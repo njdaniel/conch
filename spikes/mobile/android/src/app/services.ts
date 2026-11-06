@@ -10,6 +10,7 @@ import { LiveKitRoom } from './livekit';
 import { quietSdk } from './logging';
 import { isLocked, nativePort, onNativeEvent, routes } from './native';
 import type { LocalAudioTrack } from 'livekit-client';
+import { cameraStore } from './camera/store';
 import type { AuthSignal, AuthStep } from '../logic/auth';
 
 export const diagnostics = new Diagnostics(200);
@@ -77,6 +78,9 @@ export const controller = new VoiceController({
       onMicrophone: (track) => {
         mic = track;
         for (const l of [...micListeners]) l();
+      },
+      onCameras: (tracks) => {
+        cameraStore.set(tracks);
       },
     }),
   clock,

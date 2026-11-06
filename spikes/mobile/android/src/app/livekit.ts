@@ -4,7 +4,8 @@
 //
 // What it follows from the browser's web/src/voice/sdk.ts:
 //  - nothing is subscribed but by choice: wanted() (logic/subscribe.ts) says
-//    yes to microphones only in this slice, so no camera is received;
+//    yes to microphones, and to a camera only from a claim holder while the
+//    Voice view is open and shown (camera/policy.ts, M4-D);
 //  - the microphone is muted before it is published and the publication again
 //    after (logic/mic.ts publishMicrophone, #501), and a mic unmuted by anyone
 //    else while the gate is shut is muted again;
@@ -23,13 +24,16 @@ import {
   type RemoteTrackPublication,
   Room,
   RoomEvent,
+  type RemoteVideoTrack,
   Track,
   TrackEvent,
   createLocalAudioTrack,
 } from 'livekit-client';
 import type { DisconnectCause } from '../logic/disconnect';
 import { publishMicrophone, type Mutable } from '../logic/mic';
-import { wanted, type TrackKind, type TrackSource } from '../logic/subscribe';
+import type { TrackKind, TrackSource } from '../logic/subscribe';
+import { LiveKitCamera } from './camera/capture';
+import { noCameras, principalOf, wantTrack, type CameraWants } from './camera/policy';
 import type { RoomEvents, RoomPort } from './controller';
 
 const audioOptions: AndroidAudioTypeOptions = {
@@ -89,6 +93,8 @@ function sourceOf(source: Track.Source): TrackSource {
 export interface LiveKitRoomOptions {
   // The local microphone track, when there is one, for the level probe.
   readonly onMicrophone: (track: LocalAudioTrack | null) => void;
+  // The cameras received, by principal, whenever they change.
+  readonly onCameras: (tracks: ReadonlyMap<number, RemoteVideoTrack>) => void;
 }
 
 export class LiveKitRoom implements RoomPort {
@@ -100,9 +106,13 @@ export class LiveKitRoom implements RoomPort {
   private deafened = false;
   private closed = false;
   private events: RoomEvents | null = null;
+  readonly camera: LiveKitCamera;
+  private wants: CameraWants = noCameras;
+  private readonly cameras = new Map<number, RemoteVideoTrack>();
 
   constructor(options: LiveKitRoomOptions) {
     this.options = options;
+    this.camera = new LiveKitCamera(this.room, () => this.events);
   }
 
   async connect(url: string, token: string, publish: boolean, events: RoomEvents): Promise<void> {
@@ -118,11 +128,15 @@ export class LiveKitRoom implements RoomPort {
       .on(RoomEvent.Disconnected, (reason?: DisconnectReason) => {
         events.onDisconnected(causeOf(reason));
       })
-      .on(RoomEvent.TrackPublished, (pub: RemoteTrackPublication) => {
-        this.choose(pub);
+      .on(RoomEvent.TrackPublished, (pub: RemoteTrackPublication, participant: Participant) => {
+        this.choose(pub, participant.identity);
       })
-      .on(RoomEvent.TrackSubscribed, (track: RemoteTrack) => {
+      .on(RoomEvent.TrackSubscribed, (track: RemoteTrack, pub: RemoteTrackPublication, participant: Participant) => {
         if (track.kind === Track.Kind.Audio) this.volume(track);
+        else if (pub.source === Track.Source.Camera) this.cameraIn(track, participant.identity);
+      })
+      .on(RoomEvent.TrackUnsubscribed, (track: RemoteTrack, _pub: RemoteTrackPublication, participant: Participant) => {
+        this.cameraOut(track, participant.identity);
       })
       .on(RoomEvent.TrackUnmuted, (pub: { source: Track.Source }, participant: Participant) => {
         // Unmuted by someone else (the room API) while the gate is shut: muted
@@ -197,6 +211,9 @@ export class LiveKitRoom implements RoomPort {
 
   async disconnect(): Promise<void> {
     this.closed = true;
+    this.camera.close();
+    this.cameras.clear();
+    this.options.onCameras(new Map());
     this.options.onMicrophone(null);
     const track = this.track;
     this.track = null;
@@ -217,15 +234,37 @@ export class LiveKitRoom implements RoomPort {
   private subscribeAll(): void {
     if (this.room.state === ConnectionState.Disconnected) return;
     for (const p of this.room.remoteParticipants.values()) {
-      for (const pub of p.trackPublications.values()) this.choose(pub);
+      for (const pub of p.trackPublications.values()) this.choose(pub, p.identity);
     }
   }
 
-  // choose subscribes to a remote track only if wanted(): by its declared
-  // source and kind together. No camera is wanted in this slice.
-  private choose(pub: RemoteTrackPublication): void {
+  // watchCameras sets which cameras to receive and applies it to every track
+  // already published: a camera no longer wanted is unsubscribed at once.
+  watchCameras(wants: CameraWants): void {
+    this.wants = wants;
+    this.subscribeAll();
+  }
+
+  private cameraIn(track: RemoteTrack, identity: string): void {
+    const principal = principalOf(identity);
+    // Chosen again on what arrived: a track the policy no longer wants is let go.
+    if (principal === null || track.kind !== Track.Kind.Video || !wantTrack('camera', 'video', identity, this.wants)) return;
+    this.cameras.set(principal, track as RemoteVideoTrack);
+    this.options.onCameras(new Map(this.cameras));
+  }
+
+  private cameraOut(track: RemoteTrack, identity: string): void {
+    const principal = principalOf(identity);
+    if (principal === null || this.cameras.get(principal) !== track) return;
+    this.cameras.delete(principal);
+    this.options.onCameras(new Map(this.cameras));
+  }
+
+  // choose subscribes to a remote track only if wanted: by its declared
+  // source, its kind and its publisher together (camera/policy.ts).
+  private choose(pub: RemoteTrackPublication, identity: string): void {
     const kind: TrackKind | undefined = pub.kind === Track.Kind.Audio ? 'audio' : pub.kind === Track.Kind.Video ? 'video' : undefined;
-    const want = wanted(sourceOf(pub.source), kind, { viewing: false, shown: false, claimed: false });
+    const want = wantTrack(sourceOf(pub.source), kind, identity, this.wants);
     if (want !== pub.isSubscribed) pub.setSubscribed(want);
   }
 }

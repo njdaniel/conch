@@ -70,15 +70,15 @@ Schema copy: `src/logic/schema/{generated,validate}.ts`, verbatim from `web/src/
 | M-H1 | Lock-screen or notification Hold to talk control | not run | not run |
 | M-H2 | Volume or other hardware key as a talk key | not run | not run |
 | M-H3 | iOS Push to Talk framework (system PTT UI, 16.0+) as a later path | not run | not run |
-| M-C1 | Claim and release | not run | not run |
-| M-C2 | Off on joining | not run | not run |
-| M-C3 | Background with the camera on | not run | not run |
-| M-C4 | Screen lock with the camera on | not run | not run |
-| M-C5 | Interruption with the camera on: an incoming call, the voice assistant, and another app taking the camera | not run | not run |
-| M-C6 | No auto-resume | not run | not run |
-| M-C7 | Permission prompt | not run | not run |
-| M-C8 | Receiving others' cameras | not run | not run |
-| M-C9 | Hand-off with the camera on | not run | not run |
+| M-C1 | Claim and release | not run | Pass (emulator, M4-D, virtual front camera, hw.camera.front=emulated): the button claimed (`claimCamera` 200); `conch voice status` showed `quiet+camera`; LiveKit's room API listed a VIDEO/CAMERA track 640x360 with LOW and MEDIUM layers (a second view of the track, not a second subscriber); the button off ended it (`stopCamera` 204, track gone from the room, `quiet`). Front camera (device 1) was opened. Release on Leave not run on the emulator (unit-tested). |
+| M-C2 | Off on joining | not run | Pass (emulator): after Join the camera was off, no camera claim in presence, and the CAMERA permission still `granted=false`. |
+| M-C3 | Background with the camera on | not run | Pass (emulator): Home with the camera on closed camera device 1 in the same second (`dumpsys media.camera`), and the claim and the track were gone at the first poll, 0.5 s after the key. Timing is by polling, at 0.5 s steps. Found and fixed on this run: waiting for the SDK's unpublish held the release back until the app returned (React Native pauses JS timers in the background), so the unpublish is no longer waited for. |
+| M-C4 | Screen lock with the camera on | not run | Pass (emulator): power key with the camera on closed the camera device and ended the claim between 0.5 s and 1.0 s after the key (polling at 0.5 s); on wake the camera stayed off. |
+| M-C5 | Interruption with the camera on: an incoming call, the voice assistant, and another app taking the camera | not run | Partial (emulator): an incoming call (`gsm call`) ended the camera and the claim within 0.5 s; the stock camera app opened over the app also ended it. In both the app also left the foreground, so the interruption reason is not separated from background. The voice assistant not run. |
+| M-C6 | No auto-resume | not run | Pass (emulator): after Home, lock and the call, returning to the app left the camera off with the lifecycle note shown; no capture, claim or permission request followed (camera clients empty, presence without `+camera`). Waited seconds, not minutes. |
+| M-C7 | Permission prompt | not run | Pass (emulator): the CAMERA prompt came at the first tap only, not at launch or Join; Don't allow left the camera off with a note and no claim; the next tap prompted again, and While using the app started the camera with no second tap. |
+| M-C8 | Receiving others' cameras | not run | not run on the emulator: no second camera publisher was available. Receive is unit-tested (subscription only from claim holders, only in the open and shown Voice view). |
+| M-C9 | Hand-off with the camera on | not run | not run on the emulator (needs a second device of the same principal). |
 | M-C10 | Battery and data | not run | not run |
 
 ## Emulator dry run, step by step (M4-C)

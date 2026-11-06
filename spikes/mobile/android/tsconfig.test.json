@@ -18,6 +18,8 @@
     "src/logic/**/*.ts",
     "src/app/client.ts",
     "src/app/controller.ts",
+    "src/app/camera/controls.ts",
+    "src/app/camera/policy.ts",
     "src/app/bridge.ts",
     "test/**/*.ts"
   ],

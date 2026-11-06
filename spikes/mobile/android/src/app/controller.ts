@@ -16,14 +16,17 @@
 //  - Leave and sign-out tear the media down: the gate shuts, the room
 //    disconnects, focus is abandoned and the service stops.
 import type { Clock } from '../logic/clock';
-import { afterDisconnect, afterRefusal, retryDelay, type DisconnectCause, type Next } from '../logic/disconnect';
+import { cameraOff, type CameraRoom, type CameraState } from '../logic/camera';
+import { afterDisconnect, afterRefusal, cameraAfter, retryDelay, type DisconnectCause, type Next } from '../logic/disconnect';
 import { TransmitGate, phoneMax, type GateMode } from '../logic/gate';
 import { Lifecycle, type AppState } from '../logic/lifecycle';
 import { Transmitter } from '../logic/mic';
 import { ReportQueue, type ReportEvent } from '../logic/reports';
-import type { TransmitAnswer, VoiceSessionResult } from '../logic/api';
+import type { CameraClaimResult, TransmitAnswer, VoiceSessionResult } from '../logic/api';
 import type { VoiceParticipant, VoicePresenceV1, VoiceTransmitState } from '../logic/schema/generated';
 import type { Result } from './client';
+import { CameraControls } from './camera/controls';
+import { claimedIn, noCameras, type CameraWants } from './camera/policy';
 
 export type Phase = 'idle' | 'checking' | 'confirm' | 'joining' | 'connected' | 'reconnecting';
 
@@ -46,18 +49,26 @@ export interface VoiceState {
   readonly blocked: readonly string[];
   readonly participants: readonly VoiceParticipant[];
   readonly note: string | null;
+  // The phone's own camera (M4-D): the logic's state, whether the button shows
+  // it on, and a word of the camera layer's own (the permission, Listen only).
+  readonly camera: CameraState;
+  readonly cameraOn: boolean;
+  readonly cameraExtra: string | null;
   readonly route: string;
   readonly level: number;
 }
 
 // The events a room reports; the same as the browser's RoomEvents, less the
-// share and camera ones (M4-D adds the camera's).
+// share ones.
 export interface RoomEvents {
   onReconnecting: () => void;
   onReconnected: () => void;
   onDisconnected: (cause: DisconnectCause) => void;
   // The microphone capture ended on its own (permission revoked, device lost).
   onMicrophoneEnded: () => void;
+  // This phone's camera is gone: the device ended the capture, or LiveKit took
+  // the source away.
+  onCameraEnded: (cause: 'device' | 'server') => void;
 }
 
 export interface RoomPort {
@@ -68,12 +79,21 @@ export interface RoomPort {
   setSending(sending: boolean): Promise<void>;
   setDeafened(deafened: boolean): void;
   disconnect(): Promise<void>;
+  // The camera of this connection (logic/camera.ts CameraRoom). Nothing is
+  // captured until the camera button is pressed.
+  readonly camera: CameraRoom;
+  // Which remote cameras to receive: only from claim holders, only while the
+  // Voice view is open and shown (app/camera/policy.ts).
+  watchCameras(wants: CameraWants): void;
 }
 
 export interface NativePort {
   // The microphone permission (asked at Join, never at launch), and the
   // notification permission (asked, not required).
   ensurePermissions(): Promise<'granted' | 'microphone_denied'>;
+  // The CAMERA permission: asked at the first tap of the camera button, never
+  // at launch or at Join (M-C7).
+  ensureCameraPermission(): Promise<boolean>;
   startService(): Promise<void>;
   stopService(): Promise<void>;
   requestFocus(): Promise<boolean>;
@@ -84,6 +104,8 @@ export interface VoiceApi {
   presence(channel: string): Promise<Result<VoicePresenceV1>>;
   voiceSession(channel: string): Promise<VoiceSessionResult>;
   reportTransmit(channel: string, state: VoiceTransmitState, signal: AbortSignal): Promise<TransmitAnswer>;
+  claimCamera(channel: string, startedAt?: string): Promise<CameraClaimResult>;
+  releaseCamera(channel: string, startedAt: string): Promise<unknown>;
 }
 
 export interface ControllerOptions {
@@ -117,6 +139,9 @@ const initial: VoiceState = {
   blocked: [],
   participants: [],
   note: null,
+  camera: cameraOff,
+  cameraOn: false,
+  cameraExtra: null,
   route: '',
   level: 0,
 };
@@ -127,6 +152,10 @@ export class VoiceController {
   private readonly listeners = new Set<() => void>();
   readonly gate: TransmitGate;
   readonly lifecycle: Lifecycle;
+  private readonly camera: CameraControls;
+  // The Voice view is open; who holds a camera claim (presence).
+  private viewing = false;
+  private claimed: ReadonlySet<number> = new Set();
   private readonly reports: ReportQueue;
   private readonly transmitter: Transmitter;
   private room: RoomPort | null = null;
@@ -169,9 +198,18 @@ export class VoiceController {
       },
       { max: phoneMax },
     );
-    // The camera is M4-D's: until then the lifecycle has nothing to stop.
-    const noCamera = { lifecycleBlock: () => Promise.resolve(), lifecycleUnblock: () => undefined };
-    this.lifecycle = new Lifecycle(this.gate, noCamera);
+    this.camera = new CameraControls(
+      {
+        api: { claimCamera: (c, at) => options.api.claimCamera(c, at), releaseCamera: (c, at) => options.api.releaseCamera(c, at) },
+        permission: () => options.native.ensureCameraPermission(),
+        blocked: () => this.lifecycle.blocked,
+        clock: options.clock,
+      },
+      () => {
+        this.set({ camera: this.camera.state, cameraOn: this.camera.on, cameraExtra: this.camera.extra });
+      },
+    );
+    this.lifecycle = new Lifecycle(this.gate, this.camera.client);
   }
 
   // ---- state
@@ -199,6 +237,7 @@ export class VoiceController {
   async join(channel: string): Promise<void> {
     if (this.s.phase !== 'idle') return;
     const mine = ++this.attempt;
+    this.camera.reset();
     this.set({ ...initialFor(this.s), phase: 'checking', channel, why: null, warning: null, note: null });
     const presence = await this.o.api.presence(channel);
     if (mine !== this.attempt) return;
@@ -266,6 +305,7 @@ export class VoiceController {
     const session = await this.o.api.voiceSession(channel);
     if (mine !== this.attempt) return;
     if (!session.ok) {
+      this.camera.refused();
       this.act(afterRefusal(session), mine);
       return;
     }
@@ -287,11 +327,20 @@ export class VoiceController {
         if (mine !== this.attempt) return;
         this.set({ phase: 'connected' });
         this.applyBlock();
+        // The SDK's own reconnect: the camera's claim is named again.
+        void this.camera.reconnected();
       },
       onDisconnected: (cause) => {
         if (mine !== this.attempt || room !== this.room) return;
         this.o.log(`disconnected: ${cause}`);
+        // The capture stops, or is held for the next connection, before
+        // anything else is decided (disconnect.ts cameraAfter).
+        this.camera.lost(cameraAfter(cause));
         this.act(afterDisconnect(cause), mine);
+      },
+      onCameraEnded: (cause) => {
+        if (mine !== this.attempt || room !== this.room) return;
+        this.camera.ended(cause);
       },
       onMicrophoneEnded: () => {
         if (mine !== this.attempt) return;
@@ -321,6 +370,8 @@ export class VoiceController {
     room.setDeafened(this.s.deafened);
     this.set({ phase: 'connected', why: null, listenOnly: !grant.can_publish });
     this.applyBlock();
+    this.camera.connected(channel, room.camera);
+    this.updateWants();
     this.startPolling(channel);
   }
 
@@ -369,6 +420,7 @@ export class VoiceController {
     this.reports.reset();
     this.gate.setBlocked(true);
     if (room !== null) void room.disconnect().catch(() => undefined);
+    this.claimed = new Set();
   }
 
   // leave is the Leave button. graceful waits (briefly) for the microphone to
@@ -380,6 +432,9 @@ export class VoiceController {
     this.held = false;
     this.gate.shut();
     this.gate.setBlocked(true);
+    // The capture stops first, then the claim is released while the room and
+    // the credential still stand.
+    await this.camera.stop('left');
     if (graceful && this.room !== null) {
       await Promise.race([this.transmitter.idle(), this.after(1500)]);
       await this.reports.drain(1500);
@@ -400,10 +455,11 @@ export class VoiceController {
     this.held = false;
     this.gate.shut();
     this.gate.setBlocked(true);
+    await this.camera.stop('left');
     this.dropRoom();
     await this.o.native.abandonFocus().catch(() => undefined);
     await this.o.native.stopService().catch(() => undefined);
-    this.set({ ...initial });
+    this.set({ ...initial, camera: this.camera.state, cameraOn: this.camera.on, cameraExtra: this.camera.extra });
   }
 
   private fail(why: string): void {
@@ -444,6 +500,9 @@ export class VoiceController {
       if (result.ok) {
         const room = result.value.rooms.find((r) => r.audience === undefined);
         this.set({ participants: room?.participants ?? [] });
+        this.claimed = claimedIn(room?.participants ?? []);
+        this.camera.presence(result.value.camera_ended);
+        this.updateWants();
       }
       this.pollTimer = this.o.clock.setTimeout(() => void tick(), this.o.pollEvery ?? pollEvery);
     };
@@ -509,18 +568,48 @@ export class VoiceController {
     this.held = false;
     this.lifecycle.appState(state);
     this.set({ blocked: this.lifecycle.reasons });
+    this.updateWants();
   }
 
   screenLocked(locked: boolean): void {
     this.held = false;
     this.lifecycle.screenLocked(locked);
     this.set({ blocked: this.lifecycle.reasons });
+    this.updateWants();
   }
 
   interrupted(interrupted: boolean): void {
     this.held = false;
     this.lifecycle.interrupted(interrupted);
     this.set({ blocked: this.lifecycle.reasons });
+    this.updateWants();
+  }
+
+  // ---- the camera
+
+  // cameraTap is the camera button, the only thing that turns it on.
+  async cameraTap(): Promise<void> {
+    const channel = this.s.channel;
+    const room = this.room;
+    if (channel === null || room === null || this.s.phase !== 'connected') return;
+    await this.camera.tap(channel, room.camera, this.s.listenOnly);
+  }
+
+  // setViewing says whether the Voice view is open: cameras are received only
+  // while it is.
+  setViewing(viewing: boolean): void {
+    this.viewing = viewing;
+    this.updateWants();
+  }
+
+  // updateWants tells the room which cameras to receive. Nothing is received
+  // when the view is closed, the app is away, or the phone is not connected.
+  private updateWants(): void {
+    const connected = this.s.phase === 'connected' && this.room !== null;
+    const wants: CameraWants = connected
+      ? { viewing: this.viewing, shown: !this.lifecycle.blocked, claimed: this.claimed }
+      : noCameras;
+    this.room?.watchCameras(wants);
   }
 
   // routeChanged is an audio device attached or detached. The microphone may
@@ -546,7 +635,10 @@ export class VoiceController {
       case 'no_session':
         // A report that cannot be delivered: the connection is dropped and
         // conchd decides (a late request is worse than none).
-        if (this.room !== null) this.act({ kind: 'new_session' }, this.attempt);
+        if (this.room !== null) {
+          this.camera.lost('keep');
+          this.act({ kind: 'new_session' }, this.attempt);
+        }
         return;
       case 'unauthorized':
         // The api client has raised the auth signal; the app tears down.
@@ -557,7 +649,7 @@ export class VoiceController {
 
 function initialFor(s: VoiceState): VoiceState {
   // What a new join keeps from the last: the person's choices.
-  return { ...initial, muted: s.muted, deafened: s.deafened, mode: s.mode, route: s.route, blocked: s.blocked };
+  return { ...initial, muted: s.muted, deafened: s.deafened, mode: s.mode, route: s.route, blocked: s.blocked, camera: s.camera, cameraOn: s.cameraOn, cameraExtra: s.cameraExtra };
 }
 
 function errorName(e: unknown): string {

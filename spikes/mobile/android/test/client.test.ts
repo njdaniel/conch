@@ -93,3 +93,37 @@ test('an unauthenticated call is refused without a request', async () => {
   assert.ok(!r.ok && r.failure === 'unauthorized');
   assert.equal(calls.length, 0);
 });
+
+test('the camera claim is a POST naming nothing, or the claim it continues; the release names the claim and nothing else', async () => {
+  const { api, calls } = client((c) =>
+    c.url.includes('/v1/login') ? { status: 200, body: { next: 'signed_in', principal, credential, token: 'b' } } : c.init.method === 'DELETE' ? { status: 204, body: null } : { status: 200, body: { principal_id: 7, started_at: '2026-11-05T10:00:00Z' } },
+  );
+  await api.login('sam', 'pw');
+  const first = await api.claimCamera('general');
+  assert.ok(first.ok);
+  await api.claimCamera('general', '2026-11-05T10:00:00Z');
+  const released = await api.releaseCamera('general', '2026-11-05T10:00:00Z');
+  assert.ok(released.ok);
+  assert.deepEqual(calls.slice(1).map((c) => `${c.init.method} ${c.url}`), [
+    'POST http://example.test:1/v1/channels/general/voice/camera',
+    'POST http://example.test:1/v1/channels/general/voice/camera?started_at=2026-11-05T10%3A00%3A00Z',
+    'DELETE http://example.test:1/v1/channels/general/voice/camera?started_at=2026-11-05T10%3A00%3A00Z',
+  ]);
+});
+
+test('a refused camera claim carries its code; a bad body is invalid; a 401 signals teardown', async () => {
+  let status = 409;
+  let body: unknown = { code: 'voice_camera_full', message: 'full' };
+  const { api, signals } = client((c) => (c.url.includes('/v1/login') ? { status: 200, body: { next: 'signed_in', principal, credential, token: 'b' } } : { status, body }));
+  await api.login('sam', 'pw');
+  const full = await api.claimCamera('general');
+  assert.deepEqual(full.ok ? null : full.code, 'voice_camera_full');
+  status = 200;
+  body = { nonsense: true };
+  const bad = await api.claimCamera('general');
+  assert.deepEqual(bad.ok ? null : bad.failure, 'invalid');
+  status = 401;
+  body = {};
+  await api.claimCamera('general');
+  assert.equal(signals.length, 1);
+});

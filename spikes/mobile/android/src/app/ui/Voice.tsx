@@ -8,6 +8,7 @@ import type { LocalAudioTrack } from 'livekit-client';
 import { controller, micStore, principal } from '../services';
 import { useVoiceState } from './useVoiceState';
 import { Button, Note, Screen, colours, styles } from './common';
+import { CameraControl, CameraGrid } from '../camera/Grid';
 
 // Reads the microphone's level for the open microphone. Rendered only in the
 // open mode while connected.
@@ -66,6 +67,14 @@ export function Voice(props: { channel: string; onBack: () => void }) {
     };
   }, [props.channel]);
 
+  // Cameras are received only while this view is open (M-C8).
+  useEffect(() => {
+    controller.setViewing(true);
+    return () => {
+      controller.setViewing(false);
+    };
+  }, []);
+
   const busy = v.phase === 'checking' || v.phase === 'joining';
   const status = !mine
     ? 'Not in voice'
@@ -120,6 +129,8 @@ export function Voice(props: { channel: string; onBack: () => void }) {
           )}
           {v.mode === 'open' && mic !== null ? <LevelProbe track={mic} /> : null}
           <Text style={styles.small}>{v.transmitting ? 'Audio is being sent.' : 'Nothing is being sent.'}</Text>
+          <CameraControl />
+          <CameraGrid me={me} />
           <Button label="Leave voice" kind="danger" onPress={() => void controller.leave()} />
         </View>
       ) : null}
