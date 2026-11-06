@@ -92,14 +92,17 @@ async fn presses_faster_than_the_release_tail_are_still_reported_in_pairs_and_in
 
 #[tokio::test]
 async fn a_conchd_that_never_answers_delays_audio_by_nothing_and_never_stops_it() {
-    const WAIT: Duration = Duration::from_millis(100);
+    // Generous so that a loaded machine cannot tip the bounds below: the old behaviour
+    // waited the whole `WAIT`, the assertions allow a half of it.
+    const WAIT: Duration = Duration::from_secs(1);
+    const TIMEOUT: Duration = Duration::from_secs(1);
     let conchd = Stub::start().await;
     for _ in 0..3 {
         conchd.next_transmit(Reply::Stall);
     }
     let setup = Setup {
-        // Each attempt is given half a second, far longer than the press below.
-        report_timeout: Duration::from_millis(500),
+        // Each attempt is given far longer than the press below.
+        report_timeout: TIMEOUT,
         timings: Timings {
             report_wait: WAIT,
             ..quick()
@@ -121,7 +124,7 @@ async fn a_conchd_that_never_answers_delays_audio_by_nothing_and_never_stops_it(
     // The press did not wait for the answer at all, and was over while the first report
     // was still unanswered.
     assert!(
-        heard_after < WAIT && released_after < Duration::from_millis(450),
+        heard_after < WAIT / 2 && released_after < TIMEOUT / 2,
         "audio waited for the report: first frames after {heard_after:?}, shut after {released_after:?}"
     );
     assert_eq!(
@@ -418,7 +421,7 @@ async fn a_press_unmutes_and_sends_audio_while_its_started_report_is_unanswered(
 
 #[tokio::test]
 async fn a_press_whose_answer_does_not_come_unmutes_at_once() {
-    const WAIT: Duration = Duration::from_millis(300);
+    const WAIT: Duration = Duration::from_secs(1);
     let conchd = Stub::start().await;
     conchd.next_transmit(Reply::Stall);
     let setup = Setup {
@@ -442,7 +445,7 @@ async fn a_press_whose_answer_does_not_come_unmutes_at_once() {
     rig.frames_beyond(2).await;
 
     assert!(
-        unmuted_after < WAIT,
+        unmuted_after < WAIT / 2,
         "unmuted after {unmuted_after:?}, not at once"
     );
     assert_eq!(rig.conchd.reported(), ["started"], "still unanswered");
