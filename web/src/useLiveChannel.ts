@@ -110,6 +110,8 @@ export function useLiveChannel({
     let retryRefresh: unknown = null;
     // Whether the socket is open now: a refresh answered after it dropped does not make the channel current.
     let connected = false;
+    // Moves on at every connection change: a refresh answers only for the connection that asked.
+    let connection = 0;
     setStatus('loading');
     setNets(new Map());
     setMonitored(new Set());
@@ -126,26 +128,26 @@ export function useLiveChannel({
       setMonitored(new Set(result.value.filter((n) => n.members.some((m) => m.principal_id === meId && m.role === 'monitor')).map((n) => n.id)));
     });
 
-    function refresh(tries: number) {
+    function refresh(tries: number, asked = connection) {
       if (retryRefresh !== null) realClock.clearTimeout(retryRefresh);
       retryRefresh = null;
       void api.loadMessages(name()).then((result) => {
-        if (!live) return;
+        if (!live || asked !== connection) return;
         if (result.ok) {
           dispatchChat({ type: 'historyRefreshed', channel: name(), messages: result.value, more: result.value.length >= api.historyLimit });
-          if (connected) setStatus('open');
+          setStatus('open');
           return;
         }
         if (result.failure === 'unauthorized') {
           onUnauthorized();
           return;
         }
-        if (result.code === api.channelNotFound) {
-          onMissing(id);
-          return;
-        }
+        // A renamed channel answers not-found under the old name: the page
+        // reads the list for the new one, and the retry (under whatever
+        // name() is then) follows. A lost channel ends this effect instead.
+        if (result.code === api.channelNotFound) onMissing(id);
         retryRefresh = realClock.setTimeout(() => {
-          refresh(tries + 1);
+          refresh(tries + 1, asked);
         }, Math.min(1000 * 2 ** tries, 15000));
       });
     }
@@ -156,6 +158,9 @@ export function useLiveChannel({
       const was = connected;
       connected = next === 'open';
       if (was && connected) return;
+      connection++;
+      if (retryRefresh !== null) realClock.clearTimeout(retryRefresh);
+      retryRefresh = null;
       switch (next) {
         case 'open':
           if (reached) {
