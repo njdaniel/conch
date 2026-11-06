@@ -352,6 +352,64 @@ func TestVoiceKickPresenceCloseReason(t *testing.T) {
 	}
 }
 
+// TestVoiceKickRacingRemoval: a kick and a removal from the channel in the
+// same instant. The kick has already detached ann's subscription when the
+// removal commits, after the close path's own membership read; the removal's
+// drop must still reach that subscription, so the frame says "no longer a
+// member" and never voice_removed to someone whose membership is gone (#1458
+// review). The removal is run from the close path's test hook, between its
+// membership read and its choice of reason: deterministic, no timing.
+func TestVoiceKickRacingRemoval(t *testing.T) {
+	f := newVoiceKickFixture(t, presenceOpts{auth: AuthRequired})
+	base := wsTestServer(t, f.srv)
+	annOps, _, err := dialVoice(t, base, "ops", f.tokens["ann"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	readPresence(t, annOps)
+	var once sync.Once
+	errs := make(chan error, 1)
+	f.srv.voice.beforeCloseReason = func() {
+		once.Do(func() {
+			ctx := context.Background()
+			_, err := f.srv.store.RemoveChannelMember(ctx, "system", f.ops.ID, f.ids["ann"])
+			errs <- err
+			f.srv.voiceMemberRemoved(ctx, f.ops.ID, f.ids["ann"])
+		})
+	}
+	if got := f.kick(t, "mgr", "ops", f.ids["ann"]); got.status != http.StatusNoContent {
+		t.Fatalf("kick = %d %q", got.status, got.body)
+	}
+	ce := expectCloseError(t, annOps)
+	if err := <-errs; err != nil {
+		t.Fatalf("remove: %v", err)
+	}
+	if want := "no longer a member of this channel"; ce.Code != websocket.StatusPolicyViolation || ce.Reason != want {
+		t.Errorf("close = %d %q, want %d %q", ce.Code, ce.Reason, websocket.StatusPolicyViolation, want)
+	}
+}
+
+// TestVoiceKickCloseReasonStoreFailure: when the close path cannot read
+// membership it fails closed with an error, never with voice_removed, which
+// would tell a client it is still a member on no evidence.
+func TestVoiceKickCloseReasonStoreFailure(t *testing.T) {
+	f := newVoiceKickFixture(t, presenceOpts{auth: AuthRequired})
+	base := wsTestServer(t, f.srv)
+	annOps, _, err := dialVoice(t, base, "ops", f.tokens["ann"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	readPresence(t, annOps)
+	if err := f.srv.store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	f.srv.voice.kickPrincipal(f.ops.ID, f.ids["ann"])
+	ce := expectCloseError(t, annOps)
+	if ce.Code != websocket.StatusInternalError || ce.Reason != "membership check failed" {
+		t.Errorf("close = %d %q, want %d %q", ce.Code, ce.Reason, websocket.StatusInternalError, "membership check failed")
+	}
+}
+
 // expectCloseError waits for conn to be closed by the server and returns the
 // close frame, code and text.
 func expectCloseError(t *testing.T, conn *websocket.Conn) websocket.CloseError {

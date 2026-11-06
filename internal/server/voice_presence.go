@@ -446,6 +446,13 @@ type voicePoller struct {
 	orphansFailed  map[string]struct{}
 
 	subs map[*voiceSub]struct{}
+	// detached is the subscriptions a kick dropped whose sockets are not yet
+	// closed (kickPrincipal to voiceSub.cancel): a loss of membership in
+	// between marks them, so the close says the stronger reason.
+	detached map[*voiceSub]struct{}
+	// beforeCloseReason runs in closeVoiceDropped between its membership
+	// read and its choice of close reason. Tests set it; nothing else may.
+	beforeCloseReason func()
 	// occSubs are the occupancy sockets' subscriptions (voice_occupancy.go):
 	// one per viewer, woken when a count may have changed, never by a
 	// transmit flip or a share.
@@ -474,6 +481,7 @@ func newVoicePoller(s *Server) *voicePoller {
 		retiring:        make(map[*voiceRoomState]int64),
 		removed:         make(map[string]time.Time),
 		subs:            make(map[*voiceSub]struct{}),
+		detached:        make(map[*voiceSub]struct{}),
 		occSubs:         make(map[*voiceOccupancySub]struct{}),
 	}
 }
@@ -1935,9 +1943,29 @@ type voiceSub struct {
 	gone         bool // guarded by p.mu
 	// kicked: dropped by a moderator's voice-only removal (issue #850), with
 	// the subscriber still a member. Guarded by p.mu; set before dropped is
-	// closed.
+	// closed. A kicked subscription stays in p.detached until its socket is
+	// closed, so that a loss of membership in the meantime still reaches it.
 	kicked bool
+	// removed: membership was lost after the kick (dropPrincipal reached the
+	// detached subscription). Guarded by p.mu. The close then says
+	// "removed", never voice_removed: the stronger reason always wins.
+	removed bool
 }
+
+// voiceDropCause is why a dropped subscription was dropped, as the close
+// frame should say it.
+type voiceDropCause int
+
+const (
+	// voiceDropOther: the subscription was dropped for a reason the close path
+	// reads from the store (credential, membership), or none it knows.
+	voiceDropOther voiceDropCause = iota
+	// voiceDropKicked: a moderator's voice-only removal, membership kept.
+	voiceDropKicked
+	// voiceDropRemoved: a voice-only removal followed by a loss of membership
+	// before the socket was closed.
+	voiceDropRemoved
+)
 
 // subscribe registers a subscriber. After closeAll it returns one that is
 // already dropped.
@@ -1958,14 +1986,23 @@ func (s *voiceSub) cancel() {
 	s.p.mu.Lock()
 	defer s.p.mu.Unlock()
 	delete(s.p.subs, s)
+	delete(s.p.detached, s)
 }
 
-// wasKicked reports whether the subscription was dropped by a voice-only
-// removal rather than a loss of membership or credential.
-func (s *voiceSub) wasKicked() bool {
+// dropCause reports why the subscription was dropped, under the lock the
+// drop paths take: a removal that reached the poller before this read wins
+// over the kick.
+func (s *voiceSub) dropCause() voiceDropCause {
 	s.p.mu.Lock()
 	defer s.p.mu.Unlock()
-	return s.kicked
+	switch {
+	case s.removed:
+		return voiceDropRemoved
+	case s.kicked:
+		return voiceDropKicked
+	default:
+		return voiceDropOther
+	}
 }
 
 // current returns the channel's snapshot, or ok=false when the subscription
@@ -1989,20 +2026,10 @@ func (p *voicePoller) dropLocked(sub *voiceSub) {
 }
 
 // dropPrincipal closes principalID's presence subscriptions on channelID:
-// they are no longer a member. A zero principal (no caller) matches nothing.
+// they are no longer a member. A subscription a kick detached but whose
+// socket is not yet closed is marked removed, so its close says so. A zero
+// principal (no caller) matches nothing.
 func (p *voicePoller) dropPrincipal(channelID, principalID int64) {
-	p.dropPrincipalAs(channelID, principalID, false)
-}
-
-// kickPrincipal closes principalID's presence subscriptions on channelID for
-// a moderator's voice-only removal (issue #850): each socket is told it was
-// removed from voice, not from the channel (schema.SocketCloseVoiceRemoved,
-// issue #1409).
-func (p *voicePoller) kickPrincipal(channelID, principalID int64) {
-	p.dropPrincipalAs(channelID, principalID, true)
-}
-
-func (p *voicePoller) dropPrincipalAs(channelID, principalID int64, kicked bool) {
 	if principalID == 0 {
 		return
 	}
@@ -2010,9 +2037,30 @@ func (p *voicePoller) dropPrincipalAs(channelID, principalID int64, kicked bool)
 	defer p.mu.Unlock()
 	for sub := range p.subs {
 		if sub.principalID == principalID && sub.channelID == channelID {
-			if kicked && !sub.gone {
-				sub.kicked = true
-			}
+			p.dropLocked(sub)
+		}
+	}
+	for sub := range p.detached {
+		if sub.principalID == principalID && sub.channelID == channelID {
+			sub.removed = true
+		}
+	}
+}
+
+// kickPrincipal closes principalID's presence subscriptions on channelID for
+// a moderator's voice-only removal (issue #850): each socket is told it was
+// removed from voice, not from the channel (schema.SocketCloseVoiceRemoved,
+// issue #1409). Each stays in p.detached until its socket closes.
+func (p *voicePoller) kickPrincipal(channelID, principalID int64) {
+	if principalID == 0 {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for sub := range p.subs {
+		if sub.principalID == principalID && sub.channelID == channelID {
+			sub.kicked = true
+			p.detached[sub] = struct{}{}
 			p.dropLocked(sub)
 		}
 	}

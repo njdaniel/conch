@@ -79,6 +79,8 @@ struct Inner {
     /// While set, the next frame handed over waits here before the SDK takes it.
     send_hold: Option<Arc<SendHold>>,
     close_takes: Duration,
+    /// Closes that ran to their end (after `close_takes`): the client waited for them.
+    closed: usize,
     /// How long a mute holds the thread it is called on before it takes effect.
     mute_takes: Duration,
     records: Vec<Record>,
@@ -173,6 +175,11 @@ impl FakeSdk {
     /// Leaving a room takes this long.
     pub fn close_takes(&self, time: Duration) {
         self.lock().close_takes = time;
+    }
+
+    /// How many closes ran to their end: a close dropped half way is not counted.
+    pub fn closed(&self) -> usize {
+        self.lock().closed
     }
 
     /// From now on a mute holds the thread it is called on for this long before it takes
@@ -405,6 +412,7 @@ impl RoomHandle for FakeRoom {
         if !takes.is_zero() {
             tokio::time::sleep(takes).await;
         }
+        self.inner.lock().unwrap().closed += 1;
     }
 }
 

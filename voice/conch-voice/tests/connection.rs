@@ -289,6 +289,39 @@ async fn removed_from_voice_by_a_moderator_stops_the_client_and_asks_for_no_sess
     assert_eq!(last["state"], "stopped");
 }
 
+// The room's own disconnect for the kick can come first, and the room is still being closed
+// when the presence socket says `voice_removed`. The stop must not drop that close half way
+// (#1458 review): the client ends only once the room is closed, and asks for no session.
+#[tokio::test]
+async fn removed_from_voice_while_the_room_is_still_closing_lets_the_close_finish() {
+    let rig = Rig::start().await;
+    rig.ready().await;
+    rig.until("the presence socket", |rig| {
+        rig.conchd.presence_sockets() == 1
+    })
+    .await;
+    rig.sdk.close_takes(Duration::from_secs(1));
+    rig.sdk.disconnect(DisconnectReason::ParticipantRemoved);
+    rig.until("the room closing", |rig| rig.sdk.count(Call::Close) == 1)
+        .await;
+    assert_eq!(rig.sdk.closed(), 0, "the close is still under way");
+    rig.conchd.close_presence(1008, "voice_removed");
+
+    let (result, ended) = rig.ended().await;
+    assert!(
+        matches!(result.unwrap_err(), Error::Stopped { exit_code: 1, .. }),
+        "stopped"
+    );
+    assert_eq!(
+        ended.sdk.closed(),
+        1,
+        "the close that was under way ran to its end"
+    );
+    assert_eq!(ended.conchd.session_requests(), 1);
+    assert_eq!(ended.sdk.count(Call::Connect), 1);
+    assert_eq!(last_connection(&ended.out)["state"], "stopped");
+}
+
 // A presence socket closed 1008 for any other reason is, as before, only the socket: it is
 // opened again after a wait, and the connection is untouched. Membership lost reaches the
 // client through the room and the refused session, not through this socket.

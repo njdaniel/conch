@@ -1504,6 +1504,11 @@ impl<T: Transport> Session<T> {
     /// `conchd`'s presence socket said a moderator removed this person from voice only
     /// (issue #1409). The room, if one is joined, is left; either way the policy stops the
     /// client with the reason, and nothing asks for the session `conchd` would grant.
+    ///
+    /// Not joined, the phase is left as it is: the outcome is a stop, so the loop ends on
+    /// it, and the shutdown drains what the phase holds, a room still closing after the
+    /// SDK's own disconnect for the kick, or an attempt under way, as it does for `quit`.
+    /// Replacing the phase here would drop that close half way (#1458 review).
     fn voice_removed(&mut self) {
         let ended = Ended {
             outcome: Outcome::VoiceRemoved,
@@ -1513,8 +1518,10 @@ impl<T: Transport> Session<T> {
         if self.live.is_some() {
             self.disconnected(ended);
         } else {
-            // Asking, or waiting to: whatever attempt is under way is dropped with its phase.
-            self.phase = Phase::Settled;
+            debug_assert!(
+                ended.outcome.stops(),
+                "a non-stop would need the phase reset"
+            );
             self.decide(ended);
         }
     }
