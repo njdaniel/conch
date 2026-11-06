@@ -2,7 +2,7 @@
 // a password change, a first password, a guest's conversion, a re-
 // authentication. Main sends them, takes the new token from the answer and
 // keeps it; the renderer is answered the account without it.
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { Session } from '../../main/api/session.ts';
 import { credential, principal, sendJson, startHttp, stack, who, type Fake, type Handler } from './support.ts';
@@ -116,6 +116,30 @@ describe('Session.rotate', () => {
     session.forget();
     expect(session.rotate('a', 'b')).toBe(false);
     expect(session.signedIn).toBe(false);
+  });
+});
+
+describe('Session.successor', () => {
+  it('names the credential in force for the one rotate replaced, in the identity it was made in only', () => {
+    const session = new Session();
+    session.setOrigin('https://chat.example');
+    session.adopt('a');
+    const before = session.capture();
+    expect(session.successor(before, 'a')).toBeNull();
+    session.rotate('a', 'b');
+    expect(session.successor(before, 'a')).toBe('b');
+    expect(session.successor(before, 'b')).toBeNull();
+    expect(session.successor(before, 'x')).toBeNull();
+    session.adopt('a');
+    expect(session.successor(before, 'a')).toBeNull();
+    expect(session.successor(session.capture(), 'a')).toBeNull();
+    session.rotate('a', 'c');
+    session.setOrigin('https://other.example');
+    expect(session.successor(session.capture(), 'a')).toBeNull();
+    session.adopt('a');
+    session.rotate('a', 'd');
+    session.forget();
+    expect(session.successor(before, 'a')).toBeNull();
   });
 });
 
@@ -243,5 +267,39 @@ describe('replaceCredential', () => {
     await service.replaceCredential('reauth', { password: NEW_PASSWORD });
     await service.replaceCredential('convertGuest', { name: 'ada', password: NEW_PASSWORD });
     scan(logs);
+  });
+});
+
+describe('a request in flight across a password change (issue #1046)', () => {
+  it('is re-sent once with the new bearer and the window stays signed in', async () => {
+    let release: () => void = () => undefined;
+    const held = new Promise<void>((r) => {
+      release = r;
+    });
+    let channels = 0;
+    const { service, session, fake } = await ready((request, res) => {
+      if (request.url !== '/v1/channels') {
+        sendJson(res, 404, { code: 'not_found', message: 'no' });
+        return;
+      }
+      channels++;
+      if (request.headers['authorization'] === `Bearer ${NEW_TOKEN}`) {
+        sendJson(res, 200, { channels: [] });
+        return;
+      }
+      void held.then(() => {
+        sendJson(res, 401, { code: 'unauthorized', message: 'no' });
+      });
+    });
+    const inFlight = service.request({ operation: 'listChannels' });
+    await vi.waitFor(() => {
+      expect(channels).toBe(1);
+    });
+    expect(await service.replaceCredential('changePassword', { current: OLD_PASSWORD, password: NEW_PASSWORD })).toMatchObject({ ok: true });
+    release();
+    expect(await inFlight).toMatchObject({ kind: 'reply', status: 200 });
+    expect(channels).toBe(2);
+    expect(session.signedIn).toBe(true);
+    expect(fake.seen.filter((x) => x.url === '/v1/channels').map((x) => x.headers['authorization'])).toEqual([`Bearer ${OLD_TOKEN}`, `Bearer ${NEW_TOKEN}`]);
   });
 });
