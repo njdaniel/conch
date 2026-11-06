@@ -13,6 +13,8 @@
 import type { IpcMain } from 'electron';
 
 import type { BridgeReply, BridgeRequest, FeedRequest, SignInOutcome } from '../../web/src/platform/desktop/bridge.ts';
+import { VOICE_DEVICES_MAX_NAME_BYTES, voiceControlTalkMode, type VoiceControlTalkMode } from '../../web/src/schema/generated.ts';
+import { validChannel, validDeviceName } from './voice/protocol.ts';
 import { operations } from '../../web/src/platform/operations.ts';
 import { channelOf, INVOKED_FUNCTIONS, type Envelope, type InvokedFunction } from '../shared/bridge-names.ts';
 import { isProfileId } from './profiles/ids.ts';
@@ -24,6 +26,7 @@ import { isFileId, parseUpload, MAX_UPLOAD_BYTES, type Files } from './files.ts'
 import { LINK_GESTURE_MS, type Gestures } from './gestures.ts';
 import type { DocumentGate } from './document.ts';
 import { HOST, SCHEME } from './scheme.ts';
+import type { VoiceService } from './voice/service.ts';
 
 export interface FrameLike {
   readonly frameToken: string;
@@ -55,6 +58,8 @@ export interface IpcDeps {
   readonly gestures: Pick<Gestures, 'take'>;
   // The saved server profiles (issue #945).
   readonly profiles: ProfilesApi;
+  // Native voice (issue #1374): main's one owner of the helper.
+  readonly voice: VoiceApi;
   readonly now: () => number;
   readonly log: (line: string) => void;
 }
@@ -63,6 +68,8 @@ export type ProfilesApi = Pick<
   ProfilesService,
   'view' | 'add' | 'rename' | 'remove' | 'switchTo' | 'retry' | 'recover' | 'signOut' | 'signedIn' | 'keptCredential' | 'signInPermitted'
 >;
+
+export type VoiceApi = Pick<VoiceService, 'state' | 'join' | 'leave' | 'retry' | 'setMute' | 'setDeafen' | 'setDevices' | 'setTalkMode'>;
 
 // What a sign-in step answers when the server's release is not one the app may
 // sign in to (issue #946): nothing was sent.
@@ -137,7 +144,9 @@ interface Spec {
   readonly run: (to: Handlers, args: readonly unknown[]) => unknown;
   // True for a function that is only for the person's own act: it runs only
   // right after a click or key in the window, never from a script alone.
-  readonly gesture?: true;
+  // A function of the arguments, for one that is the person's act only in some
+  // of its forms (open-mic mode transmits without a press).
+  readonly gesture?: true | ((args: readonly unknown[]) => boolean);
 }
 
 // What a function runs against: the service, the feeds, and the document
@@ -147,6 +156,7 @@ interface Handlers {
   readonly feeds: IpcDeps['feeds'];
   readonly files: IpcDeps['files'];
   readonly profiles: ProfilesApi;
+  readonly voice: VoiceApi;
   readonly document: number;
 }
 
@@ -212,6 +222,41 @@ export function parseRequest(value: unknown): BridgeRequest | null {
     ...(body === undefined ? {} : { body }),
     ...(keepalive === undefined ? {} : { keepalive }),
   };
+}
+
+// The voice family's argument shapes. A channel and a device name are
+// checked by the protocol's own validators (validChannel, validDeviceName),
+// so the IPC layer and the encoder agree and a request the encoder would
+// refuse never enters the service's state. The extra pattern refuses the
+// line and paragraph separators as well.
+const NO_SEPARATOR = /[\u2028\u2029]/u;
+const isChannel = (value: unknown): value is string => typeof value === 'string' && validChannel(value) && !NO_SEPARATOR.test(value);
+const isDeviceName = (value: unknown): value is string => typeof value === 'string' && validDeviceName(value) && !NO_SEPARATOR.test(value);
+
+const hasExactKeys = (value: Record<string, unknown>, keys: readonly string[]): boolean => {
+  const own = Object.keys(value);
+  return own.length === keys.length && keys.every((key) => own.includes(key));
+};
+
+const oneBoolean = (args: readonly unknown[]): readonly unknown[] | null => (args.length === 1 && typeof args[0] === 'boolean' ? args : null);
+
+function parseJoin(args: readonly unknown[]): readonly unknown[] | null {
+  const [request] = args;
+  if (args.length !== 1 || !isRecord(request) || !hasExactKeys(request, ['channel', 'muted', 'deafened'])) return null;
+  const { channel, muted, deafened } = request;
+  if (!isChannel(channel) || typeof muted !== 'boolean' || typeof deafened !== 'boolean') return null;
+  return [{ channel, muted, deafened }];
+}
+
+// At least one of input and output; each a printable device name.
+function parseDevices(args: readonly unknown[]): readonly unknown[] | null {
+  const [devices] = args;
+  if (args.length !== 1 || !isRecord(devices)) return null;
+  const keys = Object.keys(devices);
+  if (keys.length === 0 || !keys.every((key) => key === 'input' || key === 'output')) return null;
+  const { input, output } = devices;
+  if ((input !== undefined && !isDeviceName(input)) || (output !== undefined && !isDeviceName(output))) return null;
+  return [{ ...(input === undefined ? {} : { input }), ...(output === undefined ? {} : { output }) }];
 }
 
 export const SPECS: Readonly<Record<InvokedFunction, Spec>> = {
@@ -326,6 +371,35 @@ export const SPECS: Readonly<Record<InvokedFunction, Spec>> = {
     run: ({ files }, [id]) => files.save(id as number),
     gesture: true,
   },
+  // Native voice (issue #1374). Every argument is main's to check; none is a
+  // token, a path or a press: the talk key is read by the helper itself, and
+  // nothing here starts a transmission. Join, retry and open-mic mode (which
+  // transmits without a press) are the person's act alone.
+  voiceState: { limit: 600, maxBytes: 0, parse: none, run: ({ voice }) => voice.state() },
+  voiceJoin: {
+    limit: 20,
+    maxBytes: 1024,
+    parse: parseJoin,
+    run: ({ voice }, [request]) => voice.join(request as { channel: string; muted: boolean; deafened: boolean }),
+    gesture: true,
+  },
+  voiceLeave: { limit: 60, maxBytes: 0, parse: none, run: ({ voice }) => voice.leave() },
+  voiceRetry: { limit: 20, maxBytes: 0, parse: none, run: ({ voice }) => voice.retry(), gesture: true },
+  voiceSetMute: { limit: 120, maxBytes: 16, parse: oneBoolean, run: ({ voice }, [muted]) => voice.setMute(muted as boolean) },
+  voiceSetDeafen: { limit: 120, maxBytes: 16, parse: oneBoolean, run: ({ voice }, [deafened]) => voice.setDeafen(deafened as boolean) },
+  voiceSetDevices: {
+    limit: 30,
+    maxBytes: 2 * VOICE_DEVICES_MAX_NAME_BYTES + 128,
+    parse: parseDevices,
+    run: ({ voice }, [devices]) => voice.setDevices(devices as { input?: string; output?: string }),
+  },
+  voiceSetTalkMode: {
+    limit: 30,
+    maxBytes: 32,
+    parse: (args) => (args.length === 1 && typeof args[0] === 'string' && voiceControlTalkMode(args[0]).length === 0 ? args : null),
+    run: ({ voice }, [mode]) => voice.setTalkMode(mode as VoiceControlTalkMode),
+    gesture: (args) => args[0] === 'open',
+  },
   feedUnsubscribe: { limit: 600, maxBytes: 32, parse: feedId, run: ({ feeds, document }, [id]) => feeds.unsubscribe(document, id as number) },
 };
 
@@ -360,13 +434,15 @@ export class Ipc {
     if (JSON.stringify(args).length > spec.maxBytes + 2) return this.#refuse('size');
     const parsed = spec.parse(args);
     if (parsed === null) return this.#refuse('shape');
-    if (spec.gesture === true && this.#deps.gestures.take(this.#deps.owned(), LINK_GESTURE_MS) === null) return this.#refuse('gesture');
+    const needsGesture = spec.gesture === true || (typeof spec.gesture === 'function' && spec.gesture(parsed));
+    if (needsGesture && this.#deps.gestures.take(this.#deps.owned(), LINK_GESTURE_MS) === null) return this.#refuse('gesture');
     try {
       const to: Handlers = {
         service: this.#deps.service,
         feeds: this.#deps.feeds,
         files: this.#deps.files,
         profiles: this.#deps.profiles,
+        voice: this.#deps.voice,
         document: this.#deps.gate.generation,
       };
       return { ok: true, value: await spec.run(to, parsed) };

@@ -6,8 +6,8 @@ import { describe, expect, it, vi } from 'vitest';
 import { foreign, guardContents, guardSession, installGuards } from '../../main/guards.ts';
 
 class FakeSession extends EventEmitter {
-  permissionRequest?: (c: unknown, p: string, cb: (ok: boolean) => void) => void;
-  permissionCheck?: () => boolean;
+  permissionRequest?: (c: unknown, p: string, cb: (ok: boolean) => void, d?: unknown) => void;
+  permissionCheck?: (...args: unknown[]) => boolean;
   devicePermission?: () => boolean;
   displayMedia?: (r: unknown, cb: (s: unknown) => void) => void;
   spellcheck: boolean | undefined;
@@ -20,7 +20,7 @@ class FakeSession extends EventEmitter {
   setPermissionRequestHandler(h: FakeSession['permissionRequest']): void {
     this.permissionRequest = h;
   }
-  setPermissionCheckHandler(h: () => boolean): void {
+  setPermissionCheckHandler(h: FakeSession["permissionCheck"]): void {
     this.permissionCheck = h;
   }
   setDevicePermissionHandler(h: () => boolean): void {
@@ -67,6 +67,15 @@ describe('guardSession', () => {
     }
     expect(ses.permissionCheck?.()).toBe(false);
     expect(ses.devicePermission?.()).toBe(false);
+  });
+
+  it('denies the microphone to the page, whether or not voice is joined: it is the helper’s (issue #1374)', () => {
+    for (const details of [{ mediaTypes: ['audio'] }, { mediaTypes: ['audio', 'video'] }, {}]) {
+      const cb = vi.fn();
+      ses.permissionRequest?.({}, 'media', cb, details);
+      expect(cb).toHaveBeenCalledExactlyOnceWith(false);
+    }
+    expect(ses.permissionCheck?.('media', 'conch-app://ui', { mediaType: 'audio' })).toBe(false);
   });
 
   it('denies display capture', () => {

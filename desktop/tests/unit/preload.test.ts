@@ -1,9 +1,9 @@
 import { describe, expect, it, vi } from 'vitest';
 
-import type { ConchDesktopBridge } from '../../../web/src/platform/desktop/bridge.ts';
+import type { ConchDesktopBridge, DesktopVoiceBridge, NativeVoiceView } from '../../../web/src/platform/desktop/bridge.ts';
 import type { FeedHandlers } from '../../../web/src/platform/desktop/bridge.ts';
 import { createBridge, type Invoke } from '../../preload/bridge.ts';
-import { BRIDGE_FUNCTIONS, PROFILE_FUNCTIONS, FEED_EVENTS, INVOKED_FUNCTIONS } from '../../shared/bridge-names.ts';
+import { BRIDGE_FUNCTIONS, PROFILE_FUNCTIONS, VOICE_FUNCTIONS, FEED_EVENTS, VOICE_EVENTS, INVOKED_FUNCTIONS } from '../../shared/bridge-names.ts';
 
 const { exposeInMainWorld, invoke, on } = vi.hoisted(() => ({ exposeInMainWorld: vi.fn(), invoke: vi.fn(), on: vi.fn() }));
 vi.mock('electron', () => ({ contextBridge: { exposeInMainWorld }, ipcRenderer: { invoke, on } }));
@@ -12,7 +12,7 @@ const noListen = (): void => undefined;
 
 // Checked by the compiler against the interface: a function added to the
 // bridge and not listed here, or listed and not declared, fails tsc.
-const named: Record<keyof ConchDesktopBridge, true> = {
+const named: Record<keyof ConchDesktopBridge | keyof DesktopVoiceBridge, true> = {
   serverAddress: true,
   request: true,
   subscribe: true,
@@ -39,6 +39,15 @@ const named: Record<keyof ConchDesktopBridge, true> = {
   uploadFile: true,
   downloadFile: true,
   saveFile: true,
+  voiceState: true,
+  voiceJoin: true,
+  voiceLeave: true,
+  voiceRetry: true,
+  voiceSetMute: true,
+  voiceSetDeafen: true,
+  voiceSetDevices: true,
+  voiceSetTalkMode: true,
+  onVoiceState: true,
 };
 
 describe('the preload', () => {
@@ -49,31 +58,32 @@ describe('the preload', () => {
     expect(name).toBe('conchDesktop');
     expect(Object.isFrozen(api)).toBe(true);
     expect(Reflect.ownKeys(api).sort()).toEqual(Object.keys(named).sort());
-    expect([...BRIDGE_FUNCTIONS, ...PROFILE_FUNCTIONS].sort()).toEqual(Object.keys(named).sort());
+    expect([...BRIDGE_FUNCTIONS, ...PROFILE_FUNCTIONS, ...VOICE_FUNCTIONS, 'onVoiceState'].sort()).toEqual(Object.keys(named).sort());
     for (const key of Reflect.ownKeys(api)) expect(typeof api[key as string], String(key)).toBe('function');
     for (const forbidden of ['ipcRenderer', 'invoke', 'send', 'on', 'sendSync', 'electron', 'require', 'process']) expect(forbidden in api).toBe(false);
     // It listens on the one feed channel, and passes on the message, not the
     // event.
-    expect(on).toHaveBeenCalledOnce();
-    expect(on.mock.calls[0]?.[0]).toBe(FEED_EVENTS);
+    expect((on.mock.calls as unknown[][]).map((call) => call[0])).toEqual([FEED_EVENTS, VOICE_EVENTS]);
+    // No exposed or invoked name says press, release, transmit, gate or ptt.
+    for (const name of [...Reflect.ownKeys(api).map(String), ...INVOKED_FUNCTIONS]) expect(name).not.toMatch(/press|release|transmit|gate|ptt/i);
   });
 
   it('sends each function on its own channel with its arguments and unwraps the answer', async () => {
     invoke.mockResolvedValue({ ok: true, value: { origin: 'https://x.example' } });
-    const bridge = createBridge(invoke as Invoke, noListen);
+    const bridge = createBridge(invoke as Invoke, noListen, noListen);
     await expect(bridge.serverAddress()).resolves.toEqual({ origin: 'https://x.example' });
     expect(invoke).toHaveBeenLastCalledWith('conch:serverAddress');
     await bridge.signInWithPassword({ name: 'a', password: 'b' });
     expect(invoke).toHaveBeenLastCalledWith('conch:signInWithPassword', { name: 'a', password: 'b' });
-    expect(INVOKED_FUNCTIONS).toHaveLength(28);
+    expect(INVOKED_FUNCTIONS).toHaveLength(36);
   });
 
   it('rejects with a bare "refused" when main refuses, or answers anything but an envelope', async () => {
-    const bridge = createBridge(() => Promise.resolve({ ok: false, kind: 'refused' }), noListen);
+    const bridge = createBridge(() => Promise.resolve({ ok: false, kind: 'refused' }), noListen, noListen);
     await expect(bridge.signOut()).rejects.toThrow(/^refused$/);
-    const odd = createBridge(() => Promise.resolve('<script>'), noListen);
+    const odd = createBridge(() => Promise.resolve('<script>'), noListen, noListen);
     await expect(odd.restore()).rejects.toThrow(/^refused$/);
-    const nothing = createBridge(() => Promise.resolve(undefined), noListen);
+    const nothing = createBridge(() => Promise.resolve(undefined), noListen, noListen);
     await expect(nothing.restore()).rejects.toThrow(/^refused$/);
   });
 
@@ -84,6 +94,7 @@ describe('the preload', () => {
 function wired(answer: (channel: string, args: unknown[]) => unknown = () => true) {
   const calls: [string, unknown[]][] = [];
   let deliver: (message: unknown) => void = () => undefined;
+  let deliverVoice: (message: unknown) => void = () => undefined;
   const bridge = createBridge(
     (channel, ...args) => {
       calls.push([channel, args]);
@@ -92,11 +103,17 @@ function wired(answer: (channel: string, args: unknown[]) => unknown = () => tru
     (callback) => {
       deliver = callback;
     },
+    (callback) => {
+      deliverVoice = callback;
+    },
   );
   const send = (event: unknown): void => {
     deliver(event);
   };
-  return { bridge, calls, send };
+  const sendVoice = (message: unknown): void => {
+    deliverVoice(message);
+  };
+  return { bridge, calls, send, sendVoice };
 }
 
 function handlers(): FeedHandlers & { seen: string[] } {
@@ -174,7 +191,7 @@ describe('the preload’s feeds', () => {
     await Promise.resolve();
     await Promise.resolve();
     expect(h.seen).toEqual(['close 1013 refused']);
-    const rejected = createBridge(() => Promise.resolve({ ok: false, kind: 'refused' }), noListen);
+    const rejected = createBridge(() => Promise.resolve({ ok: false, kind: 'refused' }), noListen, noListen);
     const r = handlers();
     rejected.subscribe({ kind: 'occupancy' }, r);
     await Promise.resolve();
@@ -188,5 +205,86 @@ describe('the preload’s feeds', () => {
     bridge.subscribe({ kind: 'occupancy' }, h);
     for (const odd of [null, 'open', { id: '1', type: 'open' }, { id: 1, type: 'frames', frames: [1] }, { id: 1, type: 'close', code: '1000' }, { id: 1, type: 'other' }, { id: 2, type: 'open' }]) send(odd);
     expect(h.seen).toEqual([]);
+  });
+});
+
+describe('the preload’s voice family', () => {
+  const view: NativeVoiceView = { status: 'idle', generation: 1, channel: null, retryable: false };
+  const running: NativeVoiceView = {
+    status: 'running',
+    generation: 2,
+    channel: 'general',
+    retryable: false,
+    helper: { version: 2, phase: 'connected', capture: 'on', transmitting: false, muted: false, deafened: false, blocked: [], talkMode: 'push_to_talk', ptt: 'ready' },
+  };
+
+  it('sends each voice function on its own channel with the argument it was given', async () => {
+    const { bridge, calls } = wired();
+    await bridge.voiceState();
+    await bridge.voiceJoin({ channel: 'general', muted: true, deafened: false });
+    await bridge.voiceLeave();
+    await bridge.voiceRetry();
+    await bridge.voiceSetMute(true);
+    await bridge.voiceSetDeafen(false);
+    await bridge.voiceSetDevices({ input: 'Mic' });
+    await bridge.voiceSetTalkMode('open');
+    expect(calls).toEqual([
+      ['conch:voiceState', []],
+      ['conch:voiceJoin', [{ channel: 'general', muted: true, deafened: false }]],
+      ['conch:voiceLeave', []],
+      ['conch:voiceRetry', []],
+      ['conch:voiceSetMute', [true]],
+      ['conch:voiceSetDeafen', [false]],
+      ['conch:voiceSetDevices', [{ input: 'Mic' }]],
+      ['conch:voiceSetTalkMode', ['open']],
+    ]);
+  });
+
+  it('rejects with a bare "refused" when main refuses a voice call', async () => {
+    const bridge = createBridge(() => Promise.resolve({ ok: false, kind: 'refused' }), noListen, noListen);
+    await expect(bridge.voiceJoin({ channel: 'a', muted: false, deafened: false })).rejects.toThrow(/^refused$/);
+  });
+
+  it('hands a well-formed view to each listener, and the view alone', () => {
+    const { bridge, sendVoice } = wired();
+    const a: NativeVoiceView[] = [];
+    const b: NativeVoiceView[] = [];
+    bridge.onVoiceState((v) => a.push(v));
+    const stopB = bridge.onVoiceState((v) => b.push(v));
+    sendVoice(view);
+    sendVoice(running);
+    stopB();
+    sendVoice(view);
+    expect(a).toEqual([view, running, view]);
+    expect(b).toEqual([view, running]);
+  });
+
+  it('drops a message that is not exactly a NativeVoiceView', () => {
+    const { bridge, sendVoice } = wired();
+    const seen: unknown[] = [];
+    bridge.onVoiceState((v) => seen.push(v));
+    const helper = running.helper;
+    for (const odd of [
+      null, 'idle', 5, [], {}, { ...view, status: 'transmitting' }, { ...view, status: 5 }, { ...view, generation: '1' }, { ...view, generation: -1 },
+      { ...view, channel: 5 }, { ...view, channel: undefined }, { ...view, retryable: 'no' }, { ...view, problem: 5 }, { ...view, token: 'secret' },
+      { ...view, helperPath: '/x' }, { ...running, helper: 'on' }, { ...running, helper: { ...helper, phase: 'nope' } },
+      { ...running, helper: { ...helper, transmitting: 'yes' } }, { ...running, helper: { ...helper, blocked: ['nope'] } },
+      { ...running, helper: { ...helper, blocked: 'none' } }, { ...running, helper: { ...helper, version: 3 } },
+      { ...running, helper: { ...helper, pid: 4 } }, { ...running, helper: { ...helper, ptt: 'press' } }, { ...running, helper: { ...helper, talkMode: 'hold' } },
+    ]) sendVoice(odd);
+    expect(seen).toEqual([]);
+  });
+
+  it('keeps delivering after a listener throws, and the error still reaches the console', async () => {
+    const { bridge, sendVoice } = wired();
+    const seen: NativeVoiceView[] = [];
+    bridge.onVoiceState(() => {
+      throw new Error('listener');
+    });
+    bridge.onVoiceState((v) => seen.push(v));
+    const caught = new Promise<unknown>((resolve) => process.once('uncaughtException', resolve));
+    sendVoice(view);
+    expect(seen).toEqual([view]);
+    expect(await caught).toEqual(new Error('listener'));
   });
 });
