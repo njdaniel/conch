@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
 import * as api from './api';
 import { archivedLine } from './archived';
+import { ReactionBar, ReactionScope } from './Reactions';
 import { Composer } from './Composer';
 import { guestName } from './guestName';
 import { Avatar, PrivateMark } from './Icons';
@@ -205,7 +206,7 @@ export function Message({
   const named = approval === null && editor === undefined && mentions(message.body, people.get(viewer)?.name ?? '');
   const classes = ['message', ...(cont ? ['cont'] : []), ...(named ? ['mentions-you'] : []), ...(items.length > 0 ? ['has-actions'] : []), ...(editor === undefined ? [] : ['editing'])];
   return (
-    <li className={classes.join(' ')} data-message-id={message.id} tabIndex={stop ? 0 : -1} {...(context === undefined ? {} : { 'aria-describedby': `reply-context-${String(message.id)}` })} {...openers}>
+    <li className={classes.join(' ')} data-message-id={message.id} tabIndex={stop ? 0 : -1} aria-description="Use Right Arrow for reaction controls; Left and Right Arrow move between them, Escape returns to the message." {...(context === undefined ? {} : { 'aria-describedby': `reply-context-${String(message.id)}` })} {...openers}>
       {named ? <span className="vh">Mentions you. </span> : null}
       {context === undefined ? null : (
         <p className="reply-context" id={`reply-context-${String(message.id)}`}>
@@ -234,6 +235,7 @@ export function Message({
           </span>
         )}
       </Line>
+      {message.removed === true ? null : <ReactionBar id={message.id} channel={channel} label={who} people={people} onUnauthorized={onUnauthorized} />}
       {notice === undefined || notice === null ? null : <p role="status" className="edit-notice">{notice}</p>}
       {items.length === 0 ? null : (
         <ActionsMenu label={`More actions for ${who}`} items={items} open={menuOpen} onOpenChange={setMenuOpen} button={more} />
@@ -420,6 +422,7 @@ function ThreadView({ rootId, root, chat, channel, live, archived, people: known
   const me = people.get(viewer) ?? { name: `#${String(viewer)}`, kind: null };
   const pending = chat.pending.filter((send) => send.threadRootId === rootId);
   return (
+    <ReactionScope key={`${String(viewer)}/${channel}/${String(rootId)}`} channel={channel} channelId={messages[0]?.channel_id ?? 0} ids={messages.filter((m) => m.removed !== true).map((m) => m.id)} onUnauthorized={onUnauthorized}>
     <section className="thread-view" aria-label={rootMessage === undefined ? 'Thread' : `Thread around ${messageName(rootMessage, people)}`}>
       <div className="thread-head">
         <h3>Thread</h3>
@@ -470,6 +473,7 @@ function ThreadView({ rootId, root, chat, channel, live, archived, people: known
         </form>
       )}
     </section>
+    </ReactionScope>
   );
 }
 
@@ -794,6 +798,11 @@ export function Conversation({
     const at = all.indexOf(item);
     let to: number;
     switch (event.key) {
+      case 'ArrowRight': {
+        const reaction = item.querySelector<HTMLButtonElement>('[data-reaction-control]:not(:disabled):not([aria-disabled="true"])');
+        if (reaction !== null) { event.preventDefault(); reaction.focus(); }
+        return;
+      }
       case 'ArrowUp':
         to = Math.max(0, at - 1);
         break;
@@ -879,7 +888,7 @@ export function Conversation({
   }
 
   return (
-    <>
+    <ReactionScope key={`${String(viewer)}/${String(channelId ?? channel)}`} channel={channel} channelId={channelId ?? shown[0]?.channel_id ?? 0} ids={shown.filter((m) => m.removed !== true).map((m) => m.id)} onUnauthorized={onUnauthorized}>
       <header className="conv-head">
         <span className="hash" aria-hidden="true">
           #
@@ -1064,6 +1073,6 @@ export function Conversation({
         }}
       />
       )}
-    </>
+    </ReactionScope>
   );
 }

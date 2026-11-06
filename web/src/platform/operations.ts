@@ -1,3 +1,4 @@
+import { reactionSummaryV1, reactionSummariesResponseV1, listReactorsResponseV1 } from '../schema/reaction';
 // The operation table: every request the client makes of conchd, keyed by a
 // stable id. Pure data and generated validators, with no DOM and no window, so
 // that the browser transport here and the desktop main (issue #770, D2-3) read
@@ -326,6 +327,12 @@ export const operations = {
   // The author's own recent text (issue #845): the edit, and the earlier
   // versions only the author may read.
   editMessage: op('PUT', '/v2/channels/{channel}/messages/{id}/body', 'bearer', { request: check(editMessageRequestV1), response: check(editMessageResponseV1) }),
+  readReactions: op('GET', '/v2/channels/{channel}/reactions', 'bearer', { response: check(reactionSummariesResponseV1) }),
+  listReactors: op('GET', '/v2/channels/{channel}/messages/{id}/reactions/{emoji}', 'bearer', { response: check(listReactorsResponseV1) }),
+  setReaction: op('PUT', '/v2/channels/{channel}/messages/{id}/reactions/{emoji}', 'bearer', { response: check(reactionSummaryV1) }),
+  removeReaction: op('DELETE', '/v2/channels/{channel}/messages/{id}/reactions/{emoji}', 'bearer', { response: check(reactionSummaryV1) }),
+  moderateReaction: op('DELETE', '/v2/channels/{channel}/messages/{id}/reactions/{emoji}/{principal}', 'bearer', { response: check(reactionSummaryV1) }),
+  removeReactor: op('DELETE', '/v2/channels/{channel}/messages/{id}/reactors/{principal}', 'bearer', { response: check(reactionSummaryV1) }),
   messageRevisions: op('GET', '/v2/channels/{channel}/messages/{id}/revisions', 'bearer', { response: check(listMessageRevisionsResponseV1) }),
   uploadFile: op('POST', '/v2/channels/{channel}/files', 'bearer', { response: check(fileV1) }),
   fileMeta: op('GET', '/v2/files/{id}/meta', 'bearer', { response: check(fileV1) }),

@@ -4913,3 +4913,15 @@ button.link {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
+
+/* Reactions stay visible for touch and keyboard; all layout obeys the CSP. */
+.reactions { grid-column: 2 / -1; display: flex; flex-wrap: wrap; align-items: center; gap: .35rem; margin-block: .25rem; min-width: 0; }
+.reaction-pair { display: inline-flex; gap: .15rem; }
+.reactions button { min-height: 2.75rem; }
+.reaction-chip[aria-pressed="true"] { border: 2px solid currentColor; background: var(--raised); }
+.reactions button:focus-visible { outline: 2px solid currentColor; outline-offset: 2px; }
+.reactions button[aria-busy="true"] { cursor: wait; }
+.reaction-error { flex-basis: 100%; }
+.reactions .emoji-picker, .reactor-page { flex-basis: 100%; max-width: 100%; min-width: 0; }
+.reactor-page { border: 1px solid currentColor; border-radius: .5rem; padding: .5rem; overflow-wrap: anywhere; }
+.reactor-page ul { max-height: 16rem; overflow-y: auto; }

@@ -105,6 +105,7 @@ import { listRunsResponseV1, runV1, type RunV1 } from './schema/run';
 import { sessionV1, type CreateSessionRequestV1, type SessionV1 } from './schema/session';
 import {
   channelMemberV1,
+  channelMembersV1,
   channelDirectoryResponseV1,
   createChannelResponseV1,
   joinChannelResponseV1,
@@ -116,6 +117,7 @@ import {
   type AddChannelMemberRequestV1,
   type ChannelAuthorV1,
   type ChannelMemberV1,
+  type ChannelMembersV1,
   type ChannelV0,
   type ChannelListingV1,
   type CreateChannelRequestV1,
@@ -157,6 +159,7 @@ import {
   type SignInLinkPurpose,
   type SignInLinkV1,
 } from './schema/signin';
+import { reactionSummaryV1, reactionSummariesResponseV1, listReactorsResponseV1, DEFAULT_REACTOR_LIMIT, MAX_REACTION_BATCH_MESSAGES, type ReactionSummaryV1, type ReactionSummariesResponseV1, type ListReactorsResponseV1 } from './schema/reaction';
 import { listReadStateResponseV1, readStateV1, type MarkReadRequestV1, type ReadStateV1 } from './schema/readstate';
 import {
   renamePrincipalResponseV1,
@@ -215,7 +218,7 @@ export type ApiFailure = 'unauthorized' | 'network' | 'invalid';
 
 export type ApiResult<T> =
   | { readonly ok: true; readonly value: T }
-  | { readonly ok: false; readonly failure: ApiFailure; readonly code?: string };
+  | { readonly ok: false; readonly failure: ApiFailure; readonly code?: string; readonly retryAfter?: number };
 
 // Where a credential is kept is the platform's (platform.credentials): 'tab'
 // is this tab alone, for an operator's and a guest's; 'lasting' is every tab
@@ -504,7 +507,13 @@ async function get<T>(request: Call, token: string, check: Validator<T>): Promis
   }
   if (!res.ok) await noteRefusal(res);
   if (res.status === 401) return { ok: false, failure: 'unauthorized' };
-  if (!res.ok) return refused(res);
+  if (!res.ok) {
+    if (request.op === 'readReactions' && res.status === 404) {
+      const code = await refusalCode(res.clone());
+      if (code === undefined) return { ok: false, failure: 'invalid', code: 'reactions_unsupported' };
+    }
+    return refused(res);
+  }
   let body: unknown;
   try {
     body = await res.json();
@@ -1996,6 +2005,49 @@ export const channelNotFound = 'channel_not_found';
 export const historyLimit = 100;
 const maxHistoryPages = 100;
 
+// Batches are bounded here as well as on the server; callers never issue one
+// request per message. An omitted id is handled by the reaction reducer.
+export function readReactions(channel: string, ids: readonly number[]): Promise<ApiResult<ReactionSummariesResponseV1>> {
+  if (ids.length === 0 || ids.length > MAX_REACTION_BATCH_MESSAGES || new Set(ids).size !== ids.length || ids.some((id) => !Number.isSafeInteger(id) || id <= 0)) {
+    return Promise.resolve({ ok: false, failure: 'invalid', code: 'invalid_request' });
+  }
+  return authed(call('readReactions', { channel }, queryOf({ messages: ids.join(',') })), reactionSummariesResponseV1);
+}
+
+export function listReactors(channel: string, id: number, emoji: string, after = 0, limit = DEFAULT_REACTOR_LIMIT): Promise<ApiResult<ListReactorsResponseV1>> {
+  return authed(call('listReactors', { channel, id, emoji }, queryOf({ after: String(after), limit: String(limit) })), listReactorsResponseV1);
+}
+
+// Retrying this request repeats an explicit intention, never a toggle.
+export async function writeReaction(channel: string, id: number, emoji: string, set: boolean): Promise<ApiResult<ReactionSummaryV1>> {
+  return reactionWrite(call(set ? 'setReaction' : 'removeReaction', { channel, id, emoji }));
+}
+
+export function moderateReaction(channel: string, id: number, principal: number, emoji?: string): Promise<ApiResult<ReactionSummaryV1>> {
+  return reactionWrite(emoji === undefined ? call('removeReactor', { channel, id, principal }) : call('moderateReaction', { channel, id, principal, emoji }));
+}
+
+async function reactionWrite(request: Call): Promise<ApiResult<ReactionSummaryV1>> {
+  const reply = await authedSend(request);
+  if (reply.kind === 'none') return { ok: false, failure: 'network' };
+  if (reply.kind === 'unauthorized') return { ok: false, failure: 'unauthorized' };
+  if (!reply.res.ok) {
+    try {
+      const body: unknown = await reply.res.clone().json();
+      if (errorV0(body).length === 0) {
+        const error = body as ErrorV0;
+        return { ok: false, failure: 'invalid', code: error.code, ...(error.retry_after_seconds === undefined ? {} : { retryAfter: error.retry_after_seconds }) };
+      }
+    } catch { /* A non-schema refusal remains an ordinary failure. */ }
+    return refused(reply.res);
+  }
+  try {
+    const body: unknown = await reply.res.json();
+    if (reactionSummaryV1(body).length === 0 && (body as ReactionSummaryV1).message_id === request.params?.id) return { ok: true, value: body as ReactionSummaryV1 };
+  } catch { /* A lost answer can safely be retried with the same intent. */ }
+  return { ok: false, failure: 'network' };
+}
+
 // loadMessages reads one page of a channel's history: the newest page, or with
 // `before` the page just below that id. The server answers newest first
 // (`order=desc`; #334) and this hands it back in id order, so opening a channel
@@ -2559,11 +2611,46 @@ async function connect(name: SocketName, id: OperationId, query: Readonly<Record
 export const openSocket: OpenSocket = (channel, after, events) =>
   connect('messages', 'messagesSocket', { channel, after: String(after), heartbeat: '1' }, events);
 
+// Reaction consumers share the existing events socket. They do not pass
+// through message notifications, message scrolling, or read-state handling.
+export type ReactionEvent = { readonly kind: 'summary'; readonly summary: ReactionSummaryV1 } | { readonly kind: 'open' | 'closed' };
+const reactionWatchers = new Set<{ readonly channel: string; readonly channelId: number; readonly receive: (event: ReactionEvent) => void }>();
+export function watchReactions(channel: string, channelId: number, receive: (event: ReactionEvent) => void): () => void {
+  const watcher = { channel, channelId, receive };
+  reactionWatchers.add(watcher);
+  return () => { reactionWatchers.delete(watcher); };
+}
+function publishReaction(channel: string, event: ReactionEvent, channelId?: number): void {
+  for (const watcher of reactionWatchers) if (event.kind === 'summary' ? watcher.channelId === event.summary.channel_id : watcher.channel === channel || watcher.channelId === channelId) watcher.receive(event);
+}
+
 // openEventsSocket opens the events stream of a channel (roster, runs,
 // activity, interventions) with the browser's own session, which the server
 // then keeps online while the socket is open.
 export function openEventsSocket(channel: string, session: number, events: SocketEvents): Promise<ApiResult<FeedSocket>> {
-  return connect('events', 'eventsSocket', { channel, session: String(session) }, events);
+  const owner = current();
+  let socketChannelId: number | undefined;
+  return connect('events', 'eventsSocket', { channel, session: String(session) }, {
+    ...events,
+    onOpen: () => {
+      if (current() === owner) publishReaction(channel, { kind: 'open' });
+      events.onOpen();
+    },
+    onClose: (code, why) => {
+      if (current() === owner) publishReaction(channel, { kind: 'closed' }, socketChannelId);
+      events.onClose(code, why);
+    },
+    onFrame: (data) => {
+      if (current() === owner && typeof data === 'string') {
+        try {
+          const body: unknown = JSON.parse(data);
+          if (channelMembersV1(body).length === 0) socketChannelId = (body as ChannelMembersV1).channel_id;
+          if (reactionSummaryV1(body).length === 0) publishReaction(channel, { kind: 'summary', summary: body as ReactionSummaryV1 });
+        } catch { /* Ignore unknown or malformed frames, as the events feed does. */ }
+      }
+      events.onFrame(data);
+    },
+  });
 }
 
 // The browser's own session (UX-18): created after sign-in, ended on sign-out
