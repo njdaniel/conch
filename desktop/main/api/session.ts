@@ -87,6 +87,18 @@ export class Session {
     this.#token = token;
   }
 
+  // rotate puts next in the place of the credential a write has just replaced
+  // at the server (a password change gives the same session a new token). It is
+  // the same identity: the generation does not move and nothing in flight is
+  // aborted, which is why it is not adopt. It does nothing, and says so, unless
+  // old is the credential in force now, so a sign-out, an account switch or
+  // another rotation in between is never undone by a late answer.
+  rotate(old: string, next: string): boolean {
+    if (this.#token === null || old !== this.#token) return false;
+    this.#token = next;
+    return true;
+  }
+
   // forget drops the credential and ends everything in flight. It returns the
   // credential it dropped, for the one revocation sign-out sends.
   forget(): string | null {
