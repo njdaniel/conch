@@ -23,10 +23,21 @@ type moderationStub struct {
 	history     schema.ListMessagesResponseV2
 	historyErr  error
 	historyRead int
+	// all, when set, is the channel ascending by id and is paged newest first.
+	all []schema.MessageV2
 }
 
-func (a *moderationStub) ListMessagesV2Page(context.Context, string, cli.MessagesPage, int) (schema.ListMessagesResponseV2, error) {
+func (a *moderationStub) ListMessagesV2Page(_ context.Context, _ string, page cli.MessagesPage, limit int) (schema.ListMessagesResponseV2, error) {
 	a.historyRead++
+	if a.all != nil {
+		var out []schema.MessageV2
+		for i := len(a.all) - 1; i >= 0 && len(out) < limit; i-- {
+			if page.Before == 0 || a.all[i].ID < page.Before {
+				out = append(out, a.all[i])
+			}
+		}
+		return schema.ListMessagesResponseV2{Messages: out}, nil
+	}
 	return a.history, a.historyErr
 }
 
@@ -363,7 +374,7 @@ func TestRemovalRememberedBeforeOriginalArrives(t *testing.T) {
 			return update(m, messageReceived{channel: "general", message: originalMessage(42)})
 		}},
 		{"reconcile read", func(m Model) (Model, tea.Cmd) {
-			return update(m, messagesReconciled{channel: "general", messages: []schema.MessageV2{originalMessage(42)}})
+			return update(m, messagesReconciled{channel: "general", done: true, messages: []schema.MessageV2{originalMessage(42)}})
 		}},
 	}
 	for _, tt := range tests {
@@ -456,7 +467,7 @@ func TestReconnectReconcilesHeldMessages(t *testing.T) {
 				if len(delays) != 2 || delays[1] != 2*minResubscribeDelay {
 					t.Fatalf("backoff did not grow: %v", delays)
 				}
-				m, _ = update(m, messagesReconciled{channel: "general", messages: []schema.MessageV2{removedCopy(41)}})
+				m, _ = update(m, messagesReconciled{channel: "general", done: true, messages: []schema.MessageV2{removedCopy(41)}})
 				if m.mod.stale["general"] || m.messages["general"][0].Body != schema.MessageRemovedBody || strings.Contains(m.View(), "[stale") {
 					t.Fatalf("recovery left stale state: %+v", m.messages["general"])
 				}
@@ -494,6 +505,106 @@ func TestConfirmationPanelShowsFullConsequenceAtNarrowWidths(t *testing.T) {
 					if w := cellWidth(line); w > width {
 						t.Errorf("row of %d cells at width %d: %q", w, width, line)
 					}
+				}
+			})
+		}
+	}
+}
+
+func TestReconcilePagesPastTheBatchCap(t *testing.T) {
+	m, api := moderationModelForTest()
+	total := int64(maxReconcilePages*historyLimit + 300)
+	for id := int64(1); id <= total; id++ {
+		message := originalMessage(id)
+		if id == 1 {
+			message = removedCopy(1)
+		}
+		api.all = append(api.all, message)
+	}
+	m.messages["general"] = []schema.MessageV2{originalMessage(1), originalMessage(total)}
+	m.ev.gen, m.ev.state = 2, eventsDown
+	m, cmd := update(m, eventsRosterReceived{gen: 2})
+	sawStaleMidway := false
+	for rounds := 0; cmd != nil && rounds < 20; rounds++ {
+		var next []tea.Cmd
+		for _, msg := range collect(cmd) {
+			if _, ok := msg.(messagesReconciled); !ok {
+				continue
+			}
+			var c tea.Cmd
+			m, c = update(m, msg)
+			next = append(next, c)
+		}
+		if m.mod.stale["general"] {
+			sawStaleMidway = true
+		}
+		cmd = tea.Batch(next...)
+	}
+	if !sawStaleMidway {
+		t.Error("view was never stale while the window was only partly covered")
+	}
+	if m.messages["general"][0].ID != 1 || !m.messages["general"][0].Removed {
+		t.Fatalf("oldest held message not reconciled: %+v", m.messages["general"][0])
+	}
+	if m.mod.stale["general"] || strings.Contains(m.View(), "[stale") {
+		t.Fatal("still stale after the window was covered")
+	}
+	if api.historyRead <= maxReconcilePages {
+		t.Fatalf("only %d pages read; did not go past the cap", api.historyRead)
+	}
+}
+
+func TestConfirmationFitsShortTerminalsAndLongNames(t *testing.T) {
+	long := strings.Repeat("字", 100)
+	tests := []struct {
+		name          string
+		width, height int
+		channel       string
+	}{
+		{"40x10", 40, 10, "general"},
+		{"40x14", 40, 14, "general"},
+		{"60x12", 60, 12, "general"},
+		{"80x10", 80, 10, "general"},
+		{"80x24 long name", 80, 24, long},
+		{"40x10 long name", 40, 10, long},
+		{"120x30 long name", 120, 30, long},
+	}
+	for _, tt := range tests {
+		for _, command := range []string{"/ban 9", "/remove-message 41"} {
+			t.Run(tt.name+command, func(t *testing.T) {
+				m, _ := moderationModelForTest()
+				m.channels = []string{tt.channel}
+				m.selected = 0
+				m.messages[tt.channel] = m.messages["general"]
+				m.width, m.height = tt.width, tt.height
+				m, _ = submitText(t, m, command)
+				if m.mod.pending == nil {
+					t.Fatal("no confirmation pending")
+				}
+				view := m.View()
+				lines := strings.Split(view, "\n")
+				if len(lines) != tt.height {
+					t.Errorf("rows = %d, want %d", len(lines), tt.height)
+				}
+				for _, line := range lines {
+					if w := cellWidth(line); w > tt.width {
+						t.Errorf("row of %d cells at width %d: %q", w, tt.width, line)
+					}
+				}
+				flat := strings.Join(strings.Fields(view), " ")
+				target := "principal 9"
+				short := "ban 9"
+				if command != "/ban 9" {
+					target, short = "message 41", "remove-message 41"
+				}
+				if strings.Contains(flat, "y to confirm") && !strings.Contains(flat, target) && !strings.Contains(flat, short) {
+					t.Errorf("keys shown without the target:\n%s", view)
+				}
+				if !strings.Contains(flat, "y to confirm") {
+					t.Errorf("keys missing:\n%s", view)
+				}
+				if !strings.Contains(flat, target) && !strings.Contains(flat, short) {
+					t.Errorf("target missing:\n%s", view)
 				}
 			})
 		}

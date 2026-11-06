@@ -54,7 +54,9 @@ type moderationModel struct {
 	reconcileBackoff map[string]time.Duration
 }
 
-// maxRemembered bounds the removed ids kept per channel.
+// maxRemembered bounds the removed ids kept per channel. Known limit: 512
+// removals arriving while one history response is in flight would evict an id
+// that response still carries; accepted as unrealistic.
 const maxRemembered = 512
 
 // remember records that id was removed in channel, so a copy of the original
@@ -109,6 +111,10 @@ type messagesReconciled struct {
 	channel  string
 	messages []schema.MessageV2
 	err      error
+	// before is where the next read continues (0 is the newest), oldest the
+	// lowest id the window must reach, and done says it has.
+	before, oldest int64
+	done           bool
 }
 
 type moderationDone struct {
@@ -325,60 +331,70 @@ func (m Model) messageRemoval(msg messageRemovalReceived) (tea.Model, tea.Cmd) {
 	return m, wait
 }
 
-// reconcileMessages re-reads the held window of channel, newest first back to
-// the oldest id held, so a removal made while the sockets were down (which
-// neither replays) reaches messages below the stream cursor.
-func (m Model) reconcileMessages(channel string) tea.Cmd {
+// reconcileMessages re-reads the held window of channel, newest first, from
+// the cursor before (0 is the newest) down to the id oldest, so a removal made
+// while the sockets were down (which neither replays) reaches messages below
+// the stream cursor. One call reads at most maxReconcilePages pages; the
+// result says where to continue.
+func (m Model) reconcileMessages(channel string, before, oldest int64) tea.Cmd {
 	if channel == "" || m.api == nil {
 		return nil
 	}
-	var oldest int64
-	for _, message := range m.messages[channel] {
-		if oldest == 0 || message.ID < oldest {
-			oldest = message.ID
+	if oldest == 0 {
+		for _, message := range m.messages[channel] {
+			if oldest == 0 || message.ID < oldest {
+				oldest = message.ID
+			}
 		}
 	}
 	if oldest == 0 {
 		return nil
 	}
 	return func() tea.Msg {
-		var all []schema.MessageV2
-		var before int64
+		result := messagesReconciled{channel: channel, oldest: oldest, before: before}
 		for range maxReconcilePages {
-			page, err := m.api.ListMessagesV2Page(m.ctx, channel, cli.MessagesPage{NewestFirst: true, Before: before}, historyLimit)
+			page, err := m.api.ListMessagesV2Page(m.ctx, channel, cli.MessagesPage{NewestFirst: true, Before: result.before}, historyLimit)
 			if err != nil {
-				return messagesReconciled{channel: channel, err: err}
+				result.err = err
+				return result
 			}
-			all = append(all, page.Messages...)
+			result.messages = append(result.messages, page.Messages...)
 			if len(page.Messages) < historyLimit {
-				break
+				result.done = true
+				return result
 			}
-			before = page.Messages[0].ID
+			next := page.Messages[0].ID
 			for _, message := range page.Messages {
-				if message.ID < before {
-					before = message.ID
+				if message.ID < next {
+					next = message.ID
 				}
 			}
-			if before <= oldest {
-				break
+			result.before = next
+			if next <= oldest {
+				result.done = true
+				return result
 			}
 		}
-		return messagesReconciled{channel: channel, messages: all}
+		return result
 	}
 }
 
-// maxReconcilePages bounds one reconcile read.
+// maxReconcilePages bounds the pages one reconcile command reads; a longer
+// window continues in the next command, from the saved cursor.
 const maxReconcilePages = 20
 
-type reconcileDue struct{ channel string }
+type reconcileDue struct {
+	channel        string
+	before, oldest int64
+}
 
-// reconciled applies a reconcile read. A failure marks the channel's view
-// stale (its originals may include removed ones) and retries with backoff.
+// reconciled applies a reconcile read. The channel stays stale until the whole
+// held window is covered. A failure retries from the same cursor with backoff.
 func (m Model) reconciled(msg messagesReconciled) (tea.Model, tea.Cmd) {
+	if msg.channel != m.current() {
+		return m, nil
+	}
 	if msg.err != nil {
-		if msg.channel != m.current() {
-			return m, nil
-		}
 		delay := m.mod.reconcileBackoff[msg.channel]
 		if delay <= 0 {
 			delay = minResubscribeDelay
@@ -389,19 +405,24 @@ func (m Model) reconciled(msg messagesReconciled) (tea.Model, tea.Cmd) {
 			m.mod.reconcileBackoff[msg.channel] = maxResubscribeDelay
 		}
 		m.setStatus(modeChannels, "history may be stale: removed messages might still show; retrying…")
-		return m, m.after(delay, reconcileDue{channel: msg.channel})
+		return m, m.after(delay, reconcileDue{channel: msg.channel, before: msg.before, oldest: msg.oldest})
+	}
+	m.addMessages(msg.channel, msg.messages)
+	naming := m.nameAuthors(msg.channel)
+	if !msg.done {
+		m.mod.stale[msg.channel] = true
+		return m, tea.Batch(naming, m.reconcileMessages(msg.channel, msg.before, msg.oldest))
 	}
 	delete(m.mod.stale, msg.channel)
 	delete(m.mod.reconcileBackoff, msg.channel)
-	m.addMessages(msg.channel, msg.messages)
-	return m, m.nameAuthors(msg.channel)
+	return m, naming
 }
 
 func (m Model) reconcileRetry(msg reconcileDue) (tea.Model, tea.Cmd) {
 	if !m.mod.stale[msg.channel] || msg.channel != m.current() {
 		return m, nil
 	}
-	return m, m.reconcileMessages(msg.channel)
+	return m, m.reconcileMessages(msg.channel, msg.before, msg.oldest)
 }
 
 // confirmationLines is the pending moderation request as a panel of wrapped
@@ -419,3 +440,40 @@ func (m Model) confirmationLines(width int) []string {
 }
 
 const confirmKeys = "y to confirm; any other key to cancel"
+
+// startReconcile begins re-reading the held window of the selected channel,
+// which is stale until the read has covered it.
+func (m Model) startReconcile() tea.Cmd {
+	cmd := m.reconcileMessages(m.current(), 0, 0)
+	if cmd != nil {
+		m.mod.stale[m.current()] = true
+	}
+	return cmd
+}
+
+// compactConfirmation fills a width x height screen with the pending request
+// when the panes cannot share it: the target first, one row, the keys last,
+// and the consequence between them, wrapped and cut with an ellipsis when it
+// does not fit. The keys are never shown without the target.
+func (m Model) compactConfirmation(width, height int) string {
+	req := *m.mod.pending
+	head := fitCells(sanitize(fmt.Sprintf("%s %d @ %s", req.op, req.target, channelLabel(req.channel))), width)
+	body := wrapWords(sanitize(moderationQuestion(req)), width, width)
+	room := max(height-2, 0)
+	if len(body) > room {
+		body = body[:room]
+		if room > 0 {
+			body[room-1] = fitCells(strings.TrimRight(body[room-1], " ")+"…", width)
+		}
+	}
+	lines := make([]string, 0, height)
+	lines = append(lines, warnStyle.Render(head))
+	for _, line := range body {
+		lines = append(lines, fitCells(line, width))
+	}
+	for len(lines) < height-1 {
+		lines = append(lines, "")
+	}
+	lines = append(lines, warnStyle.Render(fitCells(confirmKeys, width)))
+	return strings.Join(lines[:min(len(lines), height)], "\n")
+}

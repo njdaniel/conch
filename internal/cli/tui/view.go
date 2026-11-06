@@ -38,6 +38,9 @@ func (m Model) View() string {
 	if (m.mode == modeInbox || m.mode == modeDecision) && (width < minApprovalWidth || l.height < minApprovalHeight) {
 		return tooSmall(width, l.height)
 	}
+	if l.compact {
+		return m.compactConfirmation(width, l.height)
+	}
 	var rows []string
 	if l.top > 0 {
 		rows = append(rows, m.titleBar(width))
