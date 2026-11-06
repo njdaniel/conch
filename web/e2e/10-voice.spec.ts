@@ -140,7 +140,7 @@ test.describe('with LiveKit', () => {
   // The one exception is named: on a failed LiveKit connection, even one the
   // SDK retries by itself under load, livekit-client sends the join token in
   // the access_token query of its /rtc/v1/validate request, and the page's
-  // resource timing records that URL (README, "Voice in the browser"). That
+  // resource timing records that URL (docs/manual.md, "Voice in the browser"). That
   // parameter, in a URL on LiveKit's origin with exactly that path, is left
   // out of the timing entries checked. A token in any other URL, or in any other place, still
   // fails.
