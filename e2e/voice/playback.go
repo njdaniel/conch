@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"math"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -199,50 +200,117 @@ func waitCompanionTracks(hl *lkit.Headless, participant string) error {
 	})
 }
 
-func playbackHeard(c *voiceClient, what string, from, to time.Time, want map[string]int, once string) error {
-	if err := c.heard(what, from, to, 2, want); err != nil {
-		return err
-	}
-	if once == "" {
+const (
+	playbackFramesPerSecond = 100.0
+	playbackCountTolerance  = 1.25
+	playbackLevelTolerance  = 0.25
+)
+
+func playbackReady(c *voiceClient, what string, since time.Time, want map[string]int) error {
+	if len(want) == 0 {
 		return nil
 	}
-	if _, wanted := want[once]; !wanted {
-		return nil
-	}
-	for _, line := range c.statsWithin(from, to) {
-		count := 0
+	return waitForOrFail(what+": "+c.who.name+"'s first audible frames of every expected tone", 20*time.Second, func() (bool, string, error) {
+		stats := c.statsWithin(since, time.Now())
+		if c.exited() {
+			return false, "", fmt.Errorf("the client exited (%s); standard error: %s", exitText(c.exit), c.stderrTail())
+		}
+		if len(stats) == 0 {
+			return false, "no whole stats line", nil
+		}
+		line := stats[len(stats)-1]
+		found := 0
 		speakers, _ := line["speakers"].([]any)
 		for _, raw := range speakers {
 			speaker, _ := raw.(map[string]any)
-			if speaker["speaker"] == once {
-				count++
+			id, _ := speaker["speaker"].(string)
+			tone, wanted := want[id]
+			if wanted && number(speaker["audible_frames"]) > 0 && number(speaker["dominant_hz"]) == float64(tone) {
+				found++
 			}
 		}
-		if count != 1 {
-			return fmt.Errorf("%s: %s has C7's tone on %d speaker entries in one second, want exactly one", what, c.who.name, count)
+		mix, _ := line["mix"].(map[string]any)
+		ready := found == len(want) && number(mix["audible_frames"]) > 0
+		return ready, fmt.Sprintf("%d of %d expected tones audible", found, len(want)), nil
+	})
+}
+
+// playbackHeard bounds both the number of copies received and the level played.
+// A quarter-scale sine has RMS 0.25/sqrt(2); independent tones add in power.
+func playbackHeard(c *voiceClient, what string, from, to time.Time, want map[string]int, publisher *voiceClient, talking bool) error {
+	if err := c.heard(what, from, to, 2, want); err != nil {
+		return err
+	}
+	if len(want) == 0 {
+		return nil
+	}
+	stats := c.statsWithin(from, to)
+	totals := map[string]float64{}
+	for _, line := range stats {
+		speakers, _ := line["speakers"].([]any)
+		for _, raw := range speakers {
+			speaker, _ := raw.(map[string]any)
+			id, _ := speaker["speaker"].(string)
+			if _, wanted := want[id]; wanted {
+				totals[id] += number(speaker["frames"])
+			}
+		}
+		mix, _ := line["mix"].(map[string]any)
+		rms := number(mix["rms"])
+		reference := math.Sqrt(float64(len(want))) * 0.25 / math.Sqrt2
+		tolerance := reference * playbackLevelTolerance
+		if math.Abs(rms-reference) > tolerance {
+			return fmt.Errorf("%s: %s's mix RMS is %.5f, want %.5f ± %.5f for one copy of each tone (possible double playback)", what, c.who.name, rms, reference, tolerance)
+		}
+	}
+
+	microphone := ""
+	published, publisherLines := 0.0, 0
+	if talking {
+		microphone = identity(publisher.who.id)
+		for _, line := range publisher.statsWithin(from, to) {
+			published += number(line["frames_sent"])
+			publisherLines++
+		}
+	}
+	for id, frames := range totals {
+		upper := playbackFramesPerSecond * float64(len(stats)) * playbackCountTolerance
+		if id == microphone && publisherLines > 0 {
+			upper = published / float64(publisherLines) * float64(len(stats)) * playbackCountTolerance
+		}
+		if frames > upper {
+			return fmt.Errorf("%s: %s counted %.0f frames from %s over %d stats lines, want at most %.0f from one publisher with 25%% tolerance (possible double playback)", what, c.who.name, frames, id, len(stats), upper)
 		}
 	}
 	return nil
 }
 
-// playbackWindow checks two whole seconds in every helper's sink. own is H7,
-// other is H8, and standalone has no companion and no owner flag. talking says
-// whether H7's microphone tone is expected in the other sinks.
-func playbackWindow(what string, from time.Time, own, other, standalone *voiceClient, wantOwn, wantOther, wantStandalone map[string]int, talking bool, shareID string) error {
+// playbackWindow waits for each expected receiver to hear its tones, then
+// checks two fresh whole seconds in every helper's sink. own is H7, other is
+// H8, and standalone has no companion and no owner flag. talking says whether
+// H7's microphone tone is expected in the other sinks.
+func playbackWindow(what string, since time.Time, own, other, standalone *voiceClient, wantOwn, wantOther, wantStandalone map[string]int, talking bool) error {
+	checks := []struct {
+		c    *voiceClient
+		want map[string]int
+		send bool
+	}{{own, wantOwn, talking}, {other, wantOther, false}, {standalone, wantStandalone, false}}
+	for _, check := range checks {
+		if err := playbackReady(check.c, what, since, check.want); err != nil {
+			return err
+		}
+	}
+	from := time.Now()
 	var to time.Time
-	for _, c := range []*voiceClient{own, other, standalone} {
-		at, err := c.waitStats(2, from)
+	for _, check := range checks {
+		at, err := check.c.waitStats(2, from)
 		if err != nil {
 			return fmt.Errorf("%s: %w", what, err)
 		}
 		to = at
 	}
-	for _, check := range []struct {
-		c    *voiceClient
-		want map[string]int
-		send bool
-	}{{own, wantOwn, talking}, {other, wantOther, false}, {standalone, wantStandalone, false}} {
-		if err := playbackHeard(check.c, what, from, to, check.want, shareID); err != nil {
+	for _, check := range checks {
+		if err := playbackHeard(check.c, what, from, to, check.want, own, talking); err != nil {
 			return err
 		}
 		if err := check.c.sending(what, from, to, check.send); err != nil {
@@ -252,7 +320,7 @@ func playbackWindow(what string, from time.Time, own, other, standalone *voiceCl
 	return nil
 }
 
-func pressPlaybackVoice(own, other, standalone *voiceClient, shareID, what string, wantOther, wantStandalone map[string]int) error {
+func pressPlaybackVoice(own, other, standalone *voiceClient, what string, wantOther, wantStandalone map[string]int) error {
 	asked := time.Now()
 	if err := own.say("down"); err != nil {
 		return err
@@ -261,7 +329,7 @@ func pressPlaybackVoice(own, other, standalone *voiceClient, shareID, what strin
 	if err != nil {
 		return fmt.Errorf("%s: %w", what, err)
 	}
-	if err := playbackWindow(what, on.Add(hearMargin), own, other, standalone, nil, wantOther, wantStandalone, true, shareID); err != nil {
+	if err := playbackWindow(what, on, own, other, standalone, nil, wantOther, wantStandalone, true); err != nil {
 		return err
 	}
 	asked = time.Now()
@@ -356,12 +424,12 @@ func (l *live) companionPlayback(ctx context.Context) error {
 	}
 
 	shareWant := map[string]int{shareLabel: toneShare}
-	if err := playbackWindow("B2 with only C7 publishing", time.Now().Add(hearMargin), own, other, standalone, nil, nil, shareWant, false, shareLabel); err != nil {
+	if err := playbackWindow("B2 with only C7 publishing", time.Now(), own, other, standalone, nil, nil, shareWant, false); err != nil {
 		return err
 	}
 	voiceWant := map[string]int{identity(h7.id): toneAnn}
 	voiceAndShare := map[string]int{identity(h7.id): toneAnn, shareLabel: toneShare}
-	if err := pressPlaybackVoice(own, other, standalone, shareLabel, "B2 with H7's microphone and C7's tone", voiceWant, voiceAndShare); err != nil {
+	if err := pressPlaybackVoice(own, other, standalone, "B2 with H7's microphone and C7's tone", voiceWant, voiceAndShare); err != nil {
 		return err
 	}
 	for _, line := range c8.LogLines("track subscribed") {
@@ -502,16 +570,16 @@ func (l *live) companionPlayback(ctx context.Context) error {
 		return fmt.Errorf("the B1 companion may subscribe: %v", part.Permission)
 	}
 
-	if err := playbackWindow("B1 with only C7 publishing", time.Now().Add(hearMargin), own, other, standalone, nil, shareWant, shareWant, false, shareLabel); err != nil {
+	if err := playbackWindow("B1 with only C7 publishing", time.Now(), own, other, standalone, nil, shareWant, shareWant, false); err != nil {
 		return err
 	}
-	if err := pressPlaybackVoice(own, other, standalone, shareLabel, "B1 with H7's microphone and C7's tone", voiceAndShare, voiceAndShare); err != nil {
+	if err := pressPlaybackVoice(own, other, standalone, "B1 with H7's microphone and C7's tone", voiceAndShare, voiceAndShare); err != nil {
 		return err
 	}
 	if got := b1.LogLines("track subscribed"); len(got) != 0 {
 		return fmt.Errorf("the B1 companion received %d tracks despite canSubscribe=false: %s", len(got), h.redact(strings.Join(got, "\n")))
 	}
-	h.say("ok   companion playback B1: C8 received nothing; H8 heard C7's tone on exactly one speaker entry per second and H7's microphone once; H7 never heard its own companion; the no-companion helper heard both tones")
+	h.say("ok   companion playback B1: C8 received nothing; H8 heard C7's tone and H7's microphone at one publisher's frame count and level; H7 never heard its own companion; the no-companion helper heard both tones")
 	return nil
 }
 
