@@ -2,7 +2,7 @@
 # every name below on its own (ports 80 and 443 must be open, and each name
 # must already resolve to this host). `reverse_proxy` keeps the Host header
 # the client sent and passes WebSocket upgrades, which is what conchd's
-# same-origin check needs (README, "Optional: TLS and a reverse proxy").
+# same-origin check needs (docs/manual.md, "Optional: TLS and a reverse proxy").
 #
 # example.com is a placeholder. Replace it everywhere before use:
 #   sed -i 's/example\.com/your.domain/g' /etc/caddy/Caddyfile
