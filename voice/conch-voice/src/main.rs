@@ -75,6 +75,12 @@ fn main() {
             conch_voice::devices(*json, &Environment::from_process(), &scrubber)
         }
         Invocation::Keys { device } => conch_voice::keys(device),
+        Invocation::ConfigSetKeys { key, value } => {
+            conch_voice::config_set_keys(&Environment::from_process(), *key, value)
+        }
+        Invocation::ConfigUnset { key } => {
+            conch_voice::config_unset(&Environment::from_process(), *key)
+        }
         Invocation::ConfigSet { key, value } => {
             conch_voice::config_set(&Environment::from_process(), *key, value)
         }
