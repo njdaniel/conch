@@ -243,12 +243,44 @@ describe('devices()', () => {
     expect(spawned[0]?.options.env).not.toHaveProperty('CONCH_VOICE_ATTACH');
   });
 
-  it('returns the validated document’s microphones, speakers and their defaults only', async () => {
+  it('returns the validated document’s microphones, speakers, their defaults and the saved device names only', async () => {
     install({ stdoutFile: GOOD });
     const result = await oneshot.devices(s.config);
-    const doc = JSON.parse(readFileSync(GOOD, 'utf8')) as { microphones: unknown[]; speakers: unknown[]; pipewire: string; synced: boolean };
-    expect(result).toEqual({ ok: true, pipewire: doc.pipewire, synced: doc.synced, microphones: doc.microphones, speakers: doc.speakers });
-    expect(Object.keys(result).sort()).toEqual(['microphones', 'ok', 'pipewire', 'speakers', 'synced']);
+    const doc = JSON.parse(readFileSync(GOOD, 'utf8')) as { microphones: unknown[]; speakers: unknown[]; pipewire: string; synced: boolean; configured_input: string };
+    expect(result).toEqual({ ok: true, pipewire: doc.pipewire, synced: doc.synced, microphones: doc.microphones, speakers: doc.speakers, configuredInput: doc.configured_input });
+    expect(Object.keys(result).sort()).toEqual(['configuredInput', 'microphones', 'ok', 'pipewire', 'speakers', 'synced']);
+  });
+
+  it('returns both saved names, listed or not, and none when none is saved', async () => {
+    install({ stdoutFile: fixture(`${DIR}/voice-devices-v1-configured-input-absent.json`) });
+    const both = await oneshot.devices(s.config);
+    expect(both).toMatchObject({ ok: true, configuredInput: 'alsa_input.usb-Generic_USB_Headset-00.mono-fallback', configuredOutput: 'alsa_output.pci-0000_00_1f.3.analog-stereo' });
+    install({ stdoutFile: fixture(`${DIR}/voice-devices-v1-config-none.json`) });
+    const none = await oneshot.devices(s.config);
+    expect(none.ok).toBe(true);
+    expect(none).not.toHaveProperty('configuredInput');
+    expect(none).not.toHaveProperty('configuredOutput');
+  });
+
+  it('passes nothing else of the helper’s document on, however it is named', async () => {
+    const doc = JSON.parse(readFileSync(GOOD, 'utf8')) as Record<string, unknown>;
+    install({ stdout: JSON.stringify({ ...doc, talk_mode: 'open', token: 'SECRET-TOKEN', path: '/home/x/voice.toml', configured_talk_mode: 'open' }) });
+    const result = await oneshot.devices(s.config);
+    expect(result.ok).toBe(true);
+    expect(Object.keys(result).sort()).toEqual(['configuredInput', 'microphones', 'ok', 'pipewire', 'speakers', 'synced']);
+    expect(JSON.stringify(result)).not.toContain('SECRET-TOKEN');
+    expect(JSON.stringify(result)).not.toContain('voice.toml');
+  });
+
+  it.each([
+    ['a control character', 'Mic\u0007x'],
+    ['a quotation mark', 'Mic"x'],
+    ['the word default', 'default'],
+    ['too long a name', 'x'.repeat(VOICE_DEVICES_MAX_NAME_BYTES + 1)],
+  ])('refuses a document whose saved name has %s', async (_what, name) => {
+    const doc = JSON.parse(readFileSync(GOOD, 'utf8')) as Record<string, unknown>;
+    install({ stdout: JSON.stringify({ ...doc, configured_input: name }) });
+    expect(await oneshot.devices(s.config)).toEqual({ ok: false, error: 'bad-output' });
   });
 
   it('gives the pipewire-unavailable document as it is', async () => {

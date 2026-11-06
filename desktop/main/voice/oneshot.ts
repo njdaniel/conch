@@ -146,6 +146,11 @@ export class OneShot {
       synced: d.synced,
       microphones: d.microphones.map(({ name, description, default: isDefault }) => ({ name, description, default: isDefault })),
       speakers: d.speakers.map(({ name, description, default: isDefault }) => ({ name, description, default: isDefault })),
+      // The saved choices (issue #1421), already checked as listed names are
+      // (consistencyProblem); absent when nothing is saved. The document
+      // carries no talk mode, and nothing else of it goes on.
+      ...(d.configured_input === undefined || d.configured_input === '' ? {} : { configuredInput: d.configured_input }),
+      ...(d.configured_output === undefined || d.configured_output === '' ? {} : { configuredOutput: d.configured_output }),
     };
   }
 
