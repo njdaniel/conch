@@ -64,6 +64,7 @@ export interface HelperView {
   readonly helperVersion: string;
   readonly phase: VoiceControlPhase;
   readonly reason?: VoiceControlReason;
+  readonly retryInMs?: number;
   readonly capture: VoiceControlCapture;
   readonly playback?: VoiceControlPlayback;
   readonly transmitting: boolean;
@@ -204,6 +205,7 @@ function viewOf(state: VoiceControlStateV1 | VoiceControlStateV2, helperVersion:
     helperVersion,
     phase: state.phase,
     ...(state.reason === undefined ? {} : { reason: state.reason }),
+    ...(state.retry_in_ms === undefined ? {} : { retryInMs: state.retry_in_ms }),
     capture: state.capture,
     ...(v2 === null ? {} : { playback: v2.playback, talkMode: v2.talk_mode }),
     transmitting: state.transmitting,
