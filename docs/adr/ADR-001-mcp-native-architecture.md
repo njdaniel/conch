@@ -32,6 +32,13 @@ Anything the CLI/TUI can do exists in the REST/WS API **first**. `conch` (TUI an
 
 Consequence for review: a PR adding a CLI/TUI capability without its REST/WS equivalent, or an MCP tool that can do something the API cannot, is an invariant violation and blocks.
 
+> **Amended 2026-11-06 (#1172), decided by Nick.** The parity rule has two deliberate exceptions.
+>
+> - **Agent approvals are MCP-only.** Agents raise and observe approvals through `request_approval`, `await_decision` and `check_decision`. `await_decision` has no REST twin. `POST /v1/approvals`, `GET /v1/approvals`, `GET /v1/approvals/{id}` and `POST /v1/approvals/{id}/decisions` are `humansOnly` (`internal/server/routes.go:355-363`). Agents act through MCP. The approval path's audit and capability gates are on that surface, with membership and channel checks; agent credentials stay off the human routes (`internal/server/authz.go:771-777`).
+> - **Offline host commands have no route.** `conchd bootstrap-operator`, `conchd operator bootstrap|setup|recover`, `conchd restore` and `conchd ai-admin create|revoke` write the store directly. This is deliberate. There is no network route that resets an operator. The `conchd` help describes each command as offline and states that rule (`cmd/conchd/main.go:90-138`).
+>
+> Any further MCP-only or offline-only capability needs its own amendment to this ADR.
+
 ### Two front-ends, one core
 
 ```
