@@ -18,6 +18,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from
 
 import { VOICE_CONTROL_OWNER_LOSS_EXIT_MS, VOICE_CONTROL_STOP_KILL_AFTER_MS } from '../../../web/src/schema/generated.ts';
 import { HELPER_NAME, defaultSpawn } from '../../main/voice/spawn.ts';
+import { CEILING_ARGS, VoiceService } from '../../main/voice/service.ts';
 import { Supervisor, type VoiceState } from '../../main/voice/supervisor.ts';
 import { FAKE_TOKEN, readFixture, scratch, until, type Scratch } from '../unit/voice-support.ts';
 
@@ -122,6 +123,36 @@ describe.runIf(have)('the supervisor with the real conch-voice', () => {
     expect(nonces[0]?.length).toBe(43);
     expect(shown).not.toContain(nonces[0] ?? '?');
     expect(shown).not.toContain(FAKE_TOKEN);
+  });
+
+  // D3-2 (#1373), D-9: the service's start carries the ceiling flag, and the
+  // real helper accepts it (it refuses an unknown option), so drift in the
+  // flag's name fails here.
+  it('the service joins with --transmit-ceiling-secs 30 and the real helper accepts it', async () => {
+    const service = new VoiceService({
+      supervisor: sup,
+      identity: () =>
+        Promise.resolve({
+          profileId: 'it1',
+          configDir: s.config,
+          principalId: whoami.id,
+          credential: () => ({ origin, token: FAKE_TOKEN }),
+          current: () => true,
+        }),
+      log: (line) => logs.push({ at: Date.now(), line }),
+    });
+    // The service passes the ceiling; the test adds only the no-audio options.
+    const spy = sup.start.bind(sup);
+    sup.start = (req) => spy({ ...req, extraArgs: [...(req.extraArgs ?? []), '--mic', 'none', '--sink', 'count'] });
+    expect(CEILING_ARGS).toEqual(['--transmit-ceiling-secs', '30']);
+    const view = await service.join({ channel: 'general', muted: false, deafened: false });
+    expect(view.status, JSON.stringify({ view, logs, diag: sup.diagnostics() })).toBe('running');
+    expect(view.channel).toBe('general');
+    await until(reconnecting, 15_000, 'reconnecting');
+    await service.leave();
+    expect(service.state().status).toBe('idle');
+    expect(logs.map((l) => l.line)).toContain('voice: helper 1 exited (code 0)');
+    service.close();
   });
 
   it('owner loss: the end of standard input, and the helper stops with owner_lost and exits within the bound', async () => {

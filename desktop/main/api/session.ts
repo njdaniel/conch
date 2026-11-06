@@ -11,7 +11,8 @@
 // carries a generation check").
 //
 // The token is a private field and has no getter that returns it other than
-// capture(), which only the request executor calls.
+// capture(), which only the request executor calls, and voiceCredential(), which
+// only the native voice service's Join and Retry call.
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 
 export interface Capture {
@@ -121,6 +122,15 @@ export class Session {
 
   capture(): Capture {
     return { generation: this.#generation, origin: this.#origin, token: this.#token, signal: this.#controller.signal };
+  }
+
+  // voiceCredential is the second reader of the token, beside capture(): for
+  // the native voice service's start (issue #1373), at Join time only. The
+  // helper asks conchd for the person's own voice session with it
+  // (CONCH_TOKEN in the helper's environment, never argv); the caller passes
+  // it on at once and keeps no copy. Null when signed out or no server is set.
+  voiceCredential(): { readonly origin: string; readonly token: string } | null {
+    return this.#origin === null || this.#token === null ? null : { origin: this.#origin, token: this.#token };
   }
 
   // current says whether a capture is still the identity in force.

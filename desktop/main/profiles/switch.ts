@@ -25,6 +25,12 @@ export interface Activation {
   // The credential in force, held in main's memory; null when signed out. It
   // is for the vault and for nothing that leaves main.
   token(): string | null;
+  // The credential and server for a voice start (Session.voiceCredential), at
+  // Join time only; null when signed out. The caller keeps no copy.
+  voiceCredential(): { readonly origin: string; readonly token: string } | null;
+  // Whether this activation is still the identity in force: false once the
+  // session has been bumped (sign-out, a 401) or the activation is over.
+  voiceCurrent(): boolean;
   // Asks the server who the credential in force is. lasting: a member's, which
   // may be kept; an operator's or a guest's belongs to the one window.
   whoami(): Promise<Account | null>;
