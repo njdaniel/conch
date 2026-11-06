@@ -17,9 +17,13 @@ byte-identical. Two behaviours change, listed in the upgrade notes below:
 push-to-talk now opens on key-down in both voice clients, and cameras are on
 by default on a new server.
 
-The headline is the first server-side piece of moderation: the owner, an
-operator with `manage_channels` or a channel's manager can remove one
-participant from voice only, without touching their membership. The Linux
+The headline is push-to-talk that no longer cuts off the first word: both
+voice clients now send from the moment the key goes down, where a press used
+to wait a round trip for conchd (134 to 174 ms of speech lost with reports
+held back 150 ms; now 0 to 24 ms). It also brings the first server-side piece
+of moderation: the owner, an operator with `manage_channels` or a channel's
+manager can remove one participant from voice only, without touching their
+membership. The Linux
 desktop client's native voice code is also merged, but that client is in
 development and not yet supported: see the desktop entry under Added. Upgrade
 with `conch-server upgrade v0.1.0-alpha.16` from your workstation, or with
@@ -135,7 +139,7 @@ with `conch-server upgrade v0.1.0-alpha.16` from your workstation, or with
   voice off for a column now needs the camera off in the same change, as
   screen share already did (409 `permissions_conflict` otherwise).
 - **The README is a front page** (#545, PR #1362): the logo, what Conch is, a
-  status table, an architecture sketch and a quickstart, about 130 lines.
+  status table, an architecture sketch and a quickstart.
   The full guide moved, verbatim, to `docs/manual.md`; links to README
   sections now point there.
 - **The desktop client re-sends a request that got a 401 for a credential
