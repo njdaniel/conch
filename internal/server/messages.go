@@ -71,6 +71,10 @@ func (s *Server) decodePostRequest(w http.ResponseWriter, r *http.Request, req a
 	return true
 }
 
+// errReservedPayload is the one answer to a message post whose payload schema
+// only the server may author (issue #1345). Nothing was stored.
+var errReservedPayload = &schema.Error{Code: "invalid_request", Message: "payload schema is reserved: approvals and admin actions are not posted as messages"}
+
 func (s *Server) postMessage(
 	w http.ResponseWriter, r *http.Request, authorID int64, body string, payload *schema.Payload, version apiVersion,
 ) {
@@ -119,6 +123,10 @@ func (s *Server) postMessage(
 		// Nothing was stored, and the answer is the same whichever file was
 		// at fault (issue #23).
 		writeError(w, http.StatusBadRequest, errInvalidFileAttachment.Code, errInvalidFileAttachment.Message)
+		return
+	}
+	if errors.Is(err, store.ErrReservedPayload) {
+		writeError(w, http.StatusBadRequest, errReservedPayload.Code, errReservedPayload.Message)
 		return
 	}
 	if errors.Is(err, store.ErrChannelArchived) {
@@ -624,6 +632,8 @@ func (s *Server) scopedPostRefusal(ctx context.Context, err error, channelID, au
 		return &schema.Error{Code: "invalid_audience", Message: "every recipient must be a member of the channel, and a whisper needs a recipient other than the author"}
 	case errors.Is(err, store.ErrFileAttachment):
 		return errInvalidFileAttachment
+	case errors.Is(err, store.ErrReservedPayload):
+		return errReservedPayload
 	case errors.Is(err, store.ErrThreadNotFound):
 		// The root became unusable between the check and the insert.
 		return errThreadNotFound
@@ -772,7 +782,7 @@ func scopedPostStatus(code string) int {
 		return http.StatusForbidden
 	case errChannelArchived.Code:
 		return http.StatusConflict
-	case "invalid_audience", errInvalidFileAttachment.Code:
+	case "invalid_audience", errInvalidFileAttachment.Code, errReservedPayload.Code:
 		return http.StatusBadRequest
 	default:
 		return http.StatusInternalServerError

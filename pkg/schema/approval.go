@@ -3,6 +3,7 @@ package schema
 import (
 	"errors"
 	"fmt"
+	"strings"
 )
 
 // ApprovalV1Name is the registered versioned name of the approval object — the
@@ -172,4 +173,21 @@ func init() {
 		Name: ApprovalV1Name,
 		New:  func() any { return new(ApprovalV1) },
 	})
+}
+
+// ReservedMessagePayload reports whether a payload schema name is one only the
+// server may put on a message. A client-posted message carrying it would be a
+// forged approval card (it can name a real approval id) or a forged admin
+// action, so every message post refuses it (issue #1345). Approvals are
+// raised and read through their own routes, never as message payloads.
+//
+// The families are reserved, not the two names: every version of
+// conch.approval and conch.admin_action, so a later version is refused
+// without anyone remembering to extend this (security review of #1351).
+func ReservedMessagePayload(name string) bool {
+	base := name
+	if i := strings.LastIndex(name, ".v"); i > 0 {
+		base = name[:i]
+	}
+	return base == "conch.approval" || base == "conch.admin_action"
 }

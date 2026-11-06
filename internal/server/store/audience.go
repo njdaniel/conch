@@ -1098,6 +1098,10 @@ func (s *Store) InsertScopedMessage(ctx context.Context, p ScopedPost) (Message,
 func insertScopedTx(
 	ctx context.Context, tx execer, p ScopedPost, rootID int64, netID any, audience schema.Audience, recipients []int64, now time.Time,
 ) (Message, error) {
+	// The same reserved-payload refusal as insertChannelWideTx (issue #1345).
+	if p.Payload != nil && schema.ReservedMessagePayload(p.Payload.Schema) {
+		return Message{}, ErrReservedPayload
+	}
 	// The archived guard of every scoped post and reply (issue #844): the
 	// other of the two INSERT INTO messages.
 	if err := channelNotArchivedTx(ctx, tx, p.ChannelID); err != nil {
