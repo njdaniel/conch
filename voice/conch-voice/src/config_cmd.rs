@@ -1,12 +1,13 @@
-//! `conch-voice config set`: saves the microphone, the speakers or the talk mode in
-//! `voice.toml`, keeping the rest of the file as it was written (`docs/design/conch-voice.md`
-//! §8).
+//! `conch-voice config set` and `config unset`: save the microphone, the speakers, the talk
+//! mode, or the key device and bindings in `voice.toml`, keeping the rest of the file as it
+//! was written (`docs/design/conch-voice.md` §8).
 //!
-//! Input: the key, `audio.input`, `audio.output` or `audio.talk_mode`; a device name, or a
-//! talk mode, the command line has already checked; and the configuration directory, by the
-//! rule `join` uses. Output:
-//! `voice.toml` with that one value changed, or an error and the file as it was. Nothing
-//! on standard output.
+//! Input: the key, `audio.input`, `audio.output`, `audio.talk_mode`, `keys.device`,
+//! `keys.talk`, `keys.mute` or `keys.deafen`; a device name, a talk mode, an event device
+//! path or a key the command line has already checked (for `unset`, only the key, one of
+//! the four `keys.*`); and the configuration directory, by the rule `join` uses. Output:
+//! `voice.toml` with that one value changed or removed, or an error and the file as it was.
+//! Nothing on standard output, and no key, device path or file text in any error.
 //! Owns: `voice.toml`, for as long as the save takes, and the temporary file beside it.
 //! It writes nothing else: never `credentials.json`, and never the directory, which it
 //! does not create.
@@ -17,7 +18,7 @@
 //! - A symbolic link, anything that is not a regular file, and a file that group or others
 //!   can write are refused. Each is looked at before it is opened, so a FIFO cannot make the
 //!   command wait, and the file opened is checked to be the one looked at.
-//! - The text is edited by `set_audio_value`, which refuses a file the parser refuses and
+//! - The text is edited by `set_audio_value`, `set_keys_value` or `unset_keys_value`, which refuse a file the parser refuses and
 //!   checks its own result: the same configuration but for the one field, and the same
 //!   bytes but for the one value.
 //! - The new text goes to a new file in the same directory, created exclusively, written
@@ -37,7 +38,9 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use conch_voice_api::default_config_dir;
-use conch_voice_control::{AudioKey, Config, set_audio_value};
+use conch_voice_control::{
+    AudioKey, Config, KeysKey, set_audio_value, set_keys_value, unset_keys_value,
+};
 
 use crate::cli::Environment;
 use crate::error::Error;
@@ -67,13 +70,38 @@ const TEMPORARY_NAMES: u32 = 16;
 /// [`Error::NoConfigDir`] when there is no configuration directory; what
 /// [`default_config_dir`] says of `CONCH_CONFIG_DIR`; and what [`save`] says.
 pub fn set(environment: &Environment, key: AudioKey, value: &str) -> Result<(), Error> {
-    let dir = default_config_dir(
+    let dir = config_dir(environment)?;
+    save(&dir, key, value, &mut || {})
+}
+
+/// Sets `key` under `[keys]` to `value`, as [`set`] does for `[audio]`.
+///
+/// # Errors
+///
+/// As [`set`].
+pub fn set_keys(environment: &Environment, key: KeysKey, value: &str) -> Result<(), Error> {
+    let dir = config_dir(environment)?;
+    save_keys(&dir, key, value, &mut || {})
+}
+
+/// Removes `key` from `[keys]`; a key that is not there, or no file, is a success that
+/// writes nothing.
+///
+/// # Errors
+///
+/// As [`set`].
+pub fn unset_keys(environment: &Environment, key: KeysKey) -> Result<(), Error> {
+    let dir = config_dir(environment)?;
+    unset_keys_in(&dir, key, &mut || {})
+}
+
+fn config_dir(environment: &Environment) -> Result<PathBuf, Error> {
+    default_config_dir(
         environment.conch_config_dir.as_deref(),
         environment.xdg_config_home.as_deref(),
         environment.home.as_deref(),
     )?
-    .ok_or(Error::NoConfigDir)?;
-    save(&dir, key, value, &mut || {})
+    .ok_or(Error::NoConfigDir)
 }
 
 /// Sets `key` to `value` in `voice.toml` in `dir`, as [`set`] does. `before_rename` is
@@ -97,6 +125,47 @@ pub(crate) fn save(
     value: &str,
     before_rename: &mut dyn FnMut(),
 ) -> Result<(), Error> {
+    save_with(
+        dir,
+        &|old, name| set_audio_value(old, name, key, value).map_err(Error::from),
+        before_rename,
+    )
+}
+
+/// [`save`] for a `[keys]` value.
+pub(crate) fn save_keys(
+    dir: &Path,
+    key: KeysKey,
+    value: &str,
+    before_rename: &mut dyn FnMut(),
+) -> Result<(), Error> {
+    save_with(
+        dir,
+        &|old, name| set_keys_value(old, name, key, value).map_err(Error::from),
+        before_rename,
+    )
+}
+
+/// [`save`] for the removal of a `[keys]` value.
+pub(crate) fn unset_keys_in(
+    dir: &Path,
+    key: KeysKey,
+    before_rename: &mut dyn FnMut(),
+) -> Result<(), Error> {
+    save_with(
+        dir,
+        &|old, name| unset_keys_value(old, name, key).map_err(Error::from),
+        before_rename,
+    )
+}
+
+/// The save every command shares: `edit` turns the file's text (and the name to call it in
+/// errors) into the new text.
+fn save_with(
+    dir: &Path,
+    edit: &dyn Fn(&str, &str) -> Result<String, Error>,
+    before_rename: &mut dyn FnMut(),
+) -> Result<(), Error> {
     match fs::metadata(dir) {
         Ok(meta) if meta.is_dir() => {}
         Ok(_) => return Err(Error::NoConfigDir),
@@ -114,8 +183,9 @@ pub(crate) fn save(
     // Named as `read_config` names it, so an error reads the same from either.
     let name = format!("{path:?}");
     Config::parse(old, &name).map_err(Error::ConfigToFix)?;
-    let new = set_audio_value(old, &name, key, value)?;
-    if before.is_some() && new == old {
+    let new = edit(old, &name)?;
+    // Nothing to change: the file is not touched, and a missing one is not created.
+    if new == old {
         return Ok(());
     }
 
@@ -667,5 +737,265 @@ mod tests {
             "[audio]\ntalk_mode = \"open\"\n"
         );
         assert_eq!(mode(&empty.path().join(FILE_NAME)), NEW_FILE_MODE);
+    }
+
+    const KEYS_FILE: &str = "# mine\nserver = \"http://127.0.0.1:8080\"\n\n[keys]\n# the keyboard\ndevice = \"/dev/input/by-id/old-event-kbd\" # by hand\ntalk = \"KEY_F13\"\nmute = 276\n\n[audio]\ninput = \"x\"\n";
+    const MOUSE: &str = "/dev/input/by-id/usb-Example_Mouse-event-mouse";
+
+    fn save_key(dir: &Path, key: KeysKey, value: &str) -> Result<(), Error> {
+        save_keys(dir, key, value, &mut || {})
+    }
+
+    fn unset_key(dir: &Path, key: KeysKey) -> Result<(), Error> {
+        unset_keys_in(dir, key, &mut || {})
+    }
+
+    fn read(dir: &Path) -> Config {
+        crate::cli::read_config(&dir.join(FILE_NAME)).unwrap()
+    }
+
+    #[test]
+    fn keys_are_set_changing_only_their_value_and_read_back() {
+        // (key, value, expected file text)
+        let cases: [(KeysKey, &str, String); 5] = [
+            (
+                KeysKey::Device,
+                MOUSE,
+                KEYS_FILE.replace("/dev/input/by-id/old-event-kbd", MOUSE),
+            ),
+            (
+                KeysKey::Talk,
+                "275",
+                KEYS_FILE.replace("\"KEY_F13\"", "\"275\""),
+            ),
+            (
+                KeysKey::Talk,
+                "767",
+                KEYS_FILE.replace("\"KEY_F13\"", "\"767\""),
+            ),
+            (
+                KeysKey::Deafen,
+                "KEY_F14",
+                KEYS_FILE.replace("[keys]\n", "[keys]\ndeafen = \"KEY_F14\"\n"),
+            ),
+            (
+                KeysKey::Mute,
+                "KEY_F15",
+                KEYS_FILE.replace("mute = 276", "mute = \"KEY_F15\""),
+            ),
+        ];
+        for (key, value, want) in cases {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join(FILE_NAME);
+            write(&path, KEYS_FILE, 0o640);
+            save_key(dir.path(), key, value).unwrap_or_else(|e| panic!("{key:?} {value}: {e}"));
+            let text = fs::read_to_string(&path).unwrap();
+            // The deafen line is inserted directly after the table header.
+            assert_eq!(text, want, "{key:?}");
+            assert_eq!(mode(&path), 0o640);
+            assert_eq!(names(dir.path()), [FILE_NAME]);
+            let config = read(dir.path());
+            match key {
+                KeysKey::Device => assert_eq!(config.keys.device.as_deref(), Some(value)),
+                KeysKey::Talk => {
+                    assert_eq!(config.keys.talk.map(|c| c.code()), value.parse().ok());
+                }
+                KeysKey::Mute => assert!(config.keys.mute.is_some()),
+                KeysKey::Deafen => assert!(config.keys.deafen.is_some()),
+            }
+            assert_eq!(config.audio.input.as_deref(), Some("x"));
+        }
+    }
+
+    #[test]
+    fn a_missing_file_is_created_private_with_only_the_keys_table() {
+        let dir = tempfile::tempdir().unwrap();
+        save_key(dir.path(), KeysKey::Talk, "275").unwrap();
+        let path = dir.path().join(FILE_NAME);
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "[keys]\ntalk = \"275\"\n"
+        );
+        assert_eq!(mode(&path), NEW_FILE_MODE);
+    }
+
+    #[test]
+    fn a_value_that_is_not_a_device_or_a_key_is_refused_and_the_file_untouched() {
+        let bad: [(KeysKey, &str); 15] = [
+            (KeysKey::Device, "/tmp/event3"),
+            // An empty part names a directory, which join would refuse.
+            (KeysKey::Device, "/dev/input//event3"),
+            (KeysKey::Device, "/dev/input/event3/"),
+            (KeysKey::Device, "/dev/input/by-id/"),
+            (KeysKey::Device, "/dev/input"),
+            (KeysKey::Device, "/dev/input/"),
+            (KeysKey::Device, "/dev/input/../null"),
+            (KeysKey::Device, "/dev/input/by-id/a\"b"),
+            (KeysKey::Device, "/dev/input/by-id/a\nb"),
+            (KeysKey::Device, "/dev/input/by-id/a\\b"),
+            (KeysKey::Talk, "0"),
+            (KeysKey::Talk, "768"),
+            (KeysKey::Mute, "KEY_NOT_A_KEY_FAKE"),
+            (KeysKey::Deafen, ""),
+            (KeysKey::Talk, "99999999999999999999999"),
+        ];
+        for (key, value) in bad {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join(FILE_NAME);
+            write(&path, KEYS_FILE, 0o600);
+            let error = save_key(dir.path(), key, value).unwrap_err();
+            assert!(matches!(error, Error::Config(_)), "{value:?}: {error}");
+            assert!(!error.to_string().contains('\n'), "{error:?}");
+            assert_eq!(fs::read_to_string(&path).unwrap(), KEYS_FILE);
+            assert_eq!(names(dir.path()), [FILE_NAME]);
+        }
+        // Codes 275 and 767 are accepted, 0 and 768 refused (above).
+        let dir = tempfile::tempdir().unwrap();
+        for code in ["275", "767"] {
+            save_key(dir.path(), KeysKey::Talk, code).unwrap();
+        }
+    }
+
+    #[test]
+    fn a_binding_another_key_has_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(FILE_NAME);
+        write(&path, KEYS_FILE, 0o600);
+        let error = save_key(dir.path(), KeysKey::Deafen, "KEY_F13").unwrap_err();
+        assert!(matches!(error, Error::Config(_)), "{error}");
+        assert_eq!(fs::read_to_string(&path).unwrap(), KEYS_FILE);
+    }
+
+    #[test]
+    fn unset_removes_that_line_and_nothing_else() {
+        for (key, line) in [
+            (
+                KeysKey::Device,
+                "device = \"/dev/input/by-id/old-event-kbd\" # by hand\n",
+            ),
+            (KeysKey::Talk, "talk = \"KEY_F13\"\n"),
+            (KeysKey::Mute, "mute = 276\n"),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join(FILE_NAME);
+            write(&path, KEYS_FILE, 0o640);
+            unset_key(dir.path(), key).unwrap();
+            assert_eq!(
+                fs::read_to_string(&path).unwrap(),
+                KEYS_FILE.replace(line, "")
+            );
+            assert_eq!(mode(&path), 0o640);
+            assert_eq!(names(dir.path()), [FILE_NAME]);
+            let config = read(dir.path());
+            assert_eq!(config.audio.input.as_deref(), Some("x"));
+            assert_eq!(config.server.as_deref(), Some("http://127.0.0.1:8080"));
+        }
+        // Set, then unset, leaves the file as it was but for the empty table header.
+        let dir = tempfile::tempdir().unwrap();
+        save_key(dir.path(), KeysKey::Talk, "275").unwrap();
+        unset_key(dir.path(), KeysKey::Talk).unwrap();
+        assert_eq!(
+            fs::read_to_string(dir.path().join(FILE_NAME)).unwrap(),
+            "[keys]\n"
+        );
+        assert_eq!(read(dir.path()).keys.talk, None);
+    }
+
+    #[test]
+    fn unsetting_an_absent_key_or_file_succeeds_and_writes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        unset_key(dir.path(), KeysKey::Device).unwrap();
+        assert_eq!(names(dir.path()), Vec::<OsString>::new());
+
+        for text in ["[audio]\ninput = \"x\"\n", "[keys]\ntalk = 97\n"] {
+            let path = dir.path().join(FILE_NAME);
+            write(&path, text, 0o644);
+            let ino = fs::symlink_metadata(&path).unwrap().ino();
+            unset_key(dir.path(), KeysKey::Device).unwrap();
+            assert_eq!(fs::read_to_string(&path).unwrap(), text);
+            assert_eq!(fs::symlink_metadata(&path).unwrap().ino(), ino);
+            assert_eq!(names(dir.path()), [FILE_NAME]);
+        }
+    }
+
+    #[test]
+    fn the_safety_rules_of_config_set_apply_to_keys_and_unset() {
+        type Op = fn(&Path) -> Result<(), Error>;
+        let ops: [Op; 2] = [
+            |dir| save_key(dir, KeysKey::Talk, "275"),
+            |dir| unset_key(dir, KeysKey::Talk),
+        ];
+        for op in ops {
+            // Others-writable.
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join(FILE_NAME);
+            write(&path, KEYS_FILE, 0o666);
+            assert!(matches!(op(dir.path()), Err(Error::ConfigWritable { .. })));
+            assert_eq!(fs::read_to_string(&path).unwrap(), KEYS_FILE);
+
+            // A link, to a file that must stay as it is.
+            let dir = tempfile::tempdir().unwrap();
+            let elsewhere = tempfile::tempdir().unwrap();
+            let target = elsewhere.path().join("real.toml");
+            write(&target, KEYS_FILE, 0o600);
+            std::os::unix::fs::symlink(&target, dir.path().join(FILE_NAME)).unwrap();
+            assert!(matches!(op(dir.path()), Err(Error::ConfigLink { .. })));
+            assert_eq!(fs::read_to_string(&target).unwrap(), KEYS_FILE);
+
+            // A directory.
+            let dir = tempfile::tempdir().unwrap();
+            fs::create_dir(dir.path().join(FILE_NAME)).unwrap();
+            assert!(matches!(
+                op(dir.path()),
+                Err(Error::ConfigNotRegular { .. })
+            ));
+
+            // A file refused as it stands.
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join(FILE_NAME);
+            write(&path, "chanel = \"typo\"\n", 0o600);
+            assert!(matches!(op(dir.path()), Err(Error::ConfigToFix(_))));
+            assert_eq!(fs::read_to_string(&path).unwrap(), "chanel = \"typo\"\n");
+
+            // Inline and dotted [keys].
+            for text in ["keys = { talk = 97 }\n", "keys.talk = 97\n"] {
+                let dir = tempfile::tempdir().unwrap();
+                let path = dir.path().join(FILE_NAME);
+                write(&path, text, 0o600);
+                let error = op(dir.path()).unwrap_err();
+                assert!(
+                    matches!(
+                        error,
+                        Error::Config(conch_voice_control::Error::KeysFormNotEditable { .. })
+                    ),
+                    "{text:?}: {error}"
+                );
+                assert_eq!(fs::read_to_string(&path).unwrap(), text);
+                assert_eq!(names(dir.path()), [FILE_NAME]);
+            }
+
+            // Nothing missing: no directory is made.
+            let parent = tempfile::tempdir().unwrap();
+            assert!(matches!(
+                op(&parent.path().join("conch")),
+                Err(Error::NoConfigDir)
+            ));
+        }
+    }
+
+    #[test]
+    fn a_change_during_a_keys_save_is_kept_and_nothing_secret_is_shown() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(FILE_NAME);
+        write(&path, KEYS_FILE, 0o600);
+        let at = path.clone();
+        let error = save_keys(dir.path(), KeysKey::Device, MOUSE, &mut || {
+            write(&at, "[keys]\ntalk = 97\n", 0o600);
+        })
+        .unwrap_err();
+        assert!(matches!(error, Error::ConfigChanged { .. }), "{error}");
+        assert!(!error.to_string().contains("Mouse"));
+        assert_eq!(fs::read_to_string(&path).unwrap(), "[keys]\ntalk = 97\n");
+        assert_eq!(names(dir.path()), [FILE_NAME]);
     }
 }

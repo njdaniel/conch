@@ -11,7 +11,7 @@ LINT    = golangci-lint
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null)
 LDFLAGS  = -X main.version=$(VERSION)
 
-.PHONY: build test lint vet fmt fmt-check invisible-check check schema-compat schema-ts emoji-catalog depgate go-scope deploy-test agent-claim-test rust-check rust-build web-node web-check web-build web-embed build-web-embedded web-e2e desktop-node desktop-check desktop-build desktop-smoke desktop-voice-it p3-local p3-reset hooks-install clean
+.PHONY: build test lint vet fmt fmt-check invisible-check check schema-compat schema-ts emoji-catalog depgate go-scope deploy-test agent-claim-test rust-check rust-build web-node web-check web-build web-embed build-web-embedded web-e2e desktop-node desktop-check desktop-build desktop-smoke desktop-voice-it desktop-voice-e2e p3-local p3-reset hooks-install clean
 
 build:
 	$(GO) build ./...
@@ -110,7 +110,7 @@ web-e2e: web-node
 # without it this fails and names that version, it does not skip.
 DESKTOP_NODE = $(shell cat desktop/.nvmrc)
 DESKTOP_NODE_BIN = $(HOME)/.nvm/versions/node/v$(DESKTOP_NODE)/bin
-desktop-node desktop-check desktop-build desktop-smoke desktop-voice-it: export PATH := $(if $(wildcard $(DESKTOP_NODE_BIN)/node),$(DESKTOP_NODE_BIN):)$(PATH)
+desktop-node desktop-check desktop-build desktop-smoke desktop-voice-it desktop-voice-e2e: export PATH := $(if $(wildcard $(DESKTOP_NODE_BIN)/node),$(DESKTOP_NODE_BIN):)$(PATH)
 
 desktop-node:
 	@v=$$(node --version 2>/dev/null) || { echo "desktop: FAIL: Node.js is not installed; install Node $(DESKTOP_NODE) (desktop/.nvmrc)"; exit 1; }; \
@@ -154,6 +154,18 @@ desktop-voice-it: desktop-node
 	@if [ -z "$$CONCH_VOICE_BIN" ]; then $(MAKE) rust-build; fi
 	cd desktop && npm ci --no-audit
 	cd desktop && npm run test:integration
+
+# The live same-machine voice test (issue #1383, D3-12 of #771): the desktop's
+# VoiceService and Supervisor drive the real conch-voice into the pinned
+# LiveKit (Docker), with a second principal listening through a counting
+# sink and synthetic input only (a tone, a named pipe of key records). The Go
+# program e2e/desktop-voice is the world and runs desktop/tests/e2e under
+# Vitest. Builds conch-voice with the pinned toolchain unless CONCH_VOICE_BIN
+# names one. Not part of check. Without Docker or the toolchain it says
+# SKIPPED and why; with CI set, it fails instead.
+desktop-voice-e2e: desktop-node
+	cd desktop && npm ci --no-audit
+	$(GO) run ./e2e/desktop-voice
 
 # The P3 local prototype (issue #283, docs/p3-walkthrough.md): p3-local builds
 # the binaries and the web client, starts a disposable conchd, creates the test
