@@ -39,6 +39,10 @@ const (
 	AuditVoiceTransmitStopped        = "voice_transmit_stopped"
 	AuditVoiceParticipantRemoved     = "voice_participant_removed"
 	AuditVoiceEnforcementUnavailable = "voice_enforcement_unavailable"
+	// AuditVoiceParticipantKicked is written once per authorized
+	// voice-removal request (docs/design/moderation.md §4), by the moderator.
+	// Subject channel:<id>; detail principal=<target> result=completed|failed.
+	AuditVoiceParticipantKicked = "voice_participant_kicked"
 )
 
 // Audit actions added with transmit reports (issue #135,

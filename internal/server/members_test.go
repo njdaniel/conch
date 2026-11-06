@@ -187,6 +187,12 @@ func TestChannelContentLeak(t *testing.T) {
 		// Companion and viewer participants (issue #933): answered as the
 		// session endpoint is. The body is read after membership, so a
 		// non-member gets the 404 with a valid body, a malformed one and none.
+		// Voice-only removal (issue #850) is a manager's route, behind the same
+		// gate as the membership writes: a member who does not manage gets 403,
+		// an agent is refused before any lookup, a non-member the unknown
+		// channel's 404, and the operator (voice is not configured here, and the
+		// target is not in voice) a 204.
+		{"voice participant removal", "DELETE", "/v1/channels/%s/voice/participants/9999", "", false, [4]int{http.StatusForbidden, notFound, http.StatusForbidden, http.StatusNoContent}},
 		{"voice companion", "POST", "/v1/channels/%s/voice/companion", `{"publish":"screen","subscribe":true}`, false, [4]int{http.StatusServiceUnavailable, notFound, notFound, notFound}},
 		{"voice companion, malformed body", "POST", "/v1/channels/%s/voice/companion", `{"publish":`, false, [4]int{http.StatusServiceUnavailable, notFound, notFound, notFound}},
 		{"voice companion removal", "DELETE", "/v1/channels/%s/voice/companion", "", false, [4]int{http.StatusServiceUnavailable, notFound, notFound, notFound}},
@@ -220,6 +226,7 @@ func TestChannelContentLeak(t *testing.T) {
 		"DELETE /v1/channels/{channel}/nets/{net}":                        "operator-only net write; covered by the role matrix and TestNetEndpoints",
 		"PUT /v1/channels/{channel}/members/{principal_id}":               "a membership write (operator or manager, issue #790); covered by the \"member put\" row above, whose path names a principal id",
 		"DELETE /v1/channels/{channel}/members/{principal_id}":            "a membership write (operator or manager, issue #790); covered by the \"member delete\" row above, whose path names a principal id",
+		"DELETE /v1/channels/{channel}/voice/participants/{principal_id}": "a voice-only removal (issue #850); covered by the \"voice participant removal\" row above, whose path names a principal id",
 		"PUT /v1/channels/{channel}/nets/{net}/members/{principal_id}":    "operator-only net write; covered by the role matrix and TestNetEndpoints",
 		"DELETE /v1/channels/{channel}/nets/{net}/members/{principal_id}": "operator-only net write; covered by the role matrix and TestNetEndpoints",
 		// Reactions (issue #765) need a real message id for a member's row to

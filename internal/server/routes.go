@@ -101,6 +101,10 @@ func (s *Server) routeTable() []route {
 		// Companion and viewer participants (issue #933): the second
 		// participant of a person in voice. Human members who hold voice;
 		// checked in the handlers; see voice_companion.go.
+		// Voice-only removal (issue #850, moderation design §4): an owner, an
+		// operator or this channel's manager removes a person from the
+		// channel's rooms; membership and chat access are unchanged.
+		rt("DELETE /v1/channels/{channel}/voice/participants/{principal_id}", accessChannelManager, hf(s.handleVoiceParticipantRemove)),
 		rt("POST /v1/channels/{channel}/voice/companion", accessAuthenticated, hf(s.handleVoiceCompanion)),
 		rt("DELETE /v1/channels/{channel}/voice/companion", accessAuthenticated, hf(s.handleVoiceCompanionDelete)),
 		// The companion's share audio (issue #898): the share's holder

@@ -384,6 +384,7 @@ func (l *live) run(ctx context.Context) error {
 		{"joined, transmitting, outsider", l.joinedTransmittingOutsider},
 		{"removed (room rotation)", l.removed},
 		{"removed while not connected", l.removedNotConnected},
+		{"removed from voice only", l.kickedFromVoice},
 		{"other ways of losing the room", l.rotationScenario},
 		{"never issued", l.neverIssued},
 		{"credential expiring by itself", l.credentialExpires},
