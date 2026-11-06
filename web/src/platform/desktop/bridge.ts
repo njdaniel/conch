@@ -362,7 +362,9 @@ export type VoiceOneShotError =
 
 // The device list as the page gets it: the validated document's microphones
 // and speakers (each with its default flag), and whether PipeWire was
-// reached. No path, no configuration state.
+// reached, and the names saved in voice.toml (issue #1421; absent when none is
+// saved, 'default' being said by absence). No path, nothing else of the
+// configuration.
 export type NativeVoiceDevicesResult =
   | {
       readonly ok: true;
@@ -370,6 +372,8 @@ export type NativeVoiceDevicesResult =
       readonly synced: boolean;
       readonly microphones: readonly VoiceDevice[];
       readonly speakers: readonly VoiceDevice[];
+      readonly configuredInput?: string;
+      readonly configuredOutput?: string;
     }
   | { readonly ok: false; readonly error: VoiceOneShotError };
 

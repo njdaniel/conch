@@ -7,8 +7,10 @@
 // gone, with no automatic alternative; and the open microphone is only ever
 // the person's own, confirmed choice: no problem state changes the talk mode.
 //
-// The bridge does not say what is saved in voice.toml, so the lists show a
-// choice only once it is made here or the helper confirms the talk mode.
+// The device list carries the names saved in voice.toml (issue #1421), so each
+// picker starts at the saved device, or at its placeholder when none is saved,
+// until a choice is made here. The document carries no talk mode: that is shown
+// once it is chosen here or the helper confirms it.
 //
 // Device names and descriptions are other software's text and may carry bidi
 // format characters: they are stripped of those, and each is set apart in its
@@ -60,12 +62,18 @@ type Listing =
   | { readonly kind: 'loading' }
   | { readonly kind: 'failed'; readonly error: VoiceOneShotError }
   | { readonly kind: 'pipewire' }
-  | { readonly kind: 'ok'; readonly microphones: readonly VoiceDevice[]; readonly speakers: readonly VoiceDevice[] };
+  | {
+      readonly kind: 'ok';
+      readonly microphones: readonly VoiceDevice[];
+      readonly speakers: readonly VoiceDevice[];
+      readonly configuredInput: string | undefined;
+      readonly configuredOutput: string | undefined;
+    };
 
 function listing(r: NativeVoiceDevicesResult): Listing {
   if (!r.ok) return { kind: 'failed', error: r.error };
   if (r.pipewire !== 'ok') return { kind: 'pipewire' };
-  return { kind: 'ok', microphones: r.microphones, speakers: r.speakers };
+  return { kind: 'ok', microphones: r.microphones, speakers: r.speakers, configuredInput: r.configuredInput, configuredOutput: r.configuredOutput };
 }
 
 // What the person chose in this window; absent until they choose.
@@ -180,7 +188,7 @@ export function VoiceOptions({
             side="input"
             label="Microphone"
             list={lists.microphones}
-            value={chosen.input}
+            value={chosen.input ?? lists.configuredInput}
             busy={busy === 'input'}
             onChoose={(v) => { void choose('input', v); }}
             missing={mic}
@@ -191,7 +199,7 @@ export function VoiceOptions({
             side="output"
             label="Speakers"
             list={lists.speakers}
-            value={chosen.output}
+            value={chosen.output ?? lists.configuredOutput}
             busy={busy === 'output'}
             onChoose={(v) => { void choose('output', v); }}
             missing={speakers}

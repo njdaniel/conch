@@ -60,6 +60,36 @@ const mic = () => screen.getByLabelText<HTMLSelectElement>('Microphone');
 const speakers = () => screen.getByLabelText<HTMLSelectElement>('Speakers');
 const texts = (s: HTMLSelectElement) => Array.from(s.options).map((o) => o.text.replace(/[\u2068\u2069]/gu, ''));
 
+describe('VoiceOptions saved choices', () => {
+  it('preselects the saved microphone and speakers on first open', async () => {
+    const fake = new Fake();
+    fake.list = { ...listed, configuredInput: 'alsa_input.pci', configuredOutput: 'alsa_output.usb' };
+    await open(fake);
+    expect(mic().value).toBe('alsa_input.pci');
+    expect(speakers().value).toBe('alsa_output.usb');
+    expect(screen.getAllByText(/Chosen:/u).map((e) => e.textContent)).toEqual(['Chosen: Built-in Mic', 'Chosen: Headset']);
+    expect(fake.calls).toEqual([]);
+  });
+
+  it('shows a saved device that is no longer listed as not found, with no alternative picked', async () => {
+    const fake = new Fake();
+    fake.list = { ...listed, configuredInput: 'alsa_input.gone' };
+    await open(fake);
+    expect(mic().value).toBe('alsa_input.gone');
+    expect(texts(mic())[0]).toBe('alsa_input.gone (not found)');
+    expect(screen.getByText(micMissing)).toBeTruthy();
+    expect(speakers().value).toBe('');
+  });
+
+  it('keeps a choice made here over the saved one', async () => {
+    const fake = new Fake();
+    fake.list = { ...listed, configuredInput: 'alsa_input.pci' };
+    await open(fake);
+    fireEvent.change(mic(), { target: { value: 'alsa_input.usb' } });
+    await waitFor(() => { expect(mic().value).toBe('alsa_input.usb'); });
+  });
+});
+
 describe('VoiceOptions devices', () => {
   it('lists System default, then the microphones and speakers, marking the defaults', async () => {
     await open(new Fake());
