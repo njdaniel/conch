@@ -202,9 +202,47 @@ func waitCompanionTracks(hl *lkit.Headless, participant string) error {
 
 const (
 	playbackFramesPerSecond = 100.0
-	playbackCountTolerance  = 1.25
-	playbackLevelTolerance  = 0.25
+	// Allow at most 25% extra frames over the measured window for delivery
+	// backlog and stats output scheduling, still well below a second copy.
+	playbackCountTolerance = 1.25
+	playbackLevelTolerance = 0.25
 )
+
+// playbackStats measures whole reporting intervals rather than assuming each
+// tick covers one second: conch-voice's timer skips missed ticks. Its JSON has
+// no timestamp; voiceEvent.at captures time.Now (including its monotonic clock)
+// when the harness reads the line. Keep a preceding stats line as the baseline,
+// even outside the window, and exclude intervals that straddle either boundary.
+func playbackStats(c *voiceClient, from, to time.Time) ([]map[string]any, time.Duration) {
+	var stats []map[string]any
+	var elapsed time.Duration
+	var previous time.Time
+	for _, e := range c.snapshot() {
+		if e.obj["event"] != "stats" {
+			continue
+		}
+		if !previous.IsZero() && !previous.Before(from) && !e.at.After(to) && e.at.After(previous) {
+			stats = append(stats, e.obj)
+			elapsed += e.at.Sub(previous)
+		}
+		previous = e.at
+	}
+	return stats, elapsed
+}
+
+func waitPlaybackStats(c *voiceClient, from time.Time) (time.Time, error) {
+	err := waitForOrFail(c.who.name+"'s two whole playback reporting intervals", 20*time.Second, func() (bool, string, error) {
+		stats, _ := playbackStats(c, from, time.Now())
+		if len(stats) >= 2 {
+			return true, "", nil
+		}
+		if c.exited() {
+			return false, "", fmt.Errorf("the client exited (%s); standard error: %s", exitText(c.exit), c.stderrTail())
+		}
+		return false, fmt.Sprintf("%d of 2 intervals", len(stats)), nil
+	})
+	return time.Now(), err
+}
 
 func playbackReady(c *voiceClient, what string, since time.Time, want map[string]int) error {
 	if len(want) == 0 {
@@ -238,13 +276,13 @@ func playbackReady(c *voiceClient, what string, since time.Time, want map[string
 // playbackHeard bounds both the number of copies received and the level played.
 // A quarter-scale sine has RMS 0.25/sqrt(2); independent tones add in power.
 func playbackHeard(c *voiceClient, what string, from, to time.Time, want map[string]int, publisher *voiceClient, talking bool) error {
-	if err := c.heard(what, from, to, 2, want); err != nil {
+	stats, elapsed := playbackStats(c, from, to)
+	if err := c.heardStats(what, stats, 2, want); err != nil {
 		return err
 	}
 	if len(want) == 0 {
 		return nil
 	}
-	stats := c.statsWithin(from, to)
 	totals := map[string]float64{}
 	for _, line := range stats {
 		speakers, _ := line["speakers"].([]any)
@@ -265,28 +303,34 @@ func playbackHeard(c *voiceClient, what string, from, to time.Time, want map[str
 	}
 
 	microphone := ""
-	published, publisherLines := 0.0, 0
+	publishedRate := 0.0
 	if talking {
 		microphone = identity(publisher.who.id)
-		for _, line := range publisher.statsWithin(from, to) {
-			published += number(line["frames_sent"])
-			publisherLines++
+		publisherStats, publisherElapsed := playbackStats(publisher, from, to)
+		if publisherElapsed <= 0 {
+			return fmt.Errorf("%s: %s has no whole publisher reporting interval", what, publisher.who.name)
 		}
+		published := 0.0
+		for _, line := range publisherStats {
+			published += number(line["frames_sent"])
+		}
+		publishedRate = published / publisherElapsed.Seconds()
 	}
 	for id, frames := range totals {
-		upper := playbackFramesPerSecond * float64(len(stats)) * playbackCountTolerance
-		if id == microphone && publisherLines > 0 {
-			upper = published / float64(publisherLines) * float64(len(stats)) * playbackCountTolerance
+		rate := playbackFramesPerSecond
+		if id == microphone {
+			rate = publishedRate
 		}
+		upper := rate * elapsed.Seconds() * playbackCountTolerance
 		if frames > upper {
-			return fmt.Errorf("%s: %s counted %.0f frames from %s over %d stats lines, want at most %.0f from one publisher with 25%% tolerance (possible double playback)", what, c.who.name, frames, id, len(stats), upper)
+			return fmt.Errorf("%s: %s counted %.0f frames from %s over %.3f s (%.1f frames/s), want at most %.0f from one publisher at %.1f frames/s with 25%% tolerance (possible double playback)", what, c.who.name, frames, id, elapsed.Seconds(), frames/elapsed.Seconds(), upper, rate)
 		}
 	}
 	return nil
 }
 
 // playbackWindow waits for each expected receiver to hear its tones, then
-// checks two fresh whole seconds in every helper's sink. own is H7, other is
+// checks two fresh whole reporting intervals in every helper's sink. own is H7, other is
 // H8, and standalone has no companion and no owner flag. talking says whether
 // H7's microphone tone is expected in the other sinks.
 func playbackWindow(what string, since time.Time, own, other, standalone *voiceClient, wantOwn, wantOther, wantStandalone map[string]int, talking bool) error {
@@ -303,7 +347,7 @@ func playbackWindow(what string, since time.Time, own, other, standalone *voiceC
 	from := time.Now()
 	var to time.Time
 	for _, check := range checks {
-		at, err := check.c.waitStats(2, from)
+		at, err := waitPlaybackStats(check.c, from)
 		if err != nil {
 			return fmt.Errorf("%s: %w", what, err)
 		}

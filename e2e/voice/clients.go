@@ -307,7 +307,10 @@ func number(v any) float64 {
 // the listener itself is not among its own speakers. With nobody in want, the
 // mix is silent too. At least `lines` such lines must exist.
 func (c *voiceClient) heard(what string, from, to time.Time, lines int, want map[string]int) error {
-	stats := c.statsWithin(from, to)
+	return c.heardStats(what, c.statsWithin(from, to), lines, want)
+}
+
+func (c *voiceClient) heardStats(what string, stats []map[string]any, lines int, want map[string]int) error {
 	if len(stats) < lines {
 		return fmt.Errorf("%s: %s printed %d stats lines in the window, want at least %d", what, c.who.name, len(stats), lines)
 	}
