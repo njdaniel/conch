@@ -47,6 +47,8 @@ const named: Record<keyof ConchDesktopBridge | keyof DesktopVoiceBridge, true> =
   voiceSetDeafen: true,
   voiceSetDevices: true,
   voiceSetTalkMode: true,
+  voiceDevices: true,
+  voiceSaveDevice: true,
   onVoiceState: true,
 };
 
@@ -75,7 +77,7 @@ describe('the preload', () => {
     expect(invoke).toHaveBeenLastCalledWith('conch:serverAddress');
     await bridge.signInWithPassword({ name: 'a', password: 'b' });
     expect(invoke).toHaveBeenLastCalledWith('conch:signInWithPassword', { name: 'a', password: 'b' });
-    expect(INVOKED_FUNCTIONS).toHaveLength(36);
+    expect(INVOKED_FUNCTIONS).toHaveLength(38);
   });
 
   it('rejects with a bare "refused" when main refuses, or answers anything but an envelope', async () => {
@@ -228,6 +230,8 @@ describe('the preload’s voice family', () => {
     await bridge.voiceSetDeafen(false);
     await bridge.voiceSetDevices({ input: 'Mic' });
     await bridge.voiceSetTalkMode('open');
+    await bridge.voiceDevices();
+    await bridge.voiceSaveDevice({ key: 'audio.input', value: 'Mic' });
     expect(calls).toEqual([
       ['conch:voiceState', []],
       ['conch:voiceJoin', [{ channel: 'general', muted: true, deafened: false }]],
@@ -237,6 +241,8 @@ describe('the preload’s voice family', () => {
       ['conch:voiceSetDeafen', [false]],
       ['conch:voiceSetDevices', [{ input: 'Mic' }]],
       ['conch:voiceSetTalkMode', ['open']],
+      ['conch:voiceDevices', []],
+      ['conch:voiceSaveDevice', [{ key: 'audio.input', value: 'Mic' }]],
     ]);
   });
 
