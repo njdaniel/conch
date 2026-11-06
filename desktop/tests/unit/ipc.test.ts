@@ -364,6 +364,8 @@ describe('the voice family (issue #1374)', () => {
     await f.ipc.invoke(f.event(), 'voiceDevices', []);
     await f.ipc.invoke(f.event(), 'voiceSaveDevice', [{ key: 'audio.output', value: 'default' }]);
     await f.ipc.invoke(f.event(), 'voiceSaveDevice', [{ key: 'audio.talk_mode', value: 'open' }]);
+    await f.ipc.invoke(f.event(), 'voiceKeyDevices', []);
+    await f.ipc.invoke(f.event(), 'voiceSaveTalkBinding', [{ deviceId: 'abc-123', code: 275 }]);
     expect(f.calls).toEqual([
       ['voice.state', []],
       ['voice.join', [join]],
@@ -378,6 +380,8 @@ describe('the voice family (issue #1374)', () => {
       ['voice.devices', []],
       ['voice.saveDevice', [{ key: 'audio.output', value: 'default' }]],
       ['voice.saveDevice', [{ key: 'audio.talk_mode', value: 'open' }]],
+      ['voice.keyDevices', []],
+      ['voice.saveTalkBinding', [{ deviceId: 'abc-123', code: 275 }]],
     ]);
     expect(f.ipc.refusals).toBe(0);
   });
@@ -435,6 +439,23 @@ describe('the voice family (issue #1374)', () => {
     ['voiceSetTalkMode', [{ mode: 'open' }]],
     ['voiceSetTalkMode', ['open', 'extra']],
     ['voiceSetTalkMode', ['toString']],
+    ['voiceKeyDevices', [1]],
+    ['voiceSaveTalkBinding', []],
+    ['voiceSaveTalkBinding', [{ deviceId: 'abc' }]],
+    ['voiceSaveTalkBinding', [{ code: 275 }]],
+    ['voiceSaveTalkBinding', [{ deviceId: 'abc', code: 275, extra: 1 }]],
+    ['voiceSaveTalkBinding', [{ deviceId: '/dev/input/by-id/x-event-kbd', code: 275 }]],
+    ['voiceSaveTalkBinding', [{ deviceId: '', code: 275 }]],
+    ['voiceSaveTalkBinding', [{ deviceId: 'x'.repeat(65), code: 275 }]],
+    ['voiceSaveTalkBinding', [{ deviceId: 5, code: 275 }]],
+    ['voiceSaveTalkBinding', [{ deviceId: 'abc', code: 0 }]],
+    ['voiceSaveTalkBinding', [{ deviceId: 'abc', code: 768 }]],
+    ['voiceSaveTalkBinding', [{ deviceId: 'abc', code: 1.5 }]],
+    ['voiceSaveTalkBinding', [{ deviceId: 'abc', code: -1 }]],
+    ['voiceSaveTalkBinding', [{ deviceId: 'abc', code: '275' }]],
+    ['voiceSaveTalkBinding', [{ deviceId: 'abc', code: 'KEY_F13' }]],
+    ['voiceSaveTalkBinding', [{ deviceId: 'abc', code: Number.NaN }]],
+    ['voiceSaveTalkBinding', [{ deviceId: 'abc', code: 275 }, 'extra']],
     ['voiceDevices', [1]],
     ['voiceDevices', ['--json']],
     ['voiceSaveDevice', []],
@@ -494,6 +515,7 @@ describe('the voice family (issue #1374)', () => {
     ['voiceRetry', []],
     ['voiceSetTalkMode', ['open']],
     ['voiceSaveDevice', [{ key: 'audio.input', value: 'Mic' }]],
+    ['voiceSaveTalkBinding', [{ deviceId: 'abc', code: 275 }]],
   ] as const)('refuses %s without a recent gesture and executes nothing', async (name, args) => {
     const f = fixture();
     expect(await f.ipc.invoke(f.event(), name, args)).toEqual({ ok: false, kind: 'refused' });
@@ -509,6 +531,7 @@ describe('the voice family (issue #1374)', () => {
     for (const [name, args] of [
       ['voiceState', []],
       ['voiceDevices', []],
+      ['voiceKeyDevices', []],
       ['voiceLeave', []],
       ['voiceSetMute', [true]],
       ['voiceSetDeafen', [true]],
@@ -547,6 +570,7 @@ describe('the voice family (issue #1374)', () => {
       ['voiceState', []], ['voiceJoin', [join]], ['voiceLeave', []], ['voiceRetry', []], ['voiceSetMute', [true]],
       ['voiceSetDeafen', [true]], ['voiceSetDevices', [{ input: 'Mic' }]], ['voiceSetTalkMode', ['open']],
       ['voiceDevices', []], ['voiceSaveDevice', [{ key: 'audio.input', value: 'Mic' }]],
+      ['voiceKeyDevices', []], ['voiceSaveTalkBinding', [{ deviceId: 'abc', code: 275 }]],
     ];
     expect(calls.map(([name]) => name).sort()).toEqual([...VOICE_FUNCTIONS].sort());
     for (const [name, args] of calls) expect(await f.ipc.invoke(event, name, args), name).toEqual({ ok: false, kind: 'refused' });

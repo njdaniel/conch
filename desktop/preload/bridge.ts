@@ -229,6 +229,8 @@ export function createBridge(invoke: Invoke, listen: Listen, listenVoice: Listen
     voiceSetTalkMode: call('voiceSetTalkMode'),
     voiceDevices: call('voiceDevices'),
     voiceSaveDevice: call('voiceSaveDevice'),
+    voiceKeyDevices: call('voiceKeyDevices'),
+    voiceSaveTalkBinding: call('voiceSaveTalkBinding'),
     onVoiceState,
   });
 }

@@ -14,7 +14,7 @@ import type { IpcMain } from 'electron';
 
 import type { BridgeReply, BridgeRequest, FeedRequest, SignInOutcome, VoiceDeviceKey } from '../../web/src/platform/desktop/bridge.ts';
 import { VOICE_DEVICES_MAX_NAME_BYTES, voiceControlTalkMode, type VoiceControlTalkMode } from '../../web/src/schema/generated.ts';
-import { isSaveKey, saveValueFits } from './voice/oneshot.ts';
+import { isPageSaveKey, keyCodeText, saveValueFits } from './voice/oneshot.ts';
 import { validChannel, validDeviceName } from './voice/protocol.ts';
 import { operations } from '../../web/src/platform/operations.ts';
 import { channelOf, INVOKED_FUNCTIONS, type Envelope, type InvokedFunction } from '../shared/bridge-names.ts';
@@ -70,7 +70,7 @@ export type ProfilesApi = Pick<
   'view' | 'add' | 'rename' | 'remove' | 'switchTo' | 'retry' | 'recover' | 'signOut' | 'signedIn' | 'keptCredential' | 'signInPermitted'
 >;
 
-export type VoiceApi = Pick<VoiceService, 'state' | 'join' | 'leave' | 'retry' | 'setMute' | 'setDeafen' | 'setDevices' | 'setTalkMode' | 'devices' | 'saveDevice'>;
+export type VoiceApi = Pick<VoiceService, 'state' | 'join' | 'leave' | 'retry' | 'setMute' | 'setDeafen' | 'setDevices' | 'setTalkMode' | 'devices' | 'saveDevice' | 'keyDevices' | 'saveTalkBinding'>;
 
 // What a sign-in step answers when the server's release is not one the app may
 // sign in to (issue #946): nothing was sent.
@@ -256,8 +256,19 @@ function parseSaveDevice(args: readonly unknown[]): readonly unknown[] | null {
   const [request] = args;
   if (args.length !== 1 || !isRecord(request) || !hasExactKeys(request, ['key', 'value'])) return null;
   const { key, value } = request;
-  if (!isSaveKey(key) || !saveValueFits(key, value)) return null;
+  // keys.device and keys.talk are not the page's to name: see parseTalkBinding.
+  if (!isPageSaveKey(key) || !saveValueFits(key, value)) return null;
   return [{ key, value }];
+}
+
+// A talk binding is exactly an id from the last listing (an opaque string, no
+// longer than a UUID plus a margin; the service looks it up) and a key code.
+function parseTalkBinding(args: readonly unknown[]): readonly unknown[] | null {
+  const [request] = args;
+  if (args.length !== 1 || !isRecord(request) || !hasExactKeys(request, ['deviceId', 'code'])) return null;
+  const { deviceId, code } = request;
+  if (typeof deviceId !== 'string' || !/^[A-Za-z0-9-]{1,64}$/u.test(deviceId) || keyCodeText(code) === null) return null;
+  return [{ deviceId, code }];
 }
 
 // At least one of input and output; each a printable device name.
@@ -421,6 +432,17 @@ export const SPECS: Readonly<Record<InvokedFunction, Spec>> = {
     maxBytes: 2 * VOICE_DEVICES_MAX_NAME_BYTES + 128,
     parse: parseSaveDevice,
     run: ({ voice }, [request]) => voice.saveDevice(request as { key: VoiceDeviceKey; value: string }),
+    gesture: true,
+  },
+  // Talk-key setup (issue #1381). The listing opens no device; a save writes
+  // the person's voice.toml and is the person's act alone. Two processes in a
+  // row, so the rate is low.
+  voiceKeyDevices: { limit: 20, maxBytes: 0, parse: none, run: ({ voice }) => voice.keyDevices() },
+  voiceSaveTalkBinding: {
+    limit: 10,
+    maxBytes: 256,
+    parse: parseTalkBinding,
+    run: ({ voice }, [request]) => voice.saveTalkBinding(request as { deviceId: string; code: number }),
     gesture: true,
   },
   feedUnsubscribe: { limit: 600, maxBytes: 32, parse: feedId, run: ({ feeds, document }, [id]) => feeds.unsubscribe(document, id as number) },

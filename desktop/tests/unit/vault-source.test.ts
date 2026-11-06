@@ -61,7 +61,7 @@ describe('secret handling in desktop/main', () => {
     // non-secret profiles.json and the profile directories; instance.ts makes
     // the data root private. Each says what it writes in its own header.
     const writers = new Set(['vault/files.ts', 'profiles/files.ts', 'instance.ts']);
-    const readOnly = new Set(['readFile', 'readFileSync', 'readdir', 'readdirSync', 'stat', 'lstat', 'realpath', 'access', 'existsSync']);
+    const readOnly = new Set(['readFile', 'readFileSync', 'readdir', 'readdirSync', 'stat', 'lstat', 'readlink', 'realpath', 'access', 'existsSync']);
     // The voice endpoint (#948) makes its private runtime directories and
     // removes stale sockets from them; it writes no file's content.
     const endpointOnly = new Set(['mkdir', 'chmod', 'unlink']);

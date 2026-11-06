@@ -26,8 +26,9 @@
 //   - one run at a time: a second is refused 'busy', and cancel() (the
 //     profile-switch media hook) kills the one running and waits for it.
 import { VOICE_DEVICES_MAX_BYTES, voiceControlTalkMode } from '../../../web/src/schema/generated.ts';
-import type { NativeVoiceDevicesResult, VoiceDeviceKey, VoiceOneShotError, VoiceSaveResult } from '../../../web/src/platform/desktop/bridge.ts';
+import type { NativeVoiceDevicesResult, VoiceBindingKey, VoiceDeviceKey, VoiceOneShotError, VoiceSaveResult } from '../../../web/src/platform/desktop/bridge.ts';
 import { parseVoiceDevices } from './devices.ts';
+import { BY_ID_DIR, fitForARule } from './keydevices.ts';
 import { validDeviceName } from './protocol.ts';
 import { defaultOneShotSpawn, findHelper, HelperError, oneShotEnv, oneShotSpawnOptions, type FindDeps, type OneShotChild, type OneShotSpawnFn } from './spawn.ts';
 
@@ -45,26 +46,47 @@ const STDERR_LINE_CHARS = 160;
 // The exit status conch-voice gives for a command line it does not take.
 const USAGE_EXIT = 2;
 
-// The keys `config set` is given from the page: the devices and the talk mode.
-// (The key device and bindings are D3-10, #1381.)
-export const SAVE_KEYS: readonly VoiceDeviceKey[] = ['audio.input', 'audio.output', 'audio.talk_mode'];
+// The keys `config set` is given: the page's own choices (the devices and the
+// talk mode) and, from the talk-key setup alone, the key device and the talk
+// key (issue #1381). The page cannot name the latter: see PAGE_SAVE_KEYS.
+export type VoiceSaveKey = VoiceDeviceKey | VoiceBindingKey;
+export const PAGE_SAVE_KEYS: readonly VoiceDeviceKey[] = ['audio.input', 'audio.output', 'audio.talk_mode'];
+export const SAVE_KEYS: readonly VoiceSaveKey[] = [...PAGE_SAVE_KEYS, 'keys.device', 'keys.talk'];
+
+// The highest key code conch-voice takes for keys.talk.
+export const MAX_KEY_CODE = 767;
 
 const NO_SEPARATOR = /[\u2028\u2029]/u;
 
 export const DEFAULT_DEVICE = 'default';
 
-export function isSaveKey(value: unknown): value is VoiceDeviceKey {
+export function isSaveKey(value: unknown): value is VoiceSaveKey {
   return typeof value === 'string' && (SAVE_KEYS as readonly string[]).includes(value);
+}
+
+// isPageSaveKey: the keys the page may name in voiceSaveDevice.
+export function isPageSaveKey(value: unknown): value is VoiceDeviceKey {
+  return typeof value === 'string' && (PAGE_SAVE_KEYS as readonly string[]).includes(value);
+}
+
+// keyCodeText is the decimal text of a key code 1..767, or null.
+export function keyCodeText(code: unknown): string | null {
+  return typeof code === 'number' && Number.isInteger(code) && code >= 1 && code <= MAX_KEY_CODE ? String(code) : null;
 }
 
 // saveValueFits says whether value can be given to `config set` for key: for
 // a device, `default` or a printable name of 1 to 255 bytes with no quotation
 // mark, backslash, control character or line separator (the device list's own
-// rule); for the talk mode, a word of its vocabulary. It is checked here, in
-// the IPC layer and again by the service, before anything is passed.
+// rule); for the talk mode, a word of its vocabulary; for keys.device, the
+// by-id path of a name fit for a udev rule (stricter than the helper, which
+// takes any clean path under /dev/input/); for keys.talk, a canonical decimal
+// code from 1 to 767 (the helper also takes KEY_* names). It is checked here,
+// in the IPC layer and again by the service, before anything is passed.
 export function saveValueFits(key: unknown, value: unknown): value is string {
   if (!isSaveKey(key) || typeof value !== 'string') return false;
   if (key === 'audio.talk_mode') return voiceControlTalkMode(value).length === 0;
+  if (key === 'keys.talk') return /^[1-9]\d{0,2}$/u.test(value) && keyCodeText(Number(value)) === value;
+  if (key === 'keys.device') return value.startsWith(`${BY_ID_DIR}/`) && value.length <= BY_ID_DIR.length + 1 + 200 && fitForARule(value.slice(BY_ID_DIR.length + 1));
   return value === DEFAULT_DEVICE || (validDeviceName(value) && !NO_SEPARATOR.test(value));
 }
 
@@ -129,12 +151,13 @@ export class OneShot {
 
   // save runs `conch-voice config set <key> -- <value>`. A key or a value that
   // could not be saved is refused before anything runs.
-  async save(configDir: string, key: VoiceDeviceKey, value: string): Promise<VoiceSaveResult> {
+  async save(configDir: string, key: VoiceSaveKey, value: string): Promise<VoiceSaveResult> {
     if (!saveValueFits(key, value)) return { ok: false, error: 'invalid' };
     // `--` ends the options: a device name may begin with `-` (PipeWire lets any
     // program name a node), and without it clap would read `-h` as help, print
     // it and exit 0, which would look like a save.
-    const ran = await this.#run(configDir, ['config', 'set', key, '--', value], 'config set');
+    // A key device's path is a device's name: the helper's words are not logged.
+    const ran = await this.#run(configDir, ['config', 'set', key, '--', value], 'config set', key === 'keys.device');
     return ran.ok ? { ok: true } : ran;
   }
 
@@ -147,7 +170,7 @@ export class OneShot {
     await run.finished;
   }
 
-  async #run(configDir: string, args: readonly string[], what: string): Promise<Ran> {
+  async #run(configDir: string, args: readonly string[], what: string, quiet = false): Promise<Ran> {
     if (this.#active !== null) return { ok: false, error: 'busy' };
     // Taken before the first await: two calls cannot both pass the check.
     let release: () => void = () => undefined;
@@ -160,14 +183,14 @@ export class OneShot {
     };
     this.#active = run;
     try {
-      return await this.#exec(run, configDir, args, what);
+      return await this.#exec(run, configDir, args, what, quiet);
     } finally {
       this.#active = null;
       release();
     }
   }
 
-  async #exec(run: Active, configDir: string, args: readonly string[], what: string): Promise<Ran> {
+  async #exec(run: Active, configDir: string, args: readonly string[], what: string, quiet: boolean): Promise<Ran> {
     let executable: string;
     try {
       executable = await findHelper(this.deps.resources, this.deps.find);
@@ -186,10 +209,10 @@ export class OneShot {
       this.deps.log(`voice: ${what}: the helper could not be started`);
       return { ok: false, error: 'spawn-failed' };
     }
-    return this.#await(run, child, what);
+    return this.#await(run, child, what, quiet);
   }
 
-  #await(run: Active, child: OneShotChild, what: string): Promise<Ran> {
+  #await(run: Active, child: OneShotChild, what: string, quiet: boolean): Promise<Ran> {
     const timeoutMs = this.deps.timeoutMs ?? ONE_SHOT_TIMEOUT_MS;
     const graceMs = this.deps.drainGraceMs ?? DRAIN_GRACE_MS;
     return new Promise<Ran>((resolve) => {
@@ -227,7 +250,7 @@ export class OneShot {
         clearTimeout(drain);
         child.stdout.destroy();
         child.stderr.destroy();
-        const line = lastLine(tail);
+        const line = quiet ? '' : lastLine(tail);
         const log = (reason: string): void => {
           this.deps.log(`voice: ${what}: ${reason}${line === '' ? '' : `: ${line}`}`);
         };
