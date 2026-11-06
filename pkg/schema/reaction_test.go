@@ -297,6 +297,7 @@ func TestReactionGoldenFixtures(t *testing.T) {
 		{"reaction-summary-v1.json", func() any { return new(ReactionSummaryV1) }},
 		{"reaction-summary-v1-empty.json", func() any { return new(ReactionSummaryV1) }},
 		{"reaction-summaries-response-v1.json", func() any { return new(ReactionSummariesResponseV1) }},
+		{"reaction-summaries-response-v1-unreacted.json", func() any { return new(ReactionSummariesResponseV1) }},
 		{"reaction-summaries-response-v1-empty.json", func() any { return new(ReactionSummariesResponseV1) }},
 		{"reaction-v1.json", func() any { return new(ReactionV1) }},
 		{"reaction-v1-guest.json", func() any { return new(ReactionV1) }},
