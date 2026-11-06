@@ -1,0 +1,15 @@
+node_modules/
+npm-debug.log
+.metro-health-check*
+*.jsbundle
+
+# Gradle and Android
+build/
+.gradle/
+.cxx/
+.kotlin/
+local.properties
+*.iml
+*.hprof
+*.keystore
+!debug.keystore

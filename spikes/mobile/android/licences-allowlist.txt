@@ -1,0 +1,16 @@
+# Licences a package in the Android spike's package-lock.json may carry
+# (#1109, M4-A). One SPDX identifier per line. Adding one requires Nick's
+# sign-off in the PR that adds it. Enforced by check.sh through
+# scripts/web-licences.sh. This is web/'s core list, plus the three the React
+# Native toolchain needs (each build-time only; none is in the app's code).
+MIT
+Apache-2.0
+BSD-3-Clause
+ISC
+0BSD
+# Build tools only.
+BSD-2-Clause
+#   Python-2.0  argparse (a dependency of the CLI's config loader)
+Python-2.0
+#   CC-BY-4.0   caniuse-lite (browser data read by Babel; data, not code)
+CC-BY-4.0
