@@ -232,6 +232,7 @@ pub fn join(
         },
         release_tail_ms: resolved.config.audio.release_tail_ms,
         max_transmit: Duration::from_secs(u64::from(resolved.config.audio.max_transmit_secs)),
+        push_to_talk_max: Duration::from_secs(u64::from(resolved.config.audio.max_transmit_secs)),
         // `join` honours the configured mode; `down` and `up` then do nothing in open mode.
         talk_mode: resolved.config.audio.talk_mode,
         level: transmit::level_config(
@@ -322,7 +323,7 @@ pub fn managed(
     };
     let result = runtime.block_on(async {
         let (inputs, received) = mpsc::unbounded_channel();
-        let host = managed::Host::new(
+        let mut host = managed::Host::new(
             environment,
             LiveKit::new(Arc::clone(&scrubber)),
             scrubber,
@@ -333,6 +334,7 @@ pub fn managed(
             keys,
             args.share_audio_owner,
         );
+        host.transmit_ceiling_secs = args.transmit_ceiling_secs;
         managed::signals(inputs.clone(), host.watchdog.clone()).map_err(Error::Runtime)?;
         managed::watch_parent(parent, inputs.clone(), host.watchdog.clone());
         if let Some(end) = end {

@@ -369,6 +369,9 @@ pub struct Settings {
     pub release_tail_ms: u32,
     /// `audio.max_transmit_secs`.
     pub max_transmit: Duration,
+    /// The limit of one push-to-talk press: `max_transmit`, or less where the managed
+    /// owner passed `--transmit-ceiling-secs`. Open mode uses `max_transmit` alone.
+    pub push_to_talk_max: Duration,
     /// What opens the gate: `audio.talk_mode` for `join`. A managed helper speaking
     /// `conch.voice_control.v1` is given push-to-talk whatever the file says; one speaking
     /// v2, the file's mode, or the one its owner set while it was starting.
@@ -927,6 +930,7 @@ impl<T: Transport> Session<T> {
             sink_tones,
             release_tail_ms,
             max_transmit,
+            push_to_talk_max,
             talk_mode,
             level,
             key_device,
@@ -956,7 +960,7 @@ impl<T: Transport> Session<T> {
             timings.reports.clone(),
         );
         let rosters = presence::spawn(conchd.client.clone(), channel.clone(), timings.presence);
-        let (ptt, first) = Ptt::with_talk_mode(max_transmit, talk_mode);
+        let (ptt, first) = Ptt::with_limits(max_transmit, push_to_talk_max, talk_mode);
         let mut out = out;
         out.set_talk_mode(talk_mode);
         let mut session = Session {
@@ -2266,6 +2270,7 @@ mod tests {
             sink_tones: Vec::new(),
             release_tail_ms: 0,
             max_transmit: Duration::from_secs(120),
+            push_to_talk_max: Duration::from_secs(120),
             talk_mode: TalkMode::PushToTalk,
             level: transmit::level_config(-40, 400),
             key_device: None,
