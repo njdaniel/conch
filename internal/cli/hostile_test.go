@@ -187,6 +187,12 @@ func walkCases(t *testing.T) []walkCase {
 		{key: "channels create", ownWords: true, args: func(u, _ string) []string {
 			return []string{"channels", "create", "--server", u, "--private", "general"}
 		}},
+		{key: "react", ownWords: true, quietWhenOK: true, args: func(u, _ string) []string { return []string{"react", "--server", u, "general", "42", "👍"} }},
+		{key: "unreact", ownWords: true, quietWhenOK: true, args: func(u, _ string) []string { return []string{"unreact", "--server", u, "general", "42", "👍"} }},
+		{key: "reactions", ownWords: true, args: func(u, _ string) []string { return []string{"reactions", "--server", u, "general", "42"} }},
+		{key: "admin reaction remove", ownWords: true, quietWhenOK: true, args: func(u, _ string) []string {
+			return []string{"admin", "reaction", "remove", "--server", u, "general", "42", "9", "👍", "--yes"}
+		}},
 		{key: "admin channel settings", ownWords: true, args: func(u, _ string) []string {
 			return []string{"admin", "channel", "settings", "--server", u, "--private", "--default", "off", "general"}
 		}},
@@ -377,6 +383,12 @@ func hostileServer(t *testing.T, ok, whoamiOK bool) *httptest.Server {
 			write(w, http.StatusOK, schema.WhoAmIResponseV1{ID: 42, Kind: schema.PrincipalKind(hostile), Name: hostile, Role: schema.PrincipalRole(hostile), Permissions: []schema.Permission{schema.Permission(hostile), schema.PermUseVoice}, PermissionsRevision: 1})
 		case "POST /v2/channels/general/messages":
 			write(w, http.StatusCreated, schema.PostMessageResponseV2{Message: schema.MessageV2{ID: 1, Body: hostile, CreatedAt: ts}})
+		case "PUT /v2/channels/general/messages/42/reactions/👍", "DELETE /v2/channels/general/messages/42/reactions/👍", "DELETE /v2/channels/general/messages/42/reactions/👍/9":
+			write(w, http.StatusOK, reactionTestSummary(42, schema.ReactionCountV1{Emoji: "👍", Count: 1, Me: true}))
+		case "GET /v2/channels/general/messages/42/reactions":
+			write(w, http.StatusOK, reactionTestSummary(42, schema.ReactionCountV1{Emoji: "👍", Count: 1, Me: true}))
+		case "GET /v2/channels/general/messages/42/reactions/👍":
+			write(w, http.StatusOK, schema.ListReactorsResponseV1{Reactors: []schema.ReactionV1{{PrincipalID: 9, Emoji: "👍", CreatedAt: ts}}})
 		case "GET /v2/channels/general/messages":
 			// The thread listing (?thread=3): a root and a reply, each hostile.
 			write(w, http.StatusOK, schema.ListMessagesResponseV2{Messages: []schema.MessageV2{
@@ -505,7 +517,7 @@ func hostileServer(t *testing.T, ok, whoamiOK bool) *httptest.Server {
 		case "GET /v1/channels":
 			write(w, http.StatusOK, schema.ListChannelsResponse{Channels: []schema.ChannelV0{{ID: 1, Name: "general", CreatedAt: ts.Time()}}})
 		case "GET /v1/channels/general/members":
-			write(w, http.StatusOK, schema.ListChannelMembersResponseV1{Members: []schema.ChannelMemberV1{{PrincipalID: 42, Name: hostile, CreatedAt: ts}}})
+			write(w, http.StatusOK, schema.ListChannelMembersResponseV1{Members: []schema.ChannelMemberV1{{PrincipalID: 42, Name: hostile, CreatedAt: ts}, {PrincipalID: 9, Name: hostile, CreatedAt: ts}}})
 		case "POST /v1/login":
 			cred := schema.CredentialV1{ID: 5, PrincipalID: 42, Label: hostile, CreatedAt: ts}
 			write(w, http.StatusOK, schema.LoginResponseV1{Next: schema.LoginNextSignedIn, Principal: &schema.PrincipalV0{ID: 42, Name: hostile}, Credential: &cred, Token: walkToken})

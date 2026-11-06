@@ -57,7 +57,8 @@ type adminOpts struct {
 	community communityOpts
 	// aiAdmin holds the flags of `ai-admin create` (issue #1332), in
 	// admin_ai_admin.go.
-	aiAdmin aiAdminOpts
+	aiAdmin     aiAdminOpts
+	reactionYes bool
 }
 
 // principalOpts holds the flags of the principal list, hide and sign-in-link
@@ -219,6 +220,10 @@ var adminCommands = []adminCommand{
 	{group: "permissions", verb: "preset", args: []string{"personal|group"}, flags: "[--yes] ",
 		bind: bindYes, run: adminPermissionsPreset},
 	{group: "directory", verb: "members", run: adminDirectoryMembers},
+	{group: "reaction", verb: "remove", args: []string{"channel", "message-id", "principal-id", "emoji"}, idAt: 3, optionalArgs: 1, flags: "[--yes] ",
+		bind: func(fs *flag.FlagSet, o *adminOpts) {
+			fs.BoolVar(&o.reactionYes, "yes", false, "remove without asking")
+		}, run: adminReactionRemove},
 	// Webhook hooks (issue #1228), in admin_hook.go.
 	{group: "hook", verb: "list", run: adminHookList},
 	{group: "hook", verb: "revoke", args: []string{"hook-id"}, idAt: 1, run: adminHookRevoke},
@@ -228,7 +233,7 @@ var adminCommands = []adminCommand{
 	{group: "reports", verb: "file", args: []string{"id", "issue-url"}, idAt: 1, run: adminReportsFile},
 }
 
-const adminGroups = "channel|principal|credential|member|manifest|invite|join|guest|reports|sign-in-link|permissions|directory|ai-admin"
+const adminGroups = "channel|principal|credential|member|manifest|invite|join|guest|reports|sign-in-link|permissions|directory|ai-admin|reaction"
 
 // usage is the one line shown for a malformed command.
 func (c adminCommand) usage() string {

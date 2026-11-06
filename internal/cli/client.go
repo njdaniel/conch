@@ -1120,6 +1120,8 @@ type EventHandler struct {
 	Run          func(schema.RunV1) error
 	Activity     func(schema.AgentActivityV1) error
 	Intervention func(schema.InterventionV1) error
+	// Reaction is one message's whole reaction state, replacing earlier state.
+	Reaction func(schema.ReactionSummaryV1) error
 	// PermissionsChanged is called when the caller's effective permissions
 	// may have changed (ADR-014); the document carries nothing else, so the
 	// caller re-reads whoami.
@@ -1128,13 +1130,13 @@ type EventHandler struct {
 
 // SubscribeEvents follows channel's events socket and calls the handler with
 // each document it sends: the session roster (the whole state on connect and
-// on every change), and the runs, activity entries and interventions the
-// caller may see, each whole and possibly repeated. With session set (the
-// caller's own, not ended) the server keeps that session online while the
-// socket is open. A frame of any other schema is skipped, so a newer server
+// on every change), and the runs, activity entries, interventions and reaction
+// summaries the caller may see, each whole and possibly repeated. With session
+// set (the caller's own, not ended) the server keeps that session online while
+// the socket is open. A frame of any other schema is skipped, so a newer server
 // may send more. A document that fails Validate ends the subscription with an
 // error. There is no replay: a caller that reconnects takes the next roster as
-// the state and reads runs over REST. A server shutdown is reported through
+// the state and reads runs and reactions over REST. A server shutdown is reported through
 // websocket.StatusGoingAway, and loss of membership or of the credential
 // through websocket.StatusPolicyViolation.
 func (c *Client) SubscribeEvents(ctx context.Context, channel string, session int64, handler EventHandler) error {
@@ -1227,6 +1229,15 @@ func dispatchEvent(frame json.RawMessage, handler EventHandler) error {
 			return err
 		}
 		return receiveEvent(handler.PermissionsChanged(doc))
+	case schema.ReactionSummarySchemaV1:
+		if handler.Reaction == nil {
+			return nil
+		}
+		var summary schema.ReactionSummaryV1
+		if err := decodeEvent(frame, &summary, "reaction summary"); err != nil {
+			return err
+		}
+		return receiveEvent(handler.Reaction(summary))
 	}
 	return nil
 }

@@ -515,6 +515,7 @@ func (r *runner) runSuite() error {
 	}{
 		{"P3-01", "five participants, five credentials, one roster", s.p301Roster},
 		{"P3-02", "a message from each client arrives once, in order, everywhere", s.p302Send},
+		{"P3-16", "browser, terminal and CLI see the same reactions", s.p316Reactions},
 		{"P3-03", "two terminals, two channels, two drafts", s.p303Drafts},
 		{"P3-04", "one person in two terminals", s.p304TwoSessions},
 		{"P3-05", "a restricted channel, a net and a whisper", s.p305Scope},
