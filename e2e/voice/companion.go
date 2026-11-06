@@ -21,13 +21,23 @@ import (
 // publish a screen and nothing else, and the viewer p<id>.view, which
 // publishes nothing. Everything here is checked in LiveKit itself: the claims
 // of the signed tokens, the permission LiveKit reports for each connection,
-// what it refuses to publish and what it delivers.
+// what it refuses to publish and what it delivers. The scenario then runs
+// playback.go's B1/B2 audio-ownership and viewer-displacement checks (#935).
+
+// companionChannel is the original scenario's channel unless a caller names
+// another. The optional form keeps that scenario's calls unchanged.
+func companionChannel(named []string) string {
+	if len(named) > 0 {
+		return named[0]
+	}
+	return "companion"
+}
 
 // requestCompanion asks for a companion or viewer token as p and returns the
 // decoded answer, or the status and error code of a refusal.
-func (h *harness) requestCompanion(p *person, req schema.VoiceCompanionRequestV1) (schema.VoiceCompanionResponseV1, int, string, error) {
+func (h *harness) requestCompanion(p *person, req schema.VoiceCompanionRequestV1, channel ...string) (schema.VoiceCompanionResponseV1, int, string, error) {
 	var resp schema.VoiceCompanionResponseV1
-	status, data, err := p.api.do(http.MethodPost, "/v1/channels/companion/voice/companion", req)
+	status, data, err := p.api.do(http.MethodPost, "/v1/channels/"+companionChannel(channel)+"/voice/companion", req)
 	if err != nil {
 		return resp, status, "", err
 	}
@@ -63,10 +73,10 @@ func (h *harness) requestCompanion(p *person, req schema.VoiceCompanionRequestV1
 // mustCompanion requests a companion and requires it to be granted. While the
 // poller has not yet seen the person's own connection a screen companion is
 // refused with voice_no_session; that is retried for up to 20 s.
-func (h *harness) mustCompanion(p *person, req schema.VoiceCompanionRequestV1) (schema.VoiceCompanionResponseV1, error) {
+func (h *harness) mustCompanion(p *person, req schema.VoiceCompanionRequestV1, channel ...string) (schema.VoiceCompanionResponseV1, error) {
 	var resp schema.VoiceCompanionResponseV1
 	err := waitForOrFail(p.name+" to be issued a companion", 20*time.Second, func() (bool, string, error) {
-		r, status, code, err := h.requestCompanion(p, req)
+		r, status, code, err := h.requestCompanion(p, req, channel...)
 		if err != nil {
 			return false, "", err
 		}
@@ -83,8 +93,8 @@ func (h *harness) mustCompanion(p *person, req schema.VoiceCompanionRequestV1) (
 }
 
 // removeCompanion calls DELETE and requires 204.
-func (p *person) removeCompanion(query string) error {
-	status, _, err := p.api.do(http.MethodDelete, "/v1/channels/companion/voice/companion"+query, nil)
+func (p *person) removeCompanion(query string, channel ...string) error {
+	status, _, err := p.api.do(http.MethodDelete, "/v1/channels/"+companionChannel(channel)+"/voice/companion"+query, nil)
 	if err != nil {
 		return err
 	}
@@ -98,10 +108,10 @@ func (p *person) removeCompanion(query string) error {
 // sound with scope (PUT /v1/channels/companion/voice/companion/audio, issue
 // #898) and returns the decoded answer, or the status and error code of a
 // refusal.
-func requestCompanionAudio(p *person, scope schema.VoiceShareAudioScope) (schema.VoiceCompanionAudioV1, int, string, error) {
+func requestCompanionAudio(p *person, scope schema.VoiceShareAudioScope, channel ...string) (schema.VoiceCompanionAudioV1, int, string, error) {
 	var audio schema.VoiceCompanionAudioV1
 	req := schema.VoiceCompanionAudioRequestV1{Scope: scope}
-	status, data, err := p.api.do(http.MethodPut, "/v1/channels/companion/voice/companion/audio", req)
+	status, data, err := p.api.do(http.MethodPut, "/v1/channels/"+companionChannel(channel)+"/voice/companion/audio", req)
 	if err != nil || status != http.StatusOK {
 		var e schema.Error
 		_ = decodeStrict(data, &e)
@@ -752,5 +762,5 @@ func (l *live) companion(ctx context.Context) error {
 		}
 	}
 	h.say("ok   audited: one voice_session_issued row per companion grant, voice_companion_removed for each removal, and no token or room name (the final scan covers every row)")
-	return nil
+	return l.companionPlayback(ctx)
 }
