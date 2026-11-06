@@ -4111,7 +4111,10 @@ export type KnownAdminAction =
   | 'list_reports'
   | 'get_report'
   | 'update_report'
-  | 'export_audit';
+  | 'export_audit'
+  | 'list_channel_bans'
+  | 'ban_channel_member'
+  | 'unban_channel_member';
 export type AdminAction = KnownAdminAction | (string & {});
 
 export const adminAction = tolerant<KnownAdminAction>({
@@ -4155,6 +4158,9 @@ export const adminAction = tolerant<KnownAdminAction>({
   get_report: true,
   update_report: true,
   export_audit: true,
+  list_channel_bans: true,
+  ban_channel_member: true,
+  unban_channel_member: true,
 });
 
 // schema.AgentAdminV1

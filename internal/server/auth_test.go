@@ -211,6 +211,11 @@ var routeExpectations = map[string]routeExpectation{
 	"PUT /v1/channels/{channel}/members/{principal_id}":               {classManager, "/v1/channels/general/members/2", "", 204},
 	"DELETE /v1/channels/{channel}/members/{principal_id}":            {classManager, "/v1/channels/general/members/4", "", 204},
 	"DELETE /v1/channels/{channel}/voice/participants/{principal_id}": {classManager, "/v1/channels/general/voice/participants/4", "", 204},
+	// Bans (issue #851). An unknown principal cannot be banned (404) and
+	// lifting an absent ban is a no-op, so the sweep writes nothing.
+	"GET /v1/channels/{channel}/bans":                   {classManager, "/v1/channels/general/bans", "", 200},
+	"PUT /v1/channels/{channel}/bans/{principal_id}":    {classManager, "/v1/channels/general/bans/9999", "", 404},
+	"DELETE /v1/channels/{channel}/bans/{principal_id}": {classManager, "/v1/channels/general/bans/9999", "", 204},
 	// Adding a member by name (issue #790): an empty body is a 400 before
 	// anyone is looked up.
 	"POST /v1/channels/{channel}/members": {classManager, "/v1/channels/general/members", `{}`, 400},

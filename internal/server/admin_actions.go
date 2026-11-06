@@ -138,6 +138,17 @@ var adminCatalog = []adminCatalogEntry{
 	{action: schema.AdminActionUpdateReport, pattern: "PUT /v1/reports/{id}", permission: pMembers, gate: direct, target: tReport, build: passBody("")},
 
 	{action: schema.AdminActionExportAudit, pattern: "GET /v1/audit", permission: pAudit, gate: direct, build: queryParams("after", "limit")},
+
+	// Channel entry bans (moderation M3, issue #851; #849 Q4). The list is a
+	// read; a ban removes a person from the channel and keeps them out, so it
+	// is gated, and so is lifting one. Both name the member in params, as the
+	// member actions do, and carry no body: a ban has no reason or expiry.
+	// The route's own rules are not relaxed for the agent: the store gives it
+	// operator standing only where it holds manage_channels, and an owner is
+	// out of an operator's reach.
+	{action: schema.AdminActionListChannelBans, pattern: "GET /v1/channels/{channel}/bans", permission: pChannels, gate: direct, target: tChannel, build: noBody},
+	{action: schema.AdminActionBanChannelMember, pattern: "PUT /v1/channels/{channel}/bans/{principal_id}", permission: pChannels, gate: approval, target: tChannel, build: buildMemberPath(false), changesTarget: true},
+	{action: schema.AdminActionUnbanChannelMember, pattern: "DELETE /v1/channels/{channel}/bans/{principal_id}", permission: pChannels, gate: approval, target: tChannel, build: buildMemberPath(false), changesTarget: true},
 }
 
 // adminCatalogByAction indexes adminCatalog.

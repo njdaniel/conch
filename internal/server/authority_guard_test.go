@@ -183,6 +183,7 @@ var authorityAllowlist = []authorityAllowed{
 	{"store/hide.go", "Store.HideTargets", kindRoleSQL, 1, whyTarget + ": a bulk hide never touches an operator"},
 	{"store/hooks.go", "Store.ListHooks", kindRoleSQL, 1, whyTarget + ": an owner's hooks are hidden from non-owners"},
 	{"store/hooks.go", "Store.RevokeHook", kindRoleCompare, 1, whyTarget + ": an owner's hook"},
+	{"store/bans.go", "managerBanTargetTx", kindRoleCompare, 1, whyTarget + ": a manager never bans an operator"},
 	{"store/members.go", "Store.RemoveChannelMember", kindRoleCompare, 1, whyTarget + ": a manager never removes an operator"},
 	{"store/members.go", "checkManagerAddTargetTx", kindRoleCompare, 1, whyTarget + ": a manager adds members only"},
 	{"store/mode.go", "Store.StartMode", kindRoleSQL, 1, whySignIn},
