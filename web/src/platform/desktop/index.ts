@@ -17,6 +17,7 @@ import { credentials } from './credentials';
 import { http } from './http';
 import { DesktopShell } from './Shell';
 import { sockets } from './sockets';
+import { nativeVoice } from './voice';
 import { serverOrigin } from './state';
 
 export const platform: Platform = {
@@ -54,4 +55,5 @@ export const platform: Platform = {
       ),
   },
   Shell: DesktopShell,
+  nativeVoice,
 };
