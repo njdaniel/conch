@@ -8,6 +8,149 @@ release that Nick publishes.
 
 ## [Unreleased]
 
+## [0.1.0-alpha.16] - 2026-11-06
+
+This is a pre-1.0 release (`v0.1.0-alpha.16`): the API and the wire shapes
+can still change between alphas. There is no schema version bump: the
+moderation shapes (#1398) are additive, and every existing fixture is
+byte-identical. Two behaviours change, listed in the upgrade notes below:
+push-to-talk now opens on key-down in both voice clients, and cameras are on
+by default on a new server.
+
+The headline is push-to-talk that no longer cuts off the first word: both
+voice clients now send from the moment the key goes down, where a press used
+to wait a round trip for conchd (134 to 174 ms of speech lost with reports
+held back 150 ms; now 0 to 24 ms). It also brings the first server-side moderation: the
+owner, an operator with `manage_channels` or a channel's manager can remove
+someone from voice only, ban them from a channel, or remove a message, which
+leaves a tombstone. CLI and browser controls for these come later (M6). The
+Linux desktop client's native voice code is also merged, but that client is in
+development and not yet supported: see the desktop entry under Added. Upgrade
+with `conch-server upgrade v0.1.0-alpha.16` from your workstation, or with
+`conch-upgrade.sh` on the droplet (docs/deploy.md step 11).
+
+**Upgrade notes.**
+
+- There are three migrations since `alpha.15`: 44 (the camera default, see
+  Changed), 45 (`channel_bans` and `message_removals`, with triggers that
+  refuse any update or delete of a removal; no existing row is touched) and
+  46, which drops the `open_channels` table (#998, PR #1424). Nothing has
+  read it since `alpha.10`, where migration 40 copied it into each channel's
+  default mark; the joining settings' `open_channels` field reads that mark
+  and is unchanged. A
+  binary from before them refuses a database that has them, so rolling back
+  to `alpha.15` restores the pre-upgrade backup (docs/deploy.md step 11; the
+  rollback script does it), and what was written since is forgotten.
+- **Push-to-talk opens on key-down, and the audit can show an unreported
+  press** (#970, PR #1430; the browser and `conch-voice`). A press used to
+  keep the microphone muted until conchd answered the `started` report, for
+  at most 1 s. It now unmutes and queues `started` in the same moment; a
+  release still mutes before `stopped`. A refusal (409 `voice_no_session` or
+  a 401) still ends the press. There is no server grace: when a report is
+  late, the poller may write one `voice_transmit_unreported` row for that
+  press, closed `reason=reported`, or `reason=muted` when the release comes
+  before any poller pass. Anything that counts audit rows, or expects none
+  for a press, should allow for it (`docs/design/conch-voice.md` sections 3
+  and 6).
+- **Cameras are on by default on a new server; nothing changes on an
+  existing one** (#1361). Migration 44 stores the camera off on an existing
+  server, so it matches no preset until an owner applies one; the commands
+  are in the Changed entry.
+- Nothing else changes on upgrade: the voice-only removal, ban and message
+  removal routes are new. One approval rule tightens: a banned approver
+  cannot decide an approval or count toward its quorum (#1419).
+
+### Added
+
+- **Moderation M1, the signed shapes and storage** (#849, PR #1398; Nick
+  signed the shapes off on 2026-11-05). Additive: no version bump. New in
+  `pkg/schema`: `ChannelBanV1` and `ListChannelBansResponseV1` (ascending
+  `principal_id`, no name stored), `MessageRemovedV1`
+  (`conch.message_removed.v1`, the events frame for a removal) and
+  `MessageRemovedBody`. `MessageV2` gains an optional `removed`, which
+  carries the body with no payload and no `edited_at`; `MessageV1FromV2`
+  drops it. The MCP message output gains `removed`; no tool definition
+  changes, and the TypeScript types are regenerated. M3 and M4 below add
+  the routes.
+- **Moderation M2: remove a participant from voice only** (#850, PR #1414).
+  `DELETE /v1/channels/{channel}/voice/participants/{principal_id}` closes
+  the target's presence sockets for the channel, ends their presence,
+  transmit, share and camera in every live room of the channel (nets
+  included) and evicts them, and their companion and viewer, from each room.
+  Nothing is rotated; membership, credentials and the voice grant are
+  unchanged, so they can rejoin at once. Allowed for the owner, an operator
+  with `manage_channels` and the channel's manager (204); a member who does
+  not manage the channel gets 403, a non-member or unknown channel 404
+  `channel_not_found`, an agent 403. An unknown or absent target also gets
+  204. A failed room list or eviction is 503 `voice_unavailable`, never 204.
+  Audit: `voice_participant_kicked` once per authorized request, and
+  `voice_participant_removed reason=moderator_kick` for a real disconnection.
+  CLI and TUI parity is not part of this change.
+- **Moderation M3: channel bans** (#851, PR #1419; approval-path).
+  `GET`, `PUT` and `DELETE /v1/channels/{channel}/bans[/{principal_id}]`. A
+  ban removes the member and their net rows in one transaction, and every
+  way in (adding a member, guest admission, self-join) refuses a banned
+  principal; lifting a ban restores nothing. Owners and operators ban anyone,
+  members or not, ahead of time included, and the owner is protected from
+  operators. A channel's manager bans only current human members who are not
+  operators or approvers, and lifts only their own bans. A non-member, or the
+  manager of another channel, gets the unknown-channel 404. Bans work in an
+  archived channel. A banned approver cannot decide or count toward quorum.
+  AI administrators gain `ban_channel_member` and `unban_channel_member`
+  (each waits for an approval) and `list_channel_bans`, under
+  `manage_channels`: three additive `AdminAction` values, no version bump.
+- **Moderation M4: message removal** (#852, PR #1425; approval-path).
+  `DELETE /v2/channels/{channel}/messages/{message_id}`, for the same people
+  as M2. The message stays as a tombstone: its body, payload and edit time
+  are blanked in every read, `MessageV2.removed` is set, and v0 and v1
+  clients get a fixed body. Search leaves it out, its files are 404 (for the
+  uploader too), reactions, edits and revisions are refused, and a removed
+  thread root takes no new reply (REST and MCP). Live sockets get the
+  tombstone and the events socket `MessageRemovedV1`, with no notification;
+  a queued notification for it is dropped. Audit: one `message_removed` row,
+  IDs only. Removing an approval card leaves the approval pending and
+  decidable.
+- **`conch-voice managed --transmit-ceiling-secs N`** (#1372, PR #1397),
+  whole seconds from 1 to 600. It limits each push-to-talk press to the
+  smaller of `audio.max_transmit_secs` and N; open-mode openings keep the
+  file limit. `join` has no such flag. It is for the desktop client, which
+  passes 30.
+- **`conch-voice config set` takes the key device and bindings, and
+  `config unset` is new** (#1380, PR #1404). `set` accepts `keys.device`,
+  `keys.talk`, `keys.mute` and `keys.deafen` beside the audio keys; `unset`
+  removes one of those four keys' line and nothing else. A bad value exits 2
+  with one fixed line and nothing echoed.
+- **The Linux desktop client's native voice code is merged (Desktop D3, epic
+  #771). The client is in development, not released and not a supported
+  client:** the by-hand acceptance runs on a real desktop session (#1384,
+  #1385) are still open, and Nick records acceptance before any release or
+  support claim (epic #754). What is merged:
+  - main's voice service on the helper supervisor, the voice IPC and preload
+    bridge (which exposes no press, release or transmit name) and the
+    one-shot helper runs for devices and config (#1373, #1374, #1378; PRs
+    #1405, #1407, #1410);
+  - the renderer side: a native-voice platform seam, the voice strip, and
+    microphone, speakers and talk-mode options that open on the saved devices
+    (#1375, #1376, #1379, #1421; PRs #1406, #1408, #1420, #1431);
+  - per-device talk-key setup in main and in the voice options, which lists
+    key devices by name without opening any and offers a one-uid, read-only
+    udev rule, with a disclosure, for a device the person cannot read (#1381,
+    #1382; PRs #1418, #1423);
+  - the unpacked desktop build bundles the matching `conch-voice` (#1377, PR
+    #1399; the `.deb` and release versioning are #774);
+  - a live same-machine test, `make desktop-voice-e2e`, and a CI job
+    `desktop-voice-check` for it (#1383, PR #1411). It prints SKIPPED without
+    Docker or the Rust toolchain, and fails instead when `CI` is set.
+  - password change, set password, guest conversion and operator
+    re-authentication through main (#1422, PR #1426): one bridge function,
+    the request validated in main before anything is sent, the renderer never
+    sees a bearer, and the rotated token replaces the old one without ending
+    requests already in flight.
+- **`scripts/dev-stack.sh` has a LAN mode** (#1366, PR #1371):
+  `CONCH_DEV_LAN=<address>` binds conchd and LiveKit to one of the machine's
+  IPv4 addresses, for the phone experiments. It prints a warning that the
+  stack is open to the LAN over plain HTTP; loopback stays the default.
+
 ### Changed
 
 - **Cameras are on by default for members and operators on a new server, and
@@ -23,6 +166,33 @@ release that Nick publishes.
   preset is refused, 409 `permissions_conflict` naming `use_camera`. Turning
   voice off for a column now needs the camera off in the same change, as
   screen share already did (409 `permissions_conflict` otherwise).
+- **The README is a front page** (#545, PR #1362): the logo, what Conch is, a
+  status table, an architecture sketch and a quickstart.
+  The full guide moved, verbatim, to `docs/manual.md`; links to README
+  sections now point there.
+- **The desktop client re-sends a request that got a 401 for a credential
+  just rotated by a password change** (#1046, PR #1428), once and with the
+  current token, instead of signing the window out. Never for a write
+  carrying a password; a 401 on the current token or on the re-send still
+  signs out. Desktop client, in development (see Added).
+
+### Docs
+
+- **ADR-016 (the mobile track) is Accepted, with the phone camera in scope**
+  (#1106, PRs #1365 and #1369; Nick, 2026-11-05). The camera works under
+  ADR-015 as amended by #1361 and adds no route, field or server rule. A
+  phone camera counts as supported per OS and model only from receipts.
+  Camera rows M-C1 to M-C10 are in the mobile capability record (#1367, PR
+  #1370).
+
+### Tests
+
+- Flakes fixed, tests only: the channel directory Leave focus test (#1412,
+  PR #1415) and the channel-refresh empty-list test (#1427, PR #1429).
+- The Android spike's gate, lifecycle and camera logic has unit tests (#1390,
+  PR #1402; under `spikes/mobile/android`, an experiment, not a feature).
+- Agents claim an issue through `ops/issue-claim.sh` before dispatch (#831,
+  PR #832); contributor tooling only.
 
 ## [0.1.0-alpha.15] - 2026-11-05
 
