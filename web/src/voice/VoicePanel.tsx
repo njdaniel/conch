@@ -1,3 +1,4 @@
+import { ModerationConfirm, useMayModerate, useMayModerateIn } from '../Moderation';
 // The voice section. Every state says what is true: not set up, not in voice,
 // connecting, connected, reconnecting, unavailable, or stopped with the reason.
 // It also holds the screen share (issue #444): sharing, with what sound, why a
@@ -258,6 +259,11 @@ export function VoicePanel({
     };
   }, [stopped]);
 
+  // The roster is the joined channel's when in voice, else the one on screen:
+  // its moderation action, question, request and standing all follow it.
+  const rosterChannel = (inVoice ? state.channel : null) ?? viewed;
+  const mayModerateRoster = useMayModerateIn(rosterChannel, viewed, channels);
+
   // Where else people are talking, while this page is not in voice: in voice,
   // the strip describes the viewer's own connection.
   const away = inVoice ? null : busiest(channels, occupancy, viewed);
@@ -393,8 +399,8 @@ export function VoicePanel({
           leaves the controls where they were. The phone's strip is the one
           row, of four controls (issue #1028). */}
       <div className="voice-bar">
-        {strip || roster.length === 0 ? null : (
-          <Roster roster={roster} people={people} viewer={viewer} elsewhere={elsewhere} speaking={speaking} volumes={inVoice ? state.volumes : noVolumes} />
+        {strip ? null : (
+          <Roster channel={rosterChannel ?? undefined} mayModerate={mayModerateRoster} roster={roster} people={people} viewer={viewer} elsewhere={elsewhere} speaking={speaking} volumes={inVoice ? state.volumes : noVolumes} />
         )}
         {awayLine}
         <div className="voice-row">
@@ -764,7 +770,11 @@ function shownOnPhone(roster: readonly Occupant[], viewer: number): ReadonlySet<
 // the list. At 700 px and wider every chip shows, wrapping onto more lines;
 // on a phone three show, the viewer's own among them, and "+N more" shows
 // the rest.
-export function Roster({ roster, people, viewer, elsewhere, speaking, volumes }: {
+export function Roster({ channel, mayModerate: standing, roster, people, viewer, elsewhere, speaking, volumes }: {
+  // The channel the roster belongs to, and whether the viewer may moderate it
+  // (when not said, the standing in the channel on screen).
+  readonly channel?: string;
+  readonly mayModerate?: boolean;
   readonly roster: readonly Occupant[];
   readonly people: ReadonlyMap<number, Person>;
   readonly viewer: number;
@@ -774,10 +784,15 @@ export function Roster({ roster, people, viewer, elsewhere, speaking, volumes }:
   // How loud this page plays each person not at full volume.
   readonly volumes: ReadonlyMap<number, number>;
 }) {
+  const here = useMayModerate();
+  const mayModerate = standing ?? here;
+  const [kick, setKick] = useState<{ readonly id: number; readonly name: string } | null>(null);
+  const kickOpener = useRef<HTMLButtonElement>(null);
   const [all, setAll] = useState(false);
   const more = roster.length - phoneChips;
   const capped = more > 0 && !all;
   const kept = shownOnPhone(roster, viewer);
+  if (roster.length === 0 && kick === null) return null;
   return (
     <div className="voice-who">
       <h2 id="voice-count" className="voice-count">
@@ -788,6 +803,7 @@ export function Roster({ roster, people, viewer, elsewhere, speaking, volumes }:
           <li key={o.principal} className={[speaking.has(o.principal) ? 'speaking' : '', kept.has(o.principal) ? '' : 'beyond', o.principal === viewer ? 'me' : ''].filter((c) => c !== '').join(' ') || undefined}>
             <Avatar id={o.principal} name={people.get(o.principal)?.name ?? nameOf(people, o.principal, viewer)} />
             <span className="who">{nameOf(people, o.principal, viewer, elsewhere)}</span>
+            {!mayModerate || channel === undefined ? null : <button type="button" aria-label={`Remove ${nameOf(people, o.principal, viewer)} from voice`} onClick={(event) => { kickOpener.current = event.currentTarget; setKick({ id: o.principal, name: nameOf(people, o.principal, viewer) }); }}>Remove from voice</button>}
             {o.transmitting ? <Tag text="transmitting" /> : null}
             {speaking.has(o.principal) ? <Tag text="speaking" /> : null}
             {o.sharing ? <Tag text="sharing" /> : null}
@@ -798,6 +814,7 @@ export function Roster({ roster, people, viewer, elsewhere, speaking, volumes }:
           </li>
         ))}
       </ul>
+      {kick === null || channel === undefined || !mayModerate ? null : <ModerationConfirm key={kick.id} op="kickVoice" channel={channel} id={kick.id} name={kick.name} onClose={() => { setKick(null); kickOpener.current?.focus(); }} />}
       {more > 0 ? (
         <button type="button" className="voice-more quiet" aria-expanded={all} aria-controls="voice-roster" onClick={() => { setAll(!all); }}>
           {all ? 'Show fewer' : `+${String(more)} more`}

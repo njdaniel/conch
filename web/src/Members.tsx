@@ -1,3 +1,5 @@
+import { ModerationConfirm, type ModerationOperation } from './Moderation';
+import type { ChannelBanV1 } from './schema/generated';
 import { useCallback, useEffect, useId, useRef, useState, type KeyboardEvent, type ReactNode, type SyntheticEvent } from 'react';
 import * as api from './api';
 import { Avatar } from './Icons';
@@ -19,8 +21,9 @@ export interface MemberControlsProps {
   readonly channels: readonly ChannelV0[];
   readonly members: readonly ChannelMemberV1[];
   // id is the viewer's own: their own row offers no action on themself.
-  readonly viewer: Pick<WhoAmIResponseV1, 'role'> & { readonly guest: boolean; readonly id?: number };
+  readonly viewer: Pick<WhoAmIResponseV1, 'role' | 'owner' | 'permissions'> & { readonly guest: boolean; readonly id?: number };
   readonly refreshMembers: () => void;
+  readonly onModerated?: (line: string) => void;
   // Counts the server's words that the directory changed (issue #993): an
   // open picker reads the other channels again and replaces its candidates.
   readonly directoryTick?: number;
@@ -223,6 +226,7 @@ export function MemberRow({
   // Removal asks first (issue #1083): "Remove from channel" opens this
   // question in the row, with focus on Cancel; Escape and Cancel put focus
   // back on the row's ⋯ button.
+  const [moderating, setModerating] = useState<ModerationOperation | null>(null);
   const [confirming, setConfirming] = useState(false);
   const cancel = useRef<HTMLButtonElement>(null);
   const questionId = useId();
@@ -230,7 +234,7 @@ export function MemberRow({
     if (confirming) cancel.current?.focus();
   }, [confirming]);
 
-  const operator = viewer.role === 'operator';
+  const operator = !viewer.guest && ((viewer.role === 'operator' && viewer.owner === true) || (viewer.permissions === undefined ? viewer.role === 'operator' : viewer.permissions.includes('manage_channels')));
   const manager = !operator && !viewer.guest && channel.manages === true;
   const human = member !== undefined && member.kind === 'human' && member.guest === undefined;
 
@@ -242,6 +246,10 @@ export function MemberRow({
     const result = request === null ? await api.removeChannelMember(channel.name, member.principal_id) : await api.putChannelMember(channel.name, member.principal_id, request);
     setBusy(false);
     if (result.ok) {
+      if (request === null) {
+        setLine('Membership removed or already absent.');
+        controls.onModerated?.('Membership removed or already absent.');
+      }
       refreshMembers();
       return;
     }
@@ -258,8 +266,10 @@ export function MemberRow({
   // member who does not decide approvals. The server still decides.
   const items: MenuItem[] = [];
   if (member !== undefined && (operator || manager) && member.principal_id !== viewer.id) {
-    const removable = operator || (member.role === 'member' && member.kind === 'human' && member.can_decide === false);
+    const removable = operator || ((member.role === 'member' || member.guest !== undefined) && member.kind === 'human' && member.can_decide === false);
+    if (member.kind === 'human') items.push({ key: 'voice', label: 'Remove from voice', disabled: busy, onSelect: () => { setModerating('kickVoice'); } });
     if (removable) {
+      items.push({ key: 'ban', label: 'Ban from channel', disabled: busy, onSelect: () => { setModerating('banMember'); } });
       items.push({
         key: 'remove',
         label: 'Remove from channel',
@@ -306,9 +316,9 @@ export function MemberRow({
       {items.length === 0 || member === undefined ? null : (
         <ActionsMenu label={`Actions for ${displayName(member)}`} items={items} open={menuOpen} onOpenChange={setMenuOpen} button={more} />
       )}
-      {confirming && member !== undefined ? (
+      {confirming && (operator || manager) && member !== undefined ? (
         <div role="group" aria-labelledby={questionId} className="member-confirm" onKeyDown={leave}>
-          <p id={questionId}>{`Remove ${displayName(member)} from #${channel.name}? They lose this channel and its history.`}</p>
+          <p id={questionId}>{`Remove ${displayName(member)} from #${channel.name} and its nets? They lose this channel and its history. This does not ban them or revoke their account.`}</p>
           <div className="actions">
             <button
               type="button"
@@ -333,6 +343,7 @@ export function MemberRow({
           </div>
         </div>
       ) : null}
+      {moderating === null || member === undefined || (!operator && !manager) ? null : <ModerationConfirm op={moderating} id={member.principal_id} name={displayName(member)} channel={channel.name} onUnauthorized={onUnauthorized} onDone={() => { controls.onModerated?.(moderating === 'banMember' ? 'Ban is in place, including if already banned.' : 'Removed from voice or already absent. They can rejoin.'); refreshMembers(); }} onClose={() => { setModerating(null); more.current?.focus(); }} />}
       {line === null ? null : <span role="status" className="member-line">{line}</span>}
     </li>
   );
@@ -357,7 +368,8 @@ function PeopleGroup({ title, people, controls }: { readonly title: string; read
 }
 
 export function Members({ people, ...controls }: MemberControlsProps & { readonly people: readonly Entry[] }) {
-  const operator = controls.viewer.role === 'operator';
+  const [feedback, setFeedback] = useState<string | null>(null);
+  const operator = !controls.viewer.guest && ((controls.viewer.role === 'operator' && controls.viewer.owner === true) || (controls.viewer.permissions === undefined ? controls.viewer.role === 'operator' : controls.viewer.permissions.includes('manage_channels')));
   const manager = !operator && !controls.viewer.guest && controls.channel.manages === true;
   const canAdd = operator || manager;
   const online = people.filter((p) => p.state !== 'offline');
@@ -365,6 +377,8 @@ export function Members({ people, ...controls }: MemberControlsProps & { readonl
   return (
     <>
       <h3>People</h3>
+      {feedback === null ? null : <p role="status">{feedback}</p>}
+      {canAdd ? <BanList key={`bans-${String(controls.channel.id)}`} {...controls} operator={operator} /> : null}
       {canAdd ? <AddPeople key={controls.channel.id} {...controls} /> : null}
       {controls.viewer.guest ? <p className="hint">A guest visit cannot do this; create an account and ask an operator.</p> : null}
       {/* One line at most (issue #1020): what this viewer cannot do, in one. */}
@@ -374,8 +388,8 @@ export function Members({ people, ...controls }: MemberControlsProps & { readonl
         <p className="empty">Nobody</p>
       ) : (
         <>
-          <PeopleGroup title="Online" people={online} controls={controls} />
-          <PeopleGroup title="Offline" people={offline} controls={controls} />
+          <PeopleGroup title="Online" people={online} controls={{ ...controls, onModerated: setFeedback }} />
+          <PeopleGroup title="Offline" people={offline} controls={{ ...controls, onModerated: setFeedback }} />
         </>
       )}
     </>
@@ -603,4 +617,30 @@ export function CommunityMembers({
       )}
     </section>
   );
+}
+
+function BanList({ channel, viewer, operator, onUnauthorized }: MemberControlsProps & { readonly operator: boolean }) {
+  const [open, setOpen] = useState(false);
+  const [bans, setBans] = useState<readonly ChannelBanV1[]>([]);
+  const [line, setLine] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [selected, setSelected] = useState<ChannelBanV1 | null>(null);
+  const opener = useRef<HTMLButtonElement>(null);
+  async function load() {
+    setBusy(true); setLine(null);
+    const result = await api.listChannelBans(channel.name);
+    setBusy(false);
+    if (result.ok) setBans(result.value.bans);
+    else if (result.failure === 'unauthorized') onUnauthorized();
+    else setLine(refusalLine(result));
+  }
+  return <section aria-label="Channel bans" className="member-admin">
+    <button ref={opener} type="button" aria-expanded={open} onClick={() => { setOpen(!open); if (!open) void load(); }}>Channel bans</button>
+    {!open ? null : <>
+      <p className="hint">Bans apply to a principal in this channel. A new account or guest visit is not identified by a ban. Unban does not re-add anyone.</p>
+      <button type="button" disabled={busy} onClick={() => void load()}>Refresh bans</button>
+      {busy ? <p role="status">Loading bans…</p> : line !== null ? <p role="alert">{line}</p> : bans.length === 0 ? <p>No channel bans.</p> : <ul>{bans.map((ban) => <li key={ban.principal_id}>{ban.name} (#{ban.principal_id}){operator || (viewer.id !== undefined && ban.created_by === viewer.id) ? <button type="button" onClick={() => { setSelected(ban); }}>Unban {ban.name}</button> : <span>Only the banning manager or an operator can lift this ban.</span>}</li>)}</ul>}
+      {selected === null ? null : <ModerationConfirm key={selected.principal_id} op="unbanMember" id={selected.principal_id} name={selected.name} channel={channel.name} onUnauthorized={onUnauthorized} onDone={() => void load()} onClose={() => { setSelected(null); opener.current?.focus(); }} />}
+    </>}
+  </section>;
 }

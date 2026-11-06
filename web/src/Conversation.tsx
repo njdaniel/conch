@@ -1,3 +1,4 @@
+import { ModerationConfirm, useMayModerate, useTombstones } from './Moderation';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
 import * as api from './api';
 import { archivedLine } from './archived';
@@ -191,16 +192,24 @@ export function Message({
   readonly stop?: boolean;
   readonly reactionNavigation?: boolean;
 }) {
+  const row = useRef<HTMLLIElement>(null);
+  useLayoutEffect(() => {
+    const node = row.current;
+    return () => { if (node?.contains(document.activeElement) === true) node.focus(); };
+  }, [message.removed]);
+  const mayModerate = useMayModerate();
+  const [removing, setRemoving] = useState(false);
+  useEffect(() => { if (message.removed === true || !mayModerate) setRemoving(false); }, [message.removed, mayModerate]);
   const hasReactions = useHasReactions() && message.removed !== true;
   const who = messageName(message, people);
-  const approval = approvalOf(message);
-  const attachments = attachmentsOf(message);
+  const approval = message.removed === true ? null : approvalOf(message);
+  const attachments = message.removed === true ? null : attachmentsOf(message);
   // An image sent with no text has its filename as the body, and the figure
   // shows that name already: the name shows once. Display only; the post is
   // unchanged (F26).
   const [fileName, setFileName] = useState<string | null>(null);
   const nameOnly = attachments !== null && attachments.file_ids.length === 1 && fileName !== null && message.body === fileName;
-  const items = editor === undefined ? actions ?? [] : [];
+  const items: readonly MenuItem[] = message.removed === true ? [] : [...(editor === undefined ? actions ?? [] : []), ...(mayModerate ? [{ key: 'remove-message', label: 'Remove message', onSelect: () => { setRemoving(true); } }] : [])];
   const [menuOpen, setMenuOpen] = useState(false);
   const more = useRef<HTMLButtonElement>(null);
   const openers = useOpeners(items.length > 0, () => {
@@ -209,7 +218,7 @@ export function Message({
   const named = approval === null && editor === undefined && mentions(message.body, people.get(viewer)?.name ?? '');
   const classes = ['message', ...(cont ? ['cont'] : []), ...(named ? ['mentions-you'] : []), ...(items.length > 0 ? ['has-actions'] : []), ...(editor === undefined ? [] : ['editing'])];
   return (
-    <li className={classes.join(' ')} data-message-id={message.id} tabIndex={stop ? 0 : -1} aria-description={hasReactions && reactionNavigation ? "Use Right Arrow for reaction controls; Left and Right Arrow move between them, Escape returns to the message." : undefined} {...(context === undefined ? {} : { 'aria-describedby': `reply-context-${String(message.id)}` })} {...openers}>
+    <li ref={row} className={classes.join(' ')} data-message-id={message.id} tabIndex={stop ? 0 : -1} aria-description={hasReactions && reactionNavigation ? "Use Right Arrow for reaction controls; Left and Right Arrow move between them, Escape returns to the message." : undefined} {...(context === undefined ? {} : { 'aria-describedby': `reply-context-${String(message.id)}` })} {...openers}>
       {named ? <span className="vh">Mentions you. </span> : null}
       {context === undefined ? null : (
         <p className="reply-context" id={`reply-context-${String(message.id)}`}>
@@ -224,7 +233,7 @@ export function Message({
         badge={message.audience === undefined ? null : audienceLabel(message.audience, viewer, nets)}
         tag={sent ? 'Sent' : null}
       >
-        {editor ?? (approval === null ? (
+        {(message.removed === true ? null : editor) ?? (approval === null ? (
           <>
             {nameOnly ? null : <Linkified text={message.body} />}
             <EditedMarker message={message} channel={channel} viewer={viewer} onUnauthorized={onUnauthorized} />
@@ -246,7 +255,7 @@ export function Message({
         onOpen(message.id);
       }}>Open context</button>}
       <ReactionBar enabled={message.removed !== true} logNavigation={reactionNavigation} id={message.id} channel={channel} label={who} people={people} onUnauthorized={onUnauthorized}>
-        {onReply === undefined || message.thread_root_id !== undefined ? null : <button type="button" className="message-action reply-action" aria-label={`Reply to ${who}`} onClick={(event) => {
+        {onReply === undefined || message.removed === true || message.thread_root_id !== undefined ? null : <button type="button" className="message-action reply-action" aria-label={`Reply to ${who}`} onClick={(event) => {
           onReply(message.id, event.currentTarget);
         }}>Reply</button>}
         {onOpenThread === undefined || message.thread_root_id === undefined ? null : <button type="button" className="message-action" aria-label={`Open thread for ${who}`} onClick={(event) => {
@@ -256,6 +265,7 @@ export function Message({
           onOpenThread(message.id, event.currentTarget);
         }}>{replies === 1 ? '1 reply' : `${String(replies)} replies`}</button>}
       </ReactionBar>
+      {removing && mayModerate ? <ModerationConfirm op="removeMessage" id={message.id} name={who} channel={channel} onUnauthorized={onUnauthorized} onClose={() => { setRemoving(false); more.current?.focus(); }} /> : null}
       {thread}
     </li>
   );
@@ -376,6 +386,14 @@ function ThreadView({ rootId, root, chat, channel, live, archived, people: known
   readonly onDismissSend: (localId: number) => void;
   readonly onUnauthorized?: () => void;
 }) {
+  const { removed, safe } = useTombstones();
+  const previousLive = useRef(live);
+  useEffect(() => {
+    const reconnect = previousLive.current !== 'open' && live === 'open';
+    previousLive.current = live;
+    if (live !== 'open') setFetched((old) => old.length === 0 ? old : []);
+    if (reconnect) void load(0, false);
+  });
   const [fetched, setFetched] = useState<readonly MessageV2[]>([]);
   const [nextAfter, setNextAfter] = useState<number | undefined>();
   const [status, setStatus] = useState<'loading' | 'ready' | 'error'>('loading');
@@ -396,10 +414,10 @@ function ThreadView({ rootId, root, chat, channel, live, archived, people: known
       } else setStatus('error');
       return;
     }
-    setFetched((previous) => append ? [...previous, ...result.value.messages] : result.value.messages);
+    setFetched((previous) => append ? [...previous, ...result.value.messages.map(safe)] : result.value.messages.map(safe));
     setNextAfter(result.value.next_after);
     setStatus('ready');
-  }, [channel, rootId]);
+  }, [channel, rootId, safe]);
 
   useEffect(() => {
     setFetched([]);
@@ -410,13 +428,14 @@ function ThreadView({ rootId, root, chat, channel, live, archived, people: known
     };
   }, [load]);
 
+  useEffect(() => { setFetched((old) => old.map((m) => removed.get(m.id) ?? m)); }, [removed]);
   const byId = new Map<number, MessageV2>();
   if (root !== undefined) byId.set(root.id, root);
   for (const message of [...fetched, ...ordered(chat)]) {
     if (message.id !== rootId && message.thread_root_id !== rootId) continue;
     // The thread's own read and the channel's copy: the later edit wins.
     const held = byId.get(message.id);
-    if (held === undefined || isLater(message, held)) byId.set(message.id, message);
+    if (held === undefined || isLater(message, held)) byId.set(message.id, safe(message));
   }
   const messages = [...byId.values()].sort((a, b) => a.id - b.id);
   const sentMark = newestSent(messages, viewer, chat.sentIds);
@@ -450,7 +469,7 @@ function ThreadView({ rootId, root, chat, channel, live, archived, people: known
           void load(nextAfter, true);
         }}>Load more replies</button>
       )}
-      {rootMessage === undefined ? null : archived ? (
+      {rootMessage === undefined || rootMessage.removed === true ? null : archived ? (
         <p role="status" className="hint archived-note">{archivedLine}</p>
       ) : (
         <form className="reply-composer" onSubmit={(event) => {
@@ -735,6 +754,12 @@ export function Conversation({
     }
     setEditSettled(true);
   }, [chat.history, chat.byId, chat.older, chat.exhausted, viewerKind, viewer, onEdited, onLoadOlder]);
+  useEffect(() => {
+    if (edit !== null && chat.byId.get(edit.id)?.removed === true) {
+      focusBack.current = edit.id;
+      setEdit(null);
+    }
+  }, [chat.byId, edit]);
   const editMessage = edit?.id ?? null;
   const editText = edit?.text ?? '';
   useEffect(() => {

@@ -107,7 +107,7 @@ describe('removing someone from a channel asks first (issue #1083)', () => {
     choose(target, 'Remove from channel');
     expect(api.removeChannelMember).not.toHaveBeenCalled();
     expect(screen.queryByRole('menu')).toBeNull();
-    const group = within(row(target)).getByRole('group', { name: `Remove ${target} from #${channelName}? They lose this channel and its history.` });
+    const group = within(row(target)).getByRole('group', { name: `Remove ${target} from #${channelName} and its nets? They lose this channel and its history. This does not ban them or revoke their account.` });
     expect(within(group).getByRole('button', { name: 'Yes, remove' })).toBeDefined();
     expect(document.activeElement).toBe(within(group).getByRole('button', { name: 'Cancel' }));
   });
@@ -177,12 +177,12 @@ describe('administration controls', () => {
     expect(screen.queryByRole('checkbox')).toBeNull();
     expect(screen.queryByRole('button', { name: /^(Remove|Make)/ })).toBeNull();
     expect(screen.queryByRole('menu')).toBeNull();
-    expect(labels(openMenu('olivia'))).toEqual(['Remove from channel', 'Make manager', 'Stop deciding approvals']);
-    expect(labels(openMenu('ada'))).toEqual(['Remove from channel', 'Remove as manager', 'Let decide approvals']);
-    expect(labels(openMenu('avery'))).toEqual(['Remove from channel', 'Make manager', 'Stop deciding approvals']);
+    expect(labels(openMenu('olivia'))).toEqual(['Remove from voice', 'Ban from channel', 'Remove from channel', 'Make manager', 'Stop deciding approvals']);
+    expect(labels(openMenu('ada'))).toEqual(['Remove from voice', 'Ban from channel', 'Remove from channel', 'Remove as manager', 'Let decide approvals']);
+    expect(labels(openMenu('avery'))).toEqual(['Remove from voice', 'Ban from channel', 'Remove from channel', 'Make manager', 'Stop deciding approvals']);
     fireEvent.click(within(row('Pat')).getByRole('button', { name: 'Actions for Guest: Pat · a7k4' }));
-    expect(labels(screen.getByRole('menu', { name: 'Actions for Guest: Pat · a7k4' }))).toEqual(['Remove from channel']);
-    expect(labels(openMenu('bot'))).toEqual(['Remove from channel']);
+    expect(labels(screen.getByRole('menu', { name: 'Actions for Guest: Pat · a7k4' }))).toEqual(['Remove from voice', 'Ban from channel', 'Remove from channel']);
+    expect(labels(openMenu('bot'))).toEqual(['Ban from channel', 'Remove from channel']);
     expect(screen.getAllByText('Manager')).toHaveLength(1);
     expect(screen.getAllByText('Approver')).toHaveLength(2);
   });
@@ -196,13 +196,28 @@ describe('administration controls', () => {
     expect(labels(openMenu('ada'))).toContain('Remove from channel');
   });
 
+  it('lets a manager ban and remove an active guest, which memberDoc sends without a role, but not one who decides approvals', () => {
+    draw(props('member'));
+    const pat = 'Actions for Guest: Pat · a7k4';
+    fireEvent.click(within(row('Pat')).getByRole('button', { name: pat }));
+    expect(labels(screen.getByRole('menu', { name: pat }))).toEqual(['Remove from voice', 'Ban from channel', 'Remove from channel']);
+    cleanup();
+    const guest = memberList.find((m) => m.principal_id === 5);
+    if (guest === undefined) throw new Error('fixture');
+    draw({ ...props('member'), members: memberList.map((m) => (m === guest ? { ...guest, can_decide: true } : m)) });
+    fireEvent.click(within(row('Pat')).getByRole('button', { name: pat }));
+    expect(labels(screen.getByRole('menu', { name: pat }))).toEqual(['Remove from voice']);
+  });
+
   it('gives a manager add and a menu of only the removals the rules allow, with no per-row explanations', () => {
     draw(props('member'));
     expect(screen.getByRole('form', { name: 'Add person by name' })).toBeDefined();
-    expect(labels(openMenu('ada'))).toEqual(['Remove from channel']);
-    for (const name of ['olivia', 'avery', 'bot']) {
+    expect(labels(openMenu('ada'))).toEqual(['Remove from voice', 'Ban from channel', 'Remove from channel']);
+    for (const name of ['bot']) {
       expect(within(row(name)).queryByRole('button', { name: `Actions for ${name}` })).toBeNull();
     }
+    expect(labels(openMenu('olivia'))).toEqual(['Remove from voice']);
+    expect(labels(openMenu('avery'))).toEqual(['Remove from voice']);
     expect(screen.queryByText('Operators can only be removed by an operator.')).toBeNull();
     expect(screen.queryByText('Approvers are removed by an operator.')).toBeNull();
     expect(screen.queryByText('Agents are managed by operators.')).toBeNull();

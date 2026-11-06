@@ -1,3 +1,4 @@
+import { listChannelBansResponseV1, messageV2, messageRemovedV1, type MessageRemovedV1 } from './schema/generated';
 // The only module that holds the credential in use, and the only one that
 // asks conchd anything. Where the token lives depends on whose it is (issue
 // #439, decision O1). A member's lasts: it is kept so that it survives closing
@@ -2582,6 +2583,7 @@ async function connect(name: SocketName, id: OperationId, query: Readonly<Record
     events.onOpen();
   };
   socket.onmessage = (event: MessageEvent) => {
+    if (current() === opened) publishRemoval(event.data);
     events.onFrame(event.data);
   };
   // An error is always followed by a close, which is what the feed acts on.
@@ -3014,4 +3016,24 @@ export async function stopVoiceShare(channel: string, startedAt?: string): Promi
   if (reply.kind === 'unauthorized') return { ok: false, failure: 'unauthorized' };
   if (!reply.res.ok) return refused(reply.res);
   return { ok: true, value: null };
+}
+
+export async function listChannelBans(channel: string) {
+  return readSent(await authedSend(call('listBans', { channel })), listChannelBansResponseV1);
+}
+export async function moderate(channel: string, op: 'kickVoice' | 'banMember' | 'unbanMember' | 'removeMessage', id: number): Promise<InviteResult<null>> {
+  return readDone(await authedSend(call(op, { channel, principal: id, id })));
+}
+const removalWatchers = new Set<(message: MessageV2) => void>();
+export function watchRemovals(receive: (message: MessageV2) => void): () => void {
+  removalWatchers.add(receive);
+  return () => { removalWatchers.delete(receive); };
+}
+function publishRemoval(data: unknown) {
+  if (typeof data !== 'string') return;
+  try {
+    const doc: unknown = JSON.parse(data);
+    const message = messageRemovedV1(doc).length === 0 ? (doc as MessageRemovedV1).message : messageV2(doc).length === 0 ? doc as MessageV2 : null;
+    if (message?.removed === true) for (const receive of removalWatchers) receive(message);
+  } catch { /* Unknown frames are ignored. */ }
 }

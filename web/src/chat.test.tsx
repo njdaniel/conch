@@ -2227,3 +2227,143 @@ describe('scrolling', () => {
     expect(screen.queryByRole('button', { name: 'Load older messages' })).toBeNull();
   });
 });
+
+
+it('re-reads an older removal on reconnect instead of keeping text below the socket cursor', async () => {
+  server.history.general = [message(1, 'secret before disconnect'), message(2, 'newest')];
+  const first = await openChat();
+  await connect(first);
+  await screen.findByText('secret before disconnect');
+  first.drop(1006);
+  server.history.general = [{ ...message(1, 'This message was removed by a moderator.'), removed: true }, message(2, 'newest')];
+  await waitFor(() => { expect(FakeSocket.all).toHaveLength(2); }, { timeout: 3000 });
+  const second = FakeSocket.all[1] as FakeSocket;
+  expect(new URL(second.url).searchParams.get('after')).toBe('2');
+  second.open();
+  await screen.findByText('This message was removed by a moderator.');
+  expect(screen.queryByText('secret before disconnect')).toBeNull();
+});
+
+describe('the reconnect refresh', () => {
+  const removedText = 'This message was removed by a moderator.';
+  const stale = 'This conversation may be out of date';
+
+  it('keeps the channel stale while the refresh fails, retries it, and lets the tombstone win once it works', async () => {
+    server.history.general = [message(1, 'secret before disconnect'), message(2, 'newest')];
+    const first = await openChat();
+    await connect(first);
+    await screen.findByText('secret before disconnect');
+    const real = globalThis.fetch;
+    let fail = true;
+    vi.stubGlobal('fetch', (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = typeof input === 'string' ? input : input instanceof URL ? input.pathname : input.url;
+      if (fail && path.includes('/v2/channels/general/messages')) return Promise.resolve(json({}, 500));
+      return real(input, init);
+    });
+    first.drop(1006);
+    server.history.general = [{ ...message(1, removedText), removed: true }, message(2, 'newest')];
+    await waitFor(() => { expect(FakeSocket.all).toHaveLength(2); }, { timeout: 3000 });
+    (FakeSocket.all[1] as FakeSocket).open();
+    // The refresh failed: the window is not shown as current, and sending stays paused.
+    await waitFor(() => { expect(screen.getByLabelText<HTMLTextAreaElement>('Message #general').disabled).toBe(true); });
+    expect(screen.getByText(stale)).toBeTruthy();
+    expect(screen.getByLabelText<HTMLTextAreaElement>('Message #general').disabled).toBe(true);
+    fail = false;
+    await screen.findByText(removedText, undefined, { timeout: 5000 });
+    expect(screen.queryByText('secret before disconnect')).toBeNull();
+    expect(screen.queryByText(stale)).toBeNull();
+    expect(screen.getByLabelText<HTMLTextAreaElement>('Message #general').disabled).toBe(false);
+  }, 15000);
+
+  it('keeps a frame the socket delivered while the refresh was in flight', async () => {
+    server.history.general = [message(1, 'one'), message(2, 'two')];
+    const first = await openChat();
+    await connect(first);
+    await screen.findByText('two');
+    const real = globalThis.fetch;
+    let release: (() => void) | null = null;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    let held = false;
+    vi.stubGlobal('fetch', (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = typeof input === 'string' ? input : input instanceof URL ? input.pathname : input.url;
+      if (!held && path.includes('/v2/channels/general/messages')) {
+        held = true;
+        // The snapshot is taken now: ids 1 and 2 only.
+        const snapshot = real(input, init);
+        return gate.then(() => snapshot);
+      }
+      return real(input, init);
+    });
+    first.drop(1006);
+    await waitFor(() => { expect(FakeSocket.all).toHaveLength(2); }, { timeout: 3000 });
+    const second = FakeSocket.all[1] as FakeSocket;
+    second.open();
+    await waitFor(() => { expect(held).toBe(true); });
+    server.history.general = [message(1, 'one'), message(2, 'two')];
+    second.send(message(3, 'three, from the socket'));
+    await screen.findByText('three, from the socket');
+    (release as (() => void) | null)?.();
+    await waitFor(() => { expect(screen.getByLabelText<HTMLTextAreaElement>('Message #general').disabled).toBe(false); });
+    expect(screen.getByText('three, from the socket')).toBeTruthy();
+    expect(screen.getByText('two')).toBeTruthy();
+  });
+
+  it('accepts a refresh only from the connection that asked: an earlier reconnect answering late does not make the channel current', async () => {
+    server.history.general = [message(1, 'secret before disconnect'), message(2, 'newest')];
+    const first = await openChat();
+    await connect(first);
+    await screen.findByText('secret before disconnect');
+    const real = globalThis.fetch;
+    const asked: { release: () => void }[] = [];
+    vi.stubGlobal('fetch', (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = typeof input === 'string' ? input : input instanceof URL ? input.pathname : input.url;
+      if (init?.method !== 'POST' && path.includes('/v2/channels/general/messages')) {
+        const snapshot = real(input, init);
+        return new Promise<Response>((resolve) => { asked.push({ release: () => { resolve(snapshot.then((r) => r)); } }); });
+      }
+      return real(input, init);
+    });
+    first.drop(1006);
+    await waitFor(() => { expect(FakeSocket.all).toHaveLength(2); }, { timeout: 3000 });
+    (FakeSocket.all[1] as FakeSocket).open();
+    await waitFor(() => { expect(asked).toHaveLength(1); });
+    (FakeSocket.all[1] as FakeSocket).drop(1006);
+    await waitFor(() => { expect(FakeSocket.all).toHaveLength(3); }, { timeout: 3000 });
+    (FakeSocket.all[2] as FakeSocket).open();
+    await waitFor(() => { expect(asked).toHaveLength(2); });
+    server.history.general = [{ ...message(1, removedText), removed: true }, message(2, 'newest')];
+    // The first reconnect answers late, with what it read before the removal.
+    await act(async () => { asked[0]?.release(); await Promise.resolve(); await new Promise((r) => setTimeout(r, 50)); });
+    expect(screen.getByText(stale)).toBeTruthy();
+    expect(screen.getByLabelText<HTMLTextAreaElement>('Message #general').disabled).toBe(true);
+    await act(async () => { asked[1]?.release(); await new Promise((r) => setTimeout(r, 50)); });
+    await waitFor(() => { expect(screen.getByLabelText<HTMLTextAreaElement>('Message #general').disabled).toBe(false); });
+    expect(screen.queryByText(stale)).toBeNull();
+  }, 15000);
+
+  it('tries the refresh again under the new name when it was answered not-found because the channel was renamed', async () => {
+    server.history.general = [message(1, 'secret before disconnect'), message(2, 'newest')];
+    const first = await openChat();
+    await connect(first);
+    await screen.findByText('secret before disconnect');
+    first.drop(1006);
+    await waitFor(() => { expect(FakeSocket.all).toHaveLength(2); }, { timeout: 3000 });
+    const real = globalThis.fetch;
+    // The rename happens before the refresh is answered: the old name is gone.
+    server.channels = [
+      { id: 7, name: 'renamed', created_at: at },
+      { id: 8, name: 'ops', created_at: at },
+    ];
+    server.history.renamed = [{ ...message(1, removedText), removed: true }, message(2, 'newest')];
+    vi.stubGlobal('fetch', (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = typeof input === 'string' ? input : input instanceof URL ? input.pathname : input.url;
+      if (path.includes('/channels/general/')) return Promise.resolve(json({ code: 'channel_not_found', message: 'channel not found' }, 404));
+      return real(input, init);
+    });
+    (FakeSocket.all[1] as FakeSocket).open();
+    await screen.findByText(removedText, undefined, { timeout: 8000 });
+    expect(screen.queryByText('secret before disconnect')).toBeNull();
+    expect(FakeSocket.all).toHaveLength(2);
+    expect(screen.queryByText(stale)).toBeNull();
+  }, 15000);
+});

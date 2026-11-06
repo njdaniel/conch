@@ -1,3 +1,4 @@
+import { messageRemovedV1, messageRemovedV1Schema, type MessageRemovedV1 } from '../schema/message';
 // What the events socket sends: one pkg/schema document per text frame, told
 // apart by its schema field. Each is checked with its validator before the
 // page looks at it; a frame of a schema this client does not know is skipped
@@ -21,6 +22,7 @@ export type EventFrame =
   | { readonly kind: 'readState'; readonly state: ReadStateV1 }
   | { readonly kind: 'message'; readonly message: MessageV2 }
   // A message edited (issue #845): never a new one, so it never notifies.
+  | { readonly kind: 'messageRemoved'; readonly message: MessageV2 }
   | { readonly kind: 'messageEdited'; readonly message: MessageV2 }
   // The person's own channels may have changed (issue #1027): no content, only
   // a hint to read the list again.
@@ -58,6 +60,8 @@ export function parseEventFrame(data: unknown): EventFrame | null {
       return readStateV1(doc).length === 0 ? { kind: 'readState', state: doc as ReadStateV1 } : null;
     case messageV2Schema:
       return messageV2(doc).length === 0 ? { kind: 'message', message: doc as MessageV2 } : null;
+    case messageRemovedV1Schema:
+      return messageRemovedV1(doc).length === 0 ? { kind: 'messageRemoved', message: (doc as MessageRemovedV1).message } : null;
     case messageEditedV1Schema:
       return messageEditedV1(doc).length === 0 ? { kind: 'messageEdited', message: (doc as MessageEditedV1).message } : null;
     case channelsChangedV1Schema:

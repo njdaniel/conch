@@ -1,3 +1,4 @@
+import { ModerationScope } from './Moderation';
 // The browser client's top level: sign-in, the operator warning, then the
 // lobby. The auth, connection and channels reducers hold the state; src/api.ts
 // does every call and is the only code that sees the credential.
@@ -570,6 +571,12 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
     const name = nameOf(message.channel_id);
     if (name !== null) dispatchChat({ type: 'edited', channel: name, message });
   }, [nameOf, dispatchChat]);
+  useEffect(() => api.watchRemovals((message) => {
+    const name = nameOf(message.channel_id);
+    if (name !== null) dispatchChat({ type: 'removed', channel: name, message });
+    setEditEvent(message);
+    setMessageEvent((old) => old?.id === message.id ? null : old);
+  }), [nameOf]);
   const editFinal = useCallback((id: number) => {
     if (selected !== null) dispatchChat({ type: 'editFinal', channel: selected, id });
   }, [selected, dispatchChat]);
@@ -1635,7 +1642,7 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
                     : {
                         channel: currentChannel,
                         channels: channels.channels,
-                        viewer: { id: auth.principal.id, role: auth.principal.role, guest: visit !== null },
+                        viewer: { ...auth.principal, guest: visit !== null },
                         // A reconnect owes no frame for what changed while it was down, so the
                         // picker also re-reads on the permission tick every socket open bumps.
                         directoryTick: directory.tick + permissionsTick,
@@ -1737,7 +1744,7 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
           }
           report={<ReportProblem onUnauthorized={onUnauthorized} />}
           voice={
-            <VoiceStatus
+            <ModerationScope who={auth.principal} members={agents.membersFor === channelId ? agents.members : []} guest={visit !== null}><VoiceStatus
               signedIn={signedIn}
               channel={selected}
               viewer={auth.principal.id}
@@ -1749,7 +1756,7 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
               occupancy={occupancy}
               onUnauthorized={onUnauthorized}
               onOpen={onOpen}
-            />
+            /></ModerationScope>
           }
           // Operators and each channel's managers may rename it, from that
           // row's ⋯ menu (issues #728, #1135). A visit gets no rename.
@@ -1847,7 +1854,7 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
           }
           conversation={
             selected === null || channelId === null ? null : (
-              <>
+              <ModerationScope who={auth.principal} members={agents.membersFor === channelId ? agents.members : []} guest={visit !== null}>
                 {agents.state.detail === null ? null : <RunDetail agents={agents} now={now} onGoToMessage={goToMessage} />}
                 {!searchOpen ? null : (
                   <SearchPanel
@@ -1914,7 +1921,7 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
                 }}
               />
                 </div>
-              </>
+              </ModerationScope>
             )
           }
           onOpen={onOpen}

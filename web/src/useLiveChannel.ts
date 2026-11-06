@@ -107,6 +107,11 @@ export function useLiveChannel({
     let live = true;
     let feed: Feed | null = null;
     let reached = false;
+    let retryRefresh: unknown = null;
+    // Whether the socket is open now: a refresh answered after it dropped does not make the channel current.
+    let connected = false;
+    // Moves on at every connection change: a refresh answers only for the connection that asked.
+    let connection = 0;
     setStatus('loading');
     setNets(new Map());
     setMonitored(new Set());
@@ -123,10 +128,51 @@ export function useLiveChannel({
       setMonitored(new Set(result.value.filter((n) => n.members.some((m) => m.principal_id === meId && m.role === 'monitor')).map((n) => n.id)));
     });
 
+    function refresh(tries: number, asked = connection) {
+      if (retryRefresh !== null) realClock.clearTimeout(retryRefresh);
+      retryRefresh = null;
+      void api.loadMessages(name()).then((result) => {
+        if (!live || asked !== connection) return;
+        if (result.ok) {
+          dispatchChat({ type: 'historyRefreshed', channel: name(), messages: result.value, more: result.value.length >= api.historyLimit });
+          setStatus('open');
+          return;
+        }
+        if (result.failure === 'unauthorized') {
+          onUnauthorized();
+          return;
+        }
+        // A renamed channel answers not-found under the old name: the page
+        // reads the list for the new one, and the retry (under whatever
+        // name() is then) follows. A lost channel ends this effect instead.
+        if (result.code === api.channelNotFound) onMissing(id);
+        retryRefresh = realClock.setTimeout(() => {
+          refresh(tries + 1, asked);
+        }, Math.min(1000 * 2 ** tries, 15000));
+      });
+    }
+
     function onStatus(next: FeedStatus) {
       if (!live) return;
+      // An open that follows an open is not a reconnect.
+      const was = connected;
+      connected = next === 'open';
+      if (was && connected) return;
+      connection++;
+      if (retryRefresh !== null) realClock.clearTimeout(retryRefresh);
+      retryRefresh = null;
       switch (next) {
         case 'open':
+          if (reached) {
+            // A removal may be older than the replay cursor, so the held
+            // window is not current until a re-read of it succeeds. Until then
+            // the channel stays "reconnecting" (stale, sending paused), and a
+            // failed read is tried again.
+            setStatus('reconnecting');
+            refresh(0);
+            dispatchConnection({ type: 'reached' });
+            break;
+          }
           reached = true;
           setStatus('open');
           dispatchConnection({ type: 'reached' });
@@ -204,6 +250,7 @@ export function useLiveChannel({
     return () => {
       generation.current++;
       live = false;
+      if (retryRefresh !== null) realClock.clearTimeout(retryRefresh);
       feed?.stop();
     };
   }, [open, channelId, nameOf, attempt, meId, getAfter, dispatchChat, dispatchConnection, onUnauthorized, onLost, onRenamed, onMissing]);
