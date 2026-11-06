@@ -2,14 +2,41 @@
 // microphone, and who is in the room and who is talking. The SDK and the
 // microphone are reached only from src/voice/.
 import { isArchived } from './archived';
+import { platform } from './platform';
 import type { ChannelV0 } from './schema/channel';
 import type { InVoice } from './voice/useOccupancy';
+import { NativeVoicePanel } from './voice/native/NativeVoicePanel';
 import { VoicePanel } from './voice/VoicePanel';
 import { useVoice } from './voice/useVoice';
 import { useVoiceNames } from './voice/useVoiceNames';
 import type { Person } from './useLiveChannel';
 
-export function VoiceStatus({
+type Props = Parameters<typeof BrowserVoiceStatus>[0];
+
+// Where the platform has a native voice (the desktop), the strip is the native
+// one: the browser engine, and with it a second microphone publisher, is never
+// built there (ADR-007, linux-desktop.md section 6).
+export function VoiceStatus(props: Props) {
+  const native = platform.nativeVoice;
+  if (native !== undefined) {
+    return (
+      <NativeVoicePanel
+        source={native}
+        signedIn={props.signedIn}
+        channel={props.channel}
+        viewer={props.viewer}
+        people={props.people}
+        voiceAllowed={props.voiceAllowed}
+        channels={props.channels}
+        onUnauthorized={props.onUnauthorized}
+        onOpen={props.onOpen}
+      />
+    );
+  }
+  return <BrowserVoiceStatus {...props} />;
+}
+
+function BrowserVoiceStatus({
   signedIn,
   channel,
   viewer,
