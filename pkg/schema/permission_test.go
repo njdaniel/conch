@@ -90,25 +90,35 @@ func TestPermissionFixturesValidate(t *testing.T) {
 					member = append(member, row.Permission)
 				}
 			}
-			// The preset table as this fixture's server knew it: only the
-			// permissions its rows carry. An eleven-row fixture predates
-			// use_camera, and so its presets do (issue #1361).
-			inRows := func(ps []Permission) []Permission {
+			// A published fixture is what a server answered when it was
+			// written, and stays byte-identical (schema-compat). So its member
+			// column agrees with its own preset list, and that list is today's
+			// table as its server knew it: only the permissions its rows
+			// carry (an eleven-row fixture predates use_camera), and with
+			// use_camera left out by a server from before issue #1361, which
+			// put it in both presets. Any other difference is drift.
+			asKnown := func(ps, got []Permission) []Permission {
 				var out []Permission
 				for _, p := range ps {
-					if slices.Contains(rowPermissions(r.Rows), p) {
-						out = append(out, p)
+					if !slices.Contains(rowPermissions(r.Rows), p) {
+						continue
 					}
+					if p == PermUseCamera && !slices.Contains(got, PermUseCamera) {
+						continue
+					}
+					out = append(out, p)
 				}
 				return out
 			}
-			if want := inRows(PresetMemberPermissions[r.Preset]); !slices.Equal(member, want) {
-				t.Errorf("member column %v, preset %q is %v", member, r.Preset, want)
-			}
+			own := map[PermissionPreset][]Permission{}
 			for _, p := range r.Presets {
-				if want := inRows(PresetMemberPermissions[p.Preset]); !slices.Equal(p.Member, want) {
+				own[p.Preset] = p.Member
+				if want := asKnown(PresetMemberPermissions[p.Preset], p.Member); !slices.Equal(p.Member, want) {
 					t.Errorf("presets[%s] = %v, want %v", p.Preset, p.Member, want)
 				}
+			}
+			if want, ok := own[r.Preset]; !ok || !slices.Equal(member, want) {
+				t.Errorf("member column %v, the fixture's own preset %q is %v", member, r.Preset, want)
 			}
 		})
 	}
