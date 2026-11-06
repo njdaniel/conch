@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 
 	"github.com/njdaniel/conch/pkg/schema"
@@ -107,6 +108,18 @@ func (m *mod) guests() error {
 			}
 		}
 	}
+	// A file shared inside the visit's bound, which the guest can read until
+	// it is banned (§6.2: the ban closes the file path too).
+	f1, err := w.upload(p.pia, m.text("plaza: shared file")+".txt", m.text("plaza: shared file contents"))
+	if err != nil {
+		return err
+	}
+	if _, err := w.ppost(p.pia, false, "", attachment(m.text("plaza: shared file message"), f1)); err != nil {
+		return err
+	}
+	if status, _, err := g1.api.do(http.MethodGet, fmt.Sprintf("/v2/files/%d", f1), nil); err != nil || status != http.StatusOK {
+		return fmt.Errorf("the guest reading a file shared inside its visit before the ban: %d %s", status, errText(err))
+	}
 	msgs, body, err := read(g1.api)
 	if err != nil {
 		return err
@@ -190,8 +203,8 @@ func (m *mod) guests() error {
 	if who.Guest == nil || who.Guest.State != schema.GuestStateActive || who.Guest.Handle != g1.guest.Handle {
 		return fmt.Errorf("the banned guest's visit after the ban: %+v, want it active and unchanged", who.Guest)
 	}
-	m.skip = map[string]bool{"POST /v2/channels/{channel}/files": true}
-	n, err := m.outIn(plaza, g1.api, "the banned guest", in2ID, preIDs[2], in2)
+	m.skip = map[string]bool{"POST /v2/channels/{channel}/files": true, "POST /v1/channels/{channel}/leave": true}
+	n, err := m.outIn(plaza, g1.api, "the banned guest", in2ID, f1, in2)
 	m.skip = nil
 	if err != nil {
 		return err
@@ -337,6 +350,47 @@ func (m *mod) guests() error {
 		return fmt.Errorf("the plaza's ban list after the new visit is %+v, want the first visit's alone", bans)
 	}
 
+	// ---- conversion keeps the ban (§6.3)
+
+	g3, err := w.joinGuest("Mod", nil)
+	if err != nil {
+		return err
+	}
+	ban3 := fmt.Sprintf("/v1/channels/%s/bans/%d", ch, g3.id)
+	if err := w.op.call(http.MethodPut, ban3, nil, nil); err != nil {
+		return err
+	}
+	var permit schema.CreateSignInLinkResponseV1
+	if err := w.op.call(http.MethodPost, fmt.Sprintf("/v1/guests/%d/conversion-permit", g3.id), schema.CreateConversionPermitRequestV1{}, &permit); err != nil {
+		return fmt.Errorf("a conversion permit for the banned guest: %w", err)
+	}
+	w.h.secret("a conversion permit", permit.Code)
+	name3 := w.pubName("converted-mod")
+	var conv schema.ConvertGuestResponseV1
+	if err := g3.api.call(http.MethodPost, "/v1/guest/convert", schema.ConvertGuestRequestV1{Name: name3, Password: convertPassword, Permit: permit.Code}, &conv); err != nil {
+		return fmt.Errorf("the banned guest converting: %w", err)
+	}
+	member3, err := w.converted(g3, name3, conv)
+	if err != nil {
+		return err
+	}
+	if _, err := m.outIn(plaza, member3.api, "the converted member, banned as a guest", in2ID, f1, in2); err != nil {
+		return fmt.Errorf("after the conversion: %w", err)
+	}
+	bans = schema.ListChannelBansResponseV1{}
+	if err := w.op.call(http.MethodGet, "/v1/channels/"+ch+"/bans", nil, &bans); err != nil {
+		return err
+	}
+	if !slices.ContainsFunc(bans.Bans, func(b schema.ChannelBanV1) bool { return b.PrincipalID == g3.id && b.Name == name3 }) {
+		return fmt.Errorf("the plaza's ban list after the conversion is %+v, want the same principal's ban under its new name", bans)
+	}
+	if err := w.op.call(http.MethodDelete, ban3, nil, nil); err != nil {
+		return err
+	}
+	if status, _, err := member3.api.do(http.MethodGet, "/v2/channels/"+ch+"/messages", nil); err != nil || status != http.StatusNotFound {
+		return fmt.Errorf("the converted member after the unban: %d %s, want 404: nothing is restored", status, errText(err))
+	}
+
 	// ---- clean up: the ban lifted (restoring nothing) and both visits ended
 	// by the operator, a lever of its own.
 
@@ -355,6 +409,6 @@ func (m *mod) guests() error {
 			return err
 		}
 	}
-	m.say("guests: a guest of the plaza (its history from its bound) saw nothing of a message removed before its visit and was sent no frame when an older message was removed, was sent the tombstone of one removed inside its bound in each socket family's envelope, was refused the removal route, and was banned by the operator: its sockets closed (%s), its visit and credential stayed good, every route and socket variant refused it as for a ghost (%d requests) and an add by an operator was refused; the next visit from its address under its label was a new principal (%q, not %q) that the ban did not match, read nothing from before it and was sent nothing when anything from before it was removed, and was sent the tombstone of a message inside its bound (also on a socket replaying from the start); lifting the ban restored nothing and the operator ended both visits", t, n, g2.guest.Handle, g1.guest.Handle)
+	m.say("guests: a guest of the plaza (its history from its bound) saw nothing of a message removed before its visit and was sent no frame when an older message was removed, was sent the tombstone of one removed inside its bound in each socket family's envelope, was refused the removal route, and was banned by the operator: its sockets closed (%s), its visit and credential stayed good, every route and socket variant refused it as for a ghost (%d requests) and an add by an operator was refused; the next visit from its address under its label was a new principal (%q, not %q) that the ban did not match, read nothing from before it and was sent nothing when anything from before it was removed, and was sent the tombstone of a message inside its bound (also on a socket replaying from the start); a banned guest that converted to an account kept its ban under its new name and gained nothing; lifting the ban restored nothing and the operator ended both visits", t, n, g2.guest.Handle, g1.guest.Handle)
 	return nil
 }

@@ -61,6 +61,7 @@ type mod struct {
 	opID                  int64
 
 	mia, pat, wes, ned *member // manager of main; plain; plain; side only
+	agent              *member // an agent member of main, from the gates
 	netName            string
 	netID              int64
 	// tara is the principal banned in the ban scenario, with what she held,
@@ -72,7 +73,8 @@ type mod struct {
 	// frames they had then.
 	bSeen map[*feed]int
 
-	// skip is routes the next refusals leave out: a guest is refused an
+	// skip is routes the next refusals leave out: a guest is refused an upload
+	// or a leave
 	// upload as a guest before it is refused as a stranger.
 	skip map[string]bool
 
@@ -122,6 +124,9 @@ func (w *world) moderationPhase(bounds voiceBounds, bsock *bSockets) error {
 	}
 	if err := m.legacyBan(); err != nil {
 		return fmt.Errorf("a ban row with a membership live: %w", err)
+	}
+	if err := m.voiceKick(); err != nil {
+		return fmt.Errorf("voice-only removal: %w", err)
 	}
 	if err := m.voiceRace(); err != nil {
 		return fmt.Errorf("the ban and the final voice check: %w", err)
@@ -312,6 +317,9 @@ func (m *mod) auditCount(action, subject, detail string) (int, error) {
 		if leaks := m.marks.leaks([]byte(line), asked{}); len(leaks) > 0 {
 			return 0, fmt.Errorf("an audit row of %s carries %s: %+v", action, strings.Join(leaks, "; "), e)
 		}
+		if red := m.h.redact(line); red != line {
+			return 0, fmt.Errorf("an audit row of %s carries a token, secret or room name the run registered: %+v", action, e)
+		}
 		for _, p := range []*member{m.mia, m.pat, m.wes, m.ned} {
 			if strings.Contains(line, p.name) {
 				return 0, fmt.Errorf("an audit row of %s carries the name %s: %+v", action, p.name, e)
@@ -344,7 +352,31 @@ var fileNotFound = answer{http.StatusNotFound, "file_not_found"}
 // answer as for something that never existed.
 func outRefusals(term string) []refusal {
 	chp := func(ch string) string { return "/v2/channels/" + ch }
-	return []refusal{
+	transmit := schema.VoiceTransmitReportV1{State: schema.VoiceTransmitStateStarted}
+	companion := schema.VoiceCompanionRequestV1{Publish: schema.VoiceCompanionPublishScreen, Subscribe: true}
+	companionAudio := schema.VoiceCompanionAudioRequestV1{Scope: schema.VoiceShareAudioScopeApplication}
+	extra := []refusal{
+		{route: "POST /v1/channels/{channel}/leave", build: func(ch string, _, _ int64) probe { return post("/v1/channels/"+ch+"/leave", nil) }},
+		{route: "POST /v1/channels/{channel}/voice/transmit", build: func(ch string, _, _ int64) probe { return post("/v1/channels/"+ch+"/voice/transmit", transmit) }},
+		{route: "POST /v1/channels/{channel}/voice/share", build: func(ch string, _, _ int64) probe { return post("/v1/channels/"+ch+"/voice/share", nil) }},
+		{route: "POST /v1/channels/{channel}/voice/camera", build: func(ch string, _, _ int64) probe { return post("/v1/channels/"+ch+"/voice/camera", nil) }},
+		{route: "POST /v1/channels/{channel}/voice/companion", build: func(ch string, _, _ int64) probe { return post("/v1/channels/"+ch+"/voice/companion", companion) }},
+		{route: "PUT /v1/channels/{channel}/voice/companion/audio", build: func(ch string, _, _ int64) probe {
+			return put("/v1/channels/"+ch+"/voice/companion/audio", companionAudio)
+		}},
+	}
+	// The reaction and edit routes of the table, and the removal route (listed
+	// below), built from the matrix's own tables.
+	for _, r := range reactionRoutes {
+		if r.route == "DELETE /v2/channels/{channel}/messages/{message_id}" {
+			continue
+		}
+		extra = append(extra, refusal{route: r.route, build: func(ch string, msg, _ int64) probe { return r.probe(ch, msg) }})
+	}
+	for _, r := range editRoutes {
+		extra = append(extra, refusal{route: r.route, build: func(ch string, msg, _ int64) probe { return r.probe(ch, msg) }})
+	}
+	return append(extra, []refusal{
 		{route: "GET /v0/channels/{channel}/messages", build: func(ch string, _, _ int64) probe { return get("/v0/channels/" + ch + "/messages") }},
 		{route: "GET /v1/channels/{channel}/messages", build: func(ch string, _, _ int64) probe { return get("/v1/channels/" + ch + "/messages") }},
 		{route: "GET /v2/channels/{channel}/messages", build: func(ch string, _, _ int64) probe { return get(chp(ch) + "/messages?after=0&limit=100") }},
@@ -378,7 +410,7 @@ func outRefusals(term string) []refusal {
 		}},
 		{route: "GET /v2/files/{id}/meta", byFile: true, want: fileNotFound, build: func(_ string, _, f int64) probe { return get("/v2/files/" + id(f) + "/meta") }},
 		{route: "GET /v2/files/{id}", byFile: true, want: fileNotFound, build: func(_ string, _, f int64) probe { return get("/v2/files/" + id(f)) }},
-	}
+	}...)
 }
 
 // scrub sets aside what a request named so two answers can be compared.
@@ -545,6 +577,10 @@ type held struct {
 	room     string
 	grant    schema.VoiceRoomGrant
 	hasGrant bool
+	// msg and file are a message and an unattached upload of the principal's
+	// own in the moderated channel, made before it was lost: the ids the
+	// refusals are compared on, not ids nobody issued.
+	msg, file int64
 	// keep is the channels whose occupancy rows the principal keeps when the
 	// moderated channel is lost.
 	keep []int64
@@ -557,6 +593,13 @@ func (m *mod) hold(p *member) (*held, error) {
 	if h.alt, err = m.altCredential(p); err != nil {
 		return nil, err
 	}
+	if h.msg, err = m.post(p, p.name+"'s message", schema.PostMessageRequestV2{Body: m.text(p.name + "'s message")}); err != nil {
+		return nil, err
+	}
+	if h.file, err = m.upload(p, m.text(p.name+"'s file name")+".txt", m.text(p.name+"'s file contents")); err != nil {
+		return nil, err
+	}
+	m.marks.id("file", p.name+"'s file", h.file)
 	if h.main, err = openAll(p, m.main); err != nil {
 		return nil, err
 	}
@@ -825,6 +868,7 @@ func (m *mod) gates() error {
 	if err != nil {
 		return err
 	}
+	m.agent = agent
 	ghostTarget := w.ghost().id
 	for _, c := range []struct {
 		who  string
@@ -879,6 +923,9 @@ func (m *mod) gates() error {
 			as := asked{strs: []string{m.main}, ids: []kindID{{"principal", target.id}}}
 			if leaks := m.marks.leaks(got.body, as); len(leaks) > 0 {
 				return fmt.Errorf("%s on %s: the body holds %s", who.name, r.route, strings.Join(leaks, "; "))
+			}
+			if leaks := m.marks.headerLeaks(got.header, as); len(leaks) > 0 {
+				return fmt.Errorf("%s on %s: the headers hold %s", who.name, r.route, strings.Join(leaks, "; "))
 			}
 			if err := checkRefusal(got, channelNotFound, as); err != nil {
 				return fmt.Errorf("%s on %s: %w", who.name, r.route, err)
@@ -965,7 +1012,6 @@ func (m *mod) gates() error {
 // ---- membership removal
 
 func (m *mod) removal() error {
-	w := m.w
 	tom, err := m.person(m.pname("tom"), m.main, m.side)
 	if err != nil {
 		return err
@@ -977,7 +1023,6 @@ func (m *mod) removal() error {
 	if err != nil {
 		return err
 	}
-	file := w.ghost().id
 	// The manager removes him: a membership removal, not a ban.
 	t, err := m.loses("the manager removes tom from the channel", h, func() error {
 		return m.mia.api.call(http.MethodDelete, fmt.Sprintf("/v1/channels/%s/members/%d", url.PathEscape(m.main), tom.id), nil, nil)
@@ -985,7 +1030,7 @@ func (m *mod) removal() error {
 	if err != nil {
 		return err
 	}
-	n, err := m.outEverywhere("after tom was removed", h, w.ghost().id, file, m.text("term"), m.bounds)
+	n, err := m.outEverywhere("after tom was removed", h, h.msg, h.file, m.text("term"), m.bounds)
 	if err != nil {
 		return err
 	}
@@ -1056,8 +1101,7 @@ func (m *mod) ban() error {
 	if err != nil {
 		return err
 	}
-	file := w.ghost().id
-	n, err := m.outEverywhere("after tara was banned", h, w.ghost().id, file, m.text("term"), m.bounds)
+	n, err := m.outEverywhere("after tara was banned", h, h.msg, h.file, m.text("term"), m.bounds)
 	if err != nil {
 		return err
 	}
@@ -1143,11 +1187,27 @@ func (m *mod) ban() error {
 }
 
 // putSeatRefused requires that a net seat cannot be given to a banned
-// principal either: the net routes take only members.
+// principal either: the net routes take only members, and the answer is the
+// one for an existing principal who was never a member of the channel (ned).
 func (m *mod) putSeatRefused(p *member) error {
-	err := m.putSeat(p)
-	if err == nil {
-		return fmt.Errorf("a net seat was given to %s, who is banned from the channel", p.name)
+	seat := func(id int64) probe {
+		return put(fmt.Sprintf("/v1/channels/%s/nets/%s/members/%d", url.PathEscape(m.main), m.netName, id),
+			schema.PutNetMemberRequestV1{Role: schema.NetRoleMember})
+	}
+	notMember := answer{http.StatusBadRequest, "not_a_channel_member"}
+	got, err := m.w.send(m.w.op, seat(p.id))
+	if err != nil {
+		return err
+	}
+	if err := checkRefusal(got, notMember, asked{ids: []kindID{{"principal", p.id}}}); err != nil {
+		return fmt.Errorf("a net seat for %s, banned from the channel: %w", p.name, err)
+	}
+	gh, err := m.w.send(m.w.op, seat(m.ned.id))
+	if err != nil {
+		return err
+	}
+	if gh.status != got.status || !bytes.Equal(scrub(gh.body, nil, m.ned.id), scrub(got.body, nil, p.id)) {
+		return fmt.Errorf("a net seat for the banned %s is %d %s, for a principal who was never a member %d %s", p.name, got.status, got.body, gh.status, gh.body)
 	}
 	return nil
 }
@@ -1157,7 +1217,6 @@ func (m *mod) putSeatRefused(p *member) error {
 func (m *mod) residual() error {
 	w := m.w
 	tara, h := m.tara, m.taraHeld
-	file := w.ghost().id
 	// A row the ban's cleanup did not reach, and a net seat: as a restore
 	// from a backup, or a legacy row, leaves them.
 	if err := m.residualMember(tara, true); err != nil {
@@ -1173,7 +1232,7 @@ func (m *mod) residual() error {
 	if err := m.pat.api.call(http.MethodPost, "/v2/channels/"+url.PathEscape(m.main)+"/messages", schema.PostMessageRequestV2{Body: text}, nil); err != nil {
 		return err
 	}
-	if _, err := m.outEverywhere("with a residual membership", h, w.ghost().id, file, text, m.bounds); err != nil {
+	if _, err := m.outEverywhere("with a residual membership", h, h.msg, h.file, text, m.bounds); err != nil {
 		return err
 	}
 	var members schema.ListChannelMembersResponseV1
@@ -1188,6 +1247,58 @@ func (m *mod) residual() error {
 	var nets schema.ListNetsResponseV1
 	if err := m.pat.api.call(http.MethodGet, "/v1/channels/"+url.PathEscape(m.main)+"/nets", nil, &nets); err != nil {
 		return err
+	}
+	seen := false
+	for _, n := range nets.Nets {
+		if n.ID == m.netID {
+			seen = true
+		}
+		for _, seat := range n.Members {
+			if seat.PrincipalID == tara.id {
+				return fmt.Errorf("the net %d lists tara's seat, which is residual beside a ban", n.ID)
+			}
+		}
+	}
+	if !seen {
+		return fmt.Errorf("the net list as pat does not hold the net: the check of its seats is vacuous")
+	}
+	// Her own channel list omits the channel, on both credentials.
+	for _, a := range []api{tara.api, h.alt.api} {
+		var list schema.ListChannelsResponse
+		if err := a.call(http.MethodGet, "/v1/channels", nil, &list); err != nil {
+			return err
+		}
+		for _, c := range list.Channels {
+			if c.ID == m.mainID || c.Name == m.main {
+				return fmt.Errorf("GET /v1/channels as %s lists the moderated channel, which she is banned from", a.who)
+			}
+		}
+	}
+	// A net message, said while her seat is residual, is sent to the net's
+	// members who are members: no recipient row is made for her.
+	netText := m.text("a net message while tara's seat is residual")
+	netMsg, err := m.post(m.pat, "a net message while a seat is residual", schema.PostMessageRequestV2{Body: netText,
+		Audience: &schema.Audience{Kind: schema.AudienceKindNet, NetID: m.netID}})
+	if err != nil {
+		return err
+	}
+	for _, c := range []struct {
+		p    *member
+		want int
+	}{{tara, 0}, {m.pat, 1}, {m.wes, 1}} {
+		got, err := m.w.underCount("SELECT COUNT(*) FROM message_recipients WHERE message_id = ? AND principal_id = ?", netMsg, c.p.id)
+		if err != nil || got != c.want {
+			return fmt.Errorf("the net message has %d recipient row(s) for %s, want %d (%s)", got, c.p.name, c.want, errText(err))
+		}
+	}
+	// A whisper cannot be addressed to her: a recipient must be a member now.
+	whisper, err := w.send(m.pat.api, post("/v2/channels/"+url.PathEscape(m.main)+"/messages", schema.PostMessageRequestV2{Body: m.text("a whisper to a banned principal"),
+		Audience: &schema.Audience{Kind: schema.AudienceKindPrincipals, PrincipalIDs: []int64{tara.id}}}))
+	if err != nil {
+		return err
+	}
+	if err := checkRefusal(whisper, answer{http.StatusBadRequest, "invalid_audience"}, asked{ids: []kindID{{"principal", tara.id}}}); err != nil {
+		return fmt.Errorf("a whisper to tara, banned with a residual row: %w", err)
 	}
 	// A repeat ban cleans the row and the seat, audits it, and revokes: it
 	// writes no new ban row.
@@ -1229,7 +1340,7 @@ func (m *mod) residual() error {
 	if err := m.residualMember(tara, true); err != nil {
 		return err
 	}
-	if _, err := m.outEverywhere("with a second residual membership", h, w.ghost().id, file, text, m.bounds); err != nil {
+	if _, err := m.outEverywhere("with a second residual membership", h, h.msg, h.file, text, m.bounds); err != nil {
 		return err
 	}
 	if err := m.mia.api.call(http.MethodDelete, ban, nil, nil); err != nil {
@@ -1241,7 +1352,7 @@ func (m *mod) residual() error {
 	if status, _, err := tara.api.do(http.MethodGet, "/v2/channels/"+url.PathEscape(m.main)+"/messages", nil); err != nil || status != http.StatusNotFound {
 		return fmt.Errorf("tara reading the channel after the unban: %d %v, want 404: unban restores nothing", status, errText(err))
 	}
-	if _, err := m.outEverywhere("after the unban", h, w.ghost().id, file, text, m.bounds); err != nil {
+	if _, err := m.outEverywhere("after the unban", h, h.msg, h.file, text, m.bounds); err != nil {
 		return err
 	}
 	removedRows, err := m.auditCount(store.AuditChannelBanRemoved, fmt.Sprintf("channel:%d", m.mainID), fmt.Sprintf("principal=%d", tara.id))
@@ -1294,7 +1405,7 @@ func (m *mod) legacyBan() error {
 	}
 	// Nothing new works for her at once, on a credential or the other.
 	for _, a := range []api{tess.api, h.alt.api} {
-		if _, err := m.outAs(a, a.who, w.ghost().id, w.ghost().id, m.text("term")); err != nil {
+		if _, err := m.outAs(a, a.who, h.msg, h.file, m.text("term")); err != nil {
 			return fmt.Errorf("a ban row beside a live membership: %w", err)
 		}
 		if _, err := m.socketsRefused(a, a.who, true); err != nil {
@@ -1340,7 +1451,7 @@ func (m *mod) legacyBan() error {
 	if added != 0 || removed != 1 {
 		return fmt.Errorf("a repeat ban over a ban row wrote %d channel_ban_added and %d member_removed rows, want 0 and 1", added, removed)
 	}
-	if _, err := m.outEverywhere("after the repeat ban", h, w.ghost().id, w.ghost().id, m.text("term"), m.bounds); err != nil {
+	if _, err := m.outEverywhere("after the repeat ban", h, h.msg, h.file, m.text("term"), m.bounds); err != nil {
 		return err
 	}
 	m.say("residual ban row: a ban row written beside tess's live membership (her sockets on two credentials, the occupancy socket and a participant held) refused every new request and socket at once%s; a repeat ban closed her sockets and cleaned the membership: %s, audited member_removed with no new channel_ban_added", noteOf(m.notes), t)
@@ -1375,11 +1486,13 @@ func (m *mod) voiceRace() error {
 	// sent is when the request left, at when its answer came back.
 	type outcome struct {
 		status   int
+		code     string
 		grant    schema.VoiceRoomGrant
 		sent, at time.Time
 	}
 	var mu sync.Mutex
 	var outs []outcome
+	var failed []error
 	stop := make(chan struct{})
 	var wg sync.WaitGroup
 	for range 4 {
@@ -1395,9 +1508,12 @@ func (m *mod) voiceRace() error {
 				sent := time.Now()
 				status, body, err := rex.api.do(http.MethodPost, "/v1/channels/"+ch+"/voice/session", nil)
 				if err != nil {
+					mu.Lock()
+					failed = append(failed, err)
+					mu.Unlock()
 					return
 				}
-				o := outcome{status: status, sent: sent, at: time.Now()}
+				o := outcome{status: status, code: errorCode(body), sent: sent, at: time.Now()}
 				if status == http.StatusOK {
 					var s schema.VoiceSessionResponseV1
 					if json.Unmarshal(body, &s) == nil && len(s.Rooms) == 1 {
@@ -1412,15 +1528,49 @@ func (m *mod) voiceRace() error {
 			}
 		}()
 	}
-	time.Sleep(400 * time.Millisecond)
+	// Enough grants before the ban and enough refusals after it, whatever the
+	// runner's speed: the ban waits for the first, the end for the second.
+	const enough = 20
+	count := func(match func(outcome) bool) int {
+		mu.Lock()
+		defer mu.Unlock()
+		n := 0
+		for _, o := range outs {
+			if match(o) {
+				n++
+			}
+		}
+		return n
+	}
+	before := waitFor("session grants before the ban", modWait, func() (bool, string) {
+		n := count(func(o outcome) bool { return o.status == http.StatusOK })
+		return n >= enough, fmt.Sprintf("%d grants", n)
+	})
 	banSent := time.Now()
-	err = m.mia.api.call(http.MethodPut, fmt.Sprintf("/v1/channels/%s/bans/%d", ch, rex.id), nil, nil)
+	if before == nil {
+		err = m.mia.api.call(http.MethodPut, fmt.Sprintf("/v1/channels/%s/bans/%d", ch, rex.id), nil, nil)
+	}
 	banned := time.Now()
-	time.Sleep(400 * time.Millisecond)
+	after := error(nil)
+	if before == nil && err == nil {
+		after = waitFor("session refusals after the ban", modWait, func() (bool, string) {
+			n := count(func(o outcome) bool { return o.sent.After(banned) && o.status == http.StatusNotFound })
+			return n >= enough, fmt.Sprintf("%d refusals", n)
+		})
+	}
 	close(stop)
 	wg.Wait()
+	if before != nil {
+		return before
+	}
 	if err != nil {
 		return err
+	}
+	if after != nil {
+		return after
+	}
+	if len(failed) > 0 {
+		return fmt.Errorf("%d session requests failed in transport, the first: %w", len(failed), failed[0])
 	}
 	// Exact, not timed: the ban has committed when its answer arrives, so a
 	// request sent after that must be refused; and nothing can see the ban
@@ -1435,6 +1585,10 @@ func (m *mod) voiceRace() error {
 				afterBan++
 			}
 		case http.StatusNotFound:
+			if o.code != "channel_not_found" {
+				other++
+				continue
+			}
 			refused++
 			if o.at.Before(banSent) {
 				beforeBan++
@@ -1446,7 +1600,7 @@ func (m *mod) voiceRace() error {
 	if other > 0 {
 		return fmt.Errorf("%d session requests were answered neither 200 nor 404 channel_not_found", other)
 	}
-	if granted == 0 || refused == 0 {
+	if granted < enough || refused < enough {
 		return fmt.Errorf("the race had %d grants and %d refusals: it did not hit both sides of the ban", granted, refused)
 	}
 	if afterBan > 0 {
@@ -1490,6 +1644,16 @@ func expectRefusalAs(a api, method, path string, want answer) error {
 // bQuiet requires that none of the frames B's open sockets carried while the
 // phase ran holds a private string of M's or an id of its channels.
 func (m *mod) bQuiet() error {
+	// The barrier of the other checks of B's sockets: B says something on
+	// every channel and every socket must carry it, so that what was in
+	// flight while the phase ran has arrived and is counted.
+	c, err := m.w.controlB(3)
+	if err != nil {
+		return fmt.Errorf("the control of B after the moderation phase: %w", err)
+	}
+	if err := m.bsock.checkQuiet(m.w, c); err != nil {
+		return fmt.Errorf("the sockets of B after the moderation phase: %w", err)
+	}
 	n := 0
 	for _, f := range m.bsock.feeds {
 		for i, fr := range f.since(m.bSeen[f]) {
@@ -1502,7 +1666,7 @@ func (m *mod) bQuiet() error {
 			return fmt.Errorf("%s closed during the moderation phase", f.what)
 		}
 	}
-	m.say("B's sockets: the %d frames B's %d open sockets carried while the phase ran hold nothing of M's", n, len(m.bsock.feeds))
+	m.say("B's sockets: after B's own control had reached all of them, the %d frames B's %d open sockets carried while the phase ran hold nothing of M's", n, len(m.bsock.feeds))
 	return nil
 }
 
@@ -1513,4 +1677,135 @@ func errText(err error) string {
 		return "no error"
 	}
 	return err.Error()
+}
+
+// ---- voice-only removal (§4, §9 case 3)
+
+// voiceKick: the manager removes one person from voice. Only that person's
+// participant and voice sockets go; their message, events and other sockets
+// stay open, they stay a member, another in the room is not disturbed, and
+// both of their credentials can be given a session and join again at once.
+func (m *mod) voiceKick() error {
+	w := m.w
+	if w.lk == nil {
+		return nil
+	}
+	vic, err := m.person(m.pname("vic"), m.main, m.side)
+	if err != nil {
+		return err
+	}
+	wil, err := m.person(m.pname("wil"), m.main, m.side)
+	if err != nil {
+		return err
+	}
+	hv, err := m.hold(vic)
+	if err != nil {
+		return err
+	}
+	hw, err := m.hold(wil)
+	if err != nil {
+		return err
+	}
+	kick := fmt.Sprintf("/v1/channels/%s/voice/participants/%d", url.PathEscape(m.main), vic.id)
+	if err := w.checkRoute("DELETE /v1/channels/{channel}/voice/participants/{principal_id}", del(kick)); err != nil {
+		return err
+	}
+	start := time.Now()
+	if err := m.mia.api.call(http.MethodDelete, kick, nil, nil); err != nil {
+		return fmt.Errorf("the manager removing vic from voice: %w", err)
+	}
+	if err := waitFor("LiveKit to stop listing vic", m.bounds.total(), func() (bool, string) { return w.lk.gone(hv.room, vic.id) }); err != nil {
+		return err
+	}
+	took := time.Since(start)
+	if ok, _, saw := w.lk.has(hw.room, wil.id); !ok {
+		return fmt.Errorf("removing vic from voice took wil out of the room: %s", saw)
+	}
+	// Her voice sockets close; every other socket stays open, on both
+	// credentials.
+	var voice, others []*feed
+	for _, f := range hv.closing() {
+		if kindOf(f) == kindVoice {
+			voice = append(voice, f)
+		} else {
+			others = append(others, f)
+		}
+	}
+	for _, f := range voice {
+		if err := waitFor(f.what+" to close", modWait, func() (bool, string) { ended, _ := f.ended(); return ended, "still open" }); err != nil {
+			return err
+		}
+	}
+	for _, f := range append(others, append(hv.side, hv.occ...)...) {
+		if ended, _ := f.ended(); ended {
+			return fmt.Errorf("%s closed when vic was removed from voice only", f.what)
+		}
+	}
+	for _, f := range hw.closing() {
+		if ended, _ := f.ended(); ended {
+			return fmt.Errorf("%s of the person left in the room closed", f.what)
+		}
+	}
+	// Still a member, still reading, still posting; no ban.
+	var members schema.ListChannelMembersResponseV1
+	if err := m.mia.api.call(http.MethodGet, "/v1/channels/"+url.PathEscape(m.main)+"/members", nil, &members); err != nil {
+		return err
+	}
+	if !slices.ContainsFunc(members.Members, func(c schema.ChannelMemberV1) bool { return c.PrincipalID == vic.id }) {
+		return fmt.Errorf("vic is not a member after a voice-only removal")
+	}
+	for _, a := range []api{vic.api, hv.alt.api} {
+		if _, err := m.post2(a, m.text("said after a voice removal")); err != nil {
+			return err
+		}
+	}
+	var bans schema.ListChannelBansResponseV1
+	if err := m.mia.api.call(http.MethodGet, "/v1/channels/"+url.PathEscape(m.main)+"/bans", nil, &bans); err != nil {
+		return err
+	}
+	for _, b := range bans.Bans {
+		if b.PrincipalID == vic.id {
+			return fmt.Errorf("a voice-only removal made a ban")
+		}
+	}
+	// A plain member may not, and nothing changed for it.
+	if got, err := m.pat.api.do2(http.MethodDelete, kick); err != nil {
+		return err
+	} else if err := checkRefusal(got, operatorOnly, asked{ids: []kindID{{"principal", vic.id}}}); err != nil {
+		return fmt.Errorf("a plain member removing vic from voice: %w", err)
+	}
+	// Back in at once, on either credential.
+	for _, a := range []api{vic.api, hv.alt.api} {
+		sess, err := w.session(&member{name: a.who, id: vic.id, api: a}, url.PathEscape(m.main))
+		if err != nil {
+			return fmt.Errorf("%s asking for a session after being removed from voice: %w", a.who, err)
+		}
+		if _, err := w.joinSignal(sess.Rooms[0]); err != nil {
+			return fmt.Errorf("%s joining after being removed from voice: %w", a.who, err)
+		}
+		if err := waitFor("LiveKit to list vic again", modWait, func() (bool, string) {
+			ok, _, saw := w.lk.has(sess.Rooms[0].Room, vic.id)
+			return ok, saw
+		}); err != nil {
+			return err
+		}
+	}
+	n, err := m.auditCount(store.AuditVoiceParticipantKicked, fmt.Sprintf("channel:%d", m.mainID), fmt.Sprintf("principal=%d result=completed", vic.id))
+	if err != nil {
+		return err
+	}
+	if n != 1 {
+		return fmt.Errorf("%d voice_participant_kicked rows for vic, want 1", n)
+	}
+	m.say("voice-only removal: the manager removed vic from voice: LiveKit stopped listing only her within %s, her voice sockets closed and her %d message, events, side-channel and occupancy sockets on two credentials stayed open, wil stayed in the room, she stayed a member who could still post and no ban was made, a plain member was refused, and she was given a session and joined again at once on either credential (audited voice_participant_kicked, completed)", took.Round(time.Millisecond), len(others)+len(hv.side)+len(hv.occ))
+	return nil
+}
+
+// post2 posts a channel-wide v2 message of the moderated channel as a.
+func (m *mod) post2(a api, body string) (int64, error) {
+	var resp schema.PostMessageResponseV2
+	if err := a.call(http.MethodPost, "/v2/channels/"+url.PathEscape(m.main)+"/messages", schema.PostMessageRequestV2{Body: body}, &resp); err != nil {
+		return 0, err
+	}
+	return resp.Message.ID, nil
 }

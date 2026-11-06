@@ -53,11 +53,10 @@ type reader struct {
 type want int
 
 const (
-	wantNothing    want = iota
-	wantSafe            // exactly one tombstone: v0/v1 body, no marker
-	wantEnvelope        // exactly one tombstone: v2, removed true
-	wantEvent           // exactly one conch.message_removed.v1
-	wantEventMaybe      // a recipient's events socket: at most one
+	wantNothing  want = iota
+	wantSafe          // exactly one tombstone: v0/v1 body, no marker
+	wantEnvelope      // exactly one tombstone: v2, removed true
+	wantEvent         // exactly one conch.message_removed.v1
 )
 
 // wideWant is what each socket owes of a channel-wide removal.
@@ -79,7 +78,7 @@ func scopedWant(f *feed) want {
 	case kindMessageV2:
 		return wantEnvelope
 	case kindEvents:
-		return wantEventMaybe
+		return wantEvent
 	}
 	return wantNothing
 }
@@ -90,7 +89,7 @@ func scopedWant(f *feed) want {
 // about the message, and no frame at all that holds any of originals.
 func (m *mod) checkRemoval(what string, feeds []*feed, base map[*feed]int, id int64, owed func(*feed) want, originals ...string) error {
 	for _, f := range feeds {
-		if owed(f) == wantNothing || owed(f) == wantEventMaybe {
+		if owed(f) == wantNothing {
 			continue
 		}
 		if err := waitFor(f.what+" to carry the tombstone of "+what, modWait, func() (bool, string) {
@@ -126,7 +125,7 @@ func (m *mod) checkRemoval(what string, feeds []*feed, base map[*feed]int, id in
 					if !df.Removed {
 						return fmt.Errorf("%s of %s: a v2 tombstone without removed: %s", f.what, what, fr)
 					}
-				case wantEvent, wantEventMaybe:
+				case wantEvent:
 					if df.Schema != schema.MessageRemovedSchemaV1 {
 						return fmt.Errorf("%s of %s: an events tombstone that is not %s: %s", f.what, what, schema.MessageRemovedSchemaV1, fr)
 					}
@@ -145,11 +144,6 @@ func (m *mod) checkRemoval(what string, feeds []*feed, base map[*feed]int, id in
 		switch owed(f) {
 		case wantNothing:
 			wantTombs = 0
-		case wantEventMaybe:
-			if tombs > 1 {
-				return fmt.Errorf("%s of %s: %d tombstones, want at most 1", f.what, what, tombs)
-			}
-			wantTombs = tombs
 		default:
 			wantTombs = 1
 		}
@@ -256,7 +250,12 @@ func (m *mod) messages() error {
 
 	// Everyone who may read the channel holds every socket variant before a
 	// word is said: the originals are seen live, so the removals are updates.
-	readers := []*reader{{p: pat}, {p: wes}, {p: mia}}
+	// zoe is a member who is on no net and is sent no whisper.
+	zoe, err := m.person(m.pname("zoe"), m.main, m.side)
+	if err != nil {
+		return err
+	}
+	readers := []*reader{{p: pat}, {p: wes}, {p: mia}, {p: zoe}}
 	for _, r := range readers {
 		feeds, err := openAll(r.p, m.main)
 		if err != nil {
@@ -356,6 +355,7 @@ func (m *mod) messages() error {
 		want answer
 	}{
 		{"a plain member", pat.api, st.m1, operatorOnly},
+		{"an agent member", m.agent.api, st.m1, operatorOnly},
 		{"the manager, of a whisper to wes", mia.api, st.m5, messageNotFound},
 		{"the manager, of a net message she has no seat in", mia.api, st.m6, messageNotFound},
 		{"the operator, who is not a member", w.op, st.m1, channelNotFound},
@@ -386,7 +386,7 @@ func (m *mod) messages() error {
 			if ghost.status != got.status || !bytes.Equal(scrub(ghost.body, []string{g.name}, c.id), scrub(got.body, []string{m.main}, c.id)) {
 				return fmt.Errorf("%s removing: %d %s, and in a channel that never existed %d %s", c.who, got.status, got.body, ghost.status, ghost.body)
 			}
-		case messageNotFound:
+		case messageNotFound, operatorOnly:
 			ghost, err = m.remove(c.a, ghostMsg)
 			if err != nil {
 				return err
@@ -521,6 +521,12 @@ func (m *mod) messages() error {
 	// ---- replay and live, ordered
 
 	if err := m.ordering(); err != nil {
+		return err
+	}
+
+	// ---- a net's message
+
+	if err := m.netRemoval(st, readers, all); err != nil {
 		return err
 	}
 
@@ -830,10 +836,10 @@ func (m *mod) reconnects(st *removedState) error {
 			return errInterrupted
 		}
 		for _, f := range feeds {
-			tombs, wh := 0, 0
+			tombs, wh, whTombs := 0, 0, 0
 			for i, fr := range f.received() {
 				df := decodeFrame(fr)
-				for _, o := range append(append([]string{}, st.originalsWide...), st.r4) {
+				for _, o := range append(append([]string{}, st.originalsWide...), st.r4, fmt.Sprintf("%s number 3", st.term)) {
 					if bytes.Contains(fr, []byte(o)) {
 						return fmt.Errorf("frame %d on %s holds the original %q", i, f.what, o)
 					}
@@ -844,13 +850,16 @@ func (m *mod) reconnects(st *removedState) error {
 				if df.names(st.m4) {
 					wh++
 				}
+				if df.tombstone(st.m4) {
+					whTombs++
+				}
 			}
 			switch kindOf(f) {
 			case kindMessageV2:
 				if tombs != 1 {
 					return fmt.Errorf("%s replayed the removed message %d times, want one tombstone", f.what, tombs)
 				}
-				if c.scoped && wh != 1 || !c.scoped && wh != 0 {
+				if c.scoped && (wh != 1 || whTombs != 1) || !c.scoped && wh != 0 {
 					return fmt.Errorf("%s replayed the removed whisper in %d frames (it may read it: %v)", f.what, wh, c.scoped)
 				}
 			default:
@@ -980,5 +989,96 @@ func (m *mod) ordering() error {
 		f.close()
 	}
 	m.say("ordering: %d messages posted and removed in threes while six v2 sockets that replay from the start (on two credentials, with a bearer and a ticket) connected and ran: each saw every message as an original and then its tombstone once, or the tombstone alone, never a tombstone before an original or twice", count)
+	return nil
+}
+
+// netRemoval: the manager takes a seat on the net, a net message is said and
+// removed by her. It reaches the v2 sockets of the net's people and, as the
+// update it is, their events sockets, and nothing of anyone else's, the
+// member who is on no net included; a replaying socket of a seat is told the
+// tombstone once and one of the member off the net is told nothing.
+func (m *mod) netRemoval(st *removedState, readers []*reader, all func() []*feed) error {
+	if err := m.putSeat(m.mia); err != nil {
+		return err
+	}
+	r7 := m.text("net message to be removed")
+	m7, err := m.post(m.pat, "a net message to be removed", schema.PostMessageRequestV2{Body: r7,
+		Audience: &schema.Audience{Kind: schema.AudienceKindNet, NetID: m.netID}})
+	if err != nil {
+		return err
+	}
+	onNet := map[*member]bool{m.pat: true, m.wes: true, m.mia: true}
+	for _, r := range readers {
+		for _, f := range r.feeds {
+			// An events socket is told of a new message of someone else's, not
+			// of its own person's.
+			if k := kindOf(f); (k != kindMessageV2 && (k != kindEvents || r.p == m.pat)) || !onNet[r.p] {
+				continue
+			}
+			if err := waitFor(f.what+" to carry the net message", modWait, func() (bool, string) {
+				for _, fr := range f.received() {
+					if bytes.Contains(fr, []byte(r7)) {
+						return true, ""
+					}
+				}
+				return false, fmt.Sprintf("%d frames", len(f.received()))
+			}); err != nil {
+				return err
+			}
+		}
+	}
+	base := feedCounts(all())
+	if res, err := m.remove(m.mia.api, m7); err != nil || res.status != http.StatusNoContent {
+		return fmt.Errorf("the manager removing a net message she has a seat for: %d %s", res.status, errText(err))
+	}
+	owed := func(f *feed) want {
+		for _, r := range readers {
+			if onNet[r.p] && slices.Contains(r.feeds, f) {
+				return scopedWant(f)
+			}
+		}
+		return wantNothing
+	}
+	if err := m.checkRemoval("a net's message", all(), base, m7, owed, r7); err != nil {
+		return err
+	}
+	for _, c := range []struct {
+		p     *member
+		onNet bool
+	}{{m.wes, true}, {m.pat, true}, {readers[3].p, false}} {
+		f, r, err := dialSocket(c.p.api, c.p.name+"'s replay after the net message", "/v2/ws", url.Values{"channel": {m.main}, "after": {"0"}}, false)
+		if err != nil || f == nil {
+			return fmt.Errorf("a replaying socket: %s %d %s", errText(err), r.status, r.body)
+		}
+		err = waitFor(f.what+" to replay up to the control", modWait, func() (bool, string) {
+			for _, fr := range f.received() {
+				if bytes.Contains(fr, []byte(st.r3)) {
+					return true, ""
+				}
+			}
+			return false, fmt.Sprintf("%d frames", len(f.received()))
+		})
+		time.Sleep(500 * time.Millisecond)
+		tombs, names := 0, 0
+		for _, fr := range f.received() {
+			df := decodeFrame(fr)
+			if df.tombstone(m7) {
+				tombs++
+			}
+			if df.names(m7) {
+				names++
+			}
+			if bytes.Contains(fr, []byte(r7)) {
+				err = fmt.Errorf("a replayed frame holds the removed net message's text")
+			}
+		}
+		f.close()
+		if err != nil {
+			return err
+		}
+		if c.onNet && (tombs != 1 || names != 1) || !c.onNet && names != 0 {
+			return fmt.Errorf("%s replayed the removed net message in %d frames (%d tombstones), on the net: %v", c.p.name, names, tombs, c.onNet)
+		}
+	}
 	return nil
 }
