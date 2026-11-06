@@ -70,11 +70,15 @@ test.describe('the packaged shell', () => {
       'object',
       [
         'createAccount', 'joinAsGuest', 'keepCredential', 'redeemInvite', 'redeemInviteAsGuest', 'redeemSetupToken', 'redeemSignInLink', 'request', 'restore', 'resetPassword',
-        'serverAddress', 'signInWithCode', 'signInWithCredential', 'signInWithPassword', 'signOut', 'subscribe', 'uploadFile', 'downloadFile', 'saveFile',
+        'serverAddress', 'signInWithCode', 'signInWithCredential', 'signInWithPassword', 'signOut', 'replaceCredential', 'subscribe', 'uploadFile', 'downloadFile', 'saveFile',
         'profiles', 'profileAdd', 'profileRename', 'profileRemove', 'profileSwitch', 'storageRetry', 'profilesRecover',
         // The voice family (#1374): state, commands and its event, and no press,
         // release or transmit function.
         'voiceState', 'voiceJoin', 'voiceLeave', 'voiceRetry', 'voiceSetMute', 'voiceSetDeafen', 'voiceSetDevices', 'voiceSetTalkMode', 'onVoiceState',
+        // One-shot helper runs (#1378).
+        'voiceDevices', 'voiceSaveDevice',
+        // Talk-key setup (#1381).
+        'voiceKeyDevices', 'voiceSaveTalkBinding',
       ].sort(),
       true,
     ]);

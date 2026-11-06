@@ -26,9 +26,19 @@ import type {
   VoiceControlPTTProblem,
   VoiceControlReason,
   VoiceControlTalkMode,
+  VoiceDevice,
+  VoiceDevicesPipeWire,
 } from '../../schema/generated';
-import type { LoginRequestV1, RedeemSetupTokenRequestV1, ResetPasswordRequestV1, TOTPLoginRequestV1 } from '../../schema/auth';
-import type { JoinAccountRequestV1, JoinGuestRequestV1 } from '../../schema/guest';
+import type {
+  ChangePasswordRequestV1,
+  LoginRequestV1,
+  ReauthRequestV1,
+  RedeemSetupTokenRequestV1,
+  ResetPasswordRequestV1,
+  SetPasswordRequestV1,
+  TOTPLoginRequestV1,
+} from '../../schema/auth';
+import type { ConvertGuestRequestV1, JoinAccountRequestV1, JoinGuestRequestV1 } from '../../schema/guest';
 import type { RedeemInviteGuestRequestV1, RedeemInviteRequestV2 } from '../../schema/invite';
 import type { WhoAmIResponseV1 } from '../../schema/principal';
 import type { RedeemSignInLinkRequestV1 } from '../../schema/signin';
@@ -162,6 +172,14 @@ export type SignInOutcome =
   | { readonly ok: false; readonly kind: 'unkept' }
   | { readonly ok: false; readonly kind: 'challenge'; readonly challenge: string; readonly expiresAt: string };
 
+// Exactly an operation of the replacing family and the request body of its
+// type; main refuses any other key, type or size.
+export type ReplaceCredentialRequest =
+  | { readonly operation: 'changePassword'; readonly body: ChangePasswordRequestV1 }
+  | { readonly operation: 'setPassword'; readonly body: SetPasswordRequestV1 }
+  | { readonly operation: 'convertGuest'; readonly body: ConvertGuestRequestV1 }
+  | { readonly operation: 'reauth'; readonly body: ReauthRequestV1 };
+
 export type SignOutOutcome = 'ended' | 'unconfirmed' | 'unsent';
 
 // A live feed the renderer may subscribe to. Main owns the socket, the bearer
@@ -246,6 +264,13 @@ export interface ConchDesktopBridge {
   joinAsGuest(request: JoinGuestRequestV1): Promise<SignInOutcome>;
   createAccount(request: JoinAccountRequestV1): Promise<SignInOutcome>;
   signOut(): Promise<SignOutOutcome>;
+  // The writes that replace the credential they are sent with (issue #1422):
+  // change password, first password, a guest's conversion, and a
+  // re-authentication. Main sends the operation, rotates its bearer to the
+  // token the answer holds, and answers the account with the token left out
+  // (the client puts a stand-in in its place). The password and code are sent
+  // once and kept nowhere.
+  replaceCredential(request: ReplaceCredentialRequest): Promise<SignInOutcome>;
 
   // Attachments (issue #947). Upload sends the operation uploadFile; the
   // answer is the server's, validated. Download gives a file's bytes for a
@@ -319,6 +344,85 @@ export type VoiceCommandResult =
   | { readonly ok: true }
   | { readonly ok: false; readonly error: VoiceControlErrorCode | 'not-running' | 'busy' | 'unsupported' | 'lost' };
 
+// The helper's one-shot runs (issue #1378, D3-7): the device list and a save.
+// Why a run did not give what was asked; never text of the helper's.
+export type VoiceOneShotError =
+  | 'not-signed-in'
+  | 'not-installed'
+  | 'untrusted'
+  | 'busy'
+  | 'invalid'
+  | 'spawn-failed'
+  | 'timed-out'
+  | 'too-much-output'
+  | 'unsupported'
+  | 'failed'
+  | 'bad-output'
+  | 'cancelled';
+
+// The device list as the page gets it: the validated document's microphones
+// and speakers (each with its default flag), and whether PipeWire was
+// reached, and the names saved in voice.toml (issue #1421; absent when none is
+// saved, 'default' being said by absence). No path, nothing else of the
+// configuration.
+export type NativeVoiceDevicesResult =
+  | {
+      readonly ok: true;
+      readonly pipewire: VoiceDevicesPipeWire;
+      readonly synced: boolean;
+      readonly microphones: readonly VoiceDevice[];
+      readonly speakers: readonly VoiceDevice[];
+      readonly configuredInput?: string;
+      readonly configuredOutput?: string;
+    }
+  | { readonly ok: false; readonly error: VoiceOneShotError };
+
+// What `config set` saves from the page. A device is a name from the list or
+// 'default'; the talk mode a word of its vocabulary.
+export type VoiceDeviceKey = 'audio.input' | 'audio.output' | 'audio.talk_mode';
+
+export type VoiceSaveResult = { readonly ok: true } | { readonly ok: false; readonly error: VoiceOneShotError };
+
+// The keys main also saves, but only from the talk-key setup below: the page
+// never names them (issue #1381, D3-10). keys.mute and keys.deafen are not
+// set from here.
+export type VoiceBindingKey = 'keys.device' | 'keys.talk';
+
+// A device the person could bind a talk key on, listed by name from
+// /dev/input/by-id without opening anything. id is opaque and valid only for
+// the listing it came in. rule is present only for a device this user cannot
+// read: the exact udev rule the person would install themselves.
+export interface VoiceKeyDeviceRule {
+  // The file the line goes in, as root, by the person.
+  readonly file: string;
+  // The one rule line.
+  readonly line: string;
+  // What to do after: reload, then unplug and replug the device.
+  readonly reload: readonly string[];
+}
+
+export interface VoiceKeyDevice {
+  readonly id: string;
+  readonly name: string;
+  readonly kind: 'keyboard' | 'mouse';
+  readonly readable: boolean;
+  readonly rule?: VoiceKeyDeviceRule;
+}
+
+export type VoiceKeyDevicesResult =
+  | {
+      readonly ok: true;
+      readonly devices: readonly VoiceKeyDevice[];
+      // What a read grant means, to be shown before the rule is.
+      readonly disclosure: readonly string[];
+    }
+  | { readonly ok: false; readonly error: VoiceOneShotError };
+
+// Saves keys.device then keys.talk. failed says which of the two did not save.
+export type VoiceTalkBindingResult =
+  | { readonly ok: true }
+  | { readonly ok: false; readonly error: VoiceOneShotError; readonly failed?: 'device' | 'talk' };
+
 export interface DesktopVoiceBridge {
   voiceState(): Promise<NativeVoiceView>;
   voiceJoin(request: { readonly channel: ChannelName; readonly muted: boolean; readonly deafened: boolean }): Promise<NativeVoiceView>;
@@ -328,6 +432,10 @@ export interface DesktopVoiceBridge {
   voiceSetDeafen(deafened: boolean): Promise<VoiceCommandResult>;
   voiceSetDevices(devices: { readonly input?: string; readonly output?: string }): Promise<VoiceCommandResult>;
   voiceSetTalkMode(mode: VoiceControlTalkMode): Promise<VoiceCommandResult>;
+  voiceDevices(): Promise<NativeVoiceDevicesResult>;
+  voiceSaveDevice(request: { readonly key: VoiceDeviceKey; readonly value: string }): Promise<VoiceSaveResult>;
+  voiceKeyDevices(): Promise<VoiceKeyDevicesResult>;
+  voiceSaveTalkBinding(request: { readonly deviceId: string; readonly code: number }): Promise<VoiceTalkBindingResult>;
   onVoiceState(listener: (view: NativeVoiceView) => void): Unsubscribe;
 }
 

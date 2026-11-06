@@ -12,8 +12,9 @@
 // name a channel, a URL, a header or a method.
 import type { IpcMain } from 'electron';
 
-import type { BridgeReply, BridgeRequest, FeedRequest, SignInOutcome } from '../../web/src/platform/desktop/bridge.ts';
+import type { BridgeReply, BridgeRequest, FeedRequest, SignInOutcome, VoiceDeviceKey } from '../../web/src/platform/desktop/bridge.ts';
 import { VOICE_DEVICES_MAX_NAME_BYTES, voiceControlTalkMode, type VoiceControlTalkMode } from '../../web/src/schema/generated.ts';
+import { isPageSaveKey, keyCodeText, saveValueFits } from './voice/oneshot.ts';
 import { validChannel, validDeviceName } from './voice/protocol.ts';
 import { operations } from '../../web/src/platform/operations.ts';
 import { channelOf, INVOKED_FUNCTIONS, type Envelope, type InvokedFunction } from '../shared/bridge-names.ts';
@@ -21,7 +22,7 @@ import { isProfileId } from './profiles/ids.ts';
 import { MISMATCH, type ProfilesService } from './profiles/service.ts';
 import { parseFeedRequest, type Feeds } from './api/feeds.ts';
 import { targetOf, isOperationId } from './api/target.ts';
-import { invocable, type Service, type SignInStep } from './api/service.ts';
+import { invocable, type ReplaceStep, type Service, type SignInStep } from './api/service.ts';
 import { isFileId, parseUpload, MAX_UPLOAD_BYTES, type Files } from './files.ts';
 import { LINK_GESTURE_MS, type Gestures } from './gestures.ts';
 import type { DocumentGate } from './document.ts';
@@ -69,7 +70,7 @@ export type ProfilesApi = Pick<
   'view' | 'add' | 'rename' | 'remove' | 'switchTo' | 'retry' | 'recover' | 'signOut' | 'signedIn' | 'keptCredential' | 'signInPermitted'
 >;
 
-export type VoiceApi = Pick<VoiceService, 'state' | 'join' | 'leave' | 'retry' | 'setMute' | 'setDeafen' | 'setDevices' | 'setTalkMode'>;
+export type VoiceApi = Pick<VoiceService, 'state' | 'join' | 'leave' | 'retry' | 'setMute' | 'setDeafen' | 'setDevices' | 'setTalkMode' | 'devices' | 'saveDevice' | 'keyDevices' | 'saveTalkBinding'>;
 
 // What a sign-in step answers when the server's release is not one the app may
 // sign in to (issue #946): nothing was sent.
@@ -238,6 +239,20 @@ const hasExactKeys = (value: Record<string, unknown>, keys: readonly string[]): 
   return own.length === keys.length && keys.every((key) => own.includes(key));
 };
 
+const REPLACE_STEPS: readonly ReplaceStep[] = ['changePassword', 'setPassword', 'convertGuest', 'reauth'];
+
+// parseReplace is exactly { operation, body }: an operation of the replacing
+// family and a body that passes that operation's request validator. A password
+// is data here, never echoed: a refusal names the reason, not the value.
+function parseReplace(args: readonly unknown[]): readonly unknown[] | null {
+  const [request] = args;
+  if (args.length !== 1 || !isRecord(request) || !hasExactKeys(request, ['operation', 'body'])) return null;
+  const { operation, body } = request;
+  if (typeof operation !== 'string' || !(REPLACE_STEPS as readonly string[]).includes(operation)) return null;
+  if (!isRecord(body) || operations[operation as ReplaceStep].request?.(body).length !== 0) return null;
+  return [{ operation, body }];
+}
+
 const oneBoolean = (args: readonly unknown[]): readonly unknown[] | null => (args.length === 1 && typeof args[0] === 'boolean' ? args : null);
 
 function parseJoin(args: readonly unknown[]): readonly unknown[] | null {
@@ -246,6 +261,28 @@ function parseJoin(args: readonly unknown[]): readonly unknown[] | null {
   const { channel, muted, deafened } = request;
   if (!isChannel(channel) || typeof muted !== 'boolean' || typeof deafened !== 'boolean') return null;
   return [{ channel, muted, deafened }];
+}
+
+// A save is exactly a key `config set` takes from the page and a value that
+// fits it (a device name or `default`, a talk mode): checked again, in the
+// same way, by the one-shot run before anything is passed.
+function parseSaveDevice(args: readonly unknown[]): readonly unknown[] | null {
+  const [request] = args;
+  if (args.length !== 1 || !isRecord(request) || !hasExactKeys(request, ['key', 'value'])) return null;
+  const { key, value } = request;
+  // keys.device and keys.talk are not the page's to name: see parseTalkBinding.
+  if (!isPageSaveKey(key) || !saveValueFits(key, value)) return null;
+  return [{ key, value }];
+}
+
+// A talk binding is exactly an id from the last listing (an opaque string, no
+// longer than a UUID plus a margin; the service looks it up) and a key code.
+function parseTalkBinding(args: readonly unknown[]): readonly unknown[] | null {
+  const [request] = args;
+  if (args.length !== 1 || !isRecord(request) || !hasExactKeys(request, ['deviceId', 'code'])) return null;
+  const { deviceId, code } = request;
+  if (typeof deviceId !== 'string' || !/^[A-Za-z0-9-]{1,64}$/u.test(deviceId) || keyCodeText(code) === null) return null;
+  return [{ deviceId, code }];
 }
 
 // At least one of input and output; each a printable device name.
@@ -304,6 +341,22 @@ export const SPECS: Readonly<Record<InvokedFunction, Spec>> = {
   joinAsGuest: signIn('joinGuest'),
   createAccount: signIn('joinAccount'),
   signOut: { limit: 120, maxBytes: 0, parse: none, run: ({ profiles }) => profiles.signOut() },
+  // The writes that replace the credential they are sent with (issue #1422):
+  // main sends the write, takes the new token from the answer and keeps it;
+  // the renderer is answered the account, never the token. Rated as the
+  // sign-in steps are, since each carries a password.
+  replaceCredential: {
+    limit: 30,
+    maxBytes: 16 * 1024,
+    parse: parseReplace,
+    run: async ({ service, profiles }, [request]) => {
+      if (!profiles.signInPermitted()) return INCOMPATIBLE;
+      const { operation, body } = request as { operation: ReplaceStep; body: Record<string, unknown> };
+      // bound keeps the rotated credential where the old one was kept (the
+      // vault, for a member's), or binds the member a guest has become.
+      return bound(profiles, await service.replaceCredential(operation, body));
+    },
+  },
   // The saved server profiles (issue #945). Ids are 32 hex characters; a
   // label is plain text of at most 64 characters (main trims and checks it).
   profiles: { limit: 120, maxBytes: 0, parse: none, run: ({ profiles }) => profiles.view() },
@@ -399,6 +452,28 @@ export const SPECS: Readonly<Record<InvokedFunction, Spec>> = {
     parse: (args) => (args.length === 1 && typeof args[0] === 'string' && voiceControlTalkMode(args[0]).length === 0 ? args : null),
     run: ({ voice }, [mode]) => voice.setTalkMode(mode as VoiceControlTalkMode),
     gesture: (args) => args[0] === 'open',
+  },
+  // The helper's one-shot runs (issue #1378). The list is read-only; a save
+  // writes the person's voice.toml and is the person's act alone. Each is
+  // one process at a time, so the rates are low.
+  voiceDevices: { limit: 30, maxBytes: 0, parse: none, run: ({ voice }) => voice.devices() },
+  voiceSaveDevice: {
+    limit: 30,
+    maxBytes: 2 * VOICE_DEVICES_MAX_NAME_BYTES + 128,
+    parse: parseSaveDevice,
+    run: ({ voice }, [request]) => voice.saveDevice(request as { key: VoiceDeviceKey; value: string }),
+    gesture: true,
+  },
+  // Talk-key setup (issue #1381). The listing opens no device; a save writes
+  // the person's voice.toml and is the person's act alone. Two processes in a
+  // row, so the rate is low.
+  voiceKeyDevices: { limit: 20, maxBytes: 0, parse: none, run: ({ voice }) => voice.keyDevices() },
+  voiceSaveTalkBinding: {
+    limit: 10,
+    maxBytes: 256,
+    parse: parseTalkBinding,
+    run: ({ voice }, [request]) => voice.saveTalkBinding(request as { deviceId: string; code: number }),
+    gesture: true,
   },
   feedUnsubscribe: { limit: 600, maxBytes: 32, parse: feedId, run: ({ feeds, document }, [id]) => feeds.unsubscribe(document, id as number) },
 };

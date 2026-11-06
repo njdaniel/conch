@@ -206,6 +206,7 @@ export function createBridge(invoke: Invoke, listen: Listen, listenVoice: Listen
     joinAsGuest: call('joinAsGuest'),
     createAccount: call('createAccount'),
     signOut: call('signOut'),
+    replaceCredential: call('replaceCredential'),
     uploadFile: call('uploadFile'),
     downloadFile: call('downloadFile'),
     saveFile: call('saveFile'),
@@ -227,6 +228,10 @@ export function createBridge(invoke: Invoke, listen: Listen, listenVoice: Listen
     voiceSetDeafen: call('voiceSetDeafen'),
     voiceSetDevices: call('voiceSetDevices'),
     voiceSetTalkMode: call('voiceSetTalkMode'),
+    voiceDevices: call('voiceDevices'),
+    voiceSaveDevice: call('voiceSaveDevice'),
+    voiceKeyDevices: call('voiceKeyDevices'),
+    voiceSaveTalkBinding: call('voiceSaveTalkBinding'),
     onVoiceState,
   });
 }

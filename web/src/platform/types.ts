@@ -10,7 +10,7 @@
 import type { ComponentType, ReactNode } from 'react';
 import type { VoiceControlTalkMode } from '../schema/generated';
 import type { Call, OperationId } from './operations';
-import type { ChannelName, NativeVoiceView, VoiceCommandResult } from './desktop/bridge';
+import type { ChannelName, NativeVoiceDevicesResult, NativeVoiceView, VoiceCommandResult, VoiceDeviceKey, VoiceKeyDevicesResult, VoiceSaveResult, VoiceTalkBindingResult } from './desktop/bridge';
 
 // HttpTransport makes the requests of conchd that the operation table names.
 // Each takes a call (an operation id with its path values and query) and
@@ -146,6 +146,14 @@ export interface NativeVoice {
   setDeafen(deafened: boolean): Promise<VoiceCommandResult>;
   setDevices(devices: { readonly input?: string; readonly output?: string }): Promise<VoiceCommandResult>;
   setTalkMode(mode: VoiceControlTalkMode): Promise<VoiceCommandResult>;
+  // The helper's one-shot runs (issue #1379, D3-8): the device list, and a
+  // choice kept for the next session (`config set`). Neither changes a live
+  // session; setDevices and setTalkMode do.
+  devices(): Promise<NativeVoiceDevicesResult>;
+  saveDevice(request: { readonly key: VoiceDeviceKey; readonly value: string }): Promise<VoiceSaveResult>;
+  // The talk-key setup (issue #1382, D3-11). Absent when the bridge has none.
+  readonly keyDevices?: () => Promise<VoiceKeyDevicesResult>;
+  readonly saveTalkBinding?: (request: { readonly deviceId: string; readonly code: number }) => Promise<VoiceTalkBindingResult>;
 }
 
 export interface Platform {

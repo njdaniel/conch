@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { Client } from '../../main/api/client.ts';
 import { Session } from '../../main/api/session.ts';
@@ -263,5 +263,105 @@ describe('the identity', () => {
     const again = session.keepChallenge('c2', 5_000);
     session.adopt('x');
     expect(session.challenge(again, 0)).toBeNull();
+  });
+});
+
+describe('a 401 for a credential a password change has just replaced (issue #1046)', () => {
+  // A conchd that takes NEW only, and holds the answer to a request carrying
+  // OLD until released: the request was in flight when the change finished.
+  const OLD = 'conch_old_rotation_canary';
+  const NEW = 'conch_new_rotation_canary';
+  async function racing() {
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const fake = await serve((r, res) => {
+      const bearer = r.headers['authorization'];
+      const answer = (): void => {
+        if (bearer === `Bearer ${NEW}`) sendJson(res, 200, { channels: [] });
+        else sendJson(res, 401, { code: 'unauthorized', message: 'no' });
+      };
+      if (r.url === '/v1/channels' && bearer === `Bearer ${OLD}`) void gate.then(answer);
+      else answer();
+    });
+    const s = stack();
+    s.session.setOrigin(fake.origin);
+    s.session.adopt(OLD);
+    return { ...s, fake, release };
+  }
+  const bearers = (fake: Fake): (string | undefined)[] => fake.seen.map((x) => x.headers['authorization']);
+
+  it('re-sends a request in flight across the rotation exactly once, with the new credential, and stays signed in', async () => {
+    const { session, client, fake, release } = await racing();
+    const pending = client.send({ op: 'listChannels' });
+    await vi.waitFor(() => {
+      expect(fake.seen).toHaveLength(1);
+    });
+    expect(session.rotate(OLD, NEW)).toBe(true);
+    release();
+    expect(await pending).toMatchObject({ kind: 'answer', status: 200, ok: true });
+    expect(bearers(fake)).toEqual([`Bearer ${OLD}`, `Bearer ${NEW}`]);
+    expect(session.signedIn).toBe(true);
+  });
+
+  it('signs out when the re-send is refused too, and asks no third time', async () => {
+    const fake = await serve((_r, res) => {
+      sendJson(res, 401, { code: 'unauthorized', message: 'no' });
+    });
+    const { session, client } = stack();
+    session.setOrigin(fake.origin);
+    session.adopt(OLD);
+    const pending = client.send({ op: 'listChannels' });
+    session.rotate(OLD, NEW);
+    expect(await pending).toEqual({ kind: 'unauthorized' });
+    expect(session.signedIn).toBe(false);
+    expect(fake.seen).toHaveLength(2);
+  });
+
+  it('signs out on a 401 for the credential in force', async () => {
+    const { session, client, fake } = await racing();
+    session.rotate(OLD, 'conch_revoked_since');
+    expect(await client.send({ op: 'listChannels' })).toEqual({ kind: 'unauthorized' });
+    expect(session.signedIn).toBe(false);
+    expect(fake.seen).toHaveLength(1);
+  });
+
+  it.each([
+    ['a sign-out', (s: Session) => {
+        s.forget();
+      }, false],
+    ['a switch of account', (s: Session) => {
+        s.adopt('conch_other_account');
+      }, true],
+    ['a switch of server', (s: Session) => {
+        s.setOrigin('http://127.0.0.1:1');
+      }, false],
+  ])('does not re-send after %s', async (_name, change, signedIn) => {
+    const { session, client, fake, release } = await racing();
+    const pending = client.send({ op: 'listChannels' });
+    await vi.waitFor(() => {
+      expect(fake.seen).toHaveLength(1);
+    });
+    session.rotate(OLD, NEW);
+    change(session);
+    release();
+    expect(await pending).toEqual({ kind: 'none', reason: 'stale' });
+    expect(bearers(fake)).toEqual([`Bearer ${OLD}`]);
+    expect(session.signedIn).toBe(signedIn);
+  });
+
+  it('does not re-send a write that carries a password', async () => {
+    const fake = await serve((_r, res) => {
+      sendJson(res, 401, { code: 'unauthorized', message: 'no' });
+    });
+    const { session, client } = stack();
+    session.setOrigin(fake.origin);
+    session.adopt(OLD);
+    const pending = client.send({ op: 'convertGuest', body: { name: 'ada', password: 'pw-canary' } });
+    session.rotate(OLD, NEW);
+    expect(await pending).toEqual({ kind: 'unauthorized' });
+    expect(fake.seen).toHaveLength(1);
+    expect(session.signedIn).toBe(false);
   });
 });

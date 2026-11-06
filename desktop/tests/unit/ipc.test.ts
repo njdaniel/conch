@@ -319,6 +319,85 @@ describe('arguments', () => {
   });
 });
 
+describe('the credential-replacing writes (issue #1422)', () => {
+  const change = { operation: 'changePassword', body: { current: 'old-pw', password: 'new-pw' } };
+
+  it('passes a good request to replaceCredential with the operation and body, and nothing else', async () => {
+    const f = fixture();
+    await f.ipc.invoke(f.event(), 'replaceCredential', [change]);
+    await f.ipc.invoke(f.event(), 'replaceCredential', [{ operation: 'setPassword', body: { password: 'new-pw', proof: 'code' } }]);
+    await f.ipc.invoke(f.event(), 'replaceCredential', [{ operation: 'convertGuest', body: { name: 'ada', password: 'new-pw' } }]);
+    await f.ipc.invoke(f.event(), 'replaceCredential', [{ operation: 'reauth', body: { password: 'pw', code: '123456' } }]);
+    expect(f.calls).toEqual([
+      ['replaceCredential', ['changePassword', { current: 'old-pw', password: 'new-pw' }]],
+      ['replaceCredential', ['setPassword', { password: 'new-pw', proof: 'code' }]],
+      ['replaceCredential', ['convertGuest', { name: 'ada', password: 'new-pw' }]],
+      ['replaceCredential', ['reauth', { password: 'pw', code: '123456' }]],
+    ]);
+  });
+
+  it.each([
+    ['no argument', []],
+    ['a second argument', [change, 'x']],
+    ['a bare body', [{ current: 'a', password: 'b' }]],
+    ['a string', ['changePassword']],
+    ['an extra key', [{ ...change, token: 'conch_x' }]],
+    ['a missing body', [{ operation: 'changePassword' }]],
+    ['a missing operation', [{ body: change.body }]],
+    ['an extra key in the body', [{ operation: 'changePassword', body: { current: 'a', password: 'b', admin: true } }]],
+    ['a body of the wrong type', [{ operation: 'changePassword', body: { current: 1, password: 'b' } }]],
+    ['a body of another operation', [{ operation: 'changePassword', body: { name: 'ada', password: 'b' } }]],
+    ['an array body', [{ operation: 'reauth', body: [] }]],
+    ['an operation outside the family', [{ operation: 'login', body: { name: 'ada', password: 'b' } }]],
+    ['an operation that is not one', [{ operation: 'constructor', body: {} }]],
+    ['a non-string operation', [{ operation: 7, body: {} }]],
+    ['an oversize password', [{ operation: 'changePassword', body: { current: 'a', password: 'p'.repeat(20_000) } }]],
+  ])('refuses %s, executes nothing, and logs no password', async (_name, args) => {
+    const f = fixture();
+    expect(await f.ipc.invoke(f.event(), 'replaceCredential', args)).toEqual({ ok: false, kind: 'refused' });
+    expect(f.calls).toEqual([]);
+    expect(f.logs.join('\n')).not.toContain('old-pw');
+    expect(f.logs.join('\n')).not.toContain('new-pw');
+  });
+
+  it('limits its rate like the sign-in steps', async () => {
+    const f = fixture();
+    let accepted = 0;
+    for (let i = 0; i < 40; i++) if ((await f.ipc.invoke(f.event(), 'replaceCredential', [change])).ok) accepted++;
+    expect(accepted).toBe(30);
+    expect(f.logs.at(-1)).toContain('(rate)');
+  });
+
+  it('sends nothing when the server is not one the app may sign in to', async () => {
+    const f = fixture();
+    f.permit.value = false;
+    expect(await f.ipc.invoke(f.event(), 'replaceCredential', [change])).toEqual({ ok: true, value: { ok: false, kind: 'network', reason: 'incompatible' } });
+    expect(f.calls).toEqual([]);
+  });
+
+  it('keeps the rotated credential where the old one was kept, and answers the account without a token', async () => {
+    const f = fixture();
+    const who = { id: 7, kind: 'human', name: 'ada', role: 'member' } as const;
+    const bound: unknown[] = [];
+    const ipc = new Ipc({
+      owned: () => f.contents,
+      gate: f.gate,
+      service: { replaceCredential: () => Promise.resolve({ ok: true, who, answer: { revoked: 1 } }) } as unknown as Service,
+      feeds: {} as Feeds,
+      files: {} as Files,
+      gestures: { take: () => null },
+      profiles: { signInPermitted: () => true, signedIn: (account: unknown) => { bound.push(account); return Promise.resolve(true); } } as unknown as ProfilesApi,
+      voice: {} as VoiceApi,
+      now: () => 0,
+      log: () => undefined,
+    });
+    const answer = await ipc.invoke(f.event(), 'replaceCredential', [change]);
+    expect(answer).toEqual({ ok: true, value: { ok: true, who, answer: { revoked: 1 } } });
+    expect(JSON.stringify(answer)).not.toContain('token');
+    expect(bound).toEqual([{ id: 7, name: 'ada', lasting: true, guest: false }]);
+  });
+});
+
 describe('the registry', () => {
   it('registers one handler per invoked function and no other channel', () => {
     const f = fixture();
@@ -361,6 +440,11 @@ describe('the voice family (issue #1374)', () => {
     await f.ipc.invoke(f.event(), 'voiceSetDevices', [{ input: 'Mic', output: 'Speakers' }]);
     await f.ipc.invoke(f.event(), 'voiceSetTalkMode', ['open']);
     await f.ipc.invoke(f.event(), 'voiceSetTalkMode', ['push_to_talk']);
+    await f.ipc.invoke(f.event(), 'voiceDevices', []);
+    await f.ipc.invoke(f.event(), 'voiceSaveDevice', [{ key: 'audio.output', value: 'default' }]);
+    await f.ipc.invoke(f.event(), 'voiceSaveDevice', [{ key: 'audio.talk_mode', value: 'open' }]);
+    await f.ipc.invoke(f.event(), 'voiceKeyDevices', []);
+    await f.ipc.invoke(f.event(), 'voiceSaveTalkBinding', [{ deviceId: 'abc-123', code: 275 }]);
     expect(f.calls).toEqual([
       ['voice.state', []],
       ['voice.join', [join]],
@@ -372,6 +456,11 @@ describe('the voice family (issue #1374)', () => {
       ['voice.setDevices', [{ input: 'Mic', output: 'Speakers' }]],
       ['voice.setTalkMode', ['open']],
       ['voice.setTalkMode', ['push_to_talk']],
+      ['voice.devices', []],
+      ['voice.saveDevice', [{ key: 'audio.output', value: 'default' }]],
+      ['voice.saveDevice', [{ key: 'audio.talk_mode', value: 'open' }]],
+      ['voice.keyDevices', []],
+      ['voice.saveTalkBinding', [{ deviceId: 'abc-123', code: 275 }]],
     ]);
     expect(f.ipc.refusals).toBe(0);
   });
@@ -429,6 +518,50 @@ describe('the voice family (issue #1374)', () => {
     ['voiceSetTalkMode', [{ mode: 'open' }]],
     ['voiceSetTalkMode', ['open', 'extra']],
     ['voiceSetTalkMode', ['toString']],
+    ['voiceKeyDevices', [1]],
+    ['voiceSaveTalkBinding', []],
+    ['voiceSaveTalkBinding', [{ deviceId: 'abc' }]],
+    ['voiceSaveTalkBinding', [{ code: 275 }]],
+    ['voiceSaveTalkBinding', [{ deviceId: 'abc', code: 275, extra: 1 }]],
+    ['voiceSaveTalkBinding', [{ deviceId: '/dev/input/by-id/x-event-kbd', code: 275 }]],
+    ['voiceSaveTalkBinding', [{ deviceId: '', code: 275 }]],
+    ['voiceSaveTalkBinding', [{ deviceId: 'x'.repeat(65), code: 275 }]],
+    ['voiceSaveTalkBinding', [{ deviceId: 5, code: 275 }]],
+    ['voiceSaveTalkBinding', [{ deviceId: 'abc', code: 0 }]],
+    ['voiceSaveTalkBinding', [{ deviceId: 'abc', code: 768 }]],
+    ['voiceSaveTalkBinding', [{ deviceId: 'abc', code: 1.5 }]],
+    ['voiceSaveTalkBinding', [{ deviceId: 'abc', code: -1 }]],
+    ['voiceSaveTalkBinding', [{ deviceId: 'abc', code: '275' }]],
+    ['voiceSaveTalkBinding', [{ deviceId: 'abc', code: 'KEY_F13' }]],
+    ['voiceSaveTalkBinding', [{ deviceId: 'abc', code: Number.NaN }]],
+    ['voiceSaveTalkBinding', [{ deviceId: 'abc', code: 275 }, 'extra']],
+    ['voiceDevices', [1]],
+    ['voiceDevices', ['--json']],
+    ['voiceSaveDevice', []],
+    ['voiceSaveDevice', ['audio.input']],
+    ['voiceSaveDevice', [{ key: 'audio.input' }]],
+    ['voiceSaveDevice', [{ value: 'Mic' }]],
+    ['voiceSaveDevice', [{ key: 'audio.input', value: 'Mic', extra: 1 }]],
+    ['voiceSaveDevice', [{ key: 'audio.input', value: 'Mic' }, 'extra']],
+    // Only the keys D3-7 saves; the key bindings are D3-10.
+    ['voiceSaveDevice', [{ key: 'keys.talk', value: 'KEY_F13' }]],
+    ['voiceSaveDevice', [{ key: 'keys.device', value: '/dev/input/by-id/x' }]],
+    ['voiceSaveDevice', [{ key: 'server', value: 'http://evil.example' }]],
+    ['voiceSaveDevice', [{ key: 'audio.release_tail_ms', value: '100' }]],
+    ['voiceSaveDevice', [{ key: '--help', value: 'Mic' }]],
+    ['voiceSaveDevice', [{ key: 'toString', value: 'Mic' }]],
+    ['voiceSaveDevice', [{ key: 5, value: 'Mic' }]],
+    ['voiceSaveDevice', [{ key: 'audio.input', value: 5 }]],
+    ['voiceSaveDevice', [{ key: 'audio.input', value: '' }]],
+    ['voiceSaveDevice', [{ key: 'audio.input', value: 'a"b' }]],
+    ['voiceSaveDevice', [{ key: 'audio.output', value: 'a\\b' }]],
+    ['voiceSaveDevice', [{ key: 'audio.input', value: 'a\nb' }]],
+    ['voiceSaveDevice', [{ key: 'audio.input', value: 'a\u2028b' }]],
+    ['voiceSaveDevice', [{ key: 'audio.input', value: 'a\ud800b' }]],
+    ['voiceSaveDevice', [{ key: 'audio.input', value: 'x'.repeat(256) }]],
+    ['voiceSaveDevice', [{ key: 'audio.talk_mode', value: 'hold' }]],
+    ['voiceSaveDevice', [{ key: 'audio.talk_mode', value: 'default' }]],
+    ['voiceSaveDevice', [{ key: 'audio.talk_mode', value: 'OPEN' }]],
   ])('refuses a bad argument before the service is called: %s %j', async (name, args) => {
     const f = fixture();
     f.input.recent = true;
@@ -460,6 +593,8 @@ describe('the voice family (issue #1374)', () => {
     ['voiceJoin', [{ channel: 'general', muted: false, deafened: false }]],
     ['voiceRetry', []],
     ['voiceSetTalkMode', ['open']],
+    ['voiceSaveDevice', [{ key: 'audio.input', value: 'Mic' }]],
+    ['voiceSaveTalkBinding', [{ deviceId: 'abc', code: 275 }]],
   ] as const)('refuses %s without a recent gesture and executes nothing', async (name, args) => {
     const f = fixture();
     expect(await f.ipc.invoke(f.event(), name, args)).toEqual({ ok: false, kind: 'refused' });
@@ -474,6 +609,8 @@ describe('the voice family (issue #1374)', () => {
     const f = fixture();
     for (const [name, args] of [
       ['voiceState', []],
+      ['voiceDevices', []],
+      ['voiceKeyDevices', []],
       ['voiceLeave', []],
       ['voiceSetMute', [true]],
       ['voiceSetDeafen', [true]],
@@ -511,6 +648,8 @@ describe('the voice family (issue #1374)', () => {
     const calls: [string, unknown[]][] = [
       ['voiceState', []], ['voiceJoin', [join]], ['voiceLeave', []], ['voiceRetry', []], ['voiceSetMute', [true]],
       ['voiceSetDeafen', [true]], ['voiceSetDevices', [{ input: 'Mic' }]], ['voiceSetTalkMode', ['open']],
+      ['voiceDevices', []], ['voiceSaveDevice', [{ key: 'audio.input', value: 'Mic' }]],
+      ['voiceKeyDevices', []], ['voiceSaveTalkBinding', [{ deviceId: 'abc', code: 275 }]],
     ];
     expect(calls.map(([name]) => name).sort()).toEqual([...VOICE_FUNCTIONS].sort());
     for (const [name, args] of calls) expect(await f.ipc.invoke(event, name, args), name).toEqual({ ok: false, kind: 'refused' });

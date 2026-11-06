@@ -44,6 +44,7 @@ function install(): Subscription[] {
     joinAsGuest: unexpected('joinAsGuest'),
     createAccount: unexpected('createAccount'),
     signOut: unexpected('signOut'),
+    replaceCredential: unexpected('replaceCredential'),
     profiles: unexpected('profiles'),
     profileAdd: unexpected('profileAdd'),
     profileRename: unexpected('profileRename'),

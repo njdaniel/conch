@@ -14,9 +14,17 @@
 // never in argv; nothing here logs either. The environment is readable by
 // same-user processes, which is outside the vault's at-rest guarantee
 // (linux-desktop.md §4.1).
-import { spawn as nodeSpawn, type ChildProcessWithoutNullStreams, type SpawnOptionsWithStdioTuple, type StdioPipe } from 'node:child_process';
+import {
+  spawn as nodeSpawn,
+  type ChildProcessByStdio,
+  type ChildProcessWithoutNullStreams,
+  type SpawnOptionsWithStdioTuple,
+  type StdioNull,
+  type StdioPipe,
+} from 'node:child_process';
 import { lstat, realpath } from 'node:fs/promises';
 import { dirname, isAbsolute, join, sep } from 'node:path';
+import type { Readable } from 'node:stream';
 
 import {
   VOICE_CONTROL_PIPE_FLAG,
@@ -152,19 +160,33 @@ export interface HelperEnvInput {
   readonly nonce: string;
 }
 
+// baseEnv is the allowlisted names main has and CONCH_CONFIG_DIR: what every
+// run of the helper gets, whatever it is for.
+function baseEnv(parent: NodeJS.ProcessEnv, configDir: string): Record<string, string> {
+  const env: Record<string, string> = Object.create(null) as Record<string, string>;
+  for (const name of PASSED_THROUGH) {
+    const value = parent[name];
+    if (value !== undefined && value !== '' && !value.includes('\0')) env[name] = value;
+  }
+  if (!isAbsolute(configDir) || configDir.includes('\0')) throw new Error('voice: the configuration directory must be an absolute path');
+  env[CONFIG_DIR_ENV] = configDir;
+  return env;
+}
+
+// oneShotEnv is the environment of `devices` and `config set` (issue #1378):
+// the same allowlist and the profile's CONCH_CONFIG_DIR, with no CONCH_TOKEN
+// and no nonce, because neither command needs a login or an events endpoint.
+export function oneShotEnv(parent: NodeJS.ProcessEnv, configDir: string): Record<string, string> {
+  return baseEnv(parent, configDir);
+}
+
 // helperEnv builds the child's environment from empty: the allowlisted
 // names main has, then CONCH_CONFIG_DIR, CONCH_TOKEN (the start says
 // credential env) and CONCH_VOICE_ATTACH, and nothing else. A value holding
 // a NUL is left out rather than truncated.
 export function helperEnv(input: HelperEnvInput): Record<string, string> {
-  const env: Record<string, string> = Object.create(null) as Record<string, string>;
-  for (const name of PASSED_THROUGH) {
-    const value = input.parent[name];
-    if (value !== undefined && value !== '' && !value.includes('\0')) env[name] = value;
-  }
-  if (!isAbsolute(input.configDir) || input.configDir.includes('\0')) throw new Error('voice: the configuration directory must be an absolute path');
+  const env = baseEnv(input.parent, input.configDir);
   if (input.token.trim() === '' || input.token.includes('\0')) throw new Error('voice: no credential to hand to the helper');
-  env[CONFIG_DIR_ENV] = input.configDir;
   env[TOKEN_ENV] = input.token;
   env[VOICE_CONTROL_PIPE_NONCE_ENV] = input.nonce;
   return env;
@@ -194,6 +216,19 @@ export type SpawnFn = (
 export function spawnOptions(env: Record<string, string>): SpawnOptionsWithStdioTuple<StdioPipe, StdioPipe, StdioPipe> {
   return { stdio: ['pipe', 'pipe', 'pipe'], detached: false, shell: false, windowsHide: true, env, cwd: '/' };
 }
+
+// OneShotChild is a one-shot run's process: no standard input to write to.
+export type OneShotChild = ChildProcessByStdio<null, Readable, Readable>;
+
+export type OneShotSpawnFn = (command: string, args: readonly string[], options: SpawnOptionsWithStdioTuple<StdioNull, StdioPipe, StdioPipe>) => OneShotChild;
+
+// oneShotSpawnOptions: as spawnOptions, but standard input is /dev/null
+// ('ignore'), so that the run can wait for nothing from main.
+export function oneShotSpawnOptions(env: Record<string, string>): SpawnOptionsWithStdioTuple<StdioNull, StdioPipe, StdioPipe> {
+  return { stdio: ['ignore', 'pipe', 'pipe'], detached: false, shell: false, windowsHide: true, env, cwd: '/' };
+}
+
+export const defaultOneShotSpawn: OneShotSpawnFn = (command, args, options) => nodeSpawn(command, args, options);
 
 export function spawnHelper(
   spawnFn: SpawnFn,
