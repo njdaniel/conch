@@ -119,6 +119,7 @@ desktop-node:
 desktop-check: desktop-node
 	./scripts/desktop-electron-test.sh
 	./scripts/desktop-lint-test.sh
+	./scripts/desktop-voice-helper-test.sh
 	./scripts/desktop-lint.sh
 	./scripts/web-depgate.sh desktop
 	./scripts/web-licences.sh desktop/package-lock.json desktop/licences-allowlist.txt
@@ -129,8 +130,10 @@ desktop-check: desktop-node
 
 # The unpacked Linux app, desktop/dist/linux-unpacked/. Fetches the pinned
 # Electron into ~/.cache/conch/electron once (scripts/desktop-electron.sh checks its
-# SHA-256 twice) and builds web/ for it without touching web/dist. Not part of
-# `make check`.
+# SHA-256 twice) and builds web/ for it without touching web/dist. It also
+# copies bin/conch-voice (`make rust-build`, or CONCH_VOICE_BIN) to
+# resources/conch-voice and says whether it did; DESKTOP_REQUIRE_VOICE=1 fails
+# without one (#1377). Not part of `make check`.
 desktop-build: desktop-node
 	./scripts/desktop-build.sh
 

@@ -8,7 +8,8 @@
 //! lists the audio devices and helps set the key device up; `conch-voice keys <device>`
 //! helps with the keys. `conch-voice config set audio.input|audio.output <name>` saves the
 //! microphone or the speakers in `voice.toml` (`config_cmd.rs`), and `config set
-//! audio.talk_mode push_to_talk|open` the talk mode: the only things this program writes
+//! audio.talk_mode push_to_talk|open` the talk mode; `config set|unset keys.device|keys.talk|
+//! keys.mute|keys.deafen` the key device and bindings: the only things this program writes
 //! there. `conch-voice managed` is what `conch` starts to run voice inside
 //! its TUI (`managed.rs`): it takes no channel, server or login on its command line, and
 //! its own test options are hidden from the help and never read from anywhere but the
@@ -38,7 +39,7 @@ use conch_voice_api::{
 };
 use conch_voice_audio::{FRAME_MS, SAMPLE_RATE, SignalMeter};
 use conch_voice_control::{
-    AudioKey, Config, ConfigOverrides, DEFAULT_SERVER, KeyBindings, TalkMode,
+    AudioKey, Config, ConfigOverrides, DEFAULT_SERVER, KeyBindings, KeysKey, TalkMode,
 };
 use log::LevelFilter;
 
@@ -234,6 +235,19 @@ pub enum Invocation {
         /// The keyboard's event device.
         device: PathBuf,
     },
+    /// `conch-voice config set keys.<key> <value>`.
+    ConfigSetKeys {
+        /// The `[keys]` key to save.
+        key: KeysKey,
+        /// For the device a path under `/dev/input/`; for a binding a `KEY_*` name or a
+        /// decimal code. Checked, and not to be logged or echoed.
+        value: String,
+    },
+    /// `conch-voice config unset keys.<key>`.
+    ConfigUnset {
+        /// The `[keys]` key to remove.
+        key: KeysKey,
+    },
     /// `conch-voice config set <key> <value>`.
     ConfigSet {
         /// The device, or the talk mode, to save.
@@ -245,10 +259,21 @@ pub enum Invocation {
 }
 
 /// The keys `config set` takes, as they are spelled on its command line. No other is
-/// written: `server`, `channel` and `[keys]` decide where the login goes and what is read
-/// from a keyboard, and are changed by hand only; the open microphone's level and hang are
-/// changed by hand too.
-pub const CONFIG_SET_KEYS: [&str; 3] = ["audio.input", "audio.output", "audio.talk_mode"];
+/// written: `server` and `channel` decide where the login goes, and are changed by hand
+/// only; the open microphone's level and hang are changed by hand too. The four `keys.*`
+/// name what is read from an input device, and are checked as the file is checked.
+pub const CONFIG_SET_KEYS: [&str; 7] = [
+    "audio.input",
+    "audio.output",
+    "audio.talk_mode",
+    "keys.device",
+    "keys.talk",
+    "keys.mute",
+    "keys.deafen",
+];
+
+/// The keys `config unset` removes: the four under `[keys]`, which `set` writes.
+pub const CONFIG_UNSET_KEYS: [&str; 4] = ["keys.device", "keys.talk", "keys.mute", "keys.deafen"];
 
 /// One line: this binary's version and the audio frame it is built for.
 #[must_use]
@@ -409,34 +434,54 @@ pub fn command() -> Command {
                 .help("The keyboard's event device, by its path under /dev/input/by-id"),
         );
     let set = Command::new("set")
-        .about("Save the microphone, the speakers or the talk mode in voice.toml, keeping the rest of the file as written")
+        .about("Save the microphone, the speakers, the talk mode, the key device or a key binding in voice.toml, keeping the rest of the file as written")
         .long_about(
-            "Saves the microphone (audio.input), the speakers (audio.output) or the talk mode \
-             (audio.talk_mode: push_to_talk, or open for an open microphone) in voice.toml \
-             in the configuration directory, which join, managed and conch's TUI read. Only \
-             that one value changes: comments, the order of keys and every other key stay \
-             as written. The file is created, private, if there is none; the directory is \
-             not. A voice.toml that is a link, that others can write, that is refused as it \
-             stands, or whose [audio] is written inline or with dotted keys is left alone, \
-             to be changed by hand. Prints nothing on success.",
+            "Saves the microphone (audio.input), the speakers (audio.output), the talk mode \
+             (audio.talk_mode: push_to_talk, or open for an open microphone), the input \
+             device to read (keys.device: a path under /dev/input/) or a key binding \
+             (keys.talk, keys.mute, keys.deafen: a KEY_* name or a key code from 1 to 767) \
+             in voice.toml in the configuration directory, which join, managed and conch's \
+             TUI read. Only that one value changes: comments, the order of keys and every \
+             other key stay as written. The file is created, private, if there is none; the \
+             directory is not. A voice.toml that is a link, that others can write, that is \
+             refused as it stands, or whose [audio] or [keys] is written inline or with \
+             dotted keys is left alone, to be changed by hand. Prints nothing on success.",
         )
         .arg(
             Arg::new("key")
                 .required(true)
                 .value_name("KEY")
                 .value_parser(CONFIG_SET_KEYS)
-                .help("audio.input, audio.output or audio.talk_mode"),
+                .help("audio.input, audio.output, audio.talk_mode, keys.device, keys.talk, keys.mute or keys.deafen"),
         )
         .arg(
             Arg::new("value")
                 .required(true)
                 .value_name("VALUE")
-                .help("For a device, its name as `conch-voice devices` lists it, or `default` for PipeWire's default; for audio.talk_mode, push_to_talk or open"),
+                .help("For a device, its name as `conch-voice devices` lists it, or `default` for PipeWire's default; for audio.talk_mode, push_to_talk or open; for keys.device, a path under /dev/input/; for keys.talk, keys.mute and keys.deafen, a KEY_* name or a key code"),
+        );
+    let unset = Command::new("unset")
+        .about("Remove the key device or a key binding from voice.toml")
+        .long_about(
+            "Removes one line under [keys] of voice.toml in the configuration directory: \
+             keys.device, keys.talk, keys.mute or keys.deafen. Nothing else changes. A key \
+             that is not there, or no file, is not an error and writes nothing. A voice.toml \
+             that is a link, that others can write, that is refused as it stands, or whose \
+             [keys] is written inline or with dotted keys is left alone, to be changed by \
+             hand. Prints nothing on success.",
+        )
+        .arg(
+            Arg::new("key")
+                .required(true)
+                .value_name("KEY")
+                .value_parser(CONFIG_UNSET_KEYS)
+                .help("keys.device, keys.talk, keys.mute or keys.deafen"),
         );
     let config = Command::new("config")
-        .about("Change voice.toml: the microphone, the speakers and the talk mode")
+        .about("Change voice.toml: the microphone, the speakers, the talk mode, the key device and the key bindings")
         .subcommand_required(true)
-        .subcommand(set);
+        .subcommand(set)
+        .subcommand(unset);
     Command::new("conch-voice")
         .about("The Conch voice client: push-to-talk voice for a channel")
         .after_help(
@@ -460,16 +505,54 @@ pub fn command() -> Command {
         .subcommand(config)
 }
 
-/// What `config set` was given, checked: the key is one it writes, and the name can be
+/// The `[keys]` key a command line spells, or `None`.
+fn keys_key(name: Option<&str>) -> Option<KeysKey> {
+    match name {
+        Some("keys.device") => Some(KeysKey::Device),
+        Some("keys.talk") => Some(KeysKey::Talk),
+        Some("keys.mute") => Some(KeysKey::Mute),
+        Some("keys.deafen") => Some(KeysKey::Deafen),
+        _ => None,
+    }
+}
+
+/// What `config set` or `config unset` was given, checked: the key is one it writes, and the name can be
 /// written into the file as it is, or the talk mode is one there is. A value that cannot is
 /// refused without being shown, as `devices` does not show a name.
 fn config_set(matches: &clap::ArgMatches) -> Result<Invocation, clap::Error> {
+    if let Some(("unset", unset)) = matches.subcommand() {
+        let key = keys_key(unset.get_one::<String>("key").map(String::as_str));
+        return match key {
+            Some(key) => Ok(Invocation::ConfigUnset { key }),
+            None => Err(command().error(
+                clap::error::ErrorKind::InvalidValue,
+                "config unset takes keys.device, keys.talk, keys.mute or keys.deafen",
+            )),
+        };
+    }
     let Some(("set", set)) = matches.subcommand() else {
         return Err(command().error(
             clap::error::ErrorKind::MissingSubcommand,
-            "config needs a command: set",
+            "config needs a command: set or unset",
         ));
     };
+    if let Some(key) = keys_key(set.get_one::<String>("key").map(String::as_str)) {
+        // Refused with a reason that does not repeat the value, as a device name is.
+        return match set.get_one::<String>("value") {
+            Some(value) if key.check(value).is_ok() => Ok(Invocation::ConfigSetKeys {
+                key,
+                value: value.clone(),
+            }),
+            _ => Err(command().error(
+                clap::error::ErrorKind::ValueValidation,
+                if key == KeysKey::Device {
+                    "keys.device is a path under /dev/input/, such as one under /dev/input/by-id, with no quotation mark, backslash or control character"
+                } else {
+                    "a key binding is a KEY_* name this client knows, or a key code from 1 to 767"
+                },
+            )),
+        };
+    }
     let key = match set.get_one::<String>("key").map(String::as_str) {
         Some("audio.input") => AudioKey::Input,
         Some("audio.output") => AudioKey::Output,
@@ -477,7 +560,7 @@ fn config_set(matches: &clap::ArgMatches) -> Result<Invocation, clap::Error> {
         _ => {
             return Err(command().error(
                 clap::error::ErrorKind::InvalidValue,
-                "config set takes audio.input, audio.output or audio.talk_mode",
+                "config set takes audio.input, audio.output, audio.talk_mode, keys.device, keys.talk, keys.mute or keys.deafen",
             ));
         }
     };
@@ -1353,12 +1436,12 @@ mod tests {
             }
         }
         for bad in [
-            // Only the two devices: never what decides where the login goes, or which
-            // keyboard is read.
+            // Never what decides where the login goes; the keys are `keys.*`, tested
+            // beside this one.
             &["set", "server", "http://evil.example"][..],
             &["set", "channel", "ops"],
-            &["set", "keys.device", "/dev/input/event3"],
-            &["set", "keys.talk", "KEY_F13"],
+            &["set", "keys", "x"],
+            &["set", "keys.other", "x"],
             &["set", "audio.release_tail_ms", "100"],
             &["set", "audio", "x"],
             &["set", "input", "x"],
@@ -1390,6 +1473,66 @@ mod tests {
     /// The talk mode is saved by the same command, so that the TUI can keep the person's
     /// choice; only its two names are taken, and the open microphone's level and hang are
     /// not keys of the command at all.
+    #[test]
+    fn config_set_and_unset_take_the_key_device_and_bindings_and_refuse_the_rest() {
+        for (key, name) in [
+            ("keys.device", KeysKey::Device),
+            ("keys.talk", KeysKey::Talk),
+            ("keys.mute", KeysKey::Mute),
+            ("keys.deafen", KeysKey::Deafen),
+        ] {
+            let value = if name == KeysKey::Device {
+                "/dev/input/by-id/usb-Example-event-kbd"
+            } else {
+                "275"
+            };
+            assert_eq!(
+                parse(["conch-voice", "config", "set", key, value]).unwrap(),
+                Invocation::ConfigSetKeys {
+                    key: name,
+                    value: value.to_owned()
+                }
+            );
+            assert_eq!(
+                parse(["conch-voice", "config", "unset", key]).unwrap(),
+                Invocation::ConfigUnset { key: name }
+            );
+        }
+        for code in ["1", "275", "767", "KEY_F13", "key_f13"] {
+            assert!(parse(["conch-voice", "config", "set", "keys.talk", code]).is_ok());
+        }
+        for (key, value) in [
+            ("keys.talk", "0"),
+            ("keys.talk", "768"),
+            ("keys.mute", "KEY_NOPE_FAKE"),
+            ("keys.deafen", ""),
+            ("keys.device", "/tmp/event3"),
+            ("keys.device", "/dev/input"),
+            ("keys.device", "/dev/input/"),
+            ("keys.device", "/dev/input/../../etc/passwd"),
+            ("keys.device", "/dev/input/by-id/a\"b"),
+            ("keys.device", "/dev/input/by-id/a\nb"),
+            ("keys.device", "/dev/input/by-id/a\\b"),
+            ("keys.device", " /dev/input/event3"),
+        ] {
+            let error = parse(["conch-voice", "config", "set", key, value]).unwrap_err();
+            assert_eq!(error.exit_code(), 2, "{key} {value:?}");
+            // One line, and the value is not repeated in it.
+            let text = error.to_string();
+            assert!(value.len() <= 11 || !text.contains(value), "{text}");
+        }
+        for bad in [
+            &["config", "unset"][..],
+            &["config", "unset", "audio.input"],
+            &["config", "unset", "server"],
+            &["config", "unset", "keys.talk", "extra"],
+        ] {
+            let mut line = vec!["conch-voice"];
+            line.extend(bad);
+            assert_eq!(parse(line).unwrap_err().exit_code(), 2, "{bad:?}");
+        }
+    }
+
     #[test]
     fn config_set_takes_the_talk_mode_by_its_two_names_only() {
         for value in ["push_to_talk", "open"] {
