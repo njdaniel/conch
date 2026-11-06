@@ -799,8 +799,11 @@ describe('the platform seam', () => {
 
   it('keeps the desktop adapter out of the browser graph', () => {
     // Only the build-selected alias reaches the adapter; no source imports it.
+    // A type-only import of the bridge contract is erased and is allowed (the
+    // native-voice view types, issue #1375).
+    const typeOnlyBridge = /^import type [^;]*from\s+'[^']*desktop\/bridge';?$/gm;
     const importing = Object.entries(sources)
-      .filter(([path, code]) => !path.startsWith('./platform/desktop/') && /platform\/desktop|from\s+['"]\.\/desktop/.test(code))
+      .filter(([path, code]) => !path.startsWith('./platform/desktop/') && /platform\/desktop|from\s+['"]\.\/desktop/.test(code.replace(typeOnlyBridge, '')))
       .map(([path]) => path);
     expect(importing).toEqual([]);
     expect(sources['./platform/index.ts']).toContain("from '#platform-selected'");
