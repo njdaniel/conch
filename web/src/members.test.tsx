@@ -535,3 +535,68 @@ describe('pending administration actions on a channel switch', () => {
     expect(screen.queryByText('old channel refusal')).toBeNull();
   });
 });
+
+describe('a person changing presence keeps their open menu and question (issue #1450)', () => {
+  const online = (id: number, state: Entry['state']): Entry[] => people.map((p) => (p.id === id ? { ...p, state } : p));
+
+  it('keeps the menu open, with focus in it, and a choice still works', async () => {
+    vi.mocked(api.removeChannelMember).mockResolvedValue({ ok: true, value: null });
+    const p = props('operator');
+    const view = render(<Members {...p} people={online(3, 'offline')} />);
+    openMenu('avery');
+    view.rerender(<Members {...p} people={online(3, 'online')} />);
+    const menu = screen.getByRole('menu', { name: 'Actions for avery' });
+    expect(menu.contains(document.activeElement)).toBe(true);
+    fireEvent.click(within(menu).getByRole('menuitem', { name: 'Remove from channel' }));
+    confirmRemoval('avery');
+    await waitFor(() => {
+      expect(api.removeChannelMember).toHaveBeenCalledWith('general', 3);
+    });
+  });
+
+  it('keeps a pending removal question, with focus on Cancel, and Yes still works', async () => {
+    vi.mocked(api.removeChannelMember).mockResolvedValue({ ok: true, value: null });
+    const p = props('operator');
+    const view = render(<Members {...p} people={online(3, 'online')} />);
+    choose('avery', 'Remove from channel');
+    view.rerender(<Members {...p} people={online(3, 'offline')} />);
+    const group = within(row('avery')).getByRole('group');
+    expect(document.activeElement).toBe(within(group).getByRole('button', { name: 'Cancel' }));
+    confirmRemoval('avery');
+    await waitFor(() => {
+      expect(api.removeChannelMember).toHaveBeenCalledWith('general', 3);
+    });
+  });
+
+  it('keeps a pending ban question', () => {
+    const p = props('operator');
+    const view = render(<Members {...p} people={online(3, 'online')} />);
+    choose('avery', 'Ban from channel');
+    expect(within(row('avery')).queryByRole('group')).not.toBeNull();
+    view.rerender(<Members {...p} people={online(3, 'offline')} />);
+    expect(within(row('avery')).queryByRole('group')).not.toBeNull();
+  });
+});
+
+describe('a removed person does not get their menu or question back (issue #1450)', () => {
+  it.each(['Remove from channel', 'Ban from channel'])('%s: closed after the person leaves and returns', (item) => {
+    const p = props('operator');
+    const without = { ...p, members: memberList.filter((m) => m.principal_id !== 3) };
+    const view = render(<Members {...p} people={people} />);
+    choose('avery', item);
+    view.rerender(<Members {...without} people={people.filter((e) => e.id !== 3)} />);
+    view.rerender(<Members {...p} people={people} />);
+    expect(within(row('avery')).queryByRole('group')).toBeNull();
+    expect(screen.queryByRole('menu')).toBeNull();
+  });
+
+  it('an open menu is closed after the person leaves and returns', () => {
+    const p = props('operator');
+    const without = { ...p, members: memberList.filter((m) => m.principal_id !== 3) };
+    const view = render(<Members {...p} people={people} />);
+    openMenu('avery');
+    view.rerender(<Members {...without} people={people.filter((e) => e.id !== 3)} />);
+    view.rerender(<Members {...p} people={people} />);
+    expect(screen.queryByRole('menu')).toBeNull();
+  });
+});
