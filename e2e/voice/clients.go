@@ -34,10 +34,12 @@ import (
 // jitter buffer.
 
 // The tone each client's microphone plays, and every client's sink looks for.
+// toneShare is C7's screen-share audio in the companion playback scenario.
 const (
-	toneAnn = 440
-	toneBen = 880
-	toneCy  = 1320
+	toneAnn   = 440
+	toneBen   = 880
+	toneCy    = 1320
+	toneShare = 1760
 )
 
 const (
@@ -103,8 +105,9 @@ func (h *harness) buildVoiceClient() (bin, skip string, err error) {
 
 // startVoiceClient runs `conch-voice join channel` as p, with the stored
 // login `conch login` wrote for p and nothing of the caller's environment
-// that could change who it is. mic is the --mic value.
-func (l *live) startVoiceClient(p *person, channel, mic string, tone int) (*voiceClient, error) {
+// that could change who it is. mic is the --mic value; options are extra join
+// flags, such as the desktop owner's --share-audio-owner.
+func (l *live) startVoiceClient(p *person, channel, mic string, tone int, options ...string) (*voiceClient, error) {
 	h := l.h
 	dir, err := h.mkdir("conch-voice-" + p.name + "-")
 	if err != nil {
@@ -120,8 +123,9 @@ func (l *live) startVoiceClient(p *person, channel, mic string, tone int) (*voic
 		_ = outFile.Close()
 		return nil, err
 	}
-	cmd := lkit.GroupStart(l.voiceBin, "join", channel, "--json", "--mic", mic,
-		"--sink", fmt.Sprintf("count:%d,%d,%d", toneAnn, toneBen, toneCy))
+	args := []string{"join", channel, "--json", "--mic", mic,
+		"--sink", fmt.Sprintf("count:%d,%d,%d,%d", toneAnn, toneBen, toneCy, toneShare)}
+	cmd := lkit.GroupStart(l.voiceBin, append(args, options...)...)
 	cmd.Env = p.cli.env
 	cmd.Stderr = errFile
 	stdin, err := cmd.StdinPipe()
@@ -251,8 +255,8 @@ func (c *voiceClient) wait(what string, within time.Duration, since time.Time, p
 	return at, err
 }
 
-func connectionIs(state string) func(map[string]any) bool {
-	return func(o map[string]any) bool { return o["event"] == "connection" && o["state"] == state }
+func connectionConnected(o map[string]any) bool {
+	return o["event"] == "connection" && o["state"] == "connected"
 }
 
 func transmittingIs(on bool) func(map[string]any) bool {
@@ -644,7 +648,7 @@ func (l *live) voiceClients(ctx context.Context) error {
 	}
 	ann, ben, cy := s.clients[0], s.clients[1], s.clients[2]
 	for _, c := range s.clients {
-		if _, err := c.wait("connected", 60*time.Second, started, connectionIs("connected")); err != nil {
+		if _, err := c.wait("connected", 60*time.Second, started, connectionConnected); err != nil {
 			return err
 		}
 		if _, err := c.wait("ready to talk", 30*time.Second, started, readyToTalk); err != nil {
@@ -892,7 +896,7 @@ func (s *squad) removal(ctx context.Context, holder, other, gone *voiceClient) e
 		}); err != nil {
 			return err
 		}
-		at, err := c.wait("connected to the new room", 30*time.Second, removedAt, connectionIs("connected"))
+		at, err := c.wait("connected to the new room", 30*time.Second, removedAt, connectionConnected)
 		if err != nil {
 			return err
 		}
@@ -1036,7 +1040,7 @@ func (s *squad) outage(ctx context.Context, a, b *voiceClient) error {
 	}
 	var back time.Time
 	for _, c := range s.clients {
-		at, err := c.wait("connected again after LiveKit came back", 3*time.Minute, startedAt, connectionIs("connected"))
+		at, err := c.wait("connected again after LiveKit came back", 3*time.Minute, startedAt, connectionConnected)
 		if err != nil {
 			return err
 		}
