@@ -718,6 +718,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.eventsRoster(msg)
 	case reactionSummaryReceived:
 		return m.reactionEvent(msg)
+	case reactionHydrationDue:
+		return m, m.flushReactionHydration(msg.channel)
 	case reactionsLoaded:
 		return m.reactionsHydrated(msg), nil
 	case reactionWritten:
@@ -926,9 +928,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case messageReceived:
 		// Data flowing proves the subscription is healthy.
 		delete(m.backoff, msg.channel)
+		var hydrate tea.Cmd
+		if !slices.ContainsFunc(m.messages[msg.channel], func(message schema.MessageV2) bool { return message.ID == msg.message.ID }) {
+			hydrate = m.queueReactionHydration(msg.channel, msg.message)
+		}
 		m.addMessages(msg.channel, []schema.MessageV2{msg.message})
 		m.markStreamed(msg.channel, msg.message)
-		return m, tea.Batch(m.waitEvent(), m.countArrival(msg.channel, msg.message), m.markReading(), m.nameAuthors(msg.channel))
+		return m, tea.Batch(m.waitEvent(), m.countArrival(msg.channel, msg.message), m.markReading(), m.nameAuthors(msg.channel), hydrate)
 	case subscriptionOpened:
 		if msg.channel == m.current() && m.channelStatus == statusReconnecting && m.notice == "" {
 			m.setStatus(modeChannels, "connected")

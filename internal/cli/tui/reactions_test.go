@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -140,10 +141,12 @@ func TestReactionKeysTargetVisibleMessage(t *testing.T) {
 	if m.input != "/react 42 " {
 		t.Errorf("ctrl+r input = %q", m.input)
 	}
+	m.input = ""
 	m, _ = update(m, tea.KeyMsg{Type: tea.KeyCtrlU})
 	if m.input != "/unreact 42 " {
 		t.Errorf("ctrl+u input = %q", m.input)
 	}
+	m.input = ""
 	m, _ = update(m, tea.KeyMsg{Type: tea.KeyCtrlO})
 	if m.input != "/reactors 42 " {
 		t.Errorf("ctrl+o input = %q", m.input)
@@ -154,25 +157,24 @@ func TestReactionKeysTargetVisibleMessage(t *testing.T) {
 }
 
 func TestReactionHydrationOrdersAndClears(t *testing.T) {
-	m, _ := reactionModelForTest()
-	m, _ = update(m, reactionsLoaded{channel: "general", requested: []int64{41}, summaries: []schema.ReactionSummaryV1{
-		tuiReactionSummary(41, 2, schema.ReactionCountV1{Emoji: "👍", Count: 3}),
-	}})
-	m, _ = update(m, reactionsLoaded{channel: "general", requested: []int64{41}, summaries: []schema.ReactionSummaryV1{
-		tuiReactionSummary(41, 1, schema.ReactionCountV1{Emoji: "👍", Count: 1}),
-	}})
+	m, api := reactionModelForTest()
+	for _, second := range []int{2, 1} {
+		api.summaries.Summaries = []schema.ReactionSummaryV1{tuiReactionSummary(41, second, schema.ReactionCountV1{Emoji: "👍", Count: second + 1})}
+		m = feed(m, m.reloadReactions("general"))
+	}
 	if got := m.react.messages["general"][41].Reactions[0].Count; got != 3 {
 		t.Errorf("older hydration rolled count back to %d", got)
 	}
-	m, _ = update(m, reactionsLoaded{channel: "general", requested: []int64{41}, summaries: []schema.ReactionSummaryV1{}})
-	if _, ok := m.react.messages["general"][41]; ok {
-		t.Error("an omitted id did not clear its summary")
+	api.summaries.Summaries = nil
+	m = feed(m, m.reloadReactions("general"))
+	if got := m.react.messages["general"][41]; len(got.Reactions) != 0 {
+		t.Error("an omitted id did not clear its counts")
 	}
 	m.ev.gen = 1
 	m, _ = update(m, reactionSummaryReceived{gen: 1, channel: "general", summary: tuiReactionSummary(41, 4, schema.ReactionCountV1{Emoji: "👍", Count: 4})})
 	m, _ = update(m, reactionSummaryReceived{gen: 0, channel: "general", summary: tuiReactionSummary(41, 5)})
-	if got := len(m.react.messages["general"]); got != 1 {
-		t.Errorf("stale event changed state: %d summaries", got)
+	if got := m.react.messages["general"][41]; len(got.Reactions) != 1 || got.Reactions[0].Count != 4 {
+		t.Errorf("stale event changed state: %+v", got)
 	}
 }
 
@@ -308,5 +310,127 @@ func TestReactorListUsesSafeNamesAndGuestAttribution(t *testing.T) {
 	m = feed(m, cmd)
 	if !strings.Contains(m.status(), "Guest: Nick · 7h3k") || strings.Contains(m.status(), "\x1b") || strings.Contains(m.status(), "\u202e") {
 		t.Errorf("reactor status = %q", m.status())
+	}
+}
+
+func TestReactionEmptySummaryKeepsWatermark(t *testing.T) {
+	for _, source := range []string{"event", "write"} {
+		t.Run(source, func(t *testing.T) {
+			m, _ := reactionModelForTest()
+			empty := tuiReactionSummary(41, 3)
+			if source == "event" {
+				m, _ = update(m, reactionSummaryReceived{channel: "general", summary: empty})
+			} else {
+				m, _ = update(m, reactionWritten{channel: "general", messageID: 41, summary: empty})
+			}
+			m, _ = update(m, reactionWritten{channel: "general", messageID: 41, summary: tuiReactionSummary(41, 2, schema.ReactionCountV1{Emoji: "👍", Count: 1})})
+			if got := m.react.messages["general"][41]; len(got.Reactions) != 0 || got.AsOf != empty.AsOf {
+				t.Errorf("older response resurrected removed reaction: %+v", got)
+			}
+		})
+	}
+}
+
+func TestReactionHydrationDropsSupersededResults(t *testing.T) {
+	for _, result := range []string{"omitted", "nonempty"} {
+		for _, change := range []string{"event", "write", "new hydration"} {
+			t.Run(result+"/"+change, func(t *testing.T) {
+				m, api := reactionModelForTest()
+				if result == "nonempty" {
+					api.summaries.Summaries = []schema.ReactionSummaryV1{tuiReactionSummary(41, 5, schema.ReactionCountV1{Emoji: "👍", Count: 1})}
+				}
+				old := collect(m.reloadReactions("general"))
+				newer := tuiReactionSummary(41, 4, schema.ReactionCountV1{Emoji: "👍", Count: 4})
+				switch change {
+				case "event":
+					m, _ = update(m, reactionSummaryReceived{channel: "general", summary: newer})
+				case "write":
+					m, _ = update(m, reactionWritten{channel: "general", messageID: 41, summary: newer})
+				case "new hydration":
+					api.summaries.Summaries = []schema.ReactionSummaryV1{newer}
+					m = feed(m, m.reloadReactions("general"))
+				}
+				for _, msg := range old {
+					m, _ = update(m, msg)
+				}
+				got := m.react.messages["general"][41]
+				if len(got.Reactions) != 1 || got.Reactions[0].Count != 4 {
+					t.Errorf("superseded batch replaced newer state: %+v", got)
+				}
+			})
+		}
+	}
+}
+
+func TestReactionRosterBeforeReplayHydratesInBatches(t *testing.T) {
+	for _, count := range []int{2, 205} {
+		t.Run(fmt.Sprint(count), func(t *testing.T) {
+			m, api := reactionModelForTest()
+			ctx, cancel := context.WithCancel(m.ctx)
+			m.ctx = ctx
+			cancel() // No socket waiter should block this model-only test.
+			m.ev.state = eventsDown
+			m, cmd := update(m, eventsRosterReceived{})
+			m = feed(m, cmd)
+			api.batches = nil
+			var pending []tea.Cmd
+			for i := 0; i < count; i++ {
+				id := int64(42 + i)
+				api.summaries.Summaries = append(api.summaries.Summaries, tuiReactionSummary(id, 4, schema.ReactionCountV1{Emoji: "👍", Count: 2}))
+				m, cmd = update(m, messageReceived{channel: "general", message: schema.MessageV2{ID: id, Body: "replayed"}})
+				pending = append(pending, cmd)
+			}
+			for _, cmd := range pending {
+				m = feed(m, cmd)
+			}
+			if want := (count + schema.MaxReactionBatchMessages - 1) / schema.MaxReactionBatchMessages; len(api.batches) != want {
+				t.Fatalf("replay batches = %v, want %d batched requests", api.batches, want)
+			}
+			for i := 0; i < count; i++ {
+				if got := m.react.messages["general"][int64(42+i)]; len(got.Reactions) != 1 || got.Reactions[0].Count != 2 {
+					t.Errorf("replayed message %d lacks reactions: %+v", 42+i, got)
+				}
+			}
+		})
+	}
+}
+
+func TestReactionKeysPreserveComposerDraft(t *testing.T) {
+	for _, key := range []tea.KeyType{tea.KeyCtrlR, tea.KeyCtrlU, tea.KeyCtrlO} {
+		t.Run(tea.KeyMsg{Type: key}.String(), func(t *testing.T) {
+			for _, draft := range []string{"unfinished 👨‍👩‍👧 draft", " "} {
+				m, _ := reactionModelForTest()
+				m.input = draft
+				m, cmd := update(m, tea.KeyMsg{Type: key})
+				if m.input != draft || cmd != nil {
+					t.Errorf("shortcut replaced draft %q with %q (cmd %v)", draft, m.input, cmd)
+				}
+			}
+		})
+	}
+}
+
+func TestReactionHydrationRevisionIsPerMessage(t *testing.T) {
+	for _, omitted := range []bool{false, true} {
+		t.Run(fmt.Sprintf("omitted=%v", omitted), func(t *testing.T) {
+			m, api := reactionModelForTest()
+			m.messages["general"] = append(m.messages["general"], schema.MessageV2{ID: 42})
+			m.react.messages["general"] = map[int64]schema.ReactionSummaryV1{42: tuiReactionSummary(42, 1, schema.ReactionCountV1{Emoji: "👍", Count: 1})}
+			if !omitted {
+				api.summaries.Summaries = []schema.ReactionSummaryV1{tuiReactionSummary(42, 2, schema.ReactionCountV1{Emoji: "👍", Count: 2})}
+			}
+			pending := collect(m.reloadReactions("general"))
+			m, _ = update(m, reactionSummaryReceived{channel: "general", summary: tuiReactionSummary(41, 3, schema.ReactionCountV1{Emoji: "👍", Count: 3})})
+			for _, msg := range pending {
+				m, _ = update(m, msg)
+			}
+			if got := m.react.messages["general"][41]; len(got.Reactions) != 1 || got.Reactions[0].Count != 3 {
+				t.Errorf("batch changed live state: %+v", got)
+			}
+			got := m.react.messages["general"][42]
+			if omitted && len(got.Reactions) != 0 || !omitted && (len(got.Reactions) != 1 || got.Reactions[0].Count != 2) {
+				t.Errorf("batch did not update unchanged message: %+v", got)
+			}
+		})
 	}
 }

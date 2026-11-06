@@ -1,11 +1,13 @@
 package tui
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -23,6 +25,8 @@ type reactionAPI interface {
 type reactionModel struct {
 	api         reactionAPI
 	messages    map[string]map[int64]schema.ReactionSummaryV1
+	revisions   map[string]map[int64]uint64
+	pending     map[string]map[int64]schema.MessageV2
 	unsupported map[string]bool
 	text        bool
 	writing     bool
@@ -31,8 +35,13 @@ type reactionModel struct {
 type reactionsLoaded struct {
 	channel   string
 	requested []int64
+	revisions map[int64]uint64
 	summaries []schema.ReactionSummaryV1
 	err       error
+}
+
+type reactionHydrationDue struct {
+	channel string
 }
 
 type reactionSummaryReceived struct {
@@ -59,7 +68,12 @@ type reactorsListed struct {
 }
 
 func newReactionModel(api API) reactionModel {
-	r := reactionModel{messages: make(map[string]map[int64]schema.ReactionSummaryV1), unsupported: make(map[string]bool)}
+	r := reactionModel{
+		messages:    make(map[string]map[int64]schema.ReactionSummaryV1),
+		revisions:   make(map[string]map[int64]uint64),
+		pending:     make(map[string]map[int64]schema.MessageV2),
+		unsupported: make(map[string]bool),
+	}
 	r.api, _ = api.(reactionAPI)
 	return r
 }
@@ -84,9 +98,17 @@ func (m Model) loadReactions(channel string, messages []schema.MessageV2) tea.Cm
 	var commands []tea.Cmd
 	for start := 0; start < len(ids); start += schema.MaxReactionBatchMessages {
 		batch := slices.Clone(ids[start:min(start+schema.MaxReactionBatchMessages, len(ids))])
+		// Reserve a revision before launching the request. A later request,
+		// event or write supersedes it for that message alone.
+		revisions := make(map[int64]uint64, len(batch))
+		current := m.reactionRevisions(channel)
+		for _, id := range batch {
+			current[id]++
+			revisions[id] = current[id]
+		}
 		commands = append(commands, func() tea.Msg {
 			response, err := m.react.api.ReactionSummaries(m.ctx, channel, batch)
-			return reactionsLoaded{channel: channel, requested: batch, summaries: response.Summaries, err: err}
+			return reactionsLoaded{channel: channel, requested: batch, revisions: revisions, summaries: response.Summaries, err: err}
 		})
 	}
 	return tea.Batch(commands...)
@@ -97,6 +119,10 @@ func (m Model) reloadReactions(channel string) tea.Cmd {
 }
 
 func (m Model) reactionsHydrated(msg reactionsLoaded) Model {
+	current := m.reactionRevisions(msg.channel)
+	if !slices.ContainsFunc(msg.requested, func(id int64) bool { return current[id] == msg.revisions[id] }) {
+		return m
+	}
 	if cli.ReactionsUnsupported(msg.err) {
 		m.react.unsupported[msg.channel] = true
 		delete(m.react.messages, msg.channel)
@@ -116,32 +142,36 @@ func (m Model) reactionsHydrated(msg reactionsLoaded) Model {
 		byID = make(map[int64]schema.ReactionSummaryV1)
 		m.react.messages[msg.channel] = byID
 	}
-	present := make(map[int64]bool, len(msg.summaries))
+	summaries := make(map[int64]schema.ReactionSummaryV1, len(msg.summaries))
 	for _, summary := range msg.summaries {
-		present[summary.MessageID] = true
-		applyReactionSummary(byID, summary)
+		summaries[summary.MessageID] = summary
 	}
 	for _, id := range msg.requested {
-		if !present[id] {
-			delete(byID, id)
+		if current[id] != msg.revisions[id] {
+			continue
+		}
+		current[id]++
+		if summary, ok := summaries[id]; ok {
+			applyReactionSummary(byID, summary)
+		} else if summary, ok := byID[id]; ok {
+			// Omissions clear counts, but keep the last known as_of watermark.
+			summary.Reactions = nil
+			byID[id] = summary
 		}
 	}
 	return m
 }
 
 // applyReactionSummary replaces whole state; an older as_of never rolls it back.
-func applyReactionSummary(byID map[int64]schema.ReactionSummaryV1, summary schema.ReactionSummaryV1) {
+func applyReactionSummary(byID map[int64]schema.ReactionSummaryV1, summary schema.ReactionSummaryV1) bool {
 	if summary.MessageID <= 0 {
-		return
+		return false
 	}
 	if current, ok := byID[summary.MessageID]; ok && current.AsOf.Time().After(summary.AsOf.Time()) {
-		return
-	}
-	if len(summary.Reactions) == 0 {
-		delete(byID, summary.MessageID)
-		return
+		return false
 	}
 	byID[summary.MessageID] = summary
+	return true
 }
 
 func (m Model) reactionEvent(msg reactionSummaryReceived) (Model, tea.Cmd) {
@@ -154,7 +184,9 @@ func (m Model) reactionEvent(msg reactionSummaryReceived) (Model, tea.Cmd) {
 		byID = make(map[int64]schema.ReactionSummaryV1)
 		m.react.messages[msg.channel] = byID
 	}
-	applyReactionSummary(byID, msg.summary)
+	if applyReactionSummary(byID, msg.summary) {
+		m.reactionRevisions(msg.channel)[msg.summary.MessageID]++
+	}
 	return m, wait
 }
 
@@ -198,6 +230,9 @@ func (m Model) reactionTarget() (int64, bool) {
 }
 
 func (m Model) reactionKeyCommand(command string) Model {
+	if m.input != "" {
+		return m
+	}
 	if !m.reactionsAvailable(m.current()) {
 		m.setStatus(modeChannels, "reactions are not available on this server")
 		return m
@@ -291,7 +326,9 @@ func (m Model) reactionDone(msg reactionWritten) Model {
 		byID = make(map[int64]schema.ReactionSummaryV1)
 		m.react.messages[msg.channel] = byID
 	}
-	applyReactionSummary(byID, msg.summary)
+	if applyReactionSummary(byID, msg.summary) {
+		m.reactionRevisions(msg.channel)[msg.summary.MessageID]++
+	}
 	if msg.channel == m.current() {
 		m.input = strings.TrimPrefix(m.input, msg.raw)
 		if msg.set {
@@ -392,4 +429,40 @@ func (m Model) emojiCommand(rest string) Model {
 	}
 	m.input = ""
 	return m
+}
+
+// reactionRevisions is only accessed on the model update loop, never by commands.
+func (m Model) reactionRevisions(channel string) map[int64]uint64 {
+	if m.react.revisions[channel] == nil {
+		m.react.revisions[channel] = make(map[int64]uint64)
+	}
+	return m.react.revisions[channel]
+}
+
+// queueReactionHydration coalesces live and replayed messages over a short window.
+// The timer carries only the channel; the update loop owns the pending IDs.
+func (m Model) queueReactionHydration(channel string, message schema.MessageV2) tea.Cmd {
+	if !m.reactionsAvailable(channel) || message.ID <= 0 {
+		return nil
+	}
+	first := len(m.react.pending[channel]) == 0
+	if first {
+		m.react.pending[channel] = make(map[int64]schema.MessageV2)
+	}
+	m.react.pending[channel][message.ID] = message
+	if first {
+		return tickAfter(50*time.Millisecond, reactionHydrationDue{channel: channel})
+	}
+	return nil
+}
+
+func (m Model) flushReactionHydration(channel string) tea.Cmd {
+	pending := m.react.pending[channel]
+	delete(m.react.pending, channel)
+	messages := make([]schema.MessageV2, 0, len(pending))
+	for _, message := range pending {
+		messages = append(messages, message)
+	}
+	slices.SortFunc(messages, func(a, b schema.MessageV2) int { return cmp.Compare(a.ID, b.ID) })
+	return m.loadReactions(channel, messages)
 }
