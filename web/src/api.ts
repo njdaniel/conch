@@ -102,9 +102,11 @@ import {
 } from './schema/invite';
 import { interventionV1, listInterventionsResponseV1, type CreateInterventionRequestV1, type InterventionV1 } from './schema/intervention';
 import { listRunsResponseV1, runV1, type RunV1 } from './schema/run';
-import { sessionV1, type CreateSessionRequestV1, type SessionV1 } from './schema/session';
+import { sessionRosterV1, type SessionRosterV1, sessionV1, type CreateSessionRequestV1, type SessionV1 } from './schema/session';
 import {
   channelMemberV1,
+  channelDocV1,
+  type ChannelDocV1,
   channelMembersV1,
   channelDirectoryResponseV1,
   createChannelResponseV1,
@@ -2645,7 +2647,12 @@ export function openEventsSocket(channel: string, session: number, events: Socke
         try {
           const body: unknown = JSON.parse(data);
           if (channelMembersV1(body).length === 0) socketChannelId = (body as ChannelMembersV1).channel_id;
-          if (reactionSummaryV1(body).length === 0) publishReaction(channel, { kind: 'summary', summary: body as ReactionSummaryV1 });
+          if (sessionRosterV1(body).length === 0) socketChannelId = (body as SessionRosterV1).channel_id;
+          if (channelDocV1(body).length === 0) socketChannelId = (body as ChannelDocV1).channel_id;
+          if (reactionSummaryV1(body).length === 0) {
+            socketChannelId = (body as ReactionSummaryV1).channel_id;
+            publishReaction(channel, { kind: 'summary', summary: body as ReactionSummaryV1 });
+          }
         } catch { /* Ignore unknown or malformed frames, as the events feed does. */ }
       }
       events.onFrame(data);

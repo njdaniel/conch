@@ -2,9 +2,10 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useReducer,
 import * as api from './api';
 import { EmojiPicker } from './EmojiPicker';
 import { emojiNow } from './emoji/emoji';
+import { canDo } from './admin/permissions';
 import { guestName } from './guestName';
 import { MAX_REACTION_BATCH_MESSAGES, DEFAULT_REACTOR_LIMIT, type ReactionSummaryV1, type ReactionCountV1, type ReactionV1 } from './schema/reaction';
-import { emptyReactions, optimisticReactions, reactionReducer } from './state/reactions';
+import { compareReactionTime, emptyReactions, optimisticReactions, reactionReducer } from './state/reactions';
 import type { Person } from './useLiveChannel';
 
 interface Intent { readonly emoji: string; readonly set: boolean; readonly revision: number }
@@ -21,6 +22,10 @@ interface Controls {
   readonly accept: (summary: ReactionSummaryV1, revision: number) => void;
 }
 const Context = createContext<Controls | null>(null);
+export function useHasReactions(): boolean {
+  const controls = useContext(Context);
+  return controls !== null && !controls.unsupported;
+}
 const none: readonly ReactionCountV1[] = [];
 
 function reactionFailure(result: { readonly code?: string; readonly retryAfter?: number }): string {
@@ -54,6 +59,7 @@ export function ReactionScope({ channel, channelId, ids, children, onUnauthorize
   const [ready, setReady] = useState<ReadonlySet<number>>(new Set());
   const hydrated = useRef(new Set<number>());
   const confirming = useRef(new Set<number>());
+  const buffered = useRef(new Map<number, ReactionSummaryV1>());
   const [unsupported, setUnsupported] = useState(false);
   const [epoch, setEpoch] = useState(0);
   const [connected, setConnected] = useState(true);
@@ -74,6 +80,8 @@ export function ReactionScope({ channel, channelId, ids, children, onUnauthorize
         // Omitted batch entries have no timestamp. An apparently newer frame
         // may have been computed before that empty read: confirm it in a batch
         // instead of resurrecting a removed reaction from a delayed frame.
+        const held = buffered.current.get(event.summary.message_id);
+        if (held === undefined || compareReactionTime(event.summary.as_of, held.as_of) > 0) buffered.current.set(event.summary.message_id, event.summary);
         if (!confirming.current.has(event.summary.message_id)) {
           confirming.current.add(event.summary.message_id);
           hydrated.current.delete(event.summary.message_id);
@@ -87,6 +95,7 @@ export function ReactionScope({ channel, channelId, ids, children, onUnauthorize
       if (event.kind === 'closed') {
         generation.current++;
         locks.current.clear(); failures.current.clear();
+        confirming.current.clear(); buffered.current.clear();
         setPending(new Map()); setErrors(new Map()); setCooling(new Set());
         dispatch({ type: 'reset' });
         setReady(new Set());
@@ -106,6 +115,8 @@ export function ReactionScope({ channel, channelId, ids, children, onUnauthorize
     setReady((old) => new Set([...old].filter((id) => held.has(id))));
     setErrors((old) => new Map([...old].filter(([id]) => held.has(id))));
     for (const id of failures.current.keys()) if (!held.has(id)) failures.current.delete(id);
+    for (const id of confirming.current) if (!held.has(id)) confirming.current.delete(id);
+    for (const id of buffered.current.keys()) if (!held.has(id)) buffered.current.delete(id);
     for (const id of locks.current.keys()) if (!held.has(id)) locks.current.delete(id);
     setPending(new Map(locks.current));
     dispatch({ type: 'prune', ids: held });
@@ -114,9 +125,10 @@ export function ReactionScope({ channel, channelId, ids, children, onUnauthorize
       for (let i = 0; i < missing.length; i += MAX_REACTION_BATCH_MESSAGES) {
         const batch = missing.slice(i, i + MAX_REACTION_BATCH_MESSAGES);
         const before = now.current;
+        const framesBefore = new Map(buffered.current);
         const result = await api.readReactions(channel, batch);
-        for (const id of batch) confirming.current.delete(id);
         if (!active || started !== generation.current) return;
+        for (const id of batch) confirming.current.delete(id);
         if (!result.ok) {
           if (result.failure === 'unauthorized') { onUnauthorized?.(); return; }
           if (result.code === 'reactions_unsupported' || result.code === 'reactions_require_auth') { setUnsupported(true); return; }
@@ -124,7 +136,22 @@ export function ReactionScope({ channel, channelId, ids, children, onUnauthorize
           continue;
         }
         dispatch({ type: 'batch', ids: batch, summaries: result.value.summaries, channelId, before });
-        for (const id of batch) { hydrated.current.add(id); error(id); }
+        for (const id of batch) {
+          hydrated.current.add(id); error(id);
+          const frame = buffered.current.get(id);
+          buffered.current.delete(id);
+          if (frame === undefined) continue;
+          if (result.value.summaries.some((summary) => summary.message_id === id)) {
+            dispatch({ type: 'summary', summary: frame, channelId });
+          } else if (frame !== framesBefore.get(id)) {
+            // An omitted entry has no clock to compare with a newer frame.
+            // Confirm once more rather than resurrect a delayed reaction.
+            buffered.current.set(id, frame);
+            confirming.current.add(id);
+            hydrated.current.delete(id);
+            setEpoch((old) => old + 1);
+          }
+        }
         setReady((old) => new Set([...old, ...batch]));
       }
     }
@@ -188,7 +215,8 @@ export function ReactionScope({ channel, channelId, ids, children, onUnauthorize
   return <Context.Provider value={controls}>{children}</Context.Provider>;
 }
 
-export function ReactionBar({ id, channel, label, people, onUnauthorized }: {
+export function ReactionBar({ id, channel, label, people, onUnauthorized, logNavigation = false }: {
+  readonly logNavigation?: boolean;
   readonly id: number; readonly channel: string; readonly label: string;
   readonly people: ReadonlyMap<number, Person>; readonly onUnauthorized?: () => void;
 }) {
@@ -196,9 +224,8 @@ export function ReactionBar({ id, channel, label, people, onUnauthorized }: {
   const [picker, setPicker] = useState(false);
   const [listing, setListing] = useState<string | null>(null);
   const opener = useRef<HTMLButtonElement | null>(null);
-  // Reactions are an arrow-key branch of the log's active message, in this
-  // order: Add, each chip and its reactor list, Retry. Explicit -1 keeps the
-  // generic syncStops helper from adding stops before More actions and Reply.
+  // The main log enters reactions with Right Arrow and keeps explicit -1
+  // stops. Thread controls use normal Tab access; both support toolbar arrows.
   const toolbar = useRef<HTMLDivElement>(null);
   function onControlKey(event: KeyboardEvent<HTMLDivElement>) {
     if (event.altKey || event.ctrlKey || event.metaKey || event.shiftKey || event.nativeEvent.isComposing) return;
@@ -230,13 +257,13 @@ export function ReactionBar({ id, channel, label, people, onUnauthorized }: {
   return <div ref={toolbar} onKeyDown={onControlKey} className="reactions" role="group" aria-label={`Reactions for ${label}`} aria-live="off">
     {/* Keep the opener focusable during a save so choosing an emoji returns
         focus reliably; aria-disabled and the click guard block repeat opens. */}
-    <button type="button" tabIndex={-1} data-reaction-control="" className="reaction-add" aria-label={`Add reaction to ${label}`} aria-expanded={picker} aria-busy={busy} aria-disabled={busy || !ready || cooling} disabled={!ready || cooling} onClick={(event) => { if (busy) return; opener.current = event.currentTarget; setListing(null); setPicker(!picker); }}>Add reaction</button>
+    <button type="button" tabIndex={logNavigation ? -1 : 0} data-reaction-control="" className="reaction-add" aria-label={`Add reaction to ${label}`} aria-expanded={picker} aria-busy={busy} aria-disabled={busy || !ready || cooling} disabled={!ready || cooling} onClick={(event) => { if (busy) return; opener.current = event.currentTarget; setListing(null); setPicker(!picker); }}>Add reaction</button>
     {counts.map((r) => <span className="reaction-pair" key={r.emoji}>
-      <button type="button" tabIndex={-1} data-reaction-control="" className="reaction-chip" aria-label={`${names.get(r.emoji) ?? 'Emoji'}: ${String(r.count)} reaction${r.count === 1 ? '' : 's'}`} aria-pressed={Boolean(r.me)} aria-busy={busy} disabled={busy || !ready || cooling} onClick={() => { controls.change(id, r.emoji, !r.me); }}><span aria-hidden="true">{r.emoji} {r.count}</span></button>
-      <button type="button" tabIndex={-1} data-reaction-control="" className="reaction-list-button" aria-label={`Who reacted with ${names.get(r.emoji) ?? 'this emoji'}`} onClick={(event) => { opener.current = event.currentTarget; setPicker(false); setListing(r.emoji); }}>Who?</button>
+      <button type="button" tabIndex={logNavigation ? -1 : 0} data-reaction-control="" className="reaction-chip" aria-label={`${names.get(r.emoji) ?? 'Emoji'}: ${String(r.count)} reaction${r.count === 1 ? '' : 's'}`} aria-pressed={Boolean(r.me)} aria-busy={busy} disabled={busy || !ready || cooling} onClick={() => { controls.change(id, r.emoji, !r.me); }}><span aria-hidden="true">{r.emoji} {r.count}</span></button>
+      <button type="button" tabIndex={logNavigation ? -1 : 0} data-reaction-control="" className="reaction-list-button" aria-label={`Who reacted with ${names.get(r.emoji) ?? 'this emoji'}`} onClick={(event) => { opener.current = event.currentTarget; setPicker(false); setListing(r.emoji); }}>Who?</button>
     </span>)}
     {busy ? <span className="hint">Saving reaction…</span> : !ready && problem === undefined ? <span className="hint">Loading reactions…</span> : null}
-    {problem === undefined ? null : <span role="status" className="reaction-error">{problem} <button type="button" tabIndex={-1} data-reaction-control="" disabled={busy || cooling} onClick={() => { controls.retry(id); }}>Retry reaction</button></span>}
+    {problem === undefined ? null : <span role="status" className="reaction-error">{problem} <button type="button" tabIndex={logNavigation ? -1 : 0} data-reaction-control="" disabled={busy || cooling} onClick={() => { controls.retry(id); }}>Retry reaction</button></span>}
     {picker && ready ? <EmojiPicker onClose={close} onPick={(emoji) => { close(); controls.change(id, emoji.key, true); }} /> : null}
     {listing === null || !ready ? null : <ReactorPage key={`${channel}/${listing}`} channel={channel} id={id} emoji={listing} name={names.get(listing) ?? 'emoji'} people={people} version={controls.version(id)} onClose={close} onUnauthorized={onUnauthorized} />}
   </div>;
@@ -259,7 +286,7 @@ function ReactorPage({ channel, id, emoji, name, people, version, onClose, onUna
         if ((!who.ok && who.failure === 'unauthorized') || (!members.ok && members.failure === 'unauthorized')) { onClose(); onUnauthorized?.(); }
         return;
       }
-      setMayModerate(who.value.kind === 'human' && members.value.some((member) => member.principal_id === who.value.id && (member.manages === true || who.value.role === 'operator')));
+      setMayModerate(who.value.kind === 'human' && members.value.some((member) => member.principal_id === who.value.id && (member.manages === true || canDo(who.value, 'manage_channels'))));
     });
     return () => { live = false; };
   }, [channel, onClose, onUnauthorized]);

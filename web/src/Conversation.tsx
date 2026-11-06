@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
 import * as api from './api';
 import { archivedLine } from './archived';
-import { ReactionBar, ReactionScope } from './Reactions';
+import { ReactionBar, ReactionScope, useHasReactions } from './Reactions';
 import { Composer } from './Composer';
 import { guestName } from './guestName';
 import { Avatar, PrivateMark } from './Icons';
@@ -160,6 +160,7 @@ export function Message({
   editor,
   notice,
   stop = false,
+  reactionNavigation = false,
 }: {
   readonly message: MessageV2;
   readonly people: ReadonlyMap<number, Person>;
@@ -188,7 +189,9 @@ export function Message({
   readonly notice?: string | null;
   // This message is the log's one tab stop (issue #1040); the rest are -1.
   readonly stop?: boolean;
+  readonly reactionNavigation?: boolean;
 }) {
+  const hasReactions = useHasReactions() && message.removed !== true;
   const who = messageName(message, people);
   const approval = approvalOf(message);
   const attachments = attachmentsOf(message);
@@ -206,7 +209,7 @@ export function Message({
   const named = approval === null && editor === undefined && mentions(message.body, people.get(viewer)?.name ?? '');
   const classes = ['message', ...(cont ? ['cont'] : []), ...(named ? ['mentions-you'] : []), ...(items.length > 0 ? ['has-actions'] : []), ...(editor === undefined ? [] : ['editing'])];
   return (
-    <li className={classes.join(' ')} data-message-id={message.id} tabIndex={stop ? 0 : -1} aria-description="Use Right Arrow for reaction controls; Left and Right Arrow move between them, Escape returns to the message." {...(context === undefined ? {} : { 'aria-describedby': `reply-context-${String(message.id)}` })} {...openers}>
+    <li className={classes.join(' ')} data-message-id={message.id} tabIndex={stop ? 0 : -1} aria-description={hasReactions && reactionNavigation ? "Use Right Arrow for reaction controls; Left and Right Arrow move between them, Escape returns to the message." : undefined} {...(context === undefined ? {} : { 'aria-describedby': `reply-context-${String(message.id)}` })} {...openers}>
       {named ? <span className="vh">Mentions you. </span> : null}
       {context === undefined ? null : (
         <p className="reply-context" id={`reply-context-${String(message.id)}`}>
@@ -235,7 +238,7 @@ export function Message({
           </span>
         )}
       </Line>
-      {message.removed === true ? null : <ReactionBar id={message.id} channel={channel} label={who} people={people} onUnauthorized={onUnauthorized} />}
+      {message.removed === true ? null : <ReactionBar logNavigation={reactionNavigation} id={message.id} channel={channel} label={who} people={people} onUnauthorized={onUnauthorized} />}
       {notice === undefined || notice === null ? null : <p role="status" className="edit-notice">{notice}</p>}
       {items.length === 0 ? null : (
         <ActionsMenu label={`More actions for ${who}`} items={items} open={menuOpen} onOpenChange={setMenuOpen} button={more} />
@@ -799,7 +802,7 @@ export function Conversation({
     let to: number;
     switch (event.key) {
       case 'ArrowRight': {
-        const reaction = item.querySelector<HTMLButtonElement>('[data-reaction-control]:not(:disabled):not([aria-disabled="true"])');
+        const reaction = item.querySelector<HTMLButtonElement>(':scope > .reactions [data-reaction-control]:not(:disabled):not([aria-disabled="true"])');
         if (reaction !== null) { event.preventDefault(); reaction.focus(); }
         return;
       }
@@ -958,6 +961,7 @@ export function Conversation({
           {shown.map((message, i) => (
             <Message
               stop={message.id === stop}
+              reactionNavigation
               replies={replyCounts.get(message.id) ?? 0}
               {...(message.thread_root_id === undefined ? {} : { context: replyContext(chat.byId.get(message.thread_root_id), people) })}
               key={message.id}

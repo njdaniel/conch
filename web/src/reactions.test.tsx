@@ -193,3 +193,72 @@ it('confirms frames after an unversioned empty batch before showing counts again
   act(() => { receive({ kind: 'summary', summary: sum(2, true, '2026-11-06T10:00:04Z') }); });
   await screen.findByRole('button', { name: 'thumbs up: 2 reactions' });
 });
+
+it.each([0, 2])('reconciles the newest buffered frame (%i) after a confirming read', async (count) => {
+  vi.mocked(api.readReactions).mockResolvedValueOnce({ ok: true, value: { summaries: [] } });
+  let finish!: (result: Awaited<ReturnType<typeof api.readReactions>>) => void;
+  vi.mocked(api.readReactions).mockReturnValueOnce(new Promise((resolve) => { finish = resolve; }));
+  render(view());
+  await waitFor(() => { expect(add().hasAttribute('disabled')).toBe(false); });
+  act(() => { receive({ kind: 'summary', summary: sum(1) }); });
+  await waitFor(() => { expect(api.readReactions).toHaveBeenCalledTimes(2); });
+  act(() => {
+    receive({ kind: 'summary', summary: sum(count, false, '2026-11-06T10:00:02Z') });
+    receive({ kind: 'summary', summary: sum(9, false, '2026-11-06T10:00:01Z') });
+  });
+  await act(async () => { finish({ ok: true, value: { summaries: [sum(1, false, '2026-11-06T10:00:00.5Z')] } }); await Promise.resolve(); });
+  if (count === 0) expect(screen.queryByRole('button', { name: /thumbs up:/ })).toBeNull();
+  else expect(chip().getAttribute('aria-label')).toContain('2 reactions');
+});
+
+it('does not let a superseded read clear the current confirmation', async () => {
+  vi.mocked(api.readReactions).mockResolvedValueOnce({ ok: true, value: { summaries: [] } });
+  const finishes: ((result: Awaited<ReturnType<typeof api.readReactions>>) => void)[] = [];
+  vi.mocked(api.readReactions).mockImplementation(() => new Promise((resolve) => { finishes.push(resolve); }));
+  const rendered = render(view());
+  await waitFor(() => { expect(add().hasAttribute('disabled')).toBe(false); });
+  act(() => { receive({ kind: 'summary', summary: sum(1) }); });
+  await waitFor(() => { expect(finishes).toHaveLength(1); });
+  rendered.rerender(view('general', [4, 5]));
+  await waitFor(() => { expect(finishes).toHaveLength(2); });
+  await act(async () => { finishes[0]?.({ ok: true, value: { summaries: [sum()] } }); await Promise.resolve(); });
+  act(() => { receive({ kind: 'summary', summary: sum(2, false, '2026-11-06T10:00:02Z') }); });
+  expect(api.readReactions).toHaveBeenCalledTimes(3);
+  await act(async () => { finishes[1]?.({ ok: true, value: { summaries: [sum()] } }); await Promise.resolve(); });
+  expect(chip().getAttribute('aria-label')).toContain('2 reactions');
+});
+
+it.each([
+  { role: 'operator' as const, permissions: [], manages: false, allowed: false },
+  { role: 'member' as const, permissions: ['manage_channels' as const], manages: false, allowed: true },
+  { role: 'member' as const, permissions: [], manages: true, allowed: true },
+])('uses effective moderation permission: %j', async ({ role, permissions, manages, allowed }) => {
+  vi.mocked(api.whoAmI).mockResolvedValue({ ok: true, value: { id: 7, name: 'Ada', kind: 'human', role, permissions } });
+  vi.mocked(api.listMembers).mockResolvedValue({ ok: true, value: [{ principal_id: 7, name: 'Ada', kind: 'human', manages, created_at: sum().as_of }] });
+  render(view());
+  fireEvent.click(await screen.findByRole('button', { name: 'Who reacted with thumbs up' }));
+  await screen.findByText('Ada');
+  expect(screen.queryByRole('button', { name: 'Remove this reaction' }) !== null).toBe(allowed);
+});
+
+it('makes reaction controls tabbable outside the main log', async () => {
+  render(view());
+  await waitFor(() => { expect(add().hasAttribute('disabled')).toBe(false); });
+  expect(add().tabIndex).toBe(0);
+  expect(chip().tabIndex).toBe(0);
+});
+
+it('reconfirms a newer buffered frame when the confirming batch omits the message', async () => {
+  vi.mocked(api.readReactions).mockResolvedValueOnce({ ok: true, value: { summaries: [] } });
+  let finish!: (result: Awaited<ReturnType<typeof api.readReactions>>) => void;
+  vi.mocked(api.readReactions).mockReturnValueOnce(new Promise((resolve) => { finish = resolve; }));
+  vi.mocked(api.readReactions).mockResolvedValue({ ok: true, value: { summaries: [sum(2, false, '2026-11-06T10:00:03Z')] } });
+  render(view());
+  await waitFor(() => { expect(add().hasAttribute('disabled')).toBe(false); });
+  act(() => { receive({ kind: 'summary', summary: sum(1) }); });
+  await waitFor(() => { expect(api.readReactions).toHaveBeenCalledTimes(2); });
+  act(() => { receive({ kind: 'summary', summary: sum(2, false, '2026-11-06T10:00:02Z') }); });
+  await act(async () => { finish({ ok: true, value: { summaries: [] } }); await Promise.resolve(); });
+  await screen.findByRole('button', { name: 'thumbs up: 2 reactions' });
+  expect(api.readReactions).toHaveBeenCalledTimes(3);
+});

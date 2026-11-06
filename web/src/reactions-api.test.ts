@@ -68,7 +68,11 @@ describe('reaction API', () => {
   });
 });
 
-it('shares the events socket, ignores unknown/malformed frames and scopes updates to the live credential/channel', async () => {
+it.each([
+  { schema: 'conch.session_roster.v1', channel_id: 2, sessions: [] },
+  { schema: 'conch.channel.v1', channel_id: 2, name: 'renamed', created_at: summary.as_of },
+  summary,
+])('learns channel identity from %j and scopes socket events to the live credential', async (identity) => {
   class Socket {
     onopen: (() => void) | null = null;
     onmessage: ((event: MessageEvent) => void) | null = null;
@@ -87,10 +91,13 @@ it('shares the events socket, ignores unknown/malformed frames and scopes update
   socket.onopen?.();
   for (const body of ['not JSON', JSON.stringify({ schema: 'conch.future.v1' }), JSON.stringify({ ...summary, reactions: null })]) socket.onmessage?.(new MessageEvent('message', { data: body }));
   expect(receive).not.toHaveBeenCalled();
+  socket.onmessage?.(new MessageEvent('message', { data: JSON.stringify(identity) }));
+  socket.onclose?.(new CloseEvent('close', { code: 1008 }));
+  expect(receive).toHaveBeenLastCalledWith({ kind: 'closed' });
   socket.onmessage?.(new MessageEvent('message', { data: JSON.stringify(summary) }));
   expect(receive).toHaveBeenLastCalledWith({ kind: 'summary', summary });
   expect(other).not.toHaveBeenCalled();
-  socket.onmessage?.(new MessageEvent('message', { data: JSON.stringify({ schema: 'conch.channel_members.v1', channel_id: 2, members: [] }) }));
+  socket.onmessage?.(new MessageEvent('message', { data: JSON.stringify(identity) }));
   socket.onclose?.(new CloseEvent('close', { code: 1008 }));
   expect(receive).toHaveBeenLastCalledWith({ kind: 'closed' });
   // A fresh sign-in invalidates callbacks of the earlier credential/session,
