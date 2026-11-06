@@ -3,6 +3,16 @@
 /conchd
 /bin/
 /dist/
+# What `go build ./e2e/<program>` leaves at the root (issue #1348: #1324
+# committed /isolation).
+/conch-bot
+/dogfood
+/isolation
+/nets
+/p2-hardening
+/p3-local
+/reviewpost
+/sdkprobe
 
 # Rust (voice/). What a build produces for this checkout; it is per-checkout
 # on purpose, so that no two worktrees build into the same directory

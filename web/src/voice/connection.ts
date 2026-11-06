@@ -1377,8 +1377,17 @@ export class VoiceClient {
     const mine = known ?? ++this.attempt;
     const channel = this.channel;
     if (channel === null) return;
-    const session = this.state.viewer ? await this.viewerSession(channel) : await this.env.createSession(channel);
+    let session = this.state.viewer ? await this.viewerSession(channel) : await this.env.createSession(channel);
     if (mine !== this.attempt) return;
+    // Presence of a page that closed without leaving lingers a few seconds and
+    // reads as the person's voice in another client (issue #1340). The viewer
+    // grant's 409 voice_no_session says no voice of theirs is in the room, so
+    // there is nobody to knock out: this is a plain Watch only after all.
+    if (this.state.viewer && !session.ok && session.code === 'voice_no_session') {
+      this.set({ viewer: false });
+      session = await this.env.createSession(channel);
+      if (mine !== this.attempt) return;
+    }
     if (!session.ok) {
       // conchd refused the next session: a camera held for it stops (S5).
       // An answer that never came is not a refusal, and is retried.

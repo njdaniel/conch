@@ -688,6 +688,30 @@ export const approvalV1 = object<ApprovalV1>({
   created_at: timestamp,
 });
 
+// schema.CastDecisionRequestV1
+export interface CastDecisionRequestV1 {
+  principal_id: number;
+  option_id: string;
+  reason: string;
+}
+
+export const castDecisionRequestV1 = object<CastDecisionRequestV1>({
+  principal_id: int,
+  option_id: str,
+  reason: str,
+});
+
+// schema.ListApprovalsResponseV1
+export interface ListApprovalsResponseV1 {
+  approvals: ApprovalV1[];
+  read_only?: number[];
+}
+
+export const listApprovalsResponseV1 = object<ListApprovalsResponseV1>({
+  approvals: array(approvalV1),
+  read_only: optional(array(int)),
+});
+
 // schema.FileV1
 export const fileV1Schema = 'conch.file.v1';
 
@@ -4220,6 +4244,129 @@ export const adminActionV1 = object<AdminActionV1>({
   agent_id: int,
   reason: optional(str),
   requested_at: timestamp,
+});
+
+// schema.ChannelPermission
+export type ChannelPermission = 'read' | 'post' | 'post_net' | 'whisper' | 'whisper_agent';
+
+export const channelPermission = vocab<ChannelPermission>({
+  read: true,
+  post: true,
+  post_net: true,
+  whisper: true,
+  whisper_agent: true,
+});
+
+// schema.ChannelGrant
+export interface ChannelGrant {
+  channel_id: number;
+  permissions: ChannelPermission[];
+}
+
+export const channelGrant = object<ChannelGrant>({
+  channel_id: int,
+  permissions: array(channelPermission),
+});
+
+// schema.Capability
+export type Capability =
+  | 'messages.read'
+  | 'messages.post'
+  | 'approvals.request'
+  | 'approvals.await'
+  | 'approvals.check'
+  | 'sessions.manage'
+  | 'runs.manage'
+  | 'admin.act';
+
+export const capability = vocab<Capability>({
+  'messages.read': true,
+  'messages.post': true,
+  'approvals.request': true,
+  'approvals.await': true,
+  'approvals.check': true,
+  'sessions.manage': true,
+  'runs.manage': true,
+  'admin.act': true,
+});
+
+// schema.RateLimit
+export interface RateLimit {
+  capability: Capability;
+  max: number;
+  window_seconds: number;
+}
+
+export const rateLimit = object<RateLimit>({
+  capability: capability,
+  max: int,
+  window_seconds: int,
+});
+
+// schema.AgentTier
+export type AgentTier = 'C' | 'A' | 'H';
+
+export const agentTier = vocab<AgentTier>({ C: true, A: true, H: true });
+
+// schema.AgentManifestV1
+export const agentManifestV1Schema = 'conch.agent_manifest.v1';
+
+export interface AgentManifestV1 {
+  schema: typeof agentManifestV1Schema;
+  principal_id: number;
+  display_name: string;
+  tier: AgentTier;
+  capabilities?: Capability[];
+  channels?: ChannelGrant[];
+  rate_limits?: RateLimit[];
+  permissions?: Permission[];
+  admin?: AgentAdminV1;
+  created_at: string;
+  updated_at: string;
+}
+
+export const agentManifestV1 = object<AgentManifestV1>({
+  schema: vocab<typeof agentManifestV1Schema>({ [agentManifestV1Schema]: true }),
+  principal_id: int,
+  display_name: str,
+  tier: agentTier,
+  capabilities: optional(array(capability)),
+  channels: optional(array(channelGrant)),
+  rate_limits: optional(array(rateLimit)),
+  permissions: optional(array(permission)),
+  admin: optional(agentAdminV1),
+  created_at: timestamp,
+  updated_at: timestamp,
+});
+
+// schema.PutAgentManifestRequestV1
+export interface PutAgentManifestRequestV1 {
+  display_name: string;
+  tier: AgentTier;
+  capabilities?: Capability[];
+  channels?: ChannelGrant[];
+  rate_limits?: RateLimit[];
+  permissions?: Permission[];
+  admin?: AgentAdminV1;
+}
+
+export const putAgentManifestRequestV1 = object<PutAgentManifestRequestV1>({
+  display_name: str,
+  tier: agentTier,
+  capabilities: optional(array(capability)),
+  channels: optional(array(channelGrant)),
+  rate_limits: optional(array(rateLimit)),
+  permissions: optional(array(permission)),
+  admin: optional(agentAdminV1),
+});
+
+// schema.GetAgentManifestResponseV1
+export interface GetAgentManifestResponseV1 {
+  manifest: AgentManifestV1;
+}
+
+export const getAgentManifestResponseV1 = object<GetAgentManifestResponseV1>({
+  manifest: agentManifestV1,
 });
 
 // schema.Error

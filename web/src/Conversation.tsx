@@ -9,6 +9,7 @@ import { ImageAttachment } from './ImageAttachment';
 import { loadStored, saveEdit, saveReplies } from './state/draftStore';
 import { canEdit, EditedMarker, editEnds, editsLeft, editWindowMs, MessageEditor } from './MessageEdit';
 import { ActionsMenu, useOpeners, type MenuItem } from './MessageMenu';
+import { AdminApprovals } from './AdminApprovals';
 import { approvalPayloadSchema, approvalV1, type ApprovalV1 } from './schema/approval';
 import type { ChannelVisibility } from './schema/channel';
 import { fileAttachmentPayloadSchema, fileAttachmentV1, type FileAttachmentV1 } from './schema/file';
@@ -59,6 +60,11 @@ function approvalOf(message: MessageV2): ApprovalV1 | null {
   return payload.data as ApprovalV1;
 }
 
+// ApprovalCard draws an approval a message carries. Anyone in the channel can
+// post such a message with any payload, so it is never a place to decide:
+// the deciding card, AI administrators' included, is drawn only from the
+// server's own approval objects (AdminApprovals, GET /v1/approvals), never
+// from a message (security review of #1344).
 function ApprovalCard({ approval, people }: { readonly approval: ApprovalV1; readonly people: ReadonlyMap<number, Person> }) {
   return (
     <article className="approval-card" aria-label="Approval request">
@@ -893,6 +899,7 @@ export function Conversation({
           </button>
         </div>
       ) : null}
+      <AdminApprovals channelId={channelId} viewer={viewer} names={(id) => nameOf(members, id)} onUnauthorized={onUnauthorized} />
       <div className="log-wrap">
       <div
         ref={log}

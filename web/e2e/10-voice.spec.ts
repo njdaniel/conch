@@ -15,6 +15,22 @@ import { dockerAvailable, startVoiceWorld, watchPage, type Member, type VoiceWor
 // first press since a join is released: see the test that uses it.
 const firstPressBound = 200 + 1500 + 1000;
 
+// The longest a viewer not in voice may wait to see someone arrive in, or
+// leave, the roster (issue #633). It learns of either from conchd's presence
+// poller (internal/server/voice_presence.go), and the worst case is a pass
+// that began just before the change and so cannot see it, lasting as long as
+// the LiveKit client allows a call (defaultTimeout in
+// internal/server/livekit/client.go, 2 s); then the longest gap between
+// passes (voicePassGapMax, 1.5 s); then the pass that sees the change, as
+// long again. That is 5.5 s before the presence frame is sent. Doubled, it
+// is 11 s, for a loaded machine, where the client's own disconnect, the
+// frame and the render all queue behind the load: the 3 s this replaced
+// failed at a load average of 15 to 20. The room sweep (every 30 s, one more
+// 2 s call) can run just before the pass that sees the change, so the worst
+// case unloaded is 7.5 s, and 11 s still leaves 3.5 s for load. Store reads
+// inside a pass have no deadline of their own: the margin covers them too.
+const rosterBound = 2 * (2000 + 1500 + 2000);
+
 const voiceRegion = (page: Page) => page.getByRole('region', { name: 'Voice' });
 
 test('P3-F9c voice is not set up on a server without LiveKit, and the page asks for no microphone', async ({ meet, world }) => {
@@ -765,6 +781,34 @@ test.describe('with LiveKit', () => {
           expect(box?.width ?? 0, `${size}: the room's name is shown`).toBeGreaterThan(40);
         }
         await expectFits(a.page, `${size}: the strip before joining`);
+        // N08: one space between the verb and the room, not a space and a
+        // margin: the gap is the width of a single space character.
+        for (const button of [join, watch]) {
+          const gap = await button.evaluate((el) => {
+            const text = el.querySelector('.btn-text');
+            const dest = el.querySelector('.dest');
+            const first = text?.firstChild;
+            if (text === null || dest === null || first === null || first === undefined || first.textContent === null) return null;
+            const words = first.textContent;
+            const range = document.createRange();
+            range.setStart(first, 0);
+            range.setEnd(first, words.trimEnd().length);
+            const end = range.getBoundingClientRect();
+            range.setStart(first, words.length - 1);
+            range.setEnd(first, words.length);
+            const space = range.getBoundingClientRect().width;
+            const room = dest.getBoundingClientRect();
+            return { text: words, space, gap: room.left - end.right, sameLine: Math.abs(room.top - end.top) < end.height };
+          });
+          expect(gap, `${size}: the button's text and room are measurable`).not.toBeNull();
+          if (gap === null) continue;
+          expect(gap.text.endsWith(' ') && !gap.text.endsWith('  '), `${size}: one space in the text`).toBe(true);
+          // On a phone the room may wrap to a line of its own; wide, it follows the verb.
+          if (!phone) {
+            expect(gap.sameLine, `${size}: the room follows the verb on its line`).toBe(true);
+            expect(gap.gap, `${size}: one space between the verb and the room`).toBeLessThanOrEqual(gap.space + 1);
+          }
+        }
         // F17: the verb and the room read as one run of text, never as two
         // columns side by side: the verb stays on one line, and the verb and
         // the room are one item of the button.
@@ -810,6 +854,21 @@ test.describe('with LiveKit', () => {
         await press(back);
         if (phone) await showView(a.page, 'Channels');
         await expect(channelButton(a.page, vw.channel)).toHaveAttribute('aria-current', 'true');
+        if (phone) {
+          // N08: the open channel's button is wholly on screen, with nothing
+          // drawn over its right edge (the row and its fade are gone, #929).
+          const open = channelButton(a.page, vw.channel);
+          await expect(open).toBeInViewport({ ratio: 1 });
+          const box = await open.boundingBox();
+          const width = a.page.viewportSize()?.width ?? 0;
+          expect(box !== null && box.x >= 0 && box.x + box.width <= width, `${size}: the open channel's button lies inside the screen`).toBe(true);
+          const covered = await open.evaluate((el) => {
+            const r = el.getBoundingClientRect();
+            const top = document.elementFromPoint(r.right - 2, r.top + r.height / 2);
+            return top !== null && !el.contains(top) && top !== el;
+          });
+          expect(covered, `${size}: nothing sits over the open channel's right edge`).toBe(false);
+        }
         if (phone) await showView(a.page, 'Chat');
         await expect(conversation(a.page).getByRole('heading', { name: vw.channel })).toBeVisible();
         // Still the same connection: connected all along, and no new session.
@@ -831,9 +890,10 @@ test.describe('with LiveKit', () => {
   });
 
   // Issue #585 (F02): the roster of a channel not joined is live. Bob watches
-  // the strip without joining; alice joining and leaving shows within 3 s,
-  // with no channel opened again. Bob's page holds one presence socket all
-  // along, and asks for no session, no device and no LiveKit connection.
+  // the strip without joining; alice joining and leaving shows within the
+  // poller's worst case (rosterBound), with no channel opened again. Bob's
+  // page holds one presence socket all along, and asks for no session, no
+  // device and no LiveKit connection.
   test('the roster of a channel not joined shows people arriving and leaving', async ({ browser }) => {
     // Each presence socket bob's page opens: its channel, and whether it is
     // still open.
@@ -865,12 +925,12 @@ test.describe('with LiveKit', () => {
 
       await alice.getByRole('button', { name: 'Join voice' }).click();
       await expect(alice).toContainText('Connected in #voice-room', { timeout: 30_000 });
-      await expect(listed).toHaveCount(1, { timeout: 3000 });
+      await expect(listed).toHaveCount(1, { timeout: rosterBound });
       await expect(bob).toContainText('Not in voice');
 
       await alice.getByRole('button', { name: 'Leave voice' }).click();
       await expect(alice).toContainText('Not in voice', { timeout: 10_000 });
-      await expect(listed).toHaveCount(0, { timeout: 3000 });
+      await expect(listed).toHaveCount(0, { timeout: rosterBound });
 
       // One presence socket, for the channel on screen, all along: none
       // opened again for alice's coming and going.
@@ -1022,6 +1082,14 @@ test.describe('with LiveKit', () => {
         await expect(nav(r.page).getByRole('listitem').filter({ has: r.page.getByRole('img', { name: / in voice$/ }) })).toContainText(room);
         await expect(channelButton(r.page, room)).toHaveAccessibleName(room);
         await expect(elsewhere(r.page)).toHaveText(`1 in voice in #${room} Open #${room}`, { timeout: 3000 });
+        // N08: the Open button looks like a button: a visible border and a fill.
+        const look = await elsewhere(r.page).getByRole('button').evaluate((el) => {
+          const c = getComputedStyle(el);
+          return { border: c.borderTopColor, width: c.borderTopWidth, fill: c.backgroundColor };
+        });
+        expect(look.width, 'the Open button has a border').not.toBe('0px');
+        expect(look.border, 'the Open button border is drawn').not.toBe('rgba(0, 0, 0, 0)');
+        expect(look.fill, 'the Open button has a fill').not.toBe('rgba(0, 0, 0, 0)');
         // kim, by name, nested under the channel, from a channel she is not
         // in; nobody under the others.
         await expect(named(r.page).getByRole('listitem')).toHaveText([kim.name], { timeout: 3000 });

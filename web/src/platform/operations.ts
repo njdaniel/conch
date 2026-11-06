@@ -38,6 +38,12 @@ import {
   createCredentialResponseV1,
   createDeviceLinkRequestV1,
   createHookRequest,
+  createPrincipalRequest,
+  createPrincipalResponse,
+  getAgentManifestResponseV1,
+  putAgentManifestRequestV1,
+  castDecisionRequestV1,
+  listApprovalsResponseV1,
   createHookResponse,
   createSignInLinkRequestV1,
   hidePrincipalResponseV1,
@@ -274,6 +280,14 @@ export const operations = {
   hidePrincipal: op('POST', '/v1/principals/{id}/hide', 'bearer', { response: check(hidePrincipalResponseV1) }),
   disablePrincipal: op('POST', '/v1/principals/{id}/disable', 'bearer'),
   enablePrincipal: op('POST', '/v1/principals/{id}/enable', 'bearer'),
+  // Add an AI administrator (issue #1334, docs/design/ai-administrators.md
+  // §4.2): the same routes as `conch admin ai-admin create`.
+  createPrincipal: op('POST', '/v0/principals', 'bearer', { request: check(createPrincipalRequest), response: check(createPrincipalResponse) }),
+  getManifest: op('GET', '/v1/principals/{id}/manifest', 'bearer', { response: check(getAgentManifestResponseV1) }),
+  putManifest: op('PUT', '/v1/principals/{id}/manifest', 'bearer', { request: check(putAgentManifestRequestV1) }),
+  // A decision on an approval, cast from an admin-action card.
+  listApprovals: op('GET', '/v1/approvals', 'bearer', { response: check(listApprovalsResponseV1) }),
+  castDecision: op('POST', '/v1/approvals/{id}/decisions', 'bearer', { request: check(castDecisionRequestV1) }),
   createPrincipalSignInLink: op('POST', '/v1/principals/{id}/sign-in-links', 'bearer', {
     request: check(createSignInLinkRequestV1),
     response: check(createSignInLinkResponseV1),

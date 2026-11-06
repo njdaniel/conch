@@ -946,6 +946,18 @@ func (w *world) restrictedPhase() (int, error) {
 	if err != nil {
 		return rows, fmt.Errorf("the restricted member's voice rows: %w", err)
 	}
+	if w.lk != nil {
+		// The live-media gates (issue #1217): a participant in a room, a
+		// live share.
+		n, err := w.voiceGateRows(rchan, name)
+		rows += n
+		if err != nil {
+			return rows, fmt.Errorf("the restricted member's live voice rows: %w", err)
+		}
+		w.h.say("ok   voice gates: a member whose voice was switched off was removed before the PUT answered, a token signed before the switch was removed by the next pass, and a share whose share_screen was cut in the store was ended by the pass; with the cell back each is entitled again")
+	} else {
+		skipped += "; the live-media voice gates (a participant removed when use_voice is cut, a share ended when share_screen is cut)"
+	}
 	if skipped != "" {
 		w.h.say("     skipped, no LiveKit in this run: %s", skipped)
 	}
