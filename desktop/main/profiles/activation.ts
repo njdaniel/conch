@@ -72,9 +72,6 @@ export function activationFactory(env: ActivationEnv, live: Live): (spec: Activa
       identity.setOrigin(profile.origin);
       if (token !== null) identity.adopt(token);
     }
-    // The identity in force when the activation opened: sign-out, a 401 and a
-    // credential change all move the session's generation.
-    const startGeneration = identity.generation;
     const gate = new DocumentGate();
     let window: BrowserWindow | null = null;
     const owned = (): ContentsLike | null => (window === null || window.isDestroyed() ? null : window.webContents);
@@ -110,7 +107,7 @@ export function activationFactory(env: ActivationEnv, live: Live): (spec: Activa
       profileId: profile?.id ?? null,
       token: () => identity.capture().token,
       voiceCredential: () => identity.voiceCredential(),
-      voiceCurrent: () => identity.generation === startGeneration && live.service === service,
+      voiceCurrent: (generation) => identity.generation === generation && live.service === service,
       async whoami(): Promise<Account | null> {
         const outcome = await service.restore();
         if (!outcome.ok || outcome.who === null || whoAmIResponseV1(outcome.who).length > 0) return null;

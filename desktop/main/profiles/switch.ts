@@ -27,10 +27,11 @@ export interface Activation {
   token(): string | null;
   // The credential and server for a voice start (Session.voiceCredential), at
   // Join time only; null when signed out. The caller keeps no copy.
-  voiceCredential(): { readonly origin: string; readonly token: string } | null;
-  // Whether this activation is still the identity in force: false once the
-  // session has been bumped (sign-out, a 401) or the activation is over.
-  voiceCurrent(): boolean;
+  voiceCredential(): { readonly origin: string; readonly token: string; readonly generation: number } | null;
+  // Whether the identity a voice credential was read under (its generation)
+  // is still in force in this activation: false once the session has been
+  // bumped (sign-out, a 401) or the activation is over.
+  voiceCurrent(generation: number): boolean;
   // Asks the server who the credential in force is. lasting: a member's, which
   // may be kept; an operator's or a guest's belongs to the one window.
   whoami(): Promise<Account | null>;

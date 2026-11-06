@@ -131,6 +131,8 @@ export class VoiceService {
   private last: JoinRequest | null = null;
   private lastGeneration = 0;
   private joining = false;
+  // The join in progress, so that a leave can wait for it to be stopped.
+  private inflight: Promise<NativeVoiceView> | null = null;
   // Counts leaves and teardowns: a join begun before one is overtaken by it.
   private epoch = 0;
   // The identity the current join began under; its current() fences what the
@@ -158,6 +160,9 @@ export class VoiceService {
 
   // state is the view now.
   state(): NativeVoiceView {
+    // A join that sign-out, a switch or a 401 has overtaken shows nothing:
+    // not its channel, not its helper.
+    if (this.active !== null && !this.active.current()) return { status: 'idle', generation: this.lastGeneration, channel: null, retryable: false };
     return this.override ?? this.view(this.deps.supervisor.state);
   }
 
@@ -236,6 +241,16 @@ export class VoiceService {
       this.deps.log('voice: join refused: busy');
       return { ...this.state(), problem: 'busy' };
     }
+    const p = this.run(req);
+    this.inflight = p;
+    try {
+      return await p;
+    } finally {
+      if (this.inflight === p) this.inflight = null;
+    }
+  }
+
+  private async run(req: JoinRequest): Promise<NativeVoiceView> {
     this.joining = true;
     const epoch = this.epoch;
     try {
@@ -290,7 +305,7 @@ export class VoiceService {
   // logind watcher calls it too.
   async leave(): Promise<NativeVoiceView> {
     this.epoch++;
-    await this.stopBounded();
+    await this.stopBounded(true);
     this.channel = null;
     this.override = null;
     return this.state();
@@ -302,7 +317,11 @@ export class VoiceService {
     return this.leave().then(() => undefined);
   }
 
-  private async stopBounded(): Promise<void> {
+  // waitForJoin: also wait for a join still inside Supervisor.start (before it
+  // has a process for stop() to reach) to notice it was overtaken and stop
+  // what it started, so a teardown never resolves with a helper about to
+  // spawn. The same bound holds.
+  private async stopBounded(waitForJoin = false): Promise<void> {
     let timer: NodeJS.Timeout | undefined;
     const late = new Promise<void>((resolve) => {
       timer = setTimeout(() => {
@@ -311,7 +330,11 @@ export class VoiceService {
       }, this.bound);
     });
     try {
-      await Promise.race([this.deps.supervisor.stop().catch(() => undefined), late]);
+      const stopped = (async () => {
+        await this.deps.supervisor.stop().catch(() => undefined);
+        if (waitForJoin && this.inflight !== null) await this.inflight.catch(() => undefined);
+      })();
+      await Promise.race([stopped, late]);
     } finally {
       clearTimeout(timer);
     }
