@@ -73,6 +73,23 @@ describe.runIf(have)('the one-shot runs with the real conch-voice', () => {
     expect(readFileSync(voiceToml(), 'utf8')).toContain('output = "--help"');
   });
 
+  it('config set keys.device and keys.talk (#1381) save the talk-key binding, and the helper’s own refusals are not logged', async () => {
+    writeFileSync(voiceToml(), '# mine\n[audio]\ninput = "default"\n', { mode: 0o600 });
+    const path = '/dev/input/by-id/usb-Example_Keyboard-event-kbd';
+    expect(await oneshot.save(s.config, 'keys.device', path)).toEqual({ ok: true });
+    expect(await oneshot.save(s.config, 'keys.talk', '275')).toEqual({ ok: true });
+    const text = readFileSync(voiceToml(), 'utf8');
+    expect(text).toContain('# mine');
+    expect(text).toContain(`device = "${path}"`);
+    expect(text).toContain('talk = "275"');
+    expect(readdirSync(s.config).sort()).toEqual(['voice.toml']);
+    // Replacing is fine, and a value the helper refuses is a failure with nothing logged of it.
+    expect(await oneshot.save(s.config, 'keys.talk', '30')).toEqual({ ok: true });
+    expect(readFileSync(voiceToml(), 'utf8')).toContain('talk = "30"');
+    expect(logs.join('\n')).not.toContain('usb-Example');
+    expect(logs.join('\n')).not.toContain(FAKE_TOKEN);
+  });
+
   it('a second run once the first has ended is fine; the device list then shows what was saved', async () => {
     writeFileSync(voiceToml(), '[audio]\n', { mode: 0o600 });
     expect((await oneshot.save(s.config, 'audio.input', 'my_mic')).ok).toBe(true);

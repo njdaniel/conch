@@ -94,7 +94,7 @@ class FakeOneShot {
     this.calls.push(['devices', configDir]);
     return Promise.resolve(this.devicesAnswer);
   }
-  save(configDir: string, key: VoiceDeviceKey, value: string): Promise<VoiceSaveResult> {
+  save(configDir: string, key: VoiceDeviceKey | 'keys.device' | 'keys.talk', value: string): Promise<VoiceSaveResult> {
     this.calls.push(['save', configDir, key, value]);
     return Promise.resolve(this.saveAnswer);
   }

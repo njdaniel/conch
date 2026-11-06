@@ -104,8 +104,8 @@ describe('the device list reader against pkg/schema/testdata/voice-devices/', ()
 
 describe('what may be saved', () => {
   it('knows the keys of the issue and no others', () => {
-    expect([...SAVE_KEYS]).toEqual(['audio.input', 'audio.output', 'audio.talk_mode']);
-    for (const k of ['keys.talk', 'keys.device', 'keys.mute', 'keys.deafen', 'server', 'channel', 'audio', 'toString', '', '--help']) expect(isSaveKey(k), k).toBe(false);
+    expect([...SAVE_KEYS]).toEqual(['audio.input', 'audio.output', 'audio.talk_mode', 'keys.device', 'keys.talk']);
+    for (const k of ['keys.mute', 'keys.deafen', 'server', 'channel', 'audio', 'toString', '', '--help']) expect(isSaveKey(k), k).toBe(false);
     expect(isSaveKey(5)).toBe(false);
   });
 
