@@ -10,7 +10,11 @@
 #   4. main and the preload, bundled into desktop/out/;
 #   5. the asset manifest of the files in desktop/out/ui;
 #   6. electron-builder, packing them into an asar and setting the fuses,
-#      around the Electron of step 2 (`electronDist`), so it downloads nothing.
+#      around the Electron of step 2 (`electronDist`), so it downloads nothing;
+#   7. the voice helper, bin/conch-voice (or CONCH_VOICE_BIN), copied to
+#      resources/conch-voice by scripts/desktop-voice-helper.sh. Absent, the
+#      build says "built without the voice helper"; DESKTOP_REQUIRE_VOICE=1
+#      makes that a failure.
 #
 # Needs the Node desktop/.nvmrc names on PATH (the Makefile arranges it).
 set -euo pipefail
@@ -37,6 +41,11 @@ electron_dist="$root/desktop/out/electron-dist"
 (cd desktop && CI=true ./node_modules/.bin/electron-builder --linux dir --publish never \
     --config build/electron-builder.config.json \
     "-c.electronDist=$electron_dist" "-c.electronVersion=$CONCH_ELECTRON_VERSION")
+
+# The voice helper, into resources/conch-voice (issue #1377): copied after
+# electron-builder so its mode and presence are decided here, not by the
+# packer. Without a helper the build says so; DESKTOP_REQUIRE_VOICE=1 fails.
+./scripts/desktop-voice-helper.sh desktop/dist/linux-unpacked/resources
 
 # Nothing in the app may be writable by group or other. The zip said 0777 for
 # some files (desktop-electron.sh removes that), and electron-builder writes
