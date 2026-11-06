@@ -21,3 +21,8 @@ export {
 } from './generated';
 // The most bytes of one post request, the cap the page keeps a stored draft to.
 export { MAX_POST_REQUEST_BYTES } from './generated';
+// The events socket's removal frame of pkg/schema/moderation.go (issue #849,
+// docs/design/moderation.md §7.4): the tombstone, which replaces the copy the
+// page holds and notifies no one. A removed message is told by `removed`, never
+// by its body text, which the server renders.
+export { messageRemovedV1, messageRemovedV1Schema, type MessageRemovedV1 } from './generated';

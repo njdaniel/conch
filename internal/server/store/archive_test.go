@@ -62,7 +62,10 @@ func TestMigration41ArchivedAt(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, stmt := range []string{
-		// Migration 43 (issue #1326) first, then 42's columns, then 41's.
+		// Migration 45 (issue #849) first, then 43 (issue #1326), then 42's
+		// columns, then 41's.
+		"DROP TABLE message_removals", // migration 45 (issue #849); its triggers go with it
+		"DROP TABLE channel_bans",     // migration 45 (issue #849)
 		"DROP TABLE admin_actions",
 		"ALTER TABLE agent_manifests DROP COLUMN admin",
 		"ALTER TABLE agent_manifests DROP COLUMN permissions",
