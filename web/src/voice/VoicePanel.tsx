@@ -1,4 +1,4 @@
-import { ModerationConfirm, useMayModerate } from '../Moderation';
+import { ModerationConfirm, useMayModerate, useMayModerateIn } from '../Moderation';
 // The voice section. Every state says what is true: not set up, not in voice,
 // connecting, connected, reconnecting, unavailable, or stopped with the reason.
 // It also holds the screen share (issue #444): sharing, with what sound, why a
@@ -259,6 +259,11 @@ export function VoicePanel({
     };
   }, [stopped]);
 
+  // The roster is the joined channel's when in voice, else the one on screen:
+  // its moderation action, question, request and standing all follow it.
+  const rosterChannel = (inVoice ? state.channel : null) ?? viewed;
+  const mayModerateRoster = useMayModerateIn(rosterChannel, viewed, channels);
+
   // Where else people are talking, while this page is not in voice: in voice,
   // the strip describes the viewer's own connection.
   const away = inVoice ? null : busiest(channels, occupancy, viewed);
@@ -395,7 +400,7 @@ export function VoicePanel({
           row, of four controls (issue #1028). */}
       <div className="voice-bar">
         {strip ? null : (
-          <Roster channel={viewed ?? undefined} roster={roster} people={people} viewer={viewer} elsewhere={elsewhere} speaking={speaking} volumes={inVoice ? state.volumes : noVolumes} />
+          <Roster channel={rosterChannel ?? undefined} mayModerate={mayModerateRoster} roster={roster} people={people} viewer={viewer} elsewhere={elsewhere} speaking={speaking} volumes={inVoice ? state.volumes : noVolumes} />
         )}
         {awayLine}
         <div className="voice-row">
@@ -765,8 +770,11 @@ function shownOnPhone(roster: readonly Occupant[], viewer: number): ReadonlySet<
 // the list. At 700 px and wider every chip shows, wrapping onto more lines;
 // on a phone three show, the viewer's own among them, and "+N more" shows
 // the rest.
-export function Roster({ channel, roster, people, viewer, elsewhere, speaking, volumes }: {
+export function Roster({ channel, mayModerate: standing, roster, people, viewer, elsewhere, speaking, volumes }: {
+  // The channel the roster belongs to, and whether the viewer may moderate it
+  // (when not said, the standing in the channel on screen).
   readonly channel?: string;
+  readonly mayModerate?: boolean;
   readonly roster: readonly Occupant[];
   readonly people: ReadonlyMap<number, Person>;
   readonly viewer: number;
@@ -776,7 +784,8 @@ export function Roster({ channel, roster, people, viewer, elsewhere, speaking, v
   // How loud this page plays each person not at full volume.
   readonly volumes: ReadonlyMap<number, number>;
 }) {
-  const mayModerate = useMayModerate();
+  const here = useMayModerate();
+  const mayModerate = standing ?? here;
   const [kick, setKick] = useState<{ readonly id: number; readonly name: string } | null>(null);
   const kickOpener = useRef<HTMLButtonElement>(null);
   const [all, setAll] = useState(false);

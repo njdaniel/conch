@@ -6,7 +6,10 @@
 import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react';
 import { useSyncExternalStore, type ReactNode } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import * as api from '../api';
 import type { ShareClaimResult, VoiceSessionResult } from '../api';
+import { ModerationScope } from '../Moderation';
+import type { WhoAmIResponseV1 } from '../schema/principal';
 import { windowOf } from '../fakewindow';
 import { Lobby } from '../Lobby';
 import type { VoicePresenceV1 } from '../schema/voice';
@@ -119,7 +122,7 @@ const people: ReadonlyMap<number, Person> = new Map([
 const chrome: ShareFeatures = { canShare: true, chromium: true, platform: 'linux' };
 
 // wrap puts the panel where the page puts it, for a test of the layout.
-function setup(claims: ShareClaimResult[] = [], features: ShareFeatures = chrome, wrap?: (panel: ReactNode) => ReactNode) {
+function setup(claims: ShareClaimResult[] = [], features: ShareFeatures = chrome, wrap?: (panel: ReactNode) => ReactNode, viewed = 'general', channels: readonly { id: number; name: string; created_at: string; manages?: boolean }[] = []) {
   const rooms: StubRoom[] = [];
   const client = new VoiceClient({
     clock: new FakeClock(),
@@ -163,7 +166,7 @@ function setup(claims: ShareClaimResult[] = [], features: ShareFeatures = chrome
         void client.leave();
       },
     };
-    return <VoicePanel voice={control} viewer={7} people={people} viewed="general" onOpen={() => undefined} />;
+    return <VoicePanel voice={control} viewer={7} people={people} viewed={viewed} channels={channels} onOpen={() => undefined} />;
   }
   const tree = () => (wrap === undefined ? <Panel /> : wrap(<Panel />));
   const view = render(tree());
@@ -177,6 +180,8 @@ function setup(claims: ShareClaimResult[] = [], features: ShareFeatures = chrome
   };
   return { client, rooms, joins, seen, view };
 }
+
+vi.mock('../api', async (original) => ({ ...await original<typeof import('../api')>(), moderate: vi.fn() }));
 
 afterEach(() => {
   cleanup();
@@ -513,5 +518,36 @@ describe('in the lobby', () => {
     expect(t.rooms).toHaveLength(1);
     expect(t.rooms[0]?.watching.at(-1)).toBe(true);
     expect(t.client.snapshot().phase).toBe('connected');
+  });
+});
+
+describe('removing someone from voice', () => {
+  const who: WhoAmIResponseV1 = { id: 7, kind: 'human', name: 'ada', role: 'member', permissions: [] };
+  const at = '2026-11-06T10:00:00Z';
+  const manager = (id: number) => ({ principal_id: id, kind: 'human' as const, created_at: at, name: 'ada', role: 'member' as const, manages: true, can_decide: false });
+  // Voice is joined in #general; the chat on screen is #ops, whose members are the ones held.
+  async function joinedInGeneralViewingOps(generalManages: boolean) {
+    const wrap = (panel: ReactNode) => <ModerationScope who={who} members={[manager(7)]} guest={false}>{panel}</ModerationScope>;
+    const channels = [{ id: 1, name: 'general', created_at: at, manages: generalManages }, { id: 2, name: 'ops', created_at: at, manages: true }];
+    const t = setup([], chrome, wrap, 'ops', channels);
+    t.client.join('general', { watchOnly: true });
+    await act(settle);
+    t.seen(presence(null));
+    return t;
+  }
+
+  it('offers it only where the viewer manages the channel voice is joined in, not the one on screen', async () => {
+    await joinedInGeneralViewingOps(false);
+    expect(within(voice()).queryByRole('button', { name: 'Remove bea from voice' })).toBeNull();
+  });
+
+  it('sends the removal, and asks the question, for the channel voice is joined in', async () => {
+    vi.mocked(api.moderate).mockResolvedValue({ ok: true, value: null });
+    await joinedInGeneralViewingOps(true);
+    fireEvent.click(within(voice()).getByRole('button', { name: 'Remove bea from voice' }));
+    expect(screen.getByText(/Remove bea from voice in #general now/)).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm' }));
+    await act(settle);
+    expect(api.moderate).toHaveBeenCalledWith('general', 'kickVoice', 8);
   });
 });

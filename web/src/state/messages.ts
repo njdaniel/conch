@@ -104,6 +104,9 @@ export type ChatAction =
   // `more` is whether the page was full, so there may be older history.
   | { readonly type: 'historyLoaded'; readonly channel: string; readonly messages: readonly MessageV2[]; readonly more: boolean }
   | { readonly type: 'historyFailed'; readonly channel: string }
+  // The window re-read after a reconnect: like historyLoaded, but a message
+  // the socket delivered after the read began (an id beyond the page) is kept.
+  | { readonly type: 'historyRefreshed'; readonly channel: string; readonly messages: readonly MessageV2[]; readonly more: boolean }
   // A message from the socket (already validated).
   // own: the message is the caller's, so it may stand for a pending send of
   // theirs whose POST has not answered yet (issue #490).
@@ -293,6 +296,21 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
           action.messages,
         ),
       );
+    case 'historyRefreshed':
+      return update(state, action.channel, (c) => {
+        const top = action.messages.reduce((m, x) => Math.max(m, x.id), 0);
+        const after = [...c.byId.values()].filter((x) => x.id > top);
+        return reconcile(
+          {
+            ...prune(hold(track({ ...c, byId: new Map() }, action.messages), [...newest(c.byId, action.messages), ...after])),
+            history: 'ready',
+            older: 'idle',
+            trimmed: false,
+            exhausted: !action.more,
+          },
+          action.messages,
+        );
+      });
     case 'historyFailed':
       return update(state, action.channel, (c) => ({ ...c, history: 'error' }));
     case 'received':

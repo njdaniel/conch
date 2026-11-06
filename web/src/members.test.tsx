@@ -196,6 +196,19 @@ describe('administration controls', () => {
     expect(labels(openMenu('ada'))).toContain('Remove from channel');
   });
 
+  it('lets a manager ban and remove an active guest, which memberDoc sends without a role, but not one who decides approvals', () => {
+    draw(props('member'));
+    const pat = 'Actions for Guest: Pat · a7k4';
+    fireEvent.click(within(row('Pat')).getByRole('button', { name: pat }));
+    expect(labels(screen.getByRole('menu', { name: pat }))).toEqual(['Remove from voice', 'Ban from channel', 'Remove from channel']);
+    cleanup();
+    const guest = memberList.find((m) => m.principal_id === 5);
+    if (guest === undefined) throw new Error('fixture');
+    draw({ ...props('member'), members: memberList.map((m) => (m === guest ? { ...guest, can_decide: true } : m)) });
+    fireEvent.click(within(row('Pat')).getByRole('button', { name: pat }));
+    expect(labels(screen.getByRole('menu', { name: pat }))).toEqual(['Remove from voice']);
+  });
+
   it('gives a manager add and a menu of only the removals the rules allow, with no per-row explanations', () => {
     draw(props('member'));
     expect(screen.getByRole('form', { name: 'Add person by name' })).toBeDefined();

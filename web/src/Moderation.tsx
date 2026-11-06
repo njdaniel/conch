@@ -5,11 +5,27 @@ import type { ChannelMemberV1 } from './schema/channel';
 import type { WhoAmIResponseV1 } from './schema/principal';
 import type { MessageV2 } from './schema/message';
 
-const Standing = createContext(false);
+// Standing is the viewer's moderation standing: here, in the channel on screen
+// (from its members), and the two facts that carry to another channel, which
+// the channel list then settles: a signed-in human, and an operator.
+interface StandingValue { readonly here: boolean; readonly human: boolean; readonly operator: boolean }
+const Standing = createContext<StandingValue>({ here: false, human: false, operator: false });
 export function ModerationScope({ who, members, guest, children }: { readonly who: WhoAmIResponseV1; readonly members: readonly ChannelMemberV1[]; readonly guest: boolean; readonly children: ReactNode }) {
-  return <Standing.Provider value={!guest && who.kind === 'human' && members.some((m) => m.principal_id === who.id && (m.manages === true || canDo(who, 'manage_channels')))}>{children}</Standing.Provider>;
+  const human = !guest && who.kind === 'human';
+  const operator = human && canDo(who, 'manage_channels');
+  const here = human && members.some((m) => m.principal_id === who.id && (m.manages === true || operator));
+  return <Standing.Provider value={{ here, human, operator }}>{children}</Standing.Provider>;
 }
-export const useMayModerate = () => useContext(Standing);
+export const useMayModerate = () => useContext(Standing).here;
+// useMayModerateIn is the standing in a named channel that may not be the one
+// on screen (the voice channel a roster belongs to): the screen's own answer
+// for that channel, an operator's anywhere, else the channel list's `manages`.
+export function useMayModerateIn(channel: string | null, viewed: string | null, channels: readonly { readonly name: string; readonly manages?: boolean }[]): boolean {
+  const standing = useContext(Standing);
+  if (channel === null) return false;
+  if (channel === viewed) return standing.here;
+  return standing.human && (standing.operator || channels.find((c) => c.name === channel)?.manages === true);
+}
 export type ModerationOperation = 'kickVoice' | 'banMember' | 'unbanMember' | 'removeMessage';
 export function moderationQuestion(op: ModerationOperation, name: string, channel: string): string {
   switch (op) {

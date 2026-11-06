@@ -266,7 +266,7 @@ export function MemberRow({
   // member who does not decide approvals. The server still decides.
   const items: MenuItem[] = [];
   if (member !== undefined && (operator || manager) && member.principal_id !== viewer.id) {
-    const removable = operator || (member.role === 'member' && member.kind === 'human' && member.can_decide === false);
+    const removable = operator || ((member.role === 'member' || member.guest !== undefined) && member.kind === 'human' && member.can_decide === false);
     if (member.kind === 'human') items.push({ key: 'voice', label: 'Remove from voice', disabled: busy, onSelect: () => { setModerating('kickVoice'); } });
     if (removable) {
       items.push({ key: 'ban', label: 'Ban from channel', disabled: busy, onSelect: () => { setModerating('banMember'); } });
