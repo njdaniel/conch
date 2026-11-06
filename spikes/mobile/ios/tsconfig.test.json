@@ -12,6 +12,6 @@
     "rootDir": ".",
     "sourceMap": false
   },
-  "include": ["src/logic/**/*.ts", "test/**/*.ts"],
+  "include": ["src/logic/**/*.ts", "src/app/client.ts", "src/app/controller.ts", "src/app/bridge.ts", "test/**/*.ts"],
   "exclude": ["**/node_modules", "ios", "build"]
 }
