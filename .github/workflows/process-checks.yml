@@ -40,7 +40,25 @@ jobs:
         run: |
           touched=$(gh api "repos/$REPO/pulls/$PR/files" --paginate --jq '.[].filename' | while read -r f; do
             case "$f" in
-              internal/server/approvals/*|internal/server/approvals_handlers*.go|internal/server/mcp*.go|internal/server/store/approvals*.go|pkg/schema/approval*|pkg/schema/resolution*.go|pkg/schema/decision*.go|pkg/schema/mcp_approval*.go|pkg/schema/testdata/*approval*|pkg/schema/testdata/*decision*|pkg/schema/testdata/*resolution*|e2e/dogfood/*)
+              # The approval machinery, its wire shapes and MCP tools.
+              internal/server/approvals/*|internal/server/approvals_*|internal/server/mcp*.go|internal/server/store/approvals*.go|pkg/schema/approval*|pkg/schema/resolution*.go|pkg/schema/decision*.go|pkg/schema/mcp_approval*.go|pkg/schema/testdata/*approval*|pkg/schema/testdata/*decision*|pkg/schema/testdata/*resolution*)
+                echo "$f" ;;
+              # The chain tests and both end-to-end chains (issue #1170):
+              # approvals_* above covers internal/server/approvals_*_test.go.
+              internal/server/conversion_approval_test.go|internal/server/ratelimit_gate_test.go|internal/server/community_migration_test.go|internal/server/audit_chain_test.go|internal/server/open_signup_test.go|e2e/dogfood/*|e2e/p2-hardening/*)
+                echo "$f" ;;
+              # The audit read side the chains are asserted through.
+              internal/server/audit.go|internal/server/store/audit_export.go|pkg/schema/audit*|pkg/schema/testdata/audit*)
+                echo "$f" ;;
+              # Who may decide: permittedTx and the permission catalog's fixed
+              # cells (issue #1011). The can_decide writers are spread over
+              # the store and guarded by the chain tests above instead.
+              internal/server/store/permissions.go|pkg/schema/permission.go)
+                echo "$f" ;;
+              # AI administrators (#1326): the catalog says which actions wait
+              # for an approval, the door runs an approved one once, and the
+              # manifest grant is the agent's standing (agentStandingTx).
+              internal/server/admin_*|internal/server/store/admin_actions*|internal/server/store/ai_admin*|internal/server/store/manifests*)
                 echo "$f" ;;
             esac
           done)
