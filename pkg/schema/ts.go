@@ -96,6 +96,7 @@ var TSConstants = []TSConstant{
 	{Name: "VOICE_CONTROL_STOP_KILL_AFTER_MS", Value: VoiceControlStopKillAfterMS},
 	{Name: "VOICE_CONTROL_DEVICE_DEFAULT", Value: VoiceControlDeviceDefault},
 	{Name: "VOICE_DEVICES_MAX_NAME_BYTES", Value: VoiceDevicesMaxNameBytes},
+	{Name: "VOICE_DEVICES_MAX_BYTES", Value: VoiceDevicesMaxBytes},
 	{Name: "VOICE_CONTROL_PIPE_FLAG", Value: VoiceControlPipeFlag},
 	{Name: "VOICE_CONTROL_PIPE_NONCE_ENV", Value: VoiceControlPipeNonceEnv},
 	{Name: "VOICE_CONTROL_PIPE_NONCE_BYTES", Value: VoiceControlPipeNonceBytes},
@@ -259,6 +260,13 @@ var TSTypes = []TSType{
 	{Value: VoiceControlStateV2{}, Schema: VoiceControlSchemaV2},
 	{Value: VoiceControlProtocolErrorV2{}, Schema: VoiceControlSchemaV2},
 	{Value: VoiceControlPipeAttachedV1{}, Schema: VoiceControlPipeSchemaV1},
+	// The device list `conch-voice devices --json` writes (issue #1378, D3-7
+	// of #771): the desktop owner reads it from a one-shot run. Its fixtures
+	// are in testdata/voice-devices/, so the rows name no family;
+	// desktop/tests/unit/voice-oneshot.test.ts checks every one of them and
+	// every case of cases.json against this validator.
+	{Value: VoiceDevice{}},
+	{Value: VoiceDevicesV1{}, Schema: VoiceDevicesSchemaV1},
 	// Invites: the way in (ADR-008 §4). The code is in the create response
 	// alone; the new principal is in the redeem response.
 	{Value: PrincipalV0{}, Family: "principal-v0"},

@@ -18,7 +18,19 @@
 //   - teardown leaves and stops the helper within VoiceControlStopKillAfterMS;
 //   - the logind watcher of #773 calls setMute and leave (decision D-1).
 import { VOICE_CONTROL_STOP_KILL_AFTER_MS, type VoiceControlTalkMode } from '../../../web/src/schema/generated.ts';
-import type { NativeVoiceHelper, NativeVoiceStatus, NativeVoiceView, VoiceCommandResult } from '../../../web/src/platform/desktop/bridge.ts';
+import type {
+  NativeVoiceDevicesResult,
+  NativeVoiceHelper,
+  NativeVoiceStatus,
+  NativeVoiceView,
+  VoiceCommandResult,
+  VoiceDeviceKey,
+  VoiceKeyDevicesResult,
+  VoiceSaveResult,
+  VoiceTalkBindingResult,
+} from '../../../web/src/platform/desktop/bridge.ts';
+import { devicePath, KEY_DEVICE_DISCLOSURE, listKeyDevices, type KeyDeviceDeps } from './keydevices.ts';
+import { isPageSaveKey, keyCodeText, saveValueFits, type OneShot } from './oneshot.ts';
 import type { CommandResult, HelperView, StartRequest, VoiceState } from './supervisor.ts';
 
 // The longest a push-to-talk transmission may last without a release
@@ -58,10 +70,14 @@ export interface VoiceIdentity {
 
 export interface VoiceServiceDeps {
   readonly supervisor: VoiceSupervisor;
+  // The helper's one-shot runs: the device list and a save (issue #1378).
+  readonly oneShot: Pick<OneShot, 'devices' | 'save' | 'cancel'>;
   // The identity in force, or null (no profile, signed out, no private data
   // directory).
   readonly identity: () => Promise<VoiceIdentity | null>;
   readonly log: (line: string) => void;
+  // Test seams for the key-device listing (issue #1381).
+  readonly keyDevices?: KeyDeviceDeps;
   // How long teardown waits for the stop; the contract's kill bound.
   readonly stopBoundMs?: number;
 }
@@ -135,6 +151,9 @@ export class VoiceService {
   private inflight: Promise<NativeVoiceView> | null = null;
   // Counts leaves and teardowns: a join begun before one is overtaken by it.
   private epoch = 0;
+  // Counts teardowns alone: a one-shot begun before one is overtaken by it
+  // (a leave of the channel does not touch the person's device list).
+  private teardowns = 0;
   // The identity the current join began under; its current() fences what the
   // supervisor reports.
   private active: VoiceIdentity | null = null;
@@ -143,6 +162,11 @@ export class VoiceService {
   private readonly listeners = new Set<(view: NativeVoiceView) => void>();
   private readonly bound: number;
   private unsubscribe: (() => void) | null = null;
+  // The names of the last key-device listing, by the opaque id it gave each:
+  // an id means nothing in any other listing. Replaced by every listing and
+  // dropped at teardown.
+  private listing = new Map<string, string>();
+  private bindingSave = false;
 
   constructor(private readonly deps: VoiceServiceDeps) {
     this.bound = deps.stopBoundMs ?? VOICE_CONTROL_STOP_KILL_AFTER_MS;
@@ -317,7 +341,75 @@ export class VoiceService {
   // teardown is the media hook of a switch, sign-out or quit: leave and
   // stop, resolving within the contract's kill bound.
   teardown(): Promise<void> {
-    return this.leave().then(() => undefined);
+    // A one-shot run belongs to the profile it began under: it is killed and
+    // reaped with the helper, and one still waiting for its identity is
+    // overtaken (issue #1378).
+    this.teardowns++;
+    this.listing = new Map();
+    return Promise.all([this.leave(), this.deps.oneShot.cancel()]).then(() => undefined);
+  }
+
+  // devices lists the microphones and speakers (`conch-voice devices --json`),
+  // for the profile in force. It starts no voice and reads no login.
+  async devices(): Promise<NativeVoiceDevicesResult> {
+    const begun = this.teardowns;
+    const identity = await this.deps.identity();
+    if (identity === null || begun !== this.teardowns) return { ok: false, error: NOT_SIGNED_IN };
+    return this.deps.oneShot.devices(identity.configDir);
+  }
+
+  // saveDevice runs `config set` for the profile in force. The key and value
+  // are checked again here, whatever the caller.
+  async saveDevice(request: { readonly key: VoiceDeviceKey; readonly value: string }): Promise<VoiceSaveResult> {
+    // The key device and the talk key are saved by saveTalkBinding alone.
+    if (!isPageSaveKey(request.key) || !saveValueFits(request.key, request.value)) return { ok: false, error: 'invalid' };
+    const begun = this.teardowns;
+    const identity = await this.deps.identity();
+    if (identity === null || begun !== this.teardowns) return { ok: false, error: NOT_SIGNED_IN };
+    return this.deps.oneShot.save(identity.configDir, request.key, request.value);
+  }
+
+  // keyDevices lists the devices a talk key could be bound on, by name from
+  // /dev/input/by-id, opening none (issue #1381). It needs no login and
+  // starts no helper. The ids it gives are good for the next saveTalkBinding
+  // until the next listing.
+  async keyDevices(): Promise<VoiceKeyDevicesResult> {
+    const begun = this.teardowns;
+    try {
+      const { devices } = await listKeyDevices({ uid: process.getuid?.(), ...this.deps.keyDevices });
+      if (begun !== this.teardowns) return { ok: false, error: 'cancelled' };
+      this.listing = new Map(devices.map((d) => [d.id, d.name]));
+      return { ok: true, devices, disclosure: KEY_DEVICE_DISCLOSURE };
+    } catch {
+      // No device name or path in the log.
+      this.deps.log('voice: the key device list failed');
+      return { ok: false, error: 'failed' };
+    }
+  }
+
+  // saveTalkBinding saves keys.device (the by-id path of a device of the
+  // current listing) and then keys.talk (a key code 1..767) for the profile in
+  // force, and says which of the two did not save. The id and the code are
+  // checked here again, whatever the caller.
+  async saveTalkBinding(request: { readonly deviceId: string; readonly code: number }): Promise<VoiceTalkBindingResult> {
+    const name = typeof request.deviceId === 'string' ? this.listing.get(request.deviceId) : undefined;
+    const code = keyCodeText(request.code);
+    if (name === undefined || code === null) return { ok: false, error: 'invalid' };
+    const path = devicePath(name);
+    if (!saveValueFits('keys.device', path)) return { ok: false, error: 'invalid' };
+    if (this.bindingSave) return { ok: false, error: 'busy' };
+    this.bindingSave = true;
+    try {
+      const begun = this.teardowns;
+      const identity = await this.deps.identity();
+      if (identity === null || begun !== this.teardowns) return { ok: false, error: NOT_SIGNED_IN };
+      const device = await this.deps.oneShot.save(identity.configDir, 'keys.device', path);
+      if (!device.ok) return { ok: false, error: device.error, failed: 'device' };
+      const talk = await this.deps.oneShot.save(identity.configDir, 'keys.talk', code);
+      return talk.ok ? { ok: true } : { ok: false, error: talk.error, failed: 'talk' };
+    } finally {
+      this.bindingSave = false;
+    }
   }
 
   // waitForJoin: also wait for a join still inside Supervisor.start (before it

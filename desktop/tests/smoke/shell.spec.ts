@@ -75,6 +75,10 @@ test.describe('the packaged shell', () => {
         // The voice family (#1374): state, commands and its event, and no press,
         // release or transmit function.
         'voiceState', 'voiceJoin', 'voiceLeave', 'voiceRetry', 'voiceSetMute', 'voiceSetDeafen', 'voiceSetDevices', 'voiceSetTalkMode', 'onVoiceState',
+        // One-shot helper runs (#1378).
+        'voiceDevices', 'voiceSaveDevice',
+        // Talk-key setup (#1381).
+        'voiceKeyDevices', 'voiceSaveTalkBinding',
       ].sort(),
       true,
     ]);

@@ -78,7 +78,7 @@ const phaseLabel: Record<Phase, string> = {
 // nameOf names someone in voice. The viewer is "You", or, while this page is
 // not the one in voice, "You (on another device)" (issue #591, F24): one
 // person holds one place in a room, so that place is another page's.
-function nameOf(people: ReadonlyMap<number, Person>, id: number, viewer: number, elsewhere = false): string {
+export function nameOf(people: ReadonlyMap<number, Person>, id: number, viewer: number, elsewhere = false): string {
   if (id === viewer) return elsewhere ? 'You (on another device)' : 'You';
   return people.get(id)?.name ?? `Member ${String(id)}`;
 }
@@ -764,7 +764,7 @@ function shownOnPhone(roster: readonly Occupant[], viewer: number): ReadonlySet<
 // the list. At 700 px and wider every chip shows, wrapping onto more lines;
 // on a phone three show, the viewer's own among them, and "+N more" shows
 // the rest.
-function Roster({ roster, people, viewer, elsewhere, speaking, volumes }: {
+export function Roster({ roster, people, viewer, elsewhere, speaking, volumes }: {
   readonly roster: readonly Occupant[];
   readonly people: ReadonlyMap<number, Person>;
   readonly viewer: number;
