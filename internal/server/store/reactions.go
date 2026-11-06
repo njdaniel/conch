@@ -373,7 +373,7 @@ func (s *Store) SetReaction(ctx context.Context, channelID int64, reader Reader,
 			var role string
 			switch err := tx.QueryRowContext(ctx,
 				`SELECT nm.role FROM nets n JOIN net_members nm ON nm.net_id = n.id
-				 WHERE n.id = ? AND n.channel_id = ? AND n.archived_at IS NULL AND nm.principal_id = ?`,
+				 WHERE n.id = ? AND n.channel_id = ? AND n.archived_at IS NULL AND nm.principal_id = ? AND `+notBannedSQL("nm.principal_id"),
 				target.Audience.NetID, channelID, reader.PrincipalID).Scan(&role); {
 			case errors.Is(err, sql.ErrNoRows):
 				return false, ErrReactionNotPermitted

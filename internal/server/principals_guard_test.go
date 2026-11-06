@@ -60,6 +60,11 @@ var principalReads = []principalRead{
 	// administrator's grant), and at the run by the agent that asked.
 	{"store/admin_actions.go", "adminTargetNameTx", 1, readOperatorOrMaker},
 	{"store/approvals.go", "Store.castDecision", 2, readGated},
+	// #851: the ban list, behind the channel-manager class (an owner, an
+	// operator holding manage_channels, or a manager of the channel), and a
+	// manager's ban target, a member of the channel it manages.
+	{"store/bans.go", "Store.ListChannelBans", 1, readOperatorOrMaker},
+	{"store/bans.go", "managerBanTargetTx", 1, readOperatorOrMaker},
 	{"store/audience.go", "Store.ListChannelAuthors", 1, readGated},
 	// #1282: the humans who hold a message of an author that ListChannelAuthors
 	// would name it for, decided per reader by messageVisible; the ids go only
@@ -78,7 +83,7 @@ var principalReads = []principalRead{
 	{"store/credentials.go", "Store.revokeCredential", 1, readOwnOrInternal},
 	{"store/credentials.go", "insertCredentialTx", 1, readOwnOrInternal},
 	{"store/directory.go", "directoryKnowersTx", 1, readPredicate},
-	{"store/directory.go", "Store.DirectoryMembershipAudience", 1, readPredicate},
+	{"store/directory.go", "Store.DirectoryMembershipAudience", 2, readPredicate},
 	{"store/directory.go", "Store.ListDirectory", 1, readPredicate},
 	{"store/directory.go", "mayKnowTx", 1, readPredicate},
 	{"store/disable.go", "liveOperatorCredentialsTx", 2, readOwnOrInternal},

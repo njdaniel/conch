@@ -193,6 +193,13 @@ func TestChannelContentLeak(t *testing.T) {
 		// channel's 404, and the operator (voice is not configured here, and the
 		// target is not in voice) a 204.
 		{"voice participant removal", "DELETE", "/v1/channels/%s/voice/participants/9999", "", false, [4]int{http.StatusForbidden, notFound, http.StatusForbidden, http.StatusNoContent}},
+		// Bans (issue #851) are a manager's routes, behind the same gate: a
+		// member who does not manage gets 403, an agent is refused before any
+		// lookup, a non-member the unknown channel's 404. The operator lists
+		// them (200) and lifts one that is not there (204).
+		{"ban list", "GET", "/v1/channels/%s/bans", "", false, [4]int{http.StatusForbidden, notFound, http.StatusForbidden, ok}},
+		{"ban delete", "DELETE", "/v1/channels/%s/bans/0", "", false, [4]int{http.StatusForbidden, notFound, http.StatusForbidden, http.StatusBadRequest}},
+		{"ban put", "PUT", "/v1/channels/%s/bans/0", "", false, [4]int{http.StatusForbidden, notFound, http.StatusForbidden, http.StatusBadRequest}},
 		{"voice companion", "POST", "/v1/channels/%s/voice/companion", `{"publish":"screen","subscribe":true}`, false, [4]int{http.StatusServiceUnavailable, notFound, notFound, notFound}},
 		{"voice companion, malformed body", "POST", "/v1/channels/%s/voice/companion", `{"publish":`, false, [4]int{http.StatusServiceUnavailable, notFound, notFound, notFound}},
 		{"voice companion removal", "DELETE", "/v1/channels/%s/voice/companion", "", false, [4]int{http.StatusServiceUnavailable, notFound, notFound, notFound}},
@@ -227,6 +234,9 @@ func TestChannelContentLeak(t *testing.T) {
 		"PUT /v1/channels/{channel}/members/{principal_id}":               "a membership write (operator or manager, issue #790); covered by the \"member put\" row above, whose path names a principal id",
 		"DELETE /v1/channels/{channel}/members/{principal_id}":            "a membership write (operator or manager, issue #790); covered by the \"member delete\" row above, whose path names a principal id",
 		"DELETE /v1/channels/{channel}/voice/participants/{principal_id}": "a voice-only removal (issue #850); covered by the \"voice participant removal\" row above, whose path names a principal id",
+		"GET /v1/channels/{channel}/bans":                                 "the ban list (issue #851); covered by the \"ban list\" row above",
+		"PUT /v1/channels/{channel}/bans/{principal_id}":                  "a ban (issue #851); covered by the \"ban put\" row above, whose path names a principal id",
+		"DELETE /v1/channels/{channel}/bans/{principal_id}":               "a ban lifted (issue #851); covered by the \"ban delete\" row above, whose path names a principal id",
 		"PUT /v1/channels/{channel}/nets/{net}/members/{principal_id}":    "operator-only net write; covered by the role matrix and TestNetEndpoints",
 		"DELETE /v1/channels/{channel}/nets/{net}/members/{principal_id}": "operator-only net write; covered by the role matrix and TestNetEndpoints",
 		// Reactions (issue #765) need a real message id for a member's row to

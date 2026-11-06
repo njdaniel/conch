@@ -339,6 +339,15 @@ Nick signed off the shapes above as recommended on the M1 sign-off sheet, with t
 - Q5, `guest` attribution on `ChannelBanV1`: not in M1; `name` reads the handle, which is enough to confirm an unban. Additive later if M6 needs it.
 - Q6, `MessageRemovedBody` as a TypeScript constant: no.
 
+### 10.2 M3 as built (#851)
+
+No wire shape or error code was added beyond the three admin-catalog action names (`list_channel_bans`, `ban_channel_member`, `unban_channel_member`, #849 Q4, appended to the closed `AdminAction` vocabulary with the generated TypeScript).
+
+- **The predicate.** `internal/server/store/bans.go` defines `liveMembers`, `channel_members` without banned principals, as one table expression that every read of membership uses (members, content visibility, approval rights, voice entitlement, nets, files, runs, the directory). Only a write that must see the raw row (cleanup, a manager's target check, the guest-end sweeps) reads `channel_members` itself. Net seats are read with `notBannedSQL`.
+- **Refused adds.** Every membership write checks `channel_bans` inside its transaction: `PutChannelMember` (both branches), `AddChannelMemberIfAbsent` (name or id), guest admission (`admitGuestTx`) and the default-channel join of the community migration is a past migration and is unchanged. A banned principal is refused with `ErrNotAddable`, the uniform 404 `principal_not_found`; a self-join of a public channel is the existing 403 `channel_not_joinable`.
+- **Manager and self-ban.** The target rules of §6.1 are applied literally: a manager's target must have `can_decide = 0`, so a manager who is also their channel's creator (and so an approver) cannot ban themselves; an operator can.
+- **Unban.** The cleanup of a standing ban's residual membership and net seats comes first and the ban row goes last, in one transaction; a cleanup that fails leaves the ban in force.
+
 ## 11. Candidate follow-up issues for principal review
 
 The follow-ups are filed as **#849 (M1), #850 (M2), #851 (M3), #852 (M4), #853 (M5) and #854 (M6)**. IDs M1–M6 are local ordering labels. Each implementation issue is security-sensitive and gets a `security-reviewer` pass. M1 additionally records Nick's §10 approval before dispatch.

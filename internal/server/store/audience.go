@@ -284,7 +284,7 @@ func (s *Store) ListChannelAuthors(ctx context.Context, channelID int64, reader 
 func (s *Store) AuthorReaders(ctx context.Context, authorID int64) ([]int64, error) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT DISTINCT v.id FROM principals v
-		 JOIN channel_members cm ON cm.principal_id = v.id
+		 JOIN `+liveMembers+` cm ON cm.principal_id = v.id
 		 WHERE v.kind = 'human' AND v.disabled_at IS NULL AND v.hidden_at IS NULL
 		   AND v.id <> ?
 		   AND EXISTS (SELECT 1 FROM messages x WHERE x.channel_id = cm.channel_id AND x.author_id = ?)
@@ -303,7 +303,7 @@ func (s *Store) AuthorReaders(ctx context.Context, authorID int64) ([]int64, err
 		var ok bool
 		if err := s.db.QueryRowContext(ctx,
 			`SELECT EXISTS (SELECT 1 FROM messages m
-			                JOIN channel_members rc ON rc.channel_id = m.channel_id AND rc.principal_id = ?
+			                JOIN `+liveMembers+` rc ON rc.channel_id = m.channel_id AND rc.principal_id = ?
 			                WHERE m.author_id = ? AND `+messageVisible(scoped)+`)`, // #nosec G202 -- constant conditions only
 			args...).Scan(&ok); err != nil {
 			return nil, fmt.Errorf("store: readers of author %d: %w", authorID, err)
@@ -361,7 +361,7 @@ const (
 	visibleToScopedReader = `(m.audience_kind IS NULL OR (
 			        EXISTS (SELECT 1 FROM message_recipients r
 			                WHERE r.message_id = m.id AND r.principal_id = ?)
-			    AND EXISTS (SELECT 1 FROM channel_members c
+			    AND EXISTS (SELECT 1 FROM ` + liveMembers + ` c
 			                WHERE c.channel_id = m.channel_id AND c.principal_id = ?)
 			    AND EXISTS (SELECT 1 FROM principals p
 			                WHERE p.id = ? AND p.disabled_at IS NULL)))`
@@ -374,13 +374,15 @@ const (
 	// thread's root for a reply (a root's id is always below its replies'),
 	// so a new reply does not carry an old thread past the bound. A NULL
 	// bound compares as neither, so a guest without one sees nothing. The
-	// aliases (hg, hb, ha) are this condition's own.
+	// aliases (hg, hb, ha) are this condition's own. It is not a membership
+	// check: for a banned non-guest it is satisfiable, so it must stay behind
+	// one (isChannelMemberTx, the handlers' channel gate).
 	withinHistoryBound = `((NOT EXISTS (SELECT 1 FROM guest_visits hg
 			                    WHERE hg.principal_id = ? AND hg.state = 'active')
-			    AND NOT EXISTS (SELECT 1 FROM channel_members hb
+			    AND NOT EXISTS (SELECT 1 FROM ` + liveMembers + ` hb
 			                    WHERE hb.channel_id = m.channel_id AND hb.principal_id = ?
 			                      AND COALESCE(m.thread_root_id, m.id) <= hb.history_after))
-			 OR EXISTS (SELECT 1 FROM channel_members ha
+			 OR EXISTS (SELECT 1 FROM ` + liveMembers + ` ha
 			            WHERE ha.channel_id = m.channel_id AND ha.principal_id = ?
 			              AND COALESCE(m.thread_root_id, m.id) > ha.history_after))`
 
@@ -687,7 +689,7 @@ func (s *Store) FileVisibleTo(ctx context.Context, fileID int64, reader Reader) 
 // channel is the column the embedding statement names, never a caller's text.
 func noHistoryBound(channelColumn string) string {
 	return `(NOT EXISTS (SELECT 1 FROM guest_visits ng WHERE ng.principal_id = ? AND ng.state = 'active')
-		     AND NOT EXISTS (SELECT 1 FROM channel_members nb
+		     AND NOT EXISTS (SELECT 1 FROM ` + liveMembers + ` nb
 		                     WHERE nb.channel_id = ` + channelColumn + ` AND nb.principal_id = ?
 		                       AND nb.history_after IS NOT NULL))`
 }
@@ -704,7 +706,7 @@ func noHistoryBound(channelColumn string) string {
 var (
 	fileHead = `SELECT ` + fileColumns + ` FROM files f
 		 WHERE f.id = ?
-		   AND EXISTS (SELECT 1 FROM channel_members cm
+		   AND EXISTS (SELECT 1 FROM ` + liveMembers + ` cm
 		               WHERE cm.channel_id = f.channel_id AND cm.principal_id = ?)
 		   AND EXISTS (SELECT 1 FROM principals up
 		               WHERE up.id = ? AND up.disabled_at IS NULL)
@@ -1169,7 +1171,7 @@ func scopedDetail(channelID int64, a schema.Audience, recipients []int64) string
 func isChannelMemberTx(ctx context.Context, tx execer, channelID, principalID int64) (bool, error) {
 	var one int
 	switch err := tx.QueryRowContext(ctx,
-		"SELECT 1 FROM channel_members WHERE channel_id = ? AND principal_id = ?", channelID, principalID).Scan(&one); {
+		"SELECT 1 FROM "+liveMembers+" WHERE channel_id = ? AND principal_id = ?", channelID, principalID).Scan(&one); {
 	case errors.Is(err, sql.ErrNoRows):
 		return false, nil
 	case err != nil:
@@ -1186,7 +1188,7 @@ func resolveNetRecipientsTx(ctx context.Context, tx execer, channelID, netID, au
 	var role string
 	switch err := tx.QueryRowContext(ctx,
 		`SELECT m.role FROM nets n JOIN net_members m ON m.net_id = n.id
-		 WHERE n.id = ? AND n.channel_id = ? AND n.archived_at IS NULL AND m.principal_id = ?`,
+		 WHERE n.id = ? AND n.channel_id = ? AND n.archived_at IS NULL AND m.principal_id = ? AND `+notBannedSQL("m.principal_id"),
 		netID, channelID, authorID).Scan(&role); {
 	case errors.Is(err, sql.ErrNoRows):
 		return nil, ErrNetNotFound
@@ -1198,7 +1200,7 @@ func resolveNetRecipientsTx(ctx context.Context, tx execer, channelID, netID, au
 	}
 	rows, err := tx.QueryContext(ctx,
 		`SELECT m.principal_id FROM net_members m
-		 JOIN channel_members c ON c.channel_id = ? AND c.principal_id = m.principal_id
+		 JOIN `+liveMembers+` c ON c.channel_id = ? AND c.principal_id = m.principal_id
 		 WHERE m.net_id = ? ORDER BY m.principal_id ASC`, channelID, netID)
 	if err != nil {
 		return nil, fmt.Errorf("store: resolve recipients of net %d: %w", netID, err)
@@ -1286,7 +1288,7 @@ const runColumns = `ru.id, ru.session_id, ru.principal_id, ru.channel_id, ru.mes
 // then the message predicate's own. The aliases differ from the message
 // predicate's (r, c, p) so nothing in it can bind to the run by accident.
 var (
-	runVisibleHead = `(EXISTS (SELECT 1 FROM channel_members rc
+	runVisibleHead = `(EXISTS (SELECT 1 FROM ` + liveMembers + ` rc
 	                   WHERE rc.channel_id = ru.channel_id AND rc.principal_id = ?)
 	     AND EXISTS (SELECT 1 FROM principals rp WHERE rp.id = ? AND rp.disabled_at IS NULL)
 	     AND ((ru.message_id IS NULL AND ` + noHistoryBound("ru.channel_id") + `) OR EXISTS (
@@ -1727,7 +1729,7 @@ func runAnchorVisibleTx(ctx context.Context, tx execer, channelID, messageID int
 	var role string
 	switch err := tx.QueryRowContext(ctx,
 		`SELECT m.role FROM nets n JOIN net_members m ON m.net_id = n.id
-		 WHERE n.id = ? AND n.channel_id = ? AND n.archived_at IS NULL AND m.principal_id = ?`,
+		 WHERE n.id = ? AND n.channel_id = ? AND n.archived_at IS NULL AND m.principal_id = ? AND `+notBannedSQL("m.principal_id"),
 		netID.Int64, channelID, reader.PrincipalID).Scan(&role); {
 	case errors.Is(err, sql.ErrNoRows):
 		return ErrRunAnchorNotFound
@@ -2030,7 +2032,7 @@ func requestedInterventionsTx(ctx context.Context, tx execer, runID int64) (int,
 var ErrMessageNotFound = errors.New("store: message not found")
 
 // reactionMemberCond takes the reader's principal id twice.
-const reactionMemberCond = `EXISTS (SELECT 1 FROM channel_members rc
+const reactionMemberCond = `EXISTS (SELECT 1 FROM ` + liveMembers + ` rc
 	                   WHERE rc.channel_id = m.channel_id AND rc.principal_id = ?)
 	     AND EXISTS (SELECT 1 FROM principals rp WHERE rp.id = ? AND rp.disabled_at IS NULL)`
 
@@ -2237,7 +2239,7 @@ func holdsNetMemberSeatTx(ctx context.Context, tx execer, channelID, netID, prin
 	var role string
 	switch err := tx.QueryRowContext(ctx,
 		`SELECT nm.role FROM nets n JOIN net_members nm ON nm.net_id = n.id
-		 WHERE n.id = ? AND n.channel_id = ? AND n.archived_at IS NULL AND nm.principal_id = ?`,
+		 WHERE n.id = ? AND n.channel_id = ? AND n.archived_at IS NULL AND nm.principal_id = ? AND `+notBannedSQL("nm.principal_id"),
 		netID, channelID, principalID).Scan(&role); {
 	case errors.Is(err, sql.ErrNoRows):
 		return false, nil

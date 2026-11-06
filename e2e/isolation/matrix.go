@@ -448,6 +448,23 @@ func coreMatrixRows() []row {
 		byChannel("DELETE /v1/channels/{channel}/members/{principal_id}", "removes an A member from A's channel", func(w *world, s subject) probe {
 			return del(ch(s) + "/members/" + id(w.a.people[0].id))
 		}),
+		// Channel entry bans (issue #851, moderation design §6, §9 case 1): the
+		// channel-manager class, so a member of B and B's own manager (who
+		// manages B's channel and is not in A's) are told A's channel does not
+		// exist, whoever the target, for the list, the ban and the unban.
+		byChannel("GET /v1/channels/{channel}/bans", "lists the bans of A's channel", func(_ *world, s subject) probe { return get(ch(s) + "/bans") }),
+		byChannel("PUT /v1/channels/{channel}/bans/{principal_id}", "bans an A member from A's channel", func(w *world, s subject) probe {
+			return put(ch(s)+"/bans/"+id(w.a.people[0].id), nil)
+		}),
+		byChannel("DELETE /v1/channels/{channel}/bans/{principal_id}", "lifts a ban on an A member in A's channel", func(w *world, s subject) probe {
+			return del(ch(s) + "/bans/" + id(w.a.people[0].id))
+		}),
+		{route: "GET /v1/channels/{channel}/bans", what: "lists the bans of A's channel, as B's manager", pick: aChannel, manager: true, want: channelNotFound,
+			probe: func(_ *world, s subject) probe { return get(ch(s) + "/bans") }},
+		{route: "PUT /v1/channels/{channel}/bans/{principal_id}", what: "bans an A member from A's channel, as B's manager", pick: aChannel, manager: true, want: channelNotFound,
+			probe: func(w *world, s subject) probe { return put(ch(s)+"/bans/"+id(w.a.people[0].id), nil) }},
+		{route: "DELETE /v1/channels/{channel}/bans/{principal_id}", what: "lifts a ban on an A member in A's channel, as B's manager", pick: aChannel, manager: true, want: channelNotFound,
+			probe: func(w *world, s subject) probe { return del(ch(s) + "/bans/" + id(w.a.people[0].id)) }},
 		// A manager adds any member (issue #983, ADR-013 O10), so A's people are
 		// no longer refused to B's manager. What stays refused, with the one
 		// 404 of a principal never issued, is whoever is not a member: A's

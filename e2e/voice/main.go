@@ -385,6 +385,7 @@ func (l *live) run(ctx context.Context) error {
 		{"removed (room rotation)", l.removed},
 		{"removed while not connected", l.removedNotConnected},
 		{"removed from voice only", l.kickedFromVoice},
+		{"banned from the channel", l.bannedFromChannel},
 		{"other ways of losing the room", l.rotationScenario},
 		{"never issued", l.neverIssued},
 		{"credential expiring by itself", l.credentialExpires},

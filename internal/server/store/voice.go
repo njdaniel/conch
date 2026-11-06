@@ -423,7 +423,7 @@ func (s *Store) VoiceRoomsForChannel(ctx context.Context, channelID int64) ([]Vo
 func (s *Store) VoiceRoomsForMember(ctx context.Context, principalID int64) ([]VoiceRoom, error) {
 	return s.queryVoiceRooms(ctx, fmt.Sprintf("list voice rooms of principal %d", principalID),
 		`SELECT `+voiceRoomColumns+`
-		 FROM voice_rooms r JOIN channel_members m ON m.channel_id = r.channel_id
+		 FROM voice_rooms r JOIN `+liveMembers+` m ON m.channel_id = r.channel_id
 		 WHERE m.principal_id = ? AND r.retired_at IS NULL ORDER BY r.id ASC`, principalID)
 }
 
@@ -575,7 +575,7 @@ func (s *Store) InvalidVoiceRooms(ctx context.Context, now time.Time) ([]VoiceVi
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT `+voiceRoomColumns+`, MIN(CASE
 		     WHEN p.id IS NULL OR p.disabled_at IS NOT NULL THEN 1
-		     WHEN NOT EXISTS (SELECT 1 FROM channel_members m
+		     WHEN NOT EXISTS (SELECT 1 FROM `+liveMembers+` m
 		                      WHERE m.channel_id = r.channel_id AND m.principal_id = h.principal_id) THEN 2
 		     WHEN c.id IS NULL OR c.principal_id <> h.principal_id OR c.revoked_at IS NOT NULL OR NOT `+currentAuthSQL+` THEN 3
 		     WHEN c.expires_at IS NOT NULL AND c.expires_at <= ? THEN 4

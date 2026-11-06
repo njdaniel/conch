@@ -76,6 +76,12 @@ func (s *Server) routeTable() []route {
 		rt("POST /v1/channels/{channel}/members", accessChannelManager, hf(s.handleAddChannelMemberByName)),
 		rt("PUT /v1/channels/{channel}/members/{principal_id}", accessChannelManager, hf(s.handlePutChannelMember)),
 		rt("DELETE /v1/channels/{channel}/members/{principal_id}", accessChannelManager, hf(s.handleDeleteChannelMember)),
+		// Channel entry bans (issue #851, moderation.md §6): reduce-only, the
+		// same class as a membership removal. The store applies the target
+		// rules under its write lock.
+		rt("GET /v1/channels/{channel}/bans", accessChannelManager, hf(s.handleListChannelBans)),
+		rt("PUT /v1/channels/{channel}/bans/{principal_id}", accessChannelManager, hf(s.handlePutChannelBan)),
+		rt("DELETE /v1/channels/{channel}/bans/{principal_id}", accessChannelManager, hf(s.handleDeleteChannelBan)),
 		// Nets (issue #115). Management is operator-only; the list is open to
 		// authenticated callers and filtered to the nets they are on.
 		rt("POST /v1/channels/{channel}/nets", accessPermission, hf(s.handleCreateNet)).needs(schema.PermManageChannels),
