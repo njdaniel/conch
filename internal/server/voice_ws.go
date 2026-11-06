@@ -90,7 +90,7 @@ func (s *Server) streamVoice(ctx context.Context, conn *websocket.Conn, sub *voi
 	send := func() bool {
 		snap, live := sub.current()
 		if !live {
-			s.closeVoiceDropped(ctx, conn, channelID, principalID, credID)
+			s.closeVoiceDropped(ctx, conn, sub, channelID, principalID, credID)
 			return false
 		}
 		if err := snap.Validate(); err != nil {
@@ -110,7 +110,7 @@ func (s *Server) streamVoice(ctx context.Context, conn *websocket.Conn, sub *voi
 		// a removal) stops it here, as on the events socket (issue #519).
 		select {
 		case <-sub.dropped:
-			s.closeVoiceDropped(ctx, conn, channelID, principalID, credID)
+			s.closeVoiceDropped(ctx, conn, sub, channelID, principalID, credID)
 			return false
 		default:
 		}
@@ -142,7 +142,7 @@ func (s *Server) streamVoice(ctx context.Context, conn *websocket.Conn, sub *voi
 				return
 			}
 		case <-sub.dropped:
-			s.closeVoiceDropped(ctx, conn, channelID, principalID, credID)
+			s.closeVoiceDropped(ctx, conn, sub, channelID, principalID, credID)
 			return
 		}
 	}
@@ -168,9 +168,14 @@ func (s *Server) voiceStillMember(ctx context.Context, conn *websocket.Conn, cha
 }
 
 // closeVoiceDropped closes conn after its subscription was dropped, saying
-// why: shutdown, a revoked credential or disabled principal, or removal from
-// the channel.
-func (s *Server) closeVoiceDropped(ctx context.Context, conn *websocket.Conn, channelID, principalID, credID int64) {
+// why: shutdown, a revoked credential or disabled principal, removal from the
+// channel, or a moderator's voice-only removal (issue #850). The last is the
+// one close whose text is the reason itself, schema.SocketCloseVoiceRemoved:
+// the subscriber is still a member, and a client keys on that value to stay
+// out of voice without taking the channel for gone (issue #1409). Membership
+// is read before the kick mark, so a member removed from the channel in the
+// same instant hears the stronger reason.
+func (s *Server) closeVoiceDropped(ctx context.Context, conn *websocket.Conn, sub *voiceSub, channelID, principalID, credID int64) {
 	if s.voice.isClosed() {
 		closeWS(ctx, conn, schema.SocketCloseServerShutdown, websocket.StatusGoingAway, "server shutting down")
 		return
@@ -184,6 +189,10 @@ func (s *Server) closeVoiceDropped(ctx context.Context, conn *websocket.Conn, ch
 	}
 	if member, err := s.store.IsChannelMember(bg, channelID, principalID); err == nil && !member {
 		closeWS(ctx, conn, schema.SocketCloseRemoved, websocket.StatusPolicyViolation, "no longer a member of this channel")
+		return
+	}
+	if sub.wasKicked() {
+		closeWS(ctx, conn, schema.SocketCloseVoiceRemoved, websocket.StatusPolicyViolation, string(schema.SocketCloseVoiceRemoved))
 		return
 	}
 	closeWS(ctx, conn, schema.SocketCloseRemoved, websocket.StatusPolicyViolation, "presence subscription closed")

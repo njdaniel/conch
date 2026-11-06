@@ -126,10 +126,10 @@ function open(people: number[]): void {
   });
 }
 
-function drop(code: number): void {
+function drop(code: number, reason?: string): void {
   const o = last();
   act(() => {
-    o.events.onClose(code);
+    o.events.onClose(code, reason);
   });
 }
 
@@ -698,6 +698,102 @@ describe('presence of the channel on screen', () => {
     await pass(120_000);
     expect(fake.opened).toHaveLength(1);
     expect(fake.reads).toEqual(['c']);
+  });
+
+  // Issue #1409: a moderator's voice-only removal closes the socket 1008 with
+  // the text `voice_removed`. Still a member: presence is read and shown, the
+  // socket comes back through its backoff, and the channel is never gone.
+  it('is not gone after a 1008 voice_removed close, and reads presence as for any other reason', async () => {
+    fake.read = () => Promise.resolve({ ok: true, value: presence([5]) });
+    const { result } = hook();
+    await flush();
+    open([3]);
+    drop(1008, 'voice_removed');
+    await flush();
+    expect(fake.reads).toEqual(['c']);
+    expect(result.current.snapshot).not.toEqual({ kind: 'gone' });
+    expect(result.current.state.phase).toBe('idle');
+    expect(result.current.state.why).toBeNull();
+    await pass(1000);
+    expect(fake.opened).toHaveLength(2);
+    open([5]);
+    expect(result.current.snapshot).toEqual({ kind: 'presence', presence: presence([5]) });
+  });
+
+  describe('in voice', () => {
+    function room(): unknown {
+      const methods: Record<string, unknown> = { level: () => 0, microphoneInUse: () => null, microphoneProcessing: () => null };
+      return new Proxy(methods, { get: (target, name: string) => target[name] ?? (() => Promise.resolve(undefined)) });
+    }
+    let sessions = 0;
+    beforeEach(() => {
+      sessions = 0;
+      fake.session = () => {
+        sessions++;
+        return Promise.resolve({ ok: true, value: { livekit_url: 'wss://lk.example', identity: 'p7', rooms: [{ room: 'r', token: 't', can_publish: true, expires_at: '2026-10-16T00:00:15.000Z' }] } });
+      };
+      fake.room = room;
+      fake.read = () => Promise.resolve({ ok: true, value: presence([3]) });
+    });
+    afterEach(() => {
+      fake.session = () => new Promise(() => undefined);
+      fake.room = () => ({});
+    });
+
+    it('a 1008 voice_removed close leaves voice saying so, does not rejoin, and a deliberate join works', async () => {
+      const { result } = hook();
+      await flush();
+      open([3, 7]);
+      act(() => {
+        result.current.join();
+      });
+      await flush();
+      expect(result.current.state.phase).toBe('connected');
+      expect(sessions).toBe(1);
+      drop(1008, 'voice_removed');
+      await flush();
+      expect(result.current.state.phase).toBe('stopped');
+      expect(result.current.state.why).toBe('You were removed from voice');
+      // Still a member: the roster is read, never "gone", and the socket
+      // comes back through its backoff.
+      expect(fake.reads).toEqual(['c']);
+      expect(result.current.snapshot).not.toEqual({ kind: 'gone' });
+      await pass(1000);
+      expect(fake.opened).toHaveLength(2);
+      open([3]);
+      expect(result.current.snapshot).toEqual({ kind: 'presence', presence: presence([3]) });
+      // Nothing asks for the next session by itself, through the backoff.
+      await pass(60_000);
+      expect(sessions).toBe(1);
+      expect(result.current.state.phase).toBe('stopped');
+      // Joining again is the person's own choice, and is accepted at once.
+      act(() => {
+        result.current.join();
+      });
+      await flush();
+      expect(result.current.state.phase).toBe('connected');
+      expect(result.current.state.why).toBeNull();
+      expect(sessions).toBe(2);
+    });
+
+    it('a 1008 close for membership lost is the channel gone, and voice is not stopped by the socket', async () => {
+      const { result } = hook();
+      await flush();
+      open([3, 7]);
+      act(() => {
+        result.current.join();
+      });
+      await flush();
+      expect(result.current.state.phase).toBe('connected');
+      drop(1008, 'no longer a member of this channel');
+      await flush();
+      expect(result.current.snapshot).toEqual({ kind: 'gone' });
+      // The room's own disconnect, and conchd's refusal of the next session,
+      // end voice; the presence socket alone does not.
+      expect(result.current.state.phase).toBe('connected');
+      expect(result.current.state.why).toBeNull();
+      expect(fake.reads).toEqual([]);
+    });
   });
 
   it('signs out when the read after a 1008 close is refused with 401', async () => {

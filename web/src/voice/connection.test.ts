@@ -976,6 +976,41 @@ describe('disconnects', () => {
     }
   });
 
+  // Issue #1409: conchd's presence socket says a moderator removed this
+  // person from voice only. The client stops with why, asks for no session,
+  // and joins again only when told to.
+  it('removed from voice stops with the reason, does not ask conchd again, and joins again on request', async () => {
+    const t = await joined();
+    t.client.removed('You were removed from voice');
+    await settle();
+    expect(t.client.snapshot().phase).toBe('stopped');
+    expect(t.client.snapshot().why).toBe('You were removed from voice');
+    expect(t.rooms[0]?.closed).toBe(true);
+    // The room's own disconnect for the removal, arriving after, changes nothing.
+    t.rooms[0]?.events?.onDisconnected('participant_removed');
+    t.clock.advance(60_000);
+    await settle();
+    expect(t.asked).toEqual(['general']);
+    expect(t.client.snapshot().phase).toBe('stopped');
+    t.client.join('general');
+    await settle();
+    expect(t.asked).toEqual(['general', 'general']);
+    expect(t.client.snapshot().phase).toBe('connected');
+    expect(t.client.snapshot().why).toBeNull();
+  });
+
+  it('removed out of voice is nothing: idle and stopped stay as they are', async () => {
+    const t = setup();
+    t.client.removed('You were removed from voice');
+    expect(t.client.snapshot().phase).toBe('idle');
+    expect(t.client.snapshot().why).toBeNull();
+    const u = await joined();
+    u.rooms[0]?.events?.onDisconnected('duplicate_identity');
+    await settle();
+    u.client.removed('You were removed from voice');
+    expect(u.client.snapshot().why).toMatch(/Another device/);
+  });
+
   it('a duplicate identity stops, saying another device took over', async () => {
     const t = await joined();
     t.rooms[0]?.events?.onDisconnected('duplicate_identity');

@@ -3485,6 +3485,7 @@ export type SocketCloseReason =
   | 'keepalive_timeout'
   | 'revoked'
   | 'removed'
+  | 'voice_removed'
   | 'slow_consumer'
   | 'session_ended'
   | 'error';
@@ -3495,6 +3496,7 @@ export const socketCloseReason = vocab<SocketCloseReason>({
   keepalive_timeout: true,
   revoked: true,
   removed: true,
+  voice_removed: true,
   slow_consumer: true,
   session_ended: true,
   error: true,

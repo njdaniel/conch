@@ -6,6 +6,7 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState, useSyncExter
 import * as api from '../api';
 import { pageHiddenOnPhone } from '../phone';
 import type { ChannelV0 } from '../schema/channel';
+import type { SocketCloseReason } from '../schema/generated';
 import type { VoicePresenceV1 } from '../schema/voice';
 import { Feed, type FeedStatus } from '../state/feed';
 import type { Camera } from './camera';
@@ -252,6 +253,13 @@ const voiceNotAllowed = 'voice_not_allowed';
 // reader is no longer a member of the channel. The channel is then gone, and
 // the read that would say so is a request known to fail (issue #1084).
 const noLongerMember = 'no longer a member of this channel';
+
+// The one close whose text is the reason itself (schema.SocketCloseVoiceRemoved,
+// issue #1409): a moderator removed this person from voice only. They are still
+// a member, so presence is read as after any other 1008; but the voice client
+// is stopped, saying so, and not rejoined by itself.
+const voiceRemoved: SocketCloseReason = 'voice_removed';
+export const removedFromVoice = 'You were removed from voice';
 
 export interface VoiceControl {
   readonly state: VoiceState;
@@ -500,6 +508,10 @@ export function useVoice({
         set('gone');
         return;
       }
+      // Removed from voice only: out of the room, still a member. The client
+      // in this channel stops and says so, instead of taking the room's
+      // disconnect for a renewal and asking for the next session.
+      if (closeReason === voiceRemoved && joinedRef.current !== null && joinedRef.current === named()) client.removed(removedFromVoice);
       void api.getVoicePresence(named()).then((result) => {
         if (!live) return;
         if (result.ok) {

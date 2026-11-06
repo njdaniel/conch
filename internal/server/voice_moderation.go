@@ -79,8 +79,10 @@ func (s *Server) handleVoiceParticipantRemove(w http.ResponseWriter, r *http.Req
 // voiceParticipantKick removes principalID from voice in channelID and no
 // further, and reports whether every current room of the channel was cleared.
 //
-//  1. Their presence sockets in the channel close; message, events and
-//     occupancy sockets stay.
+//  1. Their presence sockets in the channel close, saying they were removed
+//     from voice and not from the channel (close 1008, text
+//     schema.SocketCloseVoiceRemoved); message, events and occupancy sockets
+//     stay.
 //  2. They leave presence in every current room of the channel and whatever
 //     the transmit rule had open for them is closed, before LiveKit is asked.
 //  3. LiveKit is asked to remove p<id> (and its companion and viewer) from
@@ -90,7 +92,7 @@ func (s *Server) handleVoiceParticipantRemove(w http.ResponseWriter, r *http.Req
 // With LiveKit unconfigured there is no media participant, and the result is
 // nil. A failed room list or removal is an error; the caller answers 503.
 func (s *Server) voiceParticipantKick(ctx context.Context, channelID, principalID int64) error {
-	s.voice.dropPrincipal(channelID, principalID)
+	s.voice.kickPrincipal(channelID, principalID)
 	if s.lk == nil {
 		return nil
 	}

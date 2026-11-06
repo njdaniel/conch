@@ -191,9 +191,17 @@ test('LiveKit: a manager confirms a voice-only removal with retry, a member cann
     await expect(voice(targetPage)).toContainText(`Connected in #${vw.channel}`);
     await voice(mgr).getByRole('button', { name: 'Retry' }).click();
     await expect(voice(mgr)).toContainText('Removed or already absent/removed.');
-    // The target staying out of voice is not asserted: the web client rejoins by itself after the
-    // presence socket closes with 1008 "removed" (tracked in #1409, which needs a vocabulary change).
+    // The target is out of voice and told so (the presence socket closed 1008 `voice_removed`,
+    // issue #1409): no rejoin by itself, never "channel gone", and Join voice is theirs to press.
+    await expect(voice(targetPage)).toContainText('You were removed from voice', { timeout: 30_000 });
+    await expect(voice(targetPage)).not.toContainText(`Connected in #${vw.channel}`);
+    const rejoin = voice(targetPage).getByRole('button', { name: 'Join voice' });
+    await expect(rejoin).toBeEnabled();
     await expect(voice(plain)).toContainText(`Connected in #${vw.channel}`);
+    // A deliberate rejoin works at once.
+    await rejoin.click();
+    await expect(voice(targetPage)).toContainText(`Connected in #${vw.channel}`, { timeout: 30_000 });
+    await expect(voice(targetPage)).not.toContainText('You were removed from voice');
     // Voice removal leaves chat access unchanged: the target is still a member who can read and post.
     expect((await vw.api(target.token, 'GET', `/v2/channels/${vw.channel}/messages`)).status).toBe(200);
     const stillPosts: PostMessageRequestV2 = { body: unique('after-voice-kick') };

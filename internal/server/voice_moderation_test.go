@@ -2,14 +2,19 @@ package server
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"slices"
 	"strings"
 	"sync"
 	"testing"
+	"time"
+
+	"github.com/coder/websocket"
 
 	"github.com/njdaniel/conch/internal/server/store"
+	"github.com/njdaniel/conch/pkg/schema"
 )
 
 // voiceKickFixture is the presence fixture with the moderation cast added:
@@ -280,6 +285,89 @@ func TestVoiceKickEffects(t *testing.T) {
 	f.pass(t)
 	if got := f.who(t, f.ops); !strings.Contains(got, "ann") {
 		t.Errorf("after rejoin = %q, want ann back", got)
+	}
+}
+
+// TestVoiceKickPresenceCloseReason: the kicked target's presence socket is
+// closed 1008 with the text schema.SocketCloseVoiceRemoved, the one close a
+// client keys on by value (issue #1409); a real removal from the channel
+// still says "no longer a member". Someone else's socket in the channel, and
+// the target's own in another channel, stay open either way.
+func TestVoiceKickPresenceCloseReason(t *testing.T) {
+	tests := []struct {
+		name       string
+		act        func(t *testing.T, f *voiceKickFixture) int
+		wantReason string
+		stillIn    bool
+	}{
+		{"removed from voice only", func(t *testing.T, f *voiceKickFixture) int {
+			return f.kick(t, "mgr", "ops", f.ids["ann"]).status
+		}, string(schema.SocketCloseVoiceRemoved), true},
+		{"removed from the channel", func(t *testing.T, f *voiceKickFixture) int {
+			return f.doOrdered(t, http.MethodDelete, fmt.Sprintf("/v1/channels/ops/members/%d", f.ids["ann"]), f.rootTok)
+		}, "no longer a member of this channel", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := newVoiceKickFixture(t, presenceOpts{auth: AuthRequired})
+			base := wsTestServer(t, f.srv)
+			annOps, _, err := dialVoice(t, base, "ops", f.tokens["ann"])
+			if err != nil {
+				t.Fatal(err)
+			}
+			readPresence(t, annOps)
+			annOps2, _, err := dialVoice(t, base, "ops2", f.tokens["ann"])
+			if err != nil {
+				t.Fatal(err)
+			}
+			readPresence(t, annOps2)
+			plainOps, _, err := dialVoice(t, base, "ops", f.tokens["plain"])
+			if err != nil {
+				t.Fatal(err)
+			}
+			readPresence(t, plainOps)
+
+			if code := tt.act(t, f); code != http.StatusNoContent {
+				t.Fatalf("status = %d", code)
+			}
+			ce := expectCloseError(t, annOps)
+			if ce.Code != websocket.StatusPolicyViolation || ce.Reason != tt.wantReason {
+				t.Errorf("close = %d %q, want %d %q", ce.Code, ce.Reason, websocket.StatusPolicyViolation, tt.wantReason)
+			}
+			if member, err := f.srv.store.IsChannelMember(context.Background(), f.ops.ID, f.ids["ann"]); err != nil || member != tt.stillIn {
+				t.Errorf("ann a member of ops = %v %v, want %v", member, err, tt.stillIn)
+			}
+			// The others are untouched: a change still reaches them.
+			room := f.inUse(t, f.ops)
+			f.lk.setRoom(room, fakeParticipant{identity: f.identity("plain"), joinedMs: 1_000})
+			f.lk.setRoom(f.inUse(t, f.ops2), fakeParticipant{identity: f.identity("ann"), joinedMs: 1_000})
+			f.pass(t)
+			if s := readPresence(t, plainOps); !s.Available {
+				t.Errorf("plain's frame: %+v", s)
+			}
+			if s := readPresence(t, annOps2); !s.Available {
+				t.Errorf("ann's ops2 frame: %+v", s)
+			}
+		})
+	}
+}
+
+// expectCloseError waits for conn to be closed by the server and returns the
+// close frame, code and text.
+func expectCloseError(t *testing.T, conn *websocket.Conn) websocket.CloseError {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	for {
+		_, _, err := conn.Read(ctx)
+		if err == nil {
+			continue
+		}
+		var ce websocket.CloseError
+		if !errors.As(err, &ce) {
+			t.Fatalf("socket ended without a close frame: %v", err)
+		}
+		return ce
 	}
 }
 

@@ -140,7 +140,7 @@ The implementation performs a manager-standing re-check before recording the req
 
 After authorization and before the response:
 
-1. `voice.dropPrincipal(channelID, principalID)` closes the target's voice-presence sockets for that channel. Message/events sockets and occupancy sockets stay open because membership is unchanged.
+1. `voice.kickPrincipal(channelID, principalID)` closes the target's voice-presence sockets for that channel with 1008 and the text `voice_removed` (`schema.SocketCloseVoiceRemoved`, #1409): the one close whose frame text is the reason word itself, so a client keys on the value and treats it as "out of voice, still a member" (no rejoin by itself; a deliberate join works). A real removal or ban keeps `removed` ("no longer a member of this channel"). Message/events sockets and occupancy sockets stay open because membership is unchanged.
 2. Forget the target from current presence and close any open transmit state so other members stop seeing them before LiveKit work.
 3. Call LiveKit `Evict` for `p<principal_id>` in every current room of the channel, bounded by `voiceEvictTimeout`. Do not skip future net-room rows in this new helper. Do not rotate the whole room: the target remains entitled and other participants need not be disconnected.
 4. Return 204 only if every eviction completed. On failure, log and return 503; because the principal is still entitled, the ordinary entitlement poller is not a removal backstop and presence may legitimately reappear. The audit result is `failed`, not a fabricated removal.

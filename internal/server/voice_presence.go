@@ -1933,6 +1933,10 @@ type voiceSub struct {
 	wake         chan struct{}
 	dropped      chan struct{}
 	gone         bool // guarded by p.mu
+	// kicked: dropped by a moderator's voice-only removal (issue #850), with
+	// the subscriber still a member. Guarded by p.mu; set before dropped is
+	// closed.
+	kicked bool
 }
 
 // subscribe registers a subscriber. After closeAll it returns one that is
@@ -1956,6 +1960,14 @@ func (s *voiceSub) cancel() {
 	delete(s.p.subs, s)
 }
 
+// wasKicked reports whether the subscription was dropped by a voice-only
+// removal rather than a loss of membership or credential.
+func (s *voiceSub) wasKicked() bool {
+	s.p.mu.Lock()
+	defer s.p.mu.Unlock()
+	return s.kicked
+}
+
 // current returns the channel's snapshot, or ok=false when the subscription
 // has been dropped. Checking and reading under one lock means a snapshot is
 // never taken for a subscriber after the drop that removed them returned.
@@ -1976,9 +1988,21 @@ func (p *voicePoller) dropLocked(sub *voiceSub) {
 	}
 }
 
-// dropPrincipal closes principalID's presence subscriptions on channelID. A
-// zero principal (no caller) matches nothing.
+// dropPrincipal closes principalID's presence subscriptions on channelID:
+// they are no longer a member. A zero principal (no caller) matches nothing.
 func (p *voicePoller) dropPrincipal(channelID, principalID int64) {
+	p.dropPrincipalAs(channelID, principalID, false)
+}
+
+// kickPrincipal closes principalID's presence subscriptions on channelID for
+// a moderator's voice-only removal (issue #850): each socket is told it was
+// removed from voice, not from the channel (schema.SocketCloseVoiceRemoved,
+// issue #1409).
+func (p *voicePoller) kickPrincipal(channelID, principalID int64) {
+	p.dropPrincipalAs(channelID, principalID, true)
+}
+
+func (p *voicePoller) dropPrincipalAs(channelID, principalID int64, kicked bool) {
 	if principalID == 0 {
 		return
 	}
@@ -1986,6 +2010,9 @@ func (p *voicePoller) dropPrincipal(channelID, principalID int64) {
 	defer p.mu.Unlock()
 	for sub := range p.subs {
 		if sub.principalID == principalID && sub.channelID == channelID {
+			if kicked && !sub.gone {
+				sub.kicked = true
+			}
 			p.dropLocked(sub)
 		}
 	}
