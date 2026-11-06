@@ -12,7 +12,7 @@
   - [ADR-008](ADR-008-private-communications-alpha.md) Decision 1, "the browser is the alpha's client on every platform": the browser **stays** the no-install client on every platform, phones included; the phone app is added beside it for the members who want voice to survive a screen lock. Nothing in ADR-008 is retired.
   - ROADMAP.md's P10+ line ("Mobile (PWA, then native if warranted)"): the planning of a native phone app starts now, in parallel with the browser alpha, by Nick's word of 2026-11-01. That edit is his.
 
-  Unchanged: [ADR-004](ADR-004-voice-via-livekit.md) (conchd is the only media authority; LiveKit optional and never bespoke WebRTC), [ADR-013](ADR-013-one-community-model.md) and its guest amendment (no guest entry points), [ADR-014](ADR-014-fixed-roles-configurable-permissions.md), [ADR-015](ADR-015-webcam-video.md) (the phone is not a camera publisher in this phase). Single tenancy, no E2EE, no federation.
+  Unchanged: [ADR-004](ADR-004-voice-via-livekit.md) (conchd is the only media authority; LiveKit optional and never bespoke WebRTC), [ADR-013](ADR-013-one-community-model.md) and its guest amendment (no guest entry points), [ADR-014](ADR-014-fixed-roles-configurable-permissions.md), [ADR-015](ADR-015-webcam-video.md) (as amended by #1361; the phone camera follows it unchanged, Decision 10 as amended on acceptance). Single tenancy, no E2EE, no federation.
 
 ## Context
 
