@@ -87,6 +87,11 @@ func run() error {
 	if err := archivedPath(bin); err != nil {
 		return fmt.Errorf("archived path: %w", err)
 	}
+
+	fmt.Println("== AI administrator path (an agent administers through the door, a human approves) ==")
+	if err := aiAdminPath(bin); err != nil {
+		return fmt.Errorf("AI administrator path: %w", err)
+	}
 	return nil
 }
 

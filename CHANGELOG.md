@@ -10,6 +10,28 @@ release that Nick publishes.
 
 ### Added
 
+- AI administrators (#1326, slices #1327 to #1335): an owner can grant an
+  agent a subset of the operator permissions and let it administer the server
+  through one door. `POST /v1/admin/actions` runs a named action from a closed
+  catalog (`GET /v1/admin/actions`) over the existing routes; an action that
+  closes or opens something (disabling a member, revoking a credential,
+  changing a channel's visibility or the permissions) raises an ordinary
+  approval in the agent's approval channel, a person decides it, and the agent
+  runs it once with `POST /v1/admin/actions/{id}/run`. MCP gains
+  `describe_admin_actions`, `submit_admin_action` and `run_approved_action`
+  (capability `admin.act`, 60 an hour by default). Setup is `conch admin
+  ai-admin create|list|show|revoke` or, on the host, `conchd ai-admin
+  create|revoke`; both print the MCP client entry once. The grant is
+  owner-only and holds only through the door: an agent calling an
+  administrative REST route directly is refused as before, an agent can never
+  decide an approval, and `change_server_settings` and `read_audit_log` are
+  never granted unless named. Disabling the agent clears its grant. New
+  payload `conch.admin_action.v1`, admin-door error codes, audit actions
+  `admin_action_requested|ran|refused`, `admin_grant_changed` and
+  `ai_admin_created|revoked`, and additive manifest fields (`permissions`,
+  `admin`); no schema version bump. `e2e/dogfood` gains the AI-administrator
+  loop. **Upgrade:** agents hold no permission unless an owner grants one;
+  nothing changes on upgrade.
 - Archive and restore a channel without deleting its history (#844, server,
   schema and CLI; the browser follows). `PUT /v1/channels/{id}/settings` takes
   `"archived": true|false` (`manage_channels`, audited as
