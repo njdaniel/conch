@@ -1,7 +1,7 @@
 //! Transmit reports: each press and release told to `conchd`, one at a time and in order
-//! (`docs/design/conch-voice.md` §6, "Client side"). A press opens its track once `conchd`
-//! has answered its `started`, or after a bounded wait; a release mutes before `stopped` is
-//! sent. Audio never depends on the answer.
+//! (`docs/design/conch-voice.md` §6, "Client side"). A press opens its track at once and
+//! reports `started` in parallel (issue #970); a release mutes before `stopped` is sent.
+//! Audio never depends on the answer.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -91,7 +91,7 @@ async fn presses_faster_than_the_release_tail_are_still_reported_in_pairs_and_in
 }
 
 #[tokio::test]
-async fn a_conchd_that_never_answers_delays_audio_by_the_wait_alone_and_never_stops_it() {
+async fn a_conchd_that_never_answers_delays_audio_by_nothing_and_never_stops_it() {
     const WAIT: Duration = Duration::from_millis(100);
     let conchd = Stub::start().await;
     for _ in 0..3 {
@@ -118,14 +118,10 @@ async fn a_conchd_that_never_answers_delays_audio_by_the_wait_alone_and_never_st
     let released_after = pressed.elapsed();
     let sent = rig.sdk.frames();
 
-    // The press waited for the answer for as long as a press waits and no longer, and was
-    // over while the first report was still unanswered.
+    // The press did not wait for the answer at all, and was over while the first report
+    // was still unanswered.
     assert!(
-        heard_after >= WAIT,
-        "the track opened before the wait was over: first frames after {heard_after:?}"
-    );
-    assert!(
-        heard_after < Duration::from_millis(400) && released_after < Duration::from_millis(450),
+        heard_after < WAIT && released_after < Duration::from_millis(450),
         "audio waited for the report: first frames after {heard_after:?}, shut after {released_after:?}"
     );
     assert_eq!(
@@ -372,7 +368,7 @@ fn note_what_conchd_heard(rig: &Rig) -> Arc<Mutex<Vec<Heard>>> {
 }
 
 #[tokio::test]
-async fn a_press_unmutes_only_once_conchd_has_answered_its_started_report() {
+async fn a_press_unmutes_and_sends_audio_while_its_started_report_is_unanswered() {
     let conchd = Stub::start().await;
     let answer = Arc::new(Notify::new());
     conchd.next_transmit(Reply::Held(
@@ -381,28 +377,32 @@ async fn a_press_unmutes_only_once_conchd_has_answered_its_started_report() {
     ));
     let rig = Rig::start_with(conchd, Setup::default(), |_| {}).await;
     rig.ready().await;
-    let heard = note_what_conchd_heard(&rig);
 
+    let pressed = tokio::time::Instant::now();
     rig.line(Down);
-    rig.reported(1).await;
-    several_frames().await;
-    // `conchd` has the report and has not answered it: the track is still muted and has
-    // been handed nothing.
+    // `conchd` is holding its answer, and the track is open and carrying audio all the same.
+    rig.frames_beyond(2).await;
+    assert!(
+        pressed.elapsed() < Duration::from_millis(500),
+        "audio waited for the answer: {:?}",
+        pressed.elapsed()
+    );
     assert_eq!(
         rig.sdk.count(Call::Unmute),
-        0,
+        1,
         "{:?}",
         rig.sdk.control_calls()
     );
-    assert!(rig.sdk.is_muted());
-    assert_eq!(rig.sdk.frames(), 0);
+    assert!(!rig.sdk.is_muted());
+    rig.reported(1).await;
+    assert_eq!(rig.conchd.reported(), ["started"], "still unanswered");
 
     answer.notify_one();
-    rig.frames_beyond(2).await;
-    assert_eq!(rig.sdk.count(Call::Unmute), 1);
     rig.line(Up);
     rig.reported(2).await;
 
+    // The track is unmuted before anything is handed to it, and a release mutes before
+    // `stopped` is sent.
     assert_eq!(
         rig.sdk.control_calls(),
         [
@@ -414,20 +414,10 @@ async fn a_press_unmutes_only_once_conchd_has_answered_its_started_report() {
         ]
     );
     assert_eq!(rig.sdk.frames_while_muted(), 0);
-    let heard = heard.lock().unwrap().clone();
-    assert_eq!(
-        heard[0],
-        Heard {
-            state: "started".to_owned(),
-            unmutes: 0,
-            muted: true
-        },
-        "conchd heard of the press before the track was unmuted"
-    );
 }
 
 #[tokio::test]
-async fn a_press_whose_answer_does_not_come_unmutes_once_the_wait_is_over() {
+async fn a_press_whose_answer_does_not_come_unmutes_at_once() {
     const WAIT: Duration = Duration::from_millis(300);
     let conchd = Stub::start().await;
     conchd.next_transmit(Reply::Stall);
@@ -452,12 +442,8 @@ async fn a_press_whose_answer_does_not_come_unmutes_once_the_wait_is_over() {
     rig.frames_beyond(2).await;
 
     assert!(
-        unmuted_after >= WAIT,
-        "unmuted after {unmuted_after:?}, before the wait of {WAIT:?} was over"
-    );
-    assert!(
-        unmuted_after < WAIT + Duration::from_millis(500),
-        "unmuted after {unmuted_after:?}, long after the wait of {WAIT:?}"
+        unmuted_after < WAIT,
+        "unmuted after {unmuted_after:?}, not at once"
     );
     assert_eq!(rig.conchd.reported(), ["started"], "still unanswered");
     assert!(rig.events_named("report").is_empty(), "and not yet failed");
@@ -471,7 +457,7 @@ async fn a_press_whose_answer_does_not_come_unmutes_once_the_wait_is_over() {
 }
 
 #[test]
-fn a_press_waits_at_most_a_second_for_its_answer_as_the_browser_does() {
+fn a_refusal_of_started_is_watched_for_at_most_a_second() {
     assert_eq!(REPORT_WAIT, Duration::from_secs(1));
     assert_eq!(Timings::default().report_wait, REPORT_WAIT);
 }
@@ -497,15 +483,8 @@ async fn a_release_mutes_the_track_before_conchd_hears_stopped() {
     let heard = heard.lock().unwrap().clone();
     assert_eq!(heard.len(), PRESSES * 2);
     for (press, pair) in heard.chunks(2).enumerate() {
-        assert_eq!(
-            pair[0],
-            Heard {
-                state: "started".to_owned(),
-                unmutes: press,
-                muted: true
-            },
-            "press {press}: conchd heard `started` before the unmute"
-        );
+        // `started` is sent in parallel with the unmute: either order may be heard.
+        assert_eq!(pair[0].state, "started", "press {press}");
         assert_eq!(
             pair[1],
             Heard {
@@ -520,7 +499,7 @@ async fn a_release_mutes_the_track_before_conchd_hears_stopped() {
 }
 
 #[tokio::test]
-async fn a_press_released_before_its_answer_never_opens_the_track() {
+async fn a_press_released_before_its_answer_is_muted_and_reports_stopped_behind_started() {
     let conchd = Stub::start().await;
     let answer = Arc::new(Notify::new());
     conchd.next_transmit(Reply::Held(
@@ -532,6 +511,7 @@ async fn a_press_released_before_its_answer_never_opens_the_track() {
 
     rig.line(Down);
     rig.reported(1).await;
+    rig.frames_beyond(2).await;
     rig.line(Up);
     rig.not_talking().await;
     // The press is over: `stopped` is queued behind the `started` that is still out.
@@ -539,14 +519,9 @@ async fn a_press_released_before_its_answer_never_opens_the_track() {
     rig.reported(2).await;
     several_frames().await;
     assert_eq!(rig.conchd.reported(), ["started", "stopped"]);
-    assert_eq!(
-        rig.sdk.count(Call::Unmute),
-        0,
-        "{:?}",
-        rig.sdk.control_calls()
-    );
-    assert_eq!(rig.sdk.frames(), 0);
+    assert_eq!(rig.sdk.count(Call::Unmute), 1);
     assert!(rig.sdk.is_muted());
+    assert_eq!(rig.sdk.frames_while_muted(), 0);
 
     // The next press is a press like any other.
     rig.line(Down);
@@ -557,12 +532,12 @@ async fn a_press_released_before_its_answer_never_opens_the_track() {
         rig.conchd.reported(),
         ["started", "stopped", "started", "stopped"]
     );
-    assert_eq!(rig.sdk.count(Call::Unmute), 1);
+    assert_eq!(rig.sdk.count(Call::Unmute), 2);
     assert_eq!(rig.sdk.frames_while_muted(), 0);
 }
 
 #[tokio::test]
-async fn a_press_shut_by_a_reason_before_its_answer_never_opens_the_track() {
+async fn a_press_shut_by_a_reason_before_its_answer_is_muted_and_stays_shut() {
     use conch_voice_control::LineCommand::Mute;
 
     let conchd = Stub::start().await;
@@ -582,25 +557,22 @@ async fn a_press_shut_by_a_reason_before_its_answer_never_opens_the_track() {
     rig.reported(2).await;
     several_frames().await;
     assert_eq!(rig.conchd.reported(), ["started", "stopped"]);
-    assert_eq!(
-        rig.sdk.count(Call::Unmute),
-        0,
-        "{:?}",
-        rig.sdk.control_calls()
-    );
-    assert_eq!(rig.sdk.frames(), 0);
+    assert_eq!(rig.sdk.count(Call::Unmute), 1);
+    assert!(rig.sdk.is_muted());
+    let sent = rig.sdk.frames();
+    assert_eq!(rig.sdk.frames_while_muted(), 0);
 
     // The key is still down, and unmuting opens nothing: a shut gate reopens only on a
     // new press.
     rig.line(Mute);
     rig.ready().await;
     several_frames().await;
-    assert_eq!(rig.sdk.count(Call::Unmute), 0);
-    assert_eq!(rig.sdk.frames(), 0);
+    assert_eq!(rig.sdk.count(Call::Unmute), 1);
+    assert_eq!(rig.sdk.frames(), sent);
 }
 
 #[tokio::test]
-async fn a_started_answered_409_drops_the_connection_before_the_track_opens() {
+async fn a_started_answered_409_drops_the_connection_and_mutes_the_track() {
     let conchd = Stub::start().await;
     conchd.next_transmit(Reply::error(409, "voice_no_session"));
     let rig = Rig::start_with(conchd, Setup::default(), |_| {}).await;
@@ -616,13 +588,11 @@ async fn a_started_answered_409_drops_the_connection_before_the_track_opens() {
     assert_eq!(waiting["reason"], "no_session");
     assert_eq!(waiting["retry_in_ms"], 0, "conchd is asked again at once");
     assert_eq!(rig.conchd.session_requests(), 2);
-    assert_eq!(
-        rig.sdk.count(Call::Unmute),
-        0,
-        "{:?}",
-        rig.sdk.control_calls()
-    );
-    assert_eq!(rig.sdk.frames(), 0);
+    // The press opened at once; the refusal dropped the connection and the track was
+    // muted, never to carry a frame after.
+    assert_eq!(rig.sdk.count(Call::Unmute), 1);
+    assert!(rig.sdk.is_muted());
+    assert_eq!(rig.sdk.frames_while_muted(), 0);
     assert_eq!(rig.sdk.count(Call::Close), 1, "the first room was left");
 
     // On the new connection a press is heard as usual.
@@ -636,12 +606,12 @@ async fn a_started_answered_409_drops_the_connection_before_the_track_opens() {
         reported.len() >= 4 && reported.ends_with(&["started".to_owned(), "stopped".to_owned()])
     })
     .await;
-    assert_eq!(rig.sdk.count(Call::Unmute), 1);
+    assert_eq!(rig.sdk.count(Call::Unmute), 2);
     assert_eq!(rig.sdk.frames_while_muted(), 0);
 }
 
 #[tokio::test]
-async fn a_started_answered_401_stops_the_client_before_the_track_opens() {
+async fn a_started_answered_401_stops_the_client_and_mutes_the_track() {
     let conchd = Stub::start().await;
     conchd.next_transmit(Reply::error(401, "unauthorized"));
     let rig = Rig::start_with(conchd, Setup::default(), |_| {}).await;
@@ -652,13 +622,8 @@ async fn a_started_answered_401_stops_the_client_before_the_track_opens() {
     let error = result.unwrap_err();
     assert!(matches!(error, Error::Stopped { .. }), "{error:?}");
     assert_eq!(error.to_string(), "not signed in: run `conch login` first");
-    assert_eq!(
-        ended.sdk.count(Call::Unmute),
-        0,
-        "{:?}",
-        ended.sdk.control_calls()
-    );
-    assert_eq!(ended.sdk.frames(), 0);
+    assert!(ended.sdk.is_muted(), "{:?}", ended.sdk.control_calls());
+    assert_eq!(ended.sdk.frames_while_muted(), 0);
     assert_eq!(ended.sdk.count(Call::Close), 1, "the room was left");
 }
 

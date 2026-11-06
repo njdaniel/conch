@@ -515,7 +515,7 @@ describe('talking', () => {
     await settle();
     expect(t.trace.map((l) => l.replace(/^\d+ /, ''))).toEqual([
       'gate open',
-      'started answered or waited out',
+      'started reported',
       'track unmuted',
       'gate shut',
       'track muted',
@@ -574,7 +574,7 @@ describe('talking', () => {
     expect(t.rooms[0]?.sending).toEqual([true, false]);
   });
 
-  it('losing focus while a press waits for its answer: the track never opens', async () => {
+  it('losing focus while a press waits for its answer: the track is muted at once, and stays so', async () => {
     const t = await joined(setup([okSession()], [], 0, true));
     t.client.setReleaseDelay(2000);
     t.client.press();
@@ -585,7 +585,7 @@ describe('talking', () => {
     await settle();
     t.clock.advance(reportWait + 2000);
     await settle();
-    expect(t.rooms[0]?.sending).not.toContain(true);
+    expect(t.rooms[0]?.sending).toEqual([true, false]);
     expect(t.client.snapshot().transmitting).toBe(false);
     await t.answer('ok');
     expect(t.reports).toEqual(['started', 'stopped']);
@@ -645,34 +645,35 @@ describe('talking', () => {
     expect([...t.client.snapshot().speaking]).toEqual([3, 9]);
   });
 
-  it('audio does not depend on a report that never answers: the track opens after reportWait', async () => {
+  it('audio does not depend on a report that never answers: the track is open throughout', async () => {
     const t = await joined(setup([okSession()], [], 0, true));
     t.client.press();
     await settle();
-    t.clock.advance(reportWait - 1);
-    await settle();
-    expect(t.rooms[0]?.sending).toEqual([]);
-    t.clock.advance(1);
+    expect(t.rooms[0]?.sending).toEqual([true]);
+    t.clock.advance(reportWait * 3);
     await settle();
     expect(t.rooms[0]?.sending).toEqual([true]);
+    expect(t.client.snapshot().transmitting).toBe(true);
   });
 });
 
-// Issue #495: conchd's poller compares what it sees of the microphone with the
-// reports, so a press is reported before the track opens, and a release mutes
-// the track before it is reported.
+// Issue #970 (before it, #495): a press opens the track at once and reports
+// `started` in parallel; a release still mutes the track before it is reported.
 describe('the order of the track and the reports', () => {
-  it('a press opens the track only once conchd has answered its report, however slow', async () => {
+  it('a press opens the track at once and reports in parallel: before conchd has answered, however slow', async () => {
     const t = await joined(setup([okSession()], [], 0, true));
     t.client.press();
     await settle();
     expect(t.client.snapshot().talking).toBe(true);
+    // Open with the report unanswered, and nothing is waited for.
+    expect(t.rooms[0]?.sending).toEqual([true]);
+    expect(t.client.snapshot().transmitting).toBe(true);
+    expect(t.log).toEqual(['report started', 'unmute']);
     t.clock.advance(reportWait - 100);
     await settle();
-    expect(t.rooms[0]?.sending).toEqual([]);
     await t.answer('ok');
     expect(t.rooms[0]?.sending).toEqual([true]);
-    expect(t.log).toEqual(['report started', 'answered ok', 'unmute']);
+    expect(t.log).toEqual(['report started', 'unmute', 'answered ok']);
   });
 
   it('a release mutes the track, and reports stopped only once it is muted', async () => {
@@ -691,10 +692,10 @@ describe('the order of the track and the reports', () => {
     await settle();
     expect(t.reports).toEqual(['started', 'stopped']);
     await t.answer('ok');
-    expect(t.log).toEqual(['report started', 'answered ok', 'unmute', 'mute', 'muted', 'report stopped', 'answered ok']);
+    expect(t.log).toEqual(['report started', 'unmute', 'answered ok', 'mute', 'muted', 'report stopped', 'answered ok']);
   });
 
-  it('a press released while its report waits never opens the track, and both reports go in order', async () => {
+  it('a press released while its report waits: the track opens and mutes, and both reports go in order', async () => {
     const t = await joined(setup([okSession()], [], 0, true));
     t.client.press();
     await settle();
@@ -709,7 +710,7 @@ describe('the order of the track and the reports', () => {
     await t.answer('ok');
     await t.answer('ok');
     await t.answer('ok');
-    expect(t.rooms[0]?.sending).toEqual([false, false]);
+    expect(t.rooms[0]?.sending).toEqual([true, false, false]);
     expect(t.reports).toEqual(['started', 'stopped', 'started', 'stopped']);
   });
 
@@ -722,7 +723,7 @@ describe('the order of the track and the reports', () => {
     expect(t.client.snapshot().reportNote).toBe('rate_limited');
   });
 
-  it('a report answered voice_no_session drops the connection before the track would open', async () => {
+  it('a report answered voice_no_session drops the connection, which mutes the track', async () => {
     const t = await joined(setup([okSession(), okSession()], [], 0, true));
     t.client.press();
     await settle();
@@ -730,7 +731,7 @@ describe('the order of the track and the reports', () => {
     await settle();
     expect(t.asked).toHaveLength(2);
     expect(t.rooms[0]?.closed).toBe(true);
-    expect(t.rooms[0]?.sending).toEqual([false]);
+    expect(t.rooms[0]?.sending).toEqual([true, false]);
     expect(t.rooms[1]?.sending).toEqual([]);
   });
 
@@ -743,7 +744,7 @@ describe('the order of the track and the reports', () => {
     await t.answer('ok');
     await t.answer('ok');
     await leaving;
-    expect(t.rooms[0]?.sending).toEqual([false]);
+    expect(t.rooms[0]?.sending).toEqual([true, false]);
     expect(t.reports).toEqual(['started', 'stopped']);
     expect(t.rooms[0]?.closed).toBe(true);
     expect(t.client.snapshot().phase).toBe('idle');
@@ -761,7 +762,7 @@ describe('the order of the track and the reports', () => {
     expect(t.client.snapshot().phase).toBe('connected');
     t.clock.advance(reportWait);
     await settle();
-    expect(t.rooms[0]?.sending).toEqual([false]);
+    expect(t.rooms[0]?.sending).toEqual([true, false]);
     expect(t.rooms[1]?.sending).toEqual([]);
     expect(t.reports).toEqual(['started']);
   });
@@ -770,16 +771,19 @@ describe('the order of the track and the reports', () => {
 // Issue #965: what the page says is what is sent, the release delay is the
 // person's, and the open microphone hears an onset sooner.
 describe('what is sent, and when', () => {
-  it('says transmitting only once the track is unmuted: not while the press waits for its answer', async () => {
+  it('says transmitting only once the track is unmuted: not while the unmute is under way', async () => {
     const t = await joined(setup([okSession()], [], 0, true));
+    const room = t.rooms[0];
+    if (room === undefined) throw new Error('no room');
+    room.holdUnmute = true;
     t.client.press();
     await settle();
     t.clock.advance(300);
     await settle();
     // The key is down and the gate open, but nothing is sent yet.
-    expect(t.rooms[0]?.sending).toEqual([]);
     expect(t.client.snapshot()).toMatchObject({ talking: true, transmitting: false });
-    await t.answer('ok');
+    room.heldUnmute?.();
+    await settle();
     expect(t.rooms[0]?.sending).toEqual([true]);
     expect(t.client.snapshot()).toMatchObject({ talking: true, transmitting: true });
     // The gate shuts and the mute goes at once: so does the indicator.
@@ -789,8 +793,11 @@ describe('what is sent, and when', () => {
     expect(t.client.snapshot()).toMatchObject({ talking: false, transmitting: false });
   });
 
-  it('a press released while its report waits is never said to transmit', async () => {
+  it('a press released while its unmute is under way is never said to transmit', async () => {
     const t = await joined(setup([okSession()], [], 0, true));
+    const room = t.rooms[0];
+    if (room === undefined) throw new Error('no room');
+    room.holdUnmute = true;
     const said: boolean[] = [];
     t.client.subscribe(() => {
       said.push(t.client.snapshot().transmitting);
@@ -800,20 +807,16 @@ describe('what is sent, and when', () => {
     t.client.release();
     t.clock.advance(defaultTail);
     await settle();
+    room.heldUnmute?.();
+    await settle();
     await t.answer('ok');
     await t.answer('ok');
-    expect(t.rooms[0]?.sending).toEqual([false]);
     expect(said).not.toContain(true);
   });
 
-  it('a report that never answers: transmitting from reportWait, when the track opens anyway', async () => {
+  it('a report that never answers: transmitting at once, the track having opened without it', async () => {
     const t = await joined(setup([okSession()], [], 0, true));
     t.client.press();
-    await settle();
-    t.clock.advance(reportWait - 1);
-    await settle();
-    expect(t.client.snapshot().transmitting).toBe(false);
-    t.clock.advance(1);
     await settle();
     expect(t.rooms[0]?.sending).toEqual([true]);
     expect(t.client.snapshot().transmitting).toBe(true);

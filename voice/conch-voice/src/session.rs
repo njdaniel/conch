@@ -23,18 +23,16 @@
 //! - **`Reconnecting` is not connected.** The gate is forced shut from that moment until
 //!   `Reconnected`. If that has not come within the grace period (20 s) the loop closes the
 //!   connection itself and goes back to `conchd`.
-//! - **A press reports `started` before it unmutes, and a release mutes before it reports
-//!   `stopped`**, as the browser client does. `conchd`'s poller compares what it sees of
-//!   the track with the reports, and the other order let it see a press before its report
-//!   and record an honest press as unreported (§6, "Client side").
-//!   - A press queues `started` and waits for `conchd`'s answer, for at most
-//!     [`REPORT_WAIT`]. Then the track is unmuted and, straight after, the gate told to
-//!     open. Past the wait, or while the report is still being tried, the press goes ahead
-//!     all the same: audio never depends on `conchd` being reachable.
-//!   - A `started` answered 409 `voice_no_session` or 401 drops the connection instead,
-//!     before the track would open, and the policy decides what follows.
-//!   - A press released, or shut by a reason, while it waits never opens the track or the
-//!     gate, and its transmission is over at once.
+//! - **A press opens at once and reports `started` in parallel; a release mutes before it
+//!   reports `stopped`** (issue #970; §6, "Client side"). A press unmutes the track and
+//!   opens the gate in the same step that queues `started`, and never waits for `conchd`:
+//!   speech is not held back by a round trip. The poller may see the unmuted track before
+//!   the report and record one `voice_transmit_unreported` row, which it closes
+//!   `reason=reported` when the report arrives; that is accepted.
+//!   - The answer to `started` is still watched, for at most [`REPORT_WAIT`]: a 409
+//!     `voice_no_session` or a 401 drops the connection, which ends the press and mutes the
+//!     track, and the policy decides what follows. Audio never depends on `conchd` being
+//!     reachable.
 //!   - A release mutes when the gate says it has shut, release tail included, and only then
 //!     does the machine produce `stopped`.
 //!   - A forced shut mutes at once, without waiting for the gate; a frame the gate let
@@ -296,8 +294,9 @@ pub struct Timings {
     /// How long, beyond the release tail, the gate is given to say it has shut when the
     /// client is leaving.
     pub gate_shut_grace: Duration,
-    /// How long a press waits for `conchd`'s answer to its `started` report before the track
-    /// opens all the same. [`REPORT_WAIT`] outside tests.
+    /// How long a press's `started` report is watched for a refusal (409 or 401) that drops
+    /// the connection. The press does not wait: it opens at once. [`REPORT_WAIT`] outside
+    /// tests.
     pub report_wait: Duration,
     /// How long the last reports are given to be delivered when the client is leaving.
     pub report_flush: Duration,
@@ -723,8 +722,8 @@ async fn sdk_event<T: Transport>(live: &mut Option<Live<T>>) -> Option<SdkEvent>
     }
 }
 
-/// A press whose `started` report is out: the track opens once `conchd` has answered it,
-/// or at `until`, whichever comes first.
+/// A press whose `started` report is out: its answer is watched until `until`, for a
+/// refusal that drops the connection. The track is already open.
 struct Opening {
     /// The answer, once the report is queued.
     answer: Option<oneshot::Receiver<Answer>>,
@@ -782,7 +781,7 @@ struct Session<T: Transport> {
     transmitter: Transmitter<Feed<T>>,
     receiver: receive::Receiver,
     reports: Reports,
-    /// A press that waits for its `started` to be answered before the track opens.
+    /// A press whose `started` is not yet answered. The press itself does not wait for it.
     opening: Option<Opening>,
     rosters: mpsc::UnboundedReceiver<Roster>,
     phase: Phase<T>,
@@ -1062,13 +1061,15 @@ impl<T: Transport> Session<T> {
     }
 
     fn obey(&mut self, outputs: Vec<PttOutput>) {
-        // A press that ended while it waited for its answer, and so never opened the gate.
-        let mut never_opened = false;
         for output in outputs {
             match output {
                 PttOutput::Gate(GateCommand::Open) => {
-                    // Not yet: the gate opens once `conchd` has answered the `started` that
-                    // the machine produces with this, or once the wait for that is over.
+                    // At once, without waiting for `conchd`: the `started` that the machine
+                    // produces with this is queued next, in parallel (issue #970). The track
+                    // is unmuted before the gate opens, so that no frame meets a muted track.
+                    self.with_track(MicTrack::unmute);
+                    self.transmitter.track_lock.reopen();
+                    self.transmitter.send(TxCommand::Gate(GateCommand::Open));
                     self.opening = Some(Opening {
                         answer: None,
                         until: Instant::now() + self.timings.report_wait,
@@ -1081,16 +1082,7 @@ impl<T: Transport> Session<T> {
                         command,
                         GateCommand::ForceShut(_) | GateCommand::TalkMode(_)
                     );
-                    let ends = at_once || command == GateCommand::Shut;
-                    let waited = ends && self.opening.take().is_some();
-                    never_opened |= waited;
-                    // The gate never opened for a press that waited, so a release has
-                    // nothing to shut; a reason, or the mode, is passed on all the same, so
-                    // that the gate holds the same reasons as the machine and runs the
-                    // level detector in the mode the machine is in.
-                    if !(waited && command == GateCommand::Shut) {
-                        self.transmitter.send(TxCommand::Gate(command));
-                    }
+                    self.transmitter.send(TxCommand::Gate(command));
                     if at_once {
                         // Nothing is left to send.
                         self.mute_track();
@@ -1121,17 +1113,9 @@ impl<T: Transport> Session<T> {
                 }
             }
         }
-        if never_opened {
-            // The gate will never say it shut, since it never opened: the press is over now,
-            // and is ended as one the gate shut, mute first and `stopped` after. Told once
-            // the machine's outputs above are carried out, so they are shown in order.
-            self.on_transmit(TxEvent::GateShut {
-                limit_reached: false,
-            });
-        }
     }
 
-    /// `conchd` answered the `started` a press waits for, or the wait is over.
+    /// `conchd` answered the `started` that is watched, or the watch is over.
     fn on_answer(&mut self, answer: Option<Answer>) {
         let refused = match answer {
             Some(Answer::NoSession) => Ended {
@@ -1146,26 +1130,14 @@ impl<T: Transport> Session<T> {
                 detail: None,
             },
             Some(Answer::Delivered | Answer::Settled) | None => {
-                if self.opening.take().is_some() {
-                    // Before the gate opens, so that no frame meets a muted track.
-                    self.with_track(MicTrack::unmute);
-                    self.transmitter.track_lock.reopen();
-                    self.transmitter.send(TxCommand::Gate(GateCommand::Open));
-                }
+                self.opening = None;
                 return;
             }
         };
-        // `conchd` would not take this transmission as reported. The connection is dropped
-        // before the track opens: the machine is told it is not connected, which ends the
-        // press that waited.
+        // `conchd` would not take this transmission as reported. The connection is dropped,
+        // which mutes the track and ends the press.
+        self.opening = None;
         self.disconnected(refused);
-        if self.opening.take().is_some() {
-            // There was no connection to drop, which cannot be while a press waits. The
-            // press is ended all the same, and its track never opens.
-            self.on_transmit(TxEvent::GateShut {
-                limit_reached: false,
-            });
-        }
     }
 
     fn with_track(&self, act: impl FnOnce(&Track<T>)) {
