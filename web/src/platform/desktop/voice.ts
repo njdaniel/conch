@@ -6,7 +6,7 @@
 import type { VoiceControlTalkMode } from '../../schema/generated';
 import type { NativeVoice, NativeVoiceOutcome } from '../types';
 import { bridge } from './access';
-import type { DesktopVoiceBridge, NativeVoiceView, Unsubscribe, VoiceCommandResult } from './bridge';
+import type { DesktopVoiceBridge, NativeVoiceDevicesResult, NativeVoiceView, Unsubscribe, VoiceCommandResult, VoiceSaveResult } from './bridge';
 
 const IDLE: NativeVoiceView = { status: 'idle', generation: 0, channel: null, retryable: false };
 const UNAVAILABLE: NativeVoiceView = { status: 'unavailable', generation: 0, channel: null, retryable: false, problem: 'unsupported' };
@@ -82,6 +82,17 @@ export function createNativeVoice(get: () => DesktopVoiceBridge | undefined = vo
     }
   };
 
+  // The one-shot runs answer with their own refusal words.
+  const oneShot = async <R extends NativeVoiceDevicesResult | VoiceSaveResult>(call: (b: DesktopVoiceBridge) => Promise<R>, fail: R): Promise<R> => {
+    const b = get();
+    if (b === undefined) return fail;
+    try {
+      return await call(b);
+    } catch {
+      return fail;
+    }
+  };
+
   return {
     snapshot: () => view,
     subscribe(listener) {
@@ -99,6 +110,8 @@ export function createNativeVoice(get: () => DesktopVoiceBridge | undefined = vo
     setDeafen: (deafened: boolean) => command((b) => b.voiceSetDeafen(deafened)),
     setDevices: (devices) => command((b) => b.voiceSetDevices(devices)),
     setTalkMode: (mode: VoiceControlTalkMode) => command((b) => b.voiceSetTalkMode(mode)),
+    devices: () => oneShot((b) => b.voiceDevices(), { ok: false, error: 'unsupported' }),
+    saveDevice: (request) => oneShot((b) => b.voiceSaveDevice(request), { ok: false, error: 'failed' }),
     keyDevices: async () => {
       const b = get();
       if (b === undefined || typeof b.voiceKeyDevices !== 'function') return unsupported;

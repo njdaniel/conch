@@ -17,6 +17,7 @@ import { Roster } from '../VoicePanel';
 import { useVoiceNames } from '../useVoiceNames';
 import { usePresence } from './usePresence';
 import { useNativeVoice } from './useNativeVoice';
+import { VoiceOptions } from './VoiceOptions';
 import { TalkKeySetup } from './TalkKeySetup';
 
 // How long the duplicate-identity warning waits for a second Join.
@@ -72,6 +73,15 @@ function phaseClass(view: NativeVoiceView): string {
 // been lost and may be retried or left.
 function hasSession(view: NativeVoiceView): boolean {
   return view.channel !== null && view.status !== 'idle' && view.status !== 'unavailable' && view.status !== 'ended';
+}
+
+function OptionsButton({ open, onToggle }: { readonly open: boolean; readonly onToggle: () => void }) {
+  return (
+    <button type="button" className="quiet" aria-expanded={open} aria-controls="voice-options" onClick={onToggle}>
+      <Glyph name="options" />
+      <span className="label">Voice options</span>
+    </button>
+  );
 }
 
 export function NativeVoicePanel({
@@ -142,6 +152,7 @@ export function NativeVoicePanel({
   // A command waits for its answer: shown as "muting…" until then.
   const [pending, setPending] = useState<'mute' | 'deafen' | null>(null);
   const [note, setNote] = useState<string | null>(null);
+  const [options, setOptions] = useState(false);
   const run = async (what: 'mute' | 'deafen', go: () => Promise<{ readonly ok: boolean; readonly error?: NativeVoiceError }>) => {
     setPending(what);
     setNote(null);
@@ -249,20 +260,25 @@ export function NativeVoicePanel({
                     </button>
                   </>
                 ) : null}
+                <OptionsButton open={options} onToggle={() => { setOptions(!options); }} />
                 <button type="button" className="danger" disabled={view.status === 'stopping' || actions === undefined} onClick={() => { if (actions !== undefined) void outcome(() => actions.leave()); }}>
                   <Glyph name="leave" />
                   <span className="label">Leave voice</span>
                 </button>
               </>
             ) : unavailable ? null : (
+              <>
+              <OptionsButton open={options} onToggle={() => { setOptions(!options); }} />
               <button type="button" className="primary" onClick={join} disabled={!canJoin || actions === undefined}>
                 <Glyph name="headphones" />
                 <span className="btn-text">Join voice {dest}</span>
               </button>
+              </>
             )}
           </div>
         </div>
       </div>
+      {unavailable || actions === undefined ? null : <VoiceOptions source={source} view={view} open={options} />}
       <div className="voice-notes">
         {why === null ? null : <p role="status" className="hint">{why}</p>}
         {note === null ? null : <p role="status" className="hint">{note}</p>}
