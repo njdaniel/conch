@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import * as api from './api';
 
 export const updateText = 'Conch was updated. Reload to get the new version.';
@@ -35,9 +35,27 @@ export function UpdateNotice({ reload = () => { window.location.reload(); } }: {
       document.removeEventListener('visibilitychange', visible);
     };
   }, []);
+  const box = useRef<HTMLDivElement>(null);
+  // The lobby is as tall as the window; it gives up the notice's height
+  // (--notice-h, set on the root element, which CSP allows) so that the
+  // composer stays on screen.
+  useLayoutEffect(() => {
+    const el = box.current;
+    if (!updated || el === null) return;
+    const root = document.documentElement;
+    const measure = () => {
+      root.style.setProperty('--notice-h', `${String(el.offsetHeight)}px`);
+    };
+    measure();
+    window.addEventListener('resize', measure);
+    return () => {
+      window.removeEventListener('resize', measure);
+      root.style.removeProperty('--notice-h');
+    };
+  }, [updated]);
   if (!updated) return null;
   return (
-    <div role="status" className="banner update-notice">
+    <div ref={box} role="status" className="banner update-notice">
       <p>{updateText}</p>
       <button type="button" onClick={reload}>
         Reload
