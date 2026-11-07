@@ -67,13 +67,17 @@ var gateRows = map[string]string{
 	"voice_occupancy.go Server.voiceOccupancyCaller": "a member without use_voice at voice occupancy",
 	"voice_share.go Server.handleVoiceShareStart":    "a member without share_screen at the share claim",
 
-	// Issue #1217: the live-media voice gates (voicegates.go; with LiveKit).
+	// The live-media voice gates (voicegates.go; with LiveKit).
 	"voice_presence.go Server.voiceEntitlement": "a participant on a token from before the switch (voiceEntitlement)",
 	"voice_share.go voicePoller.sharesWithheld": "a share whose share_screen was cut in the store (sharesWithheld)",
 
 	// Issue #1241: the camera.
 	"voice_camera.go Server.handleVoiceCameraStart": "a member without use_camera at the camera claim",
 	"voice_camera.go Server.handleVoiceCameraStop":  "the restricted operator stops a member's camera in its own channel",
+
+	// Issue #1467: the camera's live-media gates (voicegates.go; with LiveKit).
+	"voice_camera.go voicePoller.camerasWithheld": "a camera whose use_camera was cut in the store (camerasWithheld)",
+	"permissions.go Server.endCameraIfWithheld":   "the role change's hook (endCameraIfWithheld)",
 }
 
 // pendingGates are the gates that have no restricted row yet, each with why
@@ -82,18 +86,16 @@ var gateRows = map[string]string{
 // does. Each of these is reachable only by a race or by a live media
 // participant, which a request-and-response row cannot make.
 var pendingGates = map[string]string{ // #nosec G101 -- gate names, not credentials
-	"store/queries.go Store.ChannelSettings":      "reached only by a race with a cut after handleChannelSettings' own check: no request in the isolation world lands a cut between the handler's check and the store's read; covered by store/channels_v1_test.go (#1217)",
-	"voice.go Server.voiceStillEntitled":          "reached only by a cut landing between the handler's check and the token's signing: a race the isolation world has no seam for; covered by server voice_permission_test.go TestVoicePermissionFlipUnderRequests (#1217)",
-	"voice_presence.go Server.voiceWithheldAmong": "reached only by a use_voice cut from a column through PUT /v1/permissions (voiceWithheld) or by a role change (voiceWithheldFor); the per-person voice switch takes another path (voiceAfterVoiceOff, voiceEvictLost), which voicegates.go runs, and a column cut would close B's open voice sockets, which the world keeps to its end; covered on the request path by server voice_permissions_test.go TestPutUseVoiceOffRemovesThoseAffectedAtOnce (through PUT /v1/permissions: every affected member out of LiveKit when it answers, with no pass run) and TestRoleChangeWithholdingUseVoiceRemovesAtOnce (voiceWithheldFor) (#1217)",
-	"voice_share.go voicePoller.shareEntitled":    "the claim's re-read under the room's claims, reached only by a cut landing inside a claim after the handler's own share_screen check (every later claim is refused by the handler first, voicegates.go): a race the isolation world has no seam for; covered by server voice_share_revoke_test.go TestVoiceShareClaimRevokedBeforeGrant (#1217)",
+	"store/queries.go Store.ChannelSettings":      "reached only by a race with a cut after handleChannelSettings' own check: no request in the isolation world lands a cut between the handler's check and the store's read; covered by store/channels_v1_test.go (issue #1467)",
+	"voice.go Server.voiceStillEntitled":          "reached only by a cut landing between the handler's check and the token's signing: a race the isolation world has no seam for; covered by server voice_permission_test.go TestVoicePermissionFlipUnderRequests (issue #1467)",
+	"voice_presence.go Server.voiceWithheldAmong": "reached only by a use_voice cut from a column through PUT /v1/permissions (voiceWithheld) or by a role change (voiceWithheldFor); the per-person voice switch takes another path (voiceAfterVoiceOff, voiceEvictLost), which voicegates.go runs, and a column cut would close B's open voice sockets, which the world keeps to its end; covered on the request path by server voice_permissions_test.go TestPutUseVoiceOffRemovesThoseAffectedAtOnce (through PUT /v1/permissions: every affected member out of LiveKit when it answers, with no pass run) and TestRoleChangeWithholdingUseVoiceRemovesAtOnce (voiceWithheldFor) (issue #1467)",
+	"voice_share.go voicePoller.shareEntitled":    "the claim's re-read under the room's claims, reached only by a cut landing inside a claim after the handler's own share_screen check (every later claim is refused by the handler first, voicegates.go): a race the isolation world has no seam for; covered by server voice_share_revoke_test.go TestVoiceShareClaimRevokedBeforeGrant (issue #1467)",
 	// The camera's (issue #1241). Each ends or refuses a live claim, which a
 	// request-and-response row cannot hold; the media half's camera rows
 	// (media.go) run the PUT's hook against a real one, and the server's
 	// tests the rest (voice_camera_revoke_test.go, voice_camera_pass_test.go).
-	"voice_camera.go voicePoller.cameraEntitled":  "the claim's re-read under the room's claims: needs a claim held at the lock (server voice_camera_revoke_test.go TestVoiceCameraClaimRevokedBeforeGrant); #1217: a seam-driven race row",
-	"voice_camera.go voicePoller.camerasWithheld": "ends a live camera on the pass when use_camera was cut without the hook: needs a live claim and a store edit (server voice_camera_pass_test.go TestVoiceCameraEntitlementEveryPass); #1217: a live-media isolation row",
-	"permissions.go Server.endWithheldCameras":    "the PUT's hook ending a live camera when use_camera is cut: run against a real claim in the media half (media.go, cameraA); the phrase rule reads the request phases only",
-	"permissions.go Server.endCameraIfWithheld":   "a role change's hook ending a live camera: needs a live claim (server voice_camera_revoke_test.go TestVoiceCameraHooksEndBeforeAnswer); #1217: a live-media isolation row",
+	"voice_camera.go voicePoller.cameraEntitled": "the claim's re-read under the room's claims: needs a claim held at the lock (server voice_camera_revoke_test.go TestVoiceCameraClaimRevokedBeforeGrant); held at the lock only by the server's seam, which the isolation world lacks, so it stays pending (issue #1467)",
+	"permissions.go Server.endWithheldCameras":   "the PUT's hook ending a live camera when use_camera is cut: run against a real claim in the media half (media.go, cameraA); the phrase rule reads the request phases only",
 }
 
 // gateKeys reads the gates of permissionGates out of the server's test file,
