@@ -1,6 +1,7 @@
 package main
 
 import (
+	"slices"
 	"strings"
 	"testing"
 )
@@ -48,5 +49,38 @@ func TestPreviewRefusalRows(t *testing.T) {
 		if got[k] != v {
 			t.Errorf("row %s = %q, want %q", k, got[k], v)
 		}
+	}
+}
+
+// TestCheckExempt: the exempt list is cross-checked against the table.
+func TestCheckExempt(t *testing.T) {
+	const src = `
+		rt("GET /healthz", accessExempt, hf(s.h)),
+		{pattern: "POST /v1/login", access: accessExempt, handler: h},
+		rt("/mcp", accessExempt, s.mcpHandler()), // accessExempt in a comment
+`
+	for _, tc := range []struct {
+		name    string
+		src     string
+		table   []string
+		want    []string
+		wantErr string
+	}{
+		{"agrees with the table", src, []string{"GET /healthz", "POST /v1/login", "/mcp"}, []string{"GET /healthz", "POST /v1/login"}, ""},
+		{"an exempt route the table lacks", src, []string{"GET /healthz", "/mcp"}, nil, "POST /v1/login is read as exempt but is not in the route table"},
+		{"a previewable route read as exempt", "rt(\"GET /v1/channels\", accessExempt, h),", []string{"GET /v1/channels"}, nil, "is previewable"},
+		{"an exempt use the pattern missed", src + "\trt(\"GET\"+x, accessExempt, h),\n", []string{"GET /healthz", "POST /v1/login", "/mcp"}, nil, "a route of the exempt class was missed"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := checkExempt(tc.src, table(t, tc.table...))
+			switch {
+			case tc.wantErr == "" && err != nil:
+				t.Fatalf("checkExempt = %v, want nil", err)
+			case tc.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tc.wantErr)):
+				t.Fatalf("checkExempt = %v, want %q", err, tc.wantErr)
+			case tc.wantErr == "" && !slices.Equal(got, tc.want):
+				t.Errorf("checkExempt = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }
