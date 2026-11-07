@@ -3,6 +3,7 @@
 // reducer; src/api.ts and the socket feed it through App.
 import { messageV2, type Audience, type MessageV2, type Payload } from '../schema/message';
 import { attachmentPayload, type DraftAttachment } from './attachments';
+import { fromServer } from '../schema/validate';
 
 // The most messages held per channel. Messages arriving live push the oldest
 // out (a pending send of our own is kept apart and never dropped). Loading
@@ -501,7 +502,7 @@ export function parseFrame(data: unknown, channelId: number): MessageV2 | null {
   } catch {
     return null;
   }
-  if (messageV2(body).length > 0) return null;
+  if (fromServer(messageV2)(body).length > 0) return null;
   const message = body as MessageV2;
   return message.channel_id === channelId ? message : null;
 }
