@@ -69,11 +69,11 @@ func (c *Client) ChannelAuthors(ctx context.Context, channel string, ids []int64
 // nil, their owner mark.
 func (c *Client) ChangePrincipalRole(ctx context.Context, principalID int64, request schema.RoleChangeRequestV1) (schema.RoleChangeResponseV1, error) {
 	endpoint := c.resolve("v1", "principals", strconv.FormatInt(principalID, 10), "role")
-	var result schema.RoleChangeResponseV1
+	var result roleChangeDoc
 	if err := c.roundTrip(ctx, "change principal role", http.MethodPut, endpoint, request, &result); err != nil {
 		return schema.RoleChangeResponseV1{}, err
 	}
-	return result, nil
+	return result.RoleChangeResponseV1, nil
 }
 
 // AddChannelMember adds the named person to channel and returns the membership

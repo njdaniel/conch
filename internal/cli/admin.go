@@ -211,6 +211,9 @@ var adminCommands = []adminCommand{
 	{group: "invite", verb: "pause", run: adminInvitePause},
 	{group: "invite", verb: "resume", run: adminInviteResume},
 	{group: "invite", verb: "status", run: adminInviteStatus},
+	// What a principal issued to others (issue #1463).
+	{group: "principal", verb: "revoke-issued", args: []string{"id"}, idAt: 1, flags: "[--yes] ",
+		bind: bindIssuedYes, run: adminPrincipalRevokeIssued},
 	{group: "principal", verb: "invite-permission", args: []string{"id", "on|off"}, idAt: 1, run: adminPrincipalInvitePermission},
 	{group: "principal", verb: "disable-invitees", args: []string{"id"}, idAt: 1, flags: "[--all] [--yes] ",
 		bind: bindDisableInvitees, run: adminPrincipalDisableInvitees},
@@ -425,9 +428,55 @@ func adminPrincipalRole(ctx context.Context, r *adminRun) error {
 	for i, id := range resp.Manages {
 		channels[i] = strconv.FormatInt(id, 10)
 	}
-	return r.say("principal %d role %s owner %t manages %s invites closed %d credentials revoked %d hooks revoked %d live credentials %d hooks bound %d\n",
+	if err := r.say("principal %d role %s owner %t manages %s invites closed %d credentials revoked %d hooks revoked %d live credentials %d hooks bound %d\n",
 		resp.Principal.ID, safeLine(string(resp.Principal.Role)), resp.Principal.Owner, dashIfEmpty(strings.Join(channels, ",")),
-		resp.InvitesClosed, resp.CredentialsRevoked, resp.HooksRevoked, resp.LiveCredentials, resp.HooksBound)
+		resp.InvitesClosed, resp.CredentialsRevoked, resp.HooksRevoked, resp.LiveCredentials, resp.HooksBound); err != nil {
+		return err
+	}
+	return r.sayIssued(resp.Principal.ID, resp.IssuedToOthers)
+}
+
+// sayIssued prints one line per live credential or hook principal id issued
+// to someone else, which a demotion or a disable leaves live, and how to end
+// them. Nothing is printed when there are none.
+func (r *adminRun) sayIssued(id int64, items []schema.IssuedByOperatorV1) error {
+	if len(items) == 0 {
+		return nil
+	}
+	if err := r.say("%d issued to others and still live:\n", len(items)); err != nil {
+		return err
+	}
+	for _, it := range items {
+		if err := r.say("  %s %d held by principal %d issued %s\n", safeLine(string(it.Kind)), it.ID, it.PrincipalID, formatTimestamp(it.IssuedAt)); err != nil {
+			return err
+		}
+	}
+	return r.say("the owner may end them with: conch admin principal revoke-issued %d --yes\n", id)
+}
+
+func bindIssuedYes(fs *flag.FlagSet, o *adminOpts) {
+	fs.BoolVar(&o.invite.yes, "yes", false, "do it; without it, only say what it would do")
+}
+
+// issuedRefusals are revoke-issued's own words. Only the owner may do it.
+var issuedRefusals = refusalLines{
+	"forbidden": "only an owner may revoke what someone issued to others",
+}
+
+// adminPrincipalRevokeIssued revokes every live credential and hook the
+// principal issued to others. Without --yes it changes nothing.
+func adminPrincipalRevokeIssued(ctx context.Context, r *adminRun) error {
+	if !r.opts.invite.yes {
+		return r.say("would revoke every live credential and hook principal %d issued to others; run again with --yes to do it\n", r.id)
+	}
+	resp, err := r.client.RevokeIssued(ctx, r.id)
+	if err != nil {
+		return refused(err, issuedRefusals)
+	}
+	if r.opts.asJSON {
+		return r.printJSON(resp)
+	}
+	return r.say("revoked %d credential(s) and %d hook(s)\n", resp.CredentialsRevoked, resp.HooksRevoked)
 }
 
 func bindPrincipalList(fs *flag.FlagSet, o *adminOpts) {
@@ -564,13 +613,21 @@ func adminPrincipalHide(ctx context.Context, r *adminRun) error {
 }
 
 // The commands that answer 204 have no response document, so --json prints
-// nothing for them and the exit status is the result.
+// nothing for them and the exit status is the result. Disable answers 200
+// with a body from a current server (issue #1463) and 204 from an older one.
 
 func adminPrincipalDisable(ctx context.Context, r *adminRun) error {
-	if err := r.client.DisablePrincipal(ctx, r.id); err != nil {
+	resp, err := r.client.DisablePrincipal(ctx, r.id)
+	if err != nil {
 		return err
 	}
-	return r.say("disabled principal %d\n", r.id)
+	if r.opts.asJSON {
+		return r.printJSON(resp)
+	}
+	if err := r.say("disabled principal %d\n", r.id); err != nil {
+		return err
+	}
+	return r.sayIssued(r.id, resp.IssuedToOthers)
 }
 
 func adminPrincipalEnable(ctx context.Context, r *adminRun) error {

@@ -600,7 +600,8 @@ func (c *Client) roundTripOnce(ctx context.Context, what, method string, endpoin
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
 		return c.decodeError(resp)
 	}
-	if out == nil {
+	if out == nil || resp.StatusCode == http.StatusNoContent {
+		// A 204 has no document: out keeps its zero value.
 		return nil
 	}
 	var answer io.Reader = resp.Body
@@ -911,10 +912,28 @@ func (c *Client) RenamePrincipal(ctx context.Context, id int64, name string) (sc
 	return result.Principal, nil
 }
 
-// DisablePrincipal switches a principal off and revokes its credentials.
-func (c *Client) DisablePrincipal(ctx context.Context, id int64) error {
+// DisablePrincipal switches a principal off and revokes its credentials. The
+// answer lists the live credentials and hooks the principal issued to others
+// (issue #1463); a server from before that answers 204, which is the zero
+// response.
+func (c *Client) DisablePrincipal(ctx context.Context, id int64) (schema.DisablePrincipalResponseV1, error) {
 	endpoint := c.resolve("v1", "principals", strconv.FormatInt(id, 10), "disable")
-	return c.roundTrip(ctx, "disable principal", http.MethodPost, endpoint, nil, nil)
+	var result disablePrincipalDoc
+	if err := c.roundTrip(ctx, "disable principal", http.MethodPost, endpoint, nil, &result); err != nil {
+		return schema.DisablePrincipalResponseV1{}, err
+	}
+	return result.DisablePrincipalResponseV1, nil
+}
+
+// RevokeIssued revokes every live credential and hook principal id issued to
+// others (owner only, recent proof; issue #1463).
+func (c *Client) RevokeIssued(ctx context.Context, id int64) (schema.RevokeIssuedResponseV1, error) {
+	endpoint := c.resolve("v1", "principals", strconv.FormatInt(id, 10), "issued", "revoke-all")
+	var result revokeIssuedDoc
+	if err := c.roundTrip(ctx, "revoke issued", http.MethodPost, endpoint, nil, &result); err != nil {
+		return schema.RevokeIssuedResponseV1{}, err
+	}
+	return result.RevokeIssuedResponseV1, nil
 }
 
 // EnablePrincipal switches a principal back on. It revives no credential.
