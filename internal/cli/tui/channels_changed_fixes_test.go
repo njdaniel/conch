@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -25,6 +26,19 @@ type removedAPI struct {
 	// recv and ctxs record the message sockets opened, by channel.
 	recv map[string]func(schema.MessageV2) error
 	ctxs map[string]context.Context
+	// gate holds a history read until it is closed; the answer ignores the
+	// request's context, as one already in flight does. pageErr, when set, is
+	// what it answers.
+	gate    chan struct{}
+	pageErr error
+	page    []schema.MessageV2
+}
+
+func (a *removedAPI) ListMessagesV2Page(context.Context, string, cli.MessagesPage, int) (schema.ListMessagesResponseV2, error) {
+	if a.gate != nil {
+		<-a.gate
+	}
+	return schema.ListMessagesResponseV2{Messages: a.page}, a.pageErr
 }
 
 func (a *removedAPI) SubscribeEvents(context.Context, string, int64, cli.EventHandler) error {
@@ -345,5 +359,119 @@ func TestRefreshMakesNoSecondListRead(t *testing.T) {
 	}
 	if m.rs.unread["help"] != 2 {
 		t.Errorf("unread = %v, want help named from the refresh's own answer", m.rs.unread)
+	}
+}
+
+// TestRenameAndReuseInOneAnswer: one answer renames id 2 from ops to staff and
+// gives ops to id 3. The name is still in the list, so only its id says that
+// what was held under it is another channel's.
+func TestRenameAndReuseInOneAnswer(t *testing.T) {
+	base := &channelRefreshAPI{answers: []channelListAnswer{{channels: []schema.ChannelV0{{ID: 1, Name: "general"}, {ID: 2, Name: "ops"}}}}}
+	api := &removedAPI{channelRefreshAPI: base}
+	m := channelRefreshModel(t, api)
+	m.subscribed["ops"] = true
+	runCmd(m.startSubscription("ops"))
+	oldGen := m.subs.byName["ops"].gen
+	deadline := time.Now().Add(2 * time.Second)
+	var oldCtx context.Context
+	for oldCtx == nil && time.Now().Before(deadline) {
+		oldCtx, _ = api.socket("ops")
+		time.Sleep(5 * time.Millisecond)
+	}
+	if oldCtx == nil {
+		t.Fatal("the ops socket never opened")
+	}
+	m.messages["ops"] = []schema.MessageV2{{ID: 5, Body: "staff history"}}
+	m.loaded["ops"] = true
+
+	m.loadingChannels = true
+	m, _ = update(m, channelsLoaded{refresh: true, channels: []schema.ChannelV0{{ID: 1, Name: "general"}, {ID: 2, Name: "staff"}, {ID: 3, Name: "ops"}}})
+	if oldCtx.Err() == nil {
+		t.Error("the socket of id 2 was not cancelled")
+	}
+	if len(m.messages["ops"]) != 0 || m.loaded["ops"] || m.subscribed["ops"] {
+		t.Errorf("ops still holds id 2's state: messages %v, loaded %v, subscribed %v", m.messages["ops"], m.loaded["ops"], m.subscribed["ops"])
+	}
+	m.selected = 2
+	m, _ = m.openSelected()
+	if got := m.subs.byName["ops"].gen; got == 0 || got == oldGen {
+		t.Errorf("ops socket generation = %d, old = %d", got, oldGen)
+	}
+	m, _ = update(m, messageReceived{channel: "ops", gen: oldGen, message: schema.MessageV2{ID: 99}})
+	if slices.ContainsFunc(m.messages["ops"], func(x schema.MessageV2) bool { return x.ID == 99 }) {
+		t.Error("a late message of id 2's socket landed in id 3's ops")
+	}
+}
+
+// TestLateHistoryAnswerAfterReuse: a history read begun for the old ops that
+// answers after teardown and reuse must change nothing of the new ops.
+func TestLateHistoryAnswerAfterReuse(t *testing.T) {
+	tests := []struct {
+		name    string
+		pageErr error
+	}{
+		{name: "late page", pageErr: nil},
+		{name: "late failure", pageErr: fmt.Errorf("boom")},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			base := &channelRefreshAPI{answers: []channelListAnswer{{channels: []schema.ChannelV0{{ID: 1, Name: "general"}, {ID: 2, Name: "ops"}}}}}
+			api := &removedAPI{channelRefreshAPI: base, gate: make(chan struct{}), pageErr: tt.pageErr,
+				page: []schema.MessageV2{{ID: 7, Body: "staff history"}}}
+			m := channelRefreshModel(t, api)
+			m.subscribed["ops"] = true
+			done := make(chan tea.Msg, 1)
+			cmd := m.loadAndFollow()
+			go func() { done <- cmd() }()
+
+			m.loadingChannels = true
+			m, _ = update(m, channelsLoaded{refresh: true, channels: []schema.ChannelV0{{ID: 1, Name: "general"}, {ID: 2, Name: "staff"}, {ID: 3, Name: "ops"}}})
+			m.selected = 2
+			m, _ = m.openSelected()
+			if !m.subscribed["ops"] {
+				t.Fatal("the new ops did not subscribe")
+			}
+			close(api.gate)
+			late := <-done
+			m, _ = update(m, late)
+			if len(m.messages["ops"]) != 0 || m.streamed["ops"] != 0 {
+				t.Errorf("the old ops' history reached the new ops: %v, cursor %d", m.messages["ops"], m.streamed["ops"])
+			}
+			if !m.subscribed["ops"] {
+				t.Error("a late failure cleared the new ops subscription")
+			}
+		})
+	}
+}
+
+// TestReadStateAnswersOutOfOrder: a read-state answer built from an older
+// channel list must not put its names back.
+func TestReadStateAnswersOutOfOrder(t *testing.T) {
+	api := &removedAPI{channelRefreshAPI: &channelRefreshAPI{}, states: []schema.ReadStateV1{{ChannelID: 2, Unread: 3}}}
+	for _, name := range []string{"earlier refresh arrives last", "ordinary read arrives last"} {
+		t.Run(name, func(t *testing.T) {
+			m := channelRefreshModel(t, api)
+			m.rs.names = map[int64]string{1: "general", 2: "ops"}
+			var older readStateLoaded
+			if name == "ordinary read arrives last" {
+				older = msgsOf[readStateLoaded](runCmd(m.loadReadState()))[0]
+			}
+			m.loadingChannels = true
+			m, cmdA := update(m, channelsLoaded{refresh: true, channels: []schema.ChannelV0{{ID: 1, Name: "general"}, {ID: 2, Name: "ops"}}})
+			if name != "ordinary read arrives last" {
+				older = msgsOf[readStateLoaded](runCmd(cmdA))[0]
+			}
+			m.loadingChannels = true
+			m, cmdB := update(m, channelsLoaded{refresh: true, channels: []schema.ChannelV0{{ID: 1, Name: "general"}, {ID: 2, Name: "staff"}}})
+			newer := msgsOf[readStateLoaded](runCmd(cmdB))[0]
+			m, _ = update(m, newer)
+			m, _ = update(m, older)
+			if m.rs.names[2] != "staff" {
+				t.Errorf("names[2] = %q after the older answer, want staff", m.rs.names[2])
+			}
+			if m.rs.unread["ops"] != 0 || m.rs.unread["staff"] != 3 {
+				t.Errorf("unread = %v, want staff:3 only", m.rs.unread)
+			}
+		})
 	}
 }

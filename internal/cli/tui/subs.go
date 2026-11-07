@@ -1,9 +1,6 @@
 package tui
 
-import (
-	"context"
-	"slices"
-)
+import "context"
 
 // subscriptions holds each channel's message socket by channel name. A socket
 // is bound to the channel's id on the server but its callbacks carry the name
@@ -14,15 +11,20 @@ import (
 type subscriptions struct {
 	seq    int
 	byName map[string]subscription
+	// lives is the lifetime of what the model holds under a name: history reads
+	// run on its context and carry its revision, and teardown ends it, so a
+	// slow answer cannot fill a channel that later takes the name.
+	lives map[string]subscription
 }
 
 type subscription struct {
 	gen    int
 	cancel context.CancelFunc
+	ctx    context.Context
 }
 
 func newSubscriptions() *subscriptions {
-	return &subscriptions{byName: make(map[string]subscription)}
+	return &subscriptions{byName: make(map[string]subscription), lives: make(map[string]subscription)}
 }
 
 // open starts a socket's context for channel, cancelling the one it replaces.
@@ -43,8 +45,29 @@ func (s *subscriptions) live(channel string, gen int) bool {
 	return gen == 0 || gen == s.byName[channel].gen
 }
 
+// life is the context and revision of what is held under channel's name now.
+func (s *subscriptions) life(parent context.Context, channel string) (context.Context, int) {
+	if l, ok := s.lives[channel]; ok {
+		return l.ctx, l.gen
+	}
+	ctx, cancel := context.WithCancel(parent)
+	s.seq++
+	s.lives[channel] = subscription{gen: s.seq, cancel: cancel, ctx: ctx}
+	return ctx, s.seq
+}
+
+// liveRev reports whether a history answer of revision rev belongs to what is
+// held under channel's name. Revision 0 is no read's (life never makes it).
+func (s *subscriptions) liveRev(channel string, rev int) bool {
+	return rev == 0 || rev == s.lives[channel].gen
+}
+
 // stop cancels channel's socket. Its late callbacks no longer match.
 func (s *subscriptions) stop(channel string) {
+	if l, ok := s.lives[channel]; ok {
+		l.cancel()
+		delete(s.lives, channel)
+	}
 	if old, ok := s.byName[channel]; ok {
 		old.cancel()
 		delete(s.byName, channel)
@@ -76,10 +99,12 @@ func (m *Model) forgetChannel(channel string) {
 	delete(m.rs.dropped, channel)
 }
 
-// forgetMissing tears down every name of old that next no longer holds.
-func (m *Model) forgetMissing(old, next []string) {
-	for _, name := range old {
-		if !slices.Contains(next, name) {
+// forgetMissing tears down every name of old that next no longer holds, or
+// holds for a different channel: one answer can rename id 2 away from ops and
+// give the name to id 3. An id of 0 is not known, so only the name is compared.
+func (m *Model) forgetMissing(old, next map[string]int64) {
+	for name, id := range old {
+		if nextID, ok := next[name]; !ok || (id > 0 && nextID > 0 && id != nextID) {
 			m.forgetChannel(name)
 		}
 	}

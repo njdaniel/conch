@@ -48,6 +48,10 @@ type readState struct {
 	// dropped marks channels whose message socket dropped: the counts are read
 	// again once it is back.
 	dropped map[string]bool
+	// listRev counts the channel-list answers the names come from. A read-state
+	// answer carries the revision it began under and is dropped when a newer
+	// list has come since. 0 is no read's.
+	listRev int
 	// after schedules a markDue. It is its own field, not the model's after,
 	// which the message stream's retry timers share: a test that counts those
 	// must not see these.
@@ -59,7 +63,7 @@ func newReadState() readState {
 		unread: make(map[string]int), names: make(map[int64]string),
 		marked: make(map[string]int64), acked: make(map[string]int64), markedAt: make(map[string]time.Time),
 		pending: make(map[string]int64), timer: make(map[string]bool),
-		dropped: make(map[string]bool), after: tickAfter,
+		dropped: make(map[string]bool), after: tickAfter, listRev: 1,
 	}
 }
 
@@ -82,6 +86,7 @@ type readStateLoaded struct {
 	// replace says names came from a channel-list answer and are the whole
 	// mapping, not an addition to it.
 	replace bool
+	rev     int
 	err     error
 }
 
@@ -130,15 +135,15 @@ func (m Model) readStateWith(names map[int64]string, resolve bool) tea.Cmd {
 	if m.rs.off {
 		return nil
 	}
-	api, ctx := m.api, m.ctx
+	api, ctx, rev := m.api, m.ctx, m.rs.listRev
 	return func() tea.Msg {
 		resp, err := api.ListReadState(ctx)
 		if err != nil {
-			return readStateLoaded{err: err}
+			return readStateLoaded{err: err, rev: rev}
 		}
 		states := resp.ReadState
 		if !resolve {
-			return readStateLoaded{states: states, names: names, replace: true}
+			return readStateLoaded{states: states, names: names, replace: true, rev: rev}
 		}
 		for _, state := range states {
 			if _, ok := names[state.ChannelID]; ok {
@@ -158,7 +163,7 @@ func (m Model) readStateWith(names map[int64]string, resolve bool) tea.Cmd {
 			}
 			break
 		}
-		return readStateLoaded{states: states, names: names}
+		return readStateLoaded{states: states, names: names, rev: rev}
 	}
 }
 
@@ -166,6 +171,10 @@ func (m Model) readStateWith(names map[int64]string, resolve bool) tea.Cmd {
 // a refusal changes nothing and says nothing: the counts shown stay, and the
 // next message elsewhere or reconnect reads again.
 func (m Model) readStateLoaded(msg readStateLoaded) (tea.Model, tea.Cmd) {
+	if msg.rev != 0 && msg.rev != m.rs.listRev {
+		// Built from a channel list that a newer answer has replaced.
+		return m, nil
+	}
 	if msg.err != nil {
 		if refusesReadState(msg.err) {
 			m.rs.off = true

@@ -69,6 +69,9 @@ type messagesLoaded struct {
 	channel  string
 	messages []schema.MessageV2
 	err      error
+	// rev is the revision of what the model held under the name when the read
+	// began (subscriptions.life); an answer of another revision is dropped.
+	rev int
 	// following is set on a load that opens the channel's message socket once
 	// the page is in (loadAndFollow); when that load fails there is no socket
 	// and the model retries it.
@@ -883,6 +886,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case authorsLoaded:
 		return m.authorsLoaded(msg)
 	case messagesLoaded:
+		if !m.subs.liveRev(msg.channel, msg.rev) {
+			// A read for a channel that was renamed or lost; the name may be
+			// another channel's now.
+			return m, nil
+		}
 		// The result of a channel the user has since left must not overwrite
 		// the status of the channel they are looking at.
 		stale := msg.channel != m.current()
@@ -1268,7 +1276,7 @@ func (m Model) channelsLoadDone(msg channelsLoaded) (tea.Model, tea.Cmd) {
 	renamed := selected >= 0 && names[selected] != previous
 	// A name that left the list, lost or renamed away, may be taken by another
 	// channel: nothing of the old one stays under it, and its socket is closed.
-	m.forgetMissing(m.channels, names)
+	m.forgetMissing(m.channelIDs, nextIDs)
 	if previous == "" {
 		selected = defaultSelection(names)
 	}
@@ -1278,6 +1286,7 @@ func (m Model) channelsLoadDone(msg channelsLoaded) (tea.Model, tea.Cmd) {
 	m.channels = names
 	m.channelIDs = nextIDs
 	m.channelsErr = nil
+	m.rs.listRev++
 	m.selected = selected
 	m.notice = ""
 	if empty {
@@ -1308,17 +1317,18 @@ func (m Model) loadCurrent() tea.Cmd {
 	if channel == "" {
 		return nil
 	}
+	ctx, rev := m.subs.life(m.ctx, channel)
 	return func() tea.Msg {
 		// One request for the newest page, whatever the channel's size; older
 		// history is not shown, and the TUI has no scroll-back to fetch it.
-		page, err := m.api.ListMessagesV2Page(m.ctx, channel, cli.MessagesPage{NewestFirst: true}, historyLimit)
+		page, err := m.api.ListMessagesV2Page(ctx, channel, cli.MessagesPage{NewestFirst: true}, historyLimit)
 		if err != nil {
-			return messagesLoaded{channel: channel, err: err}
+			return messagesLoaded{channel: channel, rev: rev, err: err}
 		}
 		// The server sends newest first; the model holds ascending.
 		messages := slices.Clone(page.Messages)
 		slices.Reverse(messages)
-		return messagesLoaded{channel: channel, messages: messages}
+		return messagesLoaded{channel: channel, rev: rev, messages: messages}
 	}
 }
 
