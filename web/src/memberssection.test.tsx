@@ -11,6 +11,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { directoryCoalesce } from './useDirectoryChanged';
 import { App } from './App';
 import { AdminConsole } from './AdminConsole';
+import { CommunityMembers } from './Members';
 import { SettingsOpen } from './joiningSettings';
 import type { ChannelListingV1 } from './schema/channel';
 import type { Permission, PermissionsResponseV1 } from './schema/permission';
@@ -1131,6 +1132,70 @@ describe('what a person issued to others', () => {
     expect(await within(list).findByText('Revoked 2 credentials and 1 hooks.')).toBeTruthy();
     expect(sent(calls, 'POST', /issued\/revoke-all$/).length).toBe(1);
     expect(list.querySelectorAll('li').length).toBe(0);
+  });
+
+  it('keeps the result when the directory drops the person before the answer lands', async () => {
+    let disabled = false;
+    let answer: (r: Response) => void = () => undefined;
+    serve(owner, {
+      members: () => (disabled ? everyone.filter((p) => p.id !== 2) : everyone),
+      routes: {
+        'POST /v1/principals/2/disable': () => {
+          disabled = true;
+          return new Promise<Response>((resolve) => {
+            answer = resolve;
+          });
+        },
+      },
+    });
+    const region = await open();
+    await disableOperator(region);
+    await waitFor(() => {
+      expect(answer).not.toBe(undefined);
+      expect(disabled).toBe(true);
+    });
+    await directoryFrame();
+    await waitFor(() => {
+      expect(Array.from(region.querySelectorAll('.community-name')).map((e) => e.textContent)).not.toContain('operator-1');
+    });
+    answer(json({ issued_to_others: issuedList }));
+    expect(await within(region).findByRole('region', { name: 'Issued to others by operators' })).toBeTruthy();
+  });
+
+  it('takes the list away, with its names, when the viewer loses manage_members', async () => {
+    let viewer: WhoAmIResponseV1 = owner;
+    serve(() => viewer, { routes: { 'POST /v1/principals/2/disable': () => json({ issued_to_others: issuedList }) } });
+    const region = await open();
+    await disableOperator(region);
+    await within(region).findByRole('region', { name: 'Issued to others by operators' });
+    viewer = { ...owner, owner: false, permissions: operatorRights.filter((p) => p !== 'manage_members' && p !== 'act_as_members') };
+    await tick();
+    await waitFor(() => {
+      expect(document.querySelector('.issued-list')).toBeNull();
+    });
+    expect(document.body.textContent).not.toContain('issued by operator-1');
+  });
+
+  // The App ignores a whoami for another principal (auth.ts, 'refreshed'), so
+  // this identity change is made on the list itself, the way a switch of person
+  // or server reaches it.
+  it.each([
+    ['another principal without manage_members', { ...withoutMembers, id: 7, name: 'someone-else' }, origin],
+    ['the same principal on another server', owner, 'http://127.0.0.1:9090'],
+  ])('takes every list away when the viewer becomes %s', async (_label, next, nextOrigin) => {
+    serve(owner, { routes: { 'POST /v1/principals/2/disable': () => json({ issued_to_others: issuedList }) } });
+    window.sessionStorage.setItem(key, 'conch_owner_session_token');
+    const props = { channelIds: '1', onUnauthorized: () => undefined };
+    const shown = render(<CommunityMembers viewer={owner.id} who={owner} origin={origin} {...props} />);
+    const region = await screen.findByRole('region', { name: 'Community members' });
+    await within(region).findByRole('list', { name: 'People' });
+    await disableOperator(region);
+    await within(region).findByRole('region', { name: 'Issued to others by operators' });
+    shown.rerender(<CommunityMembers viewer={next.id} who={next} origin={nextOrigin} {...props} />);
+    await waitFor(() => {
+      expect(document.querySelector('.issued-list')).toBeNull();
+    });
+    expect(document.body.textContent).not.toContain('issued by operator-1');
   });
 
   it('lists them after a demotion too', async () => {

@@ -193,7 +193,7 @@ export function PersonActions({ who, person, origin, rows, readRows, open, onOpe
 
   // send makes one write, once, and says how it went. `done` is the line for
   // success; `then` gets the value the server answered with.
-  function send<T>(id: MemberActionId, write: () => Promise<api.InviteResult<T>>, nothing: string, done: (value: T) => string, lost?: string, then?: (value: T) => void) {
+  function send<T>(id: MemberActionId, write: () => Promise<api.InviteResult<T>>, nothing: string, done: (value: T) => string, lost?: string, then?: (value: T) => void, deliver?: (value: T) => void) {
     if (sending.current) return;
     if (!allowed.current.some((a) => a.id === id)) {
       setPanel(null);
@@ -209,6 +209,9 @@ export function PersonActions({ who, person, origin, rows, readRows, open, onOpe
         onUnauthorized();
         return;
       }
+      // A result for the caller is delivered whether or not this row is still
+      // here: the directory can drop a disabled person before the answer lands.
+      if (result.ok) deliver?.(result.value);
       // The row is gone (the grant went, or Settings closed): the answer
       // changes nothing here, and the list may follow.
       if (!live.current) {
@@ -300,7 +303,7 @@ export function PersonActions({ who, person, origin, rows, readRows, open, onOpe
               busy={busy}
               onYes={() => {
                 if (panel.id === 'signout') send('signout', () => api.signOutPrincipalEverywhere(person.id), 'Nobody was signed out.', () => `${name} is signed out everywhere.`);
-                else if (panel.id === 'disable') send('disable', () => api.disablePrincipal(person.id), 'Nothing was changed.', () => `${name} is disabled and signed out.`, undefined, (r) => {
+                else if (panel.id === 'disable') send('disable', () => api.disablePrincipal(person.id), 'Nothing was changed.', () => `${name} is disabled and signed out.`, undefined, undefined, (r) => {
                     onIssued(r.issued_to_others ?? []);
                   });
                 else send('remove', () => api.hidePrincipal(person.id), 'Nobody was removed.', () => `${name} is removed from the server.`);
@@ -323,6 +326,7 @@ export function PersonActions({ who, person, origin, rows, readRows, open, onOpe
                     const ended = r.credentials_revoked + r.hooks_revoked;
                     return `${name} is now ${roleWords[to]}.${ended > 0 ? ` ${String(r.credentials_revoked)} sign-ins and ${String(r.hooks_revoked)} hooks ended.` : ''}`;
                   },
+                  undefined,
                   undefined,
                   (r) => {
                     onIssued(r.issued_to_others ?? []);

@@ -8,6 +8,7 @@ import { ActionsMenu, useOpeners, type MenuItem } from './MessageMenu';
 import type { Entry } from './agents/join';
 import { PersonActions } from './admin/PersonActions';
 import { memberActions } from './memberActions';
+import { canDo } from './admin/permissions';
 import type { IssuedByOperatorV1, PermissionRowV1 } from './schema/permission';
 import { IssuedList } from './admin/PermissionsSection';
 import type { ChannelMemberV1, ChannelV0, PutChannelMemberRequestV1 } from './schema/channel';
@@ -586,6 +587,16 @@ export function CommunityMembers({
     };
   }, []);
 
+  // Losing the standing, or another person or server, takes the lists away.
+  const viewerId = who?.id;
+  const holdsMembers = who !== undefined && canDo(who, 'manage_members');
+  useEffect(() => {
+    if (!holdsMembers) setIssued([]);
+  }, [holdsMembers]);
+  useEffect(() => {
+    setIssued([]);
+  }, [viewerId, origin]);
+
   const load = useCallback(() => {
     const mine = ++seq.current;
     void api.directoryMembers().then((result) => {
@@ -622,9 +633,12 @@ export function CommunityMembers({
 
   const byId = new Map<number, ServerMemberV1>();
   if (answer !== null && answer !== 'failed') for (const m of answer.members) byId.set(m.id, m);
-  // The names the page knows, the issuers' kept from when they were listed.
+  // The lists are the viewer's to see only while they hold manage_members; the
+  // names are the current directory's, plus each issuer's own, kept from the
+  // moment the viewer disabled or demoted them.
+  const standing = who !== undefined && canDo(who, 'manage_members');
   const names = new Map<number, string>();
-  for (const entry of issued) names.set(entry.id, entry.name);
+  if (standing) for (const entry of issued) names.set(entry.id, entry.name);
   for (const [id, m] of byId) names.set(id, m.name);
   const sameIssuer = (id: number) => (entry: { readonly id: number }) => entry.id !== id;
   return (
@@ -634,7 +648,7 @@ export function CommunityMembers({
       <p ref={noteLine} role="status" className="hint" tabIndex={-1}>
         {note}
       </p>
-      {who === undefined
+      {who === undefined || !standing
         ? null
         : issued.map((entry) => (
             <IssuedList
