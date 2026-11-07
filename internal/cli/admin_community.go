@@ -5,6 +5,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"strconv"
 
 	"github.com/njdaniel/conch/pkg/schema"
@@ -12,8 +13,9 @@ import (
 
 // `conch admin channel settings`, `conch admin principal voice` and `conch
 // admin directory members` (ADR-013, issue #994). Each is one or more
-// requests to a public route; the server decides who may, and a refusal is
-// printed in this client's words, by its code (refusal.go).
+// requests to a public route; the server decides who may. Ordinary refusals
+// use this client's words (refusal.go); preview refusals keep the server's
+// code, message and permission.
 //
 // `conch admin directory` is a group, not a verb, so that `settings
 // [--hide-members on|off]` (issue #996) has its place beside `members`.
@@ -196,33 +198,61 @@ var directoryRefusals = refusalLines{"forbidden": communityOnly}
 // manage_members, and "-" where it sent none. The name is last because it may
 // contain spaces.
 func adminDirectoryMembers(ctx context.Context, r *adminRun) error {
+	var previewAs int64
+	var err error
+	if r.given["preview-as"] {
+		previewAs, err = resolvePreviewMember(ctx, r.client, r.opts.previewAs)
+		if err != nil {
+			return err
+		}
+	}
+	resp, err := readDirectoryMembers(ctx, r, previewAs)
+	if err != nil {
+		if r.given["preview-as"] {
+			return err
+		}
+		return refused(err, directoryRefusals)
+	}
+	if r.opts.asJSON {
+		return r.printJSON(resp)
+	}
+	return writeDirectoryMembers(r.stdout, resp.Members)
+}
+
+func readDirectoryMembers(ctx context.Context, r *adminRun, previewAs int64) (schema.ServerMembersResponseV1, error) {
 	all := []schema.ServerMemberV1{}
 	var scope schema.DirectoryScope
 	var after int64
 	for page := 0; ; page++ {
 		if page == maxDirectoryPages {
-			return errors.New("cli: admin directory members: the server's pages do not end")
+			return schema.ServerMembersResponseV1{}, errors.New("cli: admin directory members: the server's pages do not end")
 		}
-		resp, err := r.client.DirectoryMembers(ctx, after, schema.MaxListPrincipalsLimit)
+		var resp schema.ServerMembersResponseV1
+		var err error
+		if previewAs > 0 {
+			resp, err = r.client.DirectoryMembersPreview(ctx, after, schema.MaxListPrincipalsLimit, previewAs)
+		} else {
+			resp, err = r.client.DirectoryMembers(ctx, after, schema.MaxListPrincipalsLimit)
+		}
 		if err != nil {
-			return refused(err, directoryRefusals)
+			return schema.ServerMembersResponseV1{}, err
 		}
 		all = append(all, resp.Members...)
 		scope = resp.Scope
 		if resp.After == 0 {
-			break
+			return schema.ServerMembersResponseV1{Members: all, Scope: scope}, nil
 		}
 		// Pages go up by id; one that does not would never end.
 		if resp.After <= after {
-			return errors.New("cli: admin directory members: the server's pages do not move forward")
+			return schema.ServerMembersResponseV1{}, errors.New("cli: admin directory members: the server's pages do not move forward")
 		}
 		after = resp.After
 	}
-	if r.opts.asJSON {
-		return r.printJSON(schema.ServerMembersResponseV1{Members: all, Scope: scope})
-	}
-	for _, m := range all {
-		if err := r.say("%d %s %s %s created %s voice %s may-invite %s invited-by %s %s\n", m.ID, safeLine(string(m.Kind)),
+}
+
+func writeDirectoryMembers(w io.Writer, members []schema.ServerMemberV1) error {
+	for _, m := range members {
+		if _, err := fmt.Fprintf(w, "%d %s %s %s created %s voice %s may-invite %s invited-by %s %s\n", m.ID, safeLine(string(m.Kind)),
 			dashIfEmpty(safeLine(string(m.Role))), either(m.Owner, "owner", "-"), formatTimestamp(m.CreatedAt),
 			optionalOnOff(m.VoiceAllowed), optionalOnOff(m.MayInvite), optionalID(m.InvitedBy), safeLine(m.Name)); err != nil {
 			return err

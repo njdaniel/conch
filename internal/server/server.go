@@ -355,7 +355,7 @@ func New(cfg Config, st *store.Store) *Server {
 	s.mux = http.NewServeMux()
 	for _, rt := range s.routes {
 		s.routeByPattern[rt.pattern] = rt
-		s.mux.Handle(rt.pattern, traceRoute(s.guard(rt)))
+		s.mux.Handle(rt.pattern, traceRoute(s.guarded(rt)))
 	}
 	s.logAgentsWithoutManifest(context.Background())
 	s.logServerNameHolders(context.Background())
