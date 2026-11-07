@@ -65,6 +65,8 @@ vi.mock('../api', () => ({
     fake.mode = mode;
     fake.kept.push(mode);
   },
+  readShareQuality: () => ({ resolution: '1080p', frameRate: 30 }),
+  writeShareQuality: () => undefined,
 }));
 vi.mock('./sdk', () => ({ newLiveKitRoom: () => fake.room(), canChooseOutput: () => true }));
 

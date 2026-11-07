@@ -54,6 +54,8 @@ function setup(claims: ShareClaimResult[] = []) {
       if (room.pick !== null) return room.pick.promise;
       return room.pickFails ? Promise.reject(new Error('NotAllowedError')) : Promise.resolve({ audio: room.audio });
     },
+    setShareQuality: () => Promise.resolve(),
+    readShareStats: () => Promise.resolve(null),
     publishScreen: () => {
       calls.push('publish');
       const held = room.publish;

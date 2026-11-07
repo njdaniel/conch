@@ -43,11 +43,11 @@
 // captured or published after the close is stopped, so nothing keeps a device
 // open.
 //
-// Screen share (issue #444). A share is captured with the SDK's own picker
-// call, at up to 3840x2160 and 60 fps, and published as the screen-share
-// sources: the picture as captured, with simulcast layers of 1080p at 30 fps
-// and 720p at 15 fps where the capture is larger (issue #565), its sound as
-// music. Tracks are subscribed by choice, not automatically: every
+// Screen share (issue #444). The sharer chooses the capture's caps: 720p,
+// 1080p (the default), or Source up to 4K, at 15, 30 or 60 fps. The picture
+// has lower simulcast layers where it is larger, with 720p at up to 30 fps at
+// the bottom; its sound is published as music. Tracks are subscribed by
+// choice, not automatically: every
 // microphone, and a share's picture and sound only while this page watches
 // it. Adaptive stream asks LiveKit for the layer the watch view's size needs
 // (none while it is hidden), and dynacast lets a sharer stop encoding a layer
@@ -126,7 +126,7 @@ import type { Camera, CameraProfile, KeptCamera } from './camera';
 import type { CameraTrack, Microphone, Output, Processing, Room, RoomEvents, ShareSink } from './connection';
 import { principalOf } from './presence';
 import { LogRing, Redactor } from './redact';
-import type { Captured, KeptScreen } from './share';
+import { defaultShareQuality, type Captured, type KeptScreen, type ShareDirection, type ShareQuality, type ShareSample } from './share';
 
 export { principalOf };
 
@@ -396,11 +396,7 @@ export function watchMicrophones(onChange: () => void): () => void {
   };
 }
 
-// ---- the share's sizes and bitrates
-//
-// Every size and bitrate a share uses is here (issue #565, which replaced
-// decision O6's 1080p30 with 720p15 and 360p5). They are where it starts:
-// the bandwidth report of #448, which measures a 4K60 share too, refines them.
+// ---- the share's sizes, bitrates and stats
 
 export interface ShareLayer {
   readonly width: number;
@@ -416,46 +412,52 @@ export interface CapturedVideo {
   readonly frameRate?: number;
 }
 
-// The picker is asked for up to 3840x2160 at up to 60 fps. The SDK asks the
-// browser for that as an ideal (a maximum on Safari), never as an exact size
-// or a minimum, so a source is captured at its own size, scaled down to fit
-// but never up.
-const shareAsk = { width: 3840, height: 2160, frameRate: 60 };
+const sourceAsk = { width: 3840, height: 2160, frameRate: 60 } as const;
 
-// The top layer is the picture as captured, at the capture's own frame rate
-// up to the ask's, with a bitrate chosen by the capture's longer side: the
-// first row whose longest it does not exceed, and above them all shareTopMost.
+// The SDK turns the resolution into an ideal (a maximum on Safari), never an
+// exact size or a minimum, so a smaller source is not scaled up or refused.
+function shareAsk(quality: ShareQuality): { readonly width: number; readonly height: number; readonly frameRate: number } {
+  if (quality.resolution === '720p') return { width: 1280, height: 720, frameRate: quality.frameRate };
+  if (quality.resolution === '1080p') return { width: 1920, height: 1080, frameRate: quality.frameRate };
+  return { ...sourceAsk, frameRate: quality.frameRate };
+}
+
 const shareTops: readonly { readonly longest: number; readonly maxBitrate: number }[] = [
   { longest: 1920, maxBitrate: 6_000_000 },
   { longest: 2560, maxBitrate: 10_000_000 },
 ];
 const shareTopMost = 18_000_000;
 
-// The lower layers, at most two (all LiveKit takes besides the top): 1080p,
-// which most desktop viewers will take, and 720p for phones and slow links.
-// Each is the capture scaled down to fit its box, keeping the capture's
-// shape, with the box stood on end for a portrait capture. A layer that
-// would not be smaller than the capture is left out: a 1080p capture has a
-// 720p layer only, and a 720p one none.
+// The lower layers, smallest first. The bottom layer keeps motion smooth on
+// a pane-sized view; neither layer is ever faster than the top.
 const shareLower: readonly ShareLayer[] = [
-  { width: 1280, height: 720, maxBitrate: 1_500_000, maxFramerate: 15 },
+  { width: 1280, height: 720, maxBitrate: 2_000_000, maxFramerate: 30 },
   { width: 1920, height: 1080, maxBitrate: 4_000_000, maxFramerate: 30 },
 ];
 
-// What a capture is taken to be when the browser does not say its size.
-const shareUnknown = { width: 1920, height: 1080 };
-
 const known = (n: number | undefined): n is number => n !== undefined && Number.isFinite(n) && n > 0;
 
-// shareEncodings chooses a share's encodings from what was captured: the top
-// layer, and the lower layers smallest first.
-export function shareEncodings(captured: CapturedVideo): { readonly top: ShareLayer; readonly lower: readonly ShareLayer[] } {
-  const { width: w, height: h, frameRate: r } = captured;
-  const [width, height] = known(w) && known(h) ? [w, h] : [shareUnknown.width, shareUnknown.height];
-  const fps = known(r) ? Math.min(r, shareAsk.frameRate) : shareAsk.frameRate;
+// fitBox scales a picture down to fit, keeping its shape and standing the box
+// on end for a portrait capture. It never scales up.
+function fitBox(width: number, height: number, boxWidth: number, boxHeight: number): readonly [number, number] {
   const long = Math.max(width, height);
   const short = Math.min(width, height);
-  const portrait = height > width;
+  const boxLong = Math.max(boxWidth, boxHeight);
+  const boxShort = Math.min(boxWidth, boxHeight);
+  if (long <= boxLong && short <= boxShort) return [width, height];
+  const [l, s] = long * boxShort >= short * boxLong ? [boxLong, Math.floor((short * boxLong) / long)] : [Math.floor((long * boxShort) / short), boxShort];
+  return height > width ? [s, l] : [l, s];
+}
+
+// shareEncodings chooses the top layer from the capture and the sharer's
+// choice, and the lower layers from the top, smallest first.
+export function shareEncodings(captured: CapturedVideo, quality: ShareQuality = defaultShareQuality): { readonly top: ShareLayer; readonly lower: readonly ShareLayer[] } {
+  const ask = shareAsk(quality);
+  const [capturedWidth, capturedHeight] = known(captured.width) && known(captured.height) ? [captured.width, captured.height] : [ask.width, ask.height];
+  const [width, height] = fitBox(capturedWidth, capturedHeight, ask.width, ask.height);
+  const fps = known(captured.frameRate) ? Math.min(captured.frameRate, ask.frameRate) : ask.frameRate;
+  const long = Math.max(width, height);
+  const short = Math.min(width, height);
 
   let maxBitrate = shareTopMost;
   for (const row of shareTops) {
@@ -467,32 +469,22 @@ export function shareEncodings(captured: CapturedVideo): { readonly top: ShareLa
 
   const lower: ShareLayer[] = [];
   for (const layer of shareLower) {
-    const boxLong = Math.max(layer.width, layer.height);
-    const boxShort = Math.min(layer.width, layer.height);
-    if (long <= boxLong && short <= boxShort) continue;
-    // Scaled by the side that fits the box more tightly; the other follows
-    // the capture's shape, rounded down so the layer stays in the box.
-    const [l, s] = long * boxShort >= short * boxLong ? [boxLong, Math.floor((short * boxLong) / long)] : [Math.floor((long * boxShort) / short), boxShort];
-    lower.push({ width: portrait ? s : l, height: portrait ? l : s, maxBitrate: layer.maxBitrate, maxFramerate: Math.min(layer.maxFramerate, fps) });
+    if (long <= Math.max(layer.width, layer.height) && short <= Math.min(layer.width, layer.height)) continue;
+    const [w, h] = fitBox(width, height, layer.width, layer.height);
+    lower.push({ width: w, height: h, maxBitrate: layer.maxBitrate, maxFramerate: Math.min(layer.maxFramerate, fps) });
   }
   return { top: { width, height, maxBitrate, maxFramerate: fps }, lower };
 }
 
-// What the picker asks for: the picture at up to 3840x2160 and 60 fps, the
-// sound (a tab's, or the whole system's where the browser offers it) without
-// the voice processing a microphone gets, the Conch tab itself left out of
-// the choices, and the shared tab still heard by the sharer. The system's
-// sound leaves out what this page plays (restrictOwnAudio), so the room's
-// voices are not sent back into the room. Every share is captured as motion
-// (issue #554): shares are mostly films and games watched together, and motion
-// keeps the frame rate when bandwidth runs short, giving up text sharpness
-// only then.
-export function captureOptions(): ScreenShareCaptureOptions {
+// What the picker asks for: the chosen picture caps, unprocessed sound, the
+// Conch tab left out, and the shared tab still heard by the sharer. At 15 fps
+// detail keeps text sharp; at 30 and 60 motion keeps the frame rate instead.
+export function captureOptions(quality: ShareQuality = defaultShareQuality): ScreenShareCaptureOptions {
   return {
     video: true,
     audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false, channelCount: 2, restrictOwnAudio: true },
-    resolution: { ...shareAsk },
-    contentHint: 'motion',
+    resolution: shareAsk(quality),
+    contentHint: quality.frameRate === 15 ? 'detail' : 'motion',
     systemAudio: 'include',
     selfBrowserSurface: 'exclude',
     surfaceSwitching: 'include',
@@ -500,16 +492,64 @@ export function captureOptions(): ScreenShareCaptureOptions {
   };
 }
 
-// How the picture is published, from what was captured (shareEncodings).
+// How the picture is published, from what was captured and the chosen caps.
 // The codec is the SDK's default, VP8.
-export function videoPublishOptions(captured: CapturedVideo): TrackPublishOptions {
-  const { top, lower } = shareEncodings(captured);
+export function videoPublishOptions(captured: CapturedVideo, quality: ShareQuality = defaultShareQuality): TrackPublishOptions {
+  const { top, lower } = shareEncodings(captured, quality);
   return {
     source: Track.Source.ScreenShare,
     simulcast: true,
     screenShareEncoding: new VideoPreset(top.width, top.height, top.maxBitrate, top.maxFramerate).encoding,
     screenShareSimulcastLayers: lower.map((l) => new VideoPreset(l.width, l.height, l.maxBitrate, l.maxFramerate)),
   };
+}
+
+// The subset of inbound-rtp and outbound-rtp stats the readout uses.
+export interface ShareStats {
+  readonly type: string;
+  readonly kind?: string;
+  readonly mediaType?: string;
+  readonly frameWidth?: number;
+  readonly frameHeight?: number;
+  readonly framesPerSecond?: number;
+  readonly bytesReceived?: number;
+  readonly bytesSent?: number;
+  readonly timestamp?: number;
+}
+
+const count = (n: number | undefined): n is number => n !== undefined && Number.isFinite(n) && n >= 0;
+
+// shareSample reads the received picture, or the largest sent simulcast layer.
+export function shareSample(stats: Iterable<ShareStats>, direction: ShareDirection): ShareSample | null {
+  const wanted = direction === 'received' ? 'inbound-rtp' : 'outbound-rtp';
+  let found: ShareStats | null = null;
+  for (const stat of stats) {
+    if (stat.type !== wanted || stat.kind === 'audio' || stat.mediaType === 'audio') continue;
+    if (!known(stat.frameWidth) || !known(stat.frameHeight) || !count(stat.framesPerSecond)) continue;
+    if (found === null || stat.frameWidth * stat.frameHeight > (found.frameWidth ?? 0) * (found.frameHeight ?? 0)) found = stat;
+  }
+  if (found === null) return null;
+  const bytes = direction === 'received' ? found.bytesReceived : found.bytesSent;
+  return {
+    width: found.frameWidth ?? 0,
+    height: found.frameHeight ?? 0,
+    fps: found.framesPerSecond ?? 0,
+    ...(count(bytes) ? { bytes } : {}),
+    ...(count(found.timestamp) ? { timestamp: found.timestamp } : {}),
+  };
+}
+
+// shareReadout formats the latest sample. Bitrate needs two samples; zero
+// bytes and zero fps are real readings, not missing ones.
+export function shareReadout(current: ShareSample | null, previous?: ShareSample | null): string | null {
+  if (current === null) return null;
+  let text = `${String(current.width)}×${String(current.height)} · ${String(Math.round(current.fps))} fps`;
+  if (previous?.bytes === undefined || previous.timestamp === undefined || current.bytes === undefined || current.timestamp === undefined) return text;
+  const elapsed = current.timestamp - previous.timestamp;
+  const bytes = current.bytes - previous.bytes;
+  if (elapsed <= 0 || bytes < 0) return text;
+  text += ` · ${(bytes * 8 / elapsed / 1000).toFixed(1)} Mbps`;
+  return text;
 }
 
 // The share's sound is music, not speech: no discontinuous transmission or
@@ -671,6 +711,8 @@ class LiveKitAdapter implements Room {
   // The share this page captured, until it is stopped; and whether this
   // adapter is the one taking it down, so its own unpublish is not reported.
   private screen: LocalTrack[] = [];
+  private shareQuality: ShareQuality = defaultShareQuality;
+  private shareQualityChange: Promise<void> = Promise.resolve();
   private stoppingScreen = false;
   // Called at the next change of this connection's own permission, and when
   // the share is stopped, kept or closed: where a share's publish refused for
@@ -1115,16 +1157,61 @@ class LiveKitAdapter implements Room {
 
   // ---- sharing
 
-  async pickScreen(): Promise<Captured> {
+  async pickScreen(quality: ShareQuality = defaultShareQuality): Promise<Captured> {
     this.ensureOpen();
+    this.shareQuality = quality;
     await this.stopScreen();
-    const tracks = await this.room.localParticipant.createScreenTracks(captureOptions());
+    const tracks = await this.room.localParticipant.createScreenTracks(captureOptions(quality));
     if (this.closed) {
       for (const t of tracks) t.stop();
       throw new ClosedError();
     }
     this.holdScreen(tracks);
     return { audio: tracks.some((t) => t.source === Track.Source.ScreenShareAudio) };
+  }
+
+  setShareQuality(quality: ShareQuality): Promise<void> {
+    this.shareQuality = quality;
+    // setParameters must follow the sender's latest parameters. Queue changes
+    // made quickly one after another, rather than letting an older one win.
+    const change = this.shareQualityChange.then(() => this.applyShareQuality());
+    this.shareQualityChange = change.catch(() => undefined);
+    return change;
+  }
+
+  private async applyShareQuality(): Promise<void> {
+    const quality = this.shareQuality;
+    const track = this.screen.find((t): t is LocalVideoTrack => t.source === Track.Source.ScreenShare);
+    if (track === undefined) return;
+    const capture = track.mediaStreamTrack;
+    const ask = shareAsk(quality);
+    capture.contentHint = quality.frameRate === 15 ? 'detail' : 'motion';
+    await capture.applyConstraints({ width: { max: ask.width }, height: { max: ask.height }, frameRate: { max: ask.frameRate } });
+    this.ensureOpen();
+    const settings = capture.getSettings();
+    track.publishOptions = videoPublishOptions(settings, quality);
+    const sender = track.sender;
+    if (sender === undefined) return;
+    const { top, lower } = shareEncodings(settings, quality);
+    const parameters = sender.getParameters();
+    const layers = [...lower, top];
+    parameters.encodings = parameters.encodings.map((encoding, index) => {
+      const layer = encoding.rid === 'f' ? top : encoding.rid === 'h' ? (lower[1] ?? top) : encoding.rid === 'q' ? (lower[0] ?? top) : (layers[Math.min(index, layers.length - 1)] ?? top);
+      const scale = known(settings.width) ? Math.max(1, settings.width / layer.width) : 1;
+      return { ...encoding, maxBitrate: layer.maxBitrate, maxFramerate: layer.maxFramerate, scaleResolutionDownBy: scale };
+    });
+    await sender.setParameters(parameters);
+  }
+
+  async readShareStats(direction: ShareDirection): Promise<ShareSample | null> {
+    const track = direction === 'sent' ? this.screen.find((t) => t.source === Track.Source.ScreenShare) : this.shareVideo;
+    const report = await track?.getRTCStatsReport();
+    if (report === undefined) return null;
+    const stats: ShareStats[] = [];
+    report.forEach((stat) => {
+      stats.push(stat as ShareStats);
+    });
+    return shareSample(stats, direction);
   }
 
   // holdScreen makes a capture this connection's share, picked here or kept
@@ -1180,7 +1267,7 @@ class LiveKitAdapter implements Room {
       // Read at each publish, so a capture adopted from an earlier connection
       // is published at the size it has now.
       const settings = track.mediaStreamTrack.getSettings();
-      const options = track.source === Track.Source.ScreenShareAudio ? audioPublishOptions((settings.channelCount ?? 1) >= 2) : videoPublishOptions(settings);
+      const options = track.source === Track.Source.ScreenShareAudio ? audioPublishOptions((settings.channelCount ?? 1) >= 2) : videoPublishOptions(settings, this.shareQuality);
       await this.publishGranted(track, options, deadline);
       this.ensureOpen();
     }

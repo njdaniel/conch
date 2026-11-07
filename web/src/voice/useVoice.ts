@@ -325,6 +325,7 @@ export function useVoice({
       microphone: readMicrophone(),
       processing: processingChoices(),
       mode: modeChoice(),
+      shareQuality: api.readShareQuality(),
       outputSelection: canChooseOutput(),
       output: readOutput(),
       gate: { tail: readRelease() },
@@ -333,6 +334,7 @@ export function useVoice({
   }
   const client = clientRef.current;
   const state = useSyncExternalStore(client.subscribe, client.snapshot);
+  const keptShareQuality = useRef(state.shareQuality);
   const [talkKey, setKey] = useState(readKey);
   const [capturing, setCapturing] = useState(false);
   const [snapshot, setSnapshot] = useState<Snapshot>({ kind: 'loading' });
@@ -383,6 +385,14 @@ export function useVoice({
   useEffect(() => {
     writeCamera(state.cameraChoice);
   }, [state.cameraChoice]);
+
+  // The share quality is a local preference, not something sent to the room.
+  // Merely opening the page writes no default; only a new choice is stored.
+  useEffect(() => {
+    if (keptShareQuality.current === state.shareQuality) return;
+    keptShareQuality.current = state.shareQuality;
+    api.writeShareQuality(state.shareQuality);
+  }, [state.shareQuality]);
 
   // Every client of the page, for leaveVoice.
   useEffect(() => {
