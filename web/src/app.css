@@ -4936,3 +4936,67 @@ button.link {
 .reactions .emoji-picker, .reactor-page { flex-basis: 100%; max-width: 100%; min-width: 0; }
 .reactor-page { border: 1px solid currentColor; border-radius: .5rem; padding: .5rem; overflow-wrap: anywhere; }
 .reactor-page ul { max-height: 16rem; overflow-y: auto; }
+
+/* Preview as member (issue #1517). The top bar and the band under it are one
+   grid row; without a band the wrapper draws nothing of its own. */
+.top-group {
+  display: contents;
+}
+
+.lobby.has-band .top-group {
+  display: block;
+}
+
+.preview-band {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s2);
+  padding: var(--s2) var(--s4);
+  background: var(--accent-bg);
+  border-bottom: 1px solid var(--accent);
+  color: var(--text);
+}
+
+.preview-band p {
+  margin: 0;
+  flex: 1 1 14rem;
+  overflow-wrap: anywhere;
+}
+
+.preview-band .problem {
+  flex-basis: 100%;
+}
+
+@media (max-width: 699px) {
+  .preview-band button {
+    min-height: 44px;
+    min-width: 44px;
+  }
+}
+
+.preview-placeholder {
+  margin: var(--s4);
+  padding: var(--s4);
+  border: 1px dashed var(--border);
+  border-radius: var(--radius);
+  color: var(--muted, var(--text));
+}
+
+.preview-conversation {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.preview-controls ul,
+.preview-people ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.preview-controls li {
+  margin: var(--s1) 0;
+  overflow-wrap: anywhere;
+}

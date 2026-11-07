@@ -206,7 +206,8 @@ import {
   type UpdateProblemReportRequestV1,
 } from './schema/report';
 import type { Validator } from './schema/validate';
-import { call, fileQuery, operations, queryOf, type Call, type OperationId } from './platform/operations';
+import { call, fileQuery, operations, previewCall, queryOf, type Call, type OperationId } from './platform/operations';
+import { previewResponseV1, type PreviewResponseV1 } from './schema/preview';
 import { platform } from './platform';
 import type { FeedConnection, Held, Place } from './platform/types';
 import type { FeedSocket, OpenSocket, SocketEvents } from './state/feed';
@@ -1960,13 +1961,20 @@ const maxDirectoryPages = 50;
 // /v1/directory/members, issue #983), every page of it, in the server's order.
 // What it holds is what the server answered: operator fields only if the
 // server sent them, and the scope it says it applied.
-export async function directoryMembers(): Promise<ApiResult<ServerMembersResponseV1>> {
+export function directoryMembers(): Promise<ApiResult<ServerMembersResponseV1>> {
+  return readDirectoryMembers(undefined);
+}
+
+// as, when given, is the member whose view of the list is asked for (a
+// preview, issue #1517): every page carries the header on its own request.
+async function readDirectoryMembers(as: number | undefined): Promise<ApiResult<ServerMembersResponseV1>> {
   const members: ServerMemberV1[] = [];
   let scope: ServerMembersResponseV1['scope'];
   let after = 0;
   for (let page = 0; page < maxDirectoryPages; page++) {
     const query = `limit=${String(directoryLimit)}${after === 0 ? '' : `&after=${String(after)}`}`;
-    const result = await authed(call('directoryMembers', {}, query), serverMembersResponseV1);
+    const request = as === undefined ? call('directoryMembers', {}, query) : previewCall('directoryMembers', as, {}, query);
+    const result = await authed(request, serverMembersResponseV1);
     if (!result.ok) return result;
     members.push(...result.value.members);
     scope = result.value.scope;
@@ -1975,6 +1983,39 @@ export async function directoryMembers(): Promise<ApiResult<ServerMembersRespons
     after = next;
   }
   return { ok: true, value: { members, ...(scope === undefined ? {} : { scope }) } };
+}
+
+// The five reads of a member's view, each asking the server to answer as that
+// member (Preview as member, docs/design/permission-preview.md §4, issue
+// #1517). The administrator's own credential is sent; the member's view comes
+// back. Nothing here is a write, and the header rides only on the call that
+// is built for it (previewCall), never on authed or a module setting, so no
+// other request can pick it up.
+export interface PreviewReads {
+  readonly summary: () => Promise<ApiResult<PreviewResponseV1>>;
+  readonly channels: () => Promise<ApiResult<ChannelV0[]>>;
+  readonly channelDirectory: () => Promise<ApiResult<ChannelListingV1[]>>;
+  readonly directoryMembers: () => Promise<ApiResult<ServerMembersResponseV1>>;
+  readonly listMembers: (channel: string) => Promise<ApiResult<ChannelMemberV1[]>>;
+}
+
+export function previewAs(target: number): PreviewReads {
+  return {
+    summary: () => authed(previewCall('preview', target), previewResponseV1),
+    channels: async () => {
+      const result = await authed(previewCall('listChannels', target), listChannelsResponse);
+      return result.ok ? { ok: true, value: result.value.channels } : result;
+    },
+    channelDirectory: async () => {
+      const result = await authed(previewCall('channelDirectory', target), channelDirectoryResponseV1);
+      return result.ok ? { ok: true, value: result.value.channels } : result;
+    },
+    directoryMembers: () => readDirectoryMembers(target),
+    listMembers: async (channel) => {
+      const result = await authed(previewCall('listMembers', target, { channel }), listChannelMembersResponseV1);
+      return result.ok ? { ok: true, value: result.value.members } : result;
+    },
+  };
 }
 
 // renameChannel renames a channel by its id (issue #728): operators and this

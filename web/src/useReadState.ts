@@ -73,6 +73,7 @@ export function useReadState({
   onUnauthorized,
   onMissing,
   reload,
+  paused = false,
 }: {
   readonly signedIn: boolean;
   readonly channels: readonly ChannelV0[];
@@ -95,6 +96,10 @@ export function useReadState({
   // Set to a function that reads the counts again and replaces them (issue
   // #1027): the list was read again, so a channel may be new to it.
   readonly reload?: { current: (() => void) | null };
+  // The conversation is hidden behind a preview of someone else's view (issue
+  // #1517): no mark is made, and a mark waiting on its timer is dropped. The
+  // newest message is marked again, if it is on screen, when the preview ends.
+  readonly paused?: boolean;
 }): ReadonlyMap<string, number> {
   const [counts, setCounts] = useState<ReadonlyMap<number, number>>(new Map());
   const openId = idOf(channels, open);
@@ -111,8 +116,14 @@ export function useReadState({
   // Moved on at sign-out: an answer to a question asked before is dropped.
   const epoch = useRef(0);
   // What the callbacks below read, as of the last render.
-  const latest = useRef({ channels, open: openId, ready, reading, newest, connected: status === 'open', onUnauthorized, onMissing });
-  latest.current = { channels, open: openId, ready, reading, newest, connected: status === 'open', onUnauthorized, onMissing };
+  const latest = useRef({ channels, open: openId, ready, reading, newest, connected: status === 'open', onUnauthorized, onMissing, paused });
+  latest.current = { channels, open: openId, ready, reading, newest, connected: status === 'open', onUnauthorized, onMissing, paused };
+  useEffect(() => {
+    if (!paused) return;
+    for (const timer of marks.current.timers.values()) window.clearTimeout(timer);
+    marks.current.timers.clear();
+    marks.current.pending.clear();
+  }, [paused]);
 
   const setCount = useCallback((channel: number, count: number) => {
     setCounts((prev) => {
@@ -316,7 +327,7 @@ export function useReadState({
   // The mark moves to the newest message shown: when a channel is opened, when
   // a message arrives at the bottom, and when the newest comes back into view.
   useEffect(() => {
-    if (!signedIn || openId === null || !ready || !reading || off.current) return;
+    if (!signedIn || openId === null || !ready || !reading || off.current || paused) return;
     setCount(openId, 0);
     const m = marks.current;
     if (newestId <= (m.marked.get(openId) ?? 0)) return;
@@ -341,10 +352,10 @@ export function useReadState({
       window.setTimeout(() => {
         m.timers.delete(channel);
         const id = m.pending.get(channel) ?? 0;
-        if (!off.current && latest.current.connected && id > (m.marked.get(channel) ?? 0)) send(channel, id);
+        if (!off.current && !latest.current.paused && latest.current.connected && id > (m.marked.get(channel) ?? 0)) send(channel, id);
       }, last + markInterval - now),
     );
-  }, [signedIn, openId, ready, reading, newestId, status, send, setCount]);
+  }, [signedIn, openId, ready, reading, newestId, status, send, setCount, paused]);
 
   // The counts by name, as the list shows them, from the names it holds now.
   const byName = useMemo(() => {

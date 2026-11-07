@@ -65,6 +65,7 @@ import {
   inviteJoinersResponseV1,
   listInvitesResponseV2,
   permissionsResponseV1,
+  previewResponseV1,
   putPermissionsRequestV1,
   invitePreviewRequestV1,
   invitePreviewV1,
@@ -160,6 +161,11 @@ export interface Operation {
   readonly credentials?: readonly string[];
   // True for a WebSocket upgrade: GET, opened with a single-use ticket.
   readonly socket?: true;
+  // True for the five reads the server answers as a named member when a call
+  // carries previewAs (Conch-Preview-As, docs/design/permission-preview.md §4).
+  // The server refuses the header on every other route; the client refuses it
+  // first (previewCall).
+  readonly previewable?: true;
 }
 
 // op builds an entry with the renderer allowed unless said otherwise.
@@ -178,6 +184,10 @@ const check = <T>(validator: Validator<T>): Validator<never> => validator as unk
 export const operations = {
   health: op('GET', '/healthz', 'none', { response: check(health) }),
   whoami: op('GET', '/v1/whoami', 'bearer', { response: check(whoAmIResponseV1) }),
+  // Preview as member (issue #1007): the target's standing, read by an
+  // administrator who sends the header. The four reads below it that are
+  // marked previewable are the others the header may ride on.
+  preview: op('GET', '/v1/preview', 'bearer', { response: check(previewResponseV1), previewable: true }),
 
   // Sign-in and the credentials it gives. Every answer that holds a token is
   // kept out of the desktop renderer's hands.
@@ -307,17 +317,17 @@ export const operations = {
   }),
   createHook: op('POST', '/v1/hooks', 'bearer', { request: check(createHookRequest), response: check(createHookResponse), renderer: false, credentials: token }),
   renamePrincipal: op('PUT', '/v1/principals/{id}/name', 'bearer', { request: check(renamePrincipalRequestV1), response: check(renamePrincipalResponseV1) }),
-  listChannels: op('GET', '/v1/channels', 'bearer', { response: check(listChannelsResponse) }),
+  listChannels: op('GET', '/v1/channels', 'bearer', { response: check(listChannelsResponse), previewable: true }),
   createChannel: op('POST', '/v1/channels', 'bearer', { request: check(createChannelRequestV1), response: check(createChannelResponseV1) }),
   // The directory, self-join and leave (issues #982, #991), and the
   // community's member list (issue #983).
-  channelDirectory: op('GET', '/v1/directory/channels', 'bearer', { response: check(channelDirectoryResponseV1) }),
+  channelDirectory: op('GET', '/v1/directory/channels', 'bearer', { response: check(channelDirectoryResponseV1), previewable: true }),
   joinChannel: op('POST', '/v1/channels/{channel}/join', 'bearer', { response: check(joinChannelResponseV1) }),
   leaveChannel: op('POST', '/v1/channels/{channel}/leave', 'bearer'),
-  directoryMembers: op('GET', '/v1/directory/members', 'bearer', { response: check(serverMembersResponseV1) }),
+  directoryMembers: op('GET', '/v1/directory/members', 'bearer', { response: check(serverMembersResponseV1), previewable: true }),
   renameChannel: op('PUT', '/v1/channels/{id}/name', 'bearer', { request: check(renameChannelRequestV1), response: check(renameChannelResponseV1) }),
   channelSettings: op('PUT', '/v1/channels/{id}/settings', 'bearer', { request: check(channelSettingsRequestV1), response: check(channelSettingsResponseV1) }),
-  listMembers: op('GET', '/v1/channels/{channel}/members', 'bearer', { response: check(listChannelMembersResponseV1) }),
+  listMembers: op('GET', '/v1/channels/{channel}/members', 'bearer', { response: check(listChannelMembersResponseV1), previewable: true }),
   channelAuthors: op('GET', '/v1/channels/{channel}/authors', 'bearer', { response: check(channelAuthorsResponseV1) }),
   addMember: op('POST', '/v1/channels/{channel}/members', 'bearer', { request: check(addChannelMemberRequestV1), response: check(channelMemberV1) }),
   putMember: op('PUT', '/v1/channels/{channel}/members/{principal}', 'bearer', { request: check(putChannelMemberRequestV1) }),
@@ -406,10 +416,25 @@ export interface Call {
   readonly op: OperationId;
   readonly params?: Params;
   readonly query?: string;
+  // The principal whose view this read asks for (Conch-Preview-As). Set only
+  // by previewCall, on the five previewable reads; a transport sends it as the
+  // header on a GET and refuses it on anything else. There is no ambient
+  // setting: a call carries it or it does not.
+  readonly previewAs?: number;
 }
+
+// The header that asks a previewable read to answer as another member.
+export const previewHeader = 'Conch-Preview-As';
 
 export function call(id: OperationId, params?: Params, query?: string): Call {
   return { op: id, ...(params === undefined ? {} : { params }), ...(query === undefined ? {} : { query }) };
+}
+
+// previewCall is a call that asks a previewable read to answer as target. An
+// operation not marked previewable is a mistake in the caller, never sent.
+export function previewCall(id: OperationId, target: number, params?: Params, query?: string): Call {
+  if (operations[id].previewable !== true) throw new Error(`operation ${id} cannot be previewed`);
+  return { ...call(id, params, query), previewAs: target };
 }
 
 // queryOf encodes a query as the platform's URLSearchParams does.
