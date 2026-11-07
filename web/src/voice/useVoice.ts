@@ -593,8 +593,11 @@ export function useVoice({
     };
   }, [signedIn, capturing, talkKey, client]);
 
+  // The side buttons are taken over only in a voice session: out of voice
+  // they are the browser's Back and Forward, everywhere in Conch.
+  const inVoice = joined !== null;
   useEffect(() => {
-    if (!signedIn || capturing) return;
+    if (!signedIn || !inVoice || capturing) return;
     const button = mouseButtonForTalkKey(talkKey);
     if (button === null) return;
     const down = (e: MouseEvent) => {
@@ -619,7 +622,7 @@ export function useVoice({
       window.removeEventListener('mouseup', up);
       window.removeEventListener('auxclick', auxiliary);
     };
-  }, [signedIn, capturing, talkKey, client]);
+  }, [signedIn, inVoice, capturing, talkKey, client]);
 
   const setTalkKey = useCallback((code: string) => {
     writeKey(code);
