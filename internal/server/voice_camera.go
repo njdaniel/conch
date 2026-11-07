@@ -315,6 +315,9 @@ func (s *Server) handleVoiceCameraStop(w http.ResponseWriter, r *http.Request) {
 		if !ok {
 			return
 		}
+		// Agents do not moderate voice (issue #1546): one that holds
+		// manage_channels is refused as a member is.
+		standing = standing && caller.Kind == store.PrincipalHuman
 		ch, err := s.store.ChannelByName(ctx, r.PathValue("channel"))
 		if errors.Is(err, store.ErrNotFound) {
 			writeChannelNotFound(w)

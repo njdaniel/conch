@@ -403,6 +403,9 @@ type voicePoller struct {
 	cameraEnded map[voiceShareEndKey]schema.VoiceCameraEnded
 	// cameraClaims bounds camera claims per principal (voice_camera.go).
 	cameraClaims voiceCameraLimiter
+	// qualityChanges bounds a holder's quality changes per principal
+	// (voice_share.go, issue #1546).
+	qualityChanges agentRateLimiter
 	// retiring holds each retired room with a share claim still running in
 	// it when the room was forgotten (a first claim or a holder's claim
 	// again), with the claimer's principal id, until that claim returns
