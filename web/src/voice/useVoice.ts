@@ -12,7 +12,7 @@ import { Feed, type FeedStatus } from '../state/feed';
 import type { Camera } from './camera';
 import { VoiceClient, type Microphone, type ModeStore, type Output, type ProcessingStore, type VoiceState } from './connection';
 import { defaultTail, snapTail } from './gate';
-import { defaultTalkKey, isTyping } from './keys';
+import { defaultTalkKey, isTyping, mouseButtonForTalkKey } from './keys';
 import { parsePresence } from './presence';
 import { canChooseOutput, newLiveKitRoom } from './sdk';
 import { browserFeatures, type ShareFeatures } from './share';
@@ -573,13 +573,14 @@ export function useVoice({
   // The talk key, only while the tab has focus and focus is not in a field.
   useEffect(() => {
     if (!signedIn || capturing) return;
+    const mouseButton = mouseButtonForTalkKey(talkKey);
     const down = (e: KeyboardEvent) => {
-      if (e.code !== talkKey || e.repeat || e.ctrlKey || e.altKey || e.metaKey || isTyping(e.target)) return;
+      if (mouseButton !== null || e.code !== talkKey || e.repeat || e.ctrlKey || e.altKey || e.metaKey || isTyping(e.target)) return;
       e.preventDefault();
       client.press();
     };
     const up = (e: KeyboardEvent) => {
-      if (e.code === talkKey) client.release();
+      if (mouseButton === null && e.code === talkKey) client.release();
     };
     window.addEventListener('keydown', down);
     window.addEventListener('keyup', up);
@@ -589,6 +590,34 @@ export function useVoice({
       client.release();
       window.removeEventListener('keydown', down);
       window.removeEventListener('keyup', up);
+    };
+  }, [signedIn, capturing, talkKey, client]);
+
+  useEffect(() => {
+    if (!signedIn || capturing) return;
+    const button = mouseButtonForTalkKey(talkKey);
+    if (button === null) return;
+    const down = (e: MouseEvent) => {
+      if (e.button !== button || isTyping(e.target)) return;
+      e.preventDefault();
+      client.press();
+    };
+    const up = (e: MouseEvent) => {
+      if (e.button !== button) return;
+      e.preventDefault();
+      client.release();
+    };
+    const auxiliary = (e: MouseEvent) => {
+      if (e.button === button) e.preventDefault();
+    };
+    window.addEventListener('mousedown', down);
+    window.addEventListener('mouseup', up);
+    window.addEventListener('auxclick', auxiliary);
+    return () => {
+      client.release();
+      window.removeEventListener('mousedown', down);
+      window.removeEventListener('mouseup', up);
+      window.removeEventListener('auxclick', auxiliary);
     };
   }, [signedIn, capturing, talkKey, client]);
 

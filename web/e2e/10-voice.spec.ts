@@ -246,6 +246,41 @@ test.describe('with LiveKit', () => {
     }
   });
 
+  test('Mouse 4 is captured and held to talk without navigating back', async ({ browser }) => {
+    const a = await person(browser, 'alice');
+    try {
+      const voice = voiceRegion(a.page);
+      const cdp = await a.context.newCDPSession(a.page);
+      const mouse = async (type: 'mousePressed' | 'mouseReleased') => {
+        await cdp.send('Input.dispatchMouseEvent', { type, button: 'back', buttons: type === 'mousePressed' ? 8 : 0, x: 10, y: 10, clickCount: 1 });
+      };
+      await voice.getByRole('button', { name: 'Join voice' }).click();
+      await expect(voice).toContainText(/Connected in #voice-room/, { timeout: 30_000 });
+      await chooseMicrophone(voice, 'push to talk');
+      await voice.getByRole('button', { name: 'Voice options' }).click();
+      await voice.getByRole('button', { name: 'Change talk key' }).click();
+      await expect(voice.getByRole('button', { name: 'Press a key or Mouse 4/5 (Escape cancels)' })).toBeVisible();
+      const before = a.page.url();
+      await mouse('mousePressed');
+      await mouse('mouseReleased');
+      await expect(voice).toContainText('Talk key: Mouse 4.');
+
+      await a.page.getByRole('heading', { name: 'Conch' }).click();
+      await mouse('mousePressed');
+      await expect(voice).toContainText('Transmitting');
+      expect(a.page.url()).toBe(before);
+      await mouse('mouseReleased');
+      await expect(voice).not.toContainText('Transmitting');
+      expect(a.page.url()).toBe(before);
+
+      await voice.getByRole('button', { name: 'Leave voice' }).click();
+      await expect(voice).toContainText('Not in voice', { timeout: 10_000 });
+      await expectClean(a);
+    } finally {
+      await a.context.close();
+    }
+  });
+
   // Issue #595 (F25): Chromium logged every answered transmit report as a
   // failed request (net::ERR_ABORTED), its 204's body left unread. Three
   // presses of Hold to talk and a leave: each report is answered and audited,

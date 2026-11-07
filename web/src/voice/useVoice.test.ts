@@ -2,7 +2,7 @@
 // #585), from one socket whether or not the page is in voice, with an honest
 // state when it cannot be read. The presence socket and read are fakes the
 // test drives, on a fake clock. No SDK, no network.
-import { act, renderHook } from '@testing-library/react';
+import { act, cleanup, renderHook } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ApiResult } from '../api';
 import type { ChannelV0 } from '../schema/channel';
@@ -145,10 +145,23 @@ beforeEach(() => {
   fake.kept = [];
 });
 afterEach(() => {
+  cleanup();
   vi.useRealTimers();
 });
 
 describe('the talk key', () => {
+  beforeEach(() => {
+    window.sessionStorage.clear();
+  });
+
+  const fireMouse = (type: string, button: number): boolean => {
+    let allowed = true;
+    act(() => {
+      allowed = window.dispatchEvent(new MouseEvent(type, { button, cancelable: true }));
+    });
+    return allowed;
+  };
+
   it('is let go when it changes while held', () => {
     const { result } = hook({ channel: null });
     const client = result.current.client;
@@ -171,6 +184,89 @@ describe('the talk key', () => {
     });
     expect(press).toHaveBeenCalledTimes(2);
     expect(release).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    [3, 'Mouse4'],
+    [4, 'Mouse5'],
+  ])('presses and releases on mouse button %d', (button, key) => {
+    const { result } = hook({ channel: null });
+    act(() => {
+      result.current.setTalkKey(key);
+    });
+    const press = vi.spyOn(result.current.client, 'press');
+    const release = vi.spyOn(result.current.client, 'release');
+    expect(fireMouse('mousedown', button)).toBe(false);
+    expect(press).toHaveBeenCalledTimes(1);
+    expect(release).not.toHaveBeenCalled();
+    expect(fireMouse('mouseup', button)).toBe(false);
+    expect(release).toHaveBeenCalledTimes(1);
+  });
+
+  it('lets go of a held mouse key on blur', () => {
+    const { result } = hook({ channel: null });
+    act(() => {
+      result.current.setTalkKey('Mouse4');
+    });
+    const lost = vi.spyOn(result.current.client, 'lost');
+    fireMouse('mousedown', 3);
+    act(() => {
+      window.dispatchEvent(new Event('blur'));
+    });
+    expect(lost).toHaveBeenCalledTimes(1);
+  });
+
+  it('ignores every mouse button but the chosen one', () => {
+    const { result } = hook({ channel: null });
+    act(() => {
+      result.current.setTalkKey('Mouse5');
+    });
+    const press = vi.spyOn(result.current.client, 'press');
+    const release = vi.spyOn(result.current.client, 'release');
+    for (const button of [0, 1, 2, 3]) {
+      expect(fireMouse('mousedown', button)).toBe(true);
+      expect(fireMouse('mouseup', button)).toBe(true);
+    }
+    expect(press).not.toHaveBeenCalled();
+    expect(release).not.toHaveBeenCalled();
+  });
+
+  it('prevents navigation only for the chosen mouse button', () => {
+    const { result } = hook({ channel: null });
+    act(() => {
+      result.current.setTalkKey('Mouse4');
+    });
+    for (const type of ['mousedown', 'mouseup', 'auxclick']) {
+      expect(fireMouse(type, 3)).toBe(false);
+      expect(fireMouse(type, 4)).toBe(true);
+    }
+  });
+
+  it('keeps a stored keyboard key working unchanged', () => {
+    window.sessionStorage.setItem('conch.web.voice.key', 'KeyV');
+    const { result } = hook({ channel: null });
+    const press = vi.spyOn(result.current.client, 'press');
+    const release = vi.spyOn(result.current.client, 'release');
+    act(() => {
+      window.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyV' }));
+      window.dispatchEvent(new KeyboardEvent('keyup', { code: 'KeyV' }));
+    });
+    expect(press).toHaveBeenCalledTimes(1);
+    expect(release).toHaveBeenCalledTimes(1);
+    expect(fireMouse('mousedown', 3)).toBe(true);
+    expect(press).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not treat a mouse binding as a keyboard code', () => {
+    const { result } = hook({ channel: null });
+    act(() => {
+      result.current.setTalkKey('Mouse4');
+    });
+    const press = vi.spyOn(result.current.client, 'press');
+    act(() => {
+      window.dispatchEvent(new KeyboardEvent('keydown', { code: 'Mouse4' }));
+    });
+    expect(press).not.toHaveBeenCalled();
   });
 });
 
