@@ -1,5 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
 import { ChannelList } from './ChannelList';
+import { ChannelNav } from './ChannelNav';
+import { GroupsPanel } from './ChannelGroups';
+import { visualOrder } from './arrangement';
+import { useArrangement } from './useArrangement';
 import type { SettingsChange } from './ChannelSettingsAsk';
 import type { InVoice } from './voice/useOccupancy';
 import { headingId } from './Conversation';
@@ -85,6 +89,8 @@ export function Lobby({
   signIns,
   report,
   onOpen,
+  onBrowse,
+  directoryTick = 0,
   onRetry,
   onSignOut,
   onSignOutEverywhere,
@@ -148,6 +154,11 @@ export function Lobby({
   // again where the page says it cannot reach the server.
   readonly report?: ReactNode;
   readonly onOpen: (channel: string) => void;
+  // The quick switcher's "Join" rows: show that public channel's directory row.
+  // Absent for a viewer with no directory.
+  readonly onBrowse?: (channel: string) => void;
+  // Changes when the directory or the viewer's permissions did (issue #1492).
+  readonly directoryTick?: number;
   readonly onRetry: () => void;
   readonly onSignOut: () => void;
   // Sign out everywhere (issue #439), and why it last failed, if it did.
@@ -185,6 +196,9 @@ export function Lobby({
   // a time. All of them stay mounted, so a switch only changes what is shown:
   // the draft, the log's place and the call are untouched.
   const phone = usePhone();
+  // The person's own favorites, groups and order (issue #1493).
+  const arranged = useArrangement(origin, me, channels.channels, channels.loaded);
+  const inVisualOrder = useMemo(() => visualOrder(arranged.arrangement, channels.channels), [arranged.arrangement, channels.channels]);
   useAppHeight(phone);
   // Until a view is chosen: Chat once a channel is open, Channels while the
   // list is loading, failed to load, or has nothing open to chat in.
@@ -393,11 +407,38 @@ export function Lobby({
           </div>
         </header>
         <div className={panelOpen ? 'areas' : 'areas side-closed'} inert={settingsOpen || asking}>
-          <nav aria-label="Channels" className="channels">
+          {/* The switcher's entry is above the Channels navigation, not in it: that holds channel controls only. */}
+          <div className="channels">
+            {channels.loaded ? (
+            <ChannelNav
+              channels={inVisualOrder}
+              unread={unread}
+              selected={channels.selected}
+              me={me}
+              refresh={directoryTick}
+              onOpen={(name) => {
+                onOpen(name);
+                if (phone) {
+                  toHeading.current = true;
+                  setView('chat');
+                }
+              }}
+              {...(onBrowse === undefined
+                ? {}
+                : {
+                    onBrowse: (name: string) => {
+                      onBrowse(name);
+                      if (phone) setView('channels');
+                    },
+                  })}
+            />
+            ) : null}
+          <nav aria-label="Channels">
             <h2>Channels</h2>
             {channels.loaded ? (
               <>
                 <ChannelList
+                  {...(visit === undefined ? { arrangement: arranged } : {})}
                   channels={channels.channels}
                   selected={channels.selected}
                   unread={unread}
@@ -443,6 +484,8 @@ export function Lobby({
               <p className="empty">Loading channels…</p>
             )}
           </nav>
+            {channels.loaded && visit === undefined && channels.channels.length > 0 ? <GroupsPanel controls={arranged} /> : null}
+          </div>
           <main className="centre">
             <div ref={setStage} className="stage" />
             <section ref={conversationEl} aria-label="Conversation" className="conversation">

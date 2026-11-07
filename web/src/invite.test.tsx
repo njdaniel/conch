@@ -542,7 +542,7 @@ describe('member links', () => {
     // The channel row's ⋯ is only Leave, not Invite (issues #1135, #1095).
     await screen.findByRole('button', { name: 'general' });
     fireEvent.click(screen.getByRole('button', { name: 'Actions for general' }));
-    expect(screen.getAllByRole('menuitem').map((item) => item.textContent)).toEqual(['Leave channel']);
+    expect(screen.getAllByRole('menuitem').map((item) => item.textContent)).toEqual(['Leave channel', 'Favorite']);
   });
 
   // The form never shows more than the server last answered: a right turned

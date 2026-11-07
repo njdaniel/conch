@@ -13,12 +13,13 @@ import { AdminActionCard } from './AdminActionCard';
 import * as api from './api';
 import type { ApprovalV1 } from './schema/approval';
 import { adminActionV1, adminActionV1PayloadSchema, type AdminActionV1 } from './schema/admin';
+import { fromServer } from './schema/validate';
 
 const everyMs = 4000;
 
 function adminActionOf(approval: ApprovalV1): AdminActionV1 | null {
   const payload = approval.payload;
-  if (payload?.schema !== adminActionV1PayloadSchema || adminActionV1(payload.data).length > 0) return null;
+  if (payload?.schema !== adminActionV1PayloadSchema || fromServer(adminActionV1)(payload.data).length > 0) return null;
   return payload.data as AdminActionV1;
 }
 

@@ -503,6 +503,8 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
   const [searchOpen, setSearchOpen] = useState(false);
   // Asks from the first-run panel for the New channel form (issue #1032).
   const [createAsks, setCreateAsks] = useState(0);
+  // The quick switcher asked to show a public channel's directory row (issue #1492).
+  const [browseAsk, setBrowseAsk] = useState<{ readonly n: number; readonly name: string } | undefined>(undefined);
   // A channel's ⋯ menu (issue #1135) or Add a person asked for the invite
   // panel: a count, so asking twice opens it twice.
   const [inviteAsk, setInviteAsk] = useState<{ readonly n: number } | undefined>(undefined);
@@ -1640,6 +1642,14 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
               })}
           channels={channels}
           unread={unread}
+          directoryTick={directory.tick + permissionsTick}
+          {...(auth.principal.kind === 'human' && visit === null
+            ? {
+                onBrowse: (name: string) => {
+                  setBrowseAsk((ask) => ({ n: (ask?.n ?? 0) + 1, name }));
+                },
+              }
+            : {})}
           occupancy={occupancy}
           voiceNames={voiceNames}
           notificationCenter={<NotificationCenter alerts={notifications.alerts} onOpen={notifications.openAlert} onClear={notifications.clearAlerts} />}
@@ -1835,6 +1845,7 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
                   onLeft={leftChannel}
                   onOpen={onOpen}
                   onUnauthorized={onUnauthorized}
+                  {...(browseAsk === undefined ? {} : { reveal: browseAsk })}
                 />
                 {canDo(auth.principal, 'create_public_channels') || canDo(auth.principal, 'create_private_channels') ? (
                   <CreateChannel
