@@ -1456,6 +1456,15 @@ func TestVoiceStatusWatch(t *testing.T) {
 			wantErr: "no longer a member",
 		},
 		{
+			name: "removed from voice only is not a lost channel",
+			socket: func(ctx context.Context, conn *websocket.Conn) {
+				_ = wsjson.Write(ctx, conn, voiceDoc(true, true, three))
+				_ = conn.Close(websocket.StatusPolicyViolation, string(schema.SocketCloseVoiceRemoved))
+			},
+			wantOut: stamp + "3 - quiet " + joined + "\n",
+			wantErr: "you were removed from voice; you are still a member of the channel and may join again",
+		},
+		{
 			name: "an invalid frame ends it with an error",
 			socket: func(ctx context.Context, conn *websocket.Conn) {
 				_ = wsjson.Write(ctx, conn, voiceDoc(true, true, three))

@@ -505,6 +505,243 @@ func TestModelInitChannelSource(t *testing.T) {
 	})
 }
 
+type channelListAnswer struct {
+	channels []schema.ChannelV0
+	err      error
+	wait     <-chan struct{}
+}
+
+type channelRefreshAPI struct {
+	stubAPI
+	mu      sync.Mutex
+	answers []channelListAnswer
+	calls   int
+	started chan int
+}
+
+func (a *channelRefreshAPI) ListChannels(context.Context) (schema.ListChannelsResponse, error) {
+	a.mu.Lock()
+	a.calls++
+	call := a.calls
+	answer := channelListAnswer{err: errors.New("unexpected channel list read")}
+	if call <= len(a.answers) {
+		answer = a.answers[call-1]
+	}
+	a.mu.Unlock()
+	if a.started != nil {
+		a.started <- call
+	}
+	if answer.wait != nil {
+		<-answer.wait
+	}
+	return schema.ListChannelsResponse{Channels: answer.channels}, answer.err
+}
+
+func (a *channelRefreshAPI) listCalls() int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.calls
+}
+
+type channelRefreshTestEvent struct{}
+
+func runChannelRefreshCommand(m Model, cmd tea.Cmd) []tea.Msg {
+	if cmd == nil {
+		return nil
+	}
+	// The frame's other command is the next events-channel read. Give it one
+	// harmless message so the test can execute the batch synchronously.
+	m.events <- channelRefreshTestEvent{}
+	return runCmd(cmd)
+}
+
+func channelRefreshResult(t *testing.T, msgs []tea.Msg) (channelsLoaded, bool) {
+	t.Helper()
+	for _, msg := range msgs {
+		if loaded, ok := msg.(channelsLoaded); ok {
+			return loaded, true
+		}
+	}
+	return channelsLoaded{}, false
+}
+
+func channelRefreshModel(t *testing.T, api API) Model {
+	t.Helper()
+	m := NewModel(context.Background(), api, 7, nil)
+	m, _ = update(m, m.loadChannels()())
+	if a, ok := api.(*channelRefreshAPI); ok && a.started != nil {
+		<-a.started // the initial load, not a refresh
+	}
+	m.selected = 1 // ops, so a refresh must not jump back to general.
+	m.ev.gen = 4
+	m.ev.state = eventsLive
+	m.setStatus(modeChannels, "ready")
+	return m
+}
+
+func TestChannelsChangedRefreshesListAndSelection(t *testing.T) {
+	initial := []schema.ChannelV0{{ID: 1, Name: "general"}, {ID: 2, Name: "ops"}, {ID: 3, Name: "dev"}}
+	tests := []struct {
+		name        string
+		next        []schema.ChannelV0
+		err         error
+		genDelta    int
+		wantRead    bool
+		wantList    string
+		wantCurrent string
+		wantStatus  string
+	}{
+		{
+			name: "channel gained", next: []schema.ChannelV0{{ID: 1, Name: "general"}, {ID: 2, Name: "ops"}, {ID: 3, Name: "dev"}, {ID: 4, Name: "help"}},
+			wantRead: true, wantList: "general,ops,dev,help", wantCurrent: "ops", wantStatus: "ready",
+		},
+		{
+			name: "selected channel lost", next: []schema.ChannelV0{{ID: 1, Name: "general"}, {ID: 3, Name: "dev"}},
+			wantRead: true, wantList: "general,dev", wantCurrent: "general", wantStatus: "#ops is no longer available to you.",
+		},
+		{
+			name: "selected channel renamed", next: []schema.ChannelV0{{ID: 1, Name: "general"}, {ID: 2, Name: "staff"}, {ID: 3, Name: "dev"}},
+			wantRead: true, wantList: "general,staff,dev", wantCurrent: "staff", wantStatus: "ready",
+		},
+		{
+			name: "frame from superseded socket", next: []schema.ChannelV0{{ID: 1, Name: "general"}}, genDelta: -1,
+			wantList: "general,ops,dev", wantCurrent: "ops", wantStatus: "ready",
+		},
+		{
+			name: "failed re-read", err: errors.New("boom"), wantRead: true,
+			wantList: "general,ops,dev", wantCurrent: "ops", wantStatus: "cannot read the channel list",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			api := &channelRefreshAPI{answers: []channelListAnswer{{channels: initial}, {channels: tt.next, err: tt.err}}}
+			m := channelRefreshModel(t, api)
+			m, cmd := update(m, eventsChannelsReceived{gen: m.ev.gen + tt.genDelta})
+			loaded, ok := channelRefreshResult(t, runChannelRefreshCommand(m, cmd))
+			if ok != tt.wantRead {
+				t.Fatalf("channel re-read returned a result = %v, want %v (command messages %#v)", ok, tt.wantRead, runCmd(cmd))
+			}
+			if ok {
+				m, _ = update(m, loaded)
+			}
+			if got := strings.Join(m.channels, ","); got != tt.wantList {
+				t.Errorf("channels = %q, want %q", got, tt.wantList)
+			}
+			if m.current() != tt.wantCurrent {
+				t.Errorf("selected channel = %q, want %q", m.current(), tt.wantCurrent)
+			}
+			if m.status() != tt.wantStatus {
+				t.Errorf("status = %q, want %q", m.status(), tt.wantStatus)
+			}
+			wantCalls := 1
+			if tt.wantRead {
+				wantCalls++
+			}
+			if api.listCalls() != wantCalls {
+				t.Errorf("ListChannels calls = %d, want %d", api.listCalls(), wantCalls)
+			}
+			if tt.err != nil && m.channelsErr != nil {
+				t.Errorf("a failed refresh replaced the usable list's error state: %v", m.channelsErr)
+			}
+		})
+	}
+}
+
+func TestChannelsChangedBurstCoalesces(t *testing.T) {
+	release := make(chan struct{})
+	api := &channelRefreshAPI{
+		answers: []channelListAnswer{
+			{channels: []schema.ChannelV0{{ID: 1, Name: "general"}, {ID: 2, Name: "ops"}}},
+			{channels: []schema.ChannelV0{{ID: 1, Name: "general"}, {ID: 2, Name: "ops"}}, wait: release},
+			{channels: []schema.ChannelV0{{ID: 1, Name: "general"}, {ID: 2, Name: "ops"}, {ID: 3, Name: "dev"}}},
+		},
+		started: make(chan int, 4),
+	}
+	m := channelRefreshModel(t, api)
+	m, cmd := update(m, eventsChannelsReceived{gen: m.ev.gen})
+	first := make(chan []tea.Msg, 1)
+	go func() { first <- runChannelRefreshCommand(m, cmd) }()
+	if call := <-api.started; call != 2 {
+		t.Fatalf("first started call = %d, want the refresh (2)", call)
+	}
+	for i := 0; i < 3; i++ {
+		m, cmd = update(m, eventsChannelsReceived{gen: m.ev.gen})
+		runChannelRefreshCommand(m, cmd)
+	}
+	if got := api.listCalls(); got != 2 {
+		t.Fatalf("ListChannels calls during blocked read = %d, want 2 (initial and one refresh)", got)
+	}
+	close(release)
+	loaded, ok := channelRefreshResult(t, <-first)
+	if !ok {
+		t.Fatal("the first refresh returned no channelsLoaded")
+	}
+	m, cmd = update(m, loaded)
+	loaded, ok = channelRefreshResult(t, runCmd(cmd))
+	if !ok {
+		t.Fatal("the coalesced refresh returned no channelsLoaded")
+	}
+	m, _ = update(m, loaded)
+	if got := api.listCalls(); got != 3 {
+		t.Errorf("ListChannels calls = %d, want exactly one follow-up after the burst (3 total)", got)
+	}
+	if got := strings.Join(m.channels, ","); got != "general,ops,dev" {
+		t.Errorf("channels = %q, want the final answer", got)
+	}
+}
+
+func TestChannelsReconnectRefreshesList(t *testing.T) {
+	tests := []struct {
+		name     string
+		state    eventsState
+		genDelta int
+		wantRead bool
+	}{
+		{name: "reconnect", state: eventsDown, wantRead: true},
+		{name: "first roster", state: eventsConnecting},
+		{name: "already live", state: eventsLive},
+		{name: "superseded socket", state: eventsDown, genDelta: -1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			api := &channelRefreshAPI{answers: []channelListAnswer{
+				{channels: []schema.ChannelV0{{ID: 1, Name: "general"}, {ID: 2, Name: "ops"}}},
+				{channels: []schema.ChannelV0{{ID: 1, Name: "general"}, {ID: 2, Name: "ops"}, {ID: 3, Name: "dev"}}},
+			}}
+			m := channelRefreshModel(t, api)
+			m.ev.state = tt.state
+			m, cmd := update(m, eventsRosterReceived{gen: m.ev.gen + tt.genDelta})
+			loaded, ok := channelRefreshResult(t, runChannelRefreshCommand(m, cmd))
+			if ok != tt.wantRead {
+				t.Fatalf("reconnect read = %v, want %v", ok, tt.wantRead)
+			}
+			if ok {
+				m, _ = update(m, loaded)
+				if got := strings.Join(m.channels, ","); got != "general,ops,dev" {
+					t.Errorf("channels = %q, want the refreshed list", got)
+				}
+			}
+		})
+	}
+}
+
+func TestChannelsChangedLossStatusIsSanitized(t *testing.T) {
+	api := &channelRefreshAPI{answers: []channelListAnswer{
+		{channels: []schema.ChannelV0{{ID: 1, Name: "general"}, {ID: 2, Name: "o\x1b[31mps"}}},
+		{channels: []schema.ChannelV0{{ID: 1, Name: "general"}}},
+	}}
+	m := channelRefreshModel(t, api)
+	m, cmd := update(m, eventsChannelsReceived{gen: m.ev.gen})
+	loaded, ok := channelRefreshResult(t, runChannelRefreshCommand(m, cmd))
+	if !ok {
+		t.Fatal("no channel list re-read")
+	}
+	m, _ = update(m, loaded)
+	if strings.Contains(m.status(), "\x1b") || !strings.Contains(m.status(), "is no longer available to you.") {
+		t.Errorf("status = %q, want sanitized loss text", m.status())
+	}
+}
+
 func TestModelEmptyChannelListIsSafe(t *testing.T) {
 	keys := []tea.KeyMsg{
 		{Type: tea.KeyUp}, {Type: tea.KeyDown}, {Type: tea.KeyTab}, {Type: tea.KeyTab},
@@ -2866,5 +3103,297 @@ func TestViewOnlyApprovalCannotBeDecided(t *testing.T) {
 	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	if next.(Model).mode != modeDecision {
 		t.Errorf("enter on a decidable approval: mode %v, want decision", next.(Model).mode)
+	}
+}
+
+const archivedChannelLine = "This channel is archived."
+
+func loadChannelsForTest(m Model, channels []schema.ChannelV0) Model {
+	m.loadingChannels = true
+	m, _ = update(m, channelsLoaded{channels: channels})
+	return m
+}
+
+func TestArchivedChannelLifecycle(t *testing.T) {
+	stamp := time.Date(2026, time.November, 7, 12, 0, 0, 0, time.UTC)
+	live := func() []schema.ChannelV0 {
+		return []schema.ChannelV0{{ID: 1, Name: "general"}, {ID: 2, Name: "ops"}, {ID: 3, Name: "dev"}}
+	}
+	archived := live()
+	archived[1].ArchivedAt = &stamp
+	tests := []struct {
+		name            string
+		initial         []schema.ChannelV0
+		refused         bool
+		restore         bool
+		wantList        string
+		wantArchived    bool
+		wantArchivedTag bool
+	}{
+		{name: "live", initial: live(), wantList: "general,ops,dev"},
+		{name: "archived", initial: archived, wantList: "general,dev,ops", wantArchived: true, wantArchivedTag: true},
+		{name: "archived while open (409)", initial: live(), refused: true, wantList: "general,dev,ops", wantArchived: true, wantArchivedTag: true},
+		{name: "restored", initial: archived, restore: true, wantList: "general,ops,dev"},
+		{name: "older server", initial: live(), wantList: "general,ops,dev"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			api := &channelRefreshAPI{answers: []channelListAnswer{{channels: tt.initial}, {channels: live()}}}
+			m := NewModel(context.Background(), api, 7, nil)
+			m, _ = update(m, m.loadChannels()())
+			for i, name := range m.channels {
+				if name == "ops" {
+					m.selected = i
+				}
+			}
+			m.ev.gen, m.ev.state = 4, eventsLive
+			switch {
+			case tt.refused:
+				m.input, m.sending = "draft", true
+				m, _ = update(m, messageSent{channel: "ops", raw: "draft", err: &cli.ServerError{Status: 409, Code: schema.ErrorCodeChannelArchived, Message: "SERVER WORDS"}})
+				if m.status() != archivedChannelLine || m.input != "draft" || m.sending {
+					t.Errorf("refusal status/input/sending = %q/%q/%v", m.status(), m.input, m.sending)
+				}
+			case tt.restore:
+				m.setStatus(modeChannels, archivedChannelLine)
+				m.rd.status, m.rd.refusal = archivedChannelLine, archivedChannelLine
+				var cmd tea.Cmd
+				m, cmd = update(m, eventsChannelsReceived{gen: m.ev.gen})
+				loaded, ok := channelRefreshResult(t, runChannelRefreshCommand(m, cmd))
+				if !ok {
+					t.Fatal("channels_changed did not re-read the channel list")
+				}
+				m, _ = update(m, loaded)
+			}
+			if !tt.wantArchived && (strings.Contains(m.status(), archivedChannelLine) || strings.Contains(m.rd.status, archivedChannelLine)) {
+				t.Errorf("restored channel still says archived: status %q, run status %q", m.status(), m.rd.status)
+			}
+			if got := strings.Join(m.channels, ","); got != tt.wantList {
+				t.Errorf("channels = %q, want %q", got, tt.wantList)
+			}
+			if m.current() != "ops" || m.channelIDs[m.current()] != 2 {
+				t.Errorf("selection = %q (id %d), want ops (id 2)", m.current(), m.channelIDs[m.current()])
+			}
+			if got := strings.Contains(stripANSI(m.inputRow(100)), archivedChannelLine); got != tt.wantArchived {
+				t.Errorf("archived input = %v, want %v: %q", got, tt.wantArchived, m.inputRow(100))
+			}
+			lines := stripANSI(strings.Join(m.channelLines(100), "\n"))
+			if got := strings.Contains(lines, "ops archived"); got != tt.wantArchivedTag {
+				t.Errorf("archived tag = %v, want %v: %q", got, tt.wantArchivedTag, lines)
+			}
+		})
+	}
+}
+
+func TestChannelArchivedRequiresTypedError(t *testing.T) {
+	m := NewModel(context.Background(), stubAPI{}, 7, []string{"general"})
+	m.input = "draft"
+	m, _ = update(m, messageSent{channel: "general", raw: "draft", err: errors.New("cli: server error channel_archived: SERVER WORDS")})
+	if !strings.Contains(m.status(), "channel_archived") || strings.Contains(stripANSI(m.inputRow(80)), archivedChannelLine) {
+		t.Errorf("message text was treated as an error code: status %q, input %q", m.status(), m.inputRow(80))
+	}
+}
+
+func TestArchivedChannelWriteKeys(t *testing.T) {
+	stamp := time.Date(2026, time.November, 7, 12, 0, 0, 0, time.UTC)
+	channels := []schema.ChannelV0{{ID: 1, Name: "general", ArchivedAt: &stamp}, {ID: 2, Name: "ops"}}
+	for _, kind := range []string{"send", "reply", "react"} {
+		t.Run(kind, func(t *testing.T) {
+			var m Model
+			var key tea.KeyMsg
+			var reaction *reactionStub
+			var run *runAPI
+			switch kind {
+			case "reply":
+				run = newRunAPI(testRun(41, schema.RunStateRunning))
+				m = openCurrent(runModel(t, run, schema.InterventionKindMessage))
+				key = keyMsg("m")
+			default:
+				m, reaction = reactionModelForTest()
+				if kind == "send" {
+					m.input = "hello"
+					key = keyMsg("enter")
+				} else {
+					key = tea.KeyMsg{Type: tea.KeyCtrlR}
+				}
+			}
+			m = loadChannelsForTest(m, channels)
+			m, cmd := update(m, key)
+			if cmd != nil {
+				t.Errorf("archived %s produced a command", kind)
+			}
+			if got := strings.Count(m.status(), archivedChannelLine); got != 1 {
+				t.Errorf("status = %q, want the archive line once", m.status())
+			}
+			switch kind {
+			case "send":
+				if reaction.postedBody != "" || m.input != "hello" {
+					t.Errorf("send body/input = %q/%q", reaction.postedBody, m.input)
+				}
+			case "react":
+				if reaction.writeID != 0 || m.input != "" {
+					t.Errorf("reaction write/input = %d/%q", reaction.writeID, m.input)
+				}
+			case "reply":
+				if len(run.createdRequests()) != 0 || m.rd.input != inputNone {
+					t.Errorf("reply requests/input = %+v/%v", run.createdRequests(), m.rd.input)
+				}
+			}
+		})
+	}
+}
+
+func TestChannelArchivedAnswersForWrites(t *testing.T) {
+	for _, kind := range []string{"send", "reply", "react"} {
+		t.Run(kind, func(t *testing.T) {
+			m := NewModel(context.Background(), stubAPI{}, 7, []string{"general", "ops"})
+			m.rd.runID, m.rd.sending = 41, true
+			m.mode = modeRun
+			refusal := &cli.ServerError{Status: 409, Code: schema.ErrorCodeChannelArchived, Message: "SERVER WORDS"}
+			var msg tea.Msg
+			switch kind {
+			case "send":
+				msg = messageSent{channel: "general", err: refusal}
+			case "reply":
+				msg = interventionSent{runID: 41, channel: "general", err: refusal}
+			case "react":
+				m.react.writing = true
+				msg = reactionWritten{channel: "general", err: refusal}
+			}
+			m, _ = update(m, msg)
+			if !strings.Contains(m.status(), archivedChannelLine) || strings.Contains(m.status(), "SERVER WORDS") {
+				t.Errorf("status = %q, want only the archive line", m.status())
+			}
+			m.mode = modeChannels
+			if !strings.Contains(stripANSI(m.inputRow(80)), archivedChannelLine) {
+				t.Errorf("channel did not become read-only: %q", m.inputRow(80))
+			}
+		})
+	}
+}
+
+func TestLateInterventionArchiveRefusalUsesOrigin(t *testing.T) {
+	refusal := &cli.ServerError{Status: 409, Code: schema.ErrorCodeChannelArchived}
+	tests := []struct {
+		name   string
+		before func(Model) Model
+	}{
+		{name: "run detail closed", before: func(m Model) Model { return m.closeRun("") }},
+		{name: "selection changed", before: func(m Model) Model {
+			m.selected = 1
+			return m
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			api := newRunAPI(testRun(41, schema.RunStateRunning))
+			api.createErr = refusal
+			m := openCurrent(runModel(t, api, schema.InterventionKindPause))
+			m = loadChannelsForTest(m, []schema.ChannelV0{{ID: 1, Name: "general"}, {ID: 2, Name: "ops"}})
+			if m.rd.runID != 41 {
+				t.Fatalf("run detail did not open: runID = %d", m.rd.runID)
+			}
+			_, cmd := m.ask(schema.CreateInterventionRequestV1{Kind: schema.InterventionKindPause})
+			result := cmd()
+			if got := result.(interventionSent).runID; got != 41 {
+				t.Fatalf("request result runID = %d, want 41", got)
+			}
+			m = tt.before(m)
+			m, refresh := update(m, result)
+			if !m.channelArchived("general") || m.channelArchived("ops") {
+				t.Errorf("archive state = general %v, ops %v; want only general", m.channelArchived("general"), m.channelArchived("ops"))
+			}
+			if refresh == nil {
+				t.Error("archive refusal did not refresh the channel list")
+			}
+		})
+	}
+}
+
+type archivedRefusalAPI struct {
+	*reactionStub
+	refusal error
+}
+
+func (a *archivedRefusalAPI) PostMessageV2(context.Context, string, int64, string, *schema.Audience) (schema.MessageV2, error) {
+	return schema.MessageV2{}, a.refusal
+}
+
+func TestLateWriteArchiveRefusalResolvesOrigin(t *testing.T) {
+	refusal := &cli.ServerError{Status: 409, Code: schema.ErrorCodeChannelArchived}
+	tests := []struct {
+		name         string
+		next         []schema.ChannelV0
+		wantArchived string
+	}{
+		{name: "renamed", next: []schema.ChannelV0{{ID: 1, Name: "general"}, {ID: 2, Name: "staff"}}, wantArchived: "staff"},
+		{name: "removed", next: []schema.ChannelV0{{ID: 1, Name: "general"}}},
+		{name: "name reused", next: []schema.ChannelV0{{ID: 1, Name: "general"}, {ID: 2, Name: "staff"}, {ID: 3, Name: "ops"}}, wantArchived: "staff"},
+	}
+	for _, kind := range []string{"send", "reaction"} {
+		for _, tt := range tests {
+			t.Run(kind+"/"+tt.name, func(t *testing.T) {
+				api := &archivedRefusalAPI{reactionStub: &reactionStub{writeErr: refusal}, refusal: refusal}
+				m := NewModel(context.Background(), api, 7, nil)
+				m = loadChannelsForTest(m, []schema.ChannelV0{{ID: 1, Name: "general"}, {ID: 2, Name: "ops"}})
+				m.selected = 1
+				var result tea.Msg
+				if kind == "send" {
+					_, cmd := m.post("hello", nil, false)
+					result = cmd()
+				} else {
+					result = m.writeReaction("ops", 41, "👍", "", true)()
+				}
+				m.loadingChannels = true
+				m, _ = update(m, channelsLoaded{refresh: true, channels: tt.next})
+				m, refresh := update(m, result)
+				for _, name := range []string{"general", "ops", "staff"} {
+					if got, want := m.channelArchived(name), name == tt.wantArchived; got != want {
+						t.Errorf("channelArchived(%q) = %v, want %v", name, got, want)
+					}
+				}
+				if refresh == nil {
+					t.Error("archive refusal did not refresh the channel list")
+				}
+			})
+		}
+	}
+}
+
+func TestArchivedComposerEditingPreservesDraft(t *testing.T) {
+	stamp := time.Date(2026, time.November, 7, 12, 0, 0, 0, time.UTC)
+	keys := []struct {
+		name string
+		key  tea.KeyMsg
+	}{
+		{name: "typing", key: tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("x")}},
+		{name: "backspace", key: tea.KeyMsg{Type: tea.KeyBackspace}},
+	}
+	for _, key := range keys {
+		for _, outcome := range []string{"restore", "switch"} {
+			t.Run(key.name+"/"+outcome, func(t *testing.T) {
+				m := NewModel(context.Background(), stubAPI{}, 7, nil)
+				m = loadChannelsForTest(m, []schema.ChannelV0{{ID: 1, Name: "general"}, {ID: 2, Name: "ops", ArchivedAt: &stamp}})
+				m.selected = 1
+				m.input = "keep"
+				m, _ = update(m, key.key)
+				if m.input != "keep" {
+					t.Fatalf("draft = %q after %s, want keep", m.input, key.name)
+				}
+				if outcome == "restore" {
+					m.loadingChannels = true
+					m, _ = update(m, channelsLoaded{refresh: true, channels: []schema.ChannelV0{{ID: 1, Name: "general"}, {ID: 2, Name: "ops"}}})
+				} else {
+					m, _ = update(m, tea.KeyMsg{Type: tea.KeyUp})
+				}
+				if m.current() == "" || m.channelArchived(m.current()) {
+					t.Fatalf("selected channel = %q, want a live channel", m.current())
+				}
+				m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("!")})
+				if m.input != "keep!" {
+					t.Errorf("draft after editing a live channel = %q, want keep!", m.input)
+				}
+			})
+		}
 	}
 }

@@ -58,6 +58,8 @@ const (
 	voiceLive
 	// voiceReconnecting means the socket dropped after it had worked.
 	voiceReconnecting
+	// voiceRemoved means a moderator ended voice only; membership remains.
+	voiceRemoved
 )
 
 // voiceModel is the presence subscription of the selected channel and what it
@@ -156,6 +158,10 @@ func (m Model) voiceEnded(msg voiceEnded) (tea.Model, tea.Cmd) {
 	switch {
 	case errors.Is(msg.err, cli.ErrUnauthenticated), websocket.CloseStatus(msg.err) == websocket.StatusPolicyViolation:
 		v.state = voiceOff
+		var closeErr websocket.CloseError
+		if errors.As(msg.err, &closeErr) && closeErr.Reason == string(schema.SocketCloseVoiceRemoved) {
+			v.state = voiceRemoved
+		}
 		return m, wait
 	case errors.As(msg.err, &serverErr):
 		switch {
@@ -242,6 +248,8 @@ func (m Model) voiceLine(width int) string {
 		}
 	case voiceReconnecting:
 		text = "reconnecting"
+	case voiceRemoved:
+		text = "removed from voice; you are still a member and may join again"
 	default:
 		return ""
 	}

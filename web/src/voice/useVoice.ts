@@ -6,12 +6,13 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState, useSyncExter
 import * as api from '../api';
 import { pageHiddenOnPhone } from '../phone';
 import type { ChannelV0 } from '../schema/channel';
+import type { SocketCloseReason } from '../schema/generated';
 import type { VoicePresenceV1 } from '../schema/voice';
 import { Feed, type FeedStatus } from '../state/feed';
 import type { Camera } from './camera';
 import { VoiceClient, type Microphone, type ModeStore, type Output, type ProcessingStore, type VoiceState } from './connection';
 import { defaultTail, snapTail } from './gate';
-import { defaultTalkKey, isTyping } from './keys';
+import { defaultTalkKey, isTyping, mouseButtonForTalkKey } from './keys';
 import { parsePresence } from './presence';
 import { canChooseOutput, newLiveKitRoom } from './sdk';
 import { browserFeatures, type ShareFeatures } from './share';
@@ -252,6 +253,13 @@ const voiceNotAllowed = 'voice_not_allowed';
 // reader is no longer a member of the channel. The channel is then gone, and
 // the read that would say so is a request known to fail (issue #1084).
 const noLongerMember = 'no longer a member of this channel';
+
+// The one close whose text is the reason itself (schema.SocketCloseVoiceRemoved,
+// issue #1409): a moderator removed this person from voice only. They are still
+// a member, so presence is read as after any other 1008; but the voice client
+// is stopped, saying so, and not rejoined by itself.
+const voiceRemoved: SocketCloseReason = 'voice_removed';
+export const removedFromVoice = 'You were removed from voice';
 
 export interface VoiceControl {
   readonly state: VoiceState;
@@ -500,6 +508,10 @@ export function useVoice({
         set('gone');
         return;
       }
+      // Removed from voice only: out of the room, still a member. The client
+      // in this channel stops and says so, instead of taking the room's
+      // disconnect for a renewal and asking for the next session.
+      if (closeReason === voiceRemoved && joinedRef.current !== null && joinedRef.current === named()) client.removed(removedFromVoice);
       void api.getVoicePresence(named()).then((result) => {
         if (!live) return;
         if (result.ok) {
@@ -561,13 +573,14 @@ export function useVoice({
   // The talk key, only while the tab has focus and focus is not in a field.
   useEffect(() => {
     if (!signedIn || capturing) return;
+    const mouseButton = mouseButtonForTalkKey(talkKey);
     const down = (e: KeyboardEvent) => {
-      if (e.code !== talkKey || e.repeat || e.ctrlKey || e.altKey || e.metaKey || isTyping(e.target)) return;
+      if (mouseButton !== null || e.code !== talkKey || e.repeat || e.ctrlKey || e.altKey || e.metaKey || isTyping(e.target)) return;
       e.preventDefault();
       client.press();
     };
     const up = (e: KeyboardEvent) => {
-      if (e.code === talkKey) client.release();
+      if (mouseButton === null && e.code === talkKey) client.release();
     };
     window.addEventListener('keydown', down);
     window.addEventListener('keyup', up);
@@ -579,6 +592,37 @@ export function useVoice({
       window.removeEventListener('keyup', up);
     };
   }, [signedIn, capturing, talkKey, client]);
+
+  // The side buttons are taken over only in a voice session: out of voice
+  // they are the browser's Back and Forward, everywhere in Conch.
+  const inVoice = joined !== null;
+  useEffect(() => {
+    if (!signedIn || !inVoice || capturing) return;
+    const button = mouseButtonForTalkKey(talkKey);
+    if (button === null) return;
+    const down = (e: MouseEvent) => {
+      if (e.button !== button || isTyping(e.target)) return;
+      e.preventDefault();
+      client.press();
+    };
+    const up = (e: MouseEvent) => {
+      if (e.button !== button) return;
+      e.preventDefault();
+      client.release();
+    };
+    const auxiliary = (e: MouseEvent) => {
+      if (e.button === button) e.preventDefault();
+    };
+    window.addEventListener('mousedown', down);
+    window.addEventListener('mouseup', up);
+    window.addEventListener('auxclick', auxiliary);
+    return () => {
+      client.release();
+      window.removeEventListener('mousedown', down);
+      window.removeEventListener('mouseup', up);
+      window.removeEventListener('auxclick', auxiliary);
+    };
+  }, [signedIn, inVoice, capturing, talkKey, client]);
 
   const setTalkKey = useCallback((code: string) => {
     writeKey(code);

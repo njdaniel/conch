@@ -73,7 +73,8 @@ var Vocabularies = map[string][]string{
 	),
 	"SocketCloseReason": values(
 		SocketCloseClient, SocketCloseServerShutdown, SocketCloseKeepaliveTimeout, SocketCloseRevoked,
-		SocketCloseRemoved, SocketCloseSlowConsumer, SocketCloseSessionEnded, SocketCloseError,
+		SocketCloseRemoved, SocketCloseVoiceRemoved, SocketCloseSlowConsumer, SocketCloseSessionEnded,
+		SocketCloseError,
 	),
 	"RunState": values(
 		RunStateQueued, RunStateStarting, RunStateRunning, RunStateBlocked,

@@ -2,14 +2,19 @@ package server
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"slices"
 	"strings"
 	"sync"
 	"testing"
+	"time"
+
+	"github.com/coder/websocket"
 
 	"github.com/njdaniel/conch/internal/server/store"
+	"github.com/njdaniel/conch/pkg/schema"
 )
 
 // voiceKickFixture is the presence fixture with the moderation cast added:
@@ -280,6 +285,147 @@ func TestVoiceKickEffects(t *testing.T) {
 	f.pass(t)
 	if got := f.who(t, f.ops); !strings.Contains(got, "ann") {
 		t.Errorf("after rejoin = %q, want ann back", got)
+	}
+}
+
+// TestVoiceKickPresenceCloseReason: the kicked target's presence socket is
+// closed 1008 with the text schema.SocketCloseVoiceRemoved, the one close a
+// client keys on by value (issue #1409); a real removal from the channel
+// still says "no longer a member". Someone else's socket in the channel, and
+// the target's own in another channel, stay open either way.
+func TestVoiceKickPresenceCloseReason(t *testing.T) {
+	tests := []struct {
+		name       string
+		act        func(t *testing.T, f *voiceKickFixture) int
+		wantReason string
+		stillIn    bool
+	}{
+		{"removed from voice only", func(t *testing.T, f *voiceKickFixture) int {
+			return f.kick(t, "mgr", "ops", f.ids["ann"]).status
+		}, string(schema.SocketCloseVoiceRemoved), true},
+		{"removed from the channel", func(t *testing.T, f *voiceKickFixture) int {
+			return f.doOrdered(t, http.MethodDelete, fmt.Sprintf("/v1/channels/ops/members/%d", f.ids["ann"]), f.rootTok)
+		}, "no longer a member of this channel", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := newVoiceKickFixture(t, presenceOpts{auth: AuthRequired})
+			base := wsTestServer(t, f.srv)
+			annOps, _, err := dialVoice(t, base, "ops", f.tokens["ann"])
+			if err != nil {
+				t.Fatal(err)
+			}
+			readPresence(t, annOps)
+			annOps2, _, err := dialVoice(t, base, "ops2", f.tokens["ann"])
+			if err != nil {
+				t.Fatal(err)
+			}
+			readPresence(t, annOps2)
+			plainOps, _, err := dialVoice(t, base, "ops", f.tokens["plain"])
+			if err != nil {
+				t.Fatal(err)
+			}
+			readPresence(t, plainOps)
+
+			if code := tt.act(t, f); code != http.StatusNoContent {
+				t.Fatalf("status = %d", code)
+			}
+			ce := expectCloseError(t, annOps)
+			if ce.Code != websocket.StatusPolicyViolation || ce.Reason != tt.wantReason {
+				t.Errorf("close = %d %q, want %d %q", ce.Code, ce.Reason, websocket.StatusPolicyViolation, tt.wantReason)
+			}
+			if member, err := f.srv.store.IsChannelMember(context.Background(), f.ops.ID, f.ids["ann"]); err != nil || member != tt.stillIn {
+				t.Errorf("ann a member of ops = %v %v, want %v", member, err, tt.stillIn)
+			}
+			// The others are untouched: a change still reaches them.
+			room := f.inUse(t, f.ops)
+			f.lk.setRoom(room, fakeParticipant{identity: f.identity("plain"), joinedMs: 1_000})
+			f.lk.setRoom(f.inUse(t, f.ops2), fakeParticipant{identity: f.identity("ann"), joinedMs: 1_000})
+			f.pass(t)
+			if s := readPresence(t, plainOps); !s.Available {
+				t.Errorf("plain's frame: %+v", s)
+			}
+			if s := readPresence(t, annOps2); !s.Available {
+				t.Errorf("ann's ops2 frame: %+v", s)
+			}
+		})
+	}
+}
+
+// TestVoiceKickRacingRemoval: a kick and a removal from the channel in the
+// same instant. The kick has already detached ann's subscription when the
+// removal commits, after the close path's own membership read; the removal's
+// drop must still reach that subscription, so the frame says "no longer a
+// member" and never voice_removed to someone whose membership is gone (#1458
+// review). The removal is run from the close path's test hook, between its
+// membership read and its choice of reason: deterministic, no timing.
+func TestVoiceKickRacingRemoval(t *testing.T) {
+	f := newVoiceKickFixture(t, presenceOpts{auth: AuthRequired})
+	base := wsTestServer(t, f.srv)
+	annOps, _, err := dialVoice(t, base, "ops", f.tokens["ann"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	readPresence(t, annOps)
+	var once sync.Once
+	errs := make(chan error, 1)
+	f.srv.voice.beforeCloseReason = func() {
+		once.Do(func() {
+			ctx := context.Background()
+			_, err := f.srv.store.RemoveChannelMember(ctx, "system", f.ops.ID, f.ids["ann"])
+			errs <- err
+			f.srv.voiceMemberRemoved(ctx, f.ops.ID, f.ids["ann"])
+		})
+	}
+	if got := f.kick(t, "mgr", "ops", f.ids["ann"]); got.status != http.StatusNoContent {
+		t.Fatalf("kick = %d %q", got.status, got.body)
+	}
+	ce := expectCloseError(t, annOps)
+	if err := <-errs; err != nil {
+		t.Fatalf("remove: %v", err)
+	}
+	if want := "no longer a member of this channel"; ce.Code != websocket.StatusPolicyViolation || ce.Reason != want {
+		t.Errorf("close = %d %q, want %d %q", ce.Code, ce.Reason, websocket.StatusPolicyViolation, want)
+	}
+}
+
+// TestVoiceKickCloseReasonStoreFailure: when the close path cannot read
+// membership it fails closed with an error, never with voice_removed, which
+// would tell a client it is still a member on no evidence.
+func TestVoiceKickCloseReasonStoreFailure(t *testing.T) {
+	f := newVoiceKickFixture(t, presenceOpts{auth: AuthRequired})
+	base := wsTestServer(t, f.srv)
+	annOps, _, err := dialVoice(t, base, "ops", f.tokens["ann"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	readPresence(t, annOps)
+	if err := f.srv.store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	f.srv.voice.kickPrincipal(f.ops.ID, f.ids["ann"])
+	ce := expectCloseError(t, annOps)
+	if ce.Code != websocket.StatusInternalError || ce.Reason != "membership check failed" {
+		t.Errorf("close = %d %q, want %d %q", ce.Code, ce.Reason, websocket.StatusInternalError, "membership check failed")
+	}
+}
+
+// expectCloseError waits for conn to be closed by the server and returns the
+// close frame, code and text.
+func expectCloseError(t *testing.T, conn *websocket.Conn) websocket.CloseError {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	for {
+		_, _, err := conn.Read(ctx)
+		if err == nil {
+			continue
+		}
+		var ce websocket.CloseError
+		if !errors.As(err, &ce) {
+			t.Fatalf("socket ended without a close frame: %v", err)
+		}
+		return ce
 	}
 }
 

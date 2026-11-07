@@ -127,8 +127,9 @@ func metricsDisconnectReasons() []string {
 	return []string{
 		string(schema.SocketCloseClient), string(schema.SocketCloseServerShutdown),
 		string(schema.SocketCloseKeepaliveTimeout), string(schema.SocketCloseRevoked),
-		string(schema.SocketCloseRemoved), string(schema.SocketCloseSlowConsumer),
-		string(schema.SocketCloseSessionEnded), string(schema.SocketCloseError),
+		string(schema.SocketCloseRemoved), string(schema.SocketCloseVoiceRemoved),
+		string(schema.SocketCloseSlowConsumer), string(schema.SocketCloseSessionEnded),
+		string(schema.SocketCloseError),
 	}
 }
 

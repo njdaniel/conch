@@ -68,6 +68,8 @@ type reactionSummaryReceived struct {
 
 type reactionWritten struct {
 	channel   string
+	channelID int64
+	rev       int
 	messageID int64
 	raw       string
 	set       bool
@@ -352,6 +354,8 @@ func (m Model) reactionCommand(command, rest string) (Model, tea.Cmd) {
 }
 
 func (m Model) writeReaction(channel string, messageID int64, key, raw string, set bool) tea.Cmd {
+	channelID := m.channelIDs[channel]
+	_, rev := m.subs.life(m.ctx, channel)
 	return func() tea.Msg {
 		var summary schema.ReactionSummaryV1
 		var err error
@@ -360,7 +364,7 @@ func (m Model) writeReaction(channel string, messageID int64, key, raw string, s
 		} else {
 			summary, err = m.react.api.RemoveReaction(m.ctx, channel, messageID, key)
 		}
-		return reactionWritten{channel: channel, messageID: messageID, raw: raw, set: set, summary: summary, err: err}
+		return reactionWritten{channel: channel, channelID: channelID, rev: rev, messageID: messageID, raw: raw, set: set, summary: summary, err: err}
 	}
 }
 

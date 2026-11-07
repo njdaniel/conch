@@ -1560,6 +1560,10 @@ func watchVoice(ctx context.Context, client *Client, channel string, stdout, std
 		_, _ = fmt.Fprintln(stderr, "conch: server shutting down")
 		return nil
 	case websocket.StatusPolicyViolation:
+		var closeErr websocket.CloseError
+		if errors.As(err, &closeErr) && closeErr.Reason == string(schema.SocketCloseVoiceRemoved) {
+			return fmt.Errorf("voice presence for %s closed: you were removed from voice; you are still a member of the channel and may join again", safeLine(channel))
+		}
 		return fmt.Errorf("voice presence for %s closed: you are no longer a member of the channel, or your credential is disabled or signed out", safeLine(channel))
 	}
 	// Interrupting a watch is how a user stops it; that is not a failure.

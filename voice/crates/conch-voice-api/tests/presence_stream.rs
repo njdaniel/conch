@@ -141,8 +141,26 @@ async fn snapshots_arrive_in_order_and_a_shutdown_ends_the_stream_as_going_away(
 }
 
 #[tokio::test]
+async fn a_voice_only_removal_is_its_own_end_and_a_sentence_is_not() {
+    // conchd closes a kicked member's socket 1008 with the reason word itself (issue
+    // #1409): the client keys on the word, and on nothing that merely contains it.
+    let stub = Stub::websocket(vec![
+        text(&snapshot(&[3])),
+        Step::Close(1008, "voice_removed"),
+    ])
+    .await;
+    let mut stream = stub.client().presence_stream("general").await.unwrap();
+    snapshot_of(stream.next().await);
+    let end = end_of(stream.next().await);
+    assert_eq!(end, StreamEnd::VoiceRemoved);
+    assert_eq!(end_of(stream.next().await), end);
+    assert_eq!(stream.ended(), Some(&end));
+}
+
+#[tokio::test]
 async fn a_policy_violation_close_is_told_apart_and_keeps_the_servers_reason() {
-    // The three reasons conchd closes a presence socket with 1008 (voice_ws.go).
+    // The reasons conchd closes a presence socket with 1008 as a sentence (voice_ws.go);
+    // the one word, `voice_removed`, is StreamEnd::VoiceRemoved.
     for reason in [
         "no longer a member of this channel",
         "credential no longer valid",

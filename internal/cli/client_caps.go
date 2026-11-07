@@ -37,6 +37,8 @@ const (
 	maxChannelDirectoryBody = listRowCeiling*listRowBound + listSlack
 	maxChannelMembersBody   = listRowCeiling*listRowBound + listSlack
 	maxChannelBansBody      = listRowCeiling*listRowBound + listSlack
+	// maxIssuedBody: an IssuedByOperatorV1 is a kind and four numbers.
+	maxIssuedBody           = listRowCeiling*listRowBound + listSlack
 	maxMemberLinksBody      = listRowCeiling*inviteRowBound + listSlack
 	maxJoinersBody          = listRowCeiling*listRowBound + listSlack
 	maxChannelAuthorsBody   = schema.MaxChannelAuthorIDs*listRowBound + listSlack
@@ -150,7 +152,15 @@ type (
 		schema.ListOwnSignInLinksResponseV1
 	}
 	voiceOccupancyDoc struct{ schema.VoiceOccupancyV1 }
-	netsDoc           struct{ schema.ListNetsResponseV1 }
+
+	// What a principal issued to others, listed on a disable and a demotion
+	// (issue #1463): one row per live credential or hook, not paged.
+	disablePrincipalDoc struct {
+		schema.DisablePrincipalResponseV1
+	}
+	roleChangeDoc   struct{ schema.RoleChangeResponseV1 }
+	revokeIssuedDoc struct{ schema.RevokeIssuedResponseV1 }
+	netsDoc         struct{ schema.ListNetsResponseV1 }
 
 	// The paged reads carry the number of rows asked for.
 	messagesV1Doc struct {
@@ -200,6 +210,14 @@ func (credentialsDoc) maxBody() int64    { return maxCredentialsBody }
 func (deviceLinksDoc) maxBody() int64    { return maxDeviceLinksBody }
 func (voiceOccupancyDoc) maxBody() int64 { return maxVoiceOccupancyBody }
 func (netsDoc) maxBody() int64           { return maxNetsBody }
+
+func (disablePrincipalDoc) maxBody() int64 { return maxIssuedBody }
+
+// emptyOK: a server from before issue #1463 answers a disable with 204.
+func (disablePrincipalDoc) emptyOK() {}
+
+func (roleChangeDoc) maxBody() int64   { return maxIssuedBody }
+func (revokeIssuedDoc) maxBody() int64 { return listSlack }
 
 func (d messagesV1Doc) maxBody() int64 { return pageBody(d.rows, messageRowBound) }
 func (d messagesV2Doc) maxBody() int64 { return pageBody(d.rows, messageRowBound) }

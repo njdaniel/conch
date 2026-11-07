@@ -21,7 +21,7 @@
 // Without Docker it fails when CI is set and is skipped otherwise.
 import type { Page } from '@playwright/test';
 import { chooseMicrophone, expect, openChannel, signIn, test } from './fixtures';
-import { burstMeasure, median, pressMeasure, type Sample } from './onset';
+import { burstAudioFailure, burstMeasure, median, p90, pressMeasure, type Sample } from './onset';
 import { dockerAvailable, startVoiceWorld, watchPage, type VoiceWorld } from './voice-world';
 
 const voiceRegion = (page: Page) => page.getByRole('region', { name: 'Voice' });
@@ -175,7 +175,8 @@ test.describe('speech kept at the edges of a transmission', () => {
   });
 
   test('push to talk and the open microphone, timed at the listener', async ({ browser }) => {
-    test.setTimeout(240_000);
+    // Full retry allowances sleep for 450 s; leave 150 s for setup and browser work.
+    test.setTimeout(600_000);
     const talkerContext = await browser.newContext();
     const listenerContext = await browser.newContext();
     try {
@@ -219,7 +220,7 @@ test.describe('speech kept at the edges of a transmission', () => {
       //
       // A press whose readings a stall of the listener's page made unclear is
       // refused (onset.ts) and made again, up to three times as many presses
-      // as wanted; fewer than three good ones fails, saying so.
+      // as wanted; fewer than 20 good ones fails, saying so.
       const pttBatch = async (n: number) => {
         const reportsBefore = (await reportTimes()).length;
         const lost: number[] = [];
@@ -257,14 +258,14 @@ test.describe('speech kept at the edges of a transmission', () => {
         await signal(talker, false);
         return { pathMs: round(path), lost: round(lost), kept: round(kept), indicatorAhead: round(ahead), refused, reportMs: round((await reportTimes()).slice(reportsBefore)) };
       };
-      const fast = await pttBatch(5);
+      const fast = await pttBatch(20);
       // Again with every transmit report held back 150 ms on its way to
       // conchd, as on a slow link: the press does not wait for its answer.
       await talker.route('**/voice/transmit', async (route) => {
         await sleep(150);
         await route.continue();
       });
-      const slow = await pttBatch(5);
+      const slow = await pttBatch(20);
       await talker.unroute('**/voice/transmit');
 
       // The open microphone: bursts of the signal from quiet. The end of a
@@ -289,13 +290,15 @@ test.describe('speech kept at the edges of a transmission', () => {
           after,
         );
       let burstsRefused = 0;
-      for (let tries = 0; tries < 21 && onsetLost.length < 7; tries++) {
+      for (let tries = 0; tries < 60 && onsetLost.length < 20; tries++) {
         const on = await signal(talker, true);
         await sleep(800);
         const off = await signal(talker, false);
         await sleep(1500);
-        const got = burstMeasure(await heard(listener), on, off);
+        const samples = await heard(listener);
+        const got = burstMeasure(samples, on, off);
         if (got === null) {
+          expect(burstAudioFailure(samples, on, off), 'open microphone audio missing or dropped out while sampling was reliable').toBe(false);
           burstsRefused++;
           continue;
         }
@@ -314,9 +317,13 @@ test.describe('speech kept at the edges of a transmission', () => {
       test.info().annotations.push({ type: 'measurement', description: JSON.stringify(report) });
       console.log(`voice onset measurement: ${JSON.stringify(report)}`);
       const tooFew = 'presses measured cleanly (the rest were refused: the listening page stalled)';
-      expect(fast.kept.length, tooFew).toBeGreaterThanOrEqual(3);
-      expect(slow.kept.length, tooFew).toBeGreaterThanOrEqual(3);
-      expect(onsetLost.length, 'open microphone bursts measured cleanly').toBeGreaterThanOrEqual(3);
+      expect(fast.kept.length, tooFew).toBe(20);
+      expect(slow.kept.length, tooFew).toBe(20);
+      expect(onsetLost.length, 'open microphone bursts measured cleanly').toBe(20);
+      // At least 18 of the 20 onsets lose no more than 80 ms beyond the path.
+      // With the old 50 ms reads the 90th percentile was 86 ms.
+      const onsetP90 = p90(onsetLost);
+      expect(onsetP90, '90th percentile of ms lost at an open-microphone onset').toBeLessThanOrEqual(80);
       // The bounds are wide, for a loaded runner; what they tell apart is
       // far wider still. The release delay is heard (issue #965): a 200 ms
       // delay is heard as about 120 to 180 ms; before, a 100 ms one was heard

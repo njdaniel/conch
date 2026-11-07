@@ -178,3 +178,20 @@ func TestRedirectIsNotFollowedWithBearer(t *testing.T) {
 		})
 	}
 }
+
+func TestCallToolFullReturnsTheWholeResponse(t *testing.T) {
+	result := `{"content":[{"type":"text","text":"leak-in-text"}],"structuredContent":{"n":1}}`
+	var got map[string]any
+	srv := toolServer(t, result, &got)
+	defer srv.Close()
+	structured, response, err := New(srv.URL, "t").CallToolFull(context.Background(), "x", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(structured) != `{"n":1}` {
+		t.Fatalf("structured = %s", structured)
+	}
+	if !strings.Contains(string(response), "leak-in-text") {
+		t.Fatalf("response %s does not hold result.content", response)
+	}
+}
