@@ -77,7 +77,7 @@ var gateRows = map[string]string{
 
 	// Issue #1467: the camera's live-media gates (voicegates.go; with LiveKit).
 	"voice_camera.go voicePoller.camerasWithheld": "a camera whose use_camera was cut in the store (camerasWithheld)",
-	"permissions.go Server.endCameraIfWithheld":   "the role change's hook (endCameraIfWithheld)",
+	"permissions.go Server.endCameraIfWithheld":   "a camera held by a member demoted to a role without use_camera (endCameraIfWithheld)",
 }
 
 // pendingGates are the gates that have no restricted row yet, each with why

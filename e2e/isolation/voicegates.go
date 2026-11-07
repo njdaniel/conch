@@ -39,8 +39,10 @@ import (
 //   - camerasWithheld and endCameraIfWithheld (issue #1467, the camera's two
 //     gates that a live claim can drive; cameraGateRows): use_camera is cut
 //     in the store with no hook and the next pass ends the live camera
-//     (audited access_lost); a role change that withholds use_camera ends it
-//     before the PUT answers.
+//     (audited access_lost); a role change that withholds use_camera is
+//     followed by the camera's withdrawal within the bound (that the hook
+//     does it before the PUT answers is the server's test, which holds the
+//     poller still).
 //
 // voice_share.go voicePoller.shareEntitled and voice.go Server.voiceStillEntitled
 // have no row here: each is reached only by a cut landing inside a claim or a
@@ -499,24 +501,26 @@ func (w *world) cameraGateRows(channel string, name func(string) string) (rows i
 	if err := w.op.call(http.MethodPut, "/v1/principals/"+itoa(op.id)+"/role", schema.RoleChangeRequestV1{Role: schema.RoleMember}, nil); err != nil {
 		return rows, fmt.Errorf("the owner demotes the camera holder: %w", err)
 	}
-	// The hook ends the camera before the PUT answers: the audit row is read
-	// at once, with no wait, since a pass (1.5 s) would be too late to be
-	// what ended it. LiveKit unpublishes a withdrawn source within a moment.
-	held, err := w.cameraStoppedAccessLost(op.id)
-	if err != nil {
-		return rows, err
-	}
-	if !held {
-		return rows, errors.New("the role change's hook (endCameraIfWithheld): no voice_camera_stopped row with reason=access_lost for the demoted member when the PUT has answered")
-	}
-	if err := waitFor("the demoted member's camera to be withdrawn", 2*time.Second, func() (bool, string) {
+	// Live check only: after the demotion LiveKit stops listing the camera
+	// and the access_lost row is written, within the bound. A poller pass may
+	// be what ended it here; that the hook ends it before the PUT answers is
+	// the server's TestVoiceCameraHooksEndBeforeAnswer ("a role change"),
+	// which runs without a pass.
+	if err := waitFor("the demoted member's camera to be withdrawn and audited", voiceGatePasses, func() (bool, string) {
 		ok, p, saw := lk.has(oroom, op.id)
 		if !ok {
 			return false, "the member left the room: " + saw
 		}
-		return !cameraTrack(p), fmt.Sprintf("sources %v", p.Sources())
+		if cameraTrack(p) {
+			return false, fmt.Sprintf("sources %v", p.Sources())
+		}
+		held, err := w.cameraStoppedAccessLost(op.id)
+		if err != nil {
+			return false, err.Error()
+		}
+		return held, "no voice_camera_stopped row with reason=access_lost for the demoted member"
 	}); err != nil {
-		return rows, fmt.Errorf("the role change's hook (endCameraIfWithheld): %w", err)
+		return rows, fmt.Errorf("a camera held by a member demoted to a role without use_camera (endCameraIfWithheld): %w", err)
 	}
 	rows++
 	// The control: the demoted member, with the cell back, claims again.
