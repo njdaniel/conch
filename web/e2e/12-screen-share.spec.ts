@@ -783,7 +783,7 @@ test.describe('screen share with LiveKit', () => {
     // The Voice view, where Join voice was, shows everyone (issue #929).
     const chips = voice.getByRole('list', { name: /^[89] in voice$/ }).locator('li:visible');
     await expect.poll(() => chips.count()).toBeGreaterThanOrEqual(8);
-    await expect(chips.filter({ hasText: 'You' })).toHaveCount(1);
+    await expect(chips.filter({ hasText: b.member.name })).toHaveCount(1);
     // The strip is under Chat: one row of four, with no roster, however many
     // are in voice (issue #1028).
     await showView(b.page, 'Chat');
