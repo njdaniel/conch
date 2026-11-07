@@ -1099,12 +1099,38 @@ describe('what a person issued to others', () => {
   it('lists them under the person after a disable, by the names the page knows', async () => {
     serve(owner, { routes: { 'POST /v1/principals/2/disable': () => json({ issued_to_others: issuedList }) } });
     const region = await open();
-    const row = await disableOperator(region);
-    const list = await within(row).findByRole('region', { name: 'Issued to others by operators' });
+    await disableOperator(region);
+    const list = await within(region).findByRole('region', { name: 'Issued to others by operators' });
     expect(within(list).getByText(/credential #41 for member-1, issued by operator-1/i)).toBeTruthy();
     expect(within(list).getByText(/credential #42 for person #9, issued by operator-1/i)).toBeTruthy();
     expect(within(list).getByText(/hook #7 for member-1/i)).toBeTruthy();
     expect(within(list).getByRole('button', { name: 'Revoke all (3)' })).toBeTruthy();
+  });
+
+  it('keeps the list and Revoke all when the directory drops the disabled person', async () => {
+    let disabled = false;
+    const calls = serve(owner, {
+      members: () => (disabled ? everyone.filter((p) => p.id !== 2) : everyone),
+      routes: {
+        'POST /v1/principals/2/disable': () => {
+          disabled = true;
+          return json({ issued_to_others: issuedList });
+        },
+        'POST /v1/principals/2/issued/revoke-all': () => json({ credentials_revoked: 2, hooks_revoked: 1 }),
+      },
+    });
+    const region = await open();
+    await disableOperator(region);
+    await waitFor(() => {
+      expect(Array.from(region.querySelectorAll('.community-name')).map((e) => e.textContent)).not.toContain('operator-1');
+    });
+    const list = await within(region).findByRole('region', { name: 'Issued to others by operators' });
+    expect(within(list).getByText(/credential #41 for member-1, issued by operator-1/i)).toBeTruthy();
+    fireEvent.click(within(list).getByRole('button', { name: 'Revoke all (3)' }));
+    fireEvent.click(within(list).getByRole('button', { name: 'Yes, revoke all' }));
+    expect(await within(list).findByText('Revoked 2 credentials and 1 hooks.')).toBeTruthy();
+    expect(sent(calls, 'POST', /issued\/revoke-all$/).length).toBe(1);
+    expect(list.querySelectorAll('li').length).toBe(0);
   });
 
   it('lists them after a demotion too', async () => {
@@ -1114,7 +1140,7 @@ describe('what a person issued to others', () => {
     await choose(row, 'operator-1', 'Change role…');
     fireEvent.click(within(row).getByRole('radio', { name: 'Member' }));
     fireEvent.click(within(row).getByRole('button', { name: 'Make a member' }));
-    expect(await within(row).findByRole('region', { name: 'Issued to others by operators' })).toBeTruthy();
+    expect(await within(region).findByRole('region', { name: 'Issued to others by operators' })).toBeTruthy();
   });
 
   it.each([
@@ -1140,7 +1166,7 @@ describe('what a person issued to others', () => {
     const row = rowOf(region, 'member-1');
     await choose(row, 'member-1', 'Disable sign-in…');
     fireEvent.click(within(row).getByRole('button', { name: 'Yes, disable' }));
-    const list = await within(row).findByRole('region', { name: 'Issued to others by operators' });
+    const list = await within(region).findByRole('region', { name: 'Issued to others by operators' });
     expect(within(list).queryByRole('button', { name: /Revoke all/ })).toBeNull();
     fireEvent.click(within(list).getByRole('button', { name: 'Revoke credential #41' }));
     await waitFor(() => {
@@ -1163,8 +1189,8 @@ describe('what a person issued to others', () => {
       },
     });
     const region = await open();
-    const row = await disableOperator(region);
-    const list = await within(row).findByRole('region', { name: 'Issued to others by operators' });
+    await disableOperator(region);
+    const list = await within(region).findByRole('region', { name: 'Issued to others by operators' });
     fireEvent.click(within(list).getByRole('button', { name: 'Revoke all (3)' }));
     const question = within(list).getByRole('group', { name: 'Confirm' });
     expect(question.textContent).toContain('operator-1 issued to other people');
@@ -1188,8 +1214,8 @@ describe('what a person issued to others', () => {
       },
     });
     const region = await open();
-    const row = await disableOperator(region);
-    const list = await within(row).findByRole('region', { name: 'Issued to others by operators' });
+    await disableOperator(region);
+    const list = await within(region).findByRole('region', { name: 'Issued to others by operators' });
     fireEvent.click(within(list).getByRole('button', { name: 'Revoke all (3)' }));
     fireEvent.click(within(list).getByRole('button', { name: 'Yes, revoke all' }));
     await waitFor(() => {

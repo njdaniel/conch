@@ -219,10 +219,11 @@ test('A1020 at 390×844 the phone opens a sheet from the ⋯ button, and asks be
   expect((await directory(world)).map((m) => m.id)).not.toContain(target.id);
 });
 
-test('A1464 at 1440×900 after a demotion the owner sees what the operator issued, revokes it all, and it no longer signs in', async ({ meet, secrets, world }) => {
+for (const how of ['demotion', 'disable'] as const) {
+test(`A1464 at 1440×900 after a ${how} the owner sees what the operator issued, revokes it all, and it no longer signs in`, async ({ meet, secrets, world }) => {
   const before = await read(world);
-  const operatorName = `operator-${stamp}-i`;
-  const memberName = `member-${stamp}-i`;
+  const operatorName = `operator-${stamp}-${how[0] ?? 'x'}`;
+  const memberName = `member-${stamp}-${how[0] ?? 'x'}`;
   const made: number[] = [];
   try {
     // Operators act as members for this spec; the finally puts the cell back.
@@ -251,11 +252,18 @@ test('A1464 at 1440×900 after a demotion the owner sees what the operator issue
     await expect(section(page).getByRole('list', { name: 'People' })).toBeVisible();
     const row = rowOf(page, operatorName);
     await row.getByRole('button', { name: `Actions for ${operatorName}` }).click();
-    await row.getByRole('menuitem', { name: 'Change role…' }).click();
-    await row.getByRole('radio', { name: 'Member' }).check();
-    await row.getByRole('button', { name: 'Make a member' }).click();
+    if (how === 'demotion') {
+      await row.getByRole('menuitem', { name: 'Change role…' }).click();
+      await row.getByRole('radio', { name: 'Member' }).check();
+      await row.getByRole('button', { name: 'Make a member' }).click();
+    } else {
+      await row.getByRole('menuitem', { name: 'Disable sign-in…' }).click();
+      await row.getByRole('button', { name: 'Yes, disable' }).click();
+      // The directory leaves a disabled person out; the list does not go with the row.
+      await expect(row).toHaveCount(0);
+    }
 
-    const list = row.getByRole('region', { name: 'Issued to others by operators' });
+    const list = section(page).getByRole('region', { name: 'Issued to others by operators' });
     await expect(list).toBeVisible();
     await expect(list.getByText(new RegExp(`credential #\\d+ for ${memberName}, issued by ${operatorName}`, 'i'))).toBeVisible();
     // Demoting did not end it.
@@ -272,3 +280,4 @@ test('A1464 at 1440×900 after a demotion the owner sees what the operator issue
     await hide(world, ...made);
   }
 });
+}

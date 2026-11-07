@@ -24,7 +24,6 @@ import type { ServerMemberV1, WhoAmIResponseV1 } from '../schema/principal';
 import type { SignInLinkPurpose } from '../schema/signin';
 import { canDo, refusalLine, type Refusal } from './permissions';
 import { AIAdminCard } from './AIAdminCard';
-import { IssuedList } from './PermissionsSection';
 import { SecretOnce } from './SecretOnce';
 import { timeOf } from '../time';
 
@@ -110,12 +109,13 @@ export interface PersonActionsProps {
   // show (the row may be gone by then).
   readonly onChanged: (done?: string) => void;
   readonly onUnauthorized: () => void;
-  // The people the page knows by name, for the issued_to_others list; an id
-  // without one is shown by its number.
-  readonly names?: ReadonlyMap<number, string>;
+  // What a disable or a demotion listed as issued to others. The list is kept
+  // by the caller, outside this row: a disabled person leaves the directory and
+  // the row with it, and the owner's way to end what they issued must stay.
+  readonly onIssued: (items: readonly IssuedByOperatorV1[]) => void;
 }
 
-export function PersonActions({ who, person, origin, rows, readRows, open, onOpenChange, button, onChanged, onUnauthorized, names }: PersonActionsProps) {
+export function PersonActions({ who, person, origin, rows, readRows, open, onOpenChange, button, onChanged, onUnauthorized, onIssued }: PersonActionsProps) {
   const actions = memberActions(who, person);
   // What the viewer may do now, for the moment a request is sent.
   const allowed = useRef<readonly MemberAction[]>(actions);
@@ -127,9 +127,6 @@ export function PersonActions({ who, person, origin, rows, readRows, open, onOpe
   // The one secret just made, until Done.
   const [secret, setSecret] = useState<{ readonly id: MemberActionId; readonly label: string; readonly value: string; readonly note: string } | null>(null);
   const [channels, setChannels] = useState<Channels>(null);
-  // What this person issued to others that is still live, as the last disable
-  // or demotion answered (issue #1464); null when it listed nothing.
-  const [issued, setIssued] = useState<readonly IssuedByOperatorV1[] | null>(null);
   const sending = useRef(false);
   const live = useRef(true);
   const group = useRef<HTMLDivElement>(null);
@@ -304,7 +301,7 @@ export function PersonActions({ who, person, origin, rows, readRows, open, onOpe
               onYes={() => {
                 if (panel.id === 'signout') send('signout', () => api.signOutPrincipalEverywhere(person.id), 'Nobody was signed out.', () => `${name} is signed out everywhere.`);
                 else if (panel.id === 'disable') send('disable', () => api.disablePrincipal(person.id), 'Nothing was changed.', () => `${name} is disabled and signed out.`, undefined, (r) => {
-                    setIssued(r.issued_to_others === undefined || r.issued_to_others.length === 0 ? null : r.issued_to_others);
+                    onIssued(r.issued_to_others ?? []);
                   });
                 else send('remove', () => api.hidePrincipal(person.id), 'Nobody was removed.', () => `${name} is removed from the server.`);
               }}
@@ -328,7 +325,7 @@ export function PersonActions({ who, person, origin, rows, readRows, open, onOpe
                   },
                   undefined,
                   (r) => {
-                    setIssued(r.issued_to_others === undefined || r.issued_to_others.length === 0 ? null : r.issued_to_others);
+                    onIssued(r.issued_to_others ?? []);
                   },
                 );
               }}
@@ -422,23 +419,6 @@ export function PersonActions({ who, person, origin, rows, readRows, open, onOpe
             />
           ) : null}
         </div>
-      )}
-      {issued === null ? null : (
-        <IssuedList
-          who={who}
-          items={issued}
-          {...(names === undefined ? {} : { names })}
-          title={`Still working after this change, issued by ${name}`}
-          intro={`${name} issued these to other people. Taking away or ending ${name}’s access does not end them.`}
-          revokeAllFor={{ principal: person.id, name }}
-          onDone={(gone) => {
-            setIssued((now) => (now ?? []).filter((i) => !gone(i)));
-          }}
-          onDismiss={() => {
-            setIssued(null);
-          }}
-          onUnauthorized={onUnauthorized}
-        />
       )}
       <AIAdminCard who={who} person={person} onChanged={onChanged} onUnauthorized={onUnauthorized} />
       {secret === null ? null : (

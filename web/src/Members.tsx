@@ -1,6 +1,6 @@
 import { ModerationConfirm, type ModerationOperation } from './Moderation';
 import type { ChannelBanV1 } from './schema/generated';
-import { useCallback, useEffect, useId, useMemo, useRef, useState, type KeyboardEvent, type ReactNode, type SyntheticEvent } from 'react';
+import { useCallback, useEffect, useId, useRef, useState, type KeyboardEvent, type ReactNode, type SyntheticEvent } from 'react';
 import * as api from './api';
 import { Avatar } from './Icons';
 import { memberName } from './guestName';
@@ -8,7 +8,8 @@ import { ActionsMenu, useOpeners, type MenuItem } from './MessageMenu';
 import type { Entry } from './agents/join';
 import { PersonActions } from './admin/PersonActions';
 import { memberActions } from './memberActions';
-import type { PermissionRowV1 } from './schema/permission';
+import type { IssuedByOperatorV1, PermissionRowV1 } from './schema/permission';
+import { IssuedList } from './admin/PermissionsSection';
 import type { ChannelMemberV1, ChannelV0, PutChannelMemberRequestV1 } from './schema/channel';
 import type { ServerMemberV1, ServerMembersResponseV1, WhoAmIResponseV1 } from './schema/principal';
 
@@ -458,6 +459,7 @@ export interface RowManage {
   readonly readRows: () => void;
   readonly onChanged: (done?: string) => void;
   readonly onUnauthorized: () => void;
+  readonly onIssued: (person: ServerMemberV1, items: readonly IssuedByOperatorV1[]) => void;
 }
 
 function CommunityRow({
@@ -474,7 +476,6 @@ function CommunityRow({
   const inviter = person.invited_by === undefined ? undefined : byId.get(person.invited_by);
   const [menuOpen, setMenuOpen] = useState(false);
   const more = useRef<HTMLButtonElement>(null);
-  const names = useMemo(() => new Map(Array.from(byId, ([id, member]) => [id, member.name])), [byId]);
   const has = manage !== undefined && memberActions(manage.who, person).length > 0;
   // The row is inside the Settings drawer, a dialog, when it is the Members section.
   const openers = useOpeners(
@@ -508,7 +509,9 @@ function CommunityRow({
           button={more}
           onChanged={manage.onChanged}
           onUnauthorized={manage.onUnauthorized}
-          names={names}
+          onIssued={(items) => {
+            manage.onIssued(person, items);
+          }}
         />
       )}
     </li>
@@ -565,6 +568,10 @@ export function CommunityMembers({
   const [rows, setRows] = useState<readonly PermissionRowV1[] | null>(null);
   // What the last change said, at the list's level: the row may be gone.
   const [note, setNote] = useState('');
+  // What disabled or demoted people issued to others, kept here and not in
+  // their rows: a disabled person leaves the directory, and the owner's way to
+  // end what they issued must stay until dismissed or emptied (issue #1464).
+  const [issued, setIssued] = useState<readonly { readonly id: number; readonly name: string; readonly items: readonly IssuedByOperatorV1[] }[]>([]);
   const noteLine = useRef<HTMLParagraphElement>(null);
   const wantsFocus = useRef(false);
   const seq = useRef(0);
@@ -615,6 +622,11 @@ export function CommunityMembers({
 
   const byId = new Map<number, ServerMemberV1>();
   if (answer !== null && answer !== 'failed') for (const m of answer.members) byId.set(m.id, m);
+  // The names the page knows, the issuers' kept from when they were listed.
+  const names = new Map<number, string>();
+  for (const entry of issued) names.set(entry.id, entry.name);
+  for (const [id, m] of byId) names.set(id, m.name);
+  const sameIssuer = (id: number) => (entry: { readonly id: number }) => entry.id !== id;
   return (
     <section {...(showTitle ? { 'aria-labelledby': headingId } : { 'aria-label': title })} className="community-members">
       {!showTitle ? null : level === 4 ? <h4 id={headingId}>{title}</h4> : <h3 id={headingId}>{title}</h3>}
@@ -622,6 +634,28 @@ export function CommunityMembers({
       <p ref={noteLine} role="status" className="hint" tabIndex={-1}>
         {note}
       </p>
+      {who === undefined
+        ? null
+        : issued.map((entry) => (
+            <IssuedList
+              key={entry.id}
+              who={who}
+              items={entry.items}
+              names={names}
+              title={`Still working after this change, issued by ${entry.name}`}
+              intro={`${entry.name} issued these to other people. Taking away or ending ${entry.name}’s access does not end them.`}
+              revokeAllFor={{ principal: entry.id, name: entry.name }}
+              onDone={(gone) => {
+                setIssued((now) => now.map((e) => (e.id === entry.id ? { ...e, items: e.items.filter((i) => !gone(i)) } : e)));
+              }}
+              onDismiss={() => {
+                setIssued((now) => now.filter(sameIssuer(entry.id)));
+              }}
+              onUnauthorized={() => {
+                latest.current();
+              }}
+            />
+          ))}
       {answer === null ? (
         <p className="empty">Loading…</p>
       ) : answer === 'failed' ? (
@@ -641,7 +675,9 @@ export function CommunityMembers({
                   person={person}
                   byId={byId}
                   viewer={viewer}
-                  manage={who === undefined ? undefined : { who, origin, rows, readRows, onChanged: (done) => {
+                  manage={who === undefined ? undefined : { who, origin, rows, readRows, onIssued: (issuer, items) => {
+                      setIssued((now) => [...now.filter(sameIssuer(issuer.id)), ...(items.length === 0 ? [] : [{ id: issuer.id, name: issuer.name, items }])]);
+                    }, onChanged: (done) => {
                       setNote(done ?? '');
                       wantsFocus.current = true;
                       load();
