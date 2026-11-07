@@ -5395,6 +5395,10 @@ button.link {
 }
 
 .edit-groups {
+  /* Contains its visually hidden status line (.vh is absolute), so that the
+     line scrolls with the channel list instead of landing below it and
+     lengthening the document when the list scrolls (issue #1493). */
+  position: relative;
   display: grid;
   gap: var(--s2);
   margin-top: var(--s3);
