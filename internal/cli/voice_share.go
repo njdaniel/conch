@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -54,6 +55,8 @@ func stopFailure(err error, lines refusalLines) error {
 	)
 	var line string
 	switch {
+	case badRedirect(err):
+		line = "the server redirected the request to a location this client cannot follow; set --server to the final URL"
 	case errors.As(err, &redirect):
 		line = fmt.Sprintf("the server redirected the request (HTTP %d); set --server to the final URL", redirect.status)
 	case errors.As(err, &status):
@@ -64,6 +67,16 @@ func stopFailure(err error, lines refusalLines) error {
 		return voiceFailure(refused(err, lines))
 	}
 	return &serverText{msg: line, err: err}
+}
+
+// badRedirect reports whether err is net/http refusing a redirect whose
+// Location it could not parse. The client fails then, before it hands the
+// response over, with the Location quoted in the error: no type tells it from
+// other *url.Error failures (the cause is a plain error), so it is the
+// *url.Error and the standard library's own prefix together.
+func badRedirect(err error) bool {
+	var ue *url.Error
+	return errors.As(err, &ue) && ue.Err != nil && strings.HasPrefix(ue.Err.Error(), "failed to parse Location header")
 }
 
 func runVoiceShare(ctx context.Context, args []string, stdout, stderr io.Writer) error {

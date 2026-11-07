@@ -293,6 +293,10 @@ func TestVoiceStopHostileAnswers(t *testing.T) {
 			w.Header().Set("Location", wordy)
 			w.WriteHeader(http.StatusFound)
 		}, "the server redirected the request (HTTP 302)"},
+		{"redirect with a Location that does not parse", func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Location", "/hostile-words%zz")
+			w.WriteHeader(http.StatusFound)
+		}, "redirected the request to a location this client cannot follow"},
 		{"custom reason phrase on a body that is not an error document", func(w http.ResponseWriter, _ *http.Request) {
 			conn, buf, err := w.(http.Hijacker).Hijack()
 			if err != nil {
