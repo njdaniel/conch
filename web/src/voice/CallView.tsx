@@ -56,7 +56,7 @@ export interface Tile {
 // callTiles is who gets a tile: everyone in voice while there are at most
 // maxTiles, in the order they joined, the viewer last; with more, the people
 // whose cameras are on, as many as fit. hidden is how many cameras did not.
-export function callTiles(roster: readonly Occupant[], viewer: number, ownCamera: boolean, nameOf: (principal: number) => string): { readonly tiles: readonly Tile[]; readonly hidden: number } {
+export function callTiles(roster: readonly Occupant[], viewer: number, ownCamera: boolean, nameOf: (principal: number) => string, viewerName = ''): { readonly tiles: readonly Tile[]; readonly hidden: number } {
   const ordered = [...roster].sort((a, b) => {
     if ((a.principal === viewer) !== (b.principal === viewer)) return a.principal === viewer ? 1 : -1;
     const at = Date.parse(a.joinedAt) - Date.parse(b.joinedAt);
@@ -64,7 +64,7 @@ export function callTiles(roster: readonly Occupant[], viewer: number, ownCamera
   });
   const all = ordered.map((o) => {
     const me = o.principal === viewer;
-    return { principal: o.principal, name: me ? 'You' : nameOf(o.principal), me, camera: me ? ownCamera : o.camera };
+    return { principal: o.principal, name: me ? (viewerName === '' ? 'You' : viewerName) : nameOf(o.principal), me, camera: me ? ownCamera : o.camera };
   });
   if (all.length <= maxTiles) return { tiles: all, hidden: 0 };
   const cameras = all.filter((t) => t.camera);

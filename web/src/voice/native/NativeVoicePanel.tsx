@@ -90,6 +90,7 @@ export function NativeVoicePanel({
   signedIn,
   channel,
   viewer,
+  viewerName = '',
   people,
   voiceAllowed,
   channels,
@@ -103,6 +104,8 @@ export function NativeVoicePanel({
   readonly signedIn: boolean;
   readonly channel: string | null;
   readonly viewer: number;
+  // The viewer's own name; empty while unknown, when they are "You".
+  readonly viewerName?: string;
   readonly people: ReadonlyMap<number, Person>;
   readonly voiceAllowed: boolean;
   readonly channels: readonly ChannelV0[];
@@ -219,7 +222,7 @@ export function NativeVoicePanel({
   return (
     <section aria-label="Voice" className={`voice ${phaseClass(view)}${helper?.transmitting === true ? ' sending' : ''}`}>
       <div className="voice-bar">
-        {roster.length === 0 ? null : <Roster roster={roster} people={named} viewer={viewer} elsewhere={false} speaking={noSpeaking} volumes={noVolumes} />}
+        {roster.length === 0 ? null : <Roster roster={roster} people={named} viewer={viewer} viewerName={viewerName} elsewhere={false} speaking={noSpeaking} volumes={noVolumes} />}
         <div className="voice-row">
           <div className="voice-state">
             <p className="voice-phase">
