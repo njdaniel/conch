@@ -1,4 +1,4 @@
-import { createContext, useContext, useEffect, useLayoutEffect, useRef, useState, type DragEvent, type KeyboardEvent, type ReactNode } from 'react';
+import { createContext, useContext, useEffect, useId, useLayoutEffect, useRef, useState, type DragEvent, type KeyboardEvent, type ReactNode } from 'react';
 import { EmojiPicker } from './EmojiPicker';
 import { closedShortcodeAt, completeShortcode, completionAt, emojiNow, exactEmoji, insertAt, loadEmoji, type Emoji, type EmojiIndex } from './emoji/emoji';
 import { Glyph } from './Icons';
@@ -151,6 +151,8 @@ export function Composer({
   const selectionAfter = useRef<{ readonly start: number; readonly end: number } | null>(null);
   const formatButtons = useRef<(HTMLButtonElement | null)[]>([]);
   const [formatFocus, setFormatFocus] = useState(0);
+  const [formatOpen, setFormatOpen] = useState(false);
+  const toolbarId = useId();
   // The last `:name:` swap, until anything else changes the draft: what Backspace
   // right after it puts back.
   // Whether an input method is composing: nothing is swapped while it is.
@@ -502,32 +504,6 @@ export function Composer({
           ))}
         </ul>
       ) : null}
-      <div className="composer-formatting" role="toolbar" aria-label="Formatting">
-        {formattingControls.map((control, index) => (
-          <button
-            key={control.kind}
-            ref={(node) => { formatButtons.current[index] = node; }}
-            type="button"
-            aria-label={control.label}
-            aria-keyshortcuts={control.shortcut}
-            tabIndex={index === formatFocus ? 0 : -1}
-            disabled={!editable}
-            onFocus={() => { setFormatFocus(index); }}
-            onMouseDown={(event) => { event.preventDefault(); }}
-            onClick={() => { applyFormatting(control.kind); }}
-            onKeyDown={(event) => {
-              const last = formattingControls.length - 1;
-              const next = event.key === 'ArrowRight' ? (index + 1) % formattingControls.length : event.key === 'ArrowLeft' ? (index + last) % formattingControls.length : event.key === 'Home' ? 0 : event.key === 'End' ? last : null;
-              if (next === null) return;
-              event.preventDefault();
-              setFormatFocus(next);
-              formatButtons.current[next]?.focus();
-            }}
-          >
-            <span aria-hidden="true">{control.visible}</span>
-          </button>
-        ))}
-      </div>
       <div className={paused ? 'composer-box paused' : 'composer-box'}>
       <input
         ref={picker}
@@ -646,6 +622,37 @@ export function Composer({
           key(event);
         }}
       />
+      {/* After the box in tab order, so it costs the log nothing; on a phone it
+          is closed until this button opens it. */}
+      <button type="button" className="format-toggle" aria-label="Formatting" aria-expanded={formatOpen} aria-controls={toolbarId} disabled={!editable} onClick={() => { setFormatOpen(!formatOpen); }} onKeyDown={(event) => { if (event.key === 'Escape' && formatOpen) { event.preventDefault(); setFormatOpen(false); } }}>
+        <span aria-hidden="true">Aa</span>
+      </button>
+      <div id={toolbarId} className={formatOpen ? 'composer-formatting open' : 'composer-formatting'} role="toolbar" aria-label="Formatting" onKeyDown={(event) => { if (event.key === 'Escape' && formatOpen) { event.preventDefault(); setFormatOpen(false); textarea.current?.focus(); } }}>
+        {formattingControls.map((control, index) => (
+          <button
+            key={control.kind}
+            ref={(node) => { formatButtons.current[index] = node; }}
+            type="button"
+            aria-label={control.label}
+            aria-keyshortcuts={control.shortcut}
+            tabIndex={index === formatFocus ? 0 : -1}
+            disabled={!editable}
+            onFocus={() => { setFormatFocus(index); }}
+            onMouseDown={(event) => { event.preventDefault(); }}
+            onClick={() => { setFormatOpen(false); applyFormatting(control.kind); }}
+            onKeyDown={(event) => {
+              const last = formattingControls.length - 1;
+              const next = event.key === 'ArrowRight' ? (index + 1) % formattingControls.length : event.key === 'ArrowLeft' ? (index + last) % formattingControls.length : event.key === 'Home' ? 0 : event.key === 'End' ? last : null;
+              if (next === null) return;
+              event.preventDefault();
+              setFormatFocus(next);
+              formatButtons.current[next]?.focus();
+            }}
+          >
+            <span aria-hidden="true">{control.visible}</span>
+          </button>
+        ))}
+      </div>
       <button
         ref={emojiButton}
         type="button"

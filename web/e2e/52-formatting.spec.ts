@@ -1,4 +1,4 @@
-import type { Locator } from '@playwright/test';
+import type { Locator, Page } from '@playwright/test';
 import { history } from './api';
 import { expect, messages, signIn, test } from './fixtures';
 
@@ -55,4 +55,43 @@ test('F1496 two accounts send and read formatted text and a keyboard-accessible 
   await expect(received.getByRole('button', { name: 'Reveal spoiler' })).toBeFocused();
   await expect(messages(recipient).getByText(secret)).toHaveCount(0);
   expect((await history(world, world.tokens.guest, 'general')).filter((message) => message.body === `${spoilerTag} ||${secret}||`)).toHaveLength(1);
+});
+
+async function boxHeight(page: Page): Promise<number> {
+  return page.locator('.composer-box').evaluate((el) => el.getBoundingClientRect().height);
+}
+
+test('F1496 the toolbar adds no height to the composer, and is one tab stop', async ({ meet, world }) => {
+  const { page } = await meet({ viewport: { width: 1440, height: 900 } });
+  await signIn(page, world, world.tokens.browser, 'browser-test');
+  const toolbar = page.getByRole('toolbar', { name: 'Formatting' });
+  await expect(toolbar).toBeVisible();
+  const with_ = await boxHeight(page);
+  const raw = page.locator('.composer-formatting');
+  await raw.evaluate((el) => { el.style.display = 'none'; });
+  expect(with_).toBe(await boxHeight(page));
+  await raw.evaluate((el) => { el.style.display = ''; });
+  const stops = await toolbar.evaluate((el) => [...el.querySelectorAll('button')].filter((b) => b.tabIndex === 0).length);
+  expect(stops).toBe(1);
+  await toolbar.getByRole('button', { name: 'Bold' }).focus();
+  await page.keyboard.press('ArrowRight');
+  await expect(toolbar.getByRole('button', { name: 'Italic' })).toBeFocused();
+});
+
+test('F1496 on a phone the toolbar is closed until Formatting opens it', async ({ meet, world }) => {
+  const { page } = await meet({ viewport: { width: 390, height: 844 } });
+  await signIn(page, world, world.tokens.browser, 'browser-test');
+  const toggle = page.getByRole('button', { name: 'Formatting', exact: true });
+  const toolbar = page.getByRole('toolbar', { name: 'Formatting' });
+  await expect(toggle).toBeVisible();
+  await expect(toolbar).toBeHidden();
+  const closed = await boxHeight(page);
+  await toggle.click();
+  await expect(toolbar).toBeVisible();
+  expect(await boxHeight(page)).toBe(closed);
+  await page.keyboard.press('Escape');
+  await expect(toolbar).toBeHidden();
+  await toggle.click();
+  await toolbar.getByRole('button', { name: 'Bold' }).click();
+  await expect(toolbar).toBeHidden();
 });
