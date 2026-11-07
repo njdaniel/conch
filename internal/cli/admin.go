@@ -25,6 +25,7 @@ const maxManifestInput = 1 << 20
 type adminOpts struct {
 	server    string
 	asJSON    bool
+	previewAs string
 	kind      string
 	label     string
 	expiresAt string
@@ -115,6 +116,7 @@ type adminCommand struct {
 // adminCommands is the whole of `conch admin`, in the order the usage line
 // lists the groups.
 var adminCommands = []adminCommand{
+	{group: "preview", args: []string{"member"}, run: adminPreview},
 	{group: "channel", verb: "create", args: []string{"name"}, run: adminChannelCreate},
 	// The community model (ADR-013, issue #994), in admin_community.go.
 	{group: "channel", verb: "settings", args: []string{"channel"}, flags: "[--public|--private] [--default on|off] [--archive|--restore] ",
@@ -239,7 +241,7 @@ var adminCommands = []adminCommand{
 		bind: bindPermissionsSet, run: adminPermissionsSet},
 	{group: "permissions", verb: "preset", args: []string{"personal|group"}, flags: "[--yes] ",
 		bind: bindYes, run: adminPermissionsPreset},
-	{group: "directory", verb: "members", run: adminDirectoryMembers},
+	{group: "directory", verb: "members", flags: "[--preview-as <member>] ", bind: bindPreviewAs, run: adminDirectoryMembers},
 	{group: "reaction", verb: "remove", args: []string{"channel", "message-id", "principal-id", "emoji"}, idAt: 3, optionalArgs: 1, flags: "[--yes] ",
 		bind: func(fs *flag.FlagSet, o *adminOpts) {
 			fs.BoolVar(&o.reactionYes, "yes", false, "remove without asking")
@@ -255,9 +257,11 @@ var adminCommands = []adminCommand{
 
 const adminGroups = "channel|principal|credential|member|ban|message|manifest|invite|join|guest|reports|sign-in-link|permissions|directory|ai-admin|reaction"
 
+func (c adminCommand) name() string { return strings.TrimSpace(c.group + " " + c.verb) }
+
 // usage is the one line shown for a malformed command.
 func (c adminCommand) usage() string {
-	line := "conch admin " + c.group + " " + c.verb + " [--server <url>] [--json] " + c.flags
+	line := "conch admin " + c.name() + " [--server <url>] [--json] " + c.flags
 	args := ""
 	for i, a := range c.args {
 		arg := "<" + a + ">"
@@ -274,6 +278,13 @@ func runAdmin(ctx context.Context, args []string, stdin io.Reader, stdout, stder
 		return fmt.Errorf("cli: admin: usage: conch admin <%s> <subcommand>", adminGroups)
 	}
 	group := args[0]
+	if group == "preview" {
+		for _, c := range adminCommands {
+			if c.group == group && c.verb == "" {
+				return runAdminCommand(ctx, c, args[1:], stdin, stdout, stderr)
+			}
+		}
+	}
 	var verbs []string
 	for _, c := range adminCommands {
 		if c.group == group {
@@ -295,11 +306,12 @@ func runAdmin(ctx context.Context, args []string, stdin io.Reader, stdout, stder
 }
 
 func runAdminCommand(ctx context.Context, c adminCommand, args []string, stdin io.Reader, stdout, stderr io.Writer) error {
+	name := c.name()
 	usageErr := func(format string, a ...any) error {
-		return fmt.Errorf("cli: admin %s %s: %s (usage: %s)", c.group, c.verb, fmt.Sprintf(format, a...), c.usage())
+		return fmt.Errorf("cli: admin %s: %s (usage: %s)", name, fmt.Sprintf(format, a...), c.usage())
 	}
 	o := &adminOpts{}
-	fs := newFlagSet("admin "+c.group+" "+c.verb, io.Discard)
+	fs := newFlagSet("admin "+name, io.Discard)
 	fs.StringVar(&o.server, "server", serverEnvOr(), "conchd HTTP URL")
 	fs.BoolVar(&o.asJSON, "json", false, "print the server's response document")
 	if c.bind != nil {

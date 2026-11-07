@@ -110,11 +110,12 @@ describe('local storage', () => {
     expect(code).not.toMatch(/\.(key|clear)\(|[sS]torage\.length/);
     // The preference methods take the key from their caller, and the only
     // callers name the notification and appearance preferences' keys, the setup
-    // card's (a per-account mark that the card was put off), the voice mode and
-    // share quality, and the talk key's name (issue #1382).
+    // card's (a per-account mark that the card was put off), the channel
+    // arrangement's (issue #1493), the voice mode and share quality, and the
+    // talk key's name (issue #1382).
     const api = withoutComments(sources['./api.ts'] ?? '');
-    expect(api.match(/credentials\.(read|write)Preference\(\s*(?!notificationPreferencesKey\(|appearancePreferencesKey\(|setupCardKey\(|voiceModeKey\b|shareQualityKey\b|talkKeyLabelKey\b)/g) ?? []).toEqual([]);
-    expect(api.match(/credentials\.(read|write)Preference\(/g)?.length).toBe(12);
+    expect(api.match(/credentials\.(read|write)Preference\(\s*(?!notificationPreferencesKey\(|appearancePreferencesKey\(|arrangementKey\(|setupCardKey\(|voiceModeKey\b|shareQualityKey\b|talkKeyLabelKey\b)/g) ?? []).toEqual([]);
+    expect(api.match(/credentials\.(read|write)Preference\(/g)?.length).toBe(14);
   });
 
   it('is not missed by the rules: a bare test of each', () => {
@@ -344,11 +345,24 @@ const channelReplace = "window.history.replaceState(null, '', addressWithoutFrag
 // navigates says whether a source writes the address bar other than through
 // the hash. Comments are left out first; then the exception is taken out
 // (from route.ts only, and only once).
+// The third (issue #1534): UpdateNotice.tsx, once, reloads the page when the
+// person presses Reload on the notice that the server was updated. Nothing
+// reloads the page by itself.
+const updateReload = 'window.location.reload()';
+
 function navigates(path: string, code: string): boolean {
   const bare = withoutComments(code);
-  const checked = path === './route.ts' ? bare.replace(inviteReplace, '').replace(channelReplace, '') : bare;
+  let checked = path === './route.ts' ? bare.replace(inviteReplace, '').replace(channelReplace, '') : bare;
+  if (path === './UpdateNotice.tsx') checked = checked.replace(updateReload, '');
   return navigation.some((rule) => rule.test(checked));
 }
+
+describe('the reload exception', () => {
+  it('is one call in src/UpdateNotice.tsx, run by a click', () => {
+    const code = sources['./UpdateNotice.tsx'] ?? '';
+    expect(code.split(updateReload)).toHaveLength(2);
+  });
+});
 
 describe('the history exception', () => {
   it('is two calls in src/route.ts, each once: the address without its fragment, and the shown channel’s hash', () => {

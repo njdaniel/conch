@@ -613,8 +613,8 @@ label {
      wider wraps or shrinks rather than widening the page (issue #467). */
   grid-template-columns: minmax(0, 1fr);
   grid-template-rows: auto minmax(0, 1fr) auto;
-  height: 100vh;
-  height: 100dvh;
+  height: calc(100vh - var(--notice-h, 0px));
+  height: calc(100dvh - var(--notice-h, 0px));
   /* viewport-fit=cover draws the page under a notch and the home indicator:
      pad for them at every width (zero where there are none, issue #929). */
   padding-inline: env(safe-area-inset-left) env(safe-area-inset-right);
@@ -1091,6 +1091,24 @@ label {
   border-radius: var(--radius-sm);
   background: var(--danger-bg);
   color: var(--danger);
+}
+
+.banner.update-notice {
+  /* The notice sits above the lobby; UpdateNotice measures it into
+     --notice-h and the lobby gives up that much height, so the page never
+     grows past the window. */
+  margin: 0;
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  background: transparent;
+  border: 1px solid var(--warn);
+  color: var(--warn);
+}
+
+.banner.update-notice p {
+  margin: 0;
 }
 
 .banner.stale {
@@ -3790,8 +3808,8 @@ button.link {
 @media (max-width: 699px) {
   .lobby.phone {
     position: relative;
-    height: 100vh;
-    height: var(--app-height, 100dvh);
+    height: calc(100vh - var(--notice-h, 0px));
+    height: calc(var(--app-height, 100dvh) - var(--notice-h, 0px));
     grid-template-rows: auto minmax(0, 1fr) auto auto;
     box-sizing: border-box;
     /* The hidden conversation is laid out behind the Voice view at the
@@ -4169,8 +4187,8 @@ button.link {
 @media (max-width: 699px) and (max-height: 560px) {
   .lobby.phone {
     height: auto;
-    min-height: 100vh;
-    min-height: var(--app-height, 100dvh);
+    min-height: calc(100vh - var(--notice-h, 0px));
+    min-height: calc(var(--app-height, 100dvh) - var(--notice-h, 0px));
   }
 
   .lobby.phone .phone-nav {
@@ -5402,4 +5420,88 @@ button.link {
 
 .switcher-help {
   margin: 0;
+}
+
+/* Favorites, groups and their editor (issue #1493). */
+.channel-group-head {
+  margin: var(--s3) 0 var(--s1) var(--s2);
+  font-size: var(--small);
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.channel-group-head > button {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s1);
+  min-height: 2rem;
+  padding: 0 var(--s1);
+  background: transparent;
+  border: 0;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.channel-group-caret {
+  flex: none;
+  width: 1em;
+}
+
+.channel-group-name {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.channel-group > div > .hint {
+  margin: 0 0 0 var(--s3);
+}
+
+.edit-groups {
+  /* Contains its visually hidden status line (.vh is absolute), so that the
+     line scrolls with the channel list instead of landing below it and
+     lengthening the document when the list scrolls (issue #1493). */
+  position: relative;
+  display: grid;
+  gap: var(--s2);
+  margin-top: var(--s3);
+  justify-items: start;
+  min-width: 0;
+}
+
+.group-editor {
+  display: grid;
+  gap: var(--s2);
+  width: 100%;
+  min-width: 0;
+}
+
+.group-editor form,
+.group-editor li,
+.move-to-group {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: var(--s2);
+  min-width: 0;
+}
+
+.group-editor ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: var(--s2);
+}
+
+.group-editor li {
+  display: grid;
+}
+
+.group-editor input,
+.move-to-group select {
+  min-width: 0;
+  max-width: 100%;
+  min-height: 2.25rem;
 }

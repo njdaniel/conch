@@ -23,6 +23,7 @@ import type { LiveStatus, Person } from './useLiveChannel';
 import { mentions } from './useNotifications';
 import { useAuthorNames } from './useAuthorNames';
 import { timeOf } from './time';
+import { fromServer } from './schema/validate';
 
 // The time of day, in the reader's own locale and time zone (time.ts).
 export function clock(when: string | number): string {
@@ -58,7 +59,7 @@ export function audienceLabel(audience: Audience, viewer: number, nets: Readonly
 // (or one that is not the shape this client knows: then it is a plain message).
 function approvalOf(message: MessageV2): ApprovalV1 | null {
   const payload = message.payload;
-  if (payload?.schema !== approvalPayloadSchema || approvalV1(payload.data).length > 0) return null;
+  if (payload?.schema !== approvalPayloadSchema || fromServer(approvalV1)(payload.data).length > 0) return null;
   return payload.data as ApprovalV1;
 }
 
@@ -132,7 +133,7 @@ export function authorOf(message: MessageV2, people: ReadonlyMap<number, Person>
 
 function attachmentsOf(message: MessageV2): FileAttachmentV1 | null {
   const payload = message.payload;
-  if (payload?.schema !== fileAttachmentPayloadSchema || fileAttachmentV1(payload.data).length > 0) return null;
+  if (payload?.schema !== fileAttachmentPayloadSchema || fromServer(fileAttachmentV1)(payload.data).length > 0) return null;
   return payload.data as FileAttachmentV1;
 }
 

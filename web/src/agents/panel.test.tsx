@@ -516,7 +516,7 @@ describe('the member list the socket sends', () => {
     expect(screen.queryByRole('form', { name: 'Rename channel' })).toBeNull();
     expect(document.activeElement).toBe(nav().getByRole('button', { name: 'general' }));
     fireEvent.click(nav().getByRole('button', { name: 'Actions for general' }));
-    expect(screen.getAllByRole('menuitem').map((item) => item.textContent)).toEqual(['Leave channel']);
+    expect(screen.getAllByRole('menuitem').map((item) => item.textContent)).toEqual(['Leave channel', 'Favorite']);
     fireEvent.keyDown(screen.getByRole('menu'), { key: 'Escape' });
     expect(panel().getByText('Only operators and this channel\'s managers add people.')).toBeDefined();
     fireEvent.click(screen.getByRole('button', { name: 'Settings' }));

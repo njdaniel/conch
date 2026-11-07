@@ -364,7 +364,7 @@ describe('lobby', () => {
     signIn();
     await screen.findByRole('button', { name: 'general' });
     const list = screen.getByRole('navigation', { name: 'Channels' });
-    // Two channels and their ⋯, a voice-less one aside, Browse channels. Find a channel (issue #1492) is above the navigation, not in it.
+    // Two channels and their ⋯, a voice-less one aside, Browse channels. Find a channel (#1492) and Edit groups (#1493) sit beside the navigation, not in it.
     expect(list.querySelectorAll('button')).toHaveLength(7);
     expect(screen.getByRole('button', { name: 'general' }).getAttribute('aria-current')).toBe('true');
     expect(within(screen.getByRole('region', { name: 'Conversation' })).getByRole('heading', { level: 2 }).textContent).toBe('general');
