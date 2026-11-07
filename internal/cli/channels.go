@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"strings"
 
 	"github.com/njdaniel/conch/pkg/schema"
 )
@@ -55,18 +56,33 @@ func runChannels(ctx context.Context, args []string, stdout, stderr io.Writer) e
 	case "topic":
 		clear = fs.Bool("clear", false, "clear the channel's topic")
 	}
-	// Flags may follow the positionals, as they may for `nets`.
+	// Flags may follow positionals. Parse one at a time so -- stays a hard stop.
 	var pos []string
 	rest := args[1:]
-	for {
-		if err := fs.Parse(rest); err != nil {
-			return fmt.Errorf("cli: channels %s: %w", verb, err)
-		}
-		if fs.NArg() == 0 {
+	for len(rest) > 0 {
+		if rest[0] == "--" {
+			pos = append(pos, rest[1:]...)
 			break
 		}
-		pos = append(pos, fs.Arg(0))
-		rest = fs.Args()[1:]
+		if rest[0] == "-" || !strings.HasPrefix(rest[0], "-") {
+			pos = append(pos, rest[0])
+			rest = rest[1:]
+			continue
+		}
+		name := strings.TrimPrefix(strings.TrimPrefix(rest[0], "-"), "-")
+		name, _, hasValue := strings.Cut(name, "=")
+		n := 1
+		if f := fs.Lookup(name); f != nil && !hasValue {
+			if boolean, ok := f.Value.(interface{ IsBoolFlag() bool }); !ok || !boolean.IsBoolFlag() {
+				if len(rest) > 1 {
+					n = 2
+				}
+			}
+		}
+		if err := fs.Parse(rest[:n]); err != nil {
+			return fmt.Errorf("cli: channels %s: %w", verb, err)
+		}
+		rest = rest[n:]
 	}
 	if verb == "topic" {
 		if len(pos) < 1 || len(pos) > 2 {

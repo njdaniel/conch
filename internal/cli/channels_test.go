@@ -2,6 +2,7 @@ package cli
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -17,7 +18,20 @@ import (
 func (e *adminEnv) cli(t *testing.T, token string, args ...string) (stdout, stderr string, err error) {
 	t.Helper()
 	t.Setenv("CONCH_TOKEN", token)
-	return runCLI(t, "", append(args, "--server", e.url)...)
+	return runCLI(t, "", channelServerArgs(args, e.url)...)
+}
+
+func channelServerArgs(args []string, url string) []string {
+	for i, arg := range args {
+		if arg != "--" {
+			continue
+		}
+		withServer := make([]string, 0, len(args)+2)
+		withServer = append(withServer, args[:i]...)
+		withServer = append(withServer, "--server", url)
+		return append(withServer, args[i:]...)
+	}
+	return append(args, "--server", url)
 }
 
 func TestChannelsCommands(t *testing.T) {
@@ -36,6 +50,7 @@ func TestChannelsCommands(t *testing.T) {
 		{"the operator sees the public ones only", e.operatorToken, []string{"channels", "list"}, "1 public - - - - lounge\n4 public - joined - - ops\n"},
 		{"join", e.operatorToken, []string{"channels", "join", "lounge"}, "you are in channel lounge\n"},
 		{"join again is the same answer", e.operatorToken, []string{"channels", "join", "lounge"}, "you are in channel lounge\n"},
+		{"end of options applies to other verbs", e.operatorToken, []string{"channels", "join", "--", "lounge"}, "you are in channel lounge\n"},
 		{"the operator sees every channel with counts", e.operatorToken, []string{"channels", "list", "--all"},
 			"1 public - joined 2 - lounge\n2 private - - 1 - den\n3 private - - 1 - attic\n4 public - joined 1 - ops\n"},
 		{"leave", e.operatorToken, []string{"channels", "leave", "lounge"}, "left channel lounge\n"},
@@ -190,6 +205,7 @@ func TestChannelsTopic(t *testing.T) {
 		currentTopic string
 		write        bool
 		wantTopic    string
+		wantBody     string
 		status       int
 		code         string
 		wantOut      string
@@ -201,6 +217,9 @@ func TestChannelsTopic(t *testing.T) {
 		{name: "print through safeLine", args: []string{"channels", "topic", "ops"}, currentTopic: "bad\n\u202e", wantOut: "bad\\n\\u202e\n", wantRequests: 1},
 		{name: "set", args: []string{"channels", "topic", "ops", "Incidents and their follow-ups"}, write: true, wantTopic: "Incidents and their follow-ups", wantOut: "channel ops topic: Incidents and their follow-ups\n", wantRequests: 2},
 		{name: "clear", args: []string{"channels", "topic", "ops", "--clear"}, write: true, wantOut: "channel ops topic cleared\n", wantRequests: 2},
+		{name: "literal clear after end of options", args: []string{"channels", "topic", "--", "ops", "--clear"}, write: true, wantTopic: "--clear", wantBody: `{"topic":"--clear"}`, wantOut: "channel ops topic: --clear\n", wantRequests: 2},
+		{name: "literal single dash text after end of options", args: []string{"channels", "topic", "--", "ops", "-maintenance"}, write: true, wantTopic: "-maintenance", wantBody: `{"topic":"-maintenance"}`, wantOut: "channel ops topic: -maintenance\n", wantRequests: 2},
+		{name: "clear before end of options", args: []string{"channels", "topic", "--clear", "--", "ops"}, write: true, wantBody: `{"topic":""}`, wantOut: "channel ops topic cleared\n", wantRequests: 2},
 		{name: "clear with text is a usage error", args: []string{"channels", "topic", "ops", "text", "--clear"}, wantErr: "--clear cannot be used with text"},
 		{name: "json", args: []string{"channels", "topic", "ops", "new topic", "--json"}, write: true, wantTopic: "new topic", wantOut: "{\"channel\":{\"id\":42,\"name\":\"ops\",\"created_at\":\"0001-01-01T00:00:00Z\",\"topic\":\"new topic\"}}\n", wantRequests: 2},
 		{name: "invalid request refusal", args: []string{"channels", "topic", "ops", "bad"}, write: true, wantTopic: "bad", status: http.StatusBadRequest, code: "invalid_request", wantErr: "the server did not accept the request", wantRequests: 2},
@@ -228,8 +247,15 @@ func TestChannelsTopic(t *testing.T) {
 					if r.Method != http.MethodPut {
 						t.Errorf("write method = %s, want PUT", r.Method)
 					}
+					body, err := io.ReadAll(r.Body)
+					if err != nil {
+						t.Errorf("read write: %v", err)
+					}
+					if tt.wantBody != "" && string(body) != tt.wantBody {
+						t.Errorf("body = %q, want %q", body, tt.wantBody)
+					}
 					var request schema.SetChannelTopicRequestV1
-					if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+					if err := json.Unmarshal(body, &request); err != nil {
 						t.Errorf("decode write: %v", err)
 					}
 					if request.Topic != tt.wantTopic {
@@ -247,7 +273,7 @@ func TestChannelsTopic(t *testing.T) {
 				}
 			}))
 			defer fake.Close()
-			stdout, _, err := runCLI(t, "", append(tt.args, "--server", fake.URL)...)
+			stdout, _, err := runCLI(t, "", channelServerArgs(tt.args, fake.URL)...)
 			if tt.wantErr == "" && err != nil {
 				t.Fatalf("run: %v", err)
 			}
