@@ -2,7 +2,7 @@
 // #585), from one socket whether or not the page is in voice, with an honest
 // state when it cannot be read. The presence socket and read are fakes the
 // test drives, on a fake clock. No SDK, no network.
-import { act, renderHook } from '@testing-library/react';
+import { act, cleanup, renderHook } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ApiResult } from '../api';
 import type { ChannelV0 } from '../schema/channel';
@@ -82,6 +82,7 @@ const presence = (people: number[]): VoicePresenceV1 => ({
 });
 
 interface Props {
+  readonly signedIn?: boolean;
   readonly channel: string | null;
   readonly voiceAllowed: boolean;
   readonly reachable: boolean;
@@ -147,10 +148,59 @@ beforeEach(() => {
   fake.kept = [];
 });
 afterEach(() => {
+  cleanup();
   vi.useRealTimers();
 });
 
+// A room that records the track's mutes and answers everything else with
+// nothing.
+function talkingRoom(sending: boolean[]): unknown {
+  const methods: Record<string, unknown> = {
+    setSending: (on: boolean) => {
+      sending.push(on);
+      return Promise.resolve();
+    },
+    level: () => 0,
+    microphoneInUse: () => null,
+    microphoneProcessing: () => null,
+  };
+  return new Proxy(methods, {
+    get: (target, name: string) => target[name] ?? (() => Promise.resolve(undefined)),
+  });
+}
+
+// joinInVoice joins the channel with a room that records the track's mutes,
+// in Hold to talk with no release delay.
+async function joinInVoice(sending: boolean[]) {
+  fake.session = () =>
+    Promise.resolve({ ok: true, value: { livekit_url: 'wss://lk.example', identity: 'p7', rooms: [{ room: 'r', token: 't', can_publish: true, expires_at: '2026-10-16T00:00:15.000Z' }] } });
+  fake.room = () => talkingRoom(sending);
+  fake.mode = 'ptt';
+  const view = hook({ channel: 'c' });
+  act(() => {
+    view.result.current.join();
+  });
+  await flush();
+  expect(view.result.current.state.phase).toBe('connected');
+  act(() => {
+    view.result.current.client.setReleaseDelay(0);
+  });
+  return view;
+}
+
 describe('the talk key', () => {
+  beforeEach(() => {
+    window.sessionStorage.clear();
+  });
+
+  const fireMouse = (type: string, button: number): boolean => {
+    let allowed = true;
+    act(() => {
+      allowed = window.dispatchEvent(new MouseEvent(type, { button, cancelable: true }));
+    });
+    return allowed;
+  };
+
   it('is let go when it changes while held', () => {
     const { result } = hook({ channel: null });
     const client = result.current.client;
@@ -173,6 +223,232 @@ describe('the talk key', () => {
     });
     expect(press).toHaveBeenCalledTimes(2);
     expect(release).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    [3, 'Mouse4'],
+    [4, 'Mouse5'],
+  ])('presses and releases on mouse button %d', async (button, key) => {
+    const sending: boolean[] = [];
+    const { result } = await joinInVoice(sending);
+    act(() => {
+      result.current.setTalkKey(key);
+    });
+    expect(fireMouse('mousedown', button)).toBe(false);
+    await flush();
+    expect(sending).toEqual([true]);
+    expect(fireMouse('mouseup', button)).toBe(false);
+    await pass(1000);
+    expect(sending).toEqual([true, false]);
+  });
+
+  it('lets go of a held mouse key on blur', async () => {
+    const sending: boolean[] = [];
+    const { result } = await joinInVoice(sending);
+    act(() => {
+      result.current.setTalkKey('Mouse4');
+    });
+    fireMouse('mousedown', 3);
+    await flush();
+    expect(sending).toEqual([true]);
+    act(() => {
+      window.dispatchEvent(new Event('blur'));
+    });
+    await flush();
+    expect(sending).toEqual([true, false]);
+    expect(result.current.state.transmitting).toBe(false);
+  });
+
+  it('ignores every mouse button but the chosen one', async () => {
+    const sending: boolean[] = [];
+    const { result } = await joinInVoice(sending);
+    act(() => {
+      result.current.setTalkKey('Mouse5');
+    });
+    for (const button of [0, 1, 2, 3]) {
+      expect(fireMouse('mousedown', button)).toBe(true);
+      expect(fireMouse('mouseup', button)).toBe(true);
+    }
+    await flush();
+    expect(sending).toEqual([]);
+  });
+
+  it('prevents navigation only for the chosen mouse button, and only in voice', async () => {
+    const { result } = await joinInVoice([]);
+    act(() => {
+      result.current.setTalkKey('Mouse4');
+    });
+    for (const type of ['mousedown', 'mouseup', 'auxclick']) {
+      expect(fireMouse(type, 3)).toBe(false);
+      expect(fireMouse(type, 4)).toBe(true);
+    }
+  });
+
+  it('leaves navigation alone when the person is signed in but not in voice', () => {
+    const { result } = hook({ channel: null });
+    act(() => {
+      result.current.setTalkKey('Mouse4');
+    });
+    const press = vi.spyOn(result.current.client, 'press');
+    for (const type of ['mousedown', 'mouseup', 'auxclick']) expect(fireMouse(type, 3)).toBe(true);
+    expect(press).not.toHaveBeenCalled();
+  });
+
+  describe('while the button is held', () => {
+    afterEach(() => {
+      fake.session = () => new Promise(() => undefined);
+      fake.room = () => ({});
+      fake.mode = null;
+    });
+    const keyEvent = (type: string, code: string) => {
+      act(() => {
+        window.dispatchEvent(new KeyboardEvent(type, { code }));
+      });
+    };
+
+    it('a change to a keyboard key stops it, a stale mouse event cannot restart it, and the new key works', async () => {
+      const sending: boolean[] = [];
+      const { result } = await joinInVoice(sending);
+      act(() => {
+        result.current.setTalkKey('Mouse4');
+      });
+      fireMouse('mousedown', 3);
+      await flush();
+      expect(sending).toEqual([true]);
+      act(() => {
+        result.current.setTalkKey('KeyV');
+      });
+      await pass(1000);
+      expect(sending).toEqual([true, false]);
+      expect(result.current.state.transmitting).toBe(false);
+      expect(fireMouse('mouseup', 3)).toBe(true);
+      expect(fireMouse('mousedown', 3)).toBe(true);
+      await flush();
+      expect(sending).toEqual([true, false]);
+      keyEvent('keydown', 'KeyV');
+      await flush();
+      expect(sending).toEqual([true, false, true]);
+      keyEvent('keyup', 'KeyV');
+      await pass(1000);
+      expect(sending).toEqual([true, false, true, false]);
+    });
+
+    it('a change from a keyboard key to a mouse key stops it, a stale key event cannot restart it, and the mouse key works', async () => {
+      const sending: boolean[] = [];
+      const { result } = await joinInVoice(sending);
+      act(() => {
+        result.current.setTalkKey('KeyV');
+      });
+      keyEvent('keydown', 'KeyV');
+      await flush();
+      expect(sending).toEqual([true]);
+      act(() => {
+        result.current.setTalkKey('Mouse4');
+      });
+      await pass(1000);
+      expect(sending).toEqual([true, false]);
+      expect(result.current.state.transmitting).toBe(false);
+      keyEvent('keyup', 'KeyV');
+      keyEvent('keydown', 'KeyV');
+      await flush();
+      expect(sending).toEqual([true, false]);
+      expect(fireMouse('mousedown', 3)).toBe(false);
+      await flush();
+      expect(sending).toEqual([true, false, true]);
+      expect(fireMouse('mouseup', 3)).toBe(false);
+      await pass(1000);
+      expect(sending).toEqual([true, false, true, false]);
+    });
+
+    it('signing out stops it, a stale mouse event cannot restart it, and the key works after signing in again', async () => {
+      const sending: boolean[] = [];
+      const view = await joinInVoice(sending);
+      act(() => {
+        view.result.current.setTalkKey('Mouse4');
+      });
+      fireMouse('mousedown', 3);
+      await flush();
+      expect(sending).toEqual([true]);
+      view.rerender({ channel: 'c', voiceAllowed: true, reachable: true, signedIn: false });
+      await flush();
+      expect(sending).toEqual([true, false]);
+      expect(view.result.current.state.transmitting).toBe(false);
+      expect(fireMouse('mouseup', 3)).toBe(true);
+      expect(fireMouse('mousedown', 3)).toBe(true);
+      await flush();
+      expect(sending).toEqual([true, false]);
+      view.rerender({ channel: 'c', voiceAllowed: true, reachable: true, signedIn: true });
+      act(() => {
+        view.result.current.join();
+      });
+      await flush();
+      expect(view.result.current.state.phase).toBe('connected');
+      act(() => {
+        view.result.current.client.setReleaseDelay(0);
+      });
+      expect(fireMouse('mousedown', 3)).toBe(false);
+      await flush();
+      expect(sending).toEqual([true, false, true]);
+    });
+
+    it('leaving voice stops it, a stale mouse event cannot restart it, navigation returns, and the key works after rejoining', async () => {
+      const sending: boolean[] = [];
+      const view = await joinInVoice(sending);
+      act(() => {
+        view.result.current.setTalkKey('Mouse4');
+      });
+      fireMouse('mousedown', 3);
+      await flush();
+      expect(sending).toEqual([true]);
+      await act(async () => {
+        await view.result.current.client.leave();
+      });
+      await flush();
+      expect(view.result.current.state.phase).toBe('idle');
+      expect(sending).toEqual([true, false]);
+      expect(view.result.current.state.transmitting).toBe(false);
+      for (const type of ['mouseup', 'mousedown', 'auxclick']) expect(fireMouse(type, 3)).toBe(true);
+      await flush();
+      expect(sending).toEqual([true, false]);
+      act(() => {
+        view.result.current.join();
+      });
+      await flush();
+      expect(view.result.current.state.phase).toBe('connected');
+      act(() => {
+        view.result.current.client.setReleaseDelay(0);
+      });
+      expect(fireMouse('mousedown', 3)).toBe(false);
+      await flush();
+      expect(sending).toEqual([true, false, true]);
+    });
+  });
+
+  it('keeps a stored keyboard key working unchanged', () => {
+    window.sessionStorage.setItem('conch.web.voice.key', 'KeyV');
+    const { result } = hook({ channel: null });
+    const press = vi.spyOn(result.current.client, 'press');
+    const release = vi.spyOn(result.current.client, 'release');
+    act(() => {
+      window.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyV' }));
+      window.dispatchEvent(new KeyboardEvent('keyup', { code: 'KeyV' }));
+    });
+    expect(press).toHaveBeenCalledTimes(1);
+    expect(release).toHaveBeenCalledTimes(1);
+    expect(fireMouse('mousedown', 3)).toBe(true);
+    expect(press).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not treat a mouse binding as a keyboard code', () => {
+    const { result } = hook({ channel: null });
+    act(() => {
+      result.current.setTalkKey('Mouse4');
+    });
+    const press = vi.spyOn(result.current.client, 'press');
+    act(() => {
+      window.dispatchEvent(new KeyboardEvent('keydown', { code: 'Mouse4' }));
+    });
+    expect(press).not.toHaveBeenCalled();
   });
 });
 
@@ -211,23 +487,6 @@ describe('the release delay', () => {
 // talk key is doing: while a new key is being chosen, Hold to talk still
 // works, and what it opened must shut on a blur too.
 describe('losing focus', () => {
-  // A room that records the track's mutes and answers everything else with
-  // nothing.
-  function talkingRoom(sending: boolean[]): unknown {
-    const methods: Record<string, unknown> = {
-      setSending: (on: boolean) => {
-        sending.push(on);
-        return Promise.resolve();
-      },
-      level: () => 0,
-      microphoneInUse: () => null,
-      microphoneProcessing: () => null,
-    };
-    return new Proxy(methods, {
-      get: (target, name: string) => target[name] ?? (() => Promise.resolve(undefined)),
-    });
-  }
-
   async function joinedHook(sending: boolean[]) {
     fake.session = () =>
       Promise.resolve({ ok: true, value: { livekit_url: 'wss://lk.example', identity: 'p7', rooms: [{ room: 'r', token: 't', can_publish: true, expires_at: '2026-10-16T00:00:15.000Z' }] } });

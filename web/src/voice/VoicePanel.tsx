@@ -55,7 +55,7 @@ import { CameraTest } from './CameraTest';
 import type { Person } from '../useLiveChannel';
 import type { Phase, Processing, VoiceState } from './connection';
 import { clampTail, maxTail, releasePage, releaseStep } from './gate';
-import { keyLabel } from './keys';
+import { keyLabel, talkKeyForMouseButton } from './keys';
 import { occupants, sharer, type Occupant } from './presence';
 import { busyNote, endedNote, oneSharerNote, othersShareNote, ownPageNote, resumedNote, resumingNote, sharedNote, shortShareNote, soundNote, watchNote, type ShareFrameRate, type ShareResolution } from './share';
 import { ShareReadout, ShareView } from './ShareView';
@@ -215,9 +215,18 @@ export function VoicePanel({
       if (e.code === 'Escape') voice.capture(false);
       else voice.setTalkKey(e.code);
     };
+    const onMouse = (e: MouseEvent) => {
+      const key = talkKeyForMouseButton(e.button);
+      if (key === null) return;
+      e.preventDefault();
+      e.stopPropagation();
+      voice.setTalkKey(key);
+    };
     window.addEventListener('keydown', onKey);
+    window.addEventListener('mousedown', onMouse);
     return () => {
       window.removeEventListener('keydown', onKey);
+      window.removeEventListener('mousedown', onMouse);
     };
   }, [voice]);
 
@@ -1196,7 +1205,7 @@ function Options({ voice, open, sharable, about, others, cameraAllowed }: {
           <p className="hint talk-key-note">
             Talk key: {keyLabel(voice.talkKey)}.{' '}
             <button type="button" onClick={() => { voice.capture(!voice.capturing); }}>
-              {voice.capturing ? 'Press a key (Escape cancels)' : 'Change talk key'}
+              {voice.capturing ? 'Press a key or Mouse 4/5 (Escape cancels)' : 'Change talk key'}
             </button>
           </p>
           {/* How long the microphone stays open after the key comes up, so

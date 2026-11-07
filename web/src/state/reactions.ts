@@ -3,8 +3,10 @@
 import type { ReactionCountV1, ReactionSummaryV1 } from '../schema/reaction';
 
 export interface ReactionState {
-  // Batch omissions have no as_of. Frames for these ids need a fresh batch
-  // confirmation before they can repopulate an unversioned empty snapshot.
+  // Only ids a batch omitted (invisible, removed or unknown to the reader) have
+  // no as_of. A visible message with no reactions comes back as an empty
+  // summary with an as_of, so it is versioned like any other. Frames for an
+  // unversioned id need a fresh batch confirmation first.
   readonly unversioned: ReadonlySet<number>;
   readonly summaries: ReadonlyMap<number, ReactionSummaryV1>;
   readonly revisions: ReadonlyMap<number, number>;

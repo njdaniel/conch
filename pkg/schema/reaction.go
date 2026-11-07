@@ -201,9 +201,12 @@ func (s ReactionSummaryV1) Validate() error {
 }
 
 // ReactionSummariesResponseV1 is the body of the batch read: one summary per
-// requested message the caller may see that has at least one reaction,
-// ordered by message_id. Always a JSON array. An id the caller named that is
-// absent (invisible, unknown or unreacted) is an empty summary to the client.
+// requested message the caller may see, ordered by message_id, each stamped
+// with the read's as_of. A visible message with no reaction is listed with
+// "reactions": [] (reaction-summaries-response-v1-unreacted.json), so a client
+// orders it by as_of like any other. Always a JSON array. An id the caller
+// named that is absent is invisible, removed or unknown, and those three are
+// indistinguishable: the client clears what it showed and holds no as_of for it.
 type ReactionSummariesResponseV1 struct {
 	Summaries []ReactionSummaryV1 `json:"summaries"`
 }
