@@ -2,8 +2,8 @@
 // contexts against the conchd and pinned LiveKit of voice-world.ts, each on
 // Chromium's fake devices: the screen picker is answered with a fake screen
 // with a sound track (playwright.config.ts). The fake screen captures at the
-// size and rate it is asked for, so at 3840x2160 and 60 fps, published with
-// 720p and 1080p layers below it (issue #565). Without Docker the tests fail
+// size and rate it is asked for, by default 1920x1080 at 30 fps, with a 720p
+// layer below it. Without Docker the tests fail
 // when CI is set and are skipped otherwise, as in 10-voice.
 //
 // A share carries on when the room is renewed under it (issue #516): another
@@ -331,6 +331,71 @@ test.describe('screen share with LiveKit', () => {
       await expectClean(a);
     } finally {
       await a.close();
+    }
+  });
+
+  test('a live quality change appears in the sent and received readouts, and the choice survives a reload', async ({ browser }) => {
+    const a = await person(browser, 'alice');
+    const b = await person(browser, 'bob');
+    try {
+      await join(a, 'Join voice');
+      await join(b, 'Watch only');
+      await share(a);
+      await watching(b);
+      await expect(shareView(b.page)).toContainText(/\d+×\d+ · \d+ fps · \d+\.\d Mbps/, { timeout: 30_000 });
+
+      const voice = voiceRegion(a.page);
+      await voice.getByRole('button', { name: 'Voice options' }).click();
+      await voice.getByLabel('Share resolution').selectOption('720p');
+      await voice.getByLabel('Share frame rate').selectOption('15');
+      await expect(voice).toContainText('Sending: 1280×720 · 15 fps', { timeout: 30_000 });
+      await expect(shareView(b.page)).toContainText(/1280×720 · 15 fps · \d+\.\d Mbps/, { timeout: 30_000 });
+      expect(await picks(a.page), 'a quality change opens no new picker').toBe(1);
+      await expect(voice).toContainText('You are sharing your screen with sound.');
+
+      // End the share before the reload, and wait for its row: a share that
+      // ends with the page logs its stop late, in the next test's window.
+      await voice.getByRole('button', { name: 'Stop sharing' }).click();
+      await expect.poll(async () => (await shareRows()).at(-1)?.action, { timeout: 15_000 }).toBe('voice_share_stopped');
+      await a.page.reload();
+      await openChannel(a.page, vw.channel);
+      await join(a, 'Join voice');
+      await voiceRegion(a.page).getByRole('button', { name: 'Voice options' }).click();
+      await expect(voiceRegion(a.page).getByLabel('Share resolution')).toHaveValue('720p');
+      await expect(voiceRegion(a.page).getByLabel('Share frame rate')).toHaveValue('15');
+      await expectClean(a);
+      await expectClean(b);
+    } finally {
+      for (const p of [a, b]) await p.close();
+    }
+  });
+
+  test('raising the quality during a share reaches the viewer', async ({ browser }) => {
+    const a = await person(browser, 'alice');
+    const b = await person(browser, 'bob');
+    try {
+      await join(a, 'Join voice');
+      await join(b, 'Watch only');
+      await share(a);
+      await watching(b);
+      const voice = voiceRegion(a.page);
+      await voice.getByRole('button', { name: 'Voice options' }).click();
+      await voice.getByLabel('Share resolution').selectOption('720p');
+      await expect(shareView(b.page)).toContainText(/1280×720/, { timeout: 30_000 });
+      await voice.getByLabel('Share resolution').selectOption('1080p');
+      await expect(voice).toContainText('Sending: 1920×1080', { timeout: 30_000 });
+      // The viewer's layer follows the size of its pane (adaptive stream), so
+      // it need not be the top: the picture keeps flowing after the raise.
+      await expect(shareView(b.page)).toContainText(/\d+×\d+ · \d+ fps · \d+\.\d Mbps/, { timeout: 30_000 });
+      expect(await picks(a.page), 'a quality change opens no new picker').toBe(1);
+      await expectClean(a);
+      await expectClean(b);
+      // End the share and wait for its row, so its stop is not logged late
+      // in the next test's window.
+      await voice.getByRole('button', { name: 'Stop sharing' }).click();
+      await expect.poll(async () => (await shareRows()).at(-1)?.action, { timeout: 15_000 }).toBe('voice_share_stopped');
+    } finally {
+      for (const p of [a, b]) await p.close();
     }
   });
 
@@ -783,7 +848,7 @@ test.describe('screen share with LiveKit', () => {
     // The Voice view, where Join voice was, shows everyone (issue #929).
     const chips = voice.getByRole('list', { name: /^[89] in voice$/ }).locator('li:visible');
     await expect.poll(() => chips.count()).toBeGreaterThanOrEqual(8);
-    await expect(chips.filter({ hasText: 'You' })).toHaveCount(1);
+    await expect(chips.filter({ hasText: b.member.name })).toHaveCount(1);
     // The strip is under Chat: one row of four, with no roster, however many
     // are in voice (issue #1028).
     await showView(b.page, 'Chat');

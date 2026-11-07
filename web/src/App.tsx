@@ -707,7 +707,7 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
   const occupancy = useOccupancy({ signedIn, voiceAllowed, reachable: connection === 'connected', onUnauthorized });
   // Their names (issue #1103), from the channel's members; the page's own
   // people first.
-  const voiceNames = useOccupantNames({ occupancy, channels: channels.channels, people: live.people, viewer: principal?.id ?? 0 });
+  const voiceNames = useOccupantNames({ occupancy, channels: channels.channels, people: live.people, viewer: principal?.id ?? 0, viewerName: shownName });
 
   // Go to message: run detail closes, and once the conversation is on screen
   // again it scrolls to the message the run answers and puts focus on it. A
@@ -1762,6 +1762,7 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
               signedIn={signedIn}
               channel={selected}
               viewer={auth.principal.id}
+              viewerName={shownName}
               people={live.people}
               voiceAllowed={voiceAllowed}
               cameraAllowed={cameraAllowed}

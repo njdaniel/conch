@@ -121,6 +121,11 @@ interface Stub {
   // Issue #565: the size and frame rate the next picture captured says it
   // has (its track's settings); 1080p at 30 fps unless a test says otherwise.
   captured: { width?: number; height?: number; frameRate?: number };
+  // The encodings LiveKit made for the screen share, by rid, smallest first:
+  // it names them by how many there are (q; q,h; q,h,f). And whether the
+  // browser leaves the capture as it was when constrained (it may).
+  rids: string[];
+  ignoreConstraints: boolean;
   // Issue #658: the captures made, what each restart was asked for, when set
   // the next restart waits for the test or fails, the devices the browser
   // lists, what each listing was asked, and the audio contexts made.
@@ -156,12 +161,22 @@ interface StubSettings {
   height?: number;
   frameRate?: number;
 }
+interface StubParameters {
+  encodings: RTCRtpEncodingParameters[];
+}
+interface StubSender {
+  parameters: StubParameters;
+  getParameters: () => StubParameters;
+  setParameters: (parameters: StubParameters) => Promise<void>;
+}
 interface StubScreenTrack {
   source: string;
   stopped: number;
-  mediaStreamTrack: { readyState: string; enabled: boolean; getSettings: () => StubSettings; addEventListener: (type: string, fn: () => void) => void; ended: () => void };
+  mediaStreamTrack: { readyState: string; enabled: boolean; contentHint: string; constraints: MediaTrackConstraints[]; getSettings: () => StubSettings; applyConstraints: (constraints: MediaTrackConstraints) => Promise<void>; addEventListener: (type: string, fn: () => void) => void; ended: () => void };
   // What getSettings answers; a test may change it, as a capture can change size.
   settings: StubSettings;
+  sender?: StubSender;
+  publishOptions?: unknown;
   stop: () => void;
 }
 // A camera's capture, as the browser gives it and as the page wraps it.
@@ -221,6 +236,8 @@ const state = vi.hoisted((): Stub => {
     pending: new Map(),
     owners: new Map(),
     captured: { width: 1920, height: 1080, frameRate: 30 },
+    rids: ['q', 'h'],
+    ignoreConstraints: false,
     medias: [],
     restarts: [],
     restart: null,
@@ -263,7 +280,19 @@ vi.mock('livekit-client', () => {
       mediaStreamTrack: {
         readyState: 'live',
         enabled: true,
+        contentHint: 'motion',
+        constraints: [],
         getSettings: () => ({ ...track.settings }),
+        applyConstraints: (constraints) => {
+          track.mediaStreamTrack.constraints.push(constraints);
+          const max = (value: ConstrainULong | undefined): number | undefined => typeof value === 'object' && 'max' in value && typeof value.max === 'number' ? value.max : undefined;
+          const width = max(constraints.width);
+          const height = max(constraints.height);
+          const frameRate = max(constraints.frameRate);
+          if (!state.ignoreConstraints) track.settings = { ...track.settings, ...(width === undefined ? {} : { width }), ...(height === undefined ? {} : { height }), ...(frameRate === undefined ? {} : { frameRate }) };
+          state.calls.push('constrain');
+          return Promise.resolve();
+        },
         addEventListener: (type, fn) => {
           if (type === 'ended') listeners.push(fn);
         },
@@ -273,6 +302,17 @@ vi.mock('livekit-client', () => {
           for (const fn of listeners) fn();
         },
       },
+      sender: source === 'screen_share' ? {
+        parameters: { encodings: state.rids.map((rid) => ({ rid })) },
+        getParameters() {
+          return { ...this.parameters, encodings: this.parameters.encodings.map((encoding) => ({ ...encoding })) };
+        },
+        setParameters(parameters) {
+          this.parameters = parameters;
+          state.calls.push('parameters');
+          return Promise.resolve();
+        },
+      } : undefined,
       stop: () => {
         track.stopped++;
         track.mediaStreamTrack.readyState = 'ended';
@@ -1201,41 +1241,40 @@ describe('sharing a screen', () => {
     return room;
   }
 
-  it("asks the picker for up to 3840x2160 at up to 60 fps with unprocessed sound, tab and system sound offered, this page's own sound and this tab left out", async () => {
+  it("asks the picker for the default 1080p30 with unprocessed sound, tab and system sound offered, this page's own sound and this tab left out", async () => {
     const room = await connected();
     expect(await room.pickScreen()).toEqual({ audio: true });
     expect(state.screenOptions).toEqual({
       video: true,
       audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false, channelCount: 2, restrictOwnAudio: true },
-      resolution: { width: 3840, height: 2160, frameRate: 60 },
+      resolution: { width: 1920, height: 1080, frameRate: 30 },
       contentHint: 'motion',
       systemAudio: 'include',
       selfBrowserSurface: 'exclude',
       surfaceSwitching: 'include',
       suppressLocalAudioPlayback: false,
     });
-    // Nothing is published by picking.
-    expect(state.calls).toEqual(['pick']);
+    // Nothing is published by picking; the chosen caps are held on the capture.
+    expect(state.calls).toEqual(['pick', 'constrain']);
   });
 
-  // Issue #554: there is no choice of what a share is for; every share keeps
-  // motion, and the rest of the picker's options are as they were.
-  it('captures every share as motion', () => {
+  it('uses motion for the default and detail for a 15 fps choice', () => {
     expect(captureOptions()).toEqual({
       video: true,
       audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false, channelCount: 2, restrictOwnAudio: true },
-      resolution: { width: 3840, height: 2160, frameRate: 60 },
+      resolution: { width: 1920, height: 1080, frameRate: 30 },
       contentHint: 'motion',
       systemAudio: 'include',
       selfBrowserSurface: 'exclude',
       surfaceSwitching: 'include',
       suppressLocalAudioPlayback: false,
     });
+    expect(captureOptions({ resolution: '720p', frameRate: 15 }).contentHint).toBe('detail');
   });
 
-  // Issue #565: the picture's encodings follow its track's settings, read
-  // after the picker. A 1080p30 capture has a 720p layer and no 1080p one.
-  it('publishes a 1080p picture as captured with a 720p layer at 15 fps, and the sound as stereo music', async () => {
+  // The picture's encodings follow its track's settings, read after the picker.
+  // A 1080p30 capture has a 720p layer and no 1080p one.
+  it('publishes a 1080p picture as captured with a 720p layer at 30 fps, and the sound as stereo music', async () => {
     const room = await connected();
     await room.pickScreen();
     await room.publishScreen();
@@ -1246,7 +1285,7 @@ describe('sharing a screen', () => {
           source: 'screen_share',
           simulcast: true,
           screenShareEncoding: { maxBitrate: 6_000_000, maxFramerate: 30 },
-          screenShareSimulcastLayers: [{ width: 1280, height: 720, encoding: { maxBitrate: 1_500_000, maxFramerate: 15 } }],
+          screenShareSimulcastLayers: [{ width: 1280, height: 720, encoding: { maxBitrate: 2_000_000, maxFramerate: 30 } }],
         },
       },
       {
@@ -1256,17 +1295,70 @@ describe('sharing a screen', () => {
     ]);
   });
 
-  it('publishes a 4K60 picture at 60 fps and 18 Mb/s with layers of 720p at 15 fps and 1080p at 30 fps', async () => {
-    state.captured = { width: 3840, height: 2160, frameRate: 60 };
+  it('changes a live capture and its sender encodings without republishing', async () => {
     const room = await connected();
     await room.pickScreen();
+    await room.publishScreen();
+    const track = state.screenTracks[0];
+    if (track === undefined) throw new Error('no screen track');
+    const published = [...state.published];
+    state.calls.length = 0;
+    await room.setShareQuality({ resolution: '720p', frameRate: 15 });
+    expect(track.mediaStreamTrack.contentHint).toBe('detail');
+    expect(track.mediaStreamTrack.constraints).toEqual([{ width: { max: 1920 }, height: { max: 1080 }, frameRate: { max: 30 } }, { width: { max: 1280 }, height: { max: 720 }, frameRate: { max: 15 } }]);
+    expect(track.sender?.parameters.encodings).toEqual([
+      { rid: 'q', maxBitrate: 6_000_000, maxFramerate: 15, scaleResolutionDownBy: 1 },
+      { rid: 'h', maxBitrate: 6_000_000, maxFramerate: 15, scaleResolutionDownBy: 1 },
+    ]);
+    expect(state.calls).toEqual(['constrain', 'parameters']);
+    expect(state.published).toEqual(published);
+  });
+
+  // LiveKit's real layouts: one encoding is q, two are q,h, three are q,h,f.
+  const q = (maxBitrate: number, maxFramerate: number, scaleResolutionDownBy: number, rid: string) => ({ rid, maxBitrate, maxFramerate, scaleResolutionDownBy });
+  it.each([
+    { name: '1 encoding, 720p to Source', rids: ['q'], from: { resolution: '720p', frameRate: 30 }, to: { resolution: 'source', frameRate: 60 }, want: [q(18_000_000, 60, 1, 'q')] },
+    { name: '2 encodings, 720p to Source', rids: ['q', 'h'], from: { resolution: '720p', frameRate: 30 }, to: { resolution: 'source', frameRate: 60 }, want: [q(2_000_000, 30, 3, 'q'), q(18_000_000, 60, 1, 'h')] },
+    { name: '3 encodings, 720p to Source', rids: ['q', 'h', 'f'], from: { resolution: '720p', frameRate: 30 }, to: { resolution: 'source', frameRate: 60 }, want: [q(2_000_000, 30, 3, 'q'), q(4_000_000, 30, 2, 'h'), q(18_000_000, 60, 1, 'f')] },
+    { name: '3 encodings, Source to 720p', rids: ['q', 'h', 'f'], from: { resolution: 'source', frameRate: 60 }, to: { resolution: '720p', frameRate: 30 }, want: [q(6_000_000, 30, 1, 'q'), q(6_000_000, 30, 1, 'h'), q(6_000_000, 30, 1, 'f')] },
+    { name: '2 encodings, 1080p to 720p', rids: ['q', 'h'], from: { resolution: '1080p', frameRate: 30 }, to: { resolution: '720p', frameRate: 30 }, want: [q(6_000_000, 30, 1, 'q'), q(6_000_000, 30, 1, 'h')] },
+  ] as const)('puts the chosen top on the highest encoding: $name', async ({ rids, from, to, want }) => {
+    state.captured = { width: 3840, height: 2160, frameRate: 60 };
+    state.rids = [...rids];
+    const room = await connected();
+    await room.pickScreen(from);
+    await room.publishScreen();
+    await room.setShareQuality(to);
+    const encodings = state.screenTracks[0]?.sender?.parameters.encodings;
+    // The capture is 4K until constrained; its size follows the constraint.
+    expect(encodings).toEqual(want);
+  });
+
+  it('holds the chosen cap at publish when the picker returns a larger capture than asked', async () => {
+    state.captured = { width: 3840, height: 2160, frameRate: 60 };
+    state.ignoreConstraints = true;
+    const room = await connected();
+    await room.pickScreen({ resolution: '1080p', frameRate: 30 });
+    await room.publishScreen();
+    const track = state.screenTracks[0];
+    expect(track?.mediaStreamTrack.constraints).toEqual([{ width: { max: 1920 }, height: { max: 1080 }, frameRate: { max: 30 } }]);
+    expect(track?.sender?.parameters.encodings).toEqual([
+      { rid: 'q', maxBitrate: 2_000_000, maxFramerate: 30, scaleResolutionDownBy: 3 },
+      { rid: 'h', maxBitrate: 6_000_000, maxFramerate: 30, scaleResolutionDownBy: 2 },
+    ]);
+  });
+
+  it('publishes a Source 4K60 picture at 60 fps and 18 Mb/s with layers of 720p30 and 1080p30', async () => {
+    state.captured = { width: 3840, height: 2160, frameRate: 60 };
+    const room = await connected();
+    await room.pickScreen({ resolution: 'source', frameRate: 60 });
     await room.publishScreen();
     expect(state.published[0]?.options).toEqual({
       source: 'screen_share',
       simulcast: true,
       screenShareEncoding: { maxBitrate: 18_000_000, maxFramerate: 60 },
       screenShareSimulcastLayers: [
-        { width: 1280, height: 720, encoding: { maxBitrate: 1_500_000, maxFramerate: 15 } },
+        { width: 1280, height: 720, encoding: { maxBitrate: 2_000_000, maxFramerate: 30 } },
         { width: 1920, height: 1080, encoding: { maxBitrate: 4_000_000, maxFramerate: 30 } },
       ],
     });
@@ -1362,7 +1454,7 @@ describe('sharing a screen', () => {
           source: 'screen_share',
           simulcast: true,
           screenShareEncoding: { maxBitrate: 6_000_000, maxFramerate: 30 },
-          screenShareSimulcastLayers: [{ width: 1280, height: 720, encoding: { maxBitrate: 1_500_000, maxFramerate: 15 } }],
+          screenShareSimulcastLayers: [{ width: 1280, height: 720, encoding: { maxBitrate: 2_000_000, maxFramerate: 30 } }],
         },
         { source: 'screen_share_audio', audioPreset: { maxBitrate: 128000 }, dtx: false, red: false, forceStereo: true },
       ]);
@@ -1378,9 +1470,9 @@ describe('sharing a screen', () => {
   // Issue #565: the size is read at each publish, not kept from the picker,
   // so a capture whose source changed size (the browser lets the sharer
   // switch what is shared) is published on the next connection as it is now.
-  it('publishes a kept capture at the size it has when the next connection publishes it', async () => {
+  it('publishes a kept Source capture at the size it has when the next connection publishes it', async () => {
     const old = await connected();
-    await old.pickScreen();
+    await old.pickScreen({ resolution: 'source', frameRate: 60 });
     await old.publishScreen();
     const kept = old.keepScreen();
     await old.close();
@@ -1389,6 +1481,7 @@ describe('sharing a screen', () => {
     if (video === undefined) throw new Error('no picture captured');
     video.settings = { width: 2560, height: 1440, frameRate: 60 };
     const next = await connected();
+    await next.setShareQuality({ resolution: 'source', frameRate: 60 });
     next.adoptScreen(kept);
     state.published.length = 0;
     await next.publishScreen();
@@ -1397,7 +1490,7 @@ describe('sharing a screen', () => {
       simulcast: true,
       screenShareEncoding: { maxBitrate: 10_000_000, maxFramerate: 60 },
       screenShareSimulcastLayers: [
-        { width: 1280, height: 720, encoding: { maxBitrate: 1_500_000, maxFramerate: 15 } },
+        { width: 1280, height: 720, encoding: { maxBitrate: 2_000_000, maxFramerate: 30 } },
         { width: 1920, height: 1080, encoding: { maxBitrate: 4_000_000, maxFramerate: 30 } },
       ],
     });
@@ -1475,6 +1568,7 @@ describe('sharing a screen', () => {
       expect(outcome.value).toBe('pending');
       vi.advanceTimersByTime(grantWait - 1);
       grant();
+      await settle();
       await settle();
       expect(outcome.value).toBe('published');
       expect(state.published.map((p) => p.source)).toEqual(['screen_share', 'screen_share_audio']);
@@ -1566,7 +1660,7 @@ describe('sharing a screen', () => {
       },
     );
     await settle();
-    expect(state.calls).toEqual(['pick', 'publish screen_share']);
+    expect(state.calls).toEqual(['pick', 'constrain', 'publish screen_share']);
     const kept = room.keepScreen();
     expect(state.screenTracks.map((t) => t.mediaStreamTrack.enabled), 'blanked at once').toEqual([false, false]);
     held.resolve(undefined);
@@ -1620,13 +1714,12 @@ describe('sharing a screen', () => {
   });
 });
 
-// Issue #565: a share's encodings follow what was captured. The top layer is
-// the capture at its own frame rate up to 60 fps, its bitrate by the longer
-// side (6, 10 and 18 Mb/s up to 1920, up to 2560 and beyond); below it 720p
-// at 15 fps and 1080p at 30 fps, smallest first, each left out unless it is
-// smaller than the capture.
+// Source keeps the capture's own size and rate up to 4K60. The top layer's
+// bitrate follows its longer side; below it are 720p30 at 2 Mbps and 1080p30,
+// smallest first, each left out unless it is smaller than the capture.
 describe("a share's encodings", () => {
-  const p720: ShareLayer = { width: 1280, height: 720, maxBitrate: 1_500_000, maxFramerate: 15 };
+  const sourceEncodings = (captured: { width?: number; height?: number; frameRate?: number }) => shareEncodings(captured, { resolution: 'source', frameRate: 60 });
+  const p720: ShareLayer = { width: 1280, height: 720, maxBitrate: 2_000_000, maxFramerate: 30 };
   const p1080: ShareLayer = { width: 1920, height: 1080, maxBitrate: 4_000_000, maxFramerate: 30 };
 
   it.each<{ readonly width: number; readonly height: number; readonly fps: number; readonly bitrate: number; readonly lower: readonly ShareLayer[] }>([
@@ -1639,7 +1732,7 @@ describe("a share's encodings", () => {
     { width: 3840, height: 2160, fps: 30, bitrate: 18_000_000, lower: [p720, p1080] },
     { width: 3840, height: 2160, fps: 60, bitrate: 18_000_000, lower: [p720, p1080] },
   ])('a $width x $height capture at $fps fps', ({ width, height, fps, bitrate, lower }) => {
-    expect(shareEncodings({ width, height, frameRate: fps })).toEqual({ top: { width, height, maxBitrate: bitrate, maxFramerate: fps }, lower });
+    expect(sourceEncodings({ width, height, frameRate: fps })).toEqual({ top: { width, height, maxBitrate: bitrate, maxFramerate: fps }, lower });
   });
 
   it.each<{ readonly what: string; readonly width: number; readonly height: number; readonly bitrate: number; readonly lower: readonly ShareLayer[] }>([
@@ -1657,23 +1750,23 @@ describe("a share's encodings", () => {
     // Inside both boxes: no layer would be smaller, so none.
     { what: 'a small window', width: 1000, height: 700, bitrate: 6_000_000, lower: [] },
   ])('$what capture ($width x $height at 60 fps)', ({ width, height, bitrate, lower }) => {
-    expect(shareEncodings({ width, height, frameRate: 60 })).toEqual({ top: { width, height, maxBitrate: bitrate, maxFramerate: 60 }, lower });
+    expect(sourceEncodings({ width, height, frameRate: 60 })).toEqual({ top: { width, height, maxBitrate: bitrate, maxFramerate: 60 }, lower });
   });
 
   it('never sends more than 60 fps, nor a lower layer faster than the top', () => {
-    expect(shareEncodings({ width: 3840, height: 2160, frameRate: 120 }).top.maxFramerate).toBe(60);
-    expect(shareEncodings({ width: 3840, height: 2160, frameRate: 24 })).toEqual({
+    expect(sourceEncodings({ width: 3840, height: 2160, frameRate: 120 }).top.maxFramerate).toBe(60);
+    expect(sourceEncodings({ width: 3840, height: 2160, frameRate: 24 })).toEqual({
       top: { width: 3840, height: 2160, maxBitrate: 18_000_000, maxFramerate: 24 },
-      lower: [p720, { ...p1080, maxFramerate: 24 }],
+      lower: [{ ...p720, maxFramerate: 24 }, { ...p1080, maxFramerate: 24 }],
     });
-    expect(shareEncodings({ width: 1920, height: 1080, frameRate: 10 }).lower).toEqual([{ ...p720, maxFramerate: 10 }]);
+    expect(sourceEncodings({ width: 1920, height: 1080, frameRate: 10 }).lower).toEqual([{ ...p720, maxFramerate: 10 }]);
   });
 
-  it('takes a capture whose settings do not say its size as 1080p, and one without a frame rate as 60 fps', () => {
-    const top = { width: 1920, height: 1080, maxBitrate: 6_000_000, maxFramerate: 60 };
-    expect(shareEncodings({})).toEqual({ top, lower: [p720] });
-    expect(shareEncodings({ width: 0, height: 0, frameRate: Number.NaN })).toEqual({ top, lower: [p720] });
-    expect(shareEncodings({ width: 3840 })).toEqual({ top, lower: [p720] });
+  it('takes a Source capture whose settings do not say its size as 4K, and one without a frame rate as 60 fps', () => {
+    const top = { width: 3840, height: 2160, maxBitrate: 18_000_000, maxFramerate: 60 };
+    expect(sourceEncodings({})).toEqual({ top, lower: [p720, p1080] });
+    expect(sourceEncodings({ width: 0, height: 0, frameRate: Number.NaN })).toEqual({ top, lower: [p720, p1080] });
+    expect(sourceEncodings({ width: 3840 })).toEqual({ top, lower: [p720, p1080] });
   });
 });
 

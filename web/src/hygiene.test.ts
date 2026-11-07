@@ -110,11 +110,11 @@ describe('local storage', () => {
     expect(code).not.toMatch(/\.(key|clear)\(|[sS]torage\.length/);
     // The preference methods take the key from their caller, and the only
     // callers name the notification and appearance preferences' keys, the setup
-    // card's (a per-account mark that the card was put off), the voice mode's
-    // (issue #1244) and the talk key's name (issue #1382).
+    // card's (a per-account mark that the card was put off), the voice mode and
+    // share quality, and the talk key's name (issue #1382).
     const api = withoutComments(sources['./api.ts'] ?? '');
-    expect(api.match(/credentials\.(read|write)Preference\(\s*(?!notificationPreferencesKey\(|appearancePreferencesKey\(|setupCardKey\(|voiceModeKey\b|talkKeyLabelKey\b)/g) ?? []).toEqual([]);
-    expect(api.match(/credentials\.(read|write)Preference\(/g)?.length).toBe(10);
+    expect(api.match(/credentials\.(read|write)Preference\(\s*(?!notificationPreferencesKey\(|appearancePreferencesKey\(|setupCardKey\(|voiceModeKey\b|shareQualityKey\b|talkKeyLabelKey\b)/g) ?? []).toEqual([]);
+    expect(api.match(/credentials\.(read|write)Preference\(/g)?.length).toBe(12);
   });
 
   it('is not missed by the rules: a bare test of each', () => {

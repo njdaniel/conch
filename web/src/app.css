@@ -2888,6 +2888,11 @@ label {
   overflow-wrap: anywhere;
 }
 
+.share-readout {
+  font-size: var(--small);
+  font-weight: 400;
+}
+
 .share-frame {
   position: relative;
   min-height: 0;

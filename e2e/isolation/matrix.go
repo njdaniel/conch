@@ -879,6 +879,9 @@ var exempt = map[string]string{
 	"/mcp": "the agents' surface, with its own bearer authentication and the manifest and membership gates; no B member is an agent, " +
 		"and a guest's credential is refused there (the guests' phase, guestrevoke.go checkMCPClosed: the one 401, the same as for a token nobody was issued; internal/server/mcp_test.go " +
 		"TestMCPRejectsInvalidCredentialsIdentically for a person's credential, TestMCPRejectsDisabledAgent, mcp_audience_test.go TestMCPAudienceAuthorizationMatrix)",
+	"GET /v1/preview": "answers 400 \"preview target required\" to everyone who sends no Conch-Preview-As header, whoever they are, and nothing behind it " +
+		"belongs to a group until the header names a target; the preview phase of this check, with a row per caller and target, is issue #1516 " +
+		"(internal/server/preview_test.go TestPreviewMatrix, TestPreviewRefusesEveryOtherRoute; auth_test.go TestRouteTable holds it previewable)",
 	"POST /v1/hooks/{token}": "authenticated by the hook's own URL token, which only an operator is shown " +
 		"(internal/server/hooks_test.go TestHookIngestErrors; auth_test.go TestHookIngestExemptUnderRequired)",
 }

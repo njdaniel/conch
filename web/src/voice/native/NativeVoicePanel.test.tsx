@@ -106,9 +106,9 @@ async function frame(p: VoicePresenceV1) {
 const channels: ChannelV0[] = [];
 const people: ReadonlyMap<number, Person> = new Map([[2, { name: 'Ada' } as Person]]);
 
-function strip(fake: Fake, channel: string | null = 'general', binding?: string) {
+function strip(fake: Fake, channel: string | null = 'general', binding?: string, viewerName?: string) {
   const ui = (ch: string | null) => (
-    <NativeVoicePanel source={fake.nv} binding={binding} signedIn channel={ch} viewer={1} people={people} voiceAllowed channels={channels} onUnauthorized={() => undefined} onOpen={() => undefined} />
+    <NativeVoicePanel source={fake.nv} binding={binding} signedIn channel={ch} viewer={1} {...(viewerName === undefined ? {} : { viewerName })} people={people} voiceAllowed channels={channels} onUnauthorized={() => undefined} onOpen={() => undefined} />
   );
   const r = render(ui(channel));
   return { ...r, show: (ch: string | null) => { r.rerender(ui(ch)); } };
@@ -188,6 +188,42 @@ describe('NativeVoicePanel', () => {
     const list = screen.getByRole('list');
     expect(within(list).getByText('You')).toBeTruthy();
     expect(within(list).getByText('Ada')).toBeTruthy();
+  });
+
+  describe('the viewer in the roster (#1481)', () => {
+    const roster = () => Array.from(screen.getByRole('list').querySelectorAll('.who')).map((el) => el.textContent);
+
+    it('names the viewer by their own name when this app is in voice', async () => {
+      strip(new Fake(running()), 'general', undefined, 'nick');
+      await frame(presence([1, '2026-01-01T00:00:00Z'], [2, '2026-01-01T00:00:01Z']));
+      expect(roster()).toEqual(['nick', 'Ada']);
+    });
+
+    it('says You while the name is not known', async () => {
+      strip(new Fake(running()));
+      await frame(presence([1, '2026-01-01T00:00:00Z']));
+      expect(roster()).toEqual(['You']);
+    });
+
+    it('says the name is on another device while another client holds the place', async () => {
+      strip(new Fake(), 'general', undefined, 'nick');
+      await frame(presence([1, '2026-01-01T00:00:00Z']));
+      expect(roster()).toEqual(['nick (on another device)']);
+    });
+
+    it('says You (on another device) when the name is not known', async () => {
+      strip(new Fake());
+      await frame(presence([1, '2026-01-01T00:00:00Z']));
+      expect(roster()).toEqual(['You (on another device)']);
+    });
+
+    it('does not say another device of this app’s own just-left session', async () => {
+      const fake = new Fake(running());
+      strip(fake, 'general', undefined, 'nick');
+      await frame(presence([1, '2026-01-01T00:00:00Z']));
+      fake.set(idle);
+      expect(roster()).toEqual(['nick']);
+    });
   });
 
   it('Leave calls leave', async () => {
