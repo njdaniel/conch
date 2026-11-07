@@ -404,6 +404,13 @@ func (m Model) eventsEnded(msg eventsEnded) (tea.Model, tea.Cmd) {
 	if m.rd.open() {
 		wait = tea.Batch(wait, m.checkRun())
 	}
+	if channelGone(msg.err) {
+		// The server closes the open channel's socket with 1008 when the person
+		// is removed from it and sends no channels_changed on it, and the retry
+		// then meets a 404: the list is read to learn which. A 1008 is retried
+		// below all the same, because a reader too slow to keep up gets it too.
+		wait = tea.Batch(wait, m.refreshChannels())
+	}
 	var serverErr *cli.ServerError
 	switch {
 	case errors.Is(msg.err, cli.ErrUnauthenticated):

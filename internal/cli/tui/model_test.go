@@ -565,12 +565,12 @@ func channelRefreshResult(t *testing.T, msgs []tea.Msg) (channelsLoaded, bool) {
 	return channelsLoaded{}, false
 }
 
-func channelRefreshModel(t *testing.T, api *channelRefreshAPI) Model {
+func channelRefreshModel(t *testing.T, api API) Model {
 	t.Helper()
 	m := NewModel(context.Background(), api, 7, nil)
 	m, _ = update(m, m.loadChannels()())
-	if api.started != nil {
-		<-api.started // the initial load, not a refresh
+	if a, ok := api.(*channelRefreshAPI); ok && a.started != nil {
+		<-a.started // the initial load, not a refresh
 	}
 	m.selected = 1 // ops, so a refresh must not jump back to general.
 	m.ev.gen = 4

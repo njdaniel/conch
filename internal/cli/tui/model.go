@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/coder/websocket"
 	"slices"
 	"sort"
 	"strconv"
@@ -75,6 +76,8 @@ type messagesLoaded struct {
 }
 type messageReceived struct {
 	channel string
+	// gen is the generation of the socket that read it (subscriptions).
+	gen     int
 	message schema.MessageV2
 }
 
@@ -107,9 +110,13 @@ type netTarget struct {
 // subscriptionOpened says the server accepted channel's message socket. A
 // resumed stream may have nothing to send for a long time, so this, not a
 // message, is what ends "reconnecting".
-type subscriptionOpened struct{ channel string }
+type subscriptionOpened struct {
+	channel string
+	gen     int
+}
 type subscriptionEnded struct {
 	channel string
+	gen     int
 	err     error
 	// lived is how long the subscription ran; one that stayed up for a while
 	// was healthy, so the next drop starts the backoff over.
@@ -196,6 +203,8 @@ type Model struct {
 	channels []string
 	// channelIDs lets a refresh follow a channel whose name changed.
 	channelIDs map[string]int64
+	// subs holds each channel's message socket and its generation.
+	subs       *subscriptions
 	selected   int
 	messages   map[string][]schema.MessageV2
 	subscribed map[string]bool
@@ -414,8 +423,8 @@ func NewModel(ctx context.Context, api API, authorID int64, channels []string) M
 		}
 	}
 	m := Model{ctx: ctx, api: api, authorID: authorID,
-		channelIDs: make(map[string]int64),
-		messages:   make(map[string][]schema.MessageV2), nets: make(map[string][]schema.NetV1), members: make(map[string]map[int64]schema.ChannelMemberV1), memberRevision: make(map[string]uint64), now: time.Now, subscribed: make(map[string]bool),
+		channelIDs: make(map[string]int64), subs: newSubscriptions(),
+		messages: make(map[string][]schema.MessageV2), nets: make(map[string][]schema.NetV1), members: make(map[string]map[int64]schema.ChannelMemberV1), memberRevision: make(map[string]uint64), now: time.Now, subscribed: make(map[string]bool),
 		events: make(chan tea.Msg, 64), mode: modeChannels,
 		backoff: make(map[string]time.Duration), retryPending: make(map[string]bool), after: tickAfter, wrapped: &wrappedBody{},
 		own: &ownSession{}, loaded: make(map[string]bool), streamed: make(map[string]int64), expanded: make(map[int64]bool),
@@ -881,10 +890,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// The socket was to open after this page: without it there is
 			// nothing to follow from, so it retries like a dropped one.
 			var retry tea.Cmd
+			if channelGone(msg.err) {
+				retry = m.refreshChannels()
+			}
 			if msg.following {
 				m.subscribed[msg.channel] = false
 				if !stale {
-					retry = m.scheduleResubscribe(msg.channel)
+					retry = tea.Batch(retry, m.scheduleResubscribe(msg.channel))
 				}
 			}
 			if stale {
@@ -919,6 +931,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, tea.Batch(m.markReading(), naming, hydrate)
 	case messageReceived:
+		if !m.subs.live(msg.channel, msg.gen) {
+			// A socket of a channel that was renamed or lost: its name may
+			// belong to another channel now.
+			return m, m.waitEvent()
+		}
 		// Data flowing proves the subscription is healthy.
 		delete(m.backoff, msg.channel)
 		var hydrate, arrival tea.Cmd
@@ -934,6 +951,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.markStreamed(msg.channel, msg.message)
 		return m, tea.Batch(m.waitEvent(), arrival, m.markReading(), m.nameAuthors(msg.channel), hydrate)
 	case subscriptionOpened:
+		if !m.subs.live(msg.channel, msg.gen) {
+			return m, m.waitEvent()
+		}
 		if msg.channel == m.current() && m.channelStatus == statusReconnecting && m.notice == "" {
 			m.setStatus(modeChannels, "connected")
 		}
@@ -993,8 +1013,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // delay so a subscription that fails immediately cannot spin.
 func (m Model) subscriptionEnded(msg subscriptionEnded) (tea.Model, tea.Cmd) {
 	wait := m.waitEvent()
-	if errors.Is(msg.err, context.Canceled) || m.ctx.Err() != nil {
+	if !m.subs.live(msg.channel, msg.gen) || errors.Is(msg.err, context.Canceled) || m.ctx.Err() != nil {
 		return m, wait
+	}
+	if channelGone(msg.err) {
+		// Removed from it, or it is gone: the list says which.
+		wait = tea.Batch(wait, m.refreshChannels())
 	}
 	m.subscribed[msg.channel] = false
 	m.rs.dropped[msg.channel] = true
@@ -1242,6 +1266,9 @@ func (m Model) channelsLoadDone(msg channelsLoaded) (tea.Model, tea.Cmd) {
 	}
 	lost := previous != "" && selected < 0
 	renamed := selected >= 0 && names[selected] != previous
+	// A name that left the list, lost or renamed away, may be taken by another
+	// channel: nothing of the old one stays under it, and its socket is closed.
+	m.forgetMissing(m.channels, names)
 	if previous == "" {
 		selected = defaultSelection(names)
 	}
@@ -1272,7 +1299,7 @@ func (m Model) channelsLoadDone(msg channelsLoaded) (tea.Model, tea.Cmd) {
 	} else if m.notice != "" {
 		m.setStatus(modeChannels, m.notice)
 	}
-	cmd = tea.Batch(cmd, m.loadReadState())
+	cmd = tea.Batch(cmd, m.loadReadStateFor(msg.channels))
 	return m, m.nextChannelsLoad(again, cmd)
 }
 
@@ -1304,6 +1331,7 @@ func (m Model) loadAndFollow() tea.Cmd {
 	if load == nil {
 		return nil
 	}
+	ctx, gen := m.subs.open(m.ctx, channel)
 	return func() tea.Msg {
 		loaded := load().(messagesLoaded)
 		loaded.following = true
@@ -1314,7 +1342,7 @@ func (m Model) loadAndFollow() tea.Cmd {
 					after = message.ID
 				}
 			}
-			m.follow(channel, after)
+			m.follow(ctx, gen, channel, after)
 		}
 		return loaded
 	}
@@ -1342,37 +1370,50 @@ func (m Model) startSubscription(channel string) tea.Cmd {
 		return nil
 	}
 	after := m.lastID(channel)
+	ctx, gen := m.subs.open(m.ctx, channel)
 	return func() tea.Msg {
-		m.follow(channel, after)
+		m.follow(ctx, gen, channel, after)
 		return nil
 	}
 }
 
 // follow opens channel's message socket after the message with id after, in a
 // goroutine that reports every message, and its end, as events.
-func (m Model) follow(channel string, after int64) {
+func (m Model) follow(ctx context.Context, gen int, channel string, after int64) {
 	go func() {
 		started := time.Now()
 		opened := func() {
 			select {
-			case m.events <- subscriptionOpened{channel: channel}:
-			case <-m.ctx.Done():
+			case m.events <- subscriptionOpened{channel: channel, gen: gen}:
+			case <-ctx.Done():
 			}
 		}
-		err := m.api.SubscribeV2After(m.ctx, channel, after, opened, func(message schema.MessageV2) error {
+		err := m.api.SubscribeV2After(ctx, channel, after, opened, func(message schema.MessageV2) error {
 			select {
-			case m.events <- messageReceived{channel: channel, message: message}:
+			case m.events <- messageReceived{channel: channel, gen: gen, message: message}:
 				return nil
-			case <-m.ctx.Done():
-				return m.ctx.Err()
+			case <-ctx.Done():
+				return ctx.Err()
 			}
 		})
 		select {
-		case m.events <- subscriptionEnded{channel: channel, err: err, lived: time.Since(started)}:
-		case <-m.ctx.Done():
+		case m.events <- subscriptionEnded{channel: channel, gen: gen, err: err, lived: time.Since(started)}:
+		case <-ctx.Done():
 		}
 	}()
 }
+
+// channelGone reports whether err says the person is no longer in the channel
+// the socket was opened for, or that it does not exist: a close for loss of
+// membership, or the refusal a later attempt meets.
+func channelGone(err error) bool {
+	return err != nil && (websocket.CloseStatus(err) == websocket.StatusPolicyViolation ||
+		cli.IsServerCode(err, errChannelNotFound))
+}
+
+// errChannelNotFound is the server's refusal for a channel the caller is not in
+// as for one that does not exist.
+const errChannelNotFound = "channel_not_found"
 
 func (m Model) waitEvent() tea.Cmd {
 	return func() tea.Msg {

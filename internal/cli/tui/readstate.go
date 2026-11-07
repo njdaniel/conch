@@ -5,6 +5,7 @@ import (
 	"maps"
 	"slices"
 	"strconv"
+	"strings"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -78,7 +79,10 @@ func (m Model) scrolled(lines int) (tea.Model, tea.Cmd) {
 type readStateLoaded struct {
 	states []schema.ReadStateV1
 	names  map[int64]string
-	err    error
+	// replace says names came from a channel-list answer and are the whole
+	// mapping, not an addition to it.
+	replace bool
+	err     error
 }
 
 // readMarked is the answer to one mark request.
@@ -104,17 +108,38 @@ func refusesReadState(err error) bool {
 // loadReadState reads the counts. Read state is keyed by channel id; the
 // channel list is only fetched when an id is not yet known.
 func (m Model) loadReadState() tea.Cmd {
+	return m.readStateWith(maps.Clone(m.rs.names), true)
+}
+
+// loadReadStateFor reads the counts after a channel-list answer: the ids are
+// named from that answer, which replaces the old mapping, so a renamed channel
+// keeps no counts under its old name and no second list read is made.
+func (m Model) loadReadStateFor(list []schema.ChannelV0) tea.Cmd {
+	names := make(map[int64]string, len(list))
+	for _, channel := range list {
+		if name := strings.TrimSpace(channel.Name); name != "" {
+			names[channel.ID] = name
+		}
+	}
+	return m.readStateWith(names, false)
+}
+
+// readStateWith reads the counts. With resolve, an id not in names is looked
+// up by reading the channel list; without it, only names is used.
+func (m Model) readStateWith(names map[int64]string, resolve bool) tea.Cmd {
 	if m.rs.off {
 		return nil
 	}
 	api, ctx := m.api, m.ctx
-	names := maps.Clone(m.rs.names)
 	return func() tea.Msg {
 		resp, err := api.ListReadState(ctx)
 		if err != nil {
 			return readStateLoaded{err: err}
 		}
 		states := resp.ReadState
+		if !resolve {
+			return readStateLoaded{states: states, names: names, replace: true}
+		}
 		for _, state := range states {
 			if _, ok := names[state.ChannelID]; ok {
 				continue
@@ -148,7 +173,11 @@ func (m Model) readStateLoaded(msg readStateLoaded) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	}
-	maps.Copy(m.rs.names, msg.names)
+	if msg.replace {
+		m.rs.names = maps.Clone(msg.names)
+	} else {
+		maps.Copy(m.rs.names, msg.names)
+	}
 	clear(m.rs.unread)
 	for _, state := range msg.states {
 		name := m.rs.names[state.ChannelID]
