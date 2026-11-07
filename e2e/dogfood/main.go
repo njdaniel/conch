@@ -53,6 +53,10 @@ import (
 	"github.com/njdaniel/conch/pkg/schema"
 )
 
+// proxiedHost is the public name a reverse proxy in front of conchd keeps in
+// the Host header (issue #1479).
+const proxiedHost = "conch.example.org"
+
 func main() {
 	if err := run(); err != nil {
 		fmt.Fprintln(os.Stderr, "dogfood-check: FAIL:", err)
@@ -666,7 +670,9 @@ func happyPath(bin binaries) error {
 	if err := mcpclient.New(proc.baseURL, staticMCPToken).Initialize(context.Background(), "dogfood-check"); err == nil {
 		return fmt.Errorf("mcp accepted the static token although none is configured")
 	}
-	client := mcpclient.New(proc.baseURL, agentToken)
+	// The agent reaches conchd as it does when deployed: on a loopback
+	// listener, with the public Host a reverse proxy keeps (issue #1479).
+	client := mcpclient.New(proc.baseURL, agentToken).WithHost(proxiedHost)
 	if err := client.Initialize(context.Background(), "dogfood-check"); err != nil {
 		return fmt.Errorf("mcp initialize with issued credential: %w", err)
 	}

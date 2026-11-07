@@ -45,7 +45,17 @@ func (s *Server) mcpHandler() http.Handler {
 			return nil
 		}
 		return s.mcpServerFor(identity)
-	}, &mcp.StreamableHTTPOptions{Stateless: true, JSONResponse: true})
+	}, &mcp.StreamableHTTPOptions{
+		Stateless: true, JSONResponse: true,
+		// The library refuses a non-loopback Host on a loopback listener, as
+		// a guard against DNS rebinding (issue #1479). A deployed conchd
+		// listens on loopback behind a proxy that keeps the public Host, so
+		// that guard refused every agent. Rebinding lets a web page reach a
+		// local server without credentials; every request here has already
+		// presented a bearer credential (below, in every auth mode), which
+		// such a page does not hold.
+		DisableLocalhostProtection: true,
+	})
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		identity, ok := s.authenticateMCP(r)
 		if !ok {

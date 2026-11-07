@@ -195,3 +195,37 @@ func TestCallToolFullReturnsTheWholeResponse(t *testing.T) {
 		t.Fatalf("response %s does not hold result.content", response)
 	}
 }
+
+// TestWithHostSendsTheHostHeader (issue #1479): the client still connects to
+// the base URL but names the host a reverse proxy would keep.
+func TestWithHostSendsTheHostHeader(t *testing.T) {
+	tests := []struct {
+		name string
+		host string
+		want func(srvHost string) string
+	}{
+		{"no override", "", func(srvHost string) string { return srvHost }},
+		{"override", "conch.example.org", func(string) string { return "conch.example.org" }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var seen string
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				seen = r.Host
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"structuredContent":{}}}`))
+			}))
+			defer srv.Close()
+			c := New(srv.URL, "t")
+			if tt.host != "" {
+				c = c.WithHost(tt.host)
+			}
+			if _, err := c.CallTool(context.Background(), "x", nil); err != nil {
+				t.Fatal(err)
+			}
+			if want := tt.want(strings.TrimPrefix(srv.URL, "http://")); seen != want {
+				t.Errorf("Host = %q, want %q", seen, want)
+			}
+		})
+	}
+}
