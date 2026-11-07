@@ -81,6 +81,7 @@ export function Lobby({
   onUnauthorized,
   onAddPerson,
   account,
+  appearance,
   signIns,
   report,
   onOpen,
@@ -138,6 +139,7 @@ export function Lobby({
   readonly onAddPerson?: () => void;
   // The caller's standing and own account settings, in Settings.
   readonly account?: ReactNode;
+  readonly appearance?: ReactNode;
   // "Your sign-ins" (issue #496), in Settings. Ending this browser's own
   // sign-in is signing out, so the section is handed endThis, which asks the
   // sign-out's question.
@@ -541,6 +543,7 @@ export function Lobby({
               setConfirming('here');
             })}
           </section>
+          {appearance}
           {admin === undefined || admin === null ? null : (
             <section aria-label="Administration" className="drawer-section">
               {admin}

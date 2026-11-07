@@ -60,8 +60,8 @@ import type { Phase, Processing, VoiceState } from './connection';
 import { clampTail, maxTail, releasePage, releaseStep } from './gate';
 import { keyLabel, talkKeyForMouseButton } from './keys';
 import { occupants, sharer, type Occupant } from './presence';
-import { busyNote, endedNote, oneSharerNote, othersShareNote, ownPageNote, resumedNote, resumingNote, sharedNote, shortShareNote, soundNote, watchNote } from './share';
-import { ShareView } from './ShareView';
+import { busyNote, endedNote, oneSharerNote, othersShareNote, ownPageNote, resumedNote, resumingNote, sharedNote, shortShareNote, soundNote, watchNote, type ShareFrameRate, type ShareResolution } from './share';
+import { ShareReadout, ShareView } from './ShareView';
 import { nobody, type InVoice } from './useOccupancy';
 import type { VoiceControl } from './useVoice';
 
@@ -1309,9 +1309,37 @@ function Options({ voice, open, sharable, about, others, cameraAllowed }: {
         The talk key works only while this tab has focus, and not while you are typing. On Linux, conch-voice has a global talk key. On a phone, audio continues
         only while the page is open on screen.
       </p>
-      {sharable ? (
+      {sharable || (features.canShare && state.share.kind !== 'idle') ? (
         <section id="voice-share-about" ref={about} tabIndex={-1} className="voice-about" aria-labelledby="voice-share-about-title">
           <h3 id="voice-share-about-title">Sharing your screen</h3>
+          <label>
+            Share resolution
+            <select
+              value={state.shareQuality.resolution}
+              onChange={(e) => {
+                const resolution = e.target.value as ShareResolution;
+                void client.setShareQuality({ ...state.shareQuality, resolution });
+              }}
+            >
+              <option value="720p">720p</option>
+              <option value="1080p">1080p</option>
+              <option value="source">Source</option>
+            </select>
+          </label>
+          <label>
+            Share frame rate
+            <select
+              value={state.shareQuality.frameRate}
+              onChange={(e) => {
+                const frameRate = Number(e.target.value) as ShareFrameRate;
+                void client.setShareQuality({ ...state.shareQuality, frameRate });
+              }}
+            >
+              <option value={15}>15 fps</option>
+              <option value={30}>30 fps</option>
+              <option value={60}>60 fps</option>
+            </select>
+          </label>
           <p className="hint">{soundNote(features)}</p>
           <p className="hint">{ownPageNote}</p>
         </section>
@@ -1392,7 +1420,7 @@ function ShareNotes({ voice, holderName, others, watching, onMore }: {
   readonly watching: boolean;
   readonly onMore: () => void;
 }) {
-  const { state, features } = voice;
+  const { state, features, client } = voice;
   const share = state.share;
   if (state.listenOnly) return null;
   const line = (
@@ -1411,6 +1439,7 @@ function ShareNotes({ voice, holderName, others, watching, onMore }: {
       return (
         <>
           <p role="status" className="sharing-note">{sharedNote(share.audio, features)}</p>
+          <p className="hint"><ShareReadout client={client} direction="sent" prefix="Sending: " /></p>
           {share.resumed === true ? <p className="hint">{resumedNote}</p> : null}
         </>
       );

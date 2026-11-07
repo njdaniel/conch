@@ -1,4 +1,5 @@
 import { disablePrincipalResponseV1, listChannelBansResponseV1, messageV2, revokeIssuedResponseV1, type DisablePrincipalResponseV1, type RevokeIssuedResponseV1, messageRemovedV1, type MessageRemovedV1 } from './schema/generated';
+import { defaultShareQuality, type ShareQuality } from './voice/share';
 // The only module that holds the credential in use, and the only one that
 // asks conchd anything. Where the token lives depends on whose it is (issue
 // #439, decision O1). A member's lasts: it is kept so that it survives closing
@@ -212,6 +213,7 @@ import type { FeedSocket, OpenSocket, SocketEvents } from './state/feed';
 import { forget as forgetDiagnostics, record } from './diagnostics';
 import { visitOf } from './guestName';
 import { keyboardKeys, mouseKeys } from './platform/desktop/evdev';
+import { appearanceAccents, appearanceDensities, appearanceThemes, defaultAppearance, type AppearancePreferences } from './appearance';
 
 // Why a call failed. unauthorized is a 401: the server does not accept the
 // credential. network means no answer at all. invalid is any other reply
@@ -2464,6 +2466,31 @@ export function writeNotificationPreferences(origin: string, account: number, pr
   }
 }
 
+const appearancePreferencesKey = (origin: string, account: number) => `conch.web.appearance.v1.${origin}.${String(account)}`;
+
+export function readAppearancePreferences(origin: string, account: number): AppearancePreferences {
+  try {
+    const raw: unknown = JSON.parse(platform.credentials.readPreference(appearancePreferencesKey(origin, account)) ?? 'null');
+    if (typeof raw !== 'object' || raw === null) return defaultAppearance;
+    const value = raw as { theme?: unknown; accent?: unknown; density?: unknown };
+    return {
+      theme: typeof value.theme === 'string' && (appearanceThemes as readonly string[]).includes(value.theme) ? value.theme as AppearancePreferences['theme'] : defaultAppearance.theme,
+      accent: typeof value.accent === 'string' && (appearanceAccents as readonly string[]).includes(value.accent) ? value.accent as AppearancePreferences['accent'] : defaultAppearance.accent,
+      density: typeof value.density === 'string' && (appearanceDensities as readonly string[]).includes(value.density) ? value.density as AppearancePreferences['density'] : defaultAppearance.density,
+    };
+  } catch {
+    return defaultAppearance;
+  }
+}
+
+export function writeAppearancePreferences(origin: string, account: number, preferences: AppearancePreferences): void {
+  try {
+    platform.credentials.writePreference(appearancePreferencesKey(origin, account), JSON.stringify(preferences));
+  } catch {
+    // Storage can be unavailable; the in-memory preference still applies.
+  }
+}
+
 // The microphone mode the person chose for voice (issue #1244): a per-browser,
 // non-secret preference. Absent, unreadable or anything else is no choice (null),
 // and the voice client then starts in open microphone.
@@ -2505,6 +2532,30 @@ export function writeHideNonVideo(hide: boolean): void {
     platform.credentials.writePreference(hideNonVideoKey, hide ? 'on' : 'off');
   } catch {
     // Storage can be unavailable; the choice lasts until the page reloads.
+  }
+}
+
+// The last share quality chosen in this browser: a non-secret preference.
+const shareQualityKey = 'conch.web.voice.share-quality.v1';
+
+export function readShareQuality(): ShareQuality {
+  try {
+    const raw: unknown = JSON.parse(platform.credentials.readPreference(shareQualityKey) ?? 'null');
+    if (typeof raw !== 'object' || raw === null) return defaultShareQuality;
+    const kept = raw as { resolution?: unknown; frameRate?: unknown };
+    const resolution = kept.resolution === '720p' || kept.resolution === '1080p' || kept.resolution === 'source' ? kept.resolution : null;
+    const frameRate = kept.frameRate === 15 || kept.frameRate === 30 || kept.frameRate === 60 ? kept.frameRate : null;
+    return resolution === null || frameRate === null ? defaultShareQuality : { resolution, frameRate };
+  } catch {
+    return defaultShareQuality;
+  }
+}
+
+export function writeShareQuality(quality: ShareQuality): void {
+  try {
+    platform.credentials.writePreference(shareQualityKey, JSON.stringify(quality));
+  } catch {
+    // Storage can be unavailable; the in-memory preference still applies.
   }
 }
 

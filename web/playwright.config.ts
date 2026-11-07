@@ -36,7 +36,7 @@ export default defineConfig({
   // Screen share (issue #444) runs on the same fake devices: the screen picker
   // is answered with a fake screen with a fake sound track, so no test needs a
   // real display. The fake screen captures at the size and rate it is asked
-  // for: 3840x2160 at 60 fps since issue #565 (checked on the pinned Chromium).
+  // for: 1920x1080 at 30 fps by default (checked on the pinned Chromium).
   // The auto-select flag answers the picker the same way should a run use
   // Chromium's real picker (a headed run).
   projects: [

@@ -70,6 +70,8 @@ import { useOccupancy } from './voice/useOccupancy';
 import { leaveVoice } from './voice/useVoice';
 import { useOccupantNames } from './voice/useOccupantNames';
 import { needsHttps } from './transport';
+import { AppearanceSettings } from './AppearanceSettings';
+import { applyAppearance, defaultAppearance, type AppearancePreferences } from './appearance';
 
 const checkingAudience = 'Checking who this draft goes to…';
 const audienceGone = 'Who this draft was for is no longer available. Choose who it goes to before sending.';
@@ -736,6 +738,17 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
   }, [scrollTo, detailOpen, searchOpen]);
 
   const principalId = principal?.id ?? null;
+  const [appearance, setAppearance] = useState<AppearancePreferences>(defaultAppearance);
+  useLayoutEffect(() => {
+    const next = principalId === null ? defaultAppearance : api.readAppearancePreferences(origin, principalId);
+    applyAppearance(next);
+    setAppearance(next);
+  }, [origin, principalId]);
+  const changeAppearance = useCallback((next: AppearancePreferences) => {
+    applyAppearance(next);
+    setAppearance(next);
+    if (principalId !== null) api.writeAppearancePreferences(origin, principalId, next);
+  }, [origin, principalId]);
   const principalNow = useRef(principalId);
   principalNow.current = principalId;
   const nextRequest = useRef(1);
@@ -1655,6 +1668,7 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
               ) : null}
             </>
           }
+          appearance={<AppearanceSettings value={appearance} onChange={changeAppearance} />}
           account={
             <>
               <div className="standing">
@@ -1876,6 +1890,7 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
                 <div className="conversation-body" hidden={agents.state.detail !== null || searchOpen}>
               <Conversation
                 key={channelId}
+                density={appearance.density}
                 historyBounded={agents.membersFor === channelId && (agents.members.find((m) => m.principal_id === auth.principal.id)?.history_after ?? 0) > 0}
                 channelId={channelId}
                 channel={selected}
