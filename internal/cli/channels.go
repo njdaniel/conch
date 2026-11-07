@@ -9,10 +9,10 @@ import (
 	"github.com/njdaniel/conch/pkg/schema"
 )
 
-// `conch channels list|join|leave|create` (ADR-013, issue #994): the channel
-// directory and the community's own channel routes. Every verb is one request
-// to a public route; the server decides who may, and a refusal is printed in
-// this file's words, by its code (refusal.go).
+// `conch channels list|join|leave|create|topic` (ADR-013, issue #994): the
+// channel directory and the community's own channel routes. Every verb uses
+// public routes; the server decides who may, and a refusal is printed in this
+// file's words, by its code (refusal.go).
 
 var channelRefusals = map[string]refusalLines{
 	"list": {"forbidden": communityOnly},
@@ -29,10 +29,13 @@ var channelRefusals = map[string]refusalLines{
 		"forbidden":      communityOnly,
 		"channel_exists": "there is already a channel with that name, perhaps one you are not in; choose another name",
 	},
+	"topic": {
+		"forbidden": "only an owner, an operator holding manage_channels, or a channel manager may set the topic",
+	},
 }
 
 func runChannels(ctx context.Context, args []string, stdout, stderr io.Writer) error {
-	const verbs = "list, join, leave, create"
+	const verbs = "list, join, leave, create, topic"
 	if len(args) == 0 {
 		return fmt.Errorf("cli: channels requires a subcommand (%s)", verbs)
 	}
@@ -43,12 +46,14 @@ func runChannels(ctx context.Context, args []string, stdout, stderr io.Writer) e
 	fs := newFlagSet("channels "+verb, stderr)
 	server := fs.String("server", serverEnvOr(), "conchd HTTP URL")
 	asJSON := fs.Bool("json", false, "print the server's response document")
-	var all, private *bool
+	var all, private, clear *bool
 	switch verb {
 	case "list":
 		all = fs.Bool("all", false, "every channel with its member count, private ones too (operators)")
 	case "create":
 		private = fs.Bool("private", false, "make a private channel: only its members see it (the default is public)")
+	case "topic":
+		clear = fs.Bool("clear", false, "clear the channel's topic")
 	}
 	// Flags may follow the positionals, as they may for `nets`.
 	var pos []string
@@ -63,15 +68,24 @@ func runChannels(ctx context.Context, args []string, stdout, stderr io.Writer) e
 		pos = append(pos, fs.Arg(0))
 		rest = fs.Args()[1:]
 	}
-	want := 1
-	if verb == "list" {
-		want = 0
-	}
-	if len(pos) != want {
-		if want == 0 {
-			return fmt.Errorf("cli: channels list: takes no arguments (usage: conch channels list [--server <url>] [--json] [--all])")
+	if verb == "topic" {
+		if len(pos) < 1 || len(pos) > 2 {
+			return fmt.Errorf("cli: channels topic: expected <channel> [<text>] (usage: %s)", channelsUsage[verb])
 		}
-		return fmt.Errorf("cli: channels %s: expected <%s> (usage: %s)", verb, channelsArgName(verb), channelsUsage[verb])
+		if *clear && len(pos) != 1 {
+			return fmt.Errorf("cli: channels topic: --clear cannot be used with text (usage: %s)", channelsUsage[verb])
+		}
+	} else {
+		want := 1
+		if verb == "list" {
+			want = 0
+		}
+		if len(pos) != want {
+			if want == 0 {
+				return fmt.Errorf("cli: channels list: takes no arguments (usage: conch channels list [--server <url>] [--json] [--all])")
+			}
+			return fmt.Errorf("cli: channels %s: expected <%s> (usage: %s)", verb, channelsArgName(verb), channelsUsage[verb])
+		}
 	}
 	var request schema.CreateChannelRequestV1
 	if verb == "create" {
@@ -82,6 +96,16 @@ func runChannels(ctx context.Context, args []string, stdout, stderr io.Writer) e
 		// The check the server makes, so a name it would refuse costs no request.
 		if err := request.Validate(); err != nil {
 			return fmt.Errorf("cli: channels create: %w", err)
+		}
+	}
+	var topicRequest schema.SetChannelTopicRequestV1
+	writeTopic := verb == "topic" && (*clear || len(pos) == 2)
+	if writeTopic {
+		if len(pos) == 2 {
+			topicRequest.Topic = pos[1]
+		}
+		if err := topicRequest.Validate(); err != nil {
+			return fmt.Errorf("cli: channels topic: %w", err)
 		}
 	}
 	client, _, err := NewAuthClient(*server)
@@ -112,6 +136,8 @@ func runChannels(ctx context.Context, args []string, stdout, stderr io.Writer) e
 			return refused(err, lines)
 		}
 		return out.say("left channel %s\n", safeLine(pos[0]))
+	case "topic":
+		return runChannelTopic(ctx, client, out, lines, pos[0], topicRequest, writeTopic)
 	default: // create
 		resp, err := client.CreateChannelV1(ctx, request)
 		if err != nil {
@@ -121,11 +147,42 @@ func runChannels(ctx context.Context, args []string, stdout, stderr io.Writer) e
 	}
 }
 
+// runChannelTopic resolves the name from the caller's own channel list, then
+// reads that entry or writes the topic through the id-addressed route.
+func runChannelTopic(ctx context.Context, client *Client, out channelsOutput, lines refusalLines, name string, request schema.SetChannelTopicRequestV1, write bool) error {
+	list, err := client.ListChannels(ctx)
+	if err != nil {
+		return refused(err, lines)
+	}
+	for _, channel := range list.Channels {
+		if channel.Name != name {
+			continue
+		}
+		if !write {
+			if out.asJSON {
+				return out.json(list)
+			}
+			if channel.Topic == "" {
+				return nil
+			}
+			return out.say("%s\n", safeLine(channel.Topic))
+		}
+		resp, err := client.SetChannelTopic(ctx, channel.ID, request)
+		if err != nil {
+			return refused(err, lines)
+		}
+		return out.topic(resp)
+	}
+	// The same line as the route's 404, without revealing an invisible channel.
+	return &refusalError{line: commonRefusals["channel_not_found"]}
+}
+
 var channelsUsage = map[string]string{
 	"list":   "conch channels list [--server <url>] [--json] [--all]",
 	"join":   "conch channels join [--server <url>] [--json] <channel>",
 	"leave":  "conch channels leave [--server <url>] [--json] <channel>",
 	"create": "conch channels create [--server <url>] [--json] [--private] <name>",
+	"topic":  "conch channels topic [--server <url>] [--json] [--clear] <channel> [<text>]",
 }
 
 func channelsArgName(verb string) string {
@@ -194,6 +251,17 @@ func (o channelsOutput) created(resp schema.CreateChannelResponseV1) error {
 		kind = safeLine(string(v)) + " "
 	}
 	return o.say("created %schannel %s (id %d)\n", kind, safeLine(resp.Channel.Name), resp.Channel.ID)
+}
+
+func (o channelsOutput) topic(resp schema.SetChannelTopicResponseV1) error {
+	if o.asJSON {
+		return o.json(resp)
+	}
+	name := safeLine(resp.Channel.Name)
+	if resp.Channel.Topic == "" {
+		return o.say("channel %s topic cleared\n", name)
+	}
+	return o.say("channel %s topic: %s\n", name, safeLine(resp.Channel.Topic))
 }
 
 // jsonLine writes v as one JSON document and a newline.

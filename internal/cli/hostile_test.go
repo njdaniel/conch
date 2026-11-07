@@ -187,6 +187,10 @@ func walkCases(t *testing.T) []walkCase {
 		{key: "channels create", ownWords: true, args: func(u, _ string) []string {
 			return []string{"channels", "create", "--server", u, "--private", "general"}
 		}},
+		{key: "channels topic", ownWords: true, args: func(u, _ string) []string { return []string{"channels", "topic", "--server", u, "general"} }},
+		{key: "channels topic", ownWords: true, args: func(u, _ string) []string {
+			return []string{"channels", "topic", "--server", u, "general", "new topic"}
+		}},
 		{key: "react", ownWords: true, quietWhenOK: true, args: func(u, _ string) []string { return []string{"react", "--server", u, "general", "42", "👍"} }},
 		{key: "unreact", ownWords: true, quietWhenOK: true, args: func(u, _ string) []string { return []string{"unreact", "--server", u, "general", "42", "👍"} }},
 		{key: "reactions", ownWords: true, args: func(u, _ string) []string { return []string{"reactions", "--server", u, "general", "42"} }},
@@ -533,7 +537,9 @@ func hostileServer(t *testing.T, ok, whoamiOK bool) *httptest.Server {
 		case "GET /v1/reports/9", "PUT /v1/reports/9":
 			write(w, http.StatusOK, hostileReport(ts))
 		case "GET /v1/channels":
-			write(w, http.StatusOK, schema.ListChannelsResponse{Channels: []schema.ChannelV0{{ID: 1, Name: "general", CreatedAt: ts.Time()}}})
+			write(w, http.StatusOK, schema.ListChannelsResponse{Channels: []schema.ChannelV0{{ID: 1, Name: "general", CreatedAt: ts.Time(), Topic: hostile}}})
+		case "PUT /v1/channels/1/topic":
+			write(w, http.StatusOK, schema.SetChannelTopicResponseV1{Channel: schema.ChannelV0{ID: 1, Name: hostile, CreatedAt: ts.Time(), Topic: hostile}})
 		case "GET /v1/channels/general/members":
 			write(w, http.StatusOK, schema.ListChannelMembersResponseV1{Members: []schema.ChannelMemberV1{{PrincipalID: 42, Name: hostile, CreatedAt: ts}, {PrincipalID: 9, Name: hostile, CreatedAt: ts}}})
 		case "POST /v1/login":
