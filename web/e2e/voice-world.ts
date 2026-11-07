@@ -128,7 +128,9 @@ export interface VoiceWorld {
   // are in.
   disable: (member: Member) => Promise<void>;
   // An operator stops the channel's screen share (issue #444); the status.
-  stopShareAsOperator: () => Promise<number>;
+  // An operator's stop of someone's stream: since #1508 it names the person
+  // (a bare DELETE is the caller's own stream).
+  stopShareAsOperator: (who: Member) => Promise<number>;
   stopLiveKit: () => void;
   startLiveKit: () => Promise<void>;
   stop: () => void;
@@ -271,7 +273,7 @@ room:
       disable: async (m) => {
         await must(`disable ${m.name}`, operator, 'POST', `/v1/principals/${String(m.id)}/disable`);
       },
-      stopShareAsOperator: async () => (await api(operator, 'DELETE', `/v1/channels/${channel}/voice/share`)).status,
+      stopShareAsOperator: async (who) => (await api(operator, 'DELETE', `/v1/channels/${channel}/voice/share?principal=${String(who.id)}`)).status,
       stopLiveKit: () => {
         docker(['stop', '-t', '1', container]);
       },

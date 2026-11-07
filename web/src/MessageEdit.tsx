@@ -214,7 +214,7 @@ export function EarlierVersions({
                   <time dateTime={revision.created_at}>{when(revision.created_at)}</time>
                   {revision.revision === current ? <span className="version-current"> Current</span> : null}
                 </div>
-                <p className="version-body"><Linkified text={revision.body} /></p>
+                <div className="version-body"><Linkified text={revision.body} /></div>
               </li>
             ))}
           </ol>
