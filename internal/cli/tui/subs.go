@@ -97,6 +97,7 @@ func (m *Model) forgetChannel(channel string) {
 	delete(m.rs.pending, channel)
 	delete(m.rs.timer, channel)
 	delete(m.rs.dropped, channel)
+	delete(m.archivedAt, channel)
 }
 
 // forgetMissing tears down every name of old that next no longer holds, or

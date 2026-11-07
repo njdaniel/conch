@@ -3105,3 +3105,169 @@ func TestViewOnlyApprovalCannotBeDecided(t *testing.T) {
 		t.Errorf("enter on a decidable approval: mode %v, want decision", next.(Model).mode)
 	}
 }
+
+const archivedChannelLine = "This channel is archived."
+
+func loadChannelsForTest(m Model, channels []schema.ChannelV0) Model {
+	m.loadingChannels = true
+	m, _ = update(m, channelsLoaded{channels: channels})
+	return m
+}
+
+func TestArchivedChannelLifecycle(t *testing.T) {
+	stamp := time.Date(2026, time.November, 7, 12, 0, 0, 0, time.UTC)
+	live := func() []schema.ChannelV0 {
+		return []schema.ChannelV0{{ID: 1, Name: "general"}, {ID: 2, Name: "ops"}, {ID: 3, Name: "dev"}}
+	}
+	archived := live()
+	archived[1].ArchivedAt = &stamp
+	tests := []struct {
+		name            string
+		initial         []schema.ChannelV0
+		refused         bool
+		restore         bool
+		wantList        string
+		wantArchived    bool
+		wantArchivedTag bool
+	}{
+		{name: "live", initial: live(), wantList: "general,ops,dev"},
+		{name: "archived", initial: archived, wantList: "general,dev,ops", wantArchived: true, wantArchivedTag: true},
+		{name: "archived while open (409)", initial: live(), refused: true, wantList: "general,dev,ops", wantArchived: true, wantArchivedTag: true},
+		{name: "restored", initial: archived, restore: true, wantList: "general,ops,dev"},
+		{name: "older server", initial: live(), wantList: "general,ops,dev"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			api := &channelRefreshAPI{answers: []channelListAnswer{{channels: tt.initial}, {channels: live()}}}
+			m := NewModel(context.Background(), api, 7, nil)
+			m, _ = update(m, m.loadChannels()())
+			for i, name := range m.channels {
+				if name == "ops" {
+					m.selected = i
+				}
+			}
+			m.ev.gen, m.ev.state = 4, eventsLive
+			switch {
+			case tt.refused:
+				m.input, m.sending = "draft", true
+				m, _ = update(m, messageSent{channel: "ops", raw: "draft", err: &cli.ServerError{Status: 409, Code: schema.ErrorCodeChannelArchived, Message: "SERVER WORDS"}})
+				if m.status() != archivedChannelLine || m.input != "draft" || m.sending {
+					t.Errorf("refusal status/input/sending = %q/%q/%v", m.status(), m.input, m.sending)
+				}
+			case tt.restore:
+				m.setStatus(modeChannels, archivedChannelLine)
+				m.rd.status, m.rd.refusal = archivedChannelLine, archivedChannelLine
+				var cmd tea.Cmd
+				m, cmd = update(m, eventsChannelsReceived{gen: m.ev.gen})
+				loaded, ok := channelRefreshResult(t, runChannelRefreshCommand(m, cmd))
+				if !ok {
+					t.Fatal("channels_changed did not re-read the channel list")
+				}
+				m, _ = update(m, loaded)
+			}
+			if !tt.wantArchived && (strings.Contains(m.status(), archivedChannelLine) || strings.Contains(m.rd.status, archivedChannelLine)) {
+				t.Errorf("restored channel still says archived: status %q, run status %q", m.status(), m.rd.status)
+			}
+			if got := strings.Join(m.channels, ","); got != tt.wantList {
+				t.Errorf("channels = %q, want %q", got, tt.wantList)
+			}
+			if m.current() != "ops" || m.channelIDs[m.current()] != 2 {
+				t.Errorf("selection = %q (id %d), want ops (id 2)", m.current(), m.channelIDs[m.current()])
+			}
+			if got := strings.Contains(stripANSI(m.inputRow(100)), archivedChannelLine); got != tt.wantArchived {
+				t.Errorf("archived input = %v, want %v: %q", got, tt.wantArchived, m.inputRow(100))
+			}
+			lines := stripANSI(strings.Join(m.channelLines(100), "\n"))
+			if got := strings.Contains(lines, "ops archived"); got != tt.wantArchivedTag {
+				t.Errorf("archived tag = %v, want %v: %q", got, tt.wantArchivedTag, lines)
+			}
+		})
+	}
+}
+
+func TestChannelArchivedRequiresTypedError(t *testing.T) {
+	m := NewModel(context.Background(), stubAPI{}, 7, []string{"general"})
+	m.input = "draft"
+	m, _ = update(m, messageSent{channel: "general", raw: "draft", err: errors.New("cli: server error channel_archived: SERVER WORDS")})
+	if !strings.Contains(m.status(), "channel_archived") || strings.Contains(stripANSI(m.inputRow(80)), archivedChannelLine) {
+		t.Errorf("message text was treated as an error code: status %q, input %q", m.status(), m.inputRow(80))
+	}
+}
+
+func TestArchivedChannelWriteKeys(t *testing.T) {
+	stamp := time.Date(2026, time.November, 7, 12, 0, 0, 0, time.UTC)
+	channels := []schema.ChannelV0{{ID: 1, Name: "general", ArchivedAt: &stamp}, {ID: 2, Name: "ops"}}
+	for _, kind := range []string{"send", "reply", "react"} {
+		t.Run(kind, func(t *testing.T) {
+			var m Model
+			var key tea.KeyMsg
+			var reaction *reactionStub
+			var run *runAPI
+			switch kind {
+			case "reply":
+				run = newRunAPI(testRun(41, schema.RunStateRunning))
+				m = openCurrent(runModel(t, run, schema.InterventionKindMessage))
+				key = keyMsg("m")
+			default:
+				m, reaction = reactionModelForTest()
+				if kind == "send" {
+					m.input = "hello"
+					key = keyMsg("enter")
+				} else {
+					key = tea.KeyMsg{Type: tea.KeyCtrlR}
+				}
+			}
+			m = loadChannelsForTest(m, channels)
+			m, cmd := update(m, key)
+			if cmd != nil {
+				t.Errorf("archived %s produced a command", kind)
+			}
+			if got := strings.Count(m.status(), archivedChannelLine); got != 1 {
+				t.Errorf("status = %q, want the archive line once", m.status())
+			}
+			switch kind {
+			case "send":
+				if reaction.postedBody != "" || m.input != "hello" {
+					t.Errorf("send body/input = %q/%q", reaction.postedBody, m.input)
+				}
+			case "react":
+				if reaction.writeID != 0 || m.input != "" {
+					t.Errorf("reaction write/input = %d/%q", reaction.writeID, m.input)
+				}
+			case "reply":
+				if len(run.createdRequests()) != 0 || m.rd.input != inputNone {
+					t.Errorf("reply requests/input = %+v/%v", run.createdRequests(), m.rd.input)
+				}
+			}
+		})
+	}
+}
+
+func TestChannelArchivedAnswersForWrites(t *testing.T) {
+	for _, kind := range []string{"send", "reply", "react"} {
+		t.Run(kind, func(t *testing.T) {
+			m := NewModel(context.Background(), stubAPI{}, 7, []string{"general", "ops"})
+			m.rd.runID, m.rd.sending = 41, true
+			m.mode = modeRun
+			refusal := &cli.ServerError{Status: 409, Code: schema.ErrorCodeChannelArchived, Message: "SERVER WORDS"}
+			var msg tea.Msg
+			switch kind {
+			case "send":
+				msg = messageSent{channel: "general", err: refusal}
+			case "reply":
+				msg = interventionSent{runID: 41, err: refusal}
+			case "react":
+				m.react.writing = true
+				msg = reactionWritten{channel: "general", err: refusal}
+			}
+			m, _ = update(m, msg)
+			if !strings.Contains(m.status(), archivedChannelLine) || strings.Contains(m.status(), "SERVER WORDS") {
+				t.Errorf("status = %q, want only the archive line", m.status())
+			}
+			m.mode = modeChannels
+			if !strings.Contains(stripANSI(m.inputRow(80)), archivedChannelLine) {
+				t.Errorf("channel did not become read-only: %q", m.inputRow(80))
+			}
+		})
+	}
+}

@@ -149,7 +149,11 @@ func (m Model) chatLines(l layout) (lines []string, foot string) {
 	case !m.loaded[channel]:
 		return []string{statusStyle.Render(fitCells("loading history…", cols))}, ""
 	}
-	text := wrapWords("No messages in "+sanitize(channel)+" yet. Type below and press enter to send one.", cols, cols)
+	empty := "No messages in " + sanitize(channel) + " yet."
+	if !m.channelArchived(channel) {
+		empty += " Type below and press enter to send one."
+	}
+	text := wrapWords(empty, cols, cols)
 	for i, t := range text {
 		text[i] = statusStyle.Render(t)
 	}
@@ -187,13 +191,18 @@ func (m Model) channelLines(leftWidth int) []string {
 		if badge != "" {
 			room -= 1 + len(badge)
 		}
+		tag := ""
+		if m.channelArchived(channel) {
+			tag = archivedChannelTag
+			room -= cellWidth(tag)
+		}
 		name := fitCells(sanitize(channel), room)
 		prefix := "  "
 		if i == m.selected {
 			prefix = activeStyle.Render("› ")
 			name = activeStyle.Render(name)
 		}
-		lines[i] = prefix + name
+		lines[i] = prefix + name + statusStyle.Render(tag)
 		if badge != "" {
 			lines[i] += " " + badgeStyle.Render(badge)
 		}
@@ -245,8 +254,8 @@ func (m Model) runsPanes(l layout) string {
 
 // inputRow is the input line: the prompt and the draft in the chat view, the
 // reason in the decision prompt, run detail's own line, and nothing elsewhere.
-// The cursor mark says where typing goes. While the help is open typing goes
-// nowhere, so the draft stays on screen without it.
+// An archived channel has no composer. The cursor mark says where typing goes.
+// While the help is open typing goes nowhere, so the draft stays without it.
 func (m Model) inputRow(width int) string {
 	row := lipgloss.NewStyle().Width(width)
 	cursor := activeStyle.Render("▌")
@@ -254,11 +263,14 @@ func (m Model) inputRow(width int) string {
 		cursor = " "
 	}
 	switch m.mode {
-	case modeChannels, modeDecision:
-		prompt := ">"
-		if m.mode == modeChannels {
-			prompt = m.promptWithin(width / 2)
+	case modeChannels:
+		if m.channelArchived(m.current()) {
+			return row.Render(fitCells(archivedChannelNotice, width))
 		}
+		prompt := m.promptWithin(width / 2)
+		return row.Render(prompt + " " + clipTail(sanitize(m.input), width-cellWidth(prompt)-3) + cursor)
+	case modeDecision:
+		prompt := ">"
 		return row.Render(prompt + " " + clipTail(sanitize(m.input), width-cellWidth(prompt)-3) + cursor)
 	case modeRun:
 		return row.Render(fitCells(m.runPrompt(width), width))
@@ -311,6 +323,9 @@ func (m Model) statusHints() []hint {
 			arrows = hint{"↑/↓", "scroll", 3}
 		}
 		hints = []hint{arrows, {"←/→", "focus", 6}, {"enter", "send", 1}, {"tab", "inbox", 2}, {"esc", "quit", 0}}
+		if m.channelArchived(m.current()) {
+			hints = slices.Delete(hints, 2, 3)
+		}
 		if m.scroll > 0 {
 			hints = append(hints[:1], append([]hint{{"end", "latest", 4}}, hints[1:]...)...)
 		}
@@ -328,6 +343,9 @@ func (m Model) statusHints() []hint {
 func (m Model) statusRow(width int) string {
 	statusKeys := hintLine(m.statusHints(), width-max(16, width/5))
 	status := m.status()
+	if m.mode == modeChannels && status == archivedChannelNotice && m.channelArchived(m.current()) {
+		status = ""
+	}
 	if m.mode == modeChannels {
 		status = fitCells(status, width-cellWidth(statusKeys)) + statusKeys
 		if name := sanitize(m.userName); name != "" {
