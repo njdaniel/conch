@@ -2,7 +2,7 @@
 // the platform seam existed: the same address, the same init, key for key.
 // These are the arguments that api.ts passed to fetch then, written out.
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { call, fileQuery, queryOf } from '../operations';
+import { call, fileQuery, previewCall, queryOf } from '../operations';
 import { http } from './http';
 import { sockets } from './sockets';
 
@@ -25,6 +25,16 @@ describe('the browser HTTP transport', () => {
         '/v2/channels/red%20team/messages?order=desc&limit=50',
         { headers: { Authorization: 'Bearer tok', Accept: 'application/json' }, cache: 'no-store', credentials: 'omit' },
       ],
+    ]);
+  });
+
+  it('a previewed GET carries the header on that request alone', async () => {
+    const fetchMock = stubFetch();
+    await http.get(previewCall('listMembers', 7, { channel: 'general' }), 'tok');
+    await http.get(call('listMembers', { channel: 'general' }), 'tok');
+    expect(fetchMock.mock.calls).toEqual([
+      ['/v1/channels/general/members', { headers: { Authorization: 'Bearer tok', Accept: 'application/json', 'Conch-Preview-As': '7' }, cache: 'no-store', credentials: 'omit' }],
+      ['/v1/channels/general/members', { headers: { Authorization: 'Bearer tok', Accept: 'application/json' }, cache: 'no-store', credentials: 'omit' }],
     ]);
   });
 
