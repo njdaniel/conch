@@ -87,11 +87,10 @@ export function SetTopic({
           id={fieldId}
           type="text"
           autoComplete="off"
-          maxLength={MAX_CHANNEL_TOPIC_LENGTH}
           value={value}
           readOnly={busy}
           onChange={(event) => {
-            setValue(event.target.value);
+            setValue(Array.from(event.target.value).slice(0, MAX_CHANNEL_TOPIC_LENGTH).join(''));
           }}
         />
         <button type="submit" disabled={busy}>

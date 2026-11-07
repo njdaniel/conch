@@ -58,6 +58,33 @@ describe('the open channel', () => {
   });
 });
 
+describe('a channel topic', () => {
+  const draw = (topic?: string) => (
+    <ChannelList
+      channels={channels.map((channel) => (channel.id === 2 ? { ...channel, topic } : channel))}
+      selected="general"
+      unread={new Map()}
+      onOpen={() => undefined}
+    />
+  );
+
+  it('is the row button tooltip and accessible description only while non-empty', () => {
+    const view = render(draw('Books and authors'));
+    const button = screen.getByRole('button', { name: 'book-club' });
+    expect(button.textContent).toBe('book-club');
+    expect(button.getAttribute('title')).toBe('Books and authors');
+    expect(button.getAttribute('aria-description')).toBe('Books and authors');
+
+    view.rerender(draw('Reading together'));
+    expect(button.getAttribute('title')).toBe('Reading together');
+    expect(button.getAttribute('aria-description')).toBe('Reading together');
+
+    view.rerender(draw(''));
+    expect(button.getAttribute('title')).toBe('book-club');
+    expect(button.getAttribute('aria-description')).toBeNull();
+  });
+});
+
 describe('a manages badge', () => {
   it('marks only managed channels and describes the channel button without changing its name', () => {
     const managed = channels.map((channel) => ({ ...channel, manages: channel.id === 2 }));

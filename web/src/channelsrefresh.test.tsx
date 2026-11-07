@@ -189,6 +189,49 @@ describe('the list follows the server', () => {
     expect(screen.queryByText(/You no longer have access/)).toBeNull();
   });
 
+  it('updates and clears another channel’s sidebar topic from the re-read list', async () => {
+    const events = await openChat();
+    const button = screen.getByRole('button', { name: 'ops' });
+    expect(button.getAttribute('aria-description')).toBeNull();
+
+    server.channels = [general, { ...ops, topic: 'Operations' }];
+    events.send(frame);
+    await waitFor(() => {
+      expect(button.getAttribute('aria-description')).toBe('Operations');
+    });
+    expect(button.getAttribute('title')).toBe('Operations');
+
+    server.channels = [general, { ...ops, topic: 'Incident response' }];
+    events.send(frame);
+    await waitFor(() => {
+      expect(button.getAttribute('aria-description')).toBe('Incident response');
+    });
+
+    server.channels = [general, { ...ops, topic: '' }];
+    events.send(frame);
+    await waitFor(() => {
+      expect(button.getAttribute('aria-description')).toBeNull();
+    });
+    expect(button.getAttribute('title')).toBe('ops');
+  });
+
+  it('updates the header from a channel frame alone, without reading the list again', async () => {
+    const events = await openChat();
+    const before = server.listGets;
+    const document = { schema: 'conch.channel.v1', channel_id: 7, name: 'general', created_at: at };
+    events.send({ ...document, topic: 'Live purpose' });
+    await screen.findByText('Live purpose');
+    expect(screen.getByRole('button', { name: 'general' }).getAttribute('aria-description')).toBe('Live purpose');
+    expect(server.listGets).toBe(before);
+
+    events.send({ ...document, topic: '' });
+    await waitFor(() => {
+      expect(screen.queryByText('Live purpose')).toBeNull();
+    });
+    expect(screen.getByRole('button', { name: 'general' }).getAttribute('aria-description')).toBeNull();
+    expect(server.listGets).toBe(before);
+  });
+
   it('reads the list again once after a reconnect', async () => {
     const events = await openChat();
     expect(server.listGets).toBe(1);

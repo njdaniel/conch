@@ -95,3 +95,37 @@ test('C1504 a manager sets a topic; members and the directory learn it, while pr
   expect(publicChannel.topic).toBeUndefined();
   await expect(channelButton(readerPage, publicName)).toHaveAttribute('aria-current', 'true');
 });
+
+test('C1504 a member viewing another channel gets the sidebar topic through the channels refresh', async ({ meet, secrets, world }) => {
+  const suffix = Date.now().toString(36);
+  const manager = await member(world, secrets, `c1504-${suffix}-manager`);
+  const reader = await member(world, secrets, `c1504-${suffix}-reader`);
+  const publicName = `c1504-${suffix}-public`;
+  const otherName = `c1504-${suffix}-other`;
+  const publicTopic = `Public purpose ${suffix}`;
+  await make(world, manager.token, publicName, 'public');
+  await make(world, manager.token, otherName, 'public');
+  await add(world, publicName, reader);
+  await add(world, otherName, reader);
+
+  const managerPage = (await meet()).page;
+  const readerPage = (await meet()).page;
+  await signIn(managerPage, world, manager.token, manager.name);
+  await signIn(readerPage, world, reader.token, reader.name);
+  await openChannel(managerPage, publicName);
+  await openChannel(readerPage, otherName);
+  await expect(readerPage.getByLabel(`Message #${otherName}`)).toBeEnabled();
+
+  await nav(managerPage).getByRole('button', { name: `Actions for ${publicName}` }).click();
+  await nav(managerPage).getByRole('menuitem', { name: 'Set topic' }).click();
+  const form = nav(managerPage).getByRole('form', { name: 'Set topic' });
+  await form.getByLabel('Topic').fill(publicTopic);
+  await form.getByRole('button', { name: 'Set topic' }).click();
+  await expect(form).toHaveCount(0);
+
+  const row = channelButton(readerPage, publicName);
+  await expect(row).toHaveAttribute('aria-description', publicTopic);
+  await expect(row).toHaveAttribute('title', publicTopic);
+  await expect(readerPage.getByLabel(`Message #${otherName}`)).toBeEnabled();
+  await expect(topic(readerPage, publicTopic)).toHaveCount(0);
+});

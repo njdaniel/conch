@@ -347,6 +347,7 @@ function ChannelRow({
         }}
         tabIndex={channel.name === stop ? 0 : -1}
         aria-describedby={described.length === 0 ? undefined : described.join(' ')}
+        aria-description={channel.topic === undefined || channel.topic === '' ? undefined : channel.topic}
         aria-current={channel.name === selected ? 'true' : undefined}
         onClick={() => {
           onOpen(channel.name);
@@ -354,7 +355,7 @@ function ChannelRow({
         onKeyDown={(event) => {
           onMove(event, index);
         }}
-        title={channel.name}
+        title={channel.topic === undefined || channel.topic === '' ? channel.name : channel.topic}
       >
         {isPrivate ? <Glyph name="lock" /> : null}
         <span className="channel-name">{channel.name}</span>

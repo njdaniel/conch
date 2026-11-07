@@ -32,7 +32,7 @@ describe('SetTopic', () => {
     const { onSet, onClose } = form();
     const field = screen.getByRole('textbox', { name: 'Topic' });
     expect(field).toHaveProperty('value', channel.topic);
-    expect(field).toHaveProperty('maxLength', MAX_CHANNEL_TOPIC_LENGTH);
+    expect(field.getAttribute('maxlength')).toBeNull();
     fireEvent.change(field, { target: { value: updated.topic } });
     fireEvent.click(screen.getByRole('button', { name: 'Set topic' }));
     await waitFor(() => {
@@ -40,6 +40,32 @@ describe('SetTopic', () => {
       expect(onClose).toHaveBeenCalledOnce();
     });
     expect(setTopic).toHaveBeenCalledExactlyOnceWith(channel.id, updated.topic);
+  });
+
+  it('accepts 250 code points when the last is a supplementary character', async () => {
+    const accepted = `${'a'.repeat(MAX_CHANNEL_TOPIC_LENGTH - 1)}😀`;
+    setTopic.mockResolvedValue({ ok: true, value: { ...channel, topic: accepted } });
+    form();
+    const field = screen.getByRole('textbox', { name: 'Topic' });
+    fireEvent.change(field, { target: { value: accepted } });
+    fireEvent.click(screen.getByRole('button', { name: 'Set topic' }));
+    await waitFor(() => {
+      expect(setTopic).toHaveBeenCalledExactlyOnceWith(channel.id, accepted);
+    });
+  });
+
+  it('truncates beyond 250 code points without splitting a surrogate pair', async () => {
+    const truncated = 'a'.repeat(MAX_CHANNEL_TOPIC_LENGTH);
+    const refused = `${truncated}😀`;
+    setTopic.mockResolvedValue({ ok: true, value: { ...channel, topic: truncated } });
+    form();
+    const field = screen.getByRole('textbox', { name: 'Topic' });
+    fireEvent.change(field, { target: { value: refused } });
+    expect(field).toHaveProperty('value', truncated);
+    fireEvent.click(screen.getByRole('button', { name: 'Set topic' }));
+    await waitFor(() => {
+      expect(setTopic).toHaveBeenCalledExactlyOnceWith(channel.id, truncated);
+    });
   });
 
   it('Clear sends an empty topic and closes after the server accepts it', async () => {
