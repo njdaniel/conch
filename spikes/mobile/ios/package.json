@@ -1,0 +1,29 @@
+{
+  "name": "conch-spike-ios",
+  "version": "0.0.1",
+  "private": true,
+  "license": "AGPL-3.0-only",
+  "scripts": {
+    "start": "react-native start",
+    "ios": "react-native run-ios",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "react": "19.3.0",
+    "react-native": "0.88.1"
+  },
+  "devDependencies": {
+    "@babel/core": "7.29.13",
+    "@babel/runtime": "7.29.13",
+    "@react-native-community/cli": "20.2.0",
+    "@react-native-community/cli-platform-ios": "20.2.0",
+    "@react-native/babel-preset": "0.88.1",
+    "@react-native/metro-config": "0.88.1",
+    "@react-native/typescript-config": "0.88.1",
+    "@types/react": "19.3.0",
+    "typescript": "6.0.3"
+  },
+  "engines": {
+    "node": "24.21.0"
+  }
+}
