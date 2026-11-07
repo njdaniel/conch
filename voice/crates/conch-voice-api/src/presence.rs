@@ -1,5 +1,7 @@
-//! The presence socket: `GET /v1/voice/ws?channel=`, which sends the channel's whole voice
-//! state as a `conch.voice_presence.v1` document on connect and again on every change.
+//! The presence socket: `GET /v1/voice/ws?channel=&schema=conch.voice_presence.v2`, which
+//! sends the channel's whole voice state as a `conch.voice_presence.v2` document on connect
+//! and again on every change. v2 is asked for so that this client never reads the degraded
+//! v1 document a room with several sharers would otherwise be shown as.
 //!
 //! The reference is `SubscribeVoicePresence` in `internal/cli/client.go`.
 //!
@@ -31,7 +33,7 @@ use tokio_tungstenite::tungstenite::protocol::{CloseFrame, Role, WebSocketConfig
 
 use crate::client::{Client, decode, transport};
 use crate::error::{Error, MAX_TEXT_CHARS, Scrubber};
-use crate::types::VoicePresenceV1;
+use crate::types::{VOICE_PRESENCE_SCHEMA_PARAM, VOICE_PRESENCE_SCHEMA_V2, VoicePresenceV2};
 
 /// The most one presence frame may hold. A snapshot is a few kilobytes; tungstenite's own
 /// default would buffer 64 MiB on a server's say-so.
@@ -93,7 +95,7 @@ pub enum StreamEnd {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PresenceEvent {
     /// The channel's whole voice state. It replaces the one before it.
-    Snapshot(VoicePresenceV1),
+    Snapshot(VoicePresenceV2),
     /// The stream is over, and why. Every later call gives the same answer.
     Ended(StreamEnd),
 }
@@ -110,7 +112,8 @@ pub struct PresenceStream {
 }
 
 impl Client {
-    /// `GET /v1/voice/ws?channel=`: follows the channel's voice presence.
+    /// `GET /v1/voice/ws?channel=&schema=conch.voice_presence.v2`: follows the channel's
+    /// voice presence, as the v2 document.
     ///
     /// The first [`PresenceStream::next`] gives the state at connection; `conchd` then
     /// sends a snapshot only when something changes, so a quiet channel is a quiet
@@ -121,7 +124,13 @@ impl Client {
     /// [`Error::ChannelNotFound`].
     pub async fn presence_stream(&self, channel: &str) -> Result<PresenceStream, Error> {
         Self::check_channel(channel)?;
-        let url = self.url(&["v1", "voice", "ws"], Some(("channel", channel)))?;
+        let url = self.url(
+            &["v1", "voice", "ws"],
+            &[
+                ("channel", channel),
+                (VOICE_PRESENCE_SCHEMA_PARAM, VOICE_PRESENCE_SCHEMA_V2),
+            ],
+        )?;
         let key = generate_key();
         let request = self
             .http_get(url)
@@ -206,7 +215,7 @@ impl PresenceStream {
     /// The next thing the socket has to say.
     ///
     /// - `Ok(Snapshot)`: a document that decoded and passed
-    ///   [`VoicePresenceV1::validate`]. Documents come in the order `conchd` sent them and
+    ///   [`VoicePresenceV2::validate`]. Documents come in the order `conchd` sent them and
     ///   none is skipped.
     /// - `Ok(Ended)`: the stream is over, with the reason. It stays over.
     /// - `Err`: a frame this client could not accept: not text, not JSON of the presence
@@ -291,8 +300,8 @@ impl fmt::Debug for PresenceStream {
 }
 
 /// One frame's text as a presence document that may be believed.
-fn snapshot(text: &[u8]) -> Result<VoicePresenceV1, Error> {
-    let presence: VoicePresenceV1 = decode(text, "voice presence frame")?;
+fn snapshot(text: &[u8]) -> Result<VoicePresenceV2, Error> {
+    let presence: VoicePresenceV2 = decode(text, "voice presence frame")?;
     presence.validate()?;
     Ok(presence)
 }
