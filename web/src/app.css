@@ -2990,8 +2990,12 @@ label {
 }
 
 .call-state {
+  min-width: 0;
   color: var(--muted);
   font-weight: 400;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .call-title {
@@ -3005,6 +3009,30 @@ label {
   display: flex;
   flex-wrap: wrap;
   gap: var(--s2);
+}
+
+/* Wide enough, the head is one row: the controls keep their size and the
+   title gives way, its enlarged-picture words cut short (the full words are
+   in its title attribute). A taller head would
+   push the strip's tiles below the view's fold, where adaptive stream stops
+   sending them. */
+@media (min-width: 720px) {
+  .call-head {
+    flex-wrap: nowrap;
+  }
+
+  .call-title {
+    flex: 0 1 auto;
+    min-width: 6rem;
+    overflow: hidden;
+    white-space: nowrap;
+  }
+
+  .call-controls {
+    flex: 0 0 auto;
+    max-width: 100%;
+    justify-content: flex-end;
+  }
 }
 
 .call-grid {

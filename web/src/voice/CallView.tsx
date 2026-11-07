@@ -285,7 +285,7 @@ export function CallView({ client, state, tiles, hidden, open, share, hideNonVid
           <p className="call-title">
             <Glyph name="camera" />
             Video
-            {main === null ? null : <span className="call-state">{enlargedWords(main)}</span>}
+            {main === null ? null : <span className="call-state" title={enlargedWords(main)}>{enlargedWords(main)}</span>}
           </p>
           <div className="call-controls">
             {main === null ? null : (

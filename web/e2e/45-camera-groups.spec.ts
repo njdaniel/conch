@@ -254,6 +254,9 @@ test.describe('the call view in a small group, with LiveKit', () => {
       await expect(call).toContainText("bob's video is enlarged");
       await expect.poll(() => stripPlace(bobCam, [share, aliceCam])).toBe('right');
       expect((await boxOf(bobCam)).width).toBeGreaterThan((await boxOf(share)).width);
+      // The head stays one row (the title gives way to the controls), so the
+      // strip is not pushed down and out of view.
+      expect((await boxOf(c.page.locator('.call-head'))).height).toBeLessThan(60);
       await expectReceiving(share.getByLabel("alice's screen"));
       await expectReceiving(aliceCam);
       for (const name of ['Mute share', 'Full screen', 'Stop watching']) await expect(share.getByRole('button', { name })).toBeAttached();
