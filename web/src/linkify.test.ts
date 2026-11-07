@@ -65,6 +65,8 @@ describe('linkify', () => {
     ['many short links', 'https://a.example '.repeat(50_000)],
     ['no-host schemes', 'https:// '.repeat(100_000)],
     ['nested brackets', `https://example.com/${'(['.repeat(200_000)}`],
+    ['masked-link tails', 'https://a.co]('.repeat(75_000)],
+    ['masked-link tails, one run', 'https://a.co](x'.repeat(70_000)],
   ])('reads a long hostile body (%s) in bounded time', (_name, body) => {
     const started = performance.now();
     const out = linkify(body);
