@@ -1,0 +1,93 @@
+// validate.ts in both modes (issue #1534). At runtime an unknown key is
+// ignored and dropped; the fixture tests switch to strict so a fixture key the
+// TypeScript type lacks still fails.
+import { afterEach, describe, expect, it } from 'vitest';
+import { channelV0, type ChannelV0 } from './generated';
+import { array, int, object, setStrictKeys, str, tagged, tolerant, vocab, type Validator } from './validate';
+
+afterEach(() => {
+  setStrictKeys(false);
+});
+
+// Today's released object(), frozen as it shipped before #1534: it refuses
+// every key the type lacks. It documents what the fix replaces.
+function legacyObject<T>(shape: Record<string, Validator<unknown> | { optional: Validator<unknown> }>): Validator<T> {
+  return (v: unknown, path = '$') => {
+    if (typeof v !== 'object' || v === null || Array.isArray(v)) return [`${path}: want an object`];
+    const rec = v as Record<string, unknown>;
+    const problems: string[] = [];
+    for (const [key, field] of Object.entries(shape)) {
+      const at = `${path}.${key}`;
+      if ('optional' in field) {
+        if (key in rec) problems.push(...field.optional(rec[key], at));
+      } else if (key in rec) problems.push(...field(rec[key], at));
+      else problems.push(`${at}: required key is missing`);
+    }
+    for (const key of Object.keys(rec)) {
+      if (!Object.hasOwn(shape, key)) problems.push(`${path}.${key}: key is not in the TypeScript type`);
+    }
+    return problems;
+  };
+}
+
+const at = '2026-01-02T03:04:05Z';
+
+describe('a ChannelV0 that carries a key an older bundle lacks (the channel topic)', () => {
+  const legacyChannel = legacyObject<ChannelV0>({
+    id: int,
+    name: str,
+    created_at: (v, p) => str(v, p),
+  });
+
+  it('is refused by the validator as released before the fix', () => {
+    const problems = legacyChannel({ id: 1, name: 'general', created_at: at, topic: 'hello' });
+    expect(problems).toEqual(['$.topic: key is not in the TypeScript type']);
+  });
+
+  it('is accepted at runtime, and the key is not on the value', () => {
+    const value: unknown = { id: 1, name: 'general', created_at: at, topic: 'hello' };
+    expect(channelV0(value)).toEqual([]);
+    expect(value).toEqual({ id: 1, name: 'general', created_at: at });
+  });
+
+  it('is refused in strict mode', () => {
+    setStrictKeys(true);
+    expect(channelV0({ id: 1, name: 'general', created_at: at, topic: 'hello' })).toEqual([
+      '$.topic: key is not in the TypeScript type',
+    ]);
+  });
+});
+
+describe('runtime mode', () => {
+  const inner = object<{ n: number }>({ n: int });
+  const outer = object<{ list: { n: number }[]; one: { n: number } }>({ list: array(inner), one: inner });
+
+  it('drops unknown keys at every depth', () => {
+    const value = { list: [{ n: 1, x: 1 }], one: { n: 2, y: 2 }, z: 3 };
+    expect(outer(value)).toEqual([]);
+    expect(value).toEqual({ list: [{ n: 1 }], one: { n: 2 } });
+  });
+
+  it('still type-checks declared keys and requires required ones', () => {
+    expect(outer({ list: [{ n: 'a', x: 1 }], one: { n: 2 } })).toEqual(['$.list[0].n: want an integer, got a string']);
+    expect(outer({ one: { n: 2 } })).toEqual(['$.list: required key is missing']);
+  });
+
+  it('leaves the value as it was when the validator refuses it', () => {
+    const value = { list: 'no', one: { n: 2, y: 2 }, z: 3 };
+    expect(outer(value)).not.toEqual([]);
+    expect(value).toEqual({ list: 'no', one: { n: 2, y: 2 }, z: 3 });
+  });
+
+  it('keeps strict vocabularies strict and refuses an unknown union tag', () => {
+    const shape = object<{ k: 'a' | 'b' }>({ k: vocab<'a' | 'b'>({ a: true, b: true }) });
+    expect(shape({ k: 'c', extra: 1 })).toHaveLength(1);
+    const u = tagged<{ kind: 'a'; n: number }, 'kind'>('kind', { a: object<{ kind: 'a'; n: number }>({ kind: str as Validator<'a'>, n: int }) });
+    expect(u({ kind: 'z' })).toHaveLength(1);
+    expect(u({ kind: 'a', n: 1, more: true })).toEqual([]);
+  });
+
+  it('still tolerates an unknown value of a tolerant vocabulary', () => {
+    expect(object<{ p: string }>({ p: tolerant<'x'>({ x: true }) })({ p: 'future' })).toEqual([]);
+  });
+});

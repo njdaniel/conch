@@ -44,8 +44,34 @@ export type Shape<T> = {
 
 /* @__NO_SIDE_EFFECTS__ */
 function validator<T>(check: (value: unknown, path: string) => string[]): Validator<T> {
-  return (value: unknown, path = '$') => check(value, path);
+  return (value: unknown, path = '$') => {
+    depth++;
+    let problems: string[] = [];
+    try {
+      problems = check(value, path);
+    } finally {
+      depth--;
+      if (depth === 0) {
+        // Undeclared keys go only once the whole value has passed: a caller
+        // may try several validators on one frame to learn which it is, and a
+        // validator that refused must leave the value as it was.
+        if (problems.length === 0) {
+          for (const [holder, key] of undeclared) {
+            // eslint-disable-next-line @typescript-eslint/no-dynamic-delete -- dropping an undeclared key is the point
+            delete holder[key];
+          }
+        }
+        undeclared.length = 0;
+      }
+    }
+    return problems;
+  };
 }
+
+// How deep in validators the current call is, and the undeclared keys found so
+// far in this outermost call, to drop when it passes.
+let depth = 0;
+const undeclared: [Record<string, unknown>, string][] = [];
 
 function describe(value: unknown): string {
   if (value === null) return 'null';
@@ -132,9 +158,23 @@ export function optional<T>(v: Validator<T>): Optional<T> {
   return { optional: v };
 }
 
-// object checks a JSON object against T: every required key present, every key
-// of the right type, and no key T does not have. A key the fixture has and the
-// type lacks means the type is behind Go.
+// Whether object() refuses a key its type lacks. The browser reads a server
+// that may be newer than the bundle, and the protocol's rule is that additive
+// fields are compatible because readers ignore what they do not know (issue
+// #1534), so at runtime it does not. schema.test.ts turns it on, so a fixture
+// key the type lacks, meaning the type is behind Go, still fails there.
+let strictKeys = false;
+
+export function setStrictKeys(on: boolean): void {
+  strictKeys = on;
+}
+
+// object checks a JSON object against T: every required key present and every
+// key of the right type. A key T does not have is a problem in strict mode;
+// otherwise it is deleted from the value, which is the caller's own freshly
+// parsed JSON, once the whole value has passed, so nothing undeclared reaches
+// the app. Vocabularies and tagged
+// unions are as strict in both modes.
 /* @__NO_SIDE_EFFECTS__ */
 export function object<T>(shape: Shape<T>): Validator<T> {
   const fields: [string, Validator<unknown> | Optional<unknown>][] = Object.entries(shape);
@@ -154,9 +194,9 @@ export function object<T>(shape: Shape<T>): Validator<T> {
       }
     }
     for (const key of Object.keys(v)) {
-      if (!Object.hasOwn(shape, key)) {
-        problems.push(`${path}.${key}: key is not in the TypeScript type`);
-      }
+      if (Object.hasOwn(shape, key)) continue;
+      if (strictKeys) problems.push(`${path}.${key}: key is not in the TypeScript type`);
+      else undeclared.push([v, key]);
     }
     return problems;
   });

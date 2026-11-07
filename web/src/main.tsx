@@ -1,6 +1,7 @@
 import { Fragment, StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 import { App } from './App';
+import { UpdateNotice } from './UpdateNotice';
 import { platform } from './platform';
 import './app.css';
 
@@ -13,7 +14,12 @@ if (root === null) {
 // server's. The desktop shell has no server of its own: its Shell asks which
 // one first, and the origin is read once that is known.
 function Client() {
-  return <App origin={platform.services.origin()} />;
+  return (
+    <>
+      <UpdateNotice />
+      <App origin={platform.services.origin()} />
+    </>
+  );
 }
 
 const Shell = platform.Shell ?? Fragment;

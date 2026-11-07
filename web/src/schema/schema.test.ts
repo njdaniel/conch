@@ -29,7 +29,11 @@ import {
   type WhoAmIResponseV1,
 } from './generated';
 import { families } from './generated.families';
-import type { Validator } from './validate';
+import { setStrictKeys, type Validator } from './validate';
+
+// The fixtures are checked strictly: a key the type lacks fails here, though
+// at runtime it is ignored (issue #1534).
+setStrictKeys(true);
 
 // Read by relative path, so the test sees the fixtures of this checkout.
 const fixtures = import.meta.glob<unknown>('../../../pkg/schema/testdata/*.json', {

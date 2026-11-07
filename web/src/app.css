@@ -805,6 +805,19 @@ label {
   color: var(--danger);
 }
 
+.banner.update-notice {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  background: transparent;
+  border: 1px solid var(--warn);
+  color: var(--warn);
+}
+
+.banner.update-notice p {
+  margin: 0;
+}
+
 .banner.stale {
   background: transparent;
   border: 1px solid var(--warn);
