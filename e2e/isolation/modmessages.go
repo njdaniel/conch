@@ -2,15 +2,18 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/url"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/njdaniel/conch/internal/mcpclient"
 	"github.com/njdaniel/conch/internal/server/store"
 	"github.com/njdaniel/conch/pkg/schema"
 )
@@ -451,6 +454,26 @@ func (m *mod) messages() error {
 		}
 	}
 
+	// What the agent member of the channel reads over MCP before anything is
+	// removed: the channel-wide messages only, no whisper or net message it
+	// has no part in.
+	mcp, err := m.agentSession()
+	if err != nil {
+		return err
+	}
+	mcpBefore, err := m.mcpRead(mcp)
+	if err != nil {
+		return err
+	}
+	for _, id := range []int64{st.m4, st.m5, st.m6} {
+		if _, seen := mcpBefore.byID(id); seen {
+			return fmt.Errorf("before any removal the agent reads message %d over MCP, a message it has no part in", id)
+		}
+	}
+	if _, seen := mcpBefore.byID(st.m1); !seen {
+		return fmt.Errorf("before the removal the agent does not read message %d over MCP", st.m1)
+	}
+
 	// ---- a scoped message: the whisper to the manager
 
 	base := feedCounts(all())
@@ -513,6 +536,12 @@ func (m *mod) messages() error {
 		return fmt.Errorf("%d message_removed rows for the message after a repeat, want 1 (%v)", rows, errText(err))
 	}
 
+	// ---- the agent's MCP read
+
+	if err := m.mcpTombstone(mcp, mcpBefore, st); err != nil {
+		return fmt.Errorf("MCP read_channel after the removal: %w", err)
+	}
+
 	// ---- every surface
 
 	k, err := m.surfaces(st)
@@ -557,6 +586,132 @@ func (m *mod) messages() error {
 		f.close()
 	}
 	m.say("message removal: the manager removed a whisper sent to her and then a channel-wide message with an attachment while three people held every socket variant: each v2 socket of the whisper's two people got exactly one removed:true envelope, no v0, v1 or other person's socket got any frame about it, the wide message reached every v0, v1 and v2 socket as the fixed body (v2 with removed) and every events socket as %s, once, no frame after held an original, nobody was disconnected, a repeat sent nothing and wrote nothing; a plain member was refused, the manager was told message_not_found for a whisper and a net message she cannot see exactly as for an id nobody issued, and the operator outside the channel, B's manager and members, and a member of another channel were told the channel does not exist exactly as for a ghost (%d requests)", schema.MessageRemovedSchemaV1, n)
+	return nil
+}
+
+// agentSession opens the gates' agent member of the moderated channel on /mcp.
+func (m *mod) agentSession() (*mcpclient.Client, error) {
+	ctx, cancel := context.WithTimeout(stopCtx, time.Minute)
+	defer cancel()
+	c := mcpclient.New(m.w.d.baseURL, m.agent.token)
+	m.h.called(http.MethodPost, "/mcp")
+	if err := c.Initialize(ctx, "isolation-check"); err != nil {
+		return nil, fmt.Errorf("MCP initialize as the moderated channel's agent: %w", err)
+	}
+	return c, nil
+}
+
+// mcpPage is every message one MCP read_channel read of the moderated channel
+// returned, and the text of the answers.
+type mcpPage struct {
+	messages []schema.MessageV2
+	raw      []byte
+}
+
+func (p mcpPage) byID(id int64) (schema.MessageV2, bool) {
+	for _, msg := range p.messages {
+		if msg.ID == id {
+			return msg, true
+		}
+	}
+	return schema.MessageV2{}, false
+}
+
+// mcpRead reads the moderated channel from the start, page by page, with the
+// read_channel tool.
+func (m *mod) mcpRead(c *mcpclient.Client) (mcpPage, error) {
+	ctx, cancel := context.WithTimeout(stopCtx, time.Minute)
+	defer cancel()
+	var out mcpPage
+	var after int64
+	for range 50 {
+		raw, err := c.CallTool(ctx, "read_channel", map[string]any{"channel": m.main, "after": after, "limit": 100})
+		if err != nil {
+			return out, fmt.Errorf("read_channel as the agent: %w", err)
+		}
+		page, err := mcpclient.Decode[schema.ListMessagesResponseV2](raw)
+		if err != nil {
+			return out, err
+		}
+		out.raw = append(out.raw, raw...)
+		out.messages = append(out.messages, page.Messages...)
+		if page.NextAfter == 0 {
+			return out, nil
+		}
+		after = page.NextAfter
+	}
+	return out, fmt.Errorf("read_channel never reached the end of the channel")
+}
+
+// mcpTombstone is the row of issue #1468: the message with an attachment has
+// been removed, and the agent reads it over MCP as the tombstone REST returns
+// for it, field for field: the fixed body, the author kept, no payload (so no
+// attachment) and nothing of the original anywhere in the answer. What the
+// agent could not read before it still cannot, and the rest of the channel
+// is what it was.
+func (m *mod) mcpTombstone(c *mcpclient.Client, before mcpPage, st *removedState) error {
+	after, err := m.mcpRead(c)
+	if err != nil {
+		return err
+	}
+	for _, o := range st.originalsWide {
+		if bytes.Contains(after.raw, []byte(o)) {
+			return fmt.Errorf("the answer holds the removed message's %q", o)
+		}
+	}
+	if bytes.Contains(after.raw, []byte(st.r4)) {
+		return fmt.Errorf("the answer holds the removed whisper's text")
+	}
+	for _, id := range []int64{st.m4, st.m5, st.m6} {
+		if _, seen := after.byID(id); seen {
+			return fmt.Errorf("the agent reads message %d, which it could not read before", id)
+		}
+	}
+	tomb, ok := after.byID(st.m1)
+	if !ok {
+		return fmt.Errorf("the agent reads no tombstone for message %d", st.m1)
+	}
+	if !tomb.Removed || tomb.Body != schema.MessageRemovedBody || tomb.Payload != nil || tomb.AuthorID != m.pat.id {
+		return fmt.Errorf("the tombstone is %+v: want the fixed body, no payload, the author kept", tomb)
+	}
+	if err := tomb.Validate(); err != nil {
+		return fmt.Errorf("the tombstone does not validate: %w", err)
+	}
+	rest, _, err := m.listV2(m.agent.api, "?after=0&limit=100")
+	if err != nil {
+		return err
+	}
+	var viaREST schema.MessageV2
+	for _, msg := range rest {
+		if msg.ID == st.m1 {
+			viaREST = msg
+		}
+	}
+	if viaREST.ID == 0 {
+		return fmt.Errorf("REST returns the agent no tombstone for message %d", st.m1)
+	}
+	if !reflect.DeepEqual(tomb, viaREST) {
+		return fmt.Errorf("MCP returns the tombstone as %+v, and REST as %+v", tomb, viaREST)
+	}
+	// The same messages, in the same order, as REST gives the agent; and the
+	// same ones as before but for the removed one.
+	if len(after.messages) != len(rest) {
+		return fmt.Errorf("MCP returns %d messages and REST %d", len(after.messages), len(rest))
+	}
+	for i, msg := range after.messages {
+		if msg.ID != rest[i].ID {
+			return fmt.Errorf("MCP returns message %d in place %d, and REST %d", msg.ID, i, rest[i].ID)
+		}
+	}
+	if len(after.messages) != len(before.messages) {
+		return fmt.Errorf("the agent read %d messages before the removals and %d after", len(before.messages), len(after.messages))
+	}
+	for i, msg := range after.messages {
+		if msg.ID != before.messages[i].ID {
+			return fmt.Errorf("the agent's read changed: message %d where %d was", msg.ID, before.messages[i].ID)
+		}
+	}
+	m.say("mcp tombstone: the agent member of the channel read the removed message over MCP read_channel as the tombstone REST returns for it (the fixed body, the author kept, no payload and so no attachment, nothing of the original in the answer), the whisper to the manager, the whisper to wes and the net message were no more visible to it after than before, and the channel read as it did before but for that one message")
 	return nil
 }
 
