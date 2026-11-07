@@ -444,6 +444,15 @@ describe('the call view in a small group', () => {
     }
   });
 
+  it('a focused tile that goes, not enlarged, hands focus to Hide video while the view stays open', () => {
+    // Two cameras with camera-off tiles filtered out: focus sits on member-1's
+    // tile, member-1's camera goes off and the filter drops the tile.
+    const { redraw } = callOf([tile(8, 'member-1'), tile(9, 'member-2'), tile(7, 'You', true, true)]);
+    within(callRegion()).getByRole('button', { name: "Enlarge member-1's video" }).focus();
+    redraw([tile(9, 'member-2'), tile(7, 'You', true, true)]);
+    expect(document.activeElement).toBe(within(callRegion()).getByRole('button', { name: 'Hide video' }));
+  });
+
   it("the live region says someone else's camera starting and stopping, never the person's own", () => {
     const off = [tile(8, 'member-1', false), tile(9, 'member-2', false), tile(7, 'You', false, true)];
     const { redraw } = callOf(off);

@@ -228,6 +228,18 @@ export function CallView({ client, state, tiles, hidden, open, share, hideNonVid
     else move();
   }, [focusTo]);
 
+  // A tile that held focus and went (filtered out, its camera off, its person
+  // gone), enlarged or not: focus goes to Hide video rather than being lost,
+  // unless it already moved somewhere else.
+  const focusedTile = useRef<number | null>(null);
+  useEffect(() => {
+    const principal = focusedTile.current;
+    if (principal === null || shown.some((t) => t.principal === principal)) return;
+    focusedTile.current = null;
+    const at = document.activeElement;
+    if (open && (at === null || at === document.body)) hideButton.current?.focus();
+  }, [shown, open]);
+
   // The live region's words go after a while, so that what it said last is
   // not read again as if it were new.
   useEffect(() => {
@@ -309,6 +321,7 @@ export function CallView({ client, state, tiles, hidden, open, share, hideNonVid
         {shown.map((t) => (
           <li
             key={t.principal}
+            onFocus={() => { focusedTile.current = t.principal; }}
             ref={(el) => {
               if (el === null) items.current.delete(t.principal);
               else items.current.set(t.principal, el);
