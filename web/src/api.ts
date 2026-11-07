@@ -204,7 +204,7 @@ import {
   type ProblemReportV1,
   type UpdateProblemReportRequestV1,
 } from './schema/report';
-import type { Validator } from './schema/validate';
+import { fromServer, type Validator } from './schema/validate';
 import { call, fileQuery, operations, queryOf, type Call, type OperationId } from './platform/operations';
 import { platform } from './platform';
 import type { FeedConnection, Held, Place } from './platform/types';
@@ -450,7 +450,7 @@ function forget(held: Held): void {
 async function refusalCode(res: Response): Promise<string | undefined> {
   try {
     const body: unknown = await res.json();
-    if (errorV0(body).length === 0) return (body as { code: string }).code;
+    if (fromServer(errorV0)(body).length === 0) return (body as { code: string }).code;
   } catch {
     // No document, or not one.
   }
@@ -473,7 +473,7 @@ async function noteRefusal(res: Response): Promise<void> {
   let code: string | undefined;
   try {
     const body: unknown = await res.clone().json();
-    if (errorV0(body).length === 0) code = (body as { code: string }).code;
+    if (fromServer(errorV0)(body).length === 0) code = (body as { code: string }).code;
   } catch {
     // No document, or not one.
   }
@@ -523,7 +523,7 @@ async function get<T>(request: Call, token: string, check: Validator<T>): Promis
   } catch {
     return { ok: false, failure: 'invalid' };
   }
-  if (check(body).length > 0) return { ok: false, failure: 'invalid' };
+  if (fromServer(check)(body).length > 0) return { ok: false, failure: 'invalid' };
   return { ok: true, value: body as T };
 }
 
@@ -702,7 +702,7 @@ export async function serverHealth(): Promise<ServerHealth | null> {
   try {
     const res = await platform.http.health(call('health'));
     const body: unknown = await res.json();
-    if (health(body).length > 0) return null;
+    if (fromServer(health)(body).length > 0) return null;
     const { version, server_mode: mode } = body as { version: string; server_mode?: string };
     pageVersion ??= version;
     return { version, temporary: mode === 'temporary' };
@@ -861,7 +861,7 @@ export async function signOutEverywhere(principal: number): Promise<ApiResult<nu
   forget(held);
   try {
     const parsed: unknown = await reply.res.json();
-    if (revokeAllCredentialsResponseV1(parsed).length === 0) return { ok: true, value: (parsed as { revoked: number }).revoked };
+    if (fromServer(revokeAllCredentialsResponseV1)(parsed).length === 0) return { ok: true, value: (parsed as { revoked: number }).revoked };
   } catch {
     // Fall through.
   }
@@ -1371,7 +1371,7 @@ async function inviteRefused(res: Response): Promise<InviteRefusal> {
   let doc: ErrorV0 | undefined;
   try {
     const body: unknown = await res.json();
-    if (errorV0(body).length === 0) doc = body as ErrorV0;
+    if (fromServer(errorV0)(body).length === 0) doc = body as ErrorV0;
   } catch {
     // No document, or not one.
   }
@@ -1390,7 +1390,7 @@ async function inviteRefused(res: Response): Promise<InviteRefusal> {
 async function readBody<T>(res: Response, check: Validator<T>): Promise<InviteResult<T>> {
   try {
     const parsed: unknown = await res.json();
-    if (check(parsed).length === 0) return { ok: true, value: parsed as T };
+    if (fromServer(check)(parsed).length === 0) return { ok: true, value: parsed as T };
   } catch {
     // Fall through.
   }
@@ -1730,7 +1730,7 @@ async function convertAs(held: Held, name: string, password: string): Promise<Co
   } catch {
     body = undefined;
   }
-  if (convertGuestResponseV1(body).length > 0) {
+  if (fromServer(convertGuestResponseV1)(body).length > 0) {
     // A success whose body is not the schema's shape may still carry the
     // member's new credential: it is revoked (best effort) rather than left
     // alive, and the person signs in with the password.
@@ -1889,7 +1889,7 @@ export async function renamePrincipal(id: number, name: string): Promise<ApiResu
   if (!reply.res.ok) return refused(reply.res);
   try {
     const parsed: unknown = await reply.res.json();
-    if (renamePrincipalResponseV1(parsed).length === 0) return { ok: true, value: (parsed as RenamePrincipalResponseV1).principal };
+    if (fromServer(renamePrincipalResponseV1)(parsed).length === 0) return { ok: true, value: (parsed as RenamePrincipalResponseV1).principal };
   } catch {
     // Fall through.
   }
@@ -2048,7 +2048,7 @@ async function reactionWrite(request: Call): Promise<ApiResult<ReactionSummaryV1
   if (!reply.res.ok) {
     try {
       const body: unknown = await reply.res.clone().json();
-      if (errorV0(body).length === 0) {
+      if (fromServer(errorV0)(body).length === 0) {
         const error = body as ErrorV0;
         return { ok: false, failure: 'invalid', code: error.code, ...(error.retry_after_seconds === undefined ? {} : { retryAfter: error.retry_after_seconds }) };
       }
@@ -2057,7 +2057,7 @@ async function reactionWrite(request: Call): Promise<ApiResult<ReactionSummaryV1
   }
   try {
     const body: unknown = await reply.res.json();
-    if (reactionSummaryV1(body).length === 0 && (body as ReactionSummaryV1).message_id === request.params?.id) return { ok: true, value: body as ReactionSummaryV1 };
+    if (fromServer(reactionSummaryV1)(body).length === 0 && (body as ReactionSummaryV1).message_id === request.params?.id) return { ok: true, value: body as ReactionSummaryV1 };
   } catch { /* A lost answer can safely be retried with the same intent. */ }
   return { ok: false, failure: 'network' };
 }
@@ -2111,7 +2111,7 @@ export async function editMessage(channel: string, id: number, body: string): Pr
   if (!res.ok) {
     try {
       const doc: unknown = await res.json();
-      if (errorV0(doc).length === 0) {
+      if (fromServer(errorV0)(doc).length === 0) {
         const { code, retry_after_seconds: retryAfter } = doc as ErrorV0;
         return { ok: false, failure: 'refused', code, ...(retryAfter === undefined ? {} : { retryAfter }) };
       }
@@ -2122,7 +2122,7 @@ export async function editMessage(channel: string, id: number, body: string): Pr
   }
   try {
     const parsed: unknown = await res.json();
-    if (editMessageResponseV1(parsed).length === 0) return { ok: true, message: (parsed as EditMessageResponseV1).message };
+    if (fromServer(editMessageResponseV1)(parsed).length === 0) return { ok: true, message: (parsed as EditMessageResponseV1).message };
   } catch {
     // Fall through: the body was cut off.
   }
@@ -2248,7 +2248,7 @@ export type PostResult =
 async function requestRefusal(res: Response, fallback: string): Promise<{ readonly reason: string; readonly code?: string }> {
   try {
     const body: unknown = await res.json();
-    if (errorV0(body).length === 0) {
+    if (fromServer(errorV0)(body).length === 0) {
       const doc = body as ErrorV0;
       const line = doc.message.replace(/\s+/g, ' ').trim();
       const reason = line === '' ? fallback : line.length > 300 ? `${line.slice(0, 299)}…` : line;
@@ -2282,7 +2282,7 @@ export async function postMessage(channel: string, body: string, audience?: Audi
   if (!res.ok) return { ok: false, outcome: 'refused', ...(await postRefusal(res)) };
   try {
     const parsed: unknown = await res.json();
-    if (postMessageResponseV2(parsed).length === 0) return { ok: true, message: (parsed as { message: MessageV2 }).message };
+    if (fromServer(postMessageResponseV2)(parsed).length === 0) return { ok: true, message: (parsed as { message: MessageV2 }).message };
   } catch {
     // Fall through: the body was cut off.
   }
@@ -2342,7 +2342,7 @@ export async function uploadFile(channel: string, name: string, mediaType: strin
   if (!res.ok) return { ok: false, outcome: 'refused', ...(await requestRefusal(res, 'The server refused the upload')) };
   try {
     const parsed: unknown = await res.json();
-    if (fileV1(parsed).length === 0) return { ok: true, file: parsed as FileV1 };
+    if (fromServer(fileV1)(parsed).length === 0) return { ok: true, file: parsed as FileV1 };
   } catch {
     // Fall through: the body was cut off.
   }
@@ -2424,7 +2424,7 @@ export async function markRead(channel: string, id: number): Promise<ApiResult<R
   if (!reply.res.ok) return refused(reply.res);
   try {
     const parsed: unknown = await reply.res.json();
-    if (readStateV1(parsed).length === 0) return { ok: true, value: parsed as ReadStateV1 };
+    if (fromServer(readStateV1)(parsed).length === 0) return { ok: true, value: parsed as ReadStateV1 };
   } catch {
     // Fall through.
   }
@@ -2540,7 +2540,7 @@ async function requestTicket(): Promise<ApiResult<WSTicketV1>> {
   if (!reply.res.ok) return { ok: false, failure: 'invalid' };
   try {
     const parsed: unknown = await reply.res.json();
-    if (wsTicketV1(parsed).length === 0) return { ok: true, value: parsed as WSTicketV1 };
+    if (fromServer(wsTicketV1)(parsed).length === 0) return { ok: true, value: parsed as WSTicketV1 };
   } catch {
     // Fall through.
   }
@@ -2659,10 +2659,10 @@ export function openEventsSocket(channel: string, session: number, events: Socke
       if (current() === owner && typeof data === 'string') {
         try {
           const body: unknown = JSON.parse(data);
-          if (channelMembersV1(body).length === 0) socketChannelId = (body as ChannelMembersV1).channel_id;
-          if (sessionRosterV1(body).length === 0) socketChannelId = (body as SessionRosterV1).channel_id;
-          if (channelDocV1(body).length === 0) socketChannelId = (body as ChannelDocV1).channel_id;
-          if (reactionSummaryV1(body).length === 0) {
+          if (fromServer(channelMembersV1)(body).length === 0) socketChannelId = (body as ChannelMembersV1).channel_id;
+          if (fromServer(sessionRosterV1)(body).length === 0) socketChannelId = (body as SessionRosterV1).channel_id;
+          if (fromServer(channelDocV1)(body).length === 0) socketChannelId = (body as ChannelDocV1).channel_id;
+          if (fromServer(reactionSummaryV1)(body).length === 0) {
             socketChannelId = (body as ReactionSummaryV1).channel_id;
             publishReaction(channel, { kind: 'summary', summary: body as ReactionSummaryV1 });
           }
@@ -2685,7 +2685,7 @@ export async function createSession(client: string): Promise<ApiResult<SessionV1
   if (!reply.res.ok) return refused(reply.res);
   try {
     const parsed: unknown = await reply.res.json();
-    if (sessionV1(parsed).length === 0) return { ok: true, value: parsed as SessionV1 };
+    if (fromServer(sessionV1)(parsed).length === 0) return { ok: true, value: parsed as SessionV1 };
   } catch {
     // Fall through.
   }
@@ -2771,7 +2771,7 @@ export async function createIntervention(run: number, request: CreateInterventio
   if (!reply.res.ok) return refused(reply.res);
   try {
     const parsed: unknown = await reply.res.json();
-    if (interventionV1(parsed).length === 0) return { ok: true, value: parsed as InterventionV1 };
+    if (fromServer(interventionV1)(parsed).length === 0) return { ok: true, value: parsed as InterventionV1 };
   } catch {
     // Fall through.
   }
@@ -2800,7 +2800,7 @@ export async function createVoiceSession(channel: string): Promise<VoiceSessionR
   }
   try {
     const parsed: unknown = await res.json();
-    if (voiceSessionResponseV1(parsed).length === 0) return { ok: true, value: parsed as VoiceSessionResponseV1 };
+    if (fromServer(voiceSessionResponseV1)(parsed).length === 0) return { ok: true, value: parsed as VoiceSessionResponseV1 };
   } catch {
     // Fall through.
   }
@@ -2829,7 +2829,7 @@ export async function createVoiceViewer(channel: string): Promise<VoiceViewerRes
   }
   try {
     const parsed: unknown = await res.json();
-    if (voiceCompanionResponseV1(parsed).length === 0) return { ok: true, value: parsed as VoiceCompanionResponseV1 };
+    if (fromServer(voiceCompanionResponseV1)(parsed).length === 0) return { ok: true, value: parsed as VoiceCompanionResponseV1 };
   } catch {
     // Fall through.
   }
@@ -2957,7 +2957,7 @@ export async function claimVoiceShare(channel: string): Promise<ShareClaimResult
   }
   try {
     const parsed: unknown = await res.json();
-    if (voiceShareV1(parsed).length === 0) return { ok: true, value: parsed as VoiceShareV1 };
+    if (fromServer(voiceShareV1)(parsed).length === 0) return { ok: true, value: parsed as VoiceShareV1 };
   } catch {
     // Fall through.
   }
@@ -2994,7 +2994,7 @@ export async function claimVoiceCamera(channel: string, startedAt?: string): Pro
   }
   try {
     const parsed: unknown = await res.json();
-    if (voiceCameraV1(parsed).length === 0) return { ok: true, value: parsed as VoiceCameraV1 };
+    if (fromServer(voiceCameraV1)(parsed).length === 0) return { ok: true, value: parsed as VoiceCameraV1 };
   } catch {
     // Fall through.
   }
@@ -3044,7 +3044,7 @@ function publishRemoval(data: unknown) {
   if (typeof data !== 'string') return;
   try {
     const doc: unknown = JSON.parse(data);
-    const message = messageRemovedV1(doc).length === 0 ? (doc as MessageRemovedV1).message : messageV2(doc).length === 0 ? doc as MessageV2 : null;
+    const message = fromServer(messageRemovedV1)(doc).length === 0 ? (doc as MessageRemovedV1).message : fromServer(messageV2)(doc).length === 0 ? doc as MessageV2 : null;
     if (message?.removed === true) for (const receive of removalWatchers) receive(message);
   } catch { /* Unknown frames are ignored. */ }
 }

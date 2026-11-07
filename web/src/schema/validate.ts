@@ -158,20 +158,34 @@ export function optional<T>(v: Validator<T>): Optional<T> {
   return { optional: v };
 }
 
-// Whether object() refuses a key its type lacks. The browser reads a server
-// that may be newer than the bundle, and the protocol's rule is that additive
-// fields are compatible because readers ignore what they do not know (issue
-// #1534), so at runtime it does not. schema.test.ts turns it on, so a fixture
-// key the type lacks, meaning the type is behind Go, still fails there.
-let strictKeys = false;
+// Whether the validator running now is reading data from the server. Such data
+// may come from a newer server than the bundle, and the protocol's rule is
+// that additive fields are compatible because readers ignore what they do not
+// know (issue #1534). Everything else, such as a desktop renderer's request
+// to main, the voice-control protocol and the fixture tests, is strict: it
+// refuses a key the type lacks. fromServer is the one way into the lenient
+// mode.
+let lenient = false;
 
-export function setStrictKeys(on: boolean): void {
-  strictKeys = on;
+// fromServer makes a validator ignore, and drop, keys its type does not
+// declare. Use it only where the client decodes a server response or frame.
+// Every declared key is still checked, vocabularies and tagged unions are as
+// strict as before.
+export function fromServer<T>(check: Validator<T>): Validator<T> {
+  return (value: unknown, path?: string) => {
+    const before = lenient;
+    lenient = true;
+    try {
+      return check(value, path);
+    } finally {
+      lenient = before;
+    }
+  };
 }
 
 // object checks a JSON object against T: every required key present and every
-// key of the right type. A key T does not have is a problem in strict mode;
-// otherwise it is deleted from the value, which is the caller's own freshly
+// key of the right type. A key T does not have is a problem, unless the value
+// is read through fromServer, which deletes it from the value, which is the caller's own freshly
 // parsed JSON, once the whole value has passed, so nothing undeclared reaches
 // the app. Vocabularies and tagged
 // unions are as strict in both modes.
@@ -195,8 +209,8 @@ export function object<T>(shape: Shape<T>): Validator<T> {
     }
     for (const key of Object.keys(v)) {
       if (Object.hasOwn(shape, key)) continue;
-      if (strictKeys) problems.push(`${path}.${key}: key is not in the TypeScript type`);
-      else undeclared.push([v, key]);
+      if (lenient) undeclared.push([v, key]);
+      else problems.push(`${path}.${key}: key is not in the TypeScript type`);
     }
     return problems;
   });

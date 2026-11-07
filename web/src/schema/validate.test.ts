@@ -1,13 +1,9 @@
 // validate.ts in both modes (issue #1534). At runtime an unknown key is
 // ignored and dropped; the fixture tests switch to strict so a fixture key the
 // TypeScript type lacks still fails.
-import { afterEach, describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import { channelV0, type ChannelV0 } from './generated';
-import { array, int, object, setStrictKeys, str, tagged, tolerant, vocab, type Validator } from './validate';
-
-afterEach(() => {
-  setStrictKeys(false);
-});
+import { array, fromServer, int, object, str, tagged, tolerant, vocab, type Validator } from './validate';
 
 // Today's released object(), frozen as it shipped before #1534: it refuses
 // every key the type lacks. It documents what the fix replaces.
@@ -44,23 +40,22 @@ describe('a ChannelV0 that carries a key an older bundle lacks (the channel topi
     expect(problems).toEqual(['$.topic: key is not in the TypeScript type']);
   });
 
-  it('is accepted at runtime, and the key is not on the value', () => {
+  it('is accepted when read from the server, and the key is not on the value', () => {
     const value: unknown = { id: 1, name: 'general', created_at: at, topic: 'hello' };
-    expect(channelV0(value)).toEqual([]);
+    expect(fromServer(channelV0)(value)).toEqual([]);
     expect(value).toEqual({ id: 1, name: 'general', created_at: at });
   });
 
-  it('is refused in strict mode', () => {
-    setStrictKeys(true);
+  it('is refused by default: IPC, the voice protocol and the fixtures stay strict', () => {
     expect(channelV0({ id: 1, name: 'general', created_at: at, topic: 'hello' })).toEqual([
       '$.topic: key is not in the TypeScript type',
     ]);
   });
 });
 
-describe('runtime mode', () => {
+describe('server data', () => {
   const inner = object<{ n: number }>({ n: int });
-  const outer = object<{ list: { n: number }[]; one: { n: number } }>({ list: array(inner), one: inner });
+  const outer = fromServer(object<{ list: { n: number }[]; one: { n: number } }>({ list: array(inner), one: inner }));
 
   it('drops unknown keys at every depth', () => {
     const value = { list: [{ n: 1, x: 1 }], one: { n: 2, y: 2 }, z: 3 };
@@ -80,14 +75,14 @@ describe('runtime mode', () => {
   });
 
   it('keeps strict vocabularies strict and refuses an unknown union tag', () => {
-    const shape = object<{ k: 'a' | 'b' }>({ k: vocab<'a' | 'b'>({ a: true, b: true }) });
+    const shape = fromServer(object<{ k: 'a' | 'b' }>({ k: vocab<'a' | 'b'>({ a: true, b: true }) }));
     expect(shape({ k: 'c', extra: 1 })).toHaveLength(1);
-    const u = tagged<{ kind: 'a'; n: number }, 'kind'>('kind', { a: object<{ kind: 'a'; n: number }>({ kind: str as Validator<'a'>, n: int }) });
+    const u = fromServer(tagged<{ kind: 'a'; n: number }, 'kind'>('kind', { a: object<{ kind: 'a'; n: number }>({ kind: str as Validator<'a'>, n: int }) }));
     expect(u({ kind: 'z' })).toHaveLength(1);
     expect(u({ kind: 'a', n: 1, more: true })).toEqual([]);
   });
 
   it('still tolerates an unknown value of a tolerant vocabulary', () => {
-    expect(object<{ p: string }>({ p: tolerant<'x'>({ x: true }) })({ p: 'future' })).toEqual([]);
+    expect(fromServer(object<{ p: string }>({ p: tolerant<'x'>({ x: true }) }))({ p: 'future' })).toEqual([]);
   });
 });
