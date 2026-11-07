@@ -257,7 +257,7 @@ test.describe('screen share with LiveKit', () => {
     // browser reports (Playwright's desktop Chrome says Windows).
     await expect(voice).toContainText(/Sound: .*tab shares its (own )?sound/);
     await voice.getByRole('button', { name: 'Share screen' }).click();
-    await expect(voice).toContainText('You are sharing your screen with its sound.', { timeout: 30_000 });
+    await expect(voice).toContainText('You are sharing your screen with sound.', { timeout: 30_000 });
   }
 
   // How many times the picker was opened on this page.
@@ -266,7 +266,10 @@ test.describe('screen share with LiveKit', () => {
   async function watching(p: Someone, who = 'alice'): Promise<void> {
     const voice = voiceRegion(p.page);
     await voice.getByRole('button', { name: 'Watch' }).click({ timeout: 30_000 });
-    await expect(shareView(p.page)).toContainText(`${who} is sharing`);
+    const view = shareView(p.page);
+    await expect(view).toContainText(`${who} is sharing`);
+    await expect(view.locator('audio')).toHaveJSProperty('muted', false);
+    await expect(view.getByRole('button', { name: 'Mute share' })).toBeVisible();
     // Frames arrive and keep arriving.
     await expect.poll(async () => (await inbound(p.page)).frames, { timeout: 30_000 }).toBeGreaterThan(10);
     const before = (await inbound(p.page)).frames;
@@ -348,7 +351,7 @@ test.describe('screen share with LiveKit', () => {
       await share(a);
 
       // B watches, having asked for no microphone, and the share's sound
-      // arrives while A's microphone is shut.
+      // plays at once while A's microphone is shut.
       await expect(voiceRegion(b.page)).toContainText('alice is sharing a screen');
       await watching(b);
       expect(await micAsks(b.page), 'a watch-only page asks for no microphone').toBe(0);
@@ -525,7 +528,7 @@ test.describe('screen share with LiveKit', () => {
       late.on = true;
       await vw.disable(dave);
       await expect(voiceRegion(a.page)).toContainText('The voice room was renewed, and your share carried on in the new one.', { timeout: 30_000 });
-      await expect(voiceRegion(a.page)).toContainText('You are sharing your screen with its sound.');
+      await expect(voiceRegion(a.page)).toContainText('You are sharing your screen with sound.');
       expect(await picks(a.page), 'the picker is not opened again').toBe(1);
       await expect(shareView(b.page)).toContainText('alice is sharing', { timeout: 30_000 });
       await expect.poll(async () => (await inbound(b.page)).frames, { timeout: 30_000 }).toBeGreaterThan(10);
@@ -591,7 +594,7 @@ test.describe('screen share with LiveKit', () => {
       await vw.disable(hugo);
 
       await expect(voiceRegion(a.page)).toContainText('The voice room was renewed, and your share carried on in the new one.', { timeout: 45_000 });
-      await expect(voiceRegion(a.page)).toContainText('You are sharing your screen with its sound.');
+      await expect(voiceRegion(a.page)).toContainText('You are sharing your screen with sound.');
       expect(await picks(a.page), 'the picker is not opened again').toBe(1);
       // Both renewals ended a share, the second the one being resumed when
       // it came, and the share started again after each.
@@ -658,7 +661,7 @@ test.describe('screen share with LiveKit', () => {
       const frames = (await inbound(b.page)).frames;
       await expect.poll(async () => (await inbound(b.page)).frames, { timeout: 15_000 }).toBeGreaterThan(frames);
       await expect(voiceRegion(b.page)).toContainText('Connected in #voice-room');
-      await expect(voiceRegion(a.page)).toContainText('You are sharing your screen with its sound.');
+      await expect(voiceRegion(a.page)).toContainText('You are sharing your screen with sound.');
       await voiceRegion(a.page).getByRole('button', { name: 'Stop sharing' }).click();
       await expect(shareView(b.page)).toHaveCount(0, { timeout: 15_000 });
       await expectClean(a);
