@@ -15,6 +15,7 @@ func TestPreviewCoverage(t *testing.T) {
 		wantErr string
 	}{
 		{"every route has a row", append([]string{"POST /v1/hooks/{token}", "GET /v2/ws", "POST /v1/ws-tickets", "/mcp"}, previewable...), ""},
+		{"a method-less route other than /mcp fails coverage", []string{"/other", "/mcp"}, "/other takes any method"},
 		{"a previewable route the table lost", []string{"GET /v1/channels", "POST /v1/ws-tickets"}, "GET /v1/preview is not in the table"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

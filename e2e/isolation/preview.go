@@ -69,20 +69,31 @@ type previewRow struct {
 func previewRefusalRows(table []routetable.Route, token string) []previewRow {
 	var rows []previewRow
 	for _, r := range table {
-		if slices.Contains(previewable, r.Text) || r.Method == "" {
+		if slices.Contains(previewable, r.Text) || r.Text == mcpRoute {
 			continue
 		}
-		_, pattern, _ := strings.Cut(r.Text, " ")
+		if r.Method == "" {
+			// previewCoverage fails on a method-less route other than /mcp:
+			// which method would exercise it is a decision for a person.
+			continue
+		}
+		method, pattern := r.Method, r.Text
+		if m, rest, ok := strings.Cut(r.Text, " "); ok {
+			method, pattern = m, rest
+		}
 		path := pathParam.ReplaceAllStringFunc(pattern, func(seg string) string {
 			if seg == "{token}" {
 				return token
 			}
 			return strconv.Itoa(ghostPrincipalID)
 		})
-		rows = append(rows, previewRow{route: r.Text, method: r.Method, path: path})
+		rows = append(rows, previewRow{route: r.Text, method: method, path: path})
 	}
 	return rows
 }
+
+// mcpRoute is the one route that takes any method and ignores the header.
+const mcpRoute = "/mcp"
 
 // ghostPrincipalID is an id nothing in the run has: also the ghost path
 // segment of the refusal rows.
@@ -115,8 +126,12 @@ func previewCoverage(table []routetable.Route) error {
 		}
 	}
 	for _, r := range table {
+		if r.Method == "" && r.Text != mcpRoute {
+			problems = append(problems, fmt.Sprintf("%s takes any method and is not %s: the preview phase has no row for it", r.Text, mcpRoute))
+			continue
+		}
 		want := 1
-		if slices.Contains(previewable, r.Text) || r.Method == "" {
+		if slices.Contains(previewable, r.Text) || r.Text == mcpRoute {
 			want = 0
 		}
 		if seen[r.Text] != want {
@@ -362,6 +377,25 @@ func (p *preview) aliceAndBob(pp *previewPeople, hiding bool) error {
 		if pv.ID != t.who.id || pv.Name != t.who.name || pv.Kind != schema.PrincipalHuman || pv.Role != own.Role || pv.Owner ||
 			pv.MayInvite != own.MayInvite || pv.VoiceAllowed != ownVoice || pv.Simulation != "" {
 			return fmt.Errorf("%s: GET /v1/preview = %s, but her own whoami says %+v", what, res.body, own)
+		}
+		// The whole permissions list and its revision are the target's: the
+		// member column of the owner's document, less the two brakes.
+		var doc schema.PermissionsResponseV1
+		if err := p.w.op.call(http.MethodGet, "/v1/permissions", nil, &doc); err != nil {
+			return err
+		}
+		wantPerms := []schema.Permission{}
+		for _, r := range doc.Rows {
+			switch {
+			case !r.Member,
+				r.Permission == schema.PermMakeMemberLinks && !own.MayInvite,
+				r.Permission == schema.PermUseVoice && !ownVoice:
+			default:
+				wantPerms = append(wantPerms, r.Permission)
+			}
+		}
+		if !slices.Equal(pv.Permissions, wantPerms) || pv.PermissionsRevision != doc.Revision {
+			return fmt.Errorf("%s: GET /v1/preview permissions %v at revision %d, want %v at %d", what, pv.Permissions, pv.PermissionsRevision, wantPerms, doc.Revision)
 		}
 		if has := slices.Contains(pv.Permissions, schema.PermSeeMemberDirectory); has == hiding {
 			return fmt.Errorf("%s: see_member_directory in the preview is %v with hiding %v: %v", what, has, hiding, pv.Permissions)
@@ -845,16 +879,21 @@ func (p *preview) refusals(pp *previewPeople, table []routetable.Route) error {
 	// /mcp ignores the header: an agent's answer is the one it gets without.
 	initialize := []byte(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"isolation-check","version":"0"}}}`)
 	p.requests += 2
-	s1, b1, _, err := w.b.agent.api.requestWith(http.MethodPost, "/mcp", "application/json", initialize, nil)
+	accept := map[string]string{"Accept": "application/json, text/event-stream"}
+	s1, b1, _, err := w.b.agent.api.requestWith(http.MethodPost, "/mcp", "application/json", initialize, accept)
 	if err != nil {
 		return err
 	}
-	s2, b2, _, err := w.b.agent.api.requestWith(http.MethodPost, "/mcp", "application/json", initialize, map[string]string{previewHeader: itoa(pp.alice.id)})
+	withHeader := map[string]string{"Accept": accept["Accept"], previewHeader: itoa(pp.alice.id)}
+	s2, b2, _, err := w.b.agent.api.requestWith(http.MethodPost, "/mcp", "application/json", initialize, withHeader)
 	if err != nil {
 		return err
 	}
-	if s1 != s2 || s1 == http.StatusForbidden || bytes.Contains(b2, []byte(schema.ErrorCodePreviewReadOnly)) {
-		return fmt.Errorf("/mcp with the header = %d %s, without = %d %s: it must ignore the header", s2, b2, s1, b1)
+	if s1 != http.StatusOK || !bytes.Contains(b1, []byte(`"result"`)) {
+		return fmt.Errorf("/mcp initialize without the header = %d %s, want a success: the comparison would prove nothing", s1, w.h.redact(string(b1)))
+	}
+	if s1 != s2 || !bytes.Equal(b1, b2) {
+		return fmt.Errorf("/mcp with the header = %d %s, without = %d %s: it must ignore the header", s2, w.h.redact(string(b2)), s1, w.h.redact(string(b1)))
 	}
 	return nil
 }
