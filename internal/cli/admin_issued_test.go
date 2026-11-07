@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -35,7 +36,7 @@ func issuedFake(t *testing.T, handler http.HandlerFunc) (*httptest.Server, *atom
 
 func writeJSON(w http.ResponseWriter, v any) { _ = json.NewEncoder(w).Encode(v) }
 
-const issuedTail = "the owner may end them with: conch admin principal revoke-issued 7 --yes\n"
+const issuedTail = "the owner may end them with: conch admin principal revoke-issued 7\n"
 
 func TestAdminIssuedToOthers(t *testing.T) {
 	list := "2 issued to others and still live:\n" +
@@ -192,6 +193,42 @@ func TestAdminIssuedHostileServer(t *testing.T) {
 			}
 			if !strings.Contains(stdout, `\x1b`) {
 				t.Errorf("stdout = %q, want the escape shown as text", stdout)
+			}
+		})
+	}
+}
+
+// Only a disable may be answered with an empty 204; every other call that
+// expects a document treats one as a failure.
+func TestEmptyNoContentOnlyForDisable(t *testing.T) {
+	isolateConfig(t)
+	fake := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) }))
+	t.Cleanup(fake.Close)
+	c, err := NewClient(fake.URL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	tests := []struct {
+		name    string
+		call    func() error
+		wantErr bool
+	}{
+		{"disable accepts it", func() error { _, err := c.DisablePrincipal(ctx, 7); return err }, false},
+		{"change password rejects it", func() error {
+			_, err := c.ChangePassword(ctx, schema.ChangePasswordRequestV1{})
+			return err
+		}, true},
+		{"revoke issued rejects it", func() error { _, err := c.RevokeIssued(ctx, 7); return err }, true},
+		{"role change rejects it", func() error {
+			_, err := c.ChangePrincipalRole(ctx, 7, schema.RoleChangeRequestV1{Role: schema.RoleMember})
+			return err
+		}, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := tt.call(); (err != nil) != tt.wantErr {
+				t.Errorf("error = %v, want error %t", err, tt.wantErr)
 			}
 		})
 	}

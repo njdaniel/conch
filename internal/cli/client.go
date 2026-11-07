@@ -600,8 +600,13 @@ func (c *Client) roundTripOnce(ctx context.Context, what, method string, endpoin
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
 		return c.decodeError(resp)
 	}
-	if out == nil || resp.StatusCode == http.StatusNoContent {
-		// A 204 has no document: out keeps its zero value.
+	if out == nil {
+		return nil
+	}
+	if _, ok := out.(interface{ emptyOK() }); ok && resp.StatusCode == http.StatusNoContent {
+		// Only a document that says so may be answered with nothing (an
+		// older server's disable): out keeps its zero value. Any other
+		// document-returning call treats an empty 204 as a bad answer.
 		return nil
 	}
 	var answer io.Reader = resp.Body

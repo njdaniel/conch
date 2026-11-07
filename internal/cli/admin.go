@@ -451,7 +451,7 @@ func (r *adminRun) sayIssued(id int64, items []schema.IssuedByOperatorV1) error 
 			return err
 		}
 	}
-	return r.say("the owner may end them with: conch admin principal revoke-issued %d --yes\n", id)
+	return r.say("the owner may end them with: conch admin principal revoke-issued %d\n", id)
 }
 
 func bindIssuedYes(fs *flag.FlagSet, o *adminOpts) {

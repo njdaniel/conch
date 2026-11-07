@@ -212,8 +212,12 @@ func (voiceOccupancyDoc) maxBody() int64 { return maxVoiceOccupancyBody }
 func (netsDoc) maxBody() int64           { return maxNetsBody }
 
 func (disablePrincipalDoc) maxBody() int64 { return maxIssuedBody }
-func (roleChangeDoc) maxBody() int64       { return maxIssuedBody }
-func (revokeIssuedDoc) maxBody() int64     { return listSlack }
+
+// emptyOK: a server from before issue #1463 answers a disable with 204.
+func (disablePrincipalDoc) emptyOK() {}
+
+func (roleChangeDoc) maxBody() int64   { return maxIssuedBody }
+func (revokeIssuedDoc) maxBody() int64 { return listSlack }
 
 func (d messagesV1Doc) maxBody() int64 { return pageBody(d.rows, messageRowBound) }
 func (d messagesV2Doc) maxBody() int64 { return pageBody(d.rows, messageRowBound) }
