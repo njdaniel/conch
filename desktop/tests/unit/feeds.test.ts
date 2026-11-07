@@ -228,6 +228,20 @@ describe('frames', () => {
     expect(validFrame(kind, frame)).toBe(valid);
   });
 
+  // A server newer than the app adds an optional field (issue #1534): main
+  // passes the frame on, and the renderer's parser drops the key.
+  it.each<[FeedRequest['kind'], string]>([
+    ['messages', MESSAGE],
+    ['messages', HEARTBEAT],
+    ['events', ROSTER],
+    ['events', HEARTBEAT],
+    ['voice', PRESENCE],
+    ['occupancy', OCCUPANCY],
+  ])('a %s feed takes %s with a key added later', (kind, frame) => {
+    const later = JSON.stringify({ ...(JSON.parse(frame) as object), added_later: true });
+    expect(validFrame(kind, later)).toBe(true);
+  });
+
   it('sends a valid frame on, and drops and counts what is not one: not text, too large, not its feed’s, not JSON', () => {
     const r = rig();
     r.feeds.subscribe(1, 1, messages);

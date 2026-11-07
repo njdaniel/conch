@@ -51,7 +51,7 @@ for (const [size, options, phone] of sizes) {
 
     const press = async (target: Locator) => (phone ? target.tap() : target.click());
     await press(row.getByRole('button', { name: `Actions for ${channel}` }));
-    await expect(row.getByRole('menuitem')).toHaveText(['Invite people', 'Leave channel']);
+    await expect(row.getByRole('menuitem')).toHaveText(['Invite people', 'Leave channel', 'Favorite']);
     await expectFits(page, `${size}: a member's channel menu`);
     const answered = page.waitForResponse((response) => response.request().method() === 'POST' && response.url().endsWith(`/v1/channels/${channel}/leave`));
     await press(row.getByRole('menuitem', { name: 'Leave channel' }));

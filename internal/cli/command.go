@@ -130,10 +130,11 @@ Usage:
   conch nets archive [--server <url>] <channel> <name>
   conch nets add [--server <url>] <channel> <name> <principal-id> [--monitor]
   conch nets remove [--server <url>] <channel> <name> <principal-id>
-  conch channels list [--server <url>] [--json] [--all]
+  conch channels list [--server <url>] [--json] [--all] [--preview-as <member>]
   conch channels join [--server <url>] [--json] <channel>
   conch channels leave [--server <url>] [--json] <channel>
   conch channels create [--server <url>] [--json] [--private] <name>
+  conch admin preview [--server <url>] [--json] <member>
   conch admin channel create [--server <url>] [--json] <name>
   conch admin channel settings [--server <url>] [--json] [--public|--private] [--default on|off] [--archive|--restore] <channel>
   conch admin principal create [--server <url>] [--json] --kind human|agent <name>
@@ -174,7 +175,7 @@ Usage:
   conch admin permissions show [--server <url>] [--json]
   conch admin permissions set [--server <url>] [--json] [--members on|off] [--operators on|off] <permission>
   conch admin permissions preset [--server <url>] [--json] [--yes] personal|group
-  conch admin directory members [--server <url>] [--json]
+  conch admin directory members [--server <url>] [--json] [--preview-as <member>]
   conch admin reaction remove [--server <url>] [--json] [--yes] <channel> <message-id> <principal-id> [<emoji-or-shortcode>]
   conch admin hook list [--server <url>] [--json]
   conch admin hook revoke [--server <url>] <hook-id>
@@ -293,6 +294,10 @@ Scope:
     <id> <active|revoked> <created> <expires|-> <label>
   manifest put reads a PutAgentManifest JSON body from standard input or
   --file, refuses unknown fields, and checks it locally before sending.
+  admin preview shows a member's permissions, channels and directory without
+  acting as them; --json writes those three response documents as JSON Lines.
+  channels list and admin directory members accept --preview-as for the same
+  read-only view; other commands refuse that flag before sending a request.
 
   Joining and signing in: every password, authenticator code and link or
   token code is asked for, never taken as an argument or from the

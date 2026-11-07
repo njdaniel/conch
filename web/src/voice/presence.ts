@@ -3,6 +3,7 @@
 // the caller has joined (and, after the server closes it, one read of the
 // snapshot to learn why).
 import { voicePresenceV1, type VoicePresenceV1 } from '../schema/voice';
+import { fromServer } from '../schema/validate';
 
 // parsePresence reads one socket frame; null for anything that is not a
 // presence document of this version.
@@ -10,7 +11,7 @@ export function parsePresence(data: unknown): VoicePresenceV1 | null {
   if (typeof data !== 'string') return null;
   try {
     const body: unknown = JSON.parse(data);
-    return voicePresenceV1(body).length === 0 ? (body as VoicePresenceV1) : null;
+    return fromServer(voicePresenceV1)(body).length === 0 ? (body as VoicePresenceV1) : null;
   } catch {
     return null;
   }
