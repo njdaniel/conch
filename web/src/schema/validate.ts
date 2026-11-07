@@ -46,25 +46,28 @@ export type Shape<T> = {
 function validator<T>(check: (value: unknown, path: string) => string[]): Validator<T> {
   return (value: unknown, path = '$') => {
     depth++;
-    let problems: string[] = [];
+    // Set only when check returned: a throw partway through leaves it
+    // undefined, so nothing queued is dropped.
+    let problems: string[] | undefined;
     try {
       problems = check(value, path);
+      return problems;
     } finally {
       depth--;
       if (depth === 0) {
+        // The queue is emptied whatever happened, before anything is dropped,
+        // so no call can leave keys queued for the next one.
+        const queued = undeclared.splice(0);
         // Undeclared keys go only once the whole value has passed: a caller
         // may try several validators on one frame to learn which it is, and a
-        // validator that refused must leave the value as it was.
-        if (problems.length === 0) {
-          for (const [holder, key] of undeclared) {
-            // eslint-disable-next-line @typescript-eslint/no-dynamic-delete -- dropping an undeclared key is the point
-            delete holder[key];
-          }
+        // validator that refused must leave the value as it was. A value that
+        // cannot be changed (frozen) keeps its extra key; deleteProperty
+        // reports that and does not throw.
+        if (problems?.length === 0) {
+          for (const [holder, key] of queued) Reflect.deleteProperty(holder, key);
         }
-        undeclared.length = 0;
       }
     }
-    return problems;
   };
 }
 

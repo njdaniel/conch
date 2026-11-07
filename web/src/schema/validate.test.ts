@@ -86,3 +86,30 @@ describe('server data', () => {
     expect(fromServer(object<{ p: string }>({ p: tolerant<'x'>({ x: true }) }))({ p: 'future' })).toEqual([]);
   });
 });
+
+describe('exceptions and frozen values', () => {
+  const inner = object<{ n: number }>({ n: int });
+  const boom: Validator<string> = () => {
+    throw new Error('boom');
+  };
+  const outer = fromServer(object<{ one: { n: number }; later: string }>({ one: inner, later: boom }));
+
+  it('drops nothing when a later field validator throws, and the next call is isolated', () => {
+    const value = { one: { n: 1, extra: 1 }, later: 'x', more: 2 };
+    expect(() => outer(value)).toThrow('boom');
+    expect(value).toEqual({ one: { n: 1, extra: 1 }, later: 'x', more: 2 });
+    // Strict again, and nothing queued by the throw is deleted by this call.
+    const next = { n: 1 };
+    expect(inner(next)).toEqual([]);
+    expect(inner({ n: 1, extra: 1 })).toEqual(['$.extra: key is not in the TypeScript type']);
+  });
+
+  it('does not throw on a frozen value, and the next call is isolated', () => {
+    const frozen = Object.freeze({ n: 1, extra: 1 });
+    expect(fromServer(inner)(frozen)).toEqual([]);
+    expect(frozen).toEqual({ n: 1, extra: 1 });
+    const other = { n: 2, extra: 2 };
+    expect(inner(other)).toEqual(['$.extra: key is not in the TypeScript type']);
+    expect(other).toEqual({ n: 2, extra: 2 });
+  });
+});
