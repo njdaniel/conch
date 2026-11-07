@@ -7,6 +7,9 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testi
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { App } from './App';
 import { memberActions } from './memberActions';
+import { platform } from './platform';
+import type { NativeVoice } from './platform/types';
+import type { NativeVoiceView } from './platform/desktop/bridge';
 import { call, previewCall } from './platform/operations';
 import { http } from './platform/browser/http';
 import type { Permission } from './schema/permission';
@@ -358,6 +361,50 @@ describe('voice', () => {
     expect(screen.queryByRole('region', { name: 'Preview' })).toBeNull();
     expect(voice.left).toBe(0);
   });
+});
+
+describe('native voice on the desktop (issue #1540)', () => {
+  // A native voice store whose status the test moves; the page reads it the
+  // way the voice strip does (useNativeVoice).
+  function install(): (status: NativeVoiceView['status']) => void {
+    let view: NativeVoiceView = { status: 'idle', generation: 0, channel: null, retryable: false };
+    const listeners = new Set<() => void>();
+    const store = { subscribe: (l: () => void) => (listeners.add(l), () => void listeners.delete(l)), snapshot: () => view };
+    Reflect.set(platform, 'nativeVoice', store as unknown as NativeVoice);
+    return (status) => {
+      act(() => {
+        view = { ...view, status, generation: view.generation + 1 };
+        listeners.forEach((l) => { l(); });
+      });
+    };
+  }
+  afterEach(() => {
+    Reflect.deleteProperty(platform, 'nativeVoice');
+  });
+
+  for (const status of ['starting', 'running'] as const) {
+    it(`blocks the entry, with its reason, while the helper is ${status}`, async () => {
+      const set = install();
+      set(status);
+      const region = await openMembers();
+      const row = rowOf(region, 'alice');
+      fireEvent.click(within(row).getByRole('button', { name: 'Actions for alice' }));
+      const item = await within(row).findByRole('menuitem', { name: /Preview as member/ });
+      expect(item.getAttribute('aria-disabled') === 'true' || (item as HTMLButtonElement).disabled).toBe(true);
+      expect(row.textContent).toContain('Leave voice to start a preview.');
+      fireEvent.click(item);
+      expect(screen.queryByRole('region', { name: 'Preview' })).toBeNull();
+      expect(previewReads()).toEqual([]);
+    });
+
+    it(`ends an open preview when the helper becomes ${status}`, async () => {
+      const set = install();
+      await previewAlice();
+      set(status);
+      expect(await screen.findByText('Preview ended: voice started. Leave voice before previewing.')).toBeTruthy();
+      expect(screen.queryByRole('region', { name: 'Preview' })).toBeNull();
+    });
+  }
 });
 
 describe('the permission rules', () => {

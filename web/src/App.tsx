@@ -68,6 +68,7 @@ import { useNow } from './agents/useNow';
 import { VoiceStatus } from './VoiceStatus';
 import { useOccupancy } from './voice/useOccupancy';
 import { leaveVoice, useInVoice } from './voice/useVoice';
+import { useNativeVoice } from './voice/native/useNativeVoice';
 import { useOccupantNames } from './voice/useOccupantNames';
 import { needsHttps } from './transport';
 import { PreviewBanner } from './PreviewBanner';
@@ -557,10 +558,15 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
     reloadReadState.current?.();
   }, []);
   // Preview as member (issue #1517): one at a time, in this tab's memory. It is
-  // offered to a human holding manage_members and manage_channels, not on the
-  // desktop (its bridge has no header for it) and not to a guest's visit.
+  // offered to a human holding manage_members and manage_channels, not to a
+  // guest's visit. The desktop carries the header through its bridge (#1540).
   const mayPreview = principal !== null && visit === null && principal.kind === 'human' && canDo(principal, 'manage_members') && canDo(principal, 'manage_channels');
-  const inVoice = useInVoice();
+  // In voice by the browser's engine or by the desktop's native helper: the
+  // helper keeps capturing while a preview hides the strip, so its starting,
+  // running and stopping states count as voice too.
+  const browserInVoice = useInVoice();
+  const nativeStatus = useNativeVoice().view.status;
+  const inVoice = browserInVoice || nativeStatus === 'starting' || nativeStatus === 'running' || nativeStatus === 'stopping';
   const preview = usePreview({ signedIn, mayPreview, inVoice, onUnauthorized });
   const previewing = preview.state.phase === 'on';
   const previewSignal = preview.signal;

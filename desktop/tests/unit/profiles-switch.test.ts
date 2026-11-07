@@ -1,4 +1,11 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
+
+import { Client } from '../../main/api/client.ts';
+import { Service } from '../../main/api/service.ts';
+import { Session } from '../../main/api/session.ts';
+import type { ActivationSpec } from '../../main/profiles/service.ts';
+import type { Activation } from '../../main/profiles/switch.ts';
+import { sendJson, startHttp, type Fake } from './support.ts';
 
 import { TeardownHooks } from '../../main/profiles/hooks.ts';
 import { Switcher } from '../../main/profiles/switch.ts';
@@ -51,19 +58,6 @@ describe('the switch sequence', () => {
     expect(t.log.slice(-4)).toEqual(['0:sockets', '0:requests', '0:renderer', '1:open bbbb']);
     expect(t.events[2]?.at).toBeGreaterThan(times[4] ?? Infinity);
     expect(t.events[2]?.at).toBeLessThan(times[6] ?? 0);
-  });
-
-  it('ends a preview with the switch: its requests are aborted and the renderer that held it is destroyed before the next profile opens (issue #1540)', async () => {
-    // Preview as member lives in the renderer's memory alone; main keeps none.
-    // A switch aborts what is in flight and destroys the page, so no preview
-    // read outlives the identity it was made for and none reaches the next.
-    const t = make();
-    await t.switcher.switchTo(profile('a', ORIGIN_A), { reason: 'switch' });
-    const report = await t.switcher.switchTo(profile('b', ORIGIN_B), { reason: 'switch' });
-    const steps = report.trace.map((e) => e.step);
-    expect(steps.indexOf('requests')).toBeLessThan(steps.indexOf('renderer'));
-    expect(steps.indexOf('renderer')).toBeLessThan(steps.indexOf('activate'));
-    expect(t.log.slice(-3)).toEqual(['0:requests', '0:renderer', '1:open bbbb']);
   });
 
   it('gives a fresh activation to every switch, none shared', async () => {
@@ -131,5 +125,84 @@ describe('the switch sequence', () => {
     off();
     await t.switcher.switchTo(profile('a', ORIGIN_A), { reason: 'switch' });
     expect(runs).toBe(2);
+  });
+});
+
+describe('a profile switch ends a preview (issue #1540)', () => {
+  const servers: Fake[] = [];
+  afterEach(async () => {
+    await Promise.all(servers.splice(0).map((f) => f.close()));
+  });
+
+  it('cancels a delayed preview read, disposes the renderer, and sends the next profile\u2019s first request without Conch-Preview-As', async () => {
+    // Server A holds the preview read open until the test lets it go.
+    let release: () => void = () => undefined;
+    const held = new Promise<void>((r) => {
+      release = r;
+    });
+    const a = await startHttp((_req, res) => {
+      void held.then(() => {
+        if (!res.destroyed) sendJson(res, 200, { id: 2, name: 'alice' });
+      });
+    });
+    const b = await startHttp((_req, res) => {
+      sendJson(res, 200, { channels: [] });
+    });
+    servers.push(a, b);
+
+    // Real Session, Client and Service per activation, over real sockets; the
+    // window is the one fake, a record of whether it was disposed.
+    const live: { service: Service; session: Session; disposed: boolean }[] = [];
+    const create = (spec: ActivationSpec): Promise<Activation> => {
+      const session = new Session();
+      const service = new Service({ client: new Client({ fetch: globalThis.fetch, session }), session, now: Date.now, log: () => undefined });
+      if (spec.profile !== null) {
+        session.setOrigin(spec.profile.origin);
+        session.adopt('bearer-for-' + spec.profile.label);
+      }
+      const entry = { service, session, disposed: false };
+      live.push(entry);
+      return Promise.resolve({
+        profileId: spec.profile?.id ?? null,
+        token: () => session.capture().token,
+        voiceCredential: () => null,
+        voiceCurrent: () => false,
+        whoami: () => Promise.resolve(null),
+        signOut: () => Promise.resolve('unsent' as const),
+        endSockets: () => undefined,
+        endRequests: () => {
+          session.forget();
+        },
+        destroy: () => {
+          entry.disposed = true;
+          return Promise.resolve();
+        },
+      });
+    };
+    const switcher = new Switcher({ hooks: new TeardownHooks(), now: Date.now, log: () => undefined, boundMs: 50, open: (spec) => create({ ...spec, token: null, onInvalid: () => undefined }) });
+
+    await switcher.switchTo(profile('a', a.origin), { reason: 'switch' });
+    const old = live[0];
+    if (old === undefined) throw new Error('no first activation');
+    // The preview read is in flight when the person switches.
+    const preview = old.service.request({ operation: 'preview', previewAs: 7 });
+    await new Promise((r) => setTimeout(r, 50));
+    expect(a.seen).toHaveLength(1);
+    expect(a.seen[0]?.headers['conch-preview-as']).toBe('7');
+
+    await switcher.switchTo(profile('b', b.origin), { reason: 'switch' });
+    release();
+
+    // The old read was cancelled, its late answer never reaches the page.
+    expect(await preview).toMatchObject({ kind: 'none' });
+    // The renderer that held the preview is gone.
+    expect(old.disposed).toBe(true);
+    // The next profile's first request carries no preview.
+    const next = live[1];
+    if (next === undefined) throw new Error('no second activation');
+    await next.service.request({ operation: 'listChannels' });
+    expect(b.seen).toHaveLength(1);
+    expect(b.seen[0]?.headers['conch-preview-as']).toBeUndefined();
+    expect(b.seen[0]?.headers['authorization']).toBe('Bearer bearer-for-b');
   });
 });
