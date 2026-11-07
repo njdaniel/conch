@@ -22,6 +22,7 @@ import { isProfileId } from './profiles/ids.ts';
 import { MISMATCH, type ProfilesService } from './profiles/service.ts';
 import { parseFeedRequest, type Feeds } from './api/feeds.ts';
 import { targetOf, isOperationId } from './api/target.ts';
+import { previewable } from './api/target.ts';
 import { invocable, type ReplaceStep, type Service, type SignInStep } from './api/service.ts';
 import { isFileId, parseUpload, MAX_UPLOAD_BYTES, type Files } from './files.ts';
 import { LINK_GESTURE_MS, type Gestures } from './gestures.ts';
@@ -206,13 +207,16 @@ async function bound(profiles: ProfilesApi, outcome: SignInOutcome): Promise<Sig
 // body against the operation's request validator.
 export function parseRequest(value: unknown): BridgeRequest | null {
   if (!isRecord(value)) return null;
-  const allowed = new Set(['operation', 'params', 'query', 'body', 'keepalive']);
+  const allowed = new Set(['operation', 'params', 'query', 'body', 'keepalive', 'previewAs']);
   if (!Object.keys(value).every((key) => allowed.has(key))) return null;
-  const { operation, params, query, body, keepalive } = value;
+  const { operation, params, query, body, keepalive, previewAs } = value;
   if (typeof operation !== 'string' || !isOperationId(operation) || !invocable(operation)) return null;
   if (params !== undefined && (!isRecord(params) || Object.keys(params).length > 8)) return null;
   if (query !== undefined && typeof query !== 'string') return null;
   if (keepalive !== undefined && typeof keepalive !== 'boolean') return null;
+  // The preview header rides on the five previewable reads and nowhere else.
+  // Whether an operation is one is main's own table, never the renderer's word.
+  if (previewAs !== undefined && (!previewable(operation) || typeof previewAs !== 'number' || !Number.isSafeInteger(previewAs) || previewAs < 1)) return null;
   if (targetOf(operation, params, query) === null) return null;
   const check = operations[operation].request;
   if (check === undefined ? body !== undefined : check(body).length > 0) return null;
@@ -222,6 +226,7 @@ export function parseRequest(value: unknown): BridgeRequest | null {
     ...(query === undefined ? {} : { query }),
     ...(body === undefined ? {} : { body }),
     ...(keepalive === undefined ? {} : { keepalive }),
+    ...(previewAs === undefined ? {} : { previewAs }),
   };
 }
 

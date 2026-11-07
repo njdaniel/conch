@@ -53,6 +53,19 @@ describe('the switch sequence', () => {
     expect(t.events[2]?.at).toBeLessThan(times[6] ?? 0);
   });
 
+  it('ends a preview with the switch: its requests are aborted and the renderer that held it is destroyed before the next profile opens (issue #1540)', async () => {
+    // Preview as member lives in the renderer's memory alone; main keeps none.
+    // A switch aborts what is in flight and destroys the page, so no preview
+    // read outlives the identity it was made for and none reaches the next.
+    const t = make();
+    await t.switcher.switchTo(profile('a', ORIGIN_A), { reason: 'switch' });
+    const report = await t.switcher.switchTo(profile('b', ORIGIN_B), { reason: 'switch' });
+    const steps = report.trace.map((e) => e.step);
+    expect(steps.indexOf('requests')).toBeLessThan(steps.indexOf('renderer'));
+    expect(steps.indexOf('renderer')).toBeLessThan(steps.indexOf('activate'));
+    expect(t.log.slice(-3)).toEqual(['0:requests', '0:renderer', '1:open bbbb']);
+  });
+
   it('gives a fresh activation to every switch, none shared', async () => {
     const t = make();
     await t.switcher.switchTo(profile('a', ORIGIN_A), { reason: 'switch' });

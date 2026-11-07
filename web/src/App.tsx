@@ -70,7 +70,6 @@ import { useOccupancy } from './voice/useOccupancy';
 import { leaveVoice, useInVoice } from './voice/useVoice';
 import { useOccupantNames } from './voice/useOccupantNames';
 import { needsHttps } from './transport';
-import { platform } from './platform';
 import { PreviewBanner } from './PreviewBanner';
 import { leaveVoiceFirst, PreviewEntry } from './preview/entry';
 import { PreviewControls, PreviewConversation, PreviewPanel, PreviewVoice } from './preview/PreviewParts';
@@ -560,7 +559,7 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
   // Preview as member (issue #1517): one at a time, in this tab's memory. It is
   // offered to a human holding manage_members and manage_channels, not on the
   // desktop (its bridge has no header for it) and not to a guest's visit.
-  const mayPreview = principal !== null && visit === null && principal.kind === 'human' && platform.name === 'browser' && canDo(principal, 'manage_members') && canDo(principal, 'manage_channels');
+  const mayPreview = principal !== null && visit === null && principal.kind === 'human' && canDo(principal, 'manage_members') && canDo(principal, 'manage_channels');
   const inVoice = useInVoice();
   const preview = usePreview({ signedIn, mayPreview, inVoice, onUnauthorized });
   const previewing = preview.state.phase === 'on';

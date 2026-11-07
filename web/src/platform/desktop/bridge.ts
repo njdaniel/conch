@@ -122,6 +122,10 @@ export interface BridgeRequest {
   // Already encoded, without a leading "?", as Call.query.
   readonly query?: string;
   readonly body?: unknown;
+  // The principal whose view this read asks for (issue #1540). Main sends it as
+  // Conch-Preview-As on the five previewable reads and refuses it on every
+  // other operation, by its own table, not by anything the renderer says.
+  readonly previewAs?: number;
   // Lets the request outlive the page, as fetch's keepalive.
   readonly keepalive?: boolean;
 }
