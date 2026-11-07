@@ -1,8 +1,8 @@
-import { cleanup, fireEvent, render, screen, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react';
 import { useState } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ChannelList } from './ChannelList';
-import type { ArrangementControls } from './ChannelGroups';
+import { GroupsPanel, type ArrangementControls } from './ChannelGroups';
 import { emptyArrangement, type Arrangement } from './arrangement';
 import type { ChannelV0 } from './schema/channel';
 
@@ -11,10 +11,19 @@ const channels = [ch(1, 'general'), ch(2, 'games'), ch(3, 'books', { visibility:
 
 afterEach(cleanup);
 
+const inNav = () => within(screen.getByRole('navigation', { name: 'Channels' }));
+
 function Harness({ start = emptyArrangement, onOpen = () => undefined, list = channels, selected = 'general' }: { start?: Arrangement; onOpen?: (n: string) => void; list?: readonly ChannelV0[]; selected?: string | null }) {
   const [arrangement, setArrangement] = useState(start);
   const controls: ArrangementControls = { arrangement, edit: (change) => { setArrangement((a) => change(a)); } };
-  return <ChannelList channels={list} selected={selected} unread={new Map()} onOpen={onOpen} arrangement={controls} />;
+  return (
+    <>
+      <nav aria-label="Channels">
+        <ChannelList channels={list} selected={selected} unread={new Map()} onOpen={onOpen} arrangement={controls} />
+      </nav>
+      <GroupsPanel controls={controls} />
+    </>
+  );
 }
 
 const rowOf = (name: string) => screen.getByRole('button', { name }).closest('li') as HTMLElement;
@@ -24,6 +33,14 @@ function choose(name: string, item: string) {
 }
 const order = (label: string) => within(screen.getByRole('group', { name: label })).getAllByRole('button', { name: /^[a-z]+$/ }).map((b) => b.textContent);
 
+describe('Edit groups', () => {
+  it('is outside the Channels navigation, which holds channel controls only', () => {
+    render(<Harness />);
+    expect(within(screen.getByRole('navigation', { name: 'Channels' })).queryByRole('button', { name: 'Edit groups' })).toBeNull();
+    expect(screen.getByRole('button', { name: 'Edit groups' })).toBeTruthy();
+  });
+});
+
 describe('favorites', () => {
   it('draws a Favorites group first, and Unfavorite puts the channel back', () => {
     render(<Harness />);
@@ -31,7 +48,7 @@ describe('favorites', () => {
     choose('games', 'Favorite');
     expect(order('Favorites')).toEqual(['games']);
     expect(screen.getAllByRole('button', { name: 'games' })).toHaveLength(1);
-    expect(screen.getByRole('status').textContent).toBe('games added to favorites');
+    expect(inNav().getByRole('status').textContent).toBe('games added to favorites');
     choose('games', 'Unfavorite');
     expect(screen.queryByRole('group', { name: 'Favorites' })).toBeNull();
   });
@@ -41,7 +58,7 @@ describe('favorites', () => {
     expect(order('Favorites')).toEqual(['general', 'games', 'music']);
     choose('music', 'Move up');
     expect(order('Favorites')).toEqual(['general', 'music', 'games']);
-    expect(screen.getByRole('status').textContent).toBe('music moved up in favorites, position 2 of 3');
+    expect(inNav().getByRole('status').textContent).toBe('music moved up in favorites, position 2 of 3');
     fireEvent.click(within(rowOf('general')).getByRole('button', { name: 'Actions for general' }));
     expect(screen.getByRole('menuitem', { name: /Move up/ }).getAttribute('aria-disabled')).toBe('true');
   });
@@ -81,7 +98,7 @@ describe('groups', () => {
     fireEvent.change(screen.getByLabelText('Group'), { target: { value: 'g1' } });
     fireEvent.click(screen.getByRole('button', { name: 'Move' }));
     expect(order('Play')).toEqual(['music']);
-    expect(screen.getByRole('status').textContent).toBe('music moved to Play');
+    expect(inNav().getByRole('status').textContent).toBe('music moved to Play');
     expect(screen.getAllByRole('button', { name: 'music' })).toHaveLength(1);
     choose('music', 'Move to group…');
     fireEvent.change(screen.getByLabelText('Group'), { target: { value: '' } });
@@ -118,5 +135,38 @@ describe('groups', () => {
     render(<Harness start={{ favorites: [99], groups: [{ id: 'g1', name: 'Play', collapsed: false, channels: [98, 2] }] }} />);
     expect(screen.queryByRole('group', { name: 'Favorites' })).toBeNull();
     expect(screen.getByRole('button', { name: /Play/ }).textContent).toContain('(1)');
+  });
+});
+
+describe('revocation and focus', () => {
+  it('stops announcing a channel the moment it is no longer held', () => {
+    const view = render(<Harness />);
+    choose('books', 'Favorite');
+    expect(inNav().getByRole('status').textContent).toBe('books added to favorites');
+    view.rerender(<Harness list={channels.filter((c) => c.name !== 'books')} />);
+    expect(inNav().getByRole('status').textContent).toBe('');
+    expect(document.body.textContent).not.toContain('books');
+  });
+
+  it('does not offer, or announce, a move that changes nothing visible', () => {
+    render(<Harness start={{ favorites: [2], groups: [{ id: 'g1', name: 'Play', collapsed: false, channels: [2, 3] }] }} />);
+    fireEvent.click(within(rowOf('books')).getByRole('button', { name: 'Actions for books' }));
+    expect(screen.getByRole('menuitem', { name: /Move up/ }).getAttribute('aria-disabled')).toBe('true');
+    expect(screen.getByRole('menuitem', { name: /Move down/ }).getAttribute('aria-disabled')).toBe('true');
+  });
+
+  it('expands a folded group a channel is moved into, and keeps focus on the channel', () => {
+    vi.useFakeTimers();
+    try {
+      render(<Harness start={{ favorites: [], groups: [{ id: 'g1', name: 'Play', collapsed: true, channels: [] }] }} />);
+      choose('music', 'Move to group…');
+      fireEvent.change(screen.getByLabelText('Group'), { target: { value: 'g1' } });
+      fireEvent.click(screen.getByRole('button', { name: 'Move' }));
+      act(() => { vi.runAllTimers(); });
+      expect(screen.getByRole('button', { name: /Play/ }).getAttribute('aria-expanded')).toBe('true');
+      expect(document.activeElement).toBe(screen.getByRole('button', { name: 'music' }));
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

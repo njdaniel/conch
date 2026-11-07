@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
 import { ChannelList } from './ChannelList';
 import { ChannelNav } from './ChannelNav';
+import { GroupsPanel } from './ChannelGroups';
 import { visualOrder } from './arrangement';
 import { useArrangement } from './useArrangement';
 import type { SettingsChange } from './ChannelSettingsAsk';
@@ -404,32 +405,36 @@ export function Lobby({
           </div>
         </header>
         <div className={panelOpen ? 'areas' : 'areas side-closed'} inert={settingsOpen || asking}>
-          <nav aria-label="Channels" className="channels">
+          {/* The switcher's entry is above the Channels navigation, not in it: that holds channel controls only. */}
+          <div className="channels">
+            {channels.loaded ? (
+            <ChannelNav
+              channels={inVisualOrder}
+              unread={unread}
+              selected={channels.selected}
+              me={me}
+              refresh={directoryTick}
+              onOpen={(name) => {
+                onOpen(name);
+                if (phone) {
+                  toHeading.current = true;
+                  setView('chat');
+                }
+              }}
+              {...(onBrowse === undefined
+                ? {}
+                : {
+                    onBrowse: (name: string) => {
+                      onBrowse(name);
+                      if (phone) setView('channels');
+                    },
+                  })}
+            />
+            ) : null}
+          <nav aria-label="Channels">
             <h2>Channels</h2>
             {channels.loaded ? (
               <>
-                <ChannelNav
-                  channels={inVisualOrder}
-                  unread={unread}
-                  selected={channels.selected}
-                  me={me}
-                  refresh={directoryTick}
-                  onOpen={(name) => {
-                    onOpen(name);
-                    if (phone) {
-                      toHeading.current = true;
-                      setView('chat');
-                    }
-                  }}
-                  {...(onBrowse === undefined
-                    ? {}
-                    : {
-                        onBrowse: (name: string) => {
-                          onBrowse(name);
-                          if (phone) setView('channels');
-                        },
-                      })}
-                />
                 <ChannelList
                   {...(visit === undefined ? { arrangement: arranged } : {})}
                   channels={channels.channels}
@@ -477,6 +482,8 @@ export function Lobby({
               <p className="empty">Loading channels…</p>
             )}
           </nav>
+            {channels.loaded && visit === undefined && channels.channels.length > 0 ? <GroupsPanel controls={arranged} /> : null}
+          </div>
           <main className="centre">
             <div ref={setStage} className="stage" />
             <section ref={conversationEl} aria-label="Conversation" className="conversation">

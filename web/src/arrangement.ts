@@ -119,7 +119,10 @@ export function toggleFavorite(a: Arrangement, id: number): Arrangement {
 // moveWithin moves a channel one place up (-1) or down (1) among those drawn
 // in its section: favorites, or its group. The same object when it cannot move.
 export function moveWithin(a: Arrangement, live: readonly ChannelV0[], id: number, direction: -1 | 1): Arrangement {
-  const drawn = new Set(live.map((c) => c.id));
+  // Only what the section draws can be passed: in a group, not a favorite
+  // (which is drawn under Favorites instead).
+  const inFavorites = a.favorites.includes(id);
+  const drawn = new Set(live.filter((c) => inFavorites || !a.favorites.includes(c.id)).map((c) => c.id));
   const swap = (list: readonly number[]): number[] | null => {
     const at = list.indexOf(id);
     if (at < 0) return null;
@@ -178,6 +181,10 @@ export function renameGroup(a: Arrangement, id: string, name: string): Arrangeme
 
 export function toggleCollapsed(a: Arrangement, id: string): Arrangement {
   return { ...a, groups: a.groups.map((g) => (g.id === id ? { ...g, collapsed: !g.collapsed } : g)) };
+}
+
+export function expandGroup(a: Arrangement, id: string): Arrangement {
+  return a.groups.some((g) => g.id === id && g.collapsed) ? toggleCollapsed(a, id) : a;
 }
 
 export function deleteGroup(a: Arrangement, id: string): Arrangement {

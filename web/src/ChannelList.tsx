@@ -5,8 +5,8 @@ import { Glyph } from './Icons';
 import { ActionsMenu, useOpeners, type MenuItem } from './MessageMenu';
 import { leaveLine } from './leaveChannel';
 import type { SettingsChange } from './ChannelSettingsAsk';
-import { GroupEditor, MoveToGroup, type ArrangementControls } from './ChannelGroups';
-import { emptyArrangement, layoutOf, moveToGroup, moveWithin, toggleCollapsed, toggleFavorite, type Group } from './arrangement';
+import { MoveToGroup, type ArrangementControls } from './ChannelGroups';
+import { emptyArrangement, expandGroup, layoutOf, moveToGroup, moveWithin, toggleCollapsed, toggleFavorite, type Group } from './arrangement';
 import type { ChannelV0 } from './schema/channel';
 import { badgeText } from './useReadState';
 import { nobody, type InVoice, type Voices } from './voice/useOccupancy';
@@ -245,45 +245,6 @@ function ChannelRow({
   }
 
   const items: MenuItem[] = [];
-  if (arrange !== undefined && !archived) {
-    items.push({
-      key: 'favorite',
-      label: arrange.favorite ? 'Unfavorite' : 'Favorite',
-      onSelect: () => {
-        arrange.onFavorite();
-      },
-    });
-    if (arrange.section) {
-      items.push({
-        key: 'move-up',
-        label: 'Move up',
-        ...(arrange.canUp ? {} : { disabled: true, reason: 'Already first.' }),
-        onSelect: () => {
-          arrange.onMove(-1);
-        },
-      });
-      items.push({
-        key: 'move-down',
-        label: 'Move down',
-        ...(arrange.canDown ? {} : { disabled: true, reason: 'Already last.' }),
-        onSelect: () => {
-          arrange.onMove(1);
-        },
-      });
-    }
-    if (arrange.groups.length > 0) {
-      items.push({
-        key: 'move-group',
-        label: 'Move to group…',
-        onSelect: () => {
-          setRenaming(false);
-          setChange(null);
-          setAskingLeave(false);
-          setMoving(true);
-        },
-      });
-    }
-  }
   // An archived channel takes no new member, so it offers no invite.
   if (onInvite !== undefined && !archived) {
     items.push({
@@ -367,6 +328,46 @@ function ChannelRow({
         setChange({ kind: 'archived', to: true });
       },
     });
+  }
+  // The arrangement is last: the menu's first item stays what it was (issue #1493).
+  if (arrange !== undefined && !archived) {
+    items.push({
+      key: 'favorite',
+      label: arrange.favorite ? 'Unfavorite' : 'Favorite',
+      onSelect: () => {
+        arrange.onFavorite();
+      },
+    });
+    if (arrange.section) {
+      items.push({
+        key: 'move-up',
+        label: 'Move up',
+        ...(arrange.canUp ? {} : { disabled: true, reason: 'Already first.' }),
+        onSelect: () => {
+          arrange.onMove(-1);
+        },
+      });
+      items.push({
+        key: 'move-down',
+        label: 'Move down',
+        ...(arrange.canDown ? {} : { disabled: true, reason: 'Already last.' }),
+        onSelect: () => {
+          arrange.onMove(1);
+        },
+      });
+    }
+    if (arrange.groups.length > 0) {
+      items.push({
+        key: 'move-group',
+        label: 'Move to group…',
+        onSelect: () => {
+          setRenaming(false);
+          setChange(null);
+          setAskingLeave(false);
+          setMoving(true);
+        },
+      });
+    }
   }
   const openers = useOpeners(items.length > 0, () => {
     setMenuOpen(true);
@@ -562,12 +563,15 @@ export function ChannelList({
   const shown = expanded ? [...visible, ...archived] : visible;
   const indexOf = new Map(shown.map((c, i) => [c.name, i]));
   const sectionId = useId();
-  const [editing, setEditing] = useState(false);
   const [note, setNote] = useState('');
+  // The channel a line names: the line goes the moment it is not held.
+  const [noteChannel, setNoteChannel] = useState<number | null>(null);
+  const heldNote = noteChannel === null || channels.some((c) => c.id === noteChannel) ? note : '';
   const [noted, setNoted] = useState(false);
   const noteTimer = useRef<number | null>(null);
-  function announce(text: string) {
+  function announce(text: string, channel: number | null = null) {
     setNote(text);
+    setNoteChannel(channel);
     setNoted(true);
     // The line is only for the moment it is read; it must not outlive a
     // channel that is revoked meanwhile.
@@ -641,7 +645,7 @@ export function ChannelList({
       groupId: group?.id ?? null,
       onFavorite: () => {
         edit((x) => toggleFavorite(x, channel.id));
-        announce(favorite ? `${channel.name} removed from favorites` : `${channel.name} added to favorites`);
+        announce(favorite ? `${channel.name} removed from favorites` : `${channel.name} added to favorites`, channel.id);
         refocus(channel.name);
       },
       onMove: (direction) => {
@@ -649,12 +653,14 @@ export function ChannelList({
         const where = favorite ? 'favorites' : (group?.name ?? '');
         const list = favorite ? layout.favorites : (layout.groups.find((g) => g.group.id === group?.id)?.channels ?? []);
         const from = list.findIndex((c) => c.id === channel.id);
-        announce(`${channel.name} moved ${direction === -1 ? 'up' : 'down'} in ${where}, position ${String(from + direction + 1)} of ${String(list.length)}`);
+        announce(`${channel.name} moved ${direction === -1 ? 'up' : 'down'} in ${where}, position ${String(from + direction + 1)} of ${String(list.length)}`, channel.id);
         refocus(channel.name);
       },
       onMoveToGroup: (groupId) => {
-        edit((x) => moveToGroup(x, channel.id, groupId));
-        announce(groupId === null ? `${channel.name} taken out of its group` : `${channel.name} moved to ${a.groups.find((g) => g.id === groupId)?.name ?? 'the group'}`);
+        // A folded group the channel goes into is opened, so it is in sight and
+        // keeps focus.
+        edit((x) => (groupId === null ? moveToGroup(x, channel.id, null) : expandGroup(moveToGroup(x, channel.id, groupId), groupId)));
+        announce(groupId === null ? `${channel.name} taken out of its group` : `${channel.name} moved to ${a.groups.find((g) => g.id === groupId)?.name ?? 'the group'}`, channel.id);
         refocus(channel.name);
       },
     };
@@ -757,32 +763,9 @@ export function ChannelList({
           ) : null}
         </div>
       )}
-      {arrangement === undefined ? null : (
-        <div className="edit-groups">
-          <button
-            type="button"
-            className="quiet"
-            aria-expanded={editing}
-            onClick={() => {
-              setEditing(!editing);
-            }}
-          >
-            Edit groups
-          </button>
-          {editing ? (
-            <GroupEditor
-              controls={arrangement}
-              onNote={announce}
-              onClose={() => {
-                setEditing(false);
-              }}
-            />
-          ) : null}
-        </div>
-      )}
       {noted ? (
         <p role="status" className="vh">
-          {note}
+          {heldNote}
         </p>
       ) : null}
     </>

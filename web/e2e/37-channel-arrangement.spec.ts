@@ -1,11 +1,12 @@
 // Issue #1493: favorites, collapsible groups and ordering of the channel list,
 // kept in this browser per account and server. It is a view: nothing here
 // changes a membership, and nothing touches voice.
-import type { Page } from '@playwright/test';
+import type { Page, WebSocketRoute } from '@playwright/test';
 import { makeChannel, memberOf } from './api';
 import { channelButton, conversation, expect, expectFits, mainNav, phones, rememberPushToTalk, showView, signIn, test } from './fixtures';
 import { dockerAvailable, startVoiceWorld, type VoiceWorld } from './voice-world';
-import { loadWorld, principalId } from './world';
+import { listChannelsResponse } from '../src/schema/channel';
+import { loadWorld, ok, principalId } from './world';
 
 const nav = (page: Page) => page.getByRole('navigation', { name: 'Channels' });
 const actions = (page: Page, name: string) => channelButton(page, name).locator('xpath=..').getByRole('button', { name: `Actions for ${name}` });
@@ -13,6 +14,16 @@ const actions = (page: Page, name: string) => channelButton(page, name).locator(
 async function choose(page: Page, name: string, item: string | RegExp, how: 'click' | 'tap' = 'click'): Promise<void> {
   await actions(page, name)[how]();
   await page.getByRole('menuitem', { name: item }).first()[how]();
+}
+
+// openMenuByKeyboard focuses a row's ⋯ and opens it with Enter, again if the page was not ready to take the key.
+async function openMenuByKeyboard(page: Page, name: string): Promise<void> {
+  const more = actions(page, name);
+  await expect(async () => {
+    await more.focus();
+    if ((await more.getAttribute('aria-expanded')) !== 'true') await page.keyboard.press('Enter');
+    await expect(more).toHaveAttribute('aria-expanded', 'true', { timeout: 2_000 });
+  }).toPass({ timeout: 20_000 });
 }
 
 // A fresh channel of this test that the browser account is in.
@@ -41,7 +52,7 @@ test('C1493 two accounts in one browser keep separate arrangements, which surviv
   await expect(favorites(page).getByRole('button', { name: a ?? '', exact: true })).toBeVisible();
 
   // A group, collapsed; both survive a reload.
-  await nav(page).getByRole('button', { name: 'Edit groups' }).click();
+  await page.getByRole('button', { name: 'Edit groups' }).click();
   await page.getByLabel('New group name').fill('Raids');
   await page.getByRole('button', { name: 'Add group' }).click();
   await page.getByRole('button', { name: 'Done' }).click();
@@ -72,7 +83,12 @@ test('C1493 two accounts in one browser keep separate arrangements, which surviv
   expect((await arrangementKeys(page)).length).toBeGreaterThanOrEqual(1);
 });
 
-async function stored(page: Page): Promise<{ favorites: number[] }[]> {
+interface Stored {
+  favorites: number[];
+  groups: { name: string; channels: number[] }[];
+}
+
+async function stored(page: Page): Promise<Stored[]> {
   const raws: string[] = await page.evaluate(() => {
     const out: string[] = [];
     for (let i = 0; i < window.localStorage.length; i++) {
@@ -82,7 +98,7 @@ async function stored(page: Page): Promise<{ favorites: number[] }[]> {
     }
     return out;
   });
-  return raws.map((raw) => JSON.parse(raw) as { favorites: number[] });
+  return raws.map((raw) => JSON.parse(raw) as Stored);
 }
 
 const statusOf = (page: Page) => page.getByRole('status', { name: 'Status' });
@@ -105,6 +121,85 @@ test('C1493 a favorite whose channel is revoked leaves the list and the stored a
     .toBeGreaterThan(0);
 });
 
+test('C1493 a name announced for a favorite is gone from the status text the moment access is revoked', async ({ meet, world }) => {
+  const [a, b] = await joined(world, 'announce', 2);
+  const { page } = await meet();
+  await signIn(page, world, world.tokens.browser, 'browser-test');
+  await choose(page, a ?? '', 'Favorite');
+  await choose(page, b ?? '', 'Favorite');
+  await expect(nav(page).getByRole('status').filter({ hasText: 'added to favorites' })).toContainText(b ?? '');
+  await memberOf(world, b ?? '', await principalId(world, world.tokens.browser), false);
+  await expect(channelButton(page, b ?? '')).toHaveCount(0);
+  await expect(nav(page).getByRole('status').filter({ hasText: b ?? '' })).toHaveCount(0);
+  await expect(nav(page)).not.toContainText(b ?? '');
+});
+
+test('C1493 a revoked favorite is gone from navigation, accessible text, counts and storage after a reconnect', async ({ meet, world }) => {
+  const [a, b, c] = await joined(world, 'reconnect', 3);
+  const { page } = await meet();
+  // Every socket but voice's is kept, so the test can drop them and hold a reconnect off.
+  const sockets: WebSocketRoute[] = [];
+  let holding = false;
+  await page.routeWebSocket(/^wss?:\/\/(?!.*\/voice\/)/, (ws) => {
+    if (holding) {
+      void ws.close();
+      return;
+    }
+    ws.connectToServer();
+    sockets.push(ws);
+  });
+  await signIn(page, world, world.tokens.browser, 'browser-test');
+  const held = (await ok(world, world.tokens.browser, 'GET', '/v1/channels', listChannelsResponse)).channels;
+  const idOfB = held.find((ch) => ch.name === b)?.id ?? 0;
+  expect(idOfB).toBeGreaterThan(0);
+  await page.getByRole('button', { name: 'Edit groups' }).click();
+  await page.getByLabel('New group name').fill('Play');
+  await page.getByRole('button', { name: 'Add group' }).click();
+  await page.getByRole('button', { name: 'Done' }).click();
+  await choose(page, b ?? '', 'Move to group…');
+  await page.getByRole('combobox', { name: 'Group' }).selectOption({ label: 'Play' });
+  await page.getByRole('button', { name: 'Move', exact: true }).click();
+  await choose(page, c ?? '', 'Move to group…');
+  await page.getByRole('combobox', { name: 'Group' }).selectOption({ label: 'Play' });
+  await page.getByRole('button', { name: 'Move', exact: true }).click();
+  await choose(page, a ?? '', 'Favorite');
+  await choose(page, b ?? '', 'Favorite');
+  await expect(nav(page).getByRole('button', { name: /^Play \(1\)/ })).toBeVisible();
+
+  // The socket drops, access is revoked while it is down, and it comes back.
+  holding = true;
+  for (const ws of sockets.splice(0)) void ws.close();
+  await expect(statusOf(page)).not.toContainText('Connected', { timeout: 30_000 });
+  await memberOf(world, b ?? '', await principalId(world, world.tokens.browser), false);
+  holding = false;
+  await expect(statusOf(page)).toContainText('Connected', { timeout: 60_000 });
+
+  await expect(channelButton(page, b ?? '')).toHaveCount(0);
+  await expect(nav(page)).not.toContainText(b ?? '');
+  expect(await nav(page).ariaSnapshot()).not.toContain(b ?? '');
+  await expect(nav(page).getByRole('button', { name: /^Play \(1\)/ })).toBeVisible();
+  await expect
+    .poll(async () => JSON.stringify(await stored(page)), { message: 'the revoked channel is gone from the stored arrangement' })
+    .not.toContain(String(idOfB));
+  expect((await stored(page)).length).toBeGreaterThan(0);
+});
+
+test('C1493 a long list scrolls, and a channel far down is favorited and moved from the menu', async ({ meet, world }) => {
+  const names = await joined(world, 'long', 24);
+  const { page } = await meet({ viewport: { width: 1000, height: 500 } });
+  await signIn(page, world, world.tokens.browser, 'browser-test');
+  const last = names.at(-1) ?? '';
+  await expect(channelButton(page, last)).toBeAttached();
+  await expect(channelButton(page, last)).not.toBeInViewport();
+  await channelButton(page, last).scrollIntoViewIfNeeded();
+  await expect(channelButton(page, last)).toBeInViewport();
+  await choose(page, last, 'Favorite');
+  await choose(page, names[0] ?? '', 'Favorite');
+  await choose(page, names[0] ?? '', 'Move up');
+  expect(await orderIn(page, 'Favorites')).toEqual([names[0], last]);
+  await expect(favorites(page)).toBeInViewport();
+});
+
 test('C1493 channels are ordered and grouped from the keyboard alone, and the switcher follows that order', async ({ meet, world }) => {
   const [a, b, c] = await joined(world, 'keys', 3);
   const { page } = await meet();
@@ -115,8 +210,7 @@ test('C1493 channels are ordered and grouped from the keyboard alone, and the sw
   expect(await orderIn(page, 'Favorites')).toEqual([a, c]);
 
   // Keyboard: focus the ⋯, open it with Enter, pick with the arrows and Enter.
-  await actions(page, c ?? '').focus();
-  await page.keyboard.press('Enter');
+  await openMenuByKeyboard(page, c ?? '');
   await page.getByRole('menuitem', { name: 'Move up' }).focus();
   await page.keyboard.press('Enter');
   expect(await orderIn(page, 'Favorites')).toEqual([c, a]);
@@ -124,12 +218,11 @@ test('C1493 channels are ordered and grouped from the keyboard alone, and the sw
   await expect(channelButton(page, c ?? '')).toBeFocused();
 
   // Move b to a group, by keyboard.
-  await nav(page).getByRole('button', { name: 'Edit groups' }).click();
+  await page.getByRole('button', { name: 'Edit groups' }).click();
   await page.getByLabel('New group name').fill('Play');
   await page.keyboard.press('Enter');
   await page.keyboard.press('Escape');
-  await actions(page, b ?? '').focus();
-  await page.keyboard.press('Enter');
+  await openMenuByKeyboard(page, b ?? '');
   await page.getByRole('menuitem', { name: 'Move to group…' }).focus();
   await page.keyboard.press('Enter');
   await page.getByRole('combobox', { name: 'Group' }).selectOption({ label: 'Play' });
@@ -144,6 +237,19 @@ test('C1493 channels are ordered and grouped from the keyboard alone, and the sw
   await expect(conversation(page).getByRole('heading', { name: a ?? '' })).toBeVisible();
   await page.keyboard.press('Alt+ArrowDown');
   await expect(conversation(page).getByRole('heading', { name: b ?? '' })).toBeVisible();
+
+  // Moving into a folded group opens it and focus stays on the channel.
+  await choose(page, c ?? '', 'Unfavorite');
+  await nav(page).getByRole('button', { name: /^Play/ }).click();
+  await expect(nav(page).getByRole('button', { name: /^Play/ })).toHaveAttribute('aria-expanded', 'false');
+  await openMenuByKeyboard(page, c ?? '');
+  await page.getByRole('menuitem', { name: 'Move to group…' }).focus();
+  await page.keyboard.press('Enter');
+  await page.getByRole('combobox', { name: 'Group' }).selectOption({ label: 'Play' });
+  await page.keyboard.press('Tab');
+  await page.keyboard.press('Enter');
+  await expect(nav(page).getByRole('button', { name: /^Play/ })).toHaveAttribute('aria-expanded', 'true');
+  await expect(channelButton(page, c ?? '')).toBeFocused();
 });
 
 for (const [size, options] of phones) {
@@ -157,7 +263,7 @@ for (const [size, options] of phones) {
     await choose(page, b ?? '', 'Move up', 'tap');
     expect(await orderIn(page, 'Favorites')).toEqual([b, a]);
     await choose(page, a ?? '', 'Unfavorite', 'tap');
-    await nav(page).getByRole('button', { name: 'Edit groups' }).tap();
+    await page.getByRole('button', { name: 'Edit groups' }).tap();
     await page.getByLabel('New group name').fill('Phone group');
     await page.getByRole('button', { name: 'Add group' }).tap();
     await page.getByRole('button', { name: 'Done' }).tap();
@@ -201,10 +307,14 @@ test.describe('with a voice session', () => {
       await voice.getByRole('button', { name: 'Join voice' }).click();
       await expect(voice).toContainText(/Connected in #voice-room/, { timeout: 30_000 });
 
+      // A real share, on Chromium's fake screen, that reordering must not touch.
+      await voice.getByRole('button', { name: 'Share screen' }).click();
+      await expect(voice).toContainText('You are sharing your screen with its sound.', { timeout: 30_000 });
+
       await choose(page, other, 'Favorite');
       await choose(page, 'voice-room', 'Favorite');
       await choose(page, 'voice-room', 'Move up');
-      await nav(page).getByRole('button', { name: 'Edit groups' }).click();
+      await page.getByRole('button', { name: 'Edit groups' }).click();
       await page.getByLabel('New group name').fill('Calls');
       await page.getByRole('button', { name: 'Add group' }).click();
       await page.getByRole('button', { name: 'Done' }).click();
@@ -216,6 +326,9 @@ test.describe('with a voice session', () => {
       await expect(voice).toContainText(/Connected in #voice-room/);
       await expect(voice.getByRole('button', { name: 'Leave voice' })).toBeVisible();
       await expect(voice.getByRole('button', { name: 'Join voice' })).toHaveCount(0);
+      await expect(voice).toContainText('You are sharing your screen with its sound.');
+      await expect(voice.getByRole('button', { name: 'Stop sharing' })).toBeVisible();
+      await voice.getByRole('button', { name: 'Stop sharing' }).click();
     } finally {
       await page.close();
       await context.close();

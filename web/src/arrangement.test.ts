@@ -10,6 +10,7 @@ import {
   parseArrangement,
   pruneArrangement,
   renameGroup,
+  expandGroup,
   toggleCollapsed,
   toggleFavorite,
   visualOrder,
@@ -106,6 +107,22 @@ describe('editing', () => {
   it('moves within a group and passes over channels not shown', () => {
     const a: Arrangement = { favorites: [], groups: [{ id: 'g1', name: 'Play', collapsed: false, channels: [1, 5, 2] }] };
     expect(moveWithin(a, live, 2, -1).groups[0]?.channels).toEqual([2, 5, 1]);
+  });
+  it('reorders a group among the channels it draws, never swapping with a favorite shown elsewhere', () => {
+    const a: Arrangement = { favorites: [2], groups: [{ id: 'g1', name: 'Play', collapsed: false, channels: [1, 2, 3] }] };
+    expect(moveWithin(a, live, 3, -1).groups[0]?.channels).toEqual([3, 2, 1]);
+    expect(moveWithin(a, live, 1, 1).groups[0]?.channels).toEqual([3, 2, 1]);
+  });
+  it('offers no move to the only channel a group draws', () => {
+    const a: Arrangement = { favorites: [2], groups: [{ id: 'g1', name: 'Play', collapsed: false, channels: [2, 3] }] };
+    expect(moveWithin(a, live, 3, -1)).toBe(a);
+    expect(moveWithin(a, live, 3, 1)).toBe(a);
+  });
+  it('expands a group', () => {
+    const a: Arrangement = { favorites: [], groups: [{ id: 'g1', name: 'Play', collapsed: true, channels: [] }] };
+    expect(expandGroup(a, 'g1').groups[0]?.collapsed).toBe(false);
+    const open = expandGroup(a, 'g1');
+    expect(expandGroup(open, 'g1')).toBe(open);
   });
   it('does nothing for a channel in no group and no favorites', () => {
     const a: Arrangement = { favorites: [], groups: [] };

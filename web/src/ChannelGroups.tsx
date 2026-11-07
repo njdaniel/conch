@@ -135,3 +135,55 @@ export function MoveToGroup({ channel, favorite, groups, current, onMove, onClos
     </form>
   );
 }
+
+// "Edit groups": its button and panel, drawn beside the Channels navigation and
+// not in it, so that navigation holds channel controls and group headings only.
+// It says what it did in a line of its own.
+export function GroupsPanel({ controls }: { readonly controls: ArrangementControls }) {
+  const [open, setOpen] = useState(false);
+  const [note, setNote] = useState('');
+  const button = useRef<HTMLButtonElement>(null);
+  const timer = useRef<number | null>(null);
+  useEffect(
+    () => () => {
+      if (timer.current !== null) window.clearTimeout(timer.current);
+    },
+    [],
+  );
+  function say(text: string) {
+    setNote(text);
+    if (timer.current !== null) window.clearTimeout(timer.current);
+    timer.current = window.setTimeout(() => {
+      setNote('');
+      timer.current = null;
+    }, 4000);
+  }
+  return (
+    <div className="edit-groups">
+      <button
+        ref={button}
+        type="button"
+        className="quiet"
+        aria-expanded={open}
+        onClick={() => {
+          setOpen(!open);
+        }}
+      >
+        Edit groups
+      </button>
+      {open ? (
+        <GroupEditor
+          controls={controls}
+          onNote={say}
+          onClose={() => {
+            setOpen(false);
+            button.current?.focus();
+          }}
+        />
+      ) : null}
+      <p role="status" className="vh">
+        {note}
+      </p>
+    </div>
+  );
+}
