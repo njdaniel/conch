@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
 import { ChannelList } from './ChannelList';
+import { ChannelNav } from './ChannelNav';
 import type { SettingsChange } from './ChannelSettingsAsk';
 import type { InVoice } from './voice/useOccupancy';
 import { headingId } from './Conversation';
@@ -85,6 +86,8 @@ export function Lobby({
   signIns,
   report,
   onOpen,
+  onBrowse,
+  directoryTick = 0,
   onRetry,
   onSignOut,
   onSignOutEverywhere,
@@ -148,6 +151,11 @@ export function Lobby({
   // again where the page says it cannot reach the server.
   readonly report?: ReactNode;
   readonly onOpen: (channel: string) => void;
+  // The quick switcher's "Join" rows: show that public channel's directory row.
+  // Absent for a viewer with no directory.
+  readonly onBrowse?: (channel: string) => void;
+  // Changes when the directory or the viewer's permissions did (issue #1492).
+  readonly directoryTick?: number;
   readonly onRetry: () => void;
   readonly onSignOut: () => void;
   // Sign out everywhere (issue #439), and why it last failed, if it did.
@@ -393,7 +401,33 @@ export function Lobby({
           </div>
         </header>
         <div className={panelOpen ? 'areas' : 'areas side-closed'} inert={settingsOpen || asking}>
-          <nav aria-label="Channels" className="channels">
+          {/* The switcher's entry is above the Channels navigation, not in it: that holds channel controls only. */}
+          <div className="channels">
+            {channels.loaded ? (
+              <ChannelNav
+                channels={channels.channels}
+                unread={unread}
+                selected={channels.selected}
+                me={me}
+                refresh={directoryTick}
+                onOpen={(name) => {
+                  onOpen(name);
+                  if (phone) {
+                    toHeading.current = true;
+                    setView('chat');
+                  }
+                }}
+                {...(onBrowse === undefined
+                  ? {}
+                  : {
+                      onBrowse: (name: string) => {
+                        onBrowse(name);
+                        if (phone) setView('channels');
+                      },
+                    })}
+              />
+            ) : null}
+          <nav aria-label="Channels">
             <h2>Channels</h2>
             {channels.loaded ? (
               <>
@@ -443,6 +477,7 @@ export function Lobby({
               <p className="empty">Loading channels…</p>
             )}
           </nav>
+          </div>
           <main className="centre">
             <div ref={setStage} className="stage" />
             <section ref={conversationEl} aria-label="Conversation" className="conversation">

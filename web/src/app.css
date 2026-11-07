@@ -556,7 +556,8 @@ label {
 .audience,
 .kind,
 .ag-badge,
-.channel-list .unread {
+.channel-list .unread,
+.switcher .unread {
   display: inline-block;
   padding: 0 0.5rem;
   border-radius: 999px;
@@ -5223,3 +5224,118 @@ button.link {
 .reactions .emoji-picker, .reactor-page { flex-basis: 100%; max-width: 100%; min-width: 0; }
 .reactor-page { border: 1px solid currentColor; border-radius: .5rem; padding: .5rem; overflow-wrap: anywhere; }
 .reactor-page ul { max-height: 16rem; overflow-y: auto; }
+
+/* The quick channel switcher (issue #1492). */
+.channel-nav {
+  display: grid;
+  gap: var(--s1);
+  margin-bottom: var(--s3);
+}
+
+.channel-nav .find-channel {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  width: 100%;
+  min-height: 2.5rem;
+  text-align: left;
+}
+
+.channel-nav .find-channel span {
+  flex: 1;
+  min-width: 0;
+}
+
+.channel-nav kbd {
+  font-family: var(--mono);
+  font-size: var(--small);
+  color: var(--muted);
+}
+
+.channel-nav .nav-status {
+  margin: 0;
+  min-height: 0;
+}
+
+.channel-nav .nav-status:empty {
+  display: none;
+}
+
+.switcher-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
+  padding: 12vh var(--s4) var(--s4);
+  background: rgb(0 0 0 / 0.5);
+}
+
+.switcher {
+  display: grid;
+  gap: var(--s2);
+  width: min(32rem, 100%);
+  max-height: 70vh;
+  padding: var(--s3);
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  grid-template-rows: auto minmax(0, 1fr) auto;
+}
+
+.switcher input {
+  width: 100%;
+  min-height: 2.5rem;
+  box-sizing: border-box;
+}
+
+.switcher-list {
+  overflow-y: auto;
+  min-height: 0;
+}
+
+.switcher-list ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.switcher-list ul[aria-label='Join']::before {
+  content: 'Join';
+  display: block;
+  padding: var(--s2) var(--s2) var(--s1);
+  font-size: var(--small);
+  color: var(--muted);
+}
+
+.switcher-option {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  min-height: 2.5rem;
+  padding: 0 var(--s2);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+
+.switcher-option.active,
+.switcher-option:hover {
+  background: var(--hover);
+  outline: 2px solid transparent;
+}
+
+.switcher-option.active {
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+
+.switcher-option .switcher-name {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.switcher-help {
+  margin: 0;
+}
