@@ -1,6 +1,6 @@
 import { ModerationConfirm, type ModerationOperation } from './Moderation';
 import type { ChannelBanV1 } from './schema/generated';
-import { useCallback, useEffect, useId, useRef, useState, type KeyboardEvent, type ReactNode, type SyntheticEvent } from 'react';
+import { useCallback, useEffect, useId, useMemo, useRef, useState, type KeyboardEvent, type ReactNode, type SyntheticEvent } from 'react';
 import * as api from './api';
 import { Avatar } from './Icons';
 import { memberName } from './guestName';
@@ -474,6 +474,7 @@ function CommunityRow({
   const inviter = person.invited_by === undefined ? undefined : byId.get(person.invited_by);
   const [menuOpen, setMenuOpen] = useState(false);
   const more = useRef<HTMLButtonElement>(null);
+  const names = useMemo(() => new Map(Array.from(byId, ([id, member]) => [id, member.name])), [byId]);
   const has = manage !== undefined && memberActions(manage.who, person).length > 0;
   // The row is inside the Settings drawer, a dialog, when it is the Members section.
   const openers = useOpeners(
@@ -507,6 +508,7 @@ function CommunityRow({
           button={more}
           onChanged={manage.onChanged}
           onUnauthorized={manage.onUnauthorized}
+          names={names}
         />
       )}
     </li>

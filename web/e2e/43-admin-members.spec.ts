@@ -218,3 +218,57 @@ test('A1020 at 390×844 the phone opens a sheet from the ⋯ button, and asks be
   await expect(rowOf(page, name)).toHaveCount(0);
   expect((await directory(world)).map((m) => m.id)).not.toContain(target.id);
 });
+
+test('A1464 at 1440×900 after a demotion the owner sees what the operator issued, revokes it all, and it no longer signs in', async ({ meet, secrets, world }) => {
+  const before = await read(world);
+  const operatorName = `operator-${stamp}-i`;
+  const memberName = `member-${stamp}-i`;
+  const made: number[] = [];
+  try {
+    // Operators act as members for this spec; the finally puts the cell back.
+    if (before.rows.find((r) => r.permission === 'act_as_members')?.operator !== true) {
+      const put = await call(world, world.tokens.operator, 'PUT', '/v1/permissions', {
+        revision: before.revision,
+        changes: [{ permission: 'act_as_members', role: 'operator', granted: true }],
+      });
+      expect(put.status, `giving operators act_as_members: ${JSON.stringify(put.body)}`).toBeLessThan(300);
+    }
+    const issuer = await person(world, operatorName, 'operator');
+    made.push(issuer.id);
+    secrets.push(issuer.token);
+    const holder = await person(world, memberName);
+    made.push(holder.id);
+    secrets.push(holder.token);
+    // The operator issues a credential to the member.
+    const request: CreateCredentialRequestV1 = { label: `issued-${stamp}` };
+    const issuedToken = (await ok(world, issuer.token, 'POST', `/v1/principals/${String(holder.id)}/credentials`, createCredentialResponseV1, request)).token;
+    secrets.push(issuedToken);
+    expect((await call(world, issuedToken, 'GET', '/v1/whoami')).status).toBe(200);
+
+    const { page } = await meet(desktop);
+    await signedIn(page, world, world.tokens.operator);
+    await page.getByRole('button', { name: 'Settings' }).click();
+    await expect(section(page).getByRole('list', { name: 'People' })).toBeVisible();
+    const row = rowOf(page, operatorName);
+    await row.getByRole('button', { name: `Actions for ${operatorName}` }).click();
+    await row.getByRole('menuitem', { name: 'Change role…' }).click();
+    await row.getByRole('radio', { name: 'Member' }).check();
+    await row.getByRole('button', { name: 'Make a member' }).click();
+
+    const list = row.getByRole('region', { name: 'Issued to others by operators' });
+    await expect(list).toBeVisible();
+    await expect(list.getByText(new RegExp(`credential #\\d+ for ${memberName}, issued by ${operatorName}`, 'i'))).toBeVisible();
+    // Demoting did not end it.
+    expect((await call(world, issuedToken, 'GET', '/v1/whoami')).status).toBe(200);
+
+    await list.getByRole('button', { name: /^Revoke all \(\d+\)$/ }).click();
+    await expect(list.getByRole('group', { name: 'Confirm' })).toContainText(`${operatorName} issued to other people`);
+    await list.getByRole('button', { name: 'Yes, revoke all' }).click();
+    await expect(list.getByText(/^Revoked \d+ credentials and \d+ hooks\.$/)).toBeVisible();
+    await expect(list.locator('li')).toHaveCount(0);
+    expect((await call(world, issuedToken, 'GET', '/v1/whoami')).status).toBe(401);
+  } finally {
+    await restore(world, before);
+    await hide(world, ...made);
+  }
+});
