@@ -270,10 +270,23 @@ test.describe('screen share with LiveKit', () => {
     await expect(view).toContainText(`${who} is sharing`);
     await expect(view.locator('audio')).toHaveJSProperty('muted', false);
     await expect(view.getByRole('button', { name: 'Mute share' })).toBeVisible();
+    await expectPlaying(p.page);
     // Frames arrive and keep arriving.
     await expect.poll(async () => (await inbound(p.page)).frames, { timeout: 30_000 }).toBeGreaterThan(10);
     const before = (await inbound(p.page)).frames;
     await expect.poll(async () => (await inbound(p.page)).frames, { timeout: 15_000 }).toBeGreaterThan(before);
+  }
+
+  // The share's sound is really playing with no further click: not paused
+  // (autoplay policy may have refused it) and its clock moving. Unmuted alone
+  // proves nothing. Only the viewer's earlier Watch click is a gesture; the
+  // config sets no autoplay flag.
+  async function expectPlaying(page: Page): Promise<void> {
+    const audio = shareView(page).locator('audio');
+    await expect.poll(() => audio.evaluate((a: HTMLAudioElement) => !a.paused && a.readyState >= 2), { timeout: 15_000, message: 'the share audio element plays' }).toBe(true);
+    const t0 = await audio.evaluate((a: HTMLAudioElement) => a.currentTime);
+    await expect.poll(() => audio.evaluate((a: HTMLAudioElement) => a.currentTime), { timeout: 10_000, message: 'the share audio clock advances' }).toBeGreaterThan(t0);
+    expect(await audio.evaluate((a: HTMLAudioElement) => a.paused)).toBe(false);
   }
 
   // Nothing secret in what the page said, and no policy refused anything: the
@@ -385,6 +398,37 @@ test.describe('screen share with LiveKit', () => {
       for (const p of [b, c]) await expectClean(p);
     } finally {
       for (const p of [a, b, c]) await p.close();
+    }
+  });
+
+  // Issue #1485: the viewer's share volume is kept across shares, and the
+  // next share's sound plays (not just unmuted) at that volume.
+  test('a second share plays at the volume the viewer set on the first', async ({ browser }) => {
+    const before = (await shareRows()).length;
+    const a = await person(browser, 'alice');
+    const b = await person(browser, 'bob');
+    try {
+      await join(a, 'Join voice');
+      await join(b, 'Watch only');
+      await share(a);
+      await watching(b);
+      await shareView(b.page).getByLabel('Share volume').fill('0.25');
+      await expect(shareView(b.page).locator('audio')).toHaveJSProperty('volume', 0.25);
+      await voiceRegion(a.page).getByRole('button', { name: 'Stop sharing' }).click();
+      await expect(shareView(b.page)).toHaveCount(0, { timeout: 15_000 });
+
+      await share(a);
+      await watching(b);
+      await expect(shareView(b.page).locator('audio')).toHaveJSProperty('volume', 0.25);
+      await expect(shareView(b.page).getByLabel('Share volume')).toHaveValue('0.25');
+      await expectPlaying(b.page);
+      // End it cleanly: a share left running closes later as an idle stop,
+      // into the next test's audit window.
+      await voiceRegion(a.page).getByRole('button', { name: 'Stop sharing' }).click();
+      await expect(shareView(b.page)).toHaveCount(0, { timeout: 15_000 });
+      await expect.poll(async () => (await shareRows()).length, { timeout: 15_000 }).toBeGreaterThanOrEqual(before + 4);
+    } finally {
+      for (const p of [a, b]) await p.close();
     }
   });
 
