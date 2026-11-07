@@ -1,4 +1,5 @@
 import { disablePrincipalResponseV1, listChannelBansResponseV1, messageV2, revokeIssuedResponseV1, type DisablePrincipalResponseV1, type RevokeIssuedResponseV1, messageRemovedV1, type MessageRemovedV1 } from './schema/generated';
+import { defaultShareQuality, type ShareQuality } from './voice/share';
 // The only module that holds the credential in use, and the only one that
 // asks conchd anything. Where the token lives depends on whose it is (issue
 // #439, decision O1). A member's lasts: it is kept so that it survives closing
@@ -2484,6 +2485,30 @@ export function writeVoiceMode(mode: 'ptt' | 'open'): void {
     platform.credentials.writePreference(voiceModeKey, mode);
   } catch {
     // Storage can be unavailable; the choice lasts until the page reloads.
+  }
+}
+
+// The last share quality chosen in this browser: a non-secret preference.
+const shareQualityKey = 'conch.web.voice.share-quality.v1';
+
+export function readShareQuality(): ShareQuality {
+  try {
+    const raw: unknown = JSON.parse(platform.credentials.readPreference(shareQualityKey) ?? 'null');
+    if (typeof raw !== 'object' || raw === null) return defaultShareQuality;
+    const kept = raw as { resolution?: unknown; frameRate?: unknown };
+    const resolution = kept.resolution === '720p' || kept.resolution === '1080p' || kept.resolution === 'source' ? kept.resolution : null;
+    const frameRate = kept.frameRate === 15 || kept.frameRate === 30 || kept.frameRate === 60 ? kept.frameRate : null;
+    return resolution === null || frameRate === null ? defaultShareQuality : { resolution, frameRate };
+  } catch {
+    return defaultShareQuality;
+  }
+}
+
+export function writeShareQuality(quality: ShareQuality): void {
+  try {
+    platform.credentials.writePreference(shareQualityKey, JSON.stringify(quality));
+  } catch {
+    // Storage can be unavailable; the in-memory preference still applies.
   }
 }
 

@@ -16,6 +16,8 @@ export async function holdShare(): Promise<{ readonly stop: () => Promise<void> 
   );
   const room: ShareRoom = {
     pickScreen: () => new Promise(() => undefined),
+    setShareQuality: () => Promise.resolve(),
+    readShareStats: () => Promise.resolve(null),
     publishScreen: () => Promise.resolve(),
     stopScreen: () => Promise.resolve(),
     keepScreen: () => null,

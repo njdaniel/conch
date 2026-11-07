@@ -17,7 +17,7 @@ import { initialChannels } from '../state/channels';
 import type { Person } from '../useLiveChannel';
 import { VoiceClient, type Room, type RoomEvents, type ShareSink } from './connection';
 import { FakeClock, noCamera, settle } from './fakes';
-import type { Captured, KeptScreen, ShareFeatures } from './share';
+import type { Captured, KeptScreen, ShareFeatures, ShareQuality, ShareSample } from './share';
 import type { Snapshot, VoiceControl } from './useVoice';
 import { VoicePanel } from './VoicePanel';
 
@@ -52,6 +52,13 @@ class StubRoom implements Room {
     this.calls.push('pick');
     return Promise.resolve({ audio: this.shareAudio });
   };
+  qualities: ShareQuality[] = [];
+  sample: ShareSample | null = null;
+  setShareQuality = (quality: ShareQuality): Promise<void> => {
+    this.qualities.push(quality);
+    return Promise.resolve();
+  };
+  readShareStats = (): Promise<ShareSample | null> => Promise.resolve(this.sample);
   publishScreen = (): Promise<void> => {
     this.calls.push('publish');
     return Promise.resolve();
@@ -244,6 +251,18 @@ describe('watching', () => {
     expect(within(view).queryByText('Waiting for the picture')).toBeNull();
   });
 
+  it('shows the received resolution and fps once stats arrive', async () => {
+    const t = setup();
+    t.client.join('general', { watchOnly: true });
+    await act(settle);
+    const room = t.rooms[0];
+    if (room === undefined) throw new Error('no room');
+    room.sample = { width: 1920, height: 1080, fps: 30, bytes: 1000, timestamp: 1000 };
+    t.seen(presence(8, true));
+    fireEvent.click(await within(voice()).findByRole('button', { name: 'Watch' }));
+    expect(await screen.findByText('1920×1080 · 30 fps')).toBeTruthy();
+  });
+
   it("the share's sound has its own volume and mute, apart from voice; deafen silences it too", async () => {
     const t = await watching();
     const view = await screen.findByRole('region', { name: 'Shared screen' });
@@ -401,19 +420,44 @@ describe('sharing', () => {
     }
   });
 
-  // Issue #554: there is no choice of what a share is for. Voice options asks
-  // nothing about sharing, and Share screen opens the picker at once.
-  it('asks nothing before a share: Voice options has no share choice, and Share screen opens the picker', async () => {
+  it('offers resolution and frame rate before and during a share, defaulting to 1080p30', async () => {
     const t = setup();
     t.client.join('general');
     await act(settle);
     fireEvent.click(await within(voice()).findByRole('button', { name: 'Voice options' }));
-    expect(within(voice()).getByRole('group', { name: 'Microphone' })).toBeTruthy();
-    expect(within(voice()).queryByRole('group', { name: 'Share your screen' })).toBeNull();
-    expect(within(voice()).queryAllByRole('radio').map((r) => r.closest('label')?.textContent)).toEqual(['Push to talk', 'Open microphone']);
+    const resolution = within(voice()).getByLabelText<HTMLSelectElement>('Share resolution');
+    const frameRate = within(voice()).getByLabelText<HTMLSelectElement>('Share frame rate');
+    expect(resolution.value).toBe('1080p');
+    expect(frameRate.value).toBe('30');
+    fireEvent.change(resolution, { target: { value: '720p' } });
+    fireEvent.change(frameRate, { target: { value: '15' } });
+    expect(t.client.snapshot().shareQuality).toEqual({ resolution: '720p', frameRate: 15 });
     fireEvent.click(within(voice()).getByRole('button', { name: 'Share screen' }));
     await act(settle);
     expect(t.rooms[0]?.calls).toEqual(['pick', 'publish']);
+    expect(within(voice()).getByLabelText('Share resolution')).toBeTruthy();
+    fireEvent.change(resolution, { target: { value: 'source' } });
+    fireEvent.change(frameRate, { target: { value: '60' } });
+    await act(settle);
+    expect(t.rooms[0]?.qualities).toEqual([
+      { resolution: '1080p', frameRate: 30 },
+      { resolution: '720p', frameRate: 30 },
+      { resolution: '720p', frameRate: 15 },
+      { resolution: 'source', frameRate: 15 },
+      { resolution: 'source', frameRate: 60 },
+    ]);
+  });
+
+  it('shows the sharer what the sent top layer reports', async () => {
+    const t = setup();
+    t.client.join('general');
+    await act(settle);
+    const room = t.rooms[0];
+    if (room === undefined) throw new Error('no room');
+    room.sample = { width: 1280, height: 720, fps: 15, bytes: 1000, timestamp: 1000 };
+    fireEvent.click(within(voice()).getByRole('button', { name: 'Share screen' }));
+    await act(settle);
+    expect(await within(voice()).findByText('Sending: 1280×720 · 15 fps')).toBeTruthy();
   });
 
   it('a second person trying to share is told who is sharing', async () => {
