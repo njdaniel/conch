@@ -24,6 +24,11 @@ import (
 // the most the server returns in one page.
 const historyLimit = 100
 
+const (
+	archivedChannelNotice = "This channel is archived."
+	archivedChannelTag    = " archived"
+)
+
 // API is the shared Conch client surface used by the TUI.
 type API interface {
 	// Messages travel through the v2 methods only: a v1 reader would render a
@@ -141,11 +146,13 @@ const (
 // messageSent is the result of one post. raw is the text as typed, so the input
 // is cleared only if the user has not started something new since.
 type messageSent struct {
-	channel string
-	raw     string
-	whisper bool
-	message schema.MessageV2
-	err     error
+	channel   string
+	channelID int64
+	rev       int
+	raw       string
+	whisper   bool
+	message   schema.MessageV2
+	err       error
 }
 type approvalsLoaded struct {
 	approvals []schema.ApprovalV1
@@ -207,7 +214,10 @@ type Model struct {
 	// channelIDs lets a refresh follow a channel whose name changed.
 	channelIDs map[string]int64
 	// subs holds each channel's message socket and its generation.
-	subs       *subscriptions
+	subs *subscriptions
+	// archivedAt holds each archived channel's timestamp. Map presence marks an
+	// archive; a nil timestamp is one learned from a channel_archived refusal.
+	archivedAt map[string]*time.Time
 	selected   int
 	messages   map[string][]schema.MessageV2
 	subscribed map[string]bool
@@ -426,7 +436,7 @@ func NewModel(ctx context.Context, api API, authorID int64, channels []string) M
 		}
 	}
 	m := Model{ctx: ctx, api: api, authorID: authorID,
-		channelIDs: make(map[string]int64), subs: newSubscriptions(),
+		channelIDs: make(map[string]int64), subs: newSubscriptions(), archivedAt: make(map[string]*time.Time),
 		messages: make(map[string][]schema.MessageV2), nets: make(map[string][]schema.NetV1), members: make(map[string]map[int64]schema.ChannelMemberV1), memberRevision: make(map[string]uint64), now: time.Now, subscribed: make(map[string]bool),
 		events: make(chan tea.Msg, 64), mode: modeChannels,
 		backoff: make(map[string]time.Duration), retryPending: make(map[string]bool), after: tickAfter, wrapped: &wrappedBody{},
@@ -511,15 +521,24 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m.enterDirectory()
 			case "ctrl+p":
 				return m.enterCommunity()
-			case "ctrl+r":
-				return m.reactionKeyCommand("react"), nil
-			case "ctrl+u":
-				return m.reactionKeyCommand("unreact"), nil
+			case "ctrl+r", "ctrl+u":
+				if next, refused := m.refuseArchivedWrite(); refused {
+					return next, nil
+				}
+				command := "react"
+				if msg.String() == "ctrl+u" {
+					command = "unreact"
+				}
+				return m.reactionKeyCommand(command), nil
 			case "ctrl+o":
 				return m.reactionKeyCommand("reactors"), nil
 			}
 		}
 		if m.mode == modeRun {
+			if m.channelArchived(m.current()) && m.runWriteKey(msg) {
+				next, _ := m.refuseArchivedWrite()
+				return next, nil
+			}
 			return m.runKey(msg)
 		}
 		if m.mode == modeAgents {
@@ -699,14 +718,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		case "backspace":
 			// The Agents and Runs views have no input: the draft is the channel's.
-			if m.input != "" && m.mode != modeAgents && m.mode != modeRuns {
+			if m.input != "" && m.mode != modeAgents && m.mode != modeRuns && (m.mode != modeChannels || !m.channelArchived(m.current())) {
 				clusters := textClusters(m.input)
 				m.input = strings.TrimSuffix(m.input, clusters[len(clusters)-1].text)
 			}
 		default:
 			// A lone space arrives as KeySpace, not KeyRunes; both carry Runes.
 			if msg.Type == tea.KeyRunes || msg.Type == tea.KeySpace {
-				if m.mode == modeChannels || m.mode == modeDecision {
+				if m.mode == modeDecision || (m.mode == modeChannels && !m.channelArchived(m.current())) {
 					m.input += string(msg.Runes)
 				}
 			}
@@ -752,6 +771,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case reactionsLoaded:
 		return m.reactionLoadDone(msg)
 	case reactionWritten:
+		if cli.IsServerCode(msg.err, schema.ErrorCodeChannelArchived) {
+			m.react.writing = false
+			return m.archiveRefusal(msg.channel, msg.channelID, msg.rev)
+		}
 		return m.reactionDone(msg)
 	case reactorsListed:
 		return m.reactorsDone(msg), nil
@@ -790,6 +813,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case interventionsRead:
 		return m.interventionsRead(msg)
 	case interventionSent:
+		if cli.IsServerCode(msg.err, schema.ErrorCodeChannelArchived) {
+			if msg.runID == m.rd.runID {
+				m.rd.sending = false
+			}
+			return m.archiveRefusal(msg.channel, msg.channelID, msg.rev)
+		}
 		return m.interventionSent(msg)
 	case sessionRunsLoaded:
 		return m.sessionRunsLoaded(msg)
@@ -993,6 +1022,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(m.loadMembers(), m.startSubscription(msg.channel))
 	case messageSent:
 		m.sending = false
+		if cli.IsServerCode(msg.err, schema.ErrorCodeChannelArchived) {
+			return m.archiveRefusal(msg.channel, msg.channelID, msg.rev)
+		}
 		if msg.err != nil {
 			// The typed text stays so it can be fixed or retried by hand;
 			// nothing else is sent in its place. The error text comes from
@@ -1127,6 +1159,93 @@ func (m Model) current() string {
 	return m.channels[m.selected]
 }
 
+func (m Model) channelArchived(channel string) bool {
+	_, ok := m.archivedAt[channel]
+	return ok
+}
+
+func (m Model) markArchived(channel string) Model {
+	if channel == "" {
+		return m
+	}
+	if m.archivedAt == nil {
+		m.archivedAt = make(map[string]*time.Time)
+	}
+	if _, ok := m.archivedAt[channel]; ok {
+		return m
+	}
+	m.archivedAt[channel] = nil
+	selected := m.current()
+	selectedID := m.channelIDs[selected]
+	// Sorted on a copy: earlier models share the old slice.
+	m.channels = slices.Clone(m.channels)
+	sort.SliceStable(m.channels, func(i, j int) bool {
+		return !m.channelArchived(m.channels[i]) && m.channelArchived(m.channels[j])
+	})
+	for i, name := range m.channels {
+		if selectedID > 0 && m.channelIDs[name] == selectedID || selectedID == 0 && name == selected {
+			m.selected = i
+			break
+		}
+	}
+	return m
+}
+
+func (m Model) archiveRefusal(channel string, channelID int64, rev int) (Model, tea.Cmd) {
+	if channelID > 0 {
+		channel = ""
+		for name, id := range m.channelIDs {
+			if id == channelID {
+				channel = name
+				break
+			}
+		}
+	} else if !slices.Contains(m.channels, channel) || !m.subs.liveRev(channel, rev) {
+		// Without an id, only the same per-name lifetime may mark the channel.
+		channel = ""
+	}
+	selected := m.current()
+	if channel != "" {
+		m = m.markArchived(channel)
+		if channel == selected {
+			if m.mode == modeRun {
+				m.rd.status, m.rd.refusal = archivedChannelNotice, archivedChannelNotice
+			} else {
+				m.setStatus(modeChannels, archivedChannelNotice)
+			}
+		}
+	}
+	return m, m.refreshChannels()
+}
+
+func (m Model) refuseArchivedWrite() (Model, bool) {
+	if !m.channelArchived(m.current()) {
+		return m, false
+	}
+	if m.mode == modeRun {
+		m.rd.status, m.rd.refusal = archivedChannelNotice, archivedChannelNotice
+	} else {
+		m.setStatus(modeChannels, archivedChannelNotice)
+	}
+	return m, true
+}
+
+func (m Model) runWriteKey(msg tea.KeyMsg) bool {
+	key := msg.String()
+	switch m.rd.input {
+	case inputMessage:
+		return key == "enter"
+	case inputCancel:
+		return key == "y" || key == "Y"
+	default:
+		switch key {
+		case "m", "x", "p", "r":
+			return true
+		}
+	}
+	return false
+}
+
 func (m Model) noAuthorStatus(action string) string {
 	if m.authenticated {
 		if m.whoErr != nil {
@@ -1211,12 +1330,24 @@ func (m Model) channelsLoadDone(msg channelsLoaded) (tea.Model, tea.Cmd) {
 	m.loadingChannels = false
 	again := m.channelsAgain
 	m.channelsAgain = false
-	names := make([]string, 0, len(msg.channels))
-	ids := make([]int64, 0, len(msg.channels))
+	channels := make([]schema.ChannelV0, 0, len(msg.channels))
 	for _, channel := range msg.channels {
 		if name := strings.TrimSpace(channel.Name); name != "" {
-			names = append(names, name)
-			ids = append(ids, channel.ID)
+			channel.Name = name
+			channels = append(channels, channel)
+		}
+	}
+	sort.SliceStable(channels, func(i, j int) bool {
+		return channels[i].ArchivedAt == nil && channels[j].ArchivedAt != nil
+	})
+	names := make([]string, 0, len(channels))
+	ids := make([]int64, 0, len(channels))
+	nextArchived := make(map[string]*time.Time)
+	for _, channel := range channels {
+		names = append(names, channel.Name)
+		ids = append(ids, channel.ID)
+		if channel.ArchivedAt != nil {
+			nextArchived[channel.Name] = channel.ArchivedAt
 		}
 	}
 	if msg.err != nil {
@@ -1249,6 +1380,7 @@ func (m Model) channelsLoadDone(msg channelsLoaded) (tea.Model, tea.Cmd) {
 	if !msg.refresh {
 		m.channels = names
 		m.channelIDs = nextIDs
+		m.archivedAt = nextArchived
 		m.selected = defaultSelection(names)
 		m.notice = ""
 		if empty {
@@ -1285,6 +1417,7 @@ func (m Model) channelsLoadDone(msg channelsLoaded) (tea.Model, tea.Cmd) {
 	}
 	m.channels = names
 	m.channelIDs = nextIDs
+	m.archivedAt = nextArchived
 	m.channelsErr = nil
 	// The names move with the revision, in one step: a read begun from here
 	// on carries both, so it cannot pair the old names with the new revision.
@@ -1296,6 +1429,14 @@ func (m Model) channelsLoadDone(msg channelsLoaded) (tea.Model, tea.Cmd) {
 		}
 	}
 	m.selected = selected
+	if !m.channelArchived(m.current()) {
+		if m.channelStatus == archivedChannelNotice {
+			m.channelStatus = ""
+		}
+		if m.rd.status == archivedChannelNotice {
+			m.rd.status, m.rd.refusal = "", ""
+		}
+	}
 	m.notice = ""
 	if empty {
 		m.notice = "no channels on server"
@@ -1448,9 +1589,11 @@ func (m Model) waitEvent() tea.Cmd {
 // and no fallback: whatever the server answers is reported as is.
 func (m Model) send(channel, raw, body string, audience *schema.Audience, whisper bool) tea.Cmd {
 	author := m.authorID
+	channelID := m.channelIDs[channel]
+	_, rev := m.subs.life(m.ctx, channel)
 	return func() tea.Msg {
 		posted, err := m.api.PostMessageV2(m.ctx, channel, author, body, audience)
-		return messageSent{channel: channel, raw: raw, whisper: whisper, message: posted, err: err}
+		return messageSent{channel: channel, channelID: channelID, rev: rev, raw: raw, whisper: whisper, message: posted, err: err}
 	}
 }
 
@@ -1976,6 +2119,11 @@ func (m Model) submit() (tea.Model, tea.Cmd) {
 	case "/w":
 		return m.whisperCommand(rest)
 	case "/react", "/unreact", "/reactors":
+		if name != "/reactors" {
+			if next, refused := m.refuseArchivedWrite(); refused {
+				return next, nil
+			}
+		}
 		return m.reactionCommand(strings.TrimPrefix(name, "/"), rest)
 	case "/emoji":
 		return m.emojiCommand(rest), nil
@@ -2025,6 +2173,9 @@ func (m Model) sendToTarget(text string) (tea.Model, tea.Cmd) {
 
 // post starts one send. The input is cleared only when the server accepts it.
 func (m Model) post(text string, audience *schema.Audience, whisper bool) (tea.Model, tea.Cmd) {
+	if next, refused := m.refuseArchivedWrite(); refused {
+		return next, nil
+	}
 	if m.authorID <= 0 {
 		m.setStatus(modeChannels, m.noAuthorStatus("send"))
 		return m, nil

@@ -109,6 +109,9 @@ type (
 	}
 	interventionSent struct {
 		runID        int64
+		channel      string
+		channelID    int64
+		rev          int
 		intervention schema.InterventionV1
 		err          error
 	}
@@ -664,9 +667,12 @@ func (m Model) ask(req schema.CreateInterventionRequestV1) (tea.Model, tea.Cmd) 
 	m.rd.sending = true
 	m.rd.status = "sending…"
 	api, ctx, id := m.api, m.ctx, m.rd.runID
+	channel := m.current()
+	channelID := m.channelIDs[channel]
+	_, rev := m.subs.life(ctx, channel)
 	return m, func() tea.Msg {
 		iv, err := api.CreateIntervention(ctx, id, req)
-		return interventionSent{runID: id, intervention: iv, err: err}
+		return interventionSent{runID: id, channel: channel, channelID: channelID, rev: rev, intervention: iv, err: err}
 	}
 }
 
