@@ -116,7 +116,7 @@ function Line({
         ) : null}
         <span className="vh">: </span>
       </div>
-      <span className="body">{children}</span>
+      <div className="body">{children}</div>
       {tag === null ? null : <span className={tone === undefined ? 'state' : `state ${tone}`}> {tag}</span>}
     </>
   );

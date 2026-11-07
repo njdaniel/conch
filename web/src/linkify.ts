@@ -65,7 +65,7 @@ function writtenAuthority(text: string): string {
   return end < 0 ? rest : rest.slice(0, end);
 }
 
-function href(text: string): string | null {
+export function safeHttpUrl(text: string): string | null {
   if (text.length > maxLink || invisible.test(text)) return null;
   // Only a plain ASCII host links. A host written in other scripts can be a
   // lookalike of another name, so it stays text, at the cost of real IDN
@@ -98,9 +98,11 @@ export function linkify(body: string): Segment[] {
     const start = found.index;
     if (wordChar(body[start - 1])) continue;
     word.lastIndex = start;
-    const run = word.exec(body)?.[0] ?? '';
+    const candidate = word.exec(body)?.[0] ?? '';
+    const maskedLink = candidate.indexOf('](');
+    const run = maskedLink < 0 ? candidate : candidate.slice(0, maskedLink);
     const text = trim(run);
-    const target = href(text);
+    const target = safeHttpUrl(text);
     if (target === null) {
       // Resume after the run, so a hostile run is read once.
       scheme.lastIndex = start + run.length;
