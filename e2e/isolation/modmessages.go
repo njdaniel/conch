@@ -606,6 +606,7 @@ func (m *mod) agentSession() (*mcpclient.Client, error) {
 type mcpPage struct {
 	messages []schema.MessageV2
 	raw      []byte
+	pages    int
 }
 
 func (p mcpPage) byID(id int64) (schema.MessageV2, bool) {
@@ -619,21 +620,28 @@ func (p mcpPage) byID(id int64) (schema.MessageV2, bool) {
 
 // mcpRead reads the moderated channel from the start, page by page, with the
 // read_channel tool.
+//
+// mcpPageSize is small so the read runs across several pages: the channel
+// holds more messages than one. raw is the whole JSON-RPC response of every
+// page, result.content included, which is what the leak scan reads.
+const mcpPageSize = 3
+
 func (m *mod) mcpRead(c *mcpclient.Client) (mcpPage, error) {
 	ctx, cancel := context.WithTimeout(stopCtx, time.Minute)
 	defer cancel()
 	var out mcpPage
 	var after int64
 	for range 50 {
-		raw, err := c.CallTool(ctx, "read_channel", map[string]any{"channel": m.main, "after": after, "limit": 100})
+		raw, full, err := c.CallToolFull(ctx, "read_channel", map[string]any{"channel": m.main, "after": after, "limit": mcpPageSize})
 		if err != nil {
 			return out, fmt.Errorf("read_channel as the agent: %w", err)
 		}
+		out.pages++
 		page, err := mcpclient.Decode[schema.ListMessagesResponseV2](raw)
 		if err != nil {
 			return out, err
 		}
-		out.raw = append(out.raw, raw...)
+		out.raw = append(out.raw, full...)
 		out.messages = append(out.messages, page.Messages...)
 		if page.NextAfter == 0 {
 			return out, nil
@@ -641,6 +649,26 @@ func (m *mod) mcpRead(c *mcpclient.Client) (mcpPage, error) {
 		after = page.NextAfter
 	}
 	return out, fmt.Errorf("read_channel never reached the end of the channel")
+}
+
+// restRead reads the moderated channel as a from the start, page by page
+// with the same small page size as mcpRead, following next_after to the end.
+func (m *mod) restRead(a api) ([]schema.MessageV2, error) {
+	var out []schema.MessageV2
+	var after int64
+	for range 50 {
+		var page schema.ListMessagesResponseV2
+		path := fmt.Sprintf("/v2/channels/%s/messages?after=%d&limit=%d", url.PathEscape(m.main), after, mcpPageSize)
+		if err := a.call(http.MethodGet, path, nil, &page); err != nil {
+			return nil, err
+		}
+		out = append(out, page.Messages...)
+		if page.NextAfter == 0 {
+			return out, nil
+		}
+		after = page.NextAfter
+	}
+	return nil, fmt.Errorf("REST never reached the end of the channel")
 }
 
 // mcpTombstone is the row of issue #1468: the message with an attachment has
@@ -677,9 +705,12 @@ func (m *mod) mcpTombstone(c *mcpclient.Client, before mcpPage, st *removedState
 	if err := tomb.Validate(); err != nil {
 		return fmt.Errorf("the tombstone does not validate: %w", err)
 	}
-	rest, _, err := m.listV2(m.agent.api, "?after=0&limit=100")
+	rest, err := m.restRead(m.agent.api)
 	if err != nil {
 		return err
+	}
+	if after.pages < 3 || before.pages < 3 {
+		return fmt.Errorf("the MCP reads took %d and %d pages of %d, want the channel to span several", before.pages, after.pages, mcpPageSize)
 	}
 	var viaREST schema.MessageV2
 	for _, msg := range rest {
