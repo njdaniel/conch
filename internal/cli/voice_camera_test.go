@@ -17,8 +17,8 @@ import (
 	"github.com/njdaniel/conch/pkg/schema"
 )
 
-func cameraPerson(id int64, talking, camera bool) schema.VoiceParticipant {
-	return schema.VoiceParticipant{
+func cameraPerson(id int64, talking, camera bool) schema.VoiceParticipantV2 {
+	return schema.VoiceParticipantV2{
 		PrincipalID: id, CanPublish: true, Transmitting: talking, Camera: camera,
 		JoinedAt: schema.NewTimestamp(time.Date(2026, time.October, 9, 8, 30, 0, 0, time.UTC)),
 	}
@@ -28,41 +28,41 @@ func TestVoicePresenceShowsCamera(t *testing.T) {
 	const joined = "2026-10-09T08:30:00Z"
 	tests := []struct {
 		name  string
-		rooms []schema.VoicePresenceRoom
+		rooms []schema.VoicePresenceRoomV2
 		want  string
 	}{
 		{
 			name:  "no camera: lines are as before",
-			rooms: []schema.VoicePresenceRoom{{Participants: []schema.VoiceParticipant{cameraPerson(3, true, false), cameraPerson(9, false, false)}}},
+			rooms: []schema.VoicePresenceRoomV2{{Participants: []schema.VoiceParticipantV2{cameraPerson(3, true, false), cameraPerson(9, false, false)}}},
 			want:  "3 - talking " + joined + "\n9 - quiet " + joined + "\n",
 		},
 		{
 			name:  "one camera",
-			rooms: []schema.VoicePresenceRoom{{Participants: []schema.VoiceParticipant{cameraPerson(3, false, false), cameraPerson(9, false, true)}}},
+			rooms: []schema.VoicePresenceRoomV2{{Participants: []schema.VoiceParticipantV2{cameraPerson(3, false, false), cameraPerson(9, false, true)}}},
 			want:  "3 - quiet " + joined + "\n9 - quiet+camera " + joined + "\n",
 		},
 		{
 			name:  "several cameras",
-			rooms: []schema.VoicePresenceRoom{{Participants: []schema.VoiceParticipant{cameraPerson(9, false, true), cameraPerson(3, false, true), cameraPerson(5, false, false)}}},
+			rooms: []schema.VoicePresenceRoomV2{{Participants: []schema.VoiceParticipantV2{cameraPerson(9, false, true), cameraPerson(3, false, true), cameraPerson(5, false, false)}}},
 			want:  "3 - quiet+camera " + joined + "\n5 - quiet " + joined + "\n9 - quiet+camera " + joined + "\n",
 		},
 		{
 			name:  "a camera with talking",
-			rooms: []schema.VoicePresenceRoom{{Participants: []schema.VoiceParticipant{cameraPerson(3, true, true)}}},
+			rooms: []schema.VoicePresenceRoomV2{{Participants: []schema.VoiceParticipantV2{cameraPerson(3, true, true)}}},
 			want:  "3 - talking+camera " + joined + "\n",
 		},
 		{
 			name: "a hostile server's camera in a scoped room is not shown and the scope stays",
-			rooms: []schema.VoicePresenceRoom{
-				{Participants: []schema.VoiceParticipant{cameraPerson(3, false, true)}},
-				{Audience: &schema.Audience{Kind: schema.AudienceKindNet, NetID: 4}, Participants: []schema.VoiceParticipant{cameraPerson(7, true, true)}},
+			rooms: []schema.VoicePresenceRoomV2{
+				{Participants: []schema.VoiceParticipantV2{cameraPerson(3, false, true)}},
+				{Audience: &schema.Audience{Kind: schema.AudienceKindNet, NetID: 4}, Participants: []schema.VoiceParticipantV2{cameraPerson(7, true, true)}},
 			},
 			want: "3 - quiet+camera " + joined + "\n7 - talking " + joined + " net:4\n",
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			doc := schema.VoicePresenceV1{Schema: schema.VoicePresenceSchemaV1, ChannelID: 1, Configured: true, Available: true, Rooms: tt.rooms}
+			doc := schema.VoicePresenceV2{Schema: schema.VoicePresenceSchemaV2, ChannelID: 1, Configured: true, Available: true, Rooms: tt.rooms}
 			var out strings.Builder
 			if err := writeVoicePresence(&out, "general", doc, nil); err != nil {
 				t.Fatal(err)
@@ -83,9 +83,9 @@ func TestVoiceStatusWatchShowsCamera(t *testing.T) {
 	isolateConfig(t)
 	fake := newVoiceFake(t)
 	fake.socket = func(ctx context.Context, conn *websocket.Conn) {
-		doc := func(ps ...schema.VoiceParticipant) schema.VoicePresenceV1 {
-			return schema.VoicePresenceV1{Schema: schema.VoicePresenceSchemaV1, ChannelID: 1, Configured: true, Available: true,
-				Rooms: []schema.VoicePresenceRoom{{Participants: ps}}}
+		doc := func(ps ...schema.VoiceParticipantV2) schema.VoicePresenceV2 {
+			return schema.VoicePresenceV2{Schema: schema.VoicePresenceSchemaV2, ChannelID: 1, Configured: true, Available: true,
+				Rooms: []schema.VoicePresenceRoomV2{{Participants: ps}}}
 		}
 		_ = wsjson.Write(ctx, conn, doc(cameraPerson(3, false, false)))
 		_ = wsjson.Write(ctx, conn, doc(cameraPerson(3, false, true)))
@@ -113,8 +113,8 @@ func TestVoiceStatusUnknownCameraEndedReason(t *testing.T) {
 	isolateConfig(t)
 	fake := newVoiceFake(t)
 	at := schema.NewTimestamp(time.Date(2026, time.October, 9, 8, 30, 0, 0, time.UTC))
-	fake.snapshot = schema.VoicePresenceV1{Schema: schema.VoicePresenceSchemaV1, ChannelID: 1, Configured: true, Available: true,
-		Rooms:       []schema.VoicePresenceRoom{{Participants: []schema.VoiceParticipant{cameraPerson(3, false, true)}}},
+	fake.snapshot = schema.VoicePresenceV2{Schema: schema.VoicePresenceSchemaV2, ChannelID: 1, Configured: true, Available: true,
+		Rooms:       []schema.VoicePresenceRoomV2{{Participants: []schema.VoiceParticipantV2{cameraPerson(3, false, true)}}},
 		CameraEnded: &schema.VoiceCameraEnded{Reason: "x\n9 root \x1b[31m\u202e", StartedAt: at, EndedAt: at}}
 	stdout, _, err := runCLI(t, "", "voice", "status", "--server", fake.URL, "general")
 	if err == nil {
@@ -128,12 +128,12 @@ func TestVoiceStatusUnknownCameraEndedReason(t *testing.T) {
 func TestVoiceStatusHugeParticipantList(t *testing.T) {
 	isolateConfig(t)
 	fake := newVoiceFake(t)
-	var people []schema.VoiceParticipant
+	var people []schema.VoiceParticipantV2
 	for i := int64(1); i <= 5000; i++ {
 		people = append(people, cameraPerson(i, i%2 == 0, i%3 == 0))
 	}
-	fake.snapshot = schema.VoicePresenceV1{Schema: schema.VoicePresenceSchemaV1, ChannelID: 1, Configured: true, Available: true,
-		Rooms: []schema.VoicePresenceRoom{{Participants: people}}}
+	fake.snapshot = schema.VoicePresenceV2{Schema: schema.VoicePresenceSchemaV2, ChannelID: 1, Configured: true, Available: true,
+		Rooms: []schema.VoicePresenceRoomV2{{Participants: people}}}
 	stdout, _, err := runCLI(t, "", "voice", "status", "--server", fake.URL, "general")
 	if err != nil {
 		// The document is well under the client's body cap: it must be read.

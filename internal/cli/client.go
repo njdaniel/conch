@@ -327,6 +327,7 @@ func (c *Client) Subscribe(ctx context.Context, channel string, receive func(sch
 	}
 	query := endpoint.Query()
 	query.Set("channel", channel)
+	query.Set(schema.VoicePresenceSchemaParam, schema.VoicePresenceSchemaV2)
 	endpoint.RawQuery = query.Encode()
 	conn, resp, err := c.dial(ctx, endpoint.String())
 	if err != nil {
@@ -777,19 +778,36 @@ func (c *Client) RemoveNetMember(ctx context.Context, channel, name string, prin
 	return c.roundTrip(ctx, "remove net member", http.MethodDelete, endpoint, nil, nil)
 }
 
-// VoicePresence returns one snapshot of who is connected to channel's voice
-// and who is transmitting. A document that fails its own Validate is an error:
+// VoicePresence returns one snapshot of who is connected to channel's voice,
+// who is transmitting and who is sharing a screen, as v2 presence (it asks for
+// conch.voice_presence.v2, so every sharer is named, not only one). A document that fails its own Validate is an error:
 // presence is read to be believed, so a malformed one is never shown.
-func (c *Client) VoicePresence(ctx context.Context, channel string) (schema.VoicePresenceV1, error) {
+func (c *Client) VoicePresence(ctx context.Context, channel string) (schema.VoicePresenceV2, error) {
 	endpoint := c.resolve("v1", "channels", channel, "voice")
-	var result schema.VoicePresenceV1
+	query := endpoint.Query()
+	query.Set(schema.VoicePresenceSchemaParam, schema.VoicePresenceSchemaV2)
+	endpoint.RawQuery = query.Encode()
+	var result schema.VoicePresenceV2
 	if err := c.roundTrip(ctx, "voice presence", http.MethodGet, endpoint, nil, &result); err != nil {
-		return schema.VoicePresenceV1{}, err
+		return schema.VoicePresenceV2{}, err
 	}
 	if err := result.Validate(); err != nil {
-		return schema.VoicePresenceV1{}, fmt.Errorf("cli: invalid voice presence: %w", err)
+		return schema.VoicePresenceV2{}, fmt.Errorf("cli: invalid voice presence: %w", err)
 	}
 	return result, nil
+}
+
+// StopVoiceShare ends principalID's screen share in channel's voice room, for
+// a manager of the channel or an operator. It names the person always: an
+// un-named stop would end the caller's own share, which is the sharer's own
+// client's to do. The server answers 204 whether or not that person was
+// sharing, so nothing is returned.
+func (c *Client) StopVoiceShare(ctx context.Context, channel string, principalID int64) error {
+	endpoint := c.resolve("v1", "channels", channel, "voice", "share")
+	query := endpoint.Query()
+	query.Set(schema.VoiceSharePrincipalParam, strconv.FormatInt(principalID, 10))
+	endpoint.RawQuery = query.Encode()
+	return c.roundTrip(ctx, "stop voice share", http.MethodDelete, endpoint, nil, nil)
 }
 
 // StopVoiceCamera turns off principalID's camera in channel's voice room. It
@@ -826,7 +844,7 @@ func (c *Client) VoiceOccupancy(ctx context.Context) (schema.VoiceOccupancyV1, e
 // error. A server shutdown is reported through websocket.StatusGoingAway, and
 // removal from the channel (or a disabled or signed-out credential) through
 // websocket.StatusPolicyViolation.
-func (c *Client) SubscribeVoicePresence(ctx context.Context, channel string, receive func(schema.VoicePresenceV1) error) error {
+func (c *Client) SubscribeVoicePresence(ctx context.Context, channel string, receive func(schema.VoicePresenceV2) error) error {
 	endpoint := c.resolve("v1", "voice", "ws")
 	if endpoint.Scheme == "http" {
 		endpoint.Scheme = "ws"
@@ -835,6 +853,7 @@ func (c *Client) SubscribeVoicePresence(ctx context.Context, channel string, rec
 	}
 	query := endpoint.Query()
 	query.Set("channel", channel)
+	query.Set(schema.VoicePresenceSchemaParam, schema.VoicePresenceSchemaV2)
 	endpoint.RawQuery = query.Encode()
 	conn, resp, err := c.dial(ctx, endpoint.String())
 	if err != nil {
@@ -846,7 +865,7 @@ func (c *Client) SubscribeVoicePresence(ctx context.Context, channel string, rec
 	}
 	defer func() { _ = conn.CloseNow() }()
 	for {
-		var doc schema.VoicePresenceV1
+		var doc schema.VoicePresenceV2
 		if err := wsjson.Read(ctx, conn, &doc); err != nil {
 			return fmt.Errorf("cli: read voice presence: %w", err)
 		}

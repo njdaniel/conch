@@ -345,7 +345,7 @@ func (m Model) leaving() voiceLeft {
 
 // justLeft reports whether p, in room of the channel on screen, is the
 // session this TUI left, still listed by presence.
-func (m Model) justLeft(room schema.VoicePresenceRoom, p schema.VoiceParticipant) bool {
+func (m Model) justLeft(room schema.VoicePresenceRoomV2, p schema.VoiceParticipantV2) bool {
 	l := m.vc.left
 	if room.Audience != nil || l.channel != m.current() || l.principal != p.PrincipalID || p.JoinedAt.IsZero() {
 		return false
