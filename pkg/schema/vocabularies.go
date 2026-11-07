@@ -161,6 +161,10 @@ var Vocabularies = map[string][]string{
 	"PermissionsWarning": values(PermissionsWarningDefaultChannelExposesMembers, PermissionsWarningOpenSignupOn),
 	"IssuedKind":         values(IssuedCredential, IssuedHook),
 
+	// Preview as member (issue #1007, docs/design/permission-preview.md §8):
+	// what kind of nobody a preview answer is the view of.
+	"PreviewSimulation": values(PreviewSimulationRole),
+
 	// The community model (ADR-013, issue #978). InviteKindV2 and
 	// DirectoryScope are closed and client-tolerant.
 	"ChannelVisibility": values(ChannelPublic, ChannelPrivate),
