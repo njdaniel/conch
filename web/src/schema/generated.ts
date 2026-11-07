@@ -3811,6 +3811,38 @@ export const permissionsChangedV1 = object<PermissionsChangedV1>({
   schema: vocab<typeof permissionsChangedV1Schema>({ [permissionsChangedV1Schema]: true }),
 });
 
+// schema.PreviewSimulation
+export type PreviewSimulation = 'role';
+
+export const previewSimulation = vocab<PreviewSimulation>({ role: true });
+
+// schema.PreviewResponseV1
+export interface PreviewResponseV1 {
+  id: number;
+  kind: PrincipalKind;
+  name: string;
+  role: PrincipalRole;
+  owner: boolean;
+  permissions: Permission[];
+  permissions_revision: number;
+  may_invite: boolean;
+  voice_allowed: boolean;
+  simulation?: PreviewSimulation;
+}
+
+export const previewResponseV1 = object<PreviewResponseV1>({
+  id: int,
+  kind: principalKind,
+  name: str,
+  role: principalRole,
+  owner: bool,
+  permissions: array(permission),
+  permissions_revision: int,
+  may_invite: bool,
+  voice_allowed: bool,
+  simulation: optional(previewSimulation),
+});
+
 // schema.DisablePrincipalResponseV1
 export interface DisablePrincipalResponseV1 {
   issued_to_others?: IssuedByOperatorV1[];

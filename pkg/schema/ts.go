@@ -419,6 +419,12 @@ var TSTypes = []TSType{
 	{Value: PermissionChangeV1{}},
 	{Value: PutPermissionsRequestV1{}, Family: "put-permissions-request-v1"},
 	{Value: PermissionsChangedV1{}, Family: "permissions-changed-v1", Schema: PermissionsChangedSchemaV1},
+
+	// Preview as member (issue #1007, docs/design/permission-preview.md
+	// §6.1): the entry read's answer, the previewed member's standing and
+	// effective permissions, which the page feeds to the same controls it
+	// keys on whoami. The other preview reads answer existing shapes.
+	{Value: PreviewResponseV1{}, Family: "preview-response-v1"},
 	// What an operator issued to others, on disable and on the owner's
 	// revoke-all of it (issue #1024, ADR-014 O13); the demotion answer is
 	// RoleChangeResponseV1 above, with the same optional list.
@@ -579,6 +585,10 @@ var TSVocabularyModes = map[string]TSVocabularyMode{
 	// Strict: the page switches on an action's gate class to say whether a
 	// person will be asked.
 	"AdminGate": TSStrict,
+	// Strict: the page switches on it to pick the preview banner (design
+	// §8); a simulation it does not know it cannot label honestly, and must
+	// never show as a person's view.
+	"PreviewSimulation": TSStrict,
 
 	// Strict: a state, kind, mode, role, outcome or reason the page switches
 	// on to decide what to show or offer. A value it does not know it cannot

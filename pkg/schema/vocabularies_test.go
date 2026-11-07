@@ -225,6 +225,9 @@ var validators = map[string]func(string) bool{
 	"PermissionsWarning": validOf[PermissionsWarning](),
 	"IssuedKind":         validOf[IssuedKind](),
 
+	// Preview as member (issue #1007).
+	"PreviewSimulation": validOf[PreviewSimulation](),
+
 	// The community model (ADR-013, issue #978).
 	"ChannelVisibility": validOf[ChannelVisibility](),
 	"InviteKindV2":      validOf[InviteKindV2](),
