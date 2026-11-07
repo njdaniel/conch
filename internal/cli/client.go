@@ -603,6 +603,12 @@ func (c *Client) roundTripOnce(ctx context.Context, what, method string, endpoin
 	if out == nil {
 		return nil
 	}
+	if _, ok := out.(interface{ emptyOK() }); ok && resp.StatusCode == http.StatusNoContent {
+		// Only a document that says so may be answered with nothing (an
+		// older server's disable): out keeps its zero value. Any other
+		// document-returning call treats an empty 204 as a bad answer.
+		return nil
+	}
 	var answer io.Reader = resp.Body
 	var capped *cappedReader
 	if l, ok := out.(interface{ maxBody() int64 }); ok {
@@ -911,10 +917,28 @@ func (c *Client) RenamePrincipal(ctx context.Context, id int64, name string) (sc
 	return result.Principal, nil
 }
 
-// DisablePrincipal switches a principal off and revokes its credentials.
-func (c *Client) DisablePrincipal(ctx context.Context, id int64) error {
+// DisablePrincipal switches a principal off and revokes its credentials. The
+// answer lists the live credentials and hooks the principal issued to others
+// (issue #1463); a server from before that answers 204, which is the zero
+// response.
+func (c *Client) DisablePrincipal(ctx context.Context, id int64) (schema.DisablePrincipalResponseV1, error) {
 	endpoint := c.resolve("v1", "principals", strconv.FormatInt(id, 10), "disable")
-	return c.roundTrip(ctx, "disable principal", http.MethodPost, endpoint, nil, nil)
+	var result disablePrincipalDoc
+	if err := c.roundTrip(ctx, "disable principal", http.MethodPost, endpoint, nil, &result); err != nil {
+		return schema.DisablePrincipalResponseV1{}, err
+	}
+	return result.DisablePrincipalResponseV1, nil
+}
+
+// RevokeIssued revokes every live credential and hook principal id issued to
+// others (owner only, recent proof; issue #1463).
+func (c *Client) RevokeIssued(ctx context.Context, id int64) (schema.RevokeIssuedResponseV1, error) {
+	endpoint := c.resolve("v1", "principals", strconv.FormatInt(id, 10), "issued", "revoke-all")
+	var result revokeIssuedDoc
+	if err := c.roundTrip(ctx, "revoke issued", http.MethodPost, endpoint, nil, &result); err != nil {
+		return schema.RevokeIssuedResponseV1{}, err
+	}
+	return result.RevokeIssuedResponseV1, nil
 }
 
 // EnablePrincipal switches a principal back on. It revives no credential.
@@ -1130,6 +1154,9 @@ type EventHandler struct {
 	// may have changed (ADR-014); the document carries nothing else, so the
 	// caller re-reads whoami.
 	PermissionsChanged func(schema.PermissionsChangedV1) error
+	// ChannelsChanged is called when the caller's channel list may have
+	// changed; the document carries nothing else, so the caller re-reads it.
+	ChannelsChanged func(schema.ChannelsChangedV1) error
 }
 
 // SubscribeEvents follows channel's events socket and calls the handler with
@@ -1233,6 +1260,15 @@ func dispatchEvent(frame json.RawMessage, handler EventHandler) error {
 			return err
 		}
 		return receiveEvent(handler.PermissionsChanged(doc))
+	case schema.ChannelsChangedSchemaV1:
+		if handler.ChannelsChanged == nil {
+			return nil
+		}
+		var doc schema.ChannelsChangedV1
+		if err := decodeEvent(frame, &doc, "channels changed"); err != nil {
+			return err
+		}
+		return receiveEvent(handler.ChannelsChanged(doc))
 	case schema.ReactionSummarySchemaV1:
 		if handler.Reaction == nil {
 			return nil

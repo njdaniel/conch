@@ -1030,17 +1030,117 @@ func (m *mod) gates() error {
 			return fmt.Errorf("a refused manager's ban or removal took the approver %d out of the channel", c.id)
 		}
 	}
-	// A manager is not an owner or operator target either: a non-owner
-	// operator cannot ban an owner, which needs a second operator. The
-	// owner's own ban is refused to a manager above (the operator here is the
-	// owner), and the store's rule for the non-owner operator is held by
-	// internal/server/store/bans_test.go.
+	// A manager is not an owner or operator target either, and neither may a
+	// non-owner operator ban an owner (issue #1468): the manager's refusals
+	// are above, the operator's are in operatorBan. What the store holds of
+	// both rules is internal/server/store/bans_test.go. A message removed
+	// reads as a tombstone over MCP read_channel in mcpTombstone
+	// (modmessages.go).
+	if err := m.operatorBan(); err != nil {
+		return fmt.Errorf("a non-owner operator and the owner: %w", err)
+	}
 	for _, p := range []*member{target, approver, {id: m.opID}} {
 		if err := w.op.call(http.MethodDelete, fmt.Sprintf("/v1/channels/%s/members/%d", url.PathEscape(m.main), p.id), nil, nil); err != nil {
 			return err
 		}
 	}
 	m.say("gates: a plain member and an agent were refused the ban, unban, list and voice-removal routes before any target was looked up, and someone of B (her own channel's manager and a plain member) was told the channel does not exist, each exactly as for a ghost; a manager's ban or removal of an approver, an agent or the owner was refused, with the approver's right to decide unchanged")
+	return nil
+}
+
+// operatorBan is the row of issue #1468: an operator who is not an owner is
+// admitted by the route guard (it holds manage_channels), and the store
+// refuses it the one target it may not touch, an owner. The owner is a member
+// of the channel for the moment (gates put it there). The refusal is 403
+// forbidden, audited as an access_denied of the operator's, it changes
+// nothing for the owner, who still reads and posts, and the same operator
+// bans a plain member of the channel (the control, so the 403 is for the
+// target and not for the operator).
+func (m *mod) operatorBan() error {
+	w := m.w
+	opr, err := m.person(m.pname("operator"))
+	if err != nil {
+		return err
+	}
+	if err := w.op.call(http.MethodPut, "/v1/principals/"+itoa(opr.id)+"/role", schema.RoleChangeRequestV1{Role: schema.RoleOperator}, nil); err != nil {
+		return err
+	}
+	ctl, err := m.person(m.pname("banned-by-operator"), m.main)
+	if err != nil {
+		return err
+	}
+	ban := func(id int64) string { return fmt.Sprintf("/v1/channels/%s/bans/%d", url.PathEscape(m.main), id) }
+	denied := func() (int, error) {
+		rows, err := w.auditRows("access_denied")
+		if err != nil {
+			return 0, err
+		}
+		n := 0
+		for _, e := range rows {
+			if e.Actor == "principal:"+itoa(opr.id) && strings.Contains(e.Subject, "/bans/") {
+				n++
+			}
+		}
+		return n, nil
+	}
+	before, err := denied()
+	if err != nil {
+		return err
+	}
+	status, body, err := opr.api.do(http.MethodPut, ban(m.opID), nil)
+	if err != nil {
+		return err
+	}
+	if status != http.StatusForbidden {
+		return fmt.Errorf("a non-owner operator banning the owner = %d %s, want 403", status, m.h.redact(string(body)))
+	}
+	if e, err := errorOf(body); err != nil || e.Code != "forbidden" {
+		return fmt.Errorf("a non-owner operator banning the owner = %s, want the code forbidden (%v)", m.h.redact(string(body)), errText(err))
+	}
+	after, err := denied()
+	if err != nil {
+		return err
+	}
+	if after != before+1 {
+		return fmt.Errorf("the refused ban wrote %d access_denied rows of the operator's for a ban route, want 1", after-before)
+	}
+	// Nothing changed for the owner: not listed as banned, still a member,
+	// and it reads and posts in the channel.
+	var bans schema.ListChannelBansResponseV1
+	if err := w.op.call(http.MethodGet, "/v1/channels/"+url.PathEscape(m.main)+"/bans", nil, &bans); err != nil {
+		return err
+	}
+	for _, b := range bans.Bans {
+		if b.PrincipalID == m.opID {
+			return fmt.Errorf("the refused ban of the owner is listed: %+v", b)
+		}
+	}
+	text := m.text("the owner's word after the refused ban")
+	posted, err := m.post(&member{name: "the owner", api: w.op}, "the owner's post after a refused ban", schema.PostMessageRequestV2{Body: text})
+	if err != nil {
+		return fmt.Errorf("the owner posting after the refused ban: %w", err)
+	}
+	msgs, _, err := m.listV2(w.op, "?order=desc&limit=5")
+	if err != nil {
+		return fmt.Errorf("the owner reading after the refused ban: %w", err)
+	}
+	if !slices.ContainsFunc(msgs, func(x schema.MessageV2) bool { return x.ID == posted && x.Body == text }) {
+		return fmt.Errorf("the owner does not read back the message %d it posted after the refused ban", posted)
+	}
+	// The control.
+	if err := opr.api.call(http.MethodPut, ban(ctl.id), nil, nil); err != nil {
+		return fmt.Errorf("the same operator banning a plain member: %w", err)
+	}
+	if err := opr.api.call(http.MethodGet, "/v1/channels/"+url.PathEscape(m.main)+"/bans", nil, &bans); err != nil {
+		return err
+	}
+	if !slices.ContainsFunc(bans.Bans, func(b schema.ChannelBanV1) bool { return b.PrincipalID == ctl.id }) {
+		return fmt.Errorf("the operator's ban of a plain member is not listed: %+v", bans)
+	}
+	if err := w.op.call(http.MethodDelete, ban(ctl.id), nil, nil); err != nil {
+		return err
+	}
+	m.say("operator ban: a non-owner operator was refused the ban of the owner with 403 forbidden and one access_denied row, the owner was not listed as banned and still read and posted in the channel, and the same operator banned a plain member of it")
 	return nil
 }
 

@@ -1,4 +1,4 @@
-import { listChannelBansResponseV1 } from '../schema/generated';
+import { disablePrincipalResponseV1, listChannelBansResponseV1, revokeIssuedResponseV1 } from '../schema/generated';
 import { reactionSummaryV1, reactionSummariesResponseV1, listReactorsResponseV1 } from '../schema/reaction';
 // The operation table: every request the client makes of conchd, keyed by a
 // stable id. Pure data and generated validators, with no DOM and no window, so
@@ -280,7 +280,10 @@ export const operations = {
   setVoicePermission: op('PUT', '/v1/principals/{id}/voice-permission', 'bearer', { request: check(voicePermissionRequestV1), response: check(voicePermissionResponseV1) }),
   setInvitePermission: op('PUT', '/v1/principals/{id}/invite-permission', 'bearer', { request: check(invitePermissionRequestV1) }),
   hidePrincipal: op('POST', '/v1/principals/{id}/hide', 'bearer', { response: check(hidePrincipalResponseV1) }),
-  disablePrincipal: op('POST', '/v1/principals/{id}/disable', 'bearer'),
+  // 200 with what the person issued to others (issue #1464), or 204 from an older server.
+  disablePrincipal: op('POST', '/v1/principals/{id}/disable', 'bearer', { response: check(disablePrincipalResponseV1) }),
+  // The owner's one call to end what a person issued to others (ADR-014 O13).
+  revokeIssued: op('POST', '/v1/principals/{id}/issued/revoke-all', 'bearer', { response: check(revokeIssuedResponseV1) }),
   enablePrincipal: op('POST', '/v1/principals/{id}/enable', 'bearer'),
   // Add an AI administrator (issue #1334, docs/design/ai-administrators.md
   // §4.2): the same routes as `conch admin ai-admin create`.

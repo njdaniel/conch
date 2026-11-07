@@ -2,12 +2,13 @@ module github.com/njdaniel/conch
 
 go 1.25.0
 
-// web/ is the browser client and desktop/ the Electron shell (both Node).
-// The go command must not treat Go files that npm packages ship in their
-// node_modules (flatted does, issue #954) as packages of this module.
-// scripts/go-scope.sh, in make check, holds this.
+// web/ is the browser client, desktop/ the Electron shell, and spikes/mobile/
+// the mobile spikes (all Node). The go command must not treat Go files that
+// npm packages ship in their node_modules (flatted does, issue #954) as
+// packages of this module. scripts/go-scope.sh, in make check, holds this.
 ignore (
 	./desktop
+	./spikes
 	./web
 )
 

@@ -10,6 +10,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
+	"github.com/njdaniel/conch/internal/cli"
 	"github.com/njdaniel/conch/pkg/schema"
 )
 
@@ -896,5 +897,63 @@ func TestGoToMessageWithWrappedHistory(t *testing.T) {
 	view := m.View()
 	if !strings.Contains(view, "msg-10") || strings.Contains(view, "msg-40") {
 		t.Errorf("not centred on msg-10:\n%s", view)
+	}
+}
+
+func TestArchivedChannelView(t *testing.T) {
+	stamp := time.Date(2026, time.November, 7, 12, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name         string
+		initial      bool
+		refused      bool
+		restored     bool
+		wantArchived bool
+	}{
+		{name: "live"},
+		{name: "archived", initial: true, wantArchived: true},
+		{name: "archived while open (409)", refused: true, wantArchived: true},
+		{name: "restored", initial: true, restored: true},
+		{name: "older server"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			channels := []schema.ChannelV0{{ID: 1, Name: "general"}, {ID: 2, Name: "ops"}}
+			if tt.initial {
+				channels[0].ArchivedAt = &stamp
+			}
+			m := loadChannelsForTest(NewModel(context.Background(), stubAPI{}, 7, nil), channels)
+			if tt.refused {
+				m, _ = update(m, messageSent{channel: "general", err: &cli.ServerError{Status: 409, Code: schema.ErrorCodeChannelArchived}})
+			}
+			if tt.restored {
+				channels[0].ArchivedAt = nil
+				m = loadChannelsForTest(m, channels)
+			}
+			m.width, m.height = 120, 30
+			m.rs.off = true
+			m.loaded["general"] = true
+			m.messages["general"] = []schema.MessageV2{{ID: 1, AuthorID: 8, Body: "history stays visible"}}
+			view := stripANSI(m.View())
+			checkScreen(t, view, 120, 30)
+			if !strings.Contains(view, "history stays visible") {
+				t.Errorf("history is not visible:\n%s", view)
+			}
+			wantLines := 0
+			if tt.wantArchived {
+				wantLines = 1
+			}
+			if got := strings.Count(view, archivedChannelLine); got != wantLines {
+				t.Errorf("archive line count = %d, want %d:\n%s", got, wantLines, view)
+			}
+			if got := strings.Contains(view, "general archived"); got != tt.wantArchived {
+				t.Errorf("archive tag = %v, want %v:\n%s", got, tt.wantArchived, view)
+			}
+			if got := strings.Contains(view, "general > "); got == tt.wantArchived {
+				t.Errorf("composer visible = %v with archived %v:\n%s", got, tt.wantArchived, view)
+			}
+			if tt.wantArchived && strings.Contains(view, "enter send") {
+				t.Errorf("archived view still offers sending:\n%s", view)
+			}
+		})
 	}
 }
