@@ -222,7 +222,7 @@ export function NativeVoicePanel({
   return (
     <section aria-label="Voice" className={`voice ${phaseClass(view)}${helper?.transmitting === true ? ' sending' : ''}`}>
       <div className="voice-bar">
-        {roster.length === 0 ? null : <Roster roster={roster} people={named} viewer={viewer} viewerName={viewerName} elsewhere={false} speaking={noSpeaking} volumes={noVolumes} />}
+        {roster.length === 0 ? null : <Roster roster={roster} people={named} viewer={viewer} viewerName={viewerName} elsewhere={duplicate} speaking={noSpeaking} volumes={noVolumes} />}
         <div className="voice-row">
           <div className="voice-state">
             <p className="voice-phase">
