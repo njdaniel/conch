@@ -149,20 +149,26 @@ export function ChannelNav({
       setRows([]);
       return;
     }
+    // The server pushes nothing to a non-member when a public channel turns
+    // private or is archived, so while the switcher is open the directory is
+    // read again a few seconds after each read finishes, as well as on every
+    // refresh signal. A read that answers after a refresh, a close or another
+    // person began is dropped; the next poll waits for the last one, so a slow
+    // directory still lands.
+    let poll = 0;
+    let live = true;
     const read = () => {
       const mine = ++seq.current;
       void api.channelDirectory().then((result) => {
         if (mine === seq.current && result.ok) setRows(result.value);
+      }).finally(() => {
+        if (live && mine === seq.current) poll = window.setTimeout(read, directoryPollMs);
       });
     };
     read();
-    // The server pushes nothing to a non-member when a public channel turns
-    // private or is archived, so while the switcher is open the directory is
-    // read again every few seconds as well as on every refresh signal; a read
-    // that answers after a newer one began is dropped.
-    const poll = window.setInterval(read, directoryPollMs);
     return () => {
-      window.clearInterval(poll);
+      live = false;
+      window.clearTimeout(poll);
       seq.current++;
     };
   }, [open, canBrowse, refresh, channels]);

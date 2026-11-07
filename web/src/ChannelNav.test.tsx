@@ -269,6 +269,36 @@ describe('the Join group follows the directory', () => {
   });
 });
 
+describe('the Join group on a slow directory', () => {
+  it('waits for a slow read before polling again, so its answer still lands', async () => {
+    vi.useFakeTimers();
+    try {
+      const read = vi.spyOn(api, 'channelDirectory');
+      let slow: (v: Awaited<ReturnType<typeof api.channelDirectory>>) => void = () => undefined;
+      read.mockReturnValueOnce(new Promise((resolve) => { slow = resolve; }));
+      setup();
+      fireEvent.click(screen.getByRole('button', { name: /Find a channel/ }));
+      // Three poll intervals pass while the first read is still out.
+      act(() => { vi.advanceTimersByTime(10_000); });
+      expect(read).toHaveBeenCalledTimes(1);
+      await act(async () => {
+        slow({ ok: true, value: [listing(9, 'movie-night')] });
+        await Promise.resolve();
+      });
+      expect(screen.getByRole('option', { name: /movie-night/ })).toBeTruthy();
+      // The next read comes one interval after the slow one finished.
+      read.mockResolvedValue({ ok: true, value: [] });
+      await act(async () => {
+        vi.advanceTimersByTime(4_000);
+        await Promise.resolve();
+      });
+      expect(read).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
 describe('focus and scrolling', () => {
   it('moves focus to the conversation heading after a channel is chosen, the current one too', () => {
     vi.useFakeTimers();
