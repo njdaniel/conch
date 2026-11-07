@@ -1286,7 +1286,15 @@ func (m Model) channelsLoadDone(msg channelsLoaded) (tea.Model, tea.Cmd) {
 	m.channels = names
 	m.channelIDs = nextIDs
 	m.channelsErr = nil
+	// The names move with the revision, in one step: a read begun from here
+	// on carries both, so it cannot pair the old names with the new revision.
 	m.rs.listRev++
+	m.rs.names = make(map[int64]string, len(names))
+	for i, name := range names {
+		if ids[i] != 0 {
+			m.rs.names[ids[i]] = name
+		}
+	}
 	m.selected = selected
 	m.notice = ""
 	if empty {

@@ -448,7 +448,7 @@ func TestLateHistoryAnswerAfterReuse(t *testing.T) {
 // channel list must not put its names back.
 func TestReadStateAnswersOutOfOrder(t *testing.T) {
 	api := &removedAPI{channelRefreshAPI: &channelRefreshAPI{}, states: []schema.ReadStateV1{{ChannelID: 2, Unread: 3}}}
-	for _, name := range []string{"earlier refresh arrives last", "ordinary read arrives last"} {
+	for _, name := range []string{"earlier refresh arrives last", "ordinary read arrives last", "ordinary read begun after the list arrives last"} {
 		t.Run(name, func(t *testing.T) {
 			m := channelRefreshModel(t, api)
 			m.rs.names = map[int64]string{1: "general", 2: "ops"}
@@ -463,6 +463,11 @@ func TestReadStateAnswersOutOfOrder(t *testing.T) {
 			}
 			m.loadingChannels = true
 			m, cmdB := update(m, channelsLoaded{refresh: true, channels: []schema.ChannelV0{{ID: 1, Name: "general"}, {ID: 2, Name: "staff"}}})
+			if name == "ordinary read begun after the list arrives last" {
+				// Begun under the new revision, before the refresh's own
+				// read-state answer: it must already see the new names.
+				older = msgsOf[readStateLoaded](runCmd(m.loadReadState()))[0]
+			}
 			newer := msgsOf[readStateLoaded](runCmd(cmdB))[0]
 			m, _ = update(m, newer)
 			m, _ = update(m, older)
