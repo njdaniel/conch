@@ -1,5 +1,5 @@
+import { previewText } from './Linkified';
 import { useId, useState } from 'react';
-import { previewText } from './linkify';
 import { Glyph } from './Icons';
 import type { NotificationAlert } from './useNotifications';
 

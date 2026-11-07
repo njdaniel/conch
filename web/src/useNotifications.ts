@@ -1,5 +1,5 @@
+import { previewText } from './Linkified';
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { previewText } from './linkify';
 import * as api from './api';
 import type { NotificationPolicy } from './api';
 import { platform } from './platform';

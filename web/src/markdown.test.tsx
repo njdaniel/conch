@@ -1,7 +1,6 @@
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it } from 'vitest';
-import { BodyBoundary, Linkified } from './Linkified';
-import { previewText } from './linkify';
+import { BodyBoundary, Linkified, previewText } from './Linkified';
 import { formatText } from './formatting';
 import { excerptOf } from './Conversation';
 import { MAX_POST_REQUEST_BYTES } from './schema/message';
@@ -183,6 +182,37 @@ describe('multiline spoilers', () => {
   });
 });
 
+describe('previewText against the renderer', () => {
+  const pieces = ['||', '|', '`', '```', '\n', '> ', '\\', '**', '*', '~~', ' ', 'x', '[', 'https://a.co/'];
+  // A small deterministic generator, so a failure names its body.
+  function bodies(count: number): string[] {
+    let seed = 1496;
+    const roll = (n: number): number => {
+      seed = (seed * 1103515245 + 12345) % 2147483648;
+      return seed % n;
+    };
+    return Array.from({ length: count }, () => {
+      const parts = Array.from({ length: 2 + roll(14) }, () => pieces[roll(pieces.length)] ?? '');
+      return parts.join('');
+    });
+  }
+
+  it('shows no word the message view hides inside a spoiler', () => {
+    // Words inside a spoiler are unique tokens; none may appear in the preview.
+    for (const body of bodies(1500)) {
+      let n = 0;
+      const withSecrets = body.replace(/x/g, () => `s${String(n++)}z`);
+      const { container, unmount } = render(<Linkified text={withSecrets} />);
+      const shownWords = new Set((container.textContent).match(/s\d+z/g) ?? []);
+      unmount();
+      const previewWords = new Set(previewText(withSecrets).match(/s\d+z/g) ?? []);
+      for (const word of previewWords) {
+        expect(shownWords.has(word), `${JSON.stringify(body)}: ${word}`).toBe(true);
+      }
+    }
+  }, 60_000);
+});
+
 describe('code block from a partial-line selection', () => {
   it('breaks the line around both fences and renders as a code block', () => {
     const text = 'hello world';
@@ -214,6 +244,10 @@ describe('previews outside the message view', () => {
     ['line one ||x\ny|| line two', 'line one [spoiler] line two'],
     ['line one ||x\ny', 'line one ||x\ny'],
     ['use a || b\nnext line', 'use a || b\nnext line'],
+    ['`||` x ||secret||', '`||` x [spoiler]'],
+    ['\\|| text ||secret||', '\\|| text [spoiler]'],
+    ['```\n||\n```\n||secret||', '```\n||\n```\n[spoiler]'],
+    ['**a||b** c||secret||', '**a||b** c[spoiler]'],
     ['plain text', 'plain text'],
   ])('%j previews as %j', (body, preview) => {
     expect(previewText(body)).toBe(preview);

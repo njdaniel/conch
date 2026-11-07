@@ -18,6 +18,12 @@ function Spoiler({ children }: { readonly children: ReactNode }) {
   );
 }
 
+// text_ is the string a preview-mode result holds (it holds only strings).
+function text_(nodes: ReactNode): string {
+  if (typeof nodes === 'string') return nodes;
+  return Array.isArray(nodes) ? nodes.map((node: ReactNode) => (typeof node === 'string' ? node : '')).join('') : '';
+}
+
 function plain(text: string, prefix: string): ReactNode[] {
   if (!text.includes('://')) return [text];
   return linkify(text).map((segment, index) => segment.kind === 'text'
@@ -36,6 +42,9 @@ const maxInlineDepth = 8;
 const maxSpoilers = 500;
 interface Budget {
   spoilers: number;
+  // A preview is the body's own text with each spoiler replaced by
+  // "[spoiler]": the same tokenizer, strings out instead of elements.
+  readonly preview: boolean;
 }
 
 function nextMarkers(text: string): NextMarkers {
@@ -83,7 +92,8 @@ function inline(text: string, prefix: string, depth: number, budget: Budget): Re
   const flush = (end: number) => {
     // A loop, not a spread: a body can hold tens of thousands of segments,
     // more than a call may take as arguments.
-    if (end > literal) for (const node of plain(text.slice(literal, end), `${prefix}-${String(literal)}`)) add(node);
+    if (end > literal && budget.preview) add(text.slice(literal, end));
+    else if (end > literal) for (const node of plain(text.slice(literal, end), `${prefix}-${String(literal)}`)) add(node);
   };
   const wrap = (marker: InlineMarker, element: 'strong' | 'em' | 's'): boolean => {
     if (!text.startsWith(marker, at)) return false;
@@ -92,7 +102,8 @@ function inline(text: string, prefix: string, depth: number, budget: Budget): Re
     if (end < 0 || depth >= maxInlineDepth) return false;
     flush(at);
     const content = inline(text.slice(from, end), `${prefix}-${String(at)}`, depth + 1, budget);
-    out.push(element === 'strong' ? <strong key={`${prefix}-${String(at)}`}>{content}</strong> : element === 'em' ? <em key={`${prefix}-${String(at)}`}>{content}</em> : <s key={`${prefix}-${String(at)}`}>{content}</s>);
+    if (budget.preview) add(marker + text_(content) + marker);
+    else out.push(element === 'strong' ? <strong key={`${prefix}-${String(at)}`}>{content}</strong> : element === 'em' ? <em key={`${prefix}-${String(at)}`}>{content}</em> : <s key={`${prefix}-${String(at)}`}>{content}</s>);
     at = end + marker.length;
     literal = at;
     return true;
@@ -101,7 +112,7 @@ function inline(text: string, prefix: string, depth: number, budget: Budget): Re
   while (at < text.length) {
     if (text[at] === '\\' && at + 1 < text.length && /[*`~|[\]\\]/.test(text[at + 1] ?? '')) {
       flush(at);
-      add(text[at + 1]);
+      add(budget.preview ? text.slice(at, at + 2) : text[at + 1]);
       at += 2;
       literal = at;
       continue;
@@ -110,7 +121,8 @@ function inline(text: string, prefix: string, depth: number, budget: Budget): Re
       const end = closing(next, '`', at + 1);
       if (end >= 0) {
         flush(at);
-        out.push(<code key={`${prefix}-${String(at)}`}>{text.slice(at + 1, end)}</code>);
+        if (budget.preview) add(text.slice(at, end + 1));
+        else out.push(<code key={`${prefix}-${String(at)}`}>{text.slice(at + 1, end)}</code>);
         at = end + 1;
         literal = at;
         continue;
@@ -121,7 +133,7 @@ function inline(text: string, prefix: string, depth: number, budget: Budget): Re
       if (end >= 0) {
         flush(at);
         const inner = text.slice(at + 2, end);
-        if (budget.spoilers >= maxSpoilers) {
+        if (budget.preview || budget.spoilers >= maxSpoilers) {
           add('[spoiler]');
         } else {
           budget.spoilers += 1;
@@ -137,7 +149,9 @@ function inline(text: string, prefix: string, depth: number, budget: Budget): Re
       const end = closing(next, '***', at + 3);
       if (end >= 0 && depth < maxInlineDepth) {
         flush(at);
-        out.push(<strong key={`${prefix}-${String(at)}`}><em>{inline(text.slice(at + 3, end), `${prefix}-${String(at)}`, depth + 1, budget)}</em></strong>);
+        const inner = inline(text.slice(at + 3, end), `${prefix}-${String(at)}`, depth + 1, budget);
+        if (budget.preview) add(`***${text_(inner)}***`);
+        else out.push(<strong key={`${prefix}-${String(at)}`}><em>{inner}</em></strong>);
         at = end + 3;
         literal = at;
         continue;
@@ -150,15 +164,16 @@ function inline(text: string, prefix: string, depth: number, budget: Budget): Re
   return out;
 }
 
-function blocks(text: string): ReactNode[] {
-  const budget: Budget = { spoilers: 0 };
+function blocks(text: string, preview = false): ReactNode[] {
+  const budget: Budget = { spoilers: 0, preview };
   const lines = text.split('\n');
   const out: ReactNode[] = [];
   let ordinary: string[] = [];
   const flush = () => {
     if (ordinary.length === 0) return;
     const body = ordinary.join('\n');
-    out.push(<span key={`text-${String(out.length)}`}>{inline(body, `text-${String(out.length)}`, 0, budget)}</span>);
+    const nodes = inline(body, `text-${String(out.length)}`, 0, budget);
+    out.push(preview ? text_(nodes) : <span key={`text-${String(out.length)}`}>{nodes}</span>);
     ordinary = [];
   };
 
@@ -166,6 +181,7 @@ function blocks(text: string): ReactNode[] {
     const line = lines[at] ?? '';
     if (line.startsWith('```')) {
       flush();
+      const fence = at;
       at += 1;
       const code: string[] = [];
       while (at < lines.length && !(lines[at] ?? '').startsWith('```')) {
@@ -173,7 +189,8 @@ function blocks(text: string): ReactNode[] {
         at += 1;
       }
       if (at < lines.length) at += 1;
-      out.push(<pre key={`code-${String(out.length)}`}><code>{code.join('\n')}</code></pre>);
+      if (preview) out.push(lines.slice(fence, at).join('\n'));
+      else out.push(<pre key={`code-${String(out.length)}`}><code>{code.join('\n')}</code></pre>);
       continue;
     }
     if (line === '>' || line.startsWith('> ')) {
@@ -185,7 +202,9 @@ function blocks(text: string): ReactNode[] {
         quote.push(quoted.slice(1).trimStart());
         at += 1;
       }
-      out.push(<blockquote key={`quote-${String(out.length)}`}>{inline(quote.join('\n'), `quote-${String(out.length)}`, 0, budget)}</blockquote>);
+      const nodes = inline(quote.join('\n'), `quote-${String(out.length)}`, 0, budget);
+      if (preview) out.push(text_(nodes).split('\n').map((part) => `> ${part}`).join('\n'));
+      else out.push(<blockquote key={`quote-${String(out.length)}`}>{nodes}</blockquote>);
       continue;
     }
     ordinary.push(line);
@@ -222,4 +241,14 @@ export function Linkified({ text }: { readonly text: string }) {
       <Rendered text={text} />
     </BodyBoundary>
   );
+}
+
+// previewText is a body as a preview outside the message view (a system
+// notification, the notification list, a reply excerpt): the body's own text
+// with every spoiler the message view would hide replaced by "[spoiler]". It
+// runs the renderer's tokenizer, so escapes, inline code, code blocks and
+// nesting decide what is a spoiler exactly as they do there; an unclosed ||
+// stays literal. Other markup is kept as typed.
+export function previewText(body: string): string {
+  return blocks(body, true).map(text_).join('\n');
 }

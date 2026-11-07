@@ -117,11 +117,3 @@ export function linkify(body: string): Segment[] {
   if (at < body.length) out.push({ kind: 'text', text: body.slice(at) });
   return out;
 }
-
-// previewText is a body as a preview outside the message view (a system
-// notification, the notification list, a reply excerpt): every closed
-// ||spoiler||, across lines too, becomes "[spoiler]". An unclosed || stays
-// literal, as in the message view.
-export function previewText(body: string): string {
-  return body.replace(/\|\|(?!\|)([\s\S]+?)\|\|/g, '[spoiler]');
-}
