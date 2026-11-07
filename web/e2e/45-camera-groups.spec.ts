@@ -347,6 +347,49 @@ test.describe('the call view in a small group, with LiveKit', () => {
     }
   });
 
+  test('Hide non-video participants keeps only cameras, persists across a reload, and an empty grid closes without opening itself again', async ({ browser }) => {
+    const b = await person(browser, 'bob');
+    const c = await person(browser, 'carol', { viewport: { width: 1280, height: 900 } });
+    try {
+      await join(b);
+      await join(c);
+      await roomIs([vw.bob, vw.carol]);
+      await cameraOn(b);
+      await voiceRegion(c.page).getByRole('button', { name: 'Show video (1)' }).click({ timeout: 15_000 });
+      let call = callView(c.page);
+      const toggle = call.getByRole('button', { name: 'Hide non-video participants' });
+      await expect(toggle).toHaveAttribute('aria-pressed', 'false');
+      await expect(call.getByRole('listitem')).toHaveCount(2);
+      await expect(call.getByRole('listitem').filter({ hasText: 'carol' })).toContainText('Camera off');
+      await toggle.click();
+      await expect(toggle).toHaveAttribute('aria-pressed', 'true');
+      await expect(call.getByRole('listitem')).toHaveCount(1);
+      await expect(call.getByLabel("bob's camera")).toBeVisible();
+      await expect(call.getByRole('listitem').filter({ hasText: 'carol' })).toHaveCount(0);
+
+      await c.page.reload();
+      await openChannel(c.page, vw.channel);
+      await join(c);
+      await expect(callView(c.page)).toHaveCount(0);
+      await voiceRegion(c.page).getByRole('button', { name: 'Show video (1)' }).click({ timeout: 15_000 });
+      call = callView(c.page);
+      await expect(call.getByRole('button', { name: 'Hide non-video participants' })).toHaveAttribute('aria-pressed', 'true');
+      await expect(call.getByRole('listitem')).toHaveCount(1);
+
+      await voiceRegion(b.page).getByRole('button', { name: 'Camera', exact: true }).click();
+      await expect(callView(c.page)).toHaveCount(0, { timeout: 15_000 });
+      await expect(voiceRegion(c.page).getByRole('button', { name: /Show video/ })).toHaveCount(0);
+      await cameraOn(b);
+      const show = voiceRegion(c.page).getByRole('button', { name: 'Show video (1)' });
+      await expect(show).toBeVisible({ timeout: 15_000 });
+      await expect(show).toBeFocused();
+      await expect(callView(c.page)).toHaveCount(0);
+    } finally {
+      await b.close();
+      await c.close();
+    }
+  });
+
   test("the owner turns use_camera off for members: bob's tile on carol's page goes to Camera off, and bob's page ends its track and says why", async ({ browser }) => {
     const b = await person(browser, 'bob');
     const c = await person(browser, 'carol', { viewport: { width: 1280, height: 900 } });

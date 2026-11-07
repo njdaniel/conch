@@ -38,11 +38,14 @@ import { ModerationConfirm, useMayModerate, useMayModerateIn } from '../Moderati
 // alone (S5); others see "camera" on the person's chip. Voice options has
 // the camera picker, under the microphone's, and a private camera test.
 // "Show video (n)" opens the call view (CallView.tsx) while anyone in the
-// room has a camera on, and it never opens by itself (O8). While a share is
-// watched with the call view open, the share is the main picture and the
-// cameras are a strip beside it (design §7.4).
+// room has a camera on, and it never opens by itself (O8). Its remembered
+// "Hide non-video participants" choice can close it when no camera or watched
+// share remains; a later camera offers Show video again, without opening it.
+// While a share is watched with the call view open, the share is the main
+// picture and the cameras are a strip beside it (design §7.4).
 import { useContext, useEffect, useRef, useState, type KeyboardEvent as KeyEvent, type RefObject } from 'react';
 import { createPortal } from 'react-dom';
+import { readHideNonVideo, writeHideNonVideo } from '../api';
 import { archivedLine } from '../archived';
 import { Avatar, Glyph } from '../Icons';
 import type { ChannelV0 } from '../schema/channel';
@@ -160,6 +163,9 @@ export function VoicePanel({
   const { state, snapshot, client } = voice;
   const stage = useContext(StageHost);
   const [options, setOptions] = useState(false);
+  const [hideNonVideo, setHideNonVideo] = useState(readHideNonVideo);
+  const [focusShow, setFocusShow] = useState(false);
+  const showVideoButton = useRef<HTMLButtonElement>(null);
   // More about sharing opens Voice options at the full share notes, and
   // takes focus there once they are shown (issue #600).
   const about = useRef<HTMLElement>(null);
@@ -277,6 +283,28 @@ export function VoicePanel({
   const away = inVoice ? null : busiest(channels, occupancy, viewed);
   const awayLine = away === null ? null : <Elsewhere where={away} onOpen={onOpen} />;
 
+  const videoRoster = inVoice && presence !== null && !presence.available ? [] : occupants(presence);
+  const visibleCameraCount = videoRoster.filter((o) => o.principal !== viewer && o.camera).length + (state.cameraTrack === 'published' ? 1 : 0);
+  const emptyCall =
+    inVoice &&
+    state.viewing &&
+    !strip &&
+    hideNonVideo &&
+    !(theirs !== null && state.watching) &&
+    state.cameraTrack === 'none' &&
+    !videoRoster.some((o) => o.principal !== viewer && o.camera);
+  useEffect(() => {
+    if (!emptyCall) return;
+    setFocusShow(true);
+    client.viewVideo(false);
+  }, [client, emptyCall]);
+  useEffect(() => {
+    if (!focusShow || visibleCameraCount === 0) return;
+    const at = document.activeElement;
+    if (at === null || at === document.body) showVideoButton.current?.focus();
+    setFocusShow(false);
+  }, [focusShow, visibleCameraCount]);
+
   if (viewed === null && !inVoice) {
     // No channel to show (it was lost, or none is open). A stopped client
     // still says why it stopped.
@@ -350,10 +378,24 @@ export function VoicePanel({
   // watched share only: no call view and no camera tile, and no camera
   // received (showVideo). The person's choice to view is kept, so the view
   // and the cameras are back with the Voice view, with no tap (O8).
-  const call = inVoice && state.viewing && !strip ? callTiles(roster, viewer, state.cameraTrack !== 'none', (id) => nameOf(people, id, viewer), viewerName) : null;
+  const call = inVoice && state.viewing && !strip ? callTiles(roster, viewer, state.cameraTrack !== 'none', (id) => nameOf(people, id, viewer), viewerName, hideNonVideo) : null;
   const staged =
-    view === null && call === null ? null : (
-      <CallView client={client} state={state} tiles={call?.tiles ?? noTiles} hidden={call?.hidden ?? 0} open={call !== null} share={view} />
+    view === null && (!inVoice || strip) ? null : (
+      <CallView
+        client={client}
+        state={state}
+        tiles={call?.tiles ?? noTiles}
+        hidden={call?.hidden ?? 0}
+        open={call !== null}
+        share={view}
+        hideNonVideo={hideNonVideo}
+        onHideNonVideo={() => {
+          const next = !hideNonVideo;
+          setHideNonVideo(next);
+          writeHideNonVideo(next);
+        }}
+        keepSaid={focusShow}
+      />
     );
   // How many cameras are on in the room: everyone else's claims, and the
   // person's own while their track is published.
@@ -478,7 +520,7 @@ export function VoicePanel({
                     <span className="label">Hide video</span>
                   </button>
                 ) : cameraCount > 0 ? (
-                  <button type="button" onClick={() => { client.viewVideo(true); }}>
+                  <button ref={showVideoButton} type="button" onClick={() => { client.viewVideo(true); }}>
                     <Glyph name="camera" />
                     <span className="label">Show video ({cameraCount})</span>
                   </button>

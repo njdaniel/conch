@@ -6,13 +6,14 @@
 // viewVideo).
 //
 // While the room has at most nine people in voice, each gets a tile: their
-// camera, or their initial, their name and "Camera off". The order is the
-// order they joined, with the person themself last, and nothing reorders
-// while someone speaks: the speaking person's tile gets a ring and the word
-// "speaking", and focus stays where it was. The grid is gridOf's. Video is
-// muted, plays inline and starts by itself: a camera has no sound. The
-// person's own tile is mirrored, by a class, and "Hide self-view" hides that
-// tile alone.
+// camera, or their initial, their name and "Camera off" in a compact frame.
+// "Hide non-video participants" leaves out every camera-off tile, the viewer's
+// included, and is remembered in this browser. The order is the order they
+// joined, with the person themself last, and nothing reorders while someone
+// speaks: the speaking person's tile gets a ring and the word "speaking", and
+// focus stays where it was. The grid is gridOf's. Video is muted, plays inline
+// and starts by itself: a camera has no sound. The person's own tile is
+// mirrored, by a class, and "Hide self-view" hides that tile alone.
 //
 // A tile with a camera is a button, "Enlarge {name}'s video": the tile takes
 // the main area, the rest go in a strip, and focus moves to it. Escape, or
@@ -29,8 +30,9 @@
 // While the view is closed the share is drawn alone, as before, and the
 // wrappers around it take no part in the layout.
 //
-// A polite live region says someone else's camera starting or stopping, only
-// while the view is open. The person's own camera is CameraNote's
+// A polite live region says someone else's camera starting or stopping while
+// the view is open. If filtering the last camera closes it, the stopping words
+// stay until their usual timeout. The person's own camera is CameraNote's
 // (VoicePanel.tsx), and is not said twice.
 import { useEffect, useRef, useState, type KeyboardEvent as KeyEvent, type ReactElement, type RefObject } from 'react';
 import { Avatar, Glyph } from '../Icons';
@@ -55,8 +57,9 @@ export interface Tile {
 
 // callTiles is who gets a tile: everyone in voice while there are at most
 // maxTiles, in the order they joined, the viewer last; with more, the people
-// whose cameras are on, as many as fit. hidden is how many cameras did not.
-export function callTiles(roster: readonly Occupant[], viewer: number, ownCamera: boolean, nameOf: (principal: number) => string, viewerName = ''): { readonly tiles: readonly Tile[]; readonly hidden: number } {
+// whose cameras are on, as many as fit. hideNonVideo leaves out every person
+// whose camera is off first. hidden is how many cameras did not fit.
+export function callTiles(roster: readonly Occupant[], viewer: number, ownCamera: boolean, nameOf: (principal: number) => string, viewerName = '', hideNonVideo = false): { readonly tiles: readonly Tile[]; readonly hidden: number } {
   const ordered = [...roster].sort((a, b) => {
     if ((a.principal === viewer) !== (b.principal === viewer)) return a.principal === viewer ? 1 : -1;
     const at = Date.parse(a.joinedAt) - Date.parse(b.joinedAt);
@@ -66,8 +69,9 @@ export function callTiles(roster: readonly Occupant[], viewer: number, ownCamera
     const me = o.principal === viewer;
     return { principal: o.principal, name: me ? (viewerName === '' ? 'You' : viewerName) : nameOf(o.principal), me, camera: me ? ownCamera : o.camera };
   });
-  if (all.length <= maxTiles) return { tiles: all, hidden: 0 };
-  const cameras = all.filter((t) => t.camera);
+  const eligible = hideNonVideo ? all.filter((t) => t.camera) : all;
+  if (eligible.length <= maxTiles) return { tiles: eligible, hidden: 0 };
+  const cameras = eligible.filter((t) => t.camera);
   return { tiles: cameras.slice(0, maxTiles), hidden: Math.max(0, cameras.length - maxTiles) };
 }
 
@@ -111,7 +115,7 @@ function changed(before: Cameras, now: Cameras): string {
   return said.join('. ');
 }
 
-export function CallView({ client, state, tiles, hidden, open, share }: {
+export function CallView({ client, state, tiles, hidden, open, share, hideNonVideo = false, onHideNonVideo = () => undefined, keepSaid = false }: {
   readonly client: VoiceClient;
   readonly state: VoiceState;
   readonly tiles: readonly Tile[];
@@ -120,6 +124,10 @@ export function CallView({ client, state, tiles, hidden, open, share }: {
   readonly open: boolean;
   // The watched share (ShareView), or null.
   readonly share: ReactElement | null;
+  readonly hideNonVideo?: boolean;
+  readonly onHideNonVideo?: () => void;
+  // Keep the last camera-off announcement when filtering closed the view.
+  readonly keepSaid?: boolean;
 }) {
   const narrow = usePhone();
   const [selfHidden, setSelfHidden] = useState(false);
@@ -130,6 +138,7 @@ export function CallView({ client, state, tiles, hidden, open, share }: {
   // while the view is closed, so nothing is said then, nor on opening.
   const [said, setSaid] = useState('');
   const [cameras, setCameras] = useState<Cameras | null>(null);
+  const [wasOpen, setWasOpen] = useState(open);
 
   const hideButton = useRef<HTMLButtonElement>(null);
   const mainFrame = useRef<HTMLElement>(null);
@@ -151,12 +160,18 @@ export function CallView({ client, state, tiles, hidden, open, share }: {
     }
   }
 
-  // Closing the view forgets it all; the next opening starts at the grid.
+  if (wasOpen !== open) {
+    setWasOpen(open);
+    if (open && said !== '') setSaid('');
+  }
+
+  // Closing the view forgets it all; the next opening starts at the grid. An
+  // automatic close after the last camera went keeps that announcement.
   if (!open) {
     if (enlarged !== null) setEnlarged(null);
     if (selfHidden) setSelfHidden(false);
     if (cameras !== null) setCameras(null);
-    if (said !== '') setSaid('');
+    if (said !== '' && !keepSaid) setSaid('');
   } else {
     const now = camerasOf(tiles);
     if (cameras === null) setCameras(now);
@@ -266,6 +281,9 @@ export function CallView({ client, state, tiles, hidden, open, share }: {
                 {watched ? 'Back to the share' : 'Back to grid'}
               </button>
             )}
+            <button type="button" aria-pressed={hideNonVideo} onClick={onHideNonVideo}>
+              Hide non-video participants
+            </button>
             {hasSelf ? (
               <button type="button" aria-pressed={selfHidden} onClick={() => { setSelfHidden(!selfHidden); }}>
                 {selfHidden ? 'Show self-view' : 'Hide self-view'}
@@ -277,7 +295,7 @@ export function CallView({ client, state, tiles, hidden, open, share }: {
           </div>
         </div>
       ) : null}
-      {open ? (
+      {open || said !== '' ? (
         <p role="status" className="vh">
           {said}
         </p>
@@ -399,7 +417,7 @@ function TileView({ client, tile, arrived, speaking, main, frameRef, onEnlarge, 
 
   return (
     <>
-      <figure ref={setFrame} className="call-frame" tabIndex={main ? -1 : undefined} aria-label={main ? enlargedWords(tile) : undefined}>
+      <figure ref={setFrame} className={on ? 'call-frame' : 'call-frame off'} tabIndex={main ? -1 : undefined} aria-label={main ? enlargedWords(tile) : undefined}>
         {on ? (
           <video ref={video} className={me ? 'mirrored' : undefined} aria-label={me ? 'Your camera' : `${tile.name}'s camera`} muted playsInline autoPlay />
         ) : (

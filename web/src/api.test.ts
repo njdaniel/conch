@@ -40,11 +40,13 @@ import {
   signOut,
   setPassword,
   signOutEverywhere,
+  readHideNonVideo,
   readTalkKeyLabel,
   readVoiceMode,
   stopVoiceShare,
   uploadFile,
   whoAmI,
+  writeHideNonVideo,
   writeTalkKeyLabel,
   writeVoiceMode,
 } from './api';
@@ -1656,6 +1658,32 @@ describe('the voice mode kept in the browser', () => {
     vi.spyOn(Storage.prototype, 'setItem').mockImplementation(refuse);
     expect(readVoiceMode()).toBeNull();
     expect(() => { writeVoiceMode('ptt'); }).not.toThrow();
+    vi.restoreAllMocks();
+  });
+});
+
+describe('Hide non-video participants kept in the browser', () => {
+  it('is off by default and reads back either choice', () => {
+    expect(readHideNonVideo()).toBe(false);
+    writeHideNonVideo(true);
+    expect(readHideNonVideo()).toBe(true);
+    writeHideNonVideo(false);
+    expect(readHideNonVideo()).toBe(false);
+  });
+
+  it('reads anything but the on value as off', () => {
+    window.localStorage.setItem('conch.web.voice.hide-non-video.v1', 'perhaps');
+    expect(readHideNonVideo()).toBe(false);
+  });
+
+  it('is tolerated when the storage throws', () => {
+    const refuse = () => {
+      throw new Error('storage is off');
+    };
+    vi.spyOn(Storage.prototype, 'getItem').mockImplementation(refuse);
+    vi.spyOn(Storage.prototype, 'setItem').mockImplementation(refuse);
+    expect(readHideNonVideo()).toBe(false);
+    expect(() => { writeHideNonVideo(true); }).not.toThrow();
     vi.restoreAllMocks();
   });
 });

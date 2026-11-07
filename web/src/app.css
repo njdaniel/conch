@@ -2640,8 +2640,9 @@ label {
 /* The call view (ADR-015, design §7.4, §7.7): on the stage, under its height
    rule, with a watched share inside it when both are open. Its title and
    controls keep their height, and stay in view while the pictures scroll
-   under them. Tiles keep 16:9, and a picture is contained, never cropped.
-   The grid's columns and rows are gridOf's, as classes. */
+   under them. Camera tiles keep 16:9 and camera-off tiles are compact; a
+   picture is contained, never cropped. The grid's columns and rows are
+   gridOf's, as classes. */
 .call-view {
   display: flex;
   flex: 0 1 auto;
@@ -2823,6 +2824,12 @@ label {
   background: #000000;
   border-radius: var(--radius-sm);
   overflow: hidden;
+}
+
+.call-frame.off {
+  height: 6rem;
+  max-height: 6rem;
+  aspect-ratio: auto;
 }
 
 .call-frame video {

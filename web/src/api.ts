@@ -2487,6 +2487,27 @@ export function writeVoiceMode(mode: 'ptt' | 'open'): void {
   }
 }
 
+// Whether the call view hides people whose cameras are off (issue #1487): a
+// per-browser, non-secret preference. Absent, unreadable or anything else is
+// the default, showing everyone.
+const hideNonVideoKey = 'conch.web.voice.hide-non-video.v1';
+
+export function readHideNonVideo(): boolean {
+  try {
+    return platform.credentials.readPreference(hideNonVideoKey) === 'on';
+  } catch {
+    return false;
+  }
+}
+
+export function writeHideNonVideo(hide: boolean): void {
+  try {
+    platform.credentials.writePreference(hideNonVideoKey, hide ? 'on' : 'off');
+  } catch {
+    // Storage can be unavailable; the choice lasts until the page reloads.
+  }
+}
+
 // The talk key's name as the person knows it ("Mouse 4", "Caps Lock"): a
 // non-secret preference for the strip's "hold <key> to talk" (issue #1382).
 const talkKeyLabelKey = 'conch.desktop.voice.talk-key-label.v1';
