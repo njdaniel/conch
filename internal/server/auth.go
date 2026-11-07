@@ -200,7 +200,7 @@ func (s *Server) can(ctx context.Context, caller store.Principal, perm schema.Pe
 func (s *Server) canOrFail(w http.ResponseWriter, r *http.Request, caller store.Principal, perm schema.Permission) (allowed, ok bool) {
 	allowed, err := s.can(r.Context(), caller, perm)
 	if err != nil {
-		slog.ErrorContext(r.Context(), "auth: permission check failed", "principal", caller.ID, "permission", perm, "error", err)
+		slog.ErrorContext(r.Context(), "auth: permission check failed", append(principalAttrs(r.Context(), caller.ID), "permission", perm, "error", err)...)
 		writeError(w, http.StatusInternalServerError, "internal_error", "internal server error")
 		return false, false
 	}
@@ -552,8 +552,12 @@ func (s *Server) guarded(rt route) http.Handler {
 	switch {
 	case !s.cfg.authRequired():
 		return s.previewNeedsAuth(inner)
-	case rt.access == accessExempt:
+	case rt.pattern == "/mcp":
+		// The one inert case: /mcp admits agents only and never reads the
+		// header (design §4.3).
 		return inner
+	case rt.access == accessExempt:
+		return s.previewRefusedExempt(inner)
 	default:
 		return s.previewStep(rt, inner)
 	}

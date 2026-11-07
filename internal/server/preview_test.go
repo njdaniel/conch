@@ -664,3 +664,89 @@ func diffDumps(a, b []string) string {
 	}
 	return strings.Join(out, "\n")
 }
+
+// TestPreviewRefusedOnExemptRoutes: every route that takes no credential
+// refuses the header too, but /mcp, which never reads it. A hook ingest with
+// a valid token and the header posts nothing; each other exempt route is 403
+// preview_read_only, audited without a principal, and changes nothing.
+func TestPreviewRefusedOnExemptRoutes(t *testing.T) {
+	w := newPreviewWorld(t, schema.PresetGroup, "")
+	created := w.do(t, http.MethodPost, "/v1/hooks", w.rootTok,
+		fmt.Sprintf(`{"channel":"general","principal":%d,"label":"preview"}`, w.alice.ID))
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create hook: %d %s", created.Code, created.Body)
+	}
+	token := decodeBody[schema.CreateHookResponse](t, created).Token
+	before := dumpTables(t, w.srv)
+	auditBefore := len(w.audit(t))
+
+	send := func(method, path, body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(method, path, strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set(previewHeader, id(w.cand))
+		rec := httptest.NewRecorder()
+		w.srv.Handler().ServeHTTP(rec, req)
+		return rec
+	}
+	checked := 0
+	for _, rt := range w.srv.routes {
+		if rt.access != accessExempt || rt.pattern == "/mcp" {
+			continue
+		}
+		method := strings.Fields(rt.pattern)[0]
+		var path, body string
+		exp, ok := routeExpectations[rt.pattern]
+		switch {
+		case rt.pattern == "POST /v1/hooks/{token}":
+			path, body = "/v1/hooks/"+token, `{"body":"from a preview"}`
+		case ok:
+			path, body = exp.path, exp.body
+		default:
+			continue // a web asset route has no entry; covered below
+		}
+		checked++
+		rec := send(method, path, body)
+		if got := answerOf(t, rec); got != (answer{403, schema.ErrorCodePreviewReadOnly, ""}) {
+			t.Errorf("%s with the header: %+v", rt.pattern, got)
+		}
+	}
+	if checked < 10 {
+		t.Errorf("only %d exempt routes checked", checked)
+	}
+	if after := dumpTables(t, w.srv); !slices.Equal(before, after) {
+		t.Errorf("an exempt route with the header changed the database:\n%s", diffDumps(before, after))
+	}
+	for _, e := range w.audit(t)[auditBefore:] {
+		if e.Action != "access_denied" || !strings.Contains(e.Detail, schema.ErrorCodePreviewReadOnly) {
+			t.Errorf("unexpected audit row %+v", e)
+		}
+		if strings.Contains(e.Actor, token) || strings.Contains(e.Subject, token) || strings.Contains(e.Detail, token) {
+			t.Errorf("the hook token reached the audit log: %+v", e)
+		}
+	}
+}
+
+// TestPreviewLogsNameTheAdministrator: an error logged under preview names
+// the administrator as the requester, never the member being read as.
+func TestPreviewLogsNameTheAdministrator(t *testing.T) {
+	w := newPreviewWorld(t, schema.PresetPersonal, "")
+	logs := captureServerLogs(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // the store read fails
+	ctx = withPreview(withCaller(ctx, w.cand), previewContext{Actor: w.root, Target: w.cand})
+	req := httptest.NewRequest(http.MethodGet, "/v1/channels", nil).WithContext(ctx)
+	rec := httptest.NewRecorder()
+	if _, ok := w.srv.canOrFail(rec, req, w.cand, schema.PermManageChannels); ok {
+		t.Fatal("the permission read did not fail")
+	}
+	line := logs.String()
+	if !strings.Contains(line, "permission check failed") {
+		t.Fatalf("no error logged: %q", line)
+	}
+	if !strings.Contains(line, "principal="+id(w.root)) || !strings.Contains(line, "preview_as="+id(w.cand)) {
+		t.Errorf("log %q must name principal=%s and preview_as=%s", line, id(w.root), id(w.cand))
+	}
+	if strings.Contains(line, "principal="+id(w.cand)) {
+		t.Errorf("log names the target as the requester: %q", line)
+	}
+}

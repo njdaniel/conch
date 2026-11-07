@@ -244,3 +244,39 @@ func (s *Server) handlePreview(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
+
+// principalAttrs are the slog attributes naming who a request is from. Under
+// preview that is the administrator, with the target as preview_as, never the
+// member being read as (design §12).
+func principalAttrs(ctx context.Context, callerID int64) []any {
+	if pv, ok := previewFrom(ctx); ok {
+		return []any{"principal", pv.Actor.ID, "preview_as", pv.Target.ID}
+	}
+	return []any{"principal", callerID}
+}
+
+// previewRefusedExempt wraps a route that takes no credential (everything
+// exempt but /mcp): with the header present it is 403 preview_read_only
+// before the handler runs, so a hook token or a sign-in link cannot be used
+// under a preview header. There is no caller to name: the audit row's actor
+// is inviteAnonymousAuditActor, the subject the route pattern, and the header's
+// value is never logged.
+func (s *Server) previewRefusedExempt(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if len(r.Header.Values(previewHeader)) == 0 {
+			next.ServeHTTP(w, r)
+			return
+		}
+		subject := r.Pattern
+		if subject == "" {
+			subject = "<unmatched>"
+		}
+		detail := schema.ErrorCodePreviewReadOnly
+		if write, count := s.denials.admit(0, subject+"|"+detail, s.now()); write {
+			if _, err := s.store.AppendAuditEvent(context.WithoutCancel(r.Context()), inviteAnonymousAuditActor, "access_denied", subject, denialDetail(detail, count)); err != nil {
+				slog.ErrorContext(r.Context(), "preview: audit access_denied failed", "error", err)
+			}
+		}
+		writeJSON(w, http.StatusForbidden, schema.Error{Code: schema.ErrorCodePreviewReadOnly, Message: "this route cannot be read in preview"})
+	})
+}
