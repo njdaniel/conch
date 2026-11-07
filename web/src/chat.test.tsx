@@ -234,7 +234,7 @@ describe('loading', () => {
     const socket = await openChat();
     await connect(socket);
     socket.send('not json');
-    socket.send({ ...message(1, 'x'), extra: true });
+    socket.send({ ...message(1, 'x'), schema: 'conch.message.v1' });
     socket.send(message(2, 'elsewhere', {}, 8));
     socket.send(message(3, 'fine'));
     await screen.findByText('fine');

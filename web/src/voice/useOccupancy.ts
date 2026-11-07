@@ -13,6 +13,7 @@ import { useEffect, useRef, useState } from 'react';
 import * as api from '../api';
 import { voiceOccupancyV1, type VoiceOccupancyV1 } from '../schema/voice';
 import { Feed, type FeedStatus } from '../state/feed';
+import { fromServer } from '../schema/validate';
 
 const realClock = {
   setTimeout: (run: () => void, ms: number) => window.setTimeout(run, ms),
@@ -41,7 +42,7 @@ export function parseOccupancy(data: unknown): VoiceOccupancyV1 | null {
   if (typeof data !== 'string') return null;
   try {
     const body: unknown = JSON.parse(data);
-    return voiceOccupancyV1(body).length === 0 ? (body as VoiceOccupancyV1) : null;
+    return fromServer(voiceOccupancyV1)(body).length === 0 ? (body as VoiceOccupancyV1) : null;
   } catch {
     return null;
   }
