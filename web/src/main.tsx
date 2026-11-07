@@ -2,6 +2,7 @@ import { Fragment, StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 import { App } from './App';
 import { platform } from './platform';
+import { applyAppearance, defaultAppearance } from './appearance';
 import './app.css';
 
 const root = document.getElementById('root');
@@ -18,6 +19,7 @@ function Client() {
 
 const Shell = platform.Shell ?? Fragment;
 
+applyAppearance(defaultAppearance);
 createRoot(root).render(
   <StrictMode>
     <Shell>

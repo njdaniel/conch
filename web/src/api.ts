@@ -214,6 +214,7 @@ import type { FeedSocket, OpenSocket, SocketEvents } from './state/feed';
 import { forget as forgetDiagnostics, record } from './diagnostics';
 import { visitOf } from './guestName';
 import { keyboardKeys, mouseKeys } from './platform/desktop/evdev';
+import { appearanceAccents, appearanceDensities, appearanceThemes, defaultAppearance, type AppearancePreferences } from './appearance';
 
 // Why a call failed. unauthorized is a 401: the server does not accept the
 // credential. network means no answer at all. invalid is any other reply
@@ -2507,6 +2508,31 @@ export function readNotificationPreferences(origin: string, account: number): No
 export function writeNotificationPreferences(origin: string, account: number, preferences: NotificationPreferences): void {
   try {
     platform.credentials.writePreference(notificationPreferencesKey(origin, account), JSON.stringify(preferences));
+  } catch {
+    // Storage can be unavailable; the in-memory preference still applies.
+  }
+}
+
+const appearancePreferencesKey = (origin: string, account: number) => `conch.web.appearance.v1.${origin}.${String(account)}`;
+
+export function readAppearancePreferences(origin: string, account: number): AppearancePreferences {
+  try {
+    const raw: unknown = JSON.parse(platform.credentials.readPreference(appearancePreferencesKey(origin, account)) ?? 'null');
+    if (typeof raw !== 'object' || raw === null) return defaultAppearance;
+    const value = raw as { theme?: unknown; accent?: unknown; density?: unknown };
+    return {
+      theme: typeof value.theme === 'string' && (appearanceThemes as readonly string[]).includes(value.theme) ? value.theme as AppearancePreferences['theme'] : defaultAppearance.theme,
+      accent: typeof value.accent === 'string' && (appearanceAccents as readonly string[]).includes(value.accent) ? value.accent as AppearancePreferences['accent'] : defaultAppearance.accent,
+      density: typeof value.density === 'string' && (appearanceDensities as readonly string[]).includes(value.density) ? value.density as AppearancePreferences['density'] : defaultAppearance.density,
+    };
+  } catch {
+    return defaultAppearance;
+  }
+}
+
+export function writeAppearancePreferences(origin: string, account: number, preferences: AppearancePreferences): void {
+  try {
+    platform.credentials.writePreference(appearancePreferencesKey(origin, account), JSON.stringify(preferences));
   } catch {
     // Storage can be unavailable; the in-memory preference still applies.
   }

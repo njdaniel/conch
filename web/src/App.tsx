@@ -76,6 +76,8 @@ import { leaveVoiceFirst, PreviewEntry } from './preview/entry';
 import { PreviewControls, PreviewConversation, PreviewPanel, PreviewVoice } from './preview/PreviewParts';
 import { usePreview } from './preview/usePreview';
 import type { ServerMemberV1 } from './schema/principal';
+import { AppearanceSettings } from './AppearanceSettings';
+import { applyAppearance, defaultAppearance, type AppearancePreferences } from './appearance';
 
 const noUnread: ReadonlyMap<string, number> = new Map();
 const checkingAudience = 'Checking who this draft goes to…';
@@ -508,6 +510,8 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
   const [searchOpen, setSearchOpen] = useState(false);
   // Asks from the first-run panel for the New channel form (issue #1032).
   const [createAsks, setCreateAsks] = useState(0);
+  // The quick switcher asked to show a public channel's directory row (issue #1492).
+  const [browseAsk, setBrowseAsk] = useState<{ readonly n: number; readonly name: string } | undefined>(undefined);
   // A channel's ⋯ menu (issue #1135) or Add a person asked for the invite
   // panel: a count, so asking twice opens it twice.
   const [inviteAsk, setInviteAsk] = useState<{ readonly n: number } | undefined>(undefined);
@@ -778,6 +782,17 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
   }, [scrollTo, detailOpen, searchOpen]);
 
   const principalId = principal?.id ?? null;
+  const [appearance, setAppearance] = useState<AppearancePreferences>(defaultAppearance);
+  useLayoutEffect(() => {
+    const next = principalId === null ? defaultAppearance : api.readAppearancePreferences(origin, principalId);
+    applyAppearance(next);
+    setAppearance(next);
+  }, [origin, principalId]);
+  const changeAppearance = useCallback((next: AppearancePreferences) => {
+    applyAppearance(next);
+    setAppearance(next);
+    if (principalId !== null) api.writeAppearancePreferences(origin, principalId, next);
+  }, [origin, principalId]);
   const principalNow = useRef(principalId);
   principalNow.current = principalId;
   const nextRequest = useRef(1);
@@ -1708,6 +1723,14 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
               })}
           channels={channels}
           unread={unread}
+          directoryTick={directory.tick + permissionsTick}
+          {...(auth.principal.kind === 'human' && visit === null
+            ? {
+                onBrowse: (name: string) => {
+                  setBrowseAsk((ask) => ({ n: (ask?.n ?? 0) + 1, name }));
+                },
+              }
+            : {})}
           occupancy={occupancy}
           voiceNames={voiceNames}
           notificationCenter={<NotificationCenter alerts={notifications.alerts} onOpen={notifications.openAlert} onClear={notifications.clearAlerts} />}
@@ -1736,6 +1759,7 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
               ) : null}
             </>
           }
+          appearance={<AppearanceSettings value={appearance} onChange={changeAppearance} />}
           account={
             <>
               <div className="standing">
@@ -1902,6 +1926,7 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
                   onLeft={leftChannel}
                   onOpen={onOpen}
                   onUnauthorized={onUnauthorized}
+                  {...(browseAsk === undefined ? {} : { reveal: browseAsk })}
                 />
                 {canDo(auth.principal, 'create_public_channels') || canDo(auth.principal, 'create_private_channels') ? (
                   <CreateChannel
@@ -1957,6 +1982,7 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
                 <div className="conversation-body" hidden={agents.state.detail !== null || searchOpen}>
               <Conversation
                 key={channelId}
+                density={appearance.density}
                 historyBounded={agents.membersFor === channelId && (agents.members.find((m) => m.principal_id === auth.principal.id)?.history_after ?? 0) > 0}
                 channelId={channelId}
                 channel={selected}
