@@ -27,6 +27,7 @@ class StubRoom implements Room {
   calls: string[] = [];
   watching: boolean[] = [];
   sink: ShareSink | null = null;
+  shareAudio = true;
   connect = (_url: string, _token: string, _room: string, publish: boolean, events: RoomEvents): Promise<void> => {
     this.publish = publish;
     this.events = events;
@@ -49,7 +50,7 @@ class StubRoom implements Room {
   };
   pickScreen = (): Promise<Captured> => {
     this.calls.push('pick');
-    return Promise.resolve({ audio: true });
+    return Promise.resolve({ audio: this.shareAudio });
   };
   publishScreen = (): Promise<void> => {
     this.calls.push('publish');
@@ -102,7 +103,7 @@ const presence = (sharing: number | null, audio = false, cameras: readonly numbe
   available: true,
   rooms: [
     {
-      participants: [7, 8].map((id) => ({
+      participants: [7, 8, 9].map((id) => ({
         principal_id: id,
         can_publish: true,
         transmitting: false,
@@ -117,6 +118,7 @@ const presence = (sharing: number | null, audio = false, cameras: readonly numbe
 const people: ReadonlyMap<number, Person> = new Map([
   [7, { name: 'ada', kind: 'human' }],
   [8, { name: 'bea', kind: 'human' }],
+  [9, { name: 'carol', kind: 'human' }],
 ]);
 
 const chrome: ShareFeatures = { canShare: true, chromium: true, platform: 'linux' };
@@ -216,15 +218,15 @@ describe('watch only', () => {
 });
 
 describe('watching', () => {
-  async function watching(t = setup()) {
+  async function watching(t = setup(), audio = true) {
     t.client.join('general', { watchOnly: true });
     await act(settle);
-    t.seen(presence(8, true));
+    t.seen(presence(8, audio));
     fireEvent.click(await within(voice()).findByRole('button', { name: 'Watch' }));
     return t;
   }
 
-  it('subscribes on Watch and plays into an inline video and an audio element of its own', async () => {
+  it('subscribes on Watch and plays into an inline video and an unmuted audio element of its own', async () => {
     const t = await watching();
     const view = await screen.findByRole('region', { name: 'Shared screen' });
     expect(view.textContent).toContain('bea is sharing, with sound');
@@ -233,6 +235,8 @@ describe('watching', () => {
     expect(sink?.video.playsInline).toBe(true);
     expect(sink?.video.muted).toBe(true);
     expect(sink?.audio.tagName).toBe('AUDIO');
+    expect(sink?.audio.muted).toBe(false);
+    expect(within(view).getByRole('button', { name: 'Mute share', pressed: false })).toBeTruthy();
     expect(within(view).getByText('Waiting for the picture')).toBeTruthy();
     act(() => {
       t.rooms[0]?.events?.onShareTracks({ video: true, audio: false });
@@ -244,6 +248,7 @@ describe('watching', () => {
     const t = await watching();
     const view = await screen.findByRole('region', { name: 'Shared screen' });
     const audio = t.rooms[0]?.sink?.audio;
+    expect(audio?.muted).toBe(false);
     fireEvent.change(within(view).getByLabelText('Share volume'), { target: { value: '0.4' } });
     expect(audio?.volume).toBeCloseTo(0.4);
     fireEvent.click(within(view).getByRole('button', { name: 'Mute share' }));
@@ -256,6 +261,31 @@ describe('watching', () => {
       t.client.setDeafened(true);
     });
     expect(audio?.muted).toBe(true);
+  });
+
+  it('keeps the viewer volume when another share starts and when watching again', async () => {
+    const t = await watching();
+    const view = await screen.findByRole('region', { name: 'Shared screen' });
+    fireEvent.change(within(view).getByLabelText('Share volume'), { target: { value: '0.35' } });
+    t.seen(presence(9, true));
+    const next = await screen.findByRole('region', { name: 'Shared screen' });
+    expect(next.textContent).toContain('carol is sharing, with sound');
+    expect(t.rooms[0]?.sink?.audio.muted).toBe(false);
+    expect(t.rooms[0]?.sink?.audio.volume).toBeCloseTo(0.35);
+    expect(within(next).getByLabelText<HTMLInputElement>('Share volume').value).toBe('0.35');
+    fireEvent.click(within(next).getByRole('button', { name: 'Stop watching' }));
+    fireEvent.click(within(voice()).getByRole('button', { name: 'Watch' }));
+    const reopened = await screen.findByRole('region', { name: 'Shared screen' });
+    expect(t.rooms[0]?.sink?.audio.muted).toBe(false);
+    expect(t.rooms[0]?.sink?.audio.volume).toBeCloseTo(0.35);
+    expect(within(reopened).getByLabelText<HTMLInputElement>('Share volume').value).toBe('0.35');
+  });
+
+  it('keeps the plain mute and volume controls for a share without sound', async () => {
+    await watching(setup(), false);
+    const view = await screen.findByRole('region', { name: 'Shared screen' });
+    expect(within(view).getByRole('button', { name: 'Mute share' })).toBeTruthy();
+    expect(within(view).getByLabelText('Share volume')).toBeTruthy();
   });
 
   it('offers a tap to play the sound when the browser will not start it by itself', async () => {
@@ -347,10 +377,28 @@ describe('sharing', () => {
     fireEvent.click(within(voice()).getByRole('button', { name: 'Share screen' }));
     await act(settle);
     expect(t.rooms[0]?.calls).toEqual(['pick', 'publish']);
-    expect(await within(voice()).findByText('You are sharing your screen with its sound.')).toBeTruthy();
+    expect(await within(voice()).findByText('You are sharing your screen with sound.')).toBeTruthy();
     fireEvent.click(within(voice()).getByRole('button', { name: 'Stop sharing' }));
     await act(settle);
     expect(await within(voice()).findByText('You stopped sharing.')).toBeTruthy();
+  });
+
+  it('tells the sharer when the capture has no sound track, in words for the browser', async () => {
+    for (const [features, text] of [
+      [chrome, "Sharing without sound. To share sound, share a browser tab and keep 'Share tab audio' on."],
+      [{ canShare: true, chromium: false, platform: 'mac' }, "Sharing without sound. This browser can't share sound."],
+    ] as const) {
+      const t = setup([], features);
+      t.client.join('general');
+      await act(settle);
+      const room = t.rooms[0];
+      if (room === undefined) throw new Error('no room');
+      room.shareAudio = false;
+      fireEvent.click(within(voice()).getByRole('button', { name: 'Share screen' }));
+      await act(settle);
+      expect(await within(voice()).findByText(text)).toBeTruthy();
+      cleanup();
+    }
   });
 
   // Issue #554: there is no choice of what a share is for. Voice options asks
@@ -397,7 +445,7 @@ describe('sharing', () => {
       await act(settle);
       fireEvent.click(await within(voice()).findByRole('button', { name: 'Share screen' }));
       await act(settle);
-      expect(await within(voice()).findByText('You are sharing your screen with its sound.')).toBeTruthy();
+      expect(await within(voice()).findByText('You are sharing your screen with sound.')).toBeTruthy();
       t.seen(presence(7));
       t.seen({ ...presence(null), share_ended: { reason, started_at: '2026-10-16T00:00:00.000Z', ended_at: '2026-10-16T00:01:00.000Z' } });
       await act(settle);
@@ -418,7 +466,7 @@ describe('sharing', () => {
       await act(settle);
       fireEvent.click(await within(voice()).findByRole('button', { name: 'Share screen' }));
       await act(settle);
-      expect(await within(voice()).findByText('You are sharing your screen with its sound.')).toBeTruthy();
+      expect(await within(voice()).findByText('You are sharing your screen with sound.')).toBeTruthy();
       t.seen(presence(7));
       t.seen(renewed);
       expect(await within(voice()).findByText('The voice room was renewed. Resuming your share…')).toBeTruthy();
