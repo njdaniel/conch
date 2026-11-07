@@ -1879,9 +1879,11 @@ label {
   padding: 0 0.3rem;
 }
 
-/* On a phone it is one small button; the toolbar opens above the box on
-   demand, over the log, and takes no room while closed. */
-@media (max-width: 699px) {
+/* Where the row is too narrow to hold the toolbar beside the text (a phone, a
+   tablet, a window at 200%: it would squeeze the textarea to nothing), it is
+   one small button and the toolbar opens above the box on demand, over the
+   log, and takes no room while closed. */
+@media (max-width: 1199px) {
   .format-toggle {
     display: inline-flex;
     align-items: center;
