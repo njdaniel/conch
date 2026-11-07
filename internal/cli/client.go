@@ -462,7 +462,7 @@ func (c *Client) resolve(parts ...string) *url.URL {
 
 func (c *Client) decodeError(resp *http.Response) error {
 	if resp.StatusCode >= 300 && resp.StatusCode < 400 {
-		return fmt.Errorf("server redirected to %s (HTTP %d); set --server to the final URL", safeLine(resp.Header.Get("Location")), resp.StatusCode)
+		return &redirectError{status: resp.StatusCode, text: fmt.Sprintf("server redirected to %s (HTTP %d); set --server to the final URL", safeLine(resp.Header.Get("Location")), resp.StatusCode)}
 	}
 	var serverError schema.Error
 	decoded := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&serverError) == nil
@@ -501,6 +501,27 @@ func retryAfterSeconds(header string, fallback int) int {
 		n = v
 	}
 	return max(0, min(n, maxRetryAfterSeconds))
+}
+
+// redirectError is a server's redirect. Its text names the Location the server
+// sent, which a command that prints only its own words must not show; status
+// lets it say what happened without that.
+type redirectError struct {
+	status int
+	text   string
+}
+
+func (e *redirectError) Error() string { return e.text }
+
+// noContent is the out of a call whose only good answer is 204, such as a
+// stop: any other 2xx (a 200 with a page, a 202) is not that answer.
+type noContent struct{}
+
+// unexpectedStatusError is a 2xx that was not the 204 a noContent call needs.
+type unexpectedStatusError struct{ status int }
+
+func (e *unexpectedStatusError) Error() string {
+	return fmt.Sprintf("cli: unexpected answer from the server (HTTP %d); expected 204", e.status)
 }
 
 // statusError is a refusal with no error document, such as the mux's 404 for
@@ -602,6 +623,12 @@ func (c *Client) roundTripOnce(ctx context.Context, what, method string, endpoin
 		return c.decodeError(resp)
 	}
 	if out == nil {
+		return nil
+	}
+	if _, ok := out.(*noContent); ok {
+		if resp.StatusCode != http.StatusNoContent {
+			return &unexpectedStatusError{status: resp.StatusCode}
+		}
 		return nil
 	}
 	if _, ok := out.(interface{ emptyOK() }); ok && resp.StatusCode == http.StatusNoContent {
@@ -807,7 +834,7 @@ func (c *Client) StopVoiceShare(ctx context.Context, channel string, principalID
 	query := endpoint.Query()
 	query.Set(schema.VoiceSharePrincipalParam, strconv.FormatInt(principalID, 10))
 	endpoint.RawQuery = query.Encode()
-	return c.roundTrip(ctx, "stop voice share", http.MethodDelete, endpoint, nil, nil)
+	return c.roundTrip(ctx, "stop voice share", http.MethodDelete, endpoint, nil, &noContent{})
 }
 
 // StopVoiceCamera turns off principalID's camera in channel's voice room. It
@@ -819,7 +846,7 @@ func (c *Client) StopVoiceCamera(ctx context.Context, channel string, principalI
 	query := endpoint.Query()
 	query.Set(schema.VoiceCameraPrincipalParam, strconv.FormatInt(principalID, 10))
 	endpoint.RawQuery = query.Encode()
-	return c.roundTrip(ctx, "stop voice camera", http.MethodDelete, endpoint, nil, nil)
+	return c.roundTrip(ctx, "stop voice camera", http.MethodDelete, endpoint, nil, &noContent{})
 }
 
 // VoiceOccupancy returns one snapshot of how many people are in the voice of

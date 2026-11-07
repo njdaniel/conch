@@ -1478,7 +1478,7 @@ func runVoiceCameraStop(ctx context.Context, args []string, _, stderr io.Writer)
 		return err
 	}
 	if err := client.StopVoiceCamera(ctx, positional[0], id); err != nil {
-		return voiceFailure(refused(err, cameraStopRefusals))
+		return stopFailure(err, cameraStopRefusals)
 	}
 	return nil
 }

@@ -182,11 +182,11 @@ func TestVoiceShareStop(t *testing.T) {
 		{name: "bad request", args: []string{"@", "general", "7"}, status: http.StatusBadRequest,
 			body: apiError("invalid_request", ""), wantReq: req, wantErr: "the server did not accept the request"},
 		{name: "wrong shape of refusal", args: []string{"@", "general", "7"}, status: http.StatusForbidden, raw: `["not","an","error"]`,
-			wantReq: req, wantErr: "server returned"},
+			wantReq: req, wantErr: "the server refused this (HTTP"},
 		{name: "html where a refusal should be", args: []string{"@", "general", "7"}, status: http.StatusNotFound, raw: "<html>\x1b[31mnope</html>",
-			wantReq: req, wantErr: "server returned"},
+			wantReq: req, wantErr: "the server refused this (HTTP"},
 		{name: "oversize refusal body", args: []string{"@", "general", "7"}, status: http.StatusInternalServerError, raw: strings.Repeat("x", 4<<20),
-			wantReq: req, wantErr: "server returned"},
+			wantReq: req, wantErr: "the server refused this (HTTP"},
 		{name: "person is required", args: []string{"@", "general"}, wantErr: "expected <channel> <person-id>"},
 		{name: "no arguments", args: []string{"@"}, wantErr: "expected <channel> <person-id>"},
 		{name: "too many", args: []string{"@", "general", "7", "8"}, wantErr: "expected <channel> <person-id>"},
@@ -275,6 +275,65 @@ func TestVoiceShareSubcommands(t *testing.T) {
 		_, _, err := runCLI(t, "", tt.args...)
 		if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
 			t.Errorf("%v: err = %v, want %q", tt.args, err, tt.wantErr)
+		}
+	}
+}
+
+// A stop prints only the client's words for an answer that carries no error
+// document: a redirect's Location, a custom reason phrase and a 2xx that is
+// not the 204 a stop gets are the server's, and none reaches the line.
+func TestVoiceStopHostileAnswers(t *testing.T) {
+	const wordy = "https://pwned.example/hostile-words"
+	tests := []struct {
+		name    string
+		answer  func(w http.ResponseWriter, r *http.Request)
+		wantErr string
+	}{
+		{"redirect with a wordy Location", func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Location", wordy)
+			w.WriteHeader(http.StatusFound)
+		}, "the server redirected the request (HTTP 302)"},
+		{"custom reason phrase on a body that is not an error document", func(w http.ResponseWriter, _ *http.Request) {
+			conn, buf, err := w.(http.Hijacker).Hijack()
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			defer func() { _ = conn.Close() }()
+			_, _ = buf.WriteString("HTTP/1.1 403 Pwned By Hostile Server\r\nContent-Length: 6\r\nConnection: close\r\n\r\nnot-js")
+			_ = buf.Flush()
+		}, "the server refused this (HTTP 403)"},
+		{"200 with an html page", func(w http.ResponseWriter, _ *http.Request) {
+			_, _ = w.Write([]byte("<html>hostile words</html>"))
+		}, "unexpectedly (HTTP 200)"},
+		{"202 accepted", func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusAccepted)
+		}, "unexpectedly (HTTP 202)"},
+		{"200 with nothing", func(w http.ResponseWriter, _ *http.Request) {}, "unexpectedly (HTTP 200)"},
+	}
+	for _, kind := range []string{"share", "camera"} {
+		for _, tt := range tests {
+			t.Run(kind+"/"+tt.name, func(t *testing.T) {
+				isolateConfig(t)
+				server := httptest.NewServer(http.HandlerFunc(tt.answer))
+				defer server.Close()
+				stdout, _, err := runCLI(t, "", "voice", kind, "stop", "--server", server.URL, "general", "7")
+				if err == nil {
+					t.Fatalf("succeeded, want %q", tt.wantErr)
+				}
+				line := ErrorLine(err)
+				if !strings.Contains(line, tt.wantErr) {
+					t.Errorf("error %q lacks %q", line, tt.wantErr)
+				}
+				for _, bad := range []string{"pwned", "Pwned", "hostile", "Hostile"} {
+					if strings.Contains(line, bad) {
+						t.Errorf("error %q carries the server's words (%q)", line, bad)
+					}
+				}
+				if strings.Contains(line, "\n") || stdout != "" {
+					t.Errorf("error %q stdout %q: want one line and nothing printed", line, stdout)
+				}
+			})
 		}
 	}
 }

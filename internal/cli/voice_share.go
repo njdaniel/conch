@@ -41,6 +41,31 @@ var shareStopRefusals = refusalLines{
 	schema.ErrorCodePermissionDenied: "only a manager of the channel, or an operator, may stop someone else's share",
 }
 
+// stopFailure is a stop command's refusal as the one line it prints, in the
+// client's words only. A server refusal is worded by lines or the common
+// sentences; the answers that carry no error document (a redirect, whose
+// Location is the server's, a refusal whose reason phrase is the server's, a
+// 2xx that is not the 204 a stop gets) are told by their numeric status alone.
+func stopFailure(err error, lines refusalLines) error {
+	var (
+		redirect   *redirectError
+		status     *statusError
+		unexpected *unexpectedStatusError
+	)
+	var line string
+	switch {
+	case errors.As(err, &redirect):
+		line = fmt.Sprintf("the server redirected the request (HTTP %d); set --server to the final URL", redirect.status)
+	case errors.As(err, &status):
+		line = fmt.Sprintf("the server refused this (HTTP %d)", status.status)
+	case errors.As(err, &unexpected):
+		line = fmt.Sprintf("the server answered unexpectedly (HTTP %d); the stop may not have happened", unexpected.status)
+	default:
+		return voiceFailure(refused(err, lines))
+	}
+	return &serverText{msg: line, err: err}
+}
+
 func runVoiceShare(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	if len(args) == 0 {
 		return errors.New("cli: voice share requires a subcommand (stop)")
@@ -81,7 +106,7 @@ func runVoiceShareStop(ctx context.Context, args []string, _, stderr io.Writer) 
 		return err
 	}
 	if err := client.StopVoiceShare(ctx, positional[0], id); err != nil {
-		return voiceFailure(refused(err, shareStopRefusals))
+		return stopFailure(err, shareStopRefusals)
 	}
 	return nil
 }
