@@ -53,7 +53,8 @@ func (s *Server) mcpHandler() http.Handler {
 		// that guard refused every agent. Rebinding lets a web page reach a
 		// local server without credentials; every request here has already
 		// presented a bearer credential (below, in every auth mode), which
-		// such a page does not hold.
+		// such a page does not hold: /mcp honours no cookie or session, and
+		// no CORS header lets a page send one. Revisit this if either changes.
 		DisableLocalhostProtection: true,
 	})
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
