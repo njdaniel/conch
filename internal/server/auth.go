@@ -103,6 +103,20 @@ type route struct {
 	// route was an operator route ("operator role required", the default)
 	// or an owner route ("owner required").
 	memberRefusal string
+	// previewable admits the Conch-Preview-As header (issue #1515, design
+	// docs/design/permission-preview.md §4.3). Off for every route but the
+	// short list of reads TestPreviewableRoutesAreReads pins.
+	previewable bool
+}
+
+// asPreviewable marks rt as one of the reads an administrator may make as a
+// member, with the header. It is the whole of preview's read-only argument:
+// a route without it answers the header 403 preview_read_only. (A Go struct
+// cannot have a field and a method of one name, so the builder is not
+// called previewable.)
+func (rt route) asPreviewable() route {
+	rt.previewable = true
+	return rt
 }
 
 // needs makes rt an accessPermission route needing perm. It is a method on
@@ -158,6 +172,11 @@ func credentialIDFrom(ctx context.Context) (int64, bool) {
 // authenticated caller as "principal:<id>", or "system" when there is no
 // caller (AuthOff).
 func auditActor(ctx context.Context) string {
+	// Under preview the caller in ctx is the member being read as; the
+	// audit actor is always the administrator who asked (design §4.2).
+	if pv, ok := previewFrom(ctx); ok {
+		return fmt.Sprintf("principal:%d", pv.Actor.ID)
+	}
 	if caller, ok := callerFrom(ctx); ok {
 		return fmt.Sprintf("principal:%d", caller.ID)
 	}
@@ -525,6 +544,21 @@ func (s *Server) guard(rt route) http.Handler {
 	}
 }
 
+// guarded is guard with the preview step (design §4.2) around it: the
+// request is authenticated, then, whenever Conch-Preview-As is present, the
+// step runs before the class check. Under AuthOff the header is refused.
+func (s *Server) guarded(rt route) http.Handler {
+	inner := s.guard(rt)
+	switch {
+	case !s.cfg.authRequired():
+		return s.previewNeedsAuth(inner)
+	case rt.access == accessExempt:
+		return inner
+	default:
+		return s.previewStep(rt, inner)
+	}
+}
+
 // denyForbidden writes a 403 with the given error code and appends an
 // access_denied audit event: actor principal:<id>, subject the route pattern,
 // detail the error code. The event carries no request content or credential
@@ -538,6 +572,19 @@ func (s *Server) denyForbidden(w http.ResponseWriter, r *http.Request, caller st
 // permission field and in the audit detail as "permission=<name>". An empty
 // perm gives denyForbidden's answer and audit row, byte for byte.
 func (s *Server) denyForbiddenFor(w http.ResponseWriter, r *http.Request, caller store.Principal, code, message string, perm schema.Permission) {
+	// Under preview the caller is the member being read as and the actor is
+	// the administrator (design §4.2); the target is named in the detail.
+	actor, extra := caller.ID, ""
+	if pv, ok := previewFrom(r.Context()); ok {
+		actor, extra = pv.Actor.ID, fmt.Sprintf("preview_as=%d", pv.Target.ID)
+	}
+	s.denyForbiddenAudited(w, r, actor, code, message, perm, extra)
+}
+
+// denyForbiddenAudited is denyForbiddenFor with the actor named and an
+// extra detail word (preview_as=<id>), for the preview step, which refuses
+// before the caller is swapped.
+func (s *Server) denyForbiddenAudited(w http.ResponseWriter, r *http.Request, actorID int64, code, message string, perm schema.Permission, extra string) {
 	// The client may already be gone; the denial must still be recorded.
 	ctx := context.WithoutCancel(r.Context())
 	// The mux sets r.Pattern on every dispatched request. Never fall back to
@@ -551,17 +598,23 @@ func (s *Server) denyForbiddenFor(w http.ResponseWriter, r *http.Request, caller
 	if perm != "" {
 		detail += " permission=" + string(perm)
 	}
+	// The thinning key leaves the preview target out, so varying the id of a
+	// refused request cannot defeat the coalescer and grow the log.
+	key := subject + "|" + detail
+	if extra != "" {
+		detail += " " + extra
+	}
 	body := schema.Error{Code: code, Message: message, Permission: perm}
 	// Repeated identical denials from one principal are thinned out, so a
 	// caller cannot grow the audit log with every refused request; the first
 	// of each kind is written at once (issue #80, denialCoalescer).
-	write, count := s.denials.admit(caller.ID, subject+"|"+detail, s.now())
+	write, count := s.denials.admit(actorID, key, s.now())
 	if !write {
 		writeJSON(w, http.StatusForbidden, body)
 		return
 	}
-	if _, err := s.store.AppendAuditEvent(ctx, fmt.Sprintf("principal:%d", caller.ID), "access_denied", subject, denialDetail(detail, count)); err != nil {
-		slog.ErrorContext(ctx, "auth: audit access_denied failed", "principal", caller.ID, "error", err)
+	if _, err := s.store.AppendAuditEvent(ctx, fmt.Sprintf("principal:%d", actorID), "access_denied", subject, denialDetail(detail, count)); err != nil {
+		slog.ErrorContext(ctx, "auth: audit access_denied failed", "principal", actorID, "error", err)
 	}
 	writeJSON(w, http.StatusForbidden, body)
 }

@@ -176,14 +176,29 @@ type routeExpectation struct {
 	allowed int
 }
 
+// routePreviewable is the independently stated list of the routes that admit
+// the Conch-Preview-As header (issue #1515, design §4.3): five reads, and no
+// other. TestRouteTable pins route.previewable against it, and
+// TestPreviewableRoutesAreReads holds the same list.
+var routePreviewable = map[string]bool{
+	"GET /v1/preview":                    true,
+	"GET /v1/channels":                   true,
+	"GET /v1/directory/channels":         true,
+	"GET /v1/directory/members":          true,
+	"GET /v1/channels/{channel}/members": true,
+}
+
 // routeExpectations must name every pattern in the route table. {id} is the
 // operator's principal id (1) so operator-or-self is exercised from a member.
 var routeExpectations = map[string]routeExpectation{
-	"GET /healthz":      {classExempt, "/healthz", "", 200},
-	"GET /v0/ws":        {classAuth, "/v0/ws", "", 400},
-	"GET /v1/ws":        {classAuth, "/v1/ws", "", 400},
-	"GET /v2/ws":        {classAuth, "/v2/ws", "", 400},
-	"GET /v1/whoami":    {classAuth, "/v1/whoami", "", 200},
+	"GET /healthz":   {classExempt, "/healthz", "", 200},
+	"GET /v0/ws":     {classAuth, "/v0/ws", "", 400},
+	"GET /v1/ws":     {classAuth, "/v1/ws", "", 400},
+	"GET /v2/ws":     {classAuth, "/v2/ws", "", 400},
+	"GET /v1/whoami": {classAuth, "/v1/whoami", "", 200},
+	// Preview as member (issue #1515). Without the header it answers 400
+	// "preview target required"; the status is the same with AuthOff.
+	"GET /v1/preview":   {classAuth, "/v1/preview", "", 400},
 	"POST /v0/channels": {classPerm, "/v0/channels", `{}`, 400},
 	// The permissions document (issue #1015): any operator reads it; a PUT
 	// of nothing is refused as malformed.
@@ -576,6 +591,9 @@ func TestRouteTable(t *testing.T) {
 		}
 		if rt.perm != perm {
 			t.Errorf("route %q needs %q, expectation says %q", rt.pattern, rt.perm, perm)
+		}
+		if rt.previewable != routePreviewable[rt.pattern] {
+			t.Errorf("route %q previewable = %t, expectation says %t", rt.pattern, rt.previewable, routePreviewable[rt.pattern])
 		}
 	}
 	for p := range routePermissions {
