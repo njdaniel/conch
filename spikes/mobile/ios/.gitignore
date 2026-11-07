@@ -1,0 +1,15 @@
+node_modules/
+npm-debug.log
+.metro-health-check*
+*.jsbundle
+
+# Xcode and CocoaPods (Podfile.lock and Gemfile.lock are tracked)
+build/
+DerivedData/
+xcuserdata/
+*.xcuserstate
+*.hmap
+*.ipa
+**/Pods/
+/vendor/bundle/
+.DS_Store
