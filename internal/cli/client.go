@@ -260,9 +260,19 @@ func (c *Client) SendMessage(ctx context.Context, channel string, authorID int64
 
 // ListChannels returns every channel on the server, ordered by id.
 func (c *Client) ListChannels(ctx context.Context) (schema.ListChannelsResponse, error) {
+	return c.listChannels(ctx, 0)
+}
+
+func (c *Client) listChannels(ctx context.Context, previewAs int64) (schema.ListChannelsResponse, error) {
 	endpoint := c.resolve("v1", "channels")
 	var result channelListDoc
-	if err := c.roundTrip(ctx, "list channels", http.MethodGet, endpoint, nil, &result); err != nil {
+	var err error
+	if previewAs > 0 {
+		err = c.roundTripPreview(ctx, "list channels", endpoint, &result, previewAs)
+	} else {
+		err = c.roundTrip(ctx, "list channels", http.MethodGet, endpoint, nil, &result)
+	}
+	if err != nil {
 		return schema.ListChannelsResponse{}, err
 	}
 	return result.ListChannelsResponse, nil
@@ -562,6 +572,14 @@ func (e *ServerError) Error() string {
 // it is set, has proved the password again: the refusal comes before the
 // route does anything, so the second send is the first that acts.
 func (c *Client) roundTrip(ctx context.Context, what, method string, endpoint *url.URL, in, out any) error {
+	return c.roundTripWithPreview(ctx, what, method, endpoint, in, out, 0)
+}
+
+func (c *Client) roundTripPreview(ctx context.Context, what string, endpoint *url.URL, out any, memberID int64) error {
+	return c.roundTripWithPreview(ctx, what, http.MethodGet, endpoint, nil, out, memberID)
+}
+
+func (c *Client) roundTripWithPreview(ctx context.Context, what, method string, endpoint *url.URL, in, out any, memberID int64) error {
 	var encoded []byte
 	if in != nil {
 		var err error
@@ -569,18 +587,18 @@ func (c *Client) roundTrip(ctx context.Context, what, method string, endpoint *u
 			return fmt.Errorf("cli: encode %s request: %w", what, err)
 		}
 	}
-	err := c.roundTripOnce(ctx, what, method, endpoint, encoded, in != nil, out)
+	err := c.roundTripOncePreview(ctx, what, method, endpoint, encoded, in != nil, out, memberID)
 	if c.reauth == nil || !IsServerCode(err, schema.ErrorCodeReauthRequired) {
 		return err
 	}
 	if err := c.reauth(ctx); err != nil {
 		return err
 	}
-	return c.roundTripOnce(ctx, what, method, endpoint, encoded, in != nil, out)
+	return c.roundTripOncePreview(ctx, what, method, endpoint, encoded, in != nil, out, memberID)
 }
 
-// roundTripOnce is one send of roundTrip's request.
-func (c *Client) roundTripOnce(ctx context.Context, what, method string, endpoint *url.URL, encoded []byte, hasBody bool, out any) error {
+// roundTripOncePreview is one send of roundTrip's request.
+func (c *Client) roundTripOncePreview(ctx context.Context, what, method string, endpoint *url.URL, encoded []byte, hasBody bool, out any, memberID int64) error {
 	var body io.Reader
 	if hasBody {
 		body = bytes.NewReader(encoded)
@@ -591,6 +609,9 @@ func (c *Client) roundTripOnce(ctx context.Context, what, method string, endpoin
 	}
 	if hasBody {
 		req.Header.Set("Content-Type", "application/json")
+	}
+	if memberID > 0 {
+		req.Header.Set(previewAsHeader, strconv.FormatInt(memberID, 10))
 	}
 	resp, err := c.do(req)
 	if err != nil {
