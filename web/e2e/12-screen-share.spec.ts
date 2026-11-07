@@ -366,6 +366,31 @@ test.describe('screen share with LiveKit', () => {
     }
   });
 
+  test('raising the quality during a share reaches the viewer', async ({ browser }) => {
+    const a = await person(browser, 'alice');
+    const b = await person(browser, 'bob');
+    try {
+      await join(a, 'Join voice');
+      await join(b, 'Watch only');
+      await share(a);
+      await watching(b);
+      const voice = voiceRegion(a.page);
+      await voice.getByRole('button', { name: 'Voice options' }).click();
+      await voice.getByLabel('Share resolution').selectOption('720p');
+      await expect(shareView(b.page)).toContainText(/1280×720/, { timeout: 30_000 });
+      await voice.getByLabel('Share resolution').selectOption('1080p');
+      await expect(voice).toContainText('Sending: 1920×1080', { timeout: 30_000 });
+      // The viewer's layer follows the size of its pane (adaptive stream), so
+      // it need not be the top: the picture keeps flowing after the raise.
+      await expect(shareView(b.page)).toContainText(/\d+×\d+ · \d+ fps · \d+\.\d Mbps/, { timeout: 30_000 });
+      expect(await picks(a.page), 'a quality change opens no new picker').toBe(1);
+      await expectClean(a);
+      await expectClean(b);
+    } finally {
+      for (const p of [a, b]) await p.close();
+    }
+  });
+
   // Issue #1340: presence lingers a few seconds after a page closes without
   // leaving, and reads as the person's voice in another client. Watch only on
   // a new page at once is not refused as a viewer of a voice that is gone.

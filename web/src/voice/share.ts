@@ -57,6 +57,10 @@ export interface ShareSample {
   readonly fps: number;
   readonly bytes?: number;
   readonly timestamp?: number;
+  // Which RTP stream of which publication it is, so that bitrate is never
+  // taken between two different ones.
+  readonly stream?: string;
+  readonly publication?: string;
 }
 export type ShareDirection = 'received' | 'sent';
 

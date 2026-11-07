@@ -506,6 +506,8 @@ export function videoPublishOptions(captured: CapturedVideo, quality: ShareQuali
 
 // The subset of inbound-rtp and outbound-rtp stats the readout uses.
 export interface ShareStats {
+  readonly id?: string;
+  readonly ssrc?: number;
   readonly type: string;
   readonly kind?: string;
   readonly mediaType?: string;
@@ -520,7 +522,9 @@ export interface ShareStats {
 const count = (n: number | undefined): n is number => n !== undefined && Number.isFinite(n) && n >= 0;
 
 // shareSample reads the received picture, or the largest sent simulcast layer.
-export function shareSample(stats: Iterable<ShareStats>, direction: ShareDirection): ShareSample | null {
+// publication names the publication the stats come from, so a sample of a
+// replaced publication is never compared with one of the old.
+export function shareSample(stats: Iterable<ShareStats>, direction: ShareDirection, publication?: string): ShareSample | null {
   const wanted = direction === 'received' ? 'inbound-rtp' : 'outbound-rtp';
   let found: ShareStats | null = null;
   for (const stat of stats) {
@@ -530,21 +534,26 @@ export function shareSample(stats: Iterable<ShareStats>, direction: ShareDirecti
   }
   if (found === null) return null;
   const bytes = direction === 'received' ? found.bytesReceived : found.bytesSent;
+  const stream = found.id !== undefined || found.ssrc !== undefined ? `${found.id ?? ''}/${found.ssrc === undefined ? '' : String(found.ssrc)}` : undefined;
   return {
     width: found.frameWidth ?? 0,
     height: found.frameHeight ?? 0,
     fps: found.framesPerSecond ?? 0,
+    ...(stream === undefined ? {} : { stream }),
+    ...(publication === undefined ? {} : { publication }),
     ...(count(bytes) ? { bytes } : {}),
     ...(count(found.timestamp) ? { timestamp: found.timestamp } : {}),
   };
 }
 
-// shareReadout formats the latest sample. Bitrate needs two samples; zero
-// bytes and zero fps are real readings, not missing ones.
+// shareReadout formats the latest sample. Bitrate needs two samples of the
+// same RTP stream of the same publication, and counters that did not go back;
+// zero bytes and zero fps are real readings, not missing ones.
 export function shareReadout(current: ShareSample | null, previous?: ShareSample | null): string | null {
   if (current === null) return null;
   let text = `${String(current.width)}×${String(current.height)} · ${String(Math.round(current.fps))} fps`;
   if (previous?.bytes === undefined || previous.timestamp === undefined || current.bytes === undefined || current.timestamp === undefined) return text;
+  if (previous.stream !== current.stream || previous.publication !== current.publication) return text;
   const elapsed = current.timestamp - previous.timestamp;
   const bytes = current.bytes - previous.bytes;
   if (elapsed <= 0 || bytes < 0) return text;
@@ -1166,6 +1175,18 @@ class LiveKitAdapter implements Room {
       for (const t of tracks) t.stop();
       throw new ClosedError();
     }
+    // The size asked for is an ideal, which a browser may exceed: hold the
+    // chosen cap on the capture before anything is published from it.
+    const video = tracks.find((t): t is LocalVideoTrack => t.source === Track.Source.ScreenShare);
+    if (video !== undefined) {
+      try {
+        await this.constrainShare(video, quality);
+        this.ensureOpen();
+      } catch (err) {
+        for (const t of tracks) t.stop();
+        throw err;
+      }
+    }
     this.holdScreen(tracks);
     return { audio: tracks.some((t) => t.source === Track.Source.ScreenShareAudio) };
   }
@@ -1180,23 +1201,39 @@ class LiveKitAdapter implements Room {
   }
 
   private async applyShareQuality(): Promise<void> {
-    const quality = this.shareQuality;
     const track = this.screen.find((t): t is LocalVideoTrack => t.source === Track.Source.ScreenShare);
     if (track === undefined) return;
+    await this.constrainShare(track, this.shareQuality);
+    this.ensureOpen();
+    await this.shapeSender(track, this.shareQuality);
+  }
+
+  // constrainShare holds the chosen caps on the live capture.
+  private async constrainShare(track: LocalVideoTrack, quality: ShareQuality): Promise<void> {
     const capture = track.mediaStreamTrack;
     const ask = shareAsk(quality);
     capture.contentHint = quality.frameRate === 15 ? 'detail' : 'motion';
     await capture.applyConstraints({ width: { max: ask.width }, height: { max: ask.height }, frameRate: { max: ask.frameRate } });
-    this.ensureOpen();
-    const settings = capture.getSettings();
+  }
+
+  // shapeSender sets the published encodings by position: the highest carries
+  // the chosen top layer against the size actually captured, and those below
+  // it the lower layers, smallest first. LiveKit names encodings by how many
+  // there are (q; q,h; q,h,f) and fixes that number at publish time, so the
+  // names say nothing about which layer one carries. An encoding with no
+  // layer of its own takes the top, and no layer is above the top.
+  private async shapeSender(track: LocalVideoTrack, quality: ShareQuality): Promise<void> {
+    const settings = track.mediaStreamTrack.getSettings();
     track.publishOptions = videoPublishOptions(settings, quality);
     const sender = track.sender;
     if (sender === undefined) return;
     const { top, lower } = shareEncodings(settings, quality);
     const parameters = sender.getParameters();
-    const layers = [...lower, top];
+    const last = parameters.encodings.length - 1;
+    // Smallest first: the order LiveKit builds them in.
     parameters.encodings = parameters.encodings.map((encoding, index) => {
-      const layer = encoding.rid === 'f' ? top : encoding.rid === 'h' ? (lower[1] ?? top) : encoding.rid === 'q' ? (lower[0] ?? top) : (layers[Math.min(index, layers.length - 1)] ?? top);
+      const own = index === last ? top : lower[index];
+      const layer = own === undefined ? top : { ...own, maxBitrate: Math.min(own.maxBitrate, top.maxBitrate), maxFramerate: Math.min(own.maxFramerate, top.maxFramerate) };
       const scale = known(settings.width) ? Math.max(1, settings.width / layer.width) : 1;
       return { ...encoding, maxBitrate: layer.maxBitrate, maxFramerate: layer.maxFramerate, scaleResolutionDownBy: scale };
     });
@@ -1211,7 +1248,7 @@ class LiveKitAdapter implements Room {
     report.forEach((stat) => {
       stats.push(stat as ShareStats);
     });
-    return shareSample(stats, direction);
+    return shareSample(stats, direction, track?.sid);
   }
 
   // holdScreen makes a capture this connection's share, picked here or kept
@@ -1270,6 +1307,9 @@ class LiveKitAdapter implements Room {
       const options = track.source === Track.Source.ScreenShareAudio ? audioPublishOptions((settings.channelCount ?? 1) >= 2) : videoPublishOptions(settings, this.shareQuality);
       await this.publishGranted(track, options, deadline);
       this.ensureOpen();
+      // LiveKit builds the top layer from the real capture size: hold the cap
+      // on it. A refusal leaves the share as published.
+      if (track.source === Track.Source.ScreenShare) await this.shapeSender(track as LocalVideoTrack, this.shareQuality).catch(() => undefined);
     }
   }
 

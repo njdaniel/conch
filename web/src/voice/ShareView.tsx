@@ -23,7 +23,8 @@ export function ShareReadout({ client, direction, prefix = '' }: { readonly clie
       const sample = await client.readShareStats(direction);
       if (!live) return;
       setText(shareReadout(sample, previous.current));
-      if (sample !== null) previous.current = sample;
+      // A missing sample resets the baseline.
+      previous.current = sample;
       timer = window.setTimeout(() => { void read(); }, 1000);
     };
     void read();
