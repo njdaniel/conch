@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -467,8 +468,8 @@ func TestGuestReactions(t *testing.T) {
 	// Reactions on the old messages exist, from members, and are invisible to the guest.
 	f.set(t, f.ch.ID, f.alice, f.preWide, thumbs)
 	batch, err := f.s.ReactionSummariesOf(ctx, f.ch.ID, rdr(g), []int64{f.preWide, f.postWide}, reactionNow)
-	if err != nil || len(batch) != 0 {
-		t.Errorf("guest batch = %v, %v; want the old message absent", batch, err)
+	if err != nil || len(batch) != 1 || batch[0].MessageID != f.postWide || len(batch[0].Reactions) != 0 {
+		t.Errorf("guest batch = %v, %v; want the old message absent and the visible unreacted one empty", batch, err)
 	}
 	// G2: a set after the bound carries the attribution, for everyone who sees the message.
 	f.set(t, f.ch.ID, g, f.postWide, thumbs)
@@ -708,8 +709,20 @@ func TestReactionSummariesBatch(t *testing.T) {
 	for _, s := range got {
 		ids = append(ids, s.MessageID)
 	}
-	if want := []int64{min(f.postWide, f.postRoot), max(f.postWide, f.postRoot)}; len(ids) != 2 || ids[0] != want[0] || ids[1] != want[1] {
+	// Every visible message is named (the reply holds no reaction); the
+	// whisper frank is not in, the ghost and the unknown id are absent.
+	want := []int64{f.postRoot, f.postWide, f.postReply}
+	slices.Sort(want)
+	if !slices.Equal(ids, want) {
 		t.Errorf("batch ids = %v, want %v ascending", ids, want)
+	}
+	for _, s := range got {
+		if s.MessageID == f.postReply && (s.Reactions == nil || len(s.Reactions) != 0) {
+			t.Errorf("unreacted visible message = %#v, want a non-nil empty slice", s.Reactions)
+		}
+		if !s.AsOf.Equal(got[0].AsOf) || s.AsOf.IsZero() {
+			t.Errorf("message %d as_of = %v, want the read's", s.MessageID, s.AsOf)
+		}
 	}
 	for _, s := range got {
 		for _, r := range s.Reactions {
@@ -970,4 +983,65 @@ func TestReactionsMigration(t *testing.T) {
 	if err := s.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != len(migrations) {
 		t.Errorf("user_version = %d, %v; want %d", version, err, len(migrations))
 	}
+}
+
+// The batch names every visible requested message, with an empty summary for
+// one that holds no reaction, and leaves out invisible, removed and unknown
+// ids alike: the omission carries nothing that tells them apart.
+func TestReactionSummariesBatchVisibleEmpty(t *testing.T) {
+	f := newBoundFixture(t)
+	ctx := context.Background()
+	f.set(t, f.ch.ID, f.alice, f.postWide, thumbs)
+	f.set(t, f.ch.ID, f.alice, f.postRoot, thumbs)
+	if _, err := f.s.db.Exec("INSERT INTO message_removals (message_id, channel_id, removed_by, removed_at) VALUES (?, ?, ?, ?)",
+		f.postRoot, f.ch.ID, f.alice.ID, reactionNow().UnixMilli()); err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		name string
+		who  Principal
+		ids  []int64
+		want []int64
+	}{
+		{"visible with a reaction and visible without", f.frank, []int64{f.postWide, f.postReply}, sortedIDs(f.postWide, f.postReply)},
+		{"removed is absent", f.frank, []int64{f.postRoot, f.postReply}, []int64{f.postReply}},
+		{"invisible whisper is absent", f.frank, []int64{f.postWhisper}, nil},
+		{"unknown is absent", f.frank, []int64{1 << 40}, nil},
+		{"all four kinds, only the visible named", f.frank, []int64{f.postRoot, f.postWhisper, 1 << 40, f.postReply}, []int64{f.postReply}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := f.s.ReactionSummariesOf(ctx, f.ch.ID, rdr(tt.who), tt.ids, reactionNow)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ids := []int64{}
+			for _, s := range got {
+				ids = append(ids, s.MessageID)
+				if s.Reactions == nil || s.AsOf.IsZero() {
+					t.Errorf("message %d: reactions %#v, as_of %v; want non-nil and stamped", s.MessageID, s.Reactions, s.AsOf)
+				}
+			}
+			if !slices.Equal(ids, append([]int64{}, tt.want...)) {
+				t.Errorf("ids = %v, want %v", ids, tt.want)
+			}
+		})
+	}
+	// An invisible, a removed and an unknown id are indistinguishable.
+	var shapes [][]ReactionSummary
+	for _, id := range []int64{f.postWhisper, f.postRoot, 1 << 40} {
+		got, err := f.s.ReactionSummariesOf(ctx, f.ch.ID, rdr(f.frank), []int64{id}, reactionNow)
+		if err != nil {
+			t.Fatal(err)
+		}
+		shapes = append(shapes, got)
+	}
+	if len(shapes[0]) != 0 || len(shapes[1]) != 0 || len(shapes[2]) != 0 {
+		t.Errorf("omissions differ: %v", shapes)
+	}
+}
+
+func sortedIDs(ids ...int64) []int64 {
+	slices.Sort(ids)
+	return ids
 }

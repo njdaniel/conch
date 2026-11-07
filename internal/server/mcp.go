@@ -237,7 +237,7 @@ func (s *Server) mcpServerFor(identity mcpIdentity) *mcp.Server {
 			}
 			return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: fmt.Sprintf("message %d has %d kinds of reaction", out.MessageID, len(out.Reactions))}}}, out, nil
 		})
-	addAgentTool(s, server, identity, &mcp.Tool{Name: "read_reactions", Description: "Read the reactions on up to 100 messages of a Conch channel: one summary of emoji and counts for each listed message the agent can see that has any. A message that is missing from the answer has none, or is not one the agent can see."},
+	addAgentTool(s, server, identity, &mcp.Tool{Name: "read_reactions", Description: "Read the reactions on up to 100 messages of a Conch channel: one summary of emoji and counts for each listed message the agent can see, with an empty list and the read time for one with no reactions. A message that is missing from the answer is not one the agent can see, was removed, or does not exist."},
 		func(ctx context.Context, scope *agentScope, in mcpReadReactionsInput) (*mcp.CallToolResult, mcpReactionSummaries, error) {
 			out, serr := s.readReactionsMCP(ctx, scope, in)
 			if serr != nil {

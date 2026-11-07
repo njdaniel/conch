@@ -534,6 +534,24 @@ function syncStops(list: HTMLElement, stop: number | null) {
 // How close to the bottom still counts as being at it, in pixels.
 const nearBottom = 24;
 
+// The message at the top of the log's view and its offset below the log's
+// top. Only the log's own rows count: an expanded thread repeats ids inside
+// its root's row. Rows are in document order, so a binary search finds it.
+function topOfView(log: HTMLElement): { readonly id: string; readonly offset: number } | null {
+  const rows = log.querySelectorAll<HTMLElement>(':scope > .messages > li[data-message-id]');
+  const top = log.getBoundingClientRect().top;
+  let lo = 0;
+  let hi = rows.length - 1;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if ((rows[mid]?.getBoundingClientRect().bottom ?? 0) > top) hi = mid;
+    else lo = mid + 1;
+  }
+  const row = rows[lo];
+  if (row === undefined) return null;
+  return { id: row.dataset.messageId ?? '', offset: row.getBoundingClientRect().top - top };
+}
+
 // The open channel: its messages in id order, and the box to write in.
 export function Conversation({
   channelId,
@@ -562,10 +580,13 @@ export function Conversation({
   historyBounded = false,
   visibility,
   archived = false,
+  density = '',
 }: {
   // The channel is archived (issue #844): it opens read-only. History, search
   // and threads read as before; the composer is replaced by one line.
   readonly archived?: boolean;
+  // The chat density in force (issue #1497); a change of it keeps the reader's place.
+  readonly density?: string;
   // The viewer's own membership here has a history bound (history_after), so
   // what was said before they joined is not shown (issue #1034). False when
   // it has none or is not known yet: the page never claims hiding it cannot see.
@@ -616,6 +637,11 @@ export function Conversation({
   // renders in between (the request starting).
   const anchor = useRef<{ readonly height: number; readonly top: number; readonly oldest: number } | null>(null);
   const seen = useRef('');
+  // The message at the top of the view and how far below the log's top it
+  // sits, kept as the reader scrolls, so a change of chat density (which
+  // changes every message's height) can put that message back.
+  const view = useRef<{ readonly id: string; readonly offset: number } | null>(null);
+  const shownDensity = useRef(density);
   // The log's height as the observer below last handled it; null before it
   // has, or without one.
   const sized = useRef<number | null>(null);
@@ -882,6 +908,23 @@ export function Conversation({
     else setUnseen(true);
   });
 
+  // A change of chat density makes every message taller or shorter without
+  // changing the newest one or the log: a reader at the bottom stays there,
+  // and one who has scrolled up keeps the message they were reading in view.
+  useLayoutEffect(() => {
+    if (shownDensity.current === density) return;
+    shownDensity.current = density;
+    const el = log.current;
+    if (el === null) return;
+    if (atBottom.current) {
+      el.scrollTop = el.scrollHeight;
+      return;
+    }
+    const held = view.current;
+    const row = held === null ? null : el.querySelector<HTMLElement>(`:scope > .messages > li[data-message-id="${held.id}"]`);
+    if (held !== null && row !== null) el.scrollTop += row.getBoundingClientRect().top - el.getBoundingClientRect().top - held.offset;
+  }, [density]);
+
   // Anything that changes the log's own height (the whisper picker, the voice
   // strip, a share's stage) keeps a reader at the newest message there; one
   // who has scrolled up is left where they are. Browsers without a
@@ -958,6 +1001,7 @@ export function Conversation({
             onBottom(atBottom.current);
             if (atBottom.current) setUnseen(false);
           }
+          view.current = topOfView(el);
           if (el.scrollTop === 0 && hasOlder && !loadingOlder && chat.older !== 'error') showOlder();
         }}
       >

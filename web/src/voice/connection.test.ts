@@ -4,7 +4,7 @@ import type { VoicePresenceV1 } from '../schema/voice';
 import type { CameraClaimResult } from '../api';
 import type { Camera, CameraProfile, KeptCamera } from './camera';
 import { VoiceClient, chosenGone, earlierGone, levelEvery, meterEvery, outputMoved, outputRefused, reconnectLimit, reportWait, type CameraTrack, type Microphone, type ModeStore, type Output, type Phase, type Processing, type ProcessingStore, type Room, type RoomEvents, type ShareSink } from './connection';
-import { resumeLimit, type Captured, type KeptScreen } from './share';
+import { resumeLimit, type Captured, type KeptScreen, type ShareQuality } from './share';
 import { defaultTail } from './gate';
 import { FakeClock, settle } from './fakes';
 
@@ -98,6 +98,12 @@ class StubRoom implements Room {
     this.calls.push('pick');
     return this.pickFails ? Promise.reject(new Error('picker closed')) : Promise.resolve({ audio: this.pickAudio });
   };
+  qualities: ShareQuality[] = [];
+  setShareQuality = (quality: ShareQuality): Promise<void> => {
+    this.qualities.push(quality);
+    return Promise.resolve();
+  };
+  readShareStats = (): Promise<null> => Promise.resolve(null);
   publishScreen = (): Promise<void> => {
     this.calls.push('publish');
     return Promise.resolve();

@@ -17,7 +17,7 @@ import { initialChannels } from '../state/channels';
 import type { Person } from '../useLiveChannel';
 import { VoiceClient, type Room, type RoomEvents, type ShareSink } from './connection';
 import { FakeClock, noCamera, settle } from './fakes';
-import type { Captured, KeptScreen, ShareFeatures } from './share';
+import type { Captured, KeptScreen, ShareFeatures, ShareQuality, ShareSample } from './share';
 import type { Snapshot, VoiceControl } from './useVoice';
 import { VoicePanel } from './VoicePanel';
 
@@ -27,6 +27,7 @@ class StubRoom implements Room {
   calls: string[] = [];
   watching: boolean[] = [];
   sink: ShareSink | null = null;
+  shareAudio = true;
   connect = (_url: string, _token: string, _room: string, publish: boolean, events: RoomEvents): Promise<void> => {
     this.publish = publish;
     this.events = events;
@@ -49,8 +50,15 @@ class StubRoom implements Room {
   };
   pickScreen = (): Promise<Captured> => {
     this.calls.push('pick');
-    return Promise.resolve({ audio: true });
+    return Promise.resolve({ audio: this.shareAudio });
   };
+  qualities: ShareQuality[] = [];
+  sample: ShareSample | null = null;
+  setShareQuality = (quality: ShareQuality): Promise<void> => {
+    this.qualities.push(quality);
+    return Promise.resolve();
+  };
+  readShareStats = (): Promise<ShareSample | null> => Promise.resolve(this.sample);
   publishScreen = (): Promise<void> => {
     this.calls.push('publish');
     return Promise.resolve();
@@ -102,7 +110,7 @@ const presence = (sharing: number | null, audio = false, cameras: readonly numbe
   available: true,
   rooms: [
     {
-      participants: [7, 8].map((id) => ({
+      participants: [7, 8, 9].map((id) => ({
         principal_id: id,
         can_publish: true,
         transmitting: false,
@@ -117,6 +125,7 @@ const presence = (sharing: number | null, audio = false, cameras: readonly numbe
 const people: ReadonlyMap<number, Person> = new Map([
   [7, { name: 'ada', kind: 'human' }],
   [8, { name: 'bea', kind: 'human' }],
+  [9, { name: 'carol', kind: 'human' }],
 ]);
 
 const chrome: ShareFeatures = { canShare: true, chromium: true, platform: 'linux' };
@@ -216,15 +225,15 @@ describe('watch only', () => {
 });
 
 describe('watching', () => {
-  async function watching(t = setup()) {
+  async function watching(t = setup(), audio = true) {
     t.client.join('general', { watchOnly: true });
     await act(settle);
-    t.seen(presence(8, true));
+    t.seen(presence(8, audio));
     fireEvent.click(await within(voice()).findByRole('button', { name: 'Watch' }));
     return t;
   }
 
-  it('subscribes on Watch and plays into an inline video and an audio element of its own', async () => {
+  it('subscribes on Watch and plays into an inline video and an unmuted audio element of its own', async () => {
     const t = await watching();
     const view = await screen.findByRole('region', { name: 'Shared screen' });
     expect(view.textContent).toContain('bea is sharing, with sound');
@@ -233,6 +242,8 @@ describe('watching', () => {
     expect(sink?.video.playsInline).toBe(true);
     expect(sink?.video.muted).toBe(true);
     expect(sink?.audio.tagName).toBe('AUDIO');
+    expect(sink?.audio.muted).toBe(false);
+    expect(within(view).getByRole('button', { name: 'Mute share', pressed: false })).toBeTruthy();
     expect(within(view).getByText('Waiting for the picture')).toBeTruthy();
     act(() => {
       t.rooms[0]?.events?.onShareTracks({ video: true, audio: false });
@@ -240,10 +251,23 @@ describe('watching', () => {
     expect(within(view).queryByText('Waiting for the picture')).toBeNull();
   });
 
+  it('shows the received resolution and fps once stats arrive', async () => {
+    const t = setup();
+    t.client.join('general', { watchOnly: true });
+    await act(settle);
+    const room = t.rooms[0];
+    if (room === undefined) throw new Error('no room');
+    room.sample = { width: 1920, height: 1080, fps: 30, bytes: 1000, timestamp: 1000 };
+    t.seen(presence(8, true));
+    fireEvent.click(await within(voice()).findByRole('button', { name: 'Watch' }));
+    expect(await screen.findByText('1920×1080 · 30 fps')).toBeTruthy();
+  });
+
   it("the share's sound has its own volume and mute, apart from voice; deafen silences it too", async () => {
     const t = await watching();
     const view = await screen.findByRole('region', { name: 'Shared screen' });
     const audio = t.rooms[0]?.sink?.audio;
+    expect(audio?.muted).toBe(false);
     fireEvent.change(within(view).getByLabelText('Share volume'), { target: { value: '0.4' } });
     expect(audio?.volume).toBeCloseTo(0.4);
     fireEvent.click(within(view).getByRole('button', { name: 'Mute share' }));
@@ -256,6 +280,31 @@ describe('watching', () => {
       t.client.setDeafened(true);
     });
     expect(audio?.muted).toBe(true);
+  });
+
+  it('keeps the viewer volume when another share starts and when watching again', async () => {
+    const t = await watching();
+    const view = await screen.findByRole('region', { name: 'Shared screen' });
+    fireEvent.change(within(view).getByLabelText('Share volume'), { target: { value: '0.35' } });
+    t.seen(presence(9, true));
+    const next = await screen.findByRole('region', { name: 'Shared screen' });
+    expect(next.textContent).toContain('carol is sharing, with sound');
+    expect(t.rooms[0]?.sink?.audio.muted).toBe(false);
+    expect(t.rooms[0]?.sink?.audio.volume).toBeCloseTo(0.35);
+    expect(within(next).getByLabelText<HTMLInputElement>('Share volume').value).toBe('0.35');
+    fireEvent.click(within(next).getByRole('button', { name: 'Stop watching' }));
+    fireEvent.click(within(voice()).getByRole('button', { name: 'Watch' }));
+    const reopened = await screen.findByRole('region', { name: 'Shared screen' });
+    expect(t.rooms[0]?.sink?.audio.muted).toBe(false);
+    expect(t.rooms[0]?.sink?.audio.volume).toBeCloseTo(0.35);
+    expect(within(reopened).getByLabelText<HTMLInputElement>('Share volume').value).toBe('0.35');
+  });
+
+  it('keeps the plain mute and volume controls for a share without sound', async () => {
+    await watching(setup(), false);
+    const view = await screen.findByRole('region', { name: 'Shared screen' });
+    expect(within(view).getByRole('button', { name: 'Mute share' })).toBeTruthy();
+    expect(within(view).getByLabelText('Share volume')).toBeTruthy();
   });
 
   it('offers a tap to play the sound when the browser will not start it by itself', async () => {
@@ -347,25 +396,68 @@ describe('sharing', () => {
     fireEvent.click(within(voice()).getByRole('button', { name: 'Share screen' }));
     await act(settle);
     expect(t.rooms[0]?.calls).toEqual(['pick', 'publish']);
-    expect(await within(voice()).findByText('You are sharing your screen with its sound.')).toBeTruthy();
+    expect(await within(voice()).findByText('You are sharing your screen with sound.')).toBeTruthy();
     fireEvent.click(within(voice()).getByRole('button', { name: 'Stop sharing' }));
     await act(settle);
     expect(await within(voice()).findByText('You stopped sharing.')).toBeTruthy();
   });
 
-  // Issue #554: there is no choice of what a share is for. Voice options asks
-  // nothing about sharing, and Share screen opens the picker at once.
-  it('asks nothing before a share: Voice options has no share choice, and Share screen opens the picker', async () => {
+  it('tells the sharer when the capture has no sound track, in words for the browser', async () => {
+    for (const [features, text] of [
+      [chrome, "Sharing without sound. To share sound, share a browser tab and keep 'Share tab audio' on."],
+      [{ canShare: true, chromium: false, platform: 'mac' }, "Sharing without sound. This browser can't share sound."],
+    ] as const) {
+      const t = setup([], features);
+      t.client.join('general');
+      await act(settle);
+      const room = t.rooms[0];
+      if (room === undefined) throw new Error('no room');
+      room.shareAudio = false;
+      fireEvent.click(within(voice()).getByRole('button', { name: 'Share screen' }));
+      await act(settle);
+      expect(await within(voice()).findByText(text)).toBeTruthy();
+      cleanup();
+    }
+  });
+
+  it('offers resolution and frame rate before and during a share, defaulting to 1080p30', async () => {
     const t = setup();
     t.client.join('general');
     await act(settle);
     fireEvent.click(await within(voice()).findByRole('button', { name: 'Voice options' }));
-    expect(within(voice()).getByRole('group', { name: 'Microphone' })).toBeTruthy();
-    expect(within(voice()).queryByRole('group', { name: 'Share your screen' })).toBeNull();
-    expect(within(voice()).queryAllByRole('radio').map((r) => r.closest('label')?.textContent)).toEqual(['Push to talk', 'Open microphone']);
+    const resolution = within(voice()).getByLabelText<HTMLSelectElement>('Share resolution');
+    const frameRate = within(voice()).getByLabelText<HTMLSelectElement>('Share frame rate');
+    expect(resolution.value).toBe('1080p');
+    expect(frameRate.value).toBe('30');
+    fireEvent.change(resolution, { target: { value: '720p' } });
+    fireEvent.change(frameRate, { target: { value: '15' } });
+    expect(t.client.snapshot().shareQuality).toEqual({ resolution: '720p', frameRate: 15 });
     fireEvent.click(within(voice()).getByRole('button', { name: 'Share screen' }));
     await act(settle);
     expect(t.rooms[0]?.calls).toEqual(['pick', 'publish']);
+    expect(within(voice()).getByLabelText('Share resolution')).toBeTruthy();
+    fireEvent.change(resolution, { target: { value: 'source' } });
+    fireEvent.change(frameRate, { target: { value: '60' } });
+    await act(settle);
+    expect(t.rooms[0]?.qualities).toEqual([
+      { resolution: '1080p', frameRate: 30 },
+      { resolution: '720p', frameRate: 30 },
+      { resolution: '720p', frameRate: 15 },
+      { resolution: 'source', frameRate: 15 },
+      { resolution: 'source', frameRate: 60 },
+    ]);
+  });
+
+  it('shows the sharer what the sent top layer reports', async () => {
+    const t = setup();
+    t.client.join('general');
+    await act(settle);
+    const room = t.rooms[0];
+    if (room === undefined) throw new Error('no room');
+    room.sample = { width: 1280, height: 720, fps: 15, bytes: 1000, timestamp: 1000 };
+    fireEvent.click(within(voice()).getByRole('button', { name: 'Share screen' }));
+    await act(settle);
+    expect(await within(voice()).findByText('Sending: 1280×720 · 15 fps')).toBeTruthy();
   });
 
   it('a second person trying to share is told who is sharing', async () => {
@@ -397,7 +489,7 @@ describe('sharing', () => {
       await act(settle);
       fireEvent.click(await within(voice()).findByRole('button', { name: 'Share screen' }));
       await act(settle);
-      expect(await within(voice()).findByText('You are sharing your screen with its sound.')).toBeTruthy();
+      expect(await within(voice()).findByText('You are sharing your screen with sound.')).toBeTruthy();
       t.seen(presence(7));
       t.seen({ ...presence(null), share_ended: { reason, started_at: '2026-10-16T00:00:00.000Z', ended_at: '2026-10-16T00:01:00.000Z' } });
       await act(settle);
@@ -418,7 +510,7 @@ describe('sharing', () => {
       await act(settle);
       fireEvent.click(await within(voice()).findByRole('button', { name: 'Share screen' }));
       await act(settle);
-      expect(await within(voice()).findByText('You are sharing your screen with its sound.')).toBeTruthy();
+      expect(await within(voice()).findByText('You are sharing your screen with sound.')).toBeTruthy();
       t.seen(presence(7));
       t.seen(renewed);
       expect(await within(voice()).findByText('The voice room was renewed. Resuming your share…')).toBeTruthy();

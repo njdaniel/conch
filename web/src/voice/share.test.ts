@@ -54,6 +54,8 @@ function setup(claims: ShareClaimResult[] = []) {
       if (room.pick !== null) return room.pick.promise;
       return room.pickFails ? Promise.reject(new Error('NotAllowedError')) : Promise.resolve({ audio: room.audio });
     },
+    setShareQuality: () => Promise.resolve(),
+    readShareStats: () => Promise.resolve(null),
     publishScreen: () => {
       calls.push('publish');
       const held = room.publish;
@@ -989,12 +991,14 @@ describe('what the page says', () => {
     expect(ownPageNote).toBe('Sharing your entire screen or this browser window shows this page too, chat included. Share a tab or another window to keep it out.');
   });
 
-  it('says afterwards whether sound was obtained', () => {
+  it('says afterwards whether sound was obtained, with plain guidance for each browser family', () => {
     const chrome: ShareFeatures = { canShare: true, chromium: true, platform: 'linux' };
     const firefox: ShareFeatures = { canShare: true, chromium: false, platform: 'linux' };
-    expect(sharedNote(true, chrome)).toBe('You are sharing your screen with its sound.');
-    expect(sharedNote(false, chrome)).toMatch(/without sound\. To share sound, stop and pick a tab/);
-    expect(sharedNote(false, firefox)).toBe('You are sharing your screen without sound.');
+    const safari: ShareFeatures = { canShare: true, chromium: false, platform: 'mac' };
+    expect(sharedNote(true, chrome)).toBe('You are sharing your screen with sound.');
+    expect(sharedNote(false, chrome)).toBe("Sharing without sound. To share sound, share a browser tab and keep 'Share tab audio' on.");
+    expect(sharedNote(false, firefox)).toBe("Sharing without sound. This browser can't share sound.");
+    expect(sharedNote(false, safari)).toBe("Sharing without sound. This browser can't share sound.");
   });
 
   it('names who is sharing when a claim is busy, and says why every other share ended', () => {

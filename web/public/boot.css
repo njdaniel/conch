@@ -1,8 +1,8 @@
 /* The loading screen (issue #1037): shown from the moment index.html parses
    until React replaces the contents of #root. A file, not inline style:
-   conchd serves the page with style-src 'self'. Colours are app.css's dark
-   theme (--bg, --muted, --accent), spelled out because app.css's tokens are
-   not loaded for a script-less first paint. */
+   conchd serves the page with style-src 'self'. These are app.css's dark
+   colours (the default theme), spelled out because its tokens are not
+   loaded for this paint. */
 html,
 body {
   margin: 0;
@@ -28,6 +28,19 @@ body {
 @keyframes boot-spin {
   to {
     transform: rotate(360deg);
+  }
+}
+@media (forced-colors: active) {
+  html,
+  body {
+    background: Canvas;
+  }
+  .boot {
+    color: CanvasText;
+  }
+  .boot-spinner {
+    border-color: CanvasText;
+    border-top-color: Highlight;
   }
 }
 @media (prefers-reduced-motion: reduce) {

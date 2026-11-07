@@ -6,6 +6,35 @@
 import { useEffect, useRef, useState } from 'react';
 import { Glyph } from '../Icons';
 import type { VoiceClient, VoiceState } from './connection';
+import { shareReadout } from './sdk';
+import type { ShareDirection, ShareSample } from './share';
+
+// ShareReadout samples only the watched picture or the local screen's top
+// layer. The first sample has no bitrate; the next, about a second later, does.
+export function ShareReadout({ client, direction, prefix = '' }: { readonly client: VoiceClient; readonly direction: ShareDirection; readonly prefix?: string }) {
+  const [text, setText] = useState<string | null>(null);
+  const previous = useRef<ShareSample | null>(null);
+  useEffect(() => {
+    let live = true;
+    let timer: number | null = null;
+    previous.current = null;
+    setText(null);
+    const read = async () => {
+      const sample = await client.readShareStats(direction);
+      if (!live) return;
+      setText(shareReadout(sample, previous.current));
+      // A missing sample resets the baseline.
+      previous.current = sample;
+      timer = window.setTimeout(() => { void read(); }, 1000);
+    };
+    void read();
+    return () => {
+      live = false;
+      if (timer !== null) window.clearTimeout(timer);
+    };
+  }, [client, direction]);
+  return text === null ? null : <span className="share-readout">{prefix}{text}</span>;
+}
 
 // A video element Safari on iPhone can put full screen: it has no
 // requestFullscreen for other elements.
@@ -16,6 +45,8 @@ export function ShareView({
   state,
   name,
   audio,
+  volume,
+  onVolumeChange,
 }: {
   readonly client: VoiceClient;
   readonly state: VoiceState;
@@ -23,11 +54,13 @@ export function ShareView({
   // has sound.
   readonly name: string;
   readonly audio: boolean;
+  // The viewer's volume belongs to the panel, so another share keeps it.
+  readonly volume: number;
+  readonly onVolumeChange: (volume: number) => void;
 }) {
   const box = useRef<HTMLDivElement>(null);
   const video = useRef<HTMLVideoElement>(null);
   const sound = useRef<HTMLAudioElement>(null);
-  const [volume, setVolume] = useState(1);
   const [muted, setMuted] = useState(false);
   // The browser would not start the sound without a tap (phones' autoplay
   // rules): the view offers one.
@@ -97,6 +130,7 @@ export function ShareView({
       <p className="share-title">
         <Glyph name="screen" />
         {name} is sharing{audio ? ', with sound' : ''}
+        <ShareReadout client={client} direction="received" />
       </p>
       <div ref={box} className="share-frame">
         <video ref={video} aria-label={`${name}'s screen`} playsInline autoPlay muted />
@@ -110,7 +144,7 @@ export function ShareView({
         </button>
         <label className="volume">
           <span className="label">Share volume</span>
-          <input type="range" min={0} max={1} step={0.05} value={volume} onChange={(e) => { setVolume(Number(e.target.value)); }} />
+          <input type="range" min={0} max={1} step={0.05} value={volume} onChange={(e) => { onVolumeChange(Number(e.target.value)); }} />
         </label>
         <button type="button" onClick={fullscreen}>
           <Glyph name="fullscreen" />

@@ -233,7 +233,7 @@ test.describe('in voice, with LiveKit', () => {
         await expect(voiceRegion(p.page)).toContainText(/Connected in #voice-room/, { timeout: 30_000 });
       }
       const inVoice = voiceRegion(a.page).getByRole('list', { name: 'In voice' });
-      await expect(inVoice).toContainText('You');
+      await expect(inVoice).toContainText(a.member.name);
       await expect(inVoice).toContainText('dave');
       await expect(panel(a.page).getByRole('heading', { name: 'People' })).toBeVisible();
       // Its message socket is open too, so a late first open is not counted

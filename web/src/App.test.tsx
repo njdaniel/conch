@@ -428,12 +428,12 @@ describe('lobby', () => {
     expect(list.textContent).toContain('3');
     expect(screen.getByRole('button', { name: 'ops' }).textContent).toBe('ops');
     // Who is there, by name, nested under each channel (issue #1103): the
-    // viewer as You, and ops's people once its members have been read.
+    // viewer by their own name, and ops's people once its members have been read.
     const inOps = within(list).getByRole('list', { name: 'In voice in #ops' });
     await waitFor(() => {
-      expect(within(inOps).getAllByRole('listitem').map((li) => li.textContent)).toEqual(['You', 'eve', 'fay']);
+      expect(within(inOps).getAllByRole('listitem').map((li) => li.textContent)).toEqual(['ada', 'eve', 'fay']);
     });
-    expect(within(within(list).getByRole('list', { name: 'In voice in #general' })).getAllByRole('listitem').map((li) => li.textContent)).toEqual(['You']);
+    expect(within(within(list).getByRole('list', { name: 'In voice in #general' })).getAllByRole('listitem').map((li) => li.textContent)).toEqual(['ada']);
     expect(within(list).queryByRole('list', { name: 'In voice in #dev' })).toBeNull();
     // One read of ops's members for the names, and none of dev's (nobody
     // there); general's is the page's own, for the channel on screen.

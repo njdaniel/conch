@@ -50,10 +50,14 @@ function VoiceMark({ id, count }: { readonly id: number; readonly count: number 
 }
 
 // voiceName is how someone in a channel's voice is named in the list: the
-// viewer is "You"; anyone else by the name the page has for them, or, until
-// the channel's members have been read, by their id.
-function voiceName(id: number, viewer: number, names: ReadonlyMap<number, string>): string {
-  if (id === viewer) return 'You';
+// viewer is their own name (names has it, from the signed-in identity), or
+// "You" until that is known; anyone else by the name the page has for them,
+// or, until the channel's members have been read, by their id.
+export function voiceName(id: number, viewer: number, names: ReadonlyMap<number, string>): string {
+  if (id === viewer) {
+    const own = names.get(id);
+    return own === undefined || own === '' ? 'You' : own;
+  }
   return names.get(id) ?? `Member ${String(id)}`;
 }
 

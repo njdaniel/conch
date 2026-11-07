@@ -27,16 +27,19 @@ func (s *Server) routeTable() []route {
 		{pattern: "GET /v1/events/ws", access: accessAuthenticated, handler: hf(s.handleEventsWS), acceptsTicket: true},
 		rt("POST /v1/ws-tickets", accessAuthenticated, hf(s.handleCreateWSTicket)),
 		rt("GET /v1/whoami", accessAuthenticated, hf(s.handleWhoAmI)),
+		// Preview as member (issue #1515): the entry read of the one request
+		// header, Conch-Preview-As. It is one of the five previewable routes.
+		rt("GET /v1/preview", accessAuthenticated, hf(s.handlePreview)).asPreviewable(),
 		rt("POST /v0/channels", accessPermission, hf(s.handleCreateChannel)).needs(schema.PermManageChannels),
 		// Member channel creation (issue #981): community members only; an
 		// agent and a guest are refused before the handler runs.
 		rt("POST /v1/channels", accessAuthenticated, s.humansOnlyBecause(denyAgentChannelCreate, "agents cannot create channels", s.membersOnly(hf(s.handleCreateChannelV1)))),
-		rt("GET /v1/channels", accessAuthenticated, hf(s.handleListChannels)),
+		rt("GET /v1/channels", accessAuthenticated, hf(s.handleListChannels)).asPreviewable(),
 		// The channel directory, self-join and leave (issue #982). The
 		// directory and leave are for community members: an agent and a
 		// guest are refused before the handler runs. Join refuses them in
 		// the handler, with its own code, before any lookup.
-		rt("GET /v1/directory/channels", accessAuthenticated, s.humansOnlyBecause(denyAgentDirectory, "agents cannot list the channel directory", s.membersOnly(hf(s.handleChannelDirectory)))),
+		rt("GET /v1/directory/channels", accessAuthenticated, s.humansOnlyBecause(denyAgentDirectory, "agents cannot list the channel directory", s.membersOnly(hf(s.handleChannelDirectory)))).asPreviewable(),
 		rt("POST /v1/channels/{channel}/join", accessAuthenticated, hf(s.handleJoinChannel)),
 		rt("POST /v1/channels/{channel}/leave", accessAuthenticated, s.humansOnlyBecause(denyAgentLeave, "an agent's channels are its operator's to change", s.membersOnly(hf(s.handleLeaveChannel)))),
 		// Channel settings (issue #981, ADR-013 O5): visibility and the
@@ -69,7 +72,7 @@ func (s *Server) routeTable() []route {
 		rt("GET /v2/files/{id}", accessAuthenticated, s.humansOnlyFiles(hf(s.handleGetFile))),
 		// Members of the channel and operators (checked in the handler); anyone
 		// else gets the channel-not-found response.
-		rt("GET /v1/channels/{channel}/members", accessAuthenticated, hf(s.handleListChannelMembers)),
+		rt("GET /v1/channels/{channel}/members", accessAuthenticated, hf(s.handleListChannelMembers)).asPreviewable(),
 		// Who wrote what the caller may read here (design §13.5): behind the
 		// member list's gate, through the message visibility.
 		rt("GET /v1/channels/{channel}/authors", accessAuthenticated, hf(s.handleListChannelAuthors)),
@@ -224,7 +227,7 @@ func (s *Server) routeTable() []route {
 		rt("POST /v1/principals/hide", accessPermission, hf(s.handleHidePrincipals)).needs(schema.PermManageMembers),
 		// The community's member list (issue #983): any member; see_member_directory
 		// decides everyone versus the may-know list, manage_members the operator fields.
-		rt("GET /v1/directory/members", accessAuthenticated, s.directoryRoute(hf(s.handleListDirectoryMembers))),
+		rt("GET /v1/directory/members", accessAuthenticated, s.directoryRoute(hf(s.handleListDirectoryMembers))).asPreviewable(),
 		rt("GET /v1/principals", accessPermission, hf(s.handleListPrincipals)).needs(schema.PermManageMembers),
 		// Operators, or the principal itself: "sign out everywhere" (issue
 		// #439; checked in the handler).

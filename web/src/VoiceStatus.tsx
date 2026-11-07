@@ -37,6 +37,7 @@ function NativeStatus({ native, ...props }: Props & { readonly native: NonNullab
         signedIn={props.signedIn}
         channel={props.channel}
         viewer={props.viewer}
+        {...(props.viewerName === undefined ? {} : { viewerName: props.viewerName })}
         people={props.people}
         voiceAllowed={props.voiceAllowed}
         channels={props.channels}
@@ -50,6 +51,7 @@ function BrowserVoiceStatus({
   signedIn,
   channel,
   viewer,
+  viewerName = '',
   people,
   voiceAllowed,
   cameraAllowed = false,
@@ -62,6 +64,8 @@ function BrowserVoiceStatus({
   readonly signedIn: boolean;
   readonly channel: string | null;
   readonly viewer: number;
+  // The viewer's own name, from the signed-in identity; empty while unknown.
+  readonly viewerName?: string;
   // The people of the channel on screen. While voice is in another channel,
   // the roster's names come from that channel's members (useVoiceNames).
   readonly people: ReadonlyMap<number, Person>;
@@ -90,5 +94,5 @@ function BrowserVoiceStatus({
     presence: snapshot.kind === 'presence' ? snapshot.presence : null,
     people,
   });
-  return <VoicePanel voice={voice} viewer={viewer} people={named} viewed={channel} archived={isArchived(channels.find((c) => c.name === channel))} channels={channels} occupancy={occupancy} cameraAllowed={cameraAllowed} onOpen={onOpen} />;
+  return <VoicePanel voice={voice} viewer={viewer} viewerName={viewerName} people={named} viewed={channel} archived={isArchived(channels.find((c) => c.name === channel))} channels={channels} occupancy={occupancy} cameraAllowed={cameraAllowed} onOpen={onOpen} />;
 }

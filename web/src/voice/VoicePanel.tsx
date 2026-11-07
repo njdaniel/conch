@@ -57,8 +57,8 @@ import type { Phase, Processing, VoiceState } from './connection';
 import { clampTail, maxTail, releasePage, releaseStep } from './gate';
 import { keyLabel, talkKeyForMouseButton } from './keys';
 import { occupants, sharer, type Occupant } from './presence';
-import { busyNote, endedNote, oneSharerNote, othersShareNote, ownPageNote, resumedNote, resumingNote, sharedNote, shortShareNote, soundNote, watchNote } from './share';
-import { ShareView } from './ShareView';
+import { busyNote, endedNote, oneSharerNote, othersShareNote, ownPageNote, resumedNote, resumingNote, sharedNote, shortShareNote, soundNote, watchNote, type ShareFrameRate, type ShareResolution } from './share';
+import { ShareReadout, ShareView } from './ShareView';
 import { nobody, type InVoice } from './useOccupancy';
 import type { VoiceControl } from './useVoice';
 
@@ -76,11 +76,15 @@ const phaseLabel: Record<Phase, string> = {
   stopped: 'Voice stopped',
 };
 
-// nameOf names someone in voice. The viewer is "You", or, while this page is
-// not the one in voice, "You (on another device)" (issue #591, F24): one
-// person holds one place in a room, so that place is another page's.
-export function nameOf(people: ReadonlyMap<number, Person>, id: number, viewer: number, elsewhere = false): string {
-  if (id === viewer) return elsewhere ? 'You (on another device)' : 'You';
+// nameOf names someone in voice. The viewer is their own name (viewerName,
+// from the signed-in identity), or "You" while that is not known; while this
+// page is not the one in voice, "<name> (on another device)" (issue #591,
+// F24): one person holds one place in a room, so that place is another page's.
+export function nameOf(people: ReadonlyMap<number, Person>, id: number, viewer: number, elsewhere = false, viewerName = ''): string {
+  if (id === viewer) {
+    const own = viewerName === '' ? 'You' : viewerName;
+    return elsewhere ? `${own} (on another device)` : own;
+  }
   return people.get(id)?.name ?? `Member ${String(id)}`;
 }
 
@@ -123,6 +127,7 @@ function Tag({ text }: { readonly text: string }) {
 export function VoicePanel({
   voice,
   viewer,
+  viewerName = '',
   people,
   viewed,
   channels = [],
@@ -133,6 +138,9 @@ export function VoicePanel({
 }: {
   readonly voice: VoiceControl;
   readonly viewer: number;
+  // The viewer's own name, from the signed-in identity; empty while unknown,
+  // when the viewer is "You".
+  readonly viewerName?: string;
   readonly people: ReadonlyMap<number, Person>;
   readonly viewed: string | null;
   // The viewer's channels, and how many are in each one's voice: for the line
@@ -152,6 +160,7 @@ export function VoicePanel({
   const { state, snapshot, client } = voice;
   const stage = useContext(StageHost);
   const [options, setOptions] = useState(false);
+  const [shareVolume, setShareVolume] = useState(1);
   // More about sharing opens Voice options at the full share notes, and
   // takes focus there once they are shown (issue #600).
   const about = useRef<HTMLElement>(null);
@@ -341,7 +350,7 @@ export function VoicePanel({
   const silenced = state.muted || state.deafened;
   const captured = (state.phase === 'connected' || state.phase === 'reconnecting') && !state.watchOnly && !state.listenOnly && !state.missing;
   const view =
-    theirs !== null && state.watching ? <ShareView client={client} state={state} name={theirName} audio={theirs.sharingAudio} /> : null;
+    theirs !== null && state.watching ? <ShareView client={client} state={state} name={theirName} audio={theirs.sharingAudio} volume={shareVolume} onVolumeChange={setShareVolume} /> : null;
   // The call view, while the person asked for it and is in voice. The share
   // and the call view are one layout on the stage: the share the main
   // picture and the cameras a strip beside it while both are open. It is
@@ -351,7 +360,7 @@ export function VoicePanel({
   // watched share only: no call view and no camera tile, and no camera
   // received (showVideo). The person's choice to view is kept, so the view
   // and the cameras are back with the Voice view, with no tap (O8).
-  const call = inVoice && state.viewing && !strip ? callTiles(roster, viewer, state.cameraTrack !== 'none', (id) => nameOf(people, id, viewer)) : null;
+  const call = inVoice && state.viewing && !strip ? callTiles(roster, viewer, state.cameraTrack !== 'none', (id) => nameOf(people, id, viewer), viewerName) : null;
   const staged =
     view === null && call === null ? null : (
       <CallView client={client} state={state} tiles={call?.tiles ?? noTiles} hidden={call?.hidden ?? 0} open={call !== null} share={view} />
@@ -409,7 +418,7 @@ export function VoicePanel({
           row, of four controls (issue #1028). */}
       <div className="voice-bar">
         {strip ? null : (
-          <Roster channel={rosterChannel ?? undefined} mayModerate={mayModerateRoster} roster={roster} people={people} viewer={viewer} elsewhere={elsewhere} speaking={speaking} volumes={inVoice ? state.volumes : noVolumes} />
+          <Roster channel={rosterChannel ?? undefined} mayModerate={mayModerateRoster} roster={roster} people={people} viewer={viewer} viewerName={viewerName} elsewhere={elsewhere} speaking={speaking} volumes={inVoice ? state.volumes : noVolumes} />
         )}
         {awayLine}
         <div className="voice-row">
@@ -541,7 +550,7 @@ export function VoicePanel({
             ) : null}
             <ShareNotes
               voice={voice}
-              holderName={holder === null ? null : nameOf(people, holder.principal, viewer)}
+              holderName={holder === null ? null : nameOf(people, holder.principal, viewer, false, viewerName)}
               others={theirs === null ? null : { name: theirName, audio: theirs.sharingAudio }}
               watching={state.watching}
               onMore={more}
@@ -779,7 +788,7 @@ function shownOnPhone(roster: readonly Occupant[], viewer: number): ReadonlySet<
 // the list. At 700 px and wider every chip shows, wrapping onto more lines;
 // on a phone three show, the viewer's own among them, and "+N more" shows
 // the rest.
-export function Roster({ channel, mayModerate: standing, roster, people, viewer, elsewhere, speaking, volumes }: {
+export function Roster({ channel, mayModerate: standing, roster, people, viewer, viewerName = '', elsewhere, speaking, volumes }: {
   // The channel the roster belongs to, and whether the viewer may moderate it
   // (when not said, the standing in the channel on screen).
   readonly channel?: string;
@@ -787,6 +796,8 @@ export function Roster({ channel, mayModerate: standing, roster, people, viewer,
   readonly roster: readonly Occupant[];
   readonly people: ReadonlyMap<number, Person>;
   readonly viewer: number;
+  // The viewer's own name, from the signed-in identity; empty while unknown.
+  readonly viewerName?: string;
   // The viewer listed is in voice on another page, not on this one.
   readonly elsewhere: boolean;
   readonly speaking: ReadonlySet<number>;
@@ -810,9 +821,9 @@ export function Roster({ channel, mayModerate: standing, roster, people, viewer,
       <ul id="voice-roster" aria-labelledby="voice-count" className={capped ? 'voice-roster capped' : 'voice-roster'}>
         {roster.map((o) => (
           <li key={o.principal} className={[speaking.has(o.principal) ? 'speaking' : '', kept.has(o.principal) ? '' : 'beyond', o.principal === viewer ? 'me' : ''].filter((c) => c !== '').join(' ') || undefined}>
-            <Avatar id={o.principal} name={people.get(o.principal)?.name ?? nameOf(people, o.principal, viewer)} />
-            <span className="who">{nameOf(people, o.principal, viewer, elsewhere)}</span>
-            {!mayModerate || channel === undefined ? null : <button type="button" aria-label={`Remove ${nameOf(people, o.principal, viewer)} from voice`} onClick={(event) => { kickOpener.current = event.currentTarget; setKick({ id: o.principal, name: nameOf(people, o.principal, viewer) }); }}>Remove from voice</button>}
+            <Avatar id={o.principal} name={people.get(o.principal)?.name ?? nameOf(people, o.principal, viewer, false, viewerName)} />
+            <span className="who">{nameOf(people, o.principal, viewer, elsewhere, viewerName)}</span>
+            {!mayModerate || channel === undefined ? null : <button type="button" aria-label={`Remove ${nameOf(people, o.principal, viewer, false, viewerName)} from voice`} onClick={(event) => { kickOpener.current = event.currentTarget; setKick({ id: o.principal, name: nameOf(people, o.principal, viewer, false, viewerName) }); }}>Remove from voice</button>}
             {o.transmitting ? <Tag text="transmitting" /> : null}
             {speaking.has(o.principal) ? <Tag text="speaking" /> : null}
             {o.sharing ? <Tag text="sharing" /> : null}
@@ -1256,9 +1267,37 @@ function Options({ voice, open, sharable, about, others, cameraAllowed }: {
         The talk key works only while this tab has focus, and not while you are typing. On Linux, conch-voice has a global talk key. On a phone, audio continues
         only while the page is open on screen.
       </p>
-      {sharable ? (
+      {sharable || (features.canShare && state.share.kind !== 'idle') ? (
         <section id="voice-share-about" ref={about} tabIndex={-1} className="voice-about" aria-labelledby="voice-share-about-title">
           <h3 id="voice-share-about-title">Sharing your screen</h3>
+          <label>
+            Share resolution
+            <select
+              value={state.shareQuality.resolution}
+              onChange={(e) => {
+                const resolution = e.target.value as ShareResolution;
+                void client.setShareQuality({ ...state.shareQuality, resolution });
+              }}
+            >
+              <option value="720p">720p</option>
+              <option value="1080p">1080p</option>
+              <option value="source">Source</option>
+            </select>
+          </label>
+          <label>
+            Share frame rate
+            <select
+              value={state.shareQuality.frameRate}
+              onChange={(e) => {
+                const frameRate = Number(e.target.value) as ShareFrameRate;
+                void client.setShareQuality({ ...state.shareQuality, frameRate });
+              }}
+            >
+              <option value={15}>15 fps</option>
+              <option value={30}>30 fps</option>
+              <option value={60}>60 fps</option>
+            </select>
+          </label>
           <p className="hint">{soundNote(features)}</p>
           <p className="hint">{ownPageNote}</p>
         </section>
@@ -1339,7 +1378,7 @@ function ShareNotes({ voice, holderName, others, watching, onMore }: {
   readonly watching: boolean;
   readonly onMore: () => void;
 }) {
-  const { state, features } = voice;
+  const { state, features, client } = voice;
   const share = state.share;
   if (state.listenOnly) return null;
   const line = (
@@ -1358,6 +1397,7 @@ function ShareNotes({ voice, holderName, others, watching, onMore }: {
       return (
         <>
           <p role="status" className="sharing-note">{sharedNote(share.audio, features)}</p>
+          <p className="hint"><ShareReadout client={client} direction="sent" prefix="Sending: " /></p>
           {share.resumed === true ? <p className="hint">{resumedNote}</p> : null}
         </>
       );
