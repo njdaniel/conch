@@ -32,7 +32,7 @@ type voiceSub struct {
 
 func newVoiceAPI() *voiceAPI { return &voiceAPI{started: make(chan voiceSub, 32)} }
 
-func (a *voiceAPI) SubscribeVoicePresence(ctx context.Context, channel string, _ func(schema.VoicePresenceV1) error) error {
+func (a *voiceAPI) SubscribeVoicePresence(ctx context.Context, channel string, _ func(schema.VoicePresenceV2) error) error {
 	sub := voiceSub{channel: channel, ctx: ctx}
 	a.mu.Lock()
 	a.subs = append(a.subs, sub)
@@ -76,15 +76,15 @@ func voiceModelFor(t *testing.T) (Model, *voiceAPI, *[]recordedTimer) {
 	return m, api, timers
 }
 
-func presence(configured, available bool, people ...schema.VoiceParticipant) schema.VoicePresenceV1 {
-	return schema.VoicePresenceV1{
-		Schema: schema.VoicePresenceSchemaV1, ChannelID: 1, Configured: configured, Available: available,
-		Rooms: []schema.VoicePresenceRoom{{Participants: people}},
+func presence(configured, available bool, people ...schema.VoiceParticipantV2) schema.VoicePresenceV2 {
+	return schema.VoicePresenceV2{
+		Schema: schema.VoicePresenceSchemaV2, ChannelID: 1, Configured: configured, Available: available,
+		Rooms: []schema.VoicePresenceRoomV2{{Participants: people}},
 	}
 }
 
-func person(id int64, talking bool) schema.VoiceParticipant {
-	return schema.VoiceParticipant{PrincipalID: id, CanPublish: true, Transmitting: talking, JoinedAt: schema.NewTimestamp(time.Unix(1700000000, 0))}
+func person(id int64, talking bool) schema.VoiceParticipantV2 {
+	return schema.VoiceParticipantV2{PrincipalID: id, CanPublish: true, Transmitting: talking, JoinedAt: schema.NewTimestamp(time.Unix(1700000000, 0))}
 }
 
 func TestVoiceLineStates(t *testing.T) {
@@ -103,7 +103,7 @@ func TestVoiceLineStates(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			m, _, timers := voiceModelFor(t)
 			before := m.status()
-			if doc, ok := tt.msg.(schema.VoicePresenceV1); ok {
+			if doc, ok := tt.msg.(schema.VoicePresenceV2); ok {
 				m, _ = update(m, voicePresenceReceived{gen: m.voice.gen, doc: doc})
 			} else if tt.msg == nil {
 				// nothing arrives
@@ -274,7 +274,7 @@ func TestVoiceDownDoesNotBlockTypingOrMessages(t *testing.T) {
 }
 
 func TestVoiceLayoutDoesNotJump(t *testing.T) {
-	var people []schema.VoiceParticipant
+	var people []schema.VoiceParticipantV2
 	for i := int64(1); i <= 50; i++ {
 		people = append(people, person(i, i%2 == 0))
 	}
@@ -346,7 +346,7 @@ func TestVoiceMarkCannotBeImitatedByAName(t *testing.T) {
 
 func TestVoiceLineTruncatesWithCount(t *testing.T) {
 	m, _, _ := voiceModelFor(t)
-	var people []schema.VoiceParticipant
+	var people []schema.VoiceParticipantV2
 	for i := int64(1); i <= 8; i++ {
 		people = append(people, person(i, false))
 	}
@@ -408,9 +408,9 @@ func TestVoiceNeedsAnAPIThatOffersIt(t *testing.T) {
 func TestVoiceRosterListsOnlyTheChannelWideRoom(t *testing.T) {
 	m, _, _ := voiceModelFor(t)
 	doc := presence(true, true, person(5, false), person(9, true))
-	doc.Rooms = append(doc.Rooms, schema.VoicePresenceRoom{
+	doc.Rooms = append(doc.Rooms, schema.VoicePresenceRoomV2{
 		Audience:     &schema.Audience{Kind: schema.AudienceKindNet, NetID: 3},
-		Participants: []schema.VoiceParticipant{person(5, true), person(12, true)},
+		Participants: []schema.VoiceParticipantV2{person(5, true), person(12, true)},
 	})
 	m, _ = update(m, voicePresenceReceived{gen: m.voice.gen, doc: doc})
 	got := m.voiceLine(80)

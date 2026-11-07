@@ -277,6 +277,9 @@ func walkCases(t *testing.T) []walkCase {
 		{key: "voice camera", ownWords: true, quietWhenOK: true, args: func(u, _ string) []string {
 			return []string{"voice", "camera", "stop", "--server", u, "general", "9"}
 		}},
+		{key: "voice share", ownWords: true, quietWhenOK: true, args: func(u, _ string) []string {
+			return []string{"voice", "share", "stop", "--server", u, "general", "9"}
+		}},
 		{key: "voice where", quietWhenOK: true, args: func(u, _ string) []string { return []string{"voice", "where", "--server", u} }},
 		{key: "approvals list", args: func(u, _ string) []string { return []string{"approvals", "list", "--server", u} }},
 		{key: "approve", whoamiOK: true, args: func(u, _ string) []string { return []string{"approve", "--server", u, "--reason", "fine", "1"} }},
@@ -505,7 +508,7 @@ func hostileServer(t *testing.T, ok, whoamiOK bool) *httptest.Server {
 			write(w, http.StatusOK, schema.DisableJoinersResponseV1{DryRun: true, Count: 1, PrincipalIDs: []int64{5}})
 		case "GET /v1/invites/settings":
 			write(w, http.StatusOK, schema.InviteSettingsV1{Paused: true})
-		case "PUT /v1/principals/9/invite-permission", "DELETE /v1/sign-in-links/9", "DELETE /v1/invites/9", "DELETE /v1/channels/general/voice/camera":
+		case "PUT /v1/principals/9/invite-permission", "DELETE /v1/sign-in-links/9", "DELETE /v1/invites/9", "DELETE /v1/channels/general/voice/camera", "DELETE /v1/channels/general/voice/share":
 			w.WriteHeader(http.StatusNoContent)
 		case "POST /v1/principals/9/sign-in-links":
 			write(w, http.StatusCreated, schema.CreateSignInLinkResponseV1{
@@ -513,8 +516,8 @@ func hostileServer(t *testing.T, ok, whoamiOK bool) *httptest.Server {
 				Code:       schema.SignInLinkCodePrefix + strings.Repeat("A", schema.SignInLinkCodeLength-len(schema.SignInLinkCodePrefix)),
 			})
 		case "GET /v1/channels/general/voice":
-			write(w, http.StatusOK, schema.VoicePresenceV1{Schema: schema.VoicePresenceSchemaV1, ChannelID: 1, Configured: true, Available: true, Rooms: []schema.VoicePresenceRoom{{
-				Participants: []schema.VoiceParticipant{{PrincipalID: 42, JoinedAt: ts}, {PrincipalID: 43, CanPublish: true, Camera: true, JoinedAt: ts}},
+			write(w, http.StatusOK, schema.VoicePresenceV2{Schema: schema.VoicePresenceSchemaV2, ChannelID: 1, Configured: true, Available: true, Rooms: []schema.VoicePresenceRoomV2{{
+				Participants: []schema.VoiceParticipantV2{{PrincipalID: 42, JoinedAt: ts}, {PrincipalID: 43, CanPublish: true, Camera: true, JoinedAt: ts}},
 			}}})
 		case "GET /v1/voice/occupancy":
 			write(w, http.StatusOK, schema.VoiceOccupancyV1{Schema: schema.VoiceOccupancySchemaV1, Configured: true, Available: true,
