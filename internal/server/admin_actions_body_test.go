@@ -27,6 +27,8 @@ func TestAdminDispatchedBodies(t *testing.T) {
 		{"rename a channel", schema.AdminActionRenameChannel, channel, `{"name":"new"}`, `{"name":"new","from":"old"}`, false},
 		{"add a member", schema.AdminActionAddChannelMember, channel, `{"principal_id":7}`, `{"id":7}`, false},
 		{"add a member with rights", schema.AdminActionAddChannelMember, channel, `{"principal_id":7,"can_decide":true}`, "", true},
+		// The refusal of a zero id is what keeps id,omitempty from sending {}.
+		{"add member zero", schema.AdminActionAddChannelMember, channel, `{"principal_id":0}`, "", true},
 		{"rights: decides", schema.AdminActionSetChannelMemberRights, channel, `{"principal_id":7,"can_decide":true}`, `{"can_decide":true}`, false},
 		{"rights: manages", schema.AdminActionSetChannelMemberRights, channel, `{"principal_id":7,"manages":false}`, `{"manages":false}`, false},
 		{"rights: both", schema.AdminActionSetChannelMemberRights, channel, `{"principal_id":7,"can_decide":false,"manages":true}`, `{"can_decide":false,"manages":true}`, false},
