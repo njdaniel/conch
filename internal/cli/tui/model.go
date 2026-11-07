@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/coder/websocket"
 	"slices"
 	"sort"
 	"strconv"
@@ -58,6 +59,9 @@ type API interface {
 }
 
 type channelsLoaded struct {
+	// refresh marks a re-read after a channel-list signal or reconnect. A
+	// failure then keeps the list already on screen.
+	refresh  bool
 	channels []schema.ChannelV0
 	err      error
 }
@@ -65,6 +69,9 @@ type messagesLoaded struct {
 	channel  string
 	messages []schema.MessageV2
 	err      error
+	// rev is the revision of what the model held under the name when the read
+	// began (subscriptions.life); an answer of another revision is dropped.
+	rev int
 	// following is set on a load that opens the channel's message socket once
 	// the page is in (loadAndFollow); when that load fails there is no socket
 	// and the model retries it.
@@ -72,6 +79,8 @@ type messagesLoaded struct {
 }
 type messageReceived struct {
 	channel string
+	// gen is the generation of the socket that read it (subscriptions).
+	gen     int
 	message schema.MessageV2
 }
 
@@ -104,9 +113,13 @@ type netTarget struct {
 // subscriptionOpened says the server accepted channel's message socket. A
 // resumed stream may have nothing to send for a long time, so this, not a
 // message, is what ends "reconnecting".
-type subscriptionOpened struct{ channel string }
+type subscriptionOpened struct {
+	channel string
+	gen     int
+}
 type subscriptionEnded struct {
 	channel string
+	gen     int
 	err     error
 	// lived is how long the subscription ran; one that stayed up for a while
 	// was healthy, so the next drop starts the backoff over.
@@ -189,8 +202,12 @@ type Model struct {
 	// <label> · <tag>", with when the visit ends. nil for everyone else.
 	visit *schema.GuestV1
 	// whoErr is why whoami failed; nil while it is pending or after success.
-	whoErr     error
-	channels   []string
+	whoErr   error
+	channels []string
+	// channelIDs lets a refresh follow a channel whose name changed.
+	channelIDs map[string]int64
+	// subs holds each channel's message socket and its generation.
+	subs       *subscriptions
 	selected   int
 	messages   map[string][]schema.MessageV2
 	subscribed map[string]bool
@@ -225,10 +242,12 @@ type Model struct {
 	// the same message at the bottom (scrollAnchor).
 	scroll int
 	// loadingChannels is true while the channel list is being fetched from the
-	// server; the model has no channels until channelsLoaded arrives.
+	// server; initially the model has no channels until channelsLoaded arrives.
 	loadingChannels bool
-	// notice is a channel-list problem that must survive the "connected"
-	// status the first backfill would otherwise write.
+	// channelsAgain collapses signals received during a fetch into one more.
+	channelsAgain bool
+	// notice is a channel-list notice that must survive the "connected" status
+	// a backfill would otherwise write.
 	notice string
 	// channelsErr is why the channel list could not be read. There are then
 	// no channels, and the message pane says what failed and where.
@@ -407,6 +426,7 @@ func NewModel(ctx context.Context, api API, authorID int64, channels []string) M
 		}
 	}
 	m := Model{ctx: ctx, api: api, authorID: authorID,
+		channelIDs: make(map[string]int64), subs: newSubscriptions(),
 		messages: make(map[string][]schema.MessageV2), nets: make(map[string][]schema.NetV1), members: make(map[string]map[int64]schema.ChannelMemberV1), memberRevision: make(map[string]uint64), now: time.Now, subscribed: make(map[string]bool),
 		events: make(chan tea.Msg, 64), mode: modeChannels,
 		backoff: make(map[string]time.Duration), retryPending: make(map[string]bool), after: tickAfter, wrapped: &wrappedBody{},
@@ -751,6 +771,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.eventsActivity(msg)
 	case eventsInterventionReceived:
 		return m.eventsIntervention(msg)
+	case eventsChannelsReceived:
+		if msg.gen != m.ev.gen {
+			return m, m.waitEvent()
+		}
+		return m, tea.Batch(m.waitEvent(), m.refreshChannels())
 	case eventsPermissionsReceived:
 		// The frame says only that they may have changed: whoami is read
 		// again, and the pane and the offered commands follow its answer.
@@ -849,40 +874,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.loadApprovals()
 		}
 	case channelsLoaded:
-		if !m.loadingChannels {
-			return m, nil
-		}
-		m.loadingChannels = false
-		names := make([]string, 0, len(msg.channels))
-		for _, channel := range msg.channels {
-			if name := strings.TrimSpace(channel.Name); name != "" {
-				names = append(names, name)
-			}
-		}
-		switch {
-		case msg.err != nil:
-			// No stand-in channel: one that may not exist, on a server that may
-			// not be there, only hid why nothing worked (issue #522). The
-			// message pane gives the whole error; the status line is too short.
-			m.channelsErr = msg.err
-			m.notice = "cannot read the channel list"
-			if errors.Is(msg.err, cli.ErrUnauthenticated) {
-				m.notice = msg.err.Error()
-			}
-			m.setStatus(modeChannels, m.notice)
-			return m, nil
-		case len(names) == 0:
-			m.notice = "no channels on server"
-			names = []string{defaultChannel}
-		}
-		m.setStatus(modeChannels, m.notice)
-		m.channels = names
-		m.selected = defaultSelection(names)
-		// The channel on screen may have changed under the user.
-		m.target = nil
-		m.pendingNet = ""
-		m.subscribed[m.current()] = true
-		return m, tea.Batch(m.loadAndFollow(), m.loadNets(false, ""), m.loadMembers(), m.beginVoice(), m.beginEvents())
+		return m.channelsLoadDone(msg)
 	case netsLoaded:
 		return m.netsLoaded(msg)
 	case membersLoaded:
@@ -894,6 +886,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case authorsLoaded:
 		return m.authorsLoaded(msg)
 	case messagesLoaded:
+		if !m.subs.liveRev(msg.channel, msg.rev) {
+			// A read for a channel that was renamed or lost; the name may be
+			// another channel's now.
+			return m, nil
+		}
 		// The result of a channel the user has since left must not overwrite
 		// the status of the channel they are looking at.
 		stale := msg.channel != m.current()
@@ -901,10 +898,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// The socket was to open after this page: without it there is
 			// nothing to follow from, so it retries like a dropped one.
 			var retry tea.Cmd
+			if channelGone(msg.err) {
+				retry = m.refreshChannels()
+			}
 			if msg.following {
 				m.subscribed[msg.channel] = false
 				if !stale {
-					retry = m.scheduleResubscribe(msg.channel)
+					retry = tea.Batch(retry, m.scheduleResubscribe(msg.channel))
 				}
 			}
 			if stale {
@@ -939,6 +939,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, tea.Batch(m.markReading(), naming, hydrate)
 	case messageReceived:
+		if !m.subs.live(msg.channel, msg.gen) {
+			// A socket of a channel that was renamed or lost: its name may
+			// belong to another channel now.
+			return m, m.waitEvent()
+		}
 		// Data flowing proves the subscription is healthy.
 		delete(m.backoff, msg.channel)
 		var hydrate, arrival tea.Cmd
@@ -954,6 +959,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.markStreamed(msg.channel, msg.message)
 		return m, tea.Batch(m.waitEvent(), arrival, m.markReading(), m.nameAuthors(msg.channel), hydrate)
 	case subscriptionOpened:
+		if !m.subs.live(msg.channel, msg.gen) {
+			return m, m.waitEvent()
+		}
 		if msg.channel == m.current() && m.channelStatus == statusReconnecting && m.notice == "" {
 			m.setStatus(modeChannels, "connected")
 		}
@@ -1013,8 +1021,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // delay so a subscription that fails immediately cannot spin.
 func (m Model) subscriptionEnded(msg subscriptionEnded) (tea.Model, tea.Cmd) {
 	wait := m.waitEvent()
-	if errors.Is(msg.err, context.Canceled) || m.ctx.Err() != nil {
+	if !m.subs.live(msg.channel, msg.gen) || errors.Is(msg.err, context.Canceled) || m.ctx.Err() != nil {
 		return m, wait
+	}
+	if channelGone(msg.err) {
+		// Removed from it, or it is gone: the list says which.
+		wait = tea.Batch(wait, m.refreshChannels())
 	}
 	m.subscribed[msg.channel] = false
 	m.rs.dropped[msg.channel] = true
@@ -1167,22 +1179,164 @@ func (m Model) loadChannels() tea.Cmd {
 	}
 }
 
+// refreshChannels starts one channel-list re-read. Signals that arrive during
+// it ask for one more, never a parallel read.
+func (m *Model) refreshChannels() tea.Cmd {
+	if m.loadingChannels {
+		m.channelsAgain = true
+		return nil
+	}
+	m.loadingChannels = true
+	return m.reloadChannels()
+}
+
+func (m Model) reloadChannels() tea.Cmd {
+	return func() tea.Msg {
+		resp, err := m.api.ListChannels(m.ctx)
+		return channelsLoaded{channels: resp.Channels, err: err, refresh: true}
+	}
+}
+
+func (m *Model) nextChannelsLoad(again bool, cmd tea.Cmd) tea.Cmd {
+	if !again {
+		return cmd
+	}
+	return tea.Batch(cmd, m.refreshChannels())
+}
+
+func (m Model) channelsLoadDone(msg channelsLoaded) (tea.Model, tea.Cmd) {
+	if !m.loadingChannels {
+		return m, nil
+	}
+	m.loadingChannels = false
+	again := m.channelsAgain
+	m.channelsAgain = false
+	names := make([]string, 0, len(msg.channels))
+	ids := make([]int64, 0, len(msg.channels))
+	for _, channel := range msg.channels {
+		if name := strings.TrimSpace(channel.Name); name != "" {
+			names = append(names, name)
+			ids = append(ids, channel.ID)
+		}
+	}
+	if msg.err != nil {
+		notice := "cannot read the channel list"
+		if errors.Is(msg.err, cli.ErrUnauthenticated) {
+			notice = msg.err.Error()
+		}
+		if msg.refresh {
+			m.setStatus(modeChannels, notice)
+			return m, m.nextChannelsLoad(again, nil)
+		}
+		// No stand-in channel: one that may not exist, on a server that may
+		// not be there, only hid why nothing worked (issue #522). The
+		// message pane gives the whole error; the status line is too short.
+		m.channelsErr = msg.err
+		m.notice = notice
+		m.setStatus(modeChannels, notice)
+		return m, m.nextChannelsLoad(again, nil)
+	}
+
+	empty := len(names) == 0
+	if empty {
+		names = []string{defaultChannel}
+		ids = []int64{0}
+	}
+	nextIDs := make(map[string]int64, len(names))
+	for i, name := range names {
+		nextIDs[name] = ids[i]
+	}
+	if !msg.refresh {
+		m.channels = names
+		m.channelIDs = nextIDs
+		m.selected = defaultSelection(names)
+		m.notice = ""
+		if empty {
+			m.notice = "no channels on server"
+		}
+		m.setStatus(modeChannels, m.notice)
+		// The channel on screen may have changed under the user.
+		m.target = nil
+		m.pendingNet = ""
+		m.subscribed[m.current()] = true
+		cmd := tea.Batch(m.loadAndFollow(), m.loadNets(false, ""), m.loadMembers(), m.beginVoice(), m.beginEvents())
+		return m, m.nextChannelsLoad(again, cmd)
+	}
+
+	previous := m.current()
+	previousID := m.channelIDs[previous]
+	selected := -1
+	for i, name := range names {
+		if previousID > 0 && ids[i] == previousID || previousID == 0 && name == previous {
+			selected = i
+			break
+		}
+	}
+	lost := previous != "" && selected < 0
+	renamed := selected >= 0 && names[selected] != previous
+	// A name that left the list, lost or renamed away, may be taken by another
+	// channel: nothing of the old one stays under it, and its socket is closed.
+	m.forgetMissing(m.channelIDs, nextIDs)
+	if previous == "" {
+		selected = defaultSelection(names)
+	}
+	if selected < 0 {
+		selected = 0
+	}
+	m.channels = names
+	m.channelIDs = nextIDs
+	m.channelsErr = nil
+	// The names move with the revision, in one step: a read begun from here
+	// on carries both, so it cannot pair the old names with the new revision.
+	m.rs.listRev++
+	m.rs.names = make(map[int64]string, len(names))
+	for i, name := range names {
+		if ids[i] != 0 {
+			m.rs.names[ids[i]] = name
+		}
+	}
+	m.selected = selected
+	m.notice = ""
+	if empty {
+		m.notice = "no channels on server"
+	}
+	var cmd tea.Cmd
+	if lost || renamed || previous == "" {
+		status := m.channelStatus
+		m, cmd = m.openSelected()
+		switch {
+		case lost:
+			m.notice = sanitize(fmt.Sprintf("#%s is no longer available to you.", previous))
+			m.setStatus(modeChannels, m.notice)
+		case previous == "":
+			m.setStatus(modeChannels, m.notice)
+		default:
+			m.setStatus(modeChannels, status)
+		}
+	} else if m.notice != "" {
+		m.setStatus(modeChannels, m.notice)
+	}
+	cmd = tea.Batch(cmd, m.loadReadStateFor(msg.channels))
+	return m, m.nextChannelsLoad(again, cmd)
+}
+
 func (m Model) loadCurrent() tea.Cmd {
 	channel := m.current()
 	if channel == "" {
 		return nil
 	}
+	ctx, rev := m.subs.life(m.ctx, channel)
 	return func() tea.Msg {
 		// One request for the newest page, whatever the channel's size; older
 		// history is not shown, and the TUI has no scroll-back to fetch it.
-		page, err := m.api.ListMessagesV2Page(m.ctx, channel, cli.MessagesPage{NewestFirst: true}, historyLimit)
+		page, err := m.api.ListMessagesV2Page(ctx, channel, cli.MessagesPage{NewestFirst: true}, historyLimit)
 		if err != nil {
-			return messagesLoaded{channel: channel, err: err}
+			return messagesLoaded{channel: channel, rev: rev, err: err}
 		}
 		// The server sends newest first; the model holds ascending.
 		messages := slices.Clone(page.Messages)
 		slices.Reverse(messages)
-		return messagesLoaded{channel: channel, messages: messages}
+		return messagesLoaded{channel: channel, rev: rev, messages: messages}
 	}
 }
 
@@ -1195,6 +1349,7 @@ func (m Model) loadAndFollow() tea.Cmd {
 	if load == nil {
 		return nil
 	}
+	ctx, gen := m.subs.open(m.ctx, channel)
 	return func() tea.Msg {
 		loaded := load().(messagesLoaded)
 		loaded.following = true
@@ -1205,7 +1360,7 @@ func (m Model) loadAndFollow() tea.Cmd {
 					after = message.ID
 				}
 			}
-			m.follow(channel, after)
+			m.follow(ctx, gen, channel, after)
 		}
 		return loaded
 	}
@@ -1233,37 +1388,50 @@ func (m Model) startSubscription(channel string) tea.Cmd {
 		return nil
 	}
 	after := m.lastID(channel)
+	ctx, gen := m.subs.open(m.ctx, channel)
 	return func() tea.Msg {
-		m.follow(channel, after)
+		m.follow(ctx, gen, channel, after)
 		return nil
 	}
 }
 
 // follow opens channel's message socket after the message with id after, in a
 // goroutine that reports every message, and its end, as events.
-func (m Model) follow(channel string, after int64) {
+func (m Model) follow(ctx context.Context, gen int, channel string, after int64) {
 	go func() {
 		started := time.Now()
 		opened := func() {
 			select {
-			case m.events <- subscriptionOpened{channel: channel}:
-			case <-m.ctx.Done():
+			case m.events <- subscriptionOpened{channel: channel, gen: gen}:
+			case <-ctx.Done():
 			}
 		}
-		err := m.api.SubscribeV2After(m.ctx, channel, after, opened, func(message schema.MessageV2) error {
+		err := m.api.SubscribeV2After(ctx, channel, after, opened, func(message schema.MessageV2) error {
 			select {
-			case m.events <- messageReceived{channel: channel, message: message}:
+			case m.events <- messageReceived{channel: channel, gen: gen, message: message}:
 				return nil
-			case <-m.ctx.Done():
-				return m.ctx.Err()
+			case <-ctx.Done():
+				return ctx.Err()
 			}
 		})
 		select {
-		case m.events <- subscriptionEnded{channel: channel, err: err, lived: time.Since(started)}:
-		case <-m.ctx.Done():
+		case m.events <- subscriptionEnded{channel: channel, gen: gen, err: err, lived: time.Since(started)}:
+		case <-ctx.Done():
 		}
 	}()
 }
+
+// channelGone reports whether err says the person is no longer in the channel
+// the socket was opened for, or that it does not exist: a close for loss of
+// membership, or the refusal a later attempt meets.
+func channelGone(err error) bool {
+	return err != nil && (websocket.CloseStatus(err) == websocket.StatusPolicyViolation ||
+		cli.IsServerCode(err, errChannelNotFound))
+}
+
+// errChannelNotFound is the server's refusal for a channel the caller is not in
+// as for one that does not exist.
+const errChannelNotFound = "channel_not_found"
 
 func (m Model) waitEvent() tea.Cmd {
 	return func() tea.Msg {

@@ -61,6 +61,45 @@ func (g *eventsGot) handler() EventHandler {
 	}
 }
 
+func TestDispatchChannelsChanged(t *testing.T) {
+	tests := []struct {
+		name      string
+		frame     string
+		handler   bool
+		wantCalls int
+		wantErr   string
+	}{
+		{name: "valid frame", frame: `{"schema":"conch.channels_changed.v1","later":1}`, handler: true, wantCalls: 1},
+		{name: "malformed frame", frame: `{"schema":"conch.channels_changed.v1"`, handler: true, wantErr: "cli: read events"},
+		{name: "no handler set", frame: `{"schema":"conch.channels_changed.v1"}`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			calls := 0
+			handler := EventHandler{}
+			if tt.handler {
+				handler.ChannelsChanged = func(got schema.ChannelsChangedV1) error {
+					calls++
+					if got.Schema != schema.ChannelsChangedSchemaV1 {
+						t.Errorf("schema = %q", got.Schema)
+					}
+					return nil
+				}
+			}
+			err := dispatchEvent(json.RawMessage(tt.frame), handler)
+			if tt.wantErr == "" && err != nil {
+				t.Fatalf("dispatchEvent() error = %v", err)
+			}
+			if tt.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tt.wantErr)) {
+				t.Fatalf("dispatchEvent() error = %v, want it to mention %q", err, tt.wantErr)
+			}
+			if calls != tt.wantCalls {
+				t.Errorf("handler calls = %d, want %d", calls, tt.wantCalls)
+			}
+		})
+	}
+}
+
 func TestClientSubscribeEventsDocuments(t *testing.T) {
 	badRun := testRun(5)
 	badRun.State = "sleeping"
