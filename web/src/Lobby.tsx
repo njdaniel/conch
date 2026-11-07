@@ -399,32 +399,36 @@ export function Lobby({
           </div>
         </header>
         <div className={panelOpen ? 'areas' : 'areas side-closed'} inert={settingsOpen || asking}>
-          <nav aria-label="Channels" className="channels">
+          {/* The switcher's entry is above the Channels navigation, not in it: that holds channel controls only. */}
+          <div className="channels">
+            {channels.loaded ? (
+              <ChannelNav
+                channels={channels.channels}
+                unread={unread}
+                selected={channels.selected}
+                me={me}
+                refresh={directoryTick}
+                onOpen={(name) => {
+                  onOpen(name);
+                  if (phone) {
+                    toHeading.current = true;
+                    setView('chat');
+                  }
+                }}
+                {...(onBrowse === undefined
+                  ? {}
+                  : {
+                      onBrowse: (name: string) => {
+                        onBrowse(name);
+                        if (phone) setView('channels');
+                      },
+                    })}
+              />
+            ) : null}
+          <nav aria-label="Channels">
             <h2>Channels</h2>
             {channels.loaded ? (
               <>
-                <ChannelNav
-                  channels={channels.channels}
-                  unread={unread}
-                  selected={channels.selected}
-                  me={me}
-                  refresh={directoryTick}
-                  onOpen={(name) => {
-                    onOpen(name);
-                    if (phone) {
-                      toHeading.current = true;
-                      setView('chat');
-                    }
-                  }}
-                  {...(onBrowse === undefined
-                    ? {}
-                    : {
-                        onBrowse: (name: string) => {
-                          onBrowse(name);
-                          if (phone) setView('channels');
-                        },
-                      })}
-                />
                 <ChannelList
                   channels={channels.channels}
                   selected={channels.selected}
@@ -471,6 +475,7 @@ export function Lobby({
               <p className="empty">Loading channels…</p>
             )}
           </nav>
+          </div>
           <main className="centre">
             <div ref={setStage} className="stage" />
             <section ref={conversationEl} aria-label="Conversation" className="conversation">
