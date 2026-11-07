@@ -2464,6 +2464,28 @@ export function writeNotificationPreferences(origin: string, account: number, pr
   }
 }
 
+// How a person arranges the channel list (issue #1493): favorites, groups and
+// the order in them, kept in this browser for one account on one server. It is
+// a view and nothing more; arrangement.ts reads whatever is here defensively,
+// so this hands back the raw parsed value (null when none or unreadable).
+const arrangementKey = (origin: string, account: number) => `conch.web.arrangement.v1.${origin}.${String(account)}`;
+
+export function readArrangement(origin: string, account: number): unknown {
+  try {
+    return JSON.parse(platform.credentials.readPreference(arrangementKey(origin, account)) ?? 'null') as unknown;
+  } catch {
+    return null;
+  }
+}
+
+export function writeArrangement(origin: string, account: number, value: unknown): void {
+  try {
+    platform.credentials.writePreference(arrangementKey(origin, account), JSON.stringify(value));
+  } catch {
+    // Storage can be unavailable; the arrangement still applies until the page closes.
+  }
+}
+
 // The microphone mode the person chose for voice (issue #1244): a per-browser,
 // non-secret preference. Absent, unreadable or anything else is no choice (null),
 // and the voice client then starts in open microphone.

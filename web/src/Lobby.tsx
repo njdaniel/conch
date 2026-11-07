@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
 import { ChannelList } from './ChannelList';
 import { ChannelNav } from './ChannelNav';
+import { visualOrder } from './arrangement';
+import { useArrangement } from './useArrangement';
 import type { SettingsChange } from './ChannelSettingsAsk';
 import type { InVoice } from './voice/useOccupancy';
 import { headingId } from './Conversation';
@@ -191,6 +193,9 @@ export function Lobby({
   // a time. All of them stay mounted, so a switch only changes what is shown:
   // the draft, the log's place and the call are untouched.
   const phone = usePhone();
+  // The person's own favorites, groups and order (issue #1493).
+  const arranged = useArrangement(origin, me, channels.channels, channels.loaded);
+  const inVisualOrder = useMemo(() => visualOrder(arranged.arrangement, channels.channels), [arranged.arrangement, channels.channels]);
   useAppHeight(phone);
   // Until a view is chosen: Chat once a channel is open, Channels while the
   // list is loading, failed to load, or has nothing open to chat in.
@@ -404,7 +409,7 @@ export function Lobby({
             {channels.loaded ? (
               <>
                 <ChannelNav
-                  channels={channels.channels}
+                  channels={inVisualOrder}
                   unread={unread}
                   selected={channels.selected}
                   me={me}
@@ -426,6 +431,7 @@ export function Lobby({
                       })}
                 />
                 <ChannelList
+                  {...(visit === undefined ? { arrangement: arranged } : {})}
                   channels={channels.channels}
                   selected={channels.selected}
                   unread={unread}
