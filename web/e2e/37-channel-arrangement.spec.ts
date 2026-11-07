@@ -309,7 +309,7 @@ test.describe('with a voice session', () => {
 
       // A real share, on Chromium's fake screen, that reordering must not touch.
       await voice.getByRole('button', { name: 'Share screen' }).click();
-      await expect(voice).toContainText('You are sharing your screen with its sound.', { timeout: 30_000 });
+      await expect(voice).toContainText('You are sharing your screen with sound.', { timeout: 30_000 });
 
       await choose(page, other, 'Favorite');
       await choose(page, 'voice-room', 'Favorite');
@@ -326,7 +326,7 @@ test.describe('with a voice session', () => {
       await expect(voice).toContainText(/Connected in #voice-room/);
       await expect(voice.getByRole('button', { name: 'Leave voice' })).toBeVisible();
       await expect(voice.getByRole('button', { name: 'Join voice' })).toHaveCount(0);
-      await expect(voice).toContainText('You are sharing your screen with its sound.');
+      await expect(voice).toContainText('You are sharing your screen with sound.');
       await expect(voice.getByRole('button', { name: 'Stop sharing' })).toBeVisible();
       await voice.getByRole('button', { name: 'Stop sharing' }).click();
     } finally {
