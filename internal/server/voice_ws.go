@@ -28,6 +28,11 @@ import (
 // opened with is revoked.
 func (s *Server) handleVoiceWS(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
+	version, ok := voicePresenceVersion(r.URL.Query())
+	if !ok {
+		writeVoicePresenceSchemaInvalid(w)
+		return
+	}
 	name := r.URL.Query().Get("channel")
 	if name == "" {
 		writeError(w, http.StatusBadRequest, "invalid_request", "channel query parameter is required")
@@ -76,7 +81,7 @@ func (s *Server) handleVoiceWS(w http.ResponseWriter, r *http.Request) {
 		defer ticker.Stop()
 		recheck = ticker.C
 	}
-	s.streamVoice(ctx, conn, sub, channel.ID, caller.ID, credID, recheck)
+	s.streamVoice(ctx, conn, sub, channel.ID, caller.ID, credID, version, recheck)
 }
 
 // streamVoice writes presence until the peer leaves, the subscription is
@@ -84,16 +89,16 @@ func (s *Server) handleVoiceWS(w http.ResponseWriter, r *http.Request) {
 // whole snapshot and sends it only if it differs from the last one sent, so
 // the socket carries one frame per change and nothing otherwise. Writes carry
 // a deadline; the poller never waits for this loop.
-func (s *Server) streamVoice(ctx context.Context, conn *websocket.Conn, sub *voiceSub, channelID, principalID, credID int64, recheck <-chan time.Time) {
+func (s *Server) streamVoice(ctx context.Context, conn *websocket.Conn, sub *voiceSub, channelID, principalID, credID int64, version string, recheck <-chan time.Time) {
 	ctx = s.keepAlive(ctx, conn, false)
 	var last []byte
 	send := func() bool {
-		snap, live := sub.current()
+		snap, live, err := sub.current(version)
 		if !live {
 			s.closeVoiceDropped(ctx, conn, sub, channelID, principalID, credID)
 			return false
 		}
-		if err := snap.Validate(); err != nil {
+		if err != nil {
 			slog.ErrorContext(ctx, "voice ws: built an invalid presence document", "channel", channelID, "error", err)
 			closeWS(ctx, conn, schema.SocketCloseError, websocket.StatusInternalError, "internal error")
 			return false
