@@ -112,10 +112,13 @@ export interface PersonActionsProps {
   // What a disable or a demotion listed as issued to others. The list is kept
   // by the caller, outside this row: a disabled person leaves the directory and
   // the row with it, and the owner's way to end what they issued must stay.
-  readonly onIssued: (items: readonly IssuedByOperatorV1[]) => void;
+  // Called as a disable or a role change is sent; the function it returns takes
+  // the answer's list, and drops it if the viewer's standing, identity or
+  // server changed since (a late answer cannot refill a cleared list).
+  readonly beginIssued: () => (items: readonly IssuedByOperatorV1[]) => void;
 }
 
-export function PersonActions({ who, person, origin, rows, readRows, open, onOpenChange, button, onChanged, onUnauthorized, onIssued }: PersonActionsProps) {
+export function PersonActions({ who, person, origin, rows, readRows, open, onOpenChange, button, onChanged, onUnauthorized, beginIssued }: PersonActionsProps) {
   const actions = memberActions(who, person);
   // What the viewer may do now, for the moment a request is sent.
   const allowed = useRef<readonly MemberAction[]>(actions);
@@ -303,9 +306,12 @@ export function PersonActions({ who, person, origin, rows, readRows, open, onOpe
               busy={busy}
               onYes={() => {
                 if (panel.id === 'signout') send('signout', () => api.signOutPrincipalEverywhere(person.id), 'Nobody was signed out.', () => `${name} is signed out everywhere.`);
-                else if (panel.id === 'disable') send('disable', () => api.disablePrincipal(person.id), 'Nothing was changed.', () => `${name} is disabled and signed out.`, undefined, undefined, (r) => {
-                    onIssued(r.issued_to_others ?? []);
+                else if (panel.id === 'disable') {
+                  const settle = beginIssued();
+                  send('disable', () => api.disablePrincipal(person.id), 'Nothing was changed.', () => `${name} is disabled and signed out.`, undefined, undefined, (r) => {
+                    settle(r.issued_to_others ?? []);
                   });
+                }
                 else send('remove', () => api.hidePrincipal(person.id), 'Nobody was removed.', () => `${name} is removed from the server.`);
               }}
               onCancel={close}
@@ -318,6 +324,7 @@ export function PersonActions({ who, person, origin, rows, readRows, open, onOpe
               busy={busy}
               onCancel={close}
               onSubmit={(to) => {
+                const settle = beginIssued();
                 send(
                   'role',
                   () => api.setRole(person.id, to === 'member' ? { role: 'member' } : { role: 'operator', owner: to === 'owner' }),
@@ -329,7 +336,7 @@ export function PersonActions({ who, person, origin, rows, readRows, open, onOpe
                   undefined,
                   undefined,
                   (r) => {
-                    onIssued(r.issued_to_others ?? []);
+                    settle(r.issued_to_others ?? []);
                   },
                 );
               }}

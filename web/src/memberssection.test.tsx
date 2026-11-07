@@ -1174,13 +1174,54 @@ describe('what a person issued to others', () => {
       expect(document.querySelector('.issued-list')).toBeNull();
     });
     expect(document.body.textContent).not.toContain('issued by operator-1');
+    // Given back, the list is still gone: it was cleared, not only hidden.
+    viewer = owner;
+    await tick();
+    await within(region).findByRole('list', { name: 'People' });
+    await settled();
+    expect(document.querySelector('.issued-list')).toBeNull();
+  });
+
+  // An answer to a request sent before a change of standing, person or server
+  // does not refill the list (it is dropped, not held).
+  it.each([
+    ['standing lost and given back', { ...owner, owner: false, permissions: operatorRights.filter((p) => p !== 'manage_members') }, origin, true],
+    ['another principal', { ...operator, id: 7, name: 'someone-else' }, origin, false],
+    ['another server', owner, 'http://127.0.0.1:9090', false],
+  ])('drops a late answer after %s', async (_label, mid, midOrigin, back) => {
+    let answer: (r: Response) => void = () => undefined;
+    let asked = false;
+    serve(owner, {
+      routes: {
+        'POST /v1/principals/2/disable': () =>
+          new Promise<Response>((resolve) => {
+            asked = true;
+            answer = resolve;
+          }),
+      },
+    });
+    window.sessionStorage.setItem(key, 'conch_owner_session_token');
+    const props = { channelIds: '1', onUnauthorized: () => undefined };
+    const shown = render(<CommunityMembers viewer={owner.id} who={owner} origin={origin} {...props} />);
+    const region = await screen.findByRole('region', { name: 'Community members' });
+    await within(region).findByRole('list', { name: 'People' });
+    await disableOperator(region);
+    await waitFor(() => {
+      expect(asked).toBe(true);
+    });
+    shown.rerender(<CommunityMembers viewer={mid.id} who={mid} origin={midOrigin} {...props} />);
+    if (back) shown.rerender(<CommunityMembers viewer={owner.id} who={owner} origin={origin} {...props} />);
+    answer(json({ issued_to_others: issuedList }));
+    await settled();
+    expect(document.querySelector('.issued-list')).toBeNull();
+    expect(document.body.textContent).not.toContain('issued by operator-1');
   });
 
   // The App ignores a whoami for another principal (auth.ts, 'refreshed'), so
   // this identity change is made on the list itself, the way a switch of person
   // or server reaches it.
   it.each([
-    ['another principal without manage_members', { ...withoutMembers, id: 7, name: 'someone-else' }, origin],
+    ['another principal who also holds manage_members', { ...operator, id: 7, name: 'someone-else' }, origin],
     ['the same principal on another server', owner, 'http://127.0.0.1:9090'],
   ])('takes every list away when the viewer becomes %s', async (_label, next, nextOrigin) => {
     serve(owner, { routes: { 'POST /v1/principals/2/disable': () => json({ issued_to_others: issuedList }) } });

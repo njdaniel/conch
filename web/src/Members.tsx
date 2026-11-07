@@ -460,7 +460,7 @@ export interface RowManage {
   readonly readRows: () => void;
   readonly onChanged: (done?: string) => void;
   readonly onUnauthorized: () => void;
-  readonly onIssued: (person: ServerMemberV1, items: readonly IssuedByOperatorV1[]) => void;
+  readonly beginIssued: () => (person: ServerMemberV1, items: readonly IssuedByOperatorV1[]) => void;
 }
 
 function CommunityRow({
@@ -510,8 +510,11 @@ function CommunityRow({
           button={more}
           onChanged={manage.onChanged}
           onUnauthorized={manage.onUnauthorized}
-          onIssued={(items) => {
-            manage.onIssued(person, items);
+          beginIssued={() => {
+            const settle = manage.beginIssued();
+            return (items) => {
+              settle(person, items);
+            };
           }}
         />
       )}
@@ -590,10 +593,17 @@ export function CommunityMembers({
   // Losing the standing, or another person or server, takes the lists away.
   const viewerId = who?.id;
   const holdsMembers = who !== undefined && canDo(who, 'manage_members');
+  // Every such change starts a new context; an answer to a request sent in an
+  // earlier one is dropped (a late answer cannot refill a cleared list).
+  const context = useRef(0);
   useEffect(() => {
-    if (!holdsMembers) setIssued([]);
+    if (!holdsMembers) {
+      context.current += 1;
+      setIssued([]);
+    }
   }, [holdsMembers]);
   useEffect(() => {
+    context.current += 1;
     setIssued([]);
   }, [viewerId, origin]);
 
@@ -689,8 +699,12 @@ export function CommunityMembers({
                   person={person}
                   byId={byId}
                   viewer={viewer}
-                  manage={who === undefined ? undefined : { who, origin, rows, readRows, onIssued: (issuer, items) => {
-                      setIssued((now) => [...now.filter(sameIssuer(issuer.id)), ...(items.length === 0 ? [] : [{ id: issuer.id, name: issuer.name, items }])]);
+                  manage={who === undefined ? undefined : { who, origin, rows, readRows, beginIssued: () => {
+                      const started = context.current;
+                      return (issuer, items) => {
+                        if (started !== context.current) return;
+                        setIssued((now) => [...now.filter(sameIssuer(issuer.id)), ...(items.length === 0 ? [] : [{ id: issuer.id, name: issuer.name, items }])]);
+                      };
                     }, onChanged: (done) => {
                       setNote(done ?? '');
                       wantsFocus.current = true;
