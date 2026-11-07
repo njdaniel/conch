@@ -146,11 +146,13 @@ const (
 // messageSent is the result of one post. raw is the text as typed, so the input
 // is cleared only if the user has not started something new since.
 type messageSent struct {
-	channel string
-	raw     string
-	whisper bool
-	message schema.MessageV2
-	err     error
+	channel   string
+	channelID int64
+	rev       int
+	raw       string
+	whisper   bool
+	message   schema.MessageV2
+	err       error
 }
 type approvalsLoaded struct {
 	approvals []schema.ApprovalV1
@@ -716,14 +718,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		case "backspace":
 			// The Agents and Runs views have no input: the draft is the channel's.
-			if m.input != "" && m.mode != modeAgents && m.mode != modeRuns {
+			if m.input != "" && m.mode != modeAgents && m.mode != modeRuns && (m.mode != modeChannels || !m.channelArchived(m.current())) {
 				clusters := textClusters(m.input)
 				m.input = strings.TrimSuffix(m.input, clusters[len(clusters)-1].text)
 			}
 		default:
 			// A lone space arrives as KeySpace, not KeyRunes; both carry Runes.
 			if msg.Type == tea.KeyRunes || msg.Type == tea.KeySpace {
-				if m.mode == modeChannels || m.mode == modeDecision {
+				if m.mode == modeDecision || (m.mode == modeChannels && !m.channelArchived(m.current())) {
 					m.input += string(msg.Runes)
 				}
 			}
@@ -771,7 +773,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case reactionWritten:
 		if cli.IsServerCode(msg.err, schema.ErrorCodeChannelArchived) {
 			m.react.writing = false
-			return m.archiveRefusal(msg.channel)
+			return m.archiveRefusal(msg.channel, msg.channelID, msg.rev)
 		}
 		return m.reactionDone(msg)
 	case reactorsListed:
@@ -811,9 +813,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case interventionsRead:
 		return m.interventionsRead(msg)
 	case interventionSent:
-		if msg.runID == m.rd.runID && cli.IsServerCode(msg.err, schema.ErrorCodeChannelArchived) {
-			m.rd.sending = false
-			return m.archiveRefusal(m.current())
+		if cli.IsServerCode(msg.err, schema.ErrorCodeChannelArchived) {
+			if msg.runID == m.rd.runID {
+				m.rd.sending = false
+			}
+			return m.archiveRefusal(msg.channel, msg.channelID, msg.rev)
 		}
 		return m.interventionSent(msg)
 	case sessionRunsLoaded:
@@ -1019,7 +1023,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case messageSent:
 		m.sending = false
 		if cli.IsServerCode(msg.err, schema.ErrorCodeChannelArchived) {
-			return m.archiveRefusal(msg.channel)
+			return m.archiveRefusal(msg.channel, msg.channelID, msg.rev)
 		}
 		if msg.err != nil {
 			// The typed text stays so it can be fixed or retried by hand;
@@ -1187,14 +1191,28 @@ func (m Model) markArchived(channel string) Model {
 	return m
 }
 
-func (m Model) archiveRefusal(channel string) (Model, tea.Cmd) {
+func (m Model) archiveRefusal(channel string, channelID int64, rev int) (Model, tea.Cmd) {
+	if channelID > 0 {
+		channel = ""
+		for name, id := range m.channelIDs {
+			if id == channelID {
+				channel = name
+				break
+			}
+		}
+	} else if !slices.Contains(m.channels, channel) || !m.subs.liveRev(channel, rev) {
+		// Without an id, only the same per-name lifetime may mark the channel.
+		channel = ""
+	}
 	selected := m.current()
-	m = m.markArchived(channel)
-	if channel == selected {
-		if m.mode == modeRun {
-			m.rd.status, m.rd.refusal = archivedChannelNotice, archivedChannelNotice
-		} else {
-			m.setStatus(modeChannels, archivedChannelNotice)
+	if channel != "" {
+		m = m.markArchived(channel)
+		if channel == selected {
+			if m.mode == modeRun {
+				m.rd.status, m.rd.refusal = archivedChannelNotice, archivedChannelNotice
+			} else {
+				m.setStatus(modeChannels, archivedChannelNotice)
+			}
 		}
 	}
 	return m, m.refreshChannels()
@@ -1571,9 +1589,11 @@ func (m Model) waitEvent() tea.Cmd {
 // and no fallback: whatever the server answers is reported as is.
 func (m Model) send(channel, raw, body string, audience *schema.Audience, whisper bool) tea.Cmd {
 	author := m.authorID
+	channelID := m.channelIDs[channel]
+	_, rev := m.subs.life(m.ctx, channel)
 	return func() tea.Msg {
 		posted, err := m.api.PostMessageV2(m.ctx, channel, author, body, audience)
-		return messageSent{channel: channel, raw: raw, whisper: whisper, message: posted, err: err}
+		return messageSent{channel: channel, channelID: channelID, rev: rev, raw: raw, whisper: whisper, message: posted, err: err}
 	}
 }
 

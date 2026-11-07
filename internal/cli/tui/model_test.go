@@ -3255,7 +3255,7 @@ func TestChannelArchivedAnswersForWrites(t *testing.T) {
 			case "send":
 				msg = messageSent{channel: "general", err: refusal}
 			case "reply":
-				msg = interventionSent{runID: 41, err: refusal}
+				msg = interventionSent{runID: 41, channel: "general", err: refusal}
 			case "react":
 				m.react.writing = true
 				msg = reactionWritten{channel: "general", err: refusal}
@@ -3269,5 +3269,131 @@ func TestChannelArchivedAnswersForWrites(t *testing.T) {
 				t.Errorf("channel did not become read-only: %q", m.inputRow(80))
 			}
 		})
+	}
+}
+
+func TestLateInterventionArchiveRefusalUsesOrigin(t *testing.T) {
+	refusal := &cli.ServerError{Status: 409, Code: schema.ErrorCodeChannelArchived}
+	tests := []struct {
+		name   string
+		before func(Model) Model
+	}{
+		{name: "run detail closed", before: func(m Model) Model { return m.closeRun("") }},
+		{name: "selection changed", before: func(m Model) Model {
+			m.selected = 1
+			return m
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			api := newRunAPI(testRun(41, schema.RunStateRunning))
+			api.createErr = refusal
+			m := openCurrent(runModel(t, api, schema.InterventionKindPause))
+			m = loadChannelsForTest(m, []schema.ChannelV0{{ID: 1, Name: "general"}, {ID: 2, Name: "ops"}})
+			if m.rd.runID != 41 {
+				t.Fatalf("run detail did not open: runID = %d", m.rd.runID)
+			}
+			_, cmd := m.ask(schema.CreateInterventionRequestV1{Kind: schema.InterventionKindPause})
+			result := cmd()
+			if got := result.(interventionSent).runID; got != 41 {
+				t.Fatalf("request result runID = %d, want 41", got)
+			}
+			m = tt.before(m)
+			m, refresh := update(m, result)
+			if !m.channelArchived("general") || m.channelArchived("ops") {
+				t.Errorf("archive state = general %v, ops %v; want only general", m.channelArchived("general"), m.channelArchived("ops"))
+			}
+			if refresh == nil {
+				t.Error("archive refusal did not refresh the channel list")
+			}
+		})
+	}
+}
+
+type archivedRefusalAPI struct {
+	*reactionStub
+	refusal error
+}
+
+func (a *archivedRefusalAPI) PostMessageV2(context.Context, string, int64, string, *schema.Audience) (schema.MessageV2, error) {
+	return schema.MessageV2{}, a.refusal
+}
+
+func TestLateWriteArchiveRefusalResolvesOrigin(t *testing.T) {
+	refusal := &cli.ServerError{Status: 409, Code: schema.ErrorCodeChannelArchived}
+	tests := []struct {
+		name         string
+		next         []schema.ChannelV0
+		wantArchived string
+	}{
+		{name: "renamed", next: []schema.ChannelV0{{ID: 1, Name: "general"}, {ID: 2, Name: "staff"}}, wantArchived: "staff"},
+		{name: "removed", next: []schema.ChannelV0{{ID: 1, Name: "general"}}},
+		{name: "name reused", next: []schema.ChannelV0{{ID: 1, Name: "general"}, {ID: 2, Name: "staff"}, {ID: 3, Name: "ops"}}, wantArchived: "staff"},
+	}
+	for _, kind := range []string{"send", "reaction"} {
+		for _, tt := range tests {
+			t.Run(kind+"/"+tt.name, func(t *testing.T) {
+				api := &archivedRefusalAPI{reactionStub: &reactionStub{writeErr: refusal}, refusal: refusal}
+				m := NewModel(context.Background(), api, 7, nil)
+				m = loadChannelsForTest(m, []schema.ChannelV0{{ID: 1, Name: "general"}, {ID: 2, Name: "ops"}})
+				m.selected = 1
+				var result tea.Msg
+				if kind == "send" {
+					_, cmd := m.post("hello", nil, false)
+					result = cmd()
+				} else {
+					result = m.writeReaction("ops", 41, "👍", "", true)()
+				}
+				m.loadingChannels = true
+				m, _ = update(m, channelsLoaded{refresh: true, channels: tt.next})
+				m, refresh := update(m, result)
+				for _, name := range []string{"general", "ops", "staff"} {
+					if got, want := m.channelArchived(name), name == tt.wantArchived; got != want {
+						t.Errorf("channelArchived(%q) = %v, want %v", name, got, want)
+					}
+				}
+				if refresh == nil {
+					t.Error("archive refusal did not refresh the channel list")
+				}
+			})
+		}
+	}
+}
+
+func TestArchivedComposerEditingPreservesDraft(t *testing.T) {
+	stamp := time.Date(2026, time.November, 7, 12, 0, 0, 0, time.UTC)
+	keys := []struct {
+		name string
+		key  tea.KeyMsg
+	}{
+		{name: "typing", key: tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("x")}},
+		{name: "backspace", key: tea.KeyMsg{Type: tea.KeyBackspace}},
+	}
+	for _, key := range keys {
+		for _, outcome := range []string{"restore", "switch"} {
+			t.Run(key.name+"/"+outcome, func(t *testing.T) {
+				m := NewModel(context.Background(), stubAPI{}, 7, nil)
+				m = loadChannelsForTest(m, []schema.ChannelV0{{ID: 1, Name: "general"}, {ID: 2, Name: "ops", ArchivedAt: &stamp}})
+				m.selected = 1
+				m.input = "keep"
+				m, _ = update(m, key.key)
+				if m.input != "keep" {
+					t.Fatalf("draft = %q after %s, want keep", m.input, key.name)
+				}
+				if outcome == "restore" {
+					m.loadingChannels = true
+					m, _ = update(m, channelsLoaded{refresh: true, channels: []schema.ChannelV0{{ID: 1, Name: "general"}, {ID: 2, Name: "ops"}}})
+				} else {
+					m, _ = update(m, tea.KeyMsg{Type: tea.KeyUp})
+				}
+				if m.current() == "" || m.channelArchived(m.current()) {
+					t.Fatalf("selected channel = %q, want a live channel", m.current())
+				}
+				m, _ = update(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("!")})
+				if m.input != "keep!" {
+					t.Errorf("draft after editing a live channel = %q, want keep!", m.input)
+				}
+			})
+		}
 	}
 }
