@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
 import { ChannelList } from './ChannelList';
+import { ChannelNav } from './ChannelNav';
 import type { SettingsChange } from './ChannelSettingsAsk';
 import type { InVoice } from './voice/useOccupancy';
 import { headingId } from './Conversation';
@@ -84,6 +85,7 @@ export function Lobby({
   signIns,
   report,
   onOpen,
+  onBrowse,
   onRetry,
   onSignOut,
   onSignOutEverywhere,
@@ -146,6 +148,9 @@ export function Lobby({
   // again where the page says it cannot reach the server.
   readonly report?: ReactNode;
   readonly onOpen: (channel: string) => void;
+  // The quick switcher's "Join" rows: show that public channel's directory row.
+  // Absent for a viewer with no directory.
+  readonly onBrowse?: (channel: string) => void;
   readonly onRetry: () => void;
   readonly onSignOut: () => void;
   // Sign out everywhere (issue #439), and why it last failed, if it did.
@@ -395,6 +400,27 @@ export function Lobby({
             <h2>Channels</h2>
             {channels.loaded ? (
               <>
+                <ChannelNav
+                  channels={channels.channels}
+                  unread={unread}
+                  selected={channels.selected}
+                  me={me}
+                  onOpen={(name) => {
+                    onOpen(name);
+                    if (phone) {
+                      toHeading.current = true;
+                      setView('chat');
+                    }
+                  }}
+                  {...(onBrowse === undefined
+                    ? {}
+                    : {
+                        onBrowse: (name: string) => {
+                          onBrowse(name);
+                          if (phone) setView('channels');
+                        },
+                      })}
+                />
                 <ChannelList
                   channels={channels.channels}
                   selected={channels.selected}
