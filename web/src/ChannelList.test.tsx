@@ -327,6 +327,20 @@ describe('a channel row\'s menu', () => {
     }
   });
 
+  it('offers Set topic beside Rename only where its caller allows it, and opens that row’s form', () => {
+    const setTopic = (channel: ChannelV0, close: () => void) => (
+      <form aria-label={`Set topic for ${channel.name}`}>
+        <button type="button" onClick={close}>Cancel</button>
+      </form>
+    );
+    draw({ canRename: (c) => c.manages === true, renderRename: rename, canSetTopic: (c) => c.manages === true, renderTopic: setTopic });
+    expect(within(row('general')).queryByRole('button', { name: /^Actions for/ })).toBeNull();
+    fireEvent.click(more('book-club'));
+    expect(labels('book-club')).toEqual(['Rename channel…', 'Set topic']);
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Set topic' }));
+    expect(within(row('book-club')).getByRole('form', { name: 'Set topic for book-club' })).toBeDefined();
+  });
+
   it('keeps the ⋯ outside the channel button, which keeps its name and still opens the channel', () => {
     const opened: string[] = [];
     draw({ onInvite: () => undefined, onOpen: (n: string) => opened.push(n) });

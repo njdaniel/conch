@@ -20,6 +20,7 @@ import { OperatorWarning } from './OperatorWarning';
 import { archivedLine, channelArchived, isArchived } from './archived';
 import { ChannelSettingsAsk } from './ChannelSettingsAsk';
 import { RenameChannel } from './RenameChannel';
+import { SetTopic } from './SetTopic';
 import { channelFromHash, forgetChannel, hashForChannel, rememberChannel, rememberedChannel, showChannelInAddress, takeLinkFromAddress } from './route';
 import type { ChannelDocV1 } from './schema/channel';
 import type { WhoAmIResponseV1 } from './schema/principal';
@@ -477,6 +478,7 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
   const onChannel = useCallback(
     (doc: ChannelDocV1) => {
       renamed(doc.channel_id, doc.name);
+      dispatchChannels({ type: 'topic', id: doc.channel_id, topic: doc.topic });
       dispatchChannels({ type: 'settings', id: doc.channel_id, visibility: doc.visibility, default: doc.default, archivedAt: doc.archived_at });
     },
     [renamed, dispatchChannels],
@@ -1758,8 +1760,8 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
               onOpen={onOpen}
             /></ModerationScope>
           }
-          // Operators and each channel's managers may rename it, from that
-          // row's ⋯ menu (issues #728, #1135). A visit gets no rename.
+          // Operators and each channel's managers may rename it and set its
+          // topic from that row's ⋯ menu. A visit gets neither control.
           canRename={(channel) => visit === null && (auth.principal.role === 'operator' || channel.manages === true)}
           renderRename={(channel, close) => (
             <RenameChannel
@@ -1768,6 +1770,17 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
                 renamed(renamedTo.id, renamedTo.name);
               }}
               onStale={refind}
+              onUnauthorized={onUnauthorized}
+              onClose={close}
+            />
+          )}
+          canSetTopic={(channel) => visit === null && (auth.principal.role === 'operator' || channel.manages === true)}
+          renderTopic={(channel, close) => (
+            <SetTopic
+              channel={channel}
+              onSet={(updated) => {
+                dispatchChannels({ type: 'topic', id: updated.id, topic: updated.topic });
+              }}
               onUnauthorized={onUnauthorized}
               onClose={close}
             />
@@ -1878,6 +1891,7 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
                 historyBounded={agents.membersFor === channelId && (agents.members.find((m) => m.principal_id === auth.principal.id)?.history_after ?? 0) > 0}
                 channelId={channelId}
                 channel={selected}
+                topic={currentChannel?.topic}
                 {...(currentChannel?.visibility === undefined ? {} : { visibility: currentChannel.visibility })}
                 archived={isArchived(currentChannel)}
                 chat={chatFor(chat, selected)}

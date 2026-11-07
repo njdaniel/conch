@@ -106,6 +106,16 @@ describe('the directory', () => {
     expect(i.querySelector('.private-mark')).toBeNull();
   });
 
+  it('shows a public channel’s topic under its name to a non-member', async () => {
+    const topic = 'Ideas worth discussing';
+    directory.mockResolvedValue({ ok: true, value: [{ ...ideas, topic }] });
+    await opened();
+    const row = rowOf('ideas');
+    const line = await within(row).findByText(topic);
+    expect(line.parentElement).toBe(row.querySelector('.channel-name')?.parentElement);
+    expect(within(row).getByRole('button', { name: 'Join ideas' })).toBeDefined();
+  });
+
   it('shows no counts of people, even if a row carried one', async () => {
     directory.mockResolvedValue({ ok: true, value: [{ ...ideas, members: 41 }, { ...vault, members: 7 }] });
     await opened();

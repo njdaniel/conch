@@ -1134,6 +1134,17 @@ label {
   min-width: 0;
 }
 
+.channel-heading {
+  min-width: 0;
+}
+
+.channel-heading .channel-topic {
+  margin: 0;
+  overflow-wrap: anywhere;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
 .hash {
   color: var(--muted);
   font-size: 1.3rem;
@@ -4595,6 +4606,17 @@ button.link {
 .channel-directory .directory-row .channel-name {
   min-width: 0;
   overflow-wrap: anywhere;
+}
+
+.channel-directory .directory-channel {
+  min-width: 0;
+}
+
+.channel-directory .directory-channel .channel-topic {
+  margin: 0;
+  overflow-wrap: anywhere;
+  color: var(--muted);
+  font-size: 0.9rem;
 }
 
 .channel-directory .directory-row > p,
