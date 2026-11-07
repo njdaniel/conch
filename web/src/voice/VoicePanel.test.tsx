@@ -616,6 +616,50 @@ describe('the keyboard', () => {
   });
 });
 
+describe('talk-key capture', () => {
+  const capturing = (talkKey = 'Backquote') => {
+    const calls: string[] = [];
+    const setTalkKey = vi.fn();
+    const capture = vi.fn();
+    const voice = control(inVoice('connected', 'c'), calls, { kind: 'presence', presence });
+    render(<VoicePanel voice={{ ...voice, talkKey, capturing: true, setTalkKey, capture }} viewer={7} people={new Map()} viewed="c" onOpen={() => undefined} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Voice options' }));
+    return { setTalkKey, capture };
+  };
+
+  it.each([
+    [3, 'Mouse4'],
+    [4, 'Mouse5'],
+  ])('accepts mouse button %d', (button, key) => {
+    const { setTalkKey } = capturing();
+    expect(fireEvent.mouseDown(window, { button, cancelable: true })).toBe(false);
+    expect(setTalkKey).toHaveBeenCalledWith(key);
+  });
+
+  it.each([0, 1, 2])('leaves mouse button %d as an ordinary click', (button) => {
+    const { setTalkKey, capture } = capturing();
+    expect(fireEvent.mouseDown(window, { button, cancelable: true })).toBe(true);
+    expect(setTalkKey).not.toHaveBeenCalled();
+    expect(capture).not.toHaveBeenCalled();
+  });
+
+  it('keeps Escape as cancel and prompts for a key or Mouse 4/5', () => {
+    const { setTalkKey, capture } = capturing();
+    expect(screen.getByRole('button', { name: 'Press a key or Mouse 4/5 (Escape cancels)' })).toBeTruthy();
+    fireEvent.keyDown(window, { code: 'Escape' });
+    expect(capture).toHaveBeenCalledWith(false);
+    expect(setTalkKey).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['Mouse4', 'Mouse 4'],
+    ['Mouse5', 'Mouse 5'],
+  ])('labels %s as %s', (talkKey, label) => {
+    capturing(talkKey);
+    expect(screen.getByRole('region', { name: 'Voice' }).querySelector('.talk-key-note')?.textContent).toContain(`Talk key: ${label}.`);
+  });
+});
+
 // Issue #591 (F13, F14, F15, F24): the strip's controls and notes say what is
 // true. Bob (3) is someone else; the viewer is 7.
 describe('what the strip says is true', () => {

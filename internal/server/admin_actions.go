@@ -389,10 +389,7 @@ func buildCreateMember(ctx context.Context, _ *Server, in adminBuildInput) (admi
 	if emptyParams(in.params) || dec.Decode(&p) != nil {
 		return adminRequest{}, adminTouches{}, badParams(e.action, `params are {"name": ...}; the kind is always human`)
 	}
-	body, _ := json.Marshal(struct {
-		Kind string `json:"kind"`
-		Name string `json:"name"`
-	}{string(store.PrincipalHuman), p.Name})
+	body, _ := json.Marshal(schema.CreatePrincipalRequest{Kind: schema.PrincipalHuman, Name: p.Name})
 	stored, _ := json.Marshal(p)
 	return adminRequest{method: http.MethodPost, path: "/v0/principals", body: body}, adminTouches{params: stored}, nil
 }
@@ -409,10 +406,7 @@ func buildRenameChannel(ctx context.Context, _ *Server, in adminBuildInput) (adm
 	if emptyParams(in.params) || dec.Decode(&p) != nil || p.Name == "" {
 		return adminRequest{}, adminTouches{}, badParams(e.action, `params are {"name": ...}`)
 	}
-	body, _ := json.Marshal(struct {
-		Name string `json:"name"`
-		From string `json:"from"`
-	}{p.Name, in.target.Name})
+	body, _ := json.Marshal(schema.RenameChannelRequestV1{Name: p.Name, From: in.target.Name})
 	method, path := fillPath(e.pattern, in.target, 0)
 	stored, _ := json.Marshal(p)
 	return adminRequest{method: method, path: path, body: body}, adminTouches{channels: targetChannels(in), params: stored}, nil
@@ -455,9 +449,8 @@ func buildAddChannelMember(ctx context.Context, _ *Server, in adminBuildInput) (
 	if r != nil {
 		return adminRequest{}, adminTouches{}, r
 	}
-	body, _ := json.Marshal(struct {
-		ID int64 `json:"id"`
-	}{p.PrincipalID})
+	// Only the member: Name and CanDecide stay empty and are omitted.
+	body, _ := json.Marshal(schema.AddChannelMemberRequestV1{ID: p.PrincipalID})
 	method, path := fillPath(e.pattern, in.target, 0)
 	stored, _ := json.Marshal(p)
 	return adminRequest{method: method, path: path, body: body}, adminTouches{channels: targetChannels(in), member: p.PrincipalID, params: stored}, nil
@@ -475,10 +468,7 @@ func buildMemberPath(rights bool) adminBuilder {
 		method, path := fillPath(e.pattern, in.target, p.PrincipalID)
 		var body []byte
 		if rights {
-			body, _ = json.Marshal(struct {
-				CanDecide *bool `json:"can_decide,omitempty"`
-				Manages   *bool `json:"manages,omitempty"`
-			}{p.CanDecide, p.Manages})
+			body, _ = json.Marshal(schema.PutChannelMemberRequestV1{CanDecide: p.CanDecide, Manages: p.Manages})
 		}
 		stored, _ := json.Marshal(p)
 		return adminRequest{method: method, path: path, body: body}, adminTouches{channels: targetChannels(in), member: p.PrincipalID, params: stored}, nil

@@ -215,6 +215,7 @@ var validators = map[string]func(string) bool{
 	"VoiceDevicesPipeWire":     validOf[VoiceDevicesPipeWire](),
 	"VoiceShareAudioScope":     validOf[VoiceShareAudioScope](),
 	"VoiceShareEndReason":      validOf[VoiceShareEndReason](),
+	"VoiceShareResolution":     validOf[VoiceShareResolution](),
 	"VoiceCameraEndReason":     validOf[VoiceCameraEndReason](),
 	"VoiceTransmitState":       validOf[VoiceTransmitState](),
 
@@ -224,6 +225,9 @@ var validators = map[string]func(string) bool{
 	"PermissionPreset":   validOf[PermissionPreset](),
 	"PermissionsWarning": validOf[PermissionsWarning](),
 	"IssuedKind":         validOf[IssuedKind](),
+
+	// Preview as member (issue #1007).
+	"PreviewSimulation": validOf[PreviewSimulation](),
 
 	// The community model (ADR-013, issue #978).
 	"ChannelVisibility": validOf[ChannelVisibility](),

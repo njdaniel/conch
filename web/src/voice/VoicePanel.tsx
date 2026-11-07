@@ -58,7 +58,7 @@ import { CameraTest } from './CameraTest';
 import type { Person } from '../useLiveChannel';
 import type { Phase, Processing, VoiceState } from './connection';
 import { clampTail, maxTail, releasePage, releaseStep } from './gate';
-import { keyLabel } from './keys';
+import { keyLabel, talkKeyForMouseButton } from './keys';
 import { occupants, sharer, type Occupant } from './presence';
 import { busyNote, endedNote, oneSharerNote, othersShareNote, ownPageNote, resumedNote, resumingNote, sharedNote, shortShareNote, soundNote, watchNote } from './share';
 import { ShareView } from './ShareView';
@@ -166,6 +166,7 @@ export function VoicePanel({
   const [hideNonVideo, setHideNonVideo] = useState(readHideNonVideo);
   const [focusShow, setFocusShow] = useState(false);
   const showVideoButton = useRef<HTMLButtonElement>(null);
+  const [shareVolume, setShareVolume] = useState(1);
   // More about sharing opens Voice options at the full share notes, and
   // takes focus there once they are shown (issue #600).
   const about = useRef<HTMLElement>(null);
@@ -228,9 +229,18 @@ export function VoicePanel({
       if (e.code === 'Escape') voice.capture(false);
       else voice.setTalkKey(e.code);
     };
+    const onMouse = (e: MouseEvent) => {
+      const key = talkKeyForMouseButton(e.button);
+      if (key === null) return;
+      e.preventDefault();
+      e.stopPropagation();
+      voice.setTalkKey(key);
+    };
     window.addEventListener('keydown', onKey);
+    window.addEventListener('mousedown', onMouse);
     return () => {
       window.removeEventListener('keydown', onKey);
+      window.removeEventListener('mousedown', onMouse);
     };
   }, [voice]);
 
@@ -368,7 +378,7 @@ export function VoicePanel({
   const silenced = state.muted || state.deafened;
   const captured = (state.phase === 'connected' || state.phase === 'reconnecting') && !state.watchOnly && !state.listenOnly && !state.missing;
   const view =
-    theirs !== null && state.watching ? <ShareView client={client} state={state} name={theirName} audio={theirs.sharingAudio} /> : null;
+    theirs !== null && state.watching ? <ShareView client={client} state={state} name={theirName} audio={theirs.sharingAudio} volume={shareVolume} onVolumeChange={setShareVolume} /> : null;
   // The call view, while the person asked for it and is in voice. The share
   // and the call view are one layout on the stage: the share the main
   // picture and the cameras a strip beside it while both are open. It is
@@ -1247,7 +1257,7 @@ function Options({ voice, open, sharable, about, others, cameraAllowed }: {
           <p className="hint talk-key-note">
             Talk key: {keyLabel(voice.talkKey)}.{' '}
             <button type="button" onClick={() => { voice.capture(!voice.capturing); }}>
-              {voice.capturing ? 'Press a key (Escape cancels)' : 'Change talk key'}
+              {voice.capturing ? 'Press a key or Mouse 4/5 (Escape cancels)' : 'Change talk key'}
             </button>
           </p>
           {/* How long the microphone stays open after the key comes up, so

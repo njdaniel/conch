@@ -781,7 +781,7 @@ export const ownPageNote = 'Sharing your entire screen or this browser window sh
 
 // sharedNote says, once the share is published, whether sound came with it.
 export function sharedNote(audio: boolean, f: ShareFeatures): string {
-  if (audio) return 'You are sharing your screen with its sound.';
-  if (f.chromium && f.platform !== 'android') return 'You are sharing your screen without sound. To share sound, stop and pick a tab with its sound box ticked.';
-  return 'You are sharing your screen without sound.';
+  if (audio) return 'You are sharing your screen with sound.';
+  if (f.chromium && f.platform !== 'android') return "Sharing without sound. To share sound, share a browser tab and keep 'Share tab audio' on.";
+  return "Sharing without sound. This browser can't share sound.";
 }
