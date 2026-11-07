@@ -23,3 +23,10 @@ react-native
 @react-native/typescript-config
 @types/react
 typescript
+
+# Voice (M4-C, #1391): the LiveKit React Native SDK 3.1.0, its WebRTC peer
+# (^150.1.0; 150.1.1 is what npm resolves) and livekit-client 2.22.3, the
+# repository's version (web/package.json).
+@livekit/react-native
+@livekit/react-native-webrtc
+livekit-client

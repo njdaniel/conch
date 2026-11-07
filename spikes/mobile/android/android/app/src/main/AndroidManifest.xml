@@ -1,6 +1,24 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- Voice: the microphone, and the audio routing LiveKit's audio switch does. -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+    <!-- WebRTC reads the network type to restart ICE (M-N1). -->
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.CHANGE_NETWORK_STATE" />
+    <!-- A Bluetooth headset's route is only visible with this on Android 12+ (M-B1 to M-B3). -->
+    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+    <!-- The service that keeps the room alive: microphone and mediaPlayback, never camera. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
+    <!-- The service's notification (Android 13+); refused, the app still works (M-P2). -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- The camera (M4-D): asked at the first tap of the camera button, never at launch or Join. The service has no camera type: capture stops when the app leaves the foreground. -->
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-feature android:name="android.hardware.microphone" android:required="false" />
+    <uses-feature android:name="android.hardware.camera" android:required="false" />
 
     <application
       android:name=".MainApplication"
@@ -23,5 +41,9 @@
             <category android:name="android.intent.category.LAUNCHER" />
         </intent-filter>
       </activity>
+      <service
+        android:name=".VoiceService"
+        android:exported="false"
+        android:foregroundServiceType="microphone|mediaPlayback" />
     </application>
 </manifest>

@@ -1,6 +1,6 @@
 # Conch Android spike (#1109, M4-A)
 
-A bare React Native 0.88.1 app (no Expo) for the Android real-device experiment, under [ADR-016](../../../docs/adr/ADR-016-mobile-app.md) and [the design's section 7.2](../../../docs/design/mobile-app.md). This slice is an empty app that builds. The app's logic is M4-B and M4-C. It lives outside `make check` and `web/`.
+A bare React Native 0.88.1 app (no Expo) for the Android real-device experiment, under [ADR-016](../../../docs/adr/ADR-016-mobile-app.md) and [the design's section 7.2](../../../docs/design/mobile-app.md). M4-A is the scaffold, M4-B the logic (`src/logic`), M4-C the voice wiring (`src/app`, the Kotlin in `android/app/src/main/java/com/conchspike`): sign-in, channel list, Join/Leave, hold to talk, the foreground service, the lifecycle bridge and the diagnostics screen. The camera is M4-D. It lives outside `make check` and `web/`.
 
 ## Pins
 
@@ -39,3 +39,13 @@ Roughly 13 GB for the SDK, system image, Gradle cache and AVD, plus about 3 GB o
     adb shell am start -n com.conchspike/.MainActivity
 
 An emulator run is never device evidence.
+
+## Dry run against the dev stack (M4-C)
+
+    scripts/dev-stack.sh up                         # note the ports it prints
+    conch admin principal create --kind human sam; conch admin member add general <id>
+    conch admin principal sign-in-link <id>         # one use; paste into the app
+    adb reverse tcp:8081 tcp:8081                   # Metro
+    adb reverse tcp:<conchd> tcp:<conchd>; adb reverse tcp:<livekit> tcp:<livekit>; adb reverse tcp:<livekit+1> tcp:<livekit+1>
+
+The app takes the server address typed in at sign-in; the bearer is held in memory only. The SDK needs `LiveKitReactNative.setup` in `MainApplication.onCreate` (native). Audio focus is owned by `ConchVoiceModule.kt`, and the SDK is told not to manage it, so a focus loss reaches the lifecycle.
