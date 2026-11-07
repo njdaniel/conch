@@ -53,7 +53,9 @@ interface World {
   // Member hiding on: alice sees only the people she shares a channel with.
   hiding: boolean;
   // What the server does with a preview read.
-  refuse: { readonly status: number; readonly code: string } | null;
+  refuse: { readonly status: number; readonly code: string; readonly permission?: string } | null;
+  // The channel's people are gone between the list and their read.
+  membersGone: boolean;
   unauthorized: boolean;
   who: WhoAmIResponseV1;
 }
@@ -100,7 +102,7 @@ function serve(): void {
       const path = url.pathname;
       if (as !== undefined) {
         if (world.unauthorized) return Promise.resolve(json({ code: 'unauthorized', message: 'no' }, 401));
-        if (world.refuse !== null) return Promise.resolve(json({ code: world.refuse.code, message: 'x' }, world.refuse.status));
+        if (world.refuse !== null) return Promise.resolve(json({ code: world.refuse.code, message: 'x', ...(world.refuse.permission === undefined ? {} : { permission: world.refuse.permission }) }, world.refuse.status));
         if (method !== 'GET') return Promise.resolve(json({ code: 'preview_read_only', message: 'x' }, 403));
         const alice = as === '2';
         if (path === '/v1/preview') {
@@ -111,6 +113,7 @@ function serve(): void {
         if (path === '/v1/directory/members') {
           return Promise.resolve(json(world.hiding ? { members: [person(1, 'owner', { role: 'operator', owner: true }), person(2, 'alice')].map(stripped), scope: 'shared_channels' } : { members: everyone.map(stripped), scope: 'everyone' }));
         }
+        if (path === '/v1/channels/channel-a/members' && world.membersGone) return Promise.resolve(json({ code: 'channel_not_found', message: 'x' }, 404));
         if (path === '/v1/channels/channel-a/members') return Promise.resolve(json({ members: [member(1, 'owner'), member(2, 'alice')] }));
         return Promise.resolve(json({ code: 'channel_not_found', message: 'x' }, 404));
       }
@@ -145,7 +148,7 @@ beforeEach(() => {
   voice.in = false;
   voice.left = 0;
   FakeSocket.all = [];
-  world = { hiding: true, refuse: null, unauthorized: false, who: owner };
+  world = { hiding: true, refuse: null, membersGone: false, unauthorized: false, who: owner };
   serve();
   window.sessionStorage.clear();
   window.localStorage.clear();
@@ -402,7 +405,7 @@ describe('teardown', () => {
     await previewAlice();
     world.refuse = { status: 403, code: 'preview_read_only' };
     fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
-    expect(await screen.findByText('Preview ended: alice can no longer be previewed.')).toBeTruthy();
+    expect(await screen.findByText('Preview ended: alice can no longer be previewed. The server refused.')).toBeTruthy();
     expect(screen.queryByRole('region', { name: 'Preview' })).toBeNull();
     await screen.findByRole('navigation', { name: 'Channels' });
   });
@@ -440,7 +443,44 @@ describe('teardown', () => {
     await waitFor(() => {
       expect(previewReads().filter((r) => r.path === '/v1/channels').length).toBeGreaterThan(before);
     });
+    // A message frame on the administrator's own sockets: the page takes it as
+    // the administrator's (it shows when the preview is exited), and never
+    // into the preview.
+    const frame = { schema: 'conch.message.v2', id: 900, channel_id: 1, author_id: 2, created_at: at, body: 'SECRET-MESSAGE-BODY' };
+    for (const socket of FakeSocket.all) socket.send(frame);
+    await waitFor(() => {
+      expect(FakeSocket.all.length).toBeGreaterThan(0);
+    });
     expect(screen.queryByText('SECRET-MESSAGE-BODY')).toBeNull();
+    expect(screen.queryByRole('log', { name: 'Messages' })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Exit preview' }));
+    expect(await screen.findByText('SECRET-MESSAGE-BODY')).toBeTruthy();
+  });
+
+  it('says, when the first read is refused, that the preview never began, and why', async () => {
+    world.refuse = { status: 403, code: 'permission_denied', permission: 'manage_channels' };
+    const region = await openMembers();
+    const row = rowOf(region, 'alice');
+    fireEvent.click(within(row).getByRole('button', { name: 'Actions for alice' }));
+    fireEvent.click(await within(row).findByRole('menuitem', { name: 'Preview as member' }));
+    expect(await screen.findByText('Cannot preview alice. You need the permission to manage channels for that. Nothing was changed.')).toBeTruthy();
+    expect(screen.queryByText(/Preview ended/)).toBeNull();
+  });
+
+  it('carries the code of a refusal mid-preview', async () => {
+    await previewAlice();
+    world.refuse = { status: 404, code: 'principal_not_found' };
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+    expect(await screen.findByText(/^Preview ended: alice can no longer be previewed\. That person is gone/)).toBeTruthy();
+  });
+
+  it('takes a channel gone between the list and its people as no people, not a refusal', async () => {
+    world.membersGone = true;
+    await previewAlice();
+    const members = await screen.findByRole('region', { name: 'Channel members' });
+    expect(members.textContent).toContain('Nobody to show');
+    expect(screen.getByRole('region', { name: 'Preview' })).toBeTruthy();
+    expect(previewReads().filter((r) => r.path === '/v1/channels').length).toBeGreaterThan(1);
   });
 
   it('is gone after a reload: the page starts in the owner view', async () => {

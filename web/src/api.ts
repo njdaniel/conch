@@ -223,7 +223,7 @@ export type ApiFailure = 'unauthorized' | 'network' | 'invalid';
 
 export type ApiResult<T> =
   | { readonly ok: true; readonly value: T }
-  | { readonly ok: false; readonly failure: ApiFailure; readonly code?: string; readonly retryAfter?: number };
+  | { readonly ok: false; readonly failure: ApiFailure; readonly code?: string; readonly permission?: string; readonly retryAfter?: number };
 
 // Where a credential is kept is the platform's (platform.credentials): 'tab'
 // is this tab alone, for an operator's and a guest's; 'lasting' is every tab
@@ -497,9 +497,15 @@ async function discard(res: Response): Promise<void> {
   }
 }
 
-async function refused(res: Response): Promise<{ readonly ok: false; readonly failure: 'invalid'; readonly code?: string }> {
-  const code = await refusalCode(res);
-  return code === undefined ? { ok: false, failure: 'invalid' } : { ok: false, failure: 'invalid', code };
+async function refused(res: Response): Promise<{ readonly ok: false; readonly failure: 'invalid'; readonly code?: string; readonly permission?: string }> {
+  let doc: ErrorV0 | undefined;
+  try {
+    const body: unknown = await res.json();
+    if (errorV0(body).length === 0) doc = body as ErrorV0;
+  } catch {
+    // No document, or not one.
+  }
+  return { ok: false, failure: 'invalid', ...(doc === undefined ? {} : { code: doc.code }), ...(doc?.permission === undefined ? {} : { permission: doc.permission }) };
 }
 
 async function get<T>(request: Call, token: string, check: Validator<T>): Promise<ApiResult<T>> {

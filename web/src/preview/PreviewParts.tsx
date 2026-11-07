@@ -86,7 +86,7 @@ export function PreviewPanel({ store, channel }: { readonly store: PreviewStore;
     <>
       <section aria-label="Channel members" className="preview-people">
         <h3>{channel === null ? 'Members' : `Members of #${channel}`}</h3>
-        {members === undefined ? (
+        {members === undefined || members.length === 0 ? (
           <p className="empty">Nobody to show</p>
         ) : (
           <ul aria-label="Members">

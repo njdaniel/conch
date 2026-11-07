@@ -27,14 +27,14 @@ export interface PreviewStore {
 // permission_denied, 404 principal_not_found): the preview ends.
 export type PreviewLoad =
   | { readonly ok: true; readonly store: PreviewStore }
-  | { readonly ok: false; readonly failure: 'unauthorized' | 'network' | 'refused'; readonly code?: string };
+  | { readonly ok: false; readonly failure: 'unauthorized' | 'network' | 'refused'; readonly code?: string; readonly permission?: string };
 
 type Reads = ReturnType<typeof apiModule.previewAs>;
 
 // loadPreview reads the target's view afresh: the summary, the channel list,
 // the channel directory and the member directory together, then the member
 // list of the channel to show. The first failure is the answer.
-export async function loadPreview(reads: Reads, open: string | null, now: number): Promise<PreviewLoad> {
+export async function loadPreview(reads: Reads, open: string | null, now: number, again = true): Promise<PreviewLoad> {
   const [summary, channels, channelDirectory, directory] = await Promise.all([reads.summary(), reads.channels(), reads.channelDirectory(), reads.directoryMembers()]);
   for (const result of [summary, channels, channelDirectory, directory]) {
     if (!result.ok) return failed(result);
@@ -44,8 +44,15 @@ export async function loadPreview(reads: Reads, open: string | null, now: number
   const shown = open !== null && channels.value.some((c) => c.name === open) ? open : (channels.value[0]?.name ?? null);
   if (shown !== null) {
     const list = await reads.listMembers(shown);
-    if (!list.ok) return failed(list);
-    members.set(shown, list.value);
+    if (!list.ok) {
+      // The channel went between the list and its people (channel_not_found):
+      // not a refusal to preview. The view is read again once, and a channel
+      // still named but gone then has no people to show.
+      if (list.failure === 'invalid' && list.code === 'channel_not_found') {
+        if (again) return loadPreview(reads, open, now, false);
+        members.set(shown, []);
+      } else return failed(list);
+    } else members.set(shown, list.value);
   }
   return {
     ok: true,
@@ -53,8 +60,8 @@ export async function loadPreview(reads: Reads, open: string | null, now: number
   };
 }
 
-function failed(result: { readonly failure: 'unauthorized' | 'network' | 'invalid'; readonly code?: string }): PreviewLoad {
-  if (result.failure === 'invalid') return { ok: false, failure: 'refused', ...(result.code === undefined ? {} : { code: result.code }) };
+function failed(result: { readonly failure: 'unauthorized' | 'network' | 'invalid'; readonly code?: string; readonly permission?: string }): PreviewLoad {
+  if (result.failure === 'invalid') return { ok: false, failure: 'refused', ...(result.code === undefined ? {} : { code: result.code }), ...(result.permission === undefined ? {} : { permission: result.permission }) };
   return { ok: false, failure: result.failure };
 }
 

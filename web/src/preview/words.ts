@@ -40,7 +40,7 @@ export function controlLines(who: WhoAmIResponseV1): readonly ControlLine[] {
     {
       label: 'Voice',
       available: voice,
-      reason: voice ? `${who.name} could join voice here.` : `Voice is off for ${people.toLowerCase()}.`,
+      reason: voice ? `${who.name} could join voice here.` : canDo(who, 'use_voice') ? `Voice is off for ${who.name}.` : `Voice is off for ${people.toLowerCase()}.`,
     },
     {
       label: 'Share screen',

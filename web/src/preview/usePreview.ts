@@ -10,6 +10,7 @@
 // nothing.
 import { useCallback, useEffect, useRef, useState } from 'react';
 import * as api from '../api';
+import { personRefusal } from '../admin/PersonActions';
 import { loadPreview, type PreviewLoad, type PreviewStore } from './store';
 
 export interface PreviewTarget {
@@ -29,6 +30,9 @@ export const endedLine = (name: string) => `Preview ended: ${name} can no longer
 export const lostStandingLine = 'Preview ended: you can no longer preview members.';
 export const voiceStartedLine = 'Preview ended: voice started. Leave voice before previewing.';
 export const failedStartLine = (name: string) => `Cannot preview ${name}: the server did not answer. Nothing was changed.`;
+// A refusal of the first read: the preview never began, and the server's code
+// and permission say why, in the page's own words.
+export const refusedStartLine = (name: string, why: string) => `Cannot preview ${name}. ${why}`;
 
 export interface UsePreview {
   readonly state: PreviewState;
@@ -95,12 +99,14 @@ export function usePreview({
   // settle is what a failed read comes to. A refusal ends the preview; no
   // answer leaves what is shown, with a line; a 401 signs the page out.
   const settle = useCallback(
-    (result: Extract<PreviewLoad, { ok: false }>, name: string, shown: PreviewState) => {
+    (result: Extract<PreviewLoad, { ok: false }>, name: string, shown: PreviewState, starting = false) => {
       if (result.failure === 'unauthorized') {
         end(null);
         latest.current();
       } else if (result.failure === 'refused') {
-        end(endedLine(name));
+        const reason = { failure: 'invalid' as const, ...(result.code === undefined ? {} : { code: result.code }), ...(result.permission === undefined ? {} : { permission: result.permission }) };
+        if (starting) end(refusedStartLine(name, personRefusal(reason, 'Nothing was changed.')));
+        else end(`${endedLine(name)} ${personRefusal(reason, '').trim()}`);
       } else if (shown.phase === 'on') {
         set({ ...shown, problem: cannotReach });
       } else {
@@ -120,7 +126,7 @@ export function usePreview({
         .then((result) => {
           if (mine !== epoch.current || !live.current) return;
           if (result.ok) set({ phase: 'on', store: result.store, selected: result.store.channels[0]?.name ?? null, problem: null });
-          else settle(result, target.name, now.current);
+          else settle(result, target.name, now.current, true);
         });
     },
     [set, settle],
