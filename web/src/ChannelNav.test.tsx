@@ -16,7 +16,7 @@ beforeEach(() => {
   vi.spyOn(api, 'channelDirectory').mockResolvedValue({ ok: true, value: [listing(9, 'movie-night'), listing(1, 'general', { joined: true })] });
 });
 
-function setup(over: { channels?: readonly ChannelV0[]; unread?: ReadonlyMap<string, number>; selected?: string | null; onBrowse?: ((name: string) => void) | null; me?: number } = {}) {
+function setup(over: { refresh?: number; channels?: readonly ChannelV0[]; unread?: ReadonlyMap<string, number>; selected?: string | null; onBrowse?: ((name: string) => void) | null; me?: number } = {}) {
   const onOpen = vi.fn();
   const onBrowse = vi.fn();
   const props = (o: typeof over) => ({
@@ -24,12 +24,14 @@ function setup(over: { channels?: readonly ChannelV0[]; unread?: ReadonlyMap<str
     unread: o.unread ?? new Map<string, number>(),
     selected: o.selected === undefined ? 'general' : o.selected,
     me: o.me ?? 1,
+    refresh: o.refresh ?? 0,
     onOpen,
     ...(o.onBrowse === null ? {} : { onBrowse: o.onBrowse ?? onBrowse }),
   });
   const view = render(
     <div>
       <textarea aria-label="Message" id="composer-text" />
+      <h2 id="conversation-heading" tabIndex={-1}>heading</h2>
       <input aria-label="Search" />
       <ChannelNav {...props(over)} />
     </div>,
@@ -38,6 +40,7 @@ function setup(over: { channels?: readonly ChannelV0[]; unread?: ReadonlyMap<str
     view.rerender(
       <div>
         <textarea aria-label="Message" id="composer-text" />
+      <h2 id="conversation-heading" tabIndex={-1}>heading</h2>
         <input aria-label="Search" />
         <ChannelNav {...props(o)} />
       </div>,
@@ -233,6 +236,67 @@ describe('moving between channels', () => {
       expect(screen.getByRole('status').textContent).toBe('');
     } finally {
       vi.useRealTimers();
+    }
+  });
+});
+
+describe('the Join group follows the directory', () => {
+  it('reads the directory again on a refresh signal, and drops what is no longer listed', async () => {
+    const read = vi.spyOn(api, 'channelDirectory');
+    const { again } = setup();
+    fireEvent.click(screen.getByRole('button', { name: /Find a channel/ }));
+    await screen.findByRole('option', { name: /movie-night/ });
+    read.mockResolvedValue({ ok: true, value: [listing(9, 'movie-night', { visibility: 'private' }), listing(1, 'general', { joined: true })] });
+    again({ refresh: 1 });
+    await waitFor(() => {
+      expect(screen.queryByRole('option', { name: /movie-night/ })).toBeNull();
+    });
+    expect(read).toHaveBeenCalledTimes(2);
+  });
+
+  it('ignores a read that answers after a newer one', async () => {
+    const read = vi.spyOn(api, 'channelDirectory');
+    let late: (v: Awaited<ReturnType<typeof api.channelDirectory>>) => void = () => undefined;
+    read.mockReturnValueOnce(new Promise((resolve) => { late = resolve; }));
+    const { again } = setup();
+    fireEvent.click(screen.getByRole('button', { name: /Find a channel/ }));
+    read.mockResolvedValue({ ok: true, value: [] });
+    again({ refresh: 1 });
+    await waitFor(() => { expect(read).toHaveBeenCalledTimes(2); });
+    late({ ok: true, value: [listing(9, 'movie-night')] });
+    await new Promise((r) => setTimeout(r, 10));
+    expect(screen.queryByRole('option', { name: /movie-night/ })).toBeNull();
+  });
+});
+
+describe('focus and scrolling', () => {
+  it('moves focus to the conversation heading after a channel is chosen, the current one too', () => {
+    vi.useFakeTimers();
+    try {
+      setup();
+      for (const name of [/game-night/, /general/]) {
+        fireEvent.click(screen.getByRole('button', { name: /Find a channel/ }));
+        fireEvent.click(screen.getByRole('option', { name }));
+        act(() => { vi.runAllTimers(); });
+        expect(document.activeElement).toBe(document.getElementById('conversation-heading'));
+        (document.activeElement as HTMLElement).blur();
+      }
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('scrolls the active option into view on each move', () => {
+    const scrolled: string[] = [];
+    Element.prototype.scrollIntoView = function (this: Element) { scrolled.push(this.textContent); };
+    try {
+      setup();
+      fireEvent.click(screen.getByRole('button', { name: /Find a channel/ }));
+      key({ key: 'ArrowDown' }, box());
+      key({ key: 'ArrowDown' }, box());
+      expect(scrolled.at(-1)).toContain('book-club');
+    } finally {
+      Reflect.deleteProperty(Element.prototype, 'scrollIntoView');
     }
   });
 });

@@ -5,7 +5,7 @@ import type { Page } from '@playwright/test';
 import { makeChannel, memberOf, post } from './api';
 import { channelButton, conversation, expect, expectFits, mainNav, phones, rememberPushToTalk, signIn, test } from './fixtures';
 import { dockerAvailable, startVoiceWorld, type VoiceWorld } from './voice-world';
-import { loadWorld, principalId } from './world';
+import { loadWorld, principalId, setChannelVisibility } from './world';
 
 const switcher = (page: Page) => page.getByRole('dialog', { name: 'Find a channel' });
 // Shortcuts leave a text field alone, so a test of them first takes focus out of the composer.
@@ -54,6 +54,45 @@ test('C1492 a channel revoked while the switcher is open leaves the list and ope
   await expect(switcher(page).getByText('No channels match.')).toBeVisible();
   await page.keyboard.press('Enter');
   await expect(conversation(page).getByRole('heading', { name })).toHaveCount(0);
+});
+
+test('C1492 a public channel to join that turns private while the switcher is open leaves the Join group', async ({ meet, world }) => {
+  const name = `c1492-${String(Date.now())}-turns`;
+  await makeChannel(world, name);
+  await setChannelVisibility(world, name, 'public');
+  const { page } = await meet();
+  await signIn(page, world, world.tokens.browser, 'browser-test');
+  await blur(page);
+  await page.keyboard.press('Control+k');
+  await finder(page).fill(name);
+  const row = switcher(page).getByRole('group', { name: 'Join' }).getByRole('option', { name: new RegExp(name) });
+  await expect(row).toBeVisible();
+  await setChannelVisibility(world, name, 'private');
+  await expect(row).toHaveCount(0);
+  await expect(switcher(page).getByText('No channels match.')).toBeVisible();
+});
+
+test('C1492 focus lands on the conversation heading after choosing another channel or the current one', async ({ meet, world }) => {
+  const name = `c1492-${String(Date.now())}-focus`;
+  await makeChannel(world, name);
+  await memberOf(world, name, await principalId(world, world.tokens.browser), true);
+  const { page } = await meet();
+  await signIn(page, world, world.tokens.browser, 'browser-test');
+  await expect(channelButton(page, name)).toBeVisible();
+  for (const target of [name, 'general']) {
+    await blur(page);
+    await page.keyboard.press('Control+k');
+    await finder(page).fill(target);
+    await page.keyboard.press('Enter');
+    await expect(conversation(page).getByRole('heading', { name: target })).toBeVisible();
+    await expect(page.locator('#conversation-heading')).toBeFocused();
+  }
+  // The current channel again.
+  await blur(page);
+  await page.keyboard.press('Control+k');
+  await finder(page).fill('general');
+  await page.keyboard.press('Enter');
+  await expect(page.locator('#conversation-heading')).toBeFocused();
 });
 
 test('C1492 Ctrl+K, Escape focus, Alt+Arrow and the unread jump work from the keyboard', async ({ meet, world }) => {
@@ -118,6 +157,23 @@ test('C1492 Ctrl+K, Escape focus, Alt+Arrow and the unread jump work from the ke
 });
 
 for (const [size, options] of phones) {
+  test(`C1492 at ${size} Ctrl+K from the Chat view opens a visible switcher that takes focus`, async ({ meet, world }) => {
+    const { page } = await meet(options);
+    await signIn(page, world, world.tokens.browser, 'browser-test');
+    await expect(mainNav(page).getByRole('button', { name: 'Chat', exact: true })).toHaveAttribute('aria-current', 'page');
+    await expect(page.locator('#composer-text')).toBeEnabled();
+    await page.locator('#composer-text').focus();
+    await page.keyboard.press('Control+k');
+    await expect(finder(page)).toBeVisible();
+    await expect(finder(page)).toBeFocused();
+    await page.keyboard.press('Escape');
+    await expect(switcher(page)).toHaveCount(0);
+    // Closed, it blocks nothing: the shortcut works again.
+    await page.keyboard.press('Control+k');
+    await expect(finder(page)).toBeFocused();
+  });
+
+
   test(`C1492 at ${size} the switcher opens by tap, fits the screen and opens the channel`, async ({ meet, world }) => {
     const name = `c1492-${size}-${String(Date.now())}-phone`;
     await makeChannel(world, name);

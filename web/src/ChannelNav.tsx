@@ -1,3 +1,4 @@
+import { createPortal } from 'react-dom';
 import { useEffect, useId, useRef, useState, type KeyboardEvent } from 'react';
 import * as api from './api';
 import { isArchived } from './archived';
@@ -23,6 +24,7 @@ import { isTyping } from './voice/keys';
 // changes.
 
 const statusMs = 4000;
+const directoryPollMs = 3000;
 
 function isMac(): boolean {
   return typeof navigator !== 'undefined' && /mac|iphone|ipad/i.test(navigator.platform);
@@ -60,6 +62,7 @@ export function ChannelNav({
   unread,
   selected,
   me,
+  refresh = 0,
   onOpen,
   onBrowse,
 }: {
@@ -68,6 +71,9 @@ export function ChannelNav({
   readonly selected: string | null;
   // The signed-in principal: when it changes the switcher closes and forgets.
   readonly me: number;
+  // Bumped whenever the page learns the directory or its own permissions changed
+  // (channels_changed, a reconnect): the Join group is read again.
+  readonly refresh?: number;
   readonly onOpen: (name: string) => void;
   // Shows a public channel's row in the directory. Absent for a viewer who has
   // no directory: no Join group is offered then and none is read.
@@ -143,14 +149,23 @@ export function ChannelNav({
       setRows([]);
       return;
     }
-    const mine = ++seq.current;
-    void api.channelDirectory().then((result) => {
-      if (mine === seq.current && result.ok) setRows(result.value);
-    });
+    const read = () => {
+      const mine = ++seq.current;
+      void api.channelDirectory().then((result) => {
+        if (mine === seq.current && result.ok) setRows(result.value);
+      });
+    };
+    read();
+    // The server pushes nothing to a non-member when a public channel turns
+    // private or is archived, so while the switcher is open the directory is
+    // read again every few seconds as well as on every refresh signal; a read
+    // that answers after a newer one began is dropped.
+    const poll = window.setInterval(read, directoryPollMs);
     return () => {
+      window.clearInterval(poll);
       seq.current++;
     };
-  }, [open, canBrowse]);
+  }, [open, canBrowse, refresh, channels]);
 
   // The shortcuts.
   useEffect(() => {
@@ -207,9 +222,24 @@ export function ChannelNav({
   function choose(item: Item) {
     setOpen(false);
     opener.current = null;
-    if (item.join) onBrowse?.(item.name);
-    else onOpen(item.name);
+    if (item.join) {
+      onBrowse?.(item.name);
+      return;
+    }
+    onOpen(item.name);
+    // Focus follows the choice, so it is never left on the page's body: to the
+    // conversation heading, where the page puts it when a channel opens.
+    window.setTimeout(() => {
+      document.getElementById('conversation-heading')?.focus();
+    }, 0);
   }
+
+  const activeId = active === undefined ? undefined : optionId(active);
+  useEffect(() => {
+    if (!open || activeId === undefined) return;
+    const el = document.getElementById(activeId);
+    if (el !== null && typeof el.scrollIntoView === 'function') el.scrollIntoView({ block: 'nearest' });
+  }, [open, activeId]);
 
   function onDialogKey(event: KeyboardEvent) {
     if (event.nativeEvent.isComposing) return;
@@ -287,7 +317,8 @@ export function ChannelNav({
       <p role="status" className="nav-status hint">
         {line}
       </p>
-      {open ? (
+      {open
+        ? createPortal(
         <div
           className="switcher-backdrop"
           onMouseDown={(event) => {
@@ -334,7 +365,10 @@ export function ChannelNav({
             <p className="hint switcher-help">Enter opens. Esc closes. Alt+Up and Alt+Down move between channels; add Shift for unread.</p>
           </div>
         </div>
-      ) : null}
+        ,
+            document.body,
+          )
+        : null}
     </div>
   );
 }

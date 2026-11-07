@@ -1629,6 +1629,7 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
               })}
           channels={channels}
           unread={unread}
+          directoryTick={directory.tick + permissionsTick}
           {...(auth.principal.kind === 'human' && visit === null
             ? {
                 onBrowse: (name: string) => {

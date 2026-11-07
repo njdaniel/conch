@@ -86,6 +86,7 @@ export function Lobby({
   report,
   onOpen,
   onBrowse,
+  directoryTick = 0,
   onRetry,
   onSignOut,
   onSignOutEverywhere,
@@ -151,6 +152,8 @@ export function Lobby({
   // The quick switcher's "Join" rows: show that public channel's directory row.
   // Absent for a viewer with no directory.
   readonly onBrowse?: (channel: string) => void;
+  // Changes when the directory or the viewer's permissions did (issue #1492).
+  readonly directoryTick?: number;
   readonly onRetry: () => void;
   readonly onSignOut: () => void;
   // Sign out everywhere (issue #439), and why it last failed, if it did.
@@ -405,6 +408,7 @@ export function Lobby({
                   unread={unread}
                   selected={channels.selected}
                   me={me}
+                  refresh={directoryTick}
                   onOpen={(name) => {
                     onOpen(name);
                     if (phone) {
