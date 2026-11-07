@@ -58,6 +58,9 @@ type API interface {
 }
 
 type channelsLoaded struct {
+	// refresh marks a re-read after a channel-list signal or reconnect. A
+	// failure then keeps the list already on screen.
+	refresh  bool
 	channels []schema.ChannelV0
 	err      error
 }
@@ -189,8 +192,10 @@ type Model struct {
 	// <label> · <tag>", with when the visit ends. nil for everyone else.
 	visit *schema.GuestV1
 	// whoErr is why whoami failed; nil while it is pending or after success.
-	whoErr     error
-	channels   []string
+	whoErr   error
+	channels []string
+	// channelIDs lets a refresh follow a channel whose name changed.
+	channelIDs map[string]int64
 	selected   int
 	messages   map[string][]schema.MessageV2
 	subscribed map[string]bool
@@ -225,10 +230,12 @@ type Model struct {
 	// the same message at the bottom (scrollAnchor).
 	scroll int
 	// loadingChannels is true while the channel list is being fetched from the
-	// server; the model has no channels until channelsLoaded arrives.
+	// server; initially the model has no channels until channelsLoaded arrives.
 	loadingChannels bool
-	// notice is a channel-list problem that must survive the "connected"
-	// status the first backfill would otherwise write.
+	// channelsAgain collapses signals received during a fetch into one more.
+	channelsAgain bool
+	// notice is a channel-list notice that must survive the "connected" status
+	// a backfill would otherwise write.
 	notice string
 	// channelsErr is why the channel list could not be read. There are then
 	// no channels, and the message pane says what failed and where.
@@ -407,7 +414,8 @@ func NewModel(ctx context.Context, api API, authorID int64, channels []string) M
 		}
 	}
 	m := Model{ctx: ctx, api: api, authorID: authorID,
-		messages: make(map[string][]schema.MessageV2), nets: make(map[string][]schema.NetV1), members: make(map[string]map[int64]schema.ChannelMemberV1), memberRevision: make(map[string]uint64), now: time.Now, subscribed: make(map[string]bool),
+		channelIDs: make(map[string]int64),
+		messages:   make(map[string][]schema.MessageV2), nets: make(map[string][]schema.NetV1), members: make(map[string]map[int64]schema.ChannelMemberV1), memberRevision: make(map[string]uint64), now: time.Now, subscribed: make(map[string]bool),
 		events: make(chan tea.Msg, 64), mode: modeChannels,
 		backoff: make(map[string]time.Duration), retryPending: make(map[string]bool), after: tickAfter, wrapped: &wrappedBody{},
 		own: &ownSession{}, loaded: make(map[string]bool), streamed: make(map[string]int64), expanded: make(map[int64]bool),
@@ -751,6 +759,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.eventsActivity(msg)
 	case eventsInterventionReceived:
 		return m.eventsIntervention(msg)
+	case eventsChannelsReceived:
+		if msg.gen != m.ev.gen {
+			return m, m.waitEvent()
+		}
+		return m, tea.Batch(m.waitEvent(), m.refreshChannels())
 	case eventsPermissionsReceived:
 		// The frame says only that they may have changed: whoami is read
 		// again, and the pane and the offered commands follow its answer.
@@ -849,40 +862,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.loadApprovals()
 		}
 	case channelsLoaded:
-		if !m.loadingChannels {
-			return m, nil
-		}
-		m.loadingChannels = false
-		names := make([]string, 0, len(msg.channels))
-		for _, channel := range msg.channels {
-			if name := strings.TrimSpace(channel.Name); name != "" {
-				names = append(names, name)
-			}
-		}
-		switch {
-		case msg.err != nil:
-			// No stand-in channel: one that may not exist, on a server that may
-			// not be there, only hid why nothing worked (issue #522). The
-			// message pane gives the whole error; the status line is too short.
-			m.channelsErr = msg.err
-			m.notice = "cannot read the channel list"
-			if errors.Is(msg.err, cli.ErrUnauthenticated) {
-				m.notice = msg.err.Error()
-			}
-			m.setStatus(modeChannels, m.notice)
-			return m, nil
-		case len(names) == 0:
-			m.notice = "no channels on server"
-			names = []string{defaultChannel}
-		}
-		m.setStatus(modeChannels, m.notice)
-		m.channels = names
-		m.selected = defaultSelection(names)
-		// The channel on screen may have changed under the user.
-		m.target = nil
-		m.pendingNet = ""
-		m.subscribed[m.current()] = true
-		return m, tea.Batch(m.loadAndFollow(), m.loadNets(false, ""), m.loadMembers(), m.beginVoice(), m.beginEvents())
+		return m.channelsLoadDone(msg)
 	case netsLoaded:
 		return m.netsLoaded(msg)
 	case membersLoaded:
@@ -1165,6 +1145,135 @@ func (m Model) loadChannels() tea.Cmd {
 		resp, err := m.api.ListChannels(m.ctx)
 		return channelsLoaded{channels: resp.Channels, err: err}
 	}
+}
+
+// refreshChannels starts one channel-list re-read. Signals that arrive during
+// it ask for one more, never a parallel read.
+func (m *Model) refreshChannels() tea.Cmd {
+	if m.loadingChannels {
+		m.channelsAgain = true
+		return nil
+	}
+	m.loadingChannels = true
+	return m.reloadChannels()
+}
+
+func (m Model) reloadChannels() tea.Cmd {
+	return func() tea.Msg {
+		resp, err := m.api.ListChannels(m.ctx)
+		return channelsLoaded{channels: resp.Channels, err: err, refresh: true}
+	}
+}
+
+func (m *Model) nextChannelsLoad(again bool, cmd tea.Cmd) tea.Cmd {
+	if !again {
+		return cmd
+	}
+	return tea.Batch(cmd, m.refreshChannels())
+}
+
+func (m Model) channelsLoadDone(msg channelsLoaded) (tea.Model, tea.Cmd) {
+	if !m.loadingChannels {
+		return m, nil
+	}
+	m.loadingChannels = false
+	again := m.channelsAgain
+	m.channelsAgain = false
+	names := make([]string, 0, len(msg.channels))
+	ids := make([]int64, 0, len(msg.channels))
+	for _, channel := range msg.channels {
+		if name := strings.TrimSpace(channel.Name); name != "" {
+			names = append(names, name)
+			ids = append(ids, channel.ID)
+		}
+	}
+	if msg.err != nil {
+		notice := "cannot read the channel list"
+		if errors.Is(msg.err, cli.ErrUnauthenticated) {
+			notice = msg.err.Error()
+		}
+		if msg.refresh {
+			m.setStatus(modeChannels, notice)
+			return m, m.nextChannelsLoad(again, nil)
+		}
+		// No stand-in channel: one that may not exist, on a server that may
+		// not be there, only hid why nothing worked (issue #522). The
+		// message pane gives the whole error; the status line is too short.
+		m.channelsErr = msg.err
+		m.notice = notice
+		m.setStatus(modeChannels, notice)
+		return m, m.nextChannelsLoad(again, nil)
+	}
+
+	empty := len(names) == 0
+	if empty {
+		names = []string{defaultChannel}
+		ids = []int64{0}
+	}
+	nextIDs := make(map[string]int64, len(names))
+	for i, name := range names {
+		nextIDs[name] = ids[i]
+	}
+	if !msg.refresh {
+		m.channels = names
+		m.channelIDs = nextIDs
+		m.selected = defaultSelection(names)
+		m.notice = ""
+		if empty {
+			m.notice = "no channels on server"
+		}
+		m.setStatus(modeChannels, m.notice)
+		// The channel on screen may have changed under the user.
+		m.target = nil
+		m.pendingNet = ""
+		m.subscribed[m.current()] = true
+		cmd := tea.Batch(m.loadAndFollow(), m.loadNets(false, ""), m.loadMembers(), m.beginVoice(), m.beginEvents())
+		return m, m.nextChannelsLoad(again, cmd)
+	}
+
+	previous := m.current()
+	previousID := m.channelIDs[previous]
+	selected := -1
+	for i, name := range names {
+		if previousID > 0 && ids[i] == previousID || previousID == 0 && name == previous {
+			selected = i
+			break
+		}
+	}
+	lost := previous != "" && selected < 0
+	renamed := selected >= 0 && names[selected] != previous
+	if previous == "" {
+		selected = defaultSelection(names)
+	}
+	if selected < 0 {
+		selected = 0
+	}
+	m.channels = names
+	m.channelIDs = nextIDs
+	m.channelsErr = nil
+	m.selected = selected
+	m.notice = ""
+	if empty {
+		m.notice = "no channels on server"
+	}
+	var cmd tea.Cmd
+	if lost || renamed || previous == "" {
+		status := m.channelStatus
+		m, cmd = m.openSelected()
+		switch {
+		case lost:
+			m.notice = sanitize(fmt.Sprintf("#%s is no longer available to you.", previous))
+			m.setStatus(modeChannels, m.notice)
+		case previous == "":
+			m.setStatus(modeChannels, m.notice)
+		default:
+			m.setStatus(modeChannels, status)
+		}
+	} else if m.notice != "" {
+		m.setStatus(modeChannels, m.notice)
+	}
+	cmd = tea.Batch(cmd, m.loadReadState())
+	return m, m.nextChannelsLoad(again, cmd)
 }
 
 func (m Model) loadCurrent() tea.Cmd {

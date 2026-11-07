@@ -1130,6 +1130,9 @@ type EventHandler struct {
 	// may have changed (ADR-014); the document carries nothing else, so the
 	// caller re-reads whoami.
 	PermissionsChanged func(schema.PermissionsChangedV1) error
+	// ChannelsChanged is called when the caller's channel list may have
+	// changed; the document carries nothing else, so the caller re-reads it.
+	ChannelsChanged func(schema.ChannelsChangedV1) error
 }
 
 // SubscribeEvents follows channel's events socket and calls the handler with
@@ -1233,6 +1236,15 @@ func dispatchEvent(frame json.RawMessage, handler EventHandler) error {
 			return err
 		}
 		return receiveEvent(handler.PermissionsChanged(doc))
+	case schema.ChannelsChangedSchemaV1:
+		if handler.ChannelsChanged == nil {
+			return nil
+		}
+		var doc schema.ChannelsChangedV1
+		if err := decodeEvent(frame, &doc, "channels changed"); err != nil {
+			return err
+		}
+		return receiveEvent(handler.ChannelsChanged(doc))
 	case schema.ReactionSummarySchemaV1:
 		if handler.Reaction == nil {
 			return nil

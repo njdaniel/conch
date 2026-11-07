@@ -505,6 +505,243 @@ func TestModelInitChannelSource(t *testing.T) {
 	})
 }
 
+type channelListAnswer struct {
+	channels []schema.ChannelV0
+	err      error
+	wait     <-chan struct{}
+}
+
+type channelRefreshAPI struct {
+	stubAPI
+	mu      sync.Mutex
+	answers []channelListAnswer
+	calls   int
+	started chan int
+}
+
+func (a *channelRefreshAPI) ListChannels(context.Context) (schema.ListChannelsResponse, error) {
+	a.mu.Lock()
+	a.calls++
+	call := a.calls
+	answer := channelListAnswer{err: errors.New("unexpected channel list read")}
+	if call <= len(a.answers) {
+		answer = a.answers[call-1]
+	}
+	a.mu.Unlock()
+	if a.started != nil {
+		a.started <- call
+	}
+	if answer.wait != nil {
+		<-answer.wait
+	}
+	return schema.ListChannelsResponse{Channels: answer.channels}, answer.err
+}
+
+func (a *channelRefreshAPI) listCalls() int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.calls
+}
+
+type channelRefreshTestEvent struct{}
+
+func runChannelRefreshCommand(m Model, cmd tea.Cmd) []tea.Msg {
+	if cmd == nil {
+		return nil
+	}
+	// The frame's other command is the next events-channel read. Give it one
+	// harmless message so the test can execute the batch synchronously.
+	m.events <- channelRefreshTestEvent{}
+	return runCmd(cmd)
+}
+
+func channelRefreshResult(t *testing.T, msgs []tea.Msg) (channelsLoaded, bool) {
+	t.Helper()
+	for _, msg := range msgs {
+		if loaded, ok := msg.(channelsLoaded); ok {
+			return loaded, true
+		}
+	}
+	return channelsLoaded{}, false
+}
+
+func channelRefreshModel(t *testing.T, api *channelRefreshAPI) Model {
+	t.Helper()
+	m := NewModel(context.Background(), api, 7, nil)
+	m, _ = update(m, m.loadChannels()())
+	if api.started != nil {
+		<-api.started // the initial load, not a refresh
+	}
+	m.selected = 1 // ops, so a refresh must not jump back to general.
+	m.ev.gen = 4
+	m.ev.state = eventsLive
+	m.setStatus(modeChannels, "ready")
+	return m
+}
+
+func TestChannelsChangedRefreshesListAndSelection(t *testing.T) {
+	initial := []schema.ChannelV0{{ID: 1, Name: "general"}, {ID: 2, Name: "ops"}, {ID: 3, Name: "dev"}}
+	tests := []struct {
+		name        string
+		next        []schema.ChannelV0
+		err         error
+		genDelta    int
+		wantRead    bool
+		wantList    string
+		wantCurrent string
+		wantStatus  string
+	}{
+		{
+			name: "channel gained", next: []schema.ChannelV0{{ID: 1, Name: "general"}, {ID: 2, Name: "ops"}, {ID: 3, Name: "dev"}, {ID: 4, Name: "help"}},
+			wantRead: true, wantList: "general,ops,dev,help", wantCurrent: "ops", wantStatus: "ready",
+		},
+		{
+			name: "selected channel lost", next: []schema.ChannelV0{{ID: 1, Name: "general"}, {ID: 3, Name: "dev"}},
+			wantRead: true, wantList: "general,dev", wantCurrent: "general", wantStatus: "#ops is no longer available to you.",
+		},
+		{
+			name: "selected channel renamed", next: []schema.ChannelV0{{ID: 1, Name: "general"}, {ID: 2, Name: "staff"}, {ID: 3, Name: "dev"}},
+			wantRead: true, wantList: "general,staff,dev", wantCurrent: "staff", wantStatus: "ready",
+		},
+		{
+			name: "frame from superseded socket", next: []schema.ChannelV0{{ID: 1, Name: "general"}}, genDelta: -1,
+			wantList: "general,ops,dev", wantCurrent: "ops", wantStatus: "ready",
+		},
+		{
+			name: "failed re-read", err: errors.New("boom"), wantRead: true,
+			wantList: "general,ops,dev", wantCurrent: "ops", wantStatus: "cannot read the channel list",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			api := &channelRefreshAPI{answers: []channelListAnswer{{channels: initial}, {channels: tt.next, err: tt.err}}}
+			m := channelRefreshModel(t, api)
+			m, cmd := update(m, eventsChannelsReceived{gen: m.ev.gen + tt.genDelta})
+			loaded, ok := channelRefreshResult(t, runChannelRefreshCommand(m, cmd))
+			if ok != tt.wantRead {
+				t.Fatalf("channel re-read returned a result = %v, want %v (command messages %#v)", ok, tt.wantRead, runCmd(cmd))
+			}
+			if ok {
+				m, _ = update(m, loaded)
+			}
+			if got := strings.Join(m.channels, ","); got != tt.wantList {
+				t.Errorf("channels = %q, want %q", got, tt.wantList)
+			}
+			if m.current() != tt.wantCurrent {
+				t.Errorf("selected channel = %q, want %q", m.current(), tt.wantCurrent)
+			}
+			if m.status() != tt.wantStatus {
+				t.Errorf("status = %q, want %q", m.status(), tt.wantStatus)
+			}
+			wantCalls := 1
+			if tt.wantRead {
+				wantCalls++
+			}
+			if api.listCalls() != wantCalls {
+				t.Errorf("ListChannels calls = %d, want %d", api.listCalls(), wantCalls)
+			}
+			if tt.err != nil && m.channelsErr != nil {
+				t.Errorf("a failed refresh replaced the usable list's error state: %v", m.channelsErr)
+			}
+		})
+	}
+}
+
+func TestChannelsChangedBurstCoalesces(t *testing.T) {
+	release := make(chan struct{})
+	api := &channelRefreshAPI{
+		answers: []channelListAnswer{
+			{channels: []schema.ChannelV0{{ID: 1, Name: "general"}, {ID: 2, Name: "ops"}}},
+			{channels: []schema.ChannelV0{{ID: 1, Name: "general"}, {ID: 2, Name: "ops"}}, wait: release},
+			{channels: []schema.ChannelV0{{ID: 1, Name: "general"}, {ID: 2, Name: "ops"}, {ID: 3, Name: "dev"}}},
+		},
+		started: make(chan int, 4),
+	}
+	m := channelRefreshModel(t, api)
+	m, cmd := update(m, eventsChannelsReceived{gen: m.ev.gen})
+	first := make(chan []tea.Msg, 1)
+	go func() { first <- runChannelRefreshCommand(m, cmd) }()
+	if call := <-api.started; call != 2 {
+		t.Fatalf("first started call = %d, want the refresh (2)", call)
+	}
+	for i := 0; i < 3; i++ {
+		m, cmd = update(m, eventsChannelsReceived{gen: m.ev.gen})
+		runChannelRefreshCommand(m, cmd)
+	}
+	if got := api.listCalls(); got != 2 {
+		t.Fatalf("ListChannels calls during blocked read = %d, want 2 (initial and one refresh)", got)
+	}
+	close(release)
+	loaded, ok := channelRefreshResult(t, <-first)
+	if !ok {
+		t.Fatal("the first refresh returned no channelsLoaded")
+	}
+	m, cmd = update(m, loaded)
+	loaded, ok = channelRefreshResult(t, runCmd(cmd))
+	if !ok {
+		t.Fatal("the coalesced refresh returned no channelsLoaded")
+	}
+	m, _ = update(m, loaded)
+	if got := api.listCalls(); got != 3 {
+		t.Errorf("ListChannels calls = %d, want exactly one follow-up after the burst (3 total)", got)
+	}
+	if got := strings.Join(m.channels, ","); got != "general,ops,dev" {
+		t.Errorf("channels = %q, want the final answer", got)
+	}
+}
+
+func TestChannelsReconnectRefreshesList(t *testing.T) {
+	tests := []struct {
+		name     string
+		state    eventsState
+		genDelta int
+		wantRead bool
+	}{
+		{name: "reconnect", state: eventsDown, wantRead: true},
+		{name: "first roster", state: eventsConnecting},
+		{name: "already live", state: eventsLive},
+		{name: "superseded socket", state: eventsDown, genDelta: -1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			api := &channelRefreshAPI{answers: []channelListAnswer{
+				{channels: []schema.ChannelV0{{ID: 1, Name: "general"}, {ID: 2, Name: "ops"}}},
+				{channels: []schema.ChannelV0{{ID: 1, Name: "general"}, {ID: 2, Name: "ops"}, {ID: 3, Name: "dev"}}},
+			}}
+			m := channelRefreshModel(t, api)
+			m.ev.state = tt.state
+			m, cmd := update(m, eventsRosterReceived{gen: m.ev.gen + tt.genDelta})
+			loaded, ok := channelRefreshResult(t, runChannelRefreshCommand(m, cmd))
+			if ok != tt.wantRead {
+				t.Fatalf("reconnect read = %v, want %v", ok, tt.wantRead)
+			}
+			if ok {
+				m, _ = update(m, loaded)
+				if got := strings.Join(m.channels, ","); got != "general,ops,dev" {
+					t.Errorf("channels = %q, want the refreshed list", got)
+				}
+			}
+		})
+	}
+}
+
+func TestChannelsChangedLossStatusIsSanitized(t *testing.T) {
+	api := &channelRefreshAPI{answers: []channelListAnswer{
+		{channels: []schema.ChannelV0{{ID: 1, Name: "general"}, {ID: 2, Name: "o\x1b[31mps"}}},
+		{channels: []schema.ChannelV0{{ID: 1, Name: "general"}}},
+	}}
+	m := channelRefreshModel(t, api)
+	m, cmd := update(m, eventsChannelsReceived{gen: m.ev.gen})
+	loaded, ok := channelRefreshResult(t, runChannelRefreshCommand(m, cmd))
+	if !ok {
+		t.Fatal("no channel list re-read")
+	}
+	m, _ = update(m, loaded)
+	if strings.Contains(m.status(), "\x1b") || !strings.Contains(m.status(), "is no longer available to you.") {
+		t.Errorf("status = %q, want sanitized loss text", m.status())
+	}
+}
+
 func TestModelEmptyChannelListIsSafe(t *testing.T) {
 	keys := []tea.KeyMsg{
 		{Type: tea.KeyUp}, {Type: tea.KeyDown}, {Type: tea.KeyTab}, {Type: tea.KeyTab},

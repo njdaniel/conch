@@ -362,6 +362,7 @@ func (m Model) channelLeft(name string) (Model, tea.Cmd) {
 		return m, nil
 	}
 	m.channels = slices.Delete(slices.Clone(m.channels), i, i+1)
+	delete(m.channelIDs, name)
 	delete(m.subscribed, name)
 	switch {
 	case len(m.channels) == 0:
