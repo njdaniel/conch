@@ -1,5 +1,5 @@
 import type { Page } from '@playwright/test';
-import { post } from './api';
+import { post, reply } from './api';
 import { credentialField, expect, expectFits, messages, phoneSizes, say, signIn, statusLine, test } from './fixtures';
 import { call, type World } from './world';
 
@@ -365,5 +365,39 @@ test('a reader scrolled up keeps the same message in view across a density chang
     await expect.poll(offset, { message: `line 040 stays put going ${from} to ${to}` }).toBeLessThanOrEqual(before + 6);
     expect(await offset()).toBeGreaterThanOrEqual(before - 6);
     expect(await gap(page), 'not yanked to the bottom').toBeGreaterThan(50);
+  }
+});
+
+test('with a thread expanded, a density change keeps the main log\'s own row on top', async ({ meet, world }) => {
+  const { page } = await meet({ viewport: { width: 1100, height: 600 }, colorScheme: 'dark' });
+  const tag = `thr-${Date.now().toString(36)}`;
+  const root = await post(world, world.tokens.nick, 'general', `${tag} root`);
+  for (let i = 0; i < 50; i++) await post(world, world.tokens.nick, 'general', `${tag} filler ${String(i).padStart(2, '0')} ${'word '.repeat(i % 5 === 0 ? 30 : 3)}`);
+  // The reply comes late in the log, and again inside its root's thread, far above.
+  const answer = await reply(world, world.tokens.nick, 'general', root.id, `${tag} answer`);
+  for (let i = 0; i < 20; i++) await post(world, world.tokens.nick, 'general', `${tag} after ${String(i).padStart(2, '0')}`);
+  await signIn(page, world, world.tokens.browser, 'browser-test');
+  const mainRow = page.locator(`[role="log"][aria-label="Messages"] > .messages > li[data-message-id="${String(answer.id)}"]`);
+  await expect(mainRow).toBeAttached();
+  await page.locator(`[role="log"][aria-label="Messages"] > .messages > li[data-message-id="${String(root.id)}"]`).getByRole('button', { name: /^Reply to / }).click();
+  const thread = page.getByRole('region', { name: /^Thread around / });
+  await expect(thread.getByText(`${tag} answer`, { exact: true })).toBeVisible();
+  await expect(page.locator(`[data-message-id="${String(answer.id)}"]`)).toHaveCount(2);
+  await mainRow.evaluate((el) => {
+    const log = el.closest('[role="log"]') as HTMLElement;
+    log.scrollTop += el.getBoundingClientRect().top - log.getBoundingClientRect().top;
+  });
+  await page.waitForTimeout(150);
+  const offset = () => mainRow.evaluate((el) => {
+    const log = el.closest('[role="log"]') as HTMLElement;
+    return el.getBoundingClientRect().top - log.getBoundingClientRect().top;
+  });
+  const before = await offset();
+  expect(before).toBeGreaterThanOrEqual(-2);
+  expect(before).toBeLessThan(40);
+  for (const density of ['compact', 'comfortable'] as const) {
+    await setDensity(page, density);
+    await expect.poll(offset, { message: `the main-log occurrence stays on top at ${density}` }).toBeLessThanOrEqual(before + 6);
+    expect(await offset()).toBeGreaterThanOrEqual(before - 6);
   }
 });

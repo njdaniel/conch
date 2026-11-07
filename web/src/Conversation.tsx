@@ -535,9 +535,10 @@ function syncStops(list: HTMLElement, stop: number | null) {
 const nearBottom = 24;
 
 // The message at the top of the log's view and its offset below the log's
-// top. Rows are in document order, so a binary search finds it.
+// top. Only the log's own rows count: an expanded thread repeats ids inside
+// its root's row. Rows are in document order, so a binary search finds it.
 function topOfView(log: HTMLElement): { readonly id: string; readonly offset: number } | null {
-  const rows = log.querySelectorAll<HTMLElement>('[data-message-id]');
+  const rows = log.querySelectorAll<HTMLElement>(':scope > .messages > li[data-message-id]');
   const top = log.getBoundingClientRect().top;
   let lo = 0;
   let hi = rows.length - 1;
@@ -920,7 +921,7 @@ export function Conversation({
       return;
     }
     const held = view.current;
-    const row = held === null ? null : el.querySelector<HTMLElement>(`[data-message-id="${held.id}"]`);
+    const row = held === null ? null : el.querySelector<HTMLElement>(`:scope > .messages > li[data-message-id="${held.id}"]`);
     if (held !== null && row !== null) el.scrollTop += row.getBoundingClientRect().top - el.getBoundingClientRect().top - held.offset;
   }, [density]);
 
