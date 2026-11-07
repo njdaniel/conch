@@ -17,6 +17,7 @@
 import { useCallback, useContext, useEffect, useId, useMemo, useRef, useState } from 'react';
 import * as api from '../api';
 import { SettingsOpen } from '../joiningSettings';
+import { isOwner } from '../memberActions';
 import { usePhone } from '../phone';
 import type { IssuedByOperatorV1, KnownPermission, KnownPermissionPreset, Permission, PermissionChangeV1, PermissionPreset, PermissionRowV1, PermissionsResponseV1, PermissionsWarning, PutPermissionsRequestV1 } from '../schema/permission';
 import type { WhoAmIResponseV1 } from '../schema/principal';
@@ -711,10 +712,13 @@ const when = (stamp: string) => dateTimeOf(stamp);
 // §7.5, O13): the live credentials and hooks operators issued to other people,
 // which taking the permission away does not end. Each can be revoked here; a
 // person's credentials can be signed out all at once.
-function IssuedList({
+export function IssuedList({
   who,
   items,
   names,
+  title,
+  intro,
+  revokeAllFor,
   onDone,
   onDismiss,
   onUnauthorized,
@@ -722,11 +726,18 @@ function IssuedList({
   readonly who: WhoAmIResponseV1;
   readonly items: readonly IssuedByOperatorV1[];
   readonly names?: ReadonlyMap<number, string>;
+  // For the list under one person (issue #1464): its own heading and lead-in,
+  // and, for an owner, the one Revoke all for what that person issued.
+  readonly title?: string;
+  readonly intro?: string;
+  readonly revokeAllFor?: { readonly principal: number; readonly name: string };
   readonly onDone: (gone: (item: IssuedByOperatorV1) => boolean) => void;
   readonly onDismiss: () => void;
   readonly onUnauthorized: () => void;
 }) {
   const canRevoke = canDo(who, 'manage_members');
+  // Revoke all is the owner's alone, as the server holds it (isOwner).
+  const ownerAll = revokeAllFor !== undefined && isOwner(who);
   const [busy, setBusy] = useState<string | null>(null);
   const [line, setLine] = useState<Line>(null);
   // The question open: signing a person out everywhere, or revoking one of the
@@ -754,6 +765,27 @@ function IssuedList({
     });
   }
 
+  const credentials = items.filter((i) => i.kind === 'credential').length;
+  const hooks = items.filter((i) => i.kind === 'hook').length;
+  const counts = (c: number, h: number) => `${String(c)} credential${c === 1 ? '' : 's'} and ${String(h)} hook${h === 1 ? '' : 's'}`;
+
+  // revokeAll is the owner's one confirmed call; the server answers with the
+  // counts it ended, which can exceed the list (an expired credential that was
+  // never revoked is ended too), and the list is cleared.
+  function revokeAll() {
+    if (revokeAllFor === undefined || busy !== null || !ownerAll) return;
+    setBusy('revoke-all');
+    setLine(null);
+    void api.revokeIssued(revokeAllFor.principal).then((result) => {
+      setBusy(null);
+      if (result.ok) {
+        onDone(() => true);
+        setLine({ text: `Revoked ${String(result.value.credentials_revoked)} credentials and ${String(result.value.hooks_revoked)} hooks.`, refused: false });
+      } else if (result.failure === 'unauthorized') onUnauthorized();
+      else setLine({ text: refusalLine(result, 'Nothing was revoked.'), refused: true });
+    });
+  }
+
   // The first credential of each person carries their one Sign out everywhere.
   const firstOf = new Set<string>();
   const leaders = new Set<string>();
@@ -765,9 +797,9 @@ function IssuedList({
 
   return (
     <section className="issued-list" aria-label="Issued to others by operators">
-      <h5>Still working after this change</h5>
+      <h5>{title ?? 'Still working after this change'}</h5>
       <p>
-        Operators issued these to other people. Taking “Act as members” away does not end them. {canRevoke ? '' : reasonFor('manage_members')}
+        {intro ?? 'Operators issued these to other people. Taking “Act as members” away does not end them.'} {canRevoke ? '' : reasonFor('manage_members')}
       </p>
       {items.length === 0 ? <p className="hint">Nothing issued by operators is left on this list.</p> : null}
       <ul>
@@ -822,6 +854,22 @@ function IssuedList({
           );
         })}
       </ul>
+      {ownerAll && items.length > 0 ? (
+        <button
+          type="button"
+          className="danger"
+          disabled={busy !== null}
+          onClick={() => {
+            setAsking({
+              text: `Revoke everything ${revokeAllFor.name} issued to other people? The ${counts(credentials, hooks)} listed here end at once, and so does any that has run out but was never revoked. Whatever was issued to an owner stays. This cannot be undone.`,
+              yes: 'Yes, revoke all',
+              go: revokeAll,
+            });
+          }}
+        >
+          Revoke all ({items.length})
+        </button>
+      ) : null}
       {asking === null || !canRevoke ? null : (
         <div role="group" aria-label="Confirm" className="signout-confirm">
           <p>{asking.text}</p>

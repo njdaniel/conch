@@ -1,4 +1,4 @@
-import { listChannelBansResponseV1, messageV2, messageRemovedV1, type MessageRemovedV1 } from './schema/generated';
+import { disablePrincipalResponseV1, listChannelBansResponseV1, messageV2, revokeIssuedResponseV1, type DisablePrincipalResponseV1, type RevokeIssuedResponseV1, messageRemovedV1, type MessageRemovedV1 } from './schema/generated';
 // The only module that holds the credential in use, and the only one that
 // asks conchd anything. Where the token lives depends on whose it is (issue
 // #439, decision O1). A member's lasts: it is kept so that it survives closing
@@ -1218,9 +1218,20 @@ export async function hidePrincipal(id: number): Promise<InviteResult<HidePrinci
 
 // disablePrincipal and enablePrincipal stop and allow a person's sign-in
 // (POST /v1/principals/{id}/disable and /enable; manage_members). Both are
-// repeatable.
-export async function disablePrincipal(id: number): Promise<InviteResult<null>> {
-  return readDone(await authedSend(call('disablePrincipal', { id })));
+// repeatable. A disable answers 200 with what the person issued to others that
+// is still live (issued_to_others), or 204 from an older server, which is the
+// same answer with no list (issue #1464).
+export async function disablePrincipal(id: number): Promise<InviteResult<DisablePrincipalResponseV1>> {
+  const reply = await authedSend(call('disablePrincipal', { id }));
+  if (reply.kind === 'reply' && reply.res.status === 204) return { ok: true, value: {} };
+  return readSent(reply, disablePrincipalResponseV1);
+}
+
+// revokeIssued revokes every credential and hook a person issued to others
+// (POST /v1/principals/{id}/issued/revoke-all; owner only, and a recent proof,
+// which authedSend asks for). The answer counts what it ended.
+export async function revokeIssued(id: number): Promise<InviteResult<RevokeIssuedResponseV1>> {
+  return readSent(await authedSend(call('revokeIssued', { id })), revokeIssuedResponseV1);
 }
 
 export async function enablePrincipal(id: number): Promise<InviteResult<null>> {
