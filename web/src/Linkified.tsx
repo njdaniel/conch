@@ -1,4 +1,4 @@
-import { useId, useState, type ReactNode } from 'react';
+import { Component, useId, useState, type ReactNode } from 'react';
 import { linkify } from './linkify';
 
 function SafeLink({ text, href }: { readonly text: string; readonly href: string }) {
@@ -19,6 +19,7 @@ function Spoiler({ children }: { readonly children: ReactNode }) {
 }
 
 function plain(text: string, prefix: string): ReactNode[] {
+  if (!text.includes('://')) return [text];
   return linkify(text).map((segment, index) => segment.kind === 'text'
     ? segment.text
     : <SafeLink key={`${prefix}-link-${String(index)}`} text={segment.text} href={segment.href} />);
@@ -30,6 +31,12 @@ interface NextMarkers {
   readonly positions: Record<InlineMarker, Int32Array | null>;
 }
 const maxInlineDepth = 8;
+// Past this many spoilers in one body the rest are not components: each shows
+// as the hidden text "[spoiler]", so a body of 200 000 of them stays cheap.
+const maxSpoilers = 500;
+interface Budget {
+  spoilers: number;
+}
 
 function nextMarkers(text: string): NextMarkers {
   return {
@@ -44,7 +51,8 @@ function closing(next: NextMarkers, marker: InlineMarker, from: number): number 
     positions = new Int32Array(next.text.length + 1);
     positions.fill(-1);
     for (let at = next.text.length - 1; at >= 0; at--) {
-      if (next.text[at] === '\n') continue;
+      // Only a spoiler may span lines; the other markers close on their own line.
+      if (next.text[at] === '\n' && marker !== '||') continue;
       positions[at] = positions[at + 1] ?? -1;
       if (next.text.startsWith(marker, at)) positions[at] = at;
     }
@@ -56,13 +64,26 @@ function closing(next: NextMarkers, marker: InlineMarker, from: number): number 
 
 // Inline Markdown becomes React elements, never HTML. Delimiters that do not
 // close stay literal, and inline code never parses its contents.
-function inline(text: string, prefix = 'inline', depth = 0): ReactNode[] {
+//
+// A closed spoiler may span lines within one block, but not a quote or a code
+// block, so the toolbar wraps each line of a selection in its own. An unclosed
+// || stays literal, as in Discord.
+function inline(text: string, prefix: string, depth: number, budget: Budget): ReactNode[] {
   const next = nextMarkers(text);
   const out: ReactNode[] = [];
   let literal = 0;
   let at = 0;
+  // Neighbouring strings join, so a body of many capped spoilers is a few
+  // text nodes rather than one per spoiler.
+  const add = (node: ReactNode) => {
+    const last = out[out.length - 1];
+    if (typeof node === 'string' && typeof last === 'string') out[out.length - 1] = last + node;
+    else out.push(node);
+  };
   const flush = (end: number) => {
-    if (end > literal) out.push(...plain(text.slice(literal, end), `${prefix}-${String(literal)}`));
+    // A loop, not a spread: a body can hold tens of thousands of segments,
+    // more than a call may take as arguments.
+    if (end > literal) for (const node of plain(text.slice(literal, end), `${prefix}-${String(literal)}`)) add(node);
   };
   const wrap = (marker: InlineMarker, element: 'strong' | 'em' | 's'): boolean => {
     if (!text.startsWith(marker, at)) return false;
@@ -70,7 +91,7 @@ function inline(text: string, prefix = 'inline', depth = 0): ReactNode[] {
     const end = closing(next, marker, from);
     if (end < 0 || depth >= maxInlineDepth) return false;
     flush(at);
-    const content = inline(text.slice(from, end), `${prefix}-${String(at)}`, depth + 1);
+    const content = inline(text.slice(from, end), `${prefix}-${String(at)}`, depth + 1, budget);
     out.push(element === 'strong' ? <strong key={`${prefix}-${String(at)}`}>{content}</strong> : element === 'em' ? <em key={`${prefix}-${String(at)}`}>{content}</em> : <s key={`${prefix}-${String(at)}`}>{content}</s>);
     at = end + marker.length;
     literal = at;
@@ -80,7 +101,7 @@ function inline(text: string, prefix = 'inline', depth = 0): ReactNode[] {
   while (at < text.length) {
     if (text[at] === '\\' && at + 1 < text.length && /[*`~|[\]\\]/.test(text[at + 1] ?? '')) {
       flush(at);
-      out.push(text[at + 1]);
+      add(text[at + 1]);
       at += 2;
       literal = at;
       continue;
@@ -97,9 +118,16 @@ function inline(text: string, prefix = 'inline', depth = 0): ReactNode[] {
     }
     if (text.startsWith('||', at)) {
       const end = closing(next, '||', at + 2);
-      if (end >= 0 && depth < maxInlineDepth) {
+      if (end >= 0) {
         flush(at);
-        out.push(<Spoiler key={`${prefix}-${String(at)}`}>{inline(text.slice(at + 2, end), `${prefix}-${String(at)}`, depth + 1)}</Spoiler>);
+        const inner = text.slice(at + 2, end);
+        if (budget.spoilers >= maxSpoilers) {
+          add('[spoiler]');
+        } else {
+          budget.spoilers += 1;
+          const content = depth < maxInlineDepth ? inline(inner, `${prefix}-${String(at)}`, depth + 1, budget) : inner;
+          out.push(<Spoiler key={`${prefix}-${String(at)}`}>{content}</Spoiler>);
+        }
         at = end + 2;
         literal = at;
         continue;
@@ -109,7 +137,7 @@ function inline(text: string, prefix = 'inline', depth = 0): ReactNode[] {
       const end = closing(next, '***', at + 3);
       if (end >= 0 && depth < maxInlineDepth) {
         flush(at);
-        out.push(<strong key={`${prefix}-${String(at)}`}><em>{inline(text.slice(at + 3, end), `${prefix}-${String(at)}`, depth + 1)}</em></strong>);
+        out.push(<strong key={`${prefix}-${String(at)}`}><em>{inline(text.slice(at + 3, end), `${prefix}-${String(at)}`, depth + 1, budget)}</em></strong>);
         at = end + 3;
         literal = at;
         continue;
@@ -123,13 +151,14 @@ function inline(text: string, prefix = 'inline', depth = 0): ReactNode[] {
 }
 
 function blocks(text: string): ReactNode[] {
+  const budget: Budget = { spoilers: 0 };
   const lines = text.split('\n');
   const out: ReactNode[] = [];
   let ordinary: string[] = [];
   const flush = () => {
     if (ordinary.length === 0) return;
     const body = ordinary.join('\n');
-    out.push(<span key={`text-${String(out.length)}`}>{inline(body, `text-${String(out.length)}`)}</span>);
+    out.push(<span key={`text-${String(out.length)}`}>{inline(body, `text-${String(out.length)}`, 0, budget)}</span>);
     ordinary = [];
   };
 
@@ -156,7 +185,7 @@ function blocks(text: string): ReactNode[] {
         quote.push(quoted.slice(1).trimStart());
         at += 1;
       }
-      out.push(<blockquote key={`quote-${String(out.length)}`}>{inline(quote.join('\n'), `quote-${String(out.length)}`)}</blockquote>);
+      out.push(<blockquote key={`quote-${String(out.length)}`}>{inline(quote.join('\n'), `quote-${String(out.length)}`, 0, budget)}</blockquote>);
       continue;
     }
     ordinary.push(line);
@@ -166,8 +195,31 @@ function blocks(text: string): ReactNode[] {
   return out;
 }
 
+// BodyBoundary keeps one body that fails to render from taking the page down
+// with it: that body is shown as its plain text instead, and the rest of the
+// view renders as usual.
+export class BodyBoundary extends Component<{ readonly text: string; readonly children: ReactNode }, { readonly failed: boolean }> {
+  override state = { failed: false };
+
+  static getDerivedStateFromError(): { readonly failed: boolean } {
+    return { failed: true };
+  }
+
+  override render(): ReactNode {
+    return this.state.failed ? this.props.text : this.props.children;
+  }
+}
+
+function Rendered({ text }: { readonly text: string }) {
+  return <>{blocks(text)}</>;
+}
+
 // Linkified is the shared message-body renderer. The historic name is kept
 // because message history, pending sends, search and edit revisions all use it.
 export function Linkified({ text }: { readonly text: string }) {
-  return <>{blocks(text)}</>;
+  return (
+    <BodyBoundary key={text} text={text}>
+      <Rendered text={text} />
+    </BodyBoundary>
+  );
 }

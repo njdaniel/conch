@@ -7,6 +7,7 @@ import { Composer } from './Composer';
 import { guestName } from './guestName';
 import { Avatar, PrivateMark } from './Icons';
 import { Linkified } from './Linkified';
+import { previewText } from './linkify';
 import { ImageAttachment } from './ImageAttachment';
 import { loadStored, saveEdit, saveReplies } from './state/draftStore';
 import { canEdit, EditedMarker, editEnds, editsLeft, editWindowMs, MessageEditor } from './MessageEdit';
@@ -282,7 +283,7 @@ const excerptLength = 80;
 // excerptOf is the first line of a body, cut to about excerptLength characters.
 // It is drawn as text: markup in it shows as the characters it is.
 export function excerptOf(body: string): string {
-  const line = (body.split('\n').find((part) => part.trim() !== '') ?? '').trim();
+  const line = (previewText(body).split('\n').find((part) => part.trim() !== '') ?? '').trim();
   const chars = Array.from(line);
   return chars.length <= excerptLength ? line : `${chars.slice(0, excerptLength).join('').trimEnd()}…`;
 }

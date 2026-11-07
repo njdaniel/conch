@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { previewText } from './linkify';
 import * as api from './api';
 import type { NotificationPolicy } from './api';
 import { platform } from './platform';
@@ -34,7 +35,7 @@ export function mentions(body: string, name: string): boolean {
 }
 
 function snippet(body: string): string {
-  const text = body.replace(/\s+/g, ' ').trim();
+  const text = previewText(body).replace(/\s+/g, ' ').trim();
   return text.length <= 160 ? text : `${text.slice(0, 159)}…`;
 }
 

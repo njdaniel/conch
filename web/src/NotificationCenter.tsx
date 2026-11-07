@@ -1,4 +1,5 @@
 import { useId, useState } from 'react';
+import { previewText } from './linkify';
 import { Glyph } from './Icons';
 import type { NotificationAlert } from './useNotifications';
 
@@ -26,11 +27,11 @@ export function NotificationCenter({ alerts, onOpen, onClear }: {
         <ul aria-label="Recent notifications">
           {alerts.map((alert) => (
             <li key={alert.id}>
-              <button type="button" aria-label={`${alert.mention ? 'Mention' : 'New message'} in #${alert.channel} ${alert.message.body}`} onClick={() => {
+              <button type="button" aria-label={`${alert.mention ? 'Mention' : 'New message'} in #${alert.channel} ${previewText(alert.message.body)}`} onClick={() => {
                 onOpen(alert.id);
               }}>
                 <strong>{alert.mention ? 'Mention' : 'New message'} in #{alert.channel}</strong>
-                <span>{alert.message.body}</span>
+                <span>{previewText(alert.message.body)}</span>
               </button>
             </li>
           ))}

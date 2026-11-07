@@ -89,4 +89,11 @@ describe('composer formatting controls', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Spoiler' }));
     expect(box().value).toBe('||secret||');
   });
+
+  it('wraps each line of a multiline selection in its own spoiler', () => {
+    render(<Harness />);
+    select('one\n\ntwo');
+    fireEvent.click(screen.getByRole('button', { name: 'Spoiler' }));
+    expect(box().value).toBe('||one||\n\n||two||');
+  });
 });
