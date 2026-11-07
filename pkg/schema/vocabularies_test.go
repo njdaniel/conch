@@ -215,6 +215,7 @@ var validators = map[string]func(string) bool{
 	"VoiceDevicesPipeWire":     validOf[VoiceDevicesPipeWire](),
 	"VoiceShareAudioScope":     validOf[VoiceShareAudioScope](),
 	"VoiceShareEndReason":      validOf[VoiceShareEndReason](),
+	"VoiceShareResolution":     validOf[VoiceShareResolution](),
 	"VoiceCameraEndReason":     validOf[VoiceCameraEndReason](),
 	"VoiceTransmitState":       validOf[VoiceTransmitState](),
 

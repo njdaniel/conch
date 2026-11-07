@@ -209,6 +209,9 @@ var TSTypes = []TSType{
 	// the presence snapshot its socket streams, and the transmit report.
 	{Value: VoiceRoomGrant{}},
 	{Value: VoiceSessionResponseV1{}, Family: "voice-session-response-v1"},
+	// The quality a sharer declared (issue #1483, design §3.2): on their
+	// participant in presence, in the claim's body and in its answer.
+	{Value: VoiceShareQuality{}},
 	{Value: VoiceParticipant{}},
 	{Value: VoicePresenceRoom{}},
 	// Why the reader's own share ended (issue #487), in their presence alone.
@@ -216,6 +219,10 @@ var TSTypes = []TSType{
 	// Why the reader's own camera ended (ADR-015, issue #1238), likewise.
 	{Value: VoiceCameraEnded{}},
 	{Value: VoicePresenceV1{}, Family: "voice-presence-v1", Schema: VoicePresenceSchemaV1},
+	// Presence v2 (issue #1483, design §2.2): v1 without the one-share rule,
+	// which the page asks for with ?schema=conch.voice_presence.v2.
+	{Value: VoicePresenceRoomV2{}},
+	{Value: VoicePresenceV2{}, Family: "voice-presence-v2", Schema: VoicePresenceSchemaV2},
 	{Value: VoiceTransmitReportV1{}, Family: "voice-transmit-report-v1"},
 	// Companion and viewer participants (issue #933).
 	{Value: VoiceCompanionRequestV1{}, Family: "voice-companion-request-v1"},
@@ -224,8 +231,10 @@ var TSTypes = []TSType{
 	// scope, and the answer naming the share it belongs to.
 	{Value: VoiceCompanionAudioRequestV1{}, Family: "voice-companion-audio-request-v1"},
 	{Value: VoiceCompanionAudioV1{}, Family: "voice-companion-audio-v1"},
-	// Screen share (issue #443): the claim the page is given when the room's
-	// share is its own. Presence says who shares (VoiceParticipant above).
+	// Screen share (issue #443): the claim the page is given when it may
+	// share. Presence says who shares (VoiceParticipant above). The claim's
+	// optional body declares the quality (issue #1483, design §3.1).
+	{Value: VoiceShareRequestV1{}, Family: "voice-share-request-v1"},
 	{Value: VoiceShareV1{}, Family: "voice-share-v1"},
 	// The camera claim (ADR-015, issue #1238): the page may publish a camera
 	// while conchd holds it. Presence says who has one (VoiceParticipant).
@@ -622,6 +631,11 @@ var TSVocabularyModes = map[string]TSVocabularyMode{
 	// (voice.go; webcam-video.md §10 keeps the camera's reasons the same way).
 	"VoiceShareEndReason":  TSStrict,
 	"VoiceCameraEndReason": TSStrict,
+	// Strict: the sharer's declared resolution (issue #1483, design §3.2) is
+	// the picker's closed vocabulary; a new value is a new version of
+	// presence, as a new end reason is, and the page sends only what its
+	// picker offers.
+	"VoiceShareResolution": TSStrict,
 	"VoiceTransmitState":   TSStrict,
 
 	// Strict: written by the page itself in a problem report (issue #446);
