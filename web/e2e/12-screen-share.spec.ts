@@ -353,6 +353,10 @@ test.describe('screen share with LiveKit', () => {
       expect(await picks(a.page), 'a quality change opens no new picker').toBe(1);
       await expect(voice).toContainText('You are sharing your screen with sound.');
 
+      // End the share before the reload, and wait for its row: a share that
+      // ends with the page logs its stop late, in the next test's window.
+      await voice.getByRole('button', { name: 'Stop sharing' }).click();
+      await expect.poll(async () => (await shareRows()).at(-1)?.action, { timeout: 15_000 }).toBe('voice_share_stopped');
       await a.page.reload();
       await openChannel(a.page, vw.channel);
       await join(a, 'Join voice');
@@ -386,6 +390,10 @@ test.describe('screen share with LiveKit', () => {
       expect(await picks(a.page), 'a quality change opens no new picker').toBe(1);
       await expectClean(a);
       await expectClean(b);
+      // End the share and wait for its row, so its stop is not logged late
+      // in the next test's window.
+      await voice.getByRole('button', { name: 'Stop sharing' }).click();
+      await expect.poll(async () => (await shareRows()).at(-1)?.action, { timeout: 15_000 }).toBe('voice_share_stopped');
     } finally {
       for (const p of [a, b]) await p.close();
     }
