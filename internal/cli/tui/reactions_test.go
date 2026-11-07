@@ -669,3 +669,41 @@ func TestReactionConfirmationBackoffAndStop(t *testing.T) {
 		})
 	}
 }
+
+// A visible message with no reactions is answered with a timestamped empty
+// summary, so it is versioned: a delayed older own-write response or frame
+// cannot resurrect a removed reaction, however many reads came first, and no
+// confirming read is queued. An omitted (invisible) id stays unversioned.
+func TestReactionVisibleEmptySummaryIsVersioned(t *testing.T) {
+	m, api := reactionModelForTest()
+	m.react.messages["general"] = map[int64]schema.ReactionSummaryV1{41: tuiReactionSummary(41, 1, schema.ReactionCountV1{Emoji: "👍", Count: 1})}
+	// Two successive reads (a reconnect between them) both answer the empty summary.
+	for _, second := range []int{5, 6} {
+		api.summaries.Summaries = []schema.ReactionSummaryV1{tuiReactionSummary(41, second)}
+		m = feed(m, m.reloadReactions("general"))
+		if m.react.unversioned["general"][41] {
+			t.Fatalf("read at second %d left a visible message unversioned", second)
+		}
+	}
+	// The delayed own-write response, computed before either read.
+	stale := tuiReactionSummary(41, 3, schema.ReactionCountV1{Emoji: "👍", Count: 1})
+	m, cmd := update(m, reactionWritten{channel: "general", messageID: 41, summary: stale})
+	if cmd != nil || len(m.react.pending["general"]) != 0 {
+		t.Error("a visible message queued a confirming read")
+	}
+	m, _ = update(m, reactionSummaryReceived{channel: "general", summary: stale})
+	if got := m.react.messages["general"][41]; len(got.Reactions) != 0 {
+		t.Fatalf("delayed write resurrected a removed reaction: %+v", got)
+	}
+	// A frame newer than the read applies at once.
+	m, _ = update(m, reactionSummaryReceived{channel: "general", summary: tuiReactionSummary(41, 9, schema.ReactionCountV1{Emoji: "👍", Count: 2})})
+	if got := m.react.messages["general"][41]; len(got.Reactions) != 1 || got.Reactions[0].Count != 2 {
+		t.Errorf("newer frame not applied: %+v", got)
+	}
+	// An omitted id is still unversioned.
+	api.summaries.Summaries = nil
+	m = feed(m, m.reloadReactions("general"))
+	if !m.react.unversioned["general"][41] {
+		t.Error("an omitted id was not marked unversioned")
+	}
+}

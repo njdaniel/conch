@@ -365,7 +365,8 @@ func checkReactionBatch(ids []int64) *schema.Error {
 }
 
 // readReactionBatch is the batch read: one summary for each named message the
-// caller can see that has a reaction.
+// caller can see, with reactions: [] and the read's as_of for one that has
+// none (design section 8.2). An invisible, removed or unknown id is omitted.
 func (s *Server) readReactionBatch(ctx context.Context, c reactionCall, channel store.Channel, ids []int64) (schema.ReactionSummariesResponseV1, *schema.Error) {
 	if serr := checkReactionBatch(ids); serr != nil {
 		return schema.ReactionSummariesResponseV1{}, serr
@@ -376,11 +377,7 @@ func (s *Server) readReactionBatch(ctx context.Context, c reactionCall, channel 
 	}
 	out := schema.ReactionSummariesResponseV1{Summaries: make([]schema.ReactionSummaryV1, 0, len(sums))}
 	for _, sum := range sums {
-		// A message whose every stored key was left out has no reaction to
-		// serve, and the batch lists only messages that have one.
-		if doc := reactionSummaryDoc(ctx, sum); len(doc.Reactions) > 0 {
-			out.Summaries = append(out.Summaries, doc)
-		}
+		out.Summaries = append(out.Summaries, reactionSummaryDoc(ctx, sum))
 	}
 	return out, nil
 }

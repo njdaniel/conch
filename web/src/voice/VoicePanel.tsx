@@ -152,6 +152,7 @@ export function VoicePanel({
   const { state, snapshot, client } = voice;
   const stage = useContext(StageHost);
   const [options, setOptions] = useState(false);
+  const [shareVolume, setShareVolume] = useState(1);
   // More about sharing opens Voice options at the full share notes, and
   // takes focus there once they are shown (issue #600).
   const about = useRef<HTMLElement>(null);
@@ -341,7 +342,7 @@ export function VoicePanel({
   const silenced = state.muted || state.deafened;
   const captured = (state.phase === 'connected' || state.phase === 'reconnecting') && !state.watchOnly && !state.listenOnly && !state.missing;
   const view =
-    theirs !== null && state.watching ? <ShareView client={client} state={state} name={theirName} audio={theirs.sharingAudio} /> : null;
+    theirs !== null && state.watching ? <ShareView client={client} state={state} name={theirName} audio={theirs.sharingAudio} volume={shareVolume} onVolumeChange={setShareVolume} /> : null;
   // The call view, while the person asked for it and is in voice. The share
   // and the call view are one layout on the stage: the share the main
   // picture and the cameras a strip beside it while both are open. It is
