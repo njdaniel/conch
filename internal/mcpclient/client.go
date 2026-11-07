@@ -125,6 +125,18 @@ func Decode[T any](raw json.RawMessage) (T, error) {
 }
 
 func (c *Client) call(ctx context.Context, method string, params map[string]any) (json.RawMessage, error) {
+	structured, _, err := c.callFull(ctx, method, params)
+	return structured, err
+}
+
+// CallToolFull is CallTool that also returns the whole JSON-RPC response
+// body, result.content included, for a caller that scans everything the
+// server sent and not only the structured content.
+func (c *Client) CallToolFull(ctx context.Context, name string, arguments map[string]any) (structured, response json.RawMessage, err error) {
+	return c.callFull(ctx, "tools/call", map[string]any{"name": name, "arguments": arguments})
+}
+
+func (c *Client) callFull(ctx context.Context, method string, params map[string]any) (json.RawMessage, json.RawMessage, error) {
 	c.mu.Lock()
 	c.nextID++
 	id := c.nextID
@@ -133,11 +145,11 @@ func (c *Client) call(ctx context.Context, method string, params map[string]any)
 
 	body, err := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": id, "method": method, "params": params})
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/mcp", bytes.NewReader(body))
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json, text/event-stream")
@@ -147,7 +159,7 @@ func (c *Client) call(ctx context.Context, method string, params map[string]any)
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if sid := resp.Header.Get("Mcp-Session-Id"); sid != "" {
@@ -157,13 +169,13 @@ func (c *Client) call(ctx context.Context, method string, params map[string]any)
 	}
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	// A response body can hold message bodies, scoped ones included, and
 	// callers log these errors: an error never quotes a tool result, and
 	// quotes only the start of a refusal from the HTTP layer.
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("mcp %s status %d: %s", method, resp.StatusCode, excerpt(respBody))
+		return nil, nil, fmt.Errorf("mcp %s status %d: %s", method, resp.StatusCode, excerpt(respBody))
 	}
 	var envelope struct {
 		Result struct {
@@ -178,19 +190,19 @@ func (c *Client) call(ctx context.Context, method string, params map[string]any)
 		} `json:"error"`
 	}
 	if err := json.Unmarshal(respBody, &envelope); err != nil {
-		return nil, fmt.Errorf("decode mcp %s response (%d bytes): %w", method, len(respBody), err)
+		return nil, nil, fmt.Errorf("decode mcp %s response (%d bytes): %w", method, len(respBody), err)
 	}
 	if envelope.Error != nil {
-		return nil, fmt.Errorf("mcp %s rpc error: %s", method, envelope.Error.Message)
+		return nil, nil, fmt.Errorf("mcp %s rpc error: %s", method, envelope.Error.Message)
 	}
 	if envelope.Result.IsError {
 		var text string
 		if len(envelope.Result.Content) > 0 {
 			text = envelope.Result.Content[0].Text
 		}
-		return nil, newToolError(method, text)
+		return nil, nil, newToolError(method, text)
 	}
-	return envelope.Result.StructuredContent, nil
+	return envelope.Result.StructuredContent, respBody, nil
 }
 
 // excerpt is the first line of an HTTP error body, cut to 120 bytes.
