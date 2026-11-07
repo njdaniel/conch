@@ -40,6 +40,30 @@ import type { ShareClaimResult } from '../api';
 import type { VoiceShareEnded, VoiceShareEndReason } from '../schema/voice';
 import type { Clock } from '../state/feed';
 
+// The sharer's choice of capture and top layer. It is a local preference,
+// never part of presence or another wire document.
+export type ShareResolution = '720p' | '1080p' | 'source';
+export type ShareFrameRate = 15 | 30 | 60;
+export interface ShareQuality {
+  readonly resolution: ShareResolution;
+  readonly frameRate: ShareFrameRate;
+}
+export const defaultShareQuality: ShareQuality = { resolution: '1080p', frameRate: 30 };
+
+// One stats sample of the received share, or of its sent top layer.
+export interface ShareSample {
+  readonly width: number;
+  readonly height: number;
+  readonly fps: number;
+  readonly bytes?: number;
+  readonly timestamp?: number;
+  // Which RTP stream of which publication it is, so that bitrate is never
+  // taken between two different ones.
+  readonly stream?: string;
+  readonly publication?: string;
+}
+export type ShareDirection = 'received' | 'sent';
+
 // What the browser's picker gave: the picture always, sound when the browser
 // offered it and the person ticked it.
 export interface Captured {
@@ -68,9 +92,13 @@ export interface KeptScreen {
 
 // What a share needs of the room connection (sdk.ts implements it).
 export interface ShareRoom {
-  // Opens the browser's picker and keeps what was chosen, unpublished. Rejects
-  // when nothing was chosen.
-  readonly pickScreen: () => Promise<Captured>;
+  // Opens the browser's picker at the chosen caps and keeps what was chosen,
+  // unpublished. Rejects when nothing was chosen.
+  readonly pickScreen: (quality?: ShareQuality) => Promise<Captured>;
+  // Changes the capture and its existing sender encodings without republishing.
+  readonly setShareQuality: (quality: ShareQuality) => Promise<void>;
+  // The latest stats of the received share or the sent top layer.
+  readonly readShareStats: (direction: ShareDirection) => Promise<ShareSample | null>;
   // Publishes what was picked, with its simulcast layers.
   readonly publishScreen: () => Promise<void>;
   // Unpublishes and stops whatever was picked or published. Never rejects.
@@ -240,7 +268,7 @@ export class ScreenShare {
 
   // start claims the room's share, opens the picker, claims again and
   // publishes. It does nothing unless the last share is over.
-  async start(channel: string, room: ShareRoom): Promise<void> {
+  async start(channel: string, room: ShareRoom, quality: ShareQuality = defaultShareQuality): Promise<void> {
     if (this.state.kind !== 'idle') return;
     const mine = ++this.attempt;
     this.channel = channel;
@@ -266,7 +294,7 @@ export class ScreenShare {
     this.set({ kind: 'picking' });
     let captured: Captured;
     try {
-      captured = await room.pickScreen();
+      captured = await room.pickScreen(quality);
     } catch {
       if (mine !== this.attempt) return;
       // Closed without choosing, or refused by the browser: the claim goes.
@@ -781,7 +809,7 @@ export const ownPageNote = 'Sharing your entire screen or this browser window sh
 
 // sharedNote says, once the share is published, whether sound came with it.
 export function sharedNote(audio: boolean, f: ShareFeatures): string {
-  if (audio) return 'You are sharing your screen with its sound.';
-  if (f.chromium && f.platform !== 'android') return 'You are sharing your screen without sound. To share sound, stop and pick a tab with its sound box ticked.';
-  return 'You are sharing your screen without sound.';
+  if (audio) return 'You are sharing your screen with sound.';
+  if (f.chromium && f.platform !== 'android') return "Sharing without sound. To share sound, share a browser tab and keep 'Share tab audio' on.";
+  return "Sharing without sound. This browser can't share sound.";
 }

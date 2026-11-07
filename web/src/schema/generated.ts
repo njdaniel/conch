@@ -1223,6 +1223,26 @@ export const voiceSessionResponseV1 = object<VoiceSessionResponseV1>({
   companion_identity: optional(str),
 });
 
+// schema.VoiceShareResolution
+export type VoiceShareResolution = '720p' | '1080p' | 'source';
+
+export const voiceShareResolution = vocab<VoiceShareResolution>({
+  '720p': true,
+  '1080p': true,
+  source: true,
+});
+
+// schema.VoiceShareQuality
+export interface VoiceShareQuality {
+  resolution: VoiceShareResolution;
+  frame_rate: number;
+}
+
+export const voiceShareQuality = object<VoiceShareQuality>({
+  resolution: voiceShareResolution,
+  frame_rate: int,
+});
+
 // schema.VoiceParticipant
 export interface VoiceParticipant {
   principal_id: number;
@@ -1334,6 +1354,65 @@ export const voicePresenceV1 = object<VoicePresenceV1>({
   camera_ended: optional(voiceCameraEnded),
 });
 
+// schema.VoiceParticipantV2
+export interface VoiceParticipantV2 {
+  principal_id: number;
+  can_publish: boolean;
+  transmitting: boolean;
+  joined_at: string;
+  sharing?: boolean;
+  sharing_audio?: boolean;
+  share_started_at?: string;
+  share_quality?: VoiceShareQuality;
+  camera?: boolean;
+}
+
+export const voiceParticipantV2 = object<VoiceParticipantV2>({
+  principal_id: int,
+  can_publish: bool,
+  transmitting: bool,
+  joined_at: timestamp,
+  sharing: optional(bool),
+  sharing_audio: optional(bool),
+  share_started_at: optional(timestamp),
+  share_quality: optional(voiceShareQuality),
+  camera: optional(bool),
+});
+
+// schema.VoicePresenceRoomV2
+export interface VoicePresenceRoomV2 {
+  audience?: Audience;
+  participants: VoiceParticipantV2[];
+}
+
+export const voicePresenceRoomV2 = object<VoicePresenceRoomV2>({
+  audience: optional(audience),
+  participants: array(voiceParticipantV2),
+});
+
+// schema.VoicePresenceV2
+export const voicePresenceV2Schema = 'conch.voice_presence.v2';
+
+export interface VoicePresenceV2 {
+  schema: typeof voicePresenceV2Schema;
+  channel_id: number;
+  configured: boolean;
+  available: boolean;
+  rooms: VoicePresenceRoomV2[];
+  share_ended?: VoiceShareEnded;
+  camera_ended?: VoiceCameraEnded;
+}
+
+export const voicePresenceV2 = object<VoicePresenceV2>({
+  schema: vocab<typeof voicePresenceV2Schema>({ [voicePresenceV2Schema]: true }),
+  channel_id: int,
+  configured: bool,
+  available: bool,
+  rooms: array(voicePresenceRoomV2),
+  share_ended: optional(voiceShareEnded),
+  camera_ended: optional(voiceCameraEnded),
+});
+
 // schema.VoiceTransmitState
 export type VoiceTransmitState = 'started' | 'stopped';
 
@@ -1415,6 +1494,15 @@ export const voiceCompanionAudioV1 = object<VoiceCompanionAudioV1>({
   started_at: timestamp,
 });
 
+// schema.VoiceShareRequestV1
+export interface VoiceShareRequestV1 {
+  quality?: VoiceShareQuality;
+}
+
+export const voiceShareRequestV1 = object<VoiceShareRequestV1>({
+  quality: optional(voiceShareQuality),
+});
+
 // schema.VoiceShareV1
 export interface VoiceShareV1 {
   principal_id: number;
@@ -1426,6 +1514,21 @@ export const voiceShareV1 = object<VoiceShareV1>({
   principal_id: int,
   started_at: timestamp,
   audio: bool,
+});
+
+// schema.VoiceShareV2
+export interface VoiceShareV2 {
+  principal_id: number;
+  started_at: string;
+  audio: boolean;
+  quality: VoiceShareQuality;
+}
+
+export const voiceShareV2 = object<VoiceShareV2>({
+  principal_id: int,
+  started_at: timestamp,
+  audio: bool,
+  quality: voiceShareQuality,
 });
 
 // schema.VoiceCameraV1
@@ -3809,6 +3912,38 @@ export interface PermissionsChangedV1 {
 
 export const permissionsChangedV1 = object<PermissionsChangedV1>({
   schema: vocab<typeof permissionsChangedV1Schema>({ [permissionsChangedV1Schema]: true }),
+});
+
+// schema.PreviewSimulation
+export type PreviewSimulation = 'role';
+
+export const previewSimulation = vocab<PreviewSimulation>({ role: true });
+
+// schema.PreviewResponseV1
+export interface PreviewResponseV1 {
+  id: number;
+  kind: PrincipalKind;
+  name: string;
+  role: PrincipalRole;
+  owner: boolean;
+  permissions: Permission[];
+  permissions_revision: number;
+  may_invite: boolean;
+  voice_allowed: boolean;
+  simulation?: PreviewSimulation;
+}
+
+export const previewResponseV1 = object<PreviewResponseV1>({
+  id: int,
+  kind: principalKind,
+  name: str,
+  role: principalRole,
+  owner: bool,
+  permissions: array(permission),
+  permissions_revision: int,
+  may_invite: bool,
+  voice_allowed: bool,
+  simulation: optional(previewSimulation),
 });
 
 // schema.DisablePrincipalResponseV1

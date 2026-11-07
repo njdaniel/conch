@@ -58,3 +58,24 @@ it('does not resurrect an omitted empty id from a later-arriving frame or an old
   const fresh = reactionReducer(cleared, { type: 'batch', ids: [4], summaries: [summary(3, '2026-11-06T10:00:05Z')], channelId: 2, before: cleared });
   expect(fresh.summaries.get(4)?.reactions[0]?.count).toBe(3);
 });
+
+describe('a visible message with no reactions is versioned by its empty summary', () => {
+  const emptyAt = (at: string) => summary(0, at);
+  it('an empty batch entry is not unversioned, so a delayed older write cannot resurrect it', () => {
+    const held = reactionReducer(emptyReactions, { type: 'batch', ids: [4], summaries: [emptyAt('2026-11-06T10:00:05Z')], channelId: 2, before: emptyReactions });
+    expect(held.unversioned.has(4)).toBe(false);
+    expect(held.summaries.get(4)?.reactions).toEqual([]);
+    // The delayed own-write response, computed before the read: ignored with no confirming read.
+    expect(apply(held, summary(1, '2026-11-06T10:00:04Z'))).toBe(held);
+    // Repeating the empty read (a second reconnect) changes nothing either.
+    const again = reactionReducer(held, { type: 'batch', ids: [4], summaries: [emptyAt('2026-11-06T10:00:06Z')], channelId: 2, before: held });
+    expect(again.unversioned.has(4)).toBe(false);
+    expect(apply(again, summary(1, '2026-11-06T10:00:04Z'))).toBe(again);
+    // A genuinely newer frame applies directly.
+    expect(apply(again, summary(2, '2026-11-06T10:00:07Z')).summaries.get(4)?.reactions[0]?.count).toBe(2);
+  });
+  it('an omitted id still becomes unversioned', () => {
+    const omitted = reactionReducer(emptyReactions, { type: 'batch', ids: [4], summaries: [], channelId: 2, before: emptyReactions });
+    expect(omitted.unversioned.has(4)).toBe(true);
+  });
+});

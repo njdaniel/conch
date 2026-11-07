@@ -1,6 +1,6 @@
 # Design: Preview as member, a read-only permission preview for administrators
 
-- **Status:** Proposed, 2026-11-04, for issue [#1007](https://github.com/njdaniel/conch/issues/1007). Nothing here is implemented. The open points of §9 are Nick's (Tier-H) to decide; the slices of §10 are filed only after he has.
+- **Status:** Accepted by Nick (Tier-H), 2026-11-07 (recorded on #1007): §9's recommendations, except point 5. Nick asked to see the view of roles as well as people, so the role simulation (§8) ships with the member preview and isn't deferred. Previously: Proposed, 2026-11-04, for issue [#1007](https://github.com/njdaniel/conch/issues/1007). Nothing here is implemented. The open points of §9 are Nick's (Tier-H) to decide; the slices of §10 are filed only after he has.
 - **Facts on main** are as of `d7afd8c797d0d95fd2ec0836c6ff2ac3df254539` (the merge of PR #1304, 2026-11-04). Every claim in §1 names a file and a function at that commit. Line numbers drift; search for the function.
 - **Builds on:** [ADR-010](../adr/ADR-010-delegated-administration.md) and [delegated-administration.md](delegated-administration.md) (owner mark, owner protection, "grants never exceed the granter", the route classes, the order of checks); [ADR-013](../adr/ADR-013-one-community-model.md) and [community-model.md](community-model.md) (one community, private channels, the may-know predicate of §13.2, the uniform 404s); [ADR-014](../adr/ADR-014-fixed-roles-configurable-permissions.md) and [admin-roles.md](admin-roles.md) (the permission catalog, `can()` and `permittedTx`, the admin console).
 - **Owner:** protocol-designer (this note, the shape in §6); server-engineer, web-engineer and cli-engineer for the slices in §10.
@@ -264,17 +264,21 @@ type PreviewResponseV1 struct {
 	// give the target.
 	MayInvite    bool `json:"may_invite"`
 	VoiceAllowed bool `json:"voice_allowed"`
+	// Simulation is set when the answer is nobody's view (§8, #1519): a
+	// role simulation. Absent for a person's preview.
+	Simulation PreviewSimulation `json:"simulation,omitempty"`
 }
 ```
 
-- Fixtures: `pkg/schema/testdata/preview-response-v1.json` (a member under the personal preset), `preview-response-v1-operator.json` (a target operator), asserted with `assertGoldenFixture`.
+- `Simulation` and its closed vocabulary `PreviewSimulation` (`role`) are in the shape from P1 (#1514), since Nick's acceptance put the role simulation (§8, #1519) in scope: a field that is known from the first version costs nothing, where one added later would be a surprise to a client built before it. The vocabulary is strict on the TypeScript side (`TSVocabularyModes`): a client switches on it to pick its banner, and a simulation it does not know it cannot label honestly, so it refuses the document rather than show it as a person's view.
+- Fixtures: `pkg/schema/testdata/preview-response-v1.json` (a member under the personal preset), `preview-response-v1-operator.json` (a target operator), `preview-response-v1-simulation.json` (a simulated new member under the group preset), asserted with `assertGoldenFixture`.
 - `ts.go`: a `TSTypes` row (`PreviewResponseV1`, family `preview-response-v1`), then `go generate ./pkg/schema` so `web/src/schema/generated.ts` carries it and `schema.test.ts` validates the fixtures.
 - Unknown-field tolerance: the TypeScript validators and Go decoders tolerate extra fields as every v1 shape does; a later field (for instance a `simulation` marker, §8) is additive.
 - There is no events document and no request body.
 
 ### 6.2 New error code
 
-`ErrorCodePreviewReadOnly = "preview_read_only"` in `pkg/schema/permission.go` beside `permission_denied`, 403, message "this route cannot be read in preview". Error codes are not a closed vocabulary (`Vocabularies` does not list them), so this is an addition with no fixture change; a fixture `error-preview-read-only.json` is added for the TypeScript side. The other refusals reuse existing codes: `forbidden`, `permission_denied` (with `permission`), `principal_not_found`, `invalid_request`.
+`ErrorCodePreviewReadOnly = "preview_read_only"` in `pkg/schema/preview.go`, beside `PreviewResponseV1`, 403, message "this route cannot be read in preview". (This note first placed it in `pkg/schema/permission.go`; the principal moved it on #1514, 2026-11-07: it is a preview error, not part of the permission catalog that file holds, and `permission.go` is on the approval-path list since #1011.) Error codes are not a closed vocabulary (`Vocabularies` does not list them), so this is an addition with no fixture change; a fixture `error-preview-read-only.json` is added for the TypeScript side. The other refusals reuse existing codes: `forbidden`, `permission_denied` (with `permission`), `principal_not_found`, `invalid_request`.
 
 ### 6.3 New request header
 
@@ -342,7 +346,7 @@ Each is written to be filed cold under the task template. Order: P1 → P2 → (
 ### P1 — schema: `PreviewResponseV1`, `preview_read_only` (area/schema)
 
 - **Context.** [permission-preview.md §6](permission-preview.md) (this note), issue #1007, ADR-014 §7 (the wire is additive). No behaviour.
-- **Files.** `pkg/schema/preview.go` (new), `pkg/schema/preview_test.go`, `pkg/schema/permission.go` (the error code), `pkg/schema/testdata/preview-response-v1.json`, `preview-response-v1-operator.json`, `error-preview-read-only.json`, `pkg/schema/ts.go` (the `TSTypes` row), `web/src/schema/generated.ts` and `generated.families.ts` by `go generate ./pkg/schema`, `web/src/schema/preview.ts` (re-export, as the siblings do).
+- **Files.** `pkg/schema/preview.go` (new: the shape, `PreviewSimulation` and the error code), `pkg/schema/preview_test.go`, `pkg/schema/testdata/preview-response-v1.json`, `preview-response-v1-operator.json`, `preview-response-v1-simulation.json`, `error-preview-read-only.json`, `pkg/schema/ts.go` (the `TSTypes` row and the vocabulary mode), `pkg/schema/vocabularies.go`, `web/src/schema/generated.ts` and `generated.families.ts` by `go generate ./pkg/schema`, `web/src/schema/preview.ts` (re-export, as the siblings do). `pkg/schema/permission.go` is untouched.
 - **Acceptance criteria.**
   - [ ] `PreviewResponseV1` as §6.1, with a doc comment that says which whoami fields are absent and why.
   - [ ] `ErrorCodePreviewReadOnly` beside the permission codes.

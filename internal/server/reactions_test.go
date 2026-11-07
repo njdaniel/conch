@@ -1036,3 +1036,62 @@ func TestReactionRateLimitRefill(t *testing.T) {
 		t.Errorf("a second write after one token's time = %d %s, want 429", res.status, res.body)
 	}
 }
+
+// The batch read names a visible message that holds no reaction, with
+// reactions [] and the read's as_of (#1435), over REST and MCP; a whisper the
+// reader is not in is absent, and so is a message removed through the real
+// route, byte for byte as a ghost id is.
+func TestReactionBatchNamesVisibleUnreacted(t *testing.T) {
+	w := newRemovalWorld(t)
+	w.manifest(t, "aria", nil, schema.ChannelPermissionRead)
+	path := func(ids ...int64) string {
+		s := make([]string, len(ids))
+		for i, id := range ids {
+			s[i] = fmt.Sprint(id)
+		}
+		return "/v2/channels/ops/reactions?messages=" + strings.Join(s, ",")
+	}
+	check := func(t *testing.T, name, body string) {
+		t.Helper()
+		var br schema.ReactionSummariesResponseV1
+		if err := json.Unmarshal([]byte(body), &br); err != nil || br.Validate() != nil {
+			t.Fatalf("%s: body %s does not decode: %v", name, body, err)
+		}
+		if len(br.Summaries) != 1 || br.Summaries[0].MessageID != w.wide {
+			t.Fatalf("%s: summaries = %s, want exactly the visible message", name, body)
+		}
+		if br.Summaries[0].Reactions == nil || len(br.Summaries[0].Reactions) != 0 || br.Summaries[0].AsOf.Time().IsZero() {
+			t.Errorf("%s: summary = %+v, want reactions [] and an as_of", name, br.Summaries[0])
+		}
+		if !strings.Contains(body, `"reactions":[]`) {
+			t.Errorf("%s: body %s lacks \"reactions\":[]", name, body)
+		}
+		if strings.Contains(body, fmt.Sprintf(`"message_id":%d`, w.whisper)) || strings.Contains(body, "SECRET") {
+			t.Errorf("%s: body names the whisper: %s", name, body)
+		}
+	}
+	rest := w.callREST(t, "GET", path(w.wide, w.whisper), w.p("olga").token, "")
+	if rest.status != 200 {
+		t.Fatalf("REST = %d %s", rest.status, rest.body)
+	}
+	check(t, "REST", rest.body)
+	mcp := w.mcpCall(t, w.p("aria").token, "read_reactions", map[string]any{"channel": "ops", "message_ids": []int64{w.wide, w.whisper}})
+	if mcp.result() != "ok" {
+		t.Fatalf("MCP = %s %s", mcp.result(), mcp.body)
+	}
+	// The MCP result carries the document as text inside a JSON-RPC envelope.
+	flat := strings.ReplaceAll(mcp.body, `\"`, `"`)
+	check(t, "MCP", flat[strings.Index(flat, `{"summaries"`):strings.LastIndex(flat, `]}`)+2])
+
+	// A removed message is omitted, as a ghost is.
+	w.mustRemove(t, "olga", w.wide)
+	removed := w.callREST(t, "GET", path(w.wide), w.p("olga").token, "")
+	ghost := w.callREST(t, "GET", path(999999), w.p("olga").token, "")
+	if removed.status != 200 || removed.body != ghost.body || !strings.Contains(removed.body, `"summaries":[]`) {
+		t.Errorf("removed = %d %s; a ghost gives %d %s", removed.status, removed.body, ghost.status, ghost.body)
+	}
+	mcpRemoved := w.mcpCall(t, w.p("aria").token, "read_reactions", map[string]any{"channel": "ops", "message_ids": []int64{w.wide}})
+	if strings.Contains(mcpRemoved.body, fmt.Sprintf(`message_id\":%d`, w.wide)) || strings.Contains(mcpRemoved.body, fmt.Sprintf(`"message_id":%d`, w.wide)) {
+		t.Errorf("MCP named a removed message: %s", mcpRemoved.body)
+	}
+}

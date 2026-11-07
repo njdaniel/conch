@@ -76,7 +76,7 @@ import { afterDisconnect, afterRefusal, afterViewerRefusal, cameraAfter, retryDe
 import { clampTail, defaultTail, TransmitGate, type GateMode, type GateOptions } from './gate';
 import { cameraHolders, occupants, principalOf, sharer } from './presence';
 import { ReportQueue, type ReportEvent } from './reports';
-import { idleShare, resumeLimit, ScreenShare, type ScreenEnd, type ShareRoom, type ShareState } from './share';
+import { defaultShareQuality, idleShare, resumeLimit, ScreenShare, type ScreenEnd, type ShareDirection, type ShareQuality, type ShareRoom, type ShareSample, type ShareState } from './share';
 import { record } from '../diagnostics';
 
 // The names a browser gives the failures of a microphone it was asked for
@@ -324,6 +324,8 @@ export interface VoiceState {
   readonly speaking: ReadonlySet<number>;
   readonly reportNote: 'retrying' | 'rate_limited' | null;
   readonly share: ShareState;
+  // The capture and top-layer caps chosen by the sharer, kept locally.
+  readonly shareQuality: ShareQuality;
   // Whether this page watches the room's share, and which of its tracks
   // have arrived.
   readonly watching: boolean;
@@ -401,6 +403,8 @@ export interface VoiceEnv {
   // The microphone mode chosen earlier in this browser (issue #1244); without
   // it, the mode is open microphone and lasts as long as the client.
   readonly mode?: ModeStore;
+  // The share quality chosen earlier in this browser; default is 1080p30.
+  readonly shareQuality?: ShareQuality;
   // Whether the speakers may be chosen, and the output chosen earlier in
   // this tab, if any (issue #660).
   readonly outputSelection?: boolean;
@@ -442,6 +446,7 @@ export const initialVoice: VoiceState = {
   speaking: new Set(),
   reportNote: null,
   share: idleShare,
+  shareQuality: defaultShareQuality,
   watching: false,
   shareTracks: { video: false, audio: false },
   microphones: null,
@@ -551,6 +556,7 @@ export class VoiceClient {
     this.state = {
       ...initialVoice,
       mode: this.modes?.get() ?? initialVoice.mode,
+      shareQuality: env.shareQuality ?? defaultShareQuality,
       ...this.chosen(env.microphone ?? null),
       outputSelection: env.outputSelection === true,
       output: env.output ?? null,
@@ -849,7 +855,23 @@ export class VoiceClient {
     const channel = this.channel;
     const room = this.room;
     if (this.state.phase !== 'connected' || channel === null || room === null) return;
-    void this.share.start(channel, room);
+    void this.share.start(channel, room, this.state.shareQuality);
+  }
+
+  // A quality choice applies to the next picker, and to a live capture and
+  // its sender without ending the publication. The local choice is kept even
+  // if this browser cannot apply it to the track already open.
+  async setShareQuality(quality: ShareQuality): Promise<void> {
+    this.set({ shareQuality: quality });
+    try {
+      await this.room?.setShareQuality(quality);
+    } catch {
+      if (this.state.shareQuality === quality) this.set({ why: 'The share quality could not be changed on this capture.' });
+    }
+  }
+
+  readShareStats(direction: ShareDirection): Promise<ShareSample | null> {
+    return this.room?.readShareStats(direction).catch(() => null) ?? Promise.resolve(null);
   }
 
   stopShare(): void {
@@ -1488,6 +1510,8 @@ export class VoiceClient {
     // arrives with the connection already finds it.
     room.setWatching(this.state.watching);
     room.attachShare(this.sink);
+    // No capture on a new room, so this only records the choice synchronously.
+    void room.setShareQuality(this.state.shareQuality).catch(() => undefined);
     // So is what the call view receives, and where it plays.
     room.setCameras(this.cameraClaims);
     room.setViewing(this.state.viewing);

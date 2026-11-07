@@ -77,7 +77,7 @@ export function ReactionScope({ channel, channelId, ids, children, onUnauthorize
     if (event.kind === 'summary') {
       if (!idsNow.current.includes(event.summary.message_id)) return;
       if (now.current.unversioned.has(event.summary.message_id)) {
-        // Omitted batch entries have no timestamp. An apparently newer frame
+        // Omitted batch entries (not visible to this reader) have no timestamp; a visible message with no reactions is answered with a timestamped empty summary. An apparently newer frame
         // may have been computed before that empty read: confirm it in a batch
         // instead of resurrecting a removed reaction from a delayed frame.
         const held = buffered.current.get(event.summary.message_id);

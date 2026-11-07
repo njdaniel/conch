@@ -57,7 +57,7 @@ function control(state: VoiceState, calls: string[], snapshot: Snapshot): VoiceC
   };
 }
 
-function panel(state: VoiceState, viewed: string | null, snapshot: Snapshot = { kind: 'presence', presence }, people: ReadonlyMap<number, Person> = new Map()) {
+function panel(state: VoiceState, viewed: string | null, snapshot: Snapshot = { kind: 'presence', presence }, people: ReadonlyMap<number, Person> = new Map(), viewerName = '') {
   const calls: string[] = [];
   const opened: string[] = [];
   const voice = control(state, calls, snapshot);
@@ -65,6 +65,7 @@ function panel(state: VoiceState, viewed: string | null, snapshot: Snapshot = { 
     <VoicePanel
       voice={voice}
       viewer={7}
+      viewerName={viewerName}
       people={people}
       viewed={viewed}
       onOpen={(name) => {
@@ -77,7 +78,7 @@ function panel(state: VoiceState, viewed: string | null, snapshot: Snapshot = { 
   let shown = snapshot;
   const redraw = (next: VoiceState, nextSnapshot: Snapshot = shown) => {
     shown = nextSnapshot;
-    rerender(<VoicePanel voice={{ ...voice, state: next, snapshot: nextSnapshot }} viewer={7} people={people} viewed={viewed} onOpen={() => undefined} />);
+    rerender(<VoicePanel voice={{ ...voice, state: next, snapshot: nextSnapshot }} viewer={7} viewerName={viewerName} people={people} viewed={viewed} onOpen={() => undefined} />);
   };
   return { calls, opened, client: voice.client, redraw, voice: screen.getByRole('region', { name: 'Voice' }) };
 }
@@ -896,6 +897,23 @@ describe('what the strip says is true', () => {
         expect(voice.textContent).not.toContain('another device');
       });
     }
+
+    it('names the viewer by their own name, with the note as a suffix, while this page is not in voice (#1481)', () => {
+      const { voice } = panel(initialVoice, 'c', room(one(3), one(7)), bob, 'nick');
+      expect(names(voice)).toEqual(['bob', 'nick (on another device)']);
+    });
+
+    it('names the viewer by their own name while this page is in voice, others unchanged (#1481)', () => {
+      const { voice } = panel(inVoice('connected', 'c'), 'c', room(one(3), one(7)), bob, 'nick');
+      expect(names(voice)).toEqual(['bob', 'nick']);
+    });
+
+    it('renders a hostile name as text (#1481)', () => {
+      const hostile = '<img src=x onerror=alert(1)><b>x</b>';
+      const { voice } = panel(inVoice('connected', 'c'), 'c', room(one(7)), bob, hostile);
+      expect(names(voice)).toEqual([hostile]);
+      expect(voice.querySelector('.voice-roster img, .voice-roster b')).toBeNull();
+    });
 
     it('Watch only asks to watch beside the voice elsewhere; with no voice elsewhere it does not', () => {
       const there = panel(initialVoice, 'c', room(one(3), one(7)), bob);

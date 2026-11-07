@@ -203,8 +203,8 @@ test("P587 the voice roster shows everyone and how many, and the strip's control
   for (let i = 0; i < 7; i++) others.push(await member(world, channel, `${tag}-in-voice-${String(i)}`));
   for (const o of others) secrets.push(o.token);
   const everyone = [me.id, ...others.map((o) => o.id)];
-  // The roster is in principal order, and the viewer is "You".
-  const names = ['You', ...others.map((o) => o.name)];
+  // The roster is in principal order, and the viewer is named as themselves.
+  const names = [me.name, ...others.map((o) => o.name)];
 
   for (const [size, options, phone] of rosterSizes) {
     const { page } = await meet(options);

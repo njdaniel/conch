@@ -35,7 +35,7 @@ const roomWith = (cameras: readonly number[], sharer: number | null = null): Voi
         can_publish: true,
         transmitting: false,
         ...(cameras.includes(p.principal_id) ? { camera: true } : {}),
-        ...(sharer === p.principal_id ? { sharing: true } : {}),
+        ...(sharer === p.principal_id ? { sharing: true, sharing_audio: true } : {}),
       })),
     },
   ],

@@ -54,6 +54,24 @@ describe('callTiles', () => {
     expect(hidden).toBe(0);
   });
 
+  it('names the viewer tile by their own name, last and with the me flag; others unchanged (#1481)', () => {
+    const roster = [occupant(9, '2026-11-03T10:00:03Z'), occupant(8, '2026-11-03T10:00:02Z')];
+    const { tiles } = callTiles(roster, 8, false, names, 'nick');
+    expect(tiles.map((t) => [t.principal, t.name, t.me])).toEqual([
+      [9, 'member-9', false],
+      [8, 'nick', true],
+    ]);
+  });
+
+  it('keeps a hostile viewer name as the literal string (#1481)', () => {
+    const hostile = '<img src=x onerror=alert(1)>';
+    expect(callTiles([occupant(8, '2026-11-03T10:00:02Z')], 8, false, names, hostile).tiles[0]?.name).toBe(hostile);
+  });
+
+  it('says You for the viewer tile while the name is not known (#1481)', () => {
+    expect(callTiles([occupant(8, '2026-11-03T10:00:02Z')], 8, false, names, '').tiles[0]?.name).toBe('You');
+  });
+
   it("the viewer's own tile follows their own track, never presence (S5)", () => {
     const roster = [occupant(7, '2026-11-03T10:00:01Z', true)];
     expect(callTiles(roster, 7, false, names).tiles[0]?.camera).toBe(false);

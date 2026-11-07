@@ -137,6 +137,7 @@ test.describe('the phone voice strip with LiveKit', () => {
   interface Someone {
     readonly page: Page;
     readonly size: string;
+    readonly name: string;
     readonly close: () => Promise<void>;
   }
 
@@ -151,7 +152,7 @@ test.describe('the phone voice strip with LiveKit', () => {
       if (!page.isClosed()) await page.close();
       await context.close();
     };
-    return { page, size, close };
+    return { page, size, name: member.name, close };
   }
 
   // join joins voice, which is in the open microphone for a browser that never
@@ -393,7 +394,7 @@ test.describe('the phone voice strip with LiveKit', () => {
         // seconds later: the roster is above the controls, so a person waits
         // for it to settle before reaching for one, as this does (the CI
         // flake of issue #1163: a row went while Voice options was tapped).
-        await expect(voice.getByRole('list', { name: `${String(3 - turn)} in voice` })).toContainText('You', { timeout: 30_000 });
+        await expect(voice.getByRole('list', { name: `${String(3 - turn)} in voice` })).toContainText(p.name, { timeout: 30_000 });
         await expect(voice).toContainText('Connected in #voice-room');
         await expect(voice.getByText('Microphone in use')).toBeVisible();
         await voice.getByRole('button', { name: 'Deafen' }).tap();
