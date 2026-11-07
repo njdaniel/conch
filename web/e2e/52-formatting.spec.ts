@@ -1,5 +1,5 @@
 import type { Locator, Page } from '@playwright/test';
-import { history } from './api';
+import { history, post } from './api';
 import { expect, messages, signIn, test } from './fixtures';
 
 async function select(box: Locator, start: number, end: number): Promise<void> {
@@ -55,6 +55,9 @@ test('F1496 two accounts send and read formatted text and a keyboard-accessible 
   await expect(received.getByRole('button', { name: 'Reveal spoiler' })).toBeFocused();
   await expect(messages(recipient).getByText(secret)).toHaveCount(0);
   expect((await history(world, world.tokens.guest, 'general')).filter((message) => message.body === `${spoilerTag} ||${secret}||`)).toHaveLength(1);
+  // Leave the last line in #general to someone else, so a later spec's line from
+  // browser-test is not drawn as a continuation of this one's (no padding).
+  await post(world, world.tokens.guest, 'general', `${tag} closing`);
 });
 
 async function boxHeight(page: Page): Promise<number> {
