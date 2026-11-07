@@ -290,6 +290,12 @@ func coreMatrixRows() []row {
 		byChannel("PUT /v1/channels/{id}/name", "renames A's channel", func(_ *world, s subject) probe {
 			return put("/v1/channels/"+id(s.id)+"/name", schema.RenameChannelRequestV1{Name: "renamed", From: s.name})
 		}),
+		// Setting a channel's topic (issue #1503) hides A's channel from B's
+		// members, a manager of a different channel included: the class
+		// answers channel_not_found before the body is read.
+		byChannel("PUT /v1/channels/{id}/topic", "sets the topic of A's channel", func(_ *world, s subject) probe {
+			return put("/v1/channels/"+id(s.id)+"/topic", schema.SetChannelTopicRequestV1{Topic: "hijacked"})
+		}),
 		operator("POST /v0/principals", "makes a principal with an A member's name", aMemberName, func(_ *world, s subject) probe {
 			return post("/v0/principals", schema.CreatePrincipalRequest{Kind: schema.PrincipalHuman, Name: s.name})
 		}),

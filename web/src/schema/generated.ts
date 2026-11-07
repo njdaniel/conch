@@ -42,6 +42,7 @@ export const VOICE_CONTROL_PIPE_NONCE_ENV = 'CONCH_VOICE_ATTACH';
 export const VOICE_CONTROL_PIPE_NONCE_BYTES = 32;
 export const VOICE_CONTROL_PIPE_NONCE_CHARS = 43;
 export const MAX_CHANNEL_AUTHOR_IDS = 100;
+export const MAX_CHANNEL_TOPIC_LENGTH = 250;
 export const DEFAULT_MEMBER_LINK_EXPIRY_SECONDS = 604800;
 export const DEFAULT_ADMIN_APPROVAL_TTL_SECONDS = 86400;
 export const MIN_ADMIN_APPROVAL_TTL_SECONDS = 300;
@@ -238,6 +239,7 @@ export interface ChannelV0 {
   visibility?: ChannelVisibility;
   default?: boolean;
   archived_at?: string;
+  topic?: string;
 }
 
 export const channelV0 = object<ChannelV0>({
@@ -248,6 +250,7 @@ export const channelV0 = object<ChannelV0>({
   visibility: optional(channelVisibility),
   default: optional(bool),
   archived_at: optional(timestamp),
+  topic: optional(str),
 });
 
 // schema.ListChannelsResponse
@@ -308,6 +311,7 @@ export interface ChannelDocV1 {
   visibility?: ChannelVisibility;
   default?: boolean;
   archived_at?: string;
+  topic?: string;
 }
 
 export const channelDocV1 = object<ChannelDocV1>({
@@ -318,6 +322,25 @@ export const channelDocV1 = object<ChannelDocV1>({
   visibility: optional(channelVisibility),
   default: optional(bool),
   archived_at: optional(timestamp),
+  topic: optional(str),
+});
+
+// schema.SetChannelTopicRequestV1
+export interface SetChannelTopicRequestV1 {
+  topic: string;
+}
+
+export const setChannelTopicRequestV1 = object<SetChannelTopicRequestV1>({
+  topic: str,
+});
+
+// schema.SetChannelTopicResponseV1
+export interface SetChannelTopicResponseV1 {
+  channel: ChannelV0;
+}
+
+export const setChannelTopicResponseV1 = object<SetChannelTopicResponseV1>({
+  channel: channelV0,
 });
 
 // schema.GuestAttributionV1
@@ -3876,6 +3899,7 @@ export interface ChannelListingV1 {
   members?: number;
   managers?: ChannelAuthorV1[];
   archived_at?: string;
+  topic?: string;
 }
 
 export const channelListingV1 = object<ChannelListingV1>({
@@ -3889,6 +3913,7 @@ export const channelListingV1 = object<ChannelListingV1>({
   members: optional(int),
   managers: optional(array(channelAuthorV1)),
   archived_at: optional(timestamp),
+  topic: optional(str),
 });
 
 // schema.ChannelDirectoryResponseV1
