@@ -246,6 +246,84 @@ test.describe('with LiveKit', () => {
     }
   });
 
+  // Issue #1480: the side buttons talk when chosen, and only then. Real
+  // history first (two entries made in the page, so there is a Back and a
+  // Forward to take); then an unbound side-button press goes where it should,
+  // a bound one talks and goes nowhere, and leaving voice gives it back.
+  test('Mouse 4 and Mouse 5 talk when chosen and navigate otherwise', async ({ browser }) => {
+    const a = await person(browser, 'alice');
+    try {
+      const voice = voiceRegion(a.page);
+      const cdp = await a.context.newCDPSession(a.page);
+      type Side = 'back' | 'forward';
+      const send = async (button: Side, type: 'mousePressed' | 'mouseReleased') => {
+        await cdp.send('Input.dispatchMouseEvent', { type, button, buttons: type === 'mousePressed' ? (button === 'back' ? 8 : 16) : 0, x: 10, y: 10, clickCount: 1 });
+      };
+      const tap = async (button: Side) => {
+        await send(button, 'mousePressed');
+        await send(button, 'mouseReleased');
+      };
+      // Three entries in this document: u0 (where it loaded), u1, u2; now at u2.
+      const u0 = a.page.url();
+      const u1 = u0.replace('/app/', '/app/?nav=1');
+      const u2 = u0.replace('/app/', '/app/?nav=2');
+      expect(u1).not.toBe(u0);
+      // Chromium's Back skips entries made without a user gesture, so these
+      // are pushed as one, after a click.
+      await a.page.getByRole('heading', { name: 'Conch' }).click();
+      for (const u of [u1, u2]) await cdp.send('Runtime.evaluate', { expression: `history.pushState(null, '', ${JSON.stringify(u)})`, userGesture: true });
+      expect(a.page.url()).toBe(u2);
+      const bind = async (button: Side) => {
+        if (!(await voice.getByRole('button', { name: 'Change talk key' }).isVisible())) await voice.getByRole('button', { name: 'Voice options' }).click();
+        await voice.getByRole('button', { name: 'Change talk key' }).click();
+        await expect(voice.getByRole('button', { name: 'Press a key or Mouse 4/5 (Escape cancels)' })).toBeVisible();
+        await tap(button);
+        await expect(voice).toContainText(`Talk key: ${button === 'back' ? 'Mouse 4' : 'Mouse 5'}.`);
+        await a.page.getByRole('heading', { name: 'Conch' }).click();
+      };
+      // A bound press talks and leaves the address alone.
+      const holds = async (button: Side, at: string) => {
+        await send(button, 'mousePressed');
+        await expect(voice).toContainText('Transmitting');
+        await send(button, 'mouseReleased');
+        await expect(voice).not.toContainText('Transmitting');
+        await a.page.waitForTimeout(500);
+        expect(a.page.url()).toBe(at);
+      };
+      const goes = async (button: Side, to: string) => {
+        await tap(button);
+        await expect.poll(() => a.page.url()).toBe(to);
+      };
+
+      await voice.getByRole('button', { name: 'Join voice' }).click();
+      await expect(voice).toContainText(/Connected in #voice-room/, { timeout: 30_000 });
+      await chooseMicrophone(voice, 'push to talk');
+
+      // The talk key is a keyboard key: both side buttons navigate.
+      await goes('back', u1);
+      await goes('forward', u2);
+      await goes('back', u1);
+
+      // Mouse 5 chosen: Forward talks and stays at u1; Back still goes.
+      await bind('forward');
+      await holds('forward', u1);
+      await goes('back', u0);
+
+      // Mouse 4 chosen: Forward goes; Back talks and stays.
+      await bind('back');
+      await goes('forward', u1);
+      await holds('back', u1);
+
+      // Out of voice the chosen button is the browser's again.
+      await voice.getByRole('button', { name: 'Leave voice' }).click();
+      await expect(voice).toContainText('Not in voice', { timeout: 10_000 });
+      await goes('back', u0);
+      await expectClean(a);
+    } finally {
+      await a.context.close();
+    }
+  });
+
   // Issue #595 (F25): Chromium logged every answered transmit report as a
   // failed request (net::ERR_ABORTED), its 204's body left unread. Three
   // presses of Hold to talk and a leave: each report is answered and audited,

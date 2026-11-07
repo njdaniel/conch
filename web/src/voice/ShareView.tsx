@@ -16,6 +16,8 @@ export function ShareView({
   state,
   name,
   audio,
+  volume,
+  onVolumeChange,
 }: {
   readonly client: VoiceClient;
   readonly state: VoiceState;
@@ -23,11 +25,13 @@ export function ShareView({
   // has sound.
   readonly name: string;
   readonly audio: boolean;
+  // The viewer's volume belongs to the panel, so another share keeps it.
+  readonly volume: number;
+  readonly onVolumeChange: (volume: number) => void;
 }) {
   const box = useRef<HTMLDivElement>(null);
   const video = useRef<HTMLVideoElement>(null);
   const sound = useRef<HTMLAudioElement>(null);
-  const [volume, setVolume] = useState(1);
   const [muted, setMuted] = useState(false);
   // The browser would not start the sound without a tap (phones' autoplay
   // rules): the view offers one.
@@ -110,7 +114,7 @@ export function ShareView({
         </button>
         <label className="volume">
           <span className="label">Share volume</span>
-          <input type="range" min={0} max={1} step={0.05} value={volume} onChange={(e) => { setVolume(Number(e.target.value)); }} />
+          <input type="range" min={0} max={1} step={0.05} value={volume} onChange={(e) => { onVolumeChange(Number(e.target.value)); }} />
         </label>
         <button type="button" onClick={fullscreen}>
           <Glyph name="fullscreen" />

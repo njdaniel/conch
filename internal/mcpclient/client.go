@@ -18,6 +18,7 @@ import (
 type Client struct {
 	baseURL   string
 	token     string
+	host      string
 	http      *http.Client
 	sessionID string
 	nextID    int
@@ -36,6 +37,14 @@ func New(baseURL, token string) *Client {
 	return &Client{baseURL: baseURL, token: token, http: &http.Client{
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 	}}
+}
+
+// WithHost makes every request carry host as its Host header while still
+// connecting to the base URL, as a reverse proxy in front of conchd does
+// (issue #1479). It returns c.
+func (c *Client) WithHost(host string) *Client {
+	c.host = host
+	return c
 }
 
 // Initialize performs the MCP handshake.
@@ -150,6 +159,9 @@ func (c *Client) callFull(ctx context.Context, method string, params map[string]
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/mcp", bytes.NewReader(body))
 	if err != nil {
 		return nil, nil, err
+	}
+	if c.host != "" {
+		req.Host = c.host
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json, text/event-stream")
