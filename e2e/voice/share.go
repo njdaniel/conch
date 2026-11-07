@@ -608,13 +608,21 @@ func (l *live) multiShare(ctx context.Context) error {
 		}
 	}
 	var seen []sharer
-	if err := waitFor("una's v2 presence to show sam and val sharing", 30*time.Second, func() (bool, string) {
+	// sharing_audio is marked on the pass that sees val's audio track, which
+	// can be a pass after sharing (voice-control-plane §12): wait for both.
+	if err := waitFor("una's v2 presence to show sam and val sharing, val with sound", 30*time.Second, func() (bool, string) {
 		got, err := sharersIn(una, "multi")
 		if err != nil {
 			return false, err.Error()
 		}
 		seen = got
-		return len(got) == 2, fmt.Sprintf("%d sharers", len(got))
+		valSound := false
+		for _, s := range got {
+			if s.id == val.id {
+				valSound = s.audio
+			}
+		}
+		return len(got) == 2 && valSound, fmt.Sprintf("%d sharers, val's sound shown: %t", len(got), valSound)
 	}); err != nil {
 		return err
 	}
