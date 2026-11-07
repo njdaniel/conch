@@ -138,6 +138,16 @@ describe('the request executor', () => {
     expect(await client.send({ op: 'listChannels' })).toEqual({ kind: 'answer', status: 500, ok: false });
   });
 
+  it('keeps the code and message of a refusal that carries a key added later (issue #1534)', async () => {
+    const fake = await serve((_r, res) => {
+      sendJson(res, 401, { code: 'auth_failed', message: 'Wrong password', added_later: true });
+    });
+    const { session, client } = stack();
+    session.setOrigin(fake.origin);
+    const answer = await client.send({ op: 'login', body: { name: 'a', password: 'b' } });
+    expect(answer).toMatchObject({ kind: 'answer', status: 401, body: { code: 'auth_failed', message: 'Wrong password' } });
+  });
+
   it('signs out on a 401 for a bearer operation, but not for one that takes a secret, and not for a sign-in', async () => {
     const fake = await serve((_r, res) => {
       sendJson(res, 401, { code: 'auth_failed', message: 'no' });

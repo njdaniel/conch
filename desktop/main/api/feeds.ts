@@ -46,6 +46,7 @@ import { parseEventFrame } from '../../../web/src/agents/frames.ts';
 import type { FeedKind, FeedRequest } from '../../../web/src/platform/desktop/bridge.ts';
 import { operations, type OperationId } from '../../../web/src/platform/operations.ts';
 import { heartbeatV1, messageV2, voiceOccupancyV1, voicePresenceV1 } from '../../../web/src/schema/generated.ts';
+import { fromServer } from '../../../web/src/schema/validate.ts';
 import type { FeedEvent } from '../../shared/bridge-names.ts';
 import type { Client } from './client.ts';
 import type { Capture, Session } from './session.ts';
@@ -144,7 +145,7 @@ function parsed(data: string): unknown {
   }
 }
 
-const isHeartbeat = (doc: unknown): boolean => doc !== undefined && heartbeatV1(doc).length === 0;
+const isHeartbeat = (doc: unknown): boolean => doc !== undefined && fromServer(heartbeatV1)(doc).length === 0;
 
 // validFrame says whether a text frame is one its feed sends: a v2 message or
 // the heartbeat on the messages feed; a document the events feed's own parser
@@ -154,17 +155,17 @@ export function validFrame(kind: FeedKind, data: string): boolean {
   switch (kind) {
     case 'messages': {
       const doc = parsed(data);
-      return doc !== undefined && (messageV2(doc).length === 0 || isHeartbeat(doc));
+      return doc !== undefined && (fromServer(messageV2)(doc).length === 0 || isHeartbeat(doc));
     }
     case 'events':
       return parseEventFrame(data) !== null || isHeartbeat(parsed(data));
     case 'voice': {
       const doc = parsed(data);
-      return doc !== undefined && voicePresenceV1(doc).length === 0;
+      return doc !== undefined && fromServer(voicePresenceV1)(doc).length === 0;
     }
     case 'occupancy': {
       const doc = parsed(data);
-      return doc !== undefined && voiceOccupancyV1(doc).length === 0;
+      return doc !== undefined && fromServer(voiceOccupancyV1)(doc).length === 0;
     }
   }
 }
