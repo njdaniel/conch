@@ -30,6 +30,8 @@ type fakeVoice struct {
 	closeDeadline time.Time
 	// closeGate, when set, holds Close until it is closed.
 	closeGate chan struct{}
+	// ackWithoutState: SetTalkMode is acknowledged without the state first.
+	ackWithoutState bool
 }
 
 func newFakeVoice() *fakeVoice {
@@ -52,6 +54,33 @@ func (f *fakeVoice) SetMute(_ context.Context, on bool) error {
 func (f *fakeVoice) SetDeafen(_ context.Context, on bool) error {
 	return f.record(map[bool]string{true: "deafen on", false: "deafen off"}[on])
 }
+
+// SetDevices is recorded as "switch input <name>" or "switch output <name>",
+// or both, one after the other.
+func (f *fakeVoice) SetDevices(_ context.Context, input, output string) error {
+	var calls []string
+	if input != "" {
+		calls = append(calls, "input "+input)
+	}
+	if output != "" {
+		calls = append(calls, "output "+output)
+	}
+	return f.record("switch " + strings.Join(calls, " "))
+}
+
+// SetTalkMode acts as a helper keeping to §20.3: the state saying the new
+// mode comes before the ack, so Status says it once the call returns, unless
+// ackWithoutState stands in for one that is out of step.
+func (f *fakeVoice) SetTalkMode(_ context.Context, mode schema.VoiceControlTalkMode) error {
+	err := f.record("talkmode " + string(mode))
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err == nil && !f.ackWithoutState {
+		f.st.TalkMode = mode
+	}
+	return err
+}
+func (f *fakeVoice) Refresh(context.Context) error { return f.record("refresh") }
 func (f *fakeVoice) Status() voicehelper.Status {
 	_ = f.record("status")
 	return f.st
@@ -1060,6 +1089,10 @@ func (f *fakeDevices) Devices(context.Context) (voicehelper.DeviceList, error) {
 
 func (f *fakeDevices) SetDevice(_ context.Context, key voicehelper.DeviceKey, name string) error {
 	return f.voice.record("set " + string(key) + " " + name)
+}
+
+func (f *fakeDevices) SetTalkMode(_ context.Context, mode schema.VoiceControlTalkMode) error {
+	return f.voice.record("set audio.talk_mode " + string(mode))
 }
 
 // devicesTestModel is voiceTestModel with a fake one-shot runner.
