@@ -36,12 +36,19 @@ import (
 // two sharers is not a v1 document, and lifting the rule in place would have
 // broken every reader that validates. v1 stays as it is, published and
 // immutable, and conch.voice_presence.v2 is v1 without that rule, asked for by
-// VoicePresenceSchemaParam. Additive to both: when a participant's share
-// started, the quality the sharer declared, the optional body of the share
-// claim that declares it, the echo on the claim's answer, the refusal when the
-// room's streams are all taken, and the parameter by which a moderator names
-// whose stream to stop. The cap on streams is the server's, as the camera's
-// is (ADR-015 N3): no count appears in either version.
+// VoicePresenceSchemaParam. The published v1 shapes gain no field at all, not
+// even an optional one: the browser's generated validators are closed
+// (web/src/schema/validate.ts, object() refuses a key the type lacks), so a
+// v1 document carrying a new field would be dropped by every open tab from
+// before it, and voice_v1_frozen_test.go holds every v1 fixture to the shapes
+// as they were. So the new fields ride on v2 alone: VoiceParticipantV2 says
+// when a participant's share started and what quality the sharer declared,
+// and VoiceShareV2 is the claim's answer when the claim's optional body
+// (VoiceShareRequestV1) declared one. Additive to the routes, not to the
+// published shapes: the body, the refusal when the room's streams are all
+// taken, and the parameter by which a moderator names whose stream to stop.
+// The cap on streams is the server's, as the camera's is (ADR-015 N3): no
+// count appears in either version.
 //
 // Room names and tokens are opaque strings. The schema checks that they are
 // present, never what they contain: a token is a credential conchd signed and
@@ -292,35 +299,16 @@ type VoiceParticipant struct {
 	Transmitting bool `json:"transmitting"`
 	// JoinedAt is when the participant connected (UTC, ms precision).
 	JoinedAt Timestamp `json:"joined_at"`
-	// Sharing is whether the participant holds a screen share (issue #443):
-	// conchd granted it and it has not ended. It is what conchd decided, not
-	// what LiveKit last showed, so it is true from the moment the claim is
-	// answered, before any track is published. Omitted when false, so a
-	// document with nobody sharing is what it was before. In a v1 room at
-	// most one participant is sharing; in a v2 room any number (issue #1483).
+	// Sharing is whether the participant holds the room's screen share
+	// (issue #443): conchd granted it and it has not ended. It is what conchd
+	// decided, not what LiveKit last showed, so it is true from the moment
+	// the claim is answered, before any track is published. Omitted when
+	// false, so a document with nobody sharing is what it was before.
 	Sharing bool `json:"sharing,omitempty"`
 	// SharingAudio is whether the share carries sound: the participant holds
 	// the share and a screen-share audio track was published on the last
 	// pass. Omitted when false.
 	SharingAudio bool `json:"sharing_audio,omitempty"`
-	// ShareStartedAt is when conchd granted the participant's share (UTC, ms
-	// precision): the started_at of the claim, as VoiceShareV1 gave the
-	// sharer (issue #1483, design §2.2). With several streams in a room it is
-	// the one order every reader agrees on, earliest first, and it tells one
-	// stream of a person's from the next: a share that stopped and started
-	// again has a new value. Present exactly when Sharing in a v2 document;
-	// in v1 it is present whenever the server has the field, and a v1
-	// document from before it, sharing with no time, still reads. Omitted
-	// when not sharing, so a document with nobody sharing is what it was
-	// before, and a reader that does not know it skips it.
-	ShareStartedAt *Timestamp `json:"share_started_at,omitempty"`
-	// ShareQuality is the resolution and frame rate the sharer declared for
-	// their stream (design §3.2), present only when Sharing and the sharer
-	// declared one (VoiceShareRequestV1). It is a label, not enforcement:
-	// conchd repeats what the sharer said so a viewer can decide whether to
-	// watch, and polices neither bitrate nor size. Omitted when not sharing
-	// or not declared.
-	ShareQuality *VoiceShareQuality `json:"share_quality,omitempty"`
 	// Camera is whether the participant holds a camera claim (ADR-015,
 	// design §5): conchd granted it and it has not ended. As with Sharing it
 	// is what conchd decided, not what LiveKit last showed, so it is true
@@ -335,12 +323,7 @@ type VoiceParticipant struct {
 // participant who cannot publish cannot be transmitting, sharing or holding
 // a camera: if presence ever said so, either the grant or the observation is
 // wrong, and a reader must not be left to guess which. Sound of a share needs
-// a share, so sharing_audio needs sharing; so do share_started_at, which is a
-// time when present, and share_quality, which is one of the picker's when
-// present. Whether sharing needs share_started_at is the room's rule, by
-// version: a v2 room requires it (VoicePresenceRoomV2.Validate), a v1 room
-// does not, because a v1 document from before the field is still a v1
-// document.
+// a share, so sharing_audio needs sharing.
 func (p VoiceParticipant) Validate() error {
 	if p.PrincipalID <= 0 {
 		return fmt.Errorf("schema: voice participant principal_id must be positive, got %d", p.PrincipalID)
@@ -354,13 +337,78 @@ func (p VoiceParticipant) Validate() error {
 	if p.SharingAudio && !p.Sharing {
 		return fmt.Errorf("schema: voice participant %d cannot have sharing_audio without sharing", p.PrincipalID)
 	}
-	if p.ShareStartedAt != nil {
-		if !p.Sharing {
-			return fmt.Errorf("schema: voice participant %d cannot have share_started_at without sharing", p.PrincipalID)
-		}
-		if p.ShareStartedAt.IsZero() {
-			return fmt.Errorf("schema: voice participant %d share_started_at is zero", p.PrincipalID)
-		}
+	if p.Camera && !p.CanPublish {
+		return fmt.Errorf("schema: voice participant %d cannot have a camera without can_publish", p.PrincipalID)
+	}
+	if p.JoinedAt.IsZero() {
+		return errors.New("schema: voice participant joined_at is required")
+	}
+	return nil
+}
+
+// VoiceParticipantV2 is one principal connected to a voice room as v2
+// presence shows it (issue #1483, design §2.2): the fields of
+// VoiceParticipant, and for a sharer when their share started and what
+// quality they declared. It is its own type because the published v1
+// participant is closed to readers (see the file comment): the browser's
+// generated voiceParticipant refuses a key it does not know, so the two fields
+// could not ride on v1 as optional additions without dropping every v1 frame
+// in an open tab from before them.
+type VoiceParticipantV2 struct {
+	// PrincipalID references the connected principal.
+	PrincipalID int64 `json:"principal_id"`
+	// CanPublish is whether the participant may transmit in this room.
+	CanPublish bool `json:"can_publish"`
+	// Transmitting is whether the participant's microphone track was
+	// published and unmuted on the last pass: whether they are talking.
+	Transmitting bool `json:"transmitting"`
+	// JoinedAt is when the participant connected (UTC, ms precision).
+	JoinedAt Timestamp `json:"joined_at"`
+	// Sharing is whether the participant holds a screen share: conchd granted
+	// it and it has not ended, as in v1. Any number of participants in a v2
+	// room may be sharing; how many is the server's cap, not the schema's.
+	// Omitted when false.
+	Sharing bool `json:"sharing,omitempty"`
+	// SharingAudio is whether the share carries sound, as in v1. Omitted when
+	// false.
+	SharingAudio bool `json:"sharing_audio,omitempty"`
+	// ShareStartedAt is when conchd granted the participant's share (UTC, ms
+	// precision): the started_at of the claim, as VoiceShareV1 or
+	// VoiceShareV2 gave the sharer. Present exactly when Sharing. With several
+	// streams in a room it is the one order every reader agrees on, earliest
+	// first, and it tells one stream of a person's from the next: a share
+	// that stopped and started again has a new value.
+	ShareStartedAt *Timestamp `json:"share_started_at,omitempty"`
+	// ShareQuality is the resolution and frame rate the sharer declared for
+	// their stream (design §3.2), present only when Sharing and the sharer
+	// declared one (VoiceShareRequestV1). It is a label, not enforcement:
+	// conchd repeats what the sharer said so a viewer can decide whether to
+	// watch, and polices neither bitrate nor size.
+	ShareQuality *VoiceShareQuality `json:"share_quality,omitempty"`
+	// Camera is whether the participant holds a camera claim (ADR-015), as in
+	// v1. Omitted when false.
+	Camera bool `json:"camera,omitempty"`
+}
+
+// Validate reports whether the participant is structurally well-formed, by
+// the rules of VoiceParticipant.Validate and the share's two fields: a sharer
+// says when their share started, with a time that is not zero; neither
+// share_started_at nor share_quality appears without sharing; a present
+// quality is one of the picker's.
+func (p VoiceParticipantV2) Validate() error {
+	if err := (VoiceParticipant{
+		PrincipalID: p.PrincipalID, CanPublish: p.CanPublish, Transmitting: p.Transmitting, JoinedAt: p.JoinedAt,
+		Sharing: p.Sharing, SharingAudio: p.SharingAudio, Camera: p.Camera,
+	}).Validate(); err != nil {
+		return err
+	}
+	switch {
+	case p.ShareStartedAt != nil && !p.Sharing:
+		return fmt.Errorf("schema: voice participant %d cannot have share_started_at without sharing", p.PrincipalID)
+	case p.Sharing && p.ShareStartedAt == nil:
+		return fmt.Errorf("schema: voice participant %d is sharing without share_started_at", p.PrincipalID)
+	case p.ShareStartedAt != nil && p.ShareStartedAt.IsZero():
+		return fmt.Errorf("schema: voice participant %d share_started_at is zero", p.PrincipalID)
 	}
 	if p.ShareQuality != nil {
 		if !p.Sharing {
@@ -369,12 +417,6 @@ func (p VoiceParticipant) Validate() error {
 		if err := p.ShareQuality.Validate(); err != nil {
 			return err
 		}
-	}
-	if p.Camera && !p.CanPublish {
-		return fmt.Errorf("schema: voice participant %d cannot have a camera without can_publish", p.PrincipalID)
-	}
-	if p.JoinedAt.IsZero() {
-		return errors.New("schema: voice participant joined_at is required")
 	}
 	return nil
 }
@@ -405,9 +447,8 @@ type VoicePresenceRoom struct {
 //
 // The one-share rule is v1's contract and never changes (issue #1483): a
 // server with several streams builds a v1 document that lists exactly one of
-// them (design §2.3), and a reader that wants them all reads
-// VoicePresenceRoomV2. A sharer need not carry share_started_at here: a v1
-// document from before that field is still a v1 document.
+// them, with v1's fields and no more (design §2.3), and a reader that wants
+// them all reads VoicePresenceRoomV2.
 //
 // How many participants hold a camera is not checked (ADR-015, design §5):
 // the cap is a server constant that can change without a schema change, and
@@ -444,11 +485,12 @@ func (r VoicePresenceRoom) Validate() error {
 func (r VoicePresenceRoom) roomAudience() *Audience { return r.Audience }
 
 // VoicePresenceRoomV2 is one voice room as v2 presence shows it (issue
-// #1483, design §2.2): the fields of VoicePresenceRoom, exactly, with no
-// one-share rule. Any number of participants may be sharing, each since its
-// own ShareStartedAt; how many is the server's cap (voice_share_full at the
-// claim), never a check here (ADR-015 N3), so the cap can move without a
-// schema change. As in v1 it has no room name and no token.
+// #1483, design §2.2): the shape of VoicePresenceRoom with v2 participants
+// and no one-share rule. Any number of participants may be sharing, each
+// since its own ShareStartedAt; how many is the server's cap
+// (voice_share_full at the claim), never a check here (ADR-015 N3), so the
+// cap can move without a schema change. As in v1 it has no room name and no
+// token.
 //
 // Participants is always a JSON array, ordered by principal_id; a room with
 // nobody in it is an empty array. A reader that wants the streams in order
@@ -458,16 +500,14 @@ type VoicePresenceRoomV2 struct {
 	// whole channel.
 	Audience *Audience `json:"audience,omitempty"`
 	// Participants lists every principal connected to the room.
-	Participants []VoiceParticipant `json:"participants"`
+	Participants []VoiceParticipantV2 `json:"participants"`
 }
 
 // Validate reports whether the room is structurally well-formed: a present
-// audience satisfies Audience.Validate, every participant is well-formed, no
-// principal is listed twice, and every sharing participant says when their
-// share started. It does not count sharers: that is the one check v1 has and
-// v2 does not. share_started_at is required of a sharer here and not in v1
-// because every v2 document comes from a server that has the field, while a
-// v1 document may predate it.
+// audience satisfies Audience.Validate, every participant is well-formed
+// (VoiceParticipantV2.Validate: a sharer says when their share started), and
+// no principal is listed twice. It does not count sharers: that is the one
+// check v1 has and v2 does not.
 func (r VoicePresenceRoomV2) Validate() error {
 	if r.Audience != nil {
 		if err := r.Audience.Validate(); err != nil {
@@ -483,9 +523,6 @@ func (r VoicePresenceRoomV2) Validate() error {
 			return fmt.Errorf("schema: voice room lists principal %d more than once", p.PrincipalID)
 		}
 		seen[p.PrincipalID] = struct{}{}
-		if p.Sharing && p.ShareStartedAt == nil {
-			return fmt.Errorf("schema: voice participant %d is sharing without share_started_at", p.PrincipalID)
-		}
 	}
 	return nil
 }
@@ -614,10 +651,11 @@ func (p VoicePresenceV1) Validate() error {
 // channel (issue #1483, design §2.2): the body of
 // GET /v1/channels/{channel}/voice?schema=conch.voice_presence.v2 and the
 // document streamed on GET /v1/voice/ws with the same parameter. It has the
-// fields of VoicePresenceV1, exactly, with Schema always VoicePresenceSchemaV2
-// and rooms of VoicePresenceRoomV2, in which any number of participants may
-// be sharing. ShareEnded and CameraEnded are as in v1: the reader's own, in
-// their document alone, and naming nobody.
+// fields of VoicePresenceV1 with Schema always VoicePresenceSchemaV2 and rooms
+// of VoicePresenceRoomV2, in which any number of participants may be sharing,
+// each saying since when and at what declared quality. ShareEnded and
+// CameraEnded are as in v1: the reader's own, in their document alone, and
+// naming nobody.
 //
 // As in v1 no field of this document or of the types it embeds carries a
 // token or a room name, and voice_test.go asserts that; unknown fields are
@@ -738,17 +776,10 @@ type VoiceShareV1 struct {
 	// Always written out, so a reader never has to know that an omitted
 	// value means false.
 	Audio bool `json:"audio"`
-	// Quality echoes the resolution and frame rate the caller declared
-	// (VoiceShareRequestV1; issue #1483, design §3.1), as recorded with the
-	// claim: the request's, or on a repeated request with a body the new
-	// one. Omitted when nothing was declared, so the answer to a claim
-	// without a body is what it was before the field.
-	Quality *VoiceShareQuality `json:"quality,omitempty"`
 }
 
 // Validate reports whether the share is structurally well-formed: a positive
-// principal_id, a started_at, and a present quality that is one of the
-// picker's.
+// principal_id and a started_at.
 func (s VoiceShareV1) Validate() error {
 	if s.PrincipalID <= 0 {
 		return fmt.Errorf("schema: voice share principal_id must be positive, got %d", s.PrincipalID)
@@ -756,12 +787,44 @@ func (s VoiceShareV1) Validate() error {
 	if s.StartedAt.IsZero() {
 		return errors.New("schema: voice share started_at is required")
 	}
-	if s.Quality != nil {
-		if err := s.Quality.Validate(); err != nil {
-			return err
-		}
-	}
 	return nil
+}
+
+// VoiceShareV2 is the body of a successful POST
+// /v1/channels/{channel}/voice/share when the request's body
+// (VoiceShareRequestV1) declared a quality (issue #1483, design §3.1): the
+// fields of VoiceShareV1 and the quality as recorded, on a first claim the
+// request's and on a holder's repeated claim with a body the new one. The
+// server sends it then and only then; a claim with no body, or with a body
+// that declares nothing, is answered with VoiceShareV1 exactly as before, so a
+// client from before the quality never sees a field it does not know
+// (VoiceShareV1 is closed to the browser's generated validator, as every
+// published shape is). A client that sent a quality reads this type.
+//
+// Like VoiceShareV1 it is a REST body with no schema-name field, versioned by
+// the type suffix, and it carries no room name and no token.
+type VoiceShareV2 struct {
+	// PrincipalID is the principal who holds the share: the caller.
+	PrincipalID int64 `json:"principal_id"`
+	// StartedAt is when conchd granted the share (UTC, ms precision). Asking
+	// again while holding it answers with the same time.
+	StartedAt Timestamp `json:"started_at"`
+	// Audio is whether the share may carry sound, as in VoiceShareV1. Always
+	// written out.
+	Audio bool `json:"audio"`
+	// Quality is the resolution and frame rate the caller declared, as
+	// recorded with the claim. Always present: this type is the answer to a
+	// claim that declared one.
+	Quality VoiceShareQuality `json:"quality"`
+}
+
+// Validate reports whether the share is structurally well-formed: a positive
+// principal_id, a started_at, and a quality that is one of the picker's.
+func (s VoiceShareV2) Validate() error {
+	if err := (VoiceShareV1{PrincipalID: s.PrincipalID, StartedAt: s.StartedAt, Audio: s.Audio}).Validate(); err != nil {
+		return err
+	}
+	return s.Quality.Validate()
 }
 
 // VoiceShareResolution is the sharer's declared resolution: the picker's
@@ -796,9 +859,10 @@ func (r VoiceShareResolution) Valid() bool {
 // VoiceShareQuality is what the sharer declared for their stream: a
 // resolution and a frame rate, the picker's three by three (issue #1488;
 // design §3.2). It is a label, not enforcement: conchd records it with the
-// claim, echoes it on the claim's answer and repeats it in presence
-// (VoiceParticipant.ShareQuality) so a viewer sees "1080p at 60 fps" before
-// pressing Watch; the sharer's own client applies it to its publication, and
+// claim, echoes it on the claim's answer (VoiceShareV2) and repeats it in v2
+// presence (VoiceParticipantV2.ShareQuality) so a viewer sees "1080p at 60
+// fps" before pressing Watch; the sharer's own client applies it to its
+// publication, and
 // the server polices neither bitrate nor size (private-alpha.md O6). A frame
 // rate outside 15, 30 and 60 fails validation; as for the resolution, a new
 // one is a new version of presence.
@@ -827,10 +891,11 @@ func (q VoiceShareQuality) Validate() error {
 // VoiceShareRequestV1 is the optional body of POST
 // /v1/channels/{channel}/voice/share (issue #1483, design §3.1): the quality
 // the caller declares for their stream. No body, or an empty object, declares
-// nothing, so a client from before the quality is unchanged. On a first claim
-// the quality is recorded with the claim; a holder asking again with a body
-// changes it, and presence says so; a holder asking again without a body
-// keeps what was declared.
+// nothing, so a client from before the quality is unchanged and is answered
+// VoiceShareV1 as before; a claim that declares one is answered VoiceShareV2.
+// On a first claim the quality is recorded with the claim; a holder asking
+// again with a body changes it, and v2 presence says so; a holder asking again
+// without a body keeps what was declared.
 //
 // What it leaves out is part of the contract: no principal (the authenticated
 // caller), no room or audience (the channel-wide room, the only room with a

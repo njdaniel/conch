@@ -1,6 +1,7 @@
 package schema
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"io"
@@ -42,11 +43,10 @@ func TestVoiceGoldenFixtures(t *testing.T) {
 		// two-sharer state, the quality on the wire.
 		{name: "presence v2, two sharers, one with quality and sound, one undeclared, a camera", file: "voice-presence-v2.json", new: func() any { return new(VoicePresenceV2) }},
 		{name: "presence v2, as a sharer reads it after stopping while another shares on", file: "voice-presence-v2-share-ended.json", new: func() any { return new(VoicePresenceV2) }},
-		{name: "presence v1, degraded from two sharers to the earliest-started", file: "voice-presence-v1-degraded.json", new: func() any { return new(VoicePresenceV1) }},
-		{name: "presence v1, one sharer with share_started_at and no quality", file: "voice-presence-v1-sharing-started.json", new: func() any { return new(VoicePresenceV1) }},
+		{name: "presence v1, degraded from two sharers to the earliest-started, v1's fields only", file: "voice-presence-v1-degraded.json", new: func() any { return new(VoicePresenceV1) }},
 		{name: "share request, a declared quality", file: "voice-share-request-v1.json", new: func() any { return new(VoiceShareRequestV1) }},
 		{name: "share request, nothing declared", file: "voice-share-request-v1-empty.json", new: func() any { return new(VoiceShareRequestV1) }},
-		{name: "share claim, echoing the declared quality", file: "voice-share-v1-quality.json", new: func() any { return new(VoiceShareV1) }},
+		{name: "share claim v2, echoing the declared quality", file: "voice-share-v2.json", new: func() any { return new(VoiceShareV2) }},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -261,58 +261,6 @@ func TestVoiceParticipantValidate(t *testing.T) {
 			mutate:  func(p *VoiceParticipant) { p.CanPublish, p.Transmitting, p.Camera = false, false, true },
 			wantErr: "voice participant 3 cannot have a camera without can_publish",
 		},
-
-		// Several shares (issue #1483, design §2.2): share_started_at and
-		// share_quality need sharing; a present share_started_at is a time; a
-		// present quality is one of the picker's. Whether sharing needs
-		// share_started_at is the room's rule, by version (v2 yes, v1 no), so
-		// a participant alone accepts both.
-		{name: "valid, sharing since a time", mutate: func(p *VoiceParticipant) { p.Sharing, p.ShareStartedAt = true, voiceShareSince() }},
-		{
-			name: "valid, sharing since a time at a declared quality",
-			mutate: func(p *VoiceParticipant) {
-				p.Sharing, p.ShareStartedAt, p.ShareQuality = true, voiceShareSince(), validVoiceShareQuality()
-			},
-		},
-		{
-			name: "valid, sharing with sound and a camera, since a time at a declared quality",
-			mutate: func(p *VoiceParticipant) {
-				p.Sharing, p.SharingAudio, p.Camera = true, true, true
-				p.ShareStartedAt, p.ShareQuality = voiceShareSince(), validVoiceShareQuality()
-			},
-		},
-		{name: "valid, sharing without share_started_at: a document from before the field", mutate: func(p *VoiceParticipant) { p.Sharing = true }},
-		{
-			name:    "share_started_at without sharing",
-			mutate:  func(p *VoiceParticipant) { p.ShareStartedAt = voiceShareSince() },
-			wantErr: "voice participant 3 cannot have share_started_at without sharing",
-		},
-		{
-			name:    "share_quality without sharing",
-			mutate:  func(p *VoiceParticipant) { p.ShareQuality = validVoiceShareQuality() },
-			wantErr: "voice participant 3 cannot have share_quality without sharing",
-		},
-		{
-			name:    "share_started_at present but zero",
-			mutate:  func(p *VoiceParticipant) { p.Sharing, p.ShareStartedAt = true, &Timestamp{} },
-			wantErr: "voice participant 3 share_started_at is zero",
-		},
-		{
-			name: "share_quality with a resolution outside the picker's",
-			mutate: func(p *VoiceParticipant) {
-				p.Sharing, p.ShareStartedAt = true, voiceShareSince()
-				p.ShareQuality = &VoiceShareQuality{Resolution: "4k", FrameRate: 30}
-			},
-			wantErr: `voice share resolution "4k" is not one of 720p, 1080p, source`,
-		},
-		{
-			name: "share_quality with a frame rate outside the picker's",
-			mutate: func(p *VoiceParticipant) {
-				p.Sharing, p.ShareStartedAt = true, voiceShareSince()
-				p.ShareQuality = &VoiceShareQuality{Resolution: VoiceShareResolution1080p, FrameRate: 24}
-			},
-			wantErr: "voice share frame_rate 24 is not one of 15, 30, 60",
-		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -368,31 +316,6 @@ func TestVoicePresenceRoomValidate(t *testing.T) {
 			name:    "a participant's share is checked in the room",
 			mutate:  func(r *VoicePresenceRoom) { r.Participants[1].SharingAudio = true },
 			wantErr: "voice participant 7 cannot have sharing_audio without sharing",
-		},
-		// Several shares (issue #1483): v1 is published and never changes.
-		// It still refuses two sharers, whatever else they carry; it still
-		// accepts a sharer without share_started_at, as every v1 document
-		// before the field was; and it carries the two new fields on the one
-		// sharer it lists, which an older reader skips.
-		{
-			name: "two participants sharing, each since a time",
-			mutate: func(r *VoicePresenceRoom) {
-				r.Participants[0].Sharing, r.Participants[0].ShareStartedAt = true, voiceShareSince()
-				r.Participants[1].Sharing, r.Participants[1].ShareStartedAt = true, voiceShareSince()
-			},
-			wantErr: "voice room lists principals 3 and 7 as sharing; a room has one share at a time",
-		},
-		{
-			name: "valid, one participant sharing since a time at a declared quality",
-			mutate: func(r *VoicePresenceRoom) {
-				r.Participants[1].Sharing, r.Participants[1].ShareStartedAt = true, voiceShareSince()
-				r.Participants[1].ShareQuality = validVoiceShareQuality()
-			},
-		},
-		{
-			name:    "a participant's share_started_at is checked in the room",
-			mutate:  func(r *VoicePresenceRoom) { r.Participants[1].ShareStartedAt = voiceShareSince() },
-			wantErr: "voice participant 7 cannot have share_started_at without sharing",
 		},
 
 		// The camera (ADR-015, design §5): camera needs can_publish, and
@@ -664,8 +587,6 @@ func TestVoicePresenceTypesAreReached(t *testing.T) {
 	// Guard the reflection walk itself: if it ever stopped descending, the
 	// no-token test above would pass vacuously.
 	shared := []reflect.Type{
-		reflect.TypeOf(VoiceParticipant{}),
-		reflect.TypeOf(VoiceShareQuality{}),
 		reflect.TypeOf(VoiceShareEnded{}),
 		reflect.TypeOf(VoiceCameraEnded{}),
 		reflect.TypeOf(Audience{}),
@@ -675,8 +596,17 @@ func TestVoicePresenceTypesAreReached(t *testing.T) {
 		root reflect.Type
 		own  []reflect.Type
 	}{
-		{root: reflect.TypeOf(VoicePresenceV1{}), own: []reflect.Type{reflect.TypeOf(VoicePresenceV1{}), reflect.TypeOf(VoicePresenceRoom{})}},
-		{root: reflect.TypeOf(VoicePresenceV2{}), own: []reflect.Type{reflect.TypeOf(VoicePresenceV2{}), reflect.TypeOf(VoicePresenceRoomV2{})}},
+		{
+			root: reflect.TypeOf(VoicePresenceV1{}),
+			own:  []reflect.Type{reflect.TypeOf(VoicePresenceV1{}), reflect.TypeOf(VoicePresenceRoom{}), reflect.TypeOf(VoiceParticipant{})},
+		},
+		{
+			root: reflect.TypeOf(VoicePresenceV2{}),
+			own: []reflect.Type{
+				reflect.TypeOf(VoicePresenceV2{}), reflect.TypeOf(VoicePresenceRoomV2{}),
+				reflect.TypeOf(VoiceParticipantV2{}), reflect.TypeOf(VoiceShareQuality{}),
+			},
+		},
 	} {
 		seen := map[reflect.Type]bool{}
 		walkStructFields(tt.root, seen, func(reflect.Type, reflect.StructField) {})
@@ -797,7 +727,7 @@ func TestVoiceOneRoomPerAudience(t *testing.T) {
 // another name, so any new field has to be added here on purpose, by someone
 // who has asked whether a presence reader should see it.
 func TestVoicePresenceFieldsAreAnExactList(t *testing.T) {
-	want := []string{
+	v1 := []string{
 		"schema", "channel_id", "configured", "available", "rooms", // the document
 		"audience", "participants", // a room
 		"kind", "net_id", "principal_ids", // an audience
@@ -810,27 +740,34 @@ func TestVoicePresenceFieldsAreAnExactList(t *testing.T) {
 		// camera claim, and why the reader's own ended, in their document
 		// alone, with the same three fields as share_ended.
 		"camera", "camera_ended",
-		// Several shares (issue #1483, design §2.2, §3.2): when a
-		// participant's share started, and the resolution and frame rate the
-		// sharer declared. Both in v1 and v2; neither helps anyone join.
-		"share_started_at", "share_quality", "resolution", "frame_rate",
 	}
-	// v2 is v1 without the one-share rule: the same fields, exactly.
-	for name, root := range map[string]reflect.Type{"v1": reflect.TypeOf(VoicePresenceV1{}), "v2": reflect.TypeOf(VoicePresenceV2{})} {
+	// v1 is published and closed: it gains no field, ever (issue #1507; the
+	// browser's validators refuse an unknown key). v2 (issue #1483, design
+	// §2.2, §3.2) is v1 and, on a sharer, when their share started and the
+	// resolution and frame rate they declared; none helps anyone join.
+	v2 := append(slices.Clone(v1), "share_started_at", "share_quality", "resolution", "frame_rate")
+	for _, tt := range []struct {
+		name string
+		root reflect.Type
+		want []string
+	}{
+		{name: "v1", root: reflect.TypeOf(VoicePresenceV1{}), want: v1},
+		{name: "v2", root: reflect.TypeOf(VoicePresenceV2{}), want: v2},
+	} {
 		got := map[string]bool{}
-		walkStructFields(root, map[reflect.Type]bool{}, func(_ reflect.Type, f reflect.StructField) {
+		walkStructFields(tt.root, map[reflect.Type]bool{}, func(_ reflect.Type, f reflect.StructField) {
 			if tag := strings.Split(f.Tag.Get("json"), ",")[0]; tag != "" && tag != "-" {
 				got[tag] = true
 			}
 		})
-		for _, k := range want {
+		for _, k := range tt.want {
 			if !got[k] {
-				t.Errorf("presence %s no longer carries %q; update this list if that is intended", name, k)
+				t.Errorf("presence %s no longer carries %q; update this list if that is intended", tt.name, k)
 			}
 			delete(got, k)
 		}
 		for k := range got {
-			t.Errorf("presence %s can now carry %q, which is not on the reviewed list", name, k)
+			t.Errorf("presence %s can now carry %q, which is not on the reviewed list", tt.name, k)
 		}
 	}
 }
@@ -1234,16 +1171,11 @@ func TestVoiceShareEncoding(t *testing.T) {
 			got[tag] = true
 		}
 	})
-	// quality (issue #1483, design §3.2) is the sharer's own declaration,
-	// echoed; its two fields are a resolution and a frame rate.
-	want := map[string]bool{"principal_id": true, "started_at": true, "audio": true, "quality": true, "resolution": true, "frame_rate": true}
+	// The v1 claim is published and closed (issue #1507): the declared
+	// quality is echoed by VoiceShareV2, never added here.
+	want := map[string]bool{"principal_id": true, "started_at": true, "audio": true}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("a share carries %v, want exactly %v", got, want)
-	}
-	// A claim with nothing declared is byte for byte what it was before the
-	// field: quality is omitted, never null.
-	if strings.Contains(string(raw), "quality") {
-		t.Errorf("share without a declared quality = %s, want no quality field", raw)
 	}
 }
 
@@ -1609,8 +1541,10 @@ func TestParseVoiceCameraClaim(t *testing.T) {
 
 // Several screen shares at once (issue #1483, docs/design/voice-multi-share.md
 // §2, §3.2, §4, §5.2; the schema half is issue #1507). v2 is v1 without the
-// one-share rule; the two participant fields and the quality are additive to
-// both; the cap is the server's, never a Validate check (ADR-015 N3).
+// one-share rule, with a participant of its own that says when a share
+// started and what quality was declared; the published v1 shapes gain nothing
+// (voice_v1_frozen_test.go); the cap is the server's, never a Validate check
+// (ADR-015 N3).
 
 var voiceShareStartedAt = NewTimestamp(time.Date(2026, 11, 7, 12, 0, 4, 125e6, time.UTC))
 
@@ -1682,25 +1616,55 @@ func TestVoiceShareQualityValidate(t *testing.T) {
 	}
 }
 
-func TestVoiceShareV1QualityIsOptional(t *testing.T) {
-	s := VoiceShareV1{PrincipalID: 3, StartedAt: voiceShareStartedAt, Audio: true}
-	if err := s.Validate(); err != nil {
-		t.Fatalf("share without a quality: Validate() = %v", err)
-	}
-	s.Quality = validVoiceShareQuality()
-	if err := s.Validate(); err != nil {
-		t.Fatalf("share with a quality: Validate() = %v", err)
-	}
-	s.Quality = &VoiceShareQuality{Resolution: VoiceShareResolution720p, FrameRate: 50}
-	assertValidation(t, s.Validate(), "voice share frame_rate 50 is not one of 15, 30, 60")
+func validVoiceShareV2() VoiceShareV2 {
+	return VoiceShareV2{PrincipalID: 3, StartedAt: voiceShareStartedAt, Audio: true, Quality: *validVoiceShareQuality()}
+}
 
-	// A claim from before the field reads as one with nothing declared.
-	var back VoiceShareV1
-	if err := json.Unmarshal([]byte(`{"principal_id":3,"started_at":"2026-11-07T12:00:04.125Z","audio":true}`), &back); err != nil {
+func TestVoiceShareV2Validate(t *testing.T) {
+	tests := []struct {
+		name    string
+		mutate  func(*VoiceShareV2)
+		wantErr string
+	}{
+		{name: "valid, with sound", mutate: func(*VoiceShareV2) {}},
+		{name: "valid, without sound", mutate: func(s *VoiceShareV2) { s.Audio = false }},
+		{name: "valid, source at 15", mutate: func(s *VoiceShareV2) {
+			s.Quality = VoiceShareQuality{Resolution: VoiceShareResolutionSource, FrameRate: 15}
+		}},
+		{name: "zero principal", mutate: func(s *VoiceShareV2) { s.PrincipalID = 0 }, wantErr: "voice share principal_id must be positive, got 0"},
+		{name: "zero started_at", mutate: func(s *VoiceShareV2) { s.StartedAt = Timestamp{} }, wantErr: "voice share started_at is required"},
+		{name: "zero quality", mutate: func(s *VoiceShareV2) { s.Quality = VoiceShareQuality{} }, wantErr: `voice share resolution "" is not one of 720p, 1080p, source`},
+		{name: "frame rate outside the picker", mutate: func(s *VoiceShareV2) { s.Quality.FrameRate = 50 }, wantErr: "voice share frame_rate 50 is not one of 15, 30, 60"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := validVoiceShareV2()
+			tt.mutate(&s)
+			assertValidation(t, s.Validate(), tt.wantErr)
+		})
+	}
+}
+
+// TestVoiceShareV2Encoding: the v2 claim always writes its quality and its
+// audio, and its fields are an exact list, v1's and the quality's, with no
+// room and no token at any depth.
+func TestVoiceShareV2Encoding(t *testing.T) {
+	raw, err := json.Marshal(VoiceShareV2{PrincipalID: 3, StartedAt: voiceShareStartedAt, Quality: VoiceShareQuality{Resolution: VoiceShareResolution720p, FrameRate: 30}})
+	if err != nil {
 		t.Fatal(err)
 	}
-	if back.Quality != nil {
-		t.Errorf("an older claim decodes with a quality: %+v", back.Quality)
+	if !strings.Contains(string(raw), `"audio":false`) || !strings.Contains(string(raw), `"quality":{"resolution":"720p","frame_rate":30}`) {
+		t.Errorf("v2 share without sound = %s, want audio:false and the quality", raw)
+	}
+	got := map[string]bool{}
+	walkStructFields(reflect.TypeOf(VoiceShareV2{}), map[reflect.Type]bool{}, func(_ reflect.Type, f reflect.StructField) {
+		if tag := strings.Split(f.Tag.Get("json"), ",")[0]; tag != "" && tag != "-" {
+			got[tag] = true
+		}
+	})
+	want := map[string]bool{"principal_id": true, "started_at": true, "audio": true, "quality": true, "resolution": true, "frame_rate": true}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("a v2 share carries %v, want exactly %v", got, want)
 	}
 }
 
@@ -1899,21 +1863,128 @@ func TestVoiceShareRequestEncoding(t *testing.T) {
 	}
 }
 
-// TestVoiceParticipantShareFieldsAreOptional: the two fields are omitted when
-// not sharing, so every published v1 fixture is byte for byte what it was, and
-// an older document (sharing, no share_started_at) still reads.
-func TestVoiceParticipantShareFieldsAreOptional(t *testing.T) {
-	p := validVoiceParticipant()
-	p.Sharing = true
+// participantV2 lifts a v1 participant into v2 with no share fields.
+func participantV2(p VoiceParticipant) VoiceParticipantV2 {
+	return VoiceParticipantV2{
+		PrincipalID: p.PrincipalID, CanPublish: p.CanPublish, Transmitting: p.Transmitting, JoinedAt: p.JoinedAt,
+		Sharing: p.Sharing, SharingAudio: p.SharingAudio, Camera: p.Camera,
+	}
+}
+
+func validVoiceParticipantV2() VoiceParticipantV2 {
+	return participantV2(validVoiceParticipant())
+}
+
+func TestVoiceParticipantV2Validate(t *testing.T) {
+	tests := []struct {
+		name    string
+		mutate  func(*VoiceParticipantV2)
+		wantErr string
+	}{
+		{name: "valid, publishing and transmitting", mutate: func(*VoiceParticipantV2) {}},
+		{name: "valid, listen-only and silent", mutate: func(p *VoiceParticipantV2) { p.CanPublish, p.Transmitting = false, false }},
+		{name: "valid, sharing since a time", mutate: func(p *VoiceParticipantV2) { p.Sharing, p.ShareStartedAt = true, voiceShareSince() }},
+		{
+			name: "valid, sharing since a time at a declared quality",
+			mutate: func(p *VoiceParticipantV2) {
+				p.Sharing, p.ShareStartedAt, p.ShareQuality = true, voiceShareSince(), validVoiceShareQuality()
+			},
+		},
+		{
+			name: "valid, sharing with sound and a camera, since a time at a declared quality",
+			mutate: func(p *VoiceParticipantV2) {
+				p.Sharing, p.SharingAudio, p.Camera = true, true, true
+				p.ShareStartedAt, p.ShareQuality = voiceShareSince(), validVoiceShareQuality()
+			},
+		},
+		{name: "valid, camera and silent", mutate: func(p *VoiceParticipantV2) { p.Transmitting, p.Camera = false, true }},
+
+		// Everything v1 refuses, v2 refuses.
+		{name: "zero principal", mutate: func(p *VoiceParticipantV2) { p.PrincipalID = 0 }, wantErr: "voice participant principal_id must be positive, got 0"},
+		{name: "listen-only but transmitting", mutate: func(p *VoiceParticipantV2) { p.CanPublish = false }, wantErr: "voice participant 3 cannot be transmitting without can_publish"},
+		{name: "zero joined_at", mutate: func(p *VoiceParticipantV2) { p.JoinedAt = Timestamp{} }, wantErr: "voice participant joined_at is required"},
+		{
+			name: "listen-only but sharing",
+			mutate: func(p *VoiceParticipantV2) {
+				p.CanPublish, p.Transmitting, p.Sharing, p.ShareStartedAt = false, false, true, voiceShareSince()
+			},
+			wantErr: "voice participant 3 cannot be sharing without can_publish",
+		},
+		{name: "sound of a share without the share", mutate: func(p *VoiceParticipantV2) { p.SharingAudio = true }, wantErr: "voice participant 3 cannot have sharing_audio without sharing"},
+		{
+			name:    "listen-only but camera",
+			mutate:  func(p *VoiceParticipantV2) { p.CanPublish, p.Transmitting, p.Camera = false, false, true },
+			wantErr: "voice participant 3 cannot have a camera without can_publish",
+		},
+
+		// The share's two fields (design §2.2, §3.2).
+		{name: "sharing without share_started_at", mutate: func(p *VoiceParticipantV2) { p.Sharing = true }, wantErr: "voice participant 3 is sharing without share_started_at"},
+		{
+			name:    "share_started_at without sharing",
+			mutate:  func(p *VoiceParticipantV2) { p.ShareStartedAt = voiceShareSince() },
+			wantErr: "voice participant 3 cannot have share_started_at without sharing",
+		},
+		{
+			name:    "share_quality without sharing",
+			mutate:  func(p *VoiceParticipantV2) { p.ShareQuality = validVoiceShareQuality() },
+			wantErr: "voice participant 3 cannot have share_quality without sharing",
+		},
+		{
+			name:    "share_started_at present but zero",
+			mutate:  func(p *VoiceParticipantV2) { p.Sharing, p.ShareStartedAt = true, &Timestamp{} },
+			wantErr: "voice participant 3 share_started_at is zero",
+		},
+		{
+			name: "share_quality with a resolution outside the picker's",
+			mutate: func(p *VoiceParticipantV2) {
+				p.Sharing, p.ShareStartedAt = true, voiceShareSince()
+				p.ShareQuality = &VoiceShareQuality{Resolution: "4k", FrameRate: 30}
+			},
+			wantErr: `voice share resolution "4k" is not one of 720p, 1080p, source`,
+		},
+		{
+			name: "share_quality with a frame rate outside the picker's",
+			mutate: func(p *VoiceParticipantV2) {
+				p.Sharing, p.ShareStartedAt = true, voiceShareSince()
+				p.ShareQuality = &VoiceShareQuality{Resolution: VoiceShareResolution1080p, FrameRate: 24}
+			},
+			wantErr: "voice share frame_rate 24 is not one of 15, 30, 60",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := validVoiceParticipantV2()
+			tt.mutate(&p)
+			assertValidation(t, p.Validate(), tt.wantErr)
+		})
+	}
+}
+
+// TestVoiceParticipantV2Encoding: a v2 participant who is not sharing encodes
+// to the same bytes as the v1 participant, so the two versions differ only
+// where a share is; a sharer carries the two fields; and the fields are an
+// exact list, v1's and the two.
+func TestVoiceParticipantV2Encoding(t *testing.T) {
+	for _, v1 := range []VoiceParticipant{
+		validVoiceParticipant(),
+		{PrincipalID: 7, CanPublish: true, JoinedAt: voiceJoinedAt, Camera: true},
+		{PrincipalID: 9, JoinedAt: voiceJoinedAt},
+	} {
+		want, err := json.Marshal(v1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := json.Marshal(participantV2(v1))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(got, want) {
+			t.Errorf("v2 participant not sharing = %s, want v1's %s", got, want)
+		}
+	}
+	p := validVoiceParticipantV2()
+	p.Sharing, p.ShareStartedAt, p.ShareQuality = true, voiceShareSince(), validVoiceShareQuality()
 	raw, err := json.Marshal(p)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Contains(string(raw), "share_started_at") || strings.Contains(string(raw), "share_quality") {
-		t.Errorf("a sharer with nothing more encodes as %s, want neither new field", raw)
-	}
-	p.ShareStartedAt, p.ShareQuality = voiceShareSince(), validVoiceShareQuality()
-	raw, err = json.Marshal(p)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1922,25 +1993,34 @@ func TestVoiceParticipantShareFieldsAreOptional(t *testing.T) {
 			t.Errorf("a sharer since a time at a quality encodes as %s, want %s", raw, want)
 		}
 	}
-	var back VoiceParticipant
-	if err := json.Unmarshal([]byte(`{"principal_id":3,"can_publish":true,"transmitting":false,"joined_at":"2026-10-09T12:00:00.000Z","sharing":true}`), &back); err != nil {
-		t.Fatal(err)
+	got := map[string]bool{}
+	walkStructFields(reflect.TypeOf(VoiceParticipantV2{}), map[reflect.Type]bool{}, func(_ reflect.Type, f reflect.StructField) {
+		if tag := strings.Split(f.Tag.Get("json"), ",")[0]; tag != "" && tag != "-" {
+			got[tag] = true
+		}
+	})
+	want := map[string]bool{
+		"principal_id": true, "can_publish": true, "transmitting": true, "joined_at": true,
+		"sharing": true, "sharing_audio": true, "camera": true,
+		"share_started_at": true, "share_quality": true, "resolution": true, "frame_rate": true,
 	}
-	if back.ShareStartedAt != nil || back.ShareQuality != nil {
-		t.Errorf("an older sharer decodes with the new fields: %+v", back)
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("a v2 participant carries %v, want exactly %v", got, want)
 	}
 }
 
 func validVoicePresenceRoomV2() VoicePresenceRoomV2 {
 	r := validVoicePresenceRoom()
-	// A conversion, not a literal: the compiler then asserts the two room
-	// types have the same fields, as the design says they must.
-	return VoicePresenceRoomV2(r)
+	ps := make([]VoiceParticipantV2, len(r.Participants))
+	for i, p := range r.Participants {
+		ps[i] = participantV2(p)
+	}
+	return VoicePresenceRoomV2{Audience: r.Audience, Participants: ps}
 }
 
 // twoSharers makes both participants of a room share, each since its own
 // time, the first with sound and a declared quality.
-func twoSharers(ps []VoiceParticipant) {
+func twoSharers(ps []VoiceParticipantV2) {
 	ps[0].Sharing, ps[0].SharingAudio = true, true
 	ps[0].ShareStartedAt, ps[0].ShareQuality = voiceShareSince(), validVoiceShareQuality()
 	ps[1].Sharing = true
@@ -1957,7 +2037,7 @@ func TestVoicePresenceRoomV2Validate(t *testing.T) {
 		{name: "valid channel-wide room, nobody sharing", mutate: func(*VoicePresenceRoomV2) {}},
 		{name: "valid net room", mutate: func(r *VoicePresenceRoomV2) { r.Audience = &Audience{Kind: AudienceKindNet, NetID: 3} }},
 		{name: "valid nil participants", mutate: func(r *VoicePresenceRoomV2) { r.Participants = nil }},
-		{name: "valid empty participants", mutate: func(r *VoicePresenceRoomV2) { r.Participants = []VoiceParticipant{} }},
+		{name: "valid empty participants", mutate: func(r *VoicePresenceRoomV2) { r.Participants = []VoiceParticipantV2{} }},
 		{
 			name: "valid, one participant sharing since a time",
 			mutate: func(r *VoicePresenceRoomV2) {
@@ -1982,7 +2062,7 @@ func TestVoicePresenceRoomV2Validate(t *testing.T) {
 			mutate: func(r *VoicePresenceRoomV2) {
 				r.Participants = nil
 				for id := int64(1); id <= 10; id++ {
-					p := validVoiceParticipant()
+					p := validVoiceParticipantV2()
 					p.PrincipalID, p.Transmitting, p.Sharing, p.ShareStartedAt = id, false, true, voiceShareSince()
 					r.Participants = append(r.Participants, p)
 				}
@@ -1999,8 +2079,7 @@ func TestVoicePresenceRoomV2Validate(t *testing.T) {
 			},
 		},
 
-		// v2 is new: every v2 document comes from a server that has the
-		// field, so a sharer says when their share started.
+		// A participant's share fields are checked in the room.
 		{
 			name:    "sharing without share_started_at",
 			mutate:  func(r *VoicePresenceRoomV2) { r.Participants[1].Sharing = true },
@@ -2087,26 +2166,60 @@ func TestVoicePresenceRoomV2Validate(t *testing.T) {
 	}
 }
 
-// The same two-sharer state, in each version: v2 lists both; v1 refuses
-// both and accepts the degraded document the server builds for it (design
-// §2.3), which lists exactly one as sharing.
+// degradedV1 is the v1 room a server builds from a v2 room with several
+// sharers (design §2.3): every participant with v1's fields and no more, and
+// exactly one of them, keep, still sharing.
+func degradedV1(r VoicePresenceRoomV2, keep int64) VoicePresenceRoom {
+	out := VoicePresenceRoom{Audience: r.Audience, Participants: make([]VoiceParticipant, len(r.Participants))}
+	for i, p := range r.Participants {
+		v1 := VoiceParticipant{PrincipalID: p.PrincipalID, CanPublish: p.CanPublish, Transmitting: p.Transmitting, JoinedAt: p.JoinedAt, Camera: p.Camera}
+		if p.PrincipalID == keep {
+			v1.Sharing, v1.SharingAudio = p.Sharing, p.SharingAudio
+		}
+		out.Participants[i] = v1
+	}
+	return out
+}
+
+// The same two-sharer state, in each version: v2 lists both; v1 refuses both
+// and accepts the degraded document the server builds for it, which lists
+// exactly one as sharing, with v1's fields and no more, so that a reader from
+// before this change (whose validators refuse an unknown key) reads it whole.
 func TestVoicePresenceVersionsOnTwoSharers(t *testing.T) {
 	v2 := validVoicePresenceRoomV2()
 	twoSharers(v2.Participants)
 	if err := v2.Validate(); err != nil {
 		t.Fatalf("v2 with two sharers: Validate() = %v, want nil", err)
 	}
-	v1 := VoicePresenceRoom{Audience: v2.Audience, Participants: slices.Clone(v2.Participants)}
-	assertValidation(t, v1.Validate(), "voice room lists principals 3 and 7 as sharing; a room has one share at a time")
 
-	degraded := VoicePresenceRoom{Participants: slices.Clone(v2.Participants)}
-	degraded.Participants[1].Sharing, degraded.Participants[1].SharingAudio = false, false
-	degraded.Participants[1].ShareStartedAt, degraded.Participants[1].ShareQuality = nil, nil
-	if err := degraded.Validate(); err != nil {
-		t.Fatalf("v1 degraded to the earliest sharer: Validate() = %v, want nil", err)
-	}
-	if !degraded.Participants[0].Sharing || degraded.Participants[0].ShareStartedAt == nil || degraded.Participants[0].ShareQuality == nil {
-		t.Errorf("the degraded document lost the one sharer's fields: %+v", degraded.Participants[0])
+	both := degradedV1(v2, 3)
+	both.Participants[1].Sharing = true
+	assertValidation(t, both.Validate(), "voice room lists principals 3 and 7 as sharing; a room has one share at a time")
+
+	for _, keep := range []int64{3, 7} {
+		degraded := degradedV1(v2, keep)
+		if err := degraded.Validate(); err != nil {
+			t.Fatalf("v1 degraded to sharer %d: Validate() = %v, want nil", keep, err)
+		}
+		raw, err := json.Marshal(degraded)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(raw), "share_") {
+			t.Errorf("the degraded v1 room carries a v2 field: %s", raw)
+		}
+		var sharing int
+		for _, p := range degraded.Participants {
+			if p.Sharing {
+				sharing++
+				if p.PrincipalID != keep {
+					t.Errorf("degraded to %d but %d is sharing", keep, p.PrincipalID)
+				}
+			}
+		}
+		if sharing != 1 {
+			t.Errorf("the degraded v1 room lists %d sharers, want exactly one", sharing)
+		}
 	}
 }
 
@@ -2236,8 +2349,8 @@ func TestVoicePresenceVersionsRefuseEachOther(t *testing.T) {
 
 // TestVoicePresenceV2CarriesNoTokenOrRoom: as for v1, the JSON of a fully
 // populated v2 snapshot has no key named token or room at any depth, and no
-// type reachable from VoicePresenceV2, the quality included, declares a field
-// that could carry one.
+// type reachable from VoicePresenceV2, the v2 claim or the claim's body, the
+// quality included, declares a field that could carry one.
 func TestVoicePresenceV2CarriesNoTokenOrRoom(t *testing.T) {
 	p := validVoicePresenceV2()
 	net := validVoicePresenceRoomV2()
@@ -2263,7 +2376,7 @@ func TestVoicePresenceV2CarriesNoTokenOrRoom(t *testing.T) {
 			t.Errorf("v2 presence JSON has forbidden key %q at %s", key, path)
 		}
 	})
-	for _, root := range []reflect.Type{reflect.TypeOf(VoicePresenceV2{}), reflect.TypeOf(VoiceShareRequestV1{}), reflect.TypeOf(VoiceShareV1{})} {
+	for _, root := range []reflect.Type{reflect.TypeOf(VoicePresenceV2{}), reflect.TypeOf(VoiceShareRequestV1{}), reflect.TypeOf(VoiceShareV2{})} {
 		walkStructFields(root, map[reflect.Type]bool{}, func(owner reflect.Type, f reflect.StructField) {
 			if forbiddenPresenceFields[f.Name] {
 				t.Errorf("%s declares forbidden field %s", owner, f.Name)
@@ -2302,7 +2415,7 @@ func TestVoicePresenceV2EmptyListsEncodeAsArrays(t *testing.T) {
 	if !strings.Contains(string(raw), `"rooms":[]`) {
 		t.Errorf("v2 presence with no rooms = %s, want rooms:[]", raw)
 	}
-	raw, err = json.Marshal(VoicePresenceRoomV2{Participants: []VoiceParticipant{}})
+	raw, err = json.Marshal(VoicePresenceRoomV2{Participants: []VoiceParticipantV2{}})
 	if err != nil {
 		t.Fatal(err)
 	}

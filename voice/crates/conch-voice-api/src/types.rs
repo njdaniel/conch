@@ -1103,6 +1103,9 @@ mod tests {
             ("voice-presence-v1-not-configured.json", presence),
             ("voice-presence-v1-unavailable.json", presence),
             ("voice-presence-v1-sharing.json", presence),
+            // The v1 document a server with two sharers builds (issue #1483, design
+            // §2.3): one sharer, v1's fields and no more. This client reads it whole.
+            ("voice-presence-v1-degraded.json", presence),
             ("voice-presence-v1-share-ended.json", presence_of_a_sharer),
             ("voice-share-v1.json", share),
             // The camera (ADR-015, issue #1238).
@@ -1175,11 +1178,11 @@ mod tests {
     /// that a new one is still a decision: claim it with a type, or say here why not.
     const NOT_READ: &[(&str, &str)] = &[
         // Several shares at once (issue #1483; the schema is #1507). The helper's v2
-        // presence types and the two participant fields are #1511: until it lands, the
-        // v1 type here would read past `share_started_at` and `share_quality` and the
-        // round trip would lose them, so these wait for #1511 rather than be claimed by
-        // a type that drops what they say. The share's quality body and its echo are the
-        // sharer's, and `conch-voice` never shares a screen.
+        // presence types are #1511: until it lands, the v1 type here would read past
+        // `share_started_at` and `share_quality` and the round trip would lose them, so
+        // the v2 documents wait for #1511 rather than be claimed by a type that drops
+        // what they say. The share claim's body and the v2 answer that echoes its
+        // quality are the sharer's, and `conch-voice` never shares a screen.
         (
             "voice-presence-v2.json",
             "presence v2 is read from #1511; the v1 type here would drop its fields",
@@ -1187,14 +1190,6 @@ mod tests {
         (
             "voice-presence-v2-share-ended.json",
             "presence v2 is read from #1511; the v1 type here would drop its fields",
-        ),
-        (
-            "voice-presence-v1-degraded.json",
-            "share_started_at and share_quality are read from #1511; the type here would drop them",
-        ),
-        (
-            "voice-presence-v1-sharing-started.json",
-            "share_started_at is read from #1511; the type here would drop it",
         ),
         (
             "voice-share-request-v1.json",
@@ -1205,8 +1200,8 @@ mod tests {
             "the share claim's body is the sharer's; conch-voice never shares a screen",
         ),
         (
-            "voice-share-v1-quality.json",
-            "the share claim's answer is the sharer's; the copy here would drop quality",
+            "voice-share-v2.json",
+            "the share claim's answer is the sharer's; conch-voice never shares a screen",
         ),
         // Voice occupancy (issue #596): how many are in each channel's voice, and who
         // (issue #1103), for a channel list. The voice client joins one channel it is

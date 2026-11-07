@@ -220,7 +220,10 @@ var TSTypes = []TSType{
 	{Value: VoiceCameraEnded{}},
 	{Value: VoicePresenceV1{}, Family: "voice-presence-v1", Schema: VoicePresenceSchemaV1},
 	// Presence v2 (issue #1483, design §2.2): v1 without the one-share rule,
-	// which the page asks for with ?schema=conch.voice_presence.v2.
+	// which the page asks for with ?schema=conch.voice_presence.v2. Its
+	// participant carries the share's start and quality; v1's is closed and
+	// gains nothing (object() refuses an unknown key).
+	{Value: VoiceParticipantV2{}},
 	{Value: VoicePresenceRoomV2{}},
 	{Value: VoicePresenceV2{}, Family: "voice-presence-v2", Schema: VoicePresenceSchemaV2},
 	{Value: VoiceTransmitReportV1{}, Family: "voice-transmit-report-v1"},
@@ -233,9 +236,11 @@ var TSTypes = []TSType{
 	{Value: VoiceCompanionAudioV1{}, Family: "voice-companion-audio-v1"},
 	// Screen share (issue #443): the claim the page is given when it may
 	// share. Presence says who shares (VoiceParticipant above). The claim's
-	// optional body declares the quality (issue #1483, design §3.1).
+	// optional body declares the quality (issue #1483, design §3.1), and a
+	// claim that declared one is answered with the v2 claim, which echoes it.
 	{Value: VoiceShareRequestV1{}, Family: "voice-share-request-v1"},
 	{Value: VoiceShareV1{}, Family: "voice-share-v1"},
+	{Value: VoiceShareV2{}, Family: "voice-share-v2"},
 	// The camera claim (ADR-015, issue #1238): the page may publish a camera
 	// while conchd holds it. Presence says who has one (VoiceParticipant).
 	{Value: VoiceCameraV1{}, Family: "voice-camera-v1"},

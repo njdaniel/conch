@@ -1251,8 +1251,6 @@ export interface VoiceParticipant {
   joined_at: string;
   sharing?: boolean;
   sharing_audio?: boolean;
-  share_started_at?: string;
-  share_quality?: VoiceShareQuality;
   camera?: boolean;
 }
 
@@ -1263,8 +1261,6 @@ export const voiceParticipant = object<VoiceParticipant>({
   joined_at: timestamp,
   sharing: optional(bool),
   sharing_audio: optional(bool),
-  share_started_at: optional(timestamp),
-  share_quality: optional(voiceShareQuality),
   camera: optional(bool),
 });
 
@@ -1358,15 +1354,40 @@ export const voicePresenceV1 = object<VoicePresenceV1>({
   camera_ended: optional(voiceCameraEnded),
 });
 
+// schema.VoiceParticipantV2
+export interface VoiceParticipantV2 {
+  principal_id: number;
+  can_publish: boolean;
+  transmitting: boolean;
+  joined_at: string;
+  sharing?: boolean;
+  sharing_audio?: boolean;
+  share_started_at?: string;
+  share_quality?: VoiceShareQuality;
+  camera?: boolean;
+}
+
+export const voiceParticipantV2 = object<VoiceParticipantV2>({
+  principal_id: int,
+  can_publish: bool,
+  transmitting: bool,
+  joined_at: timestamp,
+  sharing: optional(bool),
+  sharing_audio: optional(bool),
+  share_started_at: optional(timestamp),
+  share_quality: optional(voiceShareQuality),
+  camera: optional(bool),
+});
+
 // schema.VoicePresenceRoomV2
 export interface VoicePresenceRoomV2 {
   audience?: Audience;
-  participants: VoiceParticipant[];
+  participants: VoiceParticipantV2[];
 }
 
 export const voicePresenceRoomV2 = object<VoicePresenceRoomV2>({
   audience: optional(audience),
-  participants: array(voiceParticipant),
+  participants: array(voiceParticipantV2),
 });
 
 // schema.VoicePresenceV2
@@ -1487,14 +1508,27 @@ export interface VoiceShareV1 {
   principal_id: number;
   started_at: string;
   audio: boolean;
-  quality?: VoiceShareQuality;
 }
 
 export const voiceShareV1 = object<VoiceShareV1>({
   principal_id: int,
   started_at: timestamp,
   audio: bool,
-  quality: optional(voiceShareQuality),
+});
+
+// schema.VoiceShareV2
+export interface VoiceShareV2 {
+  principal_id: number;
+  started_at: string;
+  audio: boolean;
+  quality: VoiceShareQuality;
+}
+
+export const voiceShareV2 = object<VoiceShareV2>({
+  principal_id: int,
+  started_at: timestamp,
+  audio: bool,
+  quality: voiceShareQuality,
 });
 
 // schema.VoiceCameraV1

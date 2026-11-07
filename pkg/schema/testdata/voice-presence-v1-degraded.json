@@ -13,11 +13,6 @@
           "joined_at": "2026-11-07T11:58:02.250Z",
           "sharing": true,
           "sharing_audio": true,
-          "share_started_at": "2026-11-07T12:00:04.125Z",
-          "share_quality": {
-            "resolution": "1080p",
-            "frame_rate": 60
-          },
           "camera": true
         },
         {
