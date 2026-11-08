@@ -95,9 +95,9 @@ function watchAs(client: VoiceClient, state: VoiceState): void {
 
 // Live is the panel over a fixed state but for what the client owns: which
 // streams are watched and which one is focused.
-function Live({ state, snapshot, client, allowed }: { readonly state: VoiceState; readonly snapshot: Snapshot; readonly client: VoiceClient; readonly allowed: boolean }) {
+function Live({ state, snapshot, client, allowed, viewed = 'general', onOpen = () => undefined }: { readonly state: VoiceState; readonly snapshot: Snapshot; readonly client: VoiceClient; readonly allowed: boolean; readonly viewed?: string; readonly onOpen?: (name: string) => void }) {
   const live = useSyncExternalStore(client.subscribe, client.snapshot);
-  return <VoicePanel voice={control({ ...state, watched: live.watched, focusedShare: live.focusedShare }, snapshot, client)} viewer={7} people={people} viewed="general" cameraAllowed={allowed} onOpen={() => undefined} />;
+  return <VoicePanel voice={control({ ...state, watched: live.watched, focusedShare: live.focusedShare }, snapshot, client)} viewer={7} people={people} viewed={viewed} cameraAllowed={allowed} onOpen={onOpen} />;
 }
 
 function panel(state: VoiceState, { cameras = [] as readonly number[], allowed = true, sharer = null as number | null } = {}) {
@@ -891,12 +891,12 @@ describe('the camera test', () => {
 // and receives no video; "Camera on" is in its state button, from the local
 // track alone.
 describe('the phone strip with the camera (C7)', () => {
-  function stripOf(state: VoiceState, opens: (() => void) | null, { cameras = [8], sharer = null as number | null } = {}) {
+  function stripOf(state: VoiceState, opens: (() => void) | null, { cameras = [8], sharer = null as number | null } = {}, viewed = 'general', onOpen: (name: string) => void = () => undefined) {
     const client = newClient();
     const shown = vi.spyOn(client, 'showVideo');
     const page = (next: VoiceState, opening: (() => void) | null) => (
       <VoiceStrip.Provider value={opening}>
-        <Live state={next} snapshot={{ kind: 'presence', presence: roomWith(cameras, sharer) }} client={client} allowed />
+        <Live state={next} snapshot={{ kind: 'presence', presence: roomWith(cameras, sharer) }} client={client} allowed viewed={viewed} onOpen={onOpen} />
       </VoiceStrip.Provider>
     );
     watchAs(client, state);
@@ -934,6 +934,41 @@ describe('the phone strip with the camera (C7)', () => {
     expect(screen.queryByRole('region', { name: 'Video call' })).toBeNull();
     expect(screen.queryByLabelText("member-1's camera")).toBeNull();
     expect(screen.queryByRole('listitem')).toBeNull();
+  });
+
+  it('shows the compact context and VoiceState statuses under Chat, keeps the player, and announces every toggle once', () => {
+    widthOf(true);
+    const opened = vi.fn();
+    const open = inVoice({ phase: 'reconnecting', viewing: true, watched: new Set([9]), focusedShare: 9, cameraTrack: 'published', camera: { kind: 'sending' }, speaking: new Set([8]), muted: true, deafened: true });
+    const { client } = stripOf(open, () => undefined, { cameras: [8], sharer: 9 }, 'elsewhere', opened);
+    const share = screen.getByRole('region', { name: 'Shared screen' });
+    const video = within(share).getByLabelText("member-2's screen");
+    const item = video.closest('li');
+    const before = client.snapshot();
+    fireEvent.click(within(share).getByRole('button', { name: 'Compact' }));
+    const header = () => {
+      const found = document.querySelector('.call-stage.compact .call-head');
+      if (!(found instanceof HTMLElement)) throw new Error('no compact phone header');
+      return found;
+    };
+    for (const words of ['Sharing: member-2', 'Speaking: member-1', 'Reconnecting', 'Microphone in use', 'Sending video', 'Muted.', 'Deafened (you hear no one, and you are muted).', 'Push to talk.', 'Waiting for the picture']) {
+      expect(header().textContent).toContain(words);
+    }
+    fireEvent.click(within(header()).getByRole('button', { name: '#general' }));
+    expect(opened).toHaveBeenCalledExactlyOnceWith('general');
+    expect(client.snapshot()).toBe(before);
+    expect(screen.getByLabelText("member-2's screen")).toBe(video);
+    expect(video.closest('li')).toBe(item);
+    expect(screen.getAllByText('Call view compact.')).toHaveLength(1);
+    expect(screen.getAllByRole('button', { name: 'Expand' })).toHaveLength(1);
+    fireEvent.click(within(header()).getByRole('button', { name: 'Expand' }));
+    expect(screen.getAllByText('Call view expanded.')).toHaveLength(1);
+    expect(screen.getByLabelText("member-2's screen")).toBe(video);
+    expect(video.closest('li')).toBe(item);
+    fireEvent.click(within(share).getByRole('button', { name: 'Compact' }));
+    expect(screen.getAllByText('Call view compact.')).toHaveLength(1);
+    expect(screen.getByLabelText("member-2's screen")).toBe(video);
+    expect(video.closest('li')).toBe(item);
   });
 
   it('says "Camera on" in the state button from the local track, and still opens the Voice view', () => {

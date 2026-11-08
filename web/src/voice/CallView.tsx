@@ -167,9 +167,12 @@ export function CallView({ client, state, tiles, hidden, open, viewed = state.ch
   // (state.focusedShare), not this.
   const [enlarged, setEnlarged] = useState<string | null>(null);
   const [focusTo, setFocusTo] = useState<FocusTo | null>(null);
-  // The live region's words, and the cameras they were last said from: null
-  // while the view is closed, so nothing is said then, nor on opening.
+  // The live region's camera words, and the cameras they were last said from:
+  // null while the view is closed, so no camera change is said then, nor on
+  // opening. Layout words are independent: a closed phone's Compact and
+  // Expand presses are announced too (issue #1498).
   const [said, setSaid] = useState('');
+  const [layoutSaid, setLayoutSaid] = useState('');
   const [cameras, setCameras] = useState<Cameras | null>(null);
   const [wasOpen, setWasOpen] = useState(open);
 
@@ -317,6 +320,13 @@ export function CallView({ client, state, tiles, hidden, open, viewed = state.ch
       window.clearTimeout(timer);
     };
   }, [said]);
+  useEffect(() => {
+    if (layoutSaid === '') return;
+    const timer = window.setTimeout(() => { setLayoutSaid(''); }, saidFor);
+    return () => {
+      window.clearTimeout(timer);
+    };
+  }, [layoutSaid]);
 
   // The button that enlarges or focuses a tile: a camera's is kept by key; a
   // stream's is in its player (ShareView).
@@ -379,12 +389,13 @@ export function CallView({ client, state, tiles, hidden, open, viewed = state.ch
   const changeLayout = () => {
     const next = !compact;
     setCompact(next);
-    setSaid(next ? 'Call view compact.' : 'Call view expanded.');
+    setSaid('');
+    setLayoutSaid(next ? 'Call view compact.' : 'Call view expanded.');
   };
 
   return (
     <section ref={view} tabIndex={open ? -1 : undefined} aria-label={open ? 'Video call' : undefined} className={open ? (compact ? 'call-view compact' : 'call-view') : (compact ? 'call-stage compact' : 'call-stage')} onKeyDown={open ? onKey : undefined}>
-      {open ? (
+      {open || (narrow && compact) ? (
         <div className="call-head">
           <div className="call-heading">
             <p className="call-title">
@@ -410,7 +421,7 @@ export function CallView({ client, state, tiles, hidden, open, viewed = state.ch
           </div>
         </div>
       ) : null}
-      {open || said !== '' ? <p role="status" className="vh">{said}</p> : null}
+      {open || said !== '' || layoutSaid !== '' ? <p role="status" className="vh">{said === '' ? layoutSaid : said}</p> : null}
       {/* The phone's switcher is the Voice view's: under Chat and Channels
           the stage holds the focused stream alone, and the log keeps its
           room (issue #1028). */}
@@ -436,7 +447,7 @@ export function CallView({ client, state, tiles, hidden, open, viewed = state.ch
               ref={(el) => { if (el === null) items.current.delete(key); else items.current.set(key, el); }}
               className={[t.kind === 'share' ? 'call-share' : 'call-tile', main === null ? (focus ? 'in-strip' : '') : isMain ? 'main' : 'in-strip', t.kind !== 'share' && state.speaking.has(t.principal) ? 'speaking' : ''].filter((c) => c !== '').join(' ')}
             >
-              {t.kind === 'share' && t.render !== undefined ? t.render(() => { enlarge(t); }, compact, !open && isMain ? changeLayout : undefined) : (
+              {t.kind === 'share' && t.render !== undefined ? t.render(() => { enlarge(t); }, compact, !open && isMain && !(narrow && compact) ? changeLayout : undefined) : (
                 <TileView
                   client={client}
                   tile={t}

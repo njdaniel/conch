@@ -628,7 +628,7 @@ export function VoicePanel({
               </p>
             ) : null}
             {state.mode === 'ptt' && !state.listenOnly && !state.watchOnly ? (
-              <p className="hint talk-key-note">Talk key: {keyLabel(voice.talkKey)}. It works only while this tab has focus, and not while you are typing.</p>
+              <p className="hint talk-key-note voice-supplemental">Talk key: {keyLabel(voice.talkKey)}. It works only while this tab has focus, and not while you are typing.</p>
             ) : null}
             <ShareNotes voice={voice} onMore={more} othersShare={streams.length > 0} />
             {stopped === null ? null : (
@@ -1423,7 +1423,7 @@ function ShareNotes({ voice, onMore, othersShare }: { readonly voice: VoiceContr
   const share = state.share;
   if (state.listenOnly) return null;
   const line = (
-    <p className="hint share-line">
+    <p className="hint share-line voice-supplemental">
       {shortShareNote(features)}{' '}
       <button type="button" className="more" aria-controls="voice-options" onClick={onMore}>More about sharing</button>
     </p>
@@ -1436,7 +1436,7 @@ function ShareNotes({ voice, onMore, othersShare }: { readonly voice: VoiceContr
       return (
         <>
           <p role="status" className="sharing-note">{sharedNote(share.audio, features)}</p>
-          <p className="hint"><ShareReadout client={client} direction="sent" prefix="Sending: " /></p>
+          <p className="hint voice-supplemental"><ShareReadout client={client} direction="sent" prefix="Sending: " /></p>
           {share.resumed === true ? <p className="hint">{resumedNote}</p> : null}
         </>
       );

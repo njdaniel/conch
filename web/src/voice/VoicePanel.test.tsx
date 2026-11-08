@@ -1693,6 +1693,23 @@ describe('the compact call workspace (issue #1498)', () => {
     both('Reconnecting');
   });
 
+  it('keeps lifecycle and actionable notes while another stream holds the compact stage open', () => {
+    const carol = { principal_id: 4, can_publish: true, transmitting: false, joined_at: '2026-10-18T00:00:00Z', sharing: true, share_started_at: '2026-10-18T00:01:00Z' };
+    const both: Snapshot = { kind: 'presence', presence: { ...presence, rooms: [{ participants: [participant(true), carol] }] } };
+    const carolOnly: Snapshot = { kind: 'presence', presence: { ...presence, rooms: [{ participants: [carol] }] } };
+    const people: ReadonlyMap<number, Person> = new Map([...bob, [4, { name: 'carol', kind: null }]]);
+    const t = panel(watching(), 'elsewhere', both, people);
+    fireEvent.click(screen.getByRole('button', { name: 'Compact' }));
+    t.redraw(watching({ watched: new Set([4]), focusedShare: 4 }), carolOnly);
+    expect(screen.getByRole('region', { name: 'Video call' }).classList.contains('compact')).toBe(true);
+    const stopped = within(t.voice).getByText('bob stopped sharing.');
+    expect(stopped.getAttribute('role')).toBe('status');
+    expect(stopped.classList.contains('voice-supplemental')).toBe(false);
+    t.redraw(watching({ watched: new Set([4]), focusedShare: 4, missing: true, camera: { kind: 'off', ended: 'operator' } }), carolOnly);
+    expect(within(t.voice).getByText('An operator turned off your camera.').getAttribute('role')).toBe('status');
+    expect(within(t.voice).getByText(missingNote).getAttribute('role')).toBe('status');
+  });
+
   it('closes a compact watched share with the same stopped-sharing note', () => {
     const t = compactPanel();
     t.redraw(watching({ watched: new Set() }), notSharing);

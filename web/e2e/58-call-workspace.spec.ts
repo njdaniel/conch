@@ -8,9 +8,9 @@ import { channelButton, expect, openChannel, rememberPushToTalk, showView, signI
 import { dockerAvailable, startVoiceWorld, watchPage, type Member, type VoiceWorld, type Watch } from './voice-world';
 
 // Installed before the page's scripts: keep every peer connection and the
-// watched video element, so navigation and layout can prove their identity.
+// watched share and camera elements, so navigation and layout prove identity.
 const instrument = () => {
-  const w = window as unknown as { __pcs: RTCPeerConnection[]; __kept?: Element | null };
+  const w = window as unknown as { __pcs: RTCPeerConnection[]; __kept?: Element | null; __keptCamera?: Element | null };
   w.__pcs = [];
   const Original = window.RTCPeerConnection;
   const Wrapped = function (this: unknown, ...args: ConstructorParameters<typeof RTCPeerConnection>) {
@@ -59,6 +59,17 @@ async function kept(page: Page): Promise<{ readonly same: boolean; readonly conn
     const video = document.querySelector('[aria-label="Shared screen"] video');
     w.__kept ??= video;
     return { same: video !== null && w.__kept === video, connections: w.__pcs.length };
+  });
+}
+
+// keptCamera is the same identity check for a received camera across layout
+// toggles. Camera off/on deliberately replaces it, so check only across toggles.
+async function keptCamera(page: Page): Promise<boolean> {
+  return page.evaluate(() => {
+    const w = window as unknown as { __keptCamera?: Element | null };
+    const video = document.querySelector('[aria-label="carol\'s camera"]');
+    w.__keptCamera ??= video;
+    return video !== null && w.__keptCamera === video;
   });
 }
 
@@ -150,6 +161,21 @@ test.describe('the persistent call workspace', () => {
     stopWorld?.();
   });
 
+  // The member cell of use_camera, restored after every revocation check.
+  async function memberCamera(on: boolean): Promise<void> {
+    const read = await vw.api(vw.operator, 'GET', '/v1/permissions');
+    expect(read.status).toBe(200);
+    const { revision } = JSON.parse(read.text) as { revision: number };
+    const changes = on
+      ? [
+          { permission: 'use_camera', role: 'operator', granted: true },
+          { permission: 'use_camera', role: 'member', granted: true },
+        ]
+      : [{ permission: 'use_camera', role: 'member', granted: false }];
+    const put = await vw.api(vw.operator, 'PUT', '/v1/permissions', { revision, changes });
+    expect(put.status, put.text).toBe(200);
+  }
+
   async function person(browser: Browser, member: Member, options?: BrowserContextOptions): Promise<Person> {
     const context = await browser.newContext(options);
     await rememberPushToTalk(context);
@@ -200,7 +226,7 @@ test.describe('the persistent call workspace', () => {
   }
 
   test('all six call workspace scenarios', async ({ browser }) => {
-    test.setTimeout(90_000);
+    test.setTimeout(180_000);
     const people: Person[] = [];
     try {
       const a = await person(browser, vw.alice);
@@ -257,6 +283,9 @@ test.describe('the persistent call workspace', () => {
       await call(b.page).getByRole('button', { name: '#voice-room', exact: true }).click();
       await expect(channelButton(b.page, 'voice-room')).toHaveAttribute('aria-current', 'true');
       expect(await voiceSnapshot(b.page)).toEqual(voiceBefore);
+      expect(await kept(b.page)).toEqual(before);
+      const compactFrames = await inbound(b.page);
+      await expect.poll(() => inbound(b.page), { timeout: 15_000 }).toBeGreaterThan(compactFrames);
       await b.page.setViewportSize({ width: 1440, height: 900 });
       await expand.focus();
       await b.page.keyboard.press('Enter');
@@ -269,8 +298,14 @@ test.describe('the persistent call workspace', () => {
       // Bob chose Show video and Compact; neither event changes that choice.
       await camera(c, true);
       await voice(b.page).getByRole('button', { name: 'Show video (1)' }).click();
+      await expect.poll(() => keptCamera(b.page)).toBe(true);
       await call(b.page).getByRole('button', { name: 'Compact', exact: true }).click();
       await expect(call(b.page)).toHaveClass(/compact/);
+      expect(await keptCamera(b.page)).toBe(true);
+      await call(b.page).getByRole('button', { name: 'Expand', exact: true }).click();
+      expect(await keptCamera(b.page)).toBe(true);
+      await call(b.page).getByRole('button', { name: 'Compact', exact: true }).click();
+      expect(await keptCamera(b.page)).toBe(true);
       await c.page.getByRole('heading', { name: 'Conch' }).click();
       await c.page.keyboard.down('Backquote');
       await expect(call(b.page).locator('.call-context')).toContainText('Speaking: carol', { timeout: 5000 });
@@ -286,11 +321,25 @@ test.describe('the persistent call workspace', () => {
       expect(await kept(b.page)).toEqual(before);
 
       // 4. On a phone with reduced motion, the compact share leaves the composer
-      // reachable, has 44 px controls and runs no stage animation.
+      // reachable, names the call and statuses, announces each toggle once,
+      // keeps decoded frames flowing, has 44 px controls and runs no animation.
       await b.page.emulateMedia({ reducedMotion: 'reduce' });
       await b.page.setViewportSize({ width: 390, height: 844 });
-      await openChannel(b.page, 'voice-room');
+      await openChannel(b.page, 'workspace-text');
+      const phoneStage = b.page.locator('.call-stage.compact');
+      await expect(phoneStage.locator('.call-head')).toBeVisible();
+      await expect(phoneStage.locator('.call-context')).toContainText('#voice-room');
+      await expect(phoneStage.locator('.call-context')).toContainText('Sharing: alice');
+      await expect(phoneStage.locator('.voice-sub')).toContainText('Microphone in use');
+      await expect(phoneStage.locator('.voice-sub')).toContainText('Push to talk.');
+      await phoneStage.getByRole('button', { name: '#voice-room', exact: true }).click();
       await expectComposerShown(b.page);
+      await phoneStage.getByRole('button', { name: 'Expand', exact: true }).click();
+      await expect(b.page.getByText('Call view expanded.', { exact: true })).toHaveCount(1);
+      await shareView(b.page).getByRole('button', { name: 'Compact', exact: true }).click();
+      await expect(b.page.getByText('Call view compact.', { exact: true })).toHaveCount(1);
+      const phoneFrames = await inbound(b.page);
+      await expect.poll(() => inbound(b.page), { timeout: 15_000 }).toBeGreaterThan(phoneFrames);
       expect(await b.page.locator('.stage').evaluate((stage) => stage.getAnimations({ subtree: true }).length)).toBe(0);
       const targets = await b.page.locator('.stage button').evaluateAll((buttons) => buttons.map((button) => {
         const box = button.getBoundingClientRect();
@@ -305,33 +354,69 @@ test.describe('the persistent call workspace', () => {
       await b.page.setViewportSize({ width: 1440, height: 900 });
       await b.page.emulateMedia({ reducedMotion: 'no-preference' });
 
-      // 5a. The share ending closes compact and keeps today's note. With no
-      // share or chosen camera view, Carol's camera cannot open the stage.
+      // 5a. Alice's stopped-sharing note stays visible while Carol's stream
+      // holds compact open. The last stream ending closes it; with no share or
+      // chosen camera view, Carol's camera cannot open the stage by itself.
+      await share(c);
+      await tile(b.page, 'carol').getByRole('button', { name: 'Watch' }).click({ timeout: 30_000 });
+      await expect(shareView(b.page)).toHaveCount(2, { timeout: 30_000 });
       await voice(a.page).getByRole('button', { name: 'Stop sharing' }).click();
+      await expect(shareView(b.page)).toHaveCount(1, { timeout: 20_000 });
+      await expect(call(b.page)).toHaveClass(/compact/);
+      await expect(voice(b.page).getByText('alice stopped sharing.', { exact: true })).toBeVisible();
+      await voice(c.page).getByRole('button', { name: 'Stop sharing' }).click();
       await expect(shareView(b.page)).toHaveCount(0, { timeout: 20_000 });
       await expect(call(b.page)).toHaveCount(0);
-      await expect(voice(b.page)).toContainText('alice stopped sharing.');
       await camera(c, false);
       await camera(c, true);
       await expect(call(b.page)).toHaveCount(0);
       await expect(shareView(b.page)).toHaveCount(0);
 
-      // 5b. Bob's compact choice survives watching again; an operator's voice
-      // removal then closes it and the strip says why, without a rejoin.
+      // 5b. Bob's compact choice survives watching again. Revoking use_camera
+      // ends his own camera element and keeps the explanation visible beside
+      // the compact share. An operator's voice removal then closes the stage.
       await share(a);
       await watching(b);
       await expect(call(b.page)).toHaveClass(/compact/);
+      await camera(b, true);
+      await expect(call(b.page)).toHaveClass(/compact/);
+      await expect(call(b.page).getByLabel('Your camera')).toBeVisible({ timeout: 30_000 });
+      await memberCamera(false);
+      try {
+        await expect(call(b.page).getByLabel('Your camera')).toHaveCount(0, { timeout: 10_000 });
+        await expect(call(b.page)).toHaveClass(/compact/);
+        await expect(voice(b.page).getByText('Camera is not allowed for you.', { exact: true })).toBeVisible({ timeout: 10_000 });
+        await expect(voice(b.page)).not.toContainText('Sending video');
+      } finally {
+        await memberCamera(true);
+      }
+      await call(b.page).getByRole('button', { name: 'Expand', exact: true }).click();
+      await call(b.page).getByRole('button', { name: 'Hide video', exact: true }).click();
+      await call(b.page).getByRole('button', { name: 'Compact', exact: true }).click();
       const removed = await vw.api(vw.operator, 'DELETE', `/v1/channels/${vw.channel}/voice/participants/${String(b.member.id)}`);
       expect(removed.status, removed.text).toBe(204);
       await expect(call(b.page)).toHaveCount(0, { timeout: 30_000 });
       await expect(shareView(b.page)).toHaveCount(0);
       await expect(voice(b.page)).toContainText('You were removed from voice');
       await expect(voice(b.page)).not.toContainText('Connected in #voice-room');
+
+      // 5c. Disabling the viewer's account also closes a compact stage.
+      const dave = await vw.addMember('dave');
+      const d = await person(browser, dave);
+      people.push(d);
+      await join(d);
+      await watching(d);
+      await call(d.page).getByRole('button', { name: 'Compact', exact: true }).click();
+      await expect(call(d.page)).toHaveClass(/compact/);
+      await expectClean(d);
+      await vw.disable(dave);
+      await expect(call(d.page)).toHaveCount(0, { timeout: 30_000 });
+      await expect(shareView(d.page)).toHaveCount(0);
       await voice(a.page).getByRole('button', { name: 'Stop sharing' }).click();
 
       // 6. Every context stayed free of console, policy, request and secret
-      // failures, Carol's and the stopped sharer's included.
-      for (const p of people) await expectClean(p);
+      // failures. Dave's check ran before disablement, whose 401s are expected.
+      for (const p of [a, b, c]) await expectClean(p);
     } finally {
       // Stop each page's media before closing its context, as fixtures does.
       for (const p of people) {

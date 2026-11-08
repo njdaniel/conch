@@ -3358,8 +3358,9 @@ label {
    and scroll sideways rather than taking another row from the conversation;
    the same players and list items stay in place (issue #1498). Supplemental
    roster and note rows yield their dock space too; the strip's VoiceState
-   chips and controls remain, and the notes return when the stage closes. */
-.stage:has(> .call-view.compact) {
+   chips, controls, errors and lifecycle notices remain, and the supplemental
+   notes return when the stage closes. */
+.stage:has(> .call-view.compact, > .call-stage.compact) {
   padding-top: 0;
 }
 
@@ -3371,7 +3372,8 @@ label {
 }
 
 body:has(.call-view.compact, .call-stage.compact) .voice-who,
-body:has(.call-view.compact, .call-stage.compact) .voice-notes {
+body:has(.call-view.compact, .call-stage.compact) .voice-notes > .voice-supplemental,
+body:has(.call-view.compact, .call-stage.compact) .voice-notes:not(:has(> :not(.voice-supplemental))) {
   display: none;
 }
 
@@ -3379,23 +3381,32 @@ body:has(.call-view.compact, .call-stage.compact) .dock {
   padding-top: var(--s1);
 }
 
-.call-view.compact .call-head {
+.call-view.compact .call-head,
+.call-stage.compact .call-head {
   padding-top: 0;
 }
 
-.call-view.compact .call-heading {
+.call-view.compact .call-heading,
+.call-stage.compact .call-heading {
   display: flex;
   align-items: center;
   gap: var(--s2);
 }
 
 .call-view.compact .call-context,
-.call-view.compact .voice-sub {
+.call-view.compact .voice-sub,
+.call-stage.compact .call-context,
+.call-stage.compact .voice-sub {
   flex-wrap: nowrap;
 }
 
-.call-view.compact .call-title {
+.call-view.compact .call-title,
+.call-stage.compact .call-title {
   display: none;
+}
+
+.call-stage.compact .call-head p {
+  margin: 0;
 }
 
 .call-view.compact .call-grid {
@@ -3446,7 +3457,8 @@ body:has(.call-view.compact, .call-stage.compact) .dock {
   padding-top: 0;
 }
 
-.call-view.compact .voice-sub {
+.call-view.compact .voice-sub,
+.call-stage.compact .voice-sub {
   display: flex;
   flex-wrap: nowrap;
   font-size: var(--small);
