@@ -93,7 +93,7 @@ function AgentRow({ entry, expanded, onToggle, sessionRuns, now, onOpen, control
       <button type="button" className="quiet" aria-expanded={expanded} onClick={onToggle}>
         <span aria-hidden="true">{expanded ? '▾' : '▸'}</span> <span className="ag-name">{entry.name}</span>
       </button>{' '}
-      <IdentityMarks {...controls.members.find((member) => member.principal_id === entry.id)} />
+      <IdentityMarks kind={entry.kind} {...controls.members.find((member) => member.principal_id === entry.id)} />
       <span className="ag-status">{entry.status}</span>
       {entry.sessions.length > 1 ? <span> ({entry.sessions.length} sessions)</span> : null}
       {lead?.outcome_unknown === true ? <span> · outcome unknown</span> : null}

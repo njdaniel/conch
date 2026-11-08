@@ -550,6 +550,51 @@ describe('the member list the socket sends', () => {
     });
   });
 
+  it('adds and removes Operator on the channel row and existing author rows from a members frame', async () => {
+    server.messages = [{ schema: 'conch.message.v2', id: 9, channel_id: 7, author_id: 4, created_at: at, body: 'hello from four' }];
+    const socket = await openSettled();
+    const author = (await screen.findByText('hello from four')).closest('li') as HTMLElement;
+    const row = panel().getByText('<b>mallory</b>').closest('li') as HTMLElement;
+    expect(author.querySelector('[data-identity="operator"]')).toBeNull();
+    socket.send(memberList(members.members.map((m) => (m.principal_id === 4 ? { ...m, role: 'operator' } : m))));
+    await waitFor(() => {
+      expect(author.querySelector('[data-identity="operator"]')).not.toBeNull();
+      expect(row.querySelector('[data-identity="operator"]')).not.toBeNull();
+    });
+    socket.send(memberList(members.members.map((m) => (m.principal_id === 4 ? { ...m, role: 'member' } : m))));
+    await waitFor(() => {
+      expect(author.querySelector('[data-identity="operator"]')).toBeNull();
+      expect(row.querySelector('[data-identity="operator"]')).toBeNull();
+    });
+  });
+
+  it('removes a disabled or removed agent, its row and its marks, when the members frame and the roster drop it', async () => {
+    server.messages = [{ schema: 'conch.message.v2', id: 9, channel_id: 7, author_id: 3, created_at: at, body: 'hello from bot' }];
+    const socket = await openSettled([session(100, 2), agentSession()]);
+    const author = (await screen.findByText('hello from bot')).closest('li') as HTMLElement;
+    const agents = () => panel().getByRole('list', { name: 'Agents' });
+    expect(within(agents()).getByText('bot')).toBeDefined();
+    expect(author.querySelector('[data-identity="agent"]')).not.toBeNull();
+    // The server no longer lists the agent, so a re-read agrees with the frame.
+    server.members = { members: without(3) };
+    socket.send(memberList(without(3)));
+    socket.send(roster([session(100, 2)]));
+    await waitFor(() => {
+      expect(within(agents()).queryByText('bot')).toBeNull();
+    });
+    const after = screen.getByText('hello from bot').closest('li') as HTMLElement;
+    expect(after.querySelector('[data-identity="agent"]')).toBeNull();
+    expect(within(agents()).getByText('ghost')).toBeDefined();
+  });
+
+  it('marks an agent only the roster knows (the members list has not caught up) as Agent', async () => {
+    const socket = await openSettled();
+    socket.send(roster([session(100, 2), session(120, 9, { kind: 'agent', name: 'newbot', client: 'adapter/1', status: 'idle' })]));
+    const row = (await within(panel().getByRole('list', { name: 'Agents' })).findByText('newbot')).closest('li') as HTMLElement;
+    expect(row.querySelector('[data-identity="agent"]')).not.toBeNull();
+    expect(row.querySelectorAll('[data-identity="agent"]')).toHaveLength(1);
+  });
+
   it('drops a member who left, without reading the list again', async () => {
     const socket = await openSettled();
     const reads = server.membersReads;

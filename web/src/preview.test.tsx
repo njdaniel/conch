@@ -58,6 +58,9 @@ interface World {
   membersGone: boolean;
   unauthorized: boolean;
   who: WhoAmIResponseV1;
+  // When set, what the previewed person's directory and channel people read answer.
+  previewDirectory: ServerMemberV1[] | null;
+  previewMembers: Record<string, unknown>[] | null;
 }
 
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status });
@@ -110,10 +113,12 @@ function serve(): void {
         }
         if (path === '/v1/channels') return Promise.resolve(json({ channels: alice ? [chA] : [chA, chB] }));
         if (path === '/v1/directory/channels') return Promise.resolve(json({ channels: [{ ...chA, joined: true }] }));
+        if (path === '/v1/directory/members' && world.previewDirectory !== null) return Promise.resolve(json({ members: world.previewDirectory, scope: 'everyone' }));
         if (path === '/v1/directory/members') {
           return Promise.resolve(json(world.hiding ? { members: [person(1, 'owner', { role: 'operator', owner: true }), person(2, 'alice')].map(stripped), scope: 'shared_channels' } : { members: everyone.map(stripped), scope: 'everyone' }));
         }
         if (path === '/v1/channels/channel-a/members' && world.membersGone) return Promise.resolve(json({ code: 'channel_not_found', message: 'x' }, 404));
+        if (path === '/v1/channels/channel-a/members' && world.previewMembers !== null) return Promise.resolve(json({ members: world.previewMembers }));
         if (path === '/v1/channels/channel-a/members') return Promise.resolve(json({ members: [member(1, 'owner'), member(2, 'alice')] }));
         return Promise.resolve(json({ code: 'channel_not_found', message: 'x' }, 404));
       }
@@ -148,7 +153,7 @@ beforeEach(() => {
   voice.in = false;
   voice.left = 0;
   FakeSocket.all = [];
-  world = { hiding: true, refuse: null, membersGone: false, unauthorized: false, who: owner };
+  world = { hiding: true, refuse: null, membersGone: false, unauthorized: false, who: owner, previewDirectory: null, previewMembers: null };
   serve();
   window.sessionStorage.clear();
   window.localStorage.clear();
@@ -256,6 +261,47 @@ describe('the preview', () => {
     expect(community.textContent.includes('You see the people you share a channel with')).toBe(scope);
     // The page asked for no channel of B's, which alice cannot see.
     expect(previewReads().some((r) => r.path.includes('channel-b'))).toBe(false);
+  });
+
+  describe('identity marks', () => {
+    const marksOf = (row: HTMLElement) => Array.from(row.querySelectorAll('[data-identity]')).map((m) => m.getAttribute('data-identity'));
+
+    it('draws no Owner and no Operator the previewed payloads do not carry, whatever the administrator is', async () => {
+      // The administrator (owner, operator) is the signed-in person; the
+      // previewed rows omit owner and role altogether.
+      world.previewDirectory = [
+        { id: 1, kind: 'human', name: 'owner', created_at: at },
+        { id: 2, kind: 'human', name: 'alice', created_at: at },
+        { id: 4, kind: 'agent', name: 'builder', created_at: at },
+      ];
+      world.previewMembers = [member(1, 'owner'), member(2, 'alice')];
+      await previewAlice();
+      const community = await screen.findByRole('region', { name: 'Community members' });
+      await within(community).findByText('builder');
+      expect(marksOf(rowOf(community, 'owner'))).toEqual([]);
+      expect(marksOf(rowOf(community, 'alice'))).toEqual(['you']);
+      expect(marksOf(rowOf(community, 'builder'))).toEqual(['agent']);
+      const channel = await screen.findByRole('region', { name: 'Channel members' });
+      expect(marksOf(rowOf(channel, 'owner'))).toEqual([]);
+      expect(marksOf(rowOf(channel, 'alice'))).toEqual(['you']);
+    });
+
+    it('keeps the marks the previewed payloads do carry', async () => {
+      world.previewDirectory = [
+        { id: 1, kind: 'human', name: 'owner', role: 'operator', owner: true, created_at: at },
+        { id: 2, kind: 'human', name: 'alice', role: 'member', created_at: at },
+        { id: 3, kind: 'human', name: 'bob', role: 'operator', created_at: at },
+      ];
+      world.previewMembers = [{ ...member(1, 'owner') }, { ...member(2, 'alice'), manages: true }];
+      await previewAlice();
+      const community = await screen.findByRole('region', { name: 'Community members' });
+      await within(community).findByText('bob');
+      expect(marksOf(rowOf(community, 'owner'))).toEqual(['owner', 'operator']);
+      expect(marksOf(rowOf(community, 'bob'))).toEqual(['operator']);
+      expect(marksOf(rowOf(community, 'alice'))).toEqual(['you']);
+      const channel = await screen.findByRole('region', { name: 'Channel members' });
+      expect(marksOf(rowOf(channel, 'alice'))).toEqual(['you', 'manager']);
+    });
   });
 
   it('shows no messages, no unread badge and no presence, and a disabled composer', async () => {

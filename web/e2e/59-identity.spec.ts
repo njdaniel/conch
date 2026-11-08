@@ -125,6 +125,9 @@ test('1: a plain member sees Agent but not Owner; the owner sees Owner in the co
 
     const memberContext = await meet();
     pages.push({ page: memberContext.page, errors: consoleErrors(memberContext.page) });
+    // Watched from before sign-in: the owner's directory row arrives here, and
+    // the member must never be told which row is the owner.
+    const traffic = watchTraffic(memberContext.page);
     await signIn(memberContext.page, world, member.token, member.name);
     await openChannel(memberContext.page, 'general');
     await openMembers(memberContext.page);
@@ -136,6 +139,9 @@ test('1: a plain member sees Agent but not Owner; the owner sees Owner in the co
     for (const row of [messageRow(memberContext.page, ownerMessage.id), channelRow(memberContext.page, owner.name), communityRow(memberContext.page, owner.name)]) {
       await expect(mark(row, 'owner')).toHaveCount(0);
     }
+    const received = await traffic.text();
+    expect(received, 'the owner\'s directory row reached the member').toContain(owner.name);
+    expect(received).not.toMatch(/"owner"\s*:/);
 
     const ownerContext = await meet();
     pages.push({ page: ownerContext.page, errors: consoleErrors(ownerContext.page) });
@@ -197,7 +203,7 @@ test('2: Make manager and Remove as manager update author and channel rows witho
   expectClean(pages);
 });
 
-test('3: hidden and out-of-channel identities have no row or mark, and no owner field reaches the member', async ({ meet, secrets, world }) => {
+test('3: hidden and out-of-channel identities have no row or mark, and no row of theirs reaches the member', async ({ meet, secrets, world }) => {
   const tag = unique('scope');
   const member = await person(world, secrets, `${tag}-member`);
   const hidden = await person(world, secrets, `${tag}-hidden`);
@@ -223,7 +229,7 @@ test('3: hidden and out-of-channel identities have no row or mark, and no owner 
     }
     const received = await traffic.text();
     expect(received.length).toBeGreaterThan(0);
-    expect(received).not.toMatch(/"owner"\s*:/);
+    expect(received).not.toContain(hidden.name);
   } finally {
     await memberCell(world, true);
   }
@@ -261,6 +267,128 @@ test('4: at 390×844 marks keep the message menu on screen and author text keeps
     await expectFits(page, '390×844: identity marks and message actions');
   } finally {
     await worker.stop();
+  }
+  expectClean(pages);
+});
+
+async function agentPerson(world: World, secrets: string[], name: string): Promise<Someone> {
+  const principal: CreatePrincipalRequest = { kind: 'agent', name };
+  const id = (await ok(world, world.tokens.operator, 'POST', '/v0/principals', createPrincipalResponse, principal)).principal.id;
+  const credential: CreateCredentialRequestV1 = { label: name };
+  const { token } = await ok(world, world.tokens.operator, 'POST', `/v1/principals/${String(id)}/credentials`, createCredentialResponseV1, credential);
+  secrets.push(token);
+  return { id, name, token };
+}
+
+test('6: promotion and demotion move Operator, and disabling an agent drops its row, with no reload', async ({ meet, secrets, world }) => {
+  const tag = unique('roles');
+  const member = await person(world, secrets, `${tag}-member`);
+  const bot = await agentPerson(world, secrets, `${tag}-bot`);
+  const channel = `${tag}-room`;
+  await privateChannel(world, channel, [member, bot]);
+  const said = await post(world, member.token, channel, `${tag} member author`);
+  const pages: WatchedPage[] = [];
+  const role = async (to: 'operator' | 'member') => {
+    const done = await call(world, world.tokens.operator, 'PUT', `/v1/principals/${String(member.id)}/role`, { role: to });
+    expect(done.status, `making ${member.name} ${to}: ${JSON.stringify(done.body)}`).toBeLessThan(300);
+  };
+  try {
+    const { page } = await meet();
+    pages.push({ page, errors: consoleErrors(page) });
+    // The owner: a channel's Operator marks are told only to a viewer who
+    // manages the channel; everyone else learns them from the directory.
+    await ownerIn(page, world);
+    await openChannel(page, channel);
+    await openMembers(page);
+    await expect(mark(agentRow(page, bot.name), 'agent')).toBeVisible();
+    await expect(mark(channelRow(page, member.name), 'operator')).toHaveCount(0);
+    await page.evaluate(() => {
+      document.body.dataset['kept'] = 'yes';
+    });
+
+    await role('operator');
+    await expect(mark(channelRow(page, member.name), 'operator')).toBeVisible();
+    await expect(mark(messageRow(page, said.id), 'operator')).toBeVisible();
+    await expect(mark(communityRow(page, member.name), 'operator')).toBeVisible();
+    expect(await page.evaluate(() => document.body.dataset['kept']), 'the page reloaded').toBe('yes');
+
+    await role('member');
+    await expect(mark(channelRow(page, member.name), 'operator')).toHaveCount(0);
+    await expect(mark(messageRow(page, said.id), 'operator')).toHaveCount(0);
+    await expect(mark(communityRow(page, member.name), 'operator')).toHaveCount(0);
+
+    const hid = await call(world, world.tokens.operator, 'POST', `/v1/principals/${String(bot.id)}/hide`);
+    expect(hid.status, `hiding ${bot.name}: ${JSON.stringify(hid.body)}`).toBeLessThan(300);
+    await expect(agentRow(page, bot.name)).toHaveCount(0);
+    await expect(channelRow(page, bot.name)).toHaveCount(0);
+    await expect(communityRow(page, bot.name)).toHaveCount(0);
+    await expect(page.getByRole('region', { name: 'Members list' }).getByText(bot.name)).toHaveCount(0);
+    expect(await page.evaluate(() => document.body.dataset['kept']), 'the page reloaded').toBe('yes');
+  } finally {
+    await call(world, world.tokens.operator, 'PUT', `/v1/principals/${String(member.id)}/role`, { role: 'member' });
+    await call(world, world.tokens.operator, 'POST', `/v1/principals/${String(bot.id)}/hide`);
+  }
+  // The owner's page reads the manifest of each agent in the list; once the agent
+  // is hidden that read is a 404 the browser logs. It is the page asking about
+  // a principal it was just told is gone, not an identity fault, and it is the
+  // only console error allowed here.
+  for (const { errors } of pages) {
+    for (let i = errors.length - 1; i >= 0; i--) if (errors[i]?.includes(`/v1/principals/${String(bot.id)}/manifest`) === true) errors.splice(i, 1);
+  }
+  expectClean(pages);
+});
+
+test('7: at 360 px wide marked member lists keep every row control in its row and the page from scrolling sideways', async ({ meet, secrets, world }) => {
+  const tag = unique('narrow');
+  const member = await person(world, secrets, `${tag}-a-member-with-a-very-long-name`);
+  await memberOf(world, 'general', member.id, true);
+  const promoted = await call(world, world.tokens.operator, 'PUT', `/v1/principals/${String(member.id)}/role`, { role: 'operator' });
+  expect(promoted.status, `making ${member.name} an operator: ${JSON.stringify(promoted.body)}`).toBeLessThan(300);
+  const managed = await call(world, world.tokens.operator, 'PUT', `/v1/channels/general/members/${String(member.id)}`, { manages: true });
+  expect(managed.status, `making ${member.name} a manager: ${JSON.stringify(managed.body)}`).toBeLessThan(300);
+  const worker = await launchWorker(world, 'slow.sh', { sleep: 0 });
+  const pages: WatchedPage[] = [];
+  try {
+    const { page } = await meet({ viewport: { width: 360, height: 740 } });
+    pages.push({ page, errors: consoleErrors(page) });
+    await ownerIn(page, world);
+    await openChannel(page, 'general');
+    const panel = await openMembers(page);
+    await expect(mark(channelRow(page, member.name), 'operator')).toBeVisible();
+    await expect(mark(channelRow(page, member.name), 'manager')).toBeVisible();
+    await expect(mark(agentRow(page, 'worker-test'), 'agent')).toBeVisible();
+    await expect(mark(communityRow(page, member.name), 'operator')).toBeVisible();
+
+    const lists = [
+      ['channel people', panel.getByRole('list', { name: /^(Online|Offline)/ }).locator('li.member-row')],
+      ['agents', panel.getByRole('list', { name: 'Agents' }).locator('li.member-row')],
+      ['community', panel.getByRole('list', { name: 'People' }).locator('li.community-member')],
+    ] as const;
+    let checked = 0;
+    for (const [what, rows] of lists) {
+      expect(await rows.count(), `${what} has rows`).toBeGreaterThan(0);
+      for (const row of await rows.all()) {
+        await row.scrollIntoViewIfNeeded();
+        const more = row.getByRole('button', { name: /^Actions for / });
+        if ((await more.count()) === 0) continue;
+        const rowBox = await row.boundingBox();
+        const moreBox = await more.boundingBox();
+        if (rowBox === null || moreBox === null) throw new Error(`${what}: a row or its ⋯ control has no box`);
+        const where = `${what}: ⋯ at x ${String(moreBox.x)}, ${String(moreBox.width)} wide, in a row at x ${String(rowBox.x)}, ${String(rowBox.width)} wide`;
+        expect(moreBox.x, where).toBeGreaterThanOrEqual(0);
+        expect(moreBox.x + moreBox.width, where).toBeLessThanOrEqual(360);
+        expect(moreBox.x, where).toBeGreaterThanOrEqual(rowBox.x - 1);
+        expect(moreBox.x + moreBox.width, where).toBeLessThanOrEqual(rowBox.x + rowBox.width + 1);
+        checked++;
+      }
+    }
+    expect(checked, 'rows with a ⋯ control were measured').toBeGreaterThan(2);
+    await expectFits(page, '360: marked member lists');
+    const panelScroll = await panel.evaluate((el) => ({ scroll: el.scrollWidth, client: el.clientWidth }));
+    expect(panelScroll.scroll, 'the members panel scrolls sideways').toBeLessThanOrEqual(panelScroll.client);
+  } finally {
+    await worker.stop();
+    await call(world, world.tokens.operator, 'PUT', `/v1/principals/${String(member.id)}/role`, { role: 'member' });
   }
   expectClean(pages);
 });
