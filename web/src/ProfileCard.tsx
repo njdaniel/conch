@@ -17,7 +17,7 @@ function present(person: ProfilePerson): person is Entry & IdentityInput {
 // Every value comes from the opening surface; an Entry alone adds its
 // already-held presence. Controlled open state lets a member row move between
 // presence groups without closing the card.
-export function ProfileCard({ id, person, viewer, name: surfaceName, className = '', open, onOpenChange }: {
+export function ProfileCard({ id, person, viewer, name: surfaceName, className = '', open, onOpenChange, onDisappear }: {
   readonly id: number;
   readonly person: ProfilePerson | undefined;
   readonly viewer?: number;
@@ -25,6 +25,8 @@ export function ProfileCard({ id, person, viewer, name: surfaceName, className =
   readonly className?: string;
   readonly open?: boolean;
   readonly onOpenChange?: (open: boolean) => void;
+  // The owning surface names a focus target that outlives a disappearing row.
+  readonly onDisappear?: () => void;
 }) {
   const [ownOpen, setOwnOpen] = useState(false);
   const shown = open ?? ownOpen;
@@ -33,6 +35,8 @@ export function ProfileCard({ id, person, viewer, name: surfaceName, className =
   const closeButton = useRef<HTMLButtonElement>(null);
   const openNow = useRef(shown);
   openNow.current = shown;
+  const disappear = useRef(onDisappear);
+  disappear.current = onDisappear;
   const hadPerson = useRef(person !== undefined);
   const key = useId();
   const titleId = `${key}-name`;
@@ -66,7 +70,6 @@ export function ProfileCard({ id, person, viewer, name: surfaceName, className =
     const outside = (event: Event) => {
       const target = event.target;
       if (target instanceof Node && (card.current?.contains(target) === true || opener.current?.contains(target) === true)) return;
-      if (event.cancelable) event.preventDefault();
       close();
     };
     const another = (event: Event) => {
@@ -90,7 +93,7 @@ export function ProfileCard({ id, person, viewer, name: surfaceName, className =
   }, [person, close]);
 
   useEffect(() => () => {
-    if (openNow.current) opener.current?.focus();
+    if (openNow.current) disappear.current?.();
   }, []);
 
   function keyDown(event: KeyboardEvent<HTMLDivElement>) {
@@ -110,7 +113,13 @@ export function ProfileCard({ id, person, viewer, name: surfaceName, className =
         aria-haspopup="dialog"
         aria-expanded={shown}
         {...(shown ? { 'aria-controls': cardId } : {})}
-        onClick={show}
+        onClick={(event) => {
+          // A recognised long press has already opened the row's menu. Its
+          // following click must not open a card and take focus from the menu.
+          const menu = event.currentTarget.closest('li')?.querySelector('[role="menu"]');
+          if (menu !== null && menu !== undefined) return;
+          show();
+        }}
       >
         {name}
       </button>
@@ -120,7 +129,9 @@ export function ProfileCard({ id, person, viewer, name: surfaceName, className =
             <Avatar id={id} name={name} />
             <div>
               <strong id={titleId}>{name}</strong>
-              <span className="profile-card-kind">{shownPerson.kind === 'agent' ? 'Agent' : 'Person'}</span>
+              {shownPerson.kind === 'human' || shownPerson.kind === 'agent' ? (
+                <span className="profile-card-kind">{shownPerson.kind === 'agent' ? 'Agent' : 'Person'}</span>
+              ) : null}
             </div>
           </div>
           <div className="profile-card-marks">

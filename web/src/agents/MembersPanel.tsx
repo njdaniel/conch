@@ -3,7 +3,7 @@
 // the members list joined with the latest roster frame. Every name, task,
 // runtime and model is another person's or agent's text and is rendered as a
 // text node.
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { MemberRow, Members, type MemberControlsProps } from '../Members';
 import { Avatar } from '../Icons';
 import { IdentityMarks } from '../Identity';
@@ -64,7 +64,7 @@ function SessionRow({ session, runs, now, onOpen }: {
   );
 }
 
-function AgentRow({ entry, expanded, onToggle, sessionRuns, now, onOpen, controls }: {
+function AgentRow({ entry, expanded, onToggle, sessionRuns, now, onOpen, controls, onProfileDisappear }: {
   readonly entry: Entry;
   readonly expanded: boolean;
   readonly onToggle: () => void;
@@ -72,6 +72,7 @@ function AgentRow({ entry, expanded, onToggle, sessionRuns, now, onOpen, control
   readonly now: number;
   readonly onOpen: (runId: number, sessionId: number, known: RunV1 | null) => void;
   readonly controls: MemberControlsProps;
+  readonly onProfileDisappear: () => void;
 }) {
   const lead = entry.sessions.find((s) => s.status === entry.status);
   const member = controls.members.find((m) => m.principal_id === entry.id);
@@ -95,7 +96,7 @@ function AgentRow({ entry, expanded, onToggle, sessionRuns, now, onOpen, control
       <button type="button" className="quiet agent-session-toggle" aria-label={`${expanded ? 'Hide' : 'Show'} sessions for ${entry.name}`} aria-expanded={expanded} onClick={onToggle}>
         <span aria-hidden="true">{expanded ? '▾' : '▸'}</span>
       </button>
-      <ProfileCard key={controls.channel.id} id={entry.id} person={{ ...entry, role: member?.role, manages: member?.manages, can_decide: member?.can_decide, guest: member?.guest }} viewer={controls.viewer.id} className="ag-name" />{' '}
+      <ProfileCard key={controls.channel.id} id={entry.id} person={{ ...entry, role: member?.role, manages: member?.manages, can_decide: member?.can_decide, guest: member?.guest }} viewer={controls.viewer.id} className="ag-name" onDisappear={onProfileDisappear} />{' '}
       <IdentityMarks kind={entry.kind} {...controls.members.find((member) => member.principal_id === entry.id)} />
       <span className="ag-status">{entry.status}</span>
       {entry.sessions.length > 1 ? <span> ({entry.sessions.length} sessions)</span> : null}
@@ -115,6 +116,10 @@ type PanelControls = Omit<MemberControlsProps, 'members' | 'refreshMembers'>;
 export function MembersPanel({ agents, now, controls }: { readonly agents: Agents; readonly now: number; readonly controls: PanelControls | null }) {
   const { state, session, members } = agents;
   const [expanded, setExpanded] = useState<ReadonlySet<number>>(new Set());
+  const panel = useRef<HTMLDivElement>(null);
+  const profileDisappear = () => {
+    panel.current?.querySelector<HTMLElement>('h3')?.focus();
+  };
   const joined = joinMembers(members, state.roster);
   const live = state.link === 'live';
   const memberControls: MemberControlsProps | null = controls === null ? null : { ...controls, members, refreshMembers: agents.refreshMembers };
@@ -163,13 +168,13 @@ export function MembersPanel({ agents, now, controls }: { readonly agents: Agent
   }
   if (memberControls === null) return <p role="status">Members unavailable</p>;
   return (
-    <div className="ag-panel">
+    <div ref={panel} className="ag-panel">
       <Members {...memberControls} people={joined.people} />
       {folded ? (
         <p className="empty">No agents or runs in this channel.</p>
       ) : (
         <>
-          <h3>Agents</h3>
+          <h3 tabIndex={-1}>Agents</h3>
           {joined.agents.length === 0 ? (
             <p className="empty">No agents in this channel</p>
           ) : (
@@ -190,6 +195,7 @@ export function MembersPanel({ agents, now, controls }: { readonly agents: Agent
                   now={now}
                   onOpen={agents.openRun}
                   controls={memberControls}
+                  onProfileDisappear={profileDisappear}
                 />
               ))}
             </ul>

@@ -643,12 +643,14 @@ describe('a person profile card', () => {
     expect(within(screen.getByRole('list', { name: 'Online — 1' })).getByRole('button', { name: 'ada' })).toBeDefined();
   });
 
-  it('closes when the person is removed from the channel', () => {
+  it.each(['removed', 'hidden'])('closes and focuses People when the person is %s', () => {
     const p = props('member');
     const view = render(<Members {...p} people={people} />);
     fireEvent.click(within(row('ada')).getByRole('button', { name: 'ada' }));
     expect(screen.getByRole('dialog', { name: 'ada' })).toBeDefined();
+    const heading = screen.getByRole('heading', { name: 'People' });
     view.rerender(<Members {...p} members={memberList.filter((member) => member.principal_id !== 2)} people={people.filter((person) => person.id !== 2)} />);
     expect(screen.queryByRole('dialog')).toBeNull();
+    expect(document.activeElement).toBe(heading);
   });
 });

@@ -2499,7 +2499,8 @@ label {
 }
 
 /* A name opens a read-only card (issue #1544). The card stays out of the row's
-   layout; on a phone the card and its Close control fit the screen. */
+   layout; on desktop it fits the members panel, and on a phone the card and its
+   Close control fit the screen. */
 .profile-card-disclosure {
   position: relative;
   display: inline-block;
@@ -2576,6 +2577,22 @@ label {
 
 .profile-card-close {
   justify-self: end;
+}
+
+@media (min-width: 700px) {
+  .ag-panel .member-row {
+    position: relative;
+  }
+
+  .ag-panel .profile-card-disclosure {
+    position: static;
+  }
+
+  .ag-panel .profile-card {
+    right: 0;
+    left: auto;
+    max-width: 100%;
+  }
 }
 
 @media (max-width: 699px) {

@@ -99,6 +99,7 @@ function Line({
   tag,
   tone,
   interactive = true,
+  onCardDisappear,
   children,
 }: {
   readonly time: string;
@@ -110,6 +111,7 @@ function Line({
   readonly tag: string | null;
   readonly tone?: 'failed' | 'unconfirmed';
   readonly interactive?: boolean;
+  readonly onCardDisappear?: () => void;
   readonly children: ReactNode;
 }) {
   // The badge comes first, as in the TUI, so a name or a body cannot pass for
@@ -119,7 +121,7 @@ function Line({
       <Avatar id={authorId} name={author} />
       <div className="msg-head">
         {badge === null ? null : <span className="audience">{badge} </span>}
-        <time>{time}</time> {interactive ? <ProfileCard id={authorId} person={person} viewer={viewer} name={author} className="author" /> : <span className="author">{author}</span>}
+        <time>{time}</time> {interactive ? <ProfileCard id={authorId} person={person} viewer={viewer} name={author} className="author" onDisappear={onCardDisappear} /> : <span className="author">{author}</span>}
         <IdentityMarks kind={person?.kind} role={person?.role} manages={person?.manages} only={authorMarks} textForm />
         <span className="vh">: </span>
       </div>
@@ -239,6 +241,7 @@ export function Message({
         person={people.get(message.author_id)}
         viewer={viewer}
         interactive={message.removed !== true && !cont}
+        onCardDisappear={() => { row.current?.focus(); }}
         badge={message.audience === undefined ? null : audienceLabel(message.audience, viewer, nets)}
         tag={sent ? 'Sent' : null}
       >

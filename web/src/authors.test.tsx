@@ -143,6 +143,7 @@ describe('author identity marks', () => {
     expect(head.querySelector('[data-identity="owner"], [data-identity="operator"], [data-identity="manager"], [data-identity="approver"]')).toBeNull();
 
     asked.mockClear();
+    const requests = vi.spyOn(globalThis, 'fetch');
     fireEvent.click(within(head).getByRole('button', { name: 'former-bot' }));
     const card = screen.getByRole('dialog', { name: 'former-bot' });
     expect(card.querySelector('.profile-card-kind')?.textContent).toBe('Agent');
@@ -151,6 +152,7 @@ describe('author identity marks', () => {
     expect(card.querySelector('.profile-card-presence')).toBeNull();
     expect(card.textContent).not.toMatch(/membership|member list|online|stale|offline/);
     expect(asked).not.toHaveBeenCalled();
+    expect(requests).not.toHaveBeenCalled();
   });
 });
 
@@ -183,8 +185,14 @@ describe('the author name and the message gestures', () => {
       act(() => {
         vi.advanceTimersByTime(longPressMs);
       });
-      expect(screen.getByRole('menu', { name: /^More actions for ada/ })).toBeDefined();
+      const menu = screen.getByRole('menu', { name: /^More actions for ada/ });
+      expect(menu).toBeDefined();
       expect(screen.queryByRole('dialog')).toBeNull();
+      fireEvent.touchEnd(name);
+      fireEvent.click(name);
+      expect(screen.getByRole('menu', { name: /^More actions for ada/ })).toBe(menu);
+      expect(screen.queryByRole('dialog')).toBeNull();
+      expect(document.activeElement).toBe(within(menu).getAllByRole('menuitem')[0]);
     } finally {
       vi.useRealTimers();
     }

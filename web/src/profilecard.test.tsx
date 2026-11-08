@@ -59,6 +59,18 @@ describe('the read-only profile card', () => {
     expect(screen.getByRole('dialog', { name: 'bot' })).toBeDefined();
   });
 
+  it('lets one outside tap close the card and activate another name', () => {
+    render(<><ProfileCard id={1} person={ada} viewer={2} /><ProfileCard id={2} person={{ name: 'bot', kind: 'agent' }} viewer={2} /></>);
+    open();
+    const bot = screen.getByRole('button', { name: 'bot' });
+    expect(fireEvent.touchStart(bot, { touches: [{ clientX: 10, clientY: 10 }] })).toBe(true);
+    fireEvent.touchEnd(bot);
+    fireEvent.click(bot);
+    expect(screen.queryByRole('dialog', { name: 'ada' })).toBeNull();
+    expect(screen.getByRole('dialog', { name: 'bot' })).toBeDefined();
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Close' }));
+  });
+
   it('closes when the opening surface loses the person, and returns focus to the fallback name', () => {
     const view = render(<ProfileCard id={1} person={ada} viewer={2} />);
     const opener = screen.getByRole('button', { name: 'ada' });
@@ -69,10 +81,12 @@ describe('the read-only profile card', () => {
     expect(opener.textContent).toBe('#1');
   });
 
-  it('opens an unnamed person as #<id> without inventing marks or presence', () => {
+  it('opens an unnamed person as #<id> without inventing a kind, marks or presence', () => {
     render(<ProfileCard id={7} person={undefined} viewer={2} />);
     const card = open('#7');
-    expect(within(card).getByText('Person')).toBeDefined();
+    expect(card.querySelector('.profile-card-kind')).toBeNull();
+    expect(within(card).queryByText('Person')).toBeNull();
+    expect(within(card).queryByText('Agent')).toBeNull();
     expect(card.querySelectorAll('.identity-mark')).toHaveLength(0);
     expect(card.querySelector('.profile-card-presence')).toBeNull();
   });

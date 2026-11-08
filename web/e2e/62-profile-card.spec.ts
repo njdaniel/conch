@@ -80,6 +80,23 @@ async function expectOnScreen(page: Page, element: Locator, what: string): Promi
   expect(box.y + box.height, where).toBeLessThanOrEqual(screen.height);
 }
 
+async function expectCardInPanel(page: Page, panel: Locator, card: Locator, opener: Locator, what: string): Promise<void> {
+  await expectOnScreen(page, card, what);
+  const scroller = panel.locator('..');
+  const box = await card.boundingBox();
+  const bounds = await scroller.boundingBox();
+  if (box === null || bounds === null) throw new Error(`${what} or its scroll container has no box`);
+  const where = `${what} is at x ${String(box.x)}, y ${String(box.y)}, ${String(box.width)}×${String(box.height)} in ${JSON.stringify(bounds)}`;
+  expect(box.x, where).toBeGreaterThanOrEqual(bounds.x);
+  expect(box.y, where).toBeGreaterThanOrEqual(bounds.y);
+  expect(box.x + box.width, where).toBeLessThanOrEqual(bounds.x + bounds.width);
+  expect(box.y + box.height, where).toBeLessThanOrEqual(bounds.y + bounds.height);
+  expect(await scroller.evaluate((el) => el.scrollWidth <= el.clientWidth), `${what} adds horizontal scrolling`).toBe(true);
+  await expect(opener, `${what} keeps its opening name in view`).toBeInViewport();
+  await expect(card.locator('.profile-card-person strong'), `${what} keeps its title in view`).toBeInViewport();
+  await expect(card.getByRole('button', { name: 'Close', exact: true })).toBeFocused();
+}
+
 test('1: a member card discloses no unsent Owner mark and opening cards sends no request', async ({ meet, secrets, world }) => {
   const tag = unique('reads');
   const member = await person(world, secrets, `${tag}-member`);
@@ -220,5 +237,41 @@ test('4: at 390×844 a tap opens a fitting card and a long press still opens the
   await body.dispatchEvent('touchend', { touches: [] });
   await expect(card).toHaveCount(0);
   await expectFits(page, '390×844 message menu after the profile card');
+  expectClean(pages);
+});
+
+test('5: desktop people and agent cards fit the viewport and members scroll container', async ({ meet, secrets, world }) => {
+  const tag = unique('bounds');
+  const member = await person(world, secrets, `${tag}-member`);
+  await memberOf(world, 'general', member.id, true);
+  let last = member.name;
+  for (let i = 0; i < 24; i++) {
+    last = `${tag}-person-${String(i)}`;
+    const made = await ok(world, world.tokens.operator, 'POST', '/v0/principals', createPrincipalResponse, { kind: 'human', name: last });
+    await memberOf(world, 'general', made.principal.id, true);
+  }
+  const worker = await launchWorker(world, 'slow.sh', { sleep: 0 });
+  const { page } = await meet({ viewport: { width: 1280, height: 720 } });
+  const pages = [{ page, errors: consoleErrors(page) }];
+  try {
+    await signIn(page, world, member.token, member.name);
+    await openChannel(page, 'general');
+    const panel = await openMembers(page);
+    const lastName = channelRow(page, last).getByRole('button', { name: last, exact: true });
+    await lastName.evaluate((el) => { el.scrollIntoView({ block: 'end' }); });
+    await lastName.click();
+    const personCard = page.getByRole('dialog', { name: last, exact: true });
+    await expect(personCard).toBeVisible();
+    await expectCardInPanel(page, panel, personCard, lastName, 'the person card near the list bottom');
+    await personCard.getByRole('button', { name: 'Close', exact: true }).click();
+
+    const agentName = agentRow(page, 'worker-test').getByRole('button', { name: 'worker-test', exact: true });
+    await agentName.click();
+    const agentCard = page.getByRole('dialog', { name: 'worker-test', exact: true });
+    await expect(agentCard).toBeVisible();
+    await expectCardInPanel(page, panel, agentCard, agentName, 'the agent card');
+  } finally {
+    await worker.stop();
+  }
   expectClean(pages);
 });

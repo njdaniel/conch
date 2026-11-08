@@ -594,6 +594,8 @@ describe('the member list the socket sends', () => {
     const agents = () => panel().getByRole('list', { name: 'Agents' });
     expect(within(agents()).getByText('bot')).toBeDefined();
     expect(author.querySelector('[data-identity="agent"]')).not.toBeNull();
+    fireEvent.click(within(agents()).getByRole('button', { name: 'bot' }));
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Close' }));
     // The server no longer lists the agent, so a re-read agrees with the frame.
     server.members = { members: without(3) };
     socket.send(memberList(without(3)));
@@ -601,6 +603,8 @@ describe('the member list the socket sends', () => {
     await waitFor(() => {
       expect(within(agents()).queryByText('bot')).toBeNull();
     });
+    expect(screen.queryByRole('dialog')).toBeNull();
+    expect(document.activeElement).toBe(panel().getByRole('heading', { name: 'People' }));
     const after = screen.getByText('hello from bot').closest('li') as HTMLElement;
     expect(after.querySelector('[data-identity="agent"]')).toBeNull();
     expect(within(agents()).getByText('ghost')).toBeDefined();
