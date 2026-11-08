@@ -3054,6 +3054,12 @@ label {
   grid-template-rows: minmax(0, auto) minmax(min-content, 1fr);
 }
 
+/* Compact is a docked row, not an overlay: its content determines the first
+   track and the conversation takes everything left (issue #1498). */
+.centre:has(> .stage:not(:empty):has(.compact)) {
+  grid-template-rows: minmax(0, auto) minmax(0, 1fr);
+}
+
 .stage:empty {
   display: none;
 }
@@ -3219,14 +3225,50 @@ label {
   gap: var(--s2);
 }
 
+/* The call's channel, sharers and speakers are words in both layouts, not
+   colour alone (issue #1498). They share the title's line rather than adding
+   a row, and give way with an ellipsis: the context's title attribute holds
+   all its words, and a screen reader reads them all. A row more would push
+   the strip's tiles down (below), and take a phone's log room (#1028). */
+.call-heading {
+  display: flex;
+  align-items: center;
+  gap: 0 var(--s3);
+  min-width: 0;
+  max-width: 100%;
+}
+
+.call-context {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: var(--small);
+  font-weight: 400;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.call-context > * + * {
+  margin-inline-start: var(--s2);
+}
+
+.call-channel button {
+  padding: 0 var(--s2);
+  vertical-align: middle;
+}
+
 /* Wide enough, the head is one row: the controls keep their size and the
-   title gives way, its enlarged-picture words cut short (the full words are
-   in its title attribute). A taller head would
-   push the strip's tiles below the view's fold, where adaptive stream stops
-   sending them. */
+   title and the context give way, cut short (their full words are in their
+   title attributes). A taller head would push the strip's tiles below the
+   view's fold, where adaptive stream stops sending them. */
 @media (min-width: 720px) {
   .call-head {
     flex-wrap: nowrap;
+  }
+
+  .call-heading {
+    flex: 0 1 auto;
   }
 
   .call-title {
@@ -3329,8 +3371,165 @@ label {
   border: 0;
 }
 
-/* In the strip its controls are still all there, their names only read out
-   beside an icon. */
+/* A compact call is one fixed-height, docked strip. Its tiles share that row
+   and scroll sideways rather than taking another row from the conversation;
+   the same players and list items stay in place (issue #1498). Supplemental
+   roster and note rows yield their dock space too; the strip's VoiceState
+   chips, controls, errors and lifecycle notices remain, and the supplemental
+   notes return when the stage closes. */
+.stage:has(> .call-view.compact, > .call-stage.compact) {
+  padding-top: 0;
+}
+
+.call-view.compact {
+  flex: none;
+  gap: 0;
+  padding-bottom: 0;
+  border: 0;
+}
+
+body:has(.call-view.compact, .call-stage.compact) .voice-who,
+body:has(.call-view.compact, .call-stage.compact) .voice-notes > .voice-supplemental,
+body:has(.call-view.compact, .call-stage.compact) .voice-notes:not(:has(> :not(.voice-supplemental))) {
+  display: none;
+}
+
+body:has(.call-view.compact, .call-stage.compact) .dock {
+  padding-top: var(--s1);
+}
+
+.call-view.compact .call-head,
+.call-stage.compact .call-head {
+  padding-top: 0;
+}
+
+/* The compact header has the context and the voice status, not the title.
+   On a phone it wraps, so all its words are on screen: under Chat it is
+   where the status is, and on a 390 px phone the channel, "Sharing: …" and
+   the status would otherwise run off it (#1498). Its own row costs a phone
+   nothing it had: the expanded stage there is taller. */
+.call-view.compact .call-heading,
+.call-stage.compact .call-heading {
+  flex-wrap: wrap;
+  gap: 0 var(--s2);
+}
+
+.call-view.compact .call-context,
+.call-stage.compact .call-context {
+  white-space: normal;
+}
+
+.call-view.compact .call-title,
+.call-stage.compact .call-title {
+  display: none;
+}
+
+.call-stage.compact .call-head p {
+  margin: 0;
+}
+
+.call-view.compact .call-grid {
+  display: flex;
+  overflow-x: auto;
+}
+
+.call-view.compact .call-grid > li {
+  flex: 0 0 10rem;
+}
+
+.call-view.compact .call-grid > li.main {
+  flex-basis: min(24rem, 100%);
+}
+
+.call-view.compact .call-grid > li.call-share {
+  flex-basis: 32rem;
+}
+
+.call-view.compact .call-frame,
+.compact .share-frame {
+  height: 2.75rem;
+  max-height: 2.75rem;
+}
+
+.compact .share-view {
+  display: grid;
+  flex: none;
+  grid-template-columns: minmax(8rem, 10rem) minmax(0, 1fr);
+  grid-template-rows: auto;
+  align-items: center;
+}
+
+.compact .share-title,
+.call-view.compact .call-tile-controls {
+  display: none;
+}
+
+.compact .share-frame video,
+.call-view.compact .call-grid.focus > .main .share-frame video {
+  height: 100%;
+  max-height: 2.75rem;
+}
+
+.compact .share-controls {
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  padding-top: 0;
+}
+
+.call-view.compact .voice-sub,
+.call-stage.compact .voice-sub {
+  display: flex;
+  flex-wrap: wrap;
+  min-width: 0;
+  font-size: var(--small);
+}
+
+/* Wide enough, compact is one row of 44 px: the header beside the tiles, its
+   context and status one line each, cut short (their title attributes hold
+   their words, and the voice strip below says the status in full). A second
+   row would take its height from the conversation. */
+@media (min-width: 720px) {
+  .call-view.compact {
+    flex-direction: row;
+    align-items: center;
+    gap: var(--s2);
+  }
+
+  .call-view.compact > .call-head {
+    flex: 0 1 auto;
+    max-width: 50%;
+    min-width: 0;
+  }
+
+  .call-view.compact > .call-grid {
+    flex: 1 1 0;
+    min-width: 0;
+  }
+
+  .call-view.compact .call-heading {
+    flex-wrap: nowrap;
+    min-width: 0;
+  }
+
+  .call-view.compact .call-context,
+  .call-view.compact .voice-sub {
+    display: block;
+    flex: 0 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+}
+
+.call-stage.compact button,
+.call-stage.compact input {
+  min-width: 2.75rem;
+  min-height: 2.75rem;
+}
+
+/* In the expanded strip its controls are still all there, their names only
+   read out beside an icon; compact keeps the smaller set from ShareView. */
 .call-share.in-strip .share-controls .label {
   position: absolute;
   width: 1px;
@@ -4466,10 +4665,13 @@ button.link {
 }
 
 /* The call view's layout changes without animation for someone who asked for
-   less motion (§7.7): it has none of its own, and nothing may give it one. */
+   less motion (§7.7), compact included (issue #1498): it has none of its own,
+   and nothing may give it one. */
 @media (prefers-reduced-motion: reduce) {
   .call-view,
-  .call-view * {
+  .call-view *,
+  .call-stage,
+  .call-stage * {
     transition: none;
     animation: none;
   }

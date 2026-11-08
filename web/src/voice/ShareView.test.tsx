@@ -18,6 +18,7 @@ import type { Person } from '../useLiveChannel';
 import { VoiceClient, type Room, type RoomEvents, type ShareSink } from './connection';
 import { FakeClock, noCamera, settle } from './fakes';
 import type { Captured, KeptScreen, ShareFeatures, ShareQuality, ShareSample } from './share';
+import { ShareView } from './ShareView';
 import type { Snapshot, VoiceControl } from './useVoice';
 import { VoicePanel } from './VoicePanel';
 
@@ -462,6 +463,22 @@ describe('watching', () => {
     expect(video?.isConnected).toBe(true);
     expect(audio?.volume).toBeCloseTo(0.4);
     expect(audio?.muted).toBe(true);
+  });
+
+  it('keeps Mute share, Stop watching and Expand working in compact, without the expanded volume and full-screen controls', () => {
+    const t = setup();
+    const expand = vi.fn();
+    render(<ShareView client={t.client} state={t.client.snapshot()} principal={8} name="bea" audio={false} compact onToggleLayout={expand} />);
+    const view = screen.getByRole('region', { name: 'Shared screen' });
+    const watch = vi.spyOn(t.client, 'watchStream');
+    fireEvent.click(within(view).getByRole('button', { name: 'Mute share', pressed: false }));
+    expect(within(view).getByRole('button', { name: 'Unmute share', pressed: true })).toBeTruthy();
+    fireEvent.click(within(view).getByRole('button', { name: 'Expand', pressed: true }));
+    expect(expand).toHaveBeenCalledTimes(1);
+    fireEvent.click(within(view).getByRole('button', { name: 'Stop watching' }));
+    expect(watch).toHaveBeenCalledWith(8, false);
+    expect(within(view).queryByLabelText('Share volume')).toBeNull();
+    expect(within(view).queryByRole('button', { name: 'Full screen' })).toBeNull();
   });
 
   it('closes when the share ends, and on Stop watching', async () => {

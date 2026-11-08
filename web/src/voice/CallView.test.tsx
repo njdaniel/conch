@@ -95,9 +95,9 @@ function watchAs(client: VoiceClient, state: VoiceState): void {
 
 // Live is the panel over a fixed state but for what the client owns: which
 // streams are watched and which one is focused.
-function Live({ state, snapshot, client, allowed }: { readonly state: VoiceState; readonly snapshot: Snapshot; readonly client: VoiceClient; readonly allowed: boolean }) {
+function Live({ state, snapshot, client, allowed, viewed = 'general', onOpen = () => undefined }: { readonly state: VoiceState; readonly snapshot: Snapshot; readonly client: VoiceClient; readonly allowed: boolean; readonly viewed?: string; readonly onOpen?: (name: string) => void }) {
   const live = useSyncExternalStore(client.subscribe, client.snapshot);
-  return <VoicePanel voice={control({ ...state, watched: live.watched, focusedShare: live.focusedShare }, snapshot, client)} viewer={7} people={people} viewed="general" cameraAllowed={allowed} onOpen={() => undefined} />;
+  return <VoicePanel voice={control({ ...state, watched: live.watched, focusedShare: live.focusedShare }, snapshot, client)} viewer={7} people={people} viewed={viewed} cameraAllowed={allowed} onOpen={onOpen} />;
 }
 
 function panel(state: VoiceState, { cameras = [] as readonly number[], allowed = true, sharer = null as number | null } = {}) {
@@ -891,12 +891,12 @@ describe('the camera test', () => {
 // and receives no video; "Camera on" is in its state button, from the local
 // track alone.
 describe('the phone strip with the camera (C7)', () => {
-  function stripOf(state: VoiceState, opens: (() => void) | null, { cameras = [8], sharer = null as number | null } = {}) {
+  function stripOf(state: VoiceState, opens: (() => void) | null, { cameras = [8], sharer = null as number | null } = {}, viewed = 'general', onOpen: (name: string) => void = () => undefined) {
     const client = newClient();
     const shown = vi.spyOn(client, 'showVideo');
     const page = (next: VoiceState, opening: (() => void) | null) => (
       <VoiceStrip.Provider value={opening}>
-        <Live state={next} snapshot={{ kind: 'presence', presence: roomWith(cameras, sharer) }} client={client} allowed />
+        <Live state={next} snapshot={{ kind: 'presence', presence: roomWith(cameras, sharer) }} client={client} allowed viewed={viewed} onOpen={onOpen} />
       </VoiceStrip.Provider>
     );
     watchAs(client, state);
@@ -934,6 +934,54 @@ describe('the phone strip with the camera (C7)', () => {
     expect(screen.queryByRole('region', { name: 'Video call' })).toBeNull();
     expect(screen.queryByLabelText("member-1's camera")).toBeNull();
     expect(screen.queryByRole('listitem')).toBeNull();
+  });
+
+  it('shows the compact context and VoiceState statuses under Chat, keeps the player, and announces every toggle once', () => {
+    widthOf(true);
+    const opened = vi.fn();
+    const open = inVoice({ phase: 'reconnecting', viewing: true, watched: new Set([9]), focusedShare: 9, cameraTrack: 'published', camera: { kind: 'sending' }, speaking: new Set([8]), muted: true, deafened: true });
+    // Compact is the Voice view's header's: under Chat the expanded stage is
+    // the stream alone, and the log keeps its room (issue #1028).
+    const { client, redraw } = stripOf(open, null, { cameras: [8], sharer: 9 }, 'elsewhere', opened);
+    const share = screen.getByRole('region', { name: 'Shared screen' });
+    const video = within(share).getByLabelText("member-2's screen");
+    const item = video.closest('li');
+    const inView = client.snapshot();
+    fireEvent.click(within(screen.getByRole('region', { name: 'Video call' })).getByRole('button', { name: 'Compact' }));
+    expect(client.snapshot()).toBe(inView);
+    expect(screen.getAllByText('Call view compact.')).toHaveLength(1);
+    redraw(open, () => undefined);
+    expect(screen.queryByRole('region', { name: 'Video call' })).toBeNull();
+    const before = client.snapshot();
+    const header = () => {
+      const found = document.querySelector('.call-stage.compact .call-head');
+      if (!(found instanceof HTMLElement)) throw new Error('no compact phone header');
+      return found;
+    };
+    for (const words of ['Sharing: member-2', 'Speaking: member-1', 'Reconnecting', 'Microphone in use', 'Sending video', 'Muted.', 'Deafened (you hear no one, and you are muted).', 'Push to talk.', 'Waiting for the picture']) {
+      expect(header().textContent).toContain(words);
+    }
+    fireEvent.click(within(header()).getByRole('button', { name: '#general' }));
+    expect(opened).toHaveBeenCalledExactlyOnceWith('general');
+    expect(client.snapshot()).toBe(before);
+    expect(screen.getByLabelText("member-2's screen")).toBe(video);
+    expect(video.closest('li')).toBe(item);
+    expect(screen.getAllByRole('button', { name: 'Expand' })).toHaveLength(1);
+    fireEvent.click(within(header()).getByRole('button', { name: 'Expand' }));
+    expect(screen.getAllByText('Call view expanded.')).toHaveLength(1);
+    expect(screen.getByLabelText("member-2's screen")).toBe(video);
+    expect(video.closest('li')).toBe(item);
+    // Expanded under Chat, the stage is the stream alone: no toggle, no head.
+    expect(screen.queryByRole('button', { name: 'Compact' })).toBeNull();
+    expect(document.querySelector('.call-head')).toBeNull();
+    expect(client.snapshot()).toBe(before);
+    redraw(open, null);
+    const again = client.snapshot();
+    fireEvent.click(within(screen.getByRole('region', { name: 'Video call' })).getByRole('button', { name: 'Compact' }));
+    expect(screen.getAllByText('Call view compact.')).toHaveLength(1);
+    expect(screen.getByLabelText("member-2's screen")).toBe(video);
+    expect(video.closest('li')).toBe(item);
+    expect(client.snapshot()).toBe(again);
   });
 
   it('says "Camera on" in the state button from the local track, and still opens the Voice view', () => {
@@ -1023,5 +1071,63 @@ describe('the camera test on a hidden page', () => {
     hidden(false);
     expect(stops).toEqual([]);
     expect(screen.getByText(previewNote)).toBeTruthy();
+  });
+});
+
+describe('the persistent call workspace (issue #1498)', () => {
+  it('Compact and Expand keep the share item and video, call no subscription or attachment method, and keep focus on the toggle', () => {
+    const { client } = panel(inVoice({ viewing: true, watched: new Set([9]), cameraTrack: 'published', cameraTracks: new Set([8]) }), { cameras: [8], sharer: 9 });
+    const call = callRegion();
+    const video = within(call).getByLabelText("member-2's screen");
+    const item = video.closest('li');
+    const watch = vi.spyOn(client, 'watchStream');
+    const view = vi.spyOn(client, 'viewVideo');
+    const attachStream = vi.spyOn(client, 'attachStream');
+    const attachCamera = vi.spyOn(client, 'attachCamera');
+    const toggle = within(call).getByRole('button', { name: 'Compact', pressed: false });
+    toggle.focus();
+    fireEvent.click(toggle);
+    expect(call.classList.contains('compact')).toBe(true);
+    expect(within(call).getByLabelText("member-2's screen")).toBe(video);
+    expect(video.closest('li')).toBe(item);
+    expect(toggle).toBe(within(call).getByRole('button', { name: 'Expand', pressed: true }));
+    expect(document.activeElement).toBe(toggle);
+    expect(said()).toBe('Call view compact.');
+    fireEvent.click(toggle);
+    expect(call.classList.contains('compact')).toBe(false);
+    expect(within(call).getByLabelText("member-2's screen")).toBe(video);
+    expect(video.closest('li')).toBe(item);
+    expect(toggle).toBe(within(call).getByRole('button', { name: 'Compact', pressed: false }));
+    expect(document.activeElement).toBe(toggle);
+    expect(said()).toBe('Call view expanded.');
+    for (const spy of [watch, view, attachStream, attachCamera]) expect(spy).not.toHaveBeenCalled();
+  });
+
+  it('names the voice channel, sharer and speaker in both layouts; the channel button only opens the channel', () => {
+    const client = newClient();
+    const opened = vi.fn();
+    const tiles: Tile[] = [
+      tile(8, 'member-1', false),
+      { principal: 9, name: 'member-2', me: false, camera: false, kind: 'share', watched: true, render: () => <section>Shared screen</section> },
+    ];
+    render(<CallView client={client} state={inVoice({ viewing: true, speaking: new Set([8]) })} tiles={tiles} hidden={0} open viewed="elsewhere" onOpen={opened} nameOf={(id) => people.get(id)?.name ?? `Member ${String(id)}`} />);
+    const header = () => callRegion().querySelector('.call-head')?.textContent ?? '';
+    expect(header()).toContain('#general');
+    expect(header()).toContain('Sharing: member-2');
+    expect(header()).toContain('Speaking: member-1');
+    // One line that may be cut short: its title holds all of it, and its
+    // parts are spaced apart for a screen reader.
+    const context = callRegion().querySelector('.call-context');
+    expect(context?.getAttribute('title')).toBe('#general · Sharing: member-2 · Speaking: member-1');
+    expect(context?.textContent).toBe('#general Sharing: member-2 Speaking: member-1');
+    const before = client.snapshot();
+    fireEvent.click(within(callRegion()).getByRole('button', { name: '#general' }));
+    expect(opened).toHaveBeenCalledWith('general');
+    expect(client.snapshot()).toBe(before);
+    fireEvent.click(within(callRegion()).getByRole('button', { name: 'Compact' }));
+    expect(header()).toContain('#general');
+    expect(header()).toContain('Sharing: member-2');
+    expect(header()).toContain('Speaking: member-1');
+    expect(callRegion().querySelector('.call-head .voice-sub')?.getAttribute('title')).toBe('Microphone in use · Push to talk. Not transmitting');
   });
 });
