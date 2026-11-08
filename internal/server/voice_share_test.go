@@ -158,10 +158,10 @@ func (f *presenceFixture) shareState(room string) int64 {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	r := p.rooms[room]
-	if r == nil || r.share == nil {
+	if r == nil || len(r.shares) == 0 {
 		return 0
 	}
-	return r.share.principalID
+	return sortedShareHolders(r)[0]
 }
 
 // ---------------------------------------------------------------------------
@@ -170,8 +170,8 @@ func (f *presenceFixture) shareState(room string) int64 {
 // TestVoiceShareClaimRefusals: the claim checks the caller exactly as a
 // session does, and in this order: authentication, the unknown-channel 404,
 // the agent 403, voice_not_allowed, voice not configured; then the session
-// (voice_no_session), and only then whether the room's share is free
-// (voice_share_busy). A refusal grants nothing and writes no share row.
+// (voice_no_session), and only then whether the room has a place (a body that
+// is not a quality is 400, a full room 409 voice_share_full: TestVoiceShareCap). A refusal grants nothing and writes no share row.
 func TestVoiceShareClaimRefusals(t *testing.T) {
 	held := func(who string) func(*testing.T, *presenceFixture) {
 		return func(t *testing.T, f *presenceFixture) { decodeSession(t, f.session(t, who, "ops")) }
@@ -216,12 +216,6 @@ func TestVoiceShareClaimRefusals(t *testing.T) {
 		// A share is granted to a connection, and a holder who has none is
 		// told they have no session to share from.
 		{"a holder who is not connected", presenceOpts{auth: AuthRequired}, held("ann"), "ann", "ops", 409, schema.ErrorCodeVoiceNoSession, "", 1},
-		{"someone else holds the share", presenceOpts{auth: AuthRequired},
-			func(t *testing.T, f *presenceFixture) {
-				connected(t, f)
-				decodeSession(t, f.session(t, "ann2", "ops"))
-				f.mustClaim(t, "ann")
-			}, "ann2", "ops", 409, schema.ErrorCodeVoiceShareBusy, "", 0},
 		{"LiveKit does not answer", presenceOpts{auth: AuthRequired},
 			func(t *testing.T, f *presenceFixture) {
 				connected(t, f)
@@ -345,11 +339,6 @@ func TestVoiceShareStartAndStop(t *testing.T) {
 	if again := f.mustClaim(t, "ann"); again != share {
 		t.Errorf("a second claim by the holder = %+v, want %+v", again, share)
 	}
-	if res := f.claimShare(t, "ann2", "ops"); res.status != http.StatusConflict || errCode(t, res.body) != schema.ErrorCodeVoiceShareBusy {
-		t.Fatalf("ann2 claims while ann shares: %d %s, want 409 voice_share_busy", res.status, res.body)
-	} else if strings.Contains(res.body, f.identity("ann")) || strings.Contains(res.body, "ann") {
-		t.Errorf("the busy answer names the sharer: %s", res.body)
-	}
 
 	// The browser publishes the screen and its sound.
 	f.publish(room, "ann", true, true)
@@ -386,17 +375,20 @@ func TestVoiceShareStop(t *testing.T) {
 	tests := []struct {
 		name       string
 		who        string
+		target     string // ?principal=, or "" for a bare release
 		wantStatus int
 		wantCode   string
 		wantRows   []string
 		wantDenied bool
 	}{
-		{"the sharer", "ann", 204, "", []string{"ann started audio=true", "ann stopped principal=ann reason=self"}, false},
-		{"an operator who is not a member", "root", 204, "", []string{"ann started audio=true", "root stopped principal=ann reason=operator"}, false},
-		{"another member", "ann2", 403, "forbidden", []string{"ann started audio=true"}, true},
-		{"a non-member", "bob", 404, "channel_not_found", []string{"ann started audio=true"}, false},
-		{"an agent member", "robo", 403, "forbidden", []string{"ann started audio=true"}, true},
-		{"no credential", "", 401, "unauthenticated", []string{"ann started audio=true"}, false},
+		{"the sharer", "ann", "", 204, "", []string{"ann started audio=true", "ann stopped principal=ann reason=self"}, false},
+		{"the sharer, naming themselves", "ann", "ann", 204, "", []string{"ann started audio=true", "ann stopped principal=ann reason=self"}, false},
+		{"an operator who is not a member", "root", "ann", 204, "", []string{"ann started audio=true", "root stopped principal=ann reason=operator"}, false},
+		{"another member", "ann2", "ann", 403, "forbidden", []string{"ann started audio=true"}, true},
+		{"another member, bare: their own, which is none", "ann2", "", 204, "", []string{"ann started audio=true"}, false},
+		{"a non-member", "bob", "ann", 404, "channel_not_found", []string{"ann started audio=true"}, false},
+		{"an agent member", "robo", "ann", 403, "forbidden", []string{"ann started audio=true"}, true},
+		{"no credential", "", "ann", 401, "unauthenticated", []string{"ann started audio=true"}, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -404,14 +396,19 @@ func TestVoiceShareStop(t *testing.T) {
 			f.mustClaim(t, "ann")
 			f.publish(room, "ann", true, false)
 			denied := len(f.audits(t, "access_denied"))
-			res := f.stopShare(t, tt.who, "ops")
+			var res wireResult
+			if tt.target != "" {
+				res = f.stopShareOf(t, tt.who, tt.target)
+			} else {
+				res = f.stopShare(t, tt.who, "ops")
+			}
 			if res.status != tt.wantStatus || (tt.wantCode != "" && errCode(t, res.body) != tt.wantCode) {
 				t.Fatalf("got %d %s, want %d %s", res.status, res.body, tt.wantStatus, tt.wantCode)
 			}
 			if got := f.shareRows(t); !slices.Equal(got, tt.wantRows) {
 				t.Errorf("share rows %q, want %q", got, tt.wantRows)
 			}
-			stopped := tt.wantStatus == http.StatusNoContent
+			stopped := tt.wantStatus == http.StatusNoContent && tt.who != "ann2"
 			if p, _ := f.lk.participant(room, f.identity("ann")); p.shareGranted == stopped || p.screen == stopped {
 				t.Errorf("LiveKit has ann as %+v; stopped=%v", p, stopped)
 			}
@@ -746,7 +743,7 @@ func TestVoiceShareWithLiveKitDown(t *testing.T) {
 		f.mustClaim(t, "ann")
 		f.publish(room, "ann", true, false)
 		f.lk.setUpdateStatus(http.StatusServiceUnavailable)
-		f.mustStop(t, "root")
+		f.mustStopOf(t, "ann")
 		if got := f.sharing(t, f.ops); got != "-" {
 			t.Errorf("presence shows %q sharing after the stop", got)
 		}
@@ -829,7 +826,7 @@ func TestVoiceShareNotInANetRoom(t *testing.T) {
 	f, room := newShareFixture(t)
 	calls := f.lk.count("UpdateParticipant")
 	net := store.VoiceRoom{ID: 999, ChannelID: f.ops.ID, NetID: 3, RoomName: room + "-net"}
-	if _, err := f.srv.voice.claimShare(context.Background(), net, f.ids["ann"]); !errors.Is(err, errVoiceShareNotChannelRoom) {
+	if _, err := f.srv.voice.claimShare(context.Background(), net, f.ids["ann"], nil); !errors.Is(err, errVoiceShareNotChannelRoom) {
 		t.Fatalf("claim in a net room: %v, want errVoiceShareNotChannelRoom", err)
 	}
 	if got := f.lk.count("UpdateParticipant") - calls; got != 0 {
@@ -879,7 +876,7 @@ func TestVoiceShareLostVoice(t *testing.T) {
 	r := f.srv.voice.roomNamed(room)
 	r.order.Lock()
 	f.srv.voice.mu.Lock()
-	r.share = &voiceShare{principalID: f.ids["vic"], startedAt: f.clock.Now()}
+	r.shares[f.ids["vic"]] = &voiceShare{principalID: f.ids["vic"], startedAt: f.clock.Now()}
 	f.srv.voice.mu.Unlock()
 	r.order.Unlock()
 	f.at(500)
@@ -987,7 +984,7 @@ func TestVoiceShareGrantIsNeverTakenBack(t *testing.T) {
 	})
 	r.order.Lock()
 	f.srv.voice.mu.Lock()
-	r.share = &voiceShare{principalID: f.ids["ann"], startedAt: f.clock.Now()}
+	r.shares[f.ids["ann"]] = &voiceShare{principalID: f.ids["ann"], startedAt: f.clock.Now()}
 	f.srv.voice.mu.Unlock()
 	r.order.Unlock()
 	r.claims.Unlock()
@@ -1031,14 +1028,15 @@ func TestVoiceShareKeepsSecrets(t *testing.T) {
 	var bodies []string
 	keep := func(res wireResult) { bodies = append(bodies, res.body) }
 	keep(f.claimShare(t, "ann", "ops"))
-	keep(f.claimShare(t, "ann2", "ops"))
-	keep(f.stopShare(t, "ann2", "ops"))
+	keep(f.stopShareOf(t, "ann2", "ann"))
 	keep(f.stopShare(t, "bob", "ops"))
+	// ann2 publishes a screen nobody granted: unclaimed, then withdrawn.
 	f.lk.update(room, f.identity("ann2"), func(p *fakeParticipant) { p.screen = true })
 	f.at(500)
 	f.pass(t)
+	keep(f.claimShare(t, "ann2", "ops"))
 	f.lk.setUpdateStatus(http.StatusServiceUnavailable)
-	keep(f.stopShare(t, "root", "ops"))
+	keep(f.stopShareOf(t, "root", "ann2"))
 	keep(f.claimShare(t, "ann2", "ops"))
 	f.lk.setUpdateStatus(0)
 	f.at(16_000)
@@ -1067,7 +1065,7 @@ func TestVoiceShareKeepsSecrets(t *testing.T) {
 	}
 	for _, exercised := range []string{
 		store.AuditVoiceShareStarted, store.AuditVoiceShareStopped, store.AuditVoiceShareUnclaimed,
-		"reason=operator", schema.ErrorCodeVoiceShareBusy, schema.ErrorCodeVoiceUnavailable, "withdrawing screen-share sources failed",
+		"reason=operator", schema.ErrorCodeVoiceUnavailable, "withdrawing screen-share sources failed",
 	} {
 		if !strings.Contains(text, exercised) {
 			t.Errorf("the run did not exercise %q", exercised)

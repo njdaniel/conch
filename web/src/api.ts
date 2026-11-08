@@ -205,14 +205,16 @@ import {
   type ProblemReportV1,
   type UpdateProblemReportRequestV1,
 } from './schema/report';
-import type { Validator } from './schema/validate';
-import { call, fileQuery, operations, queryOf, type Call, type OperationId } from './platform/operations';
+import { fromServer, type Validator } from './schema/validate';
+import { call, fileQuery, operations, previewCall, queryOf, type Call, type OperationId } from './platform/operations';
+import { previewResponseV1, type PreviewResponseV1 } from './schema/preview';
 import { platform } from './platform';
 import type { FeedConnection, Held, Place } from './platform/types';
 import type { FeedSocket, OpenSocket, SocketEvents } from './state/feed';
 import { forget as forgetDiagnostics, record } from './diagnostics';
 import { visitOf } from './guestName';
 import { keyboardKeys, mouseKeys } from './platform/desktop/evdev';
+import { appearanceAccents, appearanceDensities, appearanceThemes, defaultAppearance, type AppearancePreferences } from './appearance';
 
 // Why a call failed. unauthorized is a 401: the server does not accept the
 // credential. network means no answer at all. invalid is any other reply
@@ -222,7 +224,7 @@ export type ApiFailure = 'unauthorized' | 'network' | 'invalid';
 
 export type ApiResult<T> =
   | { readonly ok: true; readonly value: T }
-  | { readonly ok: false; readonly failure: ApiFailure; readonly code?: string; readonly retryAfter?: number };
+  | { readonly ok: false; readonly failure: ApiFailure; readonly code?: string; readonly permission?: string; readonly retryAfter?: number };
 
 // Where a credential is kept is the platform's (platform.credentials): 'tab'
 // is this tab alone, for an operator's and a guest's; 'lasting' is every tab
@@ -451,7 +453,7 @@ function forget(held: Held): void {
 async function refusalCode(res: Response): Promise<string | undefined> {
   try {
     const body: unknown = await res.json();
-    if (errorV0(body).length === 0) return (body as { code: string }).code;
+    if (fromServer(errorV0)(body).length === 0) return (body as { code: string }).code;
   } catch {
     // No document, or not one.
   }
@@ -474,7 +476,7 @@ async function noteRefusal(res: Response): Promise<void> {
   let code: string | undefined;
   try {
     const body: unknown = await res.clone().json();
-    if (errorV0(body).length === 0) code = (body as { code: string }).code;
+    if (fromServer(errorV0)(body).length === 0) code = (body as { code: string }).code;
   } catch {
     // No document, or not one.
   }
@@ -496,9 +498,15 @@ async function discard(res: Response): Promise<void> {
   }
 }
 
-async function refused(res: Response): Promise<{ readonly ok: false; readonly failure: 'invalid'; readonly code?: string }> {
-  const code = await refusalCode(res);
-  return code === undefined ? { ok: false, failure: 'invalid' } : { ok: false, failure: 'invalid', code };
+async function refused(res: Response): Promise<{ readonly ok: false; readonly failure: 'invalid'; readonly code?: string; readonly permission?: string }> {
+  let doc: ErrorV0 | undefined;
+  try {
+    const body: unknown = await res.json();
+    if (errorV0(body).length === 0) doc = body as ErrorV0;
+  } catch {
+    // No document, or not one.
+  }
+  return { ok: false, failure: 'invalid', ...(doc === undefined ? {} : { code: doc.code }), ...(doc?.permission === undefined ? {} : { permission: doc.permission }) };
 }
 
 async function get<T>(request: Call, token: string, check: Validator<T>): Promise<ApiResult<T>> {
@@ -524,7 +532,7 @@ async function get<T>(request: Call, token: string, check: Validator<T>): Promis
   } catch {
     return { ok: false, failure: 'invalid' };
   }
-  if (check(body).length > 0) return { ok: false, failure: 'invalid' };
+  if (fromServer(check)(body).length > 0) return { ok: false, failure: 'invalid' };
   return { ok: true, value: body as T };
 }
 
@@ -703,7 +711,7 @@ export async function serverHealth(): Promise<ServerHealth | null> {
   try {
     const res = await platform.http.health(call('health'));
     const body: unknown = await res.json();
-    if (health(body).length > 0) return null;
+    if (fromServer(health)(body).length > 0) return null;
     const { version, server_mode: mode } = body as { version: string; server_mode?: string };
     pageVersion ??= version;
     return { version, temporary: mode === 'temporary' };
@@ -862,7 +870,7 @@ export async function signOutEverywhere(principal: number): Promise<ApiResult<nu
   forget(held);
   try {
     const parsed: unknown = await reply.res.json();
-    if (revokeAllCredentialsResponseV1(parsed).length === 0) return { ok: true, value: (parsed as { revoked: number }).revoked };
+    if (fromServer(revokeAllCredentialsResponseV1)(parsed).length === 0) return { ok: true, value: (parsed as { revoked: number }).revoked };
   } catch {
     // Fall through.
   }
@@ -1372,7 +1380,7 @@ async function inviteRefused(res: Response): Promise<InviteRefusal> {
   let doc: ErrorV0 | undefined;
   try {
     const body: unknown = await res.json();
-    if (errorV0(body).length === 0) doc = body as ErrorV0;
+    if (fromServer(errorV0)(body).length === 0) doc = body as ErrorV0;
   } catch {
     // No document, or not one.
   }
@@ -1391,7 +1399,7 @@ async function inviteRefused(res: Response): Promise<InviteRefusal> {
 async function readBody<T>(res: Response, check: Validator<T>): Promise<InviteResult<T>> {
   try {
     const parsed: unknown = await res.json();
-    if (check(parsed).length === 0) return { ok: true, value: parsed as T };
+    if (fromServer(check)(parsed).length === 0) return { ok: true, value: parsed as T };
   } catch {
     // Fall through.
   }
@@ -1731,7 +1739,7 @@ async function convertAs(held: Held, name: string, password: string): Promise<Co
   } catch {
     body = undefined;
   }
-  if (convertGuestResponseV1(body).length > 0) {
+  if (fromServer(convertGuestResponseV1)(body).length > 0) {
     // A success whose body is not the schema's shape may still carry the
     // member's new credential: it is revoked (best effort) rather than left
     // alive, and the person signs in with the password.
@@ -1890,7 +1898,7 @@ export async function renamePrincipal(id: number, name: string): Promise<ApiResu
   if (!reply.res.ok) return refused(reply.res);
   try {
     const parsed: unknown = await reply.res.json();
-    if (renamePrincipalResponseV1(parsed).length === 0) return { ok: true, value: (parsed as RenamePrincipalResponseV1).principal };
+    if (fromServer(renamePrincipalResponseV1)(parsed).length === 0) return { ok: true, value: (parsed as RenamePrincipalResponseV1).principal };
   } catch {
     // Fall through.
   }
@@ -1960,13 +1968,20 @@ const maxDirectoryPages = 50;
 // /v1/directory/members, issue #983), every page of it, in the server's order.
 // What it holds is what the server answered: operator fields only if the
 // server sent them, and the scope it says it applied.
-export async function directoryMembers(): Promise<ApiResult<ServerMembersResponseV1>> {
+export function directoryMembers(): Promise<ApiResult<ServerMembersResponseV1>> {
+  return readDirectoryMembers(undefined);
+}
+
+// as, when given, is the member whose view of the list is asked for (a
+// preview, issue #1517): every page carries the header on its own request.
+async function readDirectoryMembers(as: number | undefined): Promise<ApiResult<ServerMembersResponseV1>> {
   const members: ServerMemberV1[] = [];
   let scope: ServerMembersResponseV1['scope'];
   let after = 0;
   for (let page = 0; page < maxDirectoryPages; page++) {
     const query = `limit=${String(directoryLimit)}${after === 0 ? '' : `&after=${String(after)}`}`;
-    const result = await authed(call('directoryMembers', {}, query), serverMembersResponseV1);
+    const request = as === undefined ? call('directoryMembers', {}, query) : previewCall('directoryMembers', as, {}, query);
+    const result = await authed(request, serverMembersResponseV1);
     if (!result.ok) return result;
     members.push(...result.value.members);
     scope = result.value.scope;
@@ -1975,6 +1990,39 @@ export async function directoryMembers(): Promise<ApiResult<ServerMembersRespons
     after = next;
   }
   return { ok: true, value: { members, ...(scope === undefined ? {} : { scope }) } };
+}
+
+// The five reads of a member's view, each asking the server to answer as that
+// member (Preview as member, docs/design/permission-preview.md §4, issue
+// #1517). The administrator's own credential is sent; the member's view comes
+// back. Nothing here is a write, and the header rides only on the call that
+// is built for it (previewCall), never on authed or a module setting, so no
+// other request can pick it up.
+export interface PreviewReads {
+  readonly summary: () => Promise<ApiResult<PreviewResponseV1>>;
+  readonly channels: () => Promise<ApiResult<ChannelV0[]>>;
+  readonly channelDirectory: () => Promise<ApiResult<ChannelListingV1[]>>;
+  readonly directoryMembers: () => Promise<ApiResult<ServerMembersResponseV1>>;
+  readonly listMembers: (channel: string) => Promise<ApiResult<ChannelMemberV1[]>>;
+}
+
+export function previewAs(target: number): PreviewReads {
+  return {
+    summary: () => authed(previewCall('preview', target), previewResponseV1),
+    channels: async () => {
+      const result = await authed(previewCall('listChannels', target), listChannelsResponse);
+      return result.ok ? { ok: true, value: result.value.channels } : result;
+    },
+    channelDirectory: async () => {
+      const result = await authed(previewCall('channelDirectory', target), channelDirectoryResponseV1);
+      return result.ok ? { ok: true, value: result.value.channels } : result;
+    },
+    directoryMembers: () => readDirectoryMembers(target),
+    listMembers: async (channel) => {
+      const result = await authed(previewCall('listMembers', target, { channel }), listChannelMembersResponseV1);
+      return result.ok ? { ok: true, value: result.value.members } : result;
+    },
+  };
 }
 
 // renameChannel renames a channel by its id (issue #728): operators and this
@@ -2049,7 +2097,7 @@ async function reactionWrite(request: Call): Promise<ApiResult<ReactionSummaryV1
   if (!reply.res.ok) {
     try {
       const body: unknown = await reply.res.clone().json();
-      if (errorV0(body).length === 0) {
+      if (fromServer(errorV0)(body).length === 0) {
         const error = body as ErrorV0;
         return { ok: false, failure: 'invalid', code: error.code, ...(error.retry_after_seconds === undefined ? {} : { retryAfter: error.retry_after_seconds }) };
       }
@@ -2058,7 +2106,7 @@ async function reactionWrite(request: Call): Promise<ApiResult<ReactionSummaryV1
   }
   try {
     const body: unknown = await reply.res.json();
-    if (reactionSummaryV1(body).length === 0 && (body as ReactionSummaryV1).message_id === request.params?.id) return { ok: true, value: body as ReactionSummaryV1 };
+    if (fromServer(reactionSummaryV1)(body).length === 0 && (body as ReactionSummaryV1).message_id === request.params?.id) return { ok: true, value: body as ReactionSummaryV1 };
   } catch { /* A lost answer can safely be retried with the same intent. */ }
   return { ok: false, failure: 'network' };
 }
@@ -2112,7 +2160,7 @@ export async function editMessage(channel: string, id: number, body: string): Pr
   if (!res.ok) {
     try {
       const doc: unknown = await res.json();
-      if (errorV0(doc).length === 0) {
+      if (fromServer(errorV0)(doc).length === 0) {
         const { code, retry_after_seconds: retryAfter } = doc as ErrorV0;
         return { ok: false, failure: 'refused', code, ...(retryAfter === undefined ? {} : { retryAfter }) };
       }
@@ -2123,7 +2171,7 @@ export async function editMessage(channel: string, id: number, body: string): Pr
   }
   try {
     const parsed: unknown = await res.json();
-    if (editMessageResponseV1(parsed).length === 0) return { ok: true, message: (parsed as EditMessageResponseV1).message };
+    if (fromServer(editMessageResponseV1)(parsed).length === 0) return { ok: true, message: (parsed as EditMessageResponseV1).message };
   } catch {
     // Fall through: the body was cut off.
   }
@@ -2249,7 +2297,7 @@ export type PostResult =
 async function requestRefusal(res: Response, fallback: string): Promise<{ readonly reason: string; readonly code?: string }> {
   try {
     const body: unknown = await res.json();
-    if (errorV0(body).length === 0) {
+    if (fromServer(errorV0)(body).length === 0) {
       const doc = body as ErrorV0;
       const line = doc.message.replace(/\s+/g, ' ').trim();
       const reason = line === '' ? fallback : line.length > 300 ? `${line.slice(0, 299)}…` : line;
@@ -2283,7 +2331,7 @@ export async function postMessage(channel: string, body: string, audience?: Audi
   if (!res.ok) return { ok: false, outcome: 'refused', ...(await postRefusal(res)) };
   try {
     const parsed: unknown = await res.json();
-    if (postMessageResponseV2(parsed).length === 0) return { ok: true, message: (parsed as { message: MessageV2 }).message };
+    if (fromServer(postMessageResponseV2)(parsed).length === 0) return { ok: true, message: (parsed as { message: MessageV2 }).message };
   } catch {
     // Fall through: the body was cut off.
   }
@@ -2343,7 +2391,7 @@ export async function uploadFile(channel: string, name: string, mediaType: strin
   if (!res.ok) return { ok: false, outcome: 'refused', ...(await requestRefusal(res, 'The server refused the upload')) };
   try {
     const parsed: unknown = await res.json();
-    if (fileV1(parsed).length === 0) return { ok: true, file: parsed as FileV1 };
+    if (fromServer(fileV1)(parsed).length === 0) return { ok: true, file: parsed as FileV1 };
   } catch {
     // Fall through: the body was cut off.
   }
@@ -2425,7 +2473,7 @@ export async function markRead(channel: string, id: number): Promise<ApiResult<R
   if (!reply.res.ok) return refused(reply.res);
   try {
     const parsed: unknown = await reply.res.json();
-    if (readStateV1(parsed).length === 0) return { ok: true, value: parsed as ReadStateV1 };
+    if (fromServer(readStateV1)(parsed).length === 0) return { ok: true, value: parsed as ReadStateV1 };
   } catch {
     // Fall through.
   }
@@ -2460,6 +2508,53 @@ export function readNotificationPreferences(origin: string, account: number): No
 export function writeNotificationPreferences(origin: string, account: number, preferences: NotificationPreferences): void {
   try {
     platform.credentials.writePreference(notificationPreferencesKey(origin, account), JSON.stringify(preferences));
+  } catch {
+    // Storage can be unavailable; the in-memory preference still applies.
+  }
+}
+
+// How a person arranges the channel list (issue #1493): favorites, groups and
+// the order in them, kept in this browser for one account on one server. It is
+// a view and nothing more; arrangement.ts reads whatever is here defensively,
+// so this hands back the raw parsed value (null when none or unreadable).
+const arrangementKey = (origin: string, account: number) => `conch.web.arrangement.v1.${origin}.${String(account)}`;
+
+export function readArrangement(origin: string, account: number): unknown {
+  try {
+    return JSON.parse(platform.credentials.readPreference(arrangementKey(origin, account)) ?? 'null') as unknown;
+  } catch {
+    return null;
+  }
+}
+
+export function writeArrangement(origin: string, account: number, value: unknown): void {
+  try {
+    platform.credentials.writePreference(arrangementKey(origin, account), JSON.stringify(value));
+  } catch {
+    // Storage can be unavailable; the arrangement still applies until the page closes.
+  }
+}
+
+const appearancePreferencesKey = (origin: string, account: number) => `conch.web.appearance.v1.${origin}.${String(account)}`;
+
+export function readAppearancePreferences(origin: string, account: number): AppearancePreferences {
+  try {
+    const raw: unknown = JSON.parse(platform.credentials.readPreference(appearancePreferencesKey(origin, account)) ?? 'null');
+    if (typeof raw !== 'object' || raw === null) return defaultAppearance;
+    const value = raw as { theme?: unknown; accent?: unknown; density?: unknown };
+    return {
+      theme: typeof value.theme === 'string' && (appearanceThemes as readonly string[]).includes(value.theme) ? value.theme as AppearancePreferences['theme'] : defaultAppearance.theme,
+      accent: typeof value.accent === 'string' && (appearanceAccents as readonly string[]).includes(value.accent) ? value.accent as AppearancePreferences['accent'] : defaultAppearance.accent,
+      density: typeof value.density === 'string' && (appearanceDensities as readonly string[]).includes(value.density) ? value.density as AppearancePreferences['density'] : defaultAppearance.density,
+    };
+  } catch {
+    return defaultAppearance;
+  }
+}
+
+export function writeAppearancePreferences(origin: string, account: number, preferences: AppearancePreferences): void {
+  try {
+    platform.credentials.writePreference(appearancePreferencesKey(origin, account), JSON.stringify(preferences));
   } catch {
     // Storage can be unavailable; the in-memory preference still applies.
   }
@@ -2565,7 +2660,7 @@ async function requestTicket(): Promise<ApiResult<WSTicketV1>> {
   if (!reply.res.ok) return { ok: false, failure: 'invalid' };
   try {
     const parsed: unknown = await reply.res.json();
-    if (wsTicketV1(parsed).length === 0) return { ok: true, value: parsed as WSTicketV1 };
+    if (fromServer(wsTicketV1)(parsed).length === 0) return { ok: true, value: parsed as WSTicketV1 };
   } catch {
     // Fall through.
   }
@@ -2684,10 +2779,10 @@ export function openEventsSocket(channel: string, session: number, events: Socke
       if (current() === owner && typeof data === 'string') {
         try {
           const body: unknown = JSON.parse(data);
-          if (channelMembersV1(body).length === 0) socketChannelId = (body as ChannelMembersV1).channel_id;
-          if (sessionRosterV1(body).length === 0) socketChannelId = (body as SessionRosterV1).channel_id;
-          if (channelDocV1(body).length === 0) socketChannelId = (body as ChannelDocV1).channel_id;
-          if (reactionSummaryV1(body).length === 0) {
+          if (fromServer(channelMembersV1)(body).length === 0) socketChannelId = (body as ChannelMembersV1).channel_id;
+          if (fromServer(sessionRosterV1)(body).length === 0) socketChannelId = (body as SessionRosterV1).channel_id;
+          if (fromServer(channelDocV1)(body).length === 0) socketChannelId = (body as ChannelDocV1).channel_id;
+          if (fromServer(reactionSummaryV1)(body).length === 0) {
             socketChannelId = (body as ReactionSummaryV1).channel_id;
             publishReaction(channel, { kind: 'summary', summary: body as ReactionSummaryV1 });
           }
@@ -2710,7 +2805,7 @@ export async function createSession(client: string): Promise<ApiResult<SessionV1
   if (!reply.res.ok) return refused(reply.res);
   try {
     const parsed: unknown = await reply.res.json();
-    if (sessionV1(parsed).length === 0) return { ok: true, value: parsed as SessionV1 };
+    if (fromServer(sessionV1)(parsed).length === 0) return { ok: true, value: parsed as SessionV1 };
   } catch {
     // Fall through.
   }
@@ -2796,7 +2891,7 @@ export async function createIntervention(run: number, request: CreateInterventio
   if (!reply.res.ok) return refused(reply.res);
   try {
     const parsed: unknown = await reply.res.json();
-    if (interventionV1(parsed).length === 0) return { ok: true, value: parsed as InterventionV1 };
+    if (fromServer(interventionV1)(parsed).length === 0) return { ok: true, value: parsed as InterventionV1 };
   } catch {
     // Fall through.
   }
@@ -2825,7 +2920,7 @@ export async function createVoiceSession(channel: string): Promise<VoiceSessionR
   }
   try {
     const parsed: unknown = await res.json();
-    if (voiceSessionResponseV1(parsed).length === 0) return { ok: true, value: parsed as VoiceSessionResponseV1 };
+    if (fromServer(voiceSessionResponseV1)(parsed).length === 0) return { ok: true, value: parsed as VoiceSessionResponseV1 };
   } catch {
     // Fall through.
   }
@@ -2854,7 +2949,7 @@ export async function createVoiceViewer(channel: string): Promise<VoiceViewerRes
   }
   try {
     const parsed: unknown = await res.json();
-    if (voiceCompanionResponseV1(parsed).length === 0) return { ok: true, value: parsed as VoiceCompanionResponseV1 };
+    if (fromServer(voiceCompanionResponseV1)(parsed).length === 0) return { ok: true, value: parsed as VoiceCompanionResponseV1 };
   } catch {
     // Fall through.
   }
@@ -2982,7 +3077,7 @@ export async function claimVoiceShare(channel: string): Promise<ShareClaimResult
   }
   try {
     const parsed: unknown = await res.json();
-    if (voiceShareV1(parsed).length === 0) return { ok: true, value: parsed as VoiceShareV1 };
+    if (fromServer(voiceShareV1)(parsed).length === 0) return { ok: true, value: parsed as VoiceShareV1 };
   } catch {
     // Fall through.
   }
@@ -3019,7 +3114,7 @@ export async function claimVoiceCamera(channel: string, startedAt?: string): Pro
   }
   try {
     const parsed: unknown = await res.json();
-    if (voiceCameraV1(parsed).length === 0) return { ok: true, value: parsed as VoiceCameraV1 };
+    if (fromServer(voiceCameraV1)(parsed).length === 0) return { ok: true, value: parsed as VoiceCameraV1 };
   } catch {
     // Fall through.
   }
@@ -3069,7 +3164,7 @@ function publishRemoval(data: unknown) {
   if (typeof data !== 'string') return;
   try {
     const doc: unknown = JSON.parse(data);
-    const message = messageRemovedV1(doc).length === 0 ? (doc as MessageRemovedV1).message : messageV2(doc).length === 0 ? doc as MessageV2 : null;
+    const message = fromServer(messageRemovedV1)(doc).length === 0 ? (doc as MessageRemovedV1).message : fromServer(messageV2)(doc).length === 0 ? doc as MessageV2 : null;
     if (message?.removed === true) for (const receive of removalWatchers) receive(message);
   } catch { /* Unknown frames are ignored. */ }
 }

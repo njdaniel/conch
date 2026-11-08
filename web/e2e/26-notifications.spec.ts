@@ -1,7 +1,8 @@
 import type { Page } from '@playwright/test';
 import { post } from './api';
 import { conversation, credentialField, expect, signIn, test } from './fixtures';
-import { call, principalId } from './world';
+import { createCredentialResponseV1 } from '../src/schema/credential';
+import { call, ok, principalId } from './world';
 
 async function instrument(page: Page, permission: NotificationPermission = 'denied'): Promise<void> {
   await page.addInitScript((permission) => {
@@ -60,7 +61,11 @@ async function openCenter(page: Page): Promise<void> {
 test('notification policy, hidden-tab native alerts, mute, off and logout cleanup', async ({ meet, world }) => {
   const { page } = await meet();
   await instrument(page, 'granted');
-  await signIn(page, world, world.tokens.nick, 'nick-test');
+  // This test signs out, which ends the credential it signed in with. It uses
+  // a credential of its own for nick-test, so that the fixture one still works
+  // for the specs that run after it in the same server (36, 37).
+  const own = await ok(world, world.tokens.operator, 'POST', `/v1/principals/${String(await principalId(world, world.tokens.nick))}/credentials`, createCredentialResponseV1, { label: 'e2e notifications' });
+  await signIn(page, world, own.token, 'nick-test');
   await policy(page, 'all');
   await enableNative(page);
   await page.evaluate(() => {

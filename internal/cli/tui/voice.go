@@ -20,7 +20,7 @@ import (
 // line at all. Presence is only read here; joining voice is the helper's
 // (voicectl.go), which this socket knows nothing of.
 type VoiceAPI interface {
-	SubscribeVoicePresence(ctx context.Context, channel string, receive func(schema.VoicePresenceV1) error) error
+	SubscribeVoicePresence(ctx context.Context, channel string, receive func(schema.VoicePresenceV2) error) error
 }
 
 // voiceKick asks Update to open the first presence subscription; Init cannot
@@ -32,7 +32,7 @@ type voiceKick struct{}
 // left is dropped.
 type voicePresenceReceived struct {
 	gen int
-	doc schema.VoicePresenceV1
+	doc schema.VoicePresenceV2
 }
 
 // voiceEnded is the end of one presence subscription.
@@ -70,7 +70,7 @@ type voiceModel struct {
 	gen    int
 	cancel context.CancelFunc
 	state  voiceState
-	doc    schema.VoicePresenceV1
+	doc    schema.VoicePresenceV2
 	// backoff is the delay the next drop will wait; zero means the minimum.
 	backoff      time.Duration
 	retryPending bool
@@ -87,7 +87,7 @@ func (m *Model) beginVoice() tea.Cmd {
 	}
 	v.gen++
 	v.state = voiceConnecting
-	v.doc = schema.VoicePresenceV1{}
+	v.doc = schema.VoicePresenceV2{}
 	v.backoff = 0
 	v.retryPending = false
 	channel := m.current()
@@ -104,7 +104,7 @@ func (m Model) startVoice(ctx context.Context, gen int, channel string) tea.Cmd 
 	return func() tea.Msg {
 		go func() {
 			started := time.Now()
-			err := api.SubscribeVoicePresence(ctx, channel, func(doc schema.VoicePresenceV1) error {
+			err := api.SubscribeVoicePresence(ctx, channel, func(doc schema.VoicePresenceV2) error {
 				select {
 				case events <- voicePresenceReceived{gen: gen, doc: doc}:
 					return nil
@@ -168,7 +168,7 @@ func (m Model) voiceEnded(msg voiceEnded) (tea.Model, tea.Cmd) {
 		case serverErr.Code == schema.ErrorCodeVoiceUnavailable:
 			// Configured but LiveKit cannot be reached: say so once, quietly,
 			// and keep trying.
-			v.doc = schema.VoicePresenceV1{Configured: true}
+			v.doc = schema.VoicePresenceV2{Configured: true}
 			v.state = voiceLive
 		case serverErr.Code == schema.ErrorCodeVoiceNotConfigured, serverErr.Code == schema.ErrorCodeVoiceRequiresAuth,
 			serverErr.Status >= 400 && serverErr.Status < 500:
@@ -244,7 +244,7 @@ func (m Model) voiceLine(width int) string {
 		case !v.doc.Available:
 			text = "unavailable"
 		default:
-			text = m.roster(width - cellWidth(prefix))
+			text = m.rosterWithShares(width - cellWidth(prefix))
 		}
 	case voiceReconnecting:
 		text = "reconnecting"
@@ -256,6 +256,96 @@ func (m Model) voiceLine(width int) string {
 	return fitCells(prefix+text, width)
 }
 
+// rosterWithShares is the roster followed, when it fits whole, by who is
+// sharing a screen. The roster gives way to the sentence, never the other way
+// round, down to a few cells: a roster that cannot say who is here is no use,
+// and a sentence cut short names half its sharers.
+func (m Model) rosterWithShares(width int) string {
+	share := m.shareText()
+	if share == "" {
+		return m.roster(width)
+	}
+	const sep = " · "
+	if room := width - cellWidth(share) - len(sep); room >= 12 {
+		return m.roster(room) + sep + share
+	}
+	return m.roster(width)
+}
+
+// shareText names everyone sharing a screen in the channel-wide room, earliest
+// started first (the order every reader agrees on), with the quality each
+// declared and whether it carries sound: "sam is sharing a screen (1080p · 60
+// fps)" for one, "sam and val are sharing their screens (val with sound)"
+// for several. A share in a narrower room is not the channel's and is left
+// out, as the roster leaves out its people. "" when nobody is sharing.
+func (m Model) shareText() string {
+	var sharers []schema.VoiceParticipantV2
+	for _, room := range m.voice.doc.Rooms {
+		if room.Audience != nil {
+			continue
+		}
+		for _, p := range room.Participants {
+			if p.Sharing {
+				sharers = append(sharers, p)
+			}
+		}
+	}
+	if len(sharers) == 0 {
+		return ""
+	}
+	startedAt := func(p schema.VoiceParticipantV2) time.Time {
+		if p.ShareStartedAt == nil {
+			return time.Time{}
+		}
+		return p.ShareStartedAt.Time()
+	}
+	sort.SliceStable(sharers, func(i, j int) bool {
+		if a, b := startedAt(sharers[i]), startedAt(sharers[j]); !a.Equal(b) {
+			return a.Before(b)
+		}
+		return sharers[i].PrincipalID < sharers[j].PrincipalID
+	})
+	names := make([]string, len(sharers))
+	var details []string
+	for i, p := range sharers {
+		names[i], _ = m.authorName(m.current(), p.PrincipalID)
+		detail := shareDetail(p)
+		switch {
+		case detail == "":
+		case len(sharers) == 1:
+			details = append(details, detail)
+		default:
+			details = append(details, names[i]+" "+detail)
+		}
+	}
+	var text string
+	switch len(sharers) {
+	case 1:
+		text = names[0] + " is sharing a screen"
+	case 2:
+		text = names[0] + " and " + names[1] + " are sharing their screens"
+	default:
+		text = strings.Join(names[:len(names)-1], ", ") + " and " + names[len(names)-1] + " are sharing their screens"
+	}
+	if len(details) > 0 {
+		text += " (" + strings.Join(details, "; ") + ")"
+	}
+	return text
+}
+
+// shareDetail is what a sharer declared: "1080p · 60 fps", "with sound", or
+// both. A quality outside the picker's is not shown.
+func shareDetail(p schema.VoiceParticipantV2) string {
+	var parts []string
+	if q := p.ShareQuality; q != nil && q.Validate() == nil {
+		parts = append(parts, string(q.Resolution)+" · "+strconv.Itoa(q.FrameRate)+" fps")
+	}
+	if p.SharingAudio {
+		parts = append(parts, "with sound")
+	}
+	return strings.Join(parts, ", ")
+}
+
 // roster lists the people in the channel-wide voice room as `conch voice
 // status` names them (id, then the name made safe for one line), a mark after whoever
 // is transmitting, and "+N" for those that do not fit in width.
@@ -263,7 +353,7 @@ func (m Model) roster(width int) string {
 	// Only the channel-wide room. A room with a narrower audience (a net, from
 	// V5) is left out rather than merged in: listed here, its people would read
 	// as being in the channel's room, and someone in both would appear twice.
-	var people []schema.VoiceParticipant
+	var people []schema.VoiceParticipantV2
 	for _, room := range m.voice.doc.Rooms {
 		if room.Audience != nil {
 			continue
@@ -410,7 +500,7 @@ func (m Model) voicePeople(cols int) []string {
 	case !v.doc.Available:
 		return []string{head, statusStyle.Render(fitCells("unavailable", cols))}
 	}
-	var people []schema.VoiceParticipant
+	var people []schema.VoiceParticipantV2
 	for _, room := range v.doc.Rooms {
 		if room.Audience == nil {
 			people = append(people, room.Participants...)
@@ -432,6 +522,9 @@ func (m Model) voicePeople(cols int) []string {
 		}
 		room := max(1, cols-2-1-cellWidth(word))
 		lines = append(lines, mark+padCells(fitCells(name, room), room)+" "+activeStyle.Render(word))
+	}
+	if share := m.shareText(); share != "" {
+		lines = append(lines, statusStyle.Render(fitCells(share, cols)))
 	}
 	return lines
 }

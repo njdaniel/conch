@@ -268,7 +268,10 @@ async fn presence_is_shown_from_conchds_socket_as_principal_ids() {
         .into_iter()
         .find(|request| request.method == "GET")
         .unwrap();
-    assert_eq!(request.target, "/v1/voice/ws?channel=ops");
+    assert_eq!(
+        request.target,
+        "/v1/voice/ws?channel=ops&schema=conch.voice_presence.v2"
+    );
 
     // Someone starts talking: a new line. The same document again: no line.
     rig.conchd.presence(presence(&[(3, true), (7, false)]));

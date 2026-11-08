@@ -12,7 +12,7 @@
 
 use std::time::Duration;
 
-use conch_voice_api::{Client, Error as ApiError, PresenceEvent, StreamEnd, VoicePresenceV1};
+use conch_voice_api::{Client, Error as ApiError, PresenceEvent, StreamEnd, VoicePresenceV2};
 use tokio::sync::mpsc;
 
 /// What the presence task tells the session.
@@ -53,7 +53,7 @@ pub enum Roster {
 }
 
 impl Roster {
-    fn from_snapshot(snapshot: &VoicePresenceV1) -> Self {
+    fn from_snapshot(snapshot: &VoicePresenceV2) -> Self {
         // V4 shows the channel's own room and no other (nets are V5).
         let participants = snapshot
             .channel_room()
@@ -94,8 +94,11 @@ impl Default for PresenceTimings {
     }
 }
 
-/// Starts the task that follows `channel`'s presence. Each change of the roster is sent
-/// once; the task ends when the receiver is dropped, or after it has said
+/// Starts the task that follows `channel`'s presence, read as v2 (several sharers are
+/// listed whole; the helper shows no share text, so it keeps only who is there and who is
+/// talking).
+///
+/// Each change of the roster is sent once; the task ends when the receiver is dropped, or after it has said
 /// [`Presence::VoiceRemoved`].
 #[must_use]
 pub fn spawn(
@@ -184,5 +187,44 @@ async fn follow(
             () = rosters.closed() => return,
         }
         wait = wait.saturating_mul(2).min(timings.longest_wait);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The v2 document of two sharers, `pkg/schema/testdata/voice-presence-v2.json`'s
+    /// room: the roster lists everyone, sharers or not, by id, and is the same as it
+    /// would be with nobody sharing.
+    #[test]
+    fn a_roster_from_a_room_with_two_sharers_lists_everyone() {
+        let text = include_str!("../../../pkg/schema/testdata/voice-presence-v2.json");
+        let snapshot: VoicePresenceV2 = serde_json::from_str(text).unwrap();
+        snapshot.validate().unwrap();
+        assert_eq!(
+            Roster::from_snapshot(&snapshot),
+            Roster::Known {
+                configured: true,
+                available: true,
+                participants: vec![
+                    Participant {
+                        principal_id: 3,
+                        can_publish: true,
+                        transmitting: false
+                    },
+                    Participant {
+                        principal_id: 7,
+                        can_publish: true,
+                        transmitting: true
+                    },
+                    Participant {
+                        principal_id: 9,
+                        can_publish: true,
+                        transmitting: false
+                    },
+                ],
+            }
+        );
     }
 }

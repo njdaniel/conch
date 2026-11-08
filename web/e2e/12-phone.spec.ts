@@ -501,3 +501,57 @@ for (const [size, options] of phoneSizes) {
     expect(bar.height, 'the top bar is two rows high').toBeLessThanOrEqual(72);
   });
 }
+
+// Issue #1517: Preview as member on a phone. The banner is a band under the
+// top bar on every view, Exit and Refresh are 44 px targets, and nothing
+// scrolls sideways.
+for (const [size, options] of phoneSizes) {
+  test(`P1517 at ${size} the preview band stays under the top bar on every view, its buttons are 44 px, and the page fits`, async ({ meet, secrets, world }) => {
+    const tag = `p1517-${size}-${Date.now().toString(36).slice(-5)}`;
+    const request: CreatePrincipalRequest = { kind: 'human', name: `${tag}-alice` };
+    const id = (await ok(world, world.tokens.operator, 'POST', '/v0/principals', createPrincipalResponse, request)).principal.id;
+    const credential: CreateCredentialRequestV1 = { label: tag };
+    secrets.push((await ok(world, world.tokens.operator, 'POST', `/v1/principals/${String(id)}/credentials`, createCredentialResponseV1, credential)).token);
+    // alice has a channel, so the preview has a Chat view to show.
+    const channel = `${tag}-a`;
+    const made = await call(world, world.tokens.operator, 'POST', '/v1/channels', { name: channel, visibility: 'private' });
+    expect(made.status, JSON.stringify(made.body)).toBeLessThan(300);
+    const added = await call(world, world.tokens.operator, 'PUT', `/v1/channels/${encodeURIComponent(channel)}/members/${String(id)}`);
+    expect(added.status, JSON.stringify(added.body)).toBeLessThan(300);
+    const { page } = await meet(options);
+    await page.goto(world.appUrl);
+    await (await credentialField(page)).fill(world.tokens.operator);
+    await page.getByRole('button', { name: 'Use credential' }).click();
+    await page.getByRole('button', { name: 'Continue anyway' }).click();
+    await expect(statusLine(page)).toContainText('Connected');
+
+    await page.getByRole('button', { name: 'Settings' }).tap();
+    const region = page.getByRole('dialog', { name: 'Settings' });
+    await region.getByRole('list', { name: 'Server administration' }).getByRole('button', { name: 'Members', exact: true }).tap();
+    const row = region.locator('li.community-member').filter({ has: page.locator('.community-name', { hasText: new RegExp(`^${tag}-alice$`) }) });
+    await row.getByRole('button', { name: `Actions for ${tag}-alice` }).tap();
+    await row.getByRole('menuitem', { name: 'Preview as member' }).tap();
+    const band = page.getByRole('region', { name: 'Preview', exact: true });
+    await expect(band).toContainText(`Previewing ${tag}-alice, read-only`);
+
+    for (const view of ['Channels', 'Chat', 'Voice'] as const) {
+      await showView(page, view);
+      await expect(band).toBeVisible();
+      const place = await band.evaluate((el) => {
+        const bar = document.querySelector('.topbar')?.getBoundingClientRect();
+        const box = el.getBoundingClientRect();
+        return { below: bar === undefined ? -1 : box.top - bar.bottom, height: box.height };
+      });
+      expect(place.below, `${size}: the band sits under the top bar on ${view}`).toBeGreaterThanOrEqual(-1);
+      expect(place.below, `${size}: the band touches the top bar on ${view}`).toBeLessThan(8);
+      for (const name of ['Exit preview', 'Refresh']) {
+        const box = await band.getByRole('button', { name }).boundingBox();
+        expect(box?.height ?? 0, `${size}: ${name} on ${view}`).toBeGreaterThanOrEqual(43.5);
+        expect(box?.width ?? 0, `${size}: ${name} on ${view}`).toBeGreaterThanOrEqual(43.5);
+      }
+      await expectFits(page, `${size}: the preview, ${view}`);
+    }
+    await band.getByRole('button', { name: 'Exit preview' }).tap();
+    await expect(band).toHaveCount(0);
+  });
+}

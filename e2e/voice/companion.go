@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"time"
 
@@ -762,5 +763,203 @@ func (l *live) companion(ctx context.Context) error {
 		}
 	}
 	h.say("ok   audited: one voice_session_issued row per companion grant, voice_companion_removed for each removal, and no token or room name (the final scan covers every row)")
+	if err := l.companionPerSharer(); err != nil {
+		return fmt.Errorf("one companion per sharer: %w", err)
+	}
 	return l.companionPlayback(ctx)
+}
+
+// companionPerSharer: two members share at once, each with a companion of their
+// own (issue #1483, design §5.4). Neither companion has the share's sound
+// until its own holder consents, one holder's consent never reaches the
+// other's companion, a caller who holds no stream is 409 voice_no_session,
+// and each stream's end closes its own consent (voice_share_audio_stopped
+// before voice_share_stopped) and leaves the other's standing.
+func (l *live) companionPerSharer() error {
+	h, d := l.h, l.d
+	const channel = "companion2"
+	channelID, err := d.createChannel(channel)
+	if err != nil {
+		return err
+	}
+	subject := fmt.Sprintf("channel:%d", channelID)
+	hostPort := strings.TrimPrefix(l.srv.WSURL, "ws://")
+	screenReq := schema.VoiceCompanionRequestV1{Publish: schema.VoiceCompanionPublishScreen, Subscribe: true}
+	type pair struct {
+		p        *person
+		screenID string
+		share    schema.VoiceShareV1
+		// gate holds the companion's screen publish until the claim is
+		// granted, so that each stream is published (an unpublished stream
+		// ends idle after 15 s) and nothing is refused.
+		gate *lkit.ShareFilter
+		clk  *lkit.Headless
+	}
+	var room string
+	var pairs []*pair
+	for _, name := range []string{"pat", "quin"} {
+		p, err := h.newPerson(d, name, channel)
+		if err != nil {
+			return err
+		}
+		sess, err := h.session(p, channel)
+		if err != nil {
+			return err
+		}
+		room = sess.Rooms[0].Room
+		own, err := l.joinHeadless(sess.Rooms[0])
+		if err != nil {
+			return err
+		}
+		defer own.Stop()
+		if err := l.lkWaitHas(name, room, identity(p.id), own); err != nil {
+			return err
+		}
+		comp, err := h.mustCompanion(p, screenReq, channel)
+		if err != nil {
+			return err
+		}
+		gate := lkit.NewShareFilter(true)
+		clk, err := h.startLK(l.lkBin, hostPort, comp.Token, gate.Filter, "--publish-demo")
+		if err != nil {
+			return err
+		}
+		defer clk.Stop()
+		pr := &pair{p: p, screenID: identity(p.id) + ".screen", gate: gate, clk: clk}
+		if err := l.lkWaitHas(name+"'s companion", room, pr.screenID, clk); err != nil {
+			return err
+		}
+		select {
+		case <-gate.Held():
+		case <-time.After(30 * time.Second):
+			return fmt.Errorf("%s's companion did not try to publish within 30 s", name)
+		}
+		pairs = append(pairs, pr)
+	}
+	pat, quin := pairs[0], pairs[1]
+	// The bystander holds no stream: her consent is refused, whoever else shares.
+	bystander, err := h.newPerson(d, "rae", channel)
+	if err != nil {
+		return err
+	}
+	if _, err := h.session(bystander, channel); err != nil {
+		return err
+	}
+
+	// Unclaimed, each companion's screen is withdrawn by a pass (§13); only
+	// then does the claim change its permission and LiveKit send it a token.
+	for _, pr := range pairs {
+		if err := waitFor(pr.p.name+"'s unclaimed companion to be withdrawn", 20*time.Second, func() (bool, string) {
+			ok, p, saw := l.lkHasIdentity(room, pr.screenID)
+			if !ok {
+				return false, saw
+			}
+			return p.Permission["can_publish"] == false, fmt.Sprintf("can_publish=%v", p.Permission["can_publish"])
+		}); err != nil {
+			return err
+		}
+	}
+	for _, pr := range pairs {
+		before := len(pr.clk.Relay.IssuedTokens())
+		share, status, code, err := claimShare(pr.p, channel)
+		if err != nil || status != http.StatusOK {
+			return fmt.Errorf("%s claims: status %d code %q: %w", pr.p.name, status, code, err)
+		}
+		pr.share = share
+		if err := waitFor("LiveKit to send "+pr.p.name+"'s companion a token carrying the screen", 20*time.Second, func() (bool, string) {
+			return len(pr.clk.Relay.IssuedTokens()) > before, "no token since the claim"
+		}); err != nil {
+			return err
+		}
+		pr.gate.Release()
+	}
+	perm := func(pr *pair, wantAudio bool) func() (bool, string) {
+		return func() (bool, string) {
+			ok, p, saw := l.lkHasIdentity(room, pr.screenID)
+			if !ok {
+				return false, saw
+			}
+			if wantAudio {
+				return checkCompanionSources(p.Permission, true, "SCREEN_SHARE", "SCREEN_SHARE_AUDIO") == nil, fmt.Sprint(p.Permission)
+			}
+			return checkCompanionSources(p.Permission, true, "SCREEN_SHARE") == nil, fmt.Sprint(p.Permission)
+		}
+	}
+	for _, pr := range pairs {
+		if err := waitFor(pr.p.name+"'s companion to hold the screen alone", 20*time.Second, perm(pr, false)); err != nil {
+			return err
+		}
+	}
+	consent := func(pr *pair, scope schema.VoiceShareAudioScope) error {
+		return waitForOrFail(pr.p.name+"'s consent to be recorded", 20*time.Second, func() (bool, string, error) {
+			a, status, code, err := requestCompanionAudio(pr.p, scope, channel)
+			if err != nil {
+				return false, "", err
+			}
+			if status == http.StatusOK {
+				if !a.StartedAt.Time().Equal(pr.share.StartedAt.Time()) {
+					return false, "", fmt.Errorf("%s's consent carries started_at %s, want their own stream's %s", pr.p.name, a.StartedAt.Time(), pr.share.StartedAt.Time())
+				}
+				return true, "", nil
+			}
+			if status == http.StatusConflict && code == schema.ErrorCodeVoiceNoSession {
+				return false, fmt.Sprintf("status %d %s", status, code), nil
+			}
+			return false, "", fmt.Errorf("status %d code %q", status, code)
+		})
+	}
+	if _, status, code, err := requestCompanionAudio(bystander, schema.VoiceShareAudioScopeApplication, channel); err != nil || status != http.StatusConflict || code != schema.ErrorCodeVoiceNoSession {
+		return fmt.Errorf("a caller who holds no stream asks for the sound: status %d code %q (%w), want 409 %s", status, code, err, schema.ErrorCodeVoiceNoSession)
+	}
+	if err := consent(pat, schema.VoiceShareAudioScopeApplication); err != nil {
+		return err
+	}
+	if err := waitFor("pat's companion to be granted the sound", 20*time.Second, perm(pat, true)); err != nil {
+		return err
+	}
+	// Quin's companion is not touched by pat's consent.
+	if ok, p, saw := l.lkHasIdentity(room, quin.screenID); !ok {
+		return fmt.Errorf("quin's companion is gone: %s", saw)
+	} else if err := checkCompanionSources(p.Permission, true, "SCREEN_SHARE"); err != nil {
+		return fmt.Errorf("pat's consent reached quin's companion: %w", err)
+	}
+	if err := consent(quin, schema.VoiceShareAudioScopeSystemExcludingCall); err != nil {
+		return err
+	}
+	if err := waitFor("quin's companion to be granted the sound", 20*time.Second, perm(quin, true)); err != nil {
+		return err
+	}
+	h.say("ok   audio per sharer: pat's consent granted pat's companion the sound and quin's stayed at the screen until quin's own; a caller with no stream was refused voice_no_session")
+
+	// pat's stream ends: pat's consent closes first, her companion is taken
+	// back to nothing, and quin's stands.
+	if err := releaseShare(pat.p, channel, pat.share.StartedAt); err != nil {
+		return err
+	}
+	if ok, p, saw := l.lkHasIdentity(room, pat.screenID); !ok {
+		return fmt.Errorf("pat's companion left when her share stopped: %s", saw)
+	} else if err := checkCompanionSources(p.Permission, true); err != nil {
+		return fmt.Errorf("after pat's stop, LiveKit's permission for her companion (the sound refused again): %w", err)
+	}
+	if ok, _ := perm(quin, true)(); !ok {
+		_, p, _ := l.lkHasIdentity(room, quin.screenID)
+		return fmt.Errorf("pat's stop reached quin's companion: %v", p.Permission)
+	}
+	all, err := d.audit()
+	if err != nil {
+		return err
+	}
+	var got []string
+	for _, e := range all {
+		if e.Subject != subject || (e.Action != store.AuditVoiceShareAudioStopped && e.Action != store.AuditVoiceShareStopped) {
+			continue
+		}
+		got = append(got, e.Action+" "+strings.TrimPrefix(strings.NewReplacer(fmt.Sprintf("principal=%d", pat.p.id), "principal=pat", fmt.Sprintf("principal=%d", quin.p.id), "principal=quin").Replace(e.Detail), fmt.Sprintf("channel=%d ", channelID)))
+	}
+	want := []string{store.AuditVoiceShareAudioStopped + " principal=pat reason=self", store.AuditVoiceShareStopped + " principal=pat reason=self"}
+	if !slices.Equal(got, want) {
+		return fmt.Errorf("rows after pat's stop %q, want %q (quin's consent untouched)", got, want)
+	}
+	h.say("ok   per stream: pat's stop closed her consent first and took her companion back to nothing; quin's stream and sound stand")
+	return releaseShare(quin.p, channel, quin.share.StartedAt)
 }
