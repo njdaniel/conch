@@ -18,6 +18,7 @@
 //    validator (a refusal by the error document's) before anything returns;
 //  - the answer is dropped when the identity that asked has ended.
 import { errorV0 } from '../../../web/src/schema/error.ts';
+import { fromServer } from '../../../web/src/schema/validate.ts';
 import { operations, previewHeader, type Operation, type OperationId } from '../../../web/src/platform/operations.ts';
 import type { NoAnswerReason } from '../../../web/src/platform/desktop/bridge.ts';
 import type { Capture, Session } from './session.ts';
@@ -237,7 +238,7 @@ export class Client {
       return { kind: 'answer', status: response.status, ok, body: parsed.value, ...extras };
     }
     // A refusal: its error document if it is one, else only its status.
-    if (parsed.ok && errorV0(parsed.value).length === 0) return { kind: 'answer', status: response.status, ok, body: parsed.value, ...extras };
+    if (parsed.ok && fromServer(errorV0)(parsed.value).length === 0) return { kind: 'answer', status: response.status, ok, body: parsed.value, ...extras };
     return { kind: 'answer', status: response.status, ok, ...extras };
   }
 }

@@ -6,7 +6,7 @@ import { ReactionBar, ReactionScope, useHasReactions } from './Reactions';
 import { Composer } from './Composer';
 import { guestName } from './guestName';
 import { Avatar, PrivateMark } from './Icons';
-import { Linkified } from './Linkified';
+import { Linkified, previewText } from './Linkified';
 import { ImageAttachment } from './ImageAttachment';
 import { loadStored, saveEdit, saveReplies } from './state/draftStore';
 import { canEdit, EditedMarker, editEnds, editsLeft, editWindowMs, MessageEditor } from './MessageEdit';
@@ -23,6 +23,7 @@ import type { LiveStatus, Person } from './useLiveChannel';
 import { mentions } from './useNotifications';
 import { useAuthorNames } from './useAuthorNames';
 import { timeOf } from './time';
+import { fromServer } from './schema/validate';
 
 // The time of day, in the reader's own locale and time zone (time.ts).
 export function clock(when: string | number): string {
@@ -58,7 +59,7 @@ export function audienceLabel(audience: Audience, viewer: number, nets: Readonly
 // (or one that is not the shape this client knows: then it is a plain message).
 function approvalOf(message: MessageV2): ApprovalV1 | null {
   const payload = message.payload;
-  if (payload?.schema !== approvalPayloadSchema || approvalV1(payload.data).length > 0) return null;
+  if (payload?.schema !== approvalPayloadSchema || fromServer(approvalV1)(payload.data).length > 0) return null;
   return payload.data as ApprovalV1;
 }
 
@@ -116,7 +117,7 @@ function Line({
         ) : null}
         <span className="vh">: </span>
       </div>
-      <span className="body">{children}</span>
+      <div className="body">{children}</div>
       {tag === null ? null : <span className={tone === undefined ? 'state' : `state ${tone}`}> {tag}</span>}
     </>
   );
@@ -132,7 +133,7 @@ export function authorOf(message: MessageV2, people: ReadonlyMap<number, Person>
 
 function attachmentsOf(message: MessageV2): FileAttachmentV1 | null {
   const payload = message.payload;
-  if (payload?.schema !== fileAttachmentPayloadSchema || fileAttachmentV1(payload.data).length > 0) return null;
+  if (payload?.schema !== fileAttachmentPayloadSchema || fromServer(fileAttachmentV1)(payload.data).length > 0) return null;
   return payload.data as FileAttachmentV1;
 }
 
@@ -282,7 +283,7 @@ const excerptLength = 80;
 // excerptOf is the first line of a body, cut to about excerptLength characters.
 // It is drawn as text: markup in it shows as the characters it is.
 export function excerptOf(body: string): string {
-  const line = (body.split('\n').find((part) => part.trim() !== '') ?? '').trim();
+  const line = (previewText(body).split('\n').find((part) => part.trim() !== '') ?? '').trim();
   const chars = Array.from(line);
   return chars.length <= excerptLength ? line : `${chars.slice(0, excerptLength).join('').trimEnd()}…`;
 }

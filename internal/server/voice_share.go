@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -46,6 +47,12 @@ const (
 	// voiceShareTrackGone is how long a share may go on after the last pass
 	// that saw one of its tracks: a share whose tracks are gone has ended.
 	voiceShareTrackGone = 5 * time.Second
+	// voiceShareCap is how many screen shares a room holds at once (design
+	// docs/design/voice-multi-share.md §4): a constant in code, not a setting
+	// and not a schema check, so it can move once measured without a schema
+	// change. It counts claims: a pending claim counts, and a holder asking
+	// again is not a new one.
+	voiceShareCap = 6
 )
 
 // Why a share ended: the reason on voice_share_stopped, and the one the sharer
@@ -72,6 +79,11 @@ type voiceShareEndKey struct {
 type voiceShare struct {
 	principalID int64
 	startedAt   time.Time
+	// quality is what the sharer declared for the stream (issue #1483,
+	// design §3): a label repeated in v2 presence, nil when none was
+	// declared. Changed only under p.mu, by a claim holding the room's
+	// claims.
+	quality *schema.VoiceShareQuality
 	// pending is set from the moment the claim is recorded until its
 	// voice_share_started row is written. Nothing ends a pending share: a
 	// share that never started has nothing to stop. Presence does not show
@@ -101,9 +113,9 @@ type voiceShare struct {
 
 // Errors of the share endpoints, each answered as the handlers say.
 var (
-	// errVoiceShareBusy: another principal holds the room's share. 409
-	// voice_share_busy.
-	errVoiceShareBusy = errors.New("voice: another principal holds the room's share")
+	// errVoiceShareFull: the room already holds voiceShareCap shares and the
+	// caller holds none. 409 voice_share_full, naming nobody.
+	errVoiceShareFull = errors.New("voice: the room holds as many shares as it may")
 	// errVoiceShareNotConnected: the caller holds a session but LiveKit has no
 	// connection of theirs in the room to grant the share to. 409
 	// voice_no_session: a share is granted to a connection, and they have
@@ -162,7 +174,7 @@ func voiceRoomPublishes(room store.VoiceRoom) bool { return room.NetID == 0 }
 // then is a member told that voice is not configured. Then, as for a transmit
 // report, the credential the request came with must hold a session for the
 // channel's current room (409 voice_no_session). Only then is the room's share
-// looked at: held by someone else is 409 voice_share_busy.
+// looked at: a room that holds voiceShareCap shares is 409 voice_share_full to a caller who holds none.
 func (s *Server) handleVoiceShareStart(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	channel, caller, ok := s.voiceClaimCaller(w, r)
@@ -199,10 +211,25 @@ func (s *Server) handleVoiceShareStart(w http.ResponseWriter, r *http.Request) {
 		writeVoiceNoSession(w)
 		return
 	}
-	share, err := s.voice.claimShare(ctx, room, caller.ID)
+	// The body is read after the caller's checks and before the lock: a
+	// malformed one is 400, and says nothing to a caller who was refused
+	// above. No body declares nothing.
+	r.Body = http.MaxBytesReader(w, r.Body, voiceCompanionMaxBytes)
+	req, err := schema.DecodeVoiceShareRequestV1(r.Body)
+	if err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			writeError(w, http.StatusRequestEntityTooLarge, "request_too_large", "request body exceeds the maximum size")
+			return
+		}
+		// A fixed message: the decoder's own names what the client sent.
+		writeError(w, http.StatusBadRequest, "invalid_request", "request body must be empty or a voice share request with an optional quality")
+		return
+	}
+	share, err := s.voice.claimShare(ctx, room, caller.ID, req.Quality)
 	switch {
-	case errors.Is(err, errVoiceShareBusy):
-		writeError(w, http.StatusConflict, schema.ErrorCodeVoiceShareBusy, "someone else is sharing in this room")
+	case errors.Is(err, errVoiceShareFull):
+		writeError(w, http.StatusConflict, schema.ErrorCodeVoiceShareFull, fmt.Sprintf("this call already has %d screen shares", voiceShareCap))
 		return
 	case errors.Is(err, errVoiceShareNotAllowed):
 		// The same refusal, word for word, as the up-front checks give; it
@@ -229,16 +256,26 @@ func (s *Server) handleVoiceShareStart(w http.ResponseWriter, r *http.Request) {
 		writeInternalError(w)
 		return
 	}
-	if err := share.Validate(); err != nil {
+	// A claim that declared a quality is answered with it (VoiceShareV2); one
+	// that did not gets VoiceShareV1, exactly as before, so a client from
+	// before the quality never sees a field it does not know.
+	var answer interface{ Validate() error } = share
+	if req.Quality != nil {
+		answer = schema.VoiceShareV2{PrincipalID: share.PrincipalID, StartedAt: share.StartedAt, Audio: share.Audio, Quality: *req.Quality}
+	}
+	if err := answer.Validate(); err != nil {
 		slog.ErrorContext(ctx, "voice: built an invalid share", "channel", channel.ID, "error", err)
 		writeInternalError(w)
 		return
 	}
-	writeJSON(w, http.StatusOK, share)
+	writeJSON(w, http.StatusOK, answer)
 }
 
-// handleVoiceShareStop serves DELETE /v1/channels/{channel}/voice/share: the
-// sharer stops the room's share, or an operator or channel manager stops it.
+// handleVoiceShareStop serves DELETE /v1/channels/{channel}/voice/share
+// [?started_at=…][&principal=<id>]: the sharer stops their own share, or an
+// operator or channel manager stops someone's by naming them with principal
+// (design docs/design/voice-multi-share.md §5.2). Without principal it is
+// always the caller's own stream; there is no "whoever shares" any more.
 //
 // An operator is let through whether or not they are a member, after only the
 // checks that every request makes: a verified caller and a channel that exists.
@@ -264,8 +301,9 @@ func (s *Server) handleVoiceShareStop(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, schema.ErrorCodeVoiceRequiresAuth, "voice requires authentication")
 		return
 	}
+	q := r.URL.Query()
 	var claim *schema.Timestamp
-	if values, named := r.URL.Query()[schema.VoiceShareClaimParam]; named {
+	if values, named := q[schema.VoiceShareClaimParam]; named {
 		var started schema.Timestamp
 		var err error
 		if len(values) == 1 {
@@ -276,6 +314,27 @@ func (s *Server) handleVoiceShareStop(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		claim = &started
+	}
+	// principal names whose stream to stop (design §5.2), on the camera's
+	// pattern: absent or the caller's own id is the caller's own stop. It is
+	// read, like started_at, before the channel is looked at.
+	target := caller.ID
+	if values, named := q[schema.VoiceSharePrincipalParam]; named {
+		var id int64
+		var err error
+		if len(values) == 1 {
+			id, err = strconv.ParseInt(values[0], 10, 64)
+		}
+		if len(values) != 1 || err != nil || id <= 0 || values[0] != strconv.FormatInt(id, 10) {
+			writeError(w, http.StatusBadRequest, "invalid_request", "principal must be a principal id, given once")
+			return
+		}
+		target = id
+	}
+	other := target != caller.ID
+	if other && claim != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request", "started_at names your own share; it cannot be given with principal naming someone else")
+		return
 	}
 	var channel store.Channel
 	// A moderator holds manage_channels or manages the channel (ADR-014
@@ -323,6 +382,14 @@ func (s *Server) handleVoiceShareStop(w http.ResponseWriter, r *http.Request) {
 			channel = ch
 		}
 	}
+	if other && !moderator {
+		// Someone else's stream is a moderator's to stop. A caller who got
+		// here is a member of the channel (a non-member was refused 404 above,
+		// so this says nothing about other channels), and the answer does not
+		// depend on whether the person they named shares, or exists.
+		s.denyForbidden(w, r, caller, errForbidden.Code, "only a manager of the channel or an operator can stop someone else's share")
+		return
+	}
 	if s.lk == nil {
 		writeError(w, http.StatusServiceUnavailable, schema.ErrorCodeVoiceNotConfigured, "voice is not configured on this server")
 		return
@@ -343,7 +410,7 @@ func (s *Server) handleVoiceShareStop(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
-	switch err := s.voice.stopShare(ctx, room, caller.ID, moderator, claim); {
+	switch err := s.voice.stopShare(ctx, room, caller.ID, target, moderator, claim); {
 	case errors.Is(err, errVoiceShareNotYours):
 		s.denyForbidden(w, r, caller, errForbidden.Code, "only the person sharing, a manager of the channel or an operator can stop a share")
 		return
@@ -459,7 +526,7 @@ func (p *voicePoller) claimRunning(ctx context.Context, r *voiceRoomState, princ
 // The row is written before the claim is answered, and a claim whose row
 // cannot be written is undone and its sources withdrawn: a share conchd
 // cannot account for does not start.
-func (p *voicePoller) claimShare(ctx context.Context, room store.VoiceRoom, principalID int64) (schema.VoiceShareV1, error) {
+func (p *voicePoller) claimShare(ctx context.Context, room store.VoiceRoom, principalID int64, quality *schema.VoiceShareQuality) (schema.VoiceShareV1, error) {
 	// The grant below lets the connection publish a microphone as well as
 	// the share, which is right only where every member may.
 	if !voiceRoomPublishes(room) {
@@ -488,16 +555,28 @@ func (p *voicePoller) claimShare(ctx context.Context, room store.VoiceRoom, prin
 		r.order.Unlock()
 		return schema.VoiceShareV1{}, errVoiceShareRoomGone
 	}
-	held := r.share
-	if held != nil && held.principalID != principalID {
+	held := r.shares[principalID]
+	if held == nil && len(r.shares) >= voiceShareCap {
 		p.mu.Unlock()
 		r.order.Unlock()
-		return schema.VoiceShareV1{}, errVoiceShareBusy
+		// The room is full. The cap is read after the entitlement, so a
+		// caller whose right was taken away is told that, not that the room
+		// is full; nothing is recorded, written or asked of LiveKit.
+		fctx, fcancel := context.WithTimeout(context.WithoutCancel(ctx), voiceEvictTimeout)
+		defer fcancel()
+		if err := p.shareEntitled(fctx, room, principalID); err != nil {
+			return schema.VoiceShareV1{}, err
+		}
+		return schema.VoiceShareV1{}, errVoiceShareFull
 	}
 	mine := held
 	if held == nil {
 		mine = &voiceShare{principalID: principalID, startedAt: p.now().Truncate(time.Millisecond), pending: true}
-		r.share = mine
+		if quality != nil {
+			q := *quality
+			mine.quality = &q
+		}
+		r.shares[principalID] = mine
 		delete(r.withdrawing, voiceWithdrawKey{principalID, voiceRolePerson})
 		delete(r.withdrawing, voiceWithdrawKey{principalID, voiceRoleScreen})
 		// A new share makes the end of the last one old news.
@@ -540,7 +619,7 @@ func (p *voicePoller) claimShare(ctx context.Context, room store.VoiceRoom, prin
 	p.grantCompanion(lctx, r, room, principalID)
 	if held != nil {
 		p.mu.Lock()
-		ended := r.retired || r.share != held
+		ended := r.retired || r.shares[principalID] != held
 		p.mu.Unlock()
 		if ended {
 			// A pass ended the share (it went idle, say) while it was
@@ -557,12 +636,24 @@ func (p *voicePoller) claimShare(ctx context.Context, room store.VoiceRoom, prin
 		if gone := p.roomRotatedUnder(ctx, lctx, r, room, principalID, false); gone {
 			return schema.VoiceShareV1{}, errVoiceShareRoomGone
 		}
+		// A holder's repeat with a body changes the declared quality: a
+		// presence frame, no row (design §3.1).
+		if quality != nil {
+			q := *quality
+			p.mu.Lock()
+			changed := held.quality == nil || *held.quality != q
+			held.quality = &q
+			p.mu.Unlock()
+			if changed {
+				p.notify(room.ChannelID)
+			}
+		}
 		return schema.VoiceShareV1{PrincipalID: principalID, StartedAt: schema.NewTimestamp(held.startedAt), Audio: true}, nil
 	}
 
 	r.order.Lock()
 	p.mu.Lock()
-	if r.retired || r.share != mine {
+	if r.retired || r.shares[principalID] != mine {
 		// Rotated while LiveKit was being asked: the room's deletion took
 		// the grant with it, and the share never started.
 		p.mu.Unlock()
@@ -578,13 +669,13 @@ func (p *voicePoller) claimShare(ctx context.Context, room store.VoiceRoom, prin
 	wctx, wcancel := context.WithTimeout(context.WithoutCancel(ctx), voiceEvictTimeout)
 	err = p.writeEvent(wctx, voiceEvent{
 		actor: fmt.Sprintf("principal:%d", principalID), action: store.AuditVoiceShareStarted, channelID: room.ChannelID,
-		detail: fmt.Sprintf("channel=%d audio=true", room.ChannelID), at: mine.startedAt,
+		detail: shareStartedDetail(room.ChannelID, mine.quality), at: mine.startedAt,
 	})
 	wcancel()
 	if err != nil {
 		p.mu.Lock()
-		if r.share == mine {
-			r.share = nil
+		if r.shares[principalID] == mine {
+			delete(r.shares, principalID)
 			r.owe(principalID)
 		}
 		p.mu.Unlock()
@@ -609,6 +700,17 @@ func (p *voicePoller) claimShare(ctx context.Context, room store.VoiceRoom, prin
 		return schema.VoiceShareV1{}, errVoiceShareRoomGone
 	}
 	return schema.VoiceShareV1{PrincipalID: principalID, StartedAt: schema.NewTimestamp(mine.startedAt), Audio: true}, nil
+}
+
+// shareStartedDetail is the detail of a voice_share_started row: the channel,
+// the sound the grant allows, and the quality the sharer declared, when they
+// did (design §5.6).
+func shareStartedDetail(channelID int64, quality *schema.VoiceShareQuality) string {
+	detail := fmt.Sprintf("channel=%d audio=true", channelID)
+	if quality != nil {
+		detail += fmt.Sprintf(" quality=%s/%d", quality.Resolution, quality.FrameRate)
+	}
+	return detail
 }
 
 // roomRotatedUnder reads from the store whether room was rotated while a
@@ -724,24 +826,33 @@ func (p *voicePoller) sharesWithheld(ctx context.Context, r *voiceRoomState) {
 		return
 	}
 	p.mu.Lock()
-	var holder int64
-	if r.share != nil {
-		holder = r.share.principalID
-	}
+	holders := sortedShareHolders(r)
 	p.mu.Unlock()
-	if holder == 0 {
-		return
+	// Every holder is read on its own: one person's loss ends their share
+	// and no other's.
+	for _, holder := range holders {
+		ok, err := p.s.store.Permitted(ctx, holder, schema.PermShareScreen)
+		switch {
+		case ctx.Err() != nil:
+			return
+		case err != nil:
+			slog.ErrorContext(ctx, "voice: read share_screen failed; ending the share", "channel", r.channelID, "principal", holder, "error", err)
+		case ok:
+			continue
+		}
+		p.endSharesOf(ctx, holder, r.channelID, voiceShareStopAccessLost)
 	}
-	ok, err := p.s.store.Permitted(ctx, holder, schema.PermShareScreen)
-	switch {
-	case ctx.Err() != nil:
-		return
-	case err != nil:
-		slog.ErrorContext(ctx, "voice: read share_screen failed; ending the share", "channel", r.channelID, "principal", holder, "error", err)
-	case ok:
-		return
+}
+
+// sortedShareHolders is r's share holders, started or pending, in id order.
+// The caller holds p.mu.
+func sortedShareHolders(r *voiceRoomState) []int64 {
+	pids := make([]int64, 0, len(r.shares))
+	for pid := range r.shares {
+		pids = append(pids, pid)
 	}
-	p.endSharesOf(ctx, holder, r.channelID, voiceShareStopAccessLost)
+	slices.Sort(pids)
+	return pids
 }
 
 // endSharesOf is the stop path of every revocation of share_screen or of a
@@ -765,7 +876,7 @@ func (p *voicePoller) endSharesOf(ctx context.Context, principalID, channelID in
 	p.mu.Lock()
 	var rooms []*voiceRoomState
 	for _, r := range p.rooms {
-		theirs := (r.share != nil && r.share.principalID == principalID) || r.claimer == principalID
+		theirs := r.shares[principalID] != nil || r.claimer == principalID
 		if theirs && (channelID == 0 || r.channelID == channelID) {
 			rooms = append(rooms, r)
 		}
@@ -806,7 +917,7 @@ func (p *voicePoller) endSharesOf(ctx context.Context, principalID, channelID in
 	var waits []chan struct{}
 	p.mu.Lock()
 	for r := range p.retiring {
-		if r.retiredShare != principalID || (channelID != 0 && r.channelID != channelID) {
+		if !slices.Contains(r.retiredShares, principalID) || (channelID != 0 && r.channelID != channelID) {
 			continue
 		}
 		if r.withdrawDone != nil {
@@ -860,7 +971,8 @@ func (p *voicePoller) grantCompanion(ctx context.Context, r *voiceRoomState, roo
 	// #898): a claim restores the screen by itself, never the audio. A
 	// holder claiming again keeps the consent they recorded, so their
 	// companion (perhaps a new connection) is restored to what they hold.
-	audio := r.share != nil && r.share.principalID == principalID && r.share.audioScope != ""
+	sh := r.shares[principalID]
+	audio := sh != nil && sh.audioScope != ""
 	p.mu.Unlock()
 	if !c.screen {
 		return
@@ -950,25 +1062,26 @@ func (p *voicePoller) withdrawAll(ctx context.Context, r *voiceRoomState, princi
 func (p *voicePoller) undoClaim(r *voiceRoomState, mine *voiceShare) {
 	r.order.Lock()
 	p.mu.Lock()
-	if r.share == mine {
-		r.share = nil
+	if r.shares[mine.principalID] == mine {
+		delete(r.shares, mine.principalID)
 		r.owe(mine.principalID)
 	}
 	p.mu.Unlock()
 	r.order.Unlock()
 }
 
-// stopShare ends room's share for callerID: their own, or, for an operator,
-// anyone's. A room with no share is left as it is. The share leaves presence
+// stopShare ends targetID's share in room for callerID: their own (targetID
+// is callerID), or, for a moderator, anyone's. A person with no share is left
+// as they are. The share leaves presence
 // and its row is written before LiveKit is asked to withdraw the sources; a
 // withdrawal that fails is retried by the passes, and a row that cannot be
 // written is logged: a stop is not refused for the sake of its record.
 //
 // claim, when not nil, is the started_at of the share the caller means: their
-// own. Unless the room's share is that one, held by the caller, nothing is
-// changed and errVoiceShareStale is returned, whoever the caller is; a
+// own (targetID is callerID then). Unless the caller's share is that one,
+// nothing is changed and errVoiceShareStale is returned, whoever the caller is; a
 // release that names its share is never a moderation stop.
-func (p *voicePoller) stopShare(ctx context.Context, room store.VoiceRoom, callerID int64, operator bool, claim *schema.Timestamp) error {
+func (p *voicePoller) stopShare(ctx context.Context, room store.VoiceRoom, callerID, targetID int64, operator bool, claim *schema.Timestamp) error {
 	r := p.roomNamed(room.RoomName)
 	if r == nil {
 		if claim != nil {
@@ -980,7 +1093,7 @@ func (p *voicePoller) stopShare(ctx context.Context, room store.VoiceRoom, calle
 	defer r.claims.Unlock()
 	r.order.Lock()
 	p.mu.Lock()
-	c := r.share
+	c := r.shares[targetID]
 	stale := claim != nil && (r.retired || c == nil || c.principalID != callerID || !c.startedAt.Equal(claim.Time()))
 	if stale || r.retired || c == nil {
 		p.mu.Unlock()
@@ -999,7 +1112,7 @@ func (p *voicePoller) stopShare(ctx context.Context, room store.VoiceRoom, calle
 		}
 		reason, actor = voiceShareStopOperator, callerID
 	}
-	r.share = nil
+	delete(r.shares, c.principalID)
 	r.owe(c.principalID)
 	stopped := p.shareStoppedLocked(r.channelID, c, actor, reason)
 	p.mu.Unlock()
@@ -1049,11 +1162,11 @@ func (p *voicePoller) shareStoppedLocked(channelID int64, c *voiceShare, actor i
 // withdrawn, and the row is returned for the caller to write. The caller holds
 // r.order and p.mu.
 func (p *voicePoller) endShareLocked(r *voiceRoomState, principalID int64, reason schema.VoiceShareEndReason) []voiceEvent {
-	c := r.share
-	if c == nil || c.pending || c.principalID != principalID {
+	c := r.shares[principalID]
+	if c == nil || c.pending {
 		return nil
 	}
-	r.share = nil
+	delete(r.shares, principalID)
 	r.owe(principalID)
 	return p.shareStoppedLocked(r.channelID, c, principalID, reason)
 }
@@ -1132,8 +1245,11 @@ type shareWithdrawal struct {
 func (p *voicePoller) judgeShareLocked(r *voiceRoomState, now time.Time, seen map[int64]livekit.Participant, fold voiceFold, keep map[int64]struct{}, lost map[int64]bool, since uint64) ([]voiceEvent, []shareWithdrawal, bool) {
 	var events []voiceEvent
 	changed := false
-	if c := r.share; c != nil && !c.pending {
-		pid := c.principalID
+	for _, pid := range sortedShareHolders(r) {
+		c := r.shares[pid]
+		if c.pending {
+			continue
+		}
 		part, here := seen[pid]
 		here = here && fold.direct[pid]
 		screen := fold.screens[pid] // zero when the person has no companion
@@ -1163,7 +1279,7 @@ func (p *voicePoller) judgeShareLocked(r *voiceRoomState, now time.Time, seen ma
 				events = append(events, p.endShareLocked(r, pid, voiceShareStopIdle)...)
 			}
 		}
-		if r.share == nil {
+		if r.shares[pid] == nil {
 			changed = true
 		}
 	}
@@ -1180,7 +1296,7 @@ func (p *voicePoller) judgeShareLocked(r *voiceRoomState, now time.Time, seen ma
 		quiet := owed && (stamp == 0 || stamp > since)
 		// The holder's own participants are let be, pending or not; a viewer
 		// is never the share's, and publishing anything is unclaimed.
-		if role != voiceRoleView && r.share != nil && r.share.principalID == pid {
+		if holder := r.shares[pid]; role != voiceRoleView && holder != nil {
 			if role != voiceRoleScreen {
 				return
 			}
@@ -1192,7 +1308,7 @@ func (p *voicePoller) judgeShareLocked(r *voiceRoomState, now time.Time, seen ma
 			// share is held, the companion's entry in withdrawing is this
 			// audio withdrawal's; a claim clears it and the share's end
 			// owes a whole one.
-			if r.share.audioScope != "" || !part.ScreenShareAudioPublished {
+			if holder.audioScope != "" || !part.ScreenShareAudioPublished {
 				if !quiet || stamp == 0 {
 					delete(r.withdrawing, key) // consented, or nothing left to withdraw
 				}
@@ -1315,8 +1431,9 @@ func (p *voicePoller) withdrawShares(ctx context.Context, r *voiceRoomState, lis
 	again := false
 	for _, w := range list {
 		p.mu.Lock()
-		holds := w.role != voiceRoleView && r.share != nil && r.share.principalID == w.principalID
-		consented := holds && r.share.audioScope != ""
+		sh := r.shares[w.principalID]
+		holds := w.role != voiceRoleView && sh != nil
+		consented := holds && sh.audioScope != ""
 		gone := r.retired
 		p.mu.Unlock()
 		if gone {

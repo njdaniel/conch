@@ -613,8 +613,8 @@ label {
      wider wraps or shrinks rather than widening the page (issue #467). */
   grid-template-columns: minmax(0, 1fr);
   grid-template-rows: auto minmax(0, 1fr) auto;
-  height: 100vh;
-  height: 100dvh;
+  height: calc(100vh - var(--notice-h, 0px));
+  height: calc(100dvh - var(--notice-h, 0px));
   /* viewport-fit=cover draws the page under a notch and the home indicator:
      pad for them at every width (zero where there are none, issue #929). */
   padding-inline: env(safe-area-inset-left) env(safe-area-inset-right);
@@ -1091,6 +1091,24 @@ label {
   border-radius: var(--radius-sm);
   background: var(--danger-bg);
   color: var(--danger);
+}
+
+.banner.update-notice {
+  /* The notice sits above the lobby; UpdateNotice measures it into
+     --notice-h and the lobby gives up that much height, so the page never
+     grows past the window. */
+  margin: 0;
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  background: transparent;
+  border: 1px solid var(--warn);
+  color: var(--warn);
+}
+
+.banner.update-notice p {
+  margin: 0;
 }
 
 .banner.stale {
@@ -2139,6 +2157,104 @@ label {
 .composer.narrowed .composer-label {
   color: var(--warn);
   font-weight: 600;
+}
+
+.composer-box {
+  position: relative;
+}
+
+/* The toolbar sits in the box's row, after the text: no extra height. */
+.composer-formatting {
+  display: flex;
+  flex: none;
+  gap: 2px;
+  align-self: flex-end;
+}
+
+.composer-formatting button {
+  min-width: 1.75rem;
+  min-height: 1.75rem;
+  padding: 0 0.3rem;
+  font-size: var(--small);
+}
+
+.format-toggle {
+  display: none;
+  min-width: 1.75rem;
+  min-height: 1.75rem;
+  padding: 0 0.3rem;
+}
+
+/* Where the row is too narrow to hold the toolbar beside the text (a phone, a
+   tablet, a window at 200%: it would squeeze the textarea to nothing), it is
+   one small button and the toolbar opens above the box on demand, over the
+   log, and takes no room while closed. */
+@media (max-width: 1199px) {
+  .format-toggle {
+    display: inline-flex;
+    align-items: center;
+  }
+
+  .composer-formatting {
+    display: none;
+  }
+
+  .composer-formatting.open {
+    display: flex;
+    position: absolute;
+    bottom: calc(100% + var(--s1));
+    left: 0;
+    padding: var(--s1);
+    background: var(--raised);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius);
+  }
+}
+
+.composer-formatting code {
+  font-size: var(--small);
+}
+
+.spoiler > button {
+  display: inline;
+  min-width: 0;
+  min-height: 0;
+  padding: 0.1rem 0.35rem;
+  font-size: 0.85em;
+}
+
+.spoiler:not(.revealed) > button {
+  color: var(--muted);
+  background: var(--hover);
+}
+
+.spoiler-content {
+  margin-left: 0.25rem;
+  background: var(--raised);
+}
+
+.message .body pre,
+.message .body blockquote,
+.version-body pre,
+.version-body blockquote {
+  margin: 0.35rem 0;
+}
+
+.message .body pre,
+.version-body pre {
+  padding: var(--s2);
+  overflow-x: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+
+.message .body blockquote,
+.version-body blockquote {
+  padding-left: var(--s3);
+  border-left: 3px solid var(--border-strong);
 }
 
 .composer-box {
@@ -3790,8 +3906,8 @@ button.link {
 @media (max-width: 699px) {
   .lobby.phone {
     position: relative;
-    height: 100vh;
-    height: var(--app-height, 100dvh);
+    height: calc(100vh - var(--notice-h, 0px));
+    height: calc(var(--app-height, 100dvh) - var(--notice-h, 0px));
     grid-template-rows: auto minmax(0, 1fr) auto auto;
     box-sizing: border-box;
     /* The hidden conversation is laid out behind the Voice view at the
@@ -4169,8 +4285,8 @@ button.link {
 @media (max-width: 699px) and (max-height: 560px) {
   .lobby.phone {
     height: auto;
-    min-height: 100vh;
-    min-height: var(--app-height, 100dvh);
+    min-height: calc(100vh - var(--notice-h, 0px));
+    min-height: calc(var(--app-height, 100dvh) - var(--notice-h, 0px));
   }
 
   .lobby.phone .phone-nav {
@@ -5402,4 +5518,88 @@ button.link {
 
 .switcher-help {
   margin: 0;
+}
+
+/* Favorites, groups and their editor (issue #1493). */
+.channel-group-head {
+  margin: var(--s3) 0 var(--s1) var(--s2);
+  font-size: var(--small);
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.channel-group-head > button {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s1);
+  min-height: 2rem;
+  padding: 0 var(--s1);
+  background: transparent;
+  border: 0;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.channel-group-caret {
+  flex: none;
+  width: 1em;
+}
+
+.channel-group-name {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.channel-group > div > .hint {
+  margin: 0 0 0 var(--s3);
+}
+
+.edit-groups {
+  /* Contains its visually hidden status line (.vh is absolute), so that the
+     line scrolls with the channel list instead of landing below it and
+     lengthening the document when the list scrolls (issue #1493). */
+  position: relative;
+  display: grid;
+  gap: var(--s2);
+  margin-top: var(--s3);
+  justify-items: start;
+  min-width: 0;
+}
+
+.group-editor {
+  display: grid;
+  gap: var(--s2);
+  width: 100%;
+  min-width: 0;
+}
+
+.group-editor form,
+.group-editor li,
+.move-to-group {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: var(--s2);
+  min-width: 0;
+}
+
+.group-editor ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: var(--s2);
+}
+
+.group-editor li {
+  display: grid;
+}
+
+.group-editor input,
+.move-to-group select {
+  min-width: 0;
+  max-width: 100%;
+  min-height: 2.25rem;
 }

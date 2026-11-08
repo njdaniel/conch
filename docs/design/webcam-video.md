@@ -441,6 +441,8 @@ The call view is drawn **on the stage**, the element that carries the watched sh
 - **It closes** on **Hide video** or on leaving.
 - It is **not opened for people automatically** when someone else turns a camera on. Voice in Conch is per channel and the conversation is central (browser-ui-polish §1), so someone else's camera must not push the chat away or start using a phone's data (O8).
 
+**Streams share the grid.** A screen share ([voice-multi-share.md](voice-multi-share.md), #1483) is a tile in this grid beside the cameras, up to `voiceShareCap = 6` of them. It shows the sharer, the declared quality and a **Watch** button, and nothing is received until the viewer presses it (O8 holds for streams as it does for cameras). Stream tiles and camera tiles count together against the 3 × 3 grid below.
+
 **Tiles.** While the room has at most 9 people in voice, every person in voice gets a tile. A tile without a camera shows the person's initial, name and "Camera off". With more than 9 people, only the cameras get tiles (at most 9, by the cap), and everyone is on the roster as today.
 
 | Tiles | Desktop grid | Narrow (< 700 px) |

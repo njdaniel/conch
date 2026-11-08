@@ -291,6 +291,8 @@ Beyond their own acceptance criteria (#1109, #1110), each must return, per OS an
 
 ## 8. Threats and security review targets
 
+Several screen shares at once ([voice-multi-share.md](voice-multi-share.md), #1483) change nothing here: a phone watches and never shares (§3.4), and a stream is received only after the person presses Watch on its tile.
+
 | Threat | Boundary proposed | Verification |
 | --- | --- | --- |
 | The bearer leaks from the phone (backup, another app, logs, a crash report) | Android: Keystore-backed storage with `allowBackup` off for the credential; iOS: Keychain with `kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly` ("Items with this attribute do not migrate to a new device", verified-by-docs). Never in argv, logs, analytics or the URL (the WS ticket is single-use and is the one query credential, as in the browser) | a receipt that a device backup and restore to a second device yields no sign-in; a log scan in every experiment |
