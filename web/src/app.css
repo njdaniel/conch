@@ -3386,18 +3386,24 @@ body:has(.call-view.compact, .call-stage.compact) .dock {
   padding-top: 0;
 }
 
+/* The compact header is one row where it fits and wraps where it doesn't: on
+   a 390 px phone the channel, "Sharing: …" and the voice status would
+   otherwise run off screen (#1498). */
 .call-view.compact .call-heading,
 .call-stage.compact .call-heading {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: var(--s2);
+  gap: 0 var(--s2);
+  min-width: 0;
 }
 
 .call-view.compact .call-context,
 .call-view.compact .voice-sub,
 .call-stage.compact .call-context,
 .call-stage.compact .voice-sub {
-  flex-wrap: nowrap;
+  flex-wrap: wrap;
+  min-width: 0;
 }
 
 .call-view.compact .call-title,

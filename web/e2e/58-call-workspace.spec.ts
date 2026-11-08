@@ -332,6 +332,13 @@ test.describe('the persistent call workspace', () => {
       await expect(phoneStage.locator('.call-context')).toContainText('Sharing: alice');
       await expect(phoneStage.locator('.voice-sub')).toContainText('Microphone in use');
       await expect(phoneStage.locator('.voice-sub')).toContainText('Push to talk.');
+      // The header's text is on screen, not only in the DOM: every piece of
+      // the context and status rows lies inside the 390 px viewport.
+      const offscreen = await phoneStage.locator('.call-context > *, .voice-sub > *').evaluateAll((parts) => parts
+        .map((part) => ({ text: part.textContent, box: part.getBoundingClientRect() }))
+        .filter(({ box }) => box.width > 0 && (box.left < 0 || box.right > window.innerWidth))
+        .map(({ text, box }) => `${String(text)} (${String(Math.round(box.left))}..${String(Math.round(box.right))})`));
+      expect(offscreen, 'header parts outside the viewport').toEqual([]);
       await phoneStage.getByRole('button', { name: '#voice-room', exact: true }).click();
       await expectComposerShown(b.page);
       await phoneStage.getByRole('button', { name: 'Expand', exact: true }).click();
