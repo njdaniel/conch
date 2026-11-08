@@ -4,6 +4,8 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/njdaniel/conch/pkg/schema"
 )
 
 // TestPreviewCoverage: the preview phase has a refusal row for every route of
@@ -80,6 +82,36 @@ func TestCheckExempt(t *testing.T) {
 				t.Fatalf("checkExempt = %v, want %q", err, tc.wantErr)
 			case tc.wantErr == "" && !slices.Equal(got, tc.want):
 				t.Errorf("checkExempt = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestExemptDenials: every exempt-route preview_read_only row must be
+// anonymous and name no target; a wrongly attributed row fails even when a
+// correct one is present.
+func TestExemptDenials(t *testing.T) {
+	row := func(actor, subject, detail string) schema.AuditEventV1 {
+		return schema.AuditEventV1{Actor: actor, Subject: subject, Detail: detail}
+	}
+	good := row("anonymous", "POST /v1/hooks/{token}", "preview_read_only")
+	targets := []int64{41, 42}
+	for _, tc := range []struct {
+		name    string
+		rows    []schema.AuditEventV1
+		want    int
+		wantErr bool
+	}{
+		{"one valid row", []schema.AuditEventV1{good}, 1, false},
+		{"none", nil, 0, false},
+		{"a preview_as row is not exempt", []schema.AuditEventV1{row("principal:7", "GET /v1/x", "preview_read_only preview_as=41")}, 0, false},
+		{"valid plus wrongly attributed", []schema.AuditEventV1{good, row("principal:41", "POST /v1/hooks/{token}", "preview_read_only")}, 2, true},
+		{"anonymous but names a target", []schema.AuditEventV1{row("anonymous", "POST /v1/hooks/{token}", "preview_read_only 42")}, 1, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			n, err := exemptDenials(tc.rows, targets)
+			if (err != nil) != tc.wantErr || n != tc.want {
+				t.Fatalf("exemptDenials = %d, %v; want %d, error %v", n, err, tc.want, tc.wantErr)
 			}
 		})
 	}

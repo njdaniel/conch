@@ -511,10 +511,17 @@ func (p *preview) aliceAndBob(pp *previewPeople, hiding bool) error {
 			want int // her status
 		}{
 			{"/v1/directory/channels?scope=all", http.StatusForbidden},
-			{"/v1/directory/members?q=", http.StatusOK},
 			{"/v1/directory/members?limit=200", http.StatusOK},
 			{"/v1/directory/members?limit=1", http.StatusOK},
-			{"/v1/directory/members?cursor=1", http.StatusOK},
+			// The cursor is "after" (the handler reads only after and
+			// limit): pages that start at the owner, at her, and at the
+			// other side, whose id is the boundary a preview that used the
+			// administrator's view would expose.
+			{"/v1/directory/members?after=" + itoa(pp.ownerID), http.StatusOK},
+			{"/v1/directory/members?limit=1&after=" + itoa(pp.ownerID), http.StatusOK},
+			{"/v1/directory/members?after=" + itoa(t.who.id), http.StatusOK},
+			{"/v1/directory/members?limit=1&after=" + itoa(t.otherID-1), http.StatusOK},
+			{"/v1/directory/members?limit=1&after=" + itoa(t.otherID), http.StatusOK},
 		} {
 			prev, err := p.asID(pp.admin.api, v.path, t.who.id)
 			if err != nil {
@@ -1053,17 +1060,13 @@ func (p *preview) audit(pp *previewPeople) error {
 	if err != nil {
 		return err
 	}
-	n, anonymous := 0, 0
+	n := 0
+	exempt, err := exemptDenials(denied, []int64{pp.alice.id, pp.bob.id})
+	if err != nil {
+		return err
+	}
 	for _, e := range denied {
-		// A refusal of an exempt route has no caller: the actor is
-		// "anonymous", the subject the route pattern, the detail the code.
-		if e.Actor == "anonymous" && strings.HasPrefix(e.Detail, schema.ErrorCodePreviewReadOnly) {
-			anonymous++
-			for _, id := range []int64{pp.alice.id, pp.bob.id} {
-				if named := regexp.MustCompile(`\b` + itoa(id) + `\b`); named.MatchString(e.Actor + " " + e.Subject + " " + e.Detail) {
-					return fmt.Errorf("an exempt route's preview_read_only denial names the target %d: %+v", id, e)
-				}
-			}
+		if isExemptDenial(e) {
 			continue
 		}
 		m := previewAs.FindStringSubmatch(e.Detail)
@@ -1081,8 +1084,40 @@ func (p *preview) audit(pp *previewPeople) error {
 	if n == 0 {
 		return fmt.Errorf("no access_denied row records a refused preview: the denials are not audited")
 	}
-	if anonymous == 0 {
+	if exempt == 0 {
 		return fmt.Errorf("no access_denied row with actor anonymous and detail %s records a refused preview of an exempt route", schema.ErrorCodePreviewReadOnly)
 	}
 	return nil
+}
+
+// isExemptDenial: the row is a refusal of an exempt route under a preview
+// header, picked by its detail and its subject (the route pattern, which
+// begins with a method), never by its actor, so a wrongly attributed row is
+// still selected.
+func isExemptDenial(e schema.AuditEventV1) bool {
+	return strings.HasPrefix(e.Detail, schema.ErrorCodePreviewReadOnly) && !strings.Contains(e.Detail, "preview_as=") && exemptSubject.MatchString(e.Subject)
+}
+
+// exemptSubject is a route pattern: a method, a space and a path.
+var exemptSubject = regexp.MustCompile(`^(GET|POST|PUT|DELETE|PATCH) /`)
+
+// exemptDenials counts the exempt-route denials among rows and requires every
+// one to have the actor "anonymous" and to name none of the targets.
+func exemptDenials(rows []schema.AuditEventV1, targets []int64) (int, error) {
+	n := 0
+	for _, e := range rows {
+		if !isExemptDenial(e) {
+			continue
+		}
+		n++
+		if e.Actor != "anonymous" {
+			return n, fmt.Errorf("an exempt route's preview_read_only denial has actor %q, want anonymous: %+v", e.Actor, e)
+		}
+		for _, id := range targets {
+			if regexp.MustCompile(`\b` + itoa(id) + `\b`).MatchString(e.Actor + " " + e.Subject + " " + e.Detail) {
+				return n, fmt.Errorf("an exempt route's preview_read_only denial names the target %d: %+v", id, e)
+			}
+		}
+	}
+	return n, nil
 }
