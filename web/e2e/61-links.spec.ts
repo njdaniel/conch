@@ -48,7 +48,7 @@ const hostile = [
   'https://exa%6dple.com/',
   'https://xn--e1afmkfd.xn--p1ai/',
   'https://аpple.com/',
-  'https://exa‮mple.com/',
+  `https://exa${String.fromCodePoint(0x202e)}mple.com/`,
   'https://exa​mple.com/',
   `https://example.com/${'a'.repeat(2049)}`,
   '<a href="javascript:alert(1)">literal tag</a>',
