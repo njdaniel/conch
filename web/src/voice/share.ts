@@ -98,7 +98,7 @@ export interface ShareRoom {
   // Changes the capture and its existing sender encodings without republishing.
   readonly setShareQuality: (quality: ShareQuality) => Promise<void>;
   // The latest stats of the received share or the sent top layer.
-  readonly readShareStats: (direction: ShareDirection) => Promise<ShareSample | null>;
+  readonly readShareStats: (direction: ShareDirection, principal?: number) => Promise<ShareSample | null>;
   // Publishes what was picked, with its simulcast layers.
   readonly publishScreen: () => Promise<void>;
   // Unpublishes and stops whatever was picked or published. Never rejects.
@@ -124,7 +124,7 @@ export type ShareEnd =
   | 'access_lost'
   | 'rotated'
   | 'idle'
-  | 'busy'
+  | 'full'
   | 'cancelled'
   | 'not_connected'
   | 'unavailable'
@@ -185,8 +185,22 @@ export function onTabSharing(callback: () => void): () => void {
 // s), and a reconnect after it. Past it the capture is stopped.
 export const resumeLimit = 45_000;
 
+// What a quality change while live came to: sent (or nothing to send), or
+// refused for now by conchd's bound on quality changes (#1546) and to be sent
+// again by itself in a moment (changeQuality).
+export type QualityAnswer = 'sent' | 'later';
+
+// The longest a quality change refused for the rate bound waits before it is
+// sent again, in seconds, whatever Retry-After asks for.
+export const qualityRetryLimit = 10;
+
+// What the sharer is told when conchd refused a quality change for its rate
+// bound: the picture already has the new quality, and the others' label
+// catches up.
+export const qualityLaterNote = 'Quality changes are limited to a few at a time: the others see the new quality on your stream in a moment.';
+
 export interface ShareApi {
-  readonly claim: (channel: string) => Promise<ShareClaimResult>;
+  readonly claim: (channel: string, quality?: ShareQuality) => Promise<ShareClaimResult>;
   // Releases the claim whose started_at is startedAt, and no other.
   readonly release: (channel: string, startedAt: string) => Promise<unknown>;
 }
@@ -195,7 +209,7 @@ type Refusal = Extract<ShareClaimResult, { ok: false }>;
 
 // refusalEnd names a refused claim.
 export function refusalEnd(r: Refusal): ShareEnd {
-  if (r.code === 'voice_share_busy') return 'busy';
+  if (r.code === 'voice_share_full') return 'full';
   if (r.code === 'voice_no_session') return 'not_connected';
   if (r.code === 'voice_unavailable' || r.failure === 'network') return 'unavailable';
   return 'failed';
@@ -223,6 +237,7 @@ export class ScreenShare {
   private attempt = 0;
   private channel: string | null = null;
   private room: ShareRoom | null = null;
+  private quality: ShareQuality = defaultShareQuality;
   // Whether presence has shown this person sharing since the last claim: a
   // presence without them after that is the server ending the share.
   private seen = false;
@@ -245,6 +260,12 @@ export class ScreenShare {
   // renewed. Kept apart from told, which a claim granted again clears: a
   // resume cut short by another lost connection is tried again.
   private renewal = false;
+  // A quality change refused for the rate bound, waiting to be sent again
+  // (changeQuality); the one quality change on its way, and whether a newer
+  // choice waits for it to be answered.
+  private qualityRetry: unknown = null;
+  private qualitySending: Promise<QualityAnswer> | null = null;
+  private qualityDue = false;
   // Whether the share is between rooms: from the renewal that took it off the
   // air until it is shared again or ends. The resume timer runs for the whole
   // of it, so a room renewed again meanwhile does not start the wait over.
@@ -262,6 +283,8 @@ export class ScreenShare {
 
   private set(state: ShareState): void {
     this.state = state;
+    // A quality change waits to be sent again only while the share is live.
+    if (state.kind !== 'sharing') this.endQualityRetry();
     noteSharing(this, state);
     this.onChange(state);
   }
@@ -273,13 +296,14 @@ export class ScreenShare {
     const mine = ++this.attempt;
     this.channel = channel;
     this.room = room;
+    this.quality = quality;
     this.seen = false;
     this.renewal = false;
     this.set({ kind: 'claiming' });
     // The channel as it is called now: renamed (issue #728) while the picker
     // was open, the next call names the new name.
     const at = () => this.channel ?? channel;
-    const first = await this.api.claim(channel);
+    const first = await this.api.claim(channel, this.quality);
     if (first.ok) this.granted(first.value.started_at);
     if (mine !== this.attempt) {
       // Stopped while the claim was on its way: a claim granted since is ours
@@ -309,7 +333,9 @@ export class ScreenShare {
     }
     this.set({ kind: 'publishing' });
     this.seen = false;
-    const again = await this.api.claim(at());
+    // The choice as it is now: one changed while the picker was open is the
+    // one conchd is told.
+    const again = await this.api.claim(at(), this.quality);
     if (again.ok) this.granted(again.value.started_at);
     if (mine !== this.attempt) {
       await room.stopScreen();
@@ -318,8 +344,6 @@ export class ScreenShare {
     }
     if (!again.ok) {
       const end = refusalEnd(again);
-      // A share now someone else's is not ours to stop.
-      if (end === 'busy') this.held = false;
       await room.stopScreen();
       await this.releaseHeld(at());
       if (mine === this.attempt) this.set({ kind: 'idle', ended: end });
@@ -344,6 +368,105 @@ export class ScreenShare {
     this.set({ kind: 'sharing', audio: captured.audio });
   }
 
+  // changeQuality keeps the declared choice for later claims and, while live,
+  // tells conchd so presence can show it: a holder's repeat claim with the
+  // new body (voice-multi-share.md §3.1, #1509). Its answer is a claim's:
+  //  - granted: the share of that started_at, which a conchd restarted
+  //    meanwhile may have issued anew;
+  //  - full or no session: the server no longer holds this share, which ends
+  //    as one the server ended (or waits, if presence said the room was
+  //    renewed);
+  //  - 429 rate_limited (#1546): conchd kept the quality it had. The page
+  //    keeps the person's choice (the encodings already carry it) and sends it
+  //    once more after Retry-After, the newest choice by then; 'later' says
+  //    so, for the sharer to be told.
+  // A change sent while a stop is under way, or after it, does not hold the
+  // share: a grant it is answered with then is released by its own
+  // started_at, so no claim outlives the share and takes a place under the
+  // cap (voice-multi-share.md §4).
+  //
+  // One change is on its way to conchd at a time. Choices made while one is
+  // are coalesced: when it is answered the newest is sent, once, so the last
+  // quality conchd applies is always the last one chosen, whatever order the
+  // network would have delivered several in. Every caller is answered with
+  // what the last send came to.
+  changeQuality(quality: ShareQuality): Promise<QualityAnswer> {
+    this.quality = quality;
+    this.endQualityRetry();
+    return this.queueQuality(true);
+  }
+
+  // queueQuality marks the current choice as to be sent and starts the one
+  // sender, unless it is running: it picks the choice up when its send is
+  // answered.
+  private queueQuality(retry: boolean): Promise<QualityAnswer> {
+    this.qualityDue = true;
+    if (this.qualitySending === null) {
+      this.qualitySending = this.drainQuality(retry).finally(() => {
+        this.qualitySending = null;
+      });
+    }
+    return this.qualitySending;
+  }
+
+  // drainQuality sends until no newer choice waits. A refusal for the rate
+  // bound stops it: its one later send (sendQuality) takes the newest choice
+  // by then.
+  private async drainQuality(retry: boolean): Promise<QualityAnswer> {
+    let answer: QualityAnswer = 'sent';
+    let first = true;
+    while (this.qualityDue) {
+      this.qualityDue = false;
+      answer = await this.sendQuality(first ? retry : true);
+      first = false;
+      if (answer === 'later') {
+        this.qualityDue = false;
+        break;
+      }
+    }
+    return answer;
+  }
+
+  // sendQuality sends the current choice as a holder's repeat claim; retry
+  // says whether a refusal for the rate bound may be sent once more.
+  private async sendQuality(retry: boolean): Promise<QualityAnswer> {
+    const channel = this.channel;
+    if (this.state.kind !== 'sharing' || channel === null) return 'sent';
+    const mine = this.attempt;
+    const answer = await this.api.claim(channel, this.quality);
+    if (mine !== this.attempt) {
+      // Stopped or ended meanwhile; a newer share's claim would have its own
+      // start, and is left alone.
+      if (answer.ok && this.ending()) await this.api.release(this.channel ?? channel, answer.value.started_at).catch(() => undefined);
+      return 'sent';
+    }
+    if (answer.ok) {
+      this.granted(answer.value.started_at);
+      return 'sent';
+    }
+    if (answer.status === 429 || answer.code === 'rate_limited') {
+      if (!retry) return 'sent';
+      const wait = Math.min(Math.max(answer.retryAfter ?? 1, 1), qualityRetryLimit);
+      this.qualityRetry = this.clock.setTimeout(() => {
+        this.qualityRetry = null;
+        if (mine === this.attempt) void this.queueQuality(false);
+      }, wait * 1000);
+      return 'later';
+    }
+    const end = refusalEnd(answer);
+    if (end === 'full' || end === 'not_connected') {
+      if (this.renewed()) this.suspend();
+      else await this.serverEnded();
+    }
+    return 'sent';
+  }
+
+  // endQualityRetry drops a quality change waiting to be sent again.
+  private endQualityRetry(): void {
+    if (this.qualityRetry !== null) this.clock.clearTimeout(this.qualityRetry);
+    this.qualityRetry = null;
+  }
+
   // stop ends the share from this side: the Stop sharing button, the
   // browser's own stop control, leaving voice, or a connection that was lost
   // and replaced. conchd is asked to end it while it is still held.
@@ -361,6 +484,11 @@ export class ScreenShare {
   // isIdle reads the state afresh: after an await it may have changed.
   private isIdle(): boolean {
     return this.state.kind === 'idle';
+  }
+
+  // ending reads afresh whether the share is over or being stopped.
+  private ending(): boolean {
+    return this.state.kind === 'idle' || this.state.kind === 'stopping';
   }
 
   // granted records a claim conchd granted: the share is ours, and is the
@@ -535,7 +663,7 @@ export class ScreenShare {
     const mine = ++this.attempt;
     this.reclaiming = true;
     this.seen = false;
-    const answer = await this.api.claim(channel);
+    const answer = await this.api.claim(channel, this.quality);
     this.reclaiming = false;
     // Renamed meanwhile (issue #728): what follows names the new name.
     const at = () => this.channel ?? channel;
@@ -555,9 +683,8 @@ export class ScreenShare {
         if (this.room === room) this.room = null;
         return;
       }
-      // Someone else claimed the share first, or this person may no longer
-      // share here: conchd said no, and the capture stops.
-      if (end === 'busy') this.held = false;
+      // The room is full, or this person may no longer share here: conchd said
+      // no, and the capture stops (voice-multi-share.md §5.1, #1509).
       await this.giveUp(end);
       return;
     }
@@ -634,20 +761,21 @@ export class ScreenShare {
     this.interrupted = false;
   }
 
-  // reconnected claims the share again after the SDK reconnected, as conchd
-  // asks: a connection made anew needs the sources granted to it again. A
-  // claim refused as busy means the share is gone; any other failure leaves
-  // it to the server's own passes.
+  // reconnected claims the caller's share again after the SDK reconnected, as
+  // conchd asks: a connection made anew needs the sources granted to it again,
+  // with the same declared quality. A claim refused as full means the share is
+  // gone; any other failure leaves it to the server's own passes
+  // (voice-multi-share.md §5.1, #1509).
   async reconnected(): Promise<void> {
     if (this.state.kind !== 'sharing' || this.channel === null) return;
     const mine = this.attempt;
-    const answer = await this.api.claim(this.channel);
+    const answer = await this.api.claim(this.channel, this.quality);
     if (mine !== this.attempt) return;
     if (answer.ok) {
       this.granted(answer.value.started_at);
       return;
     }
-    if (refusalEnd(answer) === 'busy') await this.serverEnded();
+    if (refusalEnd(answer) === 'full') await this.serverEnded();
   }
 
   private async serverEnded(): Promise<void> {
@@ -748,23 +876,15 @@ export function othersShareNote(who: string | null, audio: boolean): string {
 }
 
 // watchNote is what a page that is not watching is told of another's share:
-// where to see it (issue #642, N02). The one-sharer rule is oneSharerNote,
-// which stays Share screen's description.
+// where to see it (issue #642, N02). Multi-share puts Watch on each stream's
+// own tile instead of disabling Share screen (voice-multi-share.md §7.1, #1509).
 export function watchNote(who: string | null, audio: boolean): string {
   return `${othersShareNote(who, audio)} Watch to see it.`;
 }
 
-export const oneSharerNote = 'One person shares at a time.';
-
-// busyNote is why Share screen is off while someone else shares, and what a
-// claim refused for that is told: who shares, and that one person does.
-export function busyNote(who: string | null, audio: boolean): string {
-  return `${othersShareNote(who, audio)} ${oneSharerNote}`;
-}
-
-// endedNote says why the last share ended, or why one did not start. who is
-// the person presence shows sharing, when it shows someone.
-export function endedNote(end: ShareEnd, who: string | null): string {
+// endedNote says why the last share ended, or why one did not start. A full
+// refusal names the room's six-stream cap, not another sharer (#1509).
+export function endedNote(end: ShareEnd): string {
   switch (end) {
     case 'self':
       return 'You stopped sharing.';
@@ -784,8 +904,8 @@ export function endedNote(end: ShareEnd, who: string | null): string {
       return 'Your share ended because the voice room was renewed. Share again once you are back in voice.';
     case 'idle':
       return 'Your share ended because nothing was shared for a while.';
-    case 'busy':
-      return busyNote(who, false);
+    case 'full':
+      return 'This call already has 6 streams live.';
     case 'cancelled':
       return 'Nothing was shared: the picker was closed.';
     case 'not_connected':

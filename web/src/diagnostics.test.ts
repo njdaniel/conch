@@ -243,8 +243,8 @@ describe('what the voice client records', () => {
     const room = (): Room => ({
       connect: () => (refuse ? Promise.reject(new DOMException(`microphone refused for ${roomName}`, 'NotAllowedError')) : Promise.resolve()),
       publishMicrophone: () => Promise.resolve(),
-      setWatching: () => undefined,
-      attachShare: () => undefined,
+      setWatches: () => undefined,
+      attachStream: () => undefined,
       pickScreen: () => Promise.reject(new Error('no screen in this test')),
       setShareQuality: () => Promise.resolve(),
       readShareStats: () => Promise.resolve(null),

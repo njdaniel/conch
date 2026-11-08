@@ -181,16 +181,19 @@ import {
   voiceCameraV1,
   voiceCompanionResponseV1,
   voiceOccupancyV1,
-  voicePresenceV1,
+  voicePresenceV2,
   voiceSessionResponseV1,
   voiceShareV1,
+  voiceShareV2,
   type VoiceCameraV1,
   type VoiceCompanionRequestV1,
   type VoiceCompanionResponseV1,
   type VoiceOccupancyV1,
-  type VoicePresenceV1,
+  type VoicePresenceV2,
   type VoiceSessionResponseV1,
+  type VoiceShareRequestV1,
   type VoiceShareV1,
+  type VoiceShareV2,
   type VoiceTransmitReportV1,
   type VoiceTransmitState,
 } from './schema/voice';
@@ -2994,8 +2997,8 @@ export async function removeVoiceViewer(channel: string): Promise<ApiResult<null
 // getVoicePresence reads who is in a channel's voice, once. The page keeps
 // presence on its socket, joined or not, and reads this only to learn why
 // the server closed that socket (1008).
-export function getVoicePresence(channel: string): Promise<ApiResult<VoicePresenceV1>> {
-  return authed(call('voicePresence', { channel }), voicePresenceV1);
+export function getVoicePresence(channel: string): Promise<ApiResult<VoicePresenceV2>> {
+  return authed(call('voicePresence', { channel }, queryOf({ schema: 'conch.voice_presence.v2' })), voicePresenceV2);
 }
 
 // How a transmit report was answered. no_session is "go back to conchd" (409
@@ -3020,10 +3023,11 @@ export async function reportVoiceTransmit(channel: string, state: VoiceTransmitS
   return 'no_session';
 }
 
-// openVoiceSocket opens the presence stream of a channel's voice with a ticket:
-// the roster, and who is transmitting.
+// openVoiceSocket opens the v2 presence stream of a channel's voice with a
+// ticket: the roster, who is transmitting, camera claims and every live share
+// (voice-multi-share.md §2, #1509).
 export function openVoiceSocket(channel: string, events: SocketEvents): Promise<ApiResult<FeedSocket>> {
-  return connect('voice', 'voiceSocket', { channel }, events);
+  return connect('voice', 'voiceSocket', { channel, schema: 'conch.voice_presence.v2' }, events);
 }
 
 // Voice occupancy (issue #596): how many are in each channel's voice, for
@@ -3077,32 +3081,46 @@ export async function fileReport(id: number, issue: string): Promise<InviteResul
   return readSent(await authedSend(call('fileReport', { id }), request), problemReportV1);
 }
 
-// Screen share (issue #444, voice-control-plane.md section 12). The page
-// connects to the room first, then claims the room's share, then publishes:
-// the join token allows the microphone alone, and the claim is what lets that
-// connection publish a screen and its sound.
+// Screen share (issue #444, voice-control-plane.md section 12; multi-share
+// voice-multi-share.md §5.1, issue #1509). The page connects to the room first,
+// then claims the caller's own share, then publishes: the join token allows the
+// microphone alone, and the claim is what lets that connection publish a screen
+// and its sound.
 
-// A claim refused carries the status and the server's code, as a session
-// does: 409 voice_share_busy is someone else's share, 409 voice_no_session is
-// no connection to grant it to.
+// A claim refused carries the status and the server's code, as a session does:
+// 409 voice_share_full is a room at its six-stream cap, 409 voice_no_session
+// is no connection to grant it to (voice-multi-share.md §4), and 429
+// rate_limited a holder's quality change past its bound (#1546), with the
+// seconds its Retry-After asks for.
 export type ShareClaimResult =
-  | { readonly ok: true; readonly value: VoiceShareV1 }
-  | { readonly ok: false; readonly failure: ApiFailure; readonly status?: number; readonly code?: string };
+  | { readonly ok: true; readonly value: VoiceShareV1 | VoiceShareV2 }
+  | { readonly ok: false; readonly failure: ApiFailure; readonly status?: number; readonly code?: string; readonly retryAfter?: number };
 
-// claimVoiceShare claims the room's share for the caller, or claims it again
-// (after a reconnect), which keeps the share as it was.
-export async function claimVoiceShare(channel: string): Promise<ShareClaimResult> {
-  const reply = await authedPost(call('claimShare', { channel }));
+// claimVoiceShare claims the caller's own share, or claims it again after a
+// reconnect or quality change, which keeps the share as it was. A declared
+// quality is sent with the first claim, the post-picker claim and every later
+// claim (voice-multi-share.md §3.1, §5.1, issue #1509).
+export async function claimVoiceShare(channel: string, quality?: ShareQuality): Promise<ShareClaimResult> {
+  const request: VoiceShareRequestV1 | undefined = quality === undefined ? undefined : { quality: { resolution: quality.resolution, frame_rate: quality.frameRate } };
+  const reply = await authedPost(call('claimShare', { channel }), request);
   if (reply.kind === 'none') return { ok: false, failure: 'network' };
   if (reply.kind === 'unauthorized') return { ok: false, failure: 'unauthorized' };
   const res = reply.res;
   if (!res.ok) {
     const code = await refusalCode(res);
-    return code === undefined ? { ok: false, failure: 'invalid', status: res.status } : { ok: false, failure: 'invalid', status: res.status, code };
+    const retryAfter = Number.parseInt(res.headers.get('Retry-After') ?? '', 10);
+    return {
+      ok: false,
+      failure: 'invalid',
+      status: res.status,
+      ...(code === undefined ? {} : { code }),
+      ...(res.status === 429 && Number.isFinite(retryAfter) && retryAfter >= 0 ? { retryAfter } : {}),
+    };
   }
   try {
     const parsed: unknown = await res.json();
-    if (fromServer(voiceShareV1)(parsed).length === 0) return { ok: true, value: parsed as VoiceShareV1 };
+    if (quality !== undefined && fromServer(voiceShareV2)(parsed).length === 0) return { ok: true, value: parsed as VoiceShareV2 };
+    if (quality === undefined && fromServer(voiceShareV1)(parsed).length === 0) return { ok: true, value: parsed as VoiceShareV1 };
   } catch {
     // Fall through.
   }

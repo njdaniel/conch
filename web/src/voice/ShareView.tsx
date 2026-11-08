@@ -1,17 +1,21 @@
-// The watch view (issue #444): someone's shared screen, with its sound on a
-// volume and a mute of its own, apart from voice. It is open only while this
-// page watches. The SDK sizes what it receives to this view (adaptive stream),
-// so a small view or a phone gets a smaller layer than a full screen, and a
-// closed view gets none. It asks for no device.
+// The watch view (issue #444; multi-share voice-multi-share.md §7.1, issue
+// #1509): one watched stream, with its sound on a volume and a mute of its own,
+// apart from voice and every other watched stream. It is open only while this
+// page watches that stream. An unfocused stream is held to the lowest layer;
+// the focused one may take the top layer, which the SDK sizes to this view
+// (adaptive stream), so a phone gets a smaller layer than a full-screen
+// desktop, and a closed view gets none (voice-multi-share.md §8). It asks for
+// no device.
 import { useEffect, useRef, useState } from 'react';
 import { Glyph } from '../Icons';
 import type { VoiceClient, VoiceState } from './connection';
 import { shareReadout } from './sdk';
 import type { ShareDirection, ShareSample } from './share';
 
-// ShareReadout samples only the watched picture or the local screen's top
-// layer. The first sample has no bitrate; the next, about a second later, does.
-export function ShareReadout({ client, direction, prefix = '' }: { readonly client: VoiceClient; readonly direction: ShareDirection; readonly prefix?: string }) {
+// ShareReadout samples only the selected watched picture or the local screen's
+// top layer. The first sample has no bitrate; the next, about a second later,
+// does.
+export function ShareReadout({ client, direction, principal, prefix = '' }: { readonly client: VoiceClient; readonly direction: ShareDirection; readonly principal?: number; readonly prefix?: string }) {
   const [text, setText] = useState<string | null>(null);
   const previous = useRef<ShareSample | null>(null);
   useEffect(() => {
@@ -20,7 +24,7 @@ export function ShareReadout({ client, direction, prefix = '' }: { readonly clie
     previous.current = null;
     setText(null);
     const read = async () => {
-      const sample = await client.readShareStats(direction);
+      const sample = await client.readShareStats(direction, principal);
       if (!live) return;
       setText(shareReadout(sample, previous.current));
       // A missing sample resets the baseline.
@@ -32,7 +36,7 @@ export function ShareReadout({ client, direction, prefix = '' }: { readonly clie
       live = false;
       if (timer !== null) window.clearTimeout(timer);
     };
-  }, [client, direction]);
+  }, [client, direction, principal]);
   return text === null ? null : <span className="share-readout">{prefix}{text}</span>;
 }
 
@@ -40,27 +44,38 @@ export function ShareReadout({ client, direction, prefix = '' }: { readonly clie
 // requestFullscreen for other elements.
 type AppleVideo = HTMLVideoElement & { readonly webkitEnterFullscreen?: () => void };
 
+// ShareView plays one watched publisher's screen and sound with independent
+// controls and an optional focus action (voice-multi-share.md §7.1, #1509).
 export function ShareView({
   client,
   state,
+  principal,
   name,
   audio,
-  volume,
+  quality,
+  volume: keptVolume,
   onVolumeChange,
+  onFocus,
 }: {
   readonly client: VoiceClient;
   readonly state: VoiceState;
+  // Whose stream it is: the publisher its tracks are kept under.
+  readonly principal: number;
   // Who shares, as the panel names them, and whether presence says the share
   // has sound.
   readonly name: string;
   readonly audio: boolean;
-  // The viewer's volume belongs to the panel, so another share keeps it.
-  readonly volume: number;
-  readonly onVolumeChange: (volume: number) => void;
+  // The declared quality shown before and during watching; not a measurement.
+  readonly quality?: string | null;
+  // This stream's volume belongs to the panel, so moving its tile keeps it.
+  readonly volume?: number;
+  readonly onVolumeChange?: (volume: number) => void;
+  readonly onFocus?: () => void;
 }) {
   const box = useRef<HTMLDivElement>(null);
   const video = useRef<HTMLVideoElement>(null);
   const sound = useRef<HTMLAudioElement>(null);
+  const [volume, setOwnVolume] = useState(keptVolume ?? 1);
   const [muted, setMuted] = useState(false);
   // The browser would not start the sound without a tap (phones' autoplay
   // rules): the view offers one.
@@ -70,32 +85,33 @@ export function ShareView({
     const v = video.current;
     const a = sound.current;
     if (v === null || a === null) return;
-    client.attachShare({ video: v, audio: a });
+    client.attachStream(principal, { video: v, audio: a });
     return () => {
-      client.attachShare(null);
+      client.attachStream(principal, null);
     };
-  }, [client]);
+  }, [client, principal]);
 
-  // Deafened hears nothing, a share's sound included.
+  // Deafened hears nothing, a share's sound included. The SDK unmutes an
+  // element each time it attaches a track with sound to it (a track arriving,
+  // or attached again on a new connection), so the tile's own mute and volume
+  // are set again whenever this stream's tracks change.
+  const arrived = state.streamTracks.get(principal);
   useEffect(() => {
     const a = sound.current;
     if (a === null) return;
     a.volume = volume;
     a.muted = muted || state.deafened;
-  }, [volume, muted, state.deafened]);
+  }, [volume, muted, state.deafened, arrived]);
 
-  const hasSound = state.shareTracks.audio;
+  const tracks = arrived ?? { video: false, audio: false };
+  const hasSound = tracks.audio;
   useEffect(() => {
     const a = sound.current;
     if (!hasSound || a === null) return;
     let live = true;
     play(a).then(
-      () => {
-        if (live) setBlocked(false);
-      },
-      () => {
-        if (live) setBlocked(true);
-      },
+      () => { if (live) setBlocked(false); },
+      () => { if (live) setBlocked(true); },
     );
     return () => {
       live = false;
@@ -105,23 +121,16 @@ export function ShareView({
   const fullscreen = () => {
     const el = box.current;
     const v: AppleVideo | null = video.current;
-    if (el !== null && document.fullscreenEnabled) {
-      void el.requestFullscreen().catch(() => undefined);
-    } else if (v?.webkitEnterFullscreen !== undefined) {
-      v.webkitEnterFullscreen();
-    }
+    if (el !== null && document.fullscreenEnabled) void el.requestFullscreen().catch(() => undefined);
+    else if (v?.webkitEnterFullscreen !== undefined) v.webkitEnterFullscreen();
   };
 
   const tapToPlay = () => {
     const a = sound.current;
     if (a === null) return;
     play(a).then(
-      () => {
-        setBlocked(false);
-      },
-      () => {
-        setBlocked(true);
-      },
+      () => { setBlocked(false); },
+      () => { setBlocked(true); },
     );
   };
 
@@ -129,14 +138,15 @@ export function ShareView({
     <section aria-label="Shared screen" className="share-view">
       <p className="share-title">
         <Glyph name="screen" />
-        {name} is sharing{audio ? ', with sound' : ''}
-        <ShareReadout client={client} direction="received" />
+        {name} · LIVE{quality === null || quality === undefined ? null : <> · {quality}</>}{audio ? ' · with sound' : ''}
+        <ShareReadout client={client} direction="received" principal={principal} />
       </p>
       <div ref={box} className="share-frame">
         <video ref={video} aria-label={`${name}'s screen`} playsInline autoPlay muted />
-        {state.shareTracks.video ? null : <p className="hint">Waiting for the picture</p>}
+        {tracks.video ? null : <p className="hint">Waiting for the picture</p>}
+        {onFocus === undefined ? null : <button type="button" className="call-enlarge" aria-label={`Focus ${name}'s screen`} onClick={onFocus} />}
       </div>
-      <audio ref={sound} autoPlay />
+      <audio ref={sound} autoPlay aria-label={`${name}'s stream audio`} />
       <div className="share-controls">
         <button type="button" aria-pressed={muted} onClick={() => { setMuted(!muted); }}>
           <Glyph name="speaker" />
@@ -144,16 +154,18 @@ export function ShareView({
         </button>
         <label className="volume">
           <span className="label">Share volume</span>
-          <input type="range" min={0} max={1} step={0.05} value={volume} onChange={(e) => { onVolumeChange(Number(e.target.value)); }} />
+          <input type="range" min={0} max={1} step={0.05} value={volume} onChange={(e) => {
+            const next = Number(e.target.value);
+            setOwnVolume(next);
+            onVolumeChange?.(next);
+          }} />
         </label>
         <button type="button" onClick={fullscreen}>
           <Glyph name="fullscreen" />
           <span className="label">Full screen</span>
         </button>
-        <button type="button" onClick={() => { client.watch(false); }}>Stop watching</button>
-        {blocked && hasSound ? (
-          <button type="button" className="primary" onClick={tapToPlay}>Tap to play sound</button>
-        ) : null}
+        <button type="button" onClick={() => { client.watchStream(principal, false); }}>Stop watching</button>
+        {blocked && hasSound ? <button type="button" className="primary" onClick={tapToPlay}>Tap to play sound</button> : null}
       </div>
       {state.deafened && hasSound ? <p className="hint">Deafened: the share&apos;s sound is off too.</p> : null}
     </section>

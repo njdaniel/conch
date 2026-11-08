@@ -126,9 +126,9 @@ import {
   voiceCompanionRequestV1,
   voiceCompanionResponseV1,
   voiceOccupancyV1,
-  voicePresenceV1,
+  voicePresenceV2,
   voiceSessionResponseV1,
-  voiceShareV1,
+  voiceShareRequestV1,
   voiceTransmitReportV1,
   whoAmIResponseV1,
   wsTicketV1,
@@ -384,10 +384,10 @@ export const operations = {
   // Voice. The session grant holds the join token of the person's own voice:
   // the desktop renderer never holds it (D1-2), so it cannot ask for one.
   voiceSession: op('POST', '/v1/channels/{channel}/voice/session', 'bearer', { response: reply(voiceSessionResponseV1), renderer: false, credentials: ['rooms'] }),
-  voicePresence: op('GET', '/v1/channels/{channel}/voice', 'bearer', { response: reply(voicePresenceV1) }),
+  voicePresence: op('GET', '/v1/channels/{channel}/voice', 'bearer', { response: reply(voicePresenceV2) }),
   voiceTransmit: op('POST', '/v1/channels/{channel}/voice/transmit', 'bearer', { request: check(voiceTransmitReportV1) }),
   voiceOccupancy: op('GET', '/v1/voice/occupancy', 'bearer', { response: reply(voiceOccupancyV1) }),
-  claimShare: op('POST', '/v1/channels/{channel}/voice/share', 'bearer', { response: reply(voiceShareV1) }),
+  claimShare: op('POST', '/v1/channels/{channel}/voice/share', 'bearer', { request: check(voiceShareRequestV1) }),
   stopShare: op('DELETE', '/v1/channels/{channel}/voice/share', 'bearer'),
   // The viewer (issue #936, voice-control-plane.md §13): the second
   // participant, p<id>.view, that lets a tab watch beside the voice of

@@ -1072,9 +1072,13 @@ test('a push-to-talk whose reports are slow is audited as the reported pair and 
       await expect(roster).toContainText('bob');
       await expect(roster).not.toContainText(/Member \d+/);
 
-      // bob's share is announced by his name.
+      // bob's share is announced by his name: his stream's tile on alice's
+      // stage (voice-multi-share.md §7.1: every live stream is a tile, and
+      // the in-voice "is sharing a screen" line went with the one-share rule).
       await bob.getByRole('button', { name: 'Share screen' }).click();
-      await expect(alice).toContainText('bob is sharing a screen', { timeout: 15_000 });
+      const tile = a.page.locator('.call-share').filter({ hasText: 'bob · LIVE' });
+      await expect(tile).toBeVisible({ timeout: 15_000 });
+      await expect(tile).not.toContainText(/Member \d+/);
       await expect(alice).not.toContainText(/Member \d+/);
       await bob.getByRole('button', { name: 'Stop sharing' }).click();
 

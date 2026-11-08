@@ -1,10 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import type { ShareClaimResult, TransmitAnswer, VoiceSessionResult, VoiceViewerResult } from '../api';
-import type { VoicePresenceV1 } from '../schema/voice';
+import type { VoicePresenceV2 } from '../schema/voice';
 import type { CameraClaimResult } from '../api';
 import type { Camera, CameraProfile, KeptCamera } from './camera';
 import { VoiceClient, chosenGone, earlierGone, levelEvery, meterEvery, outputMoved, outputRefused, reconnectLimit, reportWait, type CameraTrack, type Microphone, type ModeStore, type Output, type Phase, type Processing, type ProcessingStore, type Room, type RoomEvents, type ShareSink } from './connection';
-import { resumeLimit, type Captured, type KeptScreen, type ShareQuality } from './share';
+import { qualityLaterNote, resumeLimit, type Captured, type KeptScreen, type ShareQuality } from './share';
 import { defaultTail } from './gate';
 import { FakeClock, settle } from './fakes';
 
@@ -88,10 +88,13 @@ class StubRoom implements Room {
     this.calls.push('microphone');
     return this.microphoneFailure === null ? Promise.resolve() : Promise.reject(this.microphoneFailure);
   };
-  setWatching = (on: boolean): void => {
-    this.watching.push(on);
+  // What setWatches asked for, in full, and whether it watched anything.
+  streamWatches: { readonly watched: number[]; readonly focused: number | null }[] = [];
+  setWatches = (watched: ReadonlySet<number>, focused: number | null): void => {
+    this.streamWatches.push({ watched: [...watched], focused });
+    this.watching.push(watched.size > 0);
   };
-  attachShare = (sink: ShareSink | null): void => {
+  attachStream = (_principal: number, sink: ShareSink | null): void => {
     this.sinks.push(sink);
   };
   pickScreen = (): Promise<Captured> => {
@@ -389,8 +392,11 @@ function setup(
     next(a);
     await settle();
   };
-  // What the share asked conchd, in order.
+  // What the share asked conchd, in order, and the quality each claim named;
+  // shareAnswers answers the claims in turn, then every claim is granted.
   const shares: string[] = [];
+  const shareQualities: (ShareQuality | undefined)[] = [];
+  const shareAnswers: ShareClaimResult[] = [];
   const trace: string[] = [];
   // What the camera asked of the rooms and of conchd, in order.
   const camLog: string[] = [];
@@ -438,9 +444,10 @@ function setup(
         rooms.push(room);
         return room;
       },
-      claimShare: (channel) => {
+      claimShare: (channel, quality) => {
         shares.push(`claim ${channel}`);
-        return Promise.resolve(claim);
+        shareQualities.push(quality);
+        return Promise.resolve(shareAnswers.shift() ?? claim);
       },
       stopShare: (channel) => {
         shares.push(`stop ${channel}`);
@@ -465,7 +472,7 @@ function setup(
     },
     () => clock.now,
   );
-  return { client, clock, rooms, asked, reports, reportedIn, shares, log, answer, trace, camLog, claimsWaiting, viewerLog };
+  return { client, clock, rooms, asked, reports, reportedIn, shares, shareQualities, shareAnswers, log, answer, trace, camLog, claimsWaiting, viewerLog };
 }
 
 const cameraGranted: CameraClaimResult = { ok: true, value: { principal_id: 7, started_at: '2026-10-16T00:00:01.000Z' } };
@@ -1230,8 +1237,8 @@ describe('leaving', () => {
 });
 
 // Issue #444: the share, watching and watch only, through the client.
-const presenceWith = (sharing: number | null): VoicePresenceV1 => ({
-  schema: 'conch.voice_presence.v1',
+const presenceWith = (sharing: number | null): VoicePresenceV2 => ({
+  schema: 'conch.voice_presence.v2',
   channel_id: 1,
   configured: true,
   available: true,
@@ -1242,7 +1249,7 @@ const presenceWith = (sharing: number | null): VoicePresenceV1 => ({
         can_publish: true,
         transmitting: false,
         joined_at: '2026-10-16T00:00:00.000Z',
-        ...(id === sharing ? { sharing: true } : {}),
+        ...(id === sharing ? { sharing: true, share_started_at: '2026-10-16T00:00:00.000Z' } : {}),
       })),
     },
   ],
@@ -1289,6 +1296,25 @@ describe('sharing through the client', () => {
     expect(t.shares).toEqual(['claim general', 'claim general', 'stop general']);
     expect(t.rooms[0]?.calls).toEqual(['pick', 'publish', 'stop']);
     expect(t.client.snapshot().share).toEqual({ kind: 'idle', ended: 'left' });
+  });
+
+  it('a quality change while live republishes the encodings, then re-POSTs; over the rate bound the sharer is told and it is sent again', async () => {
+    const t = await joined();
+    t.client.startShare();
+    await settle();
+    const changed: ShareQuality = { resolution: '720p', frameRate: 15 };
+    t.shareAnswers.push({ ok: false, failure: 'invalid', status: 429, code: 'rate_limited', retryAfter: 1 });
+    await t.client.setShareQuality(changed);
+    expect(t.rooms[0]?.qualities.at(-1)).toEqual(changed);
+    expect(t.shares).toEqual(['claim general', 'claim general', 'claim general']);
+    expect(t.shareQualities.at(-1)).toEqual(changed);
+    expect(t.client.snapshot().why).toBe(qualityLaterNote);
+    expect(t.client.snapshot().shareQuality).toEqual(changed);
+    t.clock.advance(1000);
+    await settle();
+    expect(t.shares).toEqual(['claim general', 'claim general', 'claim general', 'claim general']);
+    expect(t.shareQualities.at(-1)).toEqual(changed);
+    expect(t.client.snapshot().share).toEqual({ kind: 'sharing', audio: true });
   });
 
   it('a share does not outlive its connection: a reconnect through conchd ends it and tells conchd', async () => {
@@ -1357,7 +1383,7 @@ describe('sharing through the client', () => {
 });
 
 // Issue #516: the room renewed under a share.
-const renewedPresence = (endedFor7 = false): VoicePresenceV1 => ({
+const renewedPresence = (endedFor7 = false): VoicePresenceV2 => ({
   ...presenceWith(null),
   // Everyone left the old room; nobody is in the new one yet.
   rooms: [{ participants: [] }],
@@ -1402,47 +1428,47 @@ describe('a share across a renewed room', () => {
     const t = setup([okSession(), okSession()]);
     await joined(t);
     t.client.presence(presenceWith(8));
-    t.client.watch(true);
+    t.client.watchStream(8, true);
     t.client.presence(renewedPresence());
-    expect(t.client.snapshot().watching).toBe(true);
+    expect(t.client.snapshot().watched.has(8)).toBe(true);
     t.rooms[0]?.events?.onDisconnected('room_deleted');
     await settle();
     // In the new room, before the share is back.
     t.client.presence(presenceWith(null));
-    expect(t.client.snapshot().watching).toBe(true);
+    expect(t.client.snapshot().watched.has(8)).toBe(true);
     expect(t.rooms[1]?.watching).toEqual([true]);
     t.client.presence(presenceWith(8));
-    expect(t.client.snapshot().watching).toBe(true);
+    expect(t.client.snapshot().watched.has(8)).toBe(true);
     // Back for good: a share that ends now has ended.
     t.clock.advance(resumeLimit);
-    expect(t.client.snapshot().watching).toBe(true);
+    expect(t.client.snapshot().watched.has(8)).toBe(true);
     t.client.presence(presenceWith(null));
-    expect(t.client.snapshot().watching).toBe(false);
+    expect(t.client.snapshot().watched.has(8)).toBe(false);
   });
 
-  it("a watching page lets go if the share does not come back in time, or someone else's comes instead", async () => {
+  it('lets go if the share does not come back in time, but not when someone else starts beside it', async () => {
     const late = setup([okSession(), okSession()]);
     await joined(late);
     late.client.presence(presenceWith(8));
-    late.client.watch(true);
+    late.client.watchStream(8, true);
     late.client.presence(renewedPresence());
     late.clock.advance(resumeLimit - 1);
-    expect(late.client.snapshot().watching).toBe(true);
+    expect(late.client.snapshot().watched.has(8)).toBe(true);
     late.clock.advance(1);
-    expect(late.client.snapshot().watching).toBe(false);
+    expect(late.client.snapshot().watched.has(8)).toBe(false);
 
     const other = setup([okSession(), okSession()]);
     await joined(other);
     other.client.presence(presenceWith(8));
-    other.client.watch(true);
+    other.client.watchStream(8, true);
     // The room deleted before presence said anything.
     other.rooms[0]?.events?.onDisconnected('room_deleted');
     await settle();
     other.client.presence({
       ...presenceWith(null),
-      rooms: [{ participants: [{ principal_id: 9, can_publish: true, transmitting: false, joined_at: '2026-10-16T00:00:00.000Z', sharing: true }] }],
+      rooms: [{ participants: [{ principal_id: 9, can_publish: true, transmitting: false, joined_at: '2026-10-16T00:00:00.000Z', sharing: true, share_started_at: '2026-10-16T00:00:00.000Z' }] }],
     });
-    expect(other.client.snapshot().watching).toBe(false);
+    expect([...other.client.snapshot().watched]).toEqual([8]);
   });
 });
 
@@ -1452,23 +1478,125 @@ describe('watching', () => {
     await joined(t);
     expect(t.rooms[0]?.watching).toEqual([false]);
     const sink = { video: document.createElement('video'), audio: document.createElement('audio') };
-    t.client.attachShare(sink);
-    t.client.watch(true);
+    t.client.attachStream(8, sink);
+    t.client.presence(presenceWith(8));
+    t.client.watchStream(8, true);
     expect(t.rooms[0]?.watching).toEqual([false, true]);
     expect(t.rooms[0]?.sinks.at(-1)).toBe(sink);
-    t.rooms[0]?.events?.onShareTracks({ video: true, audio: true });
-    expect(t.client.snapshot().shareTracks).toEqual({ video: true, audio: true });
+    t.rooms[0]?.events?.onStreamTracks(8, { video: true, audio: true });
+    expect(t.client.snapshot().streamTracks.get(8)).toEqual({ video: true, audio: true });
     t.rooms[0]?.events?.onDisconnected('room_deleted');
     await settle();
     // The next connection is told before it connects.
     expect(t.rooms[1]?.watching).toEqual([true]);
     expect(t.rooms[1]?.sinks).toEqual([sink]);
-    expect(t.client.snapshot().shareTracks).toEqual({ video: false, audio: false });
+    // Nothing has arrived on it yet.
+    expect(t.client.snapshot().streamTracks.get(8)).toBeUndefined();
     t.client.presence(presenceWith(8));
-    expect(t.client.snapshot().watching).toBe(true);
+    expect(t.client.snapshot().watched.has(8)).toBe(true);
     t.client.presence(presenceWith(null));
-    expect(t.client.snapshot().watching).toBe(false);
+    expect(t.client.snapshot().watched.has(8)).toBe(false);
     expect(t.rooms[1]?.watching).toEqual([true, false]);
+  });
+
+  it('the phone switcher stops the previous stream before watching and focusing the next, picture and sound together', async () => {
+    const t = setup();
+    await joined(t);
+    const first = presenceWith(8);
+    t.client.presence({
+      ...first,
+      rooms: first.rooms.map((room) => ({
+        ...room,
+        participants: [...room.participants, { principal_id: 9, can_publish: true, transmitting: false, joined_at: '2026-10-16T00:00:00.000Z', sharing: true, share_started_at: '2026-10-16T00:01:00.000Z' }],
+      })),
+    });
+    t.client.switchStream(8);
+    t.client.switchStream(9);
+    // One step each: the previous stream goes in the same change that
+    // watches and focuses the next, so two never play at once.
+    expect(t.rooms[0]?.streamWatches).toEqual([
+      { watched: [], focused: null },
+      { watched: [8], focused: 8 },
+      { watched: [9], focused: 9 },
+    ]);
+    expect([...t.client.snapshot().watched]).toEqual([9]);
+    expect(t.client.snapshot().focusedShare).toBe(9);
+  });
+});
+
+// Two streams, 8's and 9's, beside this person (7), with whoever is listed.
+const twoStreams = (listed: readonly number[] = [7, 8, 9], live: readonly number[] = [8, 9]): VoicePresenceV2 => ({
+  ...presenceWith(null),
+  rooms: [
+    {
+      participants: listed.map((id) => ({
+        principal_id: id,
+        can_publish: true,
+        transmitting: false,
+        joined_at: '2026-10-16T00:00:00.000Z',
+        ...(live.includes(id) ? { sharing: true, share_started_at: `2026-10-16T00:0${String(id - 7)}:00.000Z` } : {}),
+      })),
+    },
+  ],
+});
+
+describe('watching several streams', () => {
+  it("each stream's tracks are its own: watching bob beside alice and stopping him leaves alice's picture as it was", async () => {
+    const t = setup();
+    await joined(t);
+    t.client.presence(twoStreams());
+    t.client.watchStream(8, true);
+    t.rooms[0]?.events?.onStreamTracks(8, { video: true, audio: true });
+    t.client.watchStream(9, true);
+    t.rooms[0]?.events?.onStreamTracks(9, { video: false, audio: true });
+    expect(t.client.snapshot().streamTracks.get(8)).toEqual({ video: true, audio: true });
+    t.client.watchStream(9, false);
+    // The SDK lets 9's tracks go: told as nothing arrived, for 9 alone.
+    t.rooms[0]?.events?.onStreamTracks(9, { video: false, audio: false });
+    expect(t.client.snapshot().streamTracks.get(8)).toEqual({ video: true, audio: true });
+    expect(t.client.snapshot().streamTracks.has(9)).toBe(false);
+    expect([...t.client.snapshot().watched]).toEqual([8]);
+  });
+
+  it('a sharer who leaves while this person stays is let go at once, not waited for', async () => {
+    const t = setup();
+    await joined(t);
+    t.client.presence(twoStreams());
+    t.client.watchStream(8, true);
+    t.client.watchStream(9, true);
+    t.client.focusShare(8);
+    // 8 left voice altogether; 7 and 9 are still here.
+    t.client.presence(twoStreams([7, 9], [9]));
+    expect([...t.client.snapshot().watched]).toEqual([9]);
+    expect(t.client.snapshot().focusedShare).toBeNull();
+    // Nothing waits for 8: back with a new share, it is not watched unasked.
+    t.client.presence(twoStreams());
+    expect([...t.client.snapshot().watched]).toEqual([9]);
+    t.clock.advance(resumeLimit);
+    expect([...t.client.snapshot().watched]).toEqual([9]);
+  });
+
+  it('a renewed room keeps every watch while this person is out of it, and a stream that is back is watched as before', async () => {
+    const t = setup([okSession(), okSession()]);
+    await joined(t);
+    t.client.presence(twoStreams());
+    t.client.watchStream(8, true);
+    t.client.watchStream(9, true);
+    // Everyone left the old room: this person is not listed either.
+    t.client.presence(twoStreams([], []));
+    expect([...t.client.snapshot().watched]).toEqual([8, 9]);
+    t.rooms[0]?.events?.onDisconnected('room_deleted');
+    await settle();
+    // In the new room before either stream is back: 8 is here, not yet
+    // sharing, and still waited for.
+    t.client.presence(twoStreams([7, 8], []));
+    expect([...t.client.snapshot().watched]).toEqual([8, 9]);
+    expect(t.rooms[1]?.streamWatches.at(-1)).toEqual({ watched: [8, 9], focused: null });
+    t.client.presence(twoStreams([7, 8, 9], [8]));
+    expect([...t.client.snapshot().watched]).toEqual([8, 9]);
+    // 9 never comes back: that watch alone ends with the wait.
+    t.clock.advance(resumeLimit);
+    expect([...t.client.snapshot().watched]).toEqual([8]);
   });
 });
 
@@ -2349,8 +2477,8 @@ const named = `?started_at=${cameraStarted}`;
 
 // Presence with this person (7) and another (8) in the room, whoever holds a
 // camera claim, and why this person's last one ended.
-const cameraPresence = (cameras: readonly number[], ended?: VoicePresenceV1['camera_ended']): VoicePresenceV1 => ({
-  schema: 'conch.voice_presence.v1',
+const cameraPresence = (cameras: readonly number[], ended?: VoicePresenceV2['camera_ended']): VoicePresenceV2 => ({
+  schema: 'conch.voice_presence.v2',
   channel_id: 1,
   configured: true,
   available: true,

@@ -18,7 +18,7 @@
 // Safari, iOS and Android. Those cells of the plan's section 2 are for a
 // person with the devices (#474).
 import type { Browser, BrowserContextOptions, Locator, Page } from '@playwright/test';
-import type { VoicePresenceV1 } from '../src/schema/voice';
+import type { VoicePresenceV2 } from '../src/schema/voice';
 import { expect, expectFits, openChannel, phones, rememberPushToTalk, showView, signIn, test } from './fixtures';
 import { dockerAvailable, startVoiceWorld, watchPage, type Member, type VoiceWorld, type Watch } from './voice-world';
 
@@ -148,7 +148,7 @@ async function inbound(page: Page): Promise<Inbound> {
 // connection to LiveKit, and the real ones are left as they are.
 async function addToRoom(page: Page, extra: number): Promise<void> {
   const crowded = (text: string): string => {
-    const doc = JSON.parse(text) as VoicePresenceV1;
+    const doc = JSON.parse(text) as VoicePresenceV2;
     const rooms = doc.rooms.map((room) =>
       room.audience !== undefined
         ? room
@@ -264,10 +264,9 @@ test.describe('screen share with LiveKit', () => {
   const picks = (page: Page) => page.evaluate(() => (window as unknown as { __picks: number }).__picks);
 
   async function watching(p: Someone, who = 'alice'): Promise<void> {
-    const voice = voiceRegion(p.page);
-    await voice.getByRole('button', { name: 'Watch' }).click({ timeout: 30_000 });
+    await p.page.getByRole('button', { name: 'Watch' }).click({ timeout: 30_000 });
     const view = shareView(p.page);
-    await expect(view).toContainText(`${who} is sharing`);
+    await expect(view).toContainText(`${who} · LIVE`);
     await expect(view.locator('audio')).toHaveJSProperty('muted', false);
     await expect(view.getByRole('button', { name: 'Mute share' })).toBeVisible();
     await expectPlaying(p.page);
@@ -342,6 +341,9 @@ test.describe('screen share with LiveKit', () => {
       await join(b, 'Watch only');
       await share(a);
       await watching(b);
+      // Focused, so bob takes the top layer: an unfocused watched tile is held
+      // to the lowest (voice-multi-share.md §8).
+      await shareView(b.page).getByRole('button', { name: "Focus alice's screen" }).click();
       await expect(shareView(b.page)).toContainText(/\d+×\d+ · \d+ fps · \d+\.\d Mbps/, { timeout: 30_000 });
 
       const voice = voiceRegion(a.page);
@@ -430,7 +432,7 @@ test.describe('screen share with LiveKit', () => {
 
       // B watches, having asked for no microphone, and the share's sound
       // plays at once while A's microphone is shut.
-      await expect(voiceRegion(b.page)).toContainText('alice is sharing a screen');
+      await expect(b.page.locator('.call-share').filter({ hasText: 'alice · LIVE' })).toBeVisible();
       await watching(b);
       expect(await micAsks(b.page), 'a watch-only page asks for no microphone').toBe(0);
       await expect(shareView(b.page)).toContainText('with sound', { timeout: 15_000 });
@@ -438,11 +440,10 @@ test.describe('screen share with LiveKit', () => {
       await expect.poll(async () => (await inbound(b.page)).audioBytes, { timeout: 15_000 }).toBeGreaterThan(sound + 2000);
       await expect(voiceRegion(b.page).getByRole('list', { name: 'In voice' })).toContainText('alice (sharing)');
 
-      // C cannot share, and is told A is (issue #591: Share screen is off
-      // while someone else shares, rather than refused when pressed).
+      // C may share beside A; nobody's stream locks the button.
       const cShare = voiceRegion(c.page).getByRole('button', { name: 'Share screen' });
-      await expect(cShare).toBeDisabled();
-      await expect(cShare).toHaveAccessibleDescription('alice is sharing a screen, with sound. Watch to see it. One person shares at a time.');
+      await expect(cShare).toBeEnabled();
+      await expect(cShare).toHaveAccessibleDescription('');
 
       // A stops; B's view closes, and B is told. A's own note is gone within
       // a few seconds (issue #642, N03).
@@ -550,10 +551,9 @@ test.describe('screen share with LiveKit', () => {
     }
   });
 
-  // Issue #591 (F14, F15). While bob shares, alice's Share screen is off and
-  // says who shares. Her own Stop watching says nothing; bob stopping a share
-  // she watches is said for a few seconds, and Share screen is on again.
-  test('while someone shares, Share screen is off and says who; a watched share that ends is said to have stopped', async ({ browser }) => {
+  // Stop watching says nothing; bob stopping a share alice watches is said
+  // for a few seconds. Sharing stays available beside bob's stream.
+  test('a watched share that ends is said to have stopped, and Share screen stays available throughout', async ({ browser }) => {
     const a = await person(browser, 'alice');
     const b = await person(browser, 'bob');
     try {
@@ -562,12 +562,9 @@ test.describe('screen share with LiveKit', () => {
       await share(b);
       const alice = voiceRegion(a.page);
       const button = alice.getByRole('button', { name: 'Share screen' });
-      const said = 'bob is sharing a screen, with sound. Watch to see it.';
-      await expect(button).toBeDisabled();
-      await expect(button).toHaveAccessibleDescription(`${said} One person shares at a time.`);
-      await expect(alice.getByText(said)).toBeVisible();
-      // The rule is read out, not drawn as a second line.
-      await expect(alice.locator('#voice-share-rule')).toHaveClass('vh');
+      await expect(button).toBeEnabled();
+      await expect(button).toHaveAccessibleDescription('');
+      await expect(a.page.locator('.call-share').filter({ hasText: 'bob · LIVE' })).toBeVisible();
 
       // Alice stops watching herself: nothing is said of bob's share.
       await watching(a, 'bob');
@@ -575,7 +572,7 @@ test.describe('screen share with LiveKit', () => {
       await expect(shareView(a.page)).toHaveCount(0);
       await a.page.waitForTimeout(1000);
       await expect(alice).not.toContainText('stopped sharing');
-      await expect(button).toBeDisabled();
+      await expect(button).toBeEnabled();
 
       await watching(a, 'bob');
       const note = alice.getByRole('status').filter({ hasText: 'bob stopped sharing.' });
@@ -585,7 +582,7 @@ test.describe('screen share with LiveKit', () => {
       await expect(shareView(a.page)).toHaveCount(0);
       await expect(button).toBeEnabled({ timeout: Math.max(1, stoppedAt + 3000 - Date.now()) });
       await expect(button).toHaveAccessibleDescription('');
-      await expect(alice).not.toContainText(said);
+      await expect(alice).not.toContainText('One person shares at a time.');
       await expect(note).toHaveCount(0, { timeout: Math.max(1, stoppedAt + 8000 - Date.now()) });
       // Said for a while, not a flash: it went no sooner than it should.
       expect(Date.now() - stoppedAt, 'how long the note was up').toBeGreaterThan(4000);
@@ -599,7 +596,7 @@ test.describe('screen share with LiveKit', () => {
       await expect(voiceRegion(b.page)).toContainText('You stopped sharing.');
       await share(a);
       await expect(voiceRegion(b.page)).not.toContainText('You stopped sharing.');
-      await expect(voiceRegion(b.page)).toContainText('alice is sharing a screen, with sound. Watch to see it.');
+      await expect(b.page.locator('.call-share').filter({ hasText: 'alice · LIVE' })).toBeVisible();
       // Ended here, and its audit row waited for, so a test after this one
       // counts only its own rows.
       await voiceRegion(a.page).getByRole('button', { name: 'Stop sharing' }).click();
@@ -639,7 +636,7 @@ test.describe('screen share with LiveKit', () => {
       await expect(voiceRegion(a.page)).toContainText('The voice room was renewed, and your share carried on in the new one.', { timeout: 30_000 });
       await expect(voiceRegion(a.page)).toContainText('You are sharing your screen with sound.');
       expect(await picks(a.page), 'the picker is not opened again').toBe(1);
-      await expect(shareView(b.page)).toContainText('alice is sharing', { timeout: 30_000 });
+      await expect(shareView(b.page)).toContainText('alice · LIVE', { timeout: 30_000 });
       await expect.poll(async () => (await inbound(b.page)).frames, { timeout: 30_000 }).toBeGreaterThan(10);
       const frames = (await inbound(b.page)).frames;
       await expect.poll(async () => (await inbound(b.page)).frames, { timeout: 15_000 }).toBeGreaterThan(frames);
@@ -710,7 +707,7 @@ test.describe('screen share with LiveKit', () => {
       await expect
         .poll(async () => (await shareRows()).slice(before).map((r) => `${r.action} ${/reason=(\w+)/.exec(r.detail)?.[1] ?? ''}`.trim()), { timeout: 15_000 })
         .toEqual(['voice_share_started', 'voice_share_stopped rotated', 'voice_share_started', 'voice_share_stopped rotated', 'voice_share_started']);
-      await expect(shareView(b.page)).toContainText('alice is sharing', { timeout: 30_000 });
+      await expect(shareView(b.page)).toContainText('alice · LIVE', { timeout: 30_000 });
       await expect.poll(async () => (await inbound(b.page)).frames, { timeout: 30_000 }).toBeGreaterThan(10);
       const frames = (await inbound(b.page)).frames;
       await expect.poll(async () => (await inbound(b.page)).frames, { timeout: 15_000 }).toBeGreaterThan(frames);
@@ -791,6 +788,9 @@ test.describe('screen share with LiveKit', () => {
       await share(a);
       await watching(b);
       await watching(c);
+      // Both are focused, the phone by its Watch: each may take the top
+      // layer, and adaptive stream sizes it to the element.
+      await shareView(b.page).getByRole('button', { name: "Focus alice's screen" }).click();
       await shareView(b.page).getByRole('button', { name: 'Full screen' }).click();
       await expect.poll(() => b.page.evaluate(() => document.fullscreenElement !== null)).toBe(true);
       // LiveKit moves each viewer to the layer its view needs as bandwidth
@@ -867,10 +867,8 @@ test.describe('screen share with LiveKit', () => {
     await showView(b.page, 'Voice');
     await watching(b);
     await showView(b.page, 'Chat');
-    // Share screen's description stays in the tree, but is not drawn under
-    // Chat.
-    await expect(b.page.locator('#voice-share-busy')).toHaveCount(1);
-    await expect(b.page.locator('#voice-share-busy')).toBeHidden();
+    // The focused stream stays on the stage under Chat.
+    await expect(shareView(b.page)).toBeVisible();
     const log = await box(b.page.getByRole('log', { name: 'Messages' }), 'the message log');
     // 200 px at 390×844 (issue #1028); #641's 120 px at the smaller phone,
     // where the picture of a share takes the room.
@@ -880,6 +878,40 @@ test.describe('screen share with LiveKit', () => {
     await voiceRegion(a.page).getByRole('button', { name: 'Stop sharing' }).click();
     await expect(voiceRegion(a.page)).toContainText('You stopped sharing.');
   }
+
+  // A phone's Watch focuses the stream (voice-multi-share.md §7.1 phone
+  // layout), and the Watch pressed goes with the still card: focus moves onto
+  // the stream's stage, so a keyboard's next Escape is the view's and returns
+  // to the grid (webcam §7.4 "Escape, or Back to grid, returns").
+  test('on a phone, Watch from the keyboard puts focus on the stream, and Escape then returns to the grid', async ({ browser }) => {
+    const a = await person(browser, 'alice');
+    const c = await person(browser, 'carol', narrow);
+    try {
+      await join(a, 'Join voice');
+      await join(c, 'Watch only');
+      await share(a);
+      const card = c.page.locator('.call-share').filter({ hasText: 'alice · LIVE' });
+      const watch = card.getByRole('button', { name: 'Watch' });
+      await expect(watch).toBeVisible({ timeout: 30_000 });
+      await watch.focus();
+      await c.page.keyboard.press('Enter');
+      await expect(shareView(c.page)).toBeVisible({ timeout: 30_000 });
+      await expect(card).toHaveClass(/main/);
+      await expect(card).toBeFocused();
+      await expect(c.page.getByRole('button', { name: 'Back to grid' })).toBeVisible();
+      await c.page.keyboard.press('Escape');
+      await expect(card).not.toHaveClass(/main/);
+      await expect(c.page.getByRole('button', { name: 'Back to grid' })).toHaveCount(0);
+      // Still watched, unfocused, and focus back on the tile's Focus.
+      await expect(shareView(c.page)).toBeVisible();
+      await expect(shareView(c.page).getByRole('button', { name: "Focus alice's screen" })).toBeFocused();
+      await voiceRegion(a.page).getByRole('button', { name: 'Stop sharing' }).click();
+      await expect(shareView(c.page)).toHaveCount(0, { timeout: 15_000 });
+    } finally {
+      await a.close();
+      await c.close();
+    }
+  });
 
   test('on a phone the share and watch controls fit the screen', async ({ browser }) => {
     for (const [size, options] of phones) {

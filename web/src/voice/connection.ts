@@ -24,8 +24,9 @@
 // every 10 ms, so that an onset opens the gate sooner.
 //
 // It also holds the screen share (issue #444): the sharer's state machine
-// (share.ts), whether this page watches someone else's share, and the
-// elements a watched share plays into.
+// (share.ts), which of the others' streams this page watches and which one is
+// focused (voice-multi-share.md §7.1, #1509), and the elements each watched
+// stream plays into.
 //
 // When the room is renewed (rotated, issue #516) every page reconnects to the
 // new one, and a share in progress is resumed by its sharer (share.ts). A page
@@ -69,14 +70,14 @@
 // local track alone (S5). The microphone and the camera are independent:
 // mute, deafen and the share leave the camera as it is.
 import type { CameraClaimResult, ShareClaimResult, TransmitAnswer, VoiceSessionResult, VoiceViewerResult } from '../api';
-import type { VoicePresenceV1, VoiceTransmitState } from '../schema/voice';
+import type { VoicePresenceV2, VoiceTransmitState } from '../schema/voice';
 import type { Clock } from '../state/feed';
 import { CameraClient, cameraOff, cameraOn, findCamera, type Camera, type CameraLoss, type CameraProfile, type CameraRoom, type CameraState } from './camera';
 import { afterDisconnect, afterRefusal, afterViewerRefusal, cameraAfter, retryDelay, type DisconnectCause, type Next } from './disconnect';
 import { clampTail, defaultTail, TransmitGate, type GateMode, type GateOptions } from './gate';
-import { cameraHolders, occupants, principalOf, sharer } from './presence';
+import { cameraHolders, occupants, principalOf, sharers } from './presence';
 import { ReportQueue, type ReportEvent } from './reports';
-import { defaultShareQuality, idleShare, resumeLimit, ScreenShare, type ScreenEnd, type ShareDirection, type ShareQuality, type ShareRoom, type ShareSample, type ShareState } from './share';
+import { defaultShareQuality, idleShare, qualityLaterNote, resumeLimit, ScreenShare, type ScreenEnd, type ShareDirection, type ShareQuality, type ShareRoom, type ShareSample, type ShareState } from './share';
 import { record } from '../diagnostics';
 
 // The names a browser gives the failures of a microphone it was asked for
@@ -191,8 +192,8 @@ export interface RoomEvents {
   readonly onSpeakers: (principals: readonly number[]) => void;
   // This page's published share is gone (share.ts).
   readonly onScreenEnded: (cause: ScreenEnd) => void;
-  // Which of a watched share's tracks have arrived.
-  readonly onShareTracks: (tracks: ShareTracks) => void;
+  // Which of one publisher's watched stream tracks have arrived (#1509).
+  readonly onStreamTracks: (principal: number, tracks: ShareTracks) => void;
   // The microphone was lost: its capture ended, or the device chosen is no
   // longer listed. The room has stopped the capture.
   readonly onMicrophoneLost: () => void;
@@ -261,11 +262,13 @@ export interface Room extends ShareRoom, CameraRoom {
   // The outputs the browser lists and names, read without asking for any
   // device.
   outputs: () => Promise<readonly Output[]>;
-  // Subscribes to a share's picture and sound, or lets them go. Microphones
-  // are always subscribed.
-  setWatching: (on: boolean) => void;
-  // Plays a watched share into these elements, or into none.
-  attachShare: (sink: ShareSink | null) => void;
+  // Subscribes to each watched publisher's share, picture and sound, with the
+  // focused stream left to adaptive stream (the top layer on a full stage)
+  // and every other held to the lowest; unwatched streams get nothing
+  // (voice-multi-share.md §7.1, §8). Microphones are always subscribed.
+  setWatches: (watched: ReadonlySet<number>, focused: number | null) => void;
+  // Plays one publisher's watched share into these elements, or into none.
+  attachStream: (principal: number, sink: ShareSink | null) => void;
   // Opens or closes the track: unmute or mute. Muted again after any republish.
   setSending: (on: boolean) => Promise<void>;
   setDeafened: (on: boolean) => void;
@@ -326,10 +329,13 @@ export interface VoiceState {
   readonly share: ShareState;
   // The capture and top-layer caps chosen by the sharer, kept locally.
   readonly shareQuality: ShareQuality;
-  // Whether this page watches the room's share, and which of its tracks
-  // have arrived.
-  readonly watching: boolean;
-  readonly shareTracks: ShareTracks;
+  // Which shares this page watches by publisher, which one is focused (the
+  // stage's, its layer left to adaptive stream), and which of each watched
+  // share's tracks have arrived (#1509). focusedShare is always one of
+  // watched, or null.
+  readonly watched: ReadonlySet<number>;
+  readonly focusedShare: number | null;
+  readonly streamTracks: ReadonlyMap<number, ShareTracks>;
   // The microphones to choose from, or null while they are not read (watch
   // only, listen only) or the browser does not name them.
   readonly microphones: readonly Microphone[] | null;
@@ -380,7 +386,7 @@ export interface VoiceEnv {
   readonly removeViewer?: (channel: string) => Promise<unknown>;
   readonly report: (channel: string, state: VoiceTransmitState, signal: AbortSignal) => Promise<TransmitAnswer>;
   readonly newRoom: () => Room;
-  readonly claimShare: (channel: string) => Promise<ShareClaimResult>;
+  readonly claimShare: (channel: string, quality?: ShareQuality) => Promise<ShareClaimResult>;
   // Releases the share whose claim started at startedAt (issue #487).
   readonly stopShare: (channel: string, startedAt: string) => Promise<unknown>;
   // The camera's claim, un-named or naming the claim it continues, and its
@@ -447,8 +453,9 @@ export const initialVoice: VoiceState = {
   reportNote: null,
   share: idleShare,
   shareQuality: defaultShareQuality,
-  watching: false,
-  shareTracks: { video: false, audio: false },
+  watched: new Set(),
+  focusedShare: null,
+  streamTracks: new Map(),
   microphones: null,
   microphone: null,
   inUse: null,
@@ -478,8 +485,6 @@ const beforePublish: ReadonlySet<CameraState['kind']> = new Set(['capturing', 'c
 // Without the camera's routes, every claim is refused.
 const noCamera = (): Promise<CameraClaimResult> => Promise.resolve({ ok: false, failure: 'invalid' });
 
-const noTracks: ShareTracks = { video: false, audio: false };
-
 // Nothing captured: no device in use, and nothing said of its processing.
 const nothingInUse = { inUse: null, reported: null } as const;
 
@@ -508,13 +513,12 @@ export class VoiceClient {
   private readonly camera: CameraClient;
   // This person, from the identity of the last session.
   private me: number | null = null;
-  private sink: ShareSink | null = null;
-  // Who presence last showed sharing, and whose share this page watches.
-  // awaiting is the timer of a watched share that went with its room: the
-  // watching ends if the share is not back by then.
-  private holder: number | null = null;
-  private watched: number | null = null;
-  private awaiting: unknown = null;
+  // Watches and their players are keyed by publisher. awaiting holds one
+  // resume timer per watched publisher whose stream went with its renewed
+  // room: that watch ends if the publisher's stream is not back by then
+  // (voice-multi-share.md §7.1).
+  private readonly streamSinks = new Map<number, ShareSink>();
+  private readonly awaiting = new Map<number, unknown>();
   // Who else holds a camera claim, from presence, and the elements the call
   // view plays cameras into: handed to every new connection.
   private cameraClaims: ReadonlySet<number> = new Set();
@@ -633,7 +637,7 @@ export class VoiceClient {
     this.camera.reset();
     // Joining is the person's own choice: a microphone missing before is
     // asked for again, as chosen.
-    this.set({ phase: 'connecting', channel, why: null, reportNote: null, watchOnly: options.watchOnly === true, viewer: options.watchOnly === true && options.beside === true, watching: false, shareTracks: noTracks, missing: false });
+    this.set({ phase: 'connecting', channel, why: null, reportNote: null, watchOnly: options.watchOnly === true, viewer: options.watchOnly === true && options.beside === true, watched: new Set(), focusedShare: null, streamTracks: new Map(), missing: false });
     void this.connect();
   }
 
@@ -859,19 +863,24 @@ export class VoiceClient {
   }
 
   // A quality choice applies to the next picker, and to a live capture and
-  // its sender without ending the publication. The local choice is kept even
-  // if this browser cannot apply it to the track already open.
+  // its sender without ending the publication; once the capture has it, conchd
+  // is told, for the others' label (share.ts changeQuality). The local choice
+  // is kept even if this browser cannot apply it to the track already open,
+  // and then conchd is not told: the stream did not change.
   async setShareQuality(quality: ShareQuality): Promise<void> {
     this.set({ shareQuality: quality });
     try {
       await this.room?.setShareQuality(quality);
     } catch {
       if (this.state.shareQuality === quality) this.set({ why: 'The share quality could not be changed on this capture.' });
+      return;
     }
+    const answer = await this.share.changeQuality(quality);
+    if (answer === 'later' && this.state.shareQuality === quality) this.set({ why: qualityLaterNote });
   }
 
-  readShareStats(direction: ShareDirection): Promise<ShareSample | null> {
-    return this.room?.readShareStats(direction).catch(() => null) ?? Promise.resolve(null);
+  readShareStats(direction: ShareDirection, principal?: number): Promise<ShareSample | null> {
+    return this.room?.readShareStats(direction, principal).catch(() => null) ?? Promise.resolve(null);
   }
 
   stopShare(): void {
@@ -1036,27 +1045,62 @@ export class VoiceClient {
     return { cameraTrack: track, cameraInUse: room?.cameraInUse() ?? null };
   }
 
-  // watch subscribes to the room's share, or lets it go.
-  watch(on: boolean): void {
-    this.endAwaiting();
-    this.watched = on ? this.holder : null;
-    this.room?.setWatching(on);
-    this.set(on ? { watching: true } : { watching: false, shareTracks: noTracks });
+  // watchStream subscribes to one publisher's share, picture and sound, or
+  // lets it go, without changing any other watch (voice-multi-share.md §7.1,
+  // #1509). This person's own stream is never watched here: they have the
+  // screen.
+  watchStream(principal: number, on: boolean): void {
+    if (on && principal === this.me) return;
+    this.endAwaiting(principal);
+    const watched = new Set(this.state.watched);
+    if (on) watched.add(principal);
+    else watched.delete(principal);
+    const focusedShare = !on && this.state.focusedShare === principal ? null : this.state.focusedShare;
+    this.watches(watched, focusedShare);
   }
 
-  // attachShare plays a watched share into the view's elements, on this
-  // connection and on every one after it.
-  attachShare(sink: ShareSink | null): void {
-    this.sink = sink;
-    this.room?.attachShare(sink);
+  // focusShare selects one watched stream for the stage, its layer left to
+  // adaptive stream rather than held to the lowest, or clears that choice;
+  // an unwatched publisher is never selected (#1509).
+  focusShare(principal: number | null): void {
+    const focusedShare = principal !== null && this.state.watched.has(principal) ? principal : null;
+    if (focusedShare === this.state.focusedShare) return;
+    this.watches(this.state.watched, focusedShare);
   }
 
-  // presence is each presence document the voice socket sends: whether this
-  // person still holds the share, whether anyone does, and, in this person's
-  // own document alone, why the server ended their last share.
-  presence(p: VoicePresenceV1): void {
-    const holder = sharer(p);
-    this.share.presence(holder === null ? 'none' : holder.principal === this.me ? 'me' : 'other', p.share_ended);
+  // switchStream is the phone's one-stream watch: every other watch ends and
+  // the chosen publisher becomes watched and focused, picture and sound
+  // together, in one step (voice-multi-share.md §7.1 phone layout).
+  switchStream(principal: number): void {
+    if (principal === this.me) return;
+    for (const other of this.state.watched) if (other !== principal) this.endAwaiting(other);
+    this.endAwaiting(principal);
+    this.watches(new Set([principal]), principal);
+  }
+
+  // watches sets what this page watches and which stream is focused, on the
+  // connection and in the state; a stream no longer watched loses its tracks.
+  private watches(watched: ReadonlySet<number>, focusedShare: number | null): void {
+    const streamTracks = new Map([...this.state.streamTracks].filter(([principal]) => watched.has(principal)));
+    this.room?.setWatches(watched, focusedShare);
+    this.set({ watched, focusedShare, streamTracks });
+  }
+
+  // attachStream plays one watched publisher into its tile, on this connection
+  // and every one after it, independently of every other tile (#1509).
+  attachStream(principal: number, sink: ShareSink | null): void {
+    if (sink === null) this.streamSinks.delete(principal);
+    else this.streamSinks.set(principal, sink);
+    this.room?.attachStream(principal, sink);
+  }
+
+  // presence is each v2 document the voice socket sends: every live sharer,
+  // whether this person still holds their own share, and, in this person's own
+  // document alone, why the server ended their last share (#1509).
+  presence(p: VoicePresenceV2): void {
+    const streams = sharers(p);
+    const mine = streams.some((s) => s.principal === this.me);
+    this.share.presence(mine ? 'me' : streams.length === 0 ? 'none' : 'other', p.share_ended);
     // Why this person's camera claim ended, if it did; and who else holds
     // one, whose cameras alone are received.
     this.camera.presence(p.camera_ended);
@@ -1064,43 +1108,44 @@ export class VoiceClient {
     if (this.me !== null) holders.delete(this.me);
     this.cameraClaims = holders;
     this.room?.setCameras(holders);
-    this.holder = holder?.principal ?? null;
-    if (this.state.watching) this.follow(holder?.principal ?? null, occupants(p).some((o) => o.principal === this.me));
+    this.follow(new Set(streams.map((s) => s.principal)), this.me !== null && occupants(p).some((o) => o.principal === this.me));
   }
 
-  // follow keeps a watching page on the share it watches. A share gone while
-  // this person is still listed in the room has ended. A share gone with
-  // this person (the room was renewed, and everyone left it) is waited for:
-  // the same person's share coming back is watched as before, anyone else's
-  // is not.
-  private follow(holder: number | null, listed: boolean): void {
-    if (holder !== null) {
-      const waited = this.awaiting !== null;
-      this.endAwaiting();
-      if (waited && holder !== this.watched) this.watch(false);
-      else this.watched = holder;
+  // follow keeps each watch on its publisher's stream, as the old single
+  // watch did for the room's one share. A watched stream gone while this
+  // person is still listed in the room has ended, now, whether or not its
+  // sharer is still listed. One gone with this person (the room was renewed,
+  // and everyone left it) is waited for: the same publisher's stream coming
+  // back is watched as before. A stream that is back ends the wait for it, and
+  // another publisher's never takes its place (voice-multi-share.md §7.1).
+  private follow(live: ReadonlySet<number>, listed: boolean): void {
+    for (const principal of [...this.state.watched]) {
+      if (live.has(principal)) this.endAwaiting(principal);
+      else if (this.awaiting.has(principal)) continue;
+      else if (listed) this.watchStream(principal, false);
+      else this.awaitShare(principal);
+    }
+  }
+
+  // awaitShare waits for the same publisher's watched share that went with its
+  // room; the timer ends that watch alone if it does not return (#1509).
+  private awaitShare(principal: number): void {
+    if (this.awaiting.has(principal)) return;
+    this.awaiting.set(principal, this.env.clock.setTimeout(() => {
+      this.awaiting.delete(principal);
+      this.watchStream(principal, false);
+    }, resumeLimit));
+  }
+
+  private endAwaiting(principal?: number): void {
+    if (principal === undefined) {
+      for (const timer of this.awaiting.values()) this.env.clock.clearTimeout(timer);
+      this.awaiting.clear();
       return;
     }
-    if (this.awaiting !== null) return;
-    if (listed || this.watched === null) {
-      this.watch(false);
-      return;
-    }
-    this.awaitShare();
-  }
-
-  // awaitShare waits for a watched share that went with its room.
-  private awaitShare(): void {
-    if (this.awaiting !== null) return;
-    this.awaiting = this.env.clock.setTimeout(() => {
-      this.awaiting = null;
-      this.watch(false);
-    }, resumeLimit);
-  }
-
-  private endAwaiting(): void {
-    if (this.awaiting !== null) this.env.clock.clearTimeout(this.awaiting);
-    this.awaiting = null;
+    const timer = this.awaiting.get(principal);
+    if (timer !== undefined) this.env.clock.clearTimeout(timer);
+    this.awaiting.delete(principal);
   }
 
   // leave shuts the gate, lets the last report go, and disconnects.
@@ -1139,7 +1184,7 @@ export class VoiceClient {
     this.room = null;
     this.channel = null;
     this.endAwaiting();
-    this.watched = null;
+    this.streamSinks.clear();
     // Nobody's camera is received out of voice; the next join reads presence.
     this.cameraClaims = new Set();
     this.switching = false;
@@ -1152,8 +1197,9 @@ export class VoiceClient {
       level: 0,
       speaking: new Set(),
       reportNote: null,
-      watching: false,
-      shareTracks: noTracks,
+      watched: new Set(),
+      focusedShare: null,
+      streamTracks: new Map(),
       microphones: null,
       ...nothingInUse,
       missing: false,
@@ -1368,14 +1414,14 @@ export class VoiceClient {
     // client that stops resumes nothing.
     if (next.kind === 'stop') void this.share.stop('lost');
     else void this.share.lost(roomDeleted);
-    // A watched share goes with a deleted room, and is waited for, whether
-    // presence has said so yet or not.
-    if (roomDeleted && next.kind !== 'stop' && this.state.watching && this.watched !== null) this.awaitShare();
+    // Every watched share goes with a deleted room and is waited for, whether
+    // presence has said so yet or not (#1509).
+    if (roomDeleted && next.kind !== 'stop') for (const principal of this.state.watched) this.awaitShare(principal);
     const room = this.room;
     this.room = null;
     // A switch under way goes with its connection; its choice is kept.
     this.switching = false;
-    this.set({ speaking: new Set(), level: 0, talking: false, transmitting: false, shareTracks: noTracks, cameraTracks: noCameraTracks, ...nothingInUse, ...this.cameraNow() });
+    this.set({ speaking: new Set(), level: 0, talking: false, transmitting: false, streamTracks: new Map(), cameraTracks: noCameraTracks, ...nothingInUse, ...this.cameraNow() });
     if (room !== null) void room.close().catch(() => undefined);
     this.act(next, mine);
   }
@@ -1469,9 +1515,14 @@ export class VoiceClient {
         if (mine !== this.attempt) return;
         this.share.ended(cause);
       },
-      onShareTracks: (tracks) => {
+      // Each stream's arrived tracks are its own tile's: one stream's never
+      // stands for another's, and a stream no longer watched has none.
+      onStreamTracks: (principal, tracks) => {
         if (mine !== this.attempt) return;
-        this.set({ shareTracks: tracks });
+        const streamTracks = new Map(this.state.streamTracks);
+        if (this.state.watched.has(principal)) streamTracks.set(principal, tracks);
+        else streamTracks.delete(principal);
+        this.set({ streamTracks });
       },
       onMicrophoneLost: () => {
         if (mine !== this.attempt) return;
@@ -1508,8 +1559,8 @@ export class VoiceClient {
     };
     // What a share needs is set before connecting, so that a track that
     // arrives with the connection already finds it.
-    room.setWatching(this.state.watching);
-    room.attachShare(this.sink);
+    room.setWatches(this.state.watched, this.state.focusedShare);
+    for (const [principal, sink] of this.streamSinks) room.attachStream(principal, sink);
     // No capture on a new room, so this only records the choice synchronously.
     void room.setShareQuality(this.state.shareQuality).catch(() => undefined);
     // So is what the call view receives, and where it plays.

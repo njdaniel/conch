@@ -468,7 +468,7 @@ describe('lobby', () => {
   });
 
   it('says voice is not set up when the server has no LiveKit, and offers no join', async () => {
-    const presence = { schema: 'conch.voice_presence.v1', channel_id: 1, configured: false, available: false, rooms: [] };
+    const presence = { schema: 'conch.voice_presence.v2', channel_id: 1, configured: false, available: false, rooms: [] };
     const sockets = socketsOf();
     serve({ ...asMember, '/v1/ws-tickets': () => json({ ticket: ticketValue, expires_at: created_at }, 201) });
     render(<App origin={origin} />);
