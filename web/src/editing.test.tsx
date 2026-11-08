@@ -535,7 +535,7 @@ describe('the (edited) marker', () => {
     expect(document.activeElement).toBe(marker);
   });
 
-  it('keeps a link in an earlier version inside the dialog’s Tab cycle', async () => {
+  it('marks and titles a link in an earlier version inside the dialog’s Tab cycle', async () => {
     vi.spyOn(api, 'messageRevisions').mockResolvedValue({
       ok: true,
       value: [
@@ -546,7 +546,10 @@ describe('the (edited) marker', () => {
     render(conversation([msg(1, { body: 'hello', edited_at: editedAt.toISOString() })]));
     fireEvent.click(screen.getByRole('button', { name: `Edited at ${when(editedAt.toISOString())}` }));
     const dialog = screen.getByRole('dialog', { name: 'Earlier versions' });
-    const link = await within(dialog).findByRole('link', { name: 'https://example.com/old' });
+    const link = await within(dialog).findByRole('link', { name: 'https://example.com/old (opens in a new tab)' });
+    expect(link.getAttribute('title')).toBe('https://example.com/old');
+    expect(link.querySelector('.vh')?.textContent).toBe('(opens in a new tab)');
+    expect(link.querySelector('.external-link-cue .icon')).not.toBeNull();
     const close = within(dialog).getByRole('button', { name: 'Close' });
     // The link comes before Close. Tab from Close, the last control, wraps to
     // the link; Shift+Tab from the link wraps back to Close.

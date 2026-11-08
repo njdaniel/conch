@@ -1,8 +1,19 @@
 import { Component, useId, useState, type ReactNode } from 'react';
+import { Glyph } from './Icons';
 import { linkify } from './linkify';
 
 function SafeLink({ text, href }: { readonly text: string; readonly href: string }) {
-  return <a href={href} target="_blank" rel="noopener noreferrer">{text}</a>;
+  const canonical = new URL(href).href;
+  return (
+    <a className="external-link" href={canonical} target="_blank" rel="noopener noreferrer" title={canonical} aria-label={`${text} (opens in a new tab)`}>
+      {text.slice(0, -1)}
+      <span className="external-link-tail">
+        {text.slice(-1)}
+        <span className="external-link-cue" aria-hidden="true"><Glyph name="external" /></span>
+      </span>
+      <span className="vh">(opens in a new tab)</span>
+    </a>
+  );
 }
 
 function Spoiler({ children }: { readonly children: ReactNode }) {

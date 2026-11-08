@@ -24,12 +24,39 @@ describe('message Markdown', () => {
     const body = '[https://bank.example](https://evil.example) https://example.com/b';
     const { container } = render(<Linkified text={body} />);
     const links = screen.getAllByRole('link');
-    expect(container.textContent).toBe(body);
+    const visible = container.cloneNode(true) as HTMLElement;
+    for (const hidden of visible.querySelectorAll('.vh')) hidden.remove();
+    expect(visible.textContent).toBe(body);
     expect(links.map((link) => link.getAttribute('href'))).toEqual(['https://bank.example/', 'https://evil.example/', 'https://example.com/b']);
     for (const link of links) {
       expect(link.getAttribute('target')).toBe('_blank');
       expect(link.getAttribute('rel')).toBe('noopener noreferrer');
     }
+  });
+
+  it.each([
+    { name: 'percent-encoding', text: 'https://example.com/a%2fb?x=hello%20world' },
+    { name: 'mixed case', text: 'HTTPS://Example.COM/a' },
+    { name: 'trailing host dot', text: 'https://Example.COM./a' },
+    { name: 'very long URL', text: `https://example.com/${'a'.repeat(300)}` },
+  ])('marks $name as external and titles it with its canonical address', ({ text }) => {
+    render(<Linkified text={text} />);
+    const canonical = new URL(text).href;
+    const link = screen.getByRole('link', { name: `${text} (opens in a new tab)` });
+    expect(link.getAttribute('href')).toBe(canonical);
+    expect(link.getAttribute('title')).toBe(canonical);
+    expect(link.textContent).toBe(`${text}(opens in a new tab)`);
+    expect(link.querySelector('.vh')?.textContent).toBe('(opens in a new tab)');
+    const cue = link.querySelector('.external-link-cue');
+    expect(cue?.getAttribute('aria-hidden')).toBe('true');
+    expect(cue?.querySelector('.icon')).not.toBeNull();
+  });
+
+  it('does not turn javascript into a link', () => {
+    const body = 'javascript:alert(1)';
+    const { container } = render(<Linkified text={body} />);
+    expect(screen.queryByRole('link')).toBeNull();
+    expect(container.textContent).toBe(body);
   });
 
   it('keeps hostile HTML, CSS and unsafe schemes as inert text', () => {

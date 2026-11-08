@@ -27,10 +27,17 @@ describe('links in a message body', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Search' }));
     await screen.findByText(/see /);
     const links = screen.getAllByRole('link');
-    expect(links.map((a) => a.getAttribute('href'))).toEqual(['https://example.com/a?b=1', 'https://example.com/t']);
-    for (const a of links) {
+    const written = ['https://example.com/a?b=1', 'https://example.com/t'];
+    expect(links.map((a) => a.getAttribute('href'))).toEqual(written);
+    for (const [index, a] of links.entries()) {
+      const text = written[index] ?? '';
       expect(a.getAttribute('rel')).toBe('noopener noreferrer');
       expect(a.getAttribute('target')).toBe('_blank');
+      expect(a.getAttribute('title')).toBe(new URL(text).href);
+      expect(a.textContent).toBe(`${text}(opens in a new tab)`);
+      expect(a.querySelector('.vh')?.textContent).toBe('(opens in a new tab)');
+      expect(a.querySelector('.external-link-cue .icon')).not.toBeNull();
+      expect(screen.getByRole('link', { name: `${text} (opens in a new tab)` })).toBe(a);
     }
     const item = links[0]?.closest('[data-message-id]');
     expect(item?.textContent).toContain('<b>');

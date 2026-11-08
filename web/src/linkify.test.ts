@@ -17,6 +17,8 @@ describe('linkify', () => {
     { name: 'uppercase scheme', body: 'HTTPS://EXAMPLE.COM/a', want: [l('HTTPS://EXAMPLE.COM/a', 'https://example.com/a')] },
     { name: 'javascript stays text', body: 'javascript:alert(1)', want: [t('javascript:alert(1)')] },
     { name: 'data stays text', body: 'data:text/html,<script>alert(1)</script>', want: [t('data:text/html,<script>alert(1)</script>')] },
+    { name: 'vbscript stays text', body: 'vbscript:msgbox(1)', want: [t('vbscript:msgbox(1)')] },
+    { name: 'file stays text', body: 'file:///etc/passwd', want: [t('file:///etc/passwd')] },
     { name: 'ftp stays text', body: 'ftp://x', want: [t('ftp://x')] },
     { name: 'www stays text', body: 'www.example.com', want: [t('www.example.com')] },
     { name: 'scheme alone stays text', body: 'http:// and https://', want: [t('http:// and https://')] },
@@ -46,6 +48,14 @@ describe('linkify', () => {
   ];
   it.each(cases)('$name', ({ body, want }) => {
     expect(linkify(body)).toEqual(want);
+  });
+
+  it('keeps the written host equal to the destination host in every safe case', () => {
+    for (const { body } of cases) {
+      for (const segment of linkify(body)) {
+        if (segment.kind === 'link') expect(new URL(segment.text).host).toBe(new URL(segment.href).host);
+      }
+    }
   });
 
   it('leaves a link longer than the cap as text', () => {
