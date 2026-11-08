@@ -30,7 +30,8 @@ import { SignInLink } from './SignInLink';
 import { AddDevice } from './AddDevice';
 import { AdminConsole } from './AdminConsole';
 import { canDo, memberLine } from './admin/permissions';
-import { ManifestReads, type ManifestReadControl } from './admin/AIAdminCard';
+import { ManifestReads } from './admin/AIAdminCard';
+import { useManifestReadControl } from './admin/manifestReads';
 import { Reauth } from './Reauth';
 import { PasswordSettings } from './Settings';
 import { Setup } from './Setup';
@@ -662,48 +663,7 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
     onPermissionsChanged: permissionsChanged,
     onDirectoryChanged: directoryChanged,
   });
-  const [unlistedAgents, setUnlistedAgents] = useState<ReadonlySet<number>>(new Set());
-  const [missingManifests, setMissingManifests] = useState<ReadonlySet<number>>(new Set());
-  const listedAgents = useRef<ReadonlySet<number>>(new Set());
-  // Only an accepted community-directory answer decides membership here; the
-  // open channel's members are a different list (#1562).
-  const acceptDirectory = useCallback((next: readonly ServerMemberV1[], afterChange: boolean) => {
-    const before = listedAgents.current;
-    const present = new Set(next.filter((member) => member.kind === 'agent').map((member) => member.id));
-    listedAgents.current = present;
-    setUnlistedAgents((current) => {
-      const changed = new Set(current);
-      for (const id of before) if (!present.has(id)) changed.add(id);
-      for (const id of present) changed.delete(id);
-      return changed.size === current.size && [...changed].every((id) => current.has(id)) ? current : changed;
-    });
-    if (!afterChange) return;
-    setMissingManifests((current) => {
-      const changed = new Set(current);
-      for (const id of present) changed.delete(id);
-      return changed.size === current.size ? current : changed;
-    });
-  }, []);
-  const stopManifestRead = useCallback((id: number) => {
-    setMissingManifests((current) => {
-      if (current.has(id)) return current;
-      const changed = new Set(current);
-      changed.add(id);
-      return changed;
-    });
-  }, []);
-  useEffect(() => {
-    if (signedIn) return;
-    listedAgents.current = new Set();
-    setUnlistedAgents(new Set());
-    setMissingManifests(new Set());
-  }, [signedIn]);
-  // One stop applies to both directory views. A routine reopen does not retry
-  // a 404; a post-change directory answer listing the agent does (#1562).
-  const manifestReads = useMemo<ManifestReadControl>(
-    () => ({ stopped: new Set([...unlistedAgents, ...missingManifests]), stop: stopManifestRead, acceptDirectory }),
-    [unlistedAgents, missingManifests, stopManifestRead, acceptDirectory],
-  );
+  const manifestReads = useManifestReadControl(signedIn);
   // The server's word that the directory changed (issue #993): the community
   // panel, the picker and this channel's people are read again and replaced.
   // The open channel's people moved (conch.channel_members.v1): the preview

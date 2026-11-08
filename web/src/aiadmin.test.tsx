@@ -512,6 +512,103 @@ describe('the agent card', () => {
     expect(reads(calls, '/v1/principals/4/manifest')).toBeGreaterThan(before);
   });
 
+  // The Settings view's request is held; Settings closes; the community panel
+  // then answers newer questions. The old answer arrives last (#1562).
+  async function twoViews() {
+    const stale = deferred<Response>();
+    const without = everyone.filter((person) => person.id !== 4);
+    let directory = everyone;
+    let hold = false;
+    const calls = serve(owner, {
+      routes: {
+        ...routes(['manage_members']),
+        'GET /v1/directory/members': () => {
+          if (!hold) return json({ members: directory });
+          hold = false;
+          return stale.promise;
+        },
+      },
+    });
+    const region = await openMembers('conch_owner_session_token');
+    await within(region).findByRole('group', { name: 'AI administrator builder' });
+    const events = await channelEvents();
+    events.send({ schema: 'conch.session_roster.v1', channel_id: 7, sessions: [] });
+    const toggle = screen.getByRole('button', { name: 'Members' });
+    if (toggle.getAttribute('aria-expanded') === 'false') fireEvent.click(toggle);
+    await settle();
+    // Settings closes and reopens: its new request is the one held.
+    fireEvent.click(screen.getByRole('button', { name: 'Close' }));
+    hold = true;
+    fireEvent.click(screen.getByRole('button', { name: 'Settings' }));
+    await waitFor(() => {
+      expect(hold).toBe(false);
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Close' }));
+    const changed = async () => {
+      const asked = reads(calls, '/v1/directory/members');
+      events.send({ schema: 'conch.directory_changed.v1' });
+      await waitFor(() => {
+        expect(reads(calls, '/v1/directory/members')).toBeGreaterThan(asked);
+      });
+      await settle();
+    };
+    directory = without;
+    await changed();
+    const before = reads(calls, '/v1/principals/4/manifest');
+    await act(async () => {
+      stale.resolve(json({ members: everyone }));
+      await stale.promise;
+    });
+    await settle();
+    return { calls, before };
+  }
+
+  it('lets a closed view\'s stale answer neither resurrect a hidden agent nor start a read', async () => {
+    const { calls, before } = await twoViews();
+    expect(reads(calls, '/v1/principals/4/manifest')).toBe(before);
+  });
+
+  it('keeps the right to resume a stopped read when a routine refresh replaces the recovery request', async () => {
+    // Both directory views (the panel and Settings) ask after the change; the
+    // answers to both are held, then dropped as stale once the routine
+    // refreshes' answers are in. Only the carried recovery can resume the read.
+    const held: ((response: Response) => void)[] = [];
+    let missing = true;
+    let hold = 0;
+    const calls = serve(owner, {
+      routes: {
+        ...routes(['manage_members']),
+        'GET /v1/principals/4/manifest': () => missing ? json({}, 404) : json(manifest(4, ['manage_members'])),
+        'GET /v1/directory/members': () => {
+          if (hold === 0) return json({ members: everyone });
+          hold--;
+          return new Promise<Response>((resolve) => held.push(resolve));
+        },
+      },
+    });
+    const region = await openMembers('conch_owner_session_token');
+    const events = await channelEvents();
+    await waitFor(() => {
+      expect(reads(calls, '/v1/principals/4/manifest')).toBeGreaterThan(0);
+    });
+    await settle();
+    expect(within(region).queryByRole('group', { name: 'AI administrator builder' })).toBeNull();
+    const before = reads(calls, '/v1/principals/4/manifest');
+
+    missing = false;
+    hold = 2;
+    events.send({ schema: 'conch.directory_changed.v1' });
+    await waitFor(() => {
+      expect(held.length).toBe(2);
+    });
+    // No second directory change: only a routine refresh replaces the requests.
+    events.send({ schema: 'conch.permissions_changed.v1' });
+    await within(region).findByRole('group', { name: 'AI administrator builder' });
+    expect(reads(calls, '/v1/principals/4/manifest')).toBeGreaterThan(before);
+    for (const resolve of held) resolve(json({ members: everyone }));
+    await settle();
+  });
+
   it('asks first, then disables the principal', async () => {
     const calls = serve(owner, { routes: routes(['manage_members']) });
     const region = await openMembers('conch_owner_session_token');

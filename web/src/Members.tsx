@@ -608,14 +608,29 @@ export function CommunityMembers({
   }, [viewerId, origin]);
 
   const seenDirectoryTick = useRef(directoryTick);
-  const load = useCallback((afterChange = false) => {
+  // A directory change owes the stopped manifest reads a recovery. The debt
+  // stays until an answer is accepted, so a request that replaces the one
+  // carrying it (a routine refresh) carries it on (#1562).
+  const recovery = useRef(false);
+  const load = useCallback(() => {
     const mine = ++seq.current;
+    const ticket = manifestReads.beginDirectory();
+    const recover = recovery.current;
     void api.directoryMembers().then((result) => {
+      if (result.ok) {
+        // The shared check comes first, and applies even if this view has
+        // closed or asked again: a stale answer must not change what other
+        // views know, and an accepted one still counts (#1562). This answer,
+        // never a channel's members, controls manifest reads.
+        if (!manifestReads.acceptDirectory(ticket, result.value.members, recover)) {
+          // A newer answer got in first: ask again rather than show this one.
+          if (mine === seq.current && live.current) load();
+          return;
+        }
+        if (recover) recovery.current = false;
+      }
       if (mine !== seq.current || !live.current) return;
       if (result.ok) {
-        // This accepted answer, never a channel's members, controls manifest
-        // reads. A post-change answer can also end an earlier 404 stop (#1562).
-        manifestReads.acceptDirectory(result.value.members, afterChange);
         setAnswer(result.value);
         return;
       }
@@ -625,7 +640,7 @@ export function CommunityMembers({
       }
       setAnswer('failed');
     });
-  }, [manifestReads.acceptDirectory]);
+  }, [manifestReads.beginDirectory, manifestReads.acceptDirectory]);
   // The permissions document is read when a person's menu opens, so a switch
   // that would do nothing says so (the voice line); not with the list.
   const readRows = useCallback(() => {
@@ -635,9 +650,9 @@ export function CommunityMembers({
     });
   }, []);
   useEffect(() => {
-    const afterChange = seenDirectoryTick.current !== directoryTick;
+    if (seenDirectoryTick.current !== directoryTick) recovery.current = true;
     seenDirectoryTick.current = directoryTick;
-    if (active) load(afterChange);
+    if (active) load();
   }, [load, channelIds, permissionsTick, directoryTick, active]);
   // After a change, if the row that had focus went with the list's next read,
   // focus would drop to the page: the status line takes it.
@@ -730,9 +745,7 @@ export function CommunityMembers({
         <button
           type="button"
           className="quiet"
-          onClick={() => {
-            load();
-          }}
+          onClick={load}
         >
           Refresh
         </button>

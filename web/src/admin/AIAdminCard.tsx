@@ -13,13 +13,18 @@ import { personRefusal } from './PersonActions';
 export interface ManifestReadControl {
   readonly stopped: ReadonlySet<number>;
   readonly stop: (id: number) => void;
-  readonly acceptDirectory: (members: readonly ServerMemberV1[], afterChange: boolean) => void;
+  // beginDirectory numbers a community-directory request, session-wide.
+  readonly beginDirectory: () => number;
+  // acceptDirectory applies the answer to that request, unless a newer one was
+  // applied first; it returns false then. recover ends the 404 stops of the
+  // agents the answer lists.
+  readonly acceptDirectory: (ticket: number, members: readonly ServerMemberV1[], recover: boolean) => boolean;
 }
 
 // ManifestReads shares a community-directory removal or a manifest 404 with
 // every card, so no directory view can retry a read another view has ended
 // (#1562). A post-change directory answer listing the agent ends either stop.
-export const ManifestReads = createContext<ManifestReadControl>({ stopped: new Set<number>(), stop: () => undefined, acceptDirectory: () => undefined });
+export const ManifestReads = createContext<ManifestReadControl>({ stopped: new Set<number>(), stop: () => undefined, beginDirectory: () => 0, acceptDirectory: () => true });
 
 export interface AIAdminCardProps {
   readonly who: WhoAmIResponseV1;
