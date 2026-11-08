@@ -35,22 +35,24 @@
 // chosen: Focus, a phone's Watch or its switcher. An enlarged camera is this
 // view's own, and focusing either clears the other. A focused stream is the
 // main picture and the other tiles are the strip. A watched stream keeps the
-// same keyed element whether in the grid, focused or in the strip, so moving it
-// never starts it again or loses its volume and mute. While the view is closed
-// only the focused watched stream is drawn, and the wrappers around it take no
-// part in the layout. On a phone one stream is watched and focused at a time,
-// with a switcher between sharers in the open view.
+// same keyed element whether in the grid, focused, in the strip or compact, so
+// moving it never starts it again or loses its volume and mute. While the view
+// is closed only the focused watched stream is drawn, and the wrappers around it
+// take no part in the layout. On a phone one stream is watched and focused at a
+// time, with a switcher between sharers in the open view.
 //
 // A polite live region says someone else's camera starting or stopping while
-// the view is open. If filtering the last camera closes it, the stopping words
-// stay until their usual timeout. The person's own camera is CameraNote's
-// (VoicePanel.tsx), and is not said twice.
+// the view is open, and says a Compact or Expand press once (issue #1498). If
+// filtering the last camera closes it, the stopping words stay until their usual
+// timeout. The person's own camera is CameraNote's (VoicePanel.tsx), and is not
+// said twice.
 import { useEffect, useRef, useState, type KeyboardEvent as KeyEvent, type ReactElement, type RefObject } from 'react';
 import { Avatar, Glyph } from '../Icons';
 import { usePhone } from '../phone';
 import type { VoiceClient, VoiceState } from './connection';
 import { gridOf } from './gridOf';
 import type { Occupant } from './presence';
+import { VoiceStatus } from './VoiceStatus';
 
 // How many tiles this view draws: camera and stream tiles share the grid cap,
 // which matches the room's camera cap (voiceCameraCap,
@@ -71,7 +73,7 @@ export interface Tile {
   readonly kind?: 'person' | 'share';
   readonly watched?: boolean;
   readonly startedAt?: string;
-  readonly render?: (focus: () => void) => ReactElement;
+  readonly render?: (focus: () => void, compact: boolean, onExpand?: () => void) => ReactElement;
 }
 
 // callTiles is who gets a person tile: everyone in voice while they and the
@@ -138,14 +140,21 @@ function changed(before: Cameras, now: Cameras): string {
 }
 
 // CallView draws camera and stream tiles, preserving players and focus as
-// tiles move between the grid, main area and strip (design §7.4, §7.7).
-export function CallView({ client, state, tiles, hidden, open, hideNonVideo = false, onHideNonVideo = () => undefined, keepSaid = false }: {
+// tiles move between the grid, main area and strip (design §7.4, §7.7). Its
+// docked compact layout is an in-memory choice, changed only by its button;
+// neither navigation nor a camera or speaker changes it (issue #1498, O8).
+export function CallView({ client, state, tiles, hidden, open, viewed = state.channel, onOpen, nameOf, hideNonVideo = false, onHideNonVideo = () => undefined, keepSaid = false }: {
   readonly client: VoiceClient;
   readonly state: VoiceState;
   readonly tiles: readonly Tile[];
   readonly hidden: number;
   // Whether the call view is shown. While it is not, only a watched stream is drawn.
   readonly open: boolean;
+  // The text channel on screen, and how to open the voice channel from the
+  // header while another is on screen. Opening never joins voice.
+  readonly viewed?: string | null;
+  readonly onOpen?: (name: string) => void;
+  readonly nameOf?: (principal: number) => string;
   readonly hideNonVideo?: boolean;
   readonly onHideNonVideo?: () => void;
   // Keep the last camera-off announcement when filtering closed the view.
@@ -153,6 +162,7 @@ export function CallView({ client, state, tiles, hidden, open, hideNonVideo = fa
 }) {
   const narrow = usePhone();
   const [selfHidden, setSelfHidden] = useState(false);
+  const [compact, setCompact] = useState(false);
   // The enlarged camera, by its tile's key. A focused stream is the client's
   // (state.focusedShare), not this.
   const [enlarged, setEnlarged] = useState<string | null>(null);
@@ -361,24 +371,42 @@ export function CallView({ client, state, tiles, hidden, open, hideNonVideo = fa
   const listClass = !open ? 'call-pass' : focus ? 'call-grid focus' : `call-grid cols-${String(grid.columns)} rows-${String(grid.rows)}`;
   const hasSelf = tiles.some((t) => t.kind !== 'share' && t.me);
   const switchable = tiles.filter((t) => t.kind === 'share' && !t.me);
+  const sharingNames = tiles.filter((t) => t.kind === 'share').map((t) => t.name);
+  const speakerNames = [...state.speaking].map((principal) => nameOf?.(principal) ?? tiles.find((t) => t.principal === principal)?.name ?? `Member ${String(principal)}`);
   // Without video asked for, the stage holds stream tiles alone: there is no
   // video to hide and no person to filter.
   const viewing = state.viewing;
+  const changeLayout = () => {
+    const next = !compact;
+    setCompact(next);
+    setSaid(next ? 'Call view compact.' : 'Call view expanded.');
+  };
 
   return (
-    <section ref={view} tabIndex={open ? -1 : undefined} aria-label={open ? 'Video call' : undefined} className={open ? 'call-view' : 'call-stage'} onKeyDown={open ? onKey : undefined}>
+    <section ref={view} tabIndex={open ? -1 : undefined} aria-label={open ? 'Video call' : undefined} className={open ? (compact ? 'call-view compact' : 'call-view') : (compact ? 'call-stage compact' : 'call-stage')} onKeyDown={open ? onKey : undefined}>
       {open ? (
         <div className="call-head">
-          <p className="call-title">
-            <Glyph name="camera" />
-            Video
-            {main === null ? null : <span className="call-state" title={main.kind === 'share' ? `Watching ${main.name}'s screen` : enlargedWords(main)}>{main.kind === 'share' ? `Watching ${main.name}'s screen` : enlargedWords(main)}</span>}
-          </p>
+          <div className="call-heading">
+            <p className="call-title">
+              <Glyph name="camera" />
+              Video
+              {main === null ? null : <span className="call-state" title={main.kind === 'share' ? `Watching ${main.name}'s screen` : enlargedWords(main)}>{main.kind === 'share' ? `Watching ${main.name}'s screen` : enlargedWords(main)}</span>}
+            </p>
+            <p className="call-context">
+              <span className="call-channel">
+                {state.channel !== null && state.channel !== viewed && onOpen !== undefined ? <button type="button" onClick={() => { onOpen(state.channel as string); }}>#{state.channel}</button> : <>#{state.channel ?? 'voice'}</>}
+              </span>
+              {sharingNames.length === 0 ? null : <span>Sharing: {sharingNames.join(', ')}</span>}
+              {speakerNames.length === 0 ? null : <span>Speaking: {speakerNames.join(', ')}</span>}
+            </p>
+            {compact ? <VoiceStatus state={state} showPhase /> : null}
+          </div>
           <div className="call-controls">
-            {main === null ? null : <button type="button" onClick={back}>Back to grid</button>}
-            {viewing ? <button type="button" aria-pressed={hideNonVideo} onClick={onHideNonVideo}>Hide non-video participants</button> : null}
-            {hasSelf ? <button type="button" aria-pressed={selfHidden} onClick={() => { setSelfHidden(!selfHidden); }}>{selfHidden ? 'Show self-view' : 'Hide self-view'}</button> : null}
-            {viewing ? <button ref={hideButton} type="button" onClick={() => { client.viewVideo(false); }}>Hide video</button> : null}
+            {!compact && main !== null ? <button type="button" onClick={back}>Back to grid</button> : null}
+            {!compact && viewing ? <button type="button" aria-pressed={hideNonVideo} onClick={onHideNonVideo}>Hide non-video participants</button> : null}
+            {!compact && hasSelf ? <button type="button" aria-pressed={selfHidden} onClick={() => { setSelfHidden(!selfHidden); }}>{selfHidden ? 'Show self-view' : 'Hide self-view'}</button> : null}
+            {!compact && viewing ? <button ref={hideButton} type="button" onClick={() => { client.viewVideo(false); }}>Hide video</button> : null}
+            <button type="button" className="call-layout" aria-pressed={compact} onClick={changeLayout}>{compact ? 'Expand' : 'Compact'}</button>
           </div>
         </div>
       ) : null}
@@ -408,7 +436,7 @@ export function CallView({ client, state, tiles, hidden, open, hideNonVideo = fa
               ref={(el) => { if (el === null) items.current.delete(key); else items.current.set(key, el); }}
               className={[t.kind === 'share' ? 'call-share' : 'call-tile', main === null ? (focus ? 'in-strip' : '') : isMain ? 'main' : 'in-strip', t.kind !== 'share' && state.speaking.has(t.principal) ? 'speaking' : ''].filter((c) => c !== '').join(' ')}
             >
-              {t.kind === 'share' && t.render !== undefined ? t.render(() => { enlarge(t); }) : (
+              {t.kind === 'share' && t.render !== undefined ? t.render(() => { enlarge(t); }, compact, !open && isMain ? changeLayout : undefined) : (
                 <TileView
                   client={client}
                   tile={t}

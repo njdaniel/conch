@@ -1025,3 +1025,55 @@ describe('the camera test on a hidden page', () => {
     expect(screen.getByText(previewNote)).toBeTruthy();
   });
 });
+
+describe('the persistent call workspace (issue #1498)', () => {
+  it('Compact and Expand keep the share item and video, call no subscription or attachment method, and keep focus on the toggle', () => {
+    const { client } = panel(inVoice({ viewing: true, watched: new Set([9]), cameraTrack: 'published', cameraTracks: new Set([8]) }), { cameras: [8], sharer: 9 });
+    const call = callRegion();
+    const video = within(call).getByLabelText("member-2's screen");
+    const item = video.closest('li');
+    const watch = vi.spyOn(client, 'watchStream');
+    const view = vi.spyOn(client, 'viewVideo');
+    const attachStream = vi.spyOn(client, 'attachStream');
+    const attachCamera = vi.spyOn(client, 'attachCamera');
+    const toggle = within(call).getByRole('button', { name: 'Compact', pressed: false });
+    toggle.focus();
+    fireEvent.click(toggle);
+    expect(call.classList.contains('compact')).toBe(true);
+    expect(within(call).getByLabelText("member-2's screen")).toBe(video);
+    expect(video.closest('li')).toBe(item);
+    expect(toggle).toBe(within(call).getByRole('button', { name: 'Expand', pressed: true }));
+    expect(document.activeElement).toBe(toggle);
+    expect(said()).toBe('Call view compact.');
+    fireEvent.click(toggle);
+    expect(call.classList.contains('compact')).toBe(false);
+    expect(within(call).getByLabelText("member-2's screen")).toBe(video);
+    expect(video.closest('li')).toBe(item);
+    expect(toggle).toBe(within(call).getByRole('button', { name: 'Compact', pressed: false }));
+    expect(document.activeElement).toBe(toggle);
+    expect(said()).toBe('Call view expanded.');
+    for (const spy of [watch, view, attachStream, attachCamera]) expect(spy).not.toHaveBeenCalled();
+  });
+
+  it('names the voice channel, sharer and speaker in both layouts; the channel button only opens the channel', () => {
+    const client = newClient();
+    const opened = vi.fn();
+    const tiles: Tile[] = [
+      tile(8, 'member-1', false),
+      { principal: 9, name: 'member-2', me: false, camera: false, kind: 'share', watched: true, render: () => <section>Shared screen</section> },
+    ];
+    render(<CallView client={client} state={inVoice({ viewing: true, speaking: new Set([8]) })} tiles={tiles} hidden={0} open viewed="elsewhere" onOpen={opened} nameOf={(id) => people.get(id)?.name ?? `Member ${String(id)}`} />);
+    const header = () => callRegion().querySelector('.call-head')?.textContent ?? '';
+    expect(header()).toContain('#general');
+    expect(header()).toContain('Sharing: member-2');
+    expect(header()).toContain('Speaking: member-1');
+    const before = client.snapshot();
+    fireEvent.click(within(callRegion()).getByRole('button', { name: '#general' }));
+    expect(opened).toHaveBeenCalledWith('general');
+    expect(client.snapshot()).toBe(before);
+    fireEvent.click(within(callRegion()).getByRole('button', { name: 'Compact' }));
+    expect(header()).toContain('#general');
+    expect(header()).toContain('Sharing: member-2');
+    expect(header()).toContain('Speaking: member-1');
+  });
+});

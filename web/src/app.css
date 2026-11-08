@@ -3054,6 +3054,12 @@ label {
   grid-template-rows: minmax(0, auto) minmax(min-content, 1fr);
 }
 
+/* Compact is a docked row, not an overlay: its content determines the first
+   track and the conversation takes everything left (issue #1498). */
+.centre:has(> .stage:not(:empty):has(.compact)) {
+  grid-template-rows: minmax(0, auto) minmax(0, 1fr);
+}
+
 .stage:empty {
   display: none;
 }
@@ -3219,6 +3225,25 @@ label {
   gap: var(--s2);
 }
 
+.call-heading {
+  min-width: 0;
+}
+
+/* The call's channel, sharers and speakers are words in both layouts, not
+   colour alone (issue #1498). */
+.call-context {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s1) var(--s3);
+  color: var(--muted);
+  font-size: var(--small);
+  font-weight: 400;
+}
+
+.call-channel button {
+  padding: 0 var(--s2);
+}
+
 /* Wide enough, the head is one row: the controls keep their size and the
    title gives way, its enlarged-picture words cut short (the full words are
    in its title attribute). A taller head would
@@ -3329,8 +3354,113 @@ label {
   border: 0;
 }
 
-/* In the strip its controls are still all there, their names only read out
-   beside an icon. */
+/* A compact call is one fixed-height, docked strip. Its tiles share that row
+   and scroll sideways rather than taking another row from the conversation;
+   the same players and list items stay in place (issue #1498). Supplemental
+   roster and note rows yield their dock space too; the strip's VoiceState
+   chips and controls remain, and the notes return when the stage closes. */
+.stage:has(> .call-view.compact) {
+  padding-top: 0;
+}
+
+.call-view.compact {
+  flex: none;
+  gap: 0;
+  padding-bottom: 0;
+  border: 0;
+}
+
+body:has(.call-view.compact, .call-stage.compact) .voice-who,
+body:has(.call-view.compact, .call-stage.compact) .voice-notes {
+  display: none;
+}
+
+body:has(.call-view.compact, .call-stage.compact) .dock {
+  padding-top: var(--s1);
+}
+
+.call-view.compact .call-head {
+  padding-top: 0;
+}
+
+.call-view.compact .call-heading {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+}
+
+.call-view.compact .call-context,
+.call-view.compact .voice-sub {
+  flex-wrap: nowrap;
+}
+
+.call-view.compact .call-title {
+  display: none;
+}
+
+.call-view.compact .call-grid {
+  display: flex;
+  overflow-x: auto;
+}
+
+.call-view.compact .call-grid > li {
+  flex: 0 0 10rem;
+}
+
+.call-view.compact .call-grid > li.main {
+  flex-basis: min(24rem, 100%);
+}
+
+.call-view.compact .call-grid > li.call-share {
+  flex-basis: 32rem;
+}
+
+.call-view.compact .call-frame,
+.compact .share-frame {
+  height: 2.75rem;
+  max-height: 2.75rem;
+}
+
+.compact .share-view {
+  display: grid;
+  flex: none;
+  grid-template-columns: minmax(8rem, 10rem) minmax(0, 1fr);
+  grid-template-rows: auto;
+  align-items: center;
+}
+
+.compact .share-title,
+.call-view.compact .call-tile-controls {
+  display: none;
+}
+
+.compact .share-frame video,
+.call-view.compact .call-grid.focus > .main .share-frame video {
+  height: 100%;
+  max-height: 2.75rem;
+}
+
+.compact .share-controls {
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  padding-top: 0;
+}
+
+.call-view.compact .voice-sub {
+  display: flex;
+  flex-wrap: nowrap;
+  font-size: var(--small);
+  white-space: nowrap;
+}
+
+.call-stage.compact button,
+.call-stage.compact input {
+  min-width: 2.75rem;
+  min-height: 2.75rem;
+}
+
+/* In the expanded strip its controls are still all there, their names only
+   read out beside an icon; compact keeps the smaller set from ShareView. */
 .call-share.in-strip .share-controls .label {
   position: absolute;
   width: 1px;
@@ -4466,10 +4596,13 @@ button.link {
 }
 
 /* The call view's layout changes without animation for someone who asked for
-   less motion (§7.7): it has none of its own, and nothing may give it one. */
+   less motion (§7.7), compact included (issue #1498): it has none of its own,
+   and nothing may give it one. */
 @media (prefers-reduced-motion: reduce) {
   .call-view,
-  .call-view * {
+  .call-view *,
+  .call-stage,
+  .call-stage * {
     transition: none;
     animation: none;
   }

@@ -59,7 +59,7 @@ import { cameraNote, cameraOffForYou, cameraOn, listenOnlyCamera, watchOnlyCamer
 import { CallView, callTiles, type Tile } from './CallView';
 import { CameraTest } from './CameraTest';
 import type { Person } from '../useLiveChannel';
-import type { Phase, Processing, VoiceState } from './connection';
+import type { Phase, Processing } from './connection';
 import { clampTail, maxTail, releasePage, releaseStep } from './gate';
 import { keyLabel, talkKeyForMouseButton } from './keys';
 import { occupants, qualityLabel, sharers, type Occupant } from './presence';
@@ -67,6 +67,7 @@ import { endedNote, ownPageNote, resumedNote, resumingNote, sharedNote, shortSha
 import { ShareReadout, ShareView } from './ShareView';
 import { nobody, type InVoice } from './useOccupancy';
 import type { VoiceControl } from './useVoice';
+import { VoiceStatus } from './VoiceStatus';
 
 // The keys that hold Hold to talk down while it has focus.
 function holdKey(e: KeyEvent): boolean {
@@ -401,11 +402,7 @@ export function VoicePanel({
   // Only on a live snapshot that says voice is up: not while loading, while
   // the server cannot be reached, or after the socket was closed for good.
   const canJoin = voice.secure && presence !== null && presence.available;
-  // The microphone is captured while connected with it, whether or not
-  // anything is sent (UX-11): said apart from transmitting. A reconnect keeps
-  // the capture it had. A microphone that went is not captured.
   const silenced = state.muted || state.deafened;
-  const captured = (state.phase === 'connected' || state.phase === 'reconnecting') && !state.watchOnly && !state.listenOnly && !state.missing;
   // One tile per live stream, beside the camera tiles. An unwatched tile only
   // offers Watch; a watched one owns its player, volume and focus control. The
   // viewer's own tile offers Stop sharing (voice-multi-share.md §7.1, #1509).
@@ -422,7 +419,7 @@ export function VoicePanel({
       kind: 'share',
       watched,
       startedAt: stream.startedAt,
-      render: (focus) => {
+      render: (focus, compact, onToggleLayout) => {
         if (me) return (
           <section aria-label="Your stream" className="share-view">
             <p className="share-title"><Glyph name="screen" />You · LIVE{quality === null ? null : <> · {quality}</>}</p>
@@ -440,7 +437,7 @@ export function VoicePanel({
             }}>Watch</button></div>
           </section>
         );
-        return <ShareView client={client} state={state} principal={stream.principal} name={name} audio={stream.sharingAudio} quality={quality} volume={shareVolumes.current.get(stream.principal) ?? 1} onVolumeChange={(volume) => { shareVolumes.current.set(stream.principal, volume); }} onFocus={focus} />;
+        return <ShareView client={client} state={state} principal={stream.principal} name={name} audio={stream.sharingAudio} quality={quality} volume={shareVolumes.current.get(stream.principal) ?? 1} onVolumeChange={(volume) => { shareVolumes.current.set(stream.principal, volume); }} onFocus={focus} compact={compact} onToggleLayout={onToggleLayout} />;
       },
     };
   });
@@ -465,6 +462,9 @@ export function VoicePanel({
       tiles={[...(call?.tiles ?? []), ...streamTiles]}
       hidden={call?.hidden ?? 0}
       open={callOpen}
+      viewed={viewed}
+      onOpen={onOpen}
+      nameOf={(principal) => nameOf(people, principal, viewer, false, viewerName)}
       hideNonVideo={hideNonVideo}
       onHideNonVideo={() => {
         const next = !hideNonVideo;
@@ -539,27 +539,7 @@ export function VoicePanel({
                 {where}
               </p>
               {inVoice ? (
-                <p className="voice-sub">
-                  {captured ? <span className="chip">Microphone in use</span> : null}{' '}
-                  {/* From this page's own camera track, never from presence (S5). */}
-                  {state.cameraTrack === 'captured' ? (
-                    <>
-                      <span className="chip">Camera in use</span>{' '}
-                    </>
-                  ) : null}
-                  {state.cameraTrack === 'published' ? (
-                    <>
-                      <span className="chip video-sending">Sending video</span>{' '}
-                    </>
-                  ) : null}
-                  <span className="voice-tx">
-                    {state.muted ? 'Muted. ' : ''}
-                    {state.deafened ? 'Deafened (you hear no one, and you are muted). ' : ''}
-                    {state.listenOnly ? 'Listen only. ' : ''}
-                    {state.viewer ? 'Watching beside your voice on another device. ' : state.watchOnly ? 'Watch only: your microphone is off. ' : ''}
-                    {transmitLabel(state)}
-                  </span>
-                </p>
+                <VoiceStatus state={state} />
               ) : (
                 <p className="voice-sub">Microphone off</p>
               )}
@@ -1105,13 +1085,8 @@ export const processingUseNote =
   'Use this for a virtual microphone (such as one a text-to-speech program provides) or a studio microphone. With speakers rather than headphones, others may hear themselves.';
 export const thresholdHint = 'Without automatic gain your level may differ: check the meter and set the level.';
 
-// transmitLabel says what is sent (issue #965): Transmitting only while audio
-// leaves the page. A press waits for conchd's answer before the track opens
-// (at most a second), and the page says so rather than claim to transmit.
-export function transmitLabel(state: Pick<VoiceState, 'talking' | 'transmitting'>): string {
-  if (state.transmitting) return 'Transmitting';
-  return state.talking ? 'Waiting for the server' : 'Not transmitting';
-}
+// The strip and compact call header share this implementation (issue #1498).
+export { transmitLabel } from './VoiceStatus';
 
 // releaseLabel names a release delay for people.
 export function releaseLabel(ms: number): string {

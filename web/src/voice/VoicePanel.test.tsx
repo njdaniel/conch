@@ -61,7 +61,7 @@ function panel(state: VoiceState, viewed: string | null, snapshot: Snapshot = { 
   const calls: string[] = [];
   const opened: string[] = [];
   const voice = control(state, calls, snapshot);
-  const { rerender } = render(
+  const { rerender, unmount } = render(
     <VoicePanel
       voice={voice}
       viewer={7}
@@ -80,7 +80,7 @@ function panel(state: VoiceState, viewed: string | null, snapshot: Snapshot = { 
     shown = nextSnapshot;
     rerender(<VoicePanel voice={{ ...voice, state: next, snapshot: nextSnapshot }} viewer={7} viewerName={viewerName} people={people} viewed={viewed} onOpen={() => undefined} />);
   };
-  return { calls, opened, client: voice.client, redraw, voice: screen.getByRole('region', { name: 'Voice' }) };
+  return { calls, opened, client: voice.client, redraw, unmount, voice: screen.getByRole('region', { name: 'Voice' }) };
 }
 
 // In push to talk, which most of these are of: the open microphone is the default (issue #1244).
@@ -1658,5 +1658,76 @@ describe('the microphone mode toggle (issue #1244)', () => {
     const { voice } = panel(inVoice('connected', 'c'), 'c');
     expect(within(voice).getByRole<HTMLInputElement>('radio', { name: 'Push to talk', hidden: true }).checked).toBe(true);
     expect(toggle(voice).getAttribute('aria-pressed')).toBe('false');
+  });
+});
+
+describe('the compact call workspace (issue #1498)', () => {
+  const bob: ReadonlyMap<number, Person> = new Map([[3, { name: 'bob', kind: null }]]);
+  const participant = (sharing: boolean) => ({ principal_id: 3, can_publish: true, transmitting: false, joined_at: '2026-10-18T00:00:00Z', sharing, ...(sharing ? { share_started_at: '2026-10-18T00:00:00Z' } : {}) });
+  const sharing: Snapshot = { kind: 'presence', presence: { ...presence, rooms: [{ participants: [participant(true)] }] } };
+  const notSharing: Snapshot = { kind: 'presence', presence: { ...presence, rooms: [{ participants: [participant(false)] }] } };
+  const watching = (patch: Partial<VoiceState> = {}): VoiceState => ({ ...inVoice('connected', 'c'), watched: new Set([3]), ...patch });
+  const compactPanel = (patch: Partial<VoiceState> = {}) => {
+    const mounted = panel(watching(patch), 'elsewhere', sharing, bob);
+    fireEvent.click(screen.getByRole('button', { name: 'Compact' }));
+    return { ...mounted, call: screen.getByRole('region', { name: 'Video call' }) };
+  };
+
+  it('shows every VoiceState status in both the compact header and the strip', () => {
+    const t = compactPanel({ cameraTrack: 'captured' });
+    const both = (text: string) => {
+      expect(t.call.textContent).toContain(text);
+      expect(t.voice.querySelector('.voice-bar')?.textContent).toContain(text);
+    };
+    both('Microphone in use');
+    both('Camera in use');
+    both('Push to talk.');
+    both('Waiting for the picture');
+    t.redraw(watching({ muted: true, cameraTrack: 'captured' }));
+    both('Muted.');
+    t.redraw(watching({ muted: true, deafened: true, cameraTrack: 'captured' }));
+    both('Deafened (you hear no one, and you are muted).');
+    t.redraw(watching({ cameraTrack: 'published' }));
+    both('Sending video');
+    t.redraw(watching({ phase: 'reconnecting' }));
+    both('Reconnecting');
+  });
+
+  it('closes a compact watched share with the same stopped-sharing note', () => {
+    const t = compactPanel();
+    t.redraw(watching({ watched: new Set() }), notSharing);
+    expect(screen.queryByRole('region', { name: 'Video call' })).toBeNull();
+    expect(screen.queryByRole('region', { name: 'Shared screen' })).toBeNull();
+    expect(t.voice.textContent).toContain('bob stopped sharing.');
+  });
+
+  it.each([
+    ['leaving voice', initialVoice, 'Not in voice'],
+    ['being kicked', { ...initialVoice, phase: 'stopped', why: 'You were removed from voice' }, 'You were removed from voice'],
+  ] as const)('closes the compact stage on %s with the existing strip state', (_what, next, note) => {
+    const t = compactPanel();
+    t.redraw(next, notSharing);
+    expect(screen.queryByRole('region', { name: 'Video call' })).toBeNull();
+    expect(screen.queryByRole('region', { name: 'Shared screen' })).toBeNull();
+    expect(t.voice.textContent).toContain(note);
+    expect(t.voice.textContent).not.toContain('bob stopped sharing.');
+  });
+
+  it('writes no storage on toggling, and a remounted panel starts expanded', () => {
+    const first = panel(watching(), 'elsewhere', sharing, bob);
+    const set = vi.spyOn(Storage.prototype, 'setItem');
+    try {
+      fireEvent.click(screen.getByRole('button', { name: 'Compact' }));
+      expect(screen.getByRole('region', { name: 'Video call' }).classList.contains('compact')).toBe(true);
+      expect(set).not.toHaveBeenCalled();
+      first.unmount();
+      panel(watching(), 'elsewhere', sharing, bob);
+      const remounted = screen.getByRole('region', { name: 'Video call' });
+      expect(remounted.classList.contains('compact')).toBe(false);
+      expect(within(remounted).getByRole('button', { name: 'Compact', pressed: false })).toBeTruthy();
+      expect(set).not.toHaveBeenCalled();
+    } finally {
+      set.mockRestore();
+    }
   });
 });

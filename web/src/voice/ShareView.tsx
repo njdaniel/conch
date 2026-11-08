@@ -46,6 +46,9 @@ type AppleVideo = HTMLVideoElement & { readonly webkitEnterFullscreen?: () => vo
 
 // ShareView plays one watched publisher's screen and sound with independent
 // controls and an optional focus action (voice-multi-share.md §7.1, #1509).
+// Compact changes only its presentation and controls, never its attachment or
+// subscription; the phone's closed call header can own its layout toggle too
+// (issue #1498).
 export function ShareView({
   client,
   state,
@@ -56,6 +59,8 @@ export function ShareView({
   volume: keptVolume,
   onVolumeChange,
   onFocus,
+  compact = false,
+  onToggleLayout,
 }: {
   readonly client: VoiceClient;
   readonly state: VoiceState;
@@ -71,6 +76,8 @@ export function ShareView({
   readonly volume?: number;
   readonly onVolumeChange?: (volume: number) => void;
   readonly onFocus?: () => void;
+  readonly compact?: boolean;
+  readonly onToggleLayout?: () => void;
 }) {
   const box = useRef<HTMLDivElement>(null);
   const video = useRef<HTMLVideoElement>(null);
@@ -152,19 +159,24 @@ export function ShareView({
           <Glyph name="speaker" />
           <span className="label">{muted ? 'Unmute share' : 'Mute share'}</span>
         </button>
-        <label className="volume">
-          <span className="label">Share volume</span>
-          <input type="range" min={0} max={1} step={0.05} value={volume} onChange={(e) => {
-            const next = Number(e.target.value);
-            setOwnVolume(next);
-            onVolumeChange?.(next);
-          }} />
-        </label>
-        <button type="button" onClick={fullscreen}>
-          <Glyph name="fullscreen" />
-          <span className="label">Full screen</span>
-        </button>
+        {compact ? null : (
+          <>
+            <label className="volume">
+              <span className="label">Share volume</span>
+              <input type="range" min={0} max={1} step={0.05} value={volume} onChange={(e) => {
+                const next = Number(e.target.value);
+                setOwnVolume(next);
+                onVolumeChange?.(next);
+              }} />
+            </label>
+            <button type="button" onClick={fullscreen}>
+              <Glyph name="fullscreen" />
+              <span className="label">Full screen</span>
+            </button>
+          </>
+        )}
         <button type="button" onClick={() => { client.watchStream(principal, false); }}>Stop watching</button>
+        {onToggleLayout === undefined ? null : <button type="button" className="call-layout" aria-pressed={compact} onClick={onToggleLayout}>{compact ? 'Expand' : 'Compact'}</button>}
         {blocked && hasSound ? <button type="button" className="primary" onClick={tapToPlay}>Tap to play sound</button> : null}
       </div>
       {state.deafened && hasSound ? <p className="hint">Deafened: the share&apos;s sound is off too.</p> : null}
