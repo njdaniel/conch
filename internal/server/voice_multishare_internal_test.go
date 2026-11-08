@@ -78,14 +78,14 @@ func TestVoiceShareStopPersonWithoutShare(t *testing.T) {
 	f.mustClaim(t, "ann")
 	r, _, _ := f.srv.voiceChannelRoom(context.Background(), f.ops.ID)
 	rows := len(f.shareRows(t))
-	if err := f.srv.voice.stopShare(context.Background(), r, f.ids["root"], f.ids["ann2"], true, nil); err != nil {
+	if err := f.srv.voice.stopShare(context.Background(), r, f.ids["root"], f.ids["ann2"], nil); err != nil {
 		t.Fatal(err)
 	}
 	if len(f.shareRows(t)) != rows || !f.granted(t, room, "ann") {
 		t.Error("a stop of a person who shares nothing touched another's stream")
 	}
 	stale := schema.NewTimestamp(time.Unix(1, 0))
-	if err := f.srv.voice.stopShare(context.Background(), r, f.ids["ann2"], f.ids["ann2"], false, &stale); !errors.Is(err, errVoiceShareStale) {
+	if err := f.srv.voice.stopShare(context.Background(), r, f.ids["ann2"], f.ids["ann2"], &stale); !errors.Is(err, errVoiceShareStale) {
 		t.Errorf("a named stale release by a non-holder: %v, want stale", err)
 	}
 }

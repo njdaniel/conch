@@ -55,6 +55,17 @@ const (
 	voiceShareCap = 6
 )
 
+// capVoiceShareQuality keys the bound on quality changes in the agent
+// limiter's table. It is not a manifest capability: nothing declares or
+// reads it, it only keeps the bound's entries apart from the agents'.
+const capVoiceShareQuality schema.Capability = "voice_share_quality"
+
+// voiceShareQualityLimit bounds a sharer's quality changes (issue #1546):
+// three in any three seconds, which is a burst of three and then one a
+// second. The first change is never refused. Over it the answer is 429
+// rate_limited with Retry-After.
+var voiceShareQualityLimit = schema.RateLimit{Capability: capVoiceShareQuality, Max: 3, WindowSeconds: 3}
+
 // Why a share ended: the reason on voice_share_stopped, and the one the sharer
 // is told in their own presence (issue #487).
 const (
@@ -124,9 +135,6 @@ var (
 	// errVoiceShareRoomGone: the room was rotated, or the share being claimed
 	// again ended, while the claim was being made. 409 voice_no_session.
 	errVoiceShareRoomGone = errors.New("voice: the room or the share went away during the claim")
-	// errVoiceShareNotYours: a caller who is neither the sharer nor an
-	// operator asked to stop the share. 403.
-	errVoiceShareNotYours = errors.New("voice: the share belongs to another principal")
 	// errVoiceShareStale: a release named a share that is not the room's
 	// current share, or not the caller's. 409 voice_share_stale, and nothing
 	// changes.
@@ -227,6 +235,7 @@ func (s *Server) handleVoiceShareStart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	share, err := s.voice.claimShare(ctx, room, caller.ID, req.Quality)
+	var limited *rateLimitedError
 	switch {
 	case errors.Is(err, errVoiceShareFull):
 		writeError(w, http.StatusConflict, schema.ErrorCodeVoiceShareFull, fmt.Sprintf("this call already has %d screen shares", voiceShareCap))
@@ -241,6 +250,9 @@ func (s *Server) handleVoiceShareStart(w http.ResponseWriter, r *http.Request) {
 		}
 		s.denyForbiddenFor(w, r, caller, schema.ErrorCodeVoiceNotAllowed, "voice is not part of your access to this server",
 			refusedPermission(caller, perm))
+		return
+	case errors.As(err, &limited):
+		writeRateLimited(w, limited)
 		return
 	case errors.Is(err, errVoiceShareNotConnected), errors.Is(err, errVoiceShareRoomGone), errors.Is(err, errVoiceShareNotChannelRoom):
 		writeVoiceNoSession(w)
@@ -343,6 +355,12 @@ func (s *Server) handleVoiceShareStop(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	// Agents do not moderate voice (issue #1546, voice-control-plane.md
+	// §12): an agent that holds manage_channels is checked as a member, so
+	// it gets what a plain member gets.
+	if caller.Kind != store.PrincipalHuman {
+		moderator = false
+	}
 	if moderator {
 		ch, err := s.store.ChannelByName(ctx, r.PathValue("channel"))
 		if errors.Is(err, store.ErrNotFound) {
@@ -410,10 +428,7 @@ func (s *Server) handleVoiceShareStop(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
-	switch err := s.voice.stopShare(ctx, room, caller.ID, target, moderator, claim); {
-	case errors.Is(err, errVoiceShareNotYours):
-		s.denyForbidden(w, r, caller, errForbidden.Code, "only the person sharing, a manager of the channel or an operator can stop a share")
-		return
+	switch err := s.voice.stopShare(ctx, room, caller.ID, target, claim); {
 	case errors.Is(err, errVoiceShareStale):
 		writeVoiceShareStale(w)
 		return
@@ -568,6 +583,18 @@ func (p *voicePoller) claimShare(ctx context.Context, room store.VoiceRoom, prin
 			return schema.VoiceShareV1{}, err
 		}
 		return schema.VoiceShareV1{}, errVoiceShareFull
+	}
+	// A holder's repeat that changes the quality fans a presence frame out to
+	// every watcher, so it is bounded per principal (issue #1546). It is read
+	// before anything is granted or changed, and a refused change leaves the
+	// quality as it was. The first change is never refused: the allowance
+	// starts full.
+	if held != nil && quality != nil && (held.quality == nil || *held.quality != *quality) {
+		if d := p.qualityChanges.take(agentLimitKey{principalID, capVoiceShareQuality}, voiceShareQualityLimit, p.now()); !d.allowed {
+			p.mu.Unlock()
+			r.order.Unlock()
+			return schema.VoiceShareV1{}, &rateLimitedError{retryAfter: d.retryAfter}
+		}
 	}
 	mine := held
 	if held == nil {
@@ -1071,7 +1098,9 @@ func (p *voicePoller) undoClaim(r *voiceRoomState, mine *voiceShare) {
 }
 
 // stopShare ends targetID's share in room for callerID: their own (targetID
-// is callerID), or, for a moderator, anyone's. A person with no share is left
+// is callerID), or, for a moderator, anyone's. Whether callerID may stop
+// someone else's is the handler's to decide (handleVoiceShareStop), before
+// this is called; this does not ask again. A person with no share is left
 // as they are. The share leaves presence
 // and its row is written before LiveKit is asked to withdraw the sources; a
 // withdrawal that fails is retried by the passes, and a row that cannot be
@@ -1081,7 +1110,7 @@ func (p *voicePoller) undoClaim(r *voiceRoomState, mine *voiceShare) {
 // own (targetID is callerID then). Unless the caller's share is that one,
 // nothing is changed and errVoiceShareStale is returned, whoever the caller is; a
 // release that names its share is never a moderation stop.
-func (p *voicePoller) stopShare(ctx context.Context, room store.VoiceRoom, callerID, targetID int64, operator bool, claim *schema.Timestamp) error {
+func (p *voicePoller) stopShare(ctx context.Context, room store.VoiceRoom, callerID, targetID int64, claim *schema.Timestamp) error {
 	r := p.roomNamed(room.RoomName)
 	if r == nil {
 		if claim != nil {
@@ -1105,11 +1134,6 @@ func (p *voicePoller) stopShare(ctx context.Context, room store.VoiceRoom, calle
 	}
 	reason, actor := voiceShareStopSelf, c.principalID
 	if c.principalID != callerID {
-		if !operator {
-			p.mu.Unlock()
-			r.order.Unlock()
-			return errVoiceShareNotYours
-		}
 		reason, actor = voiceShareStopOperator, callerID
 	}
 	delete(r.shares, c.principalID)

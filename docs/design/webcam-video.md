@@ -202,6 +202,7 @@ B keeps the server's view honest in the strongest sense: a camera exists only be
   - **The caller's standing is decided before the principal is looked up.** The caller must hold `manage_channels`. Owners always do.
   - An operator does not have to be a member, as for the share stop.
   - Anyone else, including an operator without `manage_channels`, gets 403 `permission_denied` (`permission: manage_channels`), audited `access_denied`.
+  - **Only a human has standing (#1546).** An agent holding `manage_channels` (possible only through the admin door's dispatch) is treated as having none: a member agent gets the 403 above, a non-member agent the 404. Agents do not moderate voice.
   - A non-member without `manage_channels` gets the uniform 404 first, and learns nothing.
   - For a caller with standing, an **unknown principal id answers 204**, exactly as a known principal with no claim does. The route never says whether a person exists.
   - **`started_at` with `principal` naming someone else is 400 `invalid_request`**: the operator stops the camera, not a particular claim, and the parameter has no meaning there.

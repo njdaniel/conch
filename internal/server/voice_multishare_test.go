@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"slices"
 	"strconv"
 	"strings"
@@ -886,4 +887,195 @@ func TestVoiceMultiSharePasses(t *testing.T) {
 			t.Errorf("v2 still shows %q sharing", got)
 		}
 	})
+}
+
+// ---------------------------------------------------------------------------
+// Follow-ups of the #1543 review (issue #1546)
+
+// makeAgentOperator gives the agent robo a manifest that holds
+// manage_channels, and requires that it does: the tests below are about what
+// a holder of the permission that is an agent may not do.
+func (f *presenceFixture) makeAgentOperator(t *testing.T) {
+	t.Helper()
+	req := schema.PutAgentManifestRequestV1{
+		DisplayName:  "robo",
+		Tier:         schema.AgentTierA,
+		Capabilities: []schema.Capability{schema.CapabilityAdminAct, schema.CapabilityMessagesRead},
+		Channels: []schema.ChannelGrant{{ChannelID: f.ops.ID, Permissions: []schema.ChannelPermission{
+			schema.ChannelPermissionRead, schema.ChannelPermissionPost,
+		}}},
+		Permissions: []schema.Permission{schema.PermManageChannels},
+		Admin:       &schema.AgentAdminV1{ApprovalChannelID: f.ops.ID},
+	}
+	ctx := context.Background()
+	if _, _, err := f.srv.store.PutAgentManifest(ctx, "system", f.ids["robo"], req); err != nil {
+		t.Fatal(err)
+	}
+	held, err := f.srv.store.Permitted(store.WithAdminDispatch(ctx), f.ids["robo"], schema.PermManageChannels)
+	if err != nil || !held {
+		t.Fatalf("robo holds manage_channels = %v, %v; the test needs it held", held, err)
+	}
+}
+
+// stopAsDispatchedAgent calls handler as who for a DELETE with query, with
+// the context marked as the admin door's. That is the only context in which
+// an agent holds a permission at all (store.WithAdminDispatch), and so the
+// only one in which the operator branch could admit one; the public routes
+// authenticate with a token and never carry it.
+func (f *presenceFixture) stopAsDispatchedAgent(t *testing.T, handler http.HandlerFunc, who, query string) wireResult {
+	t.Helper()
+	caller, err := f.srv.store.PrincipalByID(context.Background(), f.ids[who])
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := store.WithAdminDispatch(withCaller(context.Background(), caller))
+	req := httptest.NewRequest(http.MethodDelete, "/v1/channels/ops/voice?"+query, nil).WithContext(ctx)
+	req.SetPathValue("channel", "ops")
+	rec := httptest.NewRecorder()
+	handler(rec, req)
+	return wireResult{rec.Code, rec.Body.String(), rec.Header().Get("Content-Type")}
+}
+
+// TestVoiceShareAgentCannotModerate: an agent holding manage_channels gets
+// the 403 forbidden a plain member gets when it names someone else's share,
+// and the share goes on; a human operator and the agent's own stop are
+// unchanged.
+func TestVoiceShareAgentCannotModerate(t *testing.T) {
+	tests := []struct {
+		name       string
+		who        string
+		agentOp    bool
+		wantStatus int
+		wantCode   string
+		wantEnded  bool
+	}{
+		{name: "an agent with manage_channels names a sharer", who: "robo", agentOp: true, wantStatus: 403, wantCode: "forbidden"},
+		{name: "a plain member names a sharer", who: "plain", wantStatus: 403, wantCode: "forbidden"},
+		{name: "a human operator names a sharer", who: "root", wantStatus: 204, wantEnded: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f, room := newShareFixture(t)
+			f.addSharer(t, room, "plain", 4_000)
+			if tt.agentOp {
+				f.makeAgentOperator(t)
+			}
+			f.at(5_000)
+			f.pass(t)
+			f.at(6_000)
+			f.mustClaim(t, "ann")
+			query := "principal=" + strconv.FormatInt(f.ids["ann"], 10)
+			var res wireResult
+			if tt.agentOp {
+				res = f.stopAsDispatchedAgent(t, f.srv.handleVoiceShareStop, tt.who, query)
+			} else {
+				res = f.stopShareOf(t, tt.who, "ann")
+			}
+			if res.status != tt.wantStatus || (tt.wantCode != "" && errCode(t, res.body) != tt.wantCode) {
+				t.Fatalf("got %d %s, want %d %s", res.status, res.body, tt.wantStatus, tt.wantCode)
+			}
+			if got := !slices.Contains(f.sharers(f.presenceV2(t, "ann2")), "ann"); got != tt.wantEnded {
+				t.Errorf("ann's share ended = %v, want %v", got, tt.wantEnded)
+			}
+			if got := f.granted(t, room, "ann"); got == tt.wantEnded {
+				t.Errorf("ann granted = %v after the stop, want %v", got, !tt.wantEnded)
+			}
+		})
+	}
+}
+
+// TestVoiceShareQualityBound: a holder's repeat claim that changes the
+// quality is bounded per principal, three in three seconds; the first change
+// is never refused, a repeat that leaves the quality alone is not a change,
+// a refused change leaves the quality as it was and tells when to retry, and
+// another sharer's allowance is their own.
+func TestVoiceShareQualityBound(t *testing.T) {
+	const (
+		q720  = `{"quality":{"resolution":"720p","frame_rate":30}}`
+		q1080 = `{"quality":{"resolution":"1080p","frame_rate":60}}`
+		src   = `{"quality":{"resolution":"source","frame_rate":30}}`
+	)
+	type step struct {
+		atMs       int
+		who        string
+		body       string
+		wantStatus int
+		wantLabel  string // ann's quality in presence afterwards, when set
+	}
+	tests := []struct {
+		name  string
+		steps []step
+	}{
+		{"the first change is not throttled", []step{
+			{0, "ann", q1080, 200, "ann@1080p/60"},
+		}},
+		{"a burst of three, then the fourth is refused", []step{
+			{0, "ann", q720, 200, "ann@720p/30"},
+			{100, "ann", q1080, 200, "ann@1080p/60"},
+			{200, "ann", q720, 200, "ann@720p/30"},
+			{300, "ann", q1080, 200, "ann@1080p/60"},
+			{400, "ann", q720, 429, "ann@1080p/60"},
+		}},
+		{"a repeat that leaves the quality alone is not a change", []step{
+			{0, "ann", q720, 200, "ann@720p/30"},
+			{100, "ann", q1080, 200, "ann@1080p/60"},
+			{200, "ann", q720, 200, "ann@720p/30"},
+			{300, "ann", q1080, 200, "ann@1080p/60"},
+			{400, "ann", q1080, 200, "ann@1080p/60"},
+			{500, "ann", "", 200, "ann@1080p/60"},
+		}},
+		{"the allowance comes back as the window slides", []step{
+			{0, "ann", q720, 200, ""},
+			{100, "ann", q1080, 200, ""},
+			{200, "ann", q720, 200, ""},
+			{300, "ann", q1080, 200, ""},
+			{400, "ann", src, 429, "ann@1080p/60"},
+			{3_150, "ann", src, 200, "ann@source/30"},
+		}},
+		{"another sharer's allowance is their own", []step{
+			{0, "ann", q720, 200, ""},
+			{100, "ann", q1080, 200, ""},
+			{200, "ann", q720, 200, ""},
+			{300, "ann", q1080, 200, ""},
+			{400, "ann", q720, 429, ""},
+			{450, "ann2", q1080, 200, ""},
+			{500, "ann2", q720, 200, ""},
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f, _ := newShareFixture(t)
+			f.at(0)
+			// Both hold a share with the 720p quality declared, so every step
+			// that names another one is a change.
+			f.mustClaimQuality(t, "ann", q720)
+			f.mustClaimQuality(t, "ann2", q720)
+			for i, s := range tt.steps {
+				f.at(s.atMs)
+				before := f.lk.count("UpdateParticipant")
+				res := f.claimShareBody(t, s.who, s.body)
+				if res.status != s.wantStatus {
+					t.Fatalf("step %d (%s at %d ms): %d %s, want %d", i, s.who, s.atMs, res.status, res.body, s.wantStatus)
+				}
+				if res.status == http.StatusTooManyRequests {
+					var e schema.Error
+					strict(t, res.body, &e)
+					if e.Code != schema.ErrorCodeRateLimited || e.RetryAfterSeconds < 1 {
+						t.Errorf("step %d: refusal %s, want rate_limited with a retry_after_seconds of at least 1", i, res.body)
+					}
+					if got := f.lk.count("UpdateParticipant") - before; got != 0 {
+						t.Errorf("step %d: a refused change made %d UpdateParticipant calls", i, got)
+					}
+				}
+				if s.wantLabel != "" {
+					if got := f.sharers(f.presenceV2(t, "ann2")); !slices.Contains(got, s.wantLabel) {
+						t.Errorf("step %d: sharers %q, want %q among them", i, got, s.wantLabel)
+					}
+				}
+			}
+			if rows := f.shareRows(t); len(rows) != 2 {
+				t.Errorf("rows %q: a quality change, refused or not, writes none", rows)
+			}
+		})
+	}
 }
