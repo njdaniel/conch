@@ -15,6 +15,9 @@ export interface DraftAttachment {
   readonly mediaType: string;
   readonly size: number;
   readonly bytes: Blob;
+  // Marked as a spoiler (issue #1500): uploaded under the prefixed name. Kept
+  // like the rest of the draft; it cannot change once the upload has begun.
+  readonly spoiler: boolean;
   readonly status: DraftAttachmentStatus;
   // The upload attempt that owns a later completion. Every retry advances it.
   readonly attempt: number;
@@ -43,6 +46,7 @@ export type AttachmentDraftAction =
   | { readonly type: 'add'; readonly channel: string; readonly audience?: Audience; readonly files: readonly NewDraftAttachment[] }
   | { readonly type: 'remove'; readonly channel: string; readonly audience?: Audience; readonly clientId: number }
   | { readonly type: 'clear'; readonly channel: string; readonly audience?: Audience }
+  | { readonly type: 'spoiler'; readonly channel: string; readonly audience?: Audience; readonly clientId: number; readonly spoiler: boolean }
   | { readonly type: 'uploading'; readonly channel: string; readonly audience?: Audience; readonly clientId: number; readonly generation: number }
   | {
       readonly type: 'uploaded';
@@ -148,6 +152,7 @@ export function attachmentDraftsReducer(state: AttachmentDrafts, action: Attachm
         mediaType: file.mediaType,
         size: file.bytes.size,
         bytes: file.bytes,
+        spoiler: false,
         status: 'pending',
         attempt: 0,
       }));
@@ -160,6 +165,14 @@ export function attachmentDraftsReducer(state: AttachmentDrafts, action: Attachm
       return put(state, action.channel, action.audience, attachmentsFor(state, action.channel, action.audience).filter((a) => a.clientId !== action.clientId));
     case 'clear':
       return put(state, action.channel, action.audience, []);
+    case 'spoiler':
+      // Once a file is uploading or uploaded its stored name is fixed: the mark
+      // is disabled with a reason in the composer, and refused here.
+      return changeOne(state, action, (attachment) =>
+        attachment.status === 'uploading' || attachment.status === 'ready' || attachment.spoiler === action.spoiler
+          ? attachment
+          : { ...attachment, spoiler: action.spoiler },
+      );
     case 'uploading':
       if (!ownsAttempt(action, state)) return state;
       return changeOne(state, action, (attachment) =>

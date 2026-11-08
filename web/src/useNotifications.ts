@@ -1,4 +1,4 @@
-import { previewText } from './Linkified';
+import { messagePreview } from './spoilerFiles';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import * as api from './api';
 import type { NotificationPolicy } from './api';
@@ -34,8 +34,8 @@ export function mentions(body: string, name: string): boolean {
   return new RegExp(`(?:^|[\\s.,!?;:'"()[\\]{}<>])@${escaped}(?=$|[\\s.,!?;:'"()[\\]{}<>])`, 'iu').test(body);
 }
 
-function snippet(body: string): string {
-  const text = previewText(body).replace(/\s+/g, ' ').trim();
+function snippet(message: MessageV2): string {
+  const text = messagePreview(message).replace(/\s+/g, ' ').trim();
   return text.length <= 160 ? text : `${text.slice(0, 159)}…`;
 }
 
@@ -175,7 +175,7 @@ export function useNotifications({
     });
     if (preferences.native && browserPermission === 'granted' && document.visibilityState === 'hidden' && supported()) {
       const title = mention ? `Mention in #${channel.name}` : `New message in #${channel.name}`;
-      const notification = platform.services.notifications.show(title, snippet(message.body), id);
+      const notification = platform.services.notifications.show(title, snippet(message), id);
       natives.current.set(id, notification);
       notification.onclick = () => {
         window.focus();

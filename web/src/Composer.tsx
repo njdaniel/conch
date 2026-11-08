@@ -6,6 +6,7 @@ import { formatSize, isPreviewType } from './fileSize';
 import { formatText, type FormatKind } from './formatting';
 import { completeMention, mentionAt } from './mention';
 import { validateImage } from './image';
+import { storedName } from './spoilerFiles';
 import type { Audience } from './schema/message';
 import { audienceScope, maxDraftAttachments, type DraftAttachment, type NewDraftAttachment } from './state/attachments';
 import type { Target, TargetAction } from './state/drafts';
@@ -26,6 +27,7 @@ export interface ComposerAttachmentContextValue {
   readonly attachments: readonly DraftAttachment[];
   readonly add: (files: readonly NewDraftAttachment[]) => void;
   readonly remove: (clientId: number) => void;
+  readonly spoiler: (clientId: number, spoiler: boolean) => void;
   readonly cancel: (clientId: number) => void;
   readonly retry: (clientId: number) => void;
   // The draft's images are about to change (issue #1066): said before any
@@ -38,6 +40,7 @@ const noAttachments: ComposerAttachmentContextValue = {
   attachments: [],
   add: () => undefined,
   remove: () => undefined,
+  spoiler: () => undefined,
   cancel: () => undefined,
   retry: () => undefined,
   editing: () => undefined,
@@ -50,9 +53,10 @@ export function ComposerAttachmentProvider({ value, children }: { readonly value
   return <ComposerAttachmentContext.Provider value={value}>{children}</ComposerAttachmentContext.Provider>;
 }
 
-function DraftPreview({ attachment, busy, onRemove, onCancel, onRetry }: {
+function DraftPreview({ attachment, busy, onSpoiler, onRemove, onCancel, onRetry }: {
   readonly attachment: DraftAttachment;
   readonly busy: boolean;
+  readonly onSpoiler: (spoiler: boolean) => void;
   readonly onRemove: () => void;
   readonly onCancel: () => void;
   readonly onRetry: () => void;
@@ -60,6 +64,10 @@ function DraftPreview({ attachment, busy, onRemove, onCancel, onRetry }: {
   const [url, setUrl] = useState<string | null>(null);
   const [broken, setBroken] = useState(false);
   const image = isPreviewType(attachment.mediaType);
+  const reasonId = useId();
+  // The stored name is fixed once the upload has begun: the mark is disabled
+  // with a reason rather than re-uploading the file.
+  const locked = attachment.status === 'uploading' || attachment.status === 'ready';
   useEffect(() => {
     if (!image) return;
     const made = URL.createObjectURL(attachment.bytes);
@@ -87,6 +95,18 @@ function DraftPreview({ attachment, busy, onRemove, onCancel, onRetry }: {
           <button type="button" onClick={onRetry} aria-label={`Retry upload of ${attachment.filename}`}>Retry</button>
         </>
       ) : null}
+      <button
+        type="button"
+        className="draft-spoiler"
+        aria-pressed={attachment.spoiler}
+        aria-label={`Mark ${attachment.filename} as spoiler`}
+        disabled={locked}
+        {...(locked ? { 'aria-describedby': reasonId } : {})}
+        onClick={() => { onSpoiler(!attachment.spoiler); }}
+      >
+        Mark as spoiler
+      </button>
+      {locked ? <span id={reasonId} className="hint">Already uploaded; remove it and add it again to change this.</span> : null}
       <button type="button" onClick={onRemove} disabled={busy} aria-label={`Remove ${attachment.filename}`}>Remove</button>
     </li>
   );
@@ -310,7 +330,7 @@ export function Composer({
   function submit() {
     if (!canSend) return;
     atBottom();
-    const body = draft.trim() === '' && attachments.length > 0 ? attachments.map((a) => a.filename).join(', ') : draft;
+    const body = draft.trim() === '' && attachments.length > 0 ? attachments.map(storedName).join(', ') : draft;
     if (attachments.length > 0) setSending(true);
     onSend(body, audience(), attachments);
   }
@@ -463,6 +483,7 @@ export function Composer({
               key={attachment.clientId}
               attachment={attachment}
               busy={busy}
+              onSpoiler={(spoiler) => { fileDraft.spoiler(attachment.clientId, spoiler); }}
               onRemove={() => { fileDraft.remove(attachment.clientId); }}
               onCancel={() => { fileDraft.cancel(attachment.clientId); }}
               onRetry={() => { fileDraft.retry(attachment.clientId); }}

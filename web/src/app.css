@@ -2257,6 +2257,49 @@ label {
   background: var(--raised);
 }
 
+/* A spoiler attachment (issue #1500): a card of text and a Reveal button that
+   is a full-size control, not the small inline one of a text spoiler. */
+.attachment-spoiler {
+  padding: var(--s2) var(--s3);
+  background: var(--raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+
+.attachment .spoiler {
+  display: grid;
+  justify-items: start;
+  gap: var(--s1);
+}
+
+.attachment .spoiler > button {
+  display: inline-flex;
+  min-width: 2.75rem;
+  min-height: 2.75rem;
+  padding: 0.35rem 0.75rem;
+  font-size: 0.875rem;
+  color: inherit;
+  background: var(--hover);
+}
+
+.attachment .spoiler-content {
+  display: grid;
+  justify-items: start;
+  gap: var(--s1);
+  margin-left: 0;
+  background: transparent;
+}
+
+.attachment .spoiler > button:focus-visible {
+  outline: 2px solid var(--accent, currentColor);
+  outline-offset: 2px;
+}
+
+.draft-spoiler[aria-pressed='true'] {
+  background: var(--hover);
+  font-weight: 600;
+}
+
 .message .body pre,
 .message .body blockquote,
 .version-body pre,

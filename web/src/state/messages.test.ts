@@ -18,6 +18,7 @@ const ready = (clientId: number, fileId: number): DraftAttachment => ({
   mediaType: 'image/png',
   size: 3,
   bytes: new Blob(['img']),
+  spoiler: false,
   status: 'ready',
   attempt: 1,
   fileId,

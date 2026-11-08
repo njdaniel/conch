@@ -12,6 +12,7 @@ import {
   type AttachmentDrafts,
   type NewDraftAttachment,
 } from './attachments';
+import { spoilerName } from '../spoilerFiles';
 
 const whisper = (principal_ids: number[]): Audience => ({ kind: 'principals', principal_ids });
 const net = (net_id: number): Audience => ({ kind: 'net', net_id });
@@ -197,5 +198,54 @@ describe('attachment drafts', () => {
     expect(attachmentPayload([])).toBeUndefined();
     const state = add(initialAttachmentDrafts, 'ops', undefined, file('one.png'));
     expect(attachmentPayload(attachmentsFor(state, 'ops'))).toBeUndefined();
+  });
+});
+
+describe('the spoiler mark of a draft (issue #1500)', () => {
+  const mark = (state: AttachmentDrafts, clientId: number, spoiler: boolean, audience?: Audience) =>
+    attachmentDraftsReducer(state, { type: 'spoiler', channel: 'ops', ...(audience === undefined ? {} : { audience }), clientId, spoiler });
+  const marked = (state: AttachmentDrafts, audience?: Audience) => attachmentsFor(state, 'ops', audience).map((a) => a.spoiler);
+
+  it('starts unmarked and toggles one draft only', () => {
+    let state = add(initialAttachmentDrafts, 'ops', undefined, file('a.png'), file('b.png'));
+    expect(marked(state)).toEqual([false, false]);
+    state = mark(state, 2, true);
+    expect(marked(state)).toEqual([false, true]);
+    state = mark(state, 2, false);
+    expect(marked(state)).toEqual([false, false]);
+  });
+
+  it('is kept across audience switches, a restore and a retried upload', () => {
+    const audience = whisper([3]);
+    let state = add(initialAttachmentDrafts, 'ops', undefined, file('a.png'));
+    state = mark(state, 1, true);
+    state = add(state, 'ops', audience, file('w.png'));
+    expect(marked(state)).toEqual([true]);
+    expect(marked(state, audience)).toEqual([false]);
+    const restored = attachmentDraftsReducer(initialAttachmentDrafts, { type: 'restore', drafts: state });
+    expect(marked(restored)).toEqual([true]);
+    state = attachmentDraftsReducer(state, { type: 'uploading', channel: 'ops', clientId: 1, generation: 0 });
+    state = attachmentDraftsReducer(state, { type: 'uploadFailed', channel: 'ops', clientId: 1, generation: 0, attempt: 1, error: 'x' });
+    state = mark(state, 1, true);
+    state = attachmentDraftsReducer(state, { type: 'uploading', channel: 'ops', clientId: 1, generation: 0 });
+    expect(marked(state)).toEqual([true]);
+    expect(attachmentsFor(state, 'ops')[0]?.attempt).toBe(2);
+  });
+
+  it('can still be changed after a failed or cancelled upload, but not while uploading or once uploaded', () => {
+    let state = add(initialAttachmentDrafts, 'ops', undefined, file('a.png'));
+    state = attachmentDraftsReducer(state, { type: 'uploading', channel: 'ops', clientId: 1, generation: 0 });
+    expect(mark(state, 1, true)).toBe(state);
+    state = attachmentDraftsReducer(state, { type: 'cancelled', channel: 'ops', clientId: 1, generation: 0, attempt: 1 });
+    state = mark(state, 1, true);
+    expect(marked(state)).toEqual([true]);
+    state = attachmentDraftsReducer(state, { type: 'uploading', channel: 'ops', clientId: 1, generation: 0 });
+    state = attachmentDraftsReducer(state, { type: 'uploaded', channel: 'ops', clientId: 1, generation: 0, attempt: 2, fileId: 9 });
+    expect(mark(state, 1, false)).toBe(state);
+    expect(marked(state)).toEqual([true]);
+  });
+
+  it('names the stored file with the prefix', () => {
+    expect(spoilerName('a.png')).toBe(spoilerName(spoilerName('a.png')));
   });
 });
