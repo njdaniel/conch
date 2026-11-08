@@ -89,6 +89,12 @@ const paths = {
   ),
   chat: <path d="M4 5h16v11H9.5L5 20v-4H4z" />,
   channels: <path d="M9.5 4 7.5 20M16.5 4l-2 16M4 9h16M4 15h16" />,
+  external: (
+    <>
+      <path d="M14 4h6v6M20 4l-9 9" />
+      <path d="M18 13v6a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h6" />
+    </>
+  ),
 } as const;
 
 export type IconName = keyof typeof paths;

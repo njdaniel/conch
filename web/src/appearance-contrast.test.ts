@@ -78,6 +78,20 @@ describe('appearance token contrast', () => {
     }
   });
 
+  it.each(themes)('keeps external-link cues and focus rings visible in %s', (theme) => {
+    expect(css).toMatch(/\.external-link-cue\s*\{[^}]*color:\s*var\(--accent\)/);
+    expect(css).toMatch(/\.body a:focus-visible\s*\{[^}]*outline:\s*2px solid var\(--focus\)/);
+    for (const accent of appearanceAccents) {
+      const palette = tokens(theme, accent);
+      for (const surface of surfaces) {
+        const [cue, cueBg] = pair(palette, 'accent', surface);
+        expect(contrast(cue, cueBg), `${theme}/${accent}: link cue on ${surface}`).toBeGreaterThanOrEqual(4.5);
+        const [focus, focusBg] = pair(palette, 'focus', surface);
+        expect(contrast(focus, focusBg), `${theme}/${accent}: link focus on ${surface}`).toBeGreaterThanOrEqual(3);
+      }
+    }
+  });
+
   it('defines a distinct accent value in every explicit preset', () => {
     for (const accent of appearanceAccents) {
       const values = themes.map((theme) => tokens(theme, accent)['accent']);

@@ -1,8 +1,21 @@
 import { Component, useId, useState, type ReactNode } from 'react';
+import { Glyph } from './Icons';
 import { linkify } from './linkify';
 
 function SafeLink({ text, href }: { readonly text: string; readonly href: string }) {
-  return <a href={href} target="_blank" rel="noopener noreferrer">{text}</a>;
+  const canonical = new URL(href).href;
+  // The cue sits after the last character as the reader sees it: a whole code
+  // point (an astral one is two UTF-16 units) with any combining marks.
+  const tail = /\P{M}\p{M}*$/u.exec(text)?.[0] ?? text.slice(-1);
+  return (
+    <a className="external-link" href={canonical} target="_blank" rel="noopener noreferrer" title={canonical} aria-label={`${text} (opens in a new tab)`}>
+      {text.slice(0, text.length - tail.length)}
+      <span className="external-link-tail">
+        {tail}
+        <span className="external-link-cue" aria-hidden="true"><Glyph name="external" /></span>
+      </span>
+    </a>
+  );
 }
 
 function Spoiler({ children }: { readonly children: ReactNode }) {

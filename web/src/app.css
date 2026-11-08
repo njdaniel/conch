@@ -1705,6 +1705,32 @@ label {
   overflow-wrap: anywhere;
 }
 
+.external-link {
+  overflow-wrap: anywhere;
+}
+
+.external-link-tail {
+  white-space: nowrap;
+}
+
+.external-link-cue {
+  display: inline-block;
+  margin-left: 0.15em;
+  color: var(--accent);
+  vertical-align: -0.1em;
+}
+
+.external-link-cue .icon {
+  display: block;
+  width: 0.8em;
+  height: 0.8em;
+}
+
+.body a:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
 .attachments {
   display: flex;
   flex-wrap: wrap;
