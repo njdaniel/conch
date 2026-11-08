@@ -47,8 +47,8 @@ type AppleVideo = HTMLVideoElement & { readonly webkitEnterFullscreen?: () => vo
 // ShareView plays one watched publisher's screen and sound with independent
 // controls and an optional focus action (voice-multi-share.md §7.1, #1509).
 // Compact changes only its presentation and controls, never its attachment or
-// subscription; the phone's closed call header can own its layout toggle too
-// (issue #1498).
+// subscription. It carries the layout toggle only when given one: on a closed
+// stage with no call header (CallView says where; issue #1498).
 export function ShareView({
   client,
   state,

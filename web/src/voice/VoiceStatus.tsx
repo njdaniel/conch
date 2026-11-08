@@ -2,16 +2,38 @@ import type { VoiceState } from './connection';
 
 // VoiceStatus is the one rendering of the connection, capture and transmit
 // states shared by the voice strip and the compact call header (issue #1498).
-// Every word comes from VoiceState, never from the stage's layout.
+// Every word comes from VoiceState, never from the stage's layout. In the
+// compact header (showPhase) it also says Reconnecting, and carries all its
+// words in its title: on a wide window that header is one line, which cuts
+// them short.
 export function VoiceStatus({ state, showPhase = false }: { readonly state: VoiceState; readonly showPhase?: boolean }) {
   // The microphone is captured while connected with it, whether or not
   // anything is sent (UX-11): said apart from transmitting. A reconnect keeps
   // the capture it had. A microphone that went is not captured.
   const captured = (state.phase === 'connected' || state.phase === 'reconnecting') && !state.watchOnly && !state.listenOnly && !state.missing;
   const waiting = [...state.watched].some((principal) => state.streamTracks.get(principal)?.video !== true);
+  const reconnecting = showPhase && state.phase === 'reconnecting';
+  const tx = [
+    state.muted ? 'Muted. ' : '',
+    state.deafened ? 'Deafened (you hear no one, and you are muted). ' : '',
+    state.listenOnly ? 'Listen only. ' : '',
+    state.viewer ? 'Watching beside your voice on another device. ' : state.watchOnly ? 'Watch only: your microphone is off. ' : '',
+    state.mode === 'ptt' ? 'Push to talk. ' : '',
+    transmitLabel(state),
+  ].join('');
+  const words = showPhase
+    ? [
+        reconnecting ? 'Reconnecting' : '',
+        captured ? 'Microphone in use' : '',
+        state.cameraTrack === 'captured' ? 'Camera in use' : '',
+        state.cameraTrack === 'published' ? 'Sending video' : '',
+        waiting ? 'Waiting for the picture' : '',
+        tx,
+      ].filter((w) => w !== '').join(' · ')
+    : undefined;
   return (
-    <p className="voice-sub">
-      {showPhase && state.phase === 'reconnecting' ? <><span className="chip">Reconnecting</span>{' '}</> : null}
+    <p className="voice-sub" title={words}>
+      {reconnecting ? <><span className="chip">Reconnecting</span>{' '}</> : null}
       {captured ? <span className="chip">Microphone in use</span> : null}{' '}
       {/* From this page's own camera track, never from presence (S5). */}
       {state.cameraTrack === 'captured' ? (
@@ -25,14 +47,7 @@ export function VoiceStatus({ state, showPhase = false }: { readonly state: Voic
         </>
       ) : null}
       {waiting ? <><span className="share-waiting">Waiting for the picture</span>{' '}</> : null}
-      <span className="voice-tx">
-        {state.muted ? 'Muted. ' : ''}
-        {state.deafened ? 'Deafened (you hear no one, and you are muted). ' : ''}
-        {state.listenOnly ? 'Listen only. ' : ''}
-        {state.viewer ? 'Watching beside your voice on another device. ' : state.watchOnly ? 'Watch only: your microphone is off. ' : ''}
-        {state.mode === 'ptt' ? 'Push to talk. ' : ''}
-        {transmitLabel(state)}
-      </span>
+      <span className="voice-tx">{tx}</span>
     </p>
   );
 }

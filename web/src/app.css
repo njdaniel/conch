@@ -3225,33 +3225,50 @@ label {
   gap: var(--s2);
 }
 
+/* The call's channel, sharers and speakers are words in both layouts, not
+   colour alone (issue #1498). They share the title's line rather than adding
+   a row, and give way with an ellipsis: the context's title attribute holds
+   all its words, and a screen reader reads them all. A row more would push
+   the strip's tiles down (below), and take a phone's log room (#1028). */
 .call-heading {
+  display: flex;
+  align-items: center;
+  gap: 0 var(--s3);
   min-width: 0;
+  max-width: 100%;
 }
 
-/* The call's channel, sharers and speakers are words in both layouts, not
-   colour alone (issue #1498). */
 .call-context {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--s1) var(--s3);
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
   color: var(--muted);
   font-size: var(--small);
   font-weight: 400;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.call-context > * + * {
+  margin-inline-start: var(--s2);
 }
 
 .call-channel button {
   padding: 0 var(--s2);
+  vertical-align: middle;
 }
 
 /* Wide enough, the head is one row: the controls keep their size and the
-   title gives way, its enlarged-picture words cut short (the full words are
-   in its title attribute). A taller head would
-   push the strip's tiles below the view's fold, where adaptive stream stops
-   sending them. */
+   title and the context give way, cut short (their full words are in their
+   title attributes). A taller head would push the strip's tiles below the
+   view's fold, where adaptive stream stops sending them. */
 @media (min-width: 720px) {
   .call-head {
     flex-wrap: nowrap;
+  }
+
+  .call-heading {
+    flex: 0 1 auto;
   }
 
   .call-title {
@@ -3386,24 +3403,20 @@ body:has(.call-view.compact, .call-stage.compact) .dock {
   padding-top: 0;
 }
 
-/* The compact header is one row where it fits and wraps where it doesn't: on
-   a 390 px phone the channel, "Sharing: …" and the voice status would
-   otherwise run off screen (#1498). */
+/* The compact header has the context and the voice status, not the title.
+   On a phone it wraps, so all its words are on screen: under Chat it is
+   where the status is, and on a 390 px phone the channel, "Sharing: …" and
+   the status would otherwise run off it (#1498). Its own row costs a phone
+   nothing it had: the expanded stage there is taller. */
 .call-view.compact .call-heading,
 .call-stage.compact .call-heading {
-  display: flex;
   flex-wrap: wrap;
-  align-items: center;
   gap: 0 var(--s2);
-  min-width: 0;
 }
 
 .call-view.compact .call-context,
-.call-view.compact .voice-sub,
-.call-stage.compact .call-context,
-.call-stage.compact .voice-sub {
-  flex-wrap: wrap;
-  min-width: 0;
+.call-stage.compact .call-context {
+  white-space: normal;
 }
 
 .call-view.compact .call-title,
@@ -3466,9 +3479,47 @@ body:has(.call-view.compact, .call-stage.compact) .dock {
 .call-view.compact .voice-sub,
 .call-stage.compact .voice-sub {
   display: flex;
-  flex-wrap: nowrap;
+  flex-wrap: wrap;
+  min-width: 0;
   font-size: var(--small);
-  white-space: nowrap;
+}
+
+/* Wide enough, compact is one row of 44 px: the header beside the tiles, its
+   context and status one line each, cut short (their title attributes hold
+   their words, and the voice strip below says the status in full). A second
+   row would take its height from the conversation. */
+@media (min-width: 720px) {
+  .call-view.compact {
+    flex-direction: row;
+    align-items: center;
+    gap: var(--s2);
+  }
+
+  .call-view.compact > .call-head {
+    flex: 0 1 auto;
+    max-width: 50%;
+    min-width: 0;
+  }
+
+  .call-view.compact > .call-grid {
+    flex: 1 1 0;
+    min-width: 0;
+  }
+
+  .call-view.compact .call-heading {
+    flex-wrap: nowrap;
+    min-width: 0;
+  }
+
+  .call-view.compact .call-context,
+  .call-view.compact .voice-sub {
+    display: block;
+    flex: 0 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
 }
 
 .call-stage.compact button,

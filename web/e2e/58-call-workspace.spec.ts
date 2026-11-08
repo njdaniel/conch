@@ -323,6 +323,8 @@ test.describe('the persistent call workspace', () => {
       // 4. On a phone with reduced motion, the compact share leaves the composer
       // reachable, names the call and statuses, announces each toggle once,
       // keeps decoded frames flowing, has 44 px controls and runs no animation.
+      // Under Chat the expanded stage is the stream alone (issue #1028), so
+      // Compact is the Voice view's header's, and Expand the compact strip's.
       await b.page.emulateMedia({ reducedMotion: 'reduce' });
       await b.page.setViewportSize({ width: 390, height: 844 });
       await openChannel(b.page, 'workspace-text');
@@ -337,14 +339,28 @@ test.describe('the persistent call workspace', () => {
       const offscreen = await phoneStage.locator('.call-context > *, .voice-sub > *').evaluateAll((parts) => parts
         .map((part) => ({ text: part.textContent, box: part.getBoundingClientRect() }))
         .filter(({ box }) => box.width > 0 && (box.left < 0 || box.right > window.innerWidth))
-        .map(({ text, box }) => `${String(text)} (${String(Math.round(box.left))}..${String(Math.round(box.right))})`));
+        .map(({ text, box }) => `${text} (${String(Math.round(box.left))}..${String(Math.round(box.right))})`));
       expect(offscreen, 'header parts outside the viewport').toEqual([]);
       await phoneStage.getByRole('button', { name: '#voice-room', exact: true }).click();
       await expectComposerShown(b.page);
       await phoneStage.getByRole('button', { name: 'Expand', exact: true }).click();
       await expect(b.page.getByText('Call view expanded.', { exact: true })).toHaveCount(1);
-      await shareView(b.page).getByRole('button', { name: 'Compact', exact: true }).click();
+      await expect(shareView(b.page)).toBeVisible();
+      await expect(b.page.locator('.stage').getByRole('button', { name: 'Compact', exact: true })).toHaveCount(0);
+      await showView(b.page, 'Voice');
+      // The open view's header is one line that may end in an ellipsis: each
+      // part of it lies inside the 390 px viewport, cut short or not.
+      const outside = await call(b.page).locator('.call-title, .call-context, .call-controls > *').evaluateAll((parts) => parts
+        .map((part) => ({ text: part.textContent, box: part.getBoundingClientRect() }))
+        .filter(({ box }) => box.width > 0 && (box.left < 0 || box.right > window.innerWidth))
+        .map(({ text, box }) => `${text} (${String(Math.round(box.left))}..${String(Math.round(box.right))})`));
+      expect(outside, 'open header parts outside the viewport').toEqual([]);
+      await expect(call(b.page).locator('.call-context')).toHaveAttribute('title', /^#voice-room · Sharing: alice/);
+      await call(b.page).getByRole('button', { name: 'Compact', exact: true }).click();
       await expect(b.page.getByText('Call view compact.', { exact: true })).toHaveCount(1);
+      await showView(b.page, 'Chat');
+      await expect(phoneStage.getByRole('button', { name: 'Expand', exact: true })).toBeVisible();
+      await expectComposerShown(b.page);
       const phoneFrames = await inbound(b.page);
       await expect.poll(() => inbound(b.page), { timeout: 15_000 }).toBeGreaterThan(phoneFrames);
       expect(await b.page.locator('.stage').evaluate((stage) => stage.getAnimations({ subtree: true }).length)).toBe(0);

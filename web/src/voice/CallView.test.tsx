@@ -940,12 +940,19 @@ describe('the phone strip with the camera (C7)', () => {
     widthOf(true);
     const opened = vi.fn();
     const open = inVoice({ phase: 'reconnecting', viewing: true, watched: new Set([9]), focusedShare: 9, cameraTrack: 'published', camera: { kind: 'sending' }, speaking: new Set([8]), muted: true, deafened: true });
-    const { client } = stripOf(open, () => undefined, { cameras: [8], sharer: 9 }, 'elsewhere', opened);
+    // Compact is the Voice view's header's: under Chat the expanded stage is
+    // the stream alone, and the log keeps its room (issue #1028).
+    const { client, redraw } = stripOf(open, null, { cameras: [8], sharer: 9 }, 'elsewhere', opened);
     const share = screen.getByRole('region', { name: 'Shared screen' });
     const video = within(share).getByLabelText("member-2's screen");
     const item = video.closest('li');
+    const inView = client.snapshot();
+    fireEvent.click(within(screen.getByRole('region', { name: 'Video call' })).getByRole('button', { name: 'Compact' }));
+    expect(client.snapshot()).toBe(inView);
+    expect(screen.getAllByText('Call view compact.')).toHaveLength(1);
+    redraw(open, () => undefined);
+    expect(screen.queryByRole('region', { name: 'Video call' })).toBeNull();
     const before = client.snapshot();
-    fireEvent.click(within(share).getByRole('button', { name: 'Compact' }));
     const header = () => {
       const found = document.querySelector('.call-stage.compact .call-head');
       if (!(found instanceof HTMLElement)) throw new Error('no compact phone header');
@@ -959,16 +966,22 @@ describe('the phone strip with the camera (C7)', () => {
     expect(client.snapshot()).toBe(before);
     expect(screen.getByLabelText("member-2's screen")).toBe(video);
     expect(video.closest('li')).toBe(item);
-    expect(screen.getAllByText('Call view compact.')).toHaveLength(1);
     expect(screen.getAllByRole('button', { name: 'Expand' })).toHaveLength(1);
     fireEvent.click(within(header()).getByRole('button', { name: 'Expand' }));
     expect(screen.getAllByText('Call view expanded.')).toHaveLength(1);
     expect(screen.getByLabelText("member-2's screen")).toBe(video);
     expect(video.closest('li')).toBe(item);
-    fireEvent.click(within(share).getByRole('button', { name: 'Compact' }));
+    // Expanded under Chat, the stage is the stream alone: no toggle, no head.
+    expect(screen.queryByRole('button', { name: 'Compact' })).toBeNull();
+    expect(document.querySelector('.call-head')).toBeNull();
+    expect(client.snapshot()).toBe(before);
+    redraw(open, null);
+    const again = client.snapshot();
+    fireEvent.click(within(screen.getByRole('region', { name: 'Video call' })).getByRole('button', { name: 'Compact' }));
     expect(screen.getAllByText('Call view compact.')).toHaveLength(1);
     expect(screen.getByLabelText("member-2's screen")).toBe(video);
     expect(video.closest('li')).toBe(item);
+    expect(client.snapshot()).toBe(again);
   });
 
   it('says "Camera on" in the state button from the local track, and still opens the Voice view', () => {
@@ -1102,6 +1115,11 @@ describe('the persistent call workspace (issue #1498)', () => {
     expect(header()).toContain('#general');
     expect(header()).toContain('Sharing: member-2');
     expect(header()).toContain('Speaking: member-1');
+    // One line that may be cut short: its title holds all of it, and its
+    // parts are spaced apart for a screen reader.
+    const context = callRegion().querySelector('.call-context');
+    expect(context?.getAttribute('title')).toBe('#general · Sharing: member-2 · Speaking: member-1');
+    expect(context?.textContent).toBe('#general Sharing: member-2 Speaking: member-1');
     const before = client.snapshot();
     fireEvent.click(within(callRegion()).getByRole('button', { name: '#general' }));
     expect(opened).toHaveBeenCalledWith('general');
@@ -1110,5 +1128,6 @@ describe('the persistent call workspace (issue #1498)', () => {
     expect(header()).toContain('#general');
     expect(header()).toContain('Sharing: member-2');
     expect(header()).toContain('Speaking: member-1');
+    expect(callRegion().querySelector('.call-head .voice-sub')?.getAttribute('title')).toBe('Microphone in use · Push to talk. Not transmitting');
   });
 });

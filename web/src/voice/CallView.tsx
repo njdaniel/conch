@@ -383,6 +383,9 @@ export function CallView({ client, state, tiles, hidden, open, viewed = state.ch
   const switchable = tiles.filter((t) => t.kind === 'share' && !t.me);
   const sharingNames = tiles.filter((t) => t.kind === 'share').map((t) => t.name);
   const speakerNames = [...state.speaking].map((principal) => nameOf?.(principal) ?? tiles.find((t) => t.principal === principal)?.name ?? `Member ${String(principal)}`);
+  // The header's context is one line that may be cut short; its title holds
+  // all of it.
+  const context = [`#${state.channel ?? 'voice'}`, ...(sharingNames.length === 0 ? [] : [`Sharing: ${sharingNames.join(', ')}`]), ...(speakerNames.length === 0 ? [] : [`Speaking: ${speakerNames.join(', ')}`])].join(' · ');
   // Without video asked for, the stage holds stream tiles alone: there is no
   // video to hide and no person to filter.
   const viewing = state.viewing;
@@ -395,6 +398,12 @@ export function CallView({ client, state, tiles, hidden, open, viewed = state.ch
 
   return (
     <section ref={view} tabIndex={open ? -1 : undefined} aria-label={open ? 'Video call' : undefined} className={open ? (compact ? 'call-view compact' : 'call-view') : (compact ? 'call-stage compact' : 'call-stage')} onKeyDown={open ? onKey : undefined}>
+      {/* The layout toggle is the header's wherever the header is drawn: in
+          the open view, and in a phone's compact strip under Chat and
+          Channels. A phone's expanded stage there is the stream alone, and
+          its log keeps its room (issue #1028), so Compact is offered in the
+          Voice view's header. Only a closed stage outside the phone layout,
+          which has no header, puts the toggle in the player. */}
       {open || (narrow && compact) ? (
         <div className="call-head">
           <div className="call-heading">
@@ -403,12 +412,12 @@ export function CallView({ client, state, tiles, hidden, open, viewed = state.ch
               Video
               {main === null ? null : <span className="call-state" title={main.kind === 'share' ? `Watching ${main.name}'s screen` : enlargedWords(main)}>{main.kind === 'share' ? `Watching ${main.name}'s screen` : enlargedWords(main)}</span>}
             </p>
-            <p className="call-context">
+            <p className="call-context" title={context}>
               <span className="call-channel">
                 {state.channel !== null && state.channel !== viewed && onOpen !== undefined ? <button type="button" onClick={() => { onOpen(state.channel as string); }}>#{state.channel}</button> : <>#{state.channel ?? 'voice'}</>}
               </span>
-              {sharingNames.length === 0 ? null : <span>Sharing: {sharingNames.join(', ')}</span>}
-              {speakerNames.length === 0 ? null : <span>Speaking: {speakerNames.join(', ')}</span>}
+              {sharingNames.length === 0 ? null : <>{' '}<span>Sharing: {sharingNames.join(', ')}</span></>}
+              {speakerNames.length === 0 ? null : <>{' '}<span>Speaking: {speakerNames.join(', ')}</span></>}
             </p>
             {compact ? <VoiceStatus state={state} showPhase /> : null}
           </div>
@@ -447,7 +456,7 @@ export function CallView({ client, state, tiles, hidden, open, viewed = state.ch
               ref={(el) => { if (el === null) items.current.delete(key); else items.current.set(key, el); }}
               className={[t.kind === 'share' ? 'call-share' : 'call-tile', main === null ? (focus ? 'in-strip' : '') : isMain ? 'main' : 'in-strip', t.kind !== 'share' && state.speaking.has(t.principal) ? 'speaking' : ''].filter((c) => c !== '').join(' ')}
             >
-              {t.kind === 'share' && t.render !== undefined ? t.render(() => { enlarge(t); }, compact, !open && isMain && !(narrow && compact) ? changeLayout : undefined) : (
+              {t.kind === 'share' && t.render !== undefined ? t.render(() => { enlarge(t); }, compact, !open && isMain && !narrow ? changeLayout : undefined) : (
                 <TileView
                   client={client}
                   tile={t}
