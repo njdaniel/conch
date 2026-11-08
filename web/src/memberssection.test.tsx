@@ -13,7 +13,7 @@ import { App } from './App';
 import { AdminConsole } from './AdminConsole';
 import { CommunityMembers } from './Members';
 import { SettingsOpen } from './joiningSettings';
-import { ManifestReads, type ManifestReadControl } from './admin/AIAdminCard';
+import { AIAdminCard, ManifestReads, type ManifestReadControl } from './admin/AIAdminCard';
 import type { ChannelListingV1 } from './schema/channel';
 import type { Permission, PermissionsResponseV1 } from './schema/permission';
 import type { ServerMemberV1, WhoAmIResponseV1 } from './schema/principal';
@@ -1055,13 +1055,14 @@ describe('the section follows the directory frame (issue #1226)', () => {
     expect(reads(calls)).toBe(before + 1);
   });
 
-  it('draws its own answer when the shared order calls it stale, and leaves the stops alone', async () => {
+  it('draws its own answer when the shared order calls it stale', async () => {
     serve(owner);
     await signedIn();
     // Another view's newer answer was applied first: the order refuses this one.
     const applied: number[] = [];
     const control: ManifestReadControl = {
-      stopped: new Set<number>(),
+      mayRead: () => true,
+      generation: () => 0,
       stop: () => undefined,
       beginDirectory: () => ({ ticket: 1, generation: 0 }),
       acceptDirectory: (request) => {
@@ -1073,7 +1074,36 @@ describe('the section follows the directory frame (issue #1226)', () => {
     const region = await screen.findByRole('region', { name: 'Members' });
     await within(region).findByRole('list', { name: 'People' });
     expect(applied.length).toBeGreaterThan(0);
-    expect(control.stopped.size).toBe(0);
+  });
+
+  it('records a manifest 404 for the session even when the card has gone before it answers', async () => {
+    let answer: (response: Response) => void = () => undefined;
+    serve(owner, { routes: { 'GET /v1/principals/4/manifest': () => new Promise<Response>((resolve) => { answer = resolve; }) } });
+    await signedIn();
+    const stopped: [number, number][] = [];
+    const control: ManifestReadControl = {
+      mayRead: () => true,
+      generation: () => 7,
+      stop: (id, sent) => {
+        stopped.push([id, sent]);
+      },
+      beginDirectory: () => ({ ticket: 1, generation: 7 }),
+      acceptDirectory: () => true,
+    };
+    const agent: ServerMemberV1 = { id: 4, kind: 'agent', name: 'builder', created_at: at };
+    const view = render(
+      <ManifestReads.Provider value={control}>
+        <AIAdminCard who={owner} person={agent} onChanged={() => undefined} onUnauthorized={() => undefined} />
+      </ManifestReads.Provider>,
+    );
+    await settled();
+    view.unmount();
+    await act(async () => {
+      answer(json({}, 404));
+      await Promise.resolve();
+    });
+    await settled();
+    expect(stopped).toEqual([[4, 7]]);
   });
 
   it('sends nothing while hidden', async () => {

@@ -1,6 +1,6 @@
-// The session's one stop for agent manifest reads (issue #1562): which agents
-// the community directory no longer lists, which answered 404, and the
-// session-wide generation that orders every directory answer.
+// The session's one gate for agent manifest reads (issue #1562): the agents
+// the newest applied community-directory answer lists, those that answered
+// 404, and the session-wide order of every directory answer.
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { ServerMemberV1 } from '../schema/principal';
 import type { DirectoryRequest, ManifestReadControl } from './AIAdminCard';
@@ -9,9 +9,9 @@ import type { DirectoryRequest, ManifestReadControl } from './AIAdminCard';
 // changes counts the server's directory-changed words; signedIn false clears
 // the control, so another person's session starts clean.
 export function useManifestReadControl(signedIn: boolean, changes: number): ManifestReadControl {
-  const [unlistedAgents, setUnlistedAgents] = useState<ReadonlySet<number>>(new Set());
+  // The agents the newest applied answer lists; null before any.
+  const [listed, setListed] = useState<ReadonlySet<number> | null>(null);
   const [missingManifests, setMissingManifests] = useState<ReadonlySet<number>>(new Set());
-  const listedAgents = useRef<ReadonlySet<number>>(new Set());
   // Tickets number every directory request from every view, closed ones
   // included; an answer older than the newest one applied is stale.
   const requestedDirectory = useRef(0);
@@ -27,15 +27,8 @@ export function useManifestReadControl(signedIn: boolean, changes: number): Mani
   const acceptDirectory = useCallback((request: DirectoryRequest, next: readonly ServerMemberV1[]) => {
     if (request.ticket < acceptedDirectory.current) return false;
     acceptedDirectory.current = request.ticket;
-    const before = listedAgents.current;
     const present = new Set(next.filter((member) => member.kind === 'agent').map((member) => member.id));
-    listedAgents.current = present;
-    setUnlistedAgents((current) => {
-      const changed = new Set(current);
-      for (const id of before) if (!present.has(id)) changed.add(id);
-      for (const id of present) changed.delete(id);
-      return changed.size === current.size && [...changed].every((id) => current.has(id)) ? current : changed;
-    });
+    setListed(present);
     if (request.generation <= recovered.current) return true;
     recovered.current = request.generation;
     setMissingManifests((current) => {
@@ -45,7 +38,10 @@ export function useManifestReadControl(signedIn: boolean, changes: number): Mani
     });
     return true;
   }, []);
-  const stopManifestRead = useCallback((id: number) => {
+  const generationNow = useCallback(() => generation.current, []);
+  const stopManifestRead = useCallback((id: number, sent: number) => {
+    // A recovery newer than this read has already cleared the stops.
+    if (sent < recovered.current) return;
     setMissingManifests((current) => {
       if (current.has(id)) return current;
       const changed = new Set(current);
@@ -55,15 +51,20 @@ export function useManifestReadControl(signedIn: boolean, changes: number): Mani
   }, []);
   useEffect(() => {
     if (signedIn) return;
-    listedAgents.current = new Set();
     acceptedDirectory.current = requestedDirectory.current;
-    setUnlistedAgents(new Set());
+    setListed(null);
     setMissingManifests(new Set());
   }, [signedIn]);
-  // One stop applies to both directory views. A routine reopen does not retry
+  // One gate applies to every directory view. A routine reopen does not retry
   // a 404; a post-change directory answer listing the agent does.
   return useMemo<ManifestReadControl>(
-    () => ({ stopped: new Set([...unlistedAgents, ...missingManifests]), stop: stopManifestRead, beginDirectory, acceptDirectory }),
-    [unlistedAgents, missingManifests, stopManifestRead, beginDirectory, acceptDirectory],
+    () => ({
+      mayRead: (id) => (listed === null || listed.has(id)) && !missingManifests.has(id),
+      generation: generationNow,
+      stop: stopManifestRead,
+      beginDirectory,
+      acceptDirectory,
+    }),
+    [listed, missingManifests, generationNow, stopManifestRead, beginDirectory, acceptDirectory],
   );
 }

@@ -18,23 +18,28 @@ export interface DirectoryRequest {
   readonly generation: number;
 }
 
-// ManifestReads is the one stop for agent manifest reads, shared by every
-// card (#1562). The model: an agent is read only while neither the community
-// directory has dropped it nor a manifest read answered 404. Only the
-// community directory decides membership; channel members play no part. Every
-// directory answer, from any view and even a closed one, is ordered by its
-// ticket: one older than an answer already applied changes nothing. An answer
-// sent after a directory change (a newer generation than any applied) also
-// lifts the 404 stops of the agents it lists.
+// ManifestReads is the one gate for agent manifest reads, shared by every
+// card (#1562). The model: once any community-directory answer has been
+// applied, an agent is read only if the newest applied answer lists it and no
+// manifest read has answered 404 for it; before the first answer, reads are
+// allowed. Only the community directory decides membership; channel members
+// play no part. Every directory answer, from any view and even a closed one,
+// is ordered by its ticket: one older than an answer already applied changes
+// nothing here (each view still draws its own). An answer sent after a
+// directory change (a newer generation than any applied) also lifts the 404
+// stops of the agents it lists, and a 404 sent before that is ignored.
 export interface ManifestReadControl {
-  readonly stopped: ReadonlySet<number>;
-  readonly stop: (id: number) => void;
+  readonly mayRead: (id: number) => boolean;
+  // generation is the count of directory changes seen now: tag a read with it.
+  readonly generation: () => number;
+  // stop records a 404 for a read sent at that generation, whatever became of the card.
+  readonly stop: (id: number, generation: number) => void;
   readonly beginDirectory: () => DirectoryRequest;
   // acceptDirectory applies the answer to that request; false means it was stale.
   readonly acceptDirectory: (request: DirectoryRequest, members: readonly ServerMemberV1[]) => boolean;
 }
 
-export const ManifestReads = createContext<ManifestReadControl>({ stopped: new Set<number>(), stop: () => undefined, beginDirectory: () => ({ ticket: 0, generation: 0 }), acceptDirectory: () => true });
+export const ManifestReads = createContext<ManifestReadControl>({ mayRead: () => true, generation: () => 0, stop: () => undefined, beginDirectory: () => ({ ticket: 0, generation: 0 }), acceptDirectory: () => true });
 
 export interface AIAdminCardProps {
   readonly who: WhoAmIResponseV1;
@@ -45,7 +50,7 @@ export interface AIAdminCardProps {
 
 export function AIAdminCard({ who, person, onChanged, onUnauthorized }: AIAdminCardProps) {
   const manifest = useContext(ManifestReads);
-  const reads = who.role === 'operator' && person.kind === 'agent' && !manifest.stopped.has(person.id);
+  const reads = who.role === 'operator' && person.kind === 'agent' && manifest.mayRead(person.id);
   const [grant, setGrant] = useState<readonly string[]>([]);
   const [asking, setAsking] = useState(false);
   // Access was removed from this card. The server clears the grant when it
@@ -67,21 +72,21 @@ export function AIAdminCard({ who, person, onChanged, onUnauthorized }: AIAdminC
   useEffect(() => {
     if (!reads) return;
     let current = true;
+    const sent = manifest.generation();
     void api.agentManifest(person.id).then((result) => {
+      // A 404 is the session's, kept whatever became of this card; the rest is local.
+      if (!result.ok && result.failure !== 'unauthorized' && result.status === 404) manifest.stop(person.id, sent);
       if (!current) return;
       if (result.ok) setGrant(result.value.permissions ?? []);
       else if (result.failure === 'unauthorized') unauthorized.current();
-      else if (result.status === 404) {
-        manifest.stop(person.id);
-        setGrant([]);
-      } else setGrant([]);
+      else setGrant([]);
     });
     return () => {
       current = false;
     };
   // Read again whenever the list is (person is a new object each time), so a
   // grant made or removed since shows, unless the directory or a 404 ended it.
-  }, [reads, person, manifest.stop]);
+  }, [reads, person, manifest.stop, manifest.generation]);
 
   if (!reads || (grant.length === 0 && !removed)) return null;
   const name = person.name;

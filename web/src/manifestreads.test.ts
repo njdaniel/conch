@@ -22,11 +22,11 @@ describe('manifest read control', () => {
       result.current.acceptDirectory(listing, listed);
       expect(result.current.acceptDirectory(second, hidden)).toBe(true);
     });
-    expect(result.current.stopped.has(4)).toBe(true);
+    expect(result.current.mayRead(4)).toBe(false);
     act(() => {
       expect(result.current.acceptDirectory(first, listed)).toBe(false);
     });
-    expect(result.current.stopped.has(4)).toBe(true);
+    expect(result.current.mayRead(4)).toBe(false);
   });
 
   it('lets a stale answer that omits a re-enabled agent change nothing', () => {
@@ -38,33 +38,33 @@ describe('manifest read control', () => {
       result.current.acceptDirectory(gone, hidden);
       result.current.acceptDirectory(back, listed);
     });
-    expect(result.current.stopped.has(4)).toBe(false);
+    expect(result.current.mayRead(4)).toBe(true);
     act(() => {
       expect(result.current.acceptDirectory(old, hidden)).toBe(false);
     });
-    expect(result.current.stopped.has(4)).toBe(false);
+    expect(result.current.mayRead(4)).toBe(true);
   });
 
   it('keeps a 404 stop through a routine answer and ends it on an answer sent after a change', () => {
     const { result, rerender } = control();
     act(() => {
-      result.current.stop(4);
+      result.current.stop(4, result.current.generation());
     });
     act(() => {
       result.current.acceptDirectory(result.current.beginDirectory(), listed);
     });
-    expect(result.current.stopped.has(4)).toBe(true);
+    expect(result.current.mayRead(4)).toBe(false);
     rerender({ changes: 1 });
     act(() => {
       result.current.acceptDirectory(result.current.beginDirectory(), listed);
     });
-    expect(result.current.stopped.has(4)).toBe(false);
+    expect(result.current.mayRead(4)).toBe(true);
   });
 
   it('ends the stop for a later change even when an older change\'s answer lands first', () => {
     const { result, rerender } = control();
     act(() => {
-      result.current.stop(4);
+      result.current.stop(4, result.current.generation());
     });
     rerender({ changes: 1 });
     const hide = result.current.beginDirectory();
@@ -74,6 +74,32 @@ describe('manifest read control', () => {
       result.current.acceptDirectory(hide, hidden);
       result.current.acceptDirectory(routine, listed);
     });
-    expect(result.current.stopped.has(4)).toBe(false);
+    expect(result.current.mayRead(4)).toBe(true);
+  });
+
+  it('never reads an agent the first applied answer omits, though an older answer lists it', () => {
+    const { result } = control();
+    const older = result.current.beginDirectory();
+    const newer = result.current.beginDirectory();
+    act(() => {
+      result.current.acceptDirectory(newer, hidden);
+    });
+    act(() => {
+      expect(result.current.acceptDirectory(older, listed)).toBe(false);
+    });
+    expect(result.current.mayRead(4)).toBe(false);
+  });
+
+  it('ignores a 404 sent before a recovery that has since cleared the stops', () => {
+    const { result, rerender } = control();
+    const sent = result.current.generation();
+    rerender({ changes: 1 });
+    act(() => {
+      result.current.acceptDirectory(result.current.beginDirectory(), listed);
+    });
+    act(() => {
+      result.current.stop(4, sent);
+    });
+    expect(result.current.mayRead(4)).toBe(true);
   });
 });
