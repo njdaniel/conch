@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { linkify, maxLink, type Segment } from './linkify';
+import { linkify, maxLink, writtenAuthority, type Segment } from './linkify';
 
 const t = (text: string): Segment => ({ kind: 'text', text });
 const l = (text: string, href = text): Segment => ({ kind: 'link', text, href });
@@ -51,11 +51,20 @@ describe('linkify', () => {
   });
 
   it('keeps the written host equal to the destination host in every safe case', () => {
+    let checked = 0;
     for (const { body } of cases) {
       for (const segment of linkify(body)) {
-        if (segment.kind === 'link') expect(new URL(segment.text).host).toBe(new URL(segment.href).host);
+        if (segment.kind !== 'link') continue;
+        // What the eye reads (the authority as written, lower-cased, without a
+        // default port) against what opens.
+        const defaultPort = /^https:/i.test(segment.text) ? ':443' : ':80';
+        let written = writtenAuthority(segment.text).toLowerCase();
+        if (written.endsWith(defaultPort)) written = written.slice(0, -defaultPort.length);
+        expect(written, segment.text).toBe(new URL(segment.href).host);
+        checked += 1;
       }
     }
+    expect(checked).toBeGreaterThan(5);
   });
 
   it('leaves a link longer than the cap as text', () => {

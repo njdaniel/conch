@@ -60,7 +60,7 @@ const nonAscii = /[^\x00-\x7f]/;
 // writtenAuthority is the host part as the sender wrote it: after the
 // scheme and every slash or backslash that follows it (the URL parser skips
 // extra ones), up to the next slash, backslash, question mark or hash.
-function writtenAuthority(text: string): string {
+export function writtenAuthority(text: string): string {
   let from = text.indexOf('//') + 2;
   while (from < text.length && (text[from] === '/' || text[from] === '\\')) from += 1;
   const rest = text.slice(from);

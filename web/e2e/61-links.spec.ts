@@ -101,9 +101,11 @@ test('L1545 only the safe addresses become links, each with the cue and its cano
 });
 
 test('L1545 a click opens the link in a new tab with no Referer, and nobody asked the host before', async ({ meet, world }) => {
-  const alice = (await meet()).page;
+  const aliceTab = await meet();
+  const alice = aliceTab.page;
   const bob = await meet();
-  const site = await landing(bob.context);
+  const site = await landing(aliceTab.context, bob.context);
+  const askedByAlice = recordRequests(alice);
   const asked = recordRequests(bob.page);
   const errors = [consoleErrors(alice), consoleErrors(bob.page)];
   await signIn(alice, world, world.tokens.browser, 'browser-test');
@@ -119,6 +121,10 @@ test('L1545 a click opens the link in a new tab with no Referer, and nobody aske
   // Before the click: not prefetched, previewed or fetched by either page.
   await bob.page.waitForTimeout(500);
   expect(site.hits, 'the server was asked before the click').toEqual([]);
+  // The linked site is a stand-in answered inside the browser contexts, not a
+  // listener: conchd has no link fetcher (no unfurl or preview of message URLs
+  // anywhere under internal/), so a server-side fetch has nothing to show.
+  expect(askedByAlice.filter((u) => new URL(u).host === site.host), 'alice\'s page asked the host').toEqual([]);
   expect(asked.filter((u) => new URL(u).host === site.host), 'bob\'s page asked the host before the click').toEqual([]);
 
   const opened = bob.context.waitForEvent('page');
@@ -163,6 +169,7 @@ test('L1545 a 300-character link wraps inside a 360 px column', async ({ meet, w
 
 test('L1545 Tab reaches each link in reading order, with the focus ring showing', async ({ meet, world }) => {
   const bob = (await meet()).page;
+  const errors = consoleErrors(bob);
   await signIn(bob, world, world.tokens.guest, 'jamie-test');
   const tag = `l1545k-${Date.now().toString(36)}`;
   const urls = [`https://example.com/${tag}/one`, `https://example.net/${tag}/two`, `https://example.org/${tag}/three`];
@@ -183,4 +190,5 @@ test('L1545 Tab reaches each link in reading order, with the focus ring showing'
     expect(parseFloat(await link.evaluate((el) => getComputedStyle(el).outlineWidth))).toBeGreaterThanOrEqual(2);
     await expect(link).toBeInViewport();
   }
+  expect(errors, 'console errors').toEqual([]);
 });

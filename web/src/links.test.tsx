@@ -1,6 +1,7 @@
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as api from './api';
+import { Linkified } from './Linkified';
 import { SearchPanel } from './SearchPanel';
 import type { MessageV2 } from './schema/message';
 
@@ -43,5 +44,30 @@ describe('links in a message body', () => {
     expect(item?.textContent).toContain('<b>');
     expect(item?.querySelector('b')).toBeNull();
     expect(item?.textContent).toContain('javascript:alert(1) ftp://x www.example.com');
+  });
+});
+
+describe('the cue splits at a whole character', () => {
+  afterEach(cleanup);
+  // textContent hides a lone surrogate (it reads as U+FFFD only when drawn), so
+  // every text node is inspected.
+  function textNodes(root: Node): string[] {
+    const found: string[] = [];
+    const walk = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    for (let n = walk.nextNode(); n !== null; n = walk.nextNode()) found.push(n.nodeValue ?? '');
+    return found;
+  }
+  it.each([
+    { name: 'an emoji', text: 'https://example.com/\u{1F600}', tail: '\u{1F600}' },
+    { name: 'a combining mark', text: 'https://example.com/é', tail: 'é' },
+    { name: 'a plain letter', text: 'https://example.com/a', tail: 'a' },
+  ])('ending in $name', ({ text, tail }) => {
+    const { container } = render(<Linkified text={text} />);
+    const link = container.querySelector('a');
+    expect(link).not.toBeNull();
+    const nodes = textNodes(link as Node);
+    for (const node of nodes) expect(/[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/.test(node), JSON.stringify(node)).toBe(false);
+    expect(container.querySelector('.external-link-tail')?.firstChild?.nodeValue).toBe(tail);
+    expect(nodes[0]).toBe(text.slice(0, text.length - tail.length));
   });
 });
