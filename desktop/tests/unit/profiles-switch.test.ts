@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { Client } from '../../main/api/client.ts';
@@ -5,6 +7,8 @@ import { Service } from '../../main/api/service.ts';
 import { Session } from '../../main/api/session.ts';
 import type { ActivationSpec } from '../../main/profiles/service.ts';
 import type { Activation } from '../../main/profiles/switch.ts';
+import { previewResponseV1 } from '../../../web/src/schema/preview.ts';
+import { fromServer } from '../../../web/src/schema/validate.ts';
 import { sendJson, startHttp, type Fake } from './support.ts';
 
 import { TeardownHooks } from '../../main/profiles/hooks.ts';
@@ -128,7 +132,15 @@ describe('the switch sequence', () => {
   });
 });
 
+// The golden PreviewResponseV1: a complete answer the client would accept, so
+// only the cancellation can make the held read come back as stale.
+const previewBody: unknown = JSON.parse(readFileSync(resolve(import.meta.dirname, '../../../pkg/schema/testdata/preview-response-v1.json'), 'utf8'));
+
 describe('a profile switch ends a preview (issue #1540)', () => {
+  it('the held response is a valid PreviewResponseV1', () => {
+    expect(fromServer(previewResponseV1)(previewBody)).toEqual([]);
+  });
+
   const servers: Fake[] = [];
   afterEach(async () => {
     await Promise.all(servers.splice(0).map((f) => f.close()));
@@ -142,7 +154,7 @@ describe('a profile switch ends a preview (issue #1540)', () => {
     });
     const a = await startHttp((_req, res) => {
       void held.then(() => {
-        if (!res.destroyed) sendJson(res, 200, { id: 2, name: 'alice' });
+        if (!res.destroyed) sendJson(res, 200, previewBody);
       });
     });
     const b = await startHttp((_req, res) => {
@@ -194,7 +206,7 @@ describe('a profile switch ends a preview (issue #1540)', () => {
     release();
 
     // The old read was cancelled, its late answer never reaches the page.
-    expect(await preview).toMatchObject({ kind: 'none' });
+    expect(await preview).toEqual({ kind: 'none', reason: 'stale' });
     // The renderer that held the preview is gone.
     expect(old.disposed).toBe(true);
     // The next profile's first request carries no preview.
