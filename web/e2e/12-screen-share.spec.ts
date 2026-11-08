@@ -521,7 +521,7 @@ test.describe('screen share with LiveKit', () => {
       // nothing of why.
       await share(a);
       await watching(b);
-      expect(await vw.stopShareAsOperator()).toBe(204);
+      expect(await vw.stopShareAsOperator(vw.alice)).toBe(204);
       await expect(voiceRegion(a.page)).toContainText('An operator stopped your share.', { timeout: 15_000 });
       await expect(shareView(b.page)).toHaveCount(0, { timeout: 15_000 });
       await expect(voiceRegion(b.page)).not.toContainText(/operator|ended your share/);

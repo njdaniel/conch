@@ -67,12 +67,19 @@ import { useAgents } from './agents/useAgents';
 import { useNow } from './agents/useNow';
 import { VoiceStatus } from './VoiceStatus';
 import { useOccupancy } from './voice/useOccupancy';
-import { leaveVoice } from './voice/useVoice';
+import { leaveVoice, useInVoice } from './voice/useVoice';
 import { useOccupantNames } from './voice/useOccupantNames';
 import { needsHttps } from './transport';
+import { platform } from './platform';
+import { PreviewBanner } from './PreviewBanner';
+import { leaveVoiceFirst, PreviewEntry } from './preview/entry';
+import { PreviewControls, PreviewConversation, PreviewPanel, PreviewVoice } from './preview/PreviewParts';
+import { usePreview } from './preview/usePreview';
+import type { ServerMemberV1 } from './schema/principal';
 import { AppearanceSettings } from './AppearanceSettings';
 import { applyAppearance, defaultAppearance, type AppearancePreferences } from './appearance';
 
+const noUnread: ReadonlyMap<string, number> = new Map();
 const checkingAudience = 'Checking who this draft goes to…';
 const audienceGone = 'Who this draft was for is no longer available. Choose who it goes to before sending.';
 
@@ -550,7 +557,20 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
   const reloadCounts = useCallback(() => {
     reloadReadState.current?.();
   }, []);
-  const refreshChannels = useChannelRefresh({
+  // Preview as member (issue #1517): one at a time, in this tab's memory. It is
+  // offered to a human holding manage_members and manage_channels, not on the
+  // desktop (its bridge has no header for it) and not to a guest's visit.
+  const mayPreview = principal !== null && visit === null && principal.kind === 'human' && platform.name === 'browser' && canDo(principal, 'manage_members') && canDo(principal, 'manage_channels');
+  const inVoice = useInVoice();
+  const preview = usePreview({ signedIn, mayPreview, inVoice, onUnauthorized });
+  const previewing = preview.state.phase === 'on';
+  const previewSignal = preview.signal;
+  const startPreview = preview.start;
+  const previewEntry = useMemo(
+    () => (mayPreview ? { start: (person: ServerMemberV1) => { startPreview({ id: person.id, name: person.name }); }, blocked: inVoice ? leaveVoiceFirst : null } : null),
+    [mayPreview, startPreview, inVoice],
+  );
+  const refreshOwnChannels = useChannelRefresh({
     signedIn,
     channelsNow,
     empty: channels.loaded && channels.channels.length === 0,
@@ -560,6 +580,11 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
     onUnauthorized,
     reloadReadState: reloadCounts,
   });
+  // The content-free word that the channels changed also reads the preview again.
+  const refreshChannels = useCallback(() => {
+    refreshOwnChannels();
+    previewSignal();
+  }, [refreshOwnChannels, previewSignal]);
   const [readStateEvent, setReadStateEvent] = useState<ReadStateV1 | null>(null);
   const [messageEvent, setMessageEvent] = useState<MessageV2 | null>(null);
   const [editEvent, setEditEvent] = useState<MessageV2 | null>(null);
@@ -606,8 +631,14 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
   const permissionsChanged = useCallback(() => {
     setPermissionsTick((n) => n + 1);
     readWho();
-  }, [readWho]);
+    previewSignal();
+  }, [readWho, previewSignal]);
   const directory = useDirectoryChanged();
+  const directorySignal = directory.signal;
+  const directoryChanged = useCallback(() => {
+    directorySignal();
+    previewSignal();
+  }, [directorySignal, previewSignal]);
   const agents = useAgents({
     signedIn,
     channel: channelId === null ? null : selected,
@@ -623,10 +654,19 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
     onMessageEdited,
     onChannelsChanged: refreshChannels,
     onPermissionsChanged: permissionsChanged,
-    onDirectoryChanged: directory.signal,
+    onDirectoryChanged: directoryChanged,
   });
   // The server's word that the directory changed (issue #993): the community
   // panel, the picker and this channel's people are read again and replaced.
+  // The open channel's people moved (conch.channel_members.v1): the preview
+  // reads again too. Only the signal is used; the frame's own list is the
+  // administrator's and is never shown in a preview.
+  const membersNow = agents.members;
+  const previewingNow = useRef(previewing);
+  previewingNow.current = previewing;
+  useEffect(() => {
+    if (previewingNow.current) previewSignal();
+  }, [membersNow, previewSignal]);
   const refreshMembers = agents.refreshMembers;
   useEffect(() => {
     if (directory.tick > 0) refreshMembers();
@@ -671,6 +711,8 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
     channels: channels.channels,
     loaded: channels.loaded,
     open: channelId === null ? null : selected,
+    // No read mark is made while a preview hides the conversation.
+    paused: previewing,
     ready: held?.history === 'ready',
     newest: head === undefined ? null : { id: head.id, author: head.author_id },
     atBottom: bottom.channel === channelId ? bottom.atBottom : true,
@@ -1601,7 +1643,38 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
         />
       );
     case 'signedIn':
+      if (preview.state.phase === 'on') {
+        // Preview as member: the shell draws the preview store and nothing of
+        // the administrator's own channels, chat, people or voice. A new key
+        // so no state of the normal shell (Settings open, say) carries in.
+        const { store, selected: shown, problem } = preview.state;
+        return (
+          <Lobby
+            key="preview"
+            origin={origin}
+            name={shownName}
+            me={auth.principal.id}
+            channels={{ channels: store.channels, loaded: true, selected: shown }}
+            unread={noUnread}
+            connection={connection}
+            band={<PreviewBanner store={store} problem={problem} onExit={preview.exit} onRefresh={preview.refresh} />}
+            conversation={<PreviewConversation store={store} channel={shown} />}
+            panel={<PreviewPanel store={store} channel={shown} />}
+            newChannel={<PreviewControls store={store} />}
+            voice={<PreviewVoice store={store} channel={shown} />}
+            invites={null}
+            onOpen={preview.select}
+            onRetry={() => {
+              setAttempt((n) => n + 1);
+            }}
+            onSignOut={signOut}
+            onSignOutEverywhere={signOutEverywhere}
+            signOutProblem={everywhereFailed}
+          />
+        );
+      }
       return (
+        <PreviewEntry.Provider value={previewEntry}>
         <ComposerAttachmentProvider value={composerAttachments}>
         <Lobby
           origin={origin}
@@ -1611,6 +1684,14 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
           passwordSet={auth.principal.auth?.password_set === true}
           banner={
             <>
+              {preview.notice === null ? null : (
+                <div role="status" className="banner destination">
+                  <p>{preview.notice}</p>
+                  <button type="button" onClick={preview.dismissNotice}>
+                    Dismiss
+                  </button>
+                </div>
+              )}
               {visit === null ? null : <GuestVisit guest={visit} insecure={needsHttps(origin)} onConvert={convert} onEnd={endVisit} onForget={forgetVisit} />}
               {missing.length === 0 || destination === null ? null : (
                 <div role="status" className="banner destination">
@@ -1960,6 +2041,7 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
           signOutProblem={everywhereFailed}
         />
         </ComposerAttachmentProvider>
+        </PreviewEntry.Provider>
       );
   }
 }

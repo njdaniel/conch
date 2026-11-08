@@ -93,8 +93,10 @@ pub use presence::{CLOSE_VOICE_REMOVED, PresenceEvent, PresenceStream, StreamEnd
 pub use server::ServerAddress;
 pub use types::{
     Audience, AudienceKind, ErrorBody, MAX_AUDIENCE_PRINCIPALS, Secret, Timestamp,
-    VOICE_PRESENCE_SCHEMA_V1, VoiceParticipant, VoicePresenceRoom, VoicePresenceV1, VoiceRoomGrant,
-    VoiceSessionResponseV1, VoiceTransmitReportV1, VoiceTransmitState, WhoAmIResponseV1,
+    VOICE_PRESENCE_SCHEMA_PARAM, VOICE_PRESENCE_SCHEMA_V1, VOICE_PRESENCE_SCHEMA_V2,
+    VoiceParticipant, VoiceParticipantV2, VoicePresenceRoom, VoicePresenceRoomV2, VoicePresenceV1,
+    VoicePresenceV2, VoiceRoomGrant, VoiceSessionResponseV1, VoiceShareQuality,
+    VoiceShareResolution, VoiceTransmitReportV1, VoiceTransmitState, WhoAmIResponseV1,
 };
 pub use voice_devices::{
     VOICE_DEVICES_MAX_DESCRIPTION_CHARS, VOICE_DEVICES_MAX_LISTED, VOICE_DEVICES_MAX_NAME_BYTES,

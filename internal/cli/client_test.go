@@ -712,22 +712,22 @@ func TestClientSubscribeV2ReceivesScopedMessageWithBearer(t *testing.T) {
 
 // voiceDoc builds a valid presence document for channel 2. A nil participant
 // slice is sent as an empty array, as the server does.
-func voiceDoc(configured, available bool, people ...schema.VoiceParticipant) schema.VoicePresenceV1 {
-	doc := schema.VoicePresenceV1{
-		Schema: schema.VoicePresenceSchemaV1, ChannelID: 2,
-		Configured: configured, Available: available, Rooms: []schema.VoicePresenceRoom{},
+func voiceDoc(configured, available bool, people ...schema.VoiceParticipantV2) schema.VoicePresenceV2 {
+	doc := schema.VoicePresenceV2{
+		Schema: schema.VoicePresenceSchemaV2, ChannelID: 2,
+		Configured: configured, Available: available, Rooms: []schema.VoicePresenceRoomV2{},
 	}
 	if available {
 		if people == nil {
-			people = []schema.VoiceParticipant{}
+			people = []schema.VoiceParticipantV2{}
 		}
-		doc.Rooms = append(doc.Rooms, schema.VoicePresenceRoom{Participants: people})
+		doc.Rooms = append(doc.Rooms, schema.VoicePresenceRoomV2{Participants: people})
 	}
 	return doc
 }
 
-func voicePerson(id int64, transmitting bool) schema.VoiceParticipant {
-	return schema.VoiceParticipant{
+func voicePerson(id int64, transmitting bool) schema.VoiceParticipantV2 {
+	return schema.VoiceParticipantV2{
 		PrincipalID: id, CanPublish: true, Transmitting: transmitting,
 		JoinedAt: schema.NewTimestamp(time.Date(2026, time.October, 9, 8, 30, 0, 0, time.UTC)),
 	}
@@ -767,7 +767,7 @@ func TestClientVoicePresence(t *testing.T) {
 				t.Fatal(err)
 			}
 			doc, err := client.WithToken("tok").VoicePresence(context.Background(), "ops/ci room")
-			if got.method != http.MethodGet || got.path != "/v1/channels/ops%2Fci%20room/voice" || got.rawQuery != "" {
+			if got.method != http.MethodGet || got.path != "/v1/channels/ops%2Fci%20room/voice" || got.rawQuery != "schema=conch.voice_presence.v2" {
 				t.Errorf("request = %s %s?%s", got.method, got.path, got.rawQuery)
 			}
 			if got.auth != "Bearer tok" {
@@ -788,7 +788,7 @@ func TestClientVoicePresence(t *testing.T) {
 			if errors.Is(err, ErrUnauthenticated) != tt.wantUnath {
 				t.Errorf("errors.Is(ErrUnauthenticated) = %v, want %v", !tt.wantUnath, tt.wantUnath)
 			}
-			if !reflect.DeepEqual(doc, schema.VoicePresenceV1{}) {
+			if !reflect.DeepEqual(doc, schema.VoicePresenceV2{}) {
 				t.Errorf("a failed call returned %+v", doc)
 			}
 		})
@@ -817,7 +817,7 @@ func presenceSocket(t *testing.T, script func(ctx context.Context, conn *websock
 }
 
 func TestClientSubscribeVoicePresence(t *testing.T) {
-	docs := []schema.VoicePresenceV1{
+	docs := []schema.VoicePresenceV2{
 		voiceDoc(true, true),
 		voiceDoc(true, true, voicePerson(3, false)),
 		voiceDoc(true, true, voicePerson(3, true)),
@@ -888,8 +888,8 @@ func TestClientSubscribeVoicePresence(t *testing.T) {
 			}
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
-			var got []schema.VoicePresenceV1
-			err = client.WithToken("tok").SubscribeVoicePresence(ctx, "general", func(d schema.VoicePresenceV1) error {
+			var got []schema.VoicePresenceV2
+			err = client.WithToken("tok").SubscribeVoicePresence(ctx, "general", func(d schema.VoicePresenceV2) error {
 				got = append(got, d)
 				if tt.cancelAt != 0 && len(got) == tt.cancelAt {
 					cancel()
@@ -922,7 +922,7 @@ func TestClientSubscribeVoicePresenceReceiveErrorStops(t *testing.T) {
 	})
 	client, _ := NewClient(server.URL, server.Client())
 	stop := errors.New("stop")
-	err := client.WithToken("tok").SubscribeVoicePresence(context.Background(), "general", func(schema.VoicePresenceV1) error { return stop })
+	err := client.WithToken("tok").SubscribeVoicePresence(context.Background(), "general", func(schema.VoicePresenceV2) error { return stop })
 	if !errors.Is(err, stop) {
 		t.Fatalf("err = %v, want stop", err)
 	}
@@ -944,14 +944,14 @@ func TestClientSubscribeVoicePresenceRefusedUpgrade(t *testing.T) {
 		t.Run(tt.wantErr, func(t *testing.T) {
 			server, got := recordingServer(t, tt.status, tt.body)
 			client, _ := NewClient(server.URL, server.Client())
-			err := client.WithToken("tok").SubscribeVoicePresence(context.Background(), "general", func(schema.VoicePresenceV1) error {
+			err := client.WithToken("tok").SubscribeVoicePresence(context.Background(), "general", func(schema.VoicePresenceV2) error {
 				t.Error("received a document from a refused upgrade")
 				return nil
 			})
 			if err == nil || !strings.Contains(err.Error(), tt.wantErr) || errors.Is(err, ErrUnauthenticated) != tt.unauth {
 				t.Fatalf("err = %v, want %q", err, tt.wantErr)
 			}
-			if got.path != "/v1/voice/ws" || got.rawQuery != "channel=general" {
+			if got.path != "/v1/voice/ws" || got.rawQuery != "channel=general&schema=conch.voice_presence.v2" {
 				t.Errorf("request path %s query %s", got.path, got.rawQuery)
 			}
 		})
@@ -971,7 +971,7 @@ func TestServerErrorKeepsStatusAndCode(t *testing.T) {
 	for name, call := range map[string]func() error{
 		"snapshot": func() error { _, err := client.VoicePresence(context.Background(), "general"); return err },
 		"socket": func() error {
-			return client.SubscribeVoicePresence(context.Background(), "general", func(schema.VoicePresenceV1) error { return nil })
+			return client.SubscribeVoicePresence(context.Background(), "general", func(schema.VoicePresenceV2) error { return nil })
 		},
 	} {
 		err := call()

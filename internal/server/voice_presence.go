@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"net/url"
 	"slices"
 	"strconv"
 	"strings"
@@ -241,9 +242,10 @@ type voiceRoomState struct {
 	// Like everything here it is in memory only and goes with the room,
 	// after forgetRoom has closed what is open.
 	transmit transmitLedger
-	// share is the room's screen share, or nil (voice_share.go). It is
-	// changed only under order as well as voicePoller.mu.
-	share *voiceShare
+	// shares is the room's screen shares by principal, one per person
+	// (voice_share.go, issue #1483), at most voiceShareCap of them. Like
+	// cameras it is changed only under order as well as voicePoller.mu.
+	shares map[int64]*voiceShare
 	// withdrawing holds principals whose screen-share sources are being
 	// taken away: their share ended, a claim of theirs failed, or a pass
 	// found them with sources they do not hold the share for. The value is 0
@@ -278,12 +280,12 @@ type voiceRoomState struct {
 	// retireRoom or a running claim, and a revocation of use_camera waits for
 	// that withdrawal (endCamerasOf). Set once, under voicePoller.mu.
 	retiredCameras []int64
-	// retiredShare is retiredCameras' twin for the screen share (issue
-	// #1265): who held the room's started share when a rotation forgot it,
-	// 0 when nobody did. Their grant is withdrawn after, by retireRoom or a
-	// running claim, and a revocation of share_screen waits for that
-	// withdrawal (endSharesOf). Set once, under voicePoller.mu.
-	retiredShare int64
+	// retiredShares is retiredCameras' twin for the screen share (issue
+	// #1265): who held a started share in the room when a rotation forgot
+	// it. Their grants are withdrawn after, by retireRoom or a running
+	// claim, and a revocation of share_screen waits for that withdrawal
+	// (endSharesOf). Set once, under voicePoller.mu.
+	retiredShares []int64
 	// camTracks is what the passes have seen of the camera tracks nobody
 	// claimed and of the tracks whose kind and source disagree, by track
 	// (voiceCameraTrackKey): each is audited once, and one still listed
@@ -306,7 +308,7 @@ type voiceRoomState struct {
 // sources still to withdraw: only a pass ends a share that has gone idle.
 func (r *voiceRoomState) inUse(now time.Time) bool {
 	return r.marked || len(r.participants) > 0 || len(r.companions) > 0 || r.transmit.unsettled() ||
-		r.share != nil || len(r.withdrawing) > 0 || len(r.cameras) > 0 || len(r.camWithdrawing) > 0 ||
+		len(r.shares) > 0 || len(r.withdrawing) > 0 || len(r.cameras) > 0 || len(r.camWithdrawing) > 0 ||
 		(!r.lastSession.IsZero() && now.Sub(r.lastSession) < voiceSessionRecent)
 }
 
@@ -803,7 +805,7 @@ func (p *voicePoller) roomLocked(room store.VoiceRoom) *voiceRoomState {
 		r = &voiceRoomState{
 			name: room.RoomName, channelID: room.ChannelID, participants: map[int64]voiceSeen{}, evicted: map[int64]uint64{},
 			reports: make(chan struct{}, 1), withdrawing: map[voiceWithdrawKey]uint64{},
-			cameras: map[int64]*voiceCamera{}, camWithdrawing: map[voiceWithdrawKey]uint64{}, camTracks: map[string]*voiceCameraTrack{},
+			shares: map[int64]*voiceShare{}, cameras: map[int64]*voiceCamera{}, camWithdrawing: map[voiceWithdrawKey]uint64{}, camTracks: map[string]*voiceCameraTrack{},
 		}
 		p.rooms[room.RoomName] = r
 	}
@@ -1834,73 +1836,195 @@ func (p *voicePoller) writeEvent(ctx context.Context, e voiceEvent) error {
 // ---------------------------------------------------------------------------
 // Presence documents and subscribers
 
-// snapshot is the whole voice state of a channel as a reader sees it. It
+// snapshot is the whole voice state of a channel as a v1 reader sees it. It
 // never contains a room name or a token. Participants last seen are not
 // reported while LiveKit cannot be reached (schema: not available implies no
 // rooms), and nothing is available until LiveKit has answered once.
 //
 // viewer is who reads it. Everything in it is the same for every reader but
 // share_ended, which says why the viewer's own last share ended and is in
-// their snapshot alone; a zero viewer gets none.
+// their snapshot alone, and, with several streams in the room, which one
+// stream a v1 reader is shown (voicePresenceSnapshot); a zero viewer gets
+// none of the first and the earliest stream.
 func (p *voicePoller) snapshot(channelID, viewer int64) schema.VoicePresenceV1 {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return p.snapshotLocked(channelID, viewer)
+	doc, _ := p.snapshotLocked(channelID, viewer, schema.VoicePresenceSchemaV1)
+	v1, _ := doc.(schema.VoicePresenceV1)
+	return v1
 }
 
-func (p *voicePoller) snapshotLocked(channelID, viewer int64) schema.VoicePresenceV1 {
-	snap := schema.VoicePresenceV1{Schema: schema.VoicePresenceSchemaV1, ChannelID: channelID, Rooms: []schema.VoicePresenceRoom{}}
-	if p.s.lk == nil {
-		return snap
+// snapshotV is snapshot for the version named (schema.VoicePresenceSchemaV1
+// or V2).
+func (p *voicePoller) snapshotV(channelID, viewer int64, version string) (voicePresenceDoc, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.snapshotLocked(channelID, viewer, version)
+}
+
+// voicePresenceDoc is a presence document of either version: what a socket
+// or the GET route validates and encodes.
+type voicePresenceDoc interface {
+	Validate() error
+}
+
+// voicePresenceVersion reads the presence version a request asks for
+// (schema.VoicePresenceSchemaParam, issue #1483): absent or v1 is v1, the v2
+// name is v2, and anything else, a repeated value included, is refused. It is
+// read before the channel is looked at, so a refusal says nothing about the
+// channel.
+func voicePresenceVersion(q url.Values) (string, bool) {
+	values, named := q[schema.VoicePresenceSchemaParam]
+	if !named {
+		return schema.VoicePresenceSchemaV1, true
 	}
-	snap.Configured = true
+	if len(values) == 1 {
+		switch values[0] {
+		case schema.VoicePresenceSchemaV1, schema.VoicePresenceSchemaV2:
+			return values[0], true
+		}
+	}
+	return "", false
+}
+
+// voiceSharerRow is one started share as a snapshot lists it.
+type voiceSharerRow struct {
+	principalID int64
+	startedAt   time.Time
+	audio       bool
+	quality     *schema.VoiceShareQuality
+}
+
+// v1Sharer is the one stream a v1 reader is shown (design §2.3): the
+// viewer's own if they hold one, otherwise the earliest-started, ties to the
+// lowest principal id, so the picture does not change under a viewer when
+// another person starts. 0 when no stream has started.
+func v1Sharer(rows []voiceSharerRow, viewer int64) int64 {
+	var pick *voiceSharerRow
+	for i := range rows {
+		row := &rows[i]
+		if viewer != 0 && row.principalID == viewer {
+			return viewer
+		}
+		if pick == nil || row.startedAt.Before(pick.startedAt) ||
+			(row.startedAt.Equal(pick.startedAt) && row.principalID < pick.principalID) {
+			pick = row
+		}
+	}
+	if pick == nil {
+		return 0
+	}
+	return pick.principalID
+}
+
+// snapshotLocked builds the presence document of version for channelID as
+// viewer reads it, and validates it: a document that fails is an error, never sent. version is schema.VoicePresenceSchemaV2 for v2 and anything else
+// is v1 (callers have read it with voicePresenceVersion). The caller holds
+// p.mu.
+func (p *voicePoller) snapshotLocked(channelID, viewer int64, version string) (voicePresenceDoc, error) {
+	v2 := version == schema.VoicePresenceSchemaV2
+	name := schema.VoicePresenceSchemaV1
+	if v2 {
+		name = schema.VoicePresenceSchemaV2
+	}
+	base := schema.VoicePresenceV1{Schema: name, ChannelID: channelID, Rooms: []schema.VoicePresenceRoom{}}
+	roomV2 := schema.VoicePresenceRoomV2{Participants: []schema.VoiceParticipantV2{}}
+	build := func() voicePresenceDoc {
+		if v2 {
+			return schema.VoicePresenceV2{Schema: base.Schema, ChannelID: channelID, Configured: base.Configured, Available: base.Available,
+				Rooms: []schema.VoicePresenceRoomV2{}, ShareEnded: base.ShareEnded, CameraEnded: base.CameraEnded}
+		}
+		return base
+	}
+	if p.s.lk == nil {
+		return build(), nil
+	}
+	base.Configured = true
 	if ended, ok := p.shareEnded[voiceShareEndKey{channelID: channelID, principalID: viewer}]; ok && viewer != 0 {
-		snap.ShareEnded = &ended
+		base.ShareEnded = &ended
 	}
 	// As share_ended: the viewer's own camera's end, in their document alone.
 	if ended, ok := p.cameraEnded[voiceShareEndKey{channelID: channelID, principalID: viewer}]; ok && viewer != 0 {
-		snap.CameraEnded = &ended
+		base.CameraEnded = &ended
 	}
 	if !p.contacted || p.down {
-		return snap
+		return build(), nil
 	}
-	snap.Available = true
-	room := schema.VoicePresenceRoom{Participants: []schema.VoiceParticipant{}}
+	base.Available = true
+	roomV1 := schema.VoicePresenceRoom{Participants: []schema.VoiceParticipant{}}
 	for _, r := range p.rooms {
 		if r.channelID != channelID || r.stale {
 			continue
 		}
+		// The shares that have started, on their holders, for as long as
+		// they are shown (voice_share.go); a pending one is not shown yet.
+		var rows []voiceSharerRow
+		for pid, c := range r.shares {
+			if !c.pending {
+				rows = append(rows, voiceSharerRow{principalID: pid, startedAt: c.startedAt, audio: c.audio, quality: c.quality})
+			}
+		}
+		shown := v1Sharer(rows, viewer)
 		for pid, s := range r.participants {
-			// The share is shown once it has started, on its holder, for
-			// as long as they are shown (voice_share.go).
-			sharing := r.share != nil && !r.share.pending && r.share.principalID == pid
 			// A camera likewise: from the claim's answer until it ends
 			// (ADR-015, design §5), whichever of their participants sends it.
 			camera := r.cameras[pid] != nil && !r.cameras[pid].pending
-			room.Participants = append(room.Participants, schema.VoiceParticipant{
-				PrincipalID: pid,
-				// Every V3 member may publish into the channel-wide room
-				// (voiceAudiences); a listen-only room arrives with nets.
+			var row *voiceSharerRow
+			for i := range rows {
+				if rows[i].principalID == pid {
+					row = &rows[i]
+				}
+			}
+			if v2 {
+				part := schema.VoiceParticipantV2{
+					PrincipalID: pid,
+					// Every V3 member may publish into the channel-wide room
+					// (voiceAudiences); a listen-only room arrives with nets.
+					CanPublish:   true,
+					Transmitting: s.transmitting,
+					JoinedAt:     schema.NewTimestamp(s.joinedAt),
+					Camera:       camera,
+				}
+				if row != nil {
+					started := schema.NewTimestamp(row.startedAt)
+					part.Sharing, part.SharingAudio, part.ShareStartedAt = true, row.audio, &started
+					if row.quality != nil {
+						q := *row.quality
+						part.ShareQuality = &q
+					}
+				}
+				roomV2.Participants = append(roomV2.Participants, part)
+				continue
+			}
+			// v1 lists at most one sharer, with v1's fields and no more
+			// (design §2.3).
+			sharing := row != nil && pid == shown
+			roomV1.Participants = append(roomV1.Participants, schema.VoiceParticipant{
+				PrincipalID:  pid,
 				CanPublish:   true,
 				Transmitting: s.transmitting,
 				JoinedAt:     schema.NewTimestamp(s.joinedAt),
 				Sharing:      sharing,
-				SharingAudio: sharing && r.share.audio,
+				SharingAudio: sharing && row.audio,
 				Camera:       camera,
 			})
 		}
 	}
-	slices.SortFunc(room.Participants, func(a, b schema.VoiceParticipant) int {
-		switch {
-		case a.PrincipalID < b.PrincipalID:
-			return -1
-		case a.PrincipalID > b.PrincipalID:
-			return 1
-		}
-		return 0
-	})
-	snap.Rooms = append(snap.Rooms, room)
-	return snap
+	slices.SortFunc(roomV1.Participants, func(a, b schema.VoiceParticipant) int { return cmp.Compare(a.PrincipalID, b.PrincipalID) })
+	slices.SortFunc(roomV2.Participants, func(a, b schema.VoiceParticipantV2) int { return cmp.Compare(a.PrincipalID, b.PrincipalID) })
+	var doc voicePresenceDoc
+	if v2 {
+		d := build().(schema.VoicePresenceV2)
+		d.Rooms = append(d.Rooms, roomV2)
+		doc = d
+	} else {
+		base.Rooms = append(base.Rooms, roomV1)
+		doc = base
+	}
+	if err := doc.Validate(); err != nil {
+		return nil, fmt.Errorf("voice: built an invalid %s presence document for channel %d: %w", name, channelID, err)
+	}
+	return doc, nil
 }
 
 // metricCounts is what the metrics endpoint reports of voice (issue #562,
@@ -1922,8 +2046,10 @@ func (p *voicePoller) metricCounts() (rooms, participants, shares int) {
 			rooms++
 			participants += n
 		}
-		if r.share != nil && !r.share.pending {
-			shares++
+		for _, c := range r.shares {
+			if !c.pending {
+				shares++
+			}
 		}
 	}
 	return rooms, participants, shares
@@ -2010,13 +2136,14 @@ func (s *voiceSub) dropCause() voiceDropCause {
 // current returns the channel's snapshot, or ok=false when the subscription
 // has been dropped. Checking and reading under one lock means a snapshot is
 // never taken for a subscriber after the drop that removed them returned.
-func (s *voiceSub) current() (schema.VoicePresenceV1, bool) {
+func (s *voiceSub) current(version string) (doc voicePresenceDoc, live bool, err error) {
 	s.p.mu.Lock()
 	defer s.p.mu.Unlock()
 	if s.gone {
-		return schema.VoicePresenceV1{}, false
+		return nil, false, nil
 	}
-	return s.p.snapshotLocked(s.channelID, s.principalID), true
+	doc, err = s.p.snapshotLocked(s.channelID, s.principalID, version)
+	return doc, true, err
 }
 
 func (p *voicePoller) dropLocked(sub *voiceSub) {
@@ -2265,10 +2392,14 @@ func (p *voicePoller) forgetRoom(ctx context.Context, name string) (*voiceRoomSt
 	// revocation's endSharesOf waits for the grant and its undoing.
 	var events []voiceEvent
 	var holders []int64
-	if c := r.share; c != nil && !c.pending {
+	for _, pid := range sortedShareHolders(r) {
+		c := r.shares[pid]
+		if c.pending {
+			continue
+		}
 		events = append(events, p.shareStoppedLocked(r.channelID, c, c.principalID, voiceShareStopRotated)...)
 		holders = append(holders, c.principalID)
-		r.retiredShare = c.principalID
+		r.retiredShares = append(r.retiredShares, c.principalID)
 	}
 	// Every started camera claim ends with it too (reason=rotated), which is
 	// the end record a renewal's adoption reads. A pending one is its claim's
@@ -2298,7 +2429,7 @@ func (p *voicePoller) forgetRoom(ctx context.Context, name string) (*voiceRoomSt
 		r.withdrawDone = make(chan struct{})
 		p.retiring[r] = 0
 	}
-	r.share = nil
+	r.shares = map[int64]*voiceShare{}
 	// Every transmission still open in the room, reported or unreported, is
 	// closed now with reason=left, before the state is dropped
 	// (docs/design/conch-voice.md §6). That includes a reported `started`
@@ -2744,8 +2875,8 @@ func (p *voicePoller) channelClaimants(channelID int64) []int64 {
 		if r.channelID != channelID {
 			continue
 		}
-		if r.share != nil {
-			seen[r.share.principalID] = true
+		for pid := range r.shares {
+			seen[pid] = true
 		}
 		for pid := range r.cameras {
 			seen[pid] = true
@@ -2853,8 +2984,8 @@ func (p *voicePoller) voicePrincipals() []int64 {
 		for pid := range r.companions {
 			seen[pid] = true
 		}
-		if r.share != nil {
-			seen[r.share.principalID] = true
+		for pid := range r.shares {
+			seen[pid] = true
 		}
 		for pid := range r.cameras {
 			seen[pid] = true

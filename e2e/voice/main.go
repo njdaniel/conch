@@ -391,6 +391,7 @@ func (l *live) run(ctx context.Context) error {
 		{"credential expiring by itself", l.credentialExpires},
 		{"conch-voice clients", l.voiceClients},
 		{"screen share", l.screenShare},
+		{"several shares at once", l.multiShare},
 		{"camera", l.camera},
 		{"camera load test", l.cameraLoadtest},
 		{"companion and viewer", l.companion},

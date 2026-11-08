@@ -338,6 +338,17 @@ describe('browser permission and cleanup', () => {
     expect(onClear).toHaveBeenCalled();
   });
 
+  it('hides a spoiler in the center, its accessible name included', () => {
+    const hidden: NotificationAlert = { id: 'two', channel: 'general', message: message(2, '@ada ||the answer is X||'), mention: true };
+    render(<NotificationCenter alerts={[hidden]} onOpen={vi.fn()} onClear={vi.fn()} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Notifications (1)' }));
+    const row = screen.getByRole('button', { name: /Mention in #general/ });
+    expect(row.getAttribute('aria-label')).toContain('[spoiler]');
+    expect(row.textContent).toContain('[spoiler]');
+    expect(document.body.textContent).not.toContain('the answer is X');
+    expect(row.getAttribute('aria-label')).not.toContain('the answer is X');
+  });
+
   it('shows denied and unsupported fallbacks in settings', () => {
     const view = render(<NotificationSettings policy="mentions" native={false} permission="denied" supported={true} onPolicy={() => undefined} onEnable={() => undefined} />);
     expect(screen.getByLabelText('Message notifications')).toHaveProperty('value', 'mentions');

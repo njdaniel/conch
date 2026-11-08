@@ -185,6 +185,7 @@ Usage:
   conch voice status [--server <url>] [--watch] <channel>
   conch voice kick [--server <url>] [--yes] <channel> <principal-id>
   conch voice camera stop [--server <url>] <channel> <person-id>
+  conch voice share stop [--server <url>] <channel> <person-id>
   conch voice where [--server <url>] [--json]
   conch audit export [--server <url>] [--after <id>] [--limit <n>]
   conch approvals list [--server <url>]
@@ -255,8 +256,11 @@ Scope:
   it only reads presence and never joins. One line per participant, in
   principal id order:
     <id> <name|-> <talking|quiet>[+camera] <joined-at, RFC 3339 UTC>
-  (+camera follows the third field of someone whose camera is on; a room
-  narrower than the channel adds a fifth field naming it, net:<id>)
+  (+camera follows the third field of someone whose camera is on, and +share
+  of someone sharing a screen; any number may share at once. A sharer's line
+  ends with share_since=<RFC 3339 UTC>, then quality=<resolution>@<fps> if
+  they declared one, then "sound" if the share carries sound. A room narrower
+  than the channel adds a fifth field naming it, net:<id>, to its lines)
   The name is shown for yourself only (the API tells a non-operator no one
   else's) and is "-" when unknown; a name with spaces or odd characters is
   double-quoted and escaped. An empty room prints "nobody is connected" and
@@ -269,6 +273,11 @@ Scope:
   (the browser that turned a camera on turns it off). It prints nothing and
   exits 0 whether or not that person had a camera on; a refusal prints one line
   and exits nonzero.
+  voice share stop ends one person's screen share in a channel's voice room,
+  for an owner, an operator holding manage_channels, or a manager of the
+  channel; a member is refused. <person-id> is the principal id. It prints
+  nothing and exits 0 whether or not that person was sharing; a refusal prints
+  one line and exits nonzero.
   voice where shows which of your channels have people in voice, so you can
   find where to join; it only reads and never joins. One line per channel with
   anyone in its channel-wide voice room, in channel id order:
@@ -1291,7 +1300,7 @@ var voiceNow = time.Now
 
 func runVoice(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("cli: voice requires a subcommand (status, kick, where, camera stop)")
+		return errors.New("cli: voice requires a subcommand (status, kick, where, camera stop, share stop)")
 	}
 	switch args[0] {
 	case "status":
@@ -1302,6 +1311,8 @@ func runVoice(ctx context.Context, args []string, stdin io.Reader, stdout, stder
 		return runVoiceWhere(ctx, args[1:], stdout, stderr)
 	case "camera":
 		return runVoiceCamera(ctx, args[1:], stdout, stderr)
+	case "share":
+		return runVoiceShare(ctx, args[1:], stdout, stderr)
 	default:
 		return fmt.Errorf("cli: unknown voice subcommand %q", args[0])
 	}
@@ -1380,8 +1391,13 @@ func voiceName(name string) string {
 // V3 servers send only the channel-wide room. A camera is shown inside the
 // third field (quiet+camera, talking+camera) so the field count never moves.
 // A camera is only ever in the channel-wide room (ADR-015), so one a server
-// claims in a narrower room is not shown.
-func writeVoicePresence(w io.Writer, channel string, doc schema.VoicePresenceV1, names map[int64]string) error {
+// claims in a narrower room is not shown. A screen share is shown the same
+// way (+share, after +camera) and, there being several at once, adds trailing
+// key=value fields to that line alone: share_since=<RFC 3339 UTC>, then
+// quality=<resolution>@<fps> when the sharer declared one, then "sound" when
+// the share carries sound. A share, too, is only ever in the channel-wide
+// room.
+func writeVoicePresence(w io.Writer, channel string, doc schema.VoicePresenceV2, names map[int64]string) error {
 	lines := 0
 	for _, room := range doc.Rooms {
 		scope := ""
@@ -1389,7 +1405,7 @@ func writeVoicePresence(w io.Writer, channel string, doc schema.VoicePresenceV1,
 			// The marker without its brackets and trailing space: one field.
 			scope = " " + strings.ReplaceAll(strings.Trim(scopeMarker(room.Audience, nil), "[] "), " ", "_")
 		}
-		people := append([]schema.VoiceParticipant(nil), room.Participants...)
+		people := append([]schema.VoiceParticipantV2(nil), room.Participants...)
 		sort.Slice(people, func(i, j int) bool { return people[i].PrincipalID < people[j].PrincipalID })
 		for _, p := range people {
 			state := "quiet"
@@ -1399,7 +1415,12 @@ func writeVoicePresence(w io.Writer, channel string, doc schema.VoicePresenceV1,
 			if p.Camera && room.Audience == nil {
 				state += "+camera"
 			}
-			if _, err := fmt.Fprintf(w, "%d %s %s %s%s\n", p.PrincipalID, voiceName(names[p.PrincipalID]), state, p.JoinedAt.Time().Format(time.RFC3339), scope); err != nil {
+			share := ""
+			if p.Sharing && room.Audience == nil {
+				state += "+share"
+				share = shareFields(p)
+			}
+			if _, err := fmt.Fprintf(w, "%d %s %s %s%s%s\n", p.PrincipalID, voiceName(names[p.PrincipalID]), state, p.JoinedAt.Time().Format(time.RFC3339), scope, share); err != nil {
 				return err
 			}
 			lines++
@@ -1462,7 +1483,7 @@ func runVoiceCameraStop(ctx context.Context, args []string, _, stderr io.Writer)
 		return err
 	}
 	if err := client.StopVoiceCamera(ctx, positional[0], id); err != nil {
-		return voiceFailure(refused(err, cameraStopRefusals))
+		return stopFailure(err, cameraStopRefusals)
 	}
 	return nil
 }
@@ -1536,7 +1557,7 @@ func voiceFailure(err error) error {
 func watchVoice(ctx context.Context, client *Client, channel string, stdout, stderr io.Writer) error {
 	names := voiceNames(ctx, client)
 	first := true
-	err := client.SubscribeVoicePresence(ctx, channel, func(doc schema.VoicePresenceV1) error {
+	err := client.SubscribeVoicePresence(ctx, channel, func(doc schema.VoicePresenceV2) error {
 		if first && !doc.Configured {
 			return errVoiceNotConfigured
 		}
