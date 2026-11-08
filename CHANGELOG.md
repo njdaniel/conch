@@ -8,6 +8,31 @@ release that Nick publishes.
 
 ## [Unreleased]
 
+## [0.1.0-alpha.17] - 2026-11-07
+
+This is a pre-1.0 release (`v0.1.0-alpha.17`). There is one new schema version, `conch.voice_presence.v2`, which Nick signed off on 2026-11-07 (#1483). It is served only when a client asks with `?schema=`, so v1 readers are unchanged. **Testers: reload any open tab once after the upgrade.** From this release on, the browser accepts fields it doesn't know yet, so a later upgrade won't break an open tab (#1534), and it offers a reload when the server is newer.
+
+### Added
+- **Screen share sound.** The sharer is told when a share has no sound, and how to share a browser tab with sound. On Chrome and Edge on Mac and Linux, only a tab's sound can be shared. Viewers hear a share as soon as they watch it, and their volume carries over to the next share (#1485).
+- **Share quality.** The sharer picks the resolution (720p, 1080p or source) and the frame rate (15, 30 or 60), and the share shows its quality (#1488).
+- **Several screen shares at once** in a voice room, up to six (#1508). A moderator stops someone else's stream with `?principal=`. The CLI and TUI name every sharer and gain `conch voice share stop` (#1510), and the voice helper reads v2 presence (#1511). The browser's stream tiles come in a later release (#1509).
+- **Preview as member** (#1007): an administrator sees the server as another member sees it, read-only. Available from the server (#1515), the CLI with `conch admin preview` and `--preview-as` (#1518), and the browser (#1517).
+- **The call grid shows everyone,** with a "Hide non-video participants" toggle (#1487).
+- **The web UI:**
+  - appearance presets, accent colours and chat density (#1497);
+  - a quick channel switcher, with channel stepping and unread jumps (#1492);
+  - favorites and collapsible channel groups (#1493);
+  - a Markdown composer with formatting shortcuts and spoilers (#1496).
+
+### Changed
+- Push-to-talk in the browser accepts Mouse 4 and Mouse 5 (#1480).
+- Voice shows your own username instead of "You" (#1481).
+- `voice_share_busy` is no longer answered. A seventh share gets `voice_share_full`, and a bare `DELETE …/voice/share` stops only the caller's own stream.
+
+### Fixed
+- `/mcp` accepts the public Host kept by a reverse proxy (#1479). **After upgrading, remove `MCPGODEBUG=disablelocalhostprotection=1` from `/etc/conch/alpha.env` and restart.**
+- A hidden status line in the channel-groups editor no longer lengthens the page on long channel lists (#1550).
+
 ## [0.1.0-alpha.16] - 2026-11-06
 
 This is a pre-1.0 release (`v0.1.0-alpha.16`): the API and the wire shapes
