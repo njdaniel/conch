@@ -10,21 +10,31 @@ import type { ServerMemberV1, WhoAmIResponseV1 } from '../schema/principal';
 import { canDo, permissionName } from './permissions';
 import { personRefusal } from './PersonActions';
 
+// A community-directory request as the session numbers it: ticket orders it
+// against every other request, generation is the count of directory changes
+// the page had been told of when it was sent.
+export interface DirectoryRequest {
+  readonly ticket: number;
+  readonly generation: number;
+}
+
+// ManifestReads is the one stop for agent manifest reads, shared by every
+// card (#1562). The model: an agent is read only while neither the community
+// directory has dropped it nor a manifest read answered 404. Only the
+// community directory decides membership; channel members play no part. Every
+// directory answer, from any view and even a closed one, is ordered by its
+// ticket: one older than an answer already applied changes nothing. An answer
+// sent after a directory change (a newer generation than any applied) also
+// lifts the 404 stops of the agents it lists.
 export interface ManifestReadControl {
   readonly stopped: ReadonlySet<number>;
   readonly stop: (id: number) => void;
-  // beginDirectory numbers a community-directory request, session-wide.
-  readonly beginDirectory: () => number;
-  // acceptDirectory applies the answer to that request, unless a newer one was
-  // applied first; it returns false then. recover ends the 404 stops of the
-  // agents the answer lists.
-  readonly acceptDirectory: (ticket: number, members: readonly ServerMemberV1[], recover: boolean) => boolean;
+  readonly beginDirectory: () => DirectoryRequest;
+  // acceptDirectory applies the answer to that request; false means it was stale.
+  readonly acceptDirectory: (request: DirectoryRequest, members: readonly ServerMemberV1[]) => boolean;
 }
 
-// ManifestReads shares a community-directory removal or a manifest 404 with
-// every card, so no directory view can retry a read another view has ended
-// (#1562). A post-change directory answer listing the agent ends either stop.
-export const ManifestReads = createContext<ManifestReadControl>({ stopped: new Set<number>(), stop: () => undefined, beginDirectory: () => 0, acceptDirectory: () => true });
+export const ManifestReads = createContext<ManifestReadControl>({ stopped: new Set<number>(), stop: () => undefined, beginDirectory: () => ({ ticket: 0, generation: 0 }), acceptDirectory: () => true });
 
 export interface AIAdminCardProps {
   readonly who: WhoAmIResponseV1;

@@ -3,26 +3,30 @@
 // session-wide generation that orders every directory answer.
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { ServerMemberV1 } from '../schema/principal';
-import type { ManifestReadControl } from './AIAdminCard';
+import type { DirectoryRequest, ManifestReadControl } from './AIAdminCard';
 
 // useManifestReadControl builds the control App provides to every agent card.
-// signedIn false clears it: another person's session starts clean.
-export function useManifestReadControl(signedIn: boolean): ManifestReadControl {
+// changes counts the server's directory-changed words; signedIn false clears
+// the control, so another person's session starts clean.
+export function useManifestReadControl(signedIn: boolean, changes: number): ManifestReadControl {
   const [unlistedAgents, setUnlistedAgents] = useState<ReadonlySet<number>>(new Set());
   const [missingManifests, setMissingManifests] = useState<ReadonlySet<number>>(new Set());
   const listedAgents = useRef<ReadonlySet<number>>(new Set());
-  // One generation counts every directory request from every view, closed
-  // ones included; an answer older than the newest one accepted is stale and
-  // changes nothing.
+  // Tickets number every directory request from every view, closed ones
+  // included; an answer older than the newest one applied is stale.
   const requestedDirectory = useRef(0);
   const acceptedDirectory = useRef(0);
-  const beginDirectory = useCallback(() => ++requestedDirectory.current, []);
+  // The directory changes seen so far, and the newest generation whose
+  // answer has lifted the 404 stops.
+  const generation = useRef(changes);
+  generation.current = changes;
+  const recovered = useRef(changes);
+  const beginDirectory = useCallback((): DirectoryRequest => ({ ticket: ++requestedDirectory.current, generation: generation.current }), []);
   // Only an accepted community-directory answer decides membership here; the
-  // open channel's members are a different list. It returns false for a stale
-  // answer. recover also ends the 404 stops of the agents it lists.
-  const acceptDirectory = useCallback((ticket: number, next: readonly ServerMemberV1[], recover: boolean) => {
-    if (ticket < acceptedDirectory.current) return false;
-    acceptedDirectory.current = ticket;
+  // open channel's members are a different list.
+  const acceptDirectory = useCallback((request: DirectoryRequest, next: readonly ServerMemberV1[]) => {
+    if (request.ticket < acceptedDirectory.current) return false;
+    acceptedDirectory.current = request.ticket;
     const before = listedAgents.current;
     const present = new Set(next.filter((member) => member.kind === 'agent').map((member) => member.id));
     listedAgents.current = present;
@@ -32,7 +36,8 @@ export function useManifestReadControl(signedIn: boolean): ManifestReadControl {
       for (const id of present) changed.delete(id);
       return changed.size === current.size && [...changed].every((id) => current.has(id)) ? current : changed;
     });
-    if (!recover) return true;
+    if (request.generation <= recovered.current) return true;
+    recovered.current = request.generation;
     setMissingManifests((current) => {
       const changed = new Set(current);
       for (const id of present) changed.delete(id);

@@ -607,28 +607,16 @@ export function CommunityMembers({
     setIssued([]);
   }, [viewerId, origin]);
 
-  const seenDirectoryTick = useRef(directoryTick);
-  // A directory change owes the stopped manifest reads a recovery. The debt
-  // stays until an answer is accepted, so a request that replaces the one
-  // carrying it (a routine refresh) carries it on (#1562).
-  const recovery = useRef(false);
   const load = useCallback(() => {
     const mine = ++seq.current;
-    const ticket = manifestReads.beginDirectory();
-    const recover = recovery.current;
+    const request = manifestReads.beginDirectory();
     void api.directoryMembers().then((result) => {
-      if (result.ok) {
-        // The shared check comes first, and applies even if this view has
-        // closed or asked again: a stale answer must not change what other
-        // views know, and an accepted one still counts (#1562). This answer,
-        // never a channel's members, controls manifest reads.
-        if (!manifestReads.acceptDirectory(ticket, result.value.members, recover)) {
-          // A newer answer got in first: ask again rather than show this one.
-          if (mine === seq.current && live.current) load();
-          return;
-        }
-        if (recover) recovery.current = false;
-      }
+      // What this view shows is its own newest answer. The session-wide order
+      // governs only the shared stops on manifest reads: an answer older than
+      // one already applied there changes none of them, whether or not this
+      // view has closed or asked again, but is still drawn here (#1562). This
+      // answer, never a channel's members, controls manifest reads.
+      if (result.ok) manifestReads.acceptDirectory(request, result.value.members);
       if (mine !== seq.current || !live.current) return;
       if (result.ok) {
         setAnswer(result.value);
@@ -650,8 +638,6 @@ export function CommunityMembers({
     });
   }, []);
   useEffect(() => {
-    if (seenDirectoryTick.current !== directoryTick) recovery.current = true;
-    seenDirectoryTick.current = directoryTick;
     if (active) load();
   }, [load, channelIds, permissionsTick, directoryTick, active]);
   // After a change, if the row that had focus went with the list's next read,

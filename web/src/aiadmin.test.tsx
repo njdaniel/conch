@@ -555,17 +555,20 @@ describe('the agent card', () => {
     directory = without;
     await changed();
     const before = reads(calls, '/v1/principals/4/manifest');
+    const directoryBefore = reads(calls, '/v1/directory/members');
     await act(async () => {
       stale.resolve(json({ members: everyone }));
       await stale.promise;
     });
     await settle();
-    return { calls, before };
+    return { calls, before, directoryBefore };
   }
 
   it('lets a closed view\'s stale answer neither resurrect a hidden agent nor start a read', async () => {
-    const { calls, before } = await twoViews();
+    const { calls, before, directoryBefore } = await twoViews();
     expect(reads(calls, '/v1/principals/4/manifest')).toBe(before);
+    // The closed Settings view does not ask again for the answer it dropped.
+    expect(reads(calls, '/v1/directory/members')).toBe(directoryBefore);
   });
 
   it('keeps the right to resume a stopped read when a routine refresh replaces the recovery request', async () => {
@@ -607,6 +610,51 @@ describe('the agent card', () => {
     expect(reads(calls, '/v1/principals/4/manifest')).toBeGreaterThan(before);
     for (const resolve of held) resolve(json({ members: everyone }));
     await settle();
+  });
+
+  it('keeps a later change\'s recovery when an older change\'s answer arrives first', async () => {
+    const held: { readonly resolve: (response: Response) => void }[] = [];
+    let missing = true;
+    let hold = 0;
+    const calls = serve(owner, {
+      routes: {
+        ...routes(['manage_members']),
+        'GET /v1/principals/4/manifest': () => missing ? json({}, 404) : json(manifest(4, ['manage_members'])),
+        'GET /v1/directory/members': () => {
+          if (hold === 0) return json({ members: everyone });
+          hold--;
+          return new Promise<Response>((resolve) => held.push({ resolve }));
+        },
+      },
+    });
+    const region = await openMembers('conch_owner_session_token');
+    const events = await channelEvents();
+    await waitFor(() => {
+      expect(reads(calls, '/v1/principals/4/manifest')).toBeGreaterThan(0);
+    });
+    await settle();
+    missing = false;
+    // Two directory changes, their answers (hide, then re-enable) held.
+    hold = 2;
+    events.send({ schema: 'conch.directory_changed.v1' });
+    await waitFor(() => {
+      expect(held.length).toBe(2);
+    });
+    hold = 2;
+    events.send({ schema: 'conch.directory_changed.v1' });
+    await waitFor(() => {
+      expect(held.length).toBe(4);
+    });
+    // The hide answer lands first; then a routine refresh is answered, newer
+    // than the held re-enable answers, which are stale by then.
+    const without = everyone.filter((person) => person.id !== 4);
+    for (const request of held.slice(0, 2)) request.resolve(json({ members: without }));
+    await settle();
+    events.send({ schema: 'conch.permissions_changed.v1' });
+    await within(region).findByRole('group', { name: 'AI administrator builder' });
+    for (const request of held.slice(2)) request.resolve(json({ members: everyone }));
+    await settle();
+    expect(within(region).getByRole('group', { name: 'AI administrator builder' })).toBeTruthy();
   });
 
   it('asks first, then disables the principal', async () => {

@@ -13,6 +13,7 @@ import { App } from './App';
 import { AdminConsole } from './AdminConsole';
 import { CommunityMembers } from './Members';
 import { SettingsOpen } from './joiningSettings';
+import { ManifestReads, type ManifestReadControl } from './admin/AIAdminCard';
 import type { ChannelListingV1 } from './schema/channel';
 import type { Permission, PermissionsResponseV1 } from './schema/permission';
 import type { ServerMemberV1, WhoAmIResponseV1 } from './schema/principal';
@@ -1052,6 +1053,27 @@ describe('the section follows the directory frame (issue #1226)', () => {
       expect(rowOf(region, 'newcomer')).toBeTruthy();
     });
     expect(reads(calls)).toBe(before + 1);
+  });
+
+  it('draws its own answer when the shared order calls it stale, and leaves the stops alone', async () => {
+    serve(owner);
+    await signedIn();
+    // Another view's newer answer was applied first: the order refuses this one.
+    const applied: number[] = [];
+    const control: ManifestReadControl = {
+      stopped: new Set<number>(),
+      stop: () => undefined,
+      beginDirectory: () => ({ ticket: 1, generation: 0 }),
+      acceptDirectory: (request) => {
+        applied.push(request.ticket);
+        return false;
+      },
+    };
+    render(<ManifestReads.Provider value={control}>{console(true, 0)}</ManifestReads.Provider>);
+    const region = await screen.findByRole('region', { name: 'Members' });
+    await within(region).findByRole('list', { name: 'People' });
+    expect(applied.length).toBeGreaterThan(0);
+    expect(control.stopped.size).toBe(0);
   });
 
   it('sends nothing while hidden', async () => {

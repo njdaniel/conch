@@ -663,7 +663,7 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
     onPermissionsChanged: permissionsChanged,
     onDirectoryChanged: directoryChanged,
   });
-  const manifestReads = useManifestReadControl(signedIn);
+  const manifestReads = useManifestReadControl(signedIn, directory.tick);
   // The server's word that the directory changed (issue #993): the community
   // panel, the picker and this channel's people are read again and replaced.
   // The open channel's people moved (conch.channel_members.v1): the preview
