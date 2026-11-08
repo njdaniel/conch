@@ -7,6 +7,7 @@ import { Composer } from './Composer';
 import { guestName } from './guestName';
 import { Avatar, PrivateMark } from './Icons';
 import { IdentityMarks } from './Identity';
+import { ProfileCard } from './ProfileCard';
 import type { IdentityKey } from './identity';
 import { Linkified, previewText } from './Linkified';
 import { displayBody } from './spoilerFiles';
@@ -93,18 +94,22 @@ function Line({
   author,
   authorId,
   person,
+  viewer,
   badge,
   tag,
   tone,
+  interactive = true,
   children,
 }: {
   readonly time: string;
   readonly author: string;
   readonly authorId: number;
   readonly person: Person | undefined;
+  readonly viewer: number;
   readonly badge: string | null;
   readonly tag: string | null;
   readonly tone?: 'failed' | 'unconfirmed';
+  readonly interactive?: boolean;
   readonly children: ReactNode;
 }) {
   // The badge comes first, as in the TUI, so a name or a body cannot pass for
@@ -114,7 +119,7 @@ function Line({
       <Avatar id={authorId} name={author} />
       <div className="msg-head">
         {badge === null ? null : <span className="audience">{badge} </span>}
-        <time>{time}</time> <span className="author">{author}</span>
+        <time>{time}</time> {interactive ? <ProfileCard id={authorId} person={person} viewer={viewer} name={author} className="author" /> : <span className="author">{author}</span>}
         <IdentityMarks kind={person?.kind} role={person?.role} manages={person?.manages} only={authorMarks} textForm />
         <span className="vh">: </span>
       </div>
@@ -232,6 +237,8 @@ export function Message({
         author={authorOf(message, people)}
         authorId={message.author_id}
         person={people.get(message.author_id)}
+        viewer={viewer}
+        interactive={message.removed !== true && !cont}
         badge={message.audience === undefined ? null : audienceLabel(message.audience, viewer, nets)}
         tag={sent ? 'Sent' : null}
       >
@@ -321,6 +328,7 @@ function Pending({
         author={me.name}
         authorId={viewer}
         person={me}
+        viewer={viewer}
         badge={send.audience === undefined ? null : audienceLabel(send.audience, viewer, nets)}
         tag={tag}
         {...(send.status === 'sending' ? {} : { tone: send.status })}

@@ -1,10 +1,11 @@
 // Departed authors (design §13.5, O14d): the author of a message who is not in
 // the member list is named by the channel's authors route, and reads #<id>
 // only where the route did not name them.
-import { cleanup, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as api from './api';
-import { Conversation } from './Conversation';
+import { Conversation, Message } from './Conversation';
+import { longPressMs } from './MessageMenu';
 import type { MessageV2 } from './schema/message';
 import type { ChannelChat } from './state/messages';
 import type { Person } from './useLiveChannel';
@@ -123,14 +124,69 @@ describe('author identity marks', () => {
     expect(head.querySelector('[data-identity="manager"]')).not.toBeNull();
     expect(head.querySelector('[data-identity="operator"]')).not.toBeNull();
     expect(head.querySelector('[data-identity="owner"], [data-identity="approver"]')).toBeNull();
+
+    fireEvent.click(within(head).getByRole('button', { name: 'bob' }));
+    const card = screen.getByRole('dialog', { name: 'bob' });
+    expect(card.querySelector('.avatar')).not.toBeNull();
+    expect(within(card).getByText('Person')).toBeDefined();
+    expect(within(card).getByText('Manager')).toBeDefined();
+    expect(within(card).getByText('Operator')).toBeDefined();
+    expect(card.querySelector('.profile-card-presence')).toBeNull();
   });
 
-  it('gives an authors-route author Agent and no member standing', async () => {
-    vi.spyOn(api, 'channelAuthors').mockResolvedValue({ ok: true, value: [{ principal_id: 9, name: 'former-bot', kind: 'agent' }] });
+  it('gives an authors-route author Agent and no member standing, presence or new read on open', async () => {
+    const asked = vi.spyOn(api, 'channelAuthors').mockResolvedValue({ ok: true, value: [{ principal_id: 9, name: 'former-bot', kind: 'agent' }] });
     render(view([by(1, 9)]));
     await screen.findByText('former-bot');
     const head = header('from 9');
     expect(head.querySelector('[data-identity="agent"]')).not.toBeNull();
     expect(head.querySelector('[data-identity="owner"], [data-identity="operator"], [data-identity="manager"], [data-identity="approver"]')).toBeNull();
+
+    asked.mockClear();
+    fireEvent.click(within(head).getByRole('button', { name: 'former-bot' }));
+    const card = screen.getByRole('dialog', { name: 'former-bot' });
+    expect(card.querySelector('.profile-card-kind')?.textContent).toBe('Agent');
+    expect(card.querySelectorAll('.identity-mark')).toHaveLength(1);
+    expect(card.querySelector('[data-identity="agent"]')).not.toBeNull();
+    expect(card.querySelector('.profile-card-presence')).toBeNull();
+    expect(card.textContent).not.toMatch(/membership|member list|online|stale|offline/);
+    expect(asked).not.toHaveBeenCalled();
+  });
+});
+
+describe('the author name and the message gestures', () => {
+  it('keeps Line accessible text unchanged and opens from its native button', () => {
+    render(view([by(1, 3)], new Map([[3, { name: 'bot', kind: 'agent' }]])));
+    const head = screen.getByText('from 3').closest('li')?.querySelector<HTMLElement>('.msg-head');
+    if (head === null || head === undefined) throw new Error('no author header');
+    expect(head.textContent).toMatch(/^\d{2}:\d{2} bot \[agent\]: $/);
+    const name = within(head).getByRole('button', { name: 'bot' });
+    name.focus();
+    fireEvent.click(name);
+    expect(screen.getByRole('dialog', { name: 'bot' })).toBeDefined();
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Close' }));
+  });
+
+  it('opens the card on a tap but still opens the message menu on a long press', () => {
+    vi.useFakeTimers();
+    try {
+      render(<Message message={by(1, 2)} people={members} nets={new Map()} viewer={2} channel="general" sent={false} cont={false} actions={[{ key: 'edit', label: 'Edit', onSelect: vi.fn() }]} />);
+      const name = screen.getByRole('button', { name: 'ada' });
+      fireEvent.touchStart(name, { touches: [{ clientX: 10, clientY: 10 }] });
+      fireEvent.touchEnd(name);
+      fireEvent.click(name);
+      expect(screen.getByRole('dialog', { name: 'ada' })).toBeDefined();
+      expect(screen.queryByRole('menu')).toBeNull();
+      fireEvent.keyDown(screen.getByRole('dialog'), { key: 'Escape' });
+
+      fireEvent.touchStart(name, { touches: [{ clientX: 10, clientY: 10 }] });
+      act(() => {
+        vi.advanceTimersByTime(longPressMs);
+      });
+      expect(screen.getByRole('menu', { name: /^More actions for ada/ })).toBeDefined();
+      expect(screen.queryByRole('dialog')).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

@@ -27,6 +27,8 @@ test('every appearance preset, accent and density applies and survives reload', 
   const { page } = await meet({ colorScheme: 'dark' });
   await signIn(page, world, world.tokens.browser, 'browser-test');
   const marker = `appearance-${Date.now().toString(36)}`;
+  // Start a new author run: a continued row intentionally has no top padding.
+  await post(world, world.tokens.nick, 'general', 'start a new author run before measuring density');
   await say(page, 'general', marker);
   const row = messages(page).getByRole('listitem').filter({ hasText: marker });
   await expect(row).toBeVisible();

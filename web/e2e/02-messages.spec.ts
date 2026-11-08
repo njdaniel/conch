@@ -137,12 +137,12 @@ test('F15 with 30 messages held the log is one tab stop, and no control is named
       return (el?.closest('[data-message-id]')?.getAttribute('data-message-id') ?? '-') + ':' + (el?.getAttribute('aria-label') ?? el?.textContent ?? '');
     }));
   }
-  // Search, the newest message, its Reply, the composer's Whisper and Attach,
-  // then its box: six presses, not one per message. The log itself costs two,
-  // the newest message and its one control, whatever history is held.
-  expect(presses, seen.join(' | ')).toBeLessThanOrEqual(6);
+  // Search, the newest message, its name (issue #1544) and Reply, the
+  // composer's Whisper and Attach, then its box: seven presses, not one per
+  // message. The log costs three, whatever history is held.
+  expect(presses, seen.join(' | ')).toBe(7);
   const inLog = seen.map((where) => where.split(':')[0]).filter((id) => id !== '-');
-  expect(inLog, seen.join(' | ')).toHaveLength(2);
+  expect(inLog, seen.join(' | ')).toHaveLength(3);
   expect(new Set(inLog).size, seen.join(' | ')).toBe(1);
 
   const names = await messages(page).evaluate((log) => [...log.querySelectorAll('[aria-label]')].map((el) => el.getAttribute('aria-label') ?? ''));
@@ -177,7 +177,9 @@ test('F15 arrow keys move between messages, and a keyboard alone edits and repli
   await expect(items.nth(1)).toBeFocused();
   await expect(items.nth(1)).toHaveCSS('outline-style', 'solid');
 
-  // Edit, by keyboard alone: Tab to the ⋯, Enter, Enter on Edit, type, Enter.
+  // Edit, by keyboard alone: Tab past the author's name to ⋯, Enter, Enter on
+  // Edit, type, Enter.
+  await page.keyboard.press('Tab');
   await page.keyboard.press('Tab');
   await expect(items.nth(1).getByRole('button', { name: /^More actions for member-1-.+'s message, \d\d:\d\d$/ })).toBeFocused();
   await page.keyboard.press('Enter');
@@ -192,9 +194,12 @@ test('F15 arrow keys move between messages, and a keyboard alone edits and repli
   // Reply, by keyboard alone: up to the owner's message, Tab to Reply, Enter.
   await page.keyboard.press('Shift+Tab');
   await page.keyboard.press('Shift+Tab');
+  await page.keyboard.press('Shift+Tab');
   await expect(items.nth(1)).toBeFocused();
   await page.keyboard.press('ArrowUp');
   await expect(items.nth(0)).toBeFocused();
+  await page.keyboard.press('Tab');
+  await expect(items.nth(0).locator('.profile-card-name')).toBeFocused();
   await page.keyboard.press('Tab');
   await expect(items.nth(0).getByRole('button', { name: /^Reply to owner-.+'s message, \d\d:\d\d$/ })).toBeFocused();
   await page.keyboard.press('Enter');

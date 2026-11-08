@@ -158,7 +158,7 @@ test('@mention completes from the channel and the person named sees the mark', a
   const viewer = await meet();
   await signIn(viewer.page, world, world.tokens.guest, 'jamie-test');
   await expect(conversation(viewer.page).getByRole('heading', { name: 'general' })).toBeVisible();
-  await sender.page.getByRole('button', { name: 'Send' }).click();
+  await sender.page.getByRole('button', { name: 'Send', exact: true }).click();
   const row = conversation(viewer.page).getByRole('listitem').filter({ hasText: tag });
   await expect(row).toHaveCount(1);
   await expect(row).toHaveClass(/mentions-you/);

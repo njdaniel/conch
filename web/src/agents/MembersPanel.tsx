@@ -7,6 +7,7 @@ import { useEffect, useState } from 'react';
 import { MemberRow, Members, type MemberControlsProps } from '../Members';
 import { Avatar } from '../Icons';
 import { IdentityMarks } from '../Identity';
+import { ProfileCard } from '../ProfileCard';
 import type { RunV1 } from '../schema/run';
 import type { SessionV1 } from '../schema/session';
 import { ago } from './format';
@@ -73,6 +74,7 @@ function AgentRow({ entry, expanded, onToggle, sessionRuns, now, onOpen, control
   readonly controls: MemberControlsProps;
 }) {
   const lead = entry.sessions.find((s) => s.status === entry.status);
+  const member = controls.members.find((m) => m.principal_id === entry.id);
   return (
     <MemberRow key={`${String(controls.channel.id)}:${String(entry.id)}`} {...controls} principalId={entry.id} className={`ag-agent state-${entry.state}`} showIdentity={false}
       after={
@@ -90,9 +92,10 @@ function AgentRow({ entry, expanded, onToggle, sessionRuns, now, onOpen, control
       }
     >
       <Avatar id={entry.id} name={entry.name} />
-      <button type="button" className="quiet" aria-expanded={expanded} onClick={onToggle}>
-        <span aria-hidden="true">{expanded ? '▾' : '▸'}</span> <span className="ag-name">{entry.name}</span>
-      </button>{' '}
+      <button type="button" className="quiet agent-session-toggle" aria-label={`${expanded ? 'Hide' : 'Show'} sessions for ${entry.name}`} aria-expanded={expanded} onClick={onToggle}>
+        <span aria-hidden="true">{expanded ? '▾' : '▸'}</span>
+      </button>
+      <ProfileCard key={controls.channel.id} id={entry.id} person={{ ...entry, role: member?.role, manages: member?.manages, can_decide: member?.can_decide, guest: member?.guest }} viewer={controls.viewer.id} className="ag-name" />{' '}
       <IdentityMarks kind={entry.kind} {...controls.members.find((member) => member.principal_id === entry.id)} />
       <span className="ag-status">{entry.status}</span>
       {entry.sessions.length > 1 ? <span> ({entry.sessions.length} sessions)</span> : null}

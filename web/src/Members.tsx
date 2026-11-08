@@ -5,6 +5,7 @@ import * as api from './api';
 import { ManifestReads } from './admin/AIAdminCard';
 import { Avatar } from './Icons';
 import { IdentityMarks } from './Identity';
+import { ProfileCard } from './ProfileCard';
 import { memberName } from './guestName';
 import { ActionsMenu, useOpeners, type MenuItem } from './MessageMenu';
 import type { Entry } from './agents/join';
@@ -222,8 +223,9 @@ export interface RowUi {
   readonly menuOpen: boolean;
   readonly confirming: boolean;
   readonly moderating: ModerationOperation | null;
+  readonly profileOpen: boolean;
 }
-const noUi: RowUi = { menuOpen: false, confirming: false, moderating: null };
+const noUi: RowUi = { menuOpen: false, confirming: false, moderating: null, profileOpen: false };
 
 export function MemberRow({
   className,
@@ -382,13 +384,23 @@ function PeopleGroup({ title, people, controls }: { readonly title: string; read
     <>
       <h4>{`${title} — ${String(people.length)}`}</h4>
       <ul aria-label={`${title} — ${String(people.length)}`}>
-        {people.map((person) => (
-          <MemberRow key={`${String(controls.channel.id)}:${String(person.id)}`} {...controls} principalId={person.id} className={`ag-person state-${person.state}`}>
-            <Avatar id={person.id} name={person.name} />
-            <span className="ag-name">{person.name}</span>
-            {person.live > 1 ? <span> ({person.live} sessions)</span> : null} <span className="ag-status">{person.state}</span>
-          </MemberRow>
-        ))}
+        {people.map((person) => {
+          const member = controls.members.find((m) => m.principal_id === person.id);
+          return (
+            <MemberRow key={`${String(controls.channel.id)}:${String(person.id)}`} {...controls} principalId={person.id} className={`ag-person state-${person.state}`}>
+              <Avatar id={person.id} name={person.name} />
+              <ProfileCard
+                id={person.id}
+                person={{ ...person, role: member?.role, manages: member?.manages, can_decide: member?.can_decide, guest: member?.guest }}
+                viewer={controls.viewer.id}
+                className="ag-name"
+                open={controls.rowUi?.(person.id).profileOpen}
+                onOpenChange={(open) => { controls.setRowUi?.(person.id, { profileOpen: open }); }}
+              />
+              {person.live > 1 ? <span> ({person.live} sessions)</span> : null} <span className="ag-status">{person.state}</span>
+            </MemberRow>
+          );
+        })}
       </ul>
     </>
   );
@@ -492,7 +504,7 @@ function CommunityRow({
   return (
     <li className={`community-member${has ? ' member-row has-actions' : ''}`} {...openers}>
       <Avatar id={person.id} name={person.name} />
-      <span className="community-name">{person.name}</span>
+      <ProfileCard id={person.id} person={person} viewer={viewer} className="community-name" />
       <IdentityMarks {...person} id={person.id} viewer={viewer} />
       {person.voice_allowed === undefined ? null : <span className="hint">{person.voice_allowed ? ' · voice on' : ' · voice off'}</span>}
       {person.may_invite === undefined ? null : <span className="hint">{person.may_invite ? ' · can invite' : ' · cannot invite'}</span>}
