@@ -244,6 +244,17 @@ func coreMatrixRows() []row {
 
 		// Who B is, and B's channels.
 		own("GET /v1/whoami", "asks who she is", func(*world, subject) probe { return get("/v1/whoami") }),
+		// Preview as member (issue #1516; the preview phase, preview.go, has the
+		// administrator's side). Without the header the entry read is the same
+		// 400 for everyone; with it, a member who holds neither permission is
+		// refused before the target is looked up, the same for A's member as
+		// for an id nobody has.
+		{route: "GET /v1/preview", what: "asks for a preview with no target", want: answer{http.StatusBadRequest, "invalid_request"},
+			probe: func(*world, subject) probe { return get("/v1/preview") }},
+		{route: "GET /v1/preview", what: "previews an A member", pick: aMember, want: operatorOnly,
+			probe: func(_ *world, s subject) probe {
+				return probe{method: http.MethodGet, path: "/v1/preview", headers: map[string]string{previewHeader: id(s.id)}}
+			}},
 		own("GET /v1/channels", "lists her channels", func(*world, subject) probe { return get("/v1/channels") }),
 		operator("POST /v0/channels", "makes a channel with A's channel's name", aChannel, func(_ *world, s subject) probe {
 			return post("/v0/channels", schema.CreateChannelRequest{Name: s.name})
@@ -924,9 +935,6 @@ var exempt = map[string]string{
 	"/mcp": "the agents' surface, with its own bearer authentication and the manifest and membership gates; no B member is an agent, " +
 		"and a guest's credential is refused there (the guests' phase, guestrevoke.go checkMCPClosed: the one 401, the same as for a token nobody was issued; internal/server/mcp_test.go " +
 		"TestMCPRejectsInvalidCredentialsIdentically for a person's credential, TestMCPRejectsDisabledAgent, mcp_audience_test.go TestMCPAudienceAuthorizationMatrix)",
-	"GET /v1/preview": "answers 400 \"preview target required\" to everyone who sends no Conch-Preview-As header, whoever they are, and nothing behind it " +
-		"belongs to a group until the header names a target; the preview phase of this check, with a row per caller and target, is issue #1516 " +
-		"(internal/server/preview_test.go TestPreviewMatrix, TestPreviewRefusesEveryOtherRoute; auth_test.go TestRouteTable holds it previewable)",
 	"POST /v1/hooks/{token}": "authenticated by the hook's own URL token, which only an operator is shown " +
 		"(internal/server/hooks_test.go TestHookIngestErrors; auth_test.go TestHookIngestExemptUnderRequired)",
 }
