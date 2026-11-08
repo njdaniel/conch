@@ -1,7 +1,8 @@
 import { ModerationConfirm, type ModerationOperation } from './Moderation';
 import type { ChannelBanV1 } from './schema/generated';
-import { useCallback, useEffect, useId, useRef, useState, type KeyboardEvent, type ReactNode, type SyntheticEvent } from 'react';
+import { useCallback, useContext, useEffect, useId, useRef, useState, type KeyboardEvent, type ReactNode, type SyntheticEvent } from 'react';
 import * as api from './api';
+import { ManifestReads } from './admin/AIAdminCard';
 import { Avatar } from './Icons';
 import { IdentityMarks } from './Identity';
 import { memberName } from './guestName';
@@ -564,6 +565,7 @@ export function CommunityMembers({
   readonly onUnauthorized: () => void;
 }) {
   const headingId = useId();
+  const manifestReads = useContext(ManifestReads);
   const [answer, setAnswer] = useState<ServerMembersResponseV1 | 'failed' | null>(null);
   // The permissions document's rows, for the voice line beside the voice
   // switch (design §5); every operator may read it.
@@ -605,11 +607,15 @@ export function CommunityMembers({
     setIssued([]);
   }, [viewerId, origin]);
 
-  const load = useCallback(() => {
+  const seenDirectoryTick = useRef(directoryTick);
+  const load = useCallback((afterChange = false) => {
     const mine = ++seq.current;
     void api.directoryMembers().then((result) => {
       if (mine !== seq.current || !live.current) return;
       if (result.ok) {
+        // This accepted answer, never a channel's members, controls manifest
+        // reads. A post-change answer can also end an earlier 404 stop (#1562).
+        manifestReads.acceptDirectory(result.value.members, afterChange);
         setAnswer(result.value);
         return;
       }
@@ -619,7 +625,7 @@ export function CommunityMembers({
       }
       setAnswer('failed');
     });
-  }, []);
+  }, [manifestReads.acceptDirectory]);
   // The permissions document is read when a person's menu opens, so a switch
   // that would do nothing says so (the voice line); not with the list.
   const readRows = useCallback(() => {
@@ -629,7 +635,9 @@ export function CommunityMembers({
     });
   }, []);
   useEffect(() => {
-    if (active) load();
+    const afterChange = seenDirectoryTick.current !== directoryTick;
+    seenDirectoryTick.current = directoryTick;
+    if (active) load(afterChange);
   }, [load, channelIds, permissionsTick, directoryTick, active]);
   // After a change, if the row that had focus went with the list's next read,
   // focus would drop to the page: the status line takes it.
@@ -719,7 +727,13 @@ export function CommunityMembers({
       {/* A list that is not told of directory changes keeps a Refresh; the
           community panel and the admin console's follow the frame. */}
       {directoryTick !== undefined ? null : (
-        <button type="button" className="quiet" onClick={load}>
+        <button
+          type="button"
+          className="quiet"
+          onClick={() => {
+            load();
+          }}
+        >
           Refresh
         </button>
       )}

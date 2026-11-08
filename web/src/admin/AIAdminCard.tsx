@@ -1,14 +1,25 @@
-// The agent card (issue #1334, docs/design/ai-administrators.md §4.2 and
-// §4.5): under an agent in the Members section, what an AI administrator
+// The agent card (issues #1334 and #1562, docs/design/ai-administrators.md §4.2
+// and §4.5): under an agent in the Members section, what an AI administrator
 // holds ("AI administrator: manage members, manage channels") and Remove
 // access, which disables the principal: its credentials, sessions and sockets
 // end. Read from the agent's manifest, which operators may read; an agent with
 // no grant draws nothing. The server decides every request again.
-import { useEffect, useRef, useState } from 'react';
+import { createContext, useContext, useEffect, useRef, useState } from 'react';
 import * as api from '../api';
 import type { ServerMemberV1, WhoAmIResponseV1 } from '../schema/principal';
 import { canDo, permissionName } from './permissions';
 import { personRefusal } from './PersonActions';
+
+export interface ManifestReadControl {
+  readonly stopped: ReadonlySet<number>;
+  readonly stop: (id: number) => void;
+  readonly acceptDirectory: (members: readonly ServerMemberV1[], afterChange: boolean) => void;
+}
+
+// ManifestReads shares a community-directory removal or a manifest 404 with
+// every card, so no directory view can retry a read another view has ended
+// (#1562). A post-change directory answer listing the agent ends either stop.
+export const ManifestReads = createContext<ManifestReadControl>({ stopped: new Set<number>(), stop: () => undefined, acceptDirectory: () => undefined });
 
 export interface AIAdminCardProps {
   readonly who: WhoAmIResponseV1;
@@ -18,7 +29,8 @@ export interface AIAdminCardProps {
 }
 
 export function AIAdminCard({ who, person, onChanged, onUnauthorized }: AIAdminCardProps) {
-  const reads = who.role === 'operator' && person.kind === 'agent';
+  const manifest = useContext(ManifestReads);
+  const reads = who.role === 'operator' && person.kind === 'agent' && !manifest.stopped.has(person.id);
   const [grant, setGrant] = useState<readonly string[]>([]);
   const [asking, setAsking] = useState(false);
   // Access was removed from this card. The server clears the grant when it
@@ -44,14 +56,17 @@ export function AIAdminCard({ who, person, onChanged, onUnauthorized }: AIAdminC
       if (!current) return;
       if (result.ok) setGrant(result.value.permissions ?? []);
       else if (result.failure === 'unauthorized') unauthorized.current();
-      else setGrant([]);
+      else if (result.status === 404) {
+        manifest.stop(person.id);
+        setGrant([]);
+      } else setGrant([]);
     });
     return () => {
       current = false;
     };
   // Read again whenever the list is (person is a new object each time), so a
-  // grant made or removed since shows.
-  }, [reads, person]);
+  // grant made or removed since shows, unless the directory or a 404 ended it.
+  }, [reads, person, manifest.stop]);
 
   if (!reads || (grant.length === 0 && !removed)) return null;
   const name = person.name;

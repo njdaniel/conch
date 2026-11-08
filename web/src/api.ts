@@ -224,7 +224,7 @@ export type ApiFailure = 'unauthorized' | 'network' | 'invalid';
 
 export type ApiResult<T> =
   | { readonly ok: true; readonly value: T }
-  | { readonly ok: false; readonly failure: ApiFailure; readonly code?: string; readonly permission?: string; readonly retryAfter?: number };
+  | { readonly ok: false; readonly failure: ApiFailure; readonly status?: number; readonly code?: string; readonly permission?: string; readonly retryAfter?: number };
 
 // Where a credential is kept is the platform's (platform.credentials): 'tab'
 // is this tab alone, for an operator's and a guest's; 'lasting' is every tab
@@ -509,7 +509,9 @@ async function refused(res: Response): Promise<{ readonly ok: false; readonly fa
   return { ok: false, failure: 'invalid', ...(doc === undefined ? {} : { code: doc.code }), ...(doc?.permission === undefined ? {} : { permission: doc.permission }) };
 }
 
-async function get<T>(request: Call, token: string, check: Validator<T>): Promise<ApiResult<T>> {
+// withStatus preserves a refusal's HTTP status for a reader that treats one
+// status as final, without changing the shape of other calls' answers (#1562).
+async function get<T>(request: Call, token: string, check: Validator<T>, withStatus = false): Promise<ApiResult<T>> {
   let res: Response;
   try {
     res = await platform.http.get(request, token);
@@ -524,7 +526,8 @@ async function get<T>(request: Call, token: string, check: Validator<T>): Promis
       const code = await refusalCode(res.clone());
       if (code === undefined) return { ok: false, failure: 'invalid', code: 'reactions_unsupported' };
     }
-    return refused(res);
+    const failure = await refused(res);
+    return withStatus ? { ...failure, status: res.status } : failure;
   }
   let body: unknown;
   try {
@@ -542,11 +545,11 @@ async function get<T>(request: Call, token: string, check: Validator<T>): Promis
 // A 401 for a credential this page has since replaced is not a sign-out: the
 // call is asked again with the new one (settleRefusal, issue #1000).
 // signIn and restore are the calls that do not use it: they check a candidate.
-async function authed<T>(request: Call, check: Validator<T>): Promise<ApiResult<T>> {
+async function authed<T>(request: Call, check: Validator<T>, withStatus = false): Promise<ApiResult<T>> {
   let held = current();
   if (held === null) return { ok: false, failure: 'unauthorized' };
   for (let sent = 0; sent < resends; sent++) {
-    const result = await get(request, held.token, check);
+    const result = await get(request, held.token, check, withStatus);
     if (result.ok || result.failure !== 'unauthorized') return result;
     const next = await settleRefusal(held, true);
     if (next === null) return result;
@@ -1283,9 +1286,10 @@ export async function putAgentManifest(id: number, request: PutAgentManifestRequ
 }
 
 // agentManifest reads an agent's manifest (GET /v1/principals/{id}/manifest;
-// operators): the agent card shows its grant from it.
-export async function agentManifest(id: number): Promise<InviteResult<AgentManifestV1>> {
-  const reply = await authed(call('getManifest', { id }), getAgentManifestResponseV1);
+// operators): the agent card shows its grant from it. A refusal keeps its HTTP
+// status so the card can end reads after a 404 (#1562).
+export async function agentManifest(id: number): Promise<ApiResult<AgentManifestV1>> {
+  const reply = await authed(call('getManifest', { id }), getAgentManifestResponseV1, true);
   return reply.ok ? { ok: true, value: reply.value.manifest } : reply;
 }
 

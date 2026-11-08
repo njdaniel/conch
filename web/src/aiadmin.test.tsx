@@ -64,6 +64,16 @@ class FakeSocket {
   close() {
     // Nothing to release.
   }
+  open() {
+    act(() => {
+      this.onopen?.();
+    });
+  }
+  send(data: unknown) {
+    act(() => {
+      this.onmessage?.({ data: JSON.stringify(data) });
+    });
+  }
 }
 
 const manifest = (id: number, permissions: Permission[]) => ({
@@ -143,6 +153,29 @@ async function openMembers(token: string): Promise<HTMLElement> {
   return region;
 }
 
+const reads = (calls: readonly Call[], path: string) => calls.filter((call) => call.method === 'GET' && call.path === path).length;
+const settle = () => act(() => new Promise((resolve) => setTimeout(resolve, 50)));
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
+
+async function channelEvents(): Promise<FakeSocket> {
+  const isChannel = (socket: FakeSocket) => socket.url.includes('/v1/events/ws') && new URL(socket.url).searchParams.get('channel') === 'channel-a';
+  await waitFor(() => {
+    expect(FakeSocket.all.some(isChannel)).toBe(true);
+  });
+  for (const socket of FakeSocket.all) socket.open();
+  await settle();
+  const channels = FakeSocket.all.filter(isChannel);
+  const events = channels[channels.length - 1];
+  if (events === undefined) throw new Error('no channel events socket');
+  return events;
+}
+
 beforeEach(() => {
   FakeSocket.all = [];
   window.sessionStorage.clear();
@@ -152,6 +185,7 @@ beforeEach(() => {
 afterEach(() => {
   cleanup();
   vi.unstubAllGlobals();
+  vi.restoreAllMocks();
 });
 
 const writes = (calls: readonly Call[]) => calls.filter((c) => c.method !== 'GET' && !/ws-tickets|sessions|read-state/.test(c.path));
@@ -333,6 +367,149 @@ describe('the agent card', () => {
     const card = await within(region).findByRole('group', { name: 'AI administrator builder' });
     expect(card.textContent).toContain('AI administrator: manage members, manage channels');
     expect(within(region).queryByRole('group', { name: 'AI administrator plain-bot' })).toBeNull();
+  });
+
+  it('keeps the card and its reads when a channel drops an agent still in the directory', async () => {
+    const agent = { principal_id: 4, name: 'builder', kind: 'agent', created_at: at };
+    let channel = [agent];
+    const calls = serve(owner, {
+      routes: {
+        ...routes(['manage_members']),
+        'GET /v1/channels/channel-a/members': () => json({ members: channel }),
+      },
+    });
+    const region = await openMembers('conch_owner_session_token');
+    await within(region).findByRole('group', { name: 'AI administrator builder' });
+    const events = await channelEvents();
+    events.send({ schema: 'conch.session_roster.v1', channel_id: 7, sessions: [] });
+    const toggle = screen.getByRole('button', { name: 'Members' });
+    if (toggle.getAttribute('aria-expanded') === 'false') fireEvent.click(toggle);
+    await waitFor(() => {
+      expect(screen.getByRole('list', { name: 'Agents' }).textContent).toContain('builder');
+    });
+    const before = reads(calls, '/v1/principals/4/manifest');
+
+    events.send({ schema: 'conch.channel_members.v1', channel_id: 7, members: [] });
+    channel = [];
+    await waitFor(() => {
+      expect(screen.queryByRole('list', { name: 'Agents' })?.textContent ?? '').not.toContain('builder');
+    });
+    expect(within(region).getByRole('group', { name: 'AI administrator builder' })).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Close' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Settings' }));
+    const reopened = await screen.findByRole('region', { name: 'Members' });
+    await within(reopened).findByRole('group', { name: 'AI administrator builder' });
+
+    expect(reads(calls, '/v1/principals/4/manifest')).toBeGreaterThan(before);
+  });
+
+  it('never reads a dropped agent again, even with a stale directory answer in flight', async () => {
+    const stale = deferred<Response>();
+    let directory = everyone;
+    let hold = false;
+    const calls = serve(owner, {
+      routes: {
+        ...routes(['manage_members']),
+        'GET /v1/directory/members': () => hold ? stale.promise : json({ members: directory }),
+      },
+    });
+    const region = await openMembers('conch_owner_session_token');
+    await within(region).findByRole('group', { name: 'AI administrator builder' });
+    const events = await channelEvents();
+    const before = reads(calls, '/v1/principals/4/manifest');
+    const directoryBefore = reads(calls, '/v1/directory/members');
+
+    hold = true;
+    events.send({ schema: 'conch.permissions_changed.v1' });
+    await waitFor(() => {
+      expect(reads(calls, '/v1/directory/members')).toBeGreaterThan(directoryBefore);
+    });
+    directory = everyone.filter((person) => person.id !== 4);
+    hold = false;
+    events.send({ schema: 'conch.directory_changed.v1' });
+    await waitFor(() => {
+      expect(within(region).queryByText('builder')).toBeNull();
+    });
+    await act(async () => {
+      stale.resolve(json({ members: everyone }));
+      await stale.promise;
+    });
+    await settle();
+
+    expect(within(region).queryByText('builder')).toBeNull();
+    expect(reads(calls, '/v1/principals/4/manifest')).toBe(before);
+  });
+
+  it('reads an agent again when a changed directory lists it again', async () => {
+    let directory = everyone;
+    const calls = serve(owner, {
+      routes: {
+        ...routes(['manage_members']),
+        'GET /v1/directory/members': () => json({ members: directory }),
+      },
+    });
+    const region = await openMembers('conch_owner_session_token');
+    await within(region).findByRole('group', { name: 'AI administrator builder' });
+    const events = await channelEvents();
+    directory = everyone.filter((person) => person.id !== 4);
+    events.send({ schema: 'conch.directory_changed.v1' });
+    await waitFor(() => {
+      expect(within(region).queryByText('builder')).toBeNull();
+    });
+    const before = reads(calls, '/v1/principals/4/manifest');
+
+    directory = everyone;
+    events.send({ schema: 'conch.directory_changed.v1' });
+    await within(region).findByRole('group', { name: 'AI administrator builder' });
+    expect(reads(calls, '/v1/principals/4/manifest')).toBeGreaterThan(before);
+  });
+
+  it('ends manifest retries after a 404 and logs no console error', async () => {
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const calls = serve(owner, {
+      routes: {
+        ...routes(['manage_members']),
+        'GET /v1/principals/4/manifest': () => json({}, 404),
+      },
+    });
+    await openMembers('conch_owner_session_token');
+    await waitFor(() => {
+      expect(reads(calls, '/v1/principals/4/manifest')).toBeGreaterThan(0);
+    });
+    await channelEvents();
+    const before = reads(calls, '/v1/principals/4/manifest');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Close' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Settings' }));
+    const reopened = await screen.findByRole('region', { name: 'Members' });
+    await within(reopened).findByRole('list', { name: 'People' });
+    await settle();
+
+    expect(reads(calls, '/v1/principals/4/manifest')).toBe(before);
+    expect(errors).not.toHaveBeenCalled();
+  });
+
+  it('ends a 404 stop when a changed directory still lists the agent', async () => {
+    let missing = true;
+    const calls = serve(owner, {
+      routes: {
+        ...routes(['manage_members']),
+        'GET /v1/principals/4/manifest': () => missing ? json({}, 404) : json(manifest(4, ['manage_members'])),
+      },
+    });
+    const region = await openMembers('conch_owner_session_token');
+    await within(region).findByRole('list', { name: 'People' });
+    const events = await channelEvents();
+    await waitFor(() => {
+      expect(reads(calls, '/v1/principals/4/manifest')).toBeGreaterThan(0);
+    });
+    await settle();
+    const before = reads(calls, '/v1/principals/4/manifest');
+
+    missing = false;
+    events.send({ schema: 'conch.directory_changed.v1' });
+    await within(region).findByRole('group', { name: 'AI administrator builder' });
+    expect(reads(calls, '/v1/principals/4/manifest')).toBeGreaterThan(before);
   });
 
   it('asks first, then disables the principal', async () => {
