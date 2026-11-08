@@ -138,7 +138,7 @@ function Row({
       )}
       {row.default === true ? <span className="ag-badge">Default</span> : null}
       {row.joined ? <span className="ag-badge">Joined</span> : null}
-      {row.joined && row.manages === true ? <span className="ag-badge">Manager</span> : null}
+      {row.joined && row.manages === true ? <span className="channel-badge">Manager</span> : null}
       {row.joined ? (
         <button
           ref={more}

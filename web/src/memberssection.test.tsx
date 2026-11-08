@@ -241,8 +241,9 @@ describe('the list', () => {
     expect(row.textContent).toContain('voice on');
     expect(row.textContent).toContain('can invite');
     expect(row.textContent).toContain('invited by owner');
-    expect(within(rowOf(region, 'builder')).getByText('Agent')).toBeTruthy();
-    expect(within(rowOf(region, 'owner-2')).getByText('Owner')).toBeTruthy();
+    expect(within(rowOf(region, 'builder')).getByText('Agent').classList.contains('identity-label')).toBe(true);
+    expect(within(rowOf(region, 'owner-2')).getByText('Owner').classList.contains('identity-label')).toBe(true);
+    expect(Array.from(rowOf(region, 'owner').querySelectorAll('.identity-mark')).map((mark) => mark.getAttribute('data-identity'))).toEqual(['you', 'owner', 'operator']);
   });
 
   it('shows no operator field the server did not send, and offers no action, to an operator without manage_members', async () => {
@@ -259,6 +260,21 @@ describe('the list', () => {
     // manage_channels is still held: adding to a channel is all there is.
     const m = await menu(rowOf(region, 'member-1'), 'member-1');
     expect(labels(m)).toEqual(['Add to a channel…']);
+  });
+
+  it('shows no Owner when a plain-member payload omits owner, while keeping carried role and self marks', async () => {
+    const plain = stripped(everyone);
+    for (const member of plain) delete member.owner;
+    const viewer: WhoAmIResponseV1 = { ...owner, id: 3, name: 'member-1', role: 'member', owner: false, identity_class: 'member', permissions: ['see_member_directory'] };
+    serve(viewer, { members: () => plain });
+    window.sessionStorage.setItem(key, 'conch_member_session_token');
+    window.location.hash = '#/c/channel-a';
+    render(<App origin={origin} />);
+    const region = await screen.findByRole('region', { name: 'Members list' });
+    await within(region).findByRole('list', { name: 'People' });
+    expect(within(region).queryByText('Owner')).toBeNull();
+    expect(within(rowOf(region, 'operator-1')).getByText('Operator')).toBeTruthy();
+    expect(within(rowOf(region, 'member-1')).getByText('You')).toBeTruthy();
   });
 
   it('reads the directory for the console only while Settings is open', async () => {

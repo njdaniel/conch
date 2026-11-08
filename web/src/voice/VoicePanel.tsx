@@ -45,6 +45,7 @@ import { useContext, useEffect, useRef, useState, type KeyboardEvent as KeyEvent
 import { createPortal } from 'react-dom';
 import { archivedLine } from '../archived';
 import { Avatar, Glyph } from '../Icons';
+import { IdentityMarks } from '../Identity';
 import type { ChannelV0 } from '../schema/channel';
 import { MicTestShown, onPhoneCamera, VoiceLive, VoiceStrip } from '../phone';
 import { StageHost } from '../stage';
@@ -823,6 +824,7 @@ export function Roster({ channel, mayModerate: standing, roster, people, viewer,
           <li key={o.principal} className={[speaking.has(o.principal) ? 'speaking' : '', kept.has(o.principal) ? '' : 'beyond', o.principal === viewer ? 'me' : ''].filter((c) => c !== '').join(' ') || undefined}>
             <Avatar id={o.principal} name={people.get(o.principal)?.name ?? nameOf(people, o.principal, viewer, false, viewerName)} />
             <span className="who">{nameOf(people, o.principal, viewer, elsewhere, viewerName)}</span>
+            <IdentityMarks kind={people.get(o.principal)?.kind} only={['agent']} />
             {!mayModerate || channel === undefined ? null : <button type="button" aria-label={`Remove ${nameOf(people, o.principal, viewer, false, viewerName)} from voice`} onClick={(event) => { kickOpener.current = event.currentTarget; setKick({ id: o.principal, name: nameOf(people, o.principal, viewer, false, viewerName) }); }}>Remove from voice</button>}
             {o.transmitting ? <Tag text="transmitting" /> : null}
             {speaking.has(o.principal) ? <Tag text="speaking" /> : null}

@@ -389,8 +389,13 @@ describe('the panel', () => {
     expect(mallory?.textContent).toContain('offline');
     expect(offline.querySelector('b')).toBeNull();
     const agents = panel().getByRole('list', { name: 'Agents' });
-    const bot = within(agents).getByText('bot').closest('li');
-    expect(bot?.textContent).toContain('Agent');
+    const name = within(agents).getByText('bot');
+    const bot = name.closest('li');
+    const mark = within(bot as HTMLElement).getByText('Agent');
+    expect(bot?.querySelector('.avatar')).not.toBeNull();
+    expect(name.compareDocumentPosition(mark) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(mark.classList.contains('identity-label')).toBe(true);
+    expect(within(bot as HTMLElement).queryByText('Manager')).toBeNull();
     expect(bot?.textContent).toContain('running');
     expect(bot?.textContent).toContain('task: Answer <i>the</i> question');
     expect(agents.querySelector('i')).toBeNull();
@@ -453,7 +458,7 @@ describe('the panel', () => {
     server.runList = [run({ id: 41 }), run({ id: 40, state: 'completed', ended_at: at, task: 'Earlier job' })];
     const socket = await openApp();
     await showRoster(socket, [agentSession({ outcome_unknown: false })]);
-    fireEvent.click(panel().getByRole('button', { name: /Agent\s*bot/ }));
+    fireEvent.click(panel().getByRole('button', { name: 'bot' }));
     const sessions = await panel().findByRole('list', { name: 'Sessions of bot' });
     expect(sessions.textContent).toContain('client: adapter/1');
     expect(sessions.textContent).toContain('claude-code/fable');
@@ -521,6 +526,28 @@ describe('the member list the socket sends', () => {
     expect(panel().getByText('Only operators and this channel\'s managers add people.')).toBeDefined();
     fireEvent.click(screen.getByRole('button', { name: 'Settings' }));
     expect(screen.getByText('You are a member.')).toBeDefined();
+  });
+
+  it('adds and removes Manager on both the channel row and existing author rows from a members frame', async () => {
+    server.messages = [{ schema: 'conch.message.v2', id: 9, channel_id: 7, author_id: 2, created_at: at, body: 'hello from ada' }];
+    const socket = await openSettled();
+    const author = (await screen.findByText('hello from ada')).closest('li') as HTMLElement;
+    const member = panel().getByText('ada').closest('li') as HTMLElement;
+    expect(author.querySelector('[data-identity="manager"]')).toBeNull();
+    expect(member.querySelector('[data-identity="manager"]')).toBeNull();
+
+    const granted = members.members.map((member) => (member.principal_id === 2 ? { ...member, manages: true } : member));
+    socket.send(memberList(granted));
+    await waitFor(() => {
+      expect(author.querySelector('[data-identity="manager"]')).not.toBeNull();
+      expect(member.querySelector('[data-identity="manager"]')).not.toBeNull();
+    });
+
+    socket.send(memberList(members.members));
+    await waitFor(() => {
+      expect(author.querySelector('[data-identity="manager"]')).toBeNull();
+      expect(member.querySelector('[data-identity="manager"]')).toBeNull();
+    });
   });
 
   it('drops a member who left, without reading the list again', async () => {
@@ -592,7 +619,7 @@ describe('the member list the socket sends', () => {
 
 async function openRunDetail(socket: FakeSocket, sessionOver: Json = {}) {
   await showRoster(socket, [session(100, 2), agentSession(sessionOver)]);
-  fireEvent.click(panel().getByRole('button', { name: /Agent\s*bot/ }));
+  fireEvent.click(panel().getByRole('button', { name: 'bot' }));
   fireEvent.click(await panel().findByRole('button', { name: 'Open run #41' }));
   return screen.findByRole('article', { name: 'Run detail' });
 }
@@ -620,7 +647,7 @@ describe('run detail', () => {
     server.runs[40] = run({ id: 40, state: 'completed', ended_at: at, task: 'Earlier job' });
     const socket = await openApp();
     await showRoster(socket, [agentSession({ current_run: undefined, task: undefined })]);
-    fireEvent.click(panel().getByRole('button', { name: /Agent\s*bot/ }));
+    fireEvent.click(panel().getByRole('button', { name: 'bot' }));
     fireEvent.click(await panel().findByRole('button', { name: 'Run #40 · completed' }));
     const detail = within(await screen.findByRole('article', { name: 'Run detail' }));
     expect(detail.getByTestId('run-state').textContent).toBe('completed');
@@ -641,7 +668,7 @@ describe('run detail', () => {
     delete server.runs[41];
     const socket = await openApp();
     await showRoster(socket, [agentSession()]);
-    fireEvent.click(panel().getByRole('button', { name: /Agent\s*bot/ }));
+    fireEvent.click(panel().getByRole('button', { name: 'bot' }));
     fireEvent.click(await panel().findByRole('button', { name: 'Open run #41' }));
     await panel().findByText('This run is gone, or you can no longer see it');
     expect(screen.queryByRole('article', { name: 'Run detail' })).toBeNull();

@@ -6,6 +6,8 @@ import { ReactionBar, ReactionScope, useHasReactions } from './Reactions';
 import { Composer } from './Composer';
 import { guestName } from './guestName';
 import { Avatar, PrivateMark } from './Icons';
+import { IdentityMarks } from './Identity';
+import type { IdentityKey } from './identity';
 import { Linkified, previewText } from './Linkified';
 import { ImageAttachment } from './ImageAttachment';
 import { loadStored, saveEdit, saveReplies } from './state/draftStore';
@@ -83,11 +85,13 @@ function ApprovalCard({ approval, people }: { readonly approval: ApprovalV1; rea
 // without their name and time again (both stay in the text read out).
 const sameRun = 5 * 60 * 1000;
 
+const authorMarks: readonly IdentityKey[] = ['agent', 'manager', 'operator'];
+
 function Line({
   time,
   author,
   authorId,
-  kind,
+  person,
   badge,
   tag,
   tone,
@@ -96,25 +100,21 @@ function Line({
   readonly time: string;
   readonly author: string;
   readonly authorId: number;
-  readonly kind: Person['kind'];
+  readonly person: Person | undefined;
   readonly badge: string | null;
   readonly tag: string | null;
   readonly tone?: 'failed' | 'unconfirmed';
   readonly children: ReactNode;
 }) {
   // The badge comes first, as in the TUI, so a name or a body cannot pass for
-  // one. On screen the header reads name, agent, time, audience (app.css).
+  // one. On screen the header reads name, identity marks, time, audience.
   return (
     <>
       <Avatar id={authorId} name={author} />
       <div className="msg-head">
         {badge === null ? null : <span className="audience">{badge} </span>}
         <time>{time}</time> <span className="author">{author}</span>
-        {kind === 'agent' ? (
-          <span className="kind">
-            <span className="vh"> [</span>agent<span className="vh">]</span>
-          </span>
-        ) : null}
+        <IdentityMarks kind={person?.kind} role={person?.role} manages={person?.manages} only={authorMarks} textForm />
         <span className="vh">: </span>
       </div>
       <div className="body">{children}</div>
@@ -230,7 +230,7 @@ export function Message({
         time={clock(message.created_at)}
         author={authorOf(message, people)}
         authorId={message.author_id}
-        kind={people.get(message.author_id)?.kind ?? null}
+        person={people.get(message.author_id)}
         badge={message.audience === undefined ? null : audienceLabel(message.audience, viewer, nets)}
         tag={sent ? 'Sent' : null}
       >
@@ -319,7 +319,7 @@ function Pending({
         time={clock(send.at)}
         author={me.name}
         authorId={viewer}
-        kind={me.kind}
+        person={me}
         badge={send.audience === undefined ? null : audienceLabel(send.audience, viewer, nets)}
         tag={tag}
         {...(send.status === 'sending' ? {} : { tone: send.status })}

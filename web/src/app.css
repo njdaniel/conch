@@ -554,8 +554,8 @@ label {
 .chip,
 .tag,
 .audience,
-.kind,
 .ag-badge,
+.channel-badge,
 .channel-list .unread,
 .switcher .unread {
   display: inline-block;
@@ -1664,7 +1664,7 @@ label {
 }
 
 /* The header in the text is "badge time name [agent]:"; on screen it reads
-   name, agent, time, audience. */
+   name, identity marks, time, audience. */
 .msg-head {
   display: flex;
   flex-wrap: wrap;
@@ -1679,10 +1679,8 @@ label {
   overflow-wrap: anywhere;
 }
 
-.msg-head .kind {
+.msg-head .identity-mark {
   order: 2;
-  background: var(--accent-bg);
-  color: var(--accent);
 }
 
 .msg-head time {
@@ -2406,11 +2404,19 @@ label {
   font-weight: 600;
 }
 
-.ag-person {
+.ag-person,
+.ag-agent {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: 0 var(--s2);
+}
+
+.ag-agent > .avatar {
+  flex: none;
+  width: 1.75rem;
+  height: 1.75rem;
+  font-size: 0.8rem;
 }
 
 .ag-person .avatar {
@@ -2507,9 +2513,17 @@ label {
   font-size: 0.75rem;
 }
 
-.ag-badge {
+.ag-badge,
+.channel-badge {
+  padding: 0 0.4rem;
   background: var(--accent-bg);
+  border: 1px solid var(--accent);
+  border-radius: 0.35rem;
   color: var(--accent);
+}
+
+.identity-label {
+  text-transform: capitalize;
 }
 
 .ag-status,
@@ -2757,6 +2771,7 @@ label {
 .voice-roster li {
   display: flex;
   flex: none;
+  flex-wrap: wrap;
   max-width: 100%;
   min-width: 0;
   align-items: center;

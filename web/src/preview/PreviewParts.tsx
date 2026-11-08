@@ -4,6 +4,7 @@
 // mention candidates. Nothing here sends a request, opens a socket, joins
 // voice or marks anything read, and every control is shown, not wired.
 import { Avatar } from '../Icons';
+import { IdentityMarks } from '../Identity';
 import { Composer } from '../Composer';
 import { headingId } from '../Conversation';
 import { memberName } from '../guestName';
@@ -94,10 +95,7 @@ export function PreviewPanel({ store, channel }: { readonly store: PreviewStore;
               <li key={m.principal_id} className="community-member">
                 <Avatar id={m.principal_id} name={nameOf(m)} />
                 <span className="community-name">{nameOf(m)}</span>
-                {m.kind === 'agent' ? <span className="ag-badge">Agent</span> : null}
-                {m.manages === true ? <span className="ag-badge">Manager</span> : null}
-                {m.role === undefined ? null : <span className="ag-badge">{m.role === 'operator' ? 'Operator' : 'Member'}</span>}
-                {m.can_decide === true ? <span className="ag-badge">Decides</span> : null}
+                <IdentityMarks {...m} id={m.principal_id} viewer={store.target.id} />
               </li>
             ))}
           </ul>
@@ -116,9 +114,7 @@ export function PreviewPanel({ store, channel }: { readonly store: PreviewStore;
                 <li key={person.id} className="community-member">
                   <Avatar id={person.id} name={person.name} />
                   <span className="community-name">{person.name}</span>
-                  {person.kind === 'agent' ? <span className="ag-badge">Agent</span> : null}
-                  {person.kind === 'human' && person.role !== undefined ? <span className="ag-badge">{person.role === 'operator' ? 'Operator' : 'Member'}</span> : null}
-                  {person.owner === true ? <span className="ag-badge">Owner</span> : null}
+                  <IdentityMarks {...person} id={person.id} viewer={store.target.id} />
                   {offered.length === 0 ? null : <span className="hint">{` · ${store.target.name} would be offered: ${offered.map((a) => a.label).join(', ')}`}</span>}
                 </li>
               );

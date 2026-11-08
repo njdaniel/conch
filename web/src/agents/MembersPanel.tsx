@@ -5,6 +5,8 @@
 // text node.
 import { useEffect, useState } from 'react';
 import { MemberRow, Members, type MemberControlsProps } from '../Members';
+import { Avatar } from '../Icons';
+import { IdentityMarks } from '../Identity';
 import type { RunV1 } from '../schema/run';
 import type { SessionV1 } from '../schema/session';
 import { ago } from './format';
@@ -72,7 +74,7 @@ function AgentRow({ entry, expanded, onToggle, sessionRuns, now, onOpen, control
 }) {
   const lead = entry.sessions.find((s) => s.status === entry.status);
   return (
-    <MemberRow key={`${String(controls.channel.id)}:${String(entry.id)}`} {...controls} principalId={entry.id} className={`ag-agent state-${entry.state}`}
+    <MemberRow key={`${String(controls.channel.id)}:${String(entry.id)}`} {...controls} principalId={entry.id} className={`ag-agent state-${entry.state}`} showIdentity={false}
       after={
         expanded ? (
           entry.sessions.length === 0 ? (
@@ -87,9 +89,11 @@ function AgentRow({ entry, expanded, onToggle, sessionRuns, now, onOpen, control
         ) : null
       }
     >
+      <Avatar id={entry.id} name={entry.name} />
       <button type="button" className="quiet" aria-expanded={expanded} onClick={onToggle}>
-        <span aria-hidden="true">{expanded ? '▾' : '▸'}</span> <span className="ag-badge">Agent</span> <span className="ag-name">{entry.name}</span>
+        <span aria-hidden="true">{expanded ? '▾' : '▸'}</span> <span className="ag-name">{entry.name}</span>
       </button>{' '}
+      <IdentityMarks {...controls.members.find((member) => member.principal_id === entry.id)} />
       <span className="ag-status">{entry.status}</span>
       {entry.sessions.length > 1 ? <span> ({entry.sessions.length} sessions)</span> : null}
       {lead?.outcome_unknown === true ? <span> · outcome unknown</span> : null}

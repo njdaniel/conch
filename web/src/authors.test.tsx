@@ -99,3 +99,38 @@ describe('naming authors who are not in the member list', () => {
     expect(authorNames()).toEqual(['ada']);
   });
 });
+
+describe('author identity marks', () => {
+  const header = (body: string): HTMLElement => {
+    const found = screen.getByText(body).closest('li')?.querySelector<HTMLElement>('.msg-head');
+    if (found === null || found === undefined) throw new Error('no author header');
+    return found;
+  };
+
+  it('marks an agent author in the TUI text order', () => {
+    render(view([by(1, 3)], new Map([[3, { name: 'bot', kind: 'agent' }]])));
+    const head = header('from 3');
+    expect(head.querySelector('[data-identity="agent"]')).not.toBeNull();
+    expect(head.textContent).toMatch(/^\d{2}:\d{2} bot \[agent\]: $/);
+  });
+
+  it('marks a manager author only when the people map carries manages', () => {
+    const without = new Map<number, Person>([[3, { name: 'bob', kind: 'human' }]]);
+    const shown = render(view([by(1, 3)], without));
+    expect(header('from 3').querySelector('[data-identity="manager"]')).toBeNull();
+    shown.rerender(view([by(1, 3)], new Map([[3, { name: 'bob', kind: 'human', manages: true, role: 'operator' }]])));
+    const head = header('from 3');
+    expect(head.querySelector('[data-identity="manager"]')).not.toBeNull();
+    expect(head.querySelector('[data-identity="operator"]')).not.toBeNull();
+    expect(head.querySelector('[data-identity="owner"], [data-identity="approver"]')).toBeNull();
+  });
+
+  it('gives an authors-route author Agent and no member standing', async () => {
+    vi.spyOn(api, 'channelAuthors').mockResolvedValue({ ok: true, value: [{ principal_id: 9, name: 'former-bot', kind: 'agent' }] });
+    render(view([by(1, 9)]));
+    await screen.findByText('former-bot');
+    const head = header('from 9');
+    expect(head.querySelector('[data-identity="agent"]')).not.toBeNull();
+    expect(head.querySelector('[data-identity="owner"], [data-identity="operator"], [data-identity="manager"], [data-identity="approver"]')).toBeNull();
+  });
+});
