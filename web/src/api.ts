@@ -2583,6 +2583,27 @@ export function writeVoiceMode(mode: 'ptt' | 'open'): void {
   }
 }
 
+// Whether the call view hides people whose cameras are off (issue #1487): a
+// per-browser, non-secret preference. Absent, unreadable or anything else is
+// the default, showing everyone.
+const hideNonVideoKey = 'conch.web.voice.hide-non-video.v1';
+
+export function readHideNonVideo(): boolean {
+  try {
+    return platform.credentials.readPreference(hideNonVideoKey) === 'on';
+  } catch {
+    return false;
+  }
+}
+
+export function writeHideNonVideo(hide: boolean): void {
+  try {
+    platform.credentials.writePreference(hideNonVideoKey, hide ? 'on' : 'off');
+  } catch {
+    // Storage can be unavailable; the choice lasts until the page reloads.
+  }
+}
+
 // The last share quality chosen in this browser: a non-secret preference.
 const shareQualityKey = 'conch.web.voice.share-quality.v1';
 

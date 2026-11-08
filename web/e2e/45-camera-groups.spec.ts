@@ -254,6 +254,9 @@ test.describe('the call view in a small group, with LiveKit', () => {
       await expect(call).toContainText("bob's video is enlarged");
       await expect.poll(() => stripPlace(bobCam, [share, aliceCam])).toBe('right');
       expect((await boxOf(bobCam)).width).toBeGreaterThan((await boxOf(share)).width);
+      // The head stays one row (the title gives way to the controls), so the
+      // strip is not pushed down and out of view.
+      expect((await boxOf(c.page.locator('.call-head'))).height).toBeLessThan(60);
       await expectReceiving(share.getByLabel("alice's screen"));
       await expectReceiving(aliceCam);
       for (const name of ['Mute share', 'Full screen', 'Stop watching']) await expect(share.getByRole('button', { name })).toBeAttached();
@@ -341,6 +344,49 @@ test.describe('the call view in a small group, with LiveKit', () => {
       await expect(call).not.toContainText('enlarged');
       await expect(focused).toHaveAttribute('aria-label', "Enlarge bob's video");
       await expect(call.locator('ul')).toHaveClass(/call-grid cols-2 rows-1/);
+    } finally {
+      await b.close();
+      await c.close();
+    }
+  });
+
+  test('Hide non-video participants keeps only cameras, persists across a reload, and an empty grid closes without opening itself again', async ({ browser }) => {
+    const b = await person(browser, 'bob');
+    const c = await person(browser, 'carol', { viewport: { width: 1280, height: 900 } });
+    try {
+      await join(b);
+      await join(c);
+      await roomIs([vw.bob, vw.carol]);
+      await cameraOn(b);
+      await voiceRegion(c.page).getByRole('button', { name: 'Show video (1)' }).click({ timeout: 15_000 });
+      let call = callView(c.page);
+      const toggle = call.getByRole('button', { name: 'Hide non-video participants' });
+      await expect(toggle).toHaveAttribute('aria-pressed', 'false');
+      await expect(call.getByRole('listitem')).toHaveCount(2);
+      await expect(call.getByRole('listitem').filter({ hasText: 'carol' })).toContainText('Camera off');
+      await toggle.click();
+      await expect(toggle).toHaveAttribute('aria-pressed', 'true');
+      await expect(call.getByRole('listitem')).toHaveCount(1);
+      await expect(call.getByLabel("bob's camera")).toBeVisible();
+      await expect(call.getByRole('listitem').filter({ hasText: 'carol' })).toHaveCount(0);
+
+      await c.page.reload();
+      await openChannel(c.page, vw.channel);
+      await join(c);
+      await expect(callView(c.page)).toHaveCount(0);
+      await voiceRegion(c.page).getByRole('button', { name: 'Show video (1)' }).click({ timeout: 15_000 });
+      call = callView(c.page);
+      await expect(call.getByRole('button', { name: 'Hide non-video participants' })).toHaveAttribute('aria-pressed', 'true');
+      await expect(call.getByRole('listitem')).toHaveCount(1);
+
+      await voiceRegion(b.page).getByRole('button', { name: 'Camera', exact: true }).click();
+      await expect(callView(c.page)).toHaveCount(0, { timeout: 15_000 });
+      await expect(voiceRegion(c.page).getByRole('button', { name: /Show video/ })).toHaveCount(0);
+      await cameraOn(b);
+      const show = voiceRegion(c.page).getByRole('button', { name: 'Show video (1)' });
+      await expect(show).toBeVisible({ timeout: 15_000 });
+      await expect(show).toBeFocused();
+      await expect(callView(c.page)).toHaveCount(0);
     } finally {
       await b.close();
       await c.close();

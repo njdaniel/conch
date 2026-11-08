@@ -93,6 +93,7 @@ function panel(state: VoiceState, { cameras = [] as readonly number[], allowed =
 
 afterEach(() => {
   cleanup();
+  window.localStorage.clear();
 });
 
 describe('the Camera button', () => {
@@ -223,6 +224,54 @@ describe('the call view', () => {
     expect(within(call).queryByLabelText('Your camera')).toBeNull();
     expect(within(call).getAllByRole('listitem')).toHaveLength(2);
     expect(voice.textContent).toContain('Sending video');
+  });
+
+  it('Hide non-video participants hides every camera-off tile, the viewer included, and brings them back when off', () => {
+    panel(inVoice({ viewing: true }), { cameras: [8] });
+    const call = screen.getByRole('region', { name: 'Video call' });
+    const toggle = within(call).getByRole('button', { name: 'Hide non-video participants' });
+    expect(toggle.getAttribute('aria-pressed')).toBe('false');
+    expect(captions()).toEqual(['member-1', 'member-2', 'You']);
+    fireEvent.click(toggle);
+    expect(toggle.getAttribute('aria-pressed')).toBe('true');
+    expect(captions()).toEqual(['member-1']);
+    fireEvent.click(toggle);
+    expect(captions()).toEqual(['member-1', 'member-2', 'You']);
+  });
+
+  it('with the filter on and no camera or share, closes to the voice bar and focuses Show video when a camera returns without opening itself', () => {
+    const { client, redraw } = panel(inVoice({ viewing: true }));
+    const view = vi.spyOn(client, 'viewVideo');
+    fireEvent.click(screen.getByRole('button', { name: 'Hide non-video participants' }));
+    expect(view).toHaveBeenCalledWith(false);
+    redraw(inVoice());
+    expect(screen.queryByRole('region', { name: 'Video call' })).toBeNull();
+    expect(screen.queryByRole('button', { name: /Show video/ })).toBeNull();
+    redraw(inVoice(), [8]);
+    const show = screen.getByRole('button', { name: 'Show video (1)' });
+    expect(document.activeElement).toBe(show);
+    expect(screen.queryByRole('region', { name: 'Video call' })).toBeNull();
+  });
+
+  it('with the filter on and no camera, a watched share stays on the stage alone and the view does not close', () => {
+    const { client } = panel(inVoice({ viewing: true, watching: true }), { sharer: 9 });
+    const view = vi.spyOn(client, 'viewVideo');
+    const share = screen.getByRole('region', { name: 'Shared screen' });
+    fireEvent.click(screen.getByRole('button', { name: 'Hide non-video participants' }));
+    expect(view).not.toHaveBeenCalledWith(false);
+    expect(screen.getByRole('region', { name: 'Video call' })).toBeTruthy();
+    expect(screen.getByRole('region', { name: 'Shared screen' })).toBe(share);
+    expect(share.closest('li')?.className).toBe('call-share main');
+    expect(captions()).toEqual(['share']);
+  });
+
+  it('the last camera going with the filter on is still announced after the view closes', () => {
+    const { redraw } = panel(inVoice({ viewing: true }), { cameras: [8] });
+    fireEvent.click(screen.getByRole('button', { name: 'Hide non-video participants' }));
+    redraw(inVoice({ viewing: true }), []);
+    expect(screen.getByText("member-1's camera is off").getAttribute('role')).toBe('status');
+    redraw(inVoice(), []);
+    expect(screen.getByText("member-1's camera is off").getAttribute('role')).toBe('status');
   });
 
   it('attaches each camera to its tile and lets go when the tile goes', () => {
@@ -393,6 +442,15 @@ describe('the call view in a small group', () => {
     } finally {
       outside.remove();
     }
+  });
+
+  it('a focused tile that goes, not enlarged, hands focus to Hide video while the view stays open', () => {
+    // Two cameras with camera-off tiles filtered out: focus sits on member-1's
+    // tile, member-1's camera goes off and the filter drops the tile.
+    const { redraw } = callOf([tile(8, 'member-1'), tile(9, 'member-2'), tile(7, 'You', true, true)]);
+    within(callRegion()).getByRole('button', { name: "Enlarge member-1's video" }).focus();
+    redraw([tile(9, 'member-2'), tile(7, 'You', true, true)]);
+    expect(document.activeElement).toBe(within(callRegion()).getByRole('button', { name: 'Hide video' }));
   });
 
   it("the live region says someone else's camera starting and stopping, never the person's own", () => {
