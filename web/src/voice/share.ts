@@ -344,6 +344,8 @@ export class ScreenShare {
     this.set({ kind: 'sharing', audio: captured.audio });
   }
 
+  // changeQuality keeps the declared choice for later claims and, while live,
+  // tells conchd so presence can show it (voice-multi-share.md §3.1, #1509).
   async changeQuality(quality: ShareQuality): Promise<void> {
     this.quality = quality;
     if (this.state.kind !== 'sharing' || this.channel === null) return;
@@ -561,6 +563,8 @@ export class ScreenShare {
         if (this.room === room) this.room = null;
         return;
       }
+      // The room is full, or this person may no longer share here: conchd said
+      // no, and the capture stops (voice-multi-share.md §5.1, #1509).
       await this.giveUp(end);
       return;
     }
@@ -637,8 +641,11 @@ export class ScreenShare {
     this.interrupted = false;
   }
 
-  // reconnected claims again with the same declared quality. A full room means
-  // this claim is gone; other failures are left to the server's passes.
+  // reconnected claims the caller's share again after the SDK reconnected, as
+  // conchd asks: a connection made anew needs the sources granted to it again,
+  // with the same declared quality. A claim refused as full means the share is
+  // gone; any other failure leaves it to the server's own passes
+  // (voice-multi-share.md §5.1, #1509).
   async reconnected(): Promise<void> {
     if (this.state.kind !== 'sharing' || this.channel === null) return;
     const mine = this.attempt;
@@ -748,10 +755,15 @@ export function othersShareNote(who: string | null, audio: boolean): string {
   return `${who ?? 'Someone else'} is sharing a screen${audio ? ', with sound' : ''}.`;
 }
 
+// watchNote is what a page that is not watching is told of another's share:
+// where to see it (issue #642, N02). Multi-share puts Watch on each stream's
+// own tile instead of disabling Share screen (voice-multi-share.md §7.1, #1509).
 export function watchNote(who: string | null, audio: boolean): string {
   return `${othersShareNote(who, audio)} Watch to see it.`;
 }
 
+// endedNote says why the last share ended, or why one did not start. A full
+// refusal names the room's six-stream cap, not another sharer (#1509).
 export function endedNote(end: ShareEnd): string {
   switch (end) {
     case 'self':

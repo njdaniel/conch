@@ -1,11 +1,18 @@
-// One watched stream's player. Its volume and mute belong to this tile, apart
-// from voice and from every other watched stream.
+// The watch view (issue #444; multi-share voice-multi-share.md §7.1, issue
+// #1509): one watched stream, with its sound on a volume and a mute of its own,
+// apart from voice and every other watched stream. It is open only while this
+// page watches that stream. The SDK sizes what it receives to this view
+// (adaptive stream), so a small view or a phone gets a smaller layer than a
+// focused view, and a closed view gets none. It asks for no device.
 import { useEffect, useRef, useState } from 'react';
 import { Glyph } from '../Icons';
 import type { VoiceClient, VoiceState } from './connection';
 import { shareReadout } from './sdk';
 import type { ShareDirection, ShareSample } from './share';
 
+// ShareReadout samples only the selected watched picture or the local screen's
+// top layer. The first sample has no bitrate; the next, about a second later,
+// does.
 export function ShareReadout({ client, direction, principal, prefix = '' }: { readonly client: VoiceClient; readonly direction: ShareDirection; readonly principal?: number; readonly prefix?: string }) {
   const [text, setText] = useState<string | null>(null);
   const previous = useRef<ShareSample | null>(null);
@@ -18,6 +25,7 @@ export function ShareReadout({ client, direction, principal, prefix = '' }: { re
       const sample = await client.readShareStats(direction, principal);
       if (!live) return;
       setText(shareReadout(sample, previous.current));
+      // A missing sample resets the baseline.
       previous.current = sample;
       timer = window.setTimeout(() => { void read(); }, 1000);
     };
@@ -30,8 +38,13 @@ export function ShareReadout({ client, direction, principal, prefix = '' }: { re
   return text === null ? null : <span className="share-readout">{prefix}{text}</span>;
 }
 
+// A video element Safari on iPhone can put full screen: it has no
+// requestFullscreen for other elements.
 type AppleVideo = HTMLVideoElement & { readonly webkitEnterFullscreen?: () => void };
 
+// ShareView plays one watched publisher's screen and sound with independent
+// controls and an optional focus action (voice-multi-share.md §7.1, #1509).
+// An omitted principal addresses the legacy single-share attachment.
 export function ShareView({
   client,
   state,
@@ -46,9 +59,13 @@ export function ShareView({
   readonly client: VoiceClient;
   readonly state: VoiceState;
   readonly principal?: number;
+  // Who shares, as the panel names them, and whether presence says the share
+  // has sound.
   readonly name: string;
   readonly audio: boolean;
+  // The declared quality shown before and during watching; not a measurement.
   readonly quality?: string | null;
+  // This stream's volume belongs to the panel, so moving its tile keeps it.
   readonly volume?: number;
   readonly onVolumeChange?: (volume: number) => void;
   readonly onFocus?: () => void;
@@ -58,6 +75,8 @@ export function ShareView({
   const sound = useRef<HTMLAudioElement>(null);
   const [volume, setOwnVolume] = useState(keptVolume ?? 1);
   const [muted, setMuted] = useState(false);
+  // The browser would not start the sound without a tap (phones' autoplay
+  // rules): the view offers one.
   const [blocked, setBlocked] = useState(false);
 
   useEffect(() => {
@@ -72,6 +91,7 @@ export function ShareView({
     };
   }, [client, principal]);
 
+  // Deafened hears nothing, a share's sound included.
   useEffect(() => {
     const a = sound.current;
     if (a === null) return;
@@ -151,6 +171,7 @@ export function ShareView({
   );
 }
 
+// play starts an element; a browser that refuses without a tap rejects.
 function play(el: HTMLMediaElement): Promise<void> {
   try {
     return Promise.resolve(el.play());

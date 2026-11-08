@@ -3019,8 +3019,9 @@ export async function reportVoiceTransmit(channel: string, state: VoiceTransmitS
   return 'no_session';
 }
 
-// openVoiceSocket opens the presence stream of a channel's voice with a ticket:
-// the roster, and who is transmitting.
+// openVoiceSocket opens the v2 presence stream of a channel's voice with a
+// ticket: the roster, who is transmitting, camera claims and every live share
+// (voice-multi-share.md §2, #1509).
 export function openVoiceSocket(channel: string, events: SocketEvents): Promise<ApiResult<FeedSocket>> {
   return connect('voice', 'voiceSocket', { channel, schema: 'conch.voice_presence.v2' }, events);
 }
@@ -3076,17 +3077,23 @@ export async function fileReport(id: number, issue: string): Promise<InviteResul
   return readSent(await authedSend(call('fileReport', { id }), request), problemReportV1);
 }
 
-// Screen share (issue #444, voice-control-plane.md section 12). The page
-// connects to the room first, then claims the room's share, then publishes:
-// the join token allows the microphone alone, and the claim is what lets that
-// connection publish a screen and its sound.
+// Screen share (issue #444, voice-control-plane.md section 12; multi-share
+// voice-multi-share.md §5.1, issue #1509). The page connects to the room first,
+// then claims the caller's own share, then publishes: the join token allows the
+// microphone alone, and the claim is what lets that connection publish a screen
+// and its sound.
 
+// A claim refused carries the status and the server's code, as a session does:
+// 409 voice_share_full is a room at its six-stream cap, and 409
+// voice_no_session is no connection to grant it to (voice-multi-share.md §4).
 export type ShareClaimResult =
   | { readonly ok: true; readonly value: VoiceShareV1 | VoiceShareV2 }
   | { readonly ok: false; readonly failure: ApiFailure; readonly status?: number; readonly code?: string };
 
-// A declared quality is sent with the first claim, the post-picker claim and
-// every later claim, including a live change or reconnect.
+// claimVoiceShare claims the caller's own share, or claims it again after a
+// reconnect or quality change, which keeps the share as it was. A declared
+// quality is sent with the first claim, the post-picker claim and every later
+// claim (voice-multi-share.md §3.1, §5.1, issue #1509).
 export async function claimVoiceShare(channel: string, quality?: ShareQuality): Promise<ShareClaimResult> {
   const request: VoiceShareRequestV1 | undefined = quality === undefined ? undefined : { quality: { resolution: quality.resolution, frame_rate: quality.frameRate } };
   const reply = await authedPost(call('claimShare', { channel }), request);

@@ -165,8 +165,12 @@ quietSdk();
 export const roomOptions: RoomOptions = { adaptiveStream: true, dynacast: true, stopLocalTrackOnUnpublish: false };
 export const connectOptions: RoomConnectOptions = { autoSubscribe: false };
 
-// Camera claims and share watches are keyed by principal. focused names the
-// one watched stream allowed the top layer; every other watched preview is LOW.
+// What this page receives besides microphones (voice-multi-share.md §7.1,
+// issue #1509): the watched shares by publisher and the one focused share
+// allowed the top layer, whether the call view is open (the person's choice),
+// whether video is shown here now (false only in the phone layout outside the
+// Voice view, design §8), and whether the publisher holds a camera claim, as
+// presence says. Every other watched preview is LOW; unwatched shares get none.
 export interface Wants {
   readonly watching: ReadonlySet<number>;
   readonly focused: number | null;
@@ -176,12 +180,19 @@ export interface Wants {
   readonly claimed: boolean;
 }
 
+// compatible is whether a track's declared source and kind agree (S1).
 export function compatible(source: Track.Source, kind: Track.Kind | undefined): boolean {
   return (source === Track.Source.Microphone || source === Track.Source.ScreenShareAudio) ? kind === Track.Kind.Audio
     : (source === Track.Source.Camera || source === Track.Source.ScreenShare) ? kind === Track.Kind.Video
       : false;
 }
 
+// wanted is the subscription choice for a remote track, by its declared source,
+// kind and publisher together (S1): a microphone always, if it is sound; a
+// camera if it is a picture, from someone holding a claim, while the call view
+// is open and shown here; a watched share's picture and sound, each of its own
+// kind. Anything else, any track whose kind disagrees with its source, and this
+// page's own share, never.
 export function wanted(source: Track.Source, kind: Track.Kind | undefined, principal: number | null, want: Wants): boolean {
   if (!compatible(source, kind)) return false;
   switch (source) {
@@ -726,7 +737,9 @@ class LiveKitAdapter implements Room {
   // The browser ended the capture (its own stop control, or the shared tab
   // or window closed).
   private captureEnded = false;
-  // Each watched stream, its focused state, its elements and its arrived tracks.
+  // Each watched stream by publisher, the one focused for the top layer, its
+  // elements and its arrived tracks (voice-multi-share.md §7.1, #1509). The
+  // legacy share fields remain for the single-share attachment.
   private watching = new Set<number>();
   private watchAll = false;
   private focused: number | null = null;
@@ -798,6 +811,8 @@ class LiveKitAdapter implements Room {
         // go, never played or shown (S1).
         const principal = principalOf(participant.identity);
         if (!wanted(track.source, track.kind, principal, this.wantsOf(participant))) {
+          // A kind its source disagrees with is never wanted, whatever the
+          // page shows: remembered, so no later choice subscribes it again.
           if (!compatible(track.source, track.kind)) this.refused.add(pub.trackSid);
           pub.setSubscribed(false);
           return;
@@ -1434,6 +1449,8 @@ class LiveKitAdapter implements Room {
     const principal = participant === undefined ? null : principalOf(participant.identity);
     const wants = this.wantsOf(participant);
     const want = !this.refused.has(pub.trackSid) && wanted(pub.source, pub.kind, principal, wants);
+    // What was asked, not what has arrived: a subscription on its way is not
+    // asked for again, nor one refused asked back.
     if (pub.isDesired !== want) pub.setSubscribed(want);
     if (want && pub.source === Track.Source.ScreenShare && principal !== null) pub.setVideoQuality(wants.focused === principal ? VideoQuality.HIGH : VideoQuality.LOW);
   }

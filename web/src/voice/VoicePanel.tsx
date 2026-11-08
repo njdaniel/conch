@@ -167,6 +167,8 @@ export function VoicePanel({
   const [hideNonVideo, setHideNonVideo] = useState(readHideNonVideo);
   const [focusShow, setFocusShow] = useState(false);
   const showVideoButton = useRef<HTMLButtonElement>(null);
+  // Each publisher's volume survives its tile moving or being watched again;
+  // one stream's control never changes another's (voice-multi-share.md §7.1).
   const shareVolumes = useRef(new Map<number, number>());
   // More about sharing opens Voice options at the full share notes, and
   // takes focus there once they are shown (issue #600).
@@ -215,8 +217,12 @@ export function VoicePanel({
     setLingers(false);
   }
   const elsewhere = !inVoice && listed && !lingers;
+  // Every live share gets a tile; anyone else's may be watched on demand
+  // (voice-multi-share.md §7.1, issue #1509).
   const streams = sharers(presence);
   const theirStreams = streams.filter((s) => s.principal !== viewer);
+  // Watched shares that ended (issue #591, F15): their names by publisher, the
+  // previous watch set, and the note that a stream stopped, said for stoppedFor.
   const watchedNames = useRef(new Map<number, string>());
   const wasWatching = useRef<ReadonlySet<number>>(new Set());
   const [stopped, setStopped] = useState<{ readonly name: string } | null>(null);
@@ -255,6 +261,11 @@ export function VoicePanel({
     if (document.activeElement === null || document.activeElement === document.body) joinButton.current?.focus();
   }, [state.phase]);
 
+  // A watch ends without a note when its stream is still live (Stop watching),
+  // when this page leaves voice, or while a renewed room is still being waited
+  // for. A watched stream that disappears while this page remains in voice has
+  // ended: say whose it was. Other streams' state does not affect that decision
+  // (issue #591, F15; voice-multi-share.md §7.1, #1509).
   const liveStreams = new Set(streams.map((s) => s.principal));
   useEffect(() => {
     for (const principal of state.watched) {
@@ -373,6 +384,9 @@ export function VoicePanel({
   // the capture it had. A microphone that went is not captured.
   const silenced = state.muted || state.deafened;
   const captured = (state.phase === 'connected' || state.phase === 'reconnecting') && !state.watchOnly && !state.listenOnly && !state.missing;
+  // One tile per live stream, beside the camera tiles. An unwatched tile only
+  // offers Watch; a watched one owns its player, volume and focus control. The
+  // viewer's own tile offers Stop sharing (voice-multi-share.md §7.1, #1509).
   const streamTiles: Tile[] = streams.map((stream) => {
     const me = stream.principal === viewer;
     const name = me ? 'You' : nameOf(people, stream.principal, viewer);
@@ -406,7 +420,16 @@ export function VoicePanel({
       },
     };
   });
+  // The call view is open while the person asked for video or live streams
+  // offer tiles. Camera and stream tiles share one layout on the stage: the
+  // focused stream is the main picture and the other tiles are the strip. It
+  // stays the one CallView whether open or closed, so no watched player is
+  // drawn again by opening or closing it (design §7.4; multi-share §7.1, #1509).
   const call = inVoice && (state.viewing || streams.length > 0) && !strip ? callTiles(roster, viewer, state.cameraTrack !== 'none', (id) => nameOf(people, id, viewer), viewerName, hideNonVideo, streams.length) : null;
+  // In the phone layout under Chat and Channels (the strip) the stage holds a
+  // focused watched share only: no call view and no camera tile, and no camera
+  // received (showVideo). The person's choice to view is kept, so the view and
+  // cameras are back with the Voice view, with no tap (O8).
   const staged = !inVoice || (strip && !state.watching) ? null : (
     <CallView
       client={client}
@@ -449,6 +472,9 @@ export function VoicePanel({
   // name is only read out, and the buttons show their verbs. With no channel
   // on screen there is nowhere to name.
   const dest = viewed === null ? null : <span className="dest">in #{viewed}</span>;
+  // Share screen stays available while other people share; only the six-stream
+  // cap can refuse a new claim now (voice-multi-share.md §5.1, #1509). Before a
+  // share the strip keeps one line, with full notes in Voice options (#600).
   const { features } = voice;
   const shareLine = !state.listenOnly && features.canShare && state.share.kind === 'idle';
   const sharable = shareLine;
@@ -1345,6 +1371,10 @@ function Options({ voice, open, sharable, about, others, cameraAllowed }: {
   );
 }
 
+// ShareButton is the sharer's one control in the strip: Share screen, or Stop
+// sharing while a share is starting, live or resuming. Other people's streams
+// no longer disable it; only a disconnected phase does (voice-multi-share.md
+// §5.1, §7.1, issue #1509; the old one-sharer refusal was issue #591, F14).
 function ShareButton({ voice }: { readonly voice: VoiceControl }) {
   const { state, client, features } = voice;
   const share = state.share;
@@ -1363,6 +1393,9 @@ function ShareButton({ voice }: { readonly voice: VoiceControl }) {
   );
 }
 
+// StoppedNote is "You stopped sharing.", which the sharer knows already: it
+// goes after stoppedFor, and at once when anyone's share starts, and then
+// stays gone however long the other share lasts (issue #642, N03).
 function StoppedNote({ text, othersShare }: { readonly text: string; readonly othersShare: boolean }) {
   const [gone, setGone] = useState(false);
   if (othersShare && !gone) setGone(true);
@@ -1375,6 +1408,13 @@ function StoppedNote({ text, othersShare }: { readonly text: string; readonly ot
   return gone ? null : <p role="status" className="hint">{text}</p>;
 }
 
+// ShareNotes is what the sharer's side says: what sound a share will carry and
+// what it shows, before the picker opens; what is happening; and why the last
+// share ended. Before a share that is one line (issue #600), and More about
+// sharing opens Voice options at the full notes. Other live streams no longer
+// suppress that line or the picker (voice-multi-share.md §7.1, #1509).
+// A claim refused at the six-stream cap says so here; the old busy refusal and
+// its who-shares line are gone (voice-multi-share.md §4, §5.1; issue #591, F14).
 function ShareNotes({ voice, onMore, othersShare }: { readonly voice: VoiceControl; readonly onMore: () => void; readonly othersShare: boolean }) {
   const { state, features, client } = voice;
   const share = state.share;
@@ -1385,6 +1425,8 @@ function ShareNotes({ voice, onMore, othersShare }: { readonly voice: VoiceContr
       <button type="button" className="more" aria-controls="voice-options" onClick={onMore}>More about sharing</button>
     </p>
   );
+  // A browser that cannot share is told so in one sentence, and there is no
+  // more to say about sharing.
   if (!features.canShare) return <p className="hint">{soundNote(features)}</p>;
   switch (share.kind) {
     case 'sharing':

@@ -1,5 +1,42 @@
-// The call grid: camera and avatar tiles beside one tile per live stream.
-// Watched streams keep the same player whether in the grid, focused or in the strip.
+// The call view (ADR-015, design §7.4, §7.7; multi-share
+// voice-multi-share.md §7.1, issue #1509): the room's cameras and one tile per
+// live stream, drawn on the stage (stage.ts). For cameras it is open only while
+// the person asked for it, by turning their own camera on or by "Show video
+// (n)", and never opens for them when someone else turns a camera on (O8). A
+// live stream opens the grid to offer its Watch button, but no stream is
+// received until the person asks to watch it. The room's cameras are received
+// only while the view is open (connection.ts viewVideo).
+//
+// While there are at most nine camera and stream tiles, each person in voice
+// gets a tile: their camera, or their initial, their name and "Camera off" in a
+// compact frame. "Hide non-video participants" leaves out every camera-off
+// tile, the viewer's included, and is remembered in this browser. People keep
+// join order, with the viewer last, and streams keep claim-start order; nothing
+// reorders while someone speaks: the speaking person's tile gets a ring and the
+// word "speaking", and focus stays where it was. The grid is gridOf's. Camera
+// video is muted, plays inline and starts by itself: a camera has no sound. The
+// person's own tile is mirrored, by a class, and "Hide self-view" hides that
+// tile alone.
+//
+// A tile with a camera is a button, "Enlarge {name}'s video"; a watched stream
+// has "Focus {name}'s screen". The tile takes the main area, the rest go in a
+// strip, and focus moves to it. Escape, or "Back to grid", returns, with focus
+// back on the tile it came from. An enlarged camera has Full screen, as a share
+// has; inside full screen Escape is the browser's, and leaves full screen only.
+// If the enlarged tile goes, the view returns to the grid, and focus that was
+// on the tile goes to Hide video.
+//
+// A focused stream is the main picture and the other tiles are the strip. A
+// watched stream keeps the same keyed element whether in the grid, focused or
+// in the strip, so moving it never starts it again or loses its volume and
+// mute. While the view is closed only the focused watched stream is drawn, and
+// the wrappers around it take no part in the layout. On a phone one stream is
+// watched and focused at a time, with a switcher between sharers.
+//
+// A polite live region says someone else's camera starting or stopping while
+// the view is open. If filtering the last camera closes it, the stopping words
+// stay until their usual timeout. The person's own camera is CameraNote's
+// (VoicePanel.tsx), and is not said twice.
 import { useEffect, useRef, useState, type KeyboardEvent as KeyEvent, type ReactElement, type RefObject } from 'react';
 import { Avatar, Glyph } from '../Icons';
 import { usePhone } from '../phone';
@@ -7,12 +44,21 @@ import type { VoiceClient, VoiceState } from './connection';
 import { gridOf } from './gridOf';
 import type { Occupant } from './presence';
 
+// How many tiles this view draws: camera and stream tiles share the grid cap,
+// which matches the room's camera cap (voiceCameraCap,
+// internal/server/voice_camera.go; voice-multi-share.md §7.1).
 export const maxTiles = 9;
 
+// Tile is one person or live stream in the grid. A share supplies its own
+// player through render; watched and startedAt carry its subscription and
+// ordering state (voice-multi-share.md §7.1, issue #1509).
 export interface Tile {
   readonly principal: number;
   readonly name: string;
   readonly me: boolean;
+  // Whether the person holds a camera claim (presence); for the person
+  // themself, whether their own track is captured, which is what the page
+  // shows them (S5).
   readonly camera: boolean;
   readonly kind?: 'person' | 'share';
   readonly watched?: boolean;
@@ -20,6 +66,11 @@ export interface Tile {
   readonly render?: (focus: () => void) => ReactElement;
 }
 
+// callTiles is who gets a person tile: everyone in voice while they and the
+// stream tiles fit within maxTiles, in join order with the viewer last; with
+// more, the people whose cameras are on, as many as fit beside the streams.
+// hideNonVideo leaves out every camera-off person first. hidden is how many
+// cameras did not fit (voice-multi-share.md §7.1, issue #1509).
 export function callTiles(roster: readonly Occupant[], viewer: number, ownCamera: boolean, nameOf: (principal: number) => string, viewerName = '', hideNonVideo = false, streamCount = 0): { readonly tiles: readonly Tile[]; readonly hidden: number } {
   const ordered = [...roster].sort((a, b) => {
     if ((a.principal === viewer) !== (b.principal === viewer)) return a.principal === viewer ? 1 : -1;
@@ -37,21 +88,30 @@ export function callTiles(roster: readonly Occupant[], viewer: number, ownCamera
   return { tiles: cameras.slice(0, limit), hidden: Math.max(0, cameras.length - limit) };
 }
 
+// The words of a tile and its states.
 export const enlargeName = (t: Tile): string => (t.me ? 'Enlarge your video' : `Enlarge ${t.name}'s video`);
 export const enlargedWords = (t: Tile): string => (t.me ? 'Your video is enlarged' : `${t.name}'s video is enlarged`);
 export const cameraOnWords = (name: string): string => `${name}'s camera is on`;
 export const cameraOffWords = (name: string): string => `${name}'s camera is off`;
 
+// A person and their stream have distinct keys despite sharing a principal id.
 const keyOf = (t: Tile): string => `${t.kind === 'share' ? 'share' : 'person'}:${String(t.principal)}`;
 
+// Where focus goes once the view has drawn: the enlarged tile; the enlarge
+// button of the tile it came from; Hide video, when the enlarged tile went
+// with focus in it; or the enlarge button of the tile that was enlarged,
+// when the share beside it went with focus in it.
 type FocusTo =
   | { readonly kind: 'main' }
   | { readonly kind: 'tile'; readonly key: string }
   | { readonly kind: 'gone'; readonly key: string }
   | { readonly kind: 'unshared'; readonly key: string };
 
+// How long the live region keeps what it said.
 export const saidFor = 5000;
 
+// Others' cameras that are on, by principal, as one key that changes when
+// the set does.
 interface Cameras {
   readonly key: string;
   readonly names: ReadonlyMap<number, string>;
@@ -62,6 +122,8 @@ function camerasOf(tiles: readonly Tile[]): Cameras {
   return { key: on.map((t) => String(t.principal)).sort().join(','), names: new Map(on.map((t) => [t.principal, t.name])) };
 }
 
+// changed says what changed between two sets of cameras, in the order the
+// tiles are in.
 function changed(before: Cameras, now: Cameras): string {
   const said: string[] = [];
   for (const [principal, name] of now.names) if (!before.names.has(principal)) said.push(cameraOnWords(name));
@@ -69,21 +131,29 @@ function changed(before: Cameras, now: Cameras): string {
   return said.join('. ');
 }
 
+// CallView draws camera and stream tiles, preserving players and focus as
+// tiles move between the grid, main area and strip (design §7.4, §7.7).
 export function CallView({ client, state, tiles, hidden, open, share = null, hideNonVideo = false, onHideNonVideo = () => undefined, keepSaid = false }: {
   readonly client: VoiceClient;
   readonly state: VoiceState;
   readonly tiles: readonly Tile[];
   readonly hidden: number;
+  // Whether the call view is shown. While it is not, only a watched stream is drawn.
   readonly open: boolean;
+  // The legacy watched share (ShareView), or null; multi-share tiles carry their own.
   readonly share?: ReactElement | null;
   readonly hideNonVideo?: boolean;
   readonly onHideNonVideo?: () => void;
+  // Keep the last camera-off announcement when filtering closed the view.
   readonly keepSaid?: boolean;
 }) {
   const narrow = usePhone();
   const [selfHidden, setSelfHidden] = useState(false);
+  // The enlarged tile, by a key that distinguishes a person from their stream.
   const [enlarged, setEnlarged] = useState<string | null>(null);
   const [focusTo, setFocusTo] = useState<FocusTo | null>(null);
+  // The live region's words, and the cameras they were last said from: null
+  // while the view is closed, so nothing is said then, nor on opening.
   const [said, setSaid] = useState('');
   const [cameras, setCameras] = useState<Cameras | null>(null);
   const [wasOpen, setWasOpen] = useState(open);
@@ -100,6 +170,8 @@ export function CallView({ client, state, tiles, hidden, open, share = null, hid
     ? narrow ? (shown.find((t) => t.kind === 'share' && t.watched === true && state.focusedShare === t.principal) ?? null) : null
     : (shown.find((t) => keyOf(t) === enlarged && (t.kind === 'share' ? t.watched === true : t.camera)) ?? null);
 
+  // Stop watching the legacy share leaves the grid, whatever was enlarged
+  // beside it: focus, gone with the share's own button, goes back to that tile.
   if (wasWatched !== watched) {
     setWasWatched(watched);
     if (!watched && enlarged !== null) {
@@ -113,6 +185,8 @@ export function CallView({ client, state, tiles, hidden, open, share = null, hid
     if (open && said !== '') setSaid('');
   }
 
+  // Closing the view forgets it all; the next opening starts at the grid. An
+  // automatic close after the last camera went keeps that announcement.
   if (!open) {
     if (enlarged !== null) setEnlarged(null);
     if (selfHidden) setSelfHidden(false);
@@ -126,6 +200,8 @@ export function CallView({ client, state, tiles, hidden, open, share = null, hid
       const words = changed(cameras, now);
       if (words !== '') setSaid(words);
     }
+    // The enlarged tile went (its camera, its person, its stream or the
+    // self-view): back to the grid. The live region has said why, for a camera.
     if (enlarged !== null && main === null) {
       setEnlarged(null);
       client.focusShare(null);
@@ -133,6 +209,8 @@ export function CallView({ client, state, tiles, hidden, open, share = null, hid
     }
   }
 
+  // A focus that waits for full screen to end: the browser drops focus as it
+  // leaves full screen, so focus moved before then would be lost.
   const afterFull = useRef<(() => void) | null>(null);
   useEffect(() => {
     const onChange = () => {
@@ -159,15 +237,22 @@ export function CallView({ client, state, tiles, hidden, open, share = null, hid
       (buttons.current.get(focusTo.key) ?? hideButton.current)?.focus();
       return;
     }
+    // Only when focus went with the tile or the share: someone typing
+    // elsewhere keeps their place.
     const at = document.activeElement;
     const lost = at === null || at === document.body || (items.current.get(focusTo.key)?.contains(at) ?? false);
     if (!lost) return;
     const key = focusTo.key;
     const move = focusTo.kind === 'gone' ? () => hideButton.current?.focus() : () => (buttons.current.get(key) ?? hideButton.current)?.focus();
+    // The enlarged tile was full screen when it went: it leaves full screen
+    // (TileView), and focus moves once it has.
     if (document.fullscreenElement) afterFull.current = move;
     else move();
   }, [focusTo]);
 
+  // A tile that held focus and went (filtered out, its camera off, its person
+  // or stream gone), enlarged or not: focus goes to Hide video rather than
+  // being lost, unless it already moved somewhere else.
   const focusedTile = useRef<string | null>(null);
   useEffect(() => {
     const key = focusedTile.current;
@@ -177,6 +262,8 @@ export function CallView({ client, state, tiles, hidden, open, share = null, hid
     if (open && (at === null || at === document.body)) hideButton.current?.focus();
   }, [shown, open]);
 
+  // The live region's words go after a while, so that what it said last is
+  // not read again as if it were new.
   useEffect(() => {
     if (said === '') return;
     const timer = window.setTimeout(() => { setSaid(''); }, saidFor);
@@ -185,6 +272,8 @@ export function CallView({ client, state, tiles, hidden, open, share = null, hid
     };
   }, [said]);
 
+  // Enlarging a watched stream also selects it for the top layer; enlarging a
+  // camera clears that selection (voice-multi-share.md §7.1, #1509).
   const enlarge = (t: Tile) => {
     setEnlarged(keyOf(t));
     client.focusShare(t.kind === 'share' ? t.principal : null);
@@ -196,6 +285,8 @@ export function CallView({ client, state, tiles, hidden, open, share = null, hid
     client.focusShare(null);
     setFocusTo({ kind: 'tile', key: enlarged });
   };
+  // Escape returns to the grid. Inside full screen the browser's Escape
+  // leaves full screen first, and is not taken from it.
   const onKey = (e: KeyEvent) => {
     if (e.key !== 'Escape' || e.defaultPrevented || main === null || Boolean(document.fullscreenElement)) return;
     e.preventDefault();
@@ -274,8 +365,15 @@ export function CallView({ client, state, tiles, hidden, open, share = null, hid
   );
 }
 
+// A video element Safari on iPhone can put full screen: it has no
+// requestFullscreen for other elements.
 type AppleVideo = HTMLVideoElement & { readonly webkitEnterFullscreen?: () => void };
 
+// TileView is one person's tile: their camera (the person's own from the
+// local track, mirrored; anyone else's received only while it is claimed and
+// this view is open), or their initial and "Camera off". The same element
+// whether the tile is in the grid, enlarged or in the strip, so its video is
+// never started again by a change of place.
 function TileView({ client, tile, arrived, speaking, main, frameRef, onEnlarge, buttonRef }: {
   readonly client: VoiceClient;
   readonly tile: Tile;
@@ -300,6 +398,8 @@ function TileView({ client, tile, arrived, speaking, main, frameRef, onEnlarge, 
     return () => { client.attachCamera(principal, null); };
   }, [client, on, me, principal]);
 
+  // Leaving full screen, the browser drops focus: it comes back to Full
+  // screen, so that the next Escape is the view's, and returns to the grid.
   const fullButton = useRef<HTMLButtonElement>(null);
   useEffect(() => {
     if (!main) return;
@@ -318,6 +418,8 @@ function TileView({ client, tile, arrived, speaking, main, frameRef, onEnlarge, 
     document.addEventListener('fullscreenchange', onChange);
     return () => {
       document.removeEventListener('fullscreenchange', onChange);
+      // No longer enlarged (its camera went, or its person) while full
+      // screen: the browser would go on showing it. It leaves full screen.
       if (el !== null && document.fullscreenElement === el) void document.exitFullscreen().catch(() => undefined);
     };
   }, [main]);
