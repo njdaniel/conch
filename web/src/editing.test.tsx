@@ -548,7 +548,7 @@ describe('the (edited) marker', () => {
     const dialog = screen.getByRole('dialog', { name: 'Earlier versions' });
     const link = await within(dialog).findByRole('link', { name: 'https://example.com/old (opens in a new tab)' });
     expect(link.getAttribute('title')).toBe('https://example.com/old');
-    expect(link.querySelector('.vh')?.textContent).toBe('(opens in a new tab)');
+    expect(link.textContent).toBe('https://example.com/old');
     expect(link.querySelector('.external-link-cue .icon')).not.toBeNull();
     const close = within(dialog).getByRole('button', { name: 'Close' });
     // The link comes before Close. Tab from Close, the last control, wraps to

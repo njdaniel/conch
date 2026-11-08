@@ -63,7 +63,8 @@ async function expectExternal(link: Locator, text: string, href: string): Promis
   await expect(link).toHaveAttribute('rel', 'noopener noreferrer');
   await expect(link).toHaveAttribute('aria-label', `${text} (opens in a new tab)`);
   await expect(link.locator('.external-link-cue svg')).toBeVisible();
-  await expect(link.locator('.vh')).toHaveText('(opens in a new tab)');
+  await expect(link).toHaveAccessibleName(`${text} (opens in a new tab)`);
+  await expect(link).toHaveText(text);
 }
 
 test('L1545 only the safe addresses become links, each with the cue and its canonical address as title', async ({ meet, world }) => {

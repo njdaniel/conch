@@ -35,8 +35,8 @@ describe('links in a message body', () => {
       expect(a.getAttribute('rel')).toBe('noopener noreferrer');
       expect(a.getAttribute('target')).toBe('_blank');
       expect(a.getAttribute('title')).toBe(new URL(text).href);
-      expect(a.textContent).toBe(`${text}(opens in a new tab)`);
-      expect(a.querySelector('.vh')?.textContent).toBe('(opens in a new tab)');
+      expect(a.textContent).toBe(text);
+      expect(a.textContent).not.toContain('(opens in a new tab)');
       expect(a.querySelector('.external-link-cue .icon')).not.toBeNull();
       expect(screen.getByRole('link', { name: `${text} (opens in a new tab)` })).toBe(a);
     }

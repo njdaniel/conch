@@ -14,7 +14,6 @@ function SafeLink({ text, href }: { readonly text: string; readonly href: string
         {tail}
         <span className="external-link-cue" aria-hidden="true"><Glyph name="external" /></span>
       </span>
-      <span className="vh">(opens in a new tab)</span>
     </a>
   );
 }

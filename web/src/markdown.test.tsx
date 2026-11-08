@@ -24,9 +24,7 @@ describe('message Markdown', () => {
     const body = '[https://bank.example](https://evil.example) https://example.com/b';
     const { container } = render(<Linkified text={body} />);
     const links = screen.getAllByRole('link');
-    const visible = container.cloneNode(true) as HTMLElement;
-    for (const hidden of visible.querySelectorAll('.vh')) hidden.remove();
-    expect(visible.textContent).toBe(body);
+    expect(container.textContent).toBe(body);
     expect(links.map((link) => link.getAttribute('href'))).toEqual(['https://bank.example/', 'https://evil.example/', 'https://example.com/b']);
     for (const link of links) {
       expect(link.getAttribute('target')).toBe('_blank');
@@ -45,8 +43,8 @@ describe('message Markdown', () => {
     const link = screen.getByRole('link', { name: `${text} (opens in a new tab)` });
     expect(link.getAttribute('href')).toBe(canonical);
     expect(link.getAttribute('title')).toBe(canonical);
-    expect(link.textContent).toBe(`${text}(opens in a new tab)`);
-    expect(link.querySelector('.vh')?.textContent).toBe('(opens in a new tab)');
+    expect(link.textContent).toBe(text);
+    expect(link.textContent).not.toContain('(opens in a new tab)');
     const cue = link.querySelector('.external-link-cue');
     expect(cue?.getAttribute('aria-hidden')).toBe('true');
     expect(cue?.querySelector('.icon')).not.toBeNull();
