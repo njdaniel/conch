@@ -3925,6 +3925,12 @@ button.link {
     min-height: 7.5rem;
   }
 
+  /* A focused stream shares the phone with the conversation, not the other
+     way round: the picture gives way before the log and composer. */
+  .centre:has(> .stage:not(:empty)) .share-frame video {
+    max-height: 18vh;
+  }
+
   /* With four or more in voice (the roster capped), the picture gives way so
      that the log keeps 120 px (issue #641): a fifth of the window's height,
      which a 16:9 share of a phone's width is taller than. With fewer in

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { ShareClaimResult, TransmitAnswer, VoiceSessionResult, VoiceViewerResult } from '../api';
-import type { VoicePresenceV1 } from '../schema/voice';
+import type { VoicePresenceV2 } from '../schema/voice';
 import type { CameraClaimResult } from '../api';
 import type { Camera, CameraProfile, KeptCamera } from './camera';
 import { VoiceClient, chosenGone, earlierGone, levelEvery, meterEvery, outputMoved, outputRefused, reconnectLimit, reportWait, type CameraTrack, type Microphone, type ModeStore, type Output, type Phase, type Processing, type ProcessingStore, type Room, type RoomEvents, type ShareSink } from './connection';
@@ -90,6 +90,14 @@ class StubRoom implements Room {
   };
   setWatching = (on: boolean): void => {
     this.watching.push(on);
+  };
+  streamWatches: { readonly watched: number[]; readonly focused: number | null }[] = [];
+  setWatches = (watched: ReadonlySet<number>, focused: number | null): void => {
+    this.streamWatches.push({ watched: [...watched], focused });
+    this.watching.push(watched.size > 0);
+  };
+  attachStream = (_principal: number, sink: ShareSink | null): void => {
+    this.sinks.push(sink);
   };
   attachShare = (sink: ShareSink | null): void => {
     this.sinks.push(sink);
@@ -1230,8 +1238,8 @@ describe('leaving', () => {
 });
 
 // Issue #444: the share, watching and watch only, through the client.
-const presenceWith = (sharing: number | null): VoicePresenceV1 => ({
-  schema: 'conch.voice_presence.v1',
+const presenceWith = (sharing: number | null): VoicePresenceV2 => ({
+  schema: 'conch.voice_presence.v2',
   channel_id: 1,
   configured: true,
   available: true,
@@ -1242,7 +1250,7 @@ const presenceWith = (sharing: number | null): VoicePresenceV1 => ({
         can_publish: true,
         transmitting: false,
         joined_at: '2026-10-16T00:00:00.000Z',
-        ...(id === sharing ? { sharing: true } : {}),
+        ...(id === sharing ? { sharing: true, share_started_at: '2026-10-16T00:00:00.000Z' } : {}),
       })),
     },
   ],
@@ -1357,7 +1365,7 @@ describe('sharing through the client', () => {
 });
 
 // Issue #516: the room renewed under a share.
-const renewedPresence = (endedFor7 = false): VoicePresenceV1 => ({
+const renewedPresence = (endedFor7 = false): VoicePresenceV2 => ({
   ...presenceWith(null),
   // Everyone left the old room; nobody is in the new one yet.
   rooms: [{ participants: [] }],
@@ -1420,7 +1428,7 @@ describe('a share across a renewed room', () => {
     expect(t.client.snapshot().watching).toBe(false);
   });
 
-  it("a watching page lets go if the share does not come back in time, or someone else's comes instead", async () => {
+  it('lets go if the share does not come back in time, but not when someone else starts beside it', async () => {
     const late = setup([okSession(), okSession()]);
     await joined(late);
     late.client.presence(presenceWith(8));
@@ -1440,9 +1448,10 @@ describe('a share across a renewed room', () => {
     await settle();
     other.client.presence({
       ...presenceWith(null),
-      rooms: [{ participants: [{ principal_id: 9, can_publish: true, transmitting: false, joined_at: '2026-10-16T00:00:00.000Z', sharing: true }] }],
+      rooms: [{ participants: [{ principal_id: 9, can_publish: true, transmitting: false, joined_at: '2026-10-16T00:00:00.000Z', sharing: true, share_started_at: '2026-10-16T00:00:00.000Z' }] }],
     });
-    expect(other.client.snapshot().watching).toBe(false);
+    expect(other.client.snapshot().watching).toBe(true);
+    expect([...other.client.snapshot().watched]).toEqual([8]);
   });
 });
 
@@ -1453,6 +1462,7 @@ describe('watching', () => {
     expect(t.rooms[0]?.watching).toEqual([false]);
     const sink = { video: document.createElement('video'), audio: document.createElement('audio') };
     t.client.attachShare(sink);
+    t.client.presence(presenceWith(8));
     t.client.watch(true);
     expect(t.rooms[0]?.watching).toEqual([false, true]);
     expect(t.rooms[0]?.sinks.at(-1)).toBe(sink);
@@ -1469,6 +1479,24 @@ describe('watching', () => {
     t.client.presence(presenceWith(null));
     expect(t.client.snapshot().watching).toBe(false);
     expect(t.rooms[1]?.watching).toEqual([true, false]);
+  });
+
+  it('the phone switcher stops the previous stream before watching and focusing the next, picture and sound together', async () => {
+    const t = setup();
+    await joined(t);
+    const first = presenceWith(8);
+    t.client.presence({
+      ...first,
+      rooms: first.rooms.map((room) => ({
+        ...room,
+        participants: [...room.participants, { principal_id: 9, can_publish: true, transmitting: false, joined_at: '2026-10-16T00:00:00.000Z', sharing: true, share_started_at: '2026-10-16T00:01:00.000Z' }],
+      })),
+    });
+    t.client.switchStream(8);
+    t.client.switchStream(9);
+    expect(t.rooms[0]?.streamWatches.map((w) => w.watched)).toEqual([[], [8], [8], [], [9], [9]]);
+    expect(t.rooms[0]?.streamWatches.at(-1)?.focused).toBe(9);
+    expect([...t.client.snapshot().watched]).toEqual([9]);
   });
 });
 
@@ -2349,8 +2377,8 @@ const named = `?started_at=${cameraStarted}`;
 
 // Presence with this person (7) and another (8) in the room, whoever holds a
 // camera claim, and why this person's last one ended.
-const cameraPresence = (cameras: readonly number[], ended?: VoicePresenceV1['camera_ended']): VoicePresenceV1 => ({
-  schema: 'conch.voice_presence.v1',
+const cameraPresence = (cameras: readonly number[], ended?: VoicePresenceV2['camera_ended']): VoicePresenceV2 => ({
+  schema: 'conch.voice_presence.v2',
   channel_id: 1,
   configured: true,
   available: true,

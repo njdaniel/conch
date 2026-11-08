@@ -103,6 +103,7 @@ import {
   Track,
   TrackEvent,
   VideoPreset,
+  VideoQuality,
   createLocalAudioTrack,
   createLocalVideoTrack,
   getLogger,
@@ -164,42 +165,37 @@ quietSdk();
 export const roomOptions: RoomOptions = { adaptiveStream: true, dynacast: true, stopLocalTrackOnUnpublish: false };
 export const connectOptions: RoomConnectOptions = { autoSubscribe: false };
 
-// What this page receives besides microphones: whether it watches the share,
-// whether the call view is open (the person's choice), whether the video is
-// shown here now (false only in the phone layout outside the Voice view,
-// design §8), and whether the track's publisher holds a camera claim, as
-// presence says.
+// Camera claims and share watches are keyed by principal. focused names the
+// one watched stream allowed the top layer; every other watched preview is LOW.
 export interface Wants {
-  readonly watching: boolean;
+  readonly watching: ReadonlySet<number>;
+  readonly focused: number | null;
+  readonly own: number | null;
   readonly viewing: boolean;
   readonly shown: boolean;
   readonly claimed: boolean;
 }
 
-// wanted is the subscription choice for a remote track, by its declared
-// source and its kind together (S1): a microphone always, if it is sound; a
-// camera if it is a picture, from someone holding a claim, while the call
-// view is open and shown here; a share's picture and its sound while the share is watched,
-// each of its own kind. Anything else, and any track whose kind disagrees
-// with its source, never.
-export function wanted(source: Track.Source, kind: Track.Kind | undefined, want: Wants): boolean {
+export function compatible(source: Track.Source, kind: Track.Kind | undefined): boolean {
+  return (source === Track.Source.Microphone || source === Track.Source.ScreenShareAudio) ? kind === Track.Kind.Audio
+    : (source === Track.Source.Camera || source === Track.Source.ScreenShare) ? kind === Track.Kind.Video
+      : false;
+}
+
+export function wanted(source: Track.Source, kind: Track.Kind | undefined, principal: number | null, want: Wants): boolean {
+  if (!compatible(source, kind)) return false;
   switch (source) {
     case Track.Source.Microphone:
-      return kind === Track.Kind.Audio;
+      return true;
     case Track.Source.Camera:
-      return kind === Track.Kind.Video && want.viewing && want.shown && want.claimed;
+      return want.viewing && want.shown && want.claimed;
     case Track.Source.ScreenShare:
-      return kind === Track.Kind.Video && want.watching;
     case Track.Source.ScreenShareAudio:
-      return kind === Track.Kind.Audio && want.watching;
+      return principal !== null && principal !== want.own && want.watching.has(principal);
     default:
       return false;
   }
 }
-
-// What a track would be wanted for if the page wanted everything: false only
-// for a kind its source disagrees with.
-const everything: Wants = { watching: true, viewing: true, shown: true, claimed: true };
 
 // ---- the camera
 
@@ -730,10 +726,13 @@ class LiveKitAdapter implements Room {
   // The browser ended the capture (its own stop control, or the shared tab
   // or window closed).
   private captureEnded = false;
-  // The share this page watches: whether it does, where it plays, and the
-  // tracks that have arrived.
-  private watching = false;
+  // Each watched stream, its focused state, its elements and its arrived tracks.
+  private watching = new Set<number>();
+  private watchAll = false;
+  private focused: number | null = null;
   private sink: ShareSink | null = null;
+  private readonly streamSinks = new Map<number, ShareSink>();
+  private readonly remoteShares = new Map<number, { video: RemoteTrack | null; audio: RemoteTrack | null }>();
   private shareVideo: RemoteTrack | null = null;
   private shareAudio: RemoteTrack | null = null;
   // The camera this page captured, until it is stopped or kept; its
@@ -797,15 +796,14 @@ class LiveKitAdapter implements Room {
         // Subscribed by choice alone, and the choice is made again here, on
         // what arrived: a track whose kind disagrees with its source is let
         // go, never played or shown (S1).
-        if (!wanted(track.source, track.kind, this.wantsOf(participant))) {
-          // A kind its source disagrees with is never wanted, whatever the
-          // page shows: remembered, so no later choice subscribes it again.
-          if (!wanted(track.source, track.kind, everything)) this.refused.add(pub.trackSid);
+        const principal = principalOf(participant.identity);
+        if (!wanted(track.source, track.kind, principal, this.wantsOf(participant))) {
+          if (!compatible(track.source, track.kind)) this.refused.add(pub.trackSid);
           pub.setSubscribed(false);
           return;
         }
         if (isShare(track.source)) {
-          this.shared(track);
+          if (principal !== null) this.shared(track, principal);
           return;
         }
         if (track.source === Track.Source.Camera) {
@@ -814,15 +812,15 @@ class LiveKitAdapter implements Room {
         }
         if (track.kind !== Track.Kind.Audio) return;
         const el = track.attach();
-        const principal = principalOf(participant.identity);
         el.muted = this.deafened;
         el.volume = this.volumeOf(principal);
         this.elements.set(track.sid ?? '', { el, principal });
         document.body.appendChild(el);
       })
-      .on(RoomEvent.TrackUnsubscribed, (track: RemoteTrack) => {
+      .on(RoomEvent.TrackUnsubscribed, (track: RemoteTrack, _pub: RemoteTrackPublication, participant?: RemoteParticipant) => {
         if (isShare(track.source)) {
-          this.unshared(track);
+          const principal = participant === undefined ? [...this.remoteShares].find(([, tracks]) => tracks.video === track || tracks.audio === track)?.[0] : principalOf(participant.identity);
+          if (principal !== null && principal !== undefined) this.unshared(track, principal);
           return;
         }
         if (track.source === Track.Source.Camera) {
@@ -1240,8 +1238,8 @@ class LiveKitAdapter implements Room {
     await sender.setParameters(parameters);
   }
 
-  async readShareStats(direction: ShareDirection): Promise<ShareSample | null> {
-    const track = direction === 'sent' ? this.screen.find((t) => t.source === Track.Source.ScreenShare) : this.shareVideo;
+  async readShareStats(direction: ShareDirection, principal?: number): Promise<ShareSample | null> {
+    const track = direction === 'sent' ? this.screen.find((t) => t.source === Track.Source.ScreenShare) : principal === undefined ? this.shareVideo : (this.remoteShares.get(principal)?.video ?? null);
     const report = await track?.getRTCStatsReport();
     if (report === undefined) return null;
     const stats: ShareStats[] = [];
@@ -1386,7 +1384,14 @@ class LiveKitAdapter implements Room {
   // ---- watching
 
   setWatching(on: boolean): void {
-    this.watching = on;
+    this.watchAll = on;
+    this.subscribeAll();
+  }
+
+  setWatches(watched: ReadonlySet<number>, focused: number | null): void {
+    this.watchAll = false;
+    this.watching = new Set(watched);
+    this.focused = focused;
     this.subscribeAll();
   }
 
@@ -1403,17 +1408,34 @@ class LiveKitAdapter implements Room {
     }
   }
 
+  attachStream(principal: number, sink: ShareSink | null): void {
+    const old = this.streamSinks.get(principal);
+    const tracks = this.remoteShares.get(principal);
+    if (old !== undefined) {
+      tracks?.video?.detach(old.video);
+      tracks?.audio?.detach(old.audio);
+    }
+    if (sink === null) this.streamSinks.delete(principal);
+    else this.streamSinks.set(principal, sink);
+    if (sink !== null) {
+      tracks?.video?.attach(sink.video);
+      tracks?.audio?.attach(sink.audio);
+    }
+  }
+
   private wantsOf(participant: Participant | undefined): Wants {
     const principal = participant === undefined ? null : principalOf(participant.identity);
-    return { watching: this.watching, viewing: this.viewing, shown: this.shown, claimed: principal !== null && this.claimed.has(principal) };
+    const watching = this.watchAll && principal !== null ? new Set([principal]) : this.watching;
+    return { watching, focused: this.focused, own: principalOf(this.room.localParticipant.identity), viewing: this.viewing, shown: this.shown, claimed: principal !== null && this.claimed.has(principal) };
   }
 
   private subscribe(pub: RemoteTrackPublication, participant: RemoteParticipant | undefined): void {
     if (this.closed) return;
-    const want = !this.refused.has(pub.trackSid) && wanted(pub.source, pub.kind, this.wantsOf(participant));
-    // What was asked, not what has arrived: a subscription on its way is not
-    // asked for again, nor one refused asked back.
+    const principal = participant === undefined ? null : principalOf(participant.identity);
+    const wants = this.wantsOf(participant);
+    const want = !this.refused.has(pub.trackSid) && wanted(pub.source, pub.kind, principal, wants);
     if (pub.isDesired !== want) pub.setSubscribed(want);
+    if (want && pub.source === Track.Source.ScreenShare && principal !== null) pub.setVideoQuality(wants.focused === principal ? VideoQuality.HIGH : VideoQuality.LOW);
   }
 
   private subscribeAll(): void {
@@ -1424,16 +1446,31 @@ class LiveKitAdapter implements Room {
     });
   }
 
-  private shared(track: RemoteTrack): void {
-    if (track.source === Track.Source.ScreenShare) this.shareVideo = track;
-    else this.shareAudio = track;
-    const sink = this.sink;
+  private shared(track: RemoteTrack, principal: number): void {
+    const current = this.remoteShares.get(principal) ?? { video: null, audio: null };
+    if (track.source === Track.Source.ScreenShare) {
+      current.video = track;
+      this.shareVideo = track;
+    } else {
+      current.audio = track;
+      this.shareAudio = track;
+    }
+    this.remoteShares.set(principal, current);
+    const sink = this.streamSinks.get(principal) ?? this.sink;
     if (sink !== null) track.attach(track.source === Track.Source.ScreenShare ? sink.video : sink.audio);
+    const arrived = { video: current.video !== null, audio: current.audio !== null };
+    this.events?.onStreamTracks?.(principal, arrived);
     this.events?.onShareTracks({ video: this.shareVideo !== null, audio: this.shareAudio !== null });
   }
 
-  private unshared(track: RemoteTrack): void {
+  private unshared(track: RemoteTrack, principal: number): void {
     track.detach();
+    const current = this.remoteShares.get(principal);
+    if (current !== undefined) {
+      if (track === current.video) current.video = null;
+      if (track === current.audio) current.audio = null;
+      this.events?.onStreamTracks?.(principal, { video: current.video !== null, audio: current.audio !== null });
+    }
     if (track === this.shareVideo) this.shareVideo = null;
     if (track === this.shareAudio) this.shareAudio = null;
     this.events?.onShareTracks({ video: this.shareVideo !== null, audio: this.shareAudio !== null });
@@ -1722,6 +1759,12 @@ class LiveKitAdapter implements Room {
     for (const { el } of this.elements.values()) el.remove();
     this.elements.clear();
     this.attachShare(null);
+    for (const principal of [...this.streamSinks.keys()]) this.attachStream(principal, null);
+    for (const tracks of this.remoteShares.values()) {
+      tracks.video?.detach();
+      tracks.audio?.detach();
+    }
+    this.remoteShares.clear();
     this.shareVideo = null;
     this.shareAudio = null;
     for (const t of this.remoteCameras.values()) t.detach();

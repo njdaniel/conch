@@ -592,6 +592,19 @@ describe('invites', () => {
     ]);
   });
 
+  it('sends the picker quality as VoiceShareRequestV1 and reads the v2 claim', async () => {
+    await signedInFrom(window.localStorage, memberToken);
+    const quality = { resolution: '720p', frame_rate: 15 };
+    const share = { principal_id: 2, started_at: at, audio: true, quality };
+    const request = vi.fn<(input: RequestInfo | URL, init?: RequestInit) => Promise<Response>>().mockResolvedValue(json(share));
+    vi.stubGlobal('fetch', request);
+    expect(await claimVoiceShare('red team', { resolution: '720p', frameRate: 15 })).toEqual({ ok: true, value: share });
+    const [path, init] = request.mock.calls[0] ?? [];
+    expect(path).toBe('/v1/channels/red%20team/voice/share');
+    expect(init?.method).toBe('POST');
+    expect(init?.body).toBe(JSON.stringify({ quality }));
+  });
+
   it('names the share a release means by its started_at, and passes on a stale answer (issue #487)', async () => {
     await signedInFrom(window.localStorage, memberToken);
     const calls = serve(() => new Response(null, { status: 204 }));

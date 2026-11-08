@@ -7,7 +7,7 @@ import * as api from '../api';
 import { pageHiddenOnPhone } from '../phone';
 import type { ChannelV0 } from '../schema/channel';
 import type { SocketCloseReason } from '../schema/generated';
-import type { VoicePresenceV1 } from '../schema/voice';
+import type { VoicePresenceV2 } from '../schema/voice';
 import { Feed, type FeedStatus } from '../state/feed';
 import type { Camera } from './camera';
 import { VoiceClient, type Microphone, type ModeStore, type Output, type ProcessingStore, type VoiceState } from './connection';
@@ -265,7 +265,7 @@ export type Snapshot =
   | { readonly kind: 'unreachable' }
   | { readonly kind: 'not_allowed' }
   | { readonly kind: 'gone' }
-  | { readonly kind: 'presence'; readonly presence: VoicePresenceV1 };
+  | { readonly kind: 'presence'; readonly presence: VoicePresenceV2 };
 
 // How every voice route refuses a person whose invite did not grant voice
 // (schema.ErrorCodeVoiceNotAllowed).
@@ -365,7 +365,7 @@ export function useVoice({
   // presence it last gave, for the effects beside the one that owns it.
   const feedRef = useRef<Feed | null>(null);
   const feedStatus = useRef<FeedStatus | null>(null);
-  const latest = useRef<VoicePresenceV1 | null>(null);
+  const latest = useRef<VoicePresenceV2 | null>(null);
   const joinedRef = useRef<string | null>(null);
   // Whether the feed is lost and not back: the server out of reach.
   const lost = useRef(false);
@@ -477,7 +477,7 @@ export function useVoice({
     let live = true;
     lost.current = false;
     setSnapshot({ kind: 'loading' });
-    const show = (presence: VoicePresenceV1) => {
+    const show = (presence: VoicePresenceV2) => {
       latest.current = presence;
       lost.current = false;
       setSnapshot({ kind: 'presence', presence });

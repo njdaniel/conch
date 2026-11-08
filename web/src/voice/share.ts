@@ -98,7 +98,7 @@ export interface ShareRoom {
   // Changes the capture and its existing sender encodings without republishing.
   readonly setShareQuality: (quality: ShareQuality) => Promise<void>;
   // The latest stats of the received share or the sent top layer.
-  readonly readShareStats: (direction: ShareDirection) => Promise<ShareSample | null>;
+  readonly readShareStats: (direction: ShareDirection, principal?: number) => Promise<ShareSample | null>;
   // Publishes what was picked, with its simulcast layers.
   readonly publishScreen: () => Promise<void>;
   // Unpublishes and stops whatever was picked or published. Never rejects.
@@ -124,7 +124,7 @@ export type ShareEnd =
   | 'access_lost'
   | 'rotated'
   | 'idle'
-  | 'busy'
+  | 'full'
   | 'cancelled'
   | 'not_connected'
   | 'unavailable'
@@ -186,7 +186,7 @@ export function onTabSharing(callback: () => void): () => void {
 export const resumeLimit = 45_000;
 
 export interface ShareApi {
-  readonly claim: (channel: string) => Promise<ShareClaimResult>;
+  readonly claim: (channel: string, quality?: ShareQuality) => Promise<ShareClaimResult>;
   // Releases the claim whose started_at is startedAt, and no other.
   readonly release: (channel: string, startedAt: string) => Promise<unknown>;
 }
@@ -195,7 +195,7 @@ type Refusal = Extract<ShareClaimResult, { ok: false }>;
 
 // refusalEnd names a refused claim.
 export function refusalEnd(r: Refusal): ShareEnd {
-  if (r.code === 'voice_share_busy') return 'busy';
+  if (r.code === 'voice_share_full') return 'full';
   if (r.code === 'voice_no_session') return 'not_connected';
   if (r.code === 'voice_unavailable' || r.failure === 'network') return 'unavailable';
   return 'failed';
@@ -223,6 +223,7 @@ export class ScreenShare {
   private attempt = 0;
   private channel: string | null = null;
   private room: ShareRoom | null = null;
+  private quality: ShareQuality = defaultShareQuality;
   // Whether presence has shown this person sharing since the last claim: a
   // presence without them after that is the server ending the share.
   private seen = false;
@@ -273,13 +274,14 @@ export class ScreenShare {
     const mine = ++this.attempt;
     this.channel = channel;
     this.room = room;
+    this.quality = quality;
     this.seen = false;
     this.renewal = false;
     this.set({ kind: 'claiming' });
     // The channel as it is called now: renamed (issue #728) while the picker
     // was open, the next call names the new name.
     const at = () => this.channel ?? channel;
-    const first = await this.api.claim(channel);
+    const first = await this.api.claim(channel, this.quality);
     if (first.ok) this.granted(first.value.started_at);
     if (mine !== this.attempt) {
       // Stopped while the claim was on its way: a claim granted since is ours
@@ -309,7 +311,7 @@ export class ScreenShare {
     }
     this.set({ kind: 'publishing' });
     this.seen = false;
-    const again = await this.api.claim(at());
+    const again = await this.api.claim(at(), quality);
     if (again.ok) this.granted(again.value.started_at);
     if (mine !== this.attempt) {
       await room.stopScreen();
@@ -318,8 +320,6 @@ export class ScreenShare {
     }
     if (!again.ok) {
       const end = refusalEnd(again);
-      // A share now someone else's is not ours to stop.
-      if (end === 'busy') this.held = false;
       await room.stopScreen();
       await this.releaseHeld(at());
       if (mine === this.attempt) this.set({ kind: 'idle', ended: end });
@@ -342,6 +342,12 @@ export class ScreenShare {
     }
     if (mine !== this.attempt) return;
     this.set({ kind: 'sharing', audio: captured.audio });
+  }
+
+  async changeQuality(quality: ShareQuality): Promise<void> {
+    this.quality = quality;
+    if (this.state.kind !== 'sharing' || this.channel === null) return;
+    await this.api.claim(this.channel, quality);
   }
 
   // stop ends the share from this side: the Stop sharing button, the
@@ -535,7 +541,7 @@ export class ScreenShare {
     const mine = ++this.attempt;
     this.reclaiming = true;
     this.seen = false;
-    const answer = await this.api.claim(channel);
+    const answer = await this.api.claim(channel, this.quality);
     this.reclaiming = false;
     // Renamed meanwhile (issue #728): what follows names the new name.
     const at = () => this.channel ?? channel;
@@ -555,9 +561,6 @@ export class ScreenShare {
         if (this.room === room) this.room = null;
         return;
       }
-      // Someone else claimed the share first, or this person may no longer
-      // share here: conchd said no, and the capture stops.
-      if (end === 'busy') this.held = false;
       await this.giveUp(end);
       return;
     }
@@ -634,20 +637,18 @@ export class ScreenShare {
     this.interrupted = false;
   }
 
-  // reconnected claims the share again after the SDK reconnected, as conchd
-  // asks: a connection made anew needs the sources granted to it again. A
-  // claim refused as busy means the share is gone; any other failure leaves
-  // it to the server's own passes.
+  // reconnected claims again with the same declared quality. A full room means
+  // this claim is gone; other failures are left to the server's passes.
   async reconnected(): Promise<void> {
     if (this.state.kind !== 'sharing' || this.channel === null) return;
     const mine = this.attempt;
-    const answer = await this.api.claim(this.channel);
+    const answer = await this.api.claim(this.channel, this.quality);
     if (mine !== this.attempt) return;
     if (answer.ok) {
       this.granted(answer.value.started_at);
       return;
     }
-    if (refusalEnd(answer) === 'busy') await this.serverEnded();
+    if (refusalEnd(answer) === 'full') await this.serverEnded();
   }
 
   private async serverEnded(): Promise<void> {
@@ -747,24 +748,11 @@ export function othersShareNote(who: string | null, audio: boolean): string {
   return `${who ?? 'Someone else'} is sharing a screen${audio ? ', with sound' : ''}.`;
 }
 
-// watchNote is what a page that is not watching is told of another's share:
-// where to see it (issue #642, N02). The one-sharer rule is oneSharerNote,
-// which stays Share screen's description.
 export function watchNote(who: string | null, audio: boolean): string {
   return `${othersShareNote(who, audio)} Watch to see it.`;
 }
 
-export const oneSharerNote = 'One person shares at a time.';
-
-// busyNote is why Share screen is off while someone else shares, and what a
-// claim refused for that is told: who shares, and that one person does.
-export function busyNote(who: string | null, audio: boolean): string {
-  return `${othersShareNote(who, audio)} ${oneSharerNote}`;
-}
-
-// endedNote says why the last share ended, or why one did not start. who is
-// the person presence shows sharing, when it shows someone.
-export function endedNote(end: ShareEnd, who: string | null): string {
+export function endedNote(end: ShareEnd): string {
   switch (end) {
     case 'self':
       return 'You stopped sharing.';
@@ -784,8 +772,8 @@ export function endedNote(end: ShareEnd, who: string | null): string {
       return 'Your share ended because the voice room was renewed. Share again once you are back in voice.';
     case 'idle':
       return 'Your share ended because nothing was shared for a while.';
-    case 'busy':
-      return busyNote(who, false);
+    case 'full':
+      return 'This call already has 6 streams live.';
     case 'cancelled':
       return 'Nothing was shared: the picker was closed.';
     case 'not_connected':

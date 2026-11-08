@@ -6,7 +6,7 @@ import * as api from '../../api';
 import type { NativeVoiceHelper, NativeVoiceView } from '../../platform/desktop/bridge';
 import type { NativeVoice, NativeVoiceOutcome } from '../../platform/types';
 import type { ChannelV0 } from '../../schema/channel';
-import type { VoicePresenceV1 } from '../../schema/voice';
+import type { VoicePresenceV2 } from '../../schema/voice';
 import type { SocketEvents } from '../../state/feed';
 import type { Person } from '../../useLiveChannel';
 import * as sdk from '../sdk';
@@ -17,9 +17,9 @@ const idle: NativeVoiceView = { status: 'idle', generation: 0, channel: null, re
 const helper = (over: Partial<NativeVoiceHelper> = {}): NativeVoiceHelper => ({ version: 2, phase: 'connected', capture: 'on', transmitting: false, muted: false, deafened: false, blocked: [], ptt: 'ready', ...over });
 const running = (over: Partial<NativeVoiceHelper> = {}, channel = 'general'): NativeVoiceView => ({ status: 'running', generation: 1, channel, retryable: false, helper: helper(over) });
 
-function presence(...joins: readonly [number, string][]): VoicePresenceV1 {
+function presence(...joins: readonly [number, string][]): VoicePresenceV2 {
   return {
-    schema: 'conch.voice_presence.v1',
+    schema: 'conch.voice_presence.v2',
     channel_id: 1,
     configured: true,
     available: true,
@@ -94,7 +94,7 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-async function frame(p: VoicePresenceV1) {
+async function frame(p: VoicePresenceV2) {
   await waitFor(() => { expect(sockets.length).toBeGreaterThan(0); });
   act(() => {
     const s = sockets[sockets.length - 1];

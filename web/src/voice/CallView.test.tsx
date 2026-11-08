@@ -6,10 +6,10 @@
 import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { VoiceStrip } from '../phone';
-import type { VoicePresenceV1 } from '../schema/voice';
+import type { VoicePresenceV2 } from '../schema/voice';
 import type { Person } from '../useLiveChannel';
 import { cameraOffForYou, watchOnlyCamera, type CameraState } from './camera';
-import { CallView, saidFor, type Tile } from './CallView';
+import { CallView, callTiles, saidFor, type Tile } from './CallView';
 import { CameraTest, previewNote } from './CameraTest';
 import { initialVoice, VoiceClient, type VoiceState } from './connection';
 import { FakeClock } from './fakes';
@@ -19,8 +19,8 @@ import { VoicePanel } from './VoicePanel';
 
 const chrome: ShareFeatures = { canShare: true, chromium: true, platform: 'linux' };
 
-const roomWith = (cameras: readonly number[], sharer: number | null = null): VoicePresenceV1 => ({
-  schema: 'conch.voice_presence.v1',
+const roomWith = (cameras: readonly number[], sharer: number | null = null): VoicePresenceV2 => ({
+  schema: 'conch.voice_presence.v2',
   channel_id: 1,
   configured: true,
   available: true,
@@ -35,7 +35,7 @@ const roomWith = (cameras: readonly number[], sharer: number | null = null): Voi
         can_publish: true,
         transmitting: false,
         ...(cameras.includes(p.principal_id) ? { camera: true } : {}),
-        ...(sharer === p.principal_id ? { sharing: true, sharing_audio: true } : {}),
+        ...(sharer === p.principal_id ? { sharing: true, share_started_at: '2026-10-16T00:00:00.000Z', sharing_audio: true } : {}),
       })),
     },
   ],
@@ -83,10 +83,11 @@ const inVoice = (patch: Partial<VoiceState> = {}): VoiceState => ({ ...initialVo
 
 function panel(state: VoiceState, { cameras = [] as readonly number[], allowed = true, sharer = null as number | null } = {}) {
   const client = newClient();
+  const watching = (next: VoiceState) => sharer !== null && sharer !== 7 && next.watching && next.watched.size === 0 ? { ...next, watched: new Set([sharer]) } : next;
   const snapshot: Snapshot = { kind: 'presence', presence: roomWith(cameras, sharer) };
-  const { rerender } = render(<VoicePanel voice={control(state, snapshot, client)} viewer={7} people={people} viewed="general" cameraAllowed={allowed} onOpen={() => undefined} />);
-  const redraw = (next: VoiceState, nextCameras: readonly number[] = cameras) => {
-    rerender(<VoicePanel voice={control(next, { kind: 'presence', presence: roomWith(nextCameras, sharer) }, client)} viewer={7} people={people} viewed="general" cameraAllowed={allowed} onOpen={() => undefined} />);
+  const { rerender } = render(<VoicePanel voice={control(watching(state), snapshot, client)} viewer={7} people={people} viewed="general" cameraAllowed={allowed} onOpen={() => undefined} />);
+  const redraw = (next: VoiceState, nextCameras: readonly number[] = cameras, nextSharer: number | null = sharer) => {
+    rerender(<VoicePanel voice={control(watching(next), { kind: 'presence', presence: roomWith(nextCameras, nextSharer) }, client)} viewer={7} people={people} viewed="general" cameraAllowed={allowed} onOpen={() => undefined} />);
   };
   return { client, redraw, voice: screen.getByRole('region', { name: 'Voice' }) };
 }
@@ -217,6 +218,38 @@ describe('the call view', () => {
     expect(within(call).getByLabelText('Your camera').className).toBe('mirrored');
   });
 
+  it('puts every stream beside camera and avatar tiles, newest last, with quality and Watch; the filter keeps streams', () => {
+    const doc = roomWith([8]);
+    const participants = doc.rooms[0]?.participants ?? [];
+    const eight = participants.find((p) => p.principal_id === 8);
+    const nine = participants.find((p) => p.principal_id === 9);
+    if (eight === undefined || nine === undefined) throw new Error('missing participants');
+    Object.assign(nine, { sharing: true, share_started_at: '2026-11-03T10:03:00.000Z' });
+    Object.assign(eight, { sharing: true, sharing_audio: true, share_started_at: '2026-11-03T10:04:00.000Z', share_quality: { resolution: '720p', frame_rate: 15 } });
+    const client = newClient();
+    render(<VoicePanel voice={control(inVoice({ viewing: true }), { kind: 'presence', presence: doc }, client)} viewer={7} people={people} viewed="general" onOpen={() => undefined} />);
+    const call = screen.getByRole('region', { name: 'Video call' });
+    const labels = () => within(call).getAllByRole('listitem').map((li) => li.querySelector('figcaption')?.textContent ?? li.querySelector('.share-title')?.textContent);
+    expect(labels()).toEqual(['member-1', 'member-2', 'You', 'member-2 · LIVE', 'member-1 · LIVE · 720p · 15 fps']);
+    expect(within(call).getAllByRole('button', { name: 'Watch' })).toHaveLength(2);
+    fireEvent.click(within(call).getByRole('button', { name: 'Hide non-video participants' }));
+    expect(labels()).toEqual(['member-1', 'member-2 · LIVE', 'member-1 · LIVE · 720p · 15 fps']);
+  });
+
+  it('the page\'s own stream is You · LIVE with Stop sharing and no Watch', () => {
+    panel(inVoice({ viewing: true, share: { kind: 'sharing', audio: true } }), { sharer: 7 });
+    const own = screen.getByRole('region', { name: 'Your stream' });
+    expect(own.textContent).toContain('You · LIVE');
+    expect(within(own).getByRole('button', { name: 'Stop sharing' })).toBeTruthy();
+    expect(within(own).queryByRole('button', { name: 'Watch' })).toBeNull();
+  });
+
+  it('streams share the nine-tile budget without being dropped', () => {
+    const roster = Array.from({ length: 9 }, (_, i) => ({ principal: i + 1, transmitting: false, sharing: false, sharingAudio: false, camera: true, joinedAt: `2026-11-03T10:00:0${String(i)}Z` }));
+    const selected = callTiles(roster, 7, false, (id) => `Member ${String(id)}`, '', false, 2);
+    expect(selected.tiles).toHaveLength(7);
+  });
+
   it('"Hide self-view" hides only the viewer\'s tile, and "Sending video" stays', () => {
     const { voice } = panel(inVoice({ viewing: true, camera: { kind: 'sending' }, cameraTrack: 'published' }));
     const call = screen.getByRole('region', { name: 'Video call' });
@@ -261,7 +294,7 @@ describe('the call view', () => {
     expect(view).not.toHaveBeenCalledWith(false);
     expect(screen.getByRole('region', { name: 'Video call' })).toBeTruthy();
     expect(screen.getByRole('region', { name: 'Shared screen' })).toBe(share);
-    expect(share.closest('li')?.className).toBe('call-share main');
+    expect(share.closest('li')?.className).toBe('call-share');
     expect(captions()).toEqual(['share']);
   });
 
@@ -525,85 +558,57 @@ describe('the call view in a small group', () => {
     expect(screen.queryByText(/camera is (on|off)/)).toBeNull();
   });
 
-  it('with a share watched and the view closed, changes to cameras are not said', () => {
+  it('with a share watched, camera changes are said without replacing its tile', () => {
     const { redraw } = panel(inVoice({ watching: true }), { sharer: 9 });
-    expect(screen.getByRole('region', { name: 'Shared screen' })).toBeTruthy();
+    const share = screen.getByRole('region', { name: 'Shared screen' });
     redraw(inVoice({ watching: true }), [8]);
+    expect(said()).toBe("member-1's camera is on");
     redraw(inVoice({ watching: true }), []);
-    expect(screen.queryByText(/camera is (on|off)/)).toBeNull();
+    expect(said()).toBe("member-1's camera is off");
+    expect(screen.getByRole('region', { name: 'Shared screen' })).toBe(share);
   });
 });
 
-describe('the call view beside a watched share', () => {
+describe('stream tiles in the call view', () => {
   const shareRegion = () => within(callRegion()).getByRole('region', { name: 'Shared screen' });
-  const shareControls = (view: HTMLElement) => {
-    expect(within(view).getByRole('button', { name: 'Mute share' })).toBeTruthy();
-    expect(within(view).getByLabelText('Share volume')).toBeTruthy();
-    expect(within(view).getByRole('button', { name: 'Full screen' })).toBeTruthy();
-    expect(within(view).getByRole('button', { name: 'Stop watching' })).toBeTruthy();
-  };
 
-  it('the share is the main picture and the cameras are the strip; enlarging a camera swaps them; the share keeps its controls', () => {
+  it('a watched tile takes the stage on Focus, everything else goes to the strip, and Back to grid returns', () => {
     panel(inVoice({ viewing: true, watching: true, cameraTrack: 'published' }), { cameras: [8], sharer: 9 });
     const share = shareRegion();
+    expect(listClass()).toBe('call-grid cols-2 rows-2');
+    expect(share.textContent).toContain('member-2 · LIVE');
+    fireEvent.click(within(share).getByRole('button', { name: "Focus member-2's screen" }));
     expect(listClass()).toBe('call-grid focus');
     expect(share.closest('li')?.className).toBe('call-share main');
-    expect(share.textContent).toContain('member-2 is sharing');
-    expect(captions()).toEqual(['share', 'member-1', 'member-2', 'You']);
     for (const name of ['member-1', 'member-2', 'You']) expect(itemOf(name).classList.contains('in-strip')).toBe(true);
-    shareControls(share);
-    fireEvent.click(within(callRegion()).getByRole('button', { name: "Enlarge member-1's video" }));
-    expect(itemOf('member-1').classList.contains('main')).toBe(true);
-    // The same share, moved into the strip: not drawn again.
-    expect(shareRegion()).toBe(share);
-    expect(share.closest('li')?.className).toBe('call-share in-strip');
-    shareControls(share);
-    fireEvent.click(within(callRegion()).getByRole('button', { name: 'Back to the share' }));
-    expect(share.closest('li')?.className).toBe('call-share main');
-    expect(itemOf('member-1').classList.contains('in-strip')).toBe(true);
-    expect(document.activeElement).toBe(within(callRegion()).getByRole('button', { name: "Enlarge member-1's video" }));
-  });
-
-  it('Stop watching with a camera enlarged and the share in the strip leaves the grid too, focus on the tile that was enlarged', () => {
-    const { client, redraw } = panel(inVoice({ viewing: true, watching: true }), { cameras: [8], sharer: 9 });
-    fireEvent.click(within(callRegion()).getByRole('button', { name: "Enlarge member-1's video" }));
-    expect(itemOf('member-1').classList.contains('main')).toBe(true);
-    const watch = vi.spyOn(client, 'watch').mockReturnValue(undefined);
-    const stop = within(shareRegion()).getByRole('button', { name: 'Stop watching' });
-    stop.focus();
-    fireEvent.click(stop);
-    expect(watch).toHaveBeenCalledWith(false);
-    redraw(inVoice({ viewing: true, watching: false }));
-    expect(within(callRegion()).queryByRole('region', { name: 'Shared screen' })).toBeNull();
+    expect(within(share).getByRole('button', { name: 'Mute share' })).toBeTruthy();
+    expect(within(share).getByLabelText('Share volume')).toBeTruthy();
+    fireEvent.click(within(callRegion()).getByRole('button', { name: 'Back to grid' }));
     expect(listClass()).toBe('call-grid cols-2 rows-2');
-    expect(callRegion().textContent).not.toContain('enlarged');
-    expect(within(callRegion()).queryByRole('button', { name: /^Back to/ })).toBeNull();
-    expect(document.activeElement).toBe(within(callRegion()).getByRole('button', { name: "Enlarge member-1's video" }));
+    expect(shareRegion()).toBe(share);
   });
 
-  it('Stop watching takes the share away and leaves the grid', () => {
+  it('Stop watching unsubscribes one stream and returns its still card without removing the tile', () => {
     const { client, redraw } = panel(inVoice({ viewing: true, watching: true }), { cameras: [8], sharer: 9 });
-    const watch = vi.spyOn(client, 'watch').mockReturnValue(undefined);
+    const watch = vi.spyOn(client, 'watchStream');
     fireEvent.click(within(shareRegion()).getByRole('button', { name: 'Stop watching' }));
-    expect(watch).toHaveBeenCalledWith(false);
+    expect(watch).toHaveBeenCalledWith(9, false);
     redraw(inVoice({ viewing: true, watching: false }));
     expect(within(callRegion()).queryByRole('region', { name: 'Shared screen' })).toBeNull();
-    expect(listClass()).toBe('call-grid cols-2 rows-2');
-    expect(captions()).toEqual(['member-1', 'member-2', 'You']);
+    expect(within(callRegion()).getByRole('region', { name: "member-2's stream" }).textContent).toContain('LIVE');
+    expect(within(callRegion()).getByRole('button', { name: 'Watch' })).toBeTruthy();
   });
 
-  it('opening and closing the call view never draws the share again: alone while the view is closed, as before', () => {
-    const { redraw } = panel(inVoice({ watching: true }), { cameras: [8], sharer: 9 });
-    const share = screen.getByRole('region', { name: 'Shared screen' });
-    expect(screen.queryByRole('region', { name: 'Video call' })).toBeNull();
-    // The wrappers holding its place say nothing.
-    expect(share.closest('ul')?.getAttribute('role')).toBe('none');
-    expect(share.closest('li')?.getAttribute('role')).toBe('none');
-    redraw(inVoice({ watching: true, viewing: true }));
-    expect(shareRegion()).toBe(share);
-    expect(share.closest('ul')?.getAttribute('role')).toBeNull();
-    redraw(inVoice({ watching: true }));
-    expect(screen.getByRole('region', { name: 'Shared screen' })).toBe(share);
+  it('Escape returns from a focused stream, and the focused stream ending returns to the grid', () => {
+    const { redraw } = panel(inVoice({ viewing: true, watching: true }), { cameras: [8], sharer: 9 });
+    const share = shareRegion();
+    fireEvent.click(within(share).getByRole('button', { name: "Focus member-2's screen" }));
+    fireEvent.keyDown(share, { key: 'Escape' });
+    expect(listClass()).toBe('call-grid cols-2 rows-2');
+    fireEvent.click(within(share).getByRole('button', { name: "Focus member-2's screen" }));
+    redraw(inVoice({ viewing: true, watching: false }), [], null);
+    expect(within(callRegion()).queryByRole('region', { name: 'Shared screen' })).toBeNull();
+    expect(listClass()).toBe('call-grid cols-2 rows-2');
   });
 });
 
@@ -693,11 +698,14 @@ describe('the phone strip with the camera (C7)', () => {
   function stripOf(state: VoiceState, opens: (() => void) | null, { cameras = [8], sharer = null as number | null } = {}) {
     const client = newClient();
     const shown = vi.spyOn(client, 'showVideo');
-    const page = (next: VoiceState, opening: (() => void) | null) => (
-      <VoiceStrip.Provider value={opening}>
-        <VoicePanel voice={control(next, { kind: 'presence', presence: roomWith(cameras, sharer) }, client)} viewer={7} people={people} viewed="general" cameraAllowed onOpen={() => undefined} />
-      </VoiceStrip.Provider>
-    );
+    const page = (next: VoiceState, opening: (() => void) | null) => {
+      const watched = sharer !== null && sharer !== 7 && next.watching && next.watched.size === 0 ? { ...next, watched: new Set([sharer]), focusedShare: sharer } : next;
+      return (
+        <VoiceStrip.Provider value={opening}>
+          <VoicePanel voice={control(watched, { kind: 'presence', presence: roomWith(cameras, sharer) }, client)} viewer={7} people={people} viewed="general" cameraAllowed onOpen={() => undefined} />
+        </VoiceStrip.Provider>
+      );
+    };
     const { rerender } = render(page(state, opens));
     return {
       shown,

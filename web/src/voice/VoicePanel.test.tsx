@@ -5,7 +5,7 @@
 import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { ChannelV0 } from '../schema/channel';
-import type { VoicePresenceV1 } from '../schema/voice';
+import type { VoicePresenceV2 } from '../schema/voice';
 import type { Person } from '../useLiveChannel';
 import { initialVoice, VoiceClient, type Phase, type Processing, type VoiceState } from './connection';
 import { FakeClock } from './fakes';
@@ -15,7 +15,7 @@ import type { Snapshot, VoiceControl } from './useVoice';
 import { followsNote, missingNote, noOtherOutputs, noOutputChoice, processingLabel, processingOffNote, processingUseNote, reportedNote, stoppedFor, thresholdHint, VoicePanel } from './VoicePanel';
 
 const chrome: ShareFeatures = { canShare: true, chromium: true, platform: 'linux' };
-const presence: VoicePresenceV1 = { schema: 'conch.voice_presence.v1', channel_id: 1, configured: true, available: true, rooms: [] };
+const presence: VoicePresenceV2 = { schema: 'conch.voice_presence.v2', channel_id: 1, configured: true, available: true, rooms: [] };
 
 // A client that is never asked to connect: the panel reads the state it is
 // given, and join and leave are recorded instead.
@@ -275,7 +275,7 @@ describe('the strip while not in voice', () => {
   const unreachable = 'Voice status unavailable: the server cannot be reached.';
   const notAllowed = 'Your account does not include voice. Ask whoever invited you.';
   const unread = 'Voice status could not be read.';
-  const someone: VoicePresenceV1 = {
+  const someone: VoicePresenceV2 = {
     ...presence,
     rooms: [{ participants: [{ principal_id: 3, can_publish: true, transmitting: false, joined_at: '2026-10-18T00:00:00Z' }] }],
   };
@@ -342,7 +342,7 @@ describe('the strip while not in voice', () => {
 // heading, which names the list; on a phone a CSS rule on the class set here
 // shows three chips, and "+N more" the rest.
 describe('the roster', () => {
-  const inRoom = (n: number): VoicePresenceV1 => ({
+  const inRoom = (n: number): VoicePresenceV2 => ({
     ...presence,
     rooms: [
       {
@@ -433,7 +433,7 @@ describe('the roster', () => {
 // roster has it, and hides the others after it; the list's order is the
 // roster's.
 describe('the capped roster keeps the viewer', () => {
-  const room = (ids: readonly number[]): VoicePresenceV1 => ({
+  const room = (ids: readonly number[]): VoicePresenceV2 => ({
     ...presence,
     rooms: [{ participants: ids.map((id) => ({ principal_id: id, can_publish: true, transmitting: false, joined_at: '2026-10-18T00:00:00Z' })) }],
   });
@@ -471,7 +471,7 @@ describe('the capped roster keeps the viewer', () => {
 // CSS that keeps the controls in place has nothing else to move.
 describe('the strip in voice', () => {
   const joined = (deafened: boolean): VoiceState => ({ ...inVoice('connected', 'c'), muted: deafened, deafened });
-  const someone: VoicePresenceV1 = {
+  const someone: VoicePresenceV2 = {
     ...presence,
     rooms: [{ participants: [{ principal_id: 7, can_publish: true, transmitting: false, joined_at: '2026-10-18T00:00:00Z' }] }],
   };
@@ -690,7 +690,7 @@ describe('talk-key capture', () => {
 // true. Bob (3) is someone else; the viewer is 7.
 describe('what the strip says is true', () => {
   const bob: ReadonlyMap<number, Person> = new Map([[3, { name: 'bob', kind: null }]]);
-  const one = (principal: number, sharing = false) => ({ principal_id: principal, can_publish: true, transmitting: false, joined_at: '2026-10-18T00:00:00Z', sharing });
+  const one = (principal: number, sharing = false) => ({ principal_id: principal, can_publish: true, transmitting: false, joined_at: '2026-10-18T00:00:00Z', sharing, ...(sharing ? { share_started_at: '2026-10-18T00:00:00Z' } : {}) });
   const room = (...participants: ReturnType<typeof one>[]): Snapshot => ({ kind: 'presence', presence: { ...presence, rooms: [{ participants }] } });
   const bobShares = room(one(7), one(3, true));
   const nobodyShares = room(one(7), one(3));
@@ -713,58 +713,37 @@ describe('what the strip says is true', () => {
     }
   });
 
-  describe('Share screen while someone else shares (F14)', () => {
-    const said = 'bob is sharing a screen. One person shares at a time.';
-    // Not watching, the visible line says where to see it (issue #642, N02);
-    // the rule is read out beside it, as Share screen's description.
-    const watch = 'bob is sharing a screen. Watch to see it.';
-    const described = `${watch} One person shares at a time.`;
-
-    it('is off, and described as who shares and the rule; on again with no description once nobody else does', () => {
+  describe('Share screen beside other streams', () => {
+    it('stays enabled while bob shares, with Watch on bob\'s tile and no busy description', () => {
       const { voice, redraw } = panel(joined(), 'c', bobShares, bob);
-      const button = within(voice).getByRole('button', { name: 'Share screen', description: described });
-      expect(button.hasAttribute('disabled')).toBe(true);
-      const ids = (button.getAttribute('aria-describedby') ?? '').split(' ');
-      expect(ids.map((id) => document.getElementById(id)?.textContent)).toEqual([watch, 'One person shares at a time.']);
-      expect(ids.every((id) => voice.contains(document.getElementById(id)))).toBe(true);
-      // The one visible line about bob's share is the first.
-      expect(within(voice).getAllByText(/bob is sharing/).map((el) => el.id)).toEqual(['voice-share-busy']);
-      expect(within(voice).getByText(watch).className).not.toContain('watched');
-
+      const button = within(voice).getByRole('button', { name: 'Share screen' });
+      expect(button.hasAttribute('disabled')).toBe(false);
+      expect(button.hasAttribute('aria-describedby')).toBe(false);
+      expect(within(screen.getByRole('region', { name: "bob's stream" })).getByRole('button', { name: 'Watch' })).toBeTruthy();
+      expect(voice.textContent).not.toContain('One person shares at a time.');
       redraw(joined(), nobodyShares);
-      const again = within(voice).getByRole('button', { name: 'Share screen' });
-      expect(again.hasAttribute('disabled')).toBe(false);
-      expect(again.hasAttribute('aria-describedby')).toBe(false);
-      expect(voice.textContent).not.toContain('Watch to see it.');
+      expect(screen.queryByRole('region', { name: "bob's stream" })).toBeNull();
     });
 
-    it('while watched keeps the line hidden, without the watch prompt', () => {
-      const { voice } = panel(joined({ watching: true }), 'c', bobShares, bob);
-      const line = within(voice).getByText(said);
-      expect(line.id).toBe('voice-share-busy');
-      expect(line.className).toContain('watched');
-      expect(voice.textContent).not.toContain('Watch to see it.');
-      expect(within(voice).getByRole('button', { name: 'Share screen', description: said })).toBeTruthy();
+    it('stays enabled while watching too, with no busy note', () => {
+      const { voice } = panel(joined({ watching: true, watched: new Set([3]) }), 'c', bobShares, bob);
+      expect(screen.getByRole('region', { name: 'Shared screen' }).textContent).toContain('bob · LIVE');
+      expect(within(voice).getByRole('button', { name: 'Share screen' }).hasAttribute('disabled')).toBe(false);
+      expect(voice.textContent).not.toContain('One person shares at a time.');
     });
 
-    it('says a refused claim once while the other share lasts, and not after it ends', () => {
-      const refused = joined({ share: { kind: 'idle', ended: 'busy' } });
-      const { voice, redraw } = panel(refused, 'c', bobShares, bob);
-      // The refusal is the description's line, read out: one line, not two.
-      const notes = within(voice).getAllByText(said);
-      expect(notes).toHaveLength(1);
-      expect(notes[0]?.getAttribute('role')).toBe('status');
-      expect(within(voice).getByRole('button', { name: 'Share screen', description: said })).toBeTruthy();
-
-      redraw(refused, nobodyShares);
+    it('says when the six-stream cap refused a claim, without a busy note', () => {
+      const refused = joined({ share: { kind: 'idle', ended: 'full' } });
+      const { voice } = panel(refused, 'c', bobShares, bob);
+      expect(voice.textContent).toContain('This call already has 6 streams live.');
       expect(voice.textContent).not.toContain('One person shares at a time.');
       expect(within(voice).getByRole('button', { name: 'Share screen' }).hasAttribute('disabled')).toBe(false);
     });
 
-    it('still says why a share of ours ended, beside who shares now, unless we stopped it', () => {
+    it('still says why a share of ours ended beside the other live tile', () => {
       const { voice } = panel(joined({ share: { kind: 'idle', ended: 'operator' } }), 'c', bobShares, bob);
       expect(voice.textContent).toContain('An operator stopped your share.');
-      expect(voice.textContent).toContain(watch);
+      expect(screen.getByRole('region', { name: "bob's stream" }).textContent).toContain('LIVE');
     });
   });
 
@@ -843,13 +822,13 @@ describe('what the strip says is true', () => {
 
     it(`says the holder stopped, read out, for ${String(stoppedFor / 1000)} s`, () => {
       vi.useFakeTimers();
-      const { voice, redraw } = panel(joined({ watching: true }), 'c', bobShares, bob);
+      const { voice, redraw } = panel(joined({ watching: true, watched: new Set([3]) }), 'c', bobShares, bob);
       expect(shown(voice)).toBeNull();
       // Bob's share ends: presence says nobody shares, then the client stops
       // watching.
-      redraw(joined({ watching: true }), nobodyShares);
+      redraw(joined({ watching: true, watched: new Set([3]) }), nobodyShares);
       expect(shown(voice)).toBeNull();
-      redraw(joined({ watching: false }), nobodyShares);
+      redraw(joined({ watching: false, watched: new Set() }), nobodyShares);
       expect(shown(voice)?.getAttribute('role')).toBe('status');
       act(() => {
         vi.advanceTimersByTime(stoppedFor - 1);
@@ -862,17 +841,17 @@ describe('what the strip says is true', () => {
     });
 
     it('says the holder stopped when the share and the watching end in one frame', () => {
-      const { voice, redraw } = panel(joined({ watching: true }), 'c', bobShares, bob);
-      redraw(joined({ watching: false }), nobodyShares);
+      const { voice, redraw } = panel(joined({ watching: true, watched: new Set([3]) }), 'c', bobShares, bob);
+      redraw(joined({ watching: false, watched: new Set() }), nobodyShares);
       expect(shown(voice)).not.toBeNull();
     });
 
     it('says nothing when the viewer stops watching, nor when that share ends later', () => {
       vi.useFakeTimers();
-      const { voice, redraw } = panel(joined({ watching: true }), 'c', bobShares, bob);
-      redraw(joined({ watching: false }), bobShares);
+      const { voice, redraw } = panel(joined({ watching: true, watched: new Set([3]) }), 'c', bobShares, bob);
+      redraw(joined({ watching: false, watched: new Set() }), bobShares);
       expect(shown(voice)).toBeNull();
-      redraw(joined({ watching: false }), nobodyShares);
+      redraw(joined({ watching: false, watched: new Set() }), nobodyShares);
       act(() => {
         vi.advanceTimersByTime(stoppedFor);
       });
@@ -882,23 +861,23 @@ describe('what the strip says is true', () => {
     it('says nothing while a share that went with a renewed room is waited for, nor when it is back', () => {
       // The client keeps watching through the wait (connection.ts
       // awaitShare): the room is renewed, and everyone left it.
-      const { voice, redraw } = panel(joined({ watching: true }), 'c', bobShares, bob);
-      redraw(joined({ phase: 'connecting', watching: true }), room());
-      redraw(joined({ watching: true }), room(one(7)));
+      const { voice, redraw } = panel(joined({ watching: true, watched: new Set([3]) }), 'c', bobShares, bob);
+      redraw(joined({ phase: 'connecting', watching: true, watched: new Set([3]) }), room());
+      redraw(joined({ watching: true, watched: new Set([3]) }), room(one(7)));
       expect(shown(voice)).toBeNull();
-      redraw(joined({ watching: true }), bobShares);
+      redraw(joined({ watching: true, watched: new Set([3]) }), bobShares);
       expect(voice.textContent).not.toContain('stopped sharing');
     });
 
     it('says the holder stopped when the wait for a renewed share runs out', () => {
-      const { voice, redraw } = panel(joined({ watching: true }), 'c', bobShares, bob);
-      redraw(joined({ watching: true }), room(one(7)));
-      redraw(joined({ watching: false }), room(one(7)));
+      const { voice, redraw } = panel(joined({ watching: true, watched: new Set([3]) }), 'c', bobShares, bob);
+      redraw(joined({ watching: true, watched: new Set([3]) }), room(one(7)));
+      redraw(joined({ watching: false, watched: new Set() }), room(one(7)));
       expect(shown(voice)).not.toBeNull();
     });
 
     it('says nothing on leaving voice while watching', () => {
-      const { voice, redraw } = panel(joined({ watching: true }), 'c', bobShares, bob);
+      const { voice, redraw } = panel(joined({ watching: true, watched: new Set([3]) }), 'c', bobShares, bob);
       redraw(initialVoice, nobodyShares);
       expect(voice.textContent).not.toContain('stopped sharing');
     });
@@ -983,7 +962,7 @@ describe('the notes about sharing', () => {
     can_publish: true,
     transmitting: false,
     joined_at: '2026-10-18T00:00:00Z',
-    ...(sharing ? { sharing: true, sharing_audio: true } : {}),
+    ...(sharing ? { sharing: true, share_started_at: '2026-10-16T00:00:00.000Z', sharing_audio: true } : {}),
   });
   const room = (...participants: ReturnType<typeof one>[]): Snapshot => ({ kind: 'presence', presence: { ...presence, rooms: [{ participants }] } });
   const nobodyShares = room(one(7), one(3), one(4));
@@ -1017,33 +996,22 @@ describe('the notes about sharing', () => {
     for (const text of full) expect(within(about).getByText(text)).toBeTruthy();
   });
 
-  it("are absent while someone else shares, and one line says who, with sound, as Share screen's description", () => {
-    const said = 'bob is sharing a screen, with sound. One person shares at a time.';
-    const watch = 'bob is sharing a screen, with sound. Watch to see it.';
+  it('stay one line beside another stream, with Watch on its tile and the full notes in Voice options', () => {
     const { voice, redraw } = panel(joined(), 'c', bobShares, bob);
-    expect(within(voice).queryByText(line)).toBeNull();
-    expect(within(voice).queryByRole('button', { name: 'More about sharing' })).toBeNull();
-    expect(voice.querySelector('#voice-share-about')).toBeNull();
-    for (const text of full) expect(voice.textContent).not.toContain(text);
-    // One line about bob's share, not two.
-    expect(within(voice).getAllByText(/bob is sharing/).map((el) => el.textContent)).toEqual([watch]);
-    expect(within(voice).getByRole('button', { name: 'Share screen', description: `${watch} One person shares at a time.` })).toBeTruthy();
-
-    // Watching it, the same line, and still one in the notes (the watch
-    // view has its own title).
-    redraw(joined({ watching: true }), bobShares);
-    const notes = voice.querySelector<HTMLElement>('.voice-notes');
-    if (notes === null) throw new Error('no notes');
-    expect(within(notes).getAllByText(/bob is sharing/).map((el) => el.textContent)).toEqual([said]);
-
-    // Once bob stops, the one line about sharing is back.
+    expect(within(voice).getByText(line)).toBeTruthy();
+    expect(within(voice).getByRole('button', { name: 'More about sharing' })).toBeTruthy();
+    expect(voice.querySelector('#voice-options')?.hasAttribute('hidden')).toBe(true);
+    expect(within(screen.getByRole('region', { name: "bob's stream" })).getByRole('button', { name: 'Watch' })).toBeTruthy();
+    redraw(joined({ watching: true, watched: new Set([3]) }), bobShares);
+    expect(within(voice).getByText(line)).toBeTruthy();
+    expect(screen.getByRole('region', { name: 'Shared screen' }).textContent).toContain('bob · LIVE');
     redraw(joined(), nobodyShares);
     expect(within(voice).getByText(line)).toBeTruthy();
   });
 
-  it('name who shares in a line of its own for someone listening only, who cannot share', () => {
+  it('a listen-only viewer gets the LIVE tile but no sharing options', () => {
     const { voice } = panel(joined({ listenOnly: true }), 'c', bobShares, bob);
-    expect(within(voice).getAllByText(/bob is sharing/).map((el) => el.textContent)).toEqual(['bob is sharing a screen, with sound.']);
+    expect(screen.getByRole('region', { name: "bob's stream" }).textContent).toContain('bob · LIVE');
     expect(within(voice).queryByRole('button', { name: 'More about sharing' })).toBeNull();
   });
 });
@@ -1534,7 +1502,7 @@ describe('the phone strip under Chat and Channels (issue #1028)', () => {
             can_publish: true,
             transmitting: false,
             joined_at: '2026-10-18T00:00:00Z',
-            ...(id === 3 ? { sharing: true, sharing_audio: true } : {}),
+            ...(id === 3 ? { sharing: true, share_started_at: '2026-10-16T00:00:00.000Z', sharing_audio: true } : {}),
           })),
         },
       ],

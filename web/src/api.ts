@@ -181,16 +181,19 @@ import {
   voiceCameraV1,
   voiceCompanionResponseV1,
   voiceOccupancyV1,
-  voicePresenceV1,
+  voicePresenceV2,
   voiceSessionResponseV1,
   voiceShareV1,
+  voiceShareV2,
   type VoiceCameraV1,
   type VoiceCompanionRequestV1,
   type VoiceCompanionResponseV1,
   type VoiceOccupancyV1,
-  type VoicePresenceV1,
+  type VoicePresenceV2,
   type VoiceSessionResponseV1,
+  type VoiceShareRequestV1,
   type VoiceShareV1,
+  type VoiceShareV2,
   type VoiceTransmitReportV1,
   type VoiceTransmitState,
 } from './schema/voice';
@@ -2990,8 +2993,8 @@ export async function removeVoiceViewer(channel: string): Promise<ApiResult<null
 // getVoicePresence reads who is in a channel's voice, once. The page keeps
 // presence on its socket, joined or not, and reads this only to learn why
 // the server closed that socket (1008).
-export function getVoicePresence(channel: string): Promise<ApiResult<VoicePresenceV1>> {
-  return authed(call('voicePresence', { channel }), voicePresenceV1);
+export function getVoicePresence(channel: string): Promise<ApiResult<VoicePresenceV2>> {
+  return authed(call('voicePresence', { channel }, queryOf({ schema: 'conch.voice_presence.v2' })), voicePresenceV2);
 }
 
 // How a transmit report was answered. no_session is "go back to conchd" (409
@@ -3019,7 +3022,7 @@ export async function reportVoiceTransmit(channel: string, state: VoiceTransmitS
 // openVoiceSocket opens the presence stream of a channel's voice with a ticket:
 // the roster, and who is transmitting.
 export function openVoiceSocket(channel: string, events: SocketEvents): Promise<ApiResult<FeedSocket>> {
-  return connect('voice', 'voiceSocket', { channel }, events);
+  return connect('voice', 'voiceSocket', { channel, schema: 'conch.voice_presence.v2' }, events);
 }
 
 // Voice occupancy (issue #596): how many are in each channel's voice, for
@@ -3078,17 +3081,15 @@ export async function fileReport(id: number, issue: string): Promise<InviteResul
 // the join token allows the microphone alone, and the claim is what lets that
 // connection publish a screen and its sound.
 
-// A claim refused carries the status and the server's code, as a session
-// does: 409 voice_share_busy is someone else's share, 409 voice_no_session is
-// no connection to grant it to.
 export type ShareClaimResult =
-  | { readonly ok: true; readonly value: VoiceShareV1 }
+  | { readonly ok: true; readonly value: VoiceShareV1 | VoiceShareV2 }
   | { readonly ok: false; readonly failure: ApiFailure; readonly status?: number; readonly code?: string };
 
-// claimVoiceShare claims the room's share for the caller, or claims it again
-// (after a reconnect), which keeps the share as it was.
-export async function claimVoiceShare(channel: string): Promise<ShareClaimResult> {
-  const reply = await authedPost(call('claimShare', { channel }));
+// A declared quality is sent with the first claim, the post-picker claim and
+// every later claim, including a live change or reconnect.
+export async function claimVoiceShare(channel: string, quality?: ShareQuality): Promise<ShareClaimResult> {
+  const request: VoiceShareRequestV1 | undefined = quality === undefined ? undefined : { quality: { resolution: quality.resolution, frame_rate: quality.frameRate } };
+  const reply = await authedPost(call('claimShare', { channel }), request);
   if (reply.kind === 'none') return { ok: false, failure: 'network' };
   if (reply.kind === 'unauthorized') return { ok: false, failure: 'unauthorized' };
   const res = reply.res;
@@ -3098,7 +3099,8 @@ export async function claimVoiceShare(channel: string): Promise<ShareClaimResult
   }
   try {
     const parsed: unknown = await res.json();
-    if (fromServer(voiceShareV1)(parsed).length === 0) return { ok: true, value: parsed as VoiceShareV1 };
+    if (quality !== undefined && fromServer(voiceShareV2)(parsed).length === 0) return { ok: true, value: parsed as VoiceShareV2 };
+    if (quality === undefined && fromServer(voiceShareV1)(parsed).length === 0) return { ok: true, value: parsed as VoiceShareV1 };
   } catch {
     // Fall through.
   }

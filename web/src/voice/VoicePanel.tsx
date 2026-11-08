@@ -50,7 +50,7 @@ import { archivedLine } from '../archived';
 import { Avatar, Glyph } from '../Icons';
 import { IdentityMarks } from '../Identity';
 import type { ChannelV0 } from '../schema/channel';
-import { MicTestShown, onPhoneCamera, VoiceLive, VoiceStrip } from '../phone';
+import { MicTestShown, onPhoneCamera, usePhone, VoiceLive, VoiceStrip } from '../phone';
 import { StageHost } from '../stage';
 import { MicTest } from './MicTest';
 import { cameraNote, cameraOffForYou, cameraOn, listenOnlyCamera, watchOnlyCamera } from './camera';
@@ -60,8 +60,8 @@ import type { Person } from '../useLiveChannel';
 import type { Phase, Processing, VoiceState } from './connection';
 import { clampTail, maxTail, releasePage, releaseStep } from './gate';
 import { keyLabel, talkKeyForMouseButton } from './keys';
-import { occupants, sharer, type Occupant } from './presence';
-import { busyNote, endedNote, oneSharerNote, othersShareNote, ownPageNote, resumedNote, resumingNote, sharedNote, shortShareNote, soundNote, watchNote, type ShareFrameRate, type ShareResolution } from './share';
+import { occupants, qualityLabel, sharers, type Occupant } from './presence';
+import { endedNote, ownPageNote, resumedNote, resumingNote, sharedNote, shortShareNote, soundNote, type ShareFrameRate, type ShareResolution } from './share';
 import { ShareReadout, ShareView } from './ShareView';
 import { nobody, type InVoice } from './useOccupancy';
 import type { VoiceControl } from './useVoice';
@@ -167,7 +167,7 @@ export function VoicePanel({
   const [hideNonVideo, setHideNonVideo] = useState(readHideNonVideo);
   const [focusShow, setFocusShow] = useState(false);
   const showVideoButton = useRef<HTMLButtonElement>(null);
-  const [shareVolume, setShareVolume] = useState(1);
+  const shareVolumes = useRef(new Map<number, number>());
   // More about sharing opens Voice options at the full share notes, and
   // takes focus there once they are shown (issue #600).
   const about = useRef<HTMLElement>(null);
@@ -184,6 +184,7 @@ export function VoicePanel({
   const toVoiceView = useContext(VoiceStrip);
   const stripOpens = inVoice ? toVoiceView : null;
   const strip = stripOpens !== null;
+  const narrow = usePhone();
   useEffect(() => {
     client.showVideo(!strip);
   }, [client, strip]);
@@ -214,14 +215,11 @@ export function VoicePanel({
     setLingers(false);
   }
   const elsewhere = !inVoice && listed && !lingers;
-  // A watched share that ended (issue #591, F15): whose share this page was
-  // watching, and the note that it stopped, said for stoppedFor.
-  const watchedName = useRef<string | null>(null);
+  const streams = sharers(presence);
+  const theirStreams = streams.filter((s) => s.principal !== viewer);
+  const watchedNames = useRef(new Map<number, string>());
+  const wasWatching = useRef<ReadonlySet<number>>(new Set());
   const [stopped, setStopped] = useState<{ readonly name: string } | null>(null);
-  // Someone else's share, which this page may watch.
-  const holder = sharer(presence);
-  const theirs = holder !== null && holder.principal !== viewer ? holder : null;
-  const theirName = theirs === null ? '' : nameOf(people, theirs.principal, viewer);
 
   useEffect(() => {
     if (!voice.capturing) return;
@@ -257,22 +255,19 @@ export function VoicePanel({
     if (document.activeElement === null || document.activeElement === document.body) joinButton.current?.focus();
   }, [state.phase]);
 
-  // The watching ends because the share is gone (its holder stopped, or one
-  // that went with a renewed room did not come back in time): nobody else
-  // shares when it ends. Stop watching, or leaving voice, ends it with the
-  // share still there or with this page out of voice, and says nothing. A
-  // share waited for after a renewal keeps the watching on, so it is not
-  // said to stop.
-  const holderId = theirs?.principal ?? null;
+  const liveStreams = new Set(streams.map((s) => s.principal));
   useEffect(() => {
-    if (state.watching) {
-      if (holderId !== null) watchedName.current = theirName;
-      return;
+    for (const principal of state.watched) {
+      if (liveStreams.has(principal)) watchedNames.current.set(principal, nameOf(people, principal, viewer));
     }
-    const name = watchedName.current;
-    watchedName.current = null;
-    if (name !== null && holderId === null && inVoice) setStopped({ name });
-  }, [state.watching, holderId, theirName, inVoice]);
+    for (const principal of wasWatching.current) {
+      if (state.watched.has(principal) || liveStreams.has(principal) || !inVoice) continue;
+      const name = watchedNames.current.get(principal);
+      if (name !== undefined) setStopped({ name });
+      watchedNames.current.delete(principal);
+    }
+    wasWatching.current = new Set(state.watched);
+  }, [state.watched, liveStreams, inVoice, people, viewer]);
 
   useEffect(() => {
     if (stopped === null) return;
@@ -301,7 +296,7 @@ export function VoicePanel({
     state.viewing &&
     !strip &&
     hideNonVideo &&
-    !(theirs !== null && state.watching) &&
+    streams.length === 0 &&
     state.cameraTrack === 'none' &&
     !videoRoster.some((o) => o.principal !== viewer && o.camera);
   useEffect(() => {
@@ -378,36 +373,56 @@ export function VoicePanel({
   // the capture it had. A microphone that went is not captured.
   const silenced = state.muted || state.deafened;
   const captured = (state.phase === 'connected' || state.phase === 'reconnecting') && !state.watchOnly && !state.listenOnly && !state.missing;
-  const view =
-    theirs !== null && state.watching ? <ShareView client={client} state={state} name={theirName} audio={theirs.sharingAudio} volume={shareVolume} onVolumeChange={setShareVolume} /> : null;
-  // The call view, while the person asked for it and is in voice. The share
-  // and the call view are one layout on the stage: the share the main
-  // picture and the cameras a strip beside it while both are open. It is
-  // the one CallView whether or not the call view is open, so the share is
-  // never drawn again by opening or closing it.
-  // In the phone layout under Chat and Channels (the strip) the stage holds a
-  // watched share only: no call view and no camera tile, and no camera
-  // received (showVideo). The person's choice to view is kept, so the view
-  // and the cameras are back with the Voice view, with no tap (O8).
-  const call = inVoice && state.viewing && !strip ? callTiles(roster, viewer, state.cameraTrack !== 'none', (id) => nameOf(people, id, viewer), viewerName, hideNonVideo) : null;
-  const staged =
-    view === null && (!inVoice || strip) ? null : (
-      <CallView
-        client={client}
-        state={state}
-        tiles={call?.tiles ?? noTiles}
-        hidden={call?.hidden ?? 0}
-        open={call !== null}
-        share={view}
-        hideNonVideo={hideNonVideo}
-        onHideNonVideo={() => {
-          const next = !hideNonVideo;
-          setHideNonVideo(next);
-          writeHideNonVideo(next);
-        }}
-        keepSaid={focusShow}
-      />
-    );
+  const streamTiles: Tile[] = streams.map((stream) => {
+    const me = stream.principal === viewer;
+    const name = me ? 'You' : nameOf(people, stream.principal, viewer);
+    const quality = qualityLabel(stream.quality);
+    const watched = state.watched.has(stream.principal);
+    return {
+      principal: stream.principal,
+      name,
+      me,
+      camera: false,
+      kind: 'share',
+      watched,
+      startedAt: stream.startedAt,
+      render: (focus) => {
+        if (me) return (
+          <section aria-label="Your stream" className="share-view">
+            <p className="share-title"><Glyph name="screen" />You · LIVE{quality === null ? null : <> · {quality}</>}</p>
+            <div className="share-controls"><button type="button" onClick={() => { client.stopShare(); }}>Stop sharing</button></div>
+          </section>
+        );
+        if (!watched) return (
+          <section aria-label={`${name}'s stream`} className="share-view">
+            <p className="share-title"><Glyph name="screen" />{name} · LIVE{quality === null ? null : <> · {quality}</>}</p>
+            <div className="share-controls"><button type="button" disabled={state.phase !== 'connected'} onClick={() => {
+              if (narrow) client.switchStream(stream.principal);
+              else client.watchStream(stream.principal, true);
+            }}>Watch</button></div>
+          </section>
+        );
+        return <ShareView client={client} state={state} principal={stream.principal} name={name} audio={stream.sharingAudio} quality={quality} volume={shareVolumes.current.get(stream.principal) ?? 1} onVolumeChange={(volume) => { shareVolumes.current.set(stream.principal, volume); }} onFocus={focus} />;
+      },
+    };
+  });
+  const call = inVoice && (state.viewing || streams.length > 0) && !strip ? callTiles(roster, viewer, state.cameraTrack !== 'none', (id) => nameOf(people, id, viewer), viewerName, hideNonVideo, streams.length) : null;
+  const staged = !inVoice || (strip && !state.watching) ? null : (
+    <CallView
+      client={client}
+      state={state}
+      tiles={[...(call?.tiles ?? []), ...streamTiles]}
+      hidden={call?.hidden ?? 0}
+      open={call !== null}
+      hideNonVideo={hideNonVideo}
+      onHideNonVideo={() => {
+        const next = !hideNonVideo;
+        setHideNonVideo(next);
+        writeHideNonVideo(next);
+      }}
+      keepSaid={focusShow}
+    />
+  );
   // How many cameras are on in the room: everyone else's claims, and the
   // person's own while their track is published.
   const cameraCount = roster.filter((o) => o.principal !== viewer && o.camera).length + (state.cameraTrack === 'published' ? 1 : 0);
@@ -434,13 +449,9 @@ export function VoicePanel({
   // name is only read out, and the buttons show their verbs. With no channel
   // on screen there is nowhere to name.
   const dest = viewed === null ? null : <span className="dest">in #{viewed}</span>;
-  // Whether this page could start a share now, but for someone else's. Then
-  // who else shares is said in the line that says why Share screen is off
-  // (issue #600: one line, not two), and while nobody else does, the strip's
-  // one line about sharing shows, with the full notes in Voice options.
   const { features } = voice;
-  const busyLine = !state.listenOnly && features.canShare && state.share.kind === 'idle';
-  const sharable = busyLine && theirs === null;
+  const shareLine = !state.listenOnly && features.canShare && state.share.kind === 'idle';
+  const sharable = shareLine;
   // Everyone else in the room joined, whose volumes Voice options sets.
   const others = roster.filter((o) => o.principal !== viewer).map((o) => ({ principal: o.principal, name: nameOf(people, o.principal, viewer) }));
   const more = () => {
@@ -524,7 +535,7 @@ export function VoicePanel({
                   <span className="label">{state.deafened ? 'Undeafen' : 'Deafen'}</span>
                 </button>
                 {canCamera ? <CameraButton voice={voice} /> : null}
-                {state.viewer ? null : <ShareButton voice={voice} othersShare={theirs !== null} watching={state.watching} />}
+                {state.viewer ? null : <ShareButton voice={voice} />}
                 {state.viewing ? (
                   <button type="button" aria-pressed="true" onClick={() => { client.viewVideo(false); }}>
                     <Glyph name="camera" />
@@ -534,12 +545,6 @@ export function VoicePanel({
                   <button ref={showVideoButton} type="button" onClick={() => { client.viewVideo(true); }}>
                     <Glyph name="camera" />
                     <span className="label">Show video ({cameraCount})</span>
-                  </button>
-                ) : null}
-                {theirs !== null && !state.watching ? (
-                  <button type="button" onClick={() => { client.watch(true); }} disabled={state.phase !== 'connected'}>
-                    <Glyph name="screen" />
-                    <span className="label">Watch</span>
                   </button>
                 ) : null}
                 <button type="button" className="quiet" aria-expanded={options} aria-controls="voice-options" onClick={() => { setOptions(!options); }}>
@@ -591,19 +596,12 @@ export function VoicePanel({
             {state.mode === 'ptt' && !state.listenOnly && !state.watchOnly ? (
               <p className="hint talk-key-note">Talk key: {keyLabel(voice.talkKey)}. It works only while this tab has focus, and not while you are typing.</p>
             ) : null}
-            <ShareNotes
-              voice={voice}
-              holderName={holder === null ? null : nameOf(people, holder.principal, viewer, false, viewerName)}
-              others={theirs === null ? null : { name: theirName, audio: theirs.sharingAudio }}
-              watching={state.watching}
-              onMore={more}
-            />
+            <ShareNotes voice={voice} onMore={more} othersShare={streams.length > 0} />
             {stopped === null ? null : (
               <p role="status" className="hint">
                 {stopped.name} stopped sharing.
               </p>
             )}
-            {theirs === null || state.watching || busyLine ? null : <p className="hint">{othersShareNote(theirName, theirs.sharingAudio)}</p>}
           </>
         ) : (
           <>
@@ -615,7 +613,7 @@ export function VoicePanel({
               <p className="hint">Checking whether voice is available.</p>
             ) : null}
             {elsewhere ? <p className="hint">You are in voice on another device. Joining here moves your voice to this device.</p> : null}
-            {theirs === null ? null : <p className="hint">{theirName} is sharing a screen. Join, or watch only, to see it.</p>}
+            {theirStreams.length === 0 ? null : <p className="hint">{nameOf(people, theirStreams[0]?.principal ?? 0, viewer)} is sharing a screen. Join, or watch only, to see it.</p>}
             {!voice.secure ? (
               <p className="hint">Voice needs a secure page: use https, or localhost.</p>
             ) : presence?.available === false ? (
@@ -887,9 +885,6 @@ export function Roster({ channel, mayModerate: standing, roster, people, viewer,
     </div>
   );
 }
-
-// No tiles: the call view closed, and the share alone on the stage.
-const noTiles: readonly Tile[] = [];
 
 // Nobody turned down: the roster while this page is not in voice.
 const noVolumes: ReadonlyMap<number, number> = new Map();
@@ -1350,27 +1345,16 @@ function Options({ voice, open, sharable, about, others, cameraAllowed }: {
   );
 }
 
-// ShareButton is the sharer's one control in the strip: Share screen, or
-// Stop sharing while a share is starting, live or resuming. One person shares
-// at a time: while someone else does, Share screen is off, and its
-// description, in the notes, says who shares (issue #591, F14).
-function ShareButton({ voice, othersShare, watching }: { readonly voice: VoiceControl; readonly othersShare: boolean; readonly watching: boolean }) {
+function ShareButton({ voice }: { readonly voice: VoiceControl }) {
   const { state, client, features } = voice;
   const share = state.share;
   if (state.listenOnly || !features.canShare || share.kind === 'stopping') return null;
-  if (share.kind === 'idle') {
-    return (
-      <button
-        type="button"
-        onClick={() => { client.startShare(); }}
-        disabled={state.phase !== 'connected' || othersShare}
-        aria-describedby={othersShare ? (watching ? 'voice-share-busy' : 'voice-share-busy voice-share-rule') : undefined}
-      >
-        <Glyph name="screen" />
-        <span className="label">Share screen</span>
-      </button>
-    );
-  }
+  if (share.kind === 'idle') return (
+    <button type="button" onClick={() => { client.startShare(); }} disabled={state.phase !== 'connected'}>
+      <Glyph name="screen" />
+      <span className="label">Share screen</span>
+    </button>
+  );
   return (
     <button type="button" className="sharing" onClick={() => { client.stopShare(); }}>
       <Glyph name="screenStop" />
@@ -1379,62 +1363,28 @@ function ShareButton({ voice, othersShare, watching }: { readonly voice: VoiceCo
   );
 }
 
-// StoppedNote is "You stopped sharing.", which the sharer knows already: it
-// goes after stoppedFor, and at once when anyone's share starts, and then
-// stays gone however long the other share lasts (issue #642, N03).
 function StoppedNote({ text, othersShare }: { readonly text: string; readonly othersShare: boolean }) {
   const [gone, setGone] = useState(false);
   if (othersShare && !gone) setGone(true);
   useEffect(() => {
-    const timer = window.setTimeout(() => {
-      setGone(true);
-    }, stoppedFor);
+    const timer = window.setTimeout(() => { setGone(true); }, stoppedFor);
     return () => {
       window.clearTimeout(timer);
     };
   }, []);
-  return gone ? null : (
-    <p role="status" className="hint">
-      {text}
-    </p>
-  );
+  return gone ? null : <p role="status" className="hint">{text}</p>;
 }
 
-// ShareNotes is what the sharer's side says: what sound a share will carry
-// and what it shows, before the picker opens; what is happening; and why the
-// last share ended. Before a share that is one line (issue #600), and More
-// about sharing opens Voice options at the full notes. While someone else
-// shares no picker can open, so that line waits until their share ends, and
-// one line says who shares instead, and with what sound: Share screen's
-// description.
-//
-// A claim refused because someone else shares (busy) says the same words, so
-// it is that line, read out when it comes, and it goes with the other share
-// (issue #591, F14): once nobody else shares it is no longer true.
-function ShareNotes({ voice, holderName, others, watching, onMore }: {
-  readonly voice: VoiceControl;
-  readonly holderName: string | null;
-  // Who else shares, and whether with sound, or null while nobody else does.
-  readonly others: { readonly name: string; readonly audio: boolean } | null;
-  // This page watches that share. The stage's title says who shares, so on a
-  // phone the line is only read out, as Share screen's description (issue
-  // #641).
-  readonly watching: boolean;
-  readonly onMore: () => void;
-}) {
+function ShareNotes({ voice, onMore, othersShare }: { readonly voice: VoiceControl; readonly onMore: () => void; readonly othersShare: boolean }) {
   const { state, features, client } = voice;
   const share = state.share;
   if (state.listenOnly) return null;
   const line = (
     <p className="hint share-line">
       {shortShareNote(features)}{' '}
-      <button type="button" className="more" aria-controls="voice-options" onClick={onMore}>
-        More about sharing
-      </button>
+      <button type="button" className="more" aria-controls="voice-options" onClick={onMore}>More about sharing</button>
     </p>
   );
-  // A browser that cannot share is told so in one sentence, and there is no
-  // more to say about sharing.
   if (!features.canShare) return <p className="hint">{soundNote(features)}</p>;
   switch (share.kind) {
     case 'sharing':
@@ -1456,32 +1406,8 @@ function ShareNotes({ voice, holderName, others, watching, onMore }: {
     case 'idle':
       return (
         <>
-          {others === null ? (
-            line
-          ) : share.ended === 'busy' ? (
-            <p key="refused" id="voice-share-busy" role="status" className="hint">
-              {busyNote(others.name, others.audio)}
-            </p>
-          ) : watching ? (
-            <p key="busy" id="voice-share-busy" className="hint watched">
-              {busyNote(others.name, others.audio)}
-            </p>
-          ) : (
-            <>
-              <p key="watch" id="voice-share-busy" className="hint">
-                {watchNote(others.name, others.audio)}
-              </p>
-              {/* The rule is Share screen's description, not a second visible line. */}
-              <span id="voice-share-rule" className="vh">{oneSharerNote}</span>
-            </>
-          )}
-          {share.ended === null || share.ended === 'busy' ? null : share.ended === 'self' ? (
-            <StoppedNote key="self" text={endedNote(share.ended, holderName)} othersShare={others !== null} />
-          ) : (
-            <p role="status" className="hint">
-              {endedNote(share.ended, holderName)}
-            </p>
-          )}
+          {line}
+          {share.ended === null ? null : share.ended === 'self' ? <StoppedNote key="self" text={endedNote(share.ended)} othersShare={othersShare} /> : <p role="status" className="hint">{endedNote(share.ended)}</p>}
         </>
       );
   }

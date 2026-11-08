@@ -198,6 +198,7 @@ interface StubRemotePub {
   isDesired?: boolean;
   trackSid?: string;
   setSubscribed: (on: boolean) => void;
+  setVideoQuality?: (quality: number) => void;
 }
 const state = vi.hoisted((): Stub => {
   const stubFactory = () => () => undefined;
@@ -614,6 +615,7 @@ vi.mock('livekit-client', () => {
       Kind: { Audio: 'audio', Video: 'video' },
       Source: { Microphone: 'microphone', Camera: 'camera', ScreenShare: 'screen_share', ScreenShareAudio: 'screen_share_audio', Unknown: 'unknown' },
     },
+    VideoQuality: { LOW: 0, HIGH: 2 },
     VideoPreset: class {
       width: number;
       height: number;
@@ -1163,6 +1165,9 @@ describe('the watch view', () => {
         p.isSubscribed = on;
         state.calls.push(`subscribe ${source} ${String(on)}`);
       },
+      setVideoQuality: (quality) => {
+        state.calls.push(`quality ${source} ${String(quality)}`);
+      },
     };
     return p;
   };
@@ -1180,7 +1185,7 @@ describe('the watch view', () => {
     const mic = remotePub('microphone');
     const screen = remotePub('screen_share');
     const sound = remotePub('screen_share_audio');
-    state.remote.set('p8', { trackPublications: new Map([['a', mic], ['b', screen], ['c', sound]]) });
+    state.remote.set('p8', { identity: 'p8', trackPublications: new Map([['a', mic], ['b', screen], ['c', sound]]) } as unknown as { trackPublications: Map<string, StubRemotePub> });
     const room = newLiveKitRoom();
     await room.connect('wss://lk.example', 'tok-abcdef', 'room-abcdef', false, events);
     expect([mic.isSubscribed, screen.isSubscribed, sound.isSubscribed]).toEqual([true, false, false]);
@@ -1194,6 +1199,26 @@ describe('the watch view', () => {
     expect([later.isSubscribed, camera.isSubscribed]).toEqual([true, false]);
     room.setWatching(false);
     expect([mic.isSubscribed, screen.isSubscribed, sound.isSubscribed]).toEqual([true, false, false]);
+  });
+
+  it('with two sharers subscribes picture and sound per Watch, focuses at HIGH, holds the other at LOW, and never wants unwatched or own tracks', async () => {
+    const eight = remotePub('screen_share');
+    const eightSound = remotePub('screen_share_audio');
+    const nine = remotePub('screen_share');
+    const nineSound = remotePub('screen_share_audio');
+    const unwatched = remotePub('screen_share');
+    const own = remotePub('screen_share');
+    state.remote.set('p8', { identity: 'p8', trackPublications: new Map([['a', eight], ['b', eightSound]]) } as unknown as { trackPublications: Map<string, StubRemotePub> });
+    state.remote.set('p9', { identity: 'p9', trackPublications: new Map([['a', nine], ['b', nineSound]]) } as unknown as { trackPublications: Map<string, StubRemotePub> });
+    state.remote.set('p10', { identity: 'p10', trackPublications: new Map([['a', unwatched]]) } as unknown as { trackPublications: Map<string, StubRemotePub> });
+    state.remote.set('p7', { identity: 'p7', trackPublications: new Map([['a', own]]) } as unknown as { trackPublications: Map<string, StubRemotePub> });
+    const room = newLiveKitRoom();
+    await room.connect('wss://lk.example', 'tok-abcdef', 'room-abcdef', false, events);
+    room.setWatches?.(new Set([8, 9]), 8);
+    expect([eight.isSubscribed, eightSound.isSubscribed, nine.isSubscribed, nineSound.isSubscribed, unwatched.isSubscribed, own.isSubscribed]).toEqual([true, true, true, true, false, false]);
+    expect(state.calls.filter((c) => c.startsWith('quality'))).toEqual(['quality screen_share 2', 'quality screen_share 0']);
+    room.setWatches?.(new Set([8, 9]), 9);
+    expect(state.calls.filter((c) => c.startsWith('quality')).slice(-2)).toEqual(['quality screen_share 0', 'quality screen_share 2']);
   });
 
   it("plays a share into the view's elements, not into the page, and says what arrived", async () => {
@@ -2164,12 +2189,11 @@ describe('a switch while the first capture is under way', () => {
 
 // ---- the camera (ADR-015)
 
-describe('wanted: kind and source together (S1)', () => {
-  const none = { watching: false, viewing: false, shown: false, claimed: false };
-  const all = { watching: true, viewing: true, shown: true, claimed: true };
+describe('wanted: kind, source and publisher together (S1)', () => {
+  const none = { watching: new Set<number>(), focused: null, own: 7, viewing: false, shown: false, claimed: false };
+  const all = { watching: new Set([8, 9]), focused: 8, own: 7, viewing: true, shown: true, claimed: true };
   const { Source, Kind } = Track;
   it.each([
-    // source, kind, with everything wanted, with nothing wanted
     [Source.Microphone, Kind.Audio, true, true],
     [Source.Microphone, Kind.Video, false, false],
     [Source.Camera, Kind.Video, true, false],
@@ -2181,22 +2205,32 @@ describe('wanted: kind and source together (S1)', () => {
     [Source.Unknown, Kind.Video, false, false],
     [Source.Microphone, undefined, false, false],
   ])('%s as %s: %s while viewing, watching and claimed; %s otherwise', (source, kind, wantedAll, wantedNone) => {
-    expect(wanted(source, kind, all)).toBe(wantedAll);
-    expect(wanted(source, kind, none)).toBe(wantedNone);
+    expect(wanted(source, kind, 8, all)).toBe(wantedAll);
+    expect(wanted(source, kind, 8, none)).toBe(wantedNone);
   });
 
-  it('no camera is wanted while the video is not shown here, even with the call view open; microphones and a watched share are unaffected', () => {
-    const away = { watching: true, viewing: true, shown: false, claimed: true };
-    expect(wanted(Source.Camera, Kind.Video, away)).toBe(false);
-    expect(wanted(Source.Microphone, Kind.Audio, away)).toBe(true);
-    expect(wanted(Source.ScreenShare, Kind.Video, away)).toBe(true);
-    expect(wanted(Source.ScreenShareAudio, Kind.Audio, away)).toBe(true);
+  it('wants both picture and sound of each watched sharer, nothing unwatched, and never this page\'s own stream', () => {
+    for (const source of [Source.ScreenShare, Source.ScreenShareAudio]) {
+      const kind = source === Source.ScreenShare ? Kind.Video : Kind.Audio;
+      expect(wanted(source, kind, 8, all)).toBe(true);
+      expect(wanted(source, kind, 9, all)).toBe(true);
+      expect(wanted(source, kind, 10, all)).toBe(false);
+      expect(wanted(source, kind, 7, all)).toBe(false);
+    }
+  });
+
+  it('no camera is wanted while the video is not shown here, even with the call view open; microphones and watched shares are unaffected', () => {
+    const away = { ...all, shown: false };
+    expect(wanted(Source.Camera, Kind.Video, 8, away)).toBe(false);
+    expect(wanted(Source.Microphone, Kind.Audio, 8, away)).toBe(true);
+    expect(wanted(Source.ScreenShare, Kind.Video, 8, away)).toBe(true);
+    expect(wanted(Source.ScreenShareAudio, Kind.Audio, 8, away)).toBe(true);
   });
 
   it('a camera is wanted only while the call view is shown, and only from someone holding a claim', () => {
-    expect(wanted(Source.Camera, Kind.Video, { watching: false, viewing: true, shown: true, claimed: true })).toBe(true);
-    expect(wanted(Source.Camera, Kind.Video, { watching: true, viewing: false, shown: true, claimed: true })).toBe(false);
-    expect(wanted(Source.Camera, Kind.Video, { watching: true, viewing: true, shown: true, claimed: false })).toBe(false);
+    expect(wanted(Source.Camera, Kind.Video, 8, { ...all, watching: new Set() })).toBe(true);
+    expect(wanted(Source.Camera, Kind.Video, 8, { ...all, viewing: false })).toBe(false);
+    expect(wanted(Source.Camera, Kind.Video, 8, { ...all, claimed: false })).toBe(false);
   });
 });
 
@@ -2209,6 +2243,7 @@ describe('receiving cameras', () => {
       setSubscribed: (on) => {
         p.isSubscribed = on;
       },
+      setVideoQuality: () => undefined,
     };
     return p;
   };
