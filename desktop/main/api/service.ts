@@ -21,6 +21,7 @@ import type { WhoAmIResponseV1 } from '../../../web/src/schema/principal.ts';
 import { whoAmIResponseV1 } from '../../../web/src/schema/principal.ts';
 import { fromServer } from '../../../web/src/schema/validate.ts';
 import { Client, type Exchange } from './client.ts';
+import { previewable } from './target.ts';
 import type { Session } from './session.ts';
 
 export const REVOKE_TIMEOUT_MS = 5_000;
@@ -144,11 +145,13 @@ export class Service {
     // The IPC layer has refused these already; a second check costs nothing.
     if (!invocable(id)) return { kind: 'none', reason: 'unsupported' };
     if (NOT_JSON.has(id)) return { kind: 'none', reason: 'unsupported' };
+    if (request.previewAs !== undefined && !previewable(id)) return { kind: 'none', reason: 'unsupported' };
     const exchange = await this.#deps.client.send({
       op: id,
       ...(request.params === undefined ? {} : { params: request.params }),
       ...(request.query === undefined ? {} : { query: request.query }),
       ...(request.body === undefined ? {} : { body: request.body }),
+      ...(request.previewAs === undefined ? {} : { previewAs: request.previewAs }),
     });
     if (exchange.kind === 'none') {
       this.#note(id, exchange.reason);

@@ -59,13 +59,19 @@ function fromReply(reply: BridgeReply): Promise<Response> {
   }
 }
 
-function requestOf(call: Call, body?: unknown, keepalive?: boolean): BridgeRequest {
-  // The bridge has no preview header yet: a preview read sent without it would
-  // answer as the administrator, so it is never sent. The page offers no
-  // preview on the desktop (platform.name).
+// refusePreview throws for a call that asks for a preview where none can be
+// had: only a previewable read carries previewAs, so a write, an open call, an
+// upload or a download can never answer as someone else. Main refuses it too.
+function refusePreview(call: Call): void {
   if (call.previewAs !== undefined) throw new TypeError(reasons.unsupported);
+}
+
+function requestOf(call: Call, body?: unknown, keepalive?: boolean): BridgeRequest {
+  const previewable = operations[call.op].previewable === true && operations[call.op].method === 'GET';
+  if (call.previewAs !== undefined && !previewable) throw new TypeError(reasons.unsupported);
   return {
     operation: call.op,
+    ...(call.previewAs === undefined ? {} : { previewAs: call.previewAs }),
     ...(call.params === undefined ? {} : { params: call.params }),
     ...(call.query === undefined ? {} : { query: call.query }),
     ...(body === undefined ? {} : { body }),
@@ -186,6 +192,7 @@ export const http: HttpTransport = {
   },
 
   async send(call, _token, { body, keepalive, signal }) {
+    refusePreview(call);
     const b = await need();
     if (call.op === 'logout') {
       const ended = await withSignal(b.signOut(), signal);
@@ -207,6 +214,7 @@ export const http: HttpTransport = {
   },
 
   async open(call, body) {
+    refusePreview(call);
     const b = await need();
     const step = steps[call.op];
     if (step === undefined) return fromReply(await b.request(requestOf(call, body)));
@@ -216,10 +224,12 @@ export const http: HttpTransport = {
   },
 
   async health(call) {
+    refusePreview(call);
     return fromReply(await (await need()).request(requestOf(call)));
   },
 
   async upload(call, _token, mediaType, bytes, signal) {
+    refusePreview(call);
     const b = await need();
     const channel = call.params?.['channel'];
     const filename = filenameOf(call);
@@ -229,6 +239,7 @@ export const http: HttpTransport = {
   },
 
   async download(call) {
+    refusePreview(call);
     const b = await need();
     const id = call.params?.['id'];
     if (call.op !== 'fileBytes' || typeof id !== 'number') return noAnswer('unsupported');

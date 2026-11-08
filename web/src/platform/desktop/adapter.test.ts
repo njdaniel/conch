@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { errorV0, loginResponseV1, passwordUpdatedResponseV1, whoAmIResponseV1 } from '../../schema/generated';
-import { call } from '../operations';
-import type { BridgeReply, ConchDesktopBridge, ReplaceCredentialRequest, SignInOutcome } from './bridge';
+import { call, previewCall } from '../operations';
+import type { BridgeReply, BridgeRequest, ConchDesktopBridge, ReplaceCredentialRequest, SignInOutcome } from './bridge';
 import { credentials, isSessionToken, STAND_IN } from './credentials';
 import { http } from './http';
 
@@ -366,5 +366,51 @@ describe('the desktop credential store', () => {
     credentials.writePreference('k', 'v');
     expect(credentials.readPreference('k')).toBe('v');
     expect(window.localStorage.getItem('k')).toBeNull();
+  });
+});
+
+describe('Preview as member through the desktop transport (issue #1540)', () => {
+  const ok = (): Promise<BridgeReply> => Promise.resolve({ kind: 'reply', status: 200, body: {} });
+
+  it('hands main previewAs on each of the five previewable reads, and on those alone', async () => {
+    const request = vi.fn<(r: BridgeRequest) => Promise<BridgeReply>>(() => ok());
+    install(fakeBridge({ request }));
+    await http.get(previewCall('preview', 7), STAND_IN);
+    await http.get(previewCall('listChannels', 7), STAND_IN);
+    await http.get(previewCall('channelDirectory', 7), STAND_IN);
+    await http.get(previewCall('directoryMembers', 7, {}, 'limit=5'), STAND_IN);
+    await http.get(previewCall('listMembers', 7, { channel: 'general' }), STAND_IN);
+    expect(request.mock.calls.map(([r]) => [r.operation, r.previewAs])).toEqual([
+      ['preview', 7],
+      ['listChannels', 7],
+      ['channelDirectory', 7],
+      ['directoryMembers', 7],
+      ['listMembers', 7],
+    ]);
+    request.mockClear();
+    await http.get(call('listChannels'), STAND_IN);
+    expect(request.mock.calls[0]?.[0]).not.toHaveProperty('previewAs');
+  });
+
+  it('never hands main previewAs for an operation that is not previewable, even from a hand-built call', async () => {
+    const request = vi.fn<(r: BridgeRequest) => Promise<BridgeReply>>(() => ok());
+    install(fakeBridge({ request }));
+    const forged = { ...call('listMessages', { channel: 'a' }), previewAs: 7 };
+    await expect(http.get(forged, STAND_IN)).rejects.toBeInstanceOf(TypeError);
+    await expect(http.send({ ...call('postMessage', { channel: 'a' }), previewAs: 7 }, STAND_IN, { body: {}, keepalive: false })).rejects.toBeInstanceOf(TypeError);
+    await expect(http.open({ ...call('health'), previewAs: 7 }, undefined)).rejects.toBeInstanceOf(TypeError);
+    await expect(http.health({ ...call('health'), previewAs: 7 })).rejects.toBeInstanceOf(TypeError);
+    expect(request).not.toHaveBeenCalled();
+  });
+
+  it('refuses previewAs at the top of upload and download', async () => {
+    const uploadFile = vi.fn(() => ok());
+    const downloadFile = vi.fn(() => Promise.resolve({ kind: 'bytes', data: 'AQID' } as const));
+    install(fakeBridge({ uploadFile, downloadFile }));
+    const up = { ...call('uploadFile', { channel: 'general' }, 'filename=a.png'), previewAs: 7 };
+    await expect(http.upload(up, STAND_IN, 'image/png', new Blob([new Uint8Array([1])]), new AbortController().signal)).rejects.toBeInstanceOf(TypeError);
+    await expect(http.download({ ...call('fileBytes', { id: 1 }), previewAs: 7 }, STAND_IN)).rejects.toBeInstanceOf(TypeError);
+    expect(uploadFile).not.toHaveBeenCalled();
+    expect(downloadFile).not.toHaveBeenCalled();
   });
 });

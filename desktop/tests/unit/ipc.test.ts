@@ -411,6 +411,26 @@ describe('the registry', () => {
     expect(parseRequest({ operation: 'whoami' })).toEqual({ operation: 'whoami' });
     expect(parseRequest({ operation: 'login', body: {} })).toBeNull();
   });
+
+  it('lets previewAs through on the five previewable reads, and on nothing else (issue #1540)', () => {
+    const params = { listMembers: { channel: 'general' } } as const;
+    for (const operation of ['preview', 'listChannels', 'channelDirectory', 'directoryMembers', 'listMembers'] as const) {
+      const p = operation === 'listMembers' ? params.listMembers : undefined;
+      expect(parseRequest({ operation, ...(p === undefined ? {} : { params: p }), previewAs: 7 })).toEqual({ operation, ...(p === undefined ? {} : { params: p }), previewAs: 7 });
+    }
+    // Operations main's own table does not mark previewable: a read, a write,
+    // an open one. The renderer's word is not asked.
+    expect(parseRequest({ operation: 'whoami', previewAs: 7 })).toBeNull();
+    expect(parseRequest({ operation: 'listMessages', params: { channel: 'a' }, previewAs: 7 })).toBeNull();
+    expect(parseRequest({ operation: 'postMessage', params: { channel: 'a' }, body: { body: 'x' }, previewAs: 7 })).toBeNull();
+    expect(parseRequest({ operation: 'health', previewAs: 7 })).toBeNull();
+    // A claim of being previewable changes nothing: there is no such key.
+    expect(parseRequest({ operation: 'whoami', previewAs: 7, previewable: true })).toBeNull();
+    // The target is a positive whole number.
+    for (const bad of [0, -1, 1.5, '7', null, Number.NaN, Number.MAX_SAFE_INTEGER + 1]) {
+      expect(parseRequest({ operation: 'listChannels', previewAs: bad })).toBeNull();
+    }
+  });
 });
 
 describe('the caller check alone', () => {

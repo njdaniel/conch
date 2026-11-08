@@ -1,4 +1,15 @@
-import { describe, expect, it } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+import { afterEach, describe, expect, it } from 'vitest';
+
+import { Client } from '../../main/api/client.ts';
+import { Service } from '../../main/api/service.ts';
+import { Session } from '../../main/api/session.ts';
+import type { ActivationSpec } from '../../main/profiles/service.ts';
+import type { Activation } from '../../main/profiles/switch.ts';
+import { previewResponseV1 } from '../../../web/src/schema/preview.ts';
+import { fromServer } from '../../../web/src/schema/validate.ts';
+import { sendJson, startHttp, type Fake } from './support.ts';
 
 import { TeardownHooks } from '../../main/profiles/hooks.ts';
 import { Switcher } from '../../main/profiles/switch.ts';
@@ -118,5 +129,92 @@ describe('the switch sequence', () => {
     off();
     await t.switcher.switchTo(profile('a', ORIGIN_A), { reason: 'switch' });
     expect(runs).toBe(2);
+  });
+});
+
+// The golden PreviewResponseV1: a complete answer the client would accept, so
+// only the cancellation can make the held read come back as stale.
+const previewBody: unknown = JSON.parse(readFileSync(resolve(import.meta.dirname, '../../../pkg/schema/testdata/preview-response-v1.json'), 'utf8'));
+
+describe('a profile switch ends a preview (issue #1540)', () => {
+  it('the held response is a valid PreviewResponseV1', () => {
+    expect(fromServer(previewResponseV1)(previewBody)).toEqual([]);
+  });
+
+  const servers: Fake[] = [];
+  afterEach(async () => {
+    await Promise.all(servers.splice(0).map((f) => f.close()));
+  });
+
+  it('cancels a delayed preview read, disposes the renderer, and sends the next profile\u2019s first request without Conch-Preview-As', async () => {
+    // Server A holds the preview read open until the test lets it go.
+    let release: () => void = () => undefined;
+    const held = new Promise<void>((r) => {
+      release = r;
+    });
+    const a = await startHttp((_req, res) => {
+      void held.then(() => {
+        if (!res.destroyed) sendJson(res, 200, previewBody);
+      });
+    });
+    const b = await startHttp((_req, res) => {
+      sendJson(res, 200, { channels: [] });
+    });
+    servers.push(a, b);
+
+    // Real Session, Client and Service per activation, over real sockets; the
+    // window is the one fake, a record of whether it was disposed.
+    const live: { service: Service; session: Session; disposed: boolean }[] = [];
+    const create = (spec: ActivationSpec): Promise<Activation> => {
+      const session = new Session();
+      const service = new Service({ client: new Client({ fetch: globalThis.fetch, session }), session, now: Date.now, log: () => undefined });
+      if (spec.profile !== null) {
+        session.setOrigin(spec.profile.origin);
+        session.adopt('bearer-for-' + spec.profile.label);
+      }
+      const entry = { service, session, disposed: false };
+      live.push(entry);
+      return Promise.resolve({
+        profileId: spec.profile?.id ?? null,
+        token: () => session.capture().token,
+        voiceCredential: () => null,
+        voiceCurrent: () => false,
+        whoami: () => Promise.resolve(null),
+        signOut: () => Promise.resolve('unsent' as const),
+        endSockets: () => undefined,
+        endRequests: () => {
+          session.forget();
+        },
+        destroy: () => {
+          entry.disposed = true;
+          return Promise.resolve();
+        },
+      });
+    };
+    const switcher = new Switcher({ hooks: new TeardownHooks(), now: Date.now, log: () => undefined, boundMs: 50, open: (spec) => create({ ...spec, token: null, onInvalid: () => undefined }) });
+
+    await switcher.switchTo(profile('a', a.origin), { reason: 'switch' });
+    const old = live[0];
+    if (old === undefined) throw new Error('no first activation');
+    // The preview read is in flight when the person switches.
+    const preview = old.service.request({ operation: 'preview', previewAs: 7 });
+    await new Promise((r) => setTimeout(r, 50));
+    expect(a.seen).toHaveLength(1);
+    expect(a.seen[0]?.headers['conch-preview-as']).toBe('7');
+
+    await switcher.switchTo(profile('b', b.origin), { reason: 'switch' });
+    release();
+
+    // The old read was cancelled, its late answer never reaches the page.
+    expect(await preview).toEqual({ kind: 'none', reason: 'stale' });
+    // The renderer that held the preview is gone.
+    expect(old.disposed).toBe(true);
+    // The next profile's first request carries no preview.
+    const next = live[1];
+    if (next === undefined) throw new Error('no second activation');
+    await next.service.request({ operation: 'listChannels' });
+    expect(b.seen).toHaveLength(1);
+    expect(b.seen[0]?.headers['conch-preview-as']).toBeUndefined();
+    expect(b.seen[0]?.headers['authorization']).toBe('Bearer bearer-for-b');
   });
 });
