@@ -401,6 +401,32 @@ describe('the roster', () => {
     expect(within(voice).getByRole('button', { name: '+5 more' }).getAttribute('aria-expanded')).toBe('false');
     expect(list.classList.contains('capped')).toBe(true);
   });
+
+  it('shows only Agent on an agent roster row at phone width', () => {
+    const width = vi.spyOn(window, 'innerWidth', 'get').mockReturnValue(390);
+    try {
+      const room: Snapshot = {
+        kind: 'presence',
+        presence: {
+          ...presence,
+          rooms: [{ participants: [3, 4].map((id) => ({ principal_id: id, can_publish: true, transmitting: false, joined_at: '2026-10-18T00:00:00Z' })) }],
+        },
+      };
+      const people: ReadonlyMap<number, Person> = new Map([
+        [3, { name: 'agent-in-voice', kind: 'agent', role: 'operator', manages: true }],
+        [4, { name: 'human-in-voice', kind: 'human', role: 'operator', manages: true }],
+      ]);
+      const { voice } = panel(initialVoice, 'c', room, people);
+      const agent = within(voice).getByText('agent-in-voice').closest('li') as HTMLElement;
+      const human = within(voice).getByText('human-in-voice').closest('li') as HTMLElement;
+      expect(within(agent).getByText('Agent').classList.contains('identity-label')).toBe(true);
+      expect(agent.querySelectorAll('.identity-mark')).toHaveLength(1);
+      expect(human.querySelectorAll('.identity-mark')).toHaveLength(0);
+      expect(window.innerWidth).toBe(390);
+    } finally {
+      width.mockRestore();
+    }
+  });
 });
 
 // Issue #641: a capped roster keeps the viewer's own chip, wherever the

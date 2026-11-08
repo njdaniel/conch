@@ -98,4 +98,17 @@ describe('appearance token contrast', () => {
       expect(new Set(values).size, accent).toBe(themes.length);
     }
   });
+
+  it.each(themes)('keeps the outlined identity mark legible in every %s preset', (theme) => {
+    const style = /\.ag-badge,\s*\.channel-badge\s*\{([^}]+)\}/.exec(css)?.[1] ?? '';
+    expect(style).toContain('border: 1px solid var(--accent)');
+    expect(style).toContain('border-radius: 0.35rem');
+    expect(style).toContain('background: var(--accent-bg)');
+    expect(style).toContain('color: var(--accent)');
+    for (const accent of appearanceAccents) {
+      const [fg, bg] = pair(tokens(theme, accent), 'accent', 'accent-bg');
+      const minimum = theme === 'high-contrast' ? 7 : 4.5;
+      expect(contrast(fg, bg), `${theme}/${accent}: identity mark`).toBeGreaterThanOrEqual(minimum);
+    }
+  });
 });

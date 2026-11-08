@@ -3,6 +3,7 @@ import type { ChannelBanV1 } from './schema/generated';
 import { useCallback, useEffect, useId, useRef, useState, type KeyboardEvent, type ReactNode, type SyntheticEvent } from 'react';
 import * as api from './api';
 import { Avatar } from './Icons';
+import { IdentityMarks } from './Identity';
 import { memberName } from './guestName';
 import { ActionsMenu, useOpeners, type MenuItem } from './MessageMenu';
 import type { Entry } from './agents/join';
@@ -211,7 +212,7 @@ function AddPeople(props: MemberControlsProps) {
 }
 
 // MemberRow is one person's row in the members panel (issue #1094): the
-// caller's content, the Manager and Approver badges, and one ⋯ menu with the
+// caller's content, the carried identity marks, and one ⋯ menu with the
 // actions this viewer may use on this person. The menu is the message log's
 // (MessageMenu.tsx), opened by its button, Enter or Space on it, a right-click
 // on the row or a long press. A row with no actions draws no button and
@@ -228,8 +229,9 @@ export function MemberRow({
   principalId,
   children,
   after,
+  showIdentity = true,
   ...controls
-}: MemberControlsProps & { readonly principalId: number; readonly className: string; readonly children: ReactNode; readonly after?: ReactNode }) {
+}: MemberControlsProps & { readonly principalId: number; readonly className: string; readonly children: ReactNode; readonly after?: ReactNode; readonly showIdentity?: boolean }) {
   const { channel, members, viewer, refreshMembers, onUnauthorized } = controls;
   const member = members.find((m) => m.principal_id === principalId);
   const [busy, setBusy] = useState(false);
@@ -335,8 +337,7 @@ export function MemberRow({
   return (
     <li className={`${className} member-row${items.length > 0 ? ' has-actions' : ''}`} {...openers}>
       {children}
-      {member?.manages === true ? <span className="ag-badge">Manager</span> : null}
-      {member?.can_decide === true ? <span className="ag-badge">Approver</span> : null}
+      {showIdentity && member !== undefined ? <IdentityMarks {...member} id={member.principal_id} viewer={viewer.id} /> : null}
       {after}
       {items.length === 0 || member === undefined ? null : (
         <ActionsMenu label={`Actions for ${displayName(member)}`} items={items} open={menuOpen} onOpenChange={setMenuOpen} button={more} />
@@ -443,8 +444,8 @@ export function Members({ people, ...controls }: MemberControlsProps & { readonl
 }
 
 // What the community member panel says of one person, from the directory's
-// row. An agent is marked as one (ADR-013 O11) and a human shows their role
-// (O4). The operator fields (owner, voice, who may invite, who invited them)
+// row. An agent or operator is marked as one (ADR-013 O11, O4). The operator
+// fields (owner, voice, who may invite, who invited them)
 // are drawn only when the row carries them: the server sends them to a holder
 // of manage_members alone, so the page cannot show a member what it was not
 // told. The controls that act on them are another issue's (#992).
@@ -491,10 +492,7 @@ function CommunityRow({
     <li className={`community-member${has ? ' member-row has-actions' : ''}`} {...openers}>
       <Avatar id={person.id} name={person.name} />
       <span className="community-name">{person.name}</span>
-      {person.id === viewer ? <span className="ag-badge">You</span> : null}
-      {person.kind === 'agent' ? <span className="ag-badge">Agent</span> : null}
-      {person.kind === 'human' && person.role !== undefined ? <span className="ag-badge">{person.role === 'operator' ? 'Operator' : 'Member'}</span> : null}
-      {person.owner === true ? <span className="ag-badge">Owner</span> : null}
+      <IdentityMarks {...person} id={person.id} viewer={viewer} />
       {person.voice_allowed === undefined ? null : <span className="hint">{person.voice_allowed ? ' · voice on' : ' · voice off'}</span>}
       {person.may_invite === undefined ? null : <span className="hint">{person.may_invite ? ' · can invite' : ' · cannot invite'}</span>}
       {person.invited_by === undefined ? null : <span className="hint">{` · invited by ${inviter?.name ?? `#${String(person.invited_by)}`}`}</span>}

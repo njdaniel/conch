@@ -243,6 +243,26 @@ describe('administration controls', () => {
   });
 });
 
+describe('identity marks', () => {
+  it('draws MemberRow marks through the shared component in wire order', () => {
+    draw({ ...props('operator'), viewer: { id: 1, role: 'operator', guest: false } });
+    const olivia = row('olivia');
+    expect(Array.from(olivia.querySelectorAll('.identity-mark')).map((mark) => mark.getAttribute('data-identity'))).toEqual(['you', 'operator', 'approver']);
+    expect(within(row('ada')).getByText('Manager').classList.contains('identity-label')).toBe(true);
+    expect(within(row('bot')).getByText('Agent').classList.contains('identity-label')).toBe(true);
+  });
+
+  it('shows no standing a plain-member payload did not carry', () => {
+    const plain: ChannelMemberV1 = { principal_id: 6, created_at: at, name: 'plain', kind: 'human', manages: false, can_decide: false };
+    const controlProps = { ...props('member'), members: [...memberList, plain] };
+    render(<Members {...controlProps} people={[...people, entry(plain)]} />);
+    const marks = row('plain').querySelectorAll('.identity-mark');
+    expect(Array.from(marks).map((mark) => mark.getAttribute('data-identity'))).toEqual([]);
+    expect(within(row('plain')).queryByText('Owner')).toBeNull();
+    expect(within(row('plain')).queryByText('Operator')).toBeNull();
+  });
+});
+
 describe('opening a row\'s menu', () => {
   it('opens by right-click on the row, suppressing the native menu there only', () => {
     draw(props('operator'));
