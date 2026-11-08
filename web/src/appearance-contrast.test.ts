@@ -111,4 +111,19 @@ describe('appearance token contrast', () => {
       expect(contrast(fg, bg), `${theme}/${accent}: identity mark`).toBeGreaterThanOrEqual(minimum);
     }
   });
+
+  it.each(themes)('keeps profile-card text and focus legible in every %s preset', (theme) => {
+    const style = /\.profile-card\s*\{([^}]+)\}/.exec(css)?.[1] ?? '';
+    expect(style).toContain('background: var(--raised)');
+    expect(style).toContain('color: var(--text)');
+    expect(css).toMatch(/\.profile-card-name:focus-visible,\s*\.profile-card-close:focus-visible\s*\{[^}]*outline:\s*2px solid var\(--focus\)/);
+    for (const accent of appearanceAccents) {
+      const palette = tokens(theme, accent);
+      const [fg, bg] = pair(palette, 'text', 'raised');
+      const minimum = theme === 'high-contrast' ? 7 : 4.5;
+      expect(contrast(fg, bg), `${theme}/${accent}: profile-card text`).toBeGreaterThanOrEqual(minimum);
+      const [focus, focusBg] = pair(palette, 'focus', 'raised');
+      expect(contrast(focus, focusBg), `${theme}/${accent}: profile-card focus`).toBeGreaterThanOrEqual(3);
+    }
+  });
 });

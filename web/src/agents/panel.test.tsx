@@ -403,6 +403,25 @@ describe('the panel', () => {
     expect(within(agents).getByText('ghost').closest('li')?.textContent).toContain('offline');
   });
 
+  it('opens an agent card from its name, separately from session expansion', async () => {
+    const socket = await openApp();
+    await showRoster(socket, [session(100, 2), agentSession()]);
+    const agents = panel().getByRole('list', { name: 'Agents' });
+    const name = within(agents).getByRole('button', { name: 'bot' });
+    fireEvent.click(name);
+    const card = screen.getByRole('dialog', { name: 'bot' });
+    expect(card.querySelector('.avatar')).not.toBeNull();
+    expect(card.querySelector('.profile-card-kind')?.textContent).toBe('Agent');
+    expect(card.querySelector('[data-identity="agent"]')).not.toBeNull();
+    expect(within(card).getByText('online')).toBeDefined();
+    expect(within(card).getAllByRole('button').map((button) => button.textContent)).toEqual(['Close']);
+    expect(panel().queryByRole('list', { name: 'Sessions of bot' })).toBeNull();
+    fireEvent.keyDown(card, { key: 'Escape' });
+    expect(document.activeElement).toBe(name);
+    fireEvent.click(panel().getByRole('button', { name: 'Show sessions for bot' }));
+    await panel().findByRole('list', { name: 'Sessions of bot' });
+  });
+
   it.each<[SessionStatus, string]>([
     ['online', 'online'],
     ['idle', 'online'],
@@ -458,7 +477,7 @@ describe('the panel', () => {
     server.runList = [run({ id: 41 }), run({ id: 40, state: 'completed', ended_at: at, task: 'Earlier job' })];
     const socket = await openApp();
     await showRoster(socket, [agentSession({ outcome_unknown: false })]);
-    fireEvent.click(panel().getByRole('button', { name: 'bot' }));
+    fireEvent.click(panel().getByRole('button', { name: 'Show sessions for bot' }));
     const sessions = await panel().findByRole('list', { name: 'Sessions of bot' });
     expect(sessions.textContent).toContain('client: adapter/1');
     expect(sessions.textContent).toContain('claude-code/fable');
@@ -575,6 +594,8 @@ describe('the member list the socket sends', () => {
     const agents = () => panel().getByRole('list', { name: 'Agents' });
     expect(within(agents()).getByText('bot')).toBeDefined();
     expect(author.querySelector('[data-identity="agent"]')).not.toBeNull();
+    fireEvent.click(within(agents()).getByRole('button', { name: 'bot' }));
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Close' }));
     // The server no longer lists the agent, so a re-read agrees with the frame.
     server.members = { members: without(3) };
     socket.send(memberList(without(3)));
@@ -582,6 +603,8 @@ describe('the member list the socket sends', () => {
     await waitFor(() => {
       expect(within(agents()).queryByText('bot')).toBeNull();
     });
+    expect(screen.queryByRole('dialog')).toBeNull();
+    expect(document.activeElement).toBe(panel().getByRole('heading', { name: 'People' }));
     const after = screen.getByText('hello from bot').closest('li') as HTMLElement;
     expect(after.querySelector('[data-identity="agent"]')).toBeNull();
     expect(within(agents()).getByText('ghost')).toBeDefined();
@@ -664,7 +687,7 @@ describe('the member list the socket sends', () => {
 
 async function openRunDetail(socket: FakeSocket, sessionOver: Json = {}) {
   await showRoster(socket, [session(100, 2), agentSession(sessionOver)]);
-  fireEvent.click(panel().getByRole('button', { name: 'bot' }));
+  fireEvent.click(panel().getByRole('button', { name: 'Show sessions for bot' }));
   fireEvent.click(await panel().findByRole('button', { name: 'Open run #41' }));
   return screen.findByRole('article', { name: 'Run detail' });
 }
@@ -692,7 +715,7 @@ describe('run detail', () => {
     server.runs[40] = run({ id: 40, state: 'completed', ended_at: at, task: 'Earlier job' });
     const socket = await openApp();
     await showRoster(socket, [agentSession({ current_run: undefined, task: undefined })]);
-    fireEvent.click(panel().getByRole('button', { name: 'bot' }));
+    fireEvent.click(panel().getByRole('button', { name: 'Show sessions for bot' }));
     fireEvent.click(await panel().findByRole('button', { name: 'Run #40 · completed' }));
     const detail = within(await screen.findByRole('article', { name: 'Run detail' }));
     expect(detail.getByTestId('run-state').textContent).toBe('completed');
@@ -713,7 +736,7 @@ describe('run detail', () => {
     delete server.runs[41];
     const socket = await openApp();
     await showRoster(socket, [agentSession()]);
-    fireEvent.click(panel().getByRole('button', { name: 'bot' }));
+    fireEvent.click(panel().getByRole('button', { name: 'Show sessions for bot' }));
     fireEvent.click(await panel().findByRole('button', { name: 'Open run #41' }));
     await panel().findByText('This run is gone, or you can no longer see it');
     expect(screen.queryByRole('article', { name: 'Run detail' })).toBeNull();

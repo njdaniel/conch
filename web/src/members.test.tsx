@@ -620,3 +620,37 @@ describe('a removed person does not get their menu or question back (issue #1450
     expect(screen.queryByRole('menu')).toBeNull();
   });
 });
+
+describe('a person profile card', () => {
+  it('opens from a people row and follows member marks and presence without a reload', () => {
+    const p = props('member');
+    const view = render(<Members {...p} people={people} />);
+    const opener = within(row('ada')).getByRole('button', { name: 'ada' });
+    fireEvent.click(opener);
+    const card = screen.getByRole('dialog', { name: 'ada' });
+    expect(card.querySelector('.avatar')).not.toBeNull();
+    expect(within(card).getByText('Person')).toBeDefined();
+    expect(within(card).getByText('Manager')).toBeDefined();
+    expect(within(card).getByText('offline')).toBeDefined();
+    expect(document.activeElement).toBe(within(card).getByRole('button', { name: 'Close' }));
+
+    const demoted = { ...p, members: memberList.map((member) => member.principal_id === 2 ? { ...member, manages: false } : member) };
+    view.rerender(<Members {...demoted} people={people} />);
+    expect(within(screen.getByRole('dialog', { name: 'ada' })).queryByText('Manager')).toBeNull();
+    const changed = people.map((person) => person.id === 2 ? { ...person, state: 'online' as const, live: 2 } : person);
+    view.rerender(<Members {...demoted} people={changed} />);
+    expect(within(screen.getByRole('dialog', { name: 'ada' })).getByText('online (2 sessions)')).toBeDefined();
+    expect(within(screen.getByRole('list', { name: 'Online — 1' })).getByRole('button', { name: 'ada' })).toBeDefined();
+  });
+
+  it.each(['removed', 'hidden'])('closes and focuses People when the person is %s', () => {
+    const p = props('member');
+    const view = render(<Members {...p} people={people} />);
+    fireEvent.click(within(row('ada')).getByRole('button', { name: 'ada' }));
+    expect(screen.getByRole('dialog', { name: 'ada' })).toBeDefined();
+    const heading = screen.getByRole('heading', { name: 'People' });
+    view.rerender(<Members {...p} members={memberList.filter((member) => member.principal_id !== 2)} people={people.filter((person) => person.id !== 2)} />);
+    expect(screen.queryByRole('dialog')).toBeNull();
+    expect(document.activeElement).toBe(heading);
+  });
+});

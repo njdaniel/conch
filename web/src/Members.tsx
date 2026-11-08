@@ -5,6 +5,7 @@ import * as api from './api';
 import { ManifestReads } from './admin/AIAdminCard';
 import { Avatar } from './Icons';
 import { IdentityMarks } from './Identity';
+import { ProfileCard } from './ProfileCard';
 import { memberName } from './guestName';
 import { ActionsMenu, useOpeners, type MenuItem } from './MessageMenu';
 import type { Entry } from './agents/join';
@@ -36,6 +37,7 @@ export interface MemberControlsProps {
   // person, kept above the Online and Offline lists.
   readonly rowUi?: (principalId: number) => RowUi;
   readonly setRowUi?: (principalId: number, patch: Partial<RowUi>) => void;
+  readonly onProfileDisappear?: () => void;
 }
 
 function displayName(member: ChannelMemberV1): string {
@@ -222,8 +224,9 @@ export interface RowUi {
   readonly menuOpen: boolean;
   readonly confirming: boolean;
   readonly moderating: ModerationOperation | null;
+  readonly profileOpen: boolean;
 }
-const noUi: RowUi = { menuOpen: false, confirming: false, moderating: null };
+const noUi: RowUi = { menuOpen: false, confirming: false, moderating: null, profileOpen: false };
 
 export function MemberRow({
   className,
@@ -382,13 +385,24 @@ function PeopleGroup({ title, people, controls }: { readonly title: string; read
     <>
       <h4>{`${title} — ${String(people.length)}`}</h4>
       <ul aria-label={`${title} — ${String(people.length)}`}>
-        {people.map((person) => (
-          <MemberRow key={`${String(controls.channel.id)}:${String(person.id)}`} {...controls} principalId={person.id} className={`ag-person state-${person.state}`}>
-            <Avatar id={person.id} name={person.name} />
-            <span className="ag-name">{person.name}</span>
-            {person.live > 1 ? <span> ({person.live} sessions)</span> : null} <span className="ag-status">{person.state}</span>
-          </MemberRow>
-        ))}
+        {people.map((person) => {
+          const member = controls.members.find((m) => m.principal_id === person.id);
+          return (
+            <MemberRow key={`${String(controls.channel.id)}:${String(person.id)}`} {...controls} principalId={person.id} className={`ag-person state-${person.state}`}>
+              <Avatar id={person.id} name={person.name} />
+              <ProfileCard
+                id={person.id}
+                person={{ ...person, role: member?.role, manages: member?.manages, can_decide: member?.can_decide, guest: member?.guest }}
+                viewer={controls.viewer.id}
+                className="ag-name"
+                open={controls.rowUi?.(person.id).profileOpen}
+                onOpenChange={(open) => { controls.setRowUi?.(person.id, { profileOpen: open }); }}
+                onDisappear={controls.onProfileDisappear}
+              />
+              {person.live > 1 ? <span> ({person.live} sessions)</span> : null} <span className="ag-status">{person.state}</span>
+            </MemberRow>
+          );
+        })}
       </ul>
     </>
   );
@@ -396,6 +410,7 @@ function PeopleGroup({ title, people, controls }: { readonly title: string; read
 
 export function Members({ people, ...controls }: MemberControlsProps & { readonly people: readonly Entry[] }) {
   const [feedback, setFeedback] = useState<string | null>(null);
+  const heading = useRef<HTMLHeadingElement>(null);
   const [rowUis, setRowUis] = useState<{ readonly channel: number; readonly byId: Readonly<Record<number, RowUi>> }>({ channel: controls.channel.id, byId: {} });
   const byId = rowUis.channel === controls.channel.id ? rowUis.byId : {};
   const rowUi = (id: number): RowUi => byId[id] ?? noUi;
@@ -424,7 +439,7 @@ export function Members({ people, ...controls }: MemberControlsProps & { readonl
   const offline = people.filter((p) => p.state === 'offline');
   return (
     <>
-      <h3>People</h3>
+      <h3 ref={heading} tabIndex={-1}>People</h3>
       {feedback === null ? null : <p role="status">{feedback}</p>}
       {canAdd ? <BanList key={`bans-${String(controls.channel.id)}`} {...controls} operator={operator} /> : null}
       {canAdd ? <AddPeople key={controls.channel.id} {...controls} /> : null}
@@ -436,8 +451,8 @@ export function Members({ people, ...controls }: MemberControlsProps & { readonl
         <p className="empty">Nobody</p>
       ) : (
         <>
-          <PeopleGroup title="Online" people={online} controls={{ ...controls, onModerated: setFeedback, rowUi, setRowUi }} />
-          <PeopleGroup title="Offline" people={offline} controls={{ ...controls, onModerated: setFeedback, rowUi, setRowUi }} />
+          <PeopleGroup title="Online" people={online} controls={{ ...controls, onModerated: setFeedback, rowUi, setRowUi, onProfileDisappear: () => { heading.current?.focus(); } }} />
+          <PeopleGroup title="Offline" people={offline} controls={{ ...controls, onModerated: setFeedback, rowUi, setRowUi, onProfileDisappear: () => { heading.current?.focus(); } }} />
         </>
       )}
     </>
@@ -470,11 +485,13 @@ function CommunityRow({
   byId,
   viewer,
   manage,
+  onProfileDisappear,
 }: {
   readonly person: ServerMemberV1;
   readonly byId: ReadonlyMap<number, ServerMemberV1>;
   readonly viewer: number;
   readonly manage?: RowManage | undefined;
+  readonly onProfileDisappear: () => void;
 }) {
   const inviter = person.invited_by === undefined ? undefined : byId.get(person.invited_by);
   const [menuOpen, setMenuOpen] = useState(false);
@@ -492,7 +509,7 @@ function CommunityRow({
   return (
     <li className={`community-member${has ? ' member-row has-actions' : ''}`} {...openers}>
       <Avatar id={person.id} name={person.name} />
-      <span className="community-name">{person.name}</span>
+      <ProfileCard id={person.id} person={person} viewer={viewer} className="community-name" onDisappear={onProfileDisappear} />
       <IdentityMarks {...person} id={person.id} viewer={viewer} />
       {person.voice_allowed === undefined ? null : <span className="hint">{person.voice_allowed ? ' · voice on' : ' · voice off'}</span>}
       {person.may_invite === undefined ? null : <span className="hint">{person.may_invite ? ' · can invite' : ' · cannot invite'}</span>}
@@ -706,6 +723,7 @@ export function CommunityMembers({
                   person={person}
                   byId={byId}
                   viewer={viewer}
+                  onProfileDisappear={() => { noteLine.current?.focus(); }}
                   manage={who === undefined ? undefined : { who, origin, rows, readRows, beginIssued: () => {
                       const started = context.current;
                       return (issuer, items) => {
