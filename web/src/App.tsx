@@ -80,7 +80,7 @@ import { usePreview } from './preview/usePreview';
 import type { ServerMemberV1 } from './schema/principal';
 import { AppearanceSettings } from './AppearanceSettings';
 import { applyAppearance, defaultAppearance, type AppearancePreferences } from './appearance';
-import { storedName } from './spoilerFiles';
+import { forgetFileNames, storedName } from './spoilerFiles';
 
 const noUnread: ReadonlyMap<string, number> = new Map();
 const checkingAudience = 'Checking who this draft goes to…';
@@ -601,6 +601,11 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
     setMessageEvent(null);
     setEditEvent(null);
   }, [signedIn, principal?.id]);
+  // File ids belong to one server and one sign-in: the stored names recorded
+  // from their metadata (spoilerFiles) are dropped when the session ends or is
+  // replaced (sign-out, another account, another origin, unmount on restart or
+  // profile switch), so none can match the next session's ids.
+  useEffect(() => forgetFileNames, [origin, signedIn, principal?.id]);
   // An edited message (issue #845): the copy goes to whatever the page holds
   // of it, the open conversation and a notification alike, and is dropped
   // where nothing holds it. It is never a new message.

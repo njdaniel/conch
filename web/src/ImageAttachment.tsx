@@ -4,7 +4,7 @@ import { platform } from './platform';
 import { formatSize } from './fileSize';
 import { maxImageEncodedBytes, validateImage } from './image';
 import { Spoiler } from './Spoiler';
-import { isSpoilerName, shownName } from './spoilerFiles';
+import { isSpoilerName, rememberFileName, shownName } from './spoilerFiles';
 
 interface AttachmentView {
   // The stored name, as the server has it. A spoiler's shown name drops the
@@ -135,6 +135,7 @@ export function ImageAttachment({
         return;
       }
       const filename = metadata.value.filename;
+      rememberFileName(fileId, filename);
       nameSink.current?.(filename);
       const size = metadata.value.size;
       const mediaType = metadata.value.media_type;

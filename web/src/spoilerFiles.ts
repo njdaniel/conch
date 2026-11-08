@@ -1,3 +1,4 @@
+import { useSyncExternalStore } from 'react';
 import { previewText } from './Linkified';
 import { fileAttachmentPayloadSchema, MAX_FILE_NAME_BYTES, SPOILER_FILE_PREFIX } from './schema/file';
 import type { MessageV2 } from './schema/message';
@@ -67,15 +68,66 @@ export function canSpoilerName(name: string): boolean {
   return byteLength(extension) < MAX_FILE_NAME_BYTES - byteLength(SPOILER_FILE_PREFIX);
 }
 
+// The stored names of files this page has read the metadata of, by file id.
+// ValidateFileName allows ", " inside a name, so a body of joined names cannot
+// always be split back into them; a name read from the server can be matched
+// against the body instead. Bounded, oldest first out.
+const knownNames = new Map<number, string>();
+const maxKnownNames = 500;
+let knownVersion = 0;
+const knownListeners = new Set<() => void>();
+
+// rememberFileName records the stored name the server has for a file, and
+// wakes the views that quote names (useKnownFileNames).
+export function rememberFileName(fileId: number, name: string): void {
+  if (knownNames.get(fileId) === name) return;
+  knownNames.delete(fileId);
+  knownNames.set(fileId, name);
+  if (knownNames.size > maxKnownNames) {
+    const oldest = knownNames.keys().next();
+    if (oldest.done !== true) knownNames.delete(oldest.value);
+  }
+  knownVersion++;
+  for (const listener of [...knownListeners]) listener();
+}
+
+// forgetFileNames empties the record (tests, and a change of account).
+export function forgetFileNames(): void {
+  knownNames.clear();
+  knownVersion++;
+  for (const listener of [...knownListeners]) listener();
+}
+
+// useKnownFileNames re-renders its caller when a file name is recorded, so an
+// excerpt or a preview drawn from the record catches up with it.
+export function useKnownFileNames(): number {
+  return useSyncExternalStore(
+    (listener) => {
+      knownListeners.add(listener);
+      return () => { knownListeners.delete(listener); };
+    },
+    () => knownVersion,
+  );
+}
+
 // attachmentNames is the stored names an image-only message carries as its
 // body (the composer joins them with ", "), or null when the body is more than
-// that. It must have exactly one part per attached file and hold no "||", so a
-// caption (a text spoiler, commas inside it) is never taken for names.
+// that. It holds no "||", so a caption (a text spoiler, commas inside it) is
+// never taken for names. When the stored name of every attached file is known
+// the body must be exactly those names joined, which tells names that hold ", "
+// apart; otherwise it must split into exactly one part per attached file.
 export function attachmentNames(message: Pick<MessageV2, 'body' | 'payload'>): readonly string[] | null {
   const payload = message.payload;
   if (payload?.schema !== fileAttachmentPayloadSchema || message.body.includes('||')) return null;
   const ids = (payload.data as { file_ids?: unknown }).file_ids;
   if (!Array.isArray(ids)) return null;
+  const known: string[] = [];
+  for (const id of ids) {
+    const name = typeof id === 'number' ? knownNames.get(id) : undefined;
+    if (name === undefined) break;
+    known.push(name);
+  }
+  if (known.length === ids.length && known.join(', ') === message.body) return known;
   const parts = message.body.split(', ');
   return parts.length === ids.length && parts.every((part) => part !== '') ? parts : null;
 }

@@ -1,6 +1,6 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { MAX_FILE_NAME_BYTES, SPOILER_FILE_PREFIX } from './schema/file';
-import { attachmentNames, canSpoilerName, displayBody, isSpoilerName, messagePreview, shownName, spoilerName, storedName } from './spoilerFiles';
+import { forgetFileNames, rememberFileName, attachmentNames, canSpoilerName, displayBody, isSpoilerName, messagePreview, shownName, spoilerName, storedName } from './spoilerFiles';
 
 const bytes = (text: string) => new TextEncoder().encode(text).length;
 const prefixed = (rest: string) => `${SPOILER_FILE_PREFIX}${rest}`;
@@ -133,5 +133,41 @@ describe('messagePreview', () => {
     expect(messagePreview({ body: 'x.png', payload: attachment(1) })).toBe('x.png');
     expect(messagePreview({ body: prefixed('x.png') })).toBe(prefixed('x.png'));
     expect(messagePreview({ body: 'see ||this||' })).toBe('see [spoiler]');
+  });
+});
+
+describe('names that hold ", "', () => {
+  const comma = prefixed('trip, day 1.png');
+  const other = prefixed('other.png');
+  const body = `${comma}, ${other}`;
+  beforeEach(() => { forgetFileNames(); });
+  afterEach(() => { forgetFileNames(); });
+
+  it('falls back to the split while the names are not known', () => {
+    expect(attachmentNames({ body, payload: attachment(2) })).toBeNull();
+    expect(messagePreview({ body, payload: attachment(2) })).toBe(body);
+    rememberFileName(1, comma);
+    expect(attachmentNames({ body, payload: attachment(2) })).toBeNull();
+  });
+  it('matches the body against the known stored names', () => {
+    rememberFileName(1, comma);
+    rememberFileName(2, other);
+    expect(attachmentNames({ body, payload: attachment(2) })).toEqual([comma, other]);
+    expect(displayBody({ body, payload: attachment(2) })).toBe('trip, day 1.png, other.png');
+    expect(messagePreview({ body, payload: attachment(2) })).toBe('[spoiler] trip, day 1.png, [spoiler] other.png');
+  });
+  it('does not match a body that is not exactly the known names', () => {
+    rememberFileName(1, comma);
+    rememberFileName(2, other);
+    expect(attachmentNames({ body: `${body} tail`, payload: attachment(2) })).toBeNull();
+    expect(attachmentNames({ body: `${other}, ${comma}`, payload: attachment(2) })).toBeNull();
+  });
+  it('never turns a body with || into names, known names or not', () => {
+    rememberFileName(1, prefixed('a, b'));
+    expect(attachmentNames({ body: `${prefixed('a, b')} ||x||`, payload: attachment(1) })).toBeNull();
+    expect(messagePreview({ body: `${prefixed('a, b')} ||x, y||`, payload: attachment(1) })).not.toContain('x, y');
+    rememberFileName(1, prefixed('a||b'));
+    expect(attachmentNames({ body: prefixed('a||b'), payload: attachment(1) })).toBeNull();
+    expect(messagePreview({ body: prefixed('a||b'), payload: attachment(1) })).toBe(prefixed('a||b'));
   });
 });

@@ -9,7 +9,7 @@ import { Avatar, PrivateMark } from './Icons';
 import { IdentityMarks } from './Identity';
 import type { IdentityKey } from './identity';
 import { Linkified, previewText } from './Linkified';
-import { displayBody } from './spoilerFiles';
+import { displayBody, useKnownFileNames } from './spoilerFiles';
 import { ImageAttachment } from './ImageAttachment';
 import { loadStored, saveEdit, saveReplies } from './state/draftStore';
 import { canEdit, EditedMarker, editEnds, editsLeft, editWindowMs, MessageEditor } from './MessageEdit';
@@ -290,7 +290,9 @@ export function excerptOf(body: string): string {
 }
 
 // replyContext quotes the root from the copy this page holds, which the
-// server sent to this viewer only if they may read it; no copy, no quote.
+// server sent to this viewer only if they may read it; no copy, no quote. An
+// image-only root is quoted by its shown names, the stored ones matched when
+// they are known (see attachmentNames).
 function replyContext(root: MessageV2 | undefined, people: ReadonlyMap<number, Person>): ReplyContext | null {
   return root === undefined ? null : { author: authorOf(root, people), excerpt: excerptOf(displayBody(root)) };
 }
@@ -631,6 +633,9 @@ export function Conversation({
   // stay the member list alone.
   const authorIds = useMemo(() => [...new Set([...chat.byId.values()].filter((m) => m.guest_author === undefined).map((m) => m.author_id))], [chat.byId]);
   const people = useAuthorNames(channel, authorIds, members, onUnauthorized);
+  // A file name recorded later (an attachment's metadata loads) redraws the
+  // reply excerpts that quote it.
+  useKnownFileNames();
   const log = useRef<HTMLDivElement>(null);
   // Whether the reader is at the bottom, so new messages follow them.
   const atBottom = useRef(true);
