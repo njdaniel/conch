@@ -97,6 +97,7 @@ export function Lobby({
   signOutProblem,
   passwordSet = false,
   banner,
+  band,
   visit,
   admin,
   onSettingsOpen,
@@ -170,6 +171,9 @@ export function Lobby({
   // Shown above the conversation: a guest's visit, or what signing in from
   // an invite did not do (issue #713).
   readonly banner?: ReactNode;
+  // A band across the page under the top bar, on every phone view (Preview as
+  // member, issue #1517); the page has none otherwise.
+  readonly band?: ReactNode;
   // For a temporary guest, what Settings says in place of the sign-outs:
   // a visit ends with End visit, in the banner.
   readonly visit?: ReactNode;
@@ -361,9 +365,10 @@ export function Lobby({
     <JoiningSettings.Provider value={joining}>
     <SettingsOpen.Provider value={settingsOpen}>
     <AddPerson.Provider value={onAddPerson === undefined ? null : addPerson}>
-      <div ref={lobbyEl} className={phone ?`lobby phone view-${view}${live ? ' in-voice' : ''}` : 'lobby'}>
+      <div ref={lobbyEl} className={`${phone ? `lobby phone view-${view}${live ? ' in-voice' : ''}` : 'lobby'}${band === undefined ? '' : ' has-band'}`}>
         {/* While Settings is open the rest of the page is inert: the panel is
             modal, and focus cannot wander behind its backdrop. */}
+        <div className="top-group" inert={band !== undefined && (settingsOpen || asking)}>
         <header className="topbar" inert={settingsOpen || asking}>
           <h1 className="brand">Conch</h1>
           <div role="status" aria-label="Status" className="status">
@@ -406,6 +411,8 @@ export function Lobby({
             </button>
           </div>
         </header>
+        {band}
+        </div>
         <div className={panelOpen ? 'areas' : 'areas side-closed'} inert={settingsOpen || asking}>
           {/* The switcher's entry is above the Channels navigation, not in it: that holds channel controls only. */}
           <div className="channels">

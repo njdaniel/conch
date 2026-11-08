@@ -2160,6 +2160,104 @@ label {
 }
 
 .composer-box {
+  position: relative;
+}
+
+/* The toolbar sits in the box's row, after the text: no extra height. */
+.composer-formatting {
+  display: flex;
+  flex: none;
+  gap: 2px;
+  align-self: flex-end;
+}
+
+.composer-formatting button {
+  min-width: 1.75rem;
+  min-height: 1.75rem;
+  padding: 0 0.3rem;
+  font-size: var(--small);
+}
+
+.format-toggle {
+  display: none;
+  min-width: 1.75rem;
+  min-height: 1.75rem;
+  padding: 0 0.3rem;
+}
+
+/* Where the row is too narrow to hold the toolbar beside the text (a phone, a
+   tablet, a window at 200%: it would squeeze the textarea to nothing), it is
+   one small button and the toolbar opens above the box on demand, over the
+   log, and takes no room while closed. */
+@media (max-width: 1199px) {
+  .format-toggle {
+    display: inline-flex;
+    align-items: center;
+  }
+
+  .composer-formatting {
+    display: none;
+  }
+
+  .composer-formatting.open {
+    display: flex;
+    position: absolute;
+    bottom: calc(100% + var(--s1));
+    left: 0;
+    padding: var(--s1);
+    background: var(--raised);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius);
+  }
+}
+
+.composer-formatting code {
+  font-size: var(--small);
+}
+
+.spoiler > button {
+  display: inline;
+  min-width: 0;
+  min-height: 0;
+  padding: 0.1rem 0.35rem;
+  font-size: 0.85em;
+}
+
+.spoiler:not(.revealed) > button {
+  color: var(--muted);
+  background: var(--hover);
+}
+
+.spoiler-content {
+  margin-left: 0.25rem;
+  background: var(--raised);
+}
+
+.message .body pre,
+.message .body blockquote,
+.version-body pre,
+.version-body blockquote {
+  margin: 0.35rem 0;
+}
+
+.message .body pre,
+.version-body pre {
+  padding: var(--s2);
+  overflow-x: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+
+.message .body blockquote,
+.version-body blockquote {
+  padding-left: var(--s3);
+  border-left: 3px solid var(--border-strong);
+}
+
+.composer-box {
   display: flex;
   align-items: flex-end;
   gap: var(--s2);
@@ -5277,6 +5375,70 @@ button.link {
 .reactions .emoji-picker, .reactor-page { flex-basis: 100%; max-width: 100%; min-width: 0; }
 .reactor-page { border: 1px solid currentColor; border-radius: .5rem; padding: .5rem; overflow-wrap: anywhere; }
 .reactor-page ul { max-height: 16rem; overflow-y: auto; }
+
+/* Preview as member (issue #1517). The top bar and the band under it are one
+   grid row; without a band the wrapper draws nothing of its own. */
+.top-group {
+  display: contents;
+}
+
+.lobby.has-band .top-group {
+  display: block;
+}
+
+.preview-band {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s2);
+  padding: var(--s2) var(--s4);
+  background: var(--accent-bg);
+  border-bottom: 1px solid var(--accent);
+  color: var(--text);
+}
+
+.preview-band p {
+  margin: 0;
+  flex: 1 1 14rem;
+  overflow-wrap: anywhere;
+}
+
+.preview-band .problem {
+  flex-basis: 100%;
+}
+
+@media (max-width: 699px) {
+  .preview-band button {
+    min-height: 44px;
+    min-width: 44px;
+  }
+}
+
+.preview-placeholder {
+  margin: var(--s4);
+  padding: var(--s4);
+  border: 1px dashed var(--border);
+  border-radius: var(--radius);
+  color: var(--muted, var(--text));
+}
+
+.preview-conversation {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.preview-controls ul,
+.preview-people ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.preview-controls li {
+  margin: var(--s1) 0;
+  overflow-wrap: anywhere;
+}
 
 /* The quick channel switcher (issue #1492). */
 .channel-nav {

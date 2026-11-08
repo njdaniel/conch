@@ -653,10 +653,10 @@ describe('invites', () => {
   // Issue #1051: a newer server names a permission this bundle does not know.
   // The error document still reads, so the code is passed through rather than
   // dropped with the document.
-  it('passes a refusal naming an unknown permission through by its code', async () => {
+  it('passes a refusal naming an unknown permission through by its code, and names the permission as the server wrote it', async () => {
     await signedInFrom(window.localStorage, memberToken);
     serve(() => json({ code: 'permission_denied', message: 'no', permission: 'fly_the_server' }, 403));
-    expect(await listChannels()).toEqual({ ok: false, failure: 'invalid', code: 'permission_denied' });
+    expect(await listChannels()).toEqual({ ok: false, failure: 'invalid', code: 'permission_denied', permission: 'fly_the_server' });
   });
 
   it('reads a whoami naming an unknown permission, and keeps it', async () => {

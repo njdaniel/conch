@@ -945,14 +945,14 @@ func TestManagerStopsAShare(t *testing.T) {
 	f, room := newShareFixture(t)
 	f.mustClaim(t, "ann")
 	f.publish(room, "ann", true, false)
-	if res := f.stopShare(t, "ann2", "ops"); res.status != http.StatusForbidden {
+	if res := f.stopShareOf(t, "ann2", "ann"); res.status != http.StatusForbidden {
 		t.Fatalf("a member stops a share = %d %s, want 403", res.status, res.body)
 	}
 	no, yes := false, true
 	if _, err := f.srv.store.PutChannelMember(context.Background(), "system", f.ops.ID, f.ids["ann2"], 0, &no, &yes); err != nil {
 		t.Fatal(err)
 	}
-	if res := f.stopShare(t, "ann2", "ops"); res.status != http.StatusNoContent {
+	if res := f.stopShareOf(t, "ann2", "ann"); res.status != http.StatusNoContent {
 		t.Fatalf("a manager stops a share = %d %s, want 204", res.status, res.body)
 	}
 	if got := f.sharing(t, f.ops); got != "-" {
@@ -964,7 +964,7 @@ func TestManagerStopsAShare(t *testing.T) {
 	if _, err := f.srv.store.PutChannelMember(context.Background(), "system", f.ops.ID, f.ids["vic"], 0, &no, &yes); err != nil {
 		t.Fatal(err)
 	}
-	if res := f.stopShare(t, "vic", "ops"); res.status != http.StatusNoContent {
+	if res := f.stopShareOf(t, "vic", "ann"); res.status != http.StatusNoContent {
 		t.Fatalf("a manager without voice stops a share = %d %s, want 204", res.status, res.body)
 	}
 }

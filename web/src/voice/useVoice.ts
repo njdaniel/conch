@@ -178,6 +178,28 @@ function writeCamera(choice: Camera | null): void {
 // Every voice client this page made, for leaveVoice.
 const clients = new Set<VoiceClient>();
 
+// Whether this page is in voice now, on any client (Preview as member refuses
+// to start, and ends, while it is: issue #1517).
+const voiceListeners = new Set<() => void>();
+function notifyVoice(): void {
+  for (const listener of [...voiceListeners]) listener();
+}
+function subscribeVoice(listener: () => void): () => void {
+  voiceListeners.add(listener);
+  return () => {
+    voiceListeners.delete(listener);
+  };
+}
+function anyJoined(): boolean {
+  return [...clients].some((c) => {
+    const phase = c.snapshot().phase;
+    return phase !== 'idle' && phase !== 'stopped';
+  });
+}
+export function useInVoice(): boolean {
+  return useSyncExternalStore(subscribeVoice, anyJoined);
+}
+
 // leaveVoice leaves voice on every client of the page, and resolves once each
 // has: the camera stopped and its claim released, naming it, the share
 // stopped, the last report sent. Signing out calls it first, while the
@@ -397,8 +419,12 @@ export function useVoice({
   // Every client of the page, for leaveVoice.
   useEffect(() => {
     clients.add(client);
+    const stop = client.subscribe(notifyVoice);
+    notifyVoice();
     return () => {
+      stop();
       clients.delete(client);
+      notifyVoice();
     };
   }, [client]);
 
