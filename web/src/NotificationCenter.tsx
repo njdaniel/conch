@@ -1,4 +1,4 @@
-import { messagePreview } from './spoilerFiles';
+import { messagePreview, useKnownFileNames } from './spoilerFiles';
 import { useId, useState } from 'react';
 import { Glyph } from './Icons';
 import type { NotificationAlert } from './useNotifications';
@@ -9,6 +9,8 @@ export function NotificationCenter({ alerts, onOpen, onClear }: {
   readonly onClear: () => void;
 }) {
   const id = useId();
+  // A name recorded later redraws the previews.
+  useKnownFileNames();
   const [open, setOpen] = useState(false);
   return (
     <div className="notification-center">

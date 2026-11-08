@@ -1,6 +1,8 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { App } from './App';
+import { SPOILER_FILE_PREFIX } from './schema/file';
+import { attachmentNames, forgetFileNames, rememberFileName } from './spoilerFiles';
 
 const origin = 'http://127.0.0.1:8080';
 const secret = 'conch_secret_token_value';
@@ -622,6 +624,23 @@ describe('lobby', () => {
     expect(screen.getByRole('alert').textContent).toBe('');
     expect(window.localStorage.getItem('conch.web.token')).toBeNull();
     expect(window.sessionStorage.getItem('conch.web.token')).toBeNull();
+  });
+
+  it('forgets the file names recorded in a session when it ends, so none matches the next one', async () => {
+    serve({ ...asMember, '/v1/credentials/current': () => new Response(null, { status: 204 }) });
+    forgetFileNames();
+    render(<App origin={origin} />);
+    signIn();
+    fireEvent.click(await screen.findByRole('button', { name: 'Settings' }));
+    const stored = `${SPOILER_FILE_PREFIX}trip, day 1.png`;
+    const sent = { body: stored, payload: { schema: 'conch.file_attachment.v1', data: { file_ids: [1] } } };
+    // Named in the session, the whole body is one name; unknown, it splits in two parts for one file.
+    rememberFileName(1, stored);
+    expect(attachmentNames(sent)).toEqual([stored]);
+    fireEvent.click(await screen.findByRole('button', { name: 'Sign out' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Yes, sign out' }));
+    await screen.findByLabelText('Credential');
+    expect(attachmentNames(sent)).toBeNull();
   });
 
   // Issue #645: revoking the credential ends its sessions, so a session end

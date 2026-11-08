@@ -6,6 +6,7 @@ import { NotificationSettings } from './NotificationSettings';
 import * as api from './api';
 import { mentions, useNotifications, type NotificationAlert } from './useNotifications';
 import { SPOILER_FILE_PREFIX } from './schema/file';
+import { forgetFileNames, rememberFileName } from './spoilerFiles';
 import type { MessageV2 } from './schema/message';
 
 const at = '2026-10-26T00:00:00Z';
@@ -389,6 +390,34 @@ describe('browser permission and cleanup', () => {
     await act(async () => { await result.current.enableNative(); });
     rerender({ ...props(), event: { ...message(4, `${SPOILER_FILE_PREFIX}pic.png`), payload: { schema: 'conch.file_attachment.v1', data: { file_ids: [9] } } } });
     expect(FakeNotification.all[0]?.options.body).toBe('[spoiler] pic.png');
+  });
+
+  it('reads image-only spoilers whose names hold ", " in the center and natively, once the names are known', async () => {
+    const comma = `${SPOILER_FILE_PREFIX}trip, day 1.png`;
+    const body = `${comma}, ${SPOILER_FILE_PREFIX}other.png`;
+    const payload = { schema: 'conch.file_attachment.v1', data: { file_ids: [11, 12] } };
+    const want = '[spoiler] trip, day 1.png, [spoiler] other.png';
+    forgetFileNames();
+    rememberFileName(11, comma);
+    rememberFileName(12, `${SPOILER_FILE_PREFIX}other.png`);
+    const image: NotificationAlert = { id: 'comma', channel: 'general', message: { ...message(2, body), payload }, mention: false };
+    const { container } = render(<NotificationCenter alerts={[image]} onOpen={vi.fn()} onClear={vi.fn()} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Notifications (1)' }));
+    const row = screen.getByRole('button', { name: /New message in #general/ });
+    expect(row.getAttribute('aria-label')).toContain(want);
+    expect(row.textContent).toContain(want);
+    expect(container.textContent).not.toContain(SPOILER_FILE_PREFIX);
+    cleanup();
+
+    visibility('hidden');
+    vi.spyOn(api, 'loadMessagesAscending').mockResolvedValue({ ok: true, complete: true, value: [] });
+    const { result, rerender } = renderHook((p: Props) => useNotifications(p), { initialProps: props() });
+    await act(async () => { await Promise.resolve(); });
+    act(() => { result.current.setPolicy('all'); });
+    await act(async () => { await result.current.enableNative(); });
+    rerender({ ...props(), event: { ...message(5, body), payload } });
+    expect(FakeNotification.all[0]?.options.body).toBe(want);
+    forgetFileNames();
   });
 
   it('hides a spoiler in the center, its accessible name included', () => {
