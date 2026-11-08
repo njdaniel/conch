@@ -19,9 +19,10 @@ use conch_voice_api::{
     VoiceControlErrorCode, VoiceControlHelloV1, VoiceControlPipeAttachedV1, VoiceControlPlayback,
     VoiceControlProtocolErrorV1, VoiceControlProtocolErrorV2, VoiceControlRefusal,
     VoiceControlTalkMode, VoiceDevice, VoiceDevicesConfig, VoiceDevicesPipeWire, VoiceDevicesV1,
-    VoiceParticipant, VoicePresenceRoom, VoicePresenceV1, VoiceRoomGrant, VoiceSessionResponseV1,
-    VoiceTransmitReportV1, VoiceTransmitState, WhoAmIResponseV1, parse_command, parse_command_v2,
-    parse_event, parse_event_v2,
+    VoiceParticipant, VoiceParticipantV2, VoicePresenceRoom, VoicePresenceRoomV2, VoicePresenceV1,
+    VoicePresenceV2, VoiceRoomGrant, VoiceSessionResponseV1, VoiceTransmitReportV1,
+    VoiceTransmitState, WhoAmIResponseV1, parse_command, parse_command_v2, parse_event,
+    parse_event_v2,
 };
 use serde_json::json;
 use support::{FAKE_TOKEN, Reply, Request, Step, Stub, client_for, closed_port};
@@ -150,6 +151,30 @@ fn presence() -> VoicePresenceV1 {
     }
 }
 
+/// The same room as [`presence`], as the v2 document the presence socket carries.
+fn presence_v2() -> VoicePresenceV2 {
+    VoicePresenceV2 {
+        schema: "conch.voice_presence.v2".into(),
+        channel_id: 7,
+        configured: true,
+        available: true,
+        rooms: vec![VoicePresenceRoomV2 {
+            audience: None,
+            participants: vec![VoiceParticipantV2 {
+                principal_id: 3,
+                can_publish: true,
+                transmitting: true,
+                joined_at: stamp(),
+                sharing: false,
+                sharing_audio: false,
+                share_started_at: None,
+                share_quality: None,
+                camera: false,
+            }],
+        }],
+    }
+}
+
 fn address_with_password() -> ServerAddress {
     ServerAddress::parse(&format!("http://nick:{FAKE_PASSWORD}@127.0.0.1:8080/conch")).unwrap()
 }
@@ -162,7 +187,7 @@ async fn every_public_type_can_be_printed_without_showing_a_secret() {
     let client = Client::new(&address, &Secret::new(FAKE_TOKEN), Duration::from_secs(5)).unwrap();
 
     let stub = Stub::websocket(vec![Step::Text(
-        serde_json::to_string(&presence()).unwrap(),
+        serde_json::to_string(&presence_v2()).unwrap(),
     )])
     .await;
     let mut stream = stub.client().presence_stream("general").await.unwrap();
@@ -213,6 +238,12 @@ async fn every_public_type_can_be_printed_without_showing_a_secret() {
         debug("VoiceParticipant", &presence().rooms[0].participants[0]),
         debug("VoicePresenceRoom", &presence().rooms[0]),
         debug("VoicePresenceV1", &presence()),
+        debug(
+            "VoiceParticipantV2",
+            &presence_v2().rooms[0].participants[0],
+        ),
+        debug("VoicePresenceRoomV2", &presence_v2().rooms[0]),
+        debug("VoicePresenceV2", &presence_v2()),
         // Names and descriptions are device-supplied; the document holds nothing else.
         debug("VoiceDevicesV1", &devices()),
         debug("VoiceDevice", &devices().microphones[0]),

@@ -65,8 +65,8 @@ func richModel(t *testing.T) Model {
 		running,
 	)})
 	m.voice.state = voiceLive
-	m.voice.doc = schema.VoicePresenceV1{Configured: true, Available: true, Rooms: []schema.VoicePresenceRoom{
-		{Participants: []schema.VoiceParticipant{person(8, true), person(11, false)}},
+	m.voice.doc = schema.VoicePresenceV2{Configured: true, Available: true, Rooms: []schema.VoicePresenceRoomV2{
+		{Participants: []schema.VoiceParticipantV2{person(8, true), person(11, false)}},
 	}}
 	m.width, m.height = 120, 36
 	return m
@@ -804,20 +804,20 @@ func TestPeoplePane(t *testing.T) {
 func TestVoiceStrip(t *testing.T) {
 	tests := []struct {
 		name   string
-		people []schema.VoiceParticipant
+		people []schema.VoiceParticipantV2
 		setup  func(*Model)
 		want   string
 	}{
-		{"not in this room", []schema.VoiceParticipant{person(8, true)}, nil, "you: not in #general voice · voice: ●8 bob"},
-		{"in this room from another client", []schema.VoiceParticipant{person(7, false), person(8, false)}, nil, "you: in #general voice from another client · voice: 7 alice  8 bob"},
-		{"talking from another client", []schema.VoiceParticipant{person(7, true)}, nil, "you: in #general voice from another client, ● talking · voice: ●7 alice"},
-		{"reconnecting: nothing about you", []schema.VoiceParticipant{person(7, true)}, func(m *Model) { m.voice.state = voiceReconnecting }, "#general voice: reconnecting"},
-		{"LiveKit unavailable: nothing about you", nil, func(m *Model) { m.voice.doc = schema.VoicePresenceV1{Configured: true} }, "#general voice: unavailable"},
+		{"not in this room", []schema.VoiceParticipantV2{person(8, true)}, nil, "you: not in #general voice · voice: ●8 bob"},
+		{"in this room from another client", []schema.VoiceParticipantV2{person(7, false), person(8, false)}, nil, "you: in #general voice from another client · voice: 7 alice  8 bob"},
+		{"talking from another client", []schema.VoiceParticipantV2{person(7, true)}, nil, "you: in #general voice from another client, ● talking · voice: ●7 alice"},
+		{"reconnecting: nothing about you", []schema.VoiceParticipantV2{person(7, true)}, func(m *Model) { m.voice.state = voiceReconnecting }, "#general voice: reconnecting"},
+		{"LiveKit unavailable: nothing about you", nil, func(m *Model) { m.voice.doc = schema.VoicePresenceV2{Configured: true} }, "#general voice: unavailable"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			m := richModel(t)
-			m.voice.doc.Rooms = []schema.VoicePresenceRoom{{Participants: tt.people}}
+			m.voice.doc.Rooms = []schema.VoicePresenceRoomV2{{Participants: tt.people}}
 			if tt.setup != nil {
 				tt.setup(&m)
 			}
@@ -831,7 +831,7 @@ func TestVoiceStrip(t *testing.T) {
 		})
 	}
 	m := richModel(t)
-	m.voice.doc.Rooms = []schema.VoicePresenceRoom{{Participants: []schema.VoiceParticipant{person(11, true), person(8, false)}}}
+	m.voice.doc.Rooms = []schema.VoicePresenceRoomV2{{Participants: []schema.VoiceParticipantV2{person(11, true), person(8, false)}}}
 	for _, width := range []int{80, 50, 30, 12} {
 		if got := m.voiceStrip(width); cellWidth(got) > width {
 			t.Errorf("width %d: strip is %d cells: %q", width, cellWidth(got), got)

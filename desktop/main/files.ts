@@ -19,6 +19,7 @@
 import { fileQuery } from '../../web/src/platform/operations.ts';
 import type { BridgeReply, DownloadReply, SaveOutcome } from '../../web/src/platform/desktop/bridge.ts';
 import { fileV1 } from '../../web/src/schema/file.ts';
+import { fromServer } from '../../web/src/schema/validate.ts';
 import { replyOf } from './api/service.ts';
 import type { Client } from './api/client.ts';
 import type { Session } from './api/session.ts';
@@ -169,7 +170,7 @@ export class Files {
     const capture = session.capture();
     const meta = await client.send({ op: 'fileMeta', params: { id }, capture });
     if (meta.kind === 'unauthorized') return 'unauthorized';
-    if (meta.kind !== 'answer' || !meta.ok || fileV1(meta.body).length > 0) return 'failed';
+    if (meta.kind !== 'answer' || !meta.ok || fromServer(fileV1)(meta.body).length > 0) return 'failed';
     const info = meta.body as { filename: string; size: number };
     if (info.size > MAX_DOWNLOAD_BYTES) return 'failed';
     if (!session.current(capture)) return 'failed';

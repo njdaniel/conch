@@ -7,7 +7,7 @@ mod support;
 
 use std::time::{Duration, Instant};
 
-use conch_voice_api::{Error, PresenceEvent, StreamEnd, VoicePresenceV1};
+use conch_voice_api::{Error, PresenceEvent, StreamEnd, VoicePresenceV2};
 use serde_json::{Value, json};
 use support::{FAKE_AUTHORIZATION, FAKE_TOKEN, Reply, Step, Stub};
 
@@ -26,7 +26,7 @@ fn snapshot(principals: &[i64]) -> Value {
         })
         .collect();
     json!({
-        "schema": "conch.voice_presence.v1",
+        "schema": "conch.voice_presence.v2",
         "channel_id": 7,
         "configured": true,
         "available": true,
@@ -52,11 +52,11 @@ fn text(value: &Value) -> Step {
     Step::Text(value.to_string())
 }
 
-fn typed(value: &Value) -> VoicePresenceV1 {
+fn typed(value: &Value) -> VoicePresenceV2 {
     serde_json::from_value(value.clone()).unwrap()
 }
 
-fn snapshot_of(event: Result<PresenceEvent, Error>) -> VoicePresenceV1 {
+fn snapshot_of(event: Result<PresenceEvent, Error>) -> VoicePresenceV2 {
     match event {
         Ok(PresenceEvent::Snapshot(presence)) => presence,
         other => panic!("expected a snapshot, got {other:?}"),
@@ -83,7 +83,10 @@ async fn the_socket_is_asked_for_with_the_token_in_the_header_and_the_channel_in
     let request = stub.only_request();
     assert_eq!(request.method, "GET");
     // The query is encoded as Go's url.Values.Encode does: a space is a plus sign.
-    assert_eq!(request.target, "/v1/voice/ws?channel=war+room%2F%CE%B1");
+    assert_eq!(
+        request.target,
+        "/v1/voice/ws?channel=war+room%2F%CE%B1&schema=conch.voice_presence.v2"
+    );
     assert_eq!(request.header("authorization"), Some(FAKE_AUTHORIZATION));
     // The token is in that one header and never in the address.
     assert!(!request.target.contains(FAKE_TOKEN));
@@ -99,6 +102,45 @@ async fn the_socket_is_asked_for_with_the_token_in_the_header_and_the_channel_in
 }
 
 #[tokio::test]
+async fn a_frame_with_two_sharers_is_read_whole() {
+    // v2 has no one-share rule: the document a v1 stream would never carry.
+    let two = json!({
+        "schema": "conch.voice_presence.v2",
+        "channel_id": 7,
+        "configured": true,
+        "available": true,
+        "rooms": [{"participants": [
+            {"principal_id": 3, "can_publish": true, "transmitting": false,
+             "joined_at": "2026-11-07T11:58:02.250Z", "sharing": true, "sharing_audio": true,
+             "share_started_at": "2026-11-07T12:00:04.125Z",
+             "share_quality": {"resolution": "1080p", "frame_rate": 60}},
+            {"principal_id": 7, "can_publish": true, "transmitting": true,
+             "joined_at": "2026-11-07T12:00:31.000Z", "sharing": true,
+             "share_started_at": "2026-11-07T12:02:10.500Z"}
+        ]}]
+    });
+    let stub = Stub::websocket(vec![text(&two)]).await;
+    let mut stream = stub.client().presence_stream("general").await.unwrap();
+    let got = snapshot_of(stream.next().await);
+    assert_eq!(got, typed(&two));
+    let room = got.channel_room().unwrap();
+    let sharers = room.sharers();
+    assert_eq!(
+        sharers.iter().map(|p| p.principal_id).collect::<Vec<_>>(),
+        [3, 7]
+    );
+    let quality = sharers[0].share_quality.unwrap();
+    assert_eq!(quality.frame_rate, 60);
+    assert!(sharers[1].share_quality.is_none());
+    // The same room as a v1 stream carries is refused, as v1 refuses two sharers.
+    let mut v1 = two.clone();
+    v1["schema"] = json!("conch.voice_presence.v1");
+    let stub = Stub::websocket(vec![text(&v1)]).await;
+    let mut stream = stub.client().presence_stream("general").await.unwrap();
+    assert!(stream.next().await.is_err());
+}
+
+#[tokio::test]
 async fn the_socket_address_keeps_the_servers_path_prefix() {
     let stub = Stub::websocket(vec![text(&snapshot(&[3]))]).await;
     let client = support::client_for(&stub.url("/conch/"), Duration::from_secs(10));
@@ -106,7 +148,7 @@ async fn the_socket_address_keeps_the_servers_path_prefix() {
     snapshot_of(stream.next().await);
     assert_eq!(
         stub.only_request().target,
-        "/conch/v1/voice/ws?channel=general"
+        "/conch/v1/voice/ws?channel=general&schema=conch.voice_presence.v2"
     );
 }
 
@@ -276,7 +318,7 @@ async fn a_socket_dropped_before_any_snapshot_is_a_drop() {
 #[tokio::test]
 async fn a_frame_that_cannot_be_accepted_is_an_error_and_never_skipped() {
     let mut other_schema = snapshot(&[3]);
-    other_schema["schema"] = json!("conch.voice_presence.v2");
+    other_schema["schema"] = json!("conch.voice_presence.v1");
     let mut unconfigured_but_available = snapshot(&[]);
     unconfigured_but_available["configured"] = json!(false);
     let mut ghost_talker = snapshot(&[3]);

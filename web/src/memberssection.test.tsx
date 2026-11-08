@@ -294,6 +294,7 @@ describe('what each viewer is offered', () => {
     const region = await open();
     const m = await menu(rowOf(region, 'member-1'), 'member-1');
     expect(labels(m)).toEqual([
+      'Preview as member',
       'Turn voice off',
       'Stop member links',
       'Add to a channel…',

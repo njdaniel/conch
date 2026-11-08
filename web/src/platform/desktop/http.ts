@@ -60,6 +60,10 @@ function fromReply(reply: BridgeReply): Promise<Response> {
 }
 
 function requestOf(call: Call, body?: unknown, keepalive?: boolean): BridgeRequest {
+  // The bridge has no preview header yet: a preview read sent without it would
+  // answer as the administrator, so it is never sent. The page offers no
+  // preview on the desktop (platform.name).
+  if (call.previewAs !== undefined) throw new TypeError(reasons.unsupported);
   return {
     operation: call.op,
     ...(call.params === undefined ? {} : { params: call.params }),
