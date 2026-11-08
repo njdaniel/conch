@@ -125,7 +125,7 @@ import {
 import type { DisconnectCause } from './disconnect';
 import type { Camera, CameraProfile, KeptCamera } from './camera';
 import type { CameraTrack, Microphone, Output, Processing, Room, RoomEvents, ShareSink } from './connection';
-import { principalOf } from './presence';
+import { personOf, principalOf, publisherOf } from './presence';
 import { LogRing, Redactor } from './redact';
 import { defaultShareQuality, type Captured, type KeptScreen, type ShareDirection, type ShareQuality, type ShareSample } from './share';
 
@@ -628,6 +628,10 @@ function causeOf(reason: DisconnectReason | undefined): DisconnectCause {
   }
 }
 
+// A requested size larger than any layer a share publishes (8K): asking for
+// it leaves the choice to adaptive stream (LiveKitAdapter.release).
+const uncapped: Track.Dimensions = { width: 7680, height: 4320 };
+
 const isShare = (source: Track.Source) => source === Track.Source.ScreenShare || source === Track.Source.ScreenShareAudio;
 
 // A share's capture between two connections: still capturing, published on
@@ -737,17 +741,16 @@ class LiveKitAdapter implements Room {
   // The browser ended the capture (its own stop control, or the shared tab
   // or window closed).
   private captureEnded = false;
-  // Each watched stream by publisher, the one focused for the top layer, its
-  // elements and its arrived tracks (voice-multi-share.md §7.1, #1509). The
-  // legacy share fields remain for the single-share attachment.
-  private watching = new Set<number>();
-  private watchAll = false;
+  // Each watched stream by publisher, the one focused for the top layer, the
+  // elements each plays into and its arrived tracks (voice-multi-share.md
+  // §7.1, #1509). A publisher is the person, whether their own p<id> or their
+  // desktop companion p<id>.screen publishes the stream (publisherOf).
+  private watching: ReadonlySet<number> = new Set();
   private focused: number | null = null;
-  private sink: ShareSink | null = null;
   private readonly streamSinks = new Map<number, ShareSink>();
   private readonly remoteShares = new Map<number, { video: RemoteTrack | null; audio: RemoteTrack | null }>();
-  private shareVideo: RemoteTrack | null = null;
-  private shareAudio: RemoteTrack | null = null;
+  // The share pictures held to the lowest layer, by track sid (hold).
+  private readonly held = new Set<string>();
   // The camera this page captured, until it is stopped or kept; its
   // publication once published; whether this adapter is taking it down, so
   // its own unpublish is not reported; and the element of the self-view.
@@ -809,7 +812,7 @@ class LiveKitAdapter implements Room {
         // Subscribed by choice alone, and the choice is made again here, on
         // what arrived: a track whose kind disagrees with its source is let
         // go, never played or shown (S1).
-        const principal = principalOf(participant.identity);
+        const principal = isShare(track.source) ? publisherOf(participant.identity) : principalOf(participant.identity);
         if (!wanted(track.source, track.kind, principal, this.wantsOf(participant))) {
           // A kind its source disagrees with is never wanted, whatever the
           // page shows: remembered, so no later choice subscribes it again.
@@ -834,7 +837,7 @@ class LiveKitAdapter implements Room {
       })
       .on(RoomEvent.TrackUnsubscribed, (track: RemoteTrack, _pub: RemoteTrackPublication, participant?: RemoteParticipant) => {
         if (isShare(track.source)) {
-          const principal = participant === undefined ? [...this.remoteShares].find(([, tracks]) => tracks.video === track || tracks.audio === track)?.[0] : principalOf(participant.identity);
+          const principal = participant === undefined ? [...this.remoteShares].find(([, tracks]) => tracks.video === track || tracks.audio === track)?.[0] : publisherOf(participant.identity);
           if (principal !== null && principal !== undefined) this.unshared(track, principal);
           return;
         }
@@ -1254,7 +1257,7 @@ class LiveKitAdapter implements Room {
   }
 
   async readShareStats(direction: ShareDirection, principal?: number): Promise<ShareSample | null> {
-    const track = direction === 'sent' ? this.screen.find((t) => t.source === Track.Source.ScreenShare) : principal === undefined ? this.shareVideo : (this.remoteShares.get(principal)?.video ?? null);
+    const track = direction === 'sent' ? this.screen.find((t) => t.source === Track.Source.ScreenShare) : principal === undefined ? null : (this.remoteShares.get(principal)?.video ?? null);
     const report = await track?.getRTCStatsReport();
     if (report === undefined) return null;
     const stats: ShareStats[] = [];
@@ -1398,29 +1401,10 @@ class LiveKitAdapter implements Room {
 
   // ---- watching
 
-  setWatching(on: boolean): void {
-    this.watchAll = on;
-    this.subscribeAll();
-  }
-
   setWatches(watched: ReadonlySet<number>, focused: number | null): void {
-    this.watchAll = false;
     this.watching = new Set(watched);
     this.focused = focused;
     this.subscribeAll();
-  }
-
-  attachShare(sink: ShareSink | null): void {
-    const old = this.sink;
-    if (old !== null) {
-      this.shareVideo?.detach(old.video);
-      this.shareAudio?.detach(old.audio);
-    }
-    this.sink = sink;
-    if (sink !== null) {
-      this.shareVideo?.attach(sink.video);
-      this.shareAudio?.attach(sink.audio);
-    }
   }
 
   attachStream(principal: number, sink: ShareSink | null): void {
@@ -1438,21 +1422,50 @@ class LiveKitAdapter implements Room {
     }
   }
 
+  // wantsOf is what this page wants of a participant's tracks. A camera is
+  // the person's own p<id>'s alone (principalOf); a share is keyed by its
+  // publisher, the person or their companion (publisherOf); and own is the
+  // person this page's connection stands for, whatever its identity
+  // (personOf), so their stream is never watched here.
   private wantsOf(participant: Participant | undefined): Wants {
     const principal = participant === undefined ? null : principalOf(participant.identity);
-    const watching = this.watchAll && principal !== null ? new Set([principal]) : this.watching;
-    return { watching, focused: this.focused, own: principalOf(this.room.localParticipant.identity), viewing: this.viewing, shown: this.shown, claimed: principal !== null && this.claimed.has(principal) };
+    return { watching: this.watching, focused: this.focused, own: personOf(this.room.localParticipant.identity), viewing: this.viewing, shown: this.shown, claimed: principal !== null && this.claimed.has(principal) };
   }
 
   private subscribe(pub: RemoteTrackPublication, participant: RemoteParticipant | undefined): void {
     if (this.closed) return;
-    const principal = participant === undefined ? null : principalOf(participant.identity);
+    const principal = participant === undefined ? null : isShare(pub.source) ? publisherOf(participant.identity) : principalOf(participant.identity);
     const wants = this.wantsOf(participant);
     const want = !this.refused.has(pub.trackSid) && wanted(pub.source, pub.kind, principal, wants);
     // What was asked, not what has arrived: a subscription on its way is not
     // asked for again, nor one refused asked back.
     if (pub.isDesired !== want) pub.setSubscribed(want);
-    if (want && pub.source === Track.Source.ScreenShare && principal !== null) pub.setVideoQuality(wants.focused === principal ? VideoQuality.HIGH : VideoQuality.LOW);
+    // Every watched stream but the focused one is held to the lowest layer;
+    // the focused one is left to adaptive stream, which sizes it to its
+    // element: the top layer on a full stage, less on a phone
+    // (voice-multi-share.md §8).
+    if (want && pub.source === Track.Source.ScreenShare && principal !== null) {
+      if (wants.focused === principal) this.release(pub);
+      else this.hold(pub);
+    }
+  }
+
+  // hold caps a stream's picture at the lowest layer, whatever its tile's size.
+  private hold(pub: RemoteTrackPublication): void {
+    if (this.held.has(pub.trackSid)) return;
+    this.held.add(pub.trackSid);
+    pub.setVideoQuality(VideoQuality.LOW);
+  }
+
+  // release lifts that cap. Not setVideoQuality(HIGH): the SDK then asks for
+  // the layer it names and ignores the element's size unless the server
+  // listed a layer under that name, so a focused phone would be sent the top
+  // layer (12-screen-share.spec.ts, measured). Asking for a bound larger than
+  // any layer clears the cap, and the SDK takes the smaller of it and the
+  // element's size: adaptive stream decides again.
+  private release(pub: RemoteTrackPublication): void {
+    if (!this.held.delete(pub.trackSid)) return;
+    pub.setVideoDimensions(uncapped);
   }
 
   private subscribeAll(): void {
@@ -1463,34 +1476,29 @@ class LiveKitAdapter implements Room {
     });
   }
 
+  // shared is a watched stream's track arriving: kept under its publisher,
+  // played into that publisher's tile if it has one, and told.
   private shared(track: RemoteTrack, principal: number): void {
     const current = this.remoteShares.get(principal) ?? { video: null, audio: null };
-    if (track.source === Track.Source.ScreenShare) {
-      current.video = track;
-      this.shareVideo = track;
-    } else {
-      current.audio = track;
-      this.shareAudio = track;
-    }
+    const video = track.source === Track.Source.ScreenShare;
+    const before = video ? current.video : current.audio;
+    if (before !== null && before !== track) before.detach();
+    if (video) current.video = track;
+    else current.audio = track;
     this.remoteShares.set(principal, current);
-    const sink = this.streamSinks.get(principal) ?? this.sink;
-    if (sink !== null) track.attach(track.source === Track.Source.ScreenShare ? sink.video : sink.audio);
-    const arrived = { video: current.video !== null, audio: current.audio !== null };
-    this.events?.onStreamTracks?.(principal, arrived);
-    this.events?.onShareTracks({ video: this.shareVideo !== null, audio: this.shareAudio !== null });
+    const sink = this.streamSinks.get(principal);
+    if (sink !== undefined) track.attach(video ? sink.video : sink.audio);
+    this.events?.onStreamTracks(principal, { video: current.video !== null, audio: current.audio !== null });
   }
 
   private unshared(track: RemoteTrack, principal: number): void {
     track.detach();
     const current = this.remoteShares.get(principal);
-    if (current !== undefined) {
-      if (track === current.video) current.video = null;
-      if (track === current.audio) current.audio = null;
-      this.events?.onStreamTracks?.(principal, { video: current.video !== null, audio: current.audio !== null });
-    }
-    if (track === this.shareVideo) this.shareVideo = null;
-    if (track === this.shareAudio) this.shareAudio = null;
-    this.events?.onShareTracks({ video: this.shareVideo !== null, audio: this.shareAudio !== null });
+    if (current === undefined) return;
+    if (track === current.video) current.video = null;
+    if (track === current.audio) current.audio = null;
+    if (current.video === null && current.audio === null) this.remoteShares.delete(principal);
+    this.events?.onStreamTracks(principal, { video: current.video !== null, audio: current.audio !== null });
   }
 
   // ---- the camera
@@ -1775,15 +1783,12 @@ class LiveKitAdapter implements Room {
     this.wakeGrant();
     for (const { el } of this.elements.values()) el.remove();
     this.elements.clear();
-    this.attachShare(null);
     for (const principal of [...this.streamSinks.keys()]) this.attachStream(principal, null);
     for (const tracks of this.remoteShares.values()) {
       tracks.video?.detach();
       tracks.audio?.detach();
     }
     this.remoteShares.clear();
-    this.shareVideo = null;
-    this.shareAudio = null;
     for (const t of this.remoteCameras.values()) t.detach();
     this.remoteCameras.clear();
     this.cameraViews.clear();

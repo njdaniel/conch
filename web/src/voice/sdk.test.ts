@@ -199,6 +199,7 @@ interface StubRemotePub {
   trackSid?: string;
   setSubscribed: (on: boolean) => void;
   setVideoQuality?: (quality: number) => void;
+  setVideoDimensions?: (dimensions: { width: number; height: number }) => void;
 }
 const state = vi.hoisted((): Stub => {
   const stubFactory = () => () => undefined;
@@ -750,7 +751,7 @@ const events = {
   onDisconnected: () => undefined,
   onSpeakers: () => undefined,
   onScreenEnded: () => undefined,
-  onShareTracks: () => undefined,
+  onStreamTracks: () => undefined,
   onMicrophoneLost: () => undefined,
   onDevicesChanged: () => undefined,
   onOutputMoved: () => undefined,
@@ -1156,10 +1157,12 @@ describe('the microphone chosen', () => {
 });
 
 describe('the watch view', () => {
+  let sids = 0;
   const remotePub = (source: string, kind = source === 'microphone' || source === 'screen_share_audio' ? 'audio' : 'video'): StubRemotePub => {
     const p: StubRemotePub = {
       source,
       kind,
+      trackSid: `TR_${String(++sids)}`,
       isSubscribed: false,
       setSubscribed: (on) => {
         p.isSubscribed = on;
@@ -1168,9 +1171,13 @@ describe('the watch view', () => {
       setVideoQuality: (quality) => {
         state.calls.push(`quality ${source} ${String(quality)}`);
       },
+      setVideoDimensions: ({ width, height }) => {
+        state.calls.push(`dimensions ${source} ${String(width)}x${String(height)}`);
+      },
     };
     return p;
   };
+  const layers = () => state.calls.filter((c) => c.startsWith('quality') || c.startsWith('dimensions'));
 
   // The SDK stops no track it unpublishes, so that a share's capture
   // survives its room (issue #516); the adapter stops every track itself.
@@ -1189,7 +1196,7 @@ describe('the watch view', () => {
     const room = newLiveKitRoom();
     await room.connect('wss://lk.example', 'tok-abcdef', 'room-abcdef', false, events);
     expect([mic.isSubscribed, screen.isSubscribed, sound.isSubscribed]).toEqual([true, false, false]);
-    room.setWatching(true);
+    room.setWatches(new Set([8]), null);
     expect([mic.isSubscribed, screen.isSubscribed, sound.isSubscribed]).toEqual([true, true, true]);
     // A track published later follows the same choice; a camera never.
     const later = remotePub('microphone');
@@ -1197,11 +1204,11 @@ describe('the watch view', () => {
     state.handlers.get('tp')?.(later);
     state.handlers.get('tp')?.(camera);
     expect([later.isSubscribed, camera.isSubscribed]).toEqual([true, false]);
-    room.setWatching(false);
+    room.setWatches(new Set(), null);
     expect([mic.isSubscribed, screen.isSubscribed, sound.isSubscribed]).toEqual([true, false, false]);
   });
 
-  it('with two sharers subscribes picture and sound per Watch, focuses at HIGH, holds the other at LOW, and never wants unwatched or own tracks', async () => {
+  it('with two sharers subscribes picture and sound per Watch, leaves the focused one to adaptive stream, holds the other at LOW, and never wants unwatched or own tracks', async () => {
     const eight = remotePub('screen_share');
     const eightSound = remotePub('screen_share_audio');
     const nine = remotePub('screen_share');
@@ -1214,17 +1221,75 @@ describe('the watch view', () => {
     state.remote.set('p7', { identity: 'p7', trackPublications: new Map([['a', own]]) } as unknown as { trackPublications: Map<string, StubRemotePub> });
     const room = newLiveKitRoom();
     await room.connect('wss://lk.example', 'tok-abcdef', 'room-abcdef', false, events);
-    room.setWatches?.(new Set([8, 9]), 8);
+    room.setWatches(new Set([8, 9]), 8);
     expect([eight.isSubscribed, eightSound.isSubscribed, nine.isSubscribed, nineSound.isSubscribed, unwatched.isSubscribed, own.isSubscribed]).toEqual([true, true, true, true, false, false]);
-    expect(state.calls.filter((c) => c.startsWith('quality'))).toEqual(['quality screen_share 2', 'quality screen_share 0']);
-    room.setWatches?.(new Set([8, 9]), 9);
-    expect(state.calls.filter((c) => c.startsWith('quality')).slice(-2)).toEqual(['quality screen_share 0', 'quality screen_share 2']);
+    // 8, focused, is never capped: adaptive stream sizes it to its element.
+    expect(layers()).toEqual(['quality screen_share 0']);
+    room.setWatches(new Set([8, 9]), 9);
+    // 8 is held; 9's cap is lifted by a bound above every layer, so the
+    // element's size decides (a phone gets a smaller layer than a stage).
+    expect(layers()).toEqual(['quality screen_share 0', 'quality screen_share 0', 'dimensions screen_share 7680x4320']);
+    // Asked again, nothing changes.
+    room.setWatches(new Set([8, 9]), 9);
+    expect(layers()).toHaveLength(3);
+  });
+
+  it("a desktop companion's stream, published as p8.screen, is 8's: watched, held to its layer and played into 8's tile; a viewer's identity is nobody's stream", async () => {
+    const told: unknown[] = [];
+    const screen = remotePub('screen_share');
+    const sound = remotePub('screen_share_audio');
+    const viewerShare = remotePub('screen_share');
+    state.remote.set('p8.screen', { identity: 'p8.screen', trackPublications: new Map([['a', screen], ['b', sound]]) } as unknown as { trackPublications: Map<string, StubRemotePub> });
+    state.remote.set('p9.view', { identity: 'p9.view', trackPublications: new Map([['a', viewerShare]]) } as unknown as { trackPublications: Map<string, StubRemotePub> });
+    const room = newLiveKitRoom();
+    await room.connect('wss://lk.example', 'tok-abcdef', 'room-abcdef', false, { ...events, onStreamTracks: (p, t) => told.push([p, t]) });
+    expect([screen.isSubscribed, sound.isSubscribed]).toEqual([false, false]);
+    room.setWatches(new Set([8, 9]), null);
+    expect([screen.isSubscribed, sound.isSubscribed, viewerShare.isSubscribed]).toEqual([true, true, false]);
+    expect(layers()).toEqual(['quality screen_share 0']);
+    room.setWatches(new Set([8]), 8);
+    expect(layers().at(-1)).toBe('dimensions screen_share 7680x4320');
+    const attached: string[] = [];
+    const track = (source: string, kind: string) => ({
+      source,
+      kind,
+      sid: source,
+      attach: (el?: HTMLMediaElement) => {
+        attached.push(`${source} ${el?.tagName ?? 'new'}`);
+        return el ?? document.createElement('audio');
+      },
+      detach: () => [],
+    });
+    const sink = { video: document.createElement('video'), audio: document.createElement('audio') };
+    room.attachStream(8, sink);
+    const companion = { identity: 'p8.screen' };
+    state.handlers.get('ts')?.(track('screen_share', 'video'), screen, companion);
+    state.handlers.get('ts')?.(track('screen_share_audio', 'audio'), sound, companion);
+    // Played into 8's tile, and never into the page as a voice.
+    expect(attached).toEqual(['screen_share VIDEO', 'screen_share_audio AUDIO']);
+    expect(document.body.querySelectorAll('audio')).toHaveLength(0);
+    expect(told).toEqual([[8, { video: true, audio: false }], [8, { video: true, audio: true }]]);
+    expect(screen.isSubscribed).toBe(true);
+    // Unwatched, it is let go.
+    room.setWatches(new Set(), null);
+    expect([screen.isSubscribed, sound.isSubscribed]).toEqual([false, false]);
+  });
+
+  it("never watches this person's own stream, from their own identity or their companion, whatever this page connected as", async () => {
+    const companionScreen = remotePub('screen_share');
+    const otherScreen = remotePub('screen_share');
+    state.remote.set('p7.screen', { identity: 'p7.screen', trackPublications: new Map([['a', companionScreen]]) } as unknown as { trackPublications: Map<string, StubRemotePub> });
+    state.remote.set('p8', { identity: 'p8', trackPublications: new Map([['a', otherScreen]]) } as unknown as { trackPublications: Map<string, StubRemotePub> });
+    const room = newLiveKitRoom();
+    await room.connect('wss://lk.example', 'tok-abcdef', 'room-abcdef', false, events);
+    room.setWatches(new Set([7, 8]), 7);
+    expect([companionScreen.isSubscribed, otherScreen.isSubscribed]).toEqual([false, true]);
   });
 
   it("plays a share into the view's elements, not into the page, and says what arrived", async () => {
     const told: unknown[] = [];
     const room = newLiveKitRoom();
-    await room.connect('wss://lk.example', 'tok-abcdef', 'room-abcdef', false, { ...events, onShareTracks: (t) => told.push(t) });
+    await room.connect('wss://lk.example', 'tok-abcdef', 'room-abcdef', false, { ...events, onStreamTracks: (p, t) => told.push([p, t]) });
     const attached: string[] = [];
     const remote = (source: string, kind: string) => ({
       source,
@@ -1241,19 +1306,19 @@ describe('the watch view', () => {
     });
     const video = remote('screen_share', 'video');
     const audio = remote('screen_share_audio', 'audio');
-    room.setWatching(true);
+    room.setWatches(new Set([8]), null);
     const sharer = { identity: 'p8' };
     // Arrives before the view is open: kept, and attached once it opens.
     state.handlers.get('ts')?.(video, remotePub('screen_share'), sharer);
     const sink = { video: document.createElement('video'), audio: document.createElement('audio') };
-    room.attachShare(sink);
+    room.attachStream(8, sink);
     state.handlers.get('ts')?.(audio, remotePub('screen_share_audio'), sharer);
     expect(attached).toEqual(['screen_share VIDEO', 'screen_share_audio AUDIO']);
     expect(document.body.querySelectorAll('audio')).toHaveLength(0);
-    expect(told).toEqual([{ video: true, audio: false }, { video: true, audio: true }]);
+    expect(told).toEqual([[8, { video: true, audio: false }], [8, { video: true, audio: true }]]);
     state.handlers.get('tu')?.(video);
-    expect(told.at(-1)).toEqual({ video: false, audio: true });
-    room.attachShare(null);
+    expect(told.at(-1)).toEqual([8, { video: false, audio: true }]);
+    room.attachStream(8, null);
     expect(attached.at(-1)).toBe('detach screen_share_audio AUDIO');
   });
 });
@@ -2003,10 +2068,10 @@ describe('the volume of each person', () => {
     const room = await connected();
     const sink = { video: document.createElement('video'), audio: document.createElement('audio') };
     sink.audio.volume = 0.7;
-    room.attachShare(sink);
+    room.attachStream(8, sink);
     const sound = { source: 'screen_share_audio', kind: 'audio', sid: 's', attach: (el?: HTMLMediaElement) => el, detach: () => [] };
     room.setVolume(8, 0);
-    room.setWatching(true);
+    room.setWatches(new Set([8]), null);
     state.handlers.get('ts')?.(sound, { isSubscribed: true, setSubscribed: () => undefined }, { identity: 'p8' });
     room.setVolume(8, 0.2);
     expect(sink.audio.volume).toBe(0.7);
@@ -2277,7 +2342,7 @@ describe('receiving cameras', () => {
     state.remote.set('p8', { identity: 'p8', trackPublications: new Map([['a', camera], ['b', mic], ['c', share]]) } as unknown as { trackPublications: Map<string, StubRemotePub> });
     const room = newLiveKitRoom();
     await room.connect('wss://lk.example', 'tok-abcdef', 'room-abcdef', false, events);
-    room.setWatching(true);
+    room.setWatches(new Set([8]), null);
     room.setViewing(true);
     room.setCameras(new Set([8]));
     const subscribed = () => [camera.isSubscribed, mic.isSubscribed, share.isSubscribed];

@@ -270,10 +270,10 @@ test.describe('screen share with LiveKit', () => {
     await expect(view.locator('audio')).toHaveJSProperty('muted', false);
     await expect(view.getByRole('button', { name: 'Mute share' })).toBeVisible();
     await expectPlaying(p.page);
-    const video = view.locator('video');
-    await expect.poll(() => video.evaluate((v: HTMLVideoElement) => !v.paused && v.readyState >= 2), { timeout: 30_000 }).toBe(true);
-    const before = await video.evaluate((v: HTMLVideoElement) => v.currentTime);
-    await expect.poll(() => video.evaluate((v: HTMLVideoElement) => v.currentTime), { timeout: 15_000 }).toBeGreaterThan(before);
+    // Frames arrive and keep arriving.
+    await expect.poll(async () => (await inbound(p.page)).frames, { timeout: 30_000 }).toBeGreaterThan(10);
+    const before = (await inbound(p.page)).frames;
+    await expect.poll(async () => (await inbound(p.page)).frames, { timeout: 15_000 }).toBeGreaterThan(before);
   }
 
   // The share's sound is really playing with no further click: not paused
@@ -341,6 +341,9 @@ test.describe('screen share with LiveKit', () => {
       await join(b, 'Watch only');
       await share(a);
       await watching(b);
+      // Focused, so bob takes the top layer: an unfocused watched tile is held
+      // to the lowest (voice-multi-share.md §8).
+      await shareView(b.page).getByRole('button', { name: "Focus alice's screen" }).click();
       await expect(shareView(b.page)).toContainText(/\d+×\d+ · \d+ fps · \d+\.\d Mbps/, { timeout: 30_000 });
 
       const voice = voiceRegion(a.page);
@@ -348,7 +351,7 @@ test.describe('screen share with LiveKit', () => {
       await voice.getByLabel('Share resolution').selectOption('720p');
       await voice.getByLabel('Share frame rate').selectOption('15');
       await expect(voice).toContainText('Sending: 1280×720 · 15 fps', { timeout: 30_000 });
-      await expect(shareView(b.page)).toContainText(/1280×720 · \d+ fps · \d+\.\d Mbps/, { timeout: 30_000 });
+      await expect(shareView(b.page)).toContainText(/1280×720 · 15 fps · \d+\.\d Mbps/, { timeout: 30_000 });
       expect(await picks(a.page), 'a quality change opens no new picker').toBe(1);
       await expect(voice).toContainText('You are sharing your screen with sound.');
 
@@ -774,7 +777,7 @@ test.describe('screen share with LiveKit', () => {
     }
   });
 
-  test('focused desktop and phone viewers both receive the top layer, and the phone panel fits it', async ({ browser }) => {
+  test('a phone-wide viewer receives a smaller layer than a full-screen desktop viewer, and the panel fits it', async ({ browser }) => {
     const a = await person(browser, 'alice');
     const b = await person(browser, 'bob', fullHD);
     const c = await person(browser, 'carol', narrow);
@@ -785,11 +788,22 @@ test.describe('screen share with LiveKit', () => {
       await share(a);
       await watching(b);
       await watching(c);
+      // Both are focused, the phone by its Watch: each may take the top
+      // layer, and adaptive stream sizes it to the element.
       await shareView(b.page).getByRole('button', { name: "Focus alice's screen" }).click();
       await shareView(b.page).getByRole('button', { name: 'Full screen' }).click();
       await expect.poll(() => b.page.evaluate(() => document.fullscreenElement !== null)).toBe(true);
-      // Both are focused: each receives the top layer, whatever its width.
-      await expect.poll(async () => [(await inbound(b.page)).width, (await inbound(c.page)).width], { timeout: 60_000, intervals: [1000] }).toEqual([1920, 1920]);
+      // LiveKit moves each viewer to the layer its view needs as bandwidth
+      // allows: the full-screen desktop to a larger one than the phone.
+      await expect
+        .poll(
+          async () => {
+            const [wide, narrow] = [(await inbound(b.page)).width, (await inbound(c.page)).width];
+            return wide > narrow && narrow > 0 && narrow < 1920 ? 'smaller' : `desktop ${String(wide)}, phone ${String(narrow)}`;
+          },
+          { timeout: 60_000, intervals: [1000] },
+        )
+        .toBe('smaller');
       await expectFits(c.page, 'the phone watching a share');
       await voiceRegion(a.page).getByRole('button', { name: 'Stop sharing' }).click();
       await expect(shareView(c.page)).toHaveCount(0, { timeout: 15_000 });

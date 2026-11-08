@@ -44,9 +44,6 @@ class StubRoom implements Room {
     this.calls.push('microphone');
     return Promise.resolve();
   };
-  setWatching = (on: boolean): void => {
-    this.watching.push(on);
-  };
   setWatches = (watched: ReadonlySet<number>, focused: number | null): void => {
     this.streamWatches.push({ watched: [...watched], focused });
     this.watching.push(watched.size > 0);
@@ -55,9 +52,6 @@ class StubRoom implements Room {
     this.sink = sink;
     if (sink === null) this.streamSinks.delete(principal);
     else this.streamSinks.set(principal, sink);
-  };
-  attachShare = (sink: ShareSink | null): void => {
-    this.sink = sink;
   };
   pickScreen = (): Promise<Captured> => {
     this.calls.push('pick');
@@ -211,6 +205,22 @@ afterEach(() => {
 
 const voice = () => screen.getByRole('region', { name: 'Voice' });
 
+// bea (8) and carol (9) both sharing with sound, carol's started later.
+function twoSharing(): VoicePresenceV2 {
+  const both = presence(8, true);
+  const room = both.rooms[0];
+  if (room === undefined) throw new Error('no room');
+  room.participants.push({ principal_id: 9, can_publish: true, transmitting: false, joined_at: '2026-10-16T00:00:00.000Z', sharing: true, sharing_audio: true, share_started_at: '2026-10-16T00:01:00.000Z' });
+  return both;
+}
+
+// The watched stream of the person named.
+function streamView(name: string): HTMLElement {
+  const view = screen.getAllByRole('region', { name: 'Shared screen' }).find((v) => v.textContent.includes(`${name} · LIVE`));
+  if (view === undefined) throw new Error(`${name}'s stream is not playing`);
+  return view;
+}
+
 describe('watch only', () => {
   it('joins without the microphone, and asks for it only when the person chooses to talk', async () => {
     const t = setup();
@@ -257,9 +267,72 @@ describe('watching', () => {
     expect(within(view).getByRole('button', { name: 'Mute share', pressed: false })).toBeTruthy();
     expect(within(view).getByText('Waiting for the picture')).toBeTruthy();
     act(() => {
-      t.rooms[0]?.events?.onShareTracks({ video: true, audio: false });
+      t.rooms[0]?.events?.onStreamTracks(8, { video: true, audio: false });
     });
     expect(within(view).queryByText('Waiting for the picture')).toBeNull();
+  });
+
+  it("watching a second stream and stopping it leaves the first one's picture as it was", async () => {
+    const t = await watching();
+    t.seen(twoSharing());
+    act(() => {
+      t.rooms[0]?.events?.onStreamTracks(8, { video: true, audio: true });
+    });
+    fireEvent.click(within(screen.getByRole('region', { name: "carol's stream" })).getByRole('button', { name: 'Watch' }));
+    act(() => {
+      t.rooms[0]?.events?.onStreamTracks(9, { video: false, audio: false });
+    });
+    const carol = streamView('carol');
+    expect(within(carol).getByText('Waiting for the picture')).toBeTruthy();
+    fireEvent.click(within(carol).getByRole('button', { name: 'Stop watching' }));
+    act(() => {
+      t.rooms[0]?.events?.onStreamTracks(9, { video: false, audio: false });
+    });
+    expect(screen.getAllByRole('region', { name: 'Shared screen' })).toHaveLength(1);
+    expect(within(streamView('bea')).queryByText('Waiting for the picture')).toBeNull();
+  });
+
+  it("keeps the tile's mute and volume when the SDK attaches its sound again, which unmutes the element", async () => {
+    const t = await watching();
+    const view = await screen.findByRole('region', { name: 'Shared screen' });
+    const audio = t.rooms[0]?.streamSinks.get(8)?.audio;
+    if (audio === undefined) throw new Error('no sink');
+    fireEvent.change(within(view).getByLabelText('Share volume'), { target: { value: '0.3' } });
+    fireEvent.click(within(view).getByRole('button', { name: 'Mute share' }));
+    // What livekit's attachToElement does to an element given a track with
+    // sound: unmuted. Then the track is told as arrived.
+    audio.muted = false;
+    audio.volume = 1;
+    act(() => {
+      t.rooms[0]?.events?.onStreamTracks(8, { video: true, audio: true });
+    });
+    expect(audio.muted).toBe(true);
+    expect(audio.volume).toBeCloseTo(0.3);
+    // And again on a new arrival with the tile unmuted: the volume holds.
+    fireEvent.click(within(view).getByRole('button', { name: 'Unmute share' }));
+    audio.volume = 1;
+    act(() => {
+      t.rooms[0]?.events?.onStreamTracks(8, { video: false, audio: true });
+    });
+    expect(audio.muted).toBe(false);
+    expect(audio.volume).toBeCloseTo(0.3);
+  });
+
+  it('keeps the viewer volume when another share starts and when watching again', async () => {
+    const t = await watching();
+    const view = await screen.findByRole('region', { name: 'Shared screen' });
+    fireEvent.change(within(view).getByLabelText('Share volume'), { target: { value: '0.35' } });
+    t.seen(twoSharing());
+    const still = streamView('bea');
+    expect(still).toBe(view);
+    expect(t.rooms[0]?.streamSinks.get(8)?.audio.muted).toBe(false);
+    expect(t.rooms[0]?.streamSinks.get(8)?.audio.volume).toBeCloseTo(0.35);
+    fireEvent.click(within(still).getByRole('button', { name: 'Stop watching' }));
+    fireEvent.click(within(screen.getByRole('region', { name: "bea's stream" })).getByRole('button', { name: 'Watch' }));
+    const reopened = streamView('bea');
+    expect(t.rooms[0]?.streamSinks.get(8)?.audio.muted).toBe(false);
+    expect(t.rooms[0]?.streamSinks.get(8)?.audio.volume).toBeCloseTo(0.35);
+    expect(within(reopened).getByLabelText<HTMLInputElement>('Share volume').value).toBe('0.35');
   });
 
   it('shows the received resolution and fps once stats arrive', async () => {
@@ -328,7 +401,7 @@ describe('watching', () => {
     const play = vi.spyOn(HTMLMediaElement.prototype, 'play').mockRejectedValueOnce(new Error('NotAllowedError')).mockResolvedValue(undefined);
     const t = await watching();
     act(() => {
-      t.rooms[0]?.events?.onShareTracks({ video: true, audio: true });
+      t.rooms[0]?.events?.onStreamTracks(8, { video: true, audio: true });
     });
     const tap = await screen.findByRole('button', { name: 'Tap to play sound' });
     fireEvent.click(tap);
@@ -358,16 +431,31 @@ describe('watching', () => {
     fireEvent.click(within(view).getByRole('button', { name: 'Mute share' }));
     const attach = vi.spyOn(t.client, 'attachStream');
     t.seen(presence(8, true, [8]));
+    // The people's tiles, bea's camera among them, come with the choice to
+    // view (O8).
+    act(() => {
+      t.client.viewVideo(true);
+    });
     const call = screen.getByRole('region', { name: 'Video call' });
+    expect(within(call).getByRole('region', { name: 'Shared screen' })).toBe(view);
     expect(view.closest('li')?.className).toBe('call-share');
     fireEvent.click(within(view).getByRole('button', { name: "Focus bea's screen" }));
     expect(view.closest('li')?.className).toBe('call-share main');
     fireEvent.click(within(call).getByRole('button', { name: "Enlarge bea's video" }));
     expect(view.closest('li')?.className).toBe('call-share in-strip');
+    // Its controls are still its own, in the strip.
     expect(within(view).getByRole('button', { name: 'Unmute share' })).toBeTruthy();
     expect(within(view).getByLabelText<HTMLInputElement>('Share volume').value).toBe('0.4');
+    expect(within(view).getByRole('button', { name: 'Full screen' })).toBeTruthy();
     fireEvent.click(within(call).getByRole('button', { name: 'Back to grid' }));
     expect(view.closest('li')?.className).toBe('call-share');
+    // Hide video takes the people's tiles away; the stream stays, the same
+    // element.
+    act(() => {
+      t.client.viewVideo(false);
+    });
+    expect(screen.getByRole('region', { name: 'Shared screen' })).toBe(view);
+    expect(screen.queryByRole('button', { name: "Enlarge bea's video" })).toBeNull();
     expect(attach).not.toHaveBeenCalled();
     expect(t.rooms[0]?.streamSinks.get(8)?.audio).toBe(audio);
     expect(t.rooms[0]?.streamSinks.get(8)?.video).toBe(video);

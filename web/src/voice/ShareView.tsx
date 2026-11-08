@@ -1,9 +1,11 @@
 // The watch view (issue #444; multi-share voice-multi-share.md §7.1, issue
 // #1509): one watched stream, with its sound on a volume and a mute of its own,
 // apart from voice and every other watched stream. It is open only while this
-// page watches that stream. The SDK sizes what it receives to this view
-// (adaptive stream), so a small view or a phone gets a smaller layer than a
-// focused view, and a closed view gets none. It asks for no device.
+// page watches that stream. An unfocused stream is held to the lowest layer;
+// the focused one may take the top layer, which the SDK sizes to this view
+// (adaptive stream), so a phone gets a smaller layer than a full-screen
+// desktop, and a closed view gets none (voice-multi-share.md §8). It asks for
+// no device.
 import { useEffect, useRef, useState } from 'react';
 import { Glyph } from '../Icons';
 import type { VoiceClient, VoiceState } from './connection';
@@ -44,7 +46,6 @@ type AppleVideo = HTMLVideoElement & { readonly webkitEnterFullscreen?: () => vo
 
 // ShareView plays one watched publisher's screen and sound with independent
 // controls and an optional focus action (voice-multi-share.md §7.1, #1509).
-// An omitted principal addresses the legacy single-share attachment.
 export function ShareView({
   client,
   state,
@@ -58,7 +59,8 @@ export function ShareView({
 }: {
   readonly client: VoiceClient;
   readonly state: VoiceState;
-  readonly principal?: number;
+  // Whose stream it is: the publisher its tracks are kept under.
+  readonly principal: number;
   // Who shares, as the panel names them, and whether presence says the share
   // has sound.
   readonly name: string;
@@ -83,23 +85,25 @@ export function ShareView({
     const v = video.current;
     const a = sound.current;
     if (v === null || a === null) return;
-    if (principal === undefined) client.attachShare({ video: v, audio: a });
-    else client.attachStream(principal, { video: v, audio: a });
+    client.attachStream(principal, { video: v, audio: a });
     return () => {
-      if (principal === undefined) client.attachShare(null);
-      else client.attachStream(principal, null);
+      client.attachStream(principal, null);
     };
   }, [client, principal]);
 
-  // Deafened hears nothing, a share's sound included.
+  // Deafened hears nothing, a share's sound included. The SDK unmutes an
+  // element each time it attaches a track with sound to it (a track arriving,
+  // or attached again on a new connection), so the tile's own mute and volume
+  // are set again whenever this stream's tracks change.
+  const arrived = state.streamTracks.get(principal);
   useEffect(() => {
     const a = sound.current;
     if (a === null) return;
     a.volume = volume;
     a.muted = muted || state.deafened;
-  }, [volume, muted, state.deafened]);
+  }, [volume, muted, state.deafened, arrived]);
 
-  const tracks = principal === undefined ? state.shareTracks : (state.streamTracks.get(principal) ?? { video: false, audio: false });
+  const tracks = arrived ?? { video: false, audio: false };
   const hasSound = tracks.audio;
   useEffect(() => {
     const a = sound.current;
@@ -134,7 +138,7 @@ export function ShareView({
     <section aria-label="Shared screen" className="share-view">
       <p className="share-title">
         <Glyph name="screen" />
-        {principal === undefined ? <>{name} is sharing{audio ? ', with sound' : ''}</> : <>{name} · LIVE{quality === null || quality === undefined ? null : <> · {quality}</>}{audio ? ' · with sound' : ''}</>}
+        {name} · LIVE{quality === null || quality === undefined ? null : <> · {quality}</>}{audio ? ' · with sound' : ''}
         <ShareReadout client={client} direction="received" principal={principal} />
       </p>
       <div ref={box} className="share-frame">
@@ -160,10 +164,7 @@ export function ShareView({
           <Glyph name="fullscreen" />
           <span className="label">Full screen</span>
         </button>
-        <button type="button" onClick={() => {
-          if (principal === undefined) client.watch(false);
-          else client.watchStream(principal, false);
-        }}>Stop watching</button>
+        <button type="button" onClick={() => { client.watchStream(principal, false); }}>Stop watching</button>
         {blocked && hasSound ? <button type="button" className="primary" onClick={tapToPlay}>Tap to play sound</button> : null}
       </div>
       {state.deafened && hasSound ? <p className="hint">Deafened: the share&apos;s sound is off too.</p> : null}

@@ -19,6 +19,8 @@ import { dockerAvailable, startVoiceWorld, type Member, type VoiceWorld } from '
 
 const voiceRegion = (page: Page) => page.getByRole('region', { name: 'Voice' });
 const shareView = (page: Page) => page.getByRole('region', { name: 'Shared screen' });
+// A stream tile's Watch, on the stage (voice-multi-share.md §7.1).
+const watchButton = (page: Page) => page.locator('.call-share').getByRole('button', { name: 'Watch', exact: true });
 
 // The two sizes of the audit's finding.
 const sizes = phoneSizes.filter(([size]) => size === '320×640' || size === '390×844');
@@ -364,21 +366,22 @@ test.describe('the phone voice strip with LiveKit', () => {
       for (const p of phones) await measure(p, 'in voice');
 
       // A share on, not watched. Watch shows in the Voice view once the
-      // share is known.
+      // share is known: on the stream's tile, on the stage
+      // (voice-multi-share.md §7.1).
       const desk = voiceRegion(a.page);
       await desk.getByRole('button', { name: 'Share screen' }).click();
       await expect(desk).toContainText('You are sharing your screen', { timeout: 30_000 });
       for (const p of phones) {
         await showView(p.page, 'Voice');
-        await expect(voiceRegion(p.page).getByRole('button', { name: 'Watch', exact: true })).toBeVisible({ timeout: 15_000 });
+        await expect(watchButton(p.page)).toBeVisible({ timeout: 15_000 });
         await measure(p, 'share on');
       }
 
       // Watching the share: the stage is above the conversation under Chat.
       for (const p of phones) {
         await showView(p.page, 'Voice');
-        await voiceRegion(p.page).getByRole('button', { name: 'Watch', exact: true }).tap();
-        await expect(shareView(p.page)).toContainText('alice is sharing', { timeout: 30_000 });
+        await watchButton(p.page).tap();
+        await expect(shareView(p.page)).toContainText('alice · LIVE', { timeout: 30_000 });
         await measure(p, 'watching');
       }
 
@@ -401,12 +404,14 @@ test.describe('the phone voice strip with LiveKit', () => {
         await expect(voice).toContainText('Deafened');
         await voice.getByRole('button', { name: 'Undeafen' }).tap();
         await expect(voice).not.toContainText('Deafened');
-        // Someone else shares, so Share screen is there and off.
-        await expect(voice.getByRole('button', { name: 'Share screen' })).toBeDisabled();
+        // Someone else shares, and Share screen is there and on: several may
+        // stream at once (voice-multi-share.md §7.1; was off under the
+        // one-share rule, O5).
+        await expect(voice.getByRole('button', { name: 'Share screen' })).toBeEnabled();
         await shareView(page).getByRole('button', { name: 'Stop watching' }).tap();
         await expect(shareView(page)).toHaveCount(0);
-        await voice.getByRole('button', { name: 'Watch', exact: true }).tap();
-        await expect(shareView(page)).toContainText('alice is sharing', { timeout: 30_000 });
+        await watchButton(page).tap();
+        await expect(shareView(page)).toContainText('alice · LIVE', { timeout: 30_000 });
         const options = voice.getByRole('button', { name: 'Voice options' });
         const expanded = (want: 'true' | 'false') => async () => (await options.getAttribute('aria-expanded')) === want;
         await tapUntil(options, expanded('true'));

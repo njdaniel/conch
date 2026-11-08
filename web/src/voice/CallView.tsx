@@ -1,11 +1,14 @@
 // The call view (ADR-015, design §7.4, §7.7; multi-share
 // voice-multi-share.md §7.1, issue #1509): the room's cameras and one tile per
-// live stream, drawn on the stage (stage.ts). For cameras it is open only while
-// the person asked for it, by turning their own camera on or by "Show video
-// (n)", and never opens for them when someone else turns a camera on (O8). A
-// live stream opens the grid to offer its Watch button, but no stream is
-// received until the person asks to watch it. The room's cameras are received
-// only while the view is open (connection.ts viewVideo).
+// live stream, drawn on the stage (stage.ts). The people's tiles are drawn only
+// while the person asked for video, by turning their own camera on or by "Show
+// video (n)", and never for them when someone else turns a camera on (O8); the
+// room's cameras are received only then (connection.ts viewVideo). Live
+// streams put their tiles on the stage whether or not the person asked for
+// video, to offer Watch, but no stream is received until the person asks to
+// watch it, and no camera with them: without video asked for, the stage holds
+// the stream tiles alone, and Hide video and the people's filters are not
+// offered.
 //
 // While there are at most nine camera and stream tiles, each person in voice
 // gets a tile: their camera, or their initial, their name and "Camera off" in a
@@ -26,12 +29,16 @@
 // If the enlarged tile goes, the view returns to the grid, and focus that was
 // on the tile goes to Hide video.
 //
-// A focused stream is the main picture and the other tiles are the strip. A
-// watched stream keeps the same keyed element whether in the grid, focused or
-// in the strip, so moving it never starts it again or loses its volume and
-// mute. While the view is closed only the focused watched stream is drawn, and
-// the wrappers around it take no part in the layout. On a phone one stream is
-// watched and focused at a time, with a switcher between sharers.
+// The focused stream is the client's (VoiceState.focusedShare), the one choice
+// that both draws it on the stage and gives it the top layer, however it was
+// chosen: Focus, a phone's Watch or its switcher. An enlarged camera is this
+// view's own, and focusing either clears the other. A focused stream is the
+// main picture and the other tiles are the strip. A watched stream keeps the
+// same keyed element whether in the grid, focused or in the strip, so moving it
+// never starts it again or loses its volume and mute. While the view is closed
+// only the focused watched stream is drawn, and the wrappers around it take no
+// part in the layout. On a phone one stream is watched and focused at a time,
+// with a switcher between sharers in the open view.
 //
 // A polite live region says someone else's camera starting or stopping while
 // the view is open. If filtering the last camera closes it, the stopping words
@@ -98,14 +105,12 @@ export const cameraOffWords = (name: string): string => `${name}'s camera is off
 const keyOf = (t: Tile): string => `${t.kind === 'share' ? 'share' : 'person'}:${String(t.principal)}`;
 
 // Where focus goes once the view has drawn: the enlarged tile; the enlarge
-// button of the tile it came from; Hide video, when the enlarged tile went
-// with focus in it; or the enlarge button of the tile that was enlarged,
-// when the share beside it went with focus in it.
+// or focus button of the tile it came from; or Hide video, when the enlarged
+// tile went with focus in it.
 type FocusTo =
   | { readonly kind: 'main' }
   | { readonly kind: 'tile'; readonly key: string }
-  | { readonly kind: 'gone'; readonly key: string }
-  | { readonly kind: 'unshared'; readonly key: string };
+  | { readonly kind: 'gone'; readonly key: string };
 
 // How long the live region keeps what it said.
 export const saidFor = 5000;
@@ -133,15 +138,13 @@ function changed(before: Cameras, now: Cameras): string {
 
 // CallView draws camera and stream tiles, preserving players and focus as
 // tiles move between the grid, main area and strip (design §7.4, §7.7).
-export function CallView({ client, state, tiles, hidden, open, share = null, hideNonVideo = false, onHideNonVideo = () => undefined, keepSaid = false }: {
+export function CallView({ client, state, tiles, hidden, open, hideNonVideo = false, onHideNonVideo = () => undefined, keepSaid = false }: {
   readonly client: VoiceClient;
   readonly state: VoiceState;
   readonly tiles: readonly Tile[];
   readonly hidden: number;
   // Whether the call view is shown. While it is not, only a watched stream is drawn.
   readonly open: boolean;
-  // The legacy watched share (ShareView), or null; multi-share tiles carry their own.
-  readonly share?: ReactElement | null;
   readonly hideNonVideo?: boolean;
   readonly onHideNonVideo?: () => void;
   // Keep the last camera-off announcement when filtering closed the view.
@@ -149,7 +152,8 @@ export function CallView({ client, state, tiles, hidden, open, share = null, hid
 }) {
   const narrow = usePhone();
   const [selfHidden, setSelfHidden] = useState(false);
-  // The enlarged tile, by a key that distinguishes a person from their stream.
+  // The enlarged camera, by its tile's key. A focused stream is the client's
+  // (state.focusedShare), not this.
   const [enlarged, setEnlarged] = useState<string | null>(null);
   const [focusTo, setFocusTo] = useState<FocusTo | null>(null);
   // The live region's words, and the cameras they were last said from: null
@@ -164,29 +168,25 @@ export function CallView({ client, state, tiles, hidden, open, share = null, hid
   const items = useRef(new Map<string, HTMLLIElement>());
 
   const shown = !open ? tiles.filter((t) => t.kind === 'share' && t.watched === true && (state.focusedShare === null || state.focusedShare === t.principal)) : selfHidden ? tiles.filter((t) => !t.me || t.kind === 'share') : tiles;
-  const watched = share !== null;
-  const [wasWatched, setWasWatched] = useState(watched);
-  const main = enlarged === null
-    ? narrow ? (shown.find((t) => t.kind === 'share' && t.watched === true && state.focusedShare === t.principal) ?? null) : null
-    : (shown.find((t) => keyOf(t) === enlarged && (t.kind === 'share' ? t.watched === true : t.camera)) ?? null);
-
-  // Stop watching the legacy share leaves the grid, whatever was enlarged
-  // beside it: focus, gone with the share's own button, goes back to that tile.
-  if (wasWatched !== watched) {
-    setWasWatched(watched);
-    if (!watched && enlarged !== null) {
-      setEnlarged(null);
-      setFocusTo({ kind: 'unshared', key: enlarged });
-    }
-  }
+  const focusedStream = shown.find((t) => t.kind === 'share' && t.watched === true && t.principal === state.focusedShare) ?? null;
+  const enlargedCamera = enlarged === null ? null : (shown.find((t) => t.kind !== 'share' && keyOf(t) === enlarged && t.camera) ?? null);
+  const main = focusedStream ?? enlargedCamera;
+  const mainKey = main === null ? null : keyOf(main);
+  // The main tile last drawn, to know when it went.
+  const [lastMain, setLastMain] = useState<string | null>(mainKey);
 
   if (wasOpen !== open) {
     setWasOpen(open);
     if (open && said !== '') setSaid('');
   }
 
+  // A stream focused (by Focus, or a phone's Watch or switcher) takes the
+  // place of an enlarged camera.
+  if (focusedStream !== null && enlarged !== null) setEnlarged(null);
+
   // Closing the view forgets it all; the next opening starts at the grid. An
-  // automatic close after the last camera went keeps that announcement.
+  // automatic close after the last camera went keeps that announcement. The
+  // focused stream is the client's, and stays: it is what a closed view draws.
   if (!open) {
     if (enlarged !== null) setEnlarged(null);
     if (selfHidden) setSelfHidden(false);
@@ -200,13 +200,16 @@ export function CallView({ client, state, tiles, hidden, open, share = null, hid
       const words = changed(cameras, now);
       if (words !== '') setSaid(words);
     }
-    // The enlarged tile went (its camera, its person, its stream or the
-    // self-view): back to the grid. The live region has said why, for a camera.
-    if (enlarged !== null && main === null) {
-      setEnlarged(null);
-      client.focusShare(null);
-      setFocusTo({ kind: 'gone', key: enlarged });
-    }
+    // The enlarged camera went (its camera, its person or the self-view).
+    if (enlarged !== null && enlargedCamera === null && focusedStream === null) setEnlarged(null);
+  }
+
+  // The main tile went (the camera, its person, the stream or the self-view),
+  // not by Back to grid: back to the grid. The live region has said why, for
+  // a camera, and the stream's end is VoicePanel's note.
+  if (lastMain !== mainKey) {
+    setLastMain(mainKey);
+    if (open && lastMain !== null && mainKey === null) setFocusTo({ kind: 'gone', key: lastMain });
   }
 
   // A focus that waits for full screen to end: the browser drops focus as it
@@ -234,7 +237,7 @@ export function CallView({ client, state, tiles, hidden, open, share = null, hid
       return;
     }
     if (focusTo.kind === 'tile') {
-      (buttons.current.get(focusTo.key) ?? hideButton.current)?.focus();
+      (buttonOf(focusTo.key) ?? hideButton.current)?.focus();
       return;
     }
     // Only when focus went with the tile or the share: someone typing
@@ -242,8 +245,7 @@ export function CallView({ client, state, tiles, hidden, open, share = null, hid
     const at = document.activeElement;
     const lost = at === null || at === document.body || (items.current.get(focusTo.key)?.contains(at) ?? false);
     if (!lost) return;
-    const key = focusTo.key;
-    const move = focusTo.kind === 'gone' ? () => hideButton.current?.focus() : () => (buttons.current.get(key) ?? hideButton.current)?.focus();
+    const move = () => hideButton.current?.focus();
     // The enlarged tile was full screen when it went: it leaves full screen
     // (TileView), and focus moves once it has.
     if (document.fullscreenElement) afterFull.current = move;
@@ -262,6 +264,24 @@ export function CallView({ client, state, tiles, hidden, open, share = null, hid
     if (open && (at === null || at === document.body)) hideButton.current?.focus();
   }, [shown, open]);
 
+  // Stop watching takes the player, and the button pressed, out of a stream's
+  // tile, which stays with its still card: focus that went with them goes to
+  // that card's Watch rather than being lost (voice-multi-share.md §7.1).
+  const watchedKey = tiles.filter((t) => t.kind === 'share' && t.watched === true).map(keyOf).join(' ');
+  const wasWatched = useRef(watchedKey);
+  useEffect(() => {
+    const before = wasWatched.current === '' ? [] : wasWatched.current.split(' ');
+    wasWatched.current = watchedKey;
+    const now = new Set(watchedKey === '' ? [] : watchedKey.split(' '));
+    const at = document.activeElement;
+    if (at !== null && at !== document.body) return;
+    for (const key of before) {
+      if (now.has(key)) continue;
+      items.current.get(key)?.querySelector<HTMLButtonElement>('button')?.focus();
+      return;
+    }
+  }, [watchedKey]);
+
   // The live region's words go after a while, so that what it said last is
   // not read again as if it were new.
   useEffect(() => {
@@ -272,18 +292,32 @@ export function CallView({ client, state, tiles, hidden, open, share = null, hid
     };
   }, [said]);
 
-  // Enlarging a watched stream also selects it for the top layer; enlarging a
-  // camera clears that selection (voice-multi-share.md §7.1, #1509).
+  // The button that enlarges or focuses a tile: a camera's is kept by key; a
+  // stream's is in its player (ShareView).
+  const buttonOf = (key: string): HTMLButtonElement | null => buttons.current.get(key) ?? items.current.get(key)?.querySelector<HTMLButtonElement>('button.call-enlarge') ?? null;
+
+  // Focusing a watched stream selects it, for the stage and the top layer;
+  // enlarging a camera clears that selection (voice-multi-share.md §7.1,
+  // #1509).
   const enlarge = (t: Tile) => {
-    setEnlarged(keyOf(t));
-    client.focusShare(t.kind === 'share' ? t.principal : null);
+    if (t.kind === 'share') {
+      setEnlarged(null);
+      client.focusShare(t.principal);
+    } else {
+      setEnlarged(keyOf(t));
+      client.focusShare(null);
+    }
     setFocusTo({ kind: 'main' });
   };
+  // Back to grid lets go of whichever is main, the focused stream or the
+  // enlarged camera, and says it went by choice: focus returns to its tile.
   const back = () => {
-    if (enlarged === null) return;
-    setEnlarged(null);
-    client.focusShare(null);
-    setFocusTo({ kind: 'tile', key: enlarged });
+    if (main === null) return;
+    const key = keyOf(main);
+    if (main.kind === 'share') client.focusShare(null);
+    else setEnlarged(null);
+    setLastMain(null);
+    setFocusTo({ kind: 'tile', key });
   };
   // Escape returns to the grid. Inside full screen the browser's Escape
   // leaves full screen first, and is not taken from it.
@@ -293,12 +327,14 @@ export function CallView({ client, state, tiles, hidden, open, share = null, hid
     back();
   };
 
-  const focus = main !== null || (open && watched);
-  const grid = gridOf(shown.length + (watched ? 1 : 0), narrow);
+  const focus = main !== null;
+  const grid = gridOf(shown.length, narrow);
   const listClass = !open ? 'call-pass' : focus ? 'call-grid focus' : `call-grid cols-${String(grid.columns)} rows-${String(grid.rows)}`;
   const hasSelf = tiles.some((t) => t.kind !== 'share' && t.me);
-  const focusedStream = main?.kind === 'share' ? main : null;
   const switchable = tiles.filter((t) => t.kind === 'share' && !t.me);
+  // Without video asked for, the stage holds stream tiles alone: there is no
+  // video to hide and no person to filter.
+  const viewing = state.viewing;
 
   return (
     <section aria-label={open ? 'Video call' : undefined} className={open ? 'call-view' : 'call-stage'} onKeyDown={open ? onKey : undefined}>
@@ -310,27 +346,27 @@ export function CallView({ client, state, tiles, hidden, open, share = null, hid
             {main === null ? null : <span className="call-state" title={main.kind === 'share' ? `Watching ${main.name}'s screen` : enlargedWords(main)}>{main.kind === 'share' ? `Watching ${main.name}'s screen` : enlargedWords(main)}</span>}
           </p>
           <div className="call-controls">
-            {main === null ? null : <button type="button" onClick={back}>{watched ? 'Back to the share' : 'Back to grid'}</button>}
-            <button type="button" aria-pressed={hideNonVideo} onClick={onHideNonVideo}>Hide non-video participants</button>
+            {main === null ? null : <button type="button" onClick={back}>Back to grid</button>}
+            {viewing ? <button type="button" aria-pressed={hideNonVideo} onClick={onHideNonVideo}>Hide non-video participants</button> : null}
             {hasSelf ? <button type="button" aria-pressed={selfHidden} onClick={() => { setSelfHidden(!selfHidden); }}>{selfHidden ? 'Show self-view' : 'Hide self-view'}</button> : null}
-            <button ref={hideButton} type="button" onClick={() => { client.viewVideo(false); }}>Hide video</button>
+            {viewing ? <button ref={hideButton} type="button" onClick={() => { client.viewVideo(false); }}>Hide video</button> : null}
           </div>
         </div>
       ) : null}
       {open || said !== '' ? <p role="status" className="vh">{said}</p> : null}
-      {narrow && focusedStream !== null ? (
+      {/* The phone's switcher is the Voice view's: under Chat and Channels
+          the stage holds the focused stream alone, and the log keeps its
+          room (issue #1028). */}
+      {open && narrow && focusedStream !== null ? (
         <label className="call-state">Watching {focusedStream.name}&apos;s screen
           <select aria-label={`Watching ${focusedStream.name}'s screen`} value={focusedStream.principal} onChange={(e) => {
-            const principal = Number(e.target.value);
-            client.switchStream(principal);
-            setEnlarged(`share:${String(principal)}`);
+            client.switchStream(Number(e.target.value));
           }}>
             {switchable.map((t) => <option key={t.principal} value={t.principal}>{t.name}</option>)}
           </select>
         </label>
       ) : null}
       <ul className={listClass} role={open ? undefined : 'none'}>
-        {watched ? <li key="share" role={open ? undefined : 'none'} className={open ? (main === null ? 'call-share main' : 'call-share in-strip') : undefined}>{share}</li> : null}
         {shown.map((t) => {
           const key = keyOf(t);
           const isMain = main !== null && keyOf(main) === key;
@@ -359,7 +395,7 @@ export function CallView({ client, state, tiles, hidden, open, share = null, hid
           );
         })}
       </ul>
-      {open && shown.length === 0 && !watched ? <p className="hint">{selfHidden ? 'Your self-view is hidden.' : 'Nobody has a camera on.'}</p> : null}
+      {open && shown.length === 0 ? <p className="hint">{selfHidden ? 'Your self-view is hidden.' : 'Nobody has a camera on.'}</p> : null}
       {open && hidden > 0 ? <p className="hint">{`${String(hidden)} more ${hidden === 1 ? 'camera is' : 'cameras are'} on and not shown here.`}</p> : null}
     </section>
   );

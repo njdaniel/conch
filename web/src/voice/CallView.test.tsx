@@ -4,6 +4,7 @@
 // the call view's tiles and grid. Driven by a fake VoiceControl: no SDK, no
 // network, no camera.
 import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react';
+import { useSyncExternalStore } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { VoiceStrip } from '../phone';
 import type { VoicePresenceV2 } from '../schema/voice';
@@ -81,13 +82,32 @@ function newClient(): VoiceClient {
 
 const inVoice = (patch: Partial<VoiceState> = {}): VoiceState => ({ ...initialVoice, mode: 'ptt', phase: 'connected', channel: 'general', ...patch });
 
+// watchAs makes the client watch what a state says it watches, focused as it
+// says, so that Watch, Focus, Back and Stop watching go through the client as
+// on the page.
+function watchAs(client: VoiceClient, state: VoiceState): void {
+  act(() => {
+    for (const principal of client.snapshot().watched) if (!state.watched.has(principal)) client.watchStream(principal, false);
+    for (const principal of state.watched) if (!client.snapshot().watched.has(principal)) client.watchStream(principal, true);
+    client.focusShare(state.focusedShare);
+  });
+}
+
+// Live is the panel over a fixed state but for what the client owns: which
+// streams are watched and which one is focused.
+function Live({ state, snapshot, client, allowed }: { readonly state: VoiceState; readonly snapshot: Snapshot; readonly client: VoiceClient; readonly allowed: boolean }) {
+  const live = useSyncExternalStore(client.subscribe, client.snapshot);
+  return <VoicePanel voice={control({ ...state, watched: live.watched, focusedShare: live.focusedShare }, snapshot, client)} viewer={7} people={people} viewed="general" cameraAllowed={allowed} onOpen={() => undefined} />;
+}
+
 function panel(state: VoiceState, { cameras = [] as readonly number[], allowed = true, sharer = null as number | null } = {}) {
   const client = newClient();
-  const watching = (next: VoiceState) => sharer !== null && sharer !== 7 && next.watching && next.watched.size === 0 ? { ...next, watched: new Set([sharer]) } : next;
+  watchAs(client, state);
   const snapshot: Snapshot = { kind: 'presence', presence: roomWith(cameras, sharer) };
-  const { rerender } = render(<VoicePanel voice={control(watching(state), snapshot, client)} viewer={7} people={people} viewed="general" cameraAllowed={allowed} onOpen={() => undefined} />);
+  const { rerender } = render(<Live state={state} snapshot={snapshot} client={client} allowed={allowed} />);
   const redraw = (next: VoiceState, nextCameras: readonly number[] = cameras, nextSharer: number | null = sharer) => {
-    rerender(<VoicePanel voice={control(watching(next), { kind: 'presence', presence: roomWith(nextCameras, nextSharer) }, client)} viewer={7} people={people} viewed="general" cameraAllowed={allowed} onOpen={() => undefined} />);
+    watchAs(client, next);
+    rerender(<Live state={next} snapshot={{ kind: 'presence', presence: roomWith(nextCameras, nextSharer) }} client={client} allowed={allowed} />);
   };
   return { client, redraw, voice: screen.getByRole('region', { name: 'Voice' }) };
 }
@@ -287,7 +307,7 @@ describe('the call view', () => {
   });
 
   it('with the filter on and no camera, a watched share stays on the stage alone and the view does not close', () => {
-    const { client } = panel(inVoice({ viewing: true, watching: true }), { sharer: 9 });
+    const { client } = panel(inVoice({ viewing: true, watched: new Set([9]) }), { sharer: 9 });
     const view = vi.spyOn(client, 'viewVideo');
     const share = screen.getByRole('region', { name: 'Shared screen' });
     fireEvent.click(screen.getByRole('button', { name: 'Hide non-video participants' }));
@@ -311,7 +331,7 @@ describe('the call view', () => {
     const client = newClient();
     const attach = vi.spyOn(client, 'attachCamera');
     const tiles = [{ principal: 8, name: 'member-1', me: false, camera: true }];
-    const { unmount } = render(<CallView client={client} state={inVoice({ viewing: true })} tiles={tiles} hidden={0} open share={null} />);
+    const { unmount } = render(<CallView client={client} state={inVoice({ viewing: true })} tiles={tiles} hidden={0} open />);
     expect(attach.mock.calls[0]?.[0]).toBe(8);
     expect(attach.mock.calls[0]?.[1]).toBeInstanceOf(HTMLVideoElement);
     unmount();
@@ -325,7 +345,7 @@ const threeTiles = [tile(8, 'member-1'), tile(9, 'member-2', false), tile(7, 'Yo
 
 function callOf(tiles: readonly Tile[], patch: Partial<VoiceState> = {}) {
   const client = newClient();
-  const draw = (t: readonly Tile[], p: Partial<VoiceState>, open: boolean) => <CallView client={client} state={inVoice({ viewing: open, ...p })} tiles={t} hidden={0} open={open} share={null} />;
+  const draw = (t: readonly Tile[], p: Partial<VoiceState>, open: boolean) => <CallView client={client} state={inVoice({ viewing: open, ...p })} tiles={t} hidden={0} open={open} />;
   const { rerender } = render(draw(tiles, patch, true));
   const redraw = (t: readonly Tile[], p: Partial<VoiceState> = patch, open = true) => {
     rerender(draw(t, p, open));
@@ -558,13 +578,12 @@ describe('the call view in a small group', () => {
     expect(screen.queryByText(/camera is (on|off)/)).toBeNull();
   });
 
-  it('with a share watched, camera changes are said without replacing its tile', () => {
-    const { redraw } = panel(inVoice({ watching: true }), { sharer: 9 });
+  it('with a share watched and the view closed, changes to cameras are not said', () => {
+    const { redraw } = panel(inVoice({ watched: new Set([9]) }), { sharer: 9 });
     const share = screen.getByRole('region', { name: 'Shared screen' });
-    redraw(inVoice({ watching: true }), [8]);
-    expect(said()).toBe("member-1's camera is on");
-    redraw(inVoice({ watching: true }), []);
-    expect(said()).toBe("member-1's camera is off");
+    redraw(inVoice({ watched: new Set([9]) }), [8]);
+    redraw(inVoice({ watched: new Set([9]) }), []);
+    expect(screen.queryByText(/camera is (on|off)/)).toBeNull();
     expect(screen.getByRole('region', { name: 'Shared screen' })).toBe(share);
   });
 });
@@ -573,7 +592,7 @@ describe('stream tiles in the call view', () => {
   const shareRegion = () => within(callRegion()).getByRole('region', { name: 'Shared screen' });
 
   it('a watched tile takes the stage on Focus, everything else goes to the strip, and Back to grid returns', () => {
-    panel(inVoice({ viewing: true, watching: true, cameraTrack: 'published' }), { cameras: [8], sharer: 9 });
+    panel(inVoice({ viewing: true, watched: new Set([9]), cameraTrack: 'published' }), { cameras: [8], sharer: 9 });
     const share = shareRegion();
     expect(listClass()).toBe('call-grid cols-2 rows-2');
     expect(share.textContent).toContain('member-2 · LIVE');
@@ -589,26 +608,167 @@ describe('stream tiles in the call view', () => {
   });
 
   it('Stop watching unsubscribes one stream and returns its still card without removing the tile', () => {
-    const { client, redraw } = panel(inVoice({ viewing: true, watching: true }), { cameras: [8], sharer: 9 });
+    const { client, redraw } = panel(inVoice({ viewing: true, watched: new Set([9]) }), { cameras: [8], sharer: 9 });
     const watch = vi.spyOn(client, 'watchStream');
     fireEvent.click(within(shareRegion()).getByRole('button', { name: 'Stop watching' }));
     expect(watch).toHaveBeenCalledWith(9, false);
-    redraw(inVoice({ viewing: true, watching: false }));
+    redraw(inVoice({ viewing: true, watched: new Set<number>() }));
     expect(within(callRegion()).queryByRole('region', { name: 'Shared screen' })).toBeNull();
     expect(within(callRegion()).getByRole('region', { name: "member-2's stream" }).textContent).toContain('LIVE');
     expect(within(callRegion()).getByRole('button', { name: 'Watch' })).toBeTruthy();
+    // Focus, gone with Stop watching, is on the card's Watch.
+    expect(document.activeElement).toBe(within(callRegion()).getByRole('button', { name: 'Watch' }));
   });
 
   it('Escape returns from a focused stream, and the focused stream ending returns to the grid', () => {
-    const { redraw } = panel(inVoice({ viewing: true, watching: true }), { cameras: [8], sharer: 9 });
+    const { redraw } = panel(inVoice({ viewing: true, watched: new Set([9]) }), { cameras: [8], sharer: 9 });
     const share = shareRegion();
     fireEvent.click(within(share).getByRole('button', { name: "Focus member-2's screen" }));
     fireEvent.keyDown(share, { key: 'Escape' });
     expect(listClass()).toBe('call-grid cols-2 rows-2');
     fireEvent.click(within(share).getByRole('button', { name: "Focus member-2's screen" }));
-    redraw(inVoice({ viewing: true, watching: false }), [], null);
+    redraw(inVoice({ viewing: true, watched: new Set<number>() }), [], null);
     expect(within(callRegion()).queryByRole('region', { name: 'Shared screen' })).toBeNull();
     expect(listClass()).toBe('call-grid cols-2 rows-2');
+  });
+});
+
+// The page's width as the phone rule reads it, (max-width: 699px), which a
+// test can change as a window resized does.
+function widthOf(narrow: boolean) {
+  const listeners = new Set<() => void>();
+  const phone = { matches: narrow, addEventListener: (_: string, l: () => void) => listeners.add(l), removeEventListener: (_: string, l: () => void) => listeners.delete(l) };
+  const other = { matches: false, addEventListener: () => undefined, removeEventListener: () => undefined };
+  vi.stubGlobal('matchMedia', vi.fn((query: string) => (query === '(max-width: 699px)' ? phone : other)));
+  return {
+    set: (now: boolean) => {
+      phone.matches = now;
+      act(() => {
+        for (const l of listeners) l();
+      });
+    },
+  };
+}
+
+// Two streams, member-1's (8) and member-2's (9), beside this person.
+function twoStreams(cameras: readonly number[] = []): VoicePresenceV2 {
+  const doc = roomWith(cameras, 9);
+  const eight = doc.rooms[0]?.participants.find((p) => p.principal_id === 8);
+  if (eight === undefined) throw new Error('missing participant');
+  Object.assign(eight, { sharing: true, share_started_at: '2026-10-16T00:01:00.000Z' });
+  return doc;
+}
+
+function streamsPanel(state: VoiceState, doc: VoicePresenceV2) {
+  const client = newClient();
+  watchAs(client, state);
+  const view = render(<Live state={state} snapshot={{ kind: 'presence', presence: doc }} client={client} allowed />);
+  return { client, view };
+}
+
+describe('stream tiles without video asked for (O8)', () => {
+  it('puts the stream tiles on the stage alone: no person tile, no camera received, no Hide video; Show video adds the people', () => {
+    const { client } = panel(inVoice(), { cameras: [8], sharer: 9 });
+    const call = callRegion();
+    expect(within(call).getByRole('region', { name: "member-2's stream" })).toBeTruthy();
+    expect(within(call).getAllByRole('listitem')).toHaveLength(1);
+    expect(within(call).queryByLabelText("member-1's camera")).toBeNull();
+    expect(within(call).queryByRole('button', { name: 'Hide video' })).toBeNull();
+    expect(within(call).queryByRole('button', { name: 'Hide non-video participants' })).toBeNull();
+    const view = vi.spyOn(client, 'viewVideo').mockReturnValue(undefined);
+    fireEvent.click(screen.getByRole('button', { name: 'Show video (1)' }));
+    expect(view).toHaveBeenCalledWith(true);
+  });
+
+  it('with video asked for and then hidden, the people go and the stream tiles stay', () => {
+    const { client, redraw } = panel(inVoice({ viewing: true, watched: new Set([9]) }), { cameras: [8], sharer: 9 });
+    const share = within(callRegion()).getByRole('region', { name: 'Shared screen' });
+    expect(within(callRegion()).getByLabelText("member-1's camera")).toBeTruthy();
+    const view = vi.spyOn(client, 'viewVideo').mockReturnValue(undefined);
+    fireEvent.click(within(callRegion()).getByRole('button', { name: 'Hide video' }));
+    expect(view).toHaveBeenCalledWith(false);
+    redraw(inVoice({ watched: new Set([9]) }));
+    expect(within(callRegion()).queryByLabelText("member-1's camera")).toBeNull();
+    expect(within(callRegion()).getByRole('region', { name: 'Shared screen' })).toBe(share);
+  });
+});
+
+describe('focus on a phone', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('Watch focuses the stream, and Back to grid returns to the grid with it still watched', () => {
+    widthOf(true);
+    const { client } = panel(inVoice(), { sharer: 9 });
+    fireEvent.click(within(callRegion()).getByRole('button', { name: 'Watch' }));
+    expect(client.snapshot().focusedShare).toBe(9);
+    const share = within(callRegion()).getByRole('region', { name: 'Shared screen' });
+    expect(share.closest('li')?.className).toBe('call-share main');
+    expect(screen.getByLabelText("Watching member-2's screen")).toBeTruthy();
+    fireEvent.click(within(callRegion()).getByRole('button', { name: 'Back to grid' }));
+    expect(client.snapshot().focusedShare).toBeNull();
+    expect([...client.snapshot().watched]).toEqual([9]);
+    expect(share.closest('li')?.className).toBe('call-share');
+    expect(within(callRegion()).queryByRole('button', { name: 'Back to grid' })).toBeNull();
+    expect(document.activeElement).toBe(within(share).getByRole('button', { name: "Focus member-2's screen" }));
+  });
+
+  it('Watch focuses the stream, and Escape returns to the grid', () => {
+    widthOf(true);
+    const { client } = panel(inVoice(), { sharer: 9 });
+    fireEvent.click(within(callRegion()).getByRole('button', { name: 'Watch' }));
+    const share = within(callRegion()).getByRole('region', { name: 'Shared screen' });
+    expect(share.closest('li')?.className).toBe('call-share main');
+    fireEvent.keyDown(share, { key: 'Escape' });
+    expect(client.snapshot().focusedShare).toBeNull();
+    expect(share.closest('li')?.className).toBe('call-share');
+  });
+
+  it('a desktop watching two streams that becomes narrow keeps the focused one, focused, and lets the other go', () => {
+    const width = widthOf(false);
+    const { client } = streamsPanel(inVoice({ watched: new Set([8, 9]), focusedShare: 9 }), twoStreams());
+    expect(screen.getAllByRole('region', { name: 'Shared screen' })).toHaveLength(2);
+    width.set(true);
+    expect([...client.snapshot().watched]).toEqual([9]);
+    expect(client.snapshot().focusedShare).toBe(9);
+    expect(screen.getAllByRole('region', { name: 'Shared screen' })).toHaveLength(1);
+    expect(screen.getByRole('region', { name: "member-1's stream" })).toBeTruthy();
+  });
+
+  it('with nothing focused, becoming narrow keeps the first watched stream in claim order and focuses it', () => {
+    const width = widthOf(false);
+    const { client } = streamsPanel(inVoice({ watched: new Set([9, 8]) }), twoStreams());
+    width.set(true);
+    // 9's claim started first (roomWith), so 9 is kept.
+    expect([...client.snapshot().watched]).toEqual([9]);
+    expect(client.snapshot().focusedShare).toBe(9);
+    // Back on a desktop, nothing changes by itself.
+    width.set(false);
+    expect([...client.snapshot().watched]).toEqual([9]);
+  });
+});
+
+describe('a focused stream that ends', () => {
+  it('returns to the grid without the view changing the client while it draws', () => {
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const state = inVoice({ viewing: true, watched: new Set([9]) });
+    const { client, view } = streamsPanel(state, twoStreams());
+    fireEvent.click(screen.getByRole('button', { name: "Focus member-2's screen" }));
+    const focus = vi.spyOn(client, 'focusShare');
+    expect(listClass()).toBe('call-grid focus');
+    // The stream ends: presence no longer lists it, and the client lets the
+    // watch go, and its focus with it (connection.ts follow).
+    act(() => {
+      client.watchStream(9, false);
+    });
+    view.rerender(<Live state={state} snapshot={{ kind: 'presence', presence: roomWith([], null) }} client={client} allowed />);
+    expect(focus).not.toHaveBeenCalled();
+    expect(listClass()).not.toBe('call-grid focus');
+    expect(client.snapshot().focusedShare).toBeNull();
+    expect(screen.queryByRole('region', { name: 'Shared screen' })).toBeNull();
+    expect(errors).not.toHaveBeenCalled();
+    errors.mockRestore();
   });
 });
 
@@ -698,20 +858,19 @@ describe('the phone strip with the camera (C7)', () => {
   function stripOf(state: VoiceState, opens: (() => void) | null, { cameras = [8], sharer = null as number | null } = {}) {
     const client = newClient();
     const shown = vi.spyOn(client, 'showVideo');
-    const page = (next: VoiceState, opening: (() => void) | null) => {
-      const watched = sharer !== null && sharer !== 7 && next.watching && next.watched.size === 0 ? { ...next, watched: new Set([sharer]), focusedShare: sharer } : next;
-      return (
-        <VoiceStrip.Provider value={opening}>
-          <VoicePanel voice={control(watched, { kind: 'presence', presence: roomWith(cameras, sharer) }, client)} viewer={7} people={people} viewed="general" cameraAllowed onOpen={() => undefined} />
-        </VoiceStrip.Provider>
-      );
-    };
+    const page = (next: VoiceState, opening: (() => void) | null) => (
+      <VoiceStrip.Provider value={opening}>
+        <Live state={next} snapshot={{ kind: 'presence', presence: roomWith(cameras, sharer) }} client={client} allowed />
+      </VoiceStrip.Provider>
+    );
+    watchAs(client, state);
     const { rerender } = render(page(state, opens));
     return {
       shown,
       client,
       voice: screen.getByRole('region', { name: 'Voice' }),
       redraw: (next: VoiceState, opening: (() => void) | null) => {
+        watchAs(client, next);
         rerender(page(next, opening));
       },
     };
@@ -733,7 +892,7 @@ describe('the phone strip with the camera (C7)', () => {
   });
 
   it('keeps a watched share on the stage under Chat and Channels: the share alone, no cameras', () => {
-    const open = inVoice({ viewing: true, watching: true });
+    const open = inVoice({ viewing: true, watched: new Set([9]), focusedShare: 9 });
     stripOf(open, () => undefined, { cameras: [8], sharer: 9 });
     expect(screen.getByRole('button', { name: 'Stop watching' })).toBeTruthy();
     expect(screen.queryByRole('region', { name: 'Video call' })).toBeNull();

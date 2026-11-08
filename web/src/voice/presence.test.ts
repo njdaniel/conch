@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { VoicePresenceV2 } from '../schema/voice';
-import { parsePresence, qualityLabel, sharers } from './presence';
+import { parsePresence, personOf, principalOf, publisherOf, qualityLabel, sharers } from './presence';
 
 const presence: VoicePresenceV2 = {
   schema: 'conch.voice_presence.v2',
@@ -26,5 +26,23 @@ describe('sharers', () => {
   it('parses v2 and refuses a v1 frame', () => {
     expect(parsePresence(JSON.stringify(presence))).toEqual(presence);
     expect(parsePresence(JSON.stringify({ ...presence, schema: 'conch.voice_presence.v1' }))).toBeNull();
+  });
+});
+
+describe('identities (voice-control-plane.md §13)', () => {
+  it.each([
+    // identity, principalOf, publisherOf, personOf
+    ['p8', 8, 8, 8],
+    ['p8.screen', null, 8, 8],
+    ['p8.view', null, null, 8],
+    ['p8.Screen', null, null, null],
+    ['p8.', null, null, null],
+    ['p8.screen.screen', null, null, null],
+    ['screen.p8', null, null, null],
+    ['8', null, null, null],
+  ])('%s: speaks as %s, streams as %s, is the person %s', (identity, speaker, publisher, person) => {
+    expect(principalOf(identity)).toBe(speaker);
+    expect(publisherOf(identity)).toBe(publisher);
+    expect(personOf(identity)).toBe(person);
   });
 });

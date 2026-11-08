@@ -89,8 +89,29 @@ export function cameraHolders(p: Presence | null): Set<number> {
   return new Set(occupants(p).filter((o) => o.camera).map((o) => o.principal));
 }
 
-// principalOf reads the principal id out of an identity p<id>.
+// principalOf reads the principal id out of an identity p<id>. A suffixed
+// identity (a companion or a viewer, voice-control-plane.md §13) is nobody
+// here: it never speaks, and holds no camera.
 export function principalOf(identity: string): number | null {
   const m = /^p(\d+)$/.exec(identity);
+  return m === null || m[1] === undefined ? null : Number(m[1]);
+}
+
+// publisherOf is whose stream a remote participant's share tracks are: the
+// person's own p<id>, or their desktop companion p<id>.screen, which publishes
+// that person's screen (voice-control-plane.md §13, voice-multi-share.md
+// §7.4). A viewer, p<id>.view, publishes nothing and is nobody's stream; so is
+// any other identity.
+export function publisherOf(identity: string): number | null {
+  const m = /^p(\d+)(?:\.screen)?$/.exec(identity);
+  return m === null || m[1] === undefined ? null : Number(m[1]);
+}
+
+// personOf is the person a connection of this page stands for: p<id>, or the
+// derived identities conchd issues for that person (p<id>.screen, p<id>.view).
+// It is what keeps the person's own stream, whichever participant publishes
+// it, out of what this page watches.
+export function personOf(identity: string): number | null {
+  const m = /^p(\d+)(?:\.(?:screen|view))?$/.exec(identity);
   return m === null || m[1] === undefined ? null : Number(m[1]);
 }

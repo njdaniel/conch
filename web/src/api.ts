@@ -3084,11 +3084,13 @@ export async function fileReport(id: number, issue: string): Promise<InviteResul
 // and its sound.
 
 // A claim refused carries the status and the server's code, as a session does:
-// 409 voice_share_full is a room at its six-stream cap, and 409
-// voice_no_session is no connection to grant it to (voice-multi-share.md §4).
+// 409 voice_share_full is a room at its six-stream cap, 409 voice_no_session
+// is no connection to grant it to (voice-multi-share.md §4), and 429
+// rate_limited a holder's quality change past its bound (#1546), with the
+// seconds its Retry-After asks for.
 export type ShareClaimResult =
   | { readonly ok: true; readonly value: VoiceShareV1 | VoiceShareV2 }
-  | { readonly ok: false; readonly failure: ApiFailure; readonly status?: number; readonly code?: string };
+  | { readonly ok: false; readonly failure: ApiFailure; readonly status?: number; readonly code?: string; readonly retryAfter?: number };
 
 // claimVoiceShare claims the caller's own share, or claims it again after a
 // reconnect or quality change, which keeps the share as it was. A declared
@@ -3102,7 +3104,14 @@ export async function claimVoiceShare(channel: string, quality?: ShareQuality): 
   const res = reply.res;
   if (!res.ok) {
     const code = await refusalCode(res);
-    return code === undefined ? { ok: false, failure: 'invalid', status: res.status } : { ok: false, failure: 'invalid', status: res.status, code };
+    const retryAfter = Number.parseInt(res.headers.get('Retry-After') ?? '', 10);
+    return {
+      ok: false,
+      failure: 'invalid',
+      status: res.status,
+      ...(code === undefined ? {} : { code }),
+      ...(res.status === 429 && Number.isFinite(retryAfter) && retryAfter >= 0 ? { retryAfter } : {}),
+    };
   }
   try {
     const parsed: unknown = await res.json();

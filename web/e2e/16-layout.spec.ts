@@ -6,7 +6,7 @@
 // give it back on Escape. Media continuity through these panels is in
 // 12-screen-share, which has LiveKit.
 import type { BrowserContextOptions, Locator, Page, WebSocketRoute } from '@playwright/test';
-import { voicePresenceV1, type VoicePresenceV1 } from '../src/schema/voice';
+import { voicePresenceV2, type VoicePresenceV2 } from '../src/schema/voice';
 import { channelButton, expect, expectFits, mainNav, messages, openChannel, phoneSizes, showView, signIn, test } from './fixtures';
 import { call, ok, type World } from './world';
 
@@ -124,26 +124,27 @@ test('P536 at every size the lobby fits, its composer and voice strip are uncove
 // strip is served a presence document instead, on its socket (and on the one
 // read it makes after the server closes one): the server's own document for
 // the channel, with voice up and the given people in its room. It exists only
-// in this test; the product shows only who the server reports.
+// in this test; the product shows only who the server reports. It is v2
+// presence, which the page asks for and reads (voice-multi-share.md §7.1).
 interface Presence {
   // show sends a new document on every socket the page has open.
   show: (who: readonly number[], sharing?: number) => void;
 }
 
 async function servePresence(page: Page, world: World, token: string, channel: string, who: readonly number[]): Promise<Presence> {
-  const real = await ok(world, token, 'GET', `/v1/channels/${encodeURIComponent(channel)}/voice`, voicePresenceV1);
+  const real = await ok(world, token, 'GET', `/v1/channels/${encodeURIComponent(channel)}/voice?schema=conch.voice_presence.v2`, voicePresenceV2);
   const doc = (people: readonly number[], sharing?: number): string => {
-    const presence: VoicePresenceV1 = {
+    const presence: VoicePresenceV2 = {
       ...real,
       configured: true,
       available: true,
       rooms: [
         {
-          participants: people.map((id) => ({ principal_id: id, can_publish: true, transmitting: false, joined_at: '2026-10-18T00:00:00Z', ...(id === sharing ? { sharing: true } : {}) })),
+          participants: people.map((id) => ({ principal_id: id, can_publish: true, transmitting: false, joined_at: '2026-10-18T00:00:00Z', ...(id === sharing ? { sharing: true, share_started_at: '2026-10-18T00:00:00Z' } : {}) })),
         },
       ],
     };
-    expect(voicePresenceV1(presence), 'the faked presence document').toEqual([]);
+    expect(voicePresenceV2(presence), 'the faked presence document').toEqual([]);
     return JSON.stringify(presence);
   };
   let current = doc(who);

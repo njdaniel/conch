@@ -185,6 +185,20 @@ export function onTabSharing(callback: () => void): () => void {
 // s), and a reconnect after it. Past it the capture is stopped.
 export const resumeLimit = 45_000;
 
+// What a quality change while live came to: sent (or nothing to send), or
+// refused for now by conchd's bound on quality changes (#1546) and to be sent
+// again by itself in a moment (changeQuality).
+export type QualityAnswer = 'sent' | 'later';
+
+// The longest a quality change refused for the rate bound waits before it is
+// sent again, in seconds, whatever Retry-After asks for.
+export const qualityRetryLimit = 10;
+
+// What the sharer is told when conchd refused a quality change for its rate
+// bound: the picture already has the new quality, and the others' label
+// catches up.
+export const qualityLaterNote = 'Quality changes are limited to a few at a time: the others see the new quality on your stream in a moment.';
+
 export interface ShareApi {
   readonly claim: (channel: string, quality?: ShareQuality) => Promise<ShareClaimResult>;
   // Releases the claim whose started_at is startedAt, and no other.
@@ -246,6 +260,9 @@ export class ScreenShare {
   // renewed. Kept apart from told, which a claim granted again clears: a
   // resume cut short by another lost connection is tried again.
   private renewal = false;
+  // A quality change refused for the rate bound, waiting to be sent again
+  // (changeQuality).
+  private qualityRetry: unknown = null;
   // Whether the share is between rooms: from the renewal that took it off the
   // air until it is shared again or ends. The resume timer runs for the whole
   // of it, so a room renewed again meanwhile does not start the wait over.
@@ -263,6 +280,8 @@ export class ScreenShare {
 
   private set(state: ShareState): void {
     this.state = state;
+    // A quality change waits to be sent again only while the share is live.
+    if (state.kind !== 'sharing') this.endQualityRetry();
     noteSharing(this, state);
     this.onChange(state);
   }
@@ -311,7 +330,9 @@ export class ScreenShare {
     }
     this.set({ kind: 'publishing' });
     this.seen = false;
-    const again = await this.api.claim(at(), quality);
+    // The choice as it is now: one changed while the picker was open is the
+    // one conchd is told.
+    const again = await this.api.claim(at(), this.quality);
     if (again.ok) this.granted(again.value.started_at);
     if (mine !== this.attempt) {
       await room.stopScreen();
@@ -345,11 +366,65 @@ export class ScreenShare {
   }
 
   // changeQuality keeps the declared choice for later claims and, while live,
-  // tells conchd so presence can show it (voice-multi-share.md §3.1, #1509).
-  async changeQuality(quality: ShareQuality): Promise<void> {
+  // tells conchd so presence can show it: a holder's repeat claim with the
+  // new body (voice-multi-share.md §3.1, #1509). Its answer is a claim's:
+  //  - granted: the share of that started_at, which a conchd restarted
+  //    meanwhile may have issued anew;
+  //  - full or no session: the server no longer holds this share, which ends
+  //    as one the server ended (or waits, if presence said the room was
+  //    renewed);
+  //  - 429 rate_limited (#1546): conchd kept the quality it had. The page
+  //    keeps the person's choice (the encodings already carry it) and sends it
+  //    once more after Retry-After, the newest choice by then; 'later' says
+  //    so, for the sharer to be told.
+  // A change sent while a stop is under way, or after it, does not hold the
+  // share: a grant it is answered with then is released by its own
+  // started_at, so no claim outlives the share and takes a place under the
+  // cap (voice-multi-share.md §4).
+  async changeQuality(quality: ShareQuality): Promise<QualityAnswer> {
     this.quality = quality;
-    if (this.state.kind !== 'sharing' || this.channel === null) return;
-    await this.api.claim(this.channel, quality);
+    this.endQualityRetry();
+    return this.sendQuality(true);
+  }
+
+  // sendQuality sends the current choice as a holder's repeat claim; retry
+  // says whether a refusal for the rate bound may be sent once more.
+  private async sendQuality(retry: boolean): Promise<QualityAnswer> {
+    const channel = this.channel;
+    if (this.state.kind !== 'sharing' || channel === null) return 'sent';
+    const mine = this.attempt;
+    const answer = await this.api.claim(channel, this.quality);
+    if (mine !== this.attempt) {
+      // Stopped or ended meanwhile; a newer share's claim would have its own
+      // start, and is left alone.
+      if (answer.ok && this.ending()) await this.api.release(this.channel ?? channel, answer.value.started_at).catch(() => undefined);
+      return 'sent';
+    }
+    if (answer.ok) {
+      this.granted(answer.value.started_at);
+      return 'sent';
+    }
+    if (answer.status === 429 || answer.code === 'rate_limited') {
+      if (!retry) return 'sent';
+      const wait = Math.min(Math.max(answer.retryAfter ?? 1, 1), qualityRetryLimit);
+      this.qualityRetry = this.clock.setTimeout(() => {
+        this.qualityRetry = null;
+        if (mine === this.attempt) void this.sendQuality(false);
+      }, wait * 1000);
+      return 'later';
+    }
+    const end = refusalEnd(answer);
+    if (end === 'full' || end === 'not_connected') {
+      if (this.renewed()) this.suspend();
+      else await this.serverEnded();
+    }
+    return 'sent';
+  }
+
+  // endQualityRetry drops a quality change waiting to be sent again.
+  private endQualityRetry(): void {
+    if (this.qualityRetry !== null) this.clock.clearTimeout(this.qualityRetry);
+    this.qualityRetry = null;
   }
 
   // stop ends the share from this side: the Stop sharing button, the
@@ -369,6 +444,11 @@ export class ScreenShare {
   // isIdle reads the state afresh: after an await it may have changed.
   private isIdle(): boolean {
     return this.state.kind === 'idle';
+  }
+
+  // ending reads afresh whether the share is over or being stopped.
+  private ending(): boolean {
+    return this.state.kind === 'idle' || this.state.kind === 'stopping';
   }
 
   // granted records a claim conchd granted: the share is ours, and is the

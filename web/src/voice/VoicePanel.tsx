@@ -41,8 +41,10 @@ import { ModerationConfirm, useMayModerate, useMayModerateIn } from '../Moderati
 // room has a camera on, and it never opens by itself (O8). Its remembered
 // "Hide non-video participants" choice can close it when no camera or watched
 // share remains; a later camera offers Show video again, without opening it.
-// While a share is watched with the call view open, the share is the main
-// picture and the cameras are a strip beside it (design §7.4).
+// Every live stream is a tile on the stage, with Watch (voice-multi-share.md
+// §7.1, #1509): the people's tiles join them only with the person's choice to
+// view, and a focused stream is the main picture with every other tile in the
+// strip (design §7.4).
 import { useContext, useEffect, useRef, useState, type KeyboardEvent as KeyEvent, type RefObject } from 'react';
 import { createPortal } from 'react-dom';
 import { readHideNonVideo, writeHideNonVideo } from '../api';
@@ -280,6 +282,26 @@ export function VoicePanel({
     wasWatching.current = new Set(state.watched);
   }, [state.watched, liveStreams, inVoice, people, viewer]);
 
+  // A phone plays one stream at a time, focused (voice-multi-share.md §7.1).
+  // A page that becomes narrow while it watches several (a window made
+  // narrower, a tablet turned) keeps the focused one, or else the first
+  // watched in the streams' order, focuses it and lets the others go. Once
+  // narrow, a second watch is the switcher's, which ends the first; Back to
+  // grid leaves the one stream watched and unfocused, as chosen.
+  const wasNarrow = useRef(narrow);
+  const streamOrder = streams.map((s) => s.principal).join(',');
+  useEffect(() => {
+    const entered = narrow && !wasNarrow.current;
+    wasNarrow.current = narrow;
+    if (!narrow || state.watched.size === 0) return;
+    if (!entered && state.watched.size === 1) return;
+    const order = streamOrder === '' ? [] : streamOrder.split(',').map(Number);
+    const focused = state.focusedShare;
+    const keep = focused !== null && state.watched.has(focused) ? focused : (order.find((p) => state.watched.has(p)) ?? [...state.watched][0]);
+    if (keep === undefined || (state.watched.size === 1 && focused === keep)) return;
+    client.switchStream(keep);
+  }, [client, narrow, state.watched, state.focusedShare, streamOrder]);
+
   useEffect(() => {
     if (stopped === null) return;
     const timer = window.setTimeout(() => {
@@ -411,6 +433,8 @@ export function VoicePanel({
           <section aria-label={`${name}'s stream`} className="share-view">
             <p className="share-title"><Glyph name="screen" />{name} · LIVE{quality === null ? null : <> · {quality}</>}</p>
             <div className="share-controls"><button type="button" disabled={state.phase !== 'connected'} onClick={() => {
+              // A phone plays one stream at a time, focused: Watch there is
+              // the switcher's step (voice-multi-share.md §7.1).
               if (narrow) client.switchStream(stream.principal);
               else client.watchStream(stream.principal, true);
             }}>Watch</button></div>
@@ -422,21 +446,25 @@ export function VoicePanel({
   });
   // The call view is open while the person asked for video or live streams
   // offer tiles. Camera and stream tiles share one layout on the stage: the
-  // focused stream is the main picture and the other tiles are the strip. It
-  // stays the one CallView whether open or closed, so no watched player is
-  // drawn again by opening or closing it (design §7.4; multi-share §7.1, #1509).
-  const call = inVoice && (state.viewing || streams.length > 0) && !strip ? callTiles(roster, viewer, state.cameraTrack !== 'none', (id) => nameOf(people, id, viewer), viewerName, hideNonVideo, streams.length) : null;
+  // focused stream is the main picture and the other tiles are the strip. The
+  // people's tiles come only with the person's own choice to view (O8): live
+  // streams alone open it with their tiles and nothing else, so no camera tile
+  // waits for a camera that is not received. It stays the one CallView whether
+  // open or closed, so no watched player is drawn again by opening or closing
+  // it (design §7.4; multi-share §7.1, #1509).
+  const callOpen = inVoice && (state.viewing || streams.length > 0) && !strip;
+  const call = callOpen && state.viewing ? callTiles(roster, viewer, state.cameraTrack !== 'none', (id) => nameOf(people, id, viewer), viewerName, hideNonVideo, streams.length) : null;
   // In the phone layout under Chat and Channels (the strip) the stage holds a
   // focused watched share only: no call view and no camera tile, and no camera
   // received (showVideo). The person's choice to view is kept, so the view and
   // cameras are back with the Voice view, with no tap (O8).
-  const staged = !inVoice || (strip && !state.watching) ? null : (
+  const staged = !inVoice || (strip && state.watched.size === 0) ? null : (
     <CallView
       client={client}
       state={state}
       tiles={[...(call?.tiles ?? []), ...streamTiles]}
       hidden={call?.hidden ?? 0}
-      open={call !== null}
+      open={callOpen}
       hideNonVideo={hideNonVideo}
       onHideNonVideo={() => {
         const next = !hideNonVideo;

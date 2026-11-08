@@ -134,6 +134,96 @@ describe('starting a share', () => {
     expect(t.claimedQualities).toEqual([picked, picked, changed]);
   });
 
+  it('a quality changed while the picker is open is the one the second claim sends', async () => {
+    const t = setup();
+    t.room.pick = deferred<Captured>();
+    const picked: ShareQuality = { resolution: '1080p', frameRate: 30 };
+    const start = t.share.start('general', t.stub, picked);
+    await settle();
+    expect(t.share.current.kind).toBe('picking');
+    const meanwhile: ShareQuality = { resolution: '720p', frameRate: 60 };
+    expect(await t.share.changeQuality(meanwhile)).toBe('sent');
+    t.room.pick.resolve({ audio: true });
+    await start;
+    expect(t.claimedQualities).toEqual([picked, meanwhile]);
+  });
+
+  it('a quality change answered with a new claim adopts its started_at: the next release names it', async () => {
+    const t = await sharing();
+    const anew: ShareClaimResult = { ok: true, value: { principal_id: 7, started_at: '2026-10-16T00:05:00.000Z', audio: true, quality: { resolution: '720p', frame_rate: 30 } } };
+    const answer = deferred<ShareClaimResult>();
+    t.room.claim = answer;
+    const change = t.share.changeQuality({ resolution: '720p', frameRate: 30 });
+    answer.resolve(anew);
+    expect(await change).toBe('sent');
+    await t.share.stop('self');
+    expect(t.released).toEqual(['2026-10-16T00:05:00.000Z']);
+  });
+
+  it.each([
+    ['full', busy],
+    ['no session', noSession],
+  ])('a quality change answered %s ends the share as the server ending it, with nothing released', async (_name, answer) => {
+    const t = await sharing(setup([granted, granted, answer]));
+    expect(await t.share.changeQuality({ resolution: '720p', frameRate: 15 })).toBe('sent');
+    expect(t.calls).toEqual(['claim general', 'stop screen']);
+    expect(t.released).toEqual([]);
+    expect(t.share.current).toEqual({ kind: 'idle', ended: 'server' });
+  });
+
+  it('a quality change over the rate bound keeps the choice and sends it once more after Retry-After, the newest by then', async () => {
+    const limited: ShareClaimResult = { ok: false, failure: 'invalid', status: 429, code: 'rate_limited', retryAfter: 2 };
+    const t = await sharing(setup([granted, granted, limited, limited]));
+    expect(await t.share.changeQuality({ resolution: '720p', frameRate: 15 })).toBe('later');
+    expect(t.share.current).toEqual({ kind: 'sharing', audio: true });
+    t.clock.advance(1999);
+    await settle();
+    expect(t.calls).toEqual(['claim general']);
+    t.clock.advance(1);
+    await settle();
+    expect(t.calls).toEqual(['claim general', 'claim general']);
+    expect(t.claimedQualities.slice(2)).toEqual([{ resolution: '720p', frameRate: 15 }, { resolution: '720p', frameRate: 15 }]);
+    // Refused again: once is all, and the share goes on.
+    t.clock.advance(60_000);
+    await settle();
+    expect(t.calls).toEqual(['claim general', 'claim general']);
+    expect(t.share.current).toEqual({ kind: 'sharing', audio: true });
+  });
+
+  it('a later choice replaces the one waiting to be sent again, and a stop drops it', async () => {
+    const limited: ShareClaimResult = { ok: false, failure: 'invalid', status: 429, code: 'rate_limited', retryAfter: 1 };
+    const t = await sharing(setup([granted, granted, limited, limited]));
+    await t.share.changeQuality({ resolution: '720p', frameRate: 15 });
+    expect(await t.share.changeQuality({ resolution: 'source', frameRate: 60 })).toBe('later');
+    t.clock.advance(1000);
+    await settle();
+    // One send, of the newest choice.
+    expect(t.claimedQualities.slice(2)).toEqual([{ resolution: '720p', frameRate: 15 }, { resolution: 'source', frameRate: 60 }, { resolution: 'source', frameRate: 60 }]);
+    const u = await sharing(setup([granted, granted, limited]));
+    await u.share.changeQuality({ resolution: '720p', frameRate: 15 });
+    await u.share.stop('self');
+    u.calls.length = 0;
+    u.clock.advance(60_000);
+    await settle();
+    expect(u.calls).toEqual([]);
+  });
+
+  it('a quality change that lands after Stop sharing has its grant released by its own started_at', async () => {
+    const t = await sharing();
+    const late = deferred<ShareClaimResult>();
+    t.room.claim = late;
+    const change = t.share.changeQuality({ resolution: '720p', frameRate: 15 });
+    await t.share.stop('self');
+    expect(t.released).toEqual(['2026-10-16T00:00:00.000Z']);
+    expect(t.share.current).toEqual({ kind: 'idle', ended: 'self' });
+    // conchd took the late change as a new claim, after the stop.
+    late.resolve({ ok: true, value: { principal_id: 7, started_at: '2026-10-16T00:09:00.000Z', audio: true, quality: { resolution: '720p', frame_rate: 15 } } });
+    await change;
+    expect(t.released).toEqual(['2026-10-16T00:00:00.000Z', '2026-10-16T00:09:00.000Z']);
+    // Nothing else changed: the share stays stopped.
+    expect(t.share.current).toEqual({ kind: 'idle', ended: 'self' });
+  });
+
   it('says when no sound was obtained', async () => {
     const t = setup();
     t.room.audio = false;

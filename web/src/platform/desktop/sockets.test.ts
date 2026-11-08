@@ -3,6 +3,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { openEventsSocket, openOccupancySocket, openSocket, openVoiceSocket } from '../../api';
 import { Feed, firstDelay, type Clock, type FeedStatus } from '../../state/feed';
+import { parsePresence, sharers } from '../../voice/presence';
 import type { ConchDesktopBridge, FeedHandlers, FeedRequest } from './bridge';
 import { feedOf, sockets } from './sockets';
 
@@ -65,6 +66,14 @@ afterEach(() => {
 });
 
 const events = () => ({ onOpen: vi.fn(), onFrame: vi.fn(), onClose: vi.fn() });
+
+// The Go golden fixtures, read by relative path as schema.test.ts reads them.
+const fixtures = import.meta.glob<unknown>('../../../../pkg/schema/testdata/voice-presence-v*.json', { eager: true, import: 'default' });
+const fixture = (name: string): unknown => {
+  const found = Object.entries(fixtures).find(([path]) => path.endsWith(`/${name}.json`));
+  if (found === undefined) throw new Error(`no fixture ${name}`);
+  return found[1];
+};
 
 describe('the desktop feed request', () => {
   it.each<[Parameters<typeof feedOf>[0], Record<string, string>, FeedRequest | null]>([
@@ -135,6 +144,28 @@ describe('the client on the desktop', () => {
       { kind: 'voice', channel: 'general' },
       { kind: 'occupancy' },
     ]);
+  });
+
+  // The voice feed is v2 presence (voice-multi-share.md §7.4: the desktop's
+  // view is the web client's). The renderer names the channel alone; main
+  // adds ?schema=conch.voice_presence.v2 (desktop/main/api/feeds.ts feedUrl,
+  // tested there) and sends on what it validated as v2, which the page reads
+  // as the browser does: every stream, so the roster is there and Join is not
+  // held back.
+  it('passes the v2 presence main sends to the page, which reads it; a v1 document is not one', async () => {
+    const subs = install();
+    const frames: unknown[] = [];
+    const result = await openVoiceSocket('general', { ...events(), onFrame: (data) => frames.push(data) });
+    expect(result.ok).toBe(true);
+    expect(subs[0]?.feed).toEqual({ kind: 'voice', channel: 'general' });
+    subs[0]?.handlers.onOpen();
+    const frame = JSON.stringify(fixture('voice-presence-v2'));
+    subs[0]?.handlers.onFrame(frame);
+    expect(frames).toEqual([frame]);
+    const presence = parsePresence(frames[0]);
+    expect(presence).not.toBeNull();
+    expect(sharers(presence).length).toBeGreaterThan(1);
+    expect(parsePresence(JSON.stringify(fixture('voice-presence-v1-sharing')))).toBeNull();
   });
 
   // The renderer's own reconnect, unchanged: main's 1013 (fell behind) is a

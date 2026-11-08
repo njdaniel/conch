@@ -726,7 +726,7 @@ describe('what the strip says is true', () => {
     });
 
     it('stays enabled while watching too, with no busy note', () => {
-      const { voice } = panel(joined({ watching: true, watched: new Set([3]) }), 'c', bobShares, bob);
+      const { voice } = panel(joined({ watched: new Set([3]) }), 'c', bobShares, bob);
       expect(screen.getByRole('region', { name: 'Shared screen' }).textContent).toContain('bob · LIVE');
       expect(within(voice).getByRole('button', { name: 'Share screen' }).hasAttribute('disabled')).toBe(false);
       expect(voice.textContent).not.toContain('One person shares at a time.');
@@ -822,13 +822,13 @@ describe('what the strip says is true', () => {
 
     it(`says the holder stopped, read out, for ${String(stoppedFor / 1000)} s`, () => {
       vi.useFakeTimers();
-      const { voice, redraw } = panel(joined({ watching: true, watched: new Set([3]) }), 'c', bobShares, bob);
+      const { voice, redraw } = panel(joined({ watched: new Set([3]) }), 'c', bobShares, bob);
       expect(shown(voice)).toBeNull();
       // Bob's share ends: presence says nobody shares, then the client stops
       // watching.
-      redraw(joined({ watching: true, watched: new Set([3]) }), nobodyShares);
+      redraw(joined({ watched: new Set([3]) }), nobodyShares);
       expect(shown(voice)).toBeNull();
-      redraw(joined({ watching: false, watched: new Set() }), nobodyShares);
+      redraw(joined({ watched: new Set() }), nobodyShares);
       expect(shown(voice)?.getAttribute('role')).toBe('status');
       act(() => {
         vi.advanceTimersByTime(stoppedFor - 1);
@@ -841,17 +841,17 @@ describe('what the strip says is true', () => {
     });
 
     it('says the holder stopped when the share and the watching end in one frame', () => {
-      const { voice, redraw } = panel(joined({ watching: true, watched: new Set([3]) }), 'c', bobShares, bob);
-      redraw(joined({ watching: false, watched: new Set() }), nobodyShares);
+      const { voice, redraw } = panel(joined({ watched: new Set([3]) }), 'c', bobShares, bob);
+      redraw(joined({ watched: new Set() }), nobodyShares);
       expect(shown(voice)).not.toBeNull();
     });
 
     it('says nothing when the viewer stops watching, nor when that share ends later', () => {
       vi.useFakeTimers();
-      const { voice, redraw } = panel(joined({ watching: true, watched: new Set([3]) }), 'c', bobShares, bob);
-      redraw(joined({ watching: false, watched: new Set() }), bobShares);
+      const { voice, redraw } = panel(joined({ watched: new Set([3]) }), 'c', bobShares, bob);
+      redraw(joined({ watched: new Set() }), bobShares);
       expect(shown(voice)).toBeNull();
-      redraw(joined({ watching: false, watched: new Set() }), nobodyShares);
+      redraw(joined({ watched: new Set() }), nobodyShares);
       act(() => {
         vi.advanceTimersByTime(stoppedFor);
       });
@@ -861,23 +861,23 @@ describe('what the strip says is true', () => {
     it('says nothing while a share that went with a renewed room is waited for, nor when it is back', () => {
       // The client keeps watching through the wait (connection.ts
       // awaitShare): the room is renewed, and everyone left it.
-      const { voice, redraw } = panel(joined({ watching: true, watched: new Set([3]) }), 'c', bobShares, bob);
-      redraw(joined({ phase: 'connecting', watching: true, watched: new Set([3]) }), room());
-      redraw(joined({ watching: true, watched: new Set([3]) }), room(one(7)));
+      const { voice, redraw } = panel(joined({ watched: new Set([3]) }), 'c', bobShares, bob);
+      redraw(joined({ phase: 'connecting', watched: new Set([3]) }), room());
+      redraw(joined({ watched: new Set([3]) }), room(one(7)));
       expect(shown(voice)).toBeNull();
-      redraw(joined({ watching: true, watched: new Set([3]) }), bobShares);
+      redraw(joined({ watched: new Set([3]) }), bobShares);
       expect(voice.textContent).not.toContain('stopped sharing');
     });
 
     it('says the holder stopped when the wait for a renewed share runs out', () => {
-      const { voice, redraw } = panel(joined({ watching: true, watched: new Set([3]) }), 'c', bobShares, bob);
-      redraw(joined({ watching: true, watched: new Set([3]) }), room(one(7)));
-      redraw(joined({ watching: false, watched: new Set() }), room(one(7)));
+      const { voice, redraw } = panel(joined({ watched: new Set([3]) }), 'c', bobShares, bob);
+      redraw(joined({ watched: new Set([3]) }), room(one(7)));
+      redraw(joined({ watched: new Set() }), room(one(7)));
       expect(shown(voice)).not.toBeNull();
     });
 
     it('says nothing on leaving voice while watching', () => {
-      const { voice, redraw } = panel(joined({ watching: true, watched: new Set([3]) }), 'c', bobShares, bob);
+      const { voice, redraw } = panel(joined({ watched: new Set([3]) }), 'c', bobShares, bob);
       redraw(initialVoice, nobodyShares);
       expect(voice.textContent).not.toContain('stopped sharing');
     });
@@ -1002,7 +1002,7 @@ describe('the notes about sharing', () => {
     expect(within(voice).getByRole('button', { name: 'More about sharing' })).toBeTruthy();
     expect(voice.querySelector('#voice-options')?.hasAttribute('hidden')).toBe(true);
     expect(within(screen.getByRole('region', { name: "bob's stream" })).getByRole('button', { name: 'Watch' })).toBeTruthy();
-    redraw(joined({ watching: true, watched: new Set([3]) }), bobShares);
+    redraw(joined({ watched: new Set([3]) }), bobShares);
     expect(within(voice).getByText(line)).toBeTruthy();
     expect(screen.getByRole('region', { name: 'Shared screen' }).textContent).toContain('bob · LIVE');
     redraw(joined(), nobodyShares);
