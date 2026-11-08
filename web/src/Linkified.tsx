@@ -1,4 +1,5 @@
-import { Component, useId, useState, type ReactNode } from 'react';
+import { Component, type ReactNode } from 'react';
+import { Spoiler } from './Spoiler';
 import { Glyph } from './Icons';
 import { linkify } from './linkify';
 
@@ -15,19 +16,6 @@ function SafeLink({ text, href }: { readonly text: string; readonly href: string
         <span className="external-link-cue" aria-hidden="true"><Glyph name="external" /></span>
       </span>
     </a>
-  );
-}
-
-function Spoiler({ children }: { readonly children: ReactNode }) {
-  const [revealed, setRevealed] = useState(false);
-  const id = useId();
-  return (
-    <span className={revealed ? 'spoiler revealed' : 'spoiler'}>
-      <button type="button" aria-expanded={revealed} aria-controls={id} onClick={() => { setRevealed((shown) => !shown); }}>
-        {revealed ? 'Hide spoiler' : 'Reveal spoiler'}
-      </button>
-      {revealed ? <span id={id} className="spoiler-content">{children}</span> : null}
-    </span>
   );
 }
 

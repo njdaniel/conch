@@ -195,6 +195,12 @@ describe('one-level replies', () => {
 describe('what a reply answers', () => {
   const line = (id: number) => document.querySelector(`[data-message-id="${String(id)}"]`) as HTMLElement;
 
+  it('quotes an image-only spoiler root by its shown names, never the prefix', () => {
+    const payload = { schema: 'conch.file_attachment.v1', data: { file_ids: [1, 2] } };
+    view([{ ...root(), body: 'SPOILER_a.png, SPOILER_b.png', payload }, reply(2)]);
+    expect(within(line(2)).getByText('Replying to bea: a.png, b.png')).toBeTruthy();
+  });
+
   it('quotes the first line of a held root, with its author', () => {
     view([{ ...root(), body: 'anyone up for game night?\nsecond line' }, reply(2)]);
     expect(within(line(2)).getByText('Replying to bea: anyone up for game night?')).toBeTruthy();

@@ -72,6 +72,9 @@ var TSConstants = []TSConstant{
 	{Name: "MESSAGE_EDIT_WINDOW_SECONDS", Value: MessageEditWindowSeconds},
 	{Name: "MAX_MESSAGE_EDITS", Value: MaxMessageEdits},
 	{Name: "MAX_POST_REQUEST_BYTES", Value: MaxPostRequestBytes},
+	// A spoiler attachment (issue #1500): presentation only, no shape change.
+	{Name: "SPOILER_FILE_PREFIX", Value: SpoilerFilePrefix},
+	{Name: "MAX_FILE_NAME_BYTES", Value: MaxFileNameBytes},
 
 	// The managed voice-helper control protocol, for the desktop owner's
 	// supervisor (issue #948, Q10 of #770): the helper's command line, the

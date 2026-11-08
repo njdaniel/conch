@@ -78,6 +78,7 @@ import { usePreview } from './preview/usePreview';
 import type { ServerMemberV1 } from './schema/principal';
 import { AppearanceSettings } from './AppearanceSettings';
 import { applyAppearance, defaultAppearance, type AppearancePreferences } from './appearance';
+import { storedName } from './spoilerFiles';
 
 const noUnread: ReadonlyMap<string, number> = new Map();
 const checkingAudience = 'Checking who this draft goes to…';
@@ -894,7 +895,7 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
     const controller = new AbortController();
     const key = `${String(send.generation)}:${String(attachment.clientId)}`;
     uploadControllers.current.set(key, { controller, channelId: send.channelId });
-    const result = await api.uploadFile(send.channel, attachment.filename, attachment.mediaType, attachment.bytes, controller.signal);
+    const result = await api.uploadFile(send.channel, storedName(attachment), attachment.mediaType, attachment.bytes, controller.signal);
     if (uploadControllers.current.get(key)?.controller === controller) uploadControllers.current.delete(key);
     if (!activeSend(send)) return { ...attachment, status: 'cancelled', attempt };
     const currentChannel = nameOf(send.channelId) ?? send.channel;
@@ -954,6 +955,7 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
       beginSend(frozen);
       return;
     }
+    dispatchAttachments({ type: 'seal', channel: nameOf(channelId) ?? channel, ...(audience === undefined ? {} : { audience }) });
     void (async () => {
       let attachments = [...frozen.attachments];
       for (let index = 0; index < attachments.length; index++) {
@@ -1506,6 +1508,10 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
       if (selected === null) return;
       editedImages();
       dispatchAttachments({ type: 'remove', channel: selected, ...(composerAudience === undefined ? {} : { audience: composerAudience }), clientId });
+    },
+    spoiler: (clientId: number, spoiler: boolean) => {
+      if (selected === null) return;
+      dispatchAttachments({ type: 'spoiler', channel: selected, ...(composerAudience === undefined ? {} : { audience: composerAudience }), clientId, spoiler });
     },
     cancel: (clientId: number) => {
       if (selected === null) return;

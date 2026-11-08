@@ -5,6 +5,7 @@ import { NotificationCenter } from './NotificationCenter';
 import { NotificationSettings } from './NotificationSettings';
 import * as api from './api';
 import { mentions, useNotifications, type NotificationAlert } from './useNotifications';
+import { SPOILER_FILE_PREFIX } from './schema/file';
 import type { MessageV2 } from './schema/message';
 
 const at = '2026-10-26T00:00:00Z';
@@ -336,6 +337,58 @@ describe('browser permission and cleanup', () => {
     expect(onOpen).toHaveBeenCalledWith('one');
     fireEvent.click(screen.getByRole('button', { name: 'Clear all' }));
     expect(onClear).toHaveBeenCalled();
+  });
+
+  it('reads an image-only spoiler as [spoiler] and its shown name, never the image', () => {
+    const body = `${SPOILER_FILE_PREFIX}secret.png`;
+    const image: NotificationAlert = {
+      id: 'img',
+      channel: 'general',
+      message: { ...message(2, body), payload: { schema: 'conch.file_attachment.v1', data: { file_ids: [9] } } },
+      mention: false,
+    };
+    const { container } = render(<NotificationCenter alerts={[image]} onOpen={vi.fn()} onClear={vi.fn()} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Notifications (1)' }));
+    const row = screen.getByRole('button', { name: /New message in #general/ });
+    expect(row.getAttribute('aria-label')).toContain('[spoiler] secret.png');
+    expect(row.textContent).toContain('[spoiler] secret.png');
+    expect(container.textContent).not.toContain(SPOILER_FILE_PREFIX);
+    expect(container.querySelector('img')).toBeNull();
+  });
+
+  it('hides the text spoiler of a caption that starts with the prefix, in the center and in the native notification', async () => {
+    const body = `${SPOILER_FILE_PREFIX}note ||the secret, in full||`;
+    const withFile = (id: number): MessageV2 => ({ ...message(id, body), payload: { schema: 'conch.file_attachment.v1', data: { file_ids: [9] } } });
+    const caption: NotificationAlert = { id: 'cap', channel: 'general', message: withFile(2), mention: false };
+    render(<NotificationCenter alerts={[caption]} onOpen={vi.fn()} onClear={vi.fn()} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Notifications (1)' }));
+    const row = screen.getByRole('button', { name: /New message in #general/ });
+    expect(row.textContent).toContain('[spoiler]');
+    expect(document.body.textContent).not.toContain('the secret');
+    expect(row.getAttribute('aria-label')).not.toContain('the secret');
+    cleanup();
+
+    visibility('hidden');
+    vi.spyOn(api, 'loadMessagesAscending').mockResolvedValue({ ok: true, complete: true, value: [] });
+    const { result, rerender } = renderHook((p: Props) => useNotifications(p), { initialProps: props() });
+    await act(async () => { await Promise.resolve(); });
+    act(() => { result.current.setPolicy('all'); });
+    await act(async () => { await result.current.enableNative(); });
+    rerender({ ...props(), event: withFile(3) });
+    expect(FakeNotification.all).toHaveLength(1);
+    expect(FakeNotification.all[0]?.options.body ?? '').not.toContain('the secret');
+    expect(FakeNotification.all[0]?.options.body).toContain('[spoiler]');
+  });
+
+  it('previews an image-only spoiler natively as [spoiler] and the shown name', async () => {
+    visibility('hidden');
+    vi.spyOn(api, 'loadMessagesAscending').mockResolvedValue({ ok: true, complete: true, value: [] });
+    const { result, rerender } = renderHook((p: Props) => useNotifications(p), { initialProps: props() });
+    await act(async () => { await Promise.resolve(); });
+    act(() => { result.current.setPolicy('all'); });
+    await act(async () => { await result.current.enableNative(); });
+    rerender({ ...props(), event: { ...message(4, `${SPOILER_FILE_PREFIX}pic.png`), payload: { schema: 'conch.file_attachment.v1', data: { file_ids: [9] } } } });
+    expect(FakeNotification.all[0]?.options.body).toBe('[spoiler] pic.png');
   });
 
   it('hides a spoiler in the center, its accessible name included', () => {

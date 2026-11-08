@@ -9,6 +9,7 @@ import { Avatar, PrivateMark } from './Icons';
 import { IdentityMarks } from './Identity';
 import type { IdentityKey } from './identity';
 import { Linkified, previewText } from './Linkified';
+import { displayBody } from './spoilerFiles';
 import { ImageAttachment } from './ImageAttachment';
 import { loadStored, saveEdit, saveReplies } from './state/draftStore';
 import { canEdit, EditedMarker, editEnds, editsLeft, editWindowMs, MessageEditor } from './MessageEdit';
@@ -208,8 +209,8 @@ export function Message({
   // An image sent with no text has its filename as the body, and the figure
   // shows that name already: the name shows once. Display only; the post is
   // unchanged (F26).
-  const [fileName, setFileName] = useState<string | null>(null);
-  const nameOnly = attachments !== null && attachments.file_ids.length === 1 && fileName !== null && message.body === fileName;
+  const [fileNames, setFileNames] = useState<ReadonlyMap<number, string>>(new Map());
+  const nameOnly = attachments !== null && attachments.file_ids.every((id) => fileNames.has(id)) && message.body === attachments.file_ids.map((id) => fileNames.get(id)).join(', ');
   const items: readonly MenuItem[] = message.removed === true ? [] : [...(editor === undefined ? actions ?? [] : []), ...(mayModerate ? [{ key: 'remove-message', label: 'Remove message', onSelect: () => { setRemoving(true); } }] : [])];
   const [menuOpen, setMenuOpen] = useState(false);
   const more = useRef<HTMLButtonElement>(null);
@@ -236,14 +237,14 @@ export function Message({
       >
         {(message.removed === true ? null : editor) ?? (approval === null ? (
           <>
-            {nameOnly ? null : <Linkified text={message.body} />}
+            {nameOnly ? null : <Linkified text={displayBody(message)} />}
             <EditedMarker message={message} channel={channel} viewer={viewer} onUnauthorized={onUnauthorized} />
           </>
         ) : <ApprovalCard approval={approval} people={people} />)}
         {attachments === null ? null : (
           <span className="attachments">
             {attachments.file_ids.map((fileId) => (
-              <ImageAttachment key={fileId} fileId={fileId} channel={channel} viewer={viewer} onUnauthorized={onUnauthorized} onFilename={setFileName} />
+              <ImageAttachment key={fileId} fileId={fileId} channel={channel} viewer={viewer} onUnauthorized={onUnauthorized} onFilename={(name) => { setFileNames((known) => (known.get(fileId) === name ? known : new Map(known).set(fileId, name))); }} />
             ))}
           </span>
         )}
@@ -291,7 +292,7 @@ export function excerptOf(body: string): string {
 // replyContext quotes the root from the copy this page holds, which the
 // server sent to this viewer only if they may read it; no copy, no quote.
 function replyContext(root: MessageV2 | undefined, people: ReadonlyMap<number, Person>): ReplyContext | null {
-  return root === undefined ? null : { author: authorOf(root, people), excerpt: excerptOf(root.body) };
+  return root === undefined ? null : { author: authorOf(root, people), excerpt: excerptOf(displayBody(root)) };
 }
 
 function Pending({
