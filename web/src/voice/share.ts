@@ -261,8 +261,11 @@ export class ScreenShare {
   // resume cut short by another lost connection is tried again.
   private renewal = false;
   // A quality change refused for the rate bound, waiting to be sent again
-  // (changeQuality).
+  // (changeQuality); the one quality change on its way, and whether a newer
+  // choice waits for it to be answered.
   private qualityRetry: unknown = null;
+  private qualitySending: Promise<QualityAnswer> | null = null;
+  private qualityDue = false;
   // Whether the share is between rooms: from the renewal that took it off the
   // air until it is shared again or ends. The resume timer runs for the whole
   // of it, so a room renewed again meanwhile does not start the wait over.
@@ -381,10 +384,47 @@ export class ScreenShare {
   // share: a grant it is answered with then is released by its own
   // started_at, so no claim outlives the share and takes a place under the
   // cap (voice-multi-share.md §4).
-  async changeQuality(quality: ShareQuality): Promise<QualityAnswer> {
+  //
+  // One change is on its way to conchd at a time. Choices made while one is
+  // are coalesced: when it is answered the newest is sent, once, so the last
+  // quality conchd applies is always the last one chosen, whatever order the
+  // network would have delivered several in. Every caller is answered with
+  // what the last send came to.
+  changeQuality(quality: ShareQuality): Promise<QualityAnswer> {
     this.quality = quality;
     this.endQualityRetry();
-    return this.sendQuality(true);
+    return this.queueQuality(true);
+  }
+
+  // queueQuality marks the current choice as to be sent and starts the one
+  // sender, unless it is running: it picks the choice up when its send is
+  // answered.
+  private queueQuality(retry: boolean): Promise<QualityAnswer> {
+    this.qualityDue = true;
+    if (this.qualitySending === null) {
+      this.qualitySending = this.drainQuality(retry).finally(() => {
+        this.qualitySending = null;
+      });
+    }
+    return this.qualitySending;
+  }
+
+  // drainQuality sends until no newer choice waits. A refusal for the rate
+  // bound stops it: its one later send (sendQuality) takes the newest choice
+  // by then.
+  private async drainQuality(retry: boolean): Promise<QualityAnswer> {
+    let answer: QualityAnswer = 'sent';
+    let first = true;
+    while (this.qualityDue) {
+      this.qualityDue = false;
+      answer = await this.sendQuality(first ? retry : true);
+      first = false;
+      if (answer === 'later') {
+        this.qualityDue = false;
+        break;
+      }
+    }
+    return answer;
   }
 
   // sendQuality sends the current choice as a holder's repeat claim; retry
@@ -409,7 +449,7 @@ export class ScreenShare {
       const wait = Math.min(Math.max(answer.retryAfter ?? 1, 1), qualityRetryLimit);
       this.qualityRetry = this.clock.setTimeout(() => {
         this.qualityRetry = null;
-        if (mine === this.attempt) void this.sendQuality(false);
+        if (mine === this.attempt) void this.queueQuality(false);
       }, wait * 1000);
       return 'later';
     }

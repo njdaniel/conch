@@ -879,6 +879,40 @@ test.describe('screen share with LiveKit', () => {
     await expect(voiceRegion(a.page)).toContainText('You stopped sharing.');
   }
 
+  // A phone's Watch focuses the stream (voice-multi-share.md §7.1 phone
+  // layout), and the Watch pressed goes with the still card: focus moves onto
+  // the stream's stage, so a keyboard's next Escape is the view's and returns
+  // to the grid (webcam §7.4 "Escape, or Back to grid, returns").
+  test('on a phone, Watch from the keyboard puts focus on the stream, and Escape then returns to the grid', async ({ browser }) => {
+    const a = await person(browser, 'alice');
+    const c = await person(browser, 'carol', narrow);
+    try {
+      await join(a, 'Join voice');
+      await join(c, 'Watch only');
+      await share(a);
+      const card = c.page.locator('.call-share').filter({ hasText: 'alice · LIVE' });
+      const watch = card.getByRole('button', { name: 'Watch' });
+      await expect(watch).toBeVisible({ timeout: 30_000 });
+      await watch.focus();
+      await c.page.keyboard.press('Enter');
+      await expect(shareView(c.page)).toBeVisible({ timeout: 30_000 });
+      await expect(card).toHaveClass(/main/);
+      await expect(card).toBeFocused();
+      await expect(c.page.getByRole('button', { name: 'Back to grid' })).toBeVisible();
+      await c.page.keyboard.press('Escape');
+      await expect(card).not.toHaveClass(/main/);
+      await expect(c.page.getByRole('button', { name: 'Back to grid' })).toHaveCount(0);
+      // Still watched, unfocused, and focus back on the tile's Focus.
+      await expect(shareView(c.page)).toBeVisible();
+      await expect(shareView(c.page).getByRole('button', { name: "Focus alice's screen" })).toBeFocused();
+      await voiceRegion(a.page).getByRole('button', { name: 'Stop sharing' }).click();
+      await expect(shareView(c.page)).toHaveCount(0, { timeout: 15_000 });
+    } finally {
+      await a.close();
+      await c.close();
+    }
+  });
+
   test('on a phone the share and watch controls fit the screen', async ({ browser }) => {
     for (const [size, options] of phones) {
       const c = await person(browser, 'carol', options);

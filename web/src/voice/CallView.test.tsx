@@ -714,13 +714,18 @@ describe('focus on a phone', () => {
     expect(document.activeElement).toBe(within(share).getByRole('button', { name: "Focus member-2's screen" }));
   });
 
-  it('Watch focuses the stream, and Escape returns to the grid', () => {
+  it('Watch focuses the stream and moves keyboard focus onto its stage, and Escape from there returns to the grid', () => {
     widthOf(true);
     const { client } = panel(inVoice(), { sharer: 9 });
     fireEvent.click(within(callRegion()).getByRole('button', { name: 'Watch' }));
     const share = within(callRegion()).getByRole('region', { name: 'Shared screen' });
     expect(share.closest('li')?.className).toBe('call-share main');
-    fireEvent.keyDown(share, { key: 'Escape' });
+    // The Watch pressed went with the still card: focus is on the stage, so
+    // the next key is the view's.
+    expect(document.activeElement).toBe(share.closest('li'));
+    const at = document.activeElement;
+    if (at === null) throw new Error('no focus');
+    fireEvent.keyDown(at, { key: 'Escape' });
     expect(client.snapshot().focusedShare).toBeNull();
     expect(share.closest('li')?.className).toBe('call-share');
   });
@@ -746,6 +751,37 @@ describe('focus on a phone', () => {
     // Back on a desktop, nothing changes by itself.
     width.set(false);
     expect([...client.snapshot().watched]).toEqual([9]);
+  });
+});
+
+describe('focus when a stream is let go', () => {
+  it('Stop watching the focused stream with video on puts focus on its Watch, not on Hide video', () => {
+    panel(inVoice({ viewing: true, watched: new Set([9]) }), { cameras: [8], sharer: 9 });
+    const share = within(callRegion()).getByRole('region', { name: 'Shared screen' });
+    fireEvent.click(within(share).getByRole('button', { name: "Focus member-2's screen" }));
+    expect(share.closest('li')?.className).toBe('call-share main');
+    fireEvent.click(within(share).getByRole('button', { name: 'Stop watching' }));
+    expect(listClass()).not.toBe('call-grid focus');
+    const watch = within(within(callRegion()).getByRole('region', { name: "member-2's stream" })).getByRole('button', { name: 'Watch' });
+    expect(document.activeElement).toBe(watch);
+  });
+
+  it('without video asked for, a focused stream that ends leaves focus on the first control left, there being no Hide video', () => {
+    const state = inVoice({ watched: new Set([9]) });
+    const { client, view } = streamsPanel(state, twoStreams());
+    expect(within(callRegion()).queryByRole('button', { name: 'Hide video' })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: "Focus member-2's screen" }));
+    act(() => {
+      client.watchStream(9, false);
+    });
+    // 9's stream ends; 8's is still live, not watched.
+    const eightOnly = roomWith([], null);
+    const eight = eightOnly.rooms[0]?.participants.find((p) => p.principal_id === 8);
+    if (eight === undefined) throw new Error('missing participant');
+    Object.assign(eight, { sharing: true, share_started_at: '2026-10-16T00:01:00.000Z' });
+    view.rerender(<Live state={state} snapshot={{ kind: 'presence', presence: eightOnly }} client={client} allowed />);
+    expect(screen.queryByRole('region', { name: "member-2's stream" })).toBeNull();
+    expect(document.activeElement).toBe(within(screen.getByRole('region', { name: "member-1's stream" })).getByRole('button', { name: 'Watch' }));
   });
 });
 

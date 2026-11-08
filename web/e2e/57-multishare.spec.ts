@@ -43,12 +43,28 @@ async function videoFrames(page: Page): Promise<number> {
   });
 }
 
+// shownFrames is how many frames a tile's own video element has shown, and
+// its picture's width: one stream's, never the page's total.
+const shownFrames = (video: Locator) =>
+  video.evaluate((el) => {
+    const v = el as HTMLVideoElement;
+    return { frames: v.getVideoPlaybackQuality().totalVideoFrames, width: v.videoWidth };
+  });
+
+// expectPlaying is one stream playing in its own tile: its sound unmuted, not
+// paused and its clock moving, and its own video element showing frames that
+// keep coming. The page's received total is checked too, but proves nothing
+// of one tile when two play.
 async function expectPlaying(page: Page, stream: Locator): Promise<void> {
   const audio = stream.locator('audio');
   await expect(audio).toHaveJSProperty('muted', false);
   await expect.poll(() => audio.evaluate((a: HTMLAudioElement) => !a.paused && a.readyState >= 2), { timeout: 20_000 }).toBe(true);
   const before = await audio.evaluate((a: HTMLAudioElement) => a.currentTime);
   await expect.poll(() => audio.evaluate((a: HTMLAudioElement) => a.currentTime), { timeout: 15_000 }).toBeGreaterThan(before);
+  const video = stream.locator('video');
+  await expect.poll(async () => (await shownFrames(video)).width, { timeout: 30_000 }).toBeGreaterThan(0);
+  const shown = (await shownFrames(video)).frames;
+  await expect.poll(async () => (await shownFrames(video)).frames, { timeout: 15_000 }).toBeGreaterThan(shown);
   await expect.poll(() => videoFrames(page), { timeout: 30_000 }).toBeGreaterThan(10);
 }
 
@@ -122,9 +138,10 @@ test.describe('voice multi-share', () => {
       await tile(c.page, 'alice').getByRole('button', { name: 'Watch' }).click();
       await expectPlaying(c.page, tile(c.page, 'alice'));
 
-      // 3. Both play together, with independent mutes.
+      // 3. Both play together, each in its own tile, with independent mutes.
       await tile(c.page, 'bob').getByRole('button', { name: 'Watch' }).click();
       await expectPlaying(c.page, tile(c.page, 'bob'));
+      await expectPlaying(c.page, tile(c.page, 'alice'));
       await tile(c.page, 'alice').getByRole('button', { name: 'Mute share' }).click();
       await expect(tile(c.page, 'alice').locator('audio')).toHaveJSProperty('muted', true);
       await expect(tile(c.page, 'bob').locator('audio')).toHaveJSProperty('muted', false);

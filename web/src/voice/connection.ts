@@ -263,9 +263,9 @@ export interface Room extends ShareRoom, CameraRoom {
   // device.
   outputs: () => Promise<readonly Output[]>;
   // Subscribes to each watched publisher's share, picture and sound, with the
-  // focused stream at the top layer and every other at the lowest; unwatched
-  // streams get nothing (voice-multi-share.md §7.1, §8). Microphones are
-  // always subscribed.
+  // focused stream left to adaptive stream (the top layer on a full stage)
+  // and every other held to the lowest; unwatched streams get nothing
+  // (voice-multi-share.md §7.1, §8). Microphones are always subscribed.
   setWatches: (watched: ReadonlySet<number>, focused: number | null) => void;
   // Plays one publisher's watched share into these elements, or into none.
   attachStream: (principal: number, sink: ShareSink | null) => void;
@@ -330,8 +330,9 @@ export interface VoiceState {
   // The capture and top-layer caps chosen by the sharer, kept locally.
   readonly shareQuality: ShareQuality;
   // Which shares this page watches by publisher, which one is focused (the
-  // stage's, at the top layer), and which of each watched share's tracks have
-  // arrived (#1509). focusedShare is always one of watched, or null.
+  // stage's, its layer left to adaptive stream), and which of each watched
+  // share's tracks have arrived (#1509). focusedShare is always one of
+  // watched, or null.
   readonly watched: ReadonlySet<number>;
   readonly focusedShare: number | null;
   readonly streamTracks: ReadonlyMap<number, ShareTracks>;
@@ -1058,8 +1059,9 @@ export class VoiceClient {
     this.watches(watched, focusedShare);
   }
 
-  // focusShare selects one watched stream for the stage and the top layer, or
-  // clears that choice; an unwatched publisher is never selected (#1509).
+  // focusShare selects one watched stream for the stage, its layer left to
+  // adaptive stream rather than held to the lowest, or clears that choice;
+  // an unwatched publisher is never selected (#1509).
   focusShare(principal: number | null): void {
     const focusedShare = principal !== null && this.state.watched.has(principal) ? principal : null;
     if (focusedShare === this.state.focusedShare) return;

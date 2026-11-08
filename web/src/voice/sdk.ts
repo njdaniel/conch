@@ -167,10 +167,11 @@ export const connectOptions: RoomConnectOptions = { autoSubscribe: false };
 
 // What this page receives besides microphones (voice-multi-share.md §7.1,
 // issue #1509): the watched shares by publisher and the one focused share
-// allowed the top layer, whether the call view is open (the person's choice),
-// whether video is shown here now (false only in the phone layout outside the
-// Voice view, design §8), and whether the publisher holds a camera claim, as
-// presence says. Every other watched preview is LOW; unwatched shares get none.
+// left to adaptive stream (which gives it the top layer on a full stage),
+// whether the call view is open (the person's choice), whether video is shown
+// here now (false only in the phone layout outside the Voice view, design
+// §8), and whether the publisher holds a camera claim, as presence says.
+// Every other watched preview is LOW; unwatched shares get none.
 export interface Wants {
   readonly watching: ReadonlySet<number>;
   readonly focused: number | null;
@@ -741,16 +742,14 @@ class LiveKitAdapter implements Room {
   // The browser ended the capture (its own stop control, or the shared tab
   // or window closed).
   private captureEnded = false;
-  // Each watched stream by publisher, the one focused for the top layer, the
-  // elements each plays into and its arrived tracks (voice-multi-share.md
-  // §7.1, #1509). A publisher is the person, whether their own p<id> or their
+  // Each watched stream by publisher, the one focused (left to adaptive
+  // stream), the elements each plays into and its arrived tracks
+  // (voice-multi-share.md §7.1, #1509). A publisher is the person, whether their own p<id> or their
   // desktop companion p<id>.screen publishes the stream (publisherOf).
   private watching: ReadonlySet<number> = new Set();
   private focused: number | null = null;
   private readonly streamSinks = new Map<number, ShareSink>();
   private readonly remoteShares = new Map<number, { video: RemoteTrack | null; audio: RemoteTrack | null }>();
-  // The share pictures held to the lowest layer, by track sid (hold).
-  private readonly held = new Set<string>();
   // The camera this page captured, until it is stopped or kept; its
   // publication once published; whether this adapter is taking it down, so
   // its own unpublish is not reported; and the element of the self-view.
@@ -1450,10 +1449,13 @@ class LiveKitAdapter implements Room {
     }
   }
 
-  // hold caps a stream's picture at the lowest layer, whatever its tile's size.
+  // hold caps a stream's picture at the lowest layer, whatever its tile's
+  // size. Whether it is capped is the publication's own state
+  // (videoQuality), not a record kept here: a full reconnect gives the room
+  // new publications under the same sids, which start uncapped and are
+  // capped again, and nothing outlives the publication it is about.
   private hold(pub: RemoteTrackPublication): void {
-    if (this.held.has(pub.trackSid)) return;
-    this.held.add(pub.trackSid);
+    if (pub.videoQuality === VideoQuality.LOW) return;
     pub.setVideoQuality(VideoQuality.LOW);
   }
 
@@ -1463,8 +1465,10 @@ class LiveKitAdapter implements Room {
   // layer (12-screen-share.spec.ts, measured). Asking for a bound larger than
   // any layer clears the cap, and the SDK takes the smaller of it and the
   // element's size: adaptive stream decides again.
+  // The cap is the publication's, and outlives a watch of it: a stream held,
+  // let go and watched again focused is still capped until this lifts it.
   private release(pub: RemoteTrackPublication): void {
-    if (!this.held.delete(pub.trackSid)) return;
+    if (pub.videoQuality !== VideoQuality.LOW) return;
     pub.setVideoDimensions(uncapped);
   }
 

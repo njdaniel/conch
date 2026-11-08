@@ -208,6 +208,35 @@ describe('starting a share', () => {
     expect(u.calls).toEqual([]);
   });
 
+  it('quality changes go one at a time: choices made while one is on its way are sent once, newest, after it is answered', async () => {
+    const t = await sharing();
+    const first = deferred<ShareClaimResult>();
+    t.room.claim = first;
+    const low: ShareQuality = { resolution: '720p', frameRate: 15 };
+    const mid: ShareQuality = { resolution: '1080p', frameRate: 30 };
+    const top: ShareQuality = { resolution: 'source', frameRate: 60 };
+    const a = t.share.changeQuality(low);
+    const b = t.share.changeQuality(mid);
+    const c = t.share.changeQuality(top);
+    await settle();
+    // Only the first is on its way: a newer one cannot overtake it.
+    expect(t.calls).toEqual(['claim general']);
+    const second = deferred<ShareClaimResult>();
+    t.room.claim = second;
+    first.resolve(granted);
+    await settle();
+    // Then the newest alone; the one in between is never sent.
+    expect(t.calls).toEqual(['claim general', 'claim general']);
+    expect(t.claimedQualities.slice(2)).toEqual([low, top]);
+    second.resolve(granted);
+    expect(await Promise.all([a, b, c])).toEqual(['sent', 'sent', 'sent']);
+    // The last quality conchd was sent is the last one chosen.
+    expect(t.claimedQualities.at(-1)).toEqual(top);
+    // Nothing more waits.
+    await settle();
+    expect(t.calls).toHaveLength(2);
+  });
+
   it('a quality change that lands after Stop sharing has its grant released by its own started_at', async () => {
     const t = await sharing();
     const late = deferred<ShareClaimResult>();

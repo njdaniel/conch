@@ -200,6 +200,8 @@ interface StubRemotePub {
   setSubscribed: (on: boolean) => void;
   setVideoQuality?: (quality: number) => void;
   setVideoDimensions?: (dimensions: { width: number; height: number }) => void;
+  // The SDK's requestedMaxQuality ?? HIGH: what the publication is capped at.
+  videoQuality?: number;
 }
 const state = vi.hoisted((): Stub => {
   const stubFactory = () => () => undefined;
@@ -1164,14 +1166,20 @@ describe('the watch view', () => {
       kind,
       trackSid: `TR_${String(++sids)}`,
       isSubscribed: false,
+      videoQuality: 2,
       setSubscribed: (on) => {
         p.isSubscribed = on;
         state.calls.push(`subscribe ${source} ${String(on)}`);
       },
+      // As the SDK: the cap is the publication's, and asking for the same
+      // one again sends nothing.
       setVideoQuality: (quality) => {
+        if (p.videoQuality === quality) return;
+        p.videoQuality = quality;
         state.calls.push(`quality ${source} ${String(quality)}`);
       },
       setVideoDimensions: ({ width, height }) => {
+        p.videoQuality = 2;
         state.calls.push(`dimensions ${source} ${String(width)}x${String(height)}`);
       },
     };
@@ -1232,6 +1240,38 @@ describe('the watch view', () => {
     // Asked again, nothing changes.
     room.setWatches(new Set([8, 9]), 9);
     expect(layers()).toHaveLength(3);
+  });
+
+  it('a stream held at LOW, let go and watched again focused, has its cap lifted: the cap is the publication\'s', async () => {
+    const nine = remotePub('screen_share');
+    state.remote.set('p9', { identity: 'p9', trackPublications: new Map([['a', nine]]) } as unknown as { trackPublications: Map<string, StubRemotePub> });
+    const room = newLiveKitRoom();
+    await room.connect('wss://lk.example', 'tok-abcdef', 'room-abcdef', false, events);
+    room.setWatches(new Set([9]), null);
+    expect(layers()).toEqual(['quality screen_share 0']);
+    room.setWatches(new Set(), null);
+    expect(nine.isSubscribed).toBe(false);
+    room.setWatches(new Set([9]), 9);
+    expect(layers()).toEqual(['quality screen_share 0', 'dimensions screen_share 7680x4320']);
+  });
+
+  it('after a full reconnect a new publication under the same sid is capped at LOW again', async () => {
+    const eight = remotePub('screen_share');
+    const nine = remotePub('screen_share');
+    state.remote.set('p8', { identity: 'p8', trackPublications: new Map([['a', eight]]) } as unknown as { trackPublications: Map<string, StubRemotePub> });
+    state.remote.set('p9', { identity: 'p9', trackPublications: new Map([['a', nine]]) } as unknown as { trackPublications: Map<string, StubRemotePub> });
+    const room = newLiveKitRoom();
+    await room.connect('wss://lk.example', 'tok-abcdef', 'room-abcdef', false, events);
+    room.setWatches(new Set([8, 9]), 8);
+    expect(layers()).toEqual(['quality screen_share 0']);
+    // The SDK made the room anew: 9's publication is a new one, uncapped,
+    // under the same sid.
+    const again = remotePub('screen_share');
+    again.trackSid = nine.trackSid;
+    state.remote.set('p9', { identity: 'p9', trackPublications: new Map([['a', again]]) } as unknown as { trackPublications: Map<string, StubRemotePub> });
+    state.handlers.get('rd')?.();
+    expect(again.isSubscribed).toBe(true);
+    expect(layers()).toEqual(['quality screen_share 0', 'quality screen_share 0']);
   });
 
   it("a desktop companion's stream, published as p8.screen, is 8's: watched, held to its layer and played into 8's tile; a viewer's identity is nobody's stream", async () => {

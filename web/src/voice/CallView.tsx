@@ -27,10 +27,11 @@
 // back on the tile it came from. An enlarged camera has Full screen, as a share
 // has; inside full screen Escape is the browser's, and leaves full screen only.
 // If the enlarged tile goes, the view returns to the grid, and focus that was
-// on the tile goes to Hide video.
+// on the tile goes to what is left of it (a stream's still card), else to Hide
+// video, or without it to the first control left, or to the view itself.
 //
 // The focused stream is the client's (VoiceState.focusedShare), the one choice
-// that both draws it on the stage and gives it the top layer, however it was
+// that both draws it on the stage and lifts its layer cap, however it was
 // chosen: Focus, a phone's Watch or its switcher. An enlarged camera is this
 // view's own, and focusing either clears the other. A focused stream is the
 // main picture and the other tiles are the strip. A watched stream keeps the
@@ -163,6 +164,7 @@ export function CallView({ client, state, tiles, hidden, open, hideNonVideo = fa
   const [wasOpen, setWasOpen] = useState(open);
 
   const hideButton = useRef<HTMLButtonElement>(null);
+  const view = useRef<HTMLElement>(null);
   const mainFrame = useRef<HTMLElement>(null);
   const buttons = useRef(new Map<string, HTMLButtonElement>());
   const items = useRef(new Map<string, HTMLLIElement>());
@@ -237,15 +239,17 @@ export function CallView({ client, state, tiles, hidden, open, hideNonVideo = fa
       return;
     }
     if (focusTo.kind === 'tile') {
-      (buttonOf(focusTo.key) ?? hideButton.current)?.focus();
+      (buttonOf(focusTo.key) ?? fallback())?.focus();
       return;
     }
     // Only when focus went with the tile or the share: someone typing
-    // elsewhere keeps their place.
+    // elsewhere keeps their place. What is left of the tile takes it (a
+    // stream's still card after Stop watching), or else the fallback.
     const at = document.activeElement;
     const lost = at === null || at === document.body || (items.current.get(focusTo.key)?.contains(at) ?? false);
     if (!lost) return;
-    const move = () => hideButton.current?.focus();
+    const key = focusTo.key;
+    const move = () => landing(key)?.focus();
     // The enlarged tile was full screen when it went: it leaves full screen
     // (TileView), and focus moves once it has.
     if (document.fullscreenElement) afterFull.current = move;
@@ -253,7 +257,7 @@ export function CallView({ client, state, tiles, hidden, open, hideNonVideo = fa
   }, [focusTo]);
 
   // A tile that held focus and went (filtered out, its camera off, its person
-  // or stream gone), enlarged or not: focus goes to Hide video rather than
+  // or stream gone), enlarged or not: focus goes to the fallback rather than
   // being lost, unless it already moved somewhere else.
   const focusedTile = useRef<string | null>(null);
   useEffect(() => {
@@ -261,23 +265,35 @@ export function CallView({ client, state, tiles, hidden, open, hideNonVideo = fa
     if (key === null || shown.some((t) => keyOf(t) === key)) return;
     focusedTile.current = null;
     const at = document.activeElement;
-    if (open && (at === null || at === document.body)) hideButton.current?.focus();
+    if (open && (at === null || at === document.body)) fallback()?.focus();
   }, [shown, open]);
 
-  // Stop watching takes the player, and the button pressed, out of a stream's
-  // tile, which stays with its still card: focus that went with them goes to
-  // that card's Watch rather than being lost (voice-multi-share.md §7.1).
+  // Watch and Stop watching each take the button pressed out of the stream's
+  // tile, which stays: its player comes, or goes back to its still card. Focus
+  // that went with the button stays in that tile (voice-multi-share.md §7.1):
+  // in a stream just watched, its stage when it is the focused one (a phone's
+  // Watch focuses it, and Escape then takes it back to the grid) or else its
+  // Focus button; in one just let go, its Watch. A focused stream let go is
+  // the main tile going, which the focusTo effect has seen to first, to the
+  // same place.
   const watchedKey = tiles.filter((t) => t.kind === 'share' && t.watched === true).map(keyOf).join(' ');
   const wasWatched = useRef(watchedKey);
   useEffect(() => {
-    const before = wasWatched.current === '' ? [] : wasWatched.current.split(' ');
+    const before = new Set(wasWatched.current === '' ? [] : wasWatched.current.split(' '));
     wasWatched.current = watchedKey;
     const now = new Set(watchedKey === '' ? [] : watchedKey.split(' '));
     const at = document.activeElement;
     if (at !== null && at !== document.body) return;
+    for (const key of now) {
+      if (before.has(key)) continue;
+      const item = items.current.get(key);
+      if (item === undefined) continue;
+      (key === mainKey ? item : (item.querySelector<HTMLElement>('button.call-enlarge') ?? item)).focus();
+      return;
+    }
     for (const key of before) {
       if (now.has(key)) continue;
-      items.current.get(key)?.querySelector<HTMLButtonElement>('button')?.focus();
+      landing(key)?.focus();
       return;
     }
   }, [watchedKey]);
@@ -296,7 +312,20 @@ export function CallView({ client, state, tiles, hidden, open, hideNonVideo = fa
   // stream's is in its player (ShareView).
   const buttonOf = (key: string): HTMLButtonElement | null => buttons.current.get(key) ?? items.current.get(key)?.querySelector<HTMLButtonElement>('button.call-enlarge') ?? null;
 
-  // Focusing a watched stream selects it, for the stage and the top layer;
+  // Where focus goes when the tile it was in went: Hide video; without video
+  // asked for, which has none, the first control left on the stage (a
+  // stream's Watch, say); with none, the view itself. Never the page's body.
+  const fallback = (): HTMLElement | null => hideButton.current ?? view.current?.querySelector<HTMLElement>('ul button') ?? view.current;
+  // What is left of a tile that lost its place or its player: its enlarge or
+  // focus button, else its first control (a still card's Watch), else the
+  // fallback.
+  const landing = (key: string): HTMLElement | null => {
+    const item = items.current.get(key);
+    return item?.querySelector<HTMLElement>('button.call-enlarge') ?? item?.querySelector<HTMLElement>('button') ?? fallback();
+  };
+
+  // Focusing a watched stream selects it, for the stage and its layer left to
+  // adaptive stream;
   // enlarging a camera clears that selection (voice-multi-share.md §7.1,
   // #1509).
   const enlarge = (t: Tile) => {
@@ -337,7 +366,7 @@ export function CallView({ client, state, tiles, hidden, open, hideNonVideo = fa
   const viewing = state.viewing;
 
   return (
-    <section aria-label={open ? 'Video call' : undefined} className={open ? 'call-view' : 'call-stage'} onKeyDown={open ? onKey : undefined}>
+    <section ref={view} tabIndex={open ? -1 : undefined} aria-label={open ? 'Video call' : undefined} className={open ? 'call-view' : 'call-stage'} onKeyDown={open ? onKey : undefined}>
       {open ? (
         <div className="call-head">
           <p className="call-title">
