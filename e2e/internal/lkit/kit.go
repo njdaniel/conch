@@ -465,34 +465,71 @@ type ChecksumError struct{ msg string }
 
 func (e *ChecksumError) Error() string { return e.msg }
 
+// lkBackoff is the wait before each retry of the lk download, so the download
+// is tried len(lkBackoff)+1 times. A var so that tests do not sleep for real.
+var lkBackoff = []time.Duration{2 * time.Second, 5 * time.Second, 10 * time.Second}
+
+// lkURL is where the pinned lk archive for key (GOOS_GOARCH) is downloaded
+// from. A var so that tests can point FetchLK at a local server.
+var lkURL = func(key string) string {
+	return fmt.Sprintf("https://github.com/livekit/livekit-cli/releases/download/v%s/lk_%s_%s.tar.gz", LKVersion, LKVersion, key)
+}
+
 // FetchLK downloads the pinned lk release, checks its SHA-256 against the
-// sum written in this file, and extracts the lk binary into dir.
+// sum written in this file, and extracts the lk binary into dir. A transient
+// failure (a 5xx answer, a connection error, a timeout) is retried after the
+// waits in lkBackoff, within ctx; a 4xx answer, a checksum mismatch or a
+// cancelled ctx is final at once.
 func FetchLK(ctx context.Context, dir string) (string, error) {
 	key := runtime.GOOS + "_" + runtime.GOARCH
 	want, ok := lkSHA256[key]
 	if !ok {
 		return "", fmt.Errorf("no lk %s release is pinned for %s", LKVersion, key)
 	}
-	url := fmt.Sprintf("https://github.com/livekit/livekit-cli/releases/download/v%s/lk_%s_%s.tar.gz", LKVersion, LKVersion, key)
+	url := lkURL(key)
+	for attempt := 0; ; attempt++ {
+		archive, retry, err := downloadLK(ctx, url)
+		if err == nil {
+			return extractLK(archive, want, dir)
+		}
+		if !retry || attempt >= len(lkBackoff) {
+			return "", err
+		}
+		select {
+		case <-ctx.Done():
+			return "", fmt.Errorf("download lk: %w", ctx.Err())
+		case <-time.After(lkBackoff[attempt]):
+		}
+	}
+}
+
+// downloadLK makes one GET of url and returns the body. retry reports whether
+// the failure is transient.
+func downloadLK(ctx context.Context, url string) (archive []byte, retry bool, err error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		return "", err
+		return nil, false, err
 	}
 	resp, err := (&http.Client{Timeout: 3 * time.Minute}).Do(req)
 	if err != nil {
-		return "", fmt.Errorf("download lk: %w: %w", ErrUnreachable, UnwrapURLError(err))
+		return nil, ctx.Err() == nil, fmt.Errorf("download lk: %w: %w", ErrUnreachable, UnwrapURLError(err))
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode >= 500 {
-		return "", fmt.Errorf("download lk: %w: HTTP %d", ErrUnreachable, resp.StatusCode)
+		return nil, true, fmt.Errorf("download lk: %w: HTTP %d", ErrUnreachable, resp.StatusCode)
 	}
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("download lk: the pinned release URL answered HTTP %d", resp.StatusCode)
+		return nil, false, fmt.Errorf("download lk: the pinned release URL answered HTTP %d", resp.StatusCode)
 	}
-	archive, err := io.ReadAll(io.LimitReader(resp.Body, 200<<20))
+	archive, err = io.ReadAll(io.LimitReader(resp.Body, 200<<20))
 	if err != nil {
-		return "", fmt.Errorf("download lk: %w: %w", ErrUnreachable, err)
+		return nil, ctx.Err() == nil, fmt.Errorf("download lk: %w: %w", ErrUnreachable, err)
 	}
+	return archive, false, nil
+}
+
+// extractLK checks the archive against want and extracts the lk binary into dir.
+func extractLK(archive []byte, want, dir string) (string, error) {
 	sum := sha256.Sum256(archive)
 	if got := hex.EncodeToString(sum[:]); got != want {
 		return "", &ChecksumError{fmt.Sprintf("lk %s archive has SHA-256 %s, want %s: refusing to run it", LKVersion, got, want)}
