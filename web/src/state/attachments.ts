@@ -3,6 +3,7 @@
 // audience; nothing here persists bytes or makes a network request.
 import { fileAttachmentPayloadSchema, type FileAttachmentV1 } from '../schema/file';
 import type { Audience, Payload } from '../schema/message';
+import { canSpoilerName } from '../spoilerFiles';
 
 export const maxDraftAttachments = 10;
 
@@ -18,6 +19,10 @@ export interface DraftAttachment {
   // Marked as a spoiler (issue #1500): uploaded under the prefixed name. Kept
   // like the rest of the draft; it cannot change once the upload has begun.
   readonly spoiler: boolean;
+  // A send has frozen this draft: its mark is part of what is about to be
+  // uploaded, queued behind an earlier file, and can no longer change. A failed
+  // or cancelled upload of the send lifts it.
+  readonly sealed?: boolean;
   readonly status: DraftAttachmentStatus;
   // The upload attempt that owns a later completion. Every retry advances it.
   readonly attempt: number;
@@ -46,6 +51,7 @@ export type AttachmentDraftAction =
   | { readonly type: 'add'; readonly channel: string; readonly audience?: Audience; readonly files: readonly NewDraftAttachment[] }
   | { readonly type: 'remove'; readonly channel: string; readonly audience?: Audience; readonly clientId: number }
   | { readonly type: 'clear'; readonly channel: string; readonly audience?: Audience }
+  | { readonly type: 'seal'; readonly channel: string; readonly audience?: Audience }
   | { readonly type: 'spoiler'; readonly channel: string; readonly audience?: Audience; readonly clientId: number; readonly spoiler: boolean }
   | { readonly type: 'uploading'; readonly channel: string; readonly audience?: Audience; readonly clientId: number; readonly generation: number }
   | {
@@ -137,6 +143,14 @@ function changeOne(
   return put(state, action.channel, action.audience, next);
 }
 
+// unseal lifts the freeze on a scope's drafts: its send stopped at a failed or
+// cancelled upload, so the person may edit what is left.
+function unseal(state: AttachmentDrafts, action: { readonly channel: string; readonly audience?: Audience }): AttachmentDrafts {
+  const current = attachmentsFor(state, action.channel, action.audience);
+  if (!current.some((attachment) => attachment.sealed === true)) return state;
+  return put(state, action.channel, action.audience, current.map((attachment) => (attachment.sealed === true ? { ...attachment, sealed: false } : attachment)));
+}
+
 function ownsAttempt(action: Extract<AttachmentDraftAction, { readonly generation: number }>, state: AttachmentDrafts): boolean {
   return action.generation === state.generation;
 }
@@ -165,11 +179,18 @@ export function attachmentDraftsReducer(state: AttachmentDrafts, action: Attachm
       return put(state, action.channel, action.audience, attachmentsFor(state, action.channel, action.audience).filter((a) => a.clientId !== action.clientId));
     case 'clear':
       return put(state, action.channel, action.audience, []);
+    case 'seal': {
+      const current = attachmentsFor(state, action.channel, action.audience);
+      if (current.every((attachment) => attachment.sealed === true)) return state;
+      return put(state, action.channel, action.audience, current.map((attachment) => (attachment.sealed === true ? attachment : { ...attachment, sealed: true })));
+    }
     case 'spoiler':
-      // Once a file is uploading or uploaded its stored name is fixed: the mark
-      // is disabled with a reason in the composer, and refused here.
+      // Once a send has frozen a file, or it is uploading or uploaded, its
+      // stored name is fixed: the mark is disabled with a reason in the
+      // composer, and refused here. So is a name too long to mark whole.
       return changeOne(state, action, (attachment) =>
-        attachment.status === 'uploading' || attachment.status === 'ready' || attachment.spoiler === action.spoiler
+        attachment.sealed === true || attachment.status === 'uploading' || attachment.status === 'ready' || attachment.spoiler === action.spoiler ||
+        (action.spoiler && !canSpoilerName(attachment.filename))
           ? attachment
           : { ...attachment, spoiler: action.spoiler },
       );
@@ -189,18 +210,18 @@ export function attachmentDraftsReducer(state: AttachmentDrafts, action: Attachm
       );
     case 'uploadFailed':
       if (!ownsAttempt(action, state)) return state;
-      return changeOne(state, action, (attachment) =>
+      return unseal(changeOne(state, action, (attachment) =>
         attachment.status === 'uploading' && attachment.attempt === action.attempt
           ? { ...attachment, status: 'failed', error: action.error }
           : attachment,
-      );
+      ), action);
     case 'cancelled':
       if (!ownsAttempt(action, state)) return state;
-      return changeOne(state, action, (attachment) =>
+      return unseal(changeOne(state, action, (attachment) =>
         attachment.status === 'uploading' && attachment.attempt === action.attempt
           ? { ...attachment, status: 'cancelled', error: undefined }
           : attachment,
-      );
+      ), action);
     case 'renamed': {
       const moved = state.channels[action.from];
       if (action.from === action.to || moved === undefined) return state;
@@ -218,7 +239,7 @@ export function attachmentDraftsReducer(state: AttachmentDrafts, action: Attachm
           Object.entries(action.drafts.channels[name] ?? {}).map(([scope, attachments]) => [
             scope,
             attachments.map((attachment) =>
-              attachment.status === 'uploading' ? { ...attachment, status: 'pending' as const, error: undefined } : attachment,
+              attachment.status === 'uploading' ? { ...attachment, status: 'pending' as const, error: undefined, sealed: false } : { ...attachment, sealed: false },
             ),
           ]),
         );

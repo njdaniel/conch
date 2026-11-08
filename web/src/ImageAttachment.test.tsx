@@ -489,6 +489,16 @@ describe('a spoiler attachment', () => {
     expect(screen.queryByRole('button', { name: /^Reveal/ })).toBeNull();
   });
 
+  it('shows the names of several image-only spoilers once each, without the prefix, and never the joined stored body', async () => {
+    const other = `${SPOILER_FILE_PREFIX}second.png`;
+    mockedMeta.mockImplementation((id: number) => Promise.resolve({ ok: true, value: id === 17 ? spoilerMeta : { ...spoilerMeta, id: 18, filename: other } }));
+    const { container } = conversation([message(1, `${stored}, ${other}`, { schema: 'conch.file_attachment.v1', data: { file_ids: [17, 18] } })]);
+    await screen.findByRole('button', { name: 'Reveal second.png' });
+    expect(container.textContent).not.toContain(SPOILER_FILE_PREFIX);
+    expect(screen.getAllByText(/photo\.png/)).toHaveLength(1);
+    expect(mockedBytes).not.toHaveBeenCalled();
+  });
+
   it('shows an image-only spoiler’s name once, without the prefix', async () => {
     conversation([message(1, stored, { schema: 'conch.file_attachment.v1', data: { file_ids: [17] } })]);
     await screen.findByRole('button', { name: 'Reveal photo.png' });

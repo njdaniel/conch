@@ -142,15 +142,24 @@ test('a marked image is hidden from its recipient until Reveal, which is forgott
   // A reveal is forgotten on a fresh render.
   await reveal(bobPage, shown).click();
   await expect(enlarge(bobPage, shown)).toBeVisible();
+  expect(reads.bytes).toHaveLength(2);
+  const metasBefore = reads.meta.length;
   await bobPage.reload();
   await expect(reveal(bobPage, shown)).toBeVisible();
   await expect(card(bobPage, shown).locator('img')).toHaveCount(0);
+  // The remounted hidden card read /meta again and fetched no bytes.
+  expect(reads.meta.length).toBeGreaterThan(metasBefore);
+  expect(reads.bytes).toHaveLength(2);
   // A channel switch is a fresh render too.
   await reveal(bobPage, shown).click();
   await expect(enlarge(bobPage, shown)).toBeVisible();
+  expect(reads.bytes).toHaveLength(3);
+  const metasAtSwitch = reads.meta.length;
   await channelButton(bobPage, other).click();
   await channelButton(bobPage, channel).click();
   await expect(reveal(bobPage, shown)).toBeVisible();
+  expect(reads.meta.length).toBeGreaterThan(metasAtSwitch);
+  expect(reads.bytes).toHaveLength(3);
   await expect.poll(() => activeObjectURLs(bobPage)).toBe(0);
 });
 
@@ -298,4 +307,39 @@ test('a file uploaded under the prefix through the API is a spoiler; a lower-cas
   await expect(reveal(page, marked)).toBeVisible();
   await expect(enlarge(page, `${SPOILER_FILE_PREFIX.toLowerCase()}${plain}`)).toBeVisible();
   await expect(page.getByRole('button', { name: /^Reveal / })).toHaveCount(1);
+});
+
+test('an edit, a reaction and a search result never fetch or reveal a spoiler', async ({ meet, secrets, world }) => {
+  const channel = await privateChannel(world, 'live');
+  const alice = await person(world, secrets, unique('alice'), [channel]);
+  const bob = await person(world, secrets, unique('bob'), [channel]);
+  const shown = `${unique('live')}.png`;
+  const tag = unique('tag').replace(/-/g, '');
+  const posted = await attach(world, alice.token, channel, `look ${tag}`, [seed(spoiler(shown))]);
+
+  const { page } = await meet();
+  const reads = fileReads(page);
+  await signIn(page, world, bob.token, bob.name);
+  await channelButton(page, channel).click();
+  await expect(reveal(page, shown)).toBeVisible();
+  await expect.poll(() => reads.meta.length).toBeGreaterThan(0);
+
+  const base = `/v2/channels/${encodeURIComponent(channel)}/messages/${String(posted.id)}`;
+  expect((await call(world, alice.token, 'PUT', `${base}/body`, { body: `look again ${tag}` })).status).toBeLessThan(300);
+  await expect(messages(page).getByText(`look again ${tag}`)).toBeVisible();
+  expect((await call(world, alice.token, 'PUT', `${base}/reactions/${encodeURIComponent('👍')}`)).status).toBeLessThan(300);
+  await expect(page.locator('.reactions')).toBeVisible();
+  await expect(reveal(page, shown)).toHaveAttribute('aria-expanded', 'false');
+  await expect(card(page, shown).locator('img')).toHaveCount(0);
+  expect(reads.bytes).toEqual([]);
+
+  // A search result is a fresh render of the message: hidden, metadata only.
+  await page.getByRole('button', { name: 'Search', exact: true }).click();
+  await page.getByRole('searchbox', { name: `Messages in #${channel}` }).fill(tag);
+  await page.getByRole('button', { name: 'Search', exact: true }).click();
+  const results = page.getByRole('list', { name: 'Search results' });
+  await expect(results.getByText(`look again ${tag}`)).toBeVisible();
+  await expect(results.getByRole('button', { name: `Reveal ${shown}` })).toBeVisible();
+  await expect(results.locator('img')).toHaveCount(0);
+  expect(reads.bytes).toEqual([]);
 });

@@ -288,6 +288,16 @@ describe('Mark as spoiler on a draft (issue #1500)', () => {
     ]);
   });
 
+  it('disables the mark of a file whose name is too long, with the reason', async () => {
+    render(<Harness onSend={vi.fn()} />);
+    const name = `a.${'b'.repeat(250)}`;
+    fireEvent.change(screen.getByLabelText('Choose files'), { target: { files: [image(name)] } });
+    const toggle = await screen.findByRole('button', { name: `Mark ${name} as spoiler` });
+    expect(toggle.hasAttribute('disabled')).toBe(true);
+    expect(screen.getByText('This file name is too long to mark as a spoiler.')).toBeDefined();
+    expect(toggle.getAttribute('aria-describedby')).not.toBeNull();
+  });
+
   it('is a native button that a keyboard reaches', async () => {
     render(<Harness onSend={vi.fn()} />);
     fireEvent.change(screen.getByLabelText('Choose files'), { target: { files: [image('one.png')] } });

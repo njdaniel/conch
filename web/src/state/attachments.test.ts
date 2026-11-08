@@ -245,6 +245,34 @@ describe('the spoiler mark of a draft (issue #1500)', () => {
     expect(marked(state)).toEqual([true]);
   });
 
+  it('refuses a mark once a send has sealed the scope, and allows it again after a failed upload', () => {
+    let state = add(initialAttachmentDrafts, 'ops', undefined, file('a.png'), file('b.png'));
+    state = attachmentDraftsReducer(state, { type: 'seal', channel: 'ops' });
+    state = attachmentDraftsReducer(state, { type: 'uploading', channel: 'ops', clientId: 1, generation: 0 });
+    expect(mark(state, 2, true)).toBe(state);
+    expect(marked(state)).toEqual([false, false]);
+    state = attachmentDraftsReducer(state, { type: 'uploadFailed', channel: 'ops', clientId: 1, generation: 0, attempt: 1, error: 'x' });
+    state = mark(state, 2, true);
+    expect(marked(state)).toEqual([false, true]);
+  });
+
+  it('does not seal another audience, and a restore lifts the seal', () => {
+    let state = add(initialAttachmentDrafts, 'ops', undefined, file('a.png'));
+    state = add(state, 'ops', whisper([3]), file('w.png'));
+    state = attachmentDraftsReducer(state, { type: 'seal', channel: 'ops' });
+    expect(marked(mark(state, 2, true, whisper([3])), whisper([3]))).toEqual([true]);
+    const restored = attachmentDraftsReducer(initialAttachmentDrafts, { type: 'restore', drafts: state });
+    expect(marked(mark(restored, 1, true))).toEqual([true]);
+  });
+
+  it('refuses to mark a file whose extension leaves no room, but still lets it be unmarked and other files marked', () => {
+    const long = `a.${'b'.repeat(250)}`;
+    let state = add(initialAttachmentDrafts, 'ops', undefined, file(long), file('ok.png'));
+    expect(mark(state, 1, true)).toBe(state);
+    state = mark(state, 2, true);
+    expect(marked(state)).toEqual([false, true]);
+  });
+
   it('names the stored file with the prefix', () => {
     expect(spoilerName('a.png')).toBe(spoilerName(spoilerName('a.png')));
   });

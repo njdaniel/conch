@@ -287,7 +287,7 @@ describe('Composer and App attachment sending', () => {
     const locked = screen.getByRole('button', { name: 'Mark ready.png as spoiler' });
     expect(locked.hasAttribute('disabled')).toBe(true);
     expect(locked.getAttribute('aria-describedby')).not.toBeNull();
-    expect(screen.getByText(/Already uploaded/)).toBeDefined();
+    expect(screen.getByText(/Already uploading or uploaded/)).toBeDefined();
     // large.png failed: its mark survives, and can still be changed.
     expect(screen.getByRole('button', { name: 'Mark large.png as spoiler' }).getAttribute('aria-pressed')).toBe('true');
     refuse = false;
@@ -297,6 +297,28 @@ describe('Composer and App attachment sending', () => {
     await screen.findByText('Sent');
     expect(server.uploads.map((call) => call.filename)).toEqual(['ready.png', `${SPOILER_FILE_PREFIX}large.png`, `${SPOILER_FILE_PREFIX}large.png`]);
     expect(server.posts[0]?.request.body).toBe(`ready.png, ${SPOILER_FILE_PREFIX}large.png`);
+  });
+
+  it('freezes the spoiler marks of a whole send: a queued file cannot be marked while the first upload is held', async () => {
+    await openChat();
+    let finish = () => {};
+    server.upload = (call) => new Promise<Response>((resolve) => { finish = () => { resolve(json(fileMetadata(call, server.nextFile++), 201)); }; });
+    choose(image('first.png'), image('second.png'));
+    await screen.findByText('second.png');
+    clickSend();
+    await waitFor(() => { expect(server.uploads).toHaveLength(1); });
+    const queued = screen.getByRole('button', { name: 'Mark second.png as spoiler' });
+    expect(queued.hasAttribute('disabled')).toBe(true);
+    expect(queued.getAttribute('aria-pressed')).toBe('false');
+    expect(screen.getByRole('button', { name: 'Mark first.png as spoiler' }).hasAttribute('disabled')).toBe(true);
+    fireEvent.click(queued);
+    expect(screen.getByRole('button', { name: 'Mark second.png as spoiler' }).getAttribute('aria-pressed')).toBe('false');
+    finish();
+    await waitFor(() => { expect(server.uploads).toHaveLength(2); });
+    finish();
+    await screen.findByText('Sent');
+    expect(server.uploads.map((call) => call.filename)).toEqual(['first.png', 'second.png']);
+    expect(server.posts[0]?.request.body).toBe('first.png, second.png');
   });
 
   it('keeps text and image drafts scoped to the channel and normalized audience', async () => {

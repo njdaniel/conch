@@ -955,6 +955,7 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
       beginSend(frozen);
       return;
     }
+    dispatchAttachments({ type: 'seal', channel: nameOf(channelId) ?? channel, ...(audience === undefined ? {} : { audience }) });
     void (async () => {
       let attachments = [...frozen.attachments];
       for (let index = 0; index < attachments.length; index++) {

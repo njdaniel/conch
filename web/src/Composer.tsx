@@ -6,7 +6,7 @@ import { formatSize, isPreviewType } from './fileSize';
 import { formatText, type FormatKind } from './formatting';
 import { completeMention, mentionAt } from './mention';
 import { validateImage } from './image';
-import { storedName } from './spoilerFiles';
+import { canSpoilerName, storedName } from './spoilerFiles';
 import type { Audience } from './schema/message';
 import { audienceScope, maxDraftAttachments, type DraftAttachment, type NewDraftAttachment } from './state/attachments';
 import type { Target, TargetAction } from './state/drafts';
@@ -67,7 +67,14 @@ function DraftPreview({ attachment, busy, onSpoiler, onRemove, onCancel, onRetry
   const reasonId = useId();
   // The stored name is fixed once the upload has begun: the mark is disabled
   // with a reason rather than re-uploading the file.
-  const locked = attachment.status === 'uploading' || attachment.status === 'ready';
+  // A send in progress has frozen every file in it, queued ones too.
+  const tooLong = !attachment.spoiler && !canSpoilerName(attachment.filename);
+  const reason = busy || attachment.sealed === true || attachment.status === 'uploading' || attachment.status === 'ready'
+    ? 'Already uploading or uploaded; remove it and add it again to change this.'
+    : tooLong
+      ? 'This file name is too long to mark as a spoiler.'
+      : null;
+  const locked = reason !== null;
   useEffect(() => {
     if (!image) return;
     const made = URL.createObjectURL(attachment.bytes);
@@ -106,7 +113,7 @@ function DraftPreview({ attachment, busy, onSpoiler, onRemove, onCancel, onRetry
       >
         Mark as spoiler
       </button>
-      {locked ? <span id={reasonId} className="hint">Already uploaded; remove it and add it again to change this.</span> : null}
+      {locked ? <span id={reasonId} className="hint">{reason}</span> : null}
       <button type="button" onClick={onRemove} disabled={busy} aria-label={`Remove ${attachment.filename}`}>Remove</button>
     </li>
   );

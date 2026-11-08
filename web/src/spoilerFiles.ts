@@ -57,14 +57,42 @@ export function storedName(draft: { readonly filename: string; readonly spoiler:
   return draft.spoiler ? spoilerName(draft.filename) : draft.filename;
 }
 
+// canSpoilerName is whether a file can be marked without renaming its
+// extension: a name whose extension alone leaves no room for the prefix and a
+// base name is refused, never cut into.
+export function canSpoilerName(name: string): boolean {
+  if (isSpoilerName(name) || byteLength(SPOILER_FILE_PREFIX + name) <= MAX_FILE_NAME_BYTES) return true;
+  const dot = name.lastIndexOf('.');
+  const extension = dot > 0 ? name.slice(dot) : '';
+  return byteLength(extension) < MAX_FILE_NAME_BYTES - byteLength(SPOILER_FILE_PREFIX);
+}
+
+// attachmentNames is the stored names an image-only message carries as its
+// body (the composer joins them with ", "), or null when the body is more than
+// that. It must have exactly one part per attached file and hold no "||", so a
+// caption (a text spoiler, commas inside it) is never taken for names.
+export function attachmentNames(message: Pick<MessageV2, 'body' | 'payload'>): readonly string[] | null {
+  const payload = message.payload;
+  if (payload?.schema !== fileAttachmentPayloadSchema || message.body.includes('||')) return null;
+  const ids = (payload.data as { file_ids?: unknown }).file_ids;
+  if (!Array.isArray(ids)) return null;
+  const parts = message.body.split(', ');
+  return parts.length === ids.length && parts.every((part) => part !== '') ? parts : null;
+}
+
+// displayBody is a message's body for people: an image-only message's stored
+// names without the spoiler prefix, anything else as it is.
+export function displayBody(message: Pick<MessageV2, 'body' | 'payload'>): string {
+  const names = attachmentNames(message);
+  return names !== null && names.some(isSpoilerName) ? names.map(shownName).join(', ') : message.body;
+}
+
 // messagePreview is a message's body outside the message view (a system
 // notification, the notification list). It never shows a spoiler: a text
 // spoiler reads "[spoiler]", and an image sent with no text, whose body is the
-// stored names, reads "[spoiler] {shown name}".
+// stored names, reads "[spoiler] {shown name}" for each marked one.
 export function messagePreview(message: Pick<MessageV2, 'body' | 'payload'>): string {
-  if (message.payload?.schema === fileAttachmentPayloadSchema) {
-    const parts = message.body.split(', ');
-    if (parts.some(isSpoilerName)) return parts.map((part) => (isSpoilerName(part) ? `[spoiler] ${shownName(part)}` : previewText(part))).join(', ');
-  }
+  const names = attachmentNames(message);
+  if (names !== null && names.some(isSpoilerName)) return names.map((name) => (isSpoilerName(name) ? `[spoiler] ${shownName(name)}` : name)).join(', ');
   return previewText(message.body);
 }
