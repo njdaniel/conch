@@ -30,6 +30,8 @@ import { SignInLink } from './SignInLink';
 import { AddDevice } from './AddDevice';
 import { AdminConsole } from './AdminConsole';
 import { canDo, memberLine } from './admin/permissions';
+import { ManifestReads } from './admin/AIAdminCard';
+import { useManifestReadControl } from './admin/manifestReads';
 import { Reauth } from './Reauth';
 import { PasswordSettings } from './Settings';
 import { Setup } from './Setup';
@@ -662,6 +664,7 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
     onPermissionsChanged: permissionsChanged,
     onDirectoryChanged: directoryChanged,
   });
+  const manifestReads = useManifestReadControl(signedIn, directory.tick);
   // The server's word that the directory changed (issue #993): the community
   // panel, the picker and this channel's people are read again and replaced.
   // The open channel's people moved (conch.channel_members.v1): the preview
@@ -1685,6 +1688,7 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
         );
       }
       return (
+        <ManifestReads.Provider value={manifestReads}>
         <PreviewEntry.Provider value={previewEntry}>
         <ComposerAttachmentProvider value={composerAttachments}>
         <Lobby
@@ -2053,6 +2057,7 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
         />
         </ComposerAttachmentProvider>
         </PreviewEntry.Provider>
+        </ManifestReads.Provider>
       );
   }
 }

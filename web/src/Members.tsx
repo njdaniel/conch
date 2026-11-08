@@ -1,7 +1,8 @@
 import { ModerationConfirm, type ModerationOperation } from './Moderation';
 import type { ChannelBanV1 } from './schema/generated';
-import { useCallback, useEffect, useId, useRef, useState, type KeyboardEvent, type ReactNode, type SyntheticEvent } from 'react';
+import { useCallback, useContext, useEffect, useId, useRef, useState, type KeyboardEvent, type ReactNode, type SyntheticEvent } from 'react';
 import * as api from './api';
+import { ManifestReads } from './admin/AIAdminCard';
 import { Avatar } from './Icons';
 import { IdentityMarks } from './Identity';
 import { memberName } from './guestName';
@@ -564,6 +565,7 @@ export function CommunityMembers({
   readonly onUnauthorized: () => void;
 }) {
   const headingId = useId();
+  const manifestReads = useContext(ManifestReads);
   const [answer, setAnswer] = useState<ServerMembersResponseV1 | 'failed' | null>(null);
   // The permissions document's rows, for the voice line beside the voice
   // switch (design §5); every operator may read it.
@@ -607,7 +609,14 @@ export function CommunityMembers({
 
   const load = useCallback(() => {
     const mine = ++seq.current;
+    const request = manifestReads.beginDirectory();
     void api.directoryMembers().then((result) => {
+      // What this view shows is its own newest answer. The session-wide order
+      // governs only the shared stops on manifest reads: an answer older than
+      // one already applied there changes none of them, whether or not this
+      // view has closed or asked again, but is still drawn here (#1562). This
+      // answer, never a channel's members, controls manifest reads.
+      if (result.ok) manifestReads.acceptDirectory(request, result.value.members);
       if (mine !== seq.current || !live.current) return;
       if (result.ok) {
         setAnswer(result.value);
@@ -619,7 +628,7 @@ export function CommunityMembers({
       }
       setAnswer('failed');
     });
-  }, []);
+  }, [manifestReads.beginDirectory, manifestReads.acceptDirectory]);
   // The permissions document is read when a person's menu opens, so a switch
   // that would do nothing says so (the voice line); not with the list.
   const readRows = useCallback(() => {
@@ -719,7 +728,11 @@ export function CommunityMembers({
       {/* A list that is not told of directory changes keeps a Refresh; the
           community panel and the admin console's follow the frame. */}
       {directoryTick !== undefined ? null : (
-        <button type="button" className="quiet" onClick={load}>
+        <button
+          type="button"
+          className="quiet"
+          onClick={load}
+        >
           Refresh
         </button>
       )}

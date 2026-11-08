@@ -286,6 +286,10 @@ test('6: promotion and demotion move Operator, and disabling an agent drops its 
   const bot = await agentPerson(world, secrets, `${tag}-bot`);
   const channel = `${tag}-room`;
   await privateChannel(world, channel, [member, bot]);
+  // Give the bot a manifest so its initial card reads succeed; the unfiltered
+  // console check is for reads after the bot is hidden (#1562).
+  const manifest = await call(world, world.tokens.operator, 'PUT', `/v1/principals/${String(bot.id)}/manifest`, { display_name: bot.name, tier: 'A' });
+  expect(manifest.status, `writing ${bot.name}'s manifest: ${JSON.stringify(manifest.body)}`).toBeLessThan(300);
   const said = await post(world, member.token, channel, `${tag} member author`);
   const pages: WatchedPage[] = [];
   const role = async (to: 'operator' | 'member') => {
@@ -327,13 +331,6 @@ test('6: promotion and demotion move Operator, and disabling an agent drops its 
   } finally {
     await call(world, world.tokens.operator, 'PUT', `/v1/principals/${String(member.id)}/role`, { role: 'member' });
     await call(world, world.tokens.operator, 'POST', `/v1/principals/${String(bot.id)}/hide`);
-  }
-  // The owner's page reads the manifest of each agent in the list; once the agent
-  // is hidden that read is a 404 the browser logs. It is the page asking about
-  // a principal it was just told is gone, not an identity fault, and it is the
-  // only console error allowed here.
-  for (const { errors } of pages) {
-    for (let i = errors.length - 1; i >= 0; i--) if (errors[i]?.includes(`/v1/principals/${String(bot.id)}/manifest`) === true) errors.splice(i, 1);
   }
   expectClean(pages);
 });
