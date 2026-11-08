@@ -286,8 +286,11 @@ describe('Composer and App attachment sending', () => {
     // ready.png is uploaded: its mark is disabled, with the reason, not re-uploaded.
     const locked = screen.getByRole('button', { name: 'Mark ready.png as spoiler' });
     expect(locked.hasAttribute('disabled')).toBe(true);
-    expect(locked.getAttribute('aria-describedby')).not.toBeNull();
-    expect(screen.getByText(/Already uploading or uploaded/)).toBeDefined();
+    // ready.png's own reason, by its aria-describedby: large.png may still be
+    // sealed for a moment and show the same words, so a page-wide query races.
+    const reasonId = locked.getAttribute('aria-describedby');
+    expect(reasonId).not.toBeNull();
+    expect(document.getElementById(reasonId ?? '')?.textContent).toMatch(/Already uploading or uploaded/);
     // large.png failed: its mark survives, and can still be changed.
     expect(screen.getByRole('button', { name: 'Mark large.png as spoiler' }).getAttribute('aria-pressed')).toBe('true');
     refuse = false;
