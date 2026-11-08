@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"os"
@@ -149,18 +150,58 @@ func previewCoverage(table []routetable.Route) error {
 var exemptRoute = regexp.MustCompile(`(?:\brt\(|pattern:\s*)"((?:GET|POST|PUT|DELETE|PATCH) /[^"]*)",\s*(?:access:\s*)?accessExempt`)
 
 // exemptRoutes reads every method-bearing route of routes.go of the exempt
-// class.
-func exemptRoutes(repo string) ([]string, error) {
+// class, and cross-checks the list against the route table (checkExempt).
+func exemptRoutes(repo string, table []routetable.Route) ([]string, error) {
 	src, err := os.ReadFile(filepath.Join(repo, "internal", "server", "routes.go")) // #nosec G304 -- the repository this run is in
 	if err != nil {
 		return nil, err
 	}
+	return checkExempt(string(src), table)
+}
+
+// checkExempt finds the exempt routes in the text of routes.go and requires
+// them to agree with the table: each is a route of the table (the regexp and
+// routetable read the text separately), none is previewable, and no use of
+// accessExempt in the code escaped the regexp, but the method-less ones the
+// table lists (/mcp).
+func checkExempt(src string, table []routetable.Route) ([]string, error) {
 	var out []string
-	for _, m := range exemptRoute.FindAllStringSubmatch(string(src), -1) {
+	for _, m := range exemptRoute.FindAllStringSubmatch(src, -1) {
 		out = append(out, m[1])
 	}
 	if len(out) == 0 {
 		return nil, fmt.Errorf("routes.go has no accessExempt route this check can read")
+	}
+	inTable := map[string]routetable.Route{}
+	methodless := 0
+	for _, r := range table {
+		inTable[r.Text] = r
+		if r.Method == "" {
+			methodless++
+		}
+	}
+	var problems []string
+	for _, e := range out {
+		if _, ok := inTable[e]; !ok {
+			problems = append(problems, e+" is read as exempt but is not in the route table")
+		}
+		if slices.Contains(previewable, e) {
+			problems = append(problems, e+" is read as exempt but is previewable")
+		}
+	}
+	uses := 0
+	for _, line := range strings.Split(src, "\n") {
+		if code, _, _ := strings.Cut(line, "//"); strings.Contains(code, "accessExempt") {
+			uses++
+		}
+	}
+	// A line holds one route, and /mcp is exempt and the table's only
+	// method-less route.
+	if uses != len(out)+methodless {
+		problems = append(problems, fmt.Sprintf("routes.go uses accessExempt on %d lines, but %d exempt routes were read and %d method-less routes are in the table: a route of the exempt class was missed", uses, len(out), methodless))
+	}
+	if len(problems) > 0 {
+		return nil, errors.New(strings.Join(problems, "; "))
 	}
 	return out, nil
 }
@@ -236,6 +277,7 @@ type previewPeople struct {
 	ownerID      int64
 	admin        *member // an operator, not an owner, in neither channel
 	hookToken    string
+	goneTag      string // names the member who is disabled
 }
 
 // reads are the four reads, besides the entry read, a previewed member's
@@ -257,7 +299,7 @@ func (w *world) previewPhase(table []routetable.Route) (int, error) {
 	// a room's name must be that room's alone (markers.go).
 	tAlice := newTag(w.tag, w.btag, w.ptag, w.qtag, ta, tb, tx)
 	tBob := newTag(w.tag, w.btag, w.ptag, w.qtag, ta, tb, tx, tAlice)
-	pp := &previewPeople{roomA: "pva" + ta, roomB: "pvb" + tb}
+	pp := &previewPeople{roomA: "pva" + ta, roomB: "pvb" + tb, goneTag: tx}
 
 	var me schema.WhoAmIResponseV1
 	if err := w.op.call(http.MethodGet, "/v1/whoami", nil, &me); err != nil {
@@ -310,13 +352,13 @@ func (w *world) previewPhase(table []routetable.Route) (int, error) {
 	if err := w.applyPreset(schema.PresetGroup); err != nil {
 		return 0, err
 	}
-	if err := p.aliceAndBob(pp, false); err != nil {
+	if err := p.unchanged(pp, func() error { return p.aliceAndBob(pp, false) }); err != nil {
 		return p.requests, fmt.Errorf("hiding off (group): %w", err)
 	}
 	if err := w.applyPreset(schema.PresetPersonal); err != nil {
 		return p.requests, err
 	}
-	err = p.aliceAndBob(pp, true)
+	err = p.unchanged(pp, func() error { return p.aliceAndBob(pp, true) })
 	if gerr := w.applyPreset(schema.PresetGroup); gerr != nil && err == nil {
 		err = gerr
 	}
@@ -337,6 +379,26 @@ func (w *world) previewPhase(table []routetable.Route) (int, error) {
 		return p.requests, fmt.Errorf("the audit: %w", err)
 	}
 	return p.requests, nil
+}
+
+// unchanged runs f and requires that the server's state (state) is as it was:
+// the previewed reads write nothing.
+func (p *preview) unchanged(pp *previewPeople, f func() error) error {
+	before, err := p.state(pp)
+	if err != nil {
+		return err
+	}
+	if err := f(); err != nil {
+		return err
+	}
+	after, err := p.state(pp)
+	if err != nil {
+		return err
+	}
+	if after != before {
+		return fmt.Errorf("the previewed reads changed the server's state:\nbefore:\n%s\nafter:\n%s", p.w.h.redact(before), p.w.h.redact(after))
+	}
+	return nil
 }
 
 // aliceAndBob is §5.1 under one setting of hiding: for each of alice and bob,
@@ -439,6 +501,47 @@ func (p *preview) aliceAndBob(pp *previewPeople, hiding bool) error {
 				if err := p.directoryIs(pp, t.who, t.other, prev.body, hiding); err != nil {
 					return fmt.Errorf("%s: %w", what, err)
 				}
+			}
+		}
+
+		// The query variants: the header and a query string together. Her
+		// own bytes under the same query, hers alone.
+		for _, v := range []struct {
+			path string
+			want int // her status
+		}{
+			{"/v1/directory/channels?scope=all", http.StatusForbidden},
+			{"/v1/directory/members?limit=200", http.StatusOK},
+			{"/v1/directory/members?limit=1", http.StatusOK},
+			// The cursor is "after" (the handler reads only after and
+			// limit): pages that start at the owner, at her, and at the
+			// other side, whose id is the boundary a preview that used the
+			// administrator's view would expose.
+			{"/v1/directory/members?after=" + itoa(pp.ownerID), http.StatusOK},
+			{"/v1/directory/members?limit=1&after=" + itoa(pp.ownerID), http.StatusOK},
+			{"/v1/directory/members?after=" + itoa(t.who.id), http.StatusOK},
+			{"/v1/directory/members?limit=1&after=" + itoa(t.otherID-1), http.StatusOK},
+			{"/v1/directory/members?limit=1&after=" + itoa(t.otherID), http.StatusOK},
+		} {
+			prev, err := p.asID(pp.admin.api, v.path, t.who.id)
+			if err != nil {
+				return err
+			}
+			ownRes, err := p.plain(t.who.api, http.MethodGet, v.path, "", nil)
+			if err != nil {
+				return err
+			}
+			if prev.status != v.want || prev.status != ownRes.status || !bytes.Equal(prev.body, ownRes.body) {
+				return fmt.Errorf("%s: previewed %s = %d %s, but her own token gets %d %s (want %d)", what, v.path, prev.status, w.h.redact(string(prev.body)), ownRes.status, w.h.redact(string(ownRes.body)), v.want)
+			}
+			if v.want == http.StatusForbidden {
+				if _, err := mustRefuse(what+": previewed "+v.path, prev, answer{http.StatusForbidden, "forbidden"}); err != nil {
+					return err
+				}
+			}
+			people := hiding || !strings.HasPrefix(v.path, "/v1/directory/members")
+			if leaks := previewRegister(t.other, t.other_, t.otherID, people).leaks(prev.body, asked{}); len(leaks) > 0 {
+				return fmt.Errorf("%s: previewed %s holds %s", what, v.path, strings.Join(leaks, "; "))
 			}
 		}
 
@@ -695,9 +798,39 @@ func (p *preview) rules(pp *previewPeople) error {
 	if err != nil {
 		return err
 	}
-	_ = dup.Body.Close()
-	if dup.StatusCode == http.StatusOK {
-		return fmt.Errorf("the header sent twice, for alice and for bob, was answered 200")
+	defer func() { _ = dup.Body.Close() }()
+	dupBody, err := io.ReadAll(io.LimitReader(dup.Body, 1<<20))
+	if err != nil {
+		return err
+	}
+	if _, err := mustRefuse("the header sent twice, for alice and for bob", result{status: dup.StatusCode, body: dupBody, header: dup.Header}, answer{http.StatusBadRequest, "invalid_request"}); err != nil {
+		return err
+	}
+	return p.departed(pp, ghost)
+}
+
+// departed: a target who was disabled is no member of the community, and is
+// answered as an id nobody has, byte for byte, on each of the five reads.
+func (p *preview) departed(pp *previewPeople, ghost result) error {
+	gone, err := p.w.newPerson("pvgone-"+pp.goneTag, pp.roomA)
+	if err != nil {
+		return err
+	}
+	if err := p.w.op.call(http.MethodPost, fmt.Sprintf("/v1/principals/%d/disable", gone.id), nil, nil); err != nil {
+		return fmt.Errorf("disable %s: %w", gone.name, err)
+	}
+	for _, path := range append([]string{"/v1/preview"}, pp.reads(pp.roomA)...) {
+		res, err := p.asID(pp.admin.api, path, gone.id)
+		if err != nil {
+			return err
+		}
+		what := "an operator previews a disabled member: " + path
+		if _, err := mustRefuse(what, res, answer{http.StatusNotFound, "principal_not_found"}); err != nil {
+			return err
+		}
+		if err := sameAnswer(what, res.status, res.body, ghost.status, ghost.body); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -754,13 +887,17 @@ func (p *preview) restricted(pp *previewPeople) (err error) {
 	return nil
 }
 
-// state is what a refused sweep must leave as it found it: the owner's view of
-// the channels, the people, the permissions, the sockets' tickets are not a
-// state, and the messages of A.
+// state is what a refused sweep, or the five previewed reads, must leave as
+// they found it: the owner's view of the channels, the people (the principals,
+// the directory, the members of A and of B), the permissions, the invites, the
+// sessions, the guests, the join settings, the hooks and the messages of A and
+// B. The sockets' tickets are not a state.
 func (p *preview) state(pp *previewPeople) (string, error) {
 	var b strings.Builder
 	for _, path := range []string{"/v1/channels", "/v1/directory/members?limit=200", "/v1/directory/channels?scope=all", "/v1/permissions", "/v1/hooks",
-		"/v2/channels/" + pp.roomA + "/messages", "/v2/channels/" + pp.roomB + "/messages", "/v1/channels/" + pp.roomA + "/members"} {
+		"/v1/principals?limit=200", "/v1/invites", "/v1/sessions?channel=" + pp.roomA, "/v1/sessions?channel=" + pp.roomB, "/v1/guests", "/v1/join/settings",
+		"/v2/channels/" + pp.roomA + "/messages", "/v2/channels/" + pp.roomB + "/messages",
+		"/v1/channels/" + pp.roomA + "/members", "/v1/channels/" + pp.roomB + "/members"} {
 		res, err := p.plain(p.w.op, http.MethodGet, path, "", nil)
 		if err != nil {
 			return "", err
@@ -786,7 +923,7 @@ func (p *preview) refusals(pp *previewPeople, table []routetable.Route) error {
 	if err := previewCoverage(table); err != nil {
 		return err
 	}
-	exempt, err := exemptRoutes(w.h.repo)
+	exempt, err := exemptRoutes(w.h.repo, table)
 	if err != nil {
 		return err
 	}
@@ -924,7 +1061,14 @@ func (p *preview) audit(pp *previewPeople) error {
 		return err
 	}
 	n := 0
+	exempt, err := exemptDenials(denied, []int64{pp.alice.id, pp.bob.id})
+	if err != nil {
+		return err
+	}
 	for _, e := range denied {
+		if isExemptDenial(e) {
+			continue
+		}
 		m := previewAs.FindStringSubmatch(e.Detail)
 		if m == nil {
 			continue
@@ -940,5 +1084,40 @@ func (p *preview) audit(pp *previewPeople) error {
 	if n == 0 {
 		return fmt.Errorf("no access_denied row records a refused preview: the denials are not audited")
 	}
+	if exempt == 0 {
+		return fmt.Errorf("no access_denied row with actor anonymous and detail %s records a refused preview of an exempt route", schema.ErrorCodePreviewReadOnly)
+	}
 	return nil
+}
+
+// isExemptDenial: the row is a refusal of an exempt route under a preview
+// header, picked by its detail and its subject (the route pattern, which
+// begins with a method), never by its actor, so a wrongly attributed row is
+// still selected.
+func isExemptDenial(e schema.AuditEventV1) bool {
+	return strings.HasPrefix(e.Detail, schema.ErrorCodePreviewReadOnly) && !strings.Contains(e.Detail, "preview_as=") && exemptSubject.MatchString(e.Subject)
+}
+
+// exemptSubject is a route pattern: a method, a space and a path.
+var exemptSubject = regexp.MustCompile(`^(GET|POST|PUT|DELETE|PATCH) /`)
+
+// exemptDenials counts the exempt-route denials among rows and requires every
+// one to have the actor "anonymous" and to name none of the targets.
+func exemptDenials(rows []schema.AuditEventV1, targets []int64) (int, error) {
+	n := 0
+	for _, e := range rows {
+		if !isExemptDenial(e) {
+			continue
+		}
+		n++
+		if e.Actor != "anonymous" {
+			return n, fmt.Errorf("an exempt route's preview_read_only denial has actor %q, want anonymous: %+v", e.Actor, e)
+		}
+		for _, id := range targets {
+			if regexp.MustCompile(`\b` + itoa(id) + `\b`).MatchString(e.Actor + " " + e.Subject + " " + e.Detail) {
+				return n, fmt.Errorf("an exempt route's preview_read_only denial names the target %d: %+v", id, e)
+			}
+		}
+	}
+	return n, nil
 }
