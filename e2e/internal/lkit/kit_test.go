@@ -103,34 +103,105 @@ func TestFetchLKRetry(t *testing.T) {
 	}
 }
 
-func TestFetchLKCancelledDuringBackoff(t *testing.T) {
-	var calls atomic.Int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		calls.Add(1)
-		w.WriteHeader(http.StatusServiceUnavailable)
-	}))
-	defer srv.Close()
-	stubFetch(t, srv.URL, "00", []time.Duration{time.Hour, time.Hour, time.Hour})
-
-	ctx, cancel := context.WithCancel(context.Background())
-	go func() {
-		for calls.Load() == 0 {
-			time.Sleep(time.Millisecond)
-		}
-		cancel()
-	}()
-	done := make(chan error, 1)
-	go func() { _, err := FetchLK(ctx, t.TempDir()); done <- err }()
-	select {
-	case err := <-done:
-		if !errors.Is(err, context.Canceled) {
-			t.Errorf("err = %v, want context.Canceled", err)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("FetchLK did not stop on cancellation")
+// TestFetchLKTransport covers failures that are not an HTTP status: only a
+// transient one is retried, a permanent one makes exactly one attempt.
+func TestFetchLKTransport(t *testing.T) {
+	closedAddr := func(t *testing.T) string {
+		srv := httptest.NewServer(http.NotFoundHandler())
+		u := srv.URL
+		srv.Close()
+		return u
 	}
-	if got := calls.Load(); got != 1 {
-		t.Errorf("requests = %d, want 1", got)
+	hijackClose := func(t *testing.T) string {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			conn, _, err := w.(http.Hijacker).Hijack()
+			if err == nil {
+				_ = conn.Close()
+			}
+		}))
+		t.Cleanup(srv.Close)
+		return srv.URL
+	}
+	untrustedTLS := func(t *testing.T) string {
+		srv := httptest.NewTLSServer(http.NotFoundHandler())
+		t.Cleanup(srv.Close)
+		return srv.URL
+	}
+	redirectLoop := func(t *testing.T) string {
+		var srv *httptest.Server
+		srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			http.Redirect(w, r, srv.URL, http.StatusFound)
+		}))
+		t.Cleanup(srv.Close)
+		return srv.URL
+	}
+	tests := []struct {
+		name      string
+		url       func(*testing.T) string
+		wantWaits int // backoff waits: 0 means one attempt only
+	}{
+		{name: "connection refused is retried", url: closedAddr, wantWaits: 3},
+		{name: "connection closed mid-request is retried", url: hijackClose, wantWaits: 3},
+		{name: "untrusted certificate is final", url: untrustedTLS, wantWaits: 0},
+		{name: "redirect loop is final", url: redirectLoop, wantWaits: 0},
+		{name: "unsupported scheme is final", url: func(*testing.T) string { return "gopher://127.0.0.1:1/" }, wantWaits: 0},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			u := tc.url(t)
+			stubFetch(t, u, "00", []time.Duration{0, 0, 0})
+			var waits int
+			lkWait = func(context.Context, time.Duration) error { waits++; return nil }
+			_, err := FetchLK(context.Background(), t.TempDir())
+			if err == nil || !errors.Is(err, ErrUnreachable) {
+				t.Fatalf("err = %v, want one wrapping ErrUnreachable", err)
+			}
+			if waits != tc.wantWaits {
+				t.Errorf("backoff waits = %d, want %d (err: %v)", waits, tc.wantWaits, err)
+			}
+		})
+	}
+}
+
+// TestFetchLKCancelledDuringBackoff cancels exactly while FetchLK waits to
+// retry: no second request is made and the error wraps both the context's
+// error and ErrUnreachable.
+func TestFetchLKCancelledDuringBackoff(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		finish func(cancel context.CancelFunc) // ends the context
+		want   error
+	}{
+		{"cancel", func(c context.CancelFunc) { c() }, context.Canceled},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var calls atomic.Int32
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				calls.Add(1)
+				w.WriteHeader(http.StatusServiceUnavailable)
+			}))
+			defer srv.Close()
+			stubFetch(t, srv.URL, "00", []time.Duration{time.Hour, time.Hour, time.Hour})
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			inWait := make(chan struct{})
+			lkWait = func(ctx context.Context, _ time.Duration) error {
+				close(inWait)
+				<-ctx.Done()
+				return ctx.Err()
+			}
+			done := make(chan error, 1)
+			go func() { _, err := FetchLK(ctx, t.TempDir()); done <- err }()
+			<-inWait
+			tc.finish(cancel)
+			err := <-done
+			if !errors.Is(err, tc.want) || !errors.Is(err, ErrUnreachable) {
+				t.Errorf("err = %v, want it to wrap %v and ErrUnreachable", err, tc.want)
+			}
+			if got := calls.Load(); got != 1 {
+				t.Errorf("requests = %d, want 1", got)
+			}
+		})
 	}
 }
 
@@ -139,13 +210,13 @@ func TestFetchLKCancelledDuringBackoff(t *testing.T) {
 func stubFetch(t *testing.T, base, pin string, backoff []time.Duration) {
 	t.Helper()
 	key := runtime.GOOS + "_" + runtime.GOARCH
-	oldURL, oldBackoff, oldSum, had := lkURL, lkBackoff, lkSHA256[key], false
+	oldURL, oldBackoff, oldWait, oldSum, had := lkURL, lkBackoff, lkWait, lkSHA256[key], false
 	_, had = lkSHA256[key]
 	lkURL = func(string) string { return base }
 	lkBackoff = backoff
 	lkSHA256[key] = pin
 	t.Cleanup(func() {
-		lkURL, lkBackoff = oldURL, oldBackoff
+		lkURL, lkBackoff, lkWait = oldURL, oldBackoff, oldWait
 		if had {
 			lkSHA256[key] = oldSum
 		} else {

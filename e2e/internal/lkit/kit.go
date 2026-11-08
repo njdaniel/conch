@@ -31,6 +31,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -495,12 +496,42 @@ func FetchLK(ctx context.Context, dir string) (string, error) {
 		if !retry || attempt >= len(lkBackoff) {
 			return "", err
 		}
-		select {
-		case <-ctx.Done():
-			return "", fmt.Errorf("download lk: %w", ctx.Err())
-		case <-time.After(lkBackoff[attempt]):
+		if werr := lkWait(ctx, lkBackoff[attempt]); werr != nil {
+			// Wrap the last attempt too, so that errors.Is finds ErrUnreachable
+			// as well as the context's error.
+			return "", fmt.Errorf("%w (stopped retrying: %w)", err, werr)
 		}
 	}
+}
+
+// lkWait waits d, or until ctx is done, and returns ctx's error in that case.
+// A var so that tests can see when a backoff starts and need not sleep.
+var lkWait = func(ctx context.Context, d time.Duration) error {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-t.C:
+		return nil
+	}
+}
+
+// transientNetErr reports whether a transport error is worth another try: a
+// timeout, a refused or reset connection, a connection cut short, or a
+// temporary DNS failure. Anything else (an untrusted certificate, a redirect
+// loop, an unsupported scheme) would fail the same way again.
+func transientNetErr(err error) bool {
+	if errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, io.EOF) ||
+		errors.Is(err, syscall.ECONNREFUSED) || errors.Is(err, syscall.ECONNRESET) {
+		return true
+	}
+	var dns *net.DNSError
+	if errors.As(err, &dns) {
+		return dns.IsTemporary || dns.IsTimeout
+	}
+	var ne net.Error
+	return errors.As(err, &ne) && ne.Timeout()
 }
 
 // downloadLK makes one GET of url and returns the body. retry reports whether
@@ -512,7 +543,7 @@ func downloadLK(ctx context.Context, url string) (archive []byte, retry bool, er
 	}
 	resp, err := (&http.Client{Timeout: 3 * time.Minute}).Do(req)
 	if err != nil {
-		return nil, ctx.Err() == nil, fmt.Errorf("download lk: %w: %w", ErrUnreachable, UnwrapURLError(err))
+		return nil, ctx.Err() == nil && transientNetErr(err), fmt.Errorf("download lk: %w: %w", ErrUnreachable, UnwrapURLError(err))
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode >= 500 {
@@ -523,7 +554,7 @@ func downloadLK(ctx context.Context, url string) (archive []byte, retry bool, er
 	}
 	archive, err = io.ReadAll(io.LimitReader(resp.Body, 200<<20))
 	if err != nil {
-		return nil, ctx.Err() == nil, fmt.Errorf("download lk: %w: %w", ErrUnreachable, err)
+		return nil, ctx.Err() == nil && transientNetErr(err), fmt.Errorf("download lk: %w: %w", ErrUnreachable, err)
 	}
 	return archive, false, nil
 }
