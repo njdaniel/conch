@@ -197,4 +197,32 @@ describe('the author name and the message gestures', () => {
       vi.useRealTimers();
     }
   });
+
+  it('a long press never opens the card, even when the compatibility mousedown closes the menu first', () => {
+    vi.useFakeTimers();
+    try {
+      render(<Message message={by(1, 2)} people={members} nets={new Map()} viewer={2} channel="general" sent={false} cont={false} actions={[{ key: 'edit', label: 'Edit', onSelect: vi.fn() }]} />);
+      const name = screen.getByRole('button', { name: 'ada' });
+      fireEvent.touchStart(name, { touches: [{ clientX: 10, clientY: 10 }] });
+      act(() => {
+        vi.advanceTimersByTime(longPressMs);
+      });
+      expect(screen.getByRole('menu', { name: /^More actions for ada/ })).toBeDefined();
+      // What a phone sends after the finger lifts: the mousedown lands on the
+      // name, outside the menu, and may close it before the click arrives.
+      fireEvent.touchEnd(name);
+      fireEvent.mouseDown(name);
+      fireEvent.mouseUp(name);
+      fireEvent.click(name);
+      expect(screen.queryByRole('dialog')).toBeNull();
+
+      // The guard is spent once: the next tap opens the card.
+      fireEvent.touchStart(name, { touches: [{ clientX: 10, clientY: 10 }] });
+      fireEvent.touchEnd(name);
+      fireEvent.click(name);
+      expect(screen.getByRole('dialog', { name: 'ada' })).toBeDefined();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

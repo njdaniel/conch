@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useId, useRef, useState, type KeyboardEvent } from 'react';
 import { Avatar } from './Icons';
 import { IdentityMarks } from './Identity';
+import { longPressMs } from './MessageMenu';
 import type { IdentityInput } from './identity';
 import type { Entry } from './agents/join';
 import type { Person } from './useLiveChannel';
@@ -38,6 +39,11 @@ export function ProfileCard({ id, person, viewer, name: surfaceName, className =
   const disappear = useRef(onDisappear);
   disappear.current = onDisappear;
   const hadPerson = useRef(person !== undefined);
+  // When the current touch on the name began, and whether a touch that ended
+  // was a long press: the row's menu took that gesture (useOpeners), so its
+  // trailing click is not a tap on the name.
+  const touchStarted = useRef<number | null>(null);
+  const longPressed = useRef(false);
   const key = useId();
   const titleId = `${key}-name`;
   const cardId = `${key}-card`;
@@ -113,11 +119,27 @@ export function ProfileCard({ id, person, viewer, name: surfaceName, className =
         aria-haspopup="dialog"
         aria-expanded={shown}
         {...(shown ? { 'aria-controls': cardId } : {})}
-        onClick={(event) => {
-          // A recognised long press has already opened the row's menu. Its
-          // following click must not open a card and take focus from the menu.
-          const menu = event.currentTarget.closest('li')?.querySelector('[role="menu"]');
-          if (menu !== null && menu !== undefined) return;
+        onTouchStart={() => {
+          touchStarted.current = Date.now();
+          longPressed.current = false;
+        }}
+        onTouchEnd={() => {
+          const started = touchStarted.current;
+          touchStarted.current = null;
+          longPressed.current = started !== null && Date.now() - started >= longPressMs;
+        }}
+        onTouchCancel={() => {
+          touchStarted.current = null;
+        }}
+        onClick={() => {
+          // A long press opened the row's menu. Its trailing click must not
+          // open a card and take focus from the menu, whatever the compatibility
+          // mousedown between them did to the menu (#1544). The gesture, not
+          // the menu's presence, decides, and it is spent once.
+          if (longPressed.current) {
+            longPressed.current = false;
+            return;
+          }
           show();
         }}
       >
