@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -16,18 +16,31 @@ afterEach(() => {
   for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
 });
 
+// The tree a build is unpacked into: <tmp>/app/conch, 0755 all the way down
+// from the temporary root (which is not judged: see trustedTarget's seam).
+function tree(): { readonly top: string; readonly exec: string } {
+  const top = tmp();
+  chmodSync(top, 0o755);
+  mkdirSync(join(top, 'app'), { mode: 0o755 });
+  chmodSync(join(top, 'app'), 0o755);
+  const exec = join(top, 'app', 'conch');
+  writeFileSync(exec, '#!/bin/sh\n', { mode: 0o755 });
+  return { top, exec };
+}
 const EXEC = '/opt/Conch/conch-desktop';
 
-function make(config: string, over: { packaged?: boolean; execPath?: string } = {}) {
+function make(config: string, over: { packaged?: boolean; execPath?: string; above?: string } = {}) {
   const logs: string[] = [];
+  const target = over.execPath === undefined ? tree() : null;
   const auto = new Autostart({
     packaged: over.packaged ?? true,
-    execPath: over.execPath ?? EXEC,
+    execPath: over.execPath ?? target?.exec ?? EXEC,
+    ...(over.execPath === undefined ? { trustedAbove: target?.top } : over.above === undefined ? {} : { trustedAbove: over.above }),
     env: { XDG_CONFIG_HOME: config },
     home: '/nonexistent-home',
     log: (l) => logs.push(l),
   });
-  return { auto, logs, file: join(config, 'autostart', 'chat.conch.desktop.desktop') };
+  return { auto, logs, file: join(config, 'autostart', 'chat.conch.desktop.desktop'), exec: target?.exec ?? EXEC };
 }
 
 describe('where the entry goes', () => {
@@ -72,10 +85,10 @@ describe('the entry', () => {
 describe('turning it on and off', () => {
   it('writes exactly one file, then removes it, in a temporary config home', async () => {
     const config = tmp();
-    const { auto, file } = make(config);
+    const { auto, file, exec } = make(config);
     expect(await auto.enable()).toEqual({ ok: true });
     expect(readdirSync(join(config, 'autostart'))).toEqual(['chat.conch.desktop.desktop']);
-    expect(readFileSync(file, 'utf8')).toBe(entryText(EXEC));
+    expect(readFileSync(file, 'utf8')).toBe(entryText(exec));
     // Turning it on again replaces our own file, still one.
     expect(await auto.enable()).toEqual({ ok: true });
     expect(readdirSync(join(config, 'autostart'))).toEqual(['chat.conch.desktop.desktop']);
@@ -88,7 +101,7 @@ describe('turning it on and off', () => {
   it('refuses an unpackaged build, with a reason, and writes nothing', async () => {
     const config = tmp();
     const { auto, logs } = make(config, { packaged: false });
-    expect(auto.available()).toBe(false);
+    expect(await auto.availability()).toBe('unpackaged');
     expect(await auto.enable()).toEqual({ ok: false, reason: 'unpackaged' });
     expect(readdirSync(config)).toEqual([]);
     expect(logs.join('\n')).toMatch(/unpackaged/);
@@ -109,7 +122,81 @@ describe('turning it on and off', () => {
   it('refuses a path it cannot write safely', async () => {
     const config = tmp();
     const { auto } = make(config, { execPath: 'relative' });
-    expect(auto.available()).toBe(false);
-    expect(await auto.enable()).toEqual({ ok: false, reason: 'failed' });
+    expect(await auto.availability()).toBe('unsafe-location');
+    expect(await auto.enable()).toEqual({ ok: false, reason: 'unsafe-location' });
+  });
+});
+
+describe('where the executable may sit', () => {
+  it('allows a 0755 tree owned by the user', async () => {
+    const config = tmp();
+    const { auto } = make(config);
+    expect(await auto.availability()).toBeNull();
+  });
+
+  it.each([
+    ['world-writable', 0o777],
+    ['group-writable', 0o775],
+  ])('refuses a %s ancestor, writes nothing, and says why', async (_name, mode) => {
+    const config = tmp();
+    const { top, exec } = tree();
+    chmodSync(join(top, 'app'), mode);
+    const { auto, logs } = make(config, { execPath: exec, above: top });
+    expect(await auto.availability()).toBe('unsafe-location');
+    expect(await auto.enable()).toEqual({ ok: false, reason: 'unsafe-location' });
+    expect(existsSync(join(config, 'autostart'))).toBe(false);
+    expect(logs.join('\n')).toMatch(/only you or the system/);
+  });
+
+  it('gives a sticky, world-writable ancestor no allowance', async () => {
+    const config = tmp();
+    const { top, exec } = tree();
+    chmodSync(join(top, 'app'), 0o1777);
+    const { auto } = make(config, { execPath: exec, above: top });
+    expect(await auto.availability()).toBe('unsafe-location');
+  });
+
+  it('judges the real path: a symlinked execPath resolves first', async () => {
+    const config = tmp();
+    const { top, exec } = tree();
+    // A safe-looking link into a world-writable directory.
+    const bad = join(top, 'bad');
+    mkdirSync(bad);
+    chmodSync(bad, 0o777);
+    writeFileSync(join(bad, 'conch'), '#!/bin/sh\n', { mode: 0o755 });
+    const link = join(top, 'app', 'link');
+    symlinkSync(join(bad, 'conch'), link);
+    expect(await make(config, { execPath: link, above: top }).auto.availability()).toBe('unsafe-location');
+    const good = join(top, 'app', 'link2');
+    symlinkSync(exec, good);
+    expect(await make(config, { execPath: good, above: top }).auto.availability()).toBeNull();
+  });
+
+  it('refuses an executable that group or others can write', async () => {
+    const config = tmp();
+    const { top, exec } = tree();
+    chmodSync(exec, 0o775);
+    expect(await make(config, { execPath: exec, above: top }).auto.availability()).toBe('unsafe-location');
+    chmodSync(exec, 0o757);
+    expect(await make(config, { execPath: exec, above: top }).auto.availability()).toBe('unsafe-location');
+    expect(existsSync(join(config, 'autostart'))).toBe(false);
+  });
+
+  it('names the real path in Exec=, never the symlink that was given', async () => {
+    const config = tmp();
+    const { top, exec } = tree();
+    const link = join(top, 'app', 'link');
+    symlinkSync(exec, link);
+    const { auto, file } = make(config, { execPath: link, above: top });
+    expect(await auto.enable()).toEqual({ ok: true });
+    expect(readFileSync(file, 'utf8')).toBe(entryText(realpathSync(exec)));
+    expect(readFileSync(file, 'utf8')).not.toContain(link);
+  });
+
+  it('refuses a missing file and a directory', async () => {
+    const config = tmp();
+    const { top } = tree();
+    expect(await make(config, { execPath: join(top, 'app', 'nope'), above: top }).auto.availability()).toBe('unsafe-location');
+    expect(await make(config, { execPath: join(top, 'app'), above: top }).auto.availability()).toBe('unsafe-location');
   });
 });

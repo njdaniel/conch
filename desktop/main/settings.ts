@@ -10,7 +10,7 @@
 // joins voice or resumes capture: a start at login opens the app as any launch
 // does.
 import { randomBytes } from 'node:crypto';
-import { chmod, lstat, mkdir, open, readFile, rename, rm } from 'node:fs/promises';
+import { lstat, mkdir, open, readFile, rename, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 
 import type { DesktopSettingsView, SettingsChange, SettingsResult } from '../../web/src/platform/desktop/bridge.ts';
@@ -104,7 +104,6 @@ export function createSettingsFiles(root: string): SettingsFiles {
         await rm(tmp, { force: true });
         throw err;
       }
-      await chmod(file, FILE_MODE);
     },
   };
 }
@@ -117,7 +116,7 @@ export function memorySettingsFiles(): SettingsFiles {
 
 export interface SettingsDeps {
   readonly files: SettingsFiles;
-  readonly autostart: Pick<Autostart, 'enable' | 'disable' | 'available'>;
+  readonly autostart: Pick<Autostart, 'enable' | 'disable' | 'availability'>;
   // Whether a tray is up and working. #1589 (D5-03) supplies the real answer;
   // until then it is false and closing always quits.
   readonly trayWorking: () => boolean;
@@ -154,8 +153,9 @@ export class SettingsService {
     return closeAction({ destroying, closeToTray: this.#current.closeToTray, trayWorking: this.#deps.trayWorking() });
   }
 
-  view(): DesktopSettingsView {
-    return { ...this.#current, trayWorking: this.#deps.trayWorking(), launchAvailable: this.#deps.autostart.available() };
+  async view(): Promise<DesktopSettingsView> {
+    const why = await this.#deps.autostart.availability();
+    return { ...this.#current, trayWorking: this.#deps.trayWorking(), launchAvailable: why === null, ...(why === null ? {} : { launchUnavailable: why }) };
   }
 
   set(change: SettingsChange): Promise<SettingsResult> {
@@ -184,6 +184,6 @@ export class SettingsService {
       return { ok: false, reason: 'failed' };
     }
     this.#current = next;
-    return { ok: true, view: this.view() };
+    return { ok: true, view: await this.view() };
   }
 }

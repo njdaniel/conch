@@ -4,7 +4,7 @@ import { join } from 'node:path';
 
 import { afterEach, describe, expect, it } from 'vitest';
 
-import type { AutostartResult } from '../../main/autostart.ts';
+import { entryText, type AutostartResult } from '../../main/autostart.ts';
 import { closeAction, createSettingsFiles, DEFAULT_SETTINGS, parseSettings, SettingsService, type SettingsFiles } from '../../main/settings.ts';
 
 const dirs: string[] = [];
@@ -35,7 +35,7 @@ describe('the close rule', () => {
     await service.set({ closeToTray: true });
     expect(service.current.closeToTray).toBe(true);
     expect(service.closeAction(false)).toBe('quit');
-    expect(service.view().trayWorking).toBe(false);
+    expect((await service.view()).trayWorking).toBe(false);
   });
 
   it('keeps running when the person chose it and a fake tray works', async () => {
@@ -161,9 +161,10 @@ describe('opening at login starts nothing', () => {
     expect(text).not.toMatch(/\bsupervisor\.(start|join)\b/);
   });
 
-  it('the autostart entry carries no argument', () => {
-    const text = readFileSync(join(__dirname, '../../main/autostart.ts'), 'utf8');
-    expect(text).not.toMatch(/--/);
+  it('the autostart entry has exactly one Exec line, the quoted path alone', () => {
+    const exec = (entryText('/opt/My App/conch') ?? '').split('\n').filter((line) => line.startsWith('Exec='));
+    expect(exec).toHaveLength(1);
+    expect(exec[0]).toMatch(/^Exec="[^"\n]*"$/);
   });
 });
 
@@ -191,7 +192,7 @@ function fakeAutostart(results: { enable?: AutostartResult; disable?: AutostartR
   const ok: AutostartResult = { ok: true };
   return {
     calls,
-    available: () => true,
+    availability: () => Promise.resolve(null),
     enable: () => {
       calls.push('enable');
       return Promise.resolve(results.enable ?? ok);

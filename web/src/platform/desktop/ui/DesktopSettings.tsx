@@ -98,7 +98,7 @@ export function DesktopSettings() {
       </label>
       {view.launchAvailable ? null : (
         <p id={`${id}-launch`} className="desktop-settings-note">
-          {settingsText.launchUnavailable}
+          {view.launchUnavailable === 'unsafe-location' ? settingsText.launchUnsafe : settingsText.launchUnavailable}
         </p>
       )}
       {line === '' ? null : <p role="alert">{line}</p>}

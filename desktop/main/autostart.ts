@@ -7,12 +7,19 @@
 // Electron's app.setLoginItemSettings is documented for macOS and Windows
 // only, so main writes the standard XDG autostart entry itself. Rules:
 //   - only a packaged build writes it; an unpackaged run refuses and says why;
+//   - the executable must sit where only the user or the system can change it:
+//     its real path is a regular file and no ancestor is writable by group or
+//     others or owned by someone else than root or the user (a `dir` build can
+//     be unpacked anywhere, /tmp included, and a path another user can
+//     recreate after a reboot would run as the user at login). Unlike the data
+//     root's rule (instance.ts) there is no sticky-bit allowance: sticky does
+//     not stop the directory going away;
 //   - Exec= is the executable's path alone, with no argument: a start at login
 //     opens the app as any launch does, text first, no helper, no voice;
 //   - turning it off removes only a file that carries the marker, and a file
 //     Conch did not write is never overwritten or removed.
 import { randomBytes } from 'node:crypto';
-import { lstat, mkdir, open, readFile, rename, rm } from 'node:fs/promises';
+import { lstat, mkdir, open, readFile, realpath, rename, rm, stat } from 'node:fs/promises';
 import { dirname, isAbsolute, join } from 'node:path';
 
 // The app id of desktop/build/electron-builder.config.json.
@@ -21,7 +28,7 @@ export const MARKER_KEY = 'X-Conch-Autostart';
 const MARKER_LINE = `${MARKER_KEY}=true`;
 const MAX_BYTES = 16 * 1024;
 
-export type AutostartRefusal = 'unpackaged' | 'foreign-file' | 'failed';
+export type AutostartRefusal = 'unpackaged' | 'unsafe-location' | 'foreign-file' | 'failed';
 export type AutostartResult = { readonly ok: true } | { readonly ok: false; readonly reason: AutostartRefusal };
 
 export interface AutostartDeps {
@@ -30,6 +37,8 @@ export interface AutostartDeps {
   readonly execPath: string;
   readonly env: Readonly<Record<string, string | undefined>>;
   readonly home: string;
+  // Test seam, see trustedTarget.
+  readonly trustedAbove?: string;
   readonly log: (line: string) => void;
 }
 
@@ -66,6 +75,35 @@ function isCode(err: unknown, code: string): boolean {
   return typeof err === 'object' && err !== null && (err as { code?: unknown }).code === code;
 }
 
+// trustedTarget: the real path of the executable, when it is a regular file
+// that only root or the current user owns and can write, and every ancestor is
+// a directory with the same rule; null otherwise. The entry names this real
+// path, never a symlink to it: a link in a directory others can change could be
+// swapped after the check.
+//
+// above is a test seam: ancestors from that real directory upward are not
+// judged (a test tree lives under a sticky, world-writable /tmp). Production
+// never passes it.
+export async function trustedTarget(execPath: string, above?: string): Promise<string | null> {
+  try {
+    const real = await realpath(execPath);
+    if (execValue(real) === null) return null;
+    const uid = typeof process.getuid === 'function' ? process.getuid() : null;
+    const owned = (st: { mode: number; uid: number }): boolean => (st.mode & 0o022) === 0 && (st.uid === 0 || st.uid === uid);
+    const file = await stat(real);
+    if (!file.isFile() || !owned(file)) return null;
+    const stopAt = above === undefined ? undefined : await realpath(above);
+    for (let dir = dirname(real); dir !== stopAt; dir = dirname(dir)) {
+      const st = await stat(dir);
+      if (!st.isDirectory() || !owned(st)) return null;
+      if (dirname(dir) === dir) break;
+    }
+    return real;
+  } catch {
+    return null;
+  }
+}
+
 type Existing = 'absent' | 'ours' | 'foreign';
 
 export class Autostart {
@@ -77,9 +115,11 @@ export class Autostart {
     this.#file = autostartPath(deps.env, deps.home);
   }
 
-  // Whether this build may write the entry at all.
-  available(): boolean {
-    return this.#deps.packaged && process.platform === 'linux' && execValue(this.#deps.execPath) !== null;
+  // Why this build may not write the entry, or null when it may.
+  async availability(): Promise<'unpackaged' | 'unsafe-location' | null> {
+    if (!this.#deps.packaged) return 'unpackaged';
+    if (process.platform !== 'linux' || execValue(this.#deps.execPath) === null) return 'unsafe-location';
+    return (await trustedTarget(this.#deps.execPath, this.#deps.trustedAbove)) === null ? 'unsafe-location' : null;
   }
 
   async #existing(): Promise<Existing> {
@@ -94,12 +134,19 @@ export class Autostart {
   }
 
   async enable(): Promise<AutostartResult> {
-    if (!this.#deps.packaged) {
+    const why = await this.availability();
+    if (why === 'unpackaged') {
       this.#deps.log('conch-desktop: launch at login is only for an installed build; an unpackaged run does not write an autostart entry');
       return { ok: false, reason: 'unpackaged' };
     }
-    const text = entryText(this.#deps.execPath);
-    if (text === null || !this.available()) return { ok: false, reason: 'failed' };
+    if (why !== null) {
+      this.#deps.log('conch-desktop: launch at login needs the app installed where only you or the system can change it; no autostart entry was written');
+      return { ok: false, reason: 'unsafe-location' };
+    }
+    // The real path, checked again here, so the entry names what was judged.
+    const real = await trustedTarget(this.#deps.execPath, this.#deps.trustedAbove);
+    const text = real === null ? null : entryText(real);
+    if (text === null) return { ok: false, reason: 'failed' };
     try {
       if ((await this.#existing()) === 'foreign') {
         this.#deps.log(`conch-desktop: ${this.#file} exists and was not written by Conch; it is left alone`);

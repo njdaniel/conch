@@ -456,6 +456,9 @@ export interface DesktopSettingsView {
   readonly trayWorking: boolean;
   // Whether this build may set launch at login (an installed build may).
   readonly launchAvailable: boolean;
+  // Why not, when it is not: an unpackaged run, or an app that sits where
+  // others could change it.
+  readonly launchUnavailable?: 'unpackaged' | 'unsafe-location';
 }
 
 export interface SettingsChange {
@@ -465,7 +468,7 @@ export interface SettingsChange {
 
 export type SettingsResult =
   | { readonly ok: true; readonly view: DesktopSettingsView }
-  | { readonly ok: false; readonly reason: 'unpackaged' | 'foreign-file' | 'failed' };
+  | { readonly ok: false; readonly reason: 'unpackaged' | 'unsafe-location' | 'foreign-file' | 'failed' };
 
 export interface DesktopSettingsBridge {
   settings(): Promise<DesktopSettingsView>;

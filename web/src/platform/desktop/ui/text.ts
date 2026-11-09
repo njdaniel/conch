@@ -73,11 +73,13 @@ export const settingsText = {
   noTray: 'No tray is available on this desktop',
   launch: 'Open Conch when I log in',
   launchUnavailable: 'Only an installed copy of Conch can open when you log in.',
+  launchUnsafe: 'Launch at login needs the app installed in a place only you or the system can change.',
   failed: 'The desktop app could not change that.',
 } as const;
 
-export const settingsRefusalLines: Readonly<Record<'unpackaged' | 'foreign-file' | 'failed', string>> = {
+export const settingsRefusalLines: Readonly<Record<'unpackaged' | 'unsafe-location' | 'foreign-file' | 'failed', string>> = {
   unpackaged: 'Only an installed copy of Conch can open when you log in.',
+  'unsafe-location': 'Launch at login needs the app installed in a place only you or the system can change.',
   'foreign-file': 'Another program already has a startup entry with Conch’s name, so it was left alone.',
   failed: 'The desktop app could not change that.',
 };
