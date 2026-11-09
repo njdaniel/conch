@@ -30,6 +30,11 @@ sign-off act; `release.yml` turns a plain `v*` tag into a draft GitHub release, 
 2. Update `CHANGELOG.md` (Keep a Changelog format; create the file on the
    first release): move Unreleased into the new version section, dated. Land
    this via a normal PR before tagging — the tag points at a clean `main`.
+   **After the upgrade, add the new tag to `desktop/build/compat.json`** once
+   the desktop app has been run against it (it lists the server releases the
+   app is tested with, by exact version). Unlisted, the app refuses to sign in
+   to that server with "server version not tested". The list sat at alpha.9
+   until alpha.18 because no step said so.
 3. Tag: annotated, on the reviewed `main` commit —
    `git tag -a vX.Y.Z -m "..."` — pushed **by Nick**, or by the session only
    under his explicit, recorded authorization for this release.
