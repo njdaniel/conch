@@ -456,15 +456,18 @@ export const SPECS: Readonly<Record<InvokedFunction, Spec>> = {
     gesture: true,
   },
   // Notifications are activation-owned and carry no action or activation data.
+  // The byte bounds fit the largest request parseNotify accepts, every
+  // character quoted as JSON escapes it (a tag of TAG_MAX, title 128, body 200,
+  // a channel at its byte bound), so a size check never refuses a valid one.
   notify: {
     limit: 30,
-    maxBytes: 1024,
+    maxBytes: 4096,
     parse: parseNotify,
     run: ({ notifications, profiles, document }, [request]) => notifications.show(profiles.active, document, request as NotifyRequest),
   },
   notifyClose: {
     limit: 600,
-    maxBytes: 256,
+    maxBytes: 2048,
     parse: parseNotifyClose,
     run: ({ notifications, profiles, document }, [request]) => notifications.close(profiles.active, document, (request as { tag: string }).tag),
   },

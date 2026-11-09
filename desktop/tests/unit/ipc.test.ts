@@ -6,9 +6,10 @@ import type { Files } from '../../main/files.ts';
 import type { Service } from '../../main/api/service.ts';
 import { DocumentGate } from '../../main/document.ts';
 import { checkCaller, Ipc, parseRequest, plain, type NotificationsApi, type ProfilesApi, type VoiceApi, type ContentsLike, type FrameLike, type InvokeEvent } from '../../main/ipc.ts';
-import { INVOKED_FUNCTIONS, VOICE_EVENTS, VOICE_FUNCTIONS } from '../../shared/bridge-names.ts';
+import { INVOKED_FUNCTIONS, TAG_MAX, VOICE_EVENTS, VOICE_FUNCTIONS } from '../../shared/bridge-names.ts';
 import { deliverVoice } from '../../main/voice/events.ts';
 import type { NativeVoiceView } from '../../../web/src/platform/desktop/bridge.ts';
+import { VOICE_CONTROL_MAX_CHANNEL_BYTES } from '../../../web/src/schema/generated.ts';
 
 function frame(token = 'frame-1', over: Partial<FrameLike> = {}): FrameLike {
   return { frameToken: token, parent: null, detached: false, url: 'conch-app://ui/', ...over };
@@ -428,6 +429,14 @@ describe('desktop notifications (issue #1590)', () => {
       ['notifications.show', [f.activation, f.gate.generation, request]],
       ['notifications.close', [f.activation, f.gate.generation, request.tag]],
     ]);
+  });
+
+  it('accepts the largest valid request, every character escaped, and closes it by its tag', async () => {
+    const f = fixture();
+    const big = { tag: '"'.repeat(TAG_MAX), title: '"'.repeat(128), body: '"'.repeat(200), channel: '"'.repeat(VOICE_CONTROL_MAX_CHANNEL_BYTES) };
+    expect(await f.ipc.invoke(f.event(), 'notify', [big])).toEqual({ ok: true, value: true });
+    expect(await f.ipc.invoke(f.event(), 'notifyClose', [{ tag: big.tag }])).toEqual({ ok: true, value: true });
+    expect(f.calls.map(([name]) => name)).toEqual(['notifications.show', 'notifications.close']);
   });
 
   it.each([
