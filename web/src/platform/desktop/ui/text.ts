@@ -63,3 +63,21 @@ export const overrideLine = 'Development build: servers that are not on the test
 
 export const incompatibleLine = (family: string, server: string | null, desktop: string): string =>
   `This server’s ${family} answers are not what this app (${desktop}) expects, so its version (${server ?? 'unknown'}) is incompatible with it. This is not a network problem; use a server version that has been tested with this app.`;
+
+// The desktop app's own settings page (issue #1587).
+export const settingsText = {
+  heading: 'Desktop app',
+  closeLegend: 'When I close the window',
+  closeQuit: 'Quit Conch',
+  closeTray: 'Keep running in the tray',
+  noTray: 'No tray is available on this desktop',
+  launch: 'Open Conch when I log in',
+  launchUnavailable: 'Only an installed copy of Conch can open when you log in.',
+  failed: 'The desktop app could not change that.',
+} as const;
+
+export const settingsRefusalLines: Readonly<Record<'unpackaged' | 'foreign-file' | 'failed', string>> = {
+  unpackaged: 'Only an installed copy of Conch can open when you log in.',
+  'foreign-file': 'Another program already has a startup entry with Conch’s name, so it was left alone.',
+  failed: 'The desktop app could not change that.',
+};

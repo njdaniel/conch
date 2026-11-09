@@ -303,7 +303,7 @@ export interface ConchDesktopBridge {
 declare global {
   interface Window {
     // Present only in the desktop shell's renderer.
-    readonly conchDesktop?: ConchDesktopBridge & Partial<DesktopVoiceBridge>;
+    readonly conchDesktop?: ConchDesktopBridge & Partial<DesktopVoiceBridge> & Partial<DesktopSettingsBridge>;
   }
 }
 
@@ -443,6 +443,36 @@ export interface DesktopVoiceBridge {
   onVoiceState(listener: (view: NativeVoiceView) => void): Unsubscribe;
 }
 
-// The object the preload exposes: the bridge and the voice family. Still no
-// press, release, gate or transmit function in either.
-export type ExposedDesktopBridge = ConchDesktopBridge & DesktopVoiceBridge;
+// The app's own settings (issue #1587; linux-desktop.md §9). App-wide, kept by
+// main in <userData>/settings.json, not per account. In-process TypeScript, not
+// a wire shape.
+export interface DesktopSettingsView {
+  // Closing the window keeps the app running, in the tray. Takes effect only
+  // while trayWorking.
+  readonly closeToTray: boolean;
+  // Open the app when the person logs in.
+  readonly launchAtLogin: boolean;
+  // Whether a working tray exists right now.
+  readonly trayWorking: boolean;
+  // Whether this build may set launch at login (an installed build may).
+  readonly launchAvailable: boolean;
+}
+
+export interface SettingsChange {
+  readonly closeToTray?: boolean;
+  readonly launchAtLogin?: boolean;
+}
+
+export type SettingsResult =
+  | { readonly ok: true; readonly view: DesktopSettingsView }
+  | { readonly ok: false; readonly reason: 'unpackaged' | 'foreign-file' | 'failed' };
+
+export interface DesktopSettingsBridge {
+  settings(): Promise<DesktopSettingsView>;
+  // The person's act: main refuses it without a recent gesture in the window.
+  settingsSet(change: SettingsChange): Promise<SettingsResult>;
+}
+
+// The object the preload exposes: the bridge, the voice family and the
+// settings. Still no press, release, gate or transmit function in any.
+export type ExposedDesktopBridge = ConchDesktopBridge & DesktopVoiceBridge & DesktopSettingsBridge;

@@ -4,7 +4,7 @@ import type { Feeds } from '../../main/api/feeds.ts';
 import type { Files } from '../../main/files.ts';
 import type { Service } from '../../main/api/service.ts';
 import { DocumentGate } from '../../main/document.ts';
-import { checkCaller, Ipc, parseRequest, plain, type ProfilesApi, type VoiceApi, type ContentsLike, type FrameLike, type InvokeEvent } from '../../main/ipc.ts';
+import { checkCaller, Ipc, parseRequest, plain, type ProfilesApi, type VoiceApi, type SettingsApi, type ContentsLike, type FrameLike, type InvokeEvent } from '../../main/ipc.ts';
 import { INVOKED_FUNCTIONS, VOICE_EVENTS, VOICE_FUNCTIONS } from '../../shared/bridge-names.ts';
 import { deliverVoice } from '../../main/voice/events.ts';
 import type { NativeVoiceView } from '../../../web/src/platform/desktop/bridge.ts';
@@ -47,8 +47,9 @@ function fixture(): Fixture {
   const input = { recent: false };
   const files = new Proxy({} as Files, { get: (_t, name: string) => record(`files.${name}`) });
   const voice = new Proxy({} as VoiceApi, { get: (_t, name: string) => record(`voice.${name}`) });
+  const settings = new Proxy({} as SettingsApi, { get: (_t, name: string) => record(`settings.${name}`) });
   const gestures = { take: () => (input.recent ? ('pointer' as const) : null) };
-  const ipc = new Ipc({ owned: () => contents, gate, service, feeds, files, gestures, profiles, voice, now: () => clock.now, log: (line) => logs.push(line) });
+  const ipc = new Ipc({ owned: () => contents, gate, service, feeds, files, gestures, profiles, voice, settings, now: () => clock.now, log: (line) => logs.push(line) });
   return { ipc, gate, contents, main, calls, logs, clock, permit, input, event: (over = {}) => ({ sender: contents, senderFrame: main, ...over }) };
 }
 
@@ -90,7 +91,7 @@ describe('every invocation is checked before anything else', () => {
       files: {} as Files,
       gestures: { take: () => null },
       profiles: {} as ProfilesApi,
-      voice: {} as VoiceApi,
+      voice: {} as VoiceApi, settings: {} as SettingsApi,
       now: () => 0,
       log: () => undefined,
     });
@@ -310,7 +311,7 @@ describe('arguments', () => {
       files: {} as Files,
       gestures: { take: () => null },
       profiles: { add: () => { throw new Error('boom secret-arg'); } } as unknown as ProfilesApi,
-      voice: {} as VoiceApi,
+      voice: {} as VoiceApi, settings: {} as SettingsApi,
       now: () => 0,
       log: (line) => f.logs.push(line),
     });
@@ -387,7 +388,7 @@ describe('the credential-replacing writes (issue #1422)', () => {
       files: {} as Files,
       gestures: { take: () => null },
       profiles: { signInPermitted: () => true, signedIn: (account: unknown) => { bound.push(account); return Promise.resolve(true); } } as unknown as ProfilesApi,
-      voice: {} as VoiceApi,
+      voice: {} as VoiceApi, settings: {} as SettingsApi,
       now: () => 0,
       log: () => undefined,
     });
@@ -646,7 +647,7 @@ describe('the voice family (issue #1374)', () => {
     const f = fixture();
     const asked: number[] = [];
     const ipc = new Ipc({
-      owned: () => f.contents, gate: f.gate, service: {} as Service, feeds: {} as Feeds, files: {} as Files, profiles: {} as ProfilesApi, voice: {} as VoiceApi,
+      owned: () => f.contents, gate: f.gate, service: {} as Service, feeds: {} as Feeds, files: {} as Files, profiles: {} as ProfilesApi, voice: {} as VoiceApi, settings: {} as SettingsApi,
       gestures: { take: (_c, within) => { asked.push(within); return 'pointer'; } }, now: () => 0, log: () => undefined,
     });
     await ipc.invoke(f.event(), 'voiceSetTalkMode', ['bogus']);
@@ -681,7 +682,7 @@ describe('the voice family (issue #1374)', () => {
     f.input.recent = true;
     const ipc = new Ipc({
       owned: () => f.contents, gate: f.gate, service: {} as Service, feeds: {} as Feeds, files: {} as Files, profiles: {} as ProfilesApi,
-      voice: { join: () => { throw new Error('boom secret-channel'); } } as unknown as VoiceApi,
+      voice: { join: () => { throw new Error('boom secret-channel'); } } as unknown as VoiceApi, settings: {} as SettingsApi,
       gestures: { take: () => 'pointer' }, now: () => 0, log: (line) => f.logs.push(line),
     });
     expect(await ipc.invoke(f.event(), 'voiceJoin', [{ ...join, channel: 'secret-channel' }])).toEqual({ ok: false, kind: 'refused' });
@@ -735,5 +736,32 @@ describe('voice events (issue #1374)', () => {
     const gone = target(true, false);
     deliverVoice(gone.target, view);
     expect([uncommitted.sent, ended.sent, gone.sent]).toEqual([[], [], []]);
+  });
+});
+
+describe('the settings family (issue #1587)', () => {
+  it('reads without a gesture and passes a change on only after one', async () => {
+    const f = fixture();
+    expect((await f.ipc.invoke(f.event(), 'settings', [])).ok).toBe(true);
+    expect(await f.ipc.invoke(f.event(), 'settingsSet', [{ launchAtLogin: true }])).toEqual({ ok: false, kind: 'refused' });
+    expect(f.calls.map(([name]) => name)).toEqual(['settings.view']);
+    f.input.recent = true;
+    expect(await f.ipc.invoke(f.event(), 'settingsSet', [{ closeToTray: false, launchAtLogin: true }])).toEqual({ ok: true, value: { ran: 'settings.set' } });
+    expect(f.calls[1]).toEqual(['settings.set', [{ closeToTray: false, launchAtLogin: true }]]);
+  });
+
+  it.each([
+    ['no change', [{}]],
+    ['no argument', []],
+    ['an unknown key', [{ launchAtLogin: true, theme: 'dark' }]],
+    ['a non-boolean', [{ launchAtLogin: 'yes' }]],
+    ['a null', [{ closeToTray: null }]],
+    ['an array', [[true]]],
+    ['two arguments', [{ launchAtLogin: true }, {}]],
+  ])('refuses %s as a shape, even with a gesture', async (_name, args) => {
+    const f = fixture();
+    f.input.recent = true;
+    expect(await f.ipc.invoke(f.event(), 'settingsSet', args)).toEqual({ ok: false, kind: 'refused' });
+    expect(f.calls).toEqual([]);
   });
 });

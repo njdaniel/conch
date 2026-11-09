@@ -12,7 +12,7 @@
 // name a channel, a URL, a header or a method.
 import type { IpcMain } from 'electron';
 
-import type { BridgeReply, BridgeRequest, FeedRequest, SignInOutcome, VoiceDeviceKey } from '../../web/src/platform/desktop/bridge.ts';
+import type { BridgeReply, BridgeRequest, FeedRequest, SettingsChange, SignInOutcome, VoiceDeviceKey } from '../../web/src/platform/desktop/bridge.ts';
 import { VOICE_DEVICES_MAX_NAME_BYTES, voiceControlTalkMode, type VoiceControlTalkMode } from '../../web/src/schema/generated.ts';
 import { isPageSaveKey, keyCodeText, saveValueFits } from './voice/oneshot.ts';
 import { validChannel, validDeviceName } from './voice/protocol.ts';
@@ -29,6 +29,7 @@ import { LINK_GESTURE_MS, type Gestures } from './gestures.ts';
 import type { DocumentGate } from './document.ts';
 import { HOST, SCHEME } from './scheme.ts';
 import type { VoiceService } from './voice/service.ts';
+import type { SettingsService } from './settings.ts';
 
 export interface FrameLike {
   readonly frameToken: string;
@@ -62,6 +63,8 @@ export interface IpcDeps {
   readonly profiles: ProfilesApi;
   // Native voice (issue #1374): main's one owner of the helper.
   readonly voice: VoiceApi;
+  // The app's own settings (issue #1587).
+  readonly settings: SettingsApi;
   readonly now: () => number;
   readonly log: (line: string) => void;
 }
@@ -72,6 +75,8 @@ export type ProfilesApi = Pick<
 >;
 
 export type VoiceApi = Pick<VoiceService, 'state' | 'join' | 'leave' | 'retry' | 'setMute' | 'setDeafen' | 'setDevices' | 'setTalkMode' | 'devices' | 'saveDevice' | 'keyDevices' | 'saveTalkBinding'>;
+
+export type SettingsApi = Pick<SettingsService, 'view' | 'set'>;
 
 // What a sign-in step answers when the server's release is not one the app may
 // sign in to (issue #946): nothing was sent.
@@ -159,6 +164,7 @@ interface Handlers {
   readonly files: IpcDeps['files'];
   readonly profiles: ProfilesApi;
   readonly voice: VoiceApi;
+  readonly settings: SettingsApi;
   readonly document: number;
 }
 
@@ -243,6 +249,17 @@ const hasExactKeys = (value: Record<string, unknown>, keys: readonly string[]): 
   const own = Object.keys(value);
   return own.length === keys.length && keys.every((key) => own.includes(key));
 };
+
+// A settings change is a non-empty object of known keys with boolean values.
+function parseSettingsChange(args: readonly unknown[]): readonly unknown[] | null {
+  const [change] = args;
+  if (args.length !== 1 || !isRecord(change)) return null;
+  const keys = Object.keys(change);
+  if (keys.length === 0 || !keys.every((key) => key === 'closeToTray' || key === 'launchAtLogin')) return null;
+  const { closeToTray, launchAtLogin } = change;
+  if ((closeToTray !== undefined && typeof closeToTray !== 'boolean') || (launchAtLogin !== undefined && typeof launchAtLogin !== 'boolean')) return null;
+  return [{ ...(closeToTray === undefined ? {} : { closeToTray }), ...(launchAtLogin === undefined ? {} : { launchAtLogin }) }];
+}
 
 const REPLACE_STEPS: readonly ReplaceStep[] = ['changePassword', 'setPassword', 'convertGuest', 'reauth'];
 
@@ -480,6 +497,15 @@ export const SPECS: Readonly<Record<InvokedFunction, Spec>> = {
     run: ({ voice }, [request]) => voice.saveTalkBinding(request as { deviceId: string; code: number }),
     gesture: true,
   },
+  // The app's own settings (issue #1587). A change is the person's act alone.
+  settings: { limit: 120, maxBytes: 0, parse: none, run: ({ settings }) => settings.view() },
+  settingsSet: {
+    limit: 30,
+    maxBytes: 128,
+    parse: parseSettingsChange,
+    run: ({ settings }, [change]) => settings.set(change as SettingsChange),
+    gesture: true,
+  },
   feedUnsubscribe: { limit: 600, maxBytes: 32, parse: feedId, run: ({ feeds, document }, [id]) => feeds.unsubscribe(document, id as number) },
 };
 
@@ -523,6 +549,7 @@ export class Ipc {
         files: this.#deps.files,
         profiles: this.#deps.profiles,
         voice: this.#deps.voice,
+        settings: this.#deps.settings,
         document: this.#deps.gate.generation,
       };
       return { ok: true, value: await spec.run(to, parsed) };

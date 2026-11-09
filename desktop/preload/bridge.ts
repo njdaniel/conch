@@ -232,6 +232,9 @@ export function createBridge(invoke: Invoke, listen: Listen, listenVoice: Listen
     voiceSaveDevice: call('voiceSaveDevice'),
     voiceKeyDevices: call('voiceKeyDevices'),
     voiceSaveTalkBinding: call('voiceSaveTalkBinding'),
+    // The app's own settings (issue #1587).
+    settings: call('settings'),
+    settingsSet: call('settingsSet'),
     onVoiceState,
   });
 }
