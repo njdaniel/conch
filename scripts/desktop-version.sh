@@ -27,7 +27,9 @@ fail() {
 }
 
 num='(0|[1-9][0-9]*)'
-ident='[0-9A-Za-z-]+'
+# The same grammar as the app's RELEASE (desktop/main/compat.ts): no hyphen
+# inside a prerelease identifier, so a tag the script accepts the app accepts.
+ident='[0-9A-Za-z]+'
 tag_re="^v$num\\.$num\\.$num(-$ident(\\.$ident)*)?\$"
 
 # check_tag <tag>: succeeds only for a well-formed release tag.
