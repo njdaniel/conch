@@ -36,6 +36,10 @@ export const BRIDGE_FUNCTIONS = [
 export const NOTIFY_FUNCTIONS = ['notify', 'notifyClose'] as const satisfies readonly (keyof ConchDesktopBridge)[];
 export const NOTIFICATION_SUPPORT = 'notificationSupported' as const;
 export const NOTIFICATION_EVENTS = 'conch:notification';
+// The longest notification tag. The page builds it as origin:account:messageId
+// (web/src/useNotifications.ts); an origin can be 8 + 253 + 6 characters
+// (scheme, DNS name, port), so the earlier 128 would refuse a long origin.
+export const TAG_MAX = 512;
 
 export type NotifyFunction = (typeof NOTIFY_FUNCTIONS)[number];
 // Main's tag-only click message to the notification's owning document.

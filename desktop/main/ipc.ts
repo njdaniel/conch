@@ -10,6 +10,11 @@
 // order is fixed: caller, name, rate, size and shape of the arguments, then
 // the function. Arguments are plain data checked here; the renderer cannot
 // name a channel, a URL, a header or a method.
+//
+// One channel sits outside that registry: the synchronous `conch:notificationSupported`
+// (registerNotificationSupport), which Electron's ipcMain.on answers through
+// event.returnValue. notificationSupported() runs the same caller, rate and
+// shape checks and returns an Envelope too.
 import type { IpcMain } from 'electron';
 
 import type { BridgeReply, BridgeRequest, FeedRequest, NotifyRequest, SignInOutcome, VoiceDeviceKey } from '../../web/src/platform/desktop/bridge.ts';
@@ -17,7 +22,7 @@ import { VOICE_DEVICES_MAX_NAME_BYTES, voiceControlTalkMode, type VoiceControlTa
 import { isPageSaveKey, keyCodeText, saveValueFits } from './voice/oneshot.ts';
 import { validChannel, validDeviceName } from './voice/protocol.ts';
 import { operations } from '../../web/src/platform/operations.ts';
-import { channelOf, INVOKED_FUNCTIONS, NOTIFICATION_SUPPORT, type Envelope, type InvokedFunction } from '../shared/bridge-names.ts';
+import { channelOf, INVOKED_FUNCTIONS, NOTIFICATION_SUPPORT, TAG_MAX, type Envelope, type InvokedFunction } from '../shared/bridge-names.ts';
 import { isProfileId } from './profiles/ids.ts';
 import { MISMATCH, type ProfilesService } from './profiles/service.ts';
 import { parseFeedRequest, type Feeds } from './api/feeds.ts';
@@ -278,7 +283,7 @@ function parseNotify(args: readonly unknown[]): readonly unknown[] | null {
   const [request] = args;
   if (args.length !== 1 || !isRecord(request) || !hasExactKeys(request, ['tag', 'title', 'body', 'channel'])) return null;
   const { tag, title, body, channel } = request;
-  if (typeof tag !== 'string' || tag.length === 0 || tag.length > 128) return null;
+  if (typeof tag !== 'string' || tag.length === 0 || tag.length > TAG_MAX) return null;
   if (typeof title !== 'string' || title.length > 128 || typeof body !== 'string' || body.length > 200 || !isChannel(channel)) return null;
   return [{ tag, title, body, channel }];
 }
@@ -286,7 +291,7 @@ function parseNotify(args: readonly unknown[]): readonly unknown[] | null {
 function parseNotifyClose(args: readonly unknown[]): readonly unknown[] | null {
   const [request] = args;
   if (args.length !== 1 || !isRecord(request) || !hasExactKeys(request, ['tag'])) return null;
-  return typeof request['tag'] === 'string' && request['tag'].length > 0 && request['tag'].length <= 128 ? [request] : null;
+  return typeof request['tag'] === 'string' && request['tag'].length > 0 && request['tag'].length <= TAG_MAX ? [request] : null;
 }
 
 // A save is exactly a key `config set` takes from the page and a value that

@@ -88,8 +88,6 @@ export function useNotifications({
   const previousLive = useRef(false);
   const latestOpen = useRef(onOpen);
   latestOpen.current = onOpen;
-  const latestChannels = useRef(channels);
-  latestChannels.current = channels;
   const skipWrite = useRef(true);
 
   const close = useCallback((id: string) => {
@@ -183,8 +181,7 @@ export function useNotifications({
         window.focus();
         close(id);
         setAlerts((previous) => previous.filter((candidate) => candidate.id !== id));
-        const current = latestChannels.current.find((candidate) => candidate.id === channel.id);
-        if (current !== undefined) latestOpen.current(current.name);
+        latestOpen.current(channel.name);
       };
     }
   }, [signedIn, eventsLive, principal, preferences, browserPermission, channels, origin, account, close]);

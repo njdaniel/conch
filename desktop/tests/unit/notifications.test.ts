@@ -116,15 +116,17 @@ describe('desktop notifications (issue #1590)', () => {
     const h = harness();
     h.notifications.show(h.activation, h.gate.generation, h.request);
     h.gate.begin();
+    // The ended document's notification is closed by main (issue #1590), so a
+    // late click on it is forgotten rather than routed.
+    expect(FakeNotification.all[0]?.closed).toBe(true);
     FakeNotification.all[0]?.emit('click');
-    expect(h.window.show).toHaveBeenCalledOnce();
     expect(h.sent).toEqual([]);
 
     h.gate.commit({ frameToken: 'main' });
     h.notifications.show(h.activation, h.gate.generation, { ...h.request, tag: 'old-profile' });
     h.setCurrent({ activation: h.other, gate: h.gate });
     FakeNotification.all[1]?.emit('click');
-    expect(h.window.show).toHaveBeenCalledTimes(2);
+    expect(h.window.show).toHaveBeenCalledOnce();
     expect(h.sent).toEqual([]);
   });
 
@@ -141,5 +143,68 @@ describe('desktop notifications (issue #1590)', () => {
     expect(FakeNotification.all[1]?.closed).toBe(true);
     expect(FakeNotification.all[2]?.closed).toBe(false);
     expect(h.notifications.close(h.activation, document, h.request.tag)).toBe(false);
+  });
+
+  it('leaves no raw markup character in the title or body that reaches libnotify', () => {
+    const h = harness();
+    h.notifications.show(h.activation, h.gate.generation, { ...h.request, title: '<b>#a&b</b>', body: '<a href="x">y</a> & <img src="z">' });
+    const { title, body } = FakeNotification.all[0]?.options ?? { title: '', body: '' };
+    for (const text of [title, body]) expect(text).not.toMatch(/[<>&]/);
+    expect(body).toContain('href="x"');
+  });
+
+  it('shows a fixed title as well as a fixed body while locked', () => {
+    const h = harness();
+    h.notifications.setLocked(true);
+    h.notifications.show(h.activation, h.gate.generation, h.request);
+    expect(FakeNotification.all[0]?.options.title).toBe('Conch');
+    expect(JSON.stringify(FakeNotification.all[0]?.options)).not.toContain('general');
+  });
+
+  it('closes a notification shown after the media hook, once the helper phase ends teardown', () => {
+    const h = harness();
+    h.notifications.show(h.activation, h.gate.generation, h.request);
+    h.notifications.beginTeardown();
+    expect(FakeNotification.all[0]?.closed).toBe(true);
+    expect(h.notifications.show(h.activation, h.gate.generation, { ...h.request, tag: 'late' })).toBe(false);
+    expect(FakeNotification.all).toHaveLength(1);
+    h.notifications.endTeardown();
+    expect(h.notifications.show(h.activation, h.gate.generation, { ...h.request, tag: 'next' })).toBe(true);
+  });
+
+  it('endTeardown closes anything that got in after the media hook', () => {
+    const h = harness();
+    h.notifications.show(h.activation, h.gate.generation, h.request);
+    h.notifications.closeAll();
+    h.notifications.show(h.activation, h.gate.generation, { ...h.request, tag: 'slipped' });
+    h.notifications.endTeardown();
+    expect(FakeNotification.all.every((n) => n.closed)).toBe(true);
+  });
+
+  it('closes an activation\'s notifications from an ended document, keeping the current one', () => {
+    const h = harness();
+    h.notifications.show(h.activation, h.gate.generation, h.request);
+    h.gate.begin();
+    expect(FakeNotification.all[0]?.closed).toBe(true);
+    h.gate.commit({ frameToken: 'main' });
+    h.notifications.show(h.activation, h.gate.generation, { ...h.request, tag: 'fresh' });
+    expect(FakeNotification.all[1]?.closed).toBe(false);
+  });
+
+  it('forgets an entry once clicked, so a second click does nothing', () => {
+    const h = harness();
+    h.notifications.show(h.activation, h.gate.generation, h.request);
+    FakeNotification.all[0]?.emit('click');
+    FakeNotification.all[0]?.emit('click');
+    expect(h.sent).toHaveLength(1);
+  });
+
+  it('keeps at most 50 open, closing the oldest', () => {
+    const h = harness();
+    for (let i = 0; i < 52; i++) h.notifications.show(h.activation, h.gate.generation, { ...h.request, tag: `t${String(i)}` });
+    expect(FakeNotification.all.filter((n) => !n.closed)).toHaveLength(50);
+    expect(FakeNotification.all[0]?.closed).toBe(true);
+    expect(FakeNotification.all[1]?.closed).toBe(true);
+    expect(FakeNotification.all[2]?.closed).toBe(false);
   });
 });

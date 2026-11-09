@@ -1,3 +1,4 @@
+import type { IpcMainEvent } from 'electron';
 import { describe, expect, it } from 'vitest';
 
 import type { Feeds } from '../../main/api/feeds.ts';
@@ -196,11 +197,11 @@ describe('arguments', () => {
     ['notify', [{ tag: 't', title: 'title', body: 'body', channel: 'general', extra: true }]],
     ['notify', [{ tag: 't', title: 'x'.repeat(129), body: 'body', channel: 'general' }]],
     ['notify', [{ tag: 't', title: 'title', body: 'x'.repeat(201), channel: 'general' }]],
-    ['notify', [{ tag: 'x'.repeat(129), title: 'title', body: 'body', channel: 'general' }]],
+    ['notify', [{ tag: 'x'.repeat(513), title: 'title', body: 'body', channel: 'general' }]],
     ['notify', [{ tag: '', title: 'title', body: 'body', channel: 'general' }]],
     ['notify', [{ tag: 't', title: 'title', body: 'body', channel: '   ' }]],
     ['notifyClose', [{ tag: 't', body: 'must not cross' }]],
-    ['notifyClose', [{ tag: 'x'.repeat(129) }]],
+    ['notifyClose', [{ tag: 'x'.repeat(513) }]],
   ])('refuses a bad shape: %s %j', async (name, args) => {
     const f = fixture();
     expect(await f.ipc.invoke(f.event(), name, args)).toEqual({ ok: false, kind: 'refused' });
@@ -466,6 +467,22 @@ describe('the registry', () => {
     f.ipc.register({ handle: (channel) => void channels.push(channel) });
     expect(channels.sort()).toEqual(INVOKED_FUNCTIONS.map((n) => `conch:${n}`).sort());
     expect(channels).toHaveLength(INVOKED_FUNCTIONS.length);
+  });
+
+  it('accepts a notification tag for a long origin, up to 512 characters', async () => {
+    const f = fixture();
+    const tag = `https://${'a'.repeat(240)}.example:8443:7:123456`;
+    expect((await f.ipc.invoke(f.event(), 'notify', [{ tag, title: 't', body: 'b', channel: 'general' }])).ok).toBe(true);
+  });
+
+  it('registers exactly the synchronous support channel and answers it with an Envelope', () => {
+    const f = fixture();
+    const handlers = new Map<string, (event: IpcMainEvent, ...args: unknown[]) => void>();
+    f.ipc.registerNotificationSupport({ on: (channel, listener) => (handlers.set(channel, listener), undefined as never) });
+    expect([...handlers.keys()]).toEqual(['conch:notificationSupported']);
+    const holder: { returnValue: unknown } = Object.assign(f.event(), { returnValue: undefined });
+    handlers.get('conch:notificationSupported')?.(holder as unknown as IpcMainEvent);
+    expect(holder.returnValue).toEqual({ ok: true, value: true });
   });
 
   it('parses a request the way the table says', () => {

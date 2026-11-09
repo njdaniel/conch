@@ -278,25 +278,6 @@ describe('browser permission and cleanup', () => {
     expect(FakeNotification.all[0]?.closed).toHaveBeenCalledTimes(1);
   });
 
-  it('opens the current channel name after a rename when a native notification is clicked', async () => {
-    visibility('hidden');
-    const onOpen = vi.fn();
-    const { result, rerender } = renderHook((p: Props) => useNotifications(p), { initialProps: { ...props(), onOpen } });
-    act(() => {
-      result.current.setPolicy('all');
-    });
-    await act(async () => {
-      await result.current.enableNative();
-    });
-    rerender({ ...props(), onOpen, event: message(1) });
-    rerender({ ...props(), onOpen, channels: [{ id: 7, name: 'renamed', created_at: at }] });
-    const native = FakeNotification.all[0] as unknown as Notification;
-    act(() => {
-      native.onclick?.call(native, new MouseEvent('click'));
-    });
-    expect(onOpen).toHaveBeenCalledExactlyOnceWith('renamed');
-  });
-
   it('keeps the in-app fallback when permission is denied', async () => {
     visibility('hidden');
     FakeNotification.answer = 'denied';

@@ -207,8 +207,14 @@ export async function start(): Promise<void> {
       return activation === null ? null : { activation, gate: live.gate };
     },
   });
+  // Media first: close all and refuse new ones, as the old renderer lives on
+  // until its web contents are destroyed. The helper phase runs after that, so
+  // it closes anything that slipped in and accepts notifications again.
   teardownHooks.media('notifications', () => {
-    notifications.closeActivation(profiles.active);
+    notifications.beginTeardown();
+  });
+  teardownHooks.helper('notifications', () => {
+    notifications.endTeardown();
   });
 
   // Native voice (issue #1373): the one owner of the helper in this instance.

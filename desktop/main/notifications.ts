@@ -39,7 +39,7 @@ interface WindowLike {
 
 interface CurrentActivation {
   readonly activation: object;
-  readonly gate: Pick<DocumentGate, 'shows'>;
+  readonly gate: Pick<DocumentGate, 'shows' | 'onEnd'>;
 }
 
 // The native API and current window/activation, supplied by the app or fakes.
@@ -48,6 +48,25 @@ export interface NotificationsDeps {
   readonly icon: string;
   readonly window: () => WindowLike | null;
   readonly current: () => CurrentActivation | null;
+}
+
+// The most notifications main keeps open at once; past it the oldest closes.
+const MAX_ENTRIES = 50;
+
+// The fixed words of a locked notification: no channel, no message text.
+const LOCKED_TITLE = 'Conch';
+const LOCKED_BODY = 'New message';
+
+// Electron 44 hands title and body to libnotify unescaped, and a freedesktop
+// server that advertises body-markup, body-hyperlinks or body-images renders
+// <b>, <a href> and <img src> in the body (the daemon then opens a link itself,
+// past main's link checks). Main cannot read the server's capabilities, so it
+// neutralises unconditionally. Entities (&lt; &amp;) would show literally on a
+// server without body-markup, so the three markup characters become visible
+// look-alikes that no server parses: single angle quotation marks and the
+// fullwidth ampersand. Written as escapes so no source character is invisible.
+function plain(text: string): string {
+  return text.replaceAll('<', '\u2039').replaceAll('>', '\u203A').replaceAll('&', '\uFF06');
 }
 
 interface Entry {
@@ -61,7 +80,9 @@ interface Entry {
 export class Notifications {
   readonly #deps: NotificationsDeps;
   readonly #entries = new Map<NotificationLike, Entry>();
+  readonly #watched = new WeakSet<object>();
   #locked = false;
+  #tearingDown = false;
 
   constructor(deps: NotificationsDeps) {
     this.#deps = deps;
@@ -78,16 +99,43 @@ export class Notifications {
     if (locked) this.#closeWhere(() => true);
   }
 
+  // Teardown begins: close everything (one activation is live at a time) and
+  // refuse new notifications, because the old renderer can still ask for one
+  // until its web contents are destroyed.
+  beginTeardown(): void {
+    this.#tearingDown = true;
+    this.closeAll();
+  }
+
+  // The old renderer is gone: close what slipped in meanwhile and accept again.
+  endTeardown(): void {
+    this.closeAll();
+    this.#tearingDown = false;
+  }
+
+  // Closes every notification; only one activation is ever live.
+  closeAll(): void {
+    this.#closeWhere(() => true);
+  }
+
   // Shows one notification owned by this activation and document generation.
   show(activation: object | null, document: number, request: NotifyRequest): boolean {
-    if (activation === null || !this.supported()) return false;
+    if (activation === null || this.#tearingDown || !this.supported()) return false;
+    this.#watch(activation);
     const notification = new this.#deps.Notification({
-      title: request.title,
-      body: this.#locked ? 'New message' : request.body,
+      title: this.#locked ? LOCKED_TITLE : plain(request.title),
+      body: this.#locked ? LOCKED_BODY : plain(request.body),
       icon: this.#deps.icon,
     });
     const entry: Entry = { activation, document, tag: request.tag, channel: request.channel };
     this.#entries.set(notification, entry);
+    // A Map iterates in insertion order, so the first key is the oldest.
+    while (this.#entries.size > MAX_ENTRIES) {
+      const oldest = this.#entries.keys().next().value;
+      if (oldest === undefined) break;
+      this.#entries.delete(oldest);
+      oldest.close();
+    }
     notification.on('close', () => {
       if (this.#entries.get(notification) === entry) this.#entries.delete(notification);
     });
@@ -114,6 +162,19 @@ export class Notifications {
     if (activation !== null) this.#closeWhere((entry) => entry.activation === activation);
   }
 
+  // When the activation's document ends, its notifications from older
+  // documents can no longer be closed by the page that showed them (a close
+  // must name the current document), so main closes them. The gate is
+  // subscribed once, the first time the activation shows something.
+  #watch(activation: object): void {
+    const current = this.#deps.current();
+    if (current === null || current.activation !== activation || this.#watched.has(current.gate)) return;
+    this.#watched.add(current.gate);
+    current.gate.onEnd((generation) => {
+      this.#closeWhere((entry) => entry.activation === activation && entry.document < generation);
+    });
+  }
+
   #closeWhere(matches: (entry: Entry) => boolean): void {
     for (const [notification, entry] of [...this.#entries]) {
       if (!matches(entry)) continue;
@@ -125,6 +186,7 @@ export class Notifications {
   #click(notification: NotificationLike): void {
     const entry = this.#entries.get(notification);
     if (entry === undefined) return;
+    this.#entries.delete(notification);
     try {
       const window = this.#deps.window();
       if (window === null || window.isDestroyed()) return;

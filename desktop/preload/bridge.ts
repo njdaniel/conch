@@ -9,6 +9,10 @@
 // "refused" and nothing more. No function takes a channel, a URL, a header map
 // or a method, and nothing here holds an ipcRenderer, an event or a credential.
 //
+// One call is synchronous: notificationSupported sends on the channel
+// `conch:notificationSupported` (ipcRenderer.sendSync) outside the invoke
+// registry, and unwraps the same Envelope from the returned value.
+//
 // onVoiceState hands the page each NativeVoiceView main sends on the voice
 // channel, and drops any message that is not exactly one.
 //
@@ -28,7 +32,7 @@ import {
   voiceControlReason,
   voiceControlTalkMode,
 } from '../../web/src/schema/generated.ts';
-import { channelOf, NOTIFICATION_SUPPORT, type Envelope, type FeedEvent, type InvokedFunction } from '../shared/bridge-names.ts';
+import { channelOf, NOTIFICATION_SUPPORT, TAG_MAX, type Envelope, type FeedEvent, type InvokedFunction } from '../shared/bridge-names.ts';
 
 export type Invoke = (channel: string, ...args: unknown[]) => Promise<unknown>;
 
@@ -61,7 +65,7 @@ function isFeedEvent(value: unknown): value is FeedEvent {
 function isNotificationClick(value: unknown): value is NotificationClick {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
   const record = value as Record<string, unknown>;
-  return Object.keys(record).length === 2 && record['type'] === 'click' && typeof record['tag'] === 'string' && record['tag'].length > 0 && record['tag'].length <= 128;
+  return Object.keys(record).length === 2 && record['type'] === 'click' && typeof record['tag'] === 'string' && record['tag'].length > 0 && record['tag'].length <= TAG_MAX;
 }
 
 const STATUSES: ReadonlySet<unknown> = new Set(['idle', 'unavailable', 'starting', 'running', 'stopping', 'ended', 'failed', 'lost']);
