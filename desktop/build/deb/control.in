@@ -1,0 +1,16 @@
+Package: conch-desktop
+Version: @VERSION@
+Architecture: amd64
+Maintainer: Conch contributors <noreply@github.com>
+Homepage: https://github.com/njdaniel/conch
+Section: net
+Priority: optional
+Installed-Size: @INSTALLED_SIZE@
+Depends: @DEPENDS@
+Description: Conch desktop app
+ The Conch chat client as a desktop app (Electron), with the bundled
+ conch-voice helper for push-to-talk voice. It talks to a conchd server over
+ its public API and keeps its data per user. Run it as conch-desktop.
+ .
+ The package changes nothing about keyboard-device access: the talk-key
+ permission is an explicit step the app shows, never done by installing.
