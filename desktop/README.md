@@ -21,9 +21,11 @@ voice in the UI (#771: the supervisor that runs `conch-voice` exists, in
 | Path | Owns |
 | --- | --- |
 | `main/scheme.ts` | the `conch-app:` handler: serves only what the build-time manifest lists, checks each file's SHA-256, refuses every other URL |
-| `main/csp.ts` | the Content-Security-Policy of every response |
+| `main/csp.ts` | the Content-Security-Policy of every response: `connect-src wss: https:` (Q-D4-1), narrowed to the live grant's origin by `guards.ts` |
 | `main/window.ts` | the one window and its `webPreferences` (pinned by a unit test) |
-| `main/guards.ts` | what a web contents may not do: navigate, open windows, attach webviews, download, ask for permissions, choose devices |
+| `main/guards.ts` | what a web contents may not do: navigate, open windows, attach webviews, download, ask for permissions, choose devices; and the request filter, which passes only the live companion grant's origin (wss or https, same host and port, no userinfo) besides the app's own scheme |
+| `main/display-capture.ts` | the one screen capture: the permission and display-media rules (`Screen capture`, below) |
+| `main/portal.ts` | whether the screen-cast portal can answer (Wayland session, a read-only `gdbus` property call) |
 | `main/api/origin.ts` | the server-address rules (https; http only for loopback; no userinfo, path, query or fragment) |
 | `main/api/target.ts` | an operation id plus values to a request target; refuses anything that is not a call of the table |
 | `main/api/client.ts` | the one request executor: bearer only for bearer operations, no Origin or Cookie, no redirects, size cap, response validation, generation check |
@@ -310,3 +312,7 @@ Plain `http://` is accepted for `localhost`, `127.0.0.0/8` and `[::1]` only, the
 same rule as `web/src/transport.ts`: `conchd serve --listen 127.0.0.1:8080
 --no-web`, then enter `http://127.0.0.1:8080`. The server refuses passwords over
 plain HTTP from anywhere else, and so does the address step.
+
+## Screen capture
+
+The renderer captures the screen only through Chromium's PipeWire capturer, so only through the xdg-desktop-portal ScreenCast picker (Q-D4-4 on #1578). `main/app.ts` turns the capturer on before `ready`; `main/portal.ts` asks the portal whether it can answer, and where it cannot (no portal, or an X11 session, where Chromium would list every source with no picker) Share is unavailable and the page is told "share unavailable: no screen-cast portal". `main/display-capture.ts` grants a capture only from the owned window's live main frame at `conch-app://ui/`, in the current document generation, with a live companion grant, right after the person's own input (which the request uses up), and only when `desktopCapturer.getSources` returns exactly one source (none is a cancel; several are refused, never narrowed to the first). Video only: audio is never granted, and microphone and camera stay denied.

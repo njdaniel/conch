@@ -45,7 +45,7 @@ interface Rig {
   sends(): Send[];
 }
 
-function rig(view: NativeVoiceView = running()): Rig {
+function rig(view: NativeVoiceView = running(), share?: () => Promise<'no-portal' | 'not-wayland' | null>): Rig {
   const steps: Step[] = [];
   const logs: string[] = [];
   const answers: (Exchange | Promise<Exchange>)[] = [];
@@ -91,6 +91,7 @@ function rig(view: NativeVoiceView = running()): Rig {
         steps.push(['tell', doc, event]);
       },
       log: (line) => logs.push(line),
+      ...(share === undefined ? {} : { share }),
       sleep: (ms) => {
         steps.push(['sleep', ms]);
         return Promise.resolve();
@@ -215,6 +216,24 @@ describe('the companion’s grant', () => {
     expect(await r.companion.grant({ channel: 'general' })).toEqual({ ok: false, error: 'failed' });
     expect(r.sends()).toEqual([POST, DELETE]);
     expect(r.companion.liveOrigin()).toBeNull();
+  });
+
+  it('says beside the grant why Share is unavailable (#1580), and still gives the grant', async () => {
+    for (const why of ['no-portal', 'not-wayland'] as const) {
+      const r = rig(running(), () => Promise.resolve(why));
+      r.answers.push(ok(ANSWER));
+      expect(await r.companion.grant({ channel: 'general' })).toEqual({ ok: true, grant: GRANT, shareUnavailable: why });
+      expect(r.companion.liveOrigin()).toBe('wss://voice.example');
+    }
+  });
+
+  it('says nothing of Share when the portal answers, or when the probe throws it is "no-portal"', async () => {
+    const yes = rig(running(), () => Promise.resolve(null));
+    yes.answers.push(ok(ANSWER));
+    expect(await yes.companion.grant({ channel: 'general' })).toEqual({ ok: true, grant: GRANT });
+    const boom = rig(running(), () => Promise.reject(new Error('boom')));
+    boom.answers.push(ok(ANSWER));
+    expect(await boom.companion.grant({ channel: 'general' })).toEqual({ ok: true, grant: GRANT, shareUnavailable: 'no-portal' });
   });
 
   it('accepts plain ws to loopback, for development', async () => {

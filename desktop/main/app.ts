@@ -2,13 +2,15 @@
 // Output: one hardened window showing the packaged web client, and nothing
 // else but main's public-API client behind the bridge's IPC handlers (D2-3)
 // and the live feeds main holds for the page (D2-4). The renderer itself
-// still makes no network request.
+// makes no network request but the screen companion's, to exactly the live
+// grant's LiveKit origin, and no capture but one portal-picked screen (D4-03,
+// #1580: guards.ts, display-capture.ts, portal.ts).
 import { readFile } from 'node:fs/promises';
 import { isAbsolute, join } from 'node:path';
 
 import tls from 'node:tls';
 
-import { app, dialog, ipcMain, protocol, safeStorage, shell } from 'electron';
+import { app, desktopCapturer, dialog, ipcMain, protocol, safeStorage, shell } from 'electron';
 
 import { allowUnlisted, OVERRIDE_FLAG, parseCompat } from './compat.ts';
 import { activationFactory, healthReader, Live, prober, revoker, verifier } from './profiles/activation.ts';
@@ -27,11 +29,13 @@ import { Supervisor } from './voice/supervisor.ts';
 import { createNodeConnect } from './api/socket.ts';
 import { transportVerdict, trustSystemRoots } from './api/trust.ts';
 import { debuggingVerdict } from './debugging.ts';
+import { DisplayCapture } from './display-capture.ts';
 import { Files } from './files.ts';
 import { Gestures } from './gestures.ts';
 import { installGuards } from './guards.ts';
 import { Ipc } from './ipc.ts';
 import { Links } from './links.ts';
+import { executable, Portal, runFile } from './portal.ts';
 import { COMPANION_EVENTS } from '../shared/bridge-names.ts';
 import { saveChosenFile } from './save-file.ts';
 import { parseManifest, SCHEME, SCHEME_PRIVILEGES } from './scheme.ts';
@@ -72,6 +76,12 @@ export async function start(): Promise<void> {
     return;
   }
   app.enableSandbox();
+  // Screen capture goes through Chromium's PipeWire capturer, and so the
+  // screen-cast portal's own picker, alone (Q-D4-4 on #1578). The switch is
+  // read when Chromium starts its capturers, so it is set before ready.
+  // Chromium uses that capturer only under Wayland; portal.ts says Share is
+  // unavailable anywhere else.
+  app.commandLine.appendSwitch('enable-features', 'WebRTCPipeWireCapturer');
   const live = new Live();
   // What the person has just done, and the one way out of the window: a link
   // they clicked, validated, to the OS browser (issue #947). Both read the
@@ -104,7 +114,25 @@ export async function start(): Promise<void> {
     },
     log,
   });
-  installGuards(app, { log, gestures, owned, links });
+  // Whether this desktop can share a screen (portal.ts): asked after ready,
+  // and again with every companion grant.
+  const portal = new Portal({ platform: process.platform, env: process.env, run: runFile, executable, log });
+  // The LiveKit origin of the live companion grant: none until the companion
+  // exists (below), and then its own, read afresh on every request.
+  let liveOrigin = (): string | null => null;
+  const capture = new DisplayCapture({
+    owned: () => (live.window === null || live.window.isDestroyed() ? null : live.window.webContents),
+    gate: () => live.gate,
+    gestures,
+    live: () => liveOrigin() !== null,
+    available: () => portal.last(),
+    getSources: (options) => desktopCapturer.getSources(options),
+    log,
+  });
+  // One set of guard dependencies, for every web contents and every
+  // activation's partition alike.
+  const guard = { log, gestures, owned, links, liveOrigin: () => liveOrigin(), capture };
+  installGuards(app, guard);
 
   // One instance per data root: the lock comes before anything reads or
   // writes the root. A second launch focuses the first and exits.
@@ -122,6 +150,8 @@ export async function start(): Promise<void> {
   });
 
   await app.whenReady();
+
+  void portal.probe();
 
   // The first receipt: what this build really is.
   console.log(`conch-desktop: versions ${JSON.stringify({ electron: process.versions.electron, chrome: process.versions.chrome, node: process.versions.node })}`);
@@ -189,7 +219,7 @@ export async function start(): Promise<void> {
     vault,
     hooks: teardownHooks,
     createActivation: activationFactory(
-      { packaged: app.isPackaged, appPath, manifest, readUi: (path) => readFile(join(ui, ...path.split('/').slice(1))), connect: createNodeConnect(log), guard: { log, gestures, owned, links }, makeFiles, now: Date.now, log },
+      { packaged: app.isPackaged, appPath, manifest, readUi: (path) => readFile(join(ui, ...path.split('/').slice(1))), connect: createNodeConnect(log), guard, makeFiles, now: Date.now, log },
       live,
     ),
     compat: { servers: allowlist?.servers ?? [], override },
@@ -256,8 +286,14 @@ export async function start(): Promise<void> {
       const contents = live.owned() === null ? null : (live.window?.webContents ?? null);
       if (contents !== null && live.gate.shows(document)) contents.send(COMPANION_EVENTS, event);
     },
+    // Asked again with every grant: a portal started since is found.
+    share: async () => {
+      const answer = await portal.probe();
+      return answer === 'available' ? null : answer;
+    },
     log,
   });
+  liveOrigin = () => companion.liveOrigin();
   teardownHooks.media('share', async ({ reason }) => {
     // From here on the identity is ending: no grant is asked for under it.
     // A page's grant request after this end (the click of a switch or a

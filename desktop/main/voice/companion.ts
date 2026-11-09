@@ -8,7 +8,10 @@
 // on every end, a CompanionEvent to the page and then a DELETE to conchd.
 // Owns: the one live companion, p<id>.screen, of the activation in force, the
 // one request for it in flight, and the LiveKit origin of the live grant
-// (liveOrigin, which #1580's request filter reads).
+// (liveOrigin, which #1580's request filter and display-capture rules read).
+// Beside a grant it says when this desktop cannot share a screen (#1580:
+// shareUnavailable, from the portal probe), so the page can say so; the
+// grant itself is still given, for watching.
 //
 // What it keeps:
 //  - a grant is asked for only for the voice destination, while the view is
@@ -34,6 +37,7 @@ import type {
   CompanionGrant,
   CompanionGrantError,
   CompanionGrantResult,
+  CompanionShareUnavailable,
   NativeVoiceView,
 } from '../../../web/src/platform/desktop/bridge.ts';
 import { voiceCompanionResponseV1, type VoiceCompanionRequestV1, type VoiceCompanionResponseV1 } from '../../../web/src/schema/generated.ts';
@@ -76,6 +80,9 @@ export interface CompanionDeps {
   readonly log: (line: string) => void;
   // Test seam for the one wait before the second ask.
   readonly sleep?: (ms: number) => Promise<void>;
+  // Asks whether this desktop can share a screen (portal.ts), alongside the
+  // request to conchd; null when it can. Absent: nothing is said.
+  readonly share?: () => Promise<CompanionShareUnavailable | null>;
 }
 
 // The live companion: what it was asked for, and with what.
@@ -204,13 +211,14 @@ export class Companion {
     const asking: Asking = { channel, generation: view.generation };
     this.#asking = asking;
     try {
-      return await this.#ask(client, asking, this.#epoch, this.#deps.document());
+      const share = (this.#deps.share?.() ?? Promise.resolve(null)).catch((): CompanionShareUnavailable => 'no-portal');
+      return await this.#ask(client, asking, this.#epoch, this.#deps.document(), share);
     } finally {
       this.#asking = null;
     }
   }
 
-  async #ask(client: CompanionClient, asking: Asking, epoch: number, document: number): Promise<CompanionGrantResult> {
+  async #ask(client: CompanionClient, asking: Asking, epoch: number, document: number, share: Promise<CompanionShareUnavailable | null>): Promise<CompanionGrantResult> {
     let exchange = await this.#post(client, asking.channel);
     if (refusedWith(exchange, 'voice_no_session')) {
       // conchd has not yet seen p<id> in the room: one pass, then once more.
@@ -231,6 +239,9 @@ export class Companion {
       return refuse('failed');
     }
     const given = grantOf(exchange.body);
+    // Asked alongside conchd; read before the overtaken check, so that
+    // nothing is awaited between that check and the record.
+    const shareUnavailable = await share;
     const overtaken = epoch !== this.#epoch || this.#deps.client() !== client || lossOf(this.#deps.voice.state(), asking) !== null;
     if (given === null || overtaken) {
       // conchd has issued a companion nobody will use: remove it.
@@ -240,7 +251,7 @@ export class Companion {
     }
     this.#held = { ...asking, client, document, origin: given.origin };
     this.#deps.log('companion: issued');
-    return { ok: true, grant: given.grant };
+    return shareUnavailable === null ? { ok: true, grant: given.grant } : { ok: true, grant: given.grant, shareUnavailable };
   }
 
   // stop is the page's own companionEnd: the record goes and conchd is asked

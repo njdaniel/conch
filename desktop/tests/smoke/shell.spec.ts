@@ -57,7 +57,7 @@ test.describe('the packaged shell', () => {
     expect(response.status()).toBe(200);
     const h = response.headers();
     expect(h['content-security-policy']).toBe(
-      "default-src 'none'; script-src 'self'; style-src 'self'; font-src 'self'; img-src 'self' blob: data:; connect-src 'none'; object-src 'none'; base-uri 'none'; frame-src 'none'; frame-ancestors 'none'; form-action 'none'; worker-src 'none'",
+      "default-src 'none'; script-src 'self'; style-src 'self'; font-src 'self'; img-src 'self' blob: data:; connect-src wss: https:; object-src 'none'; base-uri 'none'; frame-src 'none'; frame-ancestors 'none'; form-action 'none'; worker-src 'none'",
     );
     expect(h['x-content-type-options']).toBe('nosniff');
     expect(h['content-type']).toBe('text/html; charset=utf-8');
@@ -148,8 +148,10 @@ test.describe('the packaged shell', () => {
 
   test('makes no request that is not to its own files', async () => {
     await page.waitForTimeout(1_000);
-    // Main logs one line for each request it cancels; the renderer's
-    // connect-src is 'none', so a fetch never gets as far as main.
+    // Main logs one line for each request it cancels. The page makes none
+    // of its own; with no live companion grant a fetch to any https origin
+    // (the CSP's connect-src allows wss: and https:, Q-D4-1) is cancelled
+    // there (share.spec.ts reads the line).
     expect(app.output()).not.toContain('blocked a request');
     expect(await page.evaluate("fetch('https://example.com/').then(() => 'sent', () => 'refused')")).toBe('refused');
   });

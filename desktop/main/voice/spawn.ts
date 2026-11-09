@@ -240,3 +240,56 @@ export function spawnHelper(
 }
 
 export const defaultSpawn: SpawnFn = (command, args, options) => nodeSpawn(command, args, options);
+
+// How long the screen-cast portal may take to answer (portal.ts, #1580): it is
+// D-Bus activated, so the first ask may start it.
+export const PORTAL_TIMEOUT_MS = 3_000;
+const PORTAL_MAX_OUTPUT = 4096;
+
+export interface RunResult {
+  readonly code: number | null;
+  readonly stdout: string;
+}
+
+// runFile runs one read-only program for portal.ts: file with args and env,
+// never a shell, bounded in time and in output, stderr dropped. It resolves
+// with the exit code and stdout, or null when the program could not be run.
+// It lives here because spawn.ts is the one place that reaches child_process.
+export function runFile(file: string, args: readonly string[], env: Readonly<Record<string, string>>): Promise<RunResult | null> {
+  return new Promise((resolve) => {
+    let out = '';
+    let settled = false;
+    const done = (value: RunResult | null): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(value);
+    };
+    let child: ChildProcessByStdio<null, Readable, Readable>;
+    try {
+      child = nodeSpawn(file, [...args], { env: { ...env }, stdio: ['ignore', 'pipe', 'pipe'] });
+    } catch {
+      resolve(null);
+      return;
+    }
+    const timer = setTimeout(() => {
+      child.kill('SIGKILL');
+      done(null);
+    }, PORTAL_TIMEOUT_MS + 500);
+    child.stdout.setEncoding('utf8');
+    child.stdout.on('data', (chunk: string) => {
+      out += chunk;
+      if (out.length > PORTAL_MAX_OUTPUT) {
+        child.kill('SIGKILL');
+        done(null);
+      }
+    });
+    child.stderr.resume();
+    child.on('error', () => {
+      done(null);
+    });
+    child.on('close', (code) => {
+      done({ code, stdout: out });
+    });
+  });
+}

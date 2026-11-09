@@ -472,7 +472,17 @@ export interface CompanionGrant {
 // else, said no more precisely.
 export type CompanionGrantError = 'not-in-voice' | 'not-yet' | 'elsewhere' | 'ended' | 'failed';
 
-export type CompanionGrantResult = { readonly ok: true; readonly grant: CompanionGrant } | { readonly ok: false; readonly error: CompanionGrantError };
+// Why this desktop cannot share a screen, said beside a grant (#1580, D4-03;
+// Q-D4-4 on #1578): the grant still serves watching others' shares. Share
+// goes only through the screen-cast portal's own picker. no-portal: the
+// portal does not answer for ScreenCast; not-wayland: the session is not
+// Wayland, where Chromium would not use the portal. The page says "share
+// unavailable: no screen-cast portal" for either, and main opens no capture.
+export type CompanionShareUnavailable = 'no-portal' | 'not-wayland';
+
+export type CompanionGrantResult =
+  | { readonly ok: true; readonly grant: CompanionGrant; readonly shareUnavailable?: CompanionShareUnavailable }
+  | { readonly ok: false; readonly error: CompanionGrantError };
 
 // Why main ended the live companion on its own. leave: the person left
 // voice; helper: the helper stopped, failed or lost its connection; renewal:
