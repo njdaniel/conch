@@ -11,7 +11,8 @@ import (
 // Leave or Close), otherwise one of the phases the helper reports.
 type Phase string
 
-// Phases. All but PhaseIdle are the wire phases of conch.voice_control.v1.
+// Phases. All but PhaseIdle are the wire phases of conch.voice_control.v1,
+// which v2 shares.
 const (
 	PhaseIdle         Phase = "idle"
 	PhaseStarting     Phase = Phase(schema.VoiceControlPhaseStarting)
@@ -83,6 +84,16 @@ type Status struct {
 	PTT           schema.VoiceControlPTT
 	PTTProblem    schema.VoiceControlPTTProblem
 	HelperVersion string
+	// Protocol is the version this helper's session speaks, chosen from its
+	// hello: schema.VoiceControlSchemaV2 when it offers it, else
+	// schema.VoiceControlSchemaV1; "" before a version was chosen.
+	Protocol string
+	// TalkMode and Playback are what a v2 helper reports: the mode in force
+	// and the speakers' stream. A v1 helper reports neither, and both are
+	// "" then: a v1 session is always push-to-talk (design note §20.6), and
+	// whether it has speakers is not said.
+	TalkMode schema.VoiceControlTalkMode
+	Playback schema.VoiceControlPlayback
 }
 
 // clone copies s, so that what a caller holds never shares the supervisor's
@@ -115,6 +126,19 @@ func fromState(gen uint64, channel, helperVersion string, st *schema.VoiceContro
 	return out
 }
 
+// fromStateV2 is the status a v2 helper's state snapshot says: the fields v1
+// has, mapped as v1's are, and the talk mode and the speakers.
+func fromStateV2(gen uint64, channel, helperVersion string, st *schema.VoiceControlStateV2) Status {
+	out := fromState(gen, channel, helperVersion, &schema.VoiceControlStateV1{
+		Phase: st.Phase, Reason: st.Reason, RetryInMS: st.RetryInMS, Capture: st.Capture,
+		Transmitting: st.Transmitting, Muted: st.Muted, Deafened: st.Deafened, Blocked: st.Blocked,
+		PTT: st.PTT, PTTProblem: st.PTTProblem,
+	})
+	out.TalkMode = st.TalkMode
+	out.Playback = st.Playback
+	return out
+}
+
 // failed turns s into a failure for reason, keeping what the helper last
 // confirmed about mute, deafen and the talk key.
 func (s Status) failed(reason string) Status {
@@ -125,10 +149,13 @@ func (s Status) failed(reason string) Status {
 	return s
 }
 
-// ended is s once the process is gone: nothing can be captured or sent, and
-// nothing is connected.
+// ended is s once the process is gone: nothing can be captured, sent or
+// played, and nothing is connected.
 func (s Status) ended() Status {
 	s.Capture = schema.VoiceControlCaptureOff
+	if s.Playback != "" {
+		s.Playback = schema.VoiceControlPlaybackOff
+	}
 	s.Transmitting = false
 	s.RetryIn = 0
 	if !slices.Contains(s.Blocked, schema.VoiceControlBlockNotConnected) {
