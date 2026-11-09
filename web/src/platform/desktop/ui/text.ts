@@ -36,6 +36,7 @@ export const inviteRefusalLines: Readonly<Record<InviteRefusal, string>> = {
 
 export const inviteAcceptLines: Readonly<Record<Extract<InviteAccept, { ok: false }>['refusal'], string>> = {
   expired: 'That invite link was not used in time. Paste it again.',
+  'voice-started': 'Voice started after the link was checked, and opening the invite on that server would leave it. Check the link again.',
   'unknown-profile': 'That saved server is no longer there. Paste the link again.',
   unsupported: 'The desktop app could not open that invite.',
   full: addRefusalLines.full,

@@ -291,6 +291,34 @@ describe('server compatibility (issue #946)', () => {
     });
   });
 
+  it('offers no hand-off of an invite code for the blocked profile, and leaves the address empty', async () => {
+    const CODE = 'CANARY-code-1';
+    const handle = `invite-${'0'.repeat(32)}`;
+    const inviteCheck = vi.fn(() =>
+      Promise.resolve<InviteCheck>({
+        ok: true,
+        handle,
+        origin: 'https://chat.example.org',
+        host: 'chat.example.org',
+        profiles: [{ id: ID_A, label: 'Work', account: 'ada', active: true }],
+        voice: false,
+      }),
+    );
+    const inviteAccept = vi.fn(() => Promise.resolve({ ok: true, switched: false } as const));
+    const inviteTake = vi.fn(() => Promise.resolve(CODE));
+    install({ profiles: () => Promise.resolve(on({ state: 'unsupported' })), inviteCheck, inviteAccept, inviteTake });
+    render(<DesktopShell>{child}</DesktopShell>);
+    fireEvent.change(await screen.findByLabelText('Invite link'), { target: { value: `https://chat.example.org/app/#/invite/${CODE}` } });
+    fireEvent.click(screen.getByRole('button', { name: 'Check link' }));
+    const group = await screen.findByRole('group', { name: 'Open this invite' });
+    expect(within(group).queryByRole('button', { name: /Open with Work/ })).toBeNull();
+    expect(group.textContent).toMatch(/release is not supported/);
+    expect(within(group).getByRole('button', { name: 'Open as a new server entry' })).toBeTruthy();
+    expect(inviteAccept).not.toHaveBeenCalled();
+    expect(inviteTake).not.toHaveBeenCalled();
+    expect(window.location.hash).toBe('');
+  });
+
   it('lets the person go to another saved server from the unsupported state', async () => {
     const profileSwitch = vi.fn(() => Promise.resolve(true));
     install({

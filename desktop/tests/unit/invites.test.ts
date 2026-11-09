@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { Invites, MAX_INVITE_LINK_LENGTH, parseInviteLink, PENDING_MS, STAGED_MS, type InvitesDeps } from '../../main/invites.ts';
 import { TeardownHooks } from '../../main/profiles/hooks.ts';
@@ -15,6 +15,8 @@ describe('parseInviteLink', () => {
     expect(parseInviteLink(link(ORIGIN_A))).toEqual({ ok: true, origin: ORIGIN_A, code: CODE });
     expect(parseInviteLink(`  ${link(ORIGIN_A)}\n`)).toEqual({ ok: true, origin: ORIGIN_A, code: CODE });
     expect(parseInviteLink('HTTPS://Chat.Example.ORG:443/app/#/invite/abc')).toEqual({ ok: true, origin: 'https://chat.example.org', code: 'abc' });
+    // A default port written out is dropped by the canonical form; that is fine.
+    expect(parseInviteLink('http://localhost:80/app/#/invite/abc')).toMatchObject({ ok: true, origin: 'http://localhost' });
     expect(parseInviteLink('https://chat.example.org:8443/app/#/invite/abc')).toMatchObject({ ok: true, origin: 'https://chat.example.org:8443' });
     expect(parseInviteLink('http://localhost:8080/app/#/invite/abc')).toEqual({ ok: true, origin: 'http://localhost:8080', code: 'abc' });
     expect(parseInviteLink('http://127.0.0.1/app/#/invite/abc')).toMatchObject({ ok: true, origin: 'http://127.0.0.1' });
@@ -63,8 +65,19 @@ describe('parseInviteLink', () => {
     ['a control character in the link', `${ORIGIN_A}/app/#/invite/a\u0007b`, 'characters'],
     ['a space inside the link', `${ORIGIN_A}/app/#/invite/a b`, 'characters'],
     ['a zero-width space in the code', `${ORIGIN_A}/app/#/invite/a​b`, 'characters'],
-    ['a right-to-left override', `${ORIGIN_A}/app/#/invite/‮abc`, 'characters'],
+    ['a right-to-left override', `${ORIGIN_A}/app/#/invite/\u202eabc`, 'characters'],
     ['a zero-width joiner in the host', `https://chat‍.example.org/app/#/invite/${CODE}`, 'characters'],
+    ['a decimal IPv4 spelling', `http://2130706433/app/#/invite/${CODE}`, 'host'],
+    ['a hex dotted IPv4 spelling', `http://0x7f.0.0.1/app/#/invite/${CODE}`, 'host'],
+    ['an octal IPv4 spelling', `http://017700000001/app/#/invite/${CODE}`, 'host'],
+    ['a short IPv4 spelling', `http://127.1/app/#/invite/${CODE}`, 'host'],
+    ['a hex IPv4 spelling over https', `https://0x7f000001/app/#/invite/${CODE}`, 'host'],
+    ['a trailing dot', `https://chat.example.org./app/#/invite/${CODE}`, 'host'],
+    ['a host of dots', `https://../app/#/invite/${CODE}`, 'host'],
+    ['a lone hyphen host', `https://-/app/#/invite/${CODE}`, 'host'],
+    ['an empty label', `https://a..b/app/#/invite/${CODE}`, 'host'],
+    ['port 0', `https://chat.example.org:0/app/#/invite/${CODE}`, 'host'],
+    ['a host over 253 characters', `https://${Array.from({ length: 5 }, () => 'a'.repeat(60)).join('.')}/app/#/invite/${CODE}`, 'host'],
     ['an over-long input', `${ORIGIN_A}/app/#/invite/${'x'.repeat(MAX_INVITE_LINK_LENGTH)}`, 'length'],
     ['an empty input', '', 'length'],
     ['only whitespace', '   ', 'length'],
@@ -296,5 +309,102 @@ describe('accepting', () => {
     expect(s.files.text ?? '').not.toContain(CODE);
     expect(s.log.join('\n')).not.toContain('CANARY');
     expect(s.factory.log.join('\n')).not.toContain('CANARY');
+  });
+});
+
+describe('voice that started after the check', () => {
+  it('refuses a switch the check did not warn about, and spends the handle and stages nothing', async () => {
+    let voice = false;
+    const s = await setup();
+    const work = await s.add(ORIGIN_A);
+    const invites = new Invites({
+      profiles: { findByOrigin: (o) => s.profiles.findByOrigin(o), view: () => s.profiles.view(), add: (a) => s.profiles.add(a), switchTo: (id) => s.profiles.switchTo(id) },
+      voiceRunning: () => voice,
+      now: () => s.clock.now,
+      log: () => undefined,
+    });
+    const answer = invites.check(link(ORIGIN_A));
+    if (!answer.ok) throw new Error('refused');
+    expect(answer.voice).toBe(false);
+    voice = true;
+    expect(await invites.accept(answer.handle, { profile: work })).toEqual({ ok: false, refusal: 'voice-started' });
+    expect(s.profiles.view().active).toBeNull();
+    expect(invites.take()).toBeNull();
+    expect(await invites.accept(answer.handle, { profile: work })).toEqual({ ok: false, refusal: 'expired' });
+    // Checked again with voice running, the same click goes through.
+    const again = invites.check(link(ORIGIN_A));
+    if (!again.ok) throw new Error('refused');
+    expect(again.voice).toBe(true);
+    expect(await invites.accept(again.handle, { profile: work })).toEqual({ ok: true, switched: true });
+  });
+
+  it('refuses adding a server the same way, before anything is added', async () => {
+    let voice = false;
+    const s = await setup();
+    const invites = new Invites({
+      profiles: { findByOrigin: (o) => s.profiles.findByOrigin(o), view: () => s.profiles.view(), add: (a) => s.profiles.add(a), switchTo: (id) => s.profiles.switchTo(id) },
+      voiceRunning: () => voice,
+      now: () => s.clock.now,
+      log: () => undefined,
+    });
+    const answer = invites.check(link(ORIGIN_A));
+    if (!answer.ok) throw new Error('refused');
+    voice = true;
+    expect(await invites.accept(answer.handle, { add: true })).toEqual({ ok: false, refusal: 'voice-started' });
+    expect(s.store.list()).toHaveLength(0);
+  });
+});
+
+describe('expiry by timer', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('drops a checked link at its time though nothing else happens', async () => {
+    vi.useFakeTimers();
+    const s = await setup();
+    const work = await s.add(ORIGIN_A);
+    const answer = checked(s, link(ORIGIN_A));
+    // The injected clock does not move: only the timer can have dropped it.
+    vi.advanceTimersByTime(PENDING_MS);
+    expect(await s.invites.accept(answer.handle, { profile: work })).toEqual({ ok: false, refusal: 'expired' });
+  });
+
+  it('drops a staged code at its time though nothing else happens', async () => {
+    vi.useFakeTimers();
+    const s = await setup();
+    const work = await s.add(ORIGIN_A);
+    const answer = checked(s, link(ORIGIN_A));
+    await s.invites.accept(answer.handle, { profile: work });
+    vi.advanceTimersByTime(STAGED_MS);
+    expect(s.invites.take()).toBeNull();
+  });
+
+  it('leaves no timer behind for a spent handle or a taken code', async () => {
+    vi.useFakeTimers();
+    const s = await setup();
+    const work = await s.add(ORIGIN_A);
+    checked(s, link(ORIGIN_A));
+    const answer = checked(s, link(ORIGIN_A));
+    await s.invites.accept(answer.handle, { profile: work });
+    // Only the first, unspent link's timer is left.
+    s.invites.take();
+    expect(vi.getTimerCount()).toBe(1);
+  });
+
+  it('clears the staged code when the switch throws', async () => {
+    const s = await setup();
+    const work = await s.add(ORIGIN_A);
+    const invites = new Invites({
+      profiles: { findByOrigin: (o) => s.profiles.findByOrigin(o), view: () => s.profiles.view(), add: (a) => s.profiles.add(a), switchTo: () => Promise.reject(new Error('boom')) },
+      voiceRunning: () => false,
+      now: () => s.clock.now,
+      log: () => undefined,
+    });
+    const answer = invites.check(link(ORIGIN_A));
+    if (!answer.ok) throw new Error('refused');
+    await expect(invites.accept(answer.handle, { profile: work })).rejects.toThrow('boom');
+    await s.profiles.switchTo(work);
+    expect(invites.take()).toBeNull();
   });
 });

@@ -12,7 +12,14 @@ import { inviteAcceptLines, inviteRefusalLines } from './text';
 
 type Checked = Extract<InviteCheck, { ok: true }>;
 
-export function InviteLink() {
+interface Props {
+  // Whether the active profile's client is on the page. On the "unsupported
+  // release" page it is not: an invite for the active profile would be handed
+  // to the address with nothing to read it, and the code would stay there.
+  readonly clientMounted: boolean;
+}
+
+export function InviteLink({ clientMounted }: Props) {
   const [checked, setChecked] = useState<Checked | null>(null);
   const [line, setLine] = useState('');
   const [busy, setBusy] = useState(false);
@@ -58,6 +65,10 @@ export function InviteLink() {
         // Main replaces this page with the profile's, which takes the code.
         // The promise may not settle for the page that asked.
         setLine('Opening…');
+      } else if (!clientMounted) {
+        // Not reachable from the buttons below; kept so that a code is never
+        // written to the address when no client will read it.
+        setLine(inviteAcceptLines.unsupported);
       } else if (!(await takeInvite())) {
         setLine(inviteAcceptLines.expired);
       }
@@ -77,6 +88,8 @@ export function InviteLink() {
   }
 
   if (!available) return null;
+  const choices = checked === null ? [] : checked.profiles.filter((p) => clientMounted || !p.active);
+  const hidden = checked === null ? 0 : checked.profiles.length - choices.length;
   return (
     <section className="desktop-invite" aria-label="Add from an invite link">
       <h3>Add from an invite link</h3>
@@ -100,11 +113,12 @@ export function InviteLink() {
             This invite is for <strong>{checked.origin}</strong>.
           </p>
           {checked.voice ? <p role="status">Voice is running. Opening the invite on a different server leaves voice.</p> : null}
+          {hidden > 0 ? <p>This server’s release is not supported by this app, so the invite cannot be opened there. Open it as a new server entry instead.</p> : null}
           {checked.profiles.length === 0 ? (
             <p>No saved server is for this address. Adding it saves a new server entry, then opens the invite there.</p>
-          ) : (
+          ) : choices.length === 0 ? null : (
             <ul>
-              {checked.profiles.map((profile) => (
+              {choices.map((profile) => (
                 <li key={profile.id}>
                   <button
                     type="button"

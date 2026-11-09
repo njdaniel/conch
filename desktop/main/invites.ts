@@ -39,11 +39,34 @@ const refuse = (refusal: InviteRefusal): InviteParse => ({ ok: false, refusal })
 // A host a person can read: letters, digits, dots and hyphens, or a bracketed
 // IPv6 literal, with an optional port. No percent escapes, no non-ASCII.
 const AUTHORITY = /^(?:[A-Za-z0-9.-]+|\[[0-9A-Fa-f:.]+\])(?::[0-9]{1,5})?$/u;
+const MAX_HOST_LENGTH = 253;
+// One DNS label: letters, digits and inner hyphens, 1 to 63 long. An empty
+// label (a trailing dot, "a..b") does not match.
+const LABEL = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/u;
 // What may be written after #/invite/: unreserved characters and escapes.
 const RAW_CODE = /^[A-Za-z0-9._~%-]+$/u;
 // What the code is once decoded: URL-safe characters only, so a decoded
 // slash, space, control or invisible character is a refusal.
 const CODE = /^[A-Za-z0-9._~-]{1,256}$/u;
+
+// hostAsWritten: the canonical origin's authority is the lower-cased one that
+// was written, apart from a default port that the canonical form drops. Also
+// refused: an empty or ill-formed label (which includes a trailing dot), port
+// 0, and a host over 253 characters.
+function hostAsWritten(authority: string, scheme: string, origin: string): boolean {
+  const written = authority.toLowerCase();
+  const canonical = new URL(origin).host;
+  const defaultPort = scheme === 'https' ? ':443' : ':80';
+  if (canonical !== written && `${canonical}${defaultPort}` !== written) return false;
+  const portAt = written.lastIndexOf(':');
+  const bracketed = written.startsWith('[');
+  const port = portAt > (bracketed ? written.indexOf(']') : -1) ? written.slice(portAt + 1) : '';
+  if (port !== '' && Number(port) === 0) return false;
+  const host = port === '' ? written : written.slice(0, portAt);
+  if (host.length > MAX_HOST_LENGTH) return false;
+  if (bracketed) return true;
+  return host.split('.').every((label) => LABEL.test(label));
+}
 
 // parseInviteLink accepts exactly <origin>/app/#/invite/<code> (the form of
 // inviteLink in web/src/route.ts): https, or http to loopback; the origin as
@@ -71,6 +94,10 @@ export function parseInviteLink(input: unknown): InviteParse {
   if (!AUTHORITY.test(authority) || authority.split('.').some((label) => label.toLowerCase().startsWith('xn--'))) return refuse('host');
   const server = parseServerAddress(`${scheme}://${authority}`);
   if (!server.ok) return refuse(server.refusal === 'scheme' ? 'scheme' : 'host');
+  // The host must be the one written: the URL parser also reads 2130706433,
+  // 0x7f.0.0.1 and 127.1 as 127.0.0.1, and a person reading the server's
+  // name must not be shown one host while another is contacted.
+  if (!hostAsWritten(authority, scheme, server.origin)) return refuse('host');
   if (!rest.startsWith('/app/')) return refuse('path');
   const tail = rest.slice('/app/'.length);
   const hashAt = tail.indexOf('#');
@@ -109,6 +136,10 @@ interface Pending {
   readonly origin: string;
   readonly code: string;
   readonly expiresAt: number;
+  // Whether the person was told voice was running when they were shown this
+  // link; accept compares it with voice now.
+  readonly voice: boolean;
+  readonly timer: ReturnType<typeof setTimeout>;
 }
 
 interface Staged {
@@ -124,6 +155,7 @@ export class Invites {
   readonly #deps: InvitesDeps;
   readonly #pending = new Map<string, Pending>();
   #staged: Staged | null = null;
+  #stagedTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(deps: InvitesDeps) {
     this.#deps = deps;
@@ -139,26 +171,47 @@ export class Invites {
       return { ok: false, refusal: parsed.refusal };
     }
     const now = this.#deps.now();
-    for (const [handle, p] of this.#pending) if (p.expiresAt <= now) this.#pending.delete(handle);
+    for (const [handle, p] of this.#pending) if (p.expiresAt <= now) this.#spend(handle);
     while (this.#pending.size >= MAX_PENDING) {
       const oldest = this.#pending.keys().next();
       if (oldest.done === true) break;
-      this.#pending.delete(oldest.value);
+      this.#spend(oldest.value);
     }
     const handle = (this.#deps.newHandle ?? defaultHandle)();
-    this.#pending.set(handle, { origin: parsed.origin, code: parsed.code, expiresAt: now + PENDING_MS });
+    const voice = this.#deps.voiceRunning();
+    // The code is dropped at its time even if nothing else happens: an unref'd
+    // timer, so it never keeps the app alive.
+    const timer = setTimeout(() => {
+      this.#pending.delete(handle);
+    }, PENDING_MS);
+    timer.unref();
+    this.#pending.set(handle, { origin: parsed.origin, code: parsed.code, expiresAt: now + PENDING_MS, voice, timer });
     return {
       ok: true,
       handle,
       origin: parsed.origin,
       host: new URL(parsed.origin).host,
       profiles: this.#deps.profiles.findByOrigin(parsed.origin).map(({ id, label, account, active }) => ({ id, label, account, active })),
-      voice: this.#deps.voiceRunning(),
+      voice,
     };
   }
 
   cancel(handle: string): boolean {
+    return this.#spend(handle);
+  }
+
+  // #spend forgets a checked link and its timer.
+  #spend(handle: string): boolean {
+    const p = this.#pending.get(handle);
+    if (p === undefined) return false;
+    clearTimeout(p.timer);
     return this.#pending.delete(handle);
+  }
+
+  #clearStaged(): void {
+    if (this.#stagedTimer !== null) clearTimeout(this.#stagedTimer);
+    this.#stagedTimer = null;
+    this.#staged = null;
   }
 
   // accept is the person's click. The handle is spent whatever the answer. The
@@ -167,8 +220,8 @@ export class Invites {
   // existing sequence, which leaves voice first.
   async accept(handle: string, target: InviteTarget): Promise<InviteAccept> {
     const pending = this.#pending.get(handle);
-    this.#pending.delete(handle);
-    this.#staged = null;
+    this.#spend(handle);
+    this.#clearStaged();
     if (pending === undefined || pending.expiresAt <= this.#deps.now()) return { ok: false, refusal: 'expired' };
     let profileId: string;
     let switched = true;
@@ -177,7 +230,10 @@ export class Invites {
       if (chosen === undefined) return { ok: false, refusal: 'unknown-profile' };
       profileId = chosen.id;
       switched = !chosen.active;
+      if (switched && !pending.voice && this.#deps.voiceRunning()) return { ok: false, refusal: 'voice-started' };
     } else {
+      // Adding always switches.
+      if (!pending.voice && this.#deps.voiceRunning()) return { ok: false, refusal: 'voice-started' };
       const added = await this.#deps.profiles.add(pending.origin);
       if (!added.ok) {
         const known = ADD_REFUSALS.find((r) => r === added.refusal);
@@ -185,12 +241,23 @@ export class Invites {
       }
       profileId = added.id;
     }
-    this.#staged = { profileId, code: pending.code, expiresAt: this.#deps.now() + STAGED_MS };
-    if (switched && !(await this.#deps.profiles.switchTo(profileId))) {
-      this.#staged = null;
-      return { ok: false, refusal: 'unsupported' };
+    const staged: Staged = { profileId, code: pending.code, expiresAt: this.#deps.now() + STAGED_MS };
+    this.#staged = staged;
+    // The code is dropped at its time even if no page ever takes it.
+    const timer = setTimeout(() => {
+      if (this.#staged === staged) this.#clearStaged();
+    }, STAGED_MS);
+    timer.unref();
+    this.#stagedTimer = timer;
+    let done = false;
+    try {
+      if (switched && !(await this.#deps.profiles.switchTo(profileId))) return { ok: false, refusal: 'unsupported' };
+      done = true;
+      return { ok: true, switched };
+    } finally {
+      // A refused or thrown switch leaves no code behind.
+      if (!done && this.#staged === staged) this.#clearStaged();
     }
-    return { ok: true, switched };
   }
 
   // take is the one place the code leaves. It answers it once, to the profile
@@ -198,7 +265,7 @@ export class Invites {
   // a take from any other profile, or after the time, spends it unanswered.
   take(): string | null {
     const staged = this.#staged;
-    this.#staged = null;
+    this.#clearStaged();
     if (staged === null || staged.expiresAt <= this.#deps.now()) return null;
     return this.#deps.profiles.view().active === staged.profileId ? staged.code : null;
   }
