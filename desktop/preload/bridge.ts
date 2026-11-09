@@ -10,14 +10,15 @@
 // or a method, and nothing here holds an ipcRenderer, an event or a credential.
 //
 // onVoiceState hands the page each NativeVoiceView main sends on the voice
-// channel, and drops any message that is not exactly one.
+// channel, and drops any message that is not exactly one. onCompanion does
+// the same for a CompanionEvent on the companion channel (issue #1579).
 //
 // subscribe numbers each feed itself (so main's first event for it can never
 // arrive before the number is known here), asks main to open it, hands the
 // page each frame of a batch in order and then acknowledges the batch, which
 // is what lets main send the next. An unsubscribed feed is forgotten here at
 // once: whatever main had already sent for it is dropped.
-import type { ExposedDesktopBridge, FeedHandlers, FeedRequest, NativeVoiceView, Unsubscribe } from '../../web/src/platform/desktop/bridge.ts';
+import type { CompanionEndReason, CompanionEvent, ExposedDesktopBridge, FeedHandlers, FeedRequest, NativeVoiceView, Unsubscribe } from '../../web/src/platform/desktop/bridge.ts';
 import {
   voiceControlBlock,
   voiceControlCapture,
@@ -101,13 +102,35 @@ function isNativeVoiceView(value: unknown): value is NativeVoiceView {
   );
 }
 
+// Checked by the compiler against CompanionEndReason: a reason added there
+// and not here fails tsc.
+const COMPANION_END_REASONS: Readonly<Record<CompanionEndReason, true>> = {
+  leave: true,
+  helper: true,
+  renewal: true,
+  'sign-out': true,
+  switch: true,
+  quit: true,
+  crash: true,
+  reload: true,
+  lock: true,
+  suspend: true,
+};
+
+// A companion message is exactly a CompanionEvent.
+function isCompanionEvent(value: unknown): value is CompanionEvent {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
+  const v = value as Record<string, unknown>;
+  return only(v, ['type', 'reason']) && v['type'] === 'end' && typeof v['reason'] === 'string' && Object.hasOwn(COMPANION_END_REASONS, v['reason']);
+}
+
 function isEnvelope(value: unknown): value is Envelope {
   if (typeof value !== 'object' || value === null) return false;
   const record = value as Record<string, unknown>;
   return (record['ok'] === true && 'value' in record) || (record['ok'] === false && record['kind'] === 'refused');
 }
 
-export function createBridge(invoke: Invoke, listen: Listen, listenVoice: Listen): Readonly<ExposedDesktopBridge> {
+export function createBridge(invoke: Invoke, listen: Listen, listenVoice: Listen, listenCompanion: Listen = () => undefined): Readonly<ExposedDesktopBridge> {
   const call =
     <T>(name: InvokedFunction) =>
     async (...args: unknown[]): Promise<T> => {
@@ -168,6 +191,27 @@ export function createBridge(invoke: Invoke, listen: Listen, listenVoice: Listen
     voiceListeners.add(listener);
     return () => {
       voiceListeners.delete(listener);
+    };
+  };
+
+  // The companion's end, from main, to each listener (issue #1579).
+  const companionListeners = new Set<(event: CompanionEvent) => void>();
+  listenCompanion((message) => {
+    if (!isCompanionEvent(message)) return;
+    for (const listener of [...companionListeners]) {
+      try {
+        listener(message);
+      } catch (error) {
+        queueMicrotask(() => {
+          throw error;
+        });
+      }
+    }
+  });
+  const onCompanion = (listener: (event: CompanionEvent) => void): Unsubscribe => {
+    companionListeners.add(listener);
+    return () => {
+      companionListeners.delete(listener);
     };
   };
 
@@ -236,5 +280,10 @@ export function createBridge(invoke: Invoke, listen: Listen, listenVoice: Listen
     settings: call('settings'),
     settingsSet: call('settingsSet'),
     onVoiceState,
+    // The screen companion (issue #1579): its grant, its end, and main's word
+    // that it has ended.
+    companionGrant: call('companionGrant'),
+    companionEnd: call('companionEnd'),
+    onCompanion,
   });
 }

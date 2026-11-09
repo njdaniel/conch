@@ -12,7 +12,8 @@
 //    validates with the table's validators;
 //  - the bearer credential, a socket ticket, a proof and the person's own
 //    voice grant never cross it: main keeps them, and answers sanitised state
-//    (a WhoAmIResponseV1, or a refusal kind) instead;
+//    (a WhoAmIResponseV1, or a refusal kind) instead. The one credential that
+//    does is the screen companion's grant (DesktopCompanionBridge below);
 //  - every body is a type of web/src/schema, so none of this is a new wire
 //    shape (decision Q1: these in-process messages carry only existing
 //    pkg/schema types).
@@ -303,7 +304,7 @@ export interface ConchDesktopBridge {
 declare global {
   interface Window {
     // Present only in the desktop shell's renderer.
-    readonly conchDesktop?: ConchDesktopBridge & Partial<DesktopVoiceBridge> & Partial<DesktopSettingsBridge>;
+    readonly conchDesktop?: ConchDesktopBridge & Partial<DesktopVoiceBridge> & Partial<DesktopSettingsBridge> & Partial<DesktopCompanionBridge>;
   }
 }
 
@@ -476,6 +477,61 @@ export interface DesktopSettingsBridge {
   settingsSet(change: SettingsChange): Promise<SettingsResult>;
 }
 
-// The object the preload exposes: the bridge, the voice family and the
-// settings. Still no press, release, gate or transmit function in any.
-export type ExposedDesktopBridge = ConchDesktopBridge & DesktopVoiceBridge & DesktopSettingsBridge;
+
+// The screen companion (issue #1579, D4-02 of #772; linux-desktop.md §4,
+// §6.4): the renderer's own LiveKit participant, p<id>.screen, which publishes
+// the screen and watches others' shares (B2). Main asks conchd for its grant
+// only on the person's act, only for the voice destination while the helper
+// is connected there, and hands over the grant alone: never the bearer, the
+// room's name or the person's own voice grant. The token lives 15 s, and
+// every grant needs a new act (Q-D4-2 on #1578: a share is not resumed after a
+// room renewal). In-process TypeScript, as the voice family (decision Q1 on
+// #770), not a wire shape.
+export interface CompanionGrant {
+  // The LiveKit server to connect to, as conchd names it.
+  readonly livekitUrl: string;
+  // The companion's join token: the one credential the renderer holds.
+  readonly token: string;
+  // The companion's identity, p<id>.screen.
+  readonly identity: string;
+  // When the token stops being accepted for a join (RFC 3339).
+  readonly expiresAt: string;
+}
+
+// Why no grant was given. not-in-voice: voice is not connected in that
+// channel (browsing another channel never gets one). not-yet: conchd has not
+// yet seen the person's voice in the room; try again shortly. elsewhere: a
+// companion of this person is already live, here or on another device.
+// ended: a Leave, a lock or a switch overtook the request. failed: anything
+// else, said no more precisely.
+export type CompanionGrantError = 'not-in-voice' | 'not-yet' | 'elsewhere' | 'ended' | 'failed';
+
+export type CompanionGrantResult = { readonly ok: true; readonly grant: CompanionGrant } | { readonly ok: false; readonly error: CompanionGrantError };
+
+// Why main ended the live companion on its own. leave: the person left
+// voice; helper: the helper stopped, failed or lost its connection; renewal:
+// conchd renewed the voice room (the page says "The voice room was renewed.
+// Share again to carry on"); sign-out, switch, quit: the identity is ending;
+// crash and reload: the document that held the grant has gone; lock and
+// suspend: the session was locked or is going to sleep (#1588, D5-02).
+export type CompanionEndReason = 'leave' | 'helper' | 'renewal' | 'sign-out' | 'switch' | 'quit' | 'crash' | 'reload' | 'lock' | 'suspend';
+
+// What main tells the page on the companion channel: always before it asks
+// conchd to remove the companion, so the page disconnects its room first.
+export interface CompanionEvent {
+  readonly type: 'end';
+  readonly reason: CompanionEndReason;
+}
+
+export interface DesktopCompanionBridge {
+  // The companion's grant for the voice destination. Only right after the
+  // person's own click or key.
+  companionGrant(request: { readonly channel: ChannelName }): Promise<CompanionGrantResult>;
+  // Removes the live companion, if there is one, and says whether there was.
+  companionEnd(): Promise<boolean>;
+  onCompanion(listener: (event: CompanionEvent) => void): Unsubscribe;
+}
+
+// The object the preload exposes: the bridge, the voice family, the settings
+// and the companion. Still no press, release, gate or transmit function in any.
+export type ExposedDesktopBridge = ConchDesktopBridge & DesktopVoiceBridge & DesktopSettingsBridge & DesktopCompanionBridge;
