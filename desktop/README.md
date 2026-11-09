@@ -162,7 +162,10 @@ sandbox's namespace mode needs; the other mode is a setuid-root `chrome-sandbox`
 On the Pop!_OS 24.04 workstation `unshare --user true` works (observed
 2026-10-28) and the unpacked build runs sandboxed as is. On the CI runner the
 job makes the helper setuid root (see the comment in `ci.yml`). The packaged
-answer (an AppArmor profile, a setuid fallback) is the `.deb` work, #774.
+answer, decided by Nick on 2026-11-09 (#1595), is an AppArmor profile installed
+with the `.deb`, not a setuid sandbox; see
+[docs/design/linux-desktop.md](../docs/design/linux-desktop.md) §9
+(Distribution) for the package decisions.
 
 The fuses are set by electron-builder (`electronFuses`): RunAsNode off,
 NODE_OPTIONS off, Node CLI inspect arguments off, embedded asar integrity
