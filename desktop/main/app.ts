@@ -20,6 +20,7 @@ import { acquire, prepareRoot } from './instance.ts';
 import { Client } from './api/client.ts';
 import { Session } from './api/session.ts';
 import { deliverVoice } from './voice/events.ts';
+import { Companion } from './voice/companion.ts';
 import { OneShot } from './voice/oneshot.ts';
 import { VoiceService } from './voice/service.ts';
 import { Supervisor } from './voice/supervisor.ts';
@@ -31,6 +32,7 @@ import { Gestures } from './gestures.ts';
 import { installGuards } from './guards.ts';
 import { Ipc } from './ipc.ts';
 import { Links } from './links.ts';
+import { COMPANION_EVENTS } from '../shared/bridge-names.ts';
 import { saveChosenFile } from './save-file.ts';
 import { parseManifest, SCHEME, SCHEME_PRIVILEGES } from './scheme.ts';
 import { electronStorage } from './vault/electron-storage.ts';
@@ -159,9 +161,14 @@ export async function start(): Promise<void> {
     : refusingVault();
 
   trustSystemRoots(tls);
+  // The request executor of the activation in force, which the screen
+  // companion asks conchd with (issue #1579): each activation makes its
+  // attachments from its own client, below, so this is always the newest.
+  let activeClient: Client | null = null;
   // The attachments of the activation in force: its own client and session.
-  const makeFiles = (client: Client, identity: Session): Files =>
-    new Files({
+  const makeFiles = (client: Client, identity: Session): Files => {
+    activeClient = client;
+    return new Files({
       client,
       session: identity,
       chooseSavePath: async (suggested) => {
@@ -176,6 +183,7 @@ export async function start(): Promise<void> {
       isAbsolute,
       log,
     });
+  };
   const profiles = new ProfilesService({
     store,
     vault,
@@ -235,6 +243,38 @@ export async function start(): Promise<void> {
     },
     log,
   });
+  // The screen companion (issue #1579, D4-02 of #772): the one holder of the
+  // p<id>.screen grant. Its media hook is registered before voice's, so a
+  // switch, sign-out or quit tells the page and removes the companion while
+  // the helper and the credential are still in force. A crash or a reload of
+  // the owned window's page ends the document the grant was given to.
+  const companion = new Companion({
+    voice,
+    client: () => activeClient,
+    document: () => live.gate.generation,
+    tell: (document, event) => {
+      const contents = live.owned() === null ? null : (live.window?.webContents ?? null);
+      if (contents !== null && live.gate.shows(document)) contents.send(COMPANION_EVENTS, event);
+    },
+    log,
+  });
+  teardownHooks.media('share', async ({ reason }) => {
+    // From here on the identity is ending: no grant is asked for under it.
+    // A page's grant request after this end (the click of a switch or a
+    // sign-out is still armed) is refused as failed, and one in flight finds
+    // the client changed and removes what conchd issued. The next
+    // activation's makeFiles sets the client again.
+    activeClient = null;
+    await companion.end(reason);
+  });
+  app.on('render-process-gone', (_event, contents) => {
+    if (contents === live.owned()) void companion.end('crash');
+  });
+  app.on('web-contents-created', (_event, contents) => {
+    contents.on('did-start-navigation', (details) => {
+      if (details.isMainFrame && !details.isSameDocument && contents === live.owned()) void companion.end('reload');
+    });
+  });
   teardownHooks.media('voice', () => voice.teardown());
   // Every change of the helper's confirmed state goes to the owned window.
   voice.subscribe((view) => {
@@ -264,6 +304,7 @@ export async function start(): Promise<void> {
     gestures,
     profiles,
     voice,
+    companion,
     now: Date.now,
     log,
   }).register(ipcMain);
