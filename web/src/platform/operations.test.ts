@@ -93,6 +93,9 @@ describe('the operation table', () => {
         'totpEnroll',
         'voiceSession',
         'voiceViewer',
+        // Main keeps the record of the desktop's screen companion and ends it
+        // itself (issue #1579).
+        'voiceViewerEnd',
         'wsTicket',
       ].sort(),
     );

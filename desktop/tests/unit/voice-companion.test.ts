@@ -277,6 +277,37 @@ describe('the companion’s grant', () => {
     expect(r.companion.liveOrigin()).toBeNull();
   });
 
+  // The 'share' media hook (app.ts) clears the client before it ends the
+  // companion, so a page that asks right after (a switch's or a sign-out's
+  // click is still armed) gets nothing under the identity that is ending.
+  it('refuses a grant asked for after the teardown hook’s end, with voice still running, and sends nothing', async () => {
+    const r = rig();
+    await live(r);
+    r.client = null;
+    expect(await r.companion.end('switch')).toBe(true);
+    r.steps.length = 0;
+    // The helper has not been stopped yet: the view is the same.
+    expect(r.voice.view).toEqual(running());
+    expect(await r.companion.grant({ channel: 'general' })).toEqual({ ok: false, error: 'failed' });
+    expect(r.steps).toEqual([]);
+    expect(r.companion.liveOrigin()).toBeNull();
+  });
+
+  it('removes as unused a grant in flight when the teardown hook clears the client, and holds nothing', async () => {
+    const r = rig();
+    let answer: (exchange: Exchange) => void = () => undefined;
+    r.answers.push(new Promise<Exchange>((resolve) => (answer = resolve)));
+    const first = r.companion.grant({ channel: 'general' });
+    // The client alone has changed (no end yet): that is enough.
+    r.client = null;
+    answer(ok(ANSWER));
+    expect(await first).toEqual({ ok: false, error: 'ended' });
+    // The DELETE goes with the client that asked.
+    expect(r.sends()).toEqual([POST, DELETE]);
+    expect(r.logs).not.toContain('companion: issued');
+    expect(r.companion.liveOrigin()).toBeNull();
+  });
+
   it('ends a companion of an activation no longer in force before asking for the next', async () => {
     const r = rig();
     await live(r);
@@ -447,9 +478,13 @@ describe('the bearer never leaves main (canary)', () => {
 });
 
 describe('the route’s entry in the operation table', () => {
-  it('stays renderer: false, so the page can never ask for a grant itself', () => {
+  it('stays renderer: false, so the page can never ask for a grant itself, nor end main’s companion behind its back', () => {
     expect(operations.voiceViewer.renderer).toBe(false);
     expect(invocable('voiceViewer')).toBe(false);
+    // A DELETE from the page would leave main's record (and liveOrigin) in
+    // place for a companion conchd had removed (security review of #1604).
+    expect(operations.voiceViewerEnd.renderer).toBe(false);
+    expect(invocable('voiceViewerEnd')).toBe(false);
     expect(operations.voiceViewer.method).toBe('POST');
     expect(operations.voiceViewer.path).toBe('/v1/channels/{channel}/voice/companion');
     expect(operations.voiceViewerEnd.method).toBe('DELETE');

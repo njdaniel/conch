@@ -259,6 +259,12 @@ export async function start(): Promise<void> {
     log,
   });
   teardownHooks.media('share', async ({ reason }) => {
+    // From here on the identity is ending: no grant is asked for under it.
+    // A page's grant request after this end (the click of a switch or a
+    // sign-out is still armed) is refused as failed, and one in flight finds
+    // the client changed and removes what conchd issued. The next
+    // activation's makeFiles sets the client again.
+    activeClient = null;
     await companion.end(reason);
   });
   app.on('render-process-gone', (_event, contents) => {
