@@ -1,9 +1,10 @@
 import { describe, expect, it } from 'vitest';
+import type { CompanionEndReason, CompanionGrantResult } from '../platform/desktop/bridge';
 import type { ShareClaimResult, TransmitAnswer, VoiceSessionResult, VoiceViewerResult } from '../api';
 import type { VoicePresenceV2 } from '../schema/voice';
 import type { CameraClaimResult } from '../api';
 import type { Camera, CameraProfile, KeptCamera } from './camera';
-import { VoiceClient, chosenGone, earlierGone, levelEvery, meterEvery, outputMoved, outputRefused, reconnectLimit, reportWait, type CameraTrack, type Microphone, type ModeStore, type Output, type Phase, type Processing, type ProcessingStore, type Room, type RoomEvents, type ShareSink } from './connection';
+import { VoiceClient, chosenGone, companionDefaultQuality, companionEnds, companionLost, companionRefusals, type CompanionEnv, earlierGone, levelEvery, meterEvery, outputMoved, outputRefused, reconnectLimit, reportWait, type CameraTrack, type Microphone, type ModeStore, type Output, type Phase, type Processing, type ProcessingStore, type Room, type RoomEvents, type ShareSink } from './connection';
 import { qualityLaterNote, resumeLimit, type Captured, type KeptScreen, type ShareQuality } from './share';
 import { defaultTail } from './gate';
 import { FakeClock, settle } from './fakes';
@@ -74,6 +75,7 @@ class StubRoom implements Room {
   disconnectOnClose = false;
   close = (): Promise<void> => {
     this.closed = true;
+    this.order?.push('close');
     this.camLog.push('close');
     if (this.disconnectOnClose) this.events?.onDisconnected('lost');
     return Promise.resolve();
@@ -84,6 +86,13 @@ class StubRoom implements Room {
   sinks: (ShareSink | null)[] = [];
   pickAudio = true;
   pickFails = false;
+  // Issue #1581: made the desktop's screen companion before connecting, and
+  // the order of what the room, conchd and main were asked (when set).
+  companion = false;
+  order: string[] | null = null;
+  setCompanion = (on: boolean): void => {
+    this.companion = on;
+  };
   publishMicrophone = (): Promise<void> => {
     this.calls.push('microphone');
     return this.microphoneFailure === null ? Promise.resolve() : Promise.reject(this.microphoneFailure);
@@ -99,6 +108,7 @@ class StubRoom implements Room {
   };
   pickScreen = (): Promise<Captured> => {
     this.calls.push('pick');
+    this.order?.push('pick');
     return this.pickFails ? Promise.reject(new Error('picker closed')) : Promise.resolve({ audio: this.pickAudio });
   };
   qualities: ShareQuality[] = [];
@@ -109,10 +119,12 @@ class StubRoom implements Room {
   readShareStats = (): Promise<null> => Promise.resolve(null);
   publishScreen = (): Promise<void> => {
     this.calls.push('publish');
+    this.order?.push('publish');
     return Promise.resolve();
   };
   stopScreen = (): Promise<void> => {
     this.calls.push('stop');
+    this.order?.push('unpublish');
     return Promise.resolve();
   };
   // Issue #516: a capture handed from one connection to the next.
@@ -375,8 +387,11 @@ function setup(
   camera?: { readonly answers?: CameraClaimResult[]; readonly choice?: Camera | null; readonly holdClaims?: boolean },
   // Issue #936: conchd's answers to the viewer grant, in order.
   viewers: VoiceViewerResult[] = [],
+  // Issue #1581: the desktop's screen companion, made with the order log.
+  companion?: (order: string[]) => CompanionEnv,
 ) {
   const clock = new FakeClock();
+  const order: string[] = [];
   const rooms: StubRoom[] = [];
   const asked: string[] = [];
   const reports: string[] = [];
@@ -439,17 +454,20 @@ function setup(
         const room = new StubRoom();
         room.log = log;
         room.camLog = camLog;
+        room.order = order;
         room.connectError = rooms.length < failFirst;
         prepare?.(room, rooms.length);
         rooms.push(room);
         return room;
       },
       claimShare: (channel, quality) => {
+        order.push(`claim ${channel}`);
         shares.push(`claim ${channel}`);
         shareQualities.push(quality);
         return Promise.resolve(shareAnswers.shift() ?? claim);
       },
-      stopShare: (channel) => {
+      stopShare: (channel, startedAt) => {
+        order.push(`release ${channel} ${startedAt}`);
         shares.push(`stop ${channel}`);
         return Promise.resolve();
       },
@@ -465,6 +483,7 @@ function setup(
         camLog.push(`DELETE ${channel} ?started_at=${startedAt}`);
         return Promise.resolve();
       },
+      ...(companion === undefined ? {} : { companion: companion(order) }),
       ...(camera?.choice === undefined ? {} : { camera: camera.choice }),
       ...(microphone === undefined ? {} : { microphone }),
       ...(processing === undefined ? {} : { processing }),
@@ -472,7 +491,7 @@ function setup(
     },
     () => clock.now,
   );
-  return { client, clock, rooms, asked, reports, reportedIn, shares, shareQualities, shareAnswers, log, answer, trace, camLog, claimsWaiting, viewerLog };
+  return { client, clock, rooms, asked, reports, reportedIn, shares, shareQualities, shareAnswers, log, answer, trace, camLog, claimsWaiting, viewerLog, order };
 }
 
 const cameraGranted: CameraClaimResult = { ok: true, value: { principal_id: 7, started_at: '2026-10-16T00:00:01.000Z' } };
@@ -3113,5 +3132,342 @@ describe('watching beside voice in another client', () => {
     expect(t.client.snapshot().phase).toBe('connected');
     expect(t.viewerLog).toEqual(['POST general publish=none', 'POST general publish=none']);
     expect(t.asked).toEqual([]);
+  });
+});
+
+// ---- the desktop's screen companion (issue #1581, D4-04 of #772)
+
+const companionToken = 'companion-token-secret-value';
+const grantOk: CompanionGrantResult = {
+  ok: true,
+  grant: { livekitUrl: 'wss://lk.example', token: companionToken, identity: 'p7.screen', expiresAt: '2026-10-16T00:00:15.000Z' },
+};
+
+// The native voice's companion, recorded: what main was asked, in order with
+// the room's and conchd's, main's end, and the helper's deafen.
+function nativeCompanion(order: string[], answers: CompanionGrantResult[] = []) {
+  const ends = new Set<(reason: CompanionEndReason) => void>();
+  const deafs = new Set<() => void>();
+  const state = { deaf: false, grants: [] as string[], endCalls: 0 };
+  const env: CompanionEnv = {
+    grant: (channel) => {
+      order.push(`grant ${channel}`);
+      state.grants.push(channel);
+      return Promise.resolve(answers.shift() ?? grantOk);
+    },
+    end: () => {
+      order.push('end');
+      state.endCalls++;
+      return Promise.resolve(true);
+    },
+    onEnd: (listener) => {
+      ends.add(listener);
+      return () => {
+        ends.delete(listener);
+      };
+    },
+    deafened: () => state.deaf,
+    onDeafened: (listener) => {
+      deafs.add(listener);
+      return () => {
+        deafs.delete(listener);
+      };
+    },
+  };
+  return {
+    env,
+    state,
+    end: (reason: CompanionEndReason) => {
+      for (const l of [...ends]) l(reason);
+    },
+    deafen: (on: boolean) => {
+      state.deaf = on;
+      for (const l of [...deafs]) l();
+    },
+    listening: () => ends.size + deafs.size,
+  };
+}
+
+function companionSetup(answers: CompanionGrantResult[] = [], prepare?: (room: StubRoom) => void) {
+  const made: ReturnType<typeof nativeCompanion>[] = [];
+  const t = setup([], [], 0, false, prepare === undefined ? undefined : (room) => { prepare(room); }, undefined, undefined, undefined, undefined, [], (order) => {
+    const native = nativeCompanion(order, answers);
+    made.push(native);
+    return native.env;
+  });
+  const native = made[0];
+  if (native === undefined) throw new Error('no companion');
+  return { ...t, native };
+}
+
+describe('the screen companion', () => {
+  it('connects only with the grant main returned, after a Share, never asking for the person’s own session', async () => {
+    const t = companionSetup();
+    expect(t.native.state.grants).toEqual([]);
+    expect(t.rooms).toHaveLength(0);
+    t.client.startCompanionShare('general');
+    expect(t.native.state.grants).toEqual(['general']);
+    await settle();
+    expect(t.asked).toEqual([]);
+    expect(t.viewerLog).toEqual([]);
+    expect(t.rooms[0]?.connectArgs).toEqual({ url: 'wss://lk.example', token: companionToken, roomName: '', publish: false });
+    expect(t.rooms[0]?.companion).toBe(true);
+    expect(t.client.snapshot()).toMatchObject({ phase: 'connected', companion: true, watchOnly: true, viewer: false });
+  });
+
+  it('never keeps the grant’s token in its state', async () => {
+    const t = companionSetup();
+    t.client.startCompanionShare('general');
+    await settle();
+    expect(JSON.stringify({ ...t.client.snapshot(), speaking: [...t.client.snapshot().speaking] })).not.toMatch(/secret/);
+  });
+
+  it.each([
+    ['not-in-voice' as const],
+    ['not-yet' as const],
+    ['elsewhere' as const],
+    ['ended' as const],
+    ['failed' as const],
+  ])('a grant refused as %s shows its typed reason and connects nothing', async (error) => {
+    const t = companionSetup([{ ok: false, error }]);
+    t.client.startCompanionShare('general');
+    await settle();
+    expect(t.rooms).toHaveLength(0);
+    expect(t.shares).toEqual([]);
+    expect(t.client.snapshot()).toMatchObject({ phase: 'stopped', companion: true, companionRefusal: error, why: companionRefusals[error] });
+    // Not tried again by itself, and main is not asked to end what it never issued.
+    t.clock.advance(120_000);
+    await settle();
+    expect(t.native.state.grants).toEqual(['general']);
+    expect(t.native.state.endCalls).toBe(0);
+    expect(t.native.listening()).toBe(0);
+  });
+
+  it('a browser with no companion, or a bridge that throws, is a failed grant', async () => {
+    const none = setup();
+    none.client.join('general', { companion: true });
+    await settle();
+    expect(none.rooms).toHaveLength(0);
+    expect(none.client.snapshot()).toMatchObject({ phase: 'stopped', companionRefusal: 'failed' });
+    const t = companionSetup();
+    const grant = t.native.env.grant;
+    const throwing = setup([], [], 0, false, undefined, undefined, undefined, undefined, undefined, [], () => ({ ...t.native.env, grant: (channel) => { void grant(channel); return Promise.reject(new Error('bridge gone')); } }));
+    throwing.client.join('general', { companion: true });
+    await settle();
+    expect(throwing.rooms).toHaveLength(0);
+    expect(throwing.client.snapshot()).toMatchObject({ phase: 'stopped', companionRefusal: 'failed' });
+  });
+
+  it('never captures or publishes a microphone, camera or share sound, and subscribes to no voice', async () => {
+    const t = companionSetup();
+    t.client.startCompanionShare('general');
+    await settle();
+    await t.client.useMicrophone();
+    await t.client.startCamera();
+    await settle();
+    expect(t.rooms[0]?.calls).toEqual(['pick', 'publish']);
+    expect(t.rooms[0]?.calls).not.toContain('microphone');
+    expect(t.rooms[0]?.connectArgs?.publish).toBe(false);
+    expect(t.camLog.filter((l) => l.startsWith('POST'))).toEqual([]);
+    expect(t.client.snapshot()).toMatchObject({ cameraTrack: 'none', watchOnly: true });
+  });
+
+  it('claims, then picks, then publishes; the connection comes before the claim', async () => {
+    const t = companionSetup();
+    t.client.startCompanionShare('general');
+    await settle();
+    expect(t.order).toEqual(['grant general', 'claim general', 'pick', 'claim general', 'publish']);
+    expect(t.client.snapshot().share).toEqual({ kind: 'sharing', audio: true });
+  });
+
+  it('Stop releases the claim by started_at, unpublishes, disconnects the room and then tells main', async () => {
+    const t = companionSetup();
+    t.client.startCompanionShare('general');
+    await settle();
+    t.order.length = 0;
+    t.client.stopShare();
+    await settle();
+    expect(t.order).toEqual(['unpublish', 'release general 2026-10-16T00:00:00.000Z', 'close', 'end']);
+    expect(t.rooms[0]?.closed).toBe(true);
+    expect(t.client.snapshot()).toMatchObject({ phase: 'idle', companion: false, share: { kind: 'idle', ended: 'self' } });
+    expect(t.native.listening()).toBe(0);
+  });
+
+  it('a source ended by the portal or the system ends the share with the existing words, and lets the companion go', async () => {
+    const t = companionSetup();
+    t.client.startCompanionShare('general');
+    await settle();
+    t.rooms[0]?.events?.onScreenEnded('browser');
+    await settle();
+    expect(t.client.snapshot().share).toEqual({ kind: 'idle', ended: 'browser' });
+    expect(t.rooms[0]?.closed).toBe(true);
+    expect(t.native.state.endCalls).toBe(1);
+  });
+
+  it('a share refused by conchd ends the companion too, with nothing watched', async () => {
+    const t = companionSetup();
+    t.shareAnswers.push({ ok: false, failure: 'invalid', status: 409, code: 'voice_share_full' });
+    t.client.startCompanionShare('general');
+    await settle();
+    expect(t.rooms[0]?.calls).toEqual([]);
+    expect(t.rooms[0]?.closed).toBe(true);
+    expect(t.native.state.endCalls).toBe(1);
+  });
+
+  it('watches by publisher, never the person’s own stream, and keeps the companion while any watch lasts', async () => {
+    const t = companionSetup();
+    t.client.watchCompanionStream('general', 8);
+    await settle();
+    expect(t.rooms[0]?.streamWatches.at(-1)).toEqual({ watched: [8], focused: null });
+    t.client.watchCompanionStream('general', 7);
+    t.client.watchStream(9, true);
+    expect(t.rooms[0]?.streamWatches.at(-1)).toEqual({ watched: [8, 9], focused: null });
+    t.client.focusShare(9);
+    expect(t.rooms[0]?.streamWatches.at(-1)).toEqual({ watched: [8, 9], focused: 9 });
+    t.client.watchStream(8, false);
+    t.client.watchStream(9, false);
+    await settle();
+    // Nothing left to do: the companion goes.
+    expect(t.rooms[0]?.closed).toBe(true);
+    expect(t.native.state.endCalls).toBe(1);
+    expect(t.rooms[0]?.calls).toEqual([]);
+  });
+
+  it('a watch is carried by a connected companion without joining again', async () => {
+    const t = companionSetup();
+    t.client.startCompanionShare('general');
+    await settle();
+    t.client.watchCompanionStream('general', 8);
+    expect(t.native.state.grants).toEqual(['general']);
+    expect(t.client.snapshot().watched).toEqual(new Set([8]));
+    t.client.stopShare();
+    await settle();
+    expect(t.rooms[0]?.closed).toBe(false);
+    expect(t.client.snapshot().phase).toBe('connected');
+  });
+
+  it('a share asked while the voice is in the page another way does nothing', async () => {
+    const t = companionSetup();
+    t.client.join('general');
+    await settle();
+    t.client.startCompanionShare('general');
+    t.client.watchCompanionStream('general', 8);
+    expect(t.native.state.grants).toEqual([]);
+    expect(t.client.snapshot().watched).toEqual(new Set());
+  });
+
+  it.each<[CompanionEndReason, 'left' | 'rotated' | 'lost']>([
+    ['leave', 'left'],
+    ['helper', 'lost'],
+    ['renewal', 'rotated'],
+    ['sign-out', 'lost'],
+    ['switch', 'lost'],
+    ['quit', 'lost'],
+    ['crash', 'lost'],
+    ['reload', 'lost'],
+    ['lock', 'lost'],
+    ['suspend', 'lost'],
+  ])('main ending the companion (%s) stops the capture and leaves the room at once, in words, and never reconnects', async (reason, ended) => {
+    const t = companionSetup();
+    t.client.startCompanionShare('general');
+    await settle();
+    t.order.length = 0;
+    t.native.end(reason);
+    await settle();
+    expect(t.order.slice(0, 2)).toEqual(['unpublish', 'close']);
+    expect(t.order).not.toContain('end');
+    expect(t.rooms[0]?.closed).toBe(true);
+    expect(t.client.snapshot()).toMatchObject({ phase: 'stopped', why: companionEnds[reason], share: { kind: 'idle', ended } });
+    t.clock.advance(120_000);
+    await settle();
+    expect(t.native.state.grants).toEqual(['general']);
+    expect(t.rooms).toHaveLength(1);
+    expect(t.native.listening()).toBe(0);
+  });
+
+  it('a room renewal ends the share with words and does not resume it or ask for a new grant', async () => {
+    const t = companionSetup();
+    t.client.startCompanionShare('general');
+    await settle();
+    t.rooms[0]?.events?.onDisconnected('room_deleted');
+    await settle();
+    t.client.presence({ ...presenceWith(null) });
+    t.clock.advance(120_000);
+    await settle();
+    expect(t.rooms).toHaveLength(1);
+    expect(t.rooms[0]?.calls).not.toContain('keep');
+    expect(t.native.state.grants).toEqual(['general']);
+    expect(t.client.snapshot()).toMatchObject({ phase: 'stopped', why: companionEnds.renewal, share: { kind: 'idle', ended: 'rotated' } });
+    expect(t.native.state.endCalls).toBe(1);
+  });
+
+  it('a lost connection stops the companion and tells main, rather than retrying with a new grant', async () => {
+    const t = companionSetup();
+    t.client.startCompanionShare('general');
+    await settle();
+    t.rooms[0]?.events?.onDisconnected('lost');
+    await settle();
+    t.clock.advance(120_000);
+    await settle();
+    expect(t.native.state.grants).toEqual(['general']);
+    expect(t.client.snapshot()).toMatchObject({ phase: 'stopped', why: companionLost });
+    expect(t.native.state.endCalls).toBe(1);
+  });
+
+  it('a room that will not connect is over, main is told, and nothing retries', async () => {
+    const t = companionSetup([], (room) => {
+      room.connectError = true;
+    });
+    t.client.startCompanionShare('general');
+    await settle();
+    t.clock.advance(120_000);
+    await settle();
+    expect(t.native.state.grants).toEqual(['general']);
+    expect(t.native.state.endCalls).toBe(1);
+    expect(t.client.snapshot().phase).toBe('stopped');
+    expect(t.rooms[0]?.calls).toEqual([]);
+  });
+
+  it('follows the helper’s deafen: a watched share’s sound is muted while deafened, and back after', async () => {
+    const t = companionSetup();
+    t.native.state.deaf = true;
+    t.client.watchCompanionStream('general', 8);
+    await settle();
+    // Deafened from the first, before anything is heard.
+    expect(t.rooms[0]?.deafened.at(-1)).toBe(true);
+    expect(t.client.snapshot().deafened).toBe(true);
+    t.native.deafen(false);
+    expect(t.rooms[0]?.deafened.at(-1)).toBe(false);
+    expect(t.client.snapshot().deafened).toBe(false);
+    t.native.deafen(true);
+    expect(t.client.snapshot().deafened).toBe(true);
+  });
+
+  it('offers 720p30 by default and 1080p30, and takes any other choice as the default', async () => {
+    const t = companionSetup();
+    expect(t.client.snapshot().shareQuality).toEqual(companionDefaultQuality);
+    expect(companionDefaultQuality).toEqual({ resolution: '720p', frameRate: 30 });
+    await t.client.setShareQuality({ resolution: '1080p', frameRate: 30 });
+    expect(t.client.snapshot().shareQuality).toEqual({ resolution: '1080p', frameRate: 30 });
+    await t.client.setShareQuality({ resolution: 'source', frameRate: 60 });
+    expect(t.client.snapshot().shareQuality).toEqual(companionDefaultQuality);
+    await t.client.setShareQuality({ resolution: '720p', frameRate: 15 });
+    expect(t.client.snapshot().shareQuality).toEqual(companionDefaultQuality);
+  });
+
+  it('the browser keeps every quality and 1080p30 by default', async () => {
+    const t = setup();
+    expect(t.client.snapshot().shareQuality).toEqual({ resolution: '1080p', frameRate: 30 });
+    await t.client.setShareQuality({ resolution: 'source', frameRate: 60 });
+    expect(t.client.snapshot().shareQuality).toEqual({ resolution: 'source', frameRate: 60 });
+  });
+
+  it('leaving removes the companion after the room is closed', async () => {
+    const t = companionSetup();
+    t.client.watchCompanionStream('general', 8);
+    await settle();
+    t.order.length = 0;
+    await t.client.leave();
+    expect(t.order).toEqual(['close', 'end']);
   });
 });

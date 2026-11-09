@@ -179,6 +179,10 @@ export interface Wants {
   readonly viewing: boolean;
   readonly shown: boolean;
   readonly claimed: boolean;
+  // Whether people's voices (microphones) are wanted. True in the browser;
+  // false for the desktop's screen companion, which never subscribes to
+  // voice (linux-desktop.md §6.4, B2: the filter beside autoSubscribe off).
+  readonly voice: boolean;
 }
 
 // compatible is whether a track's declared source and kind agree (S1).
@@ -189,7 +193,8 @@ export function compatible(source: Track.Source, kind: Track.Kind | undefined): 
 }
 
 // wanted is the subscription choice for a remote track, by its declared source,
-// kind and publisher together (S1): a microphone always, if it is sound; a
+// kind and publisher together (S1): a microphone if it is sound and voice is
+// wanted (always, but for the screen companion); a
 // camera if it is a picture, from someone holding a claim, while the call view
 // is open and shown here; a watched share's picture and sound, each of its own
 // kind. Anything else, any track whose kind disagrees with its source, and this
@@ -198,7 +203,7 @@ export function wanted(source: Track.Source, kind: Track.Kind | undefined, princ
   if (!compatible(source, kind)) return false;
   switch (source) {
     case Track.Source.Microphone:
-      return true;
+      return want.voice;
     case Track.Source.Camera:
       return want.viewing && want.shown && want.claimed;
     case Track.Source.ScreenShare:
@@ -487,13 +492,16 @@ export function shareEncodings(captured: CapturedVideo, quality: ShareQuality = 
 // What the picker asks for: the chosen picture caps, unprocessed sound, the
 // Conch tab left out, and the shared tab still heard by the sharer. At 15 fps
 // detail keeps text sharp; at 30 and 60 motion keeps the frame rate instead.
-export function captureOptions(quality: ShareQuality = defaultShareQuality): ScreenShareCaptureOptions {
+// With sound false (the desktop's screen companion on Linux, which has no
+// route for share audio, linux-desktop.md §8) the capture asks for no audio
+// at all, and the system's sound is not offered.
+export function captureOptions(quality: ShareQuality = defaultShareQuality, sound = true): ScreenShareCaptureOptions {
   return {
     video: true,
-    audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false, channelCount: 2, restrictOwnAudio: true },
+    audio: sound ? { echoCancellation: false, noiseSuppression: false, autoGainControl: false, channelCount: 2, restrictOwnAudio: true } : false,
     resolution: shareAsk(quality),
     contentHint: quality.frameRate === 15 ? 'detail' : 'motion',
-    systemAudio: 'include',
+    systemAudio: sound ? 'include' : 'exclude',
     selfBrowserSurface: 'exclude',
     surfaceSwitching: 'include',
     suppressLocalAudioPlayback: false,
@@ -778,6 +786,9 @@ class LiveKitAdapter implements Room {
   private viewing = false;
   private shown = true;
   private claimed: ReadonlySet<number> = new Set();
+  // The desktop's screen companion (issue #1581): it publishes a screen and
+  // nothing else, asks for no sound with it, and subscribes to no voice.
+  private companion = false;
   private readonly remoteCameras = new Map<number, RemoteTrack>();
   private readonly cameraViews = new Map<number, HTMLVideoElement>();
 
@@ -926,6 +937,7 @@ class LiveKitAdapter implements Room {
 
   async publishMicrophone(): Promise<void> {
     this.ensureOpen();
+    if (this.companion) throw new Error('voice: a companion has no microphone');
     // One under way is joined, to its end: its track is set before it is
     // published.
     if (this.publishing === null) {
@@ -986,6 +998,7 @@ class LiveKitAdapter implements Room {
   // the last switch waiting moves the capture, to the choice as it is then.
   async switchMicrophone(choice: string | null): Promise<void> {
     this.ensureOpen();
+    if (this.companion) throw new Error('voice: a companion has no microphone');
     this.choice = choice;
     const turn = ++this.switches;
     const publishing = this.publishing;
@@ -1185,7 +1198,11 @@ class LiveKitAdapter implements Room {
     this.ensureOpen();
     this.shareQuality = quality;
     await this.stopScreen();
-    const tracks = await this.room.localParticipant.createScreenTracks(captureOptions(quality));
+    const made = await this.room.localParticipant.createScreenTracks(captureOptions(quality, !this.companion));
+    // The companion has no sound to share on Linux: whatever the portal gave
+    // beyond the picture is stopped and never held or published.
+    const tracks = this.companion ? made.filter((t) => t.source === Track.Source.ScreenShare) : made;
+    if (this.companion) for (const t of made) if (!tracks.includes(t)) t.stop();
     if (this.closed) {
       for (const t of tracks) t.stop();
       throw new ClosedError();
@@ -1319,6 +1336,8 @@ class LiveKitAdapter implements Room {
       // Read at each publish, so a capture adopted from an earlier connection
       // is published at the size it has now.
       const settings = track.mediaStreamTrack.getSettings();
+      // The companion publishes the picture alone, whatever was captured.
+      if (this.companion && track.source !== Track.Source.ScreenShare) continue;
       const options = track.source === Track.Source.ScreenShareAudio ? audioPublishOptions((settings.channelCount ?? 1) >= 2) : videoPublishOptions(settings, this.shareQuality);
       await this.publishGranted(track, options, deadline);
       this.ensureOpen();
@@ -1400,6 +1419,13 @@ class LiveKitAdapter implements Room {
 
   // ---- watching
 
+  // setCompanion makes this connection the desktop's screen companion
+  // (issue #1581): before connecting, so that no voice is subscribed from the
+  // first track. It cannot be undone on this room.
+  setCompanion(on: boolean): void {
+    this.companion = on;
+  }
+
   setWatches(watched: ReadonlySet<number>, focused: number | null): void {
     this.watching = new Set(watched);
     this.focused = focused;
@@ -1428,7 +1454,7 @@ class LiveKitAdapter implements Room {
   // (personOf), so their stream is never watched here.
   private wantsOf(participant: Participant | undefined): Wants {
     const principal = participant === undefined ? null : principalOf(participant.identity);
-    return { watching: this.watching, focused: this.focused, own: personOf(this.room.localParticipant.identity), viewing: this.viewing, shown: this.shown, claimed: principal !== null && this.claimed.has(principal) };
+    return { watching: this.watching, focused: this.focused, own: personOf(this.room.localParticipant.identity), viewing: this.viewing, shown: this.shown, claimed: principal !== null && this.claimed.has(principal), voice: !this.companion };
   }
 
   private subscribe(pub: RemoteTrackPublication, participant: RemoteParticipant | undefined): void {

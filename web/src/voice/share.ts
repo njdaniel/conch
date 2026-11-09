@@ -469,8 +469,10 @@ export class ScreenShare {
 
   // stop ends the share from this side: the Stop sharing button, the
   // browser's own stop control, leaving voice, or a connection that was lost
-  // and replaced. conchd is asked to end it while it is still held.
-  async stop(cause: 'self' | 'browser' | 'left' | 'lost'): Promise<void> {
+  // and replaced. conchd is asked to end it while it is still held. 'rotated'
+  // is the desktop companion's room renewed: its share is not resumed (Q-D4-2
+  // on #1578), so it ends with the renewal's words.
+  async stop(cause: 'self' | 'browser' | 'left' | 'lost' | 'rotated'): Promise<void> {
     if (this.state.kind === 'idle' || this.state.kind === 'stopping') return;
     const mine = ++this.attempt;
     const { channel, room } = this;
