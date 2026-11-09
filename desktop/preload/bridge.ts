@@ -232,6 +232,12 @@ export function createBridge(invoke: Invoke, listen: Listen, listenVoice: Listen
     voiceSaveDevice: call('voiceSaveDevice'),
     voiceKeyDevices: call('voiceKeyDevices'),
     voiceSaveTalkBinding: call('voiceSaveTalkBinding'),
+    // Opening an invite link (issue #1591). The code comes back from
+    // inviteTake only, once.
+    inviteCheck: call('inviteCheck'),
+    inviteAccept: call('inviteAccept'),
+    inviteCancel: call('inviteCancel'),
+    inviteTake: call('inviteTake'),
     onVoiceState,
   });
 }

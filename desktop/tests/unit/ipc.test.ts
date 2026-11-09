@@ -4,7 +4,7 @@ import type { Feeds } from '../../main/api/feeds.ts';
 import type { Files } from '../../main/files.ts';
 import type { Service } from '../../main/api/service.ts';
 import { DocumentGate } from '../../main/document.ts';
-import { checkCaller, Ipc, parseRequest, plain, type ProfilesApi, type VoiceApi, type ContentsLike, type FrameLike, type InvokeEvent } from '../../main/ipc.ts';
+import { checkCaller, Ipc, parseRequest, plain, type InvitesApi, type ProfilesApi, type VoiceApi, type ContentsLike, type FrameLike, type InvokeEvent } from '../../main/ipc.ts';
 import { INVOKED_FUNCTIONS, VOICE_EVENTS, VOICE_FUNCTIONS } from '../../shared/bridge-names.ts';
 import { deliverVoice } from '../../main/voice/events.ts';
 import type { NativeVoiceView } from '../../../web/src/platform/desktop/bridge.ts';
@@ -47,8 +47,9 @@ function fixture(): Fixture {
   const input = { recent: false };
   const files = new Proxy({} as Files, { get: (_t, name: string) => record(`files.${name}`) });
   const voice = new Proxy({} as VoiceApi, { get: (_t, name: string) => record(`voice.${name}`) });
+  const invites = new Proxy({} as InvitesApi, { get: (_t, name: string) => record(`invites.${name}`) });
   const gestures = { take: () => (input.recent ? ('pointer' as const) : null) };
-  const ipc = new Ipc({ owned: () => contents, gate, service, feeds, files, gestures, profiles, voice, now: () => clock.now, log: (line) => logs.push(line) });
+  const ipc = new Ipc({ owned: () => contents, gate, service, feeds, files, gestures, profiles, voice, invites, now: () => clock.now, log: (line) => logs.push(line) });
   return { ipc, gate, contents, main, calls, logs, clock, permit, input, event: (over = {}) => ({ sender: contents, senderFrame: main, ...over }) };
 }
 
@@ -91,6 +92,7 @@ describe('every invocation is checked before anything else', () => {
       gestures: { take: () => null },
       profiles: {} as ProfilesApi,
       voice: {} as VoiceApi,
+      invites: {} as InvitesApi,
       now: () => 0,
       log: () => undefined,
     });
@@ -311,6 +313,7 @@ describe('arguments', () => {
       gestures: { take: () => null },
       profiles: { add: () => { throw new Error('boom secret-arg'); } } as unknown as ProfilesApi,
       voice: {} as VoiceApi,
+      invites: {} as InvitesApi,
       now: () => 0,
       log: (line) => f.logs.push(line),
     });
@@ -388,6 +391,7 @@ describe('the credential-replacing writes (issue #1422)', () => {
       gestures: { take: () => null },
       profiles: { signInPermitted: () => true, signedIn: (account: unknown) => { bound.push(account); return Promise.resolve(true); } } as unknown as ProfilesApi,
       voice: {} as VoiceApi,
+      invites: {} as InvitesApi,
       now: () => 0,
       log: () => undefined,
     });
@@ -647,6 +651,7 @@ describe('the voice family (issue #1374)', () => {
     const asked: number[] = [];
     const ipc = new Ipc({
       owned: () => f.contents, gate: f.gate, service: {} as Service, feeds: {} as Feeds, files: {} as Files, profiles: {} as ProfilesApi, voice: {} as VoiceApi,
+ invites: {} as InvitesApi,
       gestures: { take: (_c, within) => { asked.push(within); return 'pointer'; } }, now: () => 0, log: () => undefined,
     });
     await ipc.invoke(f.event(), 'voiceSetTalkMode', ['bogus']);
@@ -682,7 +687,7 @@ describe('the voice family (issue #1374)', () => {
     const ipc = new Ipc({
       owned: () => f.contents, gate: f.gate, service: {} as Service, feeds: {} as Feeds, files: {} as Files, profiles: {} as ProfilesApi,
       voice: { join: () => { throw new Error('boom secret-channel'); } } as unknown as VoiceApi,
-      gestures: { take: () => 'pointer' }, now: () => 0, log: (line) => f.logs.push(line),
+      invites: {} as InvitesApi, gestures: { take: () => 'pointer' }, now: () => 0, log: (line) => f.logs.push(line),
     });
     expect(await ipc.invoke(f.event(), 'voiceJoin', [{ ...join, channel: 'secret-channel' }])).toEqual({ ok: false, kind: 'refused' });
     expect(f.logs.join('\n')).not.toContain('secret-channel');
@@ -735,5 +740,66 @@ describe('voice events (issue #1374)', () => {
     const gone = target(true, false);
     deliverVoice(gone.target, view);
     expect([uncommitted.sent, ended.sent, gone.sent]).toEqual([[], [], []]);
+  });
+});
+
+describe('the invite functions (issue #1591)', () => {
+  const HANDLE = `invite-${'0'.repeat(32)}`;
+  const PROFILE = 'a'.repeat(32);
+
+  it('checks, cancels and takes without the person’s act, and passes the parsed arguments on', async () => {
+    const f = fixture();
+    await f.ipc.invoke(f.event(), 'inviteCheck', ['https://chat.example.org/app/#/invite/abc']);
+    await f.ipc.invoke(f.event(), 'inviteCancel', [HANDLE]);
+    await f.ipc.invoke(f.event(), 'inviteTake', []);
+    expect(f.calls).toEqual([
+      ['invites.check', ['https://chat.example.org/app/#/invite/abc']],
+      ['invites.cancel', [HANDLE]],
+      ['invites.take', []],
+    ]);
+    expect(f.ipc.refusals).toBe(0);
+  });
+
+  it('accepts only after a click or key in the window, and only a handle with one target', async () => {
+    const f = fixture();
+    expect(await f.ipc.invoke(f.event(), 'inviteAccept', [HANDLE, { profile: PROFILE }])).toEqual({ ok: false, kind: 'refused' });
+    expect(f.logs.at(-1)).toContain('(gesture)');
+    expect(f.calls).toEqual([]);
+    f.input.recent = true;
+    await f.ipc.invoke(f.event(), 'inviteAccept', [HANDLE, { profile: PROFILE }]);
+    await f.ipc.invoke(f.event(), 'inviteAccept', [HANDLE, { add: true }]);
+    expect(f.calls).toEqual([
+      ['invites.accept', [HANDLE, { profile: PROFILE }]],
+      ['invites.accept', [HANDLE, { add: true }]],
+    ]);
+  });
+
+  const malformed: [string, unknown[]][] = [
+    ['inviteCheck', []],
+    ['inviteCheck', [42]],
+    ['inviteCheck', ['a', 'b']],
+    ['inviteCheck', ['x'.repeat(5000)]],
+    ['inviteAccept', [HANDLE]],
+    ['inviteAccept', ['not-a-handle', { add: true }]],
+    ['inviteAccept', [HANDLE, { add: false }]],
+    ['inviteAccept', [HANDLE, { profile: 'short' }]],
+    ['inviteAccept', [HANDLE, { profile: PROFILE, add: true }]],
+    ['inviteAccept', [HANDLE, { add: true, code: 'secret' }]],
+    ['inviteAccept', [HANDLE, null]],
+    ['inviteCancel', ['invite-zz']],
+    ['inviteTake', ['extra']],
+  ];
+
+  it.each(malformed)('refuses %s with %j', async (name, args) => {
+    const f = fixture();
+    f.input.recent = true;
+    expect(await f.ipc.invoke(f.event(), name, args)).toEqual({ ok: false, kind: 'refused' });
+    expect(f.calls).toEqual([]);
+  });
+
+  it('logs no link or code when it refuses one', async () => {
+    const f = fixture();
+    await f.ipc.invoke(f.event(), 'inviteCheck', ['https://chat.example.org/app/#/invite/CANARY', 'x']);
+    expect(f.logs.join('\n')).not.toContain('CANARY');
   });
 });

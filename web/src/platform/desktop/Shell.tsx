@@ -20,6 +20,7 @@ import { useEffect, useState, type ReactNode } from 'react';
 import { signedIn } from './credentials';
 import { bridge } from './access';
 import type { ProfilesView } from './bridge';
+import { takeInvite } from './invite';
 import { setServerOrigin } from './state';
 import { blocks, DevelopmentNote, Unsupported } from './ui/Compat';
 import { ProfileBar } from './ui/ProfileBar';
@@ -38,6 +39,10 @@ export function DesktopShell({ children }: { readonly children: ReactNode }) {
     const b = bridge();
     const restored = b === undefined ? null : await b.restore().catch(() => null);
     if (restored?.ok === true && restored.who !== null) signedIn(restored.who.role === 'member' && restored.who.guest === undefined);
+    // An invite the person chose to open here (issue #1591): main stages its
+    // code for this profile and hands it over once; it goes to the client
+    // before the client mounts, which previews it and joins on its own button.
+    await takeInvite();
     setPhase('ready');
   }
 

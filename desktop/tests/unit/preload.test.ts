@@ -1,9 +1,9 @@
 import { describe, expect, it, vi } from 'vitest';
 
-import type { ConchDesktopBridge, DesktopVoiceBridge, NativeVoiceView } from '../../../web/src/platform/desktop/bridge.ts';
+import type { ConchDesktopBridge, DesktopInviteBridge, DesktopVoiceBridge, NativeVoiceView } from '../../../web/src/platform/desktop/bridge.ts';
 import type { FeedHandlers } from '../../../web/src/platform/desktop/bridge.ts';
 import { createBridge, type Invoke } from '../../preload/bridge.ts';
-import { BRIDGE_FUNCTIONS, PROFILE_FUNCTIONS, VOICE_FUNCTIONS, FEED_EVENTS, VOICE_EVENTS, INVOKED_FUNCTIONS } from '../../shared/bridge-names.ts';
+import { BRIDGE_FUNCTIONS, PROFILE_FUNCTIONS, VOICE_FUNCTIONS, INVITE_FUNCTIONS, FEED_EVENTS, VOICE_EVENTS, INVOKED_FUNCTIONS } from '../../shared/bridge-names.ts';
 
 const { exposeInMainWorld, invoke, on } = vi.hoisted(() => ({ exposeInMainWorld: vi.fn(), invoke: vi.fn(), on: vi.fn() }));
 vi.mock('electron', () => ({ contextBridge: { exposeInMainWorld }, ipcRenderer: { invoke, on } }));
@@ -12,7 +12,7 @@ const noListen = (): void => undefined;
 
 // Checked by the compiler against the interface: a function added to the
 // bridge and not listed here, or listed and not declared, fails tsc.
-const named: Record<keyof ConchDesktopBridge | keyof DesktopVoiceBridge, true> = {
+const named: Record<keyof ConchDesktopBridge | keyof DesktopVoiceBridge | keyof DesktopInviteBridge, true> = {
   serverAddress: true,
   request: true,
   subscribe: true,
@@ -52,6 +52,10 @@ const named: Record<keyof ConchDesktopBridge | keyof DesktopVoiceBridge, true> =
   voiceSaveDevice: true,
   voiceKeyDevices: true,
   voiceSaveTalkBinding: true,
+  inviteCheck: true,
+  inviteAccept: true,
+  inviteCancel: true,
+  inviteTake: true,
   onVoiceState: true,
 };
 
@@ -63,7 +67,7 @@ describe('the preload', () => {
     expect(name).toBe('conchDesktop');
     expect(Object.isFrozen(api)).toBe(true);
     expect(Reflect.ownKeys(api).sort()).toEqual(Object.keys(named).sort());
-    expect([...BRIDGE_FUNCTIONS, ...PROFILE_FUNCTIONS, ...VOICE_FUNCTIONS, 'onVoiceState'].sort()).toEqual(Object.keys(named).sort());
+    expect([...BRIDGE_FUNCTIONS, ...PROFILE_FUNCTIONS, ...VOICE_FUNCTIONS, ...INVITE_FUNCTIONS, 'onVoiceState'].sort()).toEqual(Object.keys(named).sort());
     for (const key of Reflect.ownKeys(api)) expect(typeof api[key as string], String(key)).toBe('function');
     for (const forbidden of ['ipcRenderer', 'invoke', 'send', 'on', 'sendSync', 'electron', 'require', 'process']) expect(forbidden in api).toBe(false);
     // It listens on the one feed channel, and passes on the message, not the
@@ -82,7 +86,7 @@ describe('the preload', () => {
     expect(invoke).toHaveBeenLastCalledWith('conch:signInWithPassword', { name: 'a', password: 'b' });
     await bridge.replaceCredential({ operation: 'changePassword', body: { current: 'a', password: 'b' } });
     expect(invoke).toHaveBeenLastCalledWith('conch:replaceCredential', { operation: 'changePassword', body: { current: 'a', password: 'b' } });
-    expect(INVOKED_FUNCTIONS).toHaveLength(41);
+    expect(INVOKED_FUNCTIONS).toHaveLength(45);
   });
 
   it('rejects with a bare "refused" when main refuses, or answers anything but an envelope', async () => {

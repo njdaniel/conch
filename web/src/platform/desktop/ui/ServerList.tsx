@@ -5,6 +5,7 @@ import { useId, useRef, useState, type SyntheticEvent } from 'react';
 
 import { bridge } from '../access';
 import type { ProfileView, ProfilesView } from '../bridge';
+import { InviteLink } from './InviteLink';
 import { StorageStatus } from './StorageStatus';
 import { addRefusalLines, example, noticeLines } from './text';
 
@@ -212,6 +213,7 @@ export function ServerList({ view, onView, heading = false }: Props) {
           Continue
         </button>
       </form>
+      <InviteLink />
       <p className="hint">Another account on a server you have already saved is another entry: add the same address again.</p>
     </section>
   );
