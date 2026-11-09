@@ -29,6 +29,7 @@ import { LINK_GESTURE_MS, type Gestures } from './gestures.ts';
 import type { DocumentGate } from './document.ts';
 import { HOST, SCHEME } from './scheme.ts';
 import type { VoiceService } from './voice/service.ts';
+import type { Companion } from './voice/companion.ts';
 
 export interface FrameLike {
   readonly frameToken: string;
@@ -62,6 +63,9 @@ export interface IpcDeps {
   readonly profiles: ProfilesApi;
   // Native voice (issue #1374): main's one owner of the helper.
   readonly voice: VoiceApi;
+  // The screen companion (issue #1579). Absent: every grant is refused as
+  // failed, and nothing is held to end.
+  readonly companion?: CompanionApi;
   readonly now: () => number;
   readonly log: (line: string) => void;
 }
@@ -72,6 +76,14 @@ export type ProfilesApi = Pick<
 >;
 
 export type VoiceApi = Pick<VoiceService, 'state' | 'join' | 'leave' | 'retry' | 'setMute' | 'setDeafen' | 'setDevices' | 'setTalkMode' | 'devices' | 'saveDevice' | 'keyDevices' | 'saveTalkBinding'>;
+
+export type CompanionApi = Pick<Companion, 'grant' | 'stop' | 'end'>;
+
+const NO_COMPANION: CompanionApi = {
+  grant: () => Promise.resolve({ ok: false, error: 'failed' }),
+  stop: () => Promise.resolve(false),
+  end: () => Promise.resolve(false),
+};
 
 // What a sign-in step answers when the server's release is not one the app may
 // sign in to (issue #946): nothing was sent.
@@ -159,6 +171,7 @@ interface Handlers {
   readonly files: IpcDeps['files'];
   readonly profiles: ProfilesApi;
   readonly voice: VoiceApi;
+  readonly companion: CompanionApi;
   readonly document: number;
 }
 
@@ -288,6 +301,15 @@ function parseTalkBinding(args: readonly unknown[]): readonly unknown[] | null {
   const { deviceId, code } = request;
   if (typeof deviceId !== 'string' || !/^[A-Za-z0-9-]{1,64}$/u.test(deviceId) || keyCodeText(code) === null) return null;
   return [{ deviceId, code }];
+}
+
+// A companion grant is asked for exactly one channel, checked as a voice
+// destination is; the service then compares it to the destination itself.
+function parseCompanionGrant(args: readonly unknown[]): readonly unknown[] | null {
+  const [request] = args;
+  if (args.length !== 1 || !isRecord(request) || !hasExactKeys(request, ['channel'])) return null;
+  const { channel } = request;
+  return isChannel(channel) ? [{ channel }] : null;
 }
 
 // At least one of input and output; each a printable device name.
@@ -441,7 +463,19 @@ export const SPECS: Readonly<Record<InvokedFunction, Spec>> = {
     run: ({ voice }, [request]) => voice.join(request as { channel: string; muted: boolean; deafened: boolean }),
     gesture: true,
   },
-  voiceLeave: { limit: 60, maxBytes: 0, parse: none, run: ({ voice }) => voice.leave() },
+  // The person's Leave ends the screen companion too (issue #1579): the page
+  // is told and the DELETE sent before the helper is asked to leave.
+  voiceLeave: {
+    limit: 60,
+    maxBytes: 0,
+    parse: none,
+    run: async ({ voice, companion }) => {
+      const ended = companion.end('leave');
+      const view = await voice.leave();
+      await ended;
+      return view;
+    },
+  },
   voiceRetry: { limit: 20, maxBytes: 0, parse: none, run: ({ voice }) => voice.retry(), gesture: true },
   voiceSetMute: { limit: 120, maxBytes: 16, parse: oneBoolean, run: ({ voice }, [muted]) => voice.setMute(muted as boolean) },
   voiceSetDeafen: { limit: 120, maxBytes: 16, parse: oneBoolean, run: ({ voice }, [deafened]) => voice.setDeafen(deafened as boolean) },
@@ -481,6 +515,17 @@ export const SPECS: Readonly<Record<InvokedFunction, Spec>> = {
     gesture: true,
   },
   feedUnsubscribe: { limit: 600, maxBytes: 32, parse: feedId, run: ({ feeds, document }, [id]) => feeds.unsubscribe(document, id as number) },
+  // The screen companion (issue #1579, D4-02 of #772). A grant is the
+  // person's act alone, and only ever the companion's: never the bearer or
+  // the person's own voice grant. Stopping needs no act.
+  companionGrant: {
+    limit: 20,
+    maxBytes: 1024,
+    parse: parseCompanionGrant,
+    run: ({ companion }, [request]) => companion.grant(request as { channel: string }),
+    gesture: true,
+  },
+  companionEnd: { limit: 60, maxBytes: 0, parse: none, run: ({ companion }) => companion.stop() },
 };
 
 export class Ipc {
@@ -523,6 +568,7 @@ export class Ipc {
         files: this.#deps.files,
         profiles: this.#deps.profiles,
         voice: this.#deps.voice,
+        companion: this.#deps.companion ?? NO_COMPANION,
         document: this.#deps.gate.generation,
       };
       return { ok: true, value: await spec.run(to, parsed) };
