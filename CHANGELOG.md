@@ -22,9 +22,9 @@ This is a pre-1.0 release (`v0.1.0-alpha.18`). There is no new schema version. `
   - Compact docks the call in a strip above the chat, and Expand brings it back. The call carries on while you move between text channels.
   - The call's header names its channel (a button back to it), who is sharing and who is speaking.
 - **Spoiler attachments** (#1500).
-  - "Mark as spoiler" on a draft hides the file behind a card showing its name, type and size, with Reveal.
-  - Nothing but the file's details is fetched until someone presses Reveal.
-  - Notifications say "[spoiler]" instead of the name.
+  - "Mark as spoiler" on a draft hides the file behind a card showing its name, type and size, with Reveal and Download.
+  - Only the file's details are fetched automatically. Reveal loads the picture, and Download fetches the file without revealing it.
+  - Notifications show the file as "[spoiler] {name}", without the `SPOILER_` prefix. The name itself is not hidden, so don't put a secret in a file name.
 - **Member marks** (#1499). Agent, Owner, Operator, Manager, Approver and You are shown the same way on every list, author row and voice roster. Each mark appears only where the server sent that fact to you.
 - **A read-only profile card** opens when you select a person's name (#1544). It shows only what that view already holds.
 - **Message links show a cue** that they open elsewhere, and their full address on hover (#1545).
