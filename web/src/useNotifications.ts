@@ -88,6 +88,8 @@ export function useNotifications({
   const previousLive = useRef(false);
   const latestOpen = useRef(onOpen);
   latestOpen.current = onOpen;
+  const latestChannels = useRef(channels);
+  latestChannels.current = channels;
   const skipWrite = useRef(true);
 
   const close = useCallback((id: string) => {
@@ -175,13 +177,14 @@ export function useNotifications({
     });
     if (preferences.native && browserPermission === 'granted' && document.visibilityState === 'hidden' && supported()) {
       const title = mention ? `Mention in #${channel.name}` : `New message in #${channel.name}`;
-      const notification = platform.services.notifications.show(title, snippet(message), id);
+      const notification = platform.services.notifications.show(title, snippet(message), id, channel.name);
       natives.current.set(id, notification);
       notification.onclick = () => {
         window.focus();
         close(id);
         setAlerts((previous) => previous.filter((candidate) => candidate.id !== id));
-        latestOpen.current(channel.name);
+        const current = latestChannels.current.find((candidate) => candidate.id === channel.id);
+        if (current !== undefined) latestOpen.current(current.name);
       };
     }
   }, [signedIn, eventsLive, principal, preferences, browserPermission, channels, origin, account, close]);

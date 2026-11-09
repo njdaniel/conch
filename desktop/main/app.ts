@@ -8,7 +8,7 @@ import { isAbsolute, join } from 'node:path';
 
 import tls from 'node:tls';
 
-import { app, dialog, ipcMain, protocol, safeStorage, shell } from 'electron';
+import { app, dialog, ipcMain, Notification, protocol, safeStorage, shell } from 'electron';
 
 import { allowUnlisted, OVERRIDE_FLAG, parseCompat } from './compat.ts';
 import { activationFactory, healthReader, Live, prober, revoker, verifier } from './profiles/activation.ts';
@@ -31,6 +31,7 @@ import { Gestures } from './gestures.ts';
 import { installGuards } from './guards.ts';
 import { Ipc } from './ipc.ts';
 import { Links } from './links.ts';
+import { Notifications } from './notifications.ts';
 import { saveChosenFile } from './save-file.ts';
 import { parseManifest, SCHEME, SCHEME_PRIVILEGES } from './scheme.ts';
 import { electronStorage } from './vault/electron-storage.ts';
@@ -195,6 +196,21 @@ export async function start(): Promise<void> {
     log,
   });
 
+  // Notifications (issue #1590) belong to the activation and document that
+  // showed them. The teardown hook also runs on quit; #1588 owns setLocked.
+  const notifications = new Notifications({
+    Notification,
+    icon: join(ui, 'favicon-32.png'),
+    window: () => live.window,
+    current: () => {
+      const activation = profiles.active;
+      return activation === null ? null : { activation, gate: live.gate };
+    },
+  });
+  teardownHooks.media('notifications', () => {
+    notifications.closeActivation(profiles.active);
+  });
+
   // Native voice (issue #1373): the one owner of the helper in this instance.
   // The helper is found only in the app's own resources directory, which is
   // Electron's, never an environment variable or an argument. Nothing here
@@ -247,7 +263,7 @@ export async function start(): Promise<void> {
     if (part === null) throw new Error('no activation');
     return part;
   };
-  new Ipc({
+  const ipc = new Ipc({
     owned: () => live.owned(),
     get gate() {
       return live.gate;
@@ -264,9 +280,12 @@ export async function start(): Promise<void> {
     gestures,
     profiles,
     voice,
+    notifications,
     now: Date.now,
     log,
-  }).register(ipcMain);
+  });
+  ipc.register(ipcMain);
+  ipc.registerNotificationSupport(ipcMain);
 
   let ending = false;
   app.on('before-quit', (event) => {

@@ -4,7 +4,7 @@ import type { Feeds } from '../../main/api/feeds.ts';
 import type { Files } from '../../main/files.ts';
 import type { Service } from '../../main/api/service.ts';
 import { DocumentGate } from '../../main/document.ts';
-import { checkCaller, Ipc, parseRequest, plain, type ProfilesApi, type VoiceApi, type ContentsLike, type FrameLike, type InvokeEvent } from '../../main/ipc.ts';
+import { checkCaller, Ipc, parseRequest, plain, type NotificationsApi, type ProfilesApi, type VoiceApi, type ContentsLike, type FrameLike, type InvokeEvent } from '../../main/ipc.ts';
 import { INVOKED_FUNCTIONS, VOICE_EVENTS, VOICE_FUNCTIONS } from '../../shared/bridge-names.ts';
 import { deliverVoice } from '../../main/voice/events.ts';
 import type { NativeVoiceView } from '../../../web/src/platform/desktop/bridge.ts';
@@ -24,6 +24,7 @@ interface Fixture {
   // Whether main's compatibility verdict lets a sign-in happen (issue #946).
   readonly permit: { value: boolean };
   readonly input: { recent: boolean };
+  readonly activation: object;
   event(over?: Partial<InvokeEvent>): InvokeEvent;
 }
 
@@ -41,15 +42,23 @@ function fixture(): Fixture {
   const service = new Proxy({} as Service, { get: (_t, name: string) => record(name) });
   const feeds = new Proxy({} as Feeds, { get: (_t, name: string) => record(`feeds.${name}`) });
   const permit = { value: true };
-  const profiles = new Proxy({} as ProfilesApi, { get: (_t, name: string) => (name === 'signInPermitted' ? () => permit.value : record(`profiles.${name}`)) });
+  const activation = {};
+  const profiles = new Proxy({} as ProfilesApi, { get: (_t, name: string) => {
+    if (name === 'active') return activation;
+    return name === 'signInPermitted' ? () => permit.value : record(`profiles.${name}`);
+  } });
   const logs: string[] = [];
   const clock = { now: 1_000_000 };
   const input = { recent: false };
   const files = new Proxy({} as Files, { get: (_t, name: string) => record(`files.${name}`) });
   const voice = new Proxy({} as VoiceApi, { get: (_t, name: string) => record(`voice.${name}`) });
+  const notifications = new Proxy({} as NotificationsApi, { get: (_t, name: string) => (...args: unknown[]) => {
+    calls.push([`notifications.${name}`, args]);
+    return true;
+  } });
   const gestures = { take: () => (input.recent ? ('pointer' as const) : null) };
-  const ipc = new Ipc({ owned: () => contents, gate, service, feeds, files, gestures, profiles, voice, now: () => clock.now, log: (line) => logs.push(line) });
-  return { ipc, gate, contents, main, calls, logs, clock, permit, input, event: (over = {}) => ({ sender: contents, senderFrame: main, ...over }) };
+  const ipc = new Ipc({ owned: () => contents, gate, service, feeds, files, gestures, profiles, voice, notifications, now: () => clock.now, log: (line) => logs.push(line) });
+  return { ipc, gate, contents, main, calls, logs, clock, permit, input, activation, event: (over = {}) => ({ sender: contents, senderFrame: main, ...over }) };
 }
 
 describe('every invocation is checked before anything else', () => {
@@ -90,7 +99,7 @@ describe('every invocation is checked before anything else', () => {
       files: {} as Files,
       gestures: { take: () => null },
       profiles: {} as ProfilesApi,
-      voice: {} as VoiceApi,
+      voice: {} as VoiceApi, notifications: {} as NotificationsApi,
       now: () => 0,
       log: () => undefined,
     });
@@ -183,6 +192,15 @@ describe('arguments', () => {
     ['feedAck', ['1']],
     ['feedUnsubscribe', [0]],
     ['feedUnsubscribe', [1, 2]],
+    ['notify', []],
+    ['notify', [{ tag: 't', title: 'title', body: 'body', channel: 'general', extra: true }]],
+    ['notify', [{ tag: 't', title: 'x'.repeat(129), body: 'body', channel: 'general' }]],
+    ['notify', [{ tag: 't', title: 'title', body: 'x'.repeat(201), channel: 'general' }]],
+    ['notify', [{ tag: 'x'.repeat(129), title: 'title', body: 'body', channel: 'general' }]],
+    ['notify', [{ tag: '', title: 'title', body: 'body', channel: 'general' }]],
+    ['notify', [{ tag: 't', title: 'title', body: 'body', channel: '   ' }]],
+    ['notifyClose', [{ tag: 't', body: 'must not cross' }]],
+    ['notifyClose', [{ tag: 'x'.repeat(129) }]],
   ])('refuses a bad shape: %s %j', async (name, args) => {
     const f = fixture();
     expect(await f.ipc.invoke(f.event(), name, args)).toEqual({ ok: false, kind: 'refused' });
@@ -310,7 +328,7 @@ describe('arguments', () => {
       files: {} as Files,
       gestures: { take: () => null },
       profiles: { add: () => { throw new Error('boom secret-arg'); } } as unknown as ProfilesApi,
-      voice: {} as VoiceApi,
+      voice: {} as VoiceApi, notifications: {} as NotificationsApi,
       now: () => 0,
       log: (line) => f.logs.push(line),
     });
@@ -387,7 +405,7 @@ describe('the credential-replacing writes (issue #1422)', () => {
       files: {} as Files,
       gestures: { take: () => null },
       profiles: { signInPermitted: () => true, signedIn: (account: unknown) => { bound.push(account); return Promise.resolve(true); } } as unknown as ProfilesApi,
-      voice: {} as VoiceApi,
+      voice: {} as VoiceApi, notifications: {} as NotificationsApi,
       now: () => 0,
       log: () => undefined,
     });
@@ -395,6 +413,49 @@ describe('the credential-replacing writes (issue #1422)', () => {
     expect(answer).toEqual({ ok: true, value: { ok: true, who, answer: { revoked: 1 } } });
     expect(JSON.stringify(answer)).not.toContain('token');
     expect(bound).toEqual([{ id: 7, name: 'ada', lasting: true, guest: false }]);
+  });
+});
+
+describe('desktop notifications (issue #1590)', () => {
+  const request = { tag: 'private-tag', title: 'private title', body: 'private body', channel: 'general' };
+
+  it('passes only the parsed fields with the caller’s activation and document', async () => {
+    const f = fixture();
+    expect(await f.ipc.invoke(f.event(), 'notify', [request])).toEqual({ ok: true, value: true });
+    expect(await f.ipc.invoke(f.event(), 'notifyClose', [{ tag: request.tag }])).toEqual({ ok: true, value: true });
+    expect(f.calls).toEqual([
+      ['notifications.show', [f.activation, f.gate.generation, request]],
+      ['notifications.close', [f.activation, f.gate.generation, request.tag]],
+    ]);
+  });
+
+  it.each([
+    ['a subframe', (f: Fixture) => f.event({ senderFrame: frame('subframe', { parent: f.main }) })],
+    ['a stale generation', (f: Fixture) => { f.gate.begin(); return f.event(); }],
+  ])('refuses notify from %s before the native service', async (_name, event) => {
+    const f = fixture();
+    expect(await f.ipc.invoke(event(f), 'notify', [request])).toEqual({ ok: false, kind: 'refused' });
+    expect(f.calls).toEqual([]);
+  });
+
+  it('drops and counts a storm past 30 a minute without logging its content', async () => {
+    const f = fixture();
+    let accepted = 0;
+    for (let i = 0; i < 35; i++) if ((await f.ipc.invoke(f.event(), 'notify', [request])).ok) accepted++;
+    expect(accepted).toBe(30);
+    expect(f.calls).toHaveLength(30);
+    expect(f.ipc.refusals).toBe(5);
+    expect(f.logs.at(-1)).toContain('(rate)');
+    expect(f.logs.join('\n')).not.toContain('private');
+  });
+
+  it('gates the synchronous OS support check and returns only a boolean', () => {
+    const f = fixture();
+    expect(f.ipc.notificationSupported(f.event(), [])).toEqual({ ok: true, value: true });
+    expect(f.calls).toEqual([['notifications.supported', []]]);
+    expect(f.ipc.notificationSupported(f.event(), ['extra'])).toEqual({ ok: false, kind: 'refused' });
+    expect(f.ipc.notificationSupported(f.event({ senderFrame: null }), [])).toEqual({ ok: false, kind: 'refused' });
+    expect(f.calls).toHaveLength(1);
   });
 });
 
@@ -646,7 +707,7 @@ describe('the voice family (issue #1374)', () => {
     const f = fixture();
     const asked: number[] = [];
     const ipc = new Ipc({
-      owned: () => f.contents, gate: f.gate, service: {} as Service, feeds: {} as Feeds, files: {} as Files, profiles: {} as ProfilesApi, voice: {} as VoiceApi,
+      owned: () => f.contents, gate: f.gate, service: {} as Service, feeds: {} as Feeds, files: {} as Files, profiles: {} as ProfilesApi, voice: {} as VoiceApi, notifications: {} as NotificationsApi,
       gestures: { take: (_c, within) => { asked.push(within); return 'pointer'; } }, now: () => 0, log: () => undefined,
     });
     await ipc.invoke(f.event(), 'voiceSetTalkMode', ['bogus']);
@@ -682,6 +743,7 @@ describe('the voice family (issue #1374)', () => {
     const ipc = new Ipc({
       owned: () => f.contents, gate: f.gate, service: {} as Service, feeds: {} as Feeds, files: {} as Files, profiles: {} as ProfilesApi,
       voice: { join: () => { throw new Error('boom secret-channel'); } } as unknown as VoiceApi,
+      notifications: {} as NotificationsApi,
       gestures: { take: () => 'pointer' }, now: () => 0, log: (line) => f.logs.push(line),
     });
     expect(await ipc.invoke(f.event(), 'voiceJoin', [{ ...join, channel: 'secret-channel' }])).toEqual({ ok: false, kind: 'refused' });

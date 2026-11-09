@@ -104,7 +104,7 @@ export interface Services {
     supported(): boolean;
     permission(): NotificationPermissionState;
     request(): Promise<NotificationPermissionState>;
-    show(title: string, body: string, tag: string): NativeNotification;
+    show(title: string, body: string, tag: string, channel: string): NativeNotification;
   };
   // The attributes of a link that leaves the app.
   externalLink: { readonly target?: '_blank'; readonly rel: string };

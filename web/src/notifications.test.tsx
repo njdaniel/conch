@@ -5,6 +5,7 @@ import { NotificationCenter } from './NotificationCenter';
 import { NotificationSettings } from './NotificationSettings';
 import * as api from './api';
 import { mentions, useNotifications, type NotificationAlert } from './useNotifications';
+import { platform } from './platform';
 import { SPOILER_FILE_PREFIX } from './schema/file';
 import { forgetFileNames, rememberFileName } from './spoilerFiles';
 import type { MessageV2 } from './schema/message';
@@ -277,6 +278,25 @@ describe('browser permission and cleanup', () => {
     expect(FakeNotification.all[0]?.closed).toHaveBeenCalledTimes(1);
   });
 
+  it('opens the current channel name after a rename when a native notification is clicked', async () => {
+    visibility('hidden');
+    const onOpen = vi.fn();
+    const { result, rerender } = renderHook((p: Props) => useNotifications(p), { initialProps: { ...props(), onOpen } });
+    act(() => {
+      result.current.setPolicy('all');
+    });
+    await act(async () => {
+      await result.current.enableNative();
+    });
+    rerender({ ...props(), onOpen, event: message(1) });
+    rerender({ ...props(), onOpen, channels: [{ id: 7, name: 'renamed', created_at: at }] });
+    const native = FakeNotification.all[0] as unknown as Notification;
+    act(() => {
+      native.onclick?.call(native, new MouseEvent('click'));
+    });
+    expect(onOpen).toHaveBeenCalledExactlyOnceWith('renamed');
+  });
+
   it('keeps the in-app fallback when permission is denied', async () => {
     visibility('hidden');
     FakeNotification.answer = 'denied';
@@ -438,6 +458,18 @@ describe('browser permission and cleanup', () => {
     view.unmount();
     render(<NotificationSettings policy="off" native={false} permission="unsupported" supported={false} onPolicy={() => undefined} onEnable={() => undefined} />);
     expect(screen.getByText(/Browser notifications are not supported/).textContent).toContain('Alerts stay here');
+  });
+
+  it('calls them desktop notifications in the desktop build', () => {
+    const original = platform.name;
+    Object.defineProperty(platform, 'name', { value: 'desktop', configurable: true });
+    try {
+      render(<NotificationSettings policy="all" native={true} permission="granted" supported={true} onPolicy={() => undefined} onEnable={() => undefined} />);
+      expect(screen.getByText(/Desktop notifications are on/)).toBeDefined();
+      expect(document.body.textContent).not.toContain('Browser notifications');
+    } finally {
+      Object.defineProperty(platform, 'name', { value: original, configurable: true });
+    }
   });
 
   // F20: the hint follows the choice, and keeps the channel-mute sentence.

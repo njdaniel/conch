@@ -73,7 +73,11 @@ describe('the desktop bridge type', () => {
       uploadFile: true,
       downloadFile: true,
       saveFile: true,
+      notify: true,
+      notifyClose: true,
+      notificationSupported: true,
+      onNotification: true,
     };
-    expect(Object.keys(named)).toHaveLength(27);
+    expect(Object.keys(named)).toHaveLength(31);
   });
 });
