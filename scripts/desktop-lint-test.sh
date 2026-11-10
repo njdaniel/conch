@@ -50,6 +50,16 @@ fresh "$tmp/e"
 echo '{"devDependencies":{"typescript":"1.0.1","vite":"2.0.0","vitest":"3.0.0","eslint":"4.0.0","typescript-eslint":"5.0.0","@playwright/test":"6.0.0"}}' >"$tmp/e/desktop/package.json"
 refuses "a shared tool at another version" "$tmp/e"
 
+# The package's files have no extension to match: postinst, the desktop file.
+fresh "$tmp/g"
+mkdir -p "$tmp/g/desktop/build/deb"
+echo 'Exec=conch-desktop --no-sandbox %U' >"$tmp/g/desktop/build/deb/chat.conch.desktop.desktop"
+refuses "--no-sandbox in the desktop file" "$tmp/g"
+fresh "$tmp/h"
+mkdir -p "$tmp/h/desktop/build/deb"
+printf '#!/bin/sh\nexec /opt/conch-desktop/conch-desktop --no-sandbox\n' >"$tmp/h/desktop/build/deb/postinst"
+refuses "--no-sandbox in a maintainer script" "$tmp/h"
+
 # Prose in docs may name the flags.
 fresh "$tmp/f"
 mkdir "$tmp/f/docs"
