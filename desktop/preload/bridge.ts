@@ -276,6 +276,9 @@ export function createBridge(invoke: Invoke, listen: Listen, listenVoice: Listen
     voiceSaveDevice: call('voiceSaveDevice'),
     voiceKeyDevices: call('voiceKeyDevices'),
     voiceSaveTalkBinding: call('voiceSaveTalkBinding'),
+    // The app's own settings (issue #1587).
+    settings: call('settings'),
+    settingsSet: call('settingsSet'),
     onVoiceState,
     // The screen companion (issue #1579): its grant, its end, and main's word
     // that it has ended.

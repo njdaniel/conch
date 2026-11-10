@@ -6,7 +6,7 @@
 // bridge's subscribe is not one invoke: the preload carries it as the three
 // feed calls below, and main answers with feed events on the one channel
 // FEED_EVENTS (issue #943).
-import type { ConchDesktopBridge, DesktopCompanionBridge, DesktopVoiceBridge } from '../../web/src/platform/desktop/bridge.ts';
+import type { ConchDesktopBridge, DesktopCompanionBridge, DesktopSettingsBridge, DesktopVoiceBridge } from '../../web/src/platform/desktop/bridge.ts';
 
 export const BRIDGE_FUNCTIONS = [
   'serverAddress',
@@ -65,6 +65,10 @@ export const VOICE_FUNCTIONS = [
 
 export type VoiceFunction = (typeof VOICE_FUNCTIONS)[number];
 
+// The app's own settings (issue #1587): read them, change them.
+export const SETTINGS_FUNCTIONS = ['settings', 'settingsSet'] as const satisfies readonly (keyof DesktopSettingsBridge)[];
+
+export type SettingsFunction = (typeof SETTINGS_FUNCTIONS)[number];
 // The screen companion (issue #1579, D4-02 of #772): the invoked functions of
 // DesktopCompanionBridge (onCompanion is its event, COMPANION_EVENTS).
 export const COMPANION_FUNCTIONS = ['companionGrant', 'companionEnd'] as const satisfies readonly (keyof DesktopCompanionBridge)[];
@@ -80,13 +84,14 @@ export const FEED_CALLS = ['feedSubscribe', 'feedAck', 'feedUnsubscribe'] as con
 export type FeedCall = (typeof FEED_CALLS)[number];
 
 // The functions that cross into main as one invoke each.
-export type InvokedFunction = Exclude<BridgeFunction, 'subscribe'> | FeedCall | ProfileFunction | VoiceFunction | CompanionFunction;
+export type InvokedFunction = Exclude<BridgeFunction, 'subscribe'> | FeedCall | ProfileFunction | VoiceFunction | SettingsFunction | CompanionFunction;
 
 export const INVOKED_FUNCTIONS: readonly InvokedFunction[] = [
   ...BRIDGE_FUNCTIONS.filter((name): name is Exclude<BridgeFunction, 'subscribe'> => name !== 'subscribe'),
   ...FEED_CALLS,
   ...PROFILE_FUNCTIONS,
   ...VOICE_FUNCTIONS,
+  ...SETTINGS_FUNCTIONS,
   ...COMPANION_FUNCTIONS,
 ];
 
