@@ -10,7 +10,7 @@
 import type { ComponentType, ReactNode } from 'react';
 import type { VoiceControlTalkMode } from '../schema/generated';
 import type { Call, OperationId } from './operations';
-import type { ChannelName, NativeVoiceDevicesResult, NativeVoiceView, VoiceCommandResult, VoiceDeviceKey, VoiceKeyDevicesResult, VoiceSaveResult, VoiceTalkBindingResult } from './desktop/bridge';
+import type { ChannelName, CompanionEvent, CompanionGrantResult, NativeVoiceDevicesResult, NativeVoiceView, VoiceCommandResult, VoiceDeviceKey, VoiceKeyDevicesResult, VoiceSaveResult, VoiceTalkBindingResult } from './desktop/bridge';
 
 // HttpTransport makes the requests of conchd that the operation table names.
 // Each takes a call (an operation id with its path values and query) and
@@ -121,6 +121,22 @@ export interface Services {
   appVersion?(): Promise<string | null>;
 }
 
+// The desktop's screen companion (issue #1581, D4-04 of #772), over the
+// bridge of #1579: p<id>.screen, the renderer's own LiveKit participant, which
+// publishes the screen and watches others' shares. Main asks conchd for its
+// grant only on the person's act and hands over the grant alone.
+export interface NativeCompanion {
+  // The grant for the voice destination. Call it in the person's click or key
+  // handler; a refusal is a typed reason, never a thrown string.
+  grant(request: { readonly channel: ChannelName }): Promise<CompanionGrantResult>;
+  // Removes the live companion, if there is one, and says whether there was.
+  end(): Promise<boolean>;
+  // Main's word (the conch:companion channel) that it ended the companion:
+  // leave, helper loss, renewal, lock, suspend, sign-out, crash. Returns the
+  // function that stops listening.
+  onEnd(listener: (event: CompanionEvent) => void): () => void;
+}
+
 // What a refused or failed native-voice call comes to: the bridge's own
 // refusal vocabulary, never a thrown string.
 export type NativeVoiceError = Extract<VoiceCommandResult, { readonly ok: false }>['error'];
@@ -154,6 +170,8 @@ export interface NativeVoice {
   // The talk-key setup (issue #1382, D3-11). Absent when the bridge has none.
   readonly keyDevices?: () => Promise<VoiceKeyDevicesResult>;
   readonly saveTalkBinding?: (request: { readonly deviceId: string; readonly code: number }) => Promise<VoiceTalkBindingResult>;
+  // The screen companion (issue #1581). Absent when the bridge has none.
+  readonly companion?: NativeCompanion;
 }
 
 export interface Platform {

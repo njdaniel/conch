@@ -2614,17 +2614,24 @@ export function writeHideNonVideo(hide: boolean): void {
 // The last share quality chosen in this browser: a non-secret preference.
 const shareQualityKey = 'conch.web.voice.share-quality.v1';
 
-export function readShareQuality(): ShareQuality {
+// keptShareQuality is the quality chosen earlier in this browser, or null if
+// none was (or the storage is refused): the desktop's default differs from the
+// browser's (issue #1581), so it must tell a choice from the default.
+export function keptShareQuality(): ShareQuality | null {
   try {
     const raw: unknown = JSON.parse(platform.credentials.readPreference(shareQualityKey) ?? 'null');
-    if (typeof raw !== 'object' || raw === null) return defaultShareQuality;
+    if (typeof raw !== 'object' || raw === null) return null;
     const kept = raw as { resolution?: unknown; frameRate?: unknown };
     const resolution = kept.resolution === '720p' || kept.resolution === '1080p' || kept.resolution === 'source' ? kept.resolution : null;
     const frameRate = kept.frameRate === 15 || kept.frameRate === 30 || kept.frameRate === 60 ? kept.frameRate : null;
-    return resolution === null || frameRate === null ? defaultShareQuality : { resolution, frameRate };
+    return resolution === null || frameRate === null ? null : { resolution, frameRate };
   } catch {
-    return defaultShareQuality;
+    return null;
   }
+}
+
+export function readShareQuality(): ShareQuality {
+  return keptShareQuality() ?? defaultShareQuality;
 }
 
 export function writeShareQuality(quality: ShareQuality): void {
