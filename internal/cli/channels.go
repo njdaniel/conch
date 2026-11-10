@@ -195,7 +195,7 @@ func runChannels(ctx context.Context, args []string, stdout, stderr io.Writer) e
 // reads that entry or writes the topic through the id-addressed route.
 func runChannelTopic(ctx context.Context, client *Client, out channelsOutput, lines refusalLines, name string, request schema.SetChannelTopicRequestV1, write bool) error {
 	if !write && out.asJSON {
-		return runChannelTopicJSON(ctx, client, out, lines, name)
+		return runChannelTopicJSON(ctx, client, out, name)
 	}
 	list, err := client.ListChannels(ctx)
 	if err != nil {
@@ -224,12 +224,14 @@ func runChannelTopic(ctx context.Context, client *Client, out channelsOutput, li
 // runChannelTopicJSON prints the one channel `channels list --json` would
 // list under name: the same ChannelListingV1 element, from the same
 // directory route, so a script reads both alike. A channel that listing does
-// not carry (an archived one, or a private one the caller only manages) is
-// reported as not found rather than printed in another shape.
-func runChannelTopicJSON(ctx context.Context, client *Client, out channelsOutput, lines refusalLines, name string) error {
+// not carry (an archived public channel, or a private one, the caller is not
+// a member of) is reported as not found rather than printed in another shape.
+// The directory refuses an agent and a guest, so a refusal here has the
+// lines `channels list` gives, not the topic write's.
+func runChannelTopicJSON(ctx context.Context, client *Client, out channelsOutput, name string) error {
 	dir, err := client.ChannelDirectory(ctx, false)
 	if err != nil {
-		return refused(err, lines)
+		return refused(err, channelRefusals["list"])
 	}
 	for _, channel := range dir.Channels {
 		if channel.Name == name {

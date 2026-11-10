@@ -361,6 +361,22 @@ func TestChannelsUsageErrors(t *testing.T) {
 
 // A topic read with --json prints the element channels list --json carries
 // for that channel, byte for byte.
+// An agent is refused the directory; the --json read says what `channels
+// list` says, not that it may not set the topic.
+func TestChannelsTopicJSONRefusal(t *testing.T) {
+	isolateConfig(t)
+	t.Setenv("CONCH_TOKEN", "tok")
+	fake := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		_ = json.NewEncoder(w).Encode(schema.Error{Code: "forbidden", Message: "agents cannot list the channel directory"})
+	}))
+	defer fake.Close()
+	_, _, err := runCLI(t, "", "channels", "topic", "ops", "--json", "--server", fake.URL)
+	if err == nil || !strings.Contains(err.Error(), communityOnly) || strings.Contains(err.Error(), "may set the topic") {
+		t.Errorf("error = %v, want the channels list refusal %q", err, communityOnly)
+	}
+}
+
 func TestChannelsTopicJSONMatchesListElement(t *testing.T) {
 	const document = `{"channels":[` +
 		`{"id":41,"name":"general","created_at":"2026-11-06T00:00:00Z","visibility":"public","joined":true},` +
