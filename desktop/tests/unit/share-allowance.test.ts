@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest';
 
-import { ShareAllowance, SHARE_ARM_MS, SHARE_CAPTURE_MS } from '../../main/share-allowance.ts';
+import { ShareAllowance, SHARE_ARM_MS, SHARE_CAPTURE_MS, SHARE_CONFIRM_MS } from '../../main/share-allowance.ts';
+
+// Part of the capture window, and the rest of it: a confirmation made PART in
+// must not restart the window, so PART + REST + 1 is just past its end.
+const PART = Math.floor(SHARE_CAPTURE_MS / 2);
+const REST = SHARE_CAPTURE_MS - PART;
 
 function make(): { share: ShareAllowance; clock: { now: number }; document: { n: number } } {
   const clock = { now: 5_000 };
@@ -67,13 +72,33 @@ describe('the share allowance', () => {
   ])('the cold path: the capture window runs from the grant being issued: %s', (_name, wait, good) => {
     const { share, clock, document } = make();
     share.arm(win);
-    clock.now += 8_000; // a slow round trip, well past SHARE_CAPTURE_MS from the arm
+    clock.now += SHARE_ARM_MS - 1_000; // the grant use taken late, inside SHARE_ARM_MS
     expect(share.takeGrant(win)).toBe(true);
+    clock.now += 2_000; // the grant's round trip: now past SHARE_CAPTURE_MS from the arm
     expect(share.peekCapture(win)).toBe(false);
     share.confirmGrant(win, document.n);
     clock.now += wait;
     expect(share.peekCapture(win)).toBe(good);
     expect(share.takeCapture(win)).toBe(good);
+  });
+
+  it('a confirmation long after the grant use was spent does not reopen the window', () => {
+    const { share, clock, document } = make();
+    share.arm(win);
+    expect(share.takeGrant(win)).toBe(true);
+    clock.now += SHARE_CONFIRM_MS + 1; // some later grant, say a Watch
+    share.confirmGrant(win, document.n);
+    expect(share.peekCapture(win)).toBe(false);
+    expect(share.takeCapture(win)).toBe(false);
+  });
+
+  it('a confirmation at the edge of SHARE_CONFIRM_MS still moves the window', () => {
+    const { share, clock, document } = make();
+    share.arm(win);
+    expect(share.takeGrant(win)).toBe(true);
+    clock.now += SHARE_CONFIRM_MS;
+    share.confirmGrant(win, document.n);
+    expect(share.peekCapture(win)).toBe(true);
   });
 
   it('a grant taken but never confirmed does not move the window', () => {
@@ -87,9 +112,9 @@ describe('the share allowance', () => {
   it('a confirmation with no grant use spent (the warm path) does not move the window', () => {
     const { share, clock, document } = make();
     share.arm(win);
-    clock.now += 2_000;
+    clock.now += PART;
     share.confirmGrant(win, document.n);
-    clock.now += 1_001;
+    clock.now += REST + 1;
     expect(share.peekCapture(win)).toBe(false);
   });
 
@@ -97,18 +122,18 @@ describe('the share allowance', () => {
     const { share, clock, document } = make();
     share.arm(win);
     share.takeGrant(win);
-    clock.now += 2_000;
+    clock.now += PART;
     share.confirmGrant(other, document.n);
     share.confirmGrant(win, document.n + 1);
-    clock.now += 1_001;
+    clock.now += REST + 1;
     expect(share.peekCapture(win)).toBe(false);
     share.arm(win);
     share.takeGrant(win);
-    clock.now += 2_000;
+    clock.now += PART;
     share.confirmGrant(win, document.n);
-    clock.now += 2_000;
+    clock.now += PART;
     share.confirmGrant(win, document.n); // a second confirmation does not extend it
-    clock.now += 1_001;
+    clock.now += SHARE_CAPTURE_MS - PART + 1;
     expect(share.peekCapture(win)).toBe(false);
   });
 

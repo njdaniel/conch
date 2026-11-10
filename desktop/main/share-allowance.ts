@@ -27,7 +27,7 @@
 // The allowance is not a grant: the capture still needs a live companion
 // grant, the portal, and every other condition of display-capture.ts.
 //
-// What this is, and is not (S1 of #1621). The 3 s capture window keeps an
+// What this is, and is not (S1 of #1621). The 10 s capture window keeps an
 // honest page from arming capture by accident and leaving it lying about. It
 // is not a defence against a compromised page: such a page can call
 // shareArm() within 1 s of any act (the act's own freshness window), and
@@ -45,13 +45,24 @@ export const SHARE_ARM_MS = 10_000;
 // is not counted (the capture use is taken when the pick starts). A
 // compromised page can still arm within 1 s of any act: the OS portal picker
 // is the consent, and this only stops an honest page arming by accident.
-export const SHARE_CAPTURE_MS = 3_000;
+// 10 s, not 3 (#1632): on the cold path the companion's LiveKit connect and
+// the claim run between the grant and the pick, and over a TURN/TCP fallback
+// they can take longer than 3 s, which made sharing impossible.
+export const SHARE_CAPTURE_MS = 10_000;
+
+// How long after the grant use was spent its confirmation may still move the
+// capture window: the companion grant's round trip to conchd, with its one
+// retry. A later confirmation (say, a Watch grant minutes after a refused
+// Share grant) is not the grant that took the use and moves nothing.
+export const SHARE_CONFIRM_MS = 15_000;
 
 interface Held {
   readonly contents: object;
   readonly document: number;
   readonly at: number;
   grant: boolean;
+  // When the grant use was spent, or null.
+  grantTakenAt: number | null;
   capture: boolean;
   // When main confirmed the grant issued from this allowance, or null.
   issuedAt: number | null;
@@ -75,7 +86,7 @@ export class ShareAllowance {
   // document. The caller has checked who is calling and taken the act.
   arm(contents: object | null): boolean {
     if (contents === null) return false;
-    this.#held = { contents, document: this.#deps.generation(), at: this.#deps.now(), grant: true, capture: true, issuedAt: null };
+    this.#held = { contents, document: this.#deps.generation(), at: this.#deps.now(), grant: true, grantTakenAt: null, capture: true, issuedAt: null };
     return true;
   }
 
@@ -102,17 +113,22 @@ export class ShareAllowance {
     const held = this.#live(contents);
     if (held === null || !held.grant || this.#deps.now() - held.at > SHARE_ARM_MS) return false;
     held.grant = false;
+    held.grantTakenAt = this.#deps.now();
     return true;
   }
 
   // confirmGrant records that main issued the companion grant that took the
   // grant use, in this document: the capture window runs from here. Nothing
   // happens if the grant use was not spent (a warm path) or the allowance is
-  // another's. It is the only way the window moves later than the arm.
+  // another's, or if it comes more than SHARE_CONFIRM_MS after the grant use
+  // was spent (it is then some other grant, #1633). It is the only way the
+  // window moves later than the arm.
   confirmGrant(contents: object | null, document: number): void {
     const held = this.#live(contents);
     if (held === null || held.grant || held.issuedAt !== null || held.document !== document) return;
-    held.issuedAt = this.#deps.now();
+    const now = this.#deps.now();
+    if (held.grantTakenAt === null || now - held.grantTakenAt > SHARE_CONFIRM_MS) return;
+    held.issuedAt = now;
   }
 
   // #captureGood says whether the capture use is there and inside
