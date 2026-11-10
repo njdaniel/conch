@@ -9,8 +9,10 @@ case "$1" in
 configure)
     profile=/etc/apparmor.d/conch-desktop
     if [ -f "$profile" ] && [ -d /sys/kernel/security/apparmor ] && command -v apparmor_parser >/dev/null 2>&1; then
-        apparmor_parser -r -T -W "$profile" ||
-            echo "conch-desktop: could not load $profile; where unprivileged user namespaces are restricted the app will not start (see docs)" >&2
+        apparmor_parser -r -T -W "$profile" || {
+            echo "conch-desktop: the AppArmor profile $profile cannot be loaded on this host (it needs AppArmor 4, as on Ubuntu 24.04 and later)." >&2
+            echo "conch-desktop: the app will not start where unprivileged user namespaces are restricted. The install goes on." >&2
+        }
     fi
     if command -v update-desktop-database >/dev/null 2>&1; then
         update-desktop-database -q /usr/share/applications || true

@@ -56,6 +56,10 @@ function install(): Subscription[] {
     uploadFile: unexpected('uploadFile'),
     downloadFile: unexpected('downloadFile'),
     saveFile: unexpected('saveFile'),
+    notify: unexpected('notify'),
+    notifyClose: unexpected('notifyClose'),
+    notificationSupported: () => false,
+    onNotification: () => () => undefined,
   };
   Object.defineProperty(window, 'conchDesktop', { value: bridge, configurable: true, writable: true });
   return subscriptions;

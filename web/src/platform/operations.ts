@@ -153,8 +153,9 @@ export interface Operation {
   // answers a wrong one 401 auth_failed: that 401 does not end the sign-in.
   readonly secret?: true;
   // False when the desktop renderer must not invoke the operation itself: its
-  // answer holds a credential, or a grant that only main may hold. The browser
-  // is unaffected; it holds both itself.
+  // answer holds a credential, or a grant that only main may hold, or it ends
+  // something main keeps the record of (the screen companion). The browser is
+  // unaffected; it holds all of these itself.
   readonly renderer: boolean;
   // The response fields that are credentials, which the desktop main consumes
   // and never returns to the renderer.
@@ -391,10 +392,13 @@ export const operations = {
   stopShare: op('DELETE', '/v1/channels/{channel}/voice/share', 'bearer'),
   // The viewer (issue #936, voice-control-plane.md §13): the second
   // participant, p<id>.view, that lets a tab watch beside the voice of
-  // another client. Its answer holds a join token, so the renderer never
-  // invokes it; the DELETE removes it and answers 204.
+  // another client; and, on the desktop, main's screen companion,
+  // p<id>.screen (issue #1579). Its answer holds a join token, so the
+  // renderer never invokes it; the DELETE removes it and answers 204. The
+  // desktop renderer does not invoke the DELETE either: main holds the record
+  // of its companion (and the LiveKit origin it allows), and ends it itself.
   voiceViewer: op('POST', '/v1/channels/{channel}/voice/companion', 'bearer', { request: check(voiceCompanionRequestV1), response: reply(voiceCompanionResponseV1), renderer: false, credentials: token }),
-  voiceViewerEnd: op('DELETE', '/v1/channels/{channel}/voice/companion', 'bearer'),
+  voiceViewerEnd: op('DELETE', '/v1/channels/{channel}/voice/companion', 'bearer', { renderer: false }),
   // The camera claim (ADR-015): claimed by the person's camera button, or
   // continued by naming the claim (?started_at=), and released.
   claimCamera: op('POST', '/v1/channels/{channel}/voice/camera', 'bearer', { response: reply(voiceCameraV1) }),

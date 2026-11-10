@@ -1,3 +1,4 @@
+import { platform } from './platform';
 import type { ChannelV0 } from './schema/channel';
 import type { BrowserPermission, NotificationPolicy } from './useNotifications';
 
@@ -19,6 +20,7 @@ export function NotificationSettings({ policy, native, permission, supported, ch
   readonly onEnable: () => void;
   readonly onToggleMute?: (channel: number) => void;
 }) {
+  const notificationKind = platform.name === 'desktop' ? 'Desktop' : 'Browser';
   return (
     <div className="notification-settings">
       <h3>Notifications</h3>
@@ -53,10 +55,10 @@ export function NotificationSettings({ policy, native, permission, supported, ch
           </fieldset>
         </details>
       )}
-      {!supported || permission === 'unsupported' ? <p className="hint">Browser notifications are not supported. Alerts stay here.</p> : null}
-      {permission === 'denied' ? <p className="hint">Browser permission is denied. Alerts stay here; you can allow it in your browser settings.</p> : null}
-      {!native && supported && permission !== 'unsupported' ? <button type="button" onClick={onEnable}>Enable browser notifications</button> : null}
-      {native && permission === 'granted' ? <p className="hint">Browser notifications are on when this tab is in the background. Alerts always remain available here.</p> : null}
+      {!supported || permission === 'unsupported' ? <p className="hint">{notificationKind} notifications are not supported. Alerts stay here.</p> : null}
+      {permission === 'denied' ? <p className="hint">{notificationKind} permission is denied. Alerts stay here; you can allow it in your browser settings.</p> : null}
+      {!native && supported && permission !== 'unsupported' ? <button type="button" onClick={onEnable}>Enable {notificationKind.toLowerCase()} notifications</button> : null}
+      {native && permission === 'granted' ? <p className="hint">{notificationKind} notifications are on when this tab is in the background. Alerts always remain available here.</p> : null}
     </div>
   );
 }

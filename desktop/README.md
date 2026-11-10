@@ -155,6 +155,10 @@ Nick's, recorded on #1595:
   and later). `postinst` loads it, and refreshes the desktop and icon caches;
   `postrm` unloads it. All of it is best effort. On an older AppArmor that cannot parse it,
   the install says so and goes on (user namespaces are unrestricted there).
+- **The package needs AppArmor 4 and an Ubuntu 24.04-class system** (the profile
+  is `abi <abi/4.0>`; the control description says so). If `apparmor_parser` cannot
+  load it, `postinst` says plainly that the profile cannot load on this host and that
+  the app will not start where user namespaces are restricted, and the install goes on.
 - Nothing in the package is a udev rule, a group change, `setcap` or setuid, and
   nothing is group- or other-writable. The talk-key permission stays an explicit step
   the app shows (#1381).
@@ -175,7 +179,13 @@ Nick's, recorded on #1595:
 `scripts/desktop-deb-test.sh <deb>` checks a built package (`make desktop-deb`
 runs it); with no argument it builds packages from a fixture tree, checks them,
 and breaks them one way at a time to show that each check can fail (it is part
-of `make desktop-check`).
+of `make desktop-check`). Beyond modes and owners it pins the two things that run
+as root or change host policy: the AppArmor profile's rules must equal the expected
+lines exactly (no wider attachment, no added `capability` or `mount`), and the control
+members must be exactly `control conffiles postinst postrm`, with `postinst` and
+`postrm` byte-identical to `desktop/build/deb/`. It also requires one `Exec=` line and
+no `MimeType=` or `Actions=` in the desktop file, no `chrome-sandbox`, and no symlink
+but `/usr/bin/conch-desktop`.
 
 ### The smoke test
 
@@ -218,7 +228,10 @@ sandbox's namespace mode needs; the other mode is a setuid-root `chrome-sandbox`
 On the Pop!_OS 24.04 workstation `unshare --user true` works (observed
 2026-10-28) and the unpacked build runs sandboxed as is. On the CI runner the
 job makes the helper setuid root (see the comment in `ci.yml`). The packaged
-answer (an AppArmor profile, a setuid fallback) is the `.deb` work, #774.
+answer, decided by Nick on 2026-11-09 (#1595), is an AppArmor profile installed
+with the `.deb`, not a setuid sandbox; see
+[docs/design/linux-desktop.md](../docs/design/linux-desktop.md) §9
+(Distribution) for the package decisions.
 
 The fuses are set by electron-builder (`electronFuses`): RunAsNode off,
 NODE_OPTIONS off, Node CLI inspect arguments off, embedded asar integrity

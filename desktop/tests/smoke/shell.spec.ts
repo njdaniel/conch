@@ -79,6 +79,12 @@ test.describe('the packaged shell', () => {
         'voiceDevices', 'voiceSaveDevice',
         // Talk-key setup (#1381).
         'voiceKeyDevices', 'voiceSaveTalkBinding',
+        // Desktop notifications (#1590): two calls, support and the click event.
+        'notify', 'notifyClose', 'notificationSupported', 'onNotification',
+        // The app's own settings (#1587).
+        'settings', 'settingsSet',
+        // The screen companion (#1579): its grant, its end and its event.
+        'companionGrant', 'companionEnd', 'onCompanion',
         // The installed files replaced under the running app (#1600).
         'updateState', 'updateRestart', 'onUpdateState',
       ].sort(),

@@ -12,7 +12,9 @@
 // What it keeps:
 //   - the bearer is read from the activation at join time only, handed to
 //     Supervisor.start and held nowhere here; the renderer never sees it;
-//   - the 30 s missed-release ceiling (D3-1) is passed on every start;
+//   - the 30 s missed-release ceiling (D3-1) is passed on every start, and so
+//     is --share-audio-owner companion (#1581): the renderer's screen
+//     companion plays watched shares' sound, never the helper;
 //   - a join that a sign-out, switch or 401 overtakes is stopped and
 //     reported nowhere;
 //   - after the installed files were replaced (#1600) join and retry start no
@@ -42,6 +44,15 @@ export const DESKTOP_MISSED_RELEASE_SECS = 30;
 
 // The helper options every start carries (D3-1 / #1372).
 export const CEILING_ARGS: readonly string[] = ['--transmit-ceiling-secs', String(DESKTOP_MISSED_RELEASE_SECS)];
+
+// Who plays other participants' share audio (#934, #1581): the renderer's
+// companion, p<id>.screen, does. Without this flag the helper would play it as
+// well, and a watched share would be heard twice. The helper learns the
+// companion's identity from its own session response; main passes nothing else.
+export const SHARE_AUDIO_ARGS: readonly string[] = ['--share-audio-owner', 'companion'];
+
+// Every option a start carries, the ceiling last.
+export const HELPER_ARGS: readonly string[] = [...SHARE_AUDIO_ARGS, ...CEILING_ARGS];
 
 // The part of the Supervisor this service uses; a test stands in for it.
 export interface VoiceSupervisor {
@@ -325,7 +336,7 @@ export class VoiceService {
           principalId: identity.principalId,
           muted: req.muted,
           deafened: req.deafened,
-          extraArgs: CEILING_ARGS,
+          extraArgs: HELPER_ARGS,
         });
       } catch {
         this.deps.log('voice: the start failed unexpectedly');

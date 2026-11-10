@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { VOICE_CONTROL_STOP_KILL_AFTER_MS } from '../../../web/src/schema/generated.ts';
 import { Supervisor, type CommandResult, type StartRequest, type VoiceState } from '../../main/voice/supervisor.ts';
-import { CEILING_ARGS, DESKTOP_MISSED_RELEASE_SECS, VoiceService, type VoiceIdentity, type VoiceSupervisor } from '../../main/voice/service.ts';
+import { CEILING_ARGS, DESKTOP_MISSED_RELEASE_SECS, HELPER_ARGS, SHARE_AUDIO_ARGS, VoiceService, type VoiceIdentity, type VoiceSupervisor } from '../../main/voice/service.ts';
 import type { NativeVoiceDevicesResult, NativeVoiceView, VoiceDeviceKey, VoiceSaveResult } from '../../../web/src/platform/desktop/bridge.ts';
 import { FAKE_TOKEN, fixture, scratch, until, type Scratch } from './voice-support.ts';
 
@@ -139,12 +139,22 @@ describe('join', () => {
         principalId: 7,
         muted: true,
         deafened: false,
-        extraArgs: ['--transmit-ceiling-secs', '30'],
+        extraArgs: ['--share-audio-owner', 'companion', '--transmit-ceiling-secs', '30'],
       },
     ]);
     expect(DESKTOP_MISSED_RELEASE_SECS).toBe(30);
     expect(CEILING_ARGS).toEqual(['--transmit-ceiling-secs', '30']);
     expect(id.reads).toBe(1);
+  });
+
+  it('every start carries --share-audio-owner companion beside the ceiling, and a retry too (#1581)', async () => {
+    expect(SHARE_AUDIO_ARGS).toEqual(['--share-audio-owner', 'companion']);
+    expect(HELPER_ARGS).toEqual(['--share-audio-owner', 'companion', '--transmit-ceiling-secs', '30']);
+    await join('general');
+    await svc.leave();
+    await join('ops');
+    expect(fake.starts.map((s) => s.extraArgs)).toEqual([HELPER_ARGS, HELPER_ARGS]);
+    expect(fake.starts.every((s) => s.extraArgs?.includes('companion') === true)).toBe(true);
   });
 
   it('a second join while one runs is refused busy and starts nothing', async () => {
@@ -273,7 +283,7 @@ describe('retry', () => {
     const v = await svc.retry();
     expect(v.status).toBe('running');
     expect(fake.starts.length).toBe(2);
-    expect(fake.starts[1]).toMatchObject({ channel: 'ops', muted: true, deafened: true, extraArgs: ['--transmit-ceiling-secs', '30'] });
+    expect(fake.starts[1]).toMatchObject({ channel: 'ops', muted: true, deafened: true, extraArgs: ['--share-audio-owner', 'companion', '--transmit-ceiling-secs', '30'] });
   });
 
   it('is refused for a failure a retry cannot fix', async () => {

