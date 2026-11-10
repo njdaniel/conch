@@ -193,6 +193,26 @@ members must be exactly `control conffiles postinst postrm`, with `postinst` and
 exactly `MimeType=x-scheme-handler/conch;` and no `Actions=` in the desktop file, no `chrome-sandbox`, and no symlink
 but `/usr/bin/conch-desktop`.
 
+`scripts/desktop-deb-lifecycle.sh` (`make desktop-deb-lifecycle`, issue #1599) is the
+package's lifecycle test: in an `ubuntu:24.04` container (pinned by digest) it installs
+an older build with `apt install ./old.deb` (apt resolves `Depends` from the archive, so
+it needs Docker and network), checks the files, owners and modes, the launcher link, the
+desktop file and `xdg-mime query default x-scheme-handler/conch`, seeds a test user's
+`~/.config/Conch/profiles.json` and `settings.json`, upgrades to a higher version
+(those files stay byte-identical, `/opt/conch-desktop` is replaced, `resources/version`
+is the new one), checks that `ldd` resolves every library of each executable ELF file and
+that `resources/conch-voice` passes `findHelper`'s trust rules, then removes and purges
+(nothing of the package left in `/opt`, `/usr` or `/etc`; the conffile goes at purge; the
+user's `~/.config/Conch` stays). `postinst` must succeed with no AppArmor in the
+container. With no argument it builds two fixture packages (`v0.1.0-alpha.1` and
+`.2`); `make desktop-deb-lifecycle DEB_OLD=<a.deb> DEB_NEW=<b.deb>` takes real ones.
+`scripts/desktop-deb-lifecycle.sh --broken` is the test of the test: the fixture packages
+without `Depends` must fail at the `ldd` check. A container is not a clean machine (no
+display, portal, keyring or PipeWire; Chromium's sandbox under Docker's seccomp is not
+representative), so the script never runs the app: the app on a real machine is #1602
+(D6-08). Without Docker it prints `SKIPPED`; with `CI` set it fails. It is not part of
+`make check` or `make desktop-check`, and has no CI job yet (it follows #1598's `.deb` job).
+
 ### The smoke test
 
 `tests/smoke/` starts the **packaged, fused** app and connects to it with
