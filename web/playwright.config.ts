@@ -2,6 +2,17 @@
 // the fixture community that e2e/p3-local --keep sets up. `make web-e2e` runs
 // it; it is not part of `make check`, which needs no browser.
 //
+// Tags (issue #1613; docs/testing.md has the policy). A test carries them in
+// Playwright's `tag` option, e.g. test('x', { tag: '@heavy' }, async () => {}).
+//   @heavy  runs only in the heavy lane (.github/workflows/e2e-heavy.yml,
+//           nightly and on demand): a test over the PR budget, or a deliberate
+//           fault or blackhole test. The PR lane (web-e2e in ci.yml) runs
+//           with --grep-invert @heavy.
+//   @smoke  the fast subset for a quick local run: --grep @smoke.
+//   @cross  the subset other browser engines run (#1658); this file still
+//           defines Chromium only.
+// Pass any of them through `make web-e2e E2E_ARGS="--grep @smoke"`.
+//
 // One worker, files in name order: the specs share one server and one
 // community, and the last one restarts the server.
 import { defineConfig, devices } from '@playwright/test';
