@@ -7,10 +7,10 @@
 // It owns: building a person (enter), joining and leaving voice (joinVoice,
 // leave), reading what a page has received (inbound) and the check that no
 // secret shows on a page (expectClean). It owns no world: the caller starts
-// one (voice-world.ts) and passes it in. The specs written before it keep
-// their own copies, which are not touched here.
+// one (voice-world.ts) and passes it in. A spec closes a person with leave (or
+// Someone.close), never with context.close alone: see closeAll in fixtures.ts.
 import type { Browser, BrowserContext, BrowserContextOptions, Page } from '@playwright/test';
-import { expect, openChannel, rememberPushToTalk, showView, signIn } from './fixtures';
+import { closeAll, expect, openChannel, rememberPushToTalk, showView, signIn } from './fixtures';
 import { watchPage, type Member, type VoiceWorld, type Watch } from './voice-world';
 
 export interface Someone {
@@ -35,7 +35,7 @@ export interface EnterOptions {
 
 // Installed before the page's own scripts: keeps every peer connection the SDK
 // makes, for getStats (inbound reads them).
-const keepConnections = () => {
+export const keepConnections = () => {
   const w = window as unknown as { __pcs?: RTCPeerConnection[] };
   if (w.__pcs !== undefined) return;
   w.__pcs = [];
@@ -66,7 +66,7 @@ export async function enter(browser: Browser, vw: VoiceWorld, member: Member, op
     const someone: Someone = { page, context, watch, member, close: () => leave(someone) };
     return someone;
   } catch (err) {
-    await context.close();
+    await closeAll(context);
     throw err;
   }
 }
@@ -80,17 +80,22 @@ export async function joinVoice(p: Someone, how: 'Join voice' | 'Watch only'): P
   // Watch only beside the person's voice in another client is the viewer
   // (issue #936); presence lingers a few seconds after an earlier page of the
   // same member closed and reads as that other client, so wait for it to clear.
+  // The button is enabled only once the first presence snapshot is in, so the
+  // check below reads the roster and not the empty page before it (issue
+  // #1682: it passed vacuously, then presence arrived and the click joined as
+  // the viewer).
+  const button = voiceRegion(p.page).getByRole('button', { name: how });
+  await expect(button).toBeEnabled({ timeout: 30_000 });
   if (how === 'Watch only') await expect(voiceRegion(p.page)).not.toContainText('You are in voice on another device', { timeout: 30_000 });
-  await voiceRegion(p.page).getByRole('button', { name: how }).click();
+  await button.click();
   await expect(voiceRegion(p.page)).toContainText(/Connected in #/, { timeout: 30_000 });
 }
 
-// leave closes the person's page and then their context, as a person closes a
-// tab: the page's pagehide ends its voice session (issue #802). Safe to call
-// twice.
-export async function leave(p: Pick<Someone, 'page' | 'context'>): Promise<void> {
-  if (!p.page.isClosed()) await p.page.close();
-  await p.context.close();
+// leave closes the person's pages and then their context (closeAll in
+// fixtures.ts says why in that order), the context even if a page will not
+// close. Safe to call twice.
+export async function leave(p: Pick<Someone, 'context'>): Promise<void> {
+  await closeAll(p.context);
 }
 
 export interface Inbound {
@@ -148,7 +153,7 @@ export async function inbound(page: Page, options: { perTrack?: boolean } = {}):
 // its /rtc/v1/validate request and the resource timing records that URL
 // (docs/manual.md, "Voice in the browser"); that parameter, in a URL on
 // LiveKit's origin with exactly that path, is left out of the timing entries.
-export async function expectClean(vw: VoiceWorld, p: Pick<Someone, 'page' | 'watch' | 'member'>): Promise<void> {
+export async function expectClean(vw: VoiceWorld, p: Pick<Someone, 'page' | 'watch'> & { readonly member: Pick<Member, 'token'> }): Promise<void> {
   await p.watch.settled();
   const livekit = new URL(vw.livekitOrigin.replace(/^ws/, 'http')).origin;
   const { kept, credentials } = await p.page.evaluate((livekitHttp) => {

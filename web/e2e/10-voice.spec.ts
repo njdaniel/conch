@@ -6,10 +6,11 @@
 //
 // The first test needs no LiveKit: on the shared server, which has none, the
 // page says voice is not set up and asks for no device.
-import type { BrowserContextOptions, Locator, Page } from '@playwright/test';
+import type { Browser, BrowserContextOptions, Locator, Page } from '@playwright/test';
 import type { PostMessageRequestV2 } from '../src/schema/generated';
-import { channelButton, chooseMicrophone, conversation, credentialField, expect, expectFits, mainNav, messages, openChannel, phones, rememberPushToTalk, showView, signIn, statusLine, test } from './fixtures';
-import { dockerAvailable, startVoiceWorld, watchPage, type Member, type VoiceWorld, type Watch } from './voice-world';
+import { closeAll, channelButton, chooseMicrophone, conversation, credentialField, expect, expectFits, mainNav, messages, phones, rememberPushToTalk, showView, signIn, statusLine, test } from './fixtures';
+import { enter, expectClean as expectCleanPage, inbound, keepConnections } from './people';
+import { dockerAvailable, startVoiceWorld, watchPage, type Member, type VoiceWorld } from './voice-world';
 
 // The longest the roster may take to stop saying "transmitting" after the
 // first press since a join is released: see the test that uses it.
@@ -54,35 +55,9 @@ test('P3-F9c voice is not set up on a server without LiveKit, and the page asks 
   expect(await page.evaluate(() => (window as unknown as { deviceRequested: boolean }).deviceRequested)).toBe(false);
 });
 
-// Counts the audio bytes this page has received, from the peer connections the
-// SDK made. The wrapper is installed before the page's own scripts run.
-const countBytes = () => {
-  const w = window as unknown as { __pcs: RTCPeerConnection[] };
-  w.__pcs = [];
-  const Original = window.RTCPeerConnection;
-  const Wrapped = function (this: unknown, ...args: ConstructorParameters<typeof RTCPeerConnection>) {
-    const pc = new Original(...args);
-    w.__pcs.push(pc);
-    return pc;
-  } as unknown as typeof RTCPeerConnection;
-  Wrapped.prototype = Original.prototype;
-  Object.setPrototypeOf(Wrapped, Original);
-  window.RTCPeerConnection = Wrapped;
-};
-
-async function inboundAudioBytes(page: Page): Promise<number> {
-  return page.evaluate(async () => {
-    const w = window as unknown as { __pcs: RTCPeerConnection[] };
-    let total = 0;
-    for (const pc of w.__pcs) {
-      const stats = await pc.getStats();
-      stats.forEach((r: { type: string; kind?: string; bytesReceived?: number }) => {
-        if (r.type === 'inbound-rtp' && r.kind === 'audio') total += r.bytesReceived ?? 0;
-      });
-    }
-    return total;
-  });
-}
+// The audio bytes this page has received, from the peer connections the SDK
+// made (people.ts keeps them from before the page's own scripts run).
+const inboundAudioBytes = async (page: Page): Promise<number> => (await inbound(page)).audioBytes;
 
 async function delta(page: Page, ms: number): Promise<number> {
   const before = await inboundAudioBytes(page);
@@ -114,84 +89,14 @@ test.describe('with LiveKit', () => {
   // joins (issue #1244: one that never chose joins in the open microphone,
   // which transmits on the fake microphone's tone, and the tests that count
   // what a held key reports start from silence). 'unchosen' is a fresh browser.
-  async function person(browser: import('@playwright/test').Browser, who: 'alice' | 'bob' | 'carol' | Member, options?: BrowserContextOptions, before?: (page: Page) => void, mode: 'push to talk' | 'unchosen' = 'push to talk') {
-    const context = await browser.newContext(options);
-    if (mode === 'push to talk') await rememberPushToTalk(context);
-    const page = await context.newPage();
-    before?.(page);
-    const watch = await watchPage(page, vw);
-    await page.addInitScript(countBytes);
-    const m = typeof who === 'string' ? vw[who] : who;
-    await signIn(page, vw, m.token, m.name);
-    await openChannel(page, vw.channel);
-    return { context, page, watch, member: m };
+  function person(browser: Browser, who: 'alice' | 'bob' | 'carol' | Member, options?: BrowserContextOptions, before?: (page: Page) => void, mode: 'push to talk' | 'unchosen' = 'push to talk') {
+    return enter(browser, vw, typeof who === 'string' ? vw[who] : who, { mode, ...(options === undefined ? {} : { context: options }), ...(before === undefined ? {} : { before }) });
   }
 
   // No secret of the world, and no join token or room name the page was given,
-  // in anything the page said or kept: its console, its DOM and address, its
-  // storage and cookies, and (unless timing is false) its resource timing
-  // entries. And no policy violation in the console.
-  //
-  // The one secret a page keeps by design is its own credential, under
-  // conch.web.token: a member's in localStorage since A7 (issue #439), an
-  // operator's in sessionStorage. Each must be exactly the signed-in member's,
-  // and the rest of storage is checked without it.
-  //
-  // The one exception is named: on a failed LiveKit connection, even one the
-  // SDK retries by itself under load, livekit-client sends the join token in
-  // the access_token query of its /rtc/v1/validate request, and the page's
-  // resource timing records that URL (docs/manual.md, "Voice in the browser"). That
-  // parameter, in a URL on LiveKit's origin with exactly that path, is left
-  // out of the timing entries checked. A token in any other URL, or in any other place, still
-  // fails.
-  async function expectClean(p: { page: Page; watch: Watch; member: { token: string } }): Promise<void> {
-    await p.watch.settled();
-    const livekit = new URL(vw.livekitOrigin.replace(/^ws/, 'http')).origin;
-    const { kept, credentials } = await p.page.evaluate((livekitHttp) => {
-      const timingName = (name: string) => {
-        try {
-          const url = new URL(name);
-          if (url.origin === livekitHttp && url.pathname === '/rtc/v1/validate') url.searchParams.delete('access_token');
-          return url.href;
-        } catch {
-          return name;
-        }
-      };
-      const without = (storage: Storage) => {
-        const rest: Record<string, string | null> = {};
-        for (let i = 0; i < storage.length; i++) {
-          const key = storage.key(i);
-          if (key !== null && key !== 'conch.web.token') rest[key] = storage.getItem(key);
-        }
-        return JSON.stringify(rest);
-      };
-      return {
-        credentials: [sessionStorage.getItem('conch.web.token'), localStorage.getItem('conch.web.token')],
-        kept: [
-          document.documentElement.outerHTML,
-          location.href,
-          without(sessionStorage),
-          without(localStorage),
-          document.cookie,
-          JSON.stringify(performance.getEntries().map((e) => timingName(e.name))),
-        ].join('\n'),
-      };
-    }, livekit);
-    for (const credential of credentials) {
-      expect(credential === null || credential === p.member.token, 'the stored credential is the member\'s own').toBe(true);
-    }
-    const said = p.watch.console.join('\n');
-    for (const s of vw.secrets) {
-      expect(kept, 'a secret in the page, its storage or its cookies').not.toContain(s);
-      expect(said, 'a secret in the console').not.toContain(s);
-    }
-    expect(p.watch.console.filter((l) => /Content Security Policy|Refused to|[Pp]ermissions policy/.test(l))).toEqual([]);
-    // Nor anything the browser reports as wrong that the person never sees
-    // (issue #595): a Permissions-Policy report, or a request to conchd the
-    // browser counts as failed, an answered one let go unread included.
-    expect(p.watch.policy, 'Permissions-Policy reports').toEqual([]);
-    expect(p.watch.failed, 'requests to conchd that failed').toEqual([]);
-  }
+  // in anything the page said or kept, and nothing the browser reports as wrong
+  // that the person never sees: people.ts expectClean says what is checked.
+  const expectClean = (p: Parameters<typeof expectCleanPage>[1]): Promise<void> => expectCleanPage(vw, p);
 
   test('a member joins, is heard only while transmitting, shows as talking, and is audited as a reported pair', async ({ browser }) => {
     const a = await person(browser, 'alice');
@@ -241,8 +146,8 @@ test.describe('with LiveKit', () => {
       // room name included.
       for (const p of [a, b]) await expectClean(p);
     } finally {
-      await a.context.close();
-      await b.context.close();
+      await closeAll(a.context);
+      await closeAll(b.context);
     }
   });
 
@@ -320,7 +225,7 @@ test.describe('with LiveKit', () => {
       await goes('back', u0);
       await expectClean(a);
     } finally {
-      await a.context.close();
+      await closeAll(a.context);
     }
   });
 
@@ -364,7 +269,7 @@ test.describe('with LiveKit', () => {
       expect(p.watch.failed.filter((l) => l.includes('/voice/transmit')), 'transmit reports the browser counted as failed').toEqual([]);
       await expectClean(p);
     } finally {
-      await p.context.close();
+      await closeAll(p.context);
     }
   });
 
@@ -432,7 +337,7 @@ test('a push-to-talk whose reports are slow is audited as the reported pair and 
       await voice.getByRole('button', { name: 'Leave voice' }).click();
       await expect(voice).toContainText('Not in voice', { timeout: 10_000 });
     } finally {
-      await c.context.close();
+      await closeAll(c.context);
     }
   });
 
@@ -474,7 +379,7 @@ test('a push-to-talk whose reports are slow is audited as the reported pair and 
       await voice.getByRole('button', { name: 'Leave voice' }).click();
       await expect(voice).toContainText('Not in voice', { timeout: 10_000 });
     } finally {
-      await b.context.close();
+      await closeAll(b.context);
     }
   });
 
@@ -571,7 +476,7 @@ test('a push-to-talk whose reports are slow is audited as the reported pair and 
       await expect(voice).toContainText('Not in voice', { timeout: 10_000 });
       await expectClean(a);
     } finally {
-      await a.context.close();
+      await closeAll(a.context);
     }
   });
 
@@ -677,8 +582,8 @@ test('a push-to-talk whose reports are slow is audited as the reported pair and 
       await expect(join).toBeFocused();
       await expectClean({ page, watch, member: vw.alice });
     } finally {
-      await context.close();
-      await b.context.close();
+      await closeAll(context);
+      await closeAll(b.context);
     }
   });
 
@@ -728,11 +633,11 @@ test('a push-to-talk whose reports are slow is audited as the reported pair and 
           await voice.getByRole('button', { name: 'Leave voice' }).click();
           await expect(voice).toContainText('Not in voice', { timeout: 10_000 });
         } finally {
-          await a.context.close();
+          await closeAll(a.context);
         }
       }
     } finally {
-      for (const o of others) await o.context.close();
+      for (const o of others) await closeAll(o.context);
     }
   });
 
@@ -754,7 +659,7 @@ test('a push-to-talk whose reports are slow is audited as the reported pair and 
         await phone(browser, size, options, bodies[bodies.length - 1] ?? '');
       }
     } finally {
-      for (const o of others) await o.context.close();
+      for (const o of others) await closeAll(o.context);
     }
   });
 
@@ -826,7 +731,7 @@ test('a push-to-talk whose reports are slow is audited as the reported pair and 
       await voice.getByRole('button', { name: 'Leave voice' }).tap();
       await expect(voice).toContainText('Not in voice', { timeout: 10_000 });
     } finally {
-      await a.context.close();
+      await closeAll(a.context);
     }
   }
 
@@ -981,7 +886,7 @@ test('a push-to-talk whose reports are slow is audited as the reported pair and 
         await showView(a.page, 'Voice');
         await expect(voice).toContainText('Not in voice', { timeout: 10_000 });
       } finally {
-        await a.context.close();
+        await closeAll(a.context);
       }
     }
   });
@@ -1037,8 +942,8 @@ test('a push-to-talk whose reports are slow is audited as the reported pair and 
       expect(await b.page.evaluate(() => (window as unknown as { __pcs: RTCPeerConnection[] }).__pcs.length), 'peer connections on bob\'s page').toBe(0);
       await expectClean(b);
     } finally {
-      await a.context.close();
-      await b.context.close();
+      await closeAll(a.context);
+      await closeAll(b.context);
     }
   });
 
@@ -1092,9 +997,9 @@ test('a push-to-talk whose reports are slow is audited as the reported pair and 
       await expect(roster).toContainText('dana', { timeout: 3000 });
       await expect(roster).not.toContainText(/Member \d+/);
     } finally {
-      await d.close();
-      await a.context.close();
-      await b.context.close();
+      await closeAll(d);
+      await closeAll(a.context);
+      await closeAll(b.context);
     }
   });
 
@@ -1142,7 +1047,7 @@ test('a push-to-talk whose reports are slow is audited as the reported pair and 
         if (r.url().endsWith('/voice/session')) seen.sessions++;
       });
       const watch = await watchPage(page, vw);
-      await page.addInitScript(countBytes);
+      await page.addInitScript(keepConnections);
       await page.addInitScript(() => {
         const w = window as unknown as { __devices: number };
         w.__devices = 0;
@@ -1234,9 +1139,9 @@ test('a push-to-talk whose reports are slow is audited as the reported pair and 
         await expectClean(r);
       }
     } finally {
-      await k.context.close();
-      await lee.context.close();
-      await max.context.close();
+      await closeAll(k.context);
+      await closeAll(lee.context);
+      await closeAll(max.context);
     }
   });
 
@@ -1304,7 +1209,7 @@ test('a push-to-talk whose reports are slow is audited as the reported pair and 
         await expect(p.voice).toContainText('Not in voice', { timeout: 10_000 });
       }
     } finally {
-      for (const c of contexts) await c.close();
+      for (const c of contexts) await closeAll(c);
     }
   });
 
@@ -1368,8 +1273,8 @@ test('a push-to-talk whose reports are slow is audited as the reported pair and 
         await expect(voiceRegion(p.page)).toContainText('Not in voice', { timeout: 10_000 });
       }
     } finally {
-      await a.context.close();
-      await b.context.close();
+      await closeAll(a.context);
+      await closeAll(b.context);
     }
   });
 
@@ -1420,7 +1325,7 @@ test('a push-to-talk whose reports are slow is audited as the reported pair and 
       await expect(here.getByRole('list', { name: 'In voice' }).getByText(/^You/)).toHaveCount(0);
       expect(await first.evaluate(() => (window as unknown as { __elsewhere: boolean }).__elsewhere), 'the page in voice said "another device" of itself').toBe(false);
     } finally {
-      for (const context of contexts) await context.close();
+      for (const context of contexts) await closeAll(context);
     }
   });
 
@@ -1435,7 +1340,7 @@ test('a push-to-talk whose reports are slow is audited as the reported pair and 
       await expect(voice).toContainText('not a member');
       await expectClean(b);
     } finally {
-      await b.context.close();
+      await closeAll(b.context);
     }
   });
 
@@ -1467,7 +1372,7 @@ test('a push-to-talk whose reports are slow is audited as the reported pair and 
       expect(seen.some((n) => n.includes(`access_token=${join}`)), 'the join token is in a validate URL in the page\'s timing').toBe(true);
       await expectClean(a);
     } finally {
-      await a.context.close();
+      await closeAll(a.context);
     }
   });
 
@@ -1545,7 +1450,7 @@ test('a push-to-talk whose reports are slow is audited as the reported pair and 
         await leak(a.page, a.member.token);
         await expect(expectClean(a), `a secret in ${where}`).rejects.toThrow();
       } finally {
-        await a.context.close();
+        await closeAll(a.context);
       }
     });
   }
@@ -1609,13 +1514,13 @@ test('a push-to-talk whose reports are slow is audited as the reported pair and 
           await expect(voice).toContainText('Not in voice', { timeout: 10_000 });
           await expect(heard).not.toContainText('yan', { timeout: 15_000 });
         } finally {
-          await a.context.close();
+          await closeAll(a.context);
         }
       }
       console.log(`first-press clear times (ms): ${clears.join(' ')}`);
       expect(clears.filter((c) => c < 0 || c > firstPressBound), `clear times after release, ms: ${clears.join(' ')}`).toEqual([]);
     } finally {
-      await b.context.close();
+      await closeAll(b.context);
     }
   });
 
@@ -1634,7 +1539,7 @@ test('a push-to-talk whose reports are slow is audited as the reported pair and 
       await expect(voice).not.toContainText('Voice server unreachable');
       await expectClean(a);
     } finally {
-      await a.context.close();
+      await closeAll(a.context);
     }
   });
 });

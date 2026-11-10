@@ -46,8 +46,7 @@
 //                          config leaves at their defaults). Measured: see
 //                          vanishedWithin below.
 import type { Browser, Locator, Page, WebSocketRoute } from '@playwright/test';
-import { expect, messages, say, test } from './fixtures';
-import { adminToken } from './livekit-admin';
+import { closeAll, expect, messages, say, test } from './fixtures';
 import { enter, expectClean, inbound, joinVoice, leave, type Someone } from './people';
 import { dockerAvailable, emptiesWithin, startVoiceWorld, type Member, type VoiceWorld } from './voice-world';
 import { loadWorld } from './world';
@@ -244,49 +243,8 @@ test.describe('voice recovery', () => {
   const identities = (...ms: Member[]) => ms.map(identity).sort();
   const names = (ps: readonly Someone[]) => ps.map((p) => p.member.name);
 
-  // LiveKit's list of one member's published tracks (microphone only), asked
-  // of LiveKit directly with the world's key and secret (as livekit-admin.ts
-  // does for identities; the secret is the one voice-world.ts adds first
-  // after the three credentials and the operator's).
-  async function microphones(member: Member): Promise<string[]> {
-    const secret = vw.secrets.find((s) => s.startsWith('web-voice-NOT-FOR-PRODUCTION-'));
-    if (secret === undefined) throw new Error('no LiveKit secret in the world');
-    const base = `http://127.0.0.1:${new URL(vw.livekitOrigin.replace(/^ws/, 'http')).port}`;
-    const call = async (method: string, grant: object, body: object): Promise<unknown> => {
-      // Fixed messages only, as livekit-admin.ts: a transport error names the
-      // address, a parse error quotes the body, and a body can name a room.
-      let res: Response;
-      try {
-        res = await fetch(`${base}/twirp/livekit.RoomService/${method}`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${adminToken('webvoicekey', secret, grant)}` },
-          body: JSON.stringify(body),
-          signal: AbortSignal.timeout(5000),
-        });
-      } catch {
-        throw new Error(`livekit ${method}: no answer`);
-      }
-      if (res.status !== 200) throw new Error(`livekit ${method}: HTTP ${String(res.status)}`);
-      try {
-        return (await res.json()) as unknown;
-      } catch {
-        throw new Error(`livekit ${method}: unreadable answer`);
-      }
-    };
-    const rooms = (await call('ListRooms', { roomList: true }, {})) as { rooms?: { name?: string }[] };
-    const out: string[] = [];
-    for (const room of rooms.rooms ?? []) {
-      if (typeof room.name !== 'string') continue;
-      const found = (await call('ListParticipants', { roomAdmin: true, room: room.name }, { room: room.name })) as {
-        participants?: { identity?: string; tracks?: { sid?: string; source?: string }[] }[];
-      };
-      for (const p of found.participants ?? []) {
-        if (p.identity !== identity(member)) continue;
-        for (const t of p.tracks ?? []) if (typeof t.sid === 'string' && t.source === 'MICROPHONE') out.push(t.sid);
-      }
-    }
-    return out.sort();
-  }
+  // The sids of one member's microphone publications, asked of LiveKit.
+  const microphones = async (member: Member): Promise<string[]> => (await vw.tracks(member, 'microphone')).map((t) => t.sid);
 
   async function unreported(member: Member): Promise<number> {
     return (await vw.audit()).filter((e) => e.actor === `principal:${String(member.id)}` && e.action === 'voice_transmit_unreported').length;
@@ -506,7 +464,7 @@ test.describe('voice recovery', () => {
       // As a crashed tab: the context goes, the page is not closed first, so
       // no pagehide ends carol's voice session.
       const goneAt = Date.now();
-      await c.context.close();
+      await closeAll(c.context);
       await expect.poll(() => vw.participants(), { timeout: vanishedWithin, message: 'LiveKit drops carol' }).toEqual(identities(vw.alice, vw.bob));
       const livekitAfter = Date.now() - goneAt;
       info.annotations.push({ type: 'LiveKit stopped listing carol after', description: `${String(livekitAfter)} ms (bound ${String(vanishedWithin)} ms)` });

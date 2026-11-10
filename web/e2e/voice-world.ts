@@ -1,3 +1,9 @@
+// What participants(), tracks() and rooms() return when LiveKit gave no
+// answer (a timeout, a dropped connection): a value no assertion accepts, so
+// that an expect.poll goes on (a throw in a poll fails it at once; see
+// livekit-admin.ts) and a one-off assertion fails with it in the report.
+export const noAnswer = 'livekit: no answer';
+
 // A community with voice for the browser suite (issue #442): a LiveKit server
 // from the same pinned image e2e/voice runs, in Docker, and a conchd of its own
 // configured for it, with three members in one channel. The shared p3-local
@@ -12,7 +18,7 @@ import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Page } from '@playwright/test';
-import { listIdentities } from './livekit-admin';
+import { listIdentities, listTracks, roomCount, untilAnswered, type PublishedTrack } from './livekit-admin';
 import { repoRoot, safePath, type World } from './world';
 
 // The same image, by version and digest, as e2e/internal/lkit/kit.go (which
@@ -142,6 +148,12 @@ export interface VoiceWorld {
   // are "p<principal id>", with ".screen" or ".view" for a companion. Room
   // names are never returned, and an error carries an HTTP status only.
   participants: () => Promise<string[]>;
+  // The tracks one member publishes, of one kind, asked of LiveKit directly
+  // and sorted by sid: 'microphone' is MICROPHONE, 'screen' is SCREEN_SHARE and
+  // SCREEN_SHARE_AUDIO. A room that ends between the calls counts as empty.
+  tracks: (member: Pick<Member, 'id'>, kind: 'microphone' | 'screen') => Promise<PublishedTrack[]>;
+  // How many rooms LiveKit lists; 0 once the last has closed.
+  rooms: () => Promise<number>;
   // Freezes the LiveKit container's processes (docker pause) and thaws them:
   // the server stops answering without closing a socket, as an unreachable
   // host does (issue #1612). Always unpause before stop.
@@ -258,6 +270,7 @@ room:
     const bob = await member('bob');
     const carol = await member('carol');
     const secrets = [operator, alice.token, bob.token, carol.token, secret];
+    const lk = `http://127.0.0.1:${String(httpPort)}`;
     let fromSessions = 0;
     let made = 0;
 
@@ -304,7 +317,13 @@ room:
         }
         return out;
       },
-      participants: () => listIdentities(`http://127.0.0.1:${String(httpPort)}`, key, secret),
+      participants: () => untilAnswered(() => listIdentities(lk, key, secret), [noAnswer]),
+      tracks: (m, kind) =>
+        untilAnswered(
+          () => listTracks(lk, key, secret, `p${String(m.id)}`, (source) => (kind === 'microphone' ? source === 'MICROPHONE' : source.startsWith('SCREEN_SHARE'))),
+          [{ sid: noAnswer, source: noAnswer }],
+        ),
+      rooms: () => untilAnswered(() => roomCount(lk, key, secret), -1),
       pauseLiveKit: () => {
         const r = docker(['pause', container]);
         if (!r.ok) throw new Error(`docker pause: ${r.out}`);

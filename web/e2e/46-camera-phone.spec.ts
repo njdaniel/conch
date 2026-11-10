@@ -25,7 +25,7 @@
 // in 10-voice.
 import type { Browser, BrowserContextOptions, Locator, Page } from '@playwright/test';
 import type { VoicePresenceV1 } from '../src/schema/voice';
-import { expect, expectFits, openChannel, phoneSizes, rememberPushToTalk, showView, signIn, test } from './fixtures';
+import { closeAll, expect, expectFits, openChannel, phoneSizes, rememberPushToTalk, showView, signIn, test } from './fixtures';
 import { dockerAvailable, startVoiceWorld, watchPage, type Member, type VoiceWorld, type Watch } from './voice-world';
 
 const voiceRegion = (page: Page) => page.getByRole('region', { name: 'Voice' });
@@ -164,12 +164,7 @@ test.describe('the camera on a phone with LiveKit', () => {
     });
     await signIn(page, vw, member.token, member.name);
     await openChannel(page, vw.channel);
-    // The page is closed before its context: its pagehide ends the session it
-    // started (issue #802).
-    const close = async () => {
-      if (!page.isClosed()) await page.close();
-      await ctx.close();
-    };
+    const close = () => closeAll(ctx);
     return { page, watch, member, size, cameraCalls, close };
   }
 

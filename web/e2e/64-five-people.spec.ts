@@ -56,5 +56,7 @@ test.describe('@heavy five people', () => {
       for (const p of people) await leave(p);
     }
     await expect.poll(() => vw.participants(), { timeout: emptiesWithin }).toEqual([]);
+    // And the room itself is closed, not merely empty.
+    await expect.poll(() => vw.rooms(), { timeout: emptiesWithin, message: 'LiveKit closes the room' }).toBe(0);
   });
 });

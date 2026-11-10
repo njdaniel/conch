@@ -31,7 +31,6 @@
 // Firefox by hand), #1584 and #1603 (the desktop) and #1513 (the droplet).
 import type { Page } from '@playwright/test';
 import { expect, test } from './fixtures';
-import { adminToken, LiveKitStatusError } from './livekit-admin';
 import { enter, expectClean, inbound, joinVoice, leave, type Someone } from './people';
 import { dockerAvailable, startVoiceWorld, type VoiceWorld } from './voice-world';
 import { loadWorld } from './world';
@@ -48,12 +47,6 @@ const endsWithin = 2 * (2000 + 1500 + 2000);
 
 const voiceRegion = (page: Page) => page.getByRole('region', { name: 'Voice' });
 const shareView = (page: Page) => page.getByRole('region', { name: 'Shared screen' });
-
-// A screen track LiveKit lists for a participant: its sid and source.
-interface Published {
-  readonly sid: string;
-  readonly source: string;
-}
 
 test.describe('@smoke screen share permission and pixels with LiveKit', () => {
   let vw: VoiceWorld;
@@ -102,58 +95,7 @@ test.describe('@smoke screen share permission and pixels with LiveKit', () => {
     expect(await memberShareCell(), 'share_screen restored for members').toBe(found);
   }
 
-  // LiveKit's screen share tracks of member, asked of LiveKit directly.
-  async function screenTracks(member: { id: number }): Promise<Published[]> {
-    const base = `http://127.0.0.1:${new URL(vw.livekitOrigin.replace(/^ws/, 'http')).port}`;
-    // The key and secret the voice world chose; the secret is the one it adds
-    // to secrets with this prefix.
-    const secret = vw.secrets.find((s) => s.startsWith('web-voice-NOT-FOR-PRODUCTION-'));
-    if (secret === undefined) throw new Error('no LiveKit secret in the world');
-    const call = async (method: string, grant: object, body: object): Promise<unknown> => {
-      let res: Response;
-      try {
-        res = await fetch(`${base}/twirp/livekit.RoomService/${method}`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${adminToken('webvoicekey', secret, grant)}` },
-          body: JSON.stringify(body),
-          signal: AbortSignal.timeout(5000),
-        });
-      } catch {
-        // A transport error names the address.
-        throw new Error(`livekit ${method}: no answer`);
-      }
-      // Status only: a body can name a room.
-      if (res.status !== 200) throw new LiveKitStatusError(method, res.status);
-      try {
-        return (await res.json()) as unknown;
-      } catch {
-        // A parse error quotes part of the body.
-        throw new Error(`livekit ${method}: unreadable answer`);
-      }
-    };
-    const rooms = (await call('ListRooms', { roomList: true }, {})) as { rooms?: { name?: string }[] };
-    const out: Published[] = [];
-    for (const room of rooms.rooms ?? []) {
-      if (typeof room.name !== 'string') continue;
-      type Found = { participants?: { identity?: string; tracks?: { sid?: string; source?: string }[] }[] };
-      let found: Found;
-      try {
-        found = (await call('ListParticipants', { roomAdmin: true, room: room.name }, { room: room.name })) as Found;
-      } catch (err) {
-        // A room that ends between the two calls has no one, as in livekit-admin.ts.
-        if (err instanceof LiveKitStatusError && err.status === 404) continue;
-        throw err;
-      }
-      for (const p of found.participants ?? []) {
-        if (p.identity !== `p${String(member.id)}`) continue;
-        for (const t of p.tracks ?? []) {
-          if (typeof t.sid === 'string' && typeof t.source === 'string' && t.source.startsWith('SCREEN_SHARE')) out.push({ sid: t.sid, source: t.source });
-        }
-      }
-    }
-    return out;
-  }
-  const videoSids = async (member: { id: number }) => (await screenTracks(member)).filter((t) => t.source === 'SCREEN_SHARE').map((t) => t.sid);
+  const videoSids = async (member: { id: number }) => (await vw.tracks(member, 'screen')).filter((t) => t.source === 'SCREEN_SHARE').map((t) => t.sid);
 
   async function shareRows(): Promise<{ actor: string; action: string; detail: string }[]> {
     return (await vw.audit()).filter((e) => e.action.startsWith('voice_share_')).map(({ actor, action, detail }) => ({ actor, action, detail }));
@@ -324,7 +266,7 @@ test.describe('@smoke screen share permission and pixels with LiveKit', () => {
         await expect(voiceRegion(a.page)).toContainText("Your share ended: you're no longer allowed to share in this channel.", { timeout: endsWithin });
         await expect(voiceRegion(a.page).getByRole('button', { name: 'Stop sharing' })).toHaveCount(0);
         await expect(shareView(c.page)).toHaveCount(0, { timeout: endsWithin });
-        await expect.poll(() => screenTracks(vw.alice), { timeout: endsWithin }).toEqual([]);
+        await expect.poll(() => vw.tracks(vw.alice, 'screen'), { timeout: endsWithin }).toEqual([]);
         framesAtEnd = (await videoFrames(c)).get(stream) ?? 0;
       });
       const me = `principal:${String(vw.alice.id)}`;
