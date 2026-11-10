@@ -1850,6 +1850,8 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
             : {})}
           onSettingsOpen={readWho}
           admin={
+            // By role on purpose: the console's routes are accessOperator, and
+            // its sections gate their own writes with canDo.
             auth.principal.role === 'operator' ? (
               // The names the page knows are the open channel's members.
               <AdminConsole
@@ -1983,11 +1985,16 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
             visit === null ? <InvitePanel origin={origin} me={auth.principal} request={inviteAsk} onUnauthorized={onUnauthorized} /> : null
           }
           firstRun={
-            // Whoever may make a channel (POST /v0/channels needs
-            // manage_channels) on a server with no channels is shown what to
-            // do first; anyone else keeps the channel list's own line.
-            channels.loaded && channels.channels.length === 0 && canDo(auth.principal, 'manage_channels') && visit === null ? (
+            // Whoever may make a channel (POST /v1/channels checks
+            // create_public_channels and create_private_channels in the
+            // store) on a server with no channels is shown what to do first;
+            // anyone else keeps the channel list's own line.
+            channels.loaded &&
+            channels.channels.length === 0 &&
+            (canDo(auth.principal, 'create_public_channels') || canDo(auth.principal, 'create_private_channels')) &&
+            visit === null ? (
               <FirstRun
+                operator={auth.principal.role === 'operator'}
                 onMakeChannel={() => {
                   setCreateAsks((n) => n + 1);
                 }}
