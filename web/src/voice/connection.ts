@@ -1571,6 +1571,11 @@ export class VoiceClient {
     this.gate.setBlocked(s.phase !== 'connected' || s.muted || s.deafened || s.listenOnly || s.watchOnly || s.missing || this.switching);
   }
 
+  private clearReconnectTimer(): void {
+    if (this.reconnectTimer !== null) this.env.clock.clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = null;
+  }
+
   private clearTimers(): void {
     for (const t of [this.retryTimer, this.reconnectTimer, this.levelTimer]) {
       if (t !== null) this.env.clock.clearTimeout(t);
@@ -1920,6 +1925,10 @@ export class VoiceClient {
       // microphone failed fires its Disconnected, which must not act again
       // (it would turn a stop into a retry).
       const next = ++this.attempt;
+      // A Reconnecting the failed room reported first armed a give-up that is
+      // this attempt's no longer: left standing, it would stop the next
+      // attempt's Reconnecting from arming its own.
+      this.clearReconnectTimer();
       void room.close().catch(() => undefined);
       this.room = null;
       // A microphone that cannot be had stops: the next attempt is the
