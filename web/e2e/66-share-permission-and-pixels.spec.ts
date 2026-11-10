@@ -17,7 +17,7 @@
 // flatBelow). The pinned Chromium's fake screen (the @playwright/test
 // version in package.json) animates. Measured: the
 // deviation is 23 to 31 and consecutive samples half a second apart differ by
-// up to about 103 levels in some pixel, so the samples must also differ.
+// by 103 levels (102.6 to 104.4 over 20 pairs) in some pixel, so the samples must also differ.
 //
 // Stop then restart: the second share is a new LiveKit publication (a track
 // sid LiveKit never listed for the first), the first is gone from LiveKit, and
@@ -31,7 +31,7 @@
 // Firefox by hand), #1584 and #1603 (the desktop) and #1513 (the droplet).
 import type { Page } from '@playwright/test';
 import { expect, test } from './fixtures';
-import { adminToken } from './livekit-admin';
+import { adminToken, LiveKitStatusError } from './livekit-admin';
 import { enter, expectClean, inbound, joinVoice, leave, type Someone } from './people';
 import { dockerAvailable, startVoiceWorld, type VoiceWorld } from './voice-world';
 import { loadWorld } from './world';
@@ -97,8 +97,9 @@ test.describe('@smoke screen share permission and pixels with LiveKit', () => {
       await body();
     } finally {
       await setMemberShareCell(found);
-      expect(await memberShareCell(), 'share_screen restored for members').toBe(found);
     }
+    // After the finally, so a failed body is not masked by this check.
+    expect(await memberShareCell(), 'share_screen restored for members').toBe(found);
   }
 
   // LiveKit's screen share tracks of member, asked of LiveKit directly.
@@ -109,23 +110,40 @@ test.describe('@smoke screen share permission and pixels with LiveKit', () => {
     const secret = vw.secrets.find((s) => s.startsWith('web-voice-NOT-FOR-PRODUCTION-'));
     if (secret === undefined) throw new Error('no LiveKit secret in the world');
     const call = async (method: string, grant: object, body: object): Promise<unknown> => {
-      const res = await fetch(`${base}/twirp/livekit.RoomService/${method}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${adminToken('webvoicekey', secret, grant)}` },
-        body: JSON.stringify(body),
-        signal: AbortSignal.timeout(5000),
-      });
+      let res: Response;
+      try {
+        res = await fetch(`${base}/twirp/livekit.RoomService/${method}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${adminToken('webvoicekey', secret, grant)}` },
+          body: JSON.stringify(body),
+          signal: AbortSignal.timeout(5000),
+        });
+      } catch {
+        // A transport error names the address.
+        throw new Error(`livekit ${method}: no answer`);
+      }
       // Status only: a body can name a room.
-      if (res.status !== 200) throw new Error(`livekit ${method}: HTTP ${String(res.status)}`);
-      return res.json();
+      if (res.status !== 200) throw new LiveKitStatusError(method, res.status);
+      try {
+        return (await res.json()) as unknown;
+      } catch {
+        // A parse error quotes part of the body.
+        throw new Error(`livekit ${method}: unreadable answer`);
+      }
     };
     const rooms = (await call('ListRooms', { roomList: true }, {})) as { rooms?: { name?: string }[] };
     const out: Published[] = [];
     for (const room of rooms.rooms ?? []) {
       if (typeof room.name !== 'string') continue;
-      const found = (await call('ListParticipants', { roomAdmin: true, room: room.name }, { room: room.name })) as {
-        participants?: { identity?: string; tracks?: { sid?: string; source?: string }[] }[];
-      };
+      type Found = { participants?: { identity?: string; tracks?: { sid?: string; source?: string }[] }[] };
+      let found: Found;
+      try {
+        found = (await call('ListParticipants', { roomAdmin: true, room: room.name }, { room: room.name })) as Found;
+      } catch (err) {
+        // A room that ends between the two calls has no one, as in livekit-admin.ts.
+        if (err instanceof LiveKitStatusError && err.status === 404) continue;
+        throw err;
+      }
       for (const p of found.participants ?? []) {
         if (p.identity !== `p${String(member.id)}`) continue;
         for (const t of p.tracks ?? []) {
@@ -137,10 +155,11 @@ test.describe('@smoke screen share permission and pixels with LiveKit', () => {
   }
   const videoSids = async (member: { id: number }) => (await screenTracks(member)).filter((t) => t.source === 'SCREEN_SHARE').map((t) => t.sid);
 
-  async function shareRows(): Promise<{ action: string; detail: string }[]> {
-    return (await vw.audit()).filter((e) => e.action.startsWith('voice_share_')).map(({ action, detail }) => ({ action, detail }));
+  async function shareRows(): Promise<{ actor: string; action: string; detail: string }[]> {
+    return (await vw.audit()).filter((e) => e.action.startsWith('voice_share_')).map(({ actor, action, detail }) => ({ actor, action, detail }));
   }
-  const rowName = (r: { action: string; detail: string }) => `${r.action} ${/reason=(\w+)/.exec(r.detail)?.[1] ?? ''}`.trim();
+  // The row's actor, action and reason.
+  const rowName = (r: { actor: string; action: string; detail: string }) => `${r.actor} ${r.action} ${/reason=(\w+)/.exec(r.detail)?.[1] ?? ''}`.trim();
 
   async function share(p: Someone): Promise<void> {
     const voice = voiceRegion(p.page);
@@ -149,15 +168,34 @@ test.describe('@smoke screen share permission and pixels with LiveKit', () => {
     await expect(voice).toContainText('You are sharing your screen with sound.', { timeout: 30_000 });
   }
 
-  // watch presses Watch on the sharer's tile and waits for frames to arrive and
-  // keep arriving. Returns the frames decoded when it was satisfied.
-  async function watch(p: Someone): Promise<number> {
+  // watch presses Watch on the sharer's tile and waits for it to show.
+  async function watch(p: Someone): Promise<void> {
     await p.page.getByRole('button', { name: 'Watch' }).click({ timeout: 30_000 });
     await expect(shareView(p.page)).toContainText('alice · LIVE');
-    await expect.poll(async () => (await inbound(p.page)).frames, { timeout: 30_000 }).toBeGreaterThan(10);
-    const before = (await inbound(p.page)).frames;
-    await expect.poll(async () => (await inbound(p.page)).frames, { timeout: 15_000 }).toBeGreaterThan(before);
-    return (await inbound(p.page)).frames;
+  }
+
+  // The received video streams of the page, by stats id, with frames decoded.
+  async function videoFrames(p: Someone): Promise<Map<string, number>> {
+    const got = await inbound(p.page, { perTrack: true });
+    return new Map((got.tracks ?? []).filter((t) => t.kind === 'video').map((t) => [t.id, t.frames]));
+  }
+
+  // framesRise waits for a received video stream whose id is not in known to
+  // decode frames and then keep decoding them, and returns its id.
+  async function framesRise(p: Someone, known: ReadonlySet<string>): Promise<string> {
+    let id = '';
+    await expect
+      .poll(
+        async () => {
+          for (const [k, frames] of await videoFrames(p)) if (!known.has(k) && frames > 10) id = k;
+          return id;
+        },
+        { timeout: 30_000, message: 'a new video stream decodes frames' },
+      )
+      .not.toBe('');
+    const at = (await videoFrames(p)).get(id) ?? 0;
+    await expect.poll(async () => (await videoFrames(p)).get(id) ?? 0, { timeout: 15_000, message: 'its frames keep rising' }).toBeGreaterThan(at);
+    return id;
   }
 
   // Five luminance samples of the watched <video> over two seconds, each a
@@ -204,6 +242,7 @@ test.describe('@smoke screen share permission and pixels with LiveKit', () => {
       await expect.poll(() => videoSids(vw.alice), { timeout: 15_000 }).toHaveLength(1);
       const first = (await videoSids(vw.alice))[0] ?? '';
       await watch(c);
+      const firstStream = await framesRise(c, new Set());
 
       const { stds, grids } = await samples(c.page);
       for (const [i, s] of stds.entries()) expect(s, `luminance deviation of sample ${String(i)}`).toBeGreaterThan(flatBelow);
@@ -221,16 +260,18 @@ test.describe('@smoke screen share permission and pixels with LiveKit', () => {
       await expect.poll(() => videoSids(vw.alice), { timeout: 15_000 }).toHaveLength(1);
       const second = (await videoSids(vw.alice))[0] ?? '';
       expect(second, 'the second share is a publication of its own').not.toBe(first);
-      const framesBefore = (await inbound(c.page)).frames;
       await watch(c);
-      expect((await inbound(c.page)).frames, 'frames rise on the new publication').toBeGreaterThan(framesBefore);
+      // A stream of its own, not the first share's, decoding frames.
+      const secondStream = await framesRise(c, new Set([firstStream]));
+      expect(secondStream).not.toBe(firstStream);
       expect(await videoSids(vw.alice), 'only the new screen publication is listed').toEqual([second]);
 
       await voiceRegion(a.page).getByRole('button', { name: 'Stop sharing' }).click();
       await expect(shareView(c.page)).toHaveCount(0, { timeout: 15_000 });
+      const me = `principal:${String(vw.alice.id)}`;
       await expect
         .poll(async () => (await shareRows()).slice(before).map(rowName), { timeout: 15_000 })
-        .toEqual(['voice_share_started', 'voice_share_stopped self', 'voice_share_started', 'voice_share_stopped self']);
+        .toEqual([`${me} voice_share_started`, `${me} voice_share_stopped self`, `${me} voice_share_started`, `${me} voice_share_stopped self`]);
       for (const p of [a, c]) await expectClean(vw, p);
     } finally {
       for (const p of [a, c]) await leave(p);
@@ -273,23 +314,24 @@ test.describe('@smoke screen share permission and pixels with LiveKit', () => {
       await joinVoice(c, 'Watch only');
       await share(a);
       await watch(c);
+      const stream = await framesRise(c, new Set());
       await expect.poll(() => videoSids(vw.alice), { timeout: 15_000 }).toHaveLength(1);
 
+      let framesAtEnd = 0;
       await withShareOff(async () => {
         // Today's words for access_lost, which say voice was lost when only
         // share_screen was (a UX follow-up, not changed here).
         await expect(voiceRegion(a.page)).toContainText('Your share ended: you no longer have voice in this channel.', { timeout: endsWithin });
         await expect(voiceRegion(a.page).getByRole('button', { name: 'Stop sharing' })).toHaveCount(0);
         await expect(shareView(c.page)).toHaveCount(0, { timeout: endsWithin });
-        // Frames stop: the ended stream's stats go with its track, so a
-        // second reading is never above the first.
-        const first = (await inbound(c.page)).frames;
-        await c.page.waitForTimeout(1000);
-        expect((await inbound(c.page)).frames, 'no more frames after the share ended').toBeLessThanOrEqual(first);
         await expect.poll(() => screenTracks(vw.alice), { timeout: endsWithin }).toEqual([]);
+        framesAtEnd = (await videoFrames(c)).get(stream) ?? 0;
       });
+      const me = `principal:${String(vw.alice.id)}`;
       const rows = (await shareRows()).slice(before).map(rowName);
-      expect(rows).toEqual(['voice_share_started', 'voice_share_stopped access_lost']);
+      expect(rows).toEqual([`${me} voice_share_started`, `${me} voice_share_stopped access_lost`]);
+      // The ended stream decoded nothing more while the rows were read.
+      expect((await videoFrames(c)).get(stream) ?? 0, 'frames after the share ended').toBeLessThanOrEqual(framesAtEnd);
       // Back as found: alice may share again.
       await expect(voiceRegion(a.page).getByRole('button', { name: 'Share screen' })).toBeEnabled();
       for (const p of [a, c]) await expectClean(vw, p);
