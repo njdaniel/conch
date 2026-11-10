@@ -326,8 +326,8 @@ nothing below says anything about Safari, macOS or iOS.
 | The client loads, signs in and chats | Yes. `01-sign-in` and `02-messages` (all but the F15 tab-stop count) and the 63 messaging smoke pass | Yes, from CI (e2e-heavy run 42819479322, `e2e-cross (webkit)`): 11 of 12 passed, the 12th (F7) after a one-line filter, below |
 | Fake `getUserMedia` audio | Yes, with `firefoxUserPrefs` `media.navigator.streams.fake` and `media.navigator.permission.disabled`: the track is "Default Audio Device", no prompt. Fake video the same way (a camera test passes) | Not established. No launch flag or pref is known; `@voice` tests are left out |
 | Fake `getDisplayMedia`, headless | No. The call is never answered (waited 10 s after a click; the same with the `media.getdisplaymedia.*` prefs). No `@cross` test shares a screen. `12-screen-share` also expects tab sound, which the client says Firefox does not give ("No sound: this browser shares the picture only") | Not established |
-| WebRTC to the pinned LiveKit on 127.0.0.1 | Yes, with `media.peerconnection.ice.obfuscate_host_addresses` false (the counterpart of Chromium's `WebRtcHideLocalIpsWithMdns`): `63` voice smoke passes (13 of 14 local runs of the Firefox set were green; the one failure was this `63` voice test, cause not captured) | Not established |
-| A synthetic Web Audio microphone (#1610) heard by the other pages | Unsettled. `65-who-hears-whom` passed in all 14 local runs on Firefox (three pages, each hearing exactly the other two tones, 20 dB above the floor) but failed once in CI (run 42819479322, job `e2e-cross (firefox)`): every page read -120 dB at every tone for the whole first reading after alice's press, while the roster said she was transmitting, the tracks were live and the stream ids were the `PA_...\|TR_...` form (so attribution by stream id holds on Firefox). Not reproduced under full CPU load (3 runs). The cause is unknown, so 65 is not `@cross`. Not tried against a Chromium listener | Not established |
+| WebRTC to the pinned LiveKit on 127.0.0.1 | Yes, with `media.peerconnection.ice.obfuscate_host_addresses` false (the counterpart of Chromium's `WebRtcHideLocalIpsWithMdns`): `63` voice smoke passes (#1703: its one failure in 20 was a teardown wait, not a join: Playwright's plain `page.close()` sends no leave to LiveKit on Firefox, so LiveKit listed the person for about 20 s; `leave` in `people.ts` now closes with `runBeforeUnload`) | Not established |
+| A synthetic Web Audio microphone (#1610) heard by the other pages | Locally yes, in CI no: `65-who-hears-whom` passed 20 of 20 on Firefox idle and 20 of 20 under load here, but failed in both heavy runs (42819479322, 42842835221), a listener's analyser hearing no tone the others hear, even after waiting until a tone is heard. Suspected cause: no audio output device on the runner, which Firefox's audio graph may need (#1707). Out of the Firefox `@cross` set until then; `inbound-rtp` bytes (as `63` checks) do arrive | Not established |
 
 How it was established: `npx playwright install firefox webkit` fetched both
 builds. Firefox launched and passed the `@cross` set locally. `getDisplayMedia` was
@@ -344,8 +344,7 @@ message for WebKit only and still fails on any other console error.
 Tests that pass on Firefox and are tagged `@cross`: the six of `01-sign-in`,
 the five of `02-messages` other than F15's tab-stop count (Firefox's log has one
 tab stop more than Chromium's: 8, not 7), and the two of `63-multi-user-smoke`
-(the second is also `@voice`): 13 tests on Firefox, 12 on WebKit.
-`65-who-hears-whom` is not in the set (see the table).
+(the second is also `@voice`): 13 tests on Firefox, 12 on WebKit. `65-who-hears-whom` is out of the set until #1707.
 
 
 ## Multi-user specs and helpers

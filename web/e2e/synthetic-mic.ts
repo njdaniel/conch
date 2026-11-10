@@ -127,6 +127,8 @@ export async function startListening(page: Page): Promise<void> {
     let wired = 0;
     const buffer = new Float32Array(256);
     const read = () => {
+      // A context a browser suspended (an autoplay policy) reads silence.
+      if (context.state === 'suspended') void context.resume();
       for (; wired < w.__heardTracks.length; wired++) {
         const track = w.__heardTracks[wired];
         if (track === undefined) continue;

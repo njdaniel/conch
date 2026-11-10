@@ -98,8 +98,18 @@ export async function joinVoice(p: Someone, how: 'Join voice' | 'Watch only'): P
 // leave closes the person's pages and then their context (closeAll in
 // fixtures.ts says why in that order), the context even if a page will not
 // close. Safe to call twice.
+//
+// runBeforeUnload (issue #1703): Playwright's plain page.close() fires neither
+// beforeunload nor, in Firefox, a pagehide that livekit-client's page-leave
+// handler (disconnectOnPageLeave) acts on, so no "leave" reaches LiveKit; it
+// then lists the person until it times their connection out, about 20 s: on
+// Firefox about 1 run in 20 idle and 4 in 10 under load, longer than
+// emptiesWithin. Closing with runBeforeUnload runs that handler, as a person
+// closing the tab does, and LiveKit lists nobody within milliseconds. The web
+// client registers no beforeunload of its own, so none can prompt and hang the
+// close.
 export async function leave(p: Pick<Someone, 'context'>): Promise<void> {
-  await closeAll(p.context);
+  await closeAll(p.context, { runBeforeUnload: true });
 }
 
 export interface Inbound {

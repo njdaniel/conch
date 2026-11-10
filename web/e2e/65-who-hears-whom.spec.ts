@@ -60,11 +60,11 @@ const maxIdleDb = -60;
 const voiceRegion = (page: Page) => page.getByRole('region', { name: 'Voice' });
 const roster = (page: Page) => voiceRegion(page).getByRole('list', { name: 'In voice' });
 
-// Not @cross (#1658): on Firefox it passed in all 14 local runs and failed once
-// in CI (run 42819479322): every page's analyser read -120 dB at every tone for
-// the whole first reading after alice's press, though the roster said she was
-// transmitting, the tracks were live and the stream ids were the PA_|TR_ form.
-// The cause is not established, so it is out of the Firefox set until it is.
+// Not @cross on Firefox (#1703, #1707): it passes every local run but failed
+// in both CI heavy runs (42819479322, 42842835221), a listener's analyser
+// hearing no tone though the talker is heard elsewhere. Suspected cause: the
+// runner has no audio output device, which Firefox's audio graph may need.
+// It runs in Chromium in the pull request lane as before.
 test.describe('who hears whom', () => {
   let vw: VoiceWorld;
   let stopWorld: (() => void) | undefined;
@@ -161,7 +161,7 @@ test.describe('who hears whom', () => {
           const others = people.filter((o) => o !== p);
           for (const o of others) await expect(roster(o.page)).toContainText(`${p.member.name} (transmitting)`, { timeout: 15_000 });
           await expect(voiceRegion(p.page)).toContainText('Transmitting');
-          expectOnly(await afterOnset(observe), t);
+          expectOnly(await afterOnset(observe, heard), t);
           await p.page.keyboard.up('Backquote');
           for (const o of others) await expect(roster(o.page)).not.toContainText(`${p.member.name} (transmitting)`, { timeout: 15_000 });
           await expectSilence();
@@ -192,7 +192,7 @@ test.describe('who hears whom', () => {
         await av.getByRole('button', { name: 'Unmute', exact: true }).click();
         await expect(av).not.toContainText('Muted.');
         for (const o of [bob, carol]) await expect(roster(o.page)).toContainText('alice (transmitting)', { timeout: 15_000 });
-        expectOnly(await afterOnset(observe), 0);
+        expectOnly(await afterOnset(observe, heard), 0);
         // Back to push to talk: the open microphone would keep alice's tone going.
         await chooseMicrophone(av, 'push to talk');
         for (const o of [bob, carol]) await expect(roster(o.page)).not.toContainText('alice (transmitting)', { timeout: 15_000 });
@@ -214,7 +214,7 @@ test.describe('who hears whom', () => {
           const listener = people.find((o) => o !== p && o !== carol);
           if (listener !== undefined) await expect(roster(listener.page)).toContainText(`${p.member.name} (transmitting)`, { timeout: 15_000 });
           // Carol is deaf in her elements, not in her tracks: only the other listener is read.
-          expectOnly(await afterOnset(observe), t, [2]);
+          expectOnly(await afterOnset(observe, heard), t, [2]);
           await p.page.keyboard.up('Backquote');
           await expectSilence([2]);
         }
@@ -246,9 +246,16 @@ test.describe('who hears whom', () => {
   });
 });
 
-// afterOnset reads once a talker has been on for a moment: a short wait for
-// the first packets to be decoded, then one reading.
-async function afterOnset(observe: (ms: number) => Promise<TrackLevel[][]>): Promise<TrackLevel[][]> {
-  await new Promise((r) => setTimeout(r, 300));
+// afterOnset reads once a talker has been heard: it waits, within 10-voice's
+// bound, until some page's analyser shows a tone above its idle floor (the
+// first packets decoded, the jitter buffer filled: a slow first window, on a
+// loaded Firefox runner, once read -120 dB everywhere, #1703), and then takes
+// one reading. A talker who is never heard still fails: the reading that
+// follows finds no track at their tone.
+async function afterOnset(observe: (ms: number) => Promise<TrackLevel[][]>, heard: (all: TrackLevel[][]) => number[][][]): Promise<TrackLevel[][]> {
+  const until = Date.now() + 15_000;
+  while (Date.now() < until) {
+    if (heard(await observe(300)).some((page) => page.some((track) => track.length > 0))) break;
+  }
   return observe(readMs);
 }

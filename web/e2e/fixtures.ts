@@ -79,9 +79,14 @@ export { expect };
 //    directory record signature not found" (issues #1660, #1684, seen under
 //    load). A closed page has closed its sockets.
 // The context closes even if a page fails to. Safe to call twice.
-export async function closeAll(context: BrowserContext): Promise<void> {
+//
+// runBeforeUnload runs each page's beforeunload handlers first (issue #1703):
+// livekit-client leaves its room from one, which Firefox does not run on a
+// plain close. Off by default, as a handler that prompts would hold the close;
+// the web client registers none, and only voice leaves (people.ts leave) ask.
+export async function closeAll(context: BrowserContext, options: { runBeforeUnload?: boolean } = {}): Promise<void> {
   try {
-    for (const page of context.pages()) if (!page.isClosed()) await page.close();
+    for (const page of context.pages()) if (!page.isClosed()) await page.close({ runBeforeUnload: options.runBeforeUnload === true });
   } finally {
     await context.close();
   }
