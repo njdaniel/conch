@@ -639,7 +639,10 @@ async fn the_end_of_input_without_leave_cuts_the_room_step_at_one_second_and_say
     rig.send_start();
     rig.ready().await;
     rig.sdk.close_takes(Duration::from_millis(2500));
-    let before = log.text().matches("the room leave was abandoned").count();
+    let before = log
+        .text()
+        .matches("the room leave was abandoned after 1000 ms")
+        .count();
 
     let gone = Instant::now();
     rig.close();
@@ -655,7 +658,10 @@ async fn the_end_of_input_without_leave_cuts_the_room_step_at_one_second_and_say
         exited < Duration::from_millis(conch_voice_api::VOICE_CONTROL_OWNER_LOSS_EXIT_MS),
         "ended {exited:?} after the owner went"
     );
-    let after = log.text().matches("the room leave was abandoned").count();
+    let after = log
+        .text()
+        .matches("the room leave was abandoned after 1000 ms")
+        .count();
     assert!(after > before, "the abandoned leave was not logged");
 }
 

@@ -2072,6 +2072,7 @@ impl<T: Transport> Session<T> {
         let attempt_limit = self.timings.attempt_limit.min(room_limit);
         let live = self.live.take();
         let phase = std::mem::replace(&mut self.phase, Phase::Settled);
+        crate::managed::set_room_leave_under_way(true);
         let room_left = Arc::new(AtomicBool::new(false));
         let room_done = Arc::clone(&room_left);
         let left = async move {
@@ -2092,6 +2093,7 @@ impl<T: Transport> Session<T> {
                 Phase::Ask(_) | Phase::Settled => {}
             }
             room_done.store(true, Ordering::SeqCst);
+            crate::managed::set_room_leave_under_way(false);
         };
         // What a get_state is answered with meanwhile: on the way out, the gate shut and
         // nothing captured.
