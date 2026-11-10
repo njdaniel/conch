@@ -71,8 +71,17 @@ After sign-in, an answer of a required family (`REQUIRED_FAMILIES` in
 `main/compat.ts`) that is not the document this app was built for is shown as
 an incompatibility, not a network error.
 
-`build/compat.json` is a checked-in list, copied into the app by
-`build/manifest.ts`; the release tooling that generates it is #774. Development
+`build/compat.json` is the development list: checked in, hand-kept, and what a
+build without a release tag copies into the app (the build says so). A release
+build (`CONCH_RELEASE_VERSION=v0.1.0-alpha.18 make desktop-build`; the release
+tag is the version, #1595) generates `out/compat.json` instead: that tag plus
+the patch releases in `build/compat-extra.json` (hand-kept, may be empty), by
+`build/manifest.ts`. It also stamps the tag into the packaged app's version
+(`0.1.0-alpha.18`; the checked-in `package.json` stays `0.0.0`, a development
+build says `0.0.0-dev+<short sha>`) and fails unless the bundled
+`resources/conch-voice --version` names that version. The tag rules and the
+Debian spelling (`0.1.0~alpha.18`) are in `scripts/desktop-version.sh`. The
+matching is still exact, never a range. Development
 against an unlisted server: `electron . --allow-unlisted-server` in an
 **unpackaged** run. It shows a persistent warning. A packaged app ignores the
 flag (`allowUnlisted`, tested), and a server that did not answer is never let
@@ -162,7 +171,10 @@ sandbox's namespace mode needs; the other mode is a setuid-root `chrome-sandbox`
 On the Pop!_OS 24.04 workstation `unshare --user true` works (observed
 2026-10-28) and the unpacked build runs sandboxed as is. On the CI runner the
 job makes the helper setuid root (see the comment in `ci.yml`). The packaged
-answer (an AppArmor profile, a setuid fallback) is the `.deb` work, #774.
+answer, decided by Nick on 2026-11-09 (#1595), is an AppArmor profile installed
+with the `.deb`, not a setuid sandbox; see
+[docs/design/linux-desktop.md](../docs/design/linux-desktop.md) §9
+(Distribution) for the package decisions.
 
 The fuses are set by electron-builder (`electronFuses`): RunAsNode off,
 NODE_OPTIONS off, Node CLI inspect arguments off, embedded asar integrity

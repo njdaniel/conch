@@ -5,8 +5,8 @@ import type { Feeds } from '../../main/api/feeds.ts';
 import type { Files } from '../../main/files.ts';
 import type { Service } from '../../main/api/service.ts';
 import { DocumentGate } from '../../main/document.ts';
-import { checkCaller, Ipc, parseRequest, plain, type NotificationsApi, type ProfilesApi, type VoiceApi, type ContentsLike, type FrameLike, type InvokeEvent } from '../../main/ipc.ts';
-import { INVOKED_FUNCTIONS, TAG_MAX, VOICE_EVENTS, VOICE_FUNCTIONS } from '../../shared/bridge-names.ts';
+import { checkCaller, Ipc, parseRequest, plain, type CompanionApi, type NotificationsApi, type ProfilesApi, type VoiceApi, type SettingsApi, type ContentsLike, type FrameLike, type InvokeEvent } from '../../main/ipc.ts';
+import { COMPANION_FUNCTIONS, INVOKED_FUNCTIONS, TAG_MAX, VOICE_EVENTS, VOICE_FUNCTIONS } from '../../shared/bridge-names.ts';
 import { deliverVoice } from '../../main/voice/events.ts';
 import type { NativeVoiceView } from '../../../web/src/platform/desktop/bridge.ts';
 import { VOICE_CONTROL_MAX_CHANNEL_BYTES } from '../../../web/src/schema/generated.ts';
@@ -58,8 +58,10 @@ function fixture(): Fixture {
     calls.push([`notifications.${name}`, args]);
     return true;
   } });
+  const settings = new Proxy({} as SettingsApi, { get: (_t, name: string) => record(`settings.${name}`) });
+  const companion = new Proxy({} as CompanionApi, { get: (_t, name: string) => record(`companion.${name}`) });
   const gestures = { take: () => (input.recent ? ('pointer' as const) : null) };
-  const ipc = new Ipc({ owned: () => contents, gate, service, feeds, files, gestures, profiles, voice, notifications, now: () => clock.now, log: (line) => logs.push(line) });
+  const ipc = new Ipc({ owned: () => contents, gate, service, feeds, files, gestures, profiles, voice, notifications, settings, companion, now: () => clock.now, log: (line) => logs.push(line) });
   return { ipc, gate, contents, main, calls, logs, clock, permit, input, activation, event: (over = {}) => ({ sender: contents, senderFrame: main, ...over }) };
 }
 
@@ -101,7 +103,7 @@ describe('every invocation is checked before anything else', () => {
       files: {} as Files,
       gestures: { take: () => null },
       profiles: {} as ProfilesApi,
-      voice: {} as VoiceApi, notifications: {} as NotificationsApi,
+      voice: {} as VoiceApi, settings: {} as SettingsApi, notifications: {} as NotificationsApi,
       now: () => 0,
       log: () => undefined,
     });
@@ -330,7 +332,7 @@ describe('arguments', () => {
       files: {} as Files,
       gestures: { take: () => null },
       profiles: { add: () => { throw new Error('boom secret-arg'); } } as unknown as ProfilesApi,
-      voice: {} as VoiceApi, notifications: {} as NotificationsApi,
+      voice: {} as VoiceApi, settings: {} as SettingsApi, notifications: {} as NotificationsApi,
       now: () => 0,
       log: (line) => f.logs.push(line),
     });
@@ -407,7 +409,7 @@ describe('the credential-replacing writes (issue #1422)', () => {
       files: {} as Files,
       gestures: { take: () => null },
       profiles: { signInPermitted: () => true, signedIn: (account: unknown) => { bound.push(account); return Promise.resolve(true); } } as unknown as ProfilesApi,
-      voice: {} as VoiceApi, notifications: {} as NotificationsApi,
+      voice: {} as VoiceApi, settings: {} as SettingsApi, notifications: {} as NotificationsApi,
       now: () => 0,
       log: () => undefined,
     });
@@ -555,6 +557,8 @@ describe('the voice family (issue #1374)', () => {
     expect(f.calls).toEqual([
       ['voice.state', []],
       ['voice.join', [join]],
+      // The person's Leave ends the screen companion first (issue #1579).
+      ['companion.end', ['leave']],
       ['voice.leave', []],
       ['voice.retry', []],
       ['voice.setMute', [true]],
@@ -733,7 +737,7 @@ describe('the voice family (issue #1374)', () => {
     const f = fixture();
     const asked: number[] = [];
     const ipc = new Ipc({
-      owned: () => f.contents, gate: f.gate, service: {} as Service, feeds: {} as Feeds, files: {} as Files, profiles: {} as ProfilesApi, voice: {} as VoiceApi, notifications: {} as NotificationsApi,
+      owned: () => f.contents, gate: f.gate, service: {} as Service, feeds: {} as Feeds, files: {} as Files, profiles: {} as ProfilesApi, voice: {} as VoiceApi, settings: {} as SettingsApi, notifications: {} as NotificationsApi,
       gestures: { take: (_c, within) => { asked.push(within); return 'pointer'; } }, now: () => 0, log: () => undefined,
     });
     await ipc.invoke(f.event(), 'voiceSetTalkMode', ['bogus']);
@@ -768,7 +772,7 @@ describe('the voice family (issue #1374)', () => {
     f.input.recent = true;
     const ipc = new Ipc({
       owned: () => f.contents, gate: f.gate, service: {} as Service, feeds: {} as Feeds, files: {} as Files, profiles: {} as ProfilesApi,
-      voice: { join: () => { throw new Error('boom secret-channel'); } } as unknown as VoiceApi,
+      voice: { join: () => { throw new Error('boom secret-channel'); } } as unknown as VoiceApi, settings: {} as SettingsApi,
       notifications: {} as NotificationsApi,
       gestures: { take: () => 'pointer' }, now: () => 0, log: (line) => f.logs.push(line),
     });
@@ -794,6 +798,129 @@ describe('the voice family (issue #1374)', () => {
     expect(f.logs.at(-1)).toContain('(rate)');
     f.clock.now += 60_001;
     expect((await f.ipc.invoke(f.event(), name, args)).ok).toBe(true);
+  });
+});
+
+describe('the companion family (issue #1579)', () => {
+  const grant = { channel: 'general' };
+
+  it('passes the parsed arguments to the companion and gives its answer back', async () => {
+    const f = fixture();
+    f.input.recent = true;
+    expect(await f.ipc.invoke(f.event(), 'companionGrant', [grant])).toEqual({ ok: true, value: { ran: 'companion.grant' } });
+    expect(await f.ipc.invoke(f.event(), 'companionEnd', [])).toEqual({ ok: true, value: { ran: 'companion.stop' } });
+    expect(f.calls).toEqual([
+      ['companion.grant', [grant]],
+      ['companion.stop', []],
+    ]);
+    expect(f.ipc.refusals).toBe(0);
+  });
+
+  it.each([
+    ['companionGrant', []],
+    ['companionGrant', ['general']],
+    ['companionGrant', [null]],
+    ['companionGrant', [[]]],
+    ['companionGrant', [{}]],
+    ['companionGrant', [{ ...grant, extra: 1 }]],
+    ['companionGrant', [{ ...grant, token: 't' }]],
+    ['companionGrant', [{ ...grant, publish: 'screen' }]],
+    ['companionGrant', [{ ...grant, subscribe: true }]],
+    ['companionGrant', [{ ...grant, livekitUrl: 'wss://evil.example' }]],
+    ['companionGrant', [{ channel: '' }]],
+    ['companionGrant', [{ channel: '   ' }]],
+    ['companionGrant', [{ channel: 5 }]],
+    ['companionGrant', [{ channel: 'a\nb' }]],
+    ['companionGrant', [{ channel: 'a\u2028b' }]],
+    ['companionGrant', [{ channel: 'gen\ud800eral' }]],
+    ['companionGrant', [{ channel: 'x'.repeat(401) }]],
+    ['companionGrant', [grant, 'extra']],
+    ['companionEnd', [1]],
+    ['companionEnd', [{}]],
+    ['companionEnd', ['general']],
+  ])('refuses a bad argument before the companion is called: %s %j', async (name, args) => {
+    const f = fixture();
+    f.input.recent = true;
+    expect(await f.ipc.invoke(f.event(), name, args)).toEqual({ ok: false, kind: 'refused' });
+    expect(f.calls).toEqual([]);
+  });
+
+  it('refuses an oversized or non-plain argument before it is parsed', async () => {
+    const f = fixture();
+    f.input.recent = true;
+    expect(await f.ipc.invoke(f.event(), 'companionGrant', [{ channel: 'x'.repeat(5000) }])).toEqual({ ok: false, kind: 'refused' });
+    expect(f.logs.at(-1)).toContain('(size)');
+    expect(await f.ipc.invoke(f.event(), 'companionGrant', [Object.assign(Object.create({ inherited: 1 }) as object, grant)])).toEqual({ ok: false, kind: 'refused' });
+    expect(f.calls).toEqual([]);
+  });
+
+  it('refuses a grant without a recent gesture and executes nothing', async () => {
+    const f = fixture();
+    expect(await f.ipc.invoke(f.event(), 'companionGrant', [grant])).toEqual({ ok: false, kind: 'refused' });
+    expect(f.logs.at(-1)).toContain('(gesture)');
+    expect(f.calls).toEqual([]);
+    f.input.recent = true;
+    expect((await f.ipc.invoke(f.event(), 'companionGrant', [grant])).ok).toBe(true);
+    expect(f.calls).toHaveLength(1);
+  });
+
+  it('needs no gesture to end the companion', async () => {
+    const f = fixture();
+    expect((await f.ipc.invoke(f.event(), 'companionEnd', [])).ok).toBe(true);
+    expect(f.ipc.refusals).toBe(0);
+  });
+
+  const callerCases: [string, (f: Fixture) => InvokeEvent][] = [
+    ['a subframe', (f) => f.event({ senderFrame: frame('frame-2', { parent: f.main }) })],
+    ['another window', (f) => f.event({ sender: { isDestroyed: () => false, mainFrame: f.main } })],
+    ['a destroyed sender', (f) => { f.contents.destroyed = true; return f.event(); }],
+    ['a stale document generation', (f) => { f.gate.begin(); return f.event(); }],
+    ['a foreign origin', (f) => f.event({ senderFrame: frame('frame-1', { url: 'https://evil.example/' }) })],
+  ];
+
+  it.each(callerCases)('refuses every companion function from %s and calls the companion for none', async (_name, make) => {
+    const f = fixture();
+    f.input.recent = true;
+    const event = make(f);
+    const calls: [string, unknown[]][] = [['companionGrant', [grant]], ['companionEnd', []]];
+    expect(calls.map(([name]) => name).sort()).toEqual([...COMPANION_FUNCTIONS].sort());
+    for (const [name, args] of calls) expect(await f.ipc.invoke(event, name, args), name).toEqual({ ok: false, kind: 'refused' });
+    expect(f.calls).toEqual([]);
+  });
+
+  it.each([
+    ['companionGrant', [grant], 20],
+    ['companionEnd', [], 60],
+  ] as const)('limits %s to its own budget a minute', async (name, args, limit) => {
+    const f = fixture();
+    f.input.recent = true;
+    let accepted = 0;
+    for (let i = 0; i < limit + 5; i++) if ((await f.ipc.invoke(f.event(), name, args)).ok) accepted++;
+    expect(accepted).toBe(limit);
+    expect(f.logs.at(-1)).toContain('(rate)');
+    f.clock.now += 60_001;
+    expect((await f.ipc.invoke(f.event(), name, args)).ok).toBe(true);
+  });
+
+  it('refuses every grant as failed, and holds nothing, when no companion is wired', async () => {
+    const f = fixture();
+    const ipc = new Ipc({
+      owned: () => f.contents, gate: f.gate, service: {} as Service, feeds: {} as Feeds, files: {} as Files, profiles: {} as ProfilesApi, voice: {} as VoiceApi, settings: {} as SettingsApi, notifications: {} as NotificationsApi,
+      gestures: { take: () => 'pointer' }, now: () => 0, log: () => undefined,
+    });
+    expect(await ipc.invoke(f.event(), 'companionGrant', [grant])).toEqual({ ok: true, value: { ok: false, error: 'failed' } });
+    expect(await ipc.invoke(f.event(), 'companionEnd', [])).toEqual({ ok: true, value: false });
+  });
+
+  it('says only "refused" when the companion throws, and logs no argument', async () => {
+    const f = fixture();
+    const ipc = new Ipc({
+      owned: () => f.contents, gate: f.gate, service: {} as Service, feeds: {} as Feeds, files: {} as Files, profiles: {} as ProfilesApi, voice: {} as VoiceApi, settings: {} as SettingsApi, notifications: {} as NotificationsApi,
+      companion: { grant: () => { throw new Error('boom secret-channel'); } } as unknown as CompanionApi,
+      gestures: { take: () => 'pointer' }, now: () => 0, log: (line) => f.logs.push(line),
+    });
+    expect(await ipc.invoke(f.event(), 'companionGrant', [{ channel: 'secret-channel' }])).toEqual({ ok: false, kind: 'refused' });
+    expect(f.logs.join('\n')).not.toContain('secret-channel');
   });
 });
 
@@ -823,5 +950,32 @@ describe('voice events (issue #1374)', () => {
     const gone = target(true, false);
     deliverVoice(gone.target, view);
     expect([uncommitted.sent, ended.sent, gone.sent]).toEqual([[], [], []]);
+  });
+});
+
+describe('the settings family (issue #1587)', () => {
+  it('reads without a gesture and passes a change on only after one', async () => {
+    const f = fixture();
+    expect((await f.ipc.invoke(f.event(), 'settings', [])).ok).toBe(true);
+    expect(await f.ipc.invoke(f.event(), 'settingsSet', [{ launchAtLogin: true }])).toEqual({ ok: false, kind: 'refused' });
+    expect(f.calls.map(([name]) => name)).toEqual(['settings.view']);
+    f.input.recent = true;
+    expect(await f.ipc.invoke(f.event(), 'settingsSet', [{ closeToTray: false, launchAtLogin: true }])).toEqual({ ok: true, value: { ran: 'settings.set' } });
+    expect(f.calls[1]).toEqual(['settings.set', [{ closeToTray: false, launchAtLogin: true }]]);
+  });
+
+  it.each([
+    ['no change', [{}]],
+    ['no argument', []],
+    ['an unknown key', [{ launchAtLogin: true, theme: 'dark' }]],
+    ['a non-boolean', [{ launchAtLogin: 'yes' }]],
+    ['a null', [{ closeToTray: null }]],
+    ['an array', [[true]]],
+    ['two arguments', [{ launchAtLogin: true }, {}]],
+  ])('refuses %s as a shape, even with a gesture', async (_name, args) => {
+    const f = fixture();
+    f.input.recent = true;
+    expect(await f.ipc.invoke(f.event(), 'settingsSet', args)).toEqual({ ok: false, kind: 'refused' });
+    expect(f.calls).toEqual([]);
   });
 });
