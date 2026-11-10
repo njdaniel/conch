@@ -223,8 +223,10 @@ class Desk {
     // and Client.send hands back no body for such an operation: through the
     // desktop's own http bridge the page would be told 200 with nothing, and
     // its claim would read as invalid. That is a gap in main, outside this
-    // test's issue (see the PR); these two go to conchd with A's bearer
-    // directly, at the path of the same table, so the rest is exercised.
+    // test's issue: it is #1638, fixed by PR #1639. Until #1639 merges, these
+    // two go to conchd with A's bearer directly, at the path of the same
+    // table, so the rest is exercised. Switch to the real bridge once #1639
+    // merges.
     await page.exposeFunction('bridgeClaim', async (channel: string, quality: { resolution: string; frameRate: number } | null) => {
       const path = targetOf('claimShare', { channel }, undefined);
       if (path === null) return { ok: false, failure: 'invalid' };
@@ -368,7 +370,7 @@ class Viewer {
 
   // watch: V's Watch button for A's stream, and the stage shows A's name.
   async watch(): Promise<void> {
-    await this.p.getByRole('button', { name: 'Watch' }).click({ timeout: 30_000 });
+    await this.p.getByRole('button', { name: 'Watch', exact: true }).click({ timeout: 30_000 });
     await this.p.getByRole('region', { name: 'Shared screen' }).filter({ hasText: `${A_NAME} · LIVE` }).waitFor({ timeout: 30_000 });
   }
 
@@ -430,6 +432,25 @@ function expectNoVoice(facts: PageFacts, where: string): void {
   expect(facts.publications.filter((p) => p.local && p.kind === 'audio'), `${where}: the companion published audio`).toEqual([]);
 }
 
+// The two refusals an unarmed or spent allowance gives. The grant's literal
+// is this harness's own (bridgeGrant above), not main's IPC answer.
+const REFUSED = { capture: 'NotAllowedError', grant: { ok: false, error: 'failed' } };
+
+// askWithoutClick has the page ask for a screen and for a grant with no Share
+// click behind either, and reports what it was told.
+async function askWithoutClick(a: Desk): Promise<{ capture: string; grant: unknown }> {
+  const capture = await a.p.evaluate(async () => {
+    try {
+      await navigator.mediaDevices.getDisplayMedia({ video: true });
+      return 'captured';
+    } catch (error) {
+      return error instanceof DOMException ? error.name : 'error';
+    }
+  });
+  const grant = await a.p.evaluate((channel) => (window as unknown as { __bridge: { grant: (c: string) => Promise<unknown> } }).__bridge.grant(channel), world.channel);
+  return { capture, grant };
+}
+
 async function startShare(a: Desk): Promise<void> {
   if (a.page === null) await a.open();
   await a.share();
@@ -461,6 +482,12 @@ describe('the desktop screen companion with the real helper, conchd, LiveKit and
     expect(facts.captures, 'the picker was used once, on the allowance').toBe(1);
     expect(a.grants).toHaveLength(1);
     expect(a.companion.liveOrigin(), 'main holds the live grant').not.toBeNull();
+
+    // The Share click's allowance is spent, not just unarmed: asking again
+    // for a screen and for a grant, with no new click, is refused on both.
+    expect(await askWithoutClick(a), 'the spent allowance refuses a second capture and a second grant').toEqual(REFUSED);
+    expect(a.grants, 'no second grant was made').toHaveLength(1);
+    expect((await a.facts()).captures, 'the picker was not used again').toBe(1);
 
     // LiveKit lists p<A> and p<A>.screen together; presence lists A once.
     await eventually(async () => (await listed(idOf(world.a, '.screen')))?.some((s) => SCREEN.test(s)) === true, 20_000, 'LiveKit to list p<A>.screen with a screen');
@@ -502,6 +529,7 @@ describe('the desktop screen companion with the real helper, conchd, LiveKit and
     await sleep(3_000);
     const after = await a.facts();
     expectNoVoice(after, 'while watching');
+    expect(after.rooms, 'the companion holds one room, so no second one hides a microphone subscription').toBe(1);
     const vmic = after.publications.filter((p) => !p.local && p.who === idOf(v) && p.source === 'microphone');
     expect(vmic, "V's microphone is in the room the companion sees").not.toEqual([]);
     expect(vmic.every((p) => !p.subscribed)).toBe(true);
@@ -520,23 +548,13 @@ describe('the desktop screen companion with the real helper, conchd, LiveKit and
     note('share, watch and no voice held');
   });
 
-  it('without the Share click nothing is granted and nothing is captured', async () => {
+  it('an unarmed allowance refuses a capture and a grant, and the page honours the refusal (the refusal is the harness\'s stand-in for main\'s IPC, not main\'s)', async () => {
     const a = desk(owner({ name: 'desk-a', who: world.a }));
     await a.owner.join();
     await a.open();
     // The page asks for a screen and for a grant with no click behind them
-    // (no arm): main's allowance gives neither, exactly as it does in the app.
-    const outcome = await a.p.evaluate(async () => {
-      try {
-        await navigator.mediaDevices.getDisplayMedia({ video: true });
-        return 'captured';
-      } catch (error) {
-        return error instanceof DOMException ? error.name : 'error';
-      }
-    });
-    expect(outcome).toBe('NotAllowedError');
-    const grant = await a.p.evaluate(() => (window as unknown as { __bridge: { grant: (c: string) => Promise<unknown> } }).__bridge.grant('squad'));
-    expect(grant).toEqual({ ok: false, error: 'failed' });
+    // (no arm): the allowance gives neither, exactly as it does in the app.
+    expect(await askWithoutClick(a)).toEqual(REFUSED);
     expect(a.grants).toEqual([]);
     expect(a.companion.liveOrigin()).toBeNull();
     expect((await a.facts()).captures).toBe(0);

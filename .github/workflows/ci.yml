@@ -1061,7 +1061,9 @@ jobs:
 
       # The screen companion's page and the browser principal V run in the
       # Chromium Playwright's own version pins (#1583). Locally, `npx
-      # playwright install chromium` alone.
+      # playwright install chromium` alone. The npm ci comes first so that npx
+      # runs the Playwright desktop/package-lock.json pins, not whatever npx
+      # would fetch; make desktop-voice-e2e then installs again, harmlessly.
       - name: browser for the companion test
         working-directory: desktop
         run: npm ci --no-audit && npx playwright install --with-deps chromium

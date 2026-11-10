@@ -176,11 +176,16 @@ desktop-voice-it: desktop-node
 # Vitest. Builds conch-voice with the pinned toolchain unless CONCH_VOICE_BIN
 # names one, and the web client (web-build) that conchd serves to the browser
 # principal of the screen companion's test (issue #1583, D4-06; the browser the
-# test drives is the one Playwright pins: `npx playwright install chromium`). Not part of check. Without
+# test drives is the one Playwright pins: `npx playwright install chromium`).
+# It also typechecks and lints tests/e2e first: that project resolves livekit-client and
+# react from web/node_modules, so it lives here, not in desktop-check, which
+# needs nothing from web. Not part of check. Without
 # Docker or the toolchain it says SKIPPED and why; with CI set, it fails
 # instead.
 desktop-voice-e2e: desktop-node web-build
 	cd desktop && npm ci --no-audit
+	cd desktop && npm run typecheck:e2e
+	cd desktop && npm run lint:e2e
 	$(GO) run ./e2e/desktop-voice
 
 # The P3 local prototype (issue #283, docs/p3-walkthrough.md): p3-local builds
