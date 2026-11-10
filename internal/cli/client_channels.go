@@ -74,6 +74,17 @@ func (c *Client) PutChannelSettings(ctx context.Context, id int64, request schem
 	return result, nil
 }
 
+// SetChannelTopic sets or clears a channel's topic. The channel is addressed
+// by id; an empty topic clears it.
+func (c *Client) SetChannelTopic(ctx context.Context, id int64, request schema.SetChannelTopicRequestV1) (schema.SetChannelTopicResponseV1, error) {
+	endpoint := c.resolve("v1", "channels", strconv.FormatInt(id, 10), "topic")
+	var result schema.SetChannelTopicResponseV1
+	if err := c.roundTrip(ctx, "set channel topic", http.MethodPut, endpoint, request, &result); err != nil {
+		return schema.SetChannelTopicResponseV1{}, err
+	}
+	return result, nil
+}
+
 // DirectoryMembers returns one page of the community's members after the
 // member with id after (0 for the first page).
 func (c *Client) DirectoryMembers(ctx context.Context, after int64, limit int) (schema.ServerMembersResponseV1, error) {

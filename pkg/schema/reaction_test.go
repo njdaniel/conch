@@ -258,6 +258,7 @@ func TestReactionConstants(t *testing.T) {
 		"MAX_FILE_NAME_BYTES": MaxFileNameBytes,
 		// The community model (ADR-013, issue #978).
 		"MAX_CHANNEL_AUTHOR_IDS":             MaxChannelAuthorIDs,
+		"MAX_CHANNEL_TOPIC_LENGTH":           MaxChannelTopicLength,
 		"DEFAULT_MEMBER_LINK_EXPIRY_SECONDS": DefaultMemberLinkExpirySeconds,
 		// AI administrators (issue #1326).
 		"DEFAULT_ADMIN_APPROVAL_TTL_SECONDS": DefaultAdminApprovalTTLSeconds,

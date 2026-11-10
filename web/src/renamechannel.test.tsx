@@ -241,7 +241,7 @@ describe('the rename control', () => {
   it('is offered to an operator, for the open channel', async () => {
     await open();
     fireEvent.click(within(nav()).getByRole('button', { name: 'Actions for general' }));
-    expect(within(screen.getByRole('menu')).getAllByRole('menuitem').map((i) => i.textContent)).toEqual(['Rename channel…', 'Leave channel', 'Make private', 'Make default channel', 'Archive channel…', 'Favorite']);
+    expect(within(screen.getByRole('menu')).getAllByRole('menuitem').map((i) => i.textContent)).toEqual(['Rename channel…', 'Set topic', 'Leave channel', 'Make private', 'Make default channel', 'Archive channel…', 'Favorite']);
     // Nothing is shown under the list any more: the form is reached by the menu only.
     expect(screen.queryByRole('form', { name: 'Rename channel' })).toBeNull();
     expect(within(nav()).queryByRole('button', { name: /^Rename #/ })).toBeNull();

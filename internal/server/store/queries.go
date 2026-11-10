@@ -138,6 +138,9 @@ type Channel struct {
 	// archived channel refuses every write the guards of this package name
 	// (ErrChannelArchived) and keeps its history, members and read state.
 	ArchivedAt time.Time
+	// Topic is the channel's one-line topic (migration 47, issue #1503); ""
+	// when it has none.
+	Topic string
 }
 
 // Archived reports whether the channel is archived.
@@ -175,7 +178,7 @@ func channelNotArchivedTx(ctx context.Context, tx execer, channelID int64) error
 
 // channelColumns are the channel columns every Channel reader selects, in
 // scanChannel's order.
-const channelColumns = "id, name, created_at, visibility, is_default, archived_at"
+const channelColumns = "id, name, created_at, visibility, is_default, archived_at, topic"
 
 // scanChannel reads one row of channelColumns.
 func scanChannel(scan func(dest ...any) error) (Channel, error) {
@@ -183,7 +186,7 @@ func scanChannel(scan func(dest ...any) error) (Channel, error) {
 	var created int64
 	var vis string
 	var archived sql.NullInt64
-	if err := scan(&c.ID, &c.Name, &created, &vis, &c.IsDefault, &archived); err != nil {
+	if err := scan(&c.ID, &c.Name, &created, &vis, &c.IsDefault, &archived, &c.Topic); err != nil {
 		return Channel{}, err
 	}
 	c.CreatedAt = time.UnixMilli(created)

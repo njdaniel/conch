@@ -118,6 +118,7 @@ import {
   listChannelsResponse,
   renameChannelResponseV1,
   channelSettingsResponseV1,
+  setChannelTopicResponseV1,
   type AddChannelMemberRequestV1,
   type ChannelAuthorV1,
   type ChannelMemberV1,
@@ -131,6 +132,7 @@ import {
   type RenameChannelRequestV1,
   type ChannelSettingsRequestV1,
   type ChannelSettingsResponseV1,
+  type SetChannelTopicRequestV1,
 } from './schema/channel';
 import { fileAttachmentPayloadSchema, fileV1, type FileAttachmentV1, type FileV1 } from './schema/file';
 import {
@@ -2048,6 +2050,21 @@ export async function renameChannel(id: number, from: string, name: string): Pro
   if (!reply.res.ok) return inviteRefused(reply.res);
   const renamed = await readBody(reply.res, renameChannelResponseV1);
   return renamed.ok ? { ok: true, value: renamed.value.channel } : renamed;
+}
+
+// setChannelTopic sets a channel's topic, or clears it with "" (PUT
+// /v1/channels/{id}/topic, issue #1504): for operators and the channel's
+// managers. Refusals carry their code and line as renameChannel's do:
+// invalid_request with the rule the topic broke, forbidden, channel_not_found.
+// The answer is the channel as it now is. It is never repeated here.
+export async function setChannelTopic(id: number, topic: string): Promise<InviteResult<ChannelV0>> {
+  const request: SetChannelTopicRequestV1 = { topic };
+  const reply = await authedSend(call('setChannelTopic', { id }), request);
+  if (reply.kind === 'none') return { ok: false, failure: 'network' };
+  if (reply.kind === 'unauthorized') return { ok: false, failure: 'unauthorized' };
+  if (!reply.res.ok) return inviteRefused(reply.res);
+  const set = await readBody(reply.res, setChannelTopicResponseV1);
+  return set.ok ? { ok: true, value: set.value.channel } : set;
 }
 
 // channelSettings makes a channel public or private, a default or not

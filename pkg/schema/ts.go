@@ -108,6 +108,9 @@ var TSConstants = []TSConstant{
 	// The community model (ADR-013, issue #978): the authors route's batch
 	// size, and the default expiry the link form shows when none is typed.
 	{Name: "MAX_CHANNEL_AUTHOR_IDS", Value: MaxChannelAuthorIDs},
+	// The channel topic (issue #1503): the page bounds its control by the
+	// number the server refuses at.
+	{Name: "MAX_CHANNEL_TOPIC_LENGTH", Value: MaxChannelTopicLength},
 	{Name: "DEFAULT_MEMBER_LINK_EXPIRY_SECONDS", Value: DefaultMemberLinkExpirySeconds},
 
 	// AI administrators (issue #1326): the bounds of an agent's admin
@@ -141,6 +144,8 @@ var TSTypes = []TSType{
 	{Value: RenameChannelRequestV1{}, Family: "rename-channel-request-v1"},
 	{Value: RenameChannelResponseV1{}, Family: "rename-channel-response-v1"},
 	{Value: ChannelDocV1{}, Family: "channel-v1", Schema: ChannelSchemaV1},
+	{Value: SetChannelTopicRequestV1{}, Family: "set-channel-topic-request-v1"},
+	{Value: SetChannelTopicResponseV1{}, Family: "set-channel-topic-response-v1"},
 	{Value: ChannelMemberV1{}, Family: "channel-member-v1"},
 	{Value: ListChannelMembersResponseV1{}, Family: "list-channel-members-response-v1"},
 	{Value: ChannelMembersV1{}, Family: "channel-members-v1", Schema: ChannelMembersSchemaV1},
