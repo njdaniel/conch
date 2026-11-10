@@ -52,7 +52,10 @@ sign-off act; `release.yml` turns a plain `v*` tag into a draft GitHub release, 
    the `attest` job wrote `checksums.txt` and attested every file, and the
    release was created by `publish` (a draft, or for a pre-release tag a
    published pre-release). If any of the first three jobs fails, no release
-   exists: fix on `main` and tag a new version, never move the tag.
+   exists: fix on `main` and tag a new version, never move the tag. Never re-run a
+   release (the run or a job of it): tag a new version. `attest` asserts the
+   exact file set and `publish` verifies every attestation before it creates
+   the release.
 5. Sanity-check the artifacts (download one, `--version`, run against a temp
    db), note the dogfood-check run in the release notes, hand the draft to
    Nick to publish (a pre-release is already published: check its notes and tester checklist).
@@ -60,8 +63,11 @@ sign-off act; `release.yml` turns a plain `v*` tag into a draft GitHub release, 
    the release's files:
    `sha256sum -c --ignore-missing checksums.txt` (the one `checksums.txt`
    covers every file), then `gh attestation verify conch-desktop_*_amd64.deb
-   --repo njdaniel/conch`, which checks that this repository's `release.yml`
-   built it. `dpkg-deb -I` shows the package's Version (the tag with the
+   --repo njdaniel/conch --signer-workflow
+   njdaniel/conch/.github/workflows/release.yml --source-ref
+   refs/tags/<tag>`. With the two pinning flags it checks that this
+   repository's `release.yml`, run for that tag, signed the file; `--repo`
+   alone accepts an attestation from any workflow on any ref. `dpkg-deb -I` shows the package's Version (the tag with the
    first `-` as `~`). The `.deb` is a **technical preview** until real-device
    acceptance is recorded (#1603), and the release notes say so. **A green
    CI or release run, a CI artifact, a checksum or an attestation says the
@@ -72,5 +78,9 @@ sign-off act; `release.yml` turns a plain `v*` tag into a draft GitHub release, 
 ## Never
 
 - Tag on a failing or stale dogfood-check or p2-hardening-check.
-- Tag without recorded sign-off, or move/delete a pushed tag.
+- Tag without recorded sign-off, or move/delete a pushed tag, or re-run a
+  release: tag a new version.
+- Tag a commit that is not on `main`: the guard refuses it, but that is only
+  accident protection. The real control is a `v*` tag ruleset on the
+  repository (Nick's setting).
 - Edit a published release's artifacts — regressions get a new patch release.

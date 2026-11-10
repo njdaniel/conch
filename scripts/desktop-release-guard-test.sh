@@ -31,6 +31,12 @@ git -C "$repo" config user.email t@example.invalid
 git -C "$repo" config user.name t
 git -C "$repo" add -A
 git -C "$repo" commit -q -m one
+git -C "$repo" branch -M main
+# A bare repository stands in for origin: the guard fetches main from it.
+git init -q --bare "$tmp/origin.git"
+git -C "$repo" remote add origin "$tmp/origin.git"
+onmain() { git -C "$repo" push -q origin HEAD:refs/heads/main; }
+onmain
 
 run() { # run <tag>: sets out and rc
     set +e
@@ -69,12 +75,25 @@ git -C "$repo" checkout -q -- voice/Cargo.toml
 echo two >"$repo/two"
 git -C "$repo" add -A
 git -C "$repo" commit -q -m two
+onmain
 refuses v1.2.3-rc.1 "not at a tag"
 
 # The helper's version differs from the tag's, on the tagged commit.
 sed -i 's/^version = "1.2.3-rc.1"/version = "1.2.3-rc.0"/' "$repo/voice/Cargo.toml"
 git -C "$repo" commit -q -am three
+onmain
 git -C "$repo" tag -a v1.2.3-rc.1b -m b
 refuses v1.2.3-rc.1b "says version 1.2.3-rc.0"
+
+# A commit that is not on main is refused, though everything else is right
+# (tag, clean tree, matching helper version); once it is on main it passes.
+git -C "$repo" checkout -q -b side
+sed -i 's/^version = "1.2.3-rc.0"/version = "1.2.3-rc.4"/' "$repo/voice/Cargo.toml"
+git -C "$repo" commit -q -am four
+git -C "$repo" tag -a v1.2.3-rc.4 -m four
+refuses v1.2.3-rc.4 "not on origin/main"
+onmain
+run v1.2.3-rc.4
+[ "$rc" = 0 ] || fail "a tagged commit on main was refused: $out"
 
 echo "desktop-release-guard-test: OK"

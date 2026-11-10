@@ -9,6 +9,12 @@
 #     tag names the commit being built, not an older or newer one;
 #   - the working tree is clean: no modified, staged or untracked file, so
 #     nothing was added to the checkout after it was made;
+#   - HEAD is an ancestor of origin/main (fetched here, read-only), so a tag
+#     on a side branch or an unreviewed commit is refused. This is accident
+#     protection only: a tagged commit carries its own copy of this script and
+#     could delete the check. The real control is a `v*` tag ruleset on the
+#     repository (who may create tags, and from where), which is Nick's
+#     repository setting and not something this script can enforce;
 #   - the voice helper's version, [workspace.package] `version` in
 #     voice/Cargo.toml, is the tag's app version. This is the early form of
 #     the check scripts/desktop-version.sh helper makes on the built binary:
@@ -48,6 +54,14 @@ dirty=$(git status --porcelain --untracked-files=all)
 [ -z "$dirty" ] || fail "the working tree is not clean:
 $dirty"
 
+# Read-only: this updates one remote-tracking ref and fetches no tags. The
+# release job checks out with full history (fetch-depth: 0), so the ancestry
+# test below sees every commit between HEAD and main.
+git fetch --quiet --no-tags origin '+refs/heads/main:refs/remotes/origin/main' ||
+    fail "cannot fetch origin/main to check that $tag is on main"
+git merge-base --is-ancestor HEAD refs/remotes/origin/main ||
+    fail "HEAD ($(git rev-parse --short HEAD)) is not on origin/main: tag the reviewed main commit (.claude/skills/release/SKILL.md)"
+
 cargo=voice/Cargo.toml
 [ -f "$cargo" ] || fail "$cargo is missing"
 # The version line of the [workspace.package] table, and no other.
@@ -65,4 +79,4 @@ got=$(awk '
 [ "$got" = "$app" ] ||
     fail "$cargo says version $got, but the tag $tag is $app; set [workspace.package] version to $app on main before tagging (.claude/skills/release/SKILL.md)"
 
-echo "desktop-release-guard: OK: $tag is HEAD ($(git rev-parse --short HEAD)), the tree is clean and the helper version is $app"
+echo "desktop-release-guard: OK: $tag is HEAD ($(git rev-parse --short HEAD)), the tree is clean, it is on main and the helper version is $app"

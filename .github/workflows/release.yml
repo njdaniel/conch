@@ -19,16 +19,26 @@ name: Release
 #   attest       the only job with id-token and attestations: write. It
 #                collects both artifacts, writes the one checksums.txt over
 #                all of them and attests every file (GitHub artifact
-#                attestations: `gh attestation verify <file> --repo ...`).
-#   publish      creates the release from what attest checked and attested.
-# A failure in any of the first three creates no release.
+#                attestations). Before attesting it asserts the exact file
+#                set: the six Go binaries for the tag, one .deb, nothing else.
+#   publish      verifies the attestation of every file, then creates the
+#                release from them.
+# A failure in any of the first three creates no release. A release is never
+# re-run: a re-run would build again under the same tag. Tag a new version.
+#
+# Verify a download the way the release notes say, which pins the workflow and
+# the tag, so an attestation from another workflow or ref is refused:
+#   gh attestation verify <file> --repo njdaniel/conch \
+#     --signer-workflow njdaniel/conch/.github/workflows/release.yml \
+#     --source-ref refs/tags/<tag>
 
 on:
   push:
     tags: ["v*"]
 
 # Least privilege: every job reads. Only publish writes contents, and only
-# attest gets the two attestation permissions (#1598).
+# attest gets the two attestation write permissions (#1598); publish reads
+# attestations, to verify them before it creates the release.
 permissions:
   contents: read
 
@@ -38,9 +48,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # cache: false, as in the desktop-deb job: a release is built from
+      # nothing a cache could have supplied unverified (a poisoned cache from
+      # another ref would otherwise reach the released binaries).
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+          cache: false
 
       - name: gofmt
         run: |
@@ -143,11 +157,14 @@ jobs:
       CONCH_RELEASE_VERSION: ${{ github.ref_name }}
       DESKTOP_REQUIRE_VOICE: "1"
     steps:
+      # Full history: the guard checks that the tagged commit is on main.
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       # First, so a bad tag fails in seconds and not after the Rust build:
-      # the tag must be this commit, the tree clean, and voice/Cargo.toml's
-      # version the tag's. (`git describe` needs the tag, which a tag-push
+      # the tag must be this commit, the tree clean, the commit on main, and
+      # voice/Cargo.toml's version the tag's. (`git describe` needs the tag, which a tag-push
       # checkout fetches.)
       - name: guard the tag
         run: ./scripts/desktop-release-guard.sh "$GITHUB_REF_NAME"
@@ -165,27 +182,19 @@ jobs:
           docker image prune -af >/dev/null 2>&1 || true
           df -h /
 
+      # cache: false, as in the desktop-deb job: a release is built from
+      # nothing a cache could have supplied unverified (a poisoned cache from
+      # another ref would otherwise reach the released binaries).
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+          cache: false
 
       - name: runner image
         id: image
         run: |
           echo "os=$ImageOS" >> "$GITHUB_OUTPUT"
           echo "version=$ImageVersion" >> "$GITHUB_OUTPUT"
-
-      # The pinned clang and libwebrtc, verified against the SHA-256 in
-      # scripts/voice-pins.sh, which is the cache key (as in ci.yml). The
-      # release is built from a clean target directory: no build cache.
-      - name: rust toolchain cache
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cache/conch/llvm-*
-            ~/.cache/conch/cargo-deny-*
-            ~/.cache/conch/webrtc-*
-          key: voice-toolchain-${{ runner.os }}-${{ hashFiles('scripts/voice-pins.sh') }}
 
       - name: rust system packages cache
         uses: actions/cache@v4
@@ -199,6 +208,12 @@ jobs:
       - name: rust system packages
         run: ./scripts/ci-voice-apt.sh ~/.cache/conch-apt
 
+      # The pinned clang and libwebrtc. There is deliberately no cache of
+      # them here (ci.yml has one): a cache restored from another ref is not
+      # hash-checked, so the release fetches them cold, and
+      # scripts/voice-toolchain.sh verifies each download against the SHA-256
+      # in scripts/voice-pins.sh. The release is built from a clean target
+      # directory too: no build cache.
       - name: rust toolchain
         run: ./scripts/voice-toolchain.sh
 
@@ -267,20 +282,44 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          set -eu
+          set -euo pipefail
           mkdir -p dist
           gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" --name go-dist --dir dist
           gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" --name desktop-deb --dir dist
-          debs=$(find dist -name 'conch-desktop_*_amd64.deb' | wc -l)
-          if [ "$debs" != 1 ]; then echo "want exactly one .deb, have $debs"; find dist; exit 1; fi
+          # The exact set, before anything is checksummed or attested: the
+          # six Go binaries named for this tag (the release job's matrix:
+          # conchd and conch, each for linux/amd64, linux/arm64 and
+          # darwin/arm64), one .deb, and nothing else: no other file and no
+          # subdirectory. find lists directories and nested files too.
+          debs=$(find dist -mindepth 1 -maxdepth 1 -type f -name 'conch-desktop_*_amd64.deb' -printf '%f\n')
+          if [ "$(printf '%s\n' "$debs" | grep -c .)" != 1 ]; then
+            echo "want exactly one .deb, have:"; echo "$debs"; find dist; exit 1
+          fi
+          want=$(
+            {
+              for bin in conchd conch; do
+                for plat in linux_amd64 linux_arm64 darwin_arm64; do
+                  echo "${bin}_${GITHUB_REF_NAME}_${plat}"
+                done
+              done
+              echo "$debs"
+            } | LC_ALL=C sort
+          )
+          have=$(find dist -mindepth 1 -printf '%P\n' | LC_ALL=C sort)
+          if [ "$have" != "$want" ]; then
+            echo "dist is not exactly the expected files. want:"; echo "$want"
+            echo "have:"; echo "$have"; exit 1
+          fi
+          if [ -n "$(find dist -mindepth 1 ! -type f)" ]; then echo "dist holds a non-file"; find dist; exit 1; fi
           # One checksums.txt, over the binaries and the .deb, in the form
           # `sha256sum -c` takes from the directory the files are in.
           (cd dist && sha256sum -- * > ../checksums.txt && mv ../checksums.txt checksums.txt && sha256sum -c checksums.txt)
           cat dist/checksums.txt
 
       # A new Action (#1598; Nick signs it off in the PR): GitHub-owned,
-      # pinned by full commit SHA. Verify a download with
-      #   gh attestation verify <file> --repo njdaniel/conch
+      # pinned by full commit SHA. Verify a download as the header says: with
+      # --signer-workflow and --source-ref, so only this workflow, run for the
+      # tag, passes. `--repo` alone accepts any workflow on any ref.
       - name: attest the release files
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
@@ -301,15 +340,38 @@ jobs:
     permissions:
       contents: write # creates the release
       actions: read # gh run download
+      attestations: read # gh attestation verify fetches the attestations
     steps:
       - name: collect the release files
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          set -eu
+          set -euo pipefail
           mkdir -p dist
           gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" --name release-files --dir dist
           (cd dist && sha256sum -c checksums.txt)
+          # The converse of `sha256sum -c`: every file in dist, and nothing
+          # but files, is listed in checksums.txt (which does not list itself).
+          if [ -n "$(find dist -mindepth 1 ! -type f)" ]; then echo "dist holds a non-file"; find dist; exit 1; fi
+          listed=$(sed 's/^[0-9a-f]* [ *]//' dist/checksums.txt)
+          for f in dist/*; do
+            name=${f#dist/}
+            [ "$name" = checksums.txt ] && continue
+            printf '%s\n' "$listed" | grep -qxF -- "$name" || { echo "$name is not listed in checksums.txt"; exit 1; }
+          done
+
+      # The release is created only from files whose attestation can be
+      # retrieved and that this workflow signed for this tag.
+      - name: verify the attestations
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          for f in dist/*; do
+            gh attestation verify "$f" --repo "$GITHUB_REPOSITORY" \
+              --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml" \
+              --source-ref "refs/tags/$GITHUB_REF_NAME"
+          done
 
       - name: Create release
         env:
@@ -317,7 +379,7 @@ jobs:
         run: |
           checks="dogfood-check, p2-hardening-check and p3-local-check run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
           web="The web client is served at /app/ by default (built into conchd; --web-dir serves a directory instead, --no-web turns it off)."
-          deb="The Linux desktop app is conch-desktop_*_amd64.deb: a technical preview until real-device acceptance is recorded (#1603), not a supported release. Verify it with: sha256sum -c --ignore-missing checksums.txt, and gh attestation verify <file> --repo $GITHUB_REPOSITORY."
+          deb="The Linux desktop app is conch-desktop_*_amd64.deb: a technical preview until real-device acceptance is recorded (#1603), not a supported release. Verify it with: sha256sum -c --ignore-missing checksums.txt, and gh attestation verify <file> --repo $GITHUB_REPOSITORY --signer-workflow $GITHUB_REPOSITORY/.github/workflows/release.yml --source-ref refs/tags/$GITHUB_REF_NAME."
           # A tag with a semver pre-release suffix (v0.1.0-alpha.1) is
           # published at once, marked a pre-release, with generated notes; a
           # plain tag stays a draft that Nick publishes.
