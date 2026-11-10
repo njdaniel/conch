@@ -1204,7 +1204,7 @@ func (s *Store) ListChannelMembers(ctx context.Context, channelID int64) ([]Chan
 // slice when there are none.
 func (s *Store) ListChannelsForPrincipal(ctx context.Context, principalID int64) ([]Channel, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT c.id, c.name, c.created_at, c.visibility, c.is_default, c.archived_at, m.manages FROM channels c
+		`SELECT c.id, c.name, c.created_at, c.visibility, c.is_default, c.archived_at, c.topic, m.manages FROM channels c
 		 JOIN `+liveMembers+` m ON m.channel_id = c.id
 		 WHERE m.principal_id = ? ORDER BY c.id ASC`, principalID)
 	if err != nil {
