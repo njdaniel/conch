@@ -9,6 +9,10 @@
 // "refused" and nothing more. No function takes a channel, a URL, a header map
 // or a method, and nothing here holds an ipcRenderer, an event or a credential.
 //
+// One call is synchronous: notificationSupported sends on the channel
+// `conch:notificationSupported` (ipcRenderer.sendSync) outside the invoke
+// registry, and unwraps the same Envelope from the returned value.
+//
 // onVoiceState hands the page each NativeVoiceView main sends on the voice
 // channel, and drops any message that is not exactly one. onCompanion does
 // the same for a CompanionEvent on the companion channel (issue #1579).
@@ -18,7 +22,7 @@
 // page each frame of a batch in order and then acknowledges the batch, which
 // is what lets main send the next. An unsubscribed feed is forgotten here at
 // once: whatever main had already sent for it is dropped.
-import type { CompanionEndReason, CompanionEvent, ExposedDesktopBridge, FeedHandlers, FeedRequest, NativeVoiceView, Unsubscribe } from '../../web/src/platform/desktop/bridge.ts';
+import type { CompanionEndReason, CompanionEvent, ExposedDesktopBridge, FeedHandlers, FeedRequest, NativeVoiceView, NotificationClick, Unsubscribe } from '../../web/src/platform/desktop/bridge.ts';
 import {
   voiceControlBlock,
   voiceControlCapture,
@@ -29,13 +33,16 @@ import {
   voiceControlReason,
   voiceControlTalkMode,
 } from '../../web/src/schema/generated.ts';
-import { channelOf, type Envelope, type FeedEvent, type InvokedFunction } from '../shared/bridge-names.ts';
+import { channelOf, NOTIFICATION_SUPPORT, TAG_MAX, type Envelope, type FeedEvent, type InvokedFunction } from '../shared/bridge-names.ts';
 
 export type Invoke = (channel: string, ...args: unknown[]) => Promise<unknown>;
 
 // Listen calls back with each message main sends on the feed channel; only
 // the message, never the event it came in.
 export type Listen = (callback: (message: unknown) => void) => void;
+
+// Sync makes one named synchronous call and returns its unvalidated answer.
+export type Sync = (channel: string) => unknown;
 
 // What a refused subscription is told: a close the page's feed retries later.
 const REFUSED = 1013;
@@ -54,6 +61,12 @@ function isFeedEvent(value: unknown): value is FeedEvent {
     default:
       return false;
   }
+}
+
+function isNotificationClick(value: unknown): value is NotificationClick {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
+  const record = value as Record<string, unknown>;
+  return Object.keys(record).length === 2 && record['type'] === 'click' && typeof record['tag'] === 'string' && record['tag'].length > 0 && record['tag'].length <= TAG_MAX;
 }
 
 const STATUSES: ReadonlySet<unknown> = new Set(['idle', 'unavailable', 'starting', 'running', 'stopping', 'ended', 'failed', 'lost']);
@@ -92,13 +105,14 @@ function isNativeVoiceView(value: unknown): value is NativeVoiceView {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
   const v = value as Record<string, unknown>;
   return (
-    only(v, ['status', 'generation', 'channel', 'problem', 'retryable', 'helper']) &&
+    only(v, ['status', 'generation', 'channel', 'problem', 'retryable', 'helper', 'mutedByLock']) &&
     STATUSES.has(v['status']) &&
     isCount(v['generation']) &&
     (v['channel'] === null || (typeof v['channel'] === 'string' && v['channel'].length <= 1024)) &&
     (absent(v['problem']) || (typeof v['problem'] === 'string' && v['problem'].length <= 256)) &&
     typeof v['retryable'] === 'boolean' &&
-    (absent(v['helper']) || isHelper(v['helper']))
+    (absent(v['helper']) || isHelper(v['helper'])) &&
+    (absent(v['mutedByLock']) || v['mutedByLock'] === true)
   );
 }
 
@@ -130,7 +144,14 @@ function isEnvelope(value: unknown): value is Envelope {
   return (record['ok'] === true && 'value' in record) || (record['ok'] === false && record['kind'] === 'refused');
 }
 
-export function createBridge(invoke: Invoke, listen: Listen, listenVoice: Listen, listenCompanion: Listen = () => undefined): Readonly<ExposedDesktopBridge> {
+export function createBridge(
+  invoke: Invoke,
+  listen: Listen,
+  listenVoice: Listen,
+  listenCompanion: Listen = () => undefined,
+  listenNotification: Listen = () => undefined,
+  sync: Sync = () => ({ ok: false, kind: 'refused' }),
+): Readonly<ExposedDesktopBridge> {
   const call =
     <T>(name: InvokedFunction) =>
     async (...args: unknown[]): Promise<T> => {
@@ -208,11 +229,36 @@ export function createBridge(invoke: Invoke, listen: Listen, listenVoice: Listen
       }
     }
   });
+  // Notification clicks carry only a bounded tag to listeners of this bridge.
+  const notificationListeners = new Set<(event: NotificationClick) => void>();
+  listenNotification((message) => {
+    if (!isNotificationClick(message)) return;
+    for (const listener of [...notificationListeners]) {
+      try {
+        listener(message);
+      } catch (error) {
+        queueMicrotask(() => {
+          throw error;
+        });
+      }
+    }
+  });
   const onCompanion = (listener: (event: CompanionEvent) => void): Unsubscribe => {
     companionListeners.add(listener);
     return () => {
       companionListeners.delete(listener);
     };
+  };
+  const onNotification = (listener: (event: NotificationClick) => void): Unsubscribe => {
+    notificationListeners.add(listener);
+    return () => {
+      notificationListeners.delete(listener);
+    };
+  };
+  const notificationSupported = (): boolean => {
+    const answer = sync(channelOf(NOTIFICATION_SUPPORT));
+    if (!isEnvelope(answer) || !answer.ok || typeof answer.value !== 'boolean') throw new Error('refused');
+    return answer.value;
   };
 
   const subscribe = (feed: FeedRequest, handlers: FeedHandlers): Unsubscribe => {
@@ -254,6 +300,11 @@ export function createBridge(invoke: Invoke, listen: Listen, listenVoice: Listen
     uploadFile: call('uploadFile'),
     downloadFile: call('downloadFile'),
     saveFile: call('saveFile'),
+    // Desktop notifications (issue #1590): no native event object crosses.
+    notify: call('notify'),
+    notifyClose: call('notifyClose'),
+    notificationSupported,
+    onNotification,
     // The saved server profiles (issue #945).
     profiles: call('profiles'),
     profileAdd: call('profileAdd'),

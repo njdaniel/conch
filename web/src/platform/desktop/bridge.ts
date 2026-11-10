@@ -235,6 +235,22 @@ export type DownloadReply = BridgeReply | { readonly kind: 'bytes'; readonly dat
 // failed is anything else (no answer, too large, not writable).
 export type SaveOutcome = 'saved' | 'cancelled' | 'failed' | 'unauthorized';
 
+// A desktop notification (issue #1590): exactly the fields main may show or
+// retain. The channel is owned by main's activation record; clicks carry only
+// the tag back to the document that showed it.
+export interface NotifyRequest {
+  readonly tag: string;
+  readonly title: string;
+  readonly body: string;
+  readonly channel: ChannelName;
+}
+
+// The only notification event: no title, body, channel or native event object.
+export interface NotificationClick {
+  readonly type: 'click';
+  readonly tag: string;
+}
+
 export interface ConchDesktopBridge {
   // The server address of the active profile (null: none is active).
   serverAddress(): Promise<ServerAddress>;
@@ -286,6 +302,12 @@ export interface ConchDesktopBridge {
   uploadFile(request: UploadRequest): Promise<BridgeReply>;
   downloadFile(id: number): Promise<DownloadReply>;
   saveFile(id: number): Promise<SaveOutcome>;
+  // Desktop notifications (issue #1590). Support is a narrow synchronous IPC
+  // because the platform's permission API is synchronous; clicks carry no text.
+  notify(request: NotifyRequest): Promise<boolean>;
+  notifyClose(request: { readonly tag: string }): Promise<boolean>;
+  notificationSupported(): boolean;
+  onNotification(listener: (event: NotificationClick) => void): Unsubscribe;
   // The saved server profiles (issue #945). Ids are opaque to the page.
   profiles(): Promise<ProfilesView>;
   profileAdd(address: string): Promise<ProfileAddResult>;
@@ -343,11 +365,14 @@ export interface NativeVoiceView {
   readonly problem?: string;
   readonly retryable: boolean;
   readonly helper?: NativeVoiceHelper;
+  // Set while main's mute at a screen lock (issue #1588) is still in force:
+  // the strip says "You were muted when your screen locked".
+  readonly mutedByLock?: true;
 }
 
 export type VoiceCommandResult =
   | { readonly ok: true }
-  | { readonly ok: false; readonly error: VoiceControlErrorCode | 'not-running' | 'busy' | 'unsupported' | 'lost' };
+  | { readonly ok: false; readonly error: VoiceControlErrorCode | 'not-running' | 'busy' | 'unsupported' | 'lost' | 'locked' };
 
 // The helper's one-shot runs (issue #1378, D3-7): the device list and a save.
 // Why a run did not give what was asked; never text of the helper's.

@@ -2,15 +2,16 @@
 // against a fake runner. No bus, no gdbus.
 import { describe, expect, it } from 'vitest';
 
-import { DETECT_TIMEOUT_MS, GDBUS, HOST_ARGV, parseHasOwner, parseHostRegistered, trayHostPresent, watcherPresent, WATCHER_ARGV, WATCHER_NAME } from '../../main/tray-detect.ts';
-import { runFile, type RunFile, type RunResult } from '../../main/voice/spawn.ts';
+import { busEnv, GDBUS, HOST_ARGV, parseHasOwner, parseHostRegistered, trayHostPresent, watcherPresent, WATCHER_ARGV, WATCHER_NAME } from '../../main/tray-detect.ts';
+import type { RunFile } from '../../main/tray-detect.ts';
+import { runFile, type RunResult } from '../../main/voice/spawn.ts';
 
-function fake(result: RunResult): { run: RunFile; calls: [string, readonly string[], number][] } {
-  const calls: [string, readonly string[], number][] = [];
+function fake(result: RunResult | null): { run: RunFile; calls: [string, readonly string[], Readonly<Record<string, string>>][] } {
+  const calls: [string, readonly string[], Readonly<Record<string, string>>][] = [];
   return {
     calls,
-    run: (file, args, timeoutMs) => {
-      calls.push([file, args, timeoutMs]);
+    run: (file, args, env) => {
+      calls.push([file, args, env]);
       return Promise.resolve(result);
     },
   };
@@ -32,19 +33,19 @@ describe('parseHasOwner', () => {
 
 describe('watcherPresent', () => {
   it('asks the session bus by absolute path with argv alone', async () => {
-    const f = fake({ ok: true, stdout: '(true,)\n' });
+    const f = fake({ code: 0, stdout: '(true,)\n' });
     expect(await watcherPresent(f.run)).toBe(true);
-    expect(f.calls).toEqual([[GDBUS, WATCHER_ARGV, DETECT_TIMEOUT_MS]]);
+    expect(f.calls).toEqual([[GDBUS, WATCHER_ARGV, busEnv()]]);
     expect(GDBUS.startsWith('/')).toBe(true);
     expect(WATCHER_ARGV).toContain('--session');
     expect(WATCHER_ARGV.at(-1)).toBe(WATCHER_NAME);
   });
 
   it.each([
-    ['no owner', { ok: true, stdout: '(false,)\n' }],
-    ['a failed run', { ok: false, stdout: '' }],
-    ['a failed run that printed true', { ok: false, stdout: '(true,)' }],
-    ['an answer it does not know', { ok: true, stdout: 'yes' }],
+    ['no owner', { code: 0, stdout: '(false,)\n' }],
+    ['a failed run', { code: 1, stdout: '' }],
+    ['a failed run that printed true', { code: 1, stdout: '(true,)' }],
+    ['an answer it does not know', { code: 0, stdout: 'yes' }],
   ] as const)('is false for %s', async (_name, result) => {
     expect(await watcherPresent(fake(result).run)).toBe(false);
   });
@@ -78,7 +79,7 @@ describe('trayHostPresent', () => {
   }
 
   it('needs the watcher to have an owner and a host to be registered, both by absolute-path argv', async () => {
-    const b = bus({ ok: true, stdout: '(true,)\n' }, { ok: true, stdout: '(<true>,)\n' });
+    const b = bus({ code: 0, stdout: '(true,)\n' }, { code: 0, stdout: '(<true>,)\n' });
     expect(await trayHostPresent(b.run)).toBe(true);
     expect(b.calls).toEqual([WATCHER_ARGV, HOST_ARGV]);
     expect(HOST_ARGV).toContain('IsStatusNotifierHostRegistered');
@@ -88,46 +89,41 @@ describe('trayHostPresent', () => {
   });
 
   it.each([
-    ['a watcher with no host', { ok: true, stdout: '(true,)' }, { ok: true, stdout: '(<false>,)' }],
-    ['a failed host query', { ok: true, stdout: '(true,)' }, { ok: false, stdout: '(<true>,)' }],
-    ['an answer for the host it does not know', { ok: true, stdout: '(true,)' }, { ok: true, stdout: 'yes' }],
+    ['a watcher with no host', { code: 0, stdout: '(true,)' }, { code: 0, stdout: '(<false>,)' }],
+    ['a failed host query', { code: 0, stdout: '(true,)' }, { code: 1, stdout: '(<true>,)' }],
+    ['an answer for the host it does not know', { code: 0, stdout: '(true,)' }, { code: 0, stdout: 'yes' }],
   ] as const)('is false for %s', async (_name, watcher, host) => {
     expect(await trayHostPresent(bus(watcher, host).run)).toBe(false);
   });
 
   it('asks nothing about the host when the watcher has no owner', async () => {
-    const b = bus({ ok: true, stdout: '(false,)' }, { ok: true, stdout: '(<true>,)' });
+    const b = bus({ code: 0, stdout: '(false,)' }, { code: 0, stdout: '(<true>,)' });
     expect(await trayHostPresent(b.run)).toBe(false);
     expect(b.calls).toEqual([WATCHER_ARGV]);
   });
 });
 
-describe('runFile', () => {
-  it('runs an absolute file and reads its output', async () => {
-    const r = await runFile('/bin/sh', ['-c', 'printf hi'], 5_000);
-    expect(r).toEqual({ ok: true, stdout: 'hi' });
+describe('busEnv', () => {
+  it('carries the session-bus names alone, not HOME or PATH', () => {
+    expect(busEnv({ HOME: '/home/someone', PATH: '/bin', DBUS_SESSION_BUS_ADDRESS: 'unix:path=/x', XDG_RUNTIME_DIR: '/run/user/1' })).toEqual({
+      DBUS_SESSION_BUS_ADDRESS: 'unix:path=/x',
+      XDG_RUNTIME_DIR: '/run/user/1',
+    });
+    expect(busEnv({ HOME: '/home/someone' })).toEqual({});
   });
-  it('is not ok for a failing, missing or relative file, and never rejects', async () => {
-    expect((await runFile('/bin/sh', ['-c', 'exit 3'], 5_000)).ok).toBe(false);
-    expect((await runFile('/nonexistent/gdbus', [], 5_000)).ok).toBe(false);
-    expect((await runFile('gdbus', [], 5_000)).ok).toBe(false);
+});
+
+describe('the one runFile (voice/spawn.ts)', () => {
+  it('is not ok for a failing or missing file, and never rejects', async () => {
+    expect(await watcherPresent(() => runFile('/bin/sh', ['-c', 'exit 3'], {}))).toBe(false);
+    expect(await runFile('/nonexistent/gdbus', [], {})).toBeNull();
   });
   it('does not reject when the spawn itself throws (an argument with a NUL)', async () => {
-    expect(await runFile('/bin/sh', ['a\0b'], 5_000)).toEqual({ ok: false, stdout: '' });
+    expect(await runFile('/bin/sh', ['a\0b'], {})).toBeNull();
   });
-  it('passes the child the session-bus names alone, not HOME', async () => {
-    const before = process.env['HOME'];
-    process.env['HOME'] = '/home/someone';
-    try {
-      const r = await runFile('/usr/bin/env', [], 5_000);
-      expect(r.stdout).not.toContain('HOME=');
-    } finally {
-      if (before === undefined) delete process.env['HOME'];
-      else process.env['HOME'] = before;
-    }
-  });
-  it('kills a run past its timeout', async () => {
-    const r = await runFile('/bin/sleep', ['30'], 100);
-    expect(r.ok).toBe(false);
+  it('hands the child the env it is given and nothing else', async () => {
+    const r = await runFile('/usr/bin/env', [], busEnv({ HOME: '/home/someone', XDG_RUNTIME_DIR: '/run/user/1' }));
+    expect(r?.stdout).toContain('XDG_RUNTIME_DIR=/run/user/1');
+    expect(r?.stdout).not.toContain('HOME=');
   });
 });

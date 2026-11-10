@@ -8,7 +8,7 @@ import { isAbsolute, join } from 'node:path';
 
 import tls from 'node:tls';
 
-import { app, BrowserWindow, dialog, ipcMain, Menu, protocol, safeStorage, shell, Tray } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain, Menu, Notification, powerMonitor, protocol, safeStorage, shell, Tray } from 'electron';
 
 import { allowUnlisted, OVERRIDE_FLAG, parseCompat } from './compat.ts';
 import { activationFactory, healthReader, Live, prober, revoker, verifier } from './profiles/activation.ts';
@@ -35,8 +35,11 @@ import { Gestures } from './gestures.ts';
 import { installGuards } from './guards.ts';
 import { Ipc } from './ipc.ts';
 import { Links } from './links.ts';
+import { Lifecycle } from './lifecycle.ts';
+import { LinuxLifecycle } from './lifecycle-linux.ts';
 import { COMPANION_EVENTS } from '../shared/bridge-names.ts';
 import { Autostart } from './autostart.ts';
+import { Notifications } from './notifications.ts';
 import { createSettingsFiles, memorySettingsFiles, SettingsService } from './settings.ts';
 import { saveChosenFile } from './save-file.ts';
 import { parseManifest, SCHEME, SCHEME_PRIVILEGES } from './scheme.ts';
@@ -272,13 +275,37 @@ export async function start(): Promise<void> {
     log,
   });
 
+  // Notifications (issue #1590) belong to the activation and document that
+  // showed them. The teardown hook also runs on quit; #1588 owns setLocked.
+  const notifications = new Notifications({
+    Notification,
+    icon: join(ui, 'favicon-32.png'),
+    window: () => live.window,
+    current: () => {
+      const activation = profiles.active;
+      return activation === null ? null : { activation, gate: live.gate };
+    },
+  });
+  // Media first: close all and refuse new ones, as the old renderer lives on
+  // until its web contents are destroyed. The helper phase runs after that, so
+  // it closes anything that slipped in and accepts notifications again.
+  teardownHooks.media('notifications', () => {
+    notifications.beginTeardown();
+  });
+  teardownHooks.helper('notifications', () => {
+    notifications.endTeardown();
+  });
+
   // Native voice (issue #1373): the one owner of the helper in this instance.
   // The helper is found only in the app's own resources directory, which is
   // Electron's, never an environment variable or an argument. Nothing here
   // starts voice: only the person's join and retry do (the IPC, issue #1374,
   // takes them only after a gesture). The
   // media hook leaves and stops the helper before identity changes.
+  // Set once Lifecycle exists (below); voice and the companion read it.
+  let screenLocked: () => boolean = () => false;
   const voice = new VoiceService({
+    locked: () => screenLocked(),
     supervisor: new Supervisor({ resources: process.resourcesPath, env: process.env, log }),
     // The device list and the saves run the same trusted helper, with no token.
     oneShot: new OneShot({ resources: process.resourcesPath, env: process.env, log }),
@@ -319,6 +346,7 @@ export async function start(): Promise<void> {
   // the owned window's page ends the document the grant was given to.
   const companion = new Companion({
     voice,
+    locked: () => screenLocked(),
     client: () => activeClient,
     document: () => live.gate.generation,
     tell: (document, event) => {
@@ -345,6 +373,26 @@ export async function start(): Promise<void> {
     });
   });
   teardownHooks.media('voice', () => voice.teardown());
+
+  // Lock and suspend fail closed (issue #1588, D5-02): mute on lock, leave on
+  // suspend, end the share, hide notification text. Linux only: the lock is
+  // observed through logind (lifecycle-linux.ts). Where it cannot be, the
+  // rules keep notification text hidden and say so on the log.
+  //
+  // The companion is the real one (issue #1579, above): lock ends a live share
+  // with reason 'lock' and suspend with 'suspend'.
+  const lifecycle = new Lifecycle({
+    voice,
+    companion,
+    notifications,
+    log,
+  });
+  screenLocked = () => lifecycle.locked;
+  let watcher: LinuxLifecycle | null = null;
+  if (process.platform === 'linux') {
+    watcher = new LinuxLifecycle({ rules: lifecycle, powerMonitor, pid: process.pid, log });
+    void watcher.start();
+  }
   // Every change of the helper's confirmed state goes to the owned window.
   voice.subscribe((view) => {
     deliverVoice({ contents: () => (live.owned() === null ? null : (live.window?.webContents ?? null)), gate: () => live.gate }, view);
@@ -356,7 +404,7 @@ export async function start(): Promise<void> {
     if (part === null) throw new Error('no activation');
     return part;
   };
-  new Ipc({
+  const ipc = new Ipc({
     owned: () => live.owned(),
     get gate() {
       return live.gate;
@@ -373,11 +421,14 @@ export async function start(): Promise<void> {
     gestures,
     profiles,
     voice,
+    notifications,
     settings,
     companion,
     now: Date.now,
     log,
-  }).register(ipcMain);
+  });
+  ipc.register(ipcMain);
+  ipc.registerNotificationSupport(ipcMain);
 
   // The tray (issue #1589, D5-03). Its Quit is app.quit(): the same
   // before-quit teardown as the window's own (helper reaped, the companion's
@@ -433,6 +484,8 @@ export async function start(): Promise<void> {
     if (ending) return;
     ending = true;
     event.preventDefault();
+    // The lock monitor's child goes with the app, by its own handle.
+    watcher?.stop();
     // Media stops before the process goes.
     void profiles.close().finally(() => {
       app.quit();

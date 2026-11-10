@@ -31,6 +31,20 @@ export const BRIDGE_FUNCTIONS = [
   'saveFile',
 ] as const satisfies readonly (keyof ConchDesktopBridge)[];
 
+// Desktop notifications (issue #1590): fixed requests, plus the synchronous
+// support check and the click event exposed separately by the preload.
+export const NOTIFY_FUNCTIONS = ['notify', 'notifyClose'] as const satisfies readonly (keyof ConchDesktopBridge)[];
+export const NOTIFICATION_SUPPORT = 'notificationSupported' as const;
+export const NOTIFICATION_EVENTS = 'conch:notification';
+// The longest notification tag. The page builds it as origin:account:messageId
+// (web/src/useNotifications.ts); an origin can be 8 + 253 + 6 characters
+// (scheme, DNS name, port), so the earlier 128 would refuse a long origin.
+export const TAG_MAX = 512;
+
+export type NotifyFunction = (typeof NOTIFY_FUNCTIONS)[number];
+// Main's tag-only click message to the notification's owning document.
+export type NotificationEvent = { readonly type: 'click'; readonly tag: string };
+
 // The saved server profiles (issue #945), a family of their own.
 export const PROFILE_FUNCTIONS = [
   'profiles',
@@ -84,18 +98,19 @@ export const FEED_CALLS = ['feedSubscribe', 'feedAck', 'feedUnsubscribe'] as con
 export type FeedCall = (typeof FEED_CALLS)[number];
 
 // The functions that cross into main as one invoke each.
-export type InvokedFunction = Exclude<BridgeFunction, 'subscribe'> | FeedCall | ProfileFunction | VoiceFunction | SettingsFunction | CompanionFunction;
+export type InvokedFunction = Exclude<BridgeFunction, 'subscribe'> | FeedCall | ProfileFunction | VoiceFunction | NotifyFunction | SettingsFunction | CompanionFunction;
 
 export const INVOKED_FUNCTIONS: readonly InvokedFunction[] = [
   ...BRIDGE_FUNCTIONS.filter((name): name is Exclude<BridgeFunction, 'subscribe'> => name !== 'subscribe'),
   ...FEED_CALLS,
   ...PROFILE_FUNCTIONS,
   ...VOICE_FUNCTIONS,
+  ...NOTIFY_FUNCTIONS,
   ...SETTINGS_FUNCTIONS,
   ...COMPANION_FUNCTIONS,
 ];
 
-export function channelOf(name: InvokedFunction): string {
+export function channelOf(name: InvokedFunction | typeof NOTIFICATION_SUPPORT): string {
   return `conch:${name}`;
 }
 

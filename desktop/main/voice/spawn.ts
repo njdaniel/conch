@@ -241,70 +241,67 @@ export function spawnHelper(
 
 export const defaultSpawn: SpawnFn = (command, args, options) => nodeSpawn(command, args, options);
 
-// RunResult is a short query's outcome: how it ended and what it printed.
+// How long the screen-cast portal may take to answer (portal.ts, #1580): it is
+// D-Bus activated, so the first ask may start it.
+export const PORTAL_TIMEOUT_MS = 3_000;
+const PORTAL_MAX_OUTPUT = 4096;
+
 export interface RunResult {
-  // True only for a process that ran to exit status 0 in time.
-  readonly ok: boolean;
+  readonly code: number | null;
   readonly stdout: string;
 }
 
-// RunFile runs one absolute-path executable with an argv and nothing else (the
-// tray's `gdbus` probe, issue #1589). The test seam of tray-detect.ts.
-export type RunFile = (file: string, args: readonly string[], timeoutMs: number) => Promise<RunResult>;
-
-// The most of a query's standard output kept.
-const RUN_MAX_BYTES = 4096;
-
-// What a session-bus query needs to find the bus, by exact name.
-const RUN_ENV: readonly string[] = ['DBUS_SESSION_BUS_ADDRESS', 'XDG_RUNTIME_DIR'];
-
-// runFile: argv only, no shell, no standard input, an environment of the
-// session-bus names alone (RUN_ENV; the file is absolute, so no PATH), never
-// detached, SIGKILLed past the timeout. Standard error is discarded. It never
-// rejects: a file that cannot be started (including a spawn that throws at
-// once, as an argument with a NUL does), a timeout and a non-zero exit are
-// all ok:false.
-export const runFile: RunFile = (file, args, timeoutMs) =>
-  new Promise<RunResult>((resolve) => {
-    if (!isAbsolute(file)) {
-      resolve({ ok: false, stdout: '' });
-      return;
-    }
+// runFile runs one read-only program for portal.ts: file with args and env,
+// never a shell, bounded in time and in output, stderr dropped. It resolves
+// with the exit code and stdout, or null when the program could not be run.
+// It lives here because spawn.ts is the one place that reaches child_process.
+export function runFile(file: string, args: readonly string[], env: Readonly<Record<string, string>>): Promise<RunResult | null> {
+  return new Promise((resolve) => {
     let out = '';
     let settled = false;
-    const finish = (result: RunResult): void => {
+    const done = (value: RunResult | null): void => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      resolve(result);
+      resolve(value);
     };
-    let child: ChildProcessByStdio<null, Readable, null>;
+    let child: ChildProcessByStdio<null, Readable, Readable>;
     try {
-      child = nodeSpawn(file, [...args], {
-        stdio: ['ignore', 'pipe', 'ignore'],
-        detached: false,
-        shell: false,
-        windowsHide: true,
-        env: Object.fromEntries(RUN_ENV.flatMap((name) => (process.env[name] === undefined ? [] : [[name, process.env[name]]]))),
-        cwd: '/',
-      });
+      child = nodeSpawn(file, [...args], { env: { ...env }, stdio: ['ignore', 'pipe', 'pipe'] });
     } catch {
-      // Not through finish: no timer exists yet.
-      resolve({ ok: false, stdout: '' });
+      resolve(null);
       return;
     }
     const timer = setTimeout(() => {
       child.kill('SIGKILL');
-      finish({ ok: false, stdout: '' });
-    }, timeoutMs);
+      done(null);
+    }, PORTAL_TIMEOUT_MS + 500);
     child.stdout.setEncoding('utf8');
     child.stdout.on('data', (chunk: string) => {
-      if (out.length < RUN_MAX_BYTES) out += chunk.slice(0, RUN_MAX_BYTES - out.length);
+      out += chunk;
+      if (out.length > PORTAL_MAX_OUTPUT) {
+        child.kill('SIGKILL');
+        done(null);
+      }
     });
-    child.once('error', () => {
-      finish({ ok: false, stdout: '' });
+    child.stderr.resume();
+    child.on('error', () => {
+      done(null);
     });
-    child.once('close', (code) => {
-      finish({ ok: code === 0, stdout: out });
+    child.on('close', (code) => {
+      done({ code, stdout: out });
     });
   });
+}
+
+// WatchChild is a long-lived read-only child: no standard input, stdout read
+// line by line, stderr dropped.
+export type WatchChild = OneShotChild;
+
+// spawnWatch starts a long-lived read-only program (the logind monitor of
+// issue #1588): argv only, no shell, not detached, standard input /dev/null.
+// The caller owns the ChildProcess and kills it by that handle, never by
+// name.
+export function spawnWatch(file: string, args: readonly string[], env: Readonly<Record<string, string>>): WatchChild {
+  return nodeSpawn(file, [...args], { env: { ...env }, stdio: ['ignore', 'pipe', 'pipe'], detached: false, shell: false, windowsHide: true, cwd: '/' });
+}

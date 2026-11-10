@@ -37,6 +37,10 @@ function fakeBridge(overrides: Partial<ConchDesktopBridge>): ConchDesktopBridge 
     uploadFile: unexpected('uploadFile'),
     downloadFile: unexpected('downloadFile'),
     saveFile: unexpected('saveFile'),
+    notify: unexpected('notify'),
+    notifyClose: unexpected('notifyClose'),
+    notificationSupported: () => false,
+    onNotification: () => () => undefined,
     ...overrides,
   };
 }

@@ -16,11 +16,31 @@
 #      build says "built without the voice helper"; DESKTOP_REQUIRE_VOICE=1
 #      makes that a failure.
 #
+# Versions (issue #1596, #1595 Q-D6-6: the release tag is the version). A
+# release build sets CONCH_RELEASE_VERSION to the tag (v0.1.0-alpha.18): the
+# app reports 0.1.0-alpha.18 (stamped into the packaged package.json only; the
+# checked-in one stays 0.0.0), out/compat.json is that tag plus
+# build/compat-extra.json, the voice helper is required and its --version must
+# be the tag's. Without it the build is a development one: version
+# 0.0.0-dev+<short sha>, the hand list build/compat.json, and it says so.
+# scripts/desktop-version.sh holds the tag rules and the Debian mapping.
+#
 # Needs the Node desktop/.nvmrc names on PATH (the Makefile arranges it).
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
 root=$PWD
+
+# The versions first, so a malformed tag fails before anything is installed.
+release=${CONCH_RELEASE_VERSION:-}
+if [ -n "$release" ]; then
+    app_version=$(./scripts/desktop-version.sh app "$release")
+    export DESKTOP_REQUIRE_VOICE=1
+    echo "desktop-build: release build $release (app version $app_version)"
+else
+    app_version="0.0.0-dev+$(git rev-parse --short HEAD 2>/dev/null || echo nogit)"
+    echo "desktop-build: development build (no CONCH_RELEASE_VERSION): version $app_version, server list is the development one (desktop/build/compat.json)"
+fi
 
 (cd web && npm ci --no-audit)
 (cd desktop && npm ci --no-audit)
@@ -40,12 +60,16 @@ electron_dist="$root/desktop/out/electron-dist"
 # electron-builder; --publish never keeps it from publishing anything.
 (cd desktop && CI=true ./node_modules/.bin/electron-builder --linux dir --publish never \
     --config build/electron-builder.config.json \
-    "-c.electronDist=$electron_dist" "-c.electronVersion=$CONCH_ELECTRON_VERSION")
+    "-c.electronDist=$electron_dist" "-c.electronVersion=$CONCH_ELECTRON_VERSION" \
+    "-c.extraMetadata.version=$app_version")
 
 # The voice helper, into resources/conch-voice (issue #1377): copied after
 # electron-builder so its mode and presence are decided here, not by the
 # packer. Without a helper the build says so; DESKTOP_REQUIRE_VOICE=1 fails.
 ./scripts/desktop-voice-helper.sh desktop/dist/linux-unpacked/resources
+if [ -n "$release" ]; then
+    ./scripts/desktop-version.sh helper "$release" desktop/dist/linux-unpacked/resources/conch-voice
+fi
 
 # Nothing in the app may be writable by group or other. The zip said 0777 for
 # some files (desktop-electron.sh removes that), and electron-builder writes
