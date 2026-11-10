@@ -12,7 +12,7 @@ which serves the packaged files and starts none).
 | Suite (CI job) | Lane | What it proves | What it does not | Local command | Artifacts |
 | --- | --- | --- | --- | --- | --- |
 | `web/e2e` in Chromium (`web-e2e`, three shards) | every pull request and push to `main`, with `--grep-invert @heavy` | the browser client against a fixture community: sign-in, messages, admin, browser voice, camera and screen share on Chromium's fake devices, with the pinned LiveKit in Docker | Firefox and WebKit (#1658); real microphones, cameras and screens; a LAN or a second machine; real AI agents (scripted ones only) | `make web-e2e` (once: `cd web && npx playwright install chromium`) | traces of failed tests, `web-e2e-test-results-N`, 7 days |
-| `web/e2e` heavy lane (`e2e-heavy.yml`) | daily on `main`, and on demand for any branch | the tests tagged `@heavy`: those over the pull request budget, and deliberate fault or blackhole tests | the same limits as the row above | `make web-e2e-heavy` (a bare `--grep @heavy` fails with "No tests found" until a heavy test exists) | traces of failed tests, `e2e-heavy-test-results`, 7 days |
+| `web/e2e` heavy lane (`e2e-heavy.yml`) | daily on `main`, and on demand for any branch | the tests tagged `@heavy`: those over the pull request budget, and deliberate fault or blackhole tests | the same limits as the row above | `make web-e2e-heavy` | traces of failed tests, `e2e-heavy-test-results`, 7 days |
 | `voice-check` | every pull request | the voice control plane: a real `conchd`, the real `conch` CLI, three `conch-voice` clients and a real LiveKit; the core unaffected with LiveKit down | a human's ears; real audio devices; PipeWire | `go run ./e2e/voice` (Docker) | the log |
 | `desktop-voice-check` | every pull request | the Linux desktop shell's voice and screen companion against the web client and LiveKit | a real display or sound card; a second machine (#1584) | `make desktop-voice-e2e` (Docker) | the log |
 | `isolation-check` | every pull request | access between groups: what a principal outside a group can and cannot reach, with LiveKit rooms | the browser; more than the scripted principals | `go run ./e2e/isolation` (Docker) | the log |
@@ -282,11 +282,29 @@ expression over titles and tags, so a tag that merely contains `@heavy` (say
   on a branch: Actions, e2e-heavy, Run workflow, pick the branch (or `gh
   workflow run e2e-heavy.yml --ref <branch>`). The branch must contain
   `e2e-heavy.yml`, so rebase on `main` first. It has its own concurrency group,
-  a 40-minute bound and `contents: read` permission only. With no `@heavy` test
-  yet it passes through `--pass-with-no-tests`. It does not use the
+  a 40-minute bound and `contents: read` permission only.
+  A run with no `@heavy` test passes (`--pass-with-no-tests`). It does not use the
   self-hosted `HEAVY_RUNNER` path. The repository is public, so hosted minutes
   cost nothing; wall time and queue contention are the cost.
 - Windows, macOS and engines other than Chromium are not in this lane.
+
+## Multi-user specs and helpers
+
+These specs use separate principals, each in its own browser context, and
+check what LiveKit itself reports, not only what the pages show (#1608).
+
+| Spec | Lane | What it proves |
+|---|---|---|
+| `63-multi-user-smoke` | `@smoke`, pull request | three principals send one message each to #general and every page shows each once; three join voice, see each other, and LiveKit's own participant list holds exactly them until they leave |
+| `64-five-people` | `@heavy` | five principals join voice and chat; LiveKit lists five, then three, then none |
+
+Helpers for new multi-user specs:
+
+- `web/e2e/people.ts`: `enter` (a principal in its own browser context),
+  `joinVoice`, `leave`, and readings of what a page receives.
+- `web/e2e/livekit-admin.ts`: LiveKit's room service over Twirp with an
+  admin token, for its participant list (`listIdentities`). `pauseLiveKit` and `unpauseLiveKit` of the voice
+  world's LiveKit container live in `voice-world.ts`.
 
 ## Flake policy
 
