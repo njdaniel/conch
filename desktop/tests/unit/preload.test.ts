@@ -1,18 +1,18 @@
 import { describe, expect, it, vi } from 'vitest';
 
-import type { CompanionEvent, ConchDesktopBridge, DesktopCompanionBridge, DesktopVoiceBridge, NativeVoiceView } from '../../../web/src/platform/desktop/bridge.ts';
+import type { CompanionEvent, ConchDesktopBridge, DesktopCompanionBridge, DesktopInviteBridge, DesktopSettingsBridge, DesktopVoiceBridge, NativeVoiceView } from '../../../web/src/platform/desktop/bridge.ts';
 import type { FeedHandlers } from '../../../web/src/platform/desktop/bridge.ts';
 import { createBridge, type Invoke } from '../../preload/bridge.ts';
-import { BRIDGE_FUNCTIONS, COMPANION_EVENTS, COMPANION_FUNCTIONS, PROFILE_FUNCTIONS, VOICE_FUNCTIONS, FEED_EVENTS, VOICE_EVENTS, INVOKED_FUNCTIONS } from '../../shared/bridge-names.ts';
+import { BRIDGE_FUNCTIONS, COMPANION_EVENTS, COMPANION_FUNCTIONS, INVITE_FUNCTIONS, NOTIFY_FUNCTIONS, PROFILE_FUNCTIONS, VOICE_FUNCTIONS, SETTINGS_FUNCTIONS, FEED_EVENTS, NOTIFICATION_EVENTS, VOICE_EVENTS, INVOKED_FUNCTIONS } from '../../shared/bridge-names.ts';
 
-const { exposeInMainWorld, invoke, on } = vi.hoisted(() => ({ exposeInMainWorld: vi.fn(), invoke: vi.fn(), on: vi.fn() }));
-vi.mock('electron', () => ({ contextBridge: { exposeInMainWorld }, ipcRenderer: { invoke, on } }));
+const { exposeInMainWorld, invoke, on, sendSync } = vi.hoisted(() => ({ exposeInMainWorld: vi.fn(), invoke: vi.fn(), on: vi.fn(), sendSync: vi.fn() }));
+vi.mock('electron', () => ({ contextBridge: { exposeInMainWorld }, ipcRenderer: { invoke, on, sendSync } }));
 
 const noListen = (): void => undefined;
 
 // Checked by the compiler against the interface: a function added to the
 // bridge and not listed here, or listed and not declared, fails tsc.
-const named: Record<keyof ConchDesktopBridge | keyof DesktopVoiceBridge | keyof DesktopCompanionBridge, true> = {
+const named: Record<keyof ConchDesktopBridge | keyof DesktopVoiceBridge | keyof DesktopInviteBridge | keyof DesktopSettingsBridge | keyof DesktopCompanionBridge, true> = {
   serverAddress: true,
   request: true,
   subscribe: true,
@@ -40,6 +40,10 @@ const named: Record<keyof ConchDesktopBridge | keyof DesktopVoiceBridge | keyof 
   uploadFile: true,
   downloadFile: true,
   saveFile: true,
+  notify: true,
+  notifyClose: true,
+  notificationSupported: true,
+  onNotification: true,
   voiceState: true,
   voiceJoin: true,
   voiceLeave: true,
@@ -52,9 +56,16 @@ const named: Record<keyof ConchDesktopBridge | keyof DesktopVoiceBridge | keyof 
   voiceSaveDevice: true,
   voiceKeyDevices: true,
   voiceSaveTalkBinding: true,
+  inviteCheck: true,
+  inviteAccept: true,
+  inviteCancel: true,
+  inviteTake: true,
   onVoiceState: true,
+  settings: true,
+  settingsSet: true,
   companionGrant: true,
   companionEnd: true,
+  shareArm: true,
   onCompanion: true,
 };
 
@@ -66,12 +77,12 @@ describe('the preload', () => {
     expect(name).toBe('conchDesktop');
     expect(Object.isFrozen(api)).toBe(true);
     expect(Reflect.ownKeys(api).sort()).toEqual(Object.keys(named).sort());
-    expect([...BRIDGE_FUNCTIONS, ...PROFILE_FUNCTIONS, ...VOICE_FUNCTIONS, 'onVoiceState', ...COMPANION_FUNCTIONS, 'onCompanion'].sort()).toEqual(Object.keys(named).sort());
+    expect([...BRIDGE_FUNCTIONS, ...PROFILE_FUNCTIONS, ...VOICE_FUNCTIONS, ...INVITE_FUNCTIONS, ...NOTIFY_FUNCTIONS, ...SETTINGS_FUNCTIONS, 'notificationSupported', 'onNotification', 'onVoiceState', ...COMPANION_FUNCTIONS, 'onCompanion'].sort()).toEqual(Object.keys(named).sort());
     for (const key of Reflect.ownKeys(api)) expect(typeof api[key as string], String(key)).toBe('function');
     for (const forbidden of ['ipcRenderer', 'invoke', 'send', 'on', 'sendSync', 'electron', 'require', 'process']) expect(forbidden in api).toBe(false);
-    // It listens on the feed, voice and companion channels, and passes on the
-    // message, not the event.
-    expect((on.mock.calls as unknown[][]).map((call) => call[0])).toEqual([FEED_EVENTS, VOICE_EVENTS, COMPANION_EVENTS]);
+    // It listens on the feed, voice, companion and notification channels, and
+    // passes on the message, not the event.
+    expect((on.mock.calls as unknown[][]).map((call) => call[0])).toEqual([FEED_EVENTS, VOICE_EVENTS, COMPANION_EVENTS, NOTIFICATION_EVENTS]);
     // No exposed or invoked name says press, release, transmit, gate or ptt.
     for (const name of [...Reflect.ownKeys(api).map(String), ...INVOKED_FUNCTIONS]) expect(name).not.toMatch(/press|release|transmit|gate|ptt/i);
   });
@@ -85,7 +96,13 @@ describe('the preload', () => {
     expect(invoke).toHaveBeenLastCalledWith('conch:signInWithPassword', { name: 'a', password: 'b' });
     await bridge.replaceCredential({ operation: 'changePassword', body: { current: 'a', password: 'b' } });
     expect(invoke).toHaveBeenLastCalledWith('conch:replaceCredential', { operation: 'changePassword', body: { current: 'a', password: 'b' } });
-    expect(INVOKED_FUNCTIONS).toHaveLength(43);
+    await bridge.notify({ tag: 't', title: 'title', body: 'body', channel: 'general' });
+    expect(invoke).toHaveBeenLastCalledWith('conch:notify', { tag: 't', title: 'title', body: 'body', channel: 'general' });
+    await bridge.notifyClose({ tag: 't' });
+    expect(invoke).toHaveBeenLastCalledWith('conch:notifyClose', { tag: 't' });
+    await bridge.settingsSet({ launchAtLogin: true });
+    expect(invoke).toHaveBeenLastCalledWith('conch:settingsSet', { launchAtLogin: true });
+    expect(INVOKED_FUNCTIONS).toHaveLength(52);
   });
 
   it('rejects with a bare "refused" when main refuses, or answers anything but an envelope', async () => {
@@ -97,6 +114,13 @@ describe('the preload', () => {
     await expect(nothing.restore()).rejects.toThrow(/^refused$/);
   });
 
+  it('reads notification support only from a valid synchronous envelope', () => {
+    const bridge = createBridge(() => Promise.resolve({ ok: true, value: true }), noListen, noListen, noListen, noListen, () => ({ ok: true, value: true }));
+    expect(bridge.notificationSupported()).toBe(true);
+    const odd = createBridge(() => Promise.resolve({ ok: true, value: true }), noListen, noListen, noListen, noListen, () => ({ ok: true, value: 'yes' }));
+    expect(() => odd.notificationSupported()).toThrow(/^refused$/);
+  });
+
 });
 
 // A preload wired to a fake main: every invoke is recorded and answered ok,
@@ -106,6 +130,7 @@ function wired(answer: (channel: string, args: unknown[]) => unknown = () => tru
   let deliver: (message: unknown) => void = () => undefined;
   let deliverVoice: (message: unknown) => void = () => undefined;
   let deliverCompanion: (message: unknown) => void = () => undefined;
+  let deliverNotification: (message: unknown) => void = () => undefined;
   const bridge = createBridge(
     (channel, ...args) => {
       calls.push([channel, args]);
@@ -120,6 +145,9 @@ function wired(answer: (channel: string, args: unknown[]) => unknown = () => tru
     (callback) => {
       deliverCompanion = callback;
     },
+    (callback) => {
+      deliverNotification = callback;
+    },
   );
   const send = (event: unknown): void => {
     deliver(event);
@@ -130,7 +158,10 @@ function wired(answer: (channel: string, args: unknown[]) => unknown = () => tru
   const sendCompanion = (message: unknown): void => {
     deliverCompanion(message);
   };
-  return { bridge, calls, send, sendVoice, sendCompanion };
+  const sendNotification = (message: unknown): void => {
+    deliverNotification(message);
+  };
+  return { bridge, calls, send, sendVoice, sendCompanion, sendNotification };
 }
 
 function handlers(): FeedHandlers & { seen: string[] } {
@@ -225,6 +256,20 @@ describe('the preload’s feeds', () => {
   });
 });
 
+describe('the preload’s notifications (issue #1590)', () => {
+  it('delivers exact click tags and drops malformed or extra-field events', () => {
+    const { bridge, sendNotification } = wired();
+    const seen: string[] = [];
+    const stop = bridge.onNotification((event) => seen.push(event.tag));
+    for (const odd of [null, 'click', {}, { type: 'open', tag: 't' }, { type: 'click', tag: 5 }, { type: 'click', tag: 't', body: 'secret' }]) sendNotification(odd);
+    expect(seen).toEqual([]);
+    sendNotification({ type: 'click', tag: 'one' });
+    stop();
+    sendNotification({ type: 'click', tag: 'two' });
+    expect(seen).toEqual(['one']);
+  });
+});
+
 describe('the preload’s voice family', () => {
   const view: NativeVoiceView = { status: 'idle', generation: 1, channel: null, retryable: false };
   const running: NativeVoiceView = {
@@ -284,6 +329,16 @@ describe('the preload’s voice family', () => {
     expect(b).toEqual([view, running]);
   });
 
+  it('passes the lock-mute marker only as true', () => {
+    const { bridge, sendVoice } = wired();
+    const seen: NativeVoiceView[] = [];
+    bridge.onVoiceState((v) => seen.push(v));
+    const marked = { ...running, mutedByLock: true };
+    sendVoice(marked);
+    for (const odd of [{ ...running, mutedByLock: false }, { ...running, mutedByLock: 'yes' }, { ...running, mutedByLock: 1 }]) sendVoice(odd);
+    expect(seen).toEqual([marked]);
+  });
+
   it('drops a message that is not exactly a NativeVoiceView', () => {
     const { bridge, sendVoice } = wired();
     const seen: unknown[] = [];
@@ -325,10 +380,17 @@ describe('the preload’s companion (issue #1579)', () => {
     ]);
   });
 
+  it('sends shareArm with no argument on its own channel', async () => {
+    const { bridge, calls } = wired(() => true);
+    await expect(bridge.shareArm()).resolves.toBe(true);
+    expect(calls).toEqual([['conch:shareArm', []]]);
+  });
+
   it('rejects with a bare "refused" when main refuses a companion call (a subframe, another window, a stale document, no gesture, extra keys)', async () => {
     const bridge = createBridge(() => Promise.resolve({ ok: false, kind: 'refused' }), noListen, noListen, noListen);
     await expect(bridge.companionGrant({ channel: 'general' })).rejects.toThrow(/^refused$/);
     await expect(bridge.companionEnd()).rejects.toThrow(/^refused$/);
+    await expect(bridge.shareArm()).rejects.toThrow(/^refused$/);
   });
 
   it('hands each end to each listener, and the event alone', () => {

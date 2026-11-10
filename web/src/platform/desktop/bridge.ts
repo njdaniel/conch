@@ -235,6 +235,22 @@ export type DownloadReply = BridgeReply | { readonly kind: 'bytes'; readonly dat
 // failed is anything else (no answer, too large, not writable).
 export type SaveOutcome = 'saved' | 'cancelled' | 'failed' | 'unauthorized';
 
+// A desktop notification (issue #1590): exactly the fields main may show or
+// retain. The channel is owned by main's activation record; clicks carry only
+// the tag back to the document that showed it.
+export interface NotifyRequest {
+  readonly tag: string;
+  readonly title: string;
+  readonly body: string;
+  readonly channel: ChannelName;
+}
+
+// The only notification event: no title, body, channel or native event object.
+export interface NotificationClick {
+  readonly type: 'click';
+  readonly tag: string;
+}
+
 export interface ConchDesktopBridge {
   // The server address of the active profile (null: none is active).
   serverAddress(): Promise<ServerAddress>;
@@ -286,6 +302,12 @@ export interface ConchDesktopBridge {
   uploadFile(request: UploadRequest): Promise<BridgeReply>;
   downloadFile(id: number): Promise<DownloadReply>;
   saveFile(id: number): Promise<SaveOutcome>;
+  // Desktop notifications (issue #1590). Support is a narrow synchronous IPC
+  // because the platform's permission API is synchronous; clicks carry no text.
+  notify(request: NotifyRequest): Promise<boolean>;
+  notifyClose(request: { readonly tag: string }): Promise<boolean>;
+  notificationSupported(): boolean;
+  onNotification(listener: (event: NotificationClick) => void): Unsubscribe;
   // The saved server profiles (issue #945). Ids are opaque to the page.
   profiles(): Promise<ProfilesView>;
   profileAdd(address: string): Promise<ProfileAddResult>;
@@ -304,7 +326,7 @@ export interface ConchDesktopBridge {
 declare global {
   interface Window {
     // Present only in the desktop shell's renderer.
-    readonly conchDesktop?: ConchDesktopBridge & Partial<DesktopVoiceBridge> & Partial<DesktopCompanionBridge>;
+    readonly conchDesktop?: ConchDesktopBridge & Partial<DesktopVoiceBridge> & Partial<DesktopSettingsBridge> & Partial<DesktopCompanionBridge> & Partial<DesktopInviteBridge>;
   }
 }
 
@@ -343,11 +365,14 @@ export interface NativeVoiceView {
   readonly problem?: string;
   readonly retryable: boolean;
   readonly helper?: NativeVoiceHelper;
+  // Set while main's mute at a screen lock (issue #1588) is still in force:
+  // the strip says "You were muted when your screen locked".
+  readonly mutedByLock?: true;
 }
 
 export type VoiceCommandResult =
   | { readonly ok: true }
-  | { readonly ok: false; readonly error: VoiceControlErrorCode | 'not-running' | 'busy' | 'unsupported' | 'lost' };
+  | { readonly ok: false; readonly error: VoiceControlErrorCode | 'not-running' | 'busy' | 'unsupported' | 'lost' | 'locked' };
 
 // The helper's one-shot runs (issue #1378, D3-7): the device list and a save.
 // Why a run did not give what was asked; never text of the helper's.
@@ -444,6 +469,103 @@ export interface DesktopVoiceBridge {
   onVoiceState(listener: (view: NativeVoiceView) => void): Unsubscribe;
 }
 
+// Opening an invite link in the app (issue #1591, D5-05 of #773). Its own
+// interface, beside ConchDesktopBridge, so a fake of the main bridge needs
+// no change. The link is untrusted text: main parses it (the page's own parse
+// is never trusted), keeps the code behind a one-time handle and answers
+// only the server it names. Nothing is contacted, switched or added until
+// inviteAccept, which is the person's click.
+//
+// Why a link was not accepted. Fixed words, never the link or its code.
+export type InviteRefusal = 'type' | 'length' | 'characters' | 'scheme' | 'userinfo' | 'host' | 'path' | 'query' | 'fragment' | 'code' | 'malformed';
+
+// A saved profile for the invite's server, offered by name and account.
+export interface InviteProfile {
+  readonly id: string;
+  readonly label: string;
+  readonly account: string | null;
+  readonly active: boolean;
+}
+
+export type InviteCheck =
+  | {
+      readonly ok: true;
+      // One-time handle for inviteAccept or inviteCancel. Not the code.
+      readonly handle: string;
+      // The canonical origin the link names, and its host: what the person
+      // is shown before anything is contacted.
+      readonly origin: string;
+      readonly host: string;
+      readonly profiles: readonly InviteProfile[];
+      // Voice is running now, in whatever profile: switching leaves it.
+      readonly voice: boolean;
+    }
+  | { readonly ok: false; readonly refusal: InviteRefusal };
+
+// Open it with a saved profile, or add the server as a new entry.
+export type InviteTarget = { readonly profile: string } | { readonly add: true };
+
+export type InviteAccept =
+  | {
+      readonly ok: true;
+      // True: the window's page is being replaced by that profile's, which
+      // takes the code itself (inviteTake). False: the profile is the one in
+      // force, and this page takes it now.
+      readonly switched: boolean;
+    }
+  | { readonly ok: false; readonly refusal: 'expired' | 'voice-started' | 'unknown-profile' | 'unsupported' | 'full' | 'unreachable' | 'certificate' | 'not-conch' };
+
+export interface DesktopInviteBridge {
+  inviteCheck(link: string): Promise<InviteCheck>;
+  // The person's click. The code never comes back from this.
+  inviteAccept(handle: string, target: InviteTarget): Promise<InviteAccept>;
+  inviteCancel(handle: string): Promise<boolean>;
+  // The invite code staged for the profile now in force, once: a second call,
+  // or one from any other profile, gets null.
+  inviteTake(): Promise<string | null>;
+}
+
+// The app's own settings (issue #1587; linux-desktop.md §9). App-wide, kept by
+// main in <userData>/settings.json, not per account. In-process TypeScript, not
+// a wire shape.
+export interface DesktopSettingsView {
+  // Closing the window keeps the app running, in the tray. Takes effect only
+  // while trayWorking.
+  readonly closeToTray: boolean;
+  // Open the app when the person logs in.
+  readonly launchAtLogin: boolean;
+  // Whether a working tray exists right now.
+  readonly trayWorking: boolean;
+  // Whether a tray host is on the session bus right now: the choice can be
+  // made only then.
+  readonly trayDetected: boolean;
+  // Whether the person has confirmed, this run, that they can see the icon.
+  readonly trayConfirmed: boolean;
+  // Whether this build may set launch at login (an installed build may).
+  readonly launchAvailable: boolean;
+  // Why not, when it is not: an unpackaged run, or an app that sits where
+  // others could change it.
+  readonly launchUnavailable?: 'unpackaged' | 'unsafe-location';
+}
+
+export interface SettingsChange {
+  readonly closeToTray?: boolean;
+  readonly launchAtLogin?: boolean;
+  // The answer to "Can you see the Conch icon in your panel?" (Q-D5-2).
+  readonly trayConfirmed?: boolean;
+}
+
+export type SettingsResult =
+  | { readonly ok: true; readonly view: DesktopSettingsView }
+  | { readonly ok: false; readonly reason: 'unpackaged' | 'unsafe-location' | 'foreign-file' | 'no-tray' | 'failed' };
+
+export interface DesktopSettingsBridge {
+  settings(): Promise<DesktopSettingsView>;
+  // The person's act: main refuses it without a recent gesture in the window.
+  settingsSet(change: SettingsChange): Promise<SettingsResult>;
+}
+
+
 // The screen companion (issue #1579, D4-02 of #772; linux-desktop.md §4,
 // §6.4): the renderer's own LiveKit participant, p<id>.screen, which publishes
 // the screen and watches others' shares (B2). Main asks conchd for its grant
@@ -472,7 +594,17 @@ export interface CompanionGrant {
 // else, said no more precisely.
 export type CompanionGrantError = 'not-in-voice' | 'not-yet' | 'elsewhere' | 'ended' | 'failed';
 
-export type CompanionGrantResult = { readonly ok: true; readonly grant: CompanionGrant } | { readonly ok: false; readonly error: CompanionGrantError };
+// Why this desktop cannot share a screen, said beside a grant (#1580, D4-03;
+// Q-D4-4 on #1578): the grant still serves watching others' shares. Share
+// goes only through the screen-cast portal's own picker. no-portal: the
+// portal does not answer for ScreenCast; not-wayland: the session is not
+// Wayland, where Chromium would not use the portal. The page says "share
+// unavailable: no screen-cast portal" for either, and main opens no capture.
+export type CompanionShareUnavailable = 'no-portal' | 'not-wayland';
+
+export type CompanionGrantResult =
+  | { readonly ok: true; readonly grant: CompanionGrant; readonly shareUnavailable?: CompanionShareUnavailable }
+  | { readonly ok: false; readonly error: CompanionGrantError };
 
 // Why main ended the live companion on its own. leave: the person left
 // voice; helper: the helper stopped, failed or lost its connection; renewal:
@@ -492,12 +624,27 @@ export interface CompanionEvent {
 export interface DesktopCompanionBridge {
   // The companion's grant for the voice destination. Only right after the
   // person's own click or key.
+  // The result's shareUnavailable ('no-portal' | 'not-wayland') is how the
+  // page learns, before it picks, that this desktop has no screen-cast portal.
   companionGrant(request: { readonly channel: ChannelName }): Promise<CompanionGrantResult>;
+  // Arms the share allowance (issue #1580, D4-03): the page calls this
+  // synchronously at the very start of the Share click, before anything else
+  // (before the join, the grant, any await). It takes the person's click or
+  // key and, for 10 s, lets exactly one companionGrant and one screen
+  // capture follow without a click of their own; a second of either
+  // needs a new shareArm. Nothing but this arms a capture: a raw click or the
+  // Enter that sends a message does not. Watching needs no arming: its
+  // companionGrant uses its own fresh click as before. Answers true when
+  // armed, false when main had nothing to arm for. Rejects (refused) when
+  // there was no click, in a subframe or after a reload. A new call replaces
+  // the allowance; it is cleared by any companion end, a reload, a crash,
+  // sign-out, a switch and quit.
+  shareArm(): Promise<boolean>;
   // Removes the live companion, if there is one, and says whether there was.
   companionEnd(): Promise<boolean>;
   onCompanion(listener: (event: CompanionEvent) => void): Unsubscribe;
 }
 
-// The object the preload exposes: the bridge, the voice family and the
-// companion. Still no press, release, gate or transmit function in any.
-export type ExposedDesktopBridge = ConchDesktopBridge & DesktopVoiceBridge & DesktopCompanionBridge;
+// The object the preload exposes: the bridge, the voice family, the settings,
+// the companion and the invite family. Still no press, release, gate or transmit function in any.
+export type ExposedDesktopBridge = ConchDesktopBridge & DesktopVoiceBridge & DesktopSettingsBridge & DesktopCompanionBridge & DesktopInviteBridge;

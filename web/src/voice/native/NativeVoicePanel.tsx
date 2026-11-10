@@ -21,6 +21,7 @@ import { Roster } from '../VoicePanel';
 import { useVoiceNames } from '../useVoiceNames';
 import { usePresence } from './usePresence';
 import { useNativeVoice } from './useNativeVoice';
+import { lockMutedNote } from './words';
 import { VoiceOptions } from './VoiceOptions';
 import { NativeStreams, ShareButton, ShareNotes, shareDisabledReason } from './NativeShare';
 import type { Companion } from './useCompanion';
@@ -61,6 +62,7 @@ const errorWords: Readonly<Record<NativeVoiceError, string>> = {
   busy: 'Voice is busy; try again in a moment.',
   unsupported: 'Voice is not available here.',
   lost: 'Voice lost touch with the app; try again.',
+  locked: 'Your screen is locked. Unlock it to unmute.',
 };
 
 // The phase class the strip's dot follows (the browser strip's).
@@ -238,7 +240,7 @@ export function NativeVoicePanel({
     else if (snapshot.kind === 'gone') idle = 'Voice status could not be read.';
     else if (presence !== null && !presence.available) idle = 'Voice is unavailable right now; chat still works.';
   }
-  const shareReason = companion === null ? null : shareDisabledReason({ state: companion.state, joined, shown: channel, live });
+  const shareReason = companion === null ? null : shareDisabledReason({ joined, shown: channel, live });
   const share = companion === null ? null : <ShareButton companion={companion} joined={joined} reason={shareReason} />;
   const canJoin = !unavailable && channel !== null && !archived && available && view.status !== 'stopping';
 
@@ -310,6 +312,7 @@ export function NativeVoicePanel({
       <div className="voice-notes">
         {why === null ? null : <p role="status" className="hint">{why}</p>}
         {companion === null || unavailable ? null : <ShareNotes companion={companion} joined={joined} reason={shareReason} soundRoute={soundRoute} />}
+        {view.mutedByLock === true && muted ? <p role="status" className="hint">{lockMutedNote}</p> : null}
         {note === null ? null : <p role="status" className="hint">{note}</p>}
         {idle === null ? null : <p role="status" className="hint">{idle}</p>}
         {!session && warned !== null && warned === channel ? <p role="status" className="hint">{duplicateWarning}</p> : null}

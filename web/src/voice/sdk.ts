@@ -205,7 +205,9 @@ export function wanted(source: Track.Source, kind: Track.Kind | undefined, princ
     case Track.Source.Microphone:
       return want.voice;
     case Track.Source.Camera:
-      return want.viewing && want.shown && want.claimed;
+      // The screen companion takes pictures of shares only (#1581), never a
+      // camera: voice is false for it alone.
+      return want.voice && want.viewing && want.shown && want.claimed;
     case Track.Source.ScreenShare:
     case Track.Source.ScreenShareAudio:
       return principal !== null && principal !== want.own && want.watching.has(principal);
@@ -913,6 +915,11 @@ class LiveKitAdapter implements Room {
         this.output = id;
         events.onOutputMoved(id);
       })
+      .on(RoomEvent.SignalConnected, () => {
+        // The SDK sets the room's name from the join response just before this
+        // event, well before connect resolves, and logs it meanwhile: held now.
+        redactor.hold(this, room.name);
+      })
       .on(RoomEvent.TrackUnmuted, (pub: TrackPublication, participant: Participant) => {
         // Unmuted by someone else (the room API) while the gate is shut: muted
         // again. An unmute of our own comes with the gate open.
@@ -920,6 +927,11 @@ class LiveKitAdapter implements Room {
         void (pub as LocalTrackPublication).mute().catch(() => undefined);
       });
     await room.connect(url, token, connectOptions);
+    // The room's own name again, in case the event above came without it (a
+    // repeat is harmless): the companion's grant names none (its roomName is
+    // empty, and a value under 4 characters is never held), yet the SDK logs
+    // the name at info and debug.
+    redactor.hold(this, room.name);
     this.ensureOpen();
     // Whoever was already in the room: their tracks are subscribed by choice too.
     this.subscribeAll();

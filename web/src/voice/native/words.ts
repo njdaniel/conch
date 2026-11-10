@@ -10,7 +10,8 @@ import type {
   VoiceControlPTTProblem,
   VoiceControlReason,
 } from '../../schema/generated';
-import type { CompanionGrantError, NativeVoiceStatus, NativeVoiceView } from '../../platform/desktop/bridge';
+import type { CompanionGrantError, CompanionShareUnavailable, NativeVoiceStatus, NativeVoiceView } from '../../platform/desktop/bridge';
+import { companionRefusals } from '../connection';
 import { endedNote, type ShareCause, type ShareEnd, type ShareState } from '../share';
 
 export interface VoiceWords {
@@ -85,6 +86,10 @@ export const pttProblemWords: Readonly<Record<VoiceControlPTTProblem, string>> =
   ended: 'the talk key device went away',
   partial_record: 'the talk key device sent unreadable data',
 };
+
+// The note the strip shows after main muted the person at a screen lock
+// (issue #1588), until they unmute or leave. Said as a plain fact.
+export const lockMutedNote = 'You were muted when your screen locked';
 
 function has<T extends string>(table: Readonly<Record<T, string>>, key: string | undefined): key is T {
   return key !== undefined && Object.prototype.hasOwnProperty.call(table, key);
@@ -203,19 +208,16 @@ export function shareElsewhereWords(joined: string): string {
   return `Share is for the channel you are in voice with: #${joined}.`;
 }
 
-// Why the companion was refused its grant, in words (CompanionGrantError).
-export const shareRefusalWords: Readonly<Record<CompanionGrantError, string>> = {
-  'not-in-voice': 'Join voice first, then share or watch a screen.',
-  'not-yet': 'Voice is still connecting; try again in a moment',
-  elsewhere: 'Your screen is being shared from another device of yours',
-  ended: 'Voice ended before the screen could start.',
-  failed: 'Screens could not start. Try again.',
-};
-
 // What more is known of a share that did not start (ShareCause).
 export const shareCauseWords: Readonly<Record<ShareCause, string>> = {
-  no_portal: shareDisabledWords.noPortal,
-  denied: 'Permission to share your screen was denied. Check the desktop’s screen sharing permission.',
+  denied: 'The screen could not be captured',
+};
+
+// Why this desktop cannot share, as the grant says (CompanionShareUnavailable):
+// no portal for ScreenCast, or a session that is not Wayland (X11).
+export const shareUnavailableWords: Readonly<Record<CompanionShareUnavailable, string>> = {
+  'no-portal': shareDisabledWords.noPortal,
+  'not-wayland': 'Sharing a screen from the Linux app needs a Wayland session; this desktop is running X11',
 };
 
 // voice_share_full: the room's six-stream cap (voiceShareCap = 6).
@@ -242,8 +244,9 @@ const toldByWhy: ReadonlySet<ShareEnd> = new Set<ShareEnd>(['left', 'lost', 'rot
 // start or has ended, or null: a refused grant, a cause, a full room, the
 // reason the companion ended (why), or the share's own end in words. A closed
 // picker says nothing.
-export function shareNote(share: ShareState, refusal: CompanionGrantError | null, why: string | null): string | null {
-  if (refusal !== null) return shareRefusalWords[refusal];
+export function shareNote(share: ShareState, refusal: CompanionGrantError | null, why: string | null, unavailable: CompanionShareUnavailable | null = null): string | null {
+  if (refusal !== null) return companionRefusals[refusal];
+  if (unavailable !== null) return shareUnavailableWords[unavailable];
   if (share.kind !== 'idle') return null;
   if (share.cause !== undefined) return shareCauseWords[share.cause];
   if (share.ended === 'full') return shareFullWords;

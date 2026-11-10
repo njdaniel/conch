@@ -14,7 +14,6 @@
 import { useRef, type ReactNode } from 'react';
 import { Glyph } from '../../Icons';
 import type { Person } from '../../useLiveChannel';
-import type { VoiceState } from '../connection';
 import { companionDefaultQuality, companionQualities } from '../connection';
 import { qualityLabel, sharers, type Sharer } from '../presence';
 import type { VoicePresenceV2 } from '../../schema/voice';
@@ -25,13 +24,13 @@ import type { Companion } from './useCompanion';
 import { indicatorWords, shareDisabledWords, shareElsewhereWords, shareNote, shareQualityWords, silentShareBefore, silentShareWhile } from './words';
 
 // Why Share is not offered now, in words, or null when it is. Share is for
-// the channel joined, shown, with the helper connected (UX-15), and is gone
-// for good on a desktop whose last try found no screen-cast portal.
-export function shareDisabledReason({ state, joined, shown, live }: { readonly state: VoiceState; readonly joined: string | null; readonly shown: string | null; readonly live: boolean }): string | null {
+// the channel joined, shown, with the helper connected (UX-15). A desktop
+// with no screen-cast portal is said in the notes after the grant says so; it
+// never turns Share off, so there is no lock to get stuck in.
+export function shareDisabledReason({ joined, shown, live }: { readonly joined: string | null; readonly shown: string | null; readonly live: boolean }): string | null {
   if (joined === null) return shareDisabledWords.notJoined;
   if (shown !== null && shown !== joined) return shareElsewhereWords(joined);
   if (!live) return shareDisabledWords.connecting;
-  if (state.share.kind === 'idle' && state.share.cause === 'no_portal') return shareDisabledWords.noPortal;
   return null;
 }
 
@@ -88,7 +87,7 @@ export function ShareNotes({ companion, joined, reason, soundRoute = false }: { 
   const share = state.share;
   const live = share.kind === 'sharing' || share.kind === 'resuming' || share.kind === 'publishing';
   const starting = share.kind === 'claiming' || share.kind === 'picking';
-  const note = share.kind === 'idle' ? shareNote(share, state.companionRefusal, state.phase === 'stopped' ? state.why : null) : null;
+  const note = share.kind === 'idle' ? shareNote(share, state.companionRefusal, state.phase === 'stopped' ? state.why : null, state.companionShareUnavailable) : null;
   const quality = companionQualities.find((q) => qualityKey(q) === qualityKey(state.shareQuality)) ?? companionDefaultQuality;
   return (
     <>

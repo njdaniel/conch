@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Version=1.5
+Name=Conch
+GenericName=Chat
+Comment=Chat with your Conch server
+Exec=conch-desktop %U
+Icon=chat.conch.desktop
+Terminal=false
+Categories=Network;InstantMessaging;
+StartupWMClass=conch-desktop
+StartupNotify=true

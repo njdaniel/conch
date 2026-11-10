@@ -90,6 +90,8 @@ interface Stub {
   room: { localParticipant: unknown } | null;
   // What the stub SDK logs while connecting, as a real one may.
   connectLog: string | null;
+  // Run inside connect, before it resolves (the SDK's signal events).
+  duringConnect: (() => void) | null;
   audioContexts: number;
   // The global names that were there before any module of this file loaded.
   baseline: ReadonlySet<string>;
@@ -225,6 +227,7 @@ const state = vi.hoisted((): Stub => {
     tracks: [],
     room: null,
     connectLog: null,
+    duringConnect: null,
     audioContexts: 0,
     baseline: new Set(Object.getOwnPropertyNames(globalThis)),
     roomOptions: undefined,
@@ -492,6 +495,8 @@ vi.mock('livekit-client', () => {
       return Promise.resolve(state.devices.filter((d) => d.kind === kind));
     }
     remoteParticipants = state.remote;
+    // The room's own name, as the server says it once connected.
+    name = 'sfu-room-name-1581';
     localParticipant = {
       identity: 'p7',
       get permissions() {
@@ -569,6 +574,7 @@ vi.mock('livekit-client', () => {
       state.connectOptions = options;
       state.calls.push('connect');
       if (state.connectLog !== null) state.logger.methodFactory('warn')(`${state.connectLog} ${token}`, { token });
+      state.duringConnect?.();
       return Promise.resolve();
     }
     disconnect() {
@@ -607,6 +613,7 @@ vi.mock('livekit-client', () => {
       ParticipantPermissionsChanged: 'ppc',
       MediaDevicesChanged: 'mdc',
       ActiveDeviceChanged: 'adc',
+      SignalConnected: 'sc',
     },
     TrackEvent: { Ended: 'ended' },
     PublishTrackError,
@@ -688,6 +695,7 @@ beforeEach(() => {
   state.tracks.length = 0;
   state.room = null;
   state.connectLog = null;
+  state.duringConnect = null;
   state.audioContexts = 0;
   state.roomOptions = undefined;
   state.connectOptions = undefined;
@@ -884,6 +892,30 @@ describe('the SDK adapter', () => {
     const lines = sdkLog.recent().join('\n');
     expect(lines).toContain('joined');
     expect(lines).not.toMatch(/room-abcdef|tok-abcdef/);
+  });
+
+  it("holds the room's own name once connected, though the caller gave none (the companion's grant names no room)", async () => {
+    const room = newLiveKitRoom();
+    room.setCompanion?.(true);
+    await room.connect('wss://lk.example', 'tok-abcdef', '', false, events);
+    state.logger.methodFactory('warn')('joined sfu-room-name-1581 as p7.screen');
+    const lines = sdkLog.recent().join('\n');
+    expect(lines).toContain('joined');
+    expect(lines).not.toContain('sfu-room-name-1581');
+  });
+
+  it("holds the room's own name at the signal event, before connect resolves", async () => {
+    const room = newLiveKitRoom();
+    room.setCompanion?.(true);
+    const lines: string[] = [];
+    state.duringConnect = () => {
+      state.handlers.get('sc')?.();
+      state.logger.methodFactory('warn')('joined sfu-room-name-1581 as p7.screen');
+      lines.push(sdkLog.recent().join('\n'));
+    };
+    await room.connect('wss://lk.example', 'tok-abcdef', '', false, events);
+    expect(lines.join('\n')).toContain('joined');
+    expect(lines.join('\n')).not.toContain('sfu-room-name-1581');
   });
 
   it('quiets the SDK when the module loads, at warn, without persisting the level', () => {
@@ -2344,7 +2376,7 @@ describe('wanted: the screen companion takes no voice (issue #1581)', () => {
   const { Source, Kind } = Track;
   // source x kind x publisher x voice. A microphone is wanted only with voice;
   // a share's picture and sound only from a watched publisher other than the
-  // person's own; a camera whatever voice says, as before.
+  // person's own; a camera only with voice too (the companion takes none).
   it.each([
     [Source.Microphone, Kind.Audio, 8, true, true],
     [Source.Microphone, Kind.Audio, 8, false, false],
@@ -2362,7 +2394,10 @@ describe('wanted: the screen companion takes no voice (issue #1581)', () => {
     [Source.ScreenShareAudio, Kind.Audio, 7, false, false],
     [Source.ScreenShareAudio, Kind.Video, 9, false, false],
     [Source.Camera, Kind.Video, 8, true, true],
-    [Source.Camera, Kind.Video, 8, false, true],
+    // Changed in the security-review fixes (#1622 S4b): the companion
+    // subscribes to screen shares only, never to a camera (voice is false for
+    // it alone), where this row first said true.
+    [Source.Camera, Kind.Video, 8, false, false],
     [Source.Unknown, Kind.Audio, 8, false, false],
   ])('%s as %s from %s with voice %s: %s', (source, kind, principal, voice, expected) => {
     expect(wanted(source, kind, principal, { ...base, voice })).toBe(expected);

@@ -620,6 +620,90 @@ describe('why the server ended it', () => {
   });
 });
 
+// Issue #1581 (security review S1, Q-D4-2 on #1578): a desktop companion's
+// share is never resumed after a renewal without a new consent, whichever of
+// presence and the room says it first.
+describe('a companion share is not resumable', () => {
+  const rotated: VoiceShareEnded = { reason: 'rotated', started_at: '2026-10-16T00:00:00.000Z', ended_at: '2026-10-16T00:01:00.000Z' };
+
+  it('presence first: the capture is stopped, nothing is claimed again, and the words are the renewal ones', async () => {
+    const t = await sharing(setup());
+    t.share.setCompanion(true);
+    t.share.presence('me');
+    t.share.presence('none', rotated);
+    await settle();
+    expect(t.share.current).toEqual({ kind: 'idle', ended: 'rotated' });
+    expect(t.calls).toEqual(['stop screen']);
+    expect(t.calls).not.toContain('keep');
+    // A new connection and more presence resume nothing.
+    t.share.connected('general', t.stub);
+    t.share.presence('none');
+    await settle();
+    t.clock.advance(120_000);
+    await settle();
+    expect(t.calls.filter((c) => c.startsWith('claim'))).toEqual([]);
+    expect(t.share.current).toEqual({ kind: 'idle', ended: 'rotated' });
+  });
+
+  it('the room first, then presence: ends with the renewal words and is not resumed', async () => {
+    const t = await sharing(setup());
+    t.share.setCompanion(true);
+    t.share.presence('me');
+    t.share.ended('server');
+    await settle();
+    t.share.presence('none', rotated);
+    await settle();
+    expect(t.share.current).toEqual({ kind: 'idle', ended: 'rotated' });
+    expect(t.calls.filter((c) => c.startsWith('claim'))).toEqual([]);
+    expect(t.calls).not.toContain('keep');
+  });
+
+  it('a claim granted again with a new started_at after a reconnect is released, not adopted', async () => {
+    const claims: ShareClaimResult[] = [];
+    const t = await sharing(setup(claims));
+    claims.push({ ok: true, value: { principal_id: 7, started_at: '2026-10-16T00:05:00.000Z', audio: true } });
+    t.share.setCompanion(true);
+    t.share.presence('me');
+    await t.share.reconnected();
+    await settle();
+    expect(t.share.current).toEqual({ kind: 'idle', ended: 'rotated' });
+    expect(t.released).toEqual(['2026-10-16T00:05:00.000Z']);
+  });
+
+  it('the same started_at on a reconnect is still the same share', async () => {
+    const t = await sharing(setup());
+    t.share.setCompanion(true);
+    t.share.presence('me');
+    await t.share.reconnected();
+    await settle();
+    expect(t.share.current).toEqual({ kind: 'sharing', audio: true });
+    expect(t.released).toEqual([]);
+  });
+
+  it('a quality change answered with a new started_at is released, not adopted', async () => {
+    const claims: ShareClaimResult[] = [];
+    const t = await sharing(setup(claims));
+    claims.push({ ok: true, value: { principal_id: 7, started_at: '2026-10-16T00:05:00.000Z', audio: true } });
+    t.share.setCompanion(true);
+    t.share.presence('me');
+    await t.share.changeQuality({ resolution: '720p', frameRate: 30 });
+    await settle();
+    expect(t.share.current).toEqual({ kind: 'idle', ended: 'rotated' });
+    expect(t.released).toEqual(['2026-10-16T00:05:00.000Z']);
+  });
+
+  it('a connection lost after the renewal was told stops the share with the renewal words', async () => {
+    const t = await sharing(setup());
+    t.share.setCompanion(true);
+    t.share.presence('me');
+    t.share.presence('none', rotated);
+    await t.share.lost(true);
+    await settle();
+    expect(t.share.current).toEqual({ kind: 'idle', ended: 'rotated' });
+    expect(t.calls).not.toContain('keep');
+  });
+});
+
 // Issue #516: a share whose room was renewed (rotated) is resumed on the next
 // connection, with the same capture and no picker, when conchd grants the
 // claim again; and is not otherwise.
@@ -1081,8 +1165,8 @@ describe('what the page says', () => {
     ['Safari on iPhone', { canShare: false, chromium: false, platform: 'ios' }, /cannot share a screen.*You can still watch/],
   ];
 
-  it('says what sound a share will carry, per browser, before the picker opens', () => {
-    for (const [name, features, text] of browsers) expect(soundNote(features), name).toMatch(text);
+  it.each(browsers)('says what sound a share will carry before the picker opens: %s', (_name, features, text) => {
+    expect(soundNote(features)).toMatch(text);
   });
 
   // Issue #600: the strip's one line names the same facts as soundNote and
@@ -1166,21 +1250,23 @@ describe('reading the browser', () => {
 });
 
 describe('the cause of a share that did not start (issue #1582)', () => {
-  it('a picker the system refused, or a platform with no picker, carries a cause beside the same end', async () => {
-    for (const [name, message, cause] of [
-      ['NotAllowedError', 'Permission denied by system', 'denied'],
-      ['NotFoundError', 'Requested device not found', 'no_portal'],
-      ['NotSupportedError', 'Not supported', 'no_portal'],
-    ] as const) {
-      const t = setup();
-      const refusing: ShareRoom = { ...t.stub, pickScreen: () => Promise.reject(Object.assign(new Error(message), { name })) };
-      await t.share.start('general', refusing);
-      expect(t.share.current, name).toEqual({ kind: 'idle', ended: 'cancelled', cause });
-    }
+  // The shapes the desktop's picker gives getDisplayMedia: main refusing (no
+  // allowance, no grant) is NotAllowedError; the person cancelling the picker
+  // is AbortError. Neither changes `ended`.
+  it.each([
+    ['NotAllowedError', 'Not allowed', { kind: 'idle', ended: 'cancelled', cause: 'denied' }],
+    ['AbortError', 'The user aborted a request', { kind: 'idle', ended: 'cancelled' }],
+  ] as const)('a pick that failed as %s', async (name, message, expected) => {
+    const t = setup();
+    const refusing: ShareRoom = { ...t.stub, pickScreen: () => Promise.reject(Object.assign(new Error(message), { name })) };
+    await t.share.start('general', refusing);
+    expect(t.share.current).toEqual(expected);
   });
 
-  it('a picker the person closed has no cause', () => {
-    expect(pickCause(Object.assign(new Error('Permission denied'), { name: 'NotAllowedError' }))).toBeUndefined();
+  it('no other pick failure carries a cause, and a non-error carries none', () => {
+    expect(pickCause(Object.assign(new Error('Aborted'), { name: 'AbortError' }))).toBeUndefined();
+    expect(pickCause(Object.assign(new Error('x'), { name: 'NotFoundError' }))).toBeUndefined();
+    expect(pickCause(Object.assign(new Error('x'), { name: 'NotSupportedError' }))).toBeUndefined();
     expect(pickCause(new Error('NotAllowedError'))).toBeUndefined();
     expect(pickCause('x')).toBeUndefined();
   });

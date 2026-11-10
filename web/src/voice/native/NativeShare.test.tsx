@@ -6,11 +6,11 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { CompanionGrantError } from '../../platform/desktop/bridge';
 import type { VoicePresenceV2 } from '../../schema/voice';
 import type { Person } from '../../useLiveChannel';
-import { companionDefaultQuality, initialVoice, type VoiceState } from '../connection';
+import { companionDefaultQuality, companionRefusals, initialVoice, type VoiceState } from '../connection';
 import type { ShareState } from '../share';
 import { NativeStreams, ShareButton, ShareNotes, shareDisabledReason } from './NativeShare';
 import type { Companion, CompanionClient } from './useCompanion';
-import { shareCauseWords, shareDisabledWords, shareElsewhereWords, shareFailedWords, shareFullWords, shareRefusalWords, shareSourceClosedWords, silentShareBefore, silentShareWhile } from './words';
+import { shareCauseWords, shareDisabledWords, shareElsewhereWords, shareFailedWords, shareFullWords, shareSourceClosedWords, shareUnavailableWords, silentShareBefore, silentShareWhile } from './words';
 
 afterEach(cleanup);
 
@@ -35,12 +35,12 @@ function fake(over: Partial<VoiceState> = {}): { readonly companion: Companion; 
 }
 
 const idleShare = (over: Partial<Extract<ShareState, { kind: 'idle' }>> = {}): ShareState => ({ kind: 'idle', ended: null, ...over });
-const reasonOf = (c: Companion, over: { joined?: string | null; shown?: string | null; live?: boolean } = {}) =>
-  shareDisabledReason({ state: c.state, joined: 'general', shown: 'general', live: true, ...over });
+const reasonOf = (over: { joined?: string | null; shown?: string | null; live?: boolean } = {}) =>
+  shareDisabledReason({ joined: 'general', shown: 'general', live: true, ...over });
 
 function strip(c: Companion, over: { joined?: string | null; shown?: string | null; live?: boolean; soundRoute?: boolean } = {}) {
   const joined = over.joined === undefined ? 'general' : over.joined;
-  const reason = reasonOf(c, over);
+  const reason = reasonOf(over);
   return render(
     <>
       <ShareButton companion={c} joined={joined} reason={reason} />
@@ -75,11 +75,15 @@ describe('Share is offered only in the joined channel while the helper is connec
     expect(screen.queryByLabelText('Share quality')).toBeNull();
   });
 
-  it('is unavailable with words on a desktop with no screen-cast portal (Q-D4-4)', () => {
-    const t = fake({ share: idleShare({ ended: 'cancelled', cause: 'no_portal' }) });
+  it.each([
+    ['no-portal' as const, 'This desktop has no screen-cast portal'],
+    ['not-wayland' as const, shareUnavailableWords['not-wayland']],
+  ])('says so, from the grant, on a desktop that cannot share (%s; Q-D4-4), and is not locked off', (companionShareUnavailable, words) => {
+    const t = fake({ companionShareUnavailable });
     strip(t.companion);
-    expect(screen.getByRole<HTMLButtonElement>('button', { name: 'Share screen' }).disabled).toBe(true);
-    expect(screen.getByText('This desktop has no screen-cast portal')).toBeTruthy();
+    expect(screen.getByText(words)).toBeTruthy();
+    // Not locked: the next click asks again, and the grant is what decides.
+    expect(screen.getByRole<HTMLButtonElement>('button', { name: 'Share screen' }).disabled).toBe(false);
   });
 });
 
@@ -144,9 +148,9 @@ describe('the refusals, each in its own words', () => {
   it.each<[CompanionGrantError, string]>([
     ['elsewhere', 'Your screen is being shared from another device of yours'],
     ['not-yet', 'Voice is still connecting; try again in a moment'],
-    ['not-in-voice', shareRefusalWords['not-in-voice']],
-    ['ended', shareRefusalWords.ended],
-    ['failed', shareRefusalWords.failed],
+    ['not-in-voice', companionRefusals['not-in-voice']],
+    ['ended', companionRefusals.ended],
+    ['failed', companionRefusals.failed],
   ])('grant refused: %s', (error, words) => {
     strip(fake({ phase: 'stopped', companion: true, companionRefusal: error, why: 'the client words' }).companion);
     expect(screen.getByText(words)).toBeTruthy();
@@ -159,12 +163,10 @@ describe('the refusals, each in its own words', () => {
     expect(shareFullWords).toContain('Six');
   });
 
-  it.each([
-    ['no_portal' as const, 'This desktop has no screen-cast portal'],
-    ['denied' as const, shareCauseWords.denied],
-  ])('%s', (cause, words) => {
-    strip(fake({ share: idleShare({ ended: 'cancelled', cause }) }).companion, { live: cause !== 'no_portal' });
-    expect(screen.getAllByText(words).length).toBeGreaterThan(0);
+  it('a refused pick (NotAllowedError: main refused) says the screen could not be captured', () => {
+    strip(fake({ share: idleShare({ ended: 'cancelled', cause: 'denied' }) }).companion);
+    expect(screen.getAllByText('The screen could not be captured').length).toBeGreaterThan(0);
+    expect(shareCauseWords.denied).toBe('The screen could not be captured');
   });
 
   it('a cancelled picker says nothing', () => {

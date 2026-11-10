@@ -3,7 +3,8 @@ import type { NativeVoiceHelper, NativeVoiceStatus, NativeVoiceView } from '../.
 import type { VoiceControlBlock, VoiceControlPTT, VoiceControlPTTProblem, VoiceControlReason } from '../../schema/generated';
 import type { CompanionGrantError } from '../../platform/desktop/bridge';
 import type { ShareCause, ShareEnd, ShareState } from '../share';
-import { blockWords, indicatorWords, pttProblemWords, pttWords, reasonWords, shareCauseWords, shareFailedWords, shareFullWords, shareNote, shareRefusalWords, shareSourceClosedWords, statusWords, words } from './words';
+import { companionRefusals } from '../connection';
+import { blockWords, indicatorWords, pttProblemWords, pttWords, reasonWords, shareCauseWords, shareFailedWords, shareFullWords, shareNote, shareSourceClosedWords, shareUnavailableWords, statusWords, words } from './words';
 
 // Each Record is exhaustive at compile time; a vocabulary value added in Go
 // fails the typecheck here until it is listed, and the tables below until it
@@ -124,13 +125,13 @@ describe('words', () => {
 // ---- share and watch (issue #1582)
 
 const grants: Record<CompanionGrantError, true> = { 'not-in-voice': true, 'not-yet': true, elsewhere: true, ended: true, failed: true };
-const causes: Record<ShareCause, true> = { no_portal: true, denied: true };
+const causes: Record<ShareCause, true> = { denied: true };
 const idleShare = (ended: ShareEnd | null, cause?: ShareCause): ShareState => ({ kind: 'idle', ended, ...(cause === undefined ? {} : { cause }) });
 
 describe('share words', () => {
   it.each(Object.keys(grants))('a refused grant: %s', (k) => {
-    expect(shareRefusalWords[k as CompanionGrantError]).not.toBe('');
-    expect(shareNote(idleShare(null), k as CompanionGrantError, 'the client words')).toBe(shareRefusalWords[k as CompanionGrantError]);
+    expect(companionRefusals[k as CompanionGrantError]).not.toBe('');
+    expect(shareNote(idleShare(null), k as CompanionGrantError, 'the client words')).toBe(companionRefusals[k as CompanionGrantError]);
   });
 
   it.each(Object.keys(causes))('a cause: %s', (k) => {
@@ -139,9 +140,10 @@ describe('share words', () => {
   });
 
   it('says the refusals the issue names, word for word', () => {
-    expect(shareRefusalWords.elsewhere).toBe('Your screen is being shared from another device of yours');
-    expect(shareRefusalWords['not-yet']).toBe('Voice is still connecting; try again in a moment');
-    expect(shareCauseWords.no_portal).toBe('This desktop has no screen-cast portal');
+    expect(companionRefusals.elsewhere).toBe('Your screen is being shared from another device of yours');
+    expect(companionRefusals['not-yet']).toBe('Voice is still connecting; try again in a moment');
+    expect(shareUnavailableWords['no-portal']).toBe('This desktop has no screen-cast portal');
+    expect(shareCauseWords.denied).toBe('The screen could not be captured');
     expect(shareNote(idleShare('full'), null, null)).toBe(shareFullWords);
     expect(shareFullWords).toBe('Six people are already sharing in this room.');
   });
@@ -158,6 +160,11 @@ describe('share words', () => {
     expect(shareNote(idleShare('browser'), null, null)).toBe(shareSourceClosedWords);
     expect(shareNote(idleShare('failed'), null, null)).toBe(shareFailedWords);
     expect(shareNote(idleShare('operator'), null, null)).toBe('An operator stopped your share.');
+  });
+
+  it.each(['no-portal', 'not-wayland'] as const)('a desktop that cannot share (%s) is said from the grant, after a refused grant but before the share\'s end', (k) => {
+    expect(shareNote(idleShare(null), null, null, k)).toBe(shareUnavailableWords[k]);
+    expect(shareNote(idleShare(null), 'elsewhere', null, k)).toBe(companionRefusals.elsewhere);
   });
 
   it('says nothing about a share that is not idle', () => {

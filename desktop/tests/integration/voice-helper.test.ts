@@ -131,6 +131,7 @@ describe.runIf(have)('the supervisor with the real conch-voice', () => {
   // flag's name fails here.
   it('the service joins with --transmit-ceiling-secs 30 and the real helper accepts it', async () => {
     const service = new VoiceService({
+      locked: () => false,
       supervisor: sup,
       oneShot: new OneShot({ resources: s.resources, env: { HOME: s.root, XDG_RUNTIME_DIR: s.run }, log: () => undefined }),
       identity: () =>

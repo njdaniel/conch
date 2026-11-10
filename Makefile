@@ -11,7 +11,7 @@ LINT    = golangci-lint
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null)
 LDFLAGS  = -X main.version=$(VERSION)
 
-.PHONY: build test lint vet fmt fmt-check invisible-check check schema-compat schema-ts emoji-catalog depgate go-scope deploy-test agent-claim-test rust-check rust-build web-node web-check web-build web-embed build-web-embedded web-e2e desktop-node desktop-check desktop-build desktop-smoke desktop-voice-it desktop-voice-e2e p3-local p3-reset hooks-install clean
+.PHONY: build test lint vet fmt fmt-check invisible-check check schema-compat schema-ts emoji-catalog depgate go-scope deploy-test agent-claim-test rust-check rust-build web-node web-check web-build web-embed build-web-embedded web-e2e desktop-node desktop-check desktop-build desktop-deb desktop-smoke desktop-voice-it desktop-voice-e2e p3-local p3-reset hooks-install clean
 
 build:
 	$(GO) build ./...
@@ -110,7 +110,7 @@ web-e2e: web-node
 # without it this fails and names that version, it does not skip.
 DESKTOP_NODE = $(shell cat desktop/.nvmrc)
 DESKTOP_NODE_BIN = $(HOME)/.nvm/versions/node/v$(DESKTOP_NODE)/bin
-desktop-node desktop-check desktop-build desktop-smoke desktop-voice-it desktop-voice-e2e: export PATH := $(if $(wildcard $(DESKTOP_NODE_BIN)/node),$(DESKTOP_NODE_BIN):)$(PATH)
+desktop-node desktop-check desktop-build desktop-deb desktop-smoke desktop-voice-it desktop-voice-e2e: export PATH := $(if $(wildcard $(DESKTOP_NODE_BIN)/node),$(DESKTOP_NODE_BIN):)$(PATH)
 
 desktop-node:
 	@v=$$(node --version 2>/dev/null) || { echo "desktop: FAIL: Node.js is not installed; install Node $(DESKTOP_NODE) (desktop/.nvmrc)"; exit 1; }; \
@@ -120,6 +120,8 @@ desktop-check: desktop-node
 	./scripts/desktop-electron-test.sh
 	./scripts/desktop-lint-test.sh
 	./scripts/desktop-voice-helper-test.sh
+	./scripts/desktop-version-test.sh
+	./scripts/desktop-deb-test.sh
 	./scripts/desktop-lint.sh
 	./scripts/web-depgate.sh desktop
 	./scripts/web-licences.sh desktop/package-lock.json desktop/licences-allowlist.txt
@@ -136,6 +138,17 @@ desktop-check: desktop-node
 # without one (#1377). Not part of `make check`.
 desktop-build: desktop-node
 	./scripts/desktop-build.sh
+
+# The x86_64 .deb of that app (issue #1597): desktop/dist/conch-desktop_<version>_amd64.deb.
+# It builds the app in release mode (the voice helper is required: make
+# rust-build first), packs it with scripts/desktop-deb.sh and checks the result
+# with scripts/desktop-deb-test.sh. CONCH_RELEASE_VERSION=v0.1.0-alpha.18 makes it
+# the release package; unset, it is a development one. Needs dpkg-dev; installs
+# nothing and needs no root. Not part of `make check`.
+desktop-deb: desktop-node
+	DESKTOP_REQUIRE_VOICE=1 ./scripts/desktop-build.sh
+	./scripts/desktop-deb.sh
+	./scripts/desktop-deb-test.sh desktop/dist/conch-desktop_*_amd64.deb
 
 # The packaged smoke test: drives the built app over Chromium's remote-debugging
 # port (desktop/tests/smoke/launch.ts says why). Needs a display: CI runs it

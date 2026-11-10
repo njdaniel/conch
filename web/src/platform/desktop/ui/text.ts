@@ -1,6 +1,6 @@
 // What the server list says, in words (issue #945). Pure functions of the
 // bridge's view; no component state.
-import type { ProfileAddResult, ProfileNotice, StorageStatus } from '../bridge';
+import type { InviteAccept, InviteRefusal, ProfileAddResult, ProfileNotice, StorageStatus } from '../bridge';
 
 // Written in two parts: the page's source holds no absolute URL.
 export const example = ['https:', 'chat.example.org'].join('//');
@@ -16,6 +16,33 @@ export const addRefusalLines: Readonly<Record<Extract<ProfileAddResult, { ok: fa
     'This computer does not trust that server’s certificate, so nothing was sent. If the server uses a private certificate authority, install it in the system’s certificate store (see desktop/README.md), then try again.',
   'not-conch': 'That address answered, but not as a Conch server.',
   full: 'There are as many saved servers as the app keeps. Remove one first.',
+};
+
+// Why an invite link was not accepted or could not be opened. Never the link
+// or its code: the person sees the rule, not what they pasted.
+export const inviteRefusalLines: Readonly<Record<InviteRefusal, string>> = {
+  type: 'That is not an invite link.',
+  length: 'That is not an invite link: it is empty or too long.',
+  characters: 'That link has spaces, hidden or look-alike characters in it, so it was not used.',
+  scheme: 'An invite link is a secure (https) address. A plain http link is accepted only for this computer (localhost, 127.0.0.1 or [::1]).',
+  userinfo: 'That link contains a user name or password, so it was not used.',
+  host: 'The server’s address in that link is written with hidden or look-alike characters, so it was not used.',
+  path: 'That is not an invite link: it does not end in /app/#/invite/ and a code.',
+  query: 'That is not an invite link: it has extra parts after the address.',
+  fragment: 'That is not an invite link: it does not end in #/invite/ and a code.',
+  code: 'The code in that link is not one Conch makes.',
+  malformed: 'That is not an invite link.',
+};
+
+export const inviteAcceptLines: Readonly<Record<Extract<InviteAccept, { ok: false }>['refusal'], string>> = {
+  expired: 'That invite link was not used in time. Paste it again.',
+  'voice-started': 'Voice started after the link was checked, and opening the invite on that server would leave it. Check the link again.',
+  'unknown-profile': 'That saved server is no longer there. Paste the link again.',
+  unsupported: 'The desktop app could not open that invite.',
+  full: addRefusalLines.full,
+  unreachable: addRefusalLines.unreachable,
+  certificate: addRefusalLines.certificate,
+  'not-conch': addRefusalLines['not-conch'],
 };
 
 export function storageLine(storage: StorageStatus, platform: string): string {
@@ -63,3 +90,27 @@ export const overrideLine = 'Development build: servers that are not on the test
 
 export const incompatibleLine = (family: string, server: string | null, desktop: string): string =>
   `This server’s ${family} answers are not what this app (${desktop}) expects, so its version (${server ?? 'unknown'}) is incompatible with it. This is not a network problem; use a server version that has been tested with this app.`;
+
+// The desktop app's own settings page (issue #1587).
+export const settingsText = {
+  heading: 'Desktop app',
+  closeLegend: 'When I close the window',
+  closeQuit: 'Quit Conch',
+  closeTray: 'Keep running in the tray',
+  noTray: 'No tray is available on this desktop',
+  trayAsk: 'Can you see the Conch icon in your panel?',
+  trayYes: 'Yes, I can see it',
+  trayNo: 'No, quit when I close',
+  launch: 'Open Conch when I log in',
+  launchUnavailable: 'Only an installed copy of Conch can open when you log in.',
+  launchUnsafe: 'Launch at login needs the app installed in a place only you or the system can change.',
+  failed: 'The desktop app could not change that.',
+} as const;
+
+export const settingsRefusalLines: Readonly<Record<'unpackaged' | 'unsafe-location' | 'foreign-file' | 'no-tray' | 'failed', string>> = {
+  unpackaged: 'Only an installed copy of Conch can open when you log in.',
+  'unsafe-location': 'Launch at login needs the app installed in a place only you or the system can change.',
+  'foreign-file': 'Another program already has a startup entry with Conch’s name, so it was left alone.',
+  'no-tray': 'No tray is available on this desktop, so closing the window will quit Conch.',
+  failed: 'The desktop app could not change that.',
+};

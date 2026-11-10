@@ -133,11 +133,11 @@ export type ShareEnd =
 // What more is known of a share that did not start, for a client that says it
 // in its own words (the desktop's, issue #1582). It never changes `ended`, so
 // the browser's words are the same with or without it.
-//   no_portal: the platform has no screen picker to offer (a missing screen-cast
-//     portal, or a platform that cannot capture).
-//   denied: the system refused the capture (the permission was denied), as
-//     opposed to the person closing the picker.
-export type ShareCause = 'no_portal' | 'denied';
+//   denied: the desktop's main refused the capture (no allowance, no grant),
+//     as opposed to the person cancelling the picker, which is silent. A
+//     desktop with no screen-cast portal is said before the pick, from the
+//     grant (VoiceState.companionShareUnavailable), never from a failed pick.
+export type ShareCause = 'denied';
 
 export type ShareState =
   | { readonly kind: 'idle'; readonly ended: ShareEnd | null; readonly cause?: ShareCause }
@@ -224,15 +224,13 @@ export function refusalEnd(r: Refusal): ShareEnd {
   return 'failed';
 }
 
-// pickCause is the more that a failed pick says. Closing the picker is a
-// NotAllowedError ("Permission denied") and is no cause at all; a system that
-// refused is the same error saying so ("by system"); a platform with no picker
-// to offer is NotFoundError or NotSupportedError.
+// pickCause is the more that a failed pick says, from the shapes the desktop's
+// picker gives getDisplayMedia: NotAllowedError is main refusing (no
+// allowance, no grant), which the person should hear of; AbortError is the
+// picker cancelled, which says nothing. Anything else says nothing more.
 export function pickCause(err: unknown): ShareCause | undefined {
   if (!(err instanceof Error)) return undefined;
-  if (err.name === 'NotFoundError' || err.name === 'NotSupportedError') return 'no_portal';
-  if (err.name === 'NotAllowedError' && /by system/i.test(err.message)) return 'denied';
-  return undefined;
+  return err.name === 'NotAllowedError' ? 'denied' : undefined;
 }
 
 // Every reason the server gives the sharer is an end the page can say: its
@@ -294,6 +292,11 @@ export class ScreenShare {
   // air until it is shared again or ends. The resume timer runs for the whole
   // of it, so a room renewed again meanwhile does not start the wait over.
   private interrupted = false;
+  // Whether this is the desktop's screen companion (issue #1581). Its share is
+  // never resumed after a renewal without a new consent (Q-D4-2 on #1578): it
+  // ends, with the renewal's words, whichever of presence or the room said so
+  // first.
+  private companion = false;
 
   constructor(api: ShareApi, onChange: (state: ShareState) => void, clock: Clock) {
     this.api = api;
@@ -465,6 +468,7 @@ export class ScreenShare {
       return 'sent';
     }
     if (answer.ok) {
+      if (await this.newShare(answer.value.started_at)) return 'sent';
       this.granted(answer.value.started_at);
       return 'sent';
     }
@@ -588,7 +592,8 @@ export class ScreenShare {
   // presence has said was renewed, is kept for the next connection; any other
   // ends, as before.
   lost(roomDeleted: boolean): Promise<void> {
-    if (this.onAir() && (roomDeleted || this.renewed())) this.suspend();
+    if (this.companion && this.renewed()) return this.stop('rotated');
+    if (!this.companion && this.onAir() && (roomDeleted || this.renewed())) this.suspend();
     // A resume under way on the connection going stops where it is; the next
     // connection resumes again.
     else if (this.state.kind === 'resuming') this.attempt++;
@@ -643,6 +648,12 @@ export class ScreenShare {
     return this.state.kind === 'sharing' || this.state.kind === 'publishing';
   }
 
+  // setCompanion makes this the desktop's screen companion's share (set when
+  // the companion is joined), which is never suspended to be resumed.
+  setCompanion(on: boolean): void {
+    this.companion = on;
+  }
+
   // renewed reports whether the server ended the share published or being
   // published because its room was renewed.
   private renewed(): boolean {
@@ -663,6 +674,13 @@ export class ScreenShare {
   // what is left of the first wait, and one whose wait ran out while it was
   // being published ends here.
   private suspend(): void {
+    // A companion's share is not resumable: the helper's connection may
+    // already be in the renewed room, so a claim made again without a click
+    // could succeed and publish onto the retired one.
+    if (this.companion) {
+      void this.serverEnded();
+      return;
+    }
     this.attempt++;
     this.set({ kind: 'resuming' });
     if (!this.interrupted) {
@@ -798,10 +816,23 @@ export class ScreenShare {
     const answer = await this.api.claim(this.channel, this.quality);
     if (mine !== this.attempt) return;
     if (answer.ok) {
+      if (await this.newShare(answer.value.started_at)) return;
       this.granted(answer.value.started_at);
       return;
     }
     if (refusalEnd(answer) === 'full') await this.serverEnded();
+  }
+
+  // newShare handles a claim granted again to a companion with a started_at
+  // other than the share's: the server ended that share and this is a new one,
+  // made without a click. A companion's share is never adopted so (Q-D4-2 on
+  // #1578): the new claim is taken only to be released, and the share ends
+  // with the renewal's words. It says whether it did.
+  private async newShare(startedAt: string): Promise<boolean> {
+    if (!this.companion || this.claimed === null || sameInstant(this.claimed, startedAt)) return false;
+    this.granted(startedAt);
+    await this.stop('rotated');
+    return true;
   }
 
   private async serverEnded(): Promise<void> {

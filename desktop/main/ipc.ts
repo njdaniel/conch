@@ -10,15 +10,21 @@
 // order is fixed: caller, name, rate, size and shape of the arguments, then
 // the function. Arguments are plain data checked here; the renderer cannot
 // name a channel, a URL, a header or a method.
+//
+// One channel sits outside that registry: the synchronous `conch:notificationSupported`
+// (registerNotificationSupport), which Electron's ipcMain.on answers through
+// event.returnValue. notificationSupported() runs the same caller, rate and
+// shape checks and returns an Envelope too.
 import type { IpcMain } from 'electron';
 
-import type { BridgeReply, BridgeRequest, FeedRequest, SignInOutcome, VoiceDeviceKey } from '../../web/src/platform/desktop/bridge.ts';
+import type { BridgeReply, BridgeRequest, FeedRequest, InviteTarget, NotifyRequest, SettingsChange, SignInOutcome, VoiceDeviceKey } from '../../web/src/platform/desktop/bridge.ts';
 import { VOICE_DEVICES_MAX_NAME_BYTES, voiceControlTalkMode, type VoiceControlTalkMode } from '../../web/src/schema/generated.ts';
 import { isPageSaveKey, keyCodeText, saveValueFits } from './voice/oneshot.ts';
 import { validChannel, validDeviceName } from './voice/protocol.ts';
 import { operations } from '../../web/src/platform/operations.ts';
-import { channelOf, INVOKED_FUNCTIONS, type Envelope, type InvokedFunction } from '../shared/bridge-names.ts';
+import { channelOf, INVOKED_FUNCTIONS, NOTIFICATION_SUPPORT, TAG_MAX, type Envelope, type InvokedFunction } from '../shared/bridge-names.ts';
 import { isProfileId } from './profiles/ids.ts';
+import type { Invites } from './invites.ts';
 import { MISMATCH, type ProfilesService } from './profiles/service.ts';
 import { parseFeedRequest, type Feeds } from './api/feeds.ts';
 import { targetOf, isOperationId } from './api/target.ts';
@@ -27,9 +33,12 @@ import { invocable, type ReplaceStep, type Service, type SignInStep } from './ap
 import { isFileId, parseUpload, MAX_UPLOAD_BYTES, type Files } from './files.ts';
 import { LINK_GESTURE_MS, type Gestures } from './gestures.ts';
 import type { DocumentGate } from './document.ts';
+import type { Notifications } from './notifications.ts';
 import { HOST, SCHEME } from './scheme.ts';
 import type { VoiceService } from './voice/service.ts';
+import type { SettingsService } from './settings.ts';
 import type { Companion } from './voice/companion.ts';
+import type { ShareAllowance } from './share-allowance.ts';
 
 export interface FrameLike {
   readonly frameToken: string;
@@ -63,20 +72,33 @@ export interface IpcDeps {
   readonly profiles: ProfilesApi;
   // Native voice (issue #1374): main's one owner of the helper.
   readonly voice: VoiceApi;
+  // Opening an invite link (issue #1591).
+  readonly invites: InvitesApi;
+  // Desktop notifications (issue #1590): owned by the active activation.
+  readonly notifications: NotificationsApi;
+  // The app's own settings (issue #1587).
+  readonly settings: SettingsApi;
   // The screen companion (issue #1579). Absent: every grant is refused as
   // failed, and nothing is held to end.
   readonly companion?: CompanionApi;
+  // The share allowance (share-allowance.ts). Absent: shareArm arms nothing
+  // and a grant needs its own fresh act.
+  readonly share?: Pick<ShareAllowance, 'arm' | 'takeGrant'>;
   readonly now: () => number;
   readonly log: (line: string) => void;
 }
 
 export type ProfilesApi = Pick<
   ProfilesService,
-  'view' | 'add' | 'rename' | 'remove' | 'switchTo' | 'retry' | 'recover' | 'signOut' | 'signedIn' | 'keptCredential' | 'signInPermitted'
+  'view' | 'add' | 'rename' | 'remove' | 'switchTo' | 'retry' | 'recover' | 'signOut' | 'signedIn' | 'keptCredential' | 'signInPermitted' | 'active'
 >;
 
-export type VoiceApi = Pick<VoiceService, 'state' | 'join' | 'leave' | 'retry' | 'setMute' | 'setDeafen' | 'setDevices' | 'setTalkMode' | 'devices' | 'saveDevice' | 'keyDevices' | 'saveTalkBinding'>;
+export type InvitesApi = Pick<Invites, 'check' | 'accept' | 'cancel' | 'take'>;
 
+export type VoiceApi = Pick<VoiceService, 'state' | 'join' | 'leave' | 'retry' | 'setMute' | 'setDeafen' | 'setDevices' | 'setTalkMode' | 'devices' | 'saveDevice' | 'keyDevices' | 'saveTalkBinding'>;
+export type NotificationsApi = Pick<Notifications, 'show' | 'close' | 'supported'>;
+
+export type SettingsApi = Pick<SettingsService, 'view' | 'set'>;
 export type CompanionApi = Pick<Companion, 'grant' | 'stop' | 'end'>;
 
 const NO_COMPANION: CompanionApi = {
@@ -161,9 +183,12 @@ interface Spec {
   // A function of the arguments, for one that is the person's act only in some
   // of its forms (open-mic mode transmits without a press).
   readonly gesture?: true | ((args: readonly unknown[]) => boolean);
+  // True for a function whose act may instead be the share allowance's grant
+  // use (companionGrant: Share armed it, Watch has a fresh act of its own).
+  readonly shareGrant?: true;
 }
 
-// What a function runs against: the service, the feeds, and the document
+// What a function runs against: the services, the activation, and the document
 // generation of the caller (already checked to be the current one).
 interface Handlers {
   readonly service: Service;
@@ -171,8 +196,12 @@ interface Handlers {
   readonly files: IpcDeps['files'];
   readonly profiles: ProfilesApi;
   readonly voice: VoiceApi;
+  readonly invites: InvitesApi;
+  readonly notifications: NotificationsApi;
+  readonly settings: SettingsApi;
   readonly companion: CompanionApi;
   readonly document: number;
+  readonly arm: () => boolean;
 }
 
 // A feed's number, which the preload chose: a positive whole number.
@@ -257,6 +286,17 @@ const hasExactKeys = (value: Record<string, unknown>, keys: readonly string[]): 
   return own.length === keys.length && keys.every((key) => own.includes(key));
 };
 
+// A settings change is a non-empty object of known keys with boolean values.
+function parseSettingsChange(args: readonly unknown[]): readonly unknown[] | null {
+  const [change] = args;
+  if (args.length !== 1 || !isRecord(change)) return null;
+  const keys = Object.keys(change);
+  if (keys.length === 0 || !keys.every((key) => key === 'closeToTray' || key === 'launchAtLogin' || key === 'trayConfirmed')) return null;
+  const { closeToTray, launchAtLogin, trayConfirmed } = change;
+  if ([closeToTray, launchAtLogin, trayConfirmed].some((value) => value !== undefined && typeof value !== 'boolean')) return null;
+  return [{ ...(closeToTray === undefined ? {} : { closeToTray }), ...(launchAtLogin === undefined ? {} : { launchAtLogin }), ...(trayConfirmed === undefined ? {} : { trayConfirmed }) }];
+}
+
 const REPLACE_STEPS: readonly ReplaceStep[] = ['changePassword', 'setPassword', 'convertGuest', 'reauth'];
 
 // parseReplace is exactly { operation, body }: an operation of the replacing
@@ -279,6 +319,22 @@ function parseJoin(args: readonly unknown[]): readonly unknown[] | null {
   const { channel, muted, deafened } = request;
   if (!isChannel(channel) || typeof muted !== 'boolean' || typeof deafened !== 'boolean') return null;
   return [{ channel, muted, deafened }];
+}
+
+// Notifications carry exactly four bounded fields, or exactly a tag to close.
+function parseNotify(args: readonly unknown[]): readonly unknown[] | null {
+  const [request] = args;
+  if (args.length !== 1 || !isRecord(request) || !hasExactKeys(request, ['tag', 'title', 'body', 'channel'])) return null;
+  const { tag, title, body, channel } = request;
+  if (typeof tag !== 'string' || tag.length === 0 || tag.length > TAG_MAX) return null;
+  if (typeof title !== 'string' || title.length > 128 || typeof body !== 'string' || body.length > 200 || !isChannel(channel)) return null;
+  return [{ tag, title, body, channel }];
+}
+
+function parseNotifyClose(args: readonly unknown[]): readonly unknown[] | null {
+  const [request] = args;
+  if (args.length !== 1 || !isRecord(request) || !hasExactKeys(request, ['tag'])) return null;
+  return typeof request['tag'] === 'string' && request['tag'].length > 0 && request['tag'].length <= TAG_MAX ? [request] : null;
 }
 
 // A save is exactly a key `config set` takes from the page and a value that
@@ -321,6 +377,17 @@ function parseDevices(args: readonly unknown[]): readonly unknown[] | null {
   const { input, output } = devices;
   if ((input !== undefined && !isDeviceName(input)) || (output !== undefined && !isDeviceName(output))) return null;
   return [{ ...(input === undefined ? {} : { input }), ...(output === undefined ? {} : { output }) }];
+}
+
+const isInviteHandle = (value: unknown): value is string => typeof value === 'string' && /^invite-[0-9a-f]{32}$/u.test(value);
+
+// A handle and exactly one target: { profile: <profile id> } or { add: true }.
+function parseInviteAccept(args: readonly unknown[]): readonly unknown[] | null {
+  const [handle, target] = args;
+  if (args.length !== 2 || !isInviteHandle(handle) || !isRecord(target)) return null;
+  if (hasExactKeys(target, ['profile']) && isProfileId(target['profile'])) return [handle, { profile: target['profile'] }];
+  if (hasExactKeys(target, ['add']) && target['add'] === true) return [handle, { add: true }];
+  return null;
 }
 
 export const SPECS: Readonly<Record<InvokedFunction, Spec>> = {
@@ -451,6 +518,22 @@ export const SPECS: Readonly<Record<InvokedFunction, Spec>> = {
     run: ({ files }, [id]) => files.save(id as number),
     gesture: true,
   },
+  // Notifications are activation-owned and carry no action or activation data.
+  // The byte bounds fit the largest request parseNotify accepts, every
+  // character quoted as JSON escapes it (a tag of TAG_MAX, title 128, body 200,
+  // a channel at its byte bound), so a size check never refuses a valid one.
+  notify: {
+    limit: 30,
+    maxBytes: 4096,
+    parse: parseNotify,
+    run: ({ notifications, profiles, document }, [request]) => notifications.show(profiles.active, document, request as NotifyRequest),
+  },
+  notifyClose: {
+    limit: 600,
+    maxBytes: 2048,
+    parse: parseNotifyClose,
+    run: ({ notifications, profiles, document }, [request]) => notifications.close(profiles.active, document, (request as { tag: string }).tag),
+  },
   // Native voice (issue #1374). Every argument is main's to check; none is a
   // token, a path or a press: the talk key is read by the helper itself, and
   // nothing here starts a transmission. Join, retry and open-mic mode (which
@@ -514,6 +597,39 @@ export const SPECS: Readonly<Record<InvokedFunction, Spec>> = {
     run: ({ voice }, [request]) => voice.saveTalkBinding(request as { deviceId: string; code: number }),
     gesture: true,
   },
+  // Opening an invite link (issue #1591). A link is untrusted text, capped;
+  // main parses it. Checking contacts nothing. Accepting adds, switches or
+  // stages, so it is the person's act alone. The handle is what main issued,
+  // never the code, and the code leaves only through inviteTake, once.
+  inviteCheck: {
+    limit: 30,
+    maxBytes: 4 * 1024,
+    parse: (args) => (args.length === 1 && typeof args[0] === 'string' && args[0].length <= 4096 ? args : null),
+    run: ({ invites }, [link]) => invites.check(link),
+  },
+  inviteAccept: {
+    limit: 20,
+    maxBytes: 256,
+    parse: parseInviteAccept,
+    run: ({ invites }, [handle, target]) => invites.accept(handle as string, target as InviteTarget),
+    gesture: true,
+  },
+  inviteCancel: {
+    limit: 30,
+    maxBytes: 128,
+    parse: (args) => (args.length === 1 && isInviteHandle(args[0]) ? args : null),
+    run: ({ invites }, [handle]) => invites.cancel(handle as string),
+  },
+  inviteTake: { limit: 60, maxBytes: 0, parse: none, run: ({ invites }) => invites.take() },
+  // The app's own settings (issue #1587). A change is the person's act alone.
+  settings: { limit: 120, maxBytes: 0, parse: none, run: ({ settings }) => settings.view() },
+  settingsSet: {
+    limit: 30,
+    maxBytes: 128,
+    parse: parseSettingsChange,
+    run: ({ settings }, [change]) => settings.set(change as SettingsChange),
+    gesture: true,
+  },
   feedUnsubscribe: { limit: 600, maxBytes: 32, parse: feedId, run: ({ feeds, document }, [id]) => feeds.unsubscribe(document, id as number) },
   // The screen companion (issue #1579, D4-02 of #772). A grant is the
   // person's act alone, and only ever the companion's: never the bearer or
@@ -524,13 +640,20 @@ export const SPECS: Readonly<Record<InvokedFunction, Spec>> = {
     parse: parseCompanionGrant,
     run: ({ companion }, [request]) => companion.grant(request as { channel: string }),
     gesture: true,
+    shareGrant: true,
   },
+  // Arms the share allowance (share-allowance.ts): the person's Share click,
+  // taken here, stands for the grant and the capture that follow it. The page
+  // calls it synchronously at the start of the click, before anything else.
+  // It carries no argument: nothing the page says is trusted.
+  shareArm: { limit: 20, maxBytes: 0, parse: none, run: ({ arm }) => arm(), gesture: true },
   companionEnd: { limit: 60, maxBytes: 0, parse: none, run: ({ companion }) => companion.stop() },
 };
 
 export class Ipc {
   readonly #deps: IpcDeps;
   readonly #limits = new Map<InvokedFunction, RateLimit>(INVOKED_FUNCTIONS.map((name) => [name, new RateLimit(SPECS[name].limit)]));
+  readonly #supportLimit = new RateLimit(120);
   #refusals = 0;
 
   constructor(deps: IpcDeps) {
@@ -557,10 +680,16 @@ export class Ipc {
     if (this.#limits.get(fn)?.allow(this.#deps.now()) !== true) return this.#refuse('rate');
     if (!plain(args)) return this.#refuse('shape');
     if (JSON.stringify(args).length > spec.maxBytes + 2) return this.#refuse('size');
+    const owned = this.#deps.owned();
     const parsed = spec.parse(args);
     if (parsed === null) return this.#refuse('shape');
     const needsGesture = spec.gesture === true || (typeof spec.gesture === 'function' && spec.gesture(parsed));
-    if (needsGesture && this.#deps.gestures.take(this.#deps.owned(), LINK_GESTURE_MS) === null) return this.#refuse('gesture');
+    // A fresh act first, so a Watch click is never answered from a Share
+    // allowance and keeps it; a grant with none falls back to the allowance's
+    // grant use (consumed), the cold Share path.
+    if (needsGesture && this.#deps.gestures.take(owned, LINK_GESTURE_MS) === null) {
+      if (spec.shareGrant !== true || this.#deps.share?.takeGrant(owned) !== true) return this.#refuse('gesture');
+    }
     try {
       const to: Handlers = {
         service: this.#deps.service,
@@ -568,12 +697,31 @@ export class Ipc {
         files: this.#deps.files,
         profiles: this.#deps.profiles,
         voice: this.#deps.voice,
+        invites: this.#deps.invites,
+        notifications: this.#deps.notifications,
+        settings: this.#deps.settings,
         companion: this.#deps.companion ?? NO_COMPANION,
         document: this.#deps.gate.generation,
+        arm: () => this.#deps.share?.arm(owned) ?? false,
       };
       return { ok: true, value: await spec.run(to, parsed) };
     } catch {
       // A bug in a function is not the renderer's to learn about.
+      return this.#refuse('error');
+    }
+  }
+
+  // The synchronous support check passes the same caller, rate and shape gates.
+  notificationSupported(event: InvokeEvent, args: readonly unknown[]): Envelope {
+    const why = checkCaller(event, this.#deps.owned(), this.#deps.gate);
+    if (why !== null) return this.#refuse(why);
+    if (!this.#supportLimit.allow(this.#deps.now())) return this.#refuse('rate');
+    if (!plain(args)) return this.#refuse('shape');
+    if (JSON.stringify(args).length > 2) return this.#refuse('size');
+    if (args.length !== 0) return this.#refuse('shape');
+    try {
+      return { ok: true, value: this.#deps.notifications.supported() };
+    } catch {
       return this.#refuse('error');
     }
   }
@@ -583,5 +731,12 @@ export class Ipc {
     for (const name of INVOKED_FUNCTIONS) {
       ipcMain.handle(channelOf(name), (event, ...args: unknown[]) => this.invoke(event, name, args));
     }
+  }
+
+  // Registers the one synchronous call, whose answer is still an Envelope.
+  registerNotificationSupport(ipcMain: Pick<IpcMain, 'on'>): void {
+    ipcMain.on(channelOf(NOTIFICATION_SUPPORT), (event, ...args: unknown[]) => {
+      event.returnValue = this.notificationSupported(event, args);
+    });
   }
 }
