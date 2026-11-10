@@ -1,47 +1,17 @@
 // Several browser streams in one voice room (issue #1509), with fake devices
 // and the pinned LiveKit of voice-world.ts. The numbered steps are the issue's
 // seven required scenarios, run in order against the same room.
-import type { Browser, BrowserContext, Locator, Page } from '@playwright/test';
-import { expect, openChannel, rememberPushToTalk, showView, signIn, test } from './fixtures';
-import { dockerAvailable, startVoiceWorld, watchPage, type Member, type VoiceWorld } from './voice-world';
+import type { Browser, Locator, Page } from '@playwright/test';
+import { expect, test } from './fixtures';
+import { enter, inbound, joinVoice, leave, type Someone } from './people';
+import { dockerAvailable, startVoiceWorld, type Member, type VoiceWorld } from './voice-world';
 
-const instrument = () => {
-  const w = window as unknown as { __pcs: RTCPeerConnection[] };
-  w.__pcs = [];
-  const Original = window.RTCPeerConnection;
-  const Wrapped = function (this: unknown, ...args: ConstructorParameters<typeof RTCPeerConnection>) {
-    const pc = new Original(...args);
-    w.__pcs.push(pc);
-    return pc;
-  } as unknown as typeof RTCPeerConnection;
-  Wrapped.prototype = Original.prototype;
-  Object.setPrototypeOf(Wrapped, Original);
-  window.RTCPeerConnection = Wrapped;
-};
-
-interface Person {
-  readonly context: BrowserContext;
-  readonly page: Page;
-  readonly member: Member;
-}
+type Person = Someone;
 
 const voice = (page: Page) => page.getByRole('region', { name: 'Voice' });
 const tile = (page: Page, name: string): Locator => page.locator('.call-share').filter({ hasText: `${name} · LIVE` });
 
-async function videoFrames(page: Page): Promise<number> {
-  return page.evaluate(async () => {
-    const w = window as unknown as { __pcs: RTCPeerConnection[] };
-    let frames = 0;
-    for (const pc of w.__pcs) {
-      if (pc.signalingState === 'closed') continue;
-      const stats = await pc.getStats();
-      stats.forEach((r: { type: string; kind?: string; framesDecoded?: number }) => {
-        if (r.type === 'inbound-rtp' && r.kind === 'video') frames += r.framesDecoded ?? 0;
-      });
-    }
-    return frames;
-  });
-}
+const videoFrames = async (page: Page): Promise<number> => (await inbound(page)).frames;
 
 // shownFrames is how many frames a tile's own video element has shown, and
 // its picture's width: one stream's, never the page's total.
@@ -86,22 +56,9 @@ test.describe('voice multi-share', () => {
     stopWorld?.();
   });
 
-  async function person(browser: Browser, member: Member): Promise<Person> {
-    const context = await browser.newContext();
-    await rememberPushToTalk(context);
-    const page = await context.newPage();
-    await watchPage(page, vw);
-    await page.addInitScript(instrument);
-    await signIn(page, vw, member.token, member.name);
-    await openChannel(page, vw.channel);
-    return { context, page, member };
-  }
+  const person = (browser: Browser, member: Member): Promise<Person> => enter(browser, vw, member);
 
-  async function join(p: Person, watchOnly = false): Promise<void> {
-    await showView(p.page, 'Voice');
-    await voice(p.page).getByRole('button', { name: watchOnly ? 'Watch only' : 'Join voice' }).click();
-    await expect(voice(p.page)).toContainText(/Connected in #voice-room/, { timeout: 30_000 });
-  }
+  const join = (p: Person, watchOnly = false): Promise<void> => joinVoice(p, watchOnly ? 'Watch only' : 'Join voice');
 
   async function share(p: Person, quality = false): Promise<void> {
     if (quality) {
@@ -183,7 +140,7 @@ test.describe('voice multi-share', () => {
       await expect(voice(seventh.page)).toContainText('This call already has 6 streams live.', { timeout: 20_000 });
       await expect(voice(seventh.page)).not.toContainText('One person shares at a time.');
     } finally {
-      for (const p of people) await p.context.close();
+      for (const p of people) await leave(p);
     }
   });
 });

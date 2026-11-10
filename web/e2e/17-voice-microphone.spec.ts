@@ -9,7 +9,7 @@
 // (voice-world.ts): without Docker it fails when CI is set and is skipped
 // otherwise.
 import type { Page } from '@playwright/test';
-import { channelButton, expect, signIn, test } from './fixtures';
+import { closeAll, channelButton, expect, signIn, test } from './fixtures';
 import { dockerAvailable, startVoiceWorld, watchPage, type VoiceWorld } from './voice-world';
 
 const voiceRegion = (page: Page) => page.getByRole('region', { name: 'Voice' });
@@ -98,7 +98,7 @@ test.describe('with a refused microphone', () => {
       await voice.getByRole('button', { name: 'Leave voice' }).click();
       await expect(voice).toContainText('Not in voice', { timeout: 10_000 });
     } finally {
-      await context.close();
+      await closeAll(context);
     }
   });
 });

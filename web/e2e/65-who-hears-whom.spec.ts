@@ -38,6 +38,7 @@ import type { Page } from '@playwright/test';
 import { chooseMicrophone, expect, test } from './fixtures';
 import { enter, expectClean, inbound, joinVoice, leave, type Someone } from './people';
 import { floorOf, heardBy, recordHeard, syntheticMicrophone, table, toneLevels, tracksAt, type TrackLevel } from './synthetic-mic';
+import { answered } from './livekit-admin';
 import { dockerAvailable, emptiesWithin, startVoiceWorld, type VoiceWorld } from './voice-world';
 import { loadWorld } from './world';
 
@@ -241,7 +242,7 @@ test.describe('who hears whom', () => {
     } finally {
       for (const p of people) await leave(p);
     }
-    await expect.poll(() => vw.participants(), { timeout: emptiesWithin }).toEqual([]);
+    await expect.poll(() => answered(vw.participants()), { timeout: emptiesWithin }).toEqual([]);
   });
 });
 

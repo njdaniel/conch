@@ -47,8 +47,8 @@
 //                          vanishedWithin below.
 import type { Browser, Locator, Page, WebSocketRoute } from '@playwright/test';
 import { expect, messages, say, test } from './fixtures';
-import { adminToken } from './livekit-admin';
 import { enter, expectClean, inbound, joinVoice, leave, type Someone } from './people';
+import { answered, mustAnswer, noAnswer, type NoAnswer } from './livekit-admin';
 import { dockerAvailable, emptiesWithin, startVoiceWorld, type Member, type VoiceWorld } from './voice-world';
 import { loadWorld } from './world';
 
@@ -244,49 +244,14 @@ test.describe('voice recovery', () => {
   const identities = (...ms: Member[]) => ms.map(identity).sort();
   const names = (ps: readonly Someone[]) => ps.map((p) => p.member.name);
 
-  // LiveKit's list of one member's published tracks (microphone only), asked
-  // of LiveKit directly with the world's key and secret (as livekit-admin.ts
-  // does for identities; the secret is the one voice-world.ts adds first
-  // after the three credentials and the operator's).
-  async function microphones(member: Member): Promise<string[]> {
-    const secret = vw.secrets.find((s) => s.startsWith('web-voice-NOT-FOR-PRODUCTION-'));
-    if (secret === undefined) throw new Error('no LiveKit secret in the world');
-    const base = `http://127.0.0.1:${new URL(vw.livekitOrigin.replace(/^ws/, 'http')).port}`;
-    const call = async (method: string, grant: object, body: object): Promise<unknown> => {
-      // Fixed messages only, as livekit-admin.ts: a transport error names the
-      // address, a parse error quotes the body, and a body can name a room.
-      let res: Response;
-      try {
-        res = await fetch(`${base}/twirp/livekit.RoomService/${method}`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${adminToken('webvoicekey', secret, grant)}` },
-          body: JSON.stringify(body),
-          signal: AbortSignal.timeout(5000),
-        });
-      } catch {
-        throw new Error(`livekit ${method}: no answer`);
-      }
-      if (res.status !== 200) throw new Error(`livekit ${method}: HTTP ${String(res.status)}`);
-      try {
-        return (await res.json()) as unknown;
-      } catch {
-        throw new Error(`livekit ${method}: unreadable answer`);
-      }
-    };
-    const rooms = (await call('ListRooms', { roomList: true }, {})) as { rooms?: { name?: string }[] };
-    const out: string[] = [];
-    for (const room of rooms.rooms ?? []) {
-      if (typeof room.name !== 'string') continue;
-      const found = (await call('ListParticipants', { roomAdmin: true, room: room.name }, { room: room.name })) as {
-        participants?: { identity?: string; tracks?: { sid?: string; source?: string }[] }[];
-      };
-      for (const p of found.participants ?? []) {
-        if (p.identity !== identity(member)) continue;
-        for (const t of p.tracks ?? []) if (typeof t.sid === 'string' && t.source === 'MICROPHONE') out.push(t.sid);
-      }
-    }
-    return out.sort();
-  }
+  // The sids of one member's microphone publications, asked of LiveKit.
+  // The sids of one member's microphone publications, or noAnswer: never a list
+  // made of it. Use answered() in a poll and mustAnswer() in a one-off assertion.
+  const microphones = async (member: Member): Promise<string[] | NoAnswer> => {
+    const tracks = await vw.tracks(member, 'microphone');
+    return tracks === noAnswer ? noAnswer : tracks.map((t) => t.sid);
+  };
+  const sureMicrophones = (member: Member): Promise<string[]> => mustAnswer(microphones(member));
 
   async function unreported(member: Member): Promise<number> {
     return (await vw.audit()).filter((e) => e.actor === `principal:${String(member.id)}` && e.action === 'voice_transmit_unreported').length;
@@ -303,7 +268,7 @@ test.describe('voice recovery', () => {
       }
       for (const p of people) await joinVoice(p, 'Join voice');
       for (const p of people) for (const n of names(people)) await expect(roster(p.page)).toContainText(n, { timeout: rosterBound });
-      await expect.poll(() => vw.participants(), { timeout: 20_000 }).toEqual(identities(vw.alice, vw.bob, vw.carol));
+      await expect.poll(() => answered(vw.participants()), { timeout: 20_000 }).toEqual(identities(vw.alice, vw.bob, vw.carol));
     } catch (err) {
       for (const p of people) await leave(p);
       throw err;
@@ -314,7 +279,7 @@ test.describe('voice recovery', () => {
   // Back as found: nobody connected, within empty_timeout and departure_timeout
   // and the margin.
   async function empty(): Promise<void> {
-    await expect.poll(() => vw.participants(), { timeout: emptiesWithin }).toEqual([]);
+    await expect.poll(() => answered(vw.participants()), { timeout: emptiesWithin }).toEqual([]);
   }
 
   test("bob's signal drops while alice and carol stay: bob resumes by himself, with no duplicate", async ({ browser }, info) => {
@@ -325,7 +290,7 @@ test.describe('voice recovery', () => {
     let others: Lapses[] = [];
     let bobInRosters: Lapses[] = [];
     try {
-      const micBefore = await microphones(vw.bob);
+      const micBefore = await sureMicrophones(vw.bob);
       expect(micBefore, "one microphone publication of bob's").toHaveLength(1);
       const unreportedBefore = await unreported(vw.bob);
       // Alice and carol stay Connected and keep seeing each other. Whether
@@ -368,10 +333,10 @@ test.describe('voice recovery', () => {
       // URL, access_token included; it is the browser's, and recorded here.
       info.annotations.push({ type: 'console lines naming an access_token', description: String(b.watch.console.filter((l) => l.includes('access_token=')).length) });
       // The same publication: the SDK resumed, it did not start over.
-      expect(await microphones(vw.bob), 'bob keeps his microphone publication across a signal-only resume').toEqual(micBefore);
+      expect(await sureMicrophones(vw.bob), 'bob keeps his microphone publication across a signal-only resume').toEqual(micBefore);
 
       await press(b, [a, c]);
-      expect(await vw.participants(), 'one participant for each person, none for bob twice').toEqual(identities(vw.alice, vw.bob, vw.carol));
+      expect(await mustAnswer(vw.participants()), 'one participant for each person, none for bob twice').toEqual(identities(vw.alice, vw.bob, vw.carol));
       expect(await unreported(vw.bob), 'no voice_transmit_unreported for bob').toBe(unreportedBefore);
       for (const p of [a, b, c]) await expectClean(vw, p);
       // Bob leaves by his button while his page is alive, so that the leave
@@ -379,7 +344,7 @@ test.describe('voice recovery', () => {
       // lose it and leave LiveKit waiting out a dead connection (vanishedWithin).
       await showLeave(b);
       const leftAt = Date.now();
-      await expect.poll(() => vw.participants(), { timeout: leaveWithin, message: 'bob leaves LiveKit at once' }).toEqual(identities(vw.alice, vw.carol));
+      await expect.poll(() => answered(vw.participants()), { timeout: leaveWithin, message: 'bob leaves LiveKit at once' }).toEqual(identities(vw.alice, vw.carol));
       info.annotations.push({ type: 'LiveKit dropped bob after his Leave', description: `${String(Date.now() - leftAt)} ms (bound ${String(leaveWithin)} ms)` });
     } finally {
       await bobSees.stop();
@@ -433,7 +398,7 @@ test.describe('voice recovery', () => {
       info.annotations.push({ type: 'carol page while offline', description: (await carolSees.stop()).join('; ') || 'stayed Connected and saw alice' });
       await expect(messages(c.page).getByText(body)).toHaveCount(1);
       await expect(messages(a.page).getByText(body)).toHaveCount(1);
-      expect(await vw.participants(), 'alice and carol are still the only ones connected').toEqual(identities(vw.alice, vw.carol));
+      expect(await mustAnswer(vw.participants()), 'alice and carol are still the only ones connected').toEqual(identities(vw.alice, vw.carol));
       await press(a, [c]);
 
       for (const p of [a, b]) await expectClean(vw, p);
@@ -454,7 +419,7 @@ test.describe('voice recovery', () => {
     const sees = [watching(a, ['bob', 'carol']), watching(b, ['alice', 'carol']), watching(c, ['alice', 'bob'])];
     let frozen = false;
     try {
-      const micsBefore = await Promise.all([vw.alice, vw.bob, vw.carol].map(microphones));
+      const micsBefore = await Promise.all([vw.alice, vw.bob, vw.carol].map(sureMicrophones));
       vw.pauseLiveKit();
       frozen = true;
       const pausedAt = Date.now();
@@ -473,13 +438,13 @@ test.describe('voice recovery', () => {
       for (const p of [a, b, c]) for (const n of names([a, b, c])) await expect(roster(p.page)).toContainText(n, { timeout: rosterBound + margin });
       // Resumed or restarted, each is listed once. A restart makes a new
       // connection and LiveKit drops the old one, so poll for the old to go.
-      await expect.poll(() => vw.participants(), { timeout: emptiesWithin }).toEqual(identities(vw.alice, vw.bob, vw.carol));
-      const micsAfter = await Promise.all([vw.alice, vw.bob, vw.carol].map(microphones));
+      await expect.poll(() => answered(vw.participants()), { timeout: emptiesWithin }).toEqual(identities(vw.alice, vw.bob, vw.carol));
+      const micsAfter = await Promise.all([vw.alice, vw.bob, vw.carol].map(sureMicrophones));
       info.annotations.push({ type: 'publications after the freeze', description: micsAfter.every((m, i) => m.join() === (micsBefore[i] ?? []).join()) ? 'kept (SDK resume)' : 'new (restart through conchd)' });
       for (const m of micsAfter) expect(m, 'one microphone publication each').toHaveLength(1);
 
       await press(a, [b, c]);
-      expect(await vw.participants()).toEqual(identities(vw.alice, vw.bob, vw.carol));
+      expect(await mustAnswer(vw.participants())).toEqual(identities(vw.alice, vw.bob, vw.carol));
       for (const p of [a, b, c]) await expectClean(vw, p);
     } finally {
       try {
@@ -504,10 +469,12 @@ test.describe('voice recovery', () => {
       expect(await voicePeople()).toContain(vw.carol.id);
 
       // As a crashed tab: the context goes, the page is not closed first, so
-      // no pagehide ends carol's voice session.
+      // no pagehide ends carol's voice session. The one deliberate
+      // context.close() of the suite outside closeAll (fixtures.ts): closing
+      // the page first would make this a clean leave and test nothing.
       const goneAt = Date.now();
       await c.context.close();
-      await expect.poll(() => vw.participants(), { timeout: vanishedWithin, message: 'LiveKit drops carol' }).toEqual(identities(vw.alice, vw.bob));
+      await expect.poll(() => answered(vw.participants()), { timeout: vanishedWithin, message: 'LiveKit drops carol' }).toEqual(identities(vw.alice, vw.bob));
       const livekitAfter = Date.now() - goneAt;
       info.annotations.push({ type: 'LiveKit stopped listing carol after', description: `${String(livekitAfter)} ms (bound ${String(vanishedWithin)} ms)` });
 
@@ -529,16 +496,16 @@ test.describe('voice recovery', () => {
     test.setTimeout(150_000);
     const [a, b, c] = await room(browser);
     try {
-      const before = await microphones(vw.bob);
+      const before = await sureMicrophones(vw.bob);
       expect(before, "one microphone publication of bob's before").toHaveLength(1);
       await showLeave(b);
-      await expect.poll(() => vw.participants(), { timeout: leaveWithin, message: 'bob leaves LiveKit at once' }).toEqual(identities(vw.alice, vw.carol));
+      await expect.poll(() => answered(vw.participants()), { timeout: leaveWithin, message: 'bob leaves LiveKit at once' }).toEqual(identities(vw.alice, vw.carol));
       for (const p of [a, c]) await expect(roster(p.page)).not.toContainText('bob', { timeout: rosterBound + margin });
 
       await joinVoice(b, 'Join voice');
-      await expect.poll(() => vw.participants(), { timeout: 20_000 }).toEqual(identities(vw.alice, vw.bob, vw.carol));
-      await expect.poll(async () => (await microphones(vw.bob)).length, { timeout: 20_000, message: 'one microphone publication again' }).toBe(1);
-      const after = await microphones(vw.bob);
+      await expect.poll(() => answered(vw.participants()), { timeout: 20_000 }).toEqual(identities(vw.alice, vw.bob, vw.carol));
+      await expect.poll(async () => (await answered(microphones(vw.bob)))?.length, { timeout: 20_000, message: 'one microphone publication again' }).toBe(1);
+      const after = await sureMicrophones(vw.bob);
       expect(after[0], 'a new track, not the old one').not.toBe(before[0]);
       expect(after.filter((sid) => before.includes(sid)), 'the old publication is not listed').toEqual([]);
       for (const p of [a, c]) await expect(roster(p.page)).toContainText('bob', { timeout: rosterBound + margin });

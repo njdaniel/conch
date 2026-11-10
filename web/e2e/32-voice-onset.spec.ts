@@ -20,10 +20,11 @@
 //
 // Without Docker it fails when CI is set and is skipped otherwise.
 import type { Page } from '@playwright/test';
-import { chooseMicrophone, expect, openChannel, signIn, test } from './fixtures';
+import { chooseMicrophone, expect, test } from './fixtures';
+import { enter, joinVoice, leave, type Someone } from './people';
 import { burstAudioFailure, burstMeasure, median, p90, pressMeasure, type Sample } from './onset';
 import { recordHeard, startListening, syntheticMicrophone } from './synthetic-mic';
-import { dockerAvailable, startVoiceWorld, watchPage, type VoiceWorld } from './voice-world';
+import { dockerAvailable, startVoiceWorld, type VoiceWorld } from './voice-world';
 
 const voiceRegion = (page: Page) => page.getByRole('region', { name: 'Voice' });
 
@@ -60,23 +61,18 @@ test.describe('speech kept at the edges of a transmission', () => {
   test('push to talk and the open microphone, timed at the listener', async ({ browser }) => {
     // Full retry allowances sleep for 450 s; leave 150 s for setup and browser work.
     test.setTimeout(600_000);
-    const talkerContext = await browser.newContext();
-    const listenerContext = await browser.newContext();
+    const people: Someone[] = [];
     try {
-      const talker = await talkerContext.newPage();
-      const listener = await listenerContext.newPage();
-      await watchPage(talker, vw);
-      await watchPage(listener, vw);
-      await talker.addInitScript(syntheticMicrophone);
-      await listener.addInitScript(recordHeard);
-      await signIn(talker, vw, vw.alice.token, vw.alice.name);
-      await signIn(listener, vw, vw.bob.token, vw.bob.name);
-      await openChannel(talker, vw.channel);
-      await openChannel(listener, vw.channel);
+      // Both on the open microphone, the default (issue #1244): neither chose push to talk.
+      const alice = await enter(browser, vw, vw.alice, { mode: 'unchosen', before: async (page) => { await page.addInitScript(syntheticMicrophone); } });
+      people.push(alice);
+      const bob = await enter(browser, vw, vw.bob, { mode: 'unchosen', before: async (page) => { await page.addInitScript(recordHeard); } });
+      people.push(bob);
+      const talker = alice.page;
+      const listener = bob.page;
       const tv = voiceRegion(talker);
-      await tv.getByRole('button', { name: 'Join voice' }).click();
-      await voiceRegion(listener).getByRole('button', { name: 'Join voice' }).click();
-      for (const p of [talker, listener]) await expect(voiceRegion(p)).toContainText(/Connected in #voice-room/, { timeout: 30_000 });
+      await joinVoice(alice, 'Join voice');
+      await joinVoice(bob, 'Join voice');
       // The open microphone is the default (issue #1244); the first half is of push to talk.
       for (const p of [talker, listener]) await chooseMicrophone(voiceRegion(p), 'push to talk');
       await expect(voiceRegion(listener).getByRole('list', { name: 'In voice' })).toContainText('alice');
@@ -225,8 +221,7 @@ test.describe('speech kept at the edges of a transmission', () => {
       await tv.getByRole('button', { name: 'Leave voice' }).click();
       await voiceRegion(listener).getByRole('button', { name: 'Leave voice' }).click();
     } finally {
-      await talkerContext.close();
-      await listenerContext.close();
+      for (const p of people) await leave(p);
     }
   });
 });

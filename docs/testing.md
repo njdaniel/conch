@@ -361,13 +361,70 @@ check what LiveKit itself reports, not only what the pages show (#1608).
 | `66-share-permission-and-pixels` | `@smoke`, pull request | `share_screen` off before a share (refused, 403 `voice_not_allowed`) and during one (ended, `access_lost`), checked in the audit and in LiveKit's own track list; a viewer's picture is not flat and animates; a stopped share started again is a new LiveKit publication. Does not prove: real displays, GPUs, Wayland, Firefox or Safari capture, other machines |
 | `67-voice-recovery` | pull request, except one `@heavy` test | voice recovery on one machine: one person's LiveKit signal socket dropped (`routeWebSocket` on `/rtc`) while two others stay, a page offline for 5 s or more (`setOffline`), LiveKit frozen for 8 s (`docker pause`, the `@heavy` test), a page that vanishes without leaving, and a person who leaves and joins again; each checks LiveKit's own list for no ghost and no duplicate. Does not prove: any per-participant media cut (none exists with a same-machine host-network LiveKit; `setOffline` leaves WebRTC UDP alone in Chromium), real network loss, NAT rebinding, Wi-Fi roaming, a mobile background kill, or a TURN path; those are by hand on a real network |
 
-Helpers for new multi-user specs:
+Helpers for multi-user specs (use these; a spec that needs a second copy of
+one of them should change the helper). All are in `web/e2e/`:
 
-- `web/e2e/people.ts`: `enter` (a principal in its own browser context),
-  `joinVoice`, `leave`, and readings of what a page receives.
-- `web/e2e/livekit-admin.ts`: LiveKit's room service over Twirp with an
-  admin token, for its participant list (`listIdentities`). `pauseLiveKit` and `unpauseLiveKit` of the voice
-  world's LiveKit container live in `voice-world.ts`.
+- `people.ts`
+  - `enter(browser, vw, member, options)`: a principal in a browser context of
+    its own, signed in, the channel open. `options.context` is the context's own
+    options (a phone's screen); `options.before` hooks the page before it
+    loads; `options.mode` is `'push to talk'` (the default) or `'unchosen'`.
+  - `joinVoice(p, 'Join voice' | 'Watch only')`: joins and waits for the
+    connection (and, for Watch only, for an earlier page's presence to clear).
+  - `leave(p)` (or `p.close()`): closes the person's pages, then their context.
+  - `inbound(page)`: video frames, frame width and audio bytes a page has
+    received (`perTrack: true` for each stream).
+  - `expectClean(vw, p)`: no secret of the world on the page, in its console,
+    storage or timing entries, and no policy violation or failed request.
+- `fixtures.ts`: `closeAll(context)`, the way to close a context that has had
+  a page. **Every `context.close()` goes through it, except a deliberate
+  crash** (the one in `67-voice-recovery`, a tab that dies without leaving, which
+  must not be closed page-first or it becomes a clean leave and tests nothing,
+  and says so in a comment): it closes the pages first
+  and then the context. Closing a context with a page whose WebSocket is busy
+  can fail with "file data stream has unexpected number of bytes" or "End of
+  central directory record signature not found", because Playwright appends the
+  socket's frames live to a trace file and `context.close()` zips that file
+  while it is still growing (found in #1660, seen under load). A page closed
+  first has closed its sockets, and its `pagehide` ends its voice session.
+- `voice-world.ts` (the `vw` of a voice world):
+  - `vw.members(n)`: n more principals, each in the channel.
+  - `vw.participants()`: LiveKit's own list of who is connected, as identities
+    (`p<id>`, with `.screen` or `.view` for a companion), sorted, one entry per
+    connection. Specs use `vw.participants()`, not `listIdentities`, which is
+    its implementation.
+  - `vw.tracks(member, 'microphone' | 'screen')`: the tracks one member
+    publishes, from LiveKit, sorted by sid.
+  - `vw.rooms()`: how many rooms LiveKit lists; `0` once the last has closed.
+  - `emptiesWithin`: how long LiveKit may take to list nobody after the last
+    connection goes, for `expect.poll(...).toEqual([])` and
+    `expect.poll(() => vw.rooms(), ...).toBe(0)`.
+  - `vw.pauseLiveKit()` and `vw.unpauseLiveKit()`.
+- `livekit-admin.ts`: `adminToken` (the HS256 admin token) and
+  `LiveKitStatusError` (a call's method and HTTP status, never a body), which a
+  spec seldom needs; and what a spec does need to read `vw.participants()`,
+  `vw.tracks()` and `vw.rooms()`: `noAnswer` / `NoAnswer`, `answered()` and
+  `mustAnswer()` (below), plus `untilAnswered` and `LiveKitNoAnswerError`, which
+  produce them.
+- `people.ts` also exports `keepConnections`, the init script that keeps a page's
+  peer connections for `inbound`; `enter` installs it, and a spec that builds its
+  own context installs it with `page.addInitScript(keepConnections)`.
+
+Polling LiveKit: a throw inside an `expect.poll` callback fails the poll at
+once in Playwright 1.61, it is not retried. So `vw.participants()`,
+`vw.tracks()` and `vw.rooms()` do not throw on a timeout or a transport error.
+They return `T | NoAnswer`, where `noAnswer` is a symbol and not a list or a
+count, so no assertion on a list, a length or a count can be satisfied by it, and
+TypeScript makes the caller choose:
+
+- in a poll, `expect.poll(() => answered(vw.participants()))`: `answered` turns
+  no answer into `undefined`, which matches nothing, so the poll goes on;
+- in a one-off assertion, `expect(await mustAnswer(vw.participants()))`: no
+  answer fails the test with "LiveKit gave no answer";
+- a helper built on a reading (`videoSids`, `microphones`) returns `T | NoAnswer`
+  itself and never filters, maps or counts a `NoAnswer` as if it were a list.
+
+A status error (a wrong key, say) still throws.
 
 ## Flake policy
 

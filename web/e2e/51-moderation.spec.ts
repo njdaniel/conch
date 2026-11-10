@@ -5,7 +5,7 @@ import type { ErrorV0 } from '../src/schema/error';
 import { listChannelBansResponseV1 } from '../src/schema/generated';
 import { postMessageResponseV2, type PostMessageRequestV2 } from '../src/schema/message';
 import { post } from './api';
-import { expect, openChannel, phones, rememberPushToTalk, signIn, test } from './fixtures';
+import { closeAll, expect, openChannel, phones, rememberPushToTalk, signIn, test } from './fixtures';
 import { call, ok, type World } from './world';
 import { dockerAvailable, startVoiceWorld } from './voice-world';
 
@@ -210,7 +210,7 @@ test('LiveKit: a manager confirms a voice-only removal with retry, a member cann
     const stillPosts: PostMessageRequestV2 = { body: unique('after-voice-kick') };
     expect((await vw.api(target.token, 'POST', `/v2/channels/${vw.channel}/messages`, stillPosts)).status).toBe(201);
   } finally {
-    for (const context of contexts) await context.close();
+    for (const context of contexts) await closeAll(context);
     vw.stop();
   }
 });
