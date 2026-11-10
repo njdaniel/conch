@@ -90,6 +90,8 @@ interface Stub {
   room: { localParticipant: unknown } | null;
   // What the stub SDK logs while connecting, as a real one may.
   connectLog: string | null;
+  // Run inside connect, before it resolves (the SDK's signal events).
+  duringConnect: (() => void) | null;
   audioContexts: number;
   // The global names that were there before any module of this file loaded.
   baseline: ReadonlySet<string>;
@@ -225,6 +227,7 @@ const state = vi.hoisted((): Stub => {
     tracks: [],
     room: null,
     connectLog: null,
+    duringConnect: null,
     audioContexts: 0,
     baseline: new Set(Object.getOwnPropertyNames(globalThis)),
     roomOptions: undefined,
@@ -492,6 +495,8 @@ vi.mock('livekit-client', () => {
       return Promise.resolve(state.devices.filter((d) => d.kind === kind));
     }
     remoteParticipants = state.remote;
+    // The room's own name, as the server says it once connected.
+    name = 'sfu-room-name-1581';
     localParticipant = {
       identity: 'p7',
       get permissions() {
@@ -569,6 +574,7 @@ vi.mock('livekit-client', () => {
       state.connectOptions = options;
       state.calls.push('connect');
       if (state.connectLog !== null) state.logger.methodFactory('warn')(`${state.connectLog} ${token}`, { token });
+      state.duringConnect?.();
       return Promise.resolve();
     }
     disconnect() {
@@ -607,6 +613,7 @@ vi.mock('livekit-client', () => {
       ParticipantPermissionsChanged: 'ppc',
       MediaDevicesChanged: 'mdc',
       ActiveDeviceChanged: 'adc',
+      SignalConnected: 'sc',
     },
     TrackEvent: { Ended: 'ended' },
     PublishTrackError,
@@ -688,6 +695,7 @@ beforeEach(() => {
   state.tracks.length = 0;
   state.room = null;
   state.connectLog = null;
+  state.duringConnect = null;
   state.audioContexts = 0;
   state.roomOptions = undefined;
   state.connectOptions = undefined;
@@ -884,6 +892,30 @@ describe('the SDK adapter', () => {
     const lines = sdkLog.recent().join('\n');
     expect(lines).toContain('joined');
     expect(lines).not.toMatch(/room-abcdef|tok-abcdef/);
+  });
+
+  it("holds the room's own name once connected, though the caller gave none (the companion's grant names no room)", async () => {
+    const room = newLiveKitRoom();
+    room.setCompanion?.(true);
+    await room.connect('wss://lk.example', 'tok-abcdef', '', false, events);
+    state.logger.methodFactory('warn')('joined sfu-room-name-1581 as p7.screen');
+    const lines = sdkLog.recent().join('\n');
+    expect(lines).toContain('joined');
+    expect(lines).not.toContain('sfu-room-name-1581');
+  });
+
+  it("holds the room's own name at the signal event, before connect resolves", async () => {
+    const room = newLiveKitRoom();
+    room.setCompanion?.(true);
+    const lines: string[] = [];
+    state.duringConnect = () => {
+      state.handlers.get('sc')?.();
+      state.logger.methodFactory('warn')('joined sfu-room-name-1581 as p7.screen');
+      lines.push(sdkLog.recent().join('\n'));
+    };
+    await room.connect('wss://lk.example', 'tok-abcdef', '', false, events);
+    expect(lines.join('\n')).toContain('joined');
+    expect(lines.join('\n')).not.toContain('sfu-room-name-1581');
   });
 
   it('quiets the SDK when the module loads, at warn, without persisting the level', () => {
@@ -2295,8 +2327,8 @@ describe('a switch while the first capture is under way', () => {
 // ---- the camera (ADR-015)
 
 describe('wanted: kind, source and publisher together (S1)', () => {
-  const none = { watching: new Set<number>(), focused: null, own: 7, viewing: false, shown: false, claimed: false };
-  const all = { watching: new Set([8, 9]), focused: 8, own: 7, viewing: true, shown: true, claimed: true };
+  const none = { watching: new Set<number>(), focused: null, own: 7, viewing: false, shown: false, claimed: false, voice: true };
+  const all = { watching: new Set([8, 9]), focused: 8, own: 7, viewing: true, shown: true, claimed: true, voice: true };
   const { Source, Kind } = Track;
   it.each([
     [Source.Microphone, Kind.Audio, true, true],
@@ -2336,6 +2368,104 @@ describe('wanted: kind, source and publisher together (S1)', () => {
     expect(wanted(Source.Camera, Kind.Video, 8, { ...all, watching: new Set() })).toBe(true);
     expect(wanted(Source.Camera, Kind.Video, 8, { ...all, viewing: false })).toBe(false);
     expect(wanted(Source.Camera, Kind.Video, 8, { ...all, claimed: false })).toBe(false);
+  });
+});
+
+describe('wanted: the screen companion takes no voice (issue #1581)', () => {
+  const base = { watching: new Set([8, 9]), focused: 8, own: 7, viewing: true, shown: true, claimed: true };
+  const { Source, Kind } = Track;
+  // source x kind x publisher x voice. A microphone is wanted only with voice;
+  // a share's picture and sound only from a watched publisher other than the
+  // person's own; a camera only with voice too (the companion takes none).
+  it.each([
+    [Source.Microphone, Kind.Audio, 8, true, true],
+    [Source.Microphone, Kind.Audio, 8, false, false],
+    [Source.Microphone, Kind.Audio, 10, true, true],
+    [Source.Microphone, Kind.Audio, 10, false, false],
+    [Source.Microphone, Kind.Audio, null, false, false],
+    [Source.Microphone, Kind.Video, 8, true, false],
+    [Source.Microphone, Kind.Video, 8, false, false],
+    [Source.ScreenShare, Kind.Video, 8, true, true],
+    [Source.ScreenShare, Kind.Video, 8, false, true],
+    [Source.ScreenShare, Kind.Video, 10, false, false],
+    [Source.ScreenShare, Kind.Video, 7, false, false],
+    [Source.ScreenShareAudio, Kind.Audio, 9, true, true],
+    [Source.ScreenShareAudio, Kind.Audio, 9, false, true],
+    [Source.ScreenShareAudio, Kind.Audio, 7, false, false],
+    [Source.ScreenShareAudio, Kind.Video, 9, false, false],
+    [Source.Camera, Kind.Video, 8, true, true],
+    // Changed in the security-review fixes (#1622 S4b): the companion
+    // subscribes to screen shares only, never to a camera (voice is false for
+    // it alone), where this row first said true.
+    [Source.Camera, Kind.Video, 8, false, false],
+    [Source.Unknown, Kind.Audio, 8, false, false],
+  ])('%s as %s from %s with voice %s: %s', (source, kind, principal, voice, expected) => {
+    expect(wanted(source, kind, principal, { ...base, voice })).toBe(expected);
+  });
+});
+
+describe('the screen companion room (issue #1581)', () => {
+  const remotePub = (source: string, kind: string): StubRemotePub => {
+    const p: StubRemotePub = {
+      source,
+      kind,
+      isSubscribed: false,
+      setSubscribed: (on) => {
+        p.isSubscribed = on;
+      },
+      setVideoQuality: () => undefined,
+    };
+    return p;
+  };
+
+  it('subscribes to no microphone, however it arrives, and to a watched share alone', async () => {
+    const mic = remotePub('microphone', 'audio');
+    const share = remotePub('screen_share', 'video');
+    const sound = remotePub('screen_share_audio', 'audio');
+    state.remote.set('p8', { identity: 'p8', trackPublications: new Map([['a', mic], ['b', share], ['c', sound]]) } as unknown as { trackPublications: Map<string, StubRemotePub> });
+    const room = newLiveKitRoom();
+    room.setCompanion?.(true);
+    await room.connect('wss://lk.example', 'tok-abcdef', 'room-abcdef', false, events);
+    expect([mic.isSubscribed, share.isSubscribed, sound.isSubscribed]).toEqual([false, false, false]);
+    room.setWatches(new Set([8]), null);
+    expect([mic.isSubscribed, share.isSubscribed, sound.isSubscribed]).toEqual([false, true, true]);
+    room.setWatches(new Set(), null);
+    expect([mic.isSubscribed, share.isSubscribed, sound.isSubscribed]).toEqual([false, false, false]);
+  });
+
+  it('a browser room still subscribes to microphones', async () => {
+    const mic = remotePub('microphone', 'audio');
+    state.remote.set('p8', { identity: 'p8', trackPublications: new Map([['a', mic]]) } as unknown as { trackPublications: Map<string, StubRemotePub> });
+    const room = newLiveKitRoom();
+    await room.connect('wss://lk.example', 'tok-abcdef', 'room-abcdef', false, events);
+    expect(mic.isSubscribed).toBe(true);
+  });
+
+  it('asks the picker for no sound at all, keeps only the picture, and publishes it alone', async () => {
+    const room = newLiveKitRoom();
+    room.setCompanion?.(true);
+    await room.connect('wss://lk.example', 'tok-abcdef', 'room-abcdef', false, events);
+    state.calls.length = 0;
+    expect(await room.pickScreen()).toEqual({ audio: false });
+    expect(state.screenOptions).toMatchObject({ video: true, audio: false, systemAudio: 'exclude', selfBrowserSurface: 'exclude' });
+    // The audio track the stub gave is stopped, never held.
+    expect(state.screenTracks.map((t) => t.source)).toEqual(['screen_share', 'screen_share_audio']);
+    await room.publishScreen();
+    expect(state.published.map((p) => p.source)).toEqual(['screen_share']);
+  });
+
+  it('never captures or publishes a microphone', async () => {
+    const room = newLiveKitRoom();
+    room.setCompanion?.(true);
+    await room.connect('wss://lk.example', 'tok-abcdef', 'room-abcdef', false, events);
+    await expect(room.publishMicrophone()).rejects.toThrow('no microphone');
+    await expect(room.switchMicrophone(null)).rejects.toThrow('no microphone');
+    expect(state.calls).not.toContain('microphone');
+  });
+
+  it('captureOptions asks for sound by default and for none when told not to', () => {
+    expect(captureOptions()).toMatchObject({ audio: { channelCount: 2 }, systemAudio: 'include' });
+    expect(captureOptions(undefined, false)).toMatchObject({ audio: false, systemAudio: 'exclude' });
   });
 });
 

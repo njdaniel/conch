@@ -6,7 +6,7 @@
 // bridge's subscribe is not one invoke: the preload carries it as the three
 // feed calls below, and main answers with feed events on the one channel
 // FEED_EVENTS (issue #943).
-import type { ConchDesktopBridge, DesktopInviteBridge, DesktopVoiceBridge } from '../../web/src/platform/desktop/bridge.ts';
+import type { ConchDesktopBridge, DesktopCompanionBridge, DesktopInviteBridge, DesktopSettingsBridge, DesktopVoiceBridge } from '../../web/src/platform/desktop/bridge.ts';
 
 export const BRIDGE_FUNCTIONS = [
   'serverAddress',
@@ -30,6 +30,20 @@ export const BRIDGE_FUNCTIONS = [
   'downloadFile',
   'saveFile',
 ] as const satisfies readonly (keyof ConchDesktopBridge)[];
+
+// Desktop notifications (issue #1590): fixed requests, plus the synchronous
+// support check and the click event exposed separately by the preload.
+export const NOTIFY_FUNCTIONS = ['notify', 'notifyClose'] as const satisfies readonly (keyof ConchDesktopBridge)[];
+export const NOTIFICATION_SUPPORT = 'notificationSupported' as const;
+export const NOTIFICATION_EVENTS = 'conch:notification';
+// The longest notification tag. The page builds it as origin:account:messageId
+// (web/src/useNotifications.ts); an origin can be 8 + 253 + 6 characters
+// (scheme, DNS name, port), so the earlier 128 would refuse a long origin.
+export const TAG_MAX = 512;
+
+export type NotifyFunction = (typeof NOTIFY_FUNCTIONS)[number];
+// Main's tag-only click message to the notification's owning document.
+export type NotificationEvent = { readonly type: 'click'; readonly tag: string };
 
 // The saved server profiles (issue #945), a family of their own.
 export const PROFILE_FUNCTIONS = [
@@ -69,6 +83,15 @@ export type VoiceFunction = (typeof VOICE_FUNCTIONS)[number];
 export const INVITE_FUNCTIONS = ['inviteCheck', 'inviteAccept', 'inviteCancel', 'inviteTake'] as const satisfies readonly (keyof DesktopInviteBridge)[];
 
 export type InviteFunction = (typeof INVITE_FUNCTIONS)[number];
+// The app's own settings (issue #1587): read them, change them.
+export const SETTINGS_FUNCTIONS = ['settings', 'settingsSet'] as const satisfies readonly (keyof DesktopSettingsBridge)[];
+
+export type SettingsFunction = (typeof SETTINGS_FUNCTIONS)[number];
+// The screen companion (issue #1579, D4-02 of #772): the invoked functions of
+// DesktopCompanionBridge (onCompanion is its event, COMPANION_EVENTS).
+export const COMPANION_FUNCTIONS = ['companionGrant', 'companionEnd'] as const satisfies readonly (keyof DesktopCompanionBridge)[];
+
+export type CompanionFunction = (typeof COMPANION_FUNCTIONS)[number];
 
 export type BridgeFunction = (typeof BRIDGE_FUNCTIONS)[number];
 
@@ -79,7 +102,7 @@ export const FEED_CALLS = ['feedSubscribe', 'feedAck', 'feedUnsubscribe'] as con
 export type FeedCall = (typeof FEED_CALLS)[number];
 
 // The functions that cross into main as one invoke each.
-export type InvokedFunction = Exclude<BridgeFunction, 'subscribe'> | FeedCall | ProfileFunction | VoiceFunction | InviteFunction;
+export type InvokedFunction = Exclude<BridgeFunction, 'subscribe'> | FeedCall | ProfileFunction | VoiceFunction | InviteFunction | NotifyFunction | SettingsFunction | CompanionFunction;
 
 export const INVOKED_FUNCTIONS: readonly InvokedFunction[] = [
   ...BRIDGE_FUNCTIONS.filter((name): name is Exclude<BridgeFunction, 'subscribe'> => name !== 'subscribe'),
@@ -87,9 +110,12 @@ export const INVOKED_FUNCTIONS: readonly InvokedFunction[] = [
   ...PROFILE_FUNCTIONS,
   ...VOICE_FUNCTIONS,
   ...INVITE_FUNCTIONS,
+  ...NOTIFY_FUNCTIONS,
+  ...SETTINGS_FUNCTIONS,
+  ...COMPANION_FUNCTIONS,
 ];
 
-export function channelOf(name: InvokedFunction): string {
+export function channelOf(name: InvokedFunction | typeof NOTIFICATION_SUPPORT): string {
   return `conch:${name}`;
 }
 
@@ -117,3 +143,8 @@ export type FeedEvent =
 // NativeVoiceView as the message. Main sends it to the owned web contents
 // only, while its current document is committed.
 export const VOICE_EVENTS = 'conch:voice';
+
+// The third: the companion's end (a CompanionEvent), told to the owned web
+// contents only, and only to the document that was given the grant, before
+// main asks conchd to remove the companion.
+export const COMPANION_EVENTS = 'conch:companion';

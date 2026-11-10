@@ -9,15 +9,20 @@
 // "refused" and nothing more. No function takes a channel, a URL, a header map
 // or a method, and nothing here holds an ipcRenderer, an event or a credential.
 //
+// One call is synchronous: notificationSupported sends on the channel
+// `conch:notificationSupported` (ipcRenderer.sendSync) outside the invoke
+// registry, and unwraps the same Envelope from the returned value.
+//
 // onVoiceState hands the page each NativeVoiceView main sends on the voice
-// channel, and drops any message that is not exactly one.
+// channel, and drops any message that is not exactly one. onCompanion does
+// the same for a CompanionEvent on the companion channel (issue #1579).
 //
 // subscribe numbers each feed itself (so main's first event for it can never
 // arrive before the number is known here), asks main to open it, hands the
 // page each frame of a batch in order and then acknowledges the batch, which
 // is what lets main send the next. An unsubscribed feed is forgotten here at
 // once: whatever main had already sent for it is dropped.
-import type { ExposedDesktopBridge, FeedHandlers, FeedRequest, NativeVoiceView, Unsubscribe } from '../../web/src/platform/desktop/bridge.ts';
+import type { CompanionEndReason, CompanionEvent, ExposedDesktopBridge, FeedHandlers, FeedRequest, NativeVoiceView, NotificationClick, Unsubscribe } from '../../web/src/platform/desktop/bridge.ts';
 import {
   voiceControlBlock,
   voiceControlCapture,
@@ -28,13 +33,16 @@ import {
   voiceControlReason,
   voiceControlTalkMode,
 } from '../../web/src/schema/generated.ts';
-import { channelOf, type Envelope, type FeedEvent, type InvokedFunction } from '../shared/bridge-names.ts';
+import { channelOf, NOTIFICATION_SUPPORT, TAG_MAX, type Envelope, type FeedEvent, type InvokedFunction } from '../shared/bridge-names.ts';
 
 export type Invoke = (channel: string, ...args: unknown[]) => Promise<unknown>;
 
 // Listen calls back with each message main sends on the feed channel; only
 // the message, never the event it came in.
 export type Listen = (callback: (message: unknown) => void) => void;
+
+// Sync makes one named synchronous call and returns its unvalidated answer.
+export type Sync = (channel: string) => unknown;
 
 // What a refused subscription is told: a close the page's feed retries later.
 const REFUSED = 1013;
@@ -53,6 +61,12 @@ function isFeedEvent(value: unknown): value is FeedEvent {
     default:
       return false;
   }
+}
+
+function isNotificationClick(value: unknown): value is NotificationClick {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
+  const record = value as Record<string, unknown>;
+  return Object.keys(record).length === 2 && record['type'] === 'click' && typeof record['tag'] === 'string' && record['tag'].length > 0 && record['tag'].length <= TAG_MAX;
 }
 
 const STATUSES: ReadonlySet<unknown> = new Set(['idle', 'unavailable', 'starting', 'running', 'stopping', 'ended', 'failed', 'lost']);
@@ -101,13 +115,42 @@ function isNativeVoiceView(value: unknown): value is NativeVoiceView {
   );
 }
 
+// Checked by the compiler against CompanionEndReason: a reason added there
+// and not here fails tsc.
+const COMPANION_END_REASONS: Readonly<Record<CompanionEndReason, true>> = {
+  leave: true,
+  helper: true,
+  renewal: true,
+  'sign-out': true,
+  switch: true,
+  quit: true,
+  crash: true,
+  reload: true,
+  lock: true,
+  suspend: true,
+};
+
+// A companion message is exactly a CompanionEvent.
+function isCompanionEvent(value: unknown): value is CompanionEvent {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
+  const v = value as Record<string, unknown>;
+  return only(v, ['type', 'reason']) && v['type'] === 'end' && typeof v['reason'] === 'string' && Object.hasOwn(COMPANION_END_REASONS, v['reason']);
+}
+
 function isEnvelope(value: unknown): value is Envelope {
   if (typeof value !== 'object' || value === null) return false;
   const record = value as Record<string, unknown>;
   return (record['ok'] === true && 'value' in record) || (record['ok'] === false && record['kind'] === 'refused');
 }
 
-export function createBridge(invoke: Invoke, listen: Listen, listenVoice: Listen): Readonly<ExposedDesktopBridge> {
+export function createBridge(
+  invoke: Invoke,
+  listen: Listen,
+  listenVoice: Listen,
+  listenCompanion: Listen = () => undefined,
+  listenNotification: Listen = () => undefined,
+  sync: Sync = () => ({ ok: false, kind: 'refused' }),
+): Readonly<ExposedDesktopBridge> {
   const call =
     <T>(name: InvokedFunction) =>
     async (...args: unknown[]): Promise<T> => {
@@ -171,6 +214,52 @@ export function createBridge(invoke: Invoke, listen: Listen, listenVoice: Listen
     };
   };
 
+  // The companion's end, from main, to each listener (issue #1579).
+  const companionListeners = new Set<(event: CompanionEvent) => void>();
+  listenCompanion((message) => {
+    if (!isCompanionEvent(message)) return;
+    for (const listener of [...companionListeners]) {
+      try {
+        listener(message);
+      } catch (error) {
+        queueMicrotask(() => {
+          throw error;
+        });
+      }
+    }
+  });
+  // Notification clicks carry only a bounded tag to listeners of this bridge.
+  const notificationListeners = new Set<(event: NotificationClick) => void>();
+  listenNotification((message) => {
+    if (!isNotificationClick(message)) return;
+    for (const listener of [...notificationListeners]) {
+      try {
+        listener(message);
+      } catch (error) {
+        queueMicrotask(() => {
+          throw error;
+        });
+      }
+    }
+  });
+  const onCompanion = (listener: (event: CompanionEvent) => void): Unsubscribe => {
+    companionListeners.add(listener);
+    return () => {
+      companionListeners.delete(listener);
+    };
+  };
+  const onNotification = (listener: (event: NotificationClick) => void): Unsubscribe => {
+    notificationListeners.add(listener);
+    return () => {
+      notificationListeners.delete(listener);
+    };
+  };
+  const notificationSupported = (): boolean => {
+    const answer = sync(channelOf(NOTIFICATION_SUPPORT));
+    if (!isEnvelope(answer) || !answer.ok || typeof answer.value !== 'boolean') throw new Error('refused');
+    return answer.value;
+  };
+
   const subscribe = (feed: FeedRequest, handlers: FeedHandlers): Unsubscribe => {
     const id = ++next;
     feeds.set(id, handlers);
@@ -210,6 +299,11 @@ export function createBridge(invoke: Invoke, listen: Listen, listenVoice: Listen
     uploadFile: call('uploadFile'),
     downloadFile: call('downloadFile'),
     saveFile: call('saveFile'),
+    // Desktop notifications (issue #1590): no native event object crosses.
+    notify: call('notify'),
+    notifyClose: call('notifyClose'),
+    notificationSupported,
+    onNotification,
     // The saved server profiles (issue #945).
     profiles: call('profiles'),
     profileAdd: call('profileAdd'),
@@ -238,6 +332,14 @@ export function createBridge(invoke: Invoke, listen: Listen, listenVoice: Listen
     inviteAccept: call('inviteAccept'),
     inviteCancel: call('inviteCancel'),
     inviteTake: call('inviteTake'),
+    // The app's own settings (issue #1587).
+    settings: call('settings'),
+    settingsSet: call('settingsSet'),
     onVoiceState,
+    // The screen companion (issue #1579): its grant, its end, and main's word
+    // that it has ended.
+    companionGrant: call('companionGrant'),
+    companionEnd: call('companionEnd'),
+    onCompanion,
   });
 }

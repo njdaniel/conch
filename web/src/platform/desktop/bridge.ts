@@ -12,7 +12,8 @@
 //    validates with the table's validators;
 //  - the bearer credential, a socket ticket, a proof and the person's own
 //    voice grant never cross it: main keeps them, and answers sanitised state
-//    (a WhoAmIResponseV1, or a refusal kind) instead;
+//    (a WhoAmIResponseV1, or a refusal kind) instead. The one credential that
+//    does is the screen companion's grant (DesktopCompanionBridge below);
 //  - every body is a type of web/src/schema, so none of this is a new wire
 //    shape (decision Q1: these in-process messages carry only existing
 //    pkg/schema types).
@@ -234,6 +235,22 @@ export type DownloadReply = BridgeReply | { readonly kind: 'bytes'; readonly dat
 // failed is anything else (no answer, too large, not writable).
 export type SaveOutcome = 'saved' | 'cancelled' | 'failed' | 'unauthorized';
 
+// A desktop notification (issue #1590): exactly the fields main may show or
+// retain. The channel is owned by main's activation record; clicks carry only
+// the tag back to the document that showed it.
+export interface NotifyRequest {
+  readonly tag: string;
+  readonly title: string;
+  readonly body: string;
+  readonly channel: ChannelName;
+}
+
+// The only notification event: no title, body, channel or native event object.
+export interface NotificationClick {
+  readonly type: 'click';
+  readonly tag: string;
+}
+
 export interface ConchDesktopBridge {
   // The server address of the active profile (null: none is active).
   serverAddress(): Promise<ServerAddress>;
@@ -285,6 +302,12 @@ export interface ConchDesktopBridge {
   uploadFile(request: UploadRequest): Promise<BridgeReply>;
   downloadFile(id: number): Promise<DownloadReply>;
   saveFile(id: number): Promise<SaveOutcome>;
+  // Desktop notifications (issue #1590). Support is a narrow synchronous IPC
+  // because the platform's permission API is synchronous; clicks carry no text.
+  notify(request: NotifyRequest): Promise<boolean>;
+  notifyClose(request: { readonly tag: string }): Promise<boolean>;
+  notificationSupported(): boolean;
+  onNotification(listener: (event: NotificationClick) => void): Unsubscribe;
   // The saved server profiles (issue #945). Ids are opaque to the page.
   profiles(): Promise<ProfilesView>;
   profileAdd(address: string): Promise<ProfileAddResult>;
@@ -303,7 +326,7 @@ export interface ConchDesktopBridge {
 declare global {
   interface Window {
     // Present only in the desktop shell's renderer.
-    readonly conchDesktop?: ConchDesktopBridge & Partial<DesktopVoiceBridge> & Partial<DesktopInviteBridge>;
+    readonly conchDesktop?: ConchDesktopBridge & Partial<DesktopVoiceBridge> & Partial<DesktopSettingsBridge> & Partial<DesktopCompanionBridge> & Partial<DesktopInviteBridge>;
   }
 }
 
@@ -443,10 +466,6 @@ export interface DesktopVoiceBridge {
   onVoiceState(listener: (view: NativeVoiceView) => void): Unsubscribe;
 }
 
-// The object the preload exposes: the bridge and the voice family. Still no
-// press, release, gate or transmit function in either.
-export type ExposedDesktopBridge = ConchDesktopBridge & DesktopVoiceBridge & DesktopInviteBridge;
-
 // Opening an invite link in the app (issue #1591, D5-05 of #773). Its own
 // interface, beside ConchDesktopBridge, so a fake of the main bridge needs
 // no change. The link is untrusted text: main parses it (the page's own parse
@@ -502,3 +521,95 @@ export interface DesktopInviteBridge {
   // or one from any other profile, gets null.
   inviteTake(): Promise<string | null>;
 }
+
+// The app's own settings (issue #1587; linux-desktop.md §9). App-wide, kept by
+// main in <userData>/settings.json, not per account. In-process TypeScript, not
+// a wire shape.
+export interface DesktopSettingsView {
+  // Closing the window keeps the app running, in the tray. Takes effect only
+  // while trayWorking.
+  readonly closeToTray: boolean;
+  // Open the app when the person logs in.
+  readonly launchAtLogin: boolean;
+  // Whether a working tray exists right now.
+  readonly trayWorking: boolean;
+  // Whether this build may set launch at login (an installed build may).
+  readonly launchAvailable: boolean;
+  // Why not, when it is not: an unpackaged run, or an app that sits where
+  // others could change it.
+  readonly launchUnavailable?: 'unpackaged' | 'unsafe-location';
+}
+
+export interface SettingsChange {
+  readonly closeToTray?: boolean;
+  readonly launchAtLogin?: boolean;
+}
+
+export type SettingsResult =
+  | { readonly ok: true; readonly view: DesktopSettingsView }
+  | { readonly ok: false; readonly reason: 'unpackaged' | 'unsafe-location' | 'foreign-file' | 'failed' };
+
+export interface DesktopSettingsBridge {
+  settings(): Promise<DesktopSettingsView>;
+  // The person's act: main refuses it without a recent gesture in the window.
+  settingsSet(change: SettingsChange): Promise<SettingsResult>;
+}
+
+
+// The screen companion (issue #1579, D4-02 of #772; linux-desktop.md §4,
+// §6.4): the renderer's own LiveKit participant, p<id>.screen, which publishes
+// the screen and watches others' shares (B2). Main asks conchd for its grant
+// only on the person's act, only for the voice destination while the helper
+// is connected there, and hands over the grant alone: never the bearer, the
+// room's name or the person's own voice grant. The token lives 15 s, and
+// every grant needs a new act (Q-D4-2 on #1578: a share is not resumed after a
+// room renewal). In-process TypeScript, as the voice family (decision Q1 on
+// #770), not a wire shape.
+export interface CompanionGrant {
+  // The LiveKit server to connect to, as conchd names it.
+  readonly livekitUrl: string;
+  // The companion's join token: the one credential the renderer holds.
+  readonly token: string;
+  // The companion's identity, p<id>.screen.
+  readonly identity: string;
+  // When the token stops being accepted for a join (RFC 3339).
+  readonly expiresAt: string;
+}
+
+// Why no grant was given. not-in-voice: voice is not connected in that
+// channel (browsing another channel never gets one). not-yet: conchd has not
+// yet seen the person's voice in the room; try again shortly. elsewhere: a
+// companion of this person is already live, here or on another device.
+// ended: a Leave, a lock or a switch overtook the request. failed: anything
+// else, said no more precisely.
+export type CompanionGrantError = 'not-in-voice' | 'not-yet' | 'elsewhere' | 'ended' | 'failed';
+
+export type CompanionGrantResult = { readonly ok: true; readonly grant: CompanionGrant } | { readonly ok: false; readonly error: CompanionGrantError };
+
+// Why main ended the live companion on its own. leave: the person left
+// voice; helper: the helper stopped, failed or lost its connection; renewal:
+// conchd renewed the voice room (the page says "The voice room was renewed.
+// Share again to carry on"); sign-out, switch, quit: the identity is ending;
+// crash and reload: the document that held the grant has gone; lock and
+// suspend: the session was locked or is going to sleep (#1588, D5-02).
+export type CompanionEndReason = 'leave' | 'helper' | 'renewal' | 'sign-out' | 'switch' | 'quit' | 'crash' | 'reload' | 'lock' | 'suspend';
+
+// What main tells the page on the companion channel: always before it asks
+// conchd to remove the companion, so the page disconnects its room first.
+export interface CompanionEvent {
+  readonly type: 'end';
+  readonly reason: CompanionEndReason;
+}
+
+export interface DesktopCompanionBridge {
+  // The companion's grant for the voice destination. Only right after the
+  // person's own click or key.
+  companionGrant(request: { readonly channel: ChannelName }): Promise<CompanionGrantResult>;
+  // Removes the live companion, if there is one, and says whether there was.
+  companionEnd(): Promise<boolean>;
+  onCompanion(listener: (event: CompanionEvent) => void): Unsubscribe;
+}
+
+// The object the preload exposes: the bridge, the voice family, the settings,
+// the companion and the invite family. Still no press, release, gate or transmit function in any.
+export type ExposedDesktopBridge = ConchDesktopBridge & DesktopVoiceBridge & DesktopSettingsBridge & DesktopCompanionBridge & DesktopInviteBridge;

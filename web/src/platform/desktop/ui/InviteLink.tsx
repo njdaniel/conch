@@ -147,9 +147,12 @@ export function InviteLink({ clientMounted }: Props) {
           </button>
         </div>
       )}
-      <p role="alert" className="notice">
-        {line}
-      </p>
+      {/* Only while there is something to say: an empty alert would be a second one on the address page. */}
+      {line === '' ? null : (
+        <p role="alert" className="notice">
+          {line}
+        </p>
+      )}
     </section>
   );
 }
