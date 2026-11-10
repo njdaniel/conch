@@ -272,6 +272,9 @@ export class LinuxLifecycle {
   #stopped = true;
   #malformed = 0;
   #reportedLost = false;
+  // Still trying: started and no answer yet, or a restart is pending. False
+  // once #lost has given up, after an answer, and after stop().
+  #trying = false;
   #upSince = 0;
   #sawLock = false;
   readonly #onSuspend = (): void => {
@@ -291,11 +294,17 @@ export class LinuxLifecycle {
     return this.#malformed;
   }
 
+  // Whether the lock is still being worked out (for #1593's "checking").
+  get trying(): boolean {
+    return this.#trying;
+  }
+
   // start begins watching: powerMonitor's suspend and resume, the idle-state
   // poll, and the logind monitor.
   async start(): Promise<void> {
     if (!this.#stopped) return;
     this.#stopped = false;
+    this.#trying = true;
     this.#deps.powerMonitor.on('suspend', this.#onSuspend);
     this.#deps.powerMonitor.on('resume', this.#onResume);
     this.#poll = setInterval(() => {
@@ -313,6 +322,7 @@ export class LinuxLifecycle {
   // stop kills the monitor through its own ChildProcess and stops every timer.
   stop(): void {
     this.#stopped = true;
+    this.#trying = false;
     clearTimeout(this.#timer);
     clearTimeout(this.#readyTimer);
     this.#cancelReady?.();
@@ -341,6 +351,7 @@ export class LinuxLifecycle {
   // and a stale "locked" would hold the app locked for good) and a slow
   // retry is scheduled, until stop().
   #lost(why: string): void {
+    this.#trying = false;
     this.#deps.rules.observe('unavailable');
     this.#deps.rules.dropSource('logind');
     this.#slowRetry();
@@ -472,6 +483,7 @@ export class LinuxLifecycle {
       return;
     }
     this.#reportedLost = false;
+    this.#trying = false;
     this.#upSince = Date.now();
     // The read came after the monitor started: a change the monitor has
     // already reported is newer than it.
@@ -512,6 +524,7 @@ export class LinuxLifecycle {
       this.#lost(`${why}, and it did not come back`);
       return;
     }
+    this.#trying = true;
     const wait = this.#backoff[this.#restarts] ?? 0;
     this.#restarts++;
     this.#timer = setTimeout(() => {
