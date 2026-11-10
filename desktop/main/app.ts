@@ -38,6 +38,7 @@ import { captureVerdict, DisplayCapture } from './display-capture.ts';
 import { Files } from './files.ts';
 import { Gestures } from './gestures.ts';
 import { ShareAllowance } from './share-allowance.ts';
+import { shareTeardown } from './share-hook.ts';
 import { installGuards } from './guards.ts';
 import { deliverUpdate, Installed, shouldAskAfterFailure } from './installed.ts';
 import { updateDialogButtons, updateDialogDetail, updateDialogMessage } from '../../web/src/platform/desktop/ui/text.ts';
@@ -513,15 +514,15 @@ export async function start(): Promise<void> {
     log,
   });
   liveOrigin = () => companion.liveOrigin();
-  teardownHooks.media('share', async ({ reason }) => {
-    // From here on the identity is ending: no grant is asked for under it.
-    // A page's grant request after this end (the click of a switch or a
-    // sign-out is still armed) is refused as failed, and one in flight finds
-    // the client changed and removes what conchd issued. The next
-    // activation's makeFiles sets the client again.
-    activeClient = null;
-    await companion.end(reason);
-  });
+  teardownHooks.media(
+    'share',
+    shareTeardown({
+      dropClient: () => {
+        activeClient = null;
+      },
+      companion,
+    }),
+  );
   app.on('render-process-gone', (_event, contents) => {
     if (contents === live.owned()) void companion.end('crash');
   });
