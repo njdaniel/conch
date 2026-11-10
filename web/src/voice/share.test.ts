@@ -620,6 +620,90 @@ describe('why the server ended it', () => {
   });
 });
 
+// Issue #1581 (security review S1, Q-D4-2 on #1578): a desktop companion's
+// share is never resumed after a renewal without a new consent, whichever of
+// presence and the room says it first.
+describe('a companion share is not resumable', () => {
+  const rotated: VoiceShareEnded = { reason: 'rotated', started_at: '2026-10-16T00:00:00.000Z', ended_at: '2026-10-16T00:01:00.000Z' };
+
+  it('presence first: the capture is stopped, nothing is claimed again, and the words are the renewal ones', async () => {
+    const t = await sharing(setup());
+    t.share.setCompanion(true);
+    t.share.presence('me');
+    t.share.presence('none', rotated);
+    await settle();
+    expect(t.share.current).toEqual({ kind: 'idle', ended: 'rotated' });
+    expect(t.calls).toEqual(['stop screen']);
+    expect(t.calls).not.toContain('keep');
+    // A new connection and more presence resume nothing.
+    t.share.connected('general', t.stub);
+    t.share.presence('none');
+    await settle();
+    t.clock.advance(120_000);
+    await settle();
+    expect(t.calls.filter((c) => c.startsWith('claim'))).toEqual([]);
+    expect(t.share.current).toEqual({ kind: 'idle', ended: 'rotated' });
+  });
+
+  it('the room first, then presence: ends with the renewal words and is not resumed', async () => {
+    const t = await sharing(setup());
+    t.share.setCompanion(true);
+    t.share.presence('me');
+    t.share.ended('server');
+    await settle();
+    t.share.presence('none', rotated);
+    await settle();
+    expect(t.share.current).toEqual({ kind: 'idle', ended: 'rotated' });
+    expect(t.calls.filter((c) => c.startsWith('claim'))).toEqual([]);
+    expect(t.calls).not.toContain('keep');
+  });
+
+  it('a claim granted again with a new started_at after a reconnect is released, not adopted', async () => {
+    const claims: ShareClaimResult[] = [];
+    const t = await sharing(setup(claims));
+    claims.push({ ok: true, value: { principal_id: 7, started_at: '2026-10-16T00:05:00.000Z', audio: true } });
+    t.share.setCompanion(true);
+    t.share.presence('me');
+    await t.share.reconnected();
+    await settle();
+    expect(t.share.current).toEqual({ kind: 'idle', ended: 'rotated' });
+    expect(t.released).toEqual(['2026-10-16T00:05:00.000Z']);
+  });
+
+  it('the same started_at on a reconnect is still the same share', async () => {
+    const t = await sharing(setup());
+    t.share.setCompanion(true);
+    t.share.presence('me');
+    await t.share.reconnected();
+    await settle();
+    expect(t.share.current).toEqual({ kind: 'sharing', audio: true });
+    expect(t.released).toEqual([]);
+  });
+
+  it('a quality change answered with a new started_at is released, not adopted', async () => {
+    const claims: ShareClaimResult[] = [];
+    const t = await sharing(setup(claims));
+    claims.push({ ok: true, value: { principal_id: 7, started_at: '2026-10-16T00:05:00.000Z', audio: true } });
+    t.share.setCompanion(true);
+    t.share.presence('me');
+    await t.share.changeQuality({ resolution: '720p', frameRate: 30 });
+    await settle();
+    expect(t.share.current).toEqual({ kind: 'idle', ended: 'rotated' });
+    expect(t.released).toEqual(['2026-10-16T00:05:00.000Z']);
+  });
+
+  it('a connection lost after the renewal was told stops the share with the renewal words', async () => {
+    const t = await sharing(setup());
+    t.share.setCompanion(true);
+    t.share.presence('me');
+    t.share.presence('none', rotated);
+    await t.share.lost(true);
+    await settle();
+    expect(t.share.current).toEqual({ kind: 'idle', ended: 'rotated' });
+    expect(t.calls).not.toContain('keep');
+  });
+});
+
 // Issue #516: a share whose room was renewed (rotated) is resumed on the next
 // connection, with the same capture and no picker, when conchd grants the
 // claim again; and is not otherwise.
