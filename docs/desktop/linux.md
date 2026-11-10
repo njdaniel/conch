@@ -32,8 +32,7 @@ The release page is <https://github.com/njdaniel/conch/releases>.
 
 > **Availability.** The `.deb`, the checksums and the attestations are
 > available from the first release that ships the `.deb`. Earlier releases do
-> not have them, and these steps do not work on them. They are specified in
-> PR #1634, which is not merged at the time of writing.
+> not have them, and these steps do not work on them.
 
 Check the file is the one that was published:
 
@@ -44,7 +43,7 @@ sha256sum -c --ignore-missing checksums.txt
 You should see `conch-desktop_<version>_amd64.deb: OK`. If you see `FAILED`,
 stop. Do not install the file. Download it again.
 
-Then check where it was built. This needs the GitHub CLI (`gh`). Replace `<tag>`
+Then check where it was built. This needs the GitHub CLI (`gh`), signed in (`gh auth login`). Replace `<tag>`
 with the release tag, for example `v0.1.0-alpha.19`:
 
 ```sh
@@ -78,8 +77,8 @@ What the package does:
 What the package does not do:
 
 - It does not install a setuid `chrome-sandbox` program.
-- It does not add a udev rule, change a group, or give any program extra
-  powers.
+- It does not add a udev rule, change a group, or set any setuid or
+  capability bit.
 - The app does not run as root.
 
 If AppArmor cannot load the profile (an older system), the install says so and
@@ -106,16 +105,17 @@ conch-desktop
    for you.
 
 If someone sent you an invite link that starts with `conch://`, click it. The
-app opens and starts from the link.
+app opens, shows the server the link names, and asks you before it does
+anything.
 
-To see what works on your computer, open the app's settings and find
-**What works on this desktop**. Each row says Working, Not available here, or
+To see what works on your computer, choose **Desktop app** in the bar at the
+top and find **What works on this desktop**. Each row says Working, Not available here, or
 Unknown, with one sentence why. **Copy this list** copies it for a problem
 report.
 
 ### Open at login and the tray
 
-- **Open Conch when I log in** is in the app's **Desktop app** settings. It
+- **Open Conch when I log in** is under **Desktop app** in the bar at the top. It
   works only if Conch is installed where only you or root can change it, which
   the package does. It writes `~/.config/autostart/chat.conch.desktop.desktop`.
 - **Keep running in the tray** works only if your desktop shows a tray. If you
@@ -128,7 +128,7 @@ Updates are manual. The app does not download anything.
 
 1. Download the new `.deb` and `checksums.txt`.
 2. Verify them as above.
-3. Quit Conch. If you are in a voice call, leave it first.
+3. Quit Conch (from the tray icon if you keep Conch in the tray). If you are in a voice call, leave it first.
 4. Install the new file:
 
    ```sh
@@ -190,23 +190,39 @@ not remove them. Your data stays until you delete it:
 | --- | --- |
 | Saved servers and sign-ins | `~/.config/conch-desktop` |
 | Open-at-login entry, if you turned it on | `~/.config/autostart/chat.conch.desktop.desktop` |
+| Talk-key permission, if you installed the rule the app showed you | `/etc/udev/rules.d/70-conch-voice.rules` (a system file; purge doesn't remove it) |
 
-To delete them, after you quit Conch:
+If `$XDG_CONFIG_HOME` is set, your files are under it instead of `~/.config`.
+
+To delete the files in your home folder, after you quit Conch:
+
+This can't be undone. It deletes your saved servers and sign-ins on this
+computer.
 
 ```sh
 rm -rf ~/.config/conch-desktop
 rm -f ~/.config/autostart/chat.conch.desktop.desktop
 ```
 
-If you only want to forget your servers, remove one in the app, or delete
-`~/.config/conch-desktop`. Turn off **Open Conch when I log in** in the app
-before you remove the package, or delete the file above afterwards.
+Deleting the folder does not sign you out on the server. To end a sign-in, sign
+out in the app first, so the server ends it. To forget one server only, remove
+it in the app. Turn off **Open Conch when I log in** in the app before you
+remove the package, or delete the file above afterwards.
 
-If `$XDG_CONFIG_HOME` is set, your files are under it instead of `~/.config`.
+If you installed the talk-key rule, it is still in place after you remove the
+package, and it still lets your programs read that device. If that file holds
+only Conch's line, delete it:
+
+```sh
+sudo rm /etc/udev/rules.d/70-conch-voice.rules
+```
+
+Then run `sudo udevadm control --reload`, and unplug and replug the device.
 
 ## What works where
 
-Each row is **supported**, **experimental**, **unsupported** or **not tried**.
+Each row is **supported**, **experimental**, **unsupported**, **not tried** or
+**not offered**.
 "Not tried" means nobody has run it and recorded the result yet. Issue #1603
 fills in the rest.
 
@@ -216,7 +232,7 @@ fills in the rest.
 | --- | --- |
 | Pop!_OS 24.04, COSMIC, Wayland, x86_64 | Supported after #1602 and #1603 pass. Until then, preview. |
 | Ubuntu 24.04, GNOME | Experimental |
-| Any desktop on X11 | Push-to-talk only. No screen sharing. |
+| Any desktop on X11 | Screen sharing unsupported. Push-to-talk not tried. |
 | ARM64 | Not offered |
 | AppImage, Flatpak, RPM | Not offered |
 
@@ -230,7 +246,7 @@ fills in the rest.
 | Sound when sharing | Unsupported | Silent on Linux for now (#1585, #1586). |
 | Tray icon | Not tried | Needs a desktop with a tray. |
 | Notifications | Not tried | |
-| Lock and suspend | Not tried | Where the app can tell the screen locked, it mutes you and hides notification text. Otherwise it says it can't tell. |
+| Lock and suspend | Not tried | Where the app can tell the screen locked, it mutes you, ends your screen share and hides notification text. Otherwise it says it can't tell. Suspend leaves voice and ends the share. |
 | Saved sign-ins | Not tried | Needs a working password keyring. Without one, sign-ins last until the app closes. |
 
 The app's own **What works on this desktop** list is the truth for your
@@ -245,7 +261,7 @@ loaded. Run:
 sudo apparmor_parser -r /etc/apparmor.d/conch-desktop
 ```
 
-If that fails, your AppArmor is older than version 4, and this package does not
+If that fails, your AppArmor is probably older than version 4, and this package does not
 support your system.
 
 **No tray icon.** Your desktop may show no tray. Closing the window then quits
@@ -258,7 +274,8 @@ when your screen locks on this desktop. The settings list says so. Mute by hand.
 has no screen-share service, or when you are on X11. Log in to a Wayland
 session. The settings list says which.
 
-**"Server version not tested".** The app signs in only to server versions it
+**"This server's version (...) has not been tested with this app (...)."**
+The app signs in only to server versions it
 was tested with. Use the server release that matches the app. Ask the server's
 operator.
 
@@ -267,5 +284,6 @@ computer. See "Private CA" in [desktop/README.md](../../desktop/README.md).
 
 **The server list could not be read.** See [Downgrade](#downgrade).
 
-**Report a problem.** Include the version (`dpkg -s conch-desktop | grep
+**Report a problem.** Open an issue at
+<https://github.com/njdaniel/conch/issues>. Include the version (`dpkg -s conch-desktop | grep
 Version`) and the copied **What works on this desktop** list.
