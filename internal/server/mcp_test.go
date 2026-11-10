@@ -694,3 +694,175 @@ func TestMCPRejectsDisabledAgent(t *testing.T) {
 		t.Errorf("stored credential after enable: status = %d, want 401", rec.Code)
 	}
 }
+
+// read_channel carries the channel's topic beside the page (issue #1506,
+// docs/design/channel-topic.md §8.4): present when the channel has one, absent
+// when it has none, current on the next page after a manager changes it, and
+// never shown to an agent refused on the channel.
+func TestMCPReadChannelCarriesTheTopic(t *testing.T) {
+	ctx := context.Background()
+	srv := newTestServer(t)
+	channel, err := srv.store.CreateChannel(ctx, "general")
+	if err != nil {
+		t.Fatalf("CreateChannel: %v", err)
+	}
+	agent, err := srv.store.CreatePrincipal(ctx, store.PrincipalAgent, "agent-smith")
+	if err != nil {
+		t.Fatalf("CreatePrincipal agent: %v", err)
+	}
+	outsider, err := srv.store.CreatePrincipal(ctx, store.PrincipalAgent, "agent-jones")
+	if err != nil {
+		t.Fatalf("CreatePrincipal outsider: %v", err)
+	}
+	// A member whose manifest grants no read in the channel (security review
+	// of #1709): in the channel, yet refused, and so told no topic.
+	unread, err := srv.store.CreatePrincipal(ctx, store.PrincipalAgent, "agent-brown")
+	if err != nil {
+		t.Fatalf("CreatePrincipal unread: %v", err)
+	}
+	grantAgent(t, srv, agent.ID, channel.ID)
+	setAgentManifest(t, srv, outsider.ID, nil)
+	if _, err := srv.store.AddChannelMember(ctx, "system", channel.ID, unread.ID, 0); err != nil {
+		t.Fatalf("AddChannelMember unread: %v", err)
+	}
+	setAgentManifest(t, srv, unread.ID, nil)
+	srv.cfg.MCPBearerTokens = map[string]int64{"token-1": agent.ID, "token-out": outsider.ID, "token-unread": unread.ID}
+
+	// read returns the structured content of one read_channel call as raw
+	// JSON, so a missing key is told from an empty one.
+	read := func(t *testing.T) map[string]json.RawMessage {
+		t.Helper()
+		res := mcpTool(t, srv, "token-1", "read_channel", map[string]any{"channel": "general"})
+		if res.code != "ok" {
+			t.Fatalf("read_channel = %s", res.code)
+		}
+		var out map[string]json.RawMessage
+		if err := json.Unmarshal(res.out, &out); err != nil {
+			t.Fatalf("decode %s: %v", res.out, err)
+		}
+		return out
+	}
+	// setTopic changes the topic as the system would (callerID 0 skips the
+	// standing check; the route's own tests cover who may).
+	setTopic := func(t *testing.T, topic string) {
+		t.Helper()
+		if _, err := srv.store.SetChannelTopic(ctx, "system", 0, channel.ID, topic, time.Now()); err != nil {
+			t.Fatalf("SetChannelTopic(%q): %v", topic, err)
+		}
+	}
+
+	tests := []struct {
+		name  string
+		topic string // "" leaves or makes the channel topicless
+		want  string // "" means the key must be absent
+	}{
+		{name: "no topic: the key is absent", topic: "", want: ""},
+		{name: "a topic is returned beside the page", topic: "Incidents and on-call", want: "Incidents and on-call"},
+		{name: "a changed topic is on the next page", topic: "Deploys only", want: "Deploys only"},
+		{name: "a cleared topic is absent again", topic: "", want: ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			setTopic(t, tt.topic)
+			out := read(t)
+			if _, ok := out["messages"]; !ok {
+				t.Fatalf("read_channel output has no messages: %v", out)
+			}
+			raw, ok := out["topic"]
+			if tt.want == "" {
+				if ok {
+					t.Fatalf("topic = %s, want the key absent", raw)
+				}
+				return
+			}
+			var got string
+			if err := json.Unmarshal(raw, &got); err != nil || got != tt.want {
+				t.Fatalf("topic = %s, want %q", raw, tt.want)
+			}
+		})
+	}
+
+	// An agent with no read in the channel is refused as before, and nothing
+	// it is sent names the topic: one outside the channel, and one in it
+	// whose manifest grants it no read there.
+	setTopic(t, "Secret plans")
+	body, err := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": map[string]any{"name": "read_channel", "arguments": map[string]any{"channel": "general"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, refused := range []struct{ who, token string }{{"an agent outside the channel", "token-out"}, {"a member with no read in its manifest", "token-unread"}} {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewReader(body))
+		req.Header.Set("Authorization", "Bearer "+refused.token)
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Accept", "application/json, text/event-stream")
+		srv.Handler().ServeHTTP(rec, req)
+		if !strings.Contains(rec.Body.String(), `"isError":true`) {
+			t.Fatalf("%s was not refused: %s", refused.who, rec.Body)
+		}
+		if strings.Contains(rec.Body.String(), "Secret plans") {
+			t.Fatalf("the refusal of %s names the topic: %s", refused.who, rec.Body)
+		}
+	}
+}
+
+// The published read_channel output schema lists topic as an optional string,
+// so an agent framework knows the field and that it may be missing.
+func TestMCPReadChannelOutputSchemaListsTopic(t *testing.T) {
+	ctx := context.Background()
+	srv := newTestServer(t)
+	agent, err := srv.store.CreatePrincipal(ctx, store.PrincipalAgent, "agent-smith")
+	if err != nil {
+		t.Fatalf("CreatePrincipal agent: %v", err)
+	}
+	setAgentManifest(t, srv, agent.ID, nil)
+	srv.cfg.MCPBearerTokens = map[string]int64{"token-1": agent.ID}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`))
+	req.Header.Set("Authorization", "Bearer token-1")
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json, text/event-stream")
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("tools/list = %d %s", rec.Code, rec.Body)
+	}
+	var response struct {
+		Result struct {
+			Tools []struct {
+				Name         string `json:"name"`
+				OutputSchema struct {
+					Properties map[string]json.RawMessage `json:"properties"`
+					Required   []string                   `json:"required"`
+				} `json:"outputSchema"`
+			} `json:"tools"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	for _, tool := range response.Result.Tools {
+		if tool.Name != "read_channel" {
+			continue
+		}
+		raw, ok := tool.OutputSchema.Properties["topic"]
+		if !ok {
+			t.Fatalf("read_channel output schema has no topic: %+v", tool.OutputSchema.Properties)
+		}
+		var topic struct {
+			Type any `json:"type"`
+		}
+		if err := json.Unmarshal(raw, &topic); err != nil {
+			t.Fatalf("decode topic schema %s: %v", raw, err)
+		}
+		if fmt.Sprint(topic.Type) != "string" {
+			t.Errorf("topic type = %v, want string", topic.Type)
+		}
+		for _, r := range tool.OutputSchema.Required {
+			if r == "topic" {
+				t.Error("read_channel output requires topic; a channel without one omits it")
+			}
+		}
+		return
+	}
+	t.Fatal("tools/list has no read_channel")
+}

@@ -8,6 +8,9 @@ release that Nick publishes.
 
 ## [Unreleased]
 
+### Added
+- **An agent reads a channel's topic** (#1506). MCP's `read_channel` returns `topic` beside the page when the channel has one, and omits it when not.
+
 ## [0.1.0-alpha.18] - 2026-11-09
 
 This is a pre-1.0 release (`v0.1.0-alpha.18`). There is no new schema version. `pkg/schema` gains the constant `SpoilerFilePrefix` (`SPOILER_`), which is presentation only (#1500). After the upgrade, an open browser tab offers a reload (#1534).
