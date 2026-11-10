@@ -92,6 +92,10 @@ func runChannels(ctx context.Context, args []string, stdout, stderr io.Writer) e
 		if len(pos) < 1 || len(pos) > 2 {
 			return fmt.Errorf("cli: channels topic: expected <channel> [<text>] (usage: %s)", channelsUsage[verb])
 		}
+		if len(pos) == 2 && pos[1] == "" && !*clear {
+			// An empty "$TOPIC" in a script must not clear the topic by accident.
+			return fmt.Errorf("cli: channels topic: the topic text is empty; use --clear to clear the topic (usage: %s)", channelsUsage[verb])
+		}
 		if *clear && len(pos) != 1 {
 			return fmt.Errorf("cli: channels topic: --clear cannot be used with text (usage: %s)", channelsUsage[verb])
 		}
@@ -200,7 +204,8 @@ func runChannelTopic(ctx context.Context, client *Client, out channelsOutput, li
 		}
 		if !write {
 			if out.asJSON {
-				return out.json(list)
+				// One element of `channels list --json`, not the whole list.
+				return out.json(channel)
 			}
 			if channel.Topic == "" {
 				return nil
@@ -222,7 +227,7 @@ var channelsUsage = map[string]string{
 	"join":   "conch channels join [--server <url>] [--json] <channel>",
 	"leave":  "conch channels leave [--server <url>] [--json] <channel>",
 	"create": "conch channels create [--server <url>] [--json] [--private] <name>",
-	"topic":  "conch channels topic [--server <url>] [--json] [--clear] <channel> [<text>]",
+	"topic":  "conch channels topic [--server <url>] [--json] [--clear] <channel> [<text>]   (put -- before a <text> that starts with -)",
 }
 
 func channelsArgName(verb string) string {
