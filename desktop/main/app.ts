@@ -269,6 +269,8 @@ export async function start(): Promise<void> {
     log,
   });
   await settings.load();
+  // An entry written earlier is judged again: the install may have been loosened since.
+  await settings.rejudge();
   const store = new ProfileStore(
     checked.ok
       ? files
