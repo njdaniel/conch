@@ -606,7 +606,8 @@ const ridRank: Readonly<Record<string, number>> = { q: 0, h: 1, f: 2 };
 // (active false) is above the one reported ('above': the top is paused, the
 // sender gives viewers a lower one), only below it or the same ('none': a lower
 // layer nobody takes says nothing about the top), or cannot be ranked
-// ('unknown': it has no size and no rid to compare). Ranked by size, else by rid.
+// ('unknown': it has no size and no rid to compare). Ranked by rid when both layers
+// have a known one, else by size.
 function inactiveAbove(all: readonly ShareStats[], sent: ShareStats): 'above' | 'unknown' | 'none' {
   const area = (stat: ShareStats): number | undefined => (known(stat.frameWidth) && known(stat.frameHeight) ? stat.frameWidth * stat.frameHeight : undefined);
   let result: 'above' | 'unknown' | 'none' = 'none';
@@ -738,9 +739,15 @@ export function shortfallReason(sample: ShareSample, quality: ShareQuality): str
     return Math.max(sample.width, sample.height) < Math.max(w, h) * sizeSlack && Math.min(sample.width, sample.height) < Math.min(w, h) * sizeSlack;
   })();
   const paused = sample.paused === true || (sample.layerOff === true && behind);
-  const asRequested = paused || sample.limitation === 'none';
+  // No limitation reported at all (Firefox) is treated like none: with no
+  // pause signal either, a smaller picture is not blamed, because Firefox
+  // shrinks the top layer instead of setting active=false when no viewer takes
+  // it, and a low rate alone never gets a reason. Only a capture smaller than
+  // asked still shows.
+  const unlimited = sample.limitation === 'none' || sample.limitation === undefined;
+  const asRequested = paused || unlimited;
   const underSize = under && (captureSmall || !asRequested);
-  const slow = !paused && sample.limitation !== 'none' && sample.fps < ask.frameRate * fpsFloor;
+  const slow = !paused && !unlimited && sample.fps < ask.frameRate * fpsFloor;
   if (!underSize && !slow) return null;
   if (underSize && captureSmall) return `What you're sharing is smaller than ${quality.resolution}`;
   if (sample.limitation === 'cpu') return 'Limited by CPU';
