@@ -11,7 +11,7 @@ which serves the packaged files and starts none).
 
 | Suite (CI job) | Lane | What it proves | What it does not | Local command | Artifacts |
 | --- | --- | --- | --- | --- | --- |
-| `web/e2e` in Chromium (`web-e2e`, three shards) | every pull request and push to `main`, with `--grep-invert @heavy` | the browser client against a fixture community: sign-in, messages, admin, browser voice, camera and screen share on Chromium's fake devices, with the pinned LiveKit in Docker | Firefox and WebKit (#1658); real microphones, cameras and screens; a LAN or a second machine; real AI agents (scripted ones only) | `make web-e2e` (once: `cd web && npx playwright install chromium`) | traces of failed tests, `web-e2e-test-results-N`, 7 days |
+| `web/e2e` in Chromium (`web-e2e`, three shards) | every pull request and push to `main`, with `--grep-invert @heavy` | the browser client against a fixture community: sign-in, messages, admin, browser voice, camera and screen share on Chromium's fake devices, with the pinned LiveKit in Docker | Firefox and WebKit (they run in the heavy lane, below); real microphones, cameras and screens; a LAN or a second machine; real AI agents (scripted ones only) | `make web-e2e` (once: `cd web && npx playwright install chromium`) | traces of failed tests, `web-e2e-test-results-N`, 7 days |
 | `web/e2e` heavy lane (`e2e-heavy.yml`) | daily on `main`, and on demand for any branch | the tests tagged `@heavy`: those over the pull request budget, and deliberate fault or blackhole tests | the same limits as the row above | `make web-e2e-heavy` | traces of failed tests, `e2e-heavy-test-results`, 7 days |
 | `voice-check` | every pull request | the voice control plane: a real `conchd`, the real `conch` CLI, three `conch-voice` clients and a real LiveKit; the core unaffected with LiveKit down | a human's ears; real audio devices; PipeWire | `go run ./e2e/voice` (Docker) | the log |
 | `desktop-voice-check` | every pull request | the Linux desktop shell's voice and screen companion against the web client and LiveKit | a real display or sound card; a second machine (#1584) | `make desktop-voice-e2e` (Docker) | the log |
@@ -264,8 +264,12 @@ A test carries tags in Playwright's `tag` option:
   shard; `e2e-heavy.yml` runs `--grep @heavy`.
 - `@smoke` marks the fast subset for a quick local run: `make web-e2e
   E2E_ARGS="--grep @smoke"`.
-- `@cross` marks the subset other browser engines run (#1658). Only Chromium
-  is configured today.
+- `@cross` marks the subset Firefox and WebKit run (#1658), when
+  `CONCH_E2E_BROWSERS` names them. Chromium runs it with the rest, in the pull
+  request lane too. Tag a test `@cross` only if it passes on the engines it runs
+  on; one that needs a fake microphone also carries `@voice`, which the `webkit`
+  project leaves out. An engine that cannot do a thing is not given a skip: the
+  test is not tagged, and the table below says why.
 
 Untagged tests stay in the pull request lane. `--grep` is an unanchored regular
 expression over titles and tags, so a tag that merely contains `@heavy` (say
@@ -286,7 +290,52 @@ expression over titles and tags, so a tag that merely contains `@heavy` (say
   A run with no `@heavy` test passes (`--pass-with-no-tests`). It does not use the
   self-hosted `HEAVY_RUNNER` path. The repository is public, so hosted minutes
   cost nothing; wall time and queue contention are the cost.
-- Windows, macOS and engines other than Chromium are not in this lane.
+- **Other engines:** the `e2e-cross` job of `e2e-heavy.yml`, one job each for
+  Firefox and WebKit (`fail-fast` off, the same 40-minute bound), runs
+  `--project=<engine> --grep @cross` with `CONCH_E2E_BROWSERS=<engine>`. It
+  never runs in the pull request lane.
+- Windows and macOS runners are not in either lane (Q8 of #1607: `conchd` has no
+  Windows build in CI, and the pinned LiveKit is a Linux container).
+
+### Firefox and WebKit (#1658)
+
+Without `CONCH_E2E_BROWSERS`, `playwright.config.ts` defines Chromium only and
+`make web-e2e` runs the same 367 tests as before. To run the other engines
+locally:
+
+```
+cd web && npx playwright install firefox webkit     # once; WebKit also needs system libraries
+CONCH_E2E_BROWSERS=firefox make web-e2e E2E_ARGS="--project=firefox --grep @cross"
+CONCH_E2E_BROWSERS=webkit  make web-e2e E2E_ARGS="--project=webkit --grep @cross"
+```
+
+Capabilities, on Playwright 1.61.0's own builds (Firefox 151.0) on Linux,
+headless. WebKit here is Playwright's Linux build of the engine, not Safari;
+nothing below says anything about Safari, macOS or iOS.
+
+| Capability | Firefox | WebKit |
+| --- | --- | --- |
+| The client loads, signs in and chats | Yes. `01-sign-in` and `02-messages` (all but the F15 tab-stop count) and the 63 messaging smoke pass | Not established: does not launch on the development host (below) |
+| Fake `getUserMedia` audio | Yes, with `firefoxUserPrefs` `media.navigator.streams.fake` and `media.navigator.permission.disabled`: the track is "Default Audio Device", no prompt. Fake video the same way (a camera test passes) | Not established. No launch flag or pref is known; `@voice` tests are left out |
+| Fake `getDisplayMedia`, headless | No. The call is never answered (waited 10 s after a click; the same with the `media.getdisplaymedia.*` prefs). No `@cross` test shares a screen. `12-screen-share` also expects tab sound, which the client says Firefox does not give ("No sound: this browser shares the picture only") | Not established |
+| WebRTC to the pinned LiveKit on 127.0.0.1 | Yes, with `media.peerconnection.ice.obfuscate_host_addresses` false (the counterpart of Chromium's `WebRtcHideLocalIpsWithMdns`): `63` voice smoke and `65-who-hears-whom` pass | Not established |
+| A synthetic Web Audio microphone (#1610) heard by the other pages | Yes: `65-who-hears-whom` passes, three Firefox pages each hearing exactly the other two tones, 20 dB above the floor. Not tried against a Chromium listener (the spec uses one engine for all three) | Not established |
+
+How it was established: `npx playwright install firefox webkit` fetched both
+builds. Firefox launched and passed the `@cross` set. `getDisplayMedia` was
+probed on a page of 127.0.0.1 with a click (it needs a user gesture) and never
+answered. WebKit failed to launch with "Host system is missing dependencies"
+(`libevent-2.1-7t64`, `libavif16`, `libwoff1`) on the development host, which has
+no root access here, so no WebKit row is claimed: the `webkit` project and its CI
+job exist, and the first `e2e-heavy` run on the branch is what establishes the
+column (CI installs with `--with-deps`). Where it fails, the failing test is
+untagged or the project dropped, with the error recorded here.
+
+Tests that pass on Firefox and are tagged `@cross`: the six of `01-sign-in`,
+the five of `02-messages` other than F15's tab-stop count (Firefox's log has one
+tab stop more than Chromium's: 8, not 7), and the two of `63-multi-user-smoke`
+(the second is also `@voice`), and `65-who-hears-whom` (`@voice`).
+
 
 ## Multi-user specs and helpers
 

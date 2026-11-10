@@ -86,3 +86,58 @@ jobs:
           path: web/test-results
           retention-days: 7
           if-no-files-found: ignore
+
+  # Other engines (issue #1658): the tests tagged @cross in Playwright's own
+  # Firefox and WebKit builds on Linux. WebKit here is not Safari, and a Linux
+  # runner says nothing about macOS or iOS. CONCH_E2E_BROWSERS puts the engine's
+  # project in web/playwright.config.ts; without it only Chromium exists, so the
+  # pull request lane is untouched. Chromium is installed too: `make web-e2e`
+  # checks for it. Each engine is a job of its own, so one failing does not hide
+  # the other, with the same bound, labels and clean-up as above.
+  e2e-cross:
+    if: github.repository == 'njdaniel/conch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        engine: [firefox, webkit]
+    env:
+      VOICE_CHECK_RUN: cross-${{ matrix.engine }}-${{ github.run_id }}-${{ github.run_attempt }}
+      CONCH_E2E_BROWSERS: ${{ matrix.engine }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: web/.nvmrc
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: install
+        working-directory: web
+        run: npm ci --no-audit
+
+      - name: browsers
+        working-directory: web
+        run: npx playwright install --with-deps chromium ${{ matrix.engine }}
+
+      - name: web-e2e (@cross, ${{ matrix.engine }})
+        run: make web-e2e E2E_ARGS="--project=${{ matrix.engine }} --grep @cross"
+
+      - name: remove any leftover LiveKit container
+        if: always()
+        run: docker ps -aq --filter "label=conch-web-voice=$VOICE_CHECK_RUN" | xargs -r docker rm -f
+
+      - name: traces of the failed tests
+        if: failure() || cancelled()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-cross-${{ matrix.engine }}-test-results
+          path: web/test-results
+          retention-days: 7
+          if-no-files-found: ignore

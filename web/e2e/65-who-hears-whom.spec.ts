@@ -59,7 +59,7 @@ const maxIdleDb = -60;
 const voiceRegion = (page: Page) => page.getByRole('region', { name: 'Voice' });
 const roster = (page: Page) => voiceRegion(page).getByRole('list', { name: 'In voice' });
 
-test.describe('@cross who hears whom', () => {
+test.describe('@cross @voice who hears whom', () => {
   let vw: VoiceWorld;
   let stopWorld: (() => void) | undefined;
 
