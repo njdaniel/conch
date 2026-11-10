@@ -161,6 +161,10 @@ func guestRows() []row {
 		// guest column, #1004.
 		{route: "POST /v1/channels/{channel}/voice/camera", what: "claims a camera in the plaza (a guest holds no voice since A4, #1016)", want: answer{http.StatusForbidden, schema.ErrorCodeVoiceNotAllowed},
 			probe: func(w *world, _ subject) probe { return post("/v1/channels/"+pch(w)+"/voice/camera", nil) }},
+		// The screen share is refused the same way: a guest holds no voice, and
+		// the claim reads the caller's voice before its share_screen cell (#1671).
+		{route: "POST /v1/channels/{channel}/voice/share", what: "claims a screen share in the plaza (a guest holds no voice since A4, #1016)", want: answer{http.StatusForbidden, schema.ErrorCodeVoiceNotAllowed},
+			probe: func(w *world, _ subject) probe { return post("/v1/channels/"+pch(w)+"/voice/share", nil) }},
 		{route: "DELETE /v1/channels/{channel}/voice/camera", what: "releases a camera in the plaza", want: answer{http.StatusForbidden, schema.ErrorCodeVoiceNotAllowed},
 			probe: func(w *world, _ subject) probe { return del("/v1/channels/" + pch(w) + "/voice/camera") }},
 		{route: "POST /v1/reports", what: "reports a problem", own: true,
@@ -245,6 +249,12 @@ func guestRows() []row {
 		refused("GET /v1/guests", "lists the visits", operatorOnly, func(*world) probe { return get("/v1/guests") }),
 		refused("POST /v1/guests/{id}/end", "ends another guest's visit", operatorOnly, func(w *world) probe {
 			return post("/v1/guests/"+id(w.p.nick2.id)+"/end", nil)
+		}),
+		// The permissions document is the operator's to change (#1671), as in
+		// the matrix's member row of the same route.
+		refused("PUT /v1/permissions", "turns a permission on for members", operatorOnly, func(*world) probe {
+			return put("/v1/permissions", schema.PutPermissionsRequestV1{Revision: 1,
+				Changes: []schema.PermissionChangeV1{{Permission: schema.PermCreatePrivateChannels, Role: schema.PermissionRoleMember, Granted: true}}})
 		}),
 		refused("POST /v0/channels", "makes a channel", operatorOnly, func(*world) probe {
 			return post("/v0/channels", schema.CreateChannelRequest{Name: "a-channel-of-her-own"})
