@@ -118,6 +118,7 @@ describe('createNativeVoice companion (issue #1581)', () => {
     const c = {
       companionGrant: vi.fn<DesktopCompanionBridge['companionGrant']>(() => Promise.resolve(grant)),
       companionEnd: vi.fn(() => Promise.resolve(true)),
+      shareArm: vi.fn(() => Promise.resolve(true)),
       onCompanion: vi.fn((l: (event: CompanionEvent) => void) => {
         listener = l;
         return off;

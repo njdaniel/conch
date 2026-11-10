@@ -8,7 +8,10 @@
 // on every end, a CompanionEvent to the page and then a DELETE to conchd.
 // Owns: the one live companion, p<id>.screen, of the activation in force, the
 // one request for it in flight, and the LiveKit origin of the live grant
-// (liveOrigin, which #1580's request filter reads).
+// (liveOrigin, which #1580's request filter and display-capture rules read).
+// Beside a grant it says when this desktop cannot share a screen (#1580:
+// shareUnavailable, from the portal probe), so the page can say so; the
+// grant itself is still given, for watching.
 //
 // What it keeps:
 //  - a grant is asked for only for the voice destination, while the view is
@@ -24,6 +27,17 @@
 //  - every end forgets the record first, tells the page (if the document that
 //    was given the grant still shows) and then sends the DELETE once; a DELETE
 //    that fails is logged by the end's reason alone;
+//  - every end, the page's own included, also asks the owned window's session
+//    to close its connections (closeConnections), after the record is
+//    forgotten: the filter only judges a request when it begins. That call
+//    reaches idle and pending sockets only: a live WebSocket stays open and
+//    keeps sending (probed on #1621, S2). What ends the companion's LiveKit
+//    socket is conchd's DELETE removing the participant. So when the DELETE
+//    is not confirmed (it failed or timed out), main reloads the owned
+//    window's document (reload), and no page-held socket survives an
+//    unconfirmed end. Main has no signal for whether the page's
+//    display-capture track still runs, so it cannot tell a page that ignored
+//    the end event;
 //  - every grant needs a new act: none is re-issued after a room renewal,
 //    which ends the share (Q-D4-2 on #1578).
 //
@@ -34,6 +48,7 @@ import type {
   CompanionGrant,
   CompanionGrantError,
   CompanionGrantResult,
+  CompanionShareUnavailable,
   NativeVoiceView,
 } from '../../../web/src/platform/desktop/bridge.ts';
 import { voiceCompanionResponseV1, type VoiceCompanionRequestV1, type VoiceCompanionResponseV1 } from '../../../web/src/schema/generated.ts';
@@ -80,6 +95,33 @@ export interface CompanionDeps {
   readonly locked: () => boolean;
   // Test seam for the one wait before the second ask.
   readonly sleep?: (ms: number) => Promise<void>;
+  // Asks whether this desktop can share a screen (portal.ts), alongside the
+  // request to conchd; null when it can. Absent: nothing is said.
+  readonly share?: () => Promise<CompanionShareUnavailable | null>;
+  // Asks the owned window's session to close its connections (the
+  // activation's session.closeAllConnections). Called on every end, after the
+  // record is forgotten. It closes idle and pending sockets only; a live
+  // WebSocket survives it. Absent: nothing.
+  readonly closeConnections?: () => Promise<void>;
+  // The owned window's web contents now, or null. Taken with the grant, so a
+  // reload can be bound to the window that held it. Absent: null.
+  readonly contents?: () => object | null;
+  // Reloads the owned window's document: the end of anything the page still
+  // holds when the companion's removal at conchd was not confirmed. Given the
+  // contents and the document generation that held the grant, as tell is
+  // given the document: the implementation reloads only if the owned contents
+  // are still that object and still show that document (S2 of #1621), so a
+  // profile switch or a new document inside the removal's wait is not
+  // reloaded. Not asked for the ends 'reload' and 'crash': the document is
+  // already gone. Absent: nothing.
+  readonly reload?: (contents: object | null, document: number) => void;
+  // Called when a grant was issued and the record is made, with the contents
+  // and document that hold it (app.ts: starts the share allowance's capture
+  // window, share-allowance.ts).
+  readonly granted?: (contents: object | null, document: number) => void;
+  // Called at the start of every end() and stop(), whether or not a companion
+  // is held (app.ts: clears the share allowance, share-allowance.ts).
+  readonly ended?: () => void;
 }
 
 // The live companion: what it was asked for, and with what.
@@ -91,10 +133,20 @@ interface Held {
   readonly client: CompanionClient;
   // The document that was given the grant.
   readonly document: number;
+  // The owned contents when it was given: null when none was known.
+  readonly contents: object | null;
   readonly origin: string;
 }
 
 type Asking = Pick<Held, 'channel' | 'generation'>;
+
+// stillHeldBy says whether the owned window is still the one that held a
+// grant: the same web contents object, and the same document generation (S2
+// of #1621). Only then is a reload for an unconfirmed removal the end of what
+// that page holds; any other window or document is not its to end.
+export function stillHeldBy(now: { readonly contents: object | null; readonly generation: number }, held: { readonly contents: object | null; readonly document: number }): boolean {
+  return now.contents !== null && now.contents === held.contents && now.generation === held.document;
+}
 
 // Why a removal was sent, for its log line.
 type RemoveReason = CompanionEndReason | 'stopped' | 'unused';
@@ -165,6 +217,7 @@ export class Companion {
   readonly #sleep: (ms: number) => Promise<void>;
   #held: Held | null = null;
   #asking: Asking | null = null;
+  readonly #changed = new Set<() => void>();
   // Counts ends and stops: a request begun before one is overtaken by it.
   #epoch = 0;
 
@@ -179,6 +232,25 @@ export class Companion {
     deps.voice.subscribe((view) => {
       this.#onVoice(view);
     });
+  }
+
+  // onChange calls the listener whenever a companion becomes live or ends, so
+  // the tray can follow "Sharing your screen". It returns the remover.
+  onChange(listener: () => void): () => void {
+    this.#changed.add(listener);
+    return () => {
+      this.#changed.delete(listener);
+    };
+  }
+
+  #announce(): void {
+    for (const listener of [...this.#changed]) {
+      try {
+        listener();
+      } catch {
+        // A listener's failure is not the companion's.
+      }
+    }
   }
 
   // liveOrigin is the LiveKit origin of the live grant, or null when no
@@ -212,13 +284,14 @@ export class Companion {
     const asking: Asking = { channel, generation: view.generation };
     this.#asking = asking;
     try {
-      return await this.#ask(client, asking, this.#epoch, this.#deps.document());
+      const share = (this.#deps.share?.() ?? Promise.resolve(null)).catch((): CompanionShareUnavailable => 'no-portal');
+      return await this.#ask(client, asking, this.#epoch, this.#deps.document(), share);
     } finally {
       this.#asking = null;
     }
   }
 
-  async #ask(client: CompanionClient, asking: Asking, epoch: number, document: number): Promise<CompanionGrantResult> {
+  async #ask(client: CompanionClient, asking: Asking, epoch: number, document: number, share: Promise<CompanionShareUnavailable | null>): Promise<CompanionGrantResult> {
     let exchange = await this.#post(client, asking.channel);
     if (refusedWith(exchange, 'voice_no_session')) {
       // conchd has not yet seen p<id> in the room: one pass, then once more.
@@ -239,6 +312,9 @@ export class Companion {
       return refuse('failed');
     }
     const given = grantOf(exchange.body);
+    // Asked alongside conchd; read before the overtaken check, so that
+    // nothing is awaited between that check and the record.
+    const shareUnavailable = await share;
     const overtaken = epoch !== this.#epoch || this.#deps.client() !== client || lossOf(this.#deps.voice.state(), asking) !== null;
     if (given === null || overtaken) {
       // conchd has issued a companion nobody will use: remove it.
@@ -246,9 +322,18 @@ export class Companion {
       await this.#remove(client, asking.channel, 'unused');
       return refuse(given === null ? 'failed' : 'ended');
     }
-    this.#held = { ...asking, client, document, origin: given.origin };
+    const contents = this.#deps.contents?.() ?? null;
+    this.#held = { ...asking, client, document, contents, origin: given.origin };
+    try {
+      this.#deps.granted?.(contents, document);
+    } catch {
+      // A window that cannot be told is not a reason to drop the grant.
+    }
     this.#deps.log('companion: issued');
-    return { ok: true, grant: given.grant };
+    // After the window was told and the grant is held: a listener (the tray)
+    // sees the live companion, never one that has already ended.
+    this.#announce();
+    return shareUnavailable === null ? { ok: true, grant: given.grant } : { ok: true, grant: given.grant, shareUnavailable };
   }
 
   // stop is the page's own companionEnd: the record goes and conchd is asked
@@ -256,10 +341,17 @@ export class Companion {
   // still in flight is overtaken.
   async stop(): Promise<boolean> {
     this.#epoch++;
+    this.#deps.ended?.();
     const held = this.#held;
     if (held === null) return false;
     this.#held = null;
-    await this.#remove(held.client, held.channel, 'stopped');
+    // Ended is called above, before the record goes: no listener sees a held
+    // grant after it.
+    this.#announce();
+    const closing = this.#close();
+    const removed = await this.#remove(held.client, held.channel, 'stopped');
+    await closing;
+    this.#unconfirmed(removed, held, 'stopped');
     return true;
   }
 
@@ -269,15 +361,21 @@ export class Companion {
   // is overtaken. Public for #1588 (D5-02: lock and suspend).
   async end(reason: CompanionEndReason): Promise<boolean> {
     this.#epoch++;
+    this.#deps.ended?.();
     const held = this.#held;
     if (held === null) return false;
     this.#held = null;
+    this.#announce();
     try {
       this.#deps.tell(held.document, { type: 'end', reason });
     } catch {
       // A window that cannot be told is not a reason to keep the companion.
     }
-    await this.#remove(held.client, held.channel, reason);
+    // Begun at once, alongside the DELETE: neither waits for the other.
+    const closing = this.#close();
+    const removed = await this.#remove(held.client, held.channel, reason);
+    await closing;
+    this.#unconfirmed(removed, held, reason);
     return true;
   }
 
@@ -300,15 +398,42 @@ export class Companion {
     }
   }
 
-  // The one DELETE of an end: never retried.
-  async #remove(client: CompanionClient, channel: string, reason: RemoveReason): Promise<void> {
+  // #close drops the open connections of the window's session, once per end.
+  // It never throws and is not retried: the record is already gone, so no new
+  // request to LiveKit can begin.
+  async #close(): Promise<void> {
+    try {
+      await this.#deps.closeConnections?.();
+    } catch {
+      this.#deps.log('companion: open connections could not be closed');
+    }
+  }
+
+  // #unconfirmed reloads the window that held the grant when the removal was
+  // not confirmed, unless that document is already gone: after a reload or a
+  // crash there is nothing left to reload, and the next document is not the
+  // one that held the grant.
+  #unconfirmed(removed: boolean, held: Held, reason: RemoveReason): void {
+    if (removed) return;
+    if (reason === 'reload' || reason === 'crash') return;
+    this.#deps.log('companion: the removal was not confirmed; reloading the window');
+    try {
+      this.#deps.reload?.(held.contents, held.document);
+    } catch {
+      // A window that cannot be reloaded is already gone.
+    }
+  }
+
+  // The one DELETE of an end: never retried. True when conchd confirmed it.
+  async #remove(client: CompanionClient, channel: string, reason: RemoveReason): Promise<boolean> {
     let exchange: Exchange;
     try {
       exchange = await client.send({ op: 'voiceViewerEnd', params: { channel }, query: 'publish=screen', timeoutMs: COMPANION_REMOVE_TIMEOUT_MS });
     } catch {
       exchange = { kind: 'none' };
     }
-    if (exchange.kind === 'answer' && exchange.ok) return;
+    if (exchange.kind === 'answer' && exchange.ok) return true;
     this.#deps.log(`companion: the removal after ${reason} was not confirmed`);
+    return false;
   }
 }

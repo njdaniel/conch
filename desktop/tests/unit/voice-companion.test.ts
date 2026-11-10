@@ -7,7 +7,7 @@ import { describe, expect, it } from 'vitest';
 import { Client, type Exchange, type Send } from '../../main/api/client.ts';
 import { invocable } from '../../main/api/service.ts';
 import { Session } from '../../main/api/session.ts';
-import { COMPANION_PASS_MS, COMPANION_REMOVE_TIMEOUT_MS, Companion, type CompanionClient } from '../../main/voice/companion.ts';
+import { COMPANION_PASS_MS, COMPANION_REMOVE_TIMEOUT_MS, Companion, stillHeldBy, type CompanionClient } from '../../main/voice/companion.ts';
 import type { CompanionEndReason, CompanionEvent, NativeVoiceHelper, NativeVoiceView } from '../../../web/src/platform/desktop/bridge.ts';
 import { operations } from '../../../web/src/platform/operations.ts';
 import type { VoiceCompanionResponseV1 } from '../../../web/src/schema/generated.ts';
@@ -39,13 +39,23 @@ interface Rig {
   // told otherwise.
   readonly answers: (Exchange | Promise<Exchange>)[];
   readonly removals: Exchange[];
+  // The liveOrigin seen by each closeConnections call, and a failure to throw.
+  readonly closes: (string | null)[];
+  readonly closeFails: { value: boolean };
+  // How many times the window's document was reloaded.
+  readonly reloads: { count: number; throws: boolean; seen: [object | null, number][] };
+  // The owned contents the rig reports, and what granted() was told.
+  readonly contents: { value: object | null };
+  readonly granted: [object | null, number][];
   readonly voice: { view: NativeVoiceView; set(view: NativeVoiceView): void };
   readonly document: { value: number };
   client: CompanionClient | null;
   sends(): Send[];
 }
 
-function rig(view: NativeVoiceView = running()): Rig {
+const win = {};
+
+function rig(view: NativeVoiceView = running(), share?: () => Promise<'no-portal' | 'not-wayland' | null>): Rig {
   const steps: Step[] = [];
   const logs: string[] = [];
   const answers: (Exchange | Promise<Exchange>)[] = [];
@@ -59,6 +69,11 @@ function rig(view: NativeVoiceView = running()): Rig {
     },
   };
   const document = { value: 5 };
+  const closes: (string | null)[] = [];
+  const closeFails = { value: false };
+  const reloads: Rig['reloads'] = { count: 0, throws: false, seen: [] };
+  const contents: Rig['contents'] = { value: win };
+  const granted: [object | null, number][] = [];
   const client: CompanionClient = {
     send: (request) => {
       steps.push(['send', request]);
@@ -71,6 +86,11 @@ function rig(view: NativeVoiceView = running()): Rig {
     logs,
     answers,
     removals,
+    closes,
+    closeFails,
+    reloads,
+    contents,
+    granted,
     voice,
     document,
     client,
@@ -92,6 +112,18 @@ function rig(view: NativeVoiceView = running()): Rig {
         steps.push(['tell', doc, event]);
       },
       log: (line) => logs.push(line),
+      closeConnections: () => {
+        closes.push(r.companion.liveOrigin());
+        return closeFails.value ? Promise.reject(new Error('session gone')) : Promise.resolve();
+      },
+      contents: () => contents.value,
+      granted: (c, d) => granted.push([c, d]),
+      reload: (c, d) => {
+        reloads.seen.push([c, d]);
+        reloads.count++;
+        if (reloads.throws) throw new Error('window gone');
+      },
+      ...(share === undefined ? {} : { share }),
       sleep: (ms) => {
         steps.push(['sleep', ms]);
         return Promise.resolve();
@@ -238,6 +270,24 @@ describe('the companion’s grant', () => {
     expect(r.companion.liveOrigin()).toBeNull();
   });
 
+  it('says beside the grant why Share is unavailable (#1580), and still gives the grant', async () => {
+    for (const why of ['no-portal', 'not-wayland'] as const) {
+      const r = rig(running(), () => Promise.resolve(why));
+      r.answers.push(ok(ANSWER));
+      expect(await r.companion.grant({ channel: 'general' })).toEqual({ ok: true, grant: GRANT, shareUnavailable: why });
+      expect(r.companion.liveOrigin()).toBe('wss://voice.example');
+    }
+  });
+
+  it('says nothing of Share when the portal answers, or when the probe throws it is "no-portal"', async () => {
+    const yes = rig(running(), () => Promise.resolve(null));
+    yes.answers.push(ok(ANSWER));
+    expect(await yes.companion.grant({ channel: 'general' })).toEqual({ ok: true, grant: GRANT });
+    const boom = rig(running(), () => Promise.reject(new Error('boom')));
+    boom.answers.push(ok(ANSWER));
+    expect(await boom.companion.grant({ channel: 'general' })).toEqual({ ok: true, grant: GRANT, shareUnavailable: 'no-portal' });
+  });
+
   it('accepts plain ws to loopback, for development', async () => {
     const r = rig();
     r.answers.push(ok({ ...ANSWER, livekit_url: 'ws://127.0.0.1:7880' }));
@@ -346,6 +396,45 @@ describe('the companion’s grant', () => {
   });
 });
 
+describe('the companion’s change signal (the tray follows it)', () => {
+  it('fires when a companion becomes live, ends, and is stopped, and not for a refusal', async () => {
+    const r = rig();
+    let n = 0;
+    const off = r.companion.onChange(() => {
+      n++;
+    });
+    r.answers.push(refusal(500));
+    await r.companion.grant({ channel: 'general' });
+    expect(n).toBe(0);
+    r.answers.push(ok(ANSWER));
+    await r.companion.grant({ channel: 'general' });
+    expect(n).toBe(1);
+    await r.companion.end('leave');
+    expect(n).toBe(2);
+    r.answers.push(ok(ANSWER));
+    await r.companion.grant({ channel: 'general' });
+    await r.companion.stop();
+    expect(n).toBe(4);
+    // Nothing held: an end or stop signals nothing.
+    await r.companion.end('leave');
+    await r.companion.stop();
+    expect(n).toBe(4);
+    off();
+    r.answers.push(ok(ANSWER));
+    await r.companion.grant({ channel: 'general' });
+    expect(n).toBe(4);
+  });
+
+  it('a listener that throws does not break the companion', async () => {
+    const r = rig();
+    r.companion.onChange(() => {
+      throw new Error('x');
+    });
+    r.answers.push(ok(ANSWER));
+    expect((await r.companion.grant({ channel: 'general' })).ok).toBe(true);
+  });
+});
+
 describe('the companion’s end', () => {
   it('companionEnd sends the DELETE and forgets the record, and tells the page nothing (it asked)', async () => {
     const r = rig();
@@ -371,6 +460,69 @@ describe('the companion’s end', () => {
     expect(await r.companion.end(reason)).toBe(false);
     expect(r.steps).toHaveLength(2);
   });
+
+  it.each(reasons)('closes the open connections on %s, after the record is forgotten', async (reason) => {
+    const r = rig();
+    await live(r);
+    await r.companion.end(reason);
+    expect(r.closes).toEqual([null]);
+    await r.companion.end(reason);
+    expect(r.closes).toHaveLength(1);
+  });
+
+  it('closes the open connections on the page’s own companionEnd too', async () => {
+    const r = rig();
+    await live(r);
+    await r.companion.stop();
+    expect(r.closes).toEqual([null]);
+  });
+
+  it('closes the open connections when the helper is lost', async () => {
+    const r = rig();
+    await live(r);
+    r.voice.set(idle);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(r.closes).toEqual([null]);
+  });
+
+  it('closes nothing when nothing is live, and still sends the DELETE when closing fails', async () => {
+    const r = rig();
+    expect(await r.companion.end('quit')).toBe(false);
+    expect(r.closes).toEqual([]);
+    await live(r);
+    r.closeFails.value = true;
+    expect(await r.companion.end('quit')).toBe(true);
+    expect(r.steps).toEqual([['tell', 5, { type: 'end', reason: 'quit' }], ['send', DELETE]]);
+    expect(r.logs.join('\n')).toContain('could not be closed');
+  });
+
+  it.each<CompanionEndReason>(['leave', 'helper', 'renewal', 'sign-out', 'switch', 'quit', 'crash', 'reload', 'lock', 'suspend'])(
+    'tells main that it ended (to clear the share allowance), for %s, held or not',
+    async (reason) => {
+      let ended = 0;
+      const client: CompanionClient = { send: (request) => Promise.resolve(request.op === 'voiceViewer' ? ok(ANSWER) : ok()) };
+      const companion = new Companion({
+        locked: () => false,
+        voice: { state: () => running(), subscribe: () => () => undefined },
+        client: () => client,
+        document: () => 1,
+        tell: () => undefined,
+        ended: () => {
+          ended++;
+        },
+        log: () => undefined,
+      });
+      // Nothing held: an end still clears (a cold Share armed it before any grant).
+      expect(await companion.end(reason)).toBe(false);
+      expect(ended).toBe(1);
+      expect((await companion.grant({ channel: 'general' })).ok).toBe(true);
+      expect(await companion.end(reason)).toBe(true);
+      expect(ended).toBe(2);
+      expect(await companion.stop()).toBe(false);
+      expect(ended).toBe(3);
+    },
+  );
 
   it('still sends the DELETE when the page cannot be told', async () => {
     const steps: Send[] = [];
@@ -432,7 +584,8 @@ describe('the companion’s end', () => {
     r.removals.push(refusal(503, 'voice_unavailable'));
     await r.companion.end('leave');
     expect(r.sends()).toEqual([DELETE]);
-    expect(r.logs).toEqual(['companion: the removal after leave was not confirmed']);
+    expect(r.logs).toEqual(['companion: the removal after leave was not confirmed', 'companion: the removal was not confirmed; reloading the window']);
+    expect(r.reloads.count).toBe(1);
   });
 
   it('survives a client that throws, and logs it by reason', async () => {
@@ -444,7 +597,71 @@ describe('the companion’s end', () => {
     const send = held.send.bind(held);
     held.send = (request) => (request.op === 'voiceViewerEnd' ? Promise.reject(new Error('boom')) : send(request));
     expect(await r.companion.end('quit')).toBe(true);
-    expect(r.logs).toEqual(['companion: the removal after quit was not confirmed']);
+    expect(r.logs).toEqual(['companion: the removal after quit was not confirmed', 'companion: the removal was not confirmed; reloading the window']);
+    expect(r.reloads.count).toBe(1);
+  });
+
+  describe('reloads the window when the removal is not confirmed (S2 of #1621: closeAllConnections leaves a live socket)', () => {
+    const outcomes: [string, (r: Rig) => void, number][] = [
+      ['confirmed', () => undefined, 0],
+      ['refused by conchd', (r) => r.removals.push(refusal(503, 'voice_unavailable')), 1],
+      ['no answer at all', (r) => r.removals.push({ kind: 'none' }), 1],
+    ];
+    it.each(outcomes)('an end whose DELETE is %s', async (_name, arrange, reloads) => {
+      const r = rig();
+      await live(r);
+      arrange(r);
+      await r.companion.end('helper');
+      expect(r.reloads.count).toBe(reloads);
+    });
+
+    it.each(outcomes)('the page’s own companionEnd whose DELETE is %s', async (_name, arrange, reloads) => {
+      const r = rig();
+      await live(r);
+      arrange(r);
+      await r.companion.stop();
+      expect(r.reloads.count).toBe(reloads);
+    });
+
+    it('reloads nothing when no companion was held, so no DELETE was sent', async () => {
+      const r = rig();
+      await r.companion.end('reload');
+      await r.companion.stop();
+      expect(r.reloads.count).toBe(0);
+    });
+
+    it('hands the reload the contents and the document that held the grant', async () => {
+      const r = rig();
+      await live(r);
+      r.document.value = 9;
+      r.contents.value = {};
+      r.removals.push(refusal(503));
+      await r.companion.end('leave');
+      expect(r.reloads.seen).toEqual([[win, 5]]);
+    });
+
+    it.each<CompanionEndReason>(['reload', 'crash'])('reloads nothing for %s, even with the removal unconfirmed', async (reason) => {
+      const r = rig();
+      await live(r);
+      r.removals.push(refusal(503));
+      await r.companion.end(reason);
+      expect(r.reloads.count).toBe(0);
+    });
+
+    it('tells the allowance the grant was issued, with the contents and the document', async () => {
+      const r = rig();
+      await live(r);
+      expect(r.granted).toEqual([[win, 5]]);
+    });
+
+    it('survives a window that cannot be reloaded', async () => {
+      const r = rig();
+      await live(r);
+      r.reloads.throws = true;
+      r.removals.push(refusal(503));
+      expect(await r.companion.end('leave')).toBe(true);
+      expect(r.reloads.count).toBe(1);
+    });
   });
 });
 
@@ -512,5 +729,21 @@ describe('the route’s entry in the operation table', () => {
     expect(operations.voiceViewer.path).toBe('/v1/channels/{channel}/voice/companion');
     expect(operations.voiceViewerEnd.method).toBe('DELETE');
     expect(operations.voiceViewerEnd.path).toBe('/v1/channels/{channel}/voice/companion');
+  });
+});
+
+describe('stillHeldBy (S2 of #1621: the reload is for the window and document that held the grant)', () => {
+  const held = { contents: win, document: 5 };
+  it.each<[string, { contents: object | null; generation: number }, boolean]>([
+    ['the same document of the same window', { contents: win, generation: 5 }, true],
+    ['a profile switch: another window object', { contents: {}, generation: 5 }, false],
+    ['a profile switch: no window', { contents: null, generation: 5 }, false],
+    ['a document change in the same window', { contents: win, generation: 6 }, false],
+  ])('%s', (_name, now, want) => {
+    expect(stillHeldBy(now, held)).toBe(want);
+  });
+
+  it('a grant held with no contents is never reloaded', () => {
+    expect(stillHeldBy({ contents: null, generation: 5 }, { contents: null, document: 5 })).toBe(false);
   });
 });

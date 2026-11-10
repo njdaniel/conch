@@ -538,6 +538,11 @@ export interface DesktopSettingsView {
   readonly launchAtLogin: boolean;
   // Whether a working tray exists right now.
   readonly trayWorking: boolean;
+  // Whether a tray host is on the session bus right now: the choice can be
+  // made only then.
+  readonly trayDetected: boolean;
+  // Whether the person has confirmed, this run, that they can see the icon.
+  readonly trayConfirmed: boolean;
   // Whether this build may set launch at login (an installed build may).
   readonly launchAvailable: boolean;
   // Why not, when it is not: an unpackaged run, or an app that sits where
@@ -548,11 +553,13 @@ export interface DesktopSettingsView {
 export interface SettingsChange {
   readonly closeToTray?: boolean;
   readonly launchAtLogin?: boolean;
+  // The answer to "Can you see the Conch icon in your panel?" (Q-D5-2).
+  readonly trayConfirmed?: boolean;
 }
 
 export type SettingsResult =
   | { readonly ok: true; readonly view: DesktopSettingsView }
-  | { readonly ok: false; readonly reason: 'unpackaged' | 'unsafe-location' | 'foreign-file' | 'failed' };
+  | { readonly ok: false; readonly reason: 'unpackaged' | 'unsafe-location' | 'foreign-file' | 'no-tray' | 'failed' };
 
 export interface DesktopSettingsBridge {
   settings(): Promise<DesktopSettingsView>;
@@ -589,7 +596,17 @@ export interface CompanionGrant {
 // else, said no more precisely.
 export type CompanionGrantError = 'not-in-voice' | 'not-yet' | 'elsewhere' | 'ended' | 'failed';
 
-export type CompanionGrantResult = { readonly ok: true; readonly grant: CompanionGrant } | { readonly ok: false; readonly error: CompanionGrantError };
+// Why this desktop cannot share a screen, said beside a grant (#1580, D4-03;
+// Q-D4-4 on #1578): the grant still serves watching others' shares. Share
+// goes only through the screen-cast portal's own picker. no-portal: the
+// portal does not answer for ScreenCast; not-wayland: the session is not
+// Wayland, where Chromium would not use the portal. The page says "share
+// unavailable: no screen-cast portal" for either, and main opens no capture.
+export type CompanionShareUnavailable = 'no-portal' | 'not-wayland';
+
+export type CompanionGrantResult =
+  | { readonly ok: true; readonly grant: CompanionGrant; readonly shareUnavailable?: CompanionShareUnavailable }
+  | { readonly ok: false; readonly error: CompanionGrantError };
 
 // Why main ended the live companion on its own. leave: the person left
 // voice; helper: the helper stopped, failed or lost its connection; renewal:
@@ -609,7 +626,22 @@ export interface CompanionEvent {
 export interface DesktopCompanionBridge {
   // The companion's grant for the voice destination. Only right after the
   // person's own click or key.
+  // The result's shareUnavailable ('no-portal' | 'not-wayland') is how the
+  // page learns, before it picks, that this desktop has no screen-cast portal.
   companionGrant(request: { readonly channel: ChannelName }): Promise<CompanionGrantResult>;
+  // Arms the share allowance (issue #1580, D4-03): the page calls this
+  // synchronously at the very start of the Share click, before anything else
+  // (before the join, the grant, any await). It takes the person's click or
+  // key and, for 10 s, lets exactly one companionGrant and one screen
+  // capture follow without a click of their own; a second of either
+  // needs a new shareArm. Nothing but this arms a capture: a raw click or the
+  // Enter that sends a message does not. Watching needs no arming: its
+  // companionGrant uses its own fresh click as before. Answers true when
+  // armed, false when main had nothing to arm for. Rejects (refused) when
+  // there was no click, in a subframe or after a reload. A new call replaces
+  // the allowance; it is cleared by any companion end, a reload, a crash,
+  // sign-out, a switch and quit.
+  shareArm(): Promise<boolean>;
   // Removes the live companion, if there is one, and says whether there was.
   companionEnd(): Promise<boolean>;
   onCompanion(listener: (event: CompanionEvent) => void): Unsubscribe;

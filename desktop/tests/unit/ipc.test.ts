@@ -7,6 +7,7 @@ import type { Service } from '../../main/api/service.ts';
 import { DocumentGate } from '../../main/document.ts';
 import { checkCaller, Ipc, parseRequest, plain, type CompanionApi, type InstalledApi, type InvitesApi, type NotificationsApi, type ProfilesApi, type VoiceApi, type SettingsApi, type ContentsLike, type FrameLike, type InvokeEvent } from '../../main/ipc.ts';
 import { COMPANION_FUNCTIONS, INVOKED_FUNCTIONS, TAG_MAX, VOICE_EVENTS, VOICE_FUNCTIONS } from '../../shared/bridge-names.ts';
+import { ShareAllowance } from '../../main/share-allowance.ts';
 import { deliverVoice } from '../../main/voice/events.ts';
 import type { NativeVoiceView } from '../../../web/src/platform/desktop/bridge.ts';
 import { VOICE_CONTROL_MAX_CHANNEL_BYTES } from '../../../web/src/schema/generated.ts';
@@ -26,6 +27,7 @@ interface Fixture {
   // Whether main's compatibility verdict lets a sign-in happen (issue #946).
   readonly permit: { value: boolean };
   readonly input: { recent: boolean };
+  readonly share: ShareAllowance;
   readonly activation: object;
   event(over?: Partial<InvokeEvent>): InvokeEvent;
 }
@@ -63,8 +65,9 @@ function fixture(): Fixture {
   const companion = new Proxy({} as CompanionApi, { get: (_t, name: string) => record(`companion.${name}`) });
   const gestures = { take: () => (input.recent ? ('pointer' as const) : null) };
   const installed = new Proxy({} as InstalledApi, { get: (_t, name: string) => record(`installed.${name}`) });
-  const ipc = new Ipc({ owned: () => contents, gate, service, feeds, files, gestures, profiles, voice, invites, notifications, settings, companion, installed, now: () => clock.now, log: (line) => logs.push(line) });
-  return { ipc, gate, contents, main, calls, logs, clock, permit, input, activation, event: (over = {}) => ({ sender: contents, senderFrame: main, ...over }) };
+  const share = new ShareAllowance({ now: () => clock.now, generation: () => gate.generation });
+  const ipc = new Ipc({ owned: () => contents, gate, service, feeds, files, gestures, profiles, voice, invites, notifications, settings, companion, share, installed, now: () => clock.now, log: (line) => logs.push(line) });
+  return { ipc, gate, contents, main, calls, logs, clock, permit, input, share, activation, event: (over = {}) => ({ sender: contents, senderFrame: main, ...over }) };
 }
 
 describe('every invocation is checked before anything else', () => {
@@ -866,6 +869,12 @@ describe('the companion family (issue #1579)', () => {
     expect(f.calls).toHaveLength(1);
   });
 
+  it.each([['companionEnd'], ['shareArm']])('%s: extra arguments are refused', async (name) => {
+    const f = fixture();
+    f.input.recent = true;
+    expect(await f.ipc.invoke(f.event(), name, ['x'])).toEqual({ ok: false, kind: 'refused' });
+  });
+
   it('needs no gesture to end the companion', async () => {
     const f = fixture();
     expect((await f.ipc.invoke(f.event(), 'companionEnd', [])).ok).toBe(true);
@@ -884,7 +893,7 @@ describe('the companion family (issue #1579)', () => {
     const f = fixture();
     f.input.recent = true;
     const event = make(f);
-    const calls: [string, unknown[]][] = [['companionGrant', [grant]], ['companionEnd', []]];
+    const calls: [string, unknown[]][] = [['companionGrant', [grant]], ['companionEnd', []], ['shareArm', []]];
     expect(calls.map(([name]) => name).sort()).toEqual([...COMPANION_FUNCTIONS].sort());
     for (const [name, args] of calls) expect(await f.ipc.invoke(event, name, args), name).toEqual({ ok: false, kind: 'refused' });
     expect(f.calls).toEqual([]);
@@ -893,6 +902,7 @@ describe('the companion family (issue #1579)', () => {
   it.each([
     ['companionGrant', [grant], 20],
     ['companionEnd', [], 60],
+    ['shareArm', [], 20],
   ] as const)('limits %s to its own budget a minute', async (name, args, limit) => {
     const f = fixture();
     f.input.recent = true;
@@ -983,6 +993,104 @@ describe('the update family (issue #1600)', () => {
   });
 });
 
+describe('the share allowance through the companion family (issue #1580)', () => {
+  const grant = { channel: 'general' };
+
+  // arm is the page's shareArm() on a click: the act is taken, then gone.
+  async function arm(f: Fixture): Promise<unknown> {
+    f.input.recent = true;
+    const result = await f.ipc.invoke(f.event(), 'shareArm', []);
+    f.input.recent = false;
+    return result;
+  }
+
+  it('shareArm needs the person’s act and arms nothing without it', async () => {
+    const f = fixture();
+    expect(await f.ipc.invoke(f.event(), 'shareArm', [])).toEqual({ ok: false, kind: 'refused' });
+    expect(f.logs.at(-1)).toContain('(gesture)');
+    expect(f.share.takeGrant(f.contents)).toBe(false);
+    expect(f.share.peekCapture(f.contents)).toBe(false);
+  });
+
+  it('the cold path: shareArm, then a grant and a capture, from one click', async () => {
+    const f = fixture();
+    expect(await arm(f)).toEqual({ ok: true, value: true });
+    // No click of its own: the grant rides on the allowance.
+    expect(await f.ipc.invoke(f.event(), 'companionGrant', [grant])).toEqual({ ok: true, value: { ran: 'companion.grant' } });
+    expect(f.share.peekCapture(f.contents)).toBe(true);
+    expect(f.share.takeCapture(f.contents)).toBe(true);
+  });
+
+  it('a grant with neither a fresh act nor an allowance is refused', async () => {
+    const f = fixture();
+    expect(await f.ipc.invoke(f.event(), 'companionGrant', [grant])).toEqual({ ok: false, kind: 'refused' });
+    expect(f.calls).toEqual([]);
+  });
+
+  it('Watch still gets a grant from a fresh click, and keeps an armed allowance', async () => {
+    const f = fixture();
+    f.input.recent = true;
+    expect((await f.ipc.invoke(f.event(), 'companionGrant', [grant])).ok).toBe(true);
+    await arm(f);
+    f.input.recent = true;
+    expect((await f.ipc.invoke(f.event(), 'companionGrant', [grant])).ok).toBe(true);
+    f.input.recent = false;
+    expect(f.share.takeGrant(f.contents)).toBe(true);
+  });
+
+  it('the grant use is single: a second grant needs a new act', async () => {
+    const f = fixture();
+    await arm(f);
+    expect((await f.ipc.invoke(f.event(), 'companionGrant', [grant])).ok).toBe(true);
+    expect(await f.ipc.invoke(f.event(), 'companionGrant', [grant])).toEqual({ ok: false, kind: 'refused' });
+    expect(f.calls).toHaveLength(1);
+  });
+
+  it('the allowance expires', async () => {
+    const f = fixture();
+    await arm(f);
+    f.clock.now += 10_001;
+    expect(await f.ipc.invoke(f.event(), 'companionGrant', [grant])).toEqual({ ok: false, kind: 'refused' });
+  });
+
+  it('a new document finds no allowance', async () => {
+    const f = fixture();
+    await arm(f);
+    f.gate.begin();
+    f.gate.commit(f.main);
+    expect(await f.ipc.invoke(f.event(), 'companionGrant', [grant])).toEqual({ ok: false, kind: 'refused' });
+    expect(f.share.peekCapture(f.contents)).toBe(false);
+  });
+
+  it('arming again replaces the allowance with a fresh one', async () => {
+    const f = fixture();
+    await arm(f);
+    expect((await f.ipc.invoke(f.event(), 'companionGrant', [grant])).ok).toBe(true);
+    await arm(f);
+    expect((await f.ipc.invoke(f.event(), 'companionGrant', [grant])).ok).toBe(true);
+  });
+
+  it.each([
+    ['a subframe', (f: Fixture) => f.event({ senderFrame: frame('frame-2', { parent: f.main }) })],
+    ['another window', (f: Fixture) => f.event({ sender: { isDestroyed: () => false, mainFrame: f.main } })],
+  ])('%s cannot arm', async (_name, make) => {
+    const f = fixture();
+    f.input.recent = true;
+    expect(await f.ipc.invoke(make(f), 'shareArm', [])).toEqual({ ok: false, kind: 'refused' });
+    expect(f.share.takeGrant(f.contents)).toBe(false);
+    expect(f.share.takeCapture(f.contents)).toBe(false);
+  });
+
+  it('answers false and arms nothing when no share allowance is wired', async () => {
+    const f = fixture();
+    const ipc = new Ipc({
+      owned: () => f.contents, gate: f.gate, service: {} as Service, feeds: {} as Feeds, files: {} as Files, profiles: {} as ProfilesApi, voice: {} as VoiceApi, invites: {} as InvitesApi, notifications: {} as NotificationsApi, settings: {} as SettingsApi, installed: {} as InstalledApi,
+      gestures: { take: () => 'pointer' }, now: () => 0, log: () => undefined,
+    });
+    expect(await ipc.invoke(f.event(), 'shareArm', [])).toEqual({ ok: true, value: false });
+  });
+});
+
 describe('the invite functions (issue #1591)', () => {
   const HANDLE = `invite-${'0'.repeat(32)}`;
   const PROFILE = 'a'.repeat(32);
@@ -1053,6 +1161,8 @@ describe('the settings family (issue #1587)', () => {
     f.input.recent = true;
     expect(await f.ipc.invoke(f.event(), 'settingsSet', [{ closeToTray: false, launchAtLogin: true }])).toEqual({ ok: true, value: { ran: 'settings.set' } });
     expect(f.calls[1]).toEqual(['settings.set', [{ closeToTray: false, launchAtLogin: true }]]);
+    expect(await f.ipc.invoke(f.event(), 'settingsSet', [{ trayConfirmed: true }])).toEqual({ ok: true, value: { ran: 'settings.set' } });
+    expect(f.calls[2]).toEqual(['settings.set', [{ trayConfirmed: true }]]);
   });
 
   it.each([
@@ -1060,6 +1170,7 @@ describe('the settings family (issue #1587)', () => {
     ['no argument', []],
     ['an unknown key', [{ launchAtLogin: true, theme: 'dark' }]],
     ['a non-boolean', [{ launchAtLogin: 'yes' }]],
+    ['a non-boolean confirmation', [{ trayConfirmed: 1 }]],
     ['a null', [{ closeToTray: null }]],
     ['an array', [[true]]],
     ['two arguments', [{ launchAtLogin: true }, {}]],

@@ -2,13 +2,17 @@
 // Output: one hardened window showing the packaged web client, and nothing
 // else but main's public-API client behind the bridge's IPC handlers (D2-3)
 // and the live feeds main holds for the page (D2-4). The renderer itself
-// still makes no network request.
+// makes no HTTP or WebSocket request but the screen companion's, to exactly
+// the live grant's LiveKit origin, and no capture but one portal-picked screen
+// (D4-03, #1580: guards.ts, display-capture.ts, portal.ts). WebRTC (ICE, STUN
+// and TURN) and WebTransport are outside the CSP and the request filter, which
+// see HTTP and WebSocket requests only (linux-desktop.md §3).
 import { readFile } from 'node:fs/promises';
 import { isAbsolute, join } from 'node:path';
 
 import tls from 'node:tls';
 
-import { app, dialog, ipcMain, Notification, powerMonitor, protocol, safeStorage, shell } from 'electron';
+import { app, BrowserWindow, desktopCapturer, dialog, ipcMain, Menu, Notification, powerMonitor, protocol, safeStorage, shell, Tray } from 'electron';
 
 import { allowUnlisted, OVERRIDE_FLAG, parseCompat } from './compat.ts';
 import { activationFactory, healthReader, Live, prober, revoker, verifier } from './profiles/activation.ts';
@@ -21,15 +25,19 @@ import { acquire, prepareRoot } from './instance.ts';
 import { Client } from './api/client.ts';
 import { Session } from './api/session.ts';
 import { deliverVoice } from './voice/events.ts';
-import { Companion } from './voice/companion.ts';
+import { Companion, stillHeldBy } from './voice/companion.ts';
 import { OneShot } from './voice/oneshot.ts';
 import { VoiceService } from './voice/service.ts';
 import { Supervisor } from './voice/supervisor.ts';
+import { trayHostPresent } from './tray-detect.ts';
+import { TrayController, unblankSoon } from './tray.ts';
 import { createNodeConnect } from './api/socket.ts';
 import { transportVerdict, trustSystemRoots } from './api/trust.ts';
 import { debuggingVerdict } from './debugging.ts';
+import { captureVerdict, DisplayCapture } from './display-capture.ts';
 import { Files } from './files.ts';
 import { Gestures } from './gestures.ts';
+import { ShareAllowance } from './share-allowance.ts';
 import { installGuards } from './guards.ts';
 import { deliverUpdate, Installed, shouldAskAfterFailure } from './installed.ts';
 import { updateDialogButtons, updateDialogDetail, updateDialogMessage } from '../../web/src/platform/desktop/ui/text.ts';
@@ -37,6 +45,7 @@ import { Ipc } from './ipc.ts';
 import { Links } from './links.ts';
 import { Lifecycle } from './lifecycle.ts';
 import { LinuxLifecycle } from './lifecycle-linux.ts';
+import { executable, Portal, runFile } from './portal.ts';
 import { COMPANION_EVENTS } from '../shared/bridge-names.ts';
 import { Autostart } from './autostart.ts';
 import { Notifications } from './notifications.ts';
@@ -79,7 +88,19 @@ export async function start(): Promise<void> {
     app.exit(1);
     return;
   }
+  // A launch that turned the PipeWire capturer off would let one source
+  // stand in for the portal's pick (display-capture.ts).
+  if (captureVerdict(app.isPackaged, (name) => app.commandLine.getSwitchValue(name), log) === 'refused') {
+    app.exit(1);
+    return;
+  }
   app.enableSandbox();
+  // Screen capture goes through Chromium's PipeWire capturer, and so the
+  // screen-cast portal's own picker, alone (Q-D4-4 on #1578). The switch is
+  // read when Chromium starts its capturers, so it is set before ready.
+  // Chromium uses that capturer only under Wayland; portal.ts says Share is
+  // unavailable anywhere else.
+  app.commandLine.appendSwitch('enable-features', 'WebRTCPipeWireCapturer');
   const live = new Live();
   // What the person has just done, and the one way out of the window: a link
   // they clicked, validated, to the OS browser (issue #947). Both read the
@@ -112,7 +133,29 @@ export async function start(): Promise<void> {
     },
     log,
   });
-  installGuards(app, { log, gestures, owned, links });
+  // Whether this desktop can share a screen (portal.ts): asked after ready,
+  // and again with every companion grant.
+  const portal = new Portal({ platform: process.platform, env: process.env, run: runFile, executable, log });
+  // The LiveKit origin of the live companion grant: none until the companion
+  // exists (below), and then its own, read afresh on every request.
+  let liveOrigin = (): string | null => null;
+  // The share allowance (share-allowance.ts): the Share click's act, spent
+  // once on the grant and once on the capture. The gate it reads is the
+  // newest activation's.
+  const share = new ShareAllowance({ now: Date.now, generation: () => live.gate.generation });
+  const capture = new DisplayCapture({
+    owned: () => (live.window === null || live.window.isDestroyed() ? null : live.window.webContents),
+    gate: () => live.gate,
+    share,
+    live: () => liveOrigin() !== null,
+    available: () => portal.last(),
+    getSources: (options) => desktopCapturer.getSources(options),
+    log,
+  });
+  // One set of guard dependencies, for every web contents and every
+  // activation's partition alike.
+  const guard = { log, gestures, owned, links, liveOrigin: () => liveOrigin(), capture };
+  installGuards(app, guard);
 
   // One instance per data root: the lock comes before anything reads or
   // writes the root. A second launch focuses the first and exits.
@@ -120,6 +163,8 @@ export async function start(): Promise<void> {
     const window = live.window;
     if (window === null || window.isDestroyed()) return;
     if (window.isMinimized()) window.restore();
+    // A window hidden by a close comes back.
+    window.show();
     window.focus();
   });
   if (!first) return;
@@ -127,6 +172,13 @@ export async function start(): Promise<void> {
   // The app's settings, once the data root is known (below). Until then, and
   // with none, closing the last window quits.
   let settings: SettingsService | null = null;
+  // The opt-in tray (#1589): made after voice, below. Until then, and while
+  // closeToTray is off, there is none.
+  let tray: TrayController | null = null;
+  // Set once the app is ending, so that a close is never turned into a hide.
+  let quitting = false;
+  // Windows whose close has been decided to go ahead.
+  const closing = new WeakSet<BrowserWindow>();
   app.on('window-all-closed', () => {
     // A window destroyed for a switch or a sign-out is not the app ending.
     // Otherwise closing quits (media stopped, helper reaped, in before-quit),
@@ -135,7 +187,34 @@ export async function start(): Promise<void> {
     if (action === 'quit') app.quit();
   });
 
+  // Closing hides the window instead only while closeToTray is on and a
+  // working tray exists, checked again now (the tray host may have gone since
+  // the last check). Otherwise the close goes on and, as the last window,
+  // quits (window-all-closed).
+  app.on('browser-window-created', (_event, created) => {
+    created.on('close', (event) => {
+      const t = tray;
+      if (quitting || live.destroying || created !== live.window || closing.has(created) || t === null || settings === null || !settings.current.closeToTray) return;
+      event.preventDefault();
+      // A check that fails lets the close go on: no answer is no tray.
+      void t.check().then(
+        () => t.working(),
+        () => false,
+      ).then((working) => {
+        if (working && !created.isDestroyed()) {
+          created.hide();
+          return;
+        }
+        if (created.isDestroyed()) return;
+        closing.add(created);
+        created.close();
+      });
+    });
+  });
+
   await app.whenReady();
+
+  void portal.probe();
 
   // The first receipt: what this build really is.
   console.log(`conch-desktop: versions ${JSON.stringify({ electron: process.versions.electron, chrome: process.versions.chrome, node: process.versions.node })}`);
@@ -159,12 +238,19 @@ export async function start(): Promise<void> {
   if (!checked.ok) log('conch-desktop: the data directory is not private to you; nothing will be saved');
   const files = createProfileFiles(root);
   // The app-wide settings: <root>/settings.json, in memory only when the root
-  // is not private. No tray exists yet (#1589, D5-03), so trayWorking is false
-  // and closing always quits.
+  // is not private. The tray (below) answers trayWorking; with none, closing
+  // always quits.
   settings = new SettingsService({
     files: checked.ok ? createSettingsFiles(root) : memorySettingsFiles(),
     autostart: new Autostart({ packaged: app.isPackaged, execPath: process.execPath, env: process.env, home: app.getPath('home'), log }),
-    trayWorking: () => false,
+    trayWorking: () => tray?.working() ?? false,
+    trayExists: () => tray?.exists ?? false,
+    trayDetected: () => trayHostPresent(runFile),
+    changed: () => {
+      void tray?.sync().catch(() => {
+        log('tray: could not follow the setting');
+      });
+    },
     log,
   });
   await settings.load();
@@ -208,14 +294,21 @@ export async function start(): Promise<void> {
       log,
     });
   };
+  const openActivation = activationFactory(
+    { packaged: app.isPackaged, appPath, manifest, readUi: (path) => readFile(join(ui, ...path.split('/').slice(1))), connect: createNodeConnect(log), guard, makeFiles, now: Date.now, log },
+    live,
+  );
   const profiles = new ProfilesService({
     store,
     vault,
     hooks: teardownHooks,
-    createActivation: activationFactory(
-      { packaged: app.isPackaged, appPath, manifest, readUi: (path) => readFile(join(ui, ...path.split('/').slice(1))), connect: createNodeConnect(log), guard: { log, gestures, owned, links }, makeFiles, now: Date.now, log },
-      live,
-    ),
+    createActivation: async (spec) => {
+      const activation = await openActivation(spec);
+      // The switcher records the activation once this resolves: the menu is
+      // filled from it on the next turn, not at the next 10 s check.
+      unblankSoon(() => tray, (generation) => profiles.switcher.isCurrent(generation), spec.generation);
+      return activation;
+    },
     compat: { servers: allowlist?.servers ?? [], override },
     desktopVersion: app.getVersion(),
     readHealth: healthReader(),
@@ -366,12 +459,43 @@ export async function start(): Promise<void> {
     locked: () => screenLocked(),
     client: () => activeClient,
     document: () => live.gate.generation,
+    // Any end or stop clears the share allowance, held or not.
+    ended: () => {
+      share.clear();
+    },
     tell: (document, event) => {
       const contents = live.owned() === null ? null : (live.window?.webContents ?? null);
       if (contents !== null && live.gate.shows(document)) contents.send(COMPANION_EVENTS, event);
     },
+    // Asked again with every grant: a portal started since is found.
+    share: async () => {
+      const answer = await portal.probe();
+      return answer === 'available' ? null : answer;
+    },
+    // The owned window's session is asked to close its connections when the
+    // grant ends. That reaches idle and pending sockets only: a live
+    // WebSocket survives closeAllConnections (S2 of #1621). What ends it is
+    // conchd's DELETE; when that is not confirmed the document is reloaded.
+    closeConnections: async () => {
+      const w = live.window;
+      if (w !== null && !w.isDestroyed()) await w.webContents.session.closeAllConnections();
+    },
+    contents: () => live.owned(),
+    // Only the contents and the document that held the grant (S2 of #1621): a
+    // switch to another profile, or a new document, inside the removal's wait
+    // is not reloaded.
+    reload: (contents, document) => {
+      const w = live.window;
+      if (w === null || w.isDestroyed() || !stillHeldBy({ contents: w.webContents, generation: live.gate.generation }, { contents, document })) return;
+      w.webContents.reload();
+    },
+    // The grant is issued: the share allowance's capture window starts here.
+    granted: (contents, document) => {
+      share.confirmGrant(contents, document);
+    },
     log,
   });
+  liveOrigin = () => companion.liveOrigin();
   teardownHooks.media('share', async ({ reason }) => {
     // From here on the identity is ending: no grant is asked for under it.
     // A page's grant request after this end (the click of a switch or a
@@ -447,6 +571,7 @@ export async function start(): Promise<void> {
       return current(live.files);
     },
     gestures,
+    share,
     profiles,
     voice,
     installed,
@@ -460,7 +585,56 @@ export async function start(): Promise<void> {
   ipc.register(ipcMain);
   ipc.registerNotificationSupport(ipcMain);
 
+  // The tray (issue #1589, D5-03). Its Quit is app.quit(): the same
+  // before-quit teardown as the window's own (helper reaped, the companion's
+  // DELETE sent by the media hooks).
+  const settingsService = settings;
+  const trayController = new TrayController({
+    createTray: (icon) => new Tray(icon),
+    buildMenu: (items) => Menu.buildFromTemplate([...items]),
+    iconDir: join(appPath, 'build', 'icons', 'tray'),
+    voice,
+    sharing: () => companion.liveOrigin() !== null,
+    endCompanion: () => companion.end('lock'),
+    profile: () => {
+      const id = profiles.active?.profileId ?? null;
+      return id === null ? null : (store.get(id)?.label ?? null);
+    },
+    show: () => {
+      const window = live.window;
+      if (window === null || window.isDestroyed()) return;
+      if (window.isMinimized()) window.restore();
+      window.show();
+      window.focus();
+    },
+    hidden: () => live.window !== null && !live.window.isDestroyed() && !live.window.isVisible(),
+    quit: () => {
+      app.quit();
+    },
+    detect: () => trayHostPresent(runFile),
+    revoke: () => {
+      settingsService.revokeTrayConfirmation();
+    },
+    settings: () => settingsService.current,
+    confirmed: () => settingsService.trayConfirmed,
+    log,
+  });
+  tray = trayController;
+  // Media ends for a switch or a sign-out: the menu shows nothing of the old
+  // profile until it is rebuilt from the activation in force.
+  teardownHooks.media('tray', () => {
+    trayController.blank();
+  });
+  // The strip shows "Sharing your screen" as the companion starts and ends.
+  companion.onChange(() => {
+    trayController.refresh();
+  });
+  void trayController.sync().catch(() => {
+    log('tray: could not start');
+  });
+
   app.on('before-quit', (event) => {
+    quitting = true;
     if (ending) return;
     ending = true;
     event.preventDefault();
