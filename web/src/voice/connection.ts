@@ -1799,6 +1799,9 @@ export class VoiceClient {
         if (mine !== this.attempt) return;
         this.set({ phase: 'reconnecting' });
         this.applyBlock();
+        // A signal-only resume that escalates to a full restart reports
+        // Reconnecting again: the limit runs from the first of them.
+        if (this.reconnectTimer !== null) return;
         this.reconnectTimer = this.env.clock.setTimeout(() => {
           this.reconnectTimer = null;
           if (mine !== this.attempt) return;

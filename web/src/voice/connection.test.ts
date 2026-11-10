@@ -1113,6 +1113,16 @@ describe('disconnects', () => {
     expect(t.rooms[0]?.closed).toBe(true);
   });
 
+  it('a second Reconnecting (a signal resume turned full restart) does not extend the limit', async () => {
+    const t = await joined();
+    t.rooms[0]?.events?.onReconnecting();
+    t.clock.advance(15_000);
+    t.rooms[0]?.events?.onReconnecting();
+    t.clock.advance(5000);
+    await settle();
+    expect(t.asked).toHaveLength(2);
+  });
+
   it('a reconnect inside the limit keeps the connection', async () => {
     const t = await joined();
     t.rooms[0]?.events?.onReconnecting();
