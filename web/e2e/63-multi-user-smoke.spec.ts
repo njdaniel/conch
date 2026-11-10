@@ -18,7 +18,7 @@ import { enter, expectClean, joinVoice, leave, type Someone } from './people';
 import { dockerAvailable, emptiesWithin, startVoiceWorld, type VoiceWorld } from './voice-world';
 import { loadWorld, principalId } from './world';
 
-test('@smoke three principals each send one message to #general and every page shows each once', async ({ meet, world }) => {
+test('@smoke @cross three principals each send one message to #general and every page shows each once', async ({ meet, world }) => {
   const people = [
     { name: 'browser-test', token: world.tokens.browser, body: `1608 hello from browser-test ${Date.now().toString(36)}` },
     { name: 'jamie-test', token: world.tokens.guest, body: `1608 hello from jamie-test ${Date.now().toString(36)}` },
@@ -58,7 +58,7 @@ test('@smoke three principals each send one message to #general and every page s
   await everyoneSeesEachOnce();
 });
 
-test.describe('@smoke with LiveKit', () => {
+test.describe('@smoke @cross @voice with LiveKit', () => {
   let vw: VoiceWorld;
   let stopWorld: (() => void) | undefined;
 
