@@ -50,6 +50,7 @@ func (s *Server) routeTable() []route {
 		// addressed by id since the name is what it changes. /name is a literal
 		// no {channel} route ends in, so no two patterns meet.
 		rt("PUT /v1/channels/{id}/name", accessChannelManager, hf(s.handleRenameChannel)),
+		rt("PUT /v1/channels/{id}/topic", accessChannelManager, hf(s.handleSetChannelTopic)),
 		rt("POST /v0/principals", accessPermission, hf(s.handleCreatePrincipal)).needs(schema.PermManageMembers),
 		// Renaming (issue #441): operators rename anyone, a person themselves
 		// (checked in the handler).

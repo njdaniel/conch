@@ -123,19 +123,22 @@ function Row({
   return (
     <li className="directory-row">
       {isPrivate ? <PrivateMark /> : null}
-      {row.joined ? (
-        <button
-          type="button"
-          className="quiet channel-name"
-          onClick={() => {
-            onOpen(row.name);
-          }}
-        >
-          {row.name}
-        </button>
-      ) : (
-        <span className="channel-name">{row.name}</span>
-      )}
+      <div className="directory-channel">
+        {row.joined ? (
+          <button
+            type="button"
+            className="quiet channel-name"
+            onClick={() => {
+              onOpen(row.name);
+            }}
+          >
+            {row.name}
+          </button>
+        ) : (
+          <span className="channel-name">{row.name}</span>
+        )}
+        {row.topic === undefined || row.topic === '' ? null : <p className="channel-topic">{row.topic}</p>}
+      </div>
       {row.default === true ? <span className="ag-badge">Default</span> : null}
       {row.joined ? <span className="ag-badge">Joined</span> : null}
       {row.joined && row.manages === true ? <span className="channel-badge">Manager</span> : null}

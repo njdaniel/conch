@@ -1307,6 +1307,7 @@ func (e *eventsStream) sendRef(ctx context.Context, ref eventRef) bool {
 			Visibility: ch.Visibility,
 			Default:    ch.IsDefault,
 			ArchivedAt: archivedAtWire(ch),
+			Topic:      ch.Topic,
 		})
 	}
 	return true

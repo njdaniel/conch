@@ -96,7 +96,7 @@ func (m Model) panes(l layout) string {
 func (m Model) chatPanes(l layout) string {
 	channels := paneBox("CHANNELS", m.focus == focusChannels, m.channelWindow(l), l.leftW, l.contentH, "")
 	lines, foot := m.chatLines(l)
-	messages := paneBox(m.chatTitle(), m.focus == focusMessages, lines, l.rightW, l.contentH, foot)
+	messages := paneBox(m.chatTitleFit(m.chatTitleRoom(l.rightW)), m.focus == focusMessages, lines, l.rightW, l.contentH, foot)
 	if l.peopleW == 0 {
 		return lipgloss.JoinHorizontal(lipgloss.Top, channels, messages)
 	}
@@ -118,19 +118,57 @@ func (m Model) channelWindow(l layout) []string {
 
 // chatTitle names the conversation on screen and, when it is not the whole
 // channel, where plain messages go.
-func (m Model) chatTitle() string {
+func (m Model) chatTitle() string { return m.chatTitleFit(0) }
+
+// chatTitleFit is chatTitle for a title room cells wide (room <= 0: no limit).
+// The net and [stale] markers are never cut: a topic too long for the room
+// left after them is truncated, or dropped when almost nothing of it would
+// show, so the border label never hides what is not shown anywhere else.
+func (m Model) chatTitleFit(room int) string {
 	channel := sanitize(m.current())
 	if channel == "" {
 		return "MESSAGES"
 	}
-	title := "# " + channel
+	head := "# " + channel
+	var net, stale string
 	if m.target != nil && m.target.channel == m.current() {
-		title += " › net " + sanitize(m.target.name)
+		net = " › net " + sanitize(m.target.name)
 	}
 	if m.mod.stale[m.current()] {
-		title += " [stale]"
+		stale = " [stale]"
 	}
-	return title
+	// [stale] is shown nowhere else; the net target is also in the compose
+	// prompt, so it goes first when even the markers do not fit.
+	if room > 0 && cellWidth(head+net+stale) > room {
+		net = ""
+	}
+	tail := net + stale
+	topic := sanitize(m.channelTopics[m.current()])
+	if topic == "" {
+		return head + tail
+	}
+	const sep = " · "
+	if room > 0 {
+		left := room - cellWidth(head) - cellWidth(sep) - cellWidth(tail)
+		if left < 2 {
+			return head + tail
+		}
+		topic = fitCells(topic, left)
+		if topic == "…" { // nothing of it fits (a wide first character)
+			return head + tail
+		}
+	}
+	return head + sep + topic + tail
+}
+
+// chatTitleRoom is the cells of a messages pane outerW wide that the title
+// text can use: borderLabel's room less the focus mark paneBox may prefix.
+func (m Model) chatTitleRoom(outerW int) int {
+	room := outerW - 4 - 2
+	if m.focus == focusMessages {
+		room -= cellWidth(focusMark)
+	}
+	return max(room, 1)
 }
 
 // chatLines is the message pane's content and the label of its bottom border:

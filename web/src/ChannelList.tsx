@@ -20,6 +20,7 @@ const noNames: ReadonlyMap<number, string> = new Map();
 const badgeId = (channel: number) => `unread-${String(channel)}`;
 const voiceId = (channel: number) => `in-voice-${String(channel)}`;
 const privateId = (channel: number) => `private-${String(channel)}`;
+const topicId = (channel: number) => `topic-${String(channel)}`;
 const managesId = (channel: number) => `manages-${String(channel)}`;
 
 // The count after a channel's name, with a name of its own ("3 unread") that the
@@ -139,6 +140,8 @@ function ChannelRow({
   viewer,
   mayRename,
   renderRename,
+  maySetTopic,
+  renderTopic,
   mayManage,
   renderSettings,
   onInvite,
@@ -159,6 +162,8 @@ function ChannelRow({
   readonly viewer: number;
   readonly mayRename: boolean;
   readonly renderRename: ((channel: ChannelV0, close: () => void) => ReactNode) | undefined;
+  readonly maySetTopic: boolean;
+  readonly renderTopic: ((channel: ChannelV0, close: () => void) => ReactNode) | undefined;
   readonly mayManage: boolean;
   readonly renderSettings: ((channel: ChannelV0, change: SettingsChange, close: () => void) => ReactNode) | undefined;
   readonly onInvite: ((channel: ChannelV0) => void) | undefined;
@@ -173,6 +178,7 @@ function ChannelRow({
   const [moving, setMoving] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const [renaming, setRenaming] = useState(false);
+  const [settingTopic, setSettingTopic] = useState(false);
   // The settings change being confirmed or sent (issue #1183), in place under the row.
   const [change, setChange] = useState<SettingsChange | null>(null);
   const [askingLeave, setAskingLeave] = useState(false);
@@ -203,6 +209,11 @@ function ChannelRow({
     setRenaming(false);
     main.current?.focus();
   }, [mayRename, renaming]);
+  useEffect(() => {
+    if (maySetTopic || !settingTopic) return;
+    setSettingTopic(false);
+    main.current?.focus();
+  }, [maySetTopic, settingTopic]);
   // The grant to manage channels went while a change was open: it goes,
   // unsent, and focus, if it was in it, goes to the row's button.
   useEffect(() => {
@@ -215,7 +226,8 @@ function ChannelRow({
   }, [mayManage, change]);
   // What describes the button: private, a manager grant, who is in its voice, then its unread.
   const inVoice = voiced?.count ?? 0;
-  const described = [isPrivate ? privateId(channel.id) : null, channel.manages === true ? managesId(channel.id) : null, inVoice > 0 ? voiceId(channel.id) : null, unread > 0 ? badgeId(channel.id) : null].filter(
+  const hasTopic = channel.topic !== undefined && channel.topic !== '';
+  const described = [hasTopic ? topicId(channel.id) : null, isPrivate ? privateId(channel.id) : null, channel.manages === true ? managesId(channel.id) : null, inVoice > 0 ? voiceId(channel.id) : null, unread > 0 ? badgeId(channel.id) : null].filter(
     (x) => x !== null,
   );
 
@@ -267,7 +279,21 @@ function ChannelRow({
         setAskingLeave(false);
         setLeaveRefusal(null);
         setChange(null);
+        setSettingTopic(false);
         setRenaming(true);
+      },
+    });
+  }
+  if (maySetTopic && renderTopic !== undefined) {
+    items.push({
+      key: 'topic',
+      label: 'Set topic',
+      onSelect: () => {
+        setAskingLeave(false);
+        setLeaveRefusal(null);
+        setChange(null);
+        setRenaming(false);
+        setSettingTopic(true);
       },
     });
   }
@@ -394,11 +420,16 @@ function ChannelRow({
         onKeyDown={(event) => {
           onMove(event, index);
         }}
-        title={channel.name}
+        title={hasTopic ? `${channel.name} — ${channel.topic ?? ''}` : channel.name}
       >
         {isPrivate ? <Glyph name="lock" /> : null}
         <span className="channel-name">{channel.name}</span>
       </button>
+      {hasTopic ? (
+        <span id={topicId(channel.id)} hidden>
+          {channel.topic}
+        </span>
+      ) : null}
       {isPrivate ? (
         <span id={privateId(channel.id)} hidden>
           private channel
@@ -421,6 +452,12 @@ function ChannelRow({
         ? renderRename(channel, () => {
             setRenaming(false);
             // The ⋯ may be gone (the grant was revoked meanwhile): the row's button then.
+            (more.current ?? main.current)?.focus();
+          })
+        : null}
+      {settingTopic && maySetTopic && renderTopic !== undefined
+        ? renderTopic(channel, () => {
+            setSettingTopic(false);
             (more.current ?? main.current)?.focus();
           })
         : null}
@@ -488,7 +525,7 @@ function ChannelRow({
 // move between channels (Home and End jump), Enter or Space opens the one
 // focused. A row may carry a ⋯ menu of what the viewer can do to that channel
 // (issues #1135, #1095): Invite people when `onInvite` is given, Rename channel…
-// when `canRename` says so for it, and Leave channel when `onLeft` is given.
+// and Set topic when allowed, and Leave channel when `onLeft` is given.
 // Managed channels carry a badge.
 export function ChannelList({
   channels,
@@ -500,6 +537,8 @@ export function ChannelList({
   empty = 'No channels yet: an operator needs to add you to one',
   canRename,
   renderRename,
+  canSetTopic,
+  renderTopic,
   canManage = false,
   renderSettings,
   onInvite,
@@ -528,6 +567,12 @@ export function ChannelList({
   // The rename form for a channel, shown in place under its row; `close`
   // hides it and returns focus to the row's ⋯.
   readonly renderRename?: (channel: ChannelV0, close: () => void) => ReactNode;
+  // Whether this viewer may set that channel's topic (an operator, or its
+  // manager); absent, nobody. The server still decides.
+  readonly canSetTopic?: (channel: ChannelV0) => boolean;
+  // The set-topic form for a channel, shown in place under its row; `close`
+  // hides it and returns focus to the row's ⋯.
+  readonly renderTopic?: (channel: ChannelV0, close: () => void) => ReactNode;
   // Whether this viewer holds manage_channels (whoami says so; the server still
   // decides). Only then does a row's ⋯ offer to make its channel public or
   // private, or a default, and `renderSettings` draws the confirmation or the
@@ -689,6 +734,8 @@ export function ChannelList({
       viewer={viewer}
       mayRename={canRename?.(channel) === true}
       renderRename={renderRename}
+      maySetTopic={canSetTopic?.(channel) === true}
+      renderTopic={renderTopic}
       mayManage={canManage}
       renderSettings={renderSettings}
       onInvite={onInvite}

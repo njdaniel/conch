@@ -25,6 +25,10 @@
 // What this does not prove: the portal, Electron's own display-capture
 // handler, real audio devices, or LAN behaviour (#1584, D4-07).
 //
+// A second desktop (C, with its own helper and companion) joins the room in
+// the two-desktop test (issue #1512): both stream, each watches the other, and
+// the operator's stop by ?principal= ends one stream and not the other.
+//
 // Not observable here, and said so rather than faked: A's helper runs as the
 // desktop runs it (`conch-voice managed`), which writes no stats lines (those
 // are `join --json`'s), so what its counting sink heard cannot be read.
@@ -64,6 +68,8 @@ function needV(name: string): string {
 
 const v: Who = { id: Number(needV('CONCH_E2E_V_ID')), token: needV('CONCH_E2E_V_TOKEN'), tone: 0 };
 const appUrl = needV('CONCH_E2E_APP_URL');
+// The operator's bearer, for the operator stop of a stream (issue #1512).
+const operatorToken = needV('CONCH_E2E_OPERATOR_TOKEN');
 const VIEWER_NAME = 'view-v';
 const A_NAME = 'desk-a';
 
@@ -148,9 +154,10 @@ afterAll(async () => {
 
 // -------------------------------------------------------------- the desktop
 
-// Desk is what main holds for A: its API client (the bearer stays here), the
-// share allowance, the companion service over A's VoiceService, and the page
-// that stands for the owned window's document.
+// Desk is what main holds for one desktop (A's, or C's in the two-desktop
+// test): its API client (the bearer stays here), the share allowance, the
+// companion service over its person's VoiceService, and the page that stands
+// for the owned window's document.
 class Desk {
   readonly logs: string[] = [];
   readonly grants: string[] = [];
@@ -165,10 +172,14 @@ class Desk {
   context: BrowserContext | null = null;
   page: Page | null = null;
 
+  // The person this desktop is (A unless the owner was made for another).
+  readonly who: Who;
+
   constructor(readonly owner: Owner) {
+    this.who = owner.o.who;
     const session = new Session();
     session.setOrigin(world.origin);
-    session.adopt(world.a.token);
+    session.adopt(this.who.token);
     this.client = new Client({ fetch: globalThis.fetch, session });
     this.service = new Service({ client: this.client, session, now: Date.now, log: (line) => this.logs.push(line) });
     this.companion = new Companion({
@@ -272,12 +283,12 @@ class Desk {
     });
   }
 
-  // presence is what conchd lists for the channel's voice, read as A (the
-  // REST snapshot is version 1; the socket is version 2).
+  // presence is what conchd lists for the channel's voice, read as this
+  // desktop's person (the REST snapshot is version 1; the socket is version 2).
   async presence(): Promise<VoicePresenceV1> {
     const path = targetOf('voicePresence', { channel: world.channel }, undefined);
     if (path === null) throw new Error('no path for voice presence');
-    const res = await fetch(world.origin + path, { headers: { authorization: `Bearer ${world.a.token}` } });
+    const res = await fetch(world.origin + path, { headers: { authorization: `Bearer ${this.who.token}` } });
     const body: unknown = await res.json();
     const problems = fromServer(voicePresenceV1)(body);
     if (!res.ok || problems.length > 0) throw new Error(`voice presence: ${String(res.status)} ${JSON.stringify(problems)} ${JSON.stringify(body).slice(0, 600)}`);
@@ -529,6 +540,93 @@ describe('the desktop screen companion with the real helper, conchd, LiveKit and
       expect(lines.filter((l) => l.includes(secret)), 'a token in a captured log or console line').toEqual([]);
     }
     note('share, watch and no voice held');
+  });
+
+  // Issue #1512 (voice-multi-share.md §7.4, §11.6): two desktops in one room,
+  // A's and C's, each with its own helper and its own companion, stream at the
+  // same time and watch each other. Each companion takes the other's screen
+  // and its sound and nothing else (not a voice, not its own person's tracks);
+  // each person's voice is published once; and the operator's stop, naming
+  // `?principal=`, ends one stream and leaves the other.
+  //
+  // Not observable here, as the header says: what each helper's sink played.
+  // That each plays voice once and neither plays its own stream's sound is the
+  // Rust suite's (#934, --share-audio-owner companion) and, for two real
+  // desktops, the by-hand steps in the PR; here the voice is read from the
+  // companions' rooms and LiveKit's list.
+  it('two desktops stream and watch each other at once, each with its voice once, and the operator stop ends one stream and not the other', async () => {
+    const c = world.c;
+    const a = desk(owner({ name: 'desk-a', who: world.a }));
+    const cc = desk(owner({ name: 'desk-c', who: c }));
+    await a.owner.join();
+    await cc.owner.join();
+    await onlyOnce(world.a);
+    await onlyOnce(c);
+
+    await startShare(a);
+    await startShare(cc);
+    await eventually(
+      async () => (await listed(idOf(world.a, '.screen')))?.some((s) => SCREEN.test(s)) === true && (await listed(idOf(c, '.screen')))?.some((s) => SCREEN.test(s)) === true,
+      30_000,
+      'LiveKit to list both p<A>.screen and p<C>.screen with a screen',
+    );
+    expect(a.grants, 'one grant each').toHaveLength(1);
+    expect(cc.grants).toHaveLength(1);
+    // Each person is one voice, and the companions publish their picture alone.
+    await onlyOnce(world.a);
+    await onlyOnce(c);
+    for (const who of [world.a, c]) {
+      expect(((await listed(idOf(who, '.screen'))) ?? []).filter((x) => !SCREEN.test(x)), `${idOf(who, '.screen')} publishes nothing but its screen`).toEqual([]);
+    }
+
+    // Each watches the other's stream.
+    await a.watch(c.id);
+    await cc.watch(world.a.id);
+    const takes = (facts: PageFacts, other: Who, own: Who): void => {
+      const theirs = facts.publications.filter((p) => !p.local && p.who === idOf(other, '.screen'));
+      expect(theirs.filter((p) => p.kind === 'video' && p.subscribed), 'the other desktop\'s screen is taken').toHaveLength(1);
+      // Everything subscribed is a screen, from the watched publisher only:
+      // no voice, no camera, nothing of this person's own (p<id> or
+      // p<id>.screen).
+      const taken = facts.publications.filter((p) => !p.local && p.subscribed);
+      expect(taken.every((p) => p.who === idOf(other, '.screen') && (p.source === 'screen_share' || p.source === 'screen_share_audio')), JSON.stringify(taken)).toBe(true);
+      expect(taken.filter((p) => p.who.startsWith(idOf(own))), 'none of this person\'s own tracks').toEqual([]);
+      expectNoVoice(facts, 'while watching');
+    };
+    await eventually(
+      async () => {
+        const [fa, fc] = [await a.facts(), await cc.facts()];
+        return fa.watched.includes(c.id) && fc.watched.includes(world.a.id) && [fa, fc].every((f) => f.publications.some((p) => !p.local && p.kind === 'video' && p.subscribed));
+      },
+      30_000,
+      "each companion to subscribe to the other's screen",
+    );
+    await sleep(3_000);
+    const [fa, fc] = [await a.facts(), await cc.facts()];
+    takes(fa, c, world.a);
+    takes(fc, world.a, c);
+    expect(fa.rooms, "A's companion holds one room").toBe(1);
+    expect(fc.rooms, "C's companion holds one room").toBe(1);
+    expect((await inRoom()).participants.filter((p) => p.identity === idOf(world.a)), 'A is one participant').toHaveLength(1);
+    expect((await inRoom()).participants.filter((p) => p.identity === idOf(c)), 'C is one participant').toHaveLength(1);
+
+    // The operator stops C's stream by naming C (DELETE ...?principal=<C>):
+    // C's screen ends and A's goes on.
+    const target = targetOf('stopShare', { channel: world.channel }, `principal=${String(c.id)}`);
+    if (target === null) throw new Error('no path for the stop of a stream');
+    const stop = await fetch(world.origin + target, { method: 'DELETE', headers: { authorization: `Bearer ${operatorToken}` } });
+    expect(stop.status, 'the operator stop').toBe(204);
+    await eventually(
+      async () => ((await listed(idOf(c, '.screen'))) ?? []).every((x) => !SCREEN.test(x)) && (await cc.facts()).share !== 'sharing',
+      COMPANION_GRACE_MS + 10_000,
+      "C's stream to end after the operator's stop",
+    );
+    await sleep(2_000);
+    expect((await listed(idOf(world.a, '.screen')) ?? []).some((x) => SCREEN.test(x)), "A's stream is still live").toBe(true);
+    expect((await a.facts()).share, "A's companion is still sharing").toBe('sharing');
+    expect(await absent(world.a), 'A is still in the room').toBe(false);
+    expect(await absent(c), 'C is still in the room, by voice').toBe(false);
+    note('two desktops: both streamed and watched each other; the operator stop ended one');
   });
 
   it('an unarmed allowance refuses a capture and a grant, and the page honours the refusal (the refusal is the harness\'s stand-in for main\'s IPC, not main\'s)', async () => {

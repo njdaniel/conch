@@ -210,7 +210,7 @@ func (s *Store) ChannelDirectory(ctx context.Context, viewerID int64, all bool) 
 		return s.channelDirectoryAll(ctx, viewerID)
 	}
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT c.id, c.name, c.created_at, c.visibility, c.is_default, c.archived_at,
+		`SELECT c.id, c.name, c.created_at, c.visibility, c.is_default, c.archived_at, c.topic,
 		        m.principal_id IS NOT NULL, COALESCE(m.manages, 0)
 		 FROM channels c
 		 LEFT JOIN `+liveMembers+` m ON m.channel_id = c.id AND m.principal_id = ?
@@ -247,7 +247,7 @@ func (s *Store) ChannelDirectory(ctx context.Context, viewerID int64, all bool) 
 // are.
 func (s *Store) channelDirectoryAll(ctx context.Context, viewerID int64) ([]ChannelListing, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT c.id, c.name, c.created_at, c.visibility, c.is_default, c.archived_at,
+		`SELECT c.id, c.name, c.created_at, c.visibility, c.is_default, c.archived_at, c.topic,
 		        m.principal_id IS NOT NULL, COALESCE(m.manages, 0),
 		        (SELECT COUNT(*) FROM `+liveMembers+` n WHERE n.channel_id = c.id),
 		        g.principal_id, p.name, p.kind

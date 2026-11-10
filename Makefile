@@ -11,7 +11,7 @@ LINT    = golangci-lint
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null)
 LDFLAGS  = -X main.version=$(VERSION)
 
-.PHONY: build test lint vet fmt fmt-check invisible-check check schema-compat schema-ts emoji-catalog depgate go-scope deploy-test agent-claim-test rust-check rust-build web-node web-check web-build web-embed build-web-embedded web-e2e desktop-node desktop-check desktop-build desktop-deb desktop-deb-lifecycle desktop-smoke desktop-voice-it desktop-voice-e2e p3-local p3-reset hooks-install clean
+.PHONY: build test lint vet fmt fmt-check invisible-check check schema-compat schema-ts emoji-catalog depgate go-scope deploy-test agent-claim-test rust-check rust-build web-node web-check web-build web-embed build-web-embedded web-e2e web-e2e-heavy desktop-node desktop-check desktop-build desktop-deb desktop-deb-lifecycle desktop-smoke desktop-voice-it desktop-voice-e2e p3-local p3-reset hooks-install clean
 
 build:
 	$(GO) build ./...
@@ -100,6 +100,13 @@ web-e2e: web-node
 	cd web && npm ci --no-audit
 	@cd web && node --input-type=module -e "import { chromium } from '@playwright/test'; import { existsSync } from 'node:fs'; if (!existsSync(chromium.executablePath())) { console.error('web-e2e: FAIL: the browser Playwright pins is not installed; run: cd web && npx playwright install chromium'); process.exit(1); }"
 	cd web && npm run e2e -- $(E2E_ARGS)
+
+# The tests tagged @heavy, which the pull request lane skips (issue #1613,
+# docs/testing.md). A thin wrapper over web-e2e; the nightly workflow
+# .github/workflows/e2e-heavy.yml runs the same arguments. A caller's E2E_ARGS
+# is appended, not replaced: make web-e2e-heavy E2E_ARGS=--headed.
+web-e2e-heavy:
+	$(MAKE) web-e2e E2E_ARGS="--grep @heavy --pass-with-no-tests $(E2E_ARGS)"
 
 # The desktop shell under desktop/ (issue #940, ADR-007, linux-desktop.md): an
 # Electron app that serves the web client from packaged files. desktop-check

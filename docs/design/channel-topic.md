@@ -17,7 +17,7 @@ A channel has a name and nothing else a person can read to learn what it is for.
 | Version | Additive; no bump (§2.4). |
 | The write | `PUT /v1/channels/{id}/topic`, body `SetChannelTopicRequestV1{topic}`, answer `SetChannelTopicResponseV1{channel}`; `""` clears; same string is a 200 no-op (§3). No `from` precondition (§3.3). |
 | Who | The `accessChannelManager` class, exactly as rename: an owner, an operator holding `manage_channels`, or a member holding `manages` in that channel; re-checked in the store's transaction (§4.1). Agents only through the admin door: a new `set_channel_topic` action, gate `direct` (§4.3). |
-| Limits | None beyond the ordinary request limits: a topic clashes with nothing and is an oracle on nothing (§4.2). |
+| Limits | No attempt limit (a topic is an oracle on nothing), but a write-rate bound shared with rename: a burst of 5, then one change per 10 s, per (principal, channel) (§4.2). |
 | Archived channel | The write is allowed, as rename and settings are: administration of an archived channel is not "something new" in it (§3.2). |
 | Audit | One row, `channel_topic_changed`, subject `channel:<id>`, detail `from=%q to=%q` (§4.4). |
 | Where it travels | Everywhere the name travels and nowhere else: `GET /v1/channels`, the directory (public rows to everyone; private rows only to members and `?scope=all`), every response carrying `ChannelV0`, `conch.channel.v1` on change, `conch.channels_changed.v1` to each human member as the re-read bell (§5). Not on invites (§5.4). |
@@ -121,9 +121,13 @@ ADR-010 decision 3 lists what a manager does in its channel, and renaming is on 
 
 Who may not: members, guests, agents directly (§4.3), anyone who cannot see the channel.
 
-### 4.2 No attempt limit
+### 4.2 No attempt limit; a write-rate bound shared with rename
 
-Rename has `renamesPerDay` and `renameAttemptsPerDay` because a name collision is an existence oracle on private channel names (community-model §5), and the limit bounds how fast a manager can probe. A topic collides with nothing and its refusals (400 on the caller's own text, 403 on the caller's own standing) reveal nothing about anyone else. The ordinary per-credential request limits bound the write rate as they bound any write. Adding a limit here would be a limit with no threat behind it.
+Rename has `renamesPerDay` and `renameAttemptsPerDay` because a name collision is an existence oracle on private channel names (community-model §5), and the limit bounds how fast a manager can probe. A topic collides with nothing and its refusals (400 on the caller's own text, 403 on the caller's own standing) reveal nothing about anyone else, so it has no attempt limit: that limit would have no threat behind it.
+
+A second, different threat remains (issue #1667, from the security review of #1531). Every change writes an audit row and sends `channels_changed` to each human member, whose client re-reads its channel list. No limiter covered the topic route (the invite, sign-in, reaction, report and agent-budget limiters each guard their own routes, and there is no global request limiter), and rename's daily cap is per person across all channels. A manager in a loop, or a buggy script, could fill the audit log and churn every member's client.
+
+The bound: one token bucket per (principal, channel), shared by `PUT /v1/channels/{id}/name` and `PUT /v1/channels/{id}/topic`. A burst of 5, refilled at one change per 10 seconds (the `inviteLimit` bucket of invite_limits.go, 5 per 50 s). Why these numbers: a person setting up a room renames it and writes a topic in a handful of edits, and fixing a typo is one or two more, so 5 at once never meets the bound; after that, one change per 10 s is faster than anyone edits by hand and 360 an hour at most from a loop, against thousands a second without it. Past it the answer is 429 `rate_limited` with `Retry-After` and `retry_after_seconds`, the repository's standard shape. The check runs after the body is read and valid and before the store is touched, so a refusal writes no audit row and sends no `channels_changed`; a malformed request spends nothing, and a same-string write spends a token. The bucket is in memory only, as the other limits are: a restart refills it, the worst case being one extra burst. Another manager, or another channel, has its own bucket.
 
 ### 4.3 Agents: the admin door
 

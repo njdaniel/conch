@@ -398,6 +398,10 @@ func run(ctx context.Context, h *harness) (string, error) {
 		"CONCH_E2E_V_ID="+strconv.FormatInt(v.id, 10),
 		"CONCH_E2E_V_TOKEN="+v.token,
 		"CONCH_E2E_APP_URL="+d.baseURL+"/app/",
+		// The operator's credential, for the operator stop of a stream
+		// (issue #1512); it is a registered secret, so it is redacted from
+		// everything this program prints.
+		"CONCH_E2E_OPERATOR_TOKEN="+d.operator,
 		"CONCH_E2E_TONE_A="+strconv.Itoa(toneA),
 		"CONCH_E2E_TONE_C="+strconv.Itoa(toneC),
 		"CONCH_E2E_CHANNEL="+channel,
