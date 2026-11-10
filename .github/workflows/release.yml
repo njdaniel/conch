@@ -4,17 +4,33 @@ name: Release
 # the tag push is the sign-off act. Procedure: .claude/skills/release/.
 # Re-runs the full gate plus the three canaries, dogfood-check (P1),
 # p2-hardening-check (P2) and p3-local-check (P3); a release does not ship
-# when any fails. Builds both binaries. A plain tag (v1.2.3) creates a DRAFT
+# when any fails. Builds both binaries, and the Linux desktop .deb with the
+# bundled voice helper (issue #1598). A plain tag (v1.2.3) creates a DRAFT
 # release that Nick publishes; a tag with a pre-release suffix
 # (v0.1.0-alpha.1) is published at once as a GitHub pre-release, since
 # pushing that tag is itself Nick's sign-off for a test build.
+#
+# Four jobs, so that nothing is released unless everything built:
+#   release      the gates and the Go binaries (unchanged), uploaded as an
+#                artifact. It no longer writes checksums or the release.
+#   desktop-deb  the guard (the tag is HEAD, the tree is clean, the helper's
+#                version is the tag's), conch-voice with the pinned toolchain,
+#                the .deb and its package test, uploaded as an artifact.
+#   attest       the only job with id-token and attestations: write. It
+#                collects both artifacts, writes the one checksums.txt over
+#                all of them and attests every file (GitHub artifact
+#                attestations: `gh attestation verify <file> --repo ...`).
+#   publish      creates the release from what attest checked and attested.
+# A failure in any of the first three creates no release.
 
 on:
   push:
     tags: ["v*"]
 
+# Least privilege: every job reads. Only publish writes contents, and only
+# attest gets the two attestation permissions (#1598).
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   release:
@@ -103,7 +119,197 @@ jobs:
               go build -trimpath -ldflags "-s -w -X main.version=${GITHUB_REF_NAME}" \
               -o "dist/conch_${GITHUB_REF_NAME}_${target%/*}_${target#*/}" ./cmd/conch
           done
-          (cd dist && sha256sum ./* > checksums.txt)
+
+      # The checksums are written once, over every file, by the attest job
+      # (so they cover the .deb too); this job hands over the binaries only.
+      - name: Keep the binaries for the later jobs
+        uses: actions/upload-artifact@v4
+        with:
+          name: go-dist
+          path: dist
+          if-no-files-found: error
+          retention-days: 7
+
+  desktop-deb:
+    # The Linux desktop app's .deb with the bundled voice helper (#1598, D6-04
+    # of #774; decisions Q-D6-4 and Q-D6-7 of #1595). It runs beside the
+    # gates on the same tag, and publish waits for it: a missing helper, a
+    # version that is not the tag's or a failed package test stops the release.
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      # The release's tag, as scripts/desktop-build.sh and desktop-deb.sh take
+      # it: the app, the package and the helper must all say this version.
+      CONCH_RELEASE_VERSION: ${{ github.ref_name }}
+      DESKTOP_REQUIRE_VOICE: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      # First, so a bad tag fails in seconds and not after the Rust build:
+      # the tag must be this commit, the tree clean, and voice/Cargo.toml's
+      # version the tag's. (`git describe` needs the tag, which a tag-push
+      # checkout fetches.)
+      - name: guard the tag
+        run: ./scripts/desktop-release-guard.sh "$GITHUB_REF_NAME"
+
+      # As the rust job in ci.yml: the hosted image ships tool trees this job
+      # does not use (about 20 GB), and the Rust build plus the desktop build
+      # and the package take about 15 GB. They go only when less than 30 GB is
+      # free: removing them takes 3½ minutes (#1352).
+      - name: free disk
+        run: |
+          df -h /
+          avail=$(df --output=avail -BG / | tail -n1 | tr -dc 0-9)
+          if [ "$avail" -ge 30 ]; then echo "free disk: ${avail} GB free, nothing removed"; exit 0; fi
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          docker image prune -af >/dev/null 2>&1 || true
+          df -h /
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: runner image
+        id: image
+        run: |
+          echo "os=$ImageOS" >> "$GITHUB_OUTPUT"
+          echo "version=$ImageVersion" >> "$GITHUB_OUTPUT"
+
+      # The pinned clang and libwebrtc, verified against the SHA-256 in
+      # scripts/voice-pins.sh, which is the cache key (as in ci.yml). The
+      # release is built from a clean target directory: no build cache.
+      - name: rust toolchain cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/conch/llvm-*
+            ~/.cache/conch/cargo-deny-*
+            ~/.cache/conch/webrtc-*
+          key: voice-toolchain-${{ runner.os }}-${{ hashFiles('scripts/voice-pins.sh') }}
+
+      - name: rust system packages cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/conch-apt
+          key: voice-apt-${{ runner.os }}-${{ hashFiles('scripts/ci-voice-apt.sh') }}-${{ steps.image.outputs.os }}-${{ steps.image.outputs.version }}
+          restore-keys: |
+            voice-apt-${{ runner.os }}-${{ hashFiles('scripts/ci-voice-apt.sh') }}-${{ steps.image.outputs.os }}-
+
+      # GLib, PipeWire and libclang for the helper's build (ci.yml's rust job).
+      - name: rust system packages
+        run: ./scripts/ci-voice-apt.sh ~/.cache/conch-apt
+
+      - name: rust toolchain
+        run: ./scripts/voice-toolchain.sh
+
+      # dpkg-shlibdeps (dpkg-dev) computes the package's Depends;
+      # desktop-file-validate (desktop-file-utils) is checked by the package
+      # test when present. Both come from the runner's own apt sources.
+      - name: packaging tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends dpkg-dev desktop-file-utils
+
+      # desktop/.nvmrc is the desktop's Node; web/.nvmrc names the same one.
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: desktop/.nvmrc
+          cache: npm
+          cache-dependency-path: |
+            web/package-lock.json
+            desktop/package-lock.json
+
+      - name: electron cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/conch/electron
+          key: desktop-electron-${{ runner.os }}-${{ hashFiles('scripts/desktop-pins.sh') }}
+
+      # bin/conch-voice, built with --release --locked. Its version is
+      # voice/Cargo.toml's, which the guard has made the tag's.
+      - name: build conch-voice
+        run: make rust-build
+
+      # The app in release mode (the helper is required, and its --version
+      # must be the tag's), the .deb, and scripts/desktop-deb-test.sh in full
+      # mode on that package: make desktop-deb runs all three.
+      - name: build the .deb
+        run: make desktop-deb
+
+      - name: disk after the build
+        if: always()
+        run: |
+          df -h /
+          du -sh voice/target 2>/dev/null || true
+
+      - name: Keep the .deb for the later jobs
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-deb
+          path: desktop/dist/conch-desktop_*_amd64.deb
+          if-no-files-found: error
+          retention-days: 7
+
+  attest:
+    # Collects every artifact, writes the one checksums.txt over all of them
+    # and attests them (Q-D6-4). The only job with the two attestation
+    # permissions; it needs nothing else but to read this run's artifacts.
+    needs: [release, desktop-deb]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      actions: read # gh run download, of this run's artifacts
+      id-token: write # the signing identity of the attestation
+      attestations: write # storing it
+    steps:
+      - name: collect the artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          mkdir -p dist
+          gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" --name go-dist --dir dist
+          gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" --name desktop-deb --dir dist
+          debs=$(find dist -name 'conch-desktop_*_amd64.deb' | wc -l)
+          if [ "$debs" != 1 ]; then echo "want exactly one .deb, have $debs"; find dist; exit 1; fi
+          # One checksums.txt, over the binaries and the .deb, in the form
+          # `sha256sum -c` takes from the directory the files are in.
+          (cd dist && sha256sum -- * > ../checksums.txt && mv ../checksums.txt checksums.txt && sha256sum -c checksums.txt)
+          cat dist/checksums.txt
+
+      # A new Action (#1598; Nick signs it off in the PR): GitHub-owned,
+      # pinned by full commit SHA. Verify a download with
+      #   gh attestation verify <file> --repo njdaniel/conch
+      - name: attest the release files
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/*
+
+      - name: Keep the release files for publish
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-files
+          path: dist
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    needs: attest
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write # creates the release
+      actions: read # gh run download
+    steps:
+      - name: collect the release files
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          mkdir -p dist
+          gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" --name release-files --dir dist
+          (cd dist && sha256sum -c checksums.txt)
 
       - name: Create release
         env:
@@ -111,6 +317,7 @@ jobs:
         run: |
           checks="dogfood-check, p2-hardening-check and p3-local-check run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
           web="The web client is served at /app/ by default (built into conchd; --web-dir serves a directory instead, --no-web turns it off)."
+          deb="The Linux desktop app is conch-desktop_*_amd64.deb: a technical preview until real-device acceptance is recorded (#1603), not a supported release. Verify it with: sha256sum -c --ignore-missing checksums.txt, and gh attestation verify <file> --repo $GITHUB_REPOSITORY."
           # A tag with a semver pre-release suffix (v0.1.0-alpha.1) is
           # published at once, marked a pre-release, with generated notes; a
           # plain tag stays a draft that Nick publishes.
@@ -120,13 +327,17 @@ jobs:
                 --prerelease --verify-tag --title "$GITHUB_REF_NAME" --generate-notes \
                 --notes "Pre-release. $checks
 
-          $web"
+          $web
+
+          $deb"
               ;;
             *)
               gh release create "$GITHUB_REF_NAME" dist/* \
                 --draft --verify-tag --title "$GITHUB_REF_NAME" \
                 --notes "Draft — Nick publishes. $checks
 
-          $web"
+          $web
+
+          $deb"
               ;;
           esac

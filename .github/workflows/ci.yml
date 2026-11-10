@@ -426,6 +426,132 @@ jobs:
           if [ -n "$bad" ]; then echo "not every check passed:"; echo "$bad"; exit 1; fi
           echo "every check passed (docs only: $DOCS_ONLY)"
 
+  # Does a push to main touch what the desktop .deb is made of (#1598)? The
+  # .deb job below builds the Rust voice helper, the web client and the
+  # desktop app, so it does not run on every pull request or push: only when
+  # desktop/, voice/, web/, scripts/desktop-* or the helper's toolchain pins
+  # changed. (A release builds it anyway: release.yml.) The compare API lists
+  # at most 300 files; a list that long builds.
+  desktop-deb-touched:
+    if: ${{ github.event_name == 'push' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      build: ${{ steps.touched.outputs.build }}
+    steps:
+      - name: touched?
+        id: touched
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.sha }}
+        run: |
+          set -eu
+          build=true
+          if [ "$BEFORE" != 0000000000000000000000000000000000000000 ] &&
+             files=$(gh api "repos/$GITHUB_REPOSITORY/compare/$BEFORE...$AFTER" --jq '.files[].filename'); then
+            n=$(printf '%s\n' "$files" | grep -c . || true)
+            if [ "$n" -lt 300 ] &&
+               ! printf '%s\n' "$files" | grep -Eq '^(desktop/|voice/|web/|scripts/desktop-|scripts/voice-pins\.sh|scripts/ci-voice-apt\.sh|Makefile$)'; then
+              build=false
+            fi
+          fi
+          echo "build=$build" >> "$GITHUB_OUTPUT"
+          echo "build the desktop .deb: $build"
+
+  # The desktop .deb with the real voice helper, on pushes to main that touch
+  # its inputs (above): a development package (no tag), built and checked by
+  # scripts/desktop-deb-test.sh in full mode. Not on pull requests, because of
+  # the Rust build's cost; not in `check`'s needs, because it is often
+  # skipped. A passing run is a build check, not acceptance (#1603).
+  desktop-deb:
+    needs: desktop-deb-touched
+    if: ${{ needs.desktop-deb-touched.outputs.build == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      DESKTOP_REQUIRE_VOICE: "1"
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+    steps:
+      - uses: actions/checkout@v4
+
+      # As in the rust job: the image's unused tool trees go only when less
+      # than 30 GB is free (3½ minutes to remove, #1352). This job's Rust,
+      # web and desktop builds and the package need about 15 GB.
+      - name: free disk
+        run: |
+          df -h /
+          avail=$(df --output=avail -BG / | tail -n1 | tr -dc 0-9)
+          if [ "$avail" -ge 30 ]; then echo "free disk: ${avail} GB free, nothing removed"; exit 0; fi
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          docker image prune -af >/dev/null 2>&1 || true
+          df -h /
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: runner image
+        id: image
+        run: |
+          echo "os=$ImageOS" >> "$GITHUB_OUTPUT"
+          echo "version=$ImageVersion" >> "$GITHUB_OUTPUT"
+
+      - name: rust toolchain cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/conch/llvm-*
+            ~/.cache/conch/cargo-deny-*
+            ~/.cache/conch/webrtc-*
+          key: voice-toolchain-${{ runner.os }}-${{ hashFiles('scripts/voice-pins.sh') }}
+
+      - name: rust system packages cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/conch-apt
+          key: voice-apt-${{ runner.os }}-${{ hashFiles('scripts/ci-voice-apt.sh') }}-${{ steps.image.outputs.os }}-${{ steps.image.outputs.version }}
+          restore-keys: |
+            voice-apt-${{ runner.os }}-${{ hashFiles('scripts/ci-voice-apt.sh') }}-${{ steps.image.outputs.os }}-
+
+      - name: rust system packages
+        run: ./scripts/ci-voice-apt.sh ~/.cache/conch-apt
+
+      - name: rust toolchain
+        run: ./scripts/voice-toolchain.sh
+
+      - name: packaging tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends dpkg-dev desktop-file-utils
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: desktop/.nvmrc
+          cache: npm
+          cache-dependency-path: |
+            web/package-lock.json
+            desktop/package-lock.json
+
+      - name: electron cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/conch/electron
+          key: desktop-electron-${{ runner.os }}-${{ hashFiles('scripts/desktop-pins.sh') }}
+
+      - name: build conch-voice
+        run: make rust-build
+
+      # build, .deb and the package test in full mode
+      - name: build the .deb
+        run: make desktop-deb
+
+      - name: disk after the build
+        if: always()
+        run: |
+          df -h /
+          du -sh voice/target 2>/dev/null || true
+
   desktop-smoke:
     needs: changes
     if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
@@ -502,6 +628,15 @@ jobs:
 
       - name: smoke test
         run: xvfb-run -a make desktop-smoke
+
+      # A release build with a stand-in helper (#1598): a made-up tag must
+      # become the app's, the package's and the compat list's version, and a
+      # helper of another version must fail the build. Nothing else exercised
+      # CONCH_RELEASE_VERSION before a tag. It rebuilds the app, so it runs
+      # after the smoke test has used the build above. dpkg-dev is on the
+      # image; desktop-file-validate is optional (the test says so).
+      - name: release build with a stand-in helper
+        run: ./scripts/desktop-release-build-test.sh
 
   web-embedded:
     needs: changes
