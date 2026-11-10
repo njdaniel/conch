@@ -270,6 +270,11 @@ export class ScreenShare {
   // air until it is shared again or ends. The resume timer runs for the whole
   // of it, so a room renewed again meanwhile does not start the wait over.
   private interrupted = false;
+  // Whether this is the desktop's screen companion (issue #1581). Its share is
+  // never resumed after a renewal without a new consent (Q-D4-2 on #1578): it
+  // ends, with the renewal's words, whichever of presence or the room said so
+  // first.
+  private companion = false;
 
   constructor(api: ShareApi, onChange: (state: ShareState) => void, clock: Clock) {
     this.api = api;
@@ -564,7 +569,8 @@ export class ScreenShare {
   // presence has said was renewed, is kept for the next connection; any other
   // ends, as before.
   lost(roomDeleted: boolean): Promise<void> {
-    if (this.onAir() && (roomDeleted || this.renewed())) this.suspend();
+    if (this.companion && this.renewed()) return this.stop('rotated');
+    if (!this.companion && this.onAir() && (roomDeleted || this.renewed())) this.suspend();
     // A resume under way on the connection going stops where it is; the next
     // connection resumes again.
     else if (this.state.kind === 'resuming') this.attempt++;
@@ -619,6 +625,12 @@ export class ScreenShare {
     return this.state.kind === 'sharing' || this.state.kind === 'publishing';
   }
 
+  // setCompanion makes this the desktop's screen companion's share (set when
+  // the companion is joined), which is never suspended to be resumed.
+  setCompanion(on: boolean): void {
+    this.companion = on;
+  }
+
   // renewed reports whether the server ended the share published or being
   // published because its room was renewed.
   private renewed(): boolean {
@@ -639,6 +651,13 @@ export class ScreenShare {
   // what is left of the first wait, and one whose wait ran out while it was
   // being published ends here.
   private suspend(): void {
+    // A companion's share is not resumable: the helper's connection may
+    // already be in the renewed room, so a claim made again without a click
+    // could succeed and publish onto the retired one.
+    if (this.companion) {
+      void this.serverEnded();
+      return;
+    }
     this.attempt++;
     this.set({ kind: 'resuming' });
     if (!this.interrupted) {

@@ -628,6 +628,9 @@ export class VoiceClient {
   // and the act that asked for it to be joined, carried out once connected.
   private companionOffs: (() => void)[] = [];
   private companionLeaving = false;
+  // Counts joins, so the tail of a leave ends only the companion it left, not
+  // one joined while its room was closing.
+  private joins = 0;
   private afterConnect: 'share' | null = null;
 
   constructor(env: VoiceEnv, now: () => number = () => Date.now()) {
@@ -716,6 +719,8 @@ export class VoiceClient {
     const companion = options.companion === true;
     this.channel = channel;
     this.companionLeaving = false;
+    this.joins++;
+    this.share.setCompanion(companion);
     this.afterConnect = null;
     this.failures = 0;
     // The camera is off on joining (design §3.4): only its button turns it
@@ -765,6 +770,9 @@ export class VoiceClient {
   // other way).
   private companionReady(channel: string): 'ready' | 'joining' | 'busy' {
     const { phase, companion } = this.state;
+    // The last companion is still being left (its room closing, main not yet
+    // told): nothing new is joined until that tail is done.
+    if (this.companionLeaving) return 'busy';
     if (phase === 'idle' || phase === 'stopped') {
       this.join(channel, { companion: true });
       return 'joining';
@@ -1346,6 +1354,7 @@ export class VoiceClient {
   async leave(): Promise<void> {
     const mine = ++this.attempt;
     const companion = this.state.companion;
+    const joined = this.joins;
     if (companion) this.companionLeaving = true;
     this.afterConnect = null;
     this.clearTimers();
@@ -1361,7 +1370,12 @@ export class VoiceClient {
     await this.reports.drain(leaveDrain);
     await sharing;
     await camera;
-    if (mine !== this.attempt) return;
+    if (mine !== this.attempt) {
+      // Taken over (dropped, or left again): this tail will not run, so the
+      // companion is not still being left by it.
+      if (companion && joined === this.joins) this.companionLeaving = false;
+      return;
+    }
     this.talk++;
     this.steps = Promise.resolve();
     this.reports.reset();
@@ -1406,10 +1420,10 @@ export class VoiceClient {
     const remove = this.env.removeViewer;
     if (viewer && left !== null && remove !== undefined) await remove(left).catch(() => undefined);
     // The room is left before main is asked to remove the companion.
-    if (companion) {
+    if (companion && joined === this.joins) {
       this.unfollowCompanion();
       await this.endCompanion();
-      this.companionLeaving = false;
+      if (joined === this.joins) this.companionLeaving = false;
     }
   }
 
@@ -1868,6 +1882,9 @@ export class VoiceClient {
     this.watchLevel(mine, room);
     this.share.connected(channel, room);
     this.camera.connected(channel, room);
+    // A companion that connected with nothing left to do (a watch undone, or a
+    // share ended, while it was connecting) does not hold the slot.
+    this.settleCompanion();
     // The act that joined the companion, carried out now that it is up.
     if (this.afterConnect === 'share') {
       this.afterConnect = null;

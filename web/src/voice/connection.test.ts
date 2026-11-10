@@ -73,11 +73,20 @@ class StubRoom implements Room {
   // When set, closing the room reports it disconnected, as the SDK does for
   // a room that had joined.
   disconnectOnClose = false;
+  // When set, closing waits for the test to finish it (issue #1581: a
+  // companion's leave in flight).
+  holdClose = false;
+  heldClose: (() => void) | null = null;
   close = (): Promise<void> => {
     this.closed = true;
     this.order?.push('close');
     this.camLog.push('close');
     if (this.disconnectOnClose) this.events?.onDisconnected('lost');
+    if (this.holdClose) {
+      return new Promise((resolve) => {
+        this.heldClose = resolve;
+      });
+    }
     return Promise.resolve();
   };
   // The share and watch half of a room (issue #444), recorded.
@@ -3399,6 +3408,60 @@ describe('the screen companion', () => {
     expect(t.native.state.grants).toEqual(['general']);
     expect(t.client.snapshot()).toMatchObject({ phase: 'stopped', why: companionEnds.renewal, share: { kind: 'idle', ended: 'rotated' } });
     expect(t.native.state.endCalls).toBe(1);
+  });
+
+  it('a Share clicked while the old companion is still closing is refused, and the old tail never ends a newer companion', async () => {
+    const t = companionSetup([], (room) => {
+      room.holdClose = true;
+    });
+    t.client.startCompanionShare('general');
+    await settle();
+    t.client.stopShare();
+    await settle();
+    // Phase is idle, the room still closing, main not yet told.
+    expect(t.client.snapshot().phase).toBe('idle');
+    expect(t.rooms[0]?.heldClose).not.toBeNull();
+    t.client.startCompanionShare('general');
+    t.client.watchCompanionStream('general', 8);
+    await settle();
+    expect(t.native.state.grants).toEqual(['general']);
+    expect(t.rooms).toHaveLength(1);
+    t.rooms[0]?.heldClose?.();
+    await settle();
+    expect(t.native.state.endCalls).toBe(1);
+    // After the tail, a new Share joins a new companion.
+    t.client.startCompanionShare('general');
+    await settle();
+    expect(t.native.state.grants).toEqual(['general', 'general']);
+  });
+
+  it('the tail of a leave ends only the companion it left: one joined meanwhile keeps its end listener', async () => {
+    const t = companionSetup([], (room) => {
+      room.holdClose = true;
+    });
+    t.client.startCompanionShare('general');
+    await settle();
+    t.client.stopShare();
+    await settle();
+    // A join that gets past the gate (as a direct one does) during the close.
+    t.client.join('general', { companion: true });
+    await settle();
+    expect(t.native.listening()).toBeGreaterThan(0);
+    t.rooms[0]?.heldClose?.();
+    await settle();
+    expect(t.native.state.endCalls).toBe(0);
+    expect(t.native.listening()).toBeGreaterThan(0);
+    expect(t.rooms).toHaveLength(2);
+  });
+
+  it('a watch undone while the companion connects leaves no idle companion holding the slot', async () => {
+    const t = companionSetup();
+    t.client.watchCompanionStream('general', 8);
+    t.client.watchStream(8, false);
+    await settle();
+    expect(t.rooms[0]?.closed).toBe(true);
+    expect(t.native.state.endCalls).toBe(1);
+    expect(t.client.snapshot().phase).toBe('idle');
   });
 
   it('a lost connection stops the companion and tells main, rather than retrying with a new grant', async () => {
