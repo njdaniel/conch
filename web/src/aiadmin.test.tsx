@@ -7,6 +7,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { App } from './App';
+import { directoryCoalesce } from './useDirectoryChanged';
 import { entryName, entryText, manifestFor } from './admin/AddAIAdmin';
 import type { Permission } from './schema/permission';
 import type { ServerMemberV1, WhoAmIResponseV1 } from './schema/principal';
@@ -186,6 +187,7 @@ afterEach(() => {
   cleanup();
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
+  vi.useRealTimers();
 });
 
 const writes = (calls: readonly Call[]) => calls.filter((c) => c.method !== 'GET' && !/ws-tickets|sessions|read-state/.test(c.path));
@@ -451,15 +453,25 @@ describe('the agent card', () => {
     const region = await openMembers('conch_owner_session_token');
     await within(region).findByRole('group', { name: 'AI administrator builder' });
     const events = await channelEvents();
+    // The page reads the directory behind a coalescing timer
+    // (directoryCoalesce); the test advances that timer itself, so neither
+    // frame waits on the wall clock.
+    vi.useFakeTimers({ shouldAdvanceTime: true, toFake: ['setTimeout', 'clearTimeout'] });
+    const frameRead = async () => {
+      events.send({ schema: 'conch.directory_changed.v1' });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(directoryCoalesce);
+      });
+    };
     directory = everyone.filter((person) => person.id !== 4);
-    events.send({ schema: 'conch.directory_changed.v1' });
+    await frameRead();
     await waitFor(() => {
       expect(within(region).queryByText('builder')).toBeNull();
     });
     const before = reads(calls, '/v1/principals/4/manifest');
 
     directory = everyone;
-    events.send({ schema: 'conch.directory_changed.v1' });
+    await frameRead();
     await within(region).findByRole('group', { name: 'AI administrator builder' });
     expect(reads(calls, '/v1/principals/4/manifest')).toBeGreaterThan(before);
   });
