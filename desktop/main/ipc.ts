@@ -38,6 +38,7 @@ import { HOST, SCHEME } from './scheme.ts';
 import type { VoiceService } from './voice/service.ts';
 import type { SettingsService } from './settings.ts';
 import type { Companion } from './voice/companion.ts';
+import type { ShareAllowance } from './share-allowance.ts';
 
 export interface FrameLike {
   readonly frameToken: string;
@@ -80,6 +81,9 @@ export interface IpcDeps {
   // The screen companion (issue #1579). Absent: every grant is refused as
   // failed, and nothing is held to end.
   readonly companion?: CompanionApi;
+  // The share allowance (share-allowance.ts). Absent: shareArm arms nothing
+  // and a grant needs its own fresh act.
+  readonly share?: Pick<ShareAllowance, 'arm' | 'takeGrant'>;
   readonly now: () => number;
   readonly log: (line: string) => void;
 }
@@ -179,6 +183,9 @@ interface Spec {
   // A function of the arguments, for one that is the person's act only in some
   // of its forms (open-mic mode transmits without a press).
   readonly gesture?: true | ((args: readonly unknown[]) => boolean);
+  // True for a function whose act may instead be the share allowance's grant
+  // use (companionGrant: Share armed it, Watch has a fresh act of its own).
+  readonly shareGrant?: true;
 }
 
 // What a function runs against: the services, the activation, and the document
@@ -194,6 +201,7 @@ interface Handlers {
   readonly settings: SettingsApi;
   readonly companion: CompanionApi;
   readonly document: number;
+  readonly arm: () => boolean;
 }
 
 // A feed's number, which the preload chose: a positive whole number.
@@ -632,7 +640,13 @@ export const SPECS: Readonly<Record<InvokedFunction, Spec>> = {
     parse: parseCompanionGrant,
     run: ({ companion }, [request]) => companion.grant(request as { channel: string }),
     gesture: true,
+    shareGrant: true,
   },
+  // Arms the share allowance (share-allowance.ts): the person's Share click,
+  // taken here, stands for the grant and the capture that follow it. The page
+  // calls it synchronously at the start of the click, before anything else.
+  // It carries no argument: nothing the page says is trusted.
+  shareArm: { limit: 20, maxBytes: 0, parse: none, run: ({ arm }) => arm(), gesture: true },
   companionEnd: { limit: 60, maxBytes: 0, parse: none, run: ({ companion }) => companion.stop() },
 };
 
@@ -666,10 +680,16 @@ export class Ipc {
     if (this.#limits.get(fn)?.allow(this.#deps.now()) !== true) return this.#refuse('rate');
     if (!plain(args)) return this.#refuse('shape');
     if (JSON.stringify(args).length > spec.maxBytes + 2) return this.#refuse('size');
+    const owned = this.#deps.owned();
     const parsed = spec.parse(args);
     if (parsed === null) return this.#refuse('shape');
     const needsGesture = spec.gesture === true || (typeof spec.gesture === 'function' && spec.gesture(parsed));
-    if (needsGesture && this.#deps.gestures.take(this.#deps.owned(), LINK_GESTURE_MS) === null) return this.#refuse('gesture');
+    // A fresh act first, so a Watch click is never answered from a Share
+    // allowance and keeps it; a grant with none falls back to the allowance's
+    // grant use (consumed), the cold Share path.
+    if (needsGesture && this.#deps.gestures.take(owned, LINK_GESTURE_MS) === null) {
+      if (spec.shareGrant !== true || this.#deps.share?.takeGrant(owned) !== true) return this.#refuse('gesture');
+    }
     try {
       const to: Handlers = {
         service: this.#deps.service,
@@ -682,6 +702,7 @@ export class Ipc {
         settings: this.#deps.settings,
         companion: this.#deps.companion ?? NO_COMPANION,
         document: this.#deps.gate.generation,
+        arm: () => this.#deps.share?.arm(owned) ?? false,
       };
       return { ok: true, value: await spec.run(to, parsed) };
     } catch {

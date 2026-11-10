@@ -21,9 +21,12 @@ voice in the UI (#771: the supervisor that runs `conch-voice` exists, in
 | Path | Owns |
 | --- | --- |
 | `main/scheme.ts` | the `conch-app:` handler: serves only what the build-time manifest lists, checks each file's SHA-256, refuses every other URL |
-| `main/csp.ts` | the Content-Security-Policy of every response |
+| `main/csp.ts` | the Content-Security-Policy of every response: `connect-src wss: https:` (Q-D4-1), narrowed to the live grant's origin by `guards.ts` (HTTP and WebSocket requests only; WebRTC and WebTransport are outside both) |
 | `main/window.ts` | the one window and its `webPreferences` (pinned by a unit test) |
-| `main/guards.ts` | what a web contents may not do: navigate, open windows, attach webviews, download, ask for permissions, choose devices |
+| `main/guards.ts` | what a web contents may not do: navigate, open windows, attach webviews, download, ask for permissions, choose devices; and the request filter, which passes only the live companion grant's origin (wss or https, same host and port, no userinfo) besides the app's own scheme |
+| `main/display-capture.ts` | the one screen capture: the permission and display-media rules (`Screen capture`, below) |
+| `main/share-allowance.ts` | the share allowance: one `shareArm()` click, a grant use good for 10 s and a capture use good for 3 s from the later of the arm and the grant |
+| `main/portal.ts` | whether the screen-cast portal can answer (Wayland session, a read-only `gdbus` property call) |
 | `main/api/origin.ts` | the server-address rules (https; http only for loopback; no userinfo, path, query or fragment) |
 | `main/api/target.ts` | an operation id plus values to a request target; refuses anything that is not a call of the table |
 | `main/api/client.ts` | the one request executor: bearer only for bearer operations, no Origin or Cookie, no redirects, size cap, response validation, generation check |
@@ -249,7 +252,7 @@ his sign-off and a line in `licences-allowlist.txt`.
 
 ## Talking to the server (issue #942)
 
-The renderer makes no network request (its CSP says `connect-src 'none'`). Main
+The renderer makes no HTTP or WebSocket request (its CSP says `connect-src wss: https:`, and `main/guards.ts` cancels all of them but exactly the live companion grant's LiveKit origin; when the grant ends main asks the session to close its connections, which reaches idle and pending sockets only; a live WebSocket is ended by conchd's removal of the participant, and when that removal is not confirmed main reloads the window's document). WebRTC (ICE, STUN, TURN) and WebTransport are outside both the CSP and that request filter. Main
 makes them all, with Node's `fetch`, from `main/api/client.ts`. The renderer
 names an operation of the table in `web/src/platform/operations.ts` and its
 values; main builds the URL, sends `Authorization: Bearer` for a bearer
@@ -373,3 +376,11 @@ Plain `http://` is accepted for `localhost`, `127.0.0.0/8` and `[::1]` only, the
 same rule as `web/src/transport.ts`: `conchd serve --listen 127.0.0.1:8080
 --no-web`, then enter `http://127.0.0.1:8080`. The server refuses passwords over
 plain HTTP from anywhere else, and so does the address step.
+
+## Screen capture
+
+The renderer captures the screen only through Chromium's PipeWire capturer, so only through the xdg-desktop-portal ScreenCast picker (Q-D4-4 on #1578). `main/app.ts` turns the capturer on before `ready`; `main/portal.ts` asks the portal whether it can answer, and where it cannot (no portal, or an X11 session, where Chromium would list every source with no picker) Share is unavailable and the page is told "share unavailable: no screen-cast portal". `main/display-capture.ts` grants a capture only from the owned window's live main frame at `conch-app://ui/`, in the current document generation, with a live companion grant, and with the share allowance's capture use unspent (see below), and only when `desktopCapturer.getSources` returns exactly one source (none is a cancel; several are refused, never narrowed to the first). Video only: audio is never granted, and microphone and camera stay denied. A packaged launch with `--disable-features` naming `WebRTCPipeWireCapturer` is refused at start (`captureVerdict`), and a renderer that asks for a desktop capture without a picker is crashed, then its page closed if the process has not gone a second later.
+
+### The share allowance (`main/share-allowance.ts`)
+
+One click on Share is followed by two things that each need the person's act: the companion's grant, then `getDisplayMedia`. The act is one-shot, so the page calls `shareArm()` synchronously at the very start of the Share click, before anything else. It takes the click and arms an allowance for that web contents and document: it has two uses: one for `companionGrant` (consumed in place of a fresh click; good for `SHARE_ARM_MS`, 10 s, from the arm) and one for the capture (consumed when the pick starts; good for `SHARE_CAPTURE_MS`, 3 s, from the later of the arm and the grant being issued from that allowance, so the warm path has 3 s from the arm and the cold path 3 s after the grant round trip). Residual, stated plainly: a compromised page can still call `shareArm` within 1 s of any act, so the OS portal picker is the consent, and the allowance only stops an honest page arming capture by accident. Arming again replaces it. Nothing else arms a capture: a raw click, or the Enter that sends a chat message, does not. Watching needs no arming: its `companionGrant` uses its own fresh click as before, and leaves an armed allowance alone. The allowance is cleared by any companion end or stop (leave, helper, renewal, sign-out, switch, quit, crash, reload, lock, suspend, the page's `companionEnd`) and by a document change. Everything else still applies: owned main frame, current document generation, a live grant, the portal. A grant's `shareUnavailable` (`no-portal`, `not-wayland`) tells the page before the pick that there is no screen-cast portal.

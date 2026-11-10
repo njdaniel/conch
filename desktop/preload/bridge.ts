@@ -341,6 +341,7 @@ export function createBridge(
     // that it has ended.
     companionGrant: call('companionGrant'),
     companionEnd: call('companionEnd'),
+    shareArm: call('shareArm'),
     onCompanion,
   });
 }

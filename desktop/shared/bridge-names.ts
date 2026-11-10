@@ -89,7 +89,7 @@ export const SETTINGS_FUNCTIONS = ['settings', 'settingsSet'] as const satisfies
 export type SettingsFunction = (typeof SETTINGS_FUNCTIONS)[number];
 // The screen companion (issue #1579, D4-02 of #772): the invoked functions of
 // DesktopCompanionBridge (onCompanion is its event, COMPANION_EVENTS).
-export const COMPANION_FUNCTIONS = ['companionGrant', 'companionEnd'] as const satisfies readonly (keyof DesktopCompanionBridge)[];
+export const COMPANION_FUNCTIONS = ['companionGrant', 'companionEnd', 'shareArm'] as const satisfies readonly (keyof DesktopCompanionBridge)[];
 
 export type CompanionFunction = (typeof COMPANION_FUNCTIONS)[number];
 
