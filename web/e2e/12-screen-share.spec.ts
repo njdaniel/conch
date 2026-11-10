@@ -236,7 +236,12 @@ test.describe('screen share with LiveKit', () => {
     const member = typeof who === 'string' ? vw[who] : who;
     await signIn(page, vw, member.token, member.name);
     await openChannel(page, vw.channel);
-    return { page, watch, member, close: () => context.close() };
+    // The page is closed first, which ends its WebSockets: Playwright records
+    // a socket's frames live into a trace file, and a busy one (the room's, the
+    // channel's) still growing while the trace zip is built at context.close
+    // makes the zip fail with "file data stream has unexpected number of
+    // bytes" (issue #1660, seen under load).
+    return { page, watch, member, close: async () => { await page.close(); await context.close(); } };
   }
 
   async function join(p: Someone, how: 'Join voice' | 'Watch only'): Promise<void> {
