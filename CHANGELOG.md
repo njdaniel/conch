@@ -8,6 +8,9 @@ release that Nick publishes.
 
 ## [Unreleased]
 
+### Added
+- **An AI administrator sets a channel's topic** (#1523). The admin door gains `set_channel_topic` (`manage_channels`, direct, as `rename_channel` is), and `pkg/schema` gains the additive `AdminAction` value `set_channel_topic`. There's no new schema version.
+
 ## [0.1.0-alpha.18] - 2026-11-09
 
 This is a pre-1.0 release (`v0.1.0-alpha.18`). There is no new schema version. `pkg/schema` gains the constant `SpoilerFilePrefix` (`SPOILER_`), which is presentation only (#1500). After the upgrade, an open browser tab offers a reload (#1534).

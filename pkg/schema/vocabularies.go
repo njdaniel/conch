@@ -195,6 +195,7 @@ var Vocabularies = map[string][]string{
 		AdminActionListReports, AdminActionGetReport, AdminActionUpdateReport,
 		AdminActionExportAudit,
 		AdminActionListChannelBans, AdminActionBanChannelMember, AdminActionUnbanChannelMember,
+		AdminActionSetChannelTopic,
 	),
 	"AdminGate": values(AdminGateDirect, AdminGateApproval),
 	"AdminTargetKind": values(

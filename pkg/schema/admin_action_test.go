@@ -393,8 +393,8 @@ func TestAdminTargetV1Validate(t *testing.T) {
 // The catalog has forty actions, in the design's order, each valid, none
 // twice, and nothing else is valid; the vocabulary table lists the same.
 func TestAdminActionsCatalog(t *testing.T) {
-	if len(AdminActions) != 43 {
-		t.Errorf("AdminActions has %d actions, want 43", len(AdminActions))
+	if len(AdminActions) != 44 {
+		t.Errorf("AdminActions has %d actions, want 44", len(AdminActions))
 	}
 	seen := map[AdminAction]bool{}
 	for _, a := range AdminActions {
@@ -406,8 +406,8 @@ func TestAdminActionsCatalog(t *testing.T) {
 		}
 		seen[a] = true
 	}
-	if first, last := AdminActions[0], AdminActions[len(AdminActions)-1]; first != AdminActionListMembers || last != AdminActionUnbanChannelMember {
-		t.Errorf("AdminActions runs from %s to %s, want list_members to unban_channel_member", first, last)
+	if first, last := AdminActions[0], AdminActions[len(AdminActions)-1]; first != AdminActionListMembers || last != AdminActionSetChannelTopic {
+		t.Errorf("AdminActions runs from %s to %s, want list_members to set_channel_topic", first, last)
 	}
 	if got := values(AdminActions...); !reflect.DeepEqual(got, Vocabularies["AdminAction"]) {
 		t.Errorf("AdminActions = %v,\nVocabularies[AdminAction] = %v", got, Vocabularies["AdminAction"])
