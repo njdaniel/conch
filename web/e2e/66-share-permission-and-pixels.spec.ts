@@ -319,9 +319,9 @@ test.describe('@smoke screen share permission and pixels with LiveKit', () => {
 
       let framesAtEnd = 0;
       await withShareOff(async () => {
-        // Today's words for access_lost, which say voice was lost when only
-        // share_screen was (a UX follow-up, not changed here).
-        await expect(voiceRegion(a.page)).toContainText('Your share ended: you no longer have voice in this channel.', { timeout: endsWithin });
+        // The page is still in the call, so it says sharing was withdrawn,
+        // not voice (#1672).
+        await expect(voiceRegion(a.page)).toContainText("Your share ended: you're no longer allowed to share in this channel.", { timeout: endsWithin });
         await expect(voiceRegion(a.page).getByRole('button', { name: 'Stop sharing' })).toHaveCount(0);
         await expect(shareView(c.page)).toHaveCount(0, { timeout: endsWithin });
         await expect.poll(() => screenTracks(vw.alice), { timeout: endsWithin }).toEqual([]);
