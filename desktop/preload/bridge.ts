@@ -327,6 +327,12 @@ export function createBridge(
     voiceSaveDevice: call('voiceSaveDevice'),
     voiceKeyDevices: call('voiceKeyDevices'),
     voiceSaveTalkBinding: call('voiceSaveTalkBinding'),
+    // Opening an invite link (issue #1591). The code comes back from
+    // inviteTake only, once.
+    inviteCheck: call('inviteCheck'),
+    inviteAccept: call('inviteAccept'),
+    inviteCancel: call('inviteCancel'),
+    inviteTake: call('inviteTake'),
     // The app's own settings (issue #1587).
     settings: call('settings'),
     settingsSet: call('settingsSet'),

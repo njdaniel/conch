@@ -12,6 +12,7 @@ import { app, dialog, ipcMain, Notification, powerMonitor, protocol, safeStorage
 
 import { allowUnlisted, OVERRIDE_FLAG, parseCompat } from './compat.ts';
 import { activationFactory, healthReader, Live, prober, revoker, verifier } from './profiles/activation.ts';
+import { Invites } from './invites.ts';
 import { createProfileFiles } from './profiles/files.ts';
 import { TeardownHooks } from './profiles/hooks.ts';
 import { ProfilesService } from './profiles/service.ts';
@@ -353,6 +354,17 @@ export async function start(): Promise<void> {
     if (part === null) throw new Error('no activation');
     return part;
   };
+  // Opening an invite link (issue #1591): parses in main, keeps the code
+  // behind a handle, and switches only through the profiles service.
+  const invites = new Invites({
+    profiles,
+    voiceRunning: () => {
+      const { status } = voice.state();
+      return status === 'starting' || status === 'running';
+    },
+    now: Date.now,
+    log,
+  });
   const ipc = new Ipc({
     owned: () => live.owned(),
     get gate() {
@@ -370,6 +382,7 @@ export async function start(): Promise<void> {
     gestures,
     profiles,
     voice,
+    invites,
     notifications,
     settings,
     companion,
