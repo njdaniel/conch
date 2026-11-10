@@ -18,9 +18,10 @@
 //    gives the Chromium it starts. There is no portal in CI.
 // This file only wires those together and reports what the room holds.
 import { Room as LiveKitRoom } from 'livekit-client';
-import type { ShareClaimResult } from '../../../../web/src/api';
+import { claimVoiceShare, restore, stopVoiceShare } from '../../../../web/src/api';
 import type { CompanionEndReason, CompanionGrantResult } from '../../../../web/src/platform/desktop/bridge';
-import type { ShareQuality } from '../../../../web/src/voice/share';
+import type { BridgeReply, BridgeRequest } from '../../../../web/src/platform/desktop/bridge';
+import { signedIn } from '../../../../web/src/platform/desktop/credentials';
 import { VoiceClient, type CompanionEnv } from '../../../../web/src/voice/connection';
 import { newLiveKitRoom } from '../../../../web/src/voice/sdk';
 
@@ -30,8 +31,7 @@ interface Bridge {
   arm(): Promise<boolean>;
   end(): Promise<boolean>;
   capture(): Promise<boolean>;
-  claim(channel: string, quality: ShareQuality | null): Promise<ShareClaimResult>;
-  release(channel: string, startedAt: string): Promise<void>;
+  request(request: BridgeRequest): Promise<BridgeReply>;
 }
 
 // One publication a room holds, as the SDK reports it.
@@ -49,6 +49,16 @@ declare global {
     companionPage: CompanionPage;
   }
 }
+
+// The desktop shell's bridge as the desktop platform's http reads it
+// (web/src/platform/desktop/http.ts): `request` alone is what a claim and its
+// release use, and it is the test process's, over main's own Service. The
+// page is signed in as the desktop's renderer is, with main's session.
+Reflect.set(window, 'conchDesktop', { request: (request: BridgeRequest) => window.__bridge.request(request) });
+signedIn(true);
+// What the app does on load: the client pins the sign-in main holds, by asking
+// whoami through the same bridge. A claim waits for it.
+const restored = restore();
 
 const rooms: LiveKitRoom[] = [];
 
@@ -105,8 +115,11 @@ const client = new VoiceClient({
   companion,
   report: () => Promise.resolve('failed'),
   newRoom: newLiveKitRoom,
-  claimShare: (channel, quality) => window.__bridge.claim(channel, quality ?? null),
-  stopShare: (channel, startedAt) => window.__bridge.release(channel, startedAt),
+  claimShare: async (channel, quality) => {
+    await restored;
+    return claimVoiceShare(channel, quality);
+  },
+  stopShare: stopVoiceShare,
 });
 
 // Each change of the client's phase and share, for the test's failure message.
