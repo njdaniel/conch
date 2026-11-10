@@ -256,6 +256,28 @@ Share stops name their claim, so a late cleanup cannot stop a newer share. Secur
 
 **New tools and dependencies.** None for the build: `dpkg-deb` (and `dpkg-shlibdeps`, if used for `Depends`) comes with the runner's `dpkg`; `desktop-file-validate` is optional and the test says when it is absent. None of these is a `go.mod`, Cargo or npm dependency, so no line goes in `deps-allowlist.txt`, `voice/deps-allowlist.txt` or `desktop/deps-allowlist.txt`. The one new third-party piece is the GitHub-owned action `actions/attest-build-provenance` in `release.yml` (Q-D6-4), together with the job permissions `id-token: write` and `attestations: write`. The repository has no machine-checked allowlist for GitHub Actions (the depgate scripts cover Go, Rust and npm only): per `CLAUDE.md` it is a dependency line that Nick signs off in the #1598 (D6-04) release-workflow PR, which he reviews anyway (releases are Tier-H, ADR-000).
 
+### 9.1 The `conch:` invite link scheme
+
+**Decided 2026-11-09 (#1592, D5-06, Q-D5-3), by Nick.** The scheme is `conch` and the shape is
+
+```
+conch://invite?server=<percent-encoded origin>&code=<code>
+```
+
+for example `conch://invite?server=https%3A%2F%2Fchat.example.org&code=AbC-123`. It is a public contract shared with Windows (W5, #779; [windows-desktop.md](windows-desktop.md) section 9.2) and a change to it is Nick's.
+
+**The shape, exactly.** The scheme in any case; the host `invite` in lower case; no userinfo, port, path or fragment; a query of exactly the two parameters `server` and `code`, once each, in either order, names in lower case; each value percent-encoded and nothing else (no raw `:` `/` or `+`). `server` decodes to an origin and only an origin (`https://host[:port]`, or `http://` to loopback), and `code` to 1 to 256 URL-safe characters (`A-Z a-z 0-9 . _ ~ -`). Main then builds the https link `<origin>/app/#/invite/<code>` and holds it to every rule of a pasted link (`parseInviteLink`, #1591): the host must be the one written (no decimal, hex or short-form IPs, no punycode, no escapes, no trailing dot), no userinfo, https unless loopback. Anything else is refused with a fixed reason; the whole link is at most 2048 characters. A different shape, a repeated or unknown parameter, a fragment, whitespace, a control or invisible character: refused, nothing repaired.
+
+**Registration.** On Linux the installed desktop file (`chat.conch.desktop.desktop`) says `MimeType=x-scheme-handler/conch;` and `Exec=conch-desktop %U`, and the package test (`scripts/desktop-deb-test.sh`) requires exactly that line. The desktop environment's `xdg-mime` database does the rest; nothing in `postinst`. On Windows it is `app.setAsDefaultProtocolClient('conch')`.
+
+**Delivery.** The URL is a command-line argument: in `process.argv` at a first launch, and in the command line `second-instance` gets when the app is already running (the single-instance lock, section 4 and `main/instance.ts`). Main picks at most one argument: the first that does not start with `-` and starts with `conch:`; later ones are never considered, even when the first is malformed. An argument that starts with `-` is a switch and is never read as a URL; `conch://--inspect` is a URL to be refused and is not a switch (it does not start with `-`). Main ignores every other argument as it always has, and the fuses still block `--inspect` and `NODE_OPTIONS`. The kept link waits in main's memory for five minutes (`PENDING_MS`) or until the page asks; a newer link replaces it. Main tells the page with a payload-free `conch:invite` event and the page asks `inviteArrived()`, which answers what `inviteCheck` answers for a pasted link: a one-time handle, the canonical server and the saved profiles for it, never the code.
+
+**What the person sees and what a link cannot do.** The same choice as a pasted link ("Add from an invite link", #1591): the server named is shown first, then the person chooses a saved profile or a new entry, and only that click contacts, adds or switches anything. A click that would leave voice running in another profile is refused by the same check at the click. A `conch:` link never joins voice, never skips the choice and never contacts the server by itself. If the app is not running, `xdg-open` starts it and the link waits for the first page.
+
+**Logging and exposure.** Main never logs argv, a link, an origin or a code: the log carries fixed words (`a conch: invite link arrived`, `refused a conch: link (host)`). Known exposure: on a first launch or a second one, the code is in that process's argv, readable by processes of the same user for as long as it lives. Same-user processes are out of scope, as everywhere in section 10.
+
+**The web page.** The invite landing page in a browser (`web/src/Invite.tsx`) shows a secondary button, "Open in the desktop app", built by `desktopInviteLink` (`web/src/route.ts`) and run through the platform's `openDesktopApp`. It never redirects by itself, the browser's own join stays, and the page does not show or store the link: it is made at the click. The desktop app's own copy of the page has no such button.
+
 ## 10. Threats and security review targets
 
 | Threat | Boundary and required verification |

@@ -16,7 +16,7 @@ import { app, BrowserWindow, desktopCapturer, dialog, ipcMain, Menu, Notificatio
 
 import { allowUnlisted, OVERRIDE_FLAG, parseCompat } from './compat.ts';
 import { activationFactory, healthReader, Live, prober, revoker, verifier } from './profiles/activation.ts';
-import { Invites } from './invites.ts';
+import { deliverInvite, Invites } from './invites.ts';
 import { createProfileFiles } from './profiles/files.ts';
 import { TeardownHooks } from './profiles/hooks.ts';
 import { ProfilesService } from './profiles/service.ts';
@@ -159,14 +159,28 @@ export async function start(): Promise<void> {
 
   // One instance per data root: the lock comes before anything reads or
   // writes the root. A second launch focuses the first and exits.
-  const first = acquire(app, () => {
-    const window = live.window;
-    if (window === null || window.isDestroyed()) return;
-    if (window.isMinimized()) window.restore();
-    // A window hidden by a close comes back.
-    window.show();
-    window.focus();
-  });
+  //
+  // A conch:// invite link (issue #1592) arrives in a launch's arguments. The
+  // invite router does not exist yet at this point, so what a second launch
+  // sends before it does is kept (a few, newest last) and given to it first
+  // thing. The arguments are never logged.
+  let argvSink: ((argv: readonly string[]) => void) | null = null;
+  const earlyArgv: (readonly string[])[] = [];
+  const first = acquire(
+    app,
+    () => {
+      const window = live.window;
+      if (window === null || window.isDestroyed()) return;
+      if (window.isMinimized()) window.restore();
+      // A window hidden by a close comes back.
+      window.show();
+      window.focus();
+    },
+    (argv) => {
+      if (argvSink !== null) argvSink(argv);
+      else if (earlyArgv.length < 4) earlyArgv.push(argv);
+    },
+  );
   if (!first) return;
 
   // The app's settings, once the data root is known (below). Until then, and
@@ -556,6 +570,15 @@ export async function start(): Promise<void> {
     now: Date.now,
     log,
   });
+  // A scheme link in any launch's arguments, this one's or a later one's, is
+  // kept by the router and the page told; the page asks for it, and the same
+  // checks and the same choice as a pasted link follow. A link arriving while
+  // a sign-in or switch is under way waits for the page like any other.
+  argvSink = (argv) => {
+    if (invites.arrive(argv)) deliverInvite({ contents: () => (live.owned() === null ? null : (live.window?.webContents ?? null)), gate: () => live.gate });
+  };
+  for (const argv of [process.argv, ...earlyArgv]) argvSink(argv);
+  earlyArgv.length = 0;
   const ipc = new Ipc({
     owned: () => live.owned(),
     get gate() {

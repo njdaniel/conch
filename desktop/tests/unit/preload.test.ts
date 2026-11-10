@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 import type { CompanionEvent, ConchDesktopBridge, DesktopCompanionBridge, DesktopInviteBridge, DesktopSettingsBridge, DesktopUpdateBridge, DesktopVoiceBridge, NativeVoiceView } from '../../../web/src/platform/desktop/bridge.ts';
 import type { FeedHandlers } from '../../../web/src/platform/desktop/bridge.ts';
 import { createBridge, type Invoke } from '../../preload/bridge.ts';
-import { BRIDGE_FUNCTIONS, COMPANION_EVENTS, COMPANION_FUNCTIONS, INVITE_FUNCTIONS, NOTIFY_FUNCTIONS, PROFILE_FUNCTIONS, VOICE_FUNCTIONS, SETTINGS_FUNCTIONS, UPDATE_FUNCTIONS, FEED_EVENTS, NOTIFICATION_EVENTS, UPDATE_EVENTS, VOICE_EVENTS, INVOKED_FUNCTIONS } from '../../shared/bridge-names.ts';
+import { BRIDGE_FUNCTIONS, COMPANION_EVENTS, COMPANION_FUNCTIONS, INVITE_FUNCTIONS, NOTIFY_FUNCTIONS, PROFILE_FUNCTIONS, VOICE_FUNCTIONS, SETTINGS_FUNCTIONS, UPDATE_FUNCTIONS, FEED_EVENTS, INVITE_EVENTS, NOTIFICATION_EVENTS, UPDATE_EVENTS, VOICE_EVENTS, INVOKED_FUNCTIONS } from '../../shared/bridge-names.ts';
 
 const { exposeInMainWorld, invoke, on, sendSync } = vi.hoisted(() => ({ exposeInMainWorld: vi.fn(), invoke: vi.fn(), on: vi.fn(), sendSync: vi.fn() }));
 vi.mock('electron', () => ({ contextBridge: { exposeInMainWorld }, ipcRenderer: { invoke, on, sendSync } }));
@@ -60,6 +60,8 @@ const named: Record<keyof ConchDesktopBridge | keyof DesktopVoiceBridge | keyof 
   inviteAccept: true,
   inviteCancel: true,
   inviteTake: true,
+  inviteArrived: true,
+  onInviteArrived: true,
   onVoiceState: true,
   settings: true,
   settingsSet: true,
@@ -80,12 +82,12 @@ describe('the preload', () => {
     expect(name).toBe('conchDesktop');
     expect(Object.isFrozen(api)).toBe(true);
     expect(Reflect.ownKeys(api).sort()).toEqual(Object.keys(named).sort());
-    expect([...BRIDGE_FUNCTIONS, ...PROFILE_FUNCTIONS, ...VOICE_FUNCTIONS, ...INVITE_FUNCTIONS, ...NOTIFY_FUNCTIONS, ...SETTINGS_FUNCTIONS, 'notificationSupported', 'onNotification', 'onVoiceState', ...COMPANION_FUNCTIONS, 'onCompanion', ...UPDATE_FUNCTIONS, 'onUpdateState'].sort()).toEqual(Object.keys(named).sort());
+    expect([...BRIDGE_FUNCTIONS, ...PROFILE_FUNCTIONS, ...VOICE_FUNCTIONS, ...INVITE_FUNCTIONS, ...NOTIFY_FUNCTIONS, ...SETTINGS_FUNCTIONS, 'notificationSupported', 'onNotification', 'onVoiceState', 'onInviteArrived', ...COMPANION_FUNCTIONS, 'onCompanion', ...UPDATE_FUNCTIONS, 'onUpdateState'].sort()).toEqual(Object.keys(named).sort());
     for (const key of Reflect.ownKeys(api)) expect(typeof api[key as string], String(key)).toBe('function');
     for (const forbidden of ['ipcRenderer', 'invoke', 'send', 'on', 'sendSync', 'electron', 'require', 'process']) expect(forbidden in api).toBe(false);
-    // It listens on the feed, voice, companion, notification and update
-    // channels, and passes on the message, not the event.
-    expect((on.mock.calls as unknown[][]).map((call) => call[0])).toEqual([FEED_EVENTS, VOICE_EVENTS, COMPANION_EVENTS, NOTIFICATION_EVENTS, UPDATE_EVENTS]);
+    // It listens on the feed, voice, companion, notification, update and
+    // invite channels, and passes on the message, not the event.
+    expect((on.mock.calls as unknown[][]).map((call) => call[0])).toEqual([FEED_EVENTS, VOICE_EVENTS, COMPANION_EVENTS, NOTIFICATION_EVENTS, UPDATE_EVENTS, INVITE_EVENTS]);
     // No exposed or invoked name says press, release, transmit, gate or ptt.
     for (const name of [...Reflect.ownKeys(api).map(String), ...INVOKED_FUNCTIONS]) expect(name).not.toMatch(/press|release|transmit|gate|ptt/i);
   });
@@ -105,7 +107,7 @@ describe('the preload', () => {
     expect(invoke).toHaveBeenLastCalledWith('conch:notifyClose', { tag: 't' });
     await bridge.settingsSet({ launchAtLogin: true });
     expect(invoke).toHaveBeenLastCalledWith('conch:settingsSet', { launchAtLogin: true });
-    expect(INVOKED_FUNCTIONS).toHaveLength(54);
+    expect(INVOKED_FUNCTIONS).toHaveLength(55);
   });
 
   it('rejects with a bare "refused" when main refuses, or answers anything but an envelope', async () => {

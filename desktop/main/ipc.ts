@@ -97,7 +97,7 @@ export type ProfilesApi = Pick<
 >;
 
 export type InstalledApi = Pick<Installed, 'view' | 'restart'>;
-export type InvitesApi = Pick<Invites, 'check' | 'accept' | 'cancel' | 'take'>;
+export type InvitesApi = Pick<Invites, 'check' | 'accept' | 'cancel' | 'take' | 'arrived'>;
 
 export type VoiceApi = Pick<VoiceService, 'state' | 'join' | 'leave' | 'retry' | 'setMute' | 'setDeafen' | 'setDevices' | 'setTalkMode' | 'devices' | 'saveDevice' | 'keyDevices' | 'saveTalkBinding'>;
 export type NotificationsApi = Pick<Notifications, 'show' | 'close' | 'supported'>;
@@ -639,6 +639,10 @@ export const SPECS: Readonly<Record<InvokedFunction, Spec>> = {
     run: ({ invites }, [handle]) => invites.cancel(handle as string),
   },
   inviteTake: { limit: 60, maxBytes: 0, parse: none, run: ({ invites }) => invites.take() },
+  // A conch:// link main was handed (issue #1592) is answered as a pasted one
+  // is: a handle and the server, never the code. Taking it is not an act that
+  // switches or contacts anything.
+  inviteArrived: { limit: 60, maxBytes: 0, parse: none, run: ({ invites }) => invites.arrived() },
   // The app's own settings (issue #1587). A change is the person's act alone.
   settings: { limit: 120, maxBytes: 0, parse: none, run: ({ settings }) => settings.view() },
   settingsSet: {

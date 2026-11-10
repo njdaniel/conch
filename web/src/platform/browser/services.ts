@@ -28,5 +28,12 @@ export const services: Services = {
 
   externalLink: { target: '_blank', rel: 'noopener noreferrer' },
 
+  // A custom-scheme link from a click: the browser asks the system for its
+  // handler, or does nothing when there is none. '_self' so that no empty
+  // tab is left behind, and the page itself stays where it is.
+  openDesktopApp: (link) => {
+    window.open(link, '_self');
+  },
+
   browserVoice: true,
 };

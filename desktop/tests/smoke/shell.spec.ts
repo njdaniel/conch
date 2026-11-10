@@ -80,7 +80,7 @@ test.describe('the packaged shell', () => {
         // Talk-key setup (#1381).
         'voiceKeyDevices', 'voiceSaveTalkBinding',
         // Opening an invite link (#1591).
-        'inviteCheck', 'inviteAccept', 'inviteCancel', 'inviteTake',
+        'inviteCheck', 'inviteAccept', 'inviteCancel', 'inviteTake', 'inviteArrived', 'onInviteArrived',
         // Desktop notifications (#1590): two calls, support and the click event.
         'notify', 'notifyClose', 'notificationSupported', 'onNotification',
         // The app's own settings (#1587).

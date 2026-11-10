@@ -19,7 +19,7 @@ function temp(): string {
 }
 
 function fakeApp(lock: boolean) {
-  const listeners: (() => void)[] = [];
+  const listeners: ((event: unknown, argv: readonly string[]) => void)[] = [];
   const exit = vi.fn();
   const app: InstanceApp = {
     requestSingleInstanceLock: () => lock,
@@ -35,7 +35,39 @@ describe('one instance per data root', () => {
     const focus = vi.fn();
     expect(acquire(app, focus)).toBe(true);
     expect(exit).not.toHaveBeenCalled();
-    listeners[0]?.();
+    listeners[0]?.({}, ['/opt/conch-desktop/conch-desktop']);
+    expect(focus).toHaveBeenCalledOnce();
+  });
+
+  it('hands a second launch’s command line to onArgv after focusing, as strings only', () => {
+    const { app, listeners } = fakeApp(true);
+    const order: string[] = [];
+    const seen: (readonly string[])[] = [];
+    expect(
+      acquire(
+        app,
+        () => order.push('focus'),
+        (argv) => {
+          order.push('argv');
+          seen.push(argv);
+        },
+      ),
+    ).toBe(true);
+    const link = 'conch://invite?server=https%3A%2F%2Fchat.example.org&code=abc';
+    listeners[0]?.({}, ['/opt/conch-desktop/conch-desktop', '--inspect', link]);
+    expect(order).toEqual(['focus', 'argv']);
+    expect(seen).toEqual([['/opt/conch-desktop/conch-desktop', '--inspect', link]]);
+    // Something that is not a list of strings is not passed on as one.
+    listeners[0]?.({}, 'conch://invite' as unknown as readonly string[]);
+    listeners[0]?.({}, ['a', 7, null, 'b'] as unknown as readonly string[]);
+    expect(seen.slice(1)).toEqual([[], ['a', 'b']]);
+  });
+
+  it('works with no onArgv, as before', () => {
+    const { app, listeners } = fakeApp(true);
+    const focus = vi.fn();
+    acquire(app, focus);
+    expect(() => listeners[0]?.({}, ['x'])).not.toThrow();
     expect(focus).toHaveBeenCalledOnce();
   });
 

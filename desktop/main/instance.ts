@@ -13,18 +13,29 @@ import { dirname } from 'node:path';
 
 export interface InstanceApp {
   requestSingleInstanceLock(): boolean;
-  on(event: 'second-instance', listener: () => void): unknown;
+  // Electron's listener is given the event, the second process's command line
+  // (its argv, untrusted), its working directory and extra data; only the
+  // command line is read, and only by onArgv.
+  on(event: 'second-instance', listener: (event: unknown, argv: readonly string[]) => void): unknown;
   exit(code: number): void;
 }
 
 // acquire takes the lock. false: another instance has the root; this process
 // has asked it to focus and has exited, and must do nothing more.
-export function acquire(app: InstanceApp, focus: () => void): boolean {
+//
+// A second launch hands this process its command line (issue #1592: a
+// conch:// link arrives that way). onArgv gets it as a list of strings,
+// untrusted, after the window is focused; it is never logged here. Anything
+// that is not an array of strings is not passed on.
+export function acquire(app: InstanceApp, focus: () => void, onArgv: (argv: readonly string[]) => void = () => undefined): boolean {
   if (!app.requestSingleInstanceLock()) {
     app.exit(0);
     return false;
   }
-  app.on('second-instance', focus);
+  app.on('second-instance', (_event, argv) => {
+    focus();
+    onArgv(Array.isArray(argv) ? (argv as readonly unknown[]).filter((a): a is string => typeof a === 'string') : []);
+  });
   return true;
 }
 

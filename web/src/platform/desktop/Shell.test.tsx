@@ -632,6 +632,68 @@ describe('opening an invite link (issue #1591)', () => {
     expect(screen.queryByRole('group', { name: 'Open this invite' })).toBeNull();
   });
 
+  // A conch:// link (issue #1592): main has checked it; the page is handed
+  // the same answer as a pasted link gets, and acts only on a click.
+  it('shows a link that arrived before the page did, as the same choice, and does nothing until the click', async () => {
+    const inviteArrived = vi.fn().mockResolvedValueOnce(checkFor()).mockResolvedValue(null);
+    const inviteAccept = vi.fn(() => Promise.resolve({ ok: true, switched: true } as const));
+    const profileSwitch = vi.fn();
+    const profileAdd = vi.fn();
+    install({ profiles: () => Promise.resolve(view()), inviteCheck: () => Promise.reject(new Error('unexpected')), inviteArrived, onInviteArrived: () => () => undefined, inviteAccept, profileSwitch, profileAdd });
+    render(<DesktopShell>{child}</DesktopShell>);
+    const group = await screen.findByRole('group', { name: 'Open this invite' });
+    expect(group.textContent).toContain('This invite is for https://chat.example.org.');
+    expect(document.body.textContent).not.toContain('CANARY');
+    expect(inviteAccept).not.toHaveBeenCalled();
+    expect(profileSwitch).not.toHaveBeenCalled();
+    expect(profileAdd).not.toHaveBeenCalled();
+    fireEvent.click(within(group).getByRole('button', { name: 'Open with Work (signed in as ada)' }));
+    await waitFor(() => {
+      expect(inviteAccept).toHaveBeenCalledWith(HANDLE, { profile: ID_A });
+    });
+  });
+
+  it('opens the server panel over the client when a link arrives, and a newer link replaces and cancels the older', async () => {
+    const second = `invite-${'1'.repeat(32)}`;
+    let tell: () => void = () => undefined;
+    const inviteArrived = vi.fn().mockResolvedValueOnce(null).mockResolvedValueOnce(checkFor()).mockResolvedValueOnce(checkFor({ handle: second, origin: 'https://other.example.org', host: 'other.example.org', profiles: [] })).mockResolvedValue(null);
+    const inviteCancel = vi.fn(() => Promise.resolve(true));
+    install({
+      profiles: () => Promise.resolve(active),
+      inviteCheck: () => Promise.reject(new Error('unexpected')),
+      inviteArrived,
+      onInviteArrived: (listener) => {
+        tell = listener;
+        return () => undefined;
+      },
+      inviteCancel,
+    });
+    render(<DesktopShell>{child}</DesktopShell>);
+    await screen.findByText('the client');
+    expect(screen.queryByLabelText('Invite link')).toBeNull();
+    // The ask at mount has been answered (nothing waiting) before main speaks.
+    await waitFor(() => {
+      expect(inviteArrived).toHaveBeenCalledTimes(1);
+    });
+    tell();
+    const group = await screen.findByRole('group', { name: 'Open this invite' });
+    expect(group.textContent).toContain('https://chat.example.org');
+    tell();
+    await waitFor(() => {
+      expect(screen.getByRole('group', { name: 'Open this invite' }).textContent).toContain('https://other.example.org');
+    });
+    expect(inviteCancel).toHaveBeenCalledExactlyOnceWith(HANDLE);
+    expect(document.body.textContent).not.toContain('CANARY');
+  });
+
+  it('ignores a failed or empty ask for an arrived link', async () => {
+    install({ profiles: () => Promise.resolve(view()), inviteCheck: () => Promise.reject(new Error('x')), inviteArrived: () => Promise.reject(new Error('refused')), onInviteArrived: () => () => undefined });
+    render(<DesktopShell>{child}</DesktopShell>);
+    await screen.findByLabelText('Invite link');
+    expect(screen.queryByRole('group', { name: 'Open this invite' })).toBeNull();
+    expect(screen.queryAllByRole('alert').map((a) => a.textContent).join(' ')).not.toMatch(/could not/);
+  });
+
   it('has no invite field when the bridge has no invite functions', async () => {
     install({ profiles: () => Promise.resolve(view()) });
     render(<DesktopShell>{child}</DesktopShell>);
