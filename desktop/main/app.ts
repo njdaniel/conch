@@ -8,7 +8,7 @@ import { isAbsolute, join } from 'node:path';
 
 import tls from 'node:tls';
 
-import { app, dialog, ipcMain, Notification, powerMonitor, protocol, safeStorage, shell } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain, Menu, Notification, powerMonitor, protocol, safeStorage, shell, Tray } from 'electron';
 
 import { allowUnlisted, OVERRIDE_FLAG, parseCompat } from './compat.ts';
 import { activationFactory, healthReader, Live, prober, revoker, verifier } from './profiles/activation.ts';
@@ -25,6 +25,9 @@ import { Companion } from './voice/companion.ts';
 import { OneShot } from './voice/oneshot.ts';
 import { VoiceService } from './voice/service.ts';
 import { Supervisor } from './voice/supervisor.ts';
+import { runFile } from './voice/spawn.ts';
+import { trayHostPresent } from './tray-detect.ts';
+import { TrayController, unblankSoon } from './tray.ts';
 import { createNodeConnect } from './api/socket.ts';
 import { transportVerdict, trustSystemRoots } from './api/trust.ts';
 import { debuggingVerdict } from './debugging.ts';
@@ -118,6 +121,8 @@ export async function start(): Promise<void> {
     const window = live.window;
     if (window === null || window.isDestroyed()) return;
     if (window.isMinimized()) window.restore();
+    // A window hidden by a close comes back.
+    window.show();
     window.focus();
   });
   if (!first) return;
@@ -125,12 +130,44 @@ export async function start(): Promise<void> {
   // The app's settings, once the data root is known (below). Until then, and
   // with none, closing the last window quits.
   let settings: SettingsService | null = null;
+  // The opt-in tray (#1589): made after voice, below. Until then, and while
+  // closeToTray is off, there is none.
+  let tray: TrayController | null = null;
+  // Set once the app is ending, so that a close is never turned into a hide.
+  let quitting = false;
+  // Windows whose close has been decided to go ahead.
+  const closing = new WeakSet<BrowserWindow>();
   app.on('window-all-closed', () => {
     // A window destroyed for a switch or a sign-out is not the app ending.
     // Otherwise closing quits (media stopped, helper reaped, in before-quit),
     // unless the person chose to keep running and a working tray exists.
     const action = settings === null ? (live.destroying ? 'stay' : 'quit') : settings.closeAction(live.destroying);
     if (action === 'quit') app.quit();
+  });
+
+  // Closing hides the window instead only while closeToTray is on and a
+  // working tray exists, checked again now (the tray host may have gone since
+  // the last check). Otherwise the close goes on and, as the last window,
+  // quits (window-all-closed).
+  app.on('browser-window-created', (_event, created) => {
+    created.on('close', (event) => {
+      const t = tray;
+      if (quitting || live.destroying || created !== live.window || closing.has(created) || t === null || settings === null || !settings.current.closeToTray) return;
+      event.preventDefault();
+      // A check that fails lets the close go on: no answer is no tray.
+      void t.check().then(
+        () => t.working(),
+        () => false,
+      ).then((working) => {
+        if (working && !created.isDestroyed()) {
+          created.hide();
+          return;
+        }
+        if (created.isDestroyed()) return;
+        closing.add(created);
+        created.close();
+      });
+    });
   });
 
   await app.whenReady();
@@ -157,12 +194,19 @@ export async function start(): Promise<void> {
   if (!checked.ok) log('conch-desktop: the data directory is not private to you; nothing will be saved');
   const files = createProfileFiles(root);
   // The app-wide settings: <root>/settings.json, in memory only when the root
-  // is not private. No tray exists yet (#1589, D5-03), so trayWorking is false
-  // and closing always quits.
+  // is not private. The tray (below) answers trayWorking; with none, closing
+  // always quits.
   settings = new SettingsService({
     files: checked.ok ? createSettingsFiles(root) : memorySettingsFiles(),
     autostart: new Autostart({ packaged: app.isPackaged, execPath: process.execPath, env: process.env, home: app.getPath('home'), log }),
-    trayWorking: () => false,
+    trayWorking: () => tray?.working() ?? false,
+    trayExists: () => tray?.exists ?? false,
+    trayDetected: () => trayHostPresent(runFile),
+    changed: () => {
+      void tray?.sync().catch(() => {
+        log('tray: could not follow the setting');
+      });
+    },
     log,
   });
   await settings.load();
@@ -206,14 +250,21 @@ export async function start(): Promise<void> {
       log,
     });
   };
+  const openActivation = activationFactory(
+    { packaged: app.isPackaged, appPath, manifest, readUi: (path) => readFile(join(ui, ...path.split('/').slice(1))), connect: createNodeConnect(log), guard: { log, gestures, owned, links }, makeFiles, now: Date.now, log },
+    live,
+  );
   const profiles = new ProfilesService({
     store,
     vault,
     hooks: teardownHooks,
-    createActivation: activationFactory(
-      { packaged: app.isPackaged, appPath, manifest, readUi: (path) => readFile(join(ui, ...path.split('/').slice(1))), connect: createNodeConnect(log), guard: { log, gestures, owned, links }, makeFiles, now: Date.now, log },
-      live,
-    ),
+    createActivation: async (spec) => {
+      const activation = await openActivation(spec);
+      // The switcher records the activation once this resolves: the menu is
+      // filled from it on the next turn, not at the next 10 s check.
+      unblankSoon(() => tray, (generation) => profiles.switcher.isCurrent(generation), spec.generation);
+      return activation;
+    },
     compat: { servers: allowlist?.servers ?? [], override },
     desktopVersion: app.getVersion(),
     readHealth: healthReader(),
@@ -392,8 +443,57 @@ export async function start(): Promise<void> {
   ipc.register(ipcMain);
   ipc.registerNotificationSupport(ipcMain);
 
+  // The tray (issue #1589, D5-03). Its Quit is app.quit(): the same
+  // before-quit teardown as the window's own (helper reaped, the companion's
+  // DELETE sent by the media hooks).
+  const settingsService = settings;
+  const trayController = new TrayController({
+    createTray: (icon) => new Tray(icon),
+    buildMenu: (items) => Menu.buildFromTemplate([...items]),
+    iconDir: join(appPath, 'build', 'icons', 'tray'),
+    voice,
+    sharing: () => companion.liveOrigin() !== null,
+    endCompanion: () => companion.end('lock'),
+    profile: () => {
+      const id = profiles.active?.profileId ?? null;
+      return id === null ? null : (store.get(id)?.label ?? null);
+    },
+    show: () => {
+      const window = live.window;
+      if (window === null || window.isDestroyed()) return;
+      if (window.isMinimized()) window.restore();
+      window.show();
+      window.focus();
+    },
+    hidden: () => live.window !== null && !live.window.isDestroyed() && !live.window.isVisible(),
+    quit: () => {
+      app.quit();
+    },
+    detect: () => trayHostPresent(runFile),
+    revoke: () => {
+      settingsService.revokeTrayConfirmation();
+    },
+    settings: () => settingsService.current,
+    confirmed: () => settingsService.trayConfirmed,
+    log,
+  });
+  tray = trayController;
+  // Media ends for a switch or a sign-out: the menu shows nothing of the old
+  // profile until it is rebuilt from the activation in force.
+  teardownHooks.media('tray', () => {
+    trayController.blank();
+  });
+  // The strip shows "Sharing your screen" as the companion starts and ends.
+  companion.onChange(() => {
+    trayController.refresh();
+  });
+  void trayController.sync().catch(() => {
+    log('tray: could not start');
+  });
+
   let ending = false;
   app.on('before-quit', (event) => {
+    quitting = true;
     if (ending) return;
     ending = true;
     event.preventDefault();

@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { entryText, type AutostartResult } from '../../main/autostart.ts';
-import { closeAction, createSettingsFiles, DEFAULT_SETTINGS, parseSettings, SettingsService, type SettingsFiles } from '../../main/settings.ts';
+import { closeAction, createSettingsFiles, DEFAULT_SETTINGS, DETECT_CACHE_MS, parseSettings, SettingsService, type SettingsFiles } from '../../main/settings.ts';
 
 const dirs: string[] = [];
 function tmp(): string {
@@ -165,6 +165,117 @@ describe('opening at login starts nothing', () => {
     const exec = (entryText('/opt/My App/conch') ?? '').split('\n').filter((line) => line.startsWith('Exec='));
     expect(exec).toHaveLength(1);
     expect(exec[0]).toMatch(/^Exec="[^"\n]*"$/);
+  });
+});
+
+describe('turning the tray on (Q-D5-2)', () => {
+  function tray(detected: { value: boolean }, exists: { value: boolean } = { value: true }, clock: { t: number } = { t: 0 }) {
+    const changes: boolean[] = [];
+    const asked = { n: 0 };
+    const service = new SettingsService({
+      files: memory(),
+      autostart: fakeAutostart(),
+      trayWorking: () => false,
+      trayExists: () => exists.value,
+      trayDetected: () => {
+        asked.n++;
+        return Promise.resolve(detected.value);
+      },
+      changed: (s) => changes.push(s.closeToTray),
+      now: () => clock.t,
+      log: () => undefined,
+    });
+    return { service, changes, asked };
+  }
+
+  it('is refused while no tray host is on the bus, and stores nothing', async () => {
+    const { service, changes } = tray({ value: false });
+    expect(await service.set({ closeToTray: true })).toEqual({ ok: false, reason: 'no-tray' });
+    expect(service.current.closeToTray).toBe(false);
+    expect(changes).toEqual([]);
+  });
+
+  it('a refused no-tray is not followed by a stale trayDetected: true from the cache', async () => {
+    const detected = { value: true };
+    const { service } = tray(detected);
+    expect((await service.view()).trayDetected).toBe(true);
+    detected.value = false;
+    expect(await service.set({ closeToTray: true })).toEqual({ ok: false, reason: 'no-tray' });
+    expect((await service.view()).trayDetected).toBe(false);
+  });
+
+  it('is accepted with a host, unconfirmed until the person says yes', async () => {
+    const { service, changes } = tray({ value: true });
+    const on = await service.set({ closeToTray: true });
+    expect(on.ok && on.view.trayConfirmed).toBe(false);
+    expect(on.ok && on.view.trayDetected).toBe(true);
+    const yes = await service.set({ trayConfirmed: true });
+    expect(yes.ok && yes.view.trayConfirmed).toBe(true);
+    expect(changes).toEqual([true, true]);
+  });
+
+  it('cannot be confirmed with the tray off, or without a host', async () => {
+    const detected = { value: true };
+    const { service } = tray(detected);
+    expect(await service.set({ trayConfirmed: true })).toEqual({ ok: false, reason: 'no-tray' });
+    await service.set({ closeToTray: true });
+    detected.value = false;
+    expect(await service.set({ trayConfirmed: true })).toEqual({ ok: false, reason: 'no-tray' });
+    expect(service.trayConfirmed).toBe(false);
+  });
+
+  it('cannot be turned on and confirmed in one call, whatever the values', async () => {
+    const { service, changes } = tray({ value: true });
+    expect(await service.set({ closeToTray: true, trayConfirmed: true })).toEqual({ ok: false, reason: 'no-tray' });
+    expect(await service.set({ closeToTray: true, trayConfirmed: false })).toEqual({ ok: false, reason: 'no-tray' });
+    expect(service.current.closeToTray).toBe(false);
+    expect(service.trayConfirmed).toBe(false);
+    expect(changes).toEqual([]);
+    // Already on, a combined change is still refused.
+    await service.set({ closeToTray: true });
+    expect(await service.set({ closeToTray: true, trayConfirmed: true })).toEqual({ ok: false, reason: 'no-tray' });
+    expect(service.trayConfirmed).toBe(false);
+  });
+
+  it('cannot be confirmed while the tray icon does not exist', async () => {
+    const exists = { value: false };
+    const { service } = tray({ value: true }, exists);
+    await service.set({ closeToTray: true });
+    expect(await service.set({ trayConfirmed: true })).toEqual({ ok: false, reason: 'no-tray' });
+    expect(service.trayConfirmed).toBe(false);
+    exists.value = true;
+    expect((await service.set({ trayConfirmed: true })).ok).toBe(true);
+    expect(service.trayConfirmed).toBe(true);
+  });
+
+  it('cannot be confirmed when the service is not told whether the icon exists', async () => {
+    const service = new SettingsService({ files: memory(), autostart: fakeAutostart(), trayWorking: () => false, trayDetected: () => Promise.resolve(true), log: () => undefined });
+    await service.set({ closeToTray: true });
+    expect(await service.set({ trayConfirmed: true })).toEqual({ ok: false, reason: 'no-tray' });
+  });
+
+  it('reads of the view reuse the detector for a few seconds, a change always asks', async () => {
+    const clock = { t: 1_000 };
+    const { service, asked } = tray({ value: true }, { value: true }, clock);
+    await service.view();
+    await service.view();
+    expect(asked.n).toBe(1);
+    clock.t += DETECT_CACHE_MS;
+    await service.view();
+    expect(asked.n).toBe(2);
+    await service.set({ closeToTray: true });
+    expect(asked.n).toBeGreaterThan(2);
+  });
+
+  it('turning it off, or losing the host, asks again', async () => {
+    const { service } = tray({ value: true });
+    await service.set({ closeToTray: true });
+    await service.set({ trayConfirmed: true });
+    service.revokeTrayConfirmation();
+    expect(service.trayConfirmed).toBe(false);
+    await service.set({ trayConfirmed: true });
+    await service.set({ closeToTray: false });
+    expect(service.trayConfirmed).toBe(false);
   });
 });
 

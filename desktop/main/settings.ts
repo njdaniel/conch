@@ -117,17 +117,37 @@ export function memorySettingsFiles(): SettingsFiles {
 export interface SettingsDeps {
   readonly files: SettingsFiles;
   readonly autostart: Pick<Autostart, 'enable' | 'disable' | 'availability'>;
-  // Whether a tray is up and working. #1589 (D5-03) supplies the real answer;
-  // until then it is false and closing always quits.
+  // Whether a tray is up and working (tray.ts, #1589): false means closing
+  // always quits.
   readonly trayWorking: () => boolean;
+  // Whether the tray icon exists now. A confirmation is taken only for an
+  // icon that exists; absent means none does.
+  readonly trayExists?: () => boolean;
+  // Whether a tray host is on the session bus now (tray-detect.ts). Absent
+  // means not asked: closeToTray is accepted as it was before the tray.
+  readonly trayDetected?: () => Promise<boolean>;
+  // Called after a change is stored or the confirmation changes, so the tray
+  // can follow closeToTray.
+  readonly changed?: (settings: AppSettings) => void;
   readonly log: (line: string) => void;
+  // The clock for the detector's short cache; a test supplies its own.
+  readonly now?: () => number;
 }
+
+// How long view() reuses the detector's answer: settings reads that follow no
+// gesture would otherwise run gdbus each time.
+export const DETECT_CACHE_MS = 5_000;
 
 export class SettingsService {
   readonly #deps: SettingsDeps;
   #current: AppSettings = DEFAULT_SETTINGS;
+  // The person has said they can see the tray icon (Q-D5-2). Kept for this
+  // run only: a new run asks again, as does losing the tray host.
+  #confirmed = false;
   // One change at a time, so two writes cannot interleave.
   #queue: Promise<unknown> = Promise.resolve();
+  // The last answer of the detector, for view() only.
+  #seen: { readonly at: number; readonly value: boolean } | null = null;
 
   constructor(deps: SettingsDeps) {
     this.#deps = deps;
@@ -153,9 +173,38 @@ export class SettingsService {
     return closeAction({ destroying, closeToTray: this.#current.closeToTray, trayWorking: this.#deps.trayWorking() });
   }
 
+  get trayConfirmed(): boolean {
+    return this.#confirmed;
+  }
+
+  // revokeTrayConfirmation: the tray host went away, so the person must
+  // confirm again before closing keeps the app running.
+  revokeTrayConfirmation(): void {
+    this.#confirmed = false;
+  }
+
   async view(): Promise<DesktopSettingsView> {
     const why = await this.#deps.autostart.availability();
-    return { ...this.#current, trayWorking: this.#deps.trayWorking(), launchAvailable: why === null, ...(why === null ? {} : { launchUnavailable: why }) };
+    const detected = await this.#detectedForView();
+    return { ...this.#current, trayWorking: this.#deps.trayWorking(), trayDetected: detected, trayConfirmed: this.#confirmed, launchAvailable: why === null, ...(why === null ? {} : { launchUnavailable: why }) };
+  }
+
+  async #detectedForView(): Promise<boolean> {
+    const detect = this.#deps.trayDetected;
+    if (detect === undefined) return true;
+    const now = (this.#deps.now ?? Date.now)();
+    if (this.#seen !== null && now - this.#seen.at >= 0 && now - this.#seen.at < DETECT_CACHE_MS) return this.#seen.value;
+    const value = await detect();
+    this.#seen = { at: now, value };
+    return value;
+  }
+
+  // detectFresh asks the bus now and writes the answer into view()'s cache, so
+  // a refused no-tray is not followed by a stale trayDetected: true.
+  async #detectFresh(detect: () => Promise<boolean>): Promise<boolean> {
+    const value = await detect();
+    this.#seen = { at: (this.#deps.now ?? Date.now)(), value };
+    return value;
   }
 
   set(change: SettingsChange): Promise<SettingsResult> {
@@ -165,7 +214,21 @@ export class SettingsService {
   }
 
   async #apply(change: SettingsChange): Promise<SettingsResult> {
-    const next: AppSettings = { ...this.#current, ...change };
+    const { trayConfirmed, ...stored } = change;
+    const next: AppSettings = { ...this.#current, ...stored };
+    // A tray is turned on only while a tray host is on the bus (Q-D5-2).
+    if (change.closeToTray === true && !this.#current.closeToTray && this.#deps.trayDetected !== undefined) {
+      if (!(await this.#detectFresh(this.#deps.trayDetected))) return { ok: false, reason: 'no-tray' };
+    }
+    // The confirmation says "I can see the icon", so it is taken only for an
+    // icon that exists: the stored setting is already on, the tray is up, and
+    // the host is there. It never rides in the same change as the setting it
+    // confirms: one call cannot turn the tray on and confirm it.
+    if (trayConfirmed !== undefined && change.closeToTray !== undefined) return { ok: false, reason: 'no-tray' };
+    if (trayConfirmed === true) {
+      if ( !this.#current.closeToTray || this.#deps.trayExists?.() !== true) return { ok: false, reason: 'no-tray' };
+      if (this.#deps.trayDetected !== undefined && !(await this.#detectFresh(this.#deps.trayDetected))) return { ok: false, reason: 'no-tray' };
+    }
     // The autostart entry first: if it cannot be changed, nothing is stored.
     if (next.launchAtLogin !== this.#current.launchAtLogin) {
       const done = next.launchAtLogin ? await this.#deps.autostart.enable() : await this.#deps.autostart.disable();
@@ -184,6 +247,9 @@ export class SettingsService {
       return { ok: false, reason: 'failed' };
     }
     this.#current = next;
+    if (!next.closeToTray) this.#confirmed = false;
+    else if (trayConfirmed !== undefined) this.#confirmed = trayConfirmed;
+    this.#deps.changed?.(next);
     return { ok: true, view: await this.view() };
   }
 }
