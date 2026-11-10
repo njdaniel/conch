@@ -167,6 +167,9 @@ export class VoiceService {
   // dropped at teardown.
   private listing = new Map<string, string>();
   private bindingSave = false;
+  // Set when main muted the person at a screen lock (issue #1588): the view
+  // says so until they unmute or leave.
+  private lockMuted = false;
 
   constructor(private readonly deps: VoiceServiceDeps) {
     this.bound = deps.stopBoundMs ?? VOICE_CONTROL_STOP_KILL_AFTER_MS;
@@ -187,7 +190,21 @@ export class VoiceService {
     // A join that sign-out, a switch or a 401 has overtaken shows nothing:
     // not its channel, not its helper.
     if (this.active !== null && !this.active.current()) return { status: 'idle', generation: this.lastGeneration, channel: null, retryable: false };
-    return this.override ?? this.view(this.deps.supervisor.state);
+    return this.withLockNote(this.override ?? this.view(this.deps.supervisor.state));
+  }
+
+  // setLockMuted records (or clears) that main muted the person at a lock,
+  // and tells the page.
+  setLockMuted(on: boolean): void {
+    if (this.lockMuted === on) return;
+    this.lockMuted = on;
+    this.emit(this.state());
+  }
+
+  // The note rides on a running view only, and only while still muted.
+  private withLockNote(view: NativeVoiceView): NativeVoiceView {
+    if (!this.lockMuted) return view;
+    return view.status === 'running' && view.helper?.muted === true ? { ...view, mutedByLock: true } : view;
   }
 
   subscribe(listener: (view: NativeVoiceView) => void): () => void {
@@ -201,7 +218,9 @@ export class VoiceService {
     // A join that sign-out, a switch or a 401 has overtaken reports nothing.
     if (this.active !== null && !this.active.current()) return;
     this.override = null;
-    this.emit(this.view(s));
+    // The note ends with the mute or the session.
+    if (this.lockMuted && (s.status !== 'running' || !s.helper.muted)) this.lockMuted = false;
+    this.emit(this.withLockNote(this.view(s)));
   }
 
   private emit(view: NativeVoiceView): void {
@@ -329,6 +348,7 @@ export class VoiceService {
   // logind watcher calls it too.
   async leave(): Promise<NativeVoiceView> {
     this.epoch++;
+    this.lockMuted = false;
     await this.stopBounded(true);
     this.channel = null;
     this.override = null;

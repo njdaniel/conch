@@ -17,6 +17,7 @@ import { Roster } from '../VoicePanel';
 import { useVoiceNames } from '../useVoiceNames';
 import { usePresence } from './usePresence';
 import { useNativeVoice } from './useNativeVoice';
+import { lockMutedNote } from './words';
 import { VoiceOptions } from './VoiceOptions';
 import { TalkKeySetup } from './TalkKeySetup';
 
@@ -284,6 +285,7 @@ export function NativeVoicePanel({
       {unavailable || actions === undefined ? null : <VoiceOptions source={source} view={view} open={options} />}
       <div className="voice-notes">
         {why === null ? null : <p role="status" className="hint">{why}</p>}
+        {view.mutedByLock === true && muted ? <p role="status" className="hint">{lockMutedNote}</p> : null}
         {note === null ? null : <p role="status" className="hint">{note}</p>}
         {idle === null ? null : <p role="status" className="hint">{idle}</p>}
         {!session && warned !== null && warned === channel ? <p role="status" className="hint">{duplicateWarning}</p> : null}

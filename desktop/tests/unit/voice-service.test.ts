@@ -226,6 +226,38 @@ describe('the destination', () => {
   });
 });
 
+describe('the lock note (issue #1588)', () => {
+  it('marks a mute main made at a lock until the person unmutes or leaves', async () => {
+    await join();
+    fake.set({ status: 'running', generation: 1, helper: helper({ muted: true }) });
+    svc.setLockMuted(true);
+    expect(svc.state().mutedByLock).toBe(true);
+    expect(views[views.length - 1]?.mutedByLock).toBe(true);
+    // The helper's later reports of the same mute keep the note.
+    fake.set({ status: 'running', generation: 1, helper: helper({ muted: true, transmitting: false }) });
+    expect(svc.state().mutedByLock).toBe(true);
+    // Unmuted: gone, and not back when it is muted again by the person.
+    fake.set({ status: 'running', generation: 1, helper: helper({ muted: false }) });
+    expect(svc.state()).not.toHaveProperty('mutedByLock');
+    fake.set({ status: 'running', generation: 1, helper: helper({ muted: true }) });
+    expect(svc.state()).not.toHaveProperty('mutedByLock');
+  });
+
+  it('is gone after a leave, and never marks a view that is not muted or not running', async () => {
+    await join();
+    svc.setLockMuted(true);
+    expect(svc.state()).not.toHaveProperty('mutedByLock');
+    fake.set({ status: 'running', generation: 1, helper: helper({ muted: true }) });
+    svc.setLockMuted(true);
+    expect(svc.state().mutedByLock).toBe(true);
+    await svc.leave();
+    expect(svc.state()).not.toHaveProperty('mutedByLock');
+    await join();
+    fake.set({ status: 'running', generation: 1, helper: helper({ muted: true }) });
+    expect(svc.state()).not.toHaveProperty('mutedByLock');
+  });
+});
+
 describe('state', () => {
   it('maps each supervisor state to one view, with only confirmed helper state', async () => {
     await join();

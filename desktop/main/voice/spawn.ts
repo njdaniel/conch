@@ -240,3 +240,74 @@ export function spawnHelper(
 }
 
 export const defaultSpawn: SpawnFn = (command, args, options) => nodeSpawn(command, args, options);
+
+// RunResult is a finished read-only run: its exit code (null when a signal
+// ended it) and its standard output.
+export interface RunResult {
+  readonly code: number | null;
+  readonly stdout: string;
+}
+
+// The bounds of runFile: a program that does not finish in this time, or says
+// more than this, is killed and counts as not run.
+export const RUN_TIMEOUT_MS = 3000;
+export const RUN_MAX_OUTPUT = 16 * 1024;
+
+// runFile runs one read-only program for the lock watcher (issue #1588):
+// file with args and env, never a shell, never detached, standard input
+// /dev/null, stderr dropped, bounded in time and in output. It resolves with
+// the exit code and stdout, or null when the program could not be run or was
+// cut off. It lives here because spawn.ts is the one place that reaches
+// child_process. (#1580's portal reader needs the same helper and gives it
+// the same name and shape.)
+export function runFile(file: string, args: readonly string[], env: Readonly<Record<string, string>>): Promise<RunResult | null> {
+  return new Promise((resolve) => {
+    let out = '';
+    let settled = false;
+    let child: OneShotChild;
+    const done = (value: RunResult | null): void => {
+      if (settled) return;
+      settled = true;
+      // timer is set before any callback below can run.
+      clearTimeout(timer);
+      resolve(value);
+    };
+    try {
+      child = nodeSpawn(file, [...args], { env: { ...env }, stdio: ['ignore', 'pipe', 'pipe'], detached: false, shell: false, windowsHide: true, cwd: '/' });
+    } catch {
+      resolve(null);
+      return;
+    }
+    const timer = setTimeout(() => {
+      child.kill('SIGKILL');
+      done(null);
+    }, RUN_TIMEOUT_MS);
+    child.stdout.setEncoding('utf8');
+    child.stdout.on('data', (chunk: string) => {
+      out += chunk;
+      if (out.length > RUN_MAX_OUTPUT) {
+        child.kill('SIGKILL');
+        done(null);
+      }
+    });
+    child.stderr.resume();
+    child.on('error', () => {
+      done(null);
+    });
+    child.on('close', (code) => {
+      done({ code, stdout: out });
+    });
+  });
+}
+
+// WatchChild is a long-lived read-only child: no standard input, stdout read
+// line by line, stderr dropped.
+export type WatchChild = OneShotChild;
+
+// spawnWatch starts a long-lived read-only program (the logind monitor of
+// issue #1588): argv only, no shell, not detached, standard input /dev/null.
+// The caller owns the ChildProcess and kills it by that handle, never by
+// name.
+export function spawnWatch(file: string, args: readonly string[], env: Readonly<Record<string, string>>): WatchChild {
+  return nodeSpawn(file, [...args], { env: { ...env }, stdio: ['ignore', 'pipe', 'pipe'], detached: false, shell: false, windowsHide: true, cwd: '/' });
+}

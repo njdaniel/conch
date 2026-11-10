@@ -8,7 +8,7 @@ import { isAbsolute, join } from 'node:path';
 
 import tls from 'node:tls';
 
-import { app, dialog, ipcMain, Notification, protocol, safeStorage, shell } from 'electron';
+import { app, dialog, ipcMain, Notification, powerMonitor, protocol, safeStorage, shell } from 'electron';
 
 import { allowUnlisted, OVERRIDE_FLAG, parseCompat } from './compat.ts';
 import { activationFactory, healthReader, Live, prober, revoker, verifier } from './profiles/activation.ts';
@@ -31,6 +31,8 @@ import { Gestures } from './gestures.ts';
 import { installGuards } from './guards.ts';
 import { Ipc } from './ipc.ts';
 import { Links } from './links.ts';
+import { Lifecycle } from './lifecycle.ts';
+import { LinuxLifecycle } from './lifecycle-linux.ts';
 import { Notifications } from './notifications.ts';
 import { saveChosenFile } from './save-file.ts';
 import { parseManifest, SCHEME, SCHEME_PRIVILEGES } from './scheme.ts';
@@ -258,6 +260,26 @@ export async function start(): Promise<void> {
     log,
   });
   teardownHooks.media('voice', () => voice.teardown());
+
+  // Lock and suspend fail closed (issue #1588, D5-02): mute on lock, leave on
+  // suspend, end the share, hide notification text. Linux only: the lock is
+  // observed through logind (lifecycle-linux.ts). Where it cannot be, the
+  // rules keep notification text hidden and say so on the log.
+  //
+  // The companion seam: #1579's Companion (voice/companion.ts, merged to
+  // main after this branch's base) is what ends the share; on merge, pass it
+  // here. Until then there is no share in this tree to end.
+  const lifecycle = new Lifecycle({
+    voice,
+    companion: { end: () => Promise.resolve(false) },
+    notifications,
+    log,
+  });
+  let watcher: LinuxLifecycle | null = null;
+  if (process.platform === 'linux') {
+    watcher = new LinuxLifecycle({ rules: lifecycle, powerMonitor, pid: process.pid, log });
+    void watcher.start();
+  }
   // Every change of the helper's confirmed state goes to the owned window.
   voice.subscribe((view) => {
     deliverVoice({ contents: () => (live.owned() === null ? null : (live.window?.webContents ?? null)), gate: () => live.gate }, view);
@@ -298,6 +320,8 @@ export async function start(): Promise<void> {
     if (ending) return;
     ending = true;
     event.preventDefault();
+    // The lock monitor's child goes with the app, by its own handle.
+    watcher?.stop();
     // Media stops before the process goes.
     void profiles.close().finally(() => {
       app.quit();

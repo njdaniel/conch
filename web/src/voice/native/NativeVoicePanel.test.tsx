@@ -226,6 +226,23 @@ describe('NativeVoicePanel', () => {
     });
   });
 
+  it('says the person was muted at a screen lock until they unmute or leave', async () => {
+    const note = 'You were muted when your screen locked';
+    const fake = new Fake({ ...running({ muted: true }), mutedByLock: true });
+    strip(fake);
+    await frame(presence([1, '2026-01-01T00:00:00Z']));
+    expect(screen.getByText(note)).toBeTruthy();
+    // Unmuted (main drops the marker with the mute): the note is gone.
+    fake.set(running({ muted: false }));
+    expect(screen.queryByText(note)).toBeNull();
+    // A marker with no mute in force is not shown either.
+    fake.set({ ...running({ muted: false }), mutedByLock: true });
+    expect(screen.queryByText(note)).toBeNull();
+    // Left: gone.
+    fake.set(idle);
+    expect(screen.queryByText(note)).toBeNull();
+  });
+
   it('Leave calls leave', async () => {
     const fake = new Fake(running());
     strip(fake);

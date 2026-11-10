@@ -364,6 +364,9 @@ export interface NativeVoiceView {
   readonly problem?: string;
   readonly retryable: boolean;
   readonly helper?: NativeVoiceHelper;
+  // Set while main's mute at a screen lock (issue #1588) is still in force:
+  // the strip says "You were muted when your screen locked".
+  readonly mutedByLock?: true;
 }
 
 export type VoiceCommandResult =
