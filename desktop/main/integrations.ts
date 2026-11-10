@@ -16,6 +16,10 @@ export interface IntegrationsDeps {
   readonly settings: () => Promise<DesktopSettingsView>;
   readonly notificationSupported: () => boolean;
   readonly lockObservation: () => LockObservation;
+  // Whether the lock watcher is still trying: before its first answer, or with
+  // a restart pending (LinuxLifecycle.trying). False once it has given up and
+  // where nothing watches.
+  readonly lockTrying: () => boolean;
   // The portal's latest answer, 'unknown' before the first (Portal.last).
   readonly share: () => ShareAvailability | 'unknown';
   readonly storage: () => StorageStatus;
@@ -52,19 +56,48 @@ function storage(status: StorageStatus): IntegrationRow {
   return { id: 'storage', state: 'unavailable', why: why[status.reason] };
 }
 
+function lock(observation: LockObservation, trying: boolean): IntegrationRow {
+  if (observation === 'available') return working('lock');
+  // Not yet is not never: the watcher starts 'unavailable' and returns to it
+  // while a restart is pending.
+  if (trying) return { id: 'lock', state: 'unknown', why: 'lock-checking' };
+  return { id: 'lock', state: 'unavailable', why: 'lock-unobserved' };
+}
+
+// The helper stopped because of a problem (a failed start, a loss, or a final
+// state that carries a reason other than the person leaving), not because the
+// person left.
+function helperFailed(view: NativeVoiceView): boolean {
+  if (view.status === 'failed' || view.status === 'lost') return true;
+  return view.status === 'ended' && view.problem !== undefined && view.problem !== 'left';
+}
+
 function voiceHelper(view: NativeVoiceView): IntegrationRow {
-  if (view.status === 'unavailable' && (view.problem === 'not-installed' || view.problem === 'untrusted')) return { id: 'voiceHelper', state: 'unavailable', why: view.problem };
-  if (view.status === 'running' || view.status === 'starting') return working('voiceHelper');
+  if (view.status === 'unavailable') {
+    if (view.problem === 'not-installed' || view.problem === 'untrusted') return { id: 'voiceHelper', state: 'unavailable', why: view.problem };
+    // Not signed in, an update pending, an unsafe profile folder, an endpoint
+    // refusal: one neutral answer, whatever the fixed code.
+    return { id: 'voiceHelper', state: 'unavailable', why: 'voice-unavailable' };
+  }
+  if (view.status === 'running') return working('voiceHelper');
+  if (view.status === 'starting') return { id: 'voiceHelper', state: 'unknown', why: 'helper-starting' };
+  if (helperFailed(view)) return { id: 'voiceHelper', state: 'unavailable', why: 'helper-failed' };
   // Not asked yet (or stopped since): nothing is started just to find out.
   return { id: 'voiceHelper', state: 'unknown', why: 'helper-not-started' };
 }
 
 function talkKey(view: NativeVoiceView): IntegrationRow {
-  const ptt = view.status === 'running' ? view.helper?.ptt : undefined;
+  if (view.status === 'unavailable') return { id: 'talkKey', state: 'unavailable', why: 'voice-unavailable' };
+  if (view.status === 'starting') return { id: 'talkKey', state: 'unknown', why: 'helper-starting' };
+  if (helperFailed(view)) return { id: 'talkKey', state: 'unavailable', why: 'helper-failed' };
+  if (view.status !== 'running') return { id: 'talkKey', state: 'unknown', why: 'helper-not-started' };
+  const ptt = view.helper?.ptt;
   if (ptt === 'ready') return working('talkKey');
-  if (ptt === 'not_configured') return { id: 'talkKey', state: 'unavailable', why: 'key-not-configured' };
+  // A setup step, not a fault.
+  if (ptt === 'not_configured') return { id: 'talkKey', state: 'unknown', why: 'key-not-configured' };
   if (ptt === 'unavailable' || ptt === 'lost') return { id: 'talkKey', state: 'unavailable', why: 'key-unavailable' };
-  return { id: 'talkKey', state: 'unknown', why: 'helper-not-started' };
+  // The helper runs but has not said.
+  return { id: 'talkKey', state: 'unknown', why: 'key-unsure' };
 }
 
 export async function integrationsView(deps: IntegrationsDeps): Promise<IntegrationsView> {
@@ -73,7 +106,7 @@ export async function integrationsView(deps: IntegrationsDeps): Promise<Integrat
   const rows: IntegrationRow[] = [
     tray(settings),
     deps.notificationSupported() ? working('notifications') : { id: 'notifications', state: 'unavailable', why: 'notifications-unsupported' },
-    deps.lockObservation() === 'available' ? working('lock') : { id: 'lock', state: 'unavailable', why: 'lock-unobserved' },
+    lock(deps.lockObservation(), deps.lockTrying()),
     capture(deps.share()),
     storage(deps.storage()),
     settings.launchAvailable ? working('launch') : { id: 'launch', state: 'unavailable', why: settings.launchUnavailable === 'unsafe-location' ? 'unsafe-location' : 'unpackaged' },

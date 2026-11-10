@@ -578,6 +578,7 @@ export type IntegrationWhy =
   | 'tray-unconfirmed'
   | 'notifications-unsupported'
   | 'lock-unobserved'
+  | 'lock-checking'
   | 'no-portal'
   | 'not-wayland'
   | 'portal-unasked'
@@ -592,7 +593,11 @@ export type IntegrationWhy =
   | 'not-installed'
   | 'untrusted'
   | 'helper-not-started'
+  | 'helper-starting'
+  | 'helper-failed'
+  | 'voice-unavailable'
   | 'key-not-configured'
+  | 'key-unsure'
   | 'key-unavailable';
 
 export interface IntegrationRow {

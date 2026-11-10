@@ -81,8 +81,8 @@ export interface IpcDeps {
   readonly notifications: NotificationsApi;
   // The app's own settings (issue #1587).
   readonly settings: SettingsApi;
-  // What works on this desktop (issue #1593): read-only. Absent: every row is
-  // reported unknown.
+  // What works on this desktop (issue #1593): read-only. Absent: main answers
+  // no rows at all (NO_INTEGRATIONS), and the page shows no list.
   readonly integrations?: IntegrationsApi;
   // The screen companion (issue #1579). Absent: every grant is refused as
   // failed, and nothing is held to end.

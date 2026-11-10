@@ -431,6 +431,43 @@ describe('the hint is read only once the monitor is subscribed (S2)', () => {
   });
 });
 
+describe('trying (for #1593: "checking" is not "not available")', () => {
+  const watcher = (r: Rig, gdbus: string, backoffMs?: readonly number[]): LinuxLifecycle =>
+    new LinuxLifecycle({ rules: r.life, powerMonitor: r.power, pid: 1, log: () => undefined, findGdbus: () => Promise.resolve(gdbus), ...(backoffMs === undefined ? {} : { backoffMs }), idlePollMs: 100000 });
+
+  it('is false before start, true while a restart is pending, and false after stop', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const r = rig();
+    const w = watcher(r, fakeGdbus({ hint: 'nonsense' }), [100000]);
+    expect(w.trying).toBe(false);
+    await w.start();
+    // The first attempt failed and a restart is waiting: still trying.
+    expect(r.life.lockObservation).toBe('unavailable');
+    expect(w.trying).toBe(true);
+    w.stop();
+    expect(w.trying).toBe(false);
+  });
+
+  it('is false once it has given up', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const r = rig();
+    const w = watcher(r, fakeGdbus({ hint: 'nonsense' }), []);
+    await w.start();
+    expect(r.life.lockObservation).toBe('unavailable');
+    expect(w.trying).toBe(false);
+    w.stop();
+  });
+
+  it('is false once the lock is observed', async () => {
+    const r = rig();
+    const w = watcher(r, fakeGdbus({}));
+    await w.start();
+    await until(() => r.life.lockObservation === 'available');
+    expect(w.trying).toBe(false);
+    w.stop();
+  });
+});
+
 describe('when the lock cannot be observed', () => {
   it.each([
     { name: 'no gdbus', gdbus: null, opts: {}, why: 'gdbus is not installed' },

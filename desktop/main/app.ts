@@ -585,6 +585,7 @@ export async function start(): Promise<void> {
           settings: () => settingsService.view(),
           notificationSupported: () => notifications.supported(),
           lockObservation: () => lifecycle.lockObservation,
+          lockTrying: () => watcher?.trying ?? false,
           share: () => portal.last(),
           storage: () => profiles.view().storage,
           voice: () => voice.state(),

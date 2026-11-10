@@ -373,7 +373,7 @@ describe('the desktop app settings (issue #1587)', () => {
       const writeText = vi.fn(() => Promise.resolve());
       Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true });
       await open();
-      fireEvent.click(await screen.findByRole('button', { name: 'Copy' }));
+      fireEvent.click(await screen.findByRole('button', { name: 'Copy this list' }));
       await waitFor(() => {
         expect(writeText).toHaveBeenCalledOnce();
       });
@@ -388,15 +388,80 @@ describe('the desktop app settings (issue #1587)', () => {
       installIntegrations(states);
       Object.defineProperty(navigator, 'clipboard', { value: { writeText: () => Promise.reject(new Error('no')) }, configurable: true });
       await open();
-      fireEvent.click(await screen.findByRole('button', { name: 'Copy' }));
+      fireEvent.click(await screen.findByRole('button', { name: 'Copy this list' }));
       expect((await screen.findByRole('status')).textContent).toMatch(/Could not copy/);
+    });
+
+    it('asks again when the settings view changes, so the list is not stale', async () => {
+      let n = 0;
+      const lines = [
+        [{ id: 'tray', state: 'unavailable', why: 'no-tray-host' }],
+        [{ id: 'tray', state: 'working' }],
+      ] as const;
+      const integrations = vi.fn((): Promise<{ rows: readonly IntegrationRow[] }> => Promise.resolve({ rows: lines[Math.min(n++, 1)] ?? [] }));
+      const settingsSet = vi.fn((): Promise<SettingsResult> => Promise.resolve({ ok: true, view: settings({ launchAtLogin: true }) }));
+      installSettings(settings(), settingsSet);
+      Object.defineProperty(window, 'conchDesktop', { value: { ...window.conchDesktop, integrations }, configurable: true, writable: true });
+      await open();
+      expect((await screen.findAllByRole('listitem'))[0]?.textContent).toMatch(/^Tray icon: Not available here\./);
+      fireEvent.click(screen.getByRole('checkbox', { name: 'Open Conch when I log in' }));
+      await waitFor(() => {
+        expect(screen.getAllByRole('listitem')[0]?.textContent).toMatch(/^Tray icon: Working\./);
+      });
+      expect(integrations).toHaveBeenCalledTimes(2);
+    });
+
+    it('asks again when Copy is clicked, and copies what main now says', async () => {
+      let n = 0;
+      const integrations = vi.fn((): Promise<{ rows: readonly IntegrationRow[] }> => Promise.resolve({ rows: n++ === 0 ? [{ id: 'tray', state: 'unavailable', why: 'no-tray-host' }] : [{ id: 'tray', state: 'working' }] }));
+      installSettings(settings(), () => Promise.reject(new Error('unexpected')));
+      Object.defineProperty(window, 'conchDesktop', { value: { ...window.conchDesktop, integrations }, configurable: true, writable: true });
+      const writeText = vi.fn(() => Promise.resolve());
+      Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true });
+      await open();
+      fireEvent.click(await screen.findByRole('button', { name: 'Copy this list' }));
+      await waitFor(() => {
+        expect(writeText).toHaveBeenCalledOnce();
+      });
+      expect(integrations).toHaveBeenCalledTimes(2);
+      expect((writeText.mock.calls as unknown as string[][])[0]?.[0]).toMatch(/\nTray icon: Working\./);
+    });
+
+    it('copies the list it holds when main cannot answer the second time', async () => {
+      let n = 0;
+      const integrations = vi.fn((): Promise<{ rows: readonly IntegrationRow[] }> => (n++ === 0 ? Promise.resolve({ rows: states }) : Promise.reject(new Error('gone'))));
+      installSettings(settings(), () => Promise.reject(new Error('unexpected')));
+      Object.defineProperty(window, 'conchDesktop', { value: { ...window.conchDesktop, integrations }, configurable: true, writable: true });
+      const writeText = vi.fn(() => Promise.resolve());
+      Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true });
+      await open();
+      fireEvent.click(await screen.findByRole('button', { name: 'Copy this list' }));
+      await waitFor(() => {
+        expect(writeText).toHaveBeenCalledOnce();
+      });
+      expect(((writeText.mock.calls as unknown as string[][])[0]?.[0] ?? '').split('\n')).toHaveLength(6);
+    });
+
+    it('says the plain thing for the new codes', async () => {
+      installIntegrations([
+        { id: 'lock', state: 'unknown', why: 'lock-checking' },
+        { id: 'voiceHelper', state: 'unavailable', why: 'helper-failed' },
+        { id: 'talkKey', state: 'unknown', why: 'key-not-configured' },
+        { id: 'capture', state: 'working' },
+      ]);
+      await open();
+      const items = within(await screen.findByRole('list')).getAllByRole('listitem');
+      expect(items[0]?.textContent).toBe('Screen lock: Unknown. Conch is still checking whether it can tell when your screen locks.');
+      expect(items[1]?.textContent).toMatch(/^Voice helper: Not available here\. The voice helper stopped because of a problem/);
+      expect(items[2]?.textContent).toMatch(/^Talk key: Unknown\. No talk key is set up yet, so set one in voice settings/);
+      expect(items[3]?.textContent).toBe('Screen sharing: Working. This desktop offers screen sharing, and shows its own picker first.');
     });
 
     it('shows no list when the bridge cannot say (an older preload)', async () => {
       installSettings(settings(), () => Promise.reject(new Error('unexpected')));
       await open();
       expect(screen.queryByRole('list')).toBeNull();
-      expect(screen.queryByRole('button', { name: 'Copy' })).toBeNull();
+      expect(screen.queryByRole('button', { name: 'Copy this list' })).toBeNull();
     });
   });
 
