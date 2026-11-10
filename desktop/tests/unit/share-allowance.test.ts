@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { ShareAllowance, SHARE_ARM_MS, SHARE_CAPTURE_MS } from '../../main/share-allowance.ts';
+import { ShareAllowance, SHARE_ARM_MS, SHARE_CAPTURE_MS, SHARE_CONFIRM_MS } from '../../main/share-allowance.ts';
 
 // Part of the capture window, and the rest of it: a confirmation made PART in
 // must not restart the window, so PART + REST + 1 is just past its end.
@@ -72,15 +72,33 @@ describe('the share allowance', () => {
   ])('the cold path: the capture window runs from the grant being issued: %s', (_name, wait, good) => {
     const { share, clock, document } = make();
     share.arm(win);
-    clock.now += 9_000; // a slow round trip, inside SHARE_ARM_MS
+    clock.now += SHARE_ARM_MS - 1_000; // the grant use taken late, inside SHARE_ARM_MS
     expect(share.takeGrant(win)).toBe(true);
+    clock.now += 2_000; // the grant's round trip: now past SHARE_CAPTURE_MS from the arm
+    expect(share.peekCapture(win)).toBe(false);
     share.confirmGrant(win, document.n);
-    // The window now runs from the confirmation, not the arm: at the edge it
-    // is 9 s + SHARE_CAPTURE_MS after the arm, well past SHARE_CAPTURE_MS.
-    expect(9_000 + wait).toBeGreaterThan(SHARE_CAPTURE_MS);
     clock.now += wait;
     expect(share.peekCapture(win)).toBe(good);
     expect(share.takeCapture(win)).toBe(good);
+  });
+
+  it('a confirmation long after the grant use was spent does not reopen the window', () => {
+    const { share, clock, document } = make();
+    share.arm(win);
+    expect(share.takeGrant(win)).toBe(true);
+    clock.now += SHARE_CONFIRM_MS + 1; // some later grant, say a Watch
+    share.confirmGrant(win, document.n);
+    expect(share.peekCapture(win)).toBe(false);
+    expect(share.takeCapture(win)).toBe(false);
+  });
+
+  it('a confirmation at the edge of SHARE_CONFIRM_MS still moves the window', () => {
+    const { share, clock, document } = make();
+    share.arm(win);
+    expect(share.takeGrant(win)).toBe(true);
+    clock.now += SHARE_CONFIRM_MS;
+    share.confirmGrant(win, document.n);
+    expect(share.peekCapture(win)).toBe(true);
   });
 
   it('a grant taken but never confirmed does not move the window', () => {
