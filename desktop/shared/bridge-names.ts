@@ -6,7 +6,7 @@
 // bridge's subscribe is not one invoke: the preload carries it as the three
 // feed calls below, and main answers with feed events on the one channel
 // FEED_EVENTS (issue #943).
-import type { ConchDesktopBridge, DesktopCompanionBridge, DesktopInviteBridge, DesktopSettingsBridge, DesktopVoiceBridge } from '../../web/src/platform/desktop/bridge.ts';
+import type { ConchDesktopBridge, DesktopCompanionBridge, DesktopInviteBridge, DesktopSettingsBridge, DesktopUpdateBridge, DesktopVoiceBridge } from '../../web/src/platform/desktop/bridge.ts';
 
 export const BRIDGE_FUNCTIONS = [
   'serverAddress',
@@ -93,6 +93,12 @@ export const COMPANION_FUNCTIONS = ['companionGrant', 'companionEnd', 'shareArm'
 
 export type CompanionFunction = (typeof COMPANION_FUNCTIONS)[number];
 
+// The update family (issue #1600, D6-06): the installed files replaced under
+// the running app. onUpdateState is its event, not an invoke.
+export const UPDATE_FUNCTIONS = ['updateState', 'updateRestart'] as const satisfies readonly (keyof DesktopUpdateBridge)[];
+
+export type UpdateFunction = (typeof UPDATE_FUNCTIONS)[number];
+
 export type BridgeFunction = (typeof BRIDGE_FUNCTIONS)[number];
 
 // The calls a subscription is made of: open a feed under a number the preload
@@ -102,7 +108,7 @@ export const FEED_CALLS = ['feedSubscribe', 'feedAck', 'feedUnsubscribe'] as con
 export type FeedCall = (typeof FEED_CALLS)[number];
 
 // The functions that cross into main as one invoke each.
-export type InvokedFunction = Exclude<BridgeFunction, 'subscribe'> | FeedCall | ProfileFunction | VoiceFunction | InviteFunction | NotifyFunction | SettingsFunction | CompanionFunction;
+export type InvokedFunction = Exclude<BridgeFunction, 'subscribe'> | FeedCall | ProfileFunction | VoiceFunction | InviteFunction | NotifyFunction | SettingsFunction | CompanionFunction | UpdateFunction;
 
 export const INVOKED_FUNCTIONS: readonly InvokedFunction[] = [
   ...BRIDGE_FUNCTIONS.filter((name): name is Exclude<BridgeFunction, 'subscribe'> => name !== 'subscribe'),
@@ -113,6 +119,7 @@ export const INVOKED_FUNCTIONS: readonly InvokedFunction[] = [
   ...NOTIFY_FUNCTIONS,
   ...SETTINGS_FUNCTIONS,
   ...COMPANION_FUNCTIONS,
+  ...UPDATE_FUNCTIONS,
 ];
 
 export function channelOf(name: InvokedFunction | typeof NOTIFICATION_SUPPORT): string {
@@ -148,3 +155,7 @@ export const VOICE_EVENTS = 'conch:voice';
 // contents only, and only to the document that was given the grant, before
 // main asks conchd to remove the companion.
 export const COMPANION_EVENTS = 'conch:companion';
+
+// Another channel main sends on: the installed state, an InstalledView as
+// the message, when it changes. Same targets and gate as VOICE_EVENTS.
+export const UPDATE_EVENTS = 'conch:update';

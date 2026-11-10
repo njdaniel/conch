@@ -39,6 +39,8 @@ import { Files } from './files.ts';
 import { Gestures } from './gestures.ts';
 import { ShareAllowance } from './share-allowance.ts';
 import { installGuards } from './guards.ts';
+import { deliverUpdate, Installed, shouldAskAfterFailure } from './installed.ts';
+import { updateDialogButtons, updateDialogDetail, updateDialogMessage } from '../../web/src/platform/desktop/ui/text.ts';
 import { Ipc } from './ipc.ts';
 import { Links } from './links.ts';
 import { Lifecycle } from './lifecycle.ts';
@@ -345,6 +347,68 @@ export async function start(): Promise<void> {
   // starts voice: only the person's join and retry do (the IPC, issue #1374,
   // takes them only after a gesture). The
   // media hook leaves and stops the helper before identity changes.
+  // The installed files replaced under this running app (issue #1600). The
+  // stamp is resources/version, written by the build; it is read at start,
+  // when a window gains focus and every ten minutes. Nothing restarts by
+  // itself: the page's Restart button relaunches (a gesture-checked IPC), and
+  // the relaunch goes through the quit below, so the helper is reaped first.
+  // True once the app is quitting (set by before-quit below): a window or
+  // renderer going away then is the quit, not a failed page.
+  let ending = false;
+  // Whether a call is running, said in the notice and the dialog; set once the
+  // voice service exists.
+  let callActive = (): boolean => false;
+  const installed = new Installed({
+    read: () => readFile(join(process.resourcesPath, 'version'), 'utf8'),
+    running: app.getVersion(),
+    every: (fn, ms) => {
+      const timer = setInterval(fn, ms);
+      timer.unref();
+      return () => {
+        clearInterval(timer);
+      };
+    },
+    relaunch: () => {
+      app.relaunch();
+      app.quit();
+    },
+    ask: async (version) => {
+      const options = {
+        type: 'info' as const,
+        message: updateDialogMessage(version),
+        detail: updateDialogDetail(callActive()),
+        buttons: [...updateDialogButtons],
+        defaultId: 1,
+        cancelId: 1,
+        noLink: true,
+      };
+      const window = parent();
+      const answer = await (window === null ? dialog.showMessageBox(options) : dialog.showMessageBox(window, options));
+      return answer.response === 0;
+    },
+    log,
+  });
+  installed.subscribe((view) => {
+    deliverUpdate({ contents: () => (live.owned() === null ? null : (live.window?.webContents ?? null)), gate: () => live.gate }, view);
+  });
+  app.on('browser-window-focus', () => {
+    void installed.check();
+  });
+  // A page that starts after an update is measured; one that does not asks
+  // for a restart in a native dialog, since it cannot show the notice itself.
+  app.on('web-contents-created', (_event, contents) => {
+    contents.on('did-finish-load', () => {
+      installed.pageStarted();
+    });
+    contents.on('did-fail-load', (_e, code, _description, _url, isMainFrame) => {
+      if (shouldAskAfterFailure({ kind: 'did-fail-load', code, isMainFrame, ending })) void installed.pageFailed();
+    });
+    contents.on('render-process-gone', (_e, details) => {
+      if (shouldAskAfterFailure({ kind: 'render-process-gone', reason: details.reason, ending })) void installed.pageFailed();
+    });
+  });
+  await installed.start();
+
   // Set once Lifecycle exists (below); voice and the companion read it.
   let screenLocked: () => boolean = () => false;
   const voice = new VoiceService({
@@ -380,8 +444,11 @@ export async function start(): Promise<void> {
         current: () => profiles.active === activation && activation.voiceCurrent(read),
       };
     },
+    updated: () => installed.updated(),
+    recheck: () => installed.check(),
     log,
   });
+  callActive = () => voice.state().status === 'running';
   // The screen companion (issue #1579, D4-02 of #772): the one holder of the
   // p<id>.screen grant. Its media hook is registered before voice's, so a
   // switch, sign-out or quit tells the page and removes the companion while
@@ -507,6 +574,7 @@ export async function start(): Promise<void> {
     share,
     profiles,
     voice,
+    installed,
     invites,
     notifications,
     settings,
@@ -565,12 +633,12 @@ export async function start(): Promise<void> {
     log('tray: could not start');
   });
 
-  let ending = false;
   app.on('before-quit', (event) => {
     quitting = true;
     if (ending) return;
     ending = true;
     event.preventDefault();
+    installed.stop();
     // The lock monitor's child goes with the app, by its own handle.
     watcher?.stop();
     // Media stops before the process goes.

@@ -388,7 +388,9 @@ export type VoiceOneShotError =
   | 'unsupported'
   | 'failed'
   | 'bad-output'
-  | 'cancelled';
+  | 'cancelled'
+  // The installed files were replaced under this running app (issue #1600).
+  | 'update-pending';
 
 // The device list as the page gets it: the validated document's microphones
 // and speakers (each with its default flag), and whether PipeWire was
@@ -645,6 +647,23 @@ export interface DesktopCompanionBridge {
   onCompanion(listener: (event: CompanionEvent) => void): Unsubscribe;
 }
 
+// Whether the installed files were replaced under this running app (issue
+// #1600, D6-06). version is the installed release, shown to the person, and is
+// null until updated. Main decides; the page only shows and asks to restart.
+export interface InstalledView {
+  readonly updated: boolean;
+  readonly version: string | null;
+}
+
+// The update family: the state, the person's click on Restart (main quits
+// through its normal teardown and relaunches; nothing restarts without it),
+// and the event main sends when the state changes.
+export interface DesktopUpdateBridge {
+  updateState(): Promise<InstalledView>;
+  updateRestart(): Promise<void>;
+  onUpdateState(listener: (view: InstalledView) => void): Unsubscribe;
+}
+
 // The object the preload exposes: the bridge, the voice family, the settings,
-// the companion and the invite family. Still no press, release, gate or transmit function in any.
-export type ExposedDesktopBridge = ConchDesktopBridge & DesktopVoiceBridge & DesktopSettingsBridge & DesktopCompanionBridge & DesktopInviteBridge;
+// the companion, the invite family and the update family. Still no press, release, gate or transmit function in any.
+export type ExposedDesktopBridge = ConchDesktopBridge & DesktopVoiceBridge & DesktopSettingsBridge & DesktopCompanionBridge & DesktopInviteBridge & DesktopUpdateBridge;

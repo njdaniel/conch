@@ -88,6 +88,8 @@ test.describe('the packaged shell', () => {
         // The screen companion (#1579): its grant, its end and its event; and
         // the share allowance's arming (#1580).
         'companionGrant', 'companionEnd', 'shareArm', 'onCompanion',
+        // The installed files replaced under the running app (#1600).
+        'updateState', 'updateRestart', 'onUpdateState',
       ].sort(),
       true,
     ]);

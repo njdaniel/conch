@@ -320,6 +320,21 @@ describe('saving the binding', () => {
     expect(r.ok && r.devices.map((d) => d.id)).toEqual(['id-1', 'id-2']);
   });
 
+  it('is refused with update-pending, and runs nothing, after the install was replaced (issue #1600)', async () => {
+    const replaced = new VoiceService({ locked: () => false,
+      supervisor: noSupervisor,
+      oneShot: one,
+      identity: () => Promise.resolve(id),
+      log: (l) => logs.push(l),
+      keyDevices: { fs: fs(), uid: 1000, newId: counter() },
+      updated: () => true,
+    });
+    const r = await replaced.keyDevices();
+    if (!r.ok) throw new Error('no list');
+    expect(await replaced.saveTalkBinding({ deviceId: r.devices[0]?.id ?? '', code: 275 })).toEqual({ ok: false, error: 'update-pending' });
+    expect(one.calls).toEqual([]);
+  });
+
   it('runs keys.device then keys.talk for the profile in force', async () => {
     const deviceId = await listed();
     expect(await svc.saveTalkBinding({ deviceId, code: 275 })).toEqual({ ok: true });

@@ -16,6 +16,9 @@
 // Once a profile is active, if main already holds a sign-in for it (the page
 // was reloaded, or the vault gave it back) the stand-in credential is restored
 // before the client starts, so that the client's own restore finds it.
+//
+// When the installed files were replaced under the running app, a notice with
+// a Restart button sits above the strip (./ui/UpdateNotice; issue #1600).
 import { useEffect, useState, type ReactNode } from 'react';
 import { signedIn } from './credentials';
 import { bridge } from './access';
@@ -26,10 +29,22 @@ import { blocks, DevelopmentNote, Unsupported } from './ui/Compat';
 import { ProfileBar } from './ui/ProfileBar';
 import { Recovery } from './ui/Recovery';
 import { ServerList } from './ui/ServerList';
+import { UpdateNotice } from './ui/UpdateNotice';
 
 type Phase = 'loading' | 'recovery' | 'list' | 'blocked' | 'ready' | 'missing';
 
+// The update notice is outside every phase: a package update is as true on the
+// server list, the recovery screen and the blocked screen as in the client.
 export function DesktopShell({ children }: { readonly children: ReactNode }) {
+  return (
+    <>
+      <UpdateNotice />
+      <Phases>{children}</Phases>
+    </>
+  );
+}
+
+function Phases({ children }: { readonly children: ReactNode }) {
   const [phase, setPhase] = useState<Phase>('loading');
   const [view, setView] = useState<ProfilesView | null>(null);
 

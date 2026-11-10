@@ -63,6 +63,11 @@ electron_dist="$root/desktop/out/electron-dist"
     "-c.electronDist=$electron_dist" "-c.electronVersion=$CONCH_ELECTRON_VERSION" \
     "-c.extraMetadata.version=$app_version")
 
+# The installed stamp (issue #1600): the app version beside the asar, outside
+# it, so a running app can read what is installed now after a package has been
+# replaced under it. main/installed.ts reads it.
+printf '%s\n' "$app_version" >desktop/dist/linux-unpacked/resources/version
+
 # The voice helper, into resources/conch-voice (issue #1377): copied after
 # electron-builder so its mode and presence are decided here, not by the
 # packer. Without a helper the build says so; DESKTOP_REQUIRE_VOICE=1 fails.

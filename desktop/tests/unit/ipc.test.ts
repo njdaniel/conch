@@ -5,7 +5,7 @@ import type { Feeds } from '../../main/api/feeds.ts';
 import type { Files } from '../../main/files.ts';
 import type { Service } from '../../main/api/service.ts';
 import { DocumentGate } from '../../main/document.ts';
-import { checkCaller, Ipc, parseRequest, plain, type CompanionApi, type InvitesApi, type NotificationsApi, type ProfilesApi, type VoiceApi, type SettingsApi, type ContentsLike, type FrameLike, type InvokeEvent } from '../../main/ipc.ts';
+import { checkCaller, Ipc, parseRequest, plain, type CompanionApi, type InstalledApi, type InvitesApi, type NotificationsApi, type ProfilesApi, type VoiceApi, type SettingsApi, type ContentsLike, type FrameLike, type InvokeEvent } from '../../main/ipc.ts';
 import { COMPANION_FUNCTIONS, INVOKED_FUNCTIONS, TAG_MAX, VOICE_EVENTS, VOICE_FUNCTIONS } from '../../shared/bridge-names.ts';
 import { ShareAllowance } from '../../main/share-allowance.ts';
 import { deliverVoice } from '../../main/voice/events.ts';
@@ -64,8 +64,9 @@ function fixture(): Fixture {
   const settings = new Proxy({} as SettingsApi, { get: (_t, name: string) => record(`settings.${name}`) });
   const companion = new Proxy({} as CompanionApi, { get: (_t, name: string) => record(`companion.${name}`) });
   const gestures = { take: () => (input.recent ? ('pointer' as const) : null) };
+  const installed = new Proxy({} as InstalledApi, { get: (_t, name: string) => record(`installed.${name}`) });
   const share = new ShareAllowance({ now: () => clock.now, generation: () => gate.generation });
-  const ipc = new Ipc({ owned: () => contents, gate, service, feeds, files, gestures, profiles, voice, invites, notifications, settings, companion, share, now: () => clock.now, log: (line) => logs.push(line) });
+  const ipc = new Ipc({ owned: () => contents, gate, service, feeds, files, gestures, profiles, voice, invites, notifications, settings, companion, share, installed, now: () => clock.now, log: (line) => logs.push(line) });
   return { ipc, gate, contents, main, calls, logs, clock, permit, input, share, activation, event: (over = {}) => ({ sender: contents, senderFrame: main, ...over }) };
 }
 
@@ -107,7 +108,7 @@ describe('every invocation is checked before anything else', () => {
       files: {} as Files,
       gestures: { take: () => null },
       profiles: {} as ProfilesApi,
-      voice: {} as VoiceApi, settings: {} as SettingsApi, notifications: {} as NotificationsApi, invites: {} as InvitesApi,
+      voice: {} as VoiceApi, settings: {} as SettingsApi, installed: {} as InstalledApi, notifications: {} as NotificationsApi, invites: {} as InvitesApi,
       now: () => 0,
       log: () => undefined,
     });
@@ -336,7 +337,7 @@ describe('arguments', () => {
       files: {} as Files,
       gestures: { take: () => null },
       profiles: { add: () => { throw new Error('boom secret-arg'); } } as unknown as ProfilesApi,
-      voice: {} as VoiceApi, settings: {} as SettingsApi, notifications: {} as NotificationsApi, invites: {} as InvitesApi,
+      voice: {} as VoiceApi, settings: {} as SettingsApi, installed: {} as InstalledApi, notifications: {} as NotificationsApi, invites: {} as InvitesApi,
       now: () => 0,
       log: (line) => f.logs.push(line),
     });
@@ -413,7 +414,7 @@ describe('the credential-replacing writes (issue #1422)', () => {
       files: {} as Files,
       gestures: { take: () => null },
       profiles: { signInPermitted: () => true, signedIn: (account: unknown) => { bound.push(account); return Promise.resolve(true); } } as unknown as ProfilesApi,
-      voice: {} as VoiceApi, settings: {} as SettingsApi, notifications: {} as NotificationsApi, invites: {} as InvitesApi,
+      voice: {} as VoiceApi, settings: {} as SettingsApi, installed: {} as InstalledApi, notifications: {} as NotificationsApi, invites: {} as InvitesApi,
       now: () => 0,
       log: () => undefined,
     });
@@ -741,7 +742,7 @@ describe('the voice family (issue #1374)', () => {
     const f = fixture();
     const asked: number[] = [];
     const ipc = new Ipc({
-      owned: () => f.contents, gate: f.gate, service: {} as Service, feeds: {} as Feeds, files: {} as Files, profiles: {} as ProfilesApi, voice: {} as VoiceApi, settings: {} as SettingsApi, notifications: {} as NotificationsApi, invites: {} as InvitesApi,
+      owned: () => f.contents, gate: f.gate, service: {} as Service, feeds: {} as Feeds, files: {} as Files, profiles: {} as ProfilesApi, voice: {} as VoiceApi, settings: {} as SettingsApi, installed: {} as InstalledApi, notifications: {} as NotificationsApi, invites: {} as InvitesApi,
       gestures: { take: (_c, within) => { asked.push(within); return 'pointer'; } }, now: () => 0, log: () => undefined,
     });
     await ipc.invoke(f.event(), 'voiceSetTalkMode', ['bogus']);
@@ -776,7 +777,7 @@ describe('the voice family (issue #1374)', () => {
     f.input.recent = true;
     const ipc = new Ipc({
       owned: () => f.contents, gate: f.gate, service: {} as Service, feeds: {} as Feeds, files: {} as Files, profiles: {} as ProfilesApi,
-      voice: { join: () => { throw new Error('boom secret-channel'); } } as unknown as VoiceApi, settings: {} as SettingsApi,
+      voice: { join: () => { throw new Error('boom secret-channel'); } } as unknown as VoiceApi, settings: {} as SettingsApi, installed: {} as InstalledApi,
       notifications: {} as NotificationsApi, invites: {} as InvitesApi,
       gestures: { take: () => 'pointer' }, now: () => 0, log: (line) => f.logs.push(line),
     });
@@ -916,7 +917,7 @@ describe('the companion family (issue #1579)', () => {
   it('refuses every grant as failed, and holds nothing, when no companion is wired', async () => {
     const f = fixture();
     const ipc = new Ipc({
-      owned: () => f.contents, gate: f.gate, service: {} as Service, feeds: {} as Feeds, files: {} as Files, profiles: {} as ProfilesApi, voice: {} as VoiceApi, settings: {} as SettingsApi, notifications: {} as NotificationsApi, invites: {} as InvitesApi,
+      owned: () => f.contents, gate: f.gate, service: {} as Service, feeds: {} as Feeds, files: {} as Files, profiles: {} as ProfilesApi, voice: {} as VoiceApi, settings: {} as SettingsApi, installed: {} as InstalledApi, notifications: {} as NotificationsApi, invites: {} as InvitesApi,
       gestures: { take: () => 'pointer' }, now: () => 0, log: () => undefined,
     });
     expect(await ipc.invoke(f.event(), 'companionGrant', [grant])).toEqual({ ok: true, value: { ok: false, error: 'failed' } });
@@ -926,7 +927,7 @@ describe('the companion family (issue #1579)', () => {
   it('says only "refused" when the companion throws, and logs no argument', async () => {
     const f = fixture();
     const ipc = new Ipc({
-      owned: () => f.contents, gate: f.gate, service: {} as Service, feeds: {} as Feeds, files: {} as Files, profiles: {} as ProfilesApi, voice: {} as VoiceApi, settings: {} as SettingsApi, notifications: {} as NotificationsApi, invites: {} as InvitesApi,
+      owned: () => f.contents, gate: f.gate, service: {} as Service, feeds: {} as Feeds, files: {} as Files, profiles: {} as ProfilesApi, voice: {} as VoiceApi, settings: {} as SettingsApi, installed: {} as InstalledApi, notifications: {} as NotificationsApi, invites: {} as InvitesApi,
       companion: { grant: () => { throw new Error('boom secret-channel'); } } as unknown as CompanionApi,
       gestures: { take: () => 'pointer' }, now: () => 0, log: (line) => f.logs.push(line),
     });
@@ -961,6 +962,34 @@ describe('voice events (issue #1374)', () => {
     const gone = target(true, false);
     deliverVoice(gone.target, view);
     expect([uncommitted.sent, ended.sent, gone.sent]).toEqual([[], [], []]);
+  });
+});
+
+describe('the update family (issue #1600)', () => {
+  it('state is a plain read; restart runs only after a gesture and only with a recent one', async () => {
+    const f = fixture();
+    expect(await f.ipc.invoke(f.event(), 'updateState', [])).toEqual({ ok: true, value: { ran: 'installed.view' } });
+    expect(await f.ipc.invoke(f.event(), 'updateRestart', [])).toEqual({ ok: false, kind: 'refused' });
+    expect(f.logs.at(-1)).toContain('(gesture)');
+    expect(f.calls.map(([name]) => name)).toEqual(['installed.view']);
+    f.input.recent = true;
+    expect((await f.ipc.invoke(f.event(), 'updateRestart', [])).ok).toBe(true);
+    expect(f.calls.map(([name]) => name)).toEqual(['installed.view', 'installed.restart']);
+  });
+
+  it('takes no argument', async () => {
+    const f = fixture();
+    f.input.recent = true;
+    for (const name of ['updateState', 'updateRestart'] as const) expect(await f.ipc.invoke(f.event(), name, ['x']), name).toEqual({ ok: false, kind: 'refused' });
+    expect(f.calls).toEqual([]);
+  });
+
+  it('is refused from a stale document', async () => {
+    const f = fixture();
+    f.input.recent = true;
+    f.gate.begin();
+    for (const name of ['updateState', 'updateRestart'] as const) expect(await f.ipc.invoke(f.event(), name, []), name).toEqual({ ok: false, kind: 'refused' });
+    expect(f.calls).toEqual([]);
   });
 });
 
@@ -1055,7 +1084,7 @@ describe('the share allowance through the companion family (issue #1580)', () =>
   it('answers false and arms nothing when no share allowance is wired', async () => {
     const f = fixture();
     const ipc = new Ipc({
-      owned: () => f.contents, gate: f.gate, service: {} as Service, feeds: {} as Feeds, files: {} as Files, profiles: {} as ProfilesApi, voice: {} as VoiceApi, invites: {} as InvitesApi, notifications: {} as NotificationsApi, settings: {} as SettingsApi,
+      owned: () => f.contents, gate: f.gate, service: {} as Service, feeds: {} as Feeds, files: {} as Files, profiles: {} as ProfilesApi, voice: {} as VoiceApi, invites: {} as InvitesApi, notifications: {} as NotificationsApi, settings: {} as SettingsApi, installed: {} as InstalledApi,
       gestures: { take: () => 'pointer' }, now: () => 0, log: () => undefined,
     });
     expect(await ipc.invoke(f.event(), 'shareArm', [])).toEqual({ ok: true, value: false });

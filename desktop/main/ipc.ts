@@ -35,6 +35,7 @@ import { LINK_GESTURE_MS, type Gestures } from './gestures.ts';
 import type { DocumentGate } from './document.ts';
 import type { Notifications } from './notifications.ts';
 import { HOST, SCHEME } from './scheme.ts';
+import type { Installed } from './installed.ts';
 import type { VoiceService } from './voice/service.ts';
 import type { SettingsService } from './settings.ts';
 import type { Companion } from './voice/companion.ts';
@@ -72,6 +73,8 @@ export interface IpcDeps {
   readonly profiles: ProfilesApi;
   // Native voice (issue #1374): main's one owner of the helper.
   readonly voice: VoiceApi;
+  // The installed files replaced under the running app (issue #1600).
+  readonly installed: InstalledApi;
   // Opening an invite link (issue #1591).
   readonly invites: InvitesApi;
   // Desktop notifications (issue #1590): owned by the active activation.
@@ -93,6 +96,7 @@ export type ProfilesApi = Pick<
   'view' | 'add' | 'rename' | 'remove' | 'switchTo' | 'retry' | 'recover' | 'signOut' | 'signedIn' | 'keptCredential' | 'signInPermitted' | 'active'
 >;
 
+export type InstalledApi = Pick<Installed, 'view' | 'restart'>;
 export type InvitesApi = Pick<Invites, 'check' | 'accept' | 'cancel' | 'take'>;
 
 export type VoiceApi = Pick<VoiceService, 'state' | 'join' | 'leave' | 'retry' | 'setMute' | 'setDeafen' | 'setDevices' | 'setTalkMode' | 'devices' | 'saveDevice' | 'keyDevices' | 'saveTalkBinding'>;
@@ -196,6 +200,7 @@ interface Handlers {
   readonly files: IpcDeps['files'];
   readonly profiles: ProfilesApi;
   readonly voice: VoiceApi;
+  readonly installed: InstalledApi;
   readonly invites: InvitesApi;
   readonly notifications: NotificationsApi;
   readonly settings: SettingsApi;
@@ -597,6 +602,19 @@ export const SPECS: Readonly<Record<InvokedFunction, Spec>> = {
     run: ({ voice }, [request]) => voice.saveTalkBinding(request as { deviceId: string; code: number }),
     gesture: true,
   },
+  // The update family (issue #1600). Restart is the person's act alone: it
+  // runs only right after a click or key in the window, and nothing else
+  // restarts the app.
+  updateState: { limit: 120, maxBytes: 0, parse: none, run: ({ installed }) => installed.view() },
+  updateRestart: {
+    limit: 6,
+    maxBytes: 0,
+    parse: none,
+    run: ({ installed }) => {
+      installed.restart();
+    },
+    gesture: true,
+  },
   // Opening an invite link (issue #1591). A link is untrusted text, capped;
   // main parses it. Checking contacts nothing. Accepting adds, switches or
   // stages, so it is the person's act alone. The handle is what main issued,
@@ -697,6 +715,7 @@ export class Ipc {
         files: this.#deps.files,
         profiles: this.#deps.profiles,
         voice: this.#deps.voice,
+        installed: this.#deps.installed,
         invites: this.#deps.invites,
         notifications: this.#deps.notifications,
         settings: this.#deps.settings,

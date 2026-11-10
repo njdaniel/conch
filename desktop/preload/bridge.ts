@@ -17,12 +17,15 @@
 // channel, and drops any message that is not exactly one. onCompanion does
 // the same for a CompanionEvent on the companion channel (issue #1579).
 //
+// onUpdateState hands the page each InstalledView main sends on the update
+// channel (issue #1600), and drops any message that is not exactly one.
+//
 // subscribe numbers each feed itself (so main's first event for it can never
 // arrive before the number is known here), asks main to open it, hands the
 // page each frame of a batch in order and then acknowledges the batch, which
 // is what lets main send the next. An unsubscribed feed is forgotten here at
 // once: whatever main had already sent for it is dropped.
-import type { CompanionEndReason, CompanionEvent, ExposedDesktopBridge, FeedHandlers, FeedRequest, NativeVoiceView, NotificationClick, Unsubscribe } from '../../web/src/platform/desktop/bridge.ts';
+import type { CompanionEndReason, CompanionEvent, ExposedDesktopBridge, FeedHandlers, FeedRequest, InstalledView, NativeVoiceView, NotificationClick, Unsubscribe } from '../../web/src/platform/desktop/bridge.ts';
 import {
   voiceControlBlock,
   voiceControlCapture,
@@ -116,6 +119,16 @@ function isNativeVoiceView(value: unknown): value is NativeVoiceView {
   );
 }
 
+// An update message is exactly an InstalledView: a boolean and a short string
+// or null, and no other key.
+function isInstalledView(value: unknown): value is InstalledView {
+  if (typeof value !== 'object' || value === null) return false;
+  const v = value as Record<string, unknown>;
+  const keys = Object.keys(v);
+  if (keys.length !== 2 || !keys.includes('updated') || !keys.includes('version')) return false;
+  return typeof v['updated'] === 'boolean' && (v['version'] === null || (typeof v['version'] === 'string' && v['version'].length <= 64));
+}
+
 // Checked by the compiler against CompanionEndReason: a reason added there
 // and not here fails tsc.
 const COMPANION_END_REASONS: Readonly<Record<CompanionEndReason, true>> = {
@@ -151,6 +164,7 @@ export function createBridge(
   listenCompanion: Listen = () => undefined,
   listenNotification: Listen = () => undefined,
   sync: Sync = () => ({ ok: false, kind: 'refused' }),
+  listenUpdate: Listen = () => undefined,
 ): Readonly<ExposedDesktopBridge> {
   const call =
     <T>(name: InvokedFunction) =>
@@ -260,6 +274,26 @@ export function createBridge(
     if (!isEnvelope(answer) || !answer.ok || typeof answer.value !== 'boolean') throw new Error('refused');
     return answer.value;
   };
+  // The installed state: main's view of whether the files were replaced.
+  const updateListeners = new Set<(view: InstalledView) => void>();
+  listenUpdate((message) => {
+    if (!isInstalledView(message)) return;
+    for (const listener of [...updateListeners]) {
+      try {
+        listener(message);
+      } catch (error) {
+        queueMicrotask(() => {
+          throw error;
+        });
+      }
+    }
+  });
+  const onUpdateState = (listener: (view: InstalledView) => void): Unsubscribe => {
+    updateListeners.add(listener);
+    return () => {
+      updateListeners.delete(listener);
+    };
+  };
 
   const subscribe = (feed: FeedRequest, handlers: FeedHandlers): Unsubscribe => {
     const id = ++next;
@@ -343,5 +377,9 @@ export function createBridge(
     companionEnd: call('companionEnd'),
     shareArm: call('shareArm'),
     onCompanion,
+    // The installed files replaced under the running app (issue #1600).
+    updateState: call('updateState'),
+    updateRestart: call('updateRestart'),
+    onUpdateState,
   });
 }

@@ -17,6 +17,9 @@
 //     companion plays watched shares' sound, never the helper;
 //   - a join that a sign-out, switch or 401 overtakes is stopped and
 //     reported nowhere;
+//   - after the installed files were replaced (#1600) join and retry start no
+//     helper and say so; a running helper is untouched until the person
+//     restarts;
 //   - teardown leaves and stops the helper within VoiceControlStopKillAfterMS;
 //   - the logind watcher of #773 calls setMute and leave (decision D-1); while
 //     the screen is locked, setMute(false) is refused (`locked`) and every
@@ -92,6 +95,12 @@ export interface VoiceServiceDeps {
   readonly log: (line: string) => void;
   // Test seams for the key-device listing (issue #1381).
   readonly keyDevices?: KeyDeviceDeps;
+  // Whether the installed files were replaced under this running app (issue
+  // #1600): a new helper is then not started from them. Absent means never.
+  readonly updated?: () => boolean;
+  // Reads the installed stamp again before a helper is started, so an update
+  // that landed since the last focus or tick is seen (issue #1600).
+  readonly recheck?: () => Promise<void>;
   // How long teardown waits for the stop; the contract's kill bound.
   readonly stopBoundMs?: number;
   // Whether the screen is locked (Lifecycle.locked, issue #1588). While it
@@ -141,6 +150,10 @@ const RETRYABLE_REASONS: ReadonlySet<string> = new Set([
 ]);
 
 const NOT_SIGNED_IN = 'not-signed-in';
+
+// The problem a join or retry is refused with after the install was replaced
+// (the page words it: "Restart Conch to finish the update").
+export const UPDATE_PENDING = 'update-pending';
 
 function helperOf(h: HelperView): NativeVoiceHelper {
   return {
@@ -297,11 +310,26 @@ export class VoiceService {
     return this.begin(this.last);
   }
 
+  // replaced reads the stamp again and says whether the installed files were
+  // replaced. A failed read changes nothing (the watcher logs it).
+  private async replaced(): Promise<boolean> {
+    try {
+      await this.deps.recheck?.();
+    } catch {
+      // The last answer stands.
+    }
+    return this.deps.updated?.() === true;
+  }
+
   private async begin(req: JoinRequest): Promise<NativeVoiceView> {
+    // The read is first, so the busy check and the start below stay together
+    // with no wait between them.
+    const replaced = await this.replaced();
     if (this.running()) {
       this.deps.log('voice: join refused: busy');
       return { ...this.state(), problem: 'busy' };
     }
+    if (replaced) return this.updatePending();
     const p = this.run(req);
     this.inflight = p;
     try {
@@ -358,6 +386,17 @@ export class VoiceService {
     }
   }
 
+  // The install was replaced: no new helper is started from its files. A
+  // helper already running is not touched (this is reached only when none is),
+  // and leave still works.
+  private updatePending(): NativeVoiceView {
+    this.deps.log('voice: start refused: the installed files were replaced; restart to finish the update');
+    const view: NativeVoiceView = { status: 'unavailable', generation: this.lastGeneration, channel: null, problem: UPDATE_PENDING, retryable: false };
+    this.override = view;
+    this.emit(view);
+    return view;
+  }
+
   private noIdentity(): NativeVoiceView {
     const view: NativeVoiceView = { status: 'unavailable', generation: this.lastGeneration, channel: null, problem: NOT_SIGNED_IN, retryable: false };
     this.override = view;
@@ -393,10 +432,21 @@ export class VoiceService {
   // devices lists the microphones and speakers (`conch-voice devices --json`),
   // for the profile in force. It starts no voice and reads no login.
   async devices(): Promise<NativeVoiceDevicesResult> {
+    // begun is taken before the stamp is read, so a teardown during the read
+    // overtakes this run as it would one waiting for its identity.
     const begun = this.teardowns;
+    if (await this.oneShotRefused()) return { ok: false, error: UPDATE_PENDING };
     const identity = await this.deps.identity();
     if (identity === null || begun !== this.teardowns) return { ok: false, error: NOT_SIGNED_IN };
     return this.deps.oneShot.devices(identity.configDir);
+  }
+
+  // oneShotRefused: a one-shot run starts the helper from the installed files
+  // too, so after a replacement it is refused with the join's reason.
+  private async oneShotRefused(): Promise<boolean> {
+    if (!(await this.replaced())) return false;
+    this.deps.log('voice: one-shot run refused: the installed files were replaced; restart to finish the update');
+    return true;
   }
 
   // saveDevice runs `config set` for the profile in force. The key and value
@@ -405,6 +455,7 @@ export class VoiceService {
     // The key device and the talk key are saved by saveTalkBinding alone.
     if (!isPageSaveKey(request.key) || !saveValueFits(request.key, request.value)) return { ok: false, error: 'invalid' };
     const begun = this.teardowns;
+    if (await this.oneShotRefused()) return { ok: false, error: UPDATE_PENDING };
     const identity = await this.deps.identity();
     if (identity === null || begun !== this.teardowns) return { ok: false, error: NOT_SIGNED_IN };
     return this.deps.oneShot.save(identity.configDir, request.key, request.value);
@@ -442,6 +493,7 @@ export class VoiceService {
     this.bindingSave = true;
     try {
       const begun = this.teardowns;
+      if (await this.oneShotRefused()) return { ok: false, error: UPDATE_PENDING };
       const identity = await this.deps.identity();
       if (identity === null || begun !== this.teardowns) return { ok: false, error: NOT_SIGNED_IN };
       const device = await this.deps.oneShot.save(identity.configDir, 'keys.device', path);

@@ -21,7 +21,7 @@ import { Roster } from '../VoicePanel';
 import { useVoiceNames } from '../useVoiceNames';
 import { usePresence } from './usePresence';
 import { useNativeVoice } from './useNativeVoice';
-import { lockMutedNote } from './words';
+import { lockMutedNote, updatePendingWords } from './words';
 import { VoiceOptions } from './VoiceOptions';
 import { NativeStreams, ShareButton, ShareNotes, shareDisabledReason } from './NativeShare';
 import type { Companion } from './useCompanion';
@@ -38,6 +38,8 @@ export const unavailableWords: Readonly<Record<string, string>> = {
   untrusted: 'The voice helper is not trusted, so it was not started.',
   'profile-dir-unsafe': 'The voice runtime directory was refused as unsafe.',
   'not-signed-in': 'Sign in to use voice.',
+  // The installed files were replaced under this running app (issue #1600).
+  'update-pending': updatePendingWords,
 };
 
 const runtimeDirectory = 'The voice runtime directory was refused as unsafe.';

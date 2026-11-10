@@ -21,6 +21,10 @@ export interface VoiceWords {
   readonly retry: boolean;
 }
 
+// Why a join or retry started nothing after the installed files were replaced
+// under the running app (issue #1600); main's problem kind is 'update-pending'.
+export const updatePendingWords = 'Restart Conch to finish the update.';
+
 export const statusWords: Readonly<Record<NativeVoiceStatus, string>> = {
   idle: 'voice off',
   unavailable: 'voice is not available here; text chat is unaffected',
