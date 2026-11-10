@@ -335,6 +335,7 @@ pub fn managed(
             args.share_audio_owner,
         );
         host.transmit_ceiling_secs = args.transmit_ceiling_secs;
+        host.no_mute_key = args.no_mute_key;
         managed::signals(inputs.clone(), host.watchdog.clone()).map_err(Error::Runtime)?;
         managed::watch_parent(parent, inputs.clone(), host.watchdog.clone());
         if let Some(end) = end {
