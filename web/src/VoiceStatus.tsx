@@ -7,6 +7,7 @@ import { isArchived } from './archived';
 import { platform } from './platform';
 import type { ChannelV0 } from './schema/channel';
 import type { InVoice } from './voice/useOccupancy';
+import { useCompanion } from './voice/native/useCompanion';
 import { NativeVoicePanel } from './voice/native/NativeVoicePanel';
 import { VoicePanel } from './voice/VoicePanel';
 import { useVoice } from './voice/useVoice';
@@ -26,6 +27,7 @@ export function VoiceStatus(props: Props) {
 
 function NativeStatus({ native, ...props }: Props & { readonly native: NonNullable<typeof platform.nativeVoice> }) {
   const [label, setLabel] = useState(readTalkKeyLabel);
+  const companion = useCompanion(native);
   return (
       <NativeVoicePanel
         source={native}
@@ -34,6 +36,7 @@ function NativeStatus({ native, ...props }: Props & { readonly native: NonNullab
           writeTalkKeyLabel(next);
           setLabel(next);
         }}
+        companion={companion}
         signedIn={props.signedIn}
         channel={props.channel}
         viewer={props.viewer}

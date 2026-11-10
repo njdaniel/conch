@@ -12,10 +12,14 @@ import type { VoiceClient, VoiceState } from './connection';
 import { shareReadout } from './sdk';
 import type { ShareDirection, ShareSample } from './share';
 
+// What the watch view needs of the client: the desktop's strip (issue #1582)
+// gives it the companion's, which is a narrower thing than the call view's.
+export type ShareViewClient = Pick<VoiceClient, 'attachStream' | 'readShareStats' | 'watchStream'>;
+
 // ShareReadout samples only the selected watched picture or the local screen's
 // top layer. The first sample has no bitrate; the next, about a second later,
 // does.
-export function ShareReadout({ client, direction, principal, prefix = '' }: { readonly client: VoiceClient; readonly direction: ShareDirection; readonly principal?: number; readonly prefix?: string }) {
+export function ShareReadout({ client, direction, principal, prefix = '' }: { readonly client: Pick<VoiceClient, 'readShareStats'>; readonly direction: ShareDirection; readonly principal?: number; readonly prefix?: string }) {
   const [text, setText] = useState<string | null>(null);
   const previous = useRef<ShareSample | null>(null);
   useEffect(() => {
@@ -62,7 +66,7 @@ export function ShareView({
   compact = false,
   onToggleLayout,
 }: {
-  readonly client: VoiceClient;
+  readonly client: ShareViewClient;
   readonly state: VoiceState;
   // Whose stream it is: the publisher its tracks are kept under.
   readonly principal: number;

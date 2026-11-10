@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { ShareClaimResult } from '../api';
 import type { VoiceShareEnded, VoiceShareEndReason } from '../schema/voice';
 import { FakeClock, settle } from './fakes';
-import { browserFeatures, endedNote, othersShareNote, ownPageNote, resumeLimit, ScreenShare, sharedNote, shortShareNote, soundNote, type Captured, type KeptScreen, type ShareFeatures, type ShareQuality, type ShareRoom, type ShareState } from './share';
+import { browserFeatures, endedNote, othersShareNote, ownPageNote, pickCause, resumeLimit, ScreenShare, sharedNote, shortShareNote, soundNote, type Captured, type KeptScreen, type ShareFeatures, type ShareQuality, type ShareRoom, type ShareState } from './share';
 
 interface Deferred<T> {
   readonly promise: Promise<T>;
@@ -1162,5 +1162,26 @@ describe('reading the browser', () => {
     expect(as('Mozilla/5.0 (X11; Linux x86_64) Gecko/20100101 Firefox/140.0', undefined, true)).toEqual({ canShare: true, chromium: false, platform: 'linux' });
     expect(as('Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X)', undefined, false)).toEqual({ canShare: false, chromium: false, platform: 'ios' });
     expect(as('Mozilla/5.0 (Linux; Android 15)', { brands: [{ brand: 'Chromium' }], platform: 'Android' }, true).platform).toBe('android');
+  });
+});
+
+describe('the cause of a share that did not start (issue #1582)', () => {
+  it('a picker the system refused, or a platform with no picker, carries a cause beside the same end', async () => {
+    for (const [name, message, cause] of [
+      ['NotAllowedError', 'Permission denied by system', 'denied'],
+      ['NotFoundError', 'Requested device not found', 'no_portal'],
+      ['NotSupportedError', 'Not supported', 'no_portal'],
+    ] as const) {
+      const t = setup();
+      const refusing: ShareRoom = { ...t.stub, pickScreen: () => Promise.reject(Object.assign(new Error(message), { name })) };
+      await t.share.start('general', refusing);
+      expect(t.share.current, name).toEqual({ kind: 'idle', ended: 'cancelled', cause });
+    }
+  });
+
+  it('a picker the person closed has no cause', () => {
+    expect(pickCause(Object.assign(new Error('Permission denied'), { name: 'NotAllowedError' }))).toBeUndefined();
+    expect(pickCause(new Error('NotAllowedError'))).toBeUndefined();
+    expect(pickCause('x')).toBeUndefined();
   });
 });

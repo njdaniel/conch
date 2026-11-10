@@ -130,8 +130,17 @@ export type ShareEnd =
   | 'unavailable'
   | 'failed';
 
+// What more is known of a share that did not start, for a client that says it
+// in its own words (the desktop's, issue #1582). It never changes `ended`, so
+// the browser's words are the same with or without it.
+//   no_portal: the platform has no screen picker to offer (a missing screen-cast
+//     portal, or a platform that cannot capture).
+//   denied: the system refused the capture (the permission was denied), as
+//     opposed to the person closing the picker.
+export type ShareCause = 'no_portal' | 'denied';
+
 export type ShareState =
-  | { readonly kind: 'idle'; readonly ended: ShareEnd | null }
+  | { readonly kind: 'idle'; readonly ended: ShareEnd | null; readonly cause?: ShareCause }
   | { readonly kind: 'claiming' }
   | { readonly kind: 'picking' }
   | { readonly kind: 'publishing' }
@@ -215,6 +224,17 @@ export function refusalEnd(r: Refusal): ShareEnd {
   return 'failed';
 }
 
+// pickCause is the more that a failed pick says. Closing the picker is a
+// NotAllowedError ("Permission denied") and is no cause at all; a system that
+// refused is the same error saying so ("by system"); a platform with no picker
+// to offer is NotFoundError or NotSupportedError.
+export function pickCause(err: unknown): ShareCause | undefined {
+  if (!(err instanceof Error)) return undefined;
+  if (err.name === 'NotFoundError' || err.name === 'NotSupportedError') return 'no_portal';
+  if (err.name === 'NotAllowedError' && /by system/i.test(err.message)) return 'denied';
+  return undefined;
+}
+
 // Every reason the server gives the sharer is an end the page can say: its
 // own stop and leaving as the page says them, the rest in their own words. A
 // reason added to the schema without a word for it fails to compile here.
@@ -225,6 +245,10 @@ const toldEnd: (reason: VoiceShareEndReason) => ShareEnd = (reason) => reason;
 function sameInstant(a: string, b: string): boolean {
   const x = Date.parse(a);
   return !Number.isNaN(x) && x === Date.parse(b);
+}
+
+function causeOf(cause: ShareCause | undefined): { readonly cause?: ShareCause } {
+  return cause === undefined ? {} : { cause };
 }
 
 export class ScreenShare {
@@ -319,12 +343,12 @@ export class ScreenShare {
     let captured: Captured;
     try {
       captured = await room.pickScreen(quality);
-    } catch {
+    } catch (err: unknown) {
       if (mine !== this.attempt) return;
       // Closed without choosing, or refused by the browser: the claim goes.
       this.set({ kind: 'stopping' });
       await this.releaseHeld(at());
-      if (mine === this.attempt) this.set({ kind: 'idle', ended: 'cancelled' });
+      if (mine === this.attempt) this.set({ kind: 'idle', ended: 'cancelled', ...causeOf(pickCause(err)) });
       return;
     }
     if (mine !== this.attempt) {
