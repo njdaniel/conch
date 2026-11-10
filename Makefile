@@ -174,9 +174,12 @@ desktop-voice-it: desktop-node
 # sink and synthetic input only (a tone, a named pipe of key records). The Go
 # program e2e/desktop-voice is the world and runs desktop/tests/e2e under
 # Vitest. Builds conch-voice with the pinned toolchain unless CONCH_VOICE_BIN
-# names one. Not part of check. Without Docker or the toolchain it says
-# SKIPPED and why; with CI set, it fails instead.
-desktop-voice-e2e: desktop-node
+# names one, and the web client (web-build) that conchd serves to the browser
+# principal of the screen companion's test (issue #1583, D4-06; the browser the
+# test drives is the one Playwright pins: `npx playwright install chromium`). Not part of check. Without
+# Docker or the toolchain it says SKIPPED and why; with CI set, it fails
+# instead.
+desktop-voice-e2e: desktop-node web-build
 	cd desktop && npm ci --no-audit
 	$(GO) run ./e2e/desktop-voice
 
