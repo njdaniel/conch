@@ -597,6 +597,68 @@ async fn leave_while_the_talk_key_is_held_has_no_release_tail_and_ends_within_it
     assert_eq!(rig.conchd.reported(), ["started", "stopped"]);
 }
 
+/// Issue #1685: the owner writes `leave` and closes standard input in the same tick (the
+/// supervisor's first step, `docs/design/tui-voice.md` §8.5). The end of input is not
+/// owner loss here: the room step is not cut at the owner-loss step of 1 s, so the LiveKit
+/// Leave is sent even when leaving the room takes longer. The process still ends within
+/// the owner-loss bound.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn leave_then_the_end_of_input_in_the_same_tick_lets_the_room_close_finish() {
+    let mut rig = ManagedRig::start().await;
+    rig.send_start();
+    rig.ready().await;
+    rig.sdk.close_takes(Duration::from_millis(1500));
+
+    let asked = Instant::now();
+    rig.send(&ManagedRig::command("leave", 2, json!({})));
+    rig.close();
+    let code = rig.exit_code().await;
+    let exited = asked.elapsed();
+    assert_eq!(code, 0);
+    assert_eq!(rig.sdk.closed(), 1, "the room close was cancelled");
+    assert!(
+        exited >= Duration::from_millis(1500),
+        "ended {exited:?} after leave, before the room was left"
+    );
+    assert!(
+        exited < Duration::from_millis(conch_voice_api::VOICE_CONTROL_OWNER_LOSS_EXIT_MS),
+        "ended {exited:?} after leave"
+    );
+    assert!(rig.ack(2).await.ok);
+    let last = rig.state().unwrap();
+    assert_eq!(last.phase, VoiceControlPhase::Stopped);
+    assert_eq!(last.reason, Some(VoiceControlReason::Left));
+}
+
+/// The end of input with no `leave` is owner loss: the room step is cut at 1 s, the
+/// abandoned leave is logged, and the process ends within the owner-loss bound.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_end_of_input_without_leave_cuts_the_room_step_at_one_second_and_says_so() {
+    let log = helper_log();
+    let mut rig = ManagedRig::start().await;
+    rig.send_start();
+    rig.ready().await;
+    rig.sdk.close_takes(Duration::from_millis(2500));
+    let before = log.text().matches("the room leave was abandoned").count();
+
+    let gone = Instant::now();
+    rig.close();
+    let code = rig.exit_code().await;
+    let exited = gone.elapsed();
+    assert_eq!(code, 0);
+    assert_eq!(rig.sdk.closed(), 0, "the room close was waited for");
+    assert!(
+        exited >= conch_voice::managed::OWNER_LOST_STEP,
+        "ended {exited:?}, before the room step's second"
+    );
+    assert!(
+        exited < Duration::from_millis(conch_voice_api::VOICE_CONTROL_OWNER_LOSS_EXIT_MS),
+        "ended {exited:?} after the owner went"
+    );
+    let after = log.text().matches("the room leave was abandoned").count();
+    assert!(after > before, "the abandoned leave was not logged");
+}
+
 /// Issue #631: under load, the thread handing a frame to the track can be taken away after
 /// the gate let the frame through and before the SDK took it, while the session loop
 /// leaves and mutes the track. That frame reaches the track before the mute or not at all.

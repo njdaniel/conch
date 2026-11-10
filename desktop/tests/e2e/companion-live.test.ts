@@ -657,7 +657,9 @@ describe('the desktop screen companion with the real helper, conchd, LiveKit and
     // leaves and tells main (companionEnd), which sends the DELETE.
     await a.stopShare();
     await eventually(async () => (await listed(idOf(world.a, '.screen'))) === null, COMPANION_GRACE_MS + 5_000, 'p<A>.screen to be removed after the page ended it');
-    expect(a.companion.liveOrigin(), 'main forgot the grant').toBeNull();
+    // The page leaves its own room first and then tells main (companionEnd),
+    // so LiveKit can be quiet a moment before main has forgotten the grant.
+    await eventually(() => Promise.resolve(a.companion.liveOrigin() === null), 5_000, 'main to forget the grant');
     expect(await listed(idOf(world.a)), 'the DELETE did not remove p<A>').not.toBeNull();
     expect(a.owner.view.helper?.phase).toBe('connected');
     expect(await absent(world.a)).toBe(false);
@@ -674,7 +676,11 @@ describe('the desktop screen companion with the real helper, conchd, LiveKit and
     await eventually(async () => (await a.facts()).phase === 'stopped' || (await a.facts()).phase === 'idle', 10_000, "the companion's room to be left");
     expect((await a.facts()).roomState, "the companion's room disconnected").toBe('disconnected');
     expect(a.ends).toContain('leave');
+    // #1685: a lost Leave shows up here as a roughly 21 s ghost (LiveKit's
+    // dead-connection removal); the fix lives in the helper, not in this bound.
+    const left = Date.now();
     expect(await absentSoon(world.a), 'p<A> went with the helper').toBe(true);
+    note(`the helper's leave to p<A> gone took ${String(Date.now() - left)} ms`);
   });
 
   it('the helper killed by its pid ends the companion, removed within the poller grace', async () => {
