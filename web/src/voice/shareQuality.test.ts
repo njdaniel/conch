@@ -207,6 +207,26 @@ describe('the sent readout: reasons, loss and the capture', () => {
     expect(shareSample([layer({ id: 'a' })], 'sent')).not.toHaveProperty('paused');
   });
 
+  it('counts a pause only when the layer off is above the one sent', () => {
+    const layer = (overrides: Partial<ShareStats>): ShareStats => ({ type: 'outbound-rtp', kind: 'video', frameWidth: 1920, frameHeight: 1080, framesPerSecond: 31, ...overrides });
+    const small = (overrides: Partial<ShareStats>): ShareStats => layer({ frameWidth: 1280, frameHeight: 720, framesPerSecond: 15, ...overrides });
+    // The 720p layer nobody takes is off, the top is sent: not paused.
+    const lower = shareSample([layer({ id: 'f', rid: 'f' }), small({ id: 'h', rid: 'h', active: false })], 'sent');
+    expect(lower).toMatchObject({ width: 1920, height: 1080 });
+    expect(lower).not.toHaveProperty('paused');
+    expect(lower).not.toHaveProperty('layerOff');
+    // Ranked by rid when there are no sizes on the off layer.
+    expect(shareSample([layer({ id: 'f', rid: 'f' }), { type: 'outbound-rtp', kind: 'video', id: 'q', rid: 'q', active: false }], 'sent')).not.toHaveProperty('paused');
+    expect(shareSample([small({ id: 'h', rid: 'h' }), { type: 'outbound-rtp', kind: 'video', id: 'f', rid: 'f', active: false }], 'sent')?.paused).toBe(true);
+    // The top off with a stale size: the sent layer is the largest that is sending.
+    const stale = shareSample([layer({ id: 'f', rid: 'f', active: false }), small({ id: 'h', rid: 'h' })], 'sent');
+    expect(stale).toMatchObject({ width: 1280, height: 720, paused: true });
+    // Nothing to rank by: noted, not called a pause.
+    const unknown = shareSample([layer({ id: 'x' }), { type: 'outbound-rtp', kind: 'video', id: 'y', active: false }], 'sent');
+    expect(unknown).toMatchObject({ layerOff: true });
+    expect(unknown).not.toHaveProperty('paused');
+  });
+
   it('keeps only the capture settings the browser gave', () => {
     expect(shareSample([sent()], 'sent', 'TR', { width: 1280, height: 720, fps: 30 })?.captured).toEqual({ width: 1280, height: 720, fps: 30 });
     expect(shareSample([sent()], 'sent', 'TR', { width: 0, height: undefined, fps: undefined })).not.toHaveProperty('captured');
@@ -242,6 +262,9 @@ describe('the shortfall reason', () => {
     { what: 'the top layer paused and no reason in the stats', s: sample({ width: 1280, height: 720, fps: 15, paused: true }), q: ask, want: null },
     { what: 'a whole layer short with limitation none and a big capture (paused, unflagged)', s: sample({ width: 1280, height: 720, fps: 15, limitation: 'none', captured: { width: 1920, height: 1080 } }), q: ask, want: null },
     { what: 'a smaller capture still shows while the top layer is paused', s: sample({ width: 1280, height: 720, limitation: 'none', paused: true, captured: { width: 1280, height: 720 } }), q: ask, want: "What you're sharing is smaller than 1080p" },
+    { what: 'a lower layer off (nobody takes it), the top slow on CPU', s: sample({ fps: 31, limitation: 'cpu', layerOff: true, captured: { width: 1920, height: 1080 } }), q: ask, want: 'Limited by CPU' },
+    { what: 'a lower layer off, the top slow on bandwidth', s: sample({ fps: 31, limitation: 'bandwidth', layerOff: true, captured: { width: 1920, height: 1080 } }), q: ask, want: 'Limited by bandwidth' },
+    { what: 'a layer off of unknown rank, the picture smaller than the capture fitted', s: sample({ width: 1280, height: 720, fps: 15, limitation: 'cpu', layerOff: true, captured: { width: 1920, height: 1080 } }), q: ask, want: null },
     { what: '720p asked and delivered', s: sample({ width: 1280, height: 720 }), q: { resolution: '720p', frameRate: 60 }, want: null },
     { what: 'a small window at 720p', s: sample({ width: 800, height: 600, captured: { width: 800, height: 600 } }), q: { resolution: '720p', frameRate: 60 }, want: "What you're sharing is smaller than 720p" },
     { what: 'source asks no size', s: sample({ width: 800, height: 600 }), q: { resolution: 'source', frameRate: 60 }, want: null },

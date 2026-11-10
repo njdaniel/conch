@@ -75,6 +75,9 @@ export interface ShareSample {
   // The sender's top layer is not being sent (every viewer takes a lower
   // layer): a smaller picture then is not a shortfall.
   readonly paused?: boolean;
+  // A layer is off whose place among the layers could not be told; it excuses
+  // a picture smaller than the capture fitted to the ask, and nothing else.
+  readonly layerOff?: boolean;
   // The capture's own size and rate (getSettings) of the sender's screen, when
   // the browser reports them. A sent sample only.
   readonly captured?: { readonly width?: number; readonly height?: number; readonly fps?: number };

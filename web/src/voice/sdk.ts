@@ -547,6 +547,8 @@ export interface ShareStats {
   // outbound-rtp: false when this simulcast layer is not being sent (dynacast
   // pauses the layers nobody takes).
   readonly active?: boolean;
+  // outbound-rtp: which simulcast layer: q (lowest), h or f (highest).
+  readonly rid?: string;
 }
 
 const count = (n: number | undefined): n is number => n !== undefined && Number.isFinite(n) && n >= 0;
@@ -558,16 +560,22 @@ export function shareSample(stats: Iterable<ShareStats>, direction: ShareDirecti
   const wanted = direction === 'received' ? 'inbound-rtp' : 'outbound-rtp';
   let found: ShareStats | null = null;
   const all = [...stats];
-  for (const stat of all) {
-    if (stat.type !== wanted || stat.kind === 'audio' || stat.mediaType === 'audio') continue;
-    if (!known(stat.frameWidth) || !known(stat.frameHeight) || !count(stat.framesPerSecond)) continue;
-    if (found === null || stat.frameWidth * stat.frameHeight > (found.frameWidth ?? 0) * (found.frameHeight ?? 0)) found = stat;
+  // The largest layer with a size, preferring one that is being sent: a layer
+  // dynacast stopped may still hold the size of its last frame.
+  for (const sending of [true, false]) {
+    for (const stat of all) {
+      if (stat.type !== wanted || stat.kind === 'audio' || stat.mediaType === 'audio') continue;
+      if (sending && stat.active === false) continue;
+      if (!known(stat.frameWidth) || !known(stat.frameHeight) || !count(stat.framesPerSecond)) continue;
+      if (found === null || stat.frameWidth * stat.frameHeight > (found.frameWidth ?? 0) * (found.frameHeight ?? 0)) found = stat;
+    }
+    if (found !== null) break;
   }
   if (found === null) return null;
   const bytes = direction === 'received' ? found.bytesReceived : found.bytesSent;
   const limitation = limitationOf(found.qualityLimitationReason);
   const lost = direction === 'received' ? undefined : sentLoss(all, found);
-  const paused = direction === 'sent' && all.some((stat) => stat.type === 'outbound-rtp' && stat.kind !== 'audio' && stat.mediaType !== 'audio' && stat.active === false);
+  const off = direction === 'sent' ? inactiveAbove(all, found) : 'none';
   const capture = direction === 'sent' && captured !== undefined ? capturedOf(captured) : undefined;
   const stream = found.id !== undefined || found.ssrc !== undefined ? `${found.id ?? ''}/${found.ssrc === undefined ? '' : String(found.ssrc)}` : undefined;
   return {
@@ -581,7 +589,7 @@ export function shareSample(stats: Iterable<ShareStats>, direction: ShareDirecti
     ...(limitation === undefined || direction === 'received' ? {} : { limitation }),
     ...(lost === undefined ? {} : { lost }),
     ...(direction === 'received' && count(found.packetsReceived) && count(found.packetsLost) ? { packetsReceived: found.packetsReceived, packetsLost: found.packetsLost } : {}),
-    ...(paused ? { paused } : {}),
+    ...(off === 'above' ? { paused: true } : off === 'unknown' ? { layerOff: true } : {}),
     ...(capture === undefined ? {} : { captured: capture }),
   };
 }
@@ -590,6 +598,33 @@ export function shareSample(stats: Iterable<ShareStats>, direction: ShareDirecti
 // nothing: never a guess.
 function limitationOf(reason: string | undefined): ShareLimitation | undefined {
   return reason === 'none' || reason === 'cpu' || reason === 'bandwidth' || reason === 'other' ? reason : undefined;
+}
+
+const ridRank: Readonly<Record<string, number>> = { q: 0, h: 1, f: 2 };
+
+// inactiveAbove says whether a simulcast layer that is not being sent
+// (active false) is above the one reported ('above': the top is paused, the
+// sender gives viewers a lower one), only below it or the same ('none': a lower
+// layer nobody takes says nothing about the top), or cannot be ranked
+// ('unknown': it has no size and no rid to compare). Ranked by size, else by rid.
+function inactiveAbove(all: readonly ShareStats[], sent: ShareStats): 'above' | 'unknown' | 'none' {
+  const area = (stat: ShareStats): number | undefined => (known(stat.frameWidth) && known(stat.frameHeight) ? stat.frameWidth * stat.frameHeight : undefined);
+  let result: 'above' | 'unknown' | 'none' = 'none';
+  for (const stat of all) {
+    if (stat === sent || stat.type !== 'outbound-rtp' || stat.kind === 'audio' || stat.mediaType === 'audio' || stat.active !== false) continue;
+    const own = area(stat);
+    const mine = area(sent);
+    const rid = stat.rid === undefined ? undefined : ridRank[stat.rid];
+    const sentRid = sent.rid === undefined ? undefined : ridRank[sent.rid];
+    if (rid !== undefined && sentRid !== undefined) {
+      if (rid > sentRid) return 'above';
+    } else if (own !== undefined && mine !== undefined) {
+      if (own > mine) return 'above';
+    } else {
+      result = 'unknown';
+    }
+  }
+  return result;
 }
 
 // The lost share of what a viewer was sent over the interval between two
@@ -695,9 +730,17 @@ export function shortfallReason(sample: ShareSample, quality: ShareQuality): str
   // layer is paused, is the sender doing what the viewers asked: dynacast
   // stops the layers nobody takes, and viewers who are not focused on the
   // stream take the lowest. Only a smaller capture still explains a size gap.
-  const asRequested = sample.paused === true || sample.limitation === 'none';
+  // A layer off whose rank is unknown excuses the gap only when the picture is
+  // smaller than the capture fitted to the ask, so a full-size top layer with
+  // a lower one off is judged as ever.
+  const behind = asked !== null && cap?.width !== undefined && cap.height !== undefined && (() => {
+    const [w, h] = fitBox(cap.width, cap.height, asked.width, asked.height);
+    return Math.max(sample.width, sample.height) < Math.max(w, h) * sizeSlack && Math.min(sample.width, sample.height) < Math.min(w, h) * sizeSlack;
+  })();
+  const paused = sample.paused === true || (sample.layerOff === true && behind);
+  const asRequested = paused || sample.limitation === 'none';
   const underSize = under && (captureSmall || !asRequested);
-  const slow = sample.paused !== true && sample.limitation !== 'none' && sample.fps < ask.frameRate * fpsFloor;
+  const slow = !paused && sample.limitation !== 'none' && sample.fps < ask.frameRate * fpsFloor;
   if (!underSize && !slow) return null;
   if (underSize && captureSmall) return `What you're sharing is smaller than ${quality.resolution}`;
   if (sample.limitation === 'cpu') return 'Limited by CPU';
