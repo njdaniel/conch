@@ -129,6 +129,12 @@ export interface NativeCompanion {
   // The grant for the voice destination. Call it in the person's click or key
   // handler; a refusal is a typed reason, never a thrown string.
   grant(request: { readonly channel: ChannelName }): Promise<CompanionGrantResult>;
+  // Arms the share allowance (issue #1580): call it synchronously at the very
+  // start of the Share click, before anything else, so main takes the click
+  // for the grant and the capture that follow. One arm lets one grant and one
+  // capture follow; a retry needs a new click. Answers whether main armed
+  // anything; never rejects.
+  shareArm(): Promise<boolean>;
   // Removes the live companion, if there is one, and says whether there was.
   end(): Promise<boolean>;
   // Main's word (the conch:companion channel) that it ended the companion:

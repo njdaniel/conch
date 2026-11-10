@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { ShareClaimResult } from '../api';
 import type { VoiceShareEnded, VoiceShareEndReason } from '../schema/voice';
 import { FakeClock, settle } from './fakes';
-import { browserFeatures, endedNote, othersShareNote, ownPageNote, resumeLimit, ScreenShare, sharedNote, shortShareNote, soundNote, type Captured, type KeptScreen, type ShareFeatures, type ShareQuality, type ShareRoom, type ShareState } from './share';
+import { browserFeatures, endedNote, othersShareNote, ownPageNote, pickCause, resumeLimit, ScreenShare, sharedNote, shortShareNote, soundNote, type Captured, type KeptScreen, type ShareFeatures, type ShareQuality, type ShareRoom, type ShareState } from './share';
 
 interface Deferred<T> {
   readonly promise: Promise<T>;
@@ -1165,8 +1165,8 @@ describe('what the page says', () => {
     ['Safari on iPhone', { canShare: false, chromium: false, platform: 'ios' }, /cannot share a screen.*You can still watch/],
   ];
 
-  it('says what sound a share will carry, per browser, before the picker opens', () => {
-    for (const [name, features, text] of browsers) expect(soundNote(features), name).toMatch(text);
+  it.each(browsers)('says what sound a share will carry before the picker opens: %s', (_name, features, text) => {
+    expect(soundNote(features)).toMatch(text);
   });
 
   // Issue #600: the strip's one line names the same facts as soundNote and
@@ -1246,5 +1246,50 @@ describe('reading the browser', () => {
     expect(as('Mozilla/5.0 (X11; Linux x86_64) Gecko/20100101 Firefox/140.0', undefined, true)).toEqual({ canShare: true, chromium: false, platform: 'linux' });
     expect(as('Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X)', undefined, false)).toEqual({ canShare: false, chromium: false, platform: 'ios' });
     expect(as('Mozilla/5.0 (Linux; Android 15)', { brands: [{ brand: 'Chromium' }], platform: 'Android' }, true).platform).toBe('android');
+  });
+});
+
+describe('the cause of a share that did not start (issue #1582)', () => {
+  // The shapes the desktop's picker gives getDisplayMedia: main refusing (no
+  // allowance, no grant) is NotAllowedError; the person cancelling the picker
+  // is AbortError. Neither changes `ended`.
+  it.each([
+    ['NotAllowedError', 'Not allowed', { kind: 'idle', ended: 'cancelled', cause: 'denied' }],
+    ['AbortError', 'The user aborted a request', { kind: 'idle', ended: 'cancelled' }],
+  ] as const)('a pick that failed as %s', async (name, message, expected) => {
+    const t = setup();
+    const refusing: ShareRoom = { ...t.stub, pickScreen: () => Promise.reject(Object.assign(new Error(message), { name })) };
+    await t.share.start('general', refusing);
+    expect(t.share.current).toEqual(expected);
+  });
+
+  // On the desktop companion every failure but the cancelled picker is a
+  // screen that could not be captured; the browser's are as above.
+  it.each([
+    ['NotAllowedError', 'denied'],
+    ['NotReadableError', 'denied'],
+    ['DeviceUnsupportedError', 'denied'],
+    ['NotFoundError', 'denied'],
+    ['AbortError', undefined],
+  ] as const)('on the companion, a pick that failed as %s has cause %s', async (name, cause) => {
+    const t = setup();
+    t.share.setCompanion(true);
+    const failing: ShareRoom = { ...t.stub, pickScreen: () => Promise.reject(Object.assign(new Error('x'), { name })) };
+    await t.share.start('general', failing);
+    expect(t.share.current).toEqual(cause === undefined ? { kind: 'idle', ended: 'cancelled' } : { kind: 'idle', ended: 'cancelled', cause });
+    expect(pickCause(Object.assign(new Error('x'), { name }), true)).toBe(cause);
+  });
+
+  it('on the companion, a rejection that is no Error is a screen that could not be captured; in the browser it says nothing', () => {
+    expect(pickCause('x', true)).toBe('denied');
+    expect(pickCause('x')).toBeUndefined();
+  });
+
+  it('no other pick failure carries a cause, and a non-error carries none', () => {
+    expect(pickCause(Object.assign(new Error('Aborted'), { name: 'AbortError' }))).toBeUndefined();
+    expect(pickCause(Object.assign(new Error('x'), { name: 'NotFoundError' }))).toBeUndefined();
+    expect(pickCause(Object.assign(new Error('x'), { name: 'NotSupportedError' }))).toBeUndefined();
+    expect(pickCause(new Error('NotAllowedError'))).toBeUndefined();
+    expect(pickCause('x')).toBeUndefined();
   });
 });

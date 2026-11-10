@@ -6073,3 +6073,18 @@ button.link {
   max-width: 100%;
   min-height: 2.25rem;
 }
+
+/* The desktop strip's streams and share quality (issue #1582): others' stream
+   tiles under the strip, and the quality choice among the share notes. */
+.voice-streams {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s2);
+  margin-top: var(--s2);
+}
+
+.share-quality {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s2);
+}

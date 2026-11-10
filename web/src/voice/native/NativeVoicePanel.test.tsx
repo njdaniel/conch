@@ -11,7 +11,9 @@ import type { SocketEvents } from '../../state/feed';
 import type { Person } from '../../useLiveChannel';
 import * as sdk from '../sdk';
 import { confirmWithin, duplicateWarning, NativeVoicePanel } from './NativeVoicePanel';
-import { statusWords, words } from './words';
+import { initialVoice, type VoiceState } from '../connection';
+import type { Companion, CompanionClient } from './useCompanion';
+import { shareDisabledWords, silentShareBefore, statusWords, words } from './words';
 
 const idle: NativeVoiceView = { status: 'idle', generation: 0, channel: null, retryable: false };
 const helper = (over: Partial<NativeVoiceHelper> = {}): NativeVoiceHelper => ({ version: 2, phase: 'connected', capture: 'on', transmitting: false, muted: false, deafened: false, blocked: [], ptt: 'ready', ...over });
@@ -380,5 +382,107 @@ describe('NativeVoicePanel', () => {
     cleanup();
     strip(new Fake(running({ ptt: 'ready' })));
     expect(await screen.findByText(/hold your talk key to talk/)).toBeTruthy();
+  });
+
+  describe('share and watch (#1582)', () => {
+    function companionOf(over: Partial<VoiceState> = {}) {
+      const calls: string[] = [];
+      const presences: VoicePresenceV2[] = [];
+      const state: VoiceState = { ...initialVoice, ...over };
+      const client: CompanionClient = {
+        subscribe: () => () => undefined,
+        snapshot: () => state,
+        startCompanionShare: (c) => { calls.push(`share ${c}`); },
+        watchCompanionStream: (c, p) => { calls.push(`watch ${c} ${String(p)}`); },
+        stopShare: () => { calls.push('stop'); },
+        watchStream: () => undefined,
+        focusShare: () => undefined,
+        setShareQuality: () => Promise.resolve(),
+        presence: (p) => { presences.push(p); },
+        attachStream: () => undefined,
+        readShareStats: () => Promise.resolve(null),
+      };
+      const companion: Companion = { client, state };
+      return { companion, calls, presences };
+    }
+    function withCompanion(fake: Fake, companion: Companion | null, channel = 'general') {
+      return render(
+        <NativeVoicePanel source={fake.nv} signedIn channel={channel} viewer={1} people={people} voiceAllowed channels={channels} companion={companion} onUnauthorized={() => undefined} onOpen={() => undefined} />,
+      );
+    }
+    const sharingPresence = (): VoicePresenceV2 => {
+      const p = presence([1, '2026-01-01T00:00:00Z'], [2, '2026-01-01T00:00:01Z']);
+      const second = p.rooms[0]?.participants[1];
+      if (second !== undefined) Object.assign(second, { sharing: true, share_started_at: '2026-01-01T00:00:02Z' });
+      return p;
+    };
+
+    it('offers no share where the bridge has no companion', async () => {
+      withCompanion(new Fake(running()), null);
+      await frame(presence([1, '2026-01-01T00:00:00Z']));
+      expect(screen.queryByRole('button', { name: 'Share screen' })).toBeNull();
+    });
+
+    it('Share starts the companion in the joined channel and leaves mute and deafen alone', async () => {
+      const fake = new Fake(running());
+      const c = companionOf();
+      withCompanion(fake, c.companion);
+      await frame(presence([1, '2026-01-01T00:00:00Z']));
+      expect(screen.getByText(silentShareBefore)).toBeTruthy();
+      fireEvent.click(screen.getByRole('button', { name: 'Share screen' }));
+      expect(c.calls).toEqual(['share general']);
+      expect(fake.calls).toEqual([]);
+      expect(screen.getByRole('button', { name: 'Mute' })).toBeTruthy();
+      expect(screen.getByRole('button', { name: 'Deafen' })).toBeTruthy();
+    });
+
+    it('while sharing, the indicator names the channel and Stop returns to the strip with voice untouched', async () => {
+      const fake = new Fake(running({ muted: true }));
+      const c = companionOf({ phase: 'connected', channel: 'general', companion: true, share: { kind: 'sharing', audio: false } });
+      withCompanion(fake, c.companion);
+      await frame(presence([1, '2026-01-01T00:00:00Z']));
+      expect(screen.getByText('Sharing your screen in #general')).toBeTruthy();
+      fireEvent.click(screen.getByRole('button', { name: 'Stop sharing' }));
+      expect(c.calls).toEqual(['stop']);
+      expect(fake.calls).toEqual([]);
+      expect(screen.getByRole('button', { name: 'Unmute' })).toBeTruthy();
+      expect(screen.getByRole('button', { name: 'Leave voice' })).toBeTruthy();
+    });
+
+    it('is disabled with its reason out of voice, and while the helper connects', async () => {
+      const out = withCompanion(new Fake(idle), companionOf().companion);
+      await frame(presence());
+      expect(screen.getByRole<HTMLButtonElement>('button', { name: 'Share screen' }).disabled).toBe(true);
+      expect(screen.getByText(shareDisabledWords.notJoined)).toBeTruthy();
+      out.unmount();
+      cleanup();
+      withCompanion(new Fake(running({ phase: 'connecting' })), companionOf().companion);
+      await frame(presence([1, '2026-01-01T00:00:00Z']));
+      expect(screen.getByRole<HTMLButtonElement>('button', { name: 'Share screen' }).disabled).toBe(true);
+      expect(screen.getByText(shareDisabledWords.connecting)).toBeTruthy();
+    });
+
+    it('is disabled when the channel on screen is not the one joined', async () => {
+      withCompanion(new Fake(running()), companionOf().companion, 'random');
+      await frame(presence([1, '2026-01-01T00:00:00Z']));
+      expect(screen.getByRole<HTMLButtonElement>('button', { name: 'Share screen' }).disabled).toBe(true);
+    });
+
+    it('gives the companion the joined channel’s presence, and tiles for the others’ streams with Watch', async () => {
+      const c = companionOf();
+      withCompanion(new Fake(running()), c.companion);
+      await frame(sharingPresence());
+      expect(c.presences.length).toBeGreaterThan(0);
+      fireEvent.click(within(screen.getByRole('region', { name: "Ada's stream" })).getByRole('button', { name: 'Watch' }));
+      expect(c.calls).toEqual(['watch general 2']);
+    });
+
+    it('draws no tiles and gives no presence out of voice', async () => {
+      const c = companionOf();
+      withCompanion(new Fake(idle), c.companion);
+      await frame(sharingPresence());
+      expect(c.presences).toEqual([]);
+      expect(screen.queryByRole('region', { name: "Ada's stream" })).toBeNull();
+    });
   });
 });

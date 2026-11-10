@@ -10,7 +10,9 @@ import type {
   VoiceControlPTTProblem,
   VoiceControlReason,
 } from '../../schema/generated';
-import type { NativeVoiceStatus, NativeVoiceView } from '../../platform/desktop/bridge';
+import type { CompanionGrantError, CompanionShareUnavailable, NativeVoiceStatus, NativeVoiceView } from '../../platform/desktop/bridge';
+import { companionRefusals } from '../connection';
+import { endedNote, type ShareCause, type ShareEnd, type ShareState } from '../share';
 
 export interface VoiceWords {
   // The one line the strip shows.
@@ -189,4 +191,86 @@ function runningWords(view: NativeVoiceView, binding: string | undefined): Voice
       if (h.talkMode === 'open') return { text: 'mic on · open mic', retry: false };
       return { text: binding === undefined || binding === '' ? 'mic on · hold your talk key to talk' : `mic on · hold ${binding} to talk`, retry: false };
   }
+}
+
+// ---- sharing and watching from the desktop (issue #1582, D4-05 of #772)
+
+// The Linux app's share carries no sound (#1552; #1578 Q-D4-1 to Q-D4-4). Said
+// before the picker opens, and in short while sharing, and not said when the
+// client reports a sound route (none does on Linux yet).
+export const silentShareBefore = "Your screen's sound isn't shared from the Linux app yet. Others will see your screen without sound.";
+export const silentShareWhile = "Sharing without sound: your screen's sound isn't shared from the Linux app yet.";
+
+// Why Share is not offered, in words (UX-15): the strip says what to do.
+export const shareDisabledWords = {
+  notJoined: 'Join voice to share your screen.',
+  connecting: 'Share is available once voice is connected.',
+  noPortal: 'This desktop has no screen-cast portal',
+} as const;
+
+export function shareElsewhereWords(joined: string): string {
+  return `Share is for the channel you are in voice with: #${joined}.`;
+}
+
+// What more is known of a share that did not start (ShareCause).
+export const shareCauseWords: Readonly<Record<ShareCause, string>> = {
+  denied: 'The screen could not be captured',
+};
+
+// Why this desktop cannot share, as the grant says (CompanionShareUnavailable):
+// no portal for ScreenCast, or a session that is not Wayland (X11).
+export const shareUnavailableWords: Readonly<Record<CompanionShareUnavailable, string>> = {
+  'no-portal': shareDisabledWords.noPortal,
+  'not-wayland': 'Sharing a screen from the Linux app needs a Wayland session; this desktop is running X11',
+};
+
+// voice_share_full: the room's six-stream cap (voiceShareCap = 6).
+export const shareFullWords = 'Six people are already sharing in this room.';
+
+// A claim conchd refused for any reason but a full room (a person without the
+// right to share here is one) and a share that could not start. The share's
+// state does not say which, so one line covers both.
+export const shareFailedWords = 'Your share could not start. You may not be permitted to share in this channel.';
+
+// The source closed under a live share: the window shared was closed, or the
+// portal or system ended the capture.
+export const shareSourceClosedWords = 'Sharing stopped: the screen or window you were sharing closed, or the system ended the capture.';
+
+// Ends the strip does not say: the person stopped it, or closed the picker,
+// which is not an error.
+const unsaid: ReadonlySet<ShareEnd> = new Set<ShareEnd>(['self', 'cancelled']);
+
+// Ends whose words main's end event (or a lost connection) already gave as
+// the strip's reason (VoiceState.why).
+const toldByWhy: ReadonlySet<ShareEnd> = new Set<ShareEnd>(['left', 'lost', 'rotated']);
+
+// shareNote is the one line the share control says about a share that did not
+// start or has ended, or null: a refused grant, a cause, a full room, the
+// reason the companion ended (why, ahead of the rest of an idle share), the
+// desktop's inability to share (unavailable, which the connection sets only
+// after a Share), or the share's own end in words. A closed picker says
+// nothing.
+export function shareNote(share: ShareState, refusal: CompanionGrantError | null, why: string | null, unavailable: CompanionShareUnavailable | null = null): string | null {
+  if (refusal !== null) return companionRefusals[refusal];
+  if (share.kind !== 'idle') return null;
+  // The companion's end words come first: a lock or a leave is news, and the
+  // note of a desktop that cannot share is only background to it.
+  if (why !== null && (share.ended === null || toldByWhy.has(share.ended) || share.cause !== undefined)) return why;
+  if (unavailable !== null) return shareUnavailableWords[unavailable];
+  if (share.cause !== undefined) return shareCauseWords[share.cause];
+  if (share.ended === 'full') return shareFullWords;
+  if (share.ended === null || unsaid.has(share.ended) || toldByWhy.has(share.ended)) return null;
+  if (share.ended === 'browser') return shareSourceClosedWords;
+  if (share.ended === 'failed') return shareFailedWords;
+  return endedNote(share.ended);
+}
+
+// The quality choices (Q-D4-3): 720p30, the default, and 1080p30.
+export const shareQualityWords: Readonly<Record<'720p' | '1080p', string>> = {
+  '720p': '720p, 30 fps',
+  '1080p': '1080p, 30 fps',
+};
+
+export function indicatorWords(channel: string): string {
+  return `Sharing your screen in #${channel}`;
 }

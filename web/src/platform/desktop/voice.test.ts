@@ -143,6 +143,15 @@ describe('createNativeVoice companion (issue #1581)', () => {
     expect(await nv.companion?.grant({ channel: 'general' })).toEqual({ ok: false, error: 'failed' });
   });
 
+  it('arms the share allowance through the bridge, false when it throws or refuses', async () => {
+    const w = withCompanion();
+    const nv = createNativeVoice(() => w.b);
+    expect(await nv.companion?.shareArm()).toBe(true);
+    expect(w.c.shareArm).toHaveBeenCalledTimes(1);
+    w.c.shareArm.mockRejectedValueOnce(new Error('no click'));
+    expect(await nv.companion?.shareArm()).toBe(false);
+  });
+
   it('ends the companion through the bridge, false when it throws', async () => {
     const w = withCompanion();
     const nv = createNativeVoice(() => w.b);
@@ -167,6 +176,7 @@ describe('createNativeVoice companion (issue #1581)', () => {
       const nv = createNativeVoice(get);
       expect(await nv.companion?.grant({ channel: 'general' })).toEqual({ ok: false, error: 'failed' });
       expect(await nv.companion?.end()).toBe(false);
+      expect(await nv.companion?.shareArm()).toBe(false);
       const seen = vi.fn();
       nv.companion?.onEnd(seen)();
       expect(seen).not.toHaveBeenCalled();

@@ -28,7 +28,7 @@ const unsupported = { ok: false, error: 'unsupported' } as const;
 const failed = { ok: false, error: 'failed' } as const;
 
 // The companion half of the bridge, when the preload offers all of it.
-const COMPANION_METHODS = ['companionGrant', 'companionEnd', 'onCompanion'] as const;
+const COMPANION_METHODS = ['companionGrant', 'shareArm', 'companionEnd', 'onCompanion'] as const;
 
 function companionBridge(whole: object | undefined): DesktopCompanionBridge | undefined {
   if (whole === undefined) return undefined;
@@ -51,6 +51,15 @@ export function createNativeVoice(get: () => DesktopVoiceBridge | undefined = vo
         return await b.companionGrant({ channel: request.channel });
       } catch {
         return grantFailed;
+      }
+    },
+    async shareArm() {
+      const b = companionBridge(get());
+      if (b === undefined) return false;
+      try {
+        return await b.shareArm();
+      } catch {
+        return false;
       }
     },
     async end() {
