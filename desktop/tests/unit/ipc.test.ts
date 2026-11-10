@@ -1,13 +1,15 @@
+import type { IpcMainEvent } from 'electron';
 import { describe, expect, it } from 'vitest';
 
 import type { Feeds } from '../../main/api/feeds.ts';
 import type { Files } from '../../main/files.ts';
 import type { Service } from '../../main/api/service.ts';
 import { DocumentGate } from '../../main/document.ts';
-import { checkCaller, Ipc, parseRequest, plain, type CompanionApi, type ProfilesApi, type VoiceApi, type SettingsApi, type ContentsLike, type FrameLike, type InvokeEvent } from '../../main/ipc.ts';
-import { COMPANION_FUNCTIONS, INVOKED_FUNCTIONS, VOICE_EVENTS, VOICE_FUNCTIONS } from '../../shared/bridge-names.ts';
+import { checkCaller, Ipc, parseRequest, plain, type CompanionApi, type NotificationsApi, type ProfilesApi, type VoiceApi, type SettingsApi, type ContentsLike, type FrameLike, type InvokeEvent } from '../../main/ipc.ts';
+import { COMPANION_FUNCTIONS, INVOKED_FUNCTIONS, TAG_MAX, VOICE_EVENTS, VOICE_FUNCTIONS } from '../../shared/bridge-names.ts';
 import { deliverVoice } from '../../main/voice/events.ts';
 import type { NativeVoiceView } from '../../../web/src/platform/desktop/bridge.ts';
+import { VOICE_CONTROL_MAX_CHANNEL_BYTES } from '../../../web/src/schema/generated.ts';
 
 function frame(token = 'frame-1', over: Partial<FrameLike> = {}): FrameLike {
   return { frameToken: token, parent: null, detached: false, url: 'conch-app://ui/', ...over };
@@ -24,6 +26,7 @@ interface Fixture {
   // Whether main's compatibility verdict lets a sign-in happen (issue #946).
   readonly permit: { value: boolean };
   readonly input: { recent: boolean };
+  readonly activation: object;
   event(over?: Partial<InvokeEvent>): InvokeEvent;
 }
 
@@ -41,17 +44,25 @@ function fixture(): Fixture {
   const service = new Proxy({} as Service, { get: (_t, name: string) => record(name) });
   const feeds = new Proxy({} as Feeds, { get: (_t, name: string) => record(`feeds.${name}`) });
   const permit = { value: true };
-  const profiles = new Proxy({} as ProfilesApi, { get: (_t, name: string) => (name === 'signInPermitted' ? () => permit.value : record(`profiles.${name}`)) });
+  const activation = {};
+  const profiles = new Proxy({} as ProfilesApi, { get: (_t, name: string) => {
+    if (name === 'active') return activation;
+    return name === 'signInPermitted' ? () => permit.value : record(`profiles.${name}`);
+  } });
   const logs: string[] = [];
   const clock = { now: 1_000_000 };
   const input = { recent: false };
   const files = new Proxy({} as Files, { get: (_t, name: string) => record(`files.${name}`) });
   const voice = new Proxy({} as VoiceApi, { get: (_t, name: string) => record(`voice.${name}`) });
+  const notifications = new Proxy({} as NotificationsApi, { get: (_t, name: string) => (...args: unknown[]) => {
+    calls.push([`notifications.${name}`, args]);
+    return true;
+  } });
   const settings = new Proxy({} as SettingsApi, { get: (_t, name: string) => record(`settings.${name}`) });
   const companion = new Proxy({} as CompanionApi, { get: (_t, name: string) => record(`companion.${name}`) });
   const gestures = { take: () => (input.recent ? ('pointer' as const) : null) };
-  const ipc = new Ipc({ owned: () => contents, gate, service, feeds, files, gestures, profiles, voice, settings, companion, now: () => clock.now, log: (line) => logs.push(line) });
-  return { ipc, gate, contents, main, calls, logs, clock, permit, input, event: (over = {}) => ({ sender: contents, senderFrame: main, ...over }) };
+  const ipc = new Ipc({ owned: () => contents, gate, service, feeds, files, gestures, profiles, voice, notifications, settings, companion, now: () => clock.now, log: (line) => logs.push(line) });
+  return { ipc, gate, contents, main, calls, logs, clock, permit, input, activation, event: (over = {}) => ({ sender: contents, senderFrame: main, ...over }) };
 }
 
 describe('every invocation is checked before anything else', () => {
@@ -92,7 +103,7 @@ describe('every invocation is checked before anything else', () => {
       files: {} as Files,
       gestures: { take: () => null },
       profiles: {} as ProfilesApi,
-      voice: {} as VoiceApi, settings: {} as SettingsApi,
+      voice: {} as VoiceApi, settings: {} as SettingsApi, notifications: {} as NotificationsApi,
       now: () => 0,
       log: () => undefined,
     });
@@ -185,6 +196,15 @@ describe('arguments', () => {
     ['feedAck', ['1']],
     ['feedUnsubscribe', [0]],
     ['feedUnsubscribe', [1, 2]],
+    ['notify', []],
+    ['notify', [{ tag: 't', title: 'title', body: 'body', channel: 'general', extra: true }]],
+    ['notify', [{ tag: 't', title: 'x'.repeat(129), body: 'body', channel: 'general' }]],
+    ['notify', [{ tag: 't', title: 'title', body: 'x'.repeat(201), channel: 'general' }]],
+    ['notify', [{ tag: 'x'.repeat(513), title: 'title', body: 'body', channel: 'general' }]],
+    ['notify', [{ tag: '', title: 'title', body: 'body', channel: 'general' }]],
+    ['notify', [{ tag: 't', title: 'title', body: 'body', channel: '   ' }]],
+    ['notifyClose', [{ tag: 't', body: 'must not cross' }]],
+    ['notifyClose', [{ tag: 'x'.repeat(513) }]],
   ])('refuses a bad shape: %s %j', async (name, args) => {
     const f = fixture();
     expect(await f.ipc.invoke(f.event(), name, args)).toEqual({ ok: false, kind: 'refused' });
@@ -312,7 +332,7 @@ describe('arguments', () => {
       files: {} as Files,
       gestures: { take: () => null },
       profiles: { add: () => { throw new Error('boom secret-arg'); } } as unknown as ProfilesApi,
-      voice: {} as VoiceApi, settings: {} as SettingsApi,
+      voice: {} as VoiceApi, settings: {} as SettingsApi, notifications: {} as NotificationsApi,
       now: () => 0,
       log: (line) => f.logs.push(line),
     });
@@ -389,7 +409,7 @@ describe('the credential-replacing writes (issue #1422)', () => {
       files: {} as Files,
       gestures: { take: () => null },
       profiles: { signInPermitted: () => true, signedIn: (account: unknown) => { bound.push(account); return Promise.resolve(true); } } as unknown as ProfilesApi,
-      voice: {} as VoiceApi, settings: {} as SettingsApi,
+      voice: {} as VoiceApi, settings: {} as SettingsApi, notifications: {} as NotificationsApi,
       now: () => 0,
       log: () => undefined,
     });
@@ -400,6 +420,57 @@ describe('the credential-replacing writes (issue #1422)', () => {
   });
 });
 
+describe('desktop notifications (issue #1590)', () => {
+  const request = { tag: 'private-tag', title: 'private title', body: 'private body', channel: 'general' };
+
+  it('passes only the parsed fields with the caller’s activation and document', async () => {
+    const f = fixture();
+    expect(await f.ipc.invoke(f.event(), 'notify', [request])).toEqual({ ok: true, value: true });
+    expect(await f.ipc.invoke(f.event(), 'notifyClose', [{ tag: request.tag }])).toEqual({ ok: true, value: true });
+    expect(f.calls).toEqual([
+      ['notifications.show', [f.activation, f.gate.generation, request]],
+      ['notifications.close', [f.activation, f.gate.generation, request.tag]],
+    ]);
+  });
+
+  it('accepts the largest valid request, every character escaped, and closes it by its tag', async () => {
+    const f = fixture();
+    const big = { tag: '"'.repeat(TAG_MAX), title: '"'.repeat(128), body: '"'.repeat(200), channel: '"'.repeat(VOICE_CONTROL_MAX_CHANNEL_BYTES) };
+    expect(await f.ipc.invoke(f.event(), 'notify', [big])).toEqual({ ok: true, value: true });
+    expect(await f.ipc.invoke(f.event(), 'notifyClose', [{ tag: big.tag }])).toEqual({ ok: true, value: true });
+    expect(f.calls.map(([name]) => name)).toEqual(['notifications.show', 'notifications.close']);
+  });
+
+  it.each([
+    ['a subframe', (f: Fixture) => f.event({ senderFrame: frame('subframe', { parent: f.main }) })],
+    ['a stale generation', (f: Fixture) => { f.gate.begin(); return f.event(); }],
+  ])('refuses notify from %s before the native service', async (_name, event) => {
+    const f = fixture();
+    expect(await f.ipc.invoke(event(f), 'notify', [request])).toEqual({ ok: false, kind: 'refused' });
+    expect(f.calls).toEqual([]);
+  });
+
+  it('drops and counts a storm past 30 a minute without logging its content', async () => {
+    const f = fixture();
+    let accepted = 0;
+    for (let i = 0; i < 35; i++) if ((await f.ipc.invoke(f.event(), 'notify', [request])).ok) accepted++;
+    expect(accepted).toBe(30);
+    expect(f.calls).toHaveLength(30);
+    expect(f.ipc.refusals).toBe(5);
+    expect(f.logs.at(-1)).toContain('(rate)');
+    expect(f.logs.join('\n')).not.toContain('private');
+  });
+
+  it('gates the synchronous OS support check and returns only a boolean', () => {
+    const f = fixture();
+    expect(f.ipc.notificationSupported(f.event(), [])).toEqual({ ok: true, value: true });
+    expect(f.calls).toEqual([['notifications.supported', []]]);
+    expect(f.ipc.notificationSupported(f.event(), ['extra'])).toEqual({ ok: false, kind: 'refused' });
+    expect(f.ipc.notificationSupported(f.event({ senderFrame: null }), [])).toEqual({ ok: false, kind: 'refused' });
+    expect(f.calls).toHaveLength(1);
+  });
+});
+
 describe('the registry', () => {
   it('registers one handler per invoked function and no other channel', () => {
     const f = fixture();
@@ -407,6 +478,22 @@ describe('the registry', () => {
     f.ipc.register({ handle: (channel) => void channels.push(channel) });
     expect(channels.sort()).toEqual(INVOKED_FUNCTIONS.map((n) => `conch:${n}`).sort());
     expect(channels).toHaveLength(INVOKED_FUNCTIONS.length);
+  });
+
+  it('accepts a notification tag for a long origin, up to 512 characters', async () => {
+    const f = fixture();
+    const tag = `https://${'a'.repeat(240)}.example:8443:7:123456`;
+    expect((await f.ipc.invoke(f.event(), 'notify', [{ tag, title: 't', body: 'b', channel: 'general' }])).ok).toBe(true);
+  });
+
+  it('registers exactly the synchronous support channel and answers it with an Envelope', () => {
+    const f = fixture();
+    const handlers = new Map<string, (event: IpcMainEvent, ...args: unknown[]) => void>();
+    f.ipc.registerNotificationSupport({ on: (channel, listener) => (handlers.set(channel, listener), undefined as never) });
+    expect([...handlers.keys()]).toEqual(['conch:notificationSupported']);
+    const holder: { returnValue: unknown } = Object.assign(f.event(), { returnValue: undefined });
+    handlers.get('conch:notificationSupported')?.(holder as unknown as IpcMainEvent);
+    expect(holder.returnValue).toEqual({ ok: true, value: true });
   });
 
   it('parses a request the way the table says', () => {
@@ -650,7 +737,7 @@ describe('the voice family (issue #1374)', () => {
     const f = fixture();
     const asked: number[] = [];
     const ipc = new Ipc({
-      owned: () => f.contents, gate: f.gate, service: {} as Service, feeds: {} as Feeds, files: {} as Files, profiles: {} as ProfilesApi, voice: {} as VoiceApi, settings: {} as SettingsApi,
+      owned: () => f.contents, gate: f.gate, service: {} as Service, feeds: {} as Feeds, files: {} as Files, profiles: {} as ProfilesApi, voice: {} as VoiceApi, settings: {} as SettingsApi, notifications: {} as NotificationsApi,
       gestures: { take: (_c, within) => { asked.push(within); return 'pointer'; } }, now: () => 0, log: () => undefined,
     });
     await ipc.invoke(f.event(), 'voiceSetTalkMode', ['bogus']);
@@ -686,6 +773,7 @@ describe('the voice family (issue #1374)', () => {
     const ipc = new Ipc({
       owned: () => f.contents, gate: f.gate, service: {} as Service, feeds: {} as Feeds, files: {} as Files, profiles: {} as ProfilesApi,
       voice: { join: () => { throw new Error('boom secret-channel'); } } as unknown as VoiceApi, settings: {} as SettingsApi,
+      notifications: {} as NotificationsApi,
       gestures: { take: () => 'pointer' }, now: () => 0, log: (line) => f.logs.push(line),
     });
     expect(await ipc.invoke(f.event(), 'voiceJoin', [{ ...join, channel: 'secret-channel' }])).toEqual({ ok: false, kind: 'refused' });
@@ -817,7 +905,7 @@ describe('the companion family (issue #1579)', () => {
   it('refuses every grant as failed, and holds nothing, when no companion is wired', async () => {
     const f = fixture();
     const ipc = new Ipc({
-      owned: () => f.contents, gate: f.gate, service: {} as Service, feeds: {} as Feeds, files: {} as Files, profiles: {} as ProfilesApi, voice: {} as VoiceApi, settings: {} as SettingsApi,
+      owned: () => f.contents, gate: f.gate, service: {} as Service, feeds: {} as Feeds, files: {} as Files, profiles: {} as ProfilesApi, voice: {} as VoiceApi, settings: {} as SettingsApi, notifications: {} as NotificationsApi,
       gestures: { take: () => 'pointer' }, now: () => 0, log: () => undefined,
     });
     expect(await ipc.invoke(f.event(), 'companionGrant', [grant])).toEqual({ ok: true, value: { ok: false, error: 'failed' } });
@@ -827,7 +915,7 @@ describe('the companion family (issue #1579)', () => {
   it('says only "refused" when the companion throws, and logs no argument', async () => {
     const f = fixture();
     const ipc = new Ipc({
-      owned: () => f.contents, gate: f.gate, service: {} as Service, feeds: {} as Feeds, files: {} as Files, profiles: {} as ProfilesApi, voice: {} as VoiceApi, settings: {} as SettingsApi,
+      owned: () => f.contents, gate: f.gate, service: {} as Service, feeds: {} as Feeds, files: {} as Files, profiles: {} as ProfilesApi, voice: {} as VoiceApi, settings: {} as SettingsApi, notifications: {} as NotificationsApi,
       companion: { grant: () => { throw new Error('boom secret-channel'); } } as unknown as CompanionApi,
       gestures: { take: () => 'pointer' }, now: () => 0, log: (line) => f.logs.push(line),
     });

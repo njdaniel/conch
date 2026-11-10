@@ -50,6 +50,10 @@ function install(overrides: Partial<ConchDesktopBridge>): void {
     uploadFile: never,
     downloadFile: never,
     saveFile: never,
+    notify: never,
+    notifyClose: never,
+    notificationSupported: () => false,
+    onNotification: () => () => undefined,
     ...overrides,
   };
   Object.defineProperty(window, 'conchDesktop', { value: bridge, configurable: true, writable: true });

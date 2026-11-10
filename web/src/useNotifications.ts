@@ -175,7 +175,7 @@ export function useNotifications({
     });
     if (preferences.native && browserPermission === 'granted' && document.visibilityState === 'hidden' && supported()) {
       const title = mention ? `Mention in #${channel.name}` : `New message in #${channel.name}`;
-      const notification = platform.services.notifications.show(title, snippet(message), id);
+      const notification = platform.services.notifications.show(title, snippet(message), id, channel.name);
       natives.current.set(id, notification);
       notification.onclick = () => {
         window.focus();
