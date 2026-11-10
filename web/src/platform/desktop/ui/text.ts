@@ -63,3 +63,11 @@ export const overrideLine = 'Development build: servers that are not on the test
 
 export const incompatibleLine = (family: string, server: string | null, desktop: string): string =>
   `This server’s ${family} answers are not what this app (${desktop}) expects, so its version (${server ?? 'unknown'}) is incompatible with it. This is not a network problem; use a server version that has been tested with this app.`;
+
+// The update notice (issue #1600). The version is main's, checked to be a
+// release version, and is shown as text.
+export const restartLabel = 'Restart';
+
+export function updatedLine(version: string | null): string {
+  return version === null ? 'Conch was updated. Restart when you’re ready.' : `Conch was updated to ${version}. Restart when you’re ready.`;
+}

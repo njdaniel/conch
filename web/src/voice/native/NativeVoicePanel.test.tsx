@@ -262,6 +262,11 @@ describe('NativeVoicePanel', () => {
       expect(screen.getByText('The voice helper is not trusted, so it was not started.')).toBeTruthy();
       expect(screen.queryByRole('button', { name: /Join/ })).toBeNull();
     });
+    it('says to restart after an update replaced the install, and offers neither Join nor Retry (issue #1600)', () => {
+      strip(new Fake({ status: 'unavailable', generation: 1, channel: null, retryable: false, problem: 'update-pending' }));
+      expect(screen.getByText('Restart Conch to finish the update.')).toBeTruthy();
+      expect(screen.queryByRole('button', { name: /Join|Retry/ })).toBeNull();
+    });
     it('uses the talk key name given, and the fallback otherwise', () => {
       strip(new Fake(running()), 'general', 'Right Ctrl');
       expect(screen.getByText('mic on · hold Right Ctrl to talk')).toBeTruthy();

@@ -28,6 +28,7 @@ import { isFileId, parseUpload, MAX_UPLOAD_BYTES, type Files } from './files.ts'
 import { LINK_GESTURE_MS, type Gestures } from './gestures.ts';
 import type { DocumentGate } from './document.ts';
 import { HOST, SCHEME } from './scheme.ts';
+import type { Installed } from './installed.ts';
 import type { VoiceService } from './voice/service.ts';
 
 export interface FrameLike {
@@ -62,6 +63,8 @@ export interface IpcDeps {
   readonly profiles: ProfilesApi;
   // Native voice (issue #1374): main's one owner of the helper.
   readonly voice: VoiceApi;
+  // The installed files replaced under the running app (issue #1600).
+  readonly installed: InstalledApi;
   readonly now: () => number;
   readonly log: (line: string) => void;
 }
@@ -70,6 +73,8 @@ export type ProfilesApi = Pick<
   ProfilesService,
   'view' | 'add' | 'rename' | 'remove' | 'switchTo' | 'retry' | 'recover' | 'signOut' | 'signedIn' | 'keptCredential' | 'signInPermitted'
 >;
+
+export type InstalledApi = Pick<Installed, 'view' | 'restart'>;
 
 export type VoiceApi = Pick<VoiceService, 'state' | 'join' | 'leave' | 'retry' | 'setMute' | 'setDeafen' | 'setDevices' | 'setTalkMode' | 'devices' | 'saveDevice' | 'keyDevices' | 'saveTalkBinding'>;
 
@@ -159,6 +164,7 @@ interface Handlers {
   readonly files: IpcDeps['files'];
   readonly profiles: ProfilesApi;
   readonly voice: VoiceApi;
+  readonly installed: InstalledApi;
   readonly document: number;
 }
 
@@ -480,6 +486,19 @@ export const SPECS: Readonly<Record<InvokedFunction, Spec>> = {
     run: ({ voice }, [request]) => voice.saveTalkBinding(request as { deviceId: string; code: number }),
     gesture: true,
   },
+  // The update family (issue #1600). Restart is the person's act alone: it
+  // runs only right after a click or key in the window, and nothing else
+  // restarts the app.
+  updateState: { limit: 120, maxBytes: 0, parse: none, run: ({ installed }) => installed.view() },
+  updateRestart: {
+    limit: 6,
+    maxBytes: 0,
+    parse: none,
+    run: ({ installed }) => {
+      installed.restart();
+    },
+    gesture: true,
+  },
   feedUnsubscribe: { limit: 600, maxBytes: 32, parse: feedId, run: ({ feeds, document }, [id]) => feeds.unsubscribe(document, id as number) },
 };
 
@@ -523,6 +542,7 @@ export class Ipc {
         files: this.#deps.files,
         profiles: this.#deps.profiles,
         voice: this.#deps.voice,
+        installed: this.#deps.installed,
         document: this.#deps.gate.generation,
       };
       return { ok: true, value: await spec.run(to, parsed) };

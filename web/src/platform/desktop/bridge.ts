@@ -443,6 +443,23 @@ export interface DesktopVoiceBridge {
   onVoiceState(listener: (view: NativeVoiceView) => void): Unsubscribe;
 }
 
-// The object the preload exposes: the bridge and the voice family. Still no
-// press, release, gate or transmit function in either.
-export type ExposedDesktopBridge = ConchDesktopBridge & DesktopVoiceBridge;
+// Whether the installed files were replaced under this running app (issue
+// #1600, D6-06). version is the installed release, shown to the person, and is
+// null until updated. Main decides; the page only shows and asks to restart.
+export interface InstalledView {
+  readonly updated: boolean;
+  readonly version: string | null;
+}
+
+// The update family: the state, the person's click on Restart (main quits
+// through its normal teardown and relaunches; nothing restarts without it),
+// and the event main sends when the state changes.
+export interface DesktopUpdateBridge {
+  updateState(): Promise<InstalledView>;
+  updateRestart(): Promise<void>;
+  onUpdateState(listener: (view: InstalledView) => void): Unsubscribe;
+}
+
+// The object the preload exposes: the bridge, the voice family and the update
+// family. Still no press, release, gate or transmit function in any.
+export type ExposedDesktopBridge = ConchDesktopBridge & DesktopVoiceBridge & DesktopUpdateBridge;

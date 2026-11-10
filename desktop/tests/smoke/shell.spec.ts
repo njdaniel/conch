@@ -79,6 +79,8 @@ test.describe('the packaged shell', () => {
         'voiceDevices', 'voiceSaveDevice',
         // Talk-key setup (#1381).
         'voiceKeyDevices', 'voiceSaveTalkBinding',
+        // The installed files replaced under the running app (#1600).
+        'updateState', 'updateRestart', 'onUpdateState',
       ].sort(),
       true,
     ]);

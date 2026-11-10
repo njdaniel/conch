@@ -29,6 +29,7 @@ import { debuggingVerdict } from './debugging.ts';
 import { Files } from './files.ts';
 import { Gestures } from './gestures.ts';
 import { installGuards } from './guards.ts';
+import { deliverUpdate, Installed } from './installed.ts';
 import { Ipc } from './ipc.ts';
 import { Links } from './links.ts';
 import { saveChosenFile } from './save-file.ts';
@@ -201,6 +202,62 @@ export async function start(): Promise<void> {
   // starts voice: only the person's join and retry do (the IPC, issue #1374,
   // takes them only after a gesture). The
   // media hook leaves and stops the helper before identity changes.
+  // The installed files replaced under this running app (issue #1600). The
+  // stamp is resources/version, written by the build; it is read at start,
+  // when a window gains focus and every ten minutes. Nothing restarts by
+  // itself: the page's Restart button relaunches (a gesture-checked IPC), and
+  // the relaunch goes through the quit below, so the helper is reaped first.
+  const installed = new Installed({
+    read: () => readFile(join(process.resourcesPath, 'version'), 'utf8'),
+    running: app.getVersion(),
+    every: (fn, ms) => {
+      const timer = setInterval(fn, ms);
+      timer.unref();
+      return () => {
+        clearInterval(timer);
+      };
+    },
+    relaunch: () => {
+      app.relaunch();
+      app.quit();
+    },
+    ask: async (version) => {
+      const options = {
+        type: 'info' as const,
+        message: version === null ? 'Conch was updated' : `Conch was updated to ${version}`,
+        detail: "Restart Conch to finish the update. Your saved servers are kept. Nothing is restarted until you choose.",
+        buttons: ['Restart', 'Later'],
+        defaultId: 1,
+        cancelId: 1,
+        noLink: true,
+      };
+      const window = parent();
+      const answer = await (window === null ? dialog.showMessageBox(options) : dialog.showMessageBox(window, options));
+      return answer.response === 0;
+    },
+    log,
+  });
+  installed.subscribe((view) => {
+    deliverUpdate({ contents: () => (live.owned() === null ? null : (live.window?.webContents ?? null)), gate: () => live.gate }, view);
+  });
+  app.on('browser-window-focus', () => {
+    void installed.check();
+  });
+  // A page that starts after an update is measured; one that does not asks
+  // for a restart in a native dialog, since it cannot show the notice itself.
+  app.on('web-contents-created', (_event, contents) => {
+    contents.on('did-finish-load', () => {
+      installed.pageStarted();
+    });
+    contents.on('did-fail-load', (_e, _code, _description, _url, isMainFrame) => {
+      if (isMainFrame) void installed.pageFailed();
+    });
+    contents.on('render-process-gone', () => {
+      void installed.pageFailed();
+    });
+  });
+  await installed.start();
+
   const voice = new VoiceService({
     supervisor: new Supervisor({ resources: process.resourcesPath, env: process.env, log }),
     // The device list and the saves run the same trusted helper, with no token.
@@ -233,6 +290,7 @@ export async function start(): Promise<void> {
         current: () => profiles.active === activation && activation.voiceCurrent(read),
       };
     },
+    updated: () => installed.updated(),
     log,
   });
   teardownHooks.media('voice', () => voice.teardown());
@@ -264,6 +322,7 @@ export async function start(): Promise<void> {
     gestures,
     profiles,
     voice,
+    installed,
     now: Date.now,
     log,
   }).register(ipcMain);
@@ -273,6 +332,7 @@ export async function start(): Promise<void> {
     if (ending) return;
     ending = true;
     event.preventDefault();
+    installed.stop();
     // Media stops before the process goes.
     void profiles.close().finally(() => {
       app.quit();

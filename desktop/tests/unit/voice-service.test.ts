@@ -560,3 +560,63 @@ describe('the one-shot runs (issue #1378)', () => {
     expect(oneShot.cancels).toBe(0);
   });
 });
+
+describe('the installed files were replaced (issue #1600)', () => {
+  let replaced: { value: boolean };
+  beforeEach(() => {
+    replaced = { value: false };
+    svc = new VoiceService({ supervisor: fake, oneShot, identity: () => Promise.resolve(id), log: (l) => logs.push(l), stopBoundMs: 200, updated: () => replaced.value });
+    views = [];
+    svc.subscribe((v) => views.push(v));
+  });
+
+  it('before the replacement a join starts as usual', async () => {
+    expect((await join()).status).toBe('running');
+    expect(fake.starts.length).toBe(1);
+  });
+
+  it('refuses a join with the update reason, starts nothing and reads no credential', async () => {
+    replaced.value = true;
+    const v = await join();
+    expect(v).toMatchObject({ status: 'unavailable', problem: 'update-pending', channel: null, retryable: false });
+    expect(fake.entered).toBe(0);
+    expect(fake.starts).toEqual([]);
+    expect(id.reads).toBe(0);
+    expect(views.at(-1)).toMatchObject({ problem: 'update-pending' });
+    expect(svc.state()).toMatchObject({ problem: 'update-pending' });
+    expect(logs.some((l) => l.includes('replaced'))).toBe(true);
+  });
+
+  it('refuses a retry the same way and starts nothing', async () => {
+    fake.next = { status: 'failed', generation: 1, reason: 'hello-timeout' };
+    await join('ops');
+    fake.state = { status: 'failed', generation: 1, reason: 'hello-timeout' };
+    replaced.value = true;
+    const v = await svc.retry();
+    expect(v).toMatchObject({ status: 'unavailable', problem: 'update-pending' });
+    expect(fake.starts.length).toBe(1);
+  });
+
+  it('leaves a running helper alone: no stop, no change of view, and the call can go on', async () => {
+    await join();
+    replaced.value = true;
+    expect(svc.state().status).toBe('running');
+    expect(fake.calls).toEqual([]);
+    // A second join is busy, as before; the running helper is still running.
+    expect((await join('other')).problem).toBe('busy');
+    expect(fake.calls).toEqual([]);
+    expect(svc.state().status).toBe('running');
+    // Mute still works on it.
+    expect((await svc.setMute(true)).ok).toBe(true);
+  });
+
+  it('leave still works, and a join after it is refused', async () => {
+    await join();
+    replaced.value = true;
+    const left = await svc.leave();
+    expect(left.status).toBe('idle');
+    expect(fake.calls).toContain('stop');
+    expect((await join()).problem).toBe('update-pending');
+    expect(fake.starts.length).toBe(1);
+  });
+});

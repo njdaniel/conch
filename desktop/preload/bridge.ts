@@ -12,12 +12,15 @@
 // onVoiceState hands the page each NativeVoiceView main sends on the voice
 // channel, and drops any message that is not exactly one.
 //
+// onUpdateState hands the page each InstalledView main sends on the update
+// channel (issue #1600), and drops any message that is not exactly one.
+//
 // subscribe numbers each feed itself (so main's first event for it can never
 // arrive before the number is known here), asks main to open it, hands the
 // page each frame of a batch in order and then acknowledges the batch, which
 // is what lets main send the next. An unsubscribed feed is forgotten here at
 // once: whatever main had already sent for it is dropped.
-import type { ExposedDesktopBridge, FeedHandlers, FeedRequest, NativeVoiceView, Unsubscribe } from '../../web/src/platform/desktop/bridge.ts';
+import type { ExposedDesktopBridge, FeedHandlers, FeedRequest, InstalledView, NativeVoiceView, Unsubscribe } from '../../web/src/platform/desktop/bridge.ts';
 import {
   voiceControlBlock,
   voiceControlCapture,
@@ -101,13 +104,23 @@ function isNativeVoiceView(value: unknown): value is NativeVoiceView {
   );
 }
 
+// An update message is exactly an InstalledView: a boolean and a short string
+// or null, and no other key.
+function isInstalledView(value: unknown): value is InstalledView {
+  if (typeof value !== 'object' || value === null) return false;
+  const v = value as Record<string, unknown>;
+  const keys = Object.keys(v);
+  if (keys.length !== 2 || !keys.includes('updated') || !keys.includes('version')) return false;
+  return typeof v['updated'] === 'boolean' && (v['version'] === null || (typeof v['version'] === 'string' && v['version'].length <= 64));
+}
+
 function isEnvelope(value: unknown): value is Envelope {
   if (typeof value !== 'object' || value === null) return false;
   const record = value as Record<string, unknown>;
   return (record['ok'] === true && 'value' in record) || (record['ok'] === false && record['kind'] === 'refused');
 }
 
-export function createBridge(invoke: Invoke, listen: Listen, listenVoice: Listen): Readonly<ExposedDesktopBridge> {
+export function createBridge(invoke: Invoke, listen: Listen, listenVoice: Listen, listenUpdate: Listen): Readonly<ExposedDesktopBridge> {
   const call =
     <T>(name: InvokedFunction) =>
     async (...args: unknown[]): Promise<T> => {
@@ -168,6 +181,27 @@ export function createBridge(invoke: Invoke, listen: Listen, listenVoice: Listen
     voiceListeners.add(listener);
     return () => {
       voiceListeners.delete(listener);
+    };
+  };
+
+  // The installed state: main's view of whether the files were replaced.
+  const updateListeners = new Set<(view: InstalledView) => void>();
+  listenUpdate((message) => {
+    if (!isInstalledView(message)) return;
+    for (const listener of [...updateListeners]) {
+      try {
+        listener(message);
+      } catch (error) {
+        queueMicrotask(() => {
+          throw error;
+        });
+      }
+    }
+  });
+  const onUpdateState = (listener: (view: InstalledView) => void): Unsubscribe => {
+    updateListeners.add(listener);
+    return () => {
+      updateListeners.delete(listener);
     };
   };
 
@@ -233,5 +267,9 @@ export function createBridge(invoke: Invoke, listen: Listen, listenVoice: Listen
     voiceKeyDevices: call('voiceKeyDevices'),
     voiceSaveTalkBinding: call('voiceSaveTalkBinding'),
     onVoiceState,
+    // The installed files replaced under the running app (issue #1600).
+    updateState: call('updateState'),
+    updateRestart: call('updateRestart'),
+    onUpdateState,
   });
 }

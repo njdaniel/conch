@@ -165,6 +165,12 @@ Nick's, recorded on #1595:
   time, entries are sorted by `dpkg-deb`, modes are set by the script).
 - The version is the release tag (`scripts/desktop-version.sh deb`). Updates are manual: install the
   newer `.deb`.
+- A package replaced under a running app (#1600): `resources/version` holds the installed app
+  version (the build writes it beside the asar). The app reads it at start, when a window gains
+  focus and every ten minutes (`main/installed.ts`); a different one shows "Conch was updated to X.
+  Restart when you're ready" with a Restart button (the normal quit, then `app.relaunch()`). Until
+  then a call goes on, Join and Retry say "Restart Conch to finish the update", and nothing
+  restarts by itself. A page that does not start after the update asks in a native dialog.
 
 `scripts/desktop-deb-test.sh <deb>` checks a built package (`make desktop-deb`
 runs it); with no argument it builds packages from a fixture tree, checks them,

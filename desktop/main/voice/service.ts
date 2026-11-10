@@ -15,6 +15,9 @@
 //   - the 30 s missed-release ceiling (D3-1) is passed on every start;
 //   - a join that a sign-out, switch or 401 overtakes is stopped and
 //     reported nowhere;
+//   - after the installed files were replaced (#1600) join and retry start no
+//     helper and say so; a running helper is untouched until the person
+//     restarts;
 //   - teardown leaves and stops the helper within VoiceControlStopKillAfterMS;
 //   - the logind watcher of #773 calls setMute and leave (decision D-1).
 import { VOICE_CONTROL_STOP_KILL_AFTER_MS, type VoiceControlTalkMode } from '../../../web/src/schema/generated.ts';
@@ -78,6 +81,9 @@ export interface VoiceServiceDeps {
   readonly log: (line: string) => void;
   // Test seams for the key-device listing (issue #1381).
   readonly keyDevices?: KeyDeviceDeps;
+  // Whether the installed files were replaced under this running app (issue
+  // #1600): a new helper is then not started from them. Absent means never.
+  readonly updated?: () => boolean;
   // How long teardown waits for the stop; the contract's kill bound.
   readonly stopBoundMs?: number;
 }
@@ -123,6 +129,10 @@ const RETRYABLE_REASONS: ReadonlySet<string> = new Set([
 ]);
 
 const NOT_SIGNED_IN = 'not-signed-in';
+
+// The problem a join or retry is refused with after the install was replaced
+// (the page words it: "Restart Conch to finish the update").
+export const UPDATE_PENDING = 'update-pending';
 
 function helperOf(h: HelperView): NativeVoiceHelper {
   return {
@@ -265,6 +275,7 @@ export class VoiceService {
       this.deps.log('voice: join refused: busy');
       return { ...this.state(), problem: 'busy' };
     }
+    if (this.deps.updated?.() === true) return this.updatePending();
     const p = this.run(req);
     this.inflight = p;
     try {
@@ -316,6 +327,17 @@ export class VoiceService {
     } finally {
       this.joining = false;
     }
+  }
+
+  // The install was replaced: no new helper is started from its files. A
+  // helper already running is not touched (this is reached only when none is),
+  // and leave still works.
+  private updatePending(): NativeVoiceView {
+    this.deps.log('voice: start refused: the installed files were replaced; restart to finish the update');
+    const view: NativeVoiceView = { status: 'unavailable', generation: this.lastGeneration, channel: null, problem: UPDATE_PENDING, retryable: false };
+    this.override = view;
+    this.emit(view);
+    return view;
   }
 
   private noIdentity(): NativeVoiceView {

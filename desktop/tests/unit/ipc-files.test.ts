@@ -4,7 +4,7 @@ import type { Feeds } from '../../main/api/feeds.ts';
 import type { Service } from '../../main/api/service.ts';
 import { DocumentGate } from '../../main/document.ts';
 import { MAX_UPLOAD_BYTES, type Files } from '../../main/files.ts';
-import { Ipc, type ContentsLike, type FrameLike, type ProfilesApi, type VoiceApi } from '../../main/ipc.ts';
+import { Ipc, type ContentsLike, type FrameLike, type InstalledApi, type ProfilesApi, type VoiceApi } from '../../main/ipc.ts';
 
 function fixture() {
   const main: FrameLike = { frameToken: 'f', parent: null, detached: false, url: 'conch-app://ui/' };
@@ -28,6 +28,7 @@ function fixture() {
     files,
     profiles: {} as ProfilesApi,
     voice: {} as VoiceApi,
+    installed: {} as InstalledApi,
     gestures: {
       take: (_c, within) => {
         input.asked.push(within);
