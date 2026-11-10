@@ -42,11 +42,12 @@ import { chromium, type Browser, type BrowserContext, type Page } from '@playwri
 import { build } from 'vite';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 
-import type { CompanionEvent } from '../../../web/src/platform/desktop/bridge.ts';
-import { voicePresenceV1, voiceShareV1, voiceShareV2, type VoicePresenceV1 } from '../../../web/src/schema/voice.ts';
+import type { BridgeRequest, CompanionEvent } from '../../../web/src/platform/desktop/bridge.ts';
+import { voicePresenceV1, type VoicePresenceV1 } from '../../../web/src/schema/voice.ts';
 import { fromServer } from '../../../web/src/schema/validate.ts';
 import { occupants } from '../../../web/src/voice/presence.ts';
 import { Client } from '../../main/api/client.ts';
+import { Service } from '../../main/api/service.ts';
 import { targetOf } from '../../main/api/target.ts';
 import { Session } from '../../main/api/session.ts';
 import { Companion } from '../../main/voice/companion.ts';
@@ -111,7 +112,9 @@ beforeAll(async () => {
     base: './',
     // One copy of the SDK: the page keeps the rooms that web/src/voice makes,
     // so both must import the same module (web's own install of it).
-    resolve: { alias: { 'livekit-client': join(import.meta.dirname, '..', '..', '..', 'web', 'node_modules', 'livekit-client') } },
+    // The page's platform is the desktop's, as in the app (--mode desktop of
+    // web/vite.config.ts), so its API calls take the desktop http transport.
+    resolve: { alias: { '#platform-selected': join(import.meta.dirname, '..', '..', '..', 'web', 'src', 'platform', 'desktop', 'index.ts'), 'livekit-client': join(import.meta.dirname, '..', '..', '..', 'web', 'node_modules', 'livekit-client') } },
     build: { outDir: join(tempDir, 'page'), emptyOutDir: true, minify: false, sourcemap: false, target: 'es2022' },
   });
   const root = join(tempDir, 'page');
@@ -157,6 +160,7 @@ class Desk {
   readonly contents: object = {};
   readonly allowance = new ShareAllowance({ now: Date.now, generation: () => 1 });
   readonly client: Client;
+  readonly service: Service;
   readonly companion: Companion;
   context: BrowserContext | null = null;
   page: Page | null = null;
@@ -166,6 +170,7 @@ class Desk {
     session.setOrigin(world.origin);
     session.adopt(world.a.token);
     this.client = new Client({ fetch: globalThis.fetch, session });
+    this.service = new Service({ client: this.client, session, now: Date.now, log: (line) => this.logs.push(line) });
     this.companion = new Companion({
       voice: owner.service,
       locked: () => false,
@@ -217,46 +222,24 @@ class Desk {
     await page.exposeFunction('bridgeArm', () => this.allowance.arm(this.contents));
     await page.exposeFunction('bridgeEnd', () => this.companion.stop());
     await page.exposeFunction('bridgeCapture', () => this.allowance.takeCapture(this.contents));
-    // The claim and its release. The answer to a claim is a document the page
-    // reads (VoiceShareV1 or V2), but main's table of operations
-    // (web/src/platform/operations.ts) gives claimShare no response validator,
-    // and Client.send hands back no body for such an operation: through the
-    // desktop's own http bridge the page would be told 200 with nothing, and
-    // its claim would read as invalid. That is a gap in main, outside this
-    // test's issue: it is #1638, fixed by PR #1639. Until #1639 merges, these
-    // two go to conchd with A's bearer directly, at the path of the same
-    // table, so the rest is exercised. Switch to the real bridge once #1639
-    // merges.
-    await page.exposeFunction('bridgeClaim', async (channel: string, quality: { resolution: string; frameRate: number } | null) => {
-      const path = targetOf('claimShare', { channel }, undefined);
-      if (path === null) return { ok: false, failure: 'invalid' };
-      const body = quality === null ? undefined : { quality: { resolution: quality.resolution, frame_rate: quality.frameRate } };
-      const res = await fetch(world.origin + path, {
-        method: 'POST',
-        headers: { authorization: `Bearer ${world.a.token}`, ...(body === undefined ? {} : { 'content-type': 'application/json' }) },
-        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-      });
-      const text = await res.text();
-      if (!res.ok) {
-        this.claims.push(`claim refused: ${String(res.status)} ${text.slice(0, 200)}`);
-        return { ok: false, failure: 'invalid', status: res.status };
-      }
-      const parsed: unknown = JSON.parse(text);
-      const problems = fromServer(quality === null ? voiceShareV1 : voiceShareV2)(parsed);
-      if (problems.length > 0) this.claims.push(`claim answer invalid: ${JSON.stringify(problems)}`);
-      return problems.length === 0 ? { ok: true, value: parsed } : { ok: false, failure: 'invalid' };
-    });
-    await page.exposeFunction('bridgeRelease', async (channel: string, startedAt: string) => {
-      const path = targetOf('stopShare', { channel }, `started_at=${encodeURIComponent(startedAt)}`);
-      if (path !== null) await fetch(world.origin + path, { method: 'DELETE', headers: { authorization: `Bearer ${world.a.token}` } });
+    // The claim and its release go the way production sends every request:
+    // the page's claimVoiceShare and stopVoiceShare, through the desktop
+    // platform's http (web/src/platform/desktop/http.ts), whose bridge call
+    // `request` is this one, into main's Service, Client.send and the table
+    // of operations (web/src/platform/operations.ts), which carries A's bearer
+    // and validates the answer. That includes the forwarding of a claim's
+    // answer (VoiceShareV1 or V2) that PR #1639 added (#1638).
+    await page.exposeFunction('bridgeRequest', async (request: BridgeRequest) => {
+      const reply = await this.service.request(request);
+      if (reply.kind !== 'reply' || reply.status >= 400) this.claims.push(`${request.operation}: ${JSON.stringify(reply).slice(0, 200)}`);
+      return reply;
     });
     await page.addInitScript(`window.__bridge = {
       grant: (c) => window.bridgeGrant(c),
       arm: () => window.bridgeArm(),
       end: () => window.bridgeEnd(),
       capture: () => window.bridgeCapture(),
-      claim: (c, q) => window.bridgeClaim(c, q),
-      release: (c, s) => window.bridgeRelease(c, s),
+      request: (r) => window.bridgeRequest(r),
     };`);
     await page.goto(pageUrl);
     await page.waitForFunction('typeof window.companionPage === "object"');
