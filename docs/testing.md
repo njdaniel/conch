@@ -99,7 +99,7 @@ How to read a cell:
 | Removed or banned member | n/a | W: xW51a; G: xS16, xImod | n/a | n/a | n/a |
 | Member of another group | W: none; G: xIm, xIc | W: none; G: xIm, xIc | W: none; G: xIm | W: none; G: xIm | W: none; G: xIm |
 | Agent | W: none; G: xS1, xS6, xS7 | W: none; G: xS1, xS9 | W: none; G: xS9, xIa | W: none; G: xS1, xAi | W: none; G: xS3, xAi |
-| Guest (refused, #1005) | W: none; G: xS5, xS6, xS7, xIg | n/a | n/a | W: none; G: none | W: none; G: xIg |
+| Guest (refused, #1005) | W: none; G: xS5, xS6, xS7, xIg | n/a | n/a | W: none; G: xIg | W: none; G: xIg |
 
 **Media**
 
@@ -113,7 +113,7 @@ How to read a cell:
 | Removed or banned member | W: xW10b; G: xVo, xImod, xIrev | W: xW12c; G: xIrev | n/a (ends with voice) |
 | Member of another group | W: xW14c; G: xIm, xImed | W: none; G: xIm, xImed | W: none; G: xIm |
 | Agent | W: none; G: xS1, xIa | W: none; G: xS1 | W: none; G: xS14, xS1 |
-| Guest (refused, #1005) | W: none; G: xS12, xIg | W: none; G: none | W: none; G: xS14, xIg |
+| Guest (refused, #1005) | W: none; G: xS12, xIg | W: none; G: xIg | W: none; G: xS14, xIg |
 
 ### Notes on the table
 
@@ -147,10 +147,8 @@ How to read a cell:
 The tables have 108 cells. 19 are `n/a` and 5 say `as member`. Of the other 84:
 
 - 36 have a browser test and a Go test.
-- 46 have a Go test and no browser test (`W: none`).
-- 2 are empty in both halves: a guest and share screen, and a guest and the
-  permissions document. No guest can be started while #1005 stands, so these
-  are low value until #1004 brings guests back.
+- 48 have a Go test and no browser test (`W: none`).
+- None is empty in both halves.
 - None has a browser test and no Go test.
 
 The browser gaps cluster in four places. Each gets a follow-up issue:
@@ -247,7 +245,7 @@ browser test of their own. The browser voice specs use plain members.
 | `Iv` | `e2e/isolation`: `voicegates.go` (needs LiveKit) | voice switch off removes the participant; a withheld share ends on the next pass |
 | `Imed` | `e2e/isolation`: `media.go` | the other group cannot get a session for the room or see its tracks |
 | `Ic` | `e2e/isolation`: `channelsrows.go` | rename, archive and membership signals reach no one outside the channel |
-| `Ig` | `e2e/isolation`: `guestrows.go` | refusal rows for a guest: invites, channel creation, voice, camera, credentials (seeded visits) |
+| `Ig` | `e2e/isolation`: `guestrows.go` | refusal rows for a guest: invites, channel creation, voice, camera, screen share, the permissions document, credentials (seeded visits) |
 | `Co` | `e2e/community`: `scenario.go` steps 1 to 6 | owner's link, redemption, public channel, voice off removes within the bound, closed link, no guest |
 | `Vo` | `e2e/voice`: `kicked.go`, `banned.go`, `camera.go` | an operator removes from voice and bans; camera claims and stops; a member's claim with the cell off is 403 |
 | `Do` | `e2e/dogfood`: `main.go` | an agent over MCP is refused `post_message` with no manifest, then posts once provisioned |
