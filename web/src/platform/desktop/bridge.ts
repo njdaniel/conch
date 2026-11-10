@@ -515,7 +515,7 @@ export type InviteAccept =
       // force, and this page takes it now.
       readonly switched: boolean;
     }
-  | { readonly ok: false; readonly refusal: 'expired' | 'voice-started' | 'unknown-profile' | 'unsupported' | 'full' | 'unreachable' | 'certificate' | 'not-conch' };
+  | { readonly ok: false; readonly refusal: 'expired' | 'just-arrived' | 'voice-started' | 'unknown-profile' | 'unsupported' | 'full' | 'unreachable' | 'certificate' | 'not-conch' };
 
 export interface DesktopInviteBridge {
   inviteCheck(link: string): Promise<InviteCheck>;
@@ -525,6 +525,14 @@ export interface DesktopInviteBridge {
   // The invite code staged for the profile now in force, once: a second call,
   // or one from any other profile, gets null.
   inviteTake(): Promise<string | null>;
+  // A conch:// link that reached the app (issue #1592, D5-06), checked by main
+  // exactly as a pasted one is: the same answer as inviteCheck, with a handle
+  // and no code, and null when nothing arrived or it was taken already. It
+  // contacts nothing; the person's click is still inviteAccept.
+  inviteArrived(): Promise<InviteCheck | null>;
+  // Main's word that a link arrived, so the page asks inviteArrived. The
+  // listener is told nothing else: no link, no origin, no code.
+  onInviteArrived(listener: () => void): Unsubscribe;
 }
 
 // The app's own settings (issue #1587; linux-desktop.md §9). App-wide, kept by

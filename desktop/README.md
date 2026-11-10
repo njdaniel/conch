@@ -151,7 +151,10 @@ Nick's, recorded on #1595:
 - The desktop file is `chat.conch.desktop.desktop` (`Exec=conch-desktop %U`,
   `StartupWMClass=conch-desktop`, `desktopName` in `package.json`), with
   placeholder icons from `build/icons/` under `hicolor/<size>x<size>/apps`. No
-  `MimeType` is set: the app registers no URL scheme.
+  `MimeType=x-scheme-handler/conch;` is the one line it sets: the app takes
+  `conch://invite?server=<origin>&code=<code>` links (issue #1592;
+  linux-desktop.md section 9) and no other scheme or file type. `xdg-mime` reads it
+  from the installed file; there is no `postinst` step for it.
 - The sandbox stays on and there is **no setuid `chrome-sandbox`** (left out of the package):
   `/etc/apparmor.d/conch-desktop` (a conffile) gives the one executable the `userns`
   permission, for systems that restrict unprivileged user namespaces (Ubuntu 23.10
@@ -187,7 +190,7 @@ as root or change host policy: the AppArmor profile's rules must equal the expec
 lines exactly (no wider attachment, no added `capability` or `mount`), and the control
 members must be exactly `control conffiles postinst postrm`, with `postinst` and
 `postrm` byte-identical to `desktop/build/deb/`. It also requires one `Exec=` line and
-no `MimeType=` or `Actions=` in the desktop file, no `chrome-sandbox`, and no symlink
+exactly `MimeType=x-scheme-handler/conch;` and no `Actions=` in the desktop file, no `chrome-sandbox`, and no symlink
 but `/usr/bin/conch-desktop`.
 
 ### The smoke test

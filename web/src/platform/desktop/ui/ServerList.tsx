@@ -4,7 +4,7 @@
 import { useId, useRef, useState, type SyntheticEvent } from 'react';
 
 import { bridge } from '../access';
-import type { ProfileView, ProfilesView } from '../bridge';
+import type { InviteCheck, ProfileView, ProfilesView } from '../bridge';
 import { InviteLink } from './InviteLink';
 import { StorageStatus } from './StorageStatus';
 import { addRefusalLines, example, noticeLines } from './text';
@@ -17,9 +17,13 @@ interface Props {
   // Whether the active profile's client is on the page; false on the
   // "unsupported release" page (./Compat).
   readonly clientMounted?: boolean;
+  // A conch:// link that reached the app, checked by main, for the invite
+  // choice below (issue #1592). Undefined: the choice asks for it itself.
+  readonly arrival?: Extract<InviteCheck, { ok: true }> | null;
+  readonly onArrivalTaken?: () => void;
 }
 
-export function ServerList({ view, onView, heading = false, clientMounted = true }: Props) {
+export function ServerList({ view, onView, heading = false, clientMounted = true, arrival, onArrivalTaken }: Props) {
   const [line, setLine] = useState('');
   const [busy, setBusy] = useState(false);
   const [renaming, setRenaming] = useState<string | null>(null);
@@ -216,7 +220,7 @@ export function ServerList({ view, onView, heading = false, clientMounted = true
           Continue
         </button>
       </form>
-      <InviteLink clientMounted={clientMounted} />
+      <InviteLink clientMounted={clientMounted} arrival={arrival} onArrivalTaken={onArrivalTaken} />
       <p className="hint">Another account on a server you have already saved is another entry: add the same address again.</p>
     </section>
   );

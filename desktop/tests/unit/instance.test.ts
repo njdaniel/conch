@@ -4,7 +4,7 @@ import { join } from 'node:path';
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { acquire, prepareRoot, type InstanceApp } from '../../main/instance.ts';
+import { acquire, keepNewest, prepareRoot, type InstanceApp } from '../../main/instance.ts';
 
 const dirs: string[] = [];
 afterEach(() => {
@@ -19,7 +19,7 @@ function temp(): string {
 }
 
 function fakeApp(lock: boolean) {
-  const listeners: (() => void)[] = [];
+  const listeners: ((event: unknown, argv: readonly string[]) => void)[] = [];
   const exit = vi.fn();
   const app: InstanceApp = {
     requestSingleInstanceLock: () => lock,
@@ -35,7 +35,39 @@ describe('one instance per data root', () => {
     const focus = vi.fn();
     expect(acquire(app, focus)).toBe(true);
     expect(exit).not.toHaveBeenCalled();
-    listeners[0]?.();
+    listeners[0]?.({}, ['/opt/conch-desktop/conch-desktop']);
+    expect(focus).toHaveBeenCalledOnce();
+  });
+
+  it('hands a second launch’s command line to onArgv after focusing, as strings only', () => {
+    const { app, listeners } = fakeApp(true);
+    const order: string[] = [];
+    const seen: (readonly string[])[] = [];
+    expect(
+      acquire(
+        app,
+        () => order.push('focus'),
+        (argv) => {
+          order.push('argv');
+          seen.push(argv);
+        },
+      ),
+    ).toBe(true);
+    const link = 'conch://invite?server=https%3A%2F%2Fchat.example.org&code=abc';
+    listeners[0]?.({}, ['/opt/conch-desktop/conch-desktop', '--inspect', link]);
+    expect(order).toEqual(['focus', 'argv']);
+    expect(seen).toEqual([['/opt/conch-desktop/conch-desktop', '--inspect', link]]);
+    // Something that is not a list of strings is not passed on as one.
+    listeners[0]?.({}, 'conch://invite' as unknown as readonly string[]);
+    listeners[0]?.({}, ['a', 7, null, 'b'] as unknown as readonly string[]);
+    expect(seen.slice(1)).toEqual([[], ['a', 'b']]);
+  });
+
+  it('works with no onArgv, as before', () => {
+    const { app, listeners } = fakeApp(true);
+    const focus = vi.fn();
+    acquire(app, focus);
+    expect(() => listeners[0]?.({}, ['x'])).not.toThrow();
     expect(focus).toHaveBeenCalledOnce();
   });
 
@@ -102,5 +134,15 @@ describe('the data root', () => {
     // A sticky world-writable parent, as /tmp is, is allowed.
     chmodSync(loose, 0o1777);
     expect(await prepareRoot(join(loose, 'data2'))).toEqual({ ok: true });
+  });
+});
+
+describe('the early second-launch queue (issue #1592, S3)', () => {
+  it('keeps the newest entries, oldest first, dropping the oldest', () => {
+    const queue: string[] = [];
+    for (const n of ['1', '2', '3']) keepNewest(queue, n, 4);
+    expect(queue).toEqual(['1', '2', '3']);
+    for (const n of ['4', '5', '6']) keepNewest(queue, n, 4);
+    expect(queue).toEqual(['3', '4', '5', '6']);
   });
 });

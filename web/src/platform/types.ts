@@ -113,6 +113,12 @@ export interface Services {
   // Absent in the browser, which saves through a download link. The page names
   // the file by id and never a path.
   saveFile?: (id: number) => Promise<'saved' | 'cancelled' | 'failed' | 'unauthorized'>;
+  // Hands a conch:// invite link to the desktop app installed on this
+  // machine, through the browser's own link handling (issue #1592). Only the
+  // browser has it: the desktop app is the thing being opened, and has no
+  // use for the button. It navigates nothing by itself; a person's click
+  // calls it, and a machine with no handler simply does nothing.
+  openDesktopApp?(link: string): void;
   // Whether this client may publish the person's own voice. Only the browser
   // may: the desktop renderer never holds the voice grant.
   browserVoice: boolean;
