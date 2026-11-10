@@ -235,3 +235,35 @@ describe('the lock cannot be observed (fail closed)', () => {
     expect(calls).toEqual([]);
   });
 });
+
+describe('dropSource (S-2)', () => {
+  it('forgets a locked source that is gone: unlocked, no action, text hidden while unobserved', async () => {
+    const r = observed('running');
+    await r.life.lockSignal('logind', true);
+    r.calls.length = 0;
+    r.life.observe('unavailable');
+    r.life.dropSource('logind');
+    expect(r.life.locked).toBe(false);
+    // Only the notification redaction (from observe); no mute, leave or end.
+    expect(r.calls.filter((c) => !c.startsWith('log '))).toEqual([]);
+    expect(r.life.lockObservation).toBe('unavailable');
+  });
+
+  it('another source that still says locked keeps the screen locked', async () => {
+    const r = observed('running');
+    await r.life.lockSignal('logind', true);
+    await r.life.lockSignal('idle', true);
+    r.life.dropSource('logind');
+    expect(r.life.locked).toBe(true);
+    r.life.dropSource('idle');
+    expect(r.life.locked).toBe(false);
+  });
+
+  it('dropping a source that never spoke does nothing; a later lock acts again', async () => {
+    const r = observed('running');
+    r.life.dropSource('logind');
+    expect(r.calls).toEqual([]);
+    await r.life.lockSignal('logind', true);
+    expect(r.calls).toContain('end lock');
+  });
+});

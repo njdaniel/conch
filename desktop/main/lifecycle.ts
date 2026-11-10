@@ -109,6 +109,21 @@ export class Lifecycle {
     return now ? this.#lock() : Promise.resolve();
   }
 
+  // dropSource forgets what one source last said, because the source is gone
+  // (its watcher gave up), not because the screen changed. A stale "locked"
+  // from a source that can no longer say "unlocked" would hold the app locked
+  // for good. Nothing acts: no lock action runs, and an unlock only means the
+  // flag is clear (unmute and join work again; still muted, no share, no
+  // rejoin). Notification text stays hidden while observation is
+  // 'unavailable', which is the state a gone source leaves behind.
+  dropSource(source: LockSource): void {
+    if (!this.#sources.delete(source)) return;
+    const now = [...this.#sources.values()].some((v) => v);
+    if (now === this.#locked) return;
+    this.#locked = now;
+    this.#syncNotifications();
+  }
+
   // suspend: the machine is going to sleep (PrepareForSleep(true) or
   // powerMonitor's suspend, whichever comes first). Signals that arrive while
   // it acts are one. The latch clears when the leave and the end settle (both

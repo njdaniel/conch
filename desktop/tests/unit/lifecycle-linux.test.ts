@@ -8,9 +8,9 @@ import { join } from 'node:path';
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { LinuxLifecycle, MAX_RESTARTS, parseDisplaySession, parseLine, parseLockedHint, parseSession, type PowerMonitorLike } from '../../main/lifecycle-linux.ts';
+import { LinuxLifecycle, MAX_RESTARTS, parseDisplaySession, parseLine, parseLockedHint, parseSession, parseSessionType, parseUserSessions, SLOW_RETRY_MS, type PowerMonitorLike } from '../../main/lifecycle-linux.ts';
 import { Lifecycle, type LifecycleDeps } from '../../main/lifecycle.ts';
-import { spawnWatch } from '../../main/voice/spawn.ts';
+import { spawnWatch, type WatchChild } from '../../main/voice/spawn.ts';
 
 const SESSION = '/org/freedesktop/login1/session/_32';
 const OTHER = '/org/freedesktop/login1/session/_7';
@@ -27,6 +27,10 @@ const RECORDED = {
   hintTrue: '(<true>,)\n',
   // Recorded on a COSMIC desktop: the user's Display property.
   display: "(<('5', objectpath '/org/freedesktop/login1/session/_35')>,)\n",
+  // The user's Sessions property, one graphical session and two.
+  sessions1: "(<[('5', objectpath '/org/freedesktop/login1/session/_35')]>,)\n",
+  sessions2: "(<[('5', objectpath '/org/freedesktop/login1/session/_35'), ('7', objectpath '/org/freedesktop/login1/session/_37')]>,)\n",
+  type: "(<'wayland'>,)\n",
   noSession: 'Error: GDBus.Error:org.freedesktop.login1.NoSessionForPID: PID 154320 does not belong to any known session\n',
 };
 
@@ -99,6 +103,27 @@ describe('the call replies', () => {
     expect(parseDisplaySession(RECORDED.noSession)).toBeNull();
     expect(parseDisplaySession('')).toBeNull();
   });
+  it('reads the sessions of the user', () => {
+    expect(parseUserSessions(RECORDED.sessions1)).toEqual([{ id: '5', path: '/org/freedesktop/login1/session/_35' }]);
+    expect(parseUserSessions(RECORDED.sessions2)).toEqual([
+      { id: '5', path: '/org/freedesktop/login1/session/_35' },
+      { id: '7', path: '/org/freedesktop/login1/session/_37' },
+    ]);
+    // None, a bad path, garbage, and a good entry followed by a bad one.
+    expect(parseUserSessions('(<@a(so) []>,)')).toEqual([]);
+    expect(parseUserSessions("(<[('5', objectpath '/org/freedesktop/login1/session/../x')]>,)")).toBeNull();
+    expect(parseUserSessions("(<[('5', objectpath '/org/freedesktop/login1/session/_35'), junk]>,)")).toBeNull();
+    expect(parseUserSessions("(<[('5', objectpath '/org/freedesktop/login1/session/_35')]>,) extra")).toBeNull();
+    expect(parseUserSessions(RECORDED.display)).toBeNull();
+    expect(parseUserSessions(RECORDED.noSession)).toBeNull();
+    expect(parseUserSessions('')).toBeNull();
+  });
+  it('reads the type of a session', () => {
+    expect(parseSessionType(RECORDED.type)).toBe('wayland');
+    expect(parseSessionType("(<'tty'>,)")).toBe('tty');
+    expect(parseSessionType('(<true>,)')).toBeNull();
+    expect(parseSessionType('')).toBeNull();
+  });
   it('reads the hint', () => {
     expect(parseLockedHint(RECORDED.hintFalse)).toBe(false);
     expect(parseLockedHint(RECORDED.hintTrue)).toBe(true);
@@ -129,13 +154,17 @@ afterEach(() => {
 // fakeGdbus writes a script that answers like gdbus: the call replies come
 // from files next to it, and the monitor prints a file's lines and waits.
 // argv is recorded one per line in argv.log.
-function fakeGdbus(opts: { session?: string; sessionCode?: number; display?: string; displayCode?: number; hint?: string; monitor?: readonly string[]; monitorExits?: boolean; monitorNoOwner?: boolean; monitorDelaySecs?: string }): string {
+function fakeGdbus(opts: { session?: string; sessionCode?: number; display?: string; displayCode?: number; sessions?: string; types?: Readonly<Record<string, string>>; hint?: string; monitor?: readonly string[]; monitorExits?: boolean; monitorNoOwner?: boolean; monitorDelaySecs?: string }): string {
   const bin = join(dir, 'bin');
   mkdirSync(bin);
   const path = join(bin, 'gdbus');
   writeFileSync(join(dir, 'session'), opts.session ?? RECORDED.session);
   writeFileSync(join(dir, 'hint'), opts.hint ?? RECORDED.hintFalse);
   writeFileSync(join(dir, 'display'), opts.display ?? RECORDED.noSession);
+  writeFileSync(join(dir, 'sessions'), opts.sessions ?? RECORDED.sessions1);
+  const typeCases = Object.entries(opts.types ?? { '/org/freedesktop/login1/session/_35': 'wayland' })
+    .map(([path, type]) => `      *--object-path\\ ${path}\\ *login1.Session\\ Type*) echo "(<'${type}'>,)"; exit 0 ;;`)
+    .join('\n');
   writeFileSync(join(dir, 'monitor'), (opts.monitor ?? []).map((l) => l + '\n').join(''));
   writeFileSync(
     path,
@@ -147,6 +176,8 @@ case "$1" in
     case "$*" in
       *GetSessionByPID*) cat "$D/session"; exit ${String(opts.sessionCode ?? 0)} ;;
       *Properties.Get*login1.User*Display*) cat "$D/display"; exit ${String(opts.displayCode ?? 1)} ;;
+      *Properties.Get*login1.User*Sessions*) cat "$D/sessions"; exit 0 ;;
+${typeCases}
       *LockedHint*) cat "$D/hint"; exit 0 ;;
     esac
     exit 1 ;;
@@ -324,6 +355,8 @@ describe('a process with no session of its own (M1)', () => {
     expect(r.calls).toEqual(expect.arrayContaining(['end lock', 'mute true']));
     const argv = argvLog();
     expect(argv).toContain('ARGV call --system --dest org.freedesktop.login1 --object-path /org/freedesktop/login1/user/self --method org.freedesktop.DBus.Properties.Get org.freedesktop.login1.User Display');
+    expect(argv).toContain('--object-path /org/freedesktop/login1/user/self --method org.freedesktop.DBus.Properties.Get org.freedesktop.login1.User Sessions');
+    expect(argv).toContain('--object-path /org/freedesktop/login1/session/_35 --method org.freedesktop.DBus.Properties.Get org.freedesktop.login1.Session Type');
     expect(argv).toContain('--object-path /org/freedesktop/login1/session/_35 --method org.freedesktop.DBus.Properties.Get org.freedesktop.login1.Session LockedHint');
     w.stop();
   });
@@ -439,5 +472,226 @@ describe('when the lock cannot be observed', () => {
     expect(r.life.lockObservation).toBe('unavailable');
     expect(r.calls).not.toContain('shown');
     w.stop();
+  });
+});
+
+// ---------------------------------------- two graphical sessions (S-1)
+
+describe('the user has more than one session (S-1)', () => {
+  const noOwn = { session: RECORDED.noSession, sessionCode: 1, display: RECORDED.display, displayCode: 0 } as const;
+  const T35 = '/org/freedesktop/login1/session/_35';
+  const T37 = '/org/freedesktop/login1/session/_37';
+
+  it('one graphical session among others: the display session is watched', async () => {
+    const r = rig();
+    const gdbus = fakeGdbus({ ...noOwn, sessions: RECORDED.sessions2, types: { [T35]: 'wayland', [T37]: 'tty' } });
+    const w = new LinuxLifecycle({ rules: r.life, powerMonitor: r.power, pid: 1, log: () => undefined, findGdbus: () => Promise.resolve(gdbus), sessionId: null });
+    await w.start();
+    await until(() => r.life.lockObservation === 'available');
+    expect(argvLog()).toContain(`--object-path ${T35} --method org.freedesktop.DBus.Properties.Get org.freedesktop.login1.Session LockedHint`);
+    w.stop();
+  });
+
+  it('two graphical sessions and XDG_SESSION_ID names one of them: that one is watched', async () => {
+    const r = rig();
+    const gdbus = fakeGdbus({ ...noOwn, sessions: RECORDED.sessions2, types: { [T35]: 'x11', [T37]: 'wayland' } });
+    const w = new LinuxLifecycle({ rules: r.life, powerMonitor: r.power, pid: 1, log: () => undefined, findGdbus: () => Promise.resolve(gdbus), sessionId: '7' });
+    await w.start();
+    await until(() => r.life.lockObservation === 'available');
+    const argv = argvLog();
+    expect(argv).toContain(`--object-path ${T37} --method org.freedesktop.DBus.Properties.Get org.freedesktop.login1.Session LockedHint`);
+    expect(argv).not.toContain(`${T35} --method org.freedesktop.DBus.Properties.Get org.freedesktop.login1.Session LockedHint`);
+    w.stop();
+  });
+
+  it.each([
+    { name: 'XDG_SESSION_ID names a session that is not in the list', id: '9' },
+    { name: 'XDG_SESSION_ID is absent', id: null },
+  ])('two graphical sessions and $name: unobserved, no monitor', async ({ id }) => {
+    const r = rig();
+    const gdbus = fakeGdbus({ ...noOwn, sessions: RECORDED.sessions2, types: { [T35]: 'x11', [T37]: 'wayland' } });
+    const w = new LinuxLifecycle({ rules: r.life, powerMonitor: r.power, pid: 1, log: (l) => r.logs.push(l), findGdbus: () => Promise.resolve(gdbus), sessionId: id, idlePollMs: 100000, slowRetryMs: 100000 });
+    await w.start();
+    expect(r.life.lockObservation).toBe('unavailable');
+    expect(r.logs.filter((l) => l.includes('lock not observed'))).toHaveLength(1);
+    expect(argvLog()).not.toContain('ARGV monitor');
+    w.stop();
+  });
+
+  it('two graphical sessions and XDG_SESSION_ID names the text one: unobserved', async () => {
+    const r = rig();
+    const gdbus = fakeGdbus({ ...noOwn, sessions: RECORDED.sessions2, types: { [T35]: 'wayland', [T37]: 'x11' } });
+    const w = new LinuxLifecycle({ rules: r.life, powerMonitor: r.power, pid: 1, log: () => undefined, findGdbus: () => Promise.resolve(gdbus), sessionId: '3', idlePollMs: 100000, slowRetryMs: 100000 });
+    await w.start();
+    expect(r.life.lockObservation).toBe('unavailable');
+    w.stop();
+  });
+
+  it.each([
+    { name: 'Sessions cannot be read', opts: { ...noOwn, sessions: 'garbage' } },
+    { name: 'a session type cannot be read', opts: { ...noOwn, sessions: RECORDED.sessions2, types: { [T35]: 'wayland' } } },
+  ])('$name: unobserved, no monitor', async ({ opts }) => {
+    const r = rig();
+    const gdbus = fakeGdbus(opts);
+    const w = new LinuxLifecycle({ rules: r.life, powerMonitor: r.power, pid: 1, log: () => undefined, findGdbus: () => Promise.resolve(gdbus), sessionId: '5', idlePollMs: 100000, slowRetryMs: 100000 });
+    await w.start();
+    expect(r.life.lockObservation).toBe('unavailable');
+    expect(argvLog()).not.toContain('ARGV monitor');
+    w.stop();
+  });
+});
+
+// --------------------------------------- fake monitor children (S-2..S-5)
+
+class FakeStream extends EventEmitter {
+  setEncoding(): void {
+    // Chunks are emitted as strings already.
+  }
+  resume(): void {
+    // Nothing is buffered.
+  }
+}
+
+class FakeChild extends EventEmitter {
+  readonly stdout = new FakeStream();
+  readonly stderr = new FakeStream();
+  killed = false;
+  kill(): boolean {
+    this.killed = true;
+    return true;
+  }
+}
+
+const asWatch = (c: FakeChild): WatchChild => c as unknown as WatchChild;
+
+describe('a burst of lines in one chunk (S-5)', () => {
+  it('a Lock after thousands of other-session lines in the same chunk still locks', async () => {
+    const r = rig();
+    const gdbus = fakeGdbus({});
+    const child = new FakeChild();
+    const w = new LinuxLifecycle({ rules: r.life, powerMonitor: r.power, pid: 1, log: () => undefined, findGdbus: () => Promise.resolve(gdbus), watch: () => asWatch(child), idlePollMs: 100000 });
+    const started = w.start();
+    await until(() => child.stdout.listenerCount('data') > 0);
+    const other = lines.hintOn.replace(SESSION, OTHER);
+    const burst = Array.from({ length: 3000 }, () => other);
+    const chunk = [RECORDED.preamble1, ...burst, lines.lock, ''].join('\n');
+    expect(chunk.length).toBeGreaterThan(64 * 1024);
+    child.stdout.emit('data', chunk);
+    await until(() => r.calls.includes('end lock'));
+    expect(r.life.locked).toBe(true);
+    await started;
+    // A remainder with no newline past the cap is dropped, not parsed, and
+    // the next line is read whole.
+    child.stdout.emit('data', 'x'.repeat(70 * 1024));
+    child.stdout.emit('data', '\n' + lines.unlock + '\n');
+    await until(() => !r.life.locked);
+    w.stop();
+  });
+});
+
+describe('a logind source that is gone (S-2)', () => {
+  it('the monitor dies while locked and the watcher gives up: the lock is released, text stays hidden', async () => {
+    const r = rig();
+    const gdbus = fakeGdbus({});
+    let starts = 0;
+    const watch = (): WatchChild => {
+      const child = new FakeChild();
+      const first = ++starts === 1;
+      setTimeout(() => {
+        if (first) child.stdout.emit('data', RECORDED.preamble1 + '\n' + lines.lock + '\n');
+        child.emit('close');
+      }, 0);
+      return asWatch(child);
+    };
+    const w = new LinuxLifecycle({ rules: r.life, powerMonitor: r.power, pid: 1, log: (l) => r.logs.push(l), findGdbus: () => Promise.resolve(gdbus), watch, backoffMs: [1, 1, 1], idlePollMs: 100000, slowRetryMs: 100000 });
+    await w.start();
+    await until(() => r.calls.includes('end lock'));
+    await until(() => r.logs.some((l) => l.includes('lock not observed')));
+    expect(starts).toBe(1 + MAX_RESTARTS);
+    // Locked, then the source was dropped: unmute and join work again (they
+    // read locked), nothing acted, and the text is still hidden.
+    expect(r.life.locked).toBe(false);
+    expect(r.life.lockObservation).toBe('unavailable');
+    expect(r.calls).toEqual(['hidden', 'end lock', 'mute true']);
+    w.stop();
+  });
+});
+
+describe('the give-up is not permanent (S-3)', () => {
+  it('keeps trying at SLOW_RETRY_MS, recovers when the monitor comes back, and stops at stop()', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const r = rig();
+    const gdbus = fakeGdbus({});
+    let starts = 0;
+    let recovered = false;
+    const watch = (file: string, args: readonly string[], env: Readonly<Record<string, string>>): WatchChild => {
+      starts++;
+      return recovered ? spawnWatch(file, args, env) : spawnWatch('/bin/sh', ['-c', 'exit 0'], {});
+    };
+    const w = new LinuxLifecycle({ rules: r.life, powerMonitor: r.power, pid: 1, log: (l) => r.logs.push(l), findGdbus: () => Promise.resolve(gdbus), watch, backoffMs: [1, 1, 1], idlePollMs: 100000 });
+    await w.start();
+    await vi.waitFor(
+      async () => {
+        await vi.advanceTimersByTimeAsync(5);
+        expect(r.logs.filter((l) => l.includes('lock not observed'))).toHaveLength(1);
+      },
+      { timeout: 5000, interval: 10 },
+    );
+    expect(starts).toBe(1 + MAX_RESTARTS);
+    // Not before the interval...
+    await vi.advanceTimersByTimeAsync(SLOW_RETRY_MS - 1000);
+    expect(starts).toBe(1 + MAX_RESTARTS);
+    // ...and again at it, and again after that (still dying).
+    await vi.advanceTimersByTimeAsync(1000);
+    await vi.waitFor(() => { expect(starts).toBe(2 + MAX_RESTARTS); }, { timeout: 5000, interval: 10 });
+    await vi.waitFor(async () => { await vi.advanceTimersByTimeAsync(1); expect(vi.getTimerCount()).toBe(1); }, { timeout: 5000, interval: 10 });
+    await vi.advanceTimersByTimeAsync(SLOW_RETRY_MS);
+    await vi.waitFor(() => { expect(starts).toBe(3 + MAX_RESTARTS); }, { timeout: 5000, interval: 10 });
+    // The monitor comes back: observed again.
+    recovered = true;
+    await vi.waitFor(async () => { await vi.advanceTimersByTimeAsync(1); expect(vi.getTimerCount()).toBe(1); }, { timeout: 5000, interval: 10 });
+    await vi.advanceTimersByTimeAsync(SLOW_RETRY_MS);
+    await vi.waitFor(() => { expect(r.life.lockObservation).toBe('available'); }, { timeout: 5000, interval: 10 });
+    w.stop();
+  });
+
+  it('stop() ends the retries', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const r = rig();
+    const gdbus = fakeGdbus({});
+    let starts = 0;
+    const watch = (): WatchChild => {
+      starts++;
+      return spawnWatch('/bin/sh', ['-c', 'exit 0'], {});
+    };
+    const w = new LinuxLifecycle({ rules: r.life, powerMonitor: r.power, pid: 1, log: (l) => r.logs.push(l), findGdbus: () => Promise.resolve(gdbus), watch, backoffMs: [1, 1, 1], idlePollMs: 100000 });
+    await w.start();
+    await vi.waitFor(
+      async () => {
+        await vi.advanceTimersByTimeAsync(5);
+        expect(r.logs.filter((l) => l.includes('lock not observed'))).toHaveLength(1);
+      },
+      { timeout: 5000, interval: 10 },
+    );
+    w.stop();
+    expect(vi.getTimerCount()).toBe(0);
+    await vi.advanceTimersByTimeAsync(SLOW_RETRY_MS * 3);
+    expect(starts).toBe(1 + MAX_RESTARTS);
+  });
+
+  it('stop() while waiting for the monitor to say it is subscribed clears that wait', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const r = rig();
+    const gdbus = fakeGdbus({});
+    const child = new FakeChild();
+    const w = new LinuxLifecycle({ rules: r.life, powerMonitor: r.power, pid: 1, log: () => undefined, findGdbus: () => Promise.resolve(gdbus), watch: () => asWatch(child), readyMs: 60_000, idlePollMs: 100000 });
+    const started = w.start();
+    await vi.waitFor(() => { expect(child.stdout.listenerCount('data')).toBe(1); }, { timeout: 5000, interval: 10 });
+    expect(vi.getTimerCount()).toBe(1);
+    w.stop();
+    expect(vi.getTimerCount()).toBe(0);
+    expect(child.killed).toBe(true);
+    // start() does not hang on the wait that was cleared.
+    await started;
   });
 });

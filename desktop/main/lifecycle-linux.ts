@@ -23,7 +23,15 @@
 // Which session: a normally launched app may have no session of its own.
 // On systemd 255 every process under user@UID.service, app scopes and
 // app-*.service units included, gets NoSessionForPID from GetSessionByPID.
-// Then the user's Display session (the graphical one) is watched instead.
+// Then the user's Display session (the graphical one) is watched instead,
+// unless the user has more than one graphical session (Type x11 or wayland,
+// read from User.Sessions): Display is then only one of them and may not be
+// the one this app runs in, so the session named by XDG_SESSION_ID is watched
+// if it is among them, and otherwise the lock is reported as not observed.
+//
+// A watcher that has given up keeps trying, slowly (SLOW_RETRY_MS), until
+// stop(); and it drops its logind source from the rules, so a lock it saw
+// last cannot hold the app locked after it can no longer see the unlock.
 import { stat } from 'node:fs/promises';
 
 import type { Lifecycle } from './lifecycle.ts';
@@ -40,6 +48,10 @@ export const GDBUS_PATHS: readonly string[] = ['/usr/bin/gdbus', '/bin/gdbus'];
 export const MAX_RESTARTS = 3;
 export const RESTART_BACKOFF_MS: readonly number[] = [1000, 2000, 4000];
 
+// After the fast restarts are spent, the wait between further attempts. The
+// give-up is not permanent: a logind that comes back is picked up again.
+export const SLOW_RETRY_MS = 60_000;
+
 // How long a monitor must stay up before its restarts are forgiven.
 const STABLE_MS = 30_000;
 
@@ -48,6 +60,9 @@ export const READY_MS = 5000;
 
 // How often the idle state is read (a second signal).
 export const IDLE_POLL_MS = 1000;
+
+// The most that may wait in the buffer for a newline that has not come.
+const MAX_PENDING = 64 * 1024;
 
 // What the parser makes of one line of `gdbus monitor`.
 export type MonitorEvent =
@@ -162,6 +177,40 @@ export function parseDisplaySession(stdout: string): string | null {
   return m?.[1] !== undefined && SESSION_PATH.test(m[1]) ? m[1] : null;
 }
 
+// A session of the user, as `User.Sessions` lists it.
+export interface UserSession {
+  readonly id: string;
+  readonly path: string;
+}
+
+// parseUserSessions reads the user's Sessions property,
+// `(<[('5', objectpath '/org/freedesktop/login1/session/_35'), ('6', ...)]>,)`
+// (`(<@a(so) []>,)` when empty). Every path must pass the same rule as
+// parseSession's; one that does not makes the whole answer unusable (null).
+export function parseUserSessions(stdout: string): UserSession[] | null {
+  const text = stdout.trim();
+  if (/^\(<@a\(so\) \[\]>,\)$/u.test(text)) return [];
+  const m = /^\(<\[(.*)\]>,\)$/u.exec(text);
+  if (m?.[1] === undefined) return null;
+  const out: UserSession[] = [];
+  const entry = /\('([A-Za-z0-9_]+)', objectpath '([^']*)'\)(, |$)/uy;
+  let at = 0;
+  while (at < m[1].length) {
+    entry.lastIndex = at;
+    const e = entry.exec(m[1]);
+    if (e?.[1] === undefined || e[2] === undefined || !SESSION_PATH.test(e[2])) return null;
+    out.push({ id: e[1], path: e[2] });
+    at = entry.lastIndex;
+  }
+  return out.length === 0 ? null : out;
+}
+
+// parseSessionType reads a session's Type property, `(<'wayland'>,)`.
+export function parseSessionType(stdout: string): string | null {
+  const m = /^\(<'([a-z0-9]+)'>,\)\s*$/u.exec(stdout);
+  return m?.[1] ?? null;
+}
+
 // parseLockedHint reads `(<true>,)` or `(<false>,)`.
 export function parseLockedHint(stdout: string): boolean | null {
   const m = /^\(<(true|false)>,\)\s*$/u.exec(stdout);
@@ -175,7 +224,7 @@ export interface PowerMonitorLike {
 }
 
 export interface WatcherDeps {
-  readonly rules: Pick<Lifecycle, 'lockSignal' | 'observe' | 'suspend' | 'resume'>;
+  readonly rules: Pick<Lifecycle, 'lockSignal' | 'dropSource' | 'observe' | 'suspend' | 'resume'>;
   readonly powerMonitor: PowerMonitorLike;
   readonly pid: number;
   readonly log: (line: string) => void;
@@ -187,6 +236,11 @@ export interface WatcherDeps {
   readonly idlePollMs?: number;
   // How long to wait for the monitor to say it is subscribed.
   readonly readyMs?: number;
+  // The wait between attempts once the fast restarts are spent.
+  readonly slowRetryMs?: number;
+  // This process's logind session id (XDG_SESSION_ID). Absent means read it
+  // from the environment; null means there is none.
+  readonly sessionId?: string | null;
 }
 
 async function defaultFindGdbus(): Promise<string | null> {
@@ -211,6 +265,9 @@ export class LinuxLifecycle {
   #child: WatchChild | null = null;
   #restarts = 0;
   #timer: NodeJS.Timeout | undefined;
+  // The wait for the monitor to say it is subscribed, and a way to end it.
+  #readyTimer: NodeJS.Timeout | undefined;
+  #cancelReady: (() => void) | null = null;
   #poll: NodeJS.Timeout | undefined;
   #stopped = true;
   #malformed = 0;
@@ -257,6 +314,9 @@ export class LinuxLifecycle {
   stop(): void {
     this.#stopped = true;
     clearTimeout(this.#timer);
+    clearTimeout(this.#readyTimer);
+    this.#cancelReady?.();
+    this.#cancelReady = null;
     clearInterval(this.#poll);
     this.#deps.powerMonitor.removeListener('suspend', this.#onSuspend);
     this.#deps.powerMonitor.removeListener('resume', this.#onResume);
@@ -276,8 +336,14 @@ export class LinuxLifecycle {
     return this.#stopped;
   }
 
+  // #lost: the lock is not observed and nothing is being tried right now.
+  // The logind source is dropped (its last word can no longer be corrected,
+  // and a stale "locked" would hold the app locked for good) and a slow
+  // retry is scheduled, until stop().
   #lost(why: string): void {
     this.#deps.rules.observe('unavailable');
+    this.#deps.rules.dropSource('logind');
+    this.#slowRetry();
     if (!this.#reportedLost) {
       this.#reportedLost = true;
       this.#deps.log(`lifecycle: lock not observed: ${why}`);
@@ -285,13 +351,34 @@ export class LinuxLifecycle {
   }
 
   // #findSession: this process's own session, else the user's display
-  // session (see the header). null when neither can be found.
+  // session (see the header), unless the user has several graphical sessions.
+  // null when no session can be settled on.
   async #findSession(run: NonNullable<WatcherDeps['run']>, gdbus: string): Promise<string | null> {
     const found = await run(gdbus, ['call', '--system', '--dest', LOGIND, '--object-path', MANAGER_PATH, '--method', `${LOGIND}.Manager.GetSessionByPID`, String(this.#deps.pid)], CHILD_ENV);
     const own = found !== null && found.code === 0 ? parseSession(found.stdout) : null;
     if (own !== null || this.#halted()) return own;
-    const display = await run(gdbus, ['call', '--system', '--dest', LOGIND, '--object-path', `${MANAGER_PATH}/user/self`, '--method', 'org.freedesktop.DBus.Properties.Get', `${LOGIND}.User`, 'Display'], CHILD_ENV);
-    return display !== null && display.code === 0 ? parseDisplaySession(display.stdout) : null;
+    const userGet = (property: string): Promise<RunResult | null> =>
+      run(gdbus, ['call', '--system', '--dest', LOGIND, '--object-path', `${MANAGER_PATH}/user/self`, '--method', 'org.freedesktop.DBus.Properties.Get', `${LOGIND}.User`, property], CHILD_ENV);
+    const display = await userGet('Display');
+    const displayPath = display !== null && display.code === 0 ? parseDisplaySession(display.stdout) : null;
+    if (displayPath === null || this.#halted()) return null;
+    // Display is one session of the user. With two graphical ones it may not
+    // be this app's, so which one is not guessed.
+    const listed = await userGet('Sessions');
+    const sessions = listed !== null && listed.code === 0 ? parseUserSessions(listed.stdout) : null;
+    if (sessions === null || this.#halted()) return null;
+    const graphical: UserSession[] = [];
+    for (const session of sessions) {
+      const kind = await run(gdbus, ['call', '--system', '--dest', LOGIND, '--object-path', session.path, '--method', 'org.freedesktop.DBus.Properties.Get', SESSION_IFACE, 'Type'], CHILD_ENV);
+      if (this.#halted()) return null;
+      // A type that cannot be read is not assumed to be a text session.
+      const type = kind !== null && kind.code === 0 ? parseSessionType(kind.stdout) : null;
+      if (type === null) return null;
+      if (type === 'x11' || type === 'wayland') graphical.push(session);
+    }
+    if (graphical.length <= 1) return displayPath;
+    const mine = this.#deps.sessionId !== undefined ? this.#deps.sessionId : (process.env['XDG_SESSION_ID'] ?? null);
+    return graphical.find((g) => mine !== null && g.id === mine)?.path ?? null;
   }
 
   // #attach finds the session, starts the monitor, waits for the monitor to
@@ -308,7 +395,7 @@ export class LinuxLifecycle {
     const session = await this.#findSession(run, gdbus);
     if (this.#halted()) return;
     if (session === null) {
-      this.#lost('this process has no logind session and the user has no display session');
+      this.#lost('this process has no logind session and the user has no single display session');
       return;
     }
     let child: WatchChild;
@@ -330,16 +417,18 @@ export class LinuxLifecycle {
     child.stdout.setEncoding('utf8');
     child.stdout.on('data', (chunk: string) => {
       pending += chunk;
-      // A line that never ends is not one: cut it off.
-      if (pending.length > 64 * 1024) pending = '';
-      let at = pending.indexOf('\n');
-      while (at >= 0) {
-        const text = pending.slice(0, at);
+      // Complete lines first, however many this chunk brings: a burst of
+      // other sessions' lines must not push a Lock line out of the buffer.
+      let from = 0;
+      for (let at = pending.indexOf('\n'); at >= 0; at = pending.indexOf('\n', from)) {
+        const text = pending.slice(from, at);
+        from = at + 1;
         if (READY.test(text.trim())) subscribed(true);
         this.#line(text, session);
-        pending = pending.slice(at + 1);
-        at = pending.indexOf('\n');
       }
+      pending = pending.slice(from);
+      // Only a line that never ends is cut off: it is not a line.
+      if (pending.length > MAX_PENDING) pending = '';
     });
     child.stderr.resume();
     const ended = (): void => {
@@ -354,14 +443,18 @@ export class LinuxLifecycle {
     };
     child.on('error', ended);
     child.on('close', ended);
-    let readyTimer: NodeJS.Timeout | undefined;
     const slow = new Promise<boolean>((resolve) => {
-      readyTimer = setTimeout(() => {
+      this.#readyTimer = setTimeout(() => {
         resolve(false);
       }, this.#deps.readyMs ?? READY_MS);
+      // stop() ends the wait at once, so nothing is left pending.
+      this.#cancelReady = () => {
+        resolve(false);
+      };
     });
     const up = await Promise.race([ready, slow]);
-    clearTimeout(readyTimer);
+    clearTimeout(this.#readyTimer);
+    this.#cancelReady = null;
     if (this.#halted() || this.#child !== child) return;
     if (!up) {
       child.kill('SIGTERM');
@@ -399,8 +492,20 @@ export class LinuxLifecycle {
     else this.#deps.rules.resume();
   }
 
+  // #slowRetry: one more attempt after SLOW_RETRY_MS, not holding the process
+  // open, until stop().
+  #slowRetry(): void {
+    if (this.#stopped) return;
+    clearTimeout(this.#timer);
+    this.#timer = setTimeout(() => {
+      if (!this.#stopped) void this.#attach();
+    }, this.#deps.slowRetryMs ?? SLOW_RETRY_MS);
+    this.#timer.unref();
+  }
+
   // #retry: the lock is not observed while the monitor is down; restart at
-  // most MAX_RESTARTS times with backoff, then stay unobserved.
+  // most MAX_RESTARTS times with backoff, then give up (#lost), which keeps
+  // trying at the slow interval.
   #retry(why: string): void {
     this.#deps.rules.observe('unavailable');
     if (this.#restarts >= Math.min(MAX_RESTARTS, this.#backoff.length)) {

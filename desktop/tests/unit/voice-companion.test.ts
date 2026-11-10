@@ -76,6 +76,7 @@ function rig(view: NativeVoiceView = running()): Rig {
     client,
     sends: () => steps.flatMap((s) => (s[0] === 'send' ? [s[1]] : [])),
     companion: new Companion({
+      locked: () => false,
       voice: {
         state: () => voice.view,
         subscribe: (l) => {
@@ -380,6 +381,7 @@ describe('the companion’s end', () => {
       },
     };
     const companion = new Companion({
+      locked: () => false,
       voice: { state: () => running(), subscribe: () => () => undefined },
       client: () => client,
       document: () => 1,
@@ -465,6 +467,7 @@ describe('the bearer never leaves main (canary)', () => {
     const logs: string[] = [];
     const told: unknown[] = [];
     const companion = new Companion({
+      locked: () => false,
       voice: { state: () => running(), subscribe: () => () => undefined },
       client: () => client,
       document: () => 1,

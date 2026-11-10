@@ -84,9 +84,9 @@ export interface VoiceServiceDeps {
   // How long teardown waits for the stop; the contract's kill bound.
   readonly stopBoundMs?: number;
   // Whether the screen is locked (Lifecycle.locked, issue #1588). While it
-  // is, nothing unmutes and any join or retry starts muted. Absent means
-  // never locked (tests); app.ts always passes it.
-  readonly locked?: () => boolean;
+  // is, nothing unmutes and any join or retry starts muted. Required: a
+  // caller that leaves it out would fail open (tests pass `() => false`).
+  readonly locked: () => boolean;
 }
 
 export interface JoinRequest {
@@ -310,11 +310,11 @@ export class VoiceService {
       this.active = identity;
       this.override = null;
       this.channel = req.channel;
-      this.last = { channel: req.channel, muted: req.muted || this.deps.locked?.() === true, deafened: req.deafened };
+      this.last = { channel: req.channel, muted: req.muted || this.deps.locked(), deafened: req.deafened };
       let result: VoiceState;
       // A join or retry begun, or still waiting for its identity, when the
       // screen locks starts muted; read now, after the awaits.
-      const muted = req.muted || this.deps.locked?.() === true;
+      const muted = req.muted || this.deps.locked();
       try {
         // The token is read here, handed on, and not kept.
         result = await this.deps.supervisor.start({
@@ -469,7 +469,7 @@ export class VoiceService {
   // view changes when the helper's state says so.
   async setMute(muted: boolean): Promise<VoiceCommandResult> {
     // Unmuting is the person's act after unlock, never during a lock.
-    if (!muted && this.deps.locked?.() === true) {
+    if (!muted && this.deps.locked()) {
       this.deps.log('voice: unmute refused: the screen is locked');
       return { ok: false, error: 'locked' };
     }

@@ -116,7 +116,7 @@ beforeEach(() => {
   id = new Identity();
   logs = [];
   views = [];
-  svc = new VoiceService({ supervisor: fake, oneShot, identity: () => Promise.resolve(id), log: (l) => logs.push(l), stopBoundMs: 200 });
+  svc = new VoiceService({ locked: () => false, supervisor: fake, oneShot, identity: () => Promise.resolve(id), log: (l) => logs.push(l), stopBoundMs: 200 });
   svc.subscribe((v) => views.push(v));
 });
 afterEach(() => {
@@ -176,7 +176,7 @@ describe('join', () => {
   });
 
   it('no identity at all: nothing starts', async () => {
-    svc = new VoiceService({ supervisor: fake, oneShot, identity: () => Promise.resolve(null), log: () => undefined });
+    svc = new VoiceService({ locked: () => false, supervisor: fake, oneShot, identity: () => Promise.resolve(null), log: () => undefined });
     expect((await svc.join({ channel: 'x', muted: false, deafened: false })).problem).toBe('not-signed-in');
     expect(fake.starts).toEqual([]);
   });
@@ -407,7 +407,7 @@ describe('teardown and the generation fence', () => {
     expect(done).toBe(true);
     expect(logs.some((l) => l.includes('did not stop'))).toBe(true);
     // The default bound is the contract's.
-    const dflt = new VoiceService({ supervisor: fake, oneShot, identity: () => Promise.resolve(id), log: () => undefined });
+    const dflt = new VoiceService({ locked: () => false, supervisor: fake, oneShot, identity: () => Promise.resolve(id), log: () => undefined });
     let d2 = false;
     void dflt.teardown().then(() => {
       d2 = true;
@@ -530,7 +530,7 @@ describe('with the real supervisor', () => {
     });
     sups.push(sup);
     const identity: VoiceIdentity = { profileId: profile, configDir: s.config, principalId: 7, credential: () => ({ origin: 'https://conch.example.org', token: FAKE_TOKEN }), current: () => true };
-    const service = new VoiceService({ supervisor: sup, oneShot, identity: () => Promise.resolve(identity), log: (l) => logs2.push(l) });
+    const service = new VoiceService({ locked: () => false, supervisor: sup, oneShot, identity: () => Promise.resolve(identity), log: (l) => logs2.push(l) });
     const seen: NativeVoiceView[] = [];
     service.subscribe((v) => seen.push(v));
     return { svc: service, views: seen };
@@ -630,7 +630,7 @@ describe('the one-shot runs (issue #1378)', () => {
   });
 
   it('says not-signed-in with no identity, and runs nothing', async () => {
-    const none = new VoiceService({ supervisor: fake, oneShot, identity: () => Promise.resolve(null), log: () => undefined });
+    const none = new VoiceService({ locked: () => false, supervisor: fake, oneShot, identity: () => Promise.resolve(null), log: () => undefined });
     expect(await none.devices()).toEqual({ ok: false, error: 'not-signed-in' });
     expect(await none.saveDevice({ key: 'audio.input', value: 'Mic' })).toEqual({ ok: false, error: 'not-signed-in' });
     expect(oneShot.calls).toEqual([]);
@@ -641,6 +641,7 @@ describe('the one-shot runs (issue #1378)', () => {
     expect(oneShot.cancels).toBe(1);
     let release: (v: Identity) => void = () => undefined;
     const slow = new VoiceService({
+      locked: () => false,
       supervisor: fake,
       oneShot,
       identity: () => new Promise<Identity>((resolve) => (release = resolve)),

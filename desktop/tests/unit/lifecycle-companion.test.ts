@@ -35,6 +35,7 @@ async function rig() {
     },
   };
   const companion = new Companion({
+    locked: () => false,
     voice: { state: () => view, subscribe: () => () => undefined },
     client: () => client,
     document: () => 5,

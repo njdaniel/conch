@@ -203,6 +203,7 @@ class Owner {
       return start({ ...req, extraArgs: [...kept, ...ceiling, '--mic', `tone:${String(o.who.tone)}`, '--sink', 'count', '--test-key-device', this.fifo] });
     };
     this.service = new VoiceService({
+      locked: () => false,
       supervisor: this.sup,
       // No one-shot helper runs in this test (#1378): devices and saves are
       // refused, and teardown has nothing to cancel.
