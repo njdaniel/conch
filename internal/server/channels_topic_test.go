@@ -234,6 +234,7 @@ func TestSetChannelTopicBodies(t *testing.T) {
 // The audit row: actor, subject, and both topics quoted.
 func TestSetChannelTopicAudit(t *testing.T) {
 	f := newChannelV1Fixture(t)
+	f.srv.relaxChannelWriteLimit() // six writes and repeats: more than the burst
 	ch := f.pubJoined
 	steps := []struct{ topic, detail string }{
 		{"First", `from="" to="First"`},

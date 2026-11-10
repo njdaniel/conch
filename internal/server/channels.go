@@ -304,6 +304,9 @@ func (s *Server) handleRenameChannel(w http.ResponseWriter, r *http.Request) {
 	}
 
 	caller, authed := callerFrom(ctx)
+	if !s.takeChannelWriteToken(w, caller.ID, id) {
+		return
+	}
 	var opt store.ChannelRenameOptions
 	if authed {
 		opt = store.ChannelRenameOptions{CallerID: caller.ID, Limits: store.RenameLimits{Renames: renamesPerDay, Attempts: renameAttemptsPerDay}}
@@ -389,6 +392,9 @@ func (s *Server) handleSetChannelTopic(w http.ResponseWriter, r *http.Request) {
 	}
 
 	caller, _ := callerFrom(ctx)
+	if !s.takeChannelWriteToken(w, caller.ID, id) {
+		return
+	}
 	res, err := s.store.SetChannelTopic(ctx, auditActor(ctx), caller.ID, id, req.Topic, s.now())
 	switch {
 	case errors.Is(err, store.ErrNotFound):
