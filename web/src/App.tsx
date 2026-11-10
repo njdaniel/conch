@@ -1889,7 +1889,7 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
           // Operators and each channel's managers may rename it, and set its
           // topic, from that row's ⋯ menu (issues #728, #1135, #1504). A visit
           // gets neither.
-          canRename={(channel) => visit === null && (auth.principal.role === 'operator' || channel.manages === true)}
+          canRename={(channel) => visit === null && (canDo(auth.principal, 'manage_channels') || channel.manages === true)}
           renderRename={(channel, close) => (
             <RenameChannel
               channel={channel}
@@ -1901,7 +1901,7 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
               onClose={close}
             />
           )}
-          canSetTopic={(channel) => visit === null && (auth.principal.role === 'operator' || channel.manages === true)}
+          canSetTopic={(channel) => visit === null && (canDo(auth.principal, 'manage_channels') || channel.manages === true)}
           renderTopic={(channel, close) => (
             <SetTopic
               channel={channel}

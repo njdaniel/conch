@@ -78,7 +78,7 @@ How to read a cell:
 | Role | Read, post | Private channel: see or change | Member links | Member directory |
 | --- | --- | --- | --- | --- |
 | Owner, and operator with the defaults | W: +W04b; G: +Co, xS17 (an operator outside the channel is refused as for a ghost) | W: +W40, +W42; G: +S11a, xS17 | W: +W11b; G: +S10, +Co | W: none; G: +S15 |
-| Operator with a cell off | W: none; G: xS11a | W: none; G: xS11a, xIr | W: none; G: xS11b, xS10, xIr | n/a (fixed on) |
+| Operator with a cell off | W: none; G: xS11a | W: xW68a; G: xS11a, xIr | W: xW68b; G: xS11b, xS10, xIr | n/a (fixed on) |
 | Channel manager | as member | W: xW24b; G: xS5 | as member | W: none; G: xS8b |
 | Member | W: +W02, +W04c, xW04a; G: +Co, +S17 | W: xW04a, +W04b; G: xS17 | W: +W11a; G: +S10 | W: +W47; G: +S15 |
 | Member with a cell or brake off | n/a (fixed right) | n/a (fixed right) | W: xW11c; G: xS10, xIp | W: xW47; G: xS15, xIh |
@@ -92,7 +92,7 @@ How to read a cell:
 | Role | Channel create, rename, archive | Channel members add, remove | Moderation | Edit permissions document | Act as |
 | --- | --- | --- | --- | --- | --- |
 | Owner, and operator with the defaults | W: +W20, +W21a, +W48a; G: +S5, +S6, +S7 | W: +W24, +W42, +W04b; G: +S8c | W: +W12b; G: +S9, +Vo | W: +W39a, +W39b; G: +S4 | W: +W39b; G: +S3 |
-| Operator with a cell off | W: none; G: xS5, xS6, xIr | W: none; G: xS11c, xIr | W: none; G: xS14, xIr | W: none; G: xS4 | W: xW43b; G: xS3, xS11d, xIr |
+| Operator with a cell off | W: xW68a; G: xS5, xS6, xIr | W: xW68a; G: xS11c, xIr | W: xW68a; G: xS14, xIr | W: none; G: xS4 | W: xW43b, xW68b; G: xS3, xS11d, xIr |
 | Channel manager | W: +W24, xW24b; G: S7, xS5, xS6 | W: +W24, +W51a; G: S8a | W: +W51a, +W51b, +W51c; G: +S9, +Imod | as member | as member |
 | Member | W: +W20, xW21b, xW48b; G: +S5, xS5, xS6, xS7 | W: xW24; G: xS8c | W: xW51a, xW51b, xW51c; G: xS9, xImod | W: xW38b; G: xS1, xS2 | W: none; G: xS2, xS3 |
 | Member with a cell or brake off | W: xW39c; G: xS5, xIp | n/a | n/a | n/a | n/a |
@@ -139,6 +139,9 @@ How to read a cell:
 - **Moderation** is: remove a message, remove or ban from a channel, remove
   from voice only, and stop another person's share or camera. The target of
   moderation is the removed or banned member.
+- **`W68b`'s Act as cell** is not `act_as_members` alone. `act_as_members`
+  requires `manage_members` in the same column, so the test turns both off in
+  one patch; the missing act-as items are `W43b`'s case reached the other way.
 - **A cell that says `as member`** has no rule of its own. A channel manager is
   a member everywhere but in its own channel.
 
@@ -146,8 +149,8 @@ How to read a cell:
 
 The tables have 108 cells. 19 are `n/a` and 5 say `as member`. Of the other 84:
 
-- 36 have a browser test and a Go test.
-- 48 have a Go test and no browser test (`W: none`).
+- 43 have a browser test and a Go test.
+- 41 have a Go test and no browser test (`W: none`).
 - None is empty in both halves.
 - None has a browser test and no Go test.
 
@@ -156,9 +159,9 @@ The browser gaps cluster in four places. Each gets a follow-up issue:
 - a member with `create_public_channels` or `create_private_channels` off, in
   the browser (the New channel form is not offered);
 - a member with `share_screen` off, in the browser (#1611);
-- an operator with `manage_channels`, `manage_members` or `act_as_members` off
-  seeing only the controls it holds (only `act_as_members` has a browser
-  test, `W43b`);
+- an operator with `act_as_members` off alone seeing only the controls it
+  holds (`W43b` has it; `manage_channels` and `manage_members` have `W68a` and
+  `W68b`);
 - a channel manager not being offered visibility or Archive.
 
 Voice, share and camera for the owner and operator have a Go test and no
@@ -206,6 +209,8 @@ browser test of their own. The browser voice specs use plain members.
 | `W51a` | `51-moderation`: manager confirms membership removal, ban and own unban; a plain member has no controls | manager removes and bans; target loses the channel (404); a plain member has no controls and 403 on voice removal |
 | `W51b` | `51-moderation`: message removal replaces live copies by id, survives reconnect and never notifies an inaccessible whisper | manager removes (204); a plain reader has no menu item; a plain channel member who is not the author is 403 |
 | `W51c` | `51-moderation`: LiveKit: a manager confirms a voice-only removal with retry, a member cannot, and the target keeps chat access | manager removes from voice; a member is 403 |
+| `W68a` | `68-restricted-operator`: R1669 an operator with manage_channels off is offered no rename, archive, visibility change or private-channel view, and the server refuses each | the channel menu is exactly Invite people, Leave channel, Favorite; the person menu in Settings is nine items, none of them Add to a channel…; no Channels section, no Every channel list; from the page, Rename channel, Ban from channel and Remove from channel are 403 `forbidden`, Make private, Make default, Archive and `GET /v1/directory/channels?scope=all` are 403 `permission_denied` naming `manage_channels`, and a private channel it is not in is 404 `channel_not_found` for adding a member and listing members; the cells are restored and read back |
+| `W68b` | `68-restricted-operator`: R1669 an operator with manage_members off is offered no removal, disabling or role change, and the server refuses each | `act_as_members` goes with it (it needs `manage_members`); the person menu in Settings is exactly Add to a channel…, so no voice or member-link switch, sign-out, Disable sign-in…, Remove from server… or act-as item; the channel menu and the channel member panel's Remove from voice, Ban from channel and Remove from channel stay (they are `manage_channels`'s); from the page, remove from server, disable, enable, voice and member-link switches, credential list, making a person and the joining settings are 403 `permission_denied` naming `manage_members`, and Change role is 403 `forbidden`; the cells are restored and read back |
 
 ### Go keys
 
