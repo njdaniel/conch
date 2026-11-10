@@ -57,9 +57,23 @@ const rosterBound = 2 * (2000 + 1500 + 2000);
 const margin = 10_000;
 // Signal closed, new sockets held unanswered, for this long before they are
 // let through again: long enough for the SDK to try and fail at least once,
-// well under reconnectLimit so the SDK resumes. The client does not show
-// Reconnecting for it (a signal-only resume is SignalReconnecting in
-// livekit-client, which the client does not map; #1678).
+// well under reconnectLimit so the SDK resumes. The page says Reconnecting
+// for it (livekit-client's SignalReconnecting, mapped as a full restart's
+// Reconnecting is; #1678).
+// This is not the length of the cut the SDK sees. restore() only stops
+// holding new sockets; the ones already held are not closed, so the cut lasts
+// until the SDK abandons its in-flight attempt, about 15 s by default (its
+// websocket timeout), and only then retries into the open. The effective cut is
+// therefore around 15 s, still inside recoverWithin (3 + 20 + 10 = 33 s) and
+// under reconnectLimit (20 s, counted from Reconnecting appearing).
+// A signal socket refused outright does not stall the resume (#1678). It was
+// tried with a scratch spec (not kept) that pointed bob's /rtc sockets, with
+// CSP bypassed, at a local server answering 503 to the upgrade, and at one that
+// destroyed the connection, with /rtc/validate also 503. Every attempt reached
+// that server; the SDK retried at 0.5, 2, 3, 5 and 8 s intervals, the page said
+// Reconnecting from 50 ms after the cut, and gave up at reconnectLimit (20 s)
+// with "Voice unavailable". The 40 s stall seen earlier came from a socket the
+// Playwright route held without ever answering or closing, not from a refusal.
 const signalCutFor = 3_000;
 // The page's HTTP and WS traffic is off for this long (issue #1612).
 const offlineFor = 5_000;
@@ -324,23 +338,25 @@ test.describe('voice recovery', () => {
       const cutAt = Date.now();
       const openedBefore = signal.opened;
       await signal.cut();
+      // A signal-only resume shows as Reconnecting, as a full restart does.
+      await expect(voiceRegion(b.page)).toContainText(/Reconnecting/, { timeout: 10_000 });
       await new Promise((r) => setTimeout(r, signalCutFor));
       signal.restore();
       // The SDK resumes: once the cut is lifted it opens at least one new
       // signal socket beyond those open before the cut. (The Connected check
-      // below cannot tell a resume from nothing happening, since the page
-      // does not show a signal-only drop, #1678; this and the unchanged
-      // publication are what prove it.)
+      // below only says the page is back; the new socket and the unchanged
+      // publication are what prove a resume.)
       await expect.poll(() => signal.opened, { timeout: recoverWithin, message: 'bob opens a new signal socket after the cut' }).toBeGreaterThan(openedBefore);
       await expect(voiceRegion(b.page)).toContainText(/Connected in #voice-room/, { timeout: recoverWithin });
       info.annotations.push({ type: 'signal back after the cut', description: `${String(Date.now() - cutAt)} ms (bound ${String(recoverWithin)} ms)` });
       info.annotations.push({ type: 'signal sockets held during the cut', description: String(signal.held) });
       const bobLapses = await bobSees.stop();
-      // livekit-client 2.22 reports a signal-only resume as SignalReconnecting,
-      // which the client does not map to its Reconnecting phase (that is for a
-      // full restart): bob's page is expected to stay Connected, and what it
-      // did is recorded, not hidden.
-      info.annotations.push({ type: 'bob page during the cut', description: bobLapses.length === 0 ? 'stayed Connected' : bobLapses.join('; ') });
+      // livekit-client 2.22 reports a signal-only resume as SignalReconnecting
+      // and then Reconnected, which the client maps to its Reconnecting and
+      // Connected (#1678): bob's page left Connected for the cut, and
+      // what it did is recorded.
+      expect(bobLapses, 'bob page said it was not Connected during the cut').toContain('bob: not Connected');
+      info.annotations.push({ type: 'bob page during the cut', description: bobLapses.join('; ') });
 
       const lapses = (await Promise.all(others.map((l) => l.stop()))).flat();
       expect(lapses, 'alice and carol stay connected and keep seeing each other').toEqual([]);

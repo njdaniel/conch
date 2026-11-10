@@ -996,6 +996,12 @@ class LiveKitAdapter implements Room {
     const room = this.room;
     room
       .on(RoomEvent.Reconnecting, events.onReconnecting)
+      // A signal-only resume (the signal socket lost, the media kept) is the
+      // same Reconnecting to the person as a full restart: state changes made
+      // meanwhile cannot reach the server (issue #1678). It ends in the same
+      // Reconnected as a restart does: livekit-client 2.22 has no
+      // SignalReconnected event.
+      .on(RoomEvent.SignalReconnecting, events.onReconnecting)
       .on(RoomEvent.Reconnected, () => {
         // Subscriptions are asked for again on a connection made anew.
         this.subscribeAll();

@@ -602,6 +602,7 @@ vi.mock('livekit-client', () => {
     RoomEvent: {
       Reconnecting: 'rc',
       Reconnected: 'rd',
+      SignalReconnecting: 'src',
       Disconnected: 'dc',
       ActiveSpeakersChanged: 'as',
       TrackPublished: 'tp',
@@ -1333,6 +1334,19 @@ describe('the watch view', () => {
     expect(nine.isSubscribed).toBe(false);
     room.setWatches(new Set([9]), 9);
     expect(layers()).toEqual(['quality screen_share 0', 'dimensions screen_share 7680x4320']);
+  });
+
+  it('a signal-only resume is reported as reconnecting and then reconnected', async () => {
+    const seen: string[] = [];
+    const room = newLiveKitRoom();
+    await room.connect('wss://lk.example', 'tok-abcdef', 'room-abcdef', false, {
+      ...events,
+      onReconnecting: () => seen.push('reconnecting'),
+      onReconnected: () => seen.push('reconnected'),
+    });
+    state.handlers.get('src')?.();
+    state.handlers.get('rd')?.();
+    expect(seen).toEqual(['reconnecting', 'reconnected']);
   });
 
   it('after a full reconnect a new publication under the same sid is capped at LOW again', async () => {

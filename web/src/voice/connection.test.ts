@@ -1113,6 +1113,45 @@ describe('disconnects', () => {
     expect(t.rooms[0]?.closed).toBe(true);
   });
 
+  it('a second Reconnecting does not leave a timer behind that drops a connection that has recovered', async () => {
+    const t = await joined();
+    t.rooms[0]?.events?.onReconnecting();
+    t.clock.advance(15_000);
+    t.rooms[0]?.events?.onReconnecting();
+    t.clock.advance(2000);
+    t.rooms[0]?.events?.onReconnected();
+    t.clock.advance(reconnectLimit);
+    await settle();
+    expect(t.asked).toHaveLength(1);
+    expect(t.client.snapshot().phase).toBe('connected');
+  });
+
+  it("a Reconnecting reported by a room that then failed to connect does not stop the next attempt's give-up", async () => {
+    const t = setup([okSession(), okSession(), okSession()], [], 0, false, (room, index) => {
+      if (index !== 0) return;
+      room.connect = (_u, _t, _n, _p, events) => {
+        room.events = events;
+        events.onReconnecting();
+        return Promise.reject(new Error('unreachable'));
+      };
+    });
+    t.client.join('general');
+    await settle();
+    expect(t.client.snapshot().phase).toBe('unavailable');
+    // The retry, well before the failed room's own give-up would have fired.
+    t.clock.advance(5000);
+    await settle();
+    expect(t.asked).toHaveLength(2);
+    expect(t.client.snapshot().phase).toBe('connected');
+    t.rooms[1]?.events?.onReconnecting();
+    t.clock.advance(reconnectLimit - 1);
+    await settle();
+    expect(t.asked).toHaveLength(2);
+    t.clock.advance(1);
+    await settle();
+    expect(t.asked).toHaveLength(3);
+  });
+
   it('a reconnect inside the limit keeps the connection', async () => {
     const t = await joined();
     t.rooms[0]?.events?.onReconnecting();
