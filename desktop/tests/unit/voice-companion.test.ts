@@ -96,6 +96,7 @@ function rig(view: NativeVoiceView = running(), share?: () => Promise<'no-portal
     client,
     sends: () => steps.flatMap((s) => (s[0] === 'send' ? [s[1]] : [])),
     companion: new Companion({
+      locked: () => false,
       voice: {
         state: () => voice.view,
         subscribe: (l) => {
@@ -157,6 +158,26 @@ describe('the companion’s grant', () => {
     expect(await r.companion.grant({ channel: 'general' })).toEqual({ ok: false, error: 'not-in-voice' });
     expect(r.steps).toEqual([]);
     expect(r.companion.liveOrigin()).toBeNull();
+  });
+
+  it('is refused as ended, and calls nothing, while the screen is locked (issue #1588, S1)', async () => {
+    let locked = true;
+    const r = rig();
+    const gated = new Companion({
+      voice: { state: () => r.voice.view, subscribe: () => () => undefined },
+      client: () => r.client,
+      document: () => r.document.value,
+      tell: () => undefined,
+      log: (line) => r.logs.push(line),
+      locked: () => locked,
+    });
+    expect(await gated.grant({ channel: 'general' })).toEqual({ ok: false, error: 'ended' });
+    expect(r.steps).toEqual([]);
+    expect(gated.liveOrigin()).toBeNull();
+    // After unlock the person may ask again.
+    locked = false;
+    r.answers.push(ok(ANSWER));
+    expect((await gated.grant({ channel: 'general' })).ok).toBe(true);
   });
 
   it('is refused as failed, and calls nothing, with no activation in force', async () => {
@@ -443,6 +464,7 @@ describe('the companion’s end', () => {
       let ended = 0;
       const client: CompanionClient = { send: (request) => Promise.resolve(request.op === 'voiceViewer' ? ok(ANSWER) : ok()) };
       const companion = new Companion({
+        locked: () => false,
         voice: { state: () => running(), subscribe: () => () => undefined },
         client: () => client,
         document: () => 1,
@@ -472,6 +494,7 @@ describe('the companion’s end', () => {
       },
     };
     const companion = new Companion({
+      locked: () => false,
       voice: { state: () => running(), subscribe: () => () => undefined },
       client: () => client,
       document: () => 1,
@@ -622,6 +645,7 @@ describe('the bearer never leaves main (canary)', () => {
     const logs: string[] = [];
     const told: unknown[] = [];
     const companion = new Companion({
+      locked: () => false,
       voice: { state: () => running(), subscribe: () => () => undefined },
       client: () => client,
       document: () => 1,

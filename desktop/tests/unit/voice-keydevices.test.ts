@@ -305,7 +305,7 @@ describe('saving the binding', () => {
     one = new FakeOneShot();
     logs = [];
     id = new Identity();
-    svc = new VoiceService({ supervisor: noSupervisor, oneShot: one, identity: () => Promise.resolve(id), log: (l) => logs.push(l), keyDevices: { fs: fs(), uid: 1000, newId: counter() } });
+    svc = new VoiceService({ locked: () => false, supervisor: noSupervisor, oneShot: one, identity: () => Promise.resolve(id), log: (l) => logs.push(l), keyDevices: { fs: fs(), uid: 1000, newId: counter() } });
   });
 
   const listed = async (): Promise<string> => {
@@ -371,7 +371,7 @@ describe('saving the binding', () => {
 
   it('is not-signed-in without an identity, and one save at a time', async () => {
     const deviceId = await listed();
-    const none = new VoiceService({ supervisor: noSupervisor, oneShot: one, identity: () => Promise.resolve(null), log: () => undefined, keyDevices: { fs: fs(), newId: counter() } });
+    const none = new VoiceService({ locked: () => false, supervisor: noSupervisor, oneShot: one, identity: () => Promise.resolve(null), log: () => undefined, keyDevices: { fs: fs(), newId: counter() } });
     await none.keyDevices();
     expect(await none.saveTalkBinding({ deviceId: 'id-1', code: 30 })).toEqual({ ok: false, error: 'not-signed-in' });
     let open: () => void = () => undefined;
@@ -393,7 +393,7 @@ describe('saving the binding', () => {
 
   it('writes no device name or path to a log line (canary)', async () => {
     const throwing: KeyDeviceFs = { ...fs(), readdir: () => Promise.reject(new Error('EACCES /dev/input/by-id/usb-Canary_Name-event-kbd')) };
-    const bad = new VoiceService({ supervisor: noSupervisor, oneShot: one, identity: () => Promise.resolve(id), log: (l) => logs.push(l), keyDevices: { fs: throwing } });
+    const bad = new VoiceService({ locked: () => false, supervisor: noSupervisor, oneShot: one, identity: () => Promise.resolve(id), log: (l) => logs.push(l), keyDevices: { fs: throwing } });
     expect(await bad.keyDevices()).toEqual({ ok: false, error: 'failed' });
     const deviceId = await listed();
     one.answers = [{ ok: false, error: 'failed' }];

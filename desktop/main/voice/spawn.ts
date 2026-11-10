@@ -293,3 +293,15 @@ export function runFile(file: string, args: readonly string[], env: Readonly<Rec
     });
   });
 }
+
+// WatchChild is a long-lived read-only child: no standard input, stdout read
+// line by line, stderr dropped.
+export type WatchChild = OneShotChild;
+
+// spawnWatch starts a long-lived read-only program (the logind monitor of
+// issue #1588): argv only, no shell, not detached, standard input /dev/null.
+// The caller owns the ChildProcess and kills it by that handle, never by
+// name.
+export function spawnWatch(file: string, args: readonly string[], env: Readonly<Record<string, string>>): WatchChild {
+  return nodeSpawn(file, [...args], { env: { ...env }, stdio: ['ignore', 'pipe', 'pipe'], detached: false, shell: false, windowsHide: true, cwd: '/' });
+}
