@@ -170,3 +170,26 @@ describe('pathOf', () => {
     expect(() => pathOf(call('listMessages'))).toThrow(/needs channel/);
   });
 });
+
+describe('the share claim answer (issue #1638)', () => {
+  const v1 = { principal_id: 7, started_at: '2026-11-09T12:00:00Z', audio: false };
+  const quality = { resolution: '720p', frame_rate: 30 };
+
+  it.each([
+    ['a V1 answer', () => ({ ...v1 }), true],
+    ['a V2 answer', () => ({ ...v1, quality: { ...quality } }), true],
+    ['an empty object', () => ({}), false],
+    ['a list', () => [v1], false],
+    ['null', () => null, false],
+  ])('%s', (_name, body, good) => {
+    const validate = operations.claimShare.response;
+    expect(validate).toBeDefined();
+    expect(validate?.(body()).length === 0).toBe(good);
+  });
+
+  it('keeps the quality of a V2 answer', () => {
+    const body: Record<string, unknown> = { ...v1, quality: { ...quality } };
+    expect(operations.claimShare.response?.(body)).toEqual([]);
+    expect(body['quality']).toEqual(quality);
+  });
+});

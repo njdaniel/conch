@@ -129,6 +129,8 @@ import {
   voicePresenceV2,
   voiceSessionResponseV1,
   voiceShareRequestV1,
+  voiceShareV1,
+  voiceShareV2,
   voiceTransmitReportV1,
   whoAmIResponseV1,
   wsTicketV1,
@@ -186,6 +188,16 @@ const check = <T>(validator: Validator<T>): Validator<never> => validator as unk
 // (issue #1534). A request stays strict: the desktop main refuses an extra key
 // from the renderer.
 const reply = <T>(validator: Validator<T>): Validator<never> => check(fromServer(validator));
+
+// shareReply is the share claim's answer: VoiceShareV2 when the claim sent a
+// quality, else VoiceShareV1 (web/src/api.ts claimVoiceShare). V2 is tried
+// first, because a validator strips the keys it does not declare from a value
+// it passes, so V1 would pass a V2 answer and drop its quality (issue #1638).
+// Without it the desktop main forwards no body, and every desktop share fails.
+const shareReply: Validator<never> = check((value: unknown, path?: string) => {
+  const asV2 = fromServer(voiceShareV2)(value, path);
+  return asV2.length === 0 ? asV2 : fromServer(voiceShareV1)(value, path);
+});
 
 export const operations = {
   health: op('GET', '/healthz', 'none', { response: reply(health) }),
@@ -388,7 +400,7 @@ export const operations = {
   voicePresence: op('GET', '/v1/channels/{channel}/voice', 'bearer', { response: reply(voicePresenceV2) }),
   voiceTransmit: op('POST', '/v1/channels/{channel}/voice/transmit', 'bearer', { request: check(voiceTransmitReportV1) }),
   voiceOccupancy: op('GET', '/v1/voice/occupancy', 'bearer', { response: reply(voiceOccupancyV1) }),
-  claimShare: op('POST', '/v1/channels/{channel}/voice/share', 'bearer', { request: check(voiceShareRequestV1) }),
+  claimShare: op('POST', '/v1/channels/{channel}/voice/share', 'bearer', { request: check(voiceShareRequestV1), response: shareReply }),
   stopShare: op('DELETE', '/v1/channels/{channel}/voice/share', 'bearer'),
   // The viewer (issue #936, voice-control-plane.md §13): the second
   // participant, p<id>.view, that lets a tab watch beside the voice of
