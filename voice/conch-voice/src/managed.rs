@@ -1250,6 +1250,8 @@ pub struct Host<T: Transport> {
     pub share_audio_owner: ShareAudioOwner,
     /// `--transmit-ceiling-secs`: a bound on each push-to-talk press, if the owner passed one.
     pub transmit_ceiling_secs: Option<u32>,
+    /// `--no-mute-key`: `keys.mute` is not read (#1631).
+    pub no_mute_key: bool,
     /// The session loop's waits.
     pub timings: Timings,
     /// The key device's waits.
@@ -1279,6 +1281,7 @@ impl<T: Transport> Host<T> {
             keys,
             share_audio_owner,
             transmit_ceiling_secs: None,
+            no_mute_key: false,
             timings: Timings::default(),
             key_timings: KeyTimings::default(),
             start_timeout: Duration::from_millis(VOICE_CONTROL_START_TIMEOUT_MS),
@@ -1375,6 +1378,7 @@ pub async fn run<T: Transport>(
         keys,
         share_audio_owner,
         transmit_ceiling_secs,
+        no_mute_key,
         timings,
         key_timings,
         ..
@@ -1382,6 +1386,7 @@ pub async fn run<T: Transport>(
     let setup = Setup {
         share_audio_owner,
         transmit_ceiling_secs,
+        no_mute_key,
         environment: &environment,
         scrubber: &scrubber,
         keys: &keys,
@@ -1492,6 +1497,7 @@ struct Setup<'a> {
     key_timings: KeyTimings,
     share_audio_owner: ShareAudioOwner,
     transmit_ceiling_secs: Option<u32>,
+    no_mute_key: bool,
     inputs: &'a mpsc::UnboundedSender<Input>,
 }
 
@@ -1747,7 +1753,7 @@ impl Boot {
                 .map_err(|error| Halt::Fail(Reason::BadConfig, error))?,
             None => Config::default(),
         };
-        let keys = key_source(&config, setup.keys)
+        let keys = key_source(&config, setup.keys, setup.no_mute_key)
             .map_err(|error| Halt::Fail(Reason::BadConfig, error))?;
         self.key = match &keys {
             Some(_) => KeyView::Unknown,
@@ -1967,10 +1973,24 @@ fn whoami_reason(error: &ApiError) -> VoiceControlReason {
 /// The key device to read, the keys to look for on it and the rule it is read under, if
 /// any: the one `voice.toml` names, as for `join`, or the test option's named pipe with the
 /// keys `voice.toml` binds.
+///
+/// With `no_mute_key` (`--no-mute-key`, #1631) `keys.mute` is not one of them: the owner
+/// alone mutes. The desktop app locks a session by muting it through `set_mute`, and a mute
+/// key read here would toggle the machine without that path, so it could unmute a locked
+/// session. The desktop's own settings cannot bind it (`saveDevice` and `saveTalkBinding`
+/// exclude it); this covers a hand-edited `voice.toml`. A file that binds only mute then
+/// opens no key device. Without the flag, as for `conch`'s TUI and for `join`, `keys.mute`
+/// is read as it always was.
 fn key_source(
     config: &Config,
     keys: &KeySource,
+    no_mute_key: bool,
 ) -> Result<Option<(PathBuf, KeyBindings, DeviceRule)>, Error> {
+    let mut config = config.clone();
+    if no_mute_key {
+        config.keys.mute = None;
+    }
+    let config = &config;
     match keys {
         KeySource::Configured => Ok(cli::key_device(config, false)?
             .map(|(device, bindings)| (device, bindings, DeviceRule::EventDevice))),
@@ -1984,6 +2004,80 @@ fn key_source(
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    /// One evdev key record: the event type EV_KEY (1), a code and a value (1 is a press).
+    fn record(code: u16, value: i32) -> [u8; conch_voice_control::INPUT_EVENT_LEN] {
+        let mut bytes = [0u8; conch_voice_control::INPUT_EVENT_LEN];
+        bytes[16..18].copy_from_slice(&1u16.to_le_bytes());
+        bytes[18..20].copy_from_slice(&code.to_le_bytes());
+        bytes[20..24].copy_from_slice(&value.to_le_bytes());
+        bytes
+    }
+
+    /// #1631: with `--no-mute-key`, `keys.mute` never reaches the key device, so no key
+    /// press can unmute a session the owner locked. Talk and deafen are kept; with only
+    /// mute bound there is nothing to read. Without the flag (the TUI) the mute key is read.
+    /// No keyboard: the decoder is given hand-built records.
+    #[test]
+    fn the_mute_key_is_not_read_with_no_mute_key_and_is_read_without() {
+        let toml = "[keys]\ndevice = \"/dev/input/event-fake\"\ntalk = \"KEY_F13\"\nmute = \"KEY_F14\"\ndeafen = \"KEY_F15\"\n";
+        let config = Config::parse(toml, "voice.toml").unwrap();
+        let (mute, talk, deafen) = (
+            config.keys.mute.unwrap().code(),
+            config.keys.talk.unwrap().code(),
+            config.keys.deafen.unwrap().code(),
+        );
+        for source in [
+            KeySource::Configured,
+            KeySource::NamedPipe(PathBuf::from("/fake/keys.pipe")),
+        ] {
+            // Without the flag: as before.
+            let (_, bindings, _) = key_source(&config, &source, false).unwrap().unwrap();
+            assert_eq!(bindings.mute(), config.keys.mute, "{source:?}");
+            let mut decoder = conch_voice_control::KeyDecoder::new(bindings);
+            assert_eq!(
+                decoder.feed(&record(mute, 1)).len(),
+                1,
+                "{source:?}: mute pressed"
+            );
+
+            // With it: no mute event, talk and deafen as before.
+            let (_, bindings, _) = key_source(&config, &source, true).unwrap().unwrap();
+            assert_eq!(bindings.mute(), None, "{source:?}: mute is bound");
+            assert_eq!(bindings.talk(), config.keys.talk, "{source:?}");
+            assert_eq!(bindings.deafen(), config.keys.deafen, "{source:?}");
+            let mut decoder = conch_voice_control::KeyDecoder::new(bindings);
+            assert_eq!(
+                decoder.feed(&record(mute, 1)),
+                [],
+                "{source:?}: mute pressed"
+            );
+            assert_eq!(decoder.feed(&record(talk, 1)).len(), 1, "{source:?}: talk");
+            assert_eq!(
+                decoder.feed(&record(deafen, 1)).len(),
+                1,
+                "{source:?}: deafen"
+            );
+        }
+
+        let only_mute = "[keys]\ndevice = \"/dev/input/event-fake\"\nmute = \"KEY_F14\"\n";
+        let config = Config::parse(only_mute, "voice.toml").unwrap();
+        for source in [
+            KeySource::Configured,
+            KeySource::NamedPipe(PathBuf::from("/fake/keys.pipe")),
+        ] {
+            assert!(
+                key_source(&config, &source, false).unwrap().is_some(),
+                "{source:?}"
+            );
+            assert!(
+                key_source(&config, &source, true).unwrap().is_none(),
+                "{source:?}"
+            );
+        }
+    }
+
     /// #1372: the push-to-talk limit is the shorter of the file's value and the ceiling;
     /// without a ceiling it is the file's value.
     #[test]
@@ -2004,8 +2098,6 @@ mod tests {
             );
         }
     }
-
-    use super::*;
 
     fn line(text: &str) -> Bounded<'_> {
         Bounded::Line(text.as_bytes())

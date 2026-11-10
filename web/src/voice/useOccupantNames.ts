@@ -31,6 +31,7 @@ export function useOccupantNames({
   channels,
   people,
   viewer,
+  viewerName = '',
 }: {
   // Who is in each channel's voice, by channel id.
   readonly occupancy: InVoice;
@@ -38,8 +39,11 @@ export function useOccupantNames({
   readonly channels: readonly ChannelV0[];
   // The people of the channel on screen.
   readonly people: ReadonlyMap<number, Person>;
-  // The viewer's own principal id: shown as "You", never read for.
+  // The viewer's own principal id: never read for.
   readonly viewer: number;
+  // The viewer's own name, from the signed-in identity; empty while unknown,
+  // when the list shows them as "You".
+  readonly viewerName?: string;
 }): ReadonlyMap<number, string> {
   // What has been read, by channel id.
   const [reads, setReads] = useState<ReadonlyMap<number, Read>>(new Map());
@@ -111,6 +115,7 @@ export function useOccupantNames({
     for (const read of reads.values())
       for (const [id, name] of read.names) out.set(id, name);
     for (const [id, person] of people) out.set(id, person.name);
+    if (viewerName !== '') out.set(viewer, viewerName);
     return out;
-  }, [reads, people]);
+  }, [reads, people, viewer, viewerName]);
 }

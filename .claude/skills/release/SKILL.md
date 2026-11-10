@@ -30,6 +30,17 @@ sign-off act; `release.yml` turns a plain `v*` tag into a draft GitHub release, 
 2. Update `CHANGELOG.md` (Keep a Changelog format; create the file on the
    first release): move Unreleased into the new version section, dated. Land
    this via a normal PR before tagging — the tag points at a clean `main`.
+   **In the same PR, set the voice helper's version to the tag:** the
+   `[workspace.package]` `version` in `voice/Cargo.toml` (for `v0.1.0-alpha.19`,
+   `0.1.0-alpha.19`). A desktop release build (`CONCH_RELEASE_VERSION`, #1596)
+   checks the bundled `conch-voice --version` against the tag and fails on a
+   mismatch.
+   A release build lists its own tag as a tested server by itself
+   (`scripts/desktop-version.sh`, #1596). **After the upgrade, also add the
+   new tag to `desktop/build/compat.json`,** the development builds' list, once
+   the desktop app has been run against it. Unlisted, a development build
+   refuses to sign in to that server with "server version not tested". The
+   list sat at alpha.9 until alpha.18 because no step said so.
 3. Tag: annotated, on the reviewed `main` commit —
    `git tag -a vX.Y.Z -m "..."` — pushed **by Nick**, or by the session only
    under his explicit, recorded authorization for this release.
@@ -39,6 +50,27 @@ sign-off act; `release.yml` turns a plain `v*` tag into a draft GitHub release, 
 5. Sanity-check the artifacts (download one, `--version`, run against a temp
    db), note the dogfood-check run in the release notes, hand the draft to
    Nick to publish (a pre-release is already published: check its notes and tester checklist).
+
+## Desktop release notes section
+
+When the release ships the Linux desktop `.deb`, the CHANGELOG entry gets a
+"Linux desktop app" section after the server notes. Fill it from recorded runs
+only (the capability report and #1603's acceptance record); a row nobody has
+run is "not tried", never "works". Link the user page,
+`docs/desktop/linux.md`.
+
+```markdown
+### Linux desktop app
+- **Verified on:** <distribution and version, desktop and compositor, session
+  type, architecture, with the run that shows it (issue or record)>.
+- **Experimental:** <what runs but has no recorded acceptance>.
+- **Not supported:** <X11 screen share, ARM64, AppImage, Flatpak, RPM, and
+  anything else that does not work>.
+- **Not tried:** <rows with no run yet>.
+- **Known issues:** <issue links>.
+- Verify the download with `docs/desktop/linux.md` (checksums, then
+  `gh attestation verify` for tag <tag>).
+```
 
 ## Never
 

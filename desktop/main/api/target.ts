@@ -60,3 +60,11 @@ export function targetOf(id: OperationId, params: Readonly<Record<string, unknow
   const clean = queryOk(query);
   return clean === null || clean === '' ? null : `${path}?${clean}`;
 }
+
+// previewable says whether an operation may carry Conch-Preview-As: the five
+// previewable reads of main's own table of operations (issue #1540), and only
+// as a GET. Nothing the renderer sends is asked.
+export function previewable(id: OperationId): boolean {
+  const op = operations[id];
+  return op.previewable === true && op.method === 'GET';
+}

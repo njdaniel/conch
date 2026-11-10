@@ -61,6 +61,10 @@ describe('reaction API', () => {
     expect(await api.listReactors('x', 4, '👍', 7, 20)).toEqual({ ok: true, value: { reactors: [], next_after: 9 } });
     expect(calls[0]?.path).toBe(`/v2/channels/x/messages/4/reactions/${encodeURIComponent('👍')}?after=7&limit=20`);
   });
+  it('decodes a server response that carries a key this bundle does not know (issue #1534)', async () => {
+    reply = () => json({ reactors: [], next_after: 9, added_later: true });
+    expect(await api.listReactors('x', 4, '👍', 7, 20)).toEqual({ ok: true, value: { reactors: [], next_after: 9 } });
+  });
   it('signs out on a revoked reaction credential', async () => {
     reply = () => json({ code: 'unauthorized', message: 'revoked' }, 401);
     expect(await api.writeReaction('x', 4, '👍', true)).toEqual({ ok: false, failure: 'unauthorized' });

@@ -5,7 +5,7 @@
 // presence; it never opens a room or asks for a device.
 import { useEffect, useRef, useState } from 'react';
 import * as api from '../../api';
-import type { VoicePresenceV1 } from '../../schema/voice';
+import type { VoicePresenceV2 } from '../../schema/voice';
 import { Feed, type FeedStatus } from '../../state/feed';
 import { parsePresence } from '../presence';
 import type { Snapshot } from '../useVoice';
@@ -64,7 +64,7 @@ export function usePresence({
           },
         }),
       onFrame: (data) => {
-        const presence: VoicePresenceV1 | null = parsePresence(data);
+        const presence: VoicePresenceV2 | null = parsePresence(data);
         if (presence === null || !live) return;
         setSnapshot({ kind: 'presence', presence });
       },

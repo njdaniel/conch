@@ -18,10 +18,11 @@
 //    validator (a refusal by the error document's) before anything returns;
 //  - the answer is dropped when the identity that asked has ended.
 import { errorV0 } from '../../../web/src/schema/error.ts';
-import { operations, type Operation, type OperationId } from '../../../web/src/platform/operations.ts';
+import { fromServer } from '../../../web/src/schema/validate.ts';
+import { operations, previewHeader, type Operation, type OperationId } from '../../../web/src/platform/operations.ts';
 import type { NoAnswerReason } from '../../../web/src/platform/desktop/bridge.ts';
 import type { Capture, Session } from './session.ts';
-import { targetOf } from './target.ts';
+import { previewable, targetOf } from './target.ts';
 import { isCertificateFailure } from './trust.ts';
 
 export const MAX_RESPONSE_BYTES = 4 * 1024 * 1024;
@@ -61,6 +62,9 @@ export interface Send {
   // True for the one request that must outlive its identity: the revocation
   // that sign-out sends for the credential it has just forgotten.
   readonly detached?: boolean;
+  // The principal whose view this read asks for. Sent as Conch-Preview-As on
+  // a previewable read; any other operation is refused before the wire.
+  readonly previewAs?: number;
   // The request body is these bytes with this declared media type, not JSON
   // (an upload). The type is untrusted data the caller has already shaped.
   readonly upload?: { readonly mediaType: string; readonly bytes: Uint8Array };
@@ -145,7 +149,9 @@ export class Client {
     const target = targetOf(request.op, request.params, request.query);
     if (target === null) return none('unsupported');
 
+    if (request.previewAs !== undefined && !previewable(request.op)) return none('unsupported');
     const headers = new Headers({ Accept: 'application/json' });
+    if (request.previewAs !== undefined) headers.set(previewHeader, String(request.previewAs));
     if (op.auth === 'bearer') {
       const token = resendToken ?? request.token ?? capture.token;
       // No credential is a 401 without asking the server.
@@ -232,7 +238,7 @@ export class Client {
       return { kind: 'answer', status: response.status, ok, body: parsed.value, ...extras };
     }
     // A refusal: its error document if it is one, else only its status.
-    if (parsed.ok && errorV0(parsed.value).length === 0) return { kind: 'answer', status: response.status, ok, body: parsed.value, ...extras };
+    if (parsed.ok && fromServer(errorV0)(parsed.value).length === 0) return { kind: 'answer', status: response.status, ok, body: parsed.value, ...extras };
     return { kind: 'answer', status: response.status, ok, ...extras };
   }
 }

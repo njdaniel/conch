@@ -13,6 +13,12 @@ import { chromium, expect, test, type Browser, type Page } from '@playwright/tes
 import { listedVersion, startConchd, UNLISTED_VERSION, type Disposable } from './conchd.ts';
 import { launch, livePage, type Launched } from './launch.ts';
 
+// The version a development build stamps: 0.0.0-dev+ and a short commit, or
+// "nogit" outside a checkout (scripts/desktop-build.sh).
+const DEV_VERSION = String.raw`0\.0\.0-dev\+(?:[0-9a-f]{7,}|nogit)`;
+const DEV_APP = new RegExp(`App ${DEV_VERSION}`, 'u');
+const escape = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
+
 // A click that makes main replace the window: the page it was made on closes
 // under the click, so the click is not awaited and the page that takes the old
 // one's place is.
@@ -52,7 +58,8 @@ test.describe('server compatibility', () => {
     page = await swap(browser, page, () => page.getByRole('button', { name: 'Continue' }).click());
     await expect(page.getByLabel('Name', { exact: true })).toBeVisible();
     await expect(page.getByText(`Version ${listedVersion()}`)).toBeVisible();
-    await expect(page.getByText('App 0.0.0')).toBeVisible();
+    // A development build is stamped 0.0.0-dev+<commit> (scripts/desktop-build.sh).
+    await expect(page.getByText(DEV_APP)).toBeVisible();
     await expect(page.getByRole('note', { name: 'Development build' })).toHaveCount(0);
   });
 
@@ -60,7 +67,7 @@ test.describe('server compatibility', () => {
     await page.getByRole('button', { name: 'Servers' }).click();
     await page.getByLabel('Server address').fill(unlisted.origin);
     page = await swap(browser, page, () => page.getByRole('button', { name: 'Continue' }).click());
-    await expect(page.getByText(`This server’s version (${UNLISTED_VERSION}) has not been tested with this app (0.0.0).`)).toBeVisible();
+    await expect(page.getByText(new RegExp(`^This server’s version \\(${escape(UNLISTED_VERSION)}\\) has not been tested with this app \\(${DEV_VERSION}\\)\\.$`, 'u'))).toBeVisible();
     await expect(page.getByLabel('Name', { exact: true })).toHaveCount(0);
     await expect(page.getByLabel('Password', { exact: true })).toHaveCount(0);
     // The packaged build ignored --allow-unlisted-server: no warning, no way in.

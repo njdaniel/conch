@@ -90,6 +90,8 @@ interface Stub {
   room: { localParticipant: unknown } | null;
   // What the stub SDK logs while connecting, as a real one may.
   connectLog: string | null;
+  // Run inside connect, before it resolves (the SDK's signal events).
+  duringConnect: (() => void) | null;
   audioContexts: number;
   // The global names that were there before any module of this file loaded.
   baseline: ReadonlySet<string>;
@@ -121,6 +123,11 @@ interface Stub {
   // Issue #565: the size and frame rate the next picture captured says it
   // has (its track's settings); 1080p at 30 fps unless a test says otherwise.
   captured: { width?: number; height?: number; frameRate?: number };
+  // The encodings LiveKit made for the screen share, by rid, smallest first:
+  // it names them by how many there are (q; q,h; q,h,f). And whether the
+  // browser leaves the capture as it was when constrained (it may).
+  rids: string[];
+  ignoreConstraints: boolean;
   // Issue #658: the captures made, what each restart was asked for, when set
   // the next restart waits for the test or fails, the devices the browser
   // lists, what each listing was asked, and the audio contexts made.
@@ -156,12 +163,22 @@ interface StubSettings {
   height?: number;
   frameRate?: number;
 }
+interface StubParameters {
+  encodings: RTCRtpEncodingParameters[];
+}
+interface StubSender {
+  parameters: StubParameters;
+  getParameters: () => StubParameters;
+  setParameters: (parameters: StubParameters) => Promise<void>;
+}
 interface StubScreenTrack {
   source: string;
   stopped: number;
-  mediaStreamTrack: { readyState: string; enabled: boolean; getSettings: () => StubSettings; addEventListener: (type: string, fn: () => void) => void; ended: () => void };
+  mediaStreamTrack: { readyState: string; enabled: boolean; contentHint: string; constraints: MediaTrackConstraints[]; getSettings: () => StubSettings; applyConstraints: (constraints: MediaTrackConstraints) => Promise<void>; addEventListener: (type: string, fn: () => void) => void; ended: () => void };
   // What getSettings answers; a test may change it, as a capture can change size.
   settings: StubSettings;
+  sender?: StubSender;
+  publishOptions?: unknown;
   stop: () => void;
 }
 // A camera's capture, as the browser gives it and as the page wraps it.
@@ -183,6 +200,10 @@ interface StubRemotePub {
   isDesired?: boolean;
   trackSid?: string;
   setSubscribed: (on: boolean) => void;
+  setVideoQuality?: (quality: number) => void;
+  setVideoDimensions?: (dimensions: { width: number; height: number }) => void;
+  // The SDK's requestedMaxQuality ?? HIGH: what the publication is capped at.
+  videoQuality?: number;
 }
 const state = vi.hoisted((): Stub => {
   const stubFactory = () => () => undefined;
@@ -206,6 +227,7 @@ const state = vi.hoisted((): Stub => {
     tracks: [],
     room: null,
     connectLog: null,
+    duringConnect: null,
     audioContexts: 0,
     baseline: new Set(Object.getOwnPropertyNames(globalThis)),
     roomOptions: undefined,
@@ -221,6 +243,8 @@ const state = vi.hoisted((): Stub => {
     pending: new Map(),
     owners: new Map(),
     captured: { width: 1920, height: 1080, frameRate: 30 },
+    rids: ['q', 'h'],
+    ignoreConstraints: false,
     medias: [],
     restarts: [],
     restart: null,
@@ -263,7 +287,19 @@ vi.mock('livekit-client', () => {
       mediaStreamTrack: {
         readyState: 'live',
         enabled: true,
+        contentHint: 'motion',
+        constraints: [],
         getSettings: () => ({ ...track.settings }),
+        applyConstraints: (constraints) => {
+          track.mediaStreamTrack.constraints.push(constraints);
+          const max = (value: ConstrainULong | undefined): number | undefined => typeof value === 'object' && 'max' in value && typeof value.max === 'number' ? value.max : undefined;
+          const width = max(constraints.width);
+          const height = max(constraints.height);
+          const frameRate = max(constraints.frameRate);
+          if (!state.ignoreConstraints) track.settings = { ...track.settings, ...(width === undefined ? {} : { width }), ...(height === undefined ? {} : { height }), ...(frameRate === undefined ? {} : { frameRate }) };
+          state.calls.push('constrain');
+          return Promise.resolve();
+        },
         addEventListener: (type, fn) => {
           if (type === 'ended') listeners.push(fn);
         },
@@ -273,6 +309,17 @@ vi.mock('livekit-client', () => {
           for (const fn of listeners) fn();
         },
       },
+      sender: source === 'screen_share' ? {
+        parameters: { encodings: state.rids.map((rid) => ({ rid })) },
+        getParameters() {
+          return { ...this.parameters, encodings: this.parameters.encodings.map((encoding) => ({ ...encoding })) };
+        },
+        setParameters(parameters) {
+          this.parameters = parameters;
+          state.calls.push('parameters');
+          return Promise.resolve();
+        },
+      } : undefined,
       stop: () => {
         track.stopped++;
         track.mediaStreamTrack.readyState = 'ended';
@@ -448,6 +495,8 @@ vi.mock('livekit-client', () => {
       return Promise.resolve(state.devices.filter((d) => d.kind === kind));
     }
     remoteParticipants = state.remote;
+    // The room's own name, as the server says it once connected.
+    name = 'sfu-room-name-1581';
     localParticipant = {
       identity: 'p7',
       get permissions() {
@@ -525,6 +574,7 @@ vi.mock('livekit-client', () => {
       state.connectOptions = options;
       state.calls.push('connect');
       if (state.connectLog !== null) state.logger.methodFactory('warn')(`${state.connectLog} ${token}`, { token });
+      state.duringConnect?.();
       return Promise.resolve();
     }
     disconnect() {
@@ -563,6 +613,7 @@ vi.mock('livekit-client', () => {
       ParticipantPermissionsChanged: 'ppc',
       MediaDevicesChanged: 'mdc',
       ActiveDeviceChanged: 'adc',
+      SignalConnected: 'sc',
     },
     TrackEvent: { Ended: 'ended' },
     PublishTrackError,
@@ -574,6 +625,7 @@ vi.mock('livekit-client', () => {
       Kind: { Audio: 'audio', Video: 'video' },
       Source: { Microphone: 'microphone', Camera: 'camera', ScreenShare: 'screen_share', ScreenShareAudio: 'screen_share_audio', Unknown: 'unknown' },
     },
+    VideoQuality: { LOW: 0, HIGH: 2 },
     VideoPreset: class {
       width: number;
       height: number;
@@ -643,6 +695,7 @@ beforeEach(() => {
   state.tracks.length = 0;
   state.room = null;
   state.connectLog = null;
+  state.duringConnect = null;
   state.audioContexts = 0;
   state.roomOptions = undefined;
   state.connectOptions = undefined;
@@ -708,7 +761,7 @@ const events = {
   onDisconnected: () => undefined,
   onSpeakers: () => undefined,
   onScreenEnded: () => undefined,
-  onShareTracks: () => undefined,
+  onStreamTracks: () => undefined,
   onMicrophoneLost: () => undefined,
   onDevicesChanged: () => undefined,
   onOutputMoved: () => undefined,
@@ -839,6 +892,30 @@ describe('the SDK adapter', () => {
     const lines = sdkLog.recent().join('\n');
     expect(lines).toContain('joined');
     expect(lines).not.toMatch(/room-abcdef|tok-abcdef/);
+  });
+
+  it("holds the room's own name once connected, though the caller gave none (the companion's grant names no room)", async () => {
+    const room = newLiveKitRoom();
+    room.setCompanion?.(true);
+    await room.connect('wss://lk.example', 'tok-abcdef', '', false, events);
+    state.logger.methodFactory('warn')('joined sfu-room-name-1581 as p7.screen');
+    const lines = sdkLog.recent().join('\n');
+    expect(lines).toContain('joined');
+    expect(lines).not.toContain('sfu-room-name-1581');
+  });
+
+  it("holds the room's own name at the signal event, before connect resolves", async () => {
+    const room = newLiveKitRoom();
+    room.setCompanion?.(true);
+    const lines: string[] = [];
+    state.duringConnect = () => {
+      state.handlers.get('sc')?.();
+      state.logger.methodFactory('warn')('joined sfu-room-name-1581 as p7.screen');
+      lines.push(sdkLog.recent().join('\n'));
+    };
+    await room.connect('wss://lk.example', 'tok-abcdef', '', false, events);
+    expect(lines.join('\n')).toContain('joined');
+    expect(lines.join('\n')).not.toContain('sfu-room-name-1581');
   });
 
   it('quiets the SDK when the module loads, at warn, without persisting the level', () => {
@@ -1114,18 +1191,33 @@ describe('the microphone chosen', () => {
 });
 
 describe('the watch view', () => {
+  let sids = 0;
   const remotePub = (source: string, kind = source === 'microphone' || source === 'screen_share_audio' ? 'audio' : 'video'): StubRemotePub => {
     const p: StubRemotePub = {
       source,
       kind,
+      trackSid: `TR_${String(++sids)}`,
       isSubscribed: false,
+      videoQuality: 2,
       setSubscribed: (on) => {
         p.isSubscribed = on;
         state.calls.push(`subscribe ${source} ${String(on)}`);
       },
+      // As the SDK: the cap is the publication's, and asking for the same
+      // one again sends nothing.
+      setVideoQuality: (quality) => {
+        if (p.videoQuality === quality) return;
+        p.videoQuality = quality;
+        state.calls.push(`quality ${source} ${String(quality)}`);
+      },
+      setVideoDimensions: ({ width, height }) => {
+        p.videoQuality = 2;
+        state.calls.push(`dimensions ${source} ${String(width)}x${String(height)}`);
+      },
     };
     return p;
   };
+  const layers = () => state.calls.filter((c) => c.startsWith('quality') || c.startsWith('dimensions'));
 
   // The SDK stops no track it unpublishes, so that a share's capture
   // survives its room (issue #516); the adapter stops every track itself.
@@ -1140,11 +1232,11 @@ describe('the watch view', () => {
     const mic = remotePub('microphone');
     const screen = remotePub('screen_share');
     const sound = remotePub('screen_share_audio');
-    state.remote.set('p8', { trackPublications: new Map([['a', mic], ['b', screen], ['c', sound]]) });
+    state.remote.set('p8', { identity: 'p8', trackPublications: new Map([['a', mic], ['b', screen], ['c', sound]]) } as unknown as { trackPublications: Map<string, StubRemotePub> });
     const room = newLiveKitRoom();
     await room.connect('wss://lk.example', 'tok-abcdef', 'room-abcdef', false, events);
     expect([mic.isSubscribed, screen.isSubscribed, sound.isSubscribed]).toEqual([true, false, false]);
-    room.setWatching(true);
+    room.setWatches(new Set([8]), null);
     expect([mic.isSubscribed, screen.isSubscribed, sound.isSubscribed]).toEqual([true, true, true]);
     // A track published later follows the same choice; a camera never.
     const later = remotePub('microphone');
@@ -1152,14 +1244,124 @@ describe('the watch view', () => {
     state.handlers.get('tp')?.(later);
     state.handlers.get('tp')?.(camera);
     expect([later.isSubscribed, camera.isSubscribed]).toEqual([true, false]);
-    room.setWatching(false);
+    room.setWatches(new Set(), null);
     expect([mic.isSubscribed, screen.isSubscribed, sound.isSubscribed]).toEqual([true, false, false]);
+  });
+
+  it('with two sharers subscribes picture and sound per Watch, leaves the focused one to adaptive stream, holds the other at LOW, and never wants unwatched or own tracks', async () => {
+    const eight = remotePub('screen_share');
+    const eightSound = remotePub('screen_share_audio');
+    const nine = remotePub('screen_share');
+    const nineSound = remotePub('screen_share_audio');
+    const unwatched = remotePub('screen_share');
+    const own = remotePub('screen_share');
+    state.remote.set('p8', { identity: 'p8', trackPublications: new Map([['a', eight], ['b', eightSound]]) } as unknown as { trackPublications: Map<string, StubRemotePub> });
+    state.remote.set('p9', { identity: 'p9', trackPublications: new Map([['a', nine], ['b', nineSound]]) } as unknown as { trackPublications: Map<string, StubRemotePub> });
+    state.remote.set('p10', { identity: 'p10', trackPublications: new Map([['a', unwatched]]) } as unknown as { trackPublications: Map<string, StubRemotePub> });
+    state.remote.set('p7', { identity: 'p7', trackPublications: new Map([['a', own]]) } as unknown as { trackPublications: Map<string, StubRemotePub> });
+    const room = newLiveKitRoom();
+    await room.connect('wss://lk.example', 'tok-abcdef', 'room-abcdef', false, events);
+    room.setWatches(new Set([8, 9]), 8);
+    expect([eight.isSubscribed, eightSound.isSubscribed, nine.isSubscribed, nineSound.isSubscribed, unwatched.isSubscribed, own.isSubscribed]).toEqual([true, true, true, true, false, false]);
+    // 8, focused, is never capped: adaptive stream sizes it to its element.
+    expect(layers()).toEqual(['quality screen_share 0']);
+    room.setWatches(new Set([8, 9]), 9);
+    // 8 is held; 9's cap is lifted by a bound above every layer, so the
+    // element's size decides (a phone gets a smaller layer than a stage).
+    expect(layers()).toEqual(['quality screen_share 0', 'quality screen_share 0', 'dimensions screen_share 7680x4320']);
+    // Asked again, nothing changes.
+    room.setWatches(new Set([8, 9]), 9);
+    expect(layers()).toHaveLength(3);
+  });
+
+  it('a stream held at LOW, let go and watched again focused, has its cap lifted: the cap is the publication\'s', async () => {
+    const nine = remotePub('screen_share');
+    state.remote.set('p9', { identity: 'p9', trackPublications: new Map([['a', nine]]) } as unknown as { trackPublications: Map<string, StubRemotePub> });
+    const room = newLiveKitRoom();
+    await room.connect('wss://lk.example', 'tok-abcdef', 'room-abcdef', false, events);
+    room.setWatches(new Set([9]), null);
+    expect(layers()).toEqual(['quality screen_share 0']);
+    room.setWatches(new Set(), null);
+    expect(nine.isSubscribed).toBe(false);
+    room.setWatches(new Set([9]), 9);
+    expect(layers()).toEqual(['quality screen_share 0', 'dimensions screen_share 7680x4320']);
+  });
+
+  it('after a full reconnect a new publication under the same sid is capped at LOW again', async () => {
+    const eight = remotePub('screen_share');
+    const nine = remotePub('screen_share');
+    state.remote.set('p8', { identity: 'p8', trackPublications: new Map([['a', eight]]) } as unknown as { trackPublications: Map<string, StubRemotePub> });
+    state.remote.set('p9', { identity: 'p9', trackPublications: new Map([['a', nine]]) } as unknown as { trackPublications: Map<string, StubRemotePub> });
+    const room = newLiveKitRoom();
+    await room.connect('wss://lk.example', 'tok-abcdef', 'room-abcdef', false, events);
+    room.setWatches(new Set([8, 9]), 8);
+    expect(layers()).toEqual(['quality screen_share 0']);
+    // The SDK made the room anew: 9's publication is a new one, uncapped,
+    // under the same sid.
+    const again = remotePub('screen_share');
+    again.trackSid = nine.trackSid;
+    state.remote.set('p9', { identity: 'p9', trackPublications: new Map([['a', again]]) } as unknown as { trackPublications: Map<string, StubRemotePub> });
+    state.handlers.get('rd')?.();
+    expect(again.isSubscribed).toBe(true);
+    expect(layers()).toEqual(['quality screen_share 0', 'quality screen_share 0']);
+  });
+
+  it("a desktop companion's stream, published as p8.screen, is 8's: watched, held to its layer and played into 8's tile; a viewer's identity is nobody's stream", async () => {
+    const told: unknown[] = [];
+    const screen = remotePub('screen_share');
+    const sound = remotePub('screen_share_audio');
+    const viewerShare = remotePub('screen_share');
+    state.remote.set('p8.screen', { identity: 'p8.screen', trackPublications: new Map([['a', screen], ['b', sound]]) } as unknown as { trackPublications: Map<string, StubRemotePub> });
+    state.remote.set('p9.view', { identity: 'p9.view', trackPublications: new Map([['a', viewerShare]]) } as unknown as { trackPublications: Map<string, StubRemotePub> });
+    const room = newLiveKitRoom();
+    await room.connect('wss://lk.example', 'tok-abcdef', 'room-abcdef', false, { ...events, onStreamTracks: (p, t) => told.push([p, t]) });
+    expect([screen.isSubscribed, sound.isSubscribed]).toEqual([false, false]);
+    room.setWatches(new Set([8, 9]), null);
+    expect([screen.isSubscribed, sound.isSubscribed, viewerShare.isSubscribed]).toEqual([true, true, false]);
+    expect(layers()).toEqual(['quality screen_share 0']);
+    room.setWatches(new Set([8]), 8);
+    expect(layers().at(-1)).toBe('dimensions screen_share 7680x4320');
+    const attached: string[] = [];
+    const track = (source: string, kind: string) => ({
+      source,
+      kind,
+      sid: source,
+      attach: (el?: HTMLMediaElement) => {
+        attached.push(`${source} ${el?.tagName ?? 'new'}`);
+        return el ?? document.createElement('audio');
+      },
+      detach: () => [],
+    });
+    const sink = { video: document.createElement('video'), audio: document.createElement('audio') };
+    room.attachStream(8, sink);
+    const companion = { identity: 'p8.screen' };
+    state.handlers.get('ts')?.(track('screen_share', 'video'), screen, companion);
+    state.handlers.get('ts')?.(track('screen_share_audio', 'audio'), sound, companion);
+    // Played into 8's tile, and never into the page as a voice.
+    expect(attached).toEqual(['screen_share VIDEO', 'screen_share_audio AUDIO']);
+    expect(document.body.querySelectorAll('audio')).toHaveLength(0);
+    expect(told).toEqual([[8, { video: true, audio: false }], [8, { video: true, audio: true }]]);
+    expect(screen.isSubscribed).toBe(true);
+    // Unwatched, it is let go.
+    room.setWatches(new Set(), null);
+    expect([screen.isSubscribed, sound.isSubscribed]).toEqual([false, false]);
+  });
+
+  it("never watches this person's own stream, from their own identity or their companion, whatever this page connected as", async () => {
+    const companionScreen = remotePub('screen_share');
+    const otherScreen = remotePub('screen_share');
+    state.remote.set('p7.screen', { identity: 'p7.screen', trackPublications: new Map([['a', companionScreen]]) } as unknown as { trackPublications: Map<string, StubRemotePub> });
+    state.remote.set('p8', { identity: 'p8', trackPublications: new Map([['a', otherScreen]]) } as unknown as { trackPublications: Map<string, StubRemotePub> });
+    const room = newLiveKitRoom();
+    await room.connect('wss://lk.example', 'tok-abcdef', 'room-abcdef', false, events);
+    room.setWatches(new Set([7, 8]), 7);
+    expect([companionScreen.isSubscribed, otherScreen.isSubscribed]).toEqual([false, true]);
   });
 
   it("plays a share into the view's elements, not into the page, and says what arrived", async () => {
     const told: unknown[] = [];
     const room = newLiveKitRoom();
-    await room.connect('wss://lk.example', 'tok-abcdef', 'room-abcdef', false, { ...events, onShareTracks: (t) => told.push(t) });
+    await room.connect('wss://lk.example', 'tok-abcdef', 'room-abcdef', false, { ...events, onStreamTracks: (p, t) => told.push([p, t]) });
     const attached: string[] = [];
     const remote = (source: string, kind: string) => ({
       source,
@@ -1176,19 +1378,19 @@ describe('the watch view', () => {
     });
     const video = remote('screen_share', 'video');
     const audio = remote('screen_share_audio', 'audio');
-    room.setWatching(true);
+    room.setWatches(new Set([8]), null);
     const sharer = { identity: 'p8' };
     // Arrives before the view is open: kept, and attached once it opens.
     state.handlers.get('ts')?.(video, remotePub('screen_share'), sharer);
     const sink = { video: document.createElement('video'), audio: document.createElement('audio') };
-    room.attachShare(sink);
+    room.attachStream(8, sink);
     state.handlers.get('ts')?.(audio, remotePub('screen_share_audio'), sharer);
     expect(attached).toEqual(['screen_share VIDEO', 'screen_share_audio AUDIO']);
     expect(document.body.querySelectorAll('audio')).toHaveLength(0);
-    expect(told).toEqual([{ video: true, audio: false }, { video: true, audio: true }]);
+    expect(told).toEqual([[8, { video: true, audio: false }], [8, { video: true, audio: true }]]);
     state.handlers.get('tu')?.(video);
-    expect(told.at(-1)).toEqual({ video: false, audio: true });
-    room.attachShare(null);
+    expect(told.at(-1)).toEqual([8, { video: false, audio: true }]);
+    room.attachStream(8, null);
     expect(attached.at(-1)).toBe('detach screen_share_audio AUDIO');
   });
 });
@@ -1201,41 +1403,40 @@ describe('sharing a screen', () => {
     return room;
   }
 
-  it("asks the picker for up to 3840x2160 at up to 60 fps with unprocessed sound, tab and system sound offered, this page's own sound and this tab left out", async () => {
+  it("asks the picker for the default 1080p30 with unprocessed sound, tab and system sound offered, this page's own sound and this tab left out", async () => {
     const room = await connected();
     expect(await room.pickScreen()).toEqual({ audio: true });
     expect(state.screenOptions).toEqual({
       video: true,
       audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false, channelCount: 2, restrictOwnAudio: true },
-      resolution: { width: 3840, height: 2160, frameRate: 60 },
+      resolution: { width: 1920, height: 1080, frameRate: 30 },
       contentHint: 'motion',
       systemAudio: 'include',
       selfBrowserSurface: 'exclude',
       surfaceSwitching: 'include',
       suppressLocalAudioPlayback: false,
     });
-    // Nothing is published by picking.
-    expect(state.calls).toEqual(['pick']);
+    // Nothing is published by picking; the chosen caps are held on the capture.
+    expect(state.calls).toEqual(['pick', 'constrain']);
   });
 
-  // Issue #554: there is no choice of what a share is for; every share keeps
-  // motion, and the rest of the picker's options are as they were.
-  it('captures every share as motion', () => {
+  it('uses motion for the default and detail for a 15 fps choice', () => {
     expect(captureOptions()).toEqual({
       video: true,
       audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false, channelCount: 2, restrictOwnAudio: true },
-      resolution: { width: 3840, height: 2160, frameRate: 60 },
+      resolution: { width: 1920, height: 1080, frameRate: 30 },
       contentHint: 'motion',
       systemAudio: 'include',
       selfBrowserSurface: 'exclude',
       surfaceSwitching: 'include',
       suppressLocalAudioPlayback: false,
     });
+    expect(captureOptions({ resolution: '720p', frameRate: 15 }).contentHint).toBe('detail');
   });
 
-  // Issue #565: the picture's encodings follow its track's settings, read
-  // after the picker. A 1080p30 capture has a 720p layer and no 1080p one.
-  it('publishes a 1080p picture as captured with a 720p layer at 15 fps, and the sound as stereo music', async () => {
+  // The picture's encodings follow its track's settings, read after the picker.
+  // A 1080p30 capture has a 720p layer and no 1080p one.
+  it('publishes a 1080p picture as captured with a 720p layer at 30 fps, and the sound as stereo music', async () => {
     const room = await connected();
     await room.pickScreen();
     await room.publishScreen();
@@ -1246,7 +1447,7 @@ describe('sharing a screen', () => {
           source: 'screen_share',
           simulcast: true,
           screenShareEncoding: { maxBitrate: 6_000_000, maxFramerate: 30 },
-          screenShareSimulcastLayers: [{ width: 1280, height: 720, encoding: { maxBitrate: 1_500_000, maxFramerate: 15 } }],
+          screenShareSimulcastLayers: [{ width: 1280, height: 720, encoding: { maxBitrate: 2_000_000, maxFramerate: 30 } }],
         },
       },
       {
@@ -1256,17 +1457,70 @@ describe('sharing a screen', () => {
     ]);
   });
 
-  it('publishes a 4K60 picture at 60 fps and 18 Mb/s with layers of 720p at 15 fps and 1080p at 30 fps', async () => {
-    state.captured = { width: 3840, height: 2160, frameRate: 60 };
+  it('changes a live capture and its sender encodings without republishing', async () => {
     const room = await connected();
     await room.pickScreen();
+    await room.publishScreen();
+    const track = state.screenTracks[0];
+    if (track === undefined) throw new Error('no screen track');
+    const published = [...state.published];
+    state.calls.length = 0;
+    await room.setShareQuality({ resolution: '720p', frameRate: 15 });
+    expect(track.mediaStreamTrack.contentHint).toBe('detail');
+    expect(track.mediaStreamTrack.constraints).toEqual([{ width: { max: 1920 }, height: { max: 1080 }, frameRate: { max: 30 } }, { width: { max: 1280 }, height: { max: 720 }, frameRate: { max: 15 } }]);
+    expect(track.sender?.parameters.encodings).toEqual([
+      { rid: 'q', maxBitrate: 6_000_000, maxFramerate: 15, scaleResolutionDownBy: 1 },
+      { rid: 'h', maxBitrate: 6_000_000, maxFramerate: 15, scaleResolutionDownBy: 1 },
+    ]);
+    expect(state.calls).toEqual(['constrain', 'parameters']);
+    expect(state.published).toEqual(published);
+  });
+
+  // LiveKit's real layouts: one encoding is q, two are q,h, three are q,h,f.
+  const q = (maxBitrate: number, maxFramerate: number, scaleResolutionDownBy: number, rid: string) => ({ rid, maxBitrate, maxFramerate, scaleResolutionDownBy });
+  it.each([
+    { name: '1 encoding, 720p to Source', rids: ['q'], from: { resolution: '720p', frameRate: 30 }, to: { resolution: 'source', frameRate: 60 }, want: [q(18_000_000, 60, 1, 'q')] },
+    { name: '2 encodings, 720p to Source', rids: ['q', 'h'], from: { resolution: '720p', frameRate: 30 }, to: { resolution: 'source', frameRate: 60 }, want: [q(2_000_000, 30, 3, 'q'), q(18_000_000, 60, 1, 'h')] },
+    { name: '3 encodings, 720p to Source', rids: ['q', 'h', 'f'], from: { resolution: '720p', frameRate: 30 }, to: { resolution: 'source', frameRate: 60 }, want: [q(2_000_000, 30, 3, 'q'), q(4_000_000, 30, 2, 'h'), q(18_000_000, 60, 1, 'f')] },
+    { name: '3 encodings, Source to 720p', rids: ['q', 'h', 'f'], from: { resolution: 'source', frameRate: 60 }, to: { resolution: '720p', frameRate: 30 }, want: [q(6_000_000, 30, 1, 'q'), q(6_000_000, 30, 1, 'h'), q(6_000_000, 30, 1, 'f')] },
+    { name: '2 encodings, 1080p to 720p', rids: ['q', 'h'], from: { resolution: '1080p', frameRate: 30 }, to: { resolution: '720p', frameRate: 30 }, want: [q(6_000_000, 30, 1, 'q'), q(6_000_000, 30, 1, 'h')] },
+  ] as const)('puts the chosen top on the highest encoding: $name', async ({ rids, from, to, want }) => {
+    state.captured = { width: 3840, height: 2160, frameRate: 60 };
+    state.rids = [...rids];
+    const room = await connected();
+    await room.pickScreen(from);
+    await room.publishScreen();
+    await room.setShareQuality(to);
+    const encodings = state.screenTracks[0]?.sender?.parameters.encodings;
+    // The capture is 4K until constrained; its size follows the constraint.
+    expect(encodings).toEqual(want);
+  });
+
+  it('holds the chosen cap at publish when the picker returns a larger capture than asked', async () => {
+    state.captured = { width: 3840, height: 2160, frameRate: 60 };
+    state.ignoreConstraints = true;
+    const room = await connected();
+    await room.pickScreen({ resolution: '1080p', frameRate: 30 });
+    await room.publishScreen();
+    const track = state.screenTracks[0];
+    expect(track?.mediaStreamTrack.constraints).toEqual([{ width: { max: 1920 }, height: { max: 1080 }, frameRate: { max: 30 } }]);
+    expect(track?.sender?.parameters.encodings).toEqual([
+      { rid: 'q', maxBitrate: 2_000_000, maxFramerate: 30, scaleResolutionDownBy: 3 },
+      { rid: 'h', maxBitrate: 6_000_000, maxFramerate: 30, scaleResolutionDownBy: 2 },
+    ]);
+  });
+
+  it('publishes a Source 4K60 picture at 60 fps and 18 Mb/s with layers of 720p30 and 1080p30', async () => {
+    state.captured = { width: 3840, height: 2160, frameRate: 60 };
+    const room = await connected();
+    await room.pickScreen({ resolution: 'source', frameRate: 60 });
     await room.publishScreen();
     expect(state.published[0]?.options).toEqual({
       source: 'screen_share',
       simulcast: true,
       screenShareEncoding: { maxBitrate: 18_000_000, maxFramerate: 60 },
       screenShareSimulcastLayers: [
-        { width: 1280, height: 720, encoding: { maxBitrate: 1_500_000, maxFramerate: 15 } },
+        { width: 1280, height: 720, encoding: { maxBitrate: 2_000_000, maxFramerate: 30 } },
         { width: 1920, height: 1080, encoding: { maxBitrate: 4_000_000, maxFramerate: 30 } },
       ],
     });
@@ -1362,7 +1616,7 @@ describe('sharing a screen', () => {
           source: 'screen_share',
           simulcast: true,
           screenShareEncoding: { maxBitrate: 6_000_000, maxFramerate: 30 },
-          screenShareSimulcastLayers: [{ width: 1280, height: 720, encoding: { maxBitrate: 1_500_000, maxFramerate: 15 } }],
+          screenShareSimulcastLayers: [{ width: 1280, height: 720, encoding: { maxBitrate: 2_000_000, maxFramerate: 30 } }],
         },
         { source: 'screen_share_audio', audioPreset: { maxBitrate: 128000 }, dtx: false, red: false, forceStereo: true },
       ]);
@@ -1378,9 +1632,9 @@ describe('sharing a screen', () => {
   // Issue #565: the size is read at each publish, not kept from the picker,
   // so a capture whose source changed size (the browser lets the sharer
   // switch what is shared) is published on the next connection as it is now.
-  it('publishes a kept capture at the size it has when the next connection publishes it', async () => {
+  it('publishes a kept Source capture at the size it has when the next connection publishes it', async () => {
     const old = await connected();
-    await old.pickScreen();
+    await old.pickScreen({ resolution: 'source', frameRate: 60 });
     await old.publishScreen();
     const kept = old.keepScreen();
     await old.close();
@@ -1389,6 +1643,7 @@ describe('sharing a screen', () => {
     if (video === undefined) throw new Error('no picture captured');
     video.settings = { width: 2560, height: 1440, frameRate: 60 };
     const next = await connected();
+    await next.setShareQuality({ resolution: 'source', frameRate: 60 });
     next.adoptScreen(kept);
     state.published.length = 0;
     await next.publishScreen();
@@ -1397,7 +1652,7 @@ describe('sharing a screen', () => {
       simulcast: true,
       screenShareEncoding: { maxBitrate: 10_000_000, maxFramerate: 60 },
       screenShareSimulcastLayers: [
-        { width: 1280, height: 720, encoding: { maxBitrate: 1_500_000, maxFramerate: 15 } },
+        { width: 1280, height: 720, encoding: { maxBitrate: 2_000_000, maxFramerate: 30 } },
         { width: 1920, height: 1080, encoding: { maxBitrate: 4_000_000, maxFramerate: 30 } },
       ],
     });
@@ -1475,6 +1730,7 @@ describe('sharing a screen', () => {
       expect(outcome.value).toBe('pending');
       vi.advanceTimersByTime(grantWait - 1);
       grant();
+      await settle();
       await settle();
       expect(outcome.value).toBe('published');
       expect(state.published.map((p) => p.source)).toEqual(['screen_share', 'screen_share_audio']);
@@ -1566,7 +1822,7 @@ describe('sharing a screen', () => {
       },
     );
     await settle();
-    expect(state.calls).toEqual(['pick', 'publish screen_share']);
+    expect(state.calls).toEqual(['pick', 'constrain', 'publish screen_share']);
     const kept = room.keepScreen();
     expect(state.screenTracks.map((t) => t.mediaStreamTrack.enabled), 'blanked at once').toEqual([false, false]);
     held.resolve(undefined);
@@ -1620,13 +1876,12 @@ describe('sharing a screen', () => {
   });
 });
 
-// Issue #565: a share's encodings follow what was captured. The top layer is
-// the capture at its own frame rate up to 60 fps, its bitrate by the longer
-// side (6, 10 and 18 Mb/s up to 1920, up to 2560 and beyond); below it 720p
-// at 15 fps and 1080p at 30 fps, smallest first, each left out unless it is
-// smaller than the capture.
+// Source keeps the capture's own size and rate up to 4K60. The top layer's
+// bitrate follows its longer side; below it are 720p30 at 2 Mbps and 1080p30,
+// smallest first, each left out unless it is smaller than the capture.
 describe("a share's encodings", () => {
-  const p720: ShareLayer = { width: 1280, height: 720, maxBitrate: 1_500_000, maxFramerate: 15 };
+  const sourceEncodings = (captured: { width?: number; height?: number; frameRate?: number }) => shareEncodings(captured, { resolution: 'source', frameRate: 60 });
+  const p720: ShareLayer = { width: 1280, height: 720, maxBitrate: 2_000_000, maxFramerate: 30 };
   const p1080: ShareLayer = { width: 1920, height: 1080, maxBitrate: 4_000_000, maxFramerate: 30 };
 
   it.each<{ readonly width: number; readonly height: number; readonly fps: number; readonly bitrate: number; readonly lower: readonly ShareLayer[] }>([
@@ -1639,7 +1894,7 @@ describe("a share's encodings", () => {
     { width: 3840, height: 2160, fps: 30, bitrate: 18_000_000, lower: [p720, p1080] },
     { width: 3840, height: 2160, fps: 60, bitrate: 18_000_000, lower: [p720, p1080] },
   ])('a $width x $height capture at $fps fps', ({ width, height, fps, bitrate, lower }) => {
-    expect(shareEncodings({ width, height, frameRate: fps })).toEqual({ top: { width, height, maxBitrate: bitrate, maxFramerate: fps }, lower });
+    expect(sourceEncodings({ width, height, frameRate: fps })).toEqual({ top: { width, height, maxBitrate: bitrate, maxFramerate: fps }, lower });
   });
 
   it.each<{ readonly what: string; readonly width: number; readonly height: number; readonly bitrate: number; readonly lower: readonly ShareLayer[] }>([
@@ -1657,23 +1912,23 @@ describe("a share's encodings", () => {
     // Inside both boxes: no layer would be smaller, so none.
     { what: 'a small window', width: 1000, height: 700, bitrate: 6_000_000, lower: [] },
   ])('$what capture ($width x $height at 60 fps)', ({ width, height, bitrate, lower }) => {
-    expect(shareEncodings({ width, height, frameRate: 60 })).toEqual({ top: { width, height, maxBitrate: bitrate, maxFramerate: 60 }, lower });
+    expect(sourceEncodings({ width, height, frameRate: 60 })).toEqual({ top: { width, height, maxBitrate: bitrate, maxFramerate: 60 }, lower });
   });
 
   it('never sends more than 60 fps, nor a lower layer faster than the top', () => {
-    expect(shareEncodings({ width: 3840, height: 2160, frameRate: 120 }).top.maxFramerate).toBe(60);
-    expect(shareEncodings({ width: 3840, height: 2160, frameRate: 24 })).toEqual({
+    expect(sourceEncodings({ width: 3840, height: 2160, frameRate: 120 }).top.maxFramerate).toBe(60);
+    expect(sourceEncodings({ width: 3840, height: 2160, frameRate: 24 })).toEqual({
       top: { width: 3840, height: 2160, maxBitrate: 18_000_000, maxFramerate: 24 },
-      lower: [p720, { ...p1080, maxFramerate: 24 }],
+      lower: [{ ...p720, maxFramerate: 24 }, { ...p1080, maxFramerate: 24 }],
     });
-    expect(shareEncodings({ width: 1920, height: 1080, frameRate: 10 }).lower).toEqual([{ ...p720, maxFramerate: 10 }]);
+    expect(sourceEncodings({ width: 1920, height: 1080, frameRate: 10 }).lower).toEqual([{ ...p720, maxFramerate: 10 }]);
   });
 
-  it('takes a capture whose settings do not say its size as 1080p, and one without a frame rate as 60 fps', () => {
-    const top = { width: 1920, height: 1080, maxBitrate: 6_000_000, maxFramerate: 60 };
-    expect(shareEncodings({})).toEqual({ top, lower: [p720] });
-    expect(shareEncodings({ width: 0, height: 0, frameRate: Number.NaN })).toEqual({ top, lower: [p720] });
-    expect(shareEncodings({ width: 3840 })).toEqual({ top, lower: [p720] });
+  it('takes a Source capture whose settings do not say its size as 4K, and one without a frame rate as 60 fps', () => {
+    const top = { width: 3840, height: 2160, maxBitrate: 18_000_000, maxFramerate: 60 };
+    expect(sourceEncodings({})).toEqual({ top, lower: [p720, p1080] });
+    expect(sourceEncodings({ width: 0, height: 0, frameRate: Number.NaN })).toEqual({ top, lower: [p720, p1080] });
+    expect(sourceEncodings({ width: 3840 })).toEqual({ top, lower: [p720, p1080] });
   });
 });
 
@@ -1885,10 +2140,10 @@ describe('the volume of each person', () => {
     const room = await connected();
     const sink = { video: document.createElement('video'), audio: document.createElement('audio') };
     sink.audio.volume = 0.7;
-    room.attachShare(sink);
+    room.attachStream(8, sink);
     const sound = { source: 'screen_share_audio', kind: 'audio', sid: 's', attach: (el?: HTMLMediaElement) => el, detach: () => [] };
     room.setVolume(8, 0);
-    room.setWatching(true);
+    room.setWatches(new Set([8]), null);
     state.handlers.get('ts')?.(sound, { isSubscribed: true, setSubscribed: () => undefined }, { identity: 'p8' });
     room.setVolume(8, 0.2);
     expect(sink.audio.volume).toBe(0.7);
@@ -2071,12 +2326,11 @@ describe('a switch while the first capture is under way', () => {
 
 // ---- the camera (ADR-015)
 
-describe('wanted: kind and source together (S1)', () => {
-  const none = { watching: false, viewing: false, shown: false, claimed: false };
-  const all = { watching: true, viewing: true, shown: true, claimed: true };
+describe('wanted: kind, source and publisher together (S1)', () => {
+  const none = { watching: new Set<number>(), focused: null, own: 7, viewing: false, shown: false, claimed: false, voice: true };
+  const all = { watching: new Set([8, 9]), focused: 8, own: 7, viewing: true, shown: true, claimed: true, voice: true };
   const { Source, Kind } = Track;
   it.each([
-    // source, kind, with everything wanted, with nothing wanted
     [Source.Microphone, Kind.Audio, true, true],
     [Source.Microphone, Kind.Video, false, false],
     [Source.Camera, Kind.Video, true, false],
@@ -2088,22 +2342,130 @@ describe('wanted: kind and source together (S1)', () => {
     [Source.Unknown, Kind.Video, false, false],
     [Source.Microphone, undefined, false, false],
   ])('%s as %s: %s while viewing, watching and claimed; %s otherwise', (source, kind, wantedAll, wantedNone) => {
-    expect(wanted(source, kind, all)).toBe(wantedAll);
-    expect(wanted(source, kind, none)).toBe(wantedNone);
+    expect(wanted(source, kind, 8, all)).toBe(wantedAll);
+    expect(wanted(source, kind, 8, none)).toBe(wantedNone);
   });
 
-  it('no camera is wanted while the video is not shown here, even with the call view open; microphones and a watched share are unaffected', () => {
-    const away = { watching: true, viewing: true, shown: false, claimed: true };
-    expect(wanted(Source.Camera, Kind.Video, away)).toBe(false);
-    expect(wanted(Source.Microphone, Kind.Audio, away)).toBe(true);
-    expect(wanted(Source.ScreenShare, Kind.Video, away)).toBe(true);
-    expect(wanted(Source.ScreenShareAudio, Kind.Audio, away)).toBe(true);
+  it('wants both picture and sound of each watched sharer, nothing unwatched, and never this page\'s own stream', () => {
+    for (const source of [Source.ScreenShare, Source.ScreenShareAudio]) {
+      const kind = source === Source.ScreenShare ? Kind.Video : Kind.Audio;
+      expect(wanted(source, kind, 8, all)).toBe(true);
+      expect(wanted(source, kind, 9, all)).toBe(true);
+      expect(wanted(source, kind, 10, all)).toBe(false);
+      expect(wanted(source, kind, 7, all)).toBe(false);
+    }
+  });
+
+  it('no camera is wanted while the video is not shown here, even with the call view open; microphones and watched shares are unaffected', () => {
+    const away = { ...all, shown: false };
+    expect(wanted(Source.Camera, Kind.Video, 8, away)).toBe(false);
+    expect(wanted(Source.Microphone, Kind.Audio, 8, away)).toBe(true);
+    expect(wanted(Source.ScreenShare, Kind.Video, 8, away)).toBe(true);
+    expect(wanted(Source.ScreenShareAudio, Kind.Audio, 8, away)).toBe(true);
   });
 
   it('a camera is wanted only while the call view is shown, and only from someone holding a claim', () => {
-    expect(wanted(Source.Camera, Kind.Video, { watching: false, viewing: true, shown: true, claimed: true })).toBe(true);
-    expect(wanted(Source.Camera, Kind.Video, { watching: true, viewing: false, shown: true, claimed: true })).toBe(false);
-    expect(wanted(Source.Camera, Kind.Video, { watching: true, viewing: true, shown: true, claimed: false })).toBe(false);
+    expect(wanted(Source.Camera, Kind.Video, 8, { ...all, watching: new Set() })).toBe(true);
+    expect(wanted(Source.Camera, Kind.Video, 8, { ...all, viewing: false })).toBe(false);
+    expect(wanted(Source.Camera, Kind.Video, 8, { ...all, claimed: false })).toBe(false);
+  });
+});
+
+describe('wanted: the screen companion takes no voice (issue #1581)', () => {
+  const base = { watching: new Set([8, 9]), focused: 8, own: 7, viewing: true, shown: true, claimed: true };
+  const { Source, Kind } = Track;
+  // source x kind x publisher x voice. A microphone is wanted only with voice;
+  // a share's picture and sound only from a watched publisher other than the
+  // person's own; a camera only with voice too (the companion takes none).
+  it.each([
+    [Source.Microphone, Kind.Audio, 8, true, true],
+    [Source.Microphone, Kind.Audio, 8, false, false],
+    [Source.Microphone, Kind.Audio, 10, true, true],
+    [Source.Microphone, Kind.Audio, 10, false, false],
+    [Source.Microphone, Kind.Audio, null, false, false],
+    [Source.Microphone, Kind.Video, 8, true, false],
+    [Source.Microphone, Kind.Video, 8, false, false],
+    [Source.ScreenShare, Kind.Video, 8, true, true],
+    [Source.ScreenShare, Kind.Video, 8, false, true],
+    [Source.ScreenShare, Kind.Video, 10, false, false],
+    [Source.ScreenShare, Kind.Video, 7, false, false],
+    [Source.ScreenShareAudio, Kind.Audio, 9, true, true],
+    [Source.ScreenShareAudio, Kind.Audio, 9, false, true],
+    [Source.ScreenShareAudio, Kind.Audio, 7, false, false],
+    [Source.ScreenShareAudio, Kind.Video, 9, false, false],
+    [Source.Camera, Kind.Video, 8, true, true],
+    // Changed in the security-review fixes (#1622 S4b): the companion
+    // subscribes to screen shares only, never to a camera (voice is false for
+    // it alone), where this row first said true.
+    [Source.Camera, Kind.Video, 8, false, false],
+    [Source.Unknown, Kind.Audio, 8, false, false],
+  ])('%s as %s from %s with voice %s: %s', (source, kind, principal, voice, expected) => {
+    expect(wanted(source, kind, principal, { ...base, voice })).toBe(expected);
+  });
+});
+
+describe('the screen companion room (issue #1581)', () => {
+  const remotePub = (source: string, kind: string): StubRemotePub => {
+    const p: StubRemotePub = {
+      source,
+      kind,
+      isSubscribed: false,
+      setSubscribed: (on) => {
+        p.isSubscribed = on;
+      },
+      setVideoQuality: () => undefined,
+    };
+    return p;
+  };
+
+  it('subscribes to no microphone, however it arrives, and to a watched share alone', async () => {
+    const mic = remotePub('microphone', 'audio');
+    const share = remotePub('screen_share', 'video');
+    const sound = remotePub('screen_share_audio', 'audio');
+    state.remote.set('p8', { identity: 'p8', trackPublications: new Map([['a', mic], ['b', share], ['c', sound]]) } as unknown as { trackPublications: Map<string, StubRemotePub> });
+    const room = newLiveKitRoom();
+    room.setCompanion?.(true);
+    await room.connect('wss://lk.example', 'tok-abcdef', 'room-abcdef', false, events);
+    expect([mic.isSubscribed, share.isSubscribed, sound.isSubscribed]).toEqual([false, false, false]);
+    room.setWatches(new Set([8]), null);
+    expect([mic.isSubscribed, share.isSubscribed, sound.isSubscribed]).toEqual([false, true, true]);
+    room.setWatches(new Set(), null);
+    expect([mic.isSubscribed, share.isSubscribed, sound.isSubscribed]).toEqual([false, false, false]);
+  });
+
+  it('a browser room still subscribes to microphones', async () => {
+    const mic = remotePub('microphone', 'audio');
+    state.remote.set('p8', { identity: 'p8', trackPublications: new Map([['a', mic]]) } as unknown as { trackPublications: Map<string, StubRemotePub> });
+    const room = newLiveKitRoom();
+    await room.connect('wss://lk.example', 'tok-abcdef', 'room-abcdef', false, events);
+    expect(mic.isSubscribed).toBe(true);
+  });
+
+  it('asks the picker for no sound at all, keeps only the picture, and publishes it alone', async () => {
+    const room = newLiveKitRoom();
+    room.setCompanion?.(true);
+    await room.connect('wss://lk.example', 'tok-abcdef', 'room-abcdef', false, events);
+    state.calls.length = 0;
+    expect(await room.pickScreen()).toEqual({ audio: false });
+    expect(state.screenOptions).toMatchObject({ video: true, audio: false, systemAudio: 'exclude', selfBrowserSurface: 'exclude' });
+    // The audio track the stub gave is stopped, never held.
+    expect(state.screenTracks.map((t) => t.source)).toEqual(['screen_share', 'screen_share_audio']);
+    await room.publishScreen();
+    expect(state.published.map((p) => p.source)).toEqual(['screen_share']);
+  });
+
+  it('never captures or publishes a microphone', async () => {
+    const room = newLiveKitRoom();
+    room.setCompanion?.(true);
+    await room.connect('wss://lk.example', 'tok-abcdef', 'room-abcdef', false, events);
+    await expect(room.publishMicrophone()).rejects.toThrow('no microphone');
+    await expect(room.switchMicrophone(null)).rejects.toThrow('no microphone');
+    expect(state.calls).not.toContain('microphone');
+  });
+
+  it('captureOptions asks for sound by default and for none when told not to', () => {
+    expect(captureOptions()).toMatchObject({ audio: { channelCount: 2 }, systemAudio: 'include' });
+    expect(captureOptions(undefined, false)).toMatchObject({ audio: false, systemAudio: 'exclude' });
   });
 });
 
@@ -2116,6 +2478,7 @@ describe('receiving cameras', () => {
       setSubscribed: (on) => {
         p.isSubscribed = on;
       },
+      setVideoQuality: () => undefined,
     };
     return p;
   };
@@ -2149,7 +2512,7 @@ describe('receiving cameras', () => {
     state.remote.set('p8', { identity: 'p8', trackPublications: new Map([['a', camera], ['b', mic], ['c', share]]) } as unknown as { trackPublications: Map<string, StubRemotePub> });
     const room = newLiveKitRoom();
     await room.connect('wss://lk.example', 'tok-abcdef', 'room-abcdef', false, events);
-    room.setWatching(true);
+    room.setWatches(new Set([8]), null);
     room.setViewing(true);
     room.setCameras(new Set([8]));
     const subscribed = () => [camera.isSubscribed, mic.isSubscribed, share.isSubscribed];

@@ -222,7 +222,7 @@ export async function expectFits(page: Page, view: string): Promise<void> {
 // say types into the composer and sends with the Send button.
 export async function say(page: Page, channel: string, body: string): Promise<void> {
   await page.getByLabel(`Message #${channel}`).fill(body);
-  await page.getByRole('button', { name: 'Send' }).click();
+  await page.getByRole('button', { name: 'Send', exact: true }).click();
 }
 
 // consoleErrors collects what a page writes to its console as an error (issue

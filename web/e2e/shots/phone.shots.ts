@@ -83,7 +83,8 @@ test('phone screenshots for design review', async ({ browser }, info) => {
       await showView(page, 'Voice');
       await voiceRegion(carol.page).getByRole('button', { name: 'Share screen' }).click();
       await expect(voiceRegion(carol.page)).toContainText('You are sharing your screen', { timeout: 30_000 });
-      await voiceRegion(page).getByRole('button', { name: 'Watch' }).click({ timeout: 30_000 });
+      // The stream's tile on the stage has Watch (voice-multi-share.md §7.1).
+      await page.locator('.call-share').getByRole('button', { name: 'Watch' }).click({ timeout: 30_000 });
       const view = page.getByRole('region', { name: 'Shared screen' });
       await expect(view).toBeVisible();
       await expect(view.getByText('Waiting for the picture')).toHaveCount(0, { timeout: 30_000 });

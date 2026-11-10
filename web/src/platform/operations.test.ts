@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
-import { call, fileQuery, operations, pathOf, queryOf, type OperationId } from './operations';
+import { call, fileQuery, operations, pathOf, previewCall, queryOf, type OperationId } from './operations';
 
 // internal/server/routes.go is the server's route table. Every entry of the
 // operation table must be a route it serves, so the table cannot name a
@@ -19,6 +19,28 @@ const served = new Set([...routesSource.matchAll(/"((?:GET|POST|PUT|DELETE) \/[^
 }));
 
 const entries = Object.entries(operations) as [OperationId, (typeof operations)[OperationId]][];
+
+describe('the preview header', () => {
+  // The server answers the header on these five reads and refuses it on every
+  // other route (internal/server/routes.go, asPreviewable). A change to this
+  // list is a decision, made on the server first.
+  it('is allowed on the five previewable reads and no other operation', () => {
+    const allowed = entries.filter(([, entry]) => entry.previewable === true).map(([id]) => id).sort();
+    expect(allowed).toEqual(['channelDirectory', 'directoryMembers', 'listChannels', 'listMembers', 'preview']);
+    for (const [id, entry] of entries) if (entry.previewable === true) expect(entry.method, id).toBe('GET');
+  });
+
+  it('is set by previewCall alone, on a previewable operation', () => {
+    expect(previewCall('listChannels', 7)).toEqual({ op: 'listChannels', previewAs: 7 });
+    expect(call('listChannels').previewAs).toBeUndefined();
+    expect(() => previewCall('postMessage', 7, { channel: 'x' })).toThrow();
+    expect(() => previewCall('whoami', 7)).toThrow();
+  });
+
+  it('is marked on the route the server serves', () => {
+    expect(routesSource).toMatch(/GET \/v1\/preview[^\n]*asPreviewable/);
+  });
+});
 
 describe('the operation table', () => {
   it('reads the server route table', () => {
@@ -71,6 +93,9 @@ describe('the operation table', () => {
         'totpEnroll',
         'voiceSession',
         'voiceViewer',
+        // Main keeps the record of the desktop's screen companion and ends it
+        // itself (issue #1579).
+        'voiceViewerEnd',
         'wsTicket',
       ].sort(),
     );
@@ -143,5 +168,28 @@ describe('pathOf', () => {
 
   it('refuses a call that leaves a value out, rather than send the braces', () => {
     expect(() => pathOf(call('listMessages'))).toThrow(/needs channel/);
+  });
+});
+
+describe('the share claim answer (issue #1638)', () => {
+  const v1 = { principal_id: 7, started_at: '2026-11-09T12:00:00Z', audio: false };
+  const quality = { resolution: '720p', frame_rate: 30 };
+
+  it.each([
+    ['a V1 answer', () => ({ ...v1 }), true],
+    ['a V2 answer', () => ({ ...v1, quality: { ...quality } }), true],
+    ['an empty object', () => ({}), false],
+    ['a list', () => [v1], false],
+    ['null', () => null, false],
+  ])('%s', (_name, body, good) => {
+    const validate = operations.claimShare.response;
+    expect(validate).toBeDefined();
+    expect(validate?.(body()).length === 0).toBe(good);
+  });
+
+  it('keeps the quality of a V2 answer', () => {
+    const body: Record<string, unknown> = { ...v1, quality: { ...quality } };
+    expect(operations.claimShare.response?.(body)).toEqual([]);
+    expect(body['quality']).toEqual(quality);
   });
 });

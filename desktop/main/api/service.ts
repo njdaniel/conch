@@ -19,7 +19,9 @@ import type {
 import { operations, type OperationId } from '../../../web/src/platform/operations.ts';
 import type { WhoAmIResponseV1 } from '../../../web/src/schema/principal.ts';
 import { whoAmIResponseV1 } from '../../../web/src/schema/principal.ts';
+import { fromServer } from '../../../web/src/schema/validate.ts';
 import { Client, type Exchange } from './client.ts';
+import { previewable } from './target.ts';
 import type { Session } from './session.ts';
 
 export const REVOKE_TIMEOUT_MS = 5_000;
@@ -143,11 +145,13 @@ export class Service {
     // The IPC layer has refused these already; a second check costs nothing.
     if (!invocable(id)) return { kind: 'none', reason: 'unsupported' };
     if (NOT_JSON.has(id)) return { kind: 'none', reason: 'unsupported' };
+    if (request.previewAs !== undefined && !previewable(id)) return { kind: 'none', reason: 'unsupported' };
     const exchange = await this.#deps.client.send({
       op: id,
       ...(request.params === undefined ? {} : { params: request.params }),
       ...(request.query === undefined ? {} : { query: request.query }),
       ...(request.body === undefined ? {} : { body: request.body }),
+      ...(request.previewAs === undefined ? {} : { previewAs: request.previewAs }),
     });
     if (exchange.kind === 'none') {
       this.#note(id, exchange.reason);
@@ -168,7 +172,7 @@ export class Service {
   // yet kept.
   async #whoami(candidate?: string): Promise<{ readonly who: WhoAmIResponseV1 } | { readonly outcome: SignInOutcome }> {
     const exchange = await this.#deps.client.send({ op: 'whoami', ...(candidate === undefined ? {} : { token: candidate }) });
-    if (exchange.kind === 'answer' && exchange.ok && whoAmIResponseV1(exchange.body).length === 0) {
+    if (exchange.kind === 'answer' && exchange.ok && fromServer(whoAmIResponseV1)(exchange.body).length === 0) {
       return { who: exchange.body as WhoAmIResponseV1 };
     }
     if (exchange.kind === 'none' && exchange.reason === 'invalid') this.#deps.onInvalid?.('whoami');
@@ -191,7 +195,7 @@ export class Service {
     const capture = session.capture();
     const exchange = await this.#deps.client.send({ op: 'whoami', token: credential, capture });
     if (exchange.kind === 'none' && exchange.reason === 'invalid') this.#deps.onInvalid?.('whoami');
-    if (exchange.kind !== 'answer' || !exchange.ok || whoAmIResponseV1(exchange.body).length > 0) return failed(exchange);
+    if (exchange.kind !== 'answer' || !exchange.ok || fromServer(whoAmIResponseV1)(exchange.body).length > 0) return failed(exchange);
     if (!session.current(capture)) return { ok: false, kind: 'network', reason: 'stale' };
     const handle = session.holdPasted(credential, this.#deps.now() + PASTED_TTL_MS);
     return { ok: true, who: exchange.body as WhoAmIResponseV1, answer: {}, handle };

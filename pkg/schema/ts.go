@@ -72,6 +72,9 @@ var TSConstants = []TSConstant{
 	{Name: "MESSAGE_EDIT_WINDOW_SECONDS", Value: MessageEditWindowSeconds},
 	{Name: "MAX_MESSAGE_EDITS", Value: MaxMessageEdits},
 	{Name: "MAX_POST_REQUEST_BYTES", Value: MaxPostRequestBytes},
+	// A spoiler attachment (issue #1500): presentation only, no shape change.
+	{Name: "SPOILER_FILE_PREFIX", Value: SpoilerFilePrefix},
+	{Name: "MAX_FILE_NAME_BYTES", Value: MaxFileNameBytes},
 
 	// The managed voice-helper control protocol, for the desktop owner's
 	// supervisor (issue #948, Q10 of #770): the helper's command line, the
@@ -214,6 +217,9 @@ var TSTypes = []TSType{
 	// the presence snapshot its socket streams, and the transmit report.
 	{Value: VoiceRoomGrant{}},
 	{Value: VoiceSessionResponseV1{}, Family: "voice-session-response-v1"},
+	// The quality a sharer declared (issue #1483, design §3.2): on their
+	// participant in presence, in the claim's body and in its answer.
+	{Value: VoiceShareQuality{}},
 	{Value: VoiceParticipant{}},
 	{Value: VoicePresenceRoom{}},
 	// Why the reader's own share ended (issue #487), in their presence alone.
@@ -221,6 +227,13 @@ var TSTypes = []TSType{
 	// Why the reader's own camera ended (ADR-015, issue #1238), likewise.
 	{Value: VoiceCameraEnded{}},
 	{Value: VoicePresenceV1{}, Family: "voice-presence-v1", Schema: VoicePresenceSchemaV1},
+	// Presence v2 (issue #1483, design §2.2): v1 without the one-share rule,
+	// which the page asks for with ?schema=conch.voice_presence.v2. Its
+	// participant carries the share's start and quality; v1's is closed and
+	// gains nothing (object() refuses an unknown key).
+	{Value: VoiceParticipantV2{}},
+	{Value: VoicePresenceRoomV2{}},
+	{Value: VoicePresenceV2{}, Family: "voice-presence-v2", Schema: VoicePresenceSchemaV2},
 	{Value: VoiceTransmitReportV1{}, Family: "voice-transmit-report-v1"},
 	// Companion and viewer participants (issue #933).
 	{Value: VoiceCompanionRequestV1{}, Family: "voice-companion-request-v1"},
@@ -229,9 +242,13 @@ var TSTypes = []TSType{
 	// scope, and the answer naming the share it belongs to.
 	{Value: VoiceCompanionAudioRequestV1{}, Family: "voice-companion-audio-request-v1"},
 	{Value: VoiceCompanionAudioV1{}, Family: "voice-companion-audio-v1"},
-	// Screen share (issue #443): the claim the page is given when the room's
-	// share is its own. Presence says who shares (VoiceParticipant above).
+	// Screen share (issue #443): the claim the page is given when it may
+	// share. Presence says who shares (VoiceParticipant above). The claim's
+	// optional body declares the quality (issue #1483, design §3.1), and a
+	// claim that declared one is answered with the v2 claim, which echoes it.
+	{Value: VoiceShareRequestV1{}, Family: "voice-share-request-v1"},
 	{Value: VoiceShareV1{}, Family: "voice-share-v1"},
+	{Value: VoiceShareV2{}, Family: "voice-share-v2"},
 	// The camera claim (ADR-015, issue #1238): the page may publish a camera
 	// while conchd holds it. Presence says who has one (VoiceParticipant).
 	{Value: VoiceCameraV1{}, Family: "voice-camera-v1"},
@@ -424,6 +441,12 @@ var TSTypes = []TSType{
 	{Value: PermissionChangeV1{}},
 	{Value: PutPermissionsRequestV1{}, Family: "put-permissions-request-v1"},
 	{Value: PermissionsChangedV1{}, Family: "permissions-changed-v1", Schema: PermissionsChangedSchemaV1},
+
+	// Preview as member (issue #1007, docs/design/permission-preview.md
+	// §6.1): the entry read's answer, the previewed member's standing and
+	// effective permissions, which the page feeds to the same controls it
+	// keys on whoami. The other preview reads answer existing shapes.
+	{Value: PreviewResponseV1{}, Family: "preview-response-v1"},
 	// What an operator issued to others, on disable and on the owner's
 	// revoke-all of it (issue #1024, ADR-014 O13); the demotion answer is
 	// RoleChangeResponseV1 above, with the same optional list.
@@ -584,6 +607,10 @@ var TSVocabularyModes = map[string]TSVocabularyMode{
 	// Strict: the page switches on an action's gate class to say whether a
 	// person will be asked.
 	"AdminGate": TSStrict,
+	// Strict: the page switches on it to pick the preview banner (design
+	// §8); a simulation it does not know it cannot label honestly, and must
+	// never show as a person's view.
+	"PreviewSimulation": TSStrict,
 
 	// Strict: a state, kind, mode, role, outcome or reason the page switches
 	// on to decide what to show or offer. A value it does not know it cannot
@@ -627,6 +654,11 @@ var TSVocabularyModes = map[string]TSVocabularyMode{
 	// (voice.go; webcam-video.md §10 keeps the camera's reasons the same way).
 	"VoiceShareEndReason":  TSStrict,
 	"VoiceCameraEndReason": TSStrict,
+	// Strict: the sharer's declared resolution (issue #1483, design §3.2) is
+	// the picker's closed vocabulary; a new value is a new version of
+	// presence, as a new end reason is, and the page sends only what its
+	// picker offers.
+	"VoiceShareResolution": TSStrict,
 	"VoiceTransmitState":   TSStrict,
 
 	// Strict: written by the page itself in a problem report (issue #446);

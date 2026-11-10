@@ -27,8 +27,10 @@ function count(value: string | undefined): number | undefined {
 }
 
 // feedOf is the subscription the client's query names: the feed of the
-// operation, and its channel, session and cursor. The rest of the query (the
-// messages feed's heartbeat) is main's to add.
+// operation, and its channel, session and cursor. The rest of the query is
+// main's to add: the messages feed's heartbeat, and the voice feed's
+// ?schema=conch.voice_presence.v2, which main always asks for, as the client
+// does (api.ts openVoiceSocket; desktop/main/api/feeds.ts feedUrl).
 export function feedOf(id: OperationId, query: Readonly<Record<string, string>>): FeedRequest | null {
   const kind = kinds[id];
   if (kind === undefined) return null;

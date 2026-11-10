@@ -41,6 +41,17 @@ export function inviteLink(origin: string, inviteCode: string): string {
   return `${origin}/app/#/invite/${encodeURIComponent(inviteCode)}`;
 }
 
+// desktopInviteLink is the same invite as a link of the desktop app's
+// scheme (issue #1592; docs/design/linux-desktop.md section 9.1):
+// conch://invite?server=<percent-encoded origin>&code=<code>. The invite
+// landing page makes it at the click that opens the desktop app and hands it
+// to the platform; it is never rendered, stored or put in the address bar.
+// Concatenated, not a template: hygiene.test.ts allows the one template that
+// holds an invite code, creator's link above.
+export function desktopInviteLink(origin: string, inviteCode: string): string {
+  return 'conch://invite?server=' + encodeURIComponent(origin) + '&code=' + encodeURIComponent(inviteCode);
+}
+
 // Sign-in links (issue #493): <origin>/app/#/signin/<code>, made by an
 // operator (`conch admin principal sign-in-link`) for a person to come back
 // into their own account. The code is handled exactly as an invite's: read

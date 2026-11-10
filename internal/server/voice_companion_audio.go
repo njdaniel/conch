@@ -38,8 +38,8 @@ import (
 // is human, holds voice, voice is configured; then an archived channel is
 // refused), the body (one strictly decoded request, within 1 KiB: 400
 // invalid_request, 413 request_too_large), then under the room's claims: the
-// caller holds the room's share (held by someone else: 409 voice_share_busy,
-// naming nobody; by nobody: 409 voice_no_session) and their p<id>.screen is in
+// caller holds a share of their own (none, or still pending: 409
+// voice_no_session; one person's consent never reaches another's stream) and their p<id>.screen is in
 // the room as the last pass listed it (else 409 voice_no_session). Then the
 // companion is granted screen_share and screen_share_audio, the
 // voice_share_audio_started row is written (actor the person, detail
@@ -83,9 +83,6 @@ func (s *Server) handleVoiceCompanionAudio(w http.ResponseWriter, r *http.Reques
 	}
 	audio, err := s.voice.grantCompanionAudio(ctx, room, caller.ID, req.Scope)
 	switch {
-	case errors.Is(err, errVoiceShareBusy):
-		writeError(w, http.StatusConflict, schema.ErrorCodeVoiceShareBusy, "someone else is sharing in this room")
-		return
 	case errors.Is(err, errVoiceShareNotConnected), errors.Is(err, errVoiceShareRoomGone):
 		writeVoiceNoSession(w)
 		return
@@ -141,8 +138,8 @@ func (s *Server) handleVoiceCompanionAudioDelete(w http.ResponseWriter, r *http.
 // (claimShare), so that no pass withdraws what is being granted and no stop
 // runs between the check and the grant:
 //
-//   - the room's share is nobody's, or pending: errVoiceShareRoomGone;
-//     someone else's: errVoiceShareBusy; the caller's companion is not in the
+//   - the caller holds no share, or a pending one: errVoiceShareRoomGone;
+//     the caller's companion is not in the
 //     room as the last pass listed it: errVoiceShareNotConnected;
 //   - the scope is the one recorded: nothing is done, and the consent is
 //     answered;
@@ -178,16 +175,11 @@ func (p *voicePoller) grantCompanionAudio(ctx context.Context, room store.VoiceR
 
 	r.order.Lock()
 	p.mu.Lock()
-	c := r.share
-	switch {
-	case r.retired || c == nil || c.pending:
+	c := r.shares[principalID]
+	if r.retired || c == nil || c.pending {
 		p.mu.Unlock()
 		r.order.Unlock()
 		return schema.VoiceCompanionAudioV1{}, errVoiceShareRoomGone
-	case c.principalID != principalID:
-		p.mu.Unlock()
-		r.order.Unlock()
-		return schema.VoiceCompanionAudioV1{}, errVoiceShareBusy
 	}
 	comp := r.companions[principalID]
 	if !comp.screen {
@@ -215,7 +207,7 @@ func (p *voicePoller) grantCompanionAudio(ctx context.Context, room store.VoiceR
 		wcancel()
 		if err != nil {
 			p.mu.Lock()
-			if r.share == c {
+			if r.shares[principalID] == c {
 				c.audioScope = recorded
 			}
 			p.mu.Unlock()
@@ -240,7 +232,7 @@ func (p *voicePoller) grantCompanionAudio(ctx context.Context, room store.VoiceR
 	undo := func() {
 		r.order.Lock()
 		p.mu.Lock()
-		if r.share == c && c.audioScope == scope {
+		if r.shares[principalID] == c && c.audioScope == scope {
 			c.audioScope = ""
 			// Whatever LiveKit may have granted is the passes' to take
 			// back, without auditing it: the sound was not published by a
@@ -271,7 +263,7 @@ func (p *voicePoller) grantCompanionAudio(ctx context.Context, room store.VoiceR
 
 	r.order.Lock()
 	p.mu.Lock()
-	if r.retired || r.share != c {
+	if r.retired || r.shares[principalID] != c {
 		// The share ended while LiveKit was being asked (a pass ended it
 		// idle, say, or a rotation forgot the room): its end owed the
 		// companion a whole withdrawal and wrote voice_share_stopped alone,
@@ -327,10 +319,10 @@ func (p *voicePoller) stopCompanionAudio(ctx context.Context, room store.VoiceRo
 	defer r.claims.Unlock()
 	r.order.Lock()
 	p.mu.Lock()
-	c := r.share
+	c := r.shares[principalID]
 	// A consent is always one that started here: a grant in flight holds the
 	// claims this took.
-	if r.retired || c == nil || c.principalID != principalID || c.audioScope == "" || !c.audioStarted {
+	if r.retired || c == nil || c.audioScope == "" || !c.audioStarted {
 		p.mu.Unlock()
 		r.order.Unlock()
 		return

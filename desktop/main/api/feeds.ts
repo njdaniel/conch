@@ -45,7 +45,8 @@
 import { parseEventFrame } from '../../../web/src/agents/frames.ts';
 import type { FeedKind, FeedRequest } from '../../../web/src/platform/desktop/bridge.ts';
 import { operations, type OperationId } from '../../../web/src/platform/operations.ts';
-import { heartbeatV1, messageV2, voiceOccupancyV1, voicePresenceV1 } from '../../../web/src/schema/generated.ts';
+import { heartbeatV1, messageV2, voiceOccupancyV1, voicePresenceV2, voicePresenceV2Schema } from '../../../web/src/schema/generated.ts';
+import { fromServer } from '../../../web/src/schema/validate.ts';
 import type { FeedEvent } from '../../shared/bridge-names.ts';
 import type { Client } from './client.ts';
 import type { Capture, Session } from './session.ts';
@@ -122,7 +123,11 @@ export function parseFeedRequest(value: unknown): FeedRequest | null {
 
 // feedUrl is the socket's address: the origin's ws or wss form, the feed's
 // route from the operation table, and its query. The messages feed always
-// asks for the heartbeat, which the renderer's silence watchdog lives on.
+// asks for the heartbeat, which the renderer's silence watchdog lives on. The
+// voice feed always asks for v2 presence (?schema=conch.voice_presence.v2),
+// every live stream with its start and quality, which the web client reads
+// (voice-multi-share.md §2.2, §7.1, §7.4: the desktop's view is the web
+// client's); without it conchd sends v1, which the renderer refuses.
 export function feedUrl(origin: string, request: FeedRequest): string {
   const base = origin.replace(/^http/u, 'ws');
   const query = new URLSearchParams();
@@ -131,6 +136,7 @@ export function feedUrl(origin: string, request: FeedRequest): string {
     query.set('after', String(request.after ?? 0));
     query.set('heartbeat', '1');
   }
+  if (request.kind === 'voice') query.set('schema', voicePresenceV2Schema);
   if (request.session !== undefined) query.set('session', String(request.session));
   const search = query.toString();
   return `${base}${operations[ROUTES[request.kind]].path}${search === '' ? '' : `?${search}`}`;
@@ -144,27 +150,28 @@ function parsed(data: string): unknown {
   }
 }
 
-const isHeartbeat = (doc: unknown): boolean => doc !== undefined && heartbeatV1(doc).length === 0;
+const isHeartbeat = (doc: unknown): boolean => doc !== undefined && fromServer(heartbeatV1)(doc).length === 0;
 
 // validFrame says whether a text frame is one its feed sends: a v2 message or
 // the heartbeat on the messages feed; a document the events feed's own parser
 // accepts, or the heartbeat, on the events feed; a presence document on the
-// voice feed; an occupancy document on the occupancy feed.
+// voice feed (v2, as feedUrl asks for); an occupancy document on the
+// occupancy feed.
 export function validFrame(kind: FeedKind, data: string): boolean {
   switch (kind) {
     case 'messages': {
       const doc = parsed(data);
-      return doc !== undefined && (messageV2(doc).length === 0 || isHeartbeat(doc));
+      return doc !== undefined && (fromServer(messageV2)(doc).length === 0 || isHeartbeat(doc));
     }
     case 'events':
       return parseEventFrame(data) !== null || isHeartbeat(parsed(data));
     case 'voice': {
       const doc = parsed(data);
-      return doc !== undefined && voicePresenceV1(doc).length === 0;
+      return doc !== undefined && fromServer(voicePresenceV2)(doc).length === 0;
     }
     case 'occupancy': {
       const doc = parsed(data);
-      return doc !== undefined && voiceOccupancyV1(doc).length === 0;
+      return doc !== undefined && fromServer(voiceOccupancyV1)(doc).length === 0;
     }
   }
 }

@@ -4,7 +4,7 @@ import { fetchFileBytes, getFileMeta } from './api';
 import { Conversation } from './Conversation';
 import { ImageAttachment } from './ImageAttachment';
 import { maxImageEncodedBytes, validateImage } from './image';
-import type { FileV1 } from './schema/file';
+import { SPOILER_FILE_PREFIX, type FileV1 } from './schema/file';
 import type { MessageV2, Payload } from './schema/message';
 import type { ChannelChat } from './state/messages';
 
@@ -358,5 +358,151 @@ describe('enlarged image dialog', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Close' }));
     expect(screen.queryByRole('dialog')).toBeNull();
     expect(document.activeElement).toBe(thumbnail);
+  });
+});
+
+// A spoiler attachment (issue #1500): only the metadata is read until Reveal.
+describe('a spoiler attachment', () => {
+  const stored = `${SPOILER_FILE_PREFIX}photo.png`;
+  const spoilerMeta: FileV1 = { ...metadata, filename: stored };
+  const unauthorized = { ok: false, failure: 'unauthorized' } as const;
+
+  beforeEach(() => {
+    mockedMeta.mockResolvedValue({ ok: true, value: spoilerMeta });
+  });
+
+  function show(onUnauthorized?: () => void) {
+    return render(<ImageAttachment fileId={17} channel="general" viewer={2} onUnauthorized={onUnauthorized} />);
+  }
+
+  it('is hidden by default: a card with the shown name, type and size, and no bytes, image or blob URL', async () => {
+    const { container } = show();
+    const reveal = await screen.findByRole('button', { name: 'Reveal photo.png' });
+    expect(reveal.getAttribute('aria-expanded')).toBe('false');
+    expect(container.textContent).toContain('Spoiler: photo.png, image/png, 4 B');
+    expect(container.textContent).not.toContain(SPOILER_FILE_PREFIX);
+    expect(container.querySelector('img')).toBeNull();
+    expect(screen.queryByRole('button', { name: /Enlarge/ })).toBeNull();
+    expect(mockedMeta).toHaveBeenCalledWith(17);
+    expect(mockedBytes).not.toHaveBeenCalled();
+    expect(mockedValidation).not.toHaveBeenCalled();
+    expect(createObjectURL).not.toHaveBeenCalled();
+  });
+
+  it('is not revealed by a re-render, a new callback or a new message prop', async () => {
+    const view = show(() => {});
+    await screen.findByRole('button', { name: 'Reveal photo.png' });
+    view.rerender(<ImageAttachment fileId={17} channel="general" viewer={2} onUnauthorized={() => {}} />);
+    await Promise.resolve();
+    expect(screen.getByRole('button', { name: 'Reveal photo.png' })).toBeDefined();
+    expect(mockedBytes).not.toHaveBeenCalled();
+  });
+
+  it('reveals, validates and shows the image, then Hide revokes the blob URL', async () => {
+    const { container } = show();
+    fireEvent.click(await screen.findByRole('button', { name: 'Reveal photo.png' }));
+    expect(await screen.findByRole('button', { name: 'Enlarge photo.png' })).toBeDefined();
+    expect(mockedBytes).toHaveBeenCalledExactlyOnceWith(17);
+    expect(mockedValidation).toHaveBeenCalledOnce();
+    expect(container.querySelector('img')?.getAttribute('src')).toBe('blob:preview-1');
+    const hide = screen.getByRole('button', { name: 'Hide photo.png' });
+    expect(hide.getAttribute('aria-expanded')).toBe('true');
+    expect(hide.getAttribute('aria-controls')).toBe(container.querySelector('.spoiler-content')?.id);
+    fireEvent.click(hide);
+    expect(revokeObjectURL).toHaveBeenCalledWith('blob:preview-1');
+    expect(container.querySelector('img')).toBeNull();
+    expect(screen.getByRole('button', { name: 'Reveal photo.png' }).getAttribute('aria-expanded')).toBe('false');
+  });
+
+  it('keeps focus on the toggle through Reveal and Hide', async () => {
+    show();
+    const reveal = await screen.findByRole('button', { name: 'Reveal photo.png' });
+    reveal.focus();
+    fireEvent.click(reveal);
+    await screen.findByRole('button', { name: 'Enlarge photo.png' });
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Hide photo.png' }));
+  });
+
+  it.each([
+    ['an invalid image', () => { mockedValidation.mockResolvedValue({ ok: false, reason: 'format' } as never); }],
+    ['an oversize file', () => { mockedMeta.mockResolvedValue({ ok: true, value: { ...spoilerMeta, size: maxImageEncodedBytes + 1 } }); }],
+    ['a declared type that is not an image', () => { mockedMeta.mockResolvedValue({ ok: true, value: { ...spoilerMeta, media_type: 'text/html' } }); }],
+  ])('shows %s as the file chip after Reveal', async (_label, arrange) => {
+    arrange();
+    const { container } = show();
+    fireEvent.click(await screen.findByRole('button', { name: 'Reveal photo.png' }));
+    await waitFor(() => {
+      expect(container.querySelector('.attachment-file')).not.toBeNull();
+    });
+    expect(container.querySelector('img')).toBeNull();
+    expect(container.querySelector('.attachment-size')).not.toBeNull();
+    expect(screen.getByRole('button', { name: 'Download' })).toBeDefined();
+    expect(createObjectURL).not.toHaveBeenCalled();
+  });
+
+  it('says the attachment is unavailable when the fetch fails, and reports a 401', async () => {
+    mockedBytes.mockResolvedValue(unauthorized);
+    const onUnauthorized = vi.fn();
+    show(onUnauthorized);
+    fireEvent.click(await screen.findByRole('button', { name: 'Reveal photo.png' }));
+    expect(await screen.findByText('Attachment unavailable. Try downloading it again.')).toBeDefined();
+    expect(onUnauthorized).toHaveBeenCalledOnce();
+    expect(screen.getByRole('button', { name: 'Hide photo.png' })).toBeDefined();
+  });
+
+  it('starts hidden again on a remount', async () => {
+    const first = show();
+    fireEvent.click(await screen.findByRole('button', { name: 'Reveal photo.png' }));
+    await screen.findByRole('button', { name: 'Enlarge photo.png' });
+    first.unmount();
+    expect(revokeObjectURL).toHaveBeenCalledWith('blob:preview-1');
+    mockedBytes.mockClear();
+    const { container } = show();
+    await screen.findByRole('button', { name: 'Reveal photo.png' });
+    expect(container.querySelector('img')).toBeNull();
+    expect(mockedBytes).not.toHaveBeenCalled();
+  });
+
+  it('offers Download while hidden, saves the stored name, and does not reveal', async () => {
+    const anchors: string[] = [];
+    vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(function click(this: HTMLAnchorElement) { anchors.push(this.download); });
+    const { container } = show();
+    fireEvent.click(await screen.findByRole('button', { name: 'Download' }));
+    await waitFor(() => {
+      expect(anchors).toEqual([stored]);
+    });
+    expect(container.querySelector('img')).toBeNull();
+    expect(screen.getByRole('button', { name: 'Reveal photo.png' }).getAttribute('aria-expanded')).toBe('false');
+  });
+
+  it('offers Download after Reveal too', async () => {
+    show();
+    fireEvent.click(await screen.findByRole('button', { name: 'Reveal photo.png' }));
+    await screen.findByRole('button', { name: 'Enlarge photo.png' });
+    expect(screen.getByRole('button', { name: 'Download' })).toBeDefined();
+  });
+
+  it('does not treat a lower-case or inner prefix as a spoiler', async () => {
+    mockedMeta.mockResolvedValue({ ok: true, value: { ...metadata, filename: `${SPOILER_FILE_PREFIX.toLowerCase()}photo.png` } });
+    show();
+    expect(await screen.findByRole('button', { name: /Enlarge/ })).toBeDefined();
+    expect(screen.queryByRole('button', { name: /^Reveal/ })).toBeNull();
+  });
+
+  it('shows the names of several image-only spoilers once each, without the prefix, and never the joined stored body', async () => {
+    const other = `${SPOILER_FILE_PREFIX}second.png`;
+    mockedMeta.mockImplementation((id: number) => Promise.resolve({ ok: true, value: id === 17 ? spoilerMeta : { ...spoilerMeta, id: 18, filename: other } }));
+    const { container } = conversation([message(1, `${stored}, ${other}`, { schema: 'conch.file_attachment.v1', data: { file_ids: [17, 18] } })]);
+    await screen.findByRole('button', { name: 'Reveal second.png' });
+    expect(container.textContent).not.toContain(SPOILER_FILE_PREFIX);
+    expect(screen.getAllByText(/photo\.png/)).toHaveLength(1);
+    expect(mockedBytes).not.toHaveBeenCalled();
+  });
+
+  it('shows an image-only spoiler’s name once, without the prefix', async () => {
+    conversation([message(1, stored, { schema: 'conch.file_attachment.v1', data: { file_ids: [17] } })]);
+    await screen.findByRole('button', { name: 'Reveal photo.png' });
+    expect(screen.queryAllByText(new RegExp(SPOILER_FILE_PREFIX)).length).toBe(0);
+    expect(mockedBytes).not.toHaveBeenCalled();
   });
 });

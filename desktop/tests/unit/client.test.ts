@@ -34,6 +34,27 @@ describe('the request executor', () => {
     }
   });
 
+  it('sends Conch-Preview-As on a previewable read only, and on no other request (issue #1540)', async () => {
+    const fake = await serve((_r, res) => {
+      sendJson(res, 200, {});
+    });
+    const { session, client } = stack();
+    session.setOrigin(fake.origin);
+    session.adopt('t');
+    await client.send({ op: 'listChannels', previewAs: 7 });
+    await client.send({ op: 'listChannels' });
+    // Anything not marked previewable in the table is refused before the wire.
+    const refused = [
+      await client.send({ op: 'whoami', previewAs: 7 }),
+      await client.send({ op: 'postMessage', params: { channel: 'a' }, body: { body: 'x' }, previewAs: 7 }),
+      await client.send({ op: 'health', previewAs: 7 }),
+    ];
+    expect(refused.map((x) => x.kind)).toEqual(['none', 'none', 'none']);
+    expect(fake.seen).toHaveLength(2);
+    expect(fake.seen[0]?.headers['conch-preview-as']).toBe('7');
+    expect(fake.seen[1]?.headers['conch-preview-as']).toBeUndefined();
+  });
+
   it('builds the URL from the operation and encodes a value into one path segment', async () => {
     const fake = await serve((_r, res) => {
       sendJson(res, 200, { messages: [] });
@@ -136,6 +157,16 @@ describe('the request executor', () => {
       requestId: 'rid-9',
     });
     expect(await client.send({ op: 'listChannels' })).toEqual({ kind: 'answer', status: 500, ok: false });
+  });
+
+  it('keeps the code and message of a refusal that carries a key added later (issue #1534)', async () => {
+    const fake = await serve((_r, res) => {
+      sendJson(res, 401, { code: 'auth_failed', message: 'Wrong password', added_later: true });
+    });
+    const { session, client } = stack();
+    session.setOrigin(fake.origin);
+    const answer = await client.send({ op: 'login', body: { name: 'a', password: 'b' } });
+    expect(answer).toMatchObject({ kind: 'answer', status: 401, body: { code: 'auth_failed', message: 'Wrong password' } });
   });
 
   it('signs out on a 401 for a bearer operation, but not for one that takes a secret, and not for a sign-in', async () => {

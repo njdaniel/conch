@@ -173,8 +173,9 @@ async function connect(socket: FakeSocket) {
 
 const lines = () => within(screen.getByRole('log', { name: 'Messages' })).queryAllByRole('listitem').map((li) => {
   const copy = li.cloneNode(true) as HTMLElement;
-  // The Reply and Open thread buttons are controls, not message text.
-  copy.querySelectorAll('button').forEach((button) => { button.remove(); });
+  // Action buttons are controls, not message text. The author's name is a
+  // button too (issue #1544), but stays in the HH:MM name [agent]: text.
+  copy.querySelectorAll('button:not(.profile-card-name)').forEach((button) => { button.remove(); });
   return copy.textContent;
 });
 
@@ -234,7 +235,7 @@ describe('loading', () => {
     const socket = await openChat();
     await connect(socket);
     socket.send('not json');
-    socket.send({ ...message(1, 'x'), extra: true });
+    socket.send({ ...message(1, 'x'), schema: 'conch.message.v1' });
     socket.send(message(2, 'elsewhere', {}, 8));
     socket.send(message(3, 'fine'));
     await screen.findByText('fine');

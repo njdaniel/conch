@@ -12,11 +12,19 @@
 // What it keeps:
 //   - the bearer is read from the activation at join time only, handed to
 //     Supervisor.start and held nowhere here; the renderer never sees it;
-//   - the 30 s missed-release ceiling (D3-1) is passed on every start;
+//   - the 30 s missed-release ceiling (D3-1) is passed on every start, and so
+//     is --share-audio-owner companion (#1581): the renderer's screen
+//     companion plays watched shares' sound, never the helper;
 //   - a join that a sign-out, switch or 401 overtakes is stopped and
 //     reported nowhere;
+//   - after the installed files were replaced (#1600) join and retry start no
+//     helper and say so; a running helper is untouched until the person
+//     restarts;
 //   - teardown leaves and stops the helper within VoiceControlStopKillAfterMS;
-//   - the logind watcher of #773 calls setMute and leave (decision D-1).
+//   - the logind watcher of #773 calls setMute and leave (decision D-1); while
+//     the screen is locked, setMute(false) is refused (`locked`) and every
+//     start is muted, so nothing transmits again until a deliberate unmute
+//     after unlock (issue #1588).
 import { VOICE_CONTROL_STOP_KILL_AFTER_MS, type VoiceControlTalkMode } from '../../../web/src/schema/generated.ts';
 import type {
   NativeVoiceDevicesResult,
@@ -39,6 +47,21 @@ export const DESKTOP_MISSED_RELEASE_SECS = 30;
 
 // The helper options every start carries (D3-1 / #1372).
 export const CEILING_ARGS: readonly string[] = ['--transmit-ceiling-secs', String(DESKTOP_MISSED_RELEASE_SECS)];
+
+// Who plays other participants' share audio (#934, #1581): the renderer's
+// companion, p<id>.screen, does. Without this flag the helper would play it as
+// well, and a watched share would be heard twice. The helper learns the
+// companion's identity from its own session response; main passes nothing else.
+export const SHARE_AUDIO_ARGS: readonly string[] = ['--share-audio-owner', 'companion'];
+
+// Main alone owns mute (#1631): the helper does not read keys.mute, so a hand-
+// edited voice.toml cannot bind a key that unmutes a session while the screen is
+// locked (VoiceService.setMute is the only way, and the lock path mutes through
+// it). The TUI passes nothing and keeps its mute key.
+export const MUTE_OWNER_ARGS: readonly string[] = ['--no-mute-key'];
+
+// Every option a start carries, the ceiling last.
+export const HELPER_ARGS: readonly string[] = [...SHARE_AUDIO_ARGS, ...MUTE_OWNER_ARGS, ...CEILING_ARGS];
 
 // The part of the Supervisor this service uses; a test stands in for it.
 export interface VoiceSupervisor {
@@ -78,8 +101,18 @@ export interface VoiceServiceDeps {
   readonly log: (line: string) => void;
   // Test seams for the key-device listing (issue #1381).
   readonly keyDevices?: KeyDeviceDeps;
+  // Whether the installed files were replaced under this running app (issue
+  // #1600): a new helper is then not started from them. Absent means never.
+  readonly updated?: () => boolean;
+  // Reads the installed stamp again before a helper is started, so an update
+  // that landed since the last focus or tick is seen (issue #1600).
+  readonly recheck?: () => Promise<void>;
   // How long teardown waits for the stop; the contract's kill bound.
   readonly stopBoundMs?: number;
+  // Whether the screen is locked (Lifecycle.locked, issue #1588). While it
+  // is, nothing unmutes and any join or retry starts muted. Required: a
+  // caller that leaves it out would fail open (tests pass `() => false`).
+  readonly locked: () => boolean;
 }
 
 export interface JoinRequest {
@@ -124,6 +157,10 @@ const RETRYABLE_REASONS: ReadonlySet<string> = new Set([
 
 const NOT_SIGNED_IN = 'not-signed-in';
 
+// The problem a join or retry is refused with after the install was replaced
+// (the page words it: "Restart Conch to finish the update").
+export const UPDATE_PENDING = 'update-pending';
+
 function helperOf(h: HelperView): NativeVoiceHelper {
   return {
     version: h.version,
@@ -167,6 +204,9 @@ export class VoiceService {
   // dropped at teardown.
   private listing = new Map<string, string>();
   private bindingSave = false;
+  // Set when main muted the person at a screen lock (issue #1588): the view
+  // says so until they unmute or leave.
+  private lockMuted = false;
 
   constructor(private readonly deps: VoiceServiceDeps) {
     this.bound = deps.stopBoundMs ?? VOICE_CONTROL_STOP_KILL_AFTER_MS;
@@ -187,7 +227,21 @@ export class VoiceService {
     // A join that sign-out, a switch or a 401 has overtaken shows nothing:
     // not its channel, not its helper.
     if (this.active !== null && !this.active.current()) return { status: 'idle', generation: this.lastGeneration, channel: null, retryable: false };
-    return this.override ?? this.view(this.deps.supervisor.state);
+    return this.withLockNote(this.override ?? this.view(this.deps.supervisor.state));
+  }
+
+  // setLockMuted records (or clears) that main muted the person at a lock,
+  // and tells the page.
+  setLockMuted(on: boolean): void {
+    if (this.lockMuted === on) return;
+    this.lockMuted = on;
+    this.emit(this.state());
+  }
+
+  // The note rides on a running view only, and only while still muted.
+  private withLockNote(view: NativeVoiceView): NativeVoiceView {
+    if (!this.lockMuted) return view;
+    return view.status === 'running' && view.helper?.muted === true ? { ...view, mutedByLock: true } : view;
   }
 
   subscribe(listener: (view: NativeVoiceView) => void): () => void {
@@ -201,7 +255,9 @@ export class VoiceService {
     // A join that sign-out, a switch or a 401 has overtaken reports nothing.
     if (this.active !== null && !this.active.current()) return;
     this.override = null;
-    this.emit(this.view(s));
+    // The note ends with the mute or the session.
+    if (this.lockMuted && (s.status !== 'running' || !s.helper.muted)) this.lockMuted = false;
+    this.emit(this.withLockNote(this.view(s)));
   }
 
   private emit(view: NativeVoiceView): void {
@@ -260,11 +316,26 @@ export class VoiceService {
     return this.begin(this.last);
   }
 
+  // replaced reads the stamp again and says whether the installed files were
+  // replaced. A failed read changes nothing (the watcher logs it).
+  private async replaced(): Promise<boolean> {
+    try {
+      await this.deps.recheck?.();
+    } catch {
+      // The last answer stands.
+    }
+    return this.deps.updated?.() === true;
+  }
+
   private async begin(req: JoinRequest): Promise<NativeVoiceView> {
+    // The read is first, so the busy check and the start below stay together
+    // with no wait between them.
+    const replaced = await this.replaced();
     if (this.running()) {
       this.deps.log('voice: join refused: busy');
       return { ...this.state(), problem: 'busy' };
     }
+    if (replaced) return this.updatePending();
     const p = this.run(req);
     this.inflight = p;
     try {
@@ -284,8 +355,11 @@ export class VoiceService {
       this.active = identity;
       this.override = null;
       this.channel = req.channel;
-      this.last = { channel: req.channel, muted: req.muted, deafened: req.deafened };
+      this.last = { channel: req.channel, muted: req.muted || this.deps.locked(), deafened: req.deafened };
       let result: VoiceState;
+      // A join or retry begun, or still waiting for its identity, when the
+      // screen locks starts muted; read now, after the awaits.
+      const muted = req.muted || this.deps.locked();
       try {
         // The token is read here, handed on, and not kept.
         result = await this.deps.supervisor.start({
@@ -295,9 +369,9 @@ export class VoiceService {
           server: credential.origin,
           channel: req.channel,
           principalId: identity.principalId,
-          muted: req.muted,
+          muted,
           deafened: req.deafened,
-          extraArgs: CEILING_ARGS,
+          extraArgs: HELPER_ARGS,
         });
       } catch {
         this.deps.log('voice: the start failed unexpectedly');
@@ -318,6 +392,17 @@ export class VoiceService {
     }
   }
 
+  // The install was replaced: no new helper is started from its files. A
+  // helper already running is not touched (this is reached only when none is),
+  // and leave still works.
+  private updatePending(): NativeVoiceView {
+    this.deps.log('voice: start refused: the installed files were replaced; restart to finish the update');
+    const view: NativeVoiceView = { status: 'unavailable', generation: this.lastGeneration, channel: null, problem: UPDATE_PENDING, retryable: false };
+    this.override = view;
+    this.emit(view);
+    return view;
+  }
+
   private noIdentity(): NativeVoiceView {
     const view: NativeVoiceView = { status: 'unavailable', generation: this.lastGeneration, channel: null, problem: NOT_SIGNED_IN, retryable: false };
     this.override = view;
@@ -329,6 +414,7 @@ export class VoiceService {
   // logind watcher calls it too.
   async leave(): Promise<NativeVoiceView> {
     this.epoch++;
+    this.lockMuted = false;
     await this.stopBounded(true);
     this.channel = null;
     this.override = null;
@@ -352,10 +438,21 @@ export class VoiceService {
   // devices lists the microphones and speakers (`conch-voice devices --json`),
   // for the profile in force. It starts no voice and reads no login.
   async devices(): Promise<NativeVoiceDevicesResult> {
+    // begun is taken before the stamp is read, so a teardown during the read
+    // overtakes this run as it would one waiting for its identity.
     const begun = this.teardowns;
+    if (await this.oneShotRefused()) return { ok: false, error: UPDATE_PENDING };
     const identity = await this.deps.identity();
     if (identity === null || begun !== this.teardowns) return { ok: false, error: NOT_SIGNED_IN };
     return this.deps.oneShot.devices(identity.configDir);
+  }
+
+  // oneShotRefused: a one-shot run starts the helper from the installed files
+  // too, so after a replacement it is refused with the join's reason.
+  private async oneShotRefused(): Promise<boolean> {
+    if (!(await this.replaced())) return false;
+    this.deps.log('voice: one-shot run refused: the installed files were replaced; restart to finish the update');
+    return true;
   }
 
   // saveDevice runs `config set` for the profile in force. The key and value
@@ -364,6 +461,7 @@ export class VoiceService {
     // The key device and the talk key are saved by saveTalkBinding alone.
     if (!isPageSaveKey(request.key) || !saveValueFits(request.key, request.value)) return { ok: false, error: 'invalid' };
     const begun = this.teardowns;
+    if (await this.oneShotRefused()) return { ok: false, error: UPDATE_PENDING };
     const identity = await this.deps.identity();
     if (identity === null || begun !== this.teardowns) return { ok: false, error: NOT_SIGNED_IN };
     return this.deps.oneShot.save(identity.configDir, request.key, request.value);
@@ -401,6 +499,7 @@ export class VoiceService {
     this.bindingSave = true;
     try {
       const begun = this.teardowns;
+      if (await this.oneShotRefused()) return { ok: false, error: UPDATE_PENDING };
       const identity = await this.deps.identity();
       if (identity === null || begun !== this.teardowns) return { ok: false, error: NOT_SIGNED_IN };
       const device = await this.deps.oneShot.save(identity.configDir, 'keys.device', path);
@@ -438,6 +537,11 @@ export class VoiceService {
   // The commands resolve with the helper's own ack, never optimistically; the
   // view changes when the helper's state says so.
   async setMute(muted: boolean): Promise<VoiceCommandResult> {
+    // Unmuting is the person's act after unlock, never during a lock.
+    if (!muted && this.deps.locked()) {
+      this.deps.log('voice: unmute refused: the screen is locked');
+      return { ok: false, error: 'locked' };
+    }
     const r = await this.deps.supervisor.setMute(muted);
     if (r.ok && this.last !== null) this.last = { ...this.last, muted };
     return r;

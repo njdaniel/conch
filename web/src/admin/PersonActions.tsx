@@ -14,7 +14,7 @@
 // and the permission it names; the server's message is never shown. A link, a
 // credential or a hook acts as the person: each is worded so and its secret is
 // shown once (SecretOnce.tsx).
-import { useEffect, useId, useRef, useState, type KeyboardEvent, type RefObject, type SyntheticEvent } from 'react';
+import { useContext, useEffect, useId, useRef, useState, type KeyboardEvent, type RefObject, type SyntheticEvent } from 'react';
 import * as api from '../api';
 import { memberActions, voiceOffLine, voiceRoleOff, type MemberAction, type MemberActionId } from '../memberActions';
 import { ActionsMenu, type MenuItem } from '../MessageMenu';
@@ -26,6 +26,7 @@ import { canDo, refusalLine, type Refusal } from './permissions';
 import { AIAdminCard } from './AIAdminCard';
 import { SecretOnce } from './SecretOnce';
 import { timeOf } from '../time';
+import { PreviewEntry } from '../preview/entry';
 
 type Line = { readonly text: string; readonly refused: boolean } | null;
 type Role = 'member' | 'operator' | 'owner';
@@ -119,7 +120,9 @@ export interface PersonActionsProps {
 }
 
 export function PersonActions({ who, person, origin, rows, readRows, open, onOpenChange, button, onChanged, onUnauthorized, beginIssued }: PersonActionsProps) {
-  const actions = memberActions(who, person);
+  // Preview as member is offered where the page can show one (not the desktop).
+  const startPreview = useContext(PreviewEntry);
+  const actions = memberActions(who, person).filter((a) => a.id !== 'preview' || startPreview !== null);
   // What the viewer may do now, for the moment a request is sent.
   const allowed = useRef<readonly MemberAction[]>(actions);
   allowed.current = actions;
@@ -242,6 +245,14 @@ export function PersonActions({ who, person, origin, rows, readRows, open, onOpe
   const items: MenuItem[] = actions.map((action) => {
     const item: MenuItem = { key: action.id, label: action.label, disabled: busy, onSelect: () => undefined };
     switch (action.id) {
+      case 'preview':
+        return {
+          ...item,
+          onSelect: () => {
+            startPreview?.start(person);
+          },
+          ...(startPreview?.blocked == null ? {} : { disabled: true, reason: startPreview.blocked }),
+        };
       case 'voice': {
         if (voiceOff) return { ...item, disabled: true, reason: voiceOffLine(person) };
         const to = person.voice_allowed === false;

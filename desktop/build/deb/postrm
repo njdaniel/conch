@@ -1,0 +1,21 @@
+#!/bin/sh
+# Unloads the AppArmor profile and refreshes the caches on remove and purge.
+# Best effort, like postinst. The user's data in their own home is not touched.
+set -e
+
+case "$1" in
+remove | purge)
+    profile=/etc/apparmor.d/conch-desktop
+    if [ -f "$profile" ] && [ -d /sys/kernel/security/apparmor ] && command -v apparmor_parser >/dev/null 2>&1; then
+        apparmor_parser -R "$profile" || true
+    fi
+    if command -v update-desktop-database >/dev/null 2>&1; then
+        update-desktop-database -q /usr/share/applications || true
+    fi
+    if command -v gtk-update-icon-cache >/dev/null 2>&1; then
+        gtk-update-icon-cache -q -t -f /usr/share/icons/hicolor || true
+    fi
+    ;;
+esac
+
+exit 0

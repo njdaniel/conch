@@ -856,6 +856,20 @@ func TestVoiceCameraOperatorStop(t *testing.T) {
 			}
 		})
 	}
+	t.Run("an agent with manage_channels is refused as a member is", func(t *testing.T) {
+		f, room := setup(t)
+		f.makeAgentOperator(t)
+		res := f.stopAsDispatchedAgent(t, f.srv.handleVoiceCameraStop, "robo", fmt.Sprintf("principal=%d", f.ids["ann"]))
+		if res.status != http.StatusForbidden || errCode(t, res.body) != schema.ErrorCodePermissionDenied {
+			t.Fatalf("got %d %s, want 403 %s", res.status, res.body, schema.ErrorCodePermissionDenied)
+		}
+		if !f.camGranted(room, "ann") {
+			t.Error("ann's camera was turned off by an agent")
+		}
+		if got := f.cameraRows(t); !slices.Equal(got, []string{"ann started"}) {
+			t.Errorf("rows %q, want only ann's start", got)
+		}
+	})
 	t.Run("an operator with manage_channels, not a member", func(t *testing.T) {
 		f, room := newCameraFixture(t)
 		ctx := context.Background()

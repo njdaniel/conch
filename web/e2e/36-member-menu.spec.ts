@@ -64,8 +64,15 @@ for (const [size, options, phone] of sizes) {
     await expect(more).toBeVisible();
 
     // A row is a line of name and state plus a line of badges at most, not a block of controls.
-    const box = await row.boundingBox();
-    expect(box?.height ?? 0, `the row is ${String(box?.height)} px tall`).toBeLessThan(64);
+    // The row is first drawn from the member list alone; the roster's status
+    // and the identity badges join it a moment later and can wrap onto a
+    // second line until the row settles (issue #1647: one run measured 71.6 px
+    // in that window). So the budget (64 px) is polled, not read once: it must
+    // hold once the layout is settled, and a row that stays taller still fails
+    // when the poll times out.
+    await expect
+      .poll(async () => (await row.boundingBox())?.height ?? Number.POSITIVE_INFINITY, { message: 'the row stays taller than its budget' })
+      .toBeLessThan(64);
     await expectFits(page, `${size}: the members panel with a ⋯ per row`);
 
     const press = async (target: Locator) => (phone ? target.tap() : target.click());

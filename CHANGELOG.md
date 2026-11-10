@@ -8,6 +8,61 @@ release that Nick publishes.
 
 ## [Unreleased]
 
+## [0.1.0-alpha.18] - 2026-11-09
+
+This is a pre-1.0 release (`v0.1.0-alpha.18`). There is no new schema version. `pkg/schema` gains the constant `SpoilerFilePrefix` (`SPOILER_`), which is presentation only (#1500). After the upgrade, an open browser tab offers a reload (#1534).
+
+### Added
+- **Several screen shares at once, in the browser** (#1509).
+  - Every live share is a tile in the call grid, in the order it started, with its quality.
+  - Nothing is received until you press Watch. Focus puts a stream on the stage, and each stream has its own volume and mute.
+  - A phone watches one stream at a time, with a switcher.
+  - The desktop app now reads the same presence, and browsers can watch a share from the desktop app.
+- **A compact call workspace** (#1498).
+  - Compact docks the call in a strip above the chat, and Expand brings it back. The call carries on while you move between text channels.
+  - The call's header names its channel (a button back to it), who is sharing and who is speaking.
+- **Spoiler attachments** (#1500).
+  - "Mark as spoiler" on a draft hides the file behind a card showing its name, type and size, with Reveal and Download.
+  - Only the file's details are fetched automatically. Reveal loads the picture, and Download fetches the file without revealing it.
+  - Notifications show the file as "[spoiler] {name}", without the `SPOILER_` prefix. The name itself is not hidden, so don't put a secret in a file name.
+- **Member marks** (#1499). Agent, Owner, Operator, Manager, Approver and You are shown the same way on every list, author row and voice roster. Each mark appears only where the server sent that fact to you.
+- **A read-only profile card** opens when you select a person's name (#1544). It shows only what that view already holds.
+- **Message links show a cue** that they open elsewhere, and their full address on hover (#1545).
+- **Preview as member** works in the desktop app (#1540).
+
+### Changed
+- **Agents don't moderate voice** (#1546). An agent can't stop someone else's share or camera, whatever it has been granted. A sharer's quality changes are limited to three in three seconds.
+- The voice design now says plainly that switching a person's voice off stays a direct action for an AI administrator (#1559). An owner can require an approval for it per agent with `admin.require_approval`.
+
+### Fixed
+- The page no longer keeps asking for a hidden or removed agent's manifest (#1562).
+- A spoiler file whose name contains ", " no longer shows its `SPOILER_` prefix in replies and notifications, once the file has been seen (#1566).
+
+## [0.1.0-alpha.17] - 2026-11-07
+
+This is a pre-1.0 release (`v0.1.0-alpha.17`). There is one new schema version, `conch.voice_presence.v2`, which Nick signed off on 2026-11-07 (#1483). It is served only when a client asks with `?schema=`, so v1 readers are unchanged. **Testers: reload any open tab once after the upgrade.** From this release on, the browser accepts fields it doesn't know yet, so a later upgrade won't break an open tab (#1534), and it offers a reload when the server is newer.
+
+### Added
+- **Screen share sound.** The sharer is told when a share has no sound, and how to share a browser tab with sound. On Chrome and Edge on Mac and Linux, only a tab's sound can be shared. Viewers hear a share as soon as they watch it, and their volume carries over to the next share (#1485).
+- **Share quality.** The sharer picks the resolution (720p, 1080p or source) and the frame rate (15, 30 or 60), and the share shows its quality (#1488).
+- **Several screen shares at once** in a voice room, up to six (#1508). A moderator stops someone else's stream with `?principal=`. The CLI and TUI name every sharer and gain `conch voice share stop` (#1510), and the voice helper reads v2 presence (#1511). The browser's stream tiles come in a later release (#1509).
+- **Preview as member** (#1007): an administrator sees the server as another member sees it, read-only. Available from the server (#1515), the CLI with `conch admin preview` and `--preview-as` (#1518), and the browser (#1517).
+- **The call grid shows everyone,** with a "Hide non-video participants" toggle (#1487).
+- **The web UI:**
+  - appearance presets, accent colours and chat density (#1497);
+  - a quick channel switcher, with channel stepping and unread jumps (#1492);
+  - favorites and collapsible channel groups (#1493);
+  - a Markdown composer with formatting shortcuts and spoilers (#1496).
+
+### Changed
+- Push-to-talk in the browser accepts Mouse 4 and Mouse 5 (#1480).
+- Voice shows your own username instead of "You" (#1481).
+- `voice_share_busy` is no longer answered. A seventh share gets `voice_share_full`, and a bare `DELETE …/voice/share` stops only the caller's own stream.
+
+### Fixed
+- `/mcp` accepts the public Host kept by a reverse proxy (#1479). **After upgrading, remove `MCPGODEBUG=disablelocalhostprotection=1` from `/etc/conch/alpha.env` and restart.**
+- A hidden status line in the channel-groups editor no longer lengthens the page on long channel lists (#1550).
+
 ## [0.1.0-alpha.16] - 2026-11-06
 
 This is a pre-1.0 release (`v0.1.0-alpha.16`): the API and the wire shapes
