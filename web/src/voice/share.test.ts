@@ -658,6 +658,40 @@ describe('a companion share is not resumable', () => {
     expect(t.calls).not.toContain('keep');
   });
 
+  it('a claim granted again with a new started_at after a reconnect is released, not adopted', async () => {
+    const claims: ShareClaimResult[] = [];
+    const t = await sharing(setup(claims));
+    claims.push({ ok: true, value: { principal_id: 7, started_at: '2026-10-16T00:05:00.000Z', audio: true } });
+    t.share.setCompanion(true);
+    t.share.presence('me');
+    await t.share.reconnected();
+    await settle();
+    expect(t.share.current).toEqual({ kind: 'idle', ended: 'rotated' });
+    expect(t.released).toEqual(['2026-10-16T00:05:00.000Z']);
+  });
+
+  it('the same started_at on a reconnect is still the same share', async () => {
+    const t = await sharing(setup());
+    t.share.setCompanion(true);
+    t.share.presence('me');
+    await t.share.reconnected();
+    await settle();
+    expect(t.share.current).toEqual({ kind: 'sharing', audio: true });
+    expect(t.released).toEqual([]);
+  });
+
+  it('a quality change answered with a new started_at is released, not adopted', async () => {
+    const claims: ShareClaimResult[] = [];
+    const t = await sharing(setup(claims));
+    claims.push({ ok: true, value: { principal_id: 7, started_at: '2026-10-16T00:05:00.000Z', audio: true } });
+    t.share.setCompanion(true);
+    t.share.presence('me');
+    await t.share.changeQuality({ resolution: '720p', frameRate: 30 });
+    await settle();
+    expect(t.share.current).toEqual({ kind: 'idle', ended: 'rotated' });
+    expect(t.released).toEqual(['2026-10-16T00:05:00.000Z']);
+  });
+
   it('a connection lost after the renewal was told stops the share with the renewal words', async () => {
     const t = await sharing(setup());
     t.share.setCompanion(true);

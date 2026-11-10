@@ -3157,16 +3157,22 @@ const grantOk: CompanionGrantResult = {
 function nativeCompanion(order: string[], answers: CompanionGrantResult[] = []) {
   const ends = new Set<(reason: CompanionEndReason) => void>();
   const deafs = new Set<() => void>();
-  const state = { deaf: false, grants: [] as string[], endCalls: 0 };
+  // held is main's record of a grant: like the real main, it refuses another
+  // grant (elsewhere) until end clears it.
+  const state = { deaf: false, grants: [] as string[], endCalls: 0, held: false };
   const env: CompanionEnv = {
     grant: (channel) => {
       order.push(`grant ${channel}`);
       state.grants.push(channel);
-      return Promise.resolve(answers.shift() ?? grantOk);
+      if (state.held) return Promise.resolve({ ok: false, error: 'elsewhere' });
+      const answer = answers.shift() ?? grantOk;
+      if (answer.ok) state.held = true;
+      return Promise.resolve(answer);
     },
     end: () => {
       order.push('end');
       state.endCalls++;
+      state.held = false;
       return Promise.resolve(true);
     },
     onEnd: (listener) => {
@@ -3296,6 +3302,8 @@ describe('the screen companion', () => {
     t.order.length = 0;
     t.client.stopShare();
     await settle();
+    // The leave's bounded waits take a few more turns.
+    await settle();
     expect(t.order).toEqual(['unpublish', 'release general 2026-10-16T00:00:00.000Z', 'close', 'end']);
     expect(t.rooms[0]?.closed).toBe(true);
     expect(t.client.snapshot()).toMatchObject({ phase: 'idle', companion: false, share: { kind: 'idle', ended: 'self' } });
@@ -3308,6 +3316,7 @@ describe('the screen companion', () => {
     await settle();
     t.rooms[0]?.events?.onScreenEnded('browser');
     await settle();
+    await settle();
     expect(t.client.snapshot().share).toEqual({ kind: 'idle', ended: 'browser' });
     expect(t.rooms[0]?.closed).toBe(true);
     expect(t.native.state.endCalls).toBe(1);
@@ -3317,6 +3326,7 @@ describe('the screen companion', () => {
     const t = companionSetup();
     t.shareAnswers.push({ ok: false, failure: 'invalid', status: 409, code: 'voice_share_full' });
     t.client.startCompanionShare('general');
+    await settle();
     await settle();
     expect(t.rooms[0]?.calls).toEqual([]);
     expect(t.rooms[0]?.closed).toBe(true);
@@ -3435,7 +3445,10 @@ describe('the screen companion', () => {
     expect(t.native.state.grants).toEqual(['general', 'general']);
   });
 
-  it('the tail of a leave ends only the companion it left: one joined meanwhile keeps its end listener', async () => {
+  // Was: a direct join got past the gate during the close and the old tail
+  // left it alone. A companion join is now refused until the leave is done, so
+  // the tail always ends the companion it left (the changed expectations).
+  it('a companion join during a leave is refused, and the tail ends the companion it left', async () => {
     const t = companionSetup([], (room) => {
       room.holdClose = true;
     });
@@ -3443,15 +3456,59 @@ describe('the screen companion', () => {
     await settle();
     t.client.stopShare();
     await settle();
-    // A join that gets past the gate (as a direct one does) during the close.
     t.client.join('general', { companion: true });
     await settle();
-    expect(t.native.listening()).toBeGreaterThan(0);
+    expect(t.rooms).toHaveLength(1);
+    expect(t.client.snapshot().phase).toBe('idle');
     t.rooms[0]?.heldClose?.();
     await settle();
-    expect(t.native.state.endCalls).toBe(0);
-    expect(t.native.listening()).toBeGreaterThan(0);
-    expect(t.rooms).toHaveLength(2);
+    expect(t.native.state.endCalls).toBe(1);
+    expect(t.native.state.held).toBe(false);
+  });
+
+  it('a superseded leave does not reopen the gate under the leave that took over: main is always told', async () => {
+    const t = companionSetup([], (room) => {
+      room.holdClose = true;
+    });
+    t.client.startCompanionShare('general');
+    await settle();
+    // L1 and L2: the second takes the first's place while the room closes.
+    void t.client.leave();
+    await settle();
+    void t.client.leave();
+    await settle();
+    // A Share while L2 is still closing is refused and joins nothing.
+    t.client.startCompanionShare('general');
+    await settle();
+    expect(t.native.state.grants).toEqual(['general']);
+    expect(t.rooms).toHaveLength(1);
+    t.rooms[0]?.heldClose?.();
+    await settle();
+    expect(t.native.state.endCalls).toBe(1);
+    expect(t.native.state.held).toBe(false);
+    t.client.startCompanionShare('general');
+    await settle();
+    expect(t.native.state.grants).toEqual(['general', 'general']);
+    expect(t.client.snapshot()).toMatchObject({ phase: 'connected', companion: true });
+  });
+
+  it('a room that never closes does not keep the gate shut', async () => {
+    const t = companionSetup([], (room) => {
+      room.holdClose = true;
+    });
+    t.client.startCompanionShare('general');
+    await settle();
+    void t.client.leave();
+    await settle();
+    t.client.startCompanionShare('general');
+    await settle();
+    expect(t.rooms).toHaveLength(1);
+    t.clock.advance(5_000);
+    await settle();
+    expect(t.native.state.endCalls).toBe(1);
+    t.client.startCompanionShare('general');
+    await settle();
+    expect(t.native.state.grants).toEqual(['general', 'general']);
   });
 
   it('a watch undone while the companion connects leaves no idle companion holding the slot', async () => {

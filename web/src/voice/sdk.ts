@@ -915,6 +915,11 @@ class LiveKitAdapter implements Room {
         this.output = id;
         events.onOutputMoved(id);
       })
+      .on(RoomEvent.SignalConnected, () => {
+        // The SDK sets the room's name from the join response just before this
+        // event, well before connect resolves, and logs it meanwhile: held now.
+        redactor.hold(this, room.name);
+      })
       .on(RoomEvent.TrackUnmuted, (pub: TrackPublication, participant: Participant) => {
         // Unmuted by someone else (the room API) while the gate is shut: muted
         // again. An unmute of our own comes with the gate open.
@@ -922,9 +927,10 @@ class LiveKitAdapter implements Room {
         void (pub as LocalTrackPublication).mute().catch(() => undefined);
       });
     await room.connect(url, token, connectOptions);
-    // The room's own name, now the server has said it: the companion's grant
-    // names none (its roomName is empty, and a value under 4 characters is
-    // never held), yet the SDK logs the name at info and debug.
+    // The room's own name again, in case the event above came without it (a
+    // repeat is harmless): the companion's grant names none (its roomName is
+    // empty, and a value under 4 characters is never held), yet the SDK logs
+    // the name at info and debug.
     redactor.hold(this, room.name);
     this.ensureOpen();
     // Whoever was already in the room: their tracks are subscribed by choice too.

@@ -627,7 +627,10 @@ export class VoiceClient {
   // end of it, the native deafen), whether it is being left by this client,
   // and the act that asked for it to be joined, carried out once connected.
   private companionOffs: (() => void)[] = [];
-  private companionLeaving = false;
+  // companionLeaving is the attempt number of the leave that owns the busy
+  // gate, null when none does: only that leave clears it, so a superseded one
+  // waking up cannot reopen the gate under the leave that took over.
+  private companionLeaving: number | null = null;
   // Counts joins, so the tail of a leave ends only the companion it left, not
   // one joined while its room was closing.
   private joins = 0;
@@ -717,8 +720,11 @@ export class VoiceClient {
   join(channel: string, options: { readonly watchOnly?: boolean; readonly beside?: boolean; readonly companion?: boolean } = {}): void {
     if (this.state.phase !== 'idle' && this.state.phase !== 'stopped') return;
     const companion = options.companion === true;
+    // A companion is not joined while the last one is still being left (its
+    // room closing, main not yet told); the gate is only ever cleared by the
+    // leave that owns it.
+    if (companion && this.companionLeaving !== null) return;
     this.channel = channel;
-    this.companionLeaving = false;
     this.joins++;
     this.share.setCompanion(companion);
     this.afterConnect = null;
@@ -772,7 +778,7 @@ export class VoiceClient {
     const { phase, companion } = this.state;
     // The last companion is still being left (its room closing, main not yet
     // told): nothing new is joined until that tail is done.
-    if (this.companionLeaving) return 'busy';
+    if (this.companionLeaving !== null) return 'busy';
     if (phase === 'idle' || phase === 'stopped') {
       this.join(channel, { companion: true });
       return 'joining';
@@ -825,7 +831,7 @@ export class VoiceClient {
   // and no watch. It is not asked for again by itself.
   private settleCompanion(): void {
     const s = this.state;
-    if (!s.companion || this.companionLeaving || s.phase !== 'connected' || this.afterConnect !== null) return;
+    if (!s.companion || this.companionLeaving !== null || s.phase !== 'connected' || this.afterConnect !== null) return;
     if (s.share.kind !== 'idle' || s.watched.size > 0) return;
     void this.leave();
   }
@@ -1354,8 +1360,7 @@ export class VoiceClient {
   async leave(): Promise<void> {
     const mine = ++this.attempt;
     const companion = this.state.companion;
-    const joined = this.joins;
-    if (companion) this.companionLeaving = true;
+    if (companion) this.companionLeaving = mine;
     this.afterConnect = null;
     this.clearTimers();
     this.gate.setBlocked(true);
@@ -1371,9 +1376,10 @@ export class VoiceClient {
     await sharing;
     await camera;
     if (mine !== this.attempt) {
-      // Taken over (dropped, or left again): this tail will not run, so the
-      // companion is not still being left by it.
-      if (companion && joined === this.joins) this.companionLeaving = false;
+      // Taken over (dropped, or left again): this tail will not run. The gate
+      // is cleared only if this leave still owns it: a later leave that took
+      // it over keeps it until its own tail is done.
+      if (companion && this.companionLeaving === mine) this.companionLeaving = null;
       return;
     }
     this.talk++;
@@ -1414,16 +1420,19 @@ export class VoiceClient {
       cameraTrack: 'none',
       cameraInUse: null,
     });
-    if (room !== null) await room.close().catch(() => undefined);
+    // Bounded, so that a close that never settles cannot keep the gate shut.
+    if (room !== null) await this.within(room.close().catch(() => undefined), leaveDrain);
     // The viewer is removed from the room as the page goes; a refusal is not
     // news, since its token lives seconds and the room drops it anyway.
     const remove = this.env.removeViewer;
     if (viewer && left !== null && remove !== undefined) await remove(left).catch(() => undefined);
     // The room is left before main is asked to remove the companion.
-    if (companion && joined === this.joins) {
+    // The join gate is shut until here, so this is the companion this leave
+    // ended, and main's record of it is always ended, whoever else woke up.
+    if (companion) {
       this.unfollowCompanion();
-      await this.endCompanion();
-      if (joined === this.joins) this.companionLeaving = false;
+      await this.within(this.endCompanion(), leaveDrain);
+      if (this.companionLeaving === mine) this.companionLeaving = null;
     }
   }
 

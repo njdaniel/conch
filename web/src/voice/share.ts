@@ -446,6 +446,7 @@ export class ScreenShare {
       return 'sent';
     }
     if (answer.ok) {
+      if (await this.newShare(answer.value.started_at)) return 'sent';
       this.granted(answer.value.started_at);
       return 'sent';
     }
@@ -793,10 +794,23 @@ export class ScreenShare {
     const answer = await this.api.claim(this.channel, this.quality);
     if (mine !== this.attempt) return;
     if (answer.ok) {
+      if (await this.newShare(answer.value.started_at)) return;
       this.granted(answer.value.started_at);
       return;
     }
     if (refusalEnd(answer) === 'full') await this.serverEnded();
+  }
+
+  // newShare handles a claim granted again to a companion with a started_at
+  // other than the share's: the server ended that share and this is a new one,
+  // made without a click. A companion's share is never adopted so (Q-D4-2 on
+  // #1578): the new claim is taken only to be released, and the share ends
+  // with the renewal's words. It says whether it did.
+  private async newShare(startedAt: string): Promise<boolean> {
+    if (!this.companion || this.claimed === null || sameInstant(this.claimed, startedAt)) return false;
+    this.granted(startedAt);
+    await this.stop('rotated');
+    return true;
   }
 
   private async serverEnded(): Promise<void> {
