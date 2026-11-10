@@ -130,8 +130,21 @@ export type ShareEnd =
   | 'unavailable'
   | 'failed';
 
+// What more is known of a share that did not start, for a client that says it
+// in its own words (the desktop's, issue #1582). It never changes `ended`, so
+// the browser's words are the same with or without it.
+//   denied: the pick failed in a way the person should hear of. In the
+//     browser that is NotAllowedError, the picker closed or refused, which it
+//     says (as it always has); on the desktop companion it is any failure but
+//     the person cancelling the picker (AbortError, silent): main refusing
+//     (no allowance, no grant), the PipeWire stream failing, a capture that
+//     could not be constrained. A
+//     desktop with no screen-cast portal is said before the pick, from the
+//     grant (VoiceState.companionShareUnavailable), never from a failed pick.
+export type ShareCause = 'denied';
+
 export type ShareState =
-  | { readonly kind: 'idle'; readonly ended: ShareEnd | null }
+  | { readonly kind: 'idle'; readonly ended: ShareEnd | null; readonly cause?: ShareCause }
   | { readonly kind: 'claiming' }
   | { readonly kind: 'picking' }
   | { readonly kind: 'publishing' }
@@ -215,6 +228,20 @@ export function refusalEnd(r: Refusal): ShareEnd {
   return 'failed';
 }
 
+// pickCause is the more that a failed pick says, from the shapes getDisplayMedia
+// gives. In the browser, NotAllowedError is the picker closed or refused (or
+// main refusing, on the desktop), which is said; AbortError and anything else
+// say nothing more. On the desktop companion (companion), only AbortError, the
+// picker cancelled, is silent: NotAllowedError (main refusing: no allowance,
+// no grant), NotReadableError (the PipeWire stream failed), LiveKit's
+// DeviceUnsupportedError, a failure to constrain the capture, or a rejection
+// that is no Error at all, are all a screen that could not be captured.
+export function pickCause(err: unknown, companion = false): ShareCause | undefined {
+  if (companion) return err instanceof Error && err.name === 'AbortError' ? undefined : 'denied';
+  if (!(err instanceof Error)) return undefined;
+  return err.name === 'NotAllowedError' ? 'denied' : undefined;
+}
+
 // Every reason the server gives the sharer is an end the page can say: its
 // own stop and leaving as the page says them, the rest in their own words. A
 // reason added to the schema without a word for it fails to compile here.
@@ -225,6 +252,10 @@ const toldEnd: (reason: VoiceShareEndReason) => ShareEnd = (reason) => reason;
 function sameInstant(a: string, b: string): boolean {
   const x = Date.parse(a);
   return !Number.isNaN(x) && x === Date.parse(b);
+}
+
+function causeOf(cause: ShareCause | undefined): { readonly cause?: ShareCause } {
+  return cause === undefined ? {} : { cause };
 }
 
 export class ScreenShare {
@@ -324,12 +355,12 @@ export class ScreenShare {
     let captured: Captured;
     try {
       captured = await room.pickScreen(quality);
-    } catch {
+    } catch (err: unknown) {
       if (mine !== this.attempt) return;
       // Closed without choosing, or refused by the browser: the claim goes.
       this.set({ kind: 'stopping' });
       await this.releaseHeld(at());
-      if (mine === this.attempt) this.set({ kind: 'idle', ended: 'cancelled' });
+      if (mine === this.attempt) this.set({ kind: 'idle', ended: 'cancelled', ...causeOf(pickCause(err, this.companion)) });
       return;
     }
     if (mine !== this.attempt) {

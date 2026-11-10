@@ -12,6 +12,7 @@ export function companionEnv(source: NativeVoice | undefined): CompanionEnv | un
   if (source === undefined || companion === undefined) return undefined;
   return {
     grant: (channel) => companion.grant({ channel }),
+    arm: () => companion.shareArm(),
     end: () => companion.end(),
     onEnd: (listener) =>
       companion.onEnd((event) => {
