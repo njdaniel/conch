@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"testing"
@@ -109,5 +110,65 @@ func TestAdminSetChannelTopic(t *testing.T) {
 	}
 	if ch, _ := other.srv.store.ChannelByName(ctx, "plans"); ch.Topic != "" {
 		t.Fatalf("a refused agent set the topic to %q", ch.Topic)
+	}
+}
+
+// TestAdminSetChannelTopicRefusalsAndGating (security review of #1710): the
+// agent's own approval channel is refused at the door, and an owner who adds
+// set_channel_topic to the agent's require_approval gets an approval whose
+// payload carries exactly the topic, with nothing changed until it runs.
+func TestAdminSetChannelTopicRefusalsAndGating(t *testing.T) {
+	ctx := context.Background()
+	d := newDoorFixture(t, schema.PermManageChannels)
+	approvalTarget := &schema.AdminTargetV1{Kind: schema.AdminTargetChannel, ID: d.approvalCh.ID}
+	assertErrorBody(t, d.do(t, "POST", "/v1/admin/actions", d.agentTok, submitBody(schema.AdminActionSetChannelTopic, approvalTarget, `{"topic":"mine now"}`, "")),
+		http.StatusForbidden, schema.ErrorCodeAdminActionNotAllowed)
+	if ch, err := d.srv.store.ChannelByName(ctx, d.approvalCh.Name); err != nil || ch.Topic != "" {
+		t.Fatalf("approval channel topic = %q (%v), want none", ch.Topic, err)
+	}
+
+	// Gated per agent: the owner requires approval for it.
+	req := schema.PutAgentManifestRequestV1{
+		DisplayName:  "helper",
+		Tier:         schema.AgentTierA,
+		Capabilities: []schema.Capability{schema.CapabilityAdminAct, schema.CapabilityMessagesRead},
+		Channels: []schema.ChannelGrant{{ChannelID: d.approvalCh.ID, Permissions: []schema.ChannelPermission{
+			schema.ChannelPermissionRead, schema.ChannelPermissionPost,
+		}}},
+		Permissions: []schema.Permission{schema.PermManageChannels},
+		Admin:       &schema.AgentAdminV1{ApprovalChannelID: d.approvalCh.ID, RequireApproval: []schema.AdminAction{schema.AdminActionSetChannelTopic}},
+	}
+	if _, _, err := d.srv.store.PutAgentManifest(ctx, "system", d.agent.ID, req); err != nil {
+		t.Fatal(err)
+	}
+	channel, err := d.srv.store.CreateChannel(ctx, "plans")
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := &schema.AdminTargetV1{Kind: schema.AdminTargetChannel, ID: channel.ID}
+	id := d.submitGated(t, submitBody(schema.AdminActionSetChannelTopic, target, `{"topic":"Release plans"}`, "the team asked"))
+	approval, err := d.srv.store.ApprovalByID(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if approval.Payload == nil || approval.Payload.Schema != schema.AdminActionV1Name {
+		t.Fatalf("approval payload = %+v, want %s", approval.Payload, schema.AdminActionV1Name)
+	}
+	var action schema.AdminActionV1
+	if err := json.Unmarshal(approval.Payload.Data, &action); err != nil {
+		t.Fatal(err)
+	}
+	if action.Action != schema.AdminActionSetChannelTopic || string(action.Params) != `{"topic":"Release plans"}` {
+		t.Fatalf("payload action %s params %s, want set_channel_topic {\"topic\":\"Release plans\"}", action.Action, action.Params)
+	}
+	if ch, _ := d.srv.store.ChannelByName(ctx, "plans"); ch.Topic != "" {
+		t.Fatalf("the topic changed before the approval: %q", ch.Topic)
+	}
+	d.decide(t, id, "run")
+	if rec := d.run(t, id, d.agentTok); rec.Code != http.StatusOK {
+		t.Fatalf("run = %d %s", rec.Code, rec.Body)
+	}
+	if ch, _ := d.srv.store.ChannelByName(ctx, "plans"); ch.Topic != "Release plans" {
+		t.Fatalf("after the approved run the topic is %q", ch.Topic)
 	}
 }

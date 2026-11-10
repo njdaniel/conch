@@ -390,7 +390,7 @@ func TestAdminTargetV1Validate(t *testing.T) {
 	}
 }
 
-// The catalog has forty actions, in the design's order, each valid, none
+// The catalog has forty-four actions, in the design's order, each valid, none
 // twice, and nothing else is valid; the vocabulary table lists the same.
 func TestAdminActionsCatalog(t *testing.T) {
 	if len(AdminActions) != 44 {
