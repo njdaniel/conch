@@ -603,7 +603,7 @@ describe('sharing', () => {
     for (const [reason, text] of [
       ['operator', 'An operator stopped your share.'],
       ['left', 'You left voice, so your share ended.'],
-      ['access_lost', 'Your share ended: you no longer have voice in this channel.'],
+      ['access_lost', "Your share ended: you're no longer allowed to share in this channel."],
       // Not an end while the capture lasts: the share is resumed (issue #516).
       ['rotated', 'The voice room was renewed. Resuming your share…'],
       ['idle', 'Your share ended because nothing was shared for a while.'],

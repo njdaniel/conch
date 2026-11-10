@@ -971,7 +971,10 @@ export function watchNote(who: string | null, audio: boolean): string {
 
 // endedNote says why the last share ended, or why one did not start. A full
 // refusal names the room's six-stream cap, not another sharer (#1509).
-export function endedNote(end: ShareEnd): string {
+// access_lost covers losing voice and losing only the right to share; the
+// page tells them apart by its own state: inVoice is true while it is still in
+// the call, so only sharing was withdrawn (#1672).
+export function endedNote(end: ShareEnd, inVoice = false): string {
   switch (end) {
     case 'self':
       return 'You stopped sharing.';
@@ -986,7 +989,7 @@ export function endedNote(end: ShareEnd): string {
     case 'operator':
       return 'An operator stopped your share.';
     case 'access_lost':
-      return 'Your share ended: you no longer have voice in this channel.';
+      return inVoice ? "Your share ended: you're no longer allowed to share in this channel." : 'Your share ended: you no longer have voice in this channel.';
     case 'rotated':
       return 'Your share ended because the voice room was renewed. Share again once you are back in voice.';
     case 'idle':

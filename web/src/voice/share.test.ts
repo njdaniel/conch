@@ -614,6 +614,8 @@ describe('why the server ended it', () => {
     expect(endedNote('operator')).toBe('An operator stopped your share.');
     expect(endedNote('left')).toBe('You left voice, so your share ended.');
     expect(endedNote('access_lost')).toBe('Your share ended: you no longer have voice in this channel.');
+    expect(endedNote('access_lost', false)).toBe('Your share ended: you no longer have voice in this channel.');
+    expect(endedNote('access_lost', true)).toBe("Your share ended: you're no longer allowed to share in this channel.");
     expect(endedNote('rotated')).toBe('Your share ended because the voice room was renewed. Share again once you are back in voice.');
     expect(endedNote('idle')).toBe('Your share ended because nothing was shared for a while.');
     expect(endedNote('self')).toBe('You stopped sharing.');
