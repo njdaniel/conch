@@ -36,7 +36,7 @@
 // desktop helper's audio.
 import type { Page } from '@playwright/test';
 import { chooseMicrophone, expect, test } from './fixtures';
-import { enter, expectClean, joinVoice, leave, type Someone } from './people';
+import { enter, expectClean, inbound, joinVoice, leave, type Someone } from './people';
 import { floorOf, heardBy, recordHeard, syntheticMicrophone, table, toneLevels, tracksAt, type TrackLevel } from './synthetic-mic';
 import { dockerAvailable, emptiesWithin, startVoiceWorld, type VoiceWorld } from './voice-world';
 import { loadWorld } from './world';
@@ -47,11 +47,15 @@ const readMs = 1200;
 // The lowest a floor is taken to be. An idle page is digital silence (-120 dB:
 // a gated track sends nothing), which is no floor: Opus decodes a held tone
 // with a skirt of noise 70 dB below it (measured -91 to -94 dB against the tone
-// at -18), and "20 dB above silence" would call that skirt a speaker. "Heard"
-// is therefore above -50 dB: 32 dB under the tone, and above the click of a
-// gate opening (-58, read only in the polls that wait for one).
-const minFloorDb = -70;
-const echoDb = 30;
+// at -18), and "20 dB above silence" would call that skirt a speaker. A click
+// where a gate opens or shuts, or a glitch in a held tone (a jitter-buffer
+// underrun on a starved runner), splatters across the analysis window: -58 dB
+// measured, about -52 estimated for a phase jump. "Heard" is therefore above
+// -40 dB: 22 dB under the tone and 12 over the worst splatter expected.
+const minFloorDb = -60;
+// The highest an idle page may measure: anything louder is a blip, or a tone
+// that leaked while nobody had pressed a key.
+const maxIdleDb = -60;
 const voiceRegion = (page: Page) => page.getByRole('region', { name: 'Voice' });
 const roster = (page: Page) => voiceRegion(page).getByRole('list', { name: 'In voice' });
 
@@ -78,7 +82,8 @@ test.describe('@cross who hears whom', () => {
     const people: Someone[] = [];
     // Every reading taken, for the table a failure attaches and the self-echo
     // check at the end.
-    const log: { page: number; floor: number; tracks: TrackLevel[] }[] = [];
+    const log: { phase: string; page: number; floor: number; tracks: TrackLevel[] }[] = [];
+    let phase = 'setup';
     const floors: number[] = [];
     try {
       for (const [i, m] of members.entries()) {
@@ -99,14 +104,17 @@ test.describe('@cross who hears whom', () => {
 
       const observe = async (ms: number): Promise<TrackLevel[][]> => {
         const all = await Promise.all(people.map((p) => toneLevels(p.page, tones, ms)));
-        all.forEach((tracks, page) => log.push({ page, floor: floors[page] ?? -120, tracks }));
+        all.forEach((tracks, page) => log.push({ phase, page, floor: floors[page] ?? -120, tracks }));
         return all;
       };
       const heard = (all: TrackLevel[][]) => all.map((tracks, i) => heardBy(tracks, floors[i] ?? -120, marginDb));
 
       // The idle floor of each page: nobody has pressed anything.
       const idle = await Promise.all(people.map((p) => toneLevels(p.page, tones, 1500)));
-      for (const t of idle) floors.push(floorOf(t, minFloorDb));
+      for (const [i, t] of idle.entries()) {
+        expect(floorOf(t), `${members[i]?.name ?? '?'}'s idle level (dB): something was heard before anyone pressed a key`).toBeLessThanOrEqual(maxIdleDb);
+        floors.push(floorOf(t, minFloorDb));
+      }
       info.annotations.push({ type: 'idle levels, floors (dB)', description: `${idle.map((t) => floorOf(t).toFixed(0)).join(', ')}; ${floors.map((f) => f.toFixed(0)).join(', ')}` });
 
       // Stream ids heard at each tone, across the pages that heard it.
@@ -135,11 +143,13 @@ test.describe('@cross who hears whom', () => {
       const focus = (p: Someone) => p.page.getByRole('heading', { name: 'Conch' }).click();
 
       try {
+        phase = 'idle';
         await expectSilence();
         expectOnly(await observe(readMs), null);
 
         // Each person talks in turn, by the key.
         for (const [t, p] of people.entries()) {
+          phase = `${p.member.name} talks`;
           await focus(p);
           await p.page.keyboard.down('Backquote');
           const others = people.filter((o) => o !== p);
@@ -165,6 +175,7 @@ test.describe('@cross who hears whom', () => {
         // Mute: alice, muted, in the open microphone reaches neither; unmuted, both.
         const [alice, bob, carol] = people;
         if (alice === undefined || bob === undefined || carol === undefined) throw new Error('three people');
+        phase = 'mute';
         const av = voiceRegion(alice.page);
         await av.getByRole('button', { name: 'Mute', exact: true }).click();
         await expect(av).toContainText('Muted.');
@@ -182,6 +193,7 @@ test.describe('@cross who hears whom', () => {
         await expectSilence();
 
         // Deafen: carol's remote audio elements are all muted, and bob and alice still hear each other.
+        phase = 'deafen';
         const cv = voiceRegion(carol.page);
         const muteds = (page: Page) => page.evaluate(() => [...document.querySelectorAll('audio')].map((a) => a.muted));
         expect(await muteds(carol.page), 'carol plays two people').toEqual([false, false]);
@@ -193,6 +205,8 @@ test.describe('@cross who hears whom', () => {
           await focus(p);
           await p.page.keyboard.down('Backquote');
           await expect(voiceRegion(p.page)).toContainText('Transmitting');
+          const listener = people.find((o) => o !== p && o !== carol);
+          if (listener !== undefined) await expect(roster(listener.page)).toContainText(`${p.member.name} (transmitting)`, { timeout: 15_000 });
           // Carol is deaf in her elements, not in her tracks: only the other listener is read.
           expectOnly(await afterOnset(observe), t, [2]);
           await p.page.keyboard.up('Backquote');
@@ -202,18 +216,19 @@ test.describe('@cross who hears whom', () => {
         expect(await muteds(carol.page)).toEqual([false, false]);
 
         // No self-echo, over every reading of the test (the polls that wait for
-        // a gate to open or shut included): a page's own tone never reaches
-        // within echoDb of the loudest tone read anywhere. Readings taken as a
-        // gate opens or shuts show a click about 40 dB under the tone at every
-        // frequency, which is not an echo.
-        const loudest = Math.max(...log.flatMap((r) => r.tracks.filter((t) => t.live).flatMap((t) => t.db)));
+        // a gate to open or shut included): a page's own tone is never above
+        // that page's "heard" line.
         for (const r of log) {
           const own = Math.max(-120, ...r.tracks.filter((t) => t.live).map((t) => t.db[r.page] ?? -120));
-          expect(own, `${members[r.page]?.name ?? '?'} hears their own tone`).toBeLessThan(loudest - echoDb);
+          expect(own, `${members[r.page]?.name ?? '?'} hears their own tone`).toBeLessThanOrEqual(r.floor + marginDb);
         }
         expect(log.length, 'readings taken').toBeGreaterThan(20);
       } catch (err) {
-        info.annotations.push({ type: 'levels', description: log.slice(-12).map((r) => table(members[r.page]?.name ?? '?', r.tracks, tones, r.floor, marginDb)).join('\n') });
+        // The readings of the phase that failed, and what each page's peer
+        // connections have received in audio bytes (they name no token or room).
+        info.annotations.push({ type: `levels in '${phase}'`, description: log.filter((r) => r.phase === phase).slice(-30).map((r) => table(members[r.page]?.name ?? '?', r.tracks, tones, r.floor, marginDb)).join('\n') });
+        const bytes = await Promise.all(people.map(async (p) => inbound(p.page, { perTrack: true }).then((i) => `${p.member.name}: ${(i.tracks ?? []).filter((t) => t.kind === 'audio').map((t) => String(t.bytes)).join(', ')}`).catch(() => `${p.member.name}: unreadable`)));
+        info.annotations.push({ type: 'inbound-rtp audio bytes per stream', description: bytes.join('\n') });
         throw err;
       }
 

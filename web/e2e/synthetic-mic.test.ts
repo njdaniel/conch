@@ -7,26 +7,23 @@ import { floorOf, heardBy, table, tracksAt, type TrackLevel } from './synthetic-
 const track = (db: number[], live = true, streamId = 'PA_x|TR_y'): TrackLevel => ({ streamId, live, db });
 
 describe('floorOf', () => {
-  it('is the highest level of any live track at any frequency', () => {
-    expect(floorOf([track([-90, -70, -100]), track([-60, -95, -95]), track([-10, -10, -10], false)])).toBe(-60);
-  });
-  it('is never below the lowest it is allowed, and is -120 for nothing at all', () => {
-    expect(floorOf([track([-120, -120, -120])], -70)).toBe(-70);
-    expect(floorOf([], -70)).toBe(-70);
-    expect(floorOf([])).toBe(-120);
+  it.each([
+    ['the highest level of any live track at any frequency', [track([-90, -70, -100]), track([-60, -95, -95]), track([-10, -10, -10], false)], -120, -60],
+    ['no lower than the lowest allowed', [track([-120, -120, -120])], -70, -70],
+    ['no lower than the lowest allowed, for nothing at all', [], -70, -70],
+    ['-120 for nothing at all and no lowest', [], -120, -120],
+  ] as const)('is %s', (_name, tracks, atLeast, want) => {
+    expect(floorOf(tracks, atLeast)).toBe(want);
   });
 });
 
 describe('heardBy', () => {
-  const tracks = [track([-18, -91, -94]), track([-120, -120, -120]), track([-18, -18, -18], false)];
-  it('lists, for each live track, the frequencies more than the margin above the floor', () => {
-    expect(heardBy(tracks, -70, 20)).toEqual([[0], []]);
-  });
-  it('does not count a level exactly at floor plus margin', () => {
-    expect(heardBy([track([-50, -49.9, -51])], -70, 20)).toEqual([[1]]);
-  });
-  it('hears two tones on one track', () => {
-    expect(heardBy([track([-18, -20, -100])], -70, 20)).toEqual([[0, 1]]);
+  it.each([
+    ['lists the frequencies above the line, per live track', [track([-18, -91, -94]), track([-120, -120, -120]), track([-18, -18, -18], false)], [[0], []]],
+    ['does not count a level exactly at floor plus margin', [track([-50, -49.9, -51])], [[1]]],
+    ['hears two tones on one track', [track([-18, -20, -100])], [[0, 1]]],
+  ] as const)('%s', (_name, tracks, want) => {
+    expect(heardBy(tracks, -70, 20)).toEqual(want);
   });
 });
 
