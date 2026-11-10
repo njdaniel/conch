@@ -120,6 +120,7 @@ desktop-check: desktop-node
 	./scripts/desktop-electron-test.sh
 	./scripts/desktop-lint-test.sh
 	./scripts/desktop-voice-helper-test.sh
+	./scripts/desktop-version-test.sh
 	./scripts/desktop-lint.sh
 	./scripts/web-depgate.sh desktop
 	./scripts/web-licences.sh desktop/package-lock.json desktop/licences-allowlist.txt

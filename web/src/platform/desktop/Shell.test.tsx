@@ -1,6 +1,6 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import type { BridgeReply, CompatView, ConchDesktopBridge, ProfileAddResult, ProfilesView, ProfileView } from './bridge';
+import type { BridgeReply, CompatView, ConchDesktopBridge, DesktopSettingsBridge, DesktopSettingsView, ProfileAddResult, ProfilesView, ProfileView, SettingsResult } from './bridge';
 import { credentials } from './credentials';
 import { DesktopShell } from './Shell';
 import { serverOrigin, setServerOrigin } from './state';
@@ -244,6 +244,73 @@ describe('with a server active', () => {
     install({ profiles: () => Promise.resolve(view({ ...active, notice: 'revocation-unsent' })) });
     render(<DesktopShell>{child}</DesktopShell>);
     expect((await screen.findByRole('banner', { name: 'Server' })).textContent).toMatch(/cannot prove the sign-in was ended there/);
+  });
+});
+
+describe('the desktop app settings (issue #1587)', () => {
+  const active = view({ profiles: [profile(ID_A, 'chat.example.org', 'ada', true)], active: ID_A });
+  const settings = (over: Partial<DesktopSettingsView> = {}): DesktopSettingsView => ({ closeToTray: false, launchAtLogin: false, trayWorking: false, launchAvailable: true, ...over });
+
+  function installSettings(first: DesktopSettingsView, settingsSet: DesktopSettingsBridge['settingsSet']): void {
+    install({ profiles: () => Promise.resolve(active) });
+    const base = window.conchDesktop;
+    Object.defineProperty(window, 'conchDesktop', { value: { ...base, settings: () => Promise.resolve(first), settingsSet }, configurable: true, writable: true });
+  }
+
+  async function open(): Promise<void> {
+    render(<DesktopShell>{child}</DesktopShell>);
+    fireEvent.click(await screen.findByRole('button', { name: 'Desktop app' }));
+    await screen.findByRole('heading', { name: 'Desktop app' });
+  }
+
+  it('shows both settings, and the tray choice disabled with its reason while no tray works', async () => {
+    installSettings(settings(), () => Promise.reject(new Error('unexpected')));
+    await open();
+    expect(screen.getByRole('radio', { name: 'Quit Conch' })).toHaveProperty('checked', true);
+    const tray = screen.getByRole('radio', { name: 'Keep running in the tray' });
+    expect(tray).toHaveProperty('disabled', true);
+    expect(screen.getByText('No tray is available on this desktop')).toBeDefined();
+    expect(screen.getByRole('checkbox', { name: 'Open Conch when I log in' })).toHaveProperty('checked', false);
+  });
+
+  it('lets the tray choice be made once a tray works', async () => {
+    const settingsSet = vi.fn((): Promise<SettingsResult> => Promise.resolve({ ok: true, view: settings({ trayWorking: true, closeToTray: true }) }));
+    installSettings(settings({ trayWorking: true }), settingsSet);
+    await open();
+    expect(screen.queryByText('No tray is available on this desktop')).toBeNull();
+    fireEvent.click(screen.getByRole('radio', { name: 'Keep running in the tray' }));
+    await waitFor(() => {
+      expect(settingsSet).toHaveBeenCalledWith({ closeToTray: true });
+    });
+    await waitFor(() => {
+      expect(screen.getByRole('radio', { name: 'Keep running in the tray' })).toHaveProperty('checked', true);
+    });
+  });
+
+  it('asks main to turn launch at login on, and says why when main refuses', async () => {
+    const settingsSet = vi.fn((): Promise<SettingsResult> => Promise.resolve({ ok: false, reason: 'foreign-file' }));
+    installSettings(settings(), settingsSet);
+    await open();
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Open Conch when I log in' }));
+    await waitFor(() => {
+      expect(settingsSet).toHaveBeenCalledWith({ launchAtLogin: true });
+    });
+    expect((await screen.findByRole('alert')).textContent).toMatch(/left alone/);
+    expect(screen.getByRole('checkbox', { name: 'Open Conch when I log in' })).toHaveProperty('checked', false);
+  });
+
+  it('says so, not nothing, when the build cannot launch at login', async () => {
+    installSettings(settings({ launchAvailable: false }), () => Promise.reject(new Error('unexpected')));
+    await open();
+    expect(screen.getByRole('checkbox', { name: 'Open Conch when I log in' })).toHaveProperty('disabled', true);
+    expect(screen.getByText(/Only an installed copy of Conch/)).toBeDefined();
+  });
+
+  it('shows no section when the bridge has no settings (an older preload)', async () => {
+    install({ profiles: () => Promise.resolve(active) });
+    render(<DesktopShell>{child}</DesktopShell>);
+    fireEvent.click(await screen.findByRole('button', { name: 'Desktop app' }));
+    expect(screen.queryByRole('heading', { name: 'Desktop app' })).toBeNull();
   });
 });
 

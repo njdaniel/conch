@@ -241,39 +241,33 @@ export function spawnHelper(
 
 export const defaultSpawn: SpawnFn = (command, args, options) => nodeSpawn(command, args, options);
 
-// RunResult is a finished read-only run: its exit code (null when a signal
-// ended it) and its standard output.
+// How long the screen-cast portal may take to answer (portal.ts, #1580): it is
+// D-Bus activated, so the first ask may start it.
+export const PORTAL_TIMEOUT_MS = 3_000;
+const PORTAL_MAX_OUTPUT = 4096;
+
 export interface RunResult {
   readonly code: number | null;
   readonly stdout: string;
 }
 
-// The bounds of runFile: a program that does not finish in this time, or says
-// more than this, is killed and counts as not run.
-export const RUN_TIMEOUT_MS = 3000;
-export const RUN_MAX_OUTPUT = 16 * 1024;
-
-// runFile runs one read-only program for the lock watcher (issue #1588):
-// file with args and env, never a shell, never detached, standard input
-// /dev/null, stderr dropped, bounded in time and in output. It resolves with
-// the exit code and stdout, or null when the program could not be run or was
-// cut off. It lives here because spawn.ts is the one place that reaches
-// child_process. (#1580's portal reader needs the same helper and gives it
-// the same name and shape.)
+// runFile runs one read-only program for portal.ts: file with args and env,
+// never a shell, bounded in time and in output, stderr dropped. It resolves
+// with the exit code and stdout, or null when the program could not be run.
+// It lives here because spawn.ts is the one place that reaches child_process.
 export function runFile(file: string, args: readonly string[], env: Readonly<Record<string, string>>): Promise<RunResult | null> {
   return new Promise((resolve) => {
     let out = '';
     let settled = false;
-    let child: OneShotChild;
     const done = (value: RunResult | null): void => {
       if (settled) return;
       settled = true;
-      // timer is set before any callback below can run.
       clearTimeout(timer);
       resolve(value);
     };
+    let child: ChildProcessByStdio<null, Readable, Readable>;
     try {
-      child = nodeSpawn(file, [...args], { env: { ...env }, stdio: ['ignore', 'pipe', 'pipe'], detached: false, shell: false, windowsHide: true, cwd: '/' });
+      child = nodeSpawn(file, [...args], { env: { ...env }, stdio: ['ignore', 'pipe', 'pipe'] });
     } catch {
       resolve(null);
       return;
@@ -281,11 +275,11 @@ export function runFile(file: string, args: readonly string[], env: Readonly<Rec
     const timer = setTimeout(() => {
       child.kill('SIGKILL');
       done(null);
-    }, RUN_TIMEOUT_MS);
+    }, PORTAL_TIMEOUT_MS + 500);
     child.stdout.setEncoding('utf8');
     child.stdout.on('data', (chunk: string) => {
       out += chunk;
-      if (out.length > RUN_MAX_OUTPUT) {
+      if (out.length > PORTAL_MAX_OUTPUT) {
         child.kill('SIGKILL');
         done(null);
       }

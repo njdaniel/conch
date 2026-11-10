@@ -20,6 +20,7 @@ import { acquire, prepareRoot } from './instance.ts';
 import { Client } from './api/client.ts';
 import { Session } from './api/session.ts';
 import { deliverVoice } from './voice/events.ts';
+import { Companion } from './voice/companion.ts';
 import { OneShot } from './voice/oneshot.ts';
 import { VoiceService } from './voice/service.ts';
 import { Supervisor } from './voice/supervisor.ts';
@@ -33,7 +34,10 @@ import { Ipc } from './ipc.ts';
 import { Links } from './links.ts';
 import { Lifecycle } from './lifecycle.ts';
 import { LinuxLifecycle } from './lifecycle-linux.ts';
+import { COMPANION_EVENTS } from '../shared/bridge-names.ts';
+import { Autostart } from './autostart.ts';
 import { Notifications } from './notifications.ts';
+import { createSettingsFiles, memorySettingsFiles, SettingsService } from './settings.ts';
 import { saveChosenFile } from './save-file.ts';
 import { parseManifest, SCHEME, SCHEME_PRIVILEGES } from './scheme.ts';
 import { electronStorage } from './vault/electron-storage.ts';
@@ -117,9 +121,15 @@ export async function start(): Promise<void> {
   });
   if (!first) return;
 
+  // The app's settings, once the data root is known (below). Until then, and
+  // with none, closing the last window quits.
+  let settings: SettingsService | null = null;
   app.on('window-all-closed', () => {
     // A window destroyed for a switch or a sign-out is not the app ending.
-    if (!live.destroying) app.quit();
+    // Otherwise closing quits (media stopped, helper reaped, in before-quit),
+    // unless the person chose to keep running and a working tray exists.
+    const action = settings === null ? (live.destroying ? 'stay' : 'quit') : settings.closeAction(live.destroying);
+    if (action === 'quit') app.quit();
   });
 
   await app.whenReady();
@@ -145,6 +155,16 @@ export async function start(): Promise<void> {
   const checked = await prepareRoot(root);
   if (!checked.ok) log('conch-desktop: the data directory is not private to you; nothing will be saved');
   const files = createProfileFiles(root);
+  // The app-wide settings: <root>/settings.json, in memory only when the root
+  // is not private. No tray exists yet (#1589, D5-03), so trayWorking is false
+  // and closing always quits.
+  settings = new SettingsService({
+    files: checked.ok ? createSettingsFiles(root) : memorySettingsFiles(),
+    autostart: new Autostart({ packaged: app.isPackaged, execPath: process.execPath, env: process.env, home: app.getPath('home'), log }),
+    trayWorking: () => false,
+    log,
+  });
+  await settings.load();
   const store = new ProfileStore(
     checked.ok
       ? files
@@ -162,9 +182,14 @@ export async function start(): Promise<void> {
     : refusingVault();
 
   trustSystemRoots(tls);
+  // The request executor of the activation in force, which the screen
+  // companion asks conchd with (issue #1579): each activation makes its
+  // attachments from its own client, below, so this is always the newest.
+  let activeClient: Client | null = null;
   // The attachments of the activation in force: its own client and session.
-  const makeFiles = (client: Client, identity: Session): Files =>
-    new Files({
+  const makeFiles = (client: Client, identity: Session): Files => {
+    activeClient = client;
+    return new Files({
       client,
       session: identity,
       chooseSavePath: async (suggested) => {
@@ -179,6 +204,7 @@ export async function start(): Promise<void> {
       isAbsolute,
       log,
     });
+  };
   const profiles = new ProfilesService({
     store,
     vault,
@@ -259,6 +285,38 @@ export async function start(): Promise<void> {
     },
     log,
   });
+  // The screen companion (issue #1579, D4-02 of #772): the one holder of the
+  // p<id>.screen grant. Its media hook is registered before voice's, so a
+  // switch, sign-out or quit tells the page and removes the companion while
+  // the helper and the credential are still in force. A crash or a reload of
+  // the owned window's page ends the document the grant was given to.
+  const companion = new Companion({
+    voice,
+    client: () => activeClient,
+    document: () => live.gate.generation,
+    tell: (document, event) => {
+      const contents = live.owned() === null ? null : (live.window?.webContents ?? null);
+      if (contents !== null && live.gate.shows(document)) contents.send(COMPANION_EVENTS, event);
+    },
+    log,
+  });
+  teardownHooks.media('share', async ({ reason }) => {
+    // From here on the identity is ending: no grant is asked for under it.
+    // A page's grant request after this end (the click of a switch or a
+    // sign-out is still armed) is refused as failed, and one in flight finds
+    // the client changed and removes what conchd issued. The next
+    // activation's makeFiles sets the client again.
+    activeClient = null;
+    await companion.end(reason);
+  });
+  app.on('render-process-gone', (_event, contents) => {
+    if (contents === live.owned()) void companion.end('crash');
+  });
+  app.on('web-contents-created', (_event, contents) => {
+    contents.on('did-start-navigation', (details) => {
+      if (details.isMainFrame && !details.isSameDocument && contents === live.owned()) void companion.end('reload');
+    });
+  });
   teardownHooks.media('voice', () => voice.teardown());
 
   // Lock and suspend fail closed (issue #1588, D5-02): mute on lock, leave on
@@ -266,12 +324,11 @@ export async function start(): Promise<void> {
   // observed through logind (lifecycle-linux.ts). Where it cannot be, the
   // rules keep notification text hidden and say so on the log.
   //
-  // The companion seam: #1579's Companion (voice/companion.ts, merged to
-  // main after this branch's base) is what ends the share; on merge, pass it
-  // here. Until then there is no share in this tree to end.
+  // The companion is the real one (issue #1579, above): lock ends a live share
+  // with reason 'lock' and suspend with 'suspend'.
   const lifecycle = new Lifecycle({
     voice,
-    companion: { end: () => Promise.resolve(false) },
+    companion,
     notifications,
     log,
   });
@@ -309,6 +366,8 @@ export async function start(): Promise<void> {
     profiles,
     voice,
     notifications,
+    settings,
+    companion,
     now: Date.now,
     log,
   });

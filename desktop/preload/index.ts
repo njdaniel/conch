@@ -2,8 +2,8 @@
 // Input: none. Output: window.conchDesktop, a frozen object whose keys are
 // exactly the functions of web/src/platform/desktop/bridge.ts (bridge.ts here
 // builds it). It never exposes ipcRenderer, an event object or a
-// caller-chosen channel; it listens on the feed, voice and notification channels
-// and passes on the message alone.
+// caller-chosen channel; it listens on the feed, voice, companion and notification
+// channels and passes on the message alone.
 //
 // The object is frozen here, but contextBridge hands the page a copy, and that
 // copy is NOT frozen: the page can add properties to its own window.conchDesktop.
@@ -11,7 +11,7 @@
 // the bridge exposes, and main checks every call (desktop/main/ipc.ts).
 import { contextBridge, ipcRenderer } from 'electron';
 
-import { FEED_EVENTS, NOTIFICATION_EVENTS, NOTIFICATION_SUPPORT, VOICE_EVENTS, channelOf } from '../shared/bridge-names.ts';
+import { COMPANION_EVENTS, FEED_EVENTS, NOTIFICATION_EVENTS, NOTIFICATION_SUPPORT, VOICE_EVENTS, channelOf } from '../shared/bridge-names.ts';
 import { createBridge } from './bridge.ts';
 
 contextBridge.exposeInMainWorld(
@@ -25,6 +25,11 @@ contextBridge.exposeInMainWorld(
     },
     (callback) => {
       ipcRenderer.on(VOICE_EVENTS, (_event, message: unknown) => {
+        callback(message);
+      });
+    },
+    (callback) => {
+      ipcRenderer.on(COMPANION_EVENTS, (_event, message: unknown) => {
         callback(message);
       });
     },
