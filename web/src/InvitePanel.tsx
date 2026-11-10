@@ -132,6 +132,8 @@ export function InvitePanel({
   readonly request?: { readonly n: number } | undefined;
   readonly onUnauthorized: () => void;
 }) {
+  // GET /v1/invites/settings is role-gated (accessOperator), so reading the
+  // pause stays by role; lifting it (PUT) needs manage_members: holdsMembers.
   const operator = me.role === 'operator';
   const [open, setOpen] = useState(false);
   const toggle = useRef<HTMLButtonElement>(null);
@@ -431,8 +433,8 @@ export function InvitePanel({
           <>
             {paused ? (
               <div className="notice" role="status">
-                <p>{operator ? pausedForOperator : pausedForMember}</p>
-                {operator && joining !== null ? (
+                <p>{holdsMembers ? pausedForOperator : pausedForMember}</p>
+                {holdsMembers && joining !== null ? (
                   <button type="button" onClick={joining.open}>
                     Open Settings → Joining
                   </button>

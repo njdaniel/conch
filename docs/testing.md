@@ -326,8 +326,8 @@ nothing below says anything about Safari, macOS or iOS.
 | The client loads, signs in and chats | Yes. `01-sign-in` and `02-messages` (all but the F15 tab-stop count) and the 63 messaging smoke pass | Yes, from CI (e2e-heavy run 42819479322, `e2e-cross (webkit)`): 11 of 12 passed, the 12th (F7) after a one-line filter, below |
 | Fake `getUserMedia` audio | Yes, with `firefoxUserPrefs` `media.navigator.streams.fake` and `media.navigator.permission.disabled`: the track is "Default Audio Device", no prompt. Fake video the same way (a camera test passes) | Not established. No launch flag or pref is known; `@voice` tests are left out |
 | Fake `getDisplayMedia`, headless | No. The call is never answered (waited 10 s after a click; the same with the `media.getdisplaymedia.*` prefs). No `@cross` test shares a screen. `12-screen-share` also expects tab sound, which the client says Firefox does not give ("No sound: this browser shares the picture only") | Not established |
-| WebRTC to the pinned LiveKit on 127.0.0.1 | Yes, with `media.peerconnection.ice.obfuscate_host_addresses` false (the counterpart of Chromium's `WebRtcHideLocalIpsWithMdns`): `63` voice smoke passes (13 of 14 local runs of the Firefox set were green; the one failure was this `63` voice test, cause not captured) | Not established |
-| A synthetic Web Audio microphone (#1610) heard by the other pages | Unsettled. `65-who-hears-whom` passed in all 14 local runs on Firefox (three pages, each hearing exactly the other two tones, 20 dB above the floor) but failed once in CI (run 42819479322, job `e2e-cross (firefox)`): every page read -120 dB at every tone for the whole first reading after alice's press, while the roster said she was transmitting, the tracks were live and the stream ids were the `PA_...\|TR_...` form (so attribution by stream id holds on Firefox). Not reproduced under full CPU load (3 runs). The cause is unknown, so 65 is not `@cross`. Not tried against a Chromium listener | Not established |
+| WebRTC to the pinned LiveKit on 127.0.0.1 | Yes, with `media.peerconnection.ice.obfuscate_host_addresses` false (the counterpart of Chromium's `WebRtcHideLocalIpsWithMdns`): `63` voice smoke passes (#1703: its one failure in 20 was a teardown wait, not a join: Playwright's plain `page.close()` sends no leave to LiveKit on Firefox, so LiveKit listed the person for about 20 s; `leave` in `people.ts` now closes with `runBeforeUnload`) | Not established |
+| A synthetic Web Audio microphone (#1610) heard by the other pages | Yes: `65-who-hears-whom` (three pages, each hearing exactly the other two tones, 20 dB above the floor) passed 20 of 20 on Firefox idle and 20 of 20 under load (12 busy loops). One CI failure (run 42819479322: every page read -120 dB at every tone in the first window after alice's press, tracks live, `PA_...\|TR_...` stream ids, so attribution holds on Firefox) was not reproduced, and its cause is not established; the spec now waits until a tone is heard before it reads (a state, not a longer fixed time) and the listener resumes a suspended AudioContext. If it recurs, the per-page level table and `inbound-rtp` bytes are in the failure's annotations. Not tried against a Chromium listener |
 
 How it was established: `npx playwright install firefox webkit` fetched both
 builds. Firefox launched and passed the `@cross` set locally. `getDisplayMedia` was
@@ -344,8 +344,7 @@ message for WebKit only and still fails on any other console error.
 Tests that pass on Firefox and are tagged `@cross`: the six of `01-sign-in`,
 the five of `02-messages` other than F15's tab-stop count (Firefox's log has one
 tab stop more than Chromium's: 8, not 7), and the two of `63-multi-user-smoke`
-(the second is also `@voice`): 13 tests on Firefox, 12 on WebKit.
-`65-who-hears-whom` is not in the set (see the table).
+(the second is also `@voice`), and `65-who-hears-whom` (`@voice`): 14 tests on Firefox, 12 on WebKit.
 
 
 ## Multi-user specs and helpers
@@ -361,13 +360,70 @@ check what LiveKit itself reports, not only what the pages show (#1608).
 | `66-share-permission-and-pixels` | `@smoke`, pull request | `share_screen` off before a share (refused, 403 `voice_not_allowed`) and during one (ended, `access_lost`), checked in the audit and in LiveKit's own track list; a viewer's picture is not flat and animates; a stopped share started again is a new LiveKit publication. Does not prove: real displays, GPUs, Wayland, Firefox or Safari capture, other machines |
 | `67-voice-recovery` | pull request, except one `@heavy` test | voice recovery on one machine: one person's LiveKit signal socket dropped (`routeWebSocket` on `/rtc`) while two others stay, a page offline for 5 s or more (`setOffline`), LiveKit frozen for 8 s (`docker pause`, the `@heavy` test), a page that vanishes without leaving, and a person who leaves and joins again; each checks LiveKit's own list for no ghost and no duplicate. Does not prove: any per-participant media cut (none exists with a same-machine host-network LiveKit; `setOffline` leaves WebRTC UDP alone in Chromium), real network loss, NAT rebinding, Wi-Fi roaming, a mobile background kill, or a TURN path; those are by hand on a real network |
 
-Helpers for new multi-user specs:
+Helpers for multi-user specs (use these; a spec that needs a second copy of
+one of them should change the helper). All are in `web/e2e/`:
 
-- `web/e2e/people.ts`: `enter` (a principal in its own browser context),
-  `joinVoice`, `leave`, and readings of what a page receives.
-- `web/e2e/livekit-admin.ts`: LiveKit's room service over Twirp with an
-  admin token, for its participant list (`listIdentities`). `pauseLiveKit` and `unpauseLiveKit` of the voice
-  world's LiveKit container live in `voice-world.ts`.
+- `people.ts`
+  - `enter(browser, vw, member, options)`: a principal in a browser context of
+    its own, signed in, the channel open. `options.context` is the context's own
+    options (a phone's screen); `options.before` hooks the page before it
+    loads; `options.mode` is `'push to talk'` (the default) or `'unchosen'`.
+  - `joinVoice(p, 'Join voice' | 'Watch only')`: joins and waits for the
+    connection (and, for Watch only, for an earlier page's presence to clear).
+  - `leave(p)` (or `p.close()`): closes the person's pages, then their context.
+  - `inbound(page)`: video frames, frame width and audio bytes a page has
+    received (`perTrack: true` for each stream).
+  - `expectClean(vw, p)`: no secret of the world on the page, in its console,
+    storage or timing entries, and no policy violation or failed request.
+- `fixtures.ts`: `closeAll(context)`, the way to close a context that has had
+  a page. **Every `context.close()` goes through it, except a deliberate
+  crash** (the one in `67-voice-recovery`, a tab that dies without leaving, which
+  must not be closed page-first or it becomes a clean leave and tests nothing,
+  and says so in a comment): it closes the pages first
+  and then the context. Closing a context with a page whose WebSocket is busy
+  can fail with "file data stream has unexpected number of bytes" or "End of
+  central directory record signature not found", because Playwright appends the
+  socket's frames live to a trace file and `context.close()` zips that file
+  while it is still growing (found in #1660, seen under load). A page closed
+  first has closed its sockets, and its `pagehide` ends its voice session.
+- `voice-world.ts` (the `vw` of a voice world):
+  - `vw.members(n)`: n more principals, each in the channel.
+  - `vw.participants()`: LiveKit's own list of who is connected, as identities
+    (`p<id>`, with `.screen` or `.view` for a companion), sorted, one entry per
+    connection. Specs use `vw.participants()`, not `listIdentities`, which is
+    its implementation.
+  - `vw.tracks(member, 'microphone' | 'screen')`: the tracks one member
+    publishes, from LiveKit, sorted by sid.
+  - `vw.rooms()`: how many rooms LiveKit lists; `0` once the last has closed.
+  - `emptiesWithin`: how long LiveKit may take to list nobody after the last
+    connection goes, for `expect.poll(...).toEqual([])` and
+    `expect.poll(() => vw.rooms(), ...).toBe(0)`.
+  - `vw.pauseLiveKit()` and `vw.unpauseLiveKit()`.
+- `livekit-admin.ts`: `adminToken` (the HS256 admin token) and
+  `LiveKitStatusError` (a call's method and HTTP status, never a body), which a
+  spec seldom needs; and what a spec does need to read `vw.participants()`,
+  `vw.tracks()` and `vw.rooms()`: `noAnswer` / `NoAnswer`, `answered()` and
+  `mustAnswer()` (below), plus `untilAnswered` and `LiveKitNoAnswerError`, which
+  produce them.
+- `people.ts` also exports `keepConnections`, the init script that keeps a page's
+  peer connections for `inbound`; `enter` installs it, and a spec that builds its
+  own context installs it with `page.addInitScript(keepConnections)`.
+
+Polling LiveKit: a throw inside an `expect.poll` callback fails the poll at
+once in Playwright 1.61, it is not retried. So `vw.participants()`,
+`vw.tracks()` and `vw.rooms()` do not throw on a timeout or a transport error.
+They return `T | NoAnswer`, where `noAnswer` is a symbol and not a list or a
+count, so no assertion on a list, a length or a count can be satisfied by it, and
+TypeScript makes the caller choose:
+
+- in a poll, `expect.poll(() => answered(vw.participants()))`: `answered` turns
+  no answer into `undefined`, which matches nothing, so the poll goes on;
+- in a one-off assertion, `expect(await mustAnswer(vw.participants()))`: no
+  answer fails the test with "LiveKit gave no answer";
+- a helper built on a reading (`videoSids`, `microphones`) returns `T | NoAnswer`
+  itself and never filters, maps or counts a `NoAnswer` as if it were a list.
+
+A status error (a wrong key, say) still throws.
 
 ## Flake policy
 

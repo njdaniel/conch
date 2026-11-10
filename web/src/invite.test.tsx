@@ -903,6 +903,23 @@ describe('member links', () => {
     expect(screen.queryByRole('button', { name: /^(Open Settings → )?Joining$/ })).toBeNull();
   });
 
+  // Issue #1701: lifting the pause (PUT /v1/invites/settings) needs
+  // manage_members, so an operator without it is not pointed at the switch.
+  it('gives an operator who lacks manage_members the plain paused line, and no button', async () => {
+    window.sessionStorage.setItem(key, operatorToken);
+    serve({
+      ...as(operatorToken, { ...operator, permissions: ['make_member_links'] }, channelList('general')),
+      'POST /v2/invites': () => refusal(503, 'invites_paused'),
+      'GET /v1/invites/settings': () => json({ paused: true }),
+    });
+    render(<App origin={origin} />);
+    const panel = await openPanel();
+    fireEvent.click(within(panel).getByRole('button', { name: 'Make link' }));
+    expect(await within(panel).findByText('Invites are paused on this server for now.')).toBeDefined();
+    expect(within(panel).queryByText(/Settings → Joining/)).toBeNull();
+    expect(within(panel).queryByRole('button', { name: 'Open Settings → Joining' })).toBeNull();
+  });
+
   // F21: the states, the pause banner, the link shown once, and the keyboard.
   it('reads Unused for a link no one has used, and Open for one that has been', async () => {
     forMember({ 'GET /v2/invites': () => json({ invites: [linkOf(1, 2), linkOf(2, 2, { uses: 1, joiners: 1 })] }) });

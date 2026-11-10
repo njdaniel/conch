@@ -12,7 +12,7 @@ import type { BrowserContextOptions, Locator, Page } from '@playwright/test';
 import { createChannelResponse, listChannelsResponse, type CreateChannelRequest } from '../src/schema/channel';
 import { channelSettingsResponseV1, type ChannelSettingsRequestV1 } from '../src/schema/generated';
 import { createCredentialResponseV1, createPrincipalResponse, type CreateCredentialRequestV1, type CreatePrincipalRequest } from '../src/schema/credential';
-import { channelButton, credentialField, expect, expectFits, openChannel, showView, signIn, statusLine, test } from './fixtures';
+import { closeAll, channelButton, credentialField, expect, expectFits, openChannel, showView, signIn, statusLine, test } from './fixtures';
 import { dockerAvailable, startVoiceWorld, type VoiceWorld } from './voice-world';
 import { call, loadWorld, ok, type World } from './world';
 
@@ -231,7 +231,7 @@ test.describe('with LiveKit', () => {
         await expect(voice.getByRole('button', { name: 'Join voice' })).toBeVisible();
         await expect(voice).not.toContainText(/Connected in #voice-room/);
       } finally {
-        await context.close();
+        await closeAll(context);
       }
     });
   }

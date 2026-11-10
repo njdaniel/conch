@@ -14,7 +14,7 @@
 // fails when CI is set and is skipped otherwise, as in 10-voice.
 import type { Browser, BrowserContextOptions, Locator, Page } from '@playwright/test';
 import type { PostMessageRequestV2 } from '../src/schema/generated';
-import { chooseMicrophone, expect, expectFits, mainNav, messages, openChannel, phoneSizes, showView, signIn, test } from './fixtures';
+import { closeAll, chooseMicrophone, expect, expectFits, mainNav, messages, openChannel, phoneSizes, showView, signIn, test } from './fixtures';
 import { dockerAvailable, startVoiceWorld, type Member, type VoiceWorld } from './voice-world';
 
 const voiceRegion = (page: Page) => page.getByRole('region', { name: 'Voice' });
@@ -148,12 +148,7 @@ test.describe('the phone voice strip with LiveKit', () => {
     const page = await context.newPage();
     await signIn(page, vw, member.token, member.name);
     await openChannel(page, vw.channel);
-    // The page is closed before its context, as fixtures.ts does: its pagehide
-    // ends the session it started (issue #802).
-    const close = async () => {
-      if (!page.isClosed()) await page.close();
-      await context.close();
-    };
+    const close = () => closeAll(context);
     return { page, size, name: member.name, close };
   }
 

@@ -3,32 +3,14 @@
 // share ends and voice removal never change that layout by themselves. The
 // same machine supplies fake microphone, camera and screen devices through
 // the pinned LiveKit of voice-world.ts; these are not real-device tests.
-import type { Browser, BrowserContext, BrowserContextOptions, Locator, Page } from '@playwright/test';
-import { channelButton, expect, openChannel, rememberPushToTalk, showView, signIn, test } from './fixtures';
-import { dockerAvailable, startVoiceWorld, watchPage, type Member, type VoiceWorld, type Watch } from './voice-world';
+import type { Browser, BrowserContextOptions, Locator, Page } from '@playwright/test';
+import { channelButton, expect, openChannel, showView, test } from './fixtures';
+import { enter, inbound as inboundStats, joinVoice, leave, type Someone } from './people';
+import { dockerAvailable, startVoiceWorld, type Member, type VoiceWorld } from './voice-world';
 
-// Installed before the page's scripts: keep every peer connection and the
-// watched share and camera elements, so navigation and layout prove identity.
-const instrument = () => {
-  const w = window as unknown as { __pcs: RTCPeerConnection[]; __kept?: Element | null; __keptCamera?: Element | null };
-  w.__pcs = [];
-  const Original = window.RTCPeerConnection;
-  const Wrapped = function (this: unknown, ...args: ConstructorParameters<typeof RTCPeerConnection>) {
-    const pc = new Original(...args);
-    w.__pcs.push(pc);
-    return pc;
-  } as unknown as typeof RTCPeerConnection;
-  Wrapped.prototype = Original.prototype;
-  Object.setPrototypeOf(Wrapped, Original);
-  window.RTCPeerConnection = Wrapped;
-};
-
-interface Person {
-  readonly context: BrowserContext;
-  readonly page: Page;
-  readonly member: Member;
-  readonly watch: Watch;
-}
+// A person is people.ts's Someone: its pages keep every peer connection (for
+// inbound and kept) and are watched.
+type Person = Someone;
 
 const voice = (page: Page) => page.getByRole('region', { name: 'Voice' });
 const call = (page: Page) => page.getByRole('region', { name: 'Video call' });
@@ -36,20 +18,7 @@ const shareView = (page: Page) => page.getByRole('region', { name: 'Shared scree
 const tile = (page: Page, name: string): Locator => page.locator('.call-share').filter({ hasText: `${name} · LIVE` });
 
 // inbound is the page's total decoded video frames from every open connection.
-async function inbound(page: Page): Promise<number> {
-  return page.evaluate(async () => {
-    const w = window as unknown as { __pcs: RTCPeerConnection[] };
-    let frames = 0;
-    for (const pc of w.__pcs) {
-      if (pc.signalingState === 'closed') continue;
-      const stats = await pc.getStats();
-      stats.forEach((r: { type: string; kind?: string; framesDecoded?: number }) => {
-        if (r.type === 'inbound-rtp' && r.kind === 'video') frames += r.framesDecoded ?? 0;
-      });
-    }
-    return frames;
-  });
-}
+const inbound = async (page: Page): Promise<number> => (await inboundStats(page)).frames;
 
 // kept is whether the originally watched element is still the one on screen,
 // and how many peer connections this page has made.
@@ -176,22 +145,10 @@ test.describe('the persistent call workspace', () => {
     expect(put.status, put.text).toBe(200);
   }
 
-  async function person(browser: Browser, member: Member, options?: BrowserContextOptions): Promise<Person> {
-    const context = await browser.newContext(options);
-    await rememberPushToTalk(context);
-    const page = await context.newPage();
-    const watch = await watchPage(page, vw);
-    await page.addInitScript(instrument);
-    await signIn(page, vw, member.token, member.name);
-    await openChannel(page, vw.channel);
-    return { context, page, member, watch };
-  }
+  const person = (browser: Browser, member: Member, options?: BrowserContextOptions): Promise<Person> =>
+    enter(browser, vw, member, options === undefined ? {} : { context: options });
 
-  async function join(p: Person): Promise<void> {
-    await showView(p.page, 'Voice');
-    await voice(p.page).getByRole('button', { name: 'Join voice' }).click();
-    await expect(voice(p.page)).toContainText(/Connected in #voice-room/, { timeout: 30_000 });
-  }
+  const join = (p: Person): Promise<void> => joinVoice(p, 'Join voice');
 
   async function share(p: Person): Promise<void> {
     await voice(p.page).getByRole('button', { name: 'Share screen' }).click();
@@ -441,11 +398,7 @@ test.describe('the persistent call workspace', () => {
       // failures. Dave's check ran before disablement, whose 401s are expected.
       for (const p of [a, b, c]) await expectClean(p);
     } finally {
-      // Stop each page's media before closing its context, as fixtures does.
-      for (const p of people) {
-        if (!p.page.isClosed()) await p.page.close();
-        await p.context.close();
-      }
+      for (const p of people) await leave(p);
     }
   });
 });

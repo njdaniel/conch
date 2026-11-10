@@ -2,7 +2,7 @@
 // fetch is replaced.
 import { createHmac } from 'node:crypto';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { adminToken, listIdentities, LiveKitStatusError, type AdminGrant } from './livekit-admin';
+import { adminToken, answered, listIdentities, listTracks, LiveKitNoAnswerError, LiveKitStatusError, mustAnswer, noAnswer, roomCount, untilAnswered, type AdminGrant } from './livekit-admin';
 
 const secret = 'unit-test-NOT-A-REAL-SECRET-0123456789';
 const unb64 = (part: string): string => atob(part.replaceAll('-', '+').replaceAll('_', '/'));
@@ -70,6 +70,21 @@ describe('listIdentities', () => {
     for (const a of asked) expect(a.auth).toMatch(/^Bearer [\w-]+\.[\w-]+\.[\w-]+$/);
   });
 
+  it('asks with the grant each call needs: roomList for ListRooms, roomAdmin on that room for ListParticipants', async () => {
+    const asked = stub({
+      ListRooms: { status: 200, body: { rooms: [{ name: 'r1' }, { name: 'r2' }] } },
+      'ListParticipants r1': { status: 200, body: { participants: [] } },
+      'ListParticipants r2': { status: 200, body: { participants: [] } },
+    });
+    await listIdentities('http://x', 'k', secret);
+    const grants = asked.map((a) => ({ method: a.url.split('/').pop(), video: (decode(a.auth.replace('Bearer ', '').split('.')[1] ?? '') as { video: AdminGrant }).video }));
+    expect(grants).toEqual([
+      { method: 'ListRooms', video: { roomList: true } },
+      { method: 'ListParticipants', video: { roomAdmin: true, room: 'r1' } },
+      { method: 'ListParticipants', video: { roomAdmin: true, room: 'r2' } },
+    ]);
+  });
+
   it('is empty with no room, and with a room that ended between the calls', async () => {
     stub({ ListRooms: { status: 200, body: {} } });
     expect(await listIdentities('http://x', 'k', secret)).toEqual([]);
@@ -92,5 +107,105 @@ describe('listIdentities', () => {
     const err = await listIdentities('http://x', 'k', secret).catch((e: unknown) => e);
     expect((err as Error).message).toBe('livekit ListRooms: unreadable answer');
     expect((err as Error).message).not.toContain('secret-room-name');
+  });
+});
+
+describe('listTracks and roomCount', () => {
+  const answers = () =>
+    vi.stubGlobal('fetch', (url: string, init: RequestInit) => {
+      const method = url.split('/').pop() ?? '';
+      const room = (JSON.parse(init.body as string) as { room?: string }).room;
+      const body =
+        method === 'ListRooms'
+          ? { rooms: [{ name: 'r1' }, { name: 'r2' }, { name: 'ended' }] }
+          : room === 'r1'
+            ? {
+                participants: [
+                  { identity: 'p1', tracks: [{ sid: 'TR_b', source: 'MICROPHONE' }, { sid: 'TR_a', source: 'SCREEN_SHARE' }, { sid: 'TR_c', source: 'SCREEN_SHARE_AUDIO' }] },
+                  { identity: 'p2', tracks: [{ sid: 'TR_x', source: 'MICROPHONE' }] },
+                ],
+              }
+            : { participants: [{ identity: 'p1', tracks: [{ sid: 'TR_0', source: 'MICROPHONE' }] }] };
+      return Promise.resolve(new Response(JSON.stringify(body), { status: room === 'ended' ? 404 : 200 }));
+    });
+
+  it('lists one identity\'s tracks of the wanted sources across rooms, sorted by sid, and skips an ended room', async () => {
+    answers();
+    expect(await listTracks('http://x', 'k', secret, 'p1', (s) => s === 'MICROPHONE')).toEqual([
+      { sid: 'TR_0', source: 'MICROPHONE' },
+      { sid: 'TR_b', source: 'MICROPHONE' },
+    ]);
+    expect(await listTracks('http://x', 'k', secret, 'p1', (s) => s.startsWith('SCREEN_SHARE'))).toEqual([
+      { sid: 'TR_a', source: 'SCREEN_SHARE' },
+      { sid: 'TR_c', source: 'SCREEN_SHARE_AUDIO' },
+    ]);
+    expect(await listTracks('http://x', 'k', secret, 'p9', () => true)).toEqual([]);
+  });
+
+  it('counts rooms, and zero when there are none', async () => {
+    answers();
+    expect(await roomCount('http://x', 'k', secret)).toBe(3);
+    vi.stubGlobal('fetch', () => Promise.resolve(new Response('{}', { status: 200 })));
+    expect(await roomCount('http://x', 'k', secret)).toBe(0);
+  });
+});
+
+describe('untilAnswered, answered and mustAnswer', () => {
+  const down = () => vi.stubGlobal('fetch', () => Promise.reject(new Error('connect ECONNREFUSED')));
+
+  it('is noAnswer, a value of its own, for a transport error, a timeout and an unreadable answer', async () => {
+    down();
+    expect(await untilAnswered(() => roomCount('http://x', 'k', secret))).toBe(noAnswer);
+    vi.stubGlobal('fetch', () => Promise.reject(new DOMException('timed out', 'TimeoutError')));
+    expect(await untilAnswered(() => listIdentities('http://x', 'k', secret))).toBe(noAnswer);
+    vi.stubGlobal('fetch', () => Promise.resolve(new Response('not json', { status: 200 })));
+    expect(await untilAnswered(() => roomCount('http://x', 'k', secret))).toBe(noAnswer);
+  });
+
+  it('passes an answer through, and still throws a status error or anything else', async () => {
+    vi.stubGlobal('fetch', () => Promise.resolve(new Response('{}', { status: 200 })));
+    expect(await untilAnswered(() => roomCount('http://x', 'k', secret))).toBe(0);
+    vi.stubGlobal('fetch', () => Promise.resolve(new Response('{}', { status: 401 })));
+    await expect(untilAnswered(() => roomCount('http://x', 'k', secret))).rejects.toBeInstanceOf(LiveKitStatusError);
+    await expect(untilAnswered(() => Promise.reject(new Error('other')))).rejects.toThrow('other');
+  });
+
+  // The assertions of the specs, on a reading that got no answer: none may pass.
+  describe('a reading with no answer cannot satisfy an assertion', () => {
+    const reading = async <T>(ask: () => Promise<T>) => {
+      down();
+      return untilAnswered(ask);
+    };
+
+    it('in a poll (answered is undefined, which no matcher takes), for a list, a count and a length', async () => {
+      const ids = await answered(reading(() => listIdentities('http://x', 'k', secret)));
+      const tracks = await answered(reading(() => listTracks('http://x', 'k', secret, 'p1', () => true)));
+      const rooms = await answered(reading(() => roomCount('http://x', 'k', secret)));
+      expect(ids).toBeUndefined();
+      expect(tracks).toBeUndefined();
+      expect(rooms).toBeUndefined();
+      // The spec's poll matchers: participants/tracks .toEqual([]), rooms .toBe(0), a length .toBe(1), toHaveLength.
+      expect(ids).not.toEqual([]);
+      expect(tracks).not.toEqual([]);
+      expect(rooms).not.toBe(0);
+      expect(tracks?.length).not.toBe(1);
+      expect(() => { expect(tracks).toHaveLength(1); }).toThrow();
+      expect(() => { expect(tracks).toHaveLength(0); }).toThrow();
+    });
+
+    it('in a one-off assertion (mustAnswer fails the test, so [] or a length of 1 is never read from it)', async () => {
+      await expect(mustAnswer(reading(() => listTracks('http://x', 'k', secret, 'p1', () => true)))).rejects.toThrow('LiveKit gave no answer');
+      await expect(mustAnswer(reading(() => listIdentities('http://x', 'k', secret)))).rejects.toThrow('LiveKit gave no answer');
+    });
+
+    it('mustAnswer and answered pass a real answer, an empty list included', async () => {
+      vi.stubGlobal('fetch', () => Promise.resolve(new Response('{}', { status: 200 })));
+      expect(await mustAnswer(untilAnswered(() => listIdentities('http://x', 'k', secret)))).toEqual([]);
+      expect(await answered(untilAnswered(() => listIdentities('http://x', 'k', secret)))).toEqual([]);
+    });
+  });
+
+  it('LiveKitNoAnswerError says the method and why, nothing else', () => {
+    expect(new LiveKitNoAnswerError('ListRooms', 'no answer').message).toBe('livekit ListRooms: no answer');
   });
 });
