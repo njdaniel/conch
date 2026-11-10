@@ -25,7 +25,7 @@ import { OneShot } from './voice/oneshot.ts';
 import { VoiceService } from './voice/service.ts';
 import { Supervisor } from './voice/supervisor.ts';
 import { runFile } from './voice/spawn.ts';
-import { watcherPresent } from './tray-detect.ts';
+import { trayHostPresent } from './tray-detect.ts';
 import { TrayController } from './tray.ts';
 import { createNodeConnect } from './api/socket.ts';
 import { transportVerdict, trustSystemRoots } from './api/trust.ts';
@@ -150,8 +150,12 @@ export async function start(): Promise<void> {
       const t = tray;
       if (quitting || live.destroying || created !== live.window || closing.has(created) || t === null || settings === null || !settings.current.closeToTray) return;
       event.preventDefault();
-      void t.check().then(() => {
-        if (t.working() && !created.isDestroyed()) {
+      // A check that fails lets the close go on: no answer is no tray.
+      void t.check().then(
+        () => t.working(),
+        () => false,
+      ).then((working) => {
+        if (working && !created.isDestroyed()) {
           created.hide();
           return;
         }
@@ -192,9 +196,12 @@ export async function start(): Promise<void> {
     files: checked.ok ? createSettingsFiles(root) : memorySettingsFiles(),
     autostart: new Autostart({ packaged: app.isPackaged, execPath: process.execPath, env: process.env, home: app.getPath('home'), log }),
     trayWorking: () => tray?.working() ?? false,
-    trayDetected: () => watcherPresent(runFile),
+    trayExists: () => tray?.exists ?? false,
+    trayDetected: () => trayHostPresent(runFile),
     changed: () => {
-      void tray?.sync();
+      void tray?.sync().catch(() => {
+        log('tray: could not follow the setting');
+      });
     },
     log,
   });
@@ -239,14 +246,23 @@ export async function start(): Promise<void> {
       log,
     });
   };
+  const openActivation = activationFactory(
+    { packaged: app.isPackaged, appPath, manifest, readUi: (path) => readFile(join(ui, ...path.split('/').slice(1))), connect: createNodeConnect(log), guard: { log, gestures, owned, links }, makeFiles, now: Date.now, log },
+    live,
+  );
   const profiles = new ProfilesService({
     store,
     vault,
     hooks: teardownHooks,
-    createActivation: activationFactory(
-      { packaged: app.isPackaged, appPath, manifest, readUi: (path) => readFile(join(ui, ...path.split('/').slice(1))), connect: createNodeConnect(log), guard: { log, gestures, owned, links }, makeFiles, now: Date.now, log },
-      live,
-    ),
+    createActivation: async (spec) => {
+      const activation = await openActivation(spec);
+      // The switcher records the activation once this resolves: the menu is
+      // filled from it on the next turn, not at the next 10 s check.
+      setTimeout(() => {
+        tray?.activated();
+      }, 0);
+      return activation;
+    },
     compat: { servers: allowlist?.servers ?? [], override },
     desktopVersion: app.getVersion(),
     readHealth: healthReader(),
@@ -390,7 +406,7 @@ export async function start(): Promise<void> {
     quit: () => {
       app.quit();
     },
-    detect: () => watcherPresent(runFile),
+    detect: () => trayHostPresent(runFile),
     revoke: () => {
       settingsService.revokeTrayConfirmation();
     },
@@ -404,7 +420,13 @@ export async function start(): Promise<void> {
   teardownHooks.media('tray', () => {
     trayController.blank();
   });
-  void trayController.sync();
+  // The strip shows "Sharing your screen" as the companion starts and ends.
+  companion.onChange(() => {
+    trayController.refresh();
+  });
+  void trayController.sync().catch(() => {
+    log('tray: could not start');
+  });
 
   let ending = false;
   app.on('before-quit', (event) => {

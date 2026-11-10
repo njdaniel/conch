@@ -161,6 +161,7 @@ export class Companion {
   readonly #sleep: (ms: number) => Promise<void>;
   #held: Held | null = null;
   #asking: Asking | null = null;
+  readonly #changed = new Set<() => void>();
   // Counts ends and stops: a request begun before one is overtaken by it.
   #epoch = 0;
 
@@ -175,6 +176,25 @@ export class Companion {
     deps.voice.subscribe((view) => {
       this.#onVoice(view);
     });
+  }
+
+  // onChange calls the listener whenever a companion becomes live or ends, so
+  // the tray can follow "Sharing your screen". It returns the remover.
+  onChange(listener: () => void): () => void {
+    this.#changed.add(listener);
+    return () => {
+      this.#changed.delete(listener);
+    };
+  }
+
+  #announce(): void {
+    for (const listener of [...this.#changed]) {
+      try {
+        listener();
+      } catch {
+        // A listener's failure is not the companion's.
+      }
+    }
   }
 
   // liveOrigin is the LiveKit origin of the live grant, or null when no
@@ -240,6 +260,7 @@ export class Companion {
     }
     this.#held = { ...asking, client, document, origin: given.origin };
     this.#deps.log('companion: issued');
+    this.#announce();
     return { ok: true, grant: given.grant };
   }
 
@@ -251,6 +272,7 @@ export class Companion {
     const held = this.#held;
     if (held === null) return false;
     this.#held = null;
+    this.#announce();
     await this.#remove(held.client, held.channel, 'stopped');
     return true;
   }
@@ -264,6 +286,7 @@ export class Companion {
     const held = this.#held;
     if (held === null) return false;
     this.#held = null;
+    this.#announce();
     try {
       this.#deps.tell(held.document, { type: 'end', reason });
     } catch {

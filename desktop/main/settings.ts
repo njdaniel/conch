@@ -120,6 +120,9 @@ export interface SettingsDeps {
   // Whether a tray is up and working (tray.ts, #1589): false means closing
   // always quits.
   readonly trayWorking: () => boolean;
+  // Whether the tray icon exists now. A confirmation is taken only for an
+  // icon that exists; absent means none does.
+  readonly trayExists?: () => boolean;
   // Whether a tray host is on the session bus now (tray-detect.ts). Absent
   // means not asked: closeToTray is accepted as it was before the tray.
   readonly trayDetected?: () => Promise<boolean>;
@@ -127,7 +130,13 @@ export interface SettingsDeps {
   // can follow closeToTray.
   readonly changed?: (settings: AppSettings) => void;
   readonly log: (line: string) => void;
+  // The clock for the detector's short cache; a test supplies its own.
+  readonly now?: () => number;
 }
+
+// How long view() reuses the detector's answer: settings reads that follow no
+// gesture would otherwise run gdbus each time.
+export const DETECT_CACHE_MS = 5_000;
 
 export class SettingsService {
   readonly #deps: SettingsDeps;
@@ -137,6 +146,8 @@ export class SettingsService {
   #confirmed = false;
   // One change at a time, so two writes cannot interleave.
   #queue: Promise<unknown> = Promise.resolve();
+  // The last answer of the detector, for view() only.
+  #seen: { readonly at: number; readonly value: boolean } | null = null;
 
   constructor(deps: SettingsDeps) {
     this.#deps = deps;
@@ -174,8 +185,18 @@ export class SettingsService {
 
   async view(): Promise<DesktopSettingsView> {
     const why = await this.#deps.autostart.availability();
-    const detected = this.#deps.trayDetected === undefined ? true : await this.#deps.trayDetected();
+    const detected = await this.#detectedForView();
     return { ...this.#current, trayWorking: this.#deps.trayWorking(), trayDetected: detected, trayConfirmed: this.#confirmed, launchAvailable: why === null, ...(why === null ? {} : { launchUnavailable: why }) };
+  }
+
+  async #detectedForView(): Promise<boolean> {
+    const detect = this.#deps.trayDetected;
+    if (detect === undefined) return true;
+    const now = (this.#deps.now ?? Date.now)();
+    if (this.#seen !== null && now - this.#seen.at >= 0 && now - this.#seen.at < DETECT_CACHE_MS) return this.#seen.value;
+    const value = await detect();
+    this.#seen = { at: now, value };
+    return value;
   }
 
   set(change: SettingsChange): Promise<SettingsResult> {
@@ -187,13 +208,19 @@ export class SettingsService {
   async #apply(change: SettingsChange): Promise<SettingsResult> {
     const { trayConfirmed, ...stored } = change;
     const next: AppSettings = { ...this.#current, ...stored };
-    // A tray is turned on only while a tray host is on the bus, and confirmed
-    // only with the tray on (Q-D5-2).
-    const wantsTray = (change.closeToTray === true && !this.#current.closeToTray) || trayConfirmed === true;
-    if (wantsTray && next.closeToTray && this.#deps.trayDetected !== undefined && !(await this.#deps.trayDetected())) {
+    // A tray is turned on only while a tray host is on the bus (Q-D5-2).
+    if (change.closeToTray === true && !this.#current.closeToTray && this.#deps.trayDetected !== undefined && !(await this.#deps.trayDetected())) {
       return { ok: false, reason: 'no-tray' };
     }
-    if (trayConfirmed === true && !next.closeToTray) return { ok: false, reason: 'no-tray' };
+    // The confirmation says "I can see the icon", so it is taken only for an
+    // icon that exists: the stored setting is already on, the tray is up, and
+    // the host is there. It never rides in the same change as the setting it
+    // confirms: one call cannot turn the tray on and confirm it.
+    if (trayConfirmed !== undefined && change.closeToTray !== undefined) return { ok: false, reason: 'no-tray' };
+    if (trayConfirmed === true) {
+      if ( !this.#current.closeToTray || this.#deps.trayExists?.() !== true) return { ok: false, reason: 'no-tray' };
+      if (this.#deps.trayDetected !== undefined && !(await this.#deps.trayDetected())) return { ok: false, reason: 'no-tray' };
+    }
     // The autostart entry first: if it cannot be changed, nothing is stored.
     if (next.launchAtLogin !== this.#current.launchAtLogin) {
       const done = next.launchAtLogin ? await this.#deps.autostart.enable() : await this.#deps.autostart.disable();

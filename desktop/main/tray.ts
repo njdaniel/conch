@@ -15,10 +15,18 @@
 //   - a tray is working only when closeToTray is on, the person has confirmed
 //     they can see its icon, and the tray host is on the bus right now
 //     (Q-D5-2). Losing the host revokes the confirmation, and shows the
-//     window if it was hidden: there is never an invisible running session;
+//     window if it was hidden: there is never an invisible running session.
+//     With the window hidden and the helper unmuted, losing the host also
+//     mutes: not being able to show an indicator is not permission to keep
+//     transmitting (§9's lock rule). Destroying the tray (the setting turned
+//     off) with the window hidden shows the window too;
+//   - Mute and Deafen send the intent bound when the menu was built (the
+//     model's muted and deafened), never a toggle against live state, so a
+//     click on a stale menu cannot do the opposite of its label;
 //   - no profile name, channel or state is logged. The menu is rebuilt from
-//     the activation in force at each refresh, and blanked first when media
-//     ends for a switch or a sign-out.
+//     the activation in force at each refresh, and blanked when media ends
+//     for a switch or a sign-out, staying blank until activated() says the
+//     new activation is open.
 import { join } from 'node:path';
 
 import type { NativeVoiceView, VoiceCommandResult } from '../../web/src/platform/desktop/bridge.ts';
@@ -49,6 +57,10 @@ export interface TrayModel {
   readonly voiceLine: string;
   // One of Transmitting, Muted, Deafened or Sharing your screen, or none.
   readonly stateLine: string | null;
+  // The helper's confirmed flags when the model was built: the menu's Mute
+  // and Deafen send the opposite of these, bound at build time.
+  readonly muted: boolean;
+  readonly deafened: boolean;
   readonly mute: TrayAction;
   readonly deafen: TrayAction;
   readonly leave: TrayAction;
@@ -79,6 +91,8 @@ export function trayModel(input: TrayInput): TrayModel {
     header: input.profile ?? 'Conch',
     voiceLine: inVoice ? `In voice: #${channel}` : 'Not in voice',
     stateLine,
+    muted,
+    deafened,
     mute: { label: muted ? 'Unmute' : 'Mute', enabled },
     deafen: { label: deafened ? 'Undeafen' : 'Deafen', enabled },
     leave: { label: 'Leave voice', enabled },
@@ -148,7 +162,9 @@ export class TrayController {
   // The last answer of the detector; false until the first check.
   #host = false;
   #pending = false;
-  // Blank until the next refresh: set when media ends for a switch.
+  // Blank until activated(): set when media ends for a switch or a sign-out,
+  // and kept through every refresh in between (a refresh from the helper's
+  // teardown or the timer must not bring the old profile back).
   #blank = false;
 
   constructor(deps: TrayDeps) {
@@ -172,11 +188,23 @@ export class TrayController {
     }
     if (this.#tray === null) {
       const model = this.#model();
-      const tray = this.#deps.createTray(join(this.#deps.iconDir, iconFile(model.icon)));
-      tray.setToolTip('Conch');
-      tray.on('click', () => {
-        this.#deps.show();
-      });
+      let tray: TrayLike | null = null;
+      try {
+        tray = this.#deps.createTray(join(this.#deps.iconDir, iconFile(model.icon)));
+        tray.setToolTip('Conch');
+        tray.on('click', () => {
+          this.#deps.show();
+        });
+      } catch {
+        // No tray could be made: none exists, so closing quits (§9).
+        this.#deps.log('tray: the tray could not be created');
+        try {
+          tray?.destroy();
+        } catch {
+          // Nothing more to undo.
+        }
+        return;
+      }
       this.#tray = tray;
       this.#unsubscribe = this.#deps.voice.subscribe(() => {
         this.refresh();
@@ -201,7 +229,13 @@ export class TrayController {
   // window is hidden, shows it: the fail-safe.
   async check(): Promise<void> {
     if (this.#tray === null) return;
-    const present = await this.#deps.detect();
+    let present: boolean;
+    try {
+      present = await this.#deps.detect();
+    } catch {
+      // A probe that cannot answer is no host: fail closed.
+      present = false;
+    }
     // The tray may have been turned off while the bus was asked.
     if (!this.exists) return;
     this.#host = present;
@@ -210,15 +244,39 @@ export class TrayController {
       if (this.#deps.hidden()) {
         this.#deps.log('tray: the tray host is gone; showing the window');
         this.#deps.show();
+        this.#muteUnmuted();
       }
     }
     this.refresh();
   }
 
+  // muteUnmuted: the window was hidden and its indicator is gone, so a helper
+  // that is running unmuted is muted. Best effort; the failure is logged by
+  // its reason alone.
+  #muteUnmuted(): void {
+    const view = this.#deps.voice.state();
+    if (view.status !== 'running' || view.helper === undefined || view.helper.muted) return;
+    this.#deps.log('tray: muting, as the tray host is gone');
+    void this.#deps.voice.setMute(true).then(
+      (result) => {
+        if (!result.ok) this.#deps.log(`tray: mute failed (${result.error})`);
+      },
+      () => {
+        this.#deps.log('tray: mute failed');
+      },
+    );
+  }
+
   // blank empties the menu of the profile and voice (media is ending for a
-  // switch or sign-out); the next refresh fills it from the new activation.
+  // switch or sign-out). It stays empty until activated().
   blank(): void {
     this.#blank = true;
+    this.refresh();
+  }
+
+  // activated: the new activation is open; the menu is filled from it now.
+  activated(): void {
+    this.#blank = false;
     this.refresh();
   }
 
@@ -233,7 +291,6 @@ export class TrayController {
   #model(): TrayModel {
     const voice = this.#deps.voice.state();
     if (this.#blank) {
-      this.#blank = false;
       return trayModel({ profile: null, voice: { status: 'idle', generation: voice.generation, channel: null, retryable: false }, sharing: false, pending: false });
     }
     return trayModel({ profile: this.#deps.profile(), voice, sharing: this.#deps.sharing(), pending: this.#pending });
@@ -250,8 +307,8 @@ export class TrayController {
           this.#deps.show();
         },
       },
-      this.#command(model.mute, 'mute', () => this.#deps.voice.setMute(!this.#deps.voice.state().helper?.muted)),
-      this.#command(model.deafen, 'deafen', () => this.#deps.voice.setDeafen(!this.#deps.voice.state().helper?.deafened)),
+      this.#command(model.mute, 'mute', () => this.#deps.voice.setMute(!model.muted)),
+      this.#command(model.deafen, 'deafen', () => this.#deps.voice.setDeafen(!model.deafened)),
       this.#command(model.leave, 'leave', () => this.#deps.voice.leave().then(() => ({ ok: true as const }))),
       { type: 'separator' },
       {
@@ -296,8 +353,18 @@ export class TrayController {
     this.#unsubscribe = null;
     this.#stopTimer?.();
     this.#stopTimer = null;
-    this.#tray?.destroy();
+    const had = this.#tray !== null;
+    try {
+      this.#tray?.destroy();
+    } catch {
+      // A tray that cannot be destroyed is gone from our side all the same.
+    }
     this.#tray = null;
     this.#host = false;
+    // With the icon gone nothing can bring a hidden window back.
+    if (had && this.#deps.hidden()) {
+      this.#deps.log('tray: the tray is off; showing the window');
+      this.#deps.show();
+    }
   }
 }

@@ -325,6 +325,45 @@ describe('the companion’s grant', () => {
   });
 });
 
+describe('the companion’s change signal (the tray follows it)', () => {
+  it('fires when a companion becomes live, ends, and is stopped, and not for a refusal', async () => {
+    const r = rig();
+    let n = 0;
+    const off = r.companion.onChange(() => {
+      n++;
+    });
+    r.answers.push(refusal(500));
+    await r.companion.grant({ channel: 'general' });
+    expect(n).toBe(0);
+    r.answers.push(ok(ANSWER));
+    await r.companion.grant({ channel: 'general' });
+    expect(n).toBe(1);
+    await r.companion.end('leave');
+    expect(n).toBe(2);
+    r.answers.push(ok(ANSWER));
+    await r.companion.grant({ channel: 'general' });
+    await r.companion.stop();
+    expect(n).toBe(4);
+    // Nothing held: an end or stop signals nothing.
+    await r.companion.end('leave');
+    await r.companion.stop();
+    expect(n).toBe(4);
+    off();
+    r.answers.push(ok(ANSWER));
+    await r.companion.grant({ channel: 'general' });
+    expect(n).toBe(4);
+  });
+
+  it('a listener that throws does not break the companion', async () => {
+    const r = rig();
+    r.companion.onChange(() => {
+      throw new Error('x');
+    });
+    r.answers.push(ok(ANSWER));
+    expect((await r.companion.grant({ channel: 'general' })).ok).toBe(true);
+  });
+});
+
 describe('the companion’s end', () => {
   it('companionEnd sends the DELETE and forgets the record, and tells the page nothing (it asked)', async () => {
     const r = rig();

@@ -251,7 +251,7 @@ describe('the menu', () => {
     expect(labels(t).slice(0, 2)).toEqual(['Conch', 'Not in voice']);
     r.state.profile = 'Work';
     r.state.view = IDLE;
-    c.refresh();
+    c.activated();
     expect(labels(t)[0]).toBe('Work');
   });
 
@@ -379,5 +379,194 @@ describe('losing the tray host (a fake bus)', () => {
     r.state.hidden = true;
     await c.check();
     expect(r.shown).toBe(0);
+  });
+});
+
+describe('Mute and Deafen send the intent bound at build', () => {
+  const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+  it('Mute built while unmuted sends setMute(true) even if the helper muted since, with no refresh', async () => {
+    const r = rig();
+    await new TrayController(r.deps).sync();
+    const t = r.trays[0] as FakeTray;
+    r.state.view = running();
+    emit(r);
+    const mute = item(t, 'Mute');
+    // The state flips behind the menu; no listener runs.
+    r.state.view = running({ muted: true });
+    mute.click?.();
+    await settle();
+    expect(r.commands).toEqual(['mute true']);
+  });
+
+  it('Unmute built while muted sends setMute(false) even if the helper unmuted since', async () => {
+    const r = rig();
+    await new TrayController(r.deps).sync();
+    const t = r.trays[0] as FakeTray;
+    r.state.view = running({ muted: true });
+    emit(r);
+    const unmute = item(t, 'Unmute');
+    r.state.view = running();
+    unmute.click?.();
+    await settle();
+    expect(r.commands).toEqual(['mute false']);
+  });
+
+  it('Deafen and Undeafen likewise', async () => {
+    const r = rig();
+    await new TrayController(r.deps).sync();
+    const t = r.trays[0] as FakeTray;
+    r.state.view = running();
+    emit(r);
+    const deafen = item(t, 'Deafen');
+    r.state.view = running({ deafened: true });
+    deafen.click?.();
+    await settle();
+    emit(r);
+    const undeafen = item(t, 'Undeafen');
+    r.state.view = running();
+    undeafen.click?.();
+    await settle();
+    expect(r.commands).toEqual(['deafen true', 'deafen false']);
+  });
+
+  it('the model carries the flags', () => {
+    expect(trayModel({ profile: null, voice: running({ muted: true }), sharing: false, pending: false })).toMatchObject({ muted: true, deafened: false });
+    expect(trayModel({ profile: null, voice: IDLE, sharing: false, pending: false })).toMatchObject({ muted: false, deafened: false });
+  });
+});
+
+describe('losing the host while the window is hidden and the helper is live', () => {
+  const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+  it('shows the window and also mutes an unmuted helper', async () => {
+    const r = rig();
+    const c = new TrayController(r.deps);
+    await c.sync();
+    r.state.view = running({ transmitting: true });
+    r.state.hidden = true;
+    r.state.bus = false;
+    await c.check();
+    await settle();
+    expect(r.shown).toBe(1);
+    expect(r.commands).toEqual(['mute true']);
+  });
+
+  it('does not mute a helper that is already muted, or a session that is not running', async () => {
+    const r = rig();
+    const c = new TrayController(r.deps);
+    await c.sync();
+    r.state.view = running({ muted: true });
+    r.state.hidden = true;
+    r.state.bus = false;
+    await c.check();
+    r.state.view = IDLE;
+    r.state.hidden = true;
+    await c.check();
+    await settle();
+    expect(r.shown).toBe(2);
+    expect(r.commands).toEqual([]);
+  });
+
+  it('does not mute with the window visible, and logs a failed mute by its reason alone', async () => {
+    const r = rig();
+    const c = new TrayController(r.deps);
+    await c.sync();
+    r.state.view = running();
+    r.state.bus = false;
+    await c.check();
+    expect(r.commands).toEqual([]);
+    r.state.hidden = true;
+    r.next = { ok: false, error: 'lost' };
+    await c.check();
+    await settle();
+    expect(r.commands).toEqual(['mute true']);
+    expect(r.logs).toContain('tray: mute failed (lost)');
+  });
+});
+
+describe('turning the tray off while the window is hidden', () => {
+  it('shows the window', async () => {
+    const r = rig();
+    const c = new TrayController(r.deps);
+    await c.sync();
+    r.state.hidden = true;
+    r.settings = { ...r.settings, closeToTray: false };
+    await c.sync();
+    expect(r.trays[0]?.destroyed).toBe(true);
+    expect(r.shown).toBe(1);
+  });
+
+  it('shows nothing when the window is visible, or when there was no tray', async () => {
+    const r = rig();
+    const c = new TrayController(r.deps);
+    await c.sync();
+    r.settings = { ...r.settings, closeToTray: false };
+    await c.sync();
+    expect(r.shown).toBe(0);
+    r.state.hidden = true;
+    await c.sync();
+    expect(r.shown).toBe(0);
+  });
+});
+
+describe('failures', () => {
+  it('a Tray that cannot be created is no tray: logged in fixed words, none working, no timer', async () => {
+    const r = rig();
+    (r.deps as { createTray: TrayDeps['createTray'] }).createTray = () => {
+      throw new Error('secret detail Home');
+    };
+    const c = new TrayController(r.deps);
+    await expect(c.sync()).resolves.toBeUndefined();
+    expect(c.exists).toBe(false);
+    expect(c.working()).toBe(false);
+    expect(r.logs).toEqual(['tray: the tray could not be created']);
+    expect(r.listeners).toEqual([]);
+  });
+
+  it('a tray that fails after being made is destroyed and counted as none', async () => {
+    const r = rig();
+    const made = new FakeTray();
+    made.setToolTip = () => {
+      throw new Error('x');
+    };
+    (r.deps as { createTray: TrayDeps['createTray'] }).createTray = () => made;
+    const c = new TrayController(r.deps);
+    await c.sync();
+    expect(made.destroyed).toBe(true);
+    expect(c.exists).toBe(false);
+  });
+
+  it('a detector that rejects counts as no host', async () => {
+    const r = rig();
+    const c = new TrayController(r.deps);
+    await c.sync();
+    (r.deps as { detect: TrayDeps['detect'] }).detect = () => Promise.reject(new Error('x'));
+    await expect(c.check()).resolves.toBeUndefined();
+    expect(c.working()).toBe(false);
+    expect(r.revoked).toBe(1);
+  });
+});
+
+describe('the blank after a switch', () => {
+  it('stays blank through refreshes from voice, the timer and a failed command, until activated', async () => {
+    const r = rig();
+    const c = new TrayController(r.deps);
+    await c.sync();
+    const t = r.trays[0] as FakeTray;
+    r.state.view = running();
+    emit(r);
+    c.blank();
+    expect(labels(t).slice(0, 2)).toEqual(['Conch', 'Not in voice']);
+    emit(r);
+    r.tick();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    c.refresh();
+    expect(labels(t).slice(0, 2)).toEqual(['Conch', 'Not in voice']);
+    expect(t.image).toBe('/icons/idle.png');
+    r.state.profile = 'Work';
+    r.state.view = running();
+    c.activated();
+    expect(labels(t).slice(0, 2)).toEqual(['Work', 'In voice: #general']);
   });
 });

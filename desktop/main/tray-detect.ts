@@ -1,6 +1,7 @@
 // Is a tray host on the session bus? (issue #1589, D5-03; linux-desktop.md §9,
 // Q-D5-2). Input: a RunFile. Output: whether org.kde.StatusNotifierWatcher
-// has an owner. Owns: the one gdbus command line.
+// has an owner and reports a registered host (IsStatusNotifierHostRegistered):
+// a watcher with no host draws no icon. Owns: the two gdbus command lines.
 //
 // This is necessary and not sufficient for a working tray: Electron gives no
 // "is the icon visible" answer, so the person also confirms they can see it
@@ -27,6 +28,30 @@ export const WATCHER_ARGV: readonly string[] = [
   WATCHER_NAME,
 ];
 
+// The watcher's IsStatusNotifierHostRegistered property, read through the
+// standard Properties interface.
+export const HOST_ARGV: readonly string[] = [
+  'call',
+  '--session',
+  '--dest',
+  WATCHER_NAME,
+  '--object-path',
+  '/StatusNotifierWatcher',
+  '--method',
+  'org.freedesktop.DBus.Properties.Get',
+  WATCHER_NAME,
+  'IsStatusNotifierHostRegistered',
+];
+
+// parseHostRegistered reads gdbus's answer to the property Get: `(<true>,)` or
+// `(<false>,)`. Anything else is null.
+export function parseHostRegistered(stdout: string): boolean | null {
+  const text = stdout.trim();
+  if (text === '(<true>,)') return true;
+  if (text === '(<false>,)') return false;
+  return null;
+}
+
 // parseHasOwner reads gdbus's answer to NameHasOwner: `(true,)` or
 // `(false,)`. Anything else is null.
 export function parseHasOwner(stdout: string): boolean | null {
@@ -40,4 +65,11 @@ export function parseHasOwner(stdout: string): boolean | null {
 export async function watcherPresent(run: RunFile): Promise<boolean> {
   const result = await run(GDBUS, WATCHER_ARGV, DETECT_TIMEOUT_MS);
   return result.ok && parseHasOwner(result.stdout) === true;
+}
+
+// trayHostPresent: the watcher has an owner and a host is registered with it.
+export async function trayHostPresent(run: RunFile): Promise<boolean> {
+  if (!(await watcherPresent(run))) return false;
+  const result = await run(GDBUS, HOST_ARGV, DETECT_TIMEOUT_MS);
+  return result.ok && parseHostRegistered(result.stdout) === true;
 }

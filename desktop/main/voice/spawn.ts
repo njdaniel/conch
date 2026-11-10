@@ -256,12 +256,14 @@ export type RunFile = (file: string, args: readonly string[], timeoutMs: number)
 const RUN_MAX_BYTES = 4096;
 
 // What a session-bus query needs to find the bus, by exact name.
-const RUN_ENV: readonly string[] = ['DBUS_SESSION_BUS_ADDRESS', 'XDG_RUNTIME_DIR', 'HOME'];
+const RUN_ENV: readonly string[] = ['DBUS_SESSION_BUS_ADDRESS', 'XDG_RUNTIME_DIR'];
 
 // runFile: argv only, no shell, no standard input, an environment of the
 // session-bus names alone (RUN_ENV; the file is absolute, so no PATH), never
-// detached, SIGKILLed past the timeout. Standard error is discarded. It never rejects: a file that cannot
-// be started, a timeout and a non-zero exit are all ok:false.
+// detached, SIGKILLed past the timeout. Standard error is discarded. It never
+// rejects: a file that cannot be started (including a spawn that throws at
+// once, as an argument with a NUL does), a timeout and a non-zero exit are
+// all ok:false.
 export const runFile: RunFile = (file, args, timeoutMs) =>
   new Promise<RunResult>((resolve) => {
     if (!isAbsolute(file)) {
@@ -276,14 +278,21 @@ export const runFile: RunFile = (file, args, timeoutMs) =>
       clearTimeout(timer);
       resolve(result);
     };
-    const child = nodeSpawn(file, [...args], {
-      stdio: ['ignore', 'pipe', 'ignore'],
-      detached: false,
-      shell: false,
-      windowsHide: true,
-      env: Object.fromEntries(RUN_ENV.flatMap((name) => (process.env[name] === undefined ? [] : [[name, process.env[name]]]))),
-      cwd: '/',
-    });
+    let child: ChildProcessByStdio<null, Readable, null>;
+    try {
+      child = nodeSpawn(file, [...args], {
+        stdio: ['ignore', 'pipe', 'ignore'],
+        detached: false,
+        shell: false,
+        windowsHide: true,
+        env: Object.fromEntries(RUN_ENV.flatMap((name) => (process.env[name] === undefined ? [] : [[name, process.env[name]]]))),
+        cwd: '/',
+      });
+    } catch {
+      // Not through finish: no timer exists yet.
+      resolve({ ok: false, stdout: '' });
+      return;
+    }
     const timer = setTimeout(() => {
       child.kill('SIGKILL');
       finish({ ok: false, stdout: '' });
