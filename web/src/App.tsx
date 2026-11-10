@@ -1983,9 +1983,10 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
             visit === null ? <InvitePanel origin={origin} me={auth.principal} request={inviteAsk} onUnauthorized={onUnauthorized} /> : null
           }
           firstRun={
-            // An operator on a server with no channels is shown what to do
-            // first; anyone else keeps the channel list's own line.
-            channels.loaded && channels.channels.length === 0 && auth.principal.role === 'operator' && visit === null ? (
+            // Whoever may make a channel (POST /v0/channels needs
+            // manage_channels) on a server with no channels is shown what to
+            // do first; anyone else keeps the channel list's own line.
+            channels.loaded && channels.channels.length === 0 && canDo(auth.principal, 'manage_channels') && visit === null ? (
               <FirstRun
                 onMakeChannel={() => {
                   setCreateAsks((n) => n + 1);

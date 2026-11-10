@@ -363,6 +363,29 @@ describe('the shared-channel picker', () => {
   });
 });
 
+describe('the shared-channel picker offers by permission (issue #1701)', () => {
+  const cara: ChannelMemberV1 = { principal_id: 6, created_at: at, name: 'cara', kind: 'human', can_decide: false };
+  const helper: ChannelMemberV1 = { principal_id: 9, created_at: at, name: 'helper', kind: 'agent' };
+  const viewing = (permissions: string[]): MemberControlsProps => ({ ...props('operator'), viewer: { role: 'operator', owner: false, permissions, guest: false } });
+
+  async function options(controls: MemberControlsProps): Promise<(string | null)[]> {
+    vi.mocked(api.listMembers).mockImplementation((name) => Promise.resolve({ ok: true, value: name === 'ops' ? [cara, helper] : [] }));
+    draw(controls);
+    fireEvent.click(screen.getByRole('button', { name: 'Add from another channel' }));
+    const form = await screen.findByRole('form', { name: 'Add person from another channel' });
+    await within(form).findByRole('option', { name: 'cara' });
+    return within(form).getAllByRole('option').map((option) => option.textContent);
+  }
+
+  it('offers an agent to an operator who holds manage_channels', async () => {
+    expect(await options(viewing(['manage_channels']))).toEqual(['Choose a person', 'cara', 'helper']);
+  });
+
+  it('offers only humans to an operator whose manage_channels is off, as the server treats them as a manager', async () => {
+    expect(await options(viewing(['manage_members']))).toEqual(['Choose a person', 'cara']);
+  });
+});
+
 describe('the shared-channel picker follows the directory (issue #993)', () => {
   it('reads again on a directory tick and replaces its candidates: a renamed person shows, a hidden one is not offered, a chosen one that is gone is unchosen', async () => {
     const cara: ChannelMemberV1 = { principal_id: 6, created_at: at, name: 'cara', kind: 'human', can_decide: false };

@@ -208,6 +208,15 @@ describe('new channel', () => {
     expect(within(screen.getByRole('region', { name: 'Members list' })).queryByText('Connecting…')).toBeNull();
   });
 
+  // Issue #1701: POST /v0/channels needs manage_channels, not the role.
+  it('offers an operator whose manage_channels is off no first-run panel', async () => {
+    serve({ ...operator, permissions: ['manage_members'] }, (name) => made(name, 1), []);
+    render(<App origin={origin} />);
+    expect(await within(await screen.findByRole('navigation', { name: 'Channels' })).findByText('No channels yet')).toBeDefined();
+    expect(screen.queryByRole('heading', { name: "You're not in any channels yet" })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Make a channel' })).toBeNull();
+  });
+
   it('opens the New channel form from the first-run panel, and the panel is gone once the channel is made and open', async () => {
     serve(operator, (name) => made(name, 1), []);
     render(<App origin={origin} />);

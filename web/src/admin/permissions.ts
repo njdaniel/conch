@@ -12,7 +12,7 @@ import type { WhoAmIResponseV1 } from '../schema/principal';
 // canDo reports whether whoami says the caller holds permission. The owner
 // always does. A server that predates permissions sends none: an operator is
 // then taken to hold all of them (the server answers each request itself).
-export function canDo(who: WhoAmIResponseV1, permission: Permission): boolean {
+export function canDo(who: Pick<WhoAmIResponseV1, 'role' | 'owner' | 'permissions'>, permission: Permission): boolean {
   if (who.role === 'operator' && who.owner === true) return true;
   if (who.permissions === undefined) return who.role === 'operator';
   return who.permissions.includes(permission);
