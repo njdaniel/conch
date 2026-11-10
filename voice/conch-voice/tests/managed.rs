@@ -665,6 +665,68 @@ async fn the_end_of_input_without_leave_cuts_the_room_step_at_one_second_and_say
     assert!(after > before, "the abandoned leave was not logged");
 }
 
+/// Issue #1690: a signal first, then the owner's `leave` and the end of input. The owner
+/// asked to leave, so the room step keeps its full limit whatever came first; the process
+/// is still bounded by the owner-loss watchdog.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_signal_then_leave_and_the_end_of_input_lets_the_room_close_finish() {
+    let mut rig = ManagedRig::start().await;
+    rig.send_start();
+    rig.ready().await;
+    rig.sdk.close_takes(Duration::from_millis(1500));
+
+    let asked = Instant::now();
+    rig.signal();
+    rig.send(&ManagedRig::command("leave", 2, json!({})));
+    rig.close();
+    let code = rig.exit_code().await;
+    let exited = asked.elapsed();
+    assert_eq!(code, 0);
+    assert_eq!(rig.sdk.closed(), 1, "the room close was cancelled");
+    assert!(
+        exited >= Duration::from_millis(1500),
+        "ended {exited:?} after the signal, before the room was left"
+    );
+    assert!(
+        exited < Duration::from_millis(conch_voice_api::VOICE_CONTROL_OWNER_LOSS_EXIT_MS),
+        "ended {exited:?} after the signal"
+    );
+}
+
+/// A signal alone is today's behaviour: reason `signal`, the room step given `ROOM_LIMIT`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_signal_alone_gives_the_room_step_its_full_limit() {
+    let mut rig = ManagedRig::start().await;
+    rig.send_start();
+    rig.ready().await;
+    rig.sdk.close_takes(Duration::from_millis(1500));
+    rig.signal();
+    assert_eq!(rig.exit_code().await, 0);
+    assert_eq!(rig.sdk.closed(), 1, "the room close was cancelled");
+    let last = rig.state().unwrap();
+    assert_eq!(last.reason, Some(VoiceControlReason::Signal));
+}
+
+/// A signal and then the end of input, with no `leave`, is owner loss: the room step is
+/// cut at 1 s, as before.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_signal_then_the_end_of_input_without_leave_cuts_the_room_step_at_one_second() {
+    let mut rig = ManagedRig::start().await;
+    rig.send_start();
+    rig.ready().await;
+    rig.sdk.close_takes(Duration::from_millis(1500));
+    let gone = Instant::now();
+    rig.signal();
+    rig.close();
+    assert_eq!(rig.exit_code().await, 0);
+    assert!(
+        gone.elapsed() < Duration::from_millis(1400),
+        "{:?}",
+        gone.elapsed()
+    );
+    assert_eq!(rig.sdk.closed(), 0);
+}
+
 /// Issue #631: under load, the thread handing a frame to the track can be taken away after
 /// the gate let the frame through and before the SDK took it, while the session loop
 /// leaves and mutes the track. That frame reaches the track before the mute or not at all.

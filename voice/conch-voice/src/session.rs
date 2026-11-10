@@ -808,6 +808,9 @@ struct Session<T: Transport> {
     owner: Option<Owner>,
     /// Why a managed helper is ending, once it is: the reason its last states give.
     ending: Option<Ending>,
+    /// Whether the owner has sent `leave`, whatever ended the session first (a signal may
+    /// have): the room step of an explicit leave is not cut by the end of input (#1690).
+    leave_asked: bool,
     /// What the key device's watcher last said, for the owner's `ptt`.
     key_state: Option<DeviceState>,
     /// Whether a talk key is bound on the key device, for the owner's `ptt`.
@@ -1008,6 +1011,7 @@ impl<T: Transport> Session<T> {
             exit: None,
             owner: None,
             ending: None,
+            leave_asked: false,
             key_state: None,
             talk_key: true,
             mic: Mic::NotOpened,
@@ -1633,6 +1637,7 @@ impl<T: Transport> Session<T> {
                 self.ack(id, None);
             }
             Control::Leave { id } => {
+                self.leave_asked = true;
                 self.begin_stopping(VoiceControlReason::Left);
                 self.settle(false);
                 self.ack(id, None);
@@ -2109,6 +2114,8 @@ impl<T: Transport> Session<T> {
             owner.finish(&last).await;
         }
         let mut cutoff: Option<Instant> = None;
+        // An explicit leave, even one that came after a signal, keeps the room step whole.
+        let mut leave_asked = self.leave_asked || ending.reason == VoiceControlReason::Left;
         {
             let work = async { tokio::join!(self.reports.flush(REPORT_LIMIT), left) };
             tokio::pin!(work);
@@ -2133,25 +2140,28 @@ impl<T: Transport> Session<T> {
                         break;
                     }
                     input = self.inputs.recv(), if self.inputs_open => match input {
-                        Some(Input::Control(control)) => answer_while_stopping(
+                        Some(Input::Control(control)) => {
+                            leave_asked |= matches!(control, Control::Leave { .. });
+                            answer_while_stopping(
                             owner.as_mut(),
                             control,
                             &stopping,
                             &mut ending,
                             &mut result,
-                        ),
+                            );
+                        }
                         Some(Input::OwnerLost | Input::Eof) | None => {
                             if input.is_none() {
                                 self.inputs_open = false;
                             }
                             // The tighter bounds of an owner that is gone apply from now,
                             // except to the room step of an explicit leave: the owner
-                            // asked for it and closes its end of the pipe at once after,
+                            // asked for it (even after a signal) and closes its end of the pipe at once after,
                             // so the end of input says nothing against that step, and
                             // cutting it would drop the LiveKit Leave (#1685). The step
                             // keeps its own limit, and the process the owner-loss
                             // watchdog.
-                            if ending.reason != VoiceControlReason::Left {
+                            if !leave_asked {
                                 let sooner = Instant::now() + OWNER_LOST_STEP;
                                 cutoff = Some(cutoff.map_or(sooner, |at| at.min(sooner)));
                             }
