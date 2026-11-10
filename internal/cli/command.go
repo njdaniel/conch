@@ -134,6 +134,7 @@ Usage:
   conch channels join [--server <url>] [--json] <channel>
   conch channels leave [--server <url>] [--json] <channel>
   conch channels create [--server <url>] [--json] [--private] <name>
+  conch channels topic [--server <url>] [--json] [--clear] <channel> [<text>]
   conch admin preview [--server <url>] [--json] <member>
   conch admin channel create [--server <url>] [--json] <name>
   conch admin channel settings [--server <url>] [--json] [--public|--private] [--default on|off] [--archive|--restore] <channel>

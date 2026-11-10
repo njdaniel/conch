@@ -124,6 +124,9 @@ func (m Model) chatTitle() string {
 		return "MESSAGES"
 	}
 	title := "# " + channel
+	if topic := sanitize(m.channelTopics[m.current()]); topic != "" {
+		title += " · " + topic
+	}
 	if m.target != nil && m.target.channel == m.current() {
 		title += " › net " + sanitize(m.target.name)
 	}
