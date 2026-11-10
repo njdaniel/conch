@@ -7,6 +7,7 @@ import { useEffect, useState } from 'react';
 import { bridge } from '../access';
 import type { ProfilesView } from '../bridge';
 import { DevelopmentNote, Incompatible } from './Compat';
+import { DesktopSettings } from './DesktopSettings';
 import { ServerList } from './ServerList';
 import { noticeLines } from './text';
 
@@ -15,6 +16,7 @@ const POLL_MS = 2_000;
 export function ProfileBar({ initial }: { readonly initial: ProfilesView }) {
   const [view, setView] = useState(initial);
   const [open, setOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
 
   useEffect(() => {
     const b = bridge();
@@ -46,6 +48,16 @@ export function ProfileBar({ initial }: { readonly initial: ProfilesView }) {
         {view.notice === null ? null : <span className="desktop-bar-notice">{noticeLines[view.notice]}</span>}
         <button
           type="button"
+          className="desktop-bar-settings"
+          aria-expanded={settingsOpen}
+          onClick={() => {
+            setSettingsOpen(!settingsOpen);
+          }}
+        >
+          Desktop app
+        </button>
+        <button
+          type="button"
           aria-expanded={open}
           onClick={() => {
             setOpen(!open);
@@ -56,6 +68,7 @@ export function ProfileBar({ initial }: { readonly initial: ProfilesView }) {
       </header>
       {view.compat.override ? <DevelopmentNote compat={view.compat} /> : null}
       <Incompatible compat={view.compat} />
+      {settingsOpen ? <DesktopSettings /> : null}
       {open ? <ServerList view={view} onView={setView} /> : null}
     </>
   );

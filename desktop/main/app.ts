@@ -40,6 +40,8 @@ import { Ipc } from './ipc.ts';
 import { Links } from './links.ts';
 import { executable, Portal, runFile } from './portal.ts';
 import { COMPANION_EVENTS } from '../shared/bridge-names.ts';
+import { Autostart } from './autostart.ts';
+import { createSettingsFiles, memorySettingsFiles, SettingsService } from './settings.ts';
 import { saveChosenFile } from './save-file.ts';
 import { parseManifest, SCHEME, SCHEME_PRIVILEGES } from './scheme.ts';
 import { electronStorage } from './vault/electron-storage.ts';
@@ -157,9 +159,15 @@ export async function start(): Promise<void> {
   });
   if (!first) return;
 
+  // The app's settings, once the data root is known (below). Until then, and
+  // with none, closing the last window quits.
+  let settings: SettingsService | null = null;
   app.on('window-all-closed', () => {
     // A window destroyed for a switch or a sign-out is not the app ending.
-    if (!live.destroying) app.quit();
+    // Otherwise closing quits (media stopped, helper reaped, in before-quit),
+    // unless the person chose to keep running and a working tray exists.
+    const action = settings === null ? (live.destroying ? 'stay' : 'quit') : settings.closeAction(live.destroying);
+    if (action === 'quit') app.quit();
   });
 
   await app.whenReady();
@@ -187,6 +195,16 @@ export async function start(): Promise<void> {
   const checked = await prepareRoot(root);
   if (!checked.ok) log('conch-desktop: the data directory is not private to you; nothing will be saved');
   const files = createProfileFiles(root);
+  // The app-wide settings: <root>/settings.json, in memory only when the root
+  // is not private. No tray exists yet (#1589, D5-03), so trayWorking is false
+  // and closing always quits.
+  settings = new SettingsService({
+    files: checked.ok ? createSettingsFiles(root) : memorySettingsFiles(),
+    autostart: new Autostart({ packaged: app.isPackaged, execPath: process.execPath, env: process.env, home: app.getPath('home'), log }),
+    trayWorking: () => false,
+    log,
+  });
+  await settings.load();
   const store = new ProfileStore(
     checked.ok
       ? files
@@ -379,6 +397,7 @@ export async function start(): Promise<void> {
     share,
     profiles,
     voice,
+    settings,
     companion,
     now: Date.now,
     log,
