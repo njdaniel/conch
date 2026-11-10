@@ -365,11 +365,14 @@ export interface NativeVoiceView {
   readonly problem?: string;
   readonly retryable: boolean;
   readonly helper?: NativeVoiceHelper;
+  // Set while main's mute at a screen lock (issue #1588) is still in force:
+  // the strip says "You were muted when your screen locked".
+  readonly mutedByLock?: true;
 }
 
 export type VoiceCommandResult =
   | { readonly ok: true }
-  | { readonly ok: false; readonly error: VoiceControlErrorCode | 'not-running' | 'busy' | 'unsupported' | 'lost' };
+  | { readonly ok: false; readonly error: VoiceControlErrorCode | 'not-running' | 'busy' | 'unsupported' | 'lost' | 'locked' };
 
 // The helper's one-shot runs (issue #1378, D3-7): the device list and a save.
 // Why a run did not give what was asked; never text of the helper's.

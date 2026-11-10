@@ -108,13 +108,14 @@ function isNativeVoiceView(value: unknown): value is NativeVoiceView {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
   const v = value as Record<string, unknown>;
   return (
-    only(v, ['status', 'generation', 'channel', 'problem', 'retryable', 'helper']) &&
+    only(v, ['status', 'generation', 'channel', 'problem', 'retryable', 'helper', 'mutedByLock']) &&
     STATUSES.has(v['status']) &&
     isCount(v['generation']) &&
     (v['channel'] === null || (typeof v['channel'] === 'string' && v['channel'].length <= 1024)) &&
     (absent(v['problem']) || (typeof v['problem'] === 'string' && v['problem'].length <= 256)) &&
     typeof v['retryable'] === 'boolean' &&
-    (absent(v['helper']) || isHelper(v['helper']))
+    (absent(v['helper']) || isHelper(v['helper'])) &&
+    (absent(v['mutedByLock']) || v['mutedByLock'] === true)
   );
 }
 

@@ -89,6 +89,10 @@ export const pttProblemWords: Readonly<Record<VoiceControlPTTProblem, string>> =
   partial_record: 'the talk key device sent unreadable data',
 };
 
+// The note the strip shows after main muted the person at a screen lock
+// (issue #1588), until they unmute or leave. Said as a plain fact.
+export const lockMutedNote = 'You were muted when your screen locked';
+
 function has<T extends string>(table: Readonly<Record<T, string>>, key: string | undefined): key is T {
   return key !== undefined && Object.prototype.hasOwnProperty.call(table, key);
 }
