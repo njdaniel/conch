@@ -35,7 +35,11 @@
 //  - the person's Share click armed a share allowance a moment ago (the page's
 //    shareArm(), which took the click; share-allowance.ts) and its capture use
 //    is unspent: the request uses it up, granted or not. A raw click, or the
-//    Enter that sends a message, arms nothing here (S3 of #1621);
+//    Enter that sends a message, arms nothing here (S3 of #1621). The capture
+//    use is good for SHARE_CAPTURE_MS (3 s) from the later of the arm and the
+//    grant being issued. Residual: a compromised page can still call shareArm()
+//    within 1 s of any act, so the OS portal picker is the consent, and the
+//    allowance only stops an honest page arming capture by accident (S1);
 //  - a companion grant is live (the companion ends on switch, sign-out,
 //    reload and crash, so it is always this activation's and this document's);
 //  - the portal is available, and Electron's desktopCapturer returned exactly

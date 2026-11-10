@@ -24,7 +24,7 @@ import { acquire, prepareRoot } from './instance.ts';
 import { Client } from './api/client.ts';
 import { Session } from './api/session.ts';
 import { deliverVoice } from './voice/events.ts';
-import { Companion } from './voice/companion.ts';
+import { Companion, stillHeldBy } from './voice/companion.ts';
 import { OneShot } from './voice/oneshot.ts';
 import { VoiceService } from './voice/service.ts';
 import { Supervisor } from './voice/supervisor.ts';
@@ -316,9 +316,18 @@ export async function start(): Promise<void> {
       const w = live.window;
       if (w !== null && !w.isDestroyed()) await w.webContents.session.closeAllConnections();
     },
-    reload: () => {
+    contents: () => live.owned(),
+    // Only the contents and the document that held the grant (S2 of #1621): a
+    // switch to another profile, or a new document, inside the removal's wait
+    // is not reloaded.
+    reload: (contents, document) => {
       const w = live.window;
-      if (w !== null && !w.isDestroyed()) w.webContents.reload();
+      if (w === null || w.isDestroyed() || !stillHeldBy({ contents: w.webContents, generation: live.gate.generation }, { contents, document })) return;
+      w.webContents.reload();
+    },
+    // The grant is issued: the share allowance's capture window starts here.
+    granted: (contents, document) => {
+      share.confirmGrant(contents, document);
     },
     log,
   });

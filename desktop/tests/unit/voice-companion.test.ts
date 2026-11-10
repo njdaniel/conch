@@ -7,7 +7,7 @@ import { describe, expect, it } from 'vitest';
 import { Client, type Exchange, type Send } from '../../main/api/client.ts';
 import { invocable } from '../../main/api/service.ts';
 import { Session } from '../../main/api/session.ts';
-import { COMPANION_PASS_MS, COMPANION_REMOVE_TIMEOUT_MS, Companion, type CompanionClient } from '../../main/voice/companion.ts';
+import { COMPANION_PASS_MS, COMPANION_REMOVE_TIMEOUT_MS, Companion, stillHeldBy, type CompanionClient } from '../../main/voice/companion.ts';
 import type { CompanionEndReason, CompanionEvent, NativeVoiceHelper, NativeVoiceView } from '../../../web/src/platform/desktop/bridge.ts';
 import { operations } from '../../../web/src/platform/operations.ts';
 import type { VoiceCompanionResponseV1 } from '../../../web/src/schema/generated.ts';
@@ -43,12 +43,17 @@ interface Rig {
   readonly closes: (string | null)[];
   readonly closeFails: { value: boolean };
   // How many times the window's document was reloaded.
-  readonly reloads: { count: number; throws: boolean };
+  readonly reloads: { count: number; throws: boolean; seen: [object | null, number][] };
+  // The owned contents the rig reports, and what granted() was told.
+  readonly contents: { value: object | null };
+  readonly granted: [object | null, number][];
   readonly voice: { view: NativeVoiceView; set(view: NativeVoiceView): void };
   readonly document: { value: number };
   client: CompanionClient | null;
   sends(): Send[];
 }
+
+const win = {};
 
 function rig(view: NativeVoiceView = running(), share?: () => Promise<'no-portal' | 'not-wayland' | null>): Rig {
   const steps: Step[] = [];
@@ -66,7 +71,9 @@ function rig(view: NativeVoiceView = running(), share?: () => Promise<'no-portal
   const document = { value: 5 };
   const closes: (string | null)[] = [];
   const closeFails = { value: false };
-  const reloads = { count: 0, throws: false };
+  const reloads: Rig['reloads'] = { count: 0, throws: false, seen: [] };
+  const contents: Rig['contents'] = { value: win };
+  const granted: [object | null, number][] = [];
   const client: CompanionClient = {
     send: (request) => {
       steps.push(['send', request]);
@@ -82,6 +89,8 @@ function rig(view: NativeVoiceView = running(), share?: () => Promise<'no-portal
     closes,
     closeFails,
     reloads,
+    contents,
+    granted,
     voice,
     document,
     client,
@@ -106,7 +115,10 @@ function rig(view: NativeVoiceView = running(), share?: () => Promise<'no-portal
         closes.push(r.companion.liveOrigin());
         return closeFails.value ? Promise.reject(new Error('session gone')) : Promise.resolve();
       },
-      reload: () => {
+      contents: () => contents.value,
+      granted: (c, d) => granted.push([c, d]),
+      reload: (c, d) => {
+        reloads.seen.push([c, d]);
         reloads.count++;
         if (reloads.throws) throw new Error('window gone');
       },
@@ -556,6 +568,30 @@ describe('the companion’s end', () => {
       expect(r.reloads.count).toBe(0);
     });
 
+    it('hands the reload the contents and the document that held the grant', async () => {
+      const r = rig();
+      await live(r);
+      r.document.value = 9;
+      r.contents.value = {};
+      r.removals.push(refusal(503));
+      await r.companion.end('leave');
+      expect(r.reloads.seen).toEqual([[win, 5]]);
+    });
+
+    it.each<CompanionEndReason>(['reload', 'crash'])('reloads nothing for %s, even with the removal unconfirmed', async (reason) => {
+      const r = rig();
+      await live(r);
+      r.removals.push(refusal(503));
+      await r.companion.end(reason);
+      expect(r.reloads.count).toBe(0);
+    });
+
+    it('tells the allowance the grant was issued, with the contents and the document', async () => {
+      const r = rig();
+      await live(r);
+      expect(r.granted).toEqual([[win, 5]]);
+    });
+
     it('survives a window that cannot be reloaded', async () => {
       const r = rig();
       await live(r);
@@ -630,5 +666,21 @@ describe('the route’s entry in the operation table', () => {
     expect(operations.voiceViewer.path).toBe('/v1/channels/{channel}/voice/companion');
     expect(operations.voiceViewerEnd.method).toBe('DELETE');
     expect(operations.voiceViewerEnd.path).toBe('/v1/channels/{channel}/voice/companion');
+  });
+});
+
+describe('stillHeldBy (S2 of #1621: the reload is for the window and document that held the grant)', () => {
+  const held = { contents: win, document: 5 };
+  it.each<[string, { contents: object | null; generation: number }, boolean]>([
+    ['the same document of the same window', { contents: win, generation: 5 }, true],
+    ['a profile switch: another window object', { contents: {}, generation: 5 }, false],
+    ['a profile switch: no window', { contents: null, generation: 5 }, false],
+    ['a document change in the same window', { contents: win, generation: 6 }, false],
+  ])('%s', (_name, now, want) => {
+    expect(stillHeldBy(now, held)).toBe(want);
+  });
+
+  it('a grant held with no contents is never reloaded', () => {
+    expect(stillHeldBy({ contents: null, generation: 5 }, { contents: null, document: 5 })).toBe(false);
   });
 });

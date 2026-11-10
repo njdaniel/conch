@@ -68,6 +68,28 @@ test.describe('the renderer’s network and capture allowances, with no companio
     await expect.poll(() => app.output()).toMatch(/display capture refused: no share allowance/);
   });
 
+  // The positive path (S3 of #1621): after a real click the page's shareArm()
+  // arms the allowance, so the display-media request gets past the allowance
+  // check (display-capture.ts permits) and is refused for the next reason,
+  // not for lack of an allowance. That proves the wiring from the bridge to
+  // permits; the grant and the portal are absent under Xvfb. It runs after
+  // the no-allowance test above and reads only the log lines added since.
+  test('arms on a real click, so getDisplayMedia is refused for the grant or the portal, not the allowance', async () => {
+    const before = app.output().length;
+    await page.evaluate(`window.__armed = 'pending'; window.__share = 'pending'; document.addEventListener('mouseup', () => {
+      window.conchDesktop.shareArm().then((armed) => {
+        window.__armed = armed;
+        return navigator.mediaDevices.getDisplayMedia({ video: true });
+      }).then(() => { window.__share = 'granted'; }, (e) => { window.__share = e.name; });
+    }, { once: true });`);
+    await page.mouse.click(5, 5);
+    await expect.poll(() => page.evaluate('window.__share')).not.toBe('pending');
+    expect(await page.evaluate('window.__armed')).toBe(true);
+    expect(await page.evaluate('window.__share')).not.toBe('granted');
+    await expect.poll(() => app.output().slice(before)).toMatch(/display capture refused: (no grant|share unavailable: no screen-cast portal)/);
+    expect(app.output().slice(before)).not.toMatch(/display capture refused: no share allowance/);
+  });
+
   test('keeps the microphone and camera denied', async () => {
     const result = await page.evaluate("navigator.mediaDevices.getUserMedia({ audio: true, video: true }).then(() => 'granted', (e) => e.name)");
     expect(result).not.toBe('granted');

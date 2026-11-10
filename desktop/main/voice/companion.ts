@@ -99,10 +99,22 @@ export interface CompanionDeps {
   // record is forgotten. It closes idle and pending sockets only; a live
   // WebSocket survives it. Absent: nothing.
   readonly closeConnections?: () => Promise<void>;
+  // The owned window's web contents now, or null. Taken with the grant, so a
+  // reload can be bound to the window that held it. Absent: null.
+  readonly contents?: () => object | null;
   // Reloads the owned window's document: the end of anything the page still
-  // holds when the companion's removal at conchd was not confirmed. Absent:
-  // nothing.
-  readonly reload?: () => void;
+  // holds when the companion's removal at conchd was not confirmed. Given the
+  // contents and the document generation that held the grant, as tell is
+  // given the document: the implementation reloads only if the owned contents
+  // are still that object and still show that document (S2 of #1621), so a
+  // profile switch or a new document inside the removal's wait is not
+  // reloaded. Not asked for the ends 'reload' and 'crash': the document is
+  // already gone. Absent: nothing.
+  readonly reload?: (contents: object | null, document: number) => void;
+  // Called when a grant was issued and the record is made, with the contents
+  // and document that hold it (app.ts: starts the share allowance's capture
+  // window, share-allowance.ts).
+  readonly granted?: (contents: object | null, document: number) => void;
   // Called at the start of every end() and stop(), whether or not a companion
   // is held (app.ts: clears the share allowance, share-allowance.ts).
   readonly ended?: () => void;
@@ -117,10 +129,20 @@ interface Held {
   readonly client: CompanionClient;
   // The document that was given the grant.
   readonly document: number;
+  // The owned contents when it was given: null when none was known.
+  readonly contents: object | null;
   readonly origin: string;
 }
 
 type Asking = Pick<Held, 'channel' | 'generation'>;
+
+// stillHeldBy says whether the owned window is still the one that held a
+// grant: the same web contents object, and the same document generation (S2
+// of #1621). Only then is a reload for an unconfirmed removal the end of what
+// that page holds; any other window or document is not its to end.
+export function stillHeldBy(now: { readonly contents: object | null; readonly generation: number }, held: { readonly contents: object | null; readonly document: number }): boolean {
+  return now.contents !== null && now.contents === held.contents && now.generation === held.document;
+}
 
 // Why a removal was sent, for its log line.
 type RemoveReason = CompanionEndReason | 'stopped' | 'unused';
@@ -272,7 +294,13 @@ export class Companion {
       await this.#remove(client, asking.channel, 'unused');
       return refuse(given === null ? 'failed' : 'ended');
     }
-    this.#held = { ...asking, client, document, origin: given.origin };
+    const contents = this.#deps.contents?.() ?? null;
+    this.#held = { ...asking, client, document, contents, origin: given.origin };
+    try {
+      this.#deps.granted?.(contents, document);
+    } catch {
+      // A window that cannot be told is not a reason to drop the grant.
+    }
     this.#deps.log('companion: issued');
     return shareUnavailable === null ? { ok: true, grant: given.grant } : { ok: true, grant: given.grant, shareUnavailable };
   }
@@ -289,7 +317,7 @@ export class Companion {
     const closing = this.#close();
     const removed = await this.#remove(held.client, held.channel, 'stopped');
     await closing;
-    this.#unconfirmed(removed);
+    this.#unconfirmed(removed, held, 'stopped');
     return true;
   }
 
@@ -312,7 +340,7 @@ export class Companion {
     const closing = this.#close();
     const removed = await this.#remove(held.client, held.channel, reason);
     await closing;
-    this.#unconfirmed(removed);
+    this.#unconfirmed(removed, held, reason);
     return true;
   }
 
@@ -346,12 +374,16 @@ export class Companion {
     }
   }
 
-  // #unconfirmed reloads the window when the removal was not confirmed.
-  #unconfirmed(removed: boolean): void {
+  // #unconfirmed reloads the window that held the grant when the removal was
+  // not confirmed, unless that document is already gone: after a reload or a
+  // crash there is nothing left to reload, and the next document is not the
+  // one that held the grant.
+  #unconfirmed(removed: boolean, held: Held, reason: RemoveReason): void {
     if (removed) return;
+    if (reason === 'reload' || reason === 'crash') return;
     this.#deps.log('companion: the removal was not confirmed; reloading the window');
     try {
-      this.#deps.reload?.();
+      this.#deps.reload?.(held.contents, held.document);
     } catch {
       // A window that cannot be reloaded is already gone.
     }

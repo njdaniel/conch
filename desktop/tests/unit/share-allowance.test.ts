@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { ShareAllowance, SHARE_ARM_MS } from '../../main/share-allowance.ts';
+import { ShareAllowance, SHARE_ARM_MS, SHARE_CAPTURE_MS } from '../../main/share-allowance.ts';
 
 function make(): { share: ShareAllowance; clock: { now: number }; document: { n: number } } {
   const clock = { now: 5_000 };
@@ -42,12 +42,82 @@ describe('the share allowance', () => {
   it.each([
     ['just inside the window', SHARE_ARM_MS, true],
     ['just past it', SHARE_ARM_MS + 1, false],
-  ])('expires: %s', (_name, wait, good) => {
+  ])('the grant use expires from the arm: %s', (_name, wait, good) => {
+    const { share, clock } = make();
+    share.arm(win);
+    clock.now += wait;
+    expect(share.takeGrant(win)).toBe(good);
+  });
+
+  it.each([
+    ['at the arm', 0, true],
+    ['just inside the window', SHARE_CAPTURE_MS, true],
+    ['just past it', SHARE_CAPTURE_MS + 1, false],
+  ])('the warm path: the capture use expires from the arm, no grant taken: %s', (_name, wait, good) => {
     const { share, clock } = make();
     share.arm(win);
     clock.now += wait;
     expect(share.peekCapture(win)).toBe(good);
-    expect(share.takeGrant(win)).toBe(good);
+    expect(share.takeCapture(win)).toBe(good);
+  });
+
+  it.each([
+    ['just inside the window', SHARE_CAPTURE_MS, true],
+    ['just past it', SHARE_CAPTURE_MS + 1, false],
+  ])('the cold path: the capture window runs from the grant being issued: %s', (_name, wait, good) => {
+    const { share, clock, document } = make();
+    share.arm(win);
+    clock.now += 8_000; // a slow round trip, well past SHARE_CAPTURE_MS from the arm
+    expect(share.takeGrant(win)).toBe(true);
+    expect(share.peekCapture(win)).toBe(false);
+    share.confirmGrant(win, document.n);
+    clock.now += wait;
+    expect(share.peekCapture(win)).toBe(good);
+    expect(share.takeCapture(win)).toBe(good);
+  });
+
+  it('a grant taken but never confirmed does not move the window', () => {
+    const { share, clock } = make();
+    share.arm(win);
+    share.takeGrant(win);
+    clock.now += SHARE_CAPTURE_MS + 1;
+    expect(share.peekCapture(win)).toBe(false);
+  });
+
+  it('a confirmation with no grant use spent (the warm path) does not move the window', () => {
+    const { share, clock, document } = make();
+    share.arm(win);
+    clock.now += 2_000;
+    share.confirmGrant(win, document.n);
+    clock.now += 1_001;
+    expect(share.peekCapture(win)).toBe(false);
+  });
+
+  it('confirms once, and only for its own contents and document', () => {
+    const { share, clock, document } = make();
+    share.arm(win);
+    share.takeGrant(win);
+    clock.now += 2_000;
+    share.confirmGrant(other, document.n);
+    share.confirmGrant(win, document.n + 1);
+    clock.now += 1_001;
+    expect(share.peekCapture(win)).toBe(false);
+    share.arm(win);
+    share.takeGrant(win);
+    clock.now += 2_000;
+    share.confirmGrant(win, document.n);
+    clock.now += 2_000;
+    share.confirmGrant(win, document.n); // a second confirmation does not extend it
+    clock.now += 1_001;
+    expect(share.peekCapture(win)).toBe(false);
+  });
+
+  it('a clock that went backwards finds nothing', () => {
+    const { share, clock } = make();
+    share.arm(win);
+    clock.now -= 1;
+    expect(share.takeGrant(win)).toBe(false);
+    expect(share.peekCapture(win)).toBe(false);
   });
 
   it('is for the contents it was armed for', () => {
