@@ -75,7 +75,7 @@ use std::future::Future;
 use std::io::{Read, Write};
 use std::os::unix::fs::FileTypeExt;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
@@ -118,7 +118,9 @@ use crate::session::{
 pub const REPORT_LIMIT: Duration = Duration::from_secs(1);
 /// How long leaving the room is given after `leave` or a signal (§8.2).
 pub const ROOM_LIMIT: Duration = Duration::from_secs(2);
-/// How long the report and the room are each given once the owner is gone (§8.3).
+/// How long the report and the room are each given once the owner is gone (§8.3). It does
+/// not apply to the room step after an explicit `leave`: the end of input that follows
+/// `leave` is the owner finishing, and that step keeps [`ROOM_LIMIT`] (#1685).
 pub const OWNER_LOST_STEP: Duration = Duration::from_secs(1);
 /// How long the final state is given to be written (§5, rule 11).
 pub const FINAL_STATE_LIMIT: Duration = Duration::from_millis(250);
@@ -815,7 +817,7 @@ impl Watchdog {
         std::thread::spawn(move || {
             // The ordinary exit is tried first, and is itself given EXIT_GRACE.
             std::thread::sleep(within.saturating_sub(EXIT_GRACE));
-            log::warn!("managed: the helper did not exit in time; ending it");
+            log::warn!("{}", fire_line(room_leave_under_way()));
             lines::exit(code.load(Ordering::SeqCst));
         });
     }
@@ -832,6 +834,28 @@ impl Watchdog {
         }
         *armed = Some(at);
         true
+    }
+}
+
+/// Whether a leave's room step is running: the watchdog, if it fires then, says the room
+/// leave was abandoned (§8.3).
+static ROOM_LEAVE: AtomicBool = AtomicBool::new(false);
+
+/// Records that a leave's room step has begun or ended.
+pub(crate) fn set_room_leave_under_way(under_way: bool) {
+    ROOM_LEAVE.store(under_way, Ordering::SeqCst);
+}
+
+fn room_leave_under_way() -> bool {
+    ROOM_LEAVE.load(Ordering::SeqCst)
+}
+
+/// What the watchdog logs as it ends the process. It names neither the room nor a token.
+fn fire_line(room_leave_under_way: bool) -> &'static str {
+    if room_leave_under_way {
+        "managed: the room leave was abandoned: the helper did not exit in time; ending it"
+    } else {
+        "managed: the helper did not exit in time; ending it"
     }
 }
 
@@ -2005,6 +2029,12 @@ fn key_source(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_watchdog_says_when_it_ends_a_room_leave_still_running() {
+        assert!(fire_line(true).contains("the room leave was abandoned"));
+        assert!(!fire_line(false).contains("room leave"));
+    }
 
     /// One evdev key record: the event type EV_KEY (1), a code and a value (1 is a press).
     fn record(code: u16, value: i32) -> [u8; conch_voice_control::INPUT_EVENT_LEN] {
