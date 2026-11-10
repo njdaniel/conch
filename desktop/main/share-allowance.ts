@@ -27,7 +27,7 @@
 // The allowance is not a grant: the capture still needs a live companion
 // grant, the portal, and every other condition of display-capture.ts.
 //
-// What this is, and is not (S1 of #1621). The 3 s capture window keeps an
+// What this is, and is not (S1 of #1621). The 10 s capture window keeps an
 // honest page from arming capture by accident and leaving it lying about. It
 // is not a defence against a compromised page: such a page can call
 // shareArm() within 1 s of any act (the act's own freshness window), and
@@ -45,7 +45,10 @@ export const SHARE_ARM_MS = 10_000;
 // is not counted (the capture use is taken when the pick starts). A
 // compromised page can still arm within 1 s of any act: the OS portal picker
 // is the consent, and this only stops an honest page arming by accident.
-export const SHARE_CAPTURE_MS = 3_000;
+// 10 s, not 3 (#1632): on the cold path the companion's LiveKit connect and
+// the claim run between the grant and the pick, and over a TURN/TCP fallback
+// they can take longer than 3 s, which made sharing impossible.
+export const SHARE_CAPTURE_MS = 10_000;
 
 interface Held {
   readonly contents: object;
