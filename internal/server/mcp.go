@@ -133,6 +133,11 @@ type mcpPostMessageOutput struct {
 type mcpListMessagesOutput struct {
 	Messages  []mcpMessageOutput `json:"messages"`
 	NextAfter int64              `json:"next_after,omitempty"`
+	// Topic is the channel's one-line purpose, set by its managers (issue
+	// #1506, docs/design/channel-topic.md §8.4); absent when it has none. It
+	// is read with the channel the agent is already allowed to read, so it
+	// adds nothing the agent could not get from GET /v1/channels.
+	Topic string `json:"topic,omitempty"`
 }
 
 // addAgentTool registers one MCP tool behind the capability gate (authz.go).
@@ -169,9 +174,9 @@ func (s *Server) mcpServerFor(identity mcpIdentity) *mcp.Server {
 			}
 			return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: fmt.Sprintf("posted message %d", out.Message.ID)}}}, mcpPostMessageOutput{Message: message}, nil
 		})
-	addAgentTool(s, server, identity, &mcp.Tool{Name: "read_channel", Description: "Read one paginated page of messages from a Conch channel: those sent to the whole channel, and those with an audience the agent is in. A message with an audience field was not sent to everyone."},
+	addAgentTool(s, server, identity, &mcp.Tool{Name: "read_channel", Description: "Read one paginated page of messages from a Conch channel: those sent to the whole channel, and those with an audience the agent is in. A message with an audience field was not sent to everyone. A topic, when present, is the channel's one-line purpose, set by its managers."},
 		func(ctx context.Context, scope *agentScope, in mcpReadChannelInput) (*mcp.CallToolResult, mcpListMessagesOutput, error) {
-			out, serr := s.readChannelMCP(ctx, scope, in)
+			out, topic, serr := s.readChannelMCP(ctx, scope, in)
 			if serr != nil {
 				return mcpToolError(serr), mcpListMessagesOutput{}, nil
 			}
@@ -183,7 +188,7 @@ func (s *Server) mcpServerFor(identity mcpIdentity) *mcp.Server {
 				}
 				messages[i] = projected
 			}
-			return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: fmt.Sprintf("read %d messages", len(out.Messages))}}}, mcpListMessagesOutput{Messages: messages, NextAfter: out.NextAfter}, nil
+			return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: fmt.Sprintf("read %d messages", len(out.Messages))}}}, mcpListMessagesOutput{Messages: messages, NextAfter: out.NextAfter, Topic: topic}, nil
 		})
 	addAgentTool(s, server, identity, &mcp.Tool{Name: "request_approval", Description: "Raise an approval as the authenticated agent."},
 		func(ctx context.Context, scope *agentScope, in mcpRequestApprovalInput) (*mcp.CallToolResult, mcpRequestApprovalOutput, error) {
@@ -373,30 +378,33 @@ func (s *Server) postScopedMessageMCP(ctx context.Context, scope *agentScope, ch
 	return schema.PostMessageResponseV2{Message: message}, nil
 }
 
-func (s *Server) readChannelMCP(ctx context.Context, scope *agentScope, in mcpReadChannelInput) (schema.ListMessagesResponseV2, *schema.Error) {
+// readChannelMCP reads one page of the channel, and the channel's topic, which
+// comes with the channel the agent was granted read on: a refused agent gets
+// the refusal and no topic (issue #1506).
+func (s *Server) readChannelMCP(ctx context.Context, scope *agentScope, in mcpReadChannelInput) (schema.ListMessagesResponseV2, string, *schema.Error) {
 	if strings.TrimSpace(in.Channel) == "" {
-		return schema.ListMessagesResponseV2{}, &schema.Error{Code: "invalid_request", Message: "channel must not be empty"}
+		return schema.ListMessagesResponseV2{}, "", &schema.Error{Code: "invalid_request", Message: "channel must not be empty"}
 	}
 	if in.After < 0 {
-		return schema.ListMessagesResponseV2{}, &schema.Error{Code: "invalid_request", Message: "after must be a non-negative integer"}
+		return schema.ListMessagesResponseV2{}, "", &schema.Error{Code: "invalid_request", Message: "after must be a non-negative integer"}
 	}
 	limit := in.Limit
 	var limitVal int64
 	if limit == nil {
 		limitVal = defaultMessageLimit
 	} else if *limit <= 0 || *limit > maxMessageLimit {
-		return schema.ListMessagesResponseV2{}, &schema.Error{Code: "invalid_request", Message: "limit must be between 1 and 100"}
+		return schema.ListMessagesResponseV2{}, "", &schema.Error{Code: "invalid_request", Message: "limit must be between 1 and 100"}
 	} else {
 		limitVal = *limit
 	}
 	channel, serr := scope.channelByName(ctx, in.Channel, schema.ChannelPermissionRead)
 	if serr != nil {
-		return schema.ListMessagesResponseV2{}, serr
+		return schema.ListMessagesResponseV2{}, "", serr
 	}
 	stored, err := channel.listMessages(ctx, in.After, int(limitVal)+1)
 	if err != nil {
 		slog.ErrorContext(ctx, "mcp: list failed", "error", err)
-		return schema.ListMessagesResponseV2{}, &schema.Error{Code: "internal_error", Message: "internal server error"}
+		return schema.ListMessagesResponseV2{}, "", &schema.Error{Code: "internal_error", Message: "internal server error"}
 	}
 	nextAfter := int64(0)
 	if len(stored) > int(limitVal) {
@@ -407,7 +415,7 @@ func (s *Server) readChannelMCP(ctx context.Context, scope *agentScope, in mcpRe
 	for i, message := range stored {
 		messages[i] = messageV2FromStore(message)
 	}
-	return schema.ListMessagesResponseV2{Messages: messages, NextAfter: nextAfter}, nil
+	return schema.ListMessagesResponseV2{Messages: messages, NextAfter: nextAfter}, channel.channel.Topic, nil
 }
 
 func (s *Server) requestApprovalMCP(ctx context.Context, scope *agentScope, in mcpRequestApprovalInput) (schema.RequestApprovalOutput, *schema.Error) {
