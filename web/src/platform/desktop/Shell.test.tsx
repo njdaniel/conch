@@ -245,7 +245,7 @@ describe('with a server active', () => {
 
 describe('the desktop app settings (issue #1587)', () => {
   const active = view({ profiles: [profile(ID_A, 'chat.example.org', 'ada', true)], active: ID_A });
-  const settings = (over: Partial<DesktopSettingsView> = {}): DesktopSettingsView => ({ closeToTray: false, launchAtLogin: false, trayWorking: false, launchAvailable: true, ...over });
+  const settings = (over: Partial<DesktopSettingsView> = {}): DesktopSettingsView => ({ closeToTray: false, launchAtLogin: false, trayWorking: false, trayDetected: false, trayConfirmed: false, launchAvailable: true, ...over });
 
   function installSettings(first: DesktopSettingsView, settingsSet: DesktopSettingsBridge['settingsSet']): void {
     install({ profiles: () => Promise.resolve(active) });
@@ -270,8 +270,8 @@ describe('the desktop app settings (issue #1587)', () => {
   });
 
   it('lets the tray choice be made once a tray works', async () => {
-    const settingsSet = vi.fn((): Promise<SettingsResult> => Promise.resolve({ ok: true, view: settings({ trayWorking: true, closeToTray: true }) }));
-    installSettings(settings({ trayWorking: true }), settingsSet);
+    const settingsSet = vi.fn((): Promise<SettingsResult> => Promise.resolve({ ok: true, view: settings({ trayWorking: true, trayDetected: true, trayConfirmed: true, closeToTray: true }) }));
+    installSettings(settings({ trayWorking: true, trayDetected: true }), settingsSet);
     await open();
     expect(screen.queryByText('No tray is available on this desktop')).toBeNull();
     fireEvent.click(screen.getByRole('radio', { name: 'Keep running in the tray' }));
@@ -281,6 +281,40 @@ describe('the desktop app settings (issue #1587)', () => {
     await waitFor(() => {
       expect(screen.getByRole('radio', { name: 'Keep running in the tray' })).toHaveProperty('checked', true);
     });
+  });
+
+  it('after the tray is chosen, asks whether the icon can be seen, and confirms on yes', async () => {
+    const settingsSet = vi.fn((change: Parameters<DesktopSettingsBridge['settingsSet']>[0]): Promise<SettingsResult> =>
+      Promise.resolve({ ok: true, view: settings({ closeToTray: true, trayDetected: true, trayConfirmed: change.trayConfirmed === true, trayWorking: change.trayConfirmed === true }) }),
+    );
+    installSettings(settings({ closeToTray: true, trayDetected: true }), settingsSet);
+    await open();
+    expect(screen.getByText('Can you see the Conch icon in your panel?')).toBeDefined();
+    fireEvent.click(screen.getByRole('button', { name: 'Yes, I can see it' }));
+    await waitFor(() => {
+      expect(settingsSet).toHaveBeenCalledWith({ trayConfirmed: true });
+    });
+    await waitFor(() => {
+      expect(screen.queryByText('Can you see the Conch icon in your panel?')).toBeNull();
+    });
+  });
+
+  it('turns the tray choice off again on no', async () => {
+    const settingsSet = vi.fn((): Promise<SettingsResult> => Promise.resolve({ ok: true, view: settings({ trayDetected: true }) }));
+    installSettings(settings({ closeToTray: true, trayDetected: true }), settingsSet);
+    await open();
+    fireEvent.click(screen.getByRole('button', { name: 'No, quit when I close' }));
+    await waitFor(() => {
+      expect(settingsSet).toHaveBeenCalledWith({ closeToTray: false });
+    });
+  });
+
+  it('says so when main finds no tray host', async () => {
+    const settingsSet = vi.fn((): Promise<SettingsResult> => Promise.resolve({ ok: false, reason: 'no-tray' }));
+    installSettings(settings({ trayDetected: true }), settingsSet);
+    await open();
+    fireEvent.click(screen.getByRole('radio', { name: 'Keep running in the tray' }));
+    expect((await screen.findByRole('alert')).textContent).toMatch(/No tray is available/);
   });
 
   it('asks main to turn launch at login on, and says why when main refuses', async () => {

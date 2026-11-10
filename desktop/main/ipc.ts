@@ -267,10 +267,10 @@ function parseSettingsChange(args: readonly unknown[]): readonly unknown[] | nul
   const [change] = args;
   if (args.length !== 1 || !isRecord(change)) return null;
   const keys = Object.keys(change);
-  if (keys.length === 0 || !keys.every((key) => key === 'closeToTray' || key === 'launchAtLogin')) return null;
-  const { closeToTray, launchAtLogin } = change;
-  if ((closeToTray !== undefined && typeof closeToTray !== 'boolean') || (launchAtLogin !== undefined && typeof launchAtLogin !== 'boolean')) return null;
-  return [{ ...(closeToTray === undefined ? {} : { closeToTray }), ...(launchAtLogin === undefined ? {} : { launchAtLogin }) }];
+  if (keys.length === 0 || !keys.every((key) => key === 'closeToTray' || key === 'launchAtLogin' || key === 'trayConfirmed')) return null;
+  const { closeToTray, launchAtLogin, trayConfirmed } = change;
+  if ([closeToTray, launchAtLogin, trayConfirmed].some((value) => value !== undefined && typeof value !== 'boolean')) return null;
+  return [{ ...(closeToTray === undefined ? {} : { closeToTray }), ...(launchAtLogin === undefined ? {} : { launchAtLogin }), ...(trayConfirmed === undefined ? {} : { trayConfirmed }) }];
 }
 
 const REPLACE_STEPS: readonly ReplaceStep[] = ['changePassword', 'setPassword', 'convertGuest', 'reauth'];

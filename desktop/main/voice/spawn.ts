@@ -240,3 +240,62 @@ export function spawnHelper(
 }
 
 export const defaultSpawn: SpawnFn = (command, args, options) => nodeSpawn(command, args, options);
+
+// RunResult is a short query's outcome: how it ended and what it printed.
+export interface RunResult {
+  // True only for a process that ran to exit status 0 in time.
+  readonly ok: boolean;
+  readonly stdout: string;
+}
+
+// RunFile runs one absolute-path executable with an argv and nothing else (the
+// tray's `gdbus` probe, issue #1589). The test seam of tray-detect.ts.
+export type RunFile = (file: string, args: readonly string[], timeoutMs: number) => Promise<RunResult>;
+
+// The most of a query's standard output kept.
+const RUN_MAX_BYTES = 4096;
+
+// What a session-bus query needs to find the bus, by exact name.
+const RUN_ENV: readonly string[] = ['DBUS_SESSION_BUS_ADDRESS', 'XDG_RUNTIME_DIR', 'HOME'];
+
+// runFile: argv only, no shell, no standard input, an environment of the
+// session-bus names alone (RUN_ENV; the file is absolute, so no PATH), never
+// detached, SIGKILLed past the timeout. Standard error is discarded. It never rejects: a file that cannot
+// be started, a timeout and a non-zero exit are all ok:false.
+export const runFile: RunFile = (file, args, timeoutMs) =>
+  new Promise<RunResult>((resolve) => {
+    if (!isAbsolute(file)) {
+      resolve({ ok: false, stdout: '' });
+      return;
+    }
+    let out = '';
+    let settled = false;
+    const finish = (result: RunResult): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(result);
+    };
+    const child = nodeSpawn(file, [...args], {
+      stdio: ['ignore', 'pipe', 'ignore'],
+      detached: false,
+      shell: false,
+      windowsHide: true,
+      env: Object.fromEntries(RUN_ENV.flatMap((name) => (process.env[name] === undefined ? [] : [[name, process.env[name]]]))),
+      cwd: '/',
+    });
+    const timer = setTimeout(() => {
+      child.kill('SIGKILL');
+      finish({ ok: false, stdout: '' });
+    }, timeoutMs);
+    child.stdout.setEncoding('utf8');
+    child.stdout.on('data', (chunk: string) => {
+      if (out.length < RUN_MAX_BYTES) out += chunk.slice(0, RUN_MAX_BYTES - out.length);
+    });
+    child.once('error', () => {
+      finish({ ok: false, stdout: '' });
+    });
+    child.once('close', (code) => {
+      finish({ ok: code === 0, stdout: out });
+    });
+  });

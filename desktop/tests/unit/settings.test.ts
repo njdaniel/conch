@@ -168,6 +168,59 @@ describe('opening at login starts nothing', () => {
   });
 });
 
+describe('turning the tray on (Q-D5-2)', () => {
+  function tray(detected: { value: boolean }) {
+    const changes: boolean[] = [];
+    const service = new SettingsService({
+      files: memory(),
+      autostart: fakeAutostart(),
+      trayWorking: () => false,
+      trayDetected: () => Promise.resolve(detected.value),
+      changed: (s) => changes.push(s.closeToTray),
+      log: () => undefined,
+    });
+    return { service, changes };
+  }
+
+  it('is refused while no tray host is on the bus, and stores nothing', async () => {
+    const { service, changes } = tray({ value: false });
+    expect(await service.set({ closeToTray: true })).toEqual({ ok: false, reason: 'no-tray' });
+    expect(service.current.closeToTray).toBe(false);
+    expect(changes).toEqual([]);
+  });
+
+  it('is accepted with a host, unconfirmed until the person says yes', async () => {
+    const { service, changes } = tray({ value: true });
+    const on = await service.set({ closeToTray: true });
+    expect(on.ok && on.view.trayConfirmed).toBe(false);
+    expect(on.ok && on.view.trayDetected).toBe(true);
+    const yes = await service.set({ trayConfirmed: true });
+    expect(yes.ok && yes.view.trayConfirmed).toBe(true);
+    expect(changes).toEqual([true, true]);
+  });
+
+  it('cannot be confirmed with the tray off, or without a host', async () => {
+    const detected = { value: true };
+    const { service } = tray(detected);
+    expect(await service.set({ trayConfirmed: true })).toEqual({ ok: false, reason: 'no-tray' });
+    await service.set({ closeToTray: true });
+    detected.value = false;
+    expect(await service.set({ trayConfirmed: true })).toEqual({ ok: false, reason: 'no-tray' });
+    expect(service.trayConfirmed).toBe(false);
+  });
+
+  it('turning it off, or losing the host, asks again', async () => {
+    const { service } = tray({ value: true });
+    await service.set({ closeToTray: true });
+    await service.set({ trayConfirmed: true });
+    service.revokeTrayConfirmation();
+    expect(service.trayConfirmed).toBe(false);
+    await service.set({ trayConfirmed: true });
+    await service.set({ closeToTray: false });
+    expect(service.trayConfirmed).toBe(false);
+  });
+});
+
 interface MemoryFiles extends SettingsFiles {
   text: string | null;
   failWrites: boolean;

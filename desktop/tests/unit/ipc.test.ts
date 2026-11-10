@@ -874,6 +874,8 @@ describe('the settings family (issue #1587)', () => {
     f.input.recent = true;
     expect(await f.ipc.invoke(f.event(), 'settingsSet', [{ closeToTray: false, launchAtLogin: true }])).toEqual({ ok: true, value: { ran: 'settings.set' } });
     expect(f.calls[1]).toEqual(['settings.set', [{ closeToTray: false, launchAtLogin: true }]]);
+    expect(await f.ipc.invoke(f.event(), 'settingsSet', [{ trayConfirmed: true }])).toEqual({ ok: true, value: { ran: 'settings.set' } });
+    expect(f.calls[2]).toEqual(['settings.set', [{ trayConfirmed: true }]]);
   });
 
   it.each([
@@ -881,6 +883,7 @@ describe('the settings family (issue #1587)', () => {
     ['no argument', []],
     ['an unknown key', [{ launchAtLogin: true, theme: 'dark' }]],
     ['a non-boolean', [{ launchAtLogin: 'yes' }]],
+    ['a non-boolean confirmation', [{ trayConfirmed: 1 }]],
     ['a null', [{ closeToTray: null }]],
     ['an array', [[true]]],
     ['two arguments', [{ launchAtLogin: true }, {}]],
