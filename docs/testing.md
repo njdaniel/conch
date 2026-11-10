@@ -46,8 +46,9 @@ flows, not that anyone can hear or see well.
 
 ## Who may do what: where it is tested
 
-A role by action map of the suites above (issue #1609, epic #1607). It says
-which test covers each cell, so that the next gap is visible. It adds no test.
+A role by action map of the suites above, in three tables: content,
+administration and media (issue #1609, epic #1607). It says which test covers
+each cell, so that the next gap is visible. It adds no test.
 Each citation names a test that exists at the base of the pull request that
 added this section and asserts what the cell says it does.
 
@@ -70,19 +71,49 @@ How to read a cell:
   action is refused. A key with no sign asserts both.
 - `none` means no test covers that half of the cell. A cell that is `none` in
   both halves is empty.
-- Keys are defined in the lists after the table.
+- Keys are defined in the lists after the tables.
 
-| Role | Read, post | Private channel seen | Member links | Channel create, rename, archive | Channel members add, remove | Moderation | Voice join | Share screen | Camera | Member directory | Edit permissions document | Act as |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| Owner, and operator with the defaults | W: +W04b; G: +Co, xS17 (an operator outside the channel is refused as for a ghost) | W: +W40, +W42; G: +S11a, xS17 | W: +W11b; G: +S10, +Co | W: +W20, +W21a, +W48a; G: +S5, +S6, +S7 | W: +W24, +W42, +W04b; G: +S8c | W: +W12b; G: +S9, +Vo | W: none; G: +S12 | W: none; G: +S12 | W: none; G: +S14, +Vo | W: none; G: +S15 | W: +W39a, +W39b (owner), xW38a (operator); G: +S4 | W: +W39b; G: +S3 |
-| Operator with a cell off | W: none; G: xS11a | W: none; G: xS11a, xIr | W: none; G: xS11b, xS10, xIr | W: none; G: xS5, xS6, xIr | W: none; G: xS11c, xIr | W: none; G: xS14, xIr | W: none; G: xS12 | W: none; G: xS12 | W: none; G: xS14 | n/a (fixed on) | W: xW38a; G: xS4, xS3 | W: xW43b; G: xS3, xS11d, xIr |
-| Channel manager | as member | W: none; G: xS5 | as member | W: +W24; G: S7, xS5, xS6 | W: +W24, +W51a; G: S8a | W: +W51a, +W51b, +W51c; G: +S9, +Imod | as member | W: none; G: +S13b | W: none; G: xS14 | W: none; G: xS8b | as member | as member |
-| Member | W: +W02, +W04c, xW04a; G: +Co, +S17 | W: xW04a, +W04b; G: xS17 | W: +W11a; G: +S10 | W: +W20, xW21b, xW48b; G: +S5, xS5, xS6, xS7 | W: xW24; G: xS8c | W: xW51a, xW51b, xW51c; G: xS9, xImod | W: +W10a; G: +Co, +S12 | W: +W12a; G: +S12 | W: +W44; G: +Vo | W: +W47; G: +S15 | W: xW38b; G: xS1, xS2 | W: none; G: xS2, xS3 |
-| Member with a cell or brake off | n/a (fixed right) | n/a (fixed right) | W: xW11c; G: xS10, xIp | W: none; G: xS5, xIp | n/a | n/a | W: xW11d; G: Co, xS12, xIv | W: none; G: xS12, xS13a, xIv | W: xW45; G: xS14, xVo | W: xW47; G: xS15, xIh | n/a | n/a |
-| Removed or banned member | W: xW51a, xW04b; G: xS16, xImod | W: xW51a, xW14b; G: xS16, xImod | n/a | n/a | W: xW51a; G: xS16, xImod | n/a | W: xW10b; G: xVo, xImod, xIrev | W: xW12c; G: xIrev | n/a (ends with voice) | n/a | n/a | n/a |
-| Member of another group | W: xW14a; G: xIm | W: xW14a, xW14c; G: xIm, xImed | W: none; G: xIm | W: none; G: xIm, xIc | W: none; G: xIm, xIc | W: none; G: xIm | W: xW14c; G: xIm, xImed | W: none; G: xIm, xImed | W: none; G: xIm | n/a (community-wide by default) | W: none; G: xIm | W: none; G: xIm |
-| Agent | W: none; G: +Do, xS17, xIa | W: none; G: xIa, xS17 | W: none; G: xS10, xIa | W: none; G: xS1, xS6, xS7 | W: none; G: xS1, xS9 | W: none; G: xS9, xIa | W: none; G: xS1, xIa | W: none; G: xS1 | W: none; G: xS14, xS1 | W: none; G: xS1 | W: none; G: xS3, xAi | W: none; G: xS3, xAi |
-| Guest (refused, #1005) | n/a (see below) | n/a | W: xW22; G: xS18, xCo, xS10, xIg | W: none; G: xS5, xS6, xS7, xIg | n/a | n/a | W: none; G: xS12, xIg | W: none; G: none | W: none; G: xS14, xIg | W: none; G: none | W: none; G: none | W: none; G: xIg |
+**Content**
+
+| Role | Read, post | Private channel: see or change | Member links | Member directory |
+| --- | --- | --- | --- | --- |
+| Owner, and operator with the defaults | W: +W04b; G: +Co, xS17 (an operator outside the channel is refused as for a ghost) | W: +W40, +W42; G: +S11a, xS17 | W: +W11b; G: +S10, +Co | W: none; G: +S15 |
+| Operator with a cell off | W: none; G: xS11a | W: none; G: xS11a, xIr | W: none; G: xS11b, xS10, xIr | n/a (fixed on) |
+| Channel manager | as member | W: none; G: xS5 | as member | W: none; G: xS8b |
+| Member | W: +W02, +W04c, xW04a; G: +Co, +S17 | W: xW04a, +W04b; G: xS17 | W: +W11a; G: +S10 | W: +W47; G: +S15 |
+| Member with a cell or brake off | n/a (fixed right) | n/a (fixed right) | W: xW11c; G: xS10, xIp | W: xW47; G: xS15, xIh |
+| Removed or banned member | W: xW51a, xW04b; G: xS16, xImod | W: xW51a, xW14b; G: xS16, xImod | n/a | n/a |
+| Member of another group | W: xW14a; G: xIm | W: xW14a, xW14c; G: xIm, xImed | W: none; G: xIm | n/a (community-wide by default) |
+| Agent | W: none; G: +Do, xS17, xIa | W: none; G: xIa, xS17 | W: none; G: xS10, xIa | W: none; G: xS1 |
+| Guest (refused, #1005) | n/a (see below) | n/a | W: xW22; G: xS18, xCo, xS10, xIg | W: none; G: xS19 |
+
+**Administration**
+
+| Role | Channel create, rename, archive | Channel members add, remove | Moderation | Edit permissions document | Act as |
+| --- | --- | --- | --- | --- | --- |
+| Owner, and operator with the defaults | W: +W20, +W21a, +W48a; G: +S5, +S6, +S7 | W: +W24, +W42, +W04b; G: +S8c | W: +W12b; G: +S9, +Vo | W: +W39a, +W39b; G: +S4 | W: +W39b; G: +S3 |
+| Operator with a cell off | W: none; G: xS5, xS6, xIr | W: none; G: xS11c, xIr | W: none; G: xS14, xIr | W: none; G: xS4 | W: xW43b; G: xS3, xS11d, xIr |
+| Channel manager | W: +W24; G: S7, xS5, xS6 | W: +W24, +W51a; G: S8a | W: +W51a, +W51b, +W51c; G: +S9, +Imod | as member | as member |
+| Member | W: +W20, xW21b, xW48b; G: +S5, xS5, xS6, xS7 | W: xW24; G: xS8c | W: xW51a, xW51b, xW51c; G: xS9, xImod | W: xW38b; G: xS1, xS2 | W: none; G: xS2, xS3 |
+| Member with a cell or brake off | W: none; G: xS5, xIp | n/a | n/a | n/a | n/a |
+| Removed or banned member | n/a | W: xW51a; G: xS16, xImod | n/a | n/a | n/a |
+| Member of another group | W: none; G: xIm, xIc | W: none; G: xIm, xIc | W: none; G: xIm | W: none; G: xIm | W: none; G: xIm |
+| Agent | W: none; G: xS1, xS6, xS7 | W: none; G: xS1, xS9 | W: none; G: xS9, xIa | W: none; G: xS1, xAi | W: none; G: xS3, xAi |
+| Guest (refused, #1005) | W: none; G: xS5, xS6, xS7, xIg | n/a | n/a | W: none; G: none | W: none; G: xIg |
+
+**Media**
+
+| Role | Voice join | Share screen | Camera |
+| --- | --- | --- | --- |
+| Owner, and operator with the defaults | W: none; G: +S12 | W: none; G: +S12 | W: none; G: +S14, +Vo |
+| Operator with a cell off | W: none; G: xS12 | W: none; G: xS12 | W: none; G: xS14 |
+| Channel manager | as member | W: none; G: +S13b | W: none; G: xS14 |
+| Member | W: +W10a; G: +Co, +S12 | W: +W12a; G: +S12 | W: +W44; G: +Vo |
+| Member with a cell or brake off | W: xW11d; G: Co, xS12, xIv | W: none; G: xS12, xS13a, xIv | W: xW45; G: xS14, xVo |
+| Removed or banned member | W: xW10b; G: xVo, xImod, xIrev | W: xW12c; G: xIrev | n/a (ends with voice) |
+| Member of another group | W: xW14c; G: xIm, xImed | W: none; G: xIm, xImed | W: none; G: xIm |
+| Agent | W: none; G: xS1, xIa | W: none; G: xS1 | W: none; G: xS14, xS1 |
+| Guest (refused, #1005) | W: none; G: xS12, xIg | W: none; G: none | W: none; G: xS14, xIg |
 
 ### Notes on the table
 
@@ -102,6 +133,9 @@ How to read a cell:
   `create_private_channels`, `make_member_links`, `see_member_directory`,
   `use_voice`, `share_screen` and `use_camera` for members, and the two brakes.
   The other permissions are fixed off for members.
+- **"Private channel: see or change"** mixes two things. For an operator,
+  owner, member and removed member it is seeing the channel. For a channel
+  manager it is the refusal to change its visibility (`S5`).
 - **Moderation** is: remove a message, remove or ban from a channel, remove
   from voice only, and stop another person's share or camera. The target of
   moderation is the removed or banned member.
@@ -110,13 +144,13 @@ How to read a cell:
 
 ### Where the map is empty or thin
 
-The table has 108 cells. 19 are `n/a` and 5 say `as member`. Of the other 84:
+The tables have 108 cells. 19 are `n/a` and 5 say `as member`. Of the other 84:
 
-- 37 have a browser test and a Go test.
-- 44 have a Go test and no browser test (`W: none`).
-- 3 are empty in both halves: a guest and share screen, a guest and the member
-  directory, a guest and the permissions document. No guest can be started
-  while #1005 stands, so these are low value until #1004 brings guests back.
+- 36 have a browser test and a Go test.
+- 46 have a Go test and no browser test (`W: none`).
+- 2 are empty in both halves: a guest and share screen, and a guest and the
+  permissions document. No guest can be started while #1005 stands, so these
+  are low value until #1004 brings guests back.
 - None has a browser test and no Go test.
 
 The browser gaps cluster in four places. Each gets a follow-up issue:
@@ -157,8 +191,7 @@ browser test of their own. The browser voice specs use plain members.
 | `W21b` | `21-channel-rename`: C728 a member is offered no control, and the server refuses the member anyway | no Rename control; the API is 403 |
 | `W22` | `22-guest`: the three G6 tests | the bare address and an invite offer no guest entry; every guest route and setting is refused (403 `guests_disabled`, 409 `invite_kind_retired`, 409 `join_policy_conflict`) |
 | `W24` | `24-channel-managers`: C793 an operator delegates a channel; its manager adds, removes and renames while members see only their standing | a manager adds, removes and renames; a plain member has no form and no row menu |
-| `W38a` | `38-admin-console`: A1018 an operator without change_server_settings sees the Server writes disabled, with the reason | the controls are disabled with the reason |
-| `W38b` | `38-admin-console`: A1018 a member sees one line of what they may do and no console | no console, no Joining, no Server |
+| `W38b` | `38-admin-console`: A1018 a member sees one line of what they may do and no console | no console, no Joining, no Server (no console is offered; it does not name the permissions document) |
 | `W39a` | `39-permissions`: A1019 the owner applies Personal, then Group, from the preset cards | the owner writes the document; the server has the preset |
 | `W39b` | `39-permissions`: A1019 the owner turns Act as members off for operators, sees what operators issued, and revokes one | an operator with the cell on issues a credential to another; the owner turns it off and revokes it |
 | `W40` | `40-channel-privacy`: P1183 an operator makes a channel private and public from its menu, and a member sees the lock live | an operator changes visibility; a member sees the lock |
@@ -171,7 +204,7 @@ browser test of their own. The browser voice specs use plain members.
 | `W48a` | `48-channel-archive`: A844 an owner archives a channel and restores it; member-1 sees it move live, read-only, and back | owner archives and restores |
 | `W48b` | `48-channel-archive`: A844 a member without manage_channels is offered neither Archive nor Restore | no menu item; the API is 403 |
 | `W51a` | `51-moderation`: manager confirms membership removal, ban and own unban; a plain member has no controls | manager removes and bans; target loses the channel (404); a plain member has no controls and 403 on voice removal |
-| `W51b` | `51-moderation`: message removal replaces live copies by id, survives reconnect and never notifies an inaccessible whisper | manager removes (204); a plain reader has no menu item; an outsider is 403 |
+| `W51b` | `51-moderation`: message removal replaces live copies by id, survives reconnect and never notifies an inaccessible whisper | manager removes (204); a plain reader has no menu item; a plain channel member who is not the author is 403 |
 | `W51c` | `51-moderation`: LiveKit: a manager confirms a voice-only removal with retry, a member cannot, and the target keeps chat access | manager removes from voice; a member is 403 |
 
 ### Go keys
@@ -194,13 +227,14 @@ browser test of their own. The browser voice specs use plain members.
 | `S11b` | `permissions_restricted_test.go`: `TestRestrictedOperatorInvites` | landing channel and never-expires refused without the cells |
 | `S11c` | `permissions_restricted_test.go`: `TestRestrictedOperatorManagerHasManagerStanding` | `can_decide` and `manages` refused without `manage_channels` |
 | `S11d` | `permissions_restricted_test.go`: `TestRestrictedOperatorSignInLinks` | sign-in links need `act_as_members` when made and when used |
-| `S12` | `voice_permissions_test.go`: `TestVoiceRoutesRefuseByPermission`, `TestVoiceGuestHoldsNoVoice` | voice and share routes by cell and brake; the owner is never refused; a guest has no voice |
+| `S12` | `voice_permissions_test.go`: `TestVoiceRoutesRefuseByPermission`, `TestVoiceGuestHoldsNoVoice` | voice and share routes by cell and brake; the owner is never refused at the gate (the test asserts not 403, not a successful join); a guest has no voice |
 | `S13a` | `voice_permissions_test.go`: `TestPutShareScreenOffEndsAShareAudited` | turning the cell off ends a live share before the PUT answers |
 | `S13b` | `administration_test.go`: `TestManagerStopsAShare` | a manager stops another's share; a plain member is 403 |
 | `S14` | `voice_camera_test.go`: `TestVoiceCameraClaimRefusals`, `TestVoiceCameraOperatorStop`; `voice_camera_pass_test.go`: `TestVoiceCameraGuest`; `permissions_test.go`: `TestPermissionsPutUseCamera` | camera claim refused for agent, no voice, cell off; only `manage_channels` stops another's camera; a guest is refused |
 | `S15` | `hide_members_test.go`: `TestHideMembersDirectory` | with the cell off a member lists only those it may know; operators see everyone |
 | `S16` | `bans_test.go`: `TestBannedResidualMembershipGrantsNothing`, `TestBanDropsLiveSockets`; `members_test.go`: `TestWebSocketRemovedMemberIsDropped` | a banned or removed member is refused as a stranger; sockets close |
 | `S17` | `members_test.go`: `TestChannelContentLeak` | every content route: a member allowed; a non-member human, agent and operator get the bytes of a missing channel |
+| `S19` | `internal/server/directory_test.go`: `TestDirectoryViewers` | an active guest on `GET /v1/directory/members` is 403 `guest_not_allowed`; an ended guest with a replayed token is 401 |
 | `S18` | `guests_removed_test.go`: `TestGuestsRemovedNoRouteStartsAVisit`, `TestGuestsRemovedNoGuestEntryPoint` | every guest entry route is 403 `guests_disabled` or refused; no visit exists afterwards |
 | `Im` | `e2e/isolation`: the matrix (`matrix.go`, `routes.go`) | each route of `routes.go` has a row (a coverage check fails the run otherwise); the other group's member gets the stated refusal, no marker, and the answer for a missing object |
 | `Ia` | `e2e/isolation`: `agents.go` | the other group's agent, over REST and MCP, is refused as for a ghost |
