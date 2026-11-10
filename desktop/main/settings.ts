@@ -164,6 +164,40 @@ export class SettingsService {
     this.#current = parsed;
   }
 
+  // rejudge: run once after load(). An autostart entry is judged when it is
+  // written, but the person can loosen an ancestor of the install later
+  // (chmod 777), and the entry would keep naming that path. If launchAtLogin
+  // is on and the build is now in an unsafe location, main says so, removes
+  // its own entry (disable() touches only a file carrying the marker, never a
+  // foreign one) and stores the setting off, so the next view shows it off
+  // beside the unsafe-location reason. If the entry cannot be removed the
+  // setting stays on: reading off while the file stays would be false.
+  rejudge(): Promise<void> {
+    const run = this.#queue.then(() => this.#rejudge());
+    this.#queue = run.catch(() => undefined);
+    return run;
+  }
+
+  async #rejudge(): Promise<void> {
+    if (!this.#current.launchAtLogin) return;
+    if ((await this.#deps.autostart.availability()) !== 'unsafe-location') return;
+    this.#deps.log('conch-desktop: launch at login is on but the app no longer sits where only you or the system can change it; the autostart entry is removed and the setting turned off');
+    const done = await this.#deps.autostart.disable();
+    // A foreign file is left alone and there is nothing of ours to remove.
+    if (!done.ok && done.reason !== 'foreign-file') {
+      this.#deps.log('conch-desktop: the autostart entry could not be removed; the setting stays on');
+      return;
+    }
+    const next: AppSettings = { ...this.#current, launchAtLogin: false };
+    this.#current = next;
+    try {
+      await this.#deps.files.write(serializeSettings(next));
+    } catch {
+      this.#deps.log('conch-desktop: settings.json could not be written');
+    }
+    this.#deps.changed?.(next);
+  }
+
   get current(): AppSettings {
     return this.#current;
   }

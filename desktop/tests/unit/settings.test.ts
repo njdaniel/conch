@@ -1,10 +1,10 @@
-import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync, readdirSync, mkdirSync, symlinkSync } from 'node:fs';
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync, readdirSync, mkdirSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { afterEach, describe, expect, it } from 'vitest';
 
-import { entryText, type AutostartResult } from '../../main/autostart.ts';
+import { Autostart, entryText, type AutostartResult } from '../../main/autostart.ts';
 import { closeAction, createSettingsFiles, DEFAULT_SETTINGS, DETECT_CACHE_MS, parseSettings, SettingsService, type SettingsFiles } from '../../main/settings.ts';
 
 const dirs: string[] = [];
@@ -149,6 +149,76 @@ describe('changing launch at login', () => {
     expect(await service.set({ launchAtLogin: true })).toEqual({ ok: false, reason: 'failed' });
     expect(auto.calls).toEqual(['enable', 'disable']);
     expect(service.current.launchAtLogin).toBe(false);
+  });
+});
+
+describe('start-up re-judges an existing launch-at-login entry', () => {
+  // A good 0755 tree <top>/app/conch, a config dir, and the real Autostart.
+  function setup() {
+    const top = tmp();
+    chmodSync(top, 0o755);
+    mkdirSync(join(top, 'app'), { mode: 0o755 });
+    chmodSync(join(top, 'app'), 0o755);
+    const exec = join(top, 'app', 'conch');
+    writeFileSync(exec, '#!/bin/sh\n', { mode: 0o755 });
+    const config = tmp();
+    const logs: string[] = [];
+    const autostart = new Autostart({ packaged: true, execPath: exec, trustedAbove: top, env: { XDG_CONFIG_HOME: config }, home: '/nonexistent-home', log: (l) => logs.push(l) });
+    const file = join(config, 'autostart', 'chat.conch.desktop.desktop');
+    mkdirSync(join(config, 'autostart'));
+    const files = memory('{"closeToTray":false,"launchAtLogin":true}');
+    const service = new SettingsService({ files, autostart, trayWorking: () => false, log: (l) => logs.push(l) });
+    return { top, exec, file, files, logs, service };
+  }
+
+  it('removes its own entry from a loosened install and reads off', async () => {
+    const t = setup();
+    writeFileSync(t.file, entryText(t.exec) ?? '');
+    await t.service.load();
+    chmodSync(join(t.top, 'app'), 0o777);
+    await t.service.rejudge();
+    expect(existsSync(t.file)).toBe(false);
+    expect(t.service.current.launchAtLogin).toBe(false);
+    expect(t.files.text).toContain('"launchAtLogin": false');
+    expect(t.logs.join('\n')).toMatch(/no longer sits where only you or the system can change it/);
+    const view = await t.service.view();
+    expect(view.launchAtLogin).toBe(false);
+    expect(view.launchAvailable).toBe(false);
+    expect(view.launchUnavailable).toBe('unsafe-location');
+  });
+
+  it('never touches a foreign file, though the setting reads off', async () => {
+    const t = setup();
+    writeFileSync(t.file, '[Desktop Entry]\nName=Someone else\n');
+    await t.service.load();
+    chmodSync(join(t.top, 'app'), 0o777);
+    await t.service.rejudge();
+    expect(readFileSync(t.file, 'utf8')).toBe('[Desktop Entry]\nName=Someone else\n');
+    expect(t.service.current.launchAtLogin).toBe(false);
+  });
+
+  it('leaves a safe install, and a setting that is off, alone', async () => {
+    const t = setup();
+    writeFileSync(t.file, entryText(t.exec) ?? '');
+    await t.service.load();
+    await t.service.rejudge();
+    expect(existsSync(t.file)).toBe(true);
+    expect(t.service.current.launchAtLogin).toBe(true);
+    expect(t.logs).toEqual([]);
+    const off = new SettingsService({ files: memory('{"launchAtLogin":false}'), autostart: fakeAutostart(), trayWorking: () => false, log: () => undefined });
+    await off.load();
+    await off.rejudge();
+    expect(off.current.launchAtLogin).toBe(false);
+  });
+
+  it('keeps the setting on when its entry cannot be removed', async () => {
+    const files = memory('{"launchAtLogin":true}');
+    const logs: string[] = [];
+    const autostart = { ...fakeAutostart({ disable: { ok: false, reason: 'failed' } }), availability: () => Promise.resolve('unsafe-location' as const) };
+    const service = new SettingsService({ files, autostart, trayWorking: () => false, log: (l) => logs.push(l) });
+    await service.load();
+    await service.rejudge();
+    expect(service.current.launchAtLogin).toBe(true);
   });
 });
 
