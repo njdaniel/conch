@@ -9,7 +9,6 @@
 // document. Each test reads the two cells first, restores them in a `finally`
 // and checks the restore after it, so a failure in the body is not masked.
 import type { Locator, Page } from '@playwright/test';
-import { createChannelResponse, type CreateChannelRequest } from '../src/schema/channel';
 import { createCredentialResponseV1, createPrincipalResponse, type CreateCredentialRequestV1, type CreatePrincipalRequest } from '../src/schema/credential';
 import { permissionsResponseV1, type PermissionChangeV1 } from '../src/schema/permission';
 import { credentialField, expect, statusLine, test } from './fixtures';
@@ -63,10 +62,7 @@ async function person(world: World, secrets: string[], name: string, role: 'memb
 }
 
 async function channel(world: World, name: string, visibility: 'public' | 'private'): Promise<number> {
-  if (visibility === 'public') {
-    const request: CreateChannelRequest = { name };
-    return (await ok(world, world.tokens.operator, 'POST', '/v0/channels', createChannelResponse, request)).channel.id;
-  }
+  // /v1/channels takes the visibility; /v0/channels makes a private channel.
   const made = await call(world, world.tokens.operator, 'POST', '/v1/channels', { name, visibility });
   expect(made.status, `making ${name}: ${JSON.stringify(made.body)}`).toBe(201);
   return (made.body as { channel: { id: number } }).channel.id;
@@ -132,8 +128,17 @@ async function menuOf(row: Locator, label: string): Promise<Locator> {
 // `finally`, and an `expect` there would mask the body's error. The caller
 // checks what it returns after the `finally`.
 async function finish(world: World, before: Readonly<Record<string, boolean>>, made: readonly number[]): Promise<number[]> {
-  const statuses = [await setOperatorCells(world, before)];
-  for (const id of made) statuses.push((await call(world, world.tokens.operator, 'POST', `/v1/principals/${String(id)}/hide`)).status);
+  // A step that throws (the read behind the cells, say) is a failing status
+  // for the caller to assert on, never an error that replaces the body's.
+  const step = async (run: () => Promise<number>): Promise<number> => {
+    try {
+      return await run();
+    } catch {
+      return -1;
+    }
+  };
+  const statuses = [await step(() => setOperatorCells(world, before))];
+  for (const id of made) statuses.push(await step(async () => (await call(world, world.tokens.operator, 'POST', `/v1/principals/${String(id)}/hide`)).status));
   return statuses;
 }
 
@@ -165,8 +170,12 @@ test('R1669 an operator with manage_channels off is offered no rename, archive, 
     await expect(await menuOf(row, open)).toHaveText(['Invite people', 'Leave channel', 'Favorite']);
     await page.keyboard.press('Escape');
     // The private channel it is not in is not listed; New channel and Browse channels remain.
+    // Not an exact list: a new person may join default channels, and an
+    // earlier spec may have made one.
     await expect(nav(page).getByRole('button', { name: hidden, exact: true })).toHaveCount(0);
-    await expect(nav(page).getByRole('button')).toHaveText([open, '⋯', 'Browse channels', 'New channel']);
+    await expect(nav(page).getByRole('button', { name: open, exact: true })).toBeVisible();
+    await expect(nav(page).getByRole('button', { name: 'Browse channels', exact: true })).toBeVisible();
+    await expect(nav(page).getByRole('button', { name: 'New channel', exact: true })).toBeVisible();
 
     // The console has no Channels section, the admin view of every channel;
     // the Members section remains, and its menu has no Add to a channel….
@@ -209,7 +218,7 @@ test('R1669 an operator with manage_channels off is offered no rename, archive, 
   }
   // Checked outside the finally, so a failure in the body is not masked.
   expect(await operatorCells(world)).toEqual(before);
-  expect(statuses.map((s) => s < 300)).toEqual(statuses.map(() => true));
+  expect(statuses.map((s) => s >= 200 && s < 300)).toEqual(statuses.map(() => true));
 });
 
 test('R1669 an operator with manage_members off is offered no removal, disabling or role change, and the server refuses each', async ({ meet, secrets, world }) => {
@@ -251,7 +260,7 @@ test('R1669 an operator with manage_members off is offered no removal, disabling
     // The channel's own moderation is manage_channels's, and stays: the
     // channel member panel still offers the four channel-level actions.
     const row = nav(page).locator('li').filter({ has: page.getByRole('button', { name: open, exact: true }) });
-    await expect(await menuOf(row, open)).toHaveText(['Invite people', 'Rename channel…', 'Set topic', 'Leave channel', 'Make public', 'Make default channel', 'Archive channel…', 'Favorite']);
+    await expect(await menuOf(row, open)).toHaveText(['Invite people', 'Rename channel…', 'Set topic', 'Leave channel', 'Make private', 'Make default channel', 'Archive channel…', 'Favorite']);
     await page.keyboard.press('Escape');
     await row.getByRole('button', { name: open, exact: true }).click();
     const panel = page.getByRole('region', { name: 'Members list' });
@@ -277,5 +286,5 @@ test('R1669 an operator with manage_members off is offered no removal, disabling
   }
   // Checked outside the finally, so a failure in the body is not masked.
   expect(await operatorCells(world)).toEqual(before);
-  expect(statuses.map((s) => s < 300)).toEqual(statuses.map(() => true));
+  expect(statuses.map((s) => s >= 200 && s < 300)).toEqual(statuses.map(() => true));
 });
