@@ -1,7 +1,7 @@
 // The renderer's one screen capture (issue #1580, D4-03 of #772;
 // linux-desktop.md §3, §6.3, §8; Q-D4-4 on #1578). Input: Chromium's
 // permission request and display-media request for the window, the person's
-// own input (gestures.ts), the companion's live grant (voice/companion.ts),
+// share allowance (share-allowance.ts), the companion's live grant (voice/companion.ts),
 // the window's document gate and the portal's answer (portal.ts). Output:
 // a yes to exactly one permission, and one source the portal's own picker
 // returned, video only; no to everything else. Owns: the one pick in flight.
@@ -13,9 +13,9 @@
 // 'display-capture' is never asked. Then, synchronously inside the
 // permission's callback, the display-media handler runs. So:
 //  - the permission request 'media' with mediaTypes exactly [] is allowed,
-//    for the owned window's main frame at conch-app://ui/, with an unused act
-//    of the person's, a live companion grant and the portal available. It
-//    uses up nothing; the display-media request takes the act;
+//    for the owned window's main frame at conch-app://ui/, with the share
+//    allowance's capture use unspent, a live companion grant and the portal
+//    available. It uses up nothing; the display-media request takes the use;
 //  - the legacy getUserMedia({video: {mandatory: {chromeMediaSource:
 //    'desktop'}}}) asks the same permission with the same details, and on
 //    a yes Electron opens the screen (and "loopback" system audio) itself,
@@ -32,8 +32,10 @@
 // each checked again after the picker returns:
 //  - it comes from the owned window's live main frame, at conch-app://ui/, in
 //    the current document generation;
-//  - the person acted just before (gestures.take: the act is used up by the
-//    request, granted or not);
+//  - the person's Share click armed a share allowance a moment ago (the page's
+//    shareArm(), which took the click; share-allowance.ts) and its capture use
+//    is unspent: the request uses it up, granted or not. A raw click, or the
+//    Enter that sends a message, arms nothing here (S3 of #1621);
 //  - a companion grant is live (the companion ends on switch, sign-out,
 //    reload and crash, so it is always this activation's and this document's);
 //  - the portal is available, and Electron's desktopCapturer returned exactly
@@ -45,9 +47,9 @@
 // no share-audio route (§8). A request that asks for audio gets video only.
 import type { DesktopCapturerSource, SourcesOptions } from 'electron';
 
-import { CAPTURE_GESTURE_MS, type Gestures } from './gestures.ts';
 import type { ShareAvailability } from './portal.ts';
 import { INITIAL_URL } from './scheme.ts';
+import type { ShareAllowance } from './share-allowance.ts';
 
 export interface CaptureFrame {
   readonly frameToken: string;
@@ -80,11 +82,11 @@ export const PIPEWIRE_FEATURE = 'WebRTCPipeWireCapturer';
 // in for the person's pick. Like debugging.ts it catches a launcher's mistake
 // (a wrapper, a stale desktop entry), not a same-user attacker. The switch
 // value is a comma list whose entries may carry a trial ("Name<Trial") or
-// parameters ("Name:k/v"); Chromium lets disable-features win over
+// parameters ("Name:k/v"), or a leading "*" ("*Name"); Chromium lets disable-features win over
 // enable-features, and "-Name" in enable-features also turns a feature off.
 export function captureVerdict(packaged: boolean, switchValue: (name: string) => string, log: (line: string) => void): 'ok' | 'refused' {
   if (!packaged) return 'ok';
-  const entries = (name: string): string[] => switchValue(name).split(',').map((e) => e.trim().replace(/[<:].*$/u, ''));
+  const entries = (name: string): string[] => switchValue(name).split(',').map((e) => e.trim().replace(/[<:].*$/u, '').replace(/^\*+/u, ''));
   const off = entries('disable-features').includes(PIPEWIRE_FEATURE) || entries('enable-features').includes(`-${PIPEWIRE_FEATURE}`);
   if (!off) return 'ok';
   log(`conch-desktop: refusing to start with ${PIPEWIRE_FEATURE} turned off: screen capture would not go through the portal's picker`);
@@ -105,7 +107,9 @@ export interface DisplayCaptureDeps {
   readonly owned: () => CaptureContents | null;
   // The owned window's document gate now.
   readonly gate: () => { current(frame: { readonly frameToken: string }): boolean };
-  readonly gestures: Pick<Gestures, 'peek' | 'take'>;
+  // The share allowance (share-allowance.ts): the capture use is the only
+  // thing that arms a capture. A raw click or key no longer does.
+  readonly share: Pick<ShareAllowance, 'peekCapture' | 'takeCapture'>;
   // Whether a companion grant is live (companion.liveOrigin() !== null).
   readonly live: () => boolean;
   // The portal's latest answer (Portal.last).
@@ -122,7 +126,7 @@ type Refusal =
   | 'another origin'
   | 'a stale document'
   | 'not display capture'
-  | 'no gesture'
+  | 'no share allowance'
   | 'no grant'
   | 'share unavailable: no screen-cast portal'
   | 'a pick is already open'
@@ -183,7 +187,7 @@ export class DisplayCapture {
     if (contents === null || owned === null || contents !== owned || owned.isDestroyed()) return this.#refuse('not the window');
     if (details?.isMainFrame !== true) return this.#refuse('a subframe');
     if (!(details.requestingUrl ?? '').startsWith(INITIAL_URL)) return this.#refuse('another origin');
-    if (this.#deps.gestures.peek(owned, CAPTURE_GESTURE_MS) === null) return this.#refuse('no gesture');
+    if (!this.#deps.share.peekCapture(owned)) return this.#refuse('no share allowance');
     const not = this.#ready();
     return not === null ? true : this.#refuse(not);
   }
@@ -256,9 +260,9 @@ export class DisplayCapture {
       answer(null);
       return;
     }
-    // The act is used up here, whatever follows.
-    if (this.#deps.gestures.take(owned, CAPTURE_GESTURE_MS) === null) {
-      this.#refuse('no gesture');
+    // The allowance's capture use is used up here, whatever follows.
+    if (!this.#deps.share.takeCapture(owned)) {
+      this.#refuse('no share allowance');
       answer(null);
       return;
     }

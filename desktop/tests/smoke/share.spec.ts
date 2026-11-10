@@ -55,7 +55,7 @@ test.describe('the renderer’s network and capture allowances, with no companio
     expect(result).not.toBe('granted');
   });
 
-  test('rejects getDisplayMedia right after a click when no companion grant is live, and says why', async () => {
+  test('rejects getDisplayMedia right after a raw click, which arms nothing, and says why', async () => {
     await page.evaluate(`window.__share = 'pending'; document.addEventListener('mouseup', () => {
       navigator.mediaDevices.getDisplayMedia({ video: true, audio: true }).then(() => { window.__share = 'granted'; }, (e) => { window.__share = e.name; });
     }, { once: true });`);
@@ -63,7 +63,9 @@ test.describe('the renderer’s network and capture allowances, with no companio
     await expect.poll(() => page.evaluate('window.__share')).not.toBe('pending');
     expect(await page.evaluate('window.__share')).not.toBe('granted');
     // The reason is main's, and it is not the picker's: nothing was opened.
-    await expect.poll(() => app.output()).toMatch(/display capture refused: (no grant|share unavailable: no screen-cast portal)/);
+    // A click alone no longer arms capture (the share allowance, #1580); only
+    // the page's shareArm() does.
+    await expect.poll(() => app.output()).toMatch(/display capture refused: no share allowance/);
   });
 
   test('keeps the microphone and camera denied', async () => {

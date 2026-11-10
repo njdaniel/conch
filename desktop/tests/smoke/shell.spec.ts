@@ -79,8 +79,9 @@ test.describe('the packaged shell', () => {
         'voiceDevices', 'voiceSaveDevice',
         // Talk-key setup (#1381).
         'voiceKeyDevices', 'voiceSaveTalkBinding',
-        // The screen companion (#1579): its grant, its end and its event.
-        'companionGrant', 'companionEnd', 'onCompanion',
+        // The screen companion (#1579): its grant, its end and its event; and
+        // the share allowance's arming (#1580).
+        'companionGrant', 'companionEnd', 'shareArm', 'onCompanion',
       ].sort(),
       true,
     ]);

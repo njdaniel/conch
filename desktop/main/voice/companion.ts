@@ -27,13 +27,17 @@
 //  - every end forgets the record first, tells the page (if the document that
 //    was given the grant still shows) and then sends the DELETE once; a DELETE
 //    that fails is logged by the end's reason alone;
-//  - every end, the page's own included, also closes the owned window's open
-//    connections (closeConnections), after the record is forgotten: the
-//    filter only judges a request when it begins, so a socket to LiveKit that
-//    was open when the grant ended would otherwise go on. Main has no signal
-//    for whether the page's display-capture track still runs, so it cannot
-//    tell a page that ignored the end event; it only closes the connections
-//    (#1621, S2);
+//  - every end, the page's own included, also asks the owned window's session
+//    to close its connections (closeConnections), after the record is
+//    forgotten: the filter only judges a request when it begins. That call
+//    reaches idle and pending sockets only: a live WebSocket stays open and
+//    keeps sending (probed on #1621, S2). What ends the companion's LiveKit
+//    socket is conchd's DELETE removing the participant. So when the DELETE
+//    is not confirmed (it failed or timed out), main reloads the owned
+//    window's document (reload), and no page-held socket survives an
+//    unconfirmed end. Main has no signal for whether the page's
+//    display-capture track still runs, so it cannot tell a page that ignored
+//    the end event;
 //  - every grant needs a new act: none is re-issued after a room renewal,
 //    which ends the share (Q-D4-2 on #1578).
 //
@@ -90,12 +94,18 @@ export interface CompanionDeps {
   // Asks whether this desktop can share a screen (portal.ts), alongside the
   // request to conchd; null when it can. Absent: nothing is said.
   readonly share?: () => Promise<CompanionShareUnavailable | null>;
-  // Closes every connection the owned window's session has open (the
+  // Asks the owned window's session to close its connections (the
   // activation's session.closeAllConnections). Called on every end, after the
-  // record is forgotten: the request filter (guards.ts) judges a connection
-  // when it is opened, so a LiveKit socket opened under the grant would
-  // otherwise outlive it (leave, helper loss, renewal). Absent: nothing.
+  // record is forgotten. It closes idle and pending sockets only; a live
+  // WebSocket survives it. Absent: nothing.
   readonly closeConnections?: () => Promise<void>;
+  // Reloads the owned window's document: the end of anything the page still
+  // holds when the companion's removal at conchd was not confirmed. Absent:
+  // nothing.
+  readonly reload?: () => void;
+  // Called at the start of every end() and stop(), whether or not a companion
+  // is held (app.ts: clears the share allowance, share-allowance.ts).
+  readonly ended?: () => void;
 }
 
 // The live companion: what it was asked for, and with what.
@@ -272,12 +282,14 @@ export class Companion {
   // still in flight is overtaken.
   async stop(): Promise<boolean> {
     this.#epoch++;
+    this.#deps.ended?.();
     const held = this.#held;
     if (held === null) return false;
     this.#held = null;
     const closing = this.#close();
-    await this.#remove(held.client, held.channel, 'stopped');
+    const removed = await this.#remove(held.client, held.channel, 'stopped');
     await closing;
+    this.#unconfirmed(removed);
     return true;
   }
 
@@ -287,6 +299,7 @@ export class Companion {
   // is overtaken. Public for #1588 (D5-02: lock and suspend).
   async end(reason: CompanionEndReason): Promise<boolean> {
     this.#epoch++;
+    this.#deps.ended?.();
     const held = this.#held;
     if (held === null) return false;
     this.#held = null;
@@ -297,8 +310,9 @@ export class Companion {
     }
     // Begun at once, alongside the DELETE: neither waits for the other.
     const closing = this.#close();
-    await this.#remove(held.client, held.channel, reason);
+    const removed = await this.#remove(held.client, held.channel, reason);
     await closing;
+    this.#unconfirmed(removed);
     return true;
   }
 
@@ -332,15 +346,27 @@ export class Companion {
     }
   }
 
-  // The one DELETE of an end: never retried.
-  async #remove(client: CompanionClient, channel: string, reason: RemoveReason): Promise<void> {
+  // #unconfirmed reloads the window when the removal was not confirmed.
+  #unconfirmed(removed: boolean): void {
+    if (removed) return;
+    this.#deps.log('companion: the removal was not confirmed; reloading the window');
+    try {
+      this.#deps.reload?.();
+    } catch {
+      // A window that cannot be reloaded is already gone.
+    }
+  }
+
+  // The one DELETE of an end: never retried. True when conchd confirmed it.
+  async #remove(client: CompanionClient, channel: string, reason: RemoveReason): Promise<boolean> {
     let exchange: Exchange;
     try {
       exchange = await client.send({ op: 'voiceViewerEnd', params: { channel }, query: 'publish=screen', timeoutMs: COMPANION_REMOVE_TIMEOUT_MS });
     } catch {
       exchange = { kind: 'none' };
     }
-    if (exchange.kind === 'answer' && exchange.ok) return;
+    if (exchange.kind === 'answer' && exchange.ok) return true;
     this.#deps.log(`companion: the removal after ${reason} was not confirmed`);
+    return false;
   }
 }

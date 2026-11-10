@@ -142,16 +142,6 @@ export class Gestures {
     return act !== undefined && this.#within(act.at, withinMs) ? act.kind : null;
   }
 
-  // peek says what kind of unused act the contents has within the last
-  // withinMs, or null, and uses nothing up. For a question asked before the
-  // one that takes it: the permission Chromium asks ahead of a screen capture,
-  // whose own request then takes the act (display-capture.ts).
-  peek(contents: object | null, withinMs: number): GestureKind | null {
-    if (contents === null) return null;
-    const act = this.#act.get(contents);
-    return act !== undefined && this.#within(act.at, withinMs) ? act.kind : null;
-  }
-
   // recent says whether the contents has an unused act within the last
   // withinMs, for the clipboard, without using it up; when it has, the act is
   // spent for links and saves.
@@ -168,7 +158,3 @@ export class Gestures {
 export const LINK_GESTURE_MS = 1_000;
 // The copy buttons (AddDevice, InvitePanel) write in the click handler itself.
 export const CLIPBOARD_GESTURE_MS = 1_500;
-// A screen capture follows the Share press after the claim's round trip to
-// conchd ("claim, then picker", #1581), so it is given longer than a link;
-// still one act, one capture, and Chromium's own activation lasts 5 s.
-export const CAPTURE_GESTURE_MS = 3_000;

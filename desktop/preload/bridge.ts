@@ -281,6 +281,7 @@ export function createBridge(invoke: Invoke, listen: Listen, listenVoice: Listen
     // that it has ended.
     companionGrant: call('companionGrant'),
     companionEnd: call('companionEnd'),
+    shareArm: call('shareArm'),
     onCompanion,
   });
 }

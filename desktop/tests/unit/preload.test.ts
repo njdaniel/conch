@@ -55,6 +55,7 @@ const named: Record<keyof ConchDesktopBridge | keyof DesktopVoiceBridge | keyof 
   onVoiceState: true,
   companionGrant: true,
   companionEnd: true,
+  shareArm: true,
   onCompanion: true,
 };
 
@@ -85,7 +86,7 @@ describe('the preload', () => {
     expect(invoke).toHaveBeenLastCalledWith('conch:signInWithPassword', { name: 'a', password: 'b' });
     await bridge.replaceCredential({ operation: 'changePassword', body: { current: 'a', password: 'b' } });
     expect(invoke).toHaveBeenLastCalledWith('conch:replaceCredential', { operation: 'changePassword', body: { current: 'a', password: 'b' } });
-    expect(INVOKED_FUNCTIONS).toHaveLength(43);
+    expect(INVOKED_FUNCTIONS).toHaveLength(44);
   });
 
   it('rejects with a bare "refused" when main refuses, or answers anything but an envelope', async () => {
@@ -325,10 +326,17 @@ describe('the preload’s companion (issue #1579)', () => {
     ]);
   });
 
+  it('sends shareArm with no argument on its own channel', async () => {
+    const { bridge, calls } = wired(() => true);
+    await expect(bridge.shareArm()).resolves.toBe(true);
+    expect(calls).toEqual([['conch:shareArm', []]]);
+  });
+
   it('rejects with a bare "refused" when main refuses a companion call (a subframe, another window, a stale document, no gesture, extra keys)', async () => {
     const bridge = createBridge(() => Promise.resolve({ ok: false, kind: 'refused' }), noListen, noListen, noListen);
     await expect(bridge.companionGrant({ channel: 'general' })).rejects.toThrow(/^refused$/);
     await expect(bridge.companionEnd()).rejects.toThrow(/^refused$/);
+    await expect(bridge.shareArm()).rejects.toThrow(/^refused$/);
   });
 
   it('hands each end to each listener, and the event alone', () => {

@@ -42,6 +42,8 @@ interface Rig {
   // The liveOrigin seen by each closeConnections call, and a failure to throw.
   readonly closes: (string | null)[];
   readonly closeFails: { value: boolean };
+  // How many times the window's document was reloaded.
+  readonly reloads: { count: number; throws: boolean };
   readonly voice: { view: NativeVoiceView; set(view: NativeVoiceView): void };
   readonly document: { value: number };
   client: CompanionClient | null;
@@ -64,6 +66,7 @@ function rig(view: NativeVoiceView = running(), share?: () => Promise<'no-portal
   const document = { value: 5 };
   const closes: (string | null)[] = [];
   const closeFails = { value: false };
+  const reloads = { count: 0, throws: false };
   const client: CompanionClient = {
     send: (request) => {
       steps.push(['send', request]);
@@ -78,6 +81,7 @@ function rig(view: NativeVoiceView = running(), share?: () => Promise<'no-portal
     removals,
     closes,
     closeFails,
+    reloads,
     voice,
     document,
     client,
@@ -101,6 +105,10 @@ function rig(view: NativeVoiceView = running(), share?: () => Promise<'no-portal
       closeConnections: () => {
         closes.push(r.companion.liveOrigin());
         return closeFails.value ? Promise.reject(new Error('session gone')) : Promise.resolve();
+      },
+      reload: () => {
+        reloads.count++;
+        if (reloads.throws) throw new Error('window gone');
       },
       ...(share === undefined ? {} : { share }),
       sleep: (ms) => {
@@ -417,6 +425,32 @@ describe('the companion’s end', () => {
     expect(r.logs.join('\n')).toContain('could not be closed');
   });
 
+  it.each<CompanionEndReason>(['leave', 'helper', 'renewal', 'sign-out', 'switch', 'quit', 'crash', 'reload', 'lock', 'suspend'])(
+    'tells main that it ended (to clear the share allowance), for %s, held or not',
+    async (reason) => {
+      let ended = 0;
+      const client: CompanionClient = { send: (request) => Promise.resolve(request.op === 'voiceViewer' ? ok(ANSWER) : ok()) };
+      const companion = new Companion({
+        voice: { state: () => running(), subscribe: () => () => undefined },
+        client: () => client,
+        document: () => 1,
+        tell: () => undefined,
+        ended: () => {
+          ended++;
+        },
+        log: () => undefined,
+      });
+      // Nothing held: an end still clears (a cold Share armed it before any grant).
+      expect(await companion.end(reason)).toBe(false);
+      expect(ended).toBe(1);
+      expect((await companion.grant({ channel: 'general' })).ok).toBe(true);
+      expect(await companion.end(reason)).toBe(true);
+      expect(ended).toBe(2);
+      expect(await companion.stop()).toBe(false);
+      expect(ended).toBe(3);
+    },
+  );
+
   it('still sends the DELETE when the page cannot be told', async () => {
     const steps: Send[] = [];
     const client: CompanionClient = {
@@ -476,7 +510,8 @@ describe('the companion’s end', () => {
     r.removals.push(refusal(503, 'voice_unavailable'));
     await r.companion.end('leave');
     expect(r.sends()).toEqual([DELETE]);
-    expect(r.logs).toEqual(['companion: the removal after leave was not confirmed']);
+    expect(r.logs).toEqual(['companion: the removal after leave was not confirmed', 'companion: the removal was not confirmed; reloading the window']);
+    expect(r.reloads.count).toBe(1);
   });
 
   it('survives a client that throws, and logs it by reason', async () => {
@@ -488,7 +523,47 @@ describe('the companion’s end', () => {
     const send = held.send.bind(held);
     held.send = (request) => (request.op === 'voiceViewerEnd' ? Promise.reject(new Error('boom')) : send(request));
     expect(await r.companion.end('quit')).toBe(true);
-    expect(r.logs).toEqual(['companion: the removal after quit was not confirmed']);
+    expect(r.logs).toEqual(['companion: the removal after quit was not confirmed', 'companion: the removal was not confirmed; reloading the window']);
+    expect(r.reloads.count).toBe(1);
+  });
+
+  describe('reloads the window when the removal is not confirmed (S2 of #1621: closeAllConnections leaves a live socket)', () => {
+    const outcomes: [string, (r: Rig) => void, number][] = [
+      ['confirmed', () => undefined, 0],
+      ['refused by conchd', (r) => r.removals.push(refusal(503, 'voice_unavailable')), 1],
+      ['no answer at all', (r) => r.removals.push({ kind: 'none' }), 1],
+    ];
+    it.each(outcomes)('an end whose DELETE is %s', async (_name, arrange, reloads) => {
+      const r = rig();
+      await live(r);
+      arrange(r);
+      await r.companion.end('helper');
+      expect(r.reloads.count).toBe(reloads);
+    });
+
+    it.each(outcomes)('the page’s own companionEnd whose DELETE is %s', async (_name, arrange, reloads) => {
+      const r = rig();
+      await live(r);
+      arrange(r);
+      await r.companion.stop();
+      expect(r.reloads.count).toBe(reloads);
+    });
+
+    it('reloads nothing when no companion was held, so no DELETE was sent', async () => {
+      const r = rig();
+      await r.companion.end('reload');
+      await r.companion.stop();
+      expect(r.reloads.count).toBe(0);
+    });
+
+    it('survives a window that cannot be reloaded', async () => {
+      const r = rig();
+      await live(r);
+      r.reloads.throws = true;
+      r.removals.push(refusal(503));
+      expect(await r.companion.end('leave')).toBe(true);
+      expect(r.reloads.count).toBe(1);
+    });
   });
 });
 

@@ -34,6 +34,7 @@ import { debuggingVerdict } from './debugging.ts';
 import { captureVerdict, DisplayCapture } from './display-capture.ts';
 import { Files } from './files.ts';
 import { Gestures } from './gestures.ts';
+import { ShareAllowance } from './share-allowance.ts';
 import { installGuards } from './guards.ts';
 import { Ipc } from './ipc.ts';
 import { Links } from './links.ts';
@@ -128,10 +129,14 @@ export async function start(): Promise<void> {
   // The LiveKit origin of the live companion grant: none until the companion
   // exists (below), and then its own, read afresh on every request.
   let liveOrigin = (): string | null => null;
+  // The share allowance (share-allowance.ts): the Share click's act, spent
+  // once on the grant and once on the capture. The gate it reads is the
+  // newest activation's.
+  const share = new ShareAllowance({ now: Date.now, generation: () => live.gate.generation });
   const capture = new DisplayCapture({
     owned: () => (live.window === null || live.window.isDestroyed() ? null : live.window.webContents),
     gate: () => live.gate,
-    gestures,
+    share,
     live: () => liveOrigin() !== null,
     available: () => portal.last(),
     getSources: (options) => desktopCapturer.getSources(options),
@@ -290,6 +295,10 @@ export async function start(): Promise<void> {
     voice,
     client: () => activeClient,
     document: () => live.gate.generation,
+    // Any end or stop clears the share allowance, held or not.
+    ended: () => {
+      share.clear();
+    },
     tell: (document, event) => {
       const contents = live.owned() === null ? null : (live.window?.webContents ?? null);
       if (contents !== null && live.gate.shows(document)) contents.send(COMPANION_EVENTS, event);
@@ -299,11 +308,17 @@ export async function start(): Promise<void> {
       const answer = await portal.probe();
       return answer === 'available' ? null : answer;
     },
-    // The owned window's session: a LiveKit socket open when the grant ends
-    // is closed (S2 of #1621; the filter only judges a request when it begins).
+    // The owned window's session is asked to close its connections when the
+    // grant ends. That reaches idle and pending sockets only: a live
+    // WebSocket survives closeAllConnections (S2 of #1621). What ends it is
+    // conchd's DELETE; when that is not confirmed the document is reloaded.
     closeConnections: async () => {
       const w = live.window;
       if (w !== null && !w.isDestroyed()) await w.webContents.session.closeAllConnections();
+    },
+    reload: () => {
+      const w = live.window;
+      if (w !== null && !w.isDestroyed()) w.webContents.reload();
     },
     log,
   });
@@ -352,6 +367,7 @@ export async function start(): Promise<void> {
       return current(live.files);
     },
     gestures,
+    share,
     profiles,
     voice,
     companion,

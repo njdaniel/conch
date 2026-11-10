@@ -4,8 +4,9 @@ import type { Session } from 'electron';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { CAPTURE_SOURCES, captureVerdict, CRASH_GRACE_MS, DisplayCapture, displayPermission, type CaptureFrame, type CaptureSource } from '../../main/display-capture.ts';
-import { CAPTURE_GESTURE_MS, Gestures } from '../../main/gestures.ts';
+import { Gestures } from '../../main/gestures.ts';
 import { guardSession } from '../../main/guards.ts';
+import { ShareAllowance, SHARE_ARM_MS } from '../../main/share-allowance.ts';
 import { GDBUS_PATHS, PORTAL_ARGS, Portal, sourceTypes, underWayland, type Env, type PortalDeps } from '../../main/portal.ts';
 
 class FakeContents extends EventEmitter {
@@ -37,7 +38,11 @@ interface World {
   sources: { list: CaptureSource[] | Error; calls: number; release?: () => void };
   logs: string[];
   capture: DisplayCapture;
-  click: (c: FakeContents) => void;
+  // arm is the page's shareArm() having been taken for c; rawClick is a
+  // click that is only a click (a send-message Enter, a mouse release).
+  arm: (c: FakeContents) => void;
+  rawClick: (c: FakeContents) => void;
+  share: ShareAllowance;
   frame: (over?: Partial<CaptureFrame>) => CaptureFrame;
   permission: (contents: unknown, details?: Record<string, unknown>) => { granted: boolean; handled: boolean };
 }
@@ -49,6 +54,7 @@ function world(): World {
   const stranger = new FakeContents();
   gestures.attach(win);
   gestures.attach(stranger);
+  const share = new ShareAllowance({ now: () => clock.now, generation: () => 1 });
   const live = { on: true };
   const portal: World['portal'] = { answer: 'available' };
   const current = { token: 'main-1' };
@@ -57,7 +63,7 @@ function world(): World {
   const capture = new DisplayCapture({
     owned: () => win,
     gate: () => ({ current: (f) => f.frameToken === current.token }),
-    gestures,
+    share,
     live: () => live.on,
     available: () => portal.answer,
     getSources: (options) => {
@@ -86,7 +92,11 @@ function world(): World {
     sources,
     logs,
     capture,
-    click: (c) => c.emit('input-event', {}, { type: 'mouseUp' }),
+    arm: (c) => {
+      share.arm(c);
+    },
+    rawClick: (c) => c.emit('input-event', {}, { type: 'mouseUp' }),
+    share,
     frame: (over = {}) => ({ frameToken: 'main-1', url: 'conch-app://ui/', parent: null, detached: false, ...over }),
     permission,
   };
@@ -122,9 +132,9 @@ describe('displayPermission', () => {
 });
 
 describe('display capture is granted', () => {
-  it('to the owned main frame right after a click, with a live grant and a portal: one source, video only', async () => {
+  it('to the owned main frame with the share allowance armed, a live grant and a portal: one source, video only', async () => {
     const w = world();
-    w.click(w.win);
+    w.arm(w.win);
     expect(w.permission(w.win)).toEqual({ granted: true, handled: true });
     // The permission uses up nothing; the display-media request takes the act.
     expect(await answer(w, {})).toEqual({ video: screen });
@@ -133,7 +143,7 @@ describe('display capture is granted', () => {
 
   it('asks the permission and the request together, as Electron does, inside the callback', async () => {
     const w = world();
-    w.click(w.win);
+    w.arm(w.win);
     let result: unknown;
     w.capture.permits(w.win, { isMainFrame: true, requestingUrl: 'conch-app://ui/', mediaTypes: [] });
     w.capture.allow(w.win, () => {
@@ -149,7 +159,7 @@ describe('display capture is granted', () => {
 
   it('never with audio: a request for audio gets the video member only, and the ask is logged', async () => {
     const w = world();
-    w.click(w.win);
+    w.arm(w.win);
     const got = await answer(w, {}, { audio: true });
     expect(got).toEqual({ video: screen });
     expect(Object.keys(got as object)).toEqual(['video']);
@@ -159,26 +169,34 @@ describe('display capture is granted', () => {
 
 describe('display capture is answered with no stream when', () => {
   const cases: { name: string; arrange: (w: World) => void; frame?: Partial<CaptureFrame> | null; reason: RegExp }[] = [
-    { name: 'there was no gesture', arrange: () => undefined, reason: /no gesture/ },
+    { name: 'there was no share allowance', arrange: () => undefined, reason: /no share allowance/ },
     {
-      name: 'the gesture is older than the capture window',
+      name: 'only a raw click came (a mouse release or the Enter that sends a message arms nothing)',
       arrange: (w) => {
-        w.click(w.win);
-        w.clock.now += CAPTURE_GESTURE_MS + 1;
+        w.rawClick(w.win);
+        w.rawClick(w.win);
       },
-      reason: /no gesture/,
+      reason: /no share allowance/,
     },
     {
-      name: 'the click was in another window',
+      name: 'the allowance has expired',
       arrange: (w) => {
-        w.click(w.stranger);
+        w.arm(w.win);
+        w.clock.now += SHARE_ARM_MS + 1;
       },
-      reason: /no gesture/,
+      reason: /no share allowance/,
+    },
+    {
+      name: 'the allowance was armed for another window',
+      arrange: (w) => {
+        w.arm(w.stranger);
+      },
+      reason: /no share allowance/,
     },
     {
       name: 'the frame is a subframe',
       arrange: (w) => {
-        w.click(w.win);
+        w.arm(w.win);
       },
       frame: { parent: {} },
       reason: /a subframe/,
@@ -186,7 +204,7 @@ describe('display capture is answered with no stream when', () => {
     {
       name: 'the frame is another window’s',
       arrange: (w) => {
-        w.click(w.win);
+        w.arm(w.win);
       },
       frame: { frameToken: 'main-2' },
       reason: /not the window/,
@@ -194,7 +212,7 @@ describe('display capture is answered with no stream when', () => {
     {
       name: 'the frame is a stale document generation',
       arrange: (w) => {
-        w.click(w.win);
+        w.arm(w.win);
         w.current.token = 'main-2';
       },
       reason: /a stale document/,
@@ -202,7 +220,7 @@ describe('display capture is answered with no stream when', () => {
     {
       name: 'the frame is not at the app’s origin',
       arrange: (w) => {
-        w.click(w.win);
+        w.arm(w.win);
       },
       frame: { url: 'https://example.com/' },
       reason: /another origin/,
@@ -210,7 +228,7 @@ describe('display capture is answered with no stream when', () => {
     {
       name: 'the frame is detached',
       arrange: (w) => {
-        w.click(w.win);
+        w.arm(w.win);
       },
       frame: { detached: true },
       reason: /not the window/,
@@ -218,7 +236,7 @@ describe('display capture is answered with no stream when', () => {
     {
       name: 'there is no frame',
       arrange: (w) => {
-        w.click(w.win);
+        w.arm(w.win);
       },
       frame: null,
       reason: /not the window/,
@@ -226,7 +244,7 @@ describe('display capture is answered with no stream when', () => {
     {
       name: 'there is no live companion grant',
       arrange: (w) => {
-        w.click(w.win);
+        w.arm(w.win);
         w.live.on = false;
       },
       reason: /no grant/,
@@ -234,7 +252,7 @@ describe('display capture is answered with no stream when', () => {
     {
       name: 'the portal is unavailable',
       arrange: (w) => {
-        w.click(w.win);
+        w.arm(w.win);
         w.portal.answer = 'no-portal';
       },
       reason: /no screen-cast portal/,
@@ -242,7 +260,7 @@ describe('display capture is answered with no stream when', () => {
     {
       name: 'the portal has not been asked yet',
       arrange: (w) => {
-        w.click(w.win);
+        w.arm(w.win);
         w.portal.answer = 'unknown';
       },
       reason: /no screen-cast portal/,
@@ -250,7 +268,7 @@ describe('display capture is answered with no stream when', () => {
     {
       name: 'the picker returns no source (cancelled or denied)',
       arrange: (w) => {
-        w.click(w.win);
+        w.arm(w.win);
         w.sources.list = [];
       },
       reason: /cancelled or denied/,
@@ -258,7 +276,7 @@ describe('display capture is answered with no stream when', () => {
     {
       name: 'the picker rejects (cancelled)',
       arrange: (w) => {
-        w.click(w.win);
+        w.arm(w.win);
         w.sources.list = new Error('cancelled');
       },
       reason: /cancelled or denied/,
@@ -266,7 +284,7 @@ describe('display capture is answered with no stream when', () => {
     {
       name: 'there are two sources, never the first',
       arrange: (w) => {
-        w.click(w.win);
+        w.arm(w.win);
         w.sources.list = [screen, other];
       },
       reason: /more than one source/,
@@ -284,35 +302,33 @@ describe('display capture is answered with no stream when', () => {
 
   it('video is not asked for', async () => {
     const w = world();
-    w.click(w.win);
+    w.arm(w.win);
     expect(await answer(w, {}, { video: false })).toBeNull();
     expect(w.sources.calls).toBe(0);
   });
 
-  it('the act is used up by the request, granted or not: a second request needs a new click', async () => {
+  it('the capture use is spent by the request, granted or not: a second request needs a new shareArm', async () => {
     const w = world();
-    w.click(w.win);
+    w.arm(w.win);
     expect(await answer(w, {})).toEqual({ video: screen });
     expect(await answer(w, {})).toBeNull();
     w.sources.list = [];
-    w.click(w.win);
+    w.arm(w.win);
     expect(await answer(w, {})).toBeNull();
     expect(await answer(w, {})).toBeNull();
   });
 
   it('the grant ends while the picker is open', async () => {
     const w = world();
-    w.click(w.win);
     let release: () => void = () => undefined;
     const held = new Promise<void>((r) => {
       release = r;
     });
-    const gestures = new Gestures(() => w.clock.now);
-    gestures.attach(w.win);
+    const share = new ShareAllowance({ now: () => w.clock.now, generation: () => 1 });
     const capture = new DisplayCapture({
       owned: () => w.win,
       gate: () => ({ current: () => true }),
-      gestures,
+      share,
       live: () => w.live.on,
       available: () => 'available',
       getSources: async () => {
@@ -321,7 +337,7 @@ describe('display capture is answered with no stream when', () => {
       },
       log: (l) => w.logs.push(l),
     });
-    w.click(w.win);
+    share.arm(w.win);
     const got = new Promise<unknown>((resolve) => {
       capture.handle({ frame: w.frame(), videoRequested: true, audioRequested: false }, resolve);
     });
@@ -337,12 +353,11 @@ describe('display capture is answered with no stream when', () => {
     const held = new Promise<void>((r) => {
       release = r;
     });
-    const gestures = new Gestures(() => w.clock.now);
-    gestures.attach(w.win);
+    const share = new ShareAllowance({ now: () => w.clock.now, generation: () => 1 });
     const capture = new DisplayCapture({
       owned: () => w.win,
       gate: () => ({ current: () => true }),
-      gestures,
+      share,
       live: () => true,
       available: () => 'available',
       getSources: async () => {
@@ -353,7 +368,7 @@ describe('display capture is answered with no stream when', () => {
     });
     const ask = (): Promise<unknown> =>
       new Promise((resolve) => {
-        w.click(w.win);
+        share.arm(w.win);
         capture.handle({ frame: w.frame(), videoRequested: true, audioRequested: false }, resolve);
       });
     const first = ask();
@@ -365,35 +380,37 @@ describe('display capture is answered with no stream when', () => {
 
 describe('the display-capture permission', () => {
   const cases: { name: string; arrange: (w: World) => void; contents?: 'stranger'; details?: Record<string, unknown> }[] = [
-    { name: 'no gesture', arrange: () => undefined },
+    { name: 'no share allowance', arrange: () => undefined },
+    { name: 'a raw click only', arrange: (w) => { w.rawClick(w.win); } },
+    { name: 'an expired allowance', arrange: (w) => { w.arm(w.win); w.clock.now += SHARE_ARM_MS + 1; } },
     { name: 'another window', arrange: (w) => {
-        w.click(w.stranger);
+        w.arm(w.stranger);
       }, contents: 'stranger' },
     {
       name: 'a subframe',
       arrange: (w) => {
-        w.click(w.win);
+        w.arm(w.win);
       },
       details: { isMainFrame: false, requestingUrl: 'conch-app://ui/', mediaTypes: [] },
     },
     {
       name: 'another origin',
       arrange: (w) => {
-        w.click(w.win);
+        w.arm(w.win);
       },
       details: { isMainFrame: true, requestingUrl: 'https://example.com/', mediaTypes: [] },
     },
     {
       name: 'no live grant',
       arrange: (w) => {
-        w.click(w.win);
+        w.arm(w.win);
         w.live.on = false;
       },
     },
     {
       name: 'no portal',
       arrange: (w) => {
-        w.click(w.win);
+        w.arm(w.win);
         w.portal.answer = 'no-portal';
       },
     },
@@ -408,7 +425,7 @@ describe('the display-capture permission', () => {
 
   it('given and then not followed by a display-media request (the legacy desktop getUserMedia) ends the renderer', () => {
     const w = world();
-    w.click(w.win);
+    w.arm(w.win);
     expect(w.permission(w.win)).toEqual({ granted: true, handled: true });
     expect(w.win.crashed).toBe(1);
     expect(w.logs.join('\n')).toMatch(/without a picker/);
@@ -418,7 +435,7 @@ describe('the display-capture permission', () => {
     const legacy = (): World => {
       vi.useFakeTimers();
       const w = world();
-      w.click(w.win);
+      w.arm(w.win);
       w.permission(w.win);
       return w;
     };
@@ -453,7 +470,7 @@ describe('the display-capture permission', () => {
 
   it('given and followed by the request does not end the renderer', async () => {
     const w = world();
-    w.click(w.win);
+    w.arm(w.win);
     let result: unknown;
     w.capture.allow(w.win, () => {
       w.capture.handle({ frame: w.frame(), videoRequested: true, audioRequested: false }, (s) => {
@@ -502,7 +519,7 @@ describe('guardSession with display capture', () => {
 
   it('grants the display permission and the one source, as video only', async () => {
     const { w, ses, here } = wired();
-    w.click(w.win);
+    w.arm(w.win);
     let got: unknown;
     const cb = vi.fn();
     ses.request?.(w.win, 'media', (ok) => {
@@ -518,9 +535,9 @@ describe('guardSession with display capture', () => {
     expect(Object.keys(got as object)).toEqual(['video']);
   });
 
-  it('keeps the microphone and camera denied while a grant is live and the person has just clicked', () => {
+  it('keeps the microphone and camera denied while a grant is live and the person has just armed the share allowance', () => {
     const { w, here, permission } = wired();
-    w.click(w.win);
+    w.arm(w.win);
     for (const mediaTypes of [['audio'], ['video'], ['audio', 'video']]) {
       expect(permission(w.win, 'media', { ...here, mediaTypes }), mediaTypes.join()).toBe(false);
     }
@@ -530,7 +547,7 @@ describe('guardSession with display capture', () => {
 
   it('answers no permission check yes, even for media', () => {
     const { w, ses } = wired();
-    w.click(w.win);
+    w.arm(w.win);
     expect(ses.check?.(w.win, 'media', 'conch-app://ui', { mediaType: 'audio' })).toBe(false);
     expect(ses.check?.(w.win, 'media', 'conch-app://ui', { mediaType: 'unknown' })).toBe(false);
     expect(ses.check?.(w.win, 'display-capture', 'conch-app://ui', {})).toBe(false);
@@ -538,7 +555,7 @@ describe('guardSession with display capture', () => {
 
   it('answers a display-media request with no stream when the grant is gone', () => {
     const { w, ses } = wired();
-    w.click(w.win);
+    w.arm(w.win);
     w.live.on = false;
     const cb = vi.fn();
     ses.media?.({ frame: w.frame(), videoRequested: true, audioRequested: false }, cb);
@@ -645,6 +662,9 @@ describe('captureVerdict (S4 of #1621)', () => {
     'WebRTCPipeWireCapturer<Trial',
     'WebRTCPipeWireCapturer:k/v',
     ' Other , WebRTCPipeWireCapturer ',
+    '*WebRTCPipeWireCapturer',
+    'Other,*WebRTCPipeWireCapturer<Trial',
+    '*WebRTCPipeWireCapturer:k/v',
   ])('refuses a packaged launch with --disable-features=%s', (value) => {
     const { verdict, logs } = run(true, { 'disable-features': value });
     expect(verdict).toBe('refused');
