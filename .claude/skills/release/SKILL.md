@@ -51,6 +51,27 @@ sign-off act; `release.yml` turns a plain `v*` tag into a draft GitHub release, 
    db), note the dogfood-check run in the release notes, hand the draft to
    Nick to publish (a pre-release is already published: check its notes and tester checklist).
 
+## Desktop release notes section
+
+When the release ships the Linux desktop `.deb`, the CHANGELOG entry gets a
+"Linux desktop app" section after the server notes. Fill it from recorded runs
+only (the capability report and #1603's acceptance record); a row nobody has
+run is "not tried", never "works". Link the user page,
+`docs/desktop/linux.md`.
+
+```markdown
+### Linux desktop app
+- **Verified on:** <distribution and version, desktop and compositor, session
+  type, architecture, with the run that shows it (issue or record)>.
+- **Experimental:** <what runs but has no recorded acceptance>.
+- **Not supported:** <X11 screen share, ARM64, AppImage, Flatpak, RPM, and
+  anything else that does not work>.
+- **Not tried:** <rows with no run yet>.
+- **Known issues:** <issue links>.
+- Verify the download with `docs/desktop/linux.md` (checksums, then
+  `gh attestation verify` for tag <tag>).
+```
+
 ## Never
 
 - Tag on a failing or stale dogfood-check or p2-hardening-check.

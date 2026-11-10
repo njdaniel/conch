@@ -101,6 +101,7 @@ Then follow [create the operator and start `conchd`](docs/manual.md#2-create-the
 | [Manual](docs/manual.md) | Setup step by step, the CLI and TUI, MCP, AI administrators, adapters, nets, invites, TLS, voice, screen sharing, diagnostics |
 | [Deployment runbook](docs/deploy.md) | A public server with Caddy, LiveKit, systemd, backups, upgrade and rollback |
 | [Alpha tester guide](docs/alpha-tester-guide.md) | Joining and using Conch as an invited tester |
+| [Linux desktop app](docs/desktop/linux.md) | Install, verify, update and remove the `.deb`, and what is supported where |
 | [Contributing](CONTRIBUTING.md) | Toolchains, checks, and the issue and PR workflow |
 | [Roadmap](ROADMAP.md) | Shipped phases, the private alpha, later direction |
 | [Client experience](docs/design/client-experience.md) | Interaction design, including voice and failure states |

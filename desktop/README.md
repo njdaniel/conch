@@ -1,7 +1,7 @@
 # desktop/: the Conch desktop shell
 
 An Electron app that opens the existing web client from packaged files at
-`conch-app://ui/`. Design: [docs/design/linux-desktop.md](../docs/design/linux-desktop.md)
+`conch-app://ui/`. Installing the app as a user: [docs/desktop/linux.md](../docs/desktop/linux.md). Design: [docs/design/linux-desktop.md](../docs/design/linux-desktop.md)
 §2 to §4 and §10; epic #770, this skeleton #940; governed by ADR-007.
 
 **What it does today:** one hardened window showing the React client, which
