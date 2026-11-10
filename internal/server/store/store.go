@@ -1064,6 +1064,12 @@ BEGIN SELECT RAISE(ABORT, 'message removals are permanent'); END`,
 	{
 		`DROP TABLE open_channels`,
 	},
+	// 47 (channelTopicMigration): a channel's one-line topic (issue #1503,
+	// docs/design/channel-topic.md). The empty string is no topic, so every
+	// existing channel has none; there is no audit row and no fill step.
+	{
+		`ALTER TABLE channels ADD COLUMN topic TEXT NOT NULL DEFAULT ''`,
+	},
 }
 
 // migrationSteps holds Go code that runs inside a migration's transaction

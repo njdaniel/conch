@@ -348,3 +348,98 @@ func TestListChannelsResponseEmptyEncodesArray(t *testing.T) {
 		t.Fatalf("got %s", got)
 	}
 }
+
+// The channel topic (issue #1503, docs/design/channel-topic.md §7): the
+// field on three published types and the two new shapes. The six fixtures
+// round-trip, and the request and the document validate.
+func TestChannelTopicGoldenFixtures(t *testing.T) {
+	tests := []struct {
+		file string
+		new  func() any
+	}{
+		{"channel-v0-topic.json", func() any { return new(ChannelV0) }},
+		{"channel-listing-v1-topic.json", func() any { return new(ChannelListingV1) }},
+		{"set-channel-topic-response-v1.json", func() any { return new(SetChannelTopicResponseV1) }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.file, func(t *testing.T) {
+			assertGoldenFixture(t, tt.file, tt.new)
+		})
+	}
+	for _, file := range []string{"channel-v1-topic.json"} {
+		t.Run(file, func(t *testing.T) {
+			assertP3GoldenFixture(t, file, func() any { return new(ChannelDocV1) })
+		})
+	}
+	for _, file := range []string{"set-channel-topic-request-v1.json", "set-channel-topic-request-v1-clear.json"} {
+		t.Run(file, func(t *testing.T) {
+			assertP3GoldenFixture(t, file, func() any { return new(SetChannelTopicRequestV1) })
+		})
+	}
+}
+
+// No topic means no key: a channel without one encodes exactly as before.
+func TestChannelTopicOmittedWhenEmpty(t *testing.T) {
+	for _, v := range []any{ChannelV0{}, ChannelListingV1{}, ChannelDocV1{}} {
+		b, err := json.Marshal(v)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(b), "topic") {
+			t.Errorf("%T encodes a topic key with no topic: %s", v, b)
+		}
+	}
+}
+
+func TestSetChannelTopicRequestV1Validate(t *testing.T) {
+	tests := []struct {
+		name    string
+		topic   string
+		wantErr string
+	}{
+		{name: "a topic", topic: "Release planning"},
+		{name: "empty clears", topic: ""},
+		{name: "exactly the limit", topic: strings.Repeat("a", MaxChannelTopicLength)},
+		{name: "the limit in multi-byte characters", topic: strings.Repeat("山", MaxChannelTopicLength)},
+		{name: "a link", topic: "Runbook: https://example.com/runbook?a=1"},
+
+		{name: "one over the limit", topic: strings.Repeat("a", MaxChannelTopicLength+1), wantErr: "at most"},
+		{name: "a newline", topic: "line one\nline two", wantErr: "control characters"},
+		{name: "a tab", topic: "a\tb", wantErr: "control characters"},
+		{name: "a bidi override", topic: "a\u202eb", wantErr: "bidi controls"},
+		{name: "a zero-width space", topic: "a\u200bb", wantErr: "invisible formatting"},
+		{name: "leading whitespace", topic: " hidden", wantErr: "whitespace"},
+		{name: "trailing whitespace", topic: "hidden ", wantErr: "whitespace"},
+		{name: "only whitespace", topic: "  ", wantErr: "whitespace"},
+		{name: "invalid UTF-8", topic: "a\xffb", wantErr: "valid UTF-8"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := SetChannelTopicRequestV1{Topic: tt.topic}.Validate()
+			assertValidation(t, err, tt.wantErr)
+			if err != nil && strings.TrimSpace(tt.topic) != "" && strings.Contains(err.Error(), strings.TrimSpace(tt.topic)) {
+				t.Errorf("error echoes the topic: %v", err)
+			}
+		})
+	}
+}
+
+func TestChannelDocV1ValidateTopic(t *testing.T) {
+	at := NewTimestamp(time.Date(2026, 7, 13, 12, 34, 56, 0, time.UTC))
+	tests := []struct {
+		name    string
+		topic   string
+		wantErr string
+	}{
+		{name: "no topic"},
+		{name: "a topic", topic: "Release planning"},
+		{name: "a newline", topic: "a\nb", wantErr: "control characters"},
+		{name: "too long", topic: strings.Repeat("a", MaxChannelTopicLength+1), wantErr: "at most"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			d := ChannelDocV1{Schema: ChannelSchemaV1, ChannelID: 7, Name: "ops", CreatedAt: at, Topic: tt.topic}
+			assertValidation(t, d.Validate(), tt.wantErr)
+		})
+	}
+}
