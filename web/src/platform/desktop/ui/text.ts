@@ -1,6 +1,6 @@
 // What the server list says, in words (issue #945). Pure functions of the
 // bridge's view; no component state.
-import type { ProfileAddResult, ProfileNotice, StorageStatus } from '../bridge';
+import type { InviteAccept, InviteRefusal, ProfileAddResult, ProfileNotice, StorageStatus } from '../bridge';
 
 // Written in two parts: the page's source holds no absolute URL.
 export const example = ['https:', 'chat.example.org'].join('//');
@@ -16,6 +16,33 @@ export const addRefusalLines: Readonly<Record<Extract<ProfileAddResult, { ok: fa
     'This computer does not trust that server’s certificate, so nothing was sent. If the server uses a private certificate authority, install it in the system’s certificate store (see desktop/README.md), then try again.',
   'not-conch': 'That address answered, but not as a Conch server.',
   full: 'There are as many saved servers as the app keeps. Remove one first.',
+};
+
+// Why an invite link was not accepted or could not be opened. Never the link
+// or its code: the person sees the rule, not what they pasted.
+export const inviteRefusalLines: Readonly<Record<InviteRefusal, string>> = {
+  type: 'That is not an invite link.',
+  length: 'That is not an invite link: it is empty or too long.',
+  characters: 'That link has spaces, hidden or look-alike characters in it, so it was not used.',
+  scheme: 'An invite link is a secure (https) address. A plain http link is accepted only for this computer (localhost, 127.0.0.1 or [::1]).',
+  userinfo: 'That link contains a user name or password, so it was not used.',
+  host: 'The server’s address in that link is written with hidden or look-alike characters, so it was not used.',
+  path: 'That is not an invite link: it does not end in /app/#/invite/ and a code.',
+  query: 'That is not an invite link: it has extra parts after the address.',
+  fragment: 'That is not an invite link: it does not end in #/invite/ and a code.',
+  code: 'The code in that link is not one Conch makes.',
+  malformed: 'That is not an invite link.',
+};
+
+export const inviteAcceptLines: Readonly<Record<Extract<InviteAccept, { ok: false }>['refusal'], string>> = {
+  expired: 'That invite link was not used in time. Paste it again.',
+  'voice-started': 'Voice started after the link was checked, and opening the invite on that server would leave it. Check the link again.',
+  'unknown-profile': 'That saved server is no longer there. Paste the link again.',
+  unsupported: 'The desktop app could not open that invite.',
+  full: addRefusalLines.full,
+  unreachable: addRefusalLines.unreachable,
+  certificate: addRefusalLines.certificate,
+  'not-conch': addRefusalLines['not-conch'],
 };
 
 export function storageLine(storage: StorageStatus, platform: string): string {
