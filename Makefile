@@ -110,7 +110,7 @@ web-e2e: web-node
 # without it this fails and names that version, it does not skip.
 DESKTOP_NODE = $(shell cat desktop/.nvmrc)
 DESKTOP_NODE_BIN = $(HOME)/.nvm/versions/node/v$(DESKTOP_NODE)/bin
-desktop-node desktop-check desktop-build desktop-deb desktop-deb-lifecycle desktop-smoke desktop-voice-it desktop-voice-e2e: export PATH := $(if $(wildcard $(DESKTOP_NODE_BIN)/node),$(DESKTOP_NODE_BIN):)$(PATH)
+desktop-node desktop-check desktop-build desktop-deb desktop-smoke desktop-voice-it desktop-voice-e2e: export PATH := $(if $(wildcard $(DESKTOP_NODE_BIN)/node),$(DESKTOP_NODE_BIN):)$(PATH)
 
 desktop-node:
 	@v=$$(node --version 2>/dev/null) || { echo "desktop: FAIL: Node.js is not installed; install Node $(DESKTOP_NODE) (desktop/.nvmrc)"; exit 1; }; \
@@ -157,7 +157,7 @@ desktop-deb: desktop-node
 # Docker it says SKIPPED and why; with CI set it fails. Never runs the app.
 # Not part of `make check`.
 desktop-deb-lifecycle:
-	./scripts/desktop-deb-lifecycle.sh $(DEB_OLD) $(DEB_NEW)
+	./scripts/desktop-deb-lifecycle.sh $(if $(DEB_OLD)$(DEB_NEW),"$(DEB_OLD)" "$(DEB_NEW)")
 
 # The packaged smoke test: drives the built app over Chromium's remote-debugging
 # port (desktop/tests/smoke/launch.ts says why). Needs a display: CI runs it

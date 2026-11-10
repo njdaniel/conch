@@ -199,15 +199,19 @@ an older build with `apt install ./old.deb` (apt resolves `Depends` from the arc
 it needs Docker and network), checks the files, owners and modes, the launcher link, the
 desktop file and `xdg-mime query default x-scheme-handler/conch`, seeds a test user's
 `~/.config/Conch/profiles.json` and `settings.json`, upgrades to a higher version
-(those files stay byte-identical, `/opt/conch-desktop` is replaced, `resources/version`
-is the new one), checks that `ldd` resolves every library of each executable ELF file and
+(those files stay byte-identical, and `/opt/conch-desktop` is `diff -r`-identical to the
+new `.deb`'s own tree, as it was to the old one after the install), checks that `ldd`
+resolves every library of every ELF file (a `.so` may name a sibling in the tree; real
+packages must have `conch-desktop` and `conch-voice` among them) and
 that `resources/conch-voice` passes `findHelper`'s trust rules, then removes and purges
 (nothing of the package left in `/opt`, `/usr` or `/etc`; the conffile goes at purge; the
 user's `~/.config/Conch` stays). `postinst` must succeed with no AppArmor in the
 container. With no argument it builds two fixture packages (`v0.1.0-alpha.1` and
 `.2`); `make desktop-deb-lifecycle DEB_OLD=<a.deb> DEB_NEW=<b.deb>` takes real ones.
 `scripts/desktop-deb-lifecycle.sh --broken` is the test of the test: the fixture packages
-without `Depends` must fail at the `ldd` check. A container is not a clean machine (no
+without `Depends` must fail at the `ldd` check, and `--broken=userdata` (a `postinst` that
+writes under `~/.config/Conch`) must fail at the user-data check. The fixture run needs a
+host no newer than Ubuntu 24.04 with `curl` installed (its ELF stand-in). A container is not a clean machine (no
 display, portal, keyring or PipeWire; Chromium's sandbox under Docker's seccomp is not
 representative), so the script never runs the app: the app on a real machine is #1602
 (D6-08). Without Docker it prints `SKIPPED`; with `CI` set it fails. It is not part of
