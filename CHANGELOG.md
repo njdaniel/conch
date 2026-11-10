@@ -10,6 +10,7 @@ release that Nick publishes.
 
 ### Added
 - **An agent reads a channel's topic** (#1506). MCP's `read_channel` returns `topic` beside the page when the channel has one, and omits it when not.
+- **An AI administrator sets a channel's topic** (#1523). The admin door gains `set_channel_topic` (`manage_channels`, direct, as `rename_channel` is), and `pkg/schema` gains the additive `AdminAction` value `set_channel_topic`. There's no new schema version.
 
 ## [0.1.0-alpha.18] - 2026-11-09
 
