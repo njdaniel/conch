@@ -126,6 +126,26 @@ jobs:
         working-directory: web
         run: npx playwright install --with-deps chromium ${{ matrix.engine }}
 
+      # Firefox's audio graph may need an output device, and a GitHub-hosted
+      # runner has none (#1707). Start a PulseAudio null sink as the default
+      # sink. Firefox's cubeb backend finds the server through the user
+      # runtime dir (XDG_RUNTIME_DIR/pulse/native), which `pulseaudio --start`
+      # uses for the same user, so the test step needs no extra variable.
+      # Every command is checked: a sink that did not start fails the job here,
+      # not as a silent -120 dB in 65.
+      - name: null audio sink (firefox)
+        if: matrix.engine == 'firefox'
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y pulseaudio pulseaudio-utils
+          pulseaudio --start --exit-idle-time=-1
+          pactl info
+          pactl load-module module-null-sink sink_name=conch_null
+          pactl set-default-sink conch_null
+          pactl info | grep -q '^Default Sink: conch_null$'
+          pactl list short sinks | grep -q conch_null
+
       - name: web-e2e (@cross, ${{ matrix.engine }})
         run: make web-e2e E2E_ARGS="--project=${{ matrix.engine }} --grep @cross"
 

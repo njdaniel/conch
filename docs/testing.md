@@ -300,15 +300,19 @@ expression over titles and tags, so a tag that merely contains `@heavy` (say
   cost nothing; wall time and queue contention are the cost.
 - **Other engines:** the `e2e-cross` job of `e2e-heavy.yml`, one job each for
   Firefox and WebKit (`fail-fast` off, the same 40-minute bound), runs
-  `--project=<engine> --grep @cross` with `CONCH_E2E_BROWSERS=<engine>`. It
-  never runs in the pull request lane.
+  `--project=<engine> --grep @cross` with `CONCH_E2E_BROWSERS=<engine>`. The
+  Firefox leg first installs PulseAudio and starts a null sink as the default
+  output (`pactl load-module module-null-sink`; the step fails if it does not
+  start), because a hosted runner has no audio device and Firefox's Web Audio
+  analysis of a received track reads silence without one (#1707). It never runs
+  in the pull request lane.
 - Windows and macOS runners are not in either lane (Q8 of #1607: `conchd` has no
   Windows build in CI, and the pinned LiveKit is a Linux container).
 
 ### Firefox and WebKit (#1658)
 
 Without `CONCH_E2E_BROWSERS`, `playwright.config.ts` defines Chromium only and
-`make web-e2e` runs the same 367 tests as before. To run the other engines
+`make web-e2e` runs the same 369 tests as before. To run the other engines
 locally:
 
 ```
@@ -327,7 +331,7 @@ nothing below says anything about Safari, macOS or iOS.
 | Fake `getUserMedia` audio | Yes, with `firefoxUserPrefs` `media.navigator.streams.fake` and `media.navigator.permission.disabled`: the track is "Default Audio Device", no prompt. Fake video the same way (a camera test passes) | Not established. No launch flag or pref is known; `@voice` tests are left out |
 | Fake `getDisplayMedia`, headless | No. The call is never answered (waited 10 s after a click; the same with the `media.getdisplaymedia.*` prefs). No `@cross` test shares a screen. `12-screen-share` also expects tab sound, which the client says Firefox does not give ("No sound: this browser shares the picture only") | Not established |
 | WebRTC to the pinned LiveKit on 127.0.0.1 | Yes, with `media.peerconnection.ice.obfuscate_host_addresses` false (the counterpart of Chromium's `WebRtcHideLocalIpsWithMdns`): `63` voice smoke passes (#1703: its one failure in 20 was a teardown wait, not a join: Playwright's plain `page.close()` sends no leave to LiveKit on Firefox, so LiveKit listed the person for about 20 s; `leave` in `people.ts` now closes with `runBeforeUnload`) | Not established |
-| A synthetic Web Audio microphone (#1610) heard by the other pages | Locally yes, in CI no: `65-who-hears-whom` passed 20 of 20 on Firefox idle and 20 of 20 under load here, but failed in both heavy runs (42819479322, 42842835221), a listener's analyser hearing no tone the others hear, even after waiting until a tone is heard. Suspected cause: no audio output device on the runner, which Firefox's audio graph may need (#1707). Out of the Firefox `@cross` set until then; `inbound-rtp` bytes (as `63` checks) do arrive | Not established |
+| A synthetic Web Audio microphone (#1610) heard by the other pages | Yes, given an audio output device. `65-who-hears-whom` passed 20 of 20 on Firefox idle and 20 of 20 under load locally (a PipeWire host), but failed in both first heavy runs (42819479322, 42842835221): a listener's analyser hearing no tone the others hear, `inbound-rtp` bytes (as `63` checks) arriving all the while. Reproduced locally (#1707): with no audio server reachable Firefox fails 65 as CI did, and with a null sink as the default sink it passes; the Firefox leg of the heavy lane now starts a PulseAudio null sink as the default before the tests. Without one, expect -120 dB at every tone | Not established |
 
 How it was established: `npx playwright install firefox webkit` fetched both
 builds. Firefox launched and passed the `@cross` set locally. `getDisplayMedia` was
@@ -344,7 +348,8 @@ message for WebKit only and still fails on any other console error.
 Tests that pass on Firefox and are tagged `@cross`: the six of `01-sign-in`,
 the five of `02-messages` other than F15's tab-stop count (Firefox's log has one
 tab stop more than Chromium's: 8, not 7), and the two of `63-multi-user-smoke`
-(the second is also `@voice`): 13 tests on Firefox, 12 on WebKit. `65-who-hears-whom` is out of the set until #1707.
+(the second is also `@voice`), and the one of `65-who-hears-whom` (`@voice`, and
+Firefox only with the null audio sink below): 14 tests on Firefox, 12 on WebKit.
 
 
 ## Multi-user specs and helpers

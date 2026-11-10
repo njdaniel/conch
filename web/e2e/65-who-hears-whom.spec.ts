@@ -60,12 +60,11 @@ const maxIdleDb = -60;
 const voiceRegion = (page: Page) => page.getByRole('region', { name: 'Voice' });
 const roster = (page: Page) => voiceRegion(page).getByRole('list', { name: 'In voice' });
 
-// Not @cross on Firefox (#1703, #1707): it passes every local run but failed
-// in both CI heavy runs (42819479322, 42842835221), a listener's analyser
-// hearing no tone though the talker is heard elsewhere. Suspected cause: the
-// runner has no audio output device, which Firefox's audio graph may need.
-// It runs in Chromium in the pull request lane as before.
-test.describe('who hears whom', () => {
+// @cross @voice (#1707): Firefox's analyser read silence on a runner with no
+// audio output device (heavy runs 42819479322, 42842835221), though it passed
+// every local run. The heavy lane's Firefox leg now starts a PulseAudio null
+// sink as the default, so Firefox has an output to run its audio graph on.
+test.describe('@cross @voice who hears whom', () => {
   let vw: VoiceWorld;
   let stopWorld: (() => void) | undefined;
 
