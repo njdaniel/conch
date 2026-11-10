@@ -79,6 +79,8 @@ test.describe('the packaged shell', () => {
         'voiceDevices', 'voiceSaveDevice',
         // Talk-key setup (#1381).
         'voiceKeyDevices', 'voiceSaveTalkBinding',
+        // The app's own settings (#1587).
+        'settings', 'settingsSet',
         // The screen companion (#1579): its grant, its end and its event.
         'companionGrant', 'companionEnd', 'onCompanion',
       ].sort(),
