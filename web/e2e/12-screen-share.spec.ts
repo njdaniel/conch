@@ -372,6 +372,54 @@ test.describe('screen share with LiveKit', () => {
     }
   });
 
+  // Issue #1660: the sharer's line says what was asked beside what is sent.
+  // The fake screen on a runner may or may not reach 60 fps; either outcome is
+  // accepted and recorded. A reason must never show while on target.
+  test('the sharer\'s readout shows what was asked beside what is sent', async ({ browser }) => {
+    const a = await person(browser, 'alice');
+    const b = await person(browser, 'bob');
+    try {
+      await join(a, 'Join voice');
+      await join(b, 'Watch only');
+      await share(a);
+      // The top layer sends only while a viewer takes it: bob watches it
+      // focused, as in the live quality change test.
+      await watching(b);
+      await shareView(b.page).getByRole('button', { name: "Focus alice's screen" }).click();
+      const voice = voiceRegion(a.page);
+      await voice.getByRole('button', { name: 'Voice options' }).click();
+      await voice.getByLabel('Share resolution').selectOption('1080p');
+      await voice.getByLabel('Share frame rate').selectOption('60');
+      const line = voice.getByRole('status', { name: 'Share quality' });
+      await expect(line).toContainText('Asked 1080p · 60 fps', { timeout: 30_000 });
+      await expect(line).toContainText(/Sending: \d+×\d+ · \d+ fps/, { timeout: 30_000 });
+      // Sample for a while: past the 5 s hold, a reason may appear if the
+      // runner falls short, and only then.
+      let outcome = 'on target';
+      // Samples in a row on target (the rate at 80% of 60 or more, at full
+      // size): the reason clears 5 s after recovery, so a run of 7 on target
+      // must show none.
+      let steady = 0;
+      for (let i = 0; i < 14; i++) {
+        await a.page.waitForTimeout(1000);
+        const text = (await line.textContent()) ?? '';
+        const sent = /Sending: (\d+)×(\d+) · (\d+) fps/.exec(text);
+        const reason = /Limited by (CPU|bandwidth)|smaller than|doesn't say why/.exec(text)?.[0];
+        if (reason !== undefined) outcome = `reason: ${reason}`;
+        const onTarget = sent !== null && Number(sent[3]) >= 48 && Number(sent[1]) === 1920 && Number(sent[2]) === 1080;
+        steady = onTarget ? steady + 1 : 0;
+        if (steady >= 7) expect(reason, 'a reason never shows while on target').toBeUndefined();
+      }
+      test.info().annotations.push({ type: 'readout', description: `${outcome}: ${(await line.textContent()) ?? ''}` });
+      await voice.getByRole('button', { name: 'Stop sharing' }).click();
+      await expect.poll(async () => (await shareRows()).at(-1)?.action, { timeout: 15_000 }).toBe('voice_share_stopped');
+      await expectClean(a);
+      await expectClean(b);
+    } finally {
+      for (const p of [a, b]) await p.close();
+    }
+  });
+
   test('raising the quality during a share reaches the viewer', async ({ browser }) => {
     const a = await person(browser, 'alice');
     const b = await person(browser, 'bob');

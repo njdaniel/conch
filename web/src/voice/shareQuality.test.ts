@@ -2,8 +2,8 @@
 // readout. jsdom storage, but no network, browser capture or LiveKit server.
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { readShareQuality, writeShareQuality } from '../api';
-import { defaultShareQuality, type ShareQuality } from './share';
-import { captureOptions, shareEncodings, shareReadout, shareSample, type ShareStats } from './sdk';
+import { defaultShareQuality, type ShareQuality, type ShareSample } from './share';
+import { askedText, captureOptions, nextShortfall, noShortfall, shareEncodings, shareReadout, shareSample, shortfallHold, shortfallReason, type ShareStats, type ShortfallState } from './sdk';
 
 afterEach(() => {
   window.localStorage.clear();
@@ -139,5 +139,137 @@ describe('the stats readout', () => {
   it('shows no readout for a missing sample and no bitrate against a missing previous one', () => {
     expect(shareReadout(null, shareSample([received()], 'received'))).toBeNull();
     expect(shareReadout(shareSample([received()], 'received'), null)).toBe('1920×1080 · 30 fps');
+  });
+});
+
+describe('the sent readout: reasons, loss and the capture', () => {
+  const sent = (overrides: Partial<ShareStats> = {}): ShareStats => ({
+    type: 'outbound-rtp',
+    kind: 'video',
+    id: 'OT1',
+    ssrc: 7,
+    frameWidth: 1920,
+    frameHeight: 1080,
+    framesPerSecond: 30,
+    bytesSent: 1_000_000,
+    timestamp: 1000,
+    ...overrides,
+  });
+  const remote = (overrides: Partial<ShareStats> = {}): ShareStats => ({ type: 'remote-inbound-rtp', kind: 'video', localId: 'OT1', ssrc: 7, fractionLost: 0.004, ...overrides });
+
+  it.each([
+    { reason: 'none', want: 'none' },
+    { reason: 'cpu', want: 'cpu' },
+    { reason: 'bandwidth', want: 'bandwidth' },
+    { reason: 'other', want: 'other' },
+  ])('keeps the encoder reason $reason', ({ reason, want }) => {
+    expect(shareSample([sent({ qualityLimitationReason: reason })], 'sent')?.limitation).toBe(want);
+  });
+
+  it('leaves an absent or unknown reason out rather than guessing', () => {
+    expect(shareSample([sent()], 'sent')).not.toHaveProperty('limitation');
+    expect(shareSample([sent({ qualityLimitationReason: 'sunspots' })], 'sent')).not.toHaveProperty('limitation');
+  });
+
+  it('reads the sender loss from the remote report of the same stream, and says nothing without one', () => {
+    const first = shareSample([sent(), remote()], 'sent');
+    expect(first?.lost).toBe(0.004);
+    expect(shareReadout(first)).toBe('1920×1080 · 30 fps · 0.4% lost');
+    const next = shareSample([sent({ bytesSent: 1_725_000, timestamp: 2000 }), remote({ fractionLost: 0 })], 'sent');
+    expect(shareReadout(next, first)).toBe('1920×1080 · 30 fps · 5.8 Mbps · 0.0% lost');
+    expect(shareReadout(shareSample([sent()], 'sent'))).toBe('1920×1080 · 30 fps');
+    // Another stream's report, an audio report and a nonsense fraction are not this one's.
+    expect(shareSample([sent(), remote({ localId: 'OT2', ssrc: 8 }), remote({ kind: 'audio' }), remote({ fractionLost: 7 })], 'sent')).not.toHaveProperty('lost');
+  });
+
+  it('reads the viewer loss from the received counters', () => {
+    const sample = shareSample([{ type: 'inbound-rtp', kind: 'video', frameWidth: 1280, frameHeight: 720, framesPerSecond: 15, packetsReceived: 995, packetsLost: 5 }], 'received');
+    expect(shareReadout(sample)).toBe('1280×720 · 15 fps · 0.5% lost');
+    const none = shareSample([{ type: 'inbound-rtp', kind: 'video', frameWidth: 1280, frameHeight: 720, framesPerSecond: 15, packetsReceived: 100 }], 'received');
+    expect(shareReadout(none)).toBe('1280×720 · 15 fps');
+    // A viewer has no encoder reason, whatever the stat holds.
+    expect(shareSample([{ type: 'inbound-rtp', kind: 'video', frameWidth: 1, frameHeight: 1, framesPerSecond: 1, qualityLimitationReason: 'cpu' }], 'received')).not.toHaveProperty('limitation');
+  });
+
+  it('keeps only the capture settings the browser gave', () => {
+    expect(shareSample([sent()], 'sent', 'TR', { width: 1280, height: 720, fps: 30 })?.captured).toEqual({ width: 1280, height: 720, fps: 30 });
+    expect(shareSample([sent()], 'sent', 'TR', { width: 0, height: undefined, fps: undefined })).not.toHaveProperty('captured');
+    expect(shareSample([{ ...sent(), type: 'inbound-rtp' }], 'received', 'TR', { width: 1280, height: 720 })).not.toHaveProperty('captured');
+  });
+
+  it('says what was asked, labelled as asked', () => {
+    expect(askedText({ resolution: '1080p', frameRate: 60 })).toBe('Asked 1080p · 60 fps');
+    expect(askedText({ resolution: '720p', frameRate: 15 })).toBe('Asked 720p · 15 fps');
+    expect(askedText({ resolution: 'source', frameRate: 30 })).toBe('Asked source size · 30 fps');
+  });
+});
+
+describe('the shortfall reason', () => {
+  const ask: ShareQuality = { resolution: '1080p', frameRate: 60 };
+  const sample = (overrides: Partial<ShareSample> = {}): ShareSample => ({ width: 1920, height: 1080, fps: 60, ...overrides });
+
+  it.each([
+    { what: 'on target', s: sample(), q: ask, want: null },
+    { what: 'a little under the rate is on target', s: sample({ fps: 49 }), q: ask, want: null },
+    { what: 'slow, the encoder says CPU', s: sample({ fps: 31, limitation: 'cpu' }), q: ask, want: 'Limited by CPU' },
+    { what: 'slow, the encoder says bandwidth', s: sample({ fps: 31, limitation: 'bandwidth' }), q: ask, want: 'Limited by bandwidth' },
+    { what: 'slow, the encoder says other', s: sample({ fps: 31, limitation: 'other' }), q: ask, want: "Your browser doesn't say why" },
+    { what: 'slow, no reason in the stats', s: sample({ fps: 31 }), q: ask, want: "Your browser doesn't say why" },
+    { what: 'slow but the encoder says none (a still screen)', s: sample({ fps: 2, limitation: 'none' }), q: ask, want: null },
+    { what: 'scaled down by bandwidth', s: sample({ width: 1280, height: 720, limitation: 'bandwidth', captured: { width: 1920, height: 1080 } }), q: ask, want: 'Limited by bandwidth' },
+    { what: 'a capture smaller than asked', s: sample({ width: 1280, height: 720, captured: { width: 1280, height: 720 } }), q: ask, want: 'The shared window is smaller than 1080p' },
+    { what: 'a capture smaller than asked beats a reason', s: sample({ width: 1280, height: 720, limitation: 'cpu', captured: { width: 1280, height: 720 } }), q: ask, want: 'The shared window is smaller than 1080p' },
+    { what: 'a smaller picture with no capture settings is not blamed on the window', s: sample({ width: 1280, height: 720, limitation: 'cpu' }), q: ask, want: 'Limited by CPU' },
+    { what: 'a taller capture fitted to the box is on target', s: sample({ width: 1728, height: 1080, captured: { width: 1920, height: 1200 } }), q: ask, want: null },
+    { what: '720p asked and delivered', s: sample({ width: 1280, height: 720 }), q: { resolution: '720p', frameRate: 60 }, want: null },
+    { what: 'a small window at 720p', s: sample({ width: 800, height: 600, captured: { width: 800, height: 600 } }), q: { resolution: '720p', frameRate: 60 }, want: 'The shared window is smaller than 720p' },
+    { what: 'source asks no size', s: sample({ width: 800, height: 600 }), q: { resolution: 'source', frameRate: 60 }, want: null },
+  ] satisfies { what: string; s: ShareSample; q: ShareQuality; want: string | null }[])('$what', ({ s, q, want }) => {
+    expect(shortfallReason(s, q)).toBe(want);
+  });
+
+  const slow = sample({ fps: 31, limitation: 'cpu' });
+  const step = (state: ShortfallState, s: ShareSample | null, now: number) => nextShortfall(state, s, ask, now);
+
+  it('shows the reason only after the shortfall has held, and clears it only after recovery has held', () => {
+    let state = noShortfall;
+    state = step(state, slow, 0);
+    expect(state.reason).toBeNull();
+    state = step(state, slow, shortfallHold - 1);
+    expect(state.reason).toBeNull();
+    state = step(state, slow, shortfallHold);
+    expect(state.reason).toBe('Limited by CPU');
+    // Back on target: the reason stays until the hold has passed.
+    state = step(state, sample(), 6000);
+    expect(state.reason).toBe('Limited by CPU');
+    state = step(state, sample(), 6000 + shortfallHold - 1);
+    expect(state.reason).toBe('Limited by CPU');
+    state = step(state, sample(), 6000 + shortfallHold);
+    expect(state.reason).toBeNull();
+  });
+
+  it('a blip shorter than the hold never shows, and a relapse restarts the hold', () => {
+    let state = step(noShortfall, slow, 0);
+    state = step(state, sample(), 3000);
+    state = step(state, slow, 4000);
+    state = step(state, slow, 4000 + shortfallHold - 1);
+    expect(state.reason).toBeNull();
+    state = step(state, slow, 4000 + shortfallHold);
+    expect(state.reason).toBe('Limited by CPU');
+    // A relapse while the reason shows keeps it, and cancels the clearing.
+    state = step(state, sample(), 10_000);
+    state = step(state, slow, 12_000);
+    state = step(state, sample(), 14_000);
+    expect(state.reason).toBe('Limited by CPU');
+  });
+
+  it('follows the latest reason while short, and starts over on no sample or another publication', () => {
+    let state = step(noShortfall, { ...slow, publication: 'A' }, 0);
+    state = step(state, { ...slow, publication: 'A' }, shortfallHold);
+    expect(state.reason).toBe('Limited by CPU');
+    state = step(state, { ...slow, publication: 'A', limitation: 'bandwidth' }, 6000);
+    expect(state.reason).toBe('Limited by bandwidth');
+    expect(step(state, { ...slow, publication: 'B' }, 7000).reason).toBeNull();
+    expect(step(state, null, 7000)).toEqual(noShortfall);
   });
 });
