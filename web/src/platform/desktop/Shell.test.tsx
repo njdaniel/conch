@@ -328,3 +328,18 @@ describe('server compatibility (issue #946)', () => {
     expect(alert.textContent).toMatch(/v1\.0\.0/);
   });
 });
+
+describe('the update notice (issue #1600)', () => {
+  const updated = { updateState: () => Promise.resolve({ updated: true, version: '0.1.0-alpha.18' }), updateRestart: () => Promise.resolve(), onUpdateState: () => () => undefined };
+
+  it.each([
+    ['the server list', view()],
+    ['the recovery screen', view({ recovery: true })],
+    ['the blocked screen', view({ profiles: [profile(ID_A, 'a.example', null, true)], active: ID_A, compat: compat({ state: 'unsupported' }) })],
+  ] as const)('is shown on %s', async (_name, shown) => {
+    install({ profiles: () => Promise.resolve(shown), ...updated });
+    render(<DesktopShell>{child}</DesktopShell>);
+    expect(await screen.findByText('Conch was updated to 0.1.0-alpha.18. Restart when you’re ready.')).toBeTruthy();
+    expect(screen.queryByText('the client')).toBeNull();
+  });
+});

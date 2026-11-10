@@ -549,6 +549,8 @@ describe('the one-shot runs (issue #1378)', () => {
     });
     const pending = slow.devices();
     const torn = slow.teardown();
+    // The run reaches identity() after the stamp read (issue #1600).
+    await new Promise<void>((resolve) => setImmediate(resolve));
     release(id);
     expect(await pending).toEqual({ ok: false, error: 'not-signed-in' });
     await torn;
@@ -618,5 +620,56 @@ describe('the installed files were replaced (issue #1600)', () => {
     expect(fake.calls).toContain('stop');
     expect((await join()).problem).toBe('update-pending');
     expect(fake.starts.length).toBe(1);
+  });
+});
+
+describe('the stamp changes between focus and Join (issue #1600)', () => {
+  it('a Join is refused when the re-read finds the update, with no focus or tick', async () => {
+    const stamp = { value: 'old' };
+    const running = 'old';
+    let known = false;
+    svc = new VoiceService({
+      supervisor: fake,
+      oneShot,
+      identity: () => Promise.resolve(id),
+      log: (l) => logs.push(l),
+      stopBoundMs: 200,
+      updated: () => known,
+      recheck: () => {
+        known = stamp.value !== running;
+        return Promise.resolve();
+      },
+    });
+    expect((await svc.join({ channel: 'general', muted: false, deafened: false })).status).toBe('running');
+    await svc.leave();
+    stamp.value = 'new';
+    const v = await svc.join({ channel: 'general', muted: false, deafened: false });
+    expect(v).toMatchObject({ status: 'unavailable', problem: 'update-pending' });
+    expect(fake.starts.length).toBe(1);
+  });
+
+  it('a failed re-read keeps the last answer', async () => {
+    svc = new VoiceService({ supervisor: fake, oneShot, identity: () => Promise.resolve(id), log: (l) => logs.push(l), updated: () => false, recheck: () => Promise.reject(new Error('x')) });
+    expect((await svc.join({ channel: 'general', muted: false, deafened: false })).status).toBe('running');
+  });
+});
+
+describe('one-shot helper runs after an update (issue #1600)', () => {
+  beforeEach(() => {
+    svc = new VoiceService({ supervisor: fake, oneShot, identity: () => Promise.resolve(id), log: (l) => logs.push(l), updated: () => true });
+  });
+
+  it('refuses the device list with update-pending and runs nothing', async () => {
+    expect(await svc.devices()).toEqual({ ok: false, error: 'update-pending' });
+    expect(oneShot.calls).toEqual([]);
+  });
+
+  it('refuses a device save with update-pending and runs nothing', async () => {
+    expect(await svc.saveDevice({ key: 'audio.input', value: 'mic' })).toEqual({ ok: false, error: 'update-pending' });
+    expect(oneShot.calls).toEqual([]);
+  });
+
+  it('still says invalid for a bad save, before anything else', async () => {
+    expect(await svc.saveDevice({ key: 'keys.talk' as never, value: 'x' })).toEqual({ ok: false, error: 'invalid' });
   });
 });

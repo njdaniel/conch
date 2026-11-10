@@ -24,6 +24,10 @@
 #     or StartupWMClass;
 #   - the text --no-sandbox in any text file, maintainer scripts included;
 #   - a maintainer script that changes groups, capabilities, setuid bits or udev;
+#   - a missing /opt/conch-desktop/resources/version (the installed stamp the
+#     running app reads to notice an update, issue #1600), one not 0644
+#     root-owned, or one whose app version is not the package's (the deb
+#     Version is its Debian spelling: first '-' to '~', later '-' to '.');
 #   - a control file with the wrong Package or Architecture, no Version, or an
 #     empty or missing Depends.
 # Fixture mode also builds twice, the second time from a copy of the tree with
@@ -92,6 +96,27 @@ check_deb() {
         echo "missing or not executable /opt/conch-desktop/conch-desktop" >>"$problems"
     awk '$6 == "./usr/bin/conch-desktop" && $7 == "->" && $8 == "/opt/conch-desktop/conch-desktop" {f = 1} END {exit !f}' "$listing" ||
         echo "/usr/bin/conch-desktop is not a link to /opt/conch-desktop/conch-desktop" >>"$problems"
+
+    # The installed stamp (issue #1600): the app version the build wrote beside
+    # the asar. The deb Version is its Debian spelling, so the stamp is mapped
+    # the same way as scripts/desktop-version.sh does (it takes only tags, and
+    # a development version has build metadata, so the mapping is repeated).
+    local stamp_line stamp_file=$x/opt/conch-desktop/resources/version
+    stamp_line=$(awk '$6 == "./opt/conch-desktop/resources/version" {print $1 " " $2}' "$listing")
+    if [ -z "$stamp_line" ]; then
+        echo "missing /opt/conch-desktop/resources/version" >>"$problems"
+    else
+        [ "$stamp_line" = "-rw-r--r-- root/root" ] || echo "resources/version is '$stamp_line', not '-rw-r--r-- root/root'" >>"$problems"
+        local app mapped debv
+        app=$(tr -d '\n' <"$stamp_file")
+        mapped=$app
+        if [[ $app == *-* ]]; then
+            local pre=${app#*-}
+            mapped="${app%%-*}~${pre//-/.}"
+        fi
+        debv=$(dpkg-deb -f "$deb" Version)
+        [ "$mapped" = "$debv" ] || echo "resources/version says '$app', which is not the package's Version '$debv'" >>"$problems"
+    fi
 
     # The desktop file.
     local df=$x/usr/share/applications/chat.conch.desktop.desktop
@@ -165,6 +190,7 @@ chmod 4755 "$tree/chrome-sandbox" 2>/dev/null || chmod 755 "$tree/chrome-sandbox
 printf '#!/bin/sh\necho "conch-voice 0.1.0-alpha.18 (fixture)"\n' >"$tree/resources/conch-voice"
 chmod 777 "$tree/resources/conch-voice"
 echo fixture >"$tree/resources/app.asar"
+printf '0.1.0-alpha.18\n' >"$tree/resources/version"
 echo fixture >"$tree/locales/en-US.pak"
 echo fixture >"$tree/LICENSE"
 chmod 666 "$tree/LICENSE"
@@ -222,7 +248,10 @@ fi
 echo "desktop-deb-test: two builds are byte-identical"
 
 # A development package builds too, and is a valid one.
-build "$tree" "$tmp/dev"
+# Its stamp is the development version scripts/desktop-build.sh writes.
+cp -r "$tree" "$tmp/devtree"
+printf '0.0.0-dev+%s\n' "$(git rev-parse --short HEAD 2>/dev/null || echo nogit)" >"$tmp/devtree/resources/version"
+build "$tmp/devtree" "$tmp/dev"
 dev=$(ls "$tmp/dev"/conch-desktop_0.0.0~dev+*_amd64.deb) || fail "no development package"
 check_deb "$dev" >"$tmp/out" 2>&1 || { sed 's/^/  /' "$tmp/out" >&2; fail "the development package fails its checks"; }
 
@@ -264,6 +293,9 @@ m_nodeps() { sed -i '/^Depends:/d' "$1/DEBIAN/control"; }
 m_emptydeps() { sed -i 's/^Depends:.*/Depends: /' "$1/DEBIAN/control"; }
 m_arch() { sed -i 's/^Architecture:.*/Architecture: arm64/' "$1/DEBIAN/control"; }
 m_stray() { mkdir -p "$1/usr/lib/stray" && echo x >"$1/usr/lib/stray/x"; }
+m_nostamp() { rm "$1/opt/conch-desktop/resources/version"; }
+m_stampmismatch() { printf '0.1.0-alpha.19\n' >"$1/opt/conch-desktop/resources/version"; }
+m_stampmode() { chmod 600 "$1/opt/conch-desktop/resources/version"; }
 m_nolink() { rm "$1/usr/bin/conch-desktop"; }
 
 break_it group-writable "group-writable" 1 m_gw
@@ -274,6 +306,9 @@ break_it udev-rule "udev" 1 m_udev
 break_it etc-file "in /etc beyond" 1 m_etc
 break_it no-helper "missing /opt/conch-desktop/resources/conch-voice" 1 m_nohelper
 break_it helper-not-executable "not -rwxr-xr-x" 1 m_nonexec
+break_it no-stamp "missing /opt/conch-desktop/resources/version" 1 m_nostamp
+break_it stamp-of-another-version "which is not the package's Version" 1 m_stampmismatch
+break_it stamp-not-0644 "resources/version is" 1 m_stampmode
 break_it no-launcher-link "not a link" 1 m_nolink
 if [ "$have_validator" = 1 ]; then
     break_it bad-desktop-file "desktop-file-validate" 1 m_baddesktop

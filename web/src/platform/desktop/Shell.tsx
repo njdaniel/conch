@@ -32,7 +32,18 @@ import { UpdateNotice } from './ui/UpdateNotice';
 
 type Phase = 'loading' | 'recovery' | 'list' | 'blocked' | 'ready' | 'missing';
 
+// The update notice is outside every phase: a package update is as true on the
+// server list, the recovery screen and the blocked screen as in the client.
 export function DesktopShell({ children }: { readonly children: ReactNode }) {
+  return (
+    <>
+      <UpdateNotice />
+      <Phases>{children}</Phases>
+    </>
+  );
+}
+
+function Phases({ children }: { readonly children: ReactNode }) {
   const [phase, setPhase] = useState<Phase>('loading');
   const [view, setView] = useState<ProfilesView | null>(null);
 
@@ -81,7 +92,6 @@ export function DesktopShell({ children }: { readonly children: ReactNode }) {
   if (phase === 'ready' && view !== null) {
     return (
       <>
-        <UpdateNotice />
         <ProfileBar initial={view} />
         {children}
       </>

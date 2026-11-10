@@ -362,7 +362,9 @@ export type VoiceOneShotError =
   | 'unsupported'
   | 'failed'
   | 'bad-output'
-  | 'cancelled';
+  | 'cancelled'
+  // The installed files were replaced under this running app (issue #1600).
+  | 'update-pending';
 
 // The device list as the page gets it: the validated document's microphones
 // and speakers (each with its default flag), and whether PipeWire was

@@ -22,7 +22,9 @@
 //     and a file with anything else in it is treated as unreadable;
 //   - restart() is the only way out: it runs only after the person's click (the
 //     IPC takes it with a gesture) and goes through the app's normal quit,
-//     whose teardown stops the helper and removes the companion;
+//     whose teardown stops the helper and removes the companion; it arms the
+//     relaunch once, so a double click (or the dialog's Restart after a click)
+//     starts one instance, not two;
 //   - nothing here stops a running helper: a call continues until the person
 //     restarts.
 import type { InstalledView } from '../../web/src/platform/desktop/bridge.ts';
@@ -65,6 +67,9 @@ export class Installed {
   #reading: Promise<void> | null = null;
   #stopTimer: (() => void) | null = null;
   #asked = false;
+  // Relaunch is armed once: a second click, or the dialog after a click, is
+  // not a second instance.
+  #restarting = false;
   readonly #listeners = new Set<(view: InstalledView) => void>();
 
   constructor(private readonly deps: InstalledDeps) {
@@ -125,6 +130,11 @@ export class Installed {
       this.deps.log('installed: restart refused: nothing was updated');
       return;
     }
+    if (this.#restarting) {
+      this.deps.log('installed: restart refused: already restarting');
+      return;
+    }
+    this.#restarting = true;
     this.deps.relaunch();
   }
 
@@ -176,6 +186,23 @@ export class Installed {
       }
     }
   }
+}
+
+// A page failure main saw, for shouldAskAfterFailure.
+export type PageFailure =
+  | { readonly kind: 'did-fail-load'; readonly code: number; readonly isMainFrame: boolean; readonly ending: boolean }
+  | { readonly kind: 'render-process-gone'; readonly reason: string; readonly ending: boolean };
+
+// Chromium's ERR_ABORTED: a load that was replaced or cancelled, not a failure.
+const ERR_ABORTED = -3;
+
+// shouldAskAfterFailure says whether a page failure may open the update dialog:
+// not a subframe, not an aborted load, not a renderer that exited cleanly, and
+// nothing once the app is quitting.
+export function shouldAskAfterFailure(event: PageFailure): boolean {
+  if (event.ending) return false;
+  if (event.kind === 'did-fail-load') return event.isMainFrame && event.code !== ERR_ABORTED;
+  return event.reason !== 'clean-exit';
 }
 
 export interface UpdateTarget {

@@ -5,7 +5,7 @@
 import { useEffect, useState } from 'react';
 
 import { bridge } from '../access';
-import type { DesktopUpdateBridge, InstalledView } from '../bridge';
+import type { DesktopUpdateBridge, DesktopVoiceBridge, InstalledView, NativeVoiceView } from '../bridge';
 import { restartLabel, updatedLine } from './text';
 
 // The update half of the bridge, or undefined when the preload does not offer
@@ -18,8 +18,34 @@ function updateBridge(): DesktopUpdateBridge | undefined {
   return b as DesktopUpdateBridge;
 }
 
+// Whether voice is running, from the voice half of the bridge when the preload
+// offers it. Absent, nothing is said about a call.
+function voiceBridge(): Pick<DesktopVoiceBridge, 'voiceState' | 'onVoiceState'> | undefined {
+  const whole = bridge();
+  if (whole === undefined) return undefined;
+  const b: Partial<Pick<DesktopVoiceBridge, 'voiceState' | 'onVoiceState'>> = whole as object;
+  if (typeof b.voiceState !== 'function' || typeof b.onVoiceState !== 'function') return undefined;
+  return b as Pick<DesktopVoiceBridge, 'voiceState' | 'onVoiceState'>;
+}
+
 export function UpdateNotice() {
   const [view, setView] = useState<InstalledView>({ updated: false, version: null });
+  const [callActive, setCallActive] = useState(false);
+
+  useEffect(() => {
+    const b = voiceBridge();
+    if (b === undefined) return;
+    let live = true;
+    const accept = (v: NativeVoiceView) => {
+      if (live) setCallActive(v.status === 'running');
+    };
+    const off = b.onVoiceState(accept);
+    b.voiceState().then(accept, () => undefined);
+    return () => {
+      live = false;
+      off();
+    };
+  }, []);
 
   useEffect(() => {
     const b = updateBridge();
@@ -43,7 +69,7 @@ export function UpdateNotice() {
   if (!view.updated) return null;
   return (
     <section role="status" aria-label="Update" className="notice desktop-update">
-      <p>{updatedLine(view.version)}</p>
+      <p>{updatedLine(view.version, callActive)}</p>
       <button
         type="button"
         onClick={() => {

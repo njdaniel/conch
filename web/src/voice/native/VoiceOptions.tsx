@@ -19,6 +19,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { NativeVoiceDevicesResult, NativeVoiceView, VoiceDeviceKey, VoiceOneShotError } from '../../platform/desktop/bridge';
 import type { NativeVoice } from '../../platform/types';
+import { updatePendingWords } from './words';
 import type { VoiceControlTalkMode, VoiceDevice } from '../../schema/generated';
 
 export const systemDefault = 'default';
@@ -41,6 +42,7 @@ const oneShotWords: Readonly<Record<VoiceOneShotError, string>> = {
   failed: 'The voice helper could not do that.',
   'bad-output': 'The voice helper gave an answer that could not be read.',
   cancelled: 'Cancelled.',
+  'update-pending': updatePendingWords,
 };
 
 // Bidi format characters: marks, embeddings and overrides, isolates.

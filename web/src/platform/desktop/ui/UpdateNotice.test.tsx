@@ -2,10 +2,10 @@
 // and a restart only on the click.
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import type { DesktopUpdateBridge, InstalledView } from '../bridge';
+import type { DesktopUpdateBridge, InstalledView, NativeVoiceView } from '../bridge';
 import { UpdateNotice } from './UpdateNotice';
 
-function install(first: InstalledView): { push: (view: InstalledView) => void; restart: ReturnType<typeof vi.fn> } {
+function install(first: InstalledView, voice?: NativeVoiceView): { push: (view: InstalledView) => void; restart: ReturnType<typeof vi.fn> } {
   let listener: (view: InstalledView) => void = () => undefined;
   const restart = vi.fn(() => Promise.resolve());
   const update: DesktopUpdateBridge = {
@@ -18,7 +18,8 @@ function install(first: InstalledView): { push: (view: InstalledView) => void; r
       };
     },
   };
-  Object.defineProperty(window, 'conchDesktop', { value: update, configurable: true, writable: true });
+  const whole = voice === undefined ? update : { ...update, voiceState: () => Promise.resolve(voice), onVoiceState: () => () => undefined };
+  Object.defineProperty(window, 'conchDesktop', { value: whole, configurable: true, writable: true });
   return {
     push: (view) => {
       act(() => {
@@ -74,5 +75,15 @@ describe('UpdateNotice', () => {
     expect(bridge.restart).not.toHaveBeenCalled();
     fireEvent.click(button);
     expect(bridge.restart).toHaveBeenCalledOnce();
+  });
+
+  it('adds that restarting ends the call only while voice is running', async () => {
+    install({ updated: true, version: '0.1.0-alpha.18' }, { status: 'running', generation: 1, channel: null, retryable: false });
+    render(<UpdateNotice />);
+    expect(await screen.findByText('Conch was updated to 0.1.0-alpha.18. Restart when you’re ready. Restarting ends your call.')).toBeTruthy();
+    cleanup();
+    install({ updated: true, version: '0.1.0-alpha.18' }, { status: 'idle', generation: 1, channel: null, retryable: false });
+    render(<UpdateNotice />);
+    expect(await screen.findByText('Conch was updated to 0.1.0-alpha.18. Restart when you’re ready.')).toBeTruthy();
   });
 });

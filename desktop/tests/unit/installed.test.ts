@@ -5,7 +5,7 @@ import { describe, expect, it } from 'vitest';
 import type { InstalledView } from '../../../web/src/platform/desktop/bridge.ts';
 import { UPDATE_EVENTS } from '../../shared/bridge-names.ts';
 import { DocumentGate } from '../../main/document.ts';
-import { deliverUpdate, INTERVAL_MS, Installed, parseStamp } from '../../main/installed.ts';
+import { deliverUpdate, INTERVAL_MS, Installed, parseStamp, shouldAskAfterFailure } from '../../main/installed.ts';
 
 // A stamp file that can be changed, made unreadable or made to say anything.
 class FakeFs {
@@ -219,6 +219,26 @@ describe('restarting', () => {
     expect(r.relaunches.n).toBe(0);
   });
 
+  it('arms the relaunch once: a double click is one relaunch', async () => {
+    const r = await rig();
+    r.fs.stamp = '0.1.0-alpha.18';
+    await r.installed.check();
+    r.installed.restart();
+    r.installed.restart();
+    expect(r.relaunches.n).toBe(1);
+    expect(r.logs.some((l) => l.includes('already restarting'))).toBe(true);
+  });
+
+  it('the dialog shares the latch: a click then the dialog\'s Restart is one relaunch', async () => {
+    const r = await rig();
+    r.fs.stamp = '0.1.0-alpha.18';
+    await r.installed.check();
+    r.answer = true;
+    r.installed.restart();
+    await r.installed.pageFailed();
+    expect(r.relaunches.n).toBe(1);
+  });
+
   it('chooses Restart in the dialog and the app relaunches', async () => {
     const r = await rig();
     r.fs.stamp = '0.1.0-alpha.18';
@@ -253,5 +273,19 @@ describe('delivery', () => {
     expect(sent).toEqual([[UPDATE_EVENTS, view]]);
     deliverUpdate({ contents: () => null, gate: () => gate }, view);
     expect(sent).toHaveLength(1);
+  });
+});
+
+describe('which page failures may ask (issue #1600)', () => {
+  it.each([
+    ['a main-frame load failure', { kind: 'did-fail-load', code: -105, isMainFrame: true, ending: false }, true],
+    ['an aborted load (-3)', { kind: 'did-fail-load', code: -3, isMainFrame: true, ending: false }, false],
+    ['a subframe load failure', { kind: 'did-fail-load', code: -105, isMainFrame: false, ending: false }, false],
+    ['a crashed renderer', { kind: 'render-process-gone', reason: 'crashed', ending: false }, true],
+    ['a clean renderer exit', { kind: 'render-process-gone', reason: 'clean-exit', ending: false }, false],
+    ['a failure while quitting', { kind: 'did-fail-load', code: -105, isMainFrame: true, ending: true }, false],
+    ['a crash while quitting', { kind: 'render-process-gone', reason: 'crashed', ending: true }, false],
+  ] as const)('%s', (_name, event, want) => {
+    expect(shouldAskAfterFailure(event)).toBe(want);
   });
 });

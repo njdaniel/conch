@@ -68,6 +68,23 @@ export const incompatibleLine = (family: string, server: string | null, desktop:
 // release version, and is shown as text.
 export const restartLabel = 'Restart';
 
-export function updatedLine(version: string | null): string {
-  return version === null ? 'Conch was updated. Restart when you’re ready.' : `Conch was updated to ${version}. Restart when you’re ready.`;
+// Said when voice is running: a restart quits the app, and the call with it.
+export const restartEndsCall = 'Restarting ends your call.';
+
+export function updatedLine(version: string | null, callActive = false): string {
+  const line = version === null ? 'Conch was updated. Restart when you’re ready.' : `Conch was updated to ${version}. Restart when you’re ready.`;
+  return callActive ? `${line} ${restartEndsCall}` : line;
+}
+
+// The native dialog main shows when a page did not start after an update (the
+// page cannot show the notice itself then). The same words as the notice.
+export const updateDialogButtons: readonly [string, string] = ['Restart', 'Later'];
+
+export function updateDialogMessage(version: string | null): string {
+  return version === null ? 'Conch was updated' : `Conch was updated to ${version}`;
+}
+
+export function updateDialogDetail(callActive: boolean): string {
+  const detail = 'Restart Conch to finish the update. Your saved servers are kept. Nothing is restarted until you choose.';
+  return callActive ? `${detail} ${restartEndsCall}` : detail;
 }

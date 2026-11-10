@@ -29,7 +29,8 @@ import { debuggingVerdict } from './debugging.ts';
 import { Files } from './files.ts';
 import { Gestures } from './gestures.ts';
 import { installGuards } from './guards.ts';
-import { deliverUpdate, Installed } from './installed.ts';
+import { deliverUpdate, Installed, shouldAskAfterFailure } from './installed.ts';
+import { updateDialogButtons, updateDialogDetail, updateDialogMessage } from '../../web/src/platform/desktop/ui/text.ts';
 import { Ipc } from './ipc.ts';
 import { Links } from './links.ts';
 import { saveChosenFile } from './save-file.ts';
@@ -207,6 +208,12 @@ export async function start(): Promise<void> {
   // when a window gains focus and every ten minutes. Nothing restarts by
   // itself: the page's Restart button relaunches (a gesture-checked IPC), and
   // the relaunch goes through the quit below, so the helper is reaped first.
+  // True once the app is quitting (set by before-quit below): a window or
+  // renderer going away then is the quit, not a failed page.
+  let ending = false;
+  // Whether a call is running, said in the notice and the dialog; set once the
+  // voice service exists.
+  let callActive = (): boolean => false;
   const installed = new Installed({
     read: () => readFile(join(process.resourcesPath, 'version'), 'utf8'),
     running: app.getVersion(),
@@ -224,9 +231,9 @@ export async function start(): Promise<void> {
     ask: async (version) => {
       const options = {
         type: 'info' as const,
-        message: version === null ? 'Conch was updated' : `Conch was updated to ${version}`,
-        detail: "Restart Conch to finish the update. Your saved servers are kept. Nothing is restarted until you choose.",
-        buttons: ['Restart', 'Later'],
+        message: updateDialogMessage(version),
+        detail: updateDialogDetail(callActive()),
+        buttons: [...updateDialogButtons],
         defaultId: 1,
         cancelId: 1,
         noLink: true,
@@ -249,11 +256,11 @@ export async function start(): Promise<void> {
     contents.on('did-finish-load', () => {
       installed.pageStarted();
     });
-    contents.on('did-fail-load', (_e, _code, _description, _url, isMainFrame) => {
-      if (isMainFrame) void installed.pageFailed();
+    contents.on('did-fail-load', (_e, code, _description, _url, isMainFrame) => {
+      if (shouldAskAfterFailure({ kind: 'did-fail-load', code, isMainFrame, ending })) void installed.pageFailed();
     });
-    contents.on('render-process-gone', () => {
-      void installed.pageFailed();
+    contents.on('render-process-gone', (_e, details) => {
+      if (shouldAskAfterFailure({ kind: 'render-process-gone', reason: details.reason, ending })) void installed.pageFailed();
     });
   });
   await installed.start();
@@ -291,8 +298,10 @@ export async function start(): Promise<void> {
       };
     },
     updated: () => installed.updated(),
+    recheck: () => installed.check(),
     log,
   });
+  callActive = () => voice.state().status === 'running';
   teardownHooks.media('voice', () => voice.teardown());
   // Every change of the helper's confirmed state goes to the owned window.
   voice.subscribe((view) => {
@@ -327,7 +336,6 @@ export async function start(): Promise<void> {
     log,
   }).register(ipcMain);
 
-  let ending = false;
   app.on('before-quit', (event) => {
     if (ending) return;
     ending = true;
