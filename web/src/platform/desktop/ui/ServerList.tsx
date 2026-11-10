@@ -5,6 +5,7 @@ import { useId, useRef, useState, type SyntheticEvent } from 'react';
 
 import { bridge } from '../access';
 import type { ProfileView, ProfilesView } from '../bridge';
+import { InviteLink } from './InviteLink';
 import { StorageStatus } from './StorageStatus';
 import { addRefusalLines, example, noticeLines } from './text';
 
@@ -13,9 +14,12 @@ interface Props {
   readonly onView: (view: ProfilesView) => void;
   // Shown when the list is the whole screen, not a panel over the client.
   readonly heading?: boolean;
+  // Whether the active profile's client is on the page; false on the
+  // "unsupported release" page (./Compat).
+  readonly clientMounted?: boolean;
 }
 
-export function ServerList({ view, onView, heading = false }: Props) {
+export function ServerList({ view, onView, heading = false, clientMounted = true }: Props) {
   const [line, setLine] = useState('');
   const [busy, setBusy] = useState(false);
   const [renaming, setRenaming] = useState<string | null>(null);
@@ -212,6 +216,7 @@ export function ServerList({ view, onView, heading = false }: Props) {
           Continue
         </button>
       </form>
+      <InviteLink clientMounted={clientMounted} />
       <p className="hint">Another account on a server you have already saved is another entry: add the same address again.</p>
     </section>
   );

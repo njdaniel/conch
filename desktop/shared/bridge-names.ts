@@ -6,7 +6,7 @@
 // bridge's subscribe is not one invoke: the preload carries it as the three
 // feed calls below, and main answers with feed events on the one channel
 // FEED_EVENTS (issue #943).
-import type { ConchDesktopBridge, DesktopCompanionBridge, DesktopSettingsBridge, DesktopUpdateBridge, DesktopVoiceBridge } from '../../web/src/platform/desktop/bridge.ts';
+import type { ConchDesktopBridge, DesktopCompanionBridge, DesktopInviteBridge, DesktopSettingsBridge, DesktopUpdateBridge, DesktopVoiceBridge } from '../../web/src/platform/desktop/bridge.ts';
 
 export const BRIDGE_FUNCTIONS = [
   'serverAddress',
@@ -79,6 +79,10 @@ export const VOICE_FUNCTIONS = [
 
 export type VoiceFunction = (typeof VOICE_FUNCTIONS)[number];
 
+// Opening an invite link (issue #1591, D5-05): DesktopInviteBridge.
+export const INVITE_FUNCTIONS = ['inviteCheck', 'inviteAccept', 'inviteCancel', 'inviteTake'] as const satisfies readonly (keyof DesktopInviteBridge)[];
+
+export type InviteFunction = (typeof INVITE_FUNCTIONS)[number];
 // The app's own settings (issue #1587): read them, change them.
 export const SETTINGS_FUNCTIONS = ['settings', 'settingsSet'] as const satisfies readonly (keyof DesktopSettingsBridge)[];
 
@@ -104,13 +108,14 @@ export const FEED_CALLS = ['feedSubscribe', 'feedAck', 'feedUnsubscribe'] as con
 export type FeedCall = (typeof FEED_CALLS)[number];
 
 // The functions that cross into main as one invoke each.
-export type InvokedFunction = Exclude<BridgeFunction, 'subscribe'> | FeedCall | ProfileFunction | VoiceFunction | NotifyFunction | SettingsFunction | CompanionFunction | UpdateFunction;
+export type InvokedFunction = Exclude<BridgeFunction, 'subscribe'> | FeedCall | ProfileFunction | VoiceFunction | InviteFunction | NotifyFunction | SettingsFunction | CompanionFunction | UpdateFunction;
 
 export const INVOKED_FUNCTIONS: readonly InvokedFunction[] = [
   ...BRIDGE_FUNCTIONS.filter((name): name is Exclude<BridgeFunction, 'subscribe'> => name !== 'subscribe'),
   ...FEED_CALLS,
   ...PROFILE_FUNCTIONS,
   ...VOICE_FUNCTIONS,
+  ...INVITE_FUNCTIONS,
   ...NOTIFY_FUNCTIONS,
   ...SETTINGS_FUNCTIONS,
   ...COMPANION_FUNCTIONS,
