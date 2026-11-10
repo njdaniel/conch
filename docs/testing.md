@@ -4,14 +4,15 @@ Which suite runs where, what it proves and what it does not, and the rules for
 the tags, the pull request budget, flakes and artifacts (issue #1613, epic
 #1607). The unit tests (`go test`, `cargo test`, Vitest) are not here: `make
 check` runs them. Nothing below runs against production or the alpha by
-default; every suite starts its own throwaway `conchd`.
+default; every suite starts its own throwaway `conchd` (except `desktop-smoke`,
+which serves the packaged files and starts none).
 
 ## The suites
 
 | Suite (CI job) | Lane | What it proves | What it does not | Local command | Artifacts |
 | --- | --- | --- | --- | --- | --- |
 | `web/e2e` in Chromium (`web-e2e`, three shards) | every pull request and push to `main`, with `--grep-invert @heavy` | the browser client against a fixture community: sign-in, messages, admin, browser voice, camera and screen share on Chromium's fake devices, with the pinned LiveKit in Docker | Firefox and WebKit (#1658); real microphones, cameras and screens; a LAN or a second machine; real AI agents (scripted ones only) | `make web-e2e` (once: `cd web && npx playwright install chromium`) | traces of failed tests, `web-e2e-test-results-N`, 7 days |
-| `web/e2e` heavy lane (`e2e-heavy.yml`) | daily on `main`, and on demand for any branch | the tests tagged `@heavy`: those over the pull request budget, and deliberate fault or blackhole tests | the same limits as the row above | `make web-e2e E2E_ARGS="--grep @heavy"` (or `make web-e2e-heavy`) | traces of failed tests, `e2e-heavy-test-results`, 7 days |
+| `web/e2e` heavy lane (`e2e-heavy.yml`) | daily on `main`, and on demand for any branch | the tests tagged `@heavy`: those over the pull request budget, and deliberate fault or blackhole tests | the same limits as the row above | `make web-e2e-heavy` (a bare `--grep @heavy` fails with "No tests found" until a heavy test exists) | traces of failed tests, `e2e-heavy-test-results`, 7 days |
 | `voice-check` | every pull request | the voice control plane: a real `conchd`, the real `conch` CLI, three `conch-voice` clients and a real LiveKit; the core unaffected with LiveKit down | a human's ears; real audio devices; PipeWire | `go run ./e2e/voice` (Docker) | the log |
 | `desktop-voice-check` | every pull request | the Linux desktop shell's voice and screen companion against the web client and LiveKit | a real display or sound card; a second machine (#1584) | `make desktop-voice-e2e` (Docker) | the log |
 | `isolation-check` | every pull request | access between groups: what a principal outside a group can and cannot reach, with LiveKit rooms | the browser; more than the scripted principals | `go run ./e2e/isolation` (Docker) | the log |
@@ -23,7 +24,10 @@ default; every suite starts its own throwaway `conchd`.
 | `conch-bot-check` | every pull request | the reference bot as a client of the public API | other bots | `go run ./e2e/conch-bot` | the log |
 | `desktop-smoke` | every pull request | the packaged desktop app starts under a virtual display and serves the web client | real windowing, the installed `.deb`, other distributions (#1603) | `xvfb-run -a make desktop-smoke` (after `make desktop-build`) | the log |
 
-Docs-only pull requests run none of these (`scripts/ci-docs-only.sh`).
+Docs-only pull requests run none of these (`scripts/ci-docs-only.sh`), with
+one exception: a docs-only pull request labelled `approval-path` still runs
+`dogfood-check`, which has no `changes` gate. Every suite here also runs on
+every push to `main`.
 
 Two limits hold for every row. Principals in these suites are separate
 principals or sessions of one principal as each suite says, but all run on one
@@ -55,7 +59,9 @@ A test carries tags in Playwright's `tag` option:
 - `@cross` marks the subset other browser engines run (#1658). Only Chromium
   is configured today.
 
-Untagged tests stay in the pull request lane.
+Untagged tests stay in the pull request lane. `--grep` is an unanchored regular
+expression over titles and tags, so a tag that merely contains `@heavy` (say
+`@heavy-gpu`) is caught too.
 
 ## Lanes and cost
 
@@ -66,7 +72,8 @@ Untagged tests stay in the pull request lane.
 - **Heavy lane:** `.github/workflows/e2e-heavy.yml` on `ubuntu-latest`, daily
   (GitHub runs schedules on `main` only) and on `workflow_dispatch`. To run it
   on a branch: Actions, e2e-heavy, Run workflow, pick the branch (or `gh
-  workflow run e2e-heavy.yml --ref <branch>`). It has its own concurrency group,
+  workflow run e2e-heavy.yml --ref <branch>`). The branch must contain
+  `e2e-heavy.yml`, so rebase on `main` first. It has its own concurrency group,
   a 40-minute bound and `contents: read` permission only. With no `@heavy` test
   yet it passes through `--pass-with-no-tests`. It does not use the
   self-hosted `HEAVY_RUNNER` path. The repository is public, so hosted minutes
@@ -75,9 +82,11 @@ Untagged tests stay in the pull request lane.
 
 ## Flake policy
 
-`retries: 0` in both lanes: a retry hides the flake. A failing heavy run is
-triaged at the principal's next session. A test that fails twice in 7 heavy
-runs with no related change gets an issue. It may be quarantined with
+`retries: 0` in both lanes: a retry hides the flake. A failing heavy run
+does not notify anyone; it is noticed with `gh run list --workflow
+e2e-heavy.yml --limit 7`, which also makes the "twice in 7 runs" rule
+checkable, and triaged at the principal's next session. A test that fails
+twice in 7 heavy runs with no related change gets an issue. It may be quarantined with
 `test.fixme` and a link to that issue only if the pull request description
 says so (CLAUDE.md, rule 6): never skip or delete a failing test silently.
 

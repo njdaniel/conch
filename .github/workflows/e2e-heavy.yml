@@ -22,13 +22,16 @@ permissions:
   contents: read
 
 # Its own group, never the pull request lane's. A second run on the same ref
-# queues behind the first instead of cancelling a run that is half way.
+# queues behind the running one instead of cancelling it. GitHub keeps only one
+# pending run per group, so a third dispatch cancels the queued second.
 concurrency:
   group: e2e-heavy-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
   e2e-heavy:
+    # Forks inherit the schedule; only the main repository runs it.
+    if: github.repository == 'njdaniel/conch'
     runs-on: ubuntu-latest
     # Generous for the heavy tests, short of runaway minutes.
     timeout-minutes: 40
@@ -74,8 +77,9 @@ jobs:
       # step, so they open nothing. Playwright cannot redact a trace. No
       # conchd or LiveKit log is uploaded unless it has been passed through
       # the world's secret list.
+      # cancelled() too: a run that hits timeout-minutes is cancelled, not failed.
       - name: traces of the failed tests
-        if: failure()
+        if: failure() || cancelled()
         uses: actions/upload-artifact@v4
         with:
           name: e2e-heavy-test-results

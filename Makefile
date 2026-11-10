@@ -103,9 +103,10 @@ web-e2e: web-node
 
 # The tests tagged @heavy, which the pull request lane skips (issue #1613,
 # docs/testing.md). A thin wrapper over web-e2e; the nightly workflow
-# .github/workflows/e2e-heavy.yml runs the same arguments.
+# .github/workflows/e2e-heavy.yml runs the same arguments. A caller's E2E_ARGS
+# is appended, not replaced: make web-e2e-heavy E2E_ARGS=--headed.
 web-e2e-heavy:
-	$(MAKE) web-e2e E2E_ARGS="--grep @heavy --pass-with-no-tests"
+	$(MAKE) web-e2e E2E_ARGS="--grep @heavy --pass-with-no-tests $(E2E_ARGS)"
 
 # The desktop shell under desktop/ (issue #940, ADR-007, linux-desktop.md): an
 # Electron app that serves the web client from packaged files. desktop-check
