@@ -58,6 +58,57 @@ describe('the open channel', () => {
   });
 });
 
+// What a screen reader announces as the button's description: the text of the
+// elements its aria-describedby names, in order.
+function describedBy(button: HTMLElement): string {
+  return (button.getAttribute('aria-describedby') ?? '')
+    .split(' ')
+    .filter((id) => id !== '')
+    .map((id) => document.getElementById(id)?.getAttribute('aria-label') ?? document.getElementById(id)?.textContent ?? '')
+    .join(' ');
+}
+
+describe('a channel topic', () => {
+  const draw = (topic?: string) => (
+    <ChannelList
+      channels={channels.map((channel) => (channel.id === 2 ? { ...channel, topic } : channel))}
+      selected="general"
+      unread={new Map()}
+      onOpen={() => undefined}
+    />
+  );
+
+  it('is part of the row button tooltip and accessible description only while non-empty', () => {
+    const view = render(draw('Books and authors'));
+    const button = screen.getByRole('button', { name: 'book-club' });
+    expect(button.textContent).toBe('book-club');
+    expect(button.getAttribute('title')).toBe('book-club — Books and authors');
+    expect(describedBy(button)).toBe('Books and authors');
+
+    view.rerender(draw('Reading together'));
+    expect(button.getAttribute('title')).toBe('book-club — Reading together');
+    expect(describedBy(button)).toBe('Reading together');
+
+    view.rerender(draw(''));
+    expect(button.getAttribute('title')).toBe('book-club');
+    expect(describedBy(button)).toBe('');
+  });
+
+  it('is still announced beside the badges that describe the row', () => {
+    render(
+      <ChannelList
+        channels={channels.map((channel) => (channel.id === 2 ? { ...channel, topic: 'Books and authors', manages: true } : channel))}
+        selected="general"
+        unread={new Map([['book-club', 3]])}
+        onOpen={() => undefined}
+      />,
+    );
+    const button = screen.getByRole('button', { name: 'book-club' });
+    expect((button.getAttribute('aria-describedby') ?? '').split(' ')[0]).toBe('topic-2');
+    expect(describedBy(button)).toMatch(/^Books and authors.*manages/);
+  });
+});
+
 describe('a manages badge', () => {
   it('marks only managed channels and describes the channel button without changing its name', () => {
     const managed = channels.map((channel) => ({ ...channel, manages: channel.id === 2 }));
@@ -337,6 +388,20 @@ describe('a channel row\'s menu', () => {
       expect(labels(name)).toEqual(['Invite people', 'Rename channel…']);
       fireEvent.keyDown(document.activeElement as Element, { key: 'Escape' });
     }
+  });
+
+  it('offers Set topic beside Rename only where its caller allows it, and opens that row’s form', () => {
+    const setTopic = (channel: ChannelV0, close: () => void) => (
+      <form aria-label={`Set topic for ${channel.name}`}>
+        <button type="button" onClick={close}>Cancel</button>
+      </form>
+    );
+    draw({ canRename: (c) => c.manages === true, renderRename: rename, canSetTopic: (c) => c.manages === true, renderTopic: setTopic });
+    expect(within(row('general')).queryByRole('button', { name: /^Actions for/ })).toBeNull();
+    fireEvent.click(more('book-club'));
+    expect(labels('book-club')).toEqual(['Rename channel…', 'Set topic']);
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Set topic' }));
+    expect(within(row('book-club')).getByRole('form', { name: 'Set topic for book-club' })).toBeDefined();
   });
 
   it('keeps the ⋯ outside the channel button, which keeps its name and still opens the channel', () => {

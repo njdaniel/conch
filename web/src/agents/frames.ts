@@ -18,7 +18,7 @@ export type EventFrame =
   | { readonly kind: 'run'; readonly run: RunV1 }
   | { readonly kind: 'activity'; readonly entry: AgentActivityV1 }
   | { readonly kind: 'intervention'; readonly intervention: InterventionV1 }
-  // The channel as it now is, sent when it is renamed (issue #728).
+  // The channel as it now is, sent when it is renamed (issue #728) or its topic or settings change.
   | { readonly kind: 'channel'; readonly channel: ChannelDocV1 }
   | { readonly kind: 'readState'; readonly state: ReadStateV1 }
   | { readonly kind: 'message'; readonly message: MessageV2 }

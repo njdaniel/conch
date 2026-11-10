@@ -18,6 +18,8 @@ export {
   listChannelMembersResponseV1,
   listChannelsResponse,
   renameChannelResponseV1,
+  setChannelTopicResponseV1,
+  MAX_CHANNEL_TOPIC_LENGTH,
   type ChannelBanV1,
   type ChannelDocV1,
   type ChannelMembersV1,
@@ -40,4 +42,6 @@ export {
   type PutChannelMemberRequestV1,
   type RenameChannelRequestV1,
   type RenameChannelResponseV1,
+  type SetChannelTopicRequestV1,
+  type SetChannelTopicResponseV1,
 } from './generated';
