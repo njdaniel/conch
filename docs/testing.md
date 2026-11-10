@@ -79,7 +79,7 @@ How to read a cell:
 | --- | --- | --- | --- | --- |
 | Owner, and operator with the defaults | W: +W04b; G: +Co, xS17 (an operator outside the channel is refused as for a ghost) | W: +W40, +W42; G: +S11a, xS17 | W: +W11b; G: +S10, +Co | W: none; G: +S15 |
 | Operator with a cell off | W: none; G: xS11a | W: none; G: xS11a, xIr | W: none; G: xS11b, xS10, xIr | n/a (fixed on) |
-| Channel manager | as member | W: none; G: xS5 | as member | W: none; G: xS8b |
+| Channel manager | as member | W: xW24b; G: xS5 | as member | W: none; G: xS8b |
 | Member | W: +W02, +W04c, xW04a; G: +Co, +S17 | W: xW04a, +W04b; G: xS17 | W: +W11a; G: +S10 | W: +W47; G: +S15 |
 | Member with a cell or brake off | n/a (fixed right) | n/a (fixed right) | W: xW11c; G: xS10, xIp | W: xW47; G: xS15, xIh |
 | Removed or banned member | W: xW51a, xW04b; G: xS16, xImod | W: xW51a, xW14b; G: xS16, xImod | n/a | n/a |
@@ -93,7 +93,7 @@ How to read a cell:
 | --- | --- | --- | --- | --- | --- |
 | Owner, and operator with the defaults | W: +W20, +W21a, +W48a; G: +S5, +S6, +S7 | W: +W24, +W42, +W04b; G: +S8c | W: +W12b; G: +S9, +Vo | W: +W39a, +W39b; G: +S4 | W: +W39b; G: +S3 |
 | Operator with a cell off | W: none; G: xS5, xS6, xIr | W: none; G: xS11c, xIr | W: none; G: xS14, xIr | W: none; G: xS4 | W: xW43b; G: xS3, xS11d, xIr |
-| Channel manager | W: +W24; G: S7, xS5, xS6 | W: +W24, +W51a; G: S8a | W: +W51a, +W51b, +W51c; G: +S9, +Imod | as member | as member |
+| Channel manager | W: +W24, xW24b; G: S7, xS5, xS6 | W: +W24, +W51a; G: S8a | W: +W51a, +W51b, +W51c; G: +S9, +Imod | as member | as member |
 | Member | W: +W20, xW21b, xW48b; G: +S5, xS5, xS6, xS7 | W: xW24; G: xS8c | W: xW51a, xW51b, xW51c; G: xS9, xImod | W: xW38b; G: xS1, xS2 | W: none; G: xS2, xS3 |
 | Member with a cell or brake off | W: none; G: xS5, xIp | n/a | n/a | n/a | n/a |
 | Removed or banned member | n/a | W: xW51a; G: xS16, xImod | n/a | n/a | n/a |
@@ -191,6 +191,7 @@ browser test of their own. The browser voice specs use plain members.
 | `W21b` | `21-channel-rename`: C728 a member is offered no control, and the server refuses the member anyway | no Rename control; the API is 403 |
 | `W22` | `22-guest`: the three G6 tests | the bare address and an invite offer no guest entry; every guest route and setting is refused (403 `guests_disabled`, 409 `invite_kind_retired`, 409 `join_policy_conflict`) |
 | `W24` | `24-channel-managers`: C793 an operator delegates a channel; its manager adds, removes and renames while members see only their standing | a manager adds, removes and renames; a plain member has no form and no row menu |
+| `W24b` | `24-channel-managers`: C1670 a manager who is not an operator is not offered Make private, Make default or Archive, and the server refuses each | the manager's menu is exactly Rename channel…, Set topic, Leave channel, Favorite; `PUT /v1/channels/{id}/settings` for private, default and archived, sent from its page, is 403 `forbidden` |
 | `W38b` | `38-admin-console`: A1018 a member sees one line of what they may do and no console | no console, no Joining, no Server (no console is offered; it does not name the permissions document) |
 | `W39a` | `39-permissions`: A1019 the owner applies Personal, then Group, from the preset cards | the owner writes the document; the server has the preset |
 | `W39b` | `39-permissions`: A1019 the owner turns Act as members off for operators, sees what operators issued, and revokes one | an operator with the cell on issues a credential to another; the owner turns it off and revokes it |
