@@ -21,7 +21,7 @@ voice in the UI (#771: the supervisor that runs `conch-voice` exists, in
 | Path | Owns |
 | --- | --- |
 | `main/scheme.ts` | the `conch-app:` handler: serves only what the build-time manifest lists, checks each file's SHA-256, refuses every other URL |
-| `main/csp.ts` | the Content-Security-Policy of every response: `connect-src wss: https:` (Q-D4-1), narrowed to the live grant's origin by `guards.ts` |
+| `main/csp.ts` | the Content-Security-Policy of every response: `connect-src wss: https:` (Q-D4-1), narrowed to the live grant's origin by `guards.ts` (HTTP and WebSocket requests only; WebRTC and WebTransport are outside both) |
 | `main/window.ts` | the one window and its `webPreferences` (pinned by a unit test) |
 | `main/guards.ts` | what a web contents may not do: navigate, open windows, attach webviews, download, ask for permissions, choose devices; and the request filter, which passes only the live companion grant's origin (wss or https, same host and port, no userinfo) besides the app's own scheme |
 | `main/display-capture.ts` | the one screen capture: the permission and display-media rules (`Screen capture`, below) |
@@ -188,7 +188,7 @@ his sign-off and a line in `licences-allowlist.txt`.
 
 ## Talking to the server (issue #942)
 
-The renderer makes no network request (its CSP says `connect-src 'none'`). Main
+The renderer makes no HTTP or WebSocket request (its CSP says `connect-src wss: https:`, and `main/guards.ts` cancels all of them but exactly the live companion grant's LiveKit origin; when the grant ends main closes the window's open connections). WebRTC (ICE, STUN, TURN) and WebTransport are outside both the CSP and that request filter. Main
 makes them all, with Node's `fetch`, from `main/api/client.ts`. The renderer
 names an operation of the table in `web/src/platform/operations.ts` and its
 values; main builds the URL, sends `Authorization: Bearer` for a bearer
@@ -315,4 +315,4 @@ plain HTTP from anywhere else, and so does the address step.
 
 ## Screen capture
 
-The renderer captures the screen only through Chromium's PipeWire capturer, so only through the xdg-desktop-portal ScreenCast picker (Q-D4-4 on #1578). `main/app.ts` turns the capturer on before `ready`; `main/portal.ts` asks the portal whether it can answer, and where it cannot (no portal, or an X11 session, where Chromium would list every source with no picker) Share is unavailable and the page is told "share unavailable: no screen-cast portal". `main/display-capture.ts` grants a capture only from the owned window's live main frame at `conch-app://ui/`, in the current document generation, with a live companion grant, right after the person's own input (which the request uses up), and only when `desktopCapturer.getSources` returns exactly one source (none is a cancel; several are refused, never narrowed to the first). Video only: audio is never granted, and microphone and camera stay denied.
+The renderer captures the screen only through Chromium's PipeWire capturer, so only through the xdg-desktop-portal ScreenCast picker (Q-D4-4 on #1578). `main/app.ts` turns the capturer on before `ready`; `main/portal.ts` asks the portal whether it can answer, and where it cannot (no portal, or an X11 session, where Chromium would list every source with no picker) Share is unavailable and the page is told "share unavailable: no screen-cast portal". `main/display-capture.ts` grants a capture only from the owned window's live main frame at `conch-app://ui/`, in the current document generation, with a live companion grant, right after the person's own input (which the request uses up), and only when `desktopCapturer.getSources` returns exactly one source (none is a cancel; several are refused, never narrowed to the first). Video only: audio is never granted, and microphone and camera stay denied. A packaged launch with `--disable-features` naming `WebRTCPipeWireCapturer` is refused at start (`captureVerdict`), and a renderer that asks for a desktop capture without a picker is crashed, then its page closed if the process has not gone a second later.

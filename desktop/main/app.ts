@@ -2,9 +2,11 @@
 // Output: one hardened window showing the packaged web client, and nothing
 // else but main's public-API client behind the bridge's IPC handlers (D2-3)
 // and the live feeds main holds for the page (D2-4). The renderer itself
-// makes no network request but the screen companion's, to exactly the live
-// grant's LiveKit origin, and no capture but one portal-picked screen (D4-03,
-// #1580: guards.ts, display-capture.ts, portal.ts).
+// makes no HTTP or WebSocket request but the screen companion's, to exactly
+// the live grant's LiveKit origin, and no capture but one portal-picked screen
+// (D4-03, #1580: guards.ts, display-capture.ts, portal.ts). WebRTC (ICE, STUN
+// and TURN) and WebTransport are outside the CSP and the request filter, which
+// see HTTP and WebSocket requests only (linux-desktop.md §3).
 import { readFile } from 'node:fs/promises';
 import { isAbsolute, join } from 'node:path';
 
@@ -29,7 +31,7 @@ import { Supervisor } from './voice/supervisor.ts';
 import { createNodeConnect } from './api/socket.ts';
 import { transportVerdict, trustSystemRoots } from './api/trust.ts';
 import { debuggingVerdict } from './debugging.ts';
-import { DisplayCapture } from './display-capture.ts';
+import { captureVerdict, DisplayCapture } from './display-capture.ts';
 import { Files } from './files.ts';
 import { Gestures } from './gestures.ts';
 import { installGuards } from './guards.ts';
@@ -72,6 +74,12 @@ export async function start(): Promise<void> {
     return;
   }
   if (transportVerdict(process.env, log) === 'refused') {
+    app.exit(1);
+    return;
+  }
+  // A launch that turned the PipeWire capturer off would let one source
+  // stand in for the portal's pick (display-capture.ts).
+  if (captureVerdict(app.isPackaged, (name) => app.commandLine.getSwitchValue(name), log) === 'refused') {
     app.exit(1);
     return;
   }
@@ -290,6 +298,12 @@ export async function start(): Promise<void> {
     share: async () => {
       const answer = await portal.probe();
       return answer === 'available' ? null : answer;
+    },
+    // The owned window's session: a LiveKit socket open when the grant ends
+    // is closed (S2 of #1621; the filter only judges a request when it begins).
+    closeConnections: async () => {
+      const w = live.window;
+      if (w !== null && !w.isDestroyed()) await w.webContents.session.closeAllConnections();
     },
     log,
   });

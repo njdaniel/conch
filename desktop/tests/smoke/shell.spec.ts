@@ -211,6 +211,25 @@ test.describe('remote debugging', () => {
   });
 });
 
+test.describe('screen capture switches', () => {
+  test('--disable-features=WebRTCPipeWireCapturer is refused, so one source cannot stand in for the portal pick', async () => {
+    const app = launch({ args: ['--disable-features=Other,WebRTCPipeWireCapturer'] });
+    try {
+      const done = await Promise.race([app.exited, new Promise<null>((r) => {
+        setTimeout(() => {
+          r(null);
+        }, 15_000);
+      }),
+      ]);
+      expect(done, 'the app kept running').not.toBeNull();
+      expect(done?.code).toBe(1);
+      expect(app.output()).toContain('refusing to start with WebRTCPipeWireCapturer turned off');
+    } finally {
+      await app.stop();
+    }
+  });
+});
+
 test.describe('the fuses, by behaviour', () => {
   test('ELECTRON_RUN_AS_NODE does not turn the app into node', async () => {
     const app = launch({ env: { ELECTRON_RUN_AS_NODE: '1' }, args: ['-e', 'process.exit(7)'] });

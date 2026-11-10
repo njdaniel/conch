@@ -7,6 +7,9 @@
 // main's request filter, and getDisplayMedia rejects with no grant and with no
 // gesture. The grant itself and a real portal pick are the manual check of
 // #1580 and the full run of #1584.
+import dgram from 'node:dgram';
+import { networkInterfaces } from 'node:os';
+
 import { chromium, expect, test, type Browser, type Page } from '@playwright/test';
 
 import { launch, type Launched } from './launch.ts';
@@ -66,5 +69,70 @@ test.describe('the renderer’s network and capture allowances, with no companio
   test('keeps the microphone and camera denied', async () => {
     const result = await page.evaluate("navigator.mediaDevices.getUserMedia({ audio: true, video: true }).then(() => 'granted', (e) => e.name)");
     expect(result).not.toBe('granted');
+  });
+
+  // KNOWN RESIDUAL (M1 on #1621). WebTransport and WebRTC (ICE, STUN, TURN)
+  // never reach webRequest.onBeforeRequest, and the CSP's `connect-src wss:
+  // https:` permits WebTransport to any host. So, with no grant, the page can
+  // still send UDP to a non-loopback address. Each test below states what
+  // SHOULD hold once M1 is fixed (nothing arrives) and is marked test.fail:
+  // while the residual exists the assertion fails and the test passes; the
+  // day M1 is fixed the assertion holds, the test "unexpectedly passes" and
+  // Playwright fails it, which is the cue to drop test.fail.
+  // A listener on a non-loopback interface address, as the reviewer's probe
+  // did: loopback is not what a real exfiltration target looks like.
+  const nonLoopback = ((): string | null => {
+    for (const list of Object.values(networkInterfaces())) {
+      for (const a of list ?? []) if (a.family === 'IPv4' && !a.internal) return a.address;
+    }
+    return null;
+  })();
+
+  async function listen(): Promise<{ port: number; seen: () => number; close: () => void }> {
+    const socket = dgram.createSocket('udp4');
+    let n = 0;
+    socket.on('message', () => {
+      n += 1;
+    });
+    await new Promise<void>((resolve) => socket.bind(0, nonLoopback ?? '0.0.0.0', resolve));
+    return { port: socket.address().port, seen: () => n, close: () => socket.close() };
+  }
+
+  test('known residual (M1): a WebTransport to a non-loopback address sends nothing', async () => {
+    test.fail();
+    test.skip(nonLoopback === null, 'no non-loopback IPv4 interface on this machine');
+    const udp = await listen();
+    const target = `${nonLoopback ?? ''}:${String(udp.port)}`;
+    try {
+      await page.evaluate(`(async () => {
+        if (typeof WebTransport === 'undefined') return 'none';
+        const t = new WebTransport('https://${target}/x');
+        return Promise.race([t.ready.then(() => 'ready', () => 'rejected'), new Promise((r) => setTimeout(() => r('timeout'), 3000))]);
+      })()`);
+      await new Promise((r) => setTimeout(r, 500));
+      expect(udp.seen()).toBe(0);
+    } finally {
+      udp.close();
+    }
+  });
+
+  test('known residual (M1): an RTCPeerConnection with a stun: server sends nothing to a non-loopback address', async () => {
+    test.fail();
+    test.skip(nonLoopback === null, 'no non-loopback IPv4 interface on this machine');
+    const udp = await listen();
+    const target = `${nonLoopback ?? ''}:${String(udp.port)}`;
+    try {
+      await page.evaluate(`(async () => {
+        const pc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:${target}' }] });
+        pc.createDataChannel('x');
+        await pc.setLocalDescription(await pc.createOffer());
+        await new Promise((r) => setTimeout(r, 2500));
+        pc.close();
+        return 'done';
+      })()`);
+      expect(udp.seen()).toBe(0);
+    } finally {
+      udp.close();
+    }
   });
 });

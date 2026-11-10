@@ -27,6 +27,13 @@
 //  - every end forgets the record first, tells the page (if the document that
 //    was given the grant still shows) and then sends the DELETE once; a DELETE
 //    that fails is logged by the end's reason alone;
+//  - every end, the page's own included, also closes the owned window's open
+//    connections (closeConnections), after the record is forgotten: the
+//    filter only judges a request when it begins, so a socket to LiveKit that
+//    was open when the grant ended would otherwise go on. Main has no signal
+//    for whether the page's display-capture track still runs, so it cannot
+//    tell a page that ignored the end event; it only closes the connections
+//    (#1621, S2);
 //  - every grant needs a new act: none is re-issued after a room renewal,
 //    which ends the share (Q-D4-2 on #1578).
 //
@@ -83,6 +90,12 @@ export interface CompanionDeps {
   // Asks whether this desktop can share a screen (portal.ts), alongside the
   // request to conchd; null when it can. Absent: nothing is said.
   readonly share?: () => Promise<CompanionShareUnavailable | null>;
+  // Closes every connection the owned window's session has open (the
+  // activation's session.closeAllConnections). Called on every end, after the
+  // record is forgotten: the request filter (guards.ts) judges a connection
+  // when it is opened, so a LiveKit socket opened under the grant would
+  // otherwise outlive it (leave, helper loss, renewal). Absent: nothing.
+  readonly closeConnections?: () => Promise<void>;
 }
 
 // The live companion: what it was asked for, and with what.
@@ -262,7 +275,9 @@ export class Companion {
     const held = this.#held;
     if (held === null) return false;
     this.#held = null;
+    const closing = this.#close();
     await this.#remove(held.client, held.channel, 'stopped');
+    await closing;
     return true;
   }
 
@@ -280,7 +295,10 @@ export class Companion {
     } catch {
       // A window that cannot be told is not a reason to keep the companion.
     }
+    // Begun at once, alongside the DELETE: neither waits for the other.
+    const closing = this.#close();
     await this.#remove(held.client, held.channel, reason);
+    await closing;
     return true;
   }
 
@@ -300,6 +318,17 @@ export class Companion {
       return await client.send({ op: 'voiceViewer', params: { channel }, body: REQUEST });
     } catch {
       return { kind: 'none' };
+    }
+  }
+
+  // #close drops the open connections of the window's session, once per end.
+  // It never throws and is not retried: the record is already gone, so no new
+  // request to LiveKit can begin.
+  async #close(): Promise<void> {
+    try {
+      await this.#deps.closeConnections?.();
+    } catch {
+      this.#deps.log('companion: open connections could not be closed');
     }
   }
 

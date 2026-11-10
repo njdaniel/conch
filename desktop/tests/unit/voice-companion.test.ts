@@ -39,6 +39,9 @@ interface Rig {
   // told otherwise.
   readonly answers: (Exchange | Promise<Exchange>)[];
   readonly removals: Exchange[];
+  // The liveOrigin seen by each closeConnections call, and a failure to throw.
+  readonly closes: (string | null)[];
+  readonly closeFails: { value: boolean };
   readonly voice: { view: NativeVoiceView; set(view: NativeVoiceView): void };
   readonly document: { value: number };
   client: CompanionClient | null;
@@ -59,6 +62,8 @@ function rig(view: NativeVoiceView = running(), share?: () => Promise<'no-portal
     },
   };
   const document = { value: 5 };
+  const closes: (string | null)[] = [];
+  const closeFails = { value: false };
   const client: CompanionClient = {
     send: (request) => {
       steps.push(['send', request]);
@@ -71,6 +76,8 @@ function rig(view: NativeVoiceView = running(), share?: () => Promise<'no-portal
     logs,
     answers,
     removals,
+    closes,
+    closeFails,
     voice,
     document,
     client,
@@ -91,6 +98,10 @@ function rig(view: NativeVoiceView = running(), share?: () => Promise<'no-portal
         steps.push(['tell', doc, event]);
       },
       log: (line) => logs.push(line),
+      closeConnections: () => {
+        closes.push(r.companion.liveOrigin());
+        return closeFails.value ? Promise.reject(new Error('session gone')) : Promise.resolve();
+      },
       ...(share === undefined ? {} : { share }),
       sleep: (ms) => {
         steps.push(['sleep', ms]);
@@ -368,6 +379,42 @@ describe('the companion’s end', () => {
     // Nothing is live: a second end tells nobody and calls nothing.
     expect(await r.companion.end(reason)).toBe(false);
     expect(r.steps).toHaveLength(2);
+  });
+
+  it.each(reasons)('closes the open connections on %s, after the record is forgotten', async (reason) => {
+    const r = rig();
+    await live(r);
+    await r.companion.end(reason);
+    expect(r.closes).toEqual([null]);
+    await r.companion.end(reason);
+    expect(r.closes).toHaveLength(1);
+  });
+
+  it('closes the open connections on the page’s own companionEnd too', async () => {
+    const r = rig();
+    await live(r);
+    await r.companion.stop();
+    expect(r.closes).toEqual([null]);
+  });
+
+  it('closes the open connections when the helper is lost', async () => {
+    const r = rig();
+    await live(r);
+    r.voice.set(idle);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(r.closes).toEqual([null]);
+  });
+
+  it('closes nothing when nothing is live, and still sends the DELETE when closing fails', async () => {
+    const r = rig();
+    expect(await r.companion.end('quit')).toBe(false);
+    expect(r.closes).toEqual([]);
+    await live(r);
+    r.closeFails.value = true;
+    expect(await r.companion.end('quit')).toBe(true);
+    expect(r.steps).toEqual([['tell', 5, { type: 'end', reason: 'quit' }], ['send', DELETE]]);
+    expect(r.logs.join('\n')).toContain('could not be closed');
   });
 
   it('still sends the DELETE when the page cannot be told', async () => {

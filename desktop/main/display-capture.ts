@@ -60,6 +60,35 @@ export interface CaptureContents {
   readonly mainFrame: { readonly frameToken: string };
   isDestroyed(): boolean;
   forcefullyCrashRenderer(): void;
+  // The fallback when the crash does not take (S5 of #1621): the renderer's
+  // process is gone when it emits this, and close() ends the page.
+  once(event: 'render-process-gone', listener: () => void): unknown;
+  close(): void;
+}
+
+// How long a crashed renderer has to be gone before the page is closed
+// instead. forcefullyCrashRenderer is a request to the process, not a kill.
+export const CRASH_GRACE_MS = 1_000;
+
+// The Chromium feature that makes screen capture go through the portal's own
+// picker (set on by app.ts).
+export const PIPEWIRE_FEATURE = 'WebRTCPipeWireCapturer';
+
+// captureVerdict refuses a packaged launch that turned the PipeWire capturer
+// off (S4 of #1621). Without it Chromium lists the sources itself, with no
+// portal picker, and the one source desktopCapturer then returned would stand
+// in for the person's pick. Like debugging.ts it catches a launcher's mistake
+// (a wrapper, a stale desktop entry), not a same-user attacker. The switch
+// value is a comma list whose entries may carry a trial ("Name<Trial") or
+// parameters ("Name:k/v"); Chromium lets disable-features win over
+// enable-features, and "-Name" in enable-features also turns a feature off.
+export function captureVerdict(packaged: boolean, switchValue: (name: string) => string, log: (line: string) => void): 'ok' | 'refused' {
+  if (!packaged) return 'ok';
+  const entries = (name: string): string[] => switchValue(name).split(',').map((e) => e.trim().replace(/[<:].*$/u, ''));
+  const off = entries('disable-features').includes(PIPEWIRE_FEATURE) || entries('enable-features').includes(`-${PIPEWIRE_FEATURE}`);
+  if (!off) return 'ok';
+  log(`conch-desktop: refusing to start with ${PIPEWIRE_FEATURE} turned off: screen capture would not go through the portal's picker`);
+  return 'refused';
 }
 
 // What the display-media handler is given, as Electron gives it.
@@ -171,13 +200,36 @@ export class DisplayCapture {
       this.#expecting = null;
       if (!followed) {
         this.#deps.log('conch-desktop: a desktop capture was asked for without a picker; ending the renderer');
-        try {
-          if (!contents.isDestroyed()) contents.forcefullyCrashRenderer();
-        } catch {
-          // Already gone.
-        }
+        this.#end(contents);
       }
     }
+  }
+
+  // #end crashes the renderer, and if it is not gone within CRASH_GRACE_MS
+  // (the crash is cooperative: a request to the process), closes the page.
+  #end(contents: CaptureContents): void {
+    let gone = false;
+    try {
+      if (contents.isDestroyed()) return;
+      contents.once('render-process-gone', () => {
+        gone = true;
+      });
+      contents.forcefullyCrashRenderer();
+    } catch {
+      // Already gone.
+      return;
+    }
+    const timer = setTimeout(() => {
+      if (gone) return;
+      try {
+        if (contents.isDestroyed()) return;
+        this.#deps.log('conch-desktop: the renderer outlived the crash; closing the page');
+        contents.close();
+      } catch {
+        // Already gone.
+      }
+    }, CRASH_GRACE_MS);
+    timer.unref();
   }
 
   // #followed says whether handle() ran since allow() set the expectation

@@ -1,9 +1,9 @@
 import { EventEmitter } from 'node:events';
 
 import type { Session } from 'electron';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { CAPTURE_SOURCES, DisplayCapture, displayPermission, type CaptureFrame, type CaptureSource } from '../../main/display-capture.ts';
+import { CAPTURE_SOURCES, captureVerdict, CRASH_GRACE_MS, DisplayCapture, displayPermission, type CaptureFrame, type CaptureSource } from '../../main/display-capture.ts';
 import { CAPTURE_GESTURE_MS, Gestures } from '../../main/gestures.ts';
 import { guardSession } from '../../main/guards.ts';
 import { GDBUS_PATHS, PORTAL_ARGS, Portal, sourceTypes, underWayland, type Env, type PortalDeps } from '../../main/portal.ts';
@@ -11,12 +11,16 @@ import { GDBUS_PATHS, PORTAL_ARGS, Portal, sourceTypes, underWayland, type Env, 
 class FakeContents extends EventEmitter {
   mainFrame = { frameToken: 'main-1' };
   crashed = 0;
+  closed = 0;
   destroyed = false;
   isDestroyed(): boolean {
     return this.destroyed;
   }
   forcefullyCrashRenderer(): void {
     this.crashed += 1;
+  }
+  close(): void {
+    this.closed += 1;
   }
 }
 
@@ -410,6 +414,43 @@ describe('the display-capture permission', () => {
     expect(w.logs.join('\n')).toMatch(/without a picker/);
   });
 
+  describe('when the crash does not take (S5 of #1621)', () => {
+    const legacy = (): World => {
+      vi.useFakeTimers();
+      const w = world();
+      w.click(w.win);
+      w.permission(w.win);
+      return w;
+    };
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it('closes the page if the renderer is still there after the grace', () => {
+      const w = legacy();
+      expect(w.win.crashed).toBe(1);
+      vi.advanceTimersByTime(CRASH_GRACE_MS - 1);
+      expect(w.win.closed).toBe(0);
+      vi.advanceTimersByTime(1);
+      expect(w.win.closed).toBe(1);
+      expect(w.logs.join('\n')).toMatch(/outlived the crash/);
+    });
+
+    it('leaves the page alone when the renderer went', () => {
+      const w = legacy();
+      w.win.emit('render-process-gone');
+      vi.advanceTimersByTime(CRASH_GRACE_MS * 2);
+      expect(w.win.closed).toBe(0);
+    });
+
+    it('leaves the page alone when the contents were destroyed meanwhile', () => {
+      const w = legacy();
+      w.win.destroyed = true;
+      vi.advanceTimersByTime(CRASH_GRACE_MS * 2);
+      expect(w.win.closed).toBe(0);
+    });
+  });
+
   it('given and followed by the request does not end the renderer', async () => {
     const w = world();
     w.click(w.win);
@@ -589,5 +630,36 @@ describe('Portal', () => {
     out = '(<uint32 2>,)\n';
     expect(await p.probe()).toBe('available');
     expect(logs).toHaveLength(2);
+  });
+});
+
+describe('captureVerdict (S4 of #1621)', () => {
+  const run = (packaged: boolean, switches: Record<string, string>): { verdict: string; logs: string[] } => {
+    const logs: string[] = [];
+    return { verdict: captureVerdict(packaged, (n) => switches[n] ?? '', (l) => logs.push(l)), logs };
+  };
+
+  it.each([
+    'WebRTCPipeWireCapturer',
+    'Other,WebRTCPipeWireCapturer',
+    'WebRTCPipeWireCapturer<Trial',
+    'WebRTCPipeWireCapturer:k/v',
+    ' Other , WebRTCPipeWireCapturer ',
+  ])('refuses a packaged launch with --disable-features=%s', (value) => {
+    const { verdict, logs } = run(true, { 'disable-features': value });
+    expect(verdict).toBe('refused');
+    expect(logs).toHaveLength(1);
+  });
+
+  it('refuses --enable-features=-WebRTCPipeWireCapturer, which turns it off too', () => {
+    expect(run(true, { 'enable-features': 'A,-WebRTCPipeWireCapturer' }).verdict).toBe('refused');
+  });
+
+  it.each<Record<string, string>>([{}, { 'disable-features': 'Other' }, { 'disable-features': 'WebRTCPipeWireCapturerX' }, { 'enable-features': 'WebRTCPipeWireCapturer' }])('lets %j through', (switches) => {
+    expect(run(true, switches)).toEqual({ verdict: 'ok', logs: [] });
+  });
+
+  it('leaves an unpackaged app alone', () => {
+    expect(run(false, { 'disable-features': 'WebRTCPipeWireCapturer' }).verdict).toBe('ok');
   });
 });

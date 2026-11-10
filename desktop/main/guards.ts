@@ -5,8 +5,9 @@
 // Input: a web contents (and its session) from Electron. Output: handlers
 // that refuse. This module owns the refusals; D2-8 adds the one way out (a
 // validated link opened in the OS browser), and D4-03 (#1580) the companion's
-// two: requests to exactly the live grant's LiveKit origin, and one screen
-// capture by the rules of display-capture.ts.
+// two: HTTP and WebSocket requests to exactly the live grant's LiveKit origin,
+// and one screen capture by the rules of display-capture.ts. WebRTC (ICE,
+// STUN, TURN) and WebTransport are not requests this module sees.
 import type { App, Event, Session, WebContents } from 'electron';
 
 import { displayPermission, type DisplayCapture } from './display-capture.ts';
@@ -144,12 +145,14 @@ export function guardSession(ses: Session, deps: GuardDeps): void {
     item.cancel();
   });
   ses.setSpellCheckerEnabled(false);
-  // The window makes no request that is not to conch-app://ui/, but to the
-  // live companion grant's LiveKit origin. The CSP's connect-src (`wss:
+  // The window makes no HTTP or WebSocket request that is not to
+  // conch-app://ui/, but to the live companion grant's LiveKit origin. The CSP's connect-src (`wss:
   // https:`) lets any secure origin as far as here, so for those this is the
   // boundary, read afresh on every request: an end, a sign-out or a switch
   // forgets the grant first, and the next request is refused. It is also the
-  // observer the smoke test reads: a refusal is one stderr line.
+  // observer the smoke test reads: a refusal is one stderr line. WebRTC
+  // (ICE, STUN, TURN) and WebTransport never reach onBeforeRequest: they are
+  // outside this filter and the CSP's connect-src alike.
   ses.webRequest.onBeforeRequest((details, callback) => {
     if (foreign(details.url) && !livekitAllowed(details.url, deps.liveOrigin?.() ?? null)) {
       deps.log(`conch-desktop: blocked a request to ${describe(details.url)}`);
