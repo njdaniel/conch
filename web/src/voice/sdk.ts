@@ -127,7 +127,7 @@ import type { Camera, CameraProfile, KeptCamera } from './camera';
 import type { CameraTrack, Microphone, Output, Processing, Room, RoomEvents, ShareSink } from './connection';
 import { personOf, principalOf, publisherOf } from './presence';
 import { LogRing, Redactor } from './redact';
-import { defaultShareQuality, type Captured, type KeptScreen, type ShareDirection, type ShareQuality, type ShareSample } from './share';
+import { defaultShareQuality, type Captured, type KeptScreen, type ShareDirection, type ShareLimitation, type ShareQuality, type ShareSample } from './share';
 
 export { principalOf };
 
@@ -535,6 +535,20 @@ export interface ShareStats {
   readonly bytesReceived?: number;
   readonly bytesSent?: number;
   readonly timestamp?: number;
+  // outbound-rtp: why the encoder holds the picture back, where the engine
+  // says (Chromium does; Firefox and Safari report fewer reasons).
+  readonly qualityLimitationReason?: string;
+  // inbound-rtp: packets received and lost. remote-inbound-rtp: the sender's
+  // view of loss, as a fraction of the interval.
+  readonly packetsReceived?: number;
+  readonly packetsLost?: number;
+  readonly fractionLost?: number;
+  readonly localId?: string;
+  // outbound-rtp: false when this simulcast layer is not being sent (dynacast
+  // pauses the layers nobody takes).
+  readonly active?: boolean;
+  // outbound-rtp: which simulcast layer: q (lowest), h or f (highest).
+  readonly rid?: string;
 }
 
 const count = (n: number | undefined): n is number => n !== undefined && Number.isFinite(n) && n >= 0;
@@ -542,16 +556,27 @@ const count = (n: number | undefined): n is number => n !== undefined && Number.
 // shareSample reads the received picture, or the largest sent simulcast layer.
 // publication names the publication the stats come from, so a sample of a
 // replaced publication is never compared with one of the old.
-export function shareSample(stats: Iterable<ShareStats>, direction: ShareDirection, publication?: string): ShareSample | null {
+export function shareSample(stats: Iterable<ShareStats>, direction: ShareDirection, publication?: string, captured?: ShareSample['captured']): ShareSample | null {
   const wanted = direction === 'received' ? 'inbound-rtp' : 'outbound-rtp';
   let found: ShareStats | null = null;
-  for (const stat of stats) {
-    if (stat.type !== wanted || stat.kind === 'audio' || stat.mediaType === 'audio') continue;
-    if (!known(stat.frameWidth) || !known(stat.frameHeight) || !count(stat.framesPerSecond)) continue;
-    if (found === null || stat.frameWidth * stat.frameHeight > (found.frameWidth ?? 0) * (found.frameHeight ?? 0)) found = stat;
+  const all = [...stats];
+  // The largest layer with a size, preferring one that is being sent: a layer
+  // dynacast stopped may still hold the size of its last frame.
+  for (const sending of [true, false]) {
+    for (const stat of all) {
+      if (stat.type !== wanted || stat.kind === 'audio' || stat.mediaType === 'audio') continue;
+      if (sending && stat.active === false) continue;
+      if (!known(stat.frameWidth) || !known(stat.frameHeight) || !count(stat.framesPerSecond)) continue;
+      if (found === null || stat.frameWidth * stat.frameHeight > (found.frameWidth ?? 0) * (found.frameHeight ?? 0)) found = stat;
+    }
+    if (found !== null) break;
   }
   if (found === null) return null;
   const bytes = direction === 'received' ? found.bytesReceived : found.bytesSent;
+  const limitation = limitationOf(found.qualityLimitationReason);
+  const lost = direction === 'received' ? undefined : sentLoss(all, found);
+  const off = direction === 'sent' ? inactiveAbove(all, found) : 'none';
+  const capture = direction === 'sent' && captured !== undefined ? capturedOf(captured) : undefined;
   const stream = found.id !== undefined || found.ssrc !== undefined ? `${found.id ?? ''}/${found.ssrc === undefined ? '' : String(found.ssrc)}` : undefined;
   return {
     width: found.frameWidth ?? 0,
@@ -561,7 +586,79 @@ export function shareSample(stats: Iterable<ShareStats>, direction: ShareDirecti
     ...(publication === undefined ? {} : { publication }),
     ...(count(bytes) ? { bytes } : {}),
     ...(count(found.timestamp) ? { timestamp: found.timestamp } : {}),
+    ...(limitation === undefined || direction === 'received' ? {} : { limitation }),
+    ...(lost === undefined ? {} : { lost }),
+    ...(direction === 'received' && count(found.packetsReceived) && count(found.packetsLost) ? { packetsReceived: found.packetsReceived, packetsLost: found.packetsLost } : {}),
+    ...(off === 'above' ? { paused: true } : off === 'unknown' ? { layerOff: true } : {}),
+    ...(capture === undefined ? {} : { captured: capture }),
   };
+}
+
+// An engine that names no reason, or a reason this client does not know, says
+// nothing: never a guess.
+function limitationOf(reason: string | undefined): ShareLimitation | undefined {
+  return reason === 'none' || reason === 'cpu' || reason === 'bandwidth' || reason === 'other' ? reason : undefined;
+}
+
+const ridRank: Readonly<Record<string, number>> = { q: 0, h: 1, f: 2 };
+
+// inactiveAbove says whether a simulcast layer that is not being sent
+// (active false) is above the one reported ('above': the top is paused, the
+// sender gives viewers a lower one), only below it or the same ('none': a lower
+// layer nobody takes says nothing about the top), or cannot be ranked
+// ('unknown': it has no size and no rid to compare). Ranked by size, else by rid.
+function inactiveAbove(all: readonly ShareStats[], sent: ShareStats): 'above' | 'unknown' | 'none' {
+  const area = (stat: ShareStats): number | undefined => (known(stat.frameWidth) && known(stat.frameHeight) ? stat.frameWidth * stat.frameHeight : undefined);
+  let result: 'above' | 'unknown' | 'none' = 'none';
+  for (const stat of all) {
+    if (stat === sent || stat.type !== 'outbound-rtp' || stat.kind === 'audio' || stat.mediaType === 'audio' || stat.active !== false) continue;
+    const own = area(stat);
+    const mine = area(sent);
+    const rid = stat.rid === undefined ? undefined : ridRank[stat.rid];
+    const sentRid = sent.rid === undefined ? undefined : ridRank[sent.rid];
+    if (rid !== undefined && sentRid !== undefined) {
+      if (rid > sentRid) return 'above';
+    } else if (own !== undefined && mine !== undefined) {
+      if (own > mine) return 'above';
+    } else {
+      result = 'unknown';
+    }
+  }
+  return result;
+}
+
+// The lost share of what a viewer was sent over the interval between two
+// samples of one stream, from inbound-rtp's counters, as the sender's loss is
+// per interval too. None without a usable earlier sample or any packets.
+function receivedLoss(current: ShareSample, previous: ShareSample | null | undefined): number | undefined {
+  if (previous === null || previous === undefined) return undefined;
+  if (previous.stream !== current.stream || previous.publication !== current.publication) return undefined;
+  if (current.packetsReceived === undefined || current.packetsLost === undefined || previous.packetsReceived === undefined || previous.packetsLost === undefined) return undefined;
+  const received = current.packetsReceived - previous.packetsReceived;
+  const lost = current.packetsLost - previous.packetsLost;
+  if (received < 0 || lost < 0 || received + lost === 0) return undefined;
+  return lost / (received + lost);
+}
+
+// The sender's view of loss on the stream it sent: the remote-inbound-rtp
+// that reports on this outbound-rtp (by localId, else by ssrc).
+function sentLoss(all: readonly ShareStats[], sent: ShareStats): number | undefined {
+  for (const stat of all) {
+    if (stat.type !== 'remote-inbound-rtp' || stat.kind === 'audio' || stat.mediaType === 'audio') continue;
+    const same = stat.localId !== undefined && sent.id !== undefined ? stat.localId === sent.id : stat.ssrc !== undefined && stat.ssrc === sent.ssrc;
+    if (!same) continue;
+    if (stat.fractionLost !== undefined && Number.isFinite(stat.fractionLost) && stat.fractionLost >= 0 && stat.fractionLost <= 1) return stat.fractionLost;
+  }
+  return undefined;
+}
+
+// Only the capture settings the browser gave, as real numbers.
+function capturedOf(settings: NonNullable<ShareSample['captured']>): ShareSample['captured'] | undefined {
+  const width = known(settings.width) ? settings.width : undefined;
+  const height = known(settings.height) ? settings.height : undefined;
+  const fps = known(settings.fps) ? settings.fps : undefined;
+  if (width === undefined && height === undefined && fps === undefined) return undefined;
+  return { ...(width === undefined ? {} : { width }), ...(height === undefined ? {} : { height }), ...(fps === undefined ? {} : { fps }) };
 }
 
 // shareReadout formats the latest sample. Bitrate needs two samples of the
@@ -570,13 +667,102 @@ export function shareSample(stats: Iterable<ShareStats>, direction: ShareDirecti
 export function shareReadout(current: ShareSample | null, previous?: ShareSample | null): string | null {
   if (current === null) return null;
   let text = `${String(current.width)}×${String(current.height)} · ${String(Math.round(current.fps))} fps`;
-  if (previous?.bytes === undefined || previous.timestamp === undefined || current.bytes === undefined || current.timestamp === undefined) return text;
-  if (previous.stream !== current.stream || previous.publication !== current.publication) return text;
+  const share = current.lost ?? receivedLoss(current, previous);
+  const loss = share === undefined ? '' : ` · ${lossText(share)} lost`;
+  if (previous?.bytes === undefined || previous.timestamp === undefined || current.bytes === undefined || current.timestamp === undefined) return text + loss;
+  if (previous.stream !== current.stream || previous.publication !== current.publication) return text + loss;
   const elapsed = current.timestamp - previous.timestamp;
   const bytes = current.bytes - previous.bytes;
-  if (elapsed <= 0 || bytes < 0) return text;
+  if (elapsed <= 0 || bytes < 0) return text + loss;
   text += ` · ${(bytes * 8 / elapsed / 1000).toFixed(1)} Mbps`;
-  return text;
+  return text + loss;
+}
+
+// lossText shows a 0 to 1 share as a percentage, one decimal.
+function lossText(share: number): string {
+  return `${(share * 100).toFixed(1)}%`;
+}
+
+// askedText says what the sharer asked for, labelled as asked: "Asked 1080p ·
+// 60 fps". It is the chosen quality, never a measurement.
+export function askedText(quality: ShareQuality): string {
+  const size = quality.resolution === 'source' ? 'source size' : quality.resolution;
+  return `Asked ${size} · ${String(quality.frameRate)} fps`;
+}
+
+// A shortfall must hold this long before it is explained, and the picture
+// must stay on target this long before the explanation clears.
+export const shortfallHold = 5000;
+// Delivered rate under this share of the asked rate is a shortfall.
+const fpsFloor = 0.8;
+// Delivered or captured size within this share of the asked box counts as
+// reaching it (the encoder rounds sizes).
+const sizeSlack = 0.98;
+
+// The state of the shortfall explanation: since when the picture has been
+// short (or back on target), and the explanation now shown. Start from
+// noShortfall; a missing sample or a changed publication starts over.
+export interface ShortfallState {
+  readonly publication?: string;
+  readonly short: number | null;
+  readonly good: number | null;
+  readonly reason: string | null;
+}
+export const noShortfall: ShortfallState = { short: null, good: null, reason: null };
+
+// shortfallReason names why the sent picture is short of what was asked, or
+// null when it is on target or nothing can be said. The reason comes only
+// from the stats and the capture's settings. An encoder that says it is not
+// limited (none) is not short on rate, as a still screen sends few frames.
+export function shortfallReason(sample: ShareSample, quality: ShareQuality): string | null {
+  const ask = shareAsk(quality);
+  const asked = quality.resolution === 'source' ? null : ask;
+  const long = Math.max(sample.width, sample.height);
+  const small = Math.min(sample.width, sample.height);
+  const under = asked !== null && long < Math.max(asked.width, asked.height) * sizeSlack && small < Math.min(asked.width, asked.height) * sizeSlack;
+  // What is captured is itself smaller than asked: a small window or screen.
+  const cap = sample.captured;
+  const captureSmall =
+    asked !== null && cap?.width !== undefined && cap.height !== undefined &&
+    Math.max(cap.width, cap.height) < Math.max(asked.width, asked.height) * sizeSlack &&
+    Math.min(cap.width, cap.height) < Math.min(asked.width, asked.height) * sizeSlack;
+  // A smaller picture the encoder says it is not limiting, or one whose top
+  // layer is paused, is the sender doing what the viewers asked: dynacast
+  // stops the layers nobody takes, and viewers who are not focused on the
+  // stream take the lowest. Only a smaller capture still explains a size gap.
+  // A layer off whose rank is unknown excuses the gap only when the picture is
+  // smaller than the capture fitted to the ask, so a full-size top layer with
+  // a lower one off is judged as ever.
+  const behind = asked !== null && cap?.width !== undefined && cap.height !== undefined && (() => {
+    const [w, h] = fitBox(cap.width, cap.height, asked.width, asked.height);
+    return Math.max(sample.width, sample.height) < Math.max(w, h) * sizeSlack && Math.min(sample.width, sample.height) < Math.min(w, h) * sizeSlack;
+  })();
+  const paused = sample.paused === true || (sample.layerOff === true && behind);
+  const asRequested = paused || sample.limitation === 'none';
+  const underSize = under && (captureSmall || !asRequested);
+  const slow = !paused && sample.limitation !== 'none' && sample.fps < ask.frameRate * fpsFloor;
+  if (!underSize && !slow) return null;
+  if (underSize && captureSmall) return `What you're sharing is smaller than ${quality.resolution}`;
+  if (sample.limitation === 'cpu') return 'Limited by CPU';
+  if (sample.limitation === 'bandwidth') return 'Limited by bandwidth';
+  return "Your browser doesn't say why";
+}
+
+// nextShortfall advances the explanation by one sample at time now (ms, any
+// monotonic clock): it appears once the shortfall has held shortfallHold, and
+// clears shortfallHold after the picture is back on target. The reason shown
+// follows the latest while short.
+export function nextShortfall(state: ShortfallState, sample: ShareSample | null, quality: ShareQuality, now: number): ShortfallState {
+  if (sample === null) return noShortfall;
+  const base = state.publication === sample.publication ? state : noShortfall;
+  const reason = shortfallReason(sample, quality);
+  const publication = sample.publication === undefined ? {} : { publication: sample.publication };
+  if (reason !== null) {
+    const short = base.short ?? now;
+    return { ...publication, short, good: null, reason: now - short >= shortfallHold ? reason : base.reason };
+  }
+  const good = base.good ?? now;
+  return { ...publication, short: null, good, reason: base.reason !== null && now - good >= shortfallHold ? null : base.reason };
 }
 
 // The share's sound is music, not speech: no discontinuous transmission or
@@ -1292,7 +1478,9 @@ class LiveKitAdapter implements Room {
     report.forEach((stat) => {
       stats.push(stat as ShareStats);
     });
-    return shareSample(stats, direction, track?.sid);
+    const settings = direction === 'sent' ? track?.mediaStreamTrack.getSettings() : undefined;
+    const captured = settings === undefined ? undefined : { width: settings.width, height: settings.height, fps: settings.frameRate };
+    return shareSample(stats, direction, track?.sid, captured);
   }
 
   // holdScreen makes a capture this connection's share, picked here or kept

@@ -61,7 +61,28 @@ export interface ShareSample {
   // taken between two different ones.
   readonly stream?: string;
   readonly publication?: string;
+  // Why the encoder holds the picture back (outbound-rtp
+  // qualityLimitationReason), where the engine says. Absent where it does not.
+  readonly limitation?: ShareLimitation;
+  // Share of packets lost, 0 to 1: the receiver's report on the sent top layer
+  // (remote-inbound-rtp), per interval. Absent where
+  // the engine does not say.
+  readonly lost?: number;
+  // A viewer's packet counters, from which a readout takes loss over the
+  // interval between two samples.
+  readonly packetsReceived?: number;
+  readonly packetsLost?: number;
+  // The sender's top layer is not being sent (every viewer takes a lower
+  // layer): a smaller picture then is not a shortfall.
+  readonly paused?: boolean;
+  // A layer is off whose place among the layers could not be told; it excuses
+  // a picture smaller than the capture fitted to the ask, and nothing else.
+  readonly layerOff?: boolean;
+  // The capture's own size and rate (getSettings) of the sender's screen, when
+  // the browser reports them. A sent sample only.
+  readonly captured?: { readonly width?: number; readonly height?: number; readonly fps?: number };
 }
+export type ShareLimitation = 'none' | 'cpu' | 'bandwidth' | 'other';
 export type ShareDirection = 'received' | 'sent';
 
 // What the browser's picker gave: the picture always, sound when the browser

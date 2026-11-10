@@ -9,8 +9,8 @@
 import { useEffect, useRef, useState } from 'react';
 import { Glyph } from '../Icons';
 import type { VoiceClient, VoiceState } from './connection';
-import { shareReadout } from './sdk';
-import type { ShareDirection, ShareSample } from './share';
+import { askedText, nextShortfall, noShortfall, shareReadout, type ShortfallState } from './sdk';
+import type { ShareDirection, ShareQuality, ShareSample } from './share';
 
 // What the watch view needs of the client: the desktop's strip (issue #1582)
 // gives it the companion's, which is a narrower thing than the call view's.
@@ -18,19 +18,52 @@ export type ShareViewClient = Pick<VoiceClient, 'attachStream' | 'readShareStats
 
 // ShareReadout samples only the selected watched picture or the local screen's
 // top layer. The first sample has no bitrate; the next, about a second later,
-// does.
-export function ShareReadout({ client, direction, principal, prefix = '' }: { readonly client: Pick<VoiceClient, 'readShareStats'>; readonly direction: ShareDirection; readonly principal?: number; readonly prefix?: string }) {
+// does. Given asked (the sharer's own line), it says what was asked first, the
+// measurement after, and, once the picture has been short of it for 5 s, one
+// reason, until it has been back on target for 5 s. Loss shows when the engine
+// reports it. Every number is the browser's measurement; a stat the engine
+// does not give is left out. It is one polite-off status line: read in order
+// by a screen reader, never announced each second.
+export function ShareReadout({ client, direction, principal, prefix = '', asked, now = () => performance.now() }: {
+  readonly client: Pick<VoiceClient, 'readShareStats'>;
+  readonly direction: ShareDirection;
+  readonly principal?: number;
+  readonly prefix?: string;
+  readonly asked?: ShareQuality;
+  // The clock the 5 s holds count on, in ms.
+  readonly now?: () => number;
+}) {
   const [text, setText] = useState<string | null>(null);
+  const [reason, setReason] = useState<string | null>(null);
   const previous = useRef<ShareSample | null>(null);
+  const shortfall = useRef<ShortfallState>(noShortfall);
+  const quality = useRef<ShareQuality | undefined>(asked);
+  quality.current = asked;
+  const clock = useRef(now);
+  clock.current = now;
+  // A new ask starts the explanation over: a reason found against the old one
+  // must not outlast the change.
+  useEffect(() => {
+    shortfall.current = noShortfall;
+    setReason(null);
+  }, [asked?.resolution, asked?.frameRate]);
   useEffect(() => {
     let live = true;
     let timer: number | null = null;
     previous.current = null;
+    shortfall.current = noShortfall;
     setText(null);
+    setReason(null);
     const read = async () => {
       const sample = await client.readShareStats(direction, principal);
       if (!live) return;
       setText(shareReadout(sample, previous.current));
+      if (quality.current === undefined) {
+        setReason(null);
+      } else {
+        shortfall.current = nextShortfall(shortfall.current, sample, quality.current, clock.current());
+        setReason(shortfall.current.reason);
+      }
       // A missing sample resets the baseline.
       previous.current = sample;
       timer = window.setTimeout(() => { void read(); }, 1000);
@@ -41,7 +74,14 @@ export function ShareReadout({ client, direction, principal, prefix = '' }: { re
       if (timer !== null) window.clearTimeout(timer);
     };
   }, [client, direction, principal]);
-  return text === null ? null : <span className="share-readout">{prefix}{text}</span>;
+  if (text === null) return null;
+  return (
+    <span className="share-readout" role="status" aria-live="off" aria-label="Share quality">
+      {asked === undefined ? null : <span>{askedText(asked)}. </span>}
+      <span>{prefix}{text}</span>
+      {reason === null ? null : <span>. {reason}.</span>}
+    </span>
+  );
 }
 
 // A video element Safari on iPhone can put full screen: it has no

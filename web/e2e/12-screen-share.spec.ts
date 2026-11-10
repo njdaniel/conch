@@ -236,7 +236,12 @@ test.describe('screen share with LiveKit', () => {
     const member = typeof who === 'string' ? vw[who] : who;
     await signIn(page, vw, member.token, member.name);
     await openChannel(page, vw.channel);
-    return { page, watch, member, close: () => context.close() };
+    // The page is closed first, which ends its WebSockets: Playwright records
+    // a socket's frames live into a trace file, and a busy one (the room's, the
+    // channel's) still growing while the trace zip is built at context.close
+    // makes the zip fail with "file data stream has unexpected number of
+    // bytes" (issue #1660, seen under load).
+    return { page, watch, member, close: async () => { await page.close(); await context.close(); } };
   }
 
   async function join(p: Someone, how: 'Join voice' | 'Watch only'): Promise<void> {
@@ -365,6 +370,86 @@ test.describe('screen share with LiveKit', () => {
       await voiceRegion(a.page).getByRole('button', { name: 'Voice options' }).click();
       await expect(voiceRegion(a.page).getByLabel('Share resolution')).toHaveValue('720p');
       await expect(voiceRegion(a.page).getByLabel('Share frame rate')).toHaveValue('15');
+      await expectClean(a);
+      await expectClean(b);
+    } finally {
+      for (const p of [a, b]) await p.close();
+    }
+  });
+
+  // Issue #1660: the sharer's line says what was asked beside what is sent.
+  // The fake screen on a runner may or may not reach 60 fps; either outcome is
+  // accepted and recorded. A reason must never show while on target.
+  test('the sharer\'s readout shows what was asked beside what is sent', async ({ browser }) => {
+    const a = await person(browser, 'alice');
+    const b = await person(browser, 'bob');
+    try {
+      await join(a, 'Join voice');
+      await join(b, 'Watch only');
+      await share(a);
+      // The top layer sends only while a viewer takes it: bob watches it
+      // focused, as in the live quality change test.
+      await watching(b);
+      await shareView(b.page).getByRole('button', { name: "Focus alice's screen" }).click();
+      const voice = voiceRegion(a.page);
+      await voice.getByRole('button', { name: 'Voice options' }).click();
+      await voice.getByLabel('Share resolution').selectOption('1080p');
+      await voice.getByLabel('Share frame rate').selectOption('60');
+      const line = voice.getByRole('status', { name: 'Share quality' });
+      await expect(line).toContainText('Asked 1080p · 60 fps', { timeout: 30_000 });
+      await expect(line).toContainText(/Sending: \d+×\d+ · \d+ fps/, { timeout: 30_000 });
+      // Sample for a while: past the 5 s hold, a reason may appear if the
+      // runner falls short, and only then.
+      let outcome = 'on target';
+      // Samples in a row on target (the rate at 80% of 60 or more, at full
+      // size; the component compares the unrounded rate, so 49 shown is
+      // safely above 47.99): the reason clears 5 s after recovery and the
+      // sampling is about a second apart, so a run of 9 on target must show
+      // none.
+      let steady = 0;
+      for (let i = 0; i < 16; i++) {
+        await a.page.waitForTimeout(1000);
+        const text = (await line.textContent()) ?? '';
+        const sent = /Sending: (\d+)×(\d+) · (\d+) fps/.exec(text);
+        const reason = /Limited by (CPU|bandwidth)|smaller than|doesn't say why/.exec(text)?.[0];
+        if (reason !== undefined) outcome = `reason: ${reason}`;
+        const onTarget = sent !== null && Number(sent[3]) >= 49 && Number(sent[1]) === 1920 && Number(sent[2]) === 1080;
+        steady = onTarget ? steady + 1 : 0;
+        if (steady >= 9) expect(reason, 'a reason never shows while on target').toBeUndefined();
+      }
+      test.info().annotations.push({ type: 'readout', description: `${outcome}: ${(await line.textContent()) ?? ''}` });
+      await voice.getByRole('button', { name: 'Stop sharing' }).click();
+      await expect.poll(async () => (await shareRows()).at(-1)?.action, { timeout: 15_000 }).toBe('voice_share_stopped');
+      await expectClean(a);
+      await expectClean(b);
+    } finally {
+      for (const p of [a, b]) await p.close();
+    }
+  });
+
+  // Issue #1660, review: an unfocused viewer holds the top layer to the lowest,
+  // dynacast stops it, and the sent picture is a lower layer. That is the
+  // sender doing what viewers asked, not a shortfall: no reason shows.
+  test('a share every viewer holds unfocused shows no reason for the smaller layer', async ({ browser }) => {
+    const a = await person(browser, 'alice');
+    const b = await person(browser, 'bob');
+    try {
+      await join(a, 'Join voice');
+      await join(b, 'Watch only');
+      await share(a);
+      await watching(b);
+      const line = voiceRegion(a.page).getByRole('status', { name: 'Share quality' });
+      await expect(line).toContainText('Asked 1080p · 30 fps', { timeout: 30_000 });
+      await expect(line).toContainText(/Sending: \d+×\d+ · \d+ fps/, { timeout: 30_000 });
+      // Past the 5 s hold and well beyond.
+      for (let i = 0; i < 12; i++) {
+        await a.page.waitForTimeout(1000);
+        const text = (await line.textContent()) ?? '';
+        expect(text, 'no reason for a layer nobody takes').not.toMatch(/Limited by|smaller than|doesn't say why/);
+      }
+      test.info().annotations.push({ type: 'readout', description: (await line.textContent()) ?? '' });
+      await voiceRegion(a.page).getByRole('button', { name: 'Stop sharing' }).click();
+      await expect.poll(async () => (await shareRows()).at(-1)?.action, { timeout: 15_000 }).toBe('voice_share_stopped');
       await expectClean(a);
       await expectClean(b);
     } finally {
