@@ -54,8 +54,14 @@ export const CEILING_ARGS: readonly string[] = ['--transmit-ceiling-secs', Strin
 // companion's identity from its own session response; main passes nothing else.
 export const SHARE_AUDIO_ARGS: readonly string[] = ['--share-audio-owner', 'companion'];
 
+// Main alone owns mute (#1631): the helper does not read keys.mute, so a hand-
+// edited voice.toml cannot bind a key that unmutes a session while the screen is
+// locked (VoiceService.setMute is the only way, and the lock path mutes through
+// it). The TUI passes nothing and keeps its mute key.
+export const MUTE_OWNER_ARGS: readonly string[] = ['--no-mute-key'];
+
 // Every option a start carries, the ceiling last.
-export const HELPER_ARGS: readonly string[] = [...SHARE_AUDIO_ARGS, ...CEILING_ARGS];
+export const HELPER_ARGS: readonly string[] = [...SHARE_AUDIO_ARGS, ...MUTE_OWNER_ARGS, ...CEILING_ARGS];
 
 // The part of the Supervisor this service uses; a test stands in for it.
 export interface VoiceSupervisor {

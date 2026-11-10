@@ -72,6 +72,8 @@ pub struct ManagedSetup {
     /// it, and the start-up waits for the watcher.
     pub keyboard_unplugged: bool,
     pub start_timeout: Duration,
+    /// Start the helper with `--no-mute-key` (#1631).
+    pub no_mute_key: bool,
     /// Microphones and speakers opened by name, as the test arranges them; `None` for the
     /// tone and the counting sink, whatever is asked for.
     pub world: Option<World>,
@@ -85,6 +87,7 @@ impl Default for ManagedSetup {
             keyboard: true,
             keyboard_unplugged: false,
             start_timeout: Duration::from_secs(10),
+            no_mute_key: false,
             world: None,
         }
     }
@@ -429,6 +432,7 @@ impl ManagedRig {
             },
             share_audio_owner: ShareAudioOwner::Helper,
             transmit_ceiling_secs: None,
+            no_mute_key: setup.no_mute_key,
             timings,
             key_timings: quick_keys(),
             start_timeout: setup.start_timeout,
