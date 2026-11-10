@@ -58,6 +58,16 @@ describe('the open channel', () => {
   });
 });
 
+// What a screen reader announces as the button's description: the text of the
+// elements its aria-describedby names, in order.
+function describedBy(button: HTMLElement): string {
+  return (button.getAttribute('aria-describedby') ?? '')
+    .split(' ')
+    .filter((id) => id !== '')
+    .map((id) => document.getElementById(id)?.getAttribute('aria-label') ?? document.getElementById(id)?.textContent ?? '')
+    .join(' ');
+}
+
 describe('a channel topic', () => {
   const draw = (topic?: string) => (
     <ChannelList
@@ -68,20 +78,34 @@ describe('a channel topic', () => {
     />
   );
 
-  it('is the row button tooltip and accessible description only while non-empty', () => {
+  it('is part of the row button tooltip and accessible description only while non-empty', () => {
     const view = render(draw('Books and authors'));
     const button = screen.getByRole('button', { name: 'book-club' });
     expect(button.textContent).toBe('book-club');
-    expect(button.getAttribute('title')).toBe('Books and authors');
-    expect(button.getAttribute('aria-description')).toBe('Books and authors');
+    expect(button.getAttribute('title')).toBe('book-club — Books and authors');
+    expect(describedBy(button)).toBe('Books and authors');
 
     view.rerender(draw('Reading together'));
-    expect(button.getAttribute('title')).toBe('Reading together');
-    expect(button.getAttribute('aria-description')).toBe('Reading together');
+    expect(button.getAttribute('title')).toBe('book-club — Reading together');
+    expect(describedBy(button)).toBe('Reading together');
 
     view.rerender(draw(''));
     expect(button.getAttribute('title')).toBe('book-club');
-    expect(button.getAttribute('aria-description')).toBeNull();
+    expect(describedBy(button)).toBe('');
+  });
+
+  it('is still announced beside the badges that describe the row', () => {
+    render(
+      <ChannelList
+        channels={channels.map((channel) => (channel.id === 2 ? { ...channel, topic: 'Books and authors', manages: true } : channel))}
+        selected="general"
+        unread={new Map([['book-club', 3]])}
+        onOpen={() => undefined}
+      />,
+    );
+    const button = screen.getByRole('button', { name: 'book-club' });
+    expect((button.getAttribute('aria-describedby') ?? '').split(' ')[0]).toBe('topic-2');
+    expect(describedBy(button)).toMatch(/^Books and authors.*manages/);
   });
 });
 

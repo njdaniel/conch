@@ -138,7 +138,11 @@ export function Lobby({
   // invite panel, and the channel-removal handler after a Leave succeeds.
   readonly canRename?: (channel: ChannelV0) => boolean;
   readonly renderRename?: (channel: ChannelV0, close: () => void) => ReactNode;
+  // Whether this viewer may set that channel's topic (an operator, or its
+  // manager); absent, nobody. The server still decides.
   readonly canSetTopic?: (channel: ChannelV0) => boolean;
+  // The set-topic form for a channel, shown in place under its row; `close`
+  // hides it and returns focus to the row's ⋯.
   readonly renderTopic?: (channel: ChannelV0, close: () => void) => ReactNode;
   readonly canManage?: boolean;
   readonly renderSettings?: (channel: ChannelV0, change: SettingsChange, close: () => void) => ReactNode;

@@ -134,6 +134,15 @@ describe('the channels_changed frame', () => {
   });
 });
 
+// The button's accessible description: the text of what its aria-describedby names.
+function described(button: HTMLElement): string {
+  return (button.getAttribute('aria-describedby') ?? '')
+    .split(' ')
+    .filter((id) => id !== '')
+    .map((id) => document.getElementById(id)?.textContent ?? '')
+    .join(' ');
+}
+
 describe('the list follows the server', () => {
   it('shows a channel added to the person, with its unread count, with no reload', async () => {
     const events = await openChat();
@@ -192,25 +201,25 @@ describe('the list follows the server', () => {
   it('updates and clears another channel’s sidebar topic from the re-read list', async () => {
     const events = await openChat();
     const button = screen.getByRole('button', { name: 'ops' });
-    expect(button.getAttribute('aria-description')).toBeNull();
+    expect(described(button)).toBe('');
 
     server.channels = [general, { ...ops, topic: 'Operations' }];
     events.send(frame);
     await waitFor(() => {
-      expect(button.getAttribute('aria-description')).toBe('Operations');
+      expect(described(button)).toBe('Operations');
     });
-    expect(button.getAttribute('title')).toBe('Operations');
+    expect(button.getAttribute('title')).toBe('ops — Operations');
 
     server.channels = [general, { ...ops, topic: 'Incident response' }];
     events.send(frame);
     await waitFor(() => {
-      expect(button.getAttribute('aria-description')).toBe('Incident response');
+      expect(described(button)).toBe('Incident response');
     });
 
     server.channels = [general, { ...ops, topic: '' }];
     events.send(frame);
     await waitFor(() => {
-      expect(button.getAttribute('aria-description')).toBeNull();
+      expect(described(button)).toBe('');
     });
     expect(button.getAttribute('title')).toBe('ops');
   });
@@ -220,15 +229,15 @@ describe('the list follows the server', () => {
     const before = server.listGets;
     const document = { schema: 'conch.channel.v1', channel_id: 7, name: 'general', created_at: at };
     events.send({ ...document, topic: 'Live purpose' });
-    await screen.findByText('Live purpose');
-    expect(screen.getByRole('button', { name: 'general' }).getAttribute('aria-description')).toBe('Live purpose');
+    await screen.findAllByText('Live purpose');
+    expect(described(screen.getByRole('button', { name: 'general' }))).toBe('Live purpose');
     expect(server.listGets).toBe(before);
 
     events.send({ ...document, topic: '' });
     await waitFor(() => {
       expect(screen.queryByText('Live purpose')).toBeNull();
     });
-    expect(screen.getByRole('button', { name: 'general' }).getAttribute('aria-description')).toBeNull();
+    expect(described(screen.getByRole('button', { name: 'general' }))).toBe('');
     expect(server.listGets).toBe(before);
   });
 

@@ -1886,8 +1886,9 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
               onOpen={onOpen}
             /></ModerationScope>
           }
-          // Operators and each channel's managers may rename it and set its
-          // topic from that row's ⋯ menu. A visit gets neither control.
+          // Operators and each channel's managers may rename it, and set its
+          // topic, from that row's ⋯ menu (issues #728, #1135, #1504). A visit
+          // gets neither.
           canRename={(channel) => visit === null && (auth.principal.role === 'operator' || channel.manages === true)}
           renderRename={(channel, close) => (
             <RenameChannel

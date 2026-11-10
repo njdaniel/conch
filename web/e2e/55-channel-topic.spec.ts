@@ -71,11 +71,11 @@ test('C1504 a manager sets a topic; members and the directory learn it, while pr
   await expect(topic(readerPage, publicTopic)).toBeVisible();
 
   const readerActions = nav(readerPage).getByRole('button', { name: `Actions for ${publicName}` });
-  if (await readerActions.count()) {
-    await readerActions.click();
-    await expect(nav(readerPage).getByRole('menuitem', { name: 'Set topic' })).toHaveCount(0);
-    await readerPage.keyboard.press('Escape');
-  }
+  await expect(readerActions).toBeVisible();
+  await readerActions.click();
+  await expect(nav(readerPage).getByRole('menu')).toBeVisible();
+  await expect(nav(readerPage).getByRole('menuitem', { name: 'Set topic' })).toHaveCount(0);
+  await readerPage.keyboard.press('Escape');
   await expect(nav(readerPage).getByRole('form', { name: 'Set topic' })).toHaveCount(0);
 
   await showView(managerPage, 'Channels');
@@ -124,8 +124,8 @@ test('C1504 a member viewing another channel gets the sidebar topic through the 
   await expect(form).toHaveCount(0);
 
   const row = channelButton(readerPage, publicName);
-  await expect(row).toHaveAttribute('aria-description', publicTopic);
-  await expect(row).toHaveAttribute('title', publicTopic);
+  await expect(row).toHaveAccessibleDescription(publicTopic);
+  await expect(row).toHaveAttribute('title', `${publicName} — ${publicTopic}`);
   await expect(readerPage.getByLabel(`Message #${otherName}`)).toBeEnabled();
   await expect(topic(readerPage, publicTopic)).toHaveCount(0);
 });

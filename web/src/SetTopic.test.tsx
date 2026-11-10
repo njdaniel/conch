@@ -32,7 +32,6 @@ describe('SetTopic', () => {
     const { onSet, onClose } = form();
     const field = screen.getByRole('textbox', { name: 'Topic' });
     expect(field).toHaveProperty('value', channel.topic);
-    expect(field.getAttribute('maxlength')).toBeNull();
     fireEvent.change(field, { target: { value: updated.topic } });
     fireEvent.click(screen.getByRole('button', { name: 'Set topic' }));
     await waitFor(() => {
@@ -54,18 +53,21 @@ describe('SetTopic', () => {
     });
   });
 
-  it('truncates beyond 250 code points without splitting a surrogate pair', async () => {
-    const truncated = 'a'.repeat(MAX_CHANNEL_TOPIC_LENGTH);
-    const refused = `${truncated}😀`;
-    setTopic.mockResolvedValue({ ok: true, value: { ...channel, topic: truncated } });
+  it('does not cut a topic over 250 code points: it says so and sends nothing', () => {
+    const refused = `${'a'.repeat(MAX_CHANNEL_TOPIC_LENGTH)}😀`;
     form();
     const field = screen.getByRole('textbox', { name: 'Topic' });
     fireEvent.change(field, { target: { value: refused } });
-    expect(field).toHaveProperty('value', truncated);
-    fireEvent.click(screen.getByRole('button', { name: 'Set topic' }));
-    await waitFor(() => {
-      expect(setTopic).toHaveBeenCalledExactlyOnceWith(channel.id, truncated);
-    });
+    expect(field).toHaveProperty('value', refused);
+    expect(field.getAttribute('aria-invalid')).toBe('true');
+    expect(screen.getByRole('status').textContent).toContain('at most 250 characters');
+    const submit = screen.getByRole('button', { name: 'Set topic' });
+    expect(submit).toHaveProperty('disabled', true);
+    fireEvent.submit(submit.closest('form') as HTMLFormElement);
+    expect(setTopic).not.toHaveBeenCalled();
+    fireEvent.change(field, { target: { value: 'fine' } });
+    expect(submit).toHaveProperty('disabled', false);
+    expect(field.getAttribute('aria-invalid')).toBeNull();
   });
 
   it('Clear sends an empty topic and closes after the server accepts it', async () => {

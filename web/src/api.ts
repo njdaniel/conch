@@ -2052,6 +2052,11 @@ export async function renameChannel(id: number, from: string, name: string): Pro
   return renamed.ok ? { ok: true, value: renamed.value.channel } : renamed;
 }
 
+// setChannelTopic sets a channel's topic, or clears it with "" (PUT
+// /v1/channels/{id}/topic, issue #1504): for operators and the channel's
+// managers. Refusals carry their code and line as renameChannel's do:
+// invalid_request with the rule the topic broke, forbidden, channel_not_found.
+// The answer is the channel as it now is. It is never repeated here.
 export async function setChannelTopic(id: number, topic: string): Promise<InviteResult<ChannelV0>> {
   const request: SetChannelTopicRequestV1 = { topic };
   const reply = await authedSend(call('setChannelTopic', { id }), request);

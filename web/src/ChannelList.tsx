@@ -20,6 +20,7 @@ const noNames: ReadonlyMap<number, string> = new Map();
 const badgeId = (channel: number) => `unread-${String(channel)}`;
 const voiceId = (channel: number) => `in-voice-${String(channel)}`;
 const privateId = (channel: number) => `private-${String(channel)}`;
+const topicId = (channel: number) => `topic-${String(channel)}`;
 const managesId = (channel: number) => `manages-${String(channel)}`;
 
 // The count after a channel's name, with a name of its own ("3 unread") that the
@@ -225,7 +226,8 @@ function ChannelRow({
   }, [mayManage, change]);
   // What describes the button: private, a manager grant, who is in its voice, then its unread.
   const inVoice = voiced?.count ?? 0;
-  const described = [isPrivate ? privateId(channel.id) : null, channel.manages === true ? managesId(channel.id) : null, inVoice > 0 ? voiceId(channel.id) : null, unread > 0 ? badgeId(channel.id) : null].filter(
+  const hasTopic = channel.topic !== undefined && channel.topic !== '';
+  const described = [hasTopic ? topicId(channel.id) : null, isPrivate ? privateId(channel.id) : null, channel.manages === true ? managesId(channel.id) : null, inVoice > 0 ? voiceId(channel.id) : null, unread > 0 ? badgeId(channel.id) : null].filter(
     (x) => x !== null,
   );
 
@@ -411,7 +413,6 @@ function ChannelRow({
         }}
         tabIndex={channel.name === stop ? 0 : -1}
         aria-describedby={described.length === 0 ? undefined : described.join(' ')}
-        aria-description={channel.topic === undefined || channel.topic === '' ? undefined : channel.topic}
         aria-current={channel.name === selected ? 'true' : undefined}
         onClick={() => {
           onOpen(channel.name);
@@ -419,11 +420,16 @@ function ChannelRow({
         onKeyDown={(event) => {
           onMove(event, index);
         }}
-        title={channel.topic === undefined || channel.topic === '' ? channel.name : channel.topic}
+        title={hasTopic ? `${channel.name} — ${channel.topic ?? ''}` : channel.name}
       >
         {isPrivate ? <Glyph name="lock" /> : null}
         <span className="channel-name">{channel.name}</span>
       </button>
+      {hasTopic ? (
+        <span id={topicId(channel.id)} hidden>
+          {channel.topic}
+        </span>
+      ) : null}
       {isPrivate ? (
         <span id={privateId(channel.id)} hidden>
           private channel
@@ -561,7 +567,11 @@ export function ChannelList({
   // The rename form for a channel, shown in place under its row; `close`
   // hides it and returns focus to the row's ⋯.
   readonly renderRename?: (channel: ChannelV0, close: () => void) => ReactNode;
+  // Whether this viewer may set that channel's topic (an operator, or its
+  // manager); absent, nobody. The server still decides.
   readonly canSetTopic?: (channel: ChannelV0) => boolean;
+  // The set-topic form for a channel, shown in place under its row; `close`
+  // hides it and returns focus to the row's ⋯.
   readonly renderTopic?: (channel: ChannelV0, close: () => void) => ReactNode;
   // Whether this viewer holds manage_channels (whoami says so; the server still
   // decides). Only then does a row's ⋯ offer to make its channel public or
