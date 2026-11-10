@@ -17,13 +17,14 @@
 // shape checks and returns an Envelope too.
 import type { IpcMain } from 'electron';
 
-import type { BridgeReply, BridgeRequest, FeedRequest, NotifyRequest, SettingsChange, SignInOutcome, VoiceDeviceKey } from '../../web/src/platform/desktop/bridge.ts';
+import type { BridgeReply, BridgeRequest, FeedRequest, InviteTarget, NotifyRequest, SettingsChange, SignInOutcome, VoiceDeviceKey } from '../../web/src/platform/desktop/bridge.ts';
 import { VOICE_DEVICES_MAX_NAME_BYTES, voiceControlTalkMode, type VoiceControlTalkMode } from '../../web/src/schema/generated.ts';
 import { isPageSaveKey, keyCodeText, saveValueFits } from './voice/oneshot.ts';
 import { validChannel, validDeviceName } from './voice/protocol.ts';
 import { operations } from '../../web/src/platform/operations.ts';
 import { channelOf, INVOKED_FUNCTIONS, NOTIFICATION_SUPPORT, TAG_MAX, type Envelope, type InvokedFunction } from '../shared/bridge-names.ts';
 import { isProfileId } from './profiles/ids.ts';
+import type { Invites } from './invites.ts';
 import { MISMATCH, type ProfilesService } from './profiles/service.ts';
 import { parseFeedRequest, type Feeds } from './api/feeds.ts';
 import { targetOf, isOperationId } from './api/target.ts';
@@ -71,6 +72,8 @@ export interface IpcDeps {
   readonly profiles: ProfilesApi;
   // Native voice (issue #1374): main's one owner of the helper.
   readonly voice: VoiceApi;
+  // Opening an invite link (issue #1591).
+  readonly invites: InvitesApi;
   // Desktop notifications (issue #1590): owned by the active activation.
   readonly notifications: NotificationsApi;
   // The app's own settings (issue #1587).
@@ -89,6 +92,8 @@ export type ProfilesApi = Pick<
   ProfilesService,
   'view' | 'add' | 'rename' | 'remove' | 'switchTo' | 'retry' | 'recover' | 'signOut' | 'signedIn' | 'keptCredential' | 'signInPermitted' | 'active'
 >;
+
+export type InvitesApi = Pick<Invites, 'check' | 'accept' | 'cancel' | 'take'>;
 
 export type VoiceApi = Pick<VoiceService, 'state' | 'join' | 'leave' | 'retry' | 'setMute' | 'setDeafen' | 'setDevices' | 'setTalkMode' | 'devices' | 'saveDevice' | 'keyDevices' | 'saveTalkBinding'>;
 export type NotificationsApi = Pick<Notifications, 'show' | 'close' | 'supported'>;
@@ -191,6 +196,7 @@ interface Handlers {
   readonly files: IpcDeps['files'];
   readonly profiles: ProfilesApi;
   readonly voice: VoiceApi;
+  readonly invites: InvitesApi;
   readonly notifications: NotificationsApi;
   readonly settings: SettingsApi;
   readonly companion: CompanionApi;
@@ -371,6 +377,17 @@ function parseDevices(args: readonly unknown[]): readonly unknown[] | null {
   const { input, output } = devices;
   if ((input !== undefined && !isDeviceName(input)) || (output !== undefined && !isDeviceName(output))) return null;
   return [{ ...(input === undefined ? {} : { input }), ...(output === undefined ? {} : { output }) }];
+}
+
+const isInviteHandle = (value: unknown): value is string => typeof value === 'string' && /^invite-[0-9a-f]{32}$/u.test(value);
+
+// A handle and exactly one target: { profile: <profile id> } or { add: true }.
+function parseInviteAccept(args: readonly unknown[]): readonly unknown[] | null {
+  const [handle, target] = args;
+  if (args.length !== 2 || !isInviteHandle(handle) || !isRecord(target)) return null;
+  if (hasExactKeys(target, ['profile']) && isProfileId(target['profile'])) return [handle, { profile: target['profile'] }];
+  if (hasExactKeys(target, ['add']) && target['add'] === true) return [handle, { add: true }];
+  return null;
 }
 
 export const SPECS: Readonly<Record<InvokedFunction, Spec>> = {
@@ -580,6 +597,30 @@ export const SPECS: Readonly<Record<InvokedFunction, Spec>> = {
     run: ({ voice }, [request]) => voice.saveTalkBinding(request as { deviceId: string; code: number }),
     gesture: true,
   },
+  // Opening an invite link (issue #1591). A link is untrusted text, capped;
+  // main parses it. Checking contacts nothing. Accepting adds, switches or
+  // stages, so it is the person's act alone. The handle is what main issued,
+  // never the code, and the code leaves only through inviteTake, once.
+  inviteCheck: {
+    limit: 30,
+    maxBytes: 4 * 1024,
+    parse: (args) => (args.length === 1 && typeof args[0] === 'string' && args[0].length <= 4096 ? args : null),
+    run: ({ invites }, [link]) => invites.check(link),
+  },
+  inviteAccept: {
+    limit: 20,
+    maxBytes: 256,
+    parse: parseInviteAccept,
+    run: ({ invites }, [handle, target]) => invites.accept(handle as string, target as InviteTarget),
+    gesture: true,
+  },
+  inviteCancel: {
+    limit: 30,
+    maxBytes: 128,
+    parse: (args) => (args.length === 1 && isInviteHandle(args[0]) ? args : null),
+    run: ({ invites }, [handle]) => invites.cancel(handle as string),
+  },
+  inviteTake: { limit: 60, maxBytes: 0, parse: none, run: ({ invites }) => invites.take() },
   // The app's own settings (issue #1587). A change is the person's act alone.
   settings: { limit: 120, maxBytes: 0, parse: none, run: ({ settings }) => settings.view() },
   settingsSet: {
@@ -656,6 +697,7 @@ export class Ipc {
         files: this.#deps.files,
         profiles: this.#deps.profiles,
         voice: this.#deps.voice,
+        invites: this.#deps.invites,
         notifications: this.#deps.notifications,
         settings: this.#deps.settings,
         companion: this.#deps.companion ?? NO_COMPANION,

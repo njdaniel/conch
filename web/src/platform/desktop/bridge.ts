@@ -326,7 +326,7 @@ export interface ConchDesktopBridge {
 declare global {
   interface Window {
     // Present only in the desktop shell's renderer.
-    readonly conchDesktop?: ConchDesktopBridge & Partial<DesktopVoiceBridge> & Partial<DesktopSettingsBridge> & Partial<DesktopCompanionBridge>;
+    readonly conchDesktop?: ConchDesktopBridge & Partial<DesktopVoiceBridge> & Partial<DesktopSettingsBridge> & Partial<DesktopCompanionBridge> & Partial<DesktopInviteBridge>;
   }
 }
 
@@ -469,6 +469,62 @@ export interface DesktopVoiceBridge {
   onVoiceState(listener: (view: NativeVoiceView) => void): Unsubscribe;
 }
 
+// Opening an invite link in the app (issue #1591, D5-05 of #773). Its own
+// interface, beside ConchDesktopBridge, so a fake of the main bridge needs
+// no change. The link is untrusted text: main parses it (the page's own parse
+// is never trusted), keeps the code behind a one-time handle and answers
+// only the server it names. Nothing is contacted, switched or added until
+// inviteAccept, which is the person's click.
+//
+// Why a link was not accepted. Fixed words, never the link or its code.
+export type InviteRefusal = 'type' | 'length' | 'characters' | 'scheme' | 'userinfo' | 'host' | 'path' | 'query' | 'fragment' | 'code' | 'malformed';
+
+// A saved profile for the invite's server, offered by name and account.
+export interface InviteProfile {
+  readonly id: string;
+  readonly label: string;
+  readonly account: string | null;
+  readonly active: boolean;
+}
+
+export type InviteCheck =
+  | {
+      readonly ok: true;
+      // One-time handle for inviteAccept or inviteCancel. Not the code.
+      readonly handle: string;
+      // The canonical origin the link names, and its host: what the person
+      // is shown before anything is contacted.
+      readonly origin: string;
+      readonly host: string;
+      readonly profiles: readonly InviteProfile[];
+      // Voice is running now, in whatever profile: switching leaves it.
+      readonly voice: boolean;
+    }
+  | { readonly ok: false; readonly refusal: InviteRefusal };
+
+// Open it with a saved profile, or add the server as a new entry.
+export type InviteTarget = { readonly profile: string } | { readonly add: true };
+
+export type InviteAccept =
+  | {
+      readonly ok: true;
+      // True: the window's page is being replaced by that profile's, which
+      // takes the code itself (inviteTake). False: the profile is the one in
+      // force, and this page takes it now.
+      readonly switched: boolean;
+    }
+  | { readonly ok: false; readonly refusal: 'expired' | 'voice-started' | 'unknown-profile' | 'unsupported' | 'full' | 'unreachable' | 'certificate' | 'not-conch' };
+
+export interface DesktopInviteBridge {
+  inviteCheck(link: string): Promise<InviteCheck>;
+  // The person's click. The code never comes back from this.
+  inviteAccept(handle: string, target: InviteTarget): Promise<InviteAccept>;
+  inviteCancel(handle: string): Promise<boolean>;
+  // The invite code staged for the profile now in force, once: a second call,
+  // or one from any other profile, gets null.
+  inviteTake(): Promise<string | null>;
+}
+
 // The app's own settings (issue #1587; linux-desktop.md §9). App-wide, kept by
 // main in <userData>/settings.json, not per account. In-process TypeScript, not
 // a wire shape.
@@ -582,6 +638,6 @@ export interface DesktopCompanionBridge {
   onCompanion(listener: (event: CompanionEvent) => void): Unsubscribe;
 }
 
-// The object the preload exposes: the bridge, the voice family, the settings
-// and the companion. Still no press, release, gate or transmit function in any.
-export type ExposedDesktopBridge = ConchDesktopBridge & DesktopVoiceBridge & DesktopSettingsBridge & DesktopCompanionBridge;
+// The object the preload exposes: the bridge, the voice family, the settings,
+// the companion and the invite family. Still no press, release, gate or transmit function in any.
+export type ExposedDesktopBridge = ConchDesktopBridge & DesktopVoiceBridge & DesktopSettingsBridge & DesktopCompanionBridge & DesktopInviteBridge;
