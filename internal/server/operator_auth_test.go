@@ -541,6 +541,7 @@ var reauthDecisions = map[string]reauthDecision{
 	"GET /v1/principals/{id}/manifest":                                {reauthNone, "a manifest read"},
 	"PUT /v1/principals/{id}/name":                                    {reauthNone, "a rename grants and ends nothing"},
 	"PUT /v1/channels/{id}/name":                                      {reauthNone, "a rename grants and ends nothing"},
+	"PUT /v1/channels/{id}/topic":                                     {reauthNone, "a topic grants and ends nothing"},
 	"POST /v1/principals/{id}/credentials":                            {reauthAlways, "creates a credential"},
 	"GET /v1/principals/{id}/credentials":                             {reauthNone, "a list"},
 	"POST /v1/credentials/{credential_id}/rotate":                     {reauthAlways, "creates a credential"},

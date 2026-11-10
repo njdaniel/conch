@@ -31,6 +31,12 @@ type ChannelV0 struct {
 	// archived channel keeps its history and members and refuses anything
 	// new (ErrorCodeChannelArchived).
 	ArchivedAt *time.Time `json:"archived_at,omitempty"`
+	// Topic is the channel's one-line topic (issue #1503, additive): what the
+	// channel is for, set by its managers. Omitted when it has none, and by
+	// a server that predates it; a reader takes either as no topic. Held to
+	// ValidateDisplayName with MaxChannelTopicLength, so it is safe in a
+	// header, a terminal title and an audit line.
+	Topic string `json:"topic,omitempty"`
 }
 
 // The community model (ADR-013, docs/design/community-model.md §3.2, issue
@@ -158,6 +164,12 @@ type ChannelListingV1 struct {
 	// omitted while it is live. An archived channel is listed to its
 	// members, and to a ?scope=all operator, never to other callers.
 	ArchivedAt *Timestamp `json:"archived_at,omitempty"`
+	// Topic is the channel's one-line topic, shown before a join (issue #1503, additive): what the
+	// channel is for, set by its managers. Omitted when it has none, and by
+	// a server that predates it; a reader takes either as no topic. Held to
+	// ValidateDisplayName with MaxChannelTopicLength, so it is safe in a
+	// header, a terminal title and an audit line.
+	Topic string `json:"topic,omitempty"`
 }
 
 // ChannelDirectoryResponseV1 is the body of GET /v1/directory/channels.
@@ -315,6 +327,12 @@ type ChannelDocV1 struct {
 	Default    bool              `json:"default,omitempty"`
 	// ArchivedAt is as on ChannelV0: omitted while the channel is live.
 	ArchivedAt *Timestamp `json:"archived_at,omitempty"`
+	// Topic is the channel's one-line topic (issue #1503, additive): what the
+	// channel is for, set by its managers. Omitted when it has none, and by
+	// a server that predates it; a reader takes either as no topic. Held to
+	// ValidateDisplayName with MaxChannelTopicLength, so it is safe in a
+	// header, a terminal title and an audit line.
+	Topic string `json:"topic,omitempty"`
 }
 
 // Validate reports whether the document is structurally well-formed: the v1
@@ -337,5 +355,38 @@ func (d ChannelDocV1) Validate() error {
 	if d.Visibility != "" && !d.Visibility.Valid() {
 		return fmt.Errorf("schema: channel visibility must be one of: %s", strings.Join(Vocabularies["ChannelVisibility"], ", "))
 	}
-	return nil
+	return validateChannelTopic(d.Topic)
+}
+
+// MaxChannelTopicLength is the longest allowed channel topic, in characters
+// (issue #1503, docs/design/channel-topic.md §2.3).
+const MaxChannelTopicLength = 250
+
+// validateChannelTopic holds a topic to the channel name's character rule
+// with MaxChannelTopicLength. The empty string, no topic, is valid. The
+// error names the rule and never echoes the text.
+func validateChannelTopic(topic string) error {
+	if topic == "" {
+		return nil
+	}
+	return ValidateDisplayName("channel topic", topic, MaxChannelTopicLength)
+}
+
+// SetChannelTopicRequestV1 is the body of PUT /v1/channels/{id}/topic.
+type SetChannelTopicRequestV1 struct {
+	// Topic is the new topic, or "" to clear it. An absent field reads as
+	// "": the request has no other field to mean. Held to the channel name's
+	// character rule with MaxChannelTopicLength, checked by Validate.
+	Topic string `json:"topic"`
+}
+
+// Validate reports whether the topic meets the rule of
+// MaxChannelTopicLength. The empty string is valid.
+func (r SetChannelTopicRequestV1) Validate() error {
+	return validateChannelTopic(r.Topic)
+}
+
+// SetChannelTopicResponseV1 is the channel as it now is.
+type SetChannelTopicResponseV1 struct {
+	Channel ChannelV0 `json:"channel"`
 }

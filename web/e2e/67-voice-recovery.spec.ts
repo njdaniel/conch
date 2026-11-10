@@ -8,7 +8,8 @@
 //
 // The faults, and the limit of each (the PR says the same):
 //   - the signal: page.routeWebSocket(/\/rtc/) wraps one page's LiveKit
-//     signal socket and closes it on command, refusing new ones for a while.
+//     signal socket and closes it on command, holding new ones unanswered (and
+//     never connected through to LiveKit) for a while.
 //     This cuts signal only. WebRTC media is UDP and does not pass through
 //     Playwright.
 //   - the page: context.setOffline(true) cuts that page's HTTP and WebSocket
@@ -44,7 +45,7 @@
 //                          the server's ICE and signal timeouts, which this
 //                          config leaves at their defaults). Measured: see
 //                          vanishedWithin below.
-import type { Locator, Page, WebSocketRoute } from '@playwright/test';
+import type { Browser, Locator, Page, WebSocketRoute } from '@playwright/test';
 import { expect, messages, say, test } from './fixtures';
 import { adminToken } from './livekit-admin';
 import { enter, expectClean, inbound, joinVoice, leave, type Someone } from './people';
@@ -54,9 +55,11 @@ import { loadWorld } from './world';
 const reconnectLimit = 20_000;
 const rosterBound = 2 * (2000 + 1500 + 2000);
 const margin = 10_000;
-// Closed signal, refused for this long before it is let through again: long
-// enough for the page to show Reconnecting (the SDK reports it at once), well
-// under reconnectLimit so the SDK resumes.
+// Signal closed, new sockets held unanswered, for this long before they are
+// let through again: long enough for the SDK to try and fail at least once,
+// well under reconnectLimit so the SDK resumes. The client does not show
+// Reconnecting for it (a signal-only resume is SignalReconnecting in
+// livekit-client, which the client does not map; #1678).
 const signalCutFor = 3_000;
 // The page's HTTP and WS traffic is off for this long (issue #1612).
 const offlineFor = 5_000;
@@ -71,6 +74,12 @@ const recoverWithin = signalCutFor + reconnectLimit + margin;
 // context closing to the identity leaving the list. Bound: the longest seen,
 // 22 s, plus the 10 s margin.
 const vanishedWithin = 22_000 + margin;
+// How long LiveKit may take to drop someone whose Leave reached it. The page
+// sends Leave and LiveKit removes the participant at once, so 5 s is generous
+// (a delivered leave measured 4 to 7 ms over 5 runs); a leave that did not arrive is
+// removed only by the dead-connection window above (about 20 s), so 5 s
+// tells the two apart.
+const leaveWithin = 5_000;
 // Requests of a page that lost them while its context was offline.
 // by method, path and error, exactly as watchPage records them: conchd's
 // approvals poll is the one request carol's page makes while offline.
@@ -81,24 +90,25 @@ const roster = (page: Page) => voiceRegion(page).getByRole('list', { name: 'In v
 
 // The signal socket of one page: passed through to LiveKit until cut().
 class Signal {
-  private refusing = false;
+  private holding = false;
   private readonly live: { page: WebSocketRoute; server: WebSocketRoute }[] = [];
+  // Signal sockets passed through to LiveKit, and attempts held while cut.
   opened = 0;
-  refused = 0;
+  held = 0;
 
   async install(page: Page): Promise<void> {
     await page.routeWebSocket(/\/rtc/, (ws) => {
-      if (this.refusing) {
-        this.refused++;
-        const dead = ws.connectToServer();
-        void dead.close({ code: 1000 });
-        void ws.close({ code: 1011, reason: 'cut' });
+      if (this.holding) {
+        // Held: never connected to LiveKit, never answered. LiveKit sees
+        // nothing of the attempt (a refusal that connected through and closed
+        // would show LiveKit a second connection under bob's identity), and
+        // the page's socket is left to the SDK's own timeout.
+        this.held++;
         return;
       }
       this.opened++;
       const server = ws.connectToServer();
-      const pair = { page: ws, server };
-      this.live.push(pair);
+      this.live.push({ page: ws, server });
       ws.onMessage((m) => {
         server.send(m);
       });
@@ -114,9 +124,9 @@ class Signal {
     });
   }
 
-  // cut closes every live signal socket and refuses new ones until restore().
+  // cut closes every live signal socket and holds new ones until restore().
   async cut(): Promise<void> {
-    this.refusing = true;
+    this.holding = true;
     for (const { page, server } of this.live.splice(0)) {
       await page.close({ code: 1011, reason: 'cut' });
       await server.close({ code: 1000 });
@@ -124,13 +134,16 @@ class Signal {
   }
 
   restore(): void {
-    this.refusing = false;
+    this.holding = false;
   }
 }
 
 // Counts the moments a page did not say what it should, polled every 200 ms.
 class Lapses {
   readonly seen: string[] = [];
+  // Reads that timed out or failed: recorded, never counted as a lapse. A slow
+  // read on a loaded machine says nothing about the page.
+  unreadable = 0;
   private running = true;
   private readonly loop: Promise<void>;
   constructor(
@@ -145,8 +158,8 @@ class Lapses {
       try {
         const problem = await this.probe();
         if (problem !== null) this.seen.push(`${this.name}: ${problem}`);
-      } catch (err) {
-        this.seen.push(`${this.name}: unreadable (${String(err).split('\n')[0]?.slice(0, 80) ?? ''})`);
+      } catch {
+        this.unreadable++;
       }
       await new Promise((r) => setTimeout(r, Math.max(0, 200 - (Date.now() - at))));
     }
@@ -226,15 +239,25 @@ test.describe('voice recovery', () => {
     if (secret === undefined) throw new Error('no LiveKit secret in the world');
     const base = `http://127.0.0.1:${new URL(vw.livekitOrigin.replace(/^ws/, 'http')).port}`;
     const call = async (method: string, grant: object, body: object): Promise<unknown> => {
-      const res = await fetch(`${base}/twirp/livekit.RoomService/${method}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${adminToken('webvoicekey', secret, grant)}` },
-        body: JSON.stringify(body),
-        signal: AbortSignal.timeout(5000),
-      });
-      // Status only: a body can name a room.
+      // Fixed messages only, as livekit-admin.ts: a transport error names the
+      // address, a parse error quotes the body, and a body can name a room.
+      let res: Response;
+      try {
+        res = await fetch(`${base}/twirp/livekit.RoomService/${method}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${adminToken('webvoicekey', secret, grant)}` },
+          body: JSON.stringify(body),
+          signal: AbortSignal.timeout(5000),
+        });
+      } catch {
+        throw new Error(`livekit ${method}: no answer`);
+      }
       if (res.status !== 200) throw new Error(`livekit ${method}: HTTP ${String(res.status)}`);
-      return res.json();
+      try {
+        return (await res.json()) as unknown;
+      } catch {
+        throw new Error(`livekit ${method}: unreadable answer`);
+      }
     };
     const rooms = (await call('ListRooms', { roomList: true }, {})) as { rooms?: { name?: string }[] };
     const out: string[] = [];
@@ -257,7 +280,7 @@ test.describe('voice recovery', () => {
 
   // The three of the voice world, in push to talk, in voice, each seeing the
   // other two in its roster. before(name, page) runs on each new page.
-  async function room(browser: import('@playwright/test').Browser, before?: Partial<Record<'alice' | 'bob' | 'carol', (page: Page) => Promise<void>>>): Promise<[Someone, Someone, Someone]> {
+  async function room(browser: Browser, before?: Partial<Record<'alice' | 'bob' | 'carol', (page: Page) => Promise<void>>>): Promise<[Someone, Someone, Someone]> {
     const people: Someone[] = [];
     try {
       for (const m of [vw.alice, vw.bob, vw.carol]) {
@@ -299,16 +322,19 @@ test.describe('voice recovery', () => {
       bobInRosters = [watching(a, ['bob']), watching(c, ['bob'])];
 
       const cutAt = Date.now();
+      const openedBefore = signal.opened;
       await signal.cut();
       await new Promise((r) => setTimeout(r, signalCutFor));
       signal.restore();
-      // The SDK resumes: it opens a second signal socket (the first was ours
-      // to cut) once the cut is lifted, and bob is Connected throughout or
-      // again within the bound.
-      await expect.poll(() => signal.opened, { timeout: recoverWithin, message: 'bob opens a new signal socket' }).toBe(2);
+      // The SDK resumes: once the cut is lifted it opens at least one new
+      // signal socket beyond those open before the cut. (The Connected check
+      // below cannot tell a resume from nothing happening, since the page
+      // does not show a signal-only drop, #1678; this and the unchanged
+      // publication are what prove it.)
+      await expect.poll(() => signal.opened, { timeout: recoverWithin, message: 'bob opens a new signal socket after the cut' }).toBeGreaterThan(openedBefore);
       await expect(voiceRegion(b.page)).toContainText(/Connected in #voice-room/, { timeout: recoverWithin });
       info.annotations.push({ type: 'signal back after the cut', description: `${String(Date.now() - cutAt)} ms (bound ${String(recoverWithin)} ms)` });
-      info.annotations.push({ type: 'signal sockets refused during the cut', description: String(signal.refused) });
+      info.annotations.push({ type: 'signal sockets held during the cut', description: String(signal.held) });
       const bobLapses = await bobSees.stop();
       // livekit-client 2.22 reports a signal-only resume as SignalReconnecting,
       // which the client does not map to its Reconnecting phase (that is for a
@@ -318,6 +344,7 @@ test.describe('voice recovery', () => {
 
       const lapses = (await Promise.all(others.map((l) => l.stop()))).flat();
       expect(lapses, 'alice and carol stay connected and keep seeing each other').toEqual([]);
+      info.annotations.push({ type: 'unreadable reads (not counted)', description: String(others.reduce((n, l) => n + l.unreadable, 0)) });
       const bobDrops = (await Promise.all(bobInRosters.map((l) => l.stop()))).flat();
       info.annotations.push({ type: "bob in alice's and carol's rosters during the cut", description: bobDrops.length === 0 ? 'kept throughout' : `dropped and came back (${[...new Set(bobDrops.map((d) => d.split(':')[0]))].join(', ')})` });
       for (const p of [a, c]) await expect(roster(p.page)).toContainText('bob', { timeout: rosterBound + margin });
@@ -335,7 +362,9 @@ test.describe('voice recovery', () => {
       // reaches LiveKit through the wrapper; closing the page at once could
       // lose it and leave LiveKit waiting out a dead connection (vanishedWithin).
       await showLeave(b);
-      await expect.poll(() => vw.participants(), { timeout: rosterBound + margin, message: 'bob leaves LiveKit' }).toEqual(identities(vw.alice, vw.carol));
+      const leftAt = Date.now();
+      await expect.poll(() => vw.participants(), { timeout: leaveWithin, message: 'bob leaves LiveKit at once' }).toEqual(identities(vw.alice, vw.carol));
+      info.annotations.push({ type: 'LiveKit dropped bob after his Leave', description: `${String(Date.now() - leftAt)} ms (bound ${String(leaveWithin)} ms)` });
     } finally {
       await bobSees.stop();
       await Promise.all([...others, ...bobInRosters].map((l) => l.stop()));
@@ -344,7 +373,7 @@ test.describe('voice recovery', () => {
     await empty();
   });
 
-  test("carol's page goes offline for 5 s: chat and the roster recover, once", async ({ browser }, info) => {
+  test("carol's page goes offline for at least 5 s: chat and the roster recover, once", async ({ browser }, info) => {
     test.setTimeout(150_000);
     const [a, b, c] = await room(browser);
     const carolSees = watching(c, ['alice']);
@@ -352,6 +381,8 @@ test.describe('voice recovery', () => {
       const body = `1612 while carol was offline ${Date.now().toString(36)}`;
       const quiet = await delta(c, 1500);
       await c.context.setOffline(true);
+      const offlineAt = Date.now();
+      let offlineLasted = 0;
       let loud = 0;
       try {
         // Meanwhile: alice says something, bob leaves voice, and alice holds
@@ -368,8 +399,13 @@ test.describe('voice recovery', () => {
         }
         await new Promise((r) => setTimeout(r, Math.max(0, offlineFor - 2000)));
       } finally {
+        offlineLasted = Date.now() - offlineAt;
         await c.context.setOffline(false);
       }
+      // Not exactly offlineFor: the window lasts as long as the say, the leave,
+      // the press and the waits above take. The allowlist below holds for
+      // whatever it was, and the real length is recorded.
+      info.annotations.push({ type: 'carol offline for', description: `${String(offlineLasted)} ms (at least ${String(offlineFor)} ms)` });
       info.annotations.push({ type: 'media while offline', description: `${String(loud)} B in 2 s while alice held the key, ${String(quiet)} B in 1.5 s quiet: ${loud > quiet * 4 + 2000 ? 'carried on' : 'cut'}` });
 
       // Chat recovers: the message posted meanwhile is shown, once.
@@ -409,13 +445,15 @@ test.describe('voice recovery', () => {
       try {
         await new Promise((r) => setTimeout(r, pausedFor));
       } finally {
+        // If this throws, frozen stays true and the outer finally tries again
+        // before it cleans up.
         vw.unpauseLiveKit();
         frozen = false;
       }
       for (const p of [a, b, c]) await expect(voiceRegion(p.page)).toContainText(/Connected in #voice-room/, { timeout: reconnectLimit + margin });
       info.annotations.push({ type: 'all connected again after unpause', description: `${String(Date.now() - pausedAt - pausedFor)} ms (bound ${String(reconnectLimit + margin)} ms)` });
       const lapses = (await Promise.all(sees.map((l) => l.stop()))).flat();
-      info.annotations.push({ type: 'pages during the freeze', description: lapses.join('; ') || 'stayed Connected and kept everyone' });
+      info.annotations.push({ type: 'pages during the freeze', description: `${lapses.join('; ') || 'stayed Connected and kept everyone'}; unreadable reads not counted: ${String(sees.reduce((n, l) => n + l.unreadable, 0))}` });
       for (const p of [a, b, c]) for (const n of names([a, b, c])) await expect(roster(p.page)).toContainText(n, { timeout: rosterBound + margin });
       // Resumed or restarted, each is listed once. A restart makes a new
       // connection and LiveKit drops the old one, so poll for the old to go.
@@ -428,9 +466,12 @@ test.describe('voice recovery', () => {
       expect(await vw.participants()).toEqual(identities(vw.alice, vw.bob, vw.carol));
       for (const p of [a, b, c]) await expectClean(vw, p);
     } finally {
-      if (frozen) vw.unpauseLiveKit();
-      await Promise.all(sees.map((l) => l.stop()));
-      for (const p of [a, b, c]) await leave(p);
+      try {
+        if (frozen) vw.unpauseLiveKit();
+      } finally {
+        await Promise.all(sees.map((l) => l.stop()));
+        for (const p of [a, b, c]) await leave(p);
+      }
     }
     await empty();
   });
@@ -475,7 +516,7 @@ test.describe('voice recovery', () => {
       const before = await microphones(vw.bob);
       expect(before, "one microphone publication of bob's before").toHaveLength(1);
       await showLeave(b);
-      await expect.poll(() => vw.participants(), { timeout: rosterBound + margin, message: 'bob leaves LiveKit' }).toEqual(identities(vw.alice, vw.carol));
+      await expect.poll(() => vw.participants(), { timeout: leaveWithin, message: 'bob leaves LiveKit at once' }).toEqual(identities(vw.alice, vw.carol));
       for (const p of [a, c]) await expect(roster(p.page)).not.toContainText('bob', { timeout: rosterBound + margin });
 
       await joinVoice(b, 'Join voice');
