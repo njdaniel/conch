@@ -823,7 +823,10 @@ jobs:
         run: npx playwright install --with-deps chromium
 
       - name: web-e2e
-        run: make web-e2e E2E_ARGS=--shard=${{ matrix.shard }}/3
+        # --grep-invert @heavy (#1613): a test tagged @heavy runs only in the
+        # heavy lane (e2e-heavy.yml, nightly and on demand), never here. See
+        # docs/testing.md for the tags and the PR budget.
+        run: make web-e2e E2E_ARGS="--shard=${{ matrix.shard }}/3 --grep-invert @heavy"
 
       # The spec removes its own container on every path; this is for the case
       # where the runner killed it. Only the container of this run.
