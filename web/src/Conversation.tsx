@@ -6,7 +6,11 @@ import { ReactionBar, ReactionScope, useHasReactions } from './Reactions';
 import { Composer } from './Composer';
 import { guestName } from './guestName';
 import { Avatar, PrivateMark } from './Icons';
-import { Linkified } from './Linkified';
+import { IdentityMarks } from './Identity';
+import { ProfileCard } from './ProfileCard';
+import type { IdentityKey } from './identity';
+import { Linkified, previewText } from './Linkified';
+import { displayBody, useKnownFileNames } from './spoilerFiles';
 import { ImageAttachment } from './ImageAttachment';
 import { loadStored, saveEdit, saveReplies } from './state/draftStore';
 import { canEdit, EditedMarker, editEnds, editsLeft, editWindowMs, MessageEditor } from './MessageEdit';
@@ -23,6 +27,7 @@ import type { LiveStatus, Person } from './useLiveChannel';
 import { mentions } from './useNotifications';
 import { useAuthorNames } from './useAuthorNames';
 import { timeOf } from './time';
+import { fromServer } from './schema/validate';
 
 // The time of day, in the reader's own locale and time zone (time.ts).
 export function clock(when: string | number): string {
@@ -58,7 +63,7 @@ export function audienceLabel(audience: Audience, viewer: number, nets: Readonly
 // (or one that is not the shape this client knows: then it is a plain message).
 function approvalOf(message: MessageV2): ApprovalV1 | null {
   const payload = message.payload;
-  if (payload?.schema !== approvalPayloadSchema || approvalV1(payload.data).length > 0) return null;
+  if (payload?.schema !== approvalPayloadSchema || fromServer(approvalV1)(payload.data).length > 0) return null;
   return payload.data as ApprovalV1;
 }
 
@@ -82,41 +87,45 @@ function ApprovalCard({ approval, people }: { readonly approval: ApprovalV1; rea
 // without their name and time again (both stay in the text read out).
 const sameRun = 5 * 60 * 1000;
 
+const authorMarks: readonly IdentityKey[] = ['agent', 'manager', 'operator'];
+
 function Line({
   time,
   author,
   authorId,
-  kind,
+  person,
+  viewer,
   badge,
   tag,
   tone,
+  interactive = true,
+  onCardDisappear,
   children,
 }: {
   readonly time: string;
   readonly author: string;
   readonly authorId: number;
-  readonly kind: Person['kind'];
+  readonly person: Person | undefined;
+  readonly viewer: number;
   readonly badge: string | null;
   readonly tag: string | null;
   readonly tone?: 'failed' | 'unconfirmed';
+  readonly interactive?: boolean;
+  readonly onCardDisappear?: () => void;
   readonly children: ReactNode;
 }) {
   // The badge comes first, as in the TUI, so a name or a body cannot pass for
-  // one. On screen the header reads name, agent, time, audience (app.css).
+  // one. On screen the header reads name, identity marks, time, audience.
   return (
     <>
       <Avatar id={authorId} name={author} />
       <div className="msg-head">
         {badge === null ? null : <span className="audience">{badge} </span>}
-        <time>{time}</time> <span className="author">{author}</span>
-        {kind === 'agent' ? (
-          <span className="kind">
-            <span className="vh"> [</span>agent<span className="vh">]</span>
-          </span>
-        ) : null}
+        <time>{time}</time> {interactive ? <ProfileCard id={authorId} person={person} viewer={viewer} name={author} className="author" onDisappear={onCardDisappear} /> : <span className="author">{author}</span>}
+        <IdentityMarks kind={person?.kind} role={person?.role} manages={person?.manages} only={authorMarks} textForm />
         <span className="vh">: </span>
       </div>
-      <span className="body">{children}</span>
+      <div className="body">{children}</div>
       {tag === null ? null : <span className={tone === undefined ? 'state' : `state ${tone}`}> {tag}</span>}
     </>
   );
@@ -132,7 +141,7 @@ export function authorOf(message: MessageV2, people: ReadonlyMap<number, Person>
 
 function attachmentsOf(message: MessageV2): FileAttachmentV1 | null {
   const payload = message.payload;
-  if (payload?.schema !== fileAttachmentPayloadSchema || fileAttachmentV1(payload.data).length > 0) return null;
+  if (payload?.schema !== fileAttachmentPayloadSchema || fromServer(fileAttachmentV1)(payload.data).length > 0) return null;
   return payload.data as FileAttachmentV1;
 }
 
@@ -207,8 +216,8 @@ export function Message({
   // An image sent with no text has its filename as the body, and the figure
   // shows that name already: the name shows once. Display only; the post is
   // unchanged (F26).
-  const [fileName, setFileName] = useState<string | null>(null);
-  const nameOnly = attachments !== null && attachments.file_ids.length === 1 && fileName !== null && message.body === fileName;
+  const [fileNames, setFileNames] = useState<ReadonlyMap<number, string>>(new Map());
+  const nameOnly = attachments !== null && attachments.file_ids.every((id) => fileNames.has(id)) && message.body === attachments.file_ids.map((id) => fileNames.get(id)).join(', ');
   const items: readonly MenuItem[] = message.removed === true ? [] : [...(editor === undefined ? actions ?? [] : []), ...(mayModerate ? [{ key: 'remove-message', label: 'Remove message', onSelect: () => { setRemoving(true); } }] : [])];
   const [menuOpen, setMenuOpen] = useState(false);
   const more = useRef<HTMLButtonElement>(null);
@@ -229,20 +238,23 @@ export function Message({
         time={clock(message.created_at)}
         author={authorOf(message, people)}
         authorId={message.author_id}
-        kind={people.get(message.author_id)?.kind ?? null}
+        person={people.get(message.author_id)}
+        viewer={viewer}
+        interactive={message.removed !== true && !cont}
+        onCardDisappear={() => { row.current?.focus(); }}
         badge={message.audience === undefined ? null : audienceLabel(message.audience, viewer, nets)}
         tag={sent ? 'Sent' : null}
       >
         {(message.removed === true ? null : editor) ?? (approval === null ? (
           <>
-            {nameOnly ? null : <Linkified text={message.body} />}
+            {nameOnly ? null : <Linkified text={displayBody(message)} />}
             <EditedMarker message={message} channel={channel} viewer={viewer} onUnauthorized={onUnauthorized} />
           </>
         ) : <ApprovalCard approval={approval} people={people} />)}
         {attachments === null ? null : (
           <span className="attachments">
             {attachments.file_ids.map((fileId) => (
-              <ImageAttachment key={fileId} fileId={fileId} channel={channel} viewer={viewer} onUnauthorized={onUnauthorized} onFilename={setFileName} />
+              <ImageAttachment key={fileId} fileId={fileId} channel={channel} viewer={viewer} onUnauthorized={onUnauthorized} onFilename={(name) => { setFileNames((known) => (known.get(fileId) === name ? known : new Map(known).set(fileId, name))); }} />
             ))}
           </span>
         )}
@@ -282,15 +294,17 @@ const excerptLength = 80;
 // excerptOf is the first line of a body, cut to about excerptLength characters.
 // It is drawn as text: markup in it shows as the characters it is.
 export function excerptOf(body: string): string {
-  const line = (body.split('\n').find((part) => part.trim() !== '') ?? '').trim();
+  const line = (previewText(body).split('\n').find((part) => part.trim() !== '') ?? '').trim();
   const chars = Array.from(line);
   return chars.length <= excerptLength ? line : `${chars.slice(0, excerptLength).join('').trimEnd()}…`;
 }
 
 // replyContext quotes the root from the copy this page holds, which the
-// server sent to this viewer only if they may read it; no copy, no quote.
+// server sent to this viewer only if they may read it; no copy, no quote. An
+// image-only root is quoted by its shown names, the stored ones matched when
+// they are known (see attachmentNames).
 function replyContext(root: MessageV2 | undefined, people: ReadonlyMap<number, Person>): ReplyContext | null {
-  return root === undefined ? null : { author: authorOf(root, people), excerpt: excerptOf(root.body) };
+  return root === undefined ? null : { author: authorOf(root, people), excerpt: excerptOf(displayBody(root)) };
 }
 
 function Pending({
@@ -318,7 +332,8 @@ function Pending({
         time={clock(send.at)}
         author={me.name}
         authorId={viewer}
-        kind={me.kind}
+        person={me}
+        viewer={viewer}
         badge={send.audience === undefined ? null : audienceLabel(send.audience, viewer, nets)}
         tag={tag}
         {...(send.status === 'sending' ? {} : { tone: send.status })}
@@ -534,6 +549,24 @@ function syncStops(list: HTMLElement, stop: number | null) {
 // How close to the bottom still counts as being at it, in pixels.
 const nearBottom = 24;
 
+// The message at the top of the log's view and its offset below the log's
+// top. Only the log's own rows count: an expanded thread repeats ids inside
+// its root's row. Rows are in document order, so a binary search finds it.
+function topOfView(log: HTMLElement): { readonly id: string; readonly offset: number } | null {
+  const rows = log.querySelectorAll<HTMLElement>(':scope > .messages > li[data-message-id]');
+  const top = log.getBoundingClientRect().top;
+  let lo = 0;
+  let hi = rows.length - 1;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if ((rows[mid]?.getBoundingClientRect().bottom ?? 0) > top) hi = mid;
+    else lo = mid + 1;
+  }
+  const row = rows[lo];
+  if (row === undefined) return null;
+  return { id: row.dataset.messageId ?? '', offset: row.getBoundingClientRect().top - top };
+}
+
 // The open channel: its messages in id order, and the box to write in.
 export function Conversation({
   channelId,
@@ -563,10 +596,13 @@ export function Conversation({
   historyBounded = false,
   visibility,
   archived = false,
+  density = '',
 }: {
   // The channel is archived (issue #844): it opens read-only. History, search
   // and threads read as before; the composer is replaced by one line.
   readonly archived?: boolean;
+  // The chat density in force (issue #1497); a change of it keeps the reader's place.
+  readonly density?: string;
   // The viewer's own membership here has a history bound (history_after), so
   // what was said before they joined is not shown (issue #1034). False when
   // it has none or is not known yet: the page never claims hiding it cannot see.
@@ -610,6 +646,9 @@ export function Conversation({
   // stay the member list alone.
   const authorIds = useMemo(() => [...new Set([...chat.byId.values()].filter((m) => m.guest_author === undefined).map((m) => m.author_id))], [chat.byId]);
   const people = useAuthorNames(channel, authorIds, members, onUnauthorized);
+  // A file name recorded later (an attachment's metadata loads) redraws the
+  // reply excerpts that quote it.
+  useKnownFileNames();
   const log = useRef<HTMLDivElement>(null);
   // Whether the reader is at the bottom, so new messages follow them.
   const atBottom = useRef(true);
@@ -618,6 +657,11 @@ export function Conversation({
   // renders in between (the request starting).
   const anchor = useRef<{ readonly height: number; readonly top: number; readonly oldest: number } | null>(null);
   const seen = useRef('');
+  // The message at the top of the view and how far below the log's top it
+  // sits, kept as the reader scrolls, so a change of chat density (which
+  // changes every message's height) can put that message back.
+  const view = useRef<{ readonly id: string; readonly offset: number } | null>(null);
+  const shownDensity = useRef(density);
   // The log's height as the observer below last handled it; null before it
   // has, or without one.
   const sized = useRef<number | null>(null);
@@ -884,6 +928,23 @@ export function Conversation({
     else setUnseen(true);
   });
 
+  // A change of chat density makes every message taller or shorter without
+  // changing the newest one or the log: a reader at the bottom stays there,
+  // and one who has scrolled up keeps the message they were reading in view.
+  useLayoutEffect(() => {
+    if (shownDensity.current === density) return;
+    shownDensity.current = density;
+    const el = log.current;
+    if (el === null) return;
+    if (atBottom.current) {
+      el.scrollTop = el.scrollHeight;
+      return;
+    }
+    const held = view.current;
+    const row = held === null ? null : el.querySelector<HTMLElement>(`:scope > .messages > li[data-message-id="${held.id}"]`);
+    if (held !== null && row !== null) el.scrollTop += row.getBoundingClientRect().top - el.getBoundingClientRect().top - held.offset;
+  }, [density]);
+
   // Anything that changes the log's own height (the whisper picker, the voice
   // strip, a share's stage) keeps a reader at the newest message there; one
   // who has scrolled up is left where they are. Browsers without a
@@ -963,6 +1024,7 @@ export function Conversation({
             onBottom(atBottom.current);
             if (atBottom.current) setUnseen(false);
           }
+          view.current = topOfView(el);
           if (el.scrollTop === 0 && hasOlder && !loadingOlder && chat.older !== 'error') showOlder();
         }}
       >

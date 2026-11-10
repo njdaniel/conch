@@ -31,6 +31,8 @@ import { SignInLink } from './SignInLink';
 import { AddDevice } from './AddDevice';
 import { AdminConsole } from './AdminConsole';
 import { canDo, memberLine } from './admin/permissions';
+import { ManifestReads } from './admin/AIAdminCard';
+import { useManifestReadControl } from './admin/manifestReads';
 import { Reauth } from './Reauth';
 import { PasswordSettings } from './Settings';
 import { Setup } from './Setup';
@@ -68,10 +70,20 @@ import { useAgents } from './agents/useAgents';
 import { useNow } from './agents/useNow';
 import { VoiceStatus } from './VoiceStatus';
 import { useOccupancy } from './voice/useOccupancy';
-import { leaveVoice } from './voice/useVoice';
+import { leaveVoice, useInVoice } from './voice/useVoice';
+import { useNativeVoice } from './voice/native/useNativeVoice';
 import { useOccupantNames } from './voice/useOccupantNames';
 import { needsHttps } from './transport';
+import { PreviewBanner } from './PreviewBanner';
+import { leaveVoiceFirst, PreviewEntry } from './preview/entry';
+import { PreviewControls, PreviewConversation, PreviewPanel, PreviewVoice } from './preview/PreviewParts';
+import { usePreview } from './preview/usePreview';
+import type { ServerMemberV1 } from './schema/principal';
+import { AppearanceSettings } from './AppearanceSettings';
+import { applyAppearance, defaultAppearance, type AppearancePreferences } from './appearance';
+import { forgetFileNames, storedName } from './spoilerFiles';
 
+const noUnread: ReadonlyMap<string, number> = new Map();
 const checkingAudience = 'Checking who this draft goes to…';
 const audienceGone = 'Who this draft was for is no longer available. Choose who it goes to before sending.';
 
@@ -503,6 +515,8 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
   const [searchOpen, setSearchOpen] = useState(false);
   // Asks from the first-run panel for the New channel form (issue #1032).
   const [createAsks, setCreateAsks] = useState(0);
+  // The quick switcher asked to show a public channel's directory row (issue #1492).
+  const [browseAsk, setBrowseAsk] = useState<{ readonly n: number; readonly name: string } | undefined>(undefined);
   // A channel's ⋯ menu (issue #1135) or Add a person asked for the invite
   // panel: a count, so asking twice opens it twice.
   const [inviteAsk, setInviteAsk] = useState<{ readonly n: number } | undefined>(undefined);
@@ -548,7 +562,25 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
   const reloadCounts = useCallback(() => {
     reloadReadState.current?.();
   }, []);
-  const refreshChannels = useChannelRefresh({
+  // Preview as member (issue #1517): one at a time, in this tab's memory. It is
+  // offered to a human holding manage_members and manage_channels, not to a
+  // guest's visit. The desktop carries the header through its bridge (#1540).
+  const mayPreview = principal !== null && visit === null && principal.kind === 'human' && canDo(principal, 'manage_members') && canDo(principal, 'manage_channels');
+  // In voice by the browser's engine or by the desktop's native helper: the
+  // helper keeps capturing while a preview hides the strip, so its starting,
+  // running and stopping states count as voice too.
+  const browserInVoice = useInVoice();
+  const nativeStatus = useNativeVoice().view.status;
+  const inVoice = browserInVoice || nativeStatus === 'starting' || nativeStatus === 'running' || nativeStatus === 'stopping';
+  const preview = usePreview({ signedIn, mayPreview, inVoice, onUnauthorized });
+  const previewing = preview.state.phase === 'on';
+  const previewSignal = preview.signal;
+  const startPreview = preview.start;
+  const previewEntry = useMemo(
+    () => (mayPreview ? { start: (person: ServerMemberV1) => { startPreview({ id: person.id, name: person.name }); }, blocked: inVoice ? leaveVoiceFirst : null } : null),
+    [mayPreview, startPreview, inVoice],
+  );
+  const refreshOwnChannels = useChannelRefresh({
     signedIn,
     channelsNow,
     empty: channels.loaded && channels.channels.length === 0,
@@ -558,6 +590,11 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
     onUnauthorized,
     reloadReadState: reloadCounts,
   });
+  // The content-free word that the channels changed also reads the preview again.
+  const refreshChannels = useCallback(() => {
+    refreshOwnChannels();
+    previewSignal();
+  }, [refreshOwnChannels, previewSignal]);
   const [readStateEvent, setReadStateEvent] = useState<ReadStateV1 | null>(null);
   const [messageEvent, setMessageEvent] = useState<MessageV2 | null>(null);
   const [editEvent, setEditEvent] = useState<MessageV2 | null>(null);
@@ -566,6 +603,11 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
     setMessageEvent(null);
     setEditEvent(null);
   }, [signedIn, principal?.id]);
+  // File ids belong to one server and one sign-in: the stored names recorded
+  // from their metadata (spoilerFiles) are dropped when the session ends or is
+  // replaced (sign-out, another account, another origin, unmount on restart or
+  // profile switch), so none can match the next session's ids.
+  useEffect(() => forgetFileNames, [origin, signedIn, principal?.id]);
   // An edited message (issue #845): the copy goes to whatever the page holds
   // of it, the open conversation and a notification alike, and is dropped
   // where nothing holds it. It is never a new message.
@@ -604,8 +646,14 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
   const permissionsChanged = useCallback(() => {
     setPermissionsTick((n) => n + 1);
     readWho();
-  }, [readWho]);
+    previewSignal();
+  }, [readWho, previewSignal]);
   const directory = useDirectoryChanged();
+  const directorySignal = directory.signal;
+  const directoryChanged = useCallback(() => {
+    directorySignal();
+    previewSignal();
+  }, [directorySignal, previewSignal]);
   const agents = useAgents({
     signedIn,
     channel: channelId === null ? null : selected,
@@ -621,10 +669,20 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
     onMessageEdited,
     onChannelsChanged: refreshChannels,
     onPermissionsChanged: permissionsChanged,
-    onDirectoryChanged: directory.signal,
+    onDirectoryChanged: directoryChanged,
   });
+  const manifestReads = useManifestReadControl(signedIn, directory.tick);
   // The server's word that the directory changed (issue #993): the community
   // panel, the picker and this channel's people are read again and replaced.
+  // The open channel's people moved (conch.channel_members.v1): the preview
+  // reads again too. Only the signal is used; the frame's own list is the
+  // administrator's and is never shown in a preview.
+  const membersNow = agents.members;
+  const previewingNow = useRef(previewing);
+  previewingNow.current = previewing;
+  useEffect(() => {
+    if (previewingNow.current) previewSignal();
+  }, [membersNow, previewSignal]);
   const refreshMembers = agents.refreshMembers;
   useEffect(() => {
     if (directory.tick > 0) refreshMembers();
@@ -669,6 +727,8 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
     channels: channels.channels,
     loaded: channels.loaded,
     open: channelId === null ? null : selected,
+    // No read mark is made while a preview hides the conversation.
+    paused: previewing,
     ready: held?.history === 'ready',
     newest: head === undefined ? null : { id: head.id, author: head.author_id },
     atBottom: bottom.channel === channelId ? bottom.atBottom : true,
@@ -707,7 +767,7 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
   const occupancy = useOccupancy({ signedIn, voiceAllowed, reachable: connection === 'connected', onUnauthorized });
   // Their names (issue #1103), from the channel's members; the page's own
   // people first.
-  const voiceNames = useOccupantNames({ occupancy, channels: channels.channels, people: live.people, viewer: principal?.id ?? 0 });
+  const voiceNames = useOccupantNames({ occupancy, channels: channels.channels, people: live.people, viewer: principal?.id ?? 0, viewerName: shownName });
 
   // Go to message: run detail closes, and once the conversation is on screen
   // again it scrolls to the message the run answers and puts focus on it. A
@@ -738,6 +798,17 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
   }, [scrollTo, detailOpen, searchOpen]);
 
   const principalId = principal?.id ?? null;
+  const [appearance, setAppearance] = useState<AppearancePreferences>(defaultAppearance);
+  useLayoutEffect(() => {
+    const next = principalId === null ? defaultAppearance : api.readAppearancePreferences(origin, principalId);
+    applyAppearance(next);
+    setAppearance(next);
+  }, [origin, principalId]);
+  const changeAppearance = useCallback((next: AppearancePreferences) => {
+    applyAppearance(next);
+    setAppearance(next);
+    if (principalId !== null) api.writeAppearancePreferences(origin, principalId, next);
+  }, [origin, principalId]);
   const principalNow = useRef(principalId);
   principalNow.current = principalId;
   const nextRequest = useRef(1);
@@ -834,7 +905,7 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
     const controller = new AbortController();
     const key = `${String(send.generation)}:${String(attachment.clientId)}`;
     uploadControllers.current.set(key, { controller, channelId: send.channelId });
-    const result = await api.uploadFile(send.channel, attachment.filename, attachment.mediaType, attachment.bytes, controller.signal);
+    const result = await api.uploadFile(send.channel, storedName(attachment), attachment.mediaType, attachment.bytes, controller.signal);
     if (uploadControllers.current.get(key)?.controller === controller) uploadControllers.current.delete(key);
     if (!activeSend(send)) return { ...attachment, status: 'cancelled', attempt };
     const currentChannel = nameOf(send.channelId) ?? send.channel;
@@ -894,6 +965,7 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
       beginSend(frozen);
       return;
     }
+    dispatchAttachments({ type: 'seal', channel: nameOf(channelId) ?? channel, ...(audience === undefined ? {} : { audience }) });
     void (async () => {
       let attachments = [...frozen.attachments];
       for (let index = 0; index < attachments.length; index++) {
@@ -1447,6 +1519,10 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
       editedImages();
       dispatchAttachments({ type: 'remove', channel: selected, ...(composerAudience === undefined ? {} : { audience: composerAudience }), clientId });
     },
+    spoiler: (clientId: number, spoiler: boolean) => {
+      if (selected === null) return;
+      dispatchAttachments({ type: 'spoiler', channel: selected, ...(composerAudience === undefined ? {} : { audience: composerAudience }), clientId, spoiler });
+    },
     cancel: (clientId: number) => {
       if (selected === null) return;
       const attachment = attachmentsFor(attachmentsNow.current, selected, composerAudience).find((a) => a.clientId === clientId);
@@ -1588,7 +1664,39 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
         />
       );
     case 'signedIn':
+      if (preview.state.phase === 'on') {
+        // Preview as member: the shell draws the preview store and nothing of
+        // the administrator's own channels, chat, people or voice. A new key
+        // so no state of the normal shell (Settings open, say) carries in.
+        const { store, selected: shown, problem } = preview.state;
+        return (
+          <Lobby
+            key="preview"
+            origin={origin}
+            name={shownName}
+            me={auth.principal.id}
+            channels={{ channels: store.channels, loaded: true, selected: shown }}
+            unread={noUnread}
+            connection={connection}
+            band={<PreviewBanner store={store} problem={problem} onExit={preview.exit} onRefresh={preview.refresh} />}
+            conversation={<PreviewConversation store={store} channel={shown} />}
+            panel={<PreviewPanel store={store} channel={shown} />}
+            newChannel={<PreviewControls store={store} />}
+            voice={<PreviewVoice store={store} channel={shown} />}
+            invites={null}
+            onOpen={preview.select}
+            onRetry={() => {
+              setAttempt((n) => n + 1);
+            }}
+            onSignOut={signOut}
+            onSignOutEverywhere={signOutEverywhere}
+            signOutProblem={everywhereFailed}
+          />
+        );
+      }
       return (
+        <ManifestReads.Provider value={manifestReads}>
+        <PreviewEntry.Provider value={previewEntry}>
         <ComposerAttachmentProvider value={composerAttachments}>
         <Lobby
           origin={origin}
@@ -1598,6 +1706,14 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
           passwordSet={auth.principal.auth?.password_set === true}
           banner={
             <>
+              {preview.notice === null ? null : (
+                <div role="status" className="banner destination">
+                  <p>{preview.notice}</p>
+                  <button type="button" onClick={preview.dismissNotice}>
+                    Dismiss
+                  </button>
+                </div>
+              )}
               {visit === null ? null : <GuestVisit guest={visit} insecure={needsHttps(origin)} onConvert={convert} onEnd={endVisit} onForget={forgetVisit} />}
               {missing.length === 0 || destination === null ? null : (
                 <div role="status" className="banner destination">
@@ -1629,6 +1745,14 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
               })}
           channels={channels}
           unread={unread}
+          directoryTick={directory.tick + permissionsTick}
+          {...(auth.principal.kind === 'human' && visit === null
+            ? {
+                onBrowse: (name: string) => {
+                  setBrowseAsk((ask) => ({ n: (ask?.n ?? 0) + 1, name }));
+                },
+              }
+            : {})}
           occupancy={occupancy}
           voiceNames={voiceNames}
           notificationCenter={<NotificationCenter alerts={notifications.alerts} onOpen={notifications.openAlert} onClear={notifications.clearAlerts} />}
@@ -1657,6 +1781,7 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
               ) : null}
             </>
           }
+          appearance={<AppearanceSettings value={appearance} onChange={changeAppearance} />}
           account={
             <>
               <div className="standing">
@@ -1750,6 +1875,7 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
               signedIn={signedIn}
               channel={selected}
               viewer={auth.principal.id}
+              viewerName={shownName}
               people={live.people}
               voiceAllowed={voiceAllowed}
               cameraAllowed={cameraAllowed}
@@ -1833,6 +1959,7 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
                   onLeft={leftChannel}
                   onOpen={onOpen}
                   onUnauthorized={onUnauthorized}
+                  {...(browseAsk === undefined ? {} : { reveal: browseAsk })}
                 />
                 {canDo(auth.principal, 'create_public_channels') || canDo(auth.principal, 'create_private_channels') ? (
                   <CreateChannel
@@ -1888,6 +2015,7 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
                 <div className="conversation-body" hidden={agents.state.detail !== null || searchOpen}>
               <Conversation
                 key={channelId}
+                density={appearance.density}
                 historyBounded={agents.membersFor === channelId && (agents.members.find((m) => m.principal_id === auth.principal.id)?.history_after ?? 0) > 0}
                 channelId={channelId}
                 channel={selected}
@@ -1947,6 +2075,8 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
           signOutProblem={everywhereFailed}
         />
         </ComposerAttachmentProvider>
+        </PreviewEntry.Provider>
+        </ManifestReads.Provider>
       );
   }
 }

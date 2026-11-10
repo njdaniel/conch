@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { ShareClaimResult } from '../api';
 import type { VoiceShareEnded, VoiceShareEndReason } from '../schema/voice';
 import { FakeClock, settle } from './fakes';
-import { browserFeatures, busyNote, endedNote, othersShareNote, ownPageNote, resumeLimit, ScreenShare, sharedNote, shortShareNote, soundNote, type Captured, type KeptScreen, type ShareFeatures, type ShareRoom, type ShareState } from './share';
+import { browserFeatures, endedNote, othersShareNote, ownPageNote, pickCause, resumeLimit, ScreenShare, sharedNote, shortShareNote, soundNote, type Captured, type KeptScreen, type ShareFeatures, type ShareQuality, type ShareRoom, type ShareState } from './share';
 
 interface Deferred<T> {
   readonly promise: Promise<T>;
@@ -24,7 +24,7 @@ function deferred<T>(): Deferred<T> {
 }
 
 const granted: ShareClaimResult = { ok: true, value: { principal_id: 7, started_at: '2026-10-16T00:00:00.000Z', audio: true } };
-const busy: ShareClaimResult = { ok: false, failure: 'invalid', status: 409, code: 'voice_share_busy' };
+const busy: ShareClaimResult = { ok: false, failure: 'invalid', status: 409, code: 'voice_share_full' };
 const noSession: ShareClaimResult = { ok: false, failure: 'invalid', status: 409, code: 'voice_no_session' };
 const unavailable: ShareClaimResult = { ok: false, failure: 'invalid', status: 503, code: 'voice_unavailable' };
 
@@ -33,6 +33,7 @@ function setup(claims: ShareClaimResult[] = []) {
   // The claim each release named, in order (issue #487).
   const released: string[] = [];
   const states: ShareState[] = [];
+  const claimedQualities: (ShareQuality | undefined)[] = [];
   const room = {
     pick: null as Deferred<Captured> | null,
     pickFails: false,
@@ -54,6 +55,8 @@ function setup(claims: ShareClaimResult[] = []) {
       if (room.pick !== null) return room.pick.promise;
       return room.pickFails ? Promise.reject(new Error('NotAllowedError')) : Promise.resolve({ audio: room.audio });
     },
+    setShareQuality: () => Promise.resolve(),
+    readShareStats: () => Promise.resolve(null),
     publishScreen: () => {
       calls.push('publish');
       const held = room.publish;
@@ -84,8 +87,9 @@ function setup(claims: ShareClaimResult[] = []) {
   };
   const share = new ScreenShare(
     {
-      claim: (channel) => {
+      claim: (channel, quality) => {
         calls.push(`claim ${channel}`);
+        claimedQualities.push(quality);
         const held = room.claim;
         room.claim = null;
         return held === null ? Promise.resolve(claims.shift() ?? granted) : held.promise;
@@ -101,7 +105,7 @@ function setup(claims: ShareClaimResult[] = []) {
     },
     clock,
   );
-  return { share, stub, room, calls, released, states, clock };
+  return { share, stub, room, calls, released, states, clock, claimedQualities };
 }
 
 async function sharing(t = setup()) {
@@ -120,6 +124,135 @@ describe('starting a share', () => {
     expect(t.share.current).toEqual({ kind: 'sharing', audio: true });
   });
 
+  it('sends the picker quality on the claim and again when it changes while live', async () => {
+    const t = setup();
+    const picked: ShareQuality = { resolution: '720p', frameRate: 15 };
+    await t.share.start('general', t.stub, picked);
+    expect(t.claimedQualities).toEqual([picked, picked]);
+    const changed: ShareQuality = { resolution: 'source', frameRate: 60 };
+    await t.share.changeQuality(changed);
+    expect(t.claimedQualities).toEqual([picked, picked, changed]);
+  });
+
+  it('a quality changed while the picker is open is the one the second claim sends', async () => {
+    const t = setup();
+    t.room.pick = deferred<Captured>();
+    const picked: ShareQuality = { resolution: '1080p', frameRate: 30 };
+    const start = t.share.start('general', t.stub, picked);
+    await settle();
+    expect(t.share.current.kind).toBe('picking');
+    const meanwhile: ShareQuality = { resolution: '720p', frameRate: 60 };
+    expect(await t.share.changeQuality(meanwhile)).toBe('sent');
+    t.room.pick.resolve({ audio: true });
+    await start;
+    expect(t.claimedQualities).toEqual([picked, meanwhile]);
+  });
+
+  it('a quality change answered with a new claim adopts its started_at: the next release names it', async () => {
+    const t = await sharing();
+    const anew: ShareClaimResult = { ok: true, value: { principal_id: 7, started_at: '2026-10-16T00:05:00.000Z', audio: true, quality: { resolution: '720p', frame_rate: 30 } } };
+    const answer = deferred<ShareClaimResult>();
+    t.room.claim = answer;
+    const change = t.share.changeQuality({ resolution: '720p', frameRate: 30 });
+    answer.resolve(anew);
+    expect(await change).toBe('sent');
+    await t.share.stop('self');
+    expect(t.released).toEqual(['2026-10-16T00:05:00.000Z']);
+  });
+
+  it.each([
+    ['full', busy],
+    ['no session', noSession],
+  ])('a quality change answered %s ends the share as the server ending it, with nothing released', async (_name, answer) => {
+    const t = await sharing(setup([granted, granted, answer]));
+    expect(await t.share.changeQuality({ resolution: '720p', frameRate: 15 })).toBe('sent');
+    expect(t.calls).toEqual(['claim general', 'stop screen']);
+    expect(t.released).toEqual([]);
+    expect(t.share.current).toEqual({ kind: 'idle', ended: 'server' });
+  });
+
+  it('a quality change over the rate bound keeps the choice and sends it once more after Retry-After, the newest by then', async () => {
+    const limited: ShareClaimResult = { ok: false, failure: 'invalid', status: 429, code: 'rate_limited', retryAfter: 2 };
+    const t = await sharing(setup([granted, granted, limited, limited]));
+    expect(await t.share.changeQuality({ resolution: '720p', frameRate: 15 })).toBe('later');
+    expect(t.share.current).toEqual({ kind: 'sharing', audio: true });
+    t.clock.advance(1999);
+    await settle();
+    expect(t.calls).toEqual(['claim general']);
+    t.clock.advance(1);
+    await settle();
+    expect(t.calls).toEqual(['claim general', 'claim general']);
+    expect(t.claimedQualities.slice(2)).toEqual([{ resolution: '720p', frameRate: 15 }, { resolution: '720p', frameRate: 15 }]);
+    // Refused again: once is all, and the share goes on.
+    t.clock.advance(60_000);
+    await settle();
+    expect(t.calls).toEqual(['claim general', 'claim general']);
+    expect(t.share.current).toEqual({ kind: 'sharing', audio: true });
+  });
+
+  it('a later choice replaces the one waiting to be sent again, and a stop drops it', async () => {
+    const limited: ShareClaimResult = { ok: false, failure: 'invalid', status: 429, code: 'rate_limited', retryAfter: 1 };
+    const t = await sharing(setup([granted, granted, limited, limited]));
+    await t.share.changeQuality({ resolution: '720p', frameRate: 15 });
+    expect(await t.share.changeQuality({ resolution: 'source', frameRate: 60 })).toBe('later');
+    t.clock.advance(1000);
+    await settle();
+    // One send, of the newest choice.
+    expect(t.claimedQualities.slice(2)).toEqual([{ resolution: '720p', frameRate: 15 }, { resolution: 'source', frameRate: 60 }, { resolution: 'source', frameRate: 60 }]);
+    const u = await sharing(setup([granted, granted, limited]));
+    await u.share.changeQuality({ resolution: '720p', frameRate: 15 });
+    await u.share.stop('self');
+    u.calls.length = 0;
+    u.clock.advance(60_000);
+    await settle();
+    expect(u.calls).toEqual([]);
+  });
+
+  it('quality changes go one at a time: choices made while one is on its way are sent once, newest, after it is answered', async () => {
+    const t = await sharing();
+    const first = deferred<ShareClaimResult>();
+    t.room.claim = first;
+    const low: ShareQuality = { resolution: '720p', frameRate: 15 };
+    const mid: ShareQuality = { resolution: '1080p', frameRate: 30 };
+    const top: ShareQuality = { resolution: 'source', frameRate: 60 };
+    const a = t.share.changeQuality(low);
+    const b = t.share.changeQuality(mid);
+    const c = t.share.changeQuality(top);
+    await settle();
+    // Only the first is on its way: a newer one cannot overtake it.
+    expect(t.calls).toEqual(['claim general']);
+    const second = deferred<ShareClaimResult>();
+    t.room.claim = second;
+    first.resolve(granted);
+    await settle();
+    // Then the newest alone; the one in between is never sent.
+    expect(t.calls).toEqual(['claim general', 'claim general']);
+    expect(t.claimedQualities.slice(2)).toEqual([low, top]);
+    second.resolve(granted);
+    expect(await Promise.all([a, b, c])).toEqual(['sent', 'sent', 'sent']);
+    // The last quality conchd was sent is the last one chosen.
+    expect(t.claimedQualities.at(-1)).toEqual(top);
+    // Nothing more waits.
+    await settle();
+    expect(t.calls).toHaveLength(2);
+  });
+
+  it('a quality change that lands after Stop sharing has its grant released by its own started_at', async () => {
+    const t = await sharing();
+    const late = deferred<ShareClaimResult>();
+    t.room.claim = late;
+    const change = t.share.changeQuality({ resolution: '720p', frameRate: 15 });
+    await t.share.stop('self');
+    expect(t.released).toEqual(['2026-10-16T00:00:00.000Z']);
+    expect(t.share.current).toEqual({ kind: 'idle', ended: 'self' });
+    // conchd took the late change as a new claim, after the stop.
+    late.resolve({ ok: true, value: { principal_id: 7, started_at: '2026-10-16T00:09:00.000Z', audio: true, quality: { resolution: '720p', frame_rate: 15 } } });
+    await change;
+    expect(t.released).toEqual(['2026-10-16T00:00:00.000Z', '2026-10-16T00:09:00.000Z']);
+    // Nothing else changed: the share stays stopped.
+    expect(t.share.current).toEqual({ kind: 'idle', ended: 'self' });
+  });
+
   it('says when no sound was obtained', async () => {
     const t = setup();
     t.room.audio = false;
@@ -131,7 +264,7 @@ describe('starting a share', () => {
     const t = setup([busy]);
     await t.share.start('general', t.stub);
     expect(t.calls).toEqual(['claim general']);
-    expect(t.share.current).toEqual({ kind: 'idle', ended: 'busy' });
+    expect(t.share.current).toEqual({ kind: 'idle', ended: 'full' });
   });
 
   it('a claim refused for another reason says which', async () => {
@@ -156,11 +289,11 @@ describe('starting a share', () => {
     expect(t.share.current).toEqual({ kind: 'idle', ended: 'cancelled' });
   });
 
-  it('a share taken by someone else while the picker was open stops the capture and releases nothing', async () => {
+  it('a full answer after the picker stops the capture and releases the earlier claim', async () => {
     const t = setup([granted, busy]);
     await t.share.start('general', t.stub);
-    expect(t.calls).toEqual(['claim general', 'pick', 'claim general', 'stop screen']);
-    expect(t.share.current).toEqual({ kind: 'idle', ended: 'busy' });
+    expect(t.calls).toEqual(['claim general', 'pick', 'claim general', 'stop screen', 'release general']);
+    expect(t.share.current).toEqual({ kind: 'idle', ended: 'full' });
   });
 
   it('a second claim that fails otherwise stops the capture and releases the first', async () => {
@@ -478,12 +611,96 @@ describe('why the server ended it', () => {
   });
 
   it('says each reason in its own words, and never names who stopped it', () => {
-    expect(endedNote('operator', null)).toBe('An operator stopped your share.');
-    expect(endedNote('left', null)).toBe('You left voice, so your share ended.');
-    expect(endedNote('access_lost', null)).toBe('Your share ended: you no longer have voice in this channel.');
-    expect(endedNote('rotated', null)).toBe('Your share ended because the voice room was renewed. Share again once you are back in voice.');
-    expect(endedNote('idle', null)).toBe('Your share ended because nothing was shared for a while.');
-    expect(endedNote('self', null)).toBe('You stopped sharing.');
+    expect(endedNote('operator')).toBe('An operator stopped your share.');
+    expect(endedNote('left')).toBe('You left voice, so your share ended.');
+    expect(endedNote('access_lost')).toBe('Your share ended: you no longer have voice in this channel.');
+    expect(endedNote('rotated')).toBe('Your share ended because the voice room was renewed. Share again once you are back in voice.');
+    expect(endedNote('idle')).toBe('Your share ended because nothing was shared for a while.');
+    expect(endedNote('self')).toBe('You stopped sharing.');
+  });
+});
+
+// Issue #1581 (security review S1, Q-D4-2 on #1578): a desktop companion's
+// share is never resumed after a renewal without a new consent, whichever of
+// presence and the room says it first.
+describe('a companion share is not resumable', () => {
+  const rotated: VoiceShareEnded = { reason: 'rotated', started_at: '2026-10-16T00:00:00.000Z', ended_at: '2026-10-16T00:01:00.000Z' };
+
+  it('presence first: the capture is stopped, nothing is claimed again, and the words are the renewal ones', async () => {
+    const t = await sharing(setup());
+    t.share.setCompanion(true);
+    t.share.presence('me');
+    t.share.presence('none', rotated);
+    await settle();
+    expect(t.share.current).toEqual({ kind: 'idle', ended: 'rotated' });
+    expect(t.calls).toEqual(['stop screen']);
+    expect(t.calls).not.toContain('keep');
+    // A new connection and more presence resume nothing.
+    t.share.connected('general', t.stub);
+    t.share.presence('none');
+    await settle();
+    t.clock.advance(120_000);
+    await settle();
+    expect(t.calls.filter((c) => c.startsWith('claim'))).toEqual([]);
+    expect(t.share.current).toEqual({ kind: 'idle', ended: 'rotated' });
+  });
+
+  it('the room first, then presence: ends with the renewal words and is not resumed', async () => {
+    const t = await sharing(setup());
+    t.share.setCompanion(true);
+    t.share.presence('me');
+    t.share.ended('server');
+    await settle();
+    t.share.presence('none', rotated);
+    await settle();
+    expect(t.share.current).toEqual({ kind: 'idle', ended: 'rotated' });
+    expect(t.calls.filter((c) => c.startsWith('claim'))).toEqual([]);
+    expect(t.calls).not.toContain('keep');
+  });
+
+  it('a claim granted again with a new started_at after a reconnect is released, not adopted', async () => {
+    const claims: ShareClaimResult[] = [];
+    const t = await sharing(setup(claims));
+    claims.push({ ok: true, value: { principal_id: 7, started_at: '2026-10-16T00:05:00.000Z', audio: true } });
+    t.share.setCompanion(true);
+    t.share.presence('me');
+    await t.share.reconnected();
+    await settle();
+    expect(t.share.current).toEqual({ kind: 'idle', ended: 'rotated' });
+    expect(t.released).toEqual(['2026-10-16T00:05:00.000Z']);
+  });
+
+  it('the same started_at on a reconnect is still the same share', async () => {
+    const t = await sharing(setup());
+    t.share.setCompanion(true);
+    t.share.presence('me');
+    await t.share.reconnected();
+    await settle();
+    expect(t.share.current).toEqual({ kind: 'sharing', audio: true });
+    expect(t.released).toEqual([]);
+  });
+
+  it('a quality change answered with a new started_at is released, not adopted', async () => {
+    const claims: ShareClaimResult[] = [];
+    const t = await sharing(setup(claims));
+    claims.push({ ok: true, value: { principal_id: 7, started_at: '2026-10-16T00:05:00.000Z', audio: true } });
+    t.share.setCompanion(true);
+    t.share.presence('me');
+    await t.share.changeQuality({ resolution: '720p', frameRate: 30 });
+    await settle();
+    expect(t.share.current).toEqual({ kind: 'idle', ended: 'rotated' });
+    expect(t.released).toEqual(['2026-10-16T00:05:00.000Z']);
+  });
+
+  it('a connection lost after the renewal was told stops the share with the renewal words', async () => {
+    const t = await sharing(setup());
+    t.share.setCompanion(true);
+    t.share.presence('me');
+    t.share.presence('none', rotated);
+    await t.share.lost(true);
+    await settle();
+    expect(t.share.current).toEqual({ kind: 'idle', ended: 'rotated' });
+    expect(t.calls).not.toContain('keep');
   });
 });
 
@@ -642,7 +859,7 @@ describe('resuming a share after the room was renewed', () => {
 
   it('a claim conchd refuses stops the capture and says why', async () => {
     for (const [answer, end] of [
-      [busy, 'busy'],
+      [busy, 'full'],
       [notAllowed, 'failed'],
       [unavailable, 'unavailable'],
     ] as const) {
@@ -835,7 +1052,7 @@ describe('a room renewed while the share is being published', () => {
 
     it(`${what} renewed while it waited, then refused in the next room or signed out, stops the capture`, async () => {
       for (const [answer, end] of [
-        [busy, 'busy'],
+        [busy, 'full'],
         [notAllowed, 'failed'],
       ] as const) {
         const t = await publishing(what === 'a first share' ? [granted, granted, answer] : [granted, granted, again, answer]);
@@ -948,8 +1165,8 @@ describe('what the page says', () => {
     ['Safari on iPhone', { canShare: false, chromium: false, platform: 'ios' }, /cannot share a screen.*You can still watch/],
   ];
 
-  it('says what sound a share will carry, per browser, before the picker opens', () => {
-    for (const [name, features, text] of browsers) expect(soundNote(features), name).toMatch(text);
+  it.each(browsers)('says what sound a share will carry before the picker opens: %s', (_name, features, text) => {
+    expect(soundNote(features)).toMatch(text);
   });
 
   // Issue #600: the strip's one line names the same facts as soundNote and
@@ -978,11 +1195,9 @@ describe('what the page says', () => {
     }
   });
 
-  it("says in one line who else shares and with what sound, which is why Share screen is off", () => {
+  it('says who else shares and whether their stream has sound', () => {
     expect(othersShareNote('bob', false)).toBe('bob is sharing a screen.');
     expect(othersShareNote('bob', true)).toBe('bob is sharing a screen, with sound.');
-    expect(busyNote('bob', true)).toBe('bob is sharing a screen, with sound. One person shares at a time.');
-    expect(busyNote(null, false)).toBe('Someone else is sharing a screen. One person shares at a time.');
   });
 
   it('warns before the picker opens that a whole screen or this window shows this page, chat included', () => {
@@ -999,12 +1214,11 @@ describe('what the page says', () => {
     expect(sharedNote(false, safari)).toBe("Sharing without sound. This browser can't share sound.");
   });
 
-  it('names who is sharing when a claim is busy, and says why every other share ended', () => {
-    expect(endedNote('busy', 'alice')).toBe('alice is sharing a screen. One person shares at a time.');
-    expect(endedNote('busy', null)).toBe('Someone else is sharing a screen. One person shares at a time.');
-    expect(endedNote('server', null)).toMatch(/server ended your share.*operator/);
+  it('says when the call is full, and says why every other share ended', () => {
+    expect(endedNote('full')).toBe('This call already has 6 streams live.');
+    expect(endedNote('server')).toMatch(/server ended your share.*operator/);
     for (const end of ['self', 'browser', 'left', 'lost', 'cancelled', 'not_connected', 'unavailable', 'failed'] as const) {
-      expect(endedNote(end, null).length, end).toBeGreaterThan(10);
+      expect(endedNote(end).length, end).toBeGreaterThan(10);
     }
   });
 });
@@ -1032,5 +1246,50 @@ describe('reading the browser', () => {
     expect(as('Mozilla/5.0 (X11; Linux x86_64) Gecko/20100101 Firefox/140.0', undefined, true)).toEqual({ canShare: true, chromium: false, platform: 'linux' });
     expect(as('Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X)', undefined, false)).toEqual({ canShare: false, chromium: false, platform: 'ios' });
     expect(as('Mozilla/5.0 (Linux; Android 15)', { brands: [{ brand: 'Chromium' }], platform: 'Android' }, true).platform).toBe('android');
+  });
+});
+
+describe('the cause of a share that did not start (issue #1582)', () => {
+  // The shapes the desktop's picker gives getDisplayMedia: main refusing (no
+  // allowance, no grant) is NotAllowedError; the person cancelling the picker
+  // is AbortError. Neither changes `ended`.
+  it.each([
+    ['NotAllowedError', 'Not allowed', { kind: 'idle', ended: 'cancelled', cause: 'denied' }],
+    ['AbortError', 'The user aborted a request', { kind: 'idle', ended: 'cancelled' }],
+  ] as const)('a pick that failed as %s', async (name, message, expected) => {
+    const t = setup();
+    const refusing: ShareRoom = { ...t.stub, pickScreen: () => Promise.reject(Object.assign(new Error(message), { name })) };
+    await t.share.start('general', refusing);
+    expect(t.share.current).toEqual(expected);
+  });
+
+  // On the desktop companion every failure but the cancelled picker is a
+  // screen that could not be captured; the browser's are as above.
+  it.each([
+    ['NotAllowedError', 'denied'],
+    ['NotReadableError', 'denied'],
+    ['DeviceUnsupportedError', 'denied'],
+    ['NotFoundError', 'denied'],
+    ['AbortError', undefined],
+  ] as const)('on the companion, a pick that failed as %s has cause %s', async (name, cause) => {
+    const t = setup();
+    t.share.setCompanion(true);
+    const failing: ShareRoom = { ...t.stub, pickScreen: () => Promise.reject(Object.assign(new Error('x'), { name })) };
+    await t.share.start('general', failing);
+    expect(t.share.current).toEqual(cause === undefined ? { kind: 'idle', ended: 'cancelled' } : { kind: 'idle', ended: 'cancelled', cause });
+    expect(pickCause(Object.assign(new Error('x'), { name }), true)).toBe(cause);
+  });
+
+  it('on the companion, a rejection that is no Error is a screen that could not be captured; in the browser it says nothing', () => {
+    expect(pickCause('x', true)).toBe('denied');
+    expect(pickCause('x')).toBeUndefined();
+  });
+
+  it('no other pick failure carries a cause, and a non-error carries none', () => {
+    expect(pickCause(Object.assign(new Error('Aborted'), { name: 'AbortError' }))).toBeUndefined();
+    expect(pickCause(Object.assign(new Error('x'), { name: 'NotFoundError' }))).toBeUndefined();
+    expect(pickCause(Object.assign(new Error('x'), { name: 'NotSupportedError' }))).toBeUndefined();
+    expect(pickCause(new Error('NotAllowedError'))).toBeUndefined();
+    expect(pickCause('x')).toBeUndefined();
   });
 });

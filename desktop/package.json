@@ -7,11 +7,14 @@
   "author": "Conch contributors",
   "type": "module",
   "main": "out/main/main.cjs",
+  "desktopName": "chat.conch.desktop.desktop",
   "engines": {
     "node": "24.21.0"
   },
   "scripts": {
     "typecheck": "tsc --noEmit && tsc --noEmit -p tests/smoke",
+    "typecheck:e2e": "tsc --noEmit -p tests/e2e",
+    "lint:e2e": "DESKTOP_LINT_E2E_PAGE=1 eslint --max-warnings 0 tests/e2e/page",
     "lint": "eslint --max-warnings 0 .",
     "test": "vitest run",
     "test:integration": "vitest run --config vitest.integration.config.ts",

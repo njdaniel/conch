@@ -96,7 +96,7 @@ pub fn presence(participants: &[(i64, bool)]) -> String {
         })
         .collect();
     serde_json::json!({
-        "schema": "conch.voice_presence.v1",
+        "schema": "conch.voice_presence.v2",
         "channel_id": 7,
         "configured": true,
         "available": true,

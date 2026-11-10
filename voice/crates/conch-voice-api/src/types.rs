@@ -128,6 +128,14 @@ pub(crate) use wire_words;
 /// The value of `schema` in a v1 voice presence document.
 pub const VOICE_PRESENCE_SCHEMA_V1: &str = "conch.voice_presence.v1";
 
+/// The value of `schema` in a v2 voice presence document: v1 without the one-share rule
+/// (`schema.VoicePresenceSchemaV2`, design `voice-multi-share.md` §2.2).
+pub const VOICE_PRESENCE_SCHEMA_V2: &str = "conch.voice_presence.v2";
+
+/// The query parameter that names the presence version a caller reads
+/// (`schema.VoicePresenceSchemaParam`). Absent means v1.
+pub const VOICE_PRESENCE_SCHEMA_PARAM: &str = "schema";
+
 /// The most principal ids a principals audience may list (`schema.MaxAudiencePrincipals`).
 pub const MAX_AUDIENCE_PRINCIPALS: usize = 64;
 
@@ -829,6 +837,258 @@ impl VoicePresenceV1 {
     }
 }
 
+/// The resolution a sharer declared for their stream (`schema.VoiceShareResolution`). A
+/// word outside these three fails decoding, so it fails the whole document: a new one is
+/// a new version of presence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub enum VoiceShareResolution {
+    /// The stream's top layer is 1280 by 720.
+    #[serde(rename = "720p")]
+    P720,
+    /// The stream's top layer is 1920 by 1080.
+    #[serde(rename = "1080p")]
+    P1080,
+    /// The stream's top layer is the capture's own size.
+    #[serde(rename = "source")]
+    Source,
+}
+
+wire_words!(VoiceShareResolution, "a share resolution that is not 720p, 1080p or source", {
+    "720p" => P720,
+    "1080p" => P1080,
+    "source" => Source,
+});
+
+/// What a sharer declared for their stream: a label, not enforcement
+/// (`schema.VoiceShareQuality`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct VoiceShareQuality {
+    /// The declared resolution of the stream's top layer.
+    pub resolution: VoiceShareResolution,
+    /// The declared frame rate in frames per second: 15, 30 or 60.
+    pub frame_rate: i64,
+}
+
+wire_object!(VoiceShareQuality, "a voice share quality object", unknown = ignored, {
+    resolution: required,
+    frame_rate: required,
+});
+
+impl VoiceShareQuality {
+    fn check(&self) -> Result<(), String> {
+        match self.frame_rate {
+            15 | 30 | 60 => Ok(()),
+            other => Err(format!(
+                "voice share frame_rate {other} is not one of 15, 30, 60"
+            )),
+        }
+    }
+}
+
+/// One principal connected to a voice room as v2 presence shows it
+/// (`schema.VoiceParticipantV2`): the fields of [`VoiceParticipant`], and for a sharer when
+/// the share started and what quality was declared. A participant who is not sharing
+/// encodes to the same bytes as a v1 one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct VoiceParticipantV2 {
+    /// The connected principal.
+    pub principal_id: i64,
+    /// Whether the participant may transmit in this room.
+    pub can_publish: bool,
+    /// Whether the participant was talking on `conchd`'s last pass.
+    pub transmitting: bool,
+    /// When the participant connected.
+    pub joined_at: Timestamp,
+    /// Whether the participant holds a screen share. Any number in a v2 room may.
+    #[serde(skip_serializing_if = "is_false")]
+    pub sharing: bool,
+    /// Whether the share carries sound. Never true without `sharing`.
+    #[serde(skip_serializing_if = "is_false")]
+    pub sharing_audio: bool,
+    /// When `conchd` granted the share: present exactly when `sharing`. It orders the
+    /// streams and tells one stream of a person's from the next.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub share_started_at: Option<Timestamp>,
+    /// What the sharer declared for the stream; only with `sharing`, and only if they
+    /// declared one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub share_quality: Option<VoiceShareQuality>,
+    /// Whether the participant holds a camera claim (ADR-015).
+    #[serde(skip_serializing_if = "is_false")]
+    pub camera: bool,
+}
+
+wire_object!(VoiceParticipantV2, "a voice participant object", unknown = ignored, {
+    principal_id: required,
+    can_publish: required,
+    transmitting: required,
+    joined_at: required,
+    sharing: optional,
+    sharing_audio: optional,
+    share_started_at: optional,
+    share_quality: optional,
+    camera: optional,
+});
+
+impl VoiceParticipantV2 {
+    /// What `schema.VoiceParticipantV2.Validate` checks: v1's rules for the shared
+    /// fields, then that a sharer says when the share started (a time that is not zero),
+    /// that neither new field appears without `sharing`, and that a quality is one of
+    /// the picker's.
+    fn check(&self) -> Result<(), String> {
+        VoiceParticipant {
+            principal_id: self.principal_id,
+            can_publish: self.can_publish,
+            transmitting: self.transmitting,
+            joined_at: self.joined_at,
+            sharing: self.sharing,
+            sharing_audio: self.sharing_audio,
+            camera: self.camera,
+        }
+        .check()?;
+        let id = self.principal_id;
+        match self.share_started_at {
+            Some(_) if !self.sharing => {
+                return Err(format!(
+                    "voice participant {id} cannot have share_started_at without sharing"
+                ));
+            }
+            None if self.sharing => {
+                return Err(format!(
+                    "voice participant {id} is sharing without share_started_at"
+                ));
+            }
+            Some(at) if at.is_zero() => {
+                return Err(format!("voice participant {id} share_started_at is zero"));
+            }
+            _ => {}
+        }
+        if let Some(quality) = &self.share_quality {
+            if !self.sharing {
+                return Err(format!(
+                    "voice participant {id} cannot have share_quality without sharing"
+                ));
+            }
+            quality.check()?;
+        }
+        Ok(())
+    }
+}
+
+/// One voice room as v2 presence shows it (`schema.VoicePresenceRoomV2`): the shape of
+/// [`VoicePresenceRoom`] with v2 participants and no one-share rule. It has no room name
+/// and no token.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct VoicePresenceRoomV2 {
+    /// The audience the room carries; `None` is the whole channel.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub audience: Option<Audience>,
+    /// Every principal connected to the room, ordered by id.
+    pub participants: Vec<VoiceParticipantV2>,
+}
+
+wire_object!(VoicePresenceRoomV2, "a voice presence room object", unknown = ignored, {
+    audience: optional,
+    participants: required,
+});
+
+impl VoicePresenceRoomV2 {
+    /// What `schema.VoicePresenceRoomV2.Validate` checks: the audience, every participant,
+    /// and no principal twice. It does not count sharers: how many is the server's cap,
+    /// not the schema's.
+    fn check(&self) -> Result<(), String> {
+        if let Some(audience) = &self.audience {
+            audience.check()?;
+        }
+        let mut seen = std::collections::BTreeSet::new();
+        for participant in &self.participants {
+            participant.check()?;
+            if !seen.insert(participant.principal_id) {
+                return Err(format!(
+                    "voice room lists principal {} more than once",
+                    participant.principal_id
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// The sharers, in the order streams are shown: earliest `share_started_at` first,
+    /// then by principal id.
+    pub fn sharers(&self) -> Vec<&VoiceParticipantV2> {
+        let mut sharers: Vec<_> = self.participants.iter().filter(|p| p.sharing).collect();
+        sharers.sort_by_key(|p| (p.share_started_at, p.principal_id));
+        sharers
+    }
+}
+
+/// The whole voice state of one channel in v2 (`schema.VoicePresenceV2`): the body of
+/// `GET /v1/channels/{channel}/voice?schema=conch.voice_presence.v2` and every frame of the
+/// presence socket asked for the same way. `share_ended` and `camera_ended` are the
+/// reader's own; this client never shares and reads past them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct VoicePresenceV2 {
+    /// Always [`VOICE_PRESENCE_SCHEMA_V2`].
+    pub schema: String,
+    /// The channel the snapshot describes.
+    pub channel_id: i64,
+    /// Whether this `conchd` has LiveKit configured at all.
+    pub configured: bool,
+    /// Whether LiveKit answered on the last pass. Never true when `configured` is false.
+    pub available: bool,
+    /// The rooms the caller may see. Empty unless `available`.
+    pub rooms: Vec<VoicePresenceRoomV2>,
+}
+
+wire_object!(VoicePresenceV2, "a voice presence object", unknown = ignored, {
+    schema: required,
+    channel_id: required,
+    configured: required,
+    available: required,
+    rooms: required,
+});
+
+impl VoicePresenceV2 {
+    /// Checks what `schema.VoicePresenceV2.Validate` checks: v1's document rules with
+    /// the v2 schema name and v2 rooms.
+    pub fn validate(&self) -> Result<(), Error> {
+        self.check().map_err(invalid("voice presence"))
+    }
+
+    fn check(&self) -> Result<(), String> {
+        if self.schema != VOICE_PRESENCE_SCHEMA_V2 {
+            return Err(format!(
+                "voice presence schema must be \"{VOICE_PRESENCE_SCHEMA_V2}\""
+            ));
+        }
+        if self.channel_id <= 0 {
+            return Err(format!(
+                "voice presence channel_id must be positive, got {}",
+                self.channel_id
+            ));
+        }
+        if !self.configured && self.available {
+            return Err("voice presence cannot be available when not configured".into());
+        }
+        if !self.available && !self.rooms.is_empty() {
+            return Err("voice presence must list no rooms when not available".into());
+        }
+        let mut seen = std::collections::BTreeSet::new();
+        for room in &self.rooms {
+            room.check()?;
+            if !seen.insert(audience_key(room.audience.as_ref())) {
+                return Err("voice presence lists more than one room for the same audience".into());
+            }
+        }
+        Ok(())
+    }
+
+    /// The channel-wide room: the one with no audience. A valid snapshot has at most one.
+    pub fn channel_room(&self) -> Option<&VoicePresenceRoomV2> {
+        self.rooms.iter().find(|room| room.audience.is_none())
+    }
+}
+
 /// What a transmit report says: that the caller's transmission began or ended
 /// (`schema.VoiceTransmitState`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -1074,6 +1334,25 @@ mod tests {
                 "{name} lost more than {field}"
             );
         }
+        fn presence_v2(name: &str) {
+            round_trip::<VoicePresenceV2>(name, VoicePresenceV2::validate);
+        }
+        // share_ended likewise, in a v2 document (issue #1511).
+        fn presence_v2_of_a_sharer(name: &str) {
+            let mut want = fixture(name);
+            let typed: VoicePresenceV2 = serde_json::from_value(want.clone())
+                .unwrap_or_else(|e| panic!("{name} does not decode: {e}"));
+            typed
+                .validate()
+                .unwrap_or_else(|e| panic!("{name} does not validate: {e}"));
+            let ended = want.as_object_mut().and_then(|o| o.remove("share_ended"));
+            assert!(ended.is_some(), "{name} has no share_ended");
+            assert_eq!(
+                serde_json::to_value(&typed).unwrap(),
+                want,
+                "{name} lost more than share_ended"
+            );
+        }
         fn report(name: &str) {
             round_trip::<VoiceTransmitReportV1>(name, VoiceTransmitReportV1::validate);
         }
@@ -1103,7 +1382,16 @@ mod tests {
             ("voice-presence-v1-not-configured.json", presence),
             ("voice-presence-v1-unavailable.json", presence),
             ("voice-presence-v1-sharing.json", presence),
+            // The v1 document a server with two sharers builds (issue #1483, design
+            // §2.3): one sharer, v1's fields and no more. This client reads it whole.
+            ("voice-presence-v1-degraded.json", presence),
             ("voice-presence-v1-share-ended.json", presence_of_a_sharer),
+            // Several sharers (issue #1483): the helper reads v2 (issue #1511).
+            ("voice-presence-v2.json", presence_v2),
+            (
+                "voice-presence-v2-share-ended.json",
+                presence_v2_of_a_sharer,
+            ),
             ("voice-share-v1.json", share),
             // The camera (ADR-015, issue #1238).
             ("voice-presence-v1-camera.json", presence),
@@ -1174,6 +1462,22 @@ mod tests {
     /// Voice fixtures of documents `conch-voice` never reads, each with the reason, so
     /// that a new one is still a decision: claim it with a type, or say here why not.
     const NOT_READ: &[(&str, &str)] = &[
+        // Several shares at once (issue #1483). The presence v2 documents are read by
+        // `VoicePresenceV2` and claimed above. The share claim's body and the v2 answer
+        // that echoes its quality are the sharer's, and `conch-voice` never shares a
+        // screen.
+        (
+            "voice-share-request-v1.json",
+            "the share claim's body is the sharer's; conch-voice never shares a screen",
+        ),
+        (
+            "voice-share-request-v1-empty.json",
+            "the share claim's body is the sharer's; conch-voice never shares a screen",
+        ),
+        (
+            "voice-share-v2.json",
+            "the share claim's answer is the sharer's; conch-voice never shares a screen",
+        ),
         // Voice occupancy (issue #596): how many are in each channel's voice, and who
         // (issue #1103), for a channel list. The voice client joins one channel it is
         // told and shows no list.
@@ -1666,6 +1970,317 @@ mod tests {
             audience,
             participants,
         }
+    }
+
+    fn participant_v2(principal_id: i64) -> VoiceParticipantV2 {
+        VoiceParticipantV2 {
+            principal_id,
+            can_publish: true,
+            transmitting: false,
+            joined_at: Timestamp::parse("2026-11-07T12:00:31.000Z").unwrap(),
+            sharing: false,
+            sharing_audio: false,
+            share_started_at: None,
+            share_quality: None,
+            camera: false,
+        }
+    }
+
+    fn sharer_v2(principal_id: i64, started: &str) -> VoiceParticipantV2 {
+        VoiceParticipantV2 {
+            sharing: true,
+            share_started_at: Some(Timestamp::parse(started).unwrap()),
+            ..participant_v2(principal_id)
+        }
+    }
+
+    fn presence_v2(rooms: Vec<VoicePresenceRoomV2>) -> VoicePresenceV2 {
+        VoicePresenceV2 {
+            schema: VOICE_PRESENCE_SCHEMA_V2.into(),
+            channel_id: 7,
+            configured: true,
+            available: true,
+            rooms,
+        }
+    }
+
+    fn room_v2(
+        audience: Option<Audience>,
+        participants: Vec<VoiceParticipantV2>,
+    ) -> VoicePresenceRoomV2 {
+        VoicePresenceRoomV2 {
+            audience,
+            participants,
+        }
+    }
+
+    #[test]
+    fn presence_v2_is_validated_as_the_schema_validates_it() {
+        let q = |resolution, frame_rate| {
+            Some(VoiceShareQuality {
+                resolution,
+                frame_rate,
+            })
+        };
+        let zero = Timestamp::parse("0001-01-01T00:00:00Z").unwrap();
+        let table: Vec<(&str, VoicePresenceV2, Option<&str>)> = vec![
+            ("nobody", presence_v2(vec![room_v2(None, vec![])]), None),
+            (
+                "two sharers, and three, are not counted",
+                presence_v2(vec![room_v2(
+                    None,
+                    vec![
+                        sharer_v2(3, "2026-11-07T12:00:04.125Z"),
+                        sharer_v2(5, "2026-11-07T12:01:00.000Z"),
+                        sharer_v2(7, "2026-11-07T12:02:10.500Z"),
+                    ],
+                )]),
+                None,
+            ),
+            (
+                "a net room beside the channel room",
+                presence_v2(vec![
+                    room_v2(None, vec![participant_v2(3)]),
+                    room_v2(Some(Audience::net(3)), vec![participant_v2(3)]),
+                ]),
+                None,
+            ),
+            (
+                "a quality with a share",
+                presence_v2(vec![room_v2(
+                    None,
+                    vec![VoiceParticipantV2 {
+                        share_quality: q(VoiceShareResolution::Source, 15),
+                        ..sharer_v2(3, "2026-11-07T12:00:04.125Z")
+                    }],
+                )]),
+                None,
+            ),
+            (
+                "the v1 schema name",
+                VoicePresenceV2 {
+                    schema: VOICE_PRESENCE_SCHEMA_V1.into(),
+                    ..presence_v2(vec![])
+                },
+                Some("schema must be"),
+            ),
+            (
+                "an audience that is not valid",
+                presence_v2(vec![room_v2(
+                    Some(Audience {
+                        kind: AudienceKind::Net,
+                        net_id: 0,
+                        principal_ids: vec![],
+                    }),
+                    vec![],
+                )]),
+                Some("net_id"),
+            ),
+            (
+                "a participant with no id",
+                presence_v2(vec![room_v2(None, vec![participant_v2(0)])]),
+                Some("principal_id must be positive"),
+            ),
+            (
+                "a participant listed twice",
+                presence_v2(vec![room_v2(
+                    None,
+                    vec![participant_v2(3), participant_v2(3)],
+                )]),
+                Some("principal 3 more than once"),
+            ),
+            (
+                "the same principal sharing twice",
+                presence_v2(vec![room_v2(
+                    None,
+                    vec![
+                        sharer_v2(3, "2026-11-07T12:00:04.125Z"),
+                        sharer_v2(3, "2026-11-07T12:01:00.000Z"),
+                    ],
+                )]),
+                Some("principal 3 more than once"),
+            ),
+            (
+                "a sharer who cannot publish",
+                presence_v2(vec![room_v2(
+                    None,
+                    vec![VoiceParticipantV2 {
+                        can_publish: false,
+                        ..sharer_v2(3, "2026-11-07T12:00:04.125Z")
+                    }],
+                )]),
+                Some("cannot be sharing without can_publish"),
+            ),
+            (
+                "sharing without a start",
+                presence_v2(vec![room_v2(
+                    None,
+                    vec![VoiceParticipantV2 {
+                        sharing: true,
+                        ..participant_v2(3)
+                    }],
+                )]),
+                Some("sharing without share_started_at"),
+            ),
+            (
+                "a start without sharing",
+                presence_v2(vec![room_v2(
+                    None,
+                    vec![VoiceParticipantV2 {
+                        share_started_at: Some(Timestamp::parse("2026-11-07T12:00:04Z").unwrap()),
+                        ..participant_v2(3)
+                    }],
+                )]),
+                Some("share_started_at without sharing"),
+            ),
+            (
+                "a zero start",
+                presence_v2(vec![room_v2(
+                    None,
+                    vec![VoiceParticipantV2 {
+                        share_started_at: Some(zero),
+                        ..sharer_v2(3, "2026-11-07T12:00:04Z")
+                    }],
+                )]),
+                Some("share_started_at is zero"),
+            ),
+            (
+                "a quality without sharing",
+                presence_v2(vec![room_v2(
+                    None,
+                    vec![VoiceParticipantV2 {
+                        share_quality: q(VoiceShareResolution::P720, 30),
+                        ..participant_v2(3)
+                    }],
+                )]),
+                Some("share_quality without sharing"),
+            ),
+            (
+                "a frame rate outside the picker's",
+                presence_v2(vec![room_v2(
+                    None,
+                    vec![VoiceParticipantV2 {
+                        share_quality: q(VoiceShareResolution::P720, 24),
+                        ..sharer_v2(3, "2026-11-07T12:00:04Z")
+                    }],
+                )]),
+                Some("frame_rate 24"),
+            ),
+            (
+                "sharing_audio without sharing",
+                presence_v2(vec![room_v2(
+                    None,
+                    vec![VoiceParticipantV2 {
+                        sharing_audio: true,
+                        ..participant_v2(3)
+                    }],
+                )]),
+                Some("sharing_audio without sharing"),
+            ),
+        ];
+        for (name, document, problem) in table {
+            let result = document.validate();
+            match problem {
+                None => assert!(result.is_ok(), "{name}: {result:?}"),
+                Some(want) => {
+                    let got = result.expect_err(name).to_string();
+                    assert!(got.contains(want), "{name}: {got}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn v1_still_refuses_two_sharers_and_v2_reads_the_same_room() {
+        let v1_sharer = |id| VoiceParticipant {
+            sharing: true,
+            ..participant(id)
+        };
+        let v1 = presence(vec![room(None, vec![v1_sharer(3), v1_sharer(7)])]);
+        let got = v1.validate().unwrap_err().to_string();
+        assert!(got.contains("a room has one share at a time"), "{got}");
+        // A v1 document cannot decode as v2 by changing the name: the sharers need starts.
+        let mut doc = serde_json::to_value(&v1).unwrap();
+        doc["schema"] = json!(VOICE_PRESENCE_SCHEMA_V2);
+        let as_v2: VoicePresenceV2 = serde_json::from_value(doc).unwrap();
+        assert!(as_v2.validate().is_err());
+    }
+
+    #[test]
+    fn the_share_fields_of_a_v2_fixture_are_read() {
+        let doc: VoicePresenceV2 =
+            serde_json::from_value(fixture("voice-presence-v2.json")).unwrap();
+        let room = doc.channel_room().unwrap();
+        let sharers = room.sharers();
+        assert_eq!(
+            sharers.iter().map(|p| p.principal_id).collect::<Vec<_>>(),
+            [3, 7]
+        );
+        assert_eq!(
+            sharers[0].share_started_at,
+            Timestamp::parse("2026-11-07T12:00:04.125Z")
+        );
+        assert_eq!(
+            sharers[0].share_quality,
+            Some(VoiceShareQuality {
+                resolution: VoiceShareResolution::P1080,
+                frame_rate: 60
+            })
+        );
+        assert!(sharers[0].sharing_audio && sharers[0].camera);
+        // The second sharer declared nothing.
+        assert_eq!(sharers[1].share_quality, None);
+        assert!(sharers[1].share_started_at.is_some());
+
+        let ended: VoicePresenceV2 =
+            serde_json::from_value(fixture("voice-presence-v2-share-ended.json")).unwrap();
+        let quality = ended.channel_room().unwrap().sharers()[0].share_quality;
+        assert_eq!(
+            quality,
+            Some(VoiceShareQuality {
+                resolution: VoiceShareResolution::P720,
+                frame_rate: 30
+            })
+        );
+    }
+
+    #[test]
+    fn sharers_are_ordered_by_start_then_id() {
+        let room = room_v2(
+            None,
+            vec![
+                sharer_v2(3, "2026-11-07T12:05:00.000Z"),
+                participant_v2(4),
+                sharer_v2(5, "2026-11-07T12:00:00.000Z"),
+                sharer_v2(2, "2026-11-07T12:05:00.000Z"),
+            ],
+        );
+        let order: Vec<i64> = room.sharers().iter().map(|p| p.principal_id).collect();
+        assert_eq!(order, [5, 2, 3]);
+    }
+
+    #[test]
+    fn a_resolution_the_schema_does_not_name_fails_the_document() {
+        for bad in ["4k", "1080P", ""] {
+            let doc = json!({"resolution": bad, "frame_rate": 30});
+            assert!(
+                serde_json::from_value::<VoiceShareQuality>(doc).is_err(),
+                "{bad}"
+            );
+        }
+        let missing = json!({"resolution": "720p"});
+        assert!(serde_json::from_value::<VoiceShareQuality>(missing).is_err());
+    }
+
+    #[test]
+    fn a_v2_participant_who_is_not_sharing_encodes_as_a_v1_one() {
+        let v1 = serde_json::to_value(participant(3)).unwrap();
+        let v2 = serde_json::to_value(VoiceParticipantV2 {
+            joined_at: participant(3).joined_at,
+            ..participant_v2(3)
+        })
+        .unwrap();
+        assert_eq!(v1, v2);
     }
 
     #[test]

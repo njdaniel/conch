@@ -799,6 +799,49 @@ mod tests {
         }
     }
 
+    /// Several sharers at once (issue #1483) change nothing in the rules of #906: with a
+    /// companion that owns share playback, no other participant's share audio is wanted
+    /// however many there are, the companion's own tracks are never wanted, and voices
+    /// are; with a companion that does not own it, the others' share audio is wanted.
+    #[test]
+    fn several_sharers_leave_the_share_audio_rules_as_they_were() {
+        let several = || {
+            vec![
+                Fake::new("bob", TrackKind::Audio, TrackSource::Microphone),
+                Fake::new("bob", TrackKind::Audio, TrackSource::ScreenshareAudio),
+                Fake::new("val", TrackKind::Audio, TrackSource::ScreenshareAudio),
+                Fake::new("carol", TrackKind::Audio, TrackSource::ScreenshareAudio),
+                Fake::new(
+                    "alice~screen",
+                    TrackKind::Audio,
+                    TrackSource::ScreenshareAudio,
+                ),
+                Fake::new("val", TrackKind::Video, TrackSource::Screenshare),
+            ]
+        };
+        let rules = [
+            // No companion: every other sharer's sound is wanted, video never.
+            (Subscription::default(), [1, 1, 1, 1, 1, 0]),
+            // A companion that does not own share playback hears the others' sound itself.
+            (
+                Subscription::new(Some(Companion::new("alice~screen", false))),
+                [1, 1, 1, 1, 0, 0],
+            ),
+            // One that owns it plays every watched stream: none of the others' is wanted.
+            (
+                Subscription::new(Some(Companion::new("alice~screen", true))),
+                [1, 0, 0, 0, 0, 0],
+            ),
+        ];
+        for (rule, wanted) in rules {
+            let present = several();
+            subscribe_on(&rule, Seen::Connected(present.clone()), || {
+                panic!("a join does not list the room")
+            });
+            assert_eq!(told(&present), wanted, "{rule:?}");
+        }
+    }
+
     /// After a restart every wanted publication is told again, even one that was already
     /// subscribed to, and an unwanted one still is not.
     #[test]

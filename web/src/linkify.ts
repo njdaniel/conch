@@ -14,7 +14,10 @@ export type Segment =
 export const maxLink = 2048;
 
 const scheme = /https?:\/\//gi;
-const word = /[^\s<>"]*/y;
+// A run ends at whitespace, an angle bracket, a quote, or the "](" of a masked
+// link. Stopping there, in the scan itself, keeps every character read once:
+// cutting the run afterwards would leave the next scan to read it again.
+const word = /(?:[^\s<>"\]]|\](?!\())*/y;
 const trailing = '.,;:!?\'*';
 const pairs: Readonly<Record<string, string>> = { ')': '(', ']': '[', '}': '{' };
 
@@ -57,7 +60,7 @@ const nonAscii = /[^\x00-\x7f]/;
 // writtenAuthority is the host part as the sender wrote it: after the
 // scheme and every slash or backslash that follows it (the URL parser skips
 // extra ones), up to the next slash, backslash, question mark or hash.
-function writtenAuthority(text: string): string {
+export function writtenAuthority(text: string): string {
   let from = text.indexOf('//') + 2;
   while (from < text.length && (text[from] === '/' || text[from] === '\\')) from += 1;
   const rest = text.slice(from);
@@ -65,7 +68,7 @@ function writtenAuthority(text: string): string {
   return end < 0 ? rest : rest.slice(0, end);
 }
 
-function href(text: string): string | null {
+export function safeHttpUrl(text: string): string | null {
   if (text.length > maxLink || invisible.test(text)) return null;
   // Only a plain ASCII host links. A host written in other scripts can be a
   // lookalike of another name, so it stays text, at the cost of real IDN
@@ -100,7 +103,7 @@ export function linkify(body: string): Segment[] {
     word.lastIndex = start;
     const run = word.exec(body)?.[0] ?? '';
     const text = trim(run);
-    const target = href(text);
+    const target = safeHttpUrl(text);
     if (target === null) {
       // Resume after the run, so a hostile run is read once.
       scheme.lastIndex = start + run.length;

@@ -3,6 +3,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testi
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as api from './api';
 import { clock, Conversation } from './Conversation';
+import { forgetFileNames, rememberFileName } from './spoilerFiles';
 import type { Audience, MessageV2 } from './schema/message';
 import type { ChannelChat, PendingSend } from './state/messages';
 
@@ -194,6 +195,26 @@ describe('one-level replies', () => {
 
 describe('what a reply answers', () => {
   const line = (id: number) => document.querySelector(`[data-message-id="${String(id)}"]`) as HTMLElement;
+
+  it('quotes an image-only spoiler root by its shown names, never the prefix', () => {
+    const payload = { schema: 'conch.file_attachment.v1', data: { file_ids: [1, 2] } };
+    view([{ ...root(), body: 'SPOILER_a.png, SPOILER_b.png', payload }, reply(2)]);
+    expect(within(line(2)).getByText('Replying to bea: a.png, b.png')).toBeTruthy();
+  });
+
+  it('quotes an image-only spoiler root whose names hold ", " by its shown names, once they are known', () => {
+    const payload = { schema: 'conch.file_attachment.v1', data: { file_ids: [1, 2] } };
+    forgetFileNames();
+    view([{ ...root(), body: 'SPOILER_trip, day 1.png, SPOILER_other.png', payload }, reply(2)]);
+    // Names not known yet: today's behaviour.
+    expect(within(line(2)).getByText('Replying to bea: SPOILER_trip, day 1.png, SPOILER_other.png')).toBeTruthy();
+    act(() => {
+      rememberFileName(1, 'SPOILER_trip, day 1.png');
+      rememberFileName(2, 'SPOILER_other.png');
+    });
+    expect(within(line(2)).getByText('Replying to bea: trip, day 1.png, other.png')).toBeTruthy();
+    forgetFileNames();
+  });
 
   it('quotes the first line of a held root, with its author', () => {
     view([{ ...root(), body: 'anyone up for game night?\nsecond line' }, reply(2)]);

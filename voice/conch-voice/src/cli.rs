@@ -215,6 +215,10 @@ pub struct ManagedArgs {
     /// `--transmit-ceiling-secs`, passed by the desktop owner: a missed-release bound for
     /// push-to-talk presses, in seconds. A shorter `audio.max_transmit_secs` still wins.
     pub transmit_ceiling_secs: Option<u32>,
+    /// `--no-mute-key`, passed by an owner that alone mutes (the desktop app, #1631): the
+    /// helper does not read `keys.mute`, so no key press can unmute a session the owner
+    /// muted, a locked screen's included. `conch` passes nothing, and `keys.mute` works.
+    pub no_mute_key: bool,
 }
 
 /// What the command line asked for.
@@ -392,6 +396,12 @@ pub fn command() -> Command {
                 .value_name("SECONDS")
                 .value_parser(transmit_ceiling_secs)
                 .help("Cap each push-to-talk press at SECONDS (1 to 600), or at audio.max_transmit_secs if that is shorter; open mode is not capped by it"),
+        )
+        .arg(
+            Arg::new("no-mute-key")
+                .long("no-mute-key")
+                .action(clap::ArgAction::SetTrue)
+                .help("Do not read keys.mute: the owner alone mutes (the desktop app passes this)"),
         )
         .arg(
             Arg::new("events-pipe")
@@ -662,6 +672,7 @@ where
                     .map(PathBuf::from),
                 share_audio_owner: share_audio_owner(managed),
                 transmit_ceiling_secs: managed.get_one::<u32>("transmit-ceiling-secs").copied(),
+                no_mute_key: managed.get_flag("no-mute-key"),
             }));
         }
         Some(("devices", devices)) => {
@@ -1278,6 +1289,20 @@ mod tests {
     }
 
     #[test]
+    fn managed_takes_no_mute_key_and_join_does_not() {
+        let no_mute = |args: &[&str]| match parse(args.iter().copied()) {
+            Ok(Invocation::Managed(args)) => Some(args.no_mute_key),
+            _ => None,
+        };
+        assert_eq!(no_mute(&["conch-voice", "managed"]), Some(false));
+        assert_eq!(
+            no_mute(&["conch-voice", "managed", "--no-mute-key"]),
+            Some(true)
+        );
+        assert!(parse(["conch-voice", "join", "--no-mute-key"]).is_err());
+    }
+
+    #[test]
     fn managed_takes_no_channel_server_or_login_and_hides_its_test_options() {
         assert_eq!(
             parse(["conch-voice", "managed"]).unwrap(),
@@ -1289,6 +1314,7 @@ mod tests {
                 events_pipe: None,
                 share_audio_owner: ShareAudioOwner::Helper,
                 transmit_ceiling_secs: None,
+                no_mute_key: false,
             })
         );
         assert_eq!(
@@ -1313,6 +1339,7 @@ mod tests {
                 events_pipe: None,
                 share_audio_owner: ShareAudioOwner::Helper,
                 transmit_ceiling_secs: None,
+                no_mute_key: false,
             })
         );
         // Nothing that names what to join, or where, or as whom.

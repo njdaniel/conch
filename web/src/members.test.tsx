@@ -243,6 +243,26 @@ describe('administration controls', () => {
   });
 });
 
+describe('identity marks', () => {
+  it('draws MemberRow marks through the shared component in wire order', () => {
+    draw({ ...props('operator'), viewer: { id: 1, role: 'operator', guest: false } });
+    const olivia = row('olivia');
+    expect(Array.from(olivia.querySelectorAll('.identity-mark')).map((mark) => mark.getAttribute('data-identity'))).toEqual(['you', 'operator', 'approver']);
+    expect(within(row('ada')).getByText('Manager').classList.contains('identity-label')).toBe(true);
+    expect(within(row('bot')).getByText('Agent').classList.contains('identity-label')).toBe(true);
+  });
+
+  it('shows no standing a plain-member payload did not carry', () => {
+    const plain: ChannelMemberV1 = { principal_id: 6, created_at: at, name: 'plain', kind: 'human', manages: false, can_decide: false };
+    const controlProps = { ...props('member'), members: [...memberList, plain] };
+    render(<Members {...controlProps} people={[...people, entry(plain)]} />);
+    const marks = row('plain').querySelectorAll('.identity-mark');
+    expect(Array.from(marks).map((mark) => mark.getAttribute('data-identity'))).toEqual([]);
+    expect(within(row('plain')).queryByText('Owner')).toBeNull();
+    expect(within(row('plain')).queryByText('Operator')).toBeNull();
+  });
+});
+
 describe('opening a row\'s menu', () => {
   it('opens by right-click on the row, suppressing the native menu there only', () => {
     draw(props('operator'));
@@ -598,5 +618,39 @@ describe('a removed person does not get their menu or question back (issue #1450
     view.rerender(<Members {...without} people={people.filter((e) => e.id !== 3)} />);
     view.rerender(<Members {...p} people={people} />);
     expect(screen.queryByRole('menu')).toBeNull();
+  });
+});
+
+describe('a person profile card', () => {
+  it('opens from a people row and follows member marks and presence without a reload', () => {
+    const p = props('member');
+    const view = render(<Members {...p} people={people} />);
+    const opener = within(row('ada')).getByRole('button', { name: 'ada' });
+    fireEvent.click(opener);
+    const card = screen.getByRole('dialog', { name: 'ada' });
+    expect(card.querySelector('.avatar')).not.toBeNull();
+    expect(within(card).getByText('Person')).toBeDefined();
+    expect(within(card).getByText('Manager')).toBeDefined();
+    expect(within(card).getByText('offline')).toBeDefined();
+    expect(document.activeElement).toBe(within(card).getByRole('button', { name: 'Close' }));
+
+    const demoted = { ...p, members: memberList.map((member) => member.principal_id === 2 ? { ...member, manages: false } : member) };
+    view.rerender(<Members {...demoted} people={people} />);
+    expect(within(screen.getByRole('dialog', { name: 'ada' })).queryByText('Manager')).toBeNull();
+    const changed = people.map((person) => person.id === 2 ? { ...person, state: 'online' as const, live: 2 } : person);
+    view.rerender(<Members {...demoted} people={changed} />);
+    expect(within(screen.getByRole('dialog', { name: 'ada' })).getByText('online (2 sessions)')).toBeDefined();
+    expect(within(screen.getByRole('list', { name: 'Online — 1' })).getByRole('button', { name: 'ada' })).toBeDefined();
+  });
+
+  it.each(['removed', 'hidden'])('closes and focuses People when the person is %s', () => {
+    const p = props('member');
+    const view = render(<Members {...p} people={people} />);
+    fireEvent.click(within(row('ada')).getByRole('button', { name: 'ada' }));
+    expect(screen.getByRole('dialog', { name: 'ada' })).toBeDefined();
+    const heading = screen.getByRole('heading', { name: 'People' });
+    view.rerender(<Members {...p} members={memberList.filter((member) => member.principal_id !== 2)} people={people.filter((person) => person.id !== 2)} />);
+    expect(screen.queryByRole('dialog')).toBeNull();
+    expect(document.activeElement).toBe(heading);
   });
 });

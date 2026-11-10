@@ -960,7 +960,9 @@ jobs:
     # the same toolchain, caches and runner, and so the same cost: it needs
     # the Rust build (the cached voice/target, from which the program's own
     # `cargo build` finds little or nothing to do) and Docker, and about a
-    # minute of its own on top. CI=true makes a skip a failure.
+    # minute of its own on top. The screen companion's live test (#1583,
+    # D4-06) runs in the same program: it adds the web build and a Chromium.
+    # CI=true makes a skip a failure.
     # On GitHub-hosted runners (#1318), or on the self-hosted ones for this
     # repository's own branches when the variable HEAVY_RUNNER is "local".
     runs-on: ${{ vars.HEAVY_RUNNER == 'local' && (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","conch-4tb"]') || 'ubuntu-latest' }}
@@ -1046,12 +1048,25 @@ jobs:
       - name: rust toolchain
         run: ./scripts/voice-toolchain.sh
 
-      # desktop/.nvmrc names the Node the desktop's tests run under.
+      # desktop/.nvmrc names the Node the desktop's tests run under. The
+      # companion's test (#1583) also builds the web client (web-build) and
+      # drives two Chromium pages, so web's lockfile is cached as well.
       - uses: actions/setup-node@v4
         with:
           node-version-file: desktop/.nvmrc
           cache: npm
-          cache-dependency-path: desktop/package-lock.json
+          cache-dependency-path: |
+            desktop/package-lock.json
+            web/package-lock.json
+
+      # The screen companion's page and the browser principal V run in the
+      # Chromium Playwright's own version pins (#1583). Locally, `npx
+      # playwright install chromium` alone. The npm ci comes first so that npx
+      # runs the Playwright desktop/package-lock.json pins, not whatever npx
+      # would fetch; make desktop-voice-e2e then installs again, harmlessly.
+      - name: browser for the companion test
+        working-directory: desktop
+        run: npm ci --no-audit && npx playwright install --with-deps chromium
 
       - name: desktop voice live test
         run: make desktop-voice-e2e

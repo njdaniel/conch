@@ -10,6 +10,7 @@ import { messageEditedV1, messageEditedV1Schema, messageV2, type MessageEditedV1
 import { channelsChangedV1, channelsChangedV1Schema, directoryChangedV1, directoryChangedV1Schema, messageV2Schema, permissionsChangedV1, permissionsChangedV1Schema, readStateV1, readStateV1Schema, type ReadStateV1 } from '../schema/generated';
 import { runSchema, runV1, type RunV1 } from '../schema/run';
 import { sessionRosterSchema, sessionRosterV1, type SessionRosterV1 } from '../schema/session';
+import { fromServer } from '../schema/validate';
 
 export type EventFrame =
   | { readonly kind: 'roster'; readonly roster: SessionRosterV1 }
@@ -45,25 +46,25 @@ export function parseEventFrame(data: unknown): EventFrame | null {
   if (typeof doc !== 'object' || doc === null) return null;
   switch ((doc as { schema?: unknown }).schema) {
     case sessionRosterSchema:
-      return sessionRosterV1(doc).length === 0 ? { kind: 'roster', roster: doc as SessionRosterV1 } : null;
+      return fromServer(sessionRosterV1)(doc).length === 0 ? { kind: 'roster', roster: doc as SessionRosterV1 } : null;
     case channelMembersSchema:
-      return channelMembersV1(doc).length === 0 ? { kind: 'members', members: doc as ChannelMembersV1 } : null;
+      return fromServer(channelMembersV1)(doc).length === 0 ? { kind: 'members', members: doc as ChannelMembersV1 } : null;
     case runSchema:
-      return runV1(doc).length === 0 ? { kind: 'run', run: doc as RunV1 } : null;
+      return fromServer(runV1)(doc).length === 0 ? { kind: 'run', run: doc as RunV1 } : null;
     case activitySchema:
-      return agentActivityV1(doc).length === 0 ? { kind: 'activity', entry: doc as AgentActivityV1 } : null;
+      return fromServer(agentActivityV1)(doc).length === 0 ? { kind: 'activity', entry: doc as AgentActivityV1 } : null;
     case interventionSchema:
-      return interventionV1(doc).length === 0 ? { kind: 'intervention', intervention: doc as InterventionV1 } : null;
+      return fromServer(interventionV1)(doc).length === 0 ? { kind: 'intervention', intervention: doc as InterventionV1 } : null;
     case channelDocSchema:
-      return channelDocV1(doc).length === 0 ? { kind: 'channel', channel: doc as ChannelDocV1 } : null;
+      return fromServer(channelDocV1)(doc).length === 0 ? { kind: 'channel', channel: doc as ChannelDocV1 } : null;
     case readStateV1Schema:
-      return readStateV1(doc).length === 0 ? { kind: 'readState', state: doc as ReadStateV1 } : null;
+      return fromServer(readStateV1)(doc).length === 0 ? { kind: 'readState', state: doc as ReadStateV1 } : null;
     case messageV2Schema:
-      return messageV2(doc).length === 0 ? { kind: 'message', message: doc as MessageV2 } : null;
+      return fromServer(messageV2)(doc).length === 0 ? { kind: 'message', message: doc as MessageV2 } : null;
     case messageRemovedV1Schema:
-      return messageRemovedV1(doc).length === 0 ? { kind: 'messageRemoved', message: (doc as MessageRemovedV1).message } : null;
+      return fromServer(messageRemovedV1)(doc).length === 0 ? { kind: 'messageRemoved', message: (doc as MessageRemovedV1).message } : null;
     case messageEditedV1Schema:
-      return messageEditedV1(doc).length === 0 ? { kind: 'messageEdited', message: (doc as MessageEditedV1).message } : null;
+      return fromServer(messageEditedV1)(doc).length === 0 ? { kind: 'messageEdited', message: (doc as MessageEditedV1).message } : null;
     case channelsChangedV1Schema:
       // The frame has no content, and a field a newer server adds is ignored:
       // only the document's own schema is checked.

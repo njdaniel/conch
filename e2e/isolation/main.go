@@ -366,6 +366,14 @@ func run(h *harness) (summary, error) {
 	}
 	h.say("ok   personal preset: %d rows; with personal applied through PUT /v1/permissions a member's link (v1 and v2) was refused invite_not_allowed naming make_member_links and its channel creation permission_denied naming the permission of the visibility; the directory narrowed to the people a member may know (bob's and zed's names and ids in none of the routes alice reads, carol known through her link, the authors route naming the departed author alone), conch.directory_changed.v1 reached exactly the viewers whose answer changed; group gave link and channel creation back, widened the directory and signalled it", pn)
 
+	// Preview as member (issue #1516, design docs/design/permission-preview.md
+	// section 10 P3): an operator reads as alice and bob, under both presets.
+	vn, err := w.previewPhase(table)
+	if err != nil {
+		return sum, fmt.Errorf("preview as member: %w", err)
+	}
+	h.say("ok   preview as member: %d requests; with Conch-Preview-As an operator's five reads were alice's and bob's own bytes under group and personal (hiding off: the directory lists everyone and never the other's room, whose members are the ghost's 404; hiding on: the owner and herself), the other's id and name and room in none of them and nothing beyond what the operator can read; every other route of the table (sockets, ws-ticket, hook and the exempt routes) answered the same 403 preview_read_only with nothing written; owner protection, agents, guests and the restricted operator held; the audit names the administrator and never the target", vn)
+
 	// B's sockets have been open through all of it: a second control, and
 	// every frame since they opened is scanned again.
 	if c, err = w.controlB(2); err != nil {

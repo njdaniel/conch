@@ -54,10 +54,48 @@ describe('callTiles', () => {
     expect(hidden).toBe(0);
   });
 
+  it('names the viewer tile by their own name, last and with the me flag; others unchanged (#1481)', () => {
+    const roster = [occupant(9, '2026-11-03T10:00:03Z'), occupant(8, '2026-11-03T10:00:02Z')];
+    const { tiles } = callTiles(roster, 8, false, names, 'nick');
+    expect(tiles.map((t) => [t.principal, t.name, t.me])).toEqual([
+      [9, 'member-9', false],
+      [8, 'nick', true],
+    ]);
+  });
+
+  it('keeps a hostile viewer name as the literal string (#1481)', () => {
+    const hostile = '<img src=x onerror=alert(1)>';
+    expect(callTiles([occupant(8, '2026-11-03T10:00:02Z')], 8, false, names, hostile).tiles[0]?.name).toBe(hostile);
+  });
+
+  it('says You for the viewer tile while the name is not known (#1481)', () => {
+    expect(callTiles([occupant(8, '2026-11-03T10:00:02Z')], 8, false, names, '').tiles[0]?.name).toBe('You');
+  });
+
   it("the viewer's own tile follows their own track, never presence (S5)", () => {
     const roster = [occupant(7, '2026-11-03T10:00:01Z', true)];
     expect(callTiles(roster, 7, false, names).tiles[0]?.camera).toBe(false);
     expect(callTiles(roster, 7, true, names).tiles[0]?.camera).toBe(true);
+  });
+
+  it('with Hide non-video participants off keeps everyone, and on hides every camera-off tile, the viewer included', () => {
+    const roster = [occupant(7, '2026-11-03T10:00:01Z'), occupant(9, '2026-11-03T10:00:03Z', true), occupant(8, '2026-11-03T10:00:02Z')];
+    expect(callTiles(roster, 7, false, names, '', false).tiles.map((t) => t.principal)).toEqual([8, 9, 7]);
+    expect(callTiles(roster, 7, false, names, '', true).tiles.map((t) => t.principal)).toEqual([9]);
+    expect(callTiles(roster, 7, true, names, '', true).tiles.map((t) => t.principal)).toEqual([9, 7]);
+  });
+
+  it('with Hide non-video participants on keeps join order, the viewer last, the cap and the camera overflow count', () => {
+    const roster = Array.from({ length: 12 }, (_, i) => occupant(i + 1, `2026-11-03T10:00:${String(10 + i)}Z`, i + 1 !== 5 && i + 1 !== 6));
+    const { tiles, hidden } = callTiles(roster, 1, true, names, '', true);
+    expect(tiles.map((t) => t.principal)).toEqual([2, 3, 4, 7, 8, 9, 10, 11, 12]);
+    expect(tiles.every((t) => t.camera)).toBe(true);
+    expect(hidden).toBe(1);
+  });
+
+  it('with Hide non-video participants on and no cameras, returns no tiles', () => {
+    const roster = [occupant(7, '2026-11-03T10:00:01Z'), occupant(8, '2026-11-03T10:00:02Z')];
+    expect(callTiles(roster, 7, false, names, '', true)).toEqual({ tiles: [], hidden: 0 });
   });
 
   it('with more than nine in voice, only cameras get tiles, at most nine', () => {

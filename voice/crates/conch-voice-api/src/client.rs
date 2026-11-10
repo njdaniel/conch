@@ -105,11 +105,9 @@ impl Client {
             timeout,
         };
         // An address reqwest cannot use is refused now, not at the first call.
-        let reached = client
-            .url(&["v1"], None)
-            .map_err(|_| Error::InvalidServer {
-                reason: "its host or path cannot be used in a request",
-            })?;
+        let reached = client.url(&["v1"], &[]).map_err(|_| Error::InvalidServer {
+            reason: "its host or path cannot be used in a request",
+        })?;
         // The token was looked up under the key. It may only go to the host the key names.
         // (An origin is scheme, host and port; the three are compared as one thing.)
         let same_host = reqwest::Url::parse(server.key())
@@ -139,7 +137,7 @@ impl Client {
     ///
     /// Refusals: [`Error::Unauthenticated`] for a login `conchd` does not accept.
     pub async fn whoami(&self) -> Result<WhoAmIResponseV1, Error> {
-        let url = self.url(&["v1", "whoami"], None)?;
+        let url = self.url(&["v1", "whoami"], &[])?;
         let response = self.send(self.http.get(url)).await?;
         self.document(response, "whoami").await
     }
@@ -154,7 +152,7 @@ impl Client {
     /// [`Error::Unavailable`].
     pub async fn session(&self, channel: &str) -> Result<VoiceSessionResponseV1, Error> {
         Self::check_channel(channel)?;
-        let url = self.url(&["v1", "channels", channel, "voice", "session"], None)?;
+        let url = self.url(&["v1", "channels", channel, "voice", "session"], &[])?;
         let response = self.send(self.http.post(url)).await?;
         let session: VoiceSessionResponseV1 = self.document(response, "voice session").await?;
         session.validate()?;
@@ -187,7 +185,7 @@ impl Client {
             what: "voice transmit report",
             problem: "it could not be encoded".into(),
         })?;
-        let url = self.url(&["v1", "channels", channel, "voice", "transmit"], None)?;
+        let url = self.url(&["v1", "channels", channel, "voice", "transmit"], &[])?;
         let request = self
             .http
             .post(url)
@@ -212,7 +210,7 @@ impl Client {
     /// answers with a snapshot that says so, not with a refusal.
     pub async fn presence(&self, channel: &str) -> Result<VoicePresenceV1, Error> {
         Self::check_channel(channel)?;
-        let url = self.url(&["v1", "channels", channel, "voice"], None)?;
+        let url = self.url(&["v1", "channels", channel, "voice"], &[])?;
         let response = self.send(self.http.get(url)).await?;
         let presence: VoicePresenceV1 = self.document(response, "voice presence").await?;
         presence.validate()?;
@@ -243,13 +241,19 @@ impl Client {
     pub(crate) fn url(
         &self,
         segments: &[&str],
-        query: Option<(&str, &str)>,
+        query: &[(&str, &str)],
     ) -> Result<reqwest::Url, Error> {
         let unusable = Error::InvalidChannel {
             reason: "the request address built from it would not reach the endpoint",
         };
         let path = self.server.request_path(segments);
-        let query = query.map(|(name, value)| format!("{name}={}", query_escape(value)));
+        let query = (!query.is_empty()).then(|| {
+            query
+                .iter()
+                .map(|(name, value)| format!("{name}={}", query_escape(value)))
+                .collect::<Vec<_>>()
+                .join("&")
+        });
         let mut text = self.server.origin();
         text.push_str(&path);
         if let Some(query) = &query {
@@ -425,7 +429,7 @@ mod tests {
         // No network: the address a request would be sent to is built and looked at.
         let secure = client("https://conch.example:8443/pre");
         let rest = secure
-            .url(&["v1", "channels", "general", "voice", "session"], None)
+            .url(&["v1", "channels", "general", "voice", "session"], &[])
             .unwrap();
         assert_eq!(rest.scheme(), "https");
         assert_eq!(
@@ -433,7 +437,7 @@ mod tests {
             "https://conch.example:8443/pre/v1/channels/general/voice/session"
         );
         let socket = secure
-            .url(&["v1", "voice", "ws"], Some(("channel", "general")))
+            .url(&["v1", "voice", "ws"], &[("channel", "general")])
             .unwrap();
         assert_eq!(socket.scheme(), "https");
         assert_eq!(
@@ -443,14 +447,14 @@ mod tests {
         assert_eq!(socket.port_or_known_default(), Some(8443));
         assert_eq!(
             client("HTTPS://Conch.Example")
-                .url(&["v1"], None)
+                .url(&["v1"], &[])
                 .unwrap()
                 .as_str(),
             "https://conch.example/v1"
         );
 
         // And a plain address stays plain: nothing is upgraded behind the user's back.
-        let plain = client("http://127.0.0.1:8080").url(&["v1"], None).unwrap();
+        let plain = client("http://127.0.0.1:8080").url(&["v1"], &[]).unwrap();
         assert_eq!(plain.as_str(), "http://127.0.0.1:8080/v1");
     }
 
@@ -460,7 +464,7 @@ mod tests {
         assert!(client.authorization.is_sensitive());
         assert!(!format!("{:?}", client.authorization).contains("FAKE"));
 
-        let url = client.url(&["v1", "voice", "ws"], None).unwrap();
+        let url = client.url(&["v1", "voice", "ws"], &[]).unwrap();
         for request in [
             client.authorized(client.http.get(url.clone())),
             client.authorized(client.http.post(url.clone())),

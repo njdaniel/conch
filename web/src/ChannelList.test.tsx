@@ -5,7 +5,7 @@
 // the Channels view, one row a channel (issue #929).
 import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { ChannelList } from './ChannelList';
+import { ChannelList, voiceName } from './ChannelList';
 import { longPressMs } from './MessageMenu';
 import type { ChannelV0 } from './schema/channel';
 
@@ -212,6 +212,18 @@ describe('who is in voice', () => {
   it('says You for the viewer and Member N for someone not yet named', () => {
     render(listed({ 2: [7, 99] }));
     expect(rows('book-club')).toEqual(['You', 'Member 99']);
+  });
+
+  it('names the viewer by their own name when the page has it, others unchanged (#1481)', () => {
+    render(listed({ 2: [10, 7, 99] }, undefined, new Map([...names, [7, 'nick']])));
+    expect(rows('book-club')).toEqual(['alice', 'nick', 'Member 99']);
+  });
+
+  it('renders a hostile viewer name as text (#1481)', () => {
+    const hostile = '<img src=x onerror=alert(1)>';
+    render(listed({ 2: [7] }, undefined, new Map([[7, hostile]])));
+    expect(rows('book-club')).toEqual([hostile]);
+    expect(inVoice('book-club').querySelector('img')).toBeNull();
   });
 
   it('folds after five with how many more', () => {
@@ -439,5 +451,18 @@ describe('a channel row\'s menu', () => {
     expect(document.activeElement).toBe(screen.getByRole('button', { name: 'book-club' }));
     fireEvent.keyDown(document.activeElement as Element, { key: 'End' });
     expect(document.activeElement).toBe(screen.getByRole('button', { name: 'game-night' }));
+  });
+});
+
+describe('voiceName (#1481)', () => {
+  const names = new Map([[10, 'alice']]);
+  it.each([
+    ['the viewer, name known', 7, new Map([[7, 'nick']]), 'nick'],
+    ['the viewer, name not known yet', 7, names, 'You'],
+    ['the viewer, empty name', 7, new Map([[7, '']]), 'You'],
+    ['someone named', 10, names, 'alice'],
+    ['someone not named', 99, names, 'Member 99'],
+  ])('%s', (_what, id, known, want) => {
+    expect(voiceName(id, 7, known)).toBe(want);
   });
 });

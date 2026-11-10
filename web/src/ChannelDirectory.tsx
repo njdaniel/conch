@@ -36,12 +36,15 @@ function Row({
   onLeave,
   onOpen,
   onUnauthorized,
+  reveal,
 }: {
   readonly row: ChannelListingV1;
   readonly onJoin: (name: string) => Promise<api.InviteResult<ChannelV0>>;
   readonly onLeave: (row: ChannelListingV1) => Promise<api.InviteResult<null>>;
   readonly onOpen: (name: string) => void;
   readonly onUnauthorized: () => void;
+  // The quick switcher asked to see this row (issue #1492): focus its control.
+  readonly reveal: number | undefined;
 }) {
   const [busy, setBusy] = useState(false);
   const [asking, setAsking] = useState(false);
@@ -52,6 +55,11 @@ function Row({
   const more = useRef<HTMLButtonElement>(null);
   const acted = useRef(false);
   const [settled, setSettled] = useState(0);
+  useEffect(() => {
+    if (reveal === undefined) return;
+    more.current?.focus();
+    if (typeof more.current?.scrollIntoView === 'function') more.current.scrollIntoView({ block: 'nearest' });
+  }, [reveal]);
   const cancel = useRef<HTMLButtonElement>(null);
   useEffect(() => {
     live.current = true;
@@ -133,7 +141,7 @@ function Row({
       </div>
       {row.default === true ? <span className="ag-badge">Default</span> : null}
       {row.joined ? <span className="ag-badge">Joined</span> : null}
-      {row.joined && row.manages === true ? <span className="ag-badge">Manager</span> : null}
+      {row.joined && row.manages === true ? <span className="channel-badge">Manager</span> : null}
       {row.joined ? (
         <button
           ref={more}
@@ -202,6 +210,7 @@ export function ChannelDirectory({
   onLeft,
   onOpen,
   onUnauthorized,
+  reveal,
 }: {
   // The person's own list, which the directory reads again when it changes.
   readonly channels: readonly ChannelV0[];
@@ -209,12 +218,20 @@ export function ChannelDirectory({
   readonly onLeft: (name: string) => void;
   readonly onOpen: (name: string) => void;
   readonly onUnauthorized: () => void;
+  // Open the directory and focus that channel's row (issue #1492); it joins
+  // nothing. A new `n` asks again.
+  readonly reveal?: { readonly n: number; readonly name: string };
 }) {
   const showChat = useContext(ShowChat);
   const [open, setOpen] = useState(false);
   const [rows, setRows] = useState<readonly ChannelListingV1[] | null>(null);
   const [failed, setFailed] = useState(false);
   const seq = useRef(0);
+  const [asked, setAsked] = useState(0);
+  if (reveal !== undefined && reveal.n !== asked) {
+    setAsked(reveal.n);
+    setOpen(true);
+  }
   const live = useRef(true);
   const latest = useRef({ onJoined, onLeft, onUnauthorized });
   latest.current = { onJoined, onLeft, onUnauthorized };
@@ -310,6 +327,7 @@ export function ChannelDirectory({
                   showChat();
                 }}
                 onUnauthorized={onUnauthorized}
+                reveal={reveal !== undefined && reveal.name === row.name ? reveal.n : undefined}
               />
             ))}
           </ul>

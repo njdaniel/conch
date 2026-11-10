@@ -6,7 +6,7 @@ import { act, cleanup, renderHook } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ApiResult } from '../api';
 import type { ChannelV0 } from '../schema/channel';
-import type { VoicePresenceV1 } from '../schema/voice';
+import type { VoicePresenceV2 } from '../schema/voice';
 import type { FeedSocket, SocketEvents } from '../state/feed';
 
 // One presence socket the page asked for: its channel, the events it was
@@ -23,7 +23,7 @@ const fake = vi.hoisted(() => ({
   // While true the ticket gets no answer, as with conchd stopped.
   down: false,
   // What a presence read answers; never, unless a test says.
-  read: (): Promise<ApiResult<VoicePresenceV1>> => new Promise(() => undefined),
+  read: (): Promise<ApiResult<VoicePresenceV2>> => new Promise(() => undefined),
   // Issue #965: a session and a room for a test that talks, and what each
   // transmit report answers; by default no session, and reports answered.
   session: (): Promise<unknown> => new Promise(() => undefined),
@@ -65,14 +65,16 @@ vi.mock('../api', () => ({
     fake.mode = mode;
     fake.kept.push(mode);
   },
+  readShareQuality: () => ({ resolution: '1080p', frameRate: 30 }),
+  writeShareQuality: () => undefined,
 }));
 vi.mock('./sdk', () => ({ newLiveKitRoom: () => fake.room(), canChooseOutput: () => true }));
 
 import { defaultTalkKey } from './keys';
 import { useVoice } from './useVoice';
 
-const presence = (people: number[]): VoicePresenceV1 => ({
-  schema: 'conch.voice_presence.v1',
+const presence = (people: number[]): VoicePresenceV2 => ({
+  schema: 'conch.voice_presence.v2',
   channel_id: 1,
   configured: true,
   available: true,

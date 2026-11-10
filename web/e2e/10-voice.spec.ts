@@ -973,7 +973,7 @@ test('a push-to-talk whose reports are slow is audited as the reported pair and 
         await expect(voice).toContainText('Connected in #voice-room');
         await expect(voice).not.toContainText('Reconnecting');
         await expect(back).toHaveCount(0);
-        await expect(voice.getByRole('list', { name: 'In voice' })).toContainText('You');
+        await expect(voice.getByRole('list', { name: 'In voice' })).toContainText(a.member.name);
         expect(sessions, `${size}: no new voice session`).toBe(1);
         await expectFits(a.page, `${size}: the strip after going back`);
 
@@ -1068,13 +1068,17 @@ test('a push-to-talk whose reports are slow is audited as the reported pair and 
       await channelButton(a.page, other).click();
       await expect(conversation(a.page).getByRole('heading', { name: other })).toBeVisible();
       const roster = alice.getByRole('list', { name: 'In voice' });
-      await expect(roster).toContainText('You');
+      await expect(roster).toContainText(a.member.name);
       await expect(roster).toContainText('bob');
       await expect(roster).not.toContainText(/Member \d+/);
 
-      // bob's share is announced by his name.
+      // bob's share is announced by his name: his stream's tile on alice's
+      // stage (voice-multi-share.md §7.1: every live stream is a tile, and
+      // the in-voice "is sharing a screen" line went with the one-share rule).
       await bob.getByRole('button', { name: 'Share screen' }).click();
-      await expect(alice).toContainText('bob is sharing a screen', { timeout: 15_000 });
+      const tile = a.page.locator('.call-share').filter({ hasText: 'bob · LIVE' });
+      await expect(tile).toBeVisible({ timeout: 15_000 });
+      await expect(tile).not.toContainText(/Member \d+/);
       await expect(alice).not.toContainText(/Member \d+/);
       await bob.getByRole('button', { name: 'Stop sharing' }).click();
 
@@ -1192,8 +1196,8 @@ test('a push-to-talk whose reports are slow is audited as the reported pair and 
         await expect(named(r.page).getByRole('listitem')).toHaveText([kim.name], { timeout: 3000 });
         await expect(nav(r.page).getByRole('list', { name: /^In voice in/ })).toHaveCount(1);
       }
-      // kim sees herself as You.
-      await expect(named(k.page).getByRole('listitem')).toHaveText(['You'], { timeout: 3000 });
+      // kim sees herself by her own name.
+      await expect(named(k.page).getByRole('listitem')).toHaveText([kim.name], { timeout: 3000 });
 
       // max opens it from the strip: the channel opens, and voice does not.
       await voiceRegion(max.page).getByRole('button', { name: `Open #${room}`, exact: true }).click();
@@ -1370,8 +1374,8 @@ test('a push-to-talk whose reports are slow is audited as the reported pair and 
   });
 
   // Issue #591 (F24): one person's credential open on two pages, one of them
-  // in voice. The other names them "You (on another device)" and says that
-  // joining there moves their voice; the one in voice names them "You", and
+  // in voice. The other names them "cy (on another device)" and says that
+  // joining there moves their voice; the one in voice names them "cy", and
   // never says "another device" of its own place, while it is in voice or
   // after it leaves. A member of their own, made through the API: the
   // others are in other tests' rooms.
@@ -1402,8 +1406,8 @@ test('a push-to-talk whose reports are slow is audited as the reported pair and 
 
       await here.getByRole('button', { name: 'Join voice' }).click();
       await expect(here).toContainText('Connected in #voice-room', { timeout: 30_000 });
-      await expect(here.getByRole('list', { name: 'In voice' }).getByText('You', { exact: true })).toBeVisible();
-      await expect(there.getByRole('list', { name: 'In voice' }).getByText('You (on another device)', { exact: true })).toBeVisible();
+      await expect(here.getByRole('list', { name: 'In voice' }).getByText(cy.name, { exact: true })).toBeVisible();
+      await expect(there.getByRole('list', { name: 'In voice' }).getByText(`${cy.name} (on another device)`, { exact: true })).toBeVisible();
       await expect(there).toContainText(said);
       await expect(there).toContainText('Not in voice');
       // Nothing stops the join there.

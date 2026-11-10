@@ -1,0 +1,14 @@
+# Lets the Conch desktop app create the user namespace Chromium's sandbox
+# needs, on systems that restrict unprivileged user namespaces by default
+# (Ubuntu 23.10 and later, and what is built on it). The app stays sandboxed:
+# this profile is not confinement, it only grants `userns` to the one
+# executable, which is the alternative to a setuid chrome-sandbox. It is
+# unconfined otherwise. Local additions go in /etc/apparmor.d/local/conch-desktop.
+abi <abi/4.0>,
+include <tunables/global>
+
+profile conch-desktop /opt/conch-desktop/conch-desktop flags=(unconfined) {
+  userns,
+
+  include if exists <local/conch-desktop>
+}

@@ -1,0 +1,9 @@
+{
+  "principal_id": 3,
+  "started_at": "2026-11-07T12:00:04.125Z",
+  "audio": true,
+  "quality": {
+    "resolution": "720p",
+    "frame_rate": 30
+  }
+}

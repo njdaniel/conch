@@ -330,8 +330,8 @@ describe('the community member panel', () => {
     expect(within(items[0] as HTMLElement).getByText('Operator')).toBeDefined();
     expect(within(items[1] as HTMLElement).getByText('You')).toBeDefined();
     expect(within(items[1] as HTMLElement).queryByText('Operator')).toBeNull();
-    // A plain member's role is shown too.
-    expect(within(items[1] as HTMLElement).getByText('Member')).toBeDefined();
+    // Member is the absence of a standing mark, not another badge.
+    expect(within(items[1] as HTMLElement).queryByText('Member')).toBeNull();
     // The section is named by its heading; the list is its own, "People".
     expect(screen.getByRole('region', { name: 'Community members' })).toBeDefined();
     expect(screen.queryByRole('list', { name: 'Community members' })).toBeNull();
@@ -347,7 +347,7 @@ describe('the community member panel', () => {
     panel();
     const list = await screen.findByRole('list', { name: 'People' });
     const [first, second] = within(list).getAllByRole('listitem');
-    expect(first?.textContent).toBe('adaOperator');
+    expect(first?.textContent).toBe('ada [Operator]');
     expect(second?.textContent).toContain('voice off');
     expect(second?.textContent).toContain('can invite');
     expect(second?.textContent).toContain('invited by ada');

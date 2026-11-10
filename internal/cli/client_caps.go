@@ -144,6 +144,7 @@ type (
 	hooksDoc  struct{ schema.ListHooksResponseV1 }
 
 	channelListDoc struct{ schema.ListChannelsResponse }
+	previewDoc     struct{ schema.PreviewResponseV1 }
 	readStateDoc   struct{ schema.ListReadStateResponseV1 }
 	credentialsDoc struct {
 		schema.ListCredentialsResponseV1
@@ -205,6 +206,7 @@ func (guestsDoc) maxBody() int64           { return maxGuestsBody }
 func (hooksDoc) maxBody() int64            { return maxHooksBody }
 
 func (channelListDoc) maxBody() int64    { return maxChannelListBody }
+func (previewDoc) maxBody() int64        { return listSlack }
 func (readStateDoc) maxBody() int64      { return maxReadStateBody }
 func (credentialsDoc) maxBody() int64    { return maxCredentialsBody }
 func (deviceLinksDoc) maxBody() int64    { return maxDeviceLinksBody }

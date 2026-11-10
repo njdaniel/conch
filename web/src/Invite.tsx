@@ -5,10 +5,15 @@
 // for now (issue #1005), so the page offers an account when the server's
 // preview says the link allows it, and nothing else: it never routes to the
 // guest flow. The code is a prop held in memory by App, sent only in request
-// bodies, and never rendered: nothing on this page shows it.
+// bodies, and never rendered: nothing on this page shows it. The one other
+// place it goes is the conch:// link of the "Open in the desktop app" button
+// (issue #1592), made at the click and handed to the platform; it is not in
+// the page, and the page never navigates there by itself.
 import { useEffect, useRef, useState } from 'react';
 import * as api from './api';
 import { CreateAccount, type AccountProblem } from './CreateAccount';
+import { platform } from './platform';
+import { desktopInviteLink } from './route';
 import type { InvitePreviewV2 } from './schema/invite';
 import type { WhoAmIResponseV1 } from './schema/principal';
 import { isNameMessage, nameRefusalLine } from './nameRefusal';
@@ -195,6 +200,14 @@ export function Invite({
   const insecure = needsHttps(origin);
   const way = offer === null || insecure ? null : offer.account ? 'account' : null;
 
+  // Only where the platform can hand a conch:// link to an installed app: the
+  // browser. The desktop app is the app, and has no such button.
+  const canOpenDesktop = platform.services.openDesktopApp !== undefined;
+
+  function openInDesktop() {
+    platform.services.openDesktopApp?.(desktopInviteLink(origin, inviteCode));
+  }
+
   function newPerson() {
     if (busy) return;
     setBusy(true);
@@ -379,6 +392,15 @@ export function Invite({
               </p>
             </>
           )}
+          {canOpenDesktop ? (
+            <p className="hint desktop-open">
+              Have the Conch desktop app?{' '}
+              <button type="button" className="link" onClick={openInDesktop}>
+                Open in the desktop app
+              </button>
+              . If nothing happens, it is not installed here; carry on in this page.
+            </p>
+          ) : null}
         </>
       )}
       <ServerVersion className="hint" />

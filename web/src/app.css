@@ -1,7 +1,6 @@
 /* A stylesheet file, never inline styles: conchd serves the page with
-   style-src 'self'. One dark theme (issue #536, docs/design/browser-ui-polish.md);
-   every colour is a token below, and every text/background pair the page uses
-   is checked at 4.5:1 or more. */
+   style-src 'self'. Presets and accents change the shared tokens below;
+   appearance-contrast.test.ts checks every text/background pair. */
 :root {
   --bg: #111416;
   --surface: #171b1e;
@@ -19,6 +18,7 @@
   --danger-bg: #3a1c1c;
   --warn: #e8c06a;
   --focus: #8ec5ff;
+  --avatar-text: #ffffff;
   --hue-0: #4c6b57;
   --hue-1: #7a5846;
   --hue-2: #4a5f80;
@@ -37,7 +37,294 @@
   --s6: 2rem;
   --radius-sm: 6px;
   --radius: 10px;
+  --message-padding-top: 0.4rem;
+  --message-padding-bottom: 0.15rem;
+  --message-gap: var(--s3);
+  --message-action-space: var(--s1);
+  --message-reaction-space: 0.25rem;
   color-scheme: dark;
+}
+
+:root[data-theme='light'] {
+  --bg: #f5f7f6;
+  --surface: #ffffff;
+  --raised: #eef1ef;
+  --hover: #dde3df;
+  --border: #a8b2ac;
+  --border-strong: #52615a;
+  --text: #17211b;
+  --muted: #4e5b53;
+  --accent: #146c3a;
+  --accent-hover: #0e572e;
+  --accent-bg: #e4f3e9;
+  --on-accent: #ffffff;
+  --danger: #a4262c;
+  --danger-bg: #fdecea;
+  --warn: #705100;
+  --focus: #0958a8;
+  --shadow: 0 12px 32px rgb(0 0 0 / 0.18);
+  color-scheme: light;
+}
+
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme]) {
+    --bg: #f5f7f6;
+    --surface: #ffffff;
+    --raised: #eef1ef;
+    --hover: #dde3df;
+    --border: #a8b2ac;
+    --border-strong: #52615a;
+    --text: #17211b;
+    --muted: #4e5b53;
+    --accent: #146c3a;
+    --accent-hover: #0e572e;
+    --accent-bg: #e4f3e9;
+    --on-accent: #ffffff;
+    --danger: #a4262c;
+    --danger-bg: #fdecea;
+    --warn: #705100;
+    --focus: #0958a8;
+    --shadow: 0 12px 32px rgb(0 0 0 / 0.18);
+    color-scheme: light;
+  }
+}
+
+:root[data-theme='high-contrast'] {
+  --bg: #000000;
+  --surface: #000000;
+  --raised: #000000;
+  --hover: #222222;
+  --border: #ffffff;
+  --border-strong: #ffffff;
+  --text: #ffffff;
+  --muted: #e6e6e6;
+  --accent: #7ff0a7;
+  --accent-hover: #ffffff;
+  --accent-bg: #000000;
+  --on-accent: #000000;
+  --danger: #ffb3ab;
+  --danger-bg: #000000;
+  --warn: #ffe08a;
+  --focus: #ffffff;
+  --hue-0: #000000;
+  --hue-1: #000000;
+  --hue-2: #000000;
+  --hue-3: #000000;
+  --hue-4: #000000;
+  --hue-5: #000000;
+  --shadow: none;
+  color-scheme: dark;
+}
+
+:root[data-accent='green'] {
+  --accent: #6fd69b;
+  --accent-hover: #8ee3b1;
+  --accent-bg: #183324;
+  --on-accent: #0d1912;
+}
+
+:root[data-accent='blue'] {
+  --accent: #8ec5ff;
+  --accent-hover: #b1d7ff;
+  --accent-bg: #172b3d;
+  --on-accent: #0b1826;
+}
+
+:root[data-accent='violet'] {
+  --accent: #c4b5fd;
+  --accent-hover: #d8ccff;
+  --accent-bg: #2c2444;
+  --on-accent: #1c1333;
+}
+
+:root[data-accent='pink'] {
+  --accent: #f0a6c0;
+  --accent-hover: #ffc2d5;
+  --accent-bg: #3b202b;
+  --on-accent: #2b121c;
+}
+
+:root[data-accent='orange'] {
+  --accent: #f2b36d;
+  --accent-hover: #ffca8f;
+  --accent-bg: #3b2918;
+  --on-accent: #2b1a0b;
+}
+
+:root[data-accent='cyan'] {
+  --accent: #76d7e5;
+  --accent-hover: #9aebf5;
+  --accent-bg: #15333a;
+  --on-accent: #092027;
+}
+
+:root[data-theme='light'][data-accent='green'] {
+  --accent: #146c3a;
+  --accent-hover: #0e572e;
+  --accent-bg: #e4f3e9;
+  --on-accent: #ffffff;
+}
+
+:root[data-theme='light'][data-accent='blue'] {
+  --accent: #064f9f;
+  --accent-hover: #0550ae;
+  --accent-bg: #e7f0fc;
+  --on-accent: #ffffff;
+}
+
+:root[data-theme='light'][data-accent='violet'] {
+  --accent: #6f42c1;
+  --accent-hover: #59359a;
+  --accent-bg: #f0eafb;
+  --on-accent: #ffffff;
+}
+
+:root[data-theme='light'][data-accent='pink'] {
+  --accent: #a61e4d;
+  --accent-hover: #851740;
+  --accent-bg: #fbe9f0;
+  --on-accent: #ffffff;
+}
+
+:root[data-theme='light'][data-accent='orange'] {
+  --accent: #934b00;
+  --accent-hover: #753b00;
+  --accent-bg: #fff0df;
+  --on-accent: #ffffff;
+}
+
+:root[data-theme='light'][data-accent='cyan'] {
+  --accent: #066577;
+  --accent-hover: #065e6e;
+  --accent-bg: #e2f5f7;
+  --on-accent: #ffffff;
+}
+
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme])[data-accent='green'] {
+    --accent: #146c3a;
+    --accent-hover: #0e572e;
+    --accent-bg: #e4f3e9;
+    --on-accent: #ffffff;
+  }
+
+  :root:not([data-theme])[data-accent='blue'] {
+    --accent: #064f9f;
+    --accent-hover: #0550ae;
+    --accent-bg: #e7f0fc;
+    --on-accent: #ffffff;
+  }
+
+  :root:not([data-theme])[data-accent='violet'] {
+    --accent: #6f42c1;
+    --accent-hover: #59359a;
+    --accent-bg: #f0eafb;
+    --on-accent: #ffffff;
+  }
+
+  :root:not([data-theme])[data-accent='pink'] {
+    --accent: #a61e4d;
+    --accent-hover: #851740;
+    --accent-bg: #fbe9f0;
+    --on-accent: #ffffff;
+  }
+
+  :root:not([data-theme])[data-accent='orange'] {
+    --accent: #934b00;
+    --accent-hover: #753b00;
+    --accent-bg: #fff0df;
+    --on-accent: #ffffff;
+  }
+
+  :root:not([data-theme])[data-accent='cyan'] {
+    --accent: #066577;
+    --accent-hover: #065e6e;
+    --accent-bg: #e2f5f7;
+    --on-accent: #ffffff;
+  }
+}
+
+:root[data-theme='high-contrast'][data-accent='green'] {
+  --accent: #7ff0a7;
+  --accent-hover: #ffffff;
+  --accent-bg: #000000;
+  --on-accent: #000000;
+}
+
+:root[data-theme='high-contrast'][data-accent='blue'] {
+  --accent: #a8d8ff;
+  --accent-hover: #ffffff;
+  --accent-bg: #000000;
+  --on-accent: #000000;
+}
+
+:root[data-theme='high-contrast'][data-accent='violet'] {
+  --accent: #d8c8ff;
+  --accent-hover: #ffffff;
+  --accent-bg: #000000;
+  --on-accent: #000000;
+}
+
+:root[data-theme='high-contrast'][data-accent='pink'] {
+  --accent: #ffc0d5;
+  --accent-hover: #ffffff;
+  --accent-bg: #000000;
+  --on-accent: #000000;
+}
+
+:root[data-theme='high-contrast'][data-accent='orange'] {
+  --accent: #ffd19a;
+  --accent-hover: #ffffff;
+  --accent-bg: #000000;
+  --on-accent: #000000;
+}
+
+:root[data-theme='high-contrast'][data-accent='cyan'] {
+  --accent: #9af2ff;
+  --accent-hover: #ffffff;
+  --accent-bg: #000000;
+  --on-accent: #000000;
+}
+
+:root[data-density='compact'] {
+  --message-padding-top: 0.15rem;
+  --message-padding-bottom: 0.05rem;
+  --message-gap: var(--s2);
+  --message-action-space: 0;
+  --message-reaction-space: 0.1rem;
+}
+
+@media (forced-colors: active) {
+  :root,
+  :root[data-theme],
+  :root[data-accent],
+  :root[data-theme][data-accent] {
+    --bg: Canvas;
+    --surface: Canvas;
+    --raised: Canvas;
+    --hover: Highlight;
+    --border: CanvasText;
+    --border-strong: CanvasText;
+    --text: CanvasText;
+    --muted: CanvasText;
+    --accent: Highlight;
+    --accent-hover: Highlight;
+    --accent-bg: Canvas;
+    --on-accent: HighlightText;
+    --danger: CanvasText;
+    --danger-bg: Canvas;
+    --warn: CanvasText;
+    --focus: Highlight;
+    --avatar-text: CanvasText;
+    --hue-0: Canvas;
+    --hue-1: Canvas;
+    --hue-2: Canvas;
+    --hue-3: Canvas;
+    --hue-4: Canvas;
+    --hue-5: Canvas;
+    --shadow: none;
+    color-scheme: light dark;
+  }
 }
 
 body {
@@ -229,7 +516,7 @@ label {
   width: 2.25rem;
   height: 2.25rem;
   border-radius: 50%;
-  color: #ffffff;
+  color: var(--avatar-text);
   font-size: 0.95rem;
   font-weight: 600;
   line-height: 1;
@@ -267,9 +554,10 @@ label {
 .chip,
 .tag,
 .audience,
-.kind,
 .ag-badge,
-.channel-list .unread {
+.channel-badge,
+.channel-list .unread,
+.switcher .unread {
   display: inline-block;
   padding: 0 0.5rem;
   border-radius: 999px;
@@ -325,8 +613,8 @@ label {
      wider wraps or shrinks rather than widening the page (issue #467). */
   grid-template-columns: minmax(0, 1fr);
   grid-template-rows: auto minmax(0, 1fr) auto;
-  height: 100vh;
-  height: 100dvh;
+  height: calc(100vh - var(--notice-h, 0px));
+  height: calc(100dvh - var(--notice-h, 0px));
   /* viewport-fit=cover draws the page under a notch and the home indicator:
      pad for them at every width (zero where there are none, issue #929). */
   padding-inline: env(safe-area-inset-left) env(safe-area-inset-right);
@@ -803,6 +1091,24 @@ label {
   border-radius: var(--radius-sm);
   background: var(--danger-bg);
   color: var(--danger);
+}
+
+.banner.update-notice {
+  /* The notice sits above the lobby; UpdateNotice measures it into
+     --notice-h and the lobby gives up that much height, so the page never
+     grows past the window. */
+  margin: 0;
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  background: transparent;
+  border: 1px solid var(--warn);
+  color: var(--warn);
+}
+
+.banner.update-notice p {
+  margin: 0;
 }
 
 .banner.stale {
@@ -1322,8 +1628,8 @@ label {
 .message {
   display: grid;
   grid-template-columns: 2.25rem minmax(0, 1fr);
-  column-gap: var(--s3);
-  padding: 0.4rem var(--s2) 0.15rem;
+  column-gap: var(--message-gap);
+  padding: var(--message-padding-top) var(--s2) var(--message-padding-bottom);
   border-radius: var(--radius-sm);
 }
 
@@ -1369,7 +1675,7 @@ label {
 }
 
 /* The header in the text is "badge time name [agent]:"; on screen it reads
-   name, agent, time, audience. */
+   name, identity marks, time, audience. */
 .msg-head {
   display: flex;
   flex-wrap: wrap;
@@ -1384,10 +1690,8 @@ label {
   overflow-wrap: anywhere;
 }
 
-.msg-head .kind {
+.msg-head .identity-mark {
   order: 2;
-  background: var(--accent-bg);
-  color: var(--accent);
 }
 
 .msg-head time {
@@ -1408,6 +1712,32 @@ label {
   display: block;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+}
+
+.external-link {
+  overflow-wrap: anywhere;
+}
+
+.external-link-tail {
+  white-space: nowrap;
+}
+
+.external-link-cue {
+  display: inline-block;
+  margin-left: 0.15em;
+  color: var(--accent);
+  vertical-align: -0.1em;
+}
+
+.external-link-cue .icon {
+  display: block;
+  width: 0.8em;
+  height: 0.8em;
+}
+
+.body a:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
 }
 
 .attachments {
@@ -1524,7 +1854,7 @@ label {
 .msg-actions {
   display: flex;
   gap: var(--s2);
-  margin: var(--s1) 0;
+  margin: var(--message-action-space) 0;
 }
 
 /* A message's actions menu (issue #845, docs/design/message-editing.md §13):
@@ -1865,6 +2195,147 @@ label {
 }
 
 .composer-box {
+  position: relative;
+}
+
+/* The toolbar sits in the box's row, after the text: no extra height. */
+.composer-formatting {
+  display: flex;
+  flex: none;
+  gap: 2px;
+  align-self: flex-end;
+}
+
+.composer-formatting button {
+  min-width: 1.75rem;
+  min-height: 1.75rem;
+  padding: 0 0.3rem;
+  font-size: var(--small);
+}
+
+.format-toggle {
+  display: none;
+  min-width: 1.75rem;
+  min-height: 1.75rem;
+  padding: 0 0.3rem;
+}
+
+/* Where the row is too narrow to hold the toolbar beside the text (a phone, a
+   tablet, a window at 200%: it would squeeze the textarea to nothing), it is
+   one small button and the toolbar opens above the box on demand, over the
+   log, and takes no room while closed. */
+@media (max-width: 1199px) {
+  .format-toggle {
+    display: inline-flex;
+    align-items: center;
+  }
+
+  .composer-formatting {
+    display: none;
+  }
+
+  .composer-formatting.open {
+    display: flex;
+    position: absolute;
+    bottom: calc(100% + var(--s1));
+    left: 0;
+    padding: var(--s1);
+    background: var(--raised);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius);
+  }
+}
+
+.composer-formatting code {
+  font-size: var(--small);
+}
+
+.spoiler > button {
+  display: inline;
+  min-width: 0;
+  min-height: 0;
+  padding: 0.1rem 0.35rem;
+  font-size: 0.85em;
+}
+
+.spoiler:not(.revealed) > button {
+  color: var(--muted);
+  background: var(--hover);
+}
+
+.spoiler-content {
+  margin-left: 0.25rem;
+  background: var(--raised);
+}
+
+/* A spoiler attachment (issue #1500): a card of text and a Reveal button that
+   is a full-size control, not the small inline one of a text spoiler. */
+.attachment-spoiler {
+  padding: var(--s2) var(--s3);
+  background: var(--raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+
+.attachment .spoiler {
+  display: grid;
+  justify-items: start;
+  gap: var(--s1);
+}
+
+.attachment .spoiler > button {
+  display: inline-flex;
+  min-width: 2.75rem;
+  min-height: 2.75rem;
+  padding: 0.35rem 0.75rem;
+  font-size: 0.875rem;
+  color: inherit;
+  background: var(--hover);
+}
+
+.attachment .spoiler-content {
+  display: grid;
+  justify-items: start;
+  gap: var(--s1);
+  margin-left: 0;
+  background: transparent;
+}
+
+.attachment .spoiler > button:focus-visible {
+  outline: 2px solid var(--accent, currentColor);
+  outline-offset: 2px;
+}
+
+.draft-spoiler[aria-pressed='true'] {
+  background: var(--hover);
+  font-weight: 600;
+}
+
+.message .body pre,
+.message .body blockquote,
+.version-body pre,
+.version-body blockquote {
+  margin: 0.35rem 0;
+}
+
+.message .body pre,
+.version-body pre {
+  padding: var(--s2);
+  overflow-x: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+
+.message .body blockquote,
+.version-body blockquote {
+  padding-left: var(--s3);
+  border-left: 3px solid var(--border-strong);
+}
+
+.composer-box {
   display: flex;
   align-items: flex-end;
   gap: var(--s2);
@@ -1970,7 +2441,7 @@ label {
 
 .emoji-cell:hover,
 .emoji-cell:focus-visible {
-  background: var(--border);
+  background: var(--hover);
 }
 
 .emoji-suggestions {
@@ -1989,7 +2460,7 @@ label {
 }
 
 .emoji-suggestions li[aria-selected='true'] {
-  background: var(--border);
+  background: var(--hover);
 }
 
 /* ---------------------------------------------------------------- members */
@@ -2013,11 +2484,19 @@ label {
   font-weight: 600;
 }
 
-.ag-person {
+.ag-person,
+.ag-agent {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: 0 var(--s2);
+}
+
+.ag-agent > .avatar {
+  flex: none;
+  width: 1.75rem;
+  height: 1.75rem;
+  font-size: 0.8rem;
 }
 
 .ag-person .avatar {
@@ -2028,6 +2507,123 @@ label {
 
 .ag-name {
   font-weight: 600;
+}
+
+/* A name opens a read-only card (issue #1544). The card stays out of the row's
+   layout; on desktop it fits the members panel, and on a phone the card and its
+   Close control fit the screen. */
+.profile-card-disclosure {
+  position: relative;
+  display: inline-block;
+  min-width: 0;
+}
+
+.profile-card-name {
+  min-height: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-weight: 600;
+  text-align: left;
+  overflow-wrap: anywhere;
+}
+
+.profile-card-name:focus-visible,
+.profile-card-close:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+.profile-card {
+  position: absolute;
+  top: calc(100% + var(--s1));
+  left: 0;
+  z-index: 30;
+  display: grid;
+  gap: var(--s2);
+  box-sizing: border-box;
+  width: 18rem;
+  max-width: calc(100vw - var(--s4));
+  padding: var(--s3);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  background: var(--raised);
+  color: var(--text);
+  box-shadow: var(--shadow);
+}
+
+.profile-card-person {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  min-width: 0;
+}
+
+.profile-card-person > div {
+  display: grid;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.profile-card-kind,
+.profile-card-presence {
+  color: var(--muted);
+}
+
+.profile-card-presence {
+  margin: 0;
+}
+
+.profile-card-marks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s1);
+}
+
+.profile-card-marks:empty {
+  display: none;
+}
+
+.profile-card-close {
+  justify-self: end;
+}
+
+@media (min-width: 700px) {
+  .ag-panel .member-row {
+    position: relative;
+  }
+
+  .ag-panel .profile-card-disclosure {
+    position: static;
+  }
+
+  .ag-panel .profile-card {
+    right: 0;
+    left: auto;
+    max-width: 100%;
+  }
+}
+
+@media (max-width: 699px) {
+  .profile-card {
+    position: fixed;
+    top: auto;
+    left: var(--s2);
+    right: var(--s2);
+    bottom: var(--s2);
+    width: auto;
+    max-width: none;
+    max-height: calc(100dvh - var(--s4));
+    overflow-y: auto;
+  }
+
+  .profile-card-name,
+  .profile-card-close {
+    min-width: 2.75rem;
+    min-height: 2.75rem;
+  }
 }
 
 /* The state is a word; the dot before it only repeats it. */
@@ -2114,9 +2710,24 @@ label {
   font-size: 0.75rem;
 }
 
-.ag-badge {
+.ag-badge,
+.channel-badge {
+  padding: 0 0.4rem;
   background: var(--accent-bg);
+  border: 1px solid var(--accent);
+  border-radius: 0.35rem;
   color: var(--accent);
+}
+
+.identity-label {
+  text-transform: capitalize;
+}
+
+/* The mark holds its own screen-reader brackets (.vh is absolute): without a
+   positioned mark they would sit against the page, outside a scrolling
+   panel's clip, and lengthen the document. */
+.identity-mark {
+  position: relative;
 }
 
 .ag-status,
@@ -2364,6 +2975,7 @@ label {
 .voice-roster li {
   display: flex;
   flex: none;
+  flex-wrap: wrap;
   max-width: 100%;
   min-width: 0;
   align-items: center;
@@ -2570,6 +3182,12 @@ label {
   grid-template-rows: minmax(0, auto) minmax(min-content, 1fr);
 }
 
+/* Compact is a docked row, not an overlay: its content determines the first
+   track and the conversation takes everything left (issue #1498). */
+.centre:has(> .stage:not(:empty):has(.compact)) {
+  grid-template-rows: minmax(0, auto) minmax(0, 1fr);
+}
+
 .stage:empty {
   display: none;
 }
@@ -2612,6 +3230,11 @@ label {
   overflow-wrap: anywhere;
 }
 
+.share-readout {
+  font-size: var(--small);
+  font-weight: 400;
+}
+
 .share-frame {
   position: relative;
   min-height: 0;
@@ -2651,8 +3274,9 @@ label {
 /* The call view (ADR-015, design §7.4, §7.7): on the stage, under its height
    rule, with a watched share inside it when both are open. Its title and
    controls keep their height, and stay in view while the pictures scroll
-   under them. Tiles keep 16:9, and a picture is contained, never cropped.
-   The grid's columns and rows are gridOf's, as classes. */
+   under them. Camera tiles keep 16:9 and camera-off tiles are compact; a
+   picture is contained, never cropped. The grid's columns and rows are
+   gridOf's, as classes. */
 .call-view {
   display: flex;
   flex: 0 1 auto;
@@ -2708,8 +3332,12 @@ label {
 }
 
 .call-state {
+  min-width: 0;
   color: var(--muted);
   font-weight: 400;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .call-title {
@@ -2723,6 +3351,66 @@ label {
   display: flex;
   flex-wrap: wrap;
   gap: var(--s2);
+}
+
+/* The call's channel, sharers and speakers are words in both layouts, not
+   colour alone (issue #1498). They share the title's line rather than adding
+   a row, and give way with an ellipsis: the context's title attribute holds
+   all its words, and a screen reader reads them all. A row more would push
+   the strip's tiles down (below), and take a phone's log room (#1028). */
+.call-heading {
+  display: flex;
+  align-items: center;
+  gap: 0 var(--s3);
+  min-width: 0;
+  max-width: 100%;
+}
+
+.call-context {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: var(--small);
+  font-weight: 400;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.call-context > * + * {
+  margin-inline-start: var(--s2);
+}
+
+.call-channel button {
+  padding: 0 var(--s2);
+  vertical-align: middle;
+}
+
+/* Wide enough, the head is one row: the controls keep their size and the
+   title and the context give way, cut short (their full words are in their
+   title attributes). A taller head would push the strip's tiles below the
+   view's fold, where adaptive stream stops sending them. */
+@media (min-width: 720px) {
+  .call-head {
+    flex-wrap: nowrap;
+  }
+
+  .call-heading {
+    flex: 0 1 auto;
+  }
+
+  .call-title {
+    flex: 0 1 auto;
+    min-width: 6rem;
+    overflow: hidden;
+    white-space: nowrap;
+  }
+
+  .call-controls {
+    flex: 0 0 auto;
+    max-width: 100%;
+    justify-content: flex-end;
+  }
 }
 
 .call-grid {
@@ -2811,8 +3499,165 @@ label {
   border: 0;
 }
 
-/* In the strip its controls are still all there, their names only read out
-   beside an icon. */
+/* A compact call is one fixed-height, docked strip. Its tiles share that row
+   and scroll sideways rather than taking another row from the conversation;
+   the same players and list items stay in place (issue #1498). Supplemental
+   roster and note rows yield their dock space too; the strip's VoiceState
+   chips, controls, errors and lifecycle notices remain, and the supplemental
+   notes return when the stage closes. */
+.stage:has(> .call-view.compact, > .call-stage.compact) {
+  padding-top: 0;
+}
+
+.call-view.compact {
+  flex: none;
+  gap: 0;
+  padding-bottom: 0;
+  border: 0;
+}
+
+body:has(.call-view.compact, .call-stage.compact) .voice-who,
+body:has(.call-view.compact, .call-stage.compact) .voice-notes > .voice-supplemental,
+body:has(.call-view.compact, .call-stage.compact) .voice-notes:not(:has(> :not(.voice-supplemental))) {
+  display: none;
+}
+
+body:has(.call-view.compact, .call-stage.compact) .dock {
+  padding-top: var(--s1);
+}
+
+.call-view.compact .call-head,
+.call-stage.compact .call-head {
+  padding-top: 0;
+}
+
+/* The compact header has the context and the voice status, not the title.
+   On a phone it wraps, so all its words are on screen: under Chat it is
+   where the status is, and on a 390 px phone the channel, "Sharing: …" and
+   the status would otherwise run off it (#1498). Its own row costs a phone
+   nothing it had: the expanded stage there is taller. */
+.call-view.compact .call-heading,
+.call-stage.compact .call-heading {
+  flex-wrap: wrap;
+  gap: 0 var(--s2);
+}
+
+.call-view.compact .call-context,
+.call-stage.compact .call-context {
+  white-space: normal;
+}
+
+.call-view.compact .call-title,
+.call-stage.compact .call-title {
+  display: none;
+}
+
+.call-stage.compact .call-head p {
+  margin: 0;
+}
+
+.call-view.compact .call-grid {
+  display: flex;
+  overflow-x: auto;
+}
+
+.call-view.compact .call-grid > li {
+  flex: 0 0 10rem;
+}
+
+.call-view.compact .call-grid > li.main {
+  flex-basis: min(24rem, 100%);
+}
+
+.call-view.compact .call-grid > li.call-share {
+  flex-basis: 32rem;
+}
+
+.call-view.compact .call-frame,
+.compact .share-frame {
+  height: 2.75rem;
+  max-height: 2.75rem;
+}
+
+.compact .share-view {
+  display: grid;
+  flex: none;
+  grid-template-columns: minmax(8rem, 10rem) minmax(0, 1fr);
+  grid-template-rows: auto;
+  align-items: center;
+}
+
+.compact .share-title,
+.call-view.compact .call-tile-controls {
+  display: none;
+}
+
+.compact .share-frame video,
+.call-view.compact .call-grid.focus > .main .share-frame video {
+  height: 100%;
+  max-height: 2.75rem;
+}
+
+.compact .share-controls {
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  padding-top: 0;
+}
+
+.call-view.compact .voice-sub,
+.call-stage.compact .voice-sub {
+  display: flex;
+  flex-wrap: wrap;
+  min-width: 0;
+  font-size: var(--small);
+}
+
+/* Wide enough, compact is one row of 44 px: the header beside the tiles, its
+   context and status one line each, cut short (their title attributes hold
+   their words, and the voice strip below says the status in full). A second
+   row would take its height from the conversation. */
+@media (min-width: 720px) {
+  .call-view.compact {
+    flex-direction: row;
+    align-items: center;
+    gap: var(--s2);
+  }
+
+  .call-view.compact > .call-head {
+    flex: 0 1 auto;
+    max-width: 50%;
+    min-width: 0;
+  }
+
+  .call-view.compact > .call-grid {
+    flex: 1 1 0;
+    min-width: 0;
+  }
+
+  .call-view.compact .call-heading {
+    flex-wrap: nowrap;
+    min-width: 0;
+  }
+
+  .call-view.compact .call-context,
+  .call-view.compact .voice-sub {
+    display: block;
+    flex: 0 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+}
+
+.call-stage.compact button,
+.call-stage.compact input {
+  min-width: 2.75rem;
+  min-height: 2.75rem;
+}
+
+/* In the expanded strip its controls are still all there, their names only
+   read out beside an icon; compact keeps the smaller set from ShareView. */
 .call-share.in-strip .share-controls .label {
   position: absolute;
   width: 1px;
@@ -2834,6 +3679,12 @@ label {
   background: #000000;
   border-radius: var(--radius-sm);
   overflow: hidden;
+}
+
+.call-frame.off {
+  height: 6rem;
+  max-height: 6rem;
+  aspect-ratio: auto;
 }
 
 .call-frame video {
@@ -3444,6 +4295,12 @@ button.link {
     min-height: 7.5rem;
   }
 
+  /* A focused stream shares the phone with the conversation, not the other
+     way round: the picture gives way before the log and composer. */
+  .centre:has(> .stage:not(:empty)) .share-frame video {
+    max-height: 18vh;
+  }
+
   /* With four or more in voice (the roster capped), the picture gives way so
      that the log keeps 120 px (issue #641): a fifth of the window's height,
      which a 16:9 share of a phone's width is taller than. With fewer in
@@ -3508,8 +4365,8 @@ button.link {
 @media (max-width: 699px) {
   .lobby.phone {
     position: relative;
-    height: 100vh;
-    height: var(--app-height, 100dvh);
+    height: calc(100vh - var(--notice-h, 0px));
+    height: calc(var(--app-height, 100dvh) - var(--notice-h, 0px));
     grid-template-rows: auto minmax(0, 1fr) auto auto;
     box-sizing: border-box;
     /* The hidden conversation is laid out behind the Voice view at the
@@ -3887,8 +4744,8 @@ button.link {
 @media (max-width: 699px) and (max-height: 560px) {
   .lobby.phone {
     height: auto;
-    min-height: 100vh;
-    min-height: var(--app-height, 100dvh);
+    min-height: calc(100vh - var(--notice-h, 0px));
+    min-height: calc(var(--app-height, 100dvh) - var(--notice-h, 0px));
   }
 
   .lobby.phone .phone-nav {
@@ -3936,10 +4793,13 @@ button.link {
 }
 
 /* The call view's layout changes without animation for someone who asked for
-   less motion (§7.7): it has none of its own, and nothing may give it one. */
+   less motion (§7.7), compact included (issue #1498): it has none of its own,
+   and nothing may give it one. */
 @media (prefers-reduced-motion: reduce) {
   .call-view,
-  .call-view * {
+  .call-view *,
+  .call-stage,
+  .call-stage * {
     transition: none;
     animation: none;
   }
@@ -4078,6 +4938,25 @@ button.link {
 
 .desktop-bar button {
   margin-left: auto;
+}
+
+/* Two buttons in the strip: only the first takes the free space. */
+.desktop-bar .desktop-bar-settings + button {
+  margin-left: 0;
+}
+
+.desktop-settings {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+  padding: var(--s3);
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+}
+
+.desktop-settings-note {
+  color: var(--muted);
+  font-size: var(--small);
 }
 
 .desktop-servers {
@@ -4943,7 +5822,7 @@ button.link {
 .message-reaction-actions > button { min-width: 2.75rem; }
 .reaction-add { min-height: 2.75rem; padding: .35rem 0; border: 0; background: transparent; color: var(--accent); font-size: var(--small); white-space: nowrap; }
 /* Reactions stay visible for touch and keyboard; all layout obeys the CSP. */
-.reactions { grid-column: 2 / -1; display: flex; flex-wrap: wrap; align-items: center; gap: .35rem; margin-block: .25rem; min-width: 0; }
+.reactions { grid-column: 2 / -1; display: flex; flex-wrap: wrap; align-items: center; gap: .35rem; margin-block: var(--message-reaction-space); min-width: 0; }
 .reaction-pair { display: inline-flex; gap: .15rem; }
 .reactions button { min-height: 2.75rem; }
 .reaction-chip[aria-pressed="true"] { border: 2px solid currentColor; background: var(--raised); }
@@ -4953,3 +5832,281 @@ button.link {
 .reactions .emoji-picker, .reactor-page { flex-basis: 100%; max-width: 100%; min-width: 0; }
 .reactor-page { border: 1px solid currentColor; border-radius: .5rem; padding: .5rem; overflow-wrap: anywhere; }
 .reactor-page ul { max-height: 16rem; overflow-y: auto; }
+
+/* Preview as member (issue #1517). The top bar and the band under it are one
+   grid row; without a band the wrapper draws nothing of its own. */
+.top-group {
+  display: contents;
+}
+
+.lobby.has-band .top-group {
+  display: block;
+}
+
+.preview-band {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s2);
+  padding: var(--s2) var(--s4);
+  background: var(--accent-bg);
+  border-bottom: 1px solid var(--accent);
+  color: var(--text);
+}
+
+.preview-band p {
+  margin: 0;
+  flex: 1 1 14rem;
+  overflow-wrap: anywhere;
+}
+
+.preview-band .problem {
+  flex-basis: 100%;
+}
+
+@media (max-width: 699px) {
+  .preview-band button {
+    min-height: 44px;
+    min-width: 44px;
+  }
+}
+
+.preview-placeholder {
+  margin: var(--s4);
+  padding: var(--s4);
+  border: 1px dashed var(--border);
+  border-radius: var(--radius);
+  color: var(--muted, var(--text));
+}
+
+.preview-conversation {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.preview-controls ul,
+.preview-people ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.preview-controls li {
+  margin: var(--s1) 0;
+  overflow-wrap: anywhere;
+}
+
+/* The quick channel switcher (issue #1492). */
+.channel-nav {
+  display: grid;
+  gap: var(--s1);
+  margin-bottom: var(--s3);
+}
+
+.channel-nav .find-channel {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  width: 100%;
+  min-height: 2.5rem;
+  text-align: left;
+}
+
+.channel-nav .find-channel span {
+  flex: 1;
+  min-width: 0;
+}
+
+.channel-nav kbd {
+  font-family: var(--mono);
+  font-size: var(--small);
+  color: var(--muted);
+}
+
+.channel-nav .nav-status {
+  margin: 0;
+  min-height: 0;
+}
+
+.channel-nav .nav-status:empty {
+  display: none;
+}
+
+.switcher-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
+  padding: 12vh var(--s4) var(--s4);
+  background: rgb(0 0 0 / 0.5);
+}
+
+.switcher {
+  display: grid;
+  gap: var(--s2);
+  width: min(32rem, 100%);
+  max-height: 70vh;
+  padding: var(--s3);
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  grid-template-rows: auto minmax(0, 1fr) auto;
+}
+
+.switcher input {
+  width: 100%;
+  min-height: 2.5rem;
+  box-sizing: border-box;
+}
+
+.switcher-list {
+  overflow-y: auto;
+  min-height: 0;
+}
+
+.switcher-list ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.switcher-list ul[aria-label='Join']::before {
+  content: 'Join';
+  display: block;
+  padding: var(--s2) var(--s2) var(--s1);
+  font-size: var(--small);
+  color: var(--muted);
+}
+
+.switcher-option {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  min-height: 2.5rem;
+  padding: 0 var(--s2);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+
+.switcher-option.active,
+.switcher-option:hover {
+  background: var(--hover);
+  outline: 2px solid transparent;
+}
+
+.switcher-option.active {
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+
+.switcher-option .switcher-name {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.switcher-help {
+  margin: 0;
+}
+
+/* Favorites, groups and their editor (issue #1493). */
+.channel-group-head {
+  margin: var(--s3) 0 var(--s1) var(--s2);
+  font-size: var(--small);
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.channel-group-head > button {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s1);
+  min-height: 2rem;
+  padding: 0 var(--s1);
+  background: transparent;
+  border: 0;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.channel-group-caret {
+  flex: none;
+  width: 1em;
+}
+
+.channel-group-name {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.channel-group > div > .hint {
+  margin: 0 0 0 var(--s3);
+}
+
+.edit-groups {
+  /* Contains its visually hidden status line (.vh is absolute), so that the
+     line scrolls with the channel list instead of landing below it and
+     lengthening the document when the list scrolls (issue #1493). */
+  position: relative;
+  display: grid;
+  gap: var(--s2);
+  margin-top: var(--s3);
+  justify-items: start;
+  min-width: 0;
+}
+
+.group-editor {
+  display: grid;
+  gap: var(--s2);
+  width: 100%;
+  min-width: 0;
+}
+
+.group-editor form,
+.group-editor li,
+.move-to-group {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: var(--s2);
+  min-width: 0;
+}
+
+.group-editor ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: var(--s2);
+}
+
+.group-editor li {
+  display: grid;
+}
+
+.group-editor input,
+.move-to-group select {
+  min-width: 0;
+  max-width: 100%;
+  min-height: 2.25rem;
+}
+
+/* The desktop strip's streams and share quality (issue #1582): others' stream
+   tiles under the strip, and the quality choice among the share notes. */
+.voice-streams {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s2);
+  margin-top: var(--s2);
+}
+
+.share-quality {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s2);
+}

@@ -2779,3 +2779,47 @@ async fn a_device_that_cannot_be_opened_is_logged_without_its_name() {
     assert!(!written.contains("_FAKE_name"), "{written}");
     assert!(!rig.events.text().contains("_FAKE_name"));
 }
+
+/// #1631: without `--no-mute-key` the mute key mutes, as the TUI relies on; with it, the
+/// key changes nothing, so a session the owner muted (the desktop's lock) stays muted. The
+/// deafen key struck after the mute key is the barrier: keys come off one pipe in order, so
+/// once it has been taken, the mute key before it has been taken too.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_mute_key_mutes_unless_the_owner_started_the_helper_with_no_mute_key() {
+    // As the TUI starts it: the key toggles the mute.
+    let mut rig = ManagedRig::start().await;
+    rig.send_start();
+    rig.ready().await;
+    rig.strike_mute();
+    rig.until("muted by the key", |rig| rig.state().unwrap().muted)
+        .await;
+    rig.close();
+    assert_eq!(rig.exit_code().await, 0);
+
+    // As the desktop starts it: muted by the owner, then the key is struck.
+    let setup = ManagedSetup {
+        no_mute_key: true,
+        ..ManagedSetup::default()
+    };
+    let mut rig = ManagedRig::start_with(Stub::start().await, setup, |_| {}).await;
+    rig.send_start();
+    rig.ready().await;
+    rig.send(&ManagedRig::command("set_mute", 2, json!({"muted": true})));
+    assert!(rig.ack(2).await.ok);
+    assert!(rig.state().unwrap().muted);
+    rig.strike_mute();
+    rig.strike_deafen();
+    rig.until("the deafen key taken", |rig| rig.state().unwrap().deafened)
+        .await;
+    assert!(
+        rig.state().unwrap().muted,
+        "the mute key unmuted the session"
+    );
+    assert_eq!(
+        rig.sdk.count(Call::Unmute),
+        0,
+        "the mute key unmuted the track"
+    );
+    rig.close();
+    assert_eq!(rig.exit_code().await, 0);
+}

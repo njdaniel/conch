@@ -13,6 +13,7 @@ import { App } from './App';
 import { AdminConsole } from './AdminConsole';
 import { CommunityMembers } from './Members';
 import { SettingsOpen } from './joiningSettings';
+import { AIAdminCard, ManifestReads, type ManifestReadControl } from './admin/AIAdminCard';
 import type { ChannelListingV1 } from './schema/channel';
 import type { Permission, PermissionsResponseV1 } from './schema/permission';
 import type { ServerMemberV1, WhoAmIResponseV1 } from './schema/principal';
@@ -241,8 +242,9 @@ describe('the list', () => {
     expect(row.textContent).toContain('voice on');
     expect(row.textContent).toContain('can invite');
     expect(row.textContent).toContain('invited by owner');
-    expect(within(rowOf(region, 'builder')).getByText('Agent')).toBeTruthy();
-    expect(within(rowOf(region, 'owner-2')).getByText('Owner')).toBeTruthy();
+    expect(within(rowOf(region, 'builder')).getByText('Agent').classList.contains('identity-label')).toBe(true);
+    expect(within(rowOf(region, 'owner-2')).getByText('Owner').classList.contains('identity-label')).toBe(true);
+    expect(Array.from(rowOf(region, 'owner').querySelectorAll('.identity-mark')).map((mark) => mark.getAttribute('data-identity'))).toEqual(['you', 'owner', 'operator']);
   });
 
   it('shows no operator field the server did not send, and offers no action, to an operator without manage_members', async () => {
@@ -259,6 +261,21 @@ describe('the list', () => {
     // manage_channels is still held: adding to a channel is all there is.
     const m = await menu(rowOf(region, 'member-1'), 'member-1');
     expect(labels(m)).toEqual(['Add to a channel…']);
+  });
+
+  it('shows no Owner when a plain-member payload omits owner, while keeping carried role and self marks', async () => {
+    const plain = stripped(everyone);
+    for (const member of plain) delete member.owner;
+    const viewer: WhoAmIResponseV1 = { ...owner, id: 3, name: 'member-1', role: 'member', owner: false, identity_class: 'member', permissions: ['see_member_directory'] };
+    serve(viewer, { members: () => plain });
+    window.sessionStorage.setItem(key, 'conch_member_session_token');
+    window.location.hash = '#/c/channel-a';
+    render(<App origin={origin} />);
+    const region = await screen.findByRole('region', { name: 'Members list' });
+    await within(region).findByRole('list', { name: 'People' });
+    expect(within(region).queryByText('Owner')).toBeNull();
+    expect(within(rowOf(region, 'operator-1')).getByText('Operator')).toBeTruthy();
+    expect(within(rowOf(region, 'member-1')).getByText('You')).toBeTruthy();
   });
 
   it('reads the directory for the console only while Settings is open', async () => {
@@ -294,6 +311,7 @@ describe('what each viewer is offered', () => {
     const region = await open();
     const m = await menu(rowOf(region, 'member-1'), 'member-1');
     expect(labels(m)).toEqual([
+      'Preview as member',
       'Turn voice off',
       'Stop member links',
       'Add to a channel…',
@@ -1035,6 +1053,57 @@ describe('the section follows the directory frame (issue #1226)', () => {
       expect(rowOf(region, 'newcomer')).toBeTruthy();
     });
     expect(reads(calls)).toBe(before + 1);
+  });
+
+  it('draws its own answer when the shared order calls it stale', async () => {
+    serve(owner);
+    await signedIn();
+    // Another view's newer answer was applied first: the order refuses this one.
+    const applied: number[] = [];
+    const control: ManifestReadControl = {
+      mayRead: () => true,
+      generation: () => 0,
+      stop: () => undefined,
+      beginDirectory: () => ({ ticket: 1, generation: 0 }),
+      acceptDirectory: (request) => {
+        applied.push(request.ticket);
+        return false;
+      },
+    };
+    render(<ManifestReads.Provider value={control}>{console(true, 0)}</ManifestReads.Provider>);
+    const region = await screen.findByRole('region', { name: 'Members' });
+    await within(region).findByRole('list', { name: 'People' });
+    expect(applied.length).toBeGreaterThan(0);
+  });
+
+  it('records a manifest 404 for the session even when the card has gone before it answers', async () => {
+    let answer: (response: Response) => void = () => undefined;
+    serve(owner, { routes: { 'GET /v1/principals/4/manifest': () => new Promise<Response>((resolve) => { answer = resolve; }) } });
+    await signedIn();
+    const stopped: [number, number][] = [];
+    const control: ManifestReadControl = {
+      mayRead: () => true,
+      generation: () => 7,
+      stop: (id, sent) => {
+        stopped.push([id, sent]);
+      },
+      beginDirectory: () => ({ ticket: 1, generation: 7 }),
+      acceptDirectory: () => true,
+    };
+    const agent: ServerMemberV1 = { id: 4, kind: 'agent', name: 'builder', created_at: at };
+    const view = render(
+      <ManifestReads.Provider value={control}>
+        <AIAdminCard who={owner} person={agent} onChanged={() => undefined} onUnauthorized={() => undefined} />
+      </ManifestReads.Provider>,
+    );
+    await settled();
+    view.unmount();
+    await act(async () => {
+      answer(json({}, 404));
+      await Promise.resolve();
+    });
+    await settled();
+    expect(stopped).toEqual([[4, 7]]);
   });
 
   it('sends nothing while hidden', async () => {

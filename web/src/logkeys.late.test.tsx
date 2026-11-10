@@ -103,7 +103,7 @@ it('keeps reaction controls out of Tab after asynchronous hydration', async () =
   expect(buttons.every((button) => button.tabIndex === -1)).toBe(true);
   act(() => { item(1).focus(); });
   expect(buttons.every((button) => button.tabIndex === -1)).toBe(true);
-  expect(Array.from(screen.getByRole('log').querySelectorAll<HTMLButtonElement>('button')).filter((button) => !button.disabled && button.tabIndex >= 0).map((button) => button.textContent)).toEqual(['Download', 'Reply']);
+  expect(Array.from(screen.getByRole('log').querySelectorAll<HTMLButtonElement>('button')).filter((button) => !button.disabled && button.tabIndex >= 0).map((button) => button.textContent)).toEqual(['bea', 'Download', 'Reply']);
 });
 
 describe('the observer', () => {

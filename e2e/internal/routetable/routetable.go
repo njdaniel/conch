@@ -10,6 +10,20 @@
 // e2e/isolation checks the other way round: that every route of the table has
 // a row in its cross-group matrix, so that a route added later cannot skip
 // the isolation check.
+//
+// What the table leaves out. Two routes are not in routes.go: GET /app/ and
+// GET /{$}, the web client and its redirect from /, which
+// internal/server/static.go (webRoutes) appends to the server's routes only
+// when a client is configured (--web-dir or the embedded build). They stay out
+// of this table, and so out of every isolation and preview row, on purpose:
+// they serve static files and a redirect, take no credential, read no
+// principal and touch no store, so there is nothing for a cross-group or a
+// Conch-Preview-As check to find; the API the page then calls is all in
+// routes.go. Reading static.go as well would give the table a second source
+// that exists only in some configurations, and /{$} is a pattern routetable's
+// path matcher does not model. internal/server TestWebRoutesShadowNothing
+// holds that neither pattern can match an API path, and the route guard wraps
+// them like any exempt route, so a preview header on either is refused.
 package routetable
 
 import (
