@@ -95,7 +95,7 @@ How to read a cell:
 | Operator with a cell off | W: none; G: xS5, xS6, xIr | W: none; G: xS11c, xIr | W: none; G: xS14, xIr | W: none; G: xS4 | W: xW43b; G: xS3, xS11d, xIr |
 | Channel manager | W: +W24; G: S7, xS5, xS6 | W: +W24, +W51a; G: S8a | W: +W51a, +W51b, +W51c; G: +S9, +Imod | as member | as member |
 | Member | W: +W20, xW21b, xW48b; G: +S5, xS5, xS6, xS7 | W: xW24; G: xS8c | W: xW51a, xW51b, xW51c; G: xS9, xImod | W: xW38b; G: xS1, xS2 | W: none; G: xS2, xS3 |
-| Member with a cell or brake off | W: none; G: xS5, xIp | n/a | n/a | n/a | n/a |
+| Member with a cell or brake off | W: xW39c; G: xS5, xIp | n/a | n/a | n/a | n/a |
 | Removed or banned member | n/a | W: xW51a; G: xS16, xImod | n/a | n/a | n/a |
 | Member of another group | W: none; G: xIm, xIc | W: none; G: xIm, xIc | W: none; G: xIm | W: none; G: xIm | W: none; G: xIm |
 | Agent | W: none; G: xS1, xS6, xS7 | W: none; G: xS1, xS9 | W: none; G: xS9, xIa | W: none; G: xS1, xAi | W: none; G: xS3, xAi |
@@ -194,6 +194,7 @@ browser test of their own. The browser voice specs use plain members.
 | `W38b` | `38-admin-console`: A1018 a member sees one line of what they may do and no console | no console, no Joining, no Server (no console is offered; it does not name the permissions document) |
 | `W39a` | `39-permissions`: A1019 the owner applies Personal, then Group, from the preset cards | the owner writes the document; the server has the preset |
 | `W39b` | `39-permissions`: A1019 the owner turns Act as members off for operators, sees what operators issued, and revokes one | an operator with the cell on issues a credential to another; the owner turns it off and revokes it |
+| `W39c` | `39-permissions`: A1668 a member with channel creation off is offered no way to make that channel, and the server refuses a direct call | `create_public_channels` off: no choice of visibility; both off: no New channel anywhere; `POST /v1/channels` from the page is 403 `permission_denied`; the cells are restored and read back |
 | `W40` | `40-channel-privacy`: P1183 an operator makes a channel private and public from its menu, and a member sees the lock live | an operator changes visibility; a member sees the lock |
 | `W42` | `42-admin-channels`: A1021 on a personal server the owner makes a private channel, adds a person to it, makes them a manager and removes them | owner creates a private channel, adds a person, makes a manager |
 | `W43a` | `43-admin-members`: A1020 the owner changes a role from a person's menu, and the server has it | only the owner changes a role |
