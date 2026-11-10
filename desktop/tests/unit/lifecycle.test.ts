@@ -5,19 +5,23 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { Lifecycle, MUTE_BOUND_MS, type LifecycleDeps, type LockSource } from '../../main/lifecycle.ts';
 
-type VoiceState = 'idle' | 'running' | 'starting';
-type MuteOutcome = 'ack' | 'refused' | 'hang' | 'throws';
+type VoiceState = 'idle' | 'running' | 'starting' | 'ended' | 'lost' | 'failed' | 'unavailable';
+// ack: acknowledged and shown muted. ackUnseen: acknowledged but the view never
+// shows it.
+type MuteOutcome = 'ack' | 'ackUnseen' | 'refused' | 'hang' | 'throws';
 
 function rig(state: VoiceState, mute: MuteOutcome = 'ack') {
   const calls: string[] = [];
+  let muted = false;
   const deps: LifecycleDeps = {
     voice: {
-      state: () => ({ status: state }),
+      state: () => (state === 'running' ? { status: state, helper: { muted } } : { status: state }),
       setMute: (m) => {
         calls.push(`mute ${String(m)}`);
         if (mute === 'hang') return new Promise(() => undefined);
         if (mute === 'throws') return Promise.reject(new Error('gone'));
-        return Promise.resolve({ ok: mute === 'ack' });
+        if (mute === 'ack') muted = m;
+        return Promise.resolve({ ok: mute === 'ack' || mute === 'ackUnseen' });
       },
       leave: () => {
         calls.push('leave');
@@ -68,13 +72,31 @@ describe('lock', () => {
     { name: 'in a call, mute refused: leave', state: 'running', mute: 'refused', want: ['notify hidden', 'end lock', 'mute true', expect.stringContaining('log lifecycle: the mute') as string, 'leave'] },
     { name: 'in a call, mute call fails: leave', state: 'running', mute: 'throws', want: ['notify hidden', 'end lock', 'mute true', expect.stringContaining('log lifecycle: the mute') as string, 'leave'] },
     { name: 'joining: a mute that cannot be acknowledged leaves', state: 'starting', mute: 'refused', want: ['notify hidden', 'end lock', 'mute true', expect.stringContaining('log lifecycle: the mute') as string, 'leave'] },
-    { name: 'no voice: no mute, no leave', state: 'idle', mute: 'ack', want: ['notify hidden', 'end lock'] },
+    // No helper to mute: the status says idle while a join (before
+    // Supervisor.start) or a retry from ended or lost may be in flight, and
+    // leave overtakes it. Plain idle: leave is harmless.
+    { name: 'idle, a join in flight or nothing at all: leave, no mute', state: 'idle', mute: 'ack', want: ['notify hidden', 'end lock', 'leave'] },
+    { name: 'ended, a retry may be in flight: leave', state: 'ended', mute: 'ack', want: ['notify hidden', 'end lock', 'leave'] },
+    { name: 'lost, a retry may be in flight: leave', state: 'lost', mute: 'ack', want: ['notify hidden', 'end lock', 'leave'] },
+    { name: 'failed: leave', state: 'failed', mute: 'ack', want: ['notify hidden', 'end lock', 'leave'] },
+    { name: 'unavailable: leave', state: 'unavailable', mute: 'ack', want: ['notify hidden', 'end lock', 'leave'] },
   ];
   it.each(table)('$name', async ({ state, mute, want }) => {
     const { life, calls } = observed(state, mute);
     await life.lockSignal('logind', true);
     expect(calls).toEqual(want);
     expect(life.locked).toBe(true);
+  });
+
+  it('leaves when the ack came but the view still shows unmuted at the bound (S4)', async () => {
+    const { life, calls } = observed('running', 'ackUnseen');
+    const done = life.lockSignal('logind', true);
+    await vi.advanceTimersByTimeAsync(MUTE_BOUND_MS - 1);
+    expect(calls).not.toContain('leave');
+    await vi.advanceTimersByTimeAsync(1);
+    await done;
+    expect(calls).toContain('leave');
+    expect(calls).not.toContain('lockMuted true');
   });
 
   it('leaves when the mute is not acknowledged within the contract bound', async () => {
@@ -129,12 +151,33 @@ describe('lock', () => {
 });
 
 describe('suspend', () => {
-  it('leaves voice and ends the share, once however many signals say so', async () => {
+  it('leaves voice and ends the share, once however many signals say so while it acts', async () => {
     const { life, calls } = observed('running');
-    await Promise.all([life.suspend(), life.suspend()]);
+    const first = life.suspend();
+    expect(life.suspended).toBe(true);
+    await Promise.all([first, life.suspend(), life.suspend()]);
+    expect(calls).toEqual(['leave', 'end suspend']);
+  });
+
+  it('clears the latch when the leave and the end settle, with no resume event (S3)', async () => {
+    const { life, calls } = observed('running');
+    await life.suspend();
+    expect(life.suspended).toBe(false);
+    calls.length = 0;
+    // A suspend signal after a missed resume acts again; both actions are idempotent.
     await life.suspend();
     expect(calls).toEqual(['leave', 'end suspend']);
-    expect(life.suspended).toBe(true);
+  });
+
+  it('clears the latch when the actions fail too (S3)', async () => {
+    const life = new Lifecycle({
+      voice: { state: () => ({ status: 'running' }), setMute: () => Promise.resolve({ ok: true }), leave: () => Promise.reject(new Error('stuck')), setLockMuted: () => undefined },
+      companion: { end: () => Promise.resolve(true) },
+      notifications: { setLocked: () => undefined },
+      log: () => undefined,
+    });
+    await life.suspend();
+    expect(life.suspended).toBe(false);
   });
 
   it('resume does nothing to voice or the share, and a later suspend acts again', async () => {

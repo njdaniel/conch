@@ -211,6 +211,73 @@ describe('nothing starts by itself', () => {
   });
 });
 
+describe('while the screen is locked (issue #1588, S1)', () => {
+  let locked = false;
+  beforeEach(() => {
+    locked = false;
+    svc = new VoiceService({ supervisor: fake, oneShot, identity: () => Promise.resolve(id), log: (l) => logs.push(l), stopBoundMs: 200, locked: () => locked });
+  });
+
+  it('refuses setMute(false) as locked, and sends nothing to the helper', async () => {
+    await join();
+    locked = true;
+    expect(await svc.setMute(false)).toEqual({ ok: false, error: 'locked' });
+    expect(fake.calls).not.toContain('mute:false');
+    expect(logs.some((l) => l.includes('unmute refused'))).toBe(true);
+  });
+
+  it('still accepts setMute(true), which is what the lock itself sends', async () => {
+    await join();
+    locked = true;
+    expect(await svc.setMute(true)).toEqual({ ok: true });
+    expect(fake.calls).toContain('mute:true');
+  });
+
+  it('accepts setMute(false) again after unlock: unmuting is the person’s act', async () => {
+    await join();
+    locked = true;
+    locked = false;
+    expect(await svc.setMute(false)).toEqual({ ok: true });
+  });
+
+  it('starts a join muted, however it was asked for', async () => {
+    locked = true;
+    await join('general', false, false);
+    expect(fake.starts.map((r) => r.muted)).toEqual([true]);
+  });
+
+  it('starts a join muted when the lock came during its identity wait', async () => {
+    let release: (i: Identity) => void = () => undefined;
+    const waiting = new VoiceService({ supervisor: fake, oneShot, identity: () => new Promise<Identity>((r) => (release = r)), log: () => undefined, stopBoundMs: 200, locked: () => locked });
+    const joined = waiting.join({ channel: 'general', muted: false, deafened: false });
+    locked = true;
+    release(id);
+    await joined;
+    expect(fake.starts.map((r) => r.muted)).toEqual([true]);
+  });
+
+  it('starts a retry muted, and a join with the screen open is as asked', async () => {
+    fake.next = { status: 'lost', generation: 1, reason: 'exited' };
+    await join('general', false, false);
+    fake.next = { status: 'running', generation: 2, helper: helper() };
+    locked = true;
+    await svc.retry();
+    expect(fake.starts.map((r) => r.muted)).toEqual([false, true]);
+  });
+
+  it('a leave overtakes a join still waiting for its identity', async () => {
+    let release: (i: Identity) => void = () => undefined;
+    const waiting = new VoiceService({ supervisor: fake, oneShot, identity: () => new Promise<Identity>((r) => (release = r)), log: () => undefined, stopBoundMs: 200, locked: () => locked });
+    const joined = waiting.join({ channel: 'general', muted: false, deafened: false });
+    locked = true;
+    const left = waiting.leave();
+    release(id);
+    await Promise.all([joined, left]);
+    expect(fake.starts).toEqual([]);
+    expect(waiting.state().status).toBe('idle');
+  });
+});
+
 describe('the destination', () => {
   it('changes only on join and when the session ends', async () => {
     expect(svc.state().channel).toBeNull();

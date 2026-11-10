@@ -16,7 +16,14 @@
 //
 // What it does not do: pretend. If there is no gdbus, no session for this
 // process, or the monitor keeps dying, the lock is reported as not observed,
-// once on the log, and the rules hide notification text.
+// once on the log, and the rules hide notification text. A watcher that gives
+// up does not force-mute (S5 of #1588, decided by the principal): #1593's
+// notice tells the person that lock won't mute them.
+//
+// Which session: a normally launched app may have no session of its own.
+// On systemd 255 every process under user@UID.service, app scopes and
+// app-*.service units included, gets NoSessionForPID from GetSessionByPID.
+// Then the user's Display session (the graphical one) is watched instead.
 import { stat } from 'node:fs/promises';
 
 import type { Lifecycle } from './lifecycle.ts';
@@ -36,6 +43,9 @@ export const RESTART_BACKOFF_MS: readonly number[] = [1000, 2000, 4000];
 // How long a monitor must stay up before its restarts are forgiven.
 const STABLE_MS = 30_000;
 
+// How long a started monitor may take to print that it is subscribed.
+export const READY_MS = 5000;
+
 // How often the idle state is read (a second signal).
 export const IDLE_POLL_MS = 1000;
 
@@ -50,8 +60,59 @@ export type ParsedLine = { readonly kind: 'event'; readonly event: MonitorEvent 
 const SIGNAL = /^(\/[A-Za-z0-9_/]*): ([A-Za-z0-9_.]+)\.([A-Za-z0-9_]+) \((.*)\)$/u;
 // The lines gdbus prints on its own.
 const PREAMBLE = /^(Monitoring signals from all objects owned by |The name )[A-Za-z0-9_.:]+( is owned by | has no owner| )?/u;
-const LOCKED_HINT = /'LockedHint': <(true|false)>/u;
+const SESSION_PATH = /^\/org\/freedesktop\/login1\/session\/[A-Za-z0-9_]+$/u;
+// The line gdbus prints once it has subscribed and learned the owner of the
+// name: the first moment a signal can no longer be missed.
+const READY = /^The name org\.freedesktop\.login1 is owned by /u;
 const SLEEP_ARGS = /^(true|false),$/u;
+
+// lockedHintOf reads the entries of a printed a{sv} dictionary (the text
+// after its `{`) and returns the value of the key LockedHint, 'absent' when
+// there is no such key, or 'invalid' when the dictionary does not parse. It
+// walks key by key, so text inside another entry's string value (which can
+// say anything, including `'LockedHint': <false>`) is never read as a key.
+function lockedHintOf(text: string): boolean | 'absent' | 'invalid' {
+  let i = 0;
+  let found: boolean | null = null;
+  for (;;) {
+    if (text[i] === '}') return found ?? 'absent';
+    const key = /^'([A-Za-z0-9_]+)': /u.exec(text.slice(i));
+    if (key === null) return 'invalid';
+    i += key[0].length;
+    const end = valueEnd(text, i);
+    if (end === null) return 'invalid';
+    if (key[1] === 'LockedHint') {
+      const v = /^<(true|false)>$/u.exec(text.slice(i, end));
+      if (v === null) return 'invalid';
+      found = v[1] === 'true';
+    }
+    i = end;
+    if (text.startsWith(', ', i)) i += 2;
+    else if (text[i] !== '}') return 'invalid';
+  }
+}
+
+// valueEnd returns the index just past the value that starts at `from`
+// (balanced brackets, quoted strings skipped whole), or null.
+function valueEnd(text: string, from: number): number | null {
+  const closer: Readonly<Record<string, string>> = { '<': '>', '(': ')', '[': ']', '{': '}' };
+  const stack: string[] = [];
+  for (let i = from; i < text.length; i++) {
+    const c = text.charAt(i);
+    if (c === "'" || c === '"') {
+      for (i++; i < text.length && text.charAt(i) !== c; i++) if (text.charAt(i) === '\\') i++;
+      if (i >= text.length) return null;
+    } else if (c in closer) {
+      stack.push(closer[c] ?? '');
+    } else if (c === '>' || c === ')' || c === ']' || c === '}') {
+      if (stack.pop() !== c) return null;
+      if (stack.length === 0) return i + 1;
+    } else if (stack.length === 0 && (c === ',' || c === '}')) {
+      return i;
+    }
+  }
+  return null;
+}
 
 // parseLine accepts only this session's object path (session) and the signals
 // Lock, Unlock, PropertiesChanged of LockedHint, and the manager's
@@ -77,16 +138,28 @@ export function parseLine(line: string, session: string): ParsedLine {
     if (!args.startsWith("'")) return { kind: 'malformed' };
     // Other properties of the session change all the time; the hint may
     // arrive with some of them in one dictionary.
-    const a = args.startsWith(`'${SESSION_IFACE}', {`) ? LOCKED_HINT.exec(args) : null;
-    return a === null ? { kind: 'ignored' } : { kind: 'event', event: { kind: 'lock', locked: a[1] === 'true' } };
+    const head = `'${SESSION_IFACE}', {`;
+    if (!args.startsWith(head)) return { kind: 'ignored' };
+    const hint = lockedHintOf(args.slice(head.length));
+    if (hint === 'invalid') return { kind: 'malformed' };
+    return hint === 'absent' ? { kind: 'ignored' } : { kind: 'event', event: { kind: 'lock', locked: hint } };
   }
   return { kind: 'ignored' };
 }
 
 // parseSession reads `(objectpath '/org/freedesktop/login1/session/_32',)`.
 export function parseSession(stdout: string): string | null {
-  const m = /^\(objectpath '(\/org\/freedesktop\/login1\/session\/[A-Za-z0-9_]+)',\)\s*$/u.exec(stdout);
-  return m?.[1] ?? null;
+  const m = /^\(objectpath '([^']*)',\)\s*$/u.exec(stdout);
+  return m?.[1] !== undefined && SESSION_PATH.test(m[1]) ? m[1] : null;
+}
+
+// parseDisplaySession reads the user's Display property,
+// `(<('5', objectpath '/org/freedesktop/login1/session/_35')>,)`: a session
+// id and its path. The path must pass the same rule as parseSession's; the
+// "no display session" answer (`('', objectpath '/')`) does not.
+export function parseDisplaySession(stdout: string): string | null {
+  const m = /^\(<\('[A-Za-z0-9_]+', objectpath '([^']*)'\)>,\)\s*$/u.exec(stdout);
+  return m?.[1] !== undefined && SESSION_PATH.test(m[1]) ? m[1] : null;
 }
 
 // parseLockedHint reads `(<true>,)` or `(<false>,)`.
@@ -112,6 +185,8 @@ export interface WatcherDeps {
   readonly watch?: (file: string, args: readonly string[], env: Readonly<Record<string, string>>) => WatchChild;
   readonly backoffMs?: readonly number[];
   readonly idlePollMs?: number;
+  // How long to wait for the monitor to say it is subscribed.
+  readonly readyMs?: number;
 }
 
 async function defaultFindGdbus(): Promise<string | null> {
@@ -209,8 +284,19 @@ export class LinuxLifecycle {
     }
   }
 
-  // #attach finds this session, starts the monitor, then reads the current
-  // LockedHint (after the monitor, so no change falls between the two).
+  // #findSession: this process's own session, else the user's display
+  // session (see the header). null when neither can be found.
+  async #findSession(run: NonNullable<WatcherDeps['run']>, gdbus: string): Promise<string | null> {
+    const found = await run(gdbus, ['call', '--system', '--dest', LOGIND, '--object-path', MANAGER_PATH, '--method', `${LOGIND}.Manager.GetSessionByPID`, String(this.#deps.pid)], CHILD_ENV);
+    const own = found !== null && found.code === 0 ? parseSession(found.stdout) : null;
+    if (own !== null || this.#halted()) return own;
+    const display = await run(gdbus, ['call', '--system', '--dest', LOGIND, '--object-path', `${MANAGER_PATH}/user/self`, '--method', 'org.freedesktop.DBus.Properties.Get', `${LOGIND}.User`, 'Display'], CHILD_ENV);
+    return display !== null && display.code === 0 ? parseDisplaySession(display.stdout) : null;
+  }
+
+  // #attach finds the session, starts the monitor, waits for the monitor to
+  // say it is subscribed, then reads the current LockedHint (so no change
+  // falls between the read and the subscription). The same at each restart.
   async #attach(): Promise<void> {
     const gdbus = await (this.#deps.findGdbus ?? defaultFindGdbus)();
     if (this.#halted()) return;
@@ -219,11 +305,10 @@ export class LinuxLifecycle {
       return;
     }
     const run = this.#deps.run ?? runFile;
-    const found = await run(gdbus, ['call', '--system', '--dest', LOGIND, '--object-path', MANAGER_PATH, '--method', `${LOGIND}.Manager.GetSessionByPID`, String(this.#deps.pid)], CHILD_ENV);
+    const session = await this.#findSession(run, gdbus);
     if (this.#halted()) return;
-    const session = found !== null && found.code === 0 ? parseSession(found.stdout) : null;
     if (session === null) {
-      this.#lost('this process has no logind session');
+      this.#lost('this process has no logind session and the user has no display session');
       return;
     }
     let child: WatchChild;
@@ -235,6 +320,12 @@ export class LinuxLifecycle {
     }
     this.#child = child;
     this.#sawLock = false;
+    // The hint is read only after the monitor has said it is subscribed, so
+    // no lock falls between the read and the subscription.
+    let subscribed: (ok: boolean) => void = () => undefined;
+    const ready = new Promise<boolean>((resolve) => {
+      subscribed = resolve;
+    });
     let pending = '';
     child.stdout.setEncoding('utf8');
     child.stdout.on('data', (chunk: string) => {
@@ -243,7 +334,9 @@ export class LinuxLifecycle {
       if (pending.length > 64 * 1024) pending = '';
       let at = pending.indexOf('\n');
       while (at >= 0) {
-        this.#line(pending.slice(0, at), session);
+        const text = pending.slice(0, at);
+        if (READY.test(text.trim())) subscribed(true);
+        this.#line(text, session);
         pending = pending.slice(at + 1);
         at = pending.indexOf('\n');
       }
@@ -256,10 +349,26 @@ export class LinuxLifecycle {
       // so one that dies at once every time is given up on.
       if (this.#upSince !== 0 && Date.now() - this.#upSince > STABLE_MS) this.#restarts = 0;
       this.#upSince = 0;
+      subscribed(false);
       if (!this.#stopped) this.#retry('the monitor ended');
     };
     child.on('error', ended);
     child.on('close', ended);
+    let readyTimer: NodeJS.Timeout | undefined;
+    const slow = new Promise<boolean>((resolve) => {
+      readyTimer = setTimeout(() => {
+        resolve(false);
+      }, this.#deps.readyMs ?? READY_MS);
+    });
+    const up = await Promise.race([ready, slow]);
+    clearTimeout(readyTimer);
+    if (this.#halted() || this.#child !== child) return;
+    if (!up) {
+      child.kill('SIGTERM');
+      this.#child = null;
+      this.#retry('the monitor did not say it was subscribed');
+      return;
+    }
     const hint = await run(gdbus, ['call', '--system', '--dest', LOGIND, '--object-path', session, '--method', 'org.freedesktop.DBus.Properties.Get', SESSION_IFACE, 'LockedHint'], CHILD_ENV);
     if (this.#halted() || this.#child !== child) return;
     const locked = hint !== null && hint.code === 0 ? parseLockedHint(hint.stdout) : null;

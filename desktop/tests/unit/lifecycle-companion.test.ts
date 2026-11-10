@@ -26,6 +26,7 @@ async function rig() {
   const sent: Send[] = [];
   const told: CompanionEvent[] = [];
   const calls: string[] = [];
+  let muted = false;
   // One client for the whole activation, as main holds it.
   const client = {
     send: (request: Send) => {
@@ -45,9 +46,10 @@ async function rig() {
   });
   const life = new Lifecycle({
     voice: {
-      state: () => ({ status: view.status }),
+      state: () => ({ status: view.status, helper: { muted } }),
       setMute: (m) => {
         calls.push(`mute ${String(m)}`);
+        muted = m;
         return Promise.resolve({ ok: true });
       },
       leave: () => {

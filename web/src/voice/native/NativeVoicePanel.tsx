@@ -56,6 +56,7 @@ const errorWords: Readonly<Record<NativeVoiceError, string>> = {
   busy: 'Voice is busy; try again in a moment.',
   unsupported: 'Voice is not available here.',
   lost: 'Voice lost touch with the app; try again.',
+  locked: 'Your screen is locked. Unlock it to unmute.',
 };
 
 // The phase class the strip's dot follows (the browser strip's).

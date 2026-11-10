@@ -127,6 +127,26 @@ describe('the companion’s grant', () => {
     expect(r.companion.liveOrigin()).toBeNull();
   });
 
+  it('is refused as ended, and calls nothing, while the screen is locked (issue #1588, S1)', async () => {
+    let locked = true;
+    const r = rig();
+    const gated = new Companion({
+      voice: { state: () => r.voice.view, subscribe: () => () => undefined },
+      client: () => r.client,
+      document: () => r.document.value,
+      tell: () => undefined,
+      log: (line) => r.logs.push(line),
+      locked: () => locked,
+    });
+    expect(await gated.grant({ channel: 'general' })).toEqual({ ok: false, error: 'ended' });
+    expect(r.steps).toEqual([]);
+    expect(gated.liveOrigin()).toBeNull();
+    // After unlock the person may ask again.
+    locked = false;
+    r.answers.push(ok(ANSWER));
+    expect((await gated.grant({ channel: 'general' })).ok).toBe(true);
+  });
+
   it('is refused as failed, and calls nothing, with no activation in force', async () => {
     const r = rig();
     r.client = null;

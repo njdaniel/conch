@@ -8,8 +8,12 @@
 // The rules fail closed:
 //   - lock: notification text is hidden, the companion ends ('lock'), and the
 //     microphone is muted (not left: the call keeps playing). A mute the
-//     helper does not acknowledge within the contract's bound is followed by
-//     a leave.
+//     helper does not acknowledge, or whose effect the view does not show,
+//     within the contract's bound is followed by a leave. With no helper to
+//     mute (idle, or a join or retry still on its way to starting one) the
+//     lock leaves: leave is safe with nothing running and overtakes a join.
+//     While locked, VoiceService refuses to unmute, starts joins muted and
+//     the companion refuses grants (they read Lifecycle.locked).
 //   - unlock: notification text may show again. Nothing else: still muted, no
 //     share, no rejoin. Unmuting is the person's act.
 //   - suspend: leave voice and end the companion ('suspend'), once however
@@ -36,12 +40,12 @@ export type LifecycleEnd = 'lock' | 'suspend';
 // (the contract's VOICE_CONTROL_ACK_TIMEOUT_MS).
 export const MUTE_BOUND_MS = 5000;
 
-// Voice statuses with no helper to mute or leave.
-const NO_SESSION: ReadonlySet<string> = new Set(['idle', 'unavailable', 'ended', 'failed', 'lost']);
+// How often the view is read to see a mute take effect.
+const MUTE_POLL_MS = 25;
 
 export interface LifecycleDeps {
   readonly voice: {
-    state(): { readonly status: string };
+    state(): { readonly status: string; readonly helper?: { readonly muted: boolean } };
     setMute(muted: boolean): Promise<{ readonly ok: boolean }>;
     leave(): Promise<unknown>;
     // Records that main muted the person at a lock, so the strip can say so
@@ -106,13 +110,19 @@ export class Lifecycle {
   }
 
   // suspend: the machine is going to sleep (PrepareForSleep(true) or
-  // powerMonitor's suspend, whichever comes first). Acts once until resume.
+  // powerMonitor's suspend, whichever comes first). Signals that arrive while
+  // it acts are one. The latch clears when the leave and the end settle (both
+  // are idempotent) and not only on resume, so a missed resume event cannot
+  // leave the next suspend ignored.
   suspend(): Promise<void> {
     if (this.#suspended) return Promise.resolve();
     this.#suspended = true;
     return Promise.all([this.#deps.voice.leave(), this.#deps.companion.end('suspend')]).then(
-      () => undefined,
       () => {
+        this.#suspended = false;
+      },
+      () => {
+        this.#suspended = false;
         this.#deps.log('lifecycle: leaving voice or ending the share at suspend failed');
       },
     );
@@ -136,21 +146,44 @@ export class Lifecycle {
   }
 
   // #mute mutes a running session, and leaves when the helper does not
-  // acknowledge the mute within the bound (fail closed).
+  // acknowledge the mute, or the view does not show it, within the bound
+  // (fail closed). With no helper to mute (idle, ended, failed, lost: a join
+  // or retry may be in flight with the status still idle) it leaves: leave is
+  // safe with nothing running, and it overtakes a join that has not started.
   async #mute(): Promise<void> {
     const voice = this.#deps.voice;
-    if (NO_SESSION.has(voice.state().status)) return;
+    const status = voice.state().status;
+    if (status !== 'running' && status !== 'starting' && status !== 'stopping') {
+      await voice.leave();
+      return;
+    }
     let timer: NodeJS.Timeout | undefined;
+    const bound = { over: false };
     const late = new Promise<false>((resolve) => {
       timer = setTimeout(() => {
+        bound.over = true;
         resolve(false);
       }, this.#bound);
     });
+    // The ack is the helper's word; the view is what the page and the next
+    // unmute rely on, so both must say muted inside the one bound.
+    const confirmed = (async (): Promise<boolean> => {
+      const acked = await voice.setMute(true).then((r) => r.ok, () => false);
+      if (!acked) return false;
+      while (voice.state().helper?.muted !== true) {
+        if (bound.over) return false;
+        await new Promise<void>((resolve) => {
+          setTimeout(resolve, MUTE_POLL_MS);
+        });
+      }
+      return true;
+    })();
     let muted = false;
     try {
-      muted = await Promise.race([voice.setMute(true).then((r) => r.ok, () => false), late]);
+      muted = await Promise.race([confirmed, late]);
     } finally {
       clearTimeout(timer);
+      bound.over = true;
     }
     if (muted) {
       voice.setLockMuted(true);

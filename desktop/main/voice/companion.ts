@@ -74,6 +74,9 @@ export interface CompanionDeps {
   // shows there; else nothing.
   readonly tell: (document: number, event: CompanionEvent) => void;
   readonly log: (line: string) => void;
+  // Whether the screen is locked (Lifecycle.locked, issue #1588): no grant
+  // is given then. Absent means never locked (tests); app.ts always passes it.
+  readonly locked?: () => boolean;
   // Test seam for the one wait before the second ask.
   readonly sleep?: (ms: number) => Promise<void>;
 }
@@ -187,6 +190,10 @@ export class Companion {
   // and hands back the grant alone.
   async grant(request: { readonly channel: string }): Promise<CompanionGrantResult> {
     const { channel } = request;
+    if (this.#deps.locked?.() === true) {
+      this.#deps.log('companion: refused: the screen is locked');
+      return refuse('ended');
+    }
     const view = this.#deps.voice.state();
     if (!connectedIn(view, channel)) {
       this.#deps.log('companion: refused: voice is not connected there');

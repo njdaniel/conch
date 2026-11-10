@@ -16,7 +16,10 @@
 //   - a join that a sign-out, switch or 401 overtakes is stopped and
 //     reported nowhere;
 //   - teardown leaves and stops the helper within VoiceControlStopKillAfterMS;
-//   - the logind watcher of #773 calls setMute and leave (decision D-1).
+//   - the logind watcher of #773 calls setMute and leave (decision D-1); while
+//     the screen is locked, setMute(false) is refused (`locked`) and every
+//     start is muted, so nothing transmits again until a deliberate unmute
+//     after unlock (issue #1588).
 import { VOICE_CONTROL_STOP_KILL_AFTER_MS, type VoiceControlTalkMode } from '../../../web/src/schema/generated.ts';
 import type {
   NativeVoiceDevicesResult,
@@ -80,6 +83,10 @@ export interface VoiceServiceDeps {
   readonly keyDevices?: KeyDeviceDeps;
   // How long teardown waits for the stop; the contract's kill bound.
   readonly stopBoundMs?: number;
+  // Whether the screen is locked (Lifecycle.locked, issue #1588). While it
+  // is, nothing unmutes and any join or retry starts muted. Absent means
+  // never locked (tests); app.ts always passes it.
+  readonly locked?: () => boolean;
 }
 
 export interface JoinRequest {
@@ -303,8 +310,11 @@ export class VoiceService {
       this.active = identity;
       this.override = null;
       this.channel = req.channel;
-      this.last = { channel: req.channel, muted: req.muted, deafened: req.deafened };
+      this.last = { channel: req.channel, muted: req.muted || this.deps.locked?.() === true, deafened: req.deafened };
       let result: VoiceState;
+      // A join or retry begun, or still waiting for its identity, when the
+      // screen locks starts muted; read now, after the awaits.
+      const muted = req.muted || this.deps.locked?.() === true;
       try {
         // The token is read here, handed on, and not kept.
         result = await this.deps.supervisor.start({
@@ -314,7 +324,7 @@ export class VoiceService {
           server: credential.origin,
           channel: req.channel,
           principalId: identity.principalId,
-          muted: req.muted,
+          muted,
           deafened: req.deafened,
           extraArgs: CEILING_ARGS,
         });
@@ -458,6 +468,11 @@ export class VoiceService {
   // The commands resolve with the helper's own ack, never optimistically; the
   // view changes when the helper's state says so.
   async setMute(muted: boolean): Promise<VoiceCommandResult> {
+    // Unmuting is the person's act after unlock, never during a lock.
+    if (!muted && this.deps.locked?.() === true) {
+      this.deps.log('voice: unmute refused: the screen is locked');
+      return { ok: false, error: 'locked' };
+    }
     const r = await this.deps.supervisor.setMute(muted);
     if (r.ok && this.last !== null) this.last = { ...this.last, muted };
     return r;

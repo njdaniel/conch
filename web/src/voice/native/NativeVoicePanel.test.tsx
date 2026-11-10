@@ -4,7 +4,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testi
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as api from '../../api';
 import type { NativeVoiceHelper, NativeVoiceView } from '../../platform/desktop/bridge';
-import type { NativeVoice, NativeVoiceOutcome } from '../../platform/types';
+import type { NativeVoice, NativeVoiceError, NativeVoiceOutcome } from '../../platform/types';
 import type { ChannelV0 } from '../../schema/channel';
 import type { VoicePresenceV2 } from '../../schema/voice';
 import type { SocketEvents } from '../../state/feed';
@@ -31,7 +31,7 @@ class Fake {
   view: NativeVoiceView;
   readonly calls: string[] = [];
   private readonly listeners = new Set<() => void>();
-  deferred: ((out: { ok: true }) => void) | null = null;
+  deferred: ((out: { ok: true } | { ok: false; error: NativeVoiceError }) => void) | null = null;
   constructor(view: NativeVoiceView = idle) {
     this.view = view;
   }
@@ -241,6 +241,19 @@ describe('NativeVoicePanel', () => {
     // Left: gone.
     fake.set(idle);
     expect(screen.queryByText(note)).toBeNull();
+  });
+
+  it('says why an unmute was refused while the screen is locked', async () => {
+    const fake = new Fake({ ...running({ muted: true }), mutedByLock: true });
+    strip(fake);
+    await frame(presence([1, '2026-01-01T00:00:00Z']));
+    fireEvent.click(screen.getByRole('button', { name: 'Unmute' }));
+    expect(fake.calls).toEqual(['mute false']);
+    await act(async () => {
+      fake.deferred?.({ ok: false, error: 'locked' });
+      await Promise.resolve();
+    });
+    expect(screen.getByText('Your screen is locked. Unlock it to unmute.')).toBeTruthy();
   });
 
   it('Leave calls leave', async () => {

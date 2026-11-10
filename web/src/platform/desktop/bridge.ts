@@ -372,7 +372,7 @@ export interface NativeVoiceView {
 
 export type VoiceCommandResult =
   | { readonly ok: true }
-  | { readonly ok: false; readonly error: VoiceControlErrorCode | 'not-running' | 'busy' | 'unsupported' | 'lost' };
+  | { readonly ok: false; readonly error: VoiceControlErrorCode | 'not-running' | 'busy' | 'unsupported' | 'lost' | 'locked' };
 
 // The helper's one-shot runs (issue #1378, D3-7): the device list and a save.
 // Why a run did not give what was asked; never text of the helper's.
