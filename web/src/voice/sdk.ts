@@ -544,6 +544,9 @@ export interface ShareStats {
   readonly packetsLost?: number;
   readonly fractionLost?: number;
   readonly localId?: string;
+  // outbound-rtp: false when this simulcast layer is not being sent (dynacast
+  // pauses the layers nobody takes).
+  readonly active?: boolean;
 }
 
 const count = (n: number | undefined): n is number => n !== undefined && Number.isFinite(n) && n >= 0;
@@ -563,7 +566,8 @@ export function shareSample(stats: Iterable<ShareStats>, direction: ShareDirecti
   if (found === null) return null;
   const bytes = direction === 'received' ? found.bytesReceived : found.bytesSent;
   const limitation = limitationOf(found.qualityLimitationReason);
-  const lost = direction === 'received' ? receivedLoss(found) : sentLoss(all, found);
+  const lost = direction === 'received' ? undefined : sentLoss(all, found);
+  const paused = direction === 'sent' && all.some((stat) => stat.type === 'outbound-rtp' && stat.kind !== 'audio' && stat.mediaType !== 'audio' && stat.active === false);
   const capture = direction === 'sent' && captured !== undefined ? capturedOf(captured) : undefined;
   const stream = found.id !== undefined || found.ssrc !== undefined ? `${found.id ?? ''}/${found.ssrc === undefined ? '' : String(found.ssrc)}` : undefined;
   return {
@@ -576,6 +580,8 @@ export function shareSample(stats: Iterable<ShareStats>, direction: ShareDirecti
     ...(count(found.timestamp) ? { timestamp: found.timestamp } : {}),
     ...(limitation === undefined || direction === 'received' ? {} : { limitation }),
     ...(lost === undefined ? {} : { lost }),
+    ...(direction === 'received' && count(found.packetsReceived) && count(found.packetsLost) ? { packetsReceived: found.packetsReceived, packetsLost: found.packetsLost } : {}),
+    ...(paused ? { paused } : {}),
     ...(capture === undefined ? {} : { captured: capture }),
   };
 }
@@ -586,11 +592,17 @@ function limitationOf(reason: string | undefined): ShareLimitation | undefined {
   return reason === 'none' || reason === 'cpu' || reason === 'bandwidth' || reason === 'other' ? reason : undefined;
 }
 
-// The lost share of what a viewer was sent, from inbound-rtp's counters.
-function receivedLoss(stat: ShareStats): number | undefined {
-  if (!count(stat.packetsLost) || !count(stat.packetsReceived)) return undefined;
-  const total = stat.packetsReceived + stat.packetsLost;
-  return total === 0 ? undefined : stat.packetsLost / total;
+// The lost share of what a viewer was sent over the interval between two
+// samples of one stream, from inbound-rtp's counters, as the sender's loss is
+// per interval too. None without a usable earlier sample or any packets.
+function receivedLoss(current: ShareSample, previous: ShareSample | null | undefined): number | undefined {
+  if (previous === null || previous === undefined) return undefined;
+  if (previous.stream !== current.stream || previous.publication !== current.publication) return undefined;
+  if (current.packetsReceived === undefined || current.packetsLost === undefined || previous.packetsReceived === undefined || previous.packetsLost === undefined) return undefined;
+  const received = current.packetsReceived - previous.packetsReceived;
+  const lost = current.packetsLost - previous.packetsLost;
+  if (received < 0 || lost < 0 || received + lost === 0) return undefined;
+  return lost / (received + lost);
 }
 
 // The sender's view of loss on the stream it sent: the remote-inbound-rtp
@@ -620,7 +632,8 @@ function capturedOf(settings: NonNullable<ShareSample['captured']>): ShareSample
 export function shareReadout(current: ShareSample | null, previous?: ShareSample | null): string | null {
   if (current === null) return null;
   let text = `${String(current.width)}×${String(current.height)} · ${String(Math.round(current.fps))} fps`;
-  const loss = current.lost === undefined ? '' : ` · ${lossText(current.lost)} lost`;
+  const share = current.lost ?? receivedLoss(current, previous);
+  const loss = share === undefined ? '' : ` · ${lossText(share)} lost`;
   if (previous?.bytes === undefined || previous.timestamp === undefined || current.bytes === undefined || current.timestamp === undefined) return text + loss;
   if (previous.stream !== current.stream || previous.publication !== current.publication) return text + loss;
   const elapsed = current.timestamp - previous.timestamp;
@@ -671,17 +684,22 @@ export function shortfallReason(sample: ShareSample, quality: ShareQuality): str
   const asked = quality.resolution === 'source' ? null : ask;
   const long = Math.max(sample.width, sample.height);
   const small = Math.min(sample.width, sample.height);
-  const underSize = asked !== null && long < Math.max(asked.width, asked.height) * sizeSlack && small < Math.min(asked.width, asked.height) * sizeSlack;
-  const slow = sample.limitation !== 'none' && sample.fps < ask.frameRate * fpsFloor;
-  if (!underSize && !slow) return null;
+  const under = asked !== null && long < Math.max(asked.width, asked.height) * sizeSlack && small < Math.min(asked.width, asked.height) * sizeSlack;
+  // What is captured is itself smaller than asked: a small window or screen.
   const cap = sample.captured;
-  if (asked !== null && underSize && cap?.width !== undefined && cap.height !== undefined) {
-    const capLong = Math.max(cap.width, cap.height);
-    const capShort = Math.min(cap.width, cap.height);
-    if (capLong < Math.max(asked.width, asked.height) * sizeSlack && capShort < Math.min(asked.width, asked.height) * sizeSlack) {
-      return `The shared window is smaller than ${quality.resolution}`;
-    }
-  }
+  const captureSmall =
+    asked !== null && cap?.width !== undefined && cap.height !== undefined &&
+    Math.max(cap.width, cap.height) < Math.max(asked.width, asked.height) * sizeSlack &&
+    Math.min(cap.width, cap.height) < Math.min(asked.width, asked.height) * sizeSlack;
+  // A smaller picture the encoder says it is not limiting, or one whose top
+  // layer is paused, is the sender doing what the viewers asked: dynacast
+  // stops the layers nobody takes, and viewers who are not focused on the
+  // stream take the lowest. Only a smaller capture still explains a size gap.
+  const asRequested = sample.paused === true || sample.limitation === 'none';
+  const underSize = under && (captureSmall || !asRequested);
+  const slow = sample.paused !== true && sample.limitation !== 'none' && sample.fps < ask.frameRate * fpsFloor;
+  if (!underSize && !slow) return null;
+  if (underSize && captureSmall) return `What you're sharing is smaller than ${quality.resolution}`;
   if (sample.limitation === 'cpu') return 'Limited by CPU';
   if (sample.limitation === 'bandwidth') return 'Limited by bandwidth';
   return "Your browser doesn't say why";

@@ -65,9 +65,16 @@ export interface ShareSample {
   // qualityLimitationReason), where the engine says. Absent where it does not.
   readonly limitation?: ShareLimitation;
   // Share of packets lost, 0 to 1: the receiver's report on the sent top layer
-  // (remote-inbound-rtp), or the lost share of a received stream. Absent where
+  // (remote-inbound-rtp), per interval. Absent where
   // the engine does not say.
   readonly lost?: number;
+  // A viewer's packet counters, from which a readout takes loss over the
+  // interval between two samples.
+  readonly packetsReceived?: number;
+  readonly packetsLost?: number;
+  // The sender's top layer is not being sent (every viewer takes a lower
+  // layer): a smaller picture then is not a shortfall.
+  readonly paused?: boolean;
   // The capture's own size and rate (getSettings) of the sender's screen, when
   // the browser reports them. A sent sample only.
   readonly captured?: { readonly width?: number; readonly height?: number; readonly fps?: number };

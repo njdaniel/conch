@@ -41,6 +41,12 @@ export function ShareReadout({ client, direction, principal, prefix = '', asked,
   quality.current = asked;
   const clock = useRef(now);
   clock.current = now;
+  // A new ask starts the explanation over: a reason found against the old one
+  // must not outlast the change.
+  useEffect(() => {
+    shortfall.current = noShortfall;
+    setReason(null);
+  }, [asked?.resolution, asked?.frameRate]);
   useEffect(() => {
     let live = true;
     let timer: number | null = null;

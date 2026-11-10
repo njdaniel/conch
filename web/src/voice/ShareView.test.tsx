@@ -806,6 +806,30 @@ describe('ShareReadout over time', () => {
     expect(line()).toBe('Asked 1080p · 60 fps. Sending: 1920×1080 · 60 fps');
   });
 
+  it('a changed ask starts the explanation over', async () => {
+    vi.useFakeTimers();
+    let clock = 0;
+    // 1280×720 from a 1080p capture on a CPU-limited encoder.
+    const samples: { current: ShareSample | null } = { current: { width: 1280, height: 720, fps: 30, limitation: 'cpu', captured: { width: 1920, height: 1080 } } };
+    const source = client(samples);
+    const view = render(<ShareReadout client={source} direction="sent" prefix="Sending: " asked={{ resolution: '1080p', frameRate: 30 }} now={() => clock} />);
+    for (let spent = 0; spent <= 6000; spent += 1000) {
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1000);
+      });
+      clock += 1000;
+    }
+    const line = () => view.getByRole('status', { name: 'Share quality' }).textContent;
+    expect(line()).toContain('Limited by CPU');
+    // The sharer lowers the ask to what is sent: the old reason goes at once.
+    view.rerender(<ShareReadout client={source} direction="sent" prefix="Sending: " asked={{ resolution: '720p', frameRate: 30 }} now={() => clock} />);
+    expect(line()).toBe('Asked 720p · 30 fps. Sending: 1280×720 · 30 fps');
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3000);
+    });
+    expect(line()).not.toContain('Limited');
+  });
+
   it('without an asked quality it is the measurement alone, and never a reason', async () => {
     vi.useFakeTimers();
     const samples: { current: ShareSample | null } = { current: { width: 1280, height: 720, fps: 3, limitation: 'cpu', lost: 0.005 } };

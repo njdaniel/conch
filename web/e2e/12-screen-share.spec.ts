@@ -397,21 +397,53 @@ test.describe('screen share with LiveKit', () => {
       // runner falls short, and only then.
       let outcome = 'on target';
       // Samples in a row on target (the rate at 80% of 60 or more, at full
-      // size): the reason clears 5 s after recovery, so a run of 7 on target
-      // must show none.
+      // size; the component compares the unrounded rate, so 49 shown is
+      // safely above 47.99): the reason clears 5 s after recovery and the
+      // sampling is about a second apart, so a run of 9 on target must show
+      // none.
       let steady = 0;
-      for (let i = 0; i < 14; i++) {
+      for (let i = 0; i < 16; i++) {
         await a.page.waitForTimeout(1000);
         const text = (await line.textContent()) ?? '';
         const sent = /Sending: (\d+)×(\d+) · (\d+) fps/.exec(text);
         const reason = /Limited by (CPU|bandwidth)|smaller than|doesn't say why/.exec(text)?.[0];
         if (reason !== undefined) outcome = `reason: ${reason}`;
-        const onTarget = sent !== null && Number(sent[3]) >= 48 && Number(sent[1]) === 1920 && Number(sent[2]) === 1080;
+        const onTarget = sent !== null && Number(sent[3]) >= 49 && Number(sent[1]) === 1920 && Number(sent[2]) === 1080;
         steady = onTarget ? steady + 1 : 0;
-        if (steady >= 7) expect(reason, 'a reason never shows while on target').toBeUndefined();
+        if (steady >= 9) expect(reason, 'a reason never shows while on target').toBeUndefined();
       }
       test.info().annotations.push({ type: 'readout', description: `${outcome}: ${(await line.textContent()) ?? ''}` });
       await voice.getByRole('button', { name: 'Stop sharing' }).click();
+      await expect.poll(async () => (await shareRows()).at(-1)?.action, { timeout: 15_000 }).toBe('voice_share_stopped');
+      await expectClean(a);
+      await expectClean(b);
+    } finally {
+      for (const p of [a, b]) await p.close();
+    }
+  });
+
+  // Issue #1660, review: an unfocused viewer holds the top layer to the lowest,
+  // dynacast stops it, and the sent picture is a lower layer. That is the
+  // sender doing what viewers asked, not a shortfall: no reason shows.
+  test('a share every viewer holds unfocused shows no reason for the smaller layer', async ({ browser }) => {
+    const a = await person(browser, 'alice');
+    const b = await person(browser, 'bob');
+    try {
+      await join(a, 'Join voice');
+      await join(b, 'Watch only');
+      await share(a);
+      await watching(b);
+      const line = voiceRegion(a.page).getByRole('status', { name: 'Share quality' });
+      await expect(line).toContainText('Asked 1080p · 30 fps', { timeout: 30_000 });
+      await expect(line).toContainText(/Sending: \d+×\d+ · \d+ fps/, { timeout: 30_000 });
+      // Past the 5 s hold and well beyond.
+      for (let i = 0; i < 12; i++) {
+        await a.page.waitForTimeout(1000);
+        const text = (await line.textContent()) ?? '';
+        expect(text, 'no reason for a layer nobody takes').not.toMatch(/Limited by|smaller than|doesn't say why/);
+      }
+      test.info().annotations.push({ type: 'readout', description: (await line.textContent()) ?? '' });
+      await voiceRegion(a.page).getByRole('button', { name: 'Stop sharing' }).click();
       await expect.poll(async () => (await shareRows()).at(-1)?.action, { timeout: 15_000 }).toBe('voice_share_stopped');
       await expectClean(a);
       await expectClean(b);
