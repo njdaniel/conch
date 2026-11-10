@@ -11,7 +11,7 @@ LINT    = golangci-lint
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null)
 LDFLAGS  = -X main.version=$(VERSION)
 
-.PHONY: build test lint vet fmt fmt-check invisible-check check schema-compat schema-ts emoji-catalog depgate go-scope deploy-test agent-claim-test rust-check rust-build web-node web-check web-build web-embed build-web-embedded web-e2e desktop-node desktop-check desktop-build desktop-deb desktop-smoke desktop-voice-it desktop-voice-e2e p3-local p3-reset hooks-install clean
+.PHONY: build test lint vet fmt fmt-check invisible-check check schema-compat schema-ts emoji-catalog depgate go-scope deploy-test agent-claim-test rust-check rust-build web-node web-check web-build web-embed build-web-embedded web-e2e desktop-node desktop-check desktop-build desktop-deb desktop-deb-lifecycle desktop-smoke desktop-voice-it desktop-voice-e2e p3-local p3-reset hooks-install clean
 
 build:
 	$(GO) build ./...
@@ -149,6 +149,15 @@ desktop-deb: desktop-node
 	DESKTOP_REQUIRE_VOICE=1 ./scripts/desktop-build.sh
 	./scripts/desktop-deb.sh
 	./scripts/desktop-deb-test.sh desktop/dist/conch-desktop_*_amd64.deb
+
+# Installs, upgrades, removes and purges the .deb in a clean ubuntu:24.04
+# container (issue #1599). With no argument it builds two fixture packages;
+# `make desktop-deb-lifecycle DEB_OLD=a.deb DEB_NEW=b.deb` uses real ones (NEW
+# a higher version). Needs Docker and network (apt fetches the Depends). Without
+# Docker it says SKIPPED and why; with CI set it fails. Never runs the app.
+# Not part of `make check`.
+desktop-deb-lifecycle:
+	./scripts/desktop-deb-lifecycle.sh $(if $(DEB_OLD)$(DEB_NEW),"$(DEB_OLD)" "$(DEB_NEW)")
 
 # The packaged smoke test: drives the built app over Chromium's remote-debugging
 # port (desktop/tests/smoke/launch.ts says why). Needs a display: CI runs it

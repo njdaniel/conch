@@ -87,6 +87,7 @@ function safeOwner(uid: number, own: number): boolean {
 // writable by group or others, in a directory with the same ownership and
 // write rules. A missing file is not-installed; anything else that fails is
 // untrusted, and nothing else is tried in its place.
+// scripts/desktop-deb-lifecycle.sh check_helper mirrors these rules; change both.
 export async function findHelper(resources: string, deps: FindDeps = {}): Promise<string> {
   if (!isAbsolute(resources) || resources.includes('\0')) throw new HelperError('untrusted', 'the resources directory is not an absolute path');
   const own = deps.uid ?? (typeof process.getuid === 'function' ? process.getuid() : -1);
