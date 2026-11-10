@@ -15,6 +15,11 @@ declare module 'node:fs' {
   export function writeFileSync(path: string, data: Uint8Array | string): void;
 }
 
+declare module 'node:crypto' {
+  // HMAC-SHA256 over a string, for the LiveKit admin token (livekit-admin.ts).
+  export function createHmac(algorithm: 'sha256', key: string): { update(data: string): { digest(): Uint8Array } };
+}
+
 declare module 'node:url' {
   export function fileURLToPath(url: URL | string): string;
 }

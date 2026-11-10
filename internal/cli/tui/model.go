@@ -213,6 +213,8 @@ type Model struct {
 	channels []string
 	// channelIDs lets a refresh follow a channel whose name changed.
 	channelIDs map[string]int64
+	// channelTopics is the one-line topic of each channel from the last list.
+	channelTopics map[string]string
 	// subs holds each channel's message socket and its generation.
 	subs *subscriptions
 	// archivedAt holds each archived channel's timestamp. Map presence marks an
@@ -436,7 +438,7 @@ func NewModel(ctx context.Context, api API, authorID int64, channels []string) M
 		}
 	}
 	m := Model{ctx: ctx, api: api, authorID: authorID,
-		channelIDs: make(map[string]int64), subs: newSubscriptions(), archivedAt: make(map[string]*time.Time),
+		channelIDs: make(map[string]int64), channelTopics: make(map[string]string), subs: newSubscriptions(), archivedAt: make(map[string]*time.Time),
 		messages: make(map[string][]schema.MessageV2), nets: make(map[string][]schema.NetV1), members: make(map[string]map[int64]schema.ChannelMemberV1), memberRevision: make(map[string]uint64), now: time.Now, subscribed: make(map[string]bool),
 		events: make(chan tea.Msg, 64), mode: modeChannels,
 		backoff: make(map[string]time.Duration), retryPending: make(map[string]bool), after: tickAfter, wrapped: &wrappedBody{},
@@ -1373,9 +1375,11 @@ func (m Model) channelsLoadDone(msg channelsLoaded) (tea.Model, tea.Cmd) {
 	names := make([]string, 0, len(channels))
 	ids := make([]int64, 0, len(channels))
 	nextArchived := make(map[string]*time.Time)
+	nextTopics := make(map[string]string, len(channels))
 	for _, channel := range channels {
 		names = append(names, channel.Name)
 		ids = append(ids, channel.ID)
+		nextTopics[channel.Name] = channel.Topic
 		if channel.ArchivedAt != nil {
 			nextArchived[channel.Name] = channel.ArchivedAt
 		}
@@ -1410,6 +1414,7 @@ func (m Model) channelsLoadDone(msg channelsLoaded) (tea.Model, tea.Cmd) {
 	if !msg.refresh {
 		m.channels = names
 		m.channelIDs = nextIDs
+		m.channelTopics = nextTopics
 		m.archivedAt = nextArchived
 		m.selected = defaultSelection(names)
 		m.notice = ""
@@ -1447,6 +1452,7 @@ func (m Model) channelsLoadDone(msg channelsLoaded) (tea.Model, tea.Cmd) {
 	}
 	m.channels = names
 	m.channelIDs = nextIDs
+	m.channelTopics = nextTopics
 	m.archivedAt = nextArchived
 	m.channelsErr = nil
 	// The names move with the revision, in one step: a read begun from here

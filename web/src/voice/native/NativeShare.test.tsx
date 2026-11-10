@@ -279,6 +279,25 @@ describe('the others’ streams', () => {
     expect(t.calls).toEqual(['focus 2', 'watchStream 2 false']);
   });
 
+  // Issue #1512 (voice-multi-share.md §7.4): the companion is the one playback
+  // owner of every watched stream's sound, so each watched tile has the sound
+  // controls of its own, and one tile's mute leaves the other's alone.
+  it('several watched streams each have their own mute and volume, and the unwatched one only Watch', () => {
+    const many: ReadonlyMap<number, Person> = new Map([[2, { name: 'Ada' } as Person], [3, { name: 'Bo' } as Person], [4, { name: 'Cy' } as Person]]);
+    const t = fake({ phase: 'connected', companion: true, watched: new Set([2, 3]), focusedShare: 2 });
+    render(<NativeStreams companion={t.companion} presence={presenceWith(2, 3, 4)} viewer={1} people={many} joined="general" live />);
+    expect(screen.getAllByRole('region', { name: 'Shared screen' })).toHaveLength(2);
+    expect(screen.getAllByLabelText('Share volume')).toHaveLength(2);
+    const mutes = screen.getAllByRole<HTMLButtonElement>('button', { name: 'Mute share' });
+    expect(mutes).toHaveLength(2);
+    fireEvent.click(mutes[0] as HTMLButtonElement);
+    expect(screen.getAllByRole('button', { name: 'Unmute share' })).toHaveLength(1);
+    expect(screen.getAllByRole('button', { name: 'Mute share' })).toHaveLength(1);
+    const cy = screen.getByRole('region', { name: "Cy's stream" });
+    expect(within(cy).getByRole('button', { name: 'Watch' })).toBeTruthy();
+    expect(within(cy).queryByLabelText('Share volume')).toBeNull();
+  });
+
   it('focus on the focused stream lets it go', () => {
     const t = fake({ phase: 'connected', companion: true, watched: new Set([2]), focusedShare: 2 });
     tiles(t.companion, presenceWith(2));

@@ -1,0 +1,88 @@
+# The heavy browser lane (issue #1613, epic #1607): the tests tagged @heavy,
+# which the pull request lane (web-e2e in ci.yml, --grep-invert @heavy) never
+# runs. A test is @heavy when it is over the PR budget or is a deliberate fault
+# or blackhole test; docs/testing.md has the tags, the budget and the flake and
+# artifact policies.
+#
+# It runs on a daily schedule (GitHub runs schedules on the default branch
+# only) and on demand: workflow_dispatch runs the workflow file of the branch
+# picked in "Use workflow from", on that branch's code, so a pull request's
+# author can run the heavy lane on their branch. It never targets production
+# or alpha: like web-e2e, the suite starts its own throwaway conchd and
+# LiveKit. GitHub-hosted ubuntu-latest, not the self-hosted HEAVY_RUNNER path.
+name: e2e-heavy
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+# Read-only: nothing here writes to the repository, an issue or a pull request.
+permissions:
+  contents: read
+
+# Its own group, never the pull request lane's. A second run on the same ref
+# queues behind the running one instead of cancelling it. GitHub keeps only one
+# pending run per group, so a third dispatch cancels the queued second.
+concurrency:
+  group: e2e-heavy-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  e2e-heavy:
+    # Forks inherit the schedule; only the main repository runs it.
+    if: github.repository == 'njdaniel/conch'
+    runs-on: ubuntu-latest
+    # Generous for the heavy tests, short of runaway minutes.
+    timeout-minutes: 40
+    env:
+      # Labels this run's LiveKit container, so the clean-up step below removes
+      # only its own (web/e2e/voice-world.ts reads it).
+      VOICE_CHECK_RUN: heavy-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: web/.nvmrc
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: install
+        working-directory: web
+        run: npm ci --no-audit
+
+      - name: browser
+        working-directory: web
+        run: npx playwright install --with-deps chromium
+
+      # --pass-with-no-tests: until the first @heavy test lands (#1608) there
+      # is nothing to run, and that is a green run, not a failure. retries stay
+      # 0, as in the pull request lane (the flake policy is in docs/testing.md).
+      - name: web-e2e (heavy)
+        run: make web-e2e E2E_ARGS="--grep @heavy --pass-with-no-tests"
+
+      # The specs remove their own container on every path; this is for the
+      # case where the runner killed it. Only the container of this run.
+      - name: remove any leftover LiveKit container
+        if: always()
+        run: docker ps -aq --filter "label=conch-web-voice=$VOICE_CHECK_RUN" | xargs -r docker rm -f
+
+      # As in web-e2e: the traces hold this run's throwaway fixture
+      # credentials, and the world was torn down by `make web-e2e` before this
+      # step, so they open nothing. Playwright cannot redact a trace. No
+      # conchd or LiveKit log is uploaded unless it has been passed through
+      # the world's secret list.
+      # cancelled() too: a run that hits timeout-minutes is cancelled, not failed.
+      - name: traces of the failed tests
+        if: failure() || cancelled()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-heavy-test-results
+          path: web/test-results
+          retention-days: 7
+          if-no-files-found: ignore

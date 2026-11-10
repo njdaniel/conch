@@ -12,6 +12,7 @@ import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Page } from '@playwright/test';
+import { listIdentities } from './livekit-admin';
 import { repoRoot, safePath, type World } from './world';
 
 // The same image, by version and digest, as e2e/internal/lkit/kit.go (which
@@ -27,6 +28,13 @@ function docker(args: string[], env?: Record<string, string | undefined>): { ok:
   const r = spawnSync('docker', args, { encoding: 'utf8', timeout: 120_000, ...(env === undefined ? {} : { env }) });
   return { ok: r.status === 0, out: `${r.stdout}${r.stderr}`.trim() };
 }
+
+// The room timeouts of the livekit.yaml below, in milliseconds, and the longest
+// LiveKit may then take to list nobody once the last connection is gone: the
+// two run in turn at worst, plus a stated margin of 10 s for a loaded runner.
+const livekitEmptyTimeout = 5_000;
+const livekitDepartureTimeout = 5_000;
+export const emptiesWithin = livekitEmptyTimeout + livekitDepartureTimeout + 10_000;
 
 const random = (n: number) => Math.floor(Math.random() * n);
 const hex = (n: number) => Array.from({ length: n }, () => random(16).toString(16)).join('');
@@ -124,6 +132,21 @@ export interface VoiceWorld {
   // them (issue #516): a disabled principal's credentials never work again,
   // so the three above are not used for that.
   addMember: (name: string) => Promise<Member>;
+  // n more separate principals, each in the channel with a credential of its
+  // own (issue #1608), named for the call so that two calls do not collide.
+  // Their credentials are added to secrets.
+  members: (n: number) => Promise<Member[]>;
+  // LiveKit's own list of who is connected, asked of LiveKit directly with the
+  // world's API secret (livekit-admin.ts): every participant identity in every
+  // room, sorted, a person connected twice listed twice. conchd's identities
+  // are "p<principal id>", with ".screen" or ".view" for a companion. Room
+  // names are never returned, and an error carries an HTTP status only.
+  participants: () => Promise<string[]>;
+  // Freezes the LiveKit container's processes (docker pause) and thaws them:
+  // the server stops answering without closing a socket, as an unreachable
+  // host does (issue #1612). Always unpause before stop.
+  pauseLiveKit: () => void;
+  unpauseLiveKit: () => void;
   // An operator disables a principal: conchd renews every voice room they
   // are in.
   disable: (member: Member) => Promise<void>;
@@ -167,8 +190,8 @@ rtc:
   use_external_ip: false
 room:
   auto_create: false
-  empty_timeout: 5
-  departure_timeout: 5
+  empty_timeout: ${String(livekitEmptyTimeout / 1000)}
+  departure_timeout: ${String(livekitDepartureTimeout / 1000)}
 `;
       mkdirSync(join(dir, 'livekit'), { recursive: true });
       writeFileSync(join(dir, 'livekit', 'livekit.yaml'), config);
@@ -236,6 +259,7 @@ room:
     const carol = await member('carol');
     const secrets = [operator, alice.token, bob.token, carol.token, secret];
     let fromSessions = 0;
+    let made = 0;
 
     return {
       origin,
@@ -269,6 +293,25 @@ room:
         const m = await member(name);
         secrets.push(m.token);
         return m;
+      },
+      members: async (n) => {
+        const batch = ++made;
+        const out: Member[] = [];
+        for (let i = 1; i <= n; i++) {
+          const m = await member(`extra${String(batch)}x${String(i)}`);
+          secrets.push(m.token);
+          out.push(m);
+        }
+        return out;
+      },
+      participants: () => listIdentities(`http://127.0.0.1:${String(httpPort)}`, key, secret),
+      pauseLiveKit: () => {
+        const r = docker(['pause', container]);
+        if (!r.ok) throw new Error(`docker pause: ${r.out}`);
+      },
+      unpauseLiveKit: () => {
+        const r = docker(['unpause', container]);
+        if (!r.ok) throw new Error(`docker unpause: ${r.out}`);
       },
       disable: async (m) => {
         await must(`disable ${m.name}`, operator, 'POST', `/v1/principals/${String(m.id)}/disable`);
