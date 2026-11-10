@@ -95,7 +95,7 @@ fails naming the version otherwise). Only `npm ci` installs.
 
 ```sh
 make desktop-check   # gates, npm ci, typecheck, lint, unit tests; part of make check
-make desktop-build   # fetch Electron, build, pack: desktop/dist/linux-unpacked/conch
+make desktop-build   # fetch Electron, build, pack: desktop/dist/linux-unpacked/conch-desktop
 make desktop-smoke   # drive that app; needs a display
 ```
 
@@ -106,7 +106,7 @@ nothing is looked up on `PATH`. A `bin/conch-voice` older than any file under
 `voice/` is refused as not built from this tree. With no helper the build
 succeeds and says "built without the voice helper" (the app shows voice
 unavailable, text works); `DESKTOP_REQUIRE_VOICE=1` makes that a failure. The
-`.deb` and release versioning are #774. CI's `desktop-smoke` job builds without
+`.deb` is `make desktop-deb` (below). CI's `desktop-smoke` job builds without
 the helper today, so the smoke test's presence and mode checks run only on a
 machine that built `bin/conch-voice`; `desktop/tests/unit/voice-bundle.test.ts`
 covers the copy and `findHelper` in CI.
@@ -128,7 +128,58 @@ The web client is built by web's own Vite with `--base /` into `out/ui`; no
 file under `web/` changes and `web/dist` is not touched. `scripts/desktop-web-dist-check.sh` and the
 CI job check that no desktop code is in the browser build.
 
-Run the unpacked app by hand: `desktop/dist/linux-unpacked/conch`.
+Run the unpacked app by hand: `desktop/dist/linux-unpacked/conch-desktop`.
+
+### The `.deb`
+
+```sh
+make desktop-deb     # build in release mode, pack and check: desktop/dist/conch-desktop_<version>_amd64.deb
+CONCH_RELEASE_VERSION=v0.1.0-alpha.18 make desktop-deb   # the release package, version 0.1.0~alpha.18
+```
+
+`scripts/desktop-deb.sh` packs `dist/linux-unpacked` with `dpkg-deb
+--root-owner-group` (needs `dpkg-dev`; it installs nothing and never runs as
+root) and refuses to run without `resources/conch-voice`. The decisions are
+Nick's, recorded on #1595:
+
+- The tree is installed root-owned at `/opt/conch-desktop`, with `resources/conch-voice` at 0755
+  (`findHelper` accepts a root-owned install). `/usr/bin/conch-desktop` links to
+  `/opt/conch-desktop/conch-desktop`; `conch` stays the CLI.
+- The desktop file is `chat.conch.desktop.desktop` (`Exec=conch-desktop %U`,
+  `StartupWMClass=conch-desktop`, `desktopName` in `package.json`), with
+  placeholder icons from `build/icons/` under `hicolor/<size>x<size>/apps`. No
+  `MimeType` is set: the app registers no URL scheme.
+- The sandbox stays on and there is **no setuid `chrome-sandbox`** (left out of the package):
+  `/etc/apparmor.d/conch-desktop` (a conffile) gives the one executable the `userns`
+  permission, for systems that restrict unprivileged user namespaces (Ubuntu 23.10
+  and later). `postinst` loads it, and refreshes the desktop and icon caches;
+  `postrm` unloads it. All of it is best effort. On an older AppArmor that cannot parse it,
+  the install says so and goes on (user namespaces are unrestricted there).
+- **The package needs AppArmor 4 and an Ubuntu 24.04-class system** (the profile
+  is `abi <abi/4.0>`; the control description says so). If `apparmor_parser` cannot
+  load it, `postinst` says plainly that the profile cannot load on this host and that
+  the app will not start where user namespaces are restricted, and the install goes on.
+- Nothing in the package is a udev rule, a group change, `setcap` or setuid, and
+  nothing is group- or other-writable. The talk-key permission stays an explicit step
+  the app shows (#1381).
+- `Depends` is computed by `dpkg-shlibdeps` from the ELF files in the tree, on the
+  machine that builds, so it names that machine's library packages: build releases on the oldest
+  system that should install them.
+- Two builds of one commit are byte-identical (`SOURCE_DATE_EPOCH` is the commit
+  time, entries are sorted by `dpkg-deb`, modes are set by the script).
+- The version is the release tag (`scripts/desktop-version.sh deb`). Updates are manual: install the
+  newer `.deb`.
+
+`scripts/desktop-deb-test.sh <deb>` checks a built package (`make desktop-deb`
+runs it); with no argument it builds packages from a fixture tree, checks them,
+and breaks them one way at a time to show that each check can fail (it is part
+of `make desktop-check`). Beyond modes and owners it pins the two things that run
+as root or change host policy: the AppArmor profile's rules must equal the expected
+lines exactly (no wider attachment, no added `capability` or `mount`), and the control
+members must be exactly `control conffiles postinst postrm`, with `postinst` and
+`postrm` byte-identical to `desktop/build/deb/`. It also requires one `Exec=` line and
+no `MimeType=` or `Actions=` in the desktop file, no `chrome-sandbox`, and no symlink
+but `/usr/bin/conch-desktop`.
 
 ### The smoke test
 
