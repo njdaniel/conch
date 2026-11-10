@@ -714,9 +714,19 @@ func TestMCPReadChannelCarriesTheTopic(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreatePrincipal outsider: %v", err)
 	}
+	// A member whose manifest grants no read in the channel (security review
+	// of #1709): in the channel, yet refused, and so told no topic.
+	unread, err := srv.store.CreatePrincipal(ctx, store.PrincipalAgent, "agent-brown")
+	if err != nil {
+		t.Fatalf("CreatePrincipal unread: %v", err)
+	}
 	grantAgent(t, srv, agent.ID, channel.ID)
 	setAgentManifest(t, srv, outsider.ID, nil)
-	srv.cfg.MCPBearerTokens = map[string]int64{"token-1": agent.ID, "token-out": outsider.ID}
+	if _, err := srv.store.AddChannelMember(ctx, "system", channel.ID, unread.ID, 0); err != nil {
+		t.Fatalf("AddChannelMember unread: %v", err)
+	}
+	setAgentManifest(t, srv, unread.ID, nil)
+	srv.cfg.MCPBearerTokens = map[string]int64{"token-1": agent.ID, "token-out": outsider.ID, "token-unread": unread.ID}
 
 	// read returns the structured content of one read_channel call as raw
 	// JSON, so a missing key is told from an empty one.
@@ -773,23 +783,26 @@ func TestMCPReadChannelCarriesTheTopic(t *testing.T) {
 	}
 
 	// An agent with no read in the channel is refused as before, and nothing
-	// it is sent names the topic.
+	// it is sent names the topic: one outside the channel, and one in it
+	// whose manifest grants it no read there.
 	setTopic(t, "Secret plans")
 	body, err := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": map[string]any{"name": "read_channel", "arguments": map[string]any{"channel": "general"}}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewReader(body))
-	req.Header.Set("Authorization", "Bearer token-out")
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/json, text/event-stream")
-	srv.Handler().ServeHTTP(rec, req)
-	if !strings.Contains(rec.Body.String(), `"isError":true`) {
-		t.Fatalf("an agent outside the channel was not refused: %s", rec.Body)
-	}
-	if strings.Contains(rec.Body.String(), "Secret plans") {
-		t.Fatalf("the refusal names the topic: %s", rec.Body)
+	for _, refused := range []struct{ who, token string }{{"an agent outside the channel", "token-out"}, {"a member with no read in its manifest", "token-unread"}} {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewReader(body))
+		req.Header.Set("Authorization", "Bearer "+refused.token)
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Accept", "application/json, text/event-stream")
+		srv.Handler().ServeHTTP(rec, req)
+		if !strings.Contains(rec.Body.String(), `"isError":true`) {
+			t.Fatalf("%s was not refused: %s", refused.who, rec.Body)
+		}
+		if strings.Contains(rec.Body.String(), "Secret plans") {
+			t.Fatalf("the refusal of %s names the topic: %s", refused.who, rec.Body)
+		}
 	}
 }
 
