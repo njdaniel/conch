@@ -536,6 +536,11 @@ export interface DesktopSettingsView {
   readonly launchAtLogin: boolean;
   // Whether a working tray exists right now.
   readonly trayWorking: boolean;
+  // Whether a tray host is on the session bus right now: the choice can be
+  // made only then.
+  readonly trayDetected: boolean;
+  // Whether the person has confirmed, this run, that they can see the icon.
+  readonly trayConfirmed: boolean;
   // Whether this build may set launch at login (an installed build may).
   readonly launchAvailable: boolean;
   // Why not, when it is not: an unpackaged run, or an app that sits where
@@ -546,11 +551,13 @@ export interface DesktopSettingsView {
 export interface SettingsChange {
   readonly closeToTray?: boolean;
   readonly launchAtLogin?: boolean;
+  // The answer to "Can you see the Conch icon in your panel?" (Q-D5-2).
+  readonly trayConfirmed?: boolean;
 }
 
 export type SettingsResult =
   | { readonly ok: true; readonly view: DesktopSettingsView }
-  | { readonly ok: false; readonly reason: 'unpackaged' | 'unsafe-location' | 'foreign-file' | 'failed' };
+  | { readonly ok: false; readonly reason: 'unpackaged' | 'unsafe-location' | 'foreign-file' | 'no-tray' | 'failed' };
 
 export interface DesktopSettingsBridge {
   settings(): Promise<DesktopSettingsView>;

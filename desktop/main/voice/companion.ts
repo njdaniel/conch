@@ -217,6 +217,7 @@ export class Companion {
   readonly #sleep: (ms: number) => Promise<void>;
   #held: Held | null = null;
   #asking: Asking | null = null;
+  readonly #changed = new Set<() => void>();
   // Counts ends and stops: a request begun before one is overtaken by it.
   #epoch = 0;
 
@@ -231,6 +232,25 @@ export class Companion {
     deps.voice.subscribe((view) => {
       this.#onVoice(view);
     });
+  }
+
+  // onChange calls the listener whenever a companion becomes live or ends, so
+  // the tray can follow "Sharing your screen". It returns the remover.
+  onChange(listener: () => void): () => void {
+    this.#changed.add(listener);
+    return () => {
+      this.#changed.delete(listener);
+    };
+  }
+
+  #announce(): void {
+    for (const listener of [...this.#changed]) {
+      try {
+        listener();
+      } catch {
+        // A listener's failure is not the companion's.
+      }
+    }
   }
 
   // liveOrigin is the LiveKit origin of the live grant, or null when no
@@ -310,6 +330,9 @@ export class Companion {
       // A window that cannot be told is not a reason to drop the grant.
     }
     this.#deps.log('companion: issued');
+    // After the window was told and the grant is held: a listener (the tray)
+    // sees the live companion, never one that has already ended.
+    this.#announce();
     return shareUnavailable === null ? { ok: true, grant: given.grant } : { ok: true, grant: given.grant, shareUnavailable };
   }
 
@@ -322,6 +345,9 @@ export class Companion {
     const held = this.#held;
     if (held === null) return false;
     this.#held = null;
+    // Ended is called above, before the record goes: no listener sees a held
+    // grant after it.
+    this.#announce();
     const closing = this.#close();
     const removed = await this.#remove(held.client, held.channel, 'stopped');
     await closing;
@@ -339,6 +365,7 @@ export class Companion {
     const held = this.#held;
     if (held === null) return false;
     this.#held = null;
+    this.#announce();
     try {
       this.#deps.tell(held.document, { type: 'end', reason });
     } catch {

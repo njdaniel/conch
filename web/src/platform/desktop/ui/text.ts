@@ -98,15 +98,19 @@ export const settingsText = {
   closeQuit: 'Quit Conch',
   closeTray: 'Keep running in the tray',
   noTray: 'No tray is available on this desktop',
+  trayAsk: 'Can you see the Conch icon in your panel?',
+  trayYes: 'Yes, I can see it',
+  trayNo: 'No, quit when I close',
   launch: 'Open Conch when I log in',
   launchUnavailable: 'Only an installed copy of Conch can open when you log in.',
   launchUnsafe: 'Launch at login needs the app installed in a place only you or the system can change.',
   failed: 'The desktop app could not change that.',
 } as const;
 
-export const settingsRefusalLines: Readonly<Record<'unpackaged' | 'unsafe-location' | 'foreign-file' | 'failed', string>> = {
+export const settingsRefusalLines: Readonly<Record<'unpackaged' | 'unsafe-location' | 'foreign-file' | 'no-tray' | 'failed', string>> = {
   unpackaged: 'Only an installed copy of Conch can open when you log in.',
   'unsafe-location': 'Launch at login needs the app installed in a place only you or the system can change.',
   'foreign-file': 'Another program already has a startup entry with Conch’s name, so it was left alone.',
+  'no-tray': 'No tray is available on this desktop, so closing the window will quit Conch.',
   failed: 'The desktop app could not change that.',
 };
