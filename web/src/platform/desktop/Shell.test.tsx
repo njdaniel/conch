@@ -1,6 +1,6 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import type { BridgeReply, CompatView, ConchDesktopBridge, DesktopInviteBridge, DesktopSettingsBridge, DesktopSettingsView, InviteCheck, ProfileAddResult, ProfilesView, ProfileView, SettingsResult } from './bridge';
+import type { BridgeReply, CompatView, ConchDesktopBridge, DesktopInviteBridge, DesktopSettingsBridge, DesktopSettingsView, IntegrationRow, InviteCheck, ProfileAddResult, ProfilesView, ProfileView, SettingsResult } from './bridge';
 import { credentials } from './credentials';
 import { DesktopShell } from './Shell';
 import { serverOrigin, setServerOrigin } from './state';
@@ -339,6 +339,65 @@ describe('the desktop app settings (issue #1587)', () => {
     await open();
     expect(screen.getByRole('checkbox', { name: 'Open Conch when I log in' })).toHaveProperty('disabled', true);
     expect(screen.getByText(/Only an installed copy of Conch/)).toBeDefined();
+  });
+
+  describe('what works on this desktop (issue #1593)', () => {
+    const states: readonly IntegrationRow[] = [
+      { id: 'tray', state: 'unavailable', why: 'no-tray-host' },
+      { id: 'notifications', state: 'working' },
+      { id: 'lock', state: 'unavailable', why: 'lock-unobserved' },
+      { id: 'capture', state: 'unknown', why: 'portal-unasked' },
+      { id: 'storage', state: 'working' },
+    ];
+
+    function installIntegrations(rows: readonly IntegrationRow[]): void {
+      installSettings(settings(), () => Promise.reject(new Error('unexpected')));
+      const base = window.conchDesktop;
+      Object.defineProperty(window, 'conchDesktop', { value: { ...base, integrations: () => Promise.resolve({ rows }) }, configurable: true, writable: true });
+    }
+
+    it('lists each row with its state and a sentence, the lock one in plain words', async () => {
+      installIntegrations(states);
+      await open();
+      const list = await screen.findByRole('list');
+      const items = within(list).getAllByRole('listitem');
+      expect(items).toHaveLength(5);
+      expect(items[0]?.textContent).toMatch(/^Tray icon: Not available here\./);
+      expect(items[1]?.textContent).toMatch(/^Notifications: Working\./);
+      expect(items[2]?.textContent).toBe('Screen lock: Not available here. Conch can’t tell when your screen locks on this desktop: locking won’t mute you, and notification text stays hidden.');
+      expect(items[3]?.textContent).toMatch(/^Screen sharing: Unknown\./);
+    });
+
+    it('copies the list as plain text, and says so', async () => {
+      installIntegrations(states);
+      const writeText = vi.fn(() => Promise.resolve());
+      Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true });
+      await open();
+      fireEvent.click(await screen.findByRole('button', { name: 'Copy' }));
+      await waitFor(() => {
+        expect(writeText).toHaveBeenCalledOnce();
+      });
+      const text = (writeText.mock.calls as unknown as string[][])[0]?.[0] ?? '';
+      expect(text.split('\n')).toHaveLength(6);
+      expect(text).toMatch(/^Conch desktop: what works here\nTray icon: Not available here\./);
+      expect(text).toMatch(/Screen lock: Not available here\. Conch can’t tell when your screen locks/);
+      expect((await screen.findByRole('status')).textContent).toBe('Copied.');
+    });
+
+    it('says so when the clipboard refuses', async () => {
+      installIntegrations(states);
+      Object.defineProperty(navigator, 'clipboard', { value: { writeText: () => Promise.reject(new Error('no')) }, configurable: true });
+      await open();
+      fireEvent.click(await screen.findByRole('button', { name: 'Copy' }));
+      expect((await screen.findByRole('status')).textContent).toMatch(/Could not copy/);
+    });
+
+    it('shows no list when the bridge cannot say (an older preload)', async () => {
+      installSettings(settings(), () => Promise.reject(new Error('unexpected')));
+      await open();
+      expect(screen.queryByRole('list')).toBeNull();
+      expect(screen.queryByRole('button', { name: 'Copy' })).toBeNull();
+    });
   });
 
   it('shows no section when the bridge has no settings (an older preload)', async () => {

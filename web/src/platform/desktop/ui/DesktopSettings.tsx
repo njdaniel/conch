@@ -8,8 +8,66 @@
 import { useEffect, useId, useState } from 'react';
 
 import { settingsBridge } from '../access';
-import type { DesktopSettingsView, SettingsChange } from '../bridge';
-import { settingsRefusalLines, settingsText } from './text';
+import { copyText } from '../clipboard';
+import type { DesktopSettingsView, IntegrationsView, SettingsChange } from '../bridge';
+import { integrationNames, integrationSentence, integrationsPlainText, integrationsText, integrationStateWords, settingsRefusalLines, settingsText } from './text';
+
+// What works on this desktop (issue #1593): main's held states as a list, and
+// a Copy button for a problem report. Shown only when main answers; a row is
+// text, never markup.
+function Integrations() {
+  const [view, setView] = useState<IntegrationsView | null>(null);
+  const [copied, setCopied] = useState<'' | 'yes' | 'no'>('');
+  const id = useId();
+
+  useEffect(() => {
+    let live = true;
+    void settingsBridge()
+      ?.integrations?.()
+      .then(
+        (next) => {
+          if (live) setView(next);
+        },
+        () => undefined,
+      );
+    return () => {
+      live = false;
+    };
+  }, []);
+
+  if (view === null || view.rows.length === 0) return null;
+
+  async function copy(rows: IntegrationsView): Promise<void> {
+    try {
+      await copyText(integrationsPlainText(rows));
+      setCopied('yes');
+    } catch {
+      setCopied('no');
+    }
+  }
+
+  return (
+    <section className="desktop-integrations" aria-labelledby={`${id}-h`}>
+      <h3 id={`${id}-h`}>{integrationsText.heading}</h3>
+      <ul>
+        {view.rows.map((row) => (
+          <li key={row.id}>
+            <strong>{integrationNames[row.id]}</strong>: {integrationStateWords[row.state]}. {integrationSentence(row)}
+          </li>
+        ))}
+      </ul>
+      <button
+        type="button"
+        onClick={() => {
+          void copy(view);
+        }}
+      >
+        {integrationsText.copy}
+      </button>
+      <p role="status">{copied === 'yes' ? integrationsText.copied : copied === 'no' ? integrationsText.copyFailed : ''}</p>
+    </section>
+  );
+}
 
 export function DesktopSettings() {
   const [view, setView] = useState<DesktopSettingsView | null>(null);
@@ -125,6 +183,7 @@ export function DesktopSettings() {
         </p>
       )}
       {line === '' ? null : <p role="alert">{line}</p>}
+      <Integrations />
     </section>
   );
 }

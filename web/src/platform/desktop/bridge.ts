@@ -561,10 +561,57 @@ export type SettingsResult =
   | { readonly ok: true; readonly view: DesktopSettingsView }
   | { readonly ok: false; readonly reason: 'unpackaged' | 'unsafe-location' | 'foreign-file' | 'no-tray' | 'failed' };
 
+// What works on this desktop (issue #1593, D5-07 of #773; UX-23). One row per
+// integration, read from the state main already holds: nothing is probed to
+// answer it (no device is opened, no capture started, no portal dialog
+// shown). A row says only which integration, its state and a fixed code for
+// why; the sentence is the page's. No path, device name, address, token or
+// user name is in any row.
+export type IntegrationId = 'tray' | 'notifications' | 'lock' | 'capture' | 'storage' | 'launch' | 'shareSound' | 'voiceHelper' | 'talkKey';
+
+// working; unavailable (here, with a reason); unknown (main cannot tell yet).
+export type IntegrationState = 'working' | 'unavailable' | 'unknown';
+
+export type IntegrationWhy =
+  | 'no-tray-host'
+  | 'tray-off'
+  | 'tray-unconfirmed'
+  | 'notifications-unsupported'
+  | 'lock-unobserved'
+  | 'no-portal'
+  | 'not-wayland'
+  | 'portal-unasked'
+  | 'secret-store-missing'
+  | 'insecure-backend'
+  | 'unknown-backend'
+  | 'unsafe-root'
+  | 'secret-store-silent'
+  | 'unpackaged'
+  | 'unsafe-location'
+  | 'share-silent'
+  | 'not-installed'
+  | 'untrusted'
+  | 'helper-not-started'
+  | 'key-not-configured'
+  | 'key-unavailable';
+
+export interface IntegrationRow {
+  readonly id: IntegrationId;
+  readonly state: IntegrationState;
+  // Absent for working.
+  readonly why?: IntegrationWhy;
+}
+
+export interface IntegrationsView {
+  readonly rows: readonly IntegrationRow[];
+}
+
 export interface DesktopSettingsBridge {
   settings(): Promise<DesktopSettingsView>;
   // The person's act: main refuses it without a recent gesture in the window.
   settingsSet(change: SettingsChange): Promise<SettingsResult>;
+  // What works on this desktop (issue #1593). Read-only; needs no gesture.
+  integrations(): Promise<IntegrationsView>;
 }
 
 

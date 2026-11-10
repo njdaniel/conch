@@ -15,6 +15,7 @@
 // link, which main will carry in later children).
 import type { NativeNotification, NotificationPermissionState, Platform } from '../types';
 import { bridge } from './access';
+import { copyText } from './clipboard';
 import { credentials } from './credentials';
 import { http } from './http';
 import { DesktopShell } from './Shell';
@@ -75,7 +76,7 @@ export const platform: Platform = {
   credentials,
   services: {
     origin: serverOrigin,
-    copyText: (text) => navigator.clipboard.writeText(text),
+    copyText,
     saveFile: async (id) => {
       const b = bridge();
       if (b === undefined) return 'failed';

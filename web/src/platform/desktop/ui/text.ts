@@ -1,6 +1,6 @@
 // What the server list says, in words (issue #945). Pure functions of the
 // bridge's view; no component state.
-import type { InviteAccept, InviteRefusal, ProfileAddResult, ProfileNotice, StorageStatus } from '../bridge';
+import type { IntegrationId, IntegrationRow, IntegrationState, IntegrationsView, IntegrationWhy, InviteAccept, InviteRefusal, ProfileAddResult, ProfileNotice, StorageStatus } from '../bridge';
 
 // Written in two parts: the page's source holds no absolute URL.
 export const example = ['https:', 'chat.example.org'].join('//');
@@ -114,6 +114,84 @@ export const settingsRefusalLines: Readonly<Record<'unpackaged' | 'unsafe-locati
   'no-tray': 'No tray is available on this desktop, so closing the window will quit Conch.',
   failed: 'The desktop app could not change that.',
 };
+
+// What works on this desktop (issue #1593, UX-23). Each row reads Working, Not
+// available here or Unknown, then one sentence on what it means for the person.
+// A reason is a fixed code from main; the sentences are written here, and none
+// holds a path, device name, address, token or user name.
+export const integrationsText = {
+  heading: 'What works on this desktop',
+  copy: 'Copy',
+  copied: 'Copied.',
+  copyFailed: 'Could not copy. Select the list and copy it by hand.',
+  copyTitle: 'Conch desktop: what works here',
+} as const;
+
+export const integrationNames: Readonly<Record<IntegrationId, string>> = {
+  tray: 'Tray icon',
+  notifications: 'Notifications',
+  lock: 'Screen lock',
+  capture: 'Screen sharing',
+  storage: 'Saved sign-ins',
+  launch: 'Open at login',
+  shareSound: 'Sound when sharing',
+  voiceHelper: 'Voice helper',
+  talkKey: 'Talk key',
+};
+
+export const integrationStateWords: Readonly<Record<IntegrationState, string>> = {
+  working: 'Working',
+  unavailable: 'Not available here',
+  unknown: 'Unknown',
+};
+
+const workingLines: Readonly<Record<IntegrationId, string>> = {
+  tray: 'Conch can keep running in your panel when you close the window.',
+  notifications: 'Conch can show a notification for a new message.',
+  lock: 'Conch can tell when your screen locks, so locking mutes you and hides notification text.',
+  capture: 'You can share your screen; your desktop shows its own picker first.',
+  storage: 'Your sign-ins are kept on this computer, sealed by the system’s secret store.',
+  launch: 'Conch can open when you log in, if you choose that.',
+  shareSound: 'Conch plays a sound when a share starts or ends.',
+  voiceHelper: 'The voice helper is installed and running.',
+  talkKey: 'Your talk key is set up and ready.',
+};
+
+const whyLines: Readonly<Record<IntegrationWhy, string>> = {
+  'no-tray-host': 'This desktop shows no tray, so closing the window quits Conch.',
+  'tray-off': 'This desktop has a tray. Conch uses it only if you choose “Keep running in the tray”.',
+  'tray-unconfirmed': 'Conch has not been told yet that you can see its icon, so closing the window still quits it.',
+  'notifications-unsupported': 'This desktop does not show notifications for Conch, so you will not be told of new messages while the window is out of sight.',
+  'lock-unobserved': 'Conch can’t tell when your screen locks on this desktop: locking won’t mute you, and notification text stays hidden.',
+  'no-portal': 'This desktop has no screen-share service Conch can use, so you can watch shares but not start one.',
+  'not-wayland': 'Sharing your screen needs a Wayland desktop, so you can watch shares but not start one here.',
+  'portal-unasked': 'Conch has not checked yet whether this desktop can share a screen.',
+  'secret-store-missing': 'This computer has no secret store, so sign-ins are kept only until the app closes and you will sign in again next time.',
+  'insecure-backend': 'The secret store here protects nothing, so sign-ins are kept only until the app closes and you will sign in again next time.',
+  'unknown-backend': 'Conch can’t tell that the secret store here is a safe one, so sign-ins are kept only until the app closes.',
+  'unsafe-root': 'The data directory is not private to you, so nothing is saved and sign-ins are kept only until the app closes.',
+  'secret-store-silent': 'The secret store did not answer, so Conch can’t tell yet whether sign-ins will be kept.',
+  unpackaged: 'Only an installed copy of Conch can open when you log in.',
+  'unsafe-location': 'Launch at login needs Conch installed in a place only you or the system can change.',
+  'share-silent': 'Conch makes no sound when a share starts or ends on this desktop yet, so watch the screen strip instead.',
+  'not-installed': 'The voice helper is not installed, so voice is off. Text chat is unaffected.',
+  untrusted: 'Conch does not trust the installed voice helper, so voice is off. Text chat is unaffected.',
+  'helper-not-started': 'The voice helper starts when you join voice, so Conch can’t tell until then.',
+  'key-not-configured': 'No talk key is set up yet, so use the mute button, or set a key in voice settings.',
+  'key-unavailable': 'Conch can’t read your talk key right now, so use the mute button.',
+};
+
+export function integrationSentence(row: IntegrationRow): string {
+  if (row.state === 'working') return workingLines[row.id];
+  if (row.why !== undefined) return whyLines[row.why];
+  return row.state === 'unknown' ? 'Conch can’t tell yet.' : 'This is not available on this desktop.';
+}
+
+// The list as plain text for a problem report: one line per row, the state
+// then its sentence.
+export function integrationsPlainText(view: IntegrationsView): string {
+  return [integrationsText.copyTitle, ...view.rows.map((row) => `${integrationNames[row.id]}: ${integrationStateWords[row.state]}. ${integrationSentence(row)}`)].join('\n');
+}
 
 // The update notice (issue #1600). The version is main's, checked to be a
 // release version, and is shown as text.
