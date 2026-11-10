@@ -86,4 +86,11 @@ describe('listIdentities', () => {
     const down = await listIdentities('http://x', 'k', secret).catch((e: unknown) => e);
     expect((down as Error).message).toBe('livekit ListRooms: no answer');
   });
+
+  it('an unreadable 200 answer says so without quoting the body', async () => {
+    vi.stubGlobal('fetch', () => Promise.resolve(new Response('{"rooms": secret-room-name', { status: 200 })));
+    const err = await listIdentities('http://x', 'k', secret).catch((e: unknown) => e);
+    expect((err as Error).message).toBe('livekit ListRooms: unreadable answer');
+    expect((err as Error).message).not.toContain('secret-room-name');
+  });
 });

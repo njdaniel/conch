@@ -185,10 +185,12 @@ export async function expectClean(vw: VoiceWorld, p: Pick<Someone, 'page' | 'wat
     expect(credential === null || credential === p.member.token, "the stored credential is the member's own").toBe(true);
   }
   const said = p.watch.console.join('\n');
-  for (const s of vw.secrets) {
-    expect(kept, 'a secret in the page, its storage or its cookies').not.toContain(s);
-    expect(said, 'a secret in the console').not.toContain(s);
-  }
+  // Asserted as booleans: a failing not.toContain would print the secret
+  // and the whole page text into the report and the CI log.
+  vw.secrets.forEach((s, i) => {
+    expect(kept.includes(s), `secret #${String(i)} in the page, its storage or its cookies`).toBe(false);
+    expect(said.includes(s), `secret #${String(i)} in the console`).toBe(false);
+  });
   expect(p.watch.console.filter((l) => /Content Security Policy|Refused to|[Pp]ermissions policy/.test(l))).toEqual([]);
   expect(p.watch.policy, 'Permissions-Policy reports').toEqual([]);
   expect(p.watch.failed, 'requests to conchd that failed').toEqual([]);

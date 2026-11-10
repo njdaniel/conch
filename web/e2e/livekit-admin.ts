@@ -55,7 +55,12 @@ async function call(base: string, key: string, secret: string, method: string, g
     throw new Error(`livekit ${method}: no answer`);
   }
   if (res.status !== 200) throw new LiveKitStatusError(method, res.status);
-  return (await res.json()) as unknown;
+  try {
+    return (await res.json()) as unknown;
+  } catch {
+    // A parse error quotes part of the body, which can hold a room name.
+    throw new Error(`livekit ${method}: unreadable answer`);
+  }
 }
 
 // listIdentities is the identity of every participant in every room of the
