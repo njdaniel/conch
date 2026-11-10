@@ -491,12 +491,11 @@ describe('when the lock cannot be observed', () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
     const r = rig();
     let starts = 0;
-    const gdbus = fakeGdbus({});
-    const dying = (): ReturnType<typeof spawnWatch> => {
+    const dying = (): WatchChild => {
       starts++;
-      return spawnWatch('/bin/sh', ['-c', 'exit 0'], {});
+      return fakeMonitor(false);
     };
-    const w = new LinuxLifecycle({ rules: r.life, powerMonitor: r.power, pid: 1, log: (l) => r.logs.push(l), findGdbus: () => Promise.resolve(gdbus), watch: dying, backoffMs: [1, 1, 1], idlePollMs: 100000 });
+    const w = new LinuxLifecycle({ rules: r.life, powerMonitor: r.power, pid: 1, log: (l) => r.logs.push(l), findGdbus: () => Promise.resolve('/fake/gdbus'), run: fakeRun, watch: dying, backoffMs: [1, 1, 1], idlePollMs: 100000 });
     await w.start();
     await vi.waitFor(
       async () => {
@@ -601,6 +600,25 @@ class FakeChild extends EventEmitter {
 
 const asWatch = (c: FakeChild): WatchChild => c as unknown as WatchChild;
 
+// In-process stand-ins for the session read and the monitor, for the tests of
+// the retry timers (#1654): a real child per attach made them slow under CPU
+// load. fakeRun answers the two reads an attach makes; fakeMonitor returns a
+// child whose output is ready by the next tick (the listeners are attached
+// right after watch() returns), either dying at once or saying it is
+// subscribed. Real children of the fake gdbus script stay covered by the
+// tests that pass spawnWatch (the argv and kill paths).
+const fakeRun = (_file: string, args: readonly string[]): Promise<{ readonly code: number; readonly stdout: string }> =>
+  Promise.resolve(args.join(' ').includes('GetSessionByPID') ? { code: 0, stdout: RECORDED.session } : { code: 0, stdout: RECORDED.hintFalse });
+
+function fakeMonitor(up: boolean): WatchChild {
+  const child = new FakeChild();
+  process.nextTick(() => {
+    if (up) child.stdout.emit('data', RECORDED.preamble1 + '\n');
+    else child.emit('close');
+  });
+  return asWatch(child);
+}
+
 describe('a burst of lines in one chunk (S-5)', () => {
   it('a Lock after thousands of other-session lines in the same chunk still locks', async () => {
     const r = rig();
@@ -655,17 +673,19 @@ describe('a logind source that is gone (S-2)', () => {
 });
 
 describe('the give-up is not permanent (S-3)', () => {
+  // No real process here (#1654): every attach used to run two or three real
+  // children, and under CPU load their start alone outlasted vitest's 5000 ms.
+  // What is tested is the timer logic, so the fake timers are the only clock.
   it('keeps trying at SLOW_RETRY_MS, recovers when the monitor comes back, and stops at stop()', async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
     const r = rig();
-    const gdbus = fakeGdbus({});
     let starts = 0;
     let recovered = false;
-    const watch = (file: string, args: readonly string[], env: Readonly<Record<string, string>>): WatchChild => {
+    const watch = (): WatchChild => {
       starts++;
-      return recovered ? spawnWatch(file, args, env) : spawnWatch('/bin/sh', ['-c', 'exit 0'], {});
+      return fakeMonitor(recovered);
     };
-    const w = new LinuxLifecycle({ rules: r.life, powerMonitor: r.power, pid: 1, log: (l) => r.logs.push(l), findGdbus: () => Promise.resolve(gdbus), watch, backoffMs: [1, 1, 1], idlePollMs: 100000 });
+    const w = new LinuxLifecycle({ rules: r.life, powerMonitor: r.power, pid: 1, log: (l) => r.logs.push(l), findGdbus: () => Promise.resolve('/fake/gdbus'), run: fakeRun, watch, backoffMs: [1, 1, 1], idlePollMs: 100000 });
     await w.start();
     await vi.waitFor(
       async () => {
@@ -695,13 +715,12 @@ describe('the give-up is not permanent (S-3)', () => {
   it('stop() ends the retries', async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
     const r = rig();
-    const gdbus = fakeGdbus({});
     let starts = 0;
     const watch = (): WatchChild => {
       starts++;
-      return spawnWatch('/bin/sh', ['-c', 'exit 0'], {});
+      return fakeMonitor(false);
     };
-    const w = new LinuxLifecycle({ rules: r.life, powerMonitor: r.power, pid: 1, log: (l) => r.logs.push(l), findGdbus: () => Promise.resolve(gdbus), watch, backoffMs: [1, 1, 1], idlePollMs: 100000 });
+    const w = new LinuxLifecycle({ rules: r.life, powerMonitor: r.power, pid: 1, log: (l) => r.logs.push(l), findGdbus: () => Promise.resolve('/fake/gdbus'), run: fakeRun, watch, backoffMs: [1, 1, 1], idlePollMs: 100000 });
     await w.start();
     await vi.waitFor(
       async () => {
