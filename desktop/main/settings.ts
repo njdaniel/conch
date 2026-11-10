@@ -199,6 +199,14 @@ export class SettingsService {
     return value;
   }
 
+  // detectFresh asks the bus now and writes the answer into view()'s cache, so
+  // a refused no-tray is not followed by a stale trayDetected: true.
+  async #detectFresh(detect: () => Promise<boolean>): Promise<boolean> {
+    const value = await detect();
+    this.#seen = { at: (this.#deps.now ?? Date.now)(), value };
+    return value;
+  }
+
   set(change: SettingsChange): Promise<SettingsResult> {
     const run = this.#queue.then(() => this.#apply(change));
     this.#queue = run.catch(() => undefined);
@@ -209,8 +217,8 @@ export class SettingsService {
     const { trayConfirmed, ...stored } = change;
     const next: AppSettings = { ...this.#current, ...stored };
     // A tray is turned on only while a tray host is on the bus (Q-D5-2).
-    if (change.closeToTray === true && !this.#current.closeToTray && this.#deps.trayDetected !== undefined && !(await this.#deps.trayDetected())) {
-      return { ok: false, reason: 'no-tray' };
+    if (change.closeToTray === true && !this.#current.closeToTray && this.#deps.trayDetected !== undefined) {
+      if (!(await this.#detectFresh(this.#deps.trayDetected))) return { ok: false, reason: 'no-tray' };
     }
     // The confirmation says "I can see the icon", so it is taken only for an
     // icon that exists: the stored setting is already on, the tray is up, and
@@ -219,7 +227,7 @@ export class SettingsService {
     if (trayConfirmed !== undefined && change.closeToTray !== undefined) return { ok: false, reason: 'no-tray' };
     if (trayConfirmed === true) {
       if ( !this.#current.closeToTray || this.#deps.trayExists?.() !== true) return { ok: false, reason: 'no-tray' };
-      if (this.#deps.trayDetected !== undefined && !(await this.#deps.trayDetected())) return { ok: false, reason: 'no-tray' };
+      if (this.#deps.trayDetected !== undefined && !(await this.#detectFresh(this.#deps.trayDetected))) return { ok: false, reason: 'no-tray' };
     }
     // The autostart entry first: if it cannot be changed, nothing is stored.
     if (next.launchAtLogin !== this.#current.launchAtLogin) {

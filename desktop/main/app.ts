@@ -26,7 +26,7 @@ import { VoiceService } from './voice/service.ts';
 import { Supervisor } from './voice/supervisor.ts';
 import { runFile } from './voice/spawn.ts';
 import { trayHostPresent } from './tray-detect.ts';
-import { TrayController } from './tray.ts';
+import { TrayController, unblankSoon } from './tray.ts';
 import { createNodeConnect } from './api/socket.ts';
 import { transportVerdict, trustSystemRoots } from './api/trust.ts';
 import { debuggingVerdict } from './debugging.ts';
@@ -258,9 +258,7 @@ export async function start(): Promise<void> {
       const activation = await openActivation(spec);
       // The switcher records the activation once this resolves: the menu is
       // filled from it on the next turn, not at the next 10 s check.
-      setTimeout(() => {
-        tray?.activated();
-      }, 0);
+      unblankSoon(() => tray, (generation) => profiles.switcher.isCurrent(generation), spec.generation);
       return activation;
     },
     compat: { servers: allowlist?.servers ?? [], override },
@@ -391,6 +389,7 @@ export async function start(): Promise<void> {
     iconDir: join(appPath, 'build', 'icons', 'tray'),
     voice,
     sharing: () => companion.liveOrigin() !== null,
+    endCompanion: () => companion.end('lock'),
     profile: () => {
       const id = profiles.active?.profileId ?? null;
       return id === null ? null : (store.get(id)?.label ?? null);

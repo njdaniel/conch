@@ -7,7 +7,9 @@ import { describe, expect, it } from 'vitest';
 
 import type { NativeVoiceHelper, NativeVoiceView, VoiceCommandResult } from '../../../web/src/platform/desktop/bridge.ts';
 import type { AppSettings } from '../../main/settings.ts';
-import { iconFile, trayModel, TrayController, type TrayDeps, type TrayIcon, type TrayLike, type TrayMenuItem } from '../../main/tray.ts';
+import { Switcher } from '../../main/profiles/switch.ts';
+import { TeardownHooks } from '../../main/profiles/hooks.ts';
+import { iconFile, trayModel, TrayController, unblankSoon, type TrayDeps, type TrayIcon, type TrayLike, type TrayMenuItem } from '../../main/tray.ts';
 
 const helper = (over: Partial<NativeVoiceHelper> = {}): NativeVoiceHelper => ({
   version: 1,
@@ -66,6 +68,9 @@ interface Rig {
   logs: string[];
   commands: string[];
   next: VoiceCommandResult;
+  nextMute: Promise<VoiceCommandResult> | null;
+  shows: 'ok' | 'throws';
+  ended: number;
   listeners: ((v: NativeVoiceView) => void)[];
   tick: () => void;
   stopped: number;
@@ -102,6 +107,9 @@ function rig(closeToTray = true): Rig {
     logs: [],
     commands: [],
     next: { ok: true },
+    nextMute: null,
+    shows: 'ok',
+    ended: 0,
     listeners: [],
     tick: () => undefined,
     stopped: 0,
@@ -125,7 +133,7 @@ function rig(closeToTray = true): Rig {
       },
       setMute: (m) => {
         r.commands.push(`mute ${String(m)}`);
-        return Promise.resolve(r.next);
+        return r.nextMute ?? Promise.resolve(r.next);
       },
       setDeafen: (d) => {
         r.commands.push(`deafen ${String(d)}`);
@@ -137,8 +145,13 @@ function rig(closeToTray = true): Rig {
       },
     },
     sharing: () => r.state.sharing,
+    endCompanion: () => {
+      r.ended++;
+      return Promise.resolve(true);
+    },
     profile: () => r.state.profile,
     show: () => {
+      if (r.shows === 'throws') throw new Error('no window');
       r.shown++;
       r.state.hidden = false;
     },
@@ -452,7 +465,7 @@ describe('losing the host while the window is hidden and the helper is live', ()
     expect(r.commands).toEqual(['mute true']);
   });
 
-  it('does not mute a helper that is already muted, or a session that is not running', async () => {
+  it('mutes a helper whose view says muted (the flag may be stale), but not a session with no helper', async () => {
     const r = rig();
     const c = new TrayController(r.deps);
     await c.sync();
@@ -460,12 +473,106 @@ describe('losing the host while the window is hidden and the helper is live', ()
     r.state.hidden = true;
     r.state.bus = false;
     await c.check();
+    await settle();
+    expect(r.commands).toEqual(['mute true']);
+    r.commands.length = 0;
     r.state.view = IDLE;
     r.state.hidden = true;
     await c.check();
     await settle();
     expect(r.shown).toBe(2);
     expect(r.commands).toEqual([]);
+  });
+
+  it('mutes a helper that is still starting, and one whose unmute is in flight', async () => {
+    const r = rig();
+    const c = new TrayController(r.deps);
+    await c.sync();
+    r.state.hidden = true;
+    r.state.bus = false;
+    r.state.view = { status: 'starting', generation: 1, channel: 'general', retryable: false };
+    await c.check();
+    await settle();
+    expect(r.commands).toEqual(['mute true']);
+    r.commands.length = 0;
+    // The helper still reports muted while an unmute is on its way.
+    r.state.view = running({ muted: true });
+    r.state.hidden = true;
+    await c.check();
+    await settle();
+    expect(r.commands).toEqual(['mute true']);
+  });
+
+  it.each<[string, VoiceCommandResult, boolean]>([
+    ['ok', { ok: true }, false],
+    ['not-running', { ok: false, error: 'not-running' }, false],
+    ['refused', { ok: false, error: 'busy' }, true],
+    ['lost', { ok: false, error: 'lost' }, true],
+  ])('a mute that comes back %s leaves voice: %s', async (_name, result, leaves) => {
+    const r = rig();
+    const c = new TrayController(r.deps);
+    await c.sync();
+    r.state.view = running();
+    r.state.hidden = true;
+    r.state.bus = false;
+    r.next = result;
+    await c.check();
+    await settle();
+    expect(r.commands).toEqual(leaves ? ['mute true', 'leave'] : ['mute true']);
+  });
+
+  it('a mute that times out (never answers, then rejects) leads to leave', async () => {
+    const r = rig();
+    const c = new TrayController(r.deps);
+    await c.sync();
+    r.state.view = running();
+    r.state.hidden = true;
+    r.state.bus = false;
+    r.nextMute = Promise.reject(new Error('timeout'));
+    await c.check();
+    await settle();
+    expect(r.commands).toEqual(['mute true', 'leave']);
+    expect(r.logs).toContain('tray: mute failed; leaving voice');
+  });
+
+  it('ends a live screen companion, and not when none is live', async () => {
+    const r = rig();
+    const c = new TrayController(r.deps);
+    await c.sync();
+    r.state.hidden = true;
+    r.state.bus = false;
+    await c.check();
+    await settle();
+    expect(r.ended).toBe(0);
+    r.state.sharing = true;
+    r.state.hidden = true;
+    await c.check();
+    await settle();
+    expect(r.ended).toBe(1);
+  });
+
+  it('still mutes and ends the share when showing the window throws, and a rejecting timer check is caught', async () => {
+    const r = rig();
+    const c = new TrayController(r.deps);
+    await c.sync();
+    r.state.view = running();
+    r.state.sharing = true;
+    r.state.hidden = true;
+    r.state.bus = false;
+    r.shows = 'throws';
+    await c.check();
+    await settle();
+    expect(r.commands).toEqual(['mute true']);
+    expect(r.ended).toBe(1);
+    expect(r.logs).toContain('tray: the window could not be shown');
+    // The timer's check cannot become an unhandled rejection: a check that
+    // rejects is logged and swallowed.
+    const bad = new TrayController({ ...r.deps, hidden: () => { throw new Error('boom'); } });
+    await bad.sync().catch(() => undefined);
+    await bad.sync().catch(() => undefined);
+    r.tick();
+    await settle();
+    expect(r.logs).toContain('tray: the check failed');
   });
 
   it('does not mute with the window visible, and logs a failed mute by its reason alone', async () => {
@@ -480,8 +587,9 @@ describe('losing the host while the window is hidden and the helper is live', ()
     r.next = { ok: false, error: 'lost' };
     await c.check();
     await settle();
-    expect(r.commands).toEqual(['mute true']);
-    expect(r.logs).toContain('tray: mute failed (lost)');
+    // A mute that fails now falls back to leaving voice (S-1).
+    expect(r.commands).toEqual(['mute true', 'leave']);
+    expect(r.logs).toContain('tray: mute failed (lost); leaving voice');
   });
 });
 
@@ -568,5 +676,45 @@ describe('the blank after a switch', () => {
     r.state.view = running();
     c.activated();
     expect(labels(t).slice(0, 2)).toEqual(['Work', 'In voice: #general']);
+  });
+});
+
+describe('unblankSoon with queued switches', () => {
+  it('the first of two queued switches does not unblank the menu; the last does', async () => {
+    const r = rig();
+    const hooks = new TeardownHooks();
+    const labelsOf: Record<string, string> = { a: 'Work', b: 'Home', c: 'Other' };
+    let switcher: Switcher | null = null;
+    r.deps = { ...r.deps, profile: () => { const id = switcher?.current?.profileId ?? null; return id === null ? null : (labelsOf[id[0] ?? ''] ?? null); } };
+    const c = new TrayController(r.deps);
+    hooks.media('tray', () => {
+      c.blank();
+    });
+    const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+    switcher = new Switcher({
+      hooks,
+      now: Date.now,
+      log: () => undefined,
+      open: async (spec) => {
+        await sleep(2);
+        unblankSoon(() => c, (g) => switcher?.isCurrent(g) ?? false, spec.generation);
+        return { profileId: spec.profile?.id ?? null, endSockets: () => undefined, endRequests: () => undefined, destroy: () => sleep(30) } as unknown as Awaited<ReturnType<ConstructorParameters<typeof Switcher>[0]['open']>>;
+      },
+    });
+    await c.sync();
+    const profile = (n: string) => ({ id: n.repeat(32), label: n, origin: 'http://127.0.0.1:1', principal: null });
+    await switcher.switchTo(profile('a'), { reason: 'switch' });
+    await sleep(5);
+    const headers = (): string => r.trays[0]?.menu[0]?.label ?? '';
+    expect(headers()).toBe('Work');
+    const p1 = switcher.switchTo(profile('b'), { reason: 'switch' });
+    const p2 = switcher.switchTo(profile('c'), { reason: 'switch' });
+    await p1;
+    // b is open and being torn down for c: the menu stays blank, not Home.
+    await sleep(10);
+    expect(headers()).toBe('Conch');
+    await p2;
+    await sleep(5);
+    expect(headers()).toBe('Other');
   });
 });

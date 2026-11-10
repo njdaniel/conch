@@ -195,6 +195,15 @@ describe('turning the tray on (Q-D5-2)', () => {
     expect(changes).toEqual([]);
   });
 
+  it('a refused no-tray is not followed by a stale trayDetected: true from the cache', async () => {
+    const detected = { value: true };
+    const { service } = tray(detected);
+    expect((await service.view()).trayDetected).toBe(true);
+    detected.value = false;
+    expect(await service.set({ closeToTray: true })).toEqual({ ok: false, reason: 'no-tray' });
+    expect((await service.view()).trayDetected).toBe(false);
+  });
+
   it('is accepted with a host, unconfirmed until the person says yes', async () => {
     const { service, changes } = tray({ value: true });
     const on = await service.set({ closeToTray: true });

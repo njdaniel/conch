@@ -16,9 +16,10 @@
 //     they can see its icon, and the tray host is on the bus right now
 //     (Q-D5-2). Losing the host revokes the confirmation, and shows the
 //     window if it was hidden: there is never an invisible running session.
-//     With the window hidden and the helper unmuted, losing the host also
-//     mutes: not being able to show an indicator is not permission to keep
-//     transmitting (§9's lock rule). Destroying the tray (the setting turned
+//     With the window hidden, losing the host also mutes any helper (whatever
+//     its status or muted flag), leaves voice if the mute is refused or times
+//     out, and ends a live screen companion: not being able to show an
+//     indicator is not permission to keep transmitting (§9's lock rule). Destroying the tray (the setting turned
 //     off) with the window hidden shows the window too;
 //   - Mute and Deafen send the intent bound when the menu was built (the
 //     model's muted and deafened), never a toggle against live state, so a
@@ -129,6 +130,10 @@ export interface TrayDeps {
   };
   // Whether the screen companion is live.
   readonly sharing: () => boolean;
+  // End the live screen companion (app.ts passes companion.end('lock'): the
+  // existing reason for "the session can no longer show its indicator";
+  // adding a 'tray' reason would reach the bridge, preload and page types).
+  readonly endCompanion: () => Promise<boolean>;
   // The label of the profile in force.
   readonly profile: () => string | null;
   // Show or focus the window, making one visible again if it was hidden.
@@ -152,6 +157,18 @@ export const CHECK_INTERVAL_MS = 10_000;
 
 export function iconFile(icon: TrayIcon): string {
   return `${icon}.png`;
+}
+
+// unblankSoon: an activation was opened; the menu is filled from it on the
+// next turn, once the switcher has recorded it. Only if its generation is
+// still current: with a second switch queued behind it, this activation is
+// already on its way out and must not unblank the menu with the outgoing
+// profile (the next activation's own call does it). The tray is read when the
+// turn comes, not now: it may be made after the first activation opens.
+export function unblankSoon(tray: () => Pick<TrayController, 'activated'> | null, isCurrent: (generation: number) => boolean, generation: number): void {
+  setTimeout(() => {
+    if (isCurrent(generation)) tray()?.activated();
+  }, 0);
 }
 
 export class TrayController {
@@ -218,7 +235,11 @@ export class TrayController {
           };
         });
       this.#stopTimer = every(() => {
-        void this.check();
+        // check() does not reject; the catch keeps a surprise from becoming an
+        // unhandled rejection that would end the timer's work silently.
+        this.check().catch(() => {
+          this.#deps.log('tray: the check failed');
+        });
       }, CHECK_INTERVAL_MS);
     }
     this.refresh();
@@ -243,28 +264,54 @@ export class TrayController {
       if (this.#deps.confirmed()) this.#deps.revoke();
       if (this.#deps.hidden()) {
         this.#deps.log('tray: the tray host is gone; showing the window');
-        this.#deps.show();
-        this.#muteUnmuted();
+        // Showing is best effort: the window failing to show must not skip
+        // the mute below.
+        try {
+          this.#deps.show();
+        } catch {
+          this.#deps.log('tray: the window could not be shown');
+        }
+        this.#failSafe();
       }
     }
     this.refresh();
   }
 
-  // muteUnmuted: the window was hidden and its indicator is gone, so a helper
-  // that is running unmuted is muted. Best effort; the failure is logged by
-  // its reason alone.
-  #muteUnmuted(): void {
+  // failSafe: the window was hidden and its indicator is gone, so nothing may
+  // keep transmitting or sharing unseen. A helper (in any status that has a
+  // process: starting, running, stopping) is muted, whatever its muted flag
+  // says (the flag is only what the helper last reported, and an unmute may be
+  // in flight); a mute that is not ok, or is not-running (no helper after all),
+  // falls back to leaving voice. A live screen companion is ended. Best
+  // effort; failures are logged by their reason alone.
+  #failSafe(): void {
     const view = this.#deps.voice.state();
-    if (view.status !== 'running' || view.helper === undefined || view.helper.muted) return;
-    this.#deps.log('tray: muting, as the tray host is gone');
-    void this.#deps.voice.setMute(true).then(
-      (result) => {
-        if (!result.ok) this.#deps.log(`tray: mute failed (${result.error})`);
-      },
-      () => {
-        this.#deps.log('tray: mute failed');
-      },
-    );
+    if (view.status === 'starting' || view.status === 'running' || view.status === 'stopping' || view.helper !== undefined) {
+      this.#deps.log('tray: muting, as the tray host is gone');
+      this.#deps.voice.setMute(true).then(
+        (result) => {
+          if (result.ok || result.error === 'not-running') return;
+          this.#deps.log(`tray: mute failed (${result.error}); leaving voice`);
+          this.#leave();
+        },
+        () => {
+          this.#deps.log('tray: mute failed; leaving voice');
+          this.#leave();
+        },
+      );
+    }
+    if (this.#deps.sharing()) {
+      this.#deps.log('tray: ending the screen share, as the tray host is gone');
+      this.#deps.endCompanion().catch(() => {
+        this.#deps.log('tray: ending the screen share failed');
+      });
+    }
+  }
+
+  #leave(): void {
+    this.#deps.voice.leave().catch(() => {
+      this.#deps.log('tray: leaving voice failed');
+    });
   }
 
   // blank empties the menu of the profile and voice (media is ending for a
