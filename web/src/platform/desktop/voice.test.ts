@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import type { DesktopVoiceBridge, NativeVoiceView } from './bridge';
+import type { CompanionEvent, CompanionGrantResult, DesktopCompanionBridge, DesktopVoiceBridge, NativeVoiceView } from './bridge';
 import { createNativeVoice } from './voice';
 
 const v = (generation: number, over: Partial<NativeVoiceView> = {}): NativeVoiceView => ({ status: 'running', generation, channel: 'general', retryable: false, ...over });
@@ -105,5 +105,81 @@ describe('createNativeVoice', () => {
     const nv = createNativeVoice(() => f.b);
     expect(await nv.join({ channel: 'general' })).toEqual({ ok: false, error: 'lost' });
     expect(await nv.setMute(true)).toEqual({ ok: false, error: 'lost' });
+  });
+});
+
+describe('createNativeVoice companion (issue #1581)', () => {
+  const grant: CompanionGrantResult = { ok: true, grant: { livekitUrl: 'wss://lk.example', token: 't', identity: 'p7.screen', expiresAt: '2026-10-16T00:00:15.000Z' } };
+
+  function withCompanion() {
+    const f = fake();
+    let listener: ((event: CompanionEvent) => void) | undefined;
+    const off = vi.fn();
+    const c = {
+      companionGrant: vi.fn<DesktopCompanionBridge['companionGrant']>(() => Promise.resolve(grant)),
+      companionEnd: vi.fn(() => Promise.resolve(true)),
+      shareArm: vi.fn(() => Promise.resolve(true)),
+      onCompanion: vi.fn((l: (event: CompanionEvent) => void) => {
+        listener = l;
+        return off;
+      }),
+    } satisfies DesktopCompanionBridge;
+    return { b: { ...f.b, ...c }, c, off, push: (event: CompanionEvent) => listener?.(event) };
+  }
+
+  it('asks the bridge for the grant of the channel and gives the answer as it is', async () => {
+    const w = withCompanion();
+    const nv = createNativeVoice(() => w.b);
+    expect(await nv.companion?.grant({ channel: 'general' })).toEqual(grant);
+    expect(w.c.companionGrant).toHaveBeenCalledWith({ channel: 'general' });
+  });
+
+  it('gives a typed refusal as it comes, and a failed one for a bridge that throws', async () => {
+    const w = withCompanion();
+    const nv = createNativeVoice(() => w.b);
+    w.c.companionGrant.mockResolvedValueOnce({ ok: false, error: 'not-in-voice' });
+    expect(await nv.companion?.grant({ channel: 'general' })).toEqual({ ok: false, error: 'not-in-voice' });
+    w.c.companionGrant.mockRejectedValueOnce(new Error('ipc gone'));
+    expect(await nv.companion?.grant({ channel: 'general' })).toEqual({ ok: false, error: 'failed' });
+  });
+
+  it('arms the share allowance through the bridge, false when it throws or refuses', async () => {
+    const w = withCompanion();
+    const nv = createNativeVoice(() => w.b);
+    expect(await nv.companion?.shareArm()).toBe(true);
+    expect(w.c.shareArm).toHaveBeenCalledTimes(1);
+    w.c.shareArm.mockRejectedValueOnce(new Error('no click'));
+    expect(await nv.companion?.shareArm()).toBe(false);
+  });
+
+  it('ends the companion through the bridge, false when it throws', async () => {
+    const w = withCompanion();
+    const nv = createNativeVoice(() => w.b);
+    expect(await nv.companion?.end()).toBe(true);
+    w.c.companionEnd.mockRejectedValueOnce(new Error('ipc gone'));
+    expect(await nv.companion?.end()).toBe(false);
+  });
+
+  it('passes main’s end event to the listener until it stops listening', () => {
+    const w = withCompanion();
+    const nv = createNativeVoice(() => w.b);
+    const seen = vi.fn();
+    const stop = nv.companion?.onEnd(seen);
+    w.push({ type: 'end', reason: 'renewal' });
+    expect(seen).toHaveBeenCalledWith({ type: 'end', reason: 'renewal' });
+    stop?.();
+    expect(w.off).toHaveBeenCalledTimes(1);
+  });
+
+  it('refuses every call, and listens to nothing, without the bridge or with a preload that lacks the companion', async () => {
+    for (const get of [() => undefined, () => fake().b]) {
+      const nv = createNativeVoice(get);
+      expect(await nv.companion?.grant({ channel: 'general' })).toEqual({ ok: false, error: 'failed' });
+      expect(await nv.companion?.end()).toBe(false);
+      expect(await nv.companion?.shareArm()).toBe(false);
+      const seen = vi.fn();
+      nv.companion?.onEnd(seen)();
+      expect(seen).not.toHaveBeenCalled();
+    }
   });
 });

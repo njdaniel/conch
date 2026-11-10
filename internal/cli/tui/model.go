@@ -481,8 +481,38 @@ func (m Model) Init() tea.Cmd {
 	return tea.Batch(who, m.startSession(), m.loadAndFollow(), m.loadNets(false, ""), m.loadMembers(), m.kickVoice(), m.loadReadState(), m.waitEvent())
 }
 
+// typedBurst reports whether msg is several typed characters that arrived in
+// one read of the terminal. Bubble Tea hands those over as one KeyRunes
+// message, and its String() is the characters themselves, so the two typed
+// letters "u" and "p" read as the name of the up arrow, "e", "n", "d" as the
+// end key, and "t", "a", "b" as tab. The key handlers match on that string.
+// Pasted text (Paste set, whose String() is bracketed) and Alt chords are not
+// bursts.
+func typedBurst(msg tea.Msg) (tea.KeyMsg, bool) {
+	key, ok := msg.(tea.KeyMsg)
+	return key, ok && key.Type == tea.KeyRunes && len(key.Runes) > 1 && !key.Paste && !key.Alt
+}
+
+// typeBurst applies the characters of a burst one at a time, in order, as the
+// person typed them: text goes into the draft and none of it is a named key
+// (issue #1156, where "p309interrupted" lost its "up" and moved the selection
+// to the channel above).
+func (m Model) typeBurst(key tea.KeyMsg) (tea.Model, tea.Cmd) {
+	var next tea.Model = m
+	cmds := make([]tea.Cmd, 0, len(key.Runes))
+	for _, r := range key.Runes {
+		var cmd tea.Cmd
+		next, cmd = next.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+		cmds = append(cmds, cmd)
+	}
+	return next, tea.Batch(cmds...)
+}
+
 // Update applies keyboard, window, and injected API-result messages.
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if key, ok := typedBurst(msg); ok {
+		return m.typeBurst(key)
+	}
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		// A history read scrolled up keeps the same message at the bottom of

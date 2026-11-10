@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"io"
 	"strings"
@@ -11,9 +12,10 @@ import (
 )
 
 // `conch channels list|join|leave|create|topic` (ADR-013, issue #994): the
-// channel directory and the community's own channel routes. Every verb uses
-// public routes; the server decides who may, and a refusal is printed in this
-// file's words, by its code (refusal.go).
+// channel directory and the community's own channel routes. The server decides
+// who may, and an ordinary refusal is printed in this file's words, by its
+// code (refusal.go). A preview refusal keeps the server's code, message and
+// permission.
 
 var channelRefusals = map[string]refusalLines{
 	"list": {"forbidden": communityOnly},
@@ -48,9 +50,11 @@ func runChannels(ctx context.Context, args []string, stdout, stderr io.Writer) e
 	server := fs.String("server", serverEnvOr(), "conchd HTTP URL")
 	asJSON := fs.Bool("json", false, "print the server's response document")
 	var all, private, clear *bool
+	var previewAs *string
 	switch verb {
 	case "list":
 		all = fs.Bool("all", false, "every channel with its member count, private ones too (operators)")
+		previewAs = fs.String("preview-as", "", "read as this member (name or principal id)")
 	case "create":
 		private = fs.Bool("private", false, "make a private channel: only its members see it (the default is public)")
 	case "topic":
@@ -98,10 +102,15 @@ func runChannels(ctx context.Context, args []string, stdout, stderr io.Writer) e
 		}
 		if len(pos) != want {
 			if want == 0 {
-				return fmt.Errorf("cli: channels list: takes no arguments (usage: conch channels list [--server <url>] [--json] [--all])")
+				return fmt.Errorf("cli: channels list: takes no arguments (usage: %s)", channelsUsage[verb])
 			}
 			return fmt.Errorf("cli: channels %s: expected <%s> (usage: %s)", verb, channelsArgName(verb), channelsUsage[verb])
 		}
+	}
+	preview := false
+	fs.Visit(func(f *flag.Flag) { preview = preview || f.Name == "preview-as" })
+	if preview && *previewAs == "" {
+		return fmt.Errorf("cli: channels list: --preview-as requires a member name or id")
 	}
 	var request schema.CreateChannelRequestV1
 	if verb == "create" {
@@ -128,6 +137,13 @@ func runChannels(ctx context.Context, args []string, stdout, stderr io.Writer) e
 	if err != nil {
 		return err
 	}
+	var previewID int64
+	if preview {
+		previewID, err = resolvePreviewMember(ctx, client, *previewAs)
+		if err != nil {
+			return err
+		}
+	}
 	out := channelsOutput{stdout: stdout, asJSON: *asJSON}
 	lines := channelRefusals[verb]
 	if verb == "list" && *all {
@@ -136,8 +152,16 @@ func runChannels(ctx context.Context, args []string, stdout, stderr io.Writer) e
 	}
 	switch verb {
 	case "list":
-		resp, err := client.ChannelDirectory(ctx, *all)
+		var resp schema.ChannelDirectoryResponseV1
+		if preview {
+			resp, err = client.ChannelDirectoryPreview(ctx, *all, previewID)
+		} else {
+			resp, err = client.ChannelDirectory(ctx, *all)
+		}
 		if err != nil {
+			if preview {
+				return err
+			}
 			return refused(err, lines)
 		}
 		return out.list(resp, *all)
@@ -194,7 +218,7 @@ func runChannelTopic(ctx context.Context, client *Client, out channelsOutput, li
 }
 
 var channelsUsage = map[string]string{
-	"list":   "conch channels list [--server <url>] [--json] [--all]",
+	"list":   "conch channels list [--server <url>] [--json] [--all] [--preview-as <member>]",
 	"join":   "conch channels join [--server <url>] [--json] <channel>",
 	"leave":  "conch channels leave [--server <url>] [--json] <channel>",
 	"create": "conch channels create [--server <url>] [--json] [--private] <name>",

@@ -134,6 +134,8 @@ Nets in voice (V5) follow the alpha. The alpha's groups are single rooms. Whispe
 
 *Recommend:* anyone in the room may share, one share per room at a time. Whoever is sharing can stop, and an operator can stop it.
 
+*Superseded by #1483 (2026-11-07): several streams per room, capped, watched on demand; see [voice-multi-share.md](voice-multi-share.md).*
+
 **O6. Size of the share.**
 
 *Recommend:*

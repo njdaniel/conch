@@ -19,6 +19,9 @@ export type LiveStatus = 'loading' | 'open' | 'reconnecting' | 'failed';
 export interface Person {
   readonly name: string;
   readonly kind: PrincipalKind | null;
+  readonly role?: ChannelMemberV1['role'];
+  readonly manages?: boolean;
+  readonly guest?: ChannelMemberV1['guest'];
 }
 
 export interface Live {
@@ -262,9 +265,9 @@ export function useLiveChannel({
     const named = new Map<number, Person>();
     for (const m of members) {
       const name = memberName(m);
-      if (name !== undefined) named.set(m.principal_id, { name, kind: m.kind ?? null });
+      if (name !== undefined) named.set(m.principal_id, { name, kind: m.kind ?? null, role: m.role, manages: m.manages, guest: m.guest });
     }
-    named.set(meId, { name: meName, kind: meKind });
+    named.set(meId, { ...named.get(meId), name: meName, kind: meKind });
     return named;
   }, [members, meId, meName, meKind]);
 

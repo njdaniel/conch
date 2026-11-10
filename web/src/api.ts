@@ -1,4 +1,5 @@
 import { disablePrincipalResponseV1, listChannelBansResponseV1, messageV2, revokeIssuedResponseV1, type DisablePrincipalResponseV1, type RevokeIssuedResponseV1, messageRemovedV1, type MessageRemovedV1 } from './schema/generated';
+import { defaultShareQuality, type ShareQuality } from './voice/share';
 // The only module that holds the credential in use, and the only one that
 // asks conchd anything. Where the token lives depends on whose it is (issue
 // #439, decision O1). A member's lasts: it is kept so that it survives closing
@@ -180,16 +181,19 @@ import {
   voiceCameraV1,
   voiceCompanionResponseV1,
   voiceOccupancyV1,
-  voicePresenceV1,
+  voicePresenceV2,
   voiceSessionResponseV1,
   voiceShareV1,
+  voiceShareV2,
   type VoiceCameraV1,
   type VoiceCompanionRequestV1,
   type VoiceCompanionResponseV1,
   type VoiceOccupancyV1,
-  type VoicePresenceV1,
+  type VoicePresenceV2,
   type VoiceSessionResponseV1,
+  type VoiceShareRequestV1,
   type VoiceShareV1,
+  type VoiceShareV2,
   type VoiceTransmitReportV1,
   type VoiceTransmitState,
 } from './schema/voice';
@@ -204,14 +208,16 @@ import {
   type ProblemReportV1,
   type UpdateProblemReportRequestV1,
 } from './schema/report';
-import type { Validator } from './schema/validate';
-import { call, fileQuery, operations, queryOf, type Call, type OperationId } from './platform/operations';
+import { fromServer, type Validator } from './schema/validate';
+import { call, fileQuery, operations, previewCall, queryOf, type Call, type OperationId } from './platform/operations';
+import { previewResponseV1, type PreviewResponseV1 } from './schema/preview';
 import { platform } from './platform';
 import type { FeedConnection, Held, Place } from './platform/types';
 import type { FeedSocket, OpenSocket, SocketEvents } from './state/feed';
 import { forget as forgetDiagnostics, record } from './diagnostics';
 import { visitOf } from './guestName';
 import { keyboardKeys, mouseKeys } from './platform/desktop/evdev';
+import { appearanceAccents, appearanceDensities, appearanceThemes, defaultAppearance, type AppearancePreferences } from './appearance';
 
 // Why a call failed. unauthorized is a 401: the server does not accept the
 // credential. network means no answer at all. invalid is any other reply
@@ -221,7 +227,7 @@ export type ApiFailure = 'unauthorized' | 'network' | 'invalid';
 
 export type ApiResult<T> =
   | { readonly ok: true; readonly value: T }
-  | { readonly ok: false; readonly failure: ApiFailure; readonly code?: string; readonly retryAfter?: number };
+  | { readonly ok: false; readonly failure: ApiFailure; readonly status?: number; readonly code?: string; readonly permission?: string; readonly retryAfter?: number };
 
 // Where a credential is kept is the platform's (platform.credentials): 'tab'
 // is this tab alone, for an operator's and a guest's; 'lasting' is every tab
@@ -450,7 +456,7 @@ function forget(held: Held): void {
 async function refusalCode(res: Response): Promise<string | undefined> {
   try {
     const body: unknown = await res.json();
-    if (errorV0(body).length === 0) return (body as { code: string }).code;
+    if (fromServer(errorV0)(body).length === 0) return (body as { code: string }).code;
   } catch {
     // No document, or not one.
   }
@@ -473,7 +479,7 @@ async function noteRefusal(res: Response): Promise<void> {
   let code: string | undefined;
   try {
     const body: unknown = await res.clone().json();
-    if (errorV0(body).length === 0) code = (body as { code: string }).code;
+    if (fromServer(errorV0)(body).length === 0) code = (body as { code: string }).code;
   } catch {
     // No document, or not one.
   }
@@ -495,12 +501,20 @@ async function discard(res: Response): Promise<void> {
   }
 }
 
-async function refused(res: Response): Promise<{ readonly ok: false; readonly failure: 'invalid'; readonly code?: string }> {
-  const code = await refusalCode(res);
-  return code === undefined ? { ok: false, failure: 'invalid' } : { ok: false, failure: 'invalid', code };
+async function refused(res: Response): Promise<{ readonly ok: false; readonly failure: 'invalid'; readonly code?: string; readonly permission?: string }> {
+  let doc: ErrorV0 | undefined;
+  try {
+    const body: unknown = await res.json();
+    if (errorV0(body).length === 0) doc = body as ErrorV0;
+  } catch {
+    // No document, or not one.
+  }
+  return { ok: false, failure: 'invalid', ...(doc === undefined ? {} : { code: doc.code }), ...(doc?.permission === undefined ? {} : { permission: doc.permission }) };
 }
 
-async function get<T>(request: Call, token: string, check: Validator<T>): Promise<ApiResult<T>> {
+// withStatus preserves a refusal's HTTP status for a reader that treats one
+// status as final, without changing the shape of other calls' answers (#1562).
+async function get<T>(request: Call, token: string, check: Validator<T>, withStatus = false): Promise<ApiResult<T>> {
   let res: Response;
   try {
     res = await platform.http.get(request, token);
@@ -515,7 +529,8 @@ async function get<T>(request: Call, token: string, check: Validator<T>): Promis
       const code = await refusalCode(res.clone());
       if (code === undefined) return { ok: false, failure: 'invalid', code: 'reactions_unsupported' };
     }
-    return refused(res);
+    const failure = await refused(res);
+    return withStatus ? { ...failure, status: res.status } : failure;
   }
   let body: unknown;
   try {
@@ -523,7 +538,7 @@ async function get<T>(request: Call, token: string, check: Validator<T>): Promis
   } catch {
     return { ok: false, failure: 'invalid' };
   }
-  if (check(body).length > 0) return { ok: false, failure: 'invalid' };
+  if (fromServer(check)(body).length > 0) return { ok: false, failure: 'invalid' };
   return { ok: true, value: body as T };
 }
 
@@ -533,11 +548,11 @@ async function get<T>(request: Call, token: string, check: Validator<T>): Promis
 // A 401 for a credential this page has since replaced is not a sign-out: the
 // call is asked again with the new one (settleRefusal, issue #1000).
 // signIn and restore are the calls that do not use it: they check a candidate.
-async function authed<T>(request: Call, check: Validator<T>): Promise<ApiResult<T>> {
+async function authed<T>(request: Call, check: Validator<T>, withStatus = false): Promise<ApiResult<T>> {
   let held = current();
   if (held === null) return { ok: false, failure: 'unauthorized' };
   for (let sent = 0; sent < resends; sent++) {
-    const result = await get(request, held.token, check);
+    const result = await get(request, held.token, check, withStatus);
     if (result.ok || result.failure !== 'unauthorized') return result;
     const next = await settleRefusal(held, true);
     if (next === null) return result;
@@ -702,7 +717,7 @@ export async function serverHealth(): Promise<ServerHealth | null> {
   try {
     const res = await platform.http.health(call('health'));
     const body: unknown = await res.json();
-    if (health(body).length > 0) return null;
+    if (fromServer(health)(body).length > 0) return null;
     const { version, server_mode: mode } = body as { version: string; server_mode?: string };
     pageVersion ??= version;
     return { version, temporary: mode === 'temporary' };
@@ -861,7 +876,7 @@ export async function signOutEverywhere(principal: number): Promise<ApiResult<nu
   forget(held);
   try {
     const parsed: unknown = await reply.res.json();
-    if (revokeAllCredentialsResponseV1(parsed).length === 0) return { ok: true, value: (parsed as { revoked: number }).revoked };
+    if (fromServer(revokeAllCredentialsResponseV1)(parsed).length === 0) return { ok: true, value: (parsed as { revoked: number }).revoked };
   } catch {
     // Fall through.
   }
@@ -1274,9 +1289,10 @@ export async function putAgentManifest(id: number, request: PutAgentManifestRequ
 }
 
 // agentManifest reads an agent's manifest (GET /v1/principals/{id}/manifest;
-// operators): the agent card shows its grant from it.
-export async function agentManifest(id: number): Promise<InviteResult<AgentManifestV1>> {
-  const reply = await authed(call('getManifest', { id }), getAgentManifestResponseV1);
+// operators): the agent card shows its grant from it. A refusal keeps its HTTP
+// status so the card can end reads after a 404 (#1562).
+export async function agentManifest(id: number): Promise<ApiResult<AgentManifestV1>> {
+  const reply = await authed(call('getManifest', { id }), getAgentManifestResponseV1, true);
   return reply.ok ? { ok: true, value: reply.value.manifest } : reply;
 }
 
@@ -1371,7 +1387,7 @@ async function inviteRefused(res: Response): Promise<InviteRefusal> {
   let doc: ErrorV0 | undefined;
   try {
     const body: unknown = await res.json();
-    if (errorV0(body).length === 0) doc = body as ErrorV0;
+    if (fromServer(errorV0)(body).length === 0) doc = body as ErrorV0;
   } catch {
     // No document, or not one.
   }
@@ -1390,7 +1406,7 @@ async function inviteRefused(res: Response): Promise<InviteRefusal> {
 async function readBody<T>(res: Response, check: Validator<T>): Promise<InviteResult<T>> {
   try {
     const parsed: unknown = await res.json();
-    if (check(parsed).length === 0) return { ok: true, value: parsed as T };
+    if (fromServer(check)(parsed).length === 0) return { ok: true, value: parsed as T };
   } catch {
     // Fall through.
   }
@@ -1730,7 +1746,7 @@ async function convertAs(held: Held, name: string, password: string): Promise<Co
   } catch {
     body = undefined;
   }
-  if (convertGuestResponseV1(body).length > 0) {
+  if (fromServer(convertGuestResponseV1)(body).length > 0) {
     // A success whose body is not the schema's shape may still carry the
     // member's new credential: it is revoked (best effort) rather than left
     // alive, and the person signs in with the password.
@@ -1889,7 +1905,7 @@ export async function renamePrincipal(id: number, name: string): Promise<ApiResu
   if (!reply.res.ok) return refused(reply.res);
   try {
     const parsed: unknown = await reply.res.json();
-    if (renamePrincipalResponseV1(parsed).length === 0) return { ok: true, value: (parsed as RenamePrincipalResponseV1).principal };
+    if (fromServer(renamePrincipalResponseV1)(parsed).length === 0) return { ok: true, value: (parsed as RenamePrincipalResponseV1).principal };
   } catch {
     // Fall through.
   }
@@ -1959,13 +1975,20 @@ const maxDirectoryPages = 50;
 // /v1/directory/members, issue #983), every page of it, in the server's order.
 // What it holds is what the server answered: operator fields only if the
 // server sent them, and the scope it says it applied.
-export async function directoryMembers(): Promise<ApiResult<ServerMembersResponseV1>> {
+export function directoryMembers(): Promise<ApiResult<ServerMembersResponseV1>> {
+  return readDirectoryMembers(undefined);
+}
+
+// as, when given, is the member whose view of the list is asked for (a
+// preview, issue #1517): every page carries the header on its own request.
+async function readDirectoryMembers(as: number | undefined): Promise<ApiResult<ServerMembersResponseV1>> {
   const members: ServerMemberV1[] = [];
   let scope: ServerMembersResponseV1['scope'];
   let after = 0;
   for (let page = 0; page < maxDirectoryPages; page++) {
     const query = `limit=${String(directoryLimit)}${after === 0 ? '' : `&after=${String(after)}`}`;
-    const result = await authed(call('directoryMembers', {}, query), serverMembersResponseV1);
+    const request = as === undefined ? call('directoryMembers', {}, query) : previewCall('directoryMembers', as, {}, query);
+    const result = await authed(request, serverMembersResponseV1);
     if (!result.ok) return result;
     members.push(...result.value.members);
     scope = result.value.scope;
@@ -1974,6 +1997,39 @@ export async function directoryMembers(): Promise<ApiResult<ServerMembersRespons
     after = next;
   }
   return { ok: true, value: { members, ...(scope === undefined ? {} : { scope }) } };
+}
+
+// The five reads of a member's view, each asking the server to answer as that
+// member (Preview as member, docs/design/permission-preview.md §4, issue
+// #1517). The administrator's own credential is sent; the member's view comes
+// back. Nothing here is a write, and the header rides only on the call that
+// is built for it (previewCall), never on authed or a module setting, so no
+// other request can pick it up.
+export interface PreviewReads {
+  readonly summary: () => Promise<ApiResult<PreviewResponseV1>>;
+  readonly channels: () => Promise<ApiResult<ChannelV0[]>>;
+  readonly channelDirectory: () => Promise<ApiResult<ChannelListingV1[]>>;
+  readonly directoryMembers: () => Promise<ApiResult<ServerMembersResponseV1>>;
+  readonly listMembers: (channel: string) => Promise<ApiResult<ChannelMemberV1[]>>;
+}
+
+export function previewAs(target: number): PreviewReads {
+  return {
+    summary: () => authed(previewCall('preview', target), previewResponseV1),
+    channels: async () => {
+      const result = await authed(previewCall('listChannels', target), listChannelsResponse);
+      return result.ok ? { ok: true, value: result.value.channels } : result;
+    },
+    channelDirectory: async () => {
+      const result = await authed(previewCall('channelDirectory', target), channelDirectoryResponseV1);
+      return result.ok ? { ok: true, value: result.value.channels } : result;
+    },
+    directoryMembers: () => readDirectoryMembers(target),
+    listMembers: async (channel) => {
+      const result = await authed(previewCall('listMembers', target, { channel }), listChannelMembersResponseV1);
+      return result.ok ? { ok: true, value: result.value.members } : result;
+    },
+  };
 }
 
 // renameChannel renames a channel by its id (issue #728): operators and this
@@ -2048,7 +2104,7 @@ async function reactionWrite(request: Call): Promise<ApiResult<ReactionSummaryV1
   if (!reply.res.ok) {
     try {
       const body: unknown = await reply.res.clone().json();
-      if (errorV0(body).length === 0) {
+      if (fromServer(errorV0)(body).length === 0) {
         const error = body as ErrorV0;
         return { ok: false, failure: 'invalid', code: error.code, ...(error.retry_after_seconds === undefined ? {} : { retryAfter: error.retry_after_seconds }) };
       }
@@ -2057,7 +2113,7 @@ async function reactionWrite(request: Call): Promise<ApiResult<ReactionSummaryV1
   }
   try {
     const body: unknown = await reply.res.json();
-    if (reactionSummaryV1(body).length === 0 && (body as ReactionSummaryV1).message_id === request.params?.id) return { ok: true, value: body as ReactionSummaryV1 };
+    if (fromServer(reactionSummaryV1)(body).length === 0 && (body as ReactionSummaryV1).message_id === request.params?.id) return { ok: true, value: body as ReactionSummaryV1 };
   } catch { /* A lost answer can safely be retried with the same intent. */ }
   return { ok: false, failure: 'network' };
 }
@@ -2111,7 +2167,7 @@ export async function editMessage(channel: string, id: number, body: string): Pr
   if (!res.ok) {
     try {
       const doc: unknown = await res.json();
-      if (errorV0(doc).length === 0) {
+      if (fromServer(errorV0)(doc).length === 0) {
         const { code, retry_after_seconds: retryAfter } = doc as ErrorV0;
         return { ok: false, failure: 'refused', code, ...(retryAfter === undefined ? {} : { retryAfter }) };
       }
@@ -2122,7 +2178,7 @@ export async function editMessage(channel: string, id: number, body: string): Pr
   }
   try {
     const parsed: unknown = await res.json();
-    if (editMessageResponseV1(parsed).length === 0) return { ok: true, message: (parsed as EditMessageResponseV1).message };
+    if (fromServer(editMessageResponseV1)(parsed).length === 0) return { ok: true, message: (parsed as EditMessageResponseV1).message };
   } catch {
     // Fall through: the body was cut off.
   }
@@ -2248,7 +2304,7 @@ export type PostResult =
 async function requestRefusal(res: Response, fallback: string): Promise<{ readonly reason: string; readonly code?: string }> {
   try {
     const body: unknown = await res.json();
-    if (errorV0(body).length === 0) {
+    if (fromServer(errorV0)(body).length === 0) {
       const doc = body as ErrorV0;
       const line = doc.message.replace(/\s+/g, ' ').trim();
       const reason = line === '' ? fallback : line.length > 300 ? `${line.slice(0, 299)}…` : line;
@@ -2282,7 +2338,7 @@ export async function postMessage(channel: string, body: string, audience?: Audi
   if (!res.ok) return { ok: false, outcome: 'refused', ...(await postRefusal(res)) };
   try {
     const parsed: unknown = await res.json();
-    if (postMessageResponseV2(parsed).length === 0) return { ok: true, message: (parsed as { message: MessageV2 }).message };
+    if (fromServer(postMessageResponseV2)(parsed).length === 0) return { ok: true, message: (parsed as { message: MessageV2 }).message };
   } catch {
     // Fall through: the body was cut off.
   }
@@ -2342,7 +2398,7 @@ export async function uploadFile(channel: string, name: string, mediaType: strin
   if (!res.ok) return { ok: false, outcome: 'refused', ...(await requestRefusal(res, 'The server refused the upload')) };
   try {
     const parsed: unknown = await res.json();
-    if (fileV1(parsed).length === 0) return { ok: true, file: parsed as FileV1 };
+    if (fromServer(fileV1)(parsed).length === 0) return { ok: true, file: parsed as FileV1 };
   } catch {
     // Fall through: the body was cut off.
   }
@@ -2424,7 +2480,7 @@ export async function markRead(channel: string, id: number): Promise<ApiResult<R
   if (!reply.res.ok) return refused(reply.res);
   try {
     const parsed: unknown = await reply.res.json();
-    if (readStateV1(parsed).length === 0) return { ok: true, value: parsed as ReadStateV1 };
+    if (fromServer(readStateV1)(parsed).length === 0) return { ok: true, value: parsed as ReadStateV1 };
   } catch {
     // Fall through.
   }
@@ -2464,6 +2520,53 @@ export function writeNotificationPreferences(origin: string, account: number, pr
   }
 }
 
+// How a person arranges the channel list (issue #1493): favorites, groups and
+// the order in them, kept in this browser for one account on one server. It is
+// a view and nothing more; arrangement.ts reads whatever is here defensively,
+// so this hands back the raw parsed value (null when none or unreadable).
+const arrangementKey = (origin: string, account: number) => `conch.web.arrangement.v1.${origin}.${String(account)}`;
+
+export function readArrangement(origin: string, account: number): unknown {
+  try {
+    return JSON.parse(platform.credentials.readPreference(arrangementKey(origin, account)) ?? 'null') as unknown;
+  } catch {
+    return null;
+  }
+}
+
+export function writeArrangement(origin: string, account: number, value: unknown): void {
+  try {
+    platform.credentials.writePreference(arrangementKey(origin, account), JSON.stringify(value));
+  } catch {
+    // Storage can be unavailable; the arrangement still applies until the page closes.
+  }
+}
+
+const appearancePreferencesKey = (origin: string, account: number) => `conch.web.appearance.v1.${origin}.${String(account)}`;
+
+export function readAppearancePreferences(origin: string, account: number): AppearancePreferences {
+  try {
+    const raw: unknown = JSON.parse(platform.credentials.readPreference(appearancePreferencesKey(origin, account)) ?? 'null');
+    if (typeof raw !== 'object' || raw === null) return defaultAppearance;
+    const value = raw as { theme?: unknown; accent?: unknown; density?: unknown };
+    return {
+      theme: typeof value.theme === 'string' && (appearanceThemes as readonly string[]).includes(value.theme) ? value.theme as AppearancePreferences['theme'] : defaultAppearance.theme,
+      accent: typeof value.accent === 'string' && (appearanceAccents as readonly string[]).includes(value.accent) ? value.accent as AppearancePreferences['accent'] : defaultAppearance.accent,
+      density: typeof value.density === 'string' && (appearanceDensities as readonly string[]).includes(value.density) ? value.density as AppearancePreferences['density'] : defaultAppearance.density,
+    };
+  } catch {
+    return defaultAppearance;
+  }
+}
+
+export function writeAppearancePreferences(origin: string, account: number, preferences: AppearancePreferences): void {
+  try {
+    platform.credentials.writePreference(appearancePreferencesKey(origin, account), JSON.stringify(preferences));
+  } catch {
+    // Storage can be unavailable; the in-memory preference still applies.
+  }
+}
+
 // The microphone mode the person chose for voice (issue #1244): a per-browser,
 // non-secret preference. Absent, unreadable or anything else is no choice (null),
 // and the voice client then starts in open microphone.
@@ -2484,6 +2587,58 @@ export function writeVoiceMode(mode: 'ptt' | 'open'): void {
     platform.credentials.writePreference(voiceModeKey, mode);
   } catch {
     // Storage can be unavailable; the choice lasts until the page reloads.
+  }
+}
+
+// Whether the call view hides people whose cameras are off (issue #1487): a
+// per-browser, non-secret preference. Absent, unreadable or anything else is
+// the default, showing everyone.
+const hideNonVideoKey = 'conch.web.voice.hide-non-video.v1';
+
+export function readHideNonVideo(): boolean {
+  try {
+    return platform.credentials.readPreference(hideNonVideoKey) === 'on';
+  } catch {
+    return false;
+  }
+}
+
+export function writeHideNonVideo(hide: boolean): void {
+  try {
+    platform.credentials.writePreference(hideNonVideoKey, hide ? 'on' : 'off');
+  } catch {
+    // Storage can be unavailable; the choice lasts until the page reloads.
+  }
+}
+
+// The last share quality chosen in this browser: a non-secret preference.
+const shareQualityKey = 'conch.web.voice.share-quality.v1';
+
+// keptShareQuality is the quality chosen earlier in this browser, or null if
+// none was (or the storage is refused): the desktop's default differs from the
+// browser's (issue #1581), so it must tell a choice from the default.
+export function keptShareQuality(): ShareQuality | null {
+  try {
+    const raw: unknown = JSON.parse(platform.credentials.readPreference(shareQualityKey) ?? 'null');
+    if (typeof raw !== 'object' || raw === null) return null;
+    const kept = raw as { resolution?: unknown; frameRate?: unknown };
+    const resolution = kept.resolution === '720p' || kept.resolution === '1080p' || kept.resolution === 'source' ? kept.resolution : null;
+    const frameRate = kept.frameRate === 15 || kept.frameRate === 30 || kept.frameRate === 60 ? kept.frameRate : null;
+    return resolution === null || frameRate === null ? null : { resolution, frameRate };
+  } catch {
+    return null;
+  }
+}
+
+export function readShareQuality(): ShareQuality {
+  return keptShareQuality() ?? defaultShareQuality;
+}
+
+export function writeShareQuality(quality: ShareQuality): void {
+  try {
+    platform.credentials.writePreference(shareQualityKey, JSON.stringify(quality));
+  } catch {
+    // Storage can be unavailable; the in-memory preference still applies.
   }
 }
 
@@ -2540,7 +2695,7 @@ async function requestTicket(): Promise<ApiResult<WSTicketV1>> {
   if (!reply.res.ok) return { ok: false, failure: 'invalid' };
   try {
     const parsed: unknown = await reply.res.json();
-    if (wsTicketV1(parsed).length === 0) return { ok: true, value: parsed as WSTicketV1 };
+    if (fromServer(wsTicketV1)(parsed).length === 0) return { ok: true, value: parsed as WSTicketV1 };
   } catch {
     // Fall through.
   }
@@ -2659,10 +2814,10 @@ export function openEventsSocket(channel: string, session: number, events: Socke
       if (current() === owner && typeof data === 'string') {
         try {
           const body: unknown = JSON.parse(data);
-          if (channelMembersV1(body).length === 0) socketChannelId = (body as ChannelMembersV1).channel_id;
-          if (sessionRosterV1(body).length === 0) socketChannelId = (body as SessionRosterV1).channel_id;
-          if (channelDocV1(body).length === 0) socketChannelId = (body as ChannelDocV1).channel_id;
-          if (reactionSummaryV1(body).length === 0) {
+          if (fromServer(channelMembersV1)(body).length === 0) socketChannelId = (body as ChannelMembersV1).channel_id;
+          if (fromServer(sessionRosterV1)(body).length === 0) socketChannelId = (body as SessionRosterV1).channel_id;
+          if (fromServer(channelDocV1)(body).length === 0) socketChannelId = (body as ChannelDocV1).channel_id;
+          if (fromServer(reactionSummaryV1)(body).length === 0) {
             socketChannelId = (body as ReactionSummaryV1).channel_id;
             publishReaction(channel, { kind: 'summary', summary: body as ReactionSummaryV1 });
           }
@@ -2685,7 +2840,7 @@ export async function createSession(client: string): Promise<ApiResult<SessionV1
   if (!reply.res.ok) return refused(reply.res);
   try {
     const parsed: unknown = await reply.res.json();
-    if (sessionV1(parsed).length === 0) return { ok: true, value: parsed as SessionV1 };
+    if (fromServer(sessionV1)(parsed).length === 0) return { ok: true, value: parsed as SessionV1 };
   } catch {
     // Fall through.
   }
@@ -2771,7 +2926,7 @@ export async function createIntervention(run: number, request: CreateInterventio
   if (!reply.res.ok) return refused(reply.res);
   try {
     const parsed: unknown = await reply.res.json();
-    if (interventionV1(parsed).length === 0) return { ok: true, value: parsed as InterventionV1 };
+    if (fromServer(interventionV1)(parsed).length === 0) return { ok: true, value: parsed as InterventionV1 };
   } catch {
     // Fall through.
   }
@@ -2800,7 +2955,7 @@ export async function createVoiceSession(channel: string): Promise<VoiceSessionR
   }
   try {
     const parsed: unknown = await res.json();
-    if (voiceSessionResponseV1(parsed).length === 0) return { ok: true, value: parsed as VoiceSessionResponseV1 };
+    if (fromServer(voiceSessionResponseV1)(parsed).length === 0) return { ok: true, value: parsed as VoiceSessionResponseV1 };
   } catch {
     // Fall through.
   }
@@ -2829,7 +2984,7 @@ export async function createVoiceViewer(channel: string): Promise<VoiceViewerRes
   }
   try {
     const parsed: unknown = await res.json();
-    if (voiceCompanionResponseV1(parsed).length === 0) return { ok: true, value: parsed as VoiceCompanionResponseV1 };
+    if (fromServer(voiceCompanionResponseV1)(parsed).length === 0) return { ok: true, value: parsed as VoiceCompanionResponseV1 };
   } catch {
     // Fall through.
   }
@@ -2849,8 +3004,8 @@ export async function removeVoiceViewer(channel: string): Promise<ApiResult<null
 // getVoicePresence reads who is in a channel's voice, once. The page keeps
 // presence on its socket, joined or not, and reads this only to learn why
 // the server closed that socket (1008).
-export function getVoicePresence(channel: string): Promise<ApiResult<VoicePresenceV1>> {
-  return authed(call('voicePresence', { channel }), voicePresenceV1);
+export function getVoicePresence(channel: string): Promise<ApiResult<VoicePresenceV2>> {
+  return authed(call('voicePresence', { channel }, queryOf({ schema: 'conch.voice_presence.v2' })), voicePresenceV2);
 }
 
 // How a transmit report was answered. no_session is "go back to conchd" (409
@@ -2875,10 +3030,11 @@ export async function reportVoiceTransmit(channel: string, state: VoiceTransmitS
   return 'no_session';
 }
 
-// openVoiceSocket opens the presence stream of a channel's voice with a ticket:
-// the roster, and who is transmitting.
+// openVoiceSocket opens the v2 presence stream of a channel's voice with a
+// ticket: the roster, who is transmitting, camera claims and every live share
+// (voice-multi-share.md §2, #1509).
 export function openVoiceSocket(channel: string, events: SocketEvents): Promise<ApiResult<FeedSocket>> {
-  return connect('voice', 'voiceSocket', { channel }, events);
+  return connect('voice', 'voiceSocket', { channel, schema: 'conch.voice_presence.v2' }, events);
 }
 
 // Voice occupancy (issue #596): how many are in each channel's voice, for
@@ -2932,32 +3088,46 @@ export async function fileReport(id: number, issue: string): Promise<InviteResul
   return readSent(await authedSend(call('fileReport', { id }), request), problemReportV1);
 }
 
-// Screen share (issue #444, voice-control-plane.md section 12). The page
-// connects to the room first, then claims the room's share, then publishes:
-// the join token allows the microphone alone, and the claim is what lets that
-// connection publish a screen and its sound.
+// Screen share (issue #444, voice-control-plane.md section 12; multi-share
+// voice-multi-share.md §5.1, issue #1509). The page connects to the room first,
+// then claims the caller's own share, then publishes: the join token allows the
+// microphone alone, and the claim is what lets that connection publish a screen
+// and its sound.
 
-// A claim refused carries the status and the server's code, as a session
-// does: 409 voice_share_busy is someone else's share, 409 voice_no_session is
-// no connection to grant it to.
+// A claim refused carries the status and the server's code, as a session does:
+// 409 voice_share_full is a room at its six-stream cap, 409 voice_no_session
+// is no connection to grant it to (voice-multi-share.md §4), and 429
+// rate_limited a holder's quality change past its bound (#1546), with the
+// seconds its Retry-After asks for.
 export type ShareClaimResult =
-  | { readonly ok: true; readonly value: VoiceShareV1 }
-  | { readonly ok: false; readonly failure: ApiFailure; readonly status?: number; readonly code?: string };
+  | { readonly ok: true; readonly value: VoiceShareV1 | VoiceShareV2 }
+  | { readonly ok: false; readonly failure: ApiFailure; readonly status?: number; readonly code?: string; readonly retryAfter?: number };
 
-// claimVoiceShare claims the room's share for the caller, or claims it again
-// (after a reconnect), which keeps the share as it was.
-export async function claimVoiceShare(channel: string): Promise<ShareClaimResult> {
-  const reply = await authedPost(call('claimShare', { channel }));
+// claimVoiceShare claims the caller's own share, or claims it again after a
+// reconnect or quality change, which keeps the share as it was. A declared
+// quality is sent with the first claim, the post-picker claim and every later
+// claim (voice-multi-share.md §3.1, §5.1, issue #1509).
+export async function claimVoiceShare(channel: string, quality?: ShareQuality): Promise<ShareClaimResult> {
+  const request: VoiceShareRequestV1 | undefined = quality === undefined ? undefined : { quality: { resolution: quality.resolution, frame_rate: quality.frameRate } };
+  const reply = await authedPost(call('claimShare', { channel }), request);
   if (reply.kind === 'none') return { ok: false, failure: 'network' };
   if (reply.kind === 'unauthorized') return { ok: false, failure: 'unauthorized' };
   const res = reply.res;
   if (!res.ok) {
     const code = await refusalCode(res);
-    return code === undefined ? { ok: false, failure: 'invalid', status: res.status } : { ok: false, failure: 'invalid', status: res.status, code };
+    const retryAfter = Number.parseInt(res.headers.get('Retry-After') ?? '', 10);
+    return {
+      ok: false,
+      failure: 'invalid',
+      status: res.status,
+      ...(code === undefined ? {} : { code }),
+      ...(res.status === 429 && Number.isFinite(retryAfter) && retryAfter >= 0 ? { retryAfter } : {}),
+    };
   }
   try {
     const parsed: unknown = await res.json();
-    if (voiceShareV1(parsed).length === 0) return { ok: true, value: parsed as VoiceShareV1 };
+    if (quality !== undefined && fromServer(voiceShareV2)(parsed).length === 0) return { ok: true, value: parsed as VoiceShareV2 };
+    if (quality === undefined && fromServer(voiceShareV1)(parsed).length === 0) return { ok: true, value: parsed as VoiceShareV1 };
   } catch {
     // Fall through.
   }
@@ -2994,7 +3164,7 @@ export async function claimVoiceCamera(channel: string, startedAt?: string): Pro
   }
   try {
     const parsed: unknown = await res.json();
-    if (voiceCameraV1(parsed).length === 0) return { ok: true, value: parsed as VoiceCameraV1 };
+    if (fromServer(voiceCameraV1)(parsed).length === 0) return { ok: true, value: parsed as VoiceCameraV1 };
   } catch {
     // Fall through.
   }
@@ -3044,7 +3214,7 @@ function publishRemoval(data: unknown) {
   if (typeof data !== 'string') return;
   try {
     const doc: unknown = JSON.parse(data);
-    const message = messageRemovedV1(doc).length === 0 ? (doc as MessageRemovedV1).message : messageV2(doc).length === 0 ? doc as MessageV2 : null;
+    const message = fromServer(messageRemovedV1)(doc).length === 0 ? (doc as MessageRemovedV1).message : fromServer(messageV2)(doc).length === 0 ? doc as MessageV2 : null;
     if (message?.removed === true) for (const receive of removalWatchers) receive(message);
   } catch { /* Unknown frames are ignored. */ }
 }

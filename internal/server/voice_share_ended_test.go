@@ -87,7 +87,7 @@ func TestVoiceShareEndedTellsTheSharer(t *testing.T) {
 		},
 		{
 			name:     "an operator stops it",
-			end:      func(t *testing.T, f *presenceFixture, _ string) { f.at(3_000); f.mustStop(t, "root") },
+			end:      func(t *testing.T, f *presenceFixture, _ string) { f.at(3_000); f.mustStopOf(t, "ann") },
 			endAt:    3 * time.Second,
 			want:     schema.VoiceShareEndOperator,
 			readable: true,
@@ -232,7 +232,7 @@ func TestVoiceShareEndedOnTheSocket(t *testing.T) {
 		}
 	}
 	f.at(2_000)
-	f.mustStop(t, "root")
+	f.mustStopOf(t, "ann")
 	annFrame := readRawPresence(t, sockets["ann"])
 	otherFrame := readRawPresence(t, sockets["ann2"])
 	var doc schema.VoicePresenceV1
@@ -414,7 +414,7 @@ func TestVoiceShareLateReleaseKeepsANewerShare(t *testing.T) {
 	}
 
 	// The deliberate stop, naming nothing, is unchanged.
-	f.mustStop(t, "root")
+	f.mustStopOf(t, "ann")
 	want = append(want, "root stopped principal=ann reason=operator")
 	if got := f.shareRows(t); !slices.Equal(got, want) {
 		t.Errorf("share rows %q, want %q", got, want)

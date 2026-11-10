@@ -1,8 +1,11 @@
 import { ModerationConfirm, type ModerationOperation } from './Moderation';
 import type { ChannelBanV1 } from './schema/generated';
-import { useCallback, useEffect, useId, useRef, useState, type KeyboardEvent, type ReactNode, type SyntheticEvent } from 'react';
+import { useCallback, useContext, useEffect, useId, useRef, useState, type KeyboardEvent, type ReactNode, type SyntheticEvent } from 'react';
 import * as api from './api';
+import { ManifestReads } from './admin/AIAdminCard';
 import { Avatar } from './Icons';
+import { IdentityMarks } from './Identity';
+import { ProfileCard } from './ProfileCard';
 import { memberName } from './guestName';
 import { ActionsMenu, useOpeners, type MenuItem } from './MessageMenu';
 import type { Entry } from './agents/join';
@@ -34,6 +37,7 @@ export interface MemberControlsProps {
   // person, kept above the Online and Offline lists.
   readonly rowUi?: (principalId: number) => RowUi;
   readonly setRowUi?: (principalId: number, patch: Partial<RowUi>) => void;
+  readonly onProfileDisappear?: () => void;
 }
 
 function displayName(member: ChannelMemberV1): string {
@@ -211,7 +215,7 @@ function AddPeople(props: MemberControlsProps) {
 }
 
 // MemberRow is one person's row in the members panel (issue #1094): the
-// caller's content, the Manager and Approver badges, and one ⋯ menu with the
+// caller's content, the carried identity marks, and one ⋯ menu with the
 // actions this viewer may use on this person. The menu is the message log's
 // (MessageMenu.tsx), opened by its button, Enter or Space on it, a right-click
 // on the row or a long press. A row with no actions draws no button and
@@ -220,16 +224,18 @@ export interface RowUi {
   readonly menuOpen: boolean;
   readonly confirming: boolean;
   readonly moderating: ModerationOperation | null;
+  readonly profileOpen: boolean;
 }
-const noUi: RowUi = { menuOpen: false, confirming: false, moderating: null };
+const noUi: RowUi = { menuOpen: false, confirming: false, moderating: null, profileOpen: false };
 
 export function MemberRow({
   className,
   principalId,
   children,
   after,
+  showIdentity = true,
   ...controls
-}: MemberControlsProps & { readonly principalId: number; readonly className: string; readonly children: ReactNode; readonly after?: ReactNode }) {
+}: MemberControlsProps & { readonly principalId: number; readonly className: string; readonly children: ReactNode; readonly after?: ReactNode; readonly showIdentity?: boolean }) {
   const { channel, members, viewer, refreshMembers, onUnauthorized } = controls;
   const member = members.find((m) => m.principal_id === principalId);
   const [busy, setBusy] = useState(false);
@@ -335,8 +341,7 @@ export function MemberRow({
   return (
     <li className={`${className} member-row${items.length > 0 ? ' has-actions' : ''}`} {...openers}>
       {children}
-      {member?.manages === true ? <span className="ag-badge">Manager</span> : null}
-      {member?.can_decide === true ? <span className="ag-badge">Approver</span> : null}
+      {showIdentity && member !== undefined ? <IdentityMarks {...member} id={member.principal_id} viewer={viewer.id} /> : null}
       {after}
       {items.length === 0 || member === undefined ? null : (
         <ActionsMenu label={`Actions for ${displayName(member)}`} items={items} open={menuOpen} onOpenChange={setMenuOpen} button={more} />
@@ -380,13 +385,24 @@ function PeopleGroup({ title, people, controls }: { readonly title: string; read
     <>
       <h4>{`${title} — ${String(people.length)}`}</h4>
       <ul aria-label={`${title} — ${String(people.length)}`}>
-        {people.map((person) => (
-          <MemberRow key={`${String(controls.channel.id)}:${String(person.id)}`} {...controls} principalId={person.id} className={`ag-person state-${person.state}`}>
-            <Avatar id={person.id} name={person.name} />
-            <span className="ag-name">{person.name}</span>
-            {person.live > 1 ? <span> ({person.live} sessions)</span> : null} <span className="ag-status">{person.state}</span>
-          </MemberRow>
-        ))}
+        {people.map((person) => {
+          const member = controls.members.find((m) => m.principal_id === person.id);
+          return (
+            <MemberRow key={`${String(controls.channel.id)}:${String(person.id)}`} {...controls} principalId={person.id} className={`ag-person state-${person.state}`}>
+              <Avatar id={person.id} name={person.name} />
+              <ProfileCard
+                id={person.id}
+                person={{ ...person, role: member?.role, manages: member?.manages, can_decide: member?.can_decide, guest: member?.guest }}
+                viewer={controls.viewer.id}
+                className="ag-name"
+                open={controls.rowUi?.(person.id).profileOpen}
+                onOpenChange={(open) => { controls.setRowUi?.(person.id, { profileOpen: open }); }}
+                onDisappear={controls.onProfileDisappear}
+              />
+              {person.live > 1 ? <span> ({person.live} sessions)</span> : null} <span className="ag-status">{person.state}</span>
+            </MemberRow>
+          );
+        })}
       </ul>
     </>
   );
@@ -394,6 +410,7 @@ function PeopleGroup({ title, people, controls }: { readonly title: string; read
 
 export function Members({ people, ...controls }: MemberControlsProps & { readonly people: readonly Entry[] }) {
   const [feedback, setFeedback] = useState<string | null>(null);
+  const heading = useRef<HTMLHeadingElement>(null);
   const [rowUis, setRowUis] = useState<{ readonly channel: number; readonly byId: Readonly<Record<number, RowUi>> }>({ channel: controls.channel.id, byId: {} });
   const byId = rowUis.channel === controls.channel.id ? rowUis.byId : {};
   const rowUi = (id: number): RowUi => byId[id] ?? noUi;
@@ -422,7 +439,7 @@ export function Members({ people, ...controls }: MemberControlsProps & { readonl
   const offline = people.filter((p) => p.state === 'offline');
   return (
     <>
-      <h3>People</h3>
+      <h3 ref={heading} tabIndex={-1}>People</h3>
       {feedback === null ? null : <p role="status">{feedback}</p>}
       {canAdd ? <BanList key={`bans-${String(controls.channel.id)}`} {...controls} operator={operator} /> : null}
       {canAdd ? <AddPeople key={controls.channel.id} {...controls} /> : null}
@@ -434,8 +451,8 @@ export function Members({ people, ...controls }: MemberControlsProps & { readonl
         <p className="empty">Nobody</p>
       ) : (
         <>
-          <PeopleGroup title="Online" people={online} controls={{ ...controls, onModerated: setFeedback, rowUi, setRowUi }} />
-          <PeopleGroup title="Offline" people={offline} controls={{ ...controls, onModerated: setFeedback, rowUi, setRowUi }} />
+          <PeopleGroup title="Online" people={online} controls={{ ...controls, onModerated: setFeedback, rowUi, setRowUi, onProfileDisappear: () => { heading.current?.focus(); } }} />
+          <PeopleGroup title="Offline" people={offline} controls={{ ...controls, onModerated: setFeedback, rowUi, setRowUi, onProfileDisappear: () => { heading.current?.focus(); } }} />
         </>
       )}
     </>
@@ -443,8 +460,8 @@ export function Members({ people, ...controls }: MemberControlsProps & { readonl
 }
 
 // What the community member panel says of one person, from the directory's
-// row. An agent is marked as one (ADR-013 O11) and a human shows their role
-// (O4). The operator fields (owner, voice, who may invite, who invited them)
+// row. An agent or operator is marked as one (ADR-013 O11, O4). The operator
+// fields (owner, voice, who may invite, who invited them)
 // are drawn only when the row carries them: the server sends them to a holder
 // of manage_members alone, so the page cannot show a member what it was not
 // told. The controls that act on them are another issue's (#992).
@@ -468,11 +485,13 @@ function CommunityRow({
   byId,
   viewer,
   manage,
+  onProfileDisappear,
 }: {
   readonly person: ServerMemberV1;
   readonly byId: ReadonlyMap<number, ServerMemberV1>;
   readonly viewer: number;
   readonly manage?: RowManage | undefined;
+  readonly onProfileDisappear: () => void;
 }) {
   const inviter = person.invited_by === undefined ? undefined : byId.get(person.invited_by);
   const [menuOpen, setMenuOpen] = useState(false);
@@ -490,11 +509,8 @@ function CommunityRow({
   return (
     <li className={`community-member${has ? ' member-row has-actions' : ''}`} {...openers}>
       <Avatar id={person.id} name={person.name} />
-      <span className="community-name">{person.name}</span>
-      {person.id === viewer ? <span className="ag-badge">You</span> : null}
-      {person.kind === 'agent' ? <span className="ag-badge">Agent</span> : null}
-      {person.kind === 'human' && person.role !== undefined ? <span className="ag-badge">{person.role === 'operator' ? 'Operator' : 'Member'}</span> : null}
-      {person.owner === true ? <span className="ag-badge">Owner</span> : null}
+      <ProfileCard id={person.id} person={person} viewer={viewer} className="community-name" onDisappear={onProfileDisappear} />
+      <IdentityMarks {...person} id={person.id} viewer={viewer} />
       {person.voice_allowed === undefined ? null : <span className="hint">{person.voice_allowed ? ' · voice on' : ' · voice off'}</span>}
       {person.may_invite === undefined ? null : <span className="hint">{person.may_invite ? ' · can invite' : ' · cannot invite'}</span>}
       {person.invited_by === undefined ? null : <span className="hint">{` · invited by ${inviter?.name ?? `#${String(person.invited_by)}`}`}</span>}
@@ -566,6 +582,7 @@ export function CommunityMembers({
   readonly onUnauthorized: () => void;
 }) {
   const headingId = useId();
+  const manifestReads = useContext(ManifestReads);
   const [answer, setAnswer] = useState<ServerMembersResponseV1 | 'failed' | null>(null);
   // The permissions document's rows, for the voice line beside the voice
   // switch (design §5); every operator may read it.
@@ -609,7 +626,14 @@ export function CommunityMembers({
 
   const load = useCallback(() => {
     const mine = ++seq.current;
+    const request = manifestReads.beginDirectory();
     void api.directoryMembers().then((result) => {
+      // What this view shows is its own newest answer. The session-wide order
+      // governs only the shared stops on manifest reads: an answer older than
+      // one already applied there changes none of them, whether or not this
+      // view has closed or asked again, but is still drawn here (#1562). This
+      // answer, never a channel's members, controls manifest reads.
+      if (result.ok) manifestReads.acceptDirectory(request, result.value.members);
       if (mine !== seq.current || !live.current) return;
       if (result.ok) {
         setAnswer(result.value);
@@ -621,7 +645,7 @@ export function CommunityMembers({
       }
       setAnswer('failed');
     });
-  }, []);
+  }, [manifestReads.beginDirectory, manifestReads.acceptDirectory]);
   // The permissions document is read when a person's menu opens, so a switch
   // that would do nothing says so (the voice line); not with the list.
   const readRows = useCallback(() => {
@@ -699,6 +723,7 @@ export function CommunityMembers({
                   person={person}
                   byId={byId}
                   viewer={viewer}
+                  onProfileDisappear={() => { noteLine.current?.focus(); }}
                   manage={who === undefined ? undefined : { who, origin, rows, readRows, beginIssued: () => {
                       const started = context.current;
                       return (issuer, items) => {
@@ -721,7 +746,11 @@ export function CommunityMembers({
       {/* A list that is not told of directory changes keeps a Refresh; the
           community panel and the admin console's follow the frame. */}
       {directoryTick !== undefined ? null : (
-        <button type="button" className="quiet" onClick={load}>
+        <button
+          type="button"
+          className="quiet"
+          onClick={load}
+        >
           Refresh
         </button>
       )}

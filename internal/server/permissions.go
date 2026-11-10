@@ -384,8 +384,8 @@ func (p *voicePoller) sharingPrincipals() []int64 {
 	defer p.mu.Unlock()
 	seen := map[int64]bool{}
 	for _, r := range p.rooms {
-		if r.share != nil {
-			seen[r.share.principalID] = true
+		for pid := range r.shares {
+			seen[pid] = true
 		}
 		if r.claimer != 0 {
 			seen[r.claimer] = true
@@ -397,8 +397,8 @@ func (p *voicePoller) sharingPrincipals() []int64 {
 		}
 		// Whose share a rotation ended there and may still be withdrawing
 		// (issue #1265).
-		if r.retiredShare != 0 {
-			seen[r.retiredShare] = true
+		for _, pid := range r.retiredShares {
+			seen[pid] = true
 		}
 	}
 	out := make([]int64, 0, len(seen))

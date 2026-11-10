@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { VOICE_CONTROL_STOP_KILL_AFTER_MS } from '../../../web/src/schema/generated.ts';
 import { Supervisor, type CommandResult, type StartRequest, type VoiceState } from '../../main/voice/supervisor.ts';
-import { CEILING_ARGS, DESKTOP_MISSED_RELEASE_SECS, VoiceService, type VoiceIdentity, type VoiceSupervisor } from '../../main/voice/service.ts';
+import { CEILING_ARGS, DESKTOP_MISSED_RELEASE_SECS, HELPER_ARGS, MUTE_OWNER_ARGS, SHARE_AUDIO_ARGS, VoiceService, type VoiceIdentity, type VoiceSupervisor } from '../../main/voice/service.ts';
 import type { NativeVoiceDevicesResult, NativeVoiceView, VoiceDeviceKey, VoiceSaveResult } from '../../../web/src/platform/desktop/bridge.ts';
 import { FAKE_TOKEN, fixture, scratch, until, type Scratch } from './voice-support.ts';
 
@@ -116,7 +116,7 @@ beforeEach(() => {
   id = new Identity();
   logs = [];
   views = [];
-  svc = new VoiceService({ supervisor: fake, oneShot, identity: () => Promise.resolve(id), log: (l) => logs.push(l), stopBoundMs: 200 });
+  svc = new VoiceService({ locked: () => false, supervisor: fake, oneShot, identity: () => Promise.resolve(id), log: (l) => logs.push(l), stopBoundMs: 200 });
   svc.subscribe((v) => views.push(v));
 });
 afterEach(() => {
@@ -139,12 +139,30 @@ describe('join', () => {
         principalId: 7,
         muted: true,
         deafened: false,
-        extraArgs: ['--transmit-ceiling-secs', '30'],
+        extraArgs: ['--share-audio-owner', 'companion', '--no-mute-key', '--transmit-ceiling-secs', '30'],
       },
     ]);
     expect(DESKTOP_MISSED_RELEASE_SECS).toBe(30);
     expect(CEILING_ARGS).toEqual(['--transmit-ceiling-secs', '30']);
     expect(id.reads).toBe(1);
+  });
+
+  it('every start carries --share-audio-owner companion beside the ceiling, and a retry too (#1581)', async () => {
+    expect(SHARE_AUDIO_ARGS).toEqual(['--share-audio-owner', 'companion']);
+    expect(HELPER_ARGS).toEqual(['--share-audio-owner', 'companion', '--no-mute-key', '--transmit-ceiling-secs', '30']);
+    await join('general');
+    await svc.leave();
+    await join('ops');
+    expect(fake.starts.map((s) => s.extraArgs)).toEqual([HELPER_ARGS, HELPER_ARGS]);
+    expect(fake.starts.every((s) => s.extraArgs?.includes('companion') === true)).toBe(true);
+  });
+
+  it('every start tells the helper not to read keys.mute, so main alone mutes, and a retry too (#1631)', async () => {
+    expect(MUTE_OWNER_ARGS).toEqual(['--no-mute-key']);
+    await join('general');
+    await svc.leave();
+    await join('ops');
+    expect(fake.starts.every((s) => s.extraArgs?.includes('--no-mute-key') === true)).toBe(true);
   });
 
   it('a second join while one runs is refused busy and starts nothing', async () => {
@@ -176,7 +194,7 @@ describe('join', () => {
   });
 
   it('no identity at all: nothing starts', async () => {
-    svc = new VoiceService({ supervisor: fake, oneShot, identity: () => Promise.resolve(null), log: () => undefined });
+    svc = new VoiceService({ locked: () => false, supervisor: fake, oneShot, identity: () => Promise.resolve(null), log: () => undefined });
     expect((await svc.join({ channel: 'x', muted: false, deafened: false })).problem).toBe('not-signed-in');
     expect(fake.starts).toEqual([]);
   });
@@ -211,6 +229,85 @@ describe('nothing starts by itself', () => {
   });
 });
 
+describe('while the screen is locked (issue #1588, S1)', () => {
+  let locked = false;
+  beforeEach(() => {
+    locked = false;
+    svc = new VoiceService({ supervisor: fake, oneShot, identity: () => Promise.resolve(id), log: (l) => logs.push(l), stopBoundMs: 200, locked: () => locked });
+  });
+
+  it('refuses setMute(false) as locked, and sends nothing to the helper', async () => {
+    await join();
+    locked = true;
+    expect(await svc.setMute(false)).toEqual({ ok: false, error: 'locked' });
+    expect(fake.calls).not.toContain('mute:false');
+    expect(logs.some((l) => l.includes('unmute refused'))).toBe(true);
+  });
+
+  it('still accepts setMute(true), which is what the lock itself sends', async () => {
+    await join();
+    locked = true;
+    expect(await svc.setMute(true)).toEqual({ ok: true });
+    expect(fake.calls).toContain('mute:true');
+  });
+
+  it('accepts setMute(false) again after unlock: unmuting is the person’s act', async () => {
+    await join();
+    locked = true;
+    locked = false;
+    expect(await svc.setMute(false)).toEqual({ ok: true });
+  });
+
+  it('starts a join muted, however it was asked for', async () => {
+    locked = true;
+    await join('general', false, false);
+    expect(fake.starts.map((r) => r.muted)).toEqual([true]);
+  });
+
+  it('starts a join muted when the lock came during its identity wait', async () => {
+    let release: (i: Identity) => void = () => undefined;
+    let asked = false;
+    const waiting = new VoiceService({ supervisor: fake, oneShot, identity: () => new Promise<Identity>((r) => ((asked = true), (release = r))), log: () => undefined, stopBoundMs: 200, locked: () => locked });
+    const joined = waiting.join({ channel: 'general', muted: false, deafened: false });
+    // The join first re-reads the install stamp (issue #1600), so it reaches
+    // its identity wait a few turns later.
+    await vi.waitFor(() => {
+      expect(asked).toBe(true);
+    });
+    locked = true;
+    release(id);
+    await joined;
+    expect(fake.starts.map((r) => r.muted)).toEqual([true]);
+  });
+
+  it('starts a retry muted, and a join with the screen open is as asked', async () => {
+    fake.next = { status: 'lost', generation: 1, reason: 'exited' };
+    await join('general', false, false);
+    fake.next = { status: 'running', generation: 2, helper: helper() };
+    locked = true;
+    await svc.retry();
+    expect(fake.starts.map((r) => r.muted)).toEqual([false, true]);
+  });
+
+  it('a leave overtakes a join still waiting for its identity', async () => {
+    let release: (i: Identity) => void = () => undefined;
+    let asked = false;
+    const waiting = new VoiceService({ supervisor: fake, oneShot, identity: () => new Promise<Identity>((r) => ((asked = true), (release = r))), log: () => undefined, stopBoundMs: 200, locked: () => locked });
+    const joined = waiting.join({ channel: 'general', muted: false, deafened: false });
+    // The join first re-reads the install stamp (issue #1600), so it reaches
+    // its identity wait a few turns later.
+    await vi.waitFor(() => {
+      expect(asked).toBe(true);
+    });
+    locked = true;
+    const left = waiting.leave();
+    release(id);
+    await Promise.all([joined, left]);
+    expect(fake.starts).toEqual([]);
+    expect(waiting.state().status).toBe('idle');
+  });
+});
+
 describe('the destination', () => {
   it('changes only on join and when the session ends', async () => {
     expect(svc.state().channel).toBeNull();
@@ -223,6 +320,38 @@ describe('the destination', () => {
     expect(views.every((v) => v.channel === 'general')).toBe(true);
     await svc.leave();
     expect(svc.state().channel).toBeNull();
+  });
+});
+
+describe('the lock note (issue #1588)', () => {
+  it('marks a mute main made at a lock until the person unmutes or leaves', async () => {
+    await join();
+    fake.set({ status: 'running', generation: 1, helper: helper({ muted: true }) });
+    svc.setLockMuted(true);
+    expect(svc.state().mutedByLock).toBe(true);
+    expect(views[views.length - 1]?.mutedByLock).toBe(true);
+    // The helper's later reports of the same mute keep the note.
+    fake.set({ status: 'running', generation: 1, helper: helper({ muted: true, transmitting: false }) });
+    expect(svc.state().mutedByLock).toBe(true);
+    // Unmuted: gone, and not back when it is muted again by the person.
+    fake.set({ status: 'running', generation: 1, helper: helper({ muted: false }) });
+    expect(svc.state()).not.toHaveProperty('mutedByLock');
+    fake.set({ status: 'running', generation: 1, helper: helper({ muted: true }) });
+    expect(svc.state()).not.toHaveProperty('mutedByLock');
+  });
+
+  it('is gone after a leave, and never marks a view that is not muted or not running', async () => {
+    await join();
+    svc.setLockMuted(true);
+    expect(svc.state()).not.toHaveProperty('mutedByLock');
+    fake.set({ status: 'running', generation: 1, helper: helper({ muted: true }) });
+    svc.setLockMuted(true);
+    expect(svc.state().mutedByLock).toBe(true);
+    await svc.leave();
+    expect(svc.state()).not.toHaveProperty('mutedByLock');
+    await join();
+    fake.set({ status: 'running', generation: 1, helper: helper({ muted: true }) });
+    expect(svc.state()).not.toHaveProperty('mutedByLock');
   });
 });
 
@@ -273,7 +402,7 @@ describe('retry', () => {
     const v = await svc.retry();
     expect(v.status).toBe('running');
     expect(fake.starts.length).toBe(2);
-    expect(fake.starts[1]).toMatchObject({ channel: 'ops', muted: true, deafened: true, extraArgs: ['--transmit-ceiling-secs', '30'] });
+    expect(fake.starts[1]).toMatchObject({ channel: 'ops', muted: true, deafened: true, extraArgs: ['--share-audio-owner', 'companion', '--no-mute-key', '--transmit-ceiling-secs', '30'] });
   });
 
   it('is refused for a failure a retry cannot fix', async () => {
@@ -308,7 +437,7 @@ describe('teardown and the generation fence', () => {
     expect(done).toBe(true);
     expect(logs.some((l) => l.includes('did not stop'))).toBe(true);
     // The default bound is the contract's.
-    const dflt = new VoiceService({ supervisor: fake, oneShot, identity: () => Promise.resolve(id), log: () => undefined });
+    const dflt = new VoiceService({ locked: () => false, supervisor: fake, oneShot, identity: () => Promise.resolve(id), log: () => undefined });
     let d2 = false;
     void dflt.teardown().then(() => {
       d2 = true;
@@ -431,7 +560,7 @@ describe('with the real supervisor', () => {
     });
     sups.push(sup);
     const identity: VoiceIdentity = { profileId: profile, configDir: s.config, principalId: 7, credential: () => ({ origin: 'https://conch.example.org', token: FAKE_TOKEN }), current: () => true };
-    const service = new VoiceService({ supervisor: sup, oneShot, identity: () => Promise.resolve(identity), log: (l) => logs2.push(l) });
+    const service = new VoiceService({ locked: () => false, supervisor: sup, oneShot, identity: () => Promise.resolve(identity), log: (l) => logs2.push(l) });
     const seen: NativeVoiceView[] = [];
     service.subscribe((v) => seen.push(v));
     return { svc: service, views: seen };
@@ -531,7 +660,7 @@ describe('the one-shot runs (issue #1378)', () => {
   });
 
   it('says not-signed-in with no identity, and runs nothing', async () => {
-    const none = new VoiceService({ supervisor: fake, oneShot, identity: () => Promise.resolve(null), log: () => undefined });
+    const none = new VoiceService({ locked: () => false, supervisor: fake, oneShot, identity: () => Promise.resolve(null), log: () => undefined });
     expect(await none.devices()).toEqual({ ok: false, error: 'not-signed-in' });
     expect(await none.saveDevice({ key: 'audio.input', value: 'Mic' })).toEqual({ ok: false, error: 'not-signed-in' });
     expect(oneShot.calls).toEqual([]);
@@ -542,6 +671,7 @@ describe('the one-shot runs (issue #1378)', () => {
     expect(oneShot.cancels).toBe(1);
     let release: (v: Identity) => void = () => undefined;
     const slow = new VoiceService({
+      locked: () => false,
       supervisor: fake,
       oneShot,
       identity: () => new Promise<Identity>((resolve) => (release = resolve)),
@@ -549,6 +679,8 @@ describe('the one-shot runs (issue #1378)', () => {
     });
     const pending = slow.devices();
     const torn = slow.teardown();
+    // The run reaches identity() after the stamp read (issue #1600).
+    await new Promise<void>((resolve) => setImmediate(resolve));
     release(id);
     expect(await pending).toEqual({ ok: false, error: 'not-signed-in' });
     await torn;
@@ -558,5 +690,116 @@ describe('the one-shot runs (issue #1378)', () => {
   it('a leave does not cancel a one-shot run', async () => {
     await svc.leave();
     expect(oneShot.cancels).toBe(0);
+  });
+});
+
+describe('the installed files were replaced (issue #1600)', () => {
+  let replaced: { value: boolean };
+  beforeEach(() => {
+    replaced = { value: false };
+    svc = new VoiceService({ locked: () => false, supervisor: fake, oneShot, identity: () => Promise.resolve(id), log: (l) => logs.push(l), stopBoundMs: 200, updated: () => replaced.value });
+    views = [];
+    svc.subscribe((v) => views.push(v));
+  });
+
+  it('before the replacement a join starts as usual', async () => {
+    expect((await join()).status).toBe('running');
+    expect(fake.starts.length).toBe(1);
+  });
+
+  it('refuses a join with the update reason, starts nothing and reads no credential', async () => {
+    replaced.value = true;
+    const v = await join();
+    expect(v).toMatchObject({ status: 'unavailable', problem: 'update-pending', channel: null, retryable: false });
+    expect(fake.entered).toBe(0);
+    expect(fake.starts).toEqual([]);
+    expect(id.reads).toBe(0);
+    expect(views.at(-1)).toMatchObject({ problem: 'update-pending' });
+    expect(svc.state()).toMatchObject({ problem: 'update-pending' });
+    expect(logs.some((l) => l.includes('replaced'))).toBe(true);
+  });
+
+  it('refuses a retry the same way and starts nothing', async () => {
+    fake.next = { status: 'failed', generation: 1, reason: 'hello-timeout' };
+    await join('ops');
+    fake.state = { status: 'failed', generation: 1, reason: 'hello-timeout' };
+    replaced.value = true;
+    const v = await svc.retry();
+    expect(v).toMatchObject({ status: 'unavailable', problem: 'update-pending' });
+    expect(fake.starts.length).toBe(1);
+  });
+
+  it('leaves a running helper alone: no stop, no change of view, and the call can go on', async () => {
+    await join();
+    replaced.value = true;
+    expect(svc.state().status).toBe('running');
+    expect(fake.calls).toEqual([]);
+    // A second join is busy, as before; the running helper is still running.
+    expect((await join('other')).problem).toBe('busy');
+    expect(fake.calls).toEqual([]);
+    expect(svc.state().status).toBe('running');
+    // Mute still works on it.
+    expect((await svc.setMute(true)).ok).toBe(true);
+  });
+
+  it('leave still works, and a join after it is refused', async () => {
+    await join();
+    replaced.value = true;
+    const left = await svc.leave();
+    expect(left.status).toBe('idle');
+    expect(fake.calls).toContain('stop');
+    expect((await join()).problem).toBe('update-pending');
+    expect(fake.starts.length).toBe(1);
+  });
+});
+
+describe('the stamp changes between focus and Join (issue #1600)', () => {
+  it('a Join is refused when the re-read finds the update, with no focus or tick', async () => {
+    const stamp = { value: 'old' };
+    const running = 'old';
+    let known = false;
+    svc = new VoiceService({ locked: () => false,
+      supervisor: fake,
+      oneShot,
+      identity: () => Promise.resolve(id),
+      log: (l) => logs.push(l),
+      stopBoundMs: 200,
+      updated: () => known,
+      recheck: () => {
+        known = stamp.value !== running;
+        return Promise.resolve();
+      },
+    });
+    expect((await svc.join({ channel: 'general', muted: false, deafened: false })).status).toBe('running');
+    await svc.leave();
+    stamp.value = 'new';
+    const v = await svc.join({ channel: 'general', muted: false, deafened: false });
+    expect(v).toMatchObject({ status: 'unavailable', problem: 'update-pending' });
+    expect(fake.starts.length).toBe(1);
+  });
+
+  it('a failed re-read keeps the last answer', async () => {
+    svc = new VoiceService({ locked: () => false, supervisor: fake, oneShot, identity: () => Promise.resolve(id), log: (l) => logs.push(l), updated: () => false, recheck: () => Promise.reject(new Error('x')) });
+    expect((await svc.join({ channel: 'general', muted: false, deafened: false })).status).toBe('running');
+  });
+});
+
+describe('one-shot helper runs after an update (issue #1600)', () => {
+  beforeEach(() => {
+    svc = new VoiceService({ locked: () => false, supervisor: fake, oneShot, identity: () => Promise.resolve(id), log: (l) => logs.push(l), updated: () => true });
+  });
+
+  it('refuses the device list with update-pending and runs nothing', async () => {
+    expect(await svc.devices()).toEqual({ ok: false, error: 'update-pending' });
+    expect(oneShot.calls).toEqual([]);
+  });
+
+  it('refuses a device save with update-pending and runs nothing', async () => {
+    expect(await svc.saveDevice({ key: 'audio.input', value: 'mic' })).toEqual({ ok: false, error: 'update-pending' });
+    expect(oneShot.calls).toEqual([]);
+  });
+
+  it('still says invalid for a bad save, before anything else', async () => {
+    expect(await svc.saveDevice({ key: 'keys.talk' as never, value: 'x' })).toEqual({ ok: false, error: 'invalid' });
   });
 });

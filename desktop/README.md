@@ -1,7 +1,7 @@
 # desktop/: the Conch desktop shell
 
 An Electron app that opens the existing web client from packaged files at
-`conch-app://ui/`. Design: [docs/design/linux-desktop.md](../docs/design/linux-desktop.md)
+`conch-app://ui/`. Installing the app as a user: [docs/desktop/linux.md](../docs/desktop/linux.md). Design: [docs/design/linux-desktop.md](../docs/design/linux-desktop.md)
 §2 to §4 and §10; epic #770, this skeleton #940; governed by ADR-007.
 
 **What it does today:** one hardened window showing the React client, which
@@ -21,9 +21,12 @@ voice in the UI (#771: the supervisor that runs `conch-voice` exists, in
 | Path | Owns |
 | --- | --- |
 | `main/scheme.ts` | the `conch-app:` handler: serves only what the build-time manifest lists, checks each file's SHA-256, refuses every other URL |
-| `main/csp.ts` | the Content-Security-Policy of every response |
+| `main/csp.ts` | the Content-Security-Policy of every response: `connect-src wss: https:` (Q-D4-1), narrowed to the live grant's origin by `guards.ts` (HTTP and WebSocket requests only; WebRTC and WebTransport are outside both) |
 | `main/window.ts` | the one window and its `webPreferences` (pinned by a unit test) |
-| `main/guards.ts` | what a web contents may not do: navigate, open windows, attach webviews, download, ask for permissions, choose devices |
+| `main/guards.ts` | what a web contents may not do: navigate, open windows, attach webviews, download, ask for permissions, choose devices; and the request filter, which passes only the live companion grant's origin (wss or https, same host and port, no userinfo) besides the app's own scheme |
+| `main/display-capture.ts` | the one screen capture: the permission and display-media rules (`Screen capture`, below) |
+| `main/share-allowance.ts` | the share allowance: one `shareArm()` click, a grant use good for 10 s and a capture use good for 10 s from the later of the arm and the grant |
+| `main/portal.ts` | whether the screen-cast portal can answer (Wayland session, a read-only `gdbus` property call) |
 | `main/api/origin.ts` | the server-address rules (https; http only for loopback; no userinfo, path, query or fragment) |
 | `main/api/target.ts` | an operation id plus values to a request target; refuses anything that is not a call of the table |
 | `main/api/client.ts` | the one request executor: bearer only for bearer operations, no Origin or Cookie, no redirects, size cap, response validation, generation check |
@@ -71,8 +74,17 @@ After sign-in, an answer of a required family (`REQUIRED_FAMILIES` in
 `main/compat.ts`) that is not the document this app was built for is shown as
 an incompatibility, not a network error.
 
-`build/compat.json` is a checked-in list, copied into the app by
-`build/manifest.ts`; the release tooling that generates it is #774. Development
+`build/compat.json` is the development list: checked in, hand-kept, and what a
+build without a release tag copies into the app (the build says so). A release
+build (`CONCH_RELEASE_VERSION=v0.1.0-alpha.18 make desktop-build`; the release
+tag is the version, #1595) generates `out/compat.json` instead: that tag plus
+the patch releases in `build/compat-extra.json` (hand-kept, may be empty), by
+`build/manifest.ts`. It also stamps the tag into the packaged app's version
+(`0.1.0-alpha.18`; the checked-in `package.json` stays `0.0.0`, a development
+build says `0.0.0-dev+<short sha>`) and fails unless the bundled
+`resources/conch-voice --version` names that version. The tag rules and the
+Debian spelling (`0.1.0~alpha.18`) are in `scripts/desktop-version.sh`. The
+matching is still exact, never a range. Development
 against an unlisted server: `electron . --allow-unlisted-server` in an
 **unpackaged** run. It shows a persistent warning. A packaged app ignores the
 flag (`allowUnlisted`, tested), and a server that did not answer is never let
@@ -86,7 +98,7 @@ fails naming the version otherwise). Only `npm ci` installs.
 
 ```sh
 make desktop-check   # gates, npm ci, typecheck, lint, unit tests; part of make check
-make desktop-build   # fetch Electron, build, pack: desktop/dist/linux-unpacked/conch
+make desktop-build   # fetch Electron, build, pack: desktop/dist/linux-unpacked/conch-desktop
 make desktop-smoke   # drive that app; needs a display
 ```
 
@@ -97,7 +109,7 @@ nothing is looked up on `PATH`. A `bin/conch-voice` older than any file under
 `voice/` is refused as not built from this tree. With no helper the build
 succeeds and says "built without the voice helper" (the app shows voice
 unavailable, text works); `DESKTOP_REQUIRE_VOICE=1` makes that a failure. The
-`.deb` and release versioning are #774. CI's `desktop-smoke` job builds without
+`.deb` is `make desktop-deb` (below). CI's `desktop-smoke` job builds without
 the helper today, so the smoke test's presence and mode checks run only on a
 machine that built `bin/conch-voice`; `desktop/tests/unit/voice-bundle.test.ts`
 covers the copy and `findHelper` in CI.
@@ -119,7 +131,91 @@ The web client is built by web's own Vite with `--base /` into `out/ui`; no
 file under `web/` changes and `web/dist` is not touched. `scripts/desktop-web-dist-check.sh` and the
 CI job check that no desktop code is in the browser build.
 
-Run the unpacked app by hand: `desktop/dist/linux-unpacked/conch`.
+Run the unpacked app by hand: `desktop/dist/linux-unpacked/conch-desktop`.
+
+### The `.deb`
+
+```sh
+make desktop-deb     # build in release mode, pack and check: desktop/dist/conch-desktop_<version>_amd64.deb
+CONCH_RELEASE_VERSION=v0.1.0-alpha.18 make desktop-deb   # the release package, version 0.1.0~alpha.18
+```
+
+`scripts/desktop-deb.sh` packs `dist/linux-unpacked` with `dpkg-deb
+--root-owner-group` (needs `dpkg-dev`; it installs nothing and never runs as
+root) and refuses to run without `resources/conch-voice`. The decisions are
+Nick's, recorded on #1595:
+
+- The tree is installed root-owned at `/opt/conch-desktop`, with `resources/conch-voice` at 0755
+  (`findHelper` accepts a root-owned install). `/usr/bin/conch-desktop` links to
+  `/opt/conch-desktop/conch-desktop`; `conch` stays the CLI.
+- The desktop file is `chat.conch.desktop.desktop` (`Exec=conch-desktop %U`,
+  `StartupWMClass=conch-desktop`, `desktopName` in `package.json`), with
+  placeholder icons from `build/icons/` under `hicolor/<size>x<size>/apps`. No
+  `MimeType=x-scheme-handler/conch;` is the one line it sets: the app takes
+  `conch://invite?server=<origin>&code=<code>` links (issue #1592;
+  linux-desktop.md section 9) and no other scheme or file type. `xdg-mime` reads it
+  from the installed file; there is no `postinst` step for it.
+- The sandbox stays on and there is **no setuid `chrome-sandbox`** (left out of the package):
+  `/etc/apparmor.d/conch-desktop` (a conffile) gives the one executable the `userns`
+  permission, for systems that restrict unprivileged user namespaces (Ubuntu 23.10
+  and later). `postinst` loads it, and refreshes the desktop and icon caches;
+  `postrm` unloads it. All of it is best effort. On an older AppArmor that cannot parse it,
+  the install says so and goes on (user namespaces are unrestricted there).
+- **The package needs AppArmor 4 and an Ubuntu 24.04-class system** (the profile
+  is `abi <abi/4.0>`; the control description says so). If `apparmor_parser` cannot
+  load it, `postinst` says plainly that the profile cannot load on this host and that
+  the app will not start where user namespaces are restricted, and the install goes on.
+- Nothing in the package is a udev rule, a group change, `setcap` or setuid, and
+  nothing is group- or other-writable. The talk-key permission stays an explicit step
+  the app shows (#1381).
+- `Depends` is computed by `dpkg-shlibdeps` from the ELF files in the tree, on the
+  machine that builds, so it names that machine's library packages: build releases on the oldest
+  system that should install them.
+- Two builds of one commit are byte-identical (`SOURCE_DATE_EPOCH` is the commit
+  time, entries are sorted by `dpkg-deb`, modes are set by the script).
+- The version is the release tag (`scripts/desktop-version.sh deb`). Updates are manual: install the
+  newer `.deb`.
+- A package replaced under a running app (#1600): `resources/version` holds the installed app
+  version (the build writes it beside the asar). The app reads it at start, when a window gains
+  focus and every ten minutes (`main/installed.ts`); a different one shows "Conch was updated to X.
+  Restart when you're ready" with a Restart button (the normal quit, then `app.relaunch()`). Until
+  then a call goes on, Join and Retry say "Restart Conch to finish the update", and nothing
+  restarts by itself. A page that does not start after the update asks in a native dialog.
+
+`scripts/desktop-deb-test.sh <deb>` checks a built package (`make desktop-deb`
+runs it); with no argument it builds packages from a fixture tree, checks them,
+and breaks them one way at a time to show that each check can fail (it is part
+of `make desktop-check`). Beyond modes and owners it pins the two things that run
+as root or change host policy: the AppArmor profile's rules must equal the expected
+lines exactly (no wider attachment, no added `capability` or `mount`), and the control
+members must be exactly `control conffiles postinst postrm`, with `postinst` and
+`postrm` byte-identical to `desktop/build/deb/`. It also requires one `Exec=` line and
+exactly `MimeType=x-scheme-handler/conch;` and no `Actions=` in the desktop file, no `chrome-sandbox`, and no symlink
+but `/usr/bin/conch-desktop`.
+
+`scripts/desktop-deb-lifecycle.sh` (`make desktop-deb-lifecycle`, issue #1599) is the
+package's lifecycle test: in an `ubuntu:24.04` container (pinned by digest) it installs
+an older build with `apt install ./old.deb` (apt resolves `Depends` from the archive, so
+it needs Docker and network), checks the files, owners and modes, the launcher link, the
+desktop file and `xdg-mime query default x-scheme-handler/conch`, seeds a test user's
+`~/.config/Conch/profiles.json` and `settings.json`, upgrades to a higher version
+(those files stay byte-identical, and `/opt/conch-desktop` is `diff -r`-identical to the
+new `.deb`'s own tree, as it was to the old one after the install), checks that `ldd`
+resolves every library of every ELF file (a `.so` may name a sibling in the tree; real
+packages must have `conch-desktop` and `conch-voice` among them) and
+that `resources/conch-voice` passes `findHelper`'s trust rules, then removes and purges
+(nothing of the package left in `/opt`, `/usr` or `/etc`; the conffile goes at purge; the
+user's `~/.config/Conch` stays). `postinst` must succeed with no AppArmor in the
+container. With no argument it builds two fixture packages (`v0.1.0-alpha.1` and
+`.2`); `make desktop-deb-lifecycle DEB_OLD=<a.deb> DEB_NEW=<b.deb>` takes real ones.
+`scripts/desktop-deb-lifecycle.sh --broken` is the test of the test: the fixture packages
+without `Depends` must fail at the `ldd` check, and `--broken=userdata` (a `postinst` that
+writes under `~/.config/Conch`) must fail at the user-data check. The fixture run needs a
+host no newer than Ubuntu 24.04 with `curl` installed (its ELF stand-in). A container is not a clean machine (no
+display, portal, keyring or PipeWire; Chromium's sandbox under Docker's seccomp is not
+representative), so the script never runs the app: the app on a real machine is #1602
+(D6-08). Without Docker it prints `SKIPPED`; with `CI` set it fails. It is not part of
+`make check` or `make desktop-check`, and has no CI job yet (it follows #1598's `.deb` job).
 
 ### The smoke test
 
@@ -162,7 +258,10 @@ sandbox's namespace mode needs; the other mode is a setuid-root `chrome-sandbox`
 On the Pop!_OS 24.04 workstation `unshare --user true` works (observed
 2026-10-28) and the unpacked build runs sandboxed as is. On the CI runner the
 job makes the helper setuid root (see the comment in `ci.yml`). The packaged
-answer (an AppArmor profile, a setuid fallback) is the `.deb` work, #774.
+answer, decided by Nick on 2026-11-09 (#1595), is an AppArmor profile installed
+with the `.deb`, not a setuid sandbox; see
+[docs/design/linux-desktop.md](../docs/design/linux-desktop.md) §9
+(Distribution) for the package decisions.
 
 The fuses are set by electron-builder (`electronFuses`): RunAsNode off,
 NODE_OPTIONS off, Node CLI inspect arguments off, embedded asar integrity
@@ -186,7 +285,7 @@ his sign-off and a line in `licences-allowlist.txt`.
 
 ## Talking to the server (issue #942)
 
-The renderer makes no network request (its CSP says `connect-src 'none'`). Main
+The renderer makes no HTTP or WebSocket request (its CSP says `connect-src wss: https:`, and `main/guards.ts` cancels all of them but exactly the live companion grant's LiveKit origin; when the grant ends main asks the session to close its connections, which reaches idle and pending sockets only; a live WebSocket is ended by conchd's removal of the participant, and when that removal is not confirmed main reloads the window's document). WebRTC (ICE, STUN, TURN) and WebTransport are outside both the CSP and that request filter. Main
 makes them all, with Node's `fetch`, from `main/api/client.ts`. The renderer
 names an operation of the table in `web/src/platform/operations.ts` and its
 values; main builds the URL, sends `Authorization: Bearer` for a bearer
@@ -310,3 +409,11 @@ Plain `http://` is accepted for `localhost`, `127.0.0.0/8` and `[::1]` only, the
 same rule as `web/src/transport.ts`: `conchd serve --listen 127.0.0.1:8080
 --no-web`, then enter `http://127.0.0.1:8080`. The server refuses passwords over
 plain HTTP from anywhere else, and so does the address step.
+
+## Screen capture
+
+The renderer captures the screen only through Chromium's PipeWire capturer, so only through the xdg-desktop-portal ScreenCast picker (Q-D4-4 on #1578). `main/app.ts` turns the capturer on before `ready`; `main/portal.ts` asks the portal whether it can answer, and where it cannot (no portal, or an X11 session, where Chromium would list every source with no picker) Share is unavailable and the page is told "share unavailable: no screen-cast portal". `main/display-capture.ts` grants a capture only from the owned window's live main frame at `conch-app://ui/`, in the current document generation, with a live companion grant, and with the share allowance's capture use unspent (see below), and only when `desktopCapturer.getSources` returns exactly one source (none is a cancel; several are refused, never narrowed to the first). Video only: audio is never granted, and microphone and camera stay denied. A packaged launch with `--disable-features` naming `WebRTCPipeWireCapturer` is refused at start (`captureVerdict`), and a renderer that asks for a desktop capture without a picker is crashed, then its page closed if the process has not gone a second later.
+
+### The share allowance (`main/share-allowance.ts`)
+
+One click on Share is followed by two things that each need the person's act: the companion's grant, then `getDisplayMedia`. The act is one-shot, so the page calls `shareArm()` synchronously at the very start of the Share click, before anything else. It takes the click and arms an allowance for that web contents and document: it has two uses: one for `companionGrant` (consumed in place of a fresh click; good for `SHARE_ARM_MS`, 10 s, from the arm) and one for the capture (consumed when the pick starts; good for `SHARE_CAPTURE_MS`, 10 s, from the later of the arm and the grant being issued from that allowance, so the warm path has 10 s from the arm and the cold path 10 s after the grant round trip, long enough for the companion's LiveKit connect on a slow link, #1632; a grant confirmed more than `SHARE_CONFIRM_MS`, 15 s, after the grant use was spent is some other grant and moves nothing). Residual, stated plainly: a compromised page can still call `shareArm` within 1 s of any act, so the OS portal picker is the consent, and the allowance only stops an honest page arming capture by accident. Arming again replaces it. Nothing else arms a capture: a raw click, or the Enter that sends a chat message, does not. Watching needs no arming: its `companionGrant` uses its own fresh click as before, and leaves an armed allowance alone. The allowance is cleared by any companion end or stop (leave, helper, renewal, sign-out, switch, quit, crash, reload, lock, suspend, the page's `companionEnd`) and by a document change. Everything else still applies: owned main frame, current document generation, a live grant, the portal. A grant's `shareUnavailable` (`no-portal`, `not-wayland`) tells the page before the pick that there is no screen-cast portal.

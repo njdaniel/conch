@@ -273,4 +273,35 @@ test.describe('one instance per data root', () => {
       rmSync(root, { recursive: true, force: true });
     }
   });
+
+  // A conch:// link (issue #1592) reaches the running app in a second
+  // launch's argv, and a cold start in its own. Neither logs it: the output of
+  // every process is scanned for the canary code, the origin and the scheme.
+  test('takes a conch:// link from a second launch and from a cold start, and logs neither the link nor its code', async () => {
+    test.setTimeout(120_000);
+    const root = mkdtempSync(join(existsSync('/tmp') ? '/tmp' : tmpdir(), 'conch-desktop-scheme-'));
+    mkdirSync(root, { recursive: true });
+    const link = (code: string): string => `conch://invite?server=${encodeURIComponent('https://chat.canary-host.example')}&code=${code}`;
+    const first = launch({ userData: root, args: [...SESSION_ONLY, link('CANARYcold1')] });
+    let second: Launched | undefined;
+    let hostile: Launched | undefined;
+    try {
+      await expect.poll(() => first.output(), { timeout: 30_000 }).toContain('conch-desktop: a conch: invite link arrived');
+      second = launch({ userData: root, args: [...SESSION_ONLY, link('CANARYsecond2')] });
+      expect((await second.exited).code).toBe(0);
+      await expect.poll(() => (first.output().match(/a conch: invite link arrived/g) ?? []).length, { timeout: 30_000 }).toBe(2);
+      // A hostile link is refused with its reason alone, and a switch is never read as a link.
+      hostile = launch({ args: [...SESSION_ONLY, '--url=' + link('CANARYswitch3'), 'conch://--inspect', `conch://invite?server=${encodeURIComponent('http://2130706433')}&code=CANARYhost4`] });
+      await expect.poll(() => hostile?.output() ?? '', { timeout: 30_000 }).toContain('conch-desktop: refused a conch: link (malformed)');
+      expect(hostile.output()).not.toContain('a conch: invite link arrived');
+      for (const app of [first, second, hostile]) {
+        for (const secret of ['CANARY', 'canary-host', 'conch://invite', '2130706433']) expect(app.output(), secret).not.toContain(secret);
+      }
+      expect(first.child.exitCode).toBeNull();
+    } finally {
+      await hostile?.stop();
+      await first.stop();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
 });

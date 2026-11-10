@@ -5,7 +5,7 @@
 import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { ChannelV0 } from '../schema/channel';
-import type { VoicePresenceV1 } from '../schema/voice';
+import type { VoicePresenceV2 } from '../schema/voice';
 import type { Person } from '../useLiveChannel';
 import { initialVoice, VoiceClient, type Phase, type Processing, type VoiceState } from './connection';
 import { FakeClock } from './fakes';
@@ -15,7 +15,7 @@ import type { Snapshot, VoiceControl } from './useVoice';
 import { followsNote, missingNote, noOtherOutputs, noOutputChoice, processingLabel, processingOffNote, processingUseNote, reportedNote, stoppedFor, thresholdHint, VoicePanel } from './VoicePanel';
 
 const chrome: ShareFeatures = { canShare: true, chromium: true, platform: 'linux' };
-const presence: VoicePresenceV1 = { schema: 'conch.voice_presence.v1', channel_id: 1, configured: true, available: true, rooms: [] };
+const presence: VoicePresenceV2 = { schema: 'conch.voice_presence.v2', channel_id: 1, configured: true, available: true, rooms: [] };
 
 // A client that is never asked to connect: the panel reads the state it is
 // given, and join and leave are recorded instead.
@@ -57,14 +57,15 @@ function control(state: VoiceState, calls: string[], snapshot: Snapshot): VoiceC
   };
 }
 
-function panel(state: VoiceState, viewed: string | null, snapshot: Snapshot = { kind: 'presence', presence }, people: ReadonlyMap<number, Person> = new Map()) {
+function panel(state: VoiceState, viewed: string | null, snapshot: Snapshot = { kind: 'presence', presence }, people: ReadonlyMap<number, Person> = new Map(), viewerName = '') {
   const calls: string[] = [];
   const opened: string[] = [];
   const voice = control(state, calls, snapshot);
-  const { rerender } = render(
+  const { rerender, unmount } = render(
     <VoicePanel
       voice={voice}
       viewer={7}
+      viewerName={viewerName}
       people={people}
       viewed={viewed}
       onOpen={(name) => {
@@ -77,9 +78,9 @@ function panel(state: VoiceState, viewed: string | null, snapshot: Snapshot = { 
   let shown = snapshot;
   const redraw = (next: VoiceState, nextSnapshot: Snapshot = shown) => {
     shown = nextSnapshot;
-    rerender(<VoicePanel voice={{ ...voice, state: next, snapshot: nextSnapshot }} viewer={7} people={people} viewed={viewed} onOpen={() => undefined} />);
+    rerender(<VoicePanel voice={{ ...voice, state: next, snapshot: nextSnapshot }} viewer={7} viewerName={viewerName} people={people} viewed={viewed} onOpen={() => undefined} />);
   };
-  return { calls, opened, client: voice.client, redraw, voice: screen.getByRole('region', { name: 'Voice' }) };
+  return { calls, opened, client: voice.client, redraw, unmount, voice: screen.getByRole('region', { name: 'Voice' }) };
 }
 
 // In push to talk, which most of these are of: the open microphone is the default (issue #1244).
@@ -274,7 +275,7 @@ describe('the strip while not in voice', () => {
   const unreachable = 'Voice status unavailable: the server cannot be reached.';
   const notAllowed = 'Your account does not include voice. Ask whoever invited you.';
   const unread = 'Voice status could not be read.';
-  const someone: VoicePresenceV1 = {
+  const someone: VoicePresenceV2 = {
     ...presence,
     rooms: [{ participants: [{ principal_id: 3, can_publish: true, transmitting: false, joined_at: '2026-10-18T00:00:00Z' }] }],
   };
@@ -341,7 +342,7 @@ describe('the strip while not in voice', () => {
 // heading, which names the list; on a phone a CSS rule on the class set here
 // shows three chips, and "+N more" the rest.
 describe('the roster', () => {
-  const inRoom = (n: number): VoicePresenceV1 => ({
+  const inRoom = (n: number): VoicePresenceV2 => ({
     ...presence,
     rooms: [
       {
@@ -400,13 +401,39 @@ describe('the roster', () => {
     expect(within(voice).getByRole('button', { name: '+5 more' }).getAttribute('aria-expanded')).toBe('false');
     expect(list.classList.contains('capped')).toBe(true);
   });
+
+  it('shows only Agent on an agent roster row at phone width', () => {
+    const width = vi.spyOn(window, 'innerWidth', 'get').mockReturnValue(390);
+    try {
+      const room: Snapshot = {
+        kind: 'presence',
+        presence: {
+          ...presence,
+          rooms: [{ participants: [3, 4].map((id) => ({ principal_id: id, can_publish: true, transmitting: false, joined_at: '2026-10-18T00:00:00Z' })) }],
+        },
+      };
+      const people: ReadonlyMap<number, Person> = new Map([
+        [3, { name: 'agent-in-voice', kind: 'agent', role: 'operator', manages: true }],
+        [4, { name: 'human-in-voice', kind: 'human', role: 'operator', manages: true }],
+      ]);
+      const { voice } = panel(initialVoice, 'c', room, people);
+      const agent = within(voice).getByText('agent-in-voice').closest('li') as HTMLElement;
+      const human = within(voice).getByText('human-in-voice').closest('li') as HTMLElement;
+      expect(within(agent).getByText('Agent').classList.contains('identity-label')).toBe(true);
+      expect(agent.querySelectorAll('.identity-mark')).toHaveLength(1);
+      expect(human.querySelectorAll('.identity-mark')).toHaveLength(0);
+      expect(window.innerWidth).toBe(390);
+    } finally {
+      width.mockRestore();
+    }
+  });
 });
 
 // Issue #641: a capped roster keeps the viewer's own chip, wherever the
 // roster has it, and hides the others after it; the list's order is the
 // roster's.
 describe('the capped roster keeps the viewer', () => {
-  const room = (ids: readonly number[]): VoicePresenceV1 => ({
+  const room = (ids: readonly number[]): VoicePresenceV2 => ({
     ...presence,
     rooms: [{ participants: ids.map((id) => ({ principal_id: id, can_publish: true, transmitting: false, joined_at: '2026-10-18T00:00:00Z' })) }],
   });
@@ -444,7 +471,7 @@ describe('the capped roster keeps the viewer', () => {
 // CSS that keeps the controls in place has nothing else to move.
 describe('the strip in voice', () => {
   const joined = (deafened: boolean): VoiceState => ({ ...inVoice('connected', 'c'), muted: deafened, deafened });
-  const someone: VoicePresenceV1 = {
+  const someone: VoicePresenceV2 = {
     ...presence,
     rooms: [{ participants: [{ principal_id: 7, can_publish: true, transmitting: false, joined_at: '2026-10-18T00:00:00Z' }] }],
   };
@@ -663,7 +690,7 @@ describe('talk-key capture', () => {
 // true. Bob (3) is someone else; the viewer is 7.
 describe('what the strip says is true', () => {
   const bob: ReadonlyMap<number, Person> = new Map([[3, { name: 'bob', kind: null }]]);
-  const one = (principal: number, sharing = false) => ({ principal_id: principal, can_publish: true, transmitting: false, joined_at: '2026-10-18T00:00:00Z', sharing });
+  const one = (principal: number, sharing = false) => ({ principal_id: principal, can_publish: true, transmitting: false, joined_at: '2026-10-18T00:00:00Z', sharing, ...(sharing ? { share_started_at: '2026-10-18T00:00:00Z' } : {}) });
   const room = (...participants: ReturnType<typeof one>[]): Snapshot => ({ kind: 'presence', presence: { ...presence, rooms: [{ participants }] } });
   const bobShares = room(one(7), one(3, true));
   const nobodyShares = room(one(7), one(3));
@@ -686,58 +713,37 @@ describe('what the strip says is true', () => {
     }
   });
 
-  describe('Share screen while someone else shares (F14)', () => {
-    const said = 'bob is sharing a screen. One person shares at a time.';
-    // Not watching, the visible line says where to see it (issue #642, N02);
-    // the rule is read out beside it, as Share screen's description.
-    const watch = 'bob is sharing a screen. Watch to see it.';
-    const described = `${watch} One person shares at a time.`;
-
-    it('is off, and described as who shares and the rule; on again with no description once nobody else does', () => {
+  describe('Share screen beside other streams', () => {
+    it('stays enabled while bob shares, with Watch on bob\'s tile and no busy description', () => {
       const { voice, redraw } = panel(joined(), 'c', bobShares, bob);
-      const button = within(voice).getByRole('button', { name: 'Share screen', description: described });
-      expect(button.hasAttribute('disabled')).toBe(true);
-      const ids = (button.getAttribute('aria-describedby') ?? '').split(' ');
-      expect(ids.map((id) => document.getElementById(id)?.textContent)).toEqual([watch, 'One person shares at a time.']);
-      expect(ids.every((id) => voice.contains(document.getElementById(id)))).toBe(true);
-      // The one visible line about bob's share is the first.
-      expect(within(voice).getAllByText(/bob is sharing/).map((el) => el.id)).toEqual(['voice-share-busy']);
-      expect(within(voice).getByText(watch).className).not.toContain('watched');
-
+      const button = within(voice).getByRole('button', { name: 'Share screen' });
+      expect(button.hasAttribute('disabled')).toBe(false);
+      expect(button.hasAttribute('aria-describedby')).toBe(false);
+      expect(within(screen.getByRole('region', { name: "bob's stream" })).getByRole('button', { name: 'Watch' })).toBeTruthy();
+      expect(voice.textContent).not.toContain('One person shares at a time.');
       redraw(joined(), nobodyShares);
-      const again = within(voice).getByRole('button', { name: 'Share screen' });
-      expect(again.hasAttribute('disabled')).toBe(false);
-      expect(again.hasAttribute('aria-describedby')).toBe(false);
-      expect(voice.textContent).not.toContain('Watch to see it.');
+      expect(screen.queryByRole('region', { name: "bob's stream" })).toBeNull();
     });
 
-    it('while watched keeps the line hidden, without the watch prompt', () => {
-      const { voice } = panel(joined({ watching: true }), 'c', bobShares, bob);
-      const line = within(voice).getByText(said);
-      expect(line.id).toBe('voice-share-busy');
-      expect(line.className).toContain('watched');
-      expect(voice.textContent).not.toContain('Watch to see it.');
-      expect(within(voice).getByRole('button', { name: 'Share screen', description: said })).toBeTruthy();
+    it('stays enabled while watching too, with no busy note', () => {
+      const { voice } = panel(joined({ watched: new Set([3]) }), 'c', bobShares, bob);
+      expect(screen.getByRole('region', { name: 'Shared screen' }).textContent).toContain('bob · LIVE');
+      expect(within(voice).getByRole('button', { name: 'Share screen' }).hasAttribute('disabled')).toBe(false);
+      expect(voice.textContent).not.toContain('One person shares at a time.');
     });
 
-    it('says a refused claim once while the other share lasts, and not after it ends', () => {
-      const refused = joined({ share: { kind: 'idle', ended: 'busy' } });
-      const { voice, redraw } = panel(refused, 'c', bobShares, bob);
-      // The refusal is the description's line, read out: one line, not two.
-      const notes = within(voice).getAllByText(said);
-      expect(notes).toHaveLength(1);
-      expect(notes[0]?.getAttribute('role')).toBe('status');
-      expect(within(voice).getByRole('button', { name: 'Share screen', description: said })).toBeTruthy();
-
-      redraw(refused, nobodyShares);
+    it('says when the six-stream cap refused a claim, without a busy note', () => {
+      const refused = joined({ share: { kind: 'idle', ended: 'full' } });
+      const { voice } = panel(refused, 'c', bobShares, bob);
+      expect(voice.textContent).toContain('This call already has 6 streams live.');
       expect(voice.textContent).not.toContain('One person shares at a time.');
       expect(within(voice).getByRole('button', { name: 'Share screen' }).hasAttribute('disabled')).toBe(false);
     });
 
-    it('still says why a share of ours ended, beside who shares now, unless we stopped it', () => {
+    it('still says why a share of ours ended beside the other live tile', () => {
       const { voice } = panel(joined({ share: { kind: 'idle', ended: 'operator' } }), 'c', bobShares, bob);
       expect(voice.textContent).toContain('An operator stopped your share.');
-      expect(voice.textContent).toContain(watch);
+      expect(screen.getByRole('region', { name: "bob's stream" }).textContent).toContain('LIVE');
     });
   });
 
@@ -816,13 +822,13 @@ describe('what the strip says is true', () => {
 
     it(`says the holder stopped, read out, for ${String(stoppedFor / 1000)} s`, () => {
       vi.useFakeTimers();
-      const { voice, redraw } = panel(joined({ watching: true }), 'c', bobShares, bob);
+      const { voice, redraw } = panel(joined({ watched: new Set([3]) }), 'c', bobShares, bob);
       expect(shown(voice)).toBeNull();
       // Bob's share ends: presence says nobody shares, then the client stops
       // watching.
-      redraw(joined({ watching: true }), nobodyShares);
+      redraw(joined({ watched: new Set([3]) }), nobodyShares);
       expect(shown(voice)).toBeNull();
-      redraw(joined({ watching: false }), nobodyShares);
+      redraw(joined({ watched: new Set() }), nobodyShares);
       expect(shown(voice)?.getAttribute('role')).toBe('status');
       act(() => {
         vi.advanceTimersByTime(stoppedFor - 1);
@@ -835,17 +841,17 @@ describe('what the strip says is true', () => {
     });
 
     it('says the holder stopped when the share and the watching end in one frame', () => {
-      const { voice, redraw } = panel(joined({ watching: true }), 'c', bobShares, bob);
-      redraw(joined({ watching: false }), nobodyShares);
+      const { voice, redraw } = panel(joined({ watched: new Set([3]) }), 'c', bobShares, bob);
+      redraw(joined({ watched: new Set() }), nobodyShares);
       expect(shown(voice)).not.toBeNull();
     });
 
     it('says nothing when the viewer stops watching, nor when that share ends later', () => {
       vi.useFakeTimers();
-      const { voice, redraw } = panel(joined({ watching: true }), 'c', bobShares, bob);
-      redraw(joined({ watching: false }), bobShares);
+      const { voice, redraw } = panel(joined({ watched: new Set([3]) }), 'c', bobShares, bob);
+      redraw(joined({ watched: new Set() }), bobShares);
       expect(shown(voice)).toBeNull();
-      redraw(joined({ watching: false }), nobodyShares);
+      redraw(joined({ watched: new Set() }), nobodyShares);
       act(() => {
         vi.advanceTimersByTime(stoppedFor);
       });
@@ -855,23 +861,23 @@ describe('what the strip says is true', () => {
     it('says nothing while a share that went with a renewed room is waited for, nor when it is back', () => {
       // The client keeps watching through the wait (connection.ts
       // awaitShare): the room is renewed, and everyone left it.
-      const { voice, redraw } = panel(joined({ watching: true }), 'c', bobShares, bob);
-      redraw(joined({ phase: 'connecting', watching: true }), room());
-      redraw(joined({ watching: true }), room(one(7)));
+      const { voice, redraw } = panel(joined({ watched: new Set([3]) }), 'c', bobShares, bob);
+      redraw(joined({ phase: 'connecting', watched: new Set([3]) }), room());
+      redraw(joined({ watched: new Set([3]) }), room(one(7)));
       expect(shown(voice)).toBeNull();
-      redraw(joined({ watching: true }), bobShares);
+      redraw(joined({ watched: new Set([3]) }), bobShares);
       expect(voice.textContent).not.toContain('stopped sharing');
     });
 
     it('says the holder stopped when the wait for a renewed share runs out', () => {
-      const { voice, redraw } = panel(joined({ watching: true }), 'c', bobShares, bob);
-      redraw(joined({ watching: true }), room(one(7)));
-      redraw(joined({ watching: false }), room(one(7)));
+      const { voice, redraw } = panel(joined({ watched: new Set([3]) }), 'c', bobShares, bob);
+      redraw(joined({ watched: new Set([3]) }), room(one(7)));
+      redraw(joined({ watched: new Set() }), room(one(7)));
       expect(shown(voice)).not.toBeNull();
     });
 
     it('says nothing on leaving voice while watching', () => {
-      const { voice, redraw } = panel(joined({ watching: true }), 'c', bobShares, bob);
+      const { voice, redraw } = panel(joined({ watched: new Set([3]) }), 'c', bobShares, bob);
       redraw(initialVoice, nobodyShares);
       expect(voice.textContent).not.toContain('stopped sharing');
     });
@@ -896,6 +902,23 @@ describe('what the strip says is true', () => {
         expect(voice.textContent).not.toContain('another device');
       });
     }
+
+    it('names the viewer by their own name, with the note as a suffix, while this page is not in voice (#1481)', () => {
+      const { voice } = panel(initialVoice, 'c', room(one(3), one(7)), bob, 'nick');
+      expect(names(voice)).toEqual(['bob', 'nick (on another device)']);
+    });
+
+    it('names the viewer by their own name while this page is in voice, others unchanged (#1481)', () => {
+      const { voice } = panel(inVoice('connected', 'c'), 'c', room(one(3), one(7)), bob, 'nick');
+      expect(names(voice)).toEqual(['bob', 'nick']);
+    });
+
+    it('renders a hostile name as text (#1481)', () => {
+      const hostile = '<img src=x onerror=alert(1)><b>x</b>';
+      const { voice } = panel(inVoice('connected', 'c'), 'c', room(one(7)), bob, hostile);
+      expect(names(voice)).toEqual([hostile]);
+      expect(voice.querySelector('.voice-roster img, .voice-roster b')).toBeNull();
+    });
 
     it('Watch only asks to watch beside the voice elsewhere; with no voice elsewhere it does not', () => {
       const there = panel(initialVoice, 'c', room(one(3), one(7)), bob);
@@ -939,7 +962,7 @@ describe('the notes about sharing', () => {
     can_publish: true,
     transmitting: false,
     joined_at: '2026-10-18T00:00:00Z',
-    ...(sharing ? { sharing: true, sharing_audio: true } : {}),
+    ...(sharing ? { sharing: true, share_started_at: '2026-10-16T00:00:00.000Z', sharing_audio: true } : {}),
   });
   const room = (...participants: ReturnType<typeof one>[]): Snapshot => ({ kind: 'presence', presence: { ...presence, rooms: [{ participants }] } });
   const nobodyShares = room(one(7), one(3), one(4));
@@ -973,33 +996,22 @@ describe('the notes about sharing', () => {
     for (const text of full) expect(within(about).getByText(text)).toBeTruthy();
   });
 
-  it("are absent while someone else shares, and one line says who, with sound, as Share screen's description", () => {
-    const said = 'bob is sharing a screen, with sound. One person shares at a time.';
-    const watch = 'bob is sharing a screen, with sound. Watch to see it.';
+  it('stay one line beside another stream, with Watch on its tile and the full notes in Voice options', () => {
     const { voice, redraw } = panel(joined(), 'c', bobShares, bob);
-    expect(within(voice).queryByText(line)).toBeNull();
-    expect(within(voice).queryByRole('button', { name: 'More about sharing' })).toBeNull();
-    expect(voice.querySelector('#voice-share-about')).toBeNull();
-    for (const text of full) expect(voice.textContent).not.toContain(text);
-    // One line about bob's share, not two.
-    expect(within(voice).getAllByText(/bob is sharing/).map((el) => el.textContent)).toEqual([watch]);
-    expect(within(voice).getByRole('button', { name: 'Share screen', description: `${watch} One person shares at a time.` })).toBeTruthy();
-
-    // Watching it, the same line, and still one in the notes (the watch
-    // view has its own title).
-    redraw(joined({ watching: true }), bobShares);
-    const notes = voice.querySelector<HTMLElement>('.voice-notes');
-    if (notes === null) throw new Error('no notes');
-    expect(within(notes).getAllByText(/bob is sharing/).map((el) => el.textContent)).toEqual([said]);
-
-    // Once bob stops, the one line about sharing is back.
+    expect(within(voice).getByText(line)).toBeTruthy();
+    expect(within(voice).getByRole('button', { name: 'More about sharing' })).toBeTruthy();
+    expect(voice.querySelector('#voice-options')?.hasAttribute('hidden')).toBe(true);
+    expect(within(screen.getByRole('region', { name: "bob's stream" })).getByRole('button', { name: 'Watch' })).toBeTruthy();
+    redraw(joined({ watched: new Set([3]) }), bobShares);
+    expect(within(voice).getByText(line)).toBeTruthy();
+    expect(screen.getByRole('region', { name: 'Shared screen' }).textContent).toContain('bob · LIVE');
     redraw(joined(), nobodyShares);
     expect(within(voice).getByText(line)).toBeTruthy();
   });
 
-  it('name who shares in a line of its own for someone listening only, who cannot share', () => {
+  it('a listen-only viewer gets the LIVE tile but no sharing options', () => {
     const { voice } = panel(joined({ listenOnly: true }), 'c', bobShares, bob);
-    expect(within(voice).getAllByText(/bob is sharing/).map((el) => el.textContent)).toEqual(['bob is sharing a screen, with sound.']);
+    expect(screen.getByRole('region', { name: "bob's stream" }).textContent).toContain('bob · LIVE');
     expect(within(voice).queryByRole('button', { name: 'More about sharing' })).toBeNull();
   });
 });
@@ -1490,7 +1502,7 @@ describe('the phone strip under Chat and Channels (issue #1028)', () => {
             can_publish: true,
             transmitting: false,
             joined_at: '2026-10-18T00:00:00Z',
-            ...(id === 3 ? { sharing: true, sharing_audio: true } : {}),
+            ...(id === 3 ? { sharing: true, share_started_at: '2026-10-16T00:00:00.000Z', sharing_audio: true } : {}),
           })),
         },
       ],
@@ -1646,5 +1658,93 @@ describe('the microphone mode toggle (issue #1244)', () => {
     const { voice } = panel(inVoice('connected', 'c'), 'c');
     expect(within(voice).getByRole<HTMLInputElement>('radio', { name: 'Push to talk', hidden: true }).checked).toBe(true);
     expect(toggle(voice).getAttribute('aria-pressed')).toBe('false');
+  });
+});
+
+describe('the compact call workspace (issue #1498)', () => {
+  const bob: ReadonlyMap<number, Person> = new Map([[3, { name: 'bob', kind: null }]]);
+  const participant = (sharing: boolean) => ({ principal_id: 3, can_publish: true, transmitting: false, joined_at: '2026-10-18T00:00:00Z', sharing, ...(sharing ? { share_started_at: '2026-10-18T00:00:00Z' } : {}) });
+  const sharing: Snapshot = { kind: 'presence', presence: { ...presence, rooms: [{ participants: [participant(true)] }] } };
+  const notSharing: Snapshot = { kind: 'presence', presence: { ...presence, rooms: [{ participants: [participant(false)] }] } };
+  const watching = (patch: Partial<VoiceState> = {}): VoiceState => ({ ...inVoice('connected', 'c'), watched: new Set([3]), ...patch });
+  const compactPanel = (patch: Partial<VoiceState> = {}) => {
+    const mounted = panel(watching(patch), 'elsewhere', sharing, bob);
+    fireEvent.click(screen.getByRole('button', { name: 'Compact' }));
+    return { ...mounted, call: screen.getByRole('region', { name: 'Video call' }) };
+  };
+
+  it('shows every VoiceState status in both the compact header and the strip', () => {
+    const t = compactPanel({ cameraTrack: 'captured' });
+    const both = (text: string) => {
+      expect(t.call.textContent).toContain(text);
+      expect(t.voice.querySelector('.voice-bar')?.textContent).toContain(text);
+    };
+    both('Microphone in use');
+    both('Camera in use');
+    both('Push to talk.');
+    both('Waiting for the picture');
+    t.redraw(watching({ muted: true, cameraTrack: 'captured' }));
+    both('Muted.');
+    t.redraw(watching({ muted: true, deafened: true, cameraTrack: 'captured' }));
+    both('Deafened (you hear no one, and you are muted).');
+    t.redraw(watching({ cameraTrack: 'published' }));
+    both('Sending video');
+    t.redraw(watching({ phase: 'reconnecting' }));
+    both('Reconnecting');
+  });
+
+  it('keeps lifecycle and actionable notes while another stream holds the compact stage open', () => {
+    const carol = { principal_id: 4, can_publish: true, transmitting: false, joined_at: '2026-10-18T00:00:00Z', sharing: true, share_started_at: '2026-10-18T00:01:00Z' };
+    const both: Snapshot = { kind: 'presence', presence: { ...presence, rooms: [{ participants: [participant(true), carol] }] } };
+    const carolOnly: Snapshot = { kind: 'presence', presence: { ...presence, rooms: [{ participants: [carol] }] } };
+    const people: ReadonlyMap<number, Person> = new Map([...bob, [4, { name: 'carol', kind: null }]]);
+    const t = panel(watching(), 'elsewhere', both, people);
+    fireEvent.click(screen.getByRole('button', { name: 'Compact' }));
+    t.redraw(watching({ watched: new Set([4]), focusedShare: 4 }), carolOnly);
+    expect(screen.getByRole('region', { name: 'Video call' }).classList.contains('compact')).toBe(true);
+    const stopped = within(t.voice).getByText('bob stopped sharing.');
+    expect(stopped.getAttribute('role')).toBe('status');
+    expect(stopped.classList.contains('voice-supplemental')).toBe(false);
+    t.redraw(watching({ watched: new Set([4]), focusedShare: 4, missing: true, camera: { kind: 'off', ended: 'operator' } }), carolOnly);
+    expect(within(t.voice).getByText('An operator turned off your camera.').getAttribute('role')).toBe('status');
+    expect(within(t.voice).getByText(missingNote).getAttribute('role')).toBe('status');
+  });
+
+  it('closes a compact watched share with the same stopped-sharing note', () => {
+    const t = compactPanel();
+    t.redraw(watching({ watched: new Set() }), notSharing);
+    expect(screen.queryByRole('region', { name: 'Video call' })).toBeNull();
+    expect(screen.queryByRole('region', { name: 'Shared screen' })).toBeNull();
+    expect(t.voice.textContent).toContain('bob stopped sharing.');
+  });
+
+  it.each([
+    ['leaving voice', initialVoice, 'Not in voice'],
+    ['being kicked', { ...initialVoice, phase: 'stopped', why: 'You were removed from voice' }, 'You were removed from voice'],
+  ] as const)('closes the compact stage on %s with the existing strip state', (_what, next, note) => {
+    const t = compactPanel();
+    t.redraw(next, notSharing);
+    expect(screen.queryByRole('region', { name: 'Video call' })).toBeNull();
+    expect(screen.queryByRole('region', { name: 'Shared screen' })).toBeNull();
+    expect(t.voice.textContent).toContain(note);
+    expect(t.voice.textContent).not.toContain('bob stopped sharing.');
+  });
+
+  it('writes no storage on toggling, and a remounted panel starts expanded', () => {
+    const first = panel(watching(), 'elsewhere', sharing, bob);
+    const set = vi.spyOn(Storage.prototype, 'setItem');
+    try {
+      fireEvent.click(screen.getByRole('button', { name: 'Compact' }));
+      expect(screen.getByRole('region', { name: 'Video call' }).classList.contains('compact')).toBe(true);
+      expect(set).not.toHaveBeenCalled();
+      first.unmount();
+      panel(watching(), 'elsewhere', sharing, bob);
+      const remounted = screen.getByRole('region', { name: 'Video call' });
+      expect(remounted.classList.contains('compact')).toBe(false);
+      expect(within(remounted).getByRole('button', { name: 'Compact', pressed: false })).toBeTruthy();
+      expect(set).not.toHaveBeenCalled();
+    } finally {
+      set.mockRestore();
+    }
   });
 });

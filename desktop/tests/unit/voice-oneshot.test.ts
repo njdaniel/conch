@@ -322,8 +322,13 @@ describe('devices()', () => {
     const result = await oneshot.devices(s.config);
     expect(result).toEqual({ ok: false, error: 'timed-out' });
     expect(Date.now() - t0).toBeLessThan(3000);
-    expect(alive(seen()[0]?.pid ?? 0)).toBe(false);
-    const child = children[0] as unknown as { signalCode: string | null; exitCode: number | null };
+    // The pid is the ChildProcess's own, from the spawn seam: the fake helper
+    // reports its pid only once Node has started, and a starved machine can
+    // take longer than the 300 ms bound to get there (issue #1644), when the
+    // report is empty and pid 0 would mean "our own process group".
+    const child = children[0] as unknown as { pid?: number; signalCode: string | null; exitCode: number | null };
+    expect(child.pid).toBeGreaterThan(0);
+    expect(alive(child.pid ?? 0)).toBe(false);
     expect(child.signalCode).toBe('SIGKILL');
   });
 

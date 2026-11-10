@@ -1,0 +1,15 @@
+{
+  "id": 5,
+  "kind": "human",
+  "name": "alice",
+  "role": "member",
+  "owner": false,
+  "permissions": [
+    "use_voice",
+    "share_screen",
+    "use_camera"
+  ],
+  "permissions_revision": 2,
+  "may_invite": false,
+  "voice_allowed": true
+}

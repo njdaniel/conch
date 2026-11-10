@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/njdaniel/conch/e2e/internal/lkit"
+	"github.com/njdaniel/conch/internal/server/store"
 	"github.com/njdaniel/conch/pkg/schema"
 )
 
@@ -425,6 +426,37 @@ func (w *world) revoke(v *voiceA, bounds voiceBounds) ([]timing, error) {
 	}
 	w.h.say("ok   revoked 1/4: %s; the %d sockets of her other credential stay open", t, len(tester.sockets))
 
+	// A second tester shares in the same room (issue #1483, several streams at
+	// once): both streams are listed in v2 presence before the disable. The
+	// disable rotates the room, which ends every stream rotated, so the
+	// other's stream goes with ann's and with its own row; the revocation of
+	// one credential above rotated nothing and ended neither.
+	var other *member
+	if v != nil {
+		var err error
+		if other, _, err = w.liveSharer(camp, w.aPerson("rsh")); err != nil {
+			return nil, fmt.Errorf("a second tester shares beside ann: %w", err)
+		}
+		// A pass lists the new sharer before presence shows them.
+		if err := waitFor("v2 presence to show ann and the second tester sharing", voiceGatePasses, func() (bool, string) {
+			var doc schema.VoicePresenceV2
+			if err := w.op.call(http.MethodGet, "/v1/channels/"+camp+"/voice?"+schema.VoicePresenceSchemaParam+"="+schema.VoicePresenceSchemaV2, nil, &doc); err != nil {
+				return false, err.Error()
+			}
+			sharing := map[int64]bool{}
+			for _, r := range doc.Rooms {
+				for _, p := range r.Participants {
+					if p.Sharing {
+						sharing[p.PrincipalID] = true
+					}
+				}
+			}
+			return sharing[ann.id] && sharing[other.id], fmt.Sprintf("sharing %v", sharing)
+		}); err != nil {
+			return nil, err
+		}
+	}
+
 	// 2. The tester herself.
 	t, err = w.measure("disable the tester (ann)", []holder{tester}, bounds, func() error {
 		return w.op.call(http.MethodPost, fmt.Sprintf("/v1/principals/%d/disable", ann.id), nil, nil)
@@ -454,6 +486,24 @@ func (w *world) revoke(v *voiceA, bounds voiceBounds) ([]timing, error) {
 					return nil, fmt.Errorf("presence still shows principal %d sharing after ann was disabled", p.PrincipalID)
 				}
 			}
+		}
+	}
+	if v != nil && other != nil {
+		// The room was rotated: the second tester's stream ended with it, with
+		// its own row.
+		if err := waitFor("the second tester's stream to end rotated", voiceGatePasses, func() (bool, string) {
+			stopped, err := w.auditRows(store.AuditVoiceShareStopped)
+			if err != nil {
+				return false, err.Error()
+			}
+			for _, r := range stopped {
+				if strings.Contains(r.Detail, "principal="+itoa(other.id)+" ") && strings.Contains(r.Detail, "reason=rotated") {
+					return true, ""
+				}
+			}
+			return false, "no voice_share_stopped reason=rotated row for the second tester"
+		}); err != nil {
+			return nil, err
 		}
 	}
 	if err := w.staysOut([]holder{tester}, bounds); err != nil {

@@ -40,11 +40,13 @@ import {
   signOut,
   setPassword,
   signOutEverywhere,
+  readHideNonVideo,
   readTalkKeyLabel,
   readVoiceMode,
   stopVoiceShare,
   uploadFile,
   whoAmI,
+  writeHideNonVideo,
   writeTalkKeyLabel,
   writeVoiceMode,
 } from './api';
@@ -590,6 +592,19 @@ describe('invites', () => {
     ]);
   });
 
+  it('sends the picker quality as VoiceShareRequestV1 and reads the v2 claim', async () => {
+    await signedInFrom(window.localStorage, memberToken);
+    const quality = { resolution: '720p', frame_rate: 15 };
+    const share = { principal_id: 2, started_at: at, audio: true, quality };
+    const request = vi.fn<(input: RequestInfo | URL, init?: RequestInit) => Promise<Response>>().mockResolvedValue(json(share));
+    vi.stubGlobal('fetch', request);
+    expect(await claimVoiceShare('red team', { resolution: '720p', frameRate: 15 })).toEqual({ ok: true, value: share });
+    const [path, init] = request.mock.calls[0] ?? [];
+    expect(path).toBe('/v1/channels/red%20team/voice/share');
+    expect(init?.method).toBe('POST');
+    expect(init?.body).toBe(JSON.stringify({ quality }));
+  });
+
   it('names the share a release means by its started_at, and passes on a stale answer (issue #487)', async () => {
     await signedInFrom(window.localStorage, memberToken);
     const calls = serve(() => new Response(null, { status: 204 }));
@@ -651,10 +666,10 @@ describe('invites', () => {
   // Issue #1051: a newer server names a permission this bundle does not know.
   // The error document still reads, so the code is passed through rather than
   // dropped with the document.
-  it('passes a refusal naming an unknown permission through by its code', async () => {
+  it('passes a refusal naming an unknown permission through by its code, and names the permission as the server wrote it', async () => {
     await signedInFrom(window.localStorage, memberToken);
     serve(() => json({ code: 'permission_denied', message: 'no', permission: 'fly_the_server' }, 403));
-    expect(await listChannels()).toEqual({ ok: false, failure: 'invalid', code: 'permission_denied' });
+    expect(await listChannels()).toEqual({ ok: false, failure: 'invalid', code: 'permission_denied', permission: 'fly_the_server' });
   });
 
   it('reads a whoami naming an unknown permission, and keeps it', async () => {
@@ -1656,6 +1671,32 @@ describe('the voice mode kept in the browser', () => {
     vi.spyOn(Storage.prototype, 'setItem').mockImplementation(refuse);
     expect(readVoiceMode()).toBeNull();
     expect(() => { writeVoiceMode('ptt'); }).not.toThrow();
+    vi.restoreAllMocks();
+  });
+});
+
+describe('Hide non-video participants kept in the browser', () => {
+  it('is off by default and reads back either choice', () => {
+    expect(readHideNonVideo()).toBe(false);
+    writeHideNonVideo(true);
+    expect(readHideNonVideo()).toBe(true);
+    writeHideNonVideo(false);
+    expect(readHideNonVideo()).toBe(false);
+  });
+
+  it('reads anything but the on value as off', () => {
+    window.localStorage.setItem('conch.web.voice.hide-non-video.v1', 'perhaps');
+    expect(readHideNonVideo()).toBe(false);
+  });
+
+  it('is tolerated when the storage throws', () => {
+    const refuse = () => {
+      throw new Error('storage is off');
+    };
+    vi.spyOn(Storage.prototype, 'getItem').mockImplementation(refuse);
+    vi.spyOn(Storage.prototype, 'setItem').mockImplementation(refuse);
+    expect(readHideNonVideo()).toBe(false);
+    expect(() => { writeHideNonVideo(true); }).not.toThrow();
     vi.restoreAllMocks();
   });
 });

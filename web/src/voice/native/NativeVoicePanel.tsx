@@ -5,6 +5,10 @@
 // command is never optimistic: the strip shows the helper's last report, and
 // "muting…" while a command waits for its answer. The destination is the
 // channel joined until Leave; browsing never moves it.
+//
+// Share and watch (issue #1582, D4-05 of #772) are the screen companion's, not
+// the helper's: NativeShare draws the control, the indicator, the notes and
+// the others' streams from the companion's state, and leaves voice alone.
 import { useEffect, useRef, useState } from 'react';
 import { isArchived } from '../../archived';
 import { Glyph } from '../../Icons';
@@ -17,7 +21,10 @@ import { Roster } from '../VoicePanel';
 import { useVoiceNames } from '../useVoiceNames';
 import { usePresence } from './usePresence';
 import { useNativeVoice } from './useNativeVoice';
+import { lockMutedNote, updatePendingWords } from './words';
 import { VoiceOptions } from './VoiceOptions';
+import { NativeStreams, ShareButton, ShareNotes, shareDisabledReason } from './NativeShare';
+import type { Companion } from './useCompanion';
 import { TalkKeySetup } from './TalkKeySetup';
 
 // How long the duplicate-identity warning waits for a second Join.
@@ -31,6 +38,8 @@ export const unavailableWords: Readonly<Record<string, string>> = {
   untrusted: 'The voice helper is not trusted, so it was not started.',
   'profile-dir-unsafe': 'The voice runtime directory was refused as unsafe.',
   'not-signed-in': 'Sign in to use voice.',
+  // The installed files were replaced under this running app (issue #1600).
+  'update-pending': updatePendingWords,
 };
 
 const runtimeDirectory = 'The voice runtime directory was refused as unsafe.';
@@ -55,6 +64,7 @@ const errorWords: Readonly<Record<NativeVoiceError, string>> = {
   busy: 'Voice is busy; try again in a moment.',
   unsupported: 'Voice is not available here.',
   lost: 'Voice lost touch with the app; try again.',
+  locked: 'Your screen is locked. Unlock it to unmute.',
 };
 
 // The phase class the strip's dot follows (the browser strip's).
@@ -90,12 +100,15 @@ export function NativeVoicePanel({
   signedIn,
   channel,
   viewer,
+  viewerName = '',
   people,
   voiceAllowed,
   channels,
   onUnauthorized,
   onOpen,
   onBound,
+  companion = null,
+  soundRoute = false,
 }: {
   readonly source: NativeVoice;
   // The talk key as the person knows it, when known.
@@ -103,6 +116,8 @@ export function NativeVoicePanel({
   readonly signedIn: boolean;
   readonly channel: string | null;
   readonly viewer: number;
+  // The viewer's own name; empty while unknown, when they are "You".
+  readonly viewerName?: string;
   readonly people: ReadonlyMap<number, Person>;
   readonly voiceAllowed: boolean;
   readonly channels: readonly ChannelV0[];
@@ -110,6 +125,12 @@ export function NativeVoicePanel({
   readonly onOpen: (name: string) => void;
   // The talk key's name once the setup saved it.
   readonly onBound?: (label: string) => void;
+  // The screen companion (#1581), or none where the bridge has none: then the
+  // strip offers no share and no watch.
+  readonly companion?: Companion | null;
+  // Whether the client reports a way to share the screen's sound; none does on
+  // Linux yet, so the silent-share notes are said.
+  readonly soundRoute?: boolean;
 }) {
   const { view, words, actions } = useNativeVoice(source, binding);
   const session = hasSession(view);
@@ -119,6 +140,13 @@ export function NativeVoicePanel({
   const snapshot = usePresence({ channel: shown, voiceAllowed, onUnauthorized });
   const presence = snapshot.kind === 'presence' ? snapshot.presence : null;
   const named = useVoiceNames({ joined, viewed: channel, presence, people });
+
+  // The companion reads the joined channel's presence for the others' streams
+  // and for why its own share ended.
+  const companionClient = companion?.client;
+  useEffect(() => {
+    if (companionClient !== undefined && joined !== null && presence !== null) companionClient.presence(presence);
+  }, [companionClient, joined, presence]);
 
   const helper = view.helper;
   // The person's last mute and deafen, as the helper confirmed them: what the
@@ -214,12 +242,14 @@ export function NativeVoicePanel({
     else if (snapshot.kind === 'gone') idle = 'Voice status could not be read.';
     else if (presence !== null && !presence.available) idle = 'Voice is unavailable right now; chat still works.';
   }
+  const shareReason = companion === null ? null : shareDisabledReason({ joined, shown: channel, live });
+  const share = companion === null ? null : <ShareButton companion={companion} joined={joined} reason={shareReason} />;
   const canJoin = !unavailable && channel !== null && !archived && available && view.status !== 'stopping';
 
   return (
     <section aria-label="Voice" className={`voice ${phaseClass(view)}${helper?.transmitting === true ? ' sending' : ''}`}>
       <div className="voice-bar">
-        {roster.length === 0 ? null : <Roster roster={roster} people={named} viewer={viewer} elsewhere={false} speaking={noSpeaking} volumes={noVolumes} />}
+        {roster.length === 0 ? null : <Roster roster={roster} people={named} viewer={viewer} viewerName={viewerName} elsewhere={duplicate} speaking={noSpeaking} volumes={noVolumes} />}
         <div className="voice-row">
           <div className="voice-state">
             <p className="voice-phase">
@@ -260,6 +290,7 @@ export function NativeVoicePanel({
                     </button>
                   </>
                 ) : null}
+                {share}
                 <OptionsButton open={options} onToggle={() => { setOptions(!options); }} />
                 <button type="button" className="danger" disabled={view.status === 'stopping' || actions === undefined} onClick={() => { if (actions !== undefined) void outcome(() => actions.leave()); }}>
                   <Glyph name="leave" />
@@ -268,6 +299,7 @@ export function NativeVoicePanel({
               </>
             ) : unavailable ? null : (
               <>
+              {share}
               <OptionsButton open={options} onToggle={() => { setOptions(!options); }} />
               <button type="button" className="primary" onClick={join} disabled={!canJoin || actions === undefined}>
                 <Glyph name="headphones" />
@@ -281,6 +313,8 @@ export function NativeVoicePanel({
       {unavailable || actions === undefined ? null : <VoiceOptions source={source} view={view} open={options} />}
       <div className="voice-notes">
         {why === null ? null : <p role="status" className="hint">{why}</p>}
+        {companion === null || unavailable ? null : <ShareNotes companion={companion} joined={joined} reason={shareReason} soundRoute={soundRoute} />}
+        {view.mutedByLock === true && muted ? <p role="status" className="hint">{lockMutedNote}</p> : null}
         {note === null ? null : <p role="status" className="hint">{note}</p>}
         {idle === null ? null : <p role="status" className="hint">{idle}</p>}
         {!session && warned !== null && warned === channel ? <p role="status" className="hint">{duplicateWarning}</p> : null}
@@ -291,6 +325,7 @@ export function NativeVoicePanel({
           </button>
         )}
       </div>
+      {companion === null || unavailable ? null : <NativeStreams companion={companion} presence={presence} viewer={viewer} people={named} joined={joined} live={live} />}
       {setup ? (
         <TalkKeySetup
           source={source}

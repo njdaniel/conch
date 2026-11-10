@@ -4,10 +4,12 @@
 // use_camera on for operators and members first, through PUT
 // /v1/permissions, as 44-camera does.
 //
-// What it shows: a camera and a share together, in carol's page, with the
-// share the main picture and both cameras in a strip that receives frames,
+// What it shows: a camera and a share together, in carol's page: the share a
+// tile with Watch, the cameras with Show video, and once the share is focused
+// it is the main picture with both cameras in a strip that receives frames,
 // on the right at 1280 px and below at 1000 px; enlarging a camera swapping
-// it with the share, and Stop watching leaving the grid; the keyboard alone
+// it with the share, and Stop watching leaving the stream's card
+// (voice-multi-share.md §7.1); the keyboard alone
 // reaching a tile, enlarging it, Full screen, and Escape back with focus
 // returned; no animation for someone who asked for less motion, and every
 // control at least 44 px each way; and the owner turning the member cell of
@@ -212,7 +214,10 @@ test.describe('the call view in a small group, with LiveKit', () => {
     return right === strip.length ? 'right' : below === strip.length ? 'below' : 'mixed';
   }
 
-  test('a camera and a share together: the share is the main picture, the cameras a strip that receives; enlarging swaps; Stop watching leaves the grid', async ({ browser }) => {
+  // A camera and a share in one call (voice-multi-share.md §7.1, §8; webcam
+  // §7.4 "Streams share the grid"). Where the single-share design of #444
+  // said otherwise, each changed assertion says why, by section.
+  test('a camera and a share together: the stream a tile with Watch, the cameras with Show video; Focus puts the share on the stage and the cameras in a strip that receives; enlarging swaps; Stop watching leaves the camera where it is', async ({ browser }) => {
     const a = await person(browser, 'alice');
     const b = await person(browser, 'bob');
     const c = await person(browser, 'carol', { viewport: { width: 1280, height: 900 } });
@@ -223,23 +228,39 @@ test.describe('the call view in a small group, with LiveKit', () => {
       await cameraOn(a);
       await cameraOn(b);
 
-      // carol watches, and opens the call view herself (O8).
-      await voiceRegion(c.page).getByRole('button', { name: 'Watch' }).click({ timeout: 30_000 });
-      await expect(shareView(c.page)).toContainText('alice is sharing', { timeout: 30_000 });
-      await expect(callView(c.page)).toHaveCount(0);
+      // alice's stream is a tile on carol's stage with Watch, and nothing is
+      // received until carol asks: no stream before Watch, no camera before
+      // Show video (§7.1 "Nothing is received until Watch"; O8). Was: Watch
+      // in the voice strip, and no stage at all before it.
+      const stream = c.page.locator('.call-share').filter({ hasText: 'alice · LIVE' });
+      await expect(stream.getByRole('button', { name: 'Watch' })).toBeVisible({ timeout: 30_000 });
+      await expect(c.page.getByLabel("alice's camera")).toHaveCount(0);
+      expect((await videoStreams(c.page)).decoding, 'nothing received before Watch').toBe(0);
+      await stream.getByRole('button', { name: 'Watch' }).click();
+      await expect(shareView(c.page)).toContainText('alice · LIVE', { timeout: 30_000 });
+      // Watching opens no video (O8): the cameras are not drawn yet.
+      await expect(c.page.getByLabel("alice's camera")).toHaveCount(0);
+      await expect(c.page.getByLabel("bob's camera")).toHaveCount(0);
       await voiceRegion(c.page).getByRole('button', { name: 'Show video (2)' }).click({ timeout: 15_000 });
       const call = callView(c.page);
       const share = call.getByRole('region', { name: 'Shared screen' });
       await expect(share).toBeVisible();
       const aliceCam = call.getByLabel("alice's camera");
       const bobCam = call.getByLabel("bob's camera");
-      // Both cameras in the strip decode frames, and so does the share.
+      // Both cameras decode frames, and so does the share.
       await expectReceiving(aliceCam);
       await expectReceiving(bobCam);
-      await expectReceiving(share.getByLabel("alice's screen"));
+      await expectReceiving(share.getByLabel("alice's screen", { exact: true }));
       await expect.poll(async () => (await videoStreams(c.page)).decoding, { timeout: 30_000 }).toBeGreaterThanOrEqual(3);
       const before = (await videoStreams(c.page)).frames;
       await expect.poll(async () => (await videoStreams(c.page)).frames, { timeout: 15_000 }).toBeGreaterThan(before);
+
+      // The share is in the grid until carol focuses it; then it is the main
+      // picture and the cameras the strip (§7.1 "Clicking a watched tile
+      // focuses it"). Was: the main picture as soon as it was watched.
+      await expect(call.locator('ul')).toHaveClass(/call-grid cols-2 rows-2/);
+      await share.getByRole('button', { name: "Focus alice's screen" }).click();
+      await expect(call).toContainText("Watching alice's screen");
       // At 1280 px the strip is on the right of the share.
       await expect.poll(() => stripPlace(share, [aliceCam, bobCam])).toBe('right');
       // The share keeps its own controls.
@@ -254,13 +275,21 @@ test.describe('the call view in a small group, with LiveKit', () => {
       await expect(call).toContainText("bob's video is enlarged");
       await expect.poll(() => stripPlace(bobCam, [share, aliceCam])).toBe('right');
       expect((await boxOf(bobCam)).width).toBeGreaterThan((await boxOf(share)).width);
-      await expectReceiving(share.getByLabel("alice's screen"));
+      // The head stays one row (the title gives way to the controls), so the
+      // strip is not pushed down and out of view.
+      expect((await boxOf(c.page.locator('.call-head'))).height).toBeLessThan(60);
+      await expectReceiving(share.getByLabel("alice's screen", { exact: true }));
       await expectReceiving(aliceCam);
       for (const name of ['Mute share', 'Full screen', 'Stop watching']) await expect(share.getByRole('button', { name })).toBeAttached();
       // The share's volume slider in the strip is still 44 px each way.
       await expectTargets(c.page, 1);
-      await call.getByRole('button', { name: 'Back to the share' }).click();
+      // Back to grid, and Focus to put the share back on the stage (§7.1
+      // "Escape or Back to grid returns"; webcam §7.4 Enlarging). Was: "Back
+      // to the share", when the share was the view's resting picture.
+      await call.getByRole('button', { name: 'Back to grid' }).click();
       await expect(c.page.locator(':focus')).toHaveAttribute('aria-label', "Enlarge bob's video");
+      await expect(call.locator('ul')).toHaveClass(/call-grid cols-2 rows-2/);
+      await share.getByRole('button', { name: "Focus alice's screen" }).click();
       await expect.poll(() => stripPlace(share, [aliceCam, bobCam])).toBe('right');
 
       // Under 1100 px the strip is below the share.
@@ -275,10 +304,19 @@ test.describe('the call view in a small group, with LiveKit', () => {
       await expectReceiving(bobCam);
 
       // Stop watching, with alice enlarged and the share in the strip, takes
-      // the share away and leaves the cameras a grid, focus on alice's tile.
+      // the share's player away and leaves its tile with Watch, focus on it;
+      // the enlarged camera stays where it is (§7.1 "Stop watching on a tile
+      // unsubscribes it and returns the card"). Was: the share leaving the
+      // view and the grid coming back, focus on alice's tile.
       await share.getByRole('button', { name: 'Stop watching' }).click();
       await expect(shareView(c.page)).toHaveCount(0);
       await expect(call).toBeVisible();
+      const card = call.locator('.call-share').filter({ hasText: 'alice · LIVE' });
+      await expect(card.getByRole('button', { name: 'Watch' })).toBeFocused();
+      await expect(call).toContainText("alice's video is enlarged");
+      // Back to grid then leaves the cameras and the card a grid, focus on
+      // alice's tile, as the old Stop watching did.
+      await call.getByRole('button', { name: 'Back to grid' }).click();
       await expect(call.locator('ul')).toHaveClass(/call-grid cols-2 rows-2/);
       await expect(call).not.toContainText('enlarged');
       await expect(c.page.locator(':focus')).toHaveAttribute('aria-label', "Enlarge alice's video");
@@ -341,6 +379,49 @@ test.describe('the call view in a small group, with LiveKit', () => {
       await expect(call).not.toContainText('enlarged');
       await expect(focused).toHaveAttribute('aria-label', "Enlarge bob's video");
       await expect(call.locator('ul')).toHaveClass(/call-grid cols-2 rows-1/);
+    } finally {
+      await b.close();
+      await c.close();
+    }
+  });
+
+  test('Hide non-video participants keeps only cameras, persists across a reload, and an empty grid closes without opening itself again', async ({ browser }) => {
+    const b = await person(browser, 'bob');
+    const c = await person(browser, 'carol', { viewport: { width: 1280, height: 900 } });
+    try {
+      await join(b);
+      await join(c);
+      await roomIs([vw.bob, vw.carol]);
+      await cameraOn(b);
+      await voiceRegion(c.page).getByRole('button', { name: 'Show video (1)' }).click({ timeout: 15_000 });
+      let call = callView(c.page);
+      const toggle = call.getByRole('button', { name: 'Hide non-video participants' });
+      await expect(toggle).toHaveAttribute('aria-pressed', 'false');
+      await expect(call.getByRole('listitem')).toHaveCount(2);
+      await expect(call.getByRole('listitem').filter({ hasText: 'carol' })).toContainText('Camera off');
+      await toggle.click();
+      await expect(toggle).toHaveAttribute('aria-pressed', 'true');
+      await expect(call.getByRole('listitem')).toHaveCount(1);
+      await expect(call.getByLabel("bob's camera")).toBeVisible();
+      await expect(call.getByRole('listitem').filter({ hasText: 'carol' })).toHaveCount(0);
+
+      await c.page.reload();
+      await openChannel(c.page, vw.channel);
+      await join(c);
+      await expect(callView(c.page)).toHaveCount(0);
+      await voiceRegion(c.page).getByRole('button', { name: 'Show video (1)' }).click({ timeout: 15_000 });
+      call = callView(c.page);
+      await expect(call.getByRole('button', { name: 'Hide non-video participants' })).toHaveAttribute('aria-pressed', 'true');
+      await expect(call.getByRole('listitem')).toHaveCount(1);
+
+      await voiceRegion(b.page).getByRole('button', { name: 'Camera', exact: true }).click();
+      await expect(callView(c.page)).toHaveCount(0, { timeout: 15_000 });
+      await expect(voiceRegion(c.page).getByRole('button', { name: /Show video/ })).toHaveCount(0);
+      await cameraOn(b);
+      const show = voiceRegion(c.page).getByRole('button', { name: 'Show video (1)' });
+      await expect(show).toBeVisible({ timeout: 15_000 });
+      await expect(show).toBeFocused();
+      await expect(callView(c.page)).toHaveCount(0);
     } finally {
       await b.close();
       await c.close();

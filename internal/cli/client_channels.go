@@ -16,12 +16,22 @@ import (
 // with all, an operator's listing of every channel with its member count
 // (?scope=all, manage_channels).
 func (c *Client) ChannelDirectory(ctx context.Context, all bool) (schema.ChannelDirectoryResponseV1, error) {
+	return c.channelDirectory(ctx, all, 0)
+}
+
+func (c *Client) channelDirectory(ctx context.Context, all bool, previewAs int64) (schema.ChannelDirectoryResponseV1, error) {
 	endpoint := c.resolve("v1", "directory", "channels")
 	if all {
 		endpoint.RawQuery = "scope=all"
 	}
 	var result channelDirectoryDoc
-	if err := c.roundTrip(ctx, "list channels", http.MethodGet, endpoint, nil, &result); err != nil {
+	var err error
+	if previewAs > 0 {
+		err = c.roundTripPreview(ctx, "list channels", endpoint, &result, previewAs)
+	} else {
+		err = c.roundTrip(ctx, "list channels", http.MethodGet, endpoint, nil, &result)
+	}
+	if err != nil {
 		return schema.ChannelDirectoryResponseV1{}, err
 	}
 	return result.ChannelDirectoryResponseV1, nil
@@ -78,6 +88,10 @@ func (c *Client) SetChannelTopic(ctx context.Context, id int64, request schema.S
 // DirectoryMembers returns one page of the community's members after the
 // member with id after (0 for the first page).
 func (c *Client) DirectoryMembers(ctx context.Context, after int64, limit int) (schema.ServerMembersResponseV1, error) {
+	return c.directoryMembers(ctx, after, limit, 0)
+}
+
+func (c *Client) directoryMembers(ctx context.Context, after int64, limit int, previewAs int64) (schema.ServerMembersResponseV1, error) {
 	endpoint := c.resolve("v1", "directory", "members")
 	query := endpoint.Query()
 	if after > 0 {
@@ -88,7 +102,13 @@ func (c *Client) DirectoryMembers(ctx context.Context, after int64, limit int) (
 	}
 	endpoint.RawQuery = query.Encode()
 	var result directoryMembersDoc
-	if err := c.roundTrip(ctx, "list the community", http.MethodGet, endpoint, nil, &result); err != nil {
+	var err error
+	if previewAs > 0 {
+		err = c.roundTripPreview(ctx, "list the community", endpoint, &result, previewAs)
+	} else {
+		err = c.roundTrip(ctx, "list the community", http.MethodGet, endpoint, nil, &result)
+	}
+	if err != nil {
 		return schema.ServerMembersResponseV1{}, err
 	}
 	return result.ServerMembersResponseV1, nil
