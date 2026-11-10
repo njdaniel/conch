@@ -18,6 +18,8 @@ export interface Someone {
   readonly context: BrowserContext;
   readonly watch: Watch;
   readonly member: Member;
+  // The channel the person opened: the one joinVoice expects to connect in.
+  readonly channel: string;
   // leave(p) under the name a person's own: closes the page, then the context.
   readonly close: () => Promise<void>;
 }
@@ -63,7 +65,7 @@ export async function enter(browser: Browser, vw: VoiceWorld, member: Member, op
     await page.addInitScript(keepConnections);
     await signIn(page, vw, member.token, member.name);
     await openChannel(page, vw.channel);
-    const someone: Someone = { page, context, watch, member, close: () => leave(someone) };
+    const someone: Someone = { page, context, watch, member, channel: vw.channel, close: () => leave(someone) };
     return someone;
   } catch (err) {
     await closeAll(context);
@@ -78,17 +80,19 @@ const voiceRegion = (page: Page) => page.getByRole('region', { name: 'Voice' });
 export async function joinVoice(p: Someone, how: 'Join voice' | 'Watch only'): Promise<void> {
   await showView(p.page, 'Voice');
   // Watch only beside the person's voice in another client is the viewer
-  // (issue #936); presence lingers a few seconds after an earlier page of the
-  // same member closed and reads as that other client, so wait for it to clear.
+  // (issue #936), which has no Share screen. Presence lingers a few seconds
+  // after an earlier page of the same member closed, and reads as that other
+  // client; a test that needs the plain Watch only waits for it to clear.
+  // (A real page is no longer refused for it: issue #1340.)
   // The button is enabled only once the first presence snapshot is in, so the
   // check below reads the roster and not the empty page before it (issue
-  // #1682: it passed vacuously, then presence arrived and the click joined as
-  // the viewer).
+  // #1682: it passed vacuously, then presence arrived listing the earlier page
+  // and the click joined as the viewer).
   const button = voiceRegion(p.page).getByRole('button', { name: how });
   await expect(button).toBeEnabled({ timeout: 30_000 });
   if (how === 'Watch only') await expect(voiceRegion(p.page)).not.toContainText('You are in voice on another device', { timeout: 30_000 });
   await button.click();
-  await expect(voiceRegion(p.page)).toContainText(/Connected in #/, { timeout: 30_000 });
+  await expect(voiceRegion(p.page)).toContainText(new RegExp(`Connected in #${p.channel.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`), { timeout: 30_000 });
 }
 
 // leave closes the person's pages and then their context (closeAll in

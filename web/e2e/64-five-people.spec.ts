@@ -10,6 +10,7 @@
 // real devices, other engines.
 import { expect, messages, say, test } from './fixtures';
 import { enter, expectClean, joinVoice, leave, type Someone } from './people';
+import { answered } from './livekit-admin';
 import { dockerAvailable, emptiesWithin, startVoiceWorld, type VoiceWorld } from './voice-world';
 import { loadWorld } from './world';
 
@@ -39,7 +40,7 @@ test.describe('@heavy five people', () => {
     try {
       for (const m of members) people.push(await enter(browser, vw, m));
       for (const p of people) await joinVoice(p, 'Join voice');
-      await expect.poll(() => vw.participants(), { timeout: 20_000 }).toEqual(identities(members));
+      await expect.poll(() => answered(vw.participants()), { timeout: 20_000 }).toEqual(identities(members));
 
       // Each posts one message; the other four (and the sender) see it once.
       const bodies = members.map((m) => `1608 hello from ${m.name} ${Date.now().toString(36)}`);
@@ -51,12 +52,12 @@ test.describe('@heavy five people', () => {
       // Two leave; LiveKit lists the other three.
       await leave(people[3] as Someone);
       await leave(people[4] as Someone);
-      await expect.poll(() => vw.participants(), { timeout: emptiesWithin }).toEqual(identities(members.slice(0, 3)));
+      await expect.poll(() => answered(vw.participants()), { timeout: emptiesWithin }).toEqual(identities(members.slice(0, 3)));
     } finally {
       for (const p of people) await leave(p);
     }
-    await expect.poll(() => vw.participants(), { timeout: emptiesWithin }).toEqual([]);
+    await expect.poll(() => answered(vw.participants()), { timeout: emptiesWithin }).toEqual([]);
     // And the room itself is closed, not merely empty.
-    await expect.poll(() => vw.rooms(), { timeout: emptiesWithin, message: 'LiveKit closes the room' }).toBe(0);
+    await expect.poll(() => answered(vw.rooms()), { timeout: emptiesWithin, message: 'LiveKit closes the room' }).toBe(0);
   });
 });

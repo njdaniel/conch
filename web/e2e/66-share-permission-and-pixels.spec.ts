@@ -32,6 +32,7 @@
 import type { Page } from '@playwright/test';
 import { expect, test } from './fixtures';
 import { enter, expectClean, inbound, joinVoice, leave, type Someone } from './people';
+import { answered, mustAnswer, noAnswer, type NoAnswer } from './livekit-admin';
 import { dockerAvailable, startVoiceWorld, type VoiceWorld } from './voice-world';
 import { loadWorld } from './world';
 
@@ -95,7 +96,13 @@ test.describe('@smoke screen share permission and pixels with LiveKit', () => {
     expect(await memberShareCell(), 'share_screen restored for members').toBe(found);
   }
 
-  const videoSids = async (member: { id: number }) => (await vw.tracks(member, 'screen')).filter((t) => t.source === 'SCREEN_SHARE').map((t) => t.sid);
+  // The sids of member's screen video publications, or noAnswer: a reading with
+  // no answer is never filtered into a list. Use answered() in a poll and
+  // mustAnswer() in a one-off assertion.
+  const videoSids = async (member: { id: number }): Promise<string[] | NoAnswer> => {
+    const tracks = await vw.tracks(member, 'screen');
+    return tracks === noAnswer ? noAnswer : tracks.filter((t) => t.source === 'SCREEN_SHARE').map((t) => t.sid);
+  };
 
   async function shareRows(): Promise<{ actor: string; action: string; detail: string }[]> {
     return (await vw.audit()).filter((e) => e.action.startsWith('voice_share_')).map(({ actor, action, detail }) => ({ actor, action, detail }));
@@ -181,8 +188,8 @@ test.describe('@smoke screen share permission and pixels with LiveKit', () => {
       await joinVoice(c, 'Watch only');
 
       await share(a);
-      await expect.poll(() => videoSids(vw.alice), { timeout: 15_000 }).toHaveLength(1);
-      const first = (await videoSids(vw.alice))[0] ?? '';
+      await expect.poll(() => answered(videoSids(vw.alice)), { timeout: 15_000 }).toHaveLength(1);
+      const first = (await mustAnswer(videoSids(vw.alice)))[0] ?? '';
       await watch(c);
       const firstStream = await framesRise(c, new Set());
 
@@ -195,18 +202,18 @@ test.describe('@smoke screen share permission and pixels with LiveKit', () => {
       await voiceRegion(a.page).getByRole('button', { name: 'Stop sharing' }).click();
       await expect(voiceRegion(a.page)).toContainText('You stopped sharing.');
       await expect(shareView(c.page)).toHaveCount(0, { timeout: 15_000 });
-      await expect.poll(() => videoSids(vw.alice), { timeout: 15_000 }).toEqual([]);
+      await expect.poll(() => answered(videoSids(vw.alice)), { timeout: 15_000 }).toEqual([]);
 
       // Again: a new publication, which the viewer watches afresh.
       await share(a);
-      await expect.poll(() => videoSids(vw.alice), { timeout: 15_000 }).toHaveLength(1);
-      const second = (await videoSids(vw.alice))[0] ?? '';
+      await expect.poll(() => answered(videoSids(vw.alice)), { timeout: 15_000 }).toHaveLength(1);
+      const second = (await mustAnswer(videoSids(vw.alice)))[0] ?? '';
       expect(second, 'the second share is a publication of its own').not.toBe(first);
       await watch(c);
       // A stream of its own, not the first share's, decoding frames.
       const secondStream = await framesRise(c, new Set([firstStream]));
       expect(secondStream).not.toBe(firstStream);
-      expect(await videoSids(vw.alice), 'only the new screen publication is listed').toEqual([second]);
+      expect(await mustAnswer(videoSids(vw.alice)), 'only the new screen publication is listed').toEqual([second]);
 
       await voiceRegion(a.page).getByRole('button', { name: 'Stop sharing' }).click();
       await expect(shareView(c.page)).toHaveCount(0, { timeout: 15_000 });
@@ -237,7 +244,7 @@ test.describe('@smoke screen share permission and pixels with LiveKit', () => {
         await expect(voice).toContainText('Your share could not start.', { timeout: 15_000 });
         await expect(voice.getByRole('button', { name: 'Stop sharing' })).toHaveCount(0);
         await expect(voice.getByRole('button', { name: 'Share screen' })).toBeVisible();
-        expect(await videoSids(vw.bob)).toEqual([]);
+        expect(await mustAnswer(videoSids(vw.bob))).toEqual([]);
       });
       expect((await shareRows()).slice(before).map(rowName), 'no share was audited').toEqual([]);
       await expectClean(vw, b);
@@ -257,7 +264,7 @@ test.describe('@smoke screen share permission and pixels with LiveKit', () => {
       await share(a);
       await watch(c);
       const stream = await framesRise(c, new Set());
-      await expect.poll(() => videoSids(vw.alice), { timeout: 15_000 }).toHaveLength(1);
+      await expect.poll(() => answered(videoSids(vw.alice)), { timeout: 15_000 }).toHaveLength(1);
 
       let framesAtEnd = 0;
       await withShareOff(async () => {
@@ -266,7 +273,7 @@ test.describe('@smoke screen share permission and pixels with LiveKit', () => {
         await expect(voiceRegion(a.page)).toContainText("Your share ended: you're no longer allowed to share in this channel.", { timeout: endsWithin });
         await expect(voiceRegion(a.page).getByRole('button', { name: 'Stop sharing' })).toHaveCount(0);
         await expect(shareView(c.page)).toHaveCount(0, { timeout: endsWithin });
-        await expect.poll(() => vw.tracks(vw.alice, 'screen'), { timeout: endsWithin }).toEqual([]);
+        await expect.poll(() => answered(vw.tracks(vw.alice, 'screen')), { timeout: endsWithin }).toEqual([]);
         framesAtEnd = (await videoFrames(c)).get(stream) ?? 0;
       });
       const me = `principal:${String(vw.alice.id)}`;

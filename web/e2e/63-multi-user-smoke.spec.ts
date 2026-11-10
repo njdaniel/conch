@@ -15,6 +15,7 @@ import type { Page } from '@playwright/test';
 import { history, post } from './api';
 import { expect, messages, say, signIn, statusLine, test } from './fixtures';
 import { enter, expectClean, joinVoice, leave, type Someone } from './people';
+import { answered } from './livekit-admin';
 import { dockerAvailable, emptiesWithin, startVoiceWorld, type VoiceWorld } from './voice-world';
 import { loadWorld, principalId } from './world';
 
@@ -90,14 +91,14 @@ test.describe('@smoke with LiveKit', () => {
       }
 
       // LiveKit's own view: exactly these three, none twice.
-      await expect.poll(() => vw.participants(), { timeout: 15_000 }).toEqual(members.map((m) => `p${String(m.id)}`).sort());
+      await expect.poll(() => answered(vw.participants()), { timeout: 15_000 }).toEqual(members.map((m) => `p${String(m.id)}`).sort());
 
       for (const p of people) await expectClean(vw, p);
     } finally {
       for (const p of people) await leave(p);
     }
-    await expect.poll(() => vw.participants(), { timeout: emptiesWithin }).toEqual([]);
+    await expect.poll(() => answered(vw.participants()), { timeout: emptiesWithin }).toEqual([]);
     // And the room itself is closed, not merely empty.
-    await expect.poll(() => vw.rooms(), { timeout: emptiesWithin, message: 'LiveKit closes the room' }).toBe(0);
+    await expect.poll(() => answered(vw.rooms()), { timeout: emptiesWithin, message: 'LiveKit closes the room' }).toBe(0);
   });
 });

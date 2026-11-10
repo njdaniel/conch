@@ -2,7 +2,7 @@
 // fetch is replaced.
 import { createHmac } from 'node:crypto';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { adminToken, listIdentities, listTracks, LiveKitNoAnswerError, LiveKitStatusError, roomCount, untilAnswered, type AdminGrant } from './livekit-admin';
+import { adminToken, answered, listIdentities, listTracks, LiveKitNoAnswerError, LiveKitStatusError, mustAnswer, noAnswer, roomCount, untilAnswered, type AdminGrant } from './livekit-admin';
 
 const secret = 'unit-test-NOT-A-REAL-SECRET-0123456789';
 const unb64 = (part: string): string => atob(part.replaceAll('-', '+').replaceAll('_', '/'));
@@ -150,22 +150,59 @@ describe('listTracks and roomCount', () => {
   });
 });
 
-describe('untilAnswered', () => {
-  it('returns the sentinel for a transport error, a timeout and an unreadable answer, so a poll goes on', async () => {
-    vi.stubGlobal('fetch', () => Promise.reject(new Error('connect ECONNREFUSED')));
-    expect(await untilAnswered(() => roomCount('http://x', 'k', secret), -1)).toBe(-1);
+describe('untilAnswered, answered and mustAnswer', () => {
+  const down = () => vi.stubGlobal('fetch', () => Promise.reject(new Error('connect ECONNREFUSED')));
+
+  it('is noAnswer, a value of its own, for a transport error, a timeout and an unreadable answer', async () => {
+    down();
+    expect(await untilAnswered(() => roomCount('http://x', 'k', secret))).toBe(noAnswer);
     vi.stubGlobal('fetch', () => Promise.reject(new DOMException('timed out', 'TimeoutError')));
-    expect(await untilAnswered(() => listIdentities('http://x', 'k', secret), ['none'])).toEqual(['none']);
+    expect(await untilAnswered(() => listIdentities('http://x', 'k', secret))).toBe(noAnswer);
     vi.stubGlobal('fetch', () => Promise.resolve(new Response('not json', { status: 200 })));
-    expect(await untilAnswered(() => roomCount('http://x', 'k', secret), -1)).toBe(-1);
+    expect(await untilAnswered(() => roomCount('http://x', 'k', secret))).toBe(noAnswer);
   });
 
   it('passes an answer through, and still throws a status error or anything else', async () => {
     vi.stubGlobal('fetch', () => Promise.resolve(new Response('{}', { status: 200 })));
-    expect(await untilAnswered(() => roomCount('http://x', 'k', secret), -1)).toBe(0);
+    expect(await untilAnswered(() => roomCount('http://x', 'k', secret))).toBe(0);
     vi.stubGlobal('fetch', () => Promise.resolve(new Response('{}', { status: 401 })));
-    await expect(untilAnswered(() => roomCount('http://x', 'k', secret), -1)).rejects.toBeInstanceOf(LiveKitStatusError);
-    await expect(untilAnswered(() => Promise.reject(new Error('other')), 0)).rejects.toThrow('other');
+    await expect(untilAnswered(() => roomCount('http://x', 'k', secret))).rejects.toBeInstanceOf(LiveKitStatusError);
+    await expect(untilAnswered(() => Promise.reject(new Error('other')))).rejects.toThrow('other');
+  });
+
+  // The assertions of the specs, on a reading that got no answer: none may pass.
+  describe('a reading with no answer cannot satisfy an assertion', () => {
+    const reading = async <T>(ask: () => Promise<T>) => {
+      down();
+      return untilAnswered(ask);
+    };
+
+    it('in a poll (answered is undefined, which no matcher takes), for a list, a count and a length', async () => {
+      const ids = await answered(reading(() => listIdentities('http://x', 'k', secret)));
+      const tracks = await answered(reading(() => listTracks('http://x', 'k', secret, 'p1', () => true)));
+      const rooms = await answered(reading(() => roomCount('http://x', 'k', secret)));
+      expect(ids).toBeUndefined();
+      expect(tracks).toBeUndefined();
+      expect(rooms).toBeUndefined();
+      // The spec's poll matchers: participants/tracks .toEqual([]), rooms .toBe(0), a length .toBe(1), toHaveLength.
+      expect(ids).not.toEqual([]);
+      expect(tracks).not.toEqual([]);
+      expect(rooms).not.toBe(0);
+      expect(tracks?.length).not.toBe(1);
+      expect(() => { expect(tracks).toHaveLength(1); }).toThrow();
+      expect(() => { expect(tracks).toHaveLength(0); }).toThrow();
+    });
+
+    it('in a one-off assertion (mustAnswer fails the test, so [] or a length of 1 is never read from it)', async () => {
+      await expect(mustAnswer(reading(() => listTracks('http://x', 'k', secret, 'p1', () => true)))).rejects.toThrow('LiveKit gave no answer');
+      await expect(mustAnswer(reading(() => listIdentities('http://x', 'k', secret)))).rejects.toThrow('LiveKit gave no answer');
+    });
+
+    it('mustAnswer and answered pass a real answer, an empty list included', async () => {
+      vi.stubGlobal('fetch', () => Promise.resolve(new Response('{}', { status: 200 })));
+      expect(await mustAnswer(untilAnswered(() => listIdentities('http://x', 'k', secret)))).toEqual([]);
+      expect(await answered(untilAnswered(() => listIdentities('http://x', 'k', secret)))).toEqual([]);
+    });
   });
 
   it('LiveKitNoAnswerError says the method and why, nothing else', () => {

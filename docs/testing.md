@@ -316,8 +316,11 @@ one of them should change the helper). All are in `web/e2e/`:
     received (`perTrack: true` for each stream).
   - `expectClean(vw, p)`: no secret of the world on the page, in its console,
     storage or timing entries, and no policy violation or failed request.
-- `fixtures.ts`: `closeAll(context)`, the one way to close a context that has had
-  a page. **Every `context.close()` goes through it**: it closes the pages first
+- `fixtures.ts`: `closeAll(context)`, the way to close a context that has had
+  a page. **Every `context.close()` goes through it, except a deliberate
+  crash** (the one in `67-voice-recovery`, a tab that dies without leaving, which
+  must not be closed page-first or it becomes a clean leave and tests nothing,
+  and says so in a comment): it closes the pages first
   and then the context. Closing a context with a page whose WebSocket is busy
   can fail with "file data stream has unexpected number of bytes" or "End of
   central directory record signature not found", because Playwright appends the
@@ -338,14 +341,30 @@ one of them should change the helper). All are in `web/e2e/`:
     `expect.poll(() => vw.rooms(), ...).toBe(0)`.
   - `vw.pauseLiveKit()` and `vw.unpauseLiveKit()`.
 - `livekit-admin.ts`: `adminToken` (the HS256 admin token) and
-  `LiveKitStatusError` (a call's method and HTTP status, never a body). A spec
-  seldom needs either; the `vw` readings above use them.
+  `LiveKitStatusError` (a call's method and HTTP status, never a body), which a
+  spec seldom needs; and what a spec does need to read `vw.participants()`,
+  `vw.tracks()` and `vw.rooms()`: `noAnswer` / `NoAnswer`, `answered()` and
+  `mustAnswer()` (below), plus `untilAnswered` and `LiveKitNoAnswerError`, which
+  produce them.
+- `people.ts` also exports `keepConnections`, the init script that keeps a page's
+  peer connections for `inbound`; `enter` installs it, and a spec that builds its
+  own context installs it with `page.addInitScript(keepConnections)`.
 
 Polling LiveKit: a throw inside an `expect.poll` callback fails the poll at
-once in Playwright 1.61, it is not retried. So `vw.participants()`, `vw.tracks()`
-and `vw.rooms()` do not throw on a timeout or a transport error: they return a
-value no assertion accepts (`noAnswer` in `voice-world.ts`, or `-1` for the room
-count) and the poll goes on. A status error (a wrong key, say) still throws.
+once in Playwright 1.61, it is not retried. So `vw.participants()`,
+`vw.tracks()` and `vw.rooms()` do not throw on a timeout or a transport error.
+They return `T | NoAnswer`, where `noAnswer` is a symbol and not a list or a
+count, so no assertion on a list, a length or a count can be satisfied by it, and
+TypeScript makes the caller choose:
+
+- in a poll, `expect.poll(() => answered(vw.participants()))`: `answered` turns
+  no answer into `undefined`, which matches nothing, so the poll goes on;
+- in a one-off assertion, `expect(await mustAnswer(vw.participants()))`: no
+  answer fails the test with "LiveKit gave no answer";
+- a helper built on a reading (`videoSids`, `microphones`) returns `T | NoAnswer`
+  itself and never filters, maps or counts a `NoAnswer` as if it were a list.
+
+A status error (a wrong key, say) still throws.
 
 ## Flake policy
 

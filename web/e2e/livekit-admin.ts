@@ -143,15 +143,39 @@ export async function listTracks(base: string, key: string, secret: string, iden
   return out.sort((a, b) => (a.sid < b.sid ? -1 : a.sid > b.sid ? 1 : 0));
 }
 
-// untilAnswered runs ask and, if LiveKit gave no usable answer, returns
-// sentinel instead of throwing, for a caller that polls: see the top of this
-// file. A status error still throws, as that is a fault and not a wait; so
-// does anything else. The sentinel must be a value the poll can never accept.
-export async function untilAnswered<T>(ask: () => Promise<T>, sentinel: T): Promise<T> {
+// What a reading returns when LiveKit gave no usable answer. A value of its own
+// type, not a list or a count that could equal what a test expects: a reading
+// is `T | NoAnswer`, and TypeScript makes every caller say what no answer means
+// to it. In a poll, answered() turns it into undefined, which matches nothing,
+// so the poll goes on; in a one-off assertion, mustAnswer() fails the test with
+// "LiveKit gave no answer". Never filter, map or count a NoAnswer as if it were
+// a list.
+export const noAnswer = Symbol('livekit: no answer');
+export type NoAnswer = typeof noAnswer;
+
+// untilAnswered runs ask and, if LiveKit gave no usable answer (see
+// LiveKitNoAnswerError), returns noAnswer instead of throwing. A status error,
+// or anything else, still throws: that is a fault and not a wait.
+export async function untilAnswered<T>(ask: () => Promise<T>): Promise<T | NoAnswer> {
   try {
     return await ask();
   } catch (err) {
-    if (err instanceof LiveKitNoAnswerError) return sentinel;
+    if (err instanceof LiveKitNoAnswerError) return noAnswer;
     throw err;
   }
+}
+
+// answered is a reading for an expect.poll callback: undefined for no answer,
+// which no matcher accepts (toEqual, toBe and toHaveLength all keep polling).
+export async function answered<T>(reading: Promise<T | NoAnswer>): Promise<T | undefined> {
+  const value = await reading;
+  return value === noAnswer ? undefined : value;
+}
+
+// mustAnswer is a reading for a one-off assertion: no answer fails the test
+// with a message that says so.
+export async function mustAnswer<T>(reading: Promise<T | NoAnswer>): Promise<T> {
+  const value = await reading;
+  if (value === noAnswer) throw new Error('LiveKit gave no answer');
+  return value;
 }
