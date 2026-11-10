@@ -93,26 +93,28 @@ app=$stage/opt/conch-desktop
 mkdir -p "$stage/DEBIAN" "$app"
 
 # The tree, with modes made by this script and not inherited: directories
-# 0755, anything executable 0755, the rest 0644. cp -r (not -a) takes no
-# ownership or time from the source; dpkg-deb stamps SOURCE_DATE_EPOCH.
+# 0755, anything executable 0755, the rest 0644 (written 00755 and 00644 so
+# that chmod also clears setgid on a directory, which a 3-digit mode keeps).
+# cp -r (not -a) takes no ownership or time from the source; dpkg-deb stamps
+# SOURCE_DATE_EPOCH.
 cp -r "$tree/." "$app/"
 rm -f "$app/chrome-sandbox"
-find "$app" -type d -exec chmod 755 {} +
-find "$app" -type f -perm /111 -exec chmod 755 {} +
-find "$app" -type f ! -perm /111 -exec chmod 644 {} +
+find "$app" -type d -exec chmod 00755 {} +
+find "$app" -type f -perm /111 -exec chmod 00755 {} +
+find "$app" -type f ! -perm /111 -exec chmod 00644 {} +
 
 # Launcher, desktop file, icons, AppArmor profile, copyright.
 mkdir -p "$stage/usr/bin" "$stage/usr/share/applications" "$stage/etc/apparmor.d" "$stage/usr/share/doc/conch-desktop"
 ln -s /opt/conch-desktop/conch-desktop "$stage/usr/bin/conch-desktop"
-install -m 644 desktop/build/deb/chat.conch.desktop.desktop "$stage/usr/share/applications/chat.conch.desktop.desktop"
-install -m 644 desktop/build/deb/conch-desktop.apparmor "$stage/etc/apparmor.d/conch-desktop"
-install -m 644 desktop/build/deb/copyright "$stage/usr/share/doc/conch-desktop/copyright"
+install -m 00644 desktop/build/deb/chat.conch.desktop.desktop "$stage/usr/share/applications/chat.conch.desktop.desktop"
+install -m 00644 desktop/build/deb/conch-desktop.apparmor "$stage/etc/apparmor.d/conch-desktop"
+install -m 00644 desktop/build/deb/copyright "$stage/usr/share/doc/conch-desktop/copyright"
 for size in 48 128 256 512; do
     dir=$stage/usr/share/icons/hicolor/${size}x${size}/apps
     mkdir -p "$dir"
-    install -m 644 "desktop/build/icons/$size.png" "$dir/chat.conch.desktop.png"
+    install -m 00644 "desktop/build/icons/$size.png" "$dir/chat.conch.desktop.png"
 done
-find "$stage" -type d -exec chmod 755 {} +
+find "$stage" -type d -exec chmod 00755 {} +
 
 # Depends, from the ELF files, as installed (the DEBIAN directory lets
 # dpkg-shlibdeps resolve $ORIGIN). Its warnings are noise unless it fails.
@@ -138,11 +140,22 @@ bytes=$(find "$stage" -type f ! -path "$stage/DEBIAN/*" -printf '%s\n' | awk '{s
 installed=$(((bytes + 1023) / 1024))
 
 # DEBIAN.
-sed -e "s|@VERSION@|$version|" -e "s|@INSTALLED_SIZE@|$installed|" -e "s|@DEPENDS@|$depends|" \
-    desktop/build/deb/control.in >"$stage/DEBIAN/control"
+# Substituted literally with awk (index and substr, values from the
+# environment), not sed: Depends holds "|" for alternatives, and "&" and "\"
+# are special in a sed or gsub replacement, so no delimiter would be safe.
+VERSION=$version INSTALLED_SIZE=$installed DEPENDS=$depends awk '
+    function put(tok, val,   i) {
+        i = index($0, tok)
+        if (i > 0) $0 = substr($0, 1, i - 1) val substr($0, i + length(tok))
+    }
+    { put("@VERSION@", ENVIRON["VERSION"]); put("@INSTALLED_SIZE@", ENVIRON["INSTALLED_SIZE"]); put("@DEPENDS@", ENVIRON["DEPENDS"]); print }
+' desktop/build/deb/control.in >"$stage/DEBIAN/control"
+if grep -q '@[A-Z_]*@' "$stage/DEBIAN/control"; then
+    fail "an unreplaced @TOKEN@ is left in the control file"
+fi
 echo /etc/apparmor.d/conch-desktop >"$stage/DEBIAN/conffiles"
-install -m 755 desktop/build/deb/postinst desktop/build/deb/postrm "$stage/DEBIAN/"
-chmod 644 "$stage/DEBIAN/control" "$stage/DEBIAN/conffiles"
+install -m 00755 desktop/build/deb/postinst desktop/build/deb/postrm "$stage/DEBIAN/"
+chmod 00644 "$stage/DEBIAN/control" "$stage/DEBIAN/conffiles"
 
 mkdir -p "$out"
 deb=$out/conch-desktop_${version}_amd64.deb
