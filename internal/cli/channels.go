@@ -92,6 +92,10 @@ func runChannels(ctx context.Context, args []string, stdout, stderr io.Writer) e
 		if len(pos) < 1 || len(pos) > 2 {
 			return fmt.Errorf("cli: channels topic: expected <channel> [<text>] (usage: %s)", channelsUsage[verb])
 		}
+		if len(pos) == 2 && strings.TrimSpace(pos[1]) == "" && !*clear {
+			// An empty "$TOPIC" in a script must not clear the topic by accident.
+			return fmt.Errorf("cli: channels topic: the topic text is empty or blank; use --clear to clear the topic (usage: %s)", channelsUsage[verb])
+		}
 		if *clear && len(pos) != 1 {
 			return fmt.Errorf("cli: channels topic: --clear cannot be used with text (usage: %s)", channelsUsage[verb])
 		}
@@ -190,6 +194,9 @@ func runChannels(ctx context.Context, args []string, stdout, stderr io.Writer) e
 // runChannelTopic resolves the name from the caller's own channel list, then
 // reads that entry or writes the topic through the id-addressed route.
 func runChannelTopic(ctx context.Context, client *Client, out channelsOutput, lines refusalLines, name string, request schema.SetChannelTopicRequestV1, write bool) error {
+	if !write && out.asJSON {
+		return runChannelTopicJSON(ctx, client, out, name)
+	}
 	list, err := client.ListChannels(ctx)
 	if err != nil {
 		return refused(err, lines)
@@ -199,9 +206,6 @@ func runChannelTopic(ctx context.Context, client *Client, out channelsOutput, li
 			continue
 		}
 		if !write {
-			if out.asJSON {
-				return out.json(list)
-			}
 			if channel.Topic == "" {
 				return nil
 			}
@@ -217,12 +221,32 @@ func runChannelTopic(ctx context.Context, client *Client, out channelsOutput, li
 	return &refusalError{line: commonRefusals["channel_not_found"]}
 }
 
+// runChannelTopicJSON prints the one channel `channels list --json` would
+// list under name: the same ChannelListingV1 element, from the same
+// directory route, so a script reads both alike. A channel that listing does
+// not carry (an archived public channel, or a private one, the caller is not
+// a member of) is reported as not found rather than printed in another shape.
+// The directory refuses an agent and a guest, so a refusal here has the
+// lines `channels list` gives, not the topic write's.
+func runChannelTopicJSON(ctx context.Context, client *Client, out channelsOutput, name string) error {
+	dir, err := client.ChannelDirectory(ctx, false)
+	if err != nil {
+		return refused(err, channelRefusals["list"])
+	}
+	for _, channel := range dir.Channels {
+		if channel.Name == name {
+			return out.json(channel)
+		}
+	}
+	return &refusalError{line: commonRefusals["channel_not_found"]}
+}
+
 var channelsUsage = map[string]string{
 	"list":   "conch channels list [--server <url>] [--json] [--all] [--preview-as <member>]",
 	"join":   "conch channels join [--server <url>] [--json] <channel>",
 	"leave":  "conch channels leave [--server <url>] [--json] <channel>",
 	"create": "conch channels create [--server <url>] [--json] [--private] <name>",
-	"topic":  "conch channels topic [--server <url>] [--json] [--clear] <channel> [<text>]",
+	"topic":  "conch channels topic [--server <url>] [--json] [--clear] <channel> [<text>]   (put -- before a <text> that starts with -)",
 }
 
 func channelsArgName(verb string) string {

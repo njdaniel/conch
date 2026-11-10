@@ -220,6 +220,9 @@ func TestChannelsTopic(t *testing.T) {
 		{name: "literal clear after end of options", args: []string{"channels", "topic", "--", "ops", "--clear"}, write: true, wantTopic: "--clear", wantBody: `{"topic":"--clear"}`, wantOut: "channel ops topic: --clear\n", wantRequests: 2},
 		{name: "literal single dash text after end of options", args: []string{"channels", "topic", "--", "ops", "-maintenance"}, write: true, wantTopic: "-maintenance", wantBody: `{"topic":"-maintenance"}`, wantOut: "channel ops topic: -maintenance\n", wantRequests: 2},
 		{name: "clear before end of options", args: []string{"channels", "topic", "--clear", "--", "ops"}, write: true, wantBody: `{"topic":""}`, wantOut: "channel ops topic cleared\n", wantRequests: 2},
+		{name: "blank text is refused", args: []string{"channels", "topic", "ops", "  \t"}, wantErr: "use --clear"},
+		{name: "empty text is refused", args: []string{"channels", "topic", "ops", ""}, wantErr: "use --clear"},
+		{name: "usage mentions end of options", args: []string{"channels", "topic", "ops", "a", "b"}, wantErr: "put -- before"},
 		{name: "clear with text is a usage error", args: []string{"channels", "topic", "ops", "text", "--clear"}, wantErr: "--clear cannot be used with text"},
 		{name: "json", args: []string{"channels", "topic", "ops", "new topic", "--json"}, write: true, wantTopic: "new topic", wantOut: "{\"channel\":{\"id\":42,\"name\":\"ops\",\"created_at\":\"0001-01-01T00:00:00Z\",\"topic\":\"new topic\"}}\n", wantRequests: 2},
 		{name: "invalid request refusal", args: []string{"channels", "topic", "ops", "bad"}, write: true, wantTopic: "bad", status: http.StatusBadRequest, code: "invalid_request", wantErr: "the server did not accept the request", wantRequests: 2},
@@ -351,6 +354,79 @@ func TestChannelsUsageErrors(t *testing.T) {
 			}
 			if requests.Load() != 0 {
 				t.Errorf("%d requests were sent, want none", requests.Load())
+			}
+		})
+	}
+}
+
+// A topic read with --json prints the element channels list --json carries
+// for that channel, byte for byte.
+// An agent is refused the directory; the --json read says what `channels
+// list` says, not that it may not set the topic.
+func TestChannelsTopicJSONRefusal(t *testing.T) {
+	isolateConfig(t)
+	t.Setenv("CONCH_TOKEN", "tok")
+	fake := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		_ = json.NewEncoder(w).Encode(schema.Error{Code: "forbidden", Message: "agents cannot list the channel directory"})
+	}))
+	defer fake.Close()
+	_, _, err := runCLI(t, "", "channels", "topic", "ops", "--json", "--server", fake.URL)
+	if err == nil || !strings.Contains(err.Error(), communityOnly) || strings.Contains(err.Error(), "may set the topic") {
+		t.Errorf("error = %v, want the channels list refusal %q", err, communityOnly)
+	}
+}
+
+func TestChannelsTopicJSONMatchesListElement(t *testing.T) {
+	const document = `{"channels":[` +
+		`{"id":41,"name":"general","created_at":"2026-11-06T00:00:00Z","visibility":"public","joined":true},` +
+		`{"id":42,"name":"ops","created_at":"2026-11-07T00:00:00Z","visibility":"private","joined":false,"members":3,"managers":[{"id":7,"name":"nick"}],"topic":"Incidents"}]}`
+	tests := []struct {
+		channel string
+		wantErr string
+	}{
+		{channel: "ops"},
+		{channel: "general"},
+		{channel: "nowhere", wantErr: "no such channel, or you cannot see it"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.channel, func(t *testing.T) {
+			isolateConfig(t)
+			t.Setenv("CONCH_TOKEN", "tok")
+			fake := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != "/v1/directory/channels" {
+					t.Errorf("unexpected request: %s", r.URL.Path)
+				}
+				_, _ = w.Write([]byte(document))
+			}))
+			defer fake.Close()
+			listOut, _, err := runCLI(t, "", "channels", "list", "--json", "--server", fake.URL)
+			if err != nil {
+				t.Fatalf("list: %v", err)
+			}
+			var list schema.ChannelDirectoryResponseV1
+			if err := json.Unmarshal([]byte(listOut), &list); err != nil {
+				t.Fatalf("decode list: %v", err)
+			}
+			topicOut, _, err := runCLI(t, "", "channels", "topic", tt.channel, "--json", "--server", fake.URL)
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("error = %v, want %q", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("topic: %v", err)
+			}
+			var want string
+			for _, c := range list.Channels {
+				if c.Name == tt.channel {
+					b, _ := json.Marshal(c)
+					want = string(b) + "\n"
+				}
+			}
+			if topicOut != want {
+				t.Errorf("topic --json = %q, want the list element %q", topicOut, want)
 			}
 		})
 	}
