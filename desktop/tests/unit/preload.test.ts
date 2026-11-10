@@ -1,9 +1,9 @@
 import { describe, expect, it, vi } from 'vitest';
 
-import type { ConchDesktopBridge, DesktopVoiceBridge, NativeVoiceView } from '../../../web/src/platform/desktop/bridge.ts';
+import type { CompanionEvent, ConchDesktopBridge, DesktopCompanionBridge, DesktopSettingsBridge, DesktopVoiceBridge, NativeVoiceView } from '../../../web/src/platform/desktop/bridge.ts';
 import type { FeedHandlers } from '../../../web/src/platform/desktop/bridge.ts';
 import { createBridge, type Invoke } from '../../preload/bridge.ts';
-import { BRIDGE_FUNCTIONS, PROFILE_FUNCTIONS, VOICE_FUNCTIONS, FEED_EVENTS, VOICE_EVENTS, INVOKED_FUNCTIONS } from '../../shared/bridge-names.ts';
+import { BRIDGE_FUNCTIONS, COMPANION_EVENTS, COMPANION_FUNCTIONS, PROFILE_FUNCTIONS, VOICE_FUNCTIONS, SETTINGS_FUNCTIONS, FEED_EVENTS, VOICE_EVENTS, INVOKED_FUNCTIONS } from '../../shared/bridge-names.ts';
 
 const { exposeInMainWorld, invoke, on } = vi.hoisted(() => ({ exposeInMainWorld: vi.fn(), invoke: vi.fn(), on: vi.fn() }));
 vi.mock('electron', () => ({ contextBridge: { exposeInMainWorld }, ipcRenderer: { invoke, on } }));
@@ -12,7 +12,7 @@ const noListen = (): void => undefined;
 
 // Checked by the compiler against the interface: a function added to the
 // bridge and not listed here, or listed and not declared, fails tsc.
-const named: Record<keyof ConchDesktopBridge | keyof DesktopVoiceBridge, true> = {
+const named: Record<keyof ConchDesktopBridge | keyof DesktopVoiceBridge | keyof DesktopSettingsBridge | keyof DesktopCompanionBridge, true> = {
   serverAddress: true,
   request: true,
   subscribe: true,
@@ -53,6 +53,11 @@ const named: Record<keyof ConchDesktopBridge | keyof DesktopVoiceBridge, true> =
   voiceKeyDevices: true,
   voiceSaveTalkBinding: true,
   onVoiceState: true,
+  settings: true,
+  settingsSet: true,
+  companionGrant: true,
+  companionEnd: true,
+  onCompanion: true,
 };
 
 describe('the preload', () => {
@@ -63,12 +68,12 @@ describe('the preload', () => {
     expect(name).toBe('conchDesktop');
     expect(Object.isFrozen(api)).toBe(true);
     expect(Reflect.ownKeys(api).sort()).toEqual(Object.keys(named).sort());
-    expect([...BRIDGE_FUNCTIONS, ...PROFILE_FUNCTIONS, ...VOICE_FUNCTIONS, 'onVoiceState'].sort()).toEqual(Object.keys(named).sort());
+    expect([...BRIDGE_FUNCTIONS, ...PROFILE_FUNCTIONS, ...VOICE_FUNCTIONS, ...SETTINGS_FUNCTIONS, 'onVoiceState', ...COMPANION_FUNCTIONS, 'onCompanion'].sort()).toEqual(Object.keys(named).sort());
     for (const key of Reflect.ownKeys(api)) expect(typeof api[key as string], String(key)).toBe('function');
     for (const forbidden of ['ipcRenderer', 'invoke', 'send', 'on', 'sendSync', 'electron', 'require', 'process']) expect(forbidden in api).toBe(false);
-    // It listens on the one feed channel, and passes on the message, not the
-    // event.
-    expect((on.mock.calls as unknown[][]).map((call) => call[0])).toEqual([FEED_EVENTS, VOICE_EVENTS]);
+    // It listens on the feed, voice and companion channels, and passes on the
+    // message, not the event.
+    expect((on.mock.calls as unknown[][]).map((call) => call[0])).toEqual([FEED_EVENTS, VOICE_EVENTS, COMPANION_EVENTS]);
     // No exposed or invoked name says press, release, transmit, gate or ptt.
     for (const name of [...Reflect.ownKeys(api).map(String), ...INVOKED_FUNCTIONS]) expect(name).not.toMatch(/press|release|transmit|gate|ptt/i);
   });
@@ -82,7 +87,9 @@ describe('the preload', () => {
     expect(invoke).toHaveBeenLastCalledWith('conch:signInWithPassword', { name: 'a', password: 'b' });
     await bridge.replaceCredential({ operation: 'changePassword', body: { current: 'a', password: 'b' } });
     expect(invoke).toHaveBeenLastCalledWith('conch:replaceCredential', { operation: 'changePassword', body: { current: 'a', password: 'b' } });
-    expect(INVOKED_FUNCTIONS).toHaveLength(41);
+    await bridge.settingsSet({ launchAtLogin: true });
+    expect(invoke).toHaveBeenLastCalledWith('conch:settingsSet', { launchAtLogin: true });
+    expect(INVOKED_FUNCTIONS).toHaveLength(45);
   });
 
   it('rejects with a bare "refused" when main refuses, or answers anything but an envelope', async () => {
@@ -102,6 +109,7 @@ function wired(answer: (channel: string, args: unknown[]) => unknown = () => tru
   const calls: [string, unknown[]][] = [];
   let deliver: (message: unknown) => void = () => undefined;
   let deliverVoice: (message: unknown) => void = () => undefined;
+  let deliverCompanion: (message: unknown) => void = () => undefined;
   const bridge = createBridge(
     (channel, ...args) => {
       calls.push([channel, args]);
@@ -113,6 +121,9 @@ function wired(answer: (channel: string, args: unknown[]) => unknown = () => tru
     (callback) => {
       deliverVoice = callback;
     },
+    (callback) => {
+      deliverCompanion = callback;
+    },
   );
   const send = (event: unknown): void => {
     deliver(event);
@@ -120,7 +131,10 @@ function wired(answer: (channel: string, args: unknown[]) => unknown = () => tru
   const sendVoice = (message: unknown): void => {
     deliverVoice(message);
   };
-  return { bridge, calls, send, sendVoice };
+  const sendCompanion = (message: unknown): void => {
+    deliverCompanion(message);
+  };
+  return { bridge, calls, send, sendVoice, sendCompanion };
 }
 
 function handlers(): FeedHandlers & { seen: string[] } {
@@ -301,5 +315,63 @@ describe('the preload’s voice family', () => {
     sendVoice(view);
     expect(seen).toEqual([view]);
     expect(await caught).toEqual(new Error('listener'));
+  });
+});
+
+describe('the preload’s companion (issue #1579)', () => {
+  it('sends the grant request and the end on their own channels, with the argument given', async () => {
+    const { bridge, calls } = wired((channel) => (channel === 'conch:companionEnd' ? true : { ok: false, error: 'not-in-voice' }));
+    await expect(bridge.companionGrant({ channel: 'general' })).resolves.toEqual({ ok: false, error: 'not-in-voice' });
+    await expect(bridge.companionEnd()).resolves.toBe(true);
+    expect(calls).toEqual([
+      ['conch:companionGrant', [{ channel: 'general' }]],
+      ['conch:companionEnd', []],
+    ]);
+  });
+
+  it('rejects with a bare "refused" when main refuses a companion call (a subframe, another window, a stale document, no gesture, extra keys)', async () => {
+    const bridge = createBridge(() => Promise.resolve({ ok: false, kind: 'refused' }), noListen, noListen, noListen);
+    await expect(bridge.companionGrant({ channel: 'general' })).rejects.toThrow(/^refused$/);
+    await expect(bridge.companionEnd()).rejects.toThrow(/^refused$/);
+  });
+
+  it('hands each end to each listener, and the event alone', () => {
+    const { bridge, sendCompanion } = wired();
+    const a: CompanionEvent[] = [];
+    const b: CompanionEvent[] = [];
+    bridge.onCompanion((e) => a.push(e));
+    const stopB = bridge.onCompanion((e) => b.push(e));
+    const leave: CompanionEvent = { type: 'end', reason: 'leave' };
+    const renewal: CompanionEvent = { type: 'end', reason: 'renewal' };
+    sendCompanion(leave);
+    stopB();
+    sendCompanion(renewal);
+    expect(a).toEqual([leave, renewal]);
+    expect(b).toEqual([leave]);
+  });
+
+  it('drops a message that is not exactly a CompanionEvent', () => {
+    const { bridge, sendCompanion } = wired();
+    const seen: unknown[] = [];
+    bridge.onCompanion((e) => seen.push(e));
+    for (const odd of [
+      null, 'end', 5, [], {}, { type: 'end' }, { type: 'start', reason: 'leave' }, { type: 'end', reason: 'bored' }, { type: 'end', reason: 5 },
+      { type: 'end', reason: 'toString' }, { type: 'end', reason: 'leave', token: 'secret' }, { type: 'end', reason: 'leave', livekitUrl: 'wss://x' },
+      [{ type: 'end', reason: 'leave' }],
+    ]) sendCompanion(odd);
+    expect(seen).toEqual([]);
+  });
+
+  it('keeps delivering after a listener throws, and the error still reaches the console', async () => {
+    const { bridge, sendCompanion } = wired();
+    const seen: CompanionEvent[] = [];
+    bridge.onCompanion(() => {
+      throw new Error('companion listener');
+    });
+    bridge.onCompanion((e) => seen.push(e));
+    const caught = new Promise<unknown>((resolve) => process.once('uncaughtException', resolve));
+    sendCompanion({ type: 'end', reason: 'crash' });
+    expect(seen).toEqual([{ type: 'end', reason: 'crash' }]);
+    expect(await caught).toEqual(new Error('companion listener'));
   });
 });

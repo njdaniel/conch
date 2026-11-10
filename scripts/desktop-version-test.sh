@@ -32,10 +32,10 @@ expect app v0.1.0-alpha.18 0.1.0-alpha.18
 expect app v1.2.3 1.2.3
 expect deb v0.1.0-alpha.18 0.1.0~alpha.18
 expect deb v1.2.3 1.2.3
-expect deb v1.0.0-rc-1.x-y 1.0.0~rc.1.x.y
+expect deb v1.0.0-rc.1.x 1.0.0~rc.1.x
 
 # Malformed tags: failure, and exactly one line.
-for bad in 0.1.0 v1 v1.2 v1.2.3.4 v01.2.3 v1.2.3- v1.2.3-a..b v1.2.3+build v1.2.3-a_b 'v1.2.3 ' latest ''; do
+for bad in 0.1.0 v1 v1.2 v1.2.3.4 v01.2.3 v1.2.3- v1.2.3-a..b v1.2.3+build v1.2.3-a_b v1.0.0-rc-1 'v1.2.3--' 'v1.2.3 ' latest ''; do
     for cmd in app deb; do
         run "$cmd" "$bad"
         [ "$rc" != 0 ] || fail "$cmd accepted '$bad'"

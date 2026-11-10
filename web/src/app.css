@@ -4929,6 +4929,25 @@ button.link {
   margin-left: auto;
 }
 
+/* Two buttons in the strip: only the first takes the free space. */
+.desktop-bar .desktop-bar-settings + button {
+  margin-left: 0;
+}
+
+.desktop-settings {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+  padding: var(--s3);
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+}
+
+.desktop-settings-note {
+  color: var(--muted);
+  font-size: var(--small);
+}
+
 .desktop-servers {
   display: flex;
   flex-direction: column;
