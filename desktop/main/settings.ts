@@ -172,6 +172,9 @@ export class SettingsService {
   // foreign one) and stores the setting off, so the next view shows it off
   // beside the unsafe-location reason. If the entry cannot be removed the
   // setting stays on: reading off while the file stays would be false.
+  // The entry is removed from an unsafe location even when the stored setting
+  // reads off (#1642's review): settings.json may have been unreadable, so the
+  // default off says nothing about whether an entry of ours is still there.
   rejudge(): Promise<void> {
     const run = this.#queue.then(() => this.#rejudge());
     this.#queue = run.catch(() => undefined);
@@ -179,8 +182,13 @@ export class SettingsService {
   }
 
   async #rejudge(): Promise<void> {
-    if (!this.#current.launchAtLogin) return;
     if ((await this.#deps.autostart.availability()) !== 'unsafe-location') return;
+    if (!this.#current.launchAtLogin) {
+      // Nothing to store; only an entry of ours that outlived the setting.
+      const stale = await this.#deps.autostart.disable();
+      if (!stale.ok && stale.reason !== 'foreign-file') this.#deps.log('conch-desktop: a stale autostart entry could not be removed');
+      return;
+    }
     this.#deps.log('conch-desktop: launch at login is on but the app no longer sits where only you or the system can change it; the autostart entry is removed and the setting turned off');
     const done = await this.#deps.autostart.disable();
     // A foreign file is left alone and there is nothing of ours to remove.

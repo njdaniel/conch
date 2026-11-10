@@ -211,6 +211,22 @@ describe('start-up re-judges an existing launch-at-login entry', () => {
     expect(off.current.launchAtLogin).toBe(false);
   });
 
+  it('removes its own entry from a loosened install even when the setting reads off', async () => {
+    // settings.json unreadable: load() falls back to the default (off), but
+    // the entry written earlier is still there.
+    const t = setup();
+    writeFileSync(t.file, entryText(t.exec) ?? '');
+    const files = memory('{not json');
+    const service = new SettingsService({ files, autostart: new Autostart({ packaged: true, execPath: t.exec, trustedAbove: t.top, env: { XDG_CONFIG_HOME: join(t.file, '..', '..') }, home: '/nonexistent-home', log: () => undefined }), trayWorking: () => false, log: (l) => t.logs.push(l) });
+    await service.load();
+    expect(service.current.launchAtLogin).toBe(false);
+    chmodSync(join(t.top, 'app'), 0o777);
+    await service.rejudge();
+    expect(existsSync(t.file)).toBe(false);
+    expect(service.current.launchAtLogin).toBe(false);
+    expect(files.text).toBe('{not json');
+  });
+
   it('keeps the setting on when its entry cannot be removed', async () => {
     const files = memory('{"launchAtLogin":true}');
     const logs: string[] = [];
