@@ -242,15 +242,19 @@ const toldByWhy: ReadonlySet<ShareEnd> = new Set<ShareEnd>(['left', 'lost', 'rot
 
 // shareNote is the one line the share control says about a share that did not
 // start or has ended, or null: a refused grant, a cause, a full room, the
-// reason the companion ended (why), or the share's own end in words. A closed
-// picker says nothing.
+// reason the companion ended (why, ahead of the rest of an idle share), the
+// desktop's inability to share (unavailable, which the connection sets only
+// after a Share), or the share's own end in words. A closed picker says
+// nothing.
 export function shareNote(share: ShareState, refusal: CompanionGrantError | null, why: string | null, unavailable: CompanionShareUnavailable | null = null): string | null {
   if (refusal !== null) return companionRefusals[refusal];
-  if (unavailable !== null) return shareUnavailableWords[unavailable];
   if (share.kind !== 'idle') return null;
+  // The companion's end words come first: a lock or a leave is news, and the
+  // note of a desktop that cannot share is only background to it.
+  if (why !== null && (share.ended === null || toldByWhy.has(share.ended) || share.cause !== undefined)) return why;
+  if (unavailable !== null) return shareUnavailableWords[unavailable];
   if (share.cause !== undefined) return shareCauseWords[share.cause];
   if (share.ended === 'full') return shareFullWords;
-  if (why !== null && (share.ended === null || toldByWhy.has(share.ended))) return why;
   if (share.ended === null || unsaid.has(share.ended) || toldByWhy.has(share.ended)) return null;
   if (share.ended === 'browser') return shareSourceClosedWords;
   if (share.ended === 'failed') return shareFailedWords;

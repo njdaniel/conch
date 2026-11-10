@@ -5,6 +5,7 @@ import type { VoicePresenceV2 } from '../schema/voice';
 import type { CameraClaimResult } from '../api';
 import type { Camera, CameraProfile, KeptCamera } from './camera';
 import { VoiceClient, chosenGone, companionDefaultQuality, companionEnds, companionLeftWatching, companionLost, companionRefusals, type CompanionEnv, earlierGone, levelEvery, meterEvery, outputMoved, outputRefused, reconnectLimit, reportWait, type CameraTrack, type Microphone, type ModeStore, type Output, type Phase, type Processing, type ProcessingStore, type Room, type RoomEvents, type ShareSink } from './connection';
+import { shareNote } from './native/words';
 import { qualityLaterNote, resumeLimit, type Captured, type KeptScreen, type ShareQuality } from './share';
 import { defaultTail } from './gate';
 import { FakeClock, settle } from './fakes';
@@ -95,6 +96,7 @@ class StubRoom implements Room {
   sinks: (ShareSink | null)[] = [];
   pickAudio = true;
   pickFails = false;
+  pickError: Error | null = null;
   // Issue #1581: made the desktop's screen companion before connecting, and
   // the order of what the room, conchd and main were asked (when set).
   companion = false;
@@ -118,7 +120,7 @@ class StubRoom implements Room {
   pickScreen = (): Promise<Captured> => {
     this.calls.push('pick');
     this.order?.push('pick');
-    return this.pickFails ? Promise.reject(new Error('picker closed')) : Promise.resolve({ audio: this.pickAudio });
+    return this.pickFails ? Promise.reject(this.pickError ?? new Error('picker closed')) : Promise.resolve({ audio: this.pickAudio });
   };
   qualities: ShareQuality[] = [];
   setShareQuality = (quality: ShareQuality): Promise<void> => {
@@ -3255,17 +3257,95 @@ describe('the screen companion', () => {
     expect(t.native.state.calls.filter((c) => c === 'arm')).toHaveLength(2);
   });
 
-  it('a desktop with no screen-cast portal opens no picker, says so, and lets the companion go when nothing is watched', async () => {
-    for (const shareUnavailable of ['no-portal', 'not-wayland'] as const) {
-      const t = companionSetup([{ ...grantOk, shareUnavailable }]);
-      t.client.startCompanionShare('general');
-      await settle();
-      await settle();
-      expect(t.rooms[0]?.calls).not.toContain('pick');
-      expect(t.shares).toEqual([]);
-      expect(t.client.snapshot()).toMatchObject({ companionShareUnavailable: shareUnavailable, share: { kind: 'idle' } });
-      expect(t.native.state.endCalls).toBe(1);
-    }
+  it.each(['no-portal', 'not-wayland'] as const)('a desktop with no screen-cast portal (%s) opens no picker, says so, and lets the companion go when nothing is watched', async (shareUnavailable) => {
+    const t = companionSetup([{ ...grantOk, shareUnavailable }]);
+    t.client.startCompanionShare('general');
+    await settle();
+    await settle();
+    expect(t.rooms[0]?.calls).not.toContain('pick');
+    expect(t.shares).toEqual([]);
+    expect(t.client.snapshot()).toMatchObject({ companionShareUnavailable: shareUnavailable, share: { kind: 'idle' } });
+    expect(t.native.state.endCalls).toBe(1);
+  });
+
+  it('a Watch alone on a desktop that cannot share says nothing of it, and the companion stays', async () => {
+    const t = companionSetup([{ ...grantOk, shareUnavailable: 'no-portal' }]);
+    t.client.watchCompanionStream('general', 9);
+    await settle();
+    expect(t.client.snapshot()).toMatchObject({ phase: 'connected', companion: true, companionShareUnavailable: null });
+    expect(t.native.state.endCalls).toBe(0);
+  });
+
+  it('a Share from a Watch-joined companion tries the pick, and says the words only when the pick is refused', async () => {
+    const t = companionSetup([{ ...grantOk, shareUnavailable: 'no-portal' }]);
+    t.client.watchCompanionStream('general', 9);
+    await settle();
+    const room = t.rooms[0];
+    if (room === undefined) throw new Error('no room');
+    room.pickFails = true;
+    room.pickError = Object.assign(new Error('refused'), { name: 'NotAllowedError' });
+    t.client.startCompanionShare('general');
+    await settle();
+    await settle();
+    expect(room.calls).toContain('pick');
+    expect(t.client.snapshot()).toMatchObject({ companionShareUnavailable: 'no-portal', share: { kind: 'idle', cause: 'denied' } });
+  });
+
+  it('a portal started since the Watch is seen: the pick goes ahead and no words are said', async () => {
+    const t = companionSetup([{ ...grantOk, shareUnavailable: 'no-portal' }]);
+    t.client.watchCompanionStream('general', 9);
+    await settle();
+    t.client.startCompanionShare('general');
+    await settle();
+    await settle();
+    expect(t.rooms[0]?.calls).toEqual(expect.arrayContaining(['pick', 'publish']));
+    expect(t.client.snapshot()).toMatchObject({ companionShareUnavailable: null, share: { kind: 'sharing' } });
+  });
+
+  it('a cancelled picker after a Watch says nothing of the portal', async () => {
+    const t = companionSetup([{ ...grantOk, shareUnavailable: 'no-portal' }]);
+    t.client.watchCompanionStream('general', 9);
+    await settle();
+    const room = t.rooms[0];
+    if (room === undefined) throw new Error('no room');
+    room.pickFails = true;
+    room.pickError = Object.assign(new Error('aborted'), { name: 'AbortError' });
+    t.client.startCompanionShare('general');
+    await settle();
+    await settle();
+    expect(t.client.snapshot().companionShareUnavailable).toBeNull();
+  });
+
+  it('a lock after the note was set is said in the companion\'s end words, which the share control puts first', async () => {
+    const t = companionSetup([{ ...grantOk, shareUnavailable: 'no-portal' }]);
+    t.client.watchCompanionStream('general', 9);
+    await settle();
+    const room = t.rooms[0];
+    if (room === undefined) throw new Error('no room');
+    room.pickFails = true;
+    room.pickError = Object.assign(new Error('refused'), { name: 'NotAllowedError' });
+    t.client.startCompanionShare('general');
+    await settle();
+    await settle();
+    expect(t.client.snapshot().companionShareUnavailable).toBe('no-portal');
+    t.native.end('lock');
+    await settle();
+    const s = t.client.snapshot();
+    expect(s.phase).toBe('stopped');
+    expect(s.why).toBe(companionEnds.lock);
+    expect(shareNote(s.share, s.companionRefusal, s.why, s.companionShareUnavailable)).toBe(companionEnds.lock);
+  });
+
+  it('leaving voice clears the note of a desktop that cannot share', async () => {
+    const t = companionSetup([{ ...grantOk, shareUnavailable: 'no-portal' }]);
+    t.client.startCompanionShare('general');
+    await settle();
+    await settle();
+    // The companion let go, the note stays to be read...
+    expect(t.client.snapshot()).toMatchObject({ phase: 'idle', companionShareUnavailable: 'no-portal' });
+    // ...until the person leaves voice.
+    await t.client.leave();
+    expect(t.client.snapshot().companionShareUnavailable).toBeNull();
   });
 
   it('a desktop that cannot share stays for a watch', async () => {
@@ -3274,7 +3354,6 @@ describe('the screen companion', () => {
     await settle();
     t.client.startShare();
     await settle();
-    expect(t.rooms[0]?.calls).not.toContain('pick');
     expect(t.native.state.endCalls).toBe(0);
     expect(t.client.snapshot()).toMatchObject({ phase: 'connected', companion: true });
   });

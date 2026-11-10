@@ -133,8 +133,12 @@ export type ShareEnd =
 // What more is known of a share that did not start, for a client that says it
 // in its own words (the desktop's, issue #1582). It never changes `ended`, so
 // the browser's words are the same with or without it.
-//   denied: the desktop's main refused the capture (no allowance, no grant),
-//     as opposed to the person cancelling the picker, which is silent. A
+//   denied: the pick failed in a way the person should hear of. In the
+//     browser that is NotAllowedError, the picker closed or refused, which it
+//     says (as it always has); on the desktop companion it is any failure but
+//     the person cancelling the picker (AbortError, silent): main refusing
+//     (no allowance, no grant), the PipeWire stream failing, a capture that
+//     could not be constrained. A
 //     desktop with no screen-cast portal is said before the pick, from the
 //     grant (VoiceState.companionShareUnavailable), never from a failed pick.
 export type ShareCause = 'denied';
@@ -224,11 +228,16 @@ export function refusalEnd(r: Refusal): ShareEnd {
   return 'failed';
 }
 
-// pickCause is the more that a failed pick says, from the shapes the desktop's
-// picker gives getDisplayMedia: NotAllowedError is main refusing (no
-// allowance, no grant), which the person should hear of; AbortError is the
-// picker cancelled, which says nothing. Anything else says nothing more.
-export function pickCause(err: unknown): ShareCause | undefined {
+// pickCause is the more that a failed pick says, from the shapes getDisplayMedia
+// gives. In the browser, NotAllowedError is the picker closed or refused (or
+// main refusing, on the desktop), which is said; AbortError and anything else
+// say nothing more. On the desktop companion (companion), only AbortError, the
+// picker cancelled, is silent: NotAllowedError (main refusing: no allowance,
+// no grant), NotReadableError (the PipeWire stream failed), LiveKit's
+// DeviceUnsupportedError, a failure to constrain the capture, or a rejection
+// that is no Error at all, are all a screen that could not be captured.
+export function pickCause(err: unknown, companion = false): ShareCause | undefined {
+  if (companion) return err instanceof Error && err.name === 'AbortError' ? undefined : 'denied';
   if (!(err instanceof Error)) return undefined;
   return err.name === 'NotAllowedError' ? 'denied' : undefined;
 }
@@ -351,7 +360,7 @@ export class ScreenShare {
       // Closed without choosing, or refused by the browser: the claim goes.
       this.set({ kind: 'stopping' });
       await this.releaseHeld(at());
-      if (mine === this.attempt) this.set({ kind: 'idle', ended: 'cancelled', ...causeOf(pickCause(err)) });
+      if (mine === this.attempt) this.set({ kind: 'idle', ended: 'cancelled', ...causeOf(pickCause(err, this.companion)) });
       return;
     }
     if (mine !== this.attempt) {

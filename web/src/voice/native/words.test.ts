@@ -167,6 +167,15 @@ describe('share words', () => {
     expect(shareNote(idleShare(null), 'elsewhere', null, k)).toBe(companionRefusals.elsewhere);
   });
 
+  it('says the companion\'s end words ahead of the unavailable note', () => {
+    for (const ended of ['left', 'lost', 'rotated'] as const) {
+      expect(shareNote(idleShare(ended), null, 'locked', 'no-portal')).toBe('locked');
+    }
+    expect(shareNote(idleShare(null), null, 'locked', 'not-wayland')).toBe('locked');
+    // With nothing to say of an end, the note is still said.
+    expect(shareNote(idleShare('cancelled'), null, null, 'no-portal')).toBe(shareUnavailableWords['no-portal']);
+  });
+
   it('says nothing about a share that is not idle', () => {
     expect(shareNote({ kind: 'sharing', audio: false }, null, 'x')).toBeNull();
   });

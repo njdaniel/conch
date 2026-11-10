@@ -1263,6 +1263,28 @@ describe('the cause of a share that did not start (issue #1582)', () => {
     expect(t.share.current).toEqual(expected);
   });
 
+  // On the desktop companion every failure but the cancelled picker is a
+  // screen that could not be captured; the browser's are as above.
+  it.each([
+    ['NotAllowedError', 'denied'],
+    ['NotReadableError', 'denied'],
+    ['DeviceUnsupportedError', 'denied'],
+    ['NotFoundError', 'denied'],
+    ['AbortError', undefined],
+  ] as const)('on the companion, a pick that failed as %s has cause %s', async (name, cause) => {
+    const t = setup();
+    t.share.setCompanion(true);
+    const failing: ShareRoom = { ...t.stub, pickScreen: () => Promise.reject(Object.assign(new Error('x'), { name })) };
+    await t.share.start('general', failing);
+    expect(t.share.current).toEqual(cause === undefined ? { kind: 'idle', ended: 'cancelled' } : { kind: 'idle', ended: 'cancelled', cause });
+    expect(pickCause(Object.assign(new Error('x'), { name }), true)).toBe(cause);
+  });
+
+  it('on the companion, a rejection that is no Error is a screen that could not be captured; in the browser it says nothing', () => {
+    expect(pickCause('x', true)).toBe('denied');
+    expect(pickCause('x')).toBeUndefined();
+  });
+
   it('no other pick failure carries a cause, and a non-error carries none', () => {
     expect(pickCause(Object.assign(new Error('Aborted'), { name: 'AbortError' }))).toBeUndefined();
     expect(pickCause(Object.assign(new Error('x'), { name: 'NotFoundError' }))).toBeUndefined();
