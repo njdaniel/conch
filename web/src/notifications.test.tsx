@@ -278,6 +278,54 @@ describe('browser permission and cleanup', () => {
     expect(FakeNotification.all[0]?.closed).toHaveBeenCalledTimes(1);
   });
 
+  // Issue #1620: a native click resolves the channel by id at click time.
+  it.each([
+    ['no rename', [{ id: 7, name: 'general', created_at: at }], 'general'],
+    ['renamed', [{ id: 7, name: 'renamed', created_at: at }], 'renamed'],
+    ['removed', [], null],
+    ['access lost', [{ id: 8, name: 'other', created_at: at }], null],
+  ])('opens the current name on a native click: %s', async (_case, after, want) => {
+    visibility('hidden');
+    const onOpen = vi.fn();
+    const { result, rerender } = renderHook((p: Props) => useNotifications(p), { initialProps: { ...props(), onOpen } });
+    act(() => {
+      result.current.setPolicy('all');
+    });
+    await act(async () => {
+      await result.current.enableNative();
+    });
+    rerender({ ...props(), onOpen, event: message(1) });
+    expect(FakeNotification.all).toHaveLength(1);
+    rerender({ ...props(), onOpen, channels: after });
+    const native = FakeNotification.all[0] as unknown as Notification;
+    act(() => {
+      native.onclick?.call(native, new MouseEvent('click'));
+    });
+    if (want === null) expect(onOpen).not.toHaveBeenCalled();
+    else expect(onOpen).toHaveBeenCalledWith(want);
+    expect(result.current.alerts).toHaveLength(0);
+    expect(FakeNotification.all[0]?.closed).toHaveBeenCalled();
+  });
+
+  it('opens nothing when a native notification is clicked after its access was withdrawn', async () => {
+    visibility('hidden');
+    const onOpen = vi.fn();
+    const { result, rerender } = renderHook((p: Props) => useNotifications(p), { initialProps: { ...props(), onOpen } });
+    act(() => {
+      result.current.setPolicy('all');
+    });
+    await act(async () => {
+      await result.current.enableNative();
+    });
+    rerender({ ...props(), onOpen, event: message(1) });
+    rerender({ ...props(), onOpen, readStateEvent: { schema: 'conch.read_state.v1', channel_id: 7, principal_id: 2, last_read_id: 0, unread: 0 } as unknown as Props['readStateEvent'] });
+    const native = FakeNotification.all[0] as unknown as Notification;
+    act(() => {
+      native.onclick?.call(native, new MouseEvent('click'));
+    });
+    expect(onOpen).not.toHaveBeenCalled();
+  });
+
   it('keeps the in-app fallback when permission is denied', async () => {
     visibility('hidden');
     FakeNotification.answer = 'denied';
