@@ -1027,6 +1027,9 @@ func TestChatTitleFitKeepsMarkers(t *testing.T) {
 		{name: "topic truncated, net and stale kept", room: 36, net: true, stale: true, topic: long, want: "# ops · Incident… › net blue [stale]"},
 		{name: "stale kept", room: 24, stale: true, topic: long, want: "# ops · Inciden… [stale]"},
 		{name: "no room for a topic drops it", room: 24, net: true, stale: true, topic: long, want: "# ops › net blue [stale]"},
+		{name: "narrow pane keeps stale, drops net", room: 16, net: true, stale: true, topic: long, want: "# ops [stale]"},
+		{name: "wide first character leaves no topic", room: 18, stale: true, topic: "😀😀😀😀", want: "# ops [stale]"},
+		{name: "wide topic truncated", room: 21, stale: true, topic: "😀😀😀😀", want: "# ops · 😀😀… [stale]"},
 		{name: "no topic", room: 40, net: true, stale: true, want: "# ops › net blue [stale]"},
 	}
 	for _, tt := range tests {
@@ -1044,6 +1047,26 @@ func TestChatTitleFitKeepsMarkers(t *testing.T) {
 			}
 			if tt.room > 0 && cellWidth(got) > tt.room {
 				t.Errorf("title is %d cells, want at most %d", cellWidth(got), tt.room)
+			}
+		})
+	}
+}
+
+func TestChatTitleRoom(t *testing.T) {
+	m := loadChannelsForTest(NewModel(context.Background(), stubAPI{}, 7, nil), []schema.ChannelV0{{ID: 1, Name: "ops"}})
+	tests := []struct {
+		name  string
+		focus paneFocus
+		want  int
+	}{
+		{name: "unfocused", focus: focusChannels, want: 24 - 6},
+		{name: "focused loses the mark", focus: focusMessages, want: 24 - 6 - cellWidth(focusMark)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m.focus = tt.focus
+			if got := m.chatTitleRoom(24); got != tt.want {
+				t.Errorf("chatTitleRoom = %d, want %d", got, tt.want)
 			}
 		})
 	}

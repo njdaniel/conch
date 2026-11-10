@@ -130,13 +130,19 @@ func (m Model) chatTitleFit(room int) string {
 		return "MESSAGES"
 	}
 	head := "# " + channel
-	var tail string
+	var net, stale string
 	if m.target != nil && m.target.channel == m.current() {
-		tail += " › net " + sanitize(m.target.name)
+		net = " › net " + sanitize(m.target.name)
 	}
 	if m.mod.stale[m.current()] {
-		tail += " [stale]"
+		stale = " [stale]"
 	}
+	// [stale] is shown nowhere else; the net target is also in the compose
+	// prompt, so it goes first when even the markers do not fit.
+	if room > 0 && cellWidth(head+net+stale) > room {
+		net = ""
+	}
+	tail := net + stale
 	topic := sanitize(m.channelTopics[m.current()])
 	if topic == "" {
 		return head + tail
@@ -148,6 +154,9 @@ func (m Model) chatTitleFit(room int) string {
 			return head + tail
 		}
 		topic = fitCells(topic, left)
+		if topic == "…" { // nothing of it fits (a wide first character)
+			return head + tail
+		}
 	}
 	return head + sep + topic + tail
 }
