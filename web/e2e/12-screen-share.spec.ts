@@ -251,8 +251,14 @@ test.describe('screen share with LiveKit', () => {
     // after an earlier page of the same member closed, and reads as that other
     // client; a test that needs the plain Watch only waits for it to clear.
     // (A real page is no longer refused for it: issue #1340.)
+    // The button is enabled only once the first presence snapshot is in, so
+    // the check below reads the roster and not the empty page before it
+    // (issue #1682: it passed vacuously, then presence arrived listing the
+    // earlier page and the click joined as the viewer).
+    const button = voiceRegion(p.page).getByRole('button', { name: how });
+    await expect(button).toBeEnabled({ timeout: 30_000 });
     if (how === 'Watch only') await expect(voiceRegion(p.page)).not.toContainText('You are in voice on another device', { timeout: 30_000 });
-    await voiceRegion(p.page).getByRole('button', { name: how }).click();
+    await button.click();
     await expect(voiceRegion(p.page)).toContainText(/Connected in #voice-room/, { timeout: 30_000 });
   }
 
