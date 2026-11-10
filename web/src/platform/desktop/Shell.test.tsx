@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { BridgeReply, CompatView, ConchDesktopBridge, DesktopInviteBridge, DesktopSettingsBridge, DesktopSettingsView, InviteCheck, ProfileAddResult, ProfilesView, ProfileView, SettingsResult } from './bridge';
 import { credentials } from './credentials';
 import { DesktopShell } from './Shell';
+import { SWAP_GUARD_MS } from './ui/InviteLink';
 import { serverOrigin, setServerOrigin } from './state';
 
 const ID_A = 'a'.repeat(32);
@@ -684,6 +685,76 @@ describe('opening an invite link (issue #1591)', () => {
     });
     expect(inviteCancel).toHaveBeenCalledExactlyOnceWith(HANDLE);
     expect(document.body.textContent).not.toContain('CANARY');
+  });
+
+  // Security review S1: a newer link replaces the choice in place. The page
+  // holds the buttons still for the interval and says why; main refuses the
+  // handle in the same interval, whatever the page does.
+  it('holds the choices still for a moment after a newer link replaces them, and works after', async () => {
+    const second = `invite-${'1'.repeat(32)}`;
+    let tell: () => void = () => undefined;
+    const inviteArrived = vi
+      .fn()
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce(checkFor())
+      .mockResolvedValueOnce(checkFor({ handle: second, profiles: [{ id: ID_A, label: 'Work', account: 'ada', active: false }] }))
+      .mockResolvedValue(null);
+    const inviteAccept = vi
+      .fn()
+      .mockResolvedValueOnce({ ok: false, refusal: 'just-arrived' } as const)
+      .mockResolvedValue({ ok: true, switched: true } as const);
+    install({
+      profiles: () => Promise.resolve(active),
+      inviteCheck: () => Promise.reject(new Error('unexpected')),
+      inviteArrived,
+      onInviteArrived: (listener) => {
+        tell = listener;
+        return () => undefined;
+      },
+      inviteCancel: () => Promise.resolve(true),
+      inviteAccept,
+    });
+    render(<DesktopShell>{child}</DesktopShell>);
+    await screen.findByText('the client');
+    await waitFor(() => {
+      expect(inviteArrived).toHaveBeenCalledTimes(1);
+    });
+    tell();
+    const first = await screen.findByRole('group', { name: 'Open this invite' });
+    // A first arrival is not a swap: nothing is held on the page.
+    expect(within(first).queryByText('A new invite link arrived')).toBeNull();
+    expect((within(first).getByRole<HTMLButtonElement>('button', { name: 'Open with Work (signed in as ada)' })).disabled).toBe(false);
+    // From here only the timer is faked, so the waits above are real.
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    // No waitFor while the timers are faked: act settles the answer.
+    await act(async () => {
+      tell();
+      await Promise.resolve();
+    });
+    const group = screen.getByRole('group', { name: 'Open this invite' });
+    expect(within(group).getByText('A new invite link arrived')).toBeTruthy();
+    const choose = within(group).getByRole<HTMLButtonElement>('button', { name: 'Open with Work (signed in as ada)' });
+    const add = within(group).getByRole<HTMLButtonElement>('button', { name: 'Open as a new server entry' });
+    expect(choose.disabled).toBe(true);
+    expect(add.disabled).toBe(true);
+    expect((within(group).getByRole<HTMLButtonElement>('button', { name: 'Cancel' })).disabled).toBe(false);
+    fireEvent.click(choose);
+    expect(inviteAccept).not.toHaveBeenCalled();
+    act(() => {
+      vi.advanceTimersByTime(SWAP_GUARD_MS);
+    });
+    expect(choose.disabled).toBe(false);
+    expect(within(group).queryByText('A new invite link arrived')).toBeNull();
+    vi.useRealTimers();
+    // Main's own guard is the one that counts: when it refuses, the page says so and keeps the choice.
+    fireEvent.click(choose);
+    await screen.findByText('A new invite link just arrived. Check the server, then choose again.');
+    expect(screen.getByRole('group', { name: 'Open this invite' })).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Open with Work (signed in as ada)' }));
+    await waitFor(() => {
+      expect(inviteAccept).toHaveBeenLastCalledWith(second, { profile: ID_A });
+    });
+    expect(inviteAccept).toHaveBeenCalledTimes(2);
   });
 
   it('ignores a failed or empty ask for an arrived link', async () => {

@@ -515,7 +515,7 @@ export type InviteAccept =
       // force, and this page takes it now.
       readonly switched: boolean;
     }
-  | { readonly ok: false; readonly refusal: 'expired' | 'voice-started' | 'unknown-profile' | 'unsupported' | 'full' | 'unreachable' | 'certificate' | 'not-conch' };
+  | { readonly ok: false; readonly refusal: 'expired' | 'just-arrived' | 'voice-started' | 'unknown-profile' | 'unsupported' | 'full' | 'unreachable' | 'certificate' | 'not-conch' };
 
 export interface DesktopInviteBridge {
   inviteCheck(link: string): Promise<InviteCheck>;

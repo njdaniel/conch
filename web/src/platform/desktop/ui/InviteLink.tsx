@@ -18,6 +18,13 @@ import { inviteAcceptLines, inviteRefusalLines } from './text';
 
 type Checked = Extract<InviteCheck, { ok: true }>;
 
+// How long the choices stay disabled after a newer link replaces the one on
+// show (issue #1592, security review S1): a click aimed at the old server must
+// not land on the new one. Main enforces the same interval on the handle
+// itself (SWAP_GUARD_MS in desktop/main/invites.ts), so this is the words and
+// the disabled buttons, not the guard.
+export const SWAP_GUARD_MS = 1_000;
+
 interface Props {
   // A link that reached the app, already checked by main, handed down by the
   // strip that asks for it (./ProfileBar). Undefined: this page asks itself.
@@ -34,6 +41,9 @@ export function InviteLink({ clientMounted, arrival, onArrivalTaken }: Props) {
   const [checked, setChecked] = useState<Checked | null>(null);
   const [line, setLine] = useState('');
   const [busy, setBusy] = useState(false);
+  // True for SWAP_GUARD_MS after a different link replaced the one on show.
+  const [swapped, setSwapped] = useState(false);
+  const swapTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const field = useRef<HTMLInputElement>(null);
   const id = useId();
   const available = inviteBridge()?.inviteCheck !== undefined;
@@ -49,7 +59,28 @@ export function InviteLink({ clientMounted, arrival, onArrivalTaken }: Props) {
     if (old !== null && old !== next.handle && b?.inviteCancel !== undefined) void b.inviteCancel(old).catch(() => undefined);
     setLine('');
     setChecked(next);
+    if (swapTimer.current !== null) clearTimeout(swapTimer.current);
+    swapTimer.current = null;
+    if (old !== null && old !== next.handle) {
+      // A different link replaced the one on show: hold the choices still for
+      // the interval, so a click meant for the old one cannot act on this one.
+      setSwapped(true);
+      swapTimer.current = setTimeout(() => {
+        swapTimer.current = null;
+        setSwapped(false);
+      }, SWAP_GUARD_MS);
+    } else {
+      setSwapped(false);
+    }
   }
+
+  // No timer outlives the page.
+  useEffect(
+    () => () => {
+      if (swapTimer.current !== null) clearTimeout(swapTimer.current);
+    },
+    [],
+  );
 
   // Asking for itself: once at mount (a cold start's link waited for this
   // page) and again whenever main says one arrived.
@@ -114,6 +145,12 @@ export function InviteLink({ clientMounted, arrival, onArrivalTaken }: Props) {
     setLine('');
     try {
       const answer = await b.inviteAccept(checked.handle, target);
+      if (!answer.ok && answer.refusal === 'just-arrived') {
+        // Main did not spend the handle: the choice stays, and the person
+        // chooses again once they have read the server.
+        setLine(inviteAcceptLines['just-arrived']);
+        return;
+      }
       shown.current = null;
       setChecked(null);
       if (!answer.ok) {
@@ -141,6 +178,7 @@ export function InviteLink({ clientMounted, arrival, onArrivalTaken }: Props) {
     const handle = checked?.handle;
     shown.current = null;
     setChecked(null);
+    setSwapped(false);
     setLine('');
     if (b?.inviteCancel !== undefined && handle !== undefined) void b.inviteCancel(handle).catch(() => undefined);
   }
@@ -170,6 +208,7 @@ export function InviteLink({ clientMounted, arrival, onArrivalTaken }: Props) {
           <p>
             This invite is for <strong>{checked.origin}</strong>.
           </p>
+          {swapped ? <p role="status">A new invite link arrived</p> : null}
           {checked.voice ? <p role="status">Voice is running. Opening the invite on a different server leaves voice.</p> : null}
           {hidden > 0 ? <p>This server’s release is not supported by this app, so the invite cannot be opened there. Open it as a new server entry instead.</p> : null}
           {checked.profiles.length === 0 ? (
@@ -180,7 +219,7 @@ export function InviteLink({ clientMounted, arrival, onArrivalTaken }: Props) {
                 <li key={profile.id}>
                   <button
                     type="button"
-                    disabled={busy}
+                    disabled={busy || swapped}
                     onClick={() => {
                       void open({ profile: profile.id });
                     }}
@@ -193,7 +232,7 @@ export function InviteLink({ clientMounted, arrival, onArrivalTaken }: Props) {
           )}
           <button
             type="button"
-            disabled={busy}
+            disabled={busy || swapped}
             onClick={() => {
               void open({ add: true });
             }}

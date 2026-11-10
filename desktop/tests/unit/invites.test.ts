@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { deliverInvite, Invites, MAX_INVITE_LINK_LENGTH, parseInviteLink, parseSchemeLink, PENDING_MS, schemeLinkFrom, STAGED_MS, type InvitesDeps } from '../../main/invites.ts';
+import { deliverInvite, Invites, MAX_INVITE_LINK_LENGTH, parseInviteLink, parseSchemeLink, PENDING_MS, schemeLinkFrom, STAGED_MS, SWAP_GUARD_MS, type InvitesDeps } from '../../main/invites.ts';
 import { INVITE_ARRIVED, INVITE_EVENTS } from '../../shared/bridge-names.ts';
 import { TeardownHooks } from '../../main/profiles/hooks.ts';
 import { ProfilesService } from '../../main/profiles/service.ts';
@@ -576,8 +576,46 @@ describe('a scheme link reaching the router', () => {
     expect(s.invites.arrived()).toBeNull();
     // Nothing joined or switched yet; the click is accept, with its checks.
     expect(switched).not.toHaveBeenCalled();
+    // The click comes after the swap guard (SWAP_GUARD_MS).
+    s.clock.now += SWAP_GUARD_MS;
     expect(await s.invites.accept(answer.handle, { profile: work })).toMatchObject({ ok: true });
     expect(s.invites.take()).toBe(CODE);
+  });
+
+  // Security review S1: a newer link replaces the choice in place; a click
+  // aimed at the old one must not act on the new one.
+  it('refuses a click on a handle shown less than SWAP_GUARD_MS ago, keeps it, and accepts it after', async () => {
+    const s = await setup();
+    await s.add(ORIGIN_A);
+    const other = await s.add(ORIGIN_B);
+    const switched = vi.spyOn(s.profiles, 'switchTo');
+    s.invites.arrive([exe, scheme(ORIGIN_A, 'first')]);
+    const first = s.invites.arrived();
+    if (first === null || !first.ok) throw new Error('nothing arrived');
+    s.clock.now += 5_000;
+    // A second link swaps the choice under the pointer.
+    s.invites.arrive([exe, scheme(ORIGIN_B, 'second')]);
+    const second = s.invites.arrived();
+    if (second === null || !second.ok) throw new Error('nothing arrived');
+    s.clock.now += SWAP_GUARD_MS - 1;
+    expect(await s.invites.accept(second.handle, { add: true })).toEqual({ ok: false, refusal: 'just-arrived' });
+    expect(switched).not.toHaveBeenCalled();
+    expect(s.invites.take()).toBeNull();
+    // Refused, not spent: the same handle works once the interval has passed.
+    s.clock.now += 1;
+    expect(await s.invites.accept(second.handle, { profile: other })).toMatchObject({ ok: true });
+  });
+
+  it('applies the guard to a first arrival too, and not to a pasted link', async () => {
+    const s = await setup();
+    const work = await s.add(ORIGIN_A);
+    s.invites.arrive([exe, scheme(ORIGIN_A)]);
+    const arrived = s.invites.arrived();
+    if (arrived === null || !arrived.ok) throw new Error('nothing arrived');
+    expect(await s.invites.accept(arrived.handle, { profile: work })).toEqual({ ok: false, refusal: 'just-arrived' });
+    const pasted = s.invites.check(link(ORIGIN_A));
+    if (!pasted.ok) throw new Error('refused');
+    expect(await s.invites.accept(pasted.handle, { profile: work })).toMatchObject({ ok: true });
   });
 
   it('is held to the voice check at the click, as a pasted link is', async () => {
@@ -597,6 +635,7 @@ describe('a scheme link reaching the router', () => {
     const answer = invites.arrived();
     if (answer === null || !answer.ok) throw new Error('nothing arrived');
     voice = true;
+    s.clock.now += SWAP_GUARD_MS;
     expect(await invites.accept(answer.handle, { profile: work })).toEqual({ ok: false, refusal: 'voice-started' });
     expect(invites.take()).toBeNull();
   });

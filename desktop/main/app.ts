@@ -21,7 +21,7 @@ import { createProfileFiles } from './profiles/files.ts';
 import { TeardownHooks } from './profiles/hooks.ts';
 import { ProfilesService } from './profiles/service.ts';
 import { ProfileStore } from './profiles/store.ts';
-import { acquire, prepareRoot } from './instance.ts';
+import { acquire, keepNewest, prepareRoot } from './instance.ts';
 import { Client } from './api/client.ts';
 import { Session } from './api/session.ts';
 import { deliverVoice } from './voice/events.ts';
@@ -162,7 +162,7 @@ export async function start(): Promise<void> {
   //
   // A conch:// invite link (issue #1592) arrives in a launch's arguments. The
   // invite router does not exist yet at this point, so what a second launch
-  // sends before it does is kept (a few, newest last) and given to it first
+  // sends before it does is kept (the newest four, newest last) and given to it first
   // thing. The arguments are never logged.
   let argvSink: ((argv: readonly string[]) => void) | null = null;
   const earlyArgv: (readonly string[])[] = [];
@@ -178,7 +178,7 @@ export async function start(): Promise<void> {
     },
     (argv) => {
       if (argvSink !== null) argvSink(argv);
-      else if (earlyArgv.length < 4) earlyArgv.push(argv);
+      else keepNewest(earlyArgv, argv, 4);
     },
   );
   if (!first) return;

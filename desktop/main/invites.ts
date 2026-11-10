@@ -40,6 +40,12 @@ export const MAX_INVITE_CODE_LENGTH = 256;
 // is not kept for a person who walked away.
 export const PENDING_MS = 5 * 60_000;
 export const STAGED_MS = 2 * 60_000;
+// A handle made by arrived() (a conch: link) is not accepted for this long
+// after it was made (issue #1592, security review S1). A newer link replaces
+// the choice on the page in place, and a click aimed at the old server must
+// not act on the new one. The page is not trusted to hold this: accept
+// refuses with 'just-arrived', and does not spend the handle.
+export const SWAP_GUARD_MS = 1_000;
 const MAX_PENDING = 4;
 
 export type InviteParse = { readonly ok: true; readonly origin: string; readonly code: string } | { readonly ok: false; readonly refusal: InviteRefusal };
@@ -212,6 +218,9 @@ interface Pending {
   // Whether the person was told voice was running when they were shown this
   // link; accept compares it with voice now.
   readonly voice: boolean;
+  // When arrived() made this handle; null for a pasted link, which the person
+  // put on the page themselves.
+  readonly shownAt: number | null;
   readonly timer: ReturnType<typeof setTimeout>;
 }
 
@@ -252,7 +261,7 @@ export class Invites {
       this.#deps.log(`conch-desktop: refused an invite link (${parsed.refusal})`);
       return { ok: false, refusal: parsed.refusal };
     }
-    return this.#register(parsed);
+    return this.#register(parsed, false);
   }
 
   // arrive is a launch's arguments: a first launch's, or a second one's while
@@ -284,7 +293,7 @@ export class Invites {
     const kept = this.#arrival;
     this.#dropArrival();
     if (kept === null) return null;
-    return this.#register({ origin: kept.origin, code: kept.code });
+    return this.#register({ origin: kept.origin, code: kept.code }, true);
   }
 
   #dropArrival(): void {
@@ -294,7 +303,7 @@ export class Invites {
 
   // #register keeps a parsed link's code behind a new handle and answers the
   // choice shown to the person.
-  #register(parsed: { readonly origin: string; readonly code: string }): InviteCheck {
+  #register(parsed: { readonly origin: string; readonly code: string }, fromScheme: boolean): InviteCheck {
     const now = this.#deps.now();
     for (const [handle, p] of this.#pending) if (p.expiresAt <= now) this.#spend(handle);
     while (this.#pending.size >= MAX_PENDING) {
@@ -310,7 +319,7 @@ export class Invites {
       this.#pending.delete(handle);
     }, PENDING_MS);
     timer.unref();
-    this.#pending.set(handle, { origin: parsed.origin, code: parsed.code, expiresAt: now + PENDING_MS, voice, timer });
+    this.#pending.set(handle, { origin: parsed.origin, code: parsed.code, expiresAt: now + PENDING_MS, voice, shownAt: fromScheme ? now : null, timer });
     return {
       ok: true,
       handle,
@@ -345,6 +354,9 @@ export class Invites {
   // existing sequence, which leaves voice first.
   async accept(handle: string, target: InviteTarget): Promise<InviteAccept> {
     const pending = this.#pending.get(handle);
+    // A handle that just arrived is refused and kept: the person may have
+    // meant the choice it replaced, and chooses again after reading it.
+    if (pending !== undefined && pending.shownAt !== null && this.#deps.now() - pending.shownAt < SWAP_GUARD_MS) return { ok: false, refusal: 'just-arrived' };
     this.#spend(handle);
     this.#clearStaged();
     if (pending === undefined || pending.expiresAt <= this.#deps.now()) return { ok: false, refusal: 'expired' };

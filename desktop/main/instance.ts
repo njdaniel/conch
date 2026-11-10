@@ -20,6 +20,15 @@ export interface InstanceApp {
   exit(code: number): void;
 }
 
+// keepNewest adds argv to a queue that holds at most max entries, dropping the
+// oldest first, so the newest launches are the ones kept (issue #1592, S3). The
+// queue is oldest first, as the invite router takes it: a later link replaces
+// an earlier one.
+export function keepNewest<T>(queue: T[], item: T, max: number): void {
+  queue.push(item);
+  while (queue.length > max) queue.shift();
+}
+
 // acquire takes the lock. false: another instance has the root; this process
 // has asked it to focus and has exited, and must do nothing more.
 //

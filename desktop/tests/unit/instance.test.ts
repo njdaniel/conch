@@ -4,7 +4,7 @@ import { join } from 'node:path';
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { acquire, prepareRoot, type InstanceApp } from '../../main/instance.ts';
+import { acquire, keepNewest, prepareRoot, type InstanceApp } from '../../main/instance.ts';
 
 const dirs: string[] = [];
 afterEach(() => {
@@ -134,5 +134,15 @@ describe('the data root', () => {
     // A sticky world-writable parent, as /tmp is, is allowed.
     chmodSync(loose, 0o1777);
     expect(await prepareRoot(join(loose, 'data2'))).toEqual({ ok: true });
+  });
+});
+
+describe('the early second-launch queue (issue #1592, S3)', () => {
+  it('keeps the newest entries, oldest first, dropping the oldest', () => {
+    const queue: string[] = [];
+    for (const n of ['1', '2', '3']) keepNewest(queue, n, 4);
+    expect(queue).toEqual(['1', '2', '3']);
+    for (const n of ['4', '5', '6']) keepNewest(queue, n, 4);
+    expect(queue).toEqual(['3', '4', '5', '6']);
   });
 });
