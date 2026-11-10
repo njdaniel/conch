@@ -43,6 +43,7 @@ import { deliverUpdate, Installed, shouldAskAfterFailure } from './installed.ts'
 import { updateDialogButtons, updateDialogDetail, updateDialogMessage } from '../../web/src/platform/desktop/ui/text.ts';
 import { Ipc } from './ipc.ts';
 import { Links } from './links.ts';
+import { integrationsView } from './integrations.ts';
 import { Lifecycle } from './lifecycle.ts';
 import { LinuxLifecycle } from './lifecycle-linux.ts';
 import { executable, Portal, runFile } from './portal.ts';
@@ -601,6 +602,18 @@ export async function start(): Promise<void> {
     invites,
     notifications,
     settings,
+    integrations: {
+      view: () =>
+        integrationsView({
+          settings: () => settingsService.view(),
+          notificationSupported: () => notifications.supported(),
+          lockObservation: () => lifecycle.lockObservation,
+          lockTrying: () => watcher?.trying ?? false,
+          share: () => portal.last(),
+          storage: () => profiles.view().storage,
+          voice: () => voice.state(),
+        }),
+    },
     companion,
     now: Date.now,
     log,

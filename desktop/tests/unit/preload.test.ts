@@ -65,6 +65,7 @@ const named: Record<keyof ConchDesktopBridge | keyof DesktopVoiceBridge | keyof 
   onVoiceState: true,
   settings: true,
   settingsSet: true,
+  integrations: true,
   companionGrant: true,
   companionEnd: true,
   shareArm: true,
@@ -107,7 +108,7 @@ describe('the preload', () => {
     expect(invoke).toHaveBeenLastCalledWith('conch:notifyClose', { tag: 't' });
     await bridge.settingsSet({ launchAtLogin: true });
     expect(invoke).toHaveBeenLastCalledWith('conch:settingsSet', { launchAtLogin: true });
-    expect(INVOKED_FUNCTIONS).toHaveLength(55);
+    expect(INVOKED_FUNCTIONS).toHaveLength(56);
   });
 
   it('rejects with a bare "refused" when main refuses, or answers anything but an envelope', async () => {

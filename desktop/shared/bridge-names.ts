@@ -84,8 +84,9 @@ export type VoiceFunction = (typeof VOICE_FUNCTIONS)[number];
 export const INVITE_FUNCTIONS = ['inviteCheck', 'inviteAccept', 'inviteCancel', 'inviteTake', 'inviteArrived'] as const satisfies readonly (keyof DesktopInviteBridge)[];
 
 export type InviteFunction = (typeof INVITE_FUNCTIONS)[number];
-// The app's own settings (issue #1587): read them, change them.
-export const SETTINGS_FUNCTIONS = ['settings', 'settingsSet'] as const satisfies readonly (keyof DesktopSettingsBridge)[];
+// The app's own settings (issue #1587): read them, change them; and read what
+// works on this desktop (issue #1593).
+export const SETTINGS_FUNCTIONS = ['settings', 'settingsSet', 'integrations'] as const satisfies readonly (keyof DesktopSettingsBridge)[];
 
 export type SettingsFunction = (typeof SETTINGS_FUNCTIONS)[number];
 // The screen companion (issue #1579, D4-02 of #772): the invoked functions of

@@ -17,7 +17,7 @@
 // shape checks and returns an Envelope too.
 import type { IpcMain } from 'electron';
 
-import type { BridgeReply, BridgeRequest, FeedRequest, InviteTarget, NotifyRequest, SettingsChange, SignInOutcome, VoiceDeviceKey } from '../../web/src/platform/desktop/bridge.ts';
+import type { BridgeReply, BridgeRequest, FeedRequest, IntegrationsView, InviteTarget, NotifyRequest, SettingsChange, SignInOutcome, VoiceDeviceKey } from '../../web/src/platform/desktop/bridge.ts';
 import { VOICE_DEVICES_MAX_NAME_BYTES, voiceControlTalkMode, type VoiceControlTalkMode } from '../../web/src/schema/generated.ts';
 import { isPageSaveKey, keyCodeText, saveValueFits } from './voice/oneshot.ts';
 import { validChannel, validDeviceName } from './voice/protocol.ts';
@@ -81,6 +81,9 @@ export interface IpcDeps {
   readonly notifications: NotificationsApi;
   // The app's own settings (issue #1587).
   readonly settings: SettingsApi;
+  // What works on this desktop (issue #1593): read-only. Absent: main answers
+  // no rows at all (NO_INTEGRATIONS), and the page shows no list.
+  readonly integrations?: IntegrationsApi;
   // The screen companion (issue #1579). Absent: every grant is refused as
   // failed, and nothing is held to end.
   readonly companion?: CompanionApi;
@@ -103,7 +106,12 @@ export type VoiceApi = Pick<VoiceService, 'state' | 'join' | 'leave' | 'retry' |
 export type NotificationsApi = Pick<Notifications, 'show' | 'close' | 'supported'>;
 
 export type SettingsApi = Pick<SettingsService, 'view' | 'set'>;
+export interface IntegrationsApi {
+  view(): Promise<IntegrationsView>;
+}
 export type CompanionApi = Pick<Companion, 'grant' | 'stop' | 'end'>;
+
+const NO_INTEGRATIONS: IntegrationsApi = { view: () => Promise.resolve({ rows: [] }) };
 
 const NO_COMPANION: CompanionApi = {
   grant: () => Promise.resolve({ ok: false, error: 'failed' }),
@@ -204,6 +212,7 @@ interface Handlers {
   readonly invites: InvitesApi;
   readonly notifications: NotificationsApi;
   readonly settings: SettingsApi;
+  readonly integrations: IntegrationsApi;
   readonly companion: CompanionApi;
   readonly document: number;
   readonly arm: () => boolean;
@@ -652,6 +661,8 @@ export const SPECS: Readonly<Record<InvokedFunction, Spec>> = {
     run: ({ settings }, [change]) => settings.set(change as SettingsChange),
     gesture: true,
   },
+  // What works on this desktop (issue #1593): a read of held state.
+  integrations: { limit: 60, maxBytes: 0, parse: none, run: ({ integrations }) => integrations.view() },
   feedUnsubscribe: { limit: 600, maxBytes: 32, parse: feedId, run: ({ feeds, document }, [id]) => feeds.unsubscribe(document, id as number) },
   // The screen companion (issue #1579, D4-02 of #772). A grant is the
   // person's act alone, and only ever the companion's: never the bearer or
@@ -723,6 +734,7 @@ export class Ipc {
         invites: this.#deps.invites,
         notifications: this.#deps.notifications,
         settings: this.#deps.settings,
+        integrations: this.#deps.integrations ?? NO_INTEGRATIONS,
         companion: this.#deps.companion ?? NO_COMPANION,
         document: this.#deps.gate.generation,
         arm: () => this.#deps.share?.arm(owned) ?? false,

@@ -401,6 +401,7 @@ export function createBridge(
     // The app's own settings (issue #1587).
     settings: call('settings'),
     settingsSet: call('settingsSet'),
+    integrations: call('integrations'),
     onVoiceState,
     // The screen companion (issue #1579): its grant, its end, and main's word
     // that it has ended.
