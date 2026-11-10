@@ -255,7 +255,8 @@ browser test of their own. The browser voice specs use plain members.
 ## Tags
 
 A test carries tags in Playwright's `tag` option:
-`test('name', { tag: '@heavy' }, async ({ page }) => { ... })`. Three exist
+`test('name', { tag: '@heavy' }, async ({ page }) => { ... })`, or in the title
+(`test('@smoke name', ...)`, as `63-multi-user-smoke` does); `--grep` matches both. Four exist
 (`web/playwright.config.ts` repeats this):
 
 - `@heavy` runs only in the heavy lane. Use it for a test over the pull request
@@ -270,6 +271,8 @@ A test carries tags in Playwright's `tag` option:
   on; one that needs a fake microphone also carries `@voice`, which the `webkit`
   project leaves out. An engine that cannot do a thing is not given a skip: the
   test is not tagged, and the table below says why.
+- `@voice` marks a test that needs a fake microphone. Firefox gets one from its
+  prefs; the `webkit` project leaves `@voice` tests out (see the table below).
 
 Untagged tests stay in the pull request lane. `--grep` is an unanchored regular
 expression over titles and tags, so a tag that merely contains `@heavy` (say
@@ -315,26 +318,29 @@ nothing below says anything about Safari, macOS or iOS.
 
 | Capability | Firefox | WebKit |
 | --- | --- | --- |
-| The client loads, signs in and chats | Yes. `01-sign-in` and `02-messages` (all but the F15 tab-stop count) and the 63 messaging smoke pass | Not established: does not launch on the development host (below) |
+| The client loads, signs in and chats | Yes. `01-sign-in` and `02-messages` (all but the F15 tab-stop count) and the 63 messaging smoke pass | Yes, from CI (e2e-heavy run 42819479322, `e2e-cross (webkit)`): 11 of 12 passed, the 12th (F7) after a one-line filter, below |
 | Fake `getUserMedia` audio | Yes, with `firefoxUserPrefs` `media.navigator.streams.fake` and `media.navigator.permission.disabled`: the track is "Default Audio Device", no prompt. Fake video the same way (a camera test passes) | Not established. No launch flag or pref is known; `@voice` tests are left out |
 | Fake `getDisplayMedia`, headless | No. The call is never answered (waited 10 s after a click; the same with the `media.getdisplaymedia.*` prefs). No `@cross` test shares a screen. `12-screen-share` also expects tab sound, which the client says Firefox does not give ("No sound: this browser shares the picture only") | Not established |
-| WebRTC to the pinned LiveKit on 127.0.0.1 | Yes, with `media.peerconnection.ice.obfuscate_host_addresses` false (the counterpart of Chromium's `WebRtcHideLocalIpsWithMdns`): `63` voice smoke and `65-who-hears-whom` pass | Not established |
-| A synthetic Web Audio microphone (#1610) heard by the other pages | Yes: `65-who-hears-whom` passes, three Firefox pages each hearing exactly the other two tones, 20 dB above the floor. Not tried against a Chromium listener (the spec uses one engine for all three) | Not established |
+| WebRTC to the pinned LiveKit on 127.0.0.1 | Yes, with `media.peerconnection.ice.obfuscate_host_addresses` false (the counterpart of Chromium's `WebRtcHideLocalIpsWithMdns`): `63` voice smoke passes (13 of 14 local runs of the Firefox set were green; the one failure was this `63` voice test, cause not captured) | Not established |
+| A synthetic Web Audio microphone (#1610) heard by the other pages | Unsettled. `65-who-hears-whom` passed in all 14 local runs on Firefox (three pages, each hearing exactly the other two tones, 20 dB above the floor) but failed once in CI (run 42819479322, job `e2e-cross (firefox)`): every page read -120 dB at every tone for the whole first reading after alice's press, while the roster said she was transmitting, the tracks were live and the stream ids were the `PA_...\|TR_...` form (so attribution by stream id holds on Firefox). Not reproduced under full CPU load (3 runs). The cause is unknown, so 65 is not `@cross`. Not tried against a Chromium listener | Not established |
 
 How it was established: `npx playwright install firefox webkit` fetched both
-builds. Firefox launched and passed the `@cross` set. `getDisplayMedia` was
+builds. Firefox launched and passed the `@cross` set locally. `getDisplayMedia` was
 probed on a page of 127.0.0.1 with a click (it needs a user gesture) and never
-answered. WebKit failed to launch with "Host system is missing dependencies"
-(`libevent-2.1-7t64`, `libavif16`, `libwoff1`) on the development host, which has
-no root access here, so no WebKit row is claimed: the `webkit` project and its CI
-job exist, and the first `e2e-heavy` run on the branch is what establishes the
-column (CI installs with `--with-deps`). Where it fails, the failing test is
-untagged or the project dropped, with the error recorded here.
+answered. WebKit does not launch on the development host (missing `libevent-2.1-7t64`,
+`libavif16`, `libwoff1`; no root here), so its column comes from CI, where
+`--with-deps` installs them: sign-in, messages and the `63` messaging smoke run
+there. WebKit's fake microphone, fake display and WebRTC rows stay not
+established (`@voice` tests are left out of it). WebKit logs one console error on
+every page, "Viewport argument key "interactive-widget" not recognized and
+ignored" (the viewport meta in `index.html`); the F7 test drops that exact
+message for WebKit only and still fails on any other console error.
 
 Tests that pass on Firefox and are tagged `@cross`: the six of `01-sign-in`,
 the five of `02-messages` other than F15's tab-stop count (Firefox's log has one
 tab stop more than Chromium's: 8, not 7), and the two of `63-multi-user-smoke`
-(the second is also `@voice`), and `65-who-hears-whom` (`@voice`).
+(the second is also `@voice`): 13 tests on Firefox, 12 on WebKit.
+`65-who-hears-whom` is not in the set (see the table).
 
 
 ## Multi-user specs and helpers

@@ -123,7 +123,7 @@ test('@cross F12 the main script arrives gzipped and the raw HTML holds the load
 // Issue #1084 (browser UX audit 4, F7): a page with no credential has nothing
 // to ask whoami, so a signed-out load makes no request that is known to fail
 // and the console has no error.
-test('@cross F7 a signed-out load asks nothing of whoami and logs no console error', async ({ meet, world }) => {
+test('@cross F7 a signed-out load asks nothing of whoami and logs no console error', async ({ meet, world, browserName }) => {
   const { page } = await meet({ viewport: { width: 1440, height: 900 } });
   const errors = consoleErrors(page);
   const asked: string[] = [];
@@ -135,5 +135,11 @@ test('@cross F7 a signed-out load asks nothing of whoami and logs no console err
   // Let any late start-up request go out before looking.
   await page.waitForLoadState('networkidle');
   expect(asked, 'requests to whoami').toEqual([]);
-  expect(errors).toEqual([]);
+  // WebKit logs, as an error, that it does not know the viewport meta key
+  // "interactive-widget" (index.html; Chromium and Firefox honour or ignore it
+  // quietly). The message is the engine's, about its own feature set, and the
+  // page is right to set the key; it is dropped for WebKit only, by its exact
+  // text, so any other console error there still fails.
+  const engineNoise = (line: string) => browserName === 'webkit' && /^Viewport argument key "interactive-widget" not recognized and ignored\. \S+$/.test(line);
+  expect(errors.filter((line) => !engineNoise(line))).toEqual([]);
 });

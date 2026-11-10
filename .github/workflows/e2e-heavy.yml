@@ -133,6 +133,8 @@ jobs:
         if: always()
         run: docker ps -aq --filter "label=conch-web-voice=$VOICE_CHECK_RUN" | xargs -r docker rm -f
 
+      # Same policy as the e2e-heavy job above: the traces hold throwaway fixture
+      # credentials of a world already torn down, and no server log is uploaded.
       - name: traces of the failed tests
         if: failure() || cancelled()
         uses: actions/upload-artifact@v4

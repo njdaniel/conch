@@ -59,7 +59,12 @@ const maxIdleDb = -60;
 const voiceRegion = (page: Page) => page.getByRole('region', { name: 'Voice' });
 const roster = (page: Page) => voiceRegion(page).getByRole('list', { name: 'In voice' });
 
-test.describe('@cross @voice who hears whom', () => {
+// Not @cross (#1658): on Firefox it passed in all 14 local runs and failed once
+// in CI (run 42819479322): every page's analyser read -120 dB at every tone for
+// the whole first reading after alice's press, though the roster said she was
+// transmitting, the tracks were live and the stream ids were the PA_|TR_ form.
+// The cause is not established, so it is out of the Firefox set until it is.
+test.describe('who hears whom', () => {
   let vw: VoiceWorld;
   let stopWorld: (() => void) | undefined;
 

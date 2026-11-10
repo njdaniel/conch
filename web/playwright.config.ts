@@ -63,6 +63,8 @@ if (named.has('webkit')) {
     name: 'webkit',
     grep: /@cross/,
     grepInvert: /@voice/,
+    // No device preset on purpose: the engine's own defaults (1280x720, its own
+    // user agent), so nothing here dresses WebKit up as Safari.
     use: { browserName: 'webkit' },
   });
 }
