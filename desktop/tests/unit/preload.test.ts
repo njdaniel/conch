@@ -324,6 +324,16 @@ describe('the preload’s voice family', () => {
     expect(b).toEqual([view, running]);
   });
 
+  it('passes the lock-mute marker only as true', () => {
+    const { bridge, sendVoice } = wired();
+    const seen: NativeVoiceView[] = [];
+    bridge.onVoiceState((v) => seen.push(v));
+    const marked = { ...running, mutedByLock: true };
+    sendVoice(marked);
+    for (const odd of [{ ...running, mutedByLock: false }, { ...running, mutedByLock: 'yes' }, { ...running, mutedByLock: 1 }]) sendVoice(odd);
+    expect(seen).toEqual([marked]);
+  });
+
   it('drops a message that is not exactly a NativeVoiceView', () => {
     const { bridge, sendVoice } = wired();
     const seen: unknown[] = [];
