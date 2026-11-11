@@ -192,7 +192,9 @@ async fn the_attach_line_comes_first_then_the_hello_and_the_nonce_is_on_the_wire
     }
     // The nonce left once, in line 1, and is in no event and not in standard error.
     assert_eq!(text.matches(FAKE_NONCE).count(), 1, "{text}");
-    assert!(!text.contains("nonce"), "{text}");
+    for event in text.lines().skip(1) {
+        assert!(!event.contains("nonce"), "{event}");
+    }
     let stderr = helper.stderr();
     assert!(!stderr.contains(FAKE_NONCE), "{stderr}");
 }
