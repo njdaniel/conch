@@ -27,6 +27,12 @@ function fakeBridge(overrides: Partial<ConchDesktopBridge>): ConchDesktopBridge 
     createAccount: unexpected('createAccount'),
     signOut: unexpected('signOut'),
     replaceCredential: unexpected('replaceCredential'),
+    createMemberLink: unexpected('createMemberLink'),
+    createSignInLink: unexpected('createSignInLink'),
+    totpEnroll: unexpected('totpEnroll'),
+    createPrincipalSignInLink: unexpected('createPrincipalSignInLink'),
+    createPrincipalCredential: unexpected('createPrincipalCredential'),
+    createHook: unexpected('createHook'),
     profiles: unexpected('profiles'),
     profileAdd: unexpected('profileAdd'),
     profileRename: unexpected('profileRename'),
@@ -102,12 +108,25 @@ describe('the desktop transport: a call of the table is a call of the bridge', (
     await expect(http.get(call('whoami'), STAND_IN)).rejects.toBeInstanceOf(TypeError);
   });
 
-  it('does not ask main for an operation whose answer holds a credential', async () => {
+  // An operation main refuses is not a network failure: the server was never
+  // asked, so the page is not told it cannot reach it (issue #1768).
+  it.each([
+    ['a socket ticket', call('wsTicket')],
+    ['the person’s own voice grant', call('voiceSession', { channel: 'a' })],
+  ] as const)('answers %s, which main alone may ask for, as the app’s own refusal and not as a network failure', async (_name, op) => {
     const request = vi.fn((): Promise<BridgeReply> => Promise.resolve({ kind: 'none' }));
     install(fakeBridge({ request }));
-    await expect(http.send(call('createMemberLink'), STAND_IN, { body: {}, keepalive: false })).rejects.toBeInstanceOf(TypeError);
-    await expect(http.send(call('voiceSession', { channel: 'a' }), STAND_IN, { keepalive: false })).rejects.toBeInstanceOf(TypeError);
+    const res = await http.send(op, STAND_IN, { keepalive: false });
+    expect(res.status).toBe(501);
+    expect(await res.json()).toEqual({ code: 'desktop_unavailable', message: 'The desktop app does not do this.' });
     expect(request).not.toHaveBeenCalled();
+  });
+
+  it('answers main’s own unsupported as the same refusal, and a real failure to answer as a network failure', async () => {
+    install(fakeBridge({ request: () => Promise.resolve({ kind: 'none', reason: 'unsupported' }) }));
+    expect((await http.get(call('whoami'), STAND_IN)).status).toBe(501);
+    install(fakeBridge({ request: () => Promise.resolve({ kind: 'none', reason: 'certificate' }) }));
+    await expect(http.get(call('whoami'), STAND_IN)).rejects.toBeInstanceOf(TypeError);
   });
 
   it('uploads a file as base64 through the bridge, with the name and declared type, and reads the server’s answer', async () => {
@@ -142,6 +161,66 @@ describe('the desktop transport: a call of the table is a call of the bridge', (
     const pending = http.send(call('postMessage', { channel: 'a' }), STAND_IN, { body: {}, keepalive: false, signal: controller.signal });
     controller.abort();
     await expect(pending).rejects.toMatchObject({ name: 'AbortError' });
+  });
+});
+
+describe('the desktop transport: secrets made for someone else (issue #1768)', () => {
+  const secret = 'display-secret-canary-31';
+  const answers = {
+    createMemberLink: { invite: { id: 1 }, code: secret },
+    createSignInLink: { sign_in_link: { id: 1 }, code: secret },
+    totpEnroll: { secret },
+    createPrincipalSignInLink: { sign_in_link: { id: 1 }, code: secret },
+    createPrincipalCredential: { credential: { id: 1 }, token: secret },
+    createHook: { id: 1, token: secret },
+  } as const;
+
+  // Each operation, the call and body the client makes, and what the bridge
+  // function is given.
+  const rows = [
+    ['createMemberLink', call('createMemberLink'), { kind: 'member' }, { kind: 'member' }],
+    ['createSignInLink', call('createSignInLink'), { label: 'phone' }, { label: 'phone' }],
+    ['totpEnroll', call('totpEnroll'), undefined, undefined],
+    ['createPrincipalSignInLink', call('createPrincipalSignInLink', { id: 12 }), { purpose: 'sign_in' }, { id: 12, body: { purpose: 'sign_in' } }],
+    ['createPrincipalCredential', call('createPrincipalCredential', { id: 12 }), { label: 'ci' }, { id: 12, body: { label: 'ci' } }],
+    ['createHook', call('createHook'), { channel: 'general', principal: 12 }, { channel: 'general', principal: 12 }],
+  ] as const;
+
+  it.each(rows)('sends %s to its own bridge function, never the generic request, and reads the answer main gives', async (name, op, body, given) => {
+    const reply = (): Promise<BridgeReply> => Promise.resolve({ kind: 'reply', status: 200, body: answers[name] });
+    const fn = vi.fn(reply);
+    const request = vi.fn();
+    install(fakeBridge({ [name]: fn, request }));
+    const res = await http.send(op, STAND_IN, { ...(body === undefined ? {} : { body }), keepalive: false });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual(answers[name]);
+    expect(request).not.toHaveBeenCalled();
+    if (given === undefined) expect(fn).toHaveBeenCalledExactlyOnceWith();
+    else expect(fn).toHaveBeenCalledExactlyOnceWith(given);
+  });
+
+  it.each(rows)('keeps the server’s refusal of %s, with its status, code and Retry-After, and does not call it a network failure', async (name, op, body) => {
+    install(fakeBridge({ [name]: () => Promise.resolve({ kind: 'reply', status: 429, body: { code: 'rate_limited', message: 'slow' }, retryAfter: 9 }) }));
+    const res = await http.send(op, STAND_IN, { ...(body === undefined ? {} : { body }), keepalive: false });
+    expect(res.status).toBe(429);
+    expect(res.headers.get('Retry-After')).toBe('9');
+    expect(await res.json()).toMatchObject({ code: 'rate_limited' });
+  });
+
+  it.each(rows)('reads a sign-in that has ended during %s as 401', async (name, op, body) => {
+    install(fakeBridge({ [name]: () => Promise.resolve({ kind: 'unauthorized' }) }));
+    expect((await http.send(op, STAND_IN, { ...(body === undefined ? {} : { body }), keepalive: false })).status).toBe(401);
+  });
+
+  it.each([
+    ['createMemberLink', call('createMemberLink'), { kind: 5 }],
+    ['createPrincipalCredential', call('createPrincipalCredential', { id: 12 }), { label: 5 }],
+    ['createHook', call('createHook'), { channel: 'general' }],
+  ] as const)('sends a body that is not %s’s request to nobody', async (name, op, body) => {
+    const fn = vi.fn();
+    install(fakeBridge({ [name]: fn }));
+    await expect(http.send(op, STAND_IN, { body, keepalive: false })).rejects.toBeInstanceOf(TypeError);
+    expect(fn).not.toHaveBeenCalled();
   });
 });
 

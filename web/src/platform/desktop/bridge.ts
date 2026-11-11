@@ -40,9 +40,11 @@ import type {
   TOTPLoginRequestV1,
 } from '../../schema/auth';
 import type { ConvertGuestRequestV1, JoinAccountRequestV1, JoinGuestRequestV1 } from '../../schema/guest';
-import type { RedeemInviteGuestRequestV1, RedeemInviteRequestV2 } from '../../schema/invite';
+import type { CreateHookRequest } from '../../schema/admin';
+import type { CreateCredentialRequestV1 } from '../../schema/credential';
+import type { CreateInviteRequestV2, RedeemInviteGuestRequestV1, RedeemInviteRequestV2 } from '../../schema/invite';
 import type { WhoAmIResponseV1 } from '../../schema/principal';
-import type { RedeemSignInLinkRequestV1 } from '../../schema/signin';
+import type { CreateDeviceLinkRequestV1, CreateSignInLinkRequestV1, RedeemSignInLinkRequestV1 } from '../../schema/signin';
 import type { OperationId, Params } from '../operations';
 
 // The server this window talks to: the canonical origin of the selected
@@ -292,6 +294,22 @@ export interface ConchDesktopBridge {
   // (the client puts a stand-in in its place). The password and code are sent
   // once and kept nowhere.
   replaceCredential(request: ReplaceCredentialRequest): Promise<SignInOutcome>;
+
+  // The six operations whose answer holds a secret made for someone or
+  // something else (issue #1768): an invite's link, a sign-in link for another
+  // device, the authenticator's seed, a sign-in link for a person, a script's
+  // credential, a hook's secret. Each is its own function: main makes the one
+  // request with its bearer, exactly as the page would, and answers once with
+  // the server's validated reply (the secret in it) for the page to show and
+  // copy. Main logs, stores and keeps none of it; the page keeps none in a URL,
+  // a title or a log, and drops it when the view closes. The generic request
+  // still refuses all six (renderer: false), so these are the only way.
+  createMemberLink(request: CreateInviteRequestV2): Promise<BridgeReply>;
+  createSignInLink(request: CreateDeviceLinkRequestV1): Promise<BridgeReply>;
+  totpEnroll(): Promise<BridgeReply>;
+  createPrincipalSignInLink(request: { readonly id: number; readonly body: CreateSignInLinkRequestV1 }): Promise<BridgeReply>;
+  createPrincipalCredential(request: { readonly id: number; readonly body: CreateCredentialRequestV1 }): Promise<BridgeReply>;
+  createHook(request: CreateHookRequest): Promise<BridgeReply>;
 
   // Attachments (issue #947). Upload sends the operation uploadFile; the
   // answer is the server's, validated. Download gives a file's bytes for a

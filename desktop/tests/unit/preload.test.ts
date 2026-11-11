@@ -30,6 +30,12 @@ const named: Record<keyof ConchDesktopBridge | keyof DesktopVoiceBridge | keyof 
   createAccount: true,
   signOut: true,
   replaceCredential: true,
+  createMemberLink: true,
+  createSignInLink: true,
+  totpEnroll: true,
+  createPrincipalSignInLink: true,
+  createPrincipalCredential: true,
+  createHook: true,
   profiles: true,
   profileAdd: true,
   profileRename: true,
@@ -102,13 +108,17 @@ describe('the preload', () => {
     expect(invoke).toHaveBeenLastCalledWith('conch:signInWithPassword', { name: 'a', password: 'b' });
     await bridge.replaceCredential({ operation: 'changePassword', body: { current: 'a', password: 'b' } });
     expect(invoke).toHaveBeenLastCalledWith('conch:replaceCredential', { operation: 'changePassword', body: { current: 'a', password: 'b' } });
+    await bridge.createPrincipalCredential({ id: 12, body: { label: 'ci' } });
+    expect(invoke).toHaveBeenLastCalledWith('conch:createPrincipalCredential', { id: 12, body: { label: 'ci' } });
+    await bridge.totpEnroll();
+    expect(invoke).toHaveBeenLastCalledWith('conch:totpEnroll');
     await bridge.notify({ tag: 't', title: 'title', body: 'body', channel: 'general' });
     expect(invoke).toHaveBeenLastCalledWith('conch:notify', { tag: 't', title: 'title', body: 'body', channel: 'general' });
     await bridge.notifyClose({ tag: 't' });
     expect(invoke).toHaveBeenLastCalledWith('conch:notifyClose', { tag: 't' });
     await bridge.settingsSet({ launchAtLogin: true });
     expect(invoke).toHaveBeenLastCalledWith('conch:settingsSet', { launchAtLogin: true });
-    expect(INVOKED_FUNCTIONS).toHaveLength(56);
+    expect(INVOKED_FUNCTIONS).toHaveLength(62);
   });
 
   it('rejects with a bare "refused" when main refuses, or answers anything but an envelope', async () => {

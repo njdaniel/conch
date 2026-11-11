@@ -219,11 +219,11 @@ describe('arguments', () => {
 
   it('refuses every operation the renderer may not invoke, and a socket, and logout', async () => {
     const f = fixture();
-    for (const operation of ['login', 'loginTotp', 'redeemInvite', 'resetPassword', 'setupRedeem', 'wsTicket', 'voiceSession', 'createMemberLink', 'totpEnroll', 'reauth', 'changePassword', 'messagesSocket', 'eventsSocket', 'logout']) {
+    for (const operation of ['login', 'loginTotp', 'redeemInvite', 'resetPassword', 'setupRedeem', 'wsTicket', 'voiceSession', 'createMemberLink', 'createSignInLink', 'totpEnroll', 'createPrincipalSignInLink', 'createPrincipalCredential', 'createHook', 'reauth', 'changePassword', 'messagesSocket', 'eventsSocket', 'logout']) {
       expect(await f.ipc.invoke(f.event(), 'request', [{ operation, params: operation === 'voiceSession' ? { channel: 'a' } : undefined }]), operation).toEqual({ ok: false, kind: 'refused' });
     }
     expect(f.calls).toEqual([]);
-    expect(f.ipc.refusals).toBe(14);
+    expect(f.ipc.refusals).toBe(18);
   });
 
   it('passes a good request to the service, and the sign-in family to signIn with the operation fixed by the function', async () => {
@@ -266,6 +266,57 @@ describe('arguments', () => {
     expect(f.calls).toEqual([]);
     expect(await f.ipc.invoke(f.event(), 'request', [{ operation: 'health' }])).toEqual({ ok: true, value: { ran: 'request' } });
     expect(f.calls).toEqual([['request', [{ operation: 'health' }]]]);
+  });
+
+  // The secrets made for someone else (issue #1768): one function each, the
+  // operation fixed by the function, the body checked against its validator.
+  it.each([
+    ['createMemberLink', [{ kind: 'member' }], ['display', ['createMemberLink', undefined, { kind: 'member' }]]],
+    ['createSignInLink', [{ label: 'phone' }], ['display', ['createSignInLink', undefined, { label: 'phone' }]]],
+    ['totpEnroll', [], ['display', ['totpEnroll', undefined, undefined]]],
+    ['createPrincipalSignInLink', [{ id: 12, body: { purpose: 'sign_in' } }], ['display', ['createPrincipalSignInLink', { id: 12 }, { purpose: 'sign_in' }]]],
+    ['createPrincipalCredential', [{ id: 12, body: { label: 'ci' } }], ['display', ['createPrincipalCredential', { id: 12 }, { label: 'ci' }]]],
+    ['createHook', [{ channel: 'general', principal: 12 }], ['display', ['createHook', undefined, { channel: 'general', principal: 12 }]]],
+  ] as const)('runs %s as its own operation and nothing else', async (name, args, call) => {
+    const f = fixture();
+    expect(await f.ipc.invoke(f.event(), name, args)).toEqual({ ok: true, value: { ran: 'display' } });
+    expect(f.calls).toEqual([call]);
+  });
+
+  it.each([
+    ['createMemberLink', []],
+    ['createMemberLink', [{}]],
+    ['createMemberLink', [{ kind: 'member' }, 'extra']],
+    ['createMemberLink', ['member']],
+    ['createSignInLink', [{ label: 5 }]],
+    ['totpEnroll', [{}]],
+    ['createPrincipalSignInLink', [{ body: { purpose: 'sign_in' } }]],
+    ['createPrincipalSignInLink', [{ id: '12', body: { purpose: 'sign_in' } }]],
+    ['createPrincipalSignInLink', [{ id: -1, body: { purpose: 'sign_in' } }]],
+    ['createPrincipalSignInLink', [{ id: 1.5, body: {} }]],
+    ['createPrincipalSignInLink', [{ id: 12, body: { purpose: 'sign_in' }, operation: 'login' }]],
+    ['createPrincipalCredential', [{ id: 12 }]],
+    ['createPrincipalCredential', [{ id: 12, body: { label: 5 } }]],
+    ['createHook', [{ channel: 'general' }]],
+    ['createHook', [{ channel: 'general', principal: 'x' }]],
+  ] as const)('refuses a bad shape: %s %j', async (name, args) => {
+    const f = fixture();
+    expect(await f.ipc.invoke(f.event(), name, args)).toEqual({ ok: false, kind: 'refused' });
+    expect(f.calls).toEqual([]);
+  });
+
+  it.each([
+    ['createMemberLink', [{ kind: 'member' }]],
+    ['createSignInLink', [{}]],
+    ['totpEnroll', []],
+    ['createPrincipalSignInLink', [{ id: 12, body: {} }]],
+    ['createPrincipalCredential', [{ id: 12, body: { label: 'ci' } }]],
+    ['createHook', [{ channel: 'general', principal: 12 }]],
+  ] as const)('sends nothing for %s when the server is not one the app may sign in to', async (name, args) => {
+    const f = fixture();
+    f.permit.value = false;
+    expect(await f.ipc.invoke(f.event(), name, args)).toEqual({ ok: true, value: { kind: 'none', reason: 'incompatible' } });
+    expect(f.calls).toEqual([]);
   });
 
   it('passes a feed call to the feeds with the caller’s document generation, and the parameters it parsed', async () => {

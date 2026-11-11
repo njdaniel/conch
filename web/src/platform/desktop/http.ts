@@ -7,10 +7,12 @@
 // ./credentials (or a pasted credential on its way to main); the transport
 // ignores it, and main sends the real bearer. A response that carries a token
 // is rebuilt with the stand-in in the token's place.
+import type { CreateHookRequest } from '../../schema/admin';
 import type { LoginRequestV1, RedeemSetupTokenRequestV1, ResetPasswordRequestV1, TOTPLoginRequestV1 } from '../../schema/auth';
 import type { JoinAccountRequestV1, JoinGuestRequestV1 } from '../../schema/guest';
-import type { RedeemInviteGuestRequestV1, RedeemInviteRequestV2 } from '../../schema/invite';
-import type { RedeemSignInLinkRequestV1 } from '../../schema/signin';
+import type { CreateInviteRequestV2, RedeemInviteGuestRequestV1, RedeemInviteRequestV2 } from '../../schema/invite';
+import type { CreateCredentialRequestV1 } from '../../schema/credential';
+import type { CreateDeviceLinkRequestV1, CreateSignInLinkRequestV1, RedeemSignInLinkRequestV1 } from '../../schema/signin';
 import { operations, type Call, type OperationId } from '../operations';
 import type { HttpTransport } from '../types';
 import type { BridgeReply, BridgeRequest, ConchDesktopBridge, NoAnswerReason, ReplaceCredentialRequest, SignInOutcome } from './bridge';
@@ -30,6 +32,15 @@ const reasons: Readonly<Record<NoAnswerReason, string>> = {
   incompatible: 'this server’s version has not been tested with this app',
 };
 
+// What the page is told of an operation that main refused to make for it: not
+// a network failure, which "Cannot reach the server" would call it, but a
+// refusal of this app's, with a code of its own. The server was never asked.
+const UNAVAILABLE = { code: 'desktop_unavailable', message: 'The desktop app does not do this.' } as const;
+
+function unavailable(): Promise<Response> {
+  return Promise.resolve(jsonResponse(501, UNAVAILABLE));
+}
+
 // noAnswer is "no answer at all", as fetch rejects: the client reports it as
 // a network failure.
 function noAnswer(reason?: NoAnswerReason): Promise<never> {
@@ -46,7 +57,9 @@ function jsonResponse(status: number, body: unknown, extra?: Readonly<Record<str
 function fromReply(reply: BridgeReply): Promise<Response> {
   switch (reply.kind) {
     case 'none':
-      return noAnswer(reply.reason);
+      // Main refused the operation: the server was not asked, and it did not
+      // fail to answer.
+      return reply.reason === 'unsupported' ? unavailable() : noAnswer(reply.reason);
     case 'unauthorized':
       return Promise.resolve(jsonResponse(401, { code: 'unauthorized', message: 'The sign-in has ended.' }));
     case 'reply':
@@ -128,6 +141,25 @@ const steps: Partial<Record<OperationId, Step>> = {
   joinAccount: (b, body: JoinAccountRequestV1) => b.createAccount(body),
 };
 
+// The operations whose answer holds a secret made for someone else (issue
+// #1768), by the one bridge function that carries each. The answer is main's
+// reply, the server's own validated document with the secret in it, shown and
+// copied by the page and kept nowhere (not in a URL, a title or a log).
+type Display = (b: ConchDesktopBridge, call: Call, body: never) => Promise<BridgeReply>;
+const principalOf = (call: Call): number => {
+  const id = call.params?.['id'];
+  if (typeof id !== 'number') throw new TypeError(reasons.unsupported);
+  return id;
+};
+const displayed: Partial<Record<OperationId, Display>> = {
+  createMemberLink: (b, _call, body: CreateInviteRequestV2) => b.createMemberLink(body),
+  createSignInLink: (b, _call, body: CreateDeviceLinkRequestV1) => b.createSignInLink(body),
+  totpEnroll: (b) => b.totpEnroll(),
+  createPrincipalSignInLink: (b, call, body: CreateSignInLinkRequestV1) => b.createPrincipalSignInLink({ id: principalOf(call), body }),
+  createPrincipalCredential: (b, call, body: CreateCredentialRequestV1) => b.createPrincipalCredential({ id: principalOf(call), body }),
+  createHook: (b, _call, body: CreateHookRequest) => b.createHook(body),
+};
+
 const replacing: ReadonlySet<OperationId> = new Set<OperationId>(['changePassword', 'setPassword', 'convertGuest', 'reauth']);
 const isReplacing = (id: OperationId): id is ReplaceCredentialRequest['operation'] => replacing.has(id);
 
@@ -207,9 +239,17 @@ export const http: HttpTransport = {
       if (check === undefined || check(body).length > 0) return noAnswer();
       return withSignal(b.replaceCredential({ operation: call.op, body } as ReplaceCredentialRequest).then((outcome) => fromOutcome(call.op, outcome)), signal);
     }
+    // The secrets made for someone else go to their own functions in main.
+    const show = displayed[call.op];
+    if (show !== undefined) {
+      const check = operations[call.op].request;
+      if (check !== undefined && check(body).length > 0) return noAnswer();
+      return fromReply(await withSignal(show(b, call, body as never), signal));
+    }
     // An operation whose answer holds a credential, a ticket or the person's
-    // voice grant is main's alone: the client does not get to ask.
-    if (!operations[call.op].renderer) return noAnswer('unsupported');
+    // voice grant is main's alone: the client does not get to ask. That is a
+    // refusal of the app's, not a network failure.
+    if (!operations[call.op].renderer) return unavailable();
     return fromReply(await withSignal(b.request(requestOf(call, body, keepalive)), signal));
   },
 
