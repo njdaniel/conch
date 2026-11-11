@@ -15,8 +15,11 @@
 //    nothing starts and the person taps again, with the permission now held.
 //    While the prompt is up, the one 'background' it causes is expected; any
 //    other lifecycle reason that begins before the answer (lock, an
-//    interruption, a second 'background') abandons the tap at once, so an
-//    Allow tapped minutes later, after a lock or a call, starts nothing. After
+//    interruption, a second 'background', or 'stopped') abandons the tap at
+//    once, so an Allow tapped minutes later, after a lock or a call, starts
+//    nothing. 'stopped' is the native activity stop (#1758): the prompt only
+//    pauses the activity, so a stop is the person leaving (Home, Recents),
+//    which AppState does not report a second time. After
 //    the answer, any reason that begins abandons it too. The wall-clock wait
 //    measures from the answer (9515c1f5: the freeze that mattered was after
 //    the grant). The prompt's 'background' is expected to reach JavaScript

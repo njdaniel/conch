@@ -659,6 +659,14 @@ export class VoiceController {
     this.lifecycleChanged(before);
   }
 
+  // activityStopped is the activity stopped (leaving the app) or started again.
+  activityStopped(stopped: boolean): void {
+    this.held = false;
+    const before = this.lifecycle.reasons;
+    this.lifecycle.activityStopped(stopped);
+    this.lifecycleChanged(before);
+  }
+
   interrupted(interrupted: boolean, permanent = false): void {
     this.held = false;
     if (!interrupted) this.focusLost = false;

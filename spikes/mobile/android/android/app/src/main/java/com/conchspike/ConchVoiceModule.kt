@@ -1,5 +1,7 @@
 package com.conchspike
 
+import android.app.Activity
+import android.app.Application
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
@@ -9,6 +11,7 @@ import android.media.AudioDeviceCallback
 import android.media.AudioDeviceInfo
 import android.media.AudioFocusRequest
 import android.media.AudioManager
+import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import com.facebook.react.bridge.Arguments
@@ -27,7 +30,10 @@ import com.facebook.react.modules.core.DeviceEventManagerModule
  *  - audio focus, owned here (the SDK is told not to manage it) so that its
  *    loss and gain reach JavaScript as the lifecycle's "interruption";
  *  - the screen-off and unlock broadcasts as the lifecycle's "lock";
- *  - audio device changes, as the "route".
+ *  - audio device changes, as the "route";
+ *  - the app's activity stopping and starting, as "activity" (#1758): the
+ *    camera permission dialog only pauses the activity, so a stop is the
+ *    person leaving (Home, Recents), which AppState never reports.
  *
  * Events go to JavaScript as "ConchVoiceEvent" with a "type" and a "state".
  * Nothing here carries a credential, an address or a device identifier.
@@ -41,6 +47,11 @@ class ConchVoiceModule(private val context: ReactApplicationContext) : ReactCont
   private var receiver: BroadcastReceiver? = null
   private var devices: AudioDeviceCallback? = null
   private var pending: Promise? = null
+  private var lifecycle: Application.ActivityLifecycleCallbacks? = null
+  // How many of the app's activities are started. Counted, so an activity
+  // recreated (rotation, a config change) is a stop then a start, and a second
+  // activity of the app does not look like leaving. Main thread only.
+  private var startedActivities = 0
 
   override fun initialize() {
     super.initialize()
@@ -63,6 +74,31 @@ class ConchVoiceModule(private val context: ReactApplicationContext) : ReactCont
     }
     context.registerReceiver(screen, filter, Context.RECEIVER_NOT_EXPORTED)
     receiver = screen
+
+    // Registered for the module's lifetime, like the screen receiver, on the
+    // Application so a recreated activity is still seen. Only onActivityStopped
+    // and onActivityStarted are reported: onActivityPaused is not, because the
+    // permission dialog pauses the activity without stopping it, and that must
+    // not look like leaving. Callbacks run on the main thread.
+    val app = context.applicationContext as Application
+    val activities = object : Application.ActivityLifecycleCallbacks {
+      override fun onActivityStarted(a: Activity) {
+        startedActivities++
+        if (startedActivities == 1) emit("activity", "started")
+      }
+      override fun onActivityStopped(a: Activity) {
+        // Never below zero, so a start this module missed cannot hide a stop.
+        startedActivities = maxOf(0, startedActivities - 1)
+        if (startedActivities == 0) emit("activity", "stopped")
+      }
+      override fun onActivityCreated(a: Activity, b: Bundle?) {}
+      override fun onActivityResumed(a: Activity) {}
+      override fun onActivityPaused(a: Activity) {}
+      override fun onActivitySaveInstanceState(a: Activity, b: Bundle) {}
+      override fun onActivityDestroyed(a: Activity) {}
+    }
+    app.registerActivityLifecycleCallbacks(activities)
+    lifecycle = activities
 
     val callback = object : AudioDeviceCallback() {
       override fun onAudioDevicesAdded(added: Array<out AudioDeviceInfo>?) = emit("route", "changed", kinds(added))
@@ -88,6 +124,7 @@ class ConchVoiceModule(private val context: ReactApplicationContext) : ReactCont
   override fun invalidate() {
     receiver?.let { context.unregisterReceiver(it) }
     devices?.let { audio.unregisterAudioDeviceCallback(it) }
+    lifecycle?.let { (context.applicationContext as Application).unregisterActivityLifecycleCallbacks(it) }
     abandon()
     VoiceService.listener = null
     super.invalidate()

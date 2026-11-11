@@ -302,6 +302,7 @@ test('lifecycle: background, lock and interruption each shut a held press at onc
     { name: 'inactive', start: (c) => c.appState('inactive'), end: (c) => c.appState('active') },
     { name: 'lock', start: (c) => c.screenLocked(true), end: (c) => c.screenLocked(false) },
     { name: 'interruption', start: (c) => c.interrupted(true), end: (c) => c.interrupted(false) },
+    { name: 'stopped', start: (c) => c.activityStopped(true), end: (c) => c.activityStopped(false) },
   ];
   for (const t of cases) {
     const r = rig();
@@ -444,6 +445,7 @@ test('the bridge maps the OS signals; a focus gain only lifts the block', () => 
     interrupted: (b: boolean) => calls.push(`interrupted ${b}`),
     routeChanged: (r: string) => calls.push(`route ${r}`),
     taskRemoved: () => calls.push('task removed'),
+    activityStopped: (b: boolean) => calls.push(`stopped ${b}`),
   };
   deliver(sink, { type: 'focus', state: 'lost', detail: '' });
   deliver(sink, { type: 'focus', state: 'duck', detail: '' });
@@ -454,8 +456,11 @@ test('the bridge maps the OS signals; a focus gain only lifts the block', () => 
   deliver(sink, { type: 'route', state: 'changed', detail: 'bluetooth' });
   deliver(sink, { type: 'service', state: 'task_removed', detail: '' });
   deliver(sink, { type: 'service', state: 'started', detail: '' });
+  deliver(sink, { type: 'activity', state: 'stopped', detail: '' });
+  deliver(sink, { type: 'activity', state: 'started', detail: '' });
+  deliver(sink, { type: 'activity', state: 'paused', detail: '' });
   deliver(sink, { type: 'unknown', state: 'x', detail: '' });
-  assert.deepEqual(calls, ['interrupted true', 'interrupted true', 'interrupted false', 'lock true', 'lock false', 'route bluetooth', 'task removed']);
+  assert.deepEqual(calls, ['interrupted true', 'interrupted true', 'interrupted false', 'lock true', 'lock false', 'route bluetooth', 'task removed', 'stopped true', 'stopped false']);
 });
 
 test('a permanent focus loss does not outlive Leave: lost, leave, join, and a press opens', async () => {
@@ -625,6 +630,21 @@ test('camera tap: a block that begins after the permission answer abandons the t
   assert.equal(r.c.state.cameraExtra, tapAgain);
 });
 
+test('camera tap: the activity stopping after the answer abandons the tap', async () => {
+  const r = rig({ prompt: promptAway(true) });
+  await joined(r);
+  const tap = r.c.cameraTap();
+  await settle();
+  r.c.activityStopped(true);
+  r.c.appState('active');
+  r.c.activityStopped(false);
+  r.clock.advance(100);
+  await tap;
+  await settle();
+  assert.equal(captures(r.log), 0);
+  assert.equal(r.c.state.cameraExtra, tapAgain);
+});
+
 test('camera tap: a tap in flight does not survive Leave', async () => {
   const r = rig({ prompt: promptAway(true) });
   await joined(r);
@@ -669,6 +689,8 @@ test('camera tap: before the answer, each of these abandons it: no capture, no c
     { name: 'a screen lock', happen: (r) => r.c.screenLocked(true) },
     { name: 'a second background', happen: (r) => (r.c.appState('active'), r.c.appState('background')) },
     { name: 'an interruption', happen: (r) => r.c.interrupted(true) },
+    // Home or Recents over the dialog: AppState says nothing, the native stop does.
+    { name: 'the activity stopping (Home over the dialog)', happen: (r) => r.c.activityStopped(true) },
     { name: 'tear-down', happen: (r) => r.c.tearDown() },
     { name: 'Leave', happen: async (r) => { const leaving = r.c.leave(); r.clock.advance(2000); await leaving; } },
     { name: 'a lost connection', happen: (r) => r.rooms[0]?.events?.onDisconnected('lost') },
@@ -685,6 +707,7 @@ test('camera tap: before the answer, each of these abandons it: no capture, no c
     r.c.appState('active');
     r.c.screenLocked(false);
     r.c.interrupted(false);
+    r.c.activityStopped(false);
     r.clock.advance(3000);
     await tap;
     await settle();
