@@ -1,6 +1,7 @@
 package store
 
 import (
+	"container/heap"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -2621,23 +2622,50 @@ func (s *Store) RemoveMessage(ctx context.Context, channelID int64, reader Reade
 // examined and more set.
 const PendingNotificationScanBound = 2000
 
-// The candidates are read one channel at a time, and merged (issue #1725).
-// A single statement over every channel the reader is in joins their
+// The candidates are read one channel at a time, and merged (issues #1725 and
+// #1730). A single statement over every channel the reader is in joins their
 // memberships and sorts every unread candidate before it applies its limit,
 // so its cost follows the reader's backlog (and, with a plan that walks
 // messages by id, other channels' messages too). The global first N
 // candidates in id order are always within each channel's first N, so the
 // statement below takes one channel's candidates above a lower bound, in id
 // order, through messages_by_channel, with every condition of the single
-// statement, and ListPendingNotifications merges channels by id and stops
-// at the bound. The answer is the same byte for byte; the work is a seek per
-// channel and about the bound's worth of rows, not the backlog.
+// statement, and pendingCandidates merges channels by id, with a min-heap,
+// and stops at the bound. The answer is the same byte for byte.
+//
+// What is bounded, and what is not. The bound is the work of a call in
+// candidates: a seek per channel the reader is in, about the limit's worth of
+// candidates, and the heap's log of the channel count per candidate taken. A
+// channel's seek starts above the greatest of the cursor, the read mark and
+// the reader's history bound there (history_after), so rows at or below the
+// bound, and rows the reader has read, are not walked. What is not bounded is
+// the rows the seek passes over after that start without selecting them, in
+// the reader's own channels, above their mark: the reader's own posts,
+// removed messages, whispers not addressed to the reader, net messages for a
+// net the reader is not on, replies after the bound to a thread whose root is
+// at or below it (a reply is held to its root's id), and, for a guest with no
+// bound (who sees nothing), every row. A call's latency therefore grows with
+// that volume. It is a timing signal about what is said in channels the
+// reader is in, and it does not change an answer: content,
+// cursor and `more` are functions of candidates only (the byte-identity
+// tests). The alternative, a stored high-water mark of examined ids per
+// reader, would be new state on a read path that revocation (a removal or a
+// ban lifted) and a new whisper recipient (a row added below the mark) would
+// each invalidate, so it is not kept. See docs/design/mobile-notifications.md
+// section 4.2.
 
 // pendingChannelsSQL lists the reader's live channels with their read marks
-// (0 for a channel never marked), in channel id order. Arguments: the reader
-// (read mark), the reader (member). It reads no message. It is a list of
-// channels the reader is in, which they hold.
-const pendingChannelsSQL = `SELECT mem.channel_id, COALESCE(rm.last_read_id, 0)
+// (0 for a channel never marked) and their history bounds (0 for a membership
+// without one), in channel id order. Arguments: the reader (read mark), the
+// reader (member). It reads no message. It is a list of channels the reader is
+// in, and of marks and bounds they hold.
+//
+// A message at or below a membership's history_after is never visible to its
+// holder (messageVisible: withinHistoryBound is false for it whether the
+// reader is a guest or not, a reply's root being below the reply), so the
+// bound is a safe place to start a seek. It is only a starting point: the
+// statement keeps the whole predicate, and is the authority.
+const pendingChannelsSQL = `SELECT mem.channel_id, COALESCE(rm.last_read_id, 0), COALESCE(mem.history_after, 0)
 	FROM ` + liveMembers + ` mem
 	LEFT JOIN read_marks rm ON rm.principal_id = ? AND rm.channel_id = mem.channel_id
 	WHERE mem.principal_id = ?
@@ -2649,8 +2677,8 @@ const pendingChannelsSQL = `SELECT mem.channel_id, COALESCE(rm.last_read_id, 0)
 // the database has been ANALYZEd, the planner on a server with few channels
 // prefers a walk of messages by id above the bound, filtering the channel
 // afterwards, which reads every channel's messages (measured in #1725). Arguments, in order: the spoiler
-// prefix's length and text, the channel, the lower bound (the greater of
-// after and the channel's read mark), the reader (member), the reader
+// prefix's length and text, the channel, the lower bound (the greatest of
+// after, the channel's read mark and the reader's history bound there), the reader (member), the reader
 // (author), then messageVisible's six, then the limit. The statement is
 // built from constants only.
 const (
@@ -2681,6 +2709,25 @@ const (
 	pendingFirstBatch = 1
 	pendingMaxBatch   = 256
 )
+
+// pendingHeap is the merge's min-heap of channels with a buffered candidate,
+// ordered by the id of the head of each buffer (ids are unique, so no ties).
+type pendingHeap []*pendingChannel
+
+func (h pendingHeap) Len() int { return len(h) }
+func (h pendingHeap) Less(i, j int) bool {
+	return h[i].buf[0].summary.MessageID < h[j].buf[0].summary.MessageID
+}
+func (h pendingHeap) Swap(i, j int) { h[i], h[j] = h[j], h[i] }
+func (h *pendingHeap) Push(x any)   { *h = append(*h, x.(*pendingChannel)) }
+func (h *pendingHeap) Pop() any {
+	old := *h
+	n := len(old)
+	x := old[n-1]
+	old[n-1] = nil
+	*h = old[:n-1]
+	return x
+}
 
 // pendingCandidate is one row the feed selected: a message the reader may
 // read, above their mark, that they did not write.
@@ -2747,11 +2794,13 @@ func (c *pendingChannel) fill(ctx context.Context, stmt *sql.Stmt, predArgs []an
 // own first candidates (see the comment above pendingChannelsSQL). It runs in
 // one read transaction, a snapshot, as the single statement did.
 //
-// Its work is bounded: one channel list, one seek per channel the reader is
-// in, and, in the merge, about limit candidates plus what each channel's last
-// batch over-read (at most pendingMaxBatch each). The count of channels is
-// the reader's own membership, and every channel counts: leaving one out
-// would change the answer.
+// Its work is bounded in candidates: one channel list, one seek per channel
+// the reader is in, and, in the merge, about limit candidates plus what each
+// channel's last batch over-read (at most pendingMaxBatch each), at a heap's
+// log of the channel count each. Rows a seek passes without selecting (see
+// the comment above pendingChannelsSQL) are not bounded. The count of
+// channels is the reader's own membership, and every channel counts: leaving
+// one out would change the answer.
 func (s *Store) pendingCandidates(ctx context.Context, reader Reader, after int64, limit int) ([]pendingCandidate, error) {
 	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 	if err != nil {
@@ -2766,12 +2815,12 @@ func (s *Store) pendingCandidates(ctx context.Context, reader Reader, after int6
 	var chans []*pendingChannel
 	for rows.Next() {
 		c := &pendingChannel{batch: pendingFirstBatch}
-		var mark int64
-		if err := rows.Scan(&c.id, &mark); err != nil {
+		var mark, bound int64
+		if err := rows.Scan(&c.id, &mark, &bound); err != nil {
 			_ = rows.Close()
 			return nil, err
 		}
-		c.above = max(after, mark)
+		c.above = max(after, mark, bound)
 		chans = append(chans, c)
 	}
 	if err := rows.Err(); err != nil {
@@ -2795,27 +2844,32 @@ func (s *Store) pendingCandidates(ctx context.Context, reader Reader, after int6
 			return nil, err
 		}
 	}
-	// Merge: take the lowest head, and read more of its channel when the
-	// buffer is empty and the channel may have more, before the next
-	// comparison, so every unfinished channel always shows its true next
-	// candidate.
+	// Merge: a min-heap of the channels that have a candidate, by their
+	// head's message id. Take the lowest head, and read more of its channel
+	// when the buffer is empty and the channel may have more, before the
+	// next comparison, so every unfinished channel always shows its true
+	// next candidate.
+	h := make(pendingHeap, 0, len(chans))
+	for _, c := range chans {
+		if len(c.buf) > 0 {
+			h = append(h, c)
+		}
+	}
+	heap.Init(&h)
 	out := make([]pendingCandidate, 0, min(limit, 64))
-	for len(out) < limit {
-		var next *pendingChannel
-		for _, c := range chans {
-			if len(c.buf) > 0 && (next == nil || c.buf[0].summary.MessageID < next.buf[0].summary.MessageID) {
-				next = c
-			}
-		}
-		if next == nil {
-			break
-		}
+	for len(out) < limit && len(h) > 0 {
+		next := h[0]
 		out = append(out, next.buf[0])
 		next.buf = next.buf[1:]
 		if len(next.buf) == 0 && !next.done {
 			if err := next.fill(ctx, stmt, predArgs, reader.PrincipalID); err != nil {
 				return nil, err
 			}
+		}
+		if len(next.buf) > 0 {
+			heap.Fix(&h, 0)
+		} else {
+			heap.Pop(&h)
 		}
 	}
 	return out, nil
