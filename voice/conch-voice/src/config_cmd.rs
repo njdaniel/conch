@@ -31,16 +31,22 @@
 //! What remains: a change made between that last read and the rename is lost. Closing that
 //! window would need a lock every writer takes, a person's editor included.
 
+#[cfg(unix)]
 use std::fs::{self, File, OpenOptions, Permissions};
+#[cfg(unix)]
 use std::io::{self, Read, Write};
+#[cfg(unix)]
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+#[cfg(unix)]
 use std::path::{Path, PathBuf};
+#[cfg(unix)]
 use std::time::{SystemTime, UNIX_EPOCH};
 
+#[cfg(unix)]
 use conch_voice_api::default_config_dir;
-use conch_voice_control::{
-    AudioKey, Config, KeysKey, set_audio_value, set_keys_value, unset_keys_value,
-};
+use conch_voice_control::{AudioKey, KeysKey};
+#[cfg(unix)]
+use conch_voice_control::{Config, set_audio_value, set_keys_value, unset_keys_value};
 
 use crate::cli::Environment;
 use crate::error::Error;
@@ -52,12 +58,39 @@ pub const FILE_NAME: &str = "voice.toml";
 /// makes `credentials.json`.
 pub const NEW_FILE_MODE: u32 = 0o600;
 
-/// `O_NONBLOCK` on Linux (x86-64 and AArch64, the targets conch-voice is built for). std
-/// has no name for it and `libc` is not a dependency here; on a regular file it changes
-/// nothing.
+/// `O_NONBLOCK` on Linux and Android. std has no name for it and `libc` is not a dependency
+/// here; on a regular file it changes nothing.
+#[cfg(any(target_os = "linux", target_os = "android"))]
 const O_NONBLOCK: i32 = 0o4000;
 
+/// `O_NONBLOCK` on the systems that share the BSD value.
+#[cfg(any(
+    target_os = "macos",
+    target_os = "ios",
+    target_os = "freebsd",
+    target_os = "netbsd",
+    target_os = "openbsd",
+    target_os = "dragonfly"
+))]
+const O_NONBLOCK: i32 = 0x0004;
+
+// Any other Unix has a value this file does not know, and a wrong one would open a file
+// with the wrong flags: say so at build time.
+#[cfg(not(any(
+    not(unix),
+    target_os = "linux",
+    target_os = "android",
+    target_os = "macos",
+    target_os = "ios",
+    target_os = "freebsd",
+    target_os = "netbsd",
+    target_os = "openbsd",
+    target_os = "dragonfly"
+)))]
+compile_error!("config_cmd.rs: O_NONBLOCK is not known for this Unix target");
+
 /// How many names are tried for the temporary file before giving up.
+#[cfg(unix)]
 const TEMPORARY_NAMES: u32 = 16;
 
 /// Sets `key` to `value` in `voice.toml` in the configuration directory `environment`
@@ -70,8 +103,16 @@ const TEMPORARY_NAMES: u32 = 16;
 /// [`Error::NoConfigDir`] when there is no configuration directory; what
 /// [`default_config_dir`] says of `CONCH_CONFIG_DIR`; and what [`save`] says.
 pub fn set(environment: &Environment, key: AudioKey, value: &str) -> Result<(), Error> {
-    let dir = config_dir(environment)?;
-    save(&dir, key, value, &mut || {})
+    #[cfg(unix)]
+    {
+        let dir = config_dir(environment)?;
+        save(&dir, key, value, &mut || {})
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (environment, key, value);
+        Err(unsupported())
+    }
 }
 
 /// Sets `key` under `[keys]` to `value`, as [`set`] does for `[audio]`.
@@ -80,8 +121,16 @@ pub fn set(environment: &Environment, key: AudioKey, value: &str) -> Result<(), 
 ///
 /// As [`set`].
 pub fn set_keys(environment: &Environment, key: KeysKey, value: &str) -> Result<(), Error> {
-    let dir = config_dir(environment)?;
-    save_keys(&dir, key, value, &mut || {})
+    #[cfg(unix)]
+    {
+        let dir = config_dir(environment)?;
+        save_keys(&dir, key, value, &mut || {})
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (environment, key, value);
+        Err(unsupported())
+    }
 }
 
 /// Removes `key` from `[keys]`; a key that is not there, or no file, is a success that
@@ -91,10 +140,31 @@ pub fn set_keys(environment: &Environment, key: KeysKey, value: &str) -> Result<
 ///
 /// As [`set`].
 pub fn unset_keys(environment: &Environment, key: KeysKey) -> Result<(), Error> {
-    let dir = config_dir(environment)?;
-    unset_keys_in(&dir, key, &mut || {})
+    #[cfg(unix)]
+    {
+        let dir = config_dir(environment)?;
+        unset_keys_in(&dir, key, &mut || {})
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (environment, key);
+        Err(unsupported())
+    }
 }
 
+/// What the three commands above answer where the file's checks and its atomic replace
+/// have no Windows form yet (the Windows port of the configuration is #904):
+/// [`Error::Unsupported`], with `voice.toml` untouched. Compiled on Linux too so that a
+/// test holds it.
+#[cfg(any(not(unix), test))]
+fn unsupported() -> Error {
+    Error::Unsupported {
+        what: "changing the configuration file (config set)",
+        path: None,
+    }
+}
+
+#[cfg(unix)]
 fn config_dir(environment: &Environment) -> Result<PathBuf, Error> {
     default_config_dir(
         environment.conch_config_dir.as_deref(),
@@ -119,6 +189,7 @@ fn config_dir(environment: &Environment) -> Result<PathBuf, Error> {
 /// - [`Error::ConfigRead`] and [`Error::ConfigWrite`] for what the operating system refused.
 ///
 /// In every case `voice.toml` is as it was, and no temporary file is left.
+#[cfg(unix)]
 pub(crate) fn save(
     dir: &Path,
     key: AudioKey,
@@ -133,6 +204,7 @@ pub(crate) fn save(
 }
 
 /// [`save`] for a `[keys]` value.
+#[cfg(unix)]
 pub(crate) fn save_keys(
     dir: &Path,
     key: KeysKey,
@@ -147,6 +219,7 @@ pub(crate) fn save_keys(
 }
 
 /// [`save`] for the removal of a `[keys]` value.
+#[cfg(unix)]
 pub(crate) fn unset_keys_in(
     dir: &Path,
     key: KeysKey,
@@ -161,6 +234,7 @@ pub(crate) fn unset_keys_in(
 
 /// The save every command shares: `edit` turns the file's text (and the name to call it in
 /// errors) into the new text.
+#[cfg(unix)]
 fn save_with(
     dir: &Path,
     edit: &dyn Fn(&str, &str) -> Result<String, Error>,
@@ -220,6 +294,7 @@ fn save_with(
 
 /// `voice.toml` as it was found: its text, and what would show that it was replaced or
 /// changed.
+#[cfg(unix)]
 #[derive(Debug, PartialEq, Eq)]
 struct Snapshot {
     text: String,
@@ -228,6 +303,7 @@ struct Snapshot {
     inode: u64,
 }
 
+#[cfg(unix)]
 impl Snapshot {
     /// Reads the file at `path`, or `None` if there is none. Refuses what `save` documents,
     /// looking before it opens.
@@ -286,12 +362,14 @@ impl Snapshot {
 }
 
 /// The new file, beside `voice.toml` until it is renamed to it, and removed if it is not.
+#[cfg(unix)]
 struct Temporary {
     path: PathBuf,
     file: File,
     renamed: bool,
 }
 
+#[cfg(unix)]
 impl Temporary {
     /// Creates a file no one else has made, in `dir`, readable and writable by its owner
     /// only until its mode is set.
@@ -327,6 +405,7 @@ impl Temporary {
     }
 }
 
+#[cfg(unix)]
 impl Drop for Temporary {
     fn drop(&mut self) {
         if !self.renamed {
@@ -338,6 +417,19 @@ impl Drop for Temporary {
 }
 
 #[cfg(test)]
+mod unsupported_tests {
+    use super::*;
+
+    #[test]
+    fn the_non_unix_answer_is_typed_and_names_the_command() {
+        let error = unsupported();
+        assert!(matches!(error, Error::Unsupported { .. }));
+        assert!(error.to_string().contains("config set"), "{error}");
+        assert_eq!(error.exit_code(), 2);
+    }
+}
+
+#[cfg(all(test, unix))]
 mod tests {
     use std::ffi::OsString;
     use std::sync::mpsc;

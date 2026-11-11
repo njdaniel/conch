@@ -4,6 +4,10 @@
 //! keyboards' half is a closure that fails the test if it is called.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
+// Linux only: It builds on PipeWire's device table and reads Unix file modes. Windows runs
+// the unit tests in `src/`, which include the answers a non-Unix platform gives, and the
+// tests in this directory that need none of this (#1309).
+#![cfg(target_os = "linux")]
 
 use std::cell::Cell;
 use std::os::unix::fs::PermissionsExt;

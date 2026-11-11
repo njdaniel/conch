@@ -70,9 +70,12 @@
 //! what was found; a change made by a command or a mute or deafen key while starting is
 //! shown at once, as every other change is.
 
-use std::fs::{File, OpenOptions};
+use std::fs::File;
+#[cfg(unix)]
+use std::fs::OpenOptions;
 use std::future::Future;
 use std::io::{Read, Write};
+#[cfg(unix)]
 use std::os::unix::fs::FileTypeExt;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
@@ -81,17 +84,16 @@ use std::time::Duration;
 
 pub use conch_voice_api::VoiceControlCapture as Capture;
 use conch_voice_api::{
-    Error as ApiError, ServerAddress, VOICE_CONTROL_EVENT_FD, VOICE_CONTROL_EVENT_QUEUE_LINES,
-    VOICE_CONTROL_HELLO_TIMEOUT_MS, VOICE_CONTROL_LEAVE_EXIT_MS, VOICE_CONTROL_MAX_IN_FLIGHT,
-    VOICE_CONTROL_MAX_LINE_BYTES, VOICE_CONTROL_MAX_RETRY_IN_MS, VOICE_CONTROL_OWNER_LOSS_EXIT_MS,
-    VOICE_CONTROL_OWNER_POLL_MS, VOICE_CONTROL_SCHEMA_V1, VOICE_CONTROL_SCHEMA_V2,
-    VOICE_CONTROL_START_TIMEOUT_MS, VoiceControlAckV1, VoiceControlAckV2, VoiceControlBlock,
-    VoiceControlCommand, VoiceControlCommandV2, VoiceControlCredential, VoiceControlErrorCode,
-    VoiceControlEventKind, VoiceControlHelloV1, VoiceControlPhase, VoiceControlPlayback,
-    VoiceControlProtocolErrorV1, VoiceControlProtocolErrorV2, VoiceControlPtt,
-    VoiceControlPttProblem, VoiceControlReason, VoiceControlStartV1, VoiceControlStartV2,
-    VoiceControlStateV1, VoiceControlStateV2, VoiceControlTalkMode, default_config_dir,
-    parse_command, parse_command_v2, resolve_token, to_line,
+    Error as ApiError, ServerAddress, VOICE_CONTROL_EVENT_QUEUE_LINES, VOICE_CONTROL_LEAVE_EXIT_MS,
+    VOICE_CONTROL_MAX_IN_FLIGHT, VOICE_CONTROL_MAX_LINE_BYTES, VOICE_CONTROL_MAX_RETRY_IN_MS,
+    VOICE_CONTROL_OWNER_LOSS_EXIT_MS, VOICE_CONTROL_OWNER_POLL_MS, VOICE_CONTROL_SCHEMA_V1,
+    VOICE_CONTROL_SCHEMA_V2, VOICE_CONTROL_START_TIMEOUT_MS, VoiceControlAckV1, VoiceControlAckV2,
+    VoiceControlBlock, VoiceControlCommand, VoiceControlCommandV2, VoiceControlCredential,
+    VoiceControlErrorCode, VoiceControlEventKind, VoiceControlHelloV1, VoiceControlPhase,
+    VoiceControlPlayback, VoiceControlProtocolErrorV1, VoiceControlProtocolErrorV2,
+    VoiceControlPtt, VoiceControlPttProblem, VoiceControlReason, VoiceControlStartV1,
+    VoiceControlStartV2, VoiceControlStateV1, VoiceControlStateV2, VoiceControlTalkMode,
+    default_config_dir, parse_command, parse_command_v2, resolve_token, to_line,
 };
 use conch_voice_control::{
     Config, Key, KeyAction, KeyBindings, KeyEvent, LineCommand, Ptt, PttInput, PttStatus,
@@ -1158,6 +1160,24 @@ pub fn spawn_reader(
     });
 }
 
+/// The process id of this process's parent, to be recorded before anything else and given to
+/// [`watch_parent`].
+///
+/// Windows has no such call in `std` and its process ids are reused, so there the answer is
+/// always 0 and [`watch_parent`] never sees it change: a Windows owner is noticed by its
+/// events endpoint ending (#938), not by this poll.
+#[must_use]
+pub fn parent_id() -> u32 {
+    #[cfg(unix)]
+    {
+        std::os::unix::process::parent_id()
+    }
+    #[cfg(not(unix))]
+    {
+        0
+    }
+}
+
 /// Looks every [`VOICE_CONTROL_OWNER_POLL_MS`] at whether the process that started this one
 /// is still its parent, and says the owner is lost when it is not: a dead owner's children
 /// are given to another parent, which catches a death the control pipe misses (§8.3).
@@ -1168,7 +1188,7 @@ pub fn watch_parent(parent: u32, inputs: mpsc::UnboundedSender<Input>, watchdog:
             if inputs.is_closed() {
                 return;
             }
-            if std::os::unix::process::parent_id() != parent {
+            if parent_id() != parent {
                 watchdog.arm(Duration::from_millis(VOICE_CONTROL_OWNER_LOSS_EXIT_MS));
                 let _ = inputs.send(Input::OwnerLost);
                 return;
@@ -1177,7 +1197,7 @@ pub fn watch_parent(parent: u32, inputs: mpsc::UnboundedSender<Input>, watchdog:
     });
 }
 
-/// Turns SIGTERM and SIGINT into [`Input::Signal`], which a managed session takes as
+/// Turns SIGTERM and SIGINT (on Windows, Ctrl-C only) into [`Input::Signal`], which a managed session takes as
 /// `leave` (§8.4), and arms the watchdog for a leave's bound. Must be called inside the
 /// runtime.
 ///
@@ -1185,15 +1205,9 @@ pub fn watch_parent(parent: u32, inputs: mpsc::UnboundedSender<Input>, watchdog:
 ///
 /// What the operating system said, if a handler could not be installed.
 pub fn signals(inputs: mpsc::UnboundedSender<Input>, watchdog: Watchdog) -> std::io::Result<()> {
-    use tokio::signal::unix::{SignalKind, signal};
-    let mut interrupt = signal(SignalKind::interrupt())?;
-    let mut terminate = signal(SignalKind::terminate())?;
+    let mut interrupts = input::Interrupts::install()?;
     tokio::spawn(async move {
-        loop {
-            tokio::select! {
-                _ = interrupt.recv() => {}
-                _ = terminate.recv() => {}
-            }
+        while interrupts.recv().await.is_some() {
             watchdog.arm(Duration::from_millis(VOICE_CONTROL_LEAVE_EXIT_MS));
             if inputs.send(Input::Signal).is_err() {
                 return;
@@ -1212,7 +1226,9 @@ pub fn signals(inputs: mpsc::UnboundedSender<Input>, watchdog: Watchdog) -> std:
 /// # Errors
 ///
 /// [`Error::EventPipe`] if file descriptor 3 is not open, is not a pipe, or has no reader.
+#[cfg(unix)]
 pub fn open_event_pipe() -> Result<File, Error> {
+    use conch_voice_api::{VOICE_CONTROL_EVENT_FD, VOICE_CONTROL_HELLO_TIMEOUT_MS};
     let path = PathBuf::from(format!("/proc/self/fd/{VOICE_CONTROL_EVENT_FD}"));
     let named = std::fs::metadata(&path).map_err(|_| Error::EventPipe("is not open"))?;
     if !named.file_type().is_fifo() {
@@ -1233,6 +1249,28 @@ pub fn open_event_pipe() -> Result<File, Error> {
         return Err(Error::EventPipe("is not a pipe"));
     }
     Ok(file)
+}
+
+/// What [`open_event_pipe`] answers where there is no inherited file descriptor 3 to open
+/// by name: [`Error::Unsupported`]. A Windows owner attaches to a named pipe instead, with
+/// `--events-pipe` (#938).
+///
+/// # Errors
+///
+/// Always [`Error::Unsupported`].
+#[cfg(not(unix))]
+pub fn open_event_pipe() -> Result<File, Error> {
+    Err(unsupported_event_pipe())
+}
+
+/// The error behind the non-Unix [`open_event_pipe`], compiled on Linux too so that a test
+/// holds its words.
+#[cfg(any(not(unix), test))]
+fn unsupported_event_pipe() -> Error {
+    Error::Unsupported {
+        what: "the inherited event pipe (file descriptor 3)",
+        path: None,
+    }
 }
 
 /// How the microphone and the speakers are opened, once the identity has been checked.
@@ -2030,6 +2068,27 @@ fn key_source(
             Ok((!bindings.is_empty())
                 .then(|| (pipe.clone(), bindings, DeviceRule::NamedPipeForTests)))
         }
+    }
+}
+
+#[cfg(test)]
+mod unsupported_tests {
+    use super::*;
+
+    #[test]
+    fn the_non_unix_event_pipe_is_a_typed_unsupported_error_that_names_fd_3() {
+        let error = unsupported_event_pipe();
+        assert!(matches!(error, Error::Unsupported { .. }));
+        assert!(error.to_string().contains("file descriptor 3"), "{error}");
+        assert_eq!(error.exit_code(), 2);
+    }
+
+    /// Where there is no parent id to read, the poll must never see it change.
+    #[cfg(not(unix))]
+    #[test]
+    fn without_unix_the_parent_id_is_zero_and_never_changes() {
+        assert_eq!(parent_id(), 0);
+        assert_eq!(parent_id(), parent_id());
     }
 }
 

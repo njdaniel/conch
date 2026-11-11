@@ -91,7 +91,6 @@ pub mod status;
 pub mod transmit;
 
 use std::io::{IsTerminal, Write};
-use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -301,7 +300,7 @@ pub fn managed(
 ) -> Result<(), Error> {
     // Where the events go: the endpoint the owner listens on, with the attach line already
     // written, or file descriptor 3. Exactly one is looked at.
-    let (events, end): (Box<dyn Write + Send>, Option<UnixStream>) = match &args.events_pipe {
+    let (events, end): (Box<dyn Write + Send>, Option<channel::Stream>) = match &args.events_pipe {
         Some(path) => {
             let endpoint = channel::attach(path, environment, &scrubber)?;
             (Box::new(endpoint.events), Some(endpoint.end))

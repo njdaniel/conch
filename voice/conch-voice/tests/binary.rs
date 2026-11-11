@@ -7,6 +7,10 @@
 //! can read or write the real user's files.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
+// Unix only: The process tests run shells, named pipes and /proc and read file modes.
+// Windows runs the unit tests in `src/`, which include the answers a non-Unix platform
+// gives, and the tests in this directory that need none of this (#1309).
+#![cfg(unix)]
 
 mod support;
 
