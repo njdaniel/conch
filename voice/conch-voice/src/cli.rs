@@ -66,9 +66,13 @@ const CONFIG_DIR_DEFAULT_HELP: &str = "Default: $XDG_CONFIG_HOME/conch, else $HO
 /// What the help says of the default configuration directory on Windows, and of what is
 /// trusted there: the directory, not the file (`docs/design/windows-desktop.md` §2.7).
 #[cfg(windows)]
-const CONFIG_DIR_DEFAULT_HELP: &str = "Default: %APPDATA%\\conch. On Windows conch-voice trusts \
-     the directory, not the file: it cannot check who may write a file there, so keep this \
-     directory yours alone (the default one is). ";
+const CONFIG_DIR_DEFAULT_HELP: &str = "Default: %APPDATA%\\conch (recommended). On Windows \
+     conch-voice trusts the directory, not the file: it checks only that the file itself is \
+     an ordinary file, not a link, and a link or junction at `conch`, at %APPDATA% or at any \
+     parent directory is followed. It cannot tell who may write a directory: a directory \
+     made under a drive root (C:\\work\\alice) is writable by every local user by default, \
+     and then another account can choose the server your token is sent to. Keep it under \
+     your profile. ";
 
 /// The peak level of `--mic tone:<hz>`: a quarter of full scale.
 pub const TONE_AMPLITUDE: f32 = 0.25;
@@ -851,7 +855,7 @@ pub(crate) fn read_config(path: &std::path::Path) -> Result<Config, Error> {
     let text = {
         use std::io::Read;
         match conch_voice_api::open_unfollowed(path) {
-            Ok(conch_voice_api::Unfollowed::File(mut file)) => {
+            Ok(conch_voice_api::Unfollowed::File(mut file, _)) => {
                 let mut text = String::new();
                 file.read_to_string(&mut text).map(|_| text)
             }
@@ -1049,15 +1053,54 @@ mod windows_config_tests {
     use super::*;
 
     /// A file symbolic link at `link` to `target`, or false: that needs a privilege or
-    /// developer mode, and GitHub's Windows runners have it.
+    /// developer mode, and GitHub's Windows runners have it. On CI (`CI` or
+    /// `GITHUB_ACTIONS` set) a failure is a panic, never a skip: libtest captures the
+    /// message of a skip, so a skipped test would be invisible there.
     fn symlink(target: &std::path::Path, link: &std::path::Path) -> bool {
         match std::os::windows::fs::symlink_file(target, link) {
             Ok(()) => true,
             Err(error) => {
+                assert!(
+                    std::env::var_os("CI").is_none()
+                        && std::env::var_os("GITHUB_ACTIONS").is_none(),
+                    "a symbolic link cannot be created on CI: {error}"
+                );
                 eprintln!("skipped: this process may not create a symbolic link: {error}");
                 false
             }
         }
+    }
+
+    /// A directory junction at `link` to the directory `target`: `mklink /J` needs no
+    /// privilege.
+    fn junction(target: &std::path::Path, link: &std::path::Path) {
+        let status = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(link)
+            .arg(target)
+            .stdout(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        assert!(status.success(), "mklink /J failed");
+    }
+
+    #[test]
+    fn a_junction_at_the_path_is_refused_and_the_target_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        let other = dir.path().join("other");
+        std::fs::create_dir(&other).unwrap();
+        std::fs::write(other.join("voice.toml"), "server = \"http://evil.test\"\n").unwrap();
+        let path = dir.path().join("voice.toml");
+        junction(&other, &path);
+        let error = read_config(&path).unwrap_err();
+        assert!(
+            matches!(
+                error,
+                Error::ConfigLink { .. } | Error::ConfigNotRegular { .. }
+            ),
+            "{error:?}"
+        );
+        assert!(!error.to_string().contains("evil.test"), "{error}");
     }
 
     #[test]

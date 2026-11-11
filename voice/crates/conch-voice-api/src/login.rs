@@ -55,8 +55,10 @@ const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
 #[cfg(windows)]
 #[derive(Debug)]
 pub enum Unfollowed {
-    /// An ordinary file, open for reading.
-    File(std::fs::File),
+    /// An ordinary file, open for reading, and the metadata of the opened handle (its size
+    /// and attributes are those of the file that was opened, not of what the path named a
+    /// moment before).
+    File(std::fs::File, std::fs::Metadata),
     /// A reparse point (a symbolic link or junction): opened as itself, never followed.
     Link,
     /// Something that is not a file.
@@ -85,7 +87,7 @@ pub fn open_unfollowed(path: &Path) -> std::io::Result<Unfollowed> {
     if !meta.is_file() {
         return Ok(Unfollowed::NotRegular);
     }
-    Ok(Unfollowed::File(file))
+    Ok(Unfollowed::File(file, meta))
 }
 
 /// The directory that holds `credentials.json` (and `conch-voice`'s `voice.toml`), from the
@@ -263,7 +265,7 @@ fn read_logins(path: &Path) -> Result<Option<HashMap<String, Option<StoredCreden
     // so a swap after the look above cannot change which file is read.
     #[cfg(windows)]
     let file = match open_unfollowed(path) {
-        Ok(Unfollowed::File(file)) => file,
+        Ok(Unfollowed::File(file, _)) => file,
         Ok(Unfollowed::Link | Unfollowed::NotRegular) => {
             return Err(Error::CredentialsNotRegular {
                 path: path.to_owned(),
@@ -839,15 +841,19 @@ mod tests {
         std::os::unix::fs::symlink(credentials_path(real.path()), credentials_path(dir.path()))
             .unwrap();
         // Creating a file symbolic link on Windows needs a privilege or developer mode
-        // (GitHub's Windows runners have it): without it this says why it did not run.
+        // (GitHub's Windows runners have it): without it this says why it did not run,
+        // except on CI (`CI` or `GITHUB_ACTIONS` set), where it fails: libtest captures the
+        // message of a skip, so a skipped test would be invisible there.
         #[cfg(windows)]
-        if std::os::windows::fs::symlink_file(
+        if let Err(error) = std::os::windows::fs::symlink_file(
             credentials_path(real.path()),
             credentials_path(dir.path()),
-        )
-        .is_err()
-        {
-            eprintln!("skipped: this process may not create a symbolic link");
+        ) {
+            assert!(
+                std::env::var_os("CI").is_none() && std::env::var_os("GITHUB_ACTIONS").is_none(),
+                "a symbolic link cannot be created on CI: {error}"
+            );
+            eprintln!("skipped: this process may not create a symbolic link: {error}");
             return;
         }
         let result = resolve_token(None, &server("http://a:1"), Some(dir.path()));
@@ -860,6 +866,27 @@ mod tests {
         fs::create_dir(credentials_path(dir.path())).unwrap();
         let result = resolve_token(None, &server("http://a:1"), Some(dir.path()));
         assert!(matches!(result, Err(Error::CredentialsNotRegular { .. })));
+    }
+
+    /// A directory junction at the leaf (`mklink /J` needs no privilege) is refused.
+    #[cfg(windows)]
+    #[test]
+    fn a_junction_at_the_leaf_is_refused() {
+        let real = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let status = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(credentials_path(dir.path()))
+            .arg(real.path())
+            .stdout(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        assert!(status.success(), "mklink /J failed");
+        let result = resolve_token(None, &server("http://a:1"), Some(dir.path()));
+        assert!(
+            matches!(result, Err(Error::CredentialsNotRegular { .. })),
+            "{result:?}"
+        );
     }
 
     #[cfg(unix)]

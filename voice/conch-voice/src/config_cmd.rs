@@ -95,6 +95,10 @@ const O_NONBLOCK: i32 = 0x0004;
 )))]
 compile_error!("config_cmd.rs: O_NONBLOCK is not known for this Unix target");
 
+/// `FILE_ATTRIBUTE_READONLY`: `winnt.h`, 0x1. Hand-defined, as in `conch-voice-api`.
+#[cfg(windows)]
+const FILE_ATTRIBUTE_READONLY: u32 = 0x1;
+
 /// How many names are tried for the temporary file before giving up.
 const TEMPORARY_NAMES: u32 = 16;
 
@@ -238,6 +242,18 @@ fn save_with(
     let mode = before
         .as_ref()
         .map_or(NEW_FILE_MODE, |before| before.mode & !0o022);
+    // A read-only file is refused here, before anything is written: whether a rename may
+    // replace one is the system's rule, and the answer is the same everywhere.
+    #[cfg(windows)]
+    if before
+        .as_ref()
+        .is_some_and(|before| before.attributes & FILE_ATTRIBUTE_READONLY != 0)
+    {
+        return Err(write(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "the file is read-only",
+        )));
+    }
     let mut temporary = Temporary::create(dir).map_err(write)?;
     temporary.file.write_all(new.as_bytes()).map_err(write)?;
     #[cfg(unix)]
@@ -342,10 +358,18 @@ impl Snapshot {
             // checked: a link or another kind of thing put in the file's place since it was
             // looked at is a change. Named pipes cannot be planted in a user directory, so
             // there is no FIFO to wait on and no `O_NONBLOCK` to port.
-            let mut file = match conch_voice_api::open_unfollowed(path).map_err(read)? {
-                conch_voice_api::Unfollowed::File(file) => file,
-                conch_voice_api::Unfollowed::Link | conch_voice_api::Unfollowed::NotRegular => {
-                    return Err(Error::ConfigChanged {
+            // The size and attributes are the opened handle's own, not the look's.
+            let (mut file, opened) = match conch_voice_api::open_unfollowed(path).map_err(read)? {
+                conch_voice_api::Unfollowed::File(file, opened) => (file, opened),
+                // A link put in the file's place since it was looked at: refused as the
+                // look refuses one.
+                conch_voice_api::Unfollowed::Link => {
+                    return Err(Error::ConfigLink {
+                        path: path.to_owned(),
+                    });
+                }
+                conch_voice_api::Unfollowed::NotRegular => {
+                    return Err(Error::ConfigNotRegular {
                         path: path.to_owned(),
                     });
                 }
@@ -354,8 +378,8 @@ impl Snapshot {
             file.read_to_string(&mut text).map_err(read)?;
             Ok(Some(Self {
                 text,
-                size: meta.file_size(),
-                attributes: meta.file_attributes(),
+                size: opened.file_size(),
+                attributes: opened.file_attributes(),
             }))
         }
     }
@@ -369,8 +393,9 @@ struct Temporary {
 }
 
 impl Temporary {
-    /// Creates a file no one else has made, in `dir`, readable and writable by its owner
-    /// only until its mode is set.
+    /// Creates a file no one else has made, in `dir`. On Unix it is readable and writable
+    /// by its owner only until its mode is set. On Windows there is no mode: the file
+    /// inherits the directory's ACL, which is the protection that is trusted there.
     fn create(dir: &Path) -> io::Result<Self> {
         let process = std::process::id();
         let nanos = SystemTime::now()
@@ -1107,15 +1132,53 @@ mod windows_tests {
     }
 
     /// A file symbolic link at `link` to `target`, or false (and a message): that needs a
-    /// privilege or developer mode, which GitHub's Windows runners have.
+    /// privilege or developer mode, which GitHub's Windows runners have. On CI (`CI` or
+    /// `GITHUB_ACTIONS` set) a failure is a panic, never a skip: libtest captures the
+    /// message of a skip, so a skipped test would be invisible there.
     fn symlink(target: &Path, link: &Path) -> bool {
         match std::os::windows::fs::symlink_file(target, link) {
             Ok(()) => true,
             Err(error) => {
+                assert!(
+                    std::env::var_os("CI").is_none()
+                        && std::env::var_os("GITHUB_ACTIONS").is_none(),
+                    "a symbolic link cannot be created on CI: {error}"
+                );
                 eprintln!("skipped: this process may not create a symbolic link: {error}");
                 false
             }
         }
+    }
+
+    /// A directory junction at `link` to the directory `target`: `mklink /J` needs no
+    /// privilege.
+    fn junction(target: &Path, link: &Path) {
+        let status = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(link)
+            .arg(target)
+            .stdout(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        assert!(status.success(), "mklink /J failed");
+    }
+
+    #[test]
+    fn a_junction_at_the_path_is_refused_and_the_target_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        let other = dir.path().join("other");
+        fs::create_dir(&other).unwrap();
+        fs::write(other.join(FILE_NAME), KEPT).unwrap();
+        junction(&other, &dir.path().join(FILE_NAME));
+        let error = save_now(dir.path(), "new").unwrap_err();
+        assert!(
+            matches!(
+                error,
+                Error::ConfigLink { .. } | Error::ConfigNotRegular { .. }
+            ),
+            "{error:?}"
+        );
+        assert_eq!(fs::read_to_string(other.join(FILE_NAME)).unwrap(), KEPT);
     }
 
     #[test]
@@ -1232,28 +1295,29 @@ mod windows_tests {
     }
 
     #[test]
-    fn a_read_only_file_is_never_half_written() {
+    fn a_read_only_file_is_refused_before_anything_is_written() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(FILE_NAME);
         fs::write(&path, KEPT).unwrap();
         let mut permissions = fs::metadata(&path).unwrap().permissions();
         permissions.set_readonly(true);
         fs::set_permissions(&path, permissions).unwrap();
-        // Whether the system lets a rename replace a read-only file is its own rule: the
-        // save either fails with a typed error naming the file and leaves the original, or
-        // replaces it whole.
-        match save_now(dir.path(), "new") {
-            Ok(()) => {
-                let text = fs::read_to_string(&path).unwrap();
-                assert_eq!(text, KEPT.replace("\"old\"", "\"new\""));
+        let mut called = false;
+        let error = save(dir.path(), AudioKey::Input, "new", &mut || called = true).unwrap_err();
+        match &error {
+            Error::ConfigWrite {
+                path: named,
+                source,
+            } => {
+                assert_eq!(named, &path);
+                assert_eq!(source.kind(), io::ErrorKind::PermissionDenied);
             }
-            Err(error) => {
-                assert!(matches!(error, Error::ConfigWrite { .. }), "{error:?}");
-                assert!(error.to_string().contains(FILE_NAME), "{error}");
-                assert_eq!(fs::read_to_string(&path).unwrap(), KEPT);
-            }
+            other => panic!("expected ConfigWrite, got {other:?}"),
         }
-        // The read-only temporary-free state is the same either way.
+        assert!(error.to_string().contains(FILE_NAME), "{error}");
+        // Refused before the new file was written, so before the rename hook.
+        assert!(!called);
+        assert_eq!(fs::read_to_string(&path).unwrap(), KEPT);
         assert_eq!(names(dir.path()), [FILE_NAME]);
     }
 
