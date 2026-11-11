@@ -720,7 +720,11 @@ pub fn write_device_list(list: &VoiceDevicesV1, out: &mut dyn Write) -> io::Resu
     out.flush()
 }
 
+/// The tests that build a PipeWire node table, which is `dmn-audio`'s and Linux's alone: a
+/// platform without PipeWire has the neutral [`DeviceTable`] only, and no way to make one
+/// from a table of nodes.
 #[cfg(test)]
+#[cfg(target_os = "linux")]
 mod tests {
     use dmn_audio::{NodeTable, RegistryEvent};
 
@@ -1158,11 +1162,23 @@ Speakers (`output`)
         assert_eq!(view.state, VoiceDevicesConfig::None);
         assert!(why.is_none());
     }
+}
+
+#[cfg(test)]
+mod uid_tests {
+    use super::*;
 
     /// A Windows user has no numeric id: the answer is "unknown", never a guess.
     #[cfg(not(unix))]
     #[test]
     fn without_unix_the_current_user_is_unknown() {
         assert_eq!(current_uid(), None);
+    }
+
+    /// Where there is a `/proc`, the user is known.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn on_linux_the_current_user_is_known() {
+        assert!(current_uid().is_some());
     }
 }
