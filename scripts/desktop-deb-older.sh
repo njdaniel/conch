@@ -40,7 +40,7 @@ dpkg --compare-versions "$older" lt "$version" || fail "$older does not sort bel
 
 dpkg-deb -R "$new" "$work/x"
 sed -i "s/^Version: .*/Version: $older/" "$work/x/DEBIAN/control"
-grep -qx "Version: $older" "$work/x/DEBIAN/control" || fail "cannot set the version in the control file"
+grep -qxF "Version: $older" "$work/x/DEBIAN/control" || fail "cannot set the version in the control file"
 mkdir -p "$(dirname "$out")"
 dpkg-deb --root-owner-group -Zxz --build "$work/x" "$out" >/dev/null
 echo "desktop-deb-older: OK: $out (version $older, below $version)"
