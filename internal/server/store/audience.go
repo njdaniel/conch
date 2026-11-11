@@ -2637,13 +2637,16 @@ const PendingNotificationScanBound = 2000
 // candidates: a seek per channel the reader is in, about the limit's worth of
 // candidates, and the heap's log of the channel count per candidate taken. A
 // channel's seek starts above the greatest of the cursor, the read mark and
-// the reader's history bound there (history_after), so history the reader may
-// never read and history they have read are not walked. What is not bounded
-// is the rows the seek passes over after that start without selecting them:
-// the reader's own posts, removed messages, and whispers not addressed to the
-// reader, in the reader's own channels, above their mark. A call's latency
-// therefore grows with that volume. It is a timing signal about whispers in
-// channels the reader is in, and it does not change an answer: content,
+// the reader's history bound there (history_after), so rows at or below the
+// bound, and rows the reader has read, are not walked. What is not bounded is
+// the rows the seek passes over after that start without selecting them, in
+// the reader's own channels, above their mark: the reader's own posts,
+// removed messages, whispers not addressed to the reader, net messages for a
+// net the reader is not on, replies after the bound to a thread whose root is
+// at or below it (a reply is held to its root's id), and, for a guest with no
+// bound (who sees nothing), every row. A call's latency therefore grows with
+// that volume. It is a timing signal about what is said in channels the
+// reader is in, and it does not change an answer: content,
 // cursor and `more` are functions of candidates only (the byte-identity
 // tests). The alternative, a stored high-water mark of examined ids per
 // reader, would be new state on a read path that revocation (a removal or a

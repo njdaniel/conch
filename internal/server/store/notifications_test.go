@@ -1077,22 +1077,106 @@ func TestPendingNotificationsPlan(t *testing.T) {
 				t.Errorf("the messages are not read through messages_by_channel:\n%s", text)
 			}
 			// The correlated subqueries run once per row the seek passes, so each
-			// is an index or rowid search, never a scan (issue #1730).
-			for _, tc := range []struct{ what, want string }{
-				{"removals", "SEARCH mrm USING INTEGER PRIMARY KEY (rowid=?)"},
-				{"recipients", "SEARCH r USING COVERING INDEX sqlite_autoindex_message_recipients_1 (message_id=? AND principal_id=?)"},
-				{"bans", "SEARCH lb USING COVERING INDEX sqlite_autoindex_channel_bans_1 (channel_id=? AND principal_id=?)"},
-				{"memberships", "SEARCH lm USING"},
-				{"files", "SEARCH sf USING INDEX files_by_message (message_id=?)"},
-				{"guest attribution", "SEARCH g USING INTEGER PRIMARY KEY (rowid=?)"},
-			} {
-				if !strings.Contains(text, tc.want) {
-					t.Errorf("the %s subquery is not %q:\n%s", tc.what, tc.want, text)
+			// is an index or rowid search, never a scan or an automatic index
+			// (issue #1730). Each subquery's plan lines are checked on their
+			// own, and each expected one is counted: the statement has two
+			// guest attributions, and a removal, recipient, file, principal and
+			// guest-visit lookup each.
+			assertSubqueriesIndexed(t, plan, map[string]int{
+				"mrm": 1, "r": 1, "sf": 1, "g": 2, "p": 1, "hg": 1,
+			}, []string{"lm", "lb"})
+		})
+	}
+}
+
+// assertSubqueriesIndexed checks a plan, as the lines of EXPLAIN QUERY PLAN:
+// no line scans, builds an automatic index or sorts; each subquery's lines are
+// all searches by an index or a rowid; every alias in exact appears in exactly
+// that many searches, and every alias in atLeast in one or more.
+func assertSubqueriesIndexed(t *testing.T, plan []string, exact map[string]int, atLeast []string) {
+	t.Helper()
+	text := strings.Join(plan, "\n")
+	search := regexp.MustCompile(`^SEARCH (\w+) USING (INTEGER PRIMARY KEY|COVERING INDEX|INDEX) `)
+	seen := map[string]int{}
+	inSubquery := false
+	for _, line := range plan {
+		switch {
+		case strings.Contains(line, "AUTOMATIC"):
+			t.Errorf("an automatic index: %q\n%s", line, text)
+		case strings.HasPrefix(line, "SCAN"):
+			t.Errorf("a scan: %q\n%s", line, text)
+		case strings.Contains(line, "TEMP B-TREE"):
+			t.Errorf("a sort: %q\n%s", line, text)
+		case strings.Contains(line, "SUBQUERY"):
+			inSubquery = true
+			continue
+		}
+		m := search.FindStringSubmatch(line)
+		if m == nil {
+			if inSubquery {
+				t.Errorf("a subquery line that is not an index or rowid search: %q\n%s", line, text)
+			}
+			continue
+		}
+		seen[m[1]]++
+	}
+	for alias, want := range exact {
+		if seen[alias] != want {
+			t.Errorf("subquery alias %s is searched %d times, want %d:\n%s", alias, seen[alias], want, text)
+		}
+	}
+	for _, alias := range atLeast {
+		if seen[alias] == 0 {
+			t.Errorf("subquery alias %s is not searched:\n%s", alias, text)
+		}
+	}
+}
+
+// The reader's channel list is a search of their memberships by principal and
+// a lookup per channel of its ban and of the read mark, with and without
+// ANALYZE (issue #1730). Its sort is of the reader's own memberships, which
+// the merge needs in full, so it is the one temp B-tree allowed.
+func TestPendingChannelsPlan(t *testing.T) {
+	for _, analyze := range []bool{false, true} {
+		t.Run(fmt.Sprintf("analyze=%v", analyze), func(t *testing.T) {
+			f := newFeedFixture(t)
+			bulkInsert(t, f.s, f.ch.ID, f.frank.ID, 300, "chatter")
+			if analyze {
+				if _, err := f.s.db.Exec("ANALYZE"); err != nil {
+					t.Fatal(err)
 				}
 			}
+			rows, err := f.s.db.Query("EXPLAIN QUERY PLAN "+pendingChannelsSQL, f.dave.ID, f.dave.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = rows.Close() }()
+			var plan []string
+			for rows.Next() {
+				var id, parent, unused int
+				var detail string
+				if err := rows.Scan(&id, &parent, &unused, &detail); err != nil {
+					t.Fatal(err)
+				}
+				plan = append(plan, detail)
+			}
+			if err := rows.Err(); err != nil {
+				t.Fatal(err)
+			}
+			text := strings.Join(plan, "\n")
+			t.Log("\n" + text)
 			for _, line := range plan {
-				if strings.HasPrefix(line, "SCAN") {
-					t.Errorf("the plan scans: %q\n%s", line, text)
+				if strings.Contains(line, "AUTOMATIC") || strings.HasPrefix(line, "SCAN") || strings.Contains(line, "messages") {
+					t.Errorf("unexpected plan line %q:\n%s", line, text)
+				}
+			}
+			for _, want := range []string{
+				"SEARCH lm USING INDEX channel_members_by_principal (principal_id=?)",
+				"SEARCH lb USING COVERING INDEX sqlite_autoindex_channel_bans_1 (channel_id=? AND principal_id=?)",
+				"SEARCH rm USING INDEX sqlite_autoindex_read_marks_1 (principal_id=? AND channel_id=?)",
+			} {
+				if !strings.Contains(text, want) {
+					t.Errorf("the channel list plan lacks %q:\n%s", want, text)
 				}
 			}
 		})

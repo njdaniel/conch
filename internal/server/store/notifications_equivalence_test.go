@@ -52,6 +52,9 @@ func referenceCandidates(t *testing.T, s *Store, reader, after int64, limit int)
 		r.whisper = k.Valid && k.String == "principals"
 		out = append(out, r)
 	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
 	return out
 }
 
@@ -98,11 +101,15 @@ func TestPendingCandidatesEquivalence(t *testing.T) {
 				}
 				au := ps[rng.Intn(len(ps))]
 				var kind any
-				if rng.Intn(4) == 0 {
+				switch rng.Intn(6) {
+				case 0, 1:
 					kind = "principals"
+				case 2:
+					// A net message (no net row: the audience is the recipient rows).
+					kind = "net"
 				}
 				var root any
-				if len(roots) > 0 && rng.Intn(6) == 0 {
+				if len(roots) > 0 && rng.Intn(3) == 0 {
 					var rch int64
 					r := roots[rng.Intn(len(roots))]
 					if err := f.s.db.QueryRow("SELECT channel_id FROM messages WHERE id=?", r).Scan(&rch); err != nil {
@@ -129,17 +136,35 @@ func TestPendingCandidatesEquivalence(t *testing.T) {
 					ex("INSERT INTO message_removals (message_id, channel_id, removed_at) VALUES (?,?,0)", id, ch)
 				}
 			}
-			maxID := int64(n + 50)
+			var maxID int64
+			if err := f.s.db.QueryRow("SELECT MAX(id) FROM messages").Scan(&maxID); err != nil {
+				t.Fatal(err)
+			}
 			for _, ch := range chans {
 				for _, p := range ps {
-					switch rng.Intn(6) {
+					switch rng.Intn(8) {
 					case 0:
 						ex("INSERT OR IGNORE INTO channel_bans (channel_id, principal_id, created_at) VALUES (?,?,0)", ch, p)
-					case 1:
+					case 1, 2, 3:
 						ex("UPDATE channel_members SET history_after=? WHERE channel_id=? AND principal_id=?", rng.Int63n(maxID), ch, p)
 					}
 					if rng.Intn(3) == 0 {
 						ex("INSERT OR REPLACE INTO read_marks (principal_id, channel_id, last_read_id, updated_at) VALUES (?,?,?,0)", p, ch, rng.Int63n(maxID))
+					}
+				}
+			}
+			// Guests: bob is an active guest with a bound in every membership,
+			// alice one with none (NULL, who sees nothing); in most worlds. A
+			// guest's bound is applied to a reply by its root, so bounds above
+			// replies' roots matter here.
+			if seed%4 != 0 {
+				for i, p := range []int64{f.bob.ID, f.alice.ID} {
+					ex(`INSERT INTO guest_visits (principal_id, handle, origin, state, started_at, expires_at, idle_ms)
+						VALUES (?, ?, 'address', 'active', 0, 9223372036854775807, 1000)`, p, fmt.Sprintf("guest-%d", i))
+					if p == f.bob.ID {
+						ex("UPDATE channel_members SET history_after = ? WHERE principal_id = ?", rng.Int63n(maxID), p)
+					} else {
+						ex("UPDATE channel_members SET history_after = NULL WHERE principal_id = ?", p)
 					}
 				}
 			}
@@ -159,7 +184,12 @@ func TestPendingCandidatesEquivalence(t *testing.T) {
 							g = append(g, feedRow{c.summary.MessageID, c.summary.ChannelID, c.summary.AuthorID, c.summary.ChannelName, c.body, c.whisper})
 						}
 						if !reflect.DeepEqual(want, g) {
-							t.Fatalf("seed %d reader %d after %d limit %d: reference %d rows, feed %d rows", seed, p, after, limit, len(want), len(g))
+							for i := 0; i < max(len(want), len(g)); i++ {
+								if i >= len(want) || i >= len(g) || want[i] != g[i] {
+									t.Fatalf("seed %d reader %d after %d limit %d: reference %d rows, feed %d rows; first difference at row %d (reference id %d, feed id %d)",
+										seed, p, after, limit, len(want), len(g), i, idAt(want, i), idAt(g, i))
+								}
+							}
 						}
 					}
 				}
@@ -167,4 +197,12 @@ func TestPendingCandidatesEquivalence(t *testing.T) {
 			t.Logf("seed %d ok (%d msgs, %d chans)", seed, n, len(chans))
 		})
 	}
+}
+
+// idAt is the id of row i, or -1 past the end.
+func idAt(rows []feedRow, i int) int64 {
+	if i < len(rows) {
+		return rows[i].id
+	}
+	return -1
 }
