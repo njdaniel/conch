@@ -259,19 +259,33 @@ func (s *Server) requireVoicePermission(w http.ResponseWriter, r *http.Request, 
 // state of the channel. When voice is not configured the snapshot says so
 // (configured and available false, no rooms) rather than failing; only a
 // caller who passed the membership check sees that.
+//
+// ?schema= names the version (voicePresenceVersion): v1 by default, v2 on
+// request, 400 for anything else, decided before the channel is looked at.
 func (s *Server) handleVoicePresence(w http.ResponseWriter, r *http.Request) {
+	version, ok := voicePresenceVersion(r.URL.Query())
+	if !ok {
+		writeVoicePresenceSchemaInvalid(w)
+		return
+	}
 	channel, caller, ok := s.voicePresenceChannel(w, r, r.PathValue("channel"), nil)
 	if !ok {
 		return
 	}
 	// The caller's own snapshot: why their last share ended is theirs alone.
-	snap := s.voice.snapshot(channel.ID, caller.ID)
-	if err := snap.Validate(); err != nil {
+	snap, err := s.voice.snapshotV(channel.ID, caller.ID, version)
+	if err != nil {
 		slog.ErrorContext(r.Context(), "voice: built an invalid presence document", "channel", channel.ID, "error", err)
 		writeInternalError(w)
 		return
 	}
 	writeJSON(w, http.StatusOK, snap)
+}
+
+// writeVoicePresenceSchemaInvalid answers a presence request whose schema
+// parameter names no version we serve. It names no channel and no version.
+func writeVoicePresenceSchemaInvalid(w http.ResponseWriter) {
+	writeError(w, http.StatusBadRequest, "invalid_request", "schema must name a presence document this server serves, given once")
 }
 
 // errVoiceNoLongerEntitled is voiceSession's refusal when the caller stopped

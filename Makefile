@@ -11,7 +11,7 @@ LINT    = golangci-lint
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null)
 LDFLAGS  = -X main.version=$(VERSION)
 
-.PHONY: build test lint vet fmt fmt-check invisible-check check schema-compat schema-ts emoji-catalog depgate go-scope deploy-test agent-claim-test rust-check rust-build web-node web-check web-build web-embed build-web-embedded web-e2e desktop-node desktop-check desktop-build desktop-smoke desktop-voice-it p3-local p3-reset hooks-install clean
+.PHONY: build test lint vet fmt fmt-check invisible-check check schema-compat schema-ts emoji-catalog depgate go-scope deploy-test agent-claim-test rust-check rust-build web-node web-check web-build web-embed build-web-embedded web-e2e web-e2e-heavy desktop-node desktop-check desktop-build desktop-deb desktop-deb-lifecycle desktop-smoke desktop-voice-it desktop-voice-e2e p3-local p3-reset hooks-install clean
 
 build:
 	$(GO) build ./...
@@ -101,6 +101,13 @@ web-e2e: web-node
 	@cd web && node --input-type=module -e "import { chromium } from '@playwright/test'; import { existsSync } from 'node:fs'; if (!existsSync(chromium.executablePath())) { console.error('web-e2e: FAIL: the browser Playwright pins is not installed; run: cd web && npx playwright install chromium'); process.exit(1); }"
 	cd web && npm run e2e -- $(E2E_ARGS)
 
+# The tests tagged @heavy, which the pull request lane skips (issue #1613,
+# docs/testing.md). A thin wrapper over web-e2e; the nightly workflow
+# .github/workflows/e2e-heavy.yml runs the same arguments. A caller's E2E_ARGS
+# is appended, not replaced: make web-e2e-heavy E2E_ARGS=--headed.
+web-e2e-heavy:
+	$(MAKE) web-e2e E2E_ARGS="--grep @heavy --pass-with-no-tests $(E2E_ARGS)"
+
 # The desktop shell under desktop/ (issue #940, ADR-007, linux-desktop.md): an
 # Electron app that serves the web client from packaged files. desktop-check
 # runs the repository's gates for it (the fetch script's test, the lint rules,
@@ -110,7 +117,7 @@ web-e2e: web-node
 # without it this fails and names that version, it does not skip.
 DESKTOP_NODE = $(shell cat desktop/.nvmrc)
 DESKTOP_NODE_BIN = $(HOME)/.nvm/versions/node/v$(DESKTOP_NODE)/bin
-desktop-node desktop-check desktop-build desktop-smoke desktop-voice-it: export PATH := $(if $(wildcard $(DESKTOP_NODE_BIN)/node),$(DESKTOP_NODE_BIN):)$(PATH)
+desktop-node desktop-check desktop-build desktop-deb desktop-smoke desktop-voice-it desktop-voice-e2e: export PATH := $(if $(wildcard $(DESKTOP_NODE_BIN)/node),$(DESKTOP_NODE_BIN):)$(PATH)
 
 desktop-node:
 	@v=$$(node --version 2>/dev/null) || { echo "desktop: FAIL: Node.js is not installed; install Node $(DESKTOP_NODE) (desktop/.nvmrc)"; exit 1; }; \
@@ -120,6 +127,8 @@ desktop-check: desktop-node
 	./scripts/desktop-electron-test.sh
 	./scripts/desktop-lint-test.sh
 	./scripts/desktop-voice-helper-test.sh
+	./scripts/desktop-version-test.sh
+	./scripts/desktop-deb-test.sh
 	./scripts/desktop-lint.sh
 	./scripts/web-depgate.sh desktop
 	./scripts/web-licences.sh desktop/package-lock.json desktop/licences-allowlist.txt
@@ -136,6 +145,26 @@ desktop-check: desktop-node
 # without one (#1377). Not part of `make check`.
 desktop-build: desktop-node
 	./scripts/desktop-build.sh
+
+# The x86_64 .deb of that app (issue #1597): desktop/dist/conch-desktop_<version>_amd64.deb.
+# It builds the app in release mode (the voice helper is required: make
+# rust-build first), packs it with scripts/desktop-deb.sh and checks the result
+# with scripts/desktop-deb-test.sh. CONCH_RELEASE_VERSION=v0.1.0-alpha.18 makes it
+# the release package; unset, it is a development one. Needs dpkg-dev; installs
+# nothing and needs no root. Not part of `make check`.
+desktop-deb: desktop-node
+	DESKTOP_REQUIRE_VOICE=1 ./scripts/desktop-build.sh
+	./scripts/desktop-deb.sh
+	./scripts/desktop-deb-test.sh desktop/dist/conch-desktop_*_amd64.deb
+
+# Installs, upgrades, removes and purges the .deb in a clean ubuntu:24.04
+# container (issue #1599). With no argument it builds two fixture packages;
+# `make desktop-deb-lifecycle DEB_OLD=a.deb DEB_NEW=b.deb` uses real ones (NEW
+# a higher version). Needs Docker and network (apt fetches the Depends). Without
+# Docker it says SKIPPED and why; with CI set it fails. Never runs the app.
+# Not part of `make check`.
+desktop-deb-lifecycle:
+	./scripts/desktop-deb-lifecycle.sh $(if $(DEB_OLD)$(DEB_NEW),"$(DEB_OLD)" "$(DEB_NEW)")
 
 # The packaged smoke test: drives the built app over Chromium's remote-debugging
 # port (desktop/tests/smoke/launch.ts says why). Needs a display: CI runs it
@@ -154,6 +183,26 @@ desktop-voice-it: desktop-node
 	@if [ -z "$$CONCH_VOICE_BIN" ]; then $(MAKE) rust-build; fi
 	cd desktop && npm ci --no-audit
 	cd desktop && npm run test:integration
+
+# The live same-machine voice test (issue #1383, D3-12 of #771): the desktop's
+# VoiceService and Supervisor drive the real conch-voice into the pinned
+# LiveKit (Docker), with a second principal listening through a counting
+# sink and synthetic input only (a tone, a named pipe of key records). The Go
+# program e2e/desktop-voice is the world and runs desktop/tests/e2e under
+# Vitest. Builds conch-voice with the pinned toolchain unless CONCH_VOICE_BIN
+# names one, and the web client (web-build) that conchd serves to the browser
+# principal of the screen companion's test (issue #1583, D4-06; the browser the
+# test drives is the one Playwright pins: `npx playwright install chromium`).
+# It also typechecks and lints tests/e2e first: that project resolves livekit-client and
+# react from web/node_modules, so it lives here, not in desktop-check, which
+# needs nothing from web. Not part of check. Without
+# Docker or the toolchain it says SKIPPED and why; with CI set, it fails
+# instead.
+desktop-voice-e2e: desktop-node web-build
+	cd desktop && npm ci --no-audit
+	cd desktop && npm run typecheck:e2e
+	cd desktop && npm run lint:e2e
+	$(GO) run ./e2e/desktop-voice
 
 # The P3 local prototype (issue #283, docs/p3-walkthrough.md): p3-local builds
 # the binaries and the web client, starts a disposable conchd, creates the test

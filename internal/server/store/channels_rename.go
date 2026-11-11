@@ -208,7 +208,7 @@ func channelRenameStandingTx(ctx context.Context, tx execer, channelID, callerID
 		return standingOperator, nil
 	}
 	var manages int
-	switch err := tx.QueryRowContext(ctx, "SELECT manages FROM channel_members WHERE channel_id = ? AND principal_id = ?", channelID, callerID).Scan(&manages); {
+	switch err := tx.QueryRowContext(ctx, "SELECT manages FROM "+liveMembers+" WHERE channel_id = ? AND principal_id = ?", channelID, callerID).Scan(&manages); {
 	case errors.Is(err, sql.ErrNoRows):
 		return 0, ErrNotFound
 	case err != nil:

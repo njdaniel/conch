@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { errorV0, loginResponseV1, passwordUpdatedResponseV1, whoAmIResponseV1 } from '../../schema/generated';
-import { call } from '../operations';
-import type { BridgeReply, ConchDesktopBridge, SignInOutcome } from './bridge';
+import { call, previewCall } from '../operations';
+import type { BridgeReply, BridgeRequest, ConchDesktopBridge, ReplaceCredentialRequest, SignInOutcome } from './bridge';
 import { credentials, isSessionToken, STAND_IN } from './credentials';
 import { http } from './http';
 
@@ -26,6 +26,7 @@ function fakeBridge(overrides: Partial<ConchDesktopBridge>): ConchDesktopBridge 
     joinAsGuest: unexpected('joinAsGuest'),
     createAccount: unexpected('createAccount'),
     signOut: unexpected('signOut'),
+    replaceCredential: unexpected('replaceCredential'),
     profiles: unexpected('profiles'),
     profileAdd: unexpected('profileAdd'),
     profileRename: unexpected('profileRename'),
@@ -36,6 +37,10 @@ function fakeBridge(overrides: Partial<ConchDesktopBridge>): ConchDesktopBridge 
     uploadFile: unexpected('uploadFile'),
     downloadFile: unexpected('downloadFile'),
     saveFile: unexpected('saveFile'),
+    notify: unexpected('notify'),
+    notifyClose: unexpected('notifyClose'),
+    notificationSupported: () => false,
+    onNotification: () => () => undefined,
     ...overrides,
   };
 }
@@ -212,6 +217,48 @@ describe('the desktop transport: sign-in', () => {
   });
 });
 
+describe('the desktop transport: the writes that replace the credential (issue #1422)', () => {
+  const rotated = { revoked: 2 } as const;
+
+  it('sends a password change to main alone and reads the answer with the stand-in where the token was', async () => {
+    const replaceCredential = vi.fn((...[,]: [ReplaceCredentialRequest]): Promise<SignInOutcome> => Promise.resolve({ ok: true, who, answer: { ...rotated, credential } }));
+    const request = vi.fn();
+    install(fakeBridge({ replaceCredential, request }));
+    const res = await http.send(call('changePassword'), STAND_IN, { keepalive: false, body: { current: 'old-canary', password: 'new-canary' } });
+    expect(replaceCredential).toHaveBeenCalledWith({ operation: 'changePassword', body: { current: 'old-canary', password: 'new-canary' } });
+    // Not through the generic request, which refuses the operation anyway.
+    expect(request).not.toHaveBeenCalled();
+    const body: unknown = await res.json();
+    expect(passwordUpdatedResponseV1(body)).toEqual([]);
+    expect(body).toMatchObject({ token: STAND_IN, revoked: 2 });
+  });
+
+  it.each([
+    ['setPassword', { password: 'p', proof: 'c' }],
+    ['convertGuest', { name: 'ada', password: 'p' }],
+    ['reauth', { password: 'p' }],
+  ] as const)('routes %s to the same function', async (op, body) => {
+    const replaceCredential = vi.fn((...[,]: [ReplaceCredentialRequest]): Promise<SignInOutcome> => Promise.resolve({ ok: true, who: null, answer: { until: '2026-11-06T10:10:00Z' } }));
+    install(fakeBridge({ replaceCredential }));
+    await http.send(call(op), STAND_IN, { keepalive: false, body });
+    expect(replaceCredential).toHaveBeenCalledWith({ operation: op, body });
+  });
+
+  it('keeps the server’s refusal of a wrong password: 401 auth_failed', async () => {
+    install(fakeBridge({ replaceCredential: () => Promise.resolve({ ok: false, kind: 'unauthorized', status: 401, code: 'auth_failed', message: 'wrong' }) }));
+    const res = await http.send(call('changePassword'), STAND_IN, { keepalive: false, body: { current: 'x', password: 'y' } });
+    expect(res.status).toBe(401);
+    expect(await res.json()).toMatchObject({ code: 'auth_failed' });
+  });
+
+  it('sends a body that is not the operation’s request to nobody', async () => {
+    const replaceCredential = vi.fn();
+    install(fakeBridge({ replaceCredential }));
+    await expect(http.send(call('changePassword'), STAND_IN, { keepalive: false, body: { current: 1 } })).rejects.toBeInstanceOf(TypeError);
+    expect(replaceCredential).not.toHaveBeenCalled();
+  });
+});
+
 describe('the desktop transport: a pasted credential', () => {
   it('goes to main to be checked, and what comes back is the account', async () => {
     const signInWithCredential = vi.fn((): Promise<SignInOutcome> => Promise.resolve({ ok: true, who, answer: {} }));
@@ -323,5 +370,51 @@ describe('the desktop credential store', () => {
     credentials.writePreference('k', 'v');
     expect(credentials.readPreference('k')).toBe('v');
     expect(window.localStorage.getItem('k')).toBeNull();
+  });
+});
+
+describe('Preview as member through the desktop transport (issue #1540)', () => {
+  const ok = (): Promise<BridgeReply> => Promise.resolve({ kind: 'reply', status: 200, body: {} });
+
+  it('hands main previewAs on each of the five previewable reads, and on those alone', async () => {
+    const request = vi.fn<(r: BridgeRequest) => Promise<BridgeReply>>(() => ok());
+    install(fakeBridge({ request }));
+    await http.get(previewCall('preview', 7), STAND_IN);
+    await http.get(previewCall('listChannels', 7), STAND_IN);
+    await http.get(previewCall('channelDirectory', 7), STAND_IN);
+    await http.get(previewCall('directoryMembers', 7, {}, 'limit=5'), STAND_IN);
+    await http.get(previewCall('listMembers', 7, { channel: 'general' }), STAND_IN);
+    expect(request.mock.calls.map(([r]) => [r.operation, r.previewAs])).toEqual([
+      ['preview', 7],
+      ['listChannels', 7],
+      ['channelDirectory', 7],
+      ['directoryMembers', 7],
+      ['listMembers', 7],
+    ]);
+    request.mockClear();
+    await http.get(call('listChannels'), STAND_IN);
+    expect(request.mock.calls[0]?.[0]).not.toHaveProperty('previewAs');
+  });
+
+  it('never hands main previewAs for an operation that is not previewable, even from a hand-built call', async () => {
+    const request = vi.fn<(r: BridgeRequest) => Promise<BridgeReply>>(() => ok());
+    install(fakeBridge({ request }));
+    const forged = { ...call('listMessages', { channel: 'a' }), previewAs: 7 };
+    await expect(http.get(forged, STAND_IN)).rejects.toBeInstanceOf(TypeError);
+    await expect(http.send({ ...call('postMessage', { channel: 'a' }), previewAs: 7 }, STAND_IN, { body: {}, keepalive: false })).rejects.toBeInstanceOf(TypeError);
+    await expect(http.open({ ...call('health'), previewAs: 7 }, undefined)).rejects.toBeInstanceOf(TypeError);
+    await expect(http.health({ ...call('health'), previewAs: 7 })).rejects.toBeInstanceOf(TypeError);
+    expect(request).not.toHaveBeenCalled();
+  });
+
+  it('refuses previewAs at the top of upload and download', async () => {
+    const uploadFile = vi.fn(() => ok());
+    const downloadFile = vi.fn(() => Promise.resolve({ kind: 'bytes', data: 'AQID' } as const));
+    install(fakeBridge({ uploadFile, downloadFile }));
+    const up = { ...call('uploadFile', { channel: 'general' }, 'filename=a.png'), previewAs: 7 };
+    await expect(http.upload(up, STAND_IN, 'image/png', new Blob([new Uint8Array([1])]), new AbortController().signal)).rejects.toBeInstanceOf(TypeError);
+    await expect(http.download({ ...call('fileBytes', { id: 1 }), previewAs: 7 }, STAND_IN)).rejects.toBeInstanceOf(TypeError);
+    expect(uploadFile).not.toHaveBeenCalled();
+    expect(downloadFile).not.toHaveBeenCalled();
   });
 });

@@ -42,7 +42,7 @@ func knowsCondExcept(viewer, exceptChannel string) string {
 		skip = " AND m1.channel_id <> " + exceptChannel
 	}
 	return "(p.id = " + viewer + " OR p.invited_by = " + viewer +
-		" OR EXISTS (SELECT 1 FROM channel_members m1 JOIN channel_members m2 ON m2.channel_id = m1.channel_id" +
+		" OR EXISTS (SELECT 1 FROM " + liveMembers + " m1 JOIN " + liveMembers + " m2 ON m2.channel_id = m1.channel_id" +
 		" WHERE m1.principal_id = " + viewer + " AND m2.principal_id = p.id" + skip + "))"
 }
 
@@ -224,7 +224,7 @@ func (s *Store) DirectoryMembershipAudience(ctx context.Context, channelID, subj
 		`SELECT v.id FROM principals v
 		 WHERE v.kind = 'human' AND v.disabled_at IS NULL AND v.hidden_at IS NULL
 		   AND (v.role = 'operator' OR v.owner = 1 OR v.id = ?
-		        OR (EXISTS (SELECT 1 FROM channel_members c WHERE c.channel_id = ? AND c.principal_id = v.id)
+		        OR (EXISTS (SELECT 1 FROM `+liveMembers+` c WHERE c.channel_id = ? AND c.principal_id = v.id)
 		            AND NOT EXISTS (SELECT 1 FROM principals p WHERE p.id = ? AND `+knowsCondExcept("v.id", "?")+`)))
 		 ORDER BY v.id`, // #nosec G202 -- the fragment is a constant of knowsCondExcept
 		subjectID, channelID, subjectID, channelID)

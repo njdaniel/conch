@@ -15,6 +15,7 @@
 //   Sign-in link as this person     act_as_members
 //   Credential, hook as the person  act_as_members
 //   Add to channel                  manage_channels
+//   Preview as member               manage_members and manage_channels
 //
 // Protection, which keys on the target and not on the viewer's authority:
 // nobody but an owner acts on an owner; a sign-in link never targets an
@@ -25,7 +26,7 @@ import { canDo } from './admin/permissions';
 import type { Permission, PermissionRowV1 } from './schema/permission';
 import type { ServerMemberV1, WhoAmIResponseV1 } from './schema/principal';
 
-export type MemberActionId = 'voice' | 'invites' | 'channel' | 'link' | 'credential' | 'hook' | 'role' | 'signout' | 'disable' | 'enable' | 'remove';
+export type MemberActionId = 'preview' | 'voice' | 'invites' | 'channel' | 'link' | 'credential' | 'hook' | 'role' | 'signout' | 'disable' | 'enable' | 'remove';
 
 export interface MemberAction {
   readonly id: MemberActionId;
@@ -50,6 +51,12 @@ export function memberActions(who: WhoAmIResponseV1, target: ServerMemberV1): re
   const add = (id: MemberActionId, label: string, needs: Permission | 'owner', destructive = false) => {
     items.push({ id, label, destructive, needs });
   };
+
+  // Preview as member (docs/design/permission-preview.md §3, §7.2): a person,
+  // never an agent, for a holder of both permissions. Nobody previews
+  // themself, and an owner is previewed by an owner alone (both above). The
+  // server decides again.
+  if (members && human && canDo(who, 'manage_channels')) add('preview', 'Preview as member', 'manage_members');
 
   // The brakes: voice binds members and operators, never an owner; member
   // links bind members alone (design §5).

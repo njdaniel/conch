@@ -171,6 +171,16 @@ type eventsModel struct {
 // permissions may have changed, and whoami says what they are now.
 type eventsPermissionsReceived struct{ gen int }
 
+// eventsChannelsReceived carries a channels_changed frame: the caller's
+// channel list may have changed, and the server says what it is now.
+type eventsChannelsReceived struct{ gen int }
+
+type membersEventReceived struct {
+	gen     int
+	channel string
+	members []schema.ChannelMemberV1
+}
+
 // eventsRosterReceived carries one roster frame. gen tells which socket sent
 // it, so a late frame from a channel the user has left is dropped.
 type eventsRosterReceived struct {
@@ -254,6 +264,18 @@ func (m Model) startEvents(ctx context.Context, gen int, channel string, session
 				PermissionsChanged: func(schema.PermissionsChangedV1) error {
 					return push(eventsPermissionsReceived{gen: gen})
 				},
+				ChannelsChanged: func(schema.ChannelsChangedV1) error {
+					return push(eventsChannelsReceived{gen: gen})
+				},
+				Reaction: func(summary schema.ReactionSummaryV1) error {
+					return push(reactionSummaryReceived{gen: gen, channel: channel, summary: summary})
+				},
+				Members: func(members schema.ChannelMembersV1) error {
+					return push(membersEventReceived{gen: gen, channel: channel, members: members.Members})
+				},
+				MessageRemoved: func(removed schema.MessageRemovedV1) error {
+					return push(messageRemovalReceived{gen: gen, channel: channel, message: removed.Message})
+				},
 			})
 			select {
 			case events <- eventsEnded{gen: gen, err: err, lived: time.Since(started)}:
@@ -306,6 +328,7 @@ func (m Model) eventsRoster(msg eventsRosterReceived) (tea.Model, tea.Cmd) {
 		return m, wait
 	}
 	wasLive := m.ev.state == eventsLive
+	interrupted := m.ev.state == eventsDown
 	// A frame is data flowing: the socket is healthy.
 	m.ev.backoff = 0
 	m.ev.roster = msg.roster
@@ -314,6 +337,13 @@ func (m Model) eventsRoster(msg eventsRosterReceived) (tea.Model, tea.Cmd) {
 	m.ev.recreated = false
 	cmds := []tea.Cmd{wait}
 	if !wasLive {
+		// Member and reaction frames have no replay; replace them after a drop.
+		cmds = append(cmds, m.loadMembers(), m.reloadReactions(m.current()), m.startReconcile())
+		if interrupted {
+			// Channel-list signals were missed too. The first roster of a socket
+			// is not a reconnect: that list was just read before the socket opened.
+			cmds = append(cmds, m.refreshChannels())
+		}
 		// Frames were missed while the socket was down: the Runs view's newest
 		// page is read again and merged.
 		if m.runs.loaded && m.runs.channel == m.current() {
@@ -330,6 +360,29 @@ func (m Model) eventsRoster(msg eventsRosterReceived) (tea.Model, tea.Cmd) {
 	}
 	m, resync := m.resyncRun()
 	return m, tea.Batch(append(cmds, resync)...)
+}
+
+func (m Model) replaceMembers(channel string, members []schema.ChannelMemberV1) (Model, tea.Cmd) {
+	names := make(map[int64]schema.ChannelMemberV1, len(members))
+	for _, member := range members {
+		names[member.PrincipalID] = member
+	}
+	m.memberRevision[channel]++
+	m.members[channel] = names
+	m.forgetAuthors(channel)
+	if m.mod.pending != nil && m.mod.pending.channel == channel && !m.moderationStanding() {
+		m.mod.pending = nil
+	}
+	return m, m.nameAuthors(channel)
+}
+
+func (m Model) membersEvent(msg membersEventReceived) (tea.Model, tea.Cmd) {
+	wait := m.waitEvent()
+	if msg.gen != m.ev.gen || msg.channel != m.current() {
+		return m, wait
+	}
+	m, naming := m.replaceMembers(msg.channel, msg.members)
+	return m, tea.Batch(wait, naming)
 }
 
 // eventsEnded decides what the end of an events socket means. The roster is
@@ -350,6 +403,13 @@ func (m Model) eventsEnded(msg eventsEnded) (tea.Model, tea.Cmd) {
 	// it brings the run up to date until the socket is back.
 	if m.rd.open() {
 		wait = tea.Batch(wait, m.checkRun())
+	}
+	if channelGone(msg.err) {
+		// The server closes the open channel's socket with 1008 when the person
+		// is removed from it and sends no channels_changed on it, and the retry
+		// then meets a 404: the list is read to learn which. A 1008 is retried
+		// below all the same, because a reader too slow to keep up gets it too.
+		wait = tea.Batch(wait, m.refreshChannels())
 	}
 	var serverErr *cli.ServerError
 	switch {

@@ -80,7 +80,8 @@ type notifyFixture struct {
 func newNotifyFixture(t *testing.T, ntfyURL string) *notifyFixture {
 	t.Helper()
 	ctx := context.Background()
-	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "conch.db"))
+	dbPath := filepath.Join(t.TempDir(), "conch.db")
+	st, err := store.Open(ctx, dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -88,6 +89,7 @@ func newNotifyFixture(t *testing.T, ntfyURL string) *notifyFixture {
 	f := &notifyFixture{st: st, ids: map[string]int64{}, tokens: map[string]string{}, gone: make(chan string, 64), returned: make(chan string, 64)}
 	f.srv = New(Config{AuthMode: AuthRequired, DataDir: t.TempDir(), Listen: "127.0.0.1:0", Version: "test",
 		Ntfy: approvals.NtfyConfig{Server: ntfyURL, ApprovalsTopic: "approvals", UrgentTopic: "urgent", Timeout: 5 * time.Second}}, st)
+	testDBPaths.Store(f.srv, dbPath)
 	if f.channel, err = st.CreateChannel(ctx, "ops"); err != nil {
 		t.Fatal(err)
 	}

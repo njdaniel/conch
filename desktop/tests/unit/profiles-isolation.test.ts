@@ -82,6 +82,8 @@ function harness() {
       const activation: Activation = {
         profileId: p?.id ?? null,
         token: () => session.capture().token,
+        voiceCredential: () => session.voiceCredential(),
+        voiceCurrent: (generation) => session.generation === generation,
         whoami: () => Promise.resolve(null),
         signOut: () => service.signOut(),
         endSockets: () => {

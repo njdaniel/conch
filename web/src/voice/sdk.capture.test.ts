@@ -1,8 +1,8 @@
-// The real SDK, not a stub (issue #565): what the browser's picker is asked
-// for when a share is picked. Up to 3840x2160 at up to 60 fps, as an ideal on
-// Chromium and Firefox and a maximum on Safari, never an exact size or a
-// minimum, so the browser captures a source at its own size and never scales
-// it up. The picker is a stub that keeps what it was asked and refuses, as a
+// The real SDK, not a stub: what the browser's picker is asked for when a
+// share is picked. The default is 1080p30, as an ideal on Chromium and Firefox
+// and a maximum on Safari, never an exact size or a minimum, so the browser
+// captures a smaller source at its own size and never scales it up. The picker
+// is a stub that keeps what it was asked and refuses, as a
 // person cancelling it would. jsdom, no network, no screen.
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { newLiveKitRoom } from './sdk';
@@ -55,14 +55,14 @@ describe('what the picker is asked for', () => {
   it.each([
     { browser: 'Chromium', userAgent: chrome },
     { browser: 'Firefox', userAgent: firefox },
-  ])('on $browser: up to 3840x2160 at up to 60 fps, as ideals', async ({ userAgent }) => {
+  ])('on $browser: the default is up to 1920x1080 at up to 30 fps, as ideals', async ({ userAgent }) => {
     const video = await pickedWith(userAgent);
-    expect(video).toEqual({ width: { ideal: 3840 }, height: { ideal: 2160 }, frameRate: 60 });
+    expect(video).toEqual({ width: { ideal: 1920 }, height: { ideal: 1080 }, frameRate: 30 });
   });
 
-  it('on Safari: up to 3840x2160 at up to 60 fps, as maximums', async () => {
+  it('on Safari: the default is up to 1920x1080 at up to 30 fps, as maximums', async () => {
     const video = await pickedWith(safari);
-    expect(video).toEqual({ width: { max: 3840 }, height: { max: 2160 }, frameRate: 60 });
+    expect(video).toEqual({ width: { max: 1920 }, height: { max: 1080 }, frameRate: 30 });
   });
 
   // A bare frame rate is an ideal too. Nothing forces a size or a rate: no

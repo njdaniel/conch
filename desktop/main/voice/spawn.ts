@@ -14,9 +14,17 @@
 // never in argv; nothing here logs either. The environment is readable by
 // same-user processes, which is outside the vault's at-rest guarantee
 // (linux-desktop.md §4.1).
-import { spawn as nodeSpawn, type ChildProcessWithoutNullStreams, type SpawnOptionsWithStdioTuple, type StdioPipe } from 'node:child_process';
+import {
+  spawn as nodeSpawn,
+  type ChildProcessByStdio,
+  type ChildProcessWithoutNullStreams,
+  type SpawnOptionsWithStdioTuple,
+  type StdioNull,
+  type StdioPipe,
+} from 'node:child_process';
 import { lstat, realpath } from 'node:fs/promises';
 import { dirname, isAbsolute, join, sep } from 'node:path';
+import type { Readable } from 'node:stream';
 
 import {
   VOICE_CONTROL_PIPE_FLAG,
@@ -79,6 +87,7 @@ function safeOwner(uid: number, own: number): boolean {
 // writable by group or others, in a directory with the same ownership and
 // write rules. A missing file is not-installed; anything else that fails is
 // untrusted, and nothing else is tried in its place.
+// scripts/desktop-deb-lifecycle.sh check_helper mirrors these rules; change both.
 export async function findHelper(resources: string, deps: FindDeps = {}): Promise<string> {
   if (!isAbsolute(resources) || resources.includes('\0')) throw new HelperError('untrusted', 'the resources directory is not an absolute path');
   const own = deps.uid ?? (typeof process.getuid === 'function' ? process.getuid() : -1);
@@ -152,19 +161,33 @@ export interface HelperEnvInput {
   readonly nonce: string;
 }
 
+// baseEnv is the allowlisted names main has and CONCH_CONFIG_DIR: what every
+// run of the helper gets, whatever it is for.
+function baseEnv(parent: NodeJS.ProcessEnv, configDir: string): Record<string, string> {
+  const env: Record<string, string> = Object.create(null) as Record<string, string>;
+  for (const name of PASSED_THROUGH) {
+    const value = parent[name];
+    if (value !== undefined && value !== '' && !value.includes('\0')) env[name] = value;
+  }
+  if (!isAbsolute(configDir) || configDir.includes('\0')) throw new Error('voice: the configuration directory must be an absolute path');
+  env[CONFIG_DIR_ENV] = configDir;
+  return env;
+}
+
+// oneShotEnv is the environment of `devices` and `config set` (issue #1378):
+// the same allowlist and the profile's CONCH_CONFIG_DIR, with no CONCH_TOKEN
+// and no nonce, because neither command needs a login or an events endpoint.
+export function oneShotEnv(parent: NodeJS.ProcessEnv, configDir: string): Record<string, string> {
+  return baseEnv(parent, configDir);
+}
+
 // helperEnv builds the child's environment from empty: the allowlisted
 // names main has, then CONCH_CONFIG_DIR, CONCH_TOKEN (the start says
 // credential env) and CONCH_VOICE_ATTACH, and nothing else. A value holding
 // a NUL is left out rather than truncated.
 export function helperEnv(input: HelperEnvInput): Record<string, string> {
-  const env: Record<string, string> = Object.create(null) as Record<string, string>;
-  for (const name of PASSED_THROUGH) {
-    const value = input.parent[name];
-    if (value !== undefined && value !== '' && !value.includes('\0')) env[name] = value;
-  }
-  if (!isAbsolute(input.configDir) || input.configDir.includes('\0')) throw new Error('voice: the configuration directory must be an absolute path');
+  const env = baseEnv(input.parent, input.configDir);
   if (input.token.trim() === '' || input.token.includes('\0')) throw new Error('voice: no credential to hand to the helper');
-  env[CONFIG_DIR_ENV] = input.configDir;
   env[TOKEN_ENV] = input.token;
   env[VOICE_CONTROL_PIPE_NONCE_ENV] = input.nonce;
   return env;
@@ -195,6 +218,19 @@ export function spawnOptions(env: Record<string, string>): SpawnOptionsWithStdio
   return { stdio: ['pipe', 'pipe', 'pipe'], detached: false, shell: false, windowsHide: true, env, cwd: '/' };
 }
 
+// OneShotChild is a one-shot run's process: no standard input to write to.
+export type OneShotChild = ChildProcessByStdio<null, Readable, Readable>;
+
+export type OneShotSpawnFn = (command: string, args: readonly string[], options: SpawnOptionsWithStdioTuple<StdioNull, StdioPipe, StdioPipe>) => OneShotChild;
+
+// oneShotSpawnOptions: as spawnOptions, but standard input is /dev/null
+// ('ignore'), so that the run can wait for nothing from main.
+export function oneShotSpawnOptions(env: Record<string, string>): SpawnOptionsWithStdioTuple<StdioNull, StdioPipe, StdioPipe> {
+  return { stdio: ['ignore', 'pipe', 'pipe'], detached: false, shell: false, windowsHide: true, env, cwd: '/' };
+}
+
+export const defaultOneShotSpawn: OneShotSpawnFn = (command, args, options) => nodeSpawn(command, args, options);
+
 export function spawnHelper(
   spawnFn: SpawnFn,
   executable: string,
@@ -205,3 +241,68 @@ export function spawnHelper(
 }
 
 export const defaultSpawn: SpawnFn = (command, args, options) => nodeSpawn(command, args, options);
+
+// How long the screen-cast portal may take to answer (portal.ts, #1580): it is
+// D-Bus activated, so the first ask may start it.
+export const PORTAL_TIMEOUT_MS = 3_000;
+const PORTAL_MAX_OUTPUT = 4096;
+
+export interface RunResult {
+  readonly code: number | null;
+  readonly stdout: string;
+}
+
+// runFile runs one read-only program for portal.ts: file with args and env,
+// never a shell, bounded in time and in output, stderr dropped. It resolves
+// with the exit code and stdout, or null when the program could not be run.
+// It lives here because spawn.ts is the one place that reaches child_process.
+export function runFile(file: string, args: readonly string[], env: Readonly<Record<string, string>>): Promise<RunResult | null> {
+  return new Promise((resolve) => {
+    let out = '';
+    let settled = false;
+    const done = (value: RunResult | null): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(value);
+    };
+    let child: ChildProcessByStdio<null, Readable, Readable>;
+    try {
+      child = nodeSpawn(file, [...args], { env: { ...env }, stdio: ['ignore', 'pipe', 'pipe'] });
+    } catch {
+      resolve(null);
+      return;
+    }
+    const timer = setTimeout(() => {
+      child.kill('SIGKILL');
+      done(null);
+    }, PORTAL_TIMEOUT_MS + 500);
+    child.stdout.setEncoding('utf8');
+    child.stdout.on('data', (chunk: string) => {
+      out += chunk;
+      if (out.length > PORTAL_MAX_OUTPUT) {
+        child.kill('SIGKILL');
+        done(null);
+      }
+    });
+    child.stderr.resume();
+    child.on('error', () => {
+      done(null);
+    });
+    child.on('close', (code) => {
+      done({ code, stdout: out });
+    });
+  });
+}
+
+// WatchChild is a long-lived read-only child: no standard input, stdout read
+// line by line, stderr dropped.
+export type WatchChild = OneShotChild;
+
+// spawnWatch starts a long-lived read-only program (the logind monitor of
+// issue #1588): argv only, no shell, not detached, standard input /dev/null.
+// The caller owns the ChildProcess and kills it by that handle, never by
+// name.
+export function spawnWatch(file: string, args: readonly string[], env: Readonly<Record<string, string>>): WatchChild {
+  return nodeSpawn(file, [...args], { env: { ...env }, stdio: ['ignore', 'pipe', 'pipe'], detached: false, shell: false, windowsHide: true, cwd: '/' });
+}

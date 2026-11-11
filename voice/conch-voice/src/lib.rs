@@ -22,8 +22,8 @@
 //! that carries audio only while the transmit gate is open. To the output PipeWire has, or
 //! the one `audio.output` names, the mix of what the channel's speakers say ([`audio`]). No join token, room name or
 //! login token is in anything this program writes, and nothing it does waits for what it
-//! writes to be read. For `config set`, `voice.toml` with one `[audio]` device, or the
-//! talk mode, changed and nothing else ([`config_cmd`]): the one file this program writes.
+//! writes to be read. For `config set`, `voice.toml` with one `[audio]` device, the
+//! talk mode, the key device or a binding changed or removed and nothing else ([`config_cmd`]): the one file this program writes.
 //!
 //! `conch-voice managed` is the same client run for `conch`'s TUI ([`managed`]): its
 //! input is also its owner's commands on standard input, and the end of that input; its
@@ -335,6 +335,7 @@ pub fn managed(
             args.share_audio_owner,
         );
         host.transmit_ceiling_secs = args.transmit_ceiling_secs;
+        host.no_mute_key = args.no_mute_key;
         managed::signals(inputs.clone(), host.watchdog.clone()).map_err(Error::Runtime)?;
         managed::watch_parent(parent, inputs.clone(), host.watchdog.clone());
         if let Some(end) = end {
@@ -440,6 +441,32 @@ pub fn config_set(
     value: &str,
 ) -> Result<(), Error> {
     config_cmd::set(environment, key, value)
+}
+
+/// `conch-voice config set keys.<key> <value>`: saves the key device or a binding in
+/// `voice.toml`, changing nothing else ([`config_cmd`]). Prints nothing.
+///
+/// # Errors
+///
+/// What [`config_cmd::set_keys`] says; `voice.toml` is then as it was.
+pub fn config_set_keys(
+    environment: &Environment,
+    key: conch_voice_control::KeysKey,
+    value: &str,
+) -> Result<(), Error> {
+    config_cmd::set_keys(environment, key, value)
+}
+
+/// `conch-voice config unset keys.<key>`: removes that line from `voice.toml`.
+///
+/// # Errors
+///
+/// What [`config_cmd::unset_keys`] says; `voice.toml` is then as it was.
+pub fn config_unset(
+    environment: &Environment,
+    key: conch_voice_control::KeysKey,
+) -> Result<(), Error> {
+    config_cmd::unset_keys(environment, key)
 }
 
 /// `conch-voice keys <device>`: says that it will show every key pressed on the device,

@@ -2,6 +2,7 @@ import { StrictMode } from 'react';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { App } from './App';
+import { SPOILER_FILE_PREFIX } from './schema/file';
 
 const origin = 'http://127.0.0.1:8080';
 const secret = 'conch_secret_token_value';
@@ -263,6 +264,64 @@ describe('Composer and App attachment sending', () => {
     expect(server.posts).toHaveLength(0);
     expect(screen.getByText('cancel.png')).toBeDefined();
     expect(screen.getByRole('button', { name: 'Retry upload of cancel.png' })).toBeDefined();
+  });
+
+  it('uploads a marked file under the prefixed name, keeps the mark across an audience switch and a retry, and locks it once uploaded', async () => {
+    await openChat();
+    let refuse = true;
+    server.upload = (call) => {
+      if (call.filename === `${SPOILER_FILE_PREFIX}large.png` && refuse) return json({ code: 'file_too_large', message: 'a file may be at most 10485760 bytes' }, 413);
+      return json(fileMetadata(call, server.nextFile++), 201);
+    };
+    choose(image('ready.png'), image('large.png'));
+    await screen.findByText('large.png');
+    fireEvent.click(screen.getByRole('button', { name: 'Mark large.png as spoiler' }));
+    fireEvent.change(screen.getByLabelText('To:'), { target: { value: 'net:5' } });
+    await screen.findByLabelText('Message net alpha');
+    fireEvent.change(screen.getByLabelText('To:'), { target: { value: 'channel' } });
+    await screen.findByText('large.png');
+    expect(screen.getByRole('button', { name: 'Mark large.png as spoiler' }).getAttribute('aria-pressed')).toBe('true');
+    clickSend();
+    await screen.findByText('large.png is too large: this server takes files up to 10 MB.');
+    // ready.png is uploaded: its mark is disabled, with the reason, not re-uploaded.
+    const locked = screen.getByRole('button', { name: 'Mark ready.png as spoiler' });
+    expect(locked.hasAttribute('disabled')).toBe(true);
+    // ready.png's own reason, by its aria-describedby: large.png may still be
+    // sealed for a moment and show the same words, so a page-wide query races.
+    const reasonId = locked.getAttribute('aria-describedby');
+    expect(reasonId).not.toBeNull();
+    expect(document.getElementById(reasonId ?? '')?.textContent).toMatch(/Already uploading or uploaded/);
+    // large.png failed: its mark survives, and can still be changed.
+    expect(screen.getByRole('button', { name: 'Mark large.png as spoiler' }).getAttribute('aria-pressed')).toBe('true');
+    refuse = false;
+    fireEvent.click(screen.getByRole('button', { name: 'Retry upload of large.png' }));
+    await waitFor(() => { expect(server.uploads).toHaveLength(3); });
+    clickSend();
+    await screen.findByText('Sent');
+    expect(server.uploads.map((call) => call.filename)).toEqual(['ready.png', `${SPOILER_FILE_PREFIX}large.png`, `${SPOILER_FILE_PREFIX}large.png`]);
+    expect(server.posts[0]?.request.body).toBe(`ready.png, ${SPOILER_FILE_PREFIX}large.png`);
+  });
+
+  it('freezes the spoiler marks of a whole send: a queued file cannot be marked while the first upload is held', async () => {
+    await openChat();
+    let finish = () => {};
+    server.upload = (call) => new Promise<Response>((resolve) => { finish = () => { resolve(json(fileMetadata(call, server.nextFile++), 201)); }; });
+    choose(image('first.png'), image('second.png'));
+    await screen.findByText('second.png');
+    clickSend();
+    await waitFor(() => { expect(server.uploads).toHaveLength(1); });
+    const queued = screen.getByRole('button', { name: 'Mark second.png as spoiler' });
+    expect(queued.hasAttribute('disabled')).toBe(true);
+    expect(queued.getAttribute('aria-pressed')).toBe('false');
+    expect(screen.getByRole('button', { name: 'Mark first.png as spoiler' }).hasAttribute('disabled')).toBe(true);
+    fireEvent.click(queued);
+    expect(screen.getByRole('button', { name: 'Mark second.png as spoiler' }).getAttribute('aria-pressed')).toBe('false');
+    finish();
+    await waitFor(() => { expect(server.uploads).toHaveLength(2); });
+    finish();
+    await screen.findByText('Sent');
+    expect(server.uploads.map((call) => call.filename)).toEqual(['first.png', 'second.png']);
+    expect(server.posts[0]?.request.body).toBe('first.png, second.png');
   });
 
   it('keeps text and image drafts scoped to the channel and normalized audience', async () => {

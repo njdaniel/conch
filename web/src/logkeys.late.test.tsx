@@ -4,13 +4,13 @@
 // message list and let go on unmount.
 import { act, cleanup, render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { fetchFileBytes, getFileMeta } from './api';
+import { fetchFileBytes, getFileMeta, readReactions } from './api';
 import { Conversation } from './Conversation';
 import type { FileV1 } from './schema/file';
 import type { MessageV2 } from './schema/message';
 import type { ChannelChat } from './state/messages';
 
-vi.mock('./api', () => ({ fetchFileBytes: vi.fn(), getFileMeta: vi.fn() }));
+vi.mock('./api', async (importOriginal) => ({ ...await importOriginal<typeof import('./api')>(), fetchFileBytes: vi.fn(), getFileMeta: vi.fn(), readReactions: vi.fn().mockResolvedValue({ ok: true, value: { summaries: [] } }) }));
 vi.mock('./image', async (importOriginal) => ({
   ...await importOriginal<typeof import('./image')>(),
   validateImage: vi.fn().mockResolvedValue({ ok: true, value: { format: 'png', width: 640, height: 480 } }),
@@ -84,6 +84,26 @@ describe('a control that mounts later in a message that is not the stop', () => 
     expect(enlarge.tabIndex).toBe(0);
     expect(enlarge.hasAttribute('data-roved')).toBe(false);
   });
+});
+
+it('keeps reaction controls out of Tab after asynchronous hydration', async () => {
+  let finish!: (value: Awaited<ReturnType<typeof readReactions>>) => void;
+  vi.mocked(readReactions).mockReturnValueOnce(new Promise((resolve) => { finish = resolve; }));
+  vi.mocked(getFileMeta).mockReturnValue(new Promise(() => undefined));
+  mount();
+  await act(async () => {
+    finish({ ok: true, value: { summaries: [{
+      schema: 'conch.reaction_summary.v1', channel_id: 7, message_id: 1,
+      as_of: '2026-11-06T10:00:00Z', reactions: [{ emoji: '👍', count: 1, me: false }],
+    }] } });
+    await Promise.resolve();
+  });
+  const buttons = Array.from(screen.getByRole('log').querySelectorAll<HTMLButtonElement>('[data-reaction-control]'));
+  expect(buttons.some((button) => button.classList.contains('reaction-chip'))).toBe(true);
+  expect(buttons.every((button) => button.tabIndex === -1)).toBe(true);
+  act(() => { item(1).focus(); });
+  expect(buttons.every((button) => button.tabIndex === -1)).toBe(true);
+  expect(Array.from(screen.getByRole('log').querySelectorAll<HTMLButtonElement>('button')).filter((button) => !button.disabled && button.tabIndex >= 0).map((button) => button.textContent)).toEqual(['bea', 'Download', 'Reply']);
 });
 
 describe('the observer', () => {

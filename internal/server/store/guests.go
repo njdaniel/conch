@@ -444,6 +444,10 @@ func admitGuestTx(ctx context.Context, tx execer, actor string, channelID, pid, 
 	if err := channelNotArchivedTx(ctx, tx, channelID); err != nil {
 		return err
 	}
+	// A banned guest principal is not admitted (issue #851).
+	if err := refuseBannedTx(ctx, tx, channelID, pid); err != nil {
+		return err
+	}
 	watermark, err := historyWatermarkTx(ctx, tx, channelID)
 	if err != nil {
 		return err
@@ -1181,7 +1185,7 @@ func (s *Store) ConvertGuest(ctx context.Context, actor string, c GuestConversio
 			}
 		}
 		if out.Channels, err = idsTx(ctx, tx,
-			"SELECT channel_id FROM channel_members WHERE principal_id = ? ORDER BY channel_id", c.PrincipalID); err != nil {
+			"SELECT channel_id FROM "+liveMembers+" WHERE principal_id = ? ORDER BY channel_id", c.PrincipalID); err != nil {
 			return fmt.Errorf("store: convert guest %d: list memberships: %w", c.PrincipalID, err)
 		}
 		p.Name = c.Name

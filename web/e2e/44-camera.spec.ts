@@ -16,7 +16,7 @@
 // tests fail when CI is set and are skipped otherwise, as in 10-voice.
 import { chromium, devices, type Browser, type BrowserContext, type BrowserContextOptions, type Page } from '@playwright/test';
 import type { VoicePresenceV1 } from '../src/schema/voice';
-import { credentialField, expect, openChannel, rememberPushToTalk, say, signIn, test } from './fixtures';
+import { closeAll, credentialField, expect, openChannel, rememberPushToTalk, say, signIn, test } from './fixtures';
 import { toneFile } from './tone';
 import { dockerAvailable, startVoiceWorld, watchPage, type Member, type VoiceWorld, type Watch } from './voice-world';
 
@@ -124,7 +124,7 @@ test.describe('the camera with LiveKit', () => {
     const member = typeof who === 'string' ? vw[who] : who;
     await signIn(page, vw, member.token, member.name);
     await openChannel(page, vw.channel);
-    return { page, watch, member, cameraCalls, close: () => ctx.close() };
+    return { page, watch, member, cameraCalls, close: () => closeAll(ctx) };
   }
 
   async function join(p: Someone): Promise<void> {

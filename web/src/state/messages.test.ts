@@ -18,6 +18,7 @@ const ready = (clientId: number, fileId: number): DraftAttachment => ({
   mediaType: 'image/png',
   size: 3,
   bytes: new Blob(['img']),
+  spoiler: false,
   status: 'ready',
   attempt: 1,
   fileId,
@@ -366,6 +367,10 @@ describe('the held messages are bounded', () => {
 });
 
 describe('parseFrame', () => {
+  it('ignores an extra key (issue #1534)', () => {
+    expect(parseFrame(JSON.stringify({ ...msg(1), extra: 1 }), 7)).toEqual(msg(1));
+  });
+
   it('reads a message of this channel', () => {
     expect(parseFrame(JSON.stringify(msg(1)), 7)).toEqual(msg(1));
   });
@@ -374,7 +379,6 @@ describe('parseFrame', () => {
     ['a binary frame', new ArrayBuffer(2)],
     ['another schema', JSON.stringify({ ...msg(1), schema: 'conch.message.v1' })],
     ['a missing id', JSON.stringify({ ...msg(1), id: undefined })],
-    ['an extra key', JSON.stringify({ ...msg(1), extra: 1 })],
     ['another channel', JSON.stringify({ ...msg(1), channel_id: 8 })],
   ];
   it.each(bad)('refuses %s', (_name, data) => {

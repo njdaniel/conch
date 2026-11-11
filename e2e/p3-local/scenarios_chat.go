@@ -613,11 +613,18 @@ func (s *suite) p309Restart() error {
 
 	// A line typed now cannot be sent: the connection is refused. It stays in
 	// the prompt, the TUI says the post failed, and nothing sends it later.
+	// The word has "up" in it on purpose: keys that reach the TUI in one read
+	// arrive as one message, and the two letters once read as the up arrow,
+	// which moved the selection to the channel above (issue #1156); the
+	// prompt is checked for the whole line, in nets-demo, once the send fails.
 	if err := t.sendLine("p309interrupted"); err != nil {
 		return err
 	}
 	if err := t.waitFor("the failure of the send", 20*time.Second, func(r []string) bool { return showing(r, "post v2") }); err != nil {
 		return err
+	}
+	if rows := t.rows(); !showing(rows, chNets+" > p309interrupted") {
+		return fmt.Errorf("after the failed send the prompt of %s does not hold the whole line:\n%s", chNets, dump(rows))
 	}
 
 	if err := s.r.restartServer(); err != nil {
@@ -803,7 +810,7 @@ func (s *suite) p310Access() error {
 	}
 
 	// The two changes.
-	if err := s.admin("member", "remove", chGeneral, id(s.pid("jamie-test"))); err != nil {
+	if err := s.admin("member", "remove", "--yes", chGeneral, id(s.pid("jamie-test"))); err != nil {
 		return err
 	}
 	if err := s.admin("credential", "revoke", id(s.r.fx.creds[partBrowser].id)); err != nil {

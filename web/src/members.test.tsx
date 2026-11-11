@@ -107,7 +107,7 @@ describe('removing someone from a channel asks first (issue #1083)', () => {
     choose(target, 'Remove from channel');
     expect(api.removeChannelMember).not.toHaveBeenCalled();
     expect(screen.queryByRole('menu')).toBeNull();
-    const group = within(row(target)).getByRole('group', { name: `Remove ${target} from #${channelName}? They lose this channel and its history.` });
+    const group = within(row(target)).getByRole('group', { name: `Remove ${target} from #${channelName} and its nets? They lose this channel and its history. This does not ban them or revoke their account.` });
     expect(within(group).getByRole('button', { name: 'Yes, remove' })).toBeDefined();
     expect(document.activeElement).toBe(within(group).getByRole('button', { name: 'Cancel' }));
   });
@@ -177,12 +177,12 @@ describe('administration controls', () => {
     expect(screen.queryByRole('checkbox')).toBeNull();
     expect(screen.queryByRole('button', { name: /^(Remove|Make)/ })).toBeNull();
     expect(screen.queryByRole('menu')).toBeNull();
-    expect(labels(openMenu('olivia'))).toEqual(['Remove from channel', 'Make manager', 'Stop deciding approvals']);
-    expect(labels(openMenu('ada'))).toEqual(['Remove from channel', 'Remove as manager', 'Let decide approvals']);
-    expect(labels(openMenu('avery'))).toEqual(['Remove from channel', 'Make manager', 'Stop deciding approvals']);
+    expect(labels(openMenu('olivia'))).toEqual(['Remove from voice', 'Ban from channel', 'Remove from channel', 'Make manager', 'Stop deciding approvals']);
+    expect(labels(openMenu('ada'))).toEqual(['Remove from voice', 'Ban from channel', 'Remove from channel', 'Remove as manager', 'Let decide approvals']);
+    expect(labels(openMenu('avery'))).toEqual(['Remove from voice', 'Ban from channel', 'Remove from channel', 'Make manager', 'Stop deciding approvals']);
     fireEvent.click(within(row('Pat')).getByRole('button', { name: 'Actions for Guest: Pat · a7k4' }));
-    expect(labels(screen.getByRole('menu', { name: 'Actions for Guest: Pat · a7k4' }))).toEqual(['Remove from channel']);
-    expect(labels(openMenu('bot'))).toEqual(['Remove from channel']);
+    expect(labels(screen.getByRole('menu', { name: 'Actions for Guest: Pat · a7k4' }))).toEqual(['Remove from voice', 'Ban from channel', 'Remove from channel']);
+    expect(labels(openMenu('bot'))).toEqual(['Ban from channel', 'Remove from channel']);
     expect(screen.getAllByText('Manager')).toHaveLength(1);
     expect(screen.getAllByText('Approver')).toHaveLength(2);
   });
@@ -196,13 +196,28 @@ describe('administration controls', () => {
     expect(labels(openMenu('ada'))).toContain('Remove from channel');
   });
 
+  it('lets a manager ban and remove an active guest, which memberDoc sends without a role, but not one who decides approvals', () => {
+    draw(props('member'));
+    const pat = 'Actions for Guest: Pat · a7k4';
+    fireEvent.click(within(row('Pat')).getByRole('button', { name: pat }));
+    expect(labels(screen.getByRole('menu', { name: pat }))).toEqual(['Remove from voice', 'Ban from channel', 'Remove from channel']);
+    cleanup();
+    const guest = memberList.find((m) => m.principal_id === 5);
+    if (guest === undefined) throw new Error('fixture');
+    draw({ ...props('member'), members: memberList.map((m) => (m === guest ? { ...guest, can_decide: true } : m)) });
+    fireEvent.click(within(row('Pat')).getByRole('button', { name: pat }));
+    expect(labels(screen.getByRole('menu', { name: pat }))).toEqual(['Remove from voice']);
+  });
+
   it('gives a manager add and a menu of only the removals the rules allow, with no per-row explanations', () => {
     draw(props('member'));
     expect(screen.getByRole('form', { name: 'Add person by name' })).toBeDefined();
-    expect(labels(openMenu('ada'))).toEqual(['Remove from channel']);
-    for (const name of ['olivia', 'avery', 'bot']) {
+    expect(labels(openMenu('ada'))).toEqual(['Remove from voice', 'Ban from channel', 'Remove from channel']);
+    for (const name of ['bot']) {
       expect(within(row(name)).queryByRole('button', { name: `Actions for ${name}` })).toBeNull();
     }
+    expect(labels(openMenu('olivia'))).toEqual(['Remove from voice']);
+    expect(labels(openMenu('avery'))).toEqual(['Remove from voice']);
     expect(screen.queryByText('Operators can only be removed by an operator.')).toBeNull();
     expect(screen.queryByText('Approvers are removed by an operator.')).toBeNull();
     expect(screen.queryByText('Agents are managed by operators.')).toBeNull();
@@ -225,6 +240,26 @@ describe('administration controls', () => {
     else expect(screen.getByText('Only operators and this channel\'s managers add people.')).toBeDefined();
     // The native menu is left alone on a row with no actions.
     expect(fireEvent.contextMenu(row('ada'))).toBe(true);
+  });
+});
+
+describe('identity marks', () => {
+  it('draws MemberRow marks through the shared component in wire order', () => {
+    draw({ ...props('operator'), viewer: { id: 1, role: 'operator', guest: false } });
+    const olivia = row('olivia');
+    expect(Array.from(olivia.querySelectorAll('.identity-mark')).map((mark) => mark.getAttribute('data-identity'))).toEqual(['you', 'operator', 'approver']);
+    expect(within(row('ada')).getByText('Manager').classList.contains('identity-label')).toBe(true);
+    expect(within(row('bot')).getByText('Agent').classList.contains('identity-label')).toBe(true);
+  });
+
+  it('shows no standing a plain-member payload did not carry', () => {
+    const plain: ChannelMemberV1 = { principal_id: 6, created_at: at, name: 'plain', kind: 'human', manages: false, can_decide: false };
+    const controlProps = { ...props('member'), members: [...memberList, plain] };
+    render(<Members {...controlProps} people={[...people, entry(plain)]} />);
+    const marks = row('plain').querySelectorAll('.identity-mark');
+    expect(Array.from(marks).map((mark) => mark.getAttribute('data-identity'))).toEqual([]);
+    expect(within(row('plain')).queryByText('Owner')).toBeNull();
+    expect(within(row('plain')).queryByText('Operator')).toBeNull();
   });
 });
 
@@ -325,6 +360,29 @@ describe('the shared-channel picker', () => {
       expect(api.putChannelMember).toHaveBeenCalledWith('general', 6, {});
     });
     expect(refreshMembers).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('the shared-channel picker offers by permission (issue #1701)', () => {
+  const cara: ChannelMemberV1 = { principal_id: 6, created_at: at, name: 'cara', kind: 'human', can_decide: false };
+  const helper: ChannelMemberV1 = { principal_id: 9, created_at: at, name: 'helper', kind: 'agent' };
+  const viewing = (permissions: string[]): MemberControlsProps => ({ ...props('operator'), viewer: { role: 'operator', owner: false, permissions, guest: false } });
+
+  async function options(controls: MemberControlsProps): Promise<(string | null)[]> {
+    vi.mocked(api.listMembers).mockImplementation((name) => Promise.resolve({ ok: true, value: name === 'ops' ? [cara, helper] : [] }));
+    draw(controls);
+    fireEvent.click(screen.getByRole('button', { name: 'Add from another channel' }));
+    const form = await screen.findByRole('form', { name: 'Add person from another channel' });
+    await within(form).findByRole('option', { name: 'cara' });
+    return within(form).getAllByRole('option').map((option) => option.textContent);
+  }
+
+  it('offers an agent to an operator who holds manage_channels', async () => {
+    expect(await options(viewing(['manage_channels']))).toEqual(['Choose a person', 'cara', 'helper']);
+  });
+
+  it('offers only humans to an operator whose manage_channels is off, as the server treats them as a manager', async () => {
+    expect(await options(viewing(['manage_members']))).toEqual(['Choose a person', 'cara']);
   });
 });
 
@@ -518,5 +576,104 @@ describe('pending administration actions on a channel switch', () => {
     expect(api.putChannelMember).toHaveBeenCalledTimes(3);
     await refuseLater(pending, { ok: false, failure: 'invalid', message: 'old channel refusal' });
     expect(screen.queryByText('old channel refusal')).toBeNull();
+  });
+});
+
+describe('a person changing presence keeps their open menu and question (issue #1450)', () => {
+  const online = (id: number, state: Entry['state']): Entry[] => people.map((p) => (p.id === id ? { ...p, state } : p));
+
+  it('keeps the menu open, with focus in it, and a choice still works', async () => {
+    vi.mocked(api.removeChannelMember).mockResolvedValue({ ok: true, value: null });
+    const p = props('operator');
+    const view = render(<Members {...p} people={online(3, 'offline')} />);
+    openMenu('avery');
+    view.rerender(<Members {...p} people={online(3, 'online')} />);
+    const menu = screen.getByRole('menu', { name: 'Actions for avery' });
+    expect(menu.contains(document.activeElement)).toBe(true);
+    fireEvent.click(within(menu).getByRole('menuitem', { name: 'Remove from channel' }));
+    confirmRemoval('avery');
+    await waitFor(() => {
+      expect(api.removeChannelMember).toHaveBeenCalledWith('general', 3);
+    });
+  });
+
+  it('keeps a pending removal question, with focus on Cancel, and Yes still works', async () => {
+    vi.mocked(api.removeChannelMember).mockResolvedValue({ ok: true, value: null });
+    const p = props('operator');
+    const view = render(<Members {...p} people={online(3, 'online')} />);
+    choose('avery', 'Remove from channel');
+    view.rerender(<Members {...p} people={online(3, 'offline')} />);
+    const group = within(row('avery')).getByRole('group');
+    expect(document.activeElement).toBe(within(group).getByRole('button', { name: 'Cancel' }));
+    confirmRemoval('avery');
+    await waitFor(() => {
+      expect(api.removeChannelMember).toHaveBeenCalledWith('general', 3);
+    });
+  });
+
+  it('keeps a pending ban question', () => {
+    const p = props('operator');
+    const view = render(<Members {...p} people={online(3, 'online')} />);
+    choose('avery', 'Ban from channel');
+    expect(within(row('avery')).queryByRole('group')).not.toBeNull();
+    view.rerender(<Members {...p} people={online(3, 'offline')} />);
+    expect(within(row('avery')).queryByRole('group')).not.toBeNull();
+  });
+});
+
+describe('a removed person does not get their menu or question back (issue #1450)', () => {
+  it.each(['Remove from channel', 'Ban from channel'])('%s: closed after the person leaves and returns', (item) => {
+    const p = props('operator');
+    const without = { ...p, members: memberList.filter((m) => m.principal_id !== 3) };
+    const view = render(<Members {...p} people={people} />);
+    choose('avery', item);
+    view.rerender(<Members {...without} people={people.filter((e) => e.id !== 3)} />);
+    view.rerender(<Members {...p} people={people} />);
+    expect(within(row('avery')).queryByRole('group')).toBeNull();
+    expect(screen.queryByRole('menu')).toBeNull();
+  });
+
+  it('an open menu is closed after the person leaves and returns', () => {
+    const p = props('operator');
+    const without = { ...p, members: memberList.filter((m) => m.principal_id !== 3) };
+    const view = render(<Members {...p} people={people} />);
+    openMenu('avery');
+    view.rerender(<Members {...without} people={people.filter((e) => e.id !== 3)} />);
+    view.rerender(<Members {...p} people={people} />);
+    expect(screen.queryByRole('menu')).toBeNull();
+  });
+});
+
+describe('a person profile card', () => {
+  it('opens from a people row and follows member marks and presence without a reload', () => {
+    const p = props('member');
+    const view = render(<Members {...p} people={people} />);
+    const opener = within(row('ada')).getByRole('button', { name: 'ada' });
+    fireEvent.click(opener);
+    const card = screen.getByRole('dialog', { name: 'ada' });
+    expect(card.querySelector('.avatar')).not.toBeNull();
+    expect(within(card).getByText('Person')).toBeDefined();
+    expect(within(card).getByText('Manager')).toBeDefined();
+    expect(within(card).getByText('offline')).toBeDefined();
+    expect(document.activeElement).toBe(within(card).getByRole('button', { name: 'Close' }));
+
+    const demoted = { ...p, members: memberList.map((member) => member.principal_id === 2 ? { ...member, manages: false } : member) };
+    view.rerender(<Members {...demoted} people={people} />);
+    expect(within(screen.getByRole('dialog', { name: 'ada' })).queryByText('Manager')).toBeNull();
+    const changed = people.map((person) => person.id === 2 ? { ...person, state: 'online' as const, live: 2 } : person);
+    view.rerender(<Members {...demoted} people={changed} />);
+    expect(within(screen.getByRole('dialog', { name: 'ada' })).getByText('online (2 sessions)')).toBeDefined();
+    expect(within(screen.getByRole('list', { name: 'Online — 1' })).getByRole('button', { name: 'ada' })).toBeDefined();
+  });
+
+  it.each(['removed', 'hidden'])('closes and focuses People when the person is %s', () => {
+    const p = props('member');
+    const view = render(<Members {...p} people={people} />);
+    fireEvent.click(within(row('ada')).getByRole('button', { name: 'ada' }));
+    expect(screen.getByRole('dialog', { name: 'ada' })).toBeDefined();
+    const heading = screen.getByRole('heading', { name: 'People' });
+    view.rerender(<Members {...p} members={memberList.filter((member) => member.principal_id !== 2)} people={people.filter((person) => person.id !== 2)} />);
+    expect(screen.queryByRole('dialog')).toBeNull();
+    expect(document.activeElement).toBe(heading);
   });
 });

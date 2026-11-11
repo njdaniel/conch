@@ -2,11 +2,11 @@
 // #585), from one socket whether or not the page is in voice, with an honest
 // state when it cannot be read. The presence socket and read are fakes the
 // test drives, on a fake clock. No SDK, no network.
-import { act, renderHook } from '@testing-library/react';
+import { act, cleanup, renderHook } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ApiResult } from '../api';
 import type { ChannelV0 } from '../schema/channel';
-import type { VoicePresenceV1 } from '../schema/voice';
+import type { VoicePresenceV2 } from '../schema/voice';
 import type { FeedSocket, SocketEvents } from '../state/feed';
 
 // One presence socket the page asked for: its channel, the events it was
@@ -23,7 +23,7 @@ const fake = vi.hoisted(() => ({
   // While true the ticket gets no answer, as with conchd stopped.
   down: false,
   // What a presence read answers; never, unless a test says.
-  read: (): Promise<ApiResult<VoicePresenceV1>> => new Promise(() => undefined),
+  read: (): Promise<ApiResult<VoicePresenceV2>> => new Promise(() => undefined),
   // Issue #965: a session and a room for a test that talks, and what each
   // transmit report answers; by default no session, and reports answered.
   session: (): Promise<unknown> => new Promise(() => undefined),
@@ -65,14 +65,16 @@ vi.mock('../api', () => ({
     fake.mode = mode;
     fake.kept.push(mode);
   },
+  readShareQuality: () => ({ resolution: '1080p', frameRate: 30 }),
+  writeShareQuality: () => undefined,
 }));
 vi.mock('./sdk', () => ({ newLiveKitRoom: () => fake.room(), canChooseOutput: () => true }));
 
 import { defaultTalkKey } from './keys';
 import { useVoice } from './useVoice';
 
-const presence = (people: number[]): VoicePresenceV1 => ({
-  schema: 'conch.voice_presence.v1',
+const presence = (people: number[]): VoicePresenceV2 => ({
+  schema: 'conch.voice_presence.v2',
   channel_id: 1,
   configured: true,
   available: true,
@@ -80,6 +82,7 @@ const presence = (people: number[]): VoicePresenceV1 => ({
 });
 
 interface Props {
+  readonly signedIn?: boolean;
   readonly channel: string | null;
   readonly voiceAllowed: boolean;
   readonly reachable: boolean;
@@ -126,10 +129,10 @@ function open(people: number[]): void {
   });
 }
 
-function drop(code: number): void {
+function drop(code: number, reason?: string): void {
   const o = last();
   act(() => {
-    o.events.onClose(code);
+    o.events.onClose(code, reason);
   });
 }
 
@@ -145,10 +148,59 @@ beforeEach(() => {
   fake.kept = [];
 });
 afterEach(() => {
+  cleanup();
   vi.useRealTimers();
 });
 
+// A room that records the track's mutes and answers everything else with
+// nothing.
+function talkingRoom(sending: boolean[]): unknown {
+  const methods: Record<string, unknown> = {
+    setSending: (on: boolean) => {
+      sending.push(on);
+      return Promise.resolve();
+    },
+    level: () => 0,
+    microphoneInUse: () => null,
+    microphoneProcessing: () => null,
+  };
+  return new Proxy(methods, {
+    get: (target, name: string) => target[name] ?? (() => Promise.resolve(undefined)),
+  });
+}
+
+// joinInVoice joins the channel with a room that records the track's mutes,
+// in Hold to talk with no release delay.
+async function joinInVoice(sending: boolean[]) {
+  fake.session = () =>
+    Promise.resolve({ ok: true, value: { livekit_url: 'wss://lk.example', identity: 'p7', rooms: [{ room: 'r', token: 't', can_publish: true, expires_at: '2026-10-16T00:00:15.000Z' }] } });
+  fake.room = () => talkingRoom(sending);
+  fake.mode = 'ptt';
+  const view = hook({ channel: 'c' });
+  act(() => {
+    view.result.current.join();
+  });
+  await flush();
+  expect(view.result.current.state.phase).toBe('connected');
+  act(() => {
+    view.result.current.client.setReleaseDelay(0);
+  });
+  return view;
+}
+
 describe('the talk key', () => {
+  beforeEach(() => {
+    window.sessionStorage.clear();
+  });
+
+  const fireMouse = (type: string, button: number): boolean => {
+    let allowed = true;
+    act(() => {
+      allowed = window.dispatchEvent(new MouseEvent(type, { button, cancelable: true }));
+    });
+    return allowed;
+  };
+
   it('is let go when it changes while held', () => {
     const { result } = hook({ channel: null });
     const client = result.current.client;
@@ -171,6 +223,232 @@ describe('the talk key', () => {
     });
     expect(press).toHaveBeenCalledTimes(2);
     expect(release).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    [3, 'Mouse4'],
+    [4, 'Mouse5'],
+  ])('presses and releases on mouse button %d', async (button, key) => {
+    const sending: boolean[] = [];
+    const { result } = await joinInVoice(sending);
+    act(() => {
+      result.current.setTalkKey(key);
+    });
+    expect(fireMouse('mousedown', button)).toBe(false);
+    await flush();
+    expect(sending).toEqual([true]);
+    expect(fireMouse('mouseup', button)).toBe(false);
+    await pass(1000);
+    expect(sending).toEqual([true, false]);
+  });
+
+  it('lets go of a held mouse key on blur', async () => {
+    const sending: boolean[] = [];
+    const { result } = await joinInVoice(sending);
+    act(() => {
+      result.current.setTalkKey('Mouse4');
+    });
+    fireMouse('mousedown', 3);
+    await flush();
+    expect(sending).toEqual([true]);
+    act(() => {
+      window.dispatchEvent(new Event('blur'));
+    });
+    await flush();
+    expect(sending).toEqual([true, false]);
+    expect(result.current.state.transmitting).toBe(false);
+  });
+
+  it('ignores every mouse button but the chosen one', async () => {
+    const sending: boolean[] = [];
+    const { result } = await joinInVoice(sending);
+    act(() => {
+      result.current.setTalkKey('Mouse5');
+    });
+    for (const button of [0, 1, 2, 3]) {
+      expect(fireMouse('mousedown', button)).toBe(true);
+      expect(fireMouse('mouseup', button)).toBe(true);
+    }
+    await flush();
+    expect(sending).toEqual([]);
+  });
+
+  it('prevents navigation only for the chosen mouse button, and only in voice', async () => {
+    const { result } = await joinInVoice([]);
+    act(() => {
+      result.current.setTalkKey('Mouse4');
+    });
+    for (const type of ['mousedown', 'mouseup', 'auxclick']) {
+      expect(fireMouse(type, 3)).toBe(false);
+      expect(fireMouse(type, 4)).toBe(true);
+    }
+  });
+
+  it('leaves navigation alone when the person is signed in but not in voice', () => {
+    const { result } = hook({ channel: null });
+    act(() => {
+      result.current.setTalkKey('Mouse4');
+    });
+    const press = vi.spyOn(result.current.client, 'press');
+    for (const type of ['mousedown', 'mouseup', 'auxclick']) expect(fireMouse(type, 3)).toBe(true);
+    expect(press).not.toHaveBeenCalled();
+  });
+
+  describe('while the button is held', () => {
+    afterEach(() => {
+      fake.session = () => new Promise(() => undefined);
+      fake.room = () => ({});
+      fake.mode = null;
+    });
+    const keyEvent = (type: string, code: string) => {
+      act(() => {
+        window.dispatchEvent(new KeyboardEvent(type, { code }));
+      });
+    };
+
+    it('a change to a keyboard key stops it, a stale mouse event cannot restart it, and the new key works', async () => {
+      const sending: boolean[] = [];
+      const { result } = await joinInVoice(sending);
+      act(() => {
+        result.current.setTalkKey('Mouse4');
+      });
+      fireMouse('mousedown', 3);
+      await flush();
+      expect(sending).toEqual([true]);
+      act(() => {
+        result.current.setTalkKey('KeyV');
+      });
+      await pass(1000);
+      expect(sending).toEqual([true, false]);
+      expect(result.current.state.transmitting).toBe(false);
+      expect(fireMouse('mouseup', 3)).toBe(true);
+      expect(fireMouse('mousedown', 3)).toBe(true);
+      await flush();
+      expect(sending).toEqual([true, false]);
+      keyEvent('keydown', 'KeyV');
+      await flush();
+      expect(sending).toEqual([true, false, true]);
+      keyEvent('keyup', 'KeyV');
+      await pass(1000);
+      expect(sending).toEqual([true, false, true, false]);
+    });
+
+    it('a change from a keyboard key to a mouse key stops it, a stale key event cannot restart it, and the mouse key works', async () => {
+      const sending: boolean[] = [];
+      const { result } = await joinInVoice(sending);
+      act(() => {
+        result.current.setTalkKey('KeyV');
+      });
+      keyEvent('keydown', 'KeyV');
+      await flush();
+      expect(sending).toEqual([true]);
+      act(() => {
+        result.current.setTalkKey('Mouse4');
+      });
+      await pass(1000);
+      expect(sending).toEqual([true, false]);
+      expect(result.current.state.transmitting).toBe(false);
+      keyEvent('keyup', 'KeyV');
+      keyEvent('keydown', 'KeyV');
+      await flush();
+      expect(sending).toEqual([true, false]);
+      expect(fireMouse('mousedown', 3)).toBe(false);
+      await flush();
+      expect(sending).toEqual([true, false, true]);
+      expect(fireMouse('mouseup', 3)).toBe(false);
+      await pass(1000);
+      expect(sending).toEqual([true, false, true, false]);
+    });
+
+    it('signing out stops it, a stale mouse event cannot restart it, and the key works after signing in again', async () => {
+      const sending: boolean[] = [];
+      const view = await joinInVoice(sending);
+      act(() => {
+        view.result.current.setTalkKey('Mouse4');
+      });
+      fireMouse('mousedown', 3);
+      await flush();
+      expect(sending).toEqual([true]);
+      view.rerender({ channel: 'c', voiceAllowed: true, reachable: true, signedIn: false });
+      await flush();
+      expect(sending).toEqual([true, false]);
+      expect(view.result.current.state.transmitting).toBe(false);
+      expect(fireMouse('mouseup', 3)).toBe(true);
+      expect(fireMouse('mousedown', 3)).toBe(true);
+      await flush();
+      expect(sending).toEqual([true, false]);
+      view.rerender({ channel: 'c', voiceAllowed: true, reachable: true, signedIn: true });
+      act(() => {
+        view.result.current.join();
+      });
+      await flush();
+      expect(view.result.current.state.phase).toBe('connected');
+      act(() => {
+        view.result.current.client.setReleaseDelay(0);
+      });
+      expect(fireMouse('mousedown', 3)).toBe(false);
+      await flush();
+      expect(sending).toEqual([true, false, true]);
+    });
+
+    it('leaving voice stops it, a stale mouse event cannot restart it, navigation returns, and the key works after rejoining', async () => {
+      const sending: boolean[] = [];
+      const view = await joinInVoice(sending);
+      act(() => {
+        view.result.current.setTalkKey('Mouse4');
+      });
+      fireMouse('mousedown', 3);
+      await flush();
+      expect(sending).toEqual([true]);
+      await act(async () => {
+        await view.result.current.client.leave();
+      });
+      await flush();
+      expect(view.result.current.state.phase).toBe('idle');
+      expect(sending).toEqual([true, false]);
+      expect(view.result.current.state.transmitting).toBe(false);
+      for (const type of ['mouseup', 'mousedown', 'auxclick']) expect(fireMouse(type, 3)).toBe(true);
+      await flush();
+      expect(sending).toEqual([true, false]);
+      act(() => {
+        view.result.current.join();
+      });
+      await flush();
+      expect(view.result.current.state.phase).toBe('connected');
+      act(() => {
+        view.result.current.client.setReleaseDelay(0);
+      });
+      expect(fireMouse('mousedown', 3)).toBe(false);
+      await flush();
+      expect(sending).toEqual([true, false, true]);
+    });
+  });
+
+  it('keeps a stored keyboard key working unchanged', () => {
+    window.sessionStorage.setItem('conch.web.voice.key', 'KeyV');
+    const { result } = hook({ channel: null });
+    const press = vi.spyOn(result.current.client, 'press');
+    const release = vi.spyOn(result.current.client, 'release');
+    act(() => {
+      window.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyV' }));
+      window.dispatchEvent(new KeyboardEvent('keyup', { code: 'KeyV' }));
+    });
+    expect(press).toHaveBeenCalledTimes(1);
+    expect(release).toHaveBeenCalledTimes(1);
+    expect(fireMouse('mousedown', 3)).toBe(true);
+    expect(press).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not treat a mouse binding as a keyboard code', () => {
+    const { result } = hook({ channel: null });
+    act(() => {
+      result.current.setTalkKey('Mouse4');
+    });
+    const press = vi.spyOn(result.current.client, 'press');
+    act(() => {
+      window.dispatchEvent(new KeyboardEvent('keydown', { code: 'Mouse4' }));
+    });
+    expect(press).not.toHaveBeenCalled();
   });
 });
 
@@ -209,23 +487,6 @@ describe('the release delay', () => {
 // talk key is doing: while a new key is being chosen, Hold to talk still
 // works, and what it opened must shut on a blur too.
 describe('losing focus', () => {
-  // A room that records the track's mutes and answers everything else with
-  // nothing.
-  function talkingRoom(sending: boolean[]): unknown {
-    const methods: Record<string, unknown> = {
-      setSending: (on: boolean) => {
-        sending.push(on);
-        return Promise.resolve();
-      },
-      level: () => 0,
-      microphoneInUse: () => null,
-      microphoneProcessing: () => null,
-    };
-    return new Proxy(methods, {
-      get: (target, name: string) => target[name] ?? (() => Promise.resolve(undefined)),
-    });
-  }
-
   async function joinedHook(sending: boolean[]) {
     fake.session = () =>
       Promise.resolve({ ok: true, value: { livekit_url: 'wss://lk.example', identity: 'p7', rooms: [{ room: 'r', token: 't', can_publish: true, expires_at: '2026-10-16T00:00:15.000Z' }] } });
@@ -698,6 +959,102 @@ describe('presence of the channel on screen', () => {
     await pass(120_000);
     expect(fake.opened).toHaveLength(1);
     expect(fake.reads).toEqual(['c']);
+  });
+
+  // Issue #1409: a moderator's voice-only removal closes the socket 1008 with
+  // the text `voice_removed`. Still a member: presence is read and shown, the
+  // socket comes back through its backoff, and the channel is never gone.
+  it('is not gone after a 1008 voice_removed close, and reads presence as for any other reason', async () => {
+    fake.read = () => Promise.resolve({ ok: true, value: presence([5]) });
+    const { result } = hook();
+    await flush();
+    open([3]);
+    drop(1008, 'voice_removed');
+    await flush();
+    expect(fake.reads).toEqual(['c']);
+    expect(result.current.snapshot).not.toEqual({ kind: 'gone' });
+    expect(result.current.state.phase).toBe('idle');
+    expect(result.current.state.why).toBeNull();
+    await pass(1000);
+    expect(fake.opened).toHaveLength(2);
+    open([5]);
+    expect(result.current.snapshot).toEqual({ kind: 'presence', presence: presence([5]) });
+  });
+
+  describe('in voice', () => {
+    function room(): unknown {
+      const methods: Record<string, unknown> = { level: () => 0, microphoneInUse: () => null, microphoneProcessing: () => null };
+      return new Proxy(methods, { get: (target, name: string) => target[name] ?? (() => Promise.resolve(undefined)) });
+    }
+    let sessions = 0;
+    beforeEach(() => {
+      sessions = 0;
+      fake.session = () => {
+        sessions++;
+        return Promise.resolve({ ok: true, value: { livekit_url: 'wss://lk.example', identity: 'p7', rooms: [{ room: 'r', token: 't', can_publish: true, expires_at: '2026-10-16T00:00:15.000Z' }] } });
+      };
+      fake.room = room;
+      fake.read = () => Promise.resolve({ ok: true, value: presence([3]) });
+    });
+    afterEach(() => {
+      fake.session = () => new Promise(() => undefined);
+      fake.room = () => ({});
+    });
+
+    it('a 1008 voice_removed close leaves voice saying so, does not rejoin, and a deliberate join works', async () => {
+      const { result } = hook();
+      await flush();
+      open([3, 7]);
+      act(() => {
+        result.current.join();
+      });
+      await flush();
+      expect(result.current.state.phase).toBe('connected');
+      expect(sessions).toBe(1);
+      drop(1008, 'voice_removed');
+      await flush();
+      expect(result.current.state.phase).toBe('stopped');
+      expect(result.current.state.why).toBe('You were removed from voice');
+      // Still a member: the roster is read, never "gone", and the socket
+      // comes back through its backoff.
+      expect(fake.reads).toEqual(['c']);
+      expect(result.current.snapshot).not.toEqual({ kind: 'gone' });
+      await pass(1000);
+      expect(fake.opened).toHaveLength(2);
+      open([3]);
+      expect(result.current.snapshot).toEqual({ kind: 'presence', presence: presence([3]) });
+      // Nothing asks for the next session by itself, through the backoff.
+      await pass(60_000);
+      expect(sessions).toBe(1);
+      expect(result.current.state.phase).toBe('stopped');
+      // Joining again is the person's own choice, and is accepted at once.
+      act(() => {
+        result.current.join();
+      });
+      await flush();
+      expect(result.current.state.phase).toBe('connected');
+      expect(result.current.state.why).toBeNull();
+      expect(sessions).toBe(2);
+    });
+
+    it('a 1008 close for membership lost is the channel gone, and voice is not stopped by the socket', async () => {
+      const { result } = hook();
+      await flush();
+      open([3, 7]);
+      act(() => {
+        result.current.join();
+      });
+      await flush();
+      expect(result.current.state.phase).toBe('connected');
+      drop(1008, 'no longer a member of this channel');
+      await flush();
+      expect(result.current.snapshot).toEqual({ kind: 'gone' });
+      // The room's own disconnect, and conchd's refusal of the next session,
+      // end voice; the presence socket alone does not.
+      expect(result.current.state.phase).toBe('connected');
+      expect(result.current.state.why).toBeNull();
+      expect(fake.reads).toEqual([]);
+    });
   });
 
   it('signs out when the read after a 1008 close is refused with 401', async () => {

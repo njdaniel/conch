@@ -343,12 +343,12 @@ func TestVoiceStripIdle(t *testing.T) {
 	tests := []struct {
 		name     string
 		controls bool
-		people   []schema.VoiceParticipant
+		people   []schema.VoiceParticipantV2
 		want     string
 	}{
-		{"no controls, not in the room", false, []schema.VoiceParticipant{person(8, false)}, "you: not in #general voice · voice: 8 bob"},
-		{"controls, not in the room", true, []schema.VoiceParticipant{person(8, false)}, "voice off · /voice join · voice: 8 bob"},
-		{"controls, in the room from another client", true, []schema.VoiceParticipant{person(7, true)}, "you: in #general voice from another client, ● talking · voice: ●7 alice"},
+		{"no controls, not in the room", false, []schema.VoiceParticipantV2{person(8, false)}, "you: not in #general voice · voice: 8 bob"},
+		{"controls, not in the room", true, []schema.VoiceParticipantV2{person(8, false)}, "voice off · /voice join · voice: 8 bob"},
+		{"controls, in the room from another client", true, []schema.VoiceParticipantV2{person(7, true)}, "you: in #general voice from another client, ● talking · voice: ●7 alice"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -536,7 +536,7 @@ func TestVoiceJoinWhereTheAccountAlreadyIs(t *testing.T) {
 func TestVoiceJoinRightAfterLeave(t *testing.T) {
 	ours := time.Date(2026, time.October, 20, 8, 0, 0, 0, time.UTC)
 	theirs := ours.Add(90 * time.Second)
-	at := func(id int64, joined time.Time) schema.VoiceParticipant {
+	at := func(id int64, joined time.Time) schema.VoiceParticipantV2 {
 		p := person(id, false)
 		p.JoinedAt = schema.NewTimestamp(joined)
 		return p
@@ -548,7 +548,7 @@ func TestVoiceJoinRightAfterLeave(t *testing.T) {
 		helper *voicehelper.Status
 		// before is presence while the helper ran; after, when set, is a
 		// presence document that arrives after the leave.
-		before, after schema.VoicePresenceV1
+		before, after schema.VoicePresenceV2
 		warned        bool
 	}{
 		{

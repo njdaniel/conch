@@ -338,7 +338,7 @@ retry. No message appears twice.
 1. With `tui-a` open on `test-private`, take `nick-test` out of it:
 
    ```sh
-   set -a; . <root>/operator.env; set +a; <root>/bin/conch admin member remove test-private <id:nick-test>
+   set -a; . <root>/operator.env; set +a; <root>/bin/conch admin member remove --yes test-private <id:nick-test>
    ```
 
 2. Try to send or reload in `tui-a`. Then put the membership back:

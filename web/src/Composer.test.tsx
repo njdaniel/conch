@@ -3,6 +3,7 @@ import { useReducer, useState } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Composer, ComposerAttachmentProvider } from './Composer';
 import { attachmentDraftsReducer, attachmentsFor, initialAttachmentDrafts } from './state/attachments';
+import { SPOILER_FILE_PREFIX } from './schema/file';
 import type { Audience } from './schema/message';
 
 const target = { net: null, whisper: null, refusal: null, note: null };
@@ -31,6 +32,7 @@ function Harness({ onSend, people = new Map([[2, { name: 'ada', kind: 'human' as
       attachments: attachmentsFor(attachments, 'general'),
       add: (files) => { dispatch({ type: 'add', channel: 'general', files }); },
       remove: (clientId) => { dispatch({ type: 'remove', channel: 'general', clientId }); },
+      spoiler: (clientId, spoiler) => { dispatch({ type: 'spoiler', channel: 'general', clientId, spoiler }); },
       cancel: () => undefined,
       retry: () => undefined,
       editing: () => undefined,
@@ -262,5 +264,45 @@ describe('@mention completion', () => {
     fireEvent.keyDown(box(), { key: 'Enter' });
     expect(box().value).toBe(':fire x @member-1 ');
     expect(onSend).not.toHaveBeenCalled();
+  });
+});
+
+describe('Mark as spoiler on a draft (issue #1500)', () => {
+  it('toggles per draft with aria-pressed, and sends the prefixed name as the image-only body', async () => {
+    const onSend = vi.fn();
+    render(<Harness onSend={onSend} />);
+    fireEvent.change(screen.getByLabelText('Choose files'), { target: { files: [image('one.png'), image('two.png')] } });
+    await screen.findByText('two.png');
+    const one = screen.getByRole('button', { name: 'Mark one.png as spoiler' });
+    const two = screen.getByRole('button', { name: 'Mark two.png as spoiler' });
+    expect(one.getAttribute('aria-pressed')).toBe('false');
+    fireEvent.click(two);
+    expect(screen.getByRole('button', { name: 'Mark two.png as spoiler' }).getAttribute('aria-pressed')).toBe('true');
+    expect(screen.getByRole('button', { name: 'Mark one.png as spoiler' }).getAttribute('aria-pressed')).toBe('false');
+    // The draft preview keeps showing the file as chosen.
+    expect(screen.getByText('two.png')).toBeDefined();
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+    expect(onSend).toHaveBeenLastCalledWith(`one.png, ${SPOILER_FILE_PREFIX}two.png`, undefined, [
+      expect.objectContaining({ filename: 'one.png', spoiler: false }),
+      expect.objectContaining({ filename: 'two.png', spoiler: true }),
+    ]);
+  });
+
+  it('disables the mark of a file whose name is too long, with the reason', async () => {
+    render(<Harness onSend={vi.fn()} />);
+    const name = `a.${'b'.repeat(250)}`;
+    fireEvent.change(screen.getByLabelText('Choose files'), { target: { files: [image(name)] } });
+    const toggle = await screen.findByRole('button', { name: `Mark ${name} as spoiler` });
+    expect(toggle.hasAttribute('disabled')).toBe(true);
+    expect(screen.getByText('This file name is too long to mark as a spoiler.')).toBeDefined();
+    expect(toggle.getAttribute('aria-describedby')).not.toBeNull();
+  });
+
+  it('is a native button that a keyboard reaches', async () => {
+    render(<Harness onSend={vi.fn()} />);
+    fireEvent.change(screen.getByLabelText('Choose files'), { target: { files: [image('one.png')] } });
+    const toggle = await screen.findByRole('button', { name: 'Mark one.png as spoiler' });
+    expect(toggle.tagName).toBe('BUTTON');
+    expect(toggle.getAttribute('type')).toBe('button');
   });
 });

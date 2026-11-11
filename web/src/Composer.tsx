@@ -1,10 +1,12 @@
-import { createContext, useContext, useEffect, useLayoutEffect, useRef, useState, type DragEvent, type KeyboardEvent, type ReactNode } from 'react';
+import { createContext, useContext, useEffect, useId, useLayoutEffect, useRef, useState, type DragEvent, type KeyboardEvent, type ReactNode } from 'react';
 import { EmojiPicker } from './EmojiPicker';
 import { closedShortcodeAt, completeShortcode, completionAt, emojiNow, exactEmoji, insertAt, loadEmoji, type Emoji, type EmojiIndex } from './emoji/emoji';
 import { Glyph } from './Icons';
 import { formatSize, isPreviewType } from './fileSize';
+import { formatText, type FormatKind } from './formatting';
 import { completeMention, mentionAt } from './mention';
 import { validateImage } from './image';
+import { canSpoilerName, storedName } from './spoilerFiles';
 import type { Audience } from './schema/message';
 import { audienceScope, maxDraftAttachments, type DraftAttachment, type NewDraftAttachment } from './state/attachments';
 import type { Target, TargetAction } from './state/drafts';
@@ -25,6 +27,7 @@ export interface ComposerAttachmentContextValue {
   readonly attachments: readonly DraftAttachment[];
   readonly add: (files: readonly NewDraftAttachment[]) => void;
   readonly remove: (clientId: number) => void;
+  readonly spoiler: (clientId: number, spoiler: boolean) => void;
   readonly cancel: (clientId: number) => void;
   readonly retry: (clientId: number) => void;
   // The draft's images are about to change (issue #1066): said before any
@@ -37,6 +40,7 @@ const noAttachments: ComposerAttachmentContextValue = {
   attachments: [],
   add: () => undefined,
   remove: () => undefined,
+  spoiler: () => undefined,
   cancel: () => undefined,
   retry: () => undefined,
   editing: () => undefined,
@@ -49,9 +53,10 @@ export function ComposerAttachmentProvider({ value, children }: { readonly value
   return <ComposerAttachmentContext.Provider value={value}>{children}</ComposerAttachmentContext.Provider>;
 }
 
-function DraftPreview({ attachment, busy, onRemove, onCancel, onRetry }: {
+function DraftPreview({ attachment, busy, onSpoiler, onRemove, onCancel, onRetry }: {
   readonly attachment: DraftAttachment;
   readonly busy: boolean;
+  readonly onSpoiler: (spoiler: boolean) => void;
   readonly onRemove: () => void;
   readonly onCancel: () => void;
   readonly onRetry: () => void;
@@ -59,6 +64,17 @@ function DraftPreview({ attachment, busy, onRemove, onCancel, onRetry }: {
   const [url, setUrl] = useState<string | null>(null);
   const [broken, setBroken] = useState(false);
   const image = isPreviewType(attachment.mediaType);
+  const reasonId = useId();
+  // The stored name is fixed once the upload has begun: the mark is disabled
+  // with a reason rather than re-uploading the file.
+  // A send in progress has frozen every file in it, queued ones too.
+  const tooLong = !attachment.spoiler && !canSpoilerName(attachment.filename);
+  const reason = busy || attachment.sealed === true || attachment.status === 'uploading' || attachment.status === 'ready'
+    ? 'Already uploading or uploaded; remove it and add it again to change this.'
+    : tooLong
+      ? 'This file name is too long to mark as a spoiler.'
+      : null;
+  const locked = reason !== null;
   useEffect(() => {
     if (!image) return;
     const made = URL.createObjectURL(attachment.bytes);
@@ -86,10 +102,32 @@ function DraftPreview({ attachment, busy, onRemove, onCancel, onRetry }: {
           <button type="button" onClick={onRetry} aria-label={`Retry upload of ${attachment.filename}`}>Retry</button>
         </>
       ) : null}
+      <button
+        type="button"
+        className="draft-spoiler"
+        aria-pressed={attachment.spoiler}
+        aria-label={`Mark ${attachment.filename} as spoiler`}
+        disabled={locked}
+        {...(locked ? { 'aria-describedby': reasonId } : {})}
+        onClick={() => { onSpoiler(!attachment.spoiler); }}
+      >
+        Mark as spoiler
+      </button>
+      {locked ? <span id={reasonId} className="hint">{reason}</span> : null}
       <button type="button" onClick={onRemove} disabled={busy} aria-label={`Remove ${attachment.filename}`}>Remove</button>
     </li>
   );
 }
+
+const formattingControls: readonly { readonly kind: FormatKind; readonly label: string; readonly visible: ReactNode; readonly shortcut?: string }[] = [
+  { kind: 'bold', label: 'Bold', visible: <strong>B</strong>, shortcut: 'Control+B Meta+B' },
+  { kind: 'italic', label: 'Italic', visible: <em>I</em>, shortcut: 'Control+I Meta+I' },
+  { kind: 'strike', label: 'Strikethrough', visible: <s>S</s>, shortcut: 'Control+Shift+X Meta+Shift+X' },
+  { kind: 'code', label: 'Inline code', visible: <code>{'</>'}</code>, shortcut: 'Control+E Meta+E' },
+  { kind: 'codeBlock', label: 'Code block', visible: 'Code' },
+  { kind: 'quote', label: 'Quote', visible: '>' },
+  { kind: 'spoiler', label: 'Spoiler', visible: 'Spoiler' },
+];
 
 // The composer: who the message goes to, the box to write in, and Send. The
 // audience is the server's to allow; this offers what the viewer can see.
@@ -137,6 +175,11 @@ export function Composer({
   const [emojiIndex, setEmojiIndex] = useState<EmojiIndex | null>(null);
   // Where the caret goes once a chosen emoji is in the draft.
   const caretAfter = useRef<number | null>(null);
+  const selectionAfter = useRef<{ readonly start: number; readonly end: number } | null>(null);
+  const formatButtons = useRef<(HTMLButtonElement | null)[]>([]);
+  const [formatFocus, setFormatFocus] = useState(0);
+  const [formatOpen, setFormatOpen] = useState(false);
+  const toolbarId = useId();
   // The last `:name:` swap, until anything else changes the draft: what Backspace
   // right after it puts back.
   // Whether an input method is composing: nothing is swapped while it is.
@@ -232,14 +275,33 @@ export function Composer({
     if (swapped.current !== null && swapped.current.text !== draft) swapped.current = null;
   }, [draft]);
   useLayoutEffect(() => {
-    const at = caretAfter.current;
     const box = textarea.current;
+    const range = selectionAfter.current;
+    if (range !== null && box !== null) {
+      selectionAfter.current = null;
+      box.focus();
+      box.setSelectionRange(range.start, range.end);
+      setCaret(range.end);
+      return;
+    }
+    const at = caretAfter.current;
     if (at === null || box === null) return;
     caretAfter.current = null;
     box.focus();
     box.setSelectionRange(at, at);
     setCaret(at);
   }, [insertions]);
+
+  function applyFormatting(kind: FormatKind): void {
+    if (!editable) return;
+    const box = textarea.current;
+    const done = formatText(draft, box?.selectionStart ?? draft.length, box?.selectionEnd ?? draft.length, kind);
+    swapped.current = null;
+    selectionAfter.current = { start: done.start, end: done.end };
+    setSuggestion(0);
+    onDraft(done.text);
+    setInsertions((n) => n + 1);
+  }
 
   // Put an emoji where the selection is (or in place of the typed `:short`).
   function insertEmoji(key: string, from: number, to: number): void {
@@ -275,12 +337,22 @@ export function Composer({
   function submit() {
     if (!canSend) return;
     atBottom();
-    const body = draft.trim() === '' && attachments.length > 0 ? attachments.map((a) => a.filename).join(', ') : draft;
+    const body = draft.trim() === '' && attachments.length > 0 ? attachments.map(storedName).join(', ') : draft;
     if (attachments.length > 0) setSending(true);
     onSend(body, audience(), attachments);
   }
 
   function key(event: KeyboardEvent) {
+    const composingNow = event.nativeEvent.isComposing || composing.current;
+    if (editable && !composingNow && !event.altKey && (event.ctrlKey || event.metaKey)) {
+      const pressed = event.key.toLowerCase();
+      const formatting = !event.shiftKey && pressed === 'b' ? 'bold' : !event.shiftKey && pressed === 'i' ? 'italic' : !event.shiftKey && pressed === 'e' ? 'code' : event.shiftKey && pressed === 'x' ? 'strike' : null;
+      if (formatting !== null) {
+        event.preventDefault();
+        applyFormatting(formatting);
+        return;
+      }
+    }
     // Enter sends, Shift+Enter adds a line; Enter while composing (an input
     // method choosing a character) is not a send.
     if (event.key !== 'Enter' || event.shiftKey || event.nativeEvent.isComposing) return;
@@ -418,6 +490,7 @@ export function Composer({
               key={attachment.clientId}
               attachment={attachment}
               busy={busy}
+              onSpoiler={(spoiler) => { fileDraft.spoiler(attachment.clientId, spoiler); }}
               onRemove={() => { fileDraft.remove(attachment.clientId); }}
               onCancel={() => { fileDraft.cancel(attachment.clientId); }}
               onRetry={() => { fileDraft.retry(attachment.clientId); }}
@@ -577,6 +650,37 @@ export function Composer({
           key(event);
         }}
       />
+      {/* After the box in tab order, so it costs the log nothing; on a phone it
+          is closed until this button opens it. */}
+      <button type="button" className="format-toggle" aria-label="Formatting" aria-expanded={formatOpen} aria-controls={toolbarId} disabled={!editable} onClick={() => { setFormatOpen(!formatOpen); }} onKeyDown={(event) => { if (event.key === 'Escape' && formatOpen) { event.preventDefault(); setFormatOpen(false); } }}>
+        <span aria-hidden="true">Aa</span>
+      </button>
+      <div id={toolbarId} className={formatOpen ? 'composer-formatting open' : 'composer-formatting'} role="toolbar" aria-label="Formatting" onKeyDown={(event) => { if (event.key === 'Escape' && formatOpen) { event.preventDefault(); setFormatOpen(false); textarea.current?.focus(); } }}>
+        {formattingControls.map((control, index) => (
+          <button
+            key={control.kind}
+            ref={(node) => { formatButtons.current[index] = node; }}
+            type="button"
+            aria-label={control.label}
+            aria-keyshortcuts={control.shortcut}
+            tabIndex={index === formatFocus ? 0 : -1}
+            disabled={!editable}
+            onFocus={() => { setFormatFocus(index); }}
+            onMouseDown={(event) => { event.preventDefault(); }}
+            onClick={() => { setFormatOpen(false); applyFormatting(control.kind); }}
+            onKeyDown={(event) => {
+              const last = formattingControls.length - 1;
+              const next = event.key === 'ArrowRight' ? (index + 1) % formattingControls.length : event.key === 'ArrowLeft' ? (index + last) % formattingControls.length : event.key === 'Home' ? 0 : event.key === 'End' ? last : null;
+              if (next === null) return;
+              event.preventDefault();
+              setFormatFocus(next);
+              formatButtons.current[next]?.focus();
+            }}
+          >
+            <span aria-hidden="true">{control.visible}</span>
+          </button>
+        ))}
+      </div>
       <button
         ref={emojiButton}
         type="button"

@@ -12,7 +12,7 @@
 // or the server is asked about a credential, /healthz must name a release on
 // the allowlist (or the development flag must allow it). The same verdict
 // decides whether a sign-in may happen in the window at all.
-import type { CompatView, ProfileAddResult, ProfileNotice, ProfilesView, StorageStatus } from '../../../web/src/platform/desktop/bridge.ts';
+import type { CompatView, ProfileAddResult, ProfileNotice, ProfilesView, ProfileView, StorageStatus } from '../../../web/src/platform/desktop/bridge.ts';
 import type { OperationId } from '../../../web/src/platform/operations.ts';
 import { parseServerAddress } from '../api/origin.ts';
 import { judge, permits, REQUIRED_FAMILIES, type CompatPolicy, type HealthResult, type Verdict } from '../compat.ts';
@@ -285,18 +285,34 @@ export class ProfilesService {
     return false;
   }
 
+  #profileView(p: Profile, active: string | null): ProfileView {
+    return {
+      id: p.id,
+      label: p.label,
+      host: new URL(p.origin).host,
+      origin: p.origin,
+      account: p.principal === null ? null : p.principal.name,
+      active: p.id === active,
+    };
+  }
+
+  // findByOrigin is every saved profile for a canonical origin, in list order:
+  // there can be several (another account on the same server is another
+  // entry). Display metadata only; the invite router (../invites.ts) offers
+  // them by name and account.
+  findByOrigin(origin: string): readonly ProfileView[] {
+    const active = this.#switcher.current?.profileId ?? null;
+    return this.#deps.store
+      .list()
+      .filter((p) => p.origin === origin)
+      .map((p) => this.#profileView(p, active));
+  }
+
   view(): ProfilesView {
     const { store, platform } = this.#deps;
     const active = this.#switcher.current?.profileId ?? null;
     return {
-      profiles: store.list().map((p) => ({
-        id: p.id,
-        label: p.label,
-        host: new URL(p.origin).host,
-        origin: p.origin,
-        account: p.principal === null ? null : p.principal.name,
-        active: p.id === active,
-      })),
+      profiles: store.list().map((p) => this.#profileView(p, active)),
       active,
       storage: storageOf(this.#storage),
       recovery: store.corrupt,

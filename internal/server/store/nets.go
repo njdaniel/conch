@@ -206,6 +206,7 @@ func (s *Store) ListNetsForPrincipal(ctx context.Context, channelID, principalID
 		`SELECT n.id, n.channel_id, n.name, n.created_by, n.created_at, n.archived_at FROM nets n
 		 JOIN net_members m ON m.net_id = n.id
 		 WHERE n.channel_id = ? AND n.archived_at IS NULL AND m.principal_id = ?
+		   AND `+notBannedSQL("m.principal_id")+`
 		 ORDER BY n.id ASC`, channelID, principalID)
 }
 
@@ -213,8 +214,8 @@ func (s *Store) ListNetsForPrincipal(ctx context.Context, channelID, principalID
 // empty, non-nil slice when nobody is on the net.
 func (s *Store) ListNetMembers(ctx context.Context, netID int64) ([]NetMember, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT principal_id, role, added_by, created_at FROM net_members
-		 WHERE net_id = ? ORDER BY principal_id ASC`, netID)
+		`SELECT m.principal_id, m.role, m.added_by, m.created_at FROM net_members m JOIN nets n ON n.id = m.net_id
+		 WHERE m.net_id = ? AND `+notBannedSQL("m.principal_id")+` ORDER BY m.principal_id ASC`, netID) // #nosec G202 -- the fragment is a constant of notBannedSQL
 	if err != nil {
 		return nil, fmt.Errorf("store: list members of net %d: %w", netID, err)
 	}
@@ -244,7 +245,8 @@ func (s *Store) ListNetMembers(ctx context.Context, netID int64) ([]NetMember, e
 func (s *Store) IsNetMember(ctx context.Context, netID, principalID int64) (bool, error) {
 	var one int
 	err := s.db.QueryRowContext(ctx,
-		"SELECT 1 FROM net_members WHERE net_id = ? AND principal_id = ? AND role = ?",
+		`SELECT 1 FROM net_members m JOIN nets n ON n.id = m.net_id
+		 WHERE m.net_id = ? AND m.principal_id = ? AND m.role = ? AND `+notBannedSQL("m.principal_id"),
 		netID, principalID, string(schema.NetRoleMember)).Scan(&one)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
@@ -275,7 +277,7 @@ func (s *Store) PutNetMember(ctx context.Context, actor string, channelID int64,
 		}
 		var one int
 		switch err := tx.QueryRowContext(ctx,
-			"SELECT 1 FROM channel_members WHERE channel_id = ? AND principal_id = ?", channelID, principalID).Scan(&one); {
+			"SELECT 1 FROM "+liveMembers+" WHERE channel_id = ? AND principal_id = ?", channelID, principalID).Scan(&one); {
 		case errors.Is(err, sql.ErrNoRows):
 			return ErrNotChannelMember
 		case err != nil:

@@ -482,7 +482,7 @@ func (s *Store) ListChannelSessions(ctx context.Context, channelID int64, now ti
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT `+sessionColumns+`
 		 FROM sessions s
-		 JOIN channel_members m ON m.principal_id = s.principal_id AND m.channel_id = ?
+		 JOIN `+liveMembers+` m ON m.principal_id = s.principal_id AND m.channel_id = ?
 		 JOIN principals p ON p.id = s.principal_id
 		 WHERE s.ended_at IS NULL AND s.last_seen_at >= ?
 		 ORDER BY s.id`, channelID, now.Add(-within).UnixMilli())

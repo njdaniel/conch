@@ -226,12 +226,29 @@ func (f *messageFeed) close() {
 	<-f.done
 }
 
-// ids is the id of each message received so far, in order.
-func (f *messageFeed) ids() []int64 {
+// snapshot is a copy of every message received so far, in order.
+func (f *messageFeed) snapshot() []schema.MessageV2 {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	out := make([]int64, len(f.msgs))
-	for i, m := range f.msgs {
+	return append([]schema.MessageV2(nil), f.msgs...)
+}
+
+// byID is every frame received for one message id, in order.
+func (f *messageFeed) byID(id int64) []schema.MessageV2 {
+	var out []schema.MessageV2
+	for _, m := range f.snapshot() {
+		if m.ID == id {
+			out = append(out, m)
+		}
+	}
+	return out
+}
+
+// ids is the id of each message received so far, in order.
+func (f *messageFeed) ids() []int64 {
+	messages := f.snapshot()
+	out := make([]int64, len(messages))
+	for i, m := range messages {
 		out[i] = m.ID
 	}
 	return out
@@ -239,14 +256,7 @@ func (f *messageFeed) ids() []int64 {
 
 // has reports whether a message with this id was received.
 func (f *messageFeed) has(id int64) bool {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	for _, m := range f.msgs {
-		if m.ID == id {
-			return true
-		}
-	}
-	return false
+	return len(f.byID(id)) != 0
 }
 
 // closed is the error that ended the socket, nil while it is open.
@@ -268,6 +278,7 @@ type eventFeed struct {
 	runs    []schema.RunV1
 	acts    []schema.AgentActivityV1
 	ivs     []schema.InterventionV1
+	removed []schema.MessageRemovedV1
 	err     error
 }
 
@@ -308,6 +319,12 @@ func (s *suite) followEvents(part, channel string) (*eventFeed, error) {
 			Intervention: func(iv schema.InterventionV1) error {
 				f.mu.Lock()
 				f.ivs = append(f.ivs, iv)
+				f.mu.Unlock()
+				return nil
+			},
+			MessageRemoved: func(r schema.MessageRemovedV1) error {
+				f.mu.Lock()
+				f.removed = append(f.removed, r)
 				f.mu.Unlock()
 				return nil
 			},
@@ -368,6 +385,13 @@ func (f *eventFeed) activitySeen() []schema.AgentActivityV1 {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]schema.AgentActivityV1(nil), f.acts...)
+}
+
+// removalsSeen is a copy of every message removal frame so far.
+func (f *eventFeed) removalsSeen() []schema.MessageRemovedV1 {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]schema.MessageRemovedV1(nil), f.removed...)
 }
 
 // anyRoster reports whether some roster frame satisfies ok.

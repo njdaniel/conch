@@ -1121,7 +1121,7 @@ func TestVoiceShareRevocationReachesTheCompanion(t *testing.T) {
 		f, room := shareWithCompanion(t)
 		f.mustClaim(t, "ann")
 		f.publishScreen(room, true, false)
-		f.mustStop(t, "root")
+		f.mustStopOf(t, "ann")
 		requireWithdrawn(t, f, room, "after the operator's stop")
 	})
 	t.Run("the audit row cannot be written", func(t *testing.T) {
@@ -1195,7 +1195,7 @@ func TestVoiceShareRevocationReachesTheCompanion(t *testing.T) {
 		f.lk.mu.Lock()
 		f.lk.rooms[room] = append(f.lk.rooms[room], fakeParticipant{identity: f.screenID("ann"), joinedMs: 3_000, shareGranted: true, screen: true})
 		f.lk.mu.Unlock()
-		f.mustStop(t, "root")
+		f.mustStopOf(t, "ann")
 		requireWithdrawn(t, f, room, "after the operator's stop")
 	})
 	t.Run("an unlisted companion: the audit row cannot be written", func(t *testing.T) {
@@ -1273,7 +1273,7 @@ func TestVoiceShareRevocationReachesTheCompanion(t *testing.T) {
 			if share && identity == f.identity("ann") {
 				once.Do(func() { // a pass ended the share while it was granted again
 					f.srv.voice.mu.Lock()
-					f.srv.voice.rooms[room].share = nil
+					delete(f.srv.voice.rooms[room].shares, f.ids["ann"])
 					f.srv.voice.mu.Unlock()
 				})
 			}

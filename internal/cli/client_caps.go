@@ -36,6 +36,9 @@ const (
 
 	maxChannelDirectoryBody = listRowCeiling*listRowBound + listSlack
 	maxChannelMembersBody   = listRowCeiling*listRowBound + listSlack
+	maxChannelBansBody      = listRowCeiling*listRowBound + listSlack
+	// maxIssuedBody: an IssuedByOperatorV1 is a kind and four numbers.
+	maxIssuedBody           = listRowCeiling*listRowBound + listSlack
 	maxMemberLinksBody      = listRowCeiling*inviteRowBound + listSlack
 	maxJoinersBody          = listRowCeiling*listRowBound + listSlack
 	maxChannelAuthorsBody   = schema.MaxChannelAuthorIDs*listRowBound + listSlack
@@ -125,6 +128,9 @@ type (
 	channelMembersDoc struct {
 		schema.ListChannelMembersResponseV1
 	}
+	channelBansDoc struct {
+		schema.ListChannelBansResponseV1
+	}
 	memberLinksDoc    struct{ schema.ListInvitesResponseV2 }
 	channelAuthorsDoc struct {
 		schema.ChannelAuthorsResponseV1
@@ -138,6 +144,7 @@ type (
 	hooksDoc  struct{ schema.ListHooksResponseV1 }
 
 	channelListDoc struct{ schema.ListChannelsResponse }
+	previewDoc     struct{ schema.PreviewResponseV1 }
 	readStateDoc   struct{ schema.ListReadStateResponseV1 }
 	credentialsDoc struct {
 		schema.ListCredentialsResponseV1
@@ -146,7 +153,15 @@ type (
 		schema.ListOwnSignInLinksResponseV1
 	}
 	voiceOccupancyDoc struct{ schema.VoiceOccupancyV1 }
-	netsDoc           struct{ schema.ListNetsResponseV1 }
+
+	// What a principal issued to others, listed on a disable and a demotion
+	// (issue #1463): one row per live credential or hook, not paged.
+	disablePrincipalDoc struct {
+		schema.DisablePrincipalResponseV1
+	}
+	roleChangeDoc   struct{ schema.RoleChangeResponseV1 }
+	revokeIssuedDoc struct{ schema.RevokeIssuedResponseV1 }
+	netsDoc         struct{ schema.ListNetsResponseV1 }
 
 	// The paged reads carry the number of rows asked for.
 	messagesV1Doc struct {
@@ -181,6 +196,7 @@ type (
 
 func (channelDirectoryDoc) maxBody() int64 { return maxChannelDirectoryBody }
 func (channelMembersDoc) maxBody() int64   { return maxChannelMembersBody }
+func (channelBansDoc) maxBody() int64      { return maxChannelBansBody }
 func (memberLinksDoc) maxBody() int64      { return maxMemberLinksBody }
 func (channelAuthorsDoc) maxBody() int64   { return maxChannelAuthorsBody }
 func (joinersDoc) maxBody() int64          { return maxJoinersBody }
@@ -190,11 +206,20 @@ func (guestsDoc) maxBody() int64           { return maxGuestsBody }
 func (hooksDoc) maxBody() int64            { return maxHooksBody }
 
 func (channelListDoc) maxBody() int64    { return maxChannelListBody }
+func (previewDoc) maxBody() int64        { return listSlack }
 func (readStateDoc) maxBody() int64      { return maxReadStateBody }
 func (credentialsDoc) maxBody() int64    { return maxCredentialsBody }
 func (deviceLinksDoc) maxBody() int64    { return maxDeviceLinksBody }
 func (voiceOccupancyDoc) maxBody() int64 { return maxVoiceOccupancyBody }
 func (netsDoc) maxBody() int64           { return maxNetsBody }
+
+func (disablePrincipalDoc) maxBody() int64 { return maxIssuedBody }
+
+// emptyOK: a server from before issue #1463 answers a disable with 204.
+func (disablePrincipalDoc) emptyOK() {}
+
+func (roleChangeDoc) maxBody() int64   { return maxIssuedBody }
+func (revokeIssuedDoc) maxBody() int64 { return listSlack }
 
 func (d messagesV1Doc) maxBody() int64 { return pageBody(d.rows, messageRowBound) }
 func (d messagesV2Doc) maxBody() int64 { return pageBody(d.rows, messageRowBound) }

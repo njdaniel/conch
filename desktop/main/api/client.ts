@@ -18,10 +18,11 @@
 //    validator (a refusal by the error document's) before anything returns;
 //  - the answer is dropped when the identity that asked has ended.
 import { errorV0 } from '../../../web/src/schema/error.ts';
-import { operations, type Operation, type OperationId } from '../../../web/src/platform/operations.ts';
+import { fromServer } from '../../../web/src/schema/validate.ts';
+import { operations, previewHeader, type Operation, type OperationId } from '../../../web/src/platform/operations.ts';
 import type { NoAnswerReason } from '../../../web/src/platform/desktop/bridge.ts';
 import type { Capture, Session } from './session.ts';
-import { targetOf } from './target.ts';
+import { previewable, targetOf } from './target.ts';
 import { isCertificateFailure } from './trust.ts';
 
 export const MAX_RESPONSE_BYTES = 4 * 1024 * 1024;
@@ -61,6 +62,9 @@ export interface Send {
   // True for the one request that must outlive its identity: the revocation
   // that sign-out sends for the credential it has just forgotten.
   readonly detached?: boolean;
+  // The principal whose view this read asks for. Sent as Conch-Preview-As on
+  // a previewable read; any other operation is refused before the wire.
+  readonly previewAs?: number;
   // The request body is these bytes with this declared media type, not JSON
   // (an upload). The type is untrusted data the caller has already shaped.
   readonly upload?: { readonly mediaType: string; readonly bytes: Uint8Array };
@@ -120,6 +124,10 @@ function parseJson(bytes: Uint8Array): { readonly ok: true; readonly value: unkn
   }
 }
 
+// The writes whose body holds a password or a proof of one: the credential
+// replacing steps (convertGuest has the member's password and no secret flag).
+const carriesPassword = (op: OperationId): boolean => operations[op].secret === true || op === 'convertGuest';
+
 export class Client {
   readonly #deps: ClientDeps;
 
@@ -128,6 +136,12 @@ export class Client {
   }
 
   async send(request: Send): Promise<Exchange> {
+    return this.#send(request, null);
+  }
+
+  // resendToken is set for the one re-send a rotated credential earns, which
+  // is never followed by another.
+  async #send(request: Send, resendToken: string | null): Promise<Exchange> {
     const { session } = this.#deps;
     const capture = request.capture ?? session.capture();
     const op: Operation = operations[request.op];
@@ -135,9 +149,11 @@ export class Client {
     const target = targetOf(request.op, request.params, request.query);
     if (target === null) return none('unsupported');
 
+    if (request.previewAs !== undefined && !previewable(request.op)) return none('unsupported');
     const headers = new Headers({ Accept: 'application/json' });
+    if (request.previewAs !== undefined) headers.set(previewHeader, String(request.previewAs));
     if (op.auth === 'bearer') {
-      const token = request.token ?? capture.token;
+      const token = resendToken ?? request.token ?? capture.token;
       // No credential is a 401 without asking the server.
       if (token === null) return { kind: 'unauthorized' };
       headers.set('Authorization', `Bearer ${token}`);
@@ -193,6 +209,16 @@ export class Client {
     // done, unless the operation takes a secret with a working credential
     // (a wrong password there is auth_failed and the person stays in).
     if (response.status === 401 && op.auth === 'bearer' && op.secret !== true && request.token === undefined) {
+      // The credential this request carried may have been replaced, at the
+      // server, by a password change that finished while it was in flight: the
+      // same identity, refused for a credential it no longer holds. Ask once
+      // more with the one in force. Never for a write that carries a password
+      // (it is not repeated), never after a sign-out, a switch of account or
+      // of server (successor is null then), and a 401 for the credential in
+      // force, or for the re-send, is a revocation and ends the sign-in.
+      const sent = capture.token;
+      const next = resendToken === null && request.detached !== true && sent !== null && !carriesPassword(request.op) ? session.successor(capture, sent) : null;
+      if (next !== null) return this.#send(request, next);
       session.forget();
       return { kind: 'unauthorized' };
     }
@@ -212,7 +238,7 @@ export class Client {
       return { kind: 'answer', status: response.status, ok, body: parsed.value, ...extras };
     }
     // A refusal: its error document if it is one, else only its status.
-    if (parsed.ok && errorV0(parsed.value).length === 0) return { kind: 'answer', status: response.status, ok, body: parsed.value, ...extras };
+    if (parsed.ok && fromServer(errorV0)(parsed.value).length === 0) return { kind: 'answer', status: response.status, ok, body: parsed.value, ...extras };
     return { kind: 'answer', status: response.status, ok, ...extras };
   }
 }

@@ -38,6 +38,9 @@ func (m Model) View() string {
 	if (m.mode == modeInbox || m.mode == modeDecision) && (width < minApprovalWidth || l.height < minApprovalHeight) {
 		return tooSmall(width, l.height)
 	}
+	if l.compact {
+		return m.compactConfirmation(width, l.height)
+	}
 	var rows []string
 	if l.top > 0 {
 		rows = append(rows, m.titleBar(width))
@@ -54,6 +57,7 @@ func (m Model) View() string {
 	if l.voice != "" {
 		rows = append(rows, statusStyle.Width(width).Render(l.voice))
 	}
+	rows = append(rows, l.confirm...)
 	rows = append(rows, m.statusRow(width))
 	return strings.Join(rows, "\n")
 }
@@ -92,7 +96,7 @@ func (m Model) panes(l layout) string {
 func (m Model) chatPanes(l layout) string {
 	channels := paneBox("CHANNELS", m.focus == focusChannels, m.channelWindow(l), l.leftW, l.contentH, "")
 	lines, foot := m.chatLines(l)
-	messages := paneBox(m.chatTitle(), m.focus == focusMessages, lines, l.rightW, l.contentH, foot)
+	messages := paneBox(m.chatTitleFit(m.chatTitleRoom(l.rightW)), m.focus == focusMessages, lines, l.rightW, l.contentH, foot)
 	if l.peopleW == 0 {
 		return lipgloss.JoinHorizontal(lipgloss.Top, channels, messages)
 	}
@@ -114,16 +118,57 @@ func (m Model) channelWindow(l layout) []string {
 
 // chatTitle names the conversation on screen and, when it is not the whole
 // channel, where plain messages go.
-func (m Model) chatTitle() string {
+func (m Model) chatTitle() string { return m.chatTitleFit(0) }
+
+// chatTitleFit is chatTitle for a title room cells wide (room <= 0: no limit).
+// The net and [stale] markers are never cut: a topic too long for the room
+// left after them is truncated, or dropped when almost nothing of it would
+// show, so the border label never hides what is not shown anywhere else.
+func (m Model) chatTitleFit(room int) string {
 	channel := sanitize(m.current())
 	if channel == "" {
 		return "MESSAGES"
 	}
-	title := "# " + channel
+	head := "# " + channel
+	var net, stale string
 	if m.target != nil && m.target.channel == m.current() {
-		title += " › net " + sanitize(m.target.name)
+		net = " › net " + sanitize(m.target.name)
 	}
-	return title
+	if m.mod.stale[m.current()] {
+		stale = " [stale]"
+	}
+	// [stale] is shown nowhere else; the net target is also in the compose
+	// prompt, so it goes first when even the markers do not fit.
+	if room > 0 && cellWidth(head+net+stale) > room {
+		net = ""
+	}
+	tail := net + stale
+	topic := sanitize(m.channelTopics[m.current()])
+	if topic == "" {
+		return head + tail
+	}
+	const sep = " · "
+	if room > 0 {
+		left := room - cellWidth(head) - cellWidth(sep) - cellWidth(tail)
+		if left < 2 {
+			return head + tail
+		}
+		topic = fitCells(topic, left)
+		if topic == "…" { // nothing of it fits (a wide first character)
+			return head + tail
+		}
+	}
+	return head + sep + topic + tail
+}
+
+// chatTitleRoom is the cells of a messages pane outerW wide that the title
+// text can use: borderLabel's room less the focus mark paneBox may prefix.
+func (m Model) chatTitleRoom(outerW int) int {
+	room := outerW - 4 - 2
+	if m.focus == focusMessages {
+		room -= cellWidth(focusMark)
+	}
+	return max(room, 1)
 }
 
 // chatLines is the message pane's content and the label of its bottom border:
@@ -142,7 +187,11 @@ func (m Model) chatLines(l layout) (lines []string, foot string) {
 	case !m.loaded[channel]:
 		return []string{statusStyle.Render(fitCells("loading history…", cols))}, ""
 	}
-	text := wrapWords("No messages in "+sanitize(channel)+" yet. Type below and press enter to send one.", cols, cols)
+	empty := "No messages in " + sanitize(channel) + " yet."
+	if !m.channelArchived(channel) {
+		empty += " Type below and press enter to send one."
+	}
+	text := wrapWords(empty, cols, cols)
 	for i, t := range text {
 		text[i] = statusStyle.Render(t)
 	}
@@ -180,13 +229,18 @@ func (m Model) channelLines(leftWidth int) []string {
 		if badge != "" {
 			room -= 1 + len(badge)
 		}
+		tag := ""
+		if m.channelArchived(channel) {
+			tag = archivedChannelTag
+			room -= cellWidth(tag)
+		}
 		name := fitCells(sanitize(channel), room)
 		prefix := "  "
 		if i == m.selected {
 			prefix = activeStyle.Render("› ")
 			name = activeStyle.Render(name)
 		}
-		lines[i] = prefix + name
+		lines[i] = prefix + name + statusStyle.Render(tag)
 		if badge != "" {
 			lines[i] += " " + badgeStyle.Render(badge)
 		}
@@ -238,8 +292,8 @@ func (m Model) runsPanes(l layout) string {
 
 // inputRow is the input line: the prompt and the draft in the chat view, the
 // reason in the decision prompt, run detail's own line, and nothing elsewhere.
-// The cursor mark says where typing goes. While the help is open typing goes
-// nowhere, so the draft stays on screen without it.
+// An archived channel has no composer. The cursor mark says where typing goes.
+// While the help is open typing goes nowhere, so the draft stays without it.
 func (m Model) inputRow(width int) string {
 	row := lipgloss.NewStyle().Width(width)
 	cursor := activeStyle.Render("▌")
@@ -247,11 +301,14 @@ func (m Model) inputRow(width int) string {
 		cursor = " "
 	}
 	switch m.mode {
-	case modeChannels, modeDecision:
-		prompt := ">"
-		if m.mode == modeChannels {
-			prompt = m.promptWithin(width / 2)
+	case modeChannels:
+		if m.channelArchived(m.current()) {
+			return row.Render(fitCells(archivedChannelNotice, width))
 		}
+		prompt := m.promptWithin(width / 2)
+		return row.Render(prompt + " " + clipTail(sanitize(m.input), width-cellWidth(prompt)-3) + cursor)
+	case modeDecision:
+		prompt := ">"
 		return row.Render(prompt + " " + clipTail(sanitize(m.input), width-cellWidth(prompt)-3) + cursor)
 	case modeRun:
 		return row.Render(fitCells(m.runPrompt(width), width))
@@ -304,6 +361,9 @@ func (m Model) statusHints() []hint {
 			arrows = hint{"↑/↓", "scroll", 3}
 		}
 		hints = []hint{arrows, {"←/→", "focus", 6}, {"enter", "send", 1}, {"tab", "inbox", 2}, {"esc", "quit", 0}}
+		if m.channelArchived(m.current()) {
+			hints = slices.Delete(hints, 2, 3)
+		}
 		if m.scroll > 0 {
 			hints = append(hints[:1], append([]hint{{"end", "latest", 4}}, hints[1:]...)...)
 		}
@@ -321,6 +381,9 @@ func (m Model) statusHints() []hint {
 func (m Model) statusRow(width int) string {
 	statusKeys := hintLine(m.statusHints(), width-max(16, width/5))
 	status := m.status()
+	if m.mode == modeChannels && status == archivedChannelNotice && m.channelArchived(m.current()) {
+		status = ""
+	}
 	if m.mode == modeChannels {
 		status = fitCells(status, width-cellWidth(statusKeys)) + statusKeys
 		if name := sanitize(m.userName); name != "" {

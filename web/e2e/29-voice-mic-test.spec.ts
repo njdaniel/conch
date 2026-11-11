@@ -13,7 +13,7 @@
 // only where voice is set up: without Docker it fails when CI is set and is
 // skipped otherwise.
 import type { Page } from '@playwright/test';
-import { expect, openChannel, showView, signIn, test } from './fixtures';
+import { closeAll, expect, openChannel, showView, signIn, test } from './fixtures';
 import { dockerAvailable, startVoiceWorld, watchPage, type VoiceWorld } from './voice-world';
 
 const voiceRegion = (page: Page) => page.getByRole('region', { name: 'Voice' });
@@ -130,7 +130,7 @@ test.describe('the private microphone test', () => {
         expect(after[after.length - 2]).toBe('ended');
         await voice.getByRole('button', { name: 'Leave voice' }).click();
       } finally {
-        await context.close();
+        await closeAll(context);
       }
     });
   }

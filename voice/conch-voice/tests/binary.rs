@@ -215,8 +215,15 @@ fn config_set_saves_quietly_refuses_in_one_line_and_exits_by_the_rule() {
     for args in [
         &["config", "set", "server", "http://evil.example"][..],
         &["config", "set", "channel", "ops"],
-        &["config", "set", "keys.talk", "KEY_F13"],
-        &["config", "set", "keys.device", "/dev/input/event3"],
+        &["config", "set", "keys.talk", "768"],
+        &[
+            "config",
+            "set",
+            "keys.device",
+            "/dev/input/event3/../../null",
+        ],
+        &["config", "set", "keys.device", "/tmp/event3"],
+        &["config", "unset", "audio.input"],
         &["config", "set", "audio.input", "with \"quotes\""],
         &["config", "set", "audio.input", "escape\u{1b}[2J"],
         &["config", "set", "audio.input", ""],
@@ -261,6 +268,60 @@ fn config_set_saves_quietly_refuses_in_one_line_and_exits_by_the_rule() {
     );
 
     assert_eq!(std::fs::read_to_string(&credentials).unwrap(), stored);
+}
+
+/// `config set keys.*` and `config unset keys.*` as a process: quiet on success, the file
+/// private when created, and a refusal is one line that does not show the value.
+#[test]
+fn config_sets_and_unsets_the_key_device_and_bindings_quietly() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let private = tempfile::tempdir().unwrap();
+    let directory = private.path().join("config").join("conch");
+    std::fs::create_dir_all(&directory).unwrap();
+    let path = directory.join("voice.toml");
+    let quiet = |args: &[&str]| run(conch_voice(private.path()).arg("config").args(args));
+
+    for args in [
+        &[
+            "set",
+            "keys.device",
+            "/dev/input/by-id/usb-Example_Mouse-event-mouse",
+        ][..],
+        &["set", "keys.talk", "275"],
+        &["set", "keys.mute", "KEY_F13"],
+    ] {
+        let (code, stdout, stderr) = quiet(args);
+        assert_eq!(
+            (code, stdout.as_str(), stderr.as_str()),
+            (Some(0), "", ""),
+            "{args:?}"
+        );
+    }
+    assert_eq!(
+        std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        "[keys]\nmute = \"KEY_F13\"\ntalk = \"275\"\ndevice = \"/dev/input/by-id/usb-Example_Mouse-event-mouse\"\n"
+    );
+    let (code, stdout, stderr) = quiet(&["unset", "keys.device"]);
+    assert_eq!((code, stdout.as_str(), stderr.as_str()), (Some(0), "", ""));
+    let (code, stdout, stderr) = quiet(&["unset", "keys.deafen"]);
+    assert_eq!((code, stdout.as_str(), stderr.as_str()), (Some(0), "", ""));
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        "[keys]\nmute = \"KEY_F13\"\ntalk = \"275\"\n"
+    );
+
+    // Refused as it stands: one line, and the value is not in it.
+    write_voice_toml(&path, "keys = { talk = 97 }\n");
+    let (code, stdout, stderr) = quiet(&["set", "keys.talk", "275"]);
+    assert_eq!((code, stdout.as_str()), (Some(1), ""));
+    assert_eq!(stderr.lines().count(), 1, "{stderr}");
+    assert!(stderr.contains("`[keys]` is written in a form"), "{stderr}");
+    assert!(!stderr.contains("275"), "{stderr}");
 }
 
 #[test]

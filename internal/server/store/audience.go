@@ -284,7 +284,7 @@ func (s *Store) ListChannelAuthors(ctx context.Context, channelID int64, reader 
 func (s *Store) AuthorReaders(ctx context.Context, authorID int64) ([]int64, error) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT DISTINCT v.id FROM principals v
-		 JOIN channel_members cm ON cm.principal_id = v.id
+		 JOIN `+liveMembers+` cm ON cm.principal_id = v.id
 		 WHERE v.kind = 'human' AND v.disabled_at IS NULL AND v.hidden_at IS NULL
 		   AND v.id <> ?
 		   AND EXISTS (SELECT 1 FROM messages x WHERE x.channel_id = cm.channel_id AND x.author_id = ?)
@@ -303,7 +303,7 @@ func (s *Store) AuthorReaders(ctx context.Context, authorID int64) ([]int64, err
 		var ok bool
 		if err := s.db.QueryRowContext(ctx,
 			`SELECT EXISTS (SELECT 1 FROM messages m
-			                JOIN channel_members rc ON rc.channel_id = m.channel_id AND rc.principal_id = ?
+			                JOIN `+liveMembers+` rc ON rc.channel_id = m.channel_id AND rc.principal_id = ?
 			                WHERE m.author_id = ? AND `+messageVisible(scoped)+`)`, // #nosec G202 -- constant conditions only
 			args...).Scan(&ok); err != nil {
 			return nil, fmt.Errorf("store: readers of author %d: %w", authorID, err)
@@ -343,11 +343,27 @@ func historyWatermarkTx(ctx context.Context, tx execer, channelID int64) (int64,
 	return id, nil
 }
 
-// messageColumns is the column list scanMessages reads.
-const messageColumns = `m.id, m.channel_id, m.author_id, m.body, m.payload_schema, m.payload_json, m.created_at, m.audience_kind, m.net_id, m.thread_root_id,
+// removedCond is true, over messages aliased m, for a message a moderator
+// removed (docs/design/moderation.md section 7). It has no arguments.
+const removedCond = `EXISTS (SELECT 1 FROM message_removals mrm WHERE mrm.message_id = m.id)`
+
+// notRemovedCond is the negation of removedCond, for the statements that must
+// not select a removed message at all (search, a new reply to a root).
+const notRemovedCond = `NOT ` + removedCond
+
+// messageColumns is the column list scanMessages reads. A removed message is
+// projected as a tombstone in the statement itself: its body, payload and
+// edit time are never selected, so no reader of these rows can hold them. The
+// last column says which rows are tombstones.
+const messageColumns = `m.id, m.channel_id, m.author_id,
+	CASE WHEN ` + removedCond + ` THEN '' ELSE m.body END,
+	CASE WHEN ` + removedCond + ` THEN NULL ELSE m.payload_schema END,
+	CASE WHEN ` + removedCond + ` THEN NULL ELSE m.payload_json END,
+	m.created_at, m.audience_kind, m.net_id, m.thread_root_id,
 	(SELECT g.handle FROM message_guest_attribution g WHERE g.message_id = m.id),
 	(SELECT g.label FROM message_guest_attribution g WHERE g.message_id = m.id),
-	m.edited_at`
+	CASE WHEN ` + removedCond + ` THEN NULL ELSE m.edited_at END,
+	` + removedCond
 
 // The visibility rule for which messages a reader may see, as SQL conditions
 // over the messages table aliased m. The list and the search both embed the
@@ -361,7 +377,7 @@ const (
 	visibleToScopedReader = `(m.audience_kind IS NULL OR (
 			        EXISTS (SELECT 1 FROM message_recipients r
 			                WHERE r.message_id = m.id AND r.principal_id = ?)
-			    AND EXISTS (SELECT 1 FROM channel_members c
+			    AND EXISTS (SELECT 1 FROM ` + liveMembers + ` c
 			                WHERE c.channel_id = m.channel_id AND c.principal_id = ?)
 			    AND EXISTS (SELECT 1 FROM principals p
 			                WHERE p.id = ? AND p.disabled_at IS NULL)))`
@@ -374,13 +390,15 @@ const (
 	// thread's root for a reply (a root's id is always below its replies'),
 	// so a new reply does not carry an old thread past the bound. A NULL
 	// bound compares as neither, so a guest without one sees nothing. The
-	// aliases (hg, hb, ha) are this condition's own.
+	// aliases (hg, hb, ha) are this condition's own. It is not a membership
+	// check: for a banned non-guest it is satisfiable, so it must stay behind
+	// one (isChannelMemberTx, the handlers' channel gate).
 	withinHistoryBound = `((NOT EXISTS (SELECT 1 FROM guest_visits hg
 			                    WHERE hg.principal_id = ? AND hg.state = 'active')
-			    AND NOT EXISTS (SELECT 1 FROM channel_members hb
+			    AND NOT EXISTS (SELECT 1 FROM ` + liveMembers + ` hb
 			                    WHERE hb.channel_id = m.channel_id AND hb.principal_id = ?
 			                      AND COALESCE(m.thread_root_id, m.id) <= hb.history_after))
-			 OR EXISTS (SELECT 1 FROM channel_members ha
+			 OR EXISTS (SELECT 1 FROM ` + liveMembers + ` ha
 			            WHERE ha.channel_id = m.channel_id AND ha.principal_id = ?
 			              AND COALESCE(m.thread_root_id, m.id) > ha.history_after))`
 
@@ -407,7 +425,7 @@ const (
 
 	searchHead = `SELECT ` + messageColumns + ` FROM messages m
 		 WHERE m.id IN (SELECT rowid FROM messages_fts WHERE messages_fts MATCH ?)
-		   AND m.channel_id = ? AND (? = 0 OR m.id < ?) AND `
+		   AND m.channel_id = ? AND (? = 0 OR m.id < ?) AND ` + notRemovedCond + ` AND `
 	searchTail = `
 		 ORDER BY m.id DESC LIMIT ?`
 )
@@ -483,8 +501,14 @@ func scanMessagesWith(ctx context.Context, q execer, rows *sql.Rows) ([]Message,
 		var netID, threadRoot, editedAt sql.NullInt64
 		var createdAt int64
 		if err := rows.Scan(&m.ID, &m.ChannelID, &m.AuthorID, &m.Body, &payloadSchema, &payloadJSON, &createdAt, &kind, &netID, &threadRoot,
-			&guestHandle, &guestLabel, &editedAt); err != nil {
+			&guestHandle, &guestLabel, &editedAt, &m.Removed); err != nil {
 			return nil, err
+		}
+		if m.Removed {
+			// The tombstone (moderation.md section 7.3): the statement
+			// selected no original, and this is the only body there is.
+			m.Body = schema.MessageRemovedBody
+			payloadSchema, payloadJSON, editedAt = sql.NullString{}, nil, sql.NullInt64{}
 		}
 		if editedAt.Valid {
 			m.EditedAt = time.UnixMilli(editedAt.Int64)
@@ -687,7 +711,7 @@ func (s *Store) FileVisibleTo(ctx context.Context, fileID int64, reader Reader) 
 // channel is the column the embedding statement names, never a caller's text.
 func noHistoryBound(channelColumn string) string {
 	return `(NOT EXISTS (SELECT 1 FROM guest_visits ng WHERE ng.principal_id = ? AND ng.state = 'active')
-		     AND NOT EXISTS (SELECT 1 FROM channel_members nb
+		     AND NOT EXISTS (SELECT 1 FROM ` + liveMembers + ` nb
 		                     WHERE nb.channel_id = ` + channelColumn + ` AND nb.principal_id = ?
 		                       AND nb.history_after IS NOT NULL))`
 }
@@ -704,7 +728,8 @@ func noHistoryBound(channelColumn string) string {
 var (
 	fileHead = `SELECT ` + fileColumns + ` FROM files f
 		 WHERE f.id = ?
-		   AND EXISTS (SELECT 1 FROM channel_members cm
+		   AND NOT EXISTS (SELECT 1 FROM message_removals fr WHERE fr.message_id = f.message_id)
+		   AND EXISTS (SELECT 1 FROM ` + liveMembers + ` cm
 		               WHERE cm.channel_id = f.channel_id AND cm.principal_id = ?)
 		   AND EXISTS (SELECT 1 FROM principals up
 		               WHERE up.id = ? AND up.disabled_at IS NULL)
@@ -905,7 +930,9 @@ func (s *Store) InsertReplyMessage(ctx context.Context, post ReplyPost, reader R
 		}
 		var kind sql.NullString
 		var rootNet sql.NullInt64
-		switch err := tx.QueryRowContext(ctx, rootSQL("m.audience_kind, m.net_id", scoped),
+		// A removed root takes no new reply (moderation.md section 10.1, Q3):
+		// it is unusable, as an unknown one is.
+		switch err := tx.QueryRowContext(ctx, rootSQL("m.audience_kind, m.net_id", scoped)+` AND `+notRemovedCond,
 			append([]any{post.RootID, post.ChannelID}, predArgs...)...).Scan(&kind, &rootNet); {
 		case errors.Is(err, sql.ErrNoRows):
 			return ErrThreadNotFound
@@ -1169,7 +1196,7 @@ func scopedDetail(channelID int64, a schema.Audience, recipients []int64) string
 func isChannelMemberTx(ctx context.Context, tx execer, channelID, principalID int64) (bool, error) {
 	var one int
 	switch err := tx.QueryRowContext(ctx,
-		"SELECT 1 FROM channel_members WHERE channel_id = ? AND principal_id = ?", channelID, principalID).Scan(&one); {
+		"SELECT 1 FROM "+liveMembers+" WHERE channel_id = ? AND principal_id = ?", channelID, principalID).Scan(&one); {
 	case errors.Is(err, sql.ErrNoRows):
 		return false, nil
 	case err != nil:
@@ -1186,7 +1213,7 @@ func resolveNetRecipientsTx(ctx context.Context, tx execer, channelID, netID, au
 	var role string
 	switch err := tx.QueryRowContext(ctx,
 		`SELECT m.role FROM nets n JOIN net_members m ON m.net_id = n.id
-		 WHERE n.id = ? AND n.channel_id = ? AND n.archived_at IS NULL AND m.principal_id = ?`,
+		 WHERE n.id = ? AND n.channel_id = ? AND n.archived_at IS NULL AND m.principal_id = ? AND `+notBannedSQL("m.principal_id"),
 		netID, channelID, authorID).Scan(&role); {
 	case errors.Is(err, sql.ErrNoRows):
 		return nil, ErrNetNotFound
@@ -1198,7 +1225,7 @@ func resolveNetRecipientsTx(ctx context.Context, tx execer, channelID, netID, au
 	}
 	rows, err := tx.QueryContext(ctx,
 		`SELECT m.principal_id FROM net_members m
-		 JOIN channel_members c ON c.channel_id = ? AND c.principal_id = m.principal_id
+		 JOIN `+liveMembers+` c ON c.channel_id = ? AND c.principal_id = m.principal_id
 		 WHERE m.net_id = ? ORDER BY m.principal_id ASC`, channelID, netID)
 	if err != nil {
 		return nil, fmt.Errorf("store: resolve recipients of net %d: %w", netID, err)
@@ -1286,7 +1313,7 @@ const runColumns = `ru.id, ru.session_id, ru.principal_id, ru.channel_id, ru.mes
 // then the message predicate's own. The aliases differ from the message
 // predicate's (r, c, p) so nothing in it can bind to the run by accident.
 var (
-	runVisibleHead = `(EXISTS (SELECT 1 FROM channel_members rc
+	runVisibleHead = `(EXISTS (SELECT 1 FROM ` + liveMembers + ` rc
 	                   WHERE rc.channel_id = ru.channel_id AND rc.principal_id = ?)
 	     AND EXISTS (SELECT 1 FROM principals rp WHERE rp.id = ? AND rp.disabled_at IS NULL)
 	     AND ((ru.message_id IS NULL AND ` + noHistoryBound("ru.channel_id") + `) OR EXISTS (
@@ -1727,7 +1754,7 @@ func runAnchorVisibleTx(ctx context.Context, tx execer, channelID, messageID int
 	var role string
 	switch err := tx.QueryRowContext(ctx,
 		`SELECT m.role FROM nets n JOIN net_members m ON m.net_id = n.id
-		 WHERE n.id = ? AND n.channel_id = ? AND n.archived_at IS NULL AND m.principal_id = ?`,
+		 WHERE n.id = ? AND n.channel_id = ? AND n.archived_at IS NULL AND m.principal_id = ? AND `+notBannedSQL("m.principal_id"),
 		netID.Int64, channelID, reader.PrincipalID).Scan(&role); {
 	case errors.Is(err, sql.ErrNoRows):
 		return ErrRunAnchorNotFound
@@ -2017,11 +2044,12 @@ func requestedInterventionsTx(ctx context.Context, tx execer, runID int64) (int,
 // here: reactions exist on v2 routes only, for a verified caller, so there is
 // nothing to read for anyone else and the answer fails closed.
 //
-// Removed messages (docs/design/moderation.md §7, not yet implemented) will
-// add AND NOT EXISTS (SELECT 1 FROM message_removals x WHERE x.message_id =
-// m.id) to reactionMessageCond, and reactionTargetTx will report the removal,
-// so every statement below picks it up at once. Until that table exists no
-// message is removed and the behaviour is identical.
+// A removed message (docs/design/moderation.md §7, issue #852) is no target of
+// a reaction: reactionMessageCond excludes it, so every statement below that
+// uses it answers ErrMessageNotFound for one, as for a message the reader
+// cannot see. reactionVisibleCond is the same condition without that clause,
+// for the readers that must still find the tombstone (the author's own
+// message read, the removal itself).
 
 // ErrMessageNotFound is the one error for a message a reaction call cannot
 // use: it does not exist, is in another channel, or the reader cannot see it.
@@ -2030,14 +2058,18 @@ func requestedInterventionsTx(ctx context.Context, tx execer, runID int64) (int,
 var ErrMessageNotFound = errors.New("store: message not found")
 
 // reactionMemberCond takes the reader's principal id twice.
-const reactionMemberCond = `EXISTS (SELECT 1 FROM channel_members rc
+const reactionMemberCond = `EXISTS (SELECT 1 FROM ` + liveMembers + ` rc
 	                   WHERE rc.channel_id = m.channel_id AND rc.principal_id = ?)
 	     AND EXISTS (SELECT 1 FROM principals rp WHERE rp.id = ? AND rp.disabled_at IS NULL)`
 
+// reactionVisibleCond is the message rule and the member-and-enabled clause
+// over a message aliased m. Its arguments are reactionArgs(reader).
+var reactionVisibleCond = messageVisible(true) + ` AND ` + reactionMemberCond
+
 // reactionMessageCond is the whole condition a reaction statement puts on a
-// message aliased m: the message rule and the member-and-enabled clause. Its
+// message aliased m: reactionVisibleCond, and the message is not removed. Its
 // arguments are reactionArgs(reader).
-var reactionMessageCond = messageVisible(true) + ` AND ` + reactionMemberCond
+var reactionMessageCond = reactionVisibleCond + ` AND ` + notRemovedCond
 
 // reactionArgs is the arguments of reactionMessageCond for reader, and false
 // when the reader may see no message at all.
@@ -2153,11 +2185,10 @@ func reactableMessagesTx(ctx context.Context, tx execer, channelID int64, reader
 // cannot read, or from before their history bound is one answer,
 // ErrMessageNotFound, and only the author ever learns more.
 //
-// Removed messages (docs/design/moderation.md, M4, not yet implemented) will
-// be refused here too: reactionMessageCond's removal clause, once it lands,
-// makes the revision read ErrMessageNotFound, and EditOwnMessage must then
-// answer ErrMessageNotEditable for a removal the reader can see. Until that
-// table exists no message is removed.
+// A removed message (docs/design/moderation.md §7, issue #852) is found by
+// the same condition, as a tombstone. EditOwnMessage answers
+// ErrMessageNotEditable for it, and the revision read ErrMessageNotFound: the
+// earlier text of a removed message is never served, even to its author.
 
 // AuditMessageEdited is written in the edit's transaction for every edit that
 // changed the text: subject "message:<id>", detail "channel=<id>
@@ -2207,7 +2238,7 @@ type MessageRevision struct {
 // probe's condition. Its arguments are the message id, the channel id, the
 // reader as author, then reactionArgs(reader).
 var ownMessageSQL = `SELECT ` + messageColumns + ` FROM messages m
-	 WHERE m.id = ? AND m.channel_id = ? AND m.author_id = ? AND ` + reactionMessageCond
+	 WHERE m.id = ? AND m.channel_id = ? AND m.author_id = ? AND ` + reactionVisibleCond
 
 // ownMessageTx reads message messageID of channelID if reader wrote it and may
 // see it now, or ErrMessageNotFound.
@@ -2237,7 +2268,7 @@ func holdsNetMemberSeatTx(ctx context.Context, tx execer, channelID, netID, prin
 	var role string
 	switch err := tx.QueryRowContext(ctx,
 		`SELECT nm.role FROM nets n JOIN net_members nm ON nm.net_id = n.id
-		 WHERE n.id = ? AND n.channel_id = ? AND n.archived_at IS NULL AND nm.principal_id = ?`,
+		 WHERE n.id = ? AND n.channel_id = ? AND n.archived_at IS NULL AND nm.principal_id = ? AND `+notBannedSQL("nm.principal_id"),
 		netID, channelID, principalID).Scan(&role); {
 	case errors.Is(err, sql.ErrNoRows):
 		return false, nil
@@ -2287,6 +2318,9 @@ func (s *Store) EditOwnMessage(ctx context.Context, channelID int64, reader Read
 		msg, err := ownMessageTx(ctx, tx, channelID, reader, messageID)
 		if err != nil {
 			return err
+		}
+		if msg.Removed {
+			return ErrMessageNotEditable
 		}
 		if msg.Payload != nil && msg.Payload.Schema != schema.FileAttachmentV1Name {
 			return ErrMessageNotEditable
@@ -2388,6 +2422,9 @@ func (s *Store) OwnMessageRevisions(ctx context.Context, channelID int64, reader
 		if err != nil {
 			return err
 		}
+		if msg.Removed {
+			return ErrMessageNotFound
+		}
 		rows, err := tx.QueryContext(ctx,
 			"SELECT revision, body, created_at FROM message_revisions WHERE message_id = ? ORDER BY revision ASC", messageID)
 		if err != nil {
@@ -2413,6 +2450,136 @@ func (s *Store) OwnMessageRevisions(ctx context.Context, channelID int64, reader
 	})
 	if err != nil {
 		return nil, err
+	}
+	return out, nil
+}
+
+// Message removal (issue #852, docs/design/moderation.md §7). A moderator
+// removes a message for its whole audience. The messages row is never touched:
+// message_removals marks it, and every read here projects the tombstone
+// (messageColumns), so there is no read of the original to forget to filter.
+
+// AuditMessageRemoved is written in the removal's transaction when a message
+// goes from visible to removed: subject "message:<id>", detail "channel=<id>".
+// Never any text, payload, reason or recipient.
+const AuditMessageRemoved = "message_removed"
+
+// MessageRemoval is RemoveMessage's answer.
+type MessageRemoval struct {
+	// Message is the tombstone, by the projection every read uses.
+	Message Message
+	// Recipients is who a scoped message was delivered to when it was
+	// posted, read back for the live tombstone; nil for a channel-wide one.
+	Recipients []int64
+	// Changed is false when the message was already removed: nothing was
+	// written, and nothing is to be broadcast.
+	Changed bool
+}
+
+// visibleMessageTx reads message messageID of channelID if reader may see it
+// now, removed or not, or ErrMessageNotFound for every other case alike. For
+// a reader with a verified principal that is reactionVisibleCond (the one
+// message rule, plus current membership and an enabled principal); with
+// authentication off (principal 0) it is the channel-wide rule, as a list read.
+func visibleMessageTx(ctx context.Context, tx execer, channelID int64, reader Reader, messageID int64) (Message, error) {
+	if messageID <= 0 {
+		return Message{}, ErrMessageNotFound
+	}
+	var (
+		cond string
+		args []any
+	)
+	if reader.PrincipalID > 0 {
+		ra, ok := reactionArgs(reader)
+		if !ok {
+			return Message{}, ErrMessageNotFound
+		}
+		cond, args = reactionVisibleCond, ra
+	} else {
+		scoped, pa := visibilityArgs(reader)
+		cond, args = messageVisible(scoped), pa
+	}
+	rows, err := tx.QueryContext(ctx,
+		`SELECT `+messageColumns+` FROM messages m WHERE m.id = ? AND m.channel_id = ? AND `+cond,
+		append([]any{messageID, channelID}, args...)...)
+	if err != nil {
+		return Message{}, fmt.Errorf("store: read message %d: %w", messageID, err)
+	}
+	defer func() { _ = rows.Close() }()
+	msgs, err := scanMessagesWith(ctx, tx, rows)
+	if err != nil {
+		return Message{}, fmt.Errorf("store: read message %d: %w", messageID, err)
+	}
+	if len(msgs) != 1 {
+		return Message{}, ErrMessageNotFound
+	}
+	return msgs[0], nil
+}
+
+// RemoveMessage removes message messageID of channelID for everyone in its
+// audience, on reader's behalf and as actor (an audit actor string), in one
+// IMMEDIATE transaction:
+//
+//  1. reader is, now, a member of the channel and enabled (ErrNotChannelMember);
+//     with authentication off (principal 0) there is no one to check;
+//  2. reader still stands as an owner, an operator or this channel's manager
+//     (ErrManagerRefused), read under the write lock so a grant revoked after
+//     the route guard cannot race the write;
+//  3. the message is in the channel and reader may see it by the one message
+//     rule and their history bound (ErrMessageNotFound for every other case:
+//     unknown, another channel, a whisper or net message they are not on,
+//     before their bound). Owners and operators get no exemption;
+//  4. already removed: nothing is written (Changed false);
+//  5. the removal row and the message_removed audit row.
+//
+// An archived channel allows it (Q1, reduce-only). The original body and
+// payload are never read into the answer or the audit row.
+func (s *Store) RemoveMessage(ctx context.Context, channelID int64, reader Reader, messageID int64, actor string, now time.Time) (MessageRemoval, error) {
+	var out MessageRemoval
+	err := s.withImmediateTx(ctx, func(tx execer) error {
+		if reader.PrincipalID > 0 {
+			if err := reactionReaderTx(ctx, tx, channelID, reader); err != nil {
+				return err
+			}
+		}
+		if _, err := memberActorStandingTx(ctx, tx, channelID, reader.PrincipalID); err != nil {
+			return err
+		}
+		msg, err := visibleMessageTx(ctx, tx, channelID, reader, messageID)
+		if err != nil {
+			return err
+		}
+		if msg.Removed {
+			out = MessageRemoval{Message: msg}
+			return nil
+		}
+		var by any
+		if reader.PrincipalID > 0 {
+			by = reader.PrincipalID
+		}
+		at := now.Truncate(time.Millisecond)
+		if _, err := tx.ExecContext(ctx,
+			"INSERT INTO message_removals (message_id, channel_id, removed_by, removed_at) VALUES (?, ?, ?, ?)",
+			messageID, channelID, by, at.UnixMilli()); err != nil {
+			return fmt.Errorf("store: remove message %d: %w", messageID, err)
+		}
+		if err := appendAuditEventTx(ctx, tx, actor, AuditMessageRemoved, messageSubject(messageID),
+			fmt.Sprintf("channel=%d", channelID), at); err != nil {
+			return err
+		}
+		var recipients []int64
+		if msg.Audience != nil {
+			if recipients, err = messageRecipientsTx(ctx, tx, messageID); err != nil {
+				return err
+			}
+		}
+		// The projection of the row as it now reads.
+		msg.Removed, msg.Body, msg.Payload, msg.EditedAt = true, schema.MessageRemovedBody, nil, time.Time{}
+		out = MessageRemoval{Message: msg, Recipients: recipients, Changed: true}
+		return nil
+	})
+	if err != nil {
+		return MessageRemoval{}, err
 	}
 	return out, nil
 }

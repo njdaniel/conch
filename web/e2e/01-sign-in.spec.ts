@@ -2,7 +2,7 @@
 import { channelButton, consoleErrors, credentialField, expect, signIn, statusLine, test } from './fixtures';
 import { principalId } from './world';
 
-test('P3-01 browser-test signs in by pasting the credential and sees the fixture channels', async ({ meet, world }) => {
+test('@cross P3-01 browser-test signs in by pasting the credential and sees the fixture channels', async ({ meet, world }) => {
   const { page } = await meet();
   await signIn(page, world, world.tokens.browser, 'browser-test');
 
@@ -17,7 +17,7 @@ test('P3-01 browser-test signs in by pasting the credential and sees the fixture
   await expect(statusLine(page)).toContainText(world.origin);
 });
 
-test('P3-01 a wrong credential shows the failure line and leaves no token in the page', async ({ meet, world }) => {
+test('@cross P3-01 a wrong credential shows the failure line and leaves no token in the page', async ({ meet, world }) => {
   const { page } = await meet();
   const wrong = 'not-a-credential-p3-01-wrong-token';
   await page.goto(world.appUrl);
@@ -42,7 +42,7 @@ test('P3-01 a wrong credential shows the failure line and leaves no token in the
 // A7 (issue #439): an operator's credential is still kept for one tab only,
 // after the warning. The test does not sign out: that would revoke the
 // world's operator credential, which later specs use.
-test('A7 an operator is warned, and the credential stays with that one tab', async ({ meet, world }) => {
+test('@cross A7 an operator is warned, and the credential stays with that one tab', async ({ meet, world }) => {
   const { context, page } = await meet();
   await page.goto(world.appUrl);
   await (await credentialField(page)).fill(world.tokens.operator);
@@ -67,7 +67,7 @@ test('A7 an operator is warned, and the credential stays with that one tab', asy
 // returning member the name and password form; a wrong password is the one
 // answer and keeps nothing. The credential field stays, apart, for
 // operators and scripts.
-test('G6 the front door says the server is invite-only, and refuses a wrong password with the one answer', async ({ meet, world }) => {
+test('@cross G6 the front door says the server is invite-only, and refuses a wrong password with the one answer', async ({ meet, world }) => {
   const { page } = await meet();
   await page.goto(world.appUrl);
   await expect(page.getByText('This server is invite-only.')).toBeVisible();
@@ -94,7 +94,7 @@ test('G6 the front door says the server is invite-only, and refuses a wrong pass
 
 // Issue #1037 (browser UX audit 3, F12): conchd gzips the client's script, and
 // the page shows a loading line, in the HTML itself, until the script runs.
-test('F12 the main script arrives gzipped and the raw HTML holds the loading text', async ({ meet, world }) => {
+test('@cross F12 the main script arrives gzipped and the raw HTML holds the loading text', async ({ meet, world }) => {
   const { page } = await meet();
   const scripts: { encoding: string | undefined; vary: string | undefined }[] = [];
   page.on('response', (response) => {
@@ -123,7 +123,7 @@ test('F12 the main script arrives gzipped and the raw HTML holds the loading tex
 // Issue #1084 (browser UX audit 4, F7): a page with no credential has nothing
 // to ask whoami, so a signed-out load makes no request that is known to fail
 // and the console has no error.
-test('F7 a signed-out load asks nothing of whoami and logs no console error', async ({ meet, world }) => {
+test('@cross F7 a signed-out load asks nothing of whoami and logs no console error', async ({ meet, world, browserName }) => {
   const { page } = await meet({ viewport: { width: 1440, height: 900 } });
   const errors = consoleErrors(page);
   const asked: string[] = [];
@@ -135,5 +135,11 @@ test('F7 a signed-out load asks nothing of whoami and logs no console error', as
   // Let any late start-up request go out before looking.
   await page.waitForLoadState('networkidle');
   expect(asked, 'requests to whoami').toEqual([]);
-  expect(errors).toEqual([]);
+  // WebKit logs, as an error, that it does not know the viewport meta key
+  // "interactive-widget" (index.html; Chromium and Firefox honour or ignore it
+  // quietly). The message is the engine's, about its own feature set, and the
+  // page is right to set the key; it is dropped for WebKit only, by its exact
+  // text, so any other console error there still fails.
+  const engineNoise = (line: string) => browserName === 'webkit' && /^Viewport argument key "interactive-widget" not recognized and ignored\. \S+$/.test(line);
+  expect(errors.filter((line) => !engineNoise(line))).toEqual([]);
 });

@@ -1,0 +1,22 @@
+{
+  "id": 2,
+  "kind": "human",
+  "name": "carol",
+  "role": "operator",
+  "owner": false,
+  "permissions": [
+    "create_public_channels",
+    "create_private_channels",
+    "make_member_links",
+    "see_member_directory",
+    "use_voice",
+    "share_screen",
+    "manage_members",
+    "act_as_members",
+    "manage_channels",
+    "use_camera"
+  ],
+  "permissions_revision": 2,
+  "may_invite": true,
+  "voice_allowed": true
+}

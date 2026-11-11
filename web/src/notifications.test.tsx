@@ -5,6 +5,9 @@ import { NotificationCenter } from './NotificationCenter';
 import { NotificationSettings } from './NotificationSettings';
 import * as api from './api';
 import { mentions, useNotifications, type NotificationAlert } from './useNotifications';
+import { platform } from './platform';
+import { SPOILER_FILE_PREFIX } from './schema/file';
+import { forgetFileNames, rememberFileName } from './spoilerFiles';
 import type { MessageV2 } from './schema/message';
 
 const at = '2026-10-26T00:00:00Z';
@@ -168,7 +171,7 @@ describe('notification policies and preferences', () => {
 });
 
 describe('browser permission and cleanup', () => {
-  it('keeps alerts across reconnects and backfills only unseen messages', async () => {
+  it('drops stale alert copies on disconnect and backfills only unseen messages', async () => {
     visibility('hidden');
     const history = vi.spyOn(api, 'loadMessagesAscending').mockResolvedValue({ ok: true, complete: true, value: [message(1)] });
     const { result, rerender } = renderHook((p: Props) => useNotifications(p), { initialProps: props() });
@@ -185,12 +188,12 @@ describe('browser permission and cleanup', () => {
     expect(FakeNotification.all).toHaveLength(1);
     expect(result.current.alerts).toHaveLength(1);
     rerender({ ...props(), eventsLive: false });
-    expect(result.current.alerts).toHaveLength(1);
-    expect(FakeNotification.all[0]?.closed).not.toHaveBeenCalled();
+    expect(result.current.alerts).toHaveLength(0);
+    expect(FakeNotification.all[0]?.closed).toHaveBeenCalled();
     history.mockResolvedValue({ ok: true, complete: true, value: [message(2), message(3), message(4)] });
     rerender({ ...props(), eventsLive: true });
     await vi.waitFor(() => {
-      expect(result.current.alerts.map((item) => item.message.id)).toEqual([2, 3, 4]);
+      expect(result.current.alerts.map((item) => item.message.id)).toEqual([3, 4]);
     });
     expect(history).toHaveBeenLastCalledWith('general', 1);
     expect(FakeNotification.all).toHaveLength(3);
@@ -275,6 +278,54 @@ describe('browser permission and cleanup', () => {
     expect(FakeNotification.all[0]?.closed).toHaveBeenCalledTimes(1);
   });
 
+  // Issue #1620: a native click resolves the channel by id at click time.
+  it.each([
+    ['no rename', [{ id: 7, name: 'general', created_at: at }], 'general'],
+    ['renamed', [{ id: 7, name: 'renamed', created_at: at }], 'renamed'],
+    ['removed', [], null],
+    ['access lost', [{ id: 8, name: 'other', created_at: at }], null],
+  ])('opens the current name on a native click: %s', async (_case, after, want) => {
+    visibility('hidden');
+    const onOpen = vi.fn();
+    const { result, rerender } = renderHook((p: Props) => useNotifications(p), { initialProps: { ...props(), onOpen } });
+    act(() => {
+      result.current.setPolicy('all');
+    });
+    await act(async () => {
+      await result.current.enableNative();
+    });
+    rerender({ ...props(), onOpen, event: message(1) });
+    expect(FakeNotification.all).toHaveLength(1);
+    rerender({ ...props(), onOpen, channels: after });
+    const native = FakeNotification.all[0] as unknown as Notification;
+    act(() => {
+      native.onclick?.call(native, new MouseEvent('click'));
+    });
+    if (want === null) expect(onOpen).not.toHaveBeenCalled();
+    else expect(onOpen).toHaveBeenCalledWith(want);
+    expect(result.current.alerts).toHaveLength(0);
+    expect(FakeNotification.all[0]?.closed).toHaveBeenCalled();
+  });
+
+  it('opens nothing when a native notification is clicked after its access was withdrawn', async () => {
+    visibility('hidden');
+    const onOpen = vi.fn();
+    const { result, rerender } = renderHook((p: Props) => useNotifications(p), { initialProps: { ...props(), onOpen } });
+    act(() => {
+      result.current.setPolicy('all');
+    });
+    await act(async () => {
+      await result.current.enableNative();
+    });
+    rerender({ ...props(), onOpen, event: message(1) });
+    rerender({ ...props(), onOpen, readStateEvent: { schema: 'conch.read_state.v1', channel_id: 7, principal_id: 2, last_read_id: 0, unread: 0 } as unknown as Props['readStateEvent'] });
+    const native = FakeNotification.all[0] as unknown as Notification;
+    act(() => {
+      native.onclick?.call(native, new MouseEvent('click'));
+    });
+    expect(onOpen).not.toHaveBeenCalled();
+  });
+
   it('keeps the in-app fallback when permission is denied', async () => {
     visibility('hidden');
     FakeNotification.answer = 'denied';
@@ -338,6 +389,97 @@ describe('browser permission and cleanup', () => {
     expect(onClear).toHaveBeenCalled();
   });
 
+  it('reads an image-only spoiler as [spoiler] and its shown name, never the image', () => {
+    const body = `${SPOILER_FILE_PREFIX}secret.png`;
+    const image: NotificationAlert = {
+      id: 'img',
+      channel: 'general',
+      message: { ...message(2, body), payload: { schema: 'conch.file_attachment.v1', data: { file_ids: [9] } } },
+      mention: false,
+    };
+    const { container } = render(<NotificationCenter alerts={[image]} onOpen={vi.fn()} onClear={vi.fn()} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Notifications (1)' }));
+    const row = screen.getByRole('button', { name: /New message in #general/ });
+    expect(row.getAttribute('aria-label')).toContain('[spoiler] secret.png');
+    expect(row.textContent).toContain('[spoiler] secret.png');
+    expect(container.textContent).not.toContain(SPOILER_FILE_PREFIX);
+    expect(container.querySelector('img')).toBeNull();
+  });
+
+  it('hides the text spoiler of a caption that starts with the prefix, in the center and in the native notification', async () => {
+    const body = `${SPOILER_FILE_PREFIX}note ||the secret, in full||`;
+    const withFile = (id: number): MessageV2 => ({ ...message(id, body), payload: { schema: 'conch.file_attachment.v1', data: { file_ids: [9] } } });
+    const caption: NotificationAlert = { id: 'cap', channel: 'general', message: withFile(2), mention: false };
+    render(<NotificationCenter alerts={[caption]} onOpen={vi.fn()} onClear={vi.fn()} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Notifications (1)' }));
+    const row = screen.getByRole('button', { name: /New message in #general/ });
+    expect(row.textContent).toContain('[spoiler]');
+    expect(document.body.textContent).not.toContain('the secret');
+    expect(row.getAttribute('aria-label')).not.toContain('the secret');
+    cleanup();
+
+    visibility('hidden');
+    vi.spyOn(api, 'loadMessagesAscending').mockResolvedValue({ ok: true, complete: true, value: [] });
+    const { result, rerender } = renderHook((p: Props) => useNotifications(p), { initialProps: props() });
+    await act(async () => { await Promise.resolve(); });
+    act(() => { result.current.setPolicy('all'); });
+    await act(async () => { await result.current.enableNative(); });
+    rerender({ ...props(), event: withFile(3) });
+    expect(FakeNotification.all).toHaveLength(1);
+    expect(FakeNotification.all[0]?.options.body ?? '').not.toContain('the secret');
+    expect(FakeNotification.all[0]?.options.body).toContain('[spoiler]');
+  });
+
+  it('previews an image-only spoiler natively as [spoiler] and the shown name', async () => {
+    visibility('hidden');
+    vi.spyOn(api, 'loadMessagesAscending').mockResolvedValue({ ok: true, complete: true, value: [] });
+    const { result, rerender } = renderHook((p: Props) => useNotifications(p), { initialProps: props() });
+    await act(async () => { await Promise.resolve(); });
+    act(() => { result.current.setPolicy('all'); });
+    await act(async () => { await result.current.enableNative(); });
+    rerender({ ...props(), event: { ...message(4, `${SPOILER_FILE_PREFIX}pic.png`), payload: { schema: 'conch.file_attachment.v1', data: { file_ids: [9] } } } });
+    expect(FakeNotification.all[0]?.options.body).toBe('[spoiler] pic.png');
+  });
+
+  it('reads image-only spoilers whose names hold ", " in the center and natively, once the names are known', async () => {
+    const comma = `${SPOILER_FILE_PREFIX}trip, day 1.png`;
+    const body = `${comma}, ${SPOILER_FILE_PREFIX}other.png`;
+    const payload = { schema: 'conch.file_attachment.v1', data: { file_ids: [11, 12] } };
+    const want = '[spoiler] trip, day 1.png, [spoiler] other.png';
+    forgetFileNames();
+    rememberFileName(11, comma);
+    rememberFileName(12, `${SPOILER_FILE_PREFIX}other.png`);
+    const image: NotificationAlert = { id: 'comma', channel: 'general', message: { ...message(2, body), payload }, mention: false };
+    const { container } = render(<NotificationCenter alerts={[image]} onOpen={vi.fn()} onClear={vi.fn()} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Notifications (1)' }));
+    const row = screen.getByRole('button', { name: /New message in #general/ });
+    expect(row.getAttribute('aria-label')).toContain(want);
+    expect(row.textContent).toContain(want);
+    expect(container.textContent).not.toContain(SPOILER_FILE_PREFIX);
+    cleanup();
+
+    visibility('hidden');
+    vi.spyOn(api, 'loadMessagesAscending').mockResolvedValue({ ok: true, complete: true, value: [] });
+    const { result, rerender } = renderHook((p: Props) => useNotifications(p), { initialProps: props() });
+    await act(async () => { await Promise.resolve(); });
+    act(() => { result.current.setPolicy('all'); });
+    await act(async () => { await result.current.enableNative(); });
+    rerender({ ...props(), event: { ...message(5, body), payload } });
+    expect(FakeNotification.all[0]?.options.body).toBe(want);
+    forgetFileNames();
+  });
+
+  it('hides a spoiler in the center, its accessible name included', () => {
+    const hidden: NotificationAlert = { id: 'two', channel: 'general', message: message(2, '@ada ||the answer is X||'), mention: true };
+    render(<NotificationCenter alerts={[hidden]} onOpen={vi.fn()} onClear={vi.fn()} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Notifications (1)' }));
+    const row = screen.getByRole('button', { name: /Mention in #general/ });
+    expect(row.getAttribute('aria-label')).toContain('[spoiler]');
+    expect(row.textContent).toContain('[spoiler]');
+    expect(document.body.textContent).not.toContain('the answer is X');
+    expect(row.getAttribute('aria-label')).not.toContain('the answer is X');
+  });
+
   it('shows denied and unsupported fallbacks in settings', () => {
     const view = render(<NotificationSettings policy="mentions" native={false} permission="denied" supported={true} onPolicy={() => undefined} onEnable={() => undefined} />);
     expect(screen.getByLabelText('Message notifications')).toHaveProperty('value', 'mentions');
@@ -345,6 +487,18 @@ describe('browser permission and cleanup', () => {
     view.unmount();
     render(<NotificationSettings policy="off" native={false} permission="unsupported" supported={false} onPolicy={() => undefined} onEnable={() => undefined} />);
     expect(screen.getByText(/Browser notifications are not supported/).textContent).toContain('Alerts stay here');
+  });
+
+  it('calls them desktop notifications in the desktop build', () => {
+    const original = platform.name;
+    Object.defineProperty(platform, 'name', { value: 'desktop', configurable: true });
+    try {
+      render(<NotificationSettings policy="all" native={true} permission="granted" supported={true} onPolicy={() => undefined} onEnable={() => undefined} />);
+      expect(screen.getByText(/Desktop notifications are on/)).toBeDefined();
+      expect(document.body.textContent).not.toContain('Browser notifications');
+    } finally {
+      Object.defineProperty(platform, 'name', { value: original, configurable: true });
+    }
   });
 
   // F20: the hint follows the choice, and keeps the channel-mute sentence.

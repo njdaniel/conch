@@ -453,7 +453,7 @@ func (s *Store) castDecision(ctx context.Context, approvalID, principalID int64,
 			// decide the approval its own gated action raised.
 			var can int
 			err := tx.QueryRowContext(ctx,
-				`SELECT m.can_decide AND p.kind = 'human' AND p.disabled_at IS NULL AND NOT `+activeGuestSQL+` FROM channel_members m
+				`SELECT m.can_decide AND p.kind = 'human' AND p.disabled_at IS NULL AND NOT `+activeGuestSQL+` FROM `+liveMembers+` m
 				 JOIN principals p ON p.id = m.principal_id
 				 WHERE m.channel_id = ? AND m.principal_id = ?`,
 				a.ChannelID, principalID).Scan(&can)
@@ -489,7 +489,7 @@ func (s *Store) castDecision(ctx context.Context, approvalID, principalID int64,
 		args := []any{approvalID, optionID}
 		if members {
 			count = `SELECT COUNT(*) FROM approval_decisions d
-			 JOIN channel_members m ON m.channel_id = ? AND m.principal_id = d.principal_id AND m.can_decide = 1
+			 JOIN ` + liveMembers + ` m ON m.channel_id = ? AND m.principal_id = d.principal_id AND m.can_decide = 1
 			 JOIN principals p ON p.id = d.principal_id AND p.kind = 'human' AND p.disabled_at IS NULL AND NOT ` + activeGuestSQL + `
 			 WHERE d.approval_id = ? AND d.option_id = ?`
 			args = []any{a.ChannelID, approvalID, optionID}

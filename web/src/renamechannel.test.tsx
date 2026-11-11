@@ -16,7 +16,7 @@ const json = (body: unknown, status = 200) => new Response(JSON.stringify(body),
 type Json = Record<string, unknown>;
 type Call = { readonly method: string; readonly path: string; readonly body: unknown };
 type Channel = { id: number; name: string; created_at: string; manages?: boolean };
-type Who = { id: number; kind: string; name: string; role: string };
+type Who = { id: number; kind: string; name: string; role: string; permissions?: string[] };
 
 const operator: Who = { id: 1, kind: 'human', name: 'nick', role: 'operator' };
 const member: Who = { id: 2, kind: 'human', name: 'ada', role: 'member' };
@@ -241,10 +241,27 @@ describe('the rename control', () => {
   it('is offered to an operator, for the open channel', async () => {
     await open();
     fireEvent.click(within(nav()).getByRole('button', { name: 'Actions for general' }));
-    expect(within(screen.getByRole('menu')).getAllByRole('menuitem').map((i) => i.textContent)).toEqual(['Rename channel…', 'Leave channel', 'Make private', 'Make default channel', 'Archive channel…']);
+    expect(within(screen.getByRole('menu')).getAllByRole('menuitem').map((i) => i.textContent)).toEqual(['Rename channel…', 'Set topic', 'Leave channel', 'Make private', 'Make default channel', 'Archive channel…', 'Favorite']);
     // Nothing is shown under the list any more: the form is reached by the menu only.
     expect(screen.queryByRole('form', { name: 'Rename channel' })).toBeNull();
     expect(within(nav()).queryByRole('button', { name: /^Rename #/ })).toBeNull();
+  });
+
+  // Issue #1698: the controls follow manage_channels, not the operator role.
+  describe.each([
+    ['an operator with manage_channels off who does not manage the channel', ['manage_members'], false, false],
+    ['an operator with manage_channels off who manages the channel', ['manage_members'], true, true],
+    ['an operator with manage_channels on', ['manage_channels'], false, true],
+  ])('%s', (_name, permissions, manages, offered) => {
+    it(offered ? 'is offered Rename channel… and Set topic' : 'is offered neither Rename channel… nor Set topic', async () => {
+      install({ ...operator, permissions });
+      if (manages) (server.channels[0] as Channel).manages = true;
+      await open();
+      fireEvent.click(within(nav()).getByRole('button', { name: 'Actions for general' }));
+      const items = within(screen.getByRole('menu')).getAllByRole('menuitem').map((i) => i.textContent);
+      expect(items.includes('Rename channel…')).toBe(offered);
+      expect(items.includes('Set topic')).toBe(offered);
+    });
   });
 
   it('is offered to this channel\'s manager, who can rename it', async () => {
@@ -282,7 +299,7 @@ describe('the rename control', () => {
     install(member);
     await open();
     fireEvent.click(within(nav()).getByRole('button', { name: 'Actions for general' }));
-    expect(within(screen.getByRole('menu')).getAllByRole('menuitem').map((item) => item.textContent)).toEqual(['Leave channel']);
+    expect(within(screen.getByRole('menu')).getAllByRole('menuitem').map((item) => item.textContent)).toEqual(['Leave channel', 'Favorite']);
     expect(screen.queryByRole('form', { name: 'Rename channel' })).toBeNull();
     expect(renames()).toEqual([]);
   });
@@ -294,7 +311,7 @@ describe('the rename control', () => {
     (server.channels[1] as Channel).manages = true;
     await open();
     fireEvent.click(within(nav()).getByRole('button', { name: 'Actions for general' }));
-    expect(within(screen.getByRole('menu')).getAllByRole('menuitem').map((item) => item.textContent)).toEqual(['Leave channel']);
+    expect(within(screen.getByRole('menu')).getAllByRole('menuitem').map((item) => item.textContent)).toEqual(['Leave channel', 'Favorite']);
     fireEvent.keyDown(screen.getByRole('menu'), { key: 'Escape' });
     expect(within(nav()).getByRole('button', { name: 'Actions for ops' })).toBeDefined();
   });

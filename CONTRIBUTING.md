@@ -64,7 +64,7 @@ Run `make check` before you open a pull request. It runs gofmt, the invisible-ch
 | --- | --- | --- |
 | anything | `make check` | `check` |
 | `pkg/schema` | follow the [schema-change procedure](.claude/skills/schema-change/SKILL.md); `go generate ./pkg/schema` regenerates the web client's wire types | `check` |
-| `web/` | `make web-e2e` for the browser suite (once: `cd web && npx playwright install chromium`) | `web-e2e`, `web-embedded` |
+| `web/` | `make web-e2e` for the browser suite (once: `cd web && npx playwright install chromium`); `make web-e2e-heavy` for the `@heavy` tests, which only the nightly and manual [`e2e-heavy`](.github/workflows/e2e-heavy.yml) run | `web-e2e`, `web-embedded` |
 | `voice/` or the voice control plane | `go run ./e2e/voice` (Docker) | `voice-check` |
 | routes, audit rows, principals or credentials | `go run ./e2e/p2-hardening`, `go run ./e2e/p3-local`, `go run ./e2e/dogfood` | `p2-hardening-check`, `p3-local-check`, `dogfood-check` |
 | nets and whispers | `go run ./e2e/nets` | `nets-check` |
@@ -72,7 +72,7 @@ Run `make check` before you open a pull request. It runs gofmt, the invisible-ch
 | access between groups | `go run ./e2e/isolation` (Docker) | `isolation-check` |
 | `ops/deploy` | `make deploy-test` | `check` |
 
-These run on every pull request, except `dogfood-check`, which runs on pull requests labelled `approval-path` and on every push to `main`. The jobs are defined in [.github/workflows/ci.yml](.github/workflows/ci.yml).
+These run on every pull request, except `dogfood-check`, which runs on pull requests labelled `approval-path` and on every push to `main`. The jobs are defined in [.github/workflows/ci.yml](.github/workflows/ci.yml). What each end-to-end suite proves and does not, the test tags and the flake and artifact policies are in [docs/testing.md](docs/testing.md).
 
 Code is idiomatic for its language: Go is `golangci-lint` clean with table-driven tests; the Rust and TypeScript rules are in [CLAUDE.md](CLAUDE.md) rule 6. Never skip or delete a failing test without saying so in the pull request.
 
