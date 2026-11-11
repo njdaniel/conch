@@ -1,4 +1,4 @@
-// Copied from spikes/mobile/android at ea00f74f (#1390, M4-B) for the iOS spike (#1394, M5-B).
+// Copied from spikes/mobile/android at cc5fab02 (#1390, M4-B, with its review fixes) for the iOS spike (#1394, M5-B).
 // Copied from web/src/voice/gate.ts at ed4a68f9 and adapted for the phone (#1109, M4-B).
 // Differences are listed in the "Phone" notes below; the rest is the browser's.
 //
@@ -53,6 +53,14 @@ export const maxTail = 2000;
 export const releaseStep = 50;
 export const releasePage = 250;
 export const defaultHang = 400;
+
+// The open microphone's watchdog: while the gate is open, a level sample must
+// arrive within this long, or the gate shuts and arms the resume latch. The
+// samples come from a probe that lives in the Voice view; if the probe is ever
+// gone (the view unmounted, a render fault) the gate fails shut. Longer than
+// the hang time on purpose: a probe that reports only changes must not shut a
+// steady, loud gate.
+export const sampleWatchdog = 1500;
 export const defaultMax = 120_000;
 // The phone's bound on a single press: the desktop figure Nick set on
 // 2026-10-28 (ADR-016 Decision 5). The phone's gate is built with it.
@@ -78,6 +86,7 @@ export class TransmitGate {
   private tailTimer: unknown = null;
   private hangTimer: unknown = null;
   private maxTimer: unknown = null;
+  private watchdogTimer: unknown = null;
 
   constructor(clock: Clock, onChange: (open: boolean) => void, options: GateOptions = {}) {
     this.clock = clock;
@@ -118,6 +127,14 @@ export class TransmitGate {
 
   get lifecycleBlocked(): boolean {
     return this.lifecycle;
+  }
+
+  // shutAndArm shuts the gate at once and arms the resume latch, with no
+  // block to lift: the route changed under an open gate. Push to talk needs a
+  // new press; the open microphone needs quiet and then an onset.
+  shutAndArm(): void {
+    this.arm();
+    this.shut();
   }
 
   // cancel is a touch cancel (the system took the touch): the gate shuts at
@@ -187,6 +204,17 @@ export class TransmitGate {
         this.shut();
       }, this.hang);
     }
+    this.watch();
+  }
+
+  // watch re-arms the watchdog on each sample while the gate is open.
+  private watch(): void {
+    this.clear('watchdog');
+    if (!this.isOpen) return;
+    this.watchdogTimer = this.clock.setTimeout(() => {
+      this.watchdogTimer = null;
+      this.shutAndArm();
+    }, sampleWatchdog);
   }
 
   // shut closes the gate at once, without a tail.
@@ -194,6 +222,7 @@ export class TransmitGate {
     this.clear('tail');
     this.clear('hang');
     this.clear('max');
+    this.clear('watchdog');
     if (!this.isOpen) return;
     this.isOpen = false;
     this.onChange(false);
@@ -226,12 +255,13 @@ export class TransmitGate {
     this.onChange(true);
   }
 
-  private clear(which: 'tail' | 'hang' | 'max' | 'quiet'): void {
-    const handle = which === 'tail' ? this.tailTimer : which === 'hang' ? this.hangTimer : which === 'max' ? this.maxTimer : this.quietTimer;
+  private clear(which: 'tail' | 'hang' | 'max' | 'quiet' | 'watchdog'): void {
+    const handle = which === 'tail' ? this.tailTimer : which === 'hang' ? this.hangTimer : which === 'max' ? this.maxTimer : which === 'watchdog' ? this.watchdogTimer : this.quietTimer;
     if (handle !== null) this.clock.clearTimeout(handle);
     if (which === 'tail') this.tailTimer = null;
     else if (which === 'hang') this.hangTimer = null;
     else if (which === 'max') this.maxTimer = null;
+    else if (which === 'watchdog') this.watchdogTimer = null;
     else this.quietTimer = null;
   }
 }
