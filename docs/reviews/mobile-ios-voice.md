@@ -15,7 +15,7 @@ Skeleton written by #1395. **Every cell is "not run"**: nothing iOS-native has b
 | conchd and LiveKit | not run (the dev stack in LAN mode, #1366) |
 | Second party | not run |
 
-Schema copy: `src/logic/schema/{generated,validate}.ts`, verbatim from `web/src/schema/`. Logic copies: from `spikes/mobile/android` at `ea00f74f` (see each file's first line); `src/logic/ios.ts` is M5-B's.
+Schema copy: `src/logic/schema/{generated,validate}.ts`, verbatim from `web/src/schema/`. Logic copies: from `spikes/mobile/android` at `ea00f74f` (M4-B) with its review fixes, refreshed from main at `cc5fab02` (`gate.ts`, `diagnostics.ts`, `test/gate.test.ts`, `test/redact.test.ts`), `477c0ce7` (`requests.ts`) and `9515c1f5` (`camera.ts` wording); the schema copy is `web/src/schema/` on main (see each file's first line); `src/logic/ios.ts` is M5-B's.
 
 ## Rows
 
