@@ -215,7 +215,7 @@ export function captureFailure(err: unknown): CameraFailure {
 export function failureNote(reason: CameraFailure): string {
   switch (reason) {
     case 'blocked':
-      return "The browser blocked the camera. Allow it in this site's settings.";
+      return "The camera is blocked. Allow it for this app in Android settings.";
     case 'not_found':
       return 'No camera found.';
     case 'in_use':

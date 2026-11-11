@@ -9,6 +9,7 @@ import { appStateOf, deliver } from '../src/app/bridge';
 import { defaultTail, phoneMax } from '../src/logic/gate';
 import { reportWait } from '../src/logic/mic';
 import type { VoicePresenceV1, VoiceSessionResponseV1, VoiceTransmitState } from '../src/logic/schema/generated';
+import { tapAgain } from '../src/app/camera/controls';
 import { FakeClock, settle } from './fakes';
 
 const me = 7;
@@ -173,6 +174,7 @@ function rig(
     random: () => 0.5,
     me: () => me,
     log: (m) => log.push(`log ${m}`),
+    now: () => clock.now,
   });
   self = c;
   return { c, clock, log, rooms, reports, claims };
@@ -564,4 +566,98 @@ test('presence follows the joined channel, not the one on screen', async () => {
   r.clock.advance(3000);
   await settle();
   assert.ok(asked.includes('a'));
+});
+
+// The permission prompt takes the activity out of the foreground (Android shows
+// it in front), so the app reports 'background' before it answers.
+const promptAway = (answer: boolean) => (_clock: FakeClock, self: () => VoiceController): Promise<boolean> => {
+  self().appState('background');
+  return Promise.resolve(answer);
+};
+
+const captures = (log: string[]) => log.filter((l) => l.startsWith('capture')).length;
+
+test('camera tap: a grant just before the app goes away starts nothing when timers were frozen across a long gap', async () => {
+  const r = rig({ prompt: promptAway(true) });
+  await joined(r);
+  const tap = r.c.cameraTap();
+  await settle();
+  // Backgrounded: React Native's timers are paused. A minute passes on the
+  // wall clock and no tick runs; then the app returns.
+  r.clock.now += 60_000;
+  r.c.appState('active');
+  r.clock.advance(100);
+  await tap;
+  await settle();
+  assert.equal(captures(r.log), 0, 'no capture on resume, with no new tap');
+  assert.equal(r.c.state.cameraExtra, tapAgain);
+  assert.equal(r.c.state.cameraOn, false);
+});
+
+test('camera tap: the foreground back within the wait starts the camera', async () => {
+  const r = rig({ prompt: promptAway(true) });
+  await joined(r);
+  const tap = r.c.cameraTap();
+  await settle();
+  r.clock.advance(300);
+  r.c.appState('active');
+  r.clock.advance(100);
+  await tap;
+  await settle();
+  assert.equal(captures(r.log), 1);
+});
+
+test('camera tap: a block that begins after the permission answer abandons the tap', async () => {
+  const r = rig({ prompt: promptAway(true) });
+  await joined(r);
+  const tap = r.c.cameraTap();
+  await settle();
+  r.c.screenLocked(true); // a new reason, after the answer
+  r.c.appState('active');
+  r.c.screenLocked(false); // every block has lifted again
+  r.clock.advance(100);
+  await tap;
+  await settle();
+  assert.equal(captures(r.log), 0);
+  assert.equal(r.c.state.cameraExtra, tapAgain);
+});
+
+test('camera tap: a tap in flight does not survive Leave', async () => {
+  const r = rig({ prompt: promptAway(true) });
+  await joined(r);
+  const tap = r.c.cameraTap();
+  await settle();
+  const leaving = r.c.leave();
+  r.clock.advance(2000);
+  await leaving;
+  r.c.appState('active');
+  r.clock.advance(300);
+  await tap;
+  await settle();
+  assert.equal(captures(r.log), 0);
+  assert.equal(r.c.state.cameraOn, false);
+  assert.equal(r.c.state.phase, 'idle');
+});
+
+test('tear-down stops the capture first, then drops the room, then waits for the release', async () => {
+  const r = rig();
+  await joined(r);
+  await r.c.cameraTap();
+  await settle();
+  assert.equal(r.c.state.camera.kind, 'sending');
+  await r.c.tearDown();
+  const stop = r.log.indexOf('camera stop');
+  const drop = r.log.indexOf('room disconnect');
+  assert.ok(stop >= 0 && drop > stop, 'capture stopped before the room went');
+});
+
+test('a reconnect tells the room what to receive again', async () => {
+  const r = rig();
+  await joined(r);
+  const room = r.rooms[0];
+  assert.ok(room !== undefined);
+  const before = room.wants.length;
+  room.events?.onReconnecting();
+  room.events?.onReconnected();
+  assert.ok(room.wants.length >= before + 2);
 });

@@ -117,6 +117,9 @@ export interface ControllerOptions {
   // The signed-in principal's id; the presence check compares with it.
   readonly me: () => number;
   readonly log: (message: string) => void;
+  // Wall-clock milliseconds [Date.now]. Timers pause in the background, so
+  // waits that must not outlive a freeze are measured with this, not ticks.
+  readonly now?: () => number;
   // How often presence is read while a channel is open, in ms.
   readonly pollEvery?: number;
 }
@@ -211,6 +214,7 @@ export class VoiceController {
         permission: () => options.native.ensureCameraPermission(),
         blocked: () => this.lifecycle.blocked,
         clock: options.clock,
+        now: options.now ?? Date.now,
       },
       () => {
         this.set({ camera: this.camera.state, cameraOn: this.camera.on, cameraExtra: this.camera.extra });
@@ -315,11 +319,10 @@ export class VoiceController {
   private applyFocus(granted: boolean): void {
     this.focusLost = !granted;
     this.held = false;
+    const before = this.lifecycle.reasons;
     this.lifecycle.interrupted(!granted);
-    this.set({
-      blocked: this.lifecycle.reasons,
-      ...(granted ? {} : { note: focusDenied }),
-    });
+    this.lifecycleChanged(before);
+    if (!granted) this.set({ note: focusDenied });
   }
 
   // regainFocus asks for the focus again, once the app is active and connected
@@ -337,8 +340,9 @@ export class VoiceController {
   // will ever send the gain, so it must not outlive the room.
   private clearFocus(): void {
     this.focusLost = false;
+    const before = this.lifecycle.reasons;
     this.lifecycle.interrupted(false);
-    this.set({ blocked: this.lifecycle.reasons });
+    this.lifecycleChanged(before);
   }
 
   private async connect(channel: string, mine: number): Promise<void> {
@@ -362,11 +366,13 @@ export class VoiceController {
         if (mine !== this.attempt) return;
         this.set({ phase: 'reconnecting' });
         this.applyBlock();
+        this.updateWants();
       },
       onReconnected: () => {
         if (mine !== this.attempt) return;
         this.set({ phase: 'connected' });
         this.applyBlock();
+        this.updateWants();
         // The SDK's own reconnect: the camera's claim is named again.
         void this.camera.reconnected();
       },
@@ -481,6 +487,9 @@ export class VoiceController {
     }
     if (mine !== this.attempt) return;
     this.dropRoom();
+    // Once more, after the room is gone: a camera tap that was still in
+    // flight when Leave began must not turn the camera on afterwards.
+    await this.camera.stop('left');
     await this.o.native.abandonFocus().catch(() => undefined);
     this.clearFocus();
     await this.o.native.stopService().catch(() => undefined);
@@ -498,11 +507,15 @@ export class VoiceController {
     this.held = false;
     this.gate.shut();
     this.gate.setBlocked(true);
-    await this.camera.stop('left');
+    // The capture stops now (synchronously, inside stop), the room is dropped,
+    // and only then is the release awaited: a claim that hangs (up to 10 s)
+    // must not keep the room, the focus and the service up.
+    const stopped = this.camera.stop('left');
     this.dropRoom();
     await this.o.native.abandonFocus().catch(() => undefined);
     this.clearFocus();
     await this.o.native.stopService().catch(() => undefined);
+    await stopped;
     this.set({ ...initial, camera: this.camera.state, cameraOn: this.camera.on, cameraExtra: this.camera.extra });
   }
 
@@ -618,25 +631,34 @@ export class VoiceController {
 
   appState(state: AppState): void {
     this.held = false;
+    const before = this.lifecycle.reasons;
     this.lifecycle.appState(state);
-    this.set({ blocked: this.lifecycle.reasons });
-    this.updateWants();
+    this.lifecycleChanged(before);
     if (state === 'active') void this.regainFocus();
   }
 
   screenLocked(locked: boolean): void {
     this.held = false;
+    const before = this.lifecycle.reasons;
     this.lifecycle.screenLocked(locked);
-    this.set({ blocked: this.lifecycle.reasons });
-    this.updateWants();
+    this.lifecycleChanged(before);
   }
 
   interrupted(interrupted: boolean, permanent = false): void {
     this.held = false;
     if (!interrupted) this.focusLost = false;
     else if (permanent) this.focusLost = true;
+    const before = this.lifecycle.reasons;
     this.lifecycle.interrupted(interrupted);
-    this.set({ blocked: this.lifecycle.reasons });
+    this.lifecycleChanged(before);
+  }
+
+  // lifecycleChanged publishes the reasons now holding, and tells the camera
+  // when one has begun (a camera tap waiting for the foreground gives up).
+  private lifecycleChanged(before: readonly string[]): void {
+    const now = this.lifecycle.reasons;
+    if (now.some((r) => !before.includes(r))) this.camera.blockBegan();
+    this.set({ blocked: now });
     this.updateWants();
   }
 
@@ -660,7 +682,9 @@ export class VoiceController {
   // updateWants tells the room which cameras to receive. Nothing is received
   // when the view is closed, the app is away, or the phone is not connected.
   private updateWants(): void {
-    const connected = this.s.phase === 'connected' && this.room !== null;
+    // Presence is read for the joined channel only (watch): wants built from
+    // another channel's claims would name the wrong people.
+    const connected = this.s.phase === 'connected' && this.room !== null && this.polling === this.s.channel;
     const wants: CameraWants = connected
       ? { viewing: this.viewing, shown: !this.lifecycle.blocked, claimed: this.claimed }
       : noCameras;

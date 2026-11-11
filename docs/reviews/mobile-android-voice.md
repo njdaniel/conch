@@ -6,7 +6,7 @@ Skeleton written by #1391. **Every device cell is "not run"**: only Nick's by-ha
 
 | Field | Value |
 | --- | --- |
-| Date | 2026-11-05 (emulator dry run) |
+| Date | 2026-11-05 (emulator dry run); repeated 2026-11-10 on the refreshed branches (M4-C steps on #1391's head, M4-D steps on #1392's), same AVD |
 | Spike commit | (filled when merged) |
 | Device model / Android build / Play services | not run |
 | Emulator | Android 15 (API 35) x86_64 Google APIs AVD `conch35`, KVM, headless, no audio device |
@@ -76,7 +76,7 @@ Schema copy: `src/logic/schema/{generated,validate}.ts`, verbatim from `web/src/
 | M-C4 | Screen lock with the camera on | not run | Pass (emulator): power key with the camera on closed the camera device and ended the claim between 0.5 s and 1.0 s after the key (polling at 0.5 s); on wake the camera stayed off. |
 | M-C5 | Interruption with the camera on: an incoming call, the voice assistant, and another app taking the camera | not run | Partial (emulator): an incoming call (`gsm call`) ended the camera and the claim within 0.5 s; the stock camera app opened over the app also ended it. In both the app also left the foreground, so the interruption reason is not separated from background. The voice assistant not run. |
 | M-C6 | No auto-resume | not run | Pass (emulator): after Home, lock and the call, returning to the app left the camera off with the lifecycle note shown; no capture, claim or permission request followed (camera clients empty, presence without `+camera`). Waited seconds, not minutes. |
-| M-C7 | Permission prompt | not run | Pass (emulator): the CAMERA prompt came at the first tap only, not at launch or Join; Don't allow left the camera off with a note and no claim; the next tap prompted again, and While using the app started the camera with no second tap. |
+| M-C7 | Permission prompt | not run | Pass (emulator): the CAMERA prompt came at the first tap only, not at launch or Join; Don't allow left the camera off with a note and no claim; the next tap prompted again, and While using the app started the camera with no second tap. Intended spike behaviour, not a defect: the camera keeps sending when the person leaves the Voice view for another screen while still in voice (presence polling stops there, the camera does not; the lifecycle and Leave stop it). |
 | M-C8 | Receiving others' cameras | not run | not run on the emulator: no second camera publisher was available. Receive is unit-tested (subscription only from claim holders, only in the open and shown Voice view). |
 | M-C9 | Hand-off with the camera on | not run | not run on the emulator (needs a second device of the same principal). |
 | M-C10 | Battery and data | not run | not run |
@@ -96,6 +96,8 @@ Not shown by the emulator: real audio (no audio device), LAN reachability, Bluet
 
 - React Native's JavaScript timers pause while the app is in the background. The presence poll, the retry timer and the `ReportQueue` retries all run on them, so a failed `stopped` report sent on Home waits for the app's return (the room stays up, and conchd's own unreported-transmit handling is the backstop). A production app needs a native or service-held timer for the report, or a report path that does not depend on JS being awake. Device rows M-L2 and M-L5 should watch for it.
 - `VoiceService` calls `stopSelf()` after a failed `startForeground`. On some Android builds, a service that was started with `startForegroundService` and then stops without having called `startForeground` successfully can raise the "did not then call Service.startForeground()" crash. Not seen on the emulator; under M-P3 the device run should look for it.
+- `CameraClient.stopNow` (`src/logic/camera.ts`) bounds the unpublish and a claim in flight with `bounded(..., unpublishWait)` and `bounded(..., claimWait)`. Those are JS timers too, so in the background they pause like the poll above: the capture is already stopped (synchronously, in the adapter), but a claim release that waits on `claimWait` waits for the app's return. Same family as the `stopCamera` finding: the adapter does not wait for the unpublish for this reason (M-C3).
+- Camera tiles and the participants list name people "Person N", not by name. Presence documents carry principal ids only, and the spike makes no directory call. The production app (M8, M9) resolves names from the directory, as the browser does. M-C8's "each tile names its person" is therefore answered by the browser's pattern, not by this spike.
 
 ## Manifest (to quote)
 

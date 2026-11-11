@@ -1,4 +1,5 @@
 /// <reference types="node" />
+import type { VoiceParticipant } from '../src/logic/schema/generated';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { claimedIn, noCameras, principalOf, wantTrack, type CameraWants } from '../src/app/camera/policy';
@@ -24,5 +25,12 @@ test('wantTrack: a camera only from a claim holder, shown, in the Voice view; mi
 });
 
 test('claimedIn lists the principals whose presence shows a camera', () => {
-  assert.deepEqual([...claimedIn([{ principal_id: 1, camera: true }, { principal_id: 2 }, { principal_id: 3, camera: false }])], [1]);
+  const person = (principal_id: number, camera?: boolean): VoiceParticipant => ({
+    principal_id,
+    can_publish: true,
+    transmitting: false,
+    joined_at: '2026-11-05T10:00:00Z',
+    ...(camera === undefined ? {} : { camera }),
+  });
+  assert.deepEqual([...claimedIn([person(1, true), person(2), person(3, false)])], [1]);
 });

@@ -6,6 +6,7 @@
 // presence says they hold a camera claim. Every camera is let go, explicitly,
 // when the Voice view closes or the app leaves the foreground, so no picture
 // is downloaded behind the person's back.
+import type { VoiceParticipant } from '../../logic/schema/generated';
 import { wanted, type TrackKind, type TrackSource } from '../../logic/subscribe';
 
 export interface CameraWants {
@@ -37,6 +38,6 @@ export function wantTrack(source: TrackSource, kind: TrackKind | undefined, iden
 }
 
 // claimedIn is who presence shows holding a camera claim.
-export function claimedIn(participants: readonly { readonly principal_id: number; readonly camera?: boolean }[]): ReadonlySet<number> {
+export function claimedIn(participants: readonly VoiceParticipant[]): ReadonlySet<number> {
   return new Set(participants.filter((p) => p.camera === true).map((p) => p.principal_id));
 }

@@ -107,7 +107,11 @@ export class LiveKitCamera implements CameraRoom {
   private readonly room: Room;
   private readonly events: () => CameraEvents | null;
   private track: LocalVideoTrack | null = null;
-  private stopping = false;
+  // The tracks this adapter is taking down (stop or keep), each until its own
+  // unpublish settles: the SDK's events for them are not the server taking the
+  // camera or the device ending it. Per track, so one stop finishing cannot
+  // clear another's, and a new capture is never taken for a stopping one.
+  private readonly stopping = new Set<object>();
   private closed = false;
   private turn = 0;
   private waiters: (() => void)[] = [];
@@ -125,8 +129,11 @@ export class LiveKitCamera implements CameraRoom {
         // The source went without this adapter taking it down: LiveKit took it
         // away. The SDK also unpublishes every track as a connection ends, just
         // before it says so; the cause is read once that is over.
-        if (pub.source !== Track.Source.Camera || this.stopping || this.closed) return;
+        if (pub.source !== Track.Source.Camera || this.closed) return;
         const track = pub.track;
+        // A publication that names no track, while one is being taken down, is
+        // that one.
+        if (track === undefined ? this.stopping.size > 0 : this.stopping.has(track)) return;
         if (track !== undefined && track !== this.track) return;
         setTimeout(() => {
           if (this.closed || this.room.state === 'disconnected') return;
@@ -178,7 +185,7 @@ export class LiveKitCamera implements CameraRoom {
     const ended = (): void => {
       // Stopped or kept by this adapter: a stop by script fires no ended
       // event, and a kept capture is the next connection's.
-      if (this.track !== track || this.stopping || this.closed) return;
+      if (this.track !== track || this.stopping.has(track) || this.closed) return;
       this.events()?.onCameraEnded('device');
     };
     track.on(TrackEvent.Ended, ended);
@@ -248,7 +255,7 @@ export class LiveKitCamera implements CameraRoom {
     this.wake();
     this.forgetEnded();
     if (track === null) return;
-    this.stopping = true;
+    this.stopping.add(track);
     // The capture stops first, at once, synchronously: the device light goes
     // off even if the signalling connection hangs and the unpublish below
     // never answers.
@@ -258,13 +265,13 @@ export class LiveKitCamera implements CameraRoom {
     // (camera.ts unpublishWait) would never end and the claim's release would
     // wait for the app to come back to the foreground (found on the emulator
     // dry run). conchd's release takes the source away from LiveKit in any
-    // case; `stopping` stays up until this settles so the SDK's unpublish is
-    // not reported as the server taking the camera.
+    // case; this track stays in `stopping` until its own unpublish settles so the
+    // SDK's unpublish is not reported as the server taking the camera.
     void this.room.localParticipant
       .unpublishTrack(track, true)
       .catch(() => undefined)
       .finally(() => {
-        this.stopping = false;
+        this.stopping.delete(track);
       });
   }
 
@@ -278,12 +285,13 @@ export class LiveKitCamera implements CameraRoom {
     this.kept.add(track);
     // Blanked at once: black frames until the next connection adopts it.
     track.mediaStreamTrack.enabled = false;
-    this.stopping = true;
-    try {
-      void this.room.localParticipant.unpublishTrack(track, false).catch(() => undefined);
-    } finally {
-      this.stopping = false;
-    }
+    this.stopping.add(track);
+    void this.room.localParticipant
+      .unpublishTrack(track, false)
+      .catch(() => undefined)
+      .finally(() => {
+        this.stopping.delete(track);
+      });
     return new Kept(track);
   }
 

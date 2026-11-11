@@ -12,7 +12,12 @@
 //    shows the prompt in front of the activity, which the lifecycle sees as
 //    leaving the foreground; so after a grant the capture starts once the
 //    foreground is back (waitForeground), and if it does not come in time
-//    nothing starts and the person taps again, with the permission now held;
+//    nothing starts and the person taps again, with the permission now held.
+//    "In time" is wall-clock time: React Native pauses its JS timers in the
+//    background, so counting ticks would let a tap granted just before a call
+//    start the camera minutes later, on resume, with no new tap. The tap is
+//    also abandoned if a lifecycle block begins after the answer, and on
+//    stop, loss or leave;
 //  - the camera is the phone's: front-facing first (capture.ts), 640x360;
 //  - nothing turns the camera back on by itself: no path here calls start
 //    but the tap (M-C6);
@@ -34,6 +39,8 @@ export interface CameraPorts {
   // Whether a lifecycle reason now holds the camera off.
   readonly blocked: () => boolean;
   readonly clock: Clock;
+  // Wall-clock milliseconds (Date.now); a test freezes or jumps it.
+  readonly now: () => number;
 }
 
 // How long the tap waits, after the permission prompt closes, for the app to
@@ -49,6 +56,11 @@ export class CameraControls {
   private readonly onChange: () => void;
   private note: string | null = null;
   private asking = false;
+  // Counts the stops, losses and leaves; a tap in flight that sees it change
+  // is abandoned.
+  private cancels = 0;
+  // Counts the lifecycle blocks that have begun (blockBegan).
+  private blocks = 0;
 
   constructor(ports: CameraPorts, onChange: () => void) {
     this.ports = ports;
@@ -94,6 +106,7 @@ export class CameraControls {
     if (this.ports.blocked()) return;
     this.asking = true;
     this.note = null;
+    const gen = this.cancels;
     this.onChange();
     let allowed: boolean;
     try {
@@ -101,13 +114,19 @@ export class CameraControls {
     } catch {
       allowed = false;
     }
+    // Stopped, lost or left while the prompt was up: nothing more happens.
+    if (gen !== this.cancels) return;
     if (!allowed) {
       this.asking = false;
       this.client.fail('blocked');
       this.onChange();
       return;
     }
-    const foreground = await this.waitForeground();
+    // The prompt's own leaving of the foreground began before the answer; a
+    // block that begins after it is a new reason to stay off.
+    const blocks = this.blocks;
+    const foreground = await this.waitForeground(gen, blocks);
+    if (gen !== this.cancels) return;
     this.asking = false;
     if (!foreground) {
       this.say(tapAgain);
@@ -116,25 +135,45 @@ export class CameraControls {
     await this.client.start(channel, room, null, 'phone');
   }
 
+  // blockBegan is the controller saying a lifecycle reason has begun: a tap
+  // still waiting for the foreground is abandoned.
+  blockBegan(): void {
+    this.blocks++;
+  }
+
+  // cancelTap abandons a tap in flight (the permission prompt, or the wait
+  // for the foreground).
+  private cancelTap(): void {
+    this.cancels++;
+    if (this.asking) {
+      this.asking = false;
+      this.onChange();
+    }
+  }
+
   private say(note: string): void {
     this.note = note;
     this.onChange();
   }
 
   // waitForeground resolves true once no lifecycle reason holds, within
-  // foregroundWait.
-  private waitForeground(): Promise<boolean> {
-    if (!this.ports.blocked()) return Promise.resolve(true);
+  // foregroundWait of wall-clock time; false if the time is up (checked first,
+  // so a resume after a long freeze of the timers is too late), if a block has
+  // begun since the answer, or if the tap was cancelled.
+  private waitForeground(gen: number, blocks: number): Promise<boolean> {
+    const deadline = this.ports.now() + foregroundWait;
+    const done = (): boolean | null => {
+      if (gen !== this.cancels || blocks !== this.blocks) return false;
+      if (this.ports.now() >= deadline) return false;
+      return this.ports.blocked() ? null : true;
+    };
+    const first = done();
+    if (first !== null) return Promise.resolve(first);
     return new Promise((resolve) => {
-      let waited = 0;
       const look = (): void => {
-        if (!this.ports.blocked()) {
-          resolve(true);
-          return;
-        }
-        waited += foregroundStep;
-        if (waited >= foregroundWait) {
-          resolve(false);
+        const answer = done();
+        if (answer !== null) {
+          resolve(answer);
           return;
         }
         this.ports.clock.setTimeout(look, foregroundStep);
@@ -146,6 +185,7 @@ export class CameraControls {
   // ---- what the controller tells the camera (all of camera.ts's, by name)
 
   stop(cause: 'self' | 'left' | 'lost'): Promise<void> {
+    this.cancelTap();
     return this.client.stop(cause);
   }
 
@@ -154,6 +194,7 @@ export class CameraControls {
   }
 
   lost(loss: CameraLoss): void {
+    this.cancelTap();
     this.client.lost(loss);
   }
 
@@ -175,6 +216,7 @@ export class CameraControls {
 
   // reset forgets why the last camera ended, at a new join.
   reset(): void {
+    this.cancelTap();
     this.note = null;
     this.client.reset();
   }
