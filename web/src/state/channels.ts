@@ -28,6 +28,7 @@ export type ChannelsAction =
   // channel_not_found. It stays where it is in the list, and stays open if it
   // was.
   | { readonly type: 'renamed'; readonly id: number; readonly name: string }
+  | { readonly type: 'topic'; readonly id: number; readonly topic: string | undefined }
   // A channel's visibility and default mark (issue #1183), by its id: the
   // operator's own answer, or the events socket's conch.channel.v1. What the
   // server says replaces what is held; a field it omits keeps the value held
@@ -109,6 +110,12 @@ export function channelsReducer(state: ChannelsState, action: ChannelsAction): C
       const selected = state.selected === was.name ? action.name : state.selected;
       return { ...state, channels, selected };
     }
+    case 'topic': {
+      const held = state.channels.find((channel) => channel.id === action.id);
+      if (held === undefined || held.topic === action.topic) return state;
+      const channels = state.channels.map((channel) => (channel.id === action.id ? { ...channel, topic: action.topic } : channel));
+      return { ...state, channels };
+    }
     case 'settings': {
       const held = state.channels.find((channel) => channel.id === action.id);
       if (held === undefined) return state;
@@ -123,6 +130,7 @@ export function channelsReducer(state: ChannelsState, action: ChannelsAction): C
         ...(visibility === undefined ? {} : { visibility }),
         ...(isDefault === undefined ? {} : { default: isDefault }),
         ...(action.archivedAt === undefined ? {} : { archived_at: action.archivedAt }),
+        ...(held.topic === undefined ? {} : { topic: held.topic }),
       };
       return { ...state, channels: state.channels.map((channel) => (channel.id === action.id ? next : channel)) };
     }

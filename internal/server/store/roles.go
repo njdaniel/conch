@@ -511,7 +511,7 @@ func populateRoleChangeResultTx(ctx context.Context, tx execer, targetID int64, 
 		return RoleChangeResult{}, err
 	}
 	manages, err := idsTx(ctx, tx,
-		"SELECT channel_id FROM channel_members WHERE principal_id = ? AND manages = 1 ORDER BY channel_id ASC", targetID)
+		"SELECT channel_id FROM "+liveMembers+" WHERE principal_id = ? AND manages = 1 ORDER BY channel_id ASC", targetID)
 	if err != nil {
 		return RoleChangeResult{}, fmt.Errorf("store: list managed channels of %d: %w", targetID, err)
 	}

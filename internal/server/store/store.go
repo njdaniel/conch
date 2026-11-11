@@ -957,7 +957,7 @@ END`,
 	// history bounds step 5 clears; and invites.link (step 8), 'legacy' for
 	// every existing invite. The Go step (migrateToCommunity) runs the
 	// preflight and steps 3 to 11 in this same transaction. open_channels
-	// stays, unread, until a later migration drops it (I13).
+	// stays, unread, until migration 46 drops it (I13).
 	{
 		`ALTER TABLE channels ADD COLUMN visibility TEXT NOT NULL DEFAULT 'private' CHECK (visibility IN ('public', 'private'))`,
 		`ALTER TABLE channels ADD COLUMN is_default INTEGER NOT NULL DEFAULT 0 CHECK (is_default IN (0, 1))`,
@@ -1053,6 +1053,22 @@ BEGIN SELECT RAISE(ABORT, 'a default channel must be public'); END`,
 BEGIN SELECT RAISE(ABORT, 'message removals are permanent'); END`,
 		`CREATE TRIGGER message_removals_no_delete BEFORE DELETE ON message_removals
 BEGIN SELECT RAISE(ABORT, 'message removals are permanent'); END`,
+	},
+	// 46: drop open_channels (issue #998, design I13). Migration 40 turned
+	// every channel listed there into a public default channel
+	// (channels.is_default, default_listed_by) and left the table in place,
+	// unread, for one release cycle; nothing reads or writes it since. The
+	// joining settings' open_channels is now a projection of the default
+	// channels. Every other table is untouched. A rollback to an older
+	// binary uses the pre-upgrade backup, not this table.
+	{
+		`DROP TABLE open_channels`,
+	},
+	// 47 (channelTopicMigration): a channel's one-line topic (issue #1503,
+	// docs/design/channel-topic.md). The empty string is no topic, so every
+	// existing channel has none; there is no audit row and no fill step.
+	{
+		`ALTER TABLE channels ADD COLUMN topic TEXT NOT NULL DEFAULT ''`,
 	},
 }
 

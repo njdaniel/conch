@@ -9,7 +9,9 @@
 // touched back in a `finally`, whatever happened. None of them skips on the
 // document's state.
 import type { BrowserContextOptions, Page } from '@playwright/test';
+import type { CreateChannelRequestV1 } from '../src/schema/channel';
 import { createCredentialResponseV1, createPrincipalResponse, type CreateCredentialRequestV1, type CreatePrincipalRequest } from '../src/schema/credential';
+import { errorV0 } from '../src/schema/error';
 import { permissionsResponseV1, type PermissionChangeV1, type PermissionsResponseV1 } from '../src/schema/permission';
 import { credentialField, expect, expectFits, statusLine, test } from './fixtures';
 import { call, ok, type World } from './world';
@@ -178,4 +180,90 @@ test('A1019 at 390×844 the phone shows one list with a switch per row, and a se
   } finally {
     await restore(world, before);
   }
+});
+
+// The member cells a test reads and restores, by permission.
+async function memberCells(world: World, permissions: readonly string[]): Promise<Record<string, boolean>> {
+  const now = await read(world);
+  const cells: Record<string, boolean> = {};
+  for (const permission of permissions) {
+    const row = now.rows.find((r) => r.permission === permission);
+    if (row === undefined) throw new Error(`the permissions document has no ${permission}`);
+    cells[permission] = row.member;
+  }
+  return cells;
+}
+
+async function setMemberCells(world: World, cells: Readonly<Record<string, boolean>>): Promise<void> {
+  const now = await read(world);
+  const changes: PermissionChangeV1[] = Object.entries(cells).map(([permission, granted]) => ({ permission, role: 'member', granted }));
+  const put = await call(world, world.tokens.operator, 'PUT', '/v1/permissions', { revision: now.revision, changes });
+  expect(put.status, `setting the member cells: ${JSON.stringify(put.body)}`).toBeLessThan(300);
+}
+
+// Issue #1668: a member whose channel creation is off is not offered New
+// channel, and the server refuses a direct call. The member's name is digits
+// of a fixed width, so the page's layout never depends on it (issue #1647).
+// Lives here, not in 20-create-channel, for this file's read and restore.
+test('A1668 a member with channel creation off is offered no way to make that channel, and the server refuses a direct call', async ({ meet, secrets, world }) => {
+  const cells = ['create_public_channels', 'create_private_channels'];
+  const before = await memberCells(world, cells);
+  const name = `m${Date.now().toString().slice(-9)}`;
+  const people: number[] = [];
+  const nav = (page: Page) => page.getByRole('navigation', { name: 'Channels' });
+  try {
+    const principal: CreatePrincipalRequest = { kind: 'human', name };
+    const id = (await ok(world, world.tokens.operator, 'POST', '/v0/principals', createPrincipalResponse, principal)).principal.id;
+    people.push(id);
+    const credential: CreateCredentialRequestV1 = { label: name };
+    const { token } = await ok(world, world.tokens.operator, 'POST', `/v1/principals/${String(id)}/credentials`, createCredentialResponseV1, credential);
+    secrets.push(token);
+
+    // Public off, private on: the form is offered with no choice of
+    // visibility, so no way to ask for a public channel.
+    await setMemberCells(world, { create_public_channels: false, create_private_channels: true });
+    const { page } = await meet(desktop);
+    await page.goto(world.appUrl);
+    await (await credentialField(page)).fill(token);
+    await page.getByRole('button', { name: 'Use credential' }).click();
+    await expect(statusLine(page)).toContainText('Connected');
+    await nav(page).getByRole('button', { name: 'New channel' }).click();
+    const form = page.getByRole('form', { name: 'New channel' });
+    await expect(form.getByRole('radio', { name: /^Public/ })).toHaveCount(0);
+    await expect(form.getByRole('radio')).toHaveCount(0);
+    await expect(form.getByText(/^Public/)).toHaveCount(0);
+    await expect(form.getByRole('button', { name: 'Create channel' })).toBeVisible();
+
+    // Both off: New channel is offered nowhere on the page.
+    await setMemberCells(world, { create_public_channels: false, create_private_channels: false });
+    await page.reload();
+    await expect(statusLine(page)).toContainText('Connected');
+    await expect(nav(page)).toBeVisible();
+    await expect(page.getByRole('button', { name: 'New channel' })).toHaveCount(0);
+    await expect(page.getByRole('form', { name: 'New channel' })).toHaveCount(0);
+    await expect(page.getByLabel('Channel name')).toHaveCount(0);
+
+    // The server refuses a direct call from the page, whatever the page offers.
+    const attempt: CreateChannelRequestV1 = { name: `c${name}`, visibility: 'public' };
+    const refused = await page.evaluate(
+      async ({ url, bearer, body }) => {
+        const res = await fetch(url, { method: 'POST', headers: { Authorization: `Bearer ${bearer}`, 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+        return { status: res.status, body: (await res.json()) as unknown };
+      },
+      { url: `${world.origin}/v1/channels`, bearer: token, body: attempt },
+    );
+    expect(refused.status).toBe(403);
+    expect(errorV0(refused.body)).toEqual([]);
+    expect((refused.body as { code: string }).code).toBe('permission_denied');
+    const listed = await call(world, token, 'GET', '/v1/channels');
+    expect(JSON.stringify(listed.body)).not.toContain(attempt.name);
+  } finally {
+    await setMemberCells(world, before);
+    for (const person of people) {
+      const off = await call(world, world.tokens.operator, 'POST', `/v1/principals/${String(person)}/disable`);
+      expect(off.status, `disabling person ${String(person)}: ${JSON.stringify(off.body)}`).toBeLessThan(300);
+    }
+  }
+  // Checked outside the finally, so a failure in the body is not masked.
+  expect(await memberCells(world, cells)).toEqual(before);
 });

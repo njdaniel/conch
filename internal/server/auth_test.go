@@ -176,14 +176,29 @@ type routeExpectation struct {
 	allowed int
 }
 
+// routePreviewable is the independently stated list of the routes that admit
+// the Conch-Preview-As header (issue #1515, design §4.3): five reads, and no
+// other. TestRouteTable pins route.previewable against it, and
+// TestPreviewableRoutesAreReads holds the same list.
+var routePreviewable = map[string]bool{
+	"GET /v1/preview":                    true,
+	"GET /v1/channels":                   true,
+	"GET /v1/directory/channels":         true,
+	"GET /v1/directory/members":          true,
+	"GET /v1/channels/{channel}/members": true,
+}
+
 // routeExpectations must name every pattern in the route table. {id} is the
 // operator's principal id (1) so operator-or-self is exercised from a member.
 var routeExpectations = map[string]routeExpectation{
-	"GET /healthz":      {classExempt, "/healthz", "", 200},
-	"GET /v0/ws":        {classAuth, "/v0/ws", "", 400},
-	"GET /v1/ws":        {classAuth, "/v1/ws", "", 400},
-	"GET /v2/ws":        {classAuth, "/v2/ws", "", 400},
-	"GET /v1/whoami":    {classAuth, "/v1/whoami", "", 200},
+	"GET /healthz":   {classExempt, "/healthz", "", 200},
+	"GET /v0/ws":     {classAuth, "/v0/ws", "", 400},
+	"GET /v1/ws":     {classAuth, "/v1/ws", "", 400},
+	"GET /v2/ws":     {classAuth, "/v2/ws", "", 400},
+	"GET /v1/whoami": {classAuth, "/v1/whoami", "", 200},
+	// Preview as member (issue #1515). Without the header it answers 400
+	// "preview target required"; the status is the same with AuthOff.
+	"GET /v1/preview":   {classAuth, "/v1/preview", "", 400},
 	"POST /v0/channels": {classPerm, "/v0/channels", `{}`, 400},
 	// The permissions document (issue #1015): any operator reads it; a PUT
 	// of nothing is refused as malformed.
@@ -206,10 +221,16 @@ var routeExpectations = map[string]routeExpectation{
 	"POST /v1/channels/{channel}/leave": {classAuth, "/v1/channels/never-made/leave", "", 404},
 	// Both membership writes are no-ops in the fixture (alice is already a
 	// member; ghost, id 4, is not), so they change nothing and audit nothing.
-	"GET /v1/channels/{channel}/members":                   {classAuth, "/v1/channels/general/members", "", 200},
-	"GET /v1/channels/{channel}/authors":                   {classAuth, "/v1/channels/general/authors?ids=2", "", 200},
-	"PUT /v1/channels/{channel}/members/{principal_id}":    {classManager, "/v1/channels/general/members/2", "", 204},
-	"DELETE /v1/channels/{channel}/members/{principal_id}": {classManager, "/v1/channels/general/members/4", "", 204},
+	"GET /v1/channels/{channel}/members":                              {classAuth, "/v1/channels/general/members", "", 200},
+	"GET /v1/channels/{channel}/authors":                              {classAuth, "/v1/channels/general/authors?ids=2", "", 200},
+	"PUT /v1/channels/{channel}/members/{principal_id}":               {classManager, "/v1/channels/general/members/2", "", 204},
+	"DELETE /v1/channels/{channel}/members/{principal_id}":            {classManager, "/v1/channels/general/members/4", "", 204},
+	"DELETE /v1/channels/{channel}/voice/participants/{principal_id}": {classManager, "/v1/channels/general/voice/participants/4", "", 204},
+	// Bans (issue #851). An unknown principal cannot be banned (404) and
+	// lifting an absent ban is a no-op, so the sweep writes nothing.
+	"GET /v1/channels/{channel}/bans":                   {classManager, "/v1/channels/general/bans", "", 200},
+	"PUT /v1/channels/{channel}/bans/{principal_id}":    {classManager, "/v1/channels/general/bans/9999", "", 404},
+	"DELETE /v1/channels/{channel}/bans/{principal_id}": {classManager, "/v1/channels/general/bans/9999", "", 204},
 	// Adding a member by name (issue #790): an empty body is a 400 before
 	// anyone is looked up.
 	"POST /v1/channels/{channel}/members": {classManager, "/v1/channels/general/members", `{}`, 400},
@@ -323,6 +344,7 @@ var routeExpectations = map[string]routeExpectation{
 	"GET /v2/channels/{channel}/reactions":                                                 {classAuth, "/v2/channels/general/reactions?messages=9999", "", 200},
 	"DELETE /v2/channels/{channel}/messages/{message_id}/reactions/{emoji}/{principal_id}": {classManager, "/v2/channels/general/messages/9999/reactions/%F0%9F%91%8D/2", "", 404},
 	"DELETE /v2/channels/{channel}/messages/{message_id}/reactors/{principal_id}":          {classManager, "/v2/channels/general/messages/9999/reactors/2", "", 404},
+	"DELETE /v2/channels/{channel}/messages/{message_id}":                                  {classManager, "/v2/channels/general/messages/9999", "", 404},
 	"PUT /v2/channels/{channel}/messages/{message_id}/body":                                {classAuth, "/v2/channels/general/messages/9999/body", `{"body":"x"}`, 404},
 	"GET /v2/channels/{channel}/messages/{message_id}/revisions":                           {classAuth, "/v2/channels/general/messages/9999/revisions", "", 404},
 	"PUT /v1/principals/{id}/manifest":                                                     {classPerm, "/v1/principals/1/manifest", `{}`, 400},
@@ -481,7 +503,8 @@ var routeExpectations = map[string]routeExpectation{
 
 	// Renaming a channel (issues #727, #791): the manager class resolves the
 	// id before the body, so an unknown channel is 404 and changes nothing.
-	"PUT /v1/channels/{id}/name": {classManager, "/v1/channels/9999/name", `{}`, 404},
+	"PUT /v1/channels/{id}/name":  {classManager, "/v1/channels/9999/name", `{}`, 404},
+	"PUT /v1/channels/{id}/topic": {classManager, "/v1/channels/9999/topic", `{"topic":5}`, 404},
 
 	// Changing a role or the owner mark (issue #790): an empty body is a 400
 	// before the target is looked up.
@@ -570,6 +593,9 @@ func TestRouteTable(t *testing.T) {
 		if rt.perm != perm {
 			t.Errorf("route %q needs %q, expectation says %q", rt.pattern, rt.perm, perm)
 		}
+		if rt.previewable != routePreviewable[rt.pattern] {
+			t.Errorf("route %q previewable = %t, expectation says %t", rt.pattern, rt.previewable, routePreviewable[rt.pattern])
+		}
 	}
 	for p := range routePermissions {
 		if _, ok := routeExpectations[p]; !ok {
@@ -655,7 +681,7 @@ func TestRoleMatrix(t *testing.T) {
 			if exp.class == classOp || exp.class == classSelf || exp.class == classOwner || exp.class == classManager || exp.class == classPerm {
 				memberWant = http.StatusForbidden
 			}
-			if rt.pattern == "PUT /v1/channels/{id}/name" {
+			if rt.pattern == "PUT /v1/channels/{id}/name" || rt.pattern == "PUT /v1/channels/{id}/topic" {
 				memberWant = exp.allowed // a non-member cannot discover the channel id
 			}
 			// Nobody makes v1 invites (issue #1134): the route answers
@@ -668,7 +694,7 @@ func TestRoleMatrix(t *testing.T) {
 			// The approval REST routes are the human surface: an agent
 			// credential is refused there and uses MCP instead (issue #79).
 			agentWant := memberWant
-			if rt.pattern == "PUT /v1/channels/{id}/name" {
+			if rt.pattern == "PUT /v1/channels/{id}/name" || rt.pattern == "PUT /v1/channels/{id}/topic" {
 				agentWant = http.StatusForbidden // kind is refused before channel lookup
 			}
 			if rt.pattern == "GET /v1/directory/members" || strings.Contains(rt.pattern, "/v1/approvals") || strings.Contains(rt.pattern, "/voice/session") || strings.Contains(rt.pattern, "/voice/transmit") || strings.Contains(rt.pattern, "/voice/share") || strings.Contains(rt.pattern, "/voice/camera") || strings.Contains(rt.pattern, "/voice/companion") || rt.pattern == "GET /v1/channels/{channel}/voice" || strings.Contains(rt.pattern, "/v1/voice/occupancy") || isFileRoute(rt.pattern) {
@@ -772,7 +798,7 @@ func TestAuthOffUnchanged(t *testing.T) {
 				if strings.Contains(rt.pattern, "/voice/session") || strings.Contains(rt.pattern, "/voice/transmit") || strings.Contains(rt.pattern, "/voice/share") || strings.Contains(rt.pattern, "/voice/camera") || strings.Contains(rt.pattern, "/voice/companion") || rt.pattern == "GET /v1/channels/{channel}/voice" || strings.Contains(rt.pattern, "/v1/voice/occupancy") {
 					want = http.StatusBadRequest // voice_requires_auth: voice is never anonymous
 				}
-				if rt.pattern == "PUT /v1/channels/{id}/name" {
+				if rt.pattern == "PUT /v1/channels/{id}/name" || rt.pattern == "PUT /v1/channels/{id}/topic" {
 					want = http.StatusBadRequest // AuthOff skips the guard and reaches body validation
 				}
 				if isFileRoute(rt.pattern) {
@@ -829,9 +855,17 @@ func TestAuthOffUnchanged(t *testing.T) {
 		// issue #445), alice's and bot's credentials 1 each, the fixture's
 		// three member_added events, and the fixture agent's
 		// manifest_created; no request may add to that (in particular no
-		// access_denied).
-		if n := len(f.audit(t)); n != 9 {
-			t.Errorf("mode %q: audit events = %d, want 9", mode, n)
+		// access_denied). The one exception is the voice-only removal (issue
+		// #850): an authorized request writes voice_participant_kicked even when
+		// it removes nobody (design §3.3), and the sweep authorizes it twice,
+		// once with no credential and once with a garbage one, both
+		// unconstrained under AuthOff. Voice is not configured here, so
+		// nothing is removed and no voice_participant_removed row follows.
+		if n := len(f.audit(t)); n != 11 {
+			t.Errorf("mode %q: audit events = %d, want 11", mode, n)
+		}
+		if n := countAction(f.audit(t), store.AuditVoiceParticipantKicked); n != 2 {
+			t.Errorf("mode %q: voice_participant_kicked events = %d, want 2", mode, n)
 		}
 	}
 }

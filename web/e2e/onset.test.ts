@@ -4,7 +4,7 @@
 // heard, and an edge it hides is refused rather than guessed. A unit test:
 // no browser, no network.
 import { describe, expect, it } from 'vitest';
-import { burstMeasure, pressMeasure, spans, type Sample } from './onset';
+import { burstAudioFailure, burstMeasure, p90, pressMeasure, spans, type Sample } from './onset';
 
 // readings from t0 to t1, every 5 ms, loud while heard(t), and none inside
 // any of the stalls.
@@ -86,6 +86,39 @@ describe('an open microphone burst', () => {
   it('a stall over the onset or the end is refused', () => {
     expect(burstMeasure(readings(800, 3000, burst, [[on + 125, on + 160]]), on, off)).toBeNull();
     expect(burstMeasure(readings(800, 3000, burst, [[off + 95, off + 130]]), on, off)).toBeNull();
+  });
+
+  it('reliable silence or a dropout is an audio failure, but a sampling stall is retryable', () => {
+    const silent = readings(800, 3000, () => false);
+    expect(burstMeasure(silent, on, off)).toBeNull();
+    expect(burstAudioFailure(silent, on, off)).toBe(true);
+
+    const dropout = readings(800, 3000, (t) => burst(t) && !within(1400, 1440)(t));
+    expect(burstMeasure(dropout, on, off)).toBeNull();
+    expect(burstAudioFailure(dropout, on, off)).toBe(true);
+
+    const stalled = readings(800, 3000, () => false, [[1200, 1300]]);
+    expect(burstMeasure(stalled, on, off)).toBeNull();
+    expect(burstAudioFailure(stalled, on, off)).toBe(false);
+  });
+
+  it('a premature ending under reliable sampling is an audio failure', () => {
+    const early = readings(800, 3000, within(1140, 1500));
+    expect(burstMeasure(early, on, off)).toBeNull();
+    expect(burstAudioFailure(early, on, off)).toBe(true);
+  });
+
+  it('a later sampling stall does not hide an observed dropout', () => {
+    const dropoutThenStall = readings(800, 3000, (t) => burst(t) && !within(1400, 1440)(t), [[2400, 2440]]);
+    expect(burstMeasure(dropoutThenStall, on, off)).toBeNull();
+    expect(burstAudioFailure(dropoutThenStall, on, off)).toBe(true);
+  });
+});
+
+describe('nearest-rank p90', () => {
+  it('allows two of 20 measurements beyond the bound, but not three', () => {
+    expect(p90([...Array<number>(18).fill(30), 100, 100])).toBe(30);
+    expect(p90([...Array<number>(17).fill(30), 100, 100, 100])).toBe(100);
   });
 });
 

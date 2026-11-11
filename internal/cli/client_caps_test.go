@@ -59,6 +59,10 @@ func TestListReadsRefuseOversizedBody(t *testing.T) {
 			_, err := c.ListChannelMembers(ctx, "general")
 			return err
 		}, ""},
+		{"channel bans", "bans", maxChannelBansBody, func(c *Client) error {
+			_, err := c.ListChannelBans(ctx, "general")
+			return err
+		}, ""},
 		{"channel authors", "authors", maxChannelAuthorsBody, func(c *Client) error {
 			_, err := c.ChannelAuthors(ctx, "general", []int64{3})
 			return err

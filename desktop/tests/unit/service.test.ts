@@ -365,3 +365,35 @@ describe('the request function', () => {
   });
 
 });
+
+describe('Preview as member through main (issue #1540)', () => {
+  it('carries previewAs to a previewable read, and refuses it on any other operation whatever the renderer says', async () => {
+    const fake = await startHttp((_r, res) => {
+      sendJson(res, 200, {});
+    });
+    servers.push(fake);
+    const { session, service } = stack();
+    session.setOrigin(fake.origin);
+    session.adopt(CANARY_TOKEN);
+    await service.request({ operation: 'listChannels', previewAs: 7 });
+    expect(fake.seen[0]?.headers['conch-preview-as']).toBe('7');
+    const before = fake.seen.length;
+    expect(await service.request({ operation: 'whoami', previewAs: 7 })).toEqual({ kind: 'none', reason: 'unsupported' });
+    expect(await service.request({ operation: 'listMessages', params: { channel: 'a' }, previewAs: 7 })).toEqual({ kind: 'none', reason: 'unsupported' });
+    expect(fake.seen).toHaveLength(before);
+  });
+
+  it('keeps no preview between requests: the next one is the administrator’s', async () => {
+    const fake = await startHttp((_r, res) => {
+      sendJson(res, 200, {});
+    });
+    servers.push(fake);
+    const { session, service } = stack();
+    session.setOrigin(fake.origin);
+    session.adopt(CANARY_TOKEN);
+    await service.request({ operation: 'listChannels', previewAs: 7 });
+    session.setOrigin(fake.origin);
+    await service.request({ operation: 'listChannels' });
+    expect(fake.seen[1]?.headers['conch-preview-as']).toBeUndefined();
+  });
+});

@@ -99,6 +99,16 @@ func TestCastMemberDecisionChecksTheRightInTheTransaction(t *testing.T) {
 			_, err := f.s.DisablePrincipal(ctx, "system", f.ann.ID)
 			return err
 		}, ErrNoDecideRight},
+		// Issue #851: a ban whose membership row was left in place (a
+		// restored backup) removes the right as removal does.
+		{"banned, membership row left in place", func(f decideFixture) error {
+			_, err := f.s.db.ExecContext(ctx, "INSERT INTO channel_bans (channel_id, principal_id, created_by, created_at) VALUES (?, ?, NULL, 1)", f.channelID, f.ann.ID)
+			return err
+		}, ErrNotFound},
+		{"banned", func(f decideFixture) error {
+			_, err := f.s.BanChannelMember(ctx, "system", f.channelID, f.ann.ID, 0)
+			return err
+		}, ErrNotFound},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newDecideFixture(t, 1)
@@ -194,5 +204,25 @@ func TestCastDecisionWithoutAuthenticationCountsEveryDecision(t *testing.T) {
 	_, r, err := f.s.CastDecision(ctx, f.approvalID, f.ann.ID, "approve", "yes")
 	if err != nil || r == nil || len(r.Decisions) != 2 {
 		t.Fatalf("ann = %+v, %v; want resolved on two decisions", r, err)
+	}
+}
+
+// Issue #851: a decider banned after deciding stops counting toward quorum,
+// as a removed one does, and the one decision left cannot resolve a quorum of
+// two; the approval is untouched by the ban.
+func TestBannedDeciderNoLongerCountsTowardQuorum(t *testing.T) {
+	ctx := context.Background()
+	f := newDecideFixture(t, 2)
+	if _, r, err := f.s.CastMemberDecision(ctx, f.approvalID, f.ann.ID, "approve", "ok"); err != nil || r != nil {
+		t.Fatalf("ann's decision = %v, %v; want recorded and unresolved", r, err)
+	}
+	if _, err := f.s.BanChannelMember(ctx, "system", f.channelID, f.ann.ID, 0); err != nil {
+		t.Fatal(err)
+	}
+	if _, r, err := f.s.CastMemberDecision(ctx, f.approvalID, f.bob.ID, "approve", "ok"); err != nil || r != nil {
+		t.Fatalf("bob's decision = %v, %v; want unresolved, ann no longer counting", r, err)
+	}
+	if _, r, err := f.s.CastMemberDecision(ctx, f.approvalID, f.cy.ID, "approve", "ok"); err != nil || r == nil {
+		t.Fatalf("cy's decision = %v, %v; want the quorum of bob and cy met", r, err)
 	}
 }

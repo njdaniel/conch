@@ -73,6 +73,26 @@ describe('channelsReducer renamed', () => {
   });
 });
 
+describe('channelsReducer topic', () => {
+  it('sets and clears only the named channel’s topic', () => {
+    const from: ChannelsState = { ...listed('ops'), channels: [general, { ...ops, topic: 'Old topic' }, dev] };
+    const set = channelsReducer(from, { type: 'topic', id: 2, topic: 'Operations and incidents' });
+    expect(set.channels.map((channel) => channel.topic)).toEqual([undefined, 'Operations and incidents', undefined]);
+    expect(set.selected).toBe('ops');
+    const cleared = channelsReducer(set, { type: 'topic', id: 2, topic: undefined });
+    expect(cleared.channels[1]?.topic).toBeUndefined();
+    expect(channelsReducer(from, { type: 'topic', id: 9, topic: 'Unknown' })).toBe(from);
+  });
+
+  it('renamed and settings preserve the topic', () => {
+    const from: ChannelsState = { ...listed('ops'), channels: [general, { ...ops, topic: 'Operations and incidents' }, dev] };
+    const renamed = channelsReducer(from, { type: 'renamed', id: 2, name: 'operations' });
+    expect(renamed.channels[1]?.topic).toBe('Operations and incidents');
+    const settings = channelsReducer(renamed, { type: 'settings', id: 2, visibility: 'private', default: false, archivedAt: undefined });
+    expect(settings.channels[1]?.topic).toBe('Operations and incidents');
+  });
+});
+
 describe('channelsReducer managed', () => {
   it('changes only the named channel and preserves every other standing', () => {
     const from: ChannelsState = { ...listed('general'), channels: [{ ...general, manages: false }, { ...ops, manages: true }, dev] };

@@ -106,6 +106,16 @@ describe('the directory', () => {
     expect(i.querySelector('.private-mark')).toBeNull();
   });
 
+  it('shows a public channel’s topic under its name to a non-member', async () => {
+    const topic = 'Ideas worth discussing';
+    directory.mockResolvedValue({ ok: true, value: [{ ...ideas, topic }] });
+    await opened();
+    const row = rowOf('ideas');
+    const line = await within(row).findByText(topic);
+    expect(line.parentElement).toBe(row.querySelector('.channel-name')?.parentElement);
+    expect(within(row).getByRole('button', { name: 'Join ideas' })).toBeDefined();
+  });
+
   it('shows no counts of people, even if a row carried one', async () => {
     directory.mockResolvedValue({ ok: true, value: [{ ...ideas, members: 41 }, { ...vault, members: 7 }] });
     await opened();
@@ -255,7 +265,10 @@ describe('Leave', () => {
     const said = await screen.findByText('You are the last member of this private channel. Add someone else before you leave.');
     expect(said.getAttribute('role')).toBe('status');
     // The confirmation that held focus is gone: focus is on the row's Leave.
-    expect(document.activeElement).toBe(within(rowOf('vault')).getByRole('button', { name: 'Leave vault' }));
+    // Focus returns in a passive effect, which can land after the status text.
+    await waitFor(() => {
+      expect(document.activeElement).toBe(within(rowOf('vault')).getByRole('button', { name: 'Leave vault' }));
+    });
     expect(seen.left).toEqual([]);
     expect(within(rowOf('vault')).getByRole('button', { name: 'Leave vault' })).toBeDefined();
   });
@@ -317,8 +330,8 @@ describe('the community member panel', () => {
     expect(within(items[0] as HTMLElement).getByText('Operator')).toBeDefined();
     expect(within(items[1] as HTMLElement).getByText('You')).toBeDefined();
     expect(within(items[1] as HTMLElement).queryByText('Operator')).toBeNull();
-    // A plain member's role is shown too.
-    expect(within(items[1] as HTMLElement).getByText('Member')).toBeDefined();
+    // Member is the absence of a standing mark, not another badge.
+    expect(within(items[1] as HTMLElement).queryByText('Member')).toBeNull();
     // The section is named by its heading; the list is its own, "People".
     expect(screen.getByRole('region', { name: 'Community members' })).toBeDefined();
     expect(screen.queryByRole('list', { name: 'Community members' })).toBeNull();
@@ -334,7 +347,7 @@ describe('the community member panel', () => {
     panel();
     const list = await screen.findByRole('list', { name: 'People' });
     const [first, second] = within(list).getAllByRole('listitem');
-    expect(first?.textContent).toBe('adaOperator');
+    expect(first?.textContent).toBe('ada [Operator]');
     expect(second?.textContent).toContain('voice off');
     expect(second?.textContent).toContain('can invite');
     expect(second?.textContent).toContain('invited by ada');

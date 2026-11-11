@@ -4,7 +4,7 @@
 // another spec uses.
 import type { Page } from '@playwright/test';
 import { createCredentialResponseV1, createPrincipalResponse, type CreateCredentialRequestV1, type CreatePrincipalRequest } from '../src/schema/credential';
-import { credentialField, expect, signIn, statusLine, test } from './fixtures';
+import { closeAll, credentialField, expect, signIn, statusLine, test } from './fixtures';
 import { call, ok, type World } from './world';
 
 interface Newcomer {
@@ -69,7 +69,7 @@ test('A7 a member signs in, closes the page and the browser, and is still signed
     await signedIn(page3, person.name);
     await expectNotShown(page3, person.tokens);
   } finally {
-    await reopened.close();
+    await closeAll(reopened);
   }
   for (const p of [again, second]) await expectNotShown(p, person.tokens);
 });

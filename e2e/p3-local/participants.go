@@ -292,7 +292,7 @@ func (r *runner) printCommands() error {
 	say("")
 	cmd("operator: list nick-test's credentials", opAdmin("credential", "list", pid("nick-test")))
 	cmd("operator: revoke the credential of terminal 3 (tui-a2) only", opAdmin("credential", "revoke", id(fx.creds["tui-a2"].id)))
-	cmd("operator: take nick-test out of test-private", opAdmin("member", "remove", chPrivate, pid("nick-test")))
+	cmd("operator: take nick-test out of test-private", opAdmin("member", "remove", "--yes", chPrivate, pid("nick-test")))
 	cmd("operator: put nick-test back into test-private", opAdmin("member", "add", chPrivate, pid("nick-test")))
 	say("")
 	cmd("stop the server (pid of conchd)", fmt.Sprintf("kill %d", r.server.pid()))

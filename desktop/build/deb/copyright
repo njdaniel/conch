@@ -1,0 +1,18 @@
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Upstream-Name: conch
+Source: https://github.com/njdaniel/conch
+
+Files: *
+Copyright: Conch contributors
+License: AGPL-3.0-only
+ This program is free software: you can redistribute it and/or modify it under
+ the terms of the GNU Affero General Public License, version 3 only, as
+ published by the Free Software Foundation. The full text is in
+ /usr/share/common-licenses/AGPL-3 on systems that carry it, and at
+ https://www.gnu.org/licenses/agpl-3.0.html.
+
+Files: opt/conch-desktop/*
+Copyright: the Electron and Chromium authors, and the authors of the
+ libraries linked into them
+License: see the files LICENSE and LICENSES.chromium.html in
+ /opt/conch-desktop/, which are shipped unchanged.

@@ -427,19 +427,19 @@ test.describe('with LiveKit', () => {
     await voiceRegion(b.page).getByRole('button', { name: 'Join voice' }).tap();
     await expect(voiceRegion(b.page)).toContainText(`Connected in #${bChannel}`, { timeout: 30_000 });
     const inVoice = voiceRegion(b.page).getByRole('list', { name: 'In voice' });
-    await expect(inVoice).toContainText('You', { timeout: 15_000 });
+    await expect(inVoice).toContainText(bea.name, { timeout: 15_000 });
     // B's own count rises when B's person joins, so the silence about A
     // below means something.
     await showView(b.page, 'Channels');
     await expect(voiceMarks(b.page)).toHaveText(['1'], { timeout: 15_000 });
     await expect(voiceMarks(b.page).first()).toHaveAccessibleName('1 in voice');
-    // The channel list names bea alone, as You, under B's channel (issue
+    // The channel list names bea alone, by her own name, under B's channel (issue
     // #1103); the people of A's room are named under nothing.
     await expect(namedInList(b.page)).toHaveCount(1);
-    await expect(namedInList(b.page).getByRole('listitem')).toHaveText(['You']);
+    await expect(namedInList(b.page).getByRole('listitem')).toHaveText([bea.name]);
     await showView(b.page, 'Voice');
 
-    // The roster calls its reader "You". alice is in A's room all the while,
+    // The roster calls its reader by her own name. alice is in A's room all the while,
     // as the operator reads it: what B does not see is there to be seen.
     const aliceInVoice = async () => {
       const presence = (await must(api, "A's presence", vw.operator, 'GET', `/v1/channels/${vw.channel}/voice`)) as { rooms: { participants: { principal_id: number }[] }[] };
@@ -471,9 +471,9 @@ test.describe('with LiveKit', () => {
 
     await showView(b.page, 'Voice');
     await voiceRegion(b.page).getByRole('button', { name: 'Join voice' }).tap();
-    await expect(voiceRegion(b.page).getByRole('list', { name: 'In voice' })).toContainText('You', { timeout: 15_000 });
+    await expect(voiceRegion(b.page).getByRole('list', { name: 'In voice' })).toContainText(bea.name, { timeout: 15_000 });
     await dropSockets(b.page);
-    await expect(voiceRegion(b.page).getByRole('list', { name: 'In voice' })).toContainText('You', { timeout: 15_000 });
+    await expect(voiceRegion(b.page).getByRole('list', { name: 'In voice' })).toContainText(bea.name, { timeout: 15_000 });
     expect(await aliceInVoice(), 'alice is still in A\'s voice room').toBe(true);
     await expectNothingOf(b.page, traffic, markersOfA, 'after a reconnect');
     expectOnlyOwn(occupancy, bIds, aIds, 'after a reconnect', idsInRoomOfA);

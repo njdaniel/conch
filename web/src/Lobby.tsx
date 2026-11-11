@@ -1,5 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
 import { ChannelList } from './ChannelList';
+import { ChannelNav } from './ChannelNav';
+import { GroupsPanel } from './ChannelGroups';
+import { visualOrder } from './arrangement';
+import { useArrangement } from './useArrangement';
 import type { SettingsChange } from './ChannelSettingsAsk';
 import type { InVoice } from './voice/useOccupancy';
 import { headingId } from './Conversation';
@@ -74,6 +78,8 @@ export function Lobby({
   newChannel,
   canRename,
   renderRename,
+  canSetTopic,
+  renderTopic,
   canManage,
   renderSettings,
   onInviteTo,
@@ -81,15 +87,19 @@ export function Lobby({
   onUnauthorized,
   onAddPerson,
   account,
+  appearance,
   signIns,
   report,
   onOpen,
+  onBrowse,
+  directoryTick = 0,
   onRetry,
   onSignOut,
   onSignOutEverywhere,
   signOutProblem,
   passwordSet = false,
   banner,
+  band,
   visit,
   admin,
   onSettingsOpen,
@@ -124,10 +134,16 @@ export function Lobby({
   // who may not make one.
   readonly newChannel?: ReactNode;
   // Per-channel actions in each row's ⋯ menu (issues #1135, #1095): who may
-  // rename which channel, the rename form for one, the opener of the invite
-  // panel, and the channel-removal handler after a Leave succeeds.
+  // rename or set the topic of which channel, their forms, the opener of the
+  // invite panel, and the channel-removal handler after a Leave succeeds.
   readonly canRename?: (channel: ChannelV0) => boolean;
   readonly renderRename?: (channel: ChannelV0, close: () => void) => ReactNode;
+  // Whether this viewer may set that channel's topic (an operator, or its
+  // manager); absent, nobody. The server still decides.
+  readonly canSetTopic?: (channel: ChannelV0) => boolean;
+  // The set-topic form for a channel, shown in place under its row; `close`
+  // hides it and returns focus to the row's ⋯.
+  readonly renderTopic?: (channel: ChannelV0, close: () => void) => ReactNode;
   readonly canManage?: boolean;
   readonly renderSettings?: (channel: ChannelV0, change: SettingsChange, close: () => void) => ReactNode;
   readonly onInviteTo?: (channel: ChannelV0) => void;
@@ -138,6 +154,7 @@ export function Lobby({
   readonly onAddPerson?: () => void;
   // The caller's standing and own account settings, in Settings.
   readonly account?: ReactNode;
+  readonly appearance?: ReactNode;
   // "Your sign-ins" (issue #496), in Settings. Ending this browser's own
   // sign-in is signing out, so the section is handed endThis, which asks the
   // sign-out's question.
@@ -146,6 +163,11 @@ export function Lobby({
   // again where the page says it cannot reach the server.
   readonly report?: ReactNode;
   readonly onOpen: (channel: string) => void;
+  // The quick switcher's "Join" rows: show that public channel's directory row.
+  // Absent for a viewer with no directory.
+  readonly onBrowse?: (channel: string) => void;
+  // Changes when the directory or the viewer's permissions did (issue #1492).
+  readonly directoryTick?: number;
   readonly onRetry: () => void;
   readonly onSignOut: () => void;
   // Sign out everywhere (issue #439), and why it last failed, if it did.
@@ -157,6 +179,9 @@ export function Lobby({
   // Shown above the conversation: a guest's visit, or what signing in from
   // an invite did not do (issue #713).
   readonly banner?: ReactNode;
+  // A band across the page under the top bar, on every phone view (Preview as
+  // member, issue #1517); the page has none otherwise.
+  readonly band?: ReactNode;
   // For a temporary guest, what Settings says in place of the sign-outs:
   // a visit ends with End visit, in the banner.
   readonly visit?: ReactNode;
@@ -183,6 +208,9 @@ export function Lobby({
   // a time. All of them stay mounted, so a switch only changes what is shown:
   // the draft, the log's place and the call are untouched.
   const phone = usePhone();
+  // The person's own favorites, groups and order (issue #1493).
+  const arranged = useArrangement(origin, me, channels.channels, channels.loaded);
+  const inVisualOrder = useMemo(() => visualOrder(arranged.arrangement, channels.channels), [arranged.arrangement, channels.channels]);
   useAppHeight(phone);
   // Until a view is chosen: Chat once a channel is open, Channels while the
   // list is loading, failed to load, or has nothing open to chat in.
@@ -345,9 +373,10 @@ export function Lobby({
     <JoiningSettings.Provider value={joining}>
     <SettingsOpen.Provider value={settingsOpen}>
     <AddPerson.Provider value={onAddPerson === undefined ? null : addPerson}>
-      <div ref={lobbyEl} className={phone ?`lobby phone view-${view}${live ? ' in-voice' : ''}` : 'lobby'}>
+      <div ref={lobbyEl} className={`${phone ? `lobby phone view-${view}${live ? ' in-voice' : ''}` : 'lobby'}${band === undefined ? '' : ' has-band'}`}>
         {/* While Settings is open the rest of the page is inert: the panel is
             modal, and focus cannot wander behind its backdrop. */}
+        <div className="top-group" inert={band !== undefined && (settingsOpen || asking)}>
         <header className="topbar" inert={settingsOpen || asking}>
           <h1 className="brand">Conch</h1>
           <div role="status" aria-label="Status" className="status">
@@ -390,12 +419,41 @@ export function Lobby({
             </button>
           </div>
         </header>
+        {band}
+        </div>
         <div className={panelOpen ? 'areas' : 'areas side-closed'} inert={settingsOpen || asking}>
-          <nav aria-label="Channels" className="channels">
+          {/* The switcher's entry is above the Channels navigation, not in it: that holds channel controls only. */}
+          <div className="channels">
+            {channels.loaded ? (
+            <ChannelNav
+              channels={inVisualOrder}
+              unread={unread}
+              selected={channels.selected}
+              me={me}
+              refresh={directoryTick}
+              onOpen={(name) => {
+                onOpen(name);
+                if (phone) {
+                  toHeading.current = true;
+                  setView('chat');
+                }
+              }}
+              {...(onBrowse === undefined
+                ? {}
+                : {
+                    onBrowse: (name: string) => {
+                      onBrowse(name);
+                      if (phone) setView('channels');
+                    },
+                  })}
+            />
+            ) : null}
+          <nav aria-label="Channels">
             <h2>Channels</h2>
             {channels.loaded ? (
               <>
                 <ChannelList
+                  {...(visit === undefined ? { arrangement: arranged } : {})}
                   channels={channels.channels}
                   selected={channels.selected}
                   unread={unread}
@@ -405,6 +463,8 @@ export function Lobby({
                   empty={newChannel === null || newChannel === undefined ? undefined : 'No channels yet'}
                   {...(canRename === undefined ? {} : { canRename })}
                   {...(renderRename === undefined ? {} : { renderRename })}
+                  {...(canSetTopic === undefined ? {} : { canSetTopic })}
+                  {...(renderTopic === undefined ? {} : { renderTopic })}
                   {...(canManage === undefined ? {} : { canManage })}
                   {...(renderSettings === undefined ? {} : { renderSettings })}
                   {...(onInviteTo === undefined ? {} : { onInvite: onInviteTo })}
@@ -441,6 +501,8 @@ export function Lobby({
               <p className="empty">Loading channels…</p>
             )}
           </nav>
+            {channels.loaded && visit === undefined && channels.channels.length > 0 ? <GroupsPanel controls={arranged} /> : null}
+          </div>
           <main className="centre">
             <div ref={setStage} className="stage" />
             <section ref={conversationEl} aria-label="Conversation" className="conversation">
@@ -541,6 +603,7 @@ export function Lobby({
               setConfirming('here');
             })}
           </section>
+          {appearance}
           {admin === undefined || admin === null ? null : (
             <section aria-label="Administration" className="drawer-section">
               {admin}

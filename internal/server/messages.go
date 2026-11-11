@@ -415,6 +415,10 @@ func messageV2FromStore(message store.Message) schema.MessageV2 {
 		m.Audience = &a
 	}
 	m.ThreadRootID = message.ThreadRootID
+	// The tombstone (docs/design/moderation.md §7.3): the store already
+	// projected the fixed body and dropped payload and edit time. v0 and v1
+	// have no marker and serve the fixed body alone.
+	m.Removed = message.Removed
 	if message.GuestAuthor != nil {
 		a := *message.GuestAuthor
 		m.GuestAuthor = &a
@@ -701,6 +705,12 @@ func (s *Server) postReply(w http.ResponseWriter, r *http.Request, req schema.Po
 	if err != nil {
 		slog.ErrorContext(ctx, "messages: find thread root failed", "error", err)
 		writeInternalError(w)
+		return
+	}
+	if root.Removed {
+		// A removed root stays readable as a tombstone but takes no new
+		// reply (moderation.md §10.1, Q3): the answer is the unknown root's.
+		writeThreadNotFound(w)
 		return
 	}
 

@@ -8,7 +8,9 @@
 // clipboard or the Notification API, and nothing but browser/credentials.ts
 // touches the credential's storage.
 import type { ComponentType, ReactNode } from 'react';
+import type { VoiceControlTalkMode } from '../schema/generated';
 import type { Call, OperationId } from './operations';
+import type { ChannelName, CompanionEvent, CompanionGrantResult, NativeVoiceDevicesResult, NativeVoiceView, VoiceCommandResult, VoiceDeviceKey, VoiceKeyDevicesResult, VoiceSaveResult, VoiceTalkBindingResult } from './desktop/bridge';
 
 // HttpTransport makes the requests of conchd that the operation table names.
 // Each takes a call (an operation id with its path values and query) and
@@ -102,7 +104,7 @@ export interface Services {
     supported(): boolean;
     permission(): NotificationPermissionState;
     request(): Promise<NotificationPermissionState>;
-    show(title: string, body: string, tag: string): NativeNotification;
+    show(title: string, body: string, tag: string, channel: string): NativeNotification;
   };
   // The attributes of a link that leaves the app.
   externalLink: { readonly target?: '_blank'; readonly rel: string };
@@ -111,12 +113,77 @@ export interface Services {
   // Absent in the browser, which saves through a download link. The page names
   // the file by id and never a path.
   saveFile?: (id: number) => Promise<'saved' | 'cancelled' | 'failed' | 'unauthorized'>;
+  // Hands a conch:// invite link to the desktop app installed on this
+  // machine, through the browser's own link handling (issue #1592). Only the
+  // browser has it: the desktop app is the thing being opened, and has no
+  // use for the button. It navigates nothing by itself; a person's click
+  // calls it, and a machine with no handler simply does nothing.
+  openDesktopApp?(link: string): void;
   // Whether this client may publish the person's own voice. Only the browser
   // may: the desktop renderer never holds the voice grant.
   browserVoice: boolean;
   // The desktop app's own version, shown beside the server's (issue #946).
   // Only the desktop shell has one; null when it cannot say.
   appVersion?(): Promise<string | null>;
+}
+
+// The desktop's screen companion (issue #1581, D4-04 of #772), over the
+// bridge of #1579: p<id>.screen, the renderer's own LiveKit participant, which
+// publishes the screen and watches others' shares. Main asks conchd for its
+// grant only on the person's act and hands over the grant alone.
+export interface NativeCompanion {
+  // The grant for the voice destination. Call it in the person's click or key
+  // handler; a refusal is a typed reason, never a thrown string.
+  grant(request: { readonly channel: ChannelName }): Promise<CompanionGrantResult>;
+  // Arms the share allowance (issue #1580): call it synchronously at the very
+  // start of the Share click, before anything else, so main takes the click
+  // for the grant and the capture that follow. One arm lets one grant and one
+  // capture follow; a retry needs a new click. Answers whether main armed
+  // anything; never rejects.
+  shareArm(): Promise<boolean>;
+  // Removes the live companion, if there is one, and says whether there was.
+  end(): Promise<boolean>;
+  // Main's word (the conch:companion channel) that it ended the companion:
+  // leave, helper loss, renewal, lock, suspend, sign-out, crash. Returns the
+  // function that stops listening.
+  onEnd(listener: (event: CompanionEvent) => void): () => void;
+}
+
+// What a refused or failed native-voice call comes to: the bridge's own
+// refusal vocabulary, never a thrown string.
+export type NativeVoiceError = Extract<VoiceCommandResult, { readonly ok: false }>['error'];
+
+// A call that answers with the new view (join, leave, retry).
+export type NativeVoiceOutcome =
+  | { readonly ok: true; readonly view: NativeVoiceView }
+  | { readonly ok: false; readonly error: NativeVoiceError };
+
+// The native voice of the desktop shell (issue #1375, D3-4 of #771). The
+// helper, not the page, owns the microphone and push-to-talk: the store only
+// shows the helper's confirmed state and asks main to act. It is a
+// useSyncExternalStore source: snapshot() is stable until the view changes.
+// Present only where services.browserVoice is false and a native voice
+// exists; the browser's platform has none.
+export interface NativeVoice {
+  readonly snapshot: () => NativeVoiceView;
+  readonly subscribe: (listener: () => void) => () => void;
+  join(request: { readonly channel: ChannelName; readonly muted?: boolean; readonly deafened?: boolean }): Promise<NativeVoiceOutcome>;
+  leave(): Promise<NativeVoiceOutcome>;
+  retry(): Promise<NativeVoiceOutcome>;
+  setMute(muted: boolean): Promise<VoiceCommandResult>;
+  setDeafen(deafened: boolean): Promise<VoiceCommandResult>;
+  setDevices(devices: { readonly input?: string; readonly output?: string }): Promise<VoiceCommandResult>;
+  setTalkMode(mode: VoiceControlTalkMode): Promise<VoiceCommandResult>;
+  // The helper's one-shot runs (issue #1379, D3-8): the device list, and a
+  // choice kept for the next session (`config set`). Neither changes a live
+  // session; setDevices and setTalkMode do.
+  devices(): Promise<NativeVoiceDevicesResult>;
+  saveDevice(request: { readonly key: VoiceDeviceKey; readonly value: string }): Promise<VoiceSaveResult>;
+  // The talk-key setup (issue #1382, D3-11). Absent when the bridge has none.
+  readonly keyDevices?: () => Promise<VoiceKeyDevicesResult>;
+  readonly saveTalkBinding?: (request: { readonly deviceId: string; readonly code: number }) => Promise<VoiceTalkBindingResult>;
+  // The screen companion (issue #1581). Absent when the bridge has none.
+  readonly companion?: NativeCompanion;
 }
 
 export interface Platform {
@@ -129,4 +196,6 @@ export interface Platform {
   readonly sockets: SocketTransport;
   readonly credentials: CredentialStore;
   readonly services: Services;
+  // Native voice, where the place has one (the desktop shell). Absent in the browser.
+  readonly nativeVoice?: NativeVoice;
 }

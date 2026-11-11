@@ -34,7 +34,10 @@ const testdata = resolve(import.meta.dirname, '../../../pkg/schema/testdata');
 const fixture = (name: string): string => JSON.stringify(JSON.parse(readFileSync(join(testdata, `${name}.json`), 'utf8')) as unknown);
 const MESSAGE = fixture('message-v2');
 const HEARTBEAT = fixture('heartbeat-v1');
-const PRESENCE = fixture('voice-presence-v1');
+// The voice feed is v2 presence (voice-multi-share.md §2.2, §7.4); a v1
+// document is not one of its frames.
+const PRESENCE = fixture('voice-presence-v2');
+const PRESENCE_V1 = fixture('voice-presence-v1');
 const OCCUPANCY = fixture('voice-occupancy-v1');
 const ROSTER = fixture('session-roster-v1');
 
@@ -167,7 +170,9 @@ describe('what the renderer may ask for', () => {
   it('is turned into the feed’s fixed route on the selected origin, with a query main builds', () => {
     expect(feedUrl('http://127.0.0.1:8080', messages)).toBe('ws://127.0.0.1:8080/v2/ws?channel=general&after=4&heartbeat=1');
     expect(feedUrl('https://chat.example', { kind: 'events', channel: 'a b&c=d', session: 9 })).toBe('wss://chat.example/v1/events/ws?channel=a+b%26c%3Dd&session=9');
-    expect(feedUrl('https://chat.example', { kind: 'voice', channel: 'general' })).toBe('wss://chat.example/v1/voice/ws?channel=general');
+    // The voice feed always asks for v2 presence, which is what the web
+    // client reads.
+    expect(feedUrl('https://chat.example', { kind: 'voice', channel: 'general' })).toBe('wss://chat.example/v1/voice/ws?channel=general&schema=conch.voice_presence.v2');
     expect(feedUrl('https://chat.example', occupancy)).toBe('wss://chat.example/v1/voice/occupancy/ws');
   });
 });
@@ -207,6 +212,23 @@ describe('the socket main opens', () => {
   });
 });
 
+describe('the voice feed', () => {
+  it('asks conchd for v2 presence and sends a v2 frame on to the page; a v1 one is dropped and counted', () => {
+    const r = rig();
+    expect(r.feeds.subscribe(1, 1, { kind: 'voice', channel: 'general' })).toBe(true);
+    const [socket] = r.sockets;
+    expect(new URL(socket?.url ?? '').searchParams.get('schema')).toBe('conch.voice_presence.v2');
+    socket?.on.open();
+    socket?.on.frame(PRESENCE_V1);
+    expect(r.feeds.invalid).toBe(1);
+    socket?.on.frame(PRESENCE);
+    expect(r.events).toEqual([
+      [1, { id: 1, type: 'open' }],
+      [1, { id: 1, type: 'frames', frames: [PRESENCE] }],
+    ]);
+  });
+});
+
 describe('frames', () => {
   it.each<[FeedRequest['kind'], string, boolean]>([
     ['messages', MESSAGE, true],
@@ -218,6 +240,7 @@ describe('frames', () => {
     ['events', HEARTBEAT, true],
     ['events', OCCUPANCY, false],
     ['voice', PRESENCE, true],
+    ['voice', PRESENCE_V1, false],
     ['voice', MESSAGE, false],
     ['occupancy', OCCUPANCY, true],
     ['occupancy', HEARTBEAT, false],
@@ -226,6 +249,20 @@ describe('frames', () => {
     ['events', '{"schema":"conch.unknown.v1"}', false],
   ])('a %s feed takes %s: %s', (kind, frame, valid) => {
     expect(validFrame(kind, frame)).toBe(valid);
+  });
+
+  // A server newer than the app adds an optional field (issue #1534): main
+  // passes the frame on, and the renderer's parser drops the key.
+  it.each<[FeedRequest['kind'], string]>([
+    ['messages', MESSAGE],
+    ['messages', HEARTBEAT],
+    ['events', ROSTER],
+    ['events', HEARTBEAT],
+    ['voice', PRESENCE],
+    ['occupancy', OCCUPANCY],
+  ])('a %s feed takes %s with a key added later', (kind, frame) => {
+    const later = JSON.stringify({ ...(JSON.parse(frame) as object), added_later: true });
+    expect(validFrame(kind, later)).toBe(true);
   });
 
   it('sends a valid frame on, and drops and counts what is not one: not text, too large, not its feed’s, not JSON', () => {

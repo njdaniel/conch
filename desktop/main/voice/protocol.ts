@@ -108,28 +108,33 @@ function refuse(code: VoiceControlErrorCode, detail: string): Refusal {
 
 // One decoded JSON value. Numbers keep their text, so an integer field is
 // read as Go's encoding/json reads an int64 (no fraction, no exponent).
-type Json =
+export type Json =
   | { readonly t: 'str'; readonly v: string }
   | { readonly t: 'num'; readonly raw: string }
   | { readonly t: 'bool'; readonly v: boolean }
   | { readonly t: 'null' }
   | { readonly t: 'arr'; readonly items: readonly Json[] }
-  | { readonly t: 'obj' };
+  // start and end are the object's span in the text, for a reader that reads
+  // the object again under rules of its own (the device list's devices).
+  | { readonly t: 'obj'; readonly start: number; readonly end: number };
 
-type Fields = ReadonlyMap<string, Json>;
+export type Fields = ReadonlyMap<string, Json>;
 
 const utf8 = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
 
-class Malformed extends Error {}
+export class Malformed extends Error {}
+// Anything but white space after the object: a second value, for a reader
+// that tells it from a malformed one.
+export class Trailing extends Malformed {}
 
 // A strict JSON reader over one line: exactly RFC 8259, the whitespace Go
 // allows, and Go's one extra refusal of a \u escape of a surrogate that is not
 // half of a pair (hasLoneSurrogateEscape). Duplicate keys are refused at the
 // top level only, as decodeVoiceControlObject does.
-class Reader {
+export class Reader {
   private at = 0;
 
-  constructor(private readonly text: string) {}
+  constructor(readonly text: string) {}
 
   object(): Map<string, Json> {
     this.ws();
@@ -157,7 +162,7 @@ class Reader {
       }
     }
     this.ws();
-    if (this.at !== this.text.length) throw new Malformed();
+    if (this.at !== this.text.length) throw new Trailing();
     return fields;
   }
 
@@ -175,9 +180,11 @@ class Reader {
     switch (c) {
       case '"':
         return { t: 'str', v: this.string() };
-      case '{':
+      case '{': {
+        const start = this.at;
         this.skipObject();
-        return { t: 'obj' };
+        return { t: 'obj', start, end: this.at };
+      }
       case '[':
         return { t: 'arr', items: this.array() };
       case 't':
@@ -314,8 +321,8 @@ class Reader {
   }
 }
 
-class Duplicate extends Error {}
-class LoneSurrogate extends Error {}
+export class Duplicate extends Error {}
+export class LoneSurrogate extends Error {}
 
 // decodeObject applies the framing rules shared by every reader
 // (decodeVoiceControlObject) and returns the object's fields.
@@ -836,7 +843,9 @@ export function validChannel(channel: string): boolean {
   );
 }
 
-function validDeviceName(name: string): boolean {
+// validDeviceName is the device-name rule the encoder applies; the IPC layer
+// uses it too, so an invalid name never enters the service's state.
+export function validDeviceName(name: string): boolean {
   return (
     name !== '' &&
     Buffer.byteLength(name, 'utf8') <= VOICE_DEVICES_MAX_NAME_BYTES &&

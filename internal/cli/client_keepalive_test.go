@@ -53,7 +53,7 @@ func keepAliveReaders() map[string]func(*Client, context.Context) error {
 			return c.SubscribeEvents(ctx, "general", 0, EventHandler{})
 		},
 		"SubscribeVoicePresence": func(c *Client, ctx context.Context) error {
-			return c.SubscribeVoicePresence(ctx, "general", func(schema.VoicePresenceV1) error { return nil })
+			return c.SubscribeVoicePresence(ctx, "general", func(schema.VoicePresenceV2) error { return nil })
 		},
 	}
 }

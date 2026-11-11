@@ -46,6 +46,22 @@
 //     bound: 2 s for a socket, one voice poller pass plus a room rotation for
 //     LiveKit (read from the server's source). Then the revoked must stay
 //     out: a kept ticket and a kept join grant no longer work.
+//   - Moderation (issue #853, moderation.go, modmessages.go, modguests.go): a
+//     group of its own, M, with a manager, plain members, an observer, a
+//     second channel the targets keep and a net. A member removed and a member
+//     banned each hold every socket variant on two credentials, the occupancy
+//     socket, a LiveKit participant and a join grant kept from before; each is
+//     timed to the revocation bounds, then refused every route and socket as
+//     for a ghost, on both credentials, while the unrelated channel stays
+//     good. Seeded residual membership and net seats are invisible, cleaned
+//     by a repeat ban and by the unban (cleanup first), and stay absent; a
+//     ban row beside a live membership is the voice poller's and the repeat
+//     ban's; session requests race a ban (both sides of the final voice check).
+//     Message removal: who may remove what, each socket family's tombstone, the
+//     scoped audience's non-disclosure, every history, thread, search, file
+//     and reply surface, reconnects on another credential, and replaying
+//     sockets against posting and removing in threes. The guests: a removal
+//     before or after a visit's bound, a ban of a guest and the next visit.
 //   - The guests (issue #717, guests.go and the files it names): a third
 //     part of the world, the plaza, open at the bare address, where members
 //     who made accounts there leave private markers before any guest comes.
@@ -326,6 +342,13 @@ func run(h *harness) (summary, error) {
 	}
 	sum.timings = append(sum.timings, gt...)
 
+	// Moderation (issue #853, docs/design/moderation.md §9): membership
+	// removal, bans, residual membership, the ban's race with the final voice
+	// check, message removal and the guests', on a real server.
+	if err := w.moderationPhase(sum.bounds, bsock); err != nil {
+		return sum, fmt.Errorf("moderation: %w", err)
+	}
+
 	// The restricted operator (issue #1015, ADR-014 design §7.7 item 1):
 	// the owner cuts the operator column through the real PUT, the
 	// restricted operator's rows run, and the column is given back.
@@ -342,6 +365,14 @@ func run(h *harness) (summary, error) {
 		return sum, fmt.Errorf("the personal preset: %w", err)
 	}
 	h.say("ok   personal preset: %d rows; with personal applied through PUT /v1/permissions a member's link (v1 and v2) was refused invite_not_allowed naming make_member_links and its channel creation permission_denied naming the permission of the visibility; the directory narrowed to the people a member may know (bob's and zed's names and ids in none of the routes alice reads, carol known through her link, the authors route naming the departed author alone), conch.directory_changed.v1 reached exactly the viewers whose answer changed; group gave link and channel creation back, widened the directory and signalled it", pn)
+
+	// Preview as member (issue #1516, design docs/design/permission-preview.md
+	// section 10 P3): an operator reads as alice and bob, under both presets.
+	vn, err := w.previewPhase(table)
+	if err != nil {
+		return sum, fmt.Errorf("preview as member: %w", err)
+	}
+	h.say("ok   preview as member: %d requests; with Conch-Preview-As an operator's five reads were alice's and bob's own bytes under group and personal (hiding off: the directory lists everyone and never the other's room, whose members are the ghost's 404; hiding on: the owner and herself), the other's id and name and room in none of them and nothing beyond what the operator can read; every other route of the table (sockets, ws-ticket, hook and the exempt routes) answered the same 403 preview_read_only with nothing written; owner protection, agents, guests and the restricted operator held; the audit names the administrator and never the target", vn)
 
 	// B's sockets have been open through all of it: a second control, and
 	// every frame since they opened is scanned again.

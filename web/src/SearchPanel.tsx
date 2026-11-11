@@ -1,3 +1,4 @@
+import { useTombstones } from './Moderation';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import * as api from './api';
 import { Message } from './Conversation';
@@ -21,6 +22,13 @@ export function SearchPanel({ channelId, channel, live, people, nets, viewer, on
   readonly onMissing: (channel: number) => void;
   readonly onUnauthorized?: () => void;
 }) {
+  const { removed, safe } = useTombstones(channelId);
+  const safeNow = useRef(safe);
+  safeNow.current = safe;
+  useEffect(() => {
+    setResults((old) => old.map((m) => removed.get(m.id) ?? m));
+    setContext((old) => old === null ? null : { ...old, messages: old.messages.map((m) => removed.get(m.id) ?? m) });
+  }, [removed]);
   const [draft, setDraft] = useState('');
   const [query, setQuery] = useState('');
   const [results, setResults] = useState<readonly MessageV2[]>([]);
@@ -69,7 +77,7 @@ export function SearchPanel({ channelId, channel, live, people, nets, viewer, on
     }
     setQuery(words);
     setResults((previous) => {
-      const combined = before === undefined ? result.value.messages : [...previous, ...result.value.messages];
+      const combined = before === undefined ? result.value.messages.map(safeNow.current) : [...previous, ...result.value.messages.map(safeNow.current)];
       return [...new Map(combined.map((message) => [message.id, message])).values()].sort((a, b) => b.id - a.id);
     });
     setNextBefore(result.value.next_before);
@@ -121,7 +129,7 @@ export function SearchPanel({ channelId, channel, live, people, nets, viewer, on
       return;
     }
     const messages = [...new Map([...before.value, ...after.value].map((message) => [message.id, message])).values()].sort((a, b) => a.id - b.id);
-    setContext({ id, messages, error: false });
+    setContext({ id, messages: messages.map(safeNow.current), error: false });
   }
 
   const messageProps = { channel, people, nets, viewer, sent: false, cont: false, onUnauthorized };

@@ -6,12 +6,24 @@
 //! connection is doing. When the socket ends it is opened again after a wait that doubles
 //! from one second to thirty. A refusal that no retry can change ends the task: the session
 //! request meets the same refusal, and the connection policy stops the client with the
-//! reason.
+//! reason. One end is news in itself: `conchd` closing the socket for a moderator's
+//! voice-only removal (`voice_removed`, issue #1409), which the task passes on as
+//! [`Presence::VoiceRemoved`] and then stops, since the session stops on it.
 
 use std::time::Duration;
 
-use conch_voice_api::{Client, Error as ApiError, PresenceEvent, VoicePresenceV1};
+use conch_voice_api::{Client, Error as ApiError, PresenceEvent, StreamEnd, VoicePresenceV2};
 use tokio::sync::mpsc;
+
+/// What the presence task tells the session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Presence {
+    /// What is known about the room changed.
+    Roster(Roster),
+    /// A moderator removed this person from voice only. They are still a member, so
+    /// `conchd` would grant the next session; the client stops instead of asking.
+    VoiceRemoved,
+}
 
 /// One participant of the channel's room, as shown.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -41,7 +53,7 @@ pub enum Roster {
 }
 
 impl Roster {
-    fn from_snapshot(snapshot: &VoicePresenceV1) -> Self {
+    fn from_snapshot(snapshot: &VoicePresenceV2) -> Self {
         // V4 shows the channel's own room and no other (nets are V5).
         let participants = snapshot
             .channel_room()
@@ -82,14 +94,18 @@ impl Default for PresenceTimings {
     }
 }
 
-/// Starts the task that follows `channel`'s presence. Each change of the roster is sent
-/// once; the task ends when the receiver is dropped.
+/// Starts the task that follows `channel`'s presence, read as v2 (several sharers are
+/// listed whole; the helper shows no share text, so it keeps only who is there and who is
+/// talking).
+///
+/// Each change of the roster is sent once; the task ends when the receiver is dropped, or after it has said
+/// [`Presence::VoiceRemoved`].
 #[must_use]
 pub fn spawn(
     client: Client,
     channel: String,
     timings: PresenceTimings,
-) -> mpsc::UnboundedReceiver<Roster> {
+) -> mpsc::UnboundedReceiver<Presence> {
     let (rosters, receiver) = mpsc::unbounded_channel();
     tokio::spawn(follow(client, channel, timings, rosters));
     receiver
@@ -113,7 +129,7 @@ async fn follow(
     client: Client,
     channel: String,
     timings: PresenceTimings,
-    rosters: mpsc::UnboundedSender<Roster>,
+    rosters: mpsc::UnboundedSender<Presence>,
 ) {
     let mut last: Option<Roster> = None;
     let mut wait = timings.first_wait;
@@ -123,7 +139,7 @@ async fn follow(
                 return true;
             }
             last = Some(roster.clone());
-            rosters.send(roster).is_ok()
+            rosters.send(Presence::Roster(roster)).is_ok()
         };
         match client.presence_stream(&channel).await {
             Ok(mut stream) => loop {
@@ -137,6 +153,14 @@ async fn follow(
                         if !say(Roster::from_snapshot(&snapshot)) {
                             return;
                         }
+                    }
+                    Ok(PresenceEvent::Ended(StreamEnd::VoiceRemoved)) => {
+                        // Not a loss of the socket to be made good: the session stops on
+                        // this, and nothing here subscribes again on its own.
+                        log::debug!("the presence socket ended: removed from voice");
+                        say(Roster::Unknown);
+                        let _ = rosters.send(Presence::VoiceRemoved);
+                        return;
                     }
                     Ok(PresenceEvent::Ended(end)) => {
                         log::debug!("the presence socket ended: {end:?}");
@@ -163,5 +187,44 @@ async fn follow(
             () = rosters.closed() => return,
         }
         wait = wait.saturating_mul(2).min(timings.longest_wait);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The v2 document of two sharers, `pkg/schema/testdata/voice-presence-v2.json`'s
+    /// room: the roster lists everyone, sharers or not, by id, and is the same as it
+    /// would be with nobody sharing.
+    #[test]
+    fn a_roster_from_a_room_with_two_sharers_lists_everyone() {
+        let text = include_str!("../../../pkg/schema/testdata/voice-presence-v2.json");
+        let snapshot: VoicePresenceV2 = serde_json::from_str(text).unwrap();
+        snapshot.validate().unwrap();
+        assert_eq!(
+            Roster::from_snapshot(&snapshot),
+            Roster::Known {
+                configured: true,
+                available: true,
+                participants: vec![
+                    Participant {
+                        principal_id: 3,
+                        can_publish: true,
+                        transmitting: false
+                    },
+                    Participant {
+                        principal_id: 7,
+                        can_publish: true,
+                        transmitting: true
+                    },
+                    Participant {
+                        principal_id: 9,
+                        can_publish: true,
+                        transmitting: false
+                    },
+                ],
+            }
+        );
     }
 }

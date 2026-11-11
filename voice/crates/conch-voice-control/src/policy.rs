@@ -54,6 +54,10 @@ pub enum Outcome {
     DuplicateIdentity,
     /// Disconnected because `conchd` removed this participant from the room by name.
     ParticipantRemoved,
+    /// `conchd`'s presence socket said a moderator removed this person from voice only
+    /// (close 1008 `voice_removed`, issue #1409). They are still a member, so `conchd` would
+    /// grant the next session: the client must stop rather than ask.
+    VoiceRemoved,
     /// Disconnected because the connection was lost and the SDK gave up resuming it.
     ConnectionLost,
     /// Disconnected because LiveKit is shutting down.
@@ -107,6 +111,11 @@ impl Outcome {
             Outcome::VoiceNotConfigured => Rule::Stop("voice is not configured on this server"),
             Outcome::DuplicateIdentity => Rule::Stop(
                 "this account joined voice from somewhere else, so this client has stopped",
+            ),
+            // Still a member, so asking `conchd` would only put this client back in the room
+            // the moderator took it out of. Joining again is the person's own decision.
+            Outcome::VoiceRemoved => Rule::Stop(
+                "removed from voice by a moderator; you are still a member of the channel, and may join again",
             ),
             // The room is gone or this client was put out of it. Either way `conchd` decides
             // what happens next: a new session for the channel's new room, or a refusal that
@@ -255,12 +264,15 @@ mod tests {
                 "this account joined voice from somewhere else, so this client has stopped",
             ),
             Outcome::ParticipantRemoved => First::AskNow,
+            Outcome::VoiceRemoved => First::Stop(
+                "removed from voice by a moderator; you are still a member of the channel, and may join again",
+            ),
             Outcome::ConnectionLost => First::BackOff,
             Outcome::ServerShutdown => First::BackOff,
         }
     }
 
-    const EVERY_OUTCOME: [Outcome; 13] = [
+    const EVERY_OUTCOME: [Outcome; 14] = [
         Outcome::NotSignedIn,
         Outcome::VoiceRequiresAuth,
         Outcome::NotAPerson,
@@ -272,6 +284,7 @@ mod tests {
         Outcome::RoomDeleted,
         Outcome::DuplicateIdentity,
         Outcome::ParticipantRemoved,
+        Outcome::VoiceRemoved,
         Outcome::ConnectionLost,
         Outcome::ServerShutdown,
     ];
@@ -310,7 +323,7 @@ mod tests {
                 }
             }
         }
-        assert_eq!(distinct.len(), 13);
+        assert_eq!(distinct.len(), 14);
     }
 
     #[test]
@@ -325,8 +338,9 @@ mod tests {
                 assert!(messages.insert(message), "{outcome:?} shares its message");
             }
         }
-        // 401, 400, 403, 404, 503 voice_not_configured, and a duplicate identity.
-        assert_eq!(stops, 6);
+        // 401, 400, 403, 404, 503 voice_not_configured, a duplicate identity, and a
+        // moderator's voice-only removal (issue #1409).
+        assert_eq!(stops, 7);
     }
 
     #[test]

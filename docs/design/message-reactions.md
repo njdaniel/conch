@@ -119,7 +119,7 @@ The five reaction routes are `accessAuthenticated` in `routes.go`; the two moder
 | `DELETE …/messages/{message_id}/reactions/{emoji}` | none → 200 `ReactionSummaryV1` | 400 `invalid_reaction`; 404 `message_not_found`; 403 `forbidden` for an agent without the audience permission (the same gate as `PUT`, so the two answer alike); 429; 400 `reactions_require_auth`. Removing a reaction one does not hold is a no-op that answers the summary. A monitor, a principal off the net, or a removed message gets 200: removing one's own mark never needs transmit rights. |
 | `GET …/messages/{message_id}/reactions` | → 200 `ReactionSummaryV1` (an empty `reactions` list when none) | 404 `message_not_found`; 400 `reactions_require_auth` |
 | `GET …/messages/{message_id}/reactions/{emoji}?after=<principal_id>&limit=<1..100>` | → 200 `ListReactorsResponseV1`, ordered by `principal_id` ascending; `next_after` present when there may be more | 400 `invalid_reaction`, 400 `invalid_request` (cursor, limit); 404 `message_not_found`. An emoji nobody used is an empty list, not an error. |
-| `GET /v2/channels/{channel}/reactions?messages=<id>[,<id>…]` | → 200 `ReactionSummariesResponseV1`: one summary per listed message that the caller may see **and** that has at least one reaction; ordered by `message_id` ascending | 400 `invalid_request` (more than `MaxReactionBatchMessages` = 100 ids, a non-positive or duplicate id, or none). An invisible, unknown or unreacted id is simply absent; the three are indistinguishable, and a client treats an absent id as an **empty summary**. |
+| `GET /v2/channels/{channel}/reactions?messages=<id>[,<id>…]` | → 200 `ReactionSummariesResponseV1`: one summary per listed message that the caller may see, ordered by `message_id` ascending; one with no reaction has `reactions: []` and the read's `as_of` | 400 `invalid_request` (more than `MaxReactionBatchMessages` = 100 ids, a non-positive or duplicate id, or none). An invisible, removed or unknown id is simply absent; the three are indistinguishable, and a client treats an absent id as an empty summary **without a timestamp** (it holds it unversioned, §8.2). |
 | `DELETE …/messages/{message_id}/reactions/{emoji}/{principal_id}` (moderation, §11.5) | none → 200 `ReactionSummaryV1` | class refusals (`channel_not_found` for a non-member manager or operator, `forbidden` for a plain member, the human-only refusal for an agent); 400 `invalid_reaction`; 404 `message_not_found` (the caller must be a member who can see the message, operators included); an absent reaction or unknown principal is an idempotent 200 that writes nothing |
 | `DELETE …/messages/{message_id}/reactors/{principal_id}` (moderation, §11.5: every reaction of one principal on the message) | none → 200 `ReactionSummaryV1` | the same |
 
@@ -239,8 +239,10 @@ type ReactionSummaryV1 struct {
 func (s ReactionSummaryV1) Validate() error
 
 // ReactionSummariesResponseV1 is the body of the batch read: one summary per
-// requested message the caller may see that has at least one reaction,
-// ordered by message_id. Always a JSON array.
+// requested message the caller may see, ordered by message_id, each with the
+// read's as_of; one with no reaction has "reactions": []. An invisible,
+// removed or unknown id is absent, and those three are indistinguishable.
+// Always a JSON array.
 type ReactionSummariesResponseV1 struct {
 	Summaries []ReactionSummaryV1 `json:"summaries"`
 }
@@ -434,7 +436,7 @@ Nothing is sent on `/v2/ws`, `/v1/ws` or `/v0/ws`: those carry message envelopes
 
 ### 8.2 Snapshot and replay
 
-There is no reaction replay. On connect or reconnect a client hydrates the messages it displays with one batch read (`GET /v2/channels/{channel}/reactions?messages=…`, up to 100 ids, which is one page of history), and does so again for each further page of history it loads. A requested id absent from the answer means an empty summary: the client clears whatever it showed for that message. The events socket sends no reaction frame on subscribe. This is the roster's model turned around: the roster is sent whole on connect because it is one document; reactions are one document per message, so the client names which it wants.
+There is no reaction replay. On connect or reconnect a client hydrates the messages it displays with one batch read (`GET /v2/channels/{channel}/reactions?messages=…`, up to 100 ids, which is one page of history), and does so again for each further page of history it loads. The answer names every requested message the reader can see, with `reactions: []` and the read's `as_of` for one that holds no reaction (#1435), so its state is ordered by `as_of` like any other and a delayed older write cannot resurrect a removed reaction. A requested id absent from the answer is invisible, removed or unknown, indistinguishable from each other: the client clears whatever it showed for that message and holds it unversioned until a confirming read. The events socket sends no reaction frame on subscribe. This is the roster's model turned around: the roster is sent whole on connect because it is one document; reactions are one document per message, so the client names which it wants.
 
 ### 8.3 Convergence rules for clients
 

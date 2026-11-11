@@ -6,10 +6,11 @@
 //
 // The first test needs no LiveKit: on the shared server, which has none, the
 // page says voice is not set up and asks for no device.
-import type { BrowserContextOptions, Locator, Page } from '@playwright/test';
+import type { Browser, BrowserContextOptions, Locator, Page } from '@playwright/test';
 import type { PostMessageRequestV2 } from '../src/schema/generated';
-import { channelButton, chooseMicrophone, conversation, credentialField, expect, expectFits, mainNav, messages, openChannel, phones, rememberPushToTalk, showView, signIn, statusLine, test } from './fixtures';
-import { dockerAvailable, startVoiceWorld, watchPage, type Member, type VoiceWorld, type Watch } from './voice-world';
+import { closeAll, channelButton, chooseMicrophone, conversation, credentialField, expect, expectFits, mainNav, messages, phones, rememberPushToTalk, showView, signIn, statusLine, test } from './fixtures';
+import { enter, expectClean as expectCleanPage, inbound, keepConnections } from './people';
+import { dockerAvailable, startVoiceWorld, watchPage, type Member, type VoiceWorld } from './voice-world';
 
 // The longest the roster may take to stop saying "transmitting" after the
 // first press since a join is released: see the test that uses it.
@@ -54,35 +55,9 @@ test('P3-F9c voice is not set up on a server without LiveKit, and the page asks 
   expect(await page.evaluate(() => (window as unknown as { deviceRequested: boolean }).deviceRequested)).toBe(false);
 });
 
-// Counts the audio bytes this page has received, from the peer connections the
-// SDK made. The wrapper is installed before the page's own scripts run.
-const countBytes = () => {
-  const w = window as unknown as { __pcs: RTCPeerConnection[] };
-  w.__pcs = [];
-  const Original = window.RTCPeerConnection;
-  const Wrapped = function (this: unknown, ...args: ConstructorParameters<typeof RTCPeerConnection>) {
-    const pc = new Original(...args);
-    w.__pcs.push(pc);
-    return pc;
-  } as unknown as typeof RTCPeerConnection;
-  Wrapped.prototype = Original.prototype;
-  Object.setPrototypeOf(Wrapped, Original);
-  window.RTCPeerConnection = Wrapped;
-};
-
-async function inboundAudioBytes(page: Page): Promise<number> {
-  return page.evaluate(async () => {
-    const w = window as unknown as { __pcs: RTCPeerConnection[] };
-    let total = 0;
-    for (const pc of w.__pcs) {
-      const stats = await pc.getStats();
-      stats.forEach((r: { type: string; kind?: string; bytesReceived?: number }) => {
-        if (r.type === 'inbound-rtp' && r.kind === 'audio') total += r.bytesReceived ?? 0;
-      });
-    }
-    return total;
-  });
-}
+// The audio bytes this page has received, from the peer connections the SDK
+// made (people.ts keeps them from before the page's own scripts run).
+const inboundAudioBytes = async (page: Page): Promise<number> => (await inbound(page)).audioBytes;
 
 async function delta(page: Page, ms: number): Promise<number> {
   const before = await inboundAudioBytes(page);
@@ -114,84 +89,14 @@ test.describe('with LiveKit', () => {
   // joins (issue #1244: one that never chose joins in the open microphone,
   // which transmits on the fake microphone's tone, and the tests that count
   // what a held key reports start from silence). 'unchosen' is a fresh browser.
-  async function person(browser: import('@playwright/test').Browser, who: 'alice' | 'bob' | 'carol' | Member, options?: BrowserContextOptions, before?: (page: Page) => void, mode: 'push to talk' | 'unchosen' = 'push to talk') {
-    const context = await browser.newContext(options);
-    if (mode === 'push to talk') await rememberPushToTalk(context);
-    const page = await context.newPage();
-    before?.(page);
-    const watch = await watchPage(page, vw);
-    await page.addInitScript(countBytes);
-    const m = typeof who === 'string' ? vw[who] : who;
-    await signIn(page, vw, m.token, m.name);
-    await openChannel(page, vw.channel);
-    return { context, page, watch, member: m };
+  function person(browser: Browser, who: 'alice' | 'bob' | 'carol' | Member, options?: BrowserContextOptions, before?: (page: Page) => void, mode: 'push to talk' | 'unchosen' = 'push to talk') {
+    return enter(browser, vw, typeof who === 'string' ? vw[who] : who, { mode, ...(options === undefined ? {} : { context: options }), ...(before === undefined ? {} : { before }) });
   }
 
   // No secret of the world, and no join token or room name the page was given,
-  // in anything the page said or kept: its console, its DOM and address, its
-  // storage and cookies, and (unless timing is false) its resource timing
-  // entries. And no policy violation in the console.
-  //
-  // The one secret a page keeps by design is its own credential, under
-  // conch.web.token: a member's in localStorage since A7 (issue #439), an
-  // operator's in sessionStorage. Each must be exactly the signed-in member's,
-  // and the rest of storage is checked without it.
-  //
-  // The one exception is named: on a failed LiveKit connection, even one the
-  // SDK retries by itself under load, livekit-client sends the join token in
-  // the access_token query of its /rtc/v1/validate request, and the page's
-  // resource timing records that URL (docs/manual.md, "Voice in the browser"). That
-  // parameter, in a URL on LiveKit's origin with exactly that path, is left
-  // out of the timing entries checked. A token in any other URL, or in any other place, still
-  // fails.
-  async function expectClean(p: { page: Page; watch: Watch; member: { token: string } }): Promise<void> {
-    await p.watch.settled();
-    const livekit = new URL(vw.livekitOrigin.replace(/^ws/, 'http')).origin;
-    const { kept, credentials } = await p.page.evaluate((livekitHttp) => {
-      const timingName = (name: string) => {
-        try {
-          const url = new URL(name);
-          if (url.origin === livekitHttp && url.pathname === '/rtc/v1/validate') url.searchParams.delete('access_token');
-          return url.href;
-        } catch {
-          return name;
-        }
-      };
-      const without = (storage: Storage) => {
-        const rest: Record<string, string | null> = {};
-        for (let i = 0; i < storage.length; i++) {
-          const key = storage.key(i);
-          if (key !== null && key !== 'conch.web.token') rest[key] = storage.getItem(key);
-        }
-        return JSON.stringify(rest);
-      };
-      return {
-        credentials: [sessionStorage.getItem('conch.web.token'), localStorage.getItem('conch.web.token')],
-        kept: [
-          document.documentElement.outerHTML,
-          location.href,
-          without(sessionStorage),
-          without(localStorage),
-          document.cookie,
-          JSON.stringify(performance.getEntries().map((e) => timingName(e.name))),
-        ].join('\n'),
-      };
-    }, livekit);
-    for (const credential of credentials) {
-      expect(credential === null || credential === p.member.token, 'the stored credential is the member\'s own').toBe(true);
-    }
-    const said = p.watch.console.join('\n');
-    for (const s of vw.secrets) {
-      expect(kept, 'a secret in the page, its storage or its cookies').not.toContain(s);
-      expect(said, 'a secret in the console').not.toContain(s);
-    }
-    expect(p.watch.console.filter((l) => /Content Security Policy|Refused to|[Pp]ermissions policy/.test(l))).toEqual([]);
-    // Nor anything the browser reports as wrong that the person never sees
-    // (issue #595): a Permissions-Policy report, or a request to conchd the
-    // browser counts as failed, an answered one let go unread included.
-    expect(p.watch.policy, 'Permissions-Policy reports').toEqual([]);
-    expect(p.watch.failed, 'requests to conchd that failed').toEqual([]);
-  }
+  // in anything the page said or kept, and nothing the browser reports as wrong
+  // that the person never sees: people.ts expectClean says what is checked.
+  const expectClean = (p: Parameters<typeof expectCleanPage>[1]): Promise<void> => expectCleanPage(vw, p);
 
   test('a member joins, is heard only while transmitting, shows as talking, and is audited as a reported pair', async ({ browser }) => {
     const a = await person(browser, 'alice');
@@ -241,8 +146,86 @@ test.describe('with LiveKit', () => {
       // room name included.
       for (const p of [a, b]) await expectClean(p);
     } finally {
-      await a.context.close();
-      await b.context.close();
+      await closeAll(a.context);
+      await closeAll(b.context);
+    }
+  });
+
+  // Issue #1480: the side buttons talk when chosen, and only then. Real
+  // history first (two entries made in the page, so there is a Back and a
+  // Forward to take); then an unbound side-button press goes where it should,
+  // a bound one talks and goes nowhere, and leaving voice gives it back.
+  test('Mouse 4 and Mouse 5 talk when chosen and navigate otherwise', async ({ browser }) => {
+    const a = await person(browser, 'alice');
+    try {
+      const voice = voiceRegion(a.page);
+      const cdp = await a.context.newCDPSession(a.page);
+      type Side = 'back' | 'forward';
+      const send = async (button: Side, type: 'mousePressed' | 'mouseReleased') => {
+        await cdp.send('Input.dispatchMouseEvent', { type, button, buttons: type === 'mousePressed' ? (button === 'back' ? 8 : 16) : 0, x: 10, y: 10, clickCount: 1 });
+      };
+      const tap = async (button: Side) => {
+        await send(button, 'mousePressed');
+        await send(button, 'mouseReleased');
+      };
+      // Three entries in this document: u0 (where it loaded), u1, u2; now at u2.
+      const u0 = a.page.url();
+      const u1 = u0.replace('/app/', '/app/?nav=1');
+      const u2 = u0.replace('/app/', '/app/?nav=2');
+      expect(u1).not.toBe(u0);
+      // Chromium's Back skips entries made without a user gesture, so these
+      // are pushed as one, after a click.
+      await a.page.getByRole('heading', { name: 'Conch' }).click();
+      for (const u of [u1, u2]) await cdp.send('Runtime.evaluate', { expression: `history.pushState(null, '', ${JSON.stringify(u)})`, userGesture: true });
+      expect(a.page.url()).toBe(u2);
+      const bind = async (button: Side) => {
+        if (!(await voice.getByRole('button', { name: 'Change talk key' }).isVisible())) await voice.getByRole('button', { name: 'Voice options' }).click();
+        await voice.getByRole('button', { name: 'Change talk key' }).click();
+        await expect(voice.getByRole('button', { name: 'Press a key or Mouse 4/5 (Escape cancels)' })).toBeVisible();
+        await tap(button);
+        await expect(voice).toContainText(`Talk key: ${button === 'back' ? 'Mouse 4' : 'Mouse 5'}.`);
+        await a.page.getByRole('heading', { name: 'Conch' }).click();
+      };
+      // A bound press talks and leaves the address alone.
+      const holds = async (button: Side, at: string) => {
+        await send(button, 'mousePressed');
+        await expect(voice).toContainText('Transmitting');
+        await send(button, 'mouseReleased');
+        await expect(voice).not.toContainText('Transmitting');
+        await a.page.waitForTimeout(500);
+        expect(a.page.url()).toBe(at);
+      };
+      const goes = async (button: Side, to: string) => {
+        await tap(button);
+        await expect.poll(() => a.page.url()).toBe(to);
+      };
+
+      await voice.getByRole('button', { name: 'Join voice' }).click();
+      await expect(voice).toContainText(/Connected in #voice-room/, { timeout: 30_000 });
+      await chooseMicrophone(voice, 'push to talk');
+
+      // The talk key is a keyboard key: both side buttons navigate.
+      await goes('back', u1);
+      await goes('forward', u2);
+      await goes('back', u1);
+
+      // Mouse 5 chosen: Forward talks and stays at u1; Back still goes.
+      await bind('forward');
+      await holds('forward', u1);
+      await goes('back', u0);
+
+      // Mouse 4 chosen: Forward goes; Back talks and stays.
+      await bind('back');
+      await goes('forward', u1);
+      await holds('back', u1);
+
+      // Out of voice the chosen button is the browser's again.
+      await voice.getByRole('button', { name: 'Leave voice' }).click();
+      await expect(voice).toContainText('Not in voice', { timeout: 10_000 });
+      await goes('back', u0);
+      await expectClean(a);
+    } finally {
+      await closeAll(a.context);
     }
   });
 
@@ -286,23 +269,23 @@ test.describe('with LiveKit', () => {
       expect(p.watch.failed.filter((l) => l.includes('/voice/transmit')), 'transmit reports the browser counted as failed').toEqual([]);
       await expectClean(p);
     } finally {
-      await p.context.close();
+      await closeAll(p.context);
     }
   });
 
-  // Issue #495: conchd's poller compares the microphone it sees with the
-  // reports. With each report held back 500 ms on its way to conchd, a page
-  // that opened its track before its report was answered was seen transmitting
-  // unreported; it opens it only after. The delay stays comfortably inside the
-  // client's 1 s reportWait: past that bound audio deliberately opens anyway,
-  // and the late report is audited as unreported. A 700 ms delay left too
-  // little room for scheduling under load and accidentally tested that case.
+  // Issue #970 (before it, #495): a press opens its track at once and reports
+  // in parallel, so with each report held back 500 ms on its way to conchd the
+  // poller may see the microphone before the report. A press is then audited
+  // as its reported pair, and at most one `voice_transmit_unreported` row,
+  // closed `reason=reported` once the report lands (or `reason=muted`, when
+  // no pass fell between the report and the release): truthful, and nothing
+  // else. (conch-voice.md section 6, "Client side".)
   //
   // Carol is in no other test of this world, and the press waits until conchd
   // has seen her join: a press made before the poller has noticed a new
   // connection is a different case (the next test's), and is not what this
   // test is about.
-  test('a push-to-talk whose reports are slow is still audited as only the reported pair', async ({ browser }) => {
+test('a push-to-talk whose reports are slow is audited as the reported pair and at most one unreported row closed as reported', async ({ browser }) => {
     const c = await person(browser, 'carol');
     try {
       await c.page.route('**/voice/transmit', async (route) => {
@@ -315,27 +298,46 @@ test.describe('with LiveKit', () => {
       await expect(voice).toContainText(/Connected in #voice-room/, { timeout: 30_000 });
       await chooseMicrophone(voice, 'push to talk');
       await expect.poll(async () => (await vw.audit()).some((e) => e.actor === actor && e.action === 'voice_joined'), { timeout: 15_000 }).toBe(true);
-      const transmits = async () => (await vw.audit()).filter((e) => e.actor === actor && e.action.startsWith('voice_transmit')).map((e) => e.action);
+      const rows = async () => (await vw.audit()).filter((e) => e.actor === actor && e.action.startsWith('voice_transmit'));
+      const reportedOf = async (action: string) => (await rows()).filter((e) => e.action === action && e.detail.includes('source=reported')).length;
+      const unreported = async () => (await rows()).filter((e) => e.action === 'voice_transmit_unreported').length;
       // Five presses, each followed by its two reports. Two passes inside one
       // held-back report are likely but far from certain, so with fewer
-      // presses the old order passed too often.
-      const pair = ['voice_transmit_started', 'voice_transmit_stopped'];
+      // presses a wrong order passed too often.
       await c.page.getByRole('heading', { name: 'Conch' }).click();
+      let seen = 0;
       for (let i = 1; i <= 5; i++) {
         await c.page.keyboard.down('Backquote');
         await expect(voice).toContainText('Transmitting');
         await new Promise((r) => setTimeout(r, 1200));
         await c.page.keyboard.up('Backquote');
         await expect(voice).toContainText('Not transmitting');
-        await expect.poll(transmits, { timeout: 15_000 }).toEqual(Array<string[]>(i).fill(pair).flat());
+        await expect.poll(async () => (await reportedOf('voice_transmit_started')) + (await reportedOf('voice_transmit_stopped')), { timeout: 15_000 }).toBe(2 * i);
+        // Let anything the poller writes for this press land, then count.
+        await new Promise((r) => setTimeout(r, 3000));
+        const now = await unreported();
+        expect(now - seen, `unreported rows written for press ${String(i)}`).toBeLessThanOrEqual(1);
+        seen = now;
       }
-      // Nothing the poller writes later, either.
-      await new Promise((r) => setTimeout(r, 3000));
-      expect(await transmits()).toEqual(Array<string[]>(5).fill(pair).flat());
+      const all = await rows();
+      // Only the reported pairs, the unreported rows and their closing rows.
+      for (const e of all) {
+        const reported = e.detail.includes('source=reported');
+        // Closed `reported` when a pass falls between the report and the
+        // release, else `muted` at the first pass after it (the first that
+        // applies, in that order: voice-control-plane.md section 7).
+        const closedLate = e.action === 'voice_transmit_stopped' && e.detail.includes('source=observed') && /reason=(reported|muted)/.test(e.detail);
+        expect(reported || e.action === 'voice_transmit_unreported' || closedLate, `unexpected row ${e.action} ${e.detail}`).toBe(true);
+      }
+      expect(all.filter((e) => e.action === 'voice_transmit_started')).toHaveLength(5);
+      // Every unreported row is closed, none left open.
+      await expect
+        .poll(async () => (await rows()).filter((e) => e.action === 'voice_transmit_stopped' && e.detail.includes('source=observed')).length, { timeout: 10_000 })
+        .toBe(seen);
       await voice.getByRole('button', { name: 'Leave voice' }).click();
       await expect(voice).toContainText('Not in voice', { timeout: 10_000 });
     } finally {
-      await c.context.close();
+      await closeAll(c.context);
     }
   });
 
@@ -377,7 +379,7 @@ test.describe('with LiveKit', () => {
       await voice.getByRole('button', { name: 'Leave voice' }).click();
       await expect(voice).toContainText('Not in voice', { timeout: 10_000 });
     } finally {
-      await b.context.close();
+      await closeAll(b.context);
     }
   });
 
@@ -474,7 +476,7 @@ test.describe('with LiveKit', () => {
       await expect(voice).toContainText('Not in voice', { timeout: 10_000 });
       await expectClean(a);
     } finally {
-      await a.context.close();
+      await closeAll(a.context);
     }
   });
 
@@ -566,7 +568,7 @@ test.describe('with LiveKit', () => {
       await page.keyboard.up('Enter');
       await expect(heard).not.toContainText('alice (transmitting)', { timeout: 15_000 });
       await expect.poll(async () => (await transmits()).slice(before), { timeout: 15_000 }).toEqual(Array<string[]>(3).fill(pair).flat());
-      expect((await vw.audit()).filter((e) => e.action === 'voice_transmit_unreported')).toEqual([]);
+      expect((await vw.audit()).filter((e) => e.actor === actor && e.action === 'voice_transmit_unreported')).toEqual([]);
 
       // Escape is not a way out of voice (UX-21).
       await page.keyboard.press('Escape');
@@ -580,8 +582,8 @@ test.describe('with LiveKit', () => {
       await expect(join).toBeFocused();
       await expectClean({ page, watch, member: vw.alice });
     } finally {
-      await context.close();
-      await b.context.close();
+      await closeAll(context);
+      await closeAll(b.context);
     }
   });
 
@@ -631,11 +633,11 @@ test.describe('with LiveKit', () => {
           await voice.getByRole('button', { name: 'Leave voice' }).click();
           await expect(voice).toContainText('Not in voice', { timeout: 10_000 });
         } finally {
-          await a.context.close();
+          await closeAll(a.context);
         }
       }
     } finally {
-      for (const o of others) await o.context.close();
+      for (const o of others) await closeAll(o.context);
     }
   });
 
@@ -657,7 +659,7 @@ test.describe('with LiveKit', () => {
         await phone(browser, size, options, bodies[bodies.length - 1] ?? '');
       }
     } finally {
-      for (const o of others) await o.context.close();
+      for (const o of others) await closeAll(o.context);
     }
   });
 
@@ -729,7 +731,7 @@ test.describe('with LiveKit', () => {
       await voice.getByRole('button', { name: 'Leave voice' }).tap();
       await expect(voice).toContainText('Not in voice', { timeout: 10_000 });
     } finally {
-      await a.context.close();
+      await closeAll(a.context);
     }
   }
 
@@ -876,7 +878,7 @@ test.describe('with LiveKit', () => {
         await expect(voice).toContainText('Connected in #voice-room');
         await expect(voice).not.toContainText('Reconnecting');
         await expect(back).toHaveCount(0);
-        await expect(voice.getByRole('list', { name: 'In voice' })).toContainText('You');
+        await expect(voice.getByRole('list', { name: 'In voice' })).toContainText(a.member.name);
         expect(sessions, `${size}: no new voice session`).toBe(1);
         await expectFits(a.page, `${size}: the strip after going back`);
 
@@ -884,7 +886,7 @@ test.describe('with LiveKit', () => {
         await showView(a.page, 'Voice');
         await expect(voice).toContainText('Not in voice', { timeout: 10_000 });
       } finally {
-        await a.context.close();
+        await closeAll(a.context);
       }
     }
   });
@@ -940,8 +942,8 @@ test.describe('with LiveKit', () => {
       expect(await b.page.evaluate(() => (window as unknown as { __pcs: RTCPeerConnection[] }).__pcs.length), 'peer connections on bob\'s page').toBe(0);
       await expectClean(b);
     } finally {
-      await a.context.close();
-      await b.context.close();
+      await closeAll(a.context);
+      await closeAll(b.context);
     }
   });
 
@@ -971,13 +973,17 @@ test.describe('with LiveKit', () => {
       await channelButton(a.page, other).click();
       await expect(conversation(a.page).getByRole('heading', { name: other })).toBeVisible();
       const roster = alice.getByRole('list', { name: 'In voice' });
-      await expect(roster).toContainText('You');
+      await expect(roster).toContainText(a.member.name);
       await expect(roster).toContainText('bob');
       await expect(roster).not.toContainText(/Member \d+/);
 
-      // bob's share is announced by his name.
+      // bob's share is announced by his name: his stream's tile on alice's
+      // stage (voice-multi-share.md §7.1: every live stream is a tile, and
+      // the in-voice "is sharing a screen" line went with the one-share rule).
       await bob.getByRole('button', { name: 'Share screen' }).click();
-      await expect(alice).toContainText('bob is sharing a screen', { timeout: 15_000 });
+      const tile = a.page.locator('.call-share').filter({ hasText: 'bob · LIVE' });
+      await expect(tile).toBeVisible({ timeout: 15_000 });
+      await expect(tile).not.toContainText(/Member \d+/);
       await expect(alice).not.toContainText(/Member \d+/);
       await bob.getByRole('button', { name: 'Stop sharing' }).click();
 
@@ -991,9 +997,9 @@ test.describe('with LiveKit', () => {
       await expect(roster).toContainText('dana', { timeout: 3000 });
       await expect(roster).not.toContainText(/Member \d+/);
     } finally {
-      await d.close();
-      await a.context.close();
-      await b.context.close();
+      await closeAll(d);
+      await closeAll(a.context);
+      await closeAll(b.context);
     }
   });
 
@@ -1041,7 +1047,7 @@ test.describe('with LiveKit', () => {
         if (r.url().endsWith('/voice/session')) seen.sessions++;
       });
       const watch = await watchPage(page, vw);
-      await page.addInitScript(countBytes);
+      await page.addInitScript(keepConnections);
       await page.addInitScript(() => {
         const w = window as unknown as { __devices: number };
         w.__devices = 0;
@@ -1095,8 +1101,8 @@ test.describe('with LiveKit', () => {
         await expect(named(r.page).getByRole('listitem')).toHaveText([kim.name], { timeout: 3000 });
         await expect(nav(r.page).getByRole('list', { name: /^In voice in/ })).toHaveCount(1);
       }
-      // kim sees herself as You.
-      await expect(named(k.page).getByRole('listitem')).toHaveText(['You'], { timeout: 3000 });
+      // kim sees herself by her own name.
+      await expect(named(k.page).getByRole('listitem')).toHaveText([kim.name], { timeout: 3000 });
 
       // max opens it from the strip: the channel opens, and voice does not.
       await voiceRegion(max.page).getByRole('button', { name: `Open #${room}`, exact: true }).click();
@@ -1133,9 +1139,9 @@ test.describe('with LiveKit', () => {
         await expectClean(r);
       }
     } finally {
-      await k.context.close();
-      await lee.context.close();
-      await max.context.close();
+      await closeAll(k.context);
+      await closeAll(lee.context);
+      await closeAll(max.context);
     }
   });
 
@@ -1203,7 +1209,7 @@ test.describe('with LiveKit', () => {
         await expect(p.voice).toContainText('Not in voice', { timeout: 10_000 });
       }
     } finally {
-      for (const c of contexts) await c.close();
+      for (const c of contexts) await closeAll(c);
     }
   });
 
@@ -1267,14 +1273,14 @@ test.describe('with LiveKit', () => {
         await expect(voiceRegion(p.page)).toContainText('Not in voice', { timeout: 10_000 });
       }
     } finally {
-      await a.context.close();
-      await b.context.close();
+      await closeAll(a.context);
+      await closeAll(b.context);
     }
   });
 
   // Issue #591 (F24): one person's credential open on two pages, one of them
-  // in voice. The other names them "You (on another device)" and says that
-  // joining there moves their voice; the one in voice names them "You", and
+  // in voice. The other names them "cy (on another device)" and says that
+  // joining there moves their voice; the one in voice names them "cy", and
   // never says "another device" of its own place, while it is in voice or
   // after it leaves. A member of their own, made through the API: the
   // others are in other tests' rooms.
@@ -1305,8 +1311,8 @@ test.describe('with LiveKit', () => {
 
       await here.getByRole('button', { name: 'Join voice' }).click();
       await expect(here).toContainText('Connected in #voice-room', { timeout: 30_000 });
-      await expect(here.getByRole('list', { name: 'In voice' }).getByText('You', { exact: true })).toBeVisible();
-      await expect(there.getByRole('list', { name: 'In voice' }).getByText('You (on another device)', { exact: true })).toBeVisible();
+      await expect(here.getByRole('list', { name: 'In voice' }).getByText(cy.name, { exact: true })).toBeVisible();
+      await expect(there.getByRole('list', { name: 'In voice' }).getByText(`${cy.name} (on another device)`, { exact: true })).toBeVisible();
       await expect(there).toContainText(said);
       await expect(there).toContainText('Not in voice');
       // Nothing stops the join there.
@@ -1319,7 +1325,7 @@ test.describe('with LiveKit', () => {
       await expect(here.getByRole('list', { name: 'In voice' }).getByText(/^You/)).toHaveCount(0);
       expect(await first.evaluate(() => (window as unknown as { __elsewhere: boolean }).__elsewhere), 'the page in voice said "another device" of itself').toBe(false);
     } finally {
-      for (const context of contexts) await context.close();
+      for (const context of contexts) await closeAll(context);
     }
   });
 
@@ -1334,7 +1340,7 @@ test.describe('with LiveKit', () => {
       await expect(voice).toContainText('not a member');
       await expectClean(b);
     } finally {
-      await b.context.close();
+      await closeAll(b.context);
     }
   });
 
@@ -1366,7 +1372,7 @@ test.describe('with LiveKit', () => {
       expect(seen.some((n) => n.includes(`access_token=${join}`)), 'the join token is in a validate URL in the page\'s timing').toBe(true);
       await expectClean(a);
     } finally {
-      await a.context.close();
+      await closeAll(a.context);
     }
   });
 
@@ -1444,7 +1450,7 @@ test.describe('with LiveKit', () => {
         await leak(a.page, a.member.token);
         await expect(expectClean(a), `a secret in ${where}`).rejects.toThrow();
       } finally {
-        await a.context.close();
+        await closeAll(a.context);
       }
     });
   }
@@ -1508,13 +1514,13 @@ test.describe('with LiveKit', () => {
           await expect(voice).toContainText('Not in voice', { timeout: 10_000 });
           await expect(heard).not.toContainText('yan', { timeout: 15_000 });
         } finally {
-          await a.context.close();
+          await closeAll(a.context);
         }
       }
       console.log(`first-press clear times (ms): ${clears.join(' ')}`);
       expect(clears.filter((c) => c < 0 || c > firstPressBound), `clear times after release, ms: ${clears.join(' ')}`).toEqual([]);
     } finally {
-      await b.context.close();
+      await closeAll(b.context);
     }
   });
 
@@ -1533,7 +1539,7 @@ test.describe('with LiveKit', () => {
       await expect(voice).not.toContainText('Voice server unreachable');
       await expectClean(a);
     } finally {
-      await a.context.close();
+      await closeAll(a.context);
     }
   });
 });

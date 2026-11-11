@@ -17,6 +17,7 @@ import { listMessagesResponseV2, postMessageResponseV2, type Audience, type Mess
 import { listReadStateResponseV1, type ReadStateV1 } from '../src/schema/readstate';
 import { listRunsResponseV1, runV1, type RunV1 } from '../src/schema/run';
 import { sessionRosterV1, sessionV1, type SessionV1 } from '../src/schema/session';
+import { createChannelResponse, type CreateChannelRequest } from '../src/schema/channel';
 import { call, ok, setChannelVisibility, type World } from './world';
 
 // history is every message of a channel, oldest first.
@@ -142,4 +143,15 @@ export async function withDefaultChannels(world: World, names: readonly string[]
     await ok(world, op, 'PUT', '/v1/join/settings', joinSettingsResponseV1, { open_joining: 'off', open_channels: [] } satisfies PutJoinSettingsRequestV1);
     for (const name of names) await setChannelVisibility(world, name, 'private');
   }
+}
+
+// makeChannel creates a (private) channel as the operator.
+export async function makeChannel(world: World, name: string): Promise<void> {
+  await ok(world, world.tokens.operator, 'POST', '/v0/channels', createChannelResponse, { name } satisfies CreateChannelRequest);
+}
+
+// memberOf adds a principal to a channel as the operator, or takes them out.
+export async function memberOf(world: World, channel: string, principal: number, member: boolean): Promise<void> {
+  const reply = await call(world, world.tokens.operator, member ? 'PUT' : 'DELETE', `/v1/channels/${encodeURIComponent(channel)}/members/${String(principal)}`);
+  if (reply.status < 200 || reply.status > 299) throw new Error(`${member ? 'add to' : 'remove from'} ${channel}: status ${String(reply.status)}`);
 }

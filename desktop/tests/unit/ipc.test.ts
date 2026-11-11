@@ -1,11 +1,16 @@
+import type { IpcMainEvent } from 'electron';
 import { describe, expect, it } from 'vitest';
 
 import type { Feeds } from '../../main/api/feeds.ts';
 import type { Files } from '../../main/files.ts';
 import type { Service } from '../../main/api/service.ts';
 import { DocumentGate } from '../../main/document.ts';
-import { checkCaller, Ipc, parseRequest, plain, type ProfilesApi, type ContentsLike, type FrameLike, type InvokeEvent } from '../../main/ipc.ts';
-import { INVOKED_FUNCTIONS } from '../../shared/bridge-names.ts';
+import { checkCaller, Ipc, parseRequest, plain, type CompanionApi, type InstalledApi, type IntegrationsApi, type InvitesApi, type NotificationsApi, type ProfilesApi, type VoiceApi, type SettingsApi, type ContentsLike, type FrameLike, type InvokeEvent } from '../../main/ipc.ts';
+import { COMPANION_FUNCTIONS, INVOKED_FUNCTIONS, TAG_MAX, VOICE_EVENTS, VOICE_FUNCTIONS } from '../../shared/bridge-names.ts';
+import { ShareAllowance } from '../../main/share-allowance.ts';
+import { deliverVoice } from '../../main/voice/events.ts';
+import type { NativeVoiceView } from '../../../web/src/platform/desktop/bridge.ts';
+import { VOICE_CONTROL_MAX_CHANNEL_BYTES } from '../../../web/src/schema/generated.ts';
 
 function frame(token = 'frame-1', over: Partial<FrameLike> = {}): FrameLike {
   return { frameToken: token, parent: null, detached: false, url: 'conch-app://ui/', ...over };
@@ -22,6 +27,8 @@ interface Fixture {
   // Whether main's compatibility verdict lets a sign-in happen (issue #946).
   readonly permit: { value: boolean };
   readonly input: { recent: boolean };
+  readonly share: ShareAllowance;
+  readonly activation: object;
   event(over?: Partial<InvokeEvent>): InvokeEvent;
 }
 
@@ -39,14 +46,29 @@ function fixture(): Fixture {
   const service = new Proxy({} as Service, { get: (_t, name: string) => record(name) });
   const feeds = new Proxy({} as Feeds, { get: (_t, name: string) => record(`feeds.${name}`) });
   const permit = { value: true };
-  const profiles = new Proxy({} as ProfilesApi, { get: (_t, name: string) => (name === 'signInPermitted' ? () => permit.value : record(`profiles.${name}`)) });
+  const activation = {};
+  const profiles = new Proxy({} as ProfilesApi, { get: (_t, name: string) => {
+    if (name === 'active') return activation;
+    return name === 'signInPermitted' ? () => permit.value : record(`profiles.${name}`);
+  } });
   const logs: string[] = [];
   const clock = { now: 1_000_000 };
   const input = { recent: false };
   const files = new Proxy({} as Files, { get: (_t, name: string) => record(`files.${name}`) });
+  const voice = new Proxy({} as VoiceApi, { get: (_t, name: string) => record(`voice.${name}`) });
+  const notifications = new Proxy({} as NotificationsApi, { get: (_t, name: string) => (...args: unknown[]) => {
+    calls.push([`notifications.${name}`, args]);
+    return true;
+  } });
+  const invites = new Proxy({} as InvitesApi, { get: (_t, name: string) => record(`invites.${name}`) });
+  const settings = new Proxy({} as SettingsApi, { get: (_t, name: string) => record(`settings.${name}`) });
+  const integrations = new Proxy({} as IntegrationsApi, { get: (_t, name: string) => record(`integrations.${name}`) });
+  const companion = new Proxy({} as CompanionApi, { get: (_t, name: string) => record(`companion.${name}`) });
   const gestures = { take: () => (input.recent ? ('pointer' as const) : null) };
-  const ipc = new Ipc({ owned: () => contents, gate, service, feeds, files, gestures, profiles, now: () => clock.now, log: (line) => logs.push(line) });
-  return { ipc, gate, contents, main, calls, logs, clock, permit, input, event: (over = {}) => ({ sender: contents, senderFrame: main, ...over }) };
+  const installed = new Proxy({} as InstalledApi, { get: (_t, name: string) => record(`installed.${name}`) });
+  const share = new ShareAllowance({ now: () => clock.now, generation: () => gate.generation });
+  const ipc = new Ipc({ owned: () => contents, gate, service, feeds, files, gestures, profiles, voice, invites, notifications, settings, integrations, companion, share, installed, now: () => clock.now, log: (line) => logs.push(line) });
+  return { ipc, gate, contents, main, calls, logs, clock, permit, input, share, activation, event: (over = {}) => ({ sender: contents, senderFrame: main, ...over }) };
 }
 
 describe('every invocation is checked before anything else', () => {
@@ -87,6 +109,7 @@ describe('every invocation is checked before anything else', () => {
       files: {} as Files,
       gestures: { take: () => null },
       profiles: {} as ProfilesApi,
+      voice: {} as VoiceApi, settings: {} as SettingsApi, installed: {} as InstalledApi, notifications: {} as NotificationsApi, invites: {} as InvitesApi,
       now: () => 0,
       log: () => undefined,
     });
@@ -179,6 +202,15 @@ describe('arguments', () => {
     ['feedAck', ['1']],
     ['feedUnsubscribe', [0]],
     ['feedUnsubscribe', [1, 2]],
+    ['notify', []],
+    ['notify', [{ tag: 't', title: 'title', body: 'body', channel: 'general', extra: true }]],
+    ['notify', [{ tag: 't', title: 'x'.repeat(129), body: 'body', channel: 'general' }]],
+    ['notify', [{ tag: 't', title: 'title', body: 'x'.repeat(201), channel: 'general' }]],
+    ['notify', [{ tag: 'x'.repeat(513), title: 'title', body: 'body', channel: 'general' }]],
+    ['notify', [{ tag: '', title: 'title', body: 'body', channel: 'general' }]],
+    ['notify', [{ tag: 't', title: 'title', body: 'body', channel: '   ' }]],
+    ['notifyClose', [{ tag: 't', body: 'must not cross' }]],
+    ['notifyClose', [{ tag: 'x'.repeat(513) }]],
   ])('refuses a bad shape: %s %j', async (name, args) => {
     const f = fixture();
     expect(await f.ipc.invoke(f.event(), name, args)).toEqual({ ok: false, kind: 'refused' });
@@ -306,11 +338,142 @@ describe('arguments', () => {
       files: {} as Files,
       gestures: { take: () => null },
       profiles: { add: () => { throw new Error('boom secret-arg'); } } as unknown as ProfilesApi,
+      voice: {} as VoiceApi, settings: {} as SettingsApi, installed: {} as InstalledApi, notifications: {} as NotificationsApi, invites: {} as InvitesApi,
       now: () => 0,
       log: (line) => f.logs.push(line),
     });
     expect(await ipc.invoke(f.event(), 'profileAdd', ['secret-arg'])).toEqual({ ok: false, kind: 'refused' });
     expect(f.logs.join('\n')).not.toContain('secret-arg');
+  });
+});
+
+describe('the credential-replacing writes (issue #1422)', () => {
+  const change = { operation: 'changePassword', body: { current: 'old-pw', password: 'new-pw' } };
+
+  it('passes a good request to replaceCredential with the operation and body, and nothing else', async () => {
+    const f = fixture();
+    await f.ipc.invoke(f.event(), 'replaceCredential', [change]);
+    await f.ipc.invoke(f.event(), 'replaceCredential', [{ operation: 'setPassword', body: { password: 'new-pw', proof: 'code' } }]);
+    await f.ipc.invoke(f.event(), 'replaceCredential', [{ operation: 'convertGuest', body: { name: 'ada', password: 'new-pw' } }]);
+    await f.ipc.invoke(f.event(), 'replaceCredential', [{ operation: 'reauth', body: { password: 'pw', code: '123456' } }]);
+    expect(f.calls).toEqual([
+      ['replaceCredential', ['changePassword', { current: 'old-pw', password: 'new-pw' }]],
+      ['replaceCredential', ['setPassword', { password: 'new-pw', proof: 'code' }]],
+      ['replaceCredential', ['convertGuest', { name: 'ada', password: 'new-pw' }]],
+      ['replaceCredential', ['reauth', { password: 'pw', code: '123456' }]],
+    ]);
+  });
+
+  it.each([
+    ['no argument', []],
+    ['a second argument', [change, 'x']],
+    ['a bare body', [{ current: 'a', password: 'b' }]],
+    ['a string', ['changePassword']],
+    ['an extra key', [{ ...change, token: 'conch_x' }]],
+    ['a missing body', [{ operation: 'changePassword' }]],
+    ['a missing operation', [{ body: change.body }]],
+    ['an extra key in the body', [{ operation: 'changePassword', body: { current: 'a', password: 'b', admin: true } }]],
+    ['a body of the wrong type', [{ operation: 'changePassword', body: { current: 1, password: 'b' } }]],
+    ['a body of another operation', [{ operation: 'changePassword', body: { name: 'ada', password: 'b' } }]],
+    ['an array body', [{ operation: 'reauth', body: [] }]],
+    ['an operation outside the family', [{ operation: 'login', body: { name: 'ada', password: 'b' } }]],
+    ['an operation that is not one', [{ operation: 'constructor', body: {} }]],
+    ['a non-string operation', [{ operation: 7, body: {} }]],
+    ['an oversize password', [{ operation: 'changePassword', body: { current: 'a', password: 'p'.repeat(20_000) } }]],
+  ])('refuses %s, executes nothing, and logs no password', async (_name, args) => {
+    const f = fixture();
+    expect(await f.ipc.invoke(f.event(), 'replaceCredential', args)).toEqual({ ok: false, kind: 'refused' });
+    expect(f.calls).toEqual([]);
+    expect(f.logs.join('\n')).not.toContain('old-pw');
+    expect(f.logs.join('\n')).not.toContain('new-pw');
+  });
+
+  it('limits its rate like the sign-in steps', async () => {
+    const f = fixture();
+    let accepted = 0;
+    for (let i = 0; i < 40; i++) if ((await f.ipc.invoke(f.event(), 'replaceCredential', [change])).ok) accepted++;
+    expect(accepted).toBe(30);
+    expect(f.logs.at(-1)).toContain('(rate)');
+  });
+
+  it('sends nothing when the server is not one the app may sign in to', async () => {
+    const f = fixture();
+    f.permit.value = false;
+    expect(await f.ipc.invoke(f.event(), 'replaceCredential', [change])).toEqual({ ok: true, value: { ok: false, kind: 'network', reason: 'incompatible' } });
+    expect(f.calls).toEqual([]);
+  });
+
+  it('keeps the rotated credential where the old one was kept, and answers the account without a token', async () => {
+    const f = fixture();
+    const who = { id: 7, kind: 'human', name: 'ada', role: 'member' } as const;
+    const bound: unknown[] = [];
+    const ipc = new Ipc({
+      owned: () => f.contents,
+      gate: f.gate,
+      service: { replaceCredential: () => Promise.resolve({ ok: true, who, answer: { revoked: 1 } }) } as unknown as Service,
+      feeds: {} as Feeds,
+      files: {} as Files,
+      gestures: { take: () => null },
+      profiles: { signInPermitted: () => true, signedIn: (account: unknown) => { bound.push(account); return Promise.resolve(true); } } as unknown as ProfilesApi,
+      voice: {} as VoiceApi, settings: {} as SettingsApi, installed: {} as InstalledApi, notifications: {} as NotificationsApi, invites: {} as InvitesApi,
+      now: () => 0,
+      log: () => undefined,
+    });
+    const answer = await ipc.invoke(f.event(), 'replaceCredential', [change]);
+    expect(answer).toEqual({ ok: true, value: { ok: true, who, answer: { revoked: 1 } } });
+    expect(JSON.stringify(answer)).not.toContain('token');
+    expect(bound).toEqual([{ id: 7, name: 'ada', lasting: true, guest: false }]);
+  });
+});
+
+describe('desktop notifications (issue #1590)', () => {
+  const request = { tag: 'private-tag', title: 'private title', body: 'private body', channel: 'general' };
+
+  it('passes only the parsed fields with the caller’s activation and document', async () => {
+    const f = fixture();
+    expect(await f.ipc.invoke(f.event(), 'notify', [request])).toEqual({ ok: true, value: true });
+    expect(await f.ipc.invoke(f.event(), 'notifyClose', [{ tag: request.tag }])).toEqual({ ok: true, value: true });
+    expect(f.calls).toEqual([
+      ['notifications.show', [f.activation, f.gate.generation, request]],
+      ['notifications.close', [f.activation, f.gate.generation, request.tag]],
+    ]);
+  });
+
+  it('accepts the largest valid request, every character escaped, and closes it by its tag', async () => {
+    const f = fixture();
+    const big = { tag: '"'.repeat(TAG_MAX), title: '"'.repeat(128), body: '"'.repeat(200), channel: '"'.repeat(VOICE_CONTROL_MAX_CHANNEL_BYTES) };
+    expect(await f.ipc.invoke(f.event(), 'notify', [big])).toEqual({ ok: true, value: true });
+    expect(await f.ipc.invoke(f.event(), 'notifyClose', [{ tag: big.tag }])).toEqual({ ok: true, value: true });
+    expect(f.calls.map(([name]) => name)).toEqual(['notifications.show', 'notifications.close']);
+  });
+
+  it.each([
+    ['a subframe', (f: Fixture) => f.event({ senderFrame: frame('subframe', { parent: f.main }) })],
+    ['a stale generation', (f: Fixture) => { f.gate.begin(); return f.event(); }],
+  ])('refuses notify from %s before the native service', async (_name, event) => {
+    const f = fixture();
+    expect(await f.ipc.invoke(event(f), 'notify', [request])).toEqual({ ok: false, kind: 'refused' });
+    expect(f.calls).toEqual([]);
+  });
+
+  it('drops and counts a storm past 30 a minute without logging its content', async () => {
+    const f = fixture();
+    let accepted = 0;
+    for (let i = 0; i < 35; i++) if ((await f.ipc.invoke(f.event(), 'notify', [request])).ok) accepted++;
+    expect(accepted).toBe(30);
+    expect(f.calls).toHaveLength(30);
+    expect(f.ipc.refusals).toBe(5);
+    expect(f.logs.at(-1)).toContain('(rate)');
+    expect(f.logs.join('\n')).not.toContain('private');
+  });
+
+  it('gates the synchronous OS support check and returns only a boolean', () => {
+    const f = fixture();
+    expect(f.ipc.notificationSupported(f.event(), [])).toEqual({ ok: true, value: true });
+    expect(f.calls).toEqual([['notifications.supported', []]]);
+    expect(f.ipc.notificationSupported(f.event(), ['extra'])).toEqual({ ok: false, kind: 'refused' });
+    expect(f.ipc.notificationSupported(f.event({ senderFrame: null }), [])).toEqual({ ok: false, kind: 'refused' });
+    expect(f.calls).toHaveLength(1);
   });
 });
 
@@ -323,9 +486,45 @@ describe('the registry', () => {
     expect(channels).toHaveLength(INVOKED_FUNCTIONS.length);
   });
 
+  it('accepts a notification tag for a long origin, up to 512 characters', async () => {
+    const f = fixture();
+    const tag = `https://${'a'.repeat(240)}.example:8443:7:123456`;
+    expect((await f.ipc.invoke(f.event(), 'notify', [{ tag, title: 't', body: 'b', channel: 'general' }])).ok).toBe(true);
+  });
+
+  it('registers exactly the synchronous support channel and answers it with an Envelope', () => {
+    const f = fixture();
+    const handlers = new Map<string, (event: IpcMainEvent, ...args: unknown[]) => void>();
+    f.ipc.registerNotificationSupport({ on: (channel, listener) => (handlers.set(channel, listener), undefined as never) });
+    expect([...handlers.keys()]).toEqual(['conch:notificationSupported']);
+    const holder: { returnValue: unknown } = Object.assign(f.event(), { returnValue: undefined });
+    handlers.get('conch:notificationSupported')?.(holder as unknown as IpcMainEvent);
+    expect(holder.returnValue).toEqual({ ok: true, value: true });
+  });
+
   it('parses a request the way the table says', () => {
     expect(parseRequest({ operation: 'whoami' })).toEqual({ operation: 'whoami' });
     expect(parseRequest({ operation: 'login', body: {} })).toBeNull();
+  });
+
+  it('lets previewAs through on the five previewable reads, and on nothing else (issue #1540)', () => {
+    const params = { listMembers: { channel: 'general' } } as const;
+    for (const operation of ['preview', 'listChannels', 'channelDirectory', 'directoryMembers', 'listMembers'] as const) {
+      const p = operation === 'listMembers' ? params.listMembers : undefined;
+      expect(parseRequest({ operation, ...(p === undefined ? {} : { params: p }), previewAs: 7 })).toEqual({ operation, ...(p === undefined ? {} : { params: p }), previewAs: 7 });
+    }
+    // Operations main's own table does not mark previewable: a read, a write,
+    // an open one. The renderer's word is not asked.
+    expect(parseRequest({ operation: 'whoami', previewAs: 7 })).toBeNull();
+    expect(parseRequest({ operation: 'listMessages', params: { channel: 'a' }, previewAs: 7 })).toBeNull();
+    expect(parseRequest({ operation: 'postMessage', params: { channel: 'a' }, body: { body: 'x' }, previewAs: 7 })).toBeNull();
+    expect(parseRequest({ operation: 'health', previewAs: 7 })).toBeNull();
+    // A claim of being previewable changes nothing: there is no such key.
+    expect(parseRequest({ operation: 'whoami', previewAs: 7, previewable: true })).toBeNull();
+    // The target is a positive whole number.
+    for (const bad of [0, -1, 1.5, '7', null, Number.NaN, Number.MAX_SAFE_INTEGER + 1]) {
+      expect(parseRequest({ operation: 'listChannels', previewAs: bad })).toBeNull();
+    }
   });
 });
 
@@ -333,5 +532,662 @@ describe('the caller check alone', () => {
   it('is null for the one document', () => {
     const f = fixture();
     expect(checkCaller(f.event(), f.contents, f.gate)).toBeNull();
+  });
+});
+
+describe('the voice family (issue #1374)', () => {
+  const join = { channel: 'general', muted: false, deafened: false };
+
+  it('has no function whose name says press, release, transmit, gate or ptt', () => {
+    for (const name of [...VOICE_FUNCTIONS, ...INVOKED_FUNCTIONS]) expect(name).not.toMatch(/press|release|transmit|gate|ptt/i);
+  });
+
+  it('passes the parsed arguments to the service and gives its answer back', async () => {
+    const f = fixture();
+    f.input.recent = true;
+    await f.ipc.invoke(f.event(), 'voiceState', []);
+    await f.ipc.invoke(f.event(), 'voiceJoin', [join]);
+    await f.ipc.invoke(f.event(), 'voiceLeave', []);
+    await f.ipc.invoke(f.event(), 'voiceRetry', []);
+    await f.ipc.invoke(f.event(), 'voiceSetMute', [true]);
+    await f.ipc.invoke(f.event(), 'voiceSetDeafen', [false]);
+    await f.ipc.invoke(f.event(), 'voiceSetDevices', [{ output: 'Speakers' }]);
+    await f.ipc.invoke(f.event(), 'voiceSetDevices', [{ input: 'Mic', output: 'Speakers' }]);
+    await f.ipc.invoke(f.event(), 'voiceSetTalkMode', ['open']);
+    await f.ipc.invoke(f.event(), 'voiceSetTalkMode', ['push_to_talk']);
+    await f.ipc.invoke(f.event(), 'voiceDevices', []);
+    await f.ipc.invoke(f.event(), 'voiceSaveDevice', [{ key: 'audio.output', value: 'default' }]);
+    await f.ipc.invoke(f.event(), 'voiceSaveDevice', [{ key: 'audio.talk_mode', value: 'open' }]);
+    await f.ipc.invoke(f.event(), 'voiceKeyDevices', []);
+    await f.ipc.invoke(f.event(), 'voiceSaveTalkBinding', [{ deviceId: 'abc-123', code: 275 }]);
+    expect(f.calls).toEqual([
+      ['voice.state', []],
+      ['voice.join', [join]],
+      // The person's Leave ends the screen companion first (issue #1579).
+      ['companion.end', ['leave']],
+      ['voice.leave', []],
+      ['voice.retry', []],
+      ['voice.setMute', [true]],
+      ['voice.setDeafen', [false]],
+      ['voice.setDevices', [{ output: 'Speakers' }]],
+      ['voice.setDevices', [{ input: 'Mic', output: 'Speakers' }]],
+      ['voice.setTalkMode', ['open']],
+      ['voice.setTalkMode', ['push_to_talk']],
+      ['voice.devices', []],
+      ['voice.saveDevice', [{ key: 'audio.output', value: 'default' }]],
+      ['voice.saveDevice', [{ key: 'audio.talk_mode', value: 'open' }]],
+      ['voice.keyDevices', []],
+      ['voice.saveTalkBinding', [{ deviceId: 'abc-123', code: 275 }]],
+    ]);
+    expect(f.ipc.refusals).toBe(0);
+  });
+
+  it.each([
+    ['voiceState', [1]],
+    ['voiceLeave', ['x']],
+    ['voiceRetry', [{}]],
+    ['voiceJoin', []],
+    ['voiceJoin', ['general']],
+    ['voiceJoin', [null]],
+    ['voiceJoin', [[]]],
+    ['voiceJoin', [{ channel: 'general', muted: false }]],
+    // The protocol's own rules (validChannel, validDeviceName): a blank
+    // channel, a lone surrogate, and a quote or backslash in a device name.
+    ['voiceJoin', [{ channel: '   ', muted: false, deafened: false }]],
+    ['voiceJoin', [{ channel: 'gen\ud800eral', muted: false, deafened: false }]],
+    ['voiceSetDevices', [{ input: 'Mic "USB"' }]],
+    ['voiceSetDevices', [{ output: 'Speakers\\1' }]],
+    ['voiceJoin', [{ muted: false, deafened: false }]],
+    ['voiceJoin', [{ ...join, extra: 1 }]],
+    ['voiceJoin', [{ ...join, token: 't' }]],
+    ['voiceJoin', [{ ...join, helperPath: '/bin/sh' }]],
+    ['voiceJoin', [{ ...join, channel: '' }]],
+    ['voiceJoin', [{ ...join, channel: 5 }]],
+    ['voiceJoin', [{ ...join, channel: 'a\nb' }]],
+    ['voiceJoin', [{ ...join, channel: 'a\u0000b' }]],
+    ['voiceJoin', [{ ...join, channel: 'x'.repeat(401) }]],
+    ['voiceJoin', [{ ...join, channel: '\u00e9'.repeat(201) }]],
+    ['voiceJoin', [{ ...join, muted: 'no' }]],
+    ['voiceJoin', [{ ...join, deafened: 0 }]],
+    ['voiceJoin', [join, 'extra']],
+    ['voiceSetMute', []],
+    ['voiceSetMute', ['true']],
+    ['voiceSetMute', [1]],
+    ['voiceSetMute', [{ muted: true }]],
+    ['voiceSetMute', [true, false]],
+    ['voiceSetDeafen', [null]],
+    ['voiceSetDeafen', ['false']],
+    ['voiceSetDevices', []],
+    ['voiceSetDevices', [{}]],
+    ['voiceSetDevices', ['Mic']],
+    ['voiceSetDevices', [{ input: '' }]],
+    ['voiceSetDevices', [{ input: 5 }]],
+    ['voiceSetDevices', [{ input: 'a\nb' }]],
+    ['voiceSetDevices', [{ input: 'x'.repeat(256) }]],
+    ['voiceSetDevices', [{ output: 'x'.repeat(256) }]],
+    ['voiceSetDevices', [{ input: 'Mic', path: '/dev/snd' }]],
+    ['voiceSetDevices', [{ other: 'Mic' }]],
+    ['voiceSetDevices', [{ input: 'Mic' }, 'extra']],
+    ['voiceSetTalkMode', []],
+    ['voiceSetTalkMode', ['hold']],
+    ['voiceSetTalkMode', ['press']],
+    ['voiceSetTalkMode', ['OPEN']],
+    ['voiceSetTalkMode', [{ mode: 'open' }]],
+    ['voiceSetTalkMode', ['open', 'extra']],
+    ['voiceSetTalkMode', ['toString']],
+    ['voiceKeyDevices', [1]],
+    ['voiceSaveTalkBinding', []],
+    ['voiceSaveTalkBinding', [{ deviceId: 'abc' }]],
+    ['voiceSaveTalkBinding', [{ code: 275 }]],
+    ['voiceSaveTalkBinding', [{ deviceId: 'abc', code: 275, extra: 1 }]],
+    ['voiceSaveTalkBinding', [{ deviceId: '/dev/input/by-id/x-event-kbd', code: 275 }]],
+    ['voiceSaveTalkBinding', [{ deviceId: '', code: 275 }]],
+    ['voiceSaveTalkBinding', [{ deviceId: 'x'.repeat(65), code: 275 }]],
+    ['voiceSaveTalkBinding', [{ deviceId: 5, code: 275 }]],
+    ['voiceSaveTalkBinding', [{ deviceId: 'abc', code: 0 }]],
+    ['voiceSaveTalkBinding', [{ deviceId: 'abc', code: 768 }]],
+    ['voiceSaveTalkBinding', [{ deviceId: 'abc', code: 1.5 }]],
+    ['voiceSaveTalkBinding', [{ deviceId: 'abc', code: -1 }]],
+    ['voiceSaveTalkBinding', [{ deviceId: 'abc', code: '275' }]],
+    ['voiceSaveTalkBinding', [{ deviceId: 'abc', code: 'KEY_F13' }]],
+    ['voiceSaveTalkBinding', [{ deviceId: 'abc', code: Number.NaN }]],
+    ['voiceSaveTalkBinding', [{ deviceId: 'abc', code: 275 }, 'extra']],
+    ['voiceDevices', [1]],
+    ['voiceDevices', ['--json']],
+    ['voiceSaveDevice', []],
+    ['voiceSaveDevice', ['audio.input']],
+    ['voiceSaveDevice', [{ key: 'audio.input' }]],
+    ['voiceSaveDevice', [{ value: 'Mic' }]],
+    ['voiceSaveDevice', [{ key: 'audio.input', value: 'Mic', extra: 1 }]],
+    ['voiceSaveDevice', [{ key: 'audio.input', value: 'Mic' }, 'extra']],
+    // Only the keys D3-7 saves; the key bindings are D3-10.
+    ['voiceSaveDevice', [{ key: 'keys.talk', value: 'KEY_F13' }]],
+    ['voiceSaveDevice', [{ key: 'keys.device', value: '/dev/input/by-id/x' }]],
+    ['voiceSaveDevice', [{ key: 'server', value: 'http://evil.example' }]],
+    ['voiceSaveDevice', [{ key: 'audio.release_tail_ms', value: '100' }]],
+    ['voiceSaveDevice', [{ key: '--help', value: 'Mic' }]],
+    ['voiceSaveDevice', [{ key: 'toString', value: 'Mic' }]],
+    ['voiceSaveDevice', [{ key: 5, value: 'Mic' }]],
+    ['voiceSaveDevice', [{ key: 'audio.input', value: 5 }]],
+    ['voiceSaveDevice', [{ key: 'audio.input', value: '' }]],
+    ['voiceSaveDevice', [{ key: 'audio.input', value: 'a"b' }]],
+    ['voiceSaveDevice', [{ key: 'audio.output', value: 'a\\b' }]],
+    ['voiceSaveDevice', [{ key: 'audio.input', value: 'a\nb' }]],
+    ['voiceSaveDevice', [{ key: 'audio.input', value: 'a\u2028b' }]],
+    ['voiceSaveDevice', [{ key: 'audio.input', value: 'a\ud800b' }]],
+    ['voiceSaveDevice', [{ key: 'audio.input', value: 'x'.repeat(256) }]],
+    ['voiceSaveDevice', [{ key: 'audio.talk_mode', value: 'hold' }]],
+    ['voiceSaveDevice', [{ key: 'audio.talk_mode', value: 'default' }]],
+    ['voiceSaveDevice', [{ key: 'audio.talk_mode', value: 'OPEN' }]],
+  ])('refuses a bad argument before the service is called: %s %j', async (name, args) => {
+    const f = fixture();
+    f.input.recent = true;
+    expect(await f.ipc.invoke(f.event(), name, args)).toEqual({ ok: false, kind: 'refused' });
+    expect(f.calls).toEqual([]);
+  });
+
+  it('accepts a channel of exactly the byte cap and refuses one byte over', async () => {
+    const f = fixture();
+    f.input.recent = true;
+    expect((await f.ipc.invoke(f.event(), 'voiceJoin', [{ ...join, channel: 'x'.repeat(400) }])).ok).toBe(true);
+    expect((await f.ipc.invoke(f.event(), 'voiceJoin', [{ ...join, channel: 'x'.repeat(401) }])).ok).toBe(false);
+    // Two bytes a character: 200 fit, 201 do not.
+    expect((await f.ipc.invoke(f.event(), 'voiceJoin', [{ ...join, channel: '\u00e9'.repeat(200) }])).ok).toBe(true);
+    expect((await f.ipc.invoke(f.event(), 'voiceJoin', [{ ...join, channel: '\u00e9'.repeat(201) }])).ok).toBe(false);
+  });
+
+  it('refuses an oversized or non-plain argument before it is parsed', async () => {
+    const f = fixture();
+    f.input.recent = true;
+    expect(await f.ipc.invoke(f.event(), 'voiceJoin', [{ ...join, channel: 'x'.repeat(5000) }])).toEqual({ ok: false, kind: 'refused' });
+    expect(f.logs.at(-1)).toContain('(size)');
+    expect(await f.ipc.invoke(f.event(), 'voiceSetMute', [new Boolean(true)])).toEqual({ ok: false, kind: 'refused' });
+    expect(await f.ipc.invoke(f.event(), 'voiceJoin', [Object.assign(Object.create({ inherited: 1 }) as object, join)])).toEqual({ ok: false, kind: 'refused' });
+    expect(f.calls).toEqual([]);
+  });
+
+  it.each([
+    ['voiceJoin', [{ channel: 'general', muted: false, deafened: false }]],
+    ['voiceRetry', []],
+    ['voiceSetTalkMode', ['open']],
+    ['voiceSaveDevice', [{ key: 'audio.input', value: 'Mic' }]],
+    ['voiceSaveTalkBinding', [{ deviceId: 'abc', code: 275 }]],
+  ] as const)('refuses %s without a recent gesture and executes nothing', async (name, args) => {
+    const f = fixture();
+    expect(await f.ipc.invoke(f.event(), name, args)).toEqual({ ok: false, kind: 'refused' });
+    expect(f.logs.at(-1)).toContain('(gesture)');
+    expect(f.calls).toEqual([]);
+    f.input.recent = true;
+    expect((await f.ipc.invoke(f.event(), name, args)).ok).toBe(true);
+    expect(f.calls).toHaveLength(1);
+  });
+
+  it('needs no gesture to leave, mute, deafen, set devices or choose push-to-talk, nor to read the state', async () => {
+    const f = fixture();
+    for (const [name, args] of [
+      ['voiceState', []],
+      ['voiceDevices', []],
+      ['voiceKeyDevices', []],
+      ['voiceLeave', []],
+      ['voiceSetMute', [true]],
+      ['voiceSetDeafen', [true]],
+      ['voiceSetDevices', [{ input: 'Mic' }]],
+      ['voiceSetTalkMode', ['push_to_talk']],
+    ] as const) {
+      expect((await f.ipc.invoke(f.event(), name, args)).ok, name).toBe(true);
+    }
+    expect(f.ipc.refusals).toBe(0);
+  });
+
+  it('does not ask for a gesture of an open-mic request that is refused for its shape', async () => {
+    const f = fixture();
+    const asked: number[] = [];
+    const ipc = new Ipc({
+      owned: () => f.contents, gate: f.gate, service: {} as Service, feeds: {} as Feeds, files: {} as Files, profiles: {} as ProfilesApi, voice: {} as VoiceApi, settings: {} as SettingsApi, installed: {} as InstalledApi, notifications: {} as NotificationsApi, invites: {} as InvitesApi,
+      gestures: { take: (_c, within) => { asked.push(within); return 'pointer'; } }, now: () => 0, log: () => undefined,
+    });
+    await ipc.invoke(f.event(), 'voiceSetTalkMode', ['bogus']);
+    expect(asked).toEqual([]);
+  });
+
+  const callerCases: [string, (f: Fixture) => InvokeEvent][] = [
+    ['a subframe', (f) => f.event({ senderFrame: frame('frame-2', { parent: f.main }) })],
+    ['another window', (f) => f.event({ sender: { isDestroyed: () => false, mainFrame: f.main } })],
+    ['a destroyed sender', (f) => { f.contents.destroyed = true; return f.event(); }],
+    ['a stale document generation', (f) => { f.gate.begin(); return f.event(); }],
+    ['a foreign origin', (f) => f.event({ senderFrame: frame('frame-1', { url: 'https://evil.example/' }) })],
+  ];
+
+  it.each(callerCases)('refuses every voice function from %s and calls the service for none', async (_name, make) => {
+    const f = fixture();
+    f.input.recent = true;
+    const event = make(f);
+    const calls: [string, unknown[]][] = [
+      ['voiceState', []], ['voiceJoin', [join]], ['voiceLeave', []], ['voiceRetry', []], ['voiceSetMute', [true]],
+      ['voiceSetDeafen', [true]], ['voiceSetDevices', [{ input: 'Mic' }]], ['voiceSetTalkMode', ['open']],
+      ['voiceDevices', []], ['voiceSaveDevice', [{ key: 'audio.input', value: 'Mic' }]],
+      ['voiceKeyDevices', []], ['voiceSaveTalkBinding', [{ deviceId: 'abc', code: 275 }]],
+    ];
+    expect(calls.map(([name]) => name).sort()).toEqual([...VOICE_FUNCTIONS].sort());
+    for (const [name, args] of calls) expect(await f.ipc.invoke(event, name, args), name).toEqual({ ok: false, kind: 'refused' });
+    expect(f.calls).toEqual([]);
+  });
+
+  it('says only "refused" when the service throws, and logs no argument', async () => {
+    const f = fixture();
+    f.input.recent = true;
+    const ipc = new Ipc({
+      owned: () => f.contents, gate: f.gate, service: {} as Service, feeds: {} as Feeds, files: {} as Files, profiles: {} as ProfilesApi,
+      voice: { join: () => { throw new Error('boom secret-channel'); } } as unknown as VoiceApi, settings: {} as SettingsApi, installed: {} as InstalledApi,
+      notifications: {} as NotificationsApi, invites: {} as InvitesApi,
+      gestures: { take: () => 'pointer' }, now: () => 0, log: (line) => f.logs.push(line),
+    });
+    expect(await ipc.invoke(f.event(), 'voiceJoin', [{ ...join, channel: 'secret-channel' }])).toEqual({ ok: false, kind: 'refused' });
+    expect(f.logs.join('\n')).not.toContain('secret-channel');
+  });
+
+  it.each([
+    ['voiceState', [], 600],
+    ['voiceJoin', [join], 20],
+    ['voiceLeave', [], 60],
+    ['voiceRetry', [], 20],
+    ['voiceSetMute', [true], 120],
+    ['voiceSetDeafen', [true], 120],
+    ['voiceSetDevices', [{ input: 'Mic' }], 30],
+    ['voiceSetTalkMode', ['open'], 30],
+  ] as const)('limits %s to its own budget a minute', async (name, args, limit) => {
+    const f = fixture();
+    f.input.recent = true;
+    let accepted = 0;
+    for (let i = 0; i < limit + 5; i++) if ((await f.ipc.invoke(f.event(), name, args)).ok) accepted++;
+    expect(accepted).toBe(limit);
+    expect(f.logs.at(-1)).toContain('(rate)');
+    f.clock.now += 60_001;
+    expect((await f.ipc.invoke(f.event(), name, args)).ok).toBe(true);
+  });
+});
+
+describe('the companion family (issue #1579)', () => {
+  const grant = { channel: 'general' };
+
+  it('passes the parsed arguments to the companion and gives its answer back', async () => {
+    const f = fixture();
+    f.input.recent = true;
+    expect(await f.ipc.invoke(f.event(), 'companionGrant', [grant])).toEqual({ ok: true, value: { ran: 'companion.grant' } });
+    expect(await f.ipc.invoke(f.event(), 'companionEnd', [])).toEqual({ ok: true, value: { ran: 'companion.stop' } });
+    expect(f.calls).toEqual([
+      ['companion.grant', [grant]],
+      ['companion.stop', []],
+    ]);
+    expect(f.ipc.refusals).toBe(0);
+  });
+
+  it.each([
+    ['companionGrant', []],
+    ['companionGrant', ['general']],
+    ['companionGrant', [null]],
+    ['companionGrant', [[]]],
+    ['companionGrant', [{}]],
+    ['companionGrant', [{ ...grant, extra: 1 }]],
+    ['companionGrant', [{ ...grant, token: 't' }]],
+    ['companionGrant', [{ ...grant, publish: 'screen' }]],
+    ['companionGrant', [{ ...grant, subscribe: true }]],
+    ['companionGrant', [{ ...grant, livekitUrl: 'wss://evil.example' }]],
+    ['companionGrant', [{ channel: '' }]],
+    ['companionGrant', [{ channel: '   ' }]],
+    ['companionGrant', [{ channel: 5 }]],
+    ['companionGrant', [{ channel: 'a\nb' }]],
+    ['companionGrant', [{ channel: 'a\u2028b' }]],
+    ['companionGrant', [{ channel: 'gen\ud800eral' }]],
+    ['companionGrant', [{ channel: 'x'.repeat(401) }]],
+    ['companionGrant', [grant, 'extra']],
+    ['companionEnd', [1]],
+    ['companionEnd', [{}]],
+    ['companionEnd', ['general']],
+  ])('refuses a bad argument before the companion is called: %s %j', async (name, args) => {
+    const f = fixture();
+    f.input.recent = true;
+    expect(await f.ipc.invoke(f.event(), name, args)).toEqual({ ok: false, kind: 'refused' });
+    expect(f.calls).toEqual([]);
+  });
+
+  it('refuses an oversized or non-plain argument before it is parsed', async () => {
+    const f = fixture();
+    f.input.recent = true;
+    expect(await f.ipc.invoke(f.event(), 'companionGrant', [{ channel: 'x'.repeat(5000) }])).toEqual({ ok: false, kind: 'refused' });
+    expect(f.logs.at(-1)).toContain('(size)');
+    expect(await f.ipc.invoke(f.event(), 'companionGrant', [Object.assign(Object.create({ inherited: 1 }) as object, grant)])).toEqual({ ok: false, kind: 'refused' });
+    expect(f.calls).toEqual([]);
+  });
+
+  it('refuses a grant without a recent gesture and executes nothing', async () => {
+    const f = fixture();
+    expect(await f.ipc.invoke(f.event(), 'companionGrant', [grant])).toEqual({ ok: false, kind: 'refused' });
+    expect(f.logs.at(-1)).toContain('(gesture)');
+    expect(f.calls).toEqual([]);
+    f.input.recent = true;
+    expect((await f.ipc.invoke(f.event(), 'companionGrant', [grant])).ok).toBe(true);
+    expect(f.calls).toHaveLength(1);
+  });
+
+  it.each([['companionEnd'], ['shareArm']])('%s: extra arguments are refused', async (name) => {
+    const f = fixture();
+    f.input.recent = true;
+    expect(await f.ipc.invoke(f.event(), name, ['x'])).toEqual({ ok: false, kind: 'refused' });
+  });
+
+  it('needs no gesture to end the companion', async () => {
+    const f = fixture();
+    expect((await f.ipc.invoke(f.event(), 'companionEnd', [])).ok).toBe(true);
+    expect(f.ipc.refusals).toBe(0);
+  });
+
+  const callerCases: [string, (f: Fixture) => InvokeEvent][] = [
+    ['a subframe', (f) => f.event({ senderFrame: frame('frame-2', { parent: f.main }) })],
+    ['another window', (f) => f.event({ sender: { isDestroyed: () => false, mainFrame: f.main } })],
+    ['a destroyed sender', (f) => { f.contents.destroyed = true; return f.event(); }],
+    ['a stale document generation', (f) => { f.gate.begin(); return f.event(); }],
+    ['a foreign origin', (f) => f.event({ senderFrame: frame('frame-1', { url: 'https://evil.example/' }) })],
+  ];
+
+  it.each(callerCases)('refuses every companion function from %s and calls the companion for none', async (_name, make) => {
+    const f = fixture();
+    f.input.recent = true;
+    const event = make(f);
+    const calls: [string, unknown[]][] = [['companionGrant', [grant]], ['companionEnd', []], ['shareArm', []]];
+    expect(calls.map(([name]) => name).sort()).toEqual([...COMPANION_FUNCTIONS].sort());
+    for (const [name, args] of calls) expect(await f.ipc.invoke(event, name, args), name).toEqual({ ok: false, kind: 'refused' });
+    expect(f.calls).toEqual([]);
+  });
+
+  it.each([
+    ['companionGrant', [grant], 20],
+    ['companionEnd', [], 60],
+    ['shareArm', [], 20],
+  ] as const)('limits %s to its own budget a minute', async (name, args, limit) => {
+    const f = fixture();
+    f.input.recent = true;
+    let accepted = 0;
+    for (let i = 0; i < limit + 5; i++) if ((await f.ipc.invoke(f.event(), name, args)).ok) accepted++;
+    expect(accepted).toBe(limit);
+    expect(f.logs.at(-1)).toContain('(rate)');
+    f.clock.now += 60_001;
+    expect((await f.ipc.invoke(f.event(), name, args)).ok).toBe(true);
+  });
+
+  it('refuses every grant as failed, and holds nothing, when no companion is wired', async () => {
+    const f = fixture();
+    const ipc = new Ipc({
+      owned: () => f.contents, gate: f.gate, service: {} as Service, feeds: {} as Feeds, files: {} as Files, profiles: {} as ProfilesApi, voice: {} as VoiceApi, settings: {} as SettingsApi, installed: {} as InstalledApi, notifications: {} as NotificationsApi, invites: {} as InvitesApi,
+      gestures: { take: () => 'pointer' }, now: () => 0, log: () => undefined,
+    });
+    expect(await ipc.invoke(f.event(), 'companionGrant', [grant])).toEqual({ ok: true, value: { ok: false, error: 'failed' } });
+    expect(await ipc.invoke(f.event(), 'companionEnd', [])).toEqual({ ok: true, value: false });
+  });
+
+  it('says only "refused" when the companion throws, and logs no argument', async () => {
+    const f = fixture();
+    const ipc = new Ipc({
+      owned: () => f.contents, gate: f.gate, service: {} as Service, feeds: {} as Feeds, files: {} as Files, profiles: {} as ProfilesApi, voice: {} as VoiceApi, settings: {} as SettingsApi, installed: {} as InstalledApi, notifications: {} as NotificationsApi, invites: {} as InvitesApi,
+      companion: { grant: () => { throw new Error('boom secret-channel'); } } as unknown as CompanionApi,
+      gestures: { take: () => 'pointer' }, now: () => 0, log: (line) => f.logs.push(line),
+    });
+    expect(await ipc.invoke(f.event(), 'companionGrant', [{ channel: 'secret-channel' }])).toEqual({ ok: false, kind: 'refused' });
+    expect(f.logs.join('\n')).not.toContain('secret-channel');
+  });
+});
+
+describe('voice events (issue #1374)', () => {
+  const view: NativeVoiceView = { status: 'idle', generation: 1, channel: null, retryable: false };
+
+  function target(committed: boolean, present = true) {
+    const sent: [string, unknown][] = [];
+    const gate = new DocumentGate();
+    gate.begin();
+    if (committed) gate.commit({ frameToken: 'f' });
+    return { sent, gate, target: { contents: () => (present ? { send: (c: string, v: NativeVoiceView) => void sent.push([c, v]) } : null), gate: () => gate } };
+  }
+
+  it('sends the view on the voice channel to the owned contents while its document is committed', () => {
+    const t = target(true);
+    deliverVoice(t.target, view);
+    expect(t.sent).toEqual([[VOICE_EVENTS, view]]);
+  });
+
+  it('sends nothing to a document that has begun but not committed, or after it ends, or with no window', () => {
+    const uncommitted = target(false);
+    deliverVoice(uncommitted.target, view);
+    const ended = target(true);
+    ended.gate.begin();
+    deliverVoice(ended.target, view);
+    const gone = target(true, false);
+    deliverVoice(gone.target, view);
+    expect([uncommitted.sent, ended.sent, gone.sent]).toEqual([[], [], []]);
+  });
+});
+
+describe('the update family (issue #1600)', () => {
+  it('state is a plain read; restart runs only after a gesture and only with a recent one', async () => {
+    const f = fixture();
+    expect(await f.ipc.invoke(f.event(), 'updateState', [])).toEqual({ ok: true, value: { ran: 'installed.view' } });
+    expect(await f.ipc.invoke(f.event(), 'updateRestart', [])).toEqual({ ok: false, kind: 'refused' });
+    expect(f.logs.at(-1)).toContain('(gesture)');
+    expect(f.calls.map(([name]) => name)).toEqual(['installed.view']);
+    f.input.recent = true;
+    expect((await f.ipc.invoke(f.event(), 'updateRestart', [])).ok).toBe(true);
+    expect(f.calls.map(([name]) => name)).toEqual(['installed.view', 'installed.restart']);
+  });
+
+  it('takes no argument', async () => {
+    const f = fixture();
+    f.input.recent = true;
+    for (const name of ['updateState', 'updateRestart'] as const) expect(await f.ipc.invoke(f.event(), name, ['x']), name).toEqual({ ok: false, kind: 'refused' });
+    expect(f.calls).toEqual([]);
+  });
+
+  it('is refused from a stale document', async () => {
+    const f = fixture();
+    f.input.recent = true;
+    f.gate.begin();
+    for (const name of ['updateState', 'updateRestart'] as const) expect(await f.ipc.invoke(f.event(), name, []), name).toEqual({ ok: false, kind: 'refused' });
+    expect(f.calls).toEqual([]);
+  });
+});
+
+describe('the share allowance through the companion family (issue #1580)', () => {
+  const grant = { channel: 'general' };
+
+  // arm is the page's shareArm() on a click: the act is taken, then gone.
+  async function arm(f: Fixture): Promise<unknown> {
+    f.input.recent = true;
+    const result = await f.ipc.invoke(f.event(), 'shareArm', []);
+    f.input.recent = false;
+    return result;
+  }
+
+  it('shareArm needs the person’s act and arms nothing without it', async () => {
+    const f = fixture();
+    expect(await f.ipc.invoke(f.event(), 'shareArm', [])).toEqual({ ok: false, kind: 'refused' });
+    expect(f.logs.at(-1)).toContain('(gesture)');
+    expect(f.share.takeGrant(f.contents)).toBe(false);
+    expect(f.share.peekCapture(f.contents)).toBe(false);
+  });
+
+  it('the cold path: shareArm, then a grant and a capture, from one click', async () => {
+    const f = fixture();
+    expect(await arm(f)).toEqual({ ok: true, value: true });
+    // No click of its own: the grant rides on the allowance.
+    expect(await f.ipc.invoke(f.event(), 'companionGrant', [grant])).toEqual({ ok: true, value: { ran: 'companion.grant' } });
+    expect(f.share.peekCapture(f.contents)).toBe(true);
+    expect(f.share.takeCapture(f.contents)).toBe(true);
+  });
+
+  it('a grant with neither a fresh act nor an allowance is refused', async () => {
+    const f = fixture();
+    expect(await f.ipc.invoke(f.event(), 'companionGrant', [grant])).toEqual({ ok: false, kind: 'refused' });
+    expect(f.calls).toEqual([]);
+  });
+
+  it('Watch still gets a grant from a fresh click, and keeps an armed allowance', async () => {
+    const f = fixture();
+    f.input.recent = true;
+    expect((await f.ipc.invoke(f.event(), 'companionGrant', [grant])).ok).toBe(true);
+    await arm(f);
+    f.input.recent = true;
+    expect((await f.ipc.invoke(f.event(), 'companionGrant', [grant])).ok).toBe(true);
+    f.input.recent = false;
+    expect(f.share.takeGrant(f.contents)).toBe(true);
+  });
+
+  it('the grant use is single: a second grant needs a new act', async () => {
+    const f = fixture();
+    await arm(f);
+    expect((await f.ipc.invoke(f.event(), 'companionGrant', [grant])).ok).toBe(true);
+    expect(await f.ipc.invoke(f.event(), 'companionGrant', [grant])).toEqual({ ok: false, kind: 'refused' });
+    expect(f.calls).toHaveLength(1);
+  });
+
+  it('the allowance expires', async () => {
+    const f = fixture();
+    await arm(f);
+    f.clock.now += 10_001;
+    expect(await f.ipc.invoke(f.event(), 'companionGrant', [grant])).toEqual({ ok: false, kind: 'refused' });
+  });
+
+  it('a new document finds no allowance', async () => {
+    const f = fixture();
+    await arm(f);
+    f.gate.begin();
+    f.gate.commit(f.main);
+    expect(await f.ipc.invoke(f.event(), 'companionGrant', [grant])).toEqual({ ok: false, kind: 'refused' });
+    expect(f.share.peekCapture(f.contents)).toBe(false);
+  });
+
+  it('arming again replaces the allowance with a fresh one', async () => {
+    const f = fixture();
+    await arm(f);
+    expect((await f.ipc.invoke(f.event(), 'companionGrant', [grant])).ok).toBe(true);
+    await arm(f);
+    expect((await f.ipc.invoke(f.event(), 'companionGrant', [grant])).ok).toBe(true);
+  });
+
+  it.each([
+    ['a subframe', (f: Fixture) => f.event({ senderFrame: frame('frame-2', { parent: f.main }) })],
+    ['another window', (f: Fixture) => f.event({ sender: { isDestroyed: () => false, mainFrame: f.main } })],
+  ])('%s cannot arm', async (_name, make) => {
+    const f = fixture();
+    f.input.recent = true;
+    expect(await f.ipc.invoke(make(f), 'shareArm', [])).toEqual({ ok: false, kind: 'refused' });
+    expect(f.share.takeGrant(f.contents)).toBe(false);
+    expect(f.share.takeCapture(f.contents)).toBe(false);
+  });
+
+  it('answers false and arms nothing when no share allowance is wired', async () => {
+    const f = fixture();
+    const ipc = new Ipc({
+      owned: () => f.contents, gate: f.gate, service: {} as Service, feeds: {} as Feeds, files: {} as Files, profiles: {} as ProfilesApi, voice: {} as VoiceApi, invites: {} as InvitesApi, notifications: {} as NotificationsApi, settings: {} as SettingsApi, installed: {} as InstalledApi,
+      gestures: { take: () => 'pointer' }, now: () => 0, log: () => undefined,
+    });
+    expect(await ipc.invoke(f.event(), 'shareArm', [])).toEqual({ ok: true, value: false });
+  });
+});
+
+describe('the invite functions (issue #1591)', () => {
+  const HANDLE = `invite-${'0'.repeat(32)}`;
+  const PROFILE = 'a'.repeat(32);
+
+  it('checks, cancels and takes without the person’s act, and passes the parsed arguments on', async () => {
+    const f = fixture();
+    await f.ipc.invoke(f.event(), 'inviteCheck', ['https://chat.example.org/app/#/invite/abc']);
+    await f.ipc.invoke(f.event(), 'inviteCancel', [HANDLE]);
+    await f.ipc.invoke(f.event(), 'inviteTake', []);
+    expect(f.calls).toEqual([
+      ['invites.check', ['https://chat.example.org/app/#/invite/abc']],
+      ['invites.cancel', [HANDLE]],
+      ['invites.take', []],
+    ]);
+    expect(f.ipc.refusals).toBe(0);
+  });
+
+  it('accepts only after a click or key in the window, and only a handle with one target', async () => {
+    const f = fixture();
+    expect(await f.ipc.invoke(f.event(), 'inviteAccept', [HANDLE, { profile: PROFILE }])).toEqual({ ok: false, kind: 'refused' });
+    expect(f.logs.at(-1)).toContain('(gesture)');
+    expect(f.calls).toEqual([]);
+    f.input.recent = true;
+    await f.ipc.invoke(f.event(), 'inviteAccept', [HANDLE, { profile: PROFILE }]);
+    await f.ipc.invoke(f.event(), 'inviteAccept', [HANDLE, { add: true }]);
+    expect(f.calls).toEqual([
+      ['invites.accept', [HANDLE, { profile: PROFILE }]],
+      ['invites.accept', [HANDLE, { add: true }]],
+    ]);
+  });
+
+  const malformed: [string, unknown[]][] = [
+    ['inviteCheck', []],
+    ['inviteCheck', [42]],
+    ['inviteCheck', ['a', 'b']],
+    ['inviteCheck', ['x'.repeat(5000)]],
+    ['inviteAccept', [HANDLE]],
+    ['inviteAccept', ['not-a-handle', { add: true }]],
+    ['inviteAccept', [HANDLE, { add: false }]],
+    ['inviteAccept', [HANDLE, { profile: 'short' }]],
+    ['inviteAccept', [HANDLE, { profile: PROFILE, add: true }]],
+    ['inviteAccept', [HANDLE, { add: true, code: 'secret' }]],
+    ['inviteAccept', [HANDLE, null]],
+    ['inviteCancel', ['invite-zz']],
+    ['inviteTake', ['extra']],
+  ];
+
+  it.each(malformed)('refuses %s with %j', async (name, args) => {
+    const f = fixture();
+    f.input.recent = true;
+    expect(await f.ipc.invoke(f.event(), name, args)).toEqual({ ok: false, kind: 'refused' });
+    expect(f.calls).toEqual([]);
+  });
+
+  it('logs no link or code when it refuses one', async () => {
+    const f = fixture();
+    await f.ipc.invoke(f.event(), 'inviteCheck', ['https://chat.example.org/app/#/invite/CANARY', 'x']);
+    expect(f.logs.join('\n')).not.toContain('CANARY');
+  });
+});
+
+describe('what works on this desktop (issue #1593)', () => {
+  it('reads without a gesture, takes no arguments, and passes nothing on', async () => {
+    const f = fixture();
+    expect(await f.ipc.invoke(f.event(), 'integrations', [])).toEqual({ ok: true, value: { ran: 'integrations.view' } });
+    expect(f.calls).toEqual([['integrations.view', []]]);
+    expect(await f.ipc.invoke(f.event(), 'integrations', ['x'])).toEqual({ ok: false, kind: 'refused' });
+  });
+});
+
+describe('the settings family (issue #1587)', () => {
+  it('reads without a gesture and passes a change on only after one', async () => {
+    const f = fixture();
+    expect((await f.ipc.invoke(f.event(), 'settings', [])).ok).toBe(true);
+    expect(await f.ipc.invoke(f.event(), 'settingsSet', [{ launchAtLogin: true }])).toEqual({ ok: false, kind: 'refused' });
+    expect(f.calls.map(([name]) => name)).toEqual(['settings.view']);
+    f.input.recent = true;
+    expect(await f.ipc.invoke(f.event(), 'settingsSet', [{ closeToTray: false, launchAtLogin: true }])).toEqual({ ok: true, value: { ran: 'settings.set' } });
+    expect(f.calls[1]).toEqual(['settings.set', [{ closeToTray: false, launchAtLogin: true }]]);
+    expect(await f.ipc.invoke(f.event(), 'settingsSet', [{ trayConfirmed: true }])).toEqual({ ok: true, value: { ran: 'settings.set' } });
+    expect(f.calls[2]).toEqual(['settings.set', [{ trayConfirmed: true }]]);
+  });
+
+  it.each([
+    ['no change', [{}]],
+    ['no argument', []],
+    ['an unknown key', [{ launchAtLogin: true, theme: 'dark' }]],
+    ['a non-boolean', [{ launchAtLogin: 'yes' }]],
+    ['a non-boolean confirmation', [{ trayConfirmed: 1 }]],
+    ['a null', [{ closeToTray: null }]],
+    ['an array', [[true]]],
+    ['two arguments', [{ launchAtLogin: true }, {}]],
+  ])('refuses %s as a shape, even with a gesture', async (_name, args) => {
+    const f = fixture();
+    f.input.recent = true;
+    expect(await f.ipc.invoke(f.event(), 'settingsSet', args)).toEqual({ ok: false, kind: 'refused' });
+    expect(f.calls).toEqual([]);
   });
 });

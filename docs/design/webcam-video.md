@@ -202,6 +202,7 @@ B keeps the server's view honest in the strongest sense: a camera exists only be
   - **The caller's standing is decided before the principal is looked up.** The caller must hold `manage_channels`. Owners always do.
   - An operator does not have to be a member, as for the share stop.
   - Anyone else, including an operator without `manage_channels`, gets 403 `permission_denied` (`permission: manage_channels`), audited `access_denied`.
+  - **Only a human has standing (#1546).** An agent holding `manage_channels` (possible only through the admin door's dispatch) is treated as having none: a member agent gets the 403 above, a non-member agent the 404. Agents do not moderate voice.
   - A non-member without `manage_channels` gets the uniform 404 first, and learns nothing.
   - For a caller with standing, an **unknown principal id answers 204**, exactly as a known principal with no claim does. The route never says whether a person exists.
   - **`started_at` with `principal` naming someone else is 400 `invalid_request`**: the operator stops the camera, not a particular claim, and the parameter has no meaning there.
@@ -440,6 +441,8 @@ The call view is drawn **on the stage**, the element that carries the watched sh
 - **It opens** when the person turns their own camera on, or presses **Show video**. That button appears in the voice controls while anyone in the room has a camera on, and says how many: "Show video (2)".
 - **It closes** on **Hide video** or on leaving.
 - It is **not opened for people automatically** when someone else turns a camera on. Voice in Conch is per channel and the conversation is central (browser-ui-polish §1), so someone else's camera must not push the chat away or start using a phone's data (O8).
+
+**Streams share the grid.** A screen share ([voice-multi-share.md](voice-multi-share.md), #1483) is a tile in this grid beside the cameras, up to `voiceShareCap = 6` of them. It shows the sharer, the declared quality and a **Watch** button, and nothing is received until the viewer presses it (O8 holds for streams as it does for cameras). Stream tiles and camera tiles count together against the 3 × 3 grid below.
 
 **Tiles.** While the room has at most 9 people in voice, every person in voice gets a tile. A tile without a camera shows the person's initial, name and "Camera off". With more than 9 people, only the cameras get tiles (at most 9, by the cap), and everyone is on the roster as today.
 

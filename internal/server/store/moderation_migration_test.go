@@ -41,11 +41,15 @@ func TestModerationMigrationFromSchema44(t *testing.T) {
 	s, path := migrateTo(t, moderationMigration-1, seed)
 	ctx := context.Background()
 
-	readable := func(pass int) {
+	// banned: the bans the test writes between the passes (sam, id 2, and the
+	// guest, id 3) are in force by the second pass, since issue #851: a banned
+	// principal's membership row grants nothing, so the guest reads no history
+	// and neither is listed.
+	readable := func(pass int, banned bool) {
 		t.Helper()
 		var version int
-		if err := s.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != len(migrations) || version != moderationMigration {
-			t.Errorf("pass %d: user_version = %d, %v; want %d", pass, version, err, moderationMigration)
+		if err := s.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != len(migrations) || version < moderationMigration {
+			t.Errorf("pass %d: user_version = %d, %v; want %d (the newest)", pass, version, err, len(migrations))
 		}
 		// The member sees everything, as before.
 		got, err := s.ListVisibleMessages(ctx, 1, Reader{PrincipalID: 1, Scoped: true}, 0, 10)
@@ -67,6 +71,15 @@ func TestModerationMigrationFromSchema44(t *testing.T) {
 			{3, "agreed", 1, false, 2},
 		} {
 			m := got[i]
+			// Message 2 is removed from the second pass on (issue #852): it
+			// reads as the tombstone, with its attribution and place intact.
+			removed := pass == 2 && want.id == 2
+			if removed {
+				want.body = schema.MessageRemovedBody
+			}
+			if m.Removed != removed {
+				t.Errorf("pass %d: message %d removed = %v, want %v", pass, m.ID, m.Removed, removed)
+			}
 			if m.ID != want.id || m.Body != want.body || m.ThreadRootID != want.root || m.AuthorID != want.authorID || !m.EditedAt.IsZero() || m.Payload != nil {
 				t.Errorf("pass %d: message %d = %+v; want id %d, body %q, root %d, author %d, no edit, no payload", pass, i, m, want.id, want.body, want.root, want.authorID)
 			}
@@ -85,15 +98,23 @@ func TestModerationMigrationFromSchema44(t *testing.T) {
 		if err != nil {
 			t.Fatalf("pass %d: the guest's ListVisibleMessages: %v", pass, err)
 		}
-		if len(got) != 1 || got[0].ID != 2 {
+		if banned {
+			if len(got) != 0 {
+				t.Errorf("pass %d: the banned guest sees %+v; want nothing", pass, got)
+			}
+		} else if len(got) != 1 || got[0].ID != 2 {
 			t.Errorf("pass %d: the guest sees %+v; want message 2 alone", pass, got)
 		}
 		members, err := s.ListChannelMembers(ctx, 1)
 		if err != nil {
 			t.Fatalf("pass %d: ListChannelMembers: %v", pass, err)
 		}
-		if len(members) != 3 {
-			t.Fatalf("pass %d: %d members, want 3", pass, len(members))
+		wantMembers := 3
+		if banned {
+			wantMembers = 1
+		}
+		if len(members) != wantMembers {
+			t.Fatalf("pass %d: %d members, want %d", pass, len(members), wantMembers)
 		}
 		for _, m := range members {
 			isGuest := m.PrincipalID == 3
@@ -115,7 +136,7 @@ func TestModerationMigrationFromSchema44(t *testing.T) {
 		}
 	}
 
-	readable(1)
+	readable(1, false)
 	if n := countRows(t, s, "channel_bans"); n != 0 {
 		t.Errorf("channel_bans has %d rows after the upgrade, want none", n)
 	}
@@ -167,7 +188,7 @@ func TestModerationMigrationFromSchema44(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = s.Close() }()
-	readable(2)
+	readable(2, true)
 	if n := countRows(t, s, "channel_bans"); n != 2 {
 		t.Errorf("channel_bans has %d rows after reopening, want 2", n)
 	}

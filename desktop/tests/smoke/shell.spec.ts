@@ -57,7 +57,7 @@ test.describe('the packaged shell', () => {
     expect(response.status()).toBe(200);
     const h = response.headers();
     expect(h['content-security-policy']).toBe(
-      "default-src 'none'; script-src 'self'; style-src 'self'; font-src 'self'; img-src 'self' blob: data:; connect-src 'none'; object-src 'none'; base-uri 'none'; frame-src 'none'; frame-ancestors 'none'; form-action 'none'; worker-src 'none'",
+      "default-src 'none'; script-src 'self'; style-src 'self'; font-src 'self'; img-src 'self' blob: data:; connect-src wss: https:; object-src 'none'; base-uri 'none'; frame-src 'none'; frame-ancestors 'none'; form-action 'none'; worker-src 'none'",
     );
     expect(h['x-content-type-options']).toBe('nosniff');
     expect(h['content-type']).toBe('text/html; charset=utf-8');
@@ -70,8 +70,26 @@ test.describe('the packaged shell', () => {
       'object',
       [
         'createAccount', 'joinAsGuest', 'keepCredential', 'redeemInvite', 'redeemInviteAsGuest', 'redeemSetupToken', 'redeemSignInLink', 'request', 'restore', 'resetPassword',
-        'serverAddress', 'signInWithCode', 'signInWithCredential', 'signInWithPassword', 'signOut', 'subscribe', 'uploadFile', 'downloadFile', 'saveFile',
+        'serverAddress', 'signInWithCode', 'signInWithCredential', 'signInWithPassword', 'signOut', 'replaceCredential', 'subscribe', 'uploadFile', 'downloadFile', 'saveFile',
         'profiles', 'profileAdd', 'profileRename', 'profileRemove', 'profileSwitch', 'storageRetry', 'profilesRecover',
+        // The voice family (#1374): state, commands and its event, and no press,
+        // release or transmit function.
+        'voiceState', 'voiceJoin', 'voiceLeave', 'voiceRetry', 'voiceSetMute', 'voiceSetDeafen', 'voiceSetDevices', 'voiceSetTalkMode', 'onVoiceState',
+        // One-shot helper runs (#1378).
+        'voiceDevices', 'voiceSaveDevice',
+        // Talk-key setup (#1381).
+        'voiceKeyDevices', 'voiceSaveTalkBinding',
+        // Opening an invite link (#1591).
+        'inviteCheck', 'inviteAccept', 'inviteCancel', 'inviteTake', 'inviteArrived', 'onInviteArrived',
+        // Desktop notifications (#1590): two calls, support and the click event.
+        'notify', 'notifyClose', 'notificationSupported', 'onNotification',
+        // The app's own settings (#1587), and what works here (#1593).
+        'settings', 'settingsSet', 'integrations',
+        // The screen companion (#1579): its grant, its end and its event; and
+        // the share allowance's arming (#1580).
+        'companionGrant', 'companionEnd', 'shareArm', 'onCompanion',
+        // The installed files replaced under the running app (#1600).
+        'updateState', 'updateRestart', 'onUpdateState',
       ].sort(),
       true,
     ]);
@@ -139,8 +157,10 @@ test.describe('the packaged shell', () => {
 
   test('makes no request that is not to its own files', async () => {
     await page.waitForTimeout(1_000);
-    // Main logs one line for each request it cancels; the renderer's
-    // connect-src is 'none', so a fetch never gets as far as main.
+    // Main logs one line for each request it cancels. The page makes none
+    // of its own; with no live companion grant a fetch to any https origin
+    // (the CSP's connect-src allows wss: and https:, Q-D4-1) is cancelled
+    // there (share.spec.ts reads the line).
     expect(app.output()).not.toContain('blocked a request');
     expect(await page.evaluate("fetch('https://example.com/').then(() => 'sent', () => 'refused')")).toBe('refused');
   });
@@ -195,6 +215,25 @@ test.describe('remote debugging', () => {
       expect(app.output()).toContain('conch-desktop: remote debugging is ON');
     } finally {
       await browser?.close();
+      await app.stop();
+    }
+  });
+});
+
+test.describe('screen capture switches', () => {
+  test('--disable-features=WebRTCPipeWireCapturer is refused, so one source cannot stand in for the portal pick', async () => {
+    const app = launch({ args: ['--disable-features=Other,WebRTCPipeWireCapturer'] });
+    try {
+      const done = await Promise.race([app.exited, new Promise<null>((r) => {
+        setTimeout(() => {
+          r(null);
+        }, 15_000);
+      }),
+      ]);
+      expect(done, 'the app kept running').not.toBeNull();
+      expect(done?.code).toBe(1);
+      expect(app.output()).toContain('refusing to start with WebRTCPipeWireCapturer turned off');
+    } finally {
       await app.stop();
     }
   });
