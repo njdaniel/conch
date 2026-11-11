@@ -64,6 +64,7 @@ import { clampTail, maxTail, releasePage, releaseStep } from './gate';
 import { keyLabel, talkKeyForMouseButton } from './keys';
 import { occupants, qualityLabel, sharers, type Occupant } from './presence';
 import { endedNote, ownPageNote, resumedNote, resumingNote, sharedNote, shortShareNote, soundNote, type ShareFrameRate, type ShareResolution } from './share';
+import { ShareQualityMenu, autoNote, cautionFor, estimateWords, resolutionWords, shareFrameRates, shareResolutions } from './ShareQualityMenu';
 import { ShareReadout, ShareView } from './ShareView';
 import { nobody, type InVoice } from './useOccupancy';
 import type { VoiceControl } from './useVoice';
@@ -1342,30 +1343,37 @@ function Options({ voice, open, sharable, about, others, cameraAllowed }: {
             Share resolution
             <select
               value={state.shareQuality.resolution}
+              aria-describedby="voice-share-estimate"
               onChange={(e) => {
                 const resolution = e.target.value as ShareResolution;
                 void client.setShareQuality({ ...state.shareQuality, resolution });
               }}
             >
-              <option value="720p">720p</option>
-              <option value="1080p">1080p</option>
-              <option value="source">Source</option>
+              {shareResolutions.map((resolution) => (
+                <option key={resolution} value={resolution}>{resolutionWords[resolution]}</option>
+              ))}
             </select>
           </label>
           <label>
             Share frame rate
             <select
               value={state.shareQuality.frameRate}
+              disabled={state.shareQuality.resolution === 'auto'}
               onChange={(e) => {
                 const frameRate = Number(e.target.value) as ShareFrameRate;
                 void client.setShareQuality({ ...state.shareQuality, frameRate });
               }}
             >
-              <option value={15}>15 fps</option>
-              <option value={30}>30 fps</option>
-              <option value={60}>60 fps</option>
+              {shareFrameRates.map((frameRate) => (
+                <option key={frameRate} value={frameRate}>{String(frameRate)} fps</option>
+              ))}
             </select>
           </label>
+          <p id="voice-share-estimate" className="hint">
+            {resolutionWords[state.shareQuality.resolution]}: {estimateWords(state.shareQuality)}.
+            {state.shareQuality.resolution === 'auto' ? ` ${autoNote}` : null}
+            {` ${cautionFor(state.shareQuality) ?? ''}`}
+          </p>
           <p className="hint">{soundNote(features)}</p>
           <p className="hint">{ownPageNote}</p>
         </section>
@@ -1383,10 +1391,13 @@ function ShareButton({ voice }: { readonly voice: VoiceControl }) {
   const share = state.share;
   if (state.listenOnly || !features.canShare || share.kind === 'stopping') return null;
   if (share.kind === 'idle') return (
-    <button type="button" onClick={() => { client.startShare(); }} disabled={state.phase !== 'connected'}>
-      <Glyph name="screen" />
-      <span className="label">Share screen</span>
-    </button>
+    <span className="share-split">
+      <button type="button" onClick={() => { client.startShare(); }} disabled={state.phase !== 'connected'}>
+        <Glyph name="screen" />
+        <span className="label">Share screen</span>
+      </button>
+      <ShareQualityMenu quality={state.shareQuality} onChoose={(next) => { void client.setShareQuality(next); }} />
+    </span>
   );
   return (
     <button type="button" className="sharing" onClick={() => { client.stopShare(); }}>
@@ -1437,7 +1448,7 @@ function ShareNotes({ voice, onMore, othersShare }: { readonly voice: VoiceContr
       return (
         <>
           <p role="status" className="sharing-note">{sharedNote(share.audio, features)}</p>
-          <p className="hint voice-supplemental"><ShareReadout client={client} direction="sent" prefix="Sending: " asked={state.shareQuality} /></p>
+          <p className="hint voice-supplemental"><ShareReadout client={client} direction="sent" prefix="Sending: " asked={state.shareQuality.resolution === 'auto' ? share.settled : { resolution: state.shareQuality.resolution, frameRate: state.shareQuality.frameRate }} /></p>
           {share.resumed === true ? <p className="hint">{resumedNote}</p> : null}
         </>
       );

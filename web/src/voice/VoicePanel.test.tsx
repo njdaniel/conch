@@ -9,7 +9,9 @@ import type { VoicePresenceV2 } from '../schema/voice';
 import type { Person } from '../useLiveChannel';
 import { initialVoice, VoiceClient, type Phase, type Processing, type VoiceState } from './connection';
 import { FakeClock } from './fakes';
-import { ownPageNote, soundNote, type ShareFeatures } from './share';
+import { ownPageNote, soundNote, type ShareFeatures, type ShareQuality } from './share';
+import { ShareQualityMenu, sourceSixtyNote } from './ShareQualityMenu';
+import { useState } from 'react';
 import { MicTestShown, VoiceLive, VoiceStrip } from '../phone';
 import type { Snapshot, VoiceControl } from './useVoice';
 import { followsNote, missingNote, noOtherOutputs, noOutputChoice, processingLabel, processingOffNote, processingUseNote, reportedNote, stoppedFor, thresholdHint, VoicePanel } from './VoicePanel';
@@ -1746,5 +1748,166 @@ describe('the compact call workspace (issue #1498)', () => {
     } finally {
       set.mockRestore();
     }
+  });
+});
+
+// The share quality chooser beside Share screen (issue #1659).
+describe('the share quality menu', () => {
+  const joined = (patch: Partial<VoiceState> = {}): VoiceState => ({ ...inVoice('connected', 'c'), ...patch });
+
+  // The menu with a state of its own, as the strip keeps one in the client.
+  function Harness({ start }: { readonly start: ShareQuality }) {
+    const [quality, setQuality] = useState(start);
+    return (
+      <>
+        <ShareQualityMenu quality={quality} onChoose={setQuality} />
+        <output aria-label="chosen">{`${quality.resolution}/${String(quality.frameRate)}`}</output>
+      </>
+    );
+  }
+  const chosen = () => screen.getByLabelText('chosen').textContent;
+  const opener = () => screen.getByRole('button', { name: 'Share quality' });
+  const key = (el: HTMLElement, k: string) => { fireEvent.keyDown(el, { key: k }); };
+
+  it('sits beside Share screen as a menu button, and Share screen alone still shares at once', () => {
+    const { voice } = panel(joined(), 'c');
+    const split = voice.querySelector('.share-split');
+    expect(split).not.toBeNull();
+    expect(within(voice).getByRole('button', { name: 'Share screen' })).toBeTruthy();
+    const button = within(voice).getByRole('button', { name: 'Share quality' });
+    expect(button.getAttribute('aria-haspopup')).toBe('menu');
+    expect(button.getAttribute('aria-expanded')).toBe('false');
+  });
+
+  it('opens on a click with the current choice checked, and shows each choice with an estimate', () => {
+    render(<Harness start={{ resolution: '1080p', frameRate: 30 }} />);
+    fireEvent.click(opener());
+    expect(opener().getAttribute('aria-expanded')).toBe('true');
+    const checked = screen.getAllByRole('menuitemradio', { checked: true }).map((el) => el.textContent);
+    expect(checked).toHaveLength(2);
+    expect(checked[0]).toContain('1080p');
+    expect(checked[1]).toBe('30 fps');
+    const names = screen.getAllByRole('menuitemradio').map((el) => el.textContent);
+    expect(names.slice(0, 4).map((n) => n.split('about')[0])).toEqual(['Auto', '720p', '1080p', 'Source (up to 4K)']);
+    for (const name of names.slice(0, 4)) expect(name).toMatch(/about \d+ Mbps up \(estimate\)/);
+  });
+
+  it('chooses by a click and stays open for a frame rate; the choice is the one checked', () => {
+    render(<Harness start={{ resolution: '1080p', frameRate: 30 }} />);
+    fireEvent.click(opener());
+    fireEvent.click(screen.getByRole('menuitemradio', { name: /^Source/ }));
+    fireEvent.click(screen.getByRole('menuitemradio', { name: '60 fps' }));
+    expect(chosen()).toBe('source/60');
+    expect(screen.getByRole('menuitemradio', { name: /^Source/ }).getAttribute('aria-checked')).toBe('true');
+    expect(screen.getByText(sourceSixtyNote)).toBeTruthy();
+  });
+
+  it.each([
+    { what: 'Source at 30 fps', start: { resolution: 'source', frameRate: 30 }, shown: false },
+    { what: 'Source at 60 fps', start: { resolution: 'source', frameRate: 60 }, shown: true },
+    { what: '1080p at 60 fps', start: { resolution: '1080p', frameRate: 60 }, shown: false },
+  ] as const)('says the 4K60 caution only for $what', ({ start, shown }) => {
+    render(<Harness start={start} />);
+    fireEvent.click(opener());
+    expect(screen.queryByText(sourceSixtyNote) !== null).toBe(shown);
+  });
+
+  it('Auto is 30 fps: the frame rates are off and the choice says what Auto does', () => {
+    render(<Harness start={{ resolution: '1080p', frameRate: 60 }} />);
+    fireEvent.click(opener());
+    fireEvent.click(screen.getByRole('menuitemradio', { name: /^Auto/ }));
+    expect(chosen()).toBe('auto/30');
+    for (const name of ['15 fps', '30 fps', '60 fps']) expect(screen.getByRole('menuitemradio', { name }).hasAttribute('disabled')).toBe(true);
+    expect(screen.getByText(/1920 px across/)).toBeTruthy();
+  });
+
+  it('works by keyboard: Down opens it at the checked choice, arrows move, Enter chooses, Escape returns focus to the button', async () => {
+    render(<Harness start={{ resolution: '1080p', frameRate: 30 }} />);
+    opener().focus();
+    key(opener(), 'ArrowDown');
+    await act(async () => { await Promise.resolve(); });
+    expect(opener().getAttribute('aria-expanded')).toBe('true');
+    const items = () => screen.getAllByRole('menuitemradio');
+    expect(document.activeElement).toBe(items()[2]);
+    key(document.activeElement as HTMLElement, 'ArrowDown');
+    expect(document.activeElement).toBe(items()[3]);
+    // Enter or Space on a focused button is a click, which is what chooses.
+    fireEvent.click(document.activeElement as HTMLElement);
+    expect(chosen()).toBe('source/30');
+    key(document.activeElement as HTMLElement, 'ArrowUp');
+    expect(document.activeElement).toBe(items()[2]);
+    key(document.activeElement as HTMLElement, 'Home');
+    expect(document.activeElement).toBe(items()[0]);
+    key(document.activeElement as HTMLElement, 'End');
+    expect(document.activeElement).toBe(items()[items().length - 1]);
+    key(document.activeElement as HTMLElement, 'Escape');
+    expect(opener().getAttribute('aria-expanded')).toBe('false');
+    expect(document.activeElement).toBe(opener());
+  });
+
+  it('wraps at the ends and skips the frame rates while Auto is chosen', async () => {
+    render(<Harness start={{ resolution: 'auto', frameRate: 30 }} />);
+    key(opener(), 'ArrowUp');
+    await act(async () => { await Promise.resolve(); });
+    const items = () => screen.getAllByRole('menuitemradio').filter((el) => !el.hasAttribute('disabled'));
+    expect(document.activeElement).toBe(items()[0]);
+    key(document.activeElement as HTMLElement, 'ArrowUp');
+    expect(document.activeElement).toBe(items()[items().length - 1]);
+    expect(items()).toHaveLength(4);
+  });
+
+  it('closes on a click outside, without taking focus', () => {
+    render(<><Harness start={{ resolution: '1080p', frameRate: 30 }} /><button type="button">elsewhere</button></>);
+    fireEvent.click(opener());
+    fireEvent.mouseDown(screen.getByRole('button', { name: 'elsewhere' }));
+    expect(opener().getAttribute('aria-expanded')).toBe('false');
+  });
+
+  it('the Voice options selects offer Auto and the relabelled Source, bound to the same choice', () => {
+    const { voice } = panel(joined({ shareQuality: { resolution: 'auto', frameRate: 30 } }), 'c');
+    fireEvent.click(within(voice).getByRole('button', { name: 'Voice options' }));
+    const resolution = within(voice).getByLabelText<HTMLSelectElement>('Share resolution');
+    expect(Array.from(resolution.options).map((o) => [o.value, o.textContent])).toEqual([['auto', 'Auto'], ['720p', '720p'], ['1080p', '1080p'], ['source', 'Source (up to 4K)']]);
+    expect(resolution.value).toBe('auto');
+    const rate = within(voice).getByLabelText<HTMLSelectElement>('Share frame rate');
+    expect(rate.disabled).toBe(true);
+    expect(rate.value).toBe('30');
+  });
+
+  it('names the notes it shows on the choices they are about', () => {
+    render(<Harness start={{ resolution: 'source', frameRate: 30 }} />);
+    fireEvent.click(opener());
+    const describes = () => screen.getAllByRole('menuitemradio').filter((el) => el.hasAttribute('aria-describedby')).map((el) => `${el.textContent.split('about')[0] ?? ''}>${el.getAttribute('aria-describedby') ?? ''}`);
+    expect(describes()).toEqual([]);
+    fireEvent.click(screen.getByRole('menuitemradio', { name: '60 fps' }));
+    expect(describes()).toEqual(['Source (up to 4K)>share-chooser-caution', '60 fps>share-chooser-caution']);
+    expect(document.getElementById('share-chooser-caution')?.textContent).toBe(sourceSixtyNote);
+    fireEvent.click(screen.getByRole('menuitemradio', { name: /^Auto/ }));
+    expect(describes()).toEqual(['Auto>share-chooser-auto-note']);
+    expect(document.getElementById('share-chooser-auto-note')?.textContent).toMatch(/1920 px across/);
+  });
+
+  // The sharer's readout of an Auto share is held to what Auto settled to, which
+  // the state says: the Asked line and the shortfall reason both stand.
+  it.each([
+    { name: 'Source', settled: { resolution: 'source', frameRate: 30 }, sample: { width: 1280, height: 720, fps: 10, limitation: 'cpu', captured: { width: 1920, height: 1080 } }, asked: 'Asked source size · 30 fps', reason: 'Limited by CPU' },
+    { name: '1080p', settled: { resolution: '1080p', frameRate: 30 }, sample: { width: 1280, height: 720, fps: 30, limitation: 'bandwidth', captured: { width: 2560, height: 1440 } }, asked: 'Asked 1080p · 30 fps', reason: 'Limited by bandwidth' },
+  ] as const)('an Auto share settled to $name shows the Asked line and a shortfall reason', async ({ settled, sample, asked, reason }) => {
+    vi.useFakeTimers();
+    try {
+      const { voice, client } = panel(joined({ shareQuality: { resolution: 'auto', frameRate: 30 }, share: { kind: 'sharing', audio: false, settled } }), 'c');
+      vi.spyOn(client, 'readShareStats').mockResolvedValue(sample);
+      for (let i = 0; i < 9; i++) await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+      expect(within(voice).getByRole('status', { name: 'Share quality' }).textContent).toContain(asked);
+      expect(within(voice).getByRole('status', { name: 'Share quality' }).textContent).toContain(reason);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('is not offered while sharing, where Stop sharing stands alone', () => {
+    const { voice } = panel(joined({ share: { kind: 'sharing', audio: false } }), 'c');
+    expect(within(voice).queryByRole('button', { name: 'Share quality' })).toBeNull();
+    expect(within(voice).getByRole('button', { name: 'Stop sharing' })).toBeTruthy();
   });
 });

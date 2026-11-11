@@ -17,7 +17,7 @@ import { initialChannels } from '../state/channels';
 import type { Person } from '../useLiveChannel';
 import { VoiceClient, type Room, type RoomEvents, type ShareSink } from './connection';
 import { FakeClock, noCamera, settle } from './fakes';
-import type { Captured, KeptScreen, ShareFeatures, ShareQuality, ShareSample } from './share';
+import { settleQuality, type Captured, type KeptScreen, type SettledQuality, type ShareFeatures, type ShareQuality, type ShareSample } from './share';
 import { ShareReadout, ShareView } from './ShareView';
 import type { Snapshot, VoiceControl } from './useVoice';
 import { VoicePanel } from './VoicePanel';
@@ -60,6 +60,9 @@ class StubRoom implements Room {
   };
   qualities: ShareQuality[] = [];
   sample: ShareSample | null = null;
+  // The size of the screen captured, for Auto to settle against.
+  capture: { width: number; height: number } = { width: 1920, height: 1080 };
+  settled = (quality: ShareQuality): SettledQuality => settleQuality(quality, this.capture);
   setShareQuality = (quality: ShareQuality): Promise<void> => {
     this.qualities.push(quality);
     return Promise.resolve();
@@ -779,7 +782,7 @@ describe('ShareReadout over time', () => {
     vi.useFakeTimers();
     let clock = 0;
     const samples: { current: ShareSample | null } = { current: { width: 1920, height: 1080, fps: 31, limitation: 'cpu' } };
-    const asked: ShareQuality = { resolution: '1080p', frameRate: 60 };
+    const asked: SettledQuality = { resolution: '1080p', frameRate: 60 };
     const view = render(<ShareReadout client={client(samples)} direction="sent" prefix="Sending: " asked={asked} now={() => clock} />);
     // A second at a time, as the readout samples, the clock moving with it.
     const tick = async (ms: number) => {

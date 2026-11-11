@@ -212,9 +212,15 @@ describe('the quality choices (Q-D4-3)', () => {
     expect(t.calls).toEqual(['quality 1080p30']);
   });
 
-  it('shows a quality that is not offered as the default', () => {
-    strip(fake({ shareQuality: { resolution: 'source', frameRate: 60 } }).companion);
-    expect(screen.getByLabelText<HTMLSelectElement>('Share quality').value).toBe('720p30');
+  it.each([
+    { what: 'one that is not offered', quality: { resolution: 'source', frameRate: 60 } },
+    { what: 'a stored Auto (issue #1659)', quality: { resolution: 'auto', frameRate: 30 } },
+  ] as const)('shows $what as the default, and never offers Auto', ({ quality }) => {
+    strip(fake({ shareQuality: quality }).companion);
+    const select = screen.getByLabelText<HTMLSelectElement>('Share quality');
+    expect(select.value).toBe('720p30');
+    expect(Array.from(select.options).map((o) => o.textContent)).not.toContain('Auto');
+    expect(screen.queryByRole('menu', { hidden: true })).toBeNull();
   });
 
   it('is not offered while sharing', () => {

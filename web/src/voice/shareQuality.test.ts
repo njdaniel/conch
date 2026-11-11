@@ -2,8 +2,8 @@
 // readout. jsdom storage, but no network, browser capture or LiveKit server.
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { readShareQuality, writeShareQuality } from '../api';
-import { defaultShareQuality, type ShareQuality, type ShareSample } from './share';
-import { askedText, captureOptions, nextShortfall, noShortfall, shareEncodings, shareReadout, shareSample, shortfallHold, shortfallReason, type ShareStats, type ShortfallState } from './sdk';
+import { defaultShareQuality, provisionalQuality, resolveAuto, settleQuality, type SettledQuality, type ShareQuality, type ShareSample } from './share';
+import { askedText, captureOptions, nextShortfall, noShortfall, shareEncodings, shareEstimateMbps, shareReadout, shareSample, shortfallHold, shortfallReason, type ShareStats, type ShortfallState } from './sdk';
 
 afterEach(() => {
   window.localStorage.clear();
@@ -59,6 +59,60 @@ describe('the chosen capture and encodings', () => {
       { ...bottom, maxFramerate: 15 },
       { width: 1920, height: 1080, maxBitrate: 4_000_000, maxFramerate: 15 },
     ]);
+  });
+});
+
+// Auto (issue #1659, Q10 on #1614): up to 1920 px across is Source, larger is
+// 1080p, always 30 fps.
+describe('Auto share quality', () => {
+  it.each([
+    { what: '1920x1080', width: 1920, height: 1080, want: 'source' },
+    { what: 'just under 1920 across', width: 1919, height: 1080, want: 'source' },
+    { what: '1920x1200', width: 1920, height: 1200, want: 'source' },
+    { what: 'just over 1920 across', width: 1921, height: 1081, want: '1080p' },
+    { what: '2560x1440', width: 2560, height: 1440, want: '1080p' },
+    { what: '3840x2160', width: 3840, height: 2160, want: '1080p' },
+    { what: 'portrait 1080x1920', width: 1080, height: 1920, want: 'source' },
+    { what: 'portrait 1440x2560', width: 1440, height: 2560, want: '1080p' },
+    { what: 'a small window', width: 800, height: 600, want: 'source' },
+    { what: 'no settings', width: undefined, height: undefined, want: '1080p' },
+    { what: 'only a width', width: 1280, height: undefined, want: '1080p' },
+    { what: 'a zero size', width: 0, height: 0, want: '1080p' },
+    { what: 'a size that is not a number', width: Number.NaN, height: 1080, want: '1080p' },
+  ])('resolves $what to $want', ({ width, height, want }) => {
+    expect(resolveAuto({ width, height })).toBe(want);
+    expect(settleQuality({ resolution: 'auto', frameRate: 30 }, { width, height })).toEqual({ resolution: want, frameRate: 30 });
+  });
+
+  it('is 30 fps whatever rate was left on the choice, and leaves other choices as they are', () => {
+    expect(settleQuality({ resolution: 'auto', frameRate: 60 }, { width: 1920, height: 1080 })).toEqual({ resolution: 'source', frameRate: 30 });
+    expect(settleQuality({ resolution: '720p', frameRate: 15 }, { width: 3840, height: 2160 })).toEqual({ resolution: '720p', frameRate: 15 });
+  });
+
+  it('declares 1080p30 before a capture is known, and a concrete choice as itself', () => {
+    expect(provisionalQuality({ resolution: 'auto', frameRate: 30 })).toEqual({ resolution: '1080p', frameRate: 30 });
+    expect(provisionalQuality({ resolution: 'source', frameRate: 60 })).toEqual({ resolution: 'source', frameRate: 60 });
+  });
+
+  it('asks the picker for the most, at 30 fps with the motion hint, and encodes by the capture', () => {
+    expect(captureOptions({ resolution: 'auto', frameRate: 30 })).toMatchObject({ resolution: { width: 3840, height: 2160, frameRate: 30 }, contentHint: 'motion' });
+    const auto: ShareQuality = { resolution: 'auto', frameRate: 30 };
+    expect(shareEncodings({ width: 1920, height: 1080, frameRate: 60 }, auto)).toEqual(shareEncodings({ width: 1920, height: 1080, frameRate: 60 }, { resolution: 'source', frameRate: 30 }));
+    expect(shareEncodings({ width: 2560, height: 1440, frameRate: 60 }, auto)).toEqual(shareEncodings({ width: 2560, height: 1440, frameRate: 60 }, { resolution: '1080p', frameRate: 30 }));
+  });
+});
+
+// The estimates shown beside each choice come from the encodings' bitrate rows.
+describe('the estimate beside a choice', () => {
+  it.each([
+    { resolution: 'auto', frameRate: 30, mbps: 8 },
+    { resolution: '720p', frameRate: 30, mbps: 6 },
+    { resolution: '1080p', frameRate: 30, mbps: 8 },
+    { resolution: '1080p', frameRate: 60, mbps: 8 },
+    { resolution: 'source', frameRate: 30, mbps: 24 },
+    { resolution: 'source', frameRate: 60, mbps: 24 },
+  ] as const)('$resolution at $frameRate fps is about $mbps Mbps', ({ resolution, frameRate, mbps }) => {
+    expect(shareEstimateMbps({ resolution, frameRate })).toBe(mbps);
   });
 });
 
@@ -241,7 +295,7 @@ describe('the sent readout: reasons, loss and the capture', () => {
 });
 
 describe('the shortfall reason', () => {
-  const ask: ShareQuality = { resolution: '1080p', frameRate: 60 };
+  const ask: SettledQuality = { resolution: '1080p', frameRate: 60 };
   const sample = (overrides: Partial<ShareSample> = {}): ShareSample => ({ width: 1920, height: 1080, fps: 60, ...overrides });
 
   it.each([
@@ -271,7 +325,7 @@ describe('the shortfall reason', () => {
     { what: '720p asked and delivered', s: sample({ width: 1280, height: 720 }), q: { resolution: '720p', frameRate: 60 }, want: null },
     { what: 'a small window at 720p', s: sample({ width: 800, height: 600, captured: { width: 800, height: 600 } }), q: { resolution: '720p', frameRate: 60 }, want: "What you're sharing is smaller than 720p" },
     { what: 'source asks no size', s: sample({ width: 800, height: 600 }), q: { resolution: 'source', frameRate: 60 }, want: null },
-  ] satisfies { what: string; s: ShareSample; q: ShareQuality; want: string | null }[])('$what', ({ s, q, want }) => {
+  ] satisfies { what: string; s: ShareSample; q: SettledQuality; want: string | null }[])('$what', ({ s, q, want }) => {
     expect(shortfallReason(s, q)).toBe(want);
   });
 

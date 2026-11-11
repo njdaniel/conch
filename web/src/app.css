@@ -3017,6 +3017,77 @@ label {
   margin-left: auto;
 }
 
+/* Share screen with its quality menu beside it (issue #1659): one control to
+   the eye, two buttons to the keyboard. */
+.share-split {
+  display: inline-flex;
+  align-items: stretch;
+}
+
+.share-split > button {
+  border-top-right-radius: 0;
+  border-bottom-right-radius: 0;
+}
+
+.share-chooser {
+  position: relative;
+  display: inline-flex;
+}
+
+.share-chooser-button {
+  border-top-left-radius: 0;
+  border-bottom-left-radius: 0;
+  margin-left: -1px;
+  padding-inline: 0.5rem;
+}
+
+.share-chooser-menu:not([hidden]) {
+  position: absolute;
+  top: 100%;
+  right: 0;
+  z-index: 20;
+  display: grid;
+  gap: var(--s2);
+  width: max-content;
+  max-width: min(22rem, 90vw);
+  margin-top: var(--s1);
+  padding: var(--s2);
+  background: var(--bg);
+  border: 1px solid var(--border-strong);
+  border-radius: 0.5rem;
+}
+
+.voice.strip .share-chooser-menu:not([hidden]) {
+  top: auto;
+  bottom: 100%;
+  margin-top: 0;
+  margin-bottom: var(--s1);
+}
+
+.share-chooser-menu [role='group'] {
+  display: grid;
+  gap: var(--s1);
+}
+
+.share-chooser-menu button[role^='menuitem'] {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 0 var(--s3);
+  text-align: left;
+}
+
+.share-chooser-menu button[aria-checked='true'] {
+  border-color: var(--accent);
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.share-chooser-menu .item-hint {
+  font-size: 0.8125rem;
+  opacity: 0.8;
+}
+
 .voice .talk {
   min-height: 2.75rem;
   min-width: 9rem;
