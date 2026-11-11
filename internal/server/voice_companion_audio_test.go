@@ -113,9 +113,10 @@ func TestVoiceCompanionAudio(t *testing.T) {
 		check(t, "ann", `{"scope":"application"}`+strings.Repeat(" ", 2048), http.StatusRequestEntityTooLarge, "request_too_large")
 		// Nobody holds the share.
 		check(t, "ann", audioApplication, http.StatusConflict, schema.ErrorCodeVoiceNoSession)
-		// Someone else does.
+		// Someone else does: that is not the caller's stream (voice_no_session;
+		// voice_share_busy is answered by nothing any more).
 		f.mustClaim(t, "ann2")
-		check(t, "ann", audioApplication, http.StatusConflict, schema.ErrorCodeVoiceShareBusy)
+		check(t, "ann", audioApplication, http.StatusConflict, schema.ErrorCodeVoiceNoSession)
 		f.mustStop(t, "ann2")
 		f.at(1_500)
 		f.pass(t)
@@ -389,7 +390,7 @@ func TestVoiceCompanionAudioEndsWithTheShare(t *testing.T) {
 	}{
 		{name: "self", actor: "ann", end: func(t *testing.T, f *presenceFixture, _ string) { f.mustStop(t, "ann") }},
 		{name: "operator", actor: "root", end: func(t *testing.T, f *presenceFixture, _ string) {
-			if res := f.stopShare(t, "root", "ops"); res.status != http.StatusNoContent {
+			if res := f.stopShareOf(t, "root", "ann"); res.status != http.StatusNoContent {
 				t.Fatalf("root stops the share: %d %s", res.status, res.body)
 			}
 		}},

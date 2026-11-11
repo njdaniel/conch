@@ -120,11 +120,13 @@ jobs:
       # The web client's wire types are generated from pkg/schema (#348): this
       # fails when web/src/schema/generated*.ts differ from what
       # `go generate ./pkg/schema` writes. Go only. The script's own test
-      # runs first.
+      # runs first. The Android spike's copy of them must match too (#1719).
       - name: generated TypeScript wire types
         run: |
           ./scripts/schema-ts-check-test.sh
           ./scripts/schema-ts-check.sh
+          ./scripts/spike-schema-check-test.sh
+          ./scripts/spike-schema-check.sh
 
       # The emoji catalog (#953): the vendored third_party/unicode/emoji-test.txt
       # matches its pinned hash and scripts/emoji-update.sh refuses a mismatch.
@@ -823,7 +825,10 @@ jobs:
         run: npx playwright install --with-deps chromium
 
       - name: web-e2e
-        run: make web-e2e E2E_ARGS=--shard=${{ matrix.shard }}/3
+        # --grep-invert @heavy (#1613): a test tagged @heavy runs only in the
+        # heavy lane (e2e-heavy.yml, nightly and on demand), never here. See
+        # docs/testing.md for the tags and the PR budget.
+        run: make web-e2e E2E_ARGS="--shard=${{ matrix.shard }}/3 --grep-invert @heavy"
 
       # The spec removes its own container on every path; this is for the case
       # where the runner killed it. Only the container of this run.
@@ -948,6 +953,134 @@ jobs:
       - name: remove any leftover LiveKit container
         if: always()
         run: docker ps -aq --filter "label=conch-voice-check=$VOICE_CHECK_RUN" | xargs -r docker rm -f
+
+  desktop-voice-check:
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
+    # The desktop's live same-machine voice test (issue #1383, D3-12 of
+    # #771): the desktop's VoiceService and Supervisor drive the real
+    # conch-voice into the pinned LiveKit in Docker, a second principal
+    # listens through a counting sink, input is synthetic (make
+    # desktop-voice-e2e, e2e/desktop-voice). It sits beside voice-check, with
+    # the same toolchain, caches and runner, and so the same cost: it needs
+    # the Rust build (the cached voice/target, from which the program's own
+    # `cargo build` finds little or nothing to do) and Docker, and about a
+    # minute of its own on top. The screen companion's live test (#1583,
+    # D4-06) runs in the same program: it adds the web build and a Chromium.
+    # CI=true makes a skip a failure.
+    # On GitHub-hosted runners (#1318), or on the self-hosted ones for this
+    # repository's own branches when the variable HEAVY_RUNNER is "local".
+    runs-on: ${{ vars.HEAVY_RUNNER == 'local' && (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","conch-4tb"]') || 'ubuntu-latest' }}
+    # About three times a warm run (5 to 9 minutes): room for a cold run
+    # whose packages come slowly (#1352), still well short of half an hour.
+    timeout-minutes: 25
+    env:
+      CI: "true"
+      # Labels this run's LiveKit container, so the clean-up step below can
+      # only ever remove its own.
+      DESKTOP_VOICE_CHECK_RUN: ${{ github.run_id }}-${{ github.run_attempt }}
+      # As the rust job builds (#1318), so its cache serves this job.
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      CARGO_PROFILE_TEST_DEBUG: line-tables-only
+    steps:
+      - uses: actions/checkout@v4
+
+      # The voice build cache would fill the hosted runner's disk with the
+      # image's unused tool trees still on it (#1286, #1318), on the image
+      # that had about 14 GB free. As in the rust job, they go only when less
+      # than 30 GB is free: removing them takes 3½ minutes (#1352).
+      - name: free disk
+        if: runner.environment == 'github-hosted'
+        run: |
+          df -h /
+          avail=$(df --output=avail -BG / | tail -n1 | tr -dc 0-9)
+          if [ "$avail" -ge 30 ]; then echo "free disk: ${avail} GB free, nothing removed"; exit 0; fi
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          docker image prune -af >/dev/null 2>&1 || true
+          df -h /
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: runner image
+        id: image
+        if: runner.environment == 'github-hosted'
+        run: |
+          echo "os=$ImageOS" >> "$GITHUB_OUTPUT"
+          echo "version=$ImageVersion" >> "$GITHUB_OUTPUT"
+
+      # The same pinned toolchain and build directory as the rust job, read
+      # from its caches and never written from here: rust builds everything
+      # this job needs (cargo test builds the conch-voice binary), so with a
+      # warm cache the program's own `cargo build` has nothing left to do.
+      - name: rust toolchain cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ~/.cache/conch/llvm-*
+            ~/.cache/conch/cargo-deny-*
+            ~/.cache/conch/webrtc-*
+          key: voice-toolchain-${{ runner.os }}-${{ hashFiles('scripts/voice-pins.sh') }}
+
+      - name: rust build cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            voice/target
+          key: voice-build-lt-${{ runner.os }}-${{ hashFiles('voice/Cargo.lock', 'voice/rust-toolchain.toml', 'scripts/voice-pins.sh') }}
+          restore-keys: |
+            voice-build-lt-${{ runner.os }}-
+
+      # The same apt cache as the rust job's, which this job, unlike its two
+      # caches above, writes as well as reads: the jobs run side by side, and this is where a stalled
+      # mirror cost 13 minutes (#1352). Whichever finishes first saves it.
+      - name: rust system packages cache
+        if: runner.environment == 'github-hosted'
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/conch-apt
+          key: voice-apt-${{ runner.os }}-${{ hashFiles('scripts/ci-voice-apt.sh') }}-${{ steps.image.outputs.os }}-${{ steps.image.outputs.version }}
+          restore-keys: |
+            voice-apt-${{ runner.os }}-${{ hashFiles('scripts/ci-voice-apt.sh') }}-${{ steps.image.outputs.os }}-
+
+      - name: rust system packages
+        if: runner.environment == 'github-hosted'
+        run: ./scripts/ci-voice-apt.sh ~/.cache/conch-apt
+
+      - name: rust toolchain
+        run: ./scripts/voice-toolchain.sh
+
+      # desktop/.nvmrc names the Node the desktop's tests run under. The
+      # companion's test (#1583) also builds the web client (web-build) and
+      # drives two Chromium pages, so web's lockfile is cached as well.
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: desktop/.nvmrc
+          cache: npm
+          cache-dependency-path: |
+            desktop/package-lock.json
+            web/package-lock.json
+
+      # The screen companion's page and the browser principal V run in the
+      # Chromium Playwright's own version pins (#1583). Locally, `npx
+      # playwright install chromium` alone. The npm ci comes first so that npx
+      # runs the Playwright desktop/package-lock.json pins, not whatever npx
+      # would fetch; make desktop-voice-e2e then installs again, harmlessly.
+      - name: browser for the companion test
+        working-directory: desktop
+        run: npm ci --no-audit && npx playwright install --with-deps chromium
+
+      - name: desktop voice live test
+        run: make desktop-voice-e2e
+
+      # The program removes its own container on every path; this is for the
+      # case where the runner killed it. Only the container of this run.
+      - name: remove any leftover LiveKit container
+        if: always()
+        run: docker ps -aq --filter "label=conch-desktop-voice-check=$DESKTOP_VOICE_CHECK_RUN" | xargs -r docker rm -f
 
   isolation-check:
     needs: changes

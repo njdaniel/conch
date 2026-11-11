@@ -71,6 +71,12 @@ afterEach(() => {
 });
 
 describe('report a problem', () => {
+  it('warns against pasting browser console output', async () => {
+    serve(() => json({}, 500));
+    const form = await signInAndOpen();
+    expect(form.textContent).toContain('Do not paste browser console output into a report: it can contain live voice tokens.');
+  });
+
   it('shows exactly what will be sent, and sends that, once', async () => {
     const calls = serve(() => json({ id: 7, created_at: '2026-10-16T09:00:00.000Z' }, 201));
     record({ kind: 'http_failure', status: 503, error: 'voice_unavailable', requestId: '0123456789abcdef' });

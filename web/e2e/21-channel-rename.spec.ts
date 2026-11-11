@@ -13,7 +13,7 @@ import type { Browser, Page } from '@playwright/test';
 import { createChannelResponse, listChannelsResponse, renameChannelResponseV1, type CreateChannelRequest, type RenameChannelRequestV1 } from '../src/schema/channel';
 import { errorV0 } from '../src/schema/error';
 import { post } from './api';
-import { channelButton, credentialField, expect, messages, rememberPushToTalk, signIn, statusLine, test } from './fixtures';
+import { closeAll, channelButton, credentialField, expect, messages, rememberPushToTalk, signIn, statusLine, test } from './fixtures';
 import { dockerAvailable, startVoiceWorld, watchPage, type Member, type VoiceWorld } from './voice-world';
 import { call, ok, type World } from './world';
 
@@ -233,7 +233,7 @@ test.describe('in voice, with LiveKit', () => {
         await expect(voiceRegion(p.page)).toContainText(/Connected in #voice-room/, { timeout: 30_000 });
       }
       const inVoice = voiceRegion(a.page).getByRole('list', { name: 'In voice' });
-      await expect(inVoice).toContainText('You');
+      await expect(inVoice).toContainText(a.member.name);
       await expect(inVoice).toContainText('dave');
       await expect(panel(a.page).getByRole('heading', { name: 'People' })).toBeVisible();
       // Its message socket is open too, so a late first open is not counted
@@ -280,8 +280,8 @@ test.describe('in voice, with LiveKit', () => {
       expect(a.asked.slice(renamedAt).filter((r) => r.includes(`/${vw.channel}/`))).toEqual([]);
       await a.watch.settled();
     } finally {
-      await a.context.close();
-      await d.context.close();
+      await closeAll(a.context);
+      await closeAll(d.context);
     }
   });
 });

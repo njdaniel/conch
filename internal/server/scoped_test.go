@@ -34,6 +34,22 @@ const (
 	msgW9       = "w9"       // channel-wide, by olga: the sentinel every socket receives last
 )
 
+// scopedAuthors is who posts each message of the corpus (postScopedCorpus).
+var scopedAuthors = map[string]string{
+	msgW1: "olga", msgNet1: "ann", msgW3: "ann", msgNet2: "nina", msgW5: "wes",
+	msgWhisper1: "ann", msgW7: "ann", msgWhisper2: "ann", msgW9: "olga",
+}
+
+// labelOf is the corpus label of message id.
+func labelOf(ids map[string]int64, id int64) string {
+	for l, v := range ids {
+		if v == id {
+			return l
+		}
+	}
+	return ""
+}
+
 var wideMessages = []string{msgW1, msgW3, msgW5, msgW7, msgW9}
 
 // postScopedCorpus posts the messages above through the real v2 REST handler
@@ -111,6 +127,9 @@ var scopedReadPaths = []string{
 	"GET /v1/channels/{channel}/messages",
 	"GET /v2/channels/{channel}/messages",
 	"GET /v2/channels/{channel}/messages/search",
+	// The pending-notification feed (issue #1713) reads messages across
+	// channels, for a person, as a v2 reader; its column is below.
+	"GET /v1/notifications/pending",
 	"GET /v0/ws",
 	"GET /v1/ws",
 	"GET /v2/ws",
@@ -169,6 +188,16 @@ func TestScopedMessagesExactSets(t *testing.T) {
 		}
 	}
 
+	// Every person who can read the channel asks for everything with its
+	// text, so that a leaked message would be in the answer with its body
+	// (issue #1713): policy all, preview on.
+	for _, r := range scopedReaders {
+		if r.who != "" && !r.agent && (r.access == readOK || r.access == readNotFound) {
+			if res := f.callREST(t, "PUT", "/v1/notifications/preferences", f.p(r.who).token, `{"policy":"all","muted":[],"preview":true}`); res.status != http.StatusOK {
+				t.Fatalf("%s: PUT preferences = %d %s", r.who, res.status, res.body)
+			}
+		}
+	}
 	ids := f.postScopedCorpus(t)
 	// dina received the net1 message and is disabled afterwards: her rows and
 	// seat stay, her credentials are revoked.
@@ -279,6 +308,53 @@ func TestScopedMessagesExactSets(t *testing.T) {
 				t.Errorf("search mentions recipients: %s", got.body)
 			}
 		})
+		// The pending feed (issue #1713) is a v2 read of every channel the
+		// reader is in, minus their own posts. People get exactly their v2
+		// set; an agent is refused; a person outside the channel has no
+		// channel to read and gets an empty feed; the disabled and the
+		// unauthenticated get 401.
+		t.Run(r.name+"/GET pending notifications", func(t *testing.T) {
+			got := f.callREST(t, "GET", "/v1/notifications/pending", tok, "")
+			wantStatus := http.StatusOK
+			switch {
+			case r.agent && r.access != readUnauth:
+				wantStatus = http.StatusForbidden
+			case r.access == readUnauth:
+				wantStatus = http.StatusUnauthorized
+			}
+			if got.status != wantStatus {
+				t.Fatalf("status = %d, want %d; body %s", got.status, wantStatus, got.body)
+			}
+			if wantStatus != http.StatusOK {
+				noSecrets(t, "pending", got.body, nil)
+				return
+			}
+			var page schema.ListPendingNotificationsResponseV1
+			decodeStrict(t, got.body, &page)
+			if err := page.Validate(); err != nil {
+				t.Errorf("the page is not valid: %v", err)
+			}
+			want := []int64{}
+			for _, id := range wantFor(ri, true) {
+				if scopedAuthors[labelOf(ids, id)] != r.who {
+					want = append(want, id)
+				}
+			}
+			gotIDs := []int64{}
+			for _, s := range page.Summaries {
+				gotIDs = append(gotIDs, s.MessageID)
+			}
+			if !reflect.DeepEqual(gotIDs, want) {
+				t.Errorf("ids = %v, want %v", gotIDs, want)
+			}
+			noSecrets(t, "pending", got.body, want)
+			if strings.Contains(got.body, "recipient") {
+				t.Errorf("pending mentions recipients: %s", got.body)
+			}
+			if page.More {
+				t.Errorf("more is set on a feed of %d", len(page.Summaries))
+			}
+		})
 		t.Run(r.name+"/mcp read_channel", func(t *testing.T) {
 			status, code, got, raw := f.mcpReadChannel(t, tok, map[string]any{"channel": "ops", "limit": 100})
 			// MCP is the agent front end: humans, the disabled and the
@@ -342,7 +418,7 @@ func TestEveryMessageReadPathIsInTheLeakTest(t *testing.T) {
 		// carries counts, never messages, and names no channel to leak; its
 		// isolation tests are in voice_occupancy_test.go.
 		isRead := strings.HasPrefix(rt.pattern, "GET ") && !reactionReads[rt.pattern] && rt.pattern != "GET /v1/voice/ws" && rt.pattern != "GET /v1/voice/occupancy/ws" && rt.pattern != "GET /v1/events/ws" &&
-			(strings.Contains(rt.pattern, "/messages") || strings.HasSuffix(rt.pattern, "/ws"))
+			(strings.Contains(rt.pattern, "/messages") || strings.HasSuffix(rt.pattern, "/ws") || strings.HasSuffix(rt.pattern, "/notifications/pending"))
 		if isRead && !covered[rt.pattern] {
 			t.Errorf("route %q reads messages but is not in scopedReadPaths and TestScopedMessagesExactSets: add a column there", rt.pattern)
 		}

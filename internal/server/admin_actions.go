@@ -138,6 +138,24 @@ var adminCatalog = []adminCatalogEntry{
 	{action: schema.AdminActionUpdateReport, pattern: "PUT /v1/reports/{id}", permission: pMembers, gate: direct, target: tReport, build: passBody("")},
 
 	{action: schema.AdminActionExportAudit, pattern: "GET /v1/audit", permission: pAudit, gate: direct, build: queryParams("after", "limit")},
+
+	// Channel entry bans (moderation M3, issue #851; #849 Q4). The list is a
+	// read; a ban removes a person from the channel and keeps them out, so it
+	// is gated, and so is lifting one. Both name the member in params, as the
+	// member actions do, and carry no body: a ban has no reason or expiry.
+	// The route's own rules are not relaxed for the agent: the store gives it
+	// operator standing only where it holds manage_channels, and an owner is
+	// out of an operator's reach.
+	{action: schema.AdminActionListChannelBans, pattern: "GET /v1/channels/{channel}/bans", permission: pChannels, gate: direct, target: tChannel, build: noBody},
+	{action: schema.AdminActionBanChannelMember, pattern: "PUT /v1/channels/{channel}/bans/{principal_id}", permission: pChannels, gate: approval, target: tChannel, build: buildMemberPath(false), changesTarget: true},
+	{action: schema.AdminActionUnbanChannelMember, pattern: "DELETE /v1/channels/{channel}/bans/{principal_id}", permission: pChannels, gate: approval, target: tChannel, build: buildMemberPath(false), changesTarget: true},
+
+	// A channel's topic (issue #1523, docs/design/channel-topic.md §4.3):
+	// direct, as rename_channel is. The route's own standing check is not
+	// relaxed for the agent: the store gives it operator standing only where
+	// it holds manage_channels, and the route's write-rate bound (#1667)
+	// applies to the agent as to anyone.
+	{action: schema.AdminActionSetChannelTopic, pattern: "PUT /v1/channels/{id}/topic", permission: pChannels, gate: direct, target: tChannel, build: buildSetChannelTopic, changesTarget: true},
 }
 
 // adminCatalogByAction indexes adminCatalog.
@@ -378,10 +396,7 @@ func buildCreateMember(ctx context.Context, _ *Server, in adminBuildInput) (admi
 	if emptyParams(in.params) || dec.Decode(&p) != nil {
 		return adminRequest{}, adminTouches{}, badParams(e.action, `params are {"name": ...}; the kind is always human`)
 	}
-	body, _ := json.Marshal(struct {
-		Kind string `json:"kind"`
-		Name string `json:"name"`
-	}{string(store.PrincipalHuman), p.Name})
+	body, _ := json.Marshal(schema.CreatePrincipalRequest{Kind: schema.PrincipalHuman, Name: p.Name})
 	stored, _ := json.Marshal(p)
 	return adminRequest{method: http.MethodPost, path: "/v0/principals", body: body}, adminTouches{params: stored}, nil
 }
@@ -398,12 +413,34 @@ func buildRenameChannel(ctx context.Context, _ *Server, in adminBuildInput) (adm
 	if emptyParams(in.params) || dec.Decode(&p) != nil || p.Name == "" {
 		return adminRequest{}, adminTouches{}, badParams(e.action, `params are {"name": ...}`)
 	}
-	body, _ := json.Marshal(struct {
-		Name string `json:"name"`
-		From string `json:"from"`
-	}{p.Name, in.target.Name})
+	body, _ := json.Marshal(schema.RenameChannelRequestV1{Name: p.Name, From: in.target.Name})
 	method, path := fillPath(e.pattern, in.target, 0)
 	stored, _ := json.Marshal(p)
+	return adminRequest{method: method, path: path, body: body}, adminTouches{channels: targetChannels(in), params: stored}, nil
+}
+
+// buildSetChannelTopic: {topic}, "" clearing it. The field is required, so an
+// agent that sends {} has not asked to clear the topic by accident. The topic
+// is validated here, so a bad one is refused at submit with the door's own
+// answer, and because the store does not check it (security review of
+// #1531): a caller of the store must.
+func buildSetChannelTopic(ctx context.Context, _ *Server, in adminBuildInput) (adminRequest, adminTouches, *adminRefusal) {
+	e := entryOf(ctx)
+	var p struct {
+		Topic *string `json:"topic"`
+	}
+	dec := json.NewDecoder(bytes.NewReader(in.params))
+	dec.DisallowUnknownFields()
+	if emptyParams(in.params) || dec.Decode(&p) != nil || p.Topic == nil {
+		return adminRequest{}, adminTouches{}, badParams(e.action, `params are {"topic": ...}; "" clears it`)
+	}
+	req := schema.SetChannelTopicRequestV1{Topic: *p.Topic}
+	if err := req.Validate(); err != nil {
+		return adminRequest{}, adminTouches{}, badParams(e.action, err.Error())
+	}
+	body, _ := json.Marshal(req)
+	method, path := fillPath(e.pattern, in.target, 0)
+	stored, _ := json.Marshal(req)
 	return adminRequest{method: method, path: path, body: body}, adminTouches{channels: targetChannels(in), params: stored}, nil
 }
 
@@ -444,9 +481,8 @@ func buildAddChannelMember(ctx context.Context, _ *Server, in adminBuildInput) (
 	if r != nil {
 		return adminRequest{}, adminTouches{}, r
 	}
-	body, _ := json.Marshal(struct {
-		ID int64 `json:"id"`
-	}{p.PrincipalID})
+	// Only the member: Name and CanDecide stay empty and are omitted.
+	body, _ := json.Marshal(schema.AddChannelMemberRequestV1{ID: p.PrincipalID})
 	method, path := fillPath(e.pattern, in.target, 0)
 	stored, _ := json.Marshal(p)
 	return adminRequest{method: method, path: path, body: body}, adminTouches{channels: targetChannels(in), member: p.PrincipalID, params: stored}, nil
@@ -464,10 +500,7 @@ func buildMemberPath(rights bool) adminBuilder {
 		method, path := fillPath(e.pattern, in.target, p.PrincipalID)
 		var body []byte
 		if rights {
-			body, _ = json.Marshal(struct {
-				CanDecide *bool `json:"can_decide,omitempty"`
-				Manages   *bool `json:"manages,omitempty"`
-			}{p.CanDecide, p.Manages})
+			body, _ = json.Marshal(schema.PutChannelMemberRequestV1{CanDecide: p.CanDecide, Manages: p.Manages})
 		}
 		stored, _ := json.Marshal(p)
 		return adminRequest{method: method, path: path, body: body}, adminTouches{channels: targetChannels(in), member: p.PrincipalID, params: stored}, nil

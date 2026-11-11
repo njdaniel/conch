@@ -10,9 +10,9 @@ test('P3-06 and P3-08 a slow run shows with the API ids and states, Cancel is ac
     const { page } = await meet();
     await signIn(page, world, world.tokens.browser, 'browser-test');
     const panel = page.getByRole('region', { name: 'Members list' });
-    const agent = panel.getByRole('button', { name: /worker-test/ });
+    const agent = panel.getByRole('button', { name: 'Show sessions for worker-test' });
     // Idle first, as the roster says (the API's view of the same session).
-    const agentRow = panel.getByRole('listitem').filter({ has: page.getByRole('button', { name: /worker-test/ }) });
+    const agentRow = panel.locator('li.ag-agent').filter({ has: page.getByRole('button', { name: /worker-test/ }) });
     await expect(agentRow).toContainText('idle');
     expect((await roster(world, world.tokens.browser, 'general')).find((s) => s.id === worker.session)?.status).toBe('idle');
 
@@ -127,7 +127,7 @@ test('P3-08 Pause and Resume reach the real adapter: the page reads waiting only
     await expect.poll(async () => (await run(world, world.tokens.browser, seen)).state, { message: 'the run is running' }).toBe('running');
 
     const panel = page.getByRole('region', { name: 'Members list' });
-    await panel.getByRole('button', { name: /worker-test/ }).click();
+    await panel.getByRole('button', { name: 'Show sessions for worker-test' }).click();
     await panel.getByRole('button', { name: new RegExp(`^Run #${String(seen)} · `) }).click();
     const detail = page.getByRole('article', { name: 'Run detail' });
     await expect(detail.getByTestId('run-state')).toHaveText('running');

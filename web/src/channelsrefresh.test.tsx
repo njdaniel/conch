@@ -134,6 +134,15 @@ describe('the channels_changed frame', () => {
   });
 });
 
+// The button's accessible description: the text of what its aria-describedby names.
+function described(button: HTMLElement): string {
+  return (button.getAttribute('aria-describedby') ?? '')
+    .split(' ')
+    .filter((id) => id !== '')
+    .map((id) => document.getElementById(id)?.textContent ?? '')
+    .join(' ');
+}
+
 describe('the list follows the server', () => {
   it('shows a channel added to the person, with its unread count, with no reload', async () => {
     const events = await openChat();
@@ -187,6 +196,49 @@ describe('the list follows the server', () => {
     events.send(frame);
     await screen.findByRole('button', { name: 'lobby' });
     expect(screen.queryByText(/You no longer have access/)).toBeNull();
+  });
+
+  it('updates and clears another channel’s sidebar topic from the re-read list', async () => {
+    const events = await openChat();
+    const button = screen.getByRole('button', { name: 'ops' });
+    expect(described(button)).toBe('');
+
+    server.channels = [general, { ...ops, topic: 'Operations' }];
+    events.send(frame);
+    await waitFor(() => {
+      expect(described(button)).toBe('Operations');
+    });
+    expect(button.getAttribute('title')).toBe('ops — Operations');
+
+    server.channels = [general, { ...ops, topic: 'Incident response' }];
+    events.send(frame);
+    await waitFor(() => {
+      expect(described(button)).toBe('Incident response');
+    });
+
+    server.channels = [general, { ...ops, topic: '' }];
+    events.send(frame);
+    await waitFor(() => {
+      expect(described(button)).toBe('');
+    });
+    expect(button.getAttribute('title')).toBe('ops');
+  });
+
+  it('updates the header from a channel frame alone, without reading the list again', async () => {
+    const events = await openChat();
+    const before = server.listGets;
+    const document = { schema: 'conch.channel.v1', channel_id: 7, name: 'general', created_at: at };
+    events.send({ ...document, topic: 'Live purpose' });
+    await screen.findAllByText('Live purpose');
+    expect(described(screen.getByRole('button', { name: 'general' }))).toBe('Live purpose');
+    expect(server.listGets).toBe(before);
+
+    events.send({ ...document, topic: '' });
+    await waitFor(() => {
+      expect(screen.queryByText('Live purpose')).toBeNull();
+    });
+    expect(described(screen.getByRole('button', { name: 'general' }))).toBe('');
+    expect(server.listGets).toBe(before);
   });
 
   it('reads the list again once after a reconnect', async () => {
@@ -262,13 +314,25 @@ describe('the list follows the server', () => {
     render(<App origin={origin} />);
     await screen.findByText(/No channels yet/);
     expect(server.listGets).toBe(1);
-    // Another part of the page may keep a 30 s timer of its own: all are run.
-    expect(timers.length).toBeGreaterThan(0);
+    // Another part of the page keeps a 30 s timer of its own, and the list's
+    // timer is set by an effect that can run after "No channels yet" shows: on
+    // a loaded runner a snapshot taken now may hold only the other one (#1427).
+    // Each timer is run once, as it appears, until the list is read again.
     server.channels = [general];
-    await act(async () => {
-      for (const timer of timers) timer.run();
-      await Promise.resolve();
-    });
+    const ran = new Set<{ run: () => void; ms: number }>();
+    await waitFor(
+      () => {
+        for (const timer of timers) {
+          if (ran.has(timer)) continue;
+          ran.add(timer);
+          act(() => {
+            timer.run();
+          });
+        }
+        expect(server.listGets).toBe(2);
+      },
+      { timeout: 5000 },
+    );
     await screen.findByRole('button', { name: 'general' }, { timeout: 5000 });
     expect(screen.getByRole('button', { name: 'general' }).getAttribute('aria-current')).toBe('true');
     expect(server.listGets).toBe(2);

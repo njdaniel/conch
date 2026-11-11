@@ -25,6 +25,7 @@ import (
 	"github.com/njdaniel/conch/internal/server"
 	"github.com/njdaniel/conch/internal/server/approvals"
 	"github.com/njdaniel/conch/internal/server/livekit"
+	"github.com/njdaniel/conch/internal/server/push"
 	"github.com/njdaniel/conch/internal/server/store"
 	"github.com/njdaniel/conch/internal/web"
 	"github.com/njdaniel/conch/pkg/schema"
@@ -86,6 +87,8 @@ Usage:
                      [--web-dir <dir> | --no-web] [--allowed-origins <origin,...>]
                      [--trusted-proxies <cidr,...>] [--invite-allowance <n>]
                      [--metrics-listen <addr> [--metrics-allow-remote]]
+                     [--push-webpush [--push-webpush-allow-private] [--push-vapid-subject <uri>]
+                      [--push-max-per-minute <n>] [--push-expire <duration>]]
                      [--test-relax-invite-limits]
   conchd bootstrap-operator --data <dir> --name <name> [--keep-existing-credentials]
                      [--server-name <name>]
@@ -199,6 +202,34 @@ Flags for serve:
   --metrics-allow-remote let --metrics-listen be an address that is not loopback
                          (env CONCHD_METRICS_ALLOW_REMOTE=1). Anyone who can reach it can
                          read the metrics; conchd logs a warning when it is used.
+  --push-webpush         turn on Web Push, the transport that wakes a phone's app (env
+                         CONCHD_PUSH_WEBPUSH=1, default off: with it off push is off, and
+                         conchd needs no key and sends nothing). On the first start with it
+                         conchd makes the server's VAPID key in <data>/push-vapid-key.pem,
+                         mode 0600, and reuses it; serve refuses to start if that file is
+                         unreadable, is not a P-256 key, or is readable by group or others.
+                         Back the file up with the data directory: a lost or replaced key
+                         ends every Web Push registration.
+  --push-webpush-allow-private
+                         with --push-webpush, accept push endpoints that resolve to private,
+                         loopback or link-local addresses, and on any port, for a
+                         UnifiedPush distributor on your own network (env
+                         CONCHD_PUSH_WEBPUSH_ALLOW_PRIVATE=1). Without it an endpoint must
+                         be https on port 443 and resolve only to public addresses. serve
+                         refuses it without --push-webpush.
+  --push-vapid-subject   with --push-webpush, the contact a push service may use to reach
+                         you about this server's traffic, sent as the VAPID sub claim: a
+                         mailto: or https: URI (env CONCHD_PUSH_VAPID_SUBJECT, default none:
+                         no sub is sent). Some push services want one. It is public to every
+                         push service your members use. serve refuses any other form.
+  --push-max-per-minute  with --push-webpush, the most wakes the server sends in a minute,
+                         all phones together (env CONCHD_PUSH_MAX_PER_MINUTE, default 600).
+                         Wakes over it are dropped and counted; each phone still gets one
+                         when it next opens the app.
+  --push-expire          with --push-webpush, how long a push service keeps a wake it could
+                         not deliver, such as while a phone is off (env CONCHD_PUSH_EXPIRE,
+                         default 24h; at least 1s, at most 672h, which is 28 days). serve
+                         refuses a value outside that.
   --test-relax-invite-limits
                          TEST SERVERS ONLY. Raises the per-address limits of the invite and
                          sign-in-link routes, and the per-person limit on making them, so a
@@ -266,6 +297,11 @@ type serveOptions struct {
 	metricsListen     string
 	metricsRemote     bool
 	relaxInviteLimits bool
+	pushWebPush       bool
+	pushAllowPrivate  bool
+	pushSubject       string
+	pushMaxPerMinute  int
+	pushExpire        time.Duration
 	serverName        string
 	mode              store.Mode
 	operatorTOTP      store.OperatorTOTP
@@ -325,6 +361,36 @@ func parseServeArgs(args []string) (serveOptions, error) {
 		return serveOptions{}, err
 	}
 	metricsRemote := fs.Bool("metrics-allow-remote", metricsRemoteDefault, "let --metrics-listen be an address that is not loopback")
+	// Phone push (issue #1714). Off unless asked for; a switch set to something
+	// unreadable is an error, not unset, as with --no-web.
+	pushWebPushDefault, err := envBool("CONCHD_PUSH_WEBPUSH")
+	if err != nil {
+		return serveOptions{}, err
+	}
+	pushWebPush := fs.Bool("push-webpush", pushWebPushDefault, "turn on Web Push, the transport that wakes a phone's app (makes a VAPID key in the data directory)")
+	pushAllowPrivateDefault, err := envBool("CONCHD_PUSH_WEBPUSH_ALLOW_PRIVATE")
+	if err != nil {
+		return serveOptions{}, err
+	}
+	pushAllowPrivate := fs.Bool("push-webpush-allow-private", pushAllowPrivateDefault, "with --push-webpush, accept push endpoints on private addresses and any port (a distributor on your own network)")
+	// How the sender behaves (issue #1715). They mean nothing with Web Push
+	// off, and are checked either way, so a bad value is found when it is
+	// written and not when push is first turned on.
+	pushSubject := fs.String("push-vapid-subject", os.Getenv("CONCHD_PUSH_VAPID_SUBJECT"), "with --push-webpush, the VAPID sub claim: a mailto: or https: URI (default none)")
+	pushMaxPerMinuteDefault := push.DefaultMaxPerMinute
+	if raw := os.Getenv("CONCHD_PUSH_MAX_PER_MINUTE"); raw != "" {
+		v, err := strconv.Atoi(raw)
+		if err != nil {
+			return serveOptions{}, fmt.Errorf("serve: CONCHD_PUSH_MAX_PER_MINUTE: %q is not a whole number", raw)
+		}
+		pushMaxPerMinuteDefault = v
+	}
+	pushMaxPerMinute := fs.Int("push-max-per-minute", pushMaxPerMinuteDefault, "with --push-webpush, the most wakes sent per minute, all phones together")
+	pushExpireDefault, err := envDuration("CONCHD_PUSH_EXPIRE", push.DefaultExpire)
+	if err != nil {
+		return serveOptions{}, err
+	}
+	pushExpire := fs.Duration("push-expire", pushExpireDefault, "with --push-webpush, how long a push service keeps an undelivered wake (at most 672h)")
 	// A flag and nothing else: an environment variable could be left set in
 	// a service file by accident, a flag has to be typed.
 	relaxInviteLimits := fs.Bool("test-relax-invite-limits", false, "TEST SERVERS ONLY: raise the per-address and per-person invite and sign-in-link limits (loopback listeners only)")
@@ -409,6 +475,21 @@ func parseServeArgs(args []string) (serveOptions, error) {
 	if err != nil {
 		return serveOptions{}, err
 	}
+	// Like --metrics-allow-remote, a flag that only relaxes another is a
+	// mistake given alone: it would look like a protection was loosened that
+	// was never on.
+	if *pushAllowPrivate && !*pushWebPush {
+		return serveOptions{}, errors.New("serve: --push-webpush-allow-private needs --push-webpush")
+	}
+	if err := push.ValidateSubject(*pushSubject); err != nil {
+		return serveOptions{}, fmt.Errorf("serve: --push-vapid-subject: %w", err)
+	}
+	if err := push.ValidateMaxPerMinute(*pushMaxPerMinute); err != nil {
+		return serveOptions{}, fmt.Errorf("serve: --push-max-per-minute: %w", err)
+	}
+	if err := push.ValidateExpire(*pushExpire); err != nil {
+		return serveOptions{}, fmt.Errorf("serve: --push-expire: %w", err)
+	}
 	if *metricsRemote && *metricsListen == "" {
 		return serveOptions{}, errors.New("serve: --metrics-allow-remote needs --metrics-listen")
 	}
@@ -423,6 +504,8 @@ func parseServeArgs(args []string) (serveOptions, error) {
 		sessionStale: *sessionStale, sessionOffline: *sessionOffline,
 		trustedProxies: trustedProxies, inviteAllowance: *inviteAllowance,
 		metricsListen: *metricsListen, metricsRemote: *metricsRemote, relaxInviteLimits: *relaxInviteLimits,
+		pushWebPush: *pushWebPush, pushAllowPrivate: *pushAllowPrivate,
+		pushSubject: *pushSubject, pushMaxPerMinute: *pushMaxPerMinute, pushExpire: *pushExpire,
 		serverName: *serverName, mode: mode, operatorTOTP: operatorTOTP,
 		dataDir: *dataDir, listen: *listen, authMode: authMode, mcpTokens: mcpTokens,
 		ntfyServer: *ntfyServer, ntfyTopic: *ntfyTopic, ntfyUrgentTopic: *ntfyUrgentTopic,
@@ -507,11 +590,24 @@ func runServe(args []string) error {
 	if err := refuseUnfinishedRestore("serve", opts.dataDir); err != nil {
 		return err
 	}
+	// The push key is loaded before anything is opened or served: a key that
+	// cannot be used stops the start with one line, and nothing is left half
+	// started (issue #1714).
+	var vapid *push.VAPIDKey
+	if opts.pushWebPush {
+		if vapid, err = push.LoadOrCreateVAPIDKey(opts.dataDir); err != nil {
+			return fmt.Errorf("serve: %w", err)
+		}
+	}
 	st, err := store.Open(ctx, filepath.Join(opts.dataDir, "conch.db"))
 	if err != nil {
 		return err
 	}
 	defer func() { _ = st.Close() }()
+	pushCfg, err := startPush(ctx, st, opts, vapid, time.Now())
+	if err != nil {
+		return err
+	}
 	// The first start after conchd restore refuses the TOTP steps an
 	// operator may have used before, from this start's clock; any other
 	// start finds nothing to do.
@@ -557,6 +653,7 @@ func runServe(args []string) error {
 		TOTPKey:               totpKey,
 		Mode:                  opts.mode,
 		OperatorTOTP:          opts.operatorTOTP,
+		Push:                  pushCfg,
 		Ntfy: approvals.NtfyConfig{
 			Server:         opts.ntfyServer,
 			ApprovalsTopic: opts.ntfyTopic,

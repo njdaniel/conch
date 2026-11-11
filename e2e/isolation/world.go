@@ -90,6 +90,9 @@ type group struct {
 	// proof and a reset (issue #708): neither may take it.
 	signInLink int64
 	signInCode string
+	// pushRegID is ann's push registration (A only), the id B's PUT and
+	// DELETE rows name (issue #1714).
+	pushRegID string
 	// public is A's public channel, made by ann through POST /v1/channels
 	// (issue #981), and publicID its id; neither is a marker.
 	public   string
@@ -633,6 +636,17 @@ func (w *world) activityA() error {
 	w.marks.secret("A's sign-in link code", link.Code)
 	a.signInLink, a.signInCode = link.SignInLink.ID, link.Code
 	w.marks.id("sign_in_link", "ann's sign-in link", link.SignInLink.ID)
+
+	// Ann's push registration (issue #1714): its endpoint, keys and id are
+	// markers of A's, and no answer to B may hold one.
+	pushPath := w.aName("pushep")
+	w.marks.str("A's push endpoint path", pushPath)
+	reg, err := w.registerPush(ann.api, pushPath, true)
+	if err != nil {
+		return fmt.Errorf("ann registers for push: %w", err)
+	}
+	a.pushRegID = reg.ID
+	w.marks.secret("A's push registration id", reg.ID)
 
 	// A problem report.
 	report, err := w.report(ann, w.aName("report"))

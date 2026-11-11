@@ -5,8 +5,8 @@
 #
 #   1. No file passes --no-sandbox or --disable-gpu-sandbox, sets
 #      webSecurity to false, or handles Chromium's certificate-error event.
-#      (Prose in docs/ may name them; code, scripts, workflows and the
-#      Makefile may not.)
+#      (Prose in docs/ may name them; code, scripts, workflows, the
+#      Makefile and everything in desktop/build/deb/ may not.)
 #   2. The tools desktop/ shares with web/ are at web/'s exact versions, so the
 #      two never drift apart silently.
 #
@@ -31,8 +31,18 @@ done < <(grep -rInE -e "$banned" \
     --include='*.ts' --include='*.tsx' --include='*.js' --include='*.mjs' --include='*.cjs' --include='*.json' \
     --include='*.sh' --include='*.yml' --include='*.yaml' --include='Makefile' \
     --exclude-dir=node_modules --exclude-dir=out --exclude-dir=dist --exclude-dir=.git --exclude-dir=target \
-    --exclude='desktop-lint.sh' --exclude='desktop-lint-test.sh' \
+    --exclude='desktop-lint.sh' --exclude='desktop-lint-test.sh' --exclude='desktop-deb-test.sh' \
     --exclude='package-lock.json' . || true)
+
+# The package's files (issue #1597) have no extension to match above (postinst,
+# control.in, the AppArmor profile, the desktop file): every text file in the
+# directory is checked. (scripts/desktop-deb-test.sh names the flag to prove its
+# own check, and is excluded above.)
+if [ -d desktop/build/deb ]; then
+    while IFS= read -r hit; do
+        fail "$hit"
+    done < <(grep -rInE -e "$banned" desktop/build/deb || true)
+fi
 
 if [ -f desktop/package.json ] && [ -f web/package.json ]; then
     for pkg in typescript vite vitest eslint typescript-eslint @playwright/test; do

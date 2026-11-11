@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -18,11 +19,27 @@ import (
 
 // wsTestServer runs the server's handler on a real socket and returns the
 // base ws:// URL. WebSocket needs real TCP; httptest.NewRecorder cannot
-// carry an upgraded connection.
+// upgrade.
+//
+// The cleanup waits for every handler to return, hijacked sockets included.
+// httptest.Server.Close does not wait for those: it forgets a connection once
+// it is hijacked, so a socket handler could still be running, and writing to
+// the store, after Close returned. Cleanups run last in, first out, so this
+// one runs after the test's own socket cleanups (which end the handlers) and
+// before the store is closed and its directory removed (issue #1681).
 func wsTestServer(t *testing.T, srv *Server) string {
 	t.Helper()
-	ts := httptest.NewServer(srv.Handler())
-	t.Cleanup(ts.Close)
+	var inflight sync.WaitGroup
+	h := srv.Handler()
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		inflight.Add(1)
+		defer inflight.Done()
+		h.ServeHTTP(w, r)
+	}))
+	t.Cleanup(func() {
+		ts.Close()
+		inflight.Wait()
+	})
 	return "ws" + strings.TrimPrefix(ts.URL, "http")
 }
 

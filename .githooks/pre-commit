@@ -40,6 +40,10 @@ if [ -f ./scripts/schema-ts-check.sh ]; then
     echo "pre-commit: generated TypeScript wire types"
     ./scripts/schema-ts-check.sh
 fi
+if [ -f ./scripts/spike-schema-check.sh ]; then
+    echo "pre-commit: the Android spike's schema copy"
+    ./scripts/spike-schema-check.sh
+fi
 
 echo "pre-commit: dependency gate"
 ./scripts/depgate.sh

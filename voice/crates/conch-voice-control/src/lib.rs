@@ -20,7 +20,8 @@
 //!
 //! - [`Config`]: the TOML configuration, its defaults, and layers of overrides.
 //! - [`set_audio_value`]: the file's text with the microphone, the speakers or the talk
-//!   mode changed, and nothing else.
+//!   mode changed, and nothing else; [`set_keys_value`] and [`unset_keys_value`] do the same
+//!   for the key device and bindings.
 //! - [`KeyDecoder`]: `input_event` records reduced to [`KeyEvent`]s of the configured keys.
 //! - [`Ptt`]: the push-to-talk state machine, and its open-microphone mode ([`TalkMode`]).
 //! - [`ConnectionPolicy`]: what to do after each [`Outcome`].
@@ -48,8 +49,9 @@ mod ptt;
 pub use config::{
     AudioConfig, AudioKey, Config, ConfigOverrides, DEFAULT_MAX_TRANSMIT_SECS,
     DEFAULT_OPEN_HANG_MS, DEFAULT_OPEN_THRESHOLD_DB, DEFAULT_RELEASE_TAIL_MS, DEFAULT_SERVER,
-    KeysConfig, MAX_MAX_TRANSMIT_SECS, MAX_OPEN_HANG_MS, MAX_OPEN_THRESHOLD_DB,
-    MAX_RELEASE_TAIL_MS, MIN_OPEN_HANG_MS, MIN_OPEN_THRESHOLD_DB, set_audio_value,
+    KeysConfig, KeysKey, MAX_MAX_TRANSMIT_SECS, MAX_OPEN_HANG_MS, MAX_OPEN_THRESHOLD_DB,
+    MAX_RELEASE_TAIL_MS, MIN_OPEN_HANG_MS, MIN_OPEN_THRESHOLD_DB, set_audio_value, set_keys_value,
+    unset_keys_value,
 };
 pub use error::Error;
 pub use keys::{KEY_CODE_MAX, Key, KeyAction, KeyBindings, KeyCode, KeyDecoder, KeyEvent};

@@ -424,7 +424,7 @@ func permittedChannelsTx(ctx context.Context, tx execer, r inviteRow) (kept, dro
 		return all, nil, nil
 	}
 	rows, err := tx.QueryContext(ctx,
-		`SELECT channel_id FROM channel_members WHERE principal_id = ?`, r.createdBy)
+		`SELECT channel_id FROM `+liveMembers+` WHERE principal_id = ?`, r.createdBy)
 	if err != nil {
 		return nil, nil, fmt.Errorf("store: invite maker memberships: %w", err)
 	}
@@ -653,7 +653,7 @@ func (s *Store) CreateInvite(ctx context.Context, actor string, creatorID int64,
 			if !rights.channels {
 				var one int
 				switch err := tx.QueryRowContext(ctx,
-					"SELECT 1 FROM channel_members WHERE channel_id = ? AND principal_id = ?", id, creatorID).Scan(&one); {
+					"SELECT 1 FROM "+liveMembers+" WHERE channel_id = ? AND principal_id = ?", id, creatorID).Scan(&one); {
 				case errors.Is(err, sql.ErrNoRows):
 					return inviteRefusal(ErrInviteGrantExceedsInviter, schema.PermManageChannels, "a channel you are not in")
 				case err != nil:

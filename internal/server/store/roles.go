@@ -221,6 +221,9 @@ func revokeLiveCredentialsTx(ctx context.Context, tx execer, now time.Time, ende
 			return 0, err
 		}
 		// Its sessions end with it, as on every other revocation (issue #265).
+		if err := endCredentialNotificationsTx(ctx, tx, "system", c.id, now); err != nil {
+			return 0, err
+		}
 		if err := endCredentialSessionsTx(ctx, tx, "system", c.id, SessionEndedByRevocation, now, ended); err != nil {
 			return 0, err
 		}
@@ -511,7 +514,7 @@ func populateRoleChangeResultTx(ctx context.Context, tx execer, targetID int64, 
 		return RoleChangeResult{}, err
 	}
 	manages, err := idsTx(ctx, tx,
-		"SELECT channel_id FROM channel_members WHERE principal_id = ? AND manages = 1 ORDER BY channel_id ASC", targetID)
+		"SELECT channel_id FROM "+liveMembers+" WHERE principal_id = ? AND manages = 1 ORDER BY channel_id ASC", targetID)
 	if err != nil {
 		return RoleChangeResult{}, fmt.Errorf("store: list managed channels of %d: %w", targetID, err)
 	}

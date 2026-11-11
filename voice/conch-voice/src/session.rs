@@ -23,18 +23,16 @@
 //! - **`Reconnecting` is not connected.** The gate is forced shut from that moment until
 //!   `Reconnected`. If that has not come within the grace period (20 s) the loop closes the
 //!   connection itself and goes back to `conchd`.
-//! - **A press reports `started` before it unmutes, and a release mutes before it reports
-//!   `stopped`**, as the browser client does. `conchd`'s poller compares what it sees of
-//!   the track with the reports, and the other order let it see a press before its report
-//!   and record an honest press as unreported (§6, "Client side").
-//!   - A press queues `started` and waits for `conchd`'s answer, for at most
-//!     [`REPORT_WAIT`]. Then the track is unmuted and, straight after, the gate told to
-//!     open. Past the wait, or while the report is still being tried, the press goes ahead
-//!     all the same: audio never depends on `conchd` being reachable.
-//!   - A `started` answered 409 `voice_no_session` or 401 drops the connection instead,
-//!     before the track would open, and the policy decides what follows.
-//!   - A press released, or shut by a reason, while it waits never opens the track or the
-//!     gate, and its transmission is over at once.
+//! - **A press opens at once and reports `started` in parallel; a release mutes before it
+//!   reports `stopped`** (issue #970; §6, "Client side"). A press unmutes the track and
+//!   opens the gate in the same step that queues `started`, and never waits for `conchd`:
+//!   speech is not held back by a round trip. The poller may see the unmuted track before
+//!   the report and record one `voice_transmit_unreported` row, which it closes
+//!   `reason=reported` when the report arrives; that is accepted.
+//!   - The answer to `started` is still watched, for at most [`REPORT_WAIT`]: a 409
+//!     `voice_no_session` or a 401 drops the connection, which ends the press and mutes the
+//!     track, and the policy decides what follows. Audio never depends on `conchd` being
+//!     reachable.
 //!   - A release mutes when the gate says it has shut, release tail included, and only then
 //!     does the machine produce `stopped`.
 //!   - A forced shut mutes at once, without waiting for the gate; a frame the gate let
@@ -88,7 +86,7 @@ use std::collections::BTreeMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use conch_voice_api::{
@@ -111,7 +109,7 @@ use crate::managed::{
     REPORT_LIMIT, ROOM_LIMIT, Snapshot,
 };
 use crate::output::{Connection, Event, Output, Stats, speaker_label};
-use crate::presence::{self, PresenceTimings, Roster};
+use crate::presence::{self, Presence, PresenceTimings};
 use crate::receive::{self, BoxedSink, MixCommand, MixStats, Playing};
 use crate::reports::{Answer, MakeClient, ReportEvent, ReportTimings, Reports};
 use crate::sdk::{DisconnectReason, MicTrack, RoomHandle, SdkError, SdkEvent, Transport};
@@ -296,8 +294,9 @@ pub struct Timings {
     /// How long, beyond the release tail, the gate is given to say it has shut when the
     /// client is leaving.
     pub gate_shut_grace: Duration,
-    /// How long a press waits for `conchd`'s answer to its `started` report before the track
-    /// opens all the same. [`REPORT_WAIT`] outside tests.
+    /// How long a press's `started` report is watched for a refusal (409 or 401) that drops
+    /// the connection. The press does not wait: it opens at once. [`REPORT_WAIT`] outside
+    /// tests.
     pub report_wait: Duration,
     /// How long the last reports are given to be delivered when the client is leaving.
     pub report_flush: Duration,
@@ -369,6 +368,9 @@ pub struct Settings {
     pub release_tail_ms: u32,
     /// `audio.max_transmit_secs`.
     pub max_transmit: Duration,
+    /// The limit of one push-to-talk press: `max_transmit`, or less where the managed
+    /// owner passed `--transmit-ceiling-secs`. Open mode uses `max_transmit` alone.
+    pub push_to_talk_max: Duration,
     /// What opens the gate: `audio.talk_mode` for `join`. A managed helper speaking
     /// `conch.voice_control.v1` is given push-to-talk whatever the file says; one speaking
     /// v2, the file's mode, or the one its owner set while it was starting.
@@ -720,8 +722,8 @@ async fn sdk_event<T: Transport>(live: &mut Option<Live<T>>) -> Option<SdkEvent>
     }
 }
 
-/// A press whose `started` report is out: the track opens once `conchd` has answered it,
-/// or at `until`, whichever comes first.
+/// A press whose `started` report is out: its answer is watched until `until`, for a
+/// refusal that drops the connection. The track is already open.
 struct Opening {
     /// The answer, once the report is queued.
     answer: Option<oneshot::Receiver<Answer>>,
@@ -743,6 +745,19 @@ async fn answered(opening: &mut Option<Opening>) -> Option<Answer> {
     tokio::select! {
         answer = answer => answer,
         () = tokio::time::sleep_until(opening.until) => None,
+    }
+}
+
+/// Waits for one step of leaving the room for at most `limit`. A step that is not done by
+/// then is dropped, and that is logged: the server may keep the participant until its own
+/// timeout. Nothing in the line names the room or any token.
+async fn abandon_if_late<F: Future>(limit: Duration, step: F) {
+    if tokio::time::timeout(limit, step).await.is_err() {
+        log::warn!(
+            "the room leave was abandoned after {} ms; the server may keep this participant \
+             until it times out",
+            limit.as_millis()
+        );
     }
 }
 
@@ -779,9 +794,9 @@ struct Session<T: Transport> {
     transmitter: Transmitter<Feed<T>>,
     receiver: receive::Receiver,
     reports: Reports,
-    /// A press that waits for its `started` to be answered before the track opens.
+    /// A press whose `started` is not yet answered. The press itself does not wait for it.
     opening: Option<Opening>,
-    rosters: mpsc::UnboundedReceiver<Roster>,
+    rosters: mpsc::UnboundedReceiver<Presence>,
     phase: Phase<T>,
     live: Option<Live<T>>,
     shown: Option<Connection>,
@@ -793,6 +808,9 @@ struct Session<T: Transport> {
     owner: Option<Owner>,
     /// Why a managed helper is ending, once it is: the reason its last states give.
     ending: Option<Ending>,
+    /// Whether the owner has sent `leave`, whatever ended the session first (a signal may
+    /// have): the room step of an explicit leave is not cut by the end of input (#1690).
+    leave_asked: bool,
     /// What the key device's watcher last said, for the owner's `ptt`.
     key_state: Option<DeviceState>,
     /// Whether a talk key is bound on the key device, for the owner's `ptt`.
@@ -927,6 +945,7 @@ impl<T: Transport> Session<T> {
             sink_tones,
             release_tail_ms,
             max_transmit,
+            push_to_talk_max,
             talk_mode,
             level,
             key_device,
@@ -934,8 +953,9 @@ impl<T: Transport> Session<T> {
             share_audio_owner,
             timings,
         } = settings;
-        let transmitter = transmit::spawn_with_level(
+        let transmitter = transmit::spawn_with_press_cap(
             transmit::gate_config(release_tail_ms, max_transmit),
+            Some(transmit::press_cap_ms(max_transmit, push_to_talk_max)),
             level,
             timings.transmit_clock.clone(),
         )?;
@@ -956,7 +976,7 @@ impl<T: Transport> Session<T> {
             timings.reports.clone(),
         );
         let rosters = presence::spawn(conchd.client.clone(), channel.clone(), timings.presence);
-        let (ptt, first) = Ptt::with_talk_mode(max_transmit, talk_mode);
+        let (ptt, first) = Ptt::with_limits(max_transmit, push_to_talk_max, talk_mode);
         let mut out = out;
         out.set_talk_mode(talk_mode);
         let mut session = Session {
@@ -991,6 +1011,7 @@ impl<T: Transport> Session<T> {
             exit: None,
             owner: None,
             ending: None,
+            leave_asked: false,
             key_state: None,
             talk_key: true,
             mic: Mic::NotOpened,
@@ -1036,7 +1057,10 @@ impl<T: Transport> Session<T> {
                     reason: "reconnect_timed_out",
                     detail: None,
                 }),
-                Some(roster) = self.rosters.recv() => self.out.show(&Event::Presence(&roster)),
+                Some(presence) = self.rosters.recv() => match presence {
+                    Presence::Roster(roster) => self.out.show(&Event::Presence(&roster)),
+                    Presence::VoiceRemoved => self.voice_removed(),
+                },
                 Some(report) = self.reports.events.recv() => self.on_report(&report),
                 Some(received) = self.receiver.stats.recv() => self.on_stats(received),
                 Some(said) = self.receiver.playing.recv() => self.on_playing(said),
@@ -1058,13 +1082,15 @@ impl<T: Transport> Session<T> {
     }
 
     fn obey(&mut self, outputs: Vec<PttOutput>) {
-        // A press that ended while it waited for its answer, and so never opened the gate.
-        let mut never_opened = false;
         for output in outputs {
             match output {
                 PttOutput::Gate(GateCommand::Open) => {
-                    // Not yet: the gate opens once `conchd` has answered the `started` that
-                    // the machine produces with this, or once the wait for that is over.
+                    // At once, without waiting for `conchd`: the `started` that the machine
+                    // produces with this is queued next, in parallel (issue #970). The track
+                    // is unmuted before the gate opens, so that no frame meets a muted track.
+                    self.with_track(MicTrack::unmute);
+                    self.transmitter.track_lock.reopen();
+                    self.transmitter.send(TxCommand::Gate(GateCommand::Open));
                     self.opening = Some(Opening {
                         answer: None,
                         until: Instant::now() + self.timings.report_wait,
@@ -1077,16 +1103,7 @@ impl<T: Transport> Session<T> {
                         command,
                         GateCommand::ForceShut(_) | GateCommand::TalkMode(_)
                     );
-                    let ends = at_once || command == GateCommand::Shut;
-                    let waited = ends && self.opening.take().is_some();
-                    never_opened |= waited;
-                    // The gate never opened for a press that waited, so a release has
-                    // nothing to shut; a reason, or the mode, is passed on all the same, so
-                    // that the gate holds the same reasons as the machine and runs the
-                    // level detector in the mode the machine is in.
-                    if !(waited && command == GateCommand::Shut) {
-                        self.transmitter.send(TxCommand::Gate(command));
-                    }
+                    self.transmitter.send(TxCommand::Gate(command));
                     if at_once {
                         // Nothing is left to send.
                         self.mute_track();
@@ -1117,17 +1134,9 @@ impl<T: Transport> Session<T> {
                 }
             }
         }
-        if never_opened {
-            // The gate will never say it shut, since it never opened: the press is over now,
-            // and is ended as one the gate shut, mute first and `stopped` after. Told once
-            // the machine's outputs above are carried out, so they are shown in order.
-            self.on_transmit(TxEvent::GateShut {
-                limit_reached: false,
-            });
-        }
     }
 
-    /// `conchd` answered the `started` a press waits for, or the wait is over.
+    /// `conchd` answered the `started` that is watched, or the watch is over.
     fn on_answer(&mut self, answer: Option<Answer>) {
         let refused = match answer {
             Some(Answer::NoSession) => Ended {
@@ -1142,26 +1151,14 @@ impl<T: Transport> Session<T> {
                 detail: None,
             },
             Some(Answer::Delivered | Answer::Settled) | None => {
-                if self.opening.take().is_some() {
-                    // Before the gate opens, so that no frame meets a muted track.
-                    self.with_track(MicTrack::unmute);
-                    self.transmitter.track_lock.reopen();
-                    self.transmitter.send(TxCommand::Gate(GateCommand::Open));
-                }
+                self.opening = None;
                 return;
             }
         };
-        // `conchd` would not take this transmission as reported. The connection is dropped
-        // before the track opens: the machine is told it is not connected, which ends the
-        // press that waited.
+        // `conchd` would not take this transmission as reported. The connection is dropped,
+        // which mutes the track and ends the press.
+        self.opening = None;
         self.disconnected(refused);
-        if self.opening.take().is_some() {
-            // There was no connection to drop, which cannot be while a press waits. The
-            // press is ended all the same, and its track never opens.
-            self.on_transmit(TxEvent::GateShut {
-                limit_reached: false,
-            });
-        }
     }
 
     fn with_track(&self, act: impl FnOnce(&Track<T>)) {
@@ -1522,6 +1519,31 @@ impl<T: Transport> Session<T> {
         );
     }
 
+    /// `conchd`'s presence socket said a moderator removed this person from voice only
+    /// (issue #1409). The room, if one is joined, is left; either way the policy stops the
+    /// client with the reason, and nothing asks for the session `conchd` would grant.
+    ///
+    /// Not joined, the phase is left as it is: the outcome is a stop, so the loop ends on
+    /// it, and the shutdown drains what the phase holds, a room still closing after the
+    /// SDK's own disconnect for the kick, or an attempt under way, as it does for `quit`.
+    /// Replacing the phase here would drop that close half way (#1458 review).
+    fn voice_removed(&mut self) {
+        let ended = Ended {
+            outcome: Outcome::VoiceRemoved,
+            reason: "voice_removed",
+            detail: None,
+        };
+        if self.live.is_some() {
+            self.disconnected(ended);
+        } else {
+            debug_assert!(
+                ended.outcome.stops(),
+                "a non-stop would need the phase reset"
+            );
+            self.decide(ended);
+        }
+    }
+
     fn on_transmit(&mut self, event: TxEvent) {
         match event {
             TxEvent::GateShut { limit_reached } => {
@@ -1615,6 +1637,7 @@ impl<T: Transport> Session<T> {
                 self.ack(id, None);
             }
             Control::Leave { id } => {
+                self.leave_asked = true;
                 self.begin_stopping(VoiceControlReason::Left);
                 self.settle(false);
                 self.ack(id, None);
@@ -1970,11 +1993,11 @@ impl<T: Transport> Session<T> {
         let phase = std::mem::replace(&mut self.phase, Phase::Settled);
         let left = async {
             if let Some(live) = live {
-                let _ = tokio::time::timeout(close_limit, live.room.close()).await;
+                abandon_if_late(close_limit, live.room.close()).await;
             }
             match phase {
                 Phase::Closing(closing, _) => {
-                    let _ = tokio::time::timeout(close_limit, closing).await;
+                    abandon_if_late(close_limit, closing).await;
                 }
                 // An attempt that is dropped where it stands can leave a participant in the
                 // room that nobody closes, and between its publish and its mute that
@@ -1983,7 +2006,7 @@ impl<T: Transport> Session<T> {
                 // track is then muted), and the room it joined is left like any other.
                 Phase::Establishing(attempt) => {
                     if let Ok(Ok(joined)) = tokio::time::timeout(attempt_limit, attempt).await {
-                        let _ = tokio::time::timeout(close_limit, joined.room.close()).await;
+                        abandon_if_late(close_limit, joined.room.close()).await;
                     }
                 }
                 Phase::Ask(_) | Phase::Settled => {}
@@ -2008,7 +2031,8 @@ impl<T: Transport> Session<T> {
     /// A managed helper leaves (`docs/design/tui-voice.md` §8.2, §8.3): the gate is shut and
     /// the microphone and the speakers closed at once, with no release tail; a press that
     /// was open gets its `stopped`, given at most [`REPORT_LIMIT`]; the room is left, given
-    /// at most [`ROOM_LIMIT`], or [`OWNER_LOST_STEP`] once the owner is gone. The owner's
+    /// at most [`ROOM_LIMIT`], or [`OWNER_LOST_STEP`] once the owner is gone (an end of input
+    /// after an explicit `leave` does not shorten it). The owner's
     /// commands are answered meanwhile, and its last state is the final one.
     async fn leave_managed(mut self) -> Result<(), Error> {
         let mut result = self.exit.take().unwrap_or(Ok(()));
@@ -2053,23 +2077,28 @@ impl<T: Transport> Session<T> {
         let attempt_limit = self.timings.attempt_limit.min(room_limit);
         let live = self.live.take();
         let phase = std::mem::replace(&mut self.phase, Phase::Settled);
+        crate::managed::set_room_leave_under_way(true);
+        let room_left = Arc::new(AtomicBool::new(false));
+        let room_done = Arc::clone(&room_left);
         let left = async move {
             if let Some(live) = live {
-                let _ = tokio::time::timeout(room_limit, live.room.close()).await;
+                abandon_if_late(room_limit, live.room.close()).await;
             }
             match phase {
                 Phase::Closing(closing, _) => {
-                    let _ = tokio::time::timeout(room_limit, closing).await;
+                    abandon_if_late(room_limit, closing).await;
                 }
                 // As for `join`: an attempt under way is given a moment to finish, so that
                 // the room it joins is left and its track is not abandoned unmuted.
                 Phase::Establishing(attempt) => {
                     if let Ok(Ok(joined)) = tokio::time::timeout(attempt_limit, attempt).await {
-                        let _ = tokio::time::timeout(room_limit, joined.room.close()).await;
+                        abandon_if_late(room_limit, joined.room.close()).await;
                     }
                 }
                 Phase::Ask(_) | Phase::Settled => {}
             }
+            room_done.store(true, Ordering::SeqCst);
+            crate::managed::set_room_leave_under_way(false);
         };
         // What a get_state is answered with meanwhile: on the way out, the gate shut and
         // nothing captured.
@@ -2085,6 +2114,8 @@ impl<T: Transport> Session<T> {
             owner.finish(&last).await;
         }
         let mut cutoff: Option<Instant> = None;
+        // An explicit leave, even one that came after a signal, keeps the room step whole.
+        let mut leave_asked = self.leave_asked || ending.reason == VoiceControlReason::Left;
         {
             let work = async { tokio::join!(self.reports.flush(REPORT_LIMIT), left) };
             tokio::pin!(work);
@@ -2098,24 +2129,42 @@ impl<T: Transport> Session<T> {
                         break;
                     }
                     () = sleep_until(cutoff) => {
-                        log::warn!("the owner is gone: leaving without waiting any longer");
+                        if room_left.load(Ordering::SeqCst) {
+                            log::warn!("the owner is gone: leaving without waiting any longer");
+                        } else {
+                            log::warn!(
+                                "the room leave was abandoned because the owner is gone; \
+                                 the server may keep this participant until it times out"
+                            );
+                        }
                         break;
                     }
                     input = self.inputs.recv(), if self.inputs_open => match input {
-                        Some(Input::Control(control)) => answer_while_stopping(
+                        Some(Input::Control(control)) => {
+                            leave_asked |= matches!(control, Control::Leave { .. });
+                            answer_while_stopping(
                             owner.as_mut(),
                             control,
                             &stopping,
                             &mut ending,
                             &mut result,
-                        ),
+                            );
+                        }
                         Some(Input::OwnerLost | Input::Eof) | None => {
                             if input.is_none() {
                                 self.inputs_open = false;
                             }
-                            // The tighter bounds of an owner that is gone apply from now.
-                            let sooner = Instant::now() + OWNER_LOST_STEP;
-                            cutoff = Some(cutoff.map_or(sooner, |at| at.min(sooner)));
+                            // The tighter bounds of an owner that is gone apply from now,
+                            // except to the room step of an explicit leave: the owner
+                            // asked for it (even after a signal) and closes its end of the pipe at once after,
+                            // so the end of input says nothing against that step, and
+                            // cutting it would drop the LiveKit Leave (#1685). The step
+                            // keeps its own limit, and the process the owner-loss
+                            // watchdog.
+                            if !leave_asked {
+                                let sooner = Instant::now() + OWNER_LOST_STEP;
+                                cutoff = Some(cutoff.map_or(sooner, |at| at.min(sooner)));
+                            }
                         }
                         Some(_) => {}
                     },
@@ -2266,6 +2315,7 @@ mod tests {
             sink_tones: Vec::new(),
             release_tail_ms: 0,
             max_transmit: Duration::from_secs(120),
+            push_to_talk_max: Duration::from_secs(120),
             talk_mode: TalkMode::PushToTalk,
             level: transmit::level_config(-40, 400),
             key_device: None,

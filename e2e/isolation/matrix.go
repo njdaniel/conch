@@ -208,7 +208,7 @@ func id(n int64) string   { return itoa(n) }
 
 // matrixRows is the matrix.
 func matrixRows() []row {
-	return slices.Concat(coreMatrixRows(), reactionMatrixRows(), editMatrixRows())
+	return slices.Concat(coreMatrixRows(), reactionMatrixRows(), editMatrixRows(), notificationMatrixRows())
 }
 
 func coreMatrixRows() []row {
@@ -244,6 +244,17 @@ func coreMatrixRows() []row {
 
 		// Who B is, and B's channels.
 		own("GET /v1/whoami", "asks who she is", func(*world, subject) probe { return get("/v1/whoami") }),
+		// Preview as member (issue #1516; the preview phase, preview.go, has the
+		// administrator's side). Without the header the entry read is the same
+		// 400 for everyone; with it, a member who holds neither permission is
+		// refused before the target is looked up, the same for A's member as
+		// for an id nobody has.
+		{route: "GET /v1/preview", what: "asks for a preview with no target", want: answer{http.StatusBadRequest, "invalid_request"},
+			probe: func(*world, subject) probe { return get("/v1/preview") }},
+		{route: "GET /v1/preview", what: "previews an A member", pick: aMember, want: operatorOnly,
+			probe: func(_ *world, s subject) probe {
+				return probe{method: http.MethodGet, path: "/v1/preview", headers: map[string]string{previewHeader: id(s.id)}}
+			}},
 		own("GET /v1/channels", "lists her channels", func(*world, subject) probe { return get("/v1/channels") }),
 		operator("POST /v0/channels", "makes a channel with A's channel's name", aChannel, func(_ *world, s subject) probe {
 			return post("/v0/channels", schema.CreateChannelRequest{Name: s.name})
@@ -289,6 +300,12 @@ func coreMatrixRows() []row {
 		// including a manager of a different channel.
 		byChannel("PUT /v1/channels/{id}/name", "renames A's channel", func(_ *world, s subject) probe {
 			return put("/v1/channels/"+id(s.id)+"/name", schema.RenameChannelRequestV1{Name: "renamed", From: s.name})
+		}),
+		// Setting a channel's topic (issue #1503) hides A's channel from B's
+		// members, a manager of a different channel included: the class
+		// answers channel_not_found before the body is read.
+		byChannel("PUT /v1/channels/{id}/topic", "sets the topic of A's channel", func(_ *world, s subject) probe {
+			return put("/v1/channels/"+id(s.id)+"/topic", schema.SetChannelTopicRequestV1{Topic: "hijacked"})
 		}),
 		operator("POST /v0/principals", "makes a principal with an A member's name", aMemberName, func(_ *world, s subject) probe {
 			return post("/v0/principals", schema.CreatePrincipalRequest{Kind: schema.PrincipalHuman, Name: s.name})
@@ -448,6 +465,23 @@ func coreMatrixRows() []row {
 		byChannel("DELETE /v1/channels/{channel}/members/{principal_id}", "removes an A member from A's channel", func(w *world, s subject) probe {
 			return del(ch(s) + "/members/" + id(w.a.people[0].id))
 		}),
+		// Channel entry bans (issue #851, moderation design §6, §9 case 1): the
+		// channel-manager class, so a member of B and B's own manager (who
+		// manages B's channel and is not in A's) are told A's channel does not
+		// exist, whoever the target, for the list, the ban and the unban.
+		byChannel("GET /v1/channels/{channel}/bans", "lists the bans of A's channel", func(_ *world, s subject) probe { return get(ch(s) + "/bans") }),
+		byChannel("PUT /v1/channels/{channel}/bans/{principal_id}", "bans an A member from A's channel", func(w *world, s subject) probe {
+			return put(ch(s)+"/bans/"+id(w.a.people[0].id), nil)
+		}),
+		byChannel("DELETE /v1/channels/{channel}/bans/{principal_id}", "lifts a ban on an A member in A's channel", func(w *world, s subject) probe {
+			return del(ch(s) + "/bans/" + id(w.a.people[0].id))
+		}),
+		{route: "GET /v1/channels/{channel}/bans", what: "lists the bans of A's channel, as B's manager", pick: aChannel, manager: true, want: channelNotFound,
+			probe: func(_ *world, s subject) probe { return get(ch(s) + "/bans") }},
+		{route: "PUT /v1/channels/{channel}/bans/{principal_id}", what: "bans an A member from A's channel, as B's manager", pick: aChannel, manager: true, want: channelNotFound,
+			probe: func(w *world, s subject) probe { return put(ch(s)+"/bans/"+id(w.a.people[0].id), nil) }},
+		{route: "DELETE /v1/channels/{channel}/bans/{principal_id}", what: "lifts a ban on an A member in A's channel, as B's manager", pick: aChannel, manager: true, want: channelNotFound,
+			probe: func(w *world, s subject) probe { return del(ch(s) + "/bans/" + id(w.a.people[0].id)) }},
 		// A manager adds any member (issue #983, ADR-013 O10), so A's people are
 		// no longer refused to B's manager. What stays refused, with the one
 		// 404 of a principal never issued, is whoever is not a member: A's
@@ -493,6 +527,31 @@ func coreMatrixRows() []row {
 		byChannel("POST /v1/channels/{channel}/voice/transmit", "reports transmitting in A's channel", func(_ *world, s subject) probe { return post(ch(s)+"/voice/transmit", transmit) }),
 		byChannel("POST /v1/channels/{channel}/voice/share", "claims A's room's share", func(_ *world, s subject) probe { return post(ch(s)+"/voice/share", nil) }),
 		byChannel("DELETE /v1/channels/{channel}/voice/share", "stops A's room's share", func(_ *world, s subject) probe { return del(ch(s) + "/voice/share") }),
+		// Several shares at once (issue #1483, design §9.4): the claim's body
+		// is read after the caller is known to be a member, so B's member is
+		// told A's channel does not exist whatever the body; a moderator's
+		// stop names the person with ?principal=, and B's member, B's manager
+		// and an operator who is not a member of A's channel are told the
+		// same as for a channel that never existed, with no marker.
+		byChannel("POST /v1/channels/{channel}/voice/share", "claims a share in A's room with a quality body", func(_ *world, s subject) probe {
+			return post(ch(s)+"/voice/share", schema.VoiceShareRequestV1{Quality: &schema.VoiceShareQuality{Resolution: schema.VoiceShareResolution1080p, FrameRate: 60}})
+		}),
+		byChannel("POST /v1/channels/{channel}/voice/share", "claims a share in A's room with a malformed body", func(_ *world, s subject) probe {
+			return post(ch(s)+"/voice/share", map[string]any{"quality": "best"})
+		}),
+		byChannel("DELETE /v1/channels/{channel}/voice/share", "stops an A member's share in A's room", func(w *world, s subject) probe {
+			return del(ch(s) + "/voice/share?" + schema.VoiceSharePrincipalParam + "=" + id(w.a.people[0].id))
+		}),
+		{route: "DELETE /v1/channels/{channel}/voice/share", what: "stops an A member's share in A's room, as B's manager", pick: aChannel, manager: true, want: channelNotFound,
+			probe: func(w *world, s subject) probe {
+				return del(ch(s) + "/voice/share?" + schema.VoiceSharePrincipalParam + "=" + id(w.a.people[0].id))
+			}},
+		// The pair is refused 400 before the channel is looked at, so it says
+		// the same for A's channel and for one that never existed.
+		{route: "DELETE /v1/channels/{channel}/voice/share", what: "stops an A member's share in A's room, naming a started_at too", pick: aChannel, want: answer{http.StatusBadRequest, "invalid_request"},
+			probe: func(w *world, s subject) probe {
+				return del(ch(s) + "/voice/share?" + schema.VoiceSharePrincipalParam + "=" + id(w.a.people[0].id) + "&" + schema.VoiceShareClaimParam + "=2026-01-01T00:00:00.000Z")
+			}},
 		// The camera (issue #1241, ADR-015): a claim, a release, and the stop
 		// of an A member's camera, which needs manage_channels that no member
 		// of B holds, all answered as for a channel that never existed.
@@ -501,12 +560,41 @@ func coreMatrixRows() []row {
 		byChannel("DELETE /v1/channels/{channel}/voice/camera", "stops an A member's camera in A's room", func(w *world, s subject) probe {
 			return del(ch(s) + "/voice/camera?" + schema.VoiceCameraPrincipalParam + "=" + id(w.a.people[0].id))
 		}),
+		// Voice-only removal (issue #850, moderation design §4, §9 case 1): a
+		// channel-manager route, so a member of B is told A's channel does not
+		// exist whoever the target is, and so is B's own manager, who manages
+		// B's channel and is not in A's.
+		byChannel("DELETE /v1/channels/{channel}/voice/participants/{principal_id}", "removes an A member from voice in A's channel", func(w *world, s subject) probe {
+			return del(ch(s) + "/voice/participants/" + id(w.a.people[0].id))
+		}),
+		{route: "DELETE /v1/channels/{channel}/voice/participants/{principal_id}", what: "removes an A member from voice in A's channel, as B's manager", pick: aChannel, manager: true, want: channelNotFound,
+			probe: func(w *world, s subject) probe { return del(ch(s) + "/voice/participants/" + id(w.a.people[0].id)) }},
 		byChannel("POST /v1/channels/{channel}/voice/companion", "asks for a screen companion in A's room", func(_ *world, s subject) probe { return post(ch(s)+"/voice/companion", companion) }),
 		byChannel("DELETE /v1/channels/{channel}/voice/companion", "removes a companion from A's room", func(_ *world, s subject) probe { return del(ch(s) + "/voice/companion") }),
 		// The companion's share audio (issue #898): the consent and its withdrawal.
 		byChannel("PUT /v1/channels/{channel}/voice/companion/audio", "consents to share audio in A's room", func(_ *world, s subject) probe { return put(ch(s)+"/voice/companion/audio", companionAudio) }),
 		byChannel("DELETE /v1/channels/{channel}/voice/companion/audio", "withdraws share audio in A's room", func(_ *world, s subject) probe { return del(ch(s) + "/voice/companion/audio") }),
 		byChannel("GET /v1/channels/{channel}/voice", "reads A's voice presence", func(_ *world, s subject) probe { return get(ch(s) + "/voice") }),
+		// The presence version (issue #1483): v2 is refused exactly as v1 is,
+		// and a version nobody serves is 400 before the channel is looked at,
+		// the same for A's channel and for one that never existed.
+		byChannel("GET /v1/channels/{channel}/voice", "reads A's voice presence as v2", func(_ *world, s subject) probe {
+			return get(ch(s) + "/voice?" + schema.VoicePresenceSchemaParam + "=" + schema.VoicePresenceSchemaV2)
+		}),
+		{route: "GET /v1/channels/{channel}/voice", what: "reads A's voice presence with a schema nobody serves", pick: aChannel, want: answer{http.StatusBadRequest, "invalid_request"},
+			probe: func(_ *world, s subject) probe {
+				return get(ch(s) + "/voice?" + schema.VoicePresenceSchemaParam + "=bogus")
+			}},
+		byChannel("GET /v1/voice/ws", "opens the voice presence socket of A's channel as v2", func(_ *world, s subject) probe {
+			return sock("/v1/voice/ws", s.name, url.Values{schema.VoicePresenceSchemaParam: {schema.VoicePresenceSchemaV2}}, false)
+		}),
+		byChannel("GET /v1/voice/ws", "opens the voice presence socket of A's channel as v2 with a ticket", func(_ *world, s subject) probe {
+			return sock("/v1/voice/ws", s.name, url.Values{schema.VoicePresenceSchemaParam: {schema.VoicePresenceSchemaV2}}, true)
+		}),
+		{route: "GET /v1/voice/ws", what: "opens the voice presence socket of A's channel with a schema nobody serves", pick: aChannel, want: answer{http.StatusBadRequest, "invalid_request"},
+			probe: func(_ *world, s subject) probe {
+				return sock("/v1/voice/ws", s.name, url.Values{schema.VoicePresenceSchemaParam: {"bogus"}}, false)
+			}},
 
 		// Sessions, runs and interventions.
 		own("POST /v1/sessions", "opens a session of her own", func(*world, subject) probe {

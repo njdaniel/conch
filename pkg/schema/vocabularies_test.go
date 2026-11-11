@@ -215,6 +215,7 @@ var validators = map[string]func(string) bool{
 	"VoiceDevicesPipeWire":     validOf[VoiceDevicesPipeWire](),
 	"VoiceShareAudioScope":     validOf[VoiceShareAudioScope](),
 	"VoiceShareEndReason":      validOf[VoiceShareEndReason](),
+	"VoiceShareResolution":     validOf[VoiceShareResolution](),
 	"VoiceCameraEndReason":     validOf[VoiceCameraEndReason](),
 	"VoiceTransmitState":       validOf[VoiceTransmitState](),
 
@@ -225,10 +226,21 @@ var validators = map[string]func(string) bool{
 	"PermissionsWarning": validOf[PermissionsWarning](),
 	"IssuedKind":         validOf[IssuedKind](),
 
+	// Preview as member (issue #1007).
+	"PreviewSimulation": validOf[PreviewSimulation](),
+
 	// The community model (ADR-013, issue #978).
 	"ChannelVisibility": validOf[ChannelVisibility](),
 	"InviteKindV2":      validOf[InviteKindV2](),
 	"DirectoryScope":    validOf[DirectoryScope](),
+
+	// Phone push and notification preferences (issue #1712).
+	"NotificationKind":          validOf[NotificationKind](),
+	"NotificationPolicy":        validOf[NotificationPolicy](),
+	"PushPlatform":              validOf[PushPlatform](),
+	"PushProvider":              validOf[PushProvider](),
+	"PushRegistrationEndReason": validOf[PushRegistrationEndReason](),
+	"PushTransport":             validOf[PushTransport](),
 
 	// AI administrators (issue #1326).
 	"AdminAction":       validOf[AdminAction](),

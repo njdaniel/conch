@@ -44,6 +44,22 @@ func coreAgentRows() []row {
 		// the door, before any action, target or approval is looked at.
 		{route: "GET /v1/admin/actions", what: "reads the admin catalog without a grant", want: answer{http.StatusForbidden, "forbidden"},
 			probe: func(*world, subject) probe { return get("/v1/admin/actions") }},
+		// Voice-only removal (issue #850) is a channel-manager route: an agent
+		// is refused the class before any channel or target is looked at.
+		{route: "DELETE /v1/channels/{channel}/voice/participants/{principal_id}", what: "removes an A member from voice in A's channel", pick: aChannel, want: answer{http.StatusForbidden, "forbidden"},
+			probe: func(w *world, s subject) probe {
+				return del("/v1/channels/" + s.name + "/voice/participants/" + id(w.a.people[0].id))
+			}},
+		// Channel entry bans (issue #851) are the same class: an agent is
+		// refused before any channel or target is looked at.
+		{route: "GET /v1/channels/{channel}/bans", what: "lists the bans of A's channel", pick: aChannel, want: answer{http.StatusForbidden, "forbidden"},
+			probe: func(_ *world, s subject) probe { return get("/v1/channels/" + s.name + "/bans") }},
+		{route: "PUT /v1/channels/{channel}/bans/{principal_id}", what: "bans an A member from A's channel", pick: aChannel, want: answer{http.StatusForbidden, "forbidden"},
+			probe: func(w *world, s subject) probe { return put("/v1/channels/"+s.name+"/bans/"+id(w.a.people[0].id), nil) }},
+		{route: "DELETE /v1/channels/{channel}/bans/{principal_id}", what: "lifts a ban on an A member in A's channel", pick: aChannel, want: answer{http.StatusForbidden, "forbidden"},
+			probe: func(w *world, s subject) probe {
+				return del("/v1/channels/" + s.name + "/bans/" + id(w.a.people[0].id))
+			}},
 		byID("POST /v1/admin/actions", "asks the admin door to disable A's member", aMember, answer{http.StatusForbidden, "forbidden"}, func(_ *world, s subject) probe {
 			return post("/v1/admin/actions", disableThrough(s.id))
 		}),

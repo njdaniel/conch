@@ -191,10 +191,11 @@ func (s *Store) ReactionSummaryOf(ctx context.Context, channelID int64, reader R
 
 // ReactionSummariesOf is the batch read: one summary for each of ids (distinct
 // and positive; the caller checked) that is a message of channelID reader may
-// see and that holds at least one reaction, ascending by message id. An id
-// that is unknown, invisible or unreacted is simply absent, and the three are
-// indistinguishable. One statement probes every id and one aggregates over
-// those that passed.
+// see, ascending by message id; a visible message with no reactions gets an
+// empty (non-nil) Reactions, so every summary carries the read's as-of. An id
+// that is unknown, invisible or removed is simply absent, and those are
+// indistinguishable: only ids the one visibility probe passed are named. One
+// statement probes every id and one aggregates over those that passed.
 func (s *Store) ReactionSummariesOf(ctx context.Context, channelID int64, reader Reader, ids []int64, clock func() time.Time) ([]ReactionSummary, error) {
 	out := []ReactionSummary{}
 	err := s.readTx(ctx, func(tx execer) error {
@@ -204,6 +205,12 @@ func (s *Store) ReactionSummariesOf(ctx context.Context, channelID int64, reader
 		visible, err := reactableMessagesTx(ctx, tx, channelID, reader, ids)
 		if err != nil || len(visible) == 0 {
 			return err
+		}
+		out = make([]ReactionSummary, len(visible))
+		index := make(map[int64]int, len(visible))
+		for i, id := range visible {
+			out[i] = ReactionSummary{ChannelID: channelID, MessageID: id, Reactions: []ReactionCount{}}
+			index[id] = i
 		}
 		list, err := json.Marshal(visible)
 		if err != nil {
@@ -227,10 +234,11 @@ func (s *Store) ReactionSummariesOf(ctx context.Context, channelID int64, reader
 				return fmt.Errorf("store: summarize reactions in channel %d: %w", channelID, err)
 			}
 			c.First, c.Me = time.UnixMilli(first), mine > 0
-			if n := len(out); n == 0 || out[n-1].MessageID != id {
-				out = append(out, ReactionSummary{ChannelID: channelID, MessageID: id, Reactions: []ReactionCount{}})
+			i, ok := index[id]
+			if !ok {
+				continue
 			}
-			out[len(out)-1].Reactions = append(out[len(out)-1].Reactions, c)
+			out[i].Reactions = append(out[i].Reactions, c)
 		}
 		if err := rows.Err(); err != nil {
 			return fmt.Errorf("store: summarize reactions in channel %d: %w", channelID, err)
@@ -373,7 +381,7 @@ func (s *Store) SetReaction(ctx context.Context, channelID int64, reader Reader,
 			var role string
 			switch err := tx.QueryRowContext(ctx,
 				`SELECT nm.role FROM nets n JOIN net_members nm ON nm.net_id = n.id
-				 WHERE n.id = ? AND n.channel_id = ? AND n.archived_at IS NULL AND nm.principal_id = ?`,
+				 WHERE n.id = ? AND n.channel_id = ? AND n.archived_at IS NULL AND nm.principal_id = ? AND `+notBannedSQL("nm.principal_id"),
 				target.Audience.NetID, channelID, reader.PrincipalID).Scan(&role); {
 			case errors.Is(err, sql.ErrNoRows):
 				return false, ErrReactionNotPermitted

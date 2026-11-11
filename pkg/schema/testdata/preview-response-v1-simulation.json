@@ -1,0 +1,20 @@
+{
+  "id": 0,
+  "kind": "human",
+  "name": "",
+  "role": "member",
+  "owner": false,
+  "permissions": [
+    "create_public_channels",
+    "create_private_channels",
+    "make_member_links",
+    "see_member_directory",
+    "use_voice",
+    "share_screen",
+    "use_camera"
+  ],
+  "permissions_revision": 1,
+  "may_invite": true,
+  "voice_allowed": true,
+  "simulation": "role"
+}

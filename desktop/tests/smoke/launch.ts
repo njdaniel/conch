@@ -13,7 +13,7 @@ import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 
-export const APP = resolve(import.meta.dirname, '../../dist/linux-unpacked/conch');
+export const APP = resolve(import.meta.dirname, '../../dist/linux-unpacked/conch-desktop');
 
 export interface Launched {
   readonly child: ChildProcess;

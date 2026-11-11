@@ -14,18 +14,19 @@
 // and the permission it names; the server's message is never shown. A link, a
 // credential or a hook acts as the person: each is worded so and its secret is
 // shown once (SecretOnce.tsx).
-import { useEffect, useId, useRef, useState, type KeyboardEvent, type RefObject, type SyntheticEvent } from 'react';
+import { useContext, useEffect, useId, useRef, useState, type KeyboardEvent, type RefObject, type SyntheticEvent } from 'react';
 import * as api from '../api';
 import { memberActions, voiceOffLine, voiceRoleOff, type MemberAction, type MemberActionId } from '../memberActions';
 import { ActionsMenu, type MenuItem } from '../MessageMenu';
 import { deviceLink } from '../route';
-import type { PermissionRowV1 } from '../schema/permission';
+import type { IssuedByOperatorV1, PermissionRowV1 } from '../schema/permission';
 import type { ServerMemberV1, WhoAmIResponseV1 } from '../schema/principal';
 import type { SignInLinkPurpose } from '../schema/signin';
 import { canDo, refusalLine, type Refusal } from './permissions';
 import { AIAdminCard } from './AIAdminCard';
 import { SecretOnce } from './SecretOnce';
 import { timeOf } from '../time';
+import { PreviewEntry } from '../preview/entry';
 
 type Line = { readonly text: string; readonly refused: boolean } | null;
 type Role = 'member' | 'operator' | 'owner';
@@ -109,10 +110,19 @@ export interface PersonActionsProps {
   // show (the row may be gone by then).
   readonly onChanged: (done?: string) => void;
   readonly onUnauthorized: () => void;
+  // What a disable or a demotion listed as issued to others. The list is kept
+  // by the caller, outside this row: a disabled person leaves the directory and
+  // the row with it, and the owner's way to end what they issued must stay.
+  // Called as a disable or a role change is sent; the function it returns takes
+  // the answer's list, and drops it if the viewer's standing, identity or
+  // server changed since (a late answer cannot refill a cleared list).
+  readonly beginIssued: () => (items: readonly IssuedByOperatorV1[]) => void;
 }
 
-export function PersonActions({ who, person, origin, rows, readRows, open, onOpenChange, button, onChanged, onUnauthorized }: PersonActionsProps) {
-  const actions = memberActions(who, person);
+export function PersonActions({ who, person, origin, rows, readRows, open, onOpenChange, button, onChanged, onUnauthorized, beginIssued }: PersonActionsProps) {
+  // Preview as member is offered where the page can show one (not the desktop).
+  const startPreview = useContext(PreviewEntry);
+  const actions = memberActions(who, person).filter((a) => a.id !== 'preview' || startPreview !== null);
   // What the viewer may do now, for the moment a request is sent.
   const allowed = useRef<readonly MemberAction[]>(actions);
   allowed.current = actions;
@@ -189,7 +199,7 @@ export function PersonActions({ who, person, origin, rows, readRows, open, onOpe
 
   // send makes one write, once, and says how it went. `done` is the line for
   // success; `then` gets the value the server answered with.
-  function send<T>(id: MemberActionId, write: () => Promise<api.InviteResult<T>>, nothing: string, done: (value: T) => string, lost?: string, then?: (value: T) => void) {
+  function send<T>(id: MemberActionId, write: () => Promise<api.InviteResult<T>>, nothing: string, done: (value: T) => string, lost?: string, then?: (value: T) => void, deliver?: (value: T) => void) {
     if (sending.current) return;
     if (!allowed.current.some((a) => a.id === id)) {
       setPanel(null);
@@ -205,6 +215,9 @@ export function PersonActions({ who, person, origin, rows, readRows, open, onOpe
         onUnauthorized();
         return;
       }
+      // A result for the caller is delivered whether or not this row is still
+      // here: the directory can drop a disabled person before the answer lands.
+      if (result.ok) deliver?.(result.value);
       // The row is gone (the grant went, or Settings closed): the answer
       // changes nothing here, and the list may follow.
       if (!live.current) {
@@ -232,6 +245,14 @@ export function PersonActions({ who, person, origin, rows, readRows, open, onOpe
   const items: MenuItem[] = actions.map((action) => {
     const item: MenuItem = { key: action.id, label: action.label, disabled: busy, onSelect: () => undefined };
     switch (action.id) {
+      case 'preview':
+        return {
+          ...item,
+          onSelect: () => {
+            startPreview?.start(person);
+          },
+          ...(startPreview?.blocked == null ? {} : { disabled: true, reason: startPreview.blocked }),
+        };
       case 'voice': {
         if (voiceOff) return { ...item, disabled: true, reason: voiceOffLine(person) };
         const to = person.voice_allowed === false;
@@ -296,7 +317,12 @@ export function PersonActions({ who, person, origin, rows, readRows, open, onOpe
               busy={busy}
               onYes={() => {
                 if (panel.id === 'signout') send('signout', () => api.signOutPrincipalEverywhere(person.id), 'Nobody was signed out.', () => `${name} is signed out everywhere.`);
-                else if (panel.id === 'disable') send('disable', () => api.disablePrincipal(person.id), 'Nothing was changed.', () => `${name} is disabled and signed out.`);
+                else if (panel.id === 'disable') {
+                  const settle = beginIssued();
+                  send('disable', () => api.disablePrincipal(person.id), 'Nothing was changed.', () => `${name} is disabled and signed out.`, undefined, undefined, (r) => {
+                    settle(r.issued_to_others ?? []);
+                  });
+                }
                 else send('remove', () => api.hidePrincipal(person.id), 'Nobody was removed.', () => `${name} is removed from the server.`);
               }}
               onCancel={close}
@@ -309,6 +335,7 @@ export function PersonActions({ who, person, origin, rows, readRows, open, onOpe
               busy={busy}
               onCancel={close}
               onSubmit={(to) => {
+                const settle = beginIssued();
                 send(
                   'role',
                   () => api.setRole(person.id, to === 'member' ? { role: 'member' } : { role: 'operator', owner: to === 'owner' }),
@@ -316,6 +343,11 @@ export function PersonActions({ who, person, origin, rows, readRows, open, onOpe
                   (r) => {
                     const ended = r.credentials_revoked + r.hooks_revoked;
                     return `${name} is now ${roleWords[to]}.${ended > 0 ? ` ${String(r.credentials_revoked)} sign-ins and ${String(r.hooks_revoked)} hooks ended.` : ''}`;
+                  },
+                  undefined,
+                  undefined,
+                  (r) => {
+                    settle(r.issued_to_others ?? []);
                   },
                 );
               }}

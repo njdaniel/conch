@@ -33,6 +33,13 @@ const (
 	// served with, whatever media type the uploader declared: a stored file
 	// is never rendered.
 	FileDownloadMediaType = "application/octet-stream"
+
+	// SpoilerFilePrefix, at the start of a stored file name, asks a browser to
+	// hide the file behind a Reveal button. It is presentation only: it never
+	// grants or withholds access, which the file routes and the message's
+	// audience alone decide. Older clients and the CLI show the name as it is,
+	// prefix included. The match is exact and case-sensitive.
+	SpoilerFilePrefix = "SPOILER_"
 )
 
 // FileV1 is the metadata of an uploaded file.

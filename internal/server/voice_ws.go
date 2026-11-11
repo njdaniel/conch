@@ -28,6 +28,11 @@ import (
 // opened with is revoked.
 func (s *Server) handleVoiceWS(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
+	version, ok := voicePresenceVersion(r.URL.Query())
+	if !ok {
+		writeVoicePresenceSchemaInvalid(w)
+		return
+	}
 	name := r.URL.Query().Get("channel")
 	if name == "" {
 		writeError(w, http.StatusBadRequest, "invalid_request", "channel query parameter is required")
@@ -76,7 +81,7 @@ func (s *Server) handleVoiceWS(w http.ResponseWriter, r *http.Request) {
 		defer ticker.Stop()
 		recheck = ticker.C
 	}
-	s.streamVoice(ctx, conn, sub, channel.ID, caller.ID, credID, recheck)
+	s.streamVoice(ctx, conn, sub, channel.ID, caller.ID, credID, version, recheck)
 }
 
 // streamVoice writes presence until the peer leaves, the subscription is
@@ -84,16 +89,16 @@ func (s *Server) handleVoiceWS(w http.ResponseWriter, r *http.Request) {
 // whole snapshot and sends it only if it differs from the last one sent, so
 // the socket carries one frame per change and nothing otherwise. Writes carry
 // a deadline; the poller never waits for this loop.
-func (s *Server) streamVoice(ctx context.Context, conn *websocket.Conn, sub *voiceSub, channelID, principalID, credID int64, recheck <-chan time.Time) {
+func (s *Server) streamVoice(ctx context.Context, conn *websocket.Conn, sub *voiceSub, channelID, principalID, credID int64, version string, recheck <-chan time.Time) {
 	ctx = s.keepAlive(ctx, conn, false)
 	var last []byte
 	send := func() bool {
-		snap, live := sub.current()
+		snap, live, err := sub.current(version)
 		if !live {
-			s.closeVoiceDropped(ctx, conn, channelID, principalID, credID)
+			s.closeVoiceDropped(ctx, conn, sub, channelID, principalID, credID)
 			return false
 		}
-		if err := snap.Validate(); err != nil {
+		if err != nil {
 			slog.ErrorContext(ctx, "voice ws: built an invalid presence document", "channel", channelID, "error", err)
 			closeWS(ctx, conn, schema.SocketCloseError, websocket.StatusInternalError, "internal error")
 			return false
@@ -110,7 +115,7 @@ func (s *Server) streamVoice(ctx context.Context, conn *websocket.Conn, sub *voi
 		// a removal) stops it here, as on the events socket (issue #519).
 		select {
 		case <-sub.dropped:
-			s.closeVoiceDropped(ctx, conn, channelID, principalID, credID)
+			s.closeVoiceDropped(ctx, conn, sub, channelID, principalID, credID)
 			return false
 		default:
 		}
@@ -142,7 +147,7 @@ func (s *Server) streamVoice(ctx context.Context, conn *websocket.Conn, sub *voi
 				return
 			}
 		case <-sub.dropped:
-			s.closeVoiceDropped(ctx, conn, channelID, principalID, credID)
+			s.closeVoiceDropped(ctx, conn, sub, channelID, principalID, credID)
 			return
 		}
 	}
@@ -168,9 +173,16 @@ func (s *Server) voiceStillMember(ctx context.Context, conn *websocket.Conn, cha
 }
 
 // closeVoiceDropped closes conn after its subscription was dropped, saying
-// why: shutdown, a revoked credential or disabled principal, or removal from
-// the channel.
-func (s *Server) closeVoiceDropped(ctx context.Context, conn *websocket.Conn, channelID, principalID, credID int64) {
+// why: shutdown, a revoked credential or disabled principal, removal from the
+// channel, or a moderator's voice-only removal (issue #850). The last is the
+// one close whose text is the reason itself, schema.SocketCloseVoiceRemoved:
+// the subscriber is still a member, and a client keys on that value to stay
+// out of voice without taking the channel for gone (issue #1409). The stronger
+// reason always wins: membership is read from the store first, and a removal
+// that commits after that read reaches the kicked subscription through
+// dropPrincipal, under the poller's lock, before the reason is chosen. A
+// membership read that fails closes with an error, never voice_removed.
+func (s *Server) closeVoiceDropped(ctx context.Context, conn *websocket.Conn, sub *voiceSub, channelID, principalID, credID int64) {
 	if s.voice.isClosed() {
 		closeWS(ctx, conn, schema.SocketCloseServerShutdown, websocket.StatusGoingAway, "server shutting down")
 		return
@@ -182,9 +194,25 @@ func (s *Server) closeVoiceDropped(ctx context.Context, conn *websocket.Conn, ch
 			return
 		}
 	}
-	if member, err := s.store.IsChannelMember(bg, channelID, principalID); err == nil && !member {
+	member, err := s.store.IsChannelMember(bg, channelID, principalID)
+	switch {
+	case err != nil:
+		slog.ErrorContext(ctx, "voice ws: membership check after drop failed", "error", err)
+		closeWS(ctx, conn, schema.SocketCloseError, websocket.StatusInternalError, "membership check failed")
+		return
+	case !member:
 		closeWS(ctx, conn, schema.SocketCloseRemoved, websocket.StatusPolicyViolation, "no longer a member of this channel")
 		return
 	}
-	closeWS(ctx, conn, schema.SocketCloseRemoved, websocket.StatusPolicyViolation, "presence subscription closed")
+	if hook := s.voice.beforeCloseReason; hook != nil {
+		hook()
+	}
+	switch sub.dropCause() {
+	case voiceDropRemoved:
+		closeWS(ctx, conn, schema.SocketCloseRemoved, websocket.StatusPolicyViolation, "no longer a member of this channel")
+	case voiceDropKicked:
+		closeWS(ctx, conn, schema.SocketCloseVoiceRemoved, websocket.StatusPolicyViolation, string(schema.SocketCloseVoiceRemoved))
+	default:
+		closeWS(ctx, conn, schema.SocketCloseRemoved, websocket.StatusPolicyViolation, "presence subscription closed")
+	}
 }

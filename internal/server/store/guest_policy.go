@@ -680,7 +680,7 @@ func checkOpenChannelsWriterTx(ctx context.Context, tx execer, actorID int64, ne
 	for id := range check {
 		var one int
 		switch err := tx.QueryRowContext(ctx,
-			"SELECT 1 FROM channel_members WHERE channel_id = ? AND principal_id = ?", id, actorID).Scan(&one); {
+			"SELECT 1 FROM "+liveMembers+" WHERE channel_id = ? AND principal_id = ?", id, actorID).Scan(&one); {
 		case errors.Is(err, sql.ErrNoRows):
 			return errOpenChannelNotYours()
 		case err != nil:

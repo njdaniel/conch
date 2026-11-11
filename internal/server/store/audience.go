@@ -1,12 +1,14 @@
 package store
 
 import (
+	"container/heap"
 	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -284,7 +286,7 @@ func (s *Store) ListChannelAuthors(ctx context.Context, channelID int64, reader 
 func (s *Store) AuthorReaders(ctx context.Context, authorID int64) ([]int64, error) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT DISTINCT v.id FROM principals v
-		 JOIN channel_members cm ON cm.principal_id = v.id
+		 JOIN `+liveMembers+` cm ON cm.principal_id = v.id
 		 WHERE v.kind = 'human' AND v.disabled_at IS NULL AND v.hidden_at IS NULL
 		   AND v.id <> ?
 		   AND EXISTS (SELECT 1 FROM messages x WHERE x.channel_id = cm.channel_id AND x.author_id = ?)
@@ -303,7 +305,7 @@ func (s *Store) AuthorReaders(ctx context.Context, authorID int64) ([]int64, err
 		var ok bool
 		if err := s.db.QueryRowContext(ctx,
 			`SELECT EXISTS (SELECT 1 FROM messages m
-			                JOIN channel_members rc ON rc.channel_id = m.channel_id AND rc.principal_id = ?
+			                JOIN `+liveMembers+` rc ON rc.channel_id = m.channel_id AND rc.principal_id = ?
 			                WHERE m.author_id = ? AND `+messageVisible(scoped)+`)`, // #nosec G202 -- constant conditions only
 			args...).Scan(&ok); err != nil {
 			return nil, fmt.Errorf("store: readers of author %d: %w", authorID, err)
@@ -343,11 +345,27 @@ func historyWatermarkTx(ctx context.Context, tx execer, channelID int64) (int64,
 	return id, nil
 }
 
-// messageColumns is the column list scanMessages reads.
-const messageColumns = `m.id, m.channel_id, m.author_id, m.body, m.payload_schema, m.payload_json, m.created_at, m.audience_kind, m.net_id, m.thread_root_id,
+// removedCond is true, over messages aliased m, for a message a moderator
+// removed (docs/design/moderation.md section 7). It has no arguments.
+const removedCond = `EXISTS (SELECT 1 FROM message_removals mrm WHERE mrm.message_id = m.id)`
+
+// notRemovedCond is the negation of removedCond, for the statements that must
+// not select a removed message at all (search, a new reply to a root).
+const notRemovedCond = `NOT ` + removedCond
+
+// messageColumns is the column list scanMessages reads. A removed message is
+// projected as a tombstone in the statement itself: its body, payload and
+// edit time are never selected, so no reader of these rows can hold them. The
+// last column says which rows are tombstones.
+const messageColumns = `m.id, m.channel_id, m.author_id,
+	CASE WHEN ` + removedCond + ` THEN '' ELSE m.body END,
+	CASE WHEN ` + removedCond + ` THEN NULL ELSE m.payload_schema END,
+	CASE WHEN ` + removedCond + ` THEN NULL ELSE m.payload_json END,
+	m.created_at, m.audience_kind, m.net_id, m.thread_root_id,
 	(SELECT g.handle FROM message_guest_attribution g WHERE g.message_id = m.id),
 	(SELECT g.label FROM message_guest_attribution g WHERE g.message_id = m.id),
-	m.edited_at`
+	CASE WHEN ` + removedCond + ` THEN NULL ELSE m.edited_at END,
+	` + removedCond
 
 // The visibility rule for which messages a reader may see, as SQL conditions
 // over the messages table aliased m. The list and the search both embed the
@@ -361,7 +379,7 @@ const (
 	visibleToScopedReader = `(m.audience_kind IS NULL OR (
 			        EXISTS (SELECT 1 FROM message_recipients r
 			                WHERE r.message_id = m.id AND r.principal_id = ?)
-			    AND EXISTS (SELECT 1 FROM channel_members c
+			    AND EXISTS (SELECT 1 FROM ` + liveMembers + ` c
 			                WHERE c.channel_id = m.channel_id AND c.principal_id = ?)
 			    AND EXISTS (SELECT 1 FROM principals p
 			                WHERE p.id = ? AND p.disabled_at IS NULL)))`
@@ -374,13 +392,15 @@ const (
 	// thread's root for a reply (a root's id is always below its replies'),
 	// so a new reply does not carry an old thread past the bound. A NULL
 	// bound compares as neither, so a guest without one sees nothing. The
-	// aliases (hg, hb, ha) are this condition's own.
+	// aliases (hg, hb, ha) are this condition's own. It is not a membership
+	// check: for a banned non-guest it is satisfiable, so it must stay behind
+	// one (isChannelMemberTx, the handlers' channel gate).
 	withinHistoryBound = `((NOT EXISTS (SELECT 1 FROM guest_visits hg
 			                    WHERE hg.principal_id = ? AND hg.state = 'active')
-			    AND NOT EXISTS (SELECT 1 FROM channel_members hb
+			    AND NOT EXISTS (SELECT 1 FROM ` + liveMembers + ` hb
 			                    WHERE hb.channel_id = m.channel_id AND hb.principal_id = ?
 			                      AND COALESCE(m.thread_root_id, m.id) <= hb.history_after))
-			 OR EXISTS (SELECT 1 FROM channel_members ha
+			 OR EXISTS (SELECT 1 FROM ` + liveMembers + ` ha
 			            WHERE ha.channel_id = m.channel_id AND ha.principal_id = ?
 			              AND COALESCE(m.thread_root_id, m.id) > ha.history_after))`
 
@@ -407,7 +427,7 @@ const (
 
 	searchHead = `SELECT ` + messageColumns + ` FROM messages m
 		 WHERE m.id IN (SELECT rowid FROM messages_fts WHERE messages_fts MATCH ?)
-		   AND m.channel_id = ? AND (? = 0 OR m.id < ?) AND `
+		   AND m.channel_id = ? AND (? = 0 OR m.id < ?) AND ` + notRemovedCond + ` AND `
 	searchTail = `
 		 ORDER BY m.id DESC LIMIT ?`
 )
@@ -483,8 +503,14 @@ func scanMessagesWith(ctx context.Context, q execer, rows *sql.Rows) ([]Message,
 		var netID, threadRoot, editedAt sql.NullInt64
 		var createdAt int64
 		if err := rows.Scan(&m.ID, &m.ChannelID, &m.AuthorID, &m.Body, &payloadSchema, &payloadJSON, &createdAt, &kind, &netID, &threadRoot,
-			&guestHandle, &guestLabel, &editedAt); err != nil {
+			&guestHandle, &guestLabel, &editedAt, &m.Removed); err != nil {
 			return nil, err
+		}
+		if m.Removed {
+			// The tombstone (moderation.md section 7.3): the statement
+			// selected no original, and this is the only body there is.
+			m.Body = schema.MessageRemovedBody
+			payloadSchema, payloadJSON, editedAt = sql.NullString{}, nil, sql.NullInt64{}
 		}
 		if editedAt.Valid {
 			m.EditedAt = time.UnixMilli(editedAt.Int64)
@@ -687,7 +713,7 @@ func (s *Store) FileVisibleTo(ctx context.Context, fileID int64, reader Reader) 
 // channel is the column the embedding statement names, never a caller's text.
 func noHistoryBound(channelColumn string) string {
 	return `(NOT EXISTS (SELECT 1 FROM guest_visits ng WHERE ng.principal_id = ? AND ng.state = 'active')
-		     AND NOT EXISTS (SELECT 1 FROM channel_members nb
+		     AND NOT EXISTS (SELECT 1 FROM ` + liveMembers + ` nb
 		                     WHERE nb.channel_id = ` + channelColumn + ` AND nb.principal_id = ?
 		                       AND nb.history_after IS NOT NULL))`
 }
@@ -704,7 +730,8 @@ func noHistoryBound(channelColumn string) string {
 var (
 	fileHead = `SELECT ` + fileColumns + ` FROM files f
 		 WHERE f.id = ?
-		   AND EXISTS (SELECT 1 FROM channel_members cm
+		   AND NOT EXISTS (SELECT 1 FROM message_removals fr WHERE fr.message_id = f.message_id)
+		   AND EXISTS (SELECT 1 FROM ` + liveMembers + ` cm
 		               WHERE cm.channel_id = f.channel_id AND cm.principal_id = ?)
 		   AND EXISTS (SELECT 1 FROM principals up
 		               WHERE up.id = ? AND up.disabled_at IS NULL)
@@ -905,7 +932,9 @@ func (s *Store) InsertReplyMessage(ctx context.Context, post ReplyPost, reader R
 		}
 		var kind sql.NullString
 		var rootNet sql.NullInt64
-		switch err := tx.QueryRowContext(ctx, rootSQL("m.audience_kind, m.net_id", scoped),
+		// A removed root takes no new reply (moderation.md section 10.1, Q3):
+		// it is unusable, as an unknown one is.
+		switch err := tx.QueryRowContext(ctx, rootSQL("m.audience_kind, m.net_id", scoped)+` AND `+notRemovedCond,
 			append([]any{post.RootID, post.ChannelID}, predArgs...)...).Scan(&kind, &rootNet); {
 		case errors.Is(err, sql.ErrNoRows):
 			return ErrThreadNotFound
@@ -1169,7 +1198,7 @@ func scopedDetail(channelID int64, a schema.Audience, recipients []int64) string
 func isChannelMemberTx(ctx context.Context, tx execer, channelID, principalID int64) (bool, error) {
 	var one int
 	switch err := tx.QueryRowContext(ctx,
-		"SELECT 1 FROM channel_members WHERE channel_id = ? AND principal_id = ?", channelID, principalID).Scan(&one); {
+		"SELECT 1 FROM "+liveMembers+" WHERE channel_id = ? AND principal_id = ?", channelID, principalID).Scan(&one); {
 	case errors.Is(err, sql.ErrNoRows):
 		return false, nil
 	case err != nil:
@@ -1186,7 +1215,7 @@ func resolveNetRecipientsTx(ctx context.Context, tx execer, channelID, netID, au
 	var role string
 	switch err := tx.QueryRowContext(ctx,
 		`SELECT m.role FROM nets n JOIN net_members m ON m.net_id = n.id
-		 WHERE n.id = ? AND n.channel_id = ? AND n.archived_at IS NULL AND m.principal_id = ?`,
+		 WHERE n.id = ? AND n.channel_id = ? AND n.archived_at IS NULL AND m.principal_id = ? AND `+notBannedSQL("m.principal_id"),
 		netID, channelID, authorID).Scan(&role); {
 	case errors.Is(err, sql.ErrNoRows):
 		return nil, ErrNetNotFound
@@ -1198,7 +1227,7 @@ func resolveNetRecipientsTx(ctx context.Context, tx execer, channelID, netID, au
 	}
 	rows, err := tx.QueryContext(ctx,
 		`SELECT m.principal_id FROM net_members m
-		 JOIN channel_members c ON c.channel_id = ? AND c.principal_id = m.principal_id
+		 JOIN `+liveMembers+` c ON c.channel_id = ? AND c.principal_id = m.principal_id
 		 WHERE m.net_id = ? ORDER BY m.principal_id ASC`, channelID, netID)
 	if err != nil {
 		return nil, fmt.Errorf("store: resolve recipients of net %d: %w", netID, err)
@@ -1286,7 +1315,7 @@ const runColumns = `ru.id, ru.session_id, ru.principal_id, ru.channel_id, ru.mes
 // then the message predicate's own. The aliases differ from the message
 // predicate's (r, c, p) so nothing in it can bind to the run by accident.
 var (
-	runVisibleHead = `(EXISTS (SELECT 1 FROM channel_members rc
+	runVisibleHead = `(EXISTS (SELECT 1 FROM ` + liveMembers + ` rc
 	                   WHERE rc.channel_id = ru.channel_id AND rc.principal_id = ?)
 	     AND EXISTS (SELECT 1 FROM principals rp WHERE rp.id = ? AND rp.disabled_at IS NULL)
 	     AND ((ru.message_id IS NULL AND ` + noHistoryBound("ru.channel_id") + `) OR EXISTS (
@@ -1727,7 +1756,7 @@ func runAnchorVisibleTx(ctx context.Context, tx execer, channelID, messageID int
 	var role string
 	switch err := tx.QueryRowContext(ctx,
 		`SELECT m.role FROM nets n JOIN net_members m ON m.net_id = n.id
-		 WHERE n.id = ? AND n.channel_id = ? AND n.archived_at IS NULL AND m.principal_id = ?`,
+		 WHERE n.id = ? AND n.channel_id = ? AND n.archived_at IS NULL AND m.principal_id = ? AND `+notBannedSQL("m.principal_id"),
 		netID.Int64, channelID, reader.PrincipalID).Scan(&role); {
 	case errors.Is(err, sql.ErrNoRows):
 		return ErrRunAnchorNotFound
@@ -2017,11 +2046,12 @@ func requestedInterventionsTx(ctx context.Context, tx execer, runID int64) (int,
 // here: reactions exist on v2 routes only, for a verified caller, so there is
 // nothing to read for anyone else and the answer fails closed.
 //
-// Removed messages (docs/design/moderation.md §7, not yet implemented) will
-// add AND NOT EXISTS (SELECT 1 FROM message_removals x WHERE x.message_id =
-// m.id) to reactionMessageCond, and reactionTargetTx will report the removal,
-// so every statement below picks it up at once. Until that table exists no
-// message is removed and the behaviour is identical.
+// A removed message (docs/design/moderation.md §7, issue #852) is no target of
+// a reaction: reactionMessageCond excludes it, so every statement below that
+// uses it answers ErrMessageNotFound for one, as for a message the reader
+// cannot see. reactionVisibleCond is the same condition without that clause,
+// for the readers that must still find the tombstone (the author's own
+// message read, the removal itself).
 
 // ErrMessageNotFound is the one error for a message a reaction call cannot
 // use: it does not exist, is in another channel, or the reader cannot see it.
@@ -2030,14 +2060,18 @@ func requestedInterventionsTx(ctx context.Context, tx execer, runID int64) (int,
 var ErrMessageNotFound = errors.New("store: message not found")
 
 // reactionMemberCond takes the reader's principal id twice.
-const reactionMemberCond = `EXISTS (SELECT 1 FROM channel_members rc
+const reactionMemberCond = `EXISTS (SELECT 1 FROM ` + liveMembers + ` rc
 	                   WHERE rc.channel_id = m.channel_id AND rc.principal_id = ?)
 	     AND EXISTS (SELECT 1 FROM principals rp WHERE rp.id = ? AND rp.disabled_at IS NULL)`
 
+// reactionVisibleCond is the message rule and the member-and-enabled clause
+// over a message aliased m. Its arguments are reactionArgs(reader).
+var reactionVisibleCond = messageVisible(true) + ` AND ` + reactionMemberCond
+
 // reactionMessageCond is the whole condition a reaction statement puts on a
-// message aliased m: the message rule and the member-and-enabled clause. Its
+// message aliased m: reactionVisibleCond, and the message is not removed. Its
 // arguments are reactionArgs(reader).
-var reactionMessageCond = messageVisible(true) + ` AND ` + reactionMemberCond
+var reactionMessageCond = reactionVisibleCond + ` AND ` + notRemovedCond
 
 // reactionArgs is the arguments of reactionMessageCond for reader, and false
 // when the reader may see no message at all.
@@ -2153,11 +2187,10 @@ func reactableMessagesTx(ctx context.Context, tx execer, channelID int64, reader
 // cannot read, or from before their history bound is one answer,
 // ErrMessageNotFound, and only the author ever learns more.
 //
-// Removed messages (docs/design/moderation.md, M4, not yet implemented) will
-// be refused here too: reactionMessageCond's removal clause, once it lands,
-// makes the revision read ErrMessageNotFound, and EditOwnMessage must then
-// answer ErrMessageNotEditable for a removal the reader can see. Until that
-// table exists no message is removed.
+// A removed message (docs/design/moderation.md §7, issue #852) is found by
+// the same condition, as a tombstone. EditOwnMessage answers
+// ErrMessageNotEditable for it, and the revision read ErrMessageNotFound: the
+// earlier text of a removed message is never served, even to its author.
 
 // AuditMessageEdited is written in the edit's transaction for every edit that
 // changed the text: subject "message:<id>", detail "channel=<id>
@@ -2207,7 +2240,7 @@ type MessageRevision struct {
 // probe's condition. Its arguments are the message id, the channel id, the
 // reader as author, then reactionArgs(reader).
 var ownMessageSQL = `SELECT ` + messageColumns + ` FROM messages m
-	 WHERE m.id = ? AND m.channel_id = ? AND m.author_id = ? AND ` + reactionMessageCond
+	 WHERE m.id = ? AND m.channel_id = ? AND m.author_id = ? AND ` + reactionVisibleCond
 
 // ownMessageTx reads message messageID of channelID if reader wrote it and may
 // see it now, or ErrMessageNotFound.
@@ -2237,7 +2270,7 @@ func holdsNetMemberSeatTx(ctx context.Context, tx execer, channelID, netID, prin
 	var role string
 	switch err := tx.QueryRowContext(ctx,
 		`SELECT nm.role FROM nets n JOIN net_members nm ON nm.net_id = n.id
-		 WHERE n.id = ? AND n.channel_id = ? AND n.archived_at IS NULL AND nm.principal_id = ?`,
+		 WHERE n.id = ? AND n.channel_id = ? AND n.archived_at IS NULL AND nm.principal_id = ? AND `+notBannedSQL("nm.principal_id"),
 		netID, channelID, principalID).Scan(&role); {
 	case errors.Is(err, sql.ErrNoRows):
 		return false, nil
@@ -2287,6 +2320,9 @@ func (s *Store) EditOwnMessage(ctx context.Context, channelID int64, reader Read
 		msg, err := ownMessageTx(ctx, tx, channelID, reader, messageID)
 		if err != nil {
 			return err
+		}
+		if msg.Removed {
+			return ErrMessageNotEditable
 		}
 		if msg.Payload != nil && msg.Payload.Schema != schema.FileAttachmentV1Name {
 			return ErrMessageNotEditable
@@ -2388,6 +2424,9 @@ func (s *Store) OwnMessageRevisions(ctx context.Context, channelID int64, reader
 		if err != nil {
 			return err
 		}
+		if msg.Removed {
+			return ErrMessageNotFound
+		}
 		rows, err := tx.QueryContext(ctx,
 			"SELECT revision, body, created_at FROM message_revisions WHERE message_id = ? ORDER BY revision ASC", messageID)
 		if err != nil {
@@ -2415,4 +2454,741 @@ func (s *Store) OwnMessageRevisions(ctx context.Context, channelID int64, reader
 		return nil, err
 	}
 	return out, nil
+}
+
+// Message removal (issue #852, docs/design/moderation.md §7). A moderator
+// removes a message for its whole audience. The messages row is never touched:
+// message_removals marks it, and every read here projects the tombstone
+// (messageColumns), so there is no read of the original to forget to filter.
+
+// AuditMessageRemoved is written in the removal's transaction when a message
+// goes from visible to removed: subject "message:<id>", detail "channel=<id>".
+// Never any text, payload, reason or recipient.
+const AuditMessageRemoved = "message_removed"
+
+// MessageRemoval is RemoveMessage's answer.
+type MessageRemoval struct {
+	// Message is the tombstone, by the projection every read uses.
+	Message Message
+	// Recipients is who a scoped message was delivered to when it was
+	// posted, read back for the live tombstone; nil for a channel-wide one.
+	Recipients []int64
+	// Changed is false when the message was already removed: nothing was
+	// written, and nothing is to be broadcast.
+	Changed bool
+}
+
+// visibleMessageTx reads message messageID of channelID if reader may see it
+// now, removed or not, or ErrMessageNotFound for every other case alike. For
+// a reader with a verified principal that is reactionVisibleCond (the one
+// message rule, plus current membership and an enabled principal); with
+// authentication off (principal 0) it is the channel-wide rule, as a list read.
+func visibleMessageTx(ctx context.Context, tx execer, channelID int64, reader Reader, messageID int64) (Message, error) {
+	if messageID <= 0 {
+		return Message{}, ErrMessageNotFound
+	}
+	var (
+		cond string
+		args []any
+	)
+	if reader.PrincipalID > 0 {
+		ra, ok := reactionArgs(reader)
+		if !ok {
+			return Message{}, ErrMessageNotFound
+		}
+		cond, args = reactionVisibleCond, ra
+	} else {
+		scoped, pa := visibilityArgs(reader)
+		cond, args = messageVisible(scoped), pa
+	}
+	rows, err := tx.QueryContext(ctx,
+		`SELECT `+messageColumns+` FROM messages m WHERE m.id = ? AND m.channel_id = ? AND `+cond,
+		append([]any{messageID, channelID}, args...)...)
+	if err != nil {
+		return Message{}, fmt.Errorf("store: read message %d: %w", messageID, err)
+	}
+	defer func() { _ = rows.Close() }()
+	msgs, err := scanMessagesWith(ctx, tx, rows)
+	if err != nil {
+		return Message{}, fmt.Errorf("store: read message %d: %w", messageID, err)
+	}
+	if len(msgs) != 1 {
+		return Message{}, ErrMessageNotFound
+	}
+	return msgs[0], nil
+}
+
+// RemoveMessage removes message messageID of channelID for everyone in its
+// audience, on reader's behalf and as actor (an audit actor string), in one
+// IMMEDIATE transaction:
+//
+//  1. reader is, now, a member of the channel and enabled (ErrNotChannelMember);
+//     with authentication off (principal 0) there is no one to check;
+//  2. reader still stands as an owner, an operator or this channel's manager
+//     (ErrManagerRefused), read under the write lock so a grant revoked after
+//     the route guard cannot race the write;
+//  3. the message is in the channel and reader may see it by the one message
+//     rule and their history bound (ErrMessageNotFound for every other case:
+//     unknown, another channel, a whisper or net message they are not on,
+//     before their bound). Owners and operators get no exemption;
+//  4. already removed: nothing is written (Changed false);
+//  5. the removal row and the message_removed audit row.
+//
+// An archived channel allows it (Q1, reduce-only). The original body and
+// payload are never read into the answer or the audit row.
+func (s *Store) RemoveMessage(ctx context.Context, channelID int64, reader Reader, messageID int64, actor string, now time.Time) (MessageRemoval, error) {
+	var out MessageRemoval
+	err := s.withImmediateTx(ctx, func(tx execer) error {
+		if reader.PrincipalID > 0 {
+			if err := reactionReaderTx(ctx, tx, channelID, reader); err != nil {
+				return err
+			}
+		}
+		if _, err := memberActorStandingTx(ctx, tx, channelID, reader.PrincipalID); err != nil {
+			return err
+		}
+		msg, err := visibleMessageTx(ctx, tx, channelID, reader, messageID)
+		if err != nil {
+			return err
+		}
+		if msg.Removed {
+			out = MessageRemoval{Message: msg}
+			return nil
+		}
+		var by any
+		if reader.PrincipalID > 0 {
+			by = reader.PrincipalID
+		}
+		at := now.Truncate(time.Millisecond)
+		if _, err := tx.ExecContext(ctx,
+			"INSERT INTO message_removals (message_id, channel_id, removed_by, removed_at) VALUES (?, ?, ?, ?)",
+			messageID, channelID, by, at.UnixMilli()); err != nil {
+			return fmt.Errorf("store: remove message %d: %w", messageID, err)
+		}
+		if err := appendAuditEventTx(ctx, tx, actor, AuditMessageRemoved, messageSubject(messageID),
+			fmt.Sprintf("channel=%d", channelID), at); err != nil {
+			return err
+		}
+		var recipients []int64
+		if msg.Audience != nil {
+			if recipients, err = messageRecipientsTx(ctx, tx, messageID); err != nil {
+				return err
+			}
+		}
+		// The projection of the row as it now reads.
+		msg.Removed, msg.Body, msg.Payload, msg.EditedAt = true, schema.MessageRemovedBody, nil, time.Time{}
+		out = MessageRemoval{Message: msg, Recipients: recipients, Changed: true}
+		return nil
+	})
+	if err != nil {
+		return MessageRemoval{}, err
+	}
+	return out, nil
+}
+
+// The pending-notification feed (issue #1713, Mobile M11-A;
+// docs/design/mobile-notifications.md §4.3 and §5.5).
+//
+// ListPendingNotifications answers what is new for a reader now, shaped by
+// the preferences of the credential that asks. It is a message read, so it
+// is held to the rule of this file, and to one rule more: the answer is
+// never a function of a message the reader cannot read. A page of "the next
+// 2,000 rows above the cursor, filtered afterwards" would let any member who
+// passes any `after` learn how much is said in channels they are not in and
+// in whispers not to them (the activity-volume oracle of §4.2): the cursor
+// would stop on a hidden row, or the bound would be spent on one. So the
+// candidates are chosen in the statement, and only these reach Go:
+//
+//   - messageVisible: the audience predicate and the history bound, for the
+//     scoped reader, exactly as the lists embed it;
+//   - the reader is a live member of the message's channel now, so a
+//     message in a channel they have left, been banned from, or that went
+//     private without them is not a candidate whatever the audience says;
+//   - the id is above both after and the reader's read mark in that channel
+//     (a channel never marked starts at 0), which is where unread starts;
+//   - the message was not written by the reader, and is not removed.
+//
+// Every one of those is a fact the reader holds or may read, so the bound
+// counts only candidates, the cursor is the id of a candidate the reader may
+// read or after itself, and `more` means "a candidate exists above the
+// cursor". What runs in Go after that, over candidates only, is what depends
+// on the credential's preferences: the mutes and the policy. A candidate
+// that does not match is examined, counted against the bound and may carry
+// the cursor.
+
+// PendingNotificationScanBound is the most candidates one call examines, so
+// that the mentions filter cannot make a call unbounded. When it is reached
+// the call answers what matched, with the cursor at the highest candidate
+// examined and more set.
+const PendingNotificationScanBound = 2000
+
+// The candidates are read one channel at a time, and merged (issues #1725 and
+// #1730). A single statement over every channel the reader is in joins their
+// memberships and sorts every unread candidate before it applies its limit,
+// so its cost follows the reader's backlog (and, with a plan that walks
+// messages by id, other channels' messages too). The global first N
+// candidates in id order are always within each channel's first N, so the
+// statement below takes one channel's candidates above a lower bound, in id
+// order, through messages_by_channel, with every condition of the single
+// statement, and pendingCandidates merges channels by id, with a min-heap,
+// and stops at the bound. The answer is the same byte for byte.
+//
+// What is bounded, and what is not. The bound is the work of a call in
+// candidates: a seek per channel the reader is in, about the limit's worth of
+// candidates, and the heap's log of the channel count per candidate taken. A
+// channel's seek starts above the greatest of the cursor, the read mark and
+// the reader's history bound there (history_after), so rows at or below the
+// bound, and rows the reader has read, are not walked. What is not bounded is
+// the rows the seek passes over after that start without selecting them, in
+// the reader's own channels, above their mark: the reader's own posts,
+// removed messages, whispers not addressed to the reader, net messages for a
+// net the reader is not on, replies after the bound to a thread whose root is
+// at or below it (a reply is held to its root's id), and, for a guest with no
+// bound (who sees nothing), every row. A call's latency therefore grows with
+// that volume. It is a timing signal about what is said in channels the
+// reader is in, and it does not change an answer: content,
+// cursor and `more` are functions of candidates only (the byte-identity
+// tests). The alternative, a stored high-water mark of examined ids per
+// reader, would be new state on a read path that revocation (a removal or a
+// ban lifted) and a new whisper recipient (a row added below the mark) would
+// each invalidate, so it is not kept. See docs/design/mobile-notifications.md
+// section 4.2.
+
+// pendingChannelsSQL lists the reader's live channels with their read marks
+// (0 for a channel never marked) and their history bounds (0 for a membership
+// without one), in channel id order. Arguments: the reader (read mark), the
+// reader (member). It reads no message. It is a list of channels the reader is
+// in, and of marks and bounds they hold.
+//
+// A message at or below a membership's history_after is never visible to its
+// holder (messageVisible: withinHistoryBound is false for it whether the
+// reader is a guest or not, a reply's root being below the reply), so the
+// bound is a safe place to start a seek. It is only a starting point: the
+// statement keeps the whole predicate, and is the authority.
+const pendingChannelsSQL = `SELECT mem.channel_id, COALESCE(rm.last_read_id, 0), COALESCE(mem.history_after, 0)
+	FROM ` + liveMembers + ` mem
+	LEFT JOIN read_marks rm ON rm.principal_id = ? AND rm.channel_id = mem.channel_id
+	WHERE mem.principal_id = ?
+	ORDER BY mem.channel_id`
+
+// pendingNotificationsHead and Tail wrap the message visibility condition,
+// as listHead and listTail do, and select one channel's candidates
+// ascending, at most the batch asked for. The index is named because, once
+// the database has been ANALYZEd, the planner on a server with few channels
+// prefers a walk of messages by id above the bound, filtering the channel
+// afterwards, which reads every channel's messages (measured in #1725). Arguments, in order: the spoiler
+// prefix's length and text, the channel, the lower bound (the greatest of
+// after, the channel's read mark and the reader's history bound there), the reader (member), the reader
+// (author), then messageVisible's six, then the limit. The statement is
+// built from constants only.
+const (
+	pendingNotificationsHead = `SELECT m.id, m.channel_id, ch.name, m.author_id, m.body, m.created_at, m.audience_kind,
+	(SELECT g.handle FROM message_guest_attribution g WHERE g.message_id = m.id),
+	(SELECT g.label FROM message_guest_attribution g WHERE g.message_id = m.id),
+	EXISTS (SELECT 1 FROM files sf WHERE sf.message_id = m.id AND substr(sf.filename, 1, ?) = ?)
+	FROM messages m INDEXED BY messages_by_channel
+	JOIN channels ch ON ch.id = m.channel_id
+	WHERE m.channel_id = ? AND m.id > ?
+	  AND EXISTS (SELECT 1 FROM ` + liveMembers + ` mem WHERE mem.channel_id = m.channel_id AND mem.principal_id = ?)
+	  AND m.author_id <> ? AND ` + notRemovedCond + `
+	  AND `
+	pendingNotificationsTail = `
+	ORDER BY m.id ASC LIMIT ?`
+)
+
+func pendingNotificationsSQL() string {
+	return pendingNotificationsHead + messageVisible(true) + pendingNotificationsTail
+}
+
+// pendingFirstBatch and pendingMaxBatch size a channel's reads in the merge:
+// the first read of a channel takes one row (most channels have nothing, and
+// the merge needs only each channel's next candidate to start), and every
+// later read of the same channel doubles, up to the maximum. The sizes shape
+// the work and never the answer.
+const (
+	pendingFirstBatch = 1
+	pendingMaxBatch   = 256
+)
+
+// pendingHeap is the merge's min-heap of channels with a buffered candidate,
+// ordered by the id of the head of each buffer (ids are unique, so no ties).
+type pendingHeap []*pendingChannel
+
+func (h pendingHeap) Len() int { return len(h) }
+func (h pendingHeap) Less(i, j int) bool {
+	return h[i].buf[0].summary.MessageID < h[j].buf[0].summary.MessageID
+}
+func (h pendingHeap) Swap(i, j int) { h[i], h[j] = h[j], h[i] }
+func (h *pendingHeap) Push(x any)   { *h = append(*h, x.(*pendingChannel)) }
+func (h *pendingHeap) Pop() any {
+	old := *h
+	n := len(old)
+	x := old[n-1]
+	old[n-1] = nil
+	*h = old[:n-1]
+	return x
+}
+
+// pendingCandidate is one row the feed selected: a message the reader may
+// read, above their mark, that they did not write.
+type pendingCandidate struct {
+	summary   schema.NotificationSummaryV1
+	body      string
+	whisper   bool
+	guestName string
+	spoiler   bool
+}
+
+// pendingChannel is the merge's state for one channel: the candidates read
+// and not yet taken (in id order), the id to read above next, and whether
+// the channel has no more.
+type pendingChannel struct {
+	id    int64
+	above int64
+	batch int
+	buf   []pendingCandidate
+	done  bool
+}
+
+// fill reads the channel's next batch of candidates above its last read id.
+func (c *pendingChannel) fill(ctx context.Context, stmt *sql.Stmt, predArgs []any, reader int64) error {
+	args := []any{len(schema.SpoilerFilePrefix), schema.SpoilerFilePrefix, c.id, c.above, reader, reader}
+	args = append(append(args, predArgs...), c.batch)
+	rows, err := stmt.QueryContext(ctx, args...)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = rows.Close() }()
+	n := 0
+	for rows.Next() {
+		var cand pendingCandidate
+		var created int64
+		var kind, guestHandle, guestLabel sql.NullString
+		if err := rows.Scan(&cand.summary.MessageID, &cand.summary.ChannelID, &cand.summary.ChannelName, &cand.summary.AuthorID, &cand.body,
+			&created, &kind, &guestHandle, &guestLabel, &cand.spoiler); err != nil {
+			return err
+		}
+		cand.summary.Schema = schema.NotificationSummarySchemaV1
+		cand.summary.PostedAt = schema.NewTimestamp(time.UnixMilli(created))
+		cand.whisper = kind.Valid && schema.AudienceKind(kind.String) == schema.AudienceKindPrincipals
+		if guestHandle.Valid {
+			cand.guestName = schema.GuestDisplayName(guestLabel.String, guestHandle.String)
+		}
+		c.buf = append(c.buf, cand)
+		c.above = cand.summary.MessageID
+		n++
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	// A short batch means the channel has no more above its last id. A
+	// full one may or may not.
+	c.done = n < c.batch
+	c.batch = min(c.batch*2, pendingMaxBatch)
+	return nil
+}
+
+// pendingCandidates returns the first limit candidates for reader above
+// after, across the reader's live channels, in message id order: what the
+// single statement of issue #1713 returned, chosen by merging the channels'
+// own first candidates (see the comment above pendingChannelsSQL). It runs in
+// one read transaction, a snapshot, as the single statement did.
+//
+// Its work is bounded in candidates: one channel list, one seek per channel
+// the reader is in, and, in the merge, about limit candidates plus what each
+// channel's last batch over-read (at most pendingMaxBatch each), at a heap's
+// log of the channel count each. Rows a seek passes without selecting (see
+// the comment above pendingChannelsSQL) are not bounded. The count of
+// channels is the reader's own membership, and every channel counts: leaving
+// one out would change the answer.
+func (s *Store) pendingCandidates(ctx context.Context, reader Reader, after int64, limit int) ([]pendingCandidate, error) {
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	rows, err := tx.QueryContext(ctx, pendingChannelsSQL, reader.PrincipalID, reader.PrincipalID)
+	if err != nil {
+		return nil, err
+	}
+	var chans []*pendingChannel
+	for rows.Next() {
+		c := &pendingChannel{batch: pendingFirstBatch}
+		var mark, bound int64
+		if err := rows.Scan(&c.id, &mark, &bound); err != nil {
+			_ = rows.Close()
+			return nil, err
+		}
+		c.above = max(after, mark, bound)
+		chans = append(chans, c)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+
+	// Prepared once: the statement is long, and parsing it per channel would
+	// cost more than reading a channel with nothing new.
+	stmt, err := tx.PrepareContext(ctx, pendingNotificationsSQL())
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = stmt.Close() }()
+	_, predArgs := visibilityArgs(Reader{PrincipalID: reader.PrincipalID, Scoped: true})
+	for _, c := range chans {
+		if err := c.fill(ctx, stmt, predArgs, reader.PrincipalID); err != nil {
+			return nil, err
+		}
+	}
+	// Merge: a min-heap of the channels that have a candidate, by their
+	// head's message id. Take the lowest head, and read more of its channel
+	// when the buffer is empty and the channel may have more, before the
+	// next comparison, so every unfinished channel always shows its true
+	// next candidate.
+	h := make(pendingHeap, 0, len(chans))
+	for _, c := range chans {
+		if len(c.buf) > 0 {
+			h = append(h, c)
+		}
+	}
+	heap.Init(&h)
+	out := make([]pendingCandidate, 0, min(limit, 64))
+	for len(out) < limit && len(h) > 0 {
+		next := h[0]
+		out = append(out, next.buf[0])
+		next.buf = next.buf[1:]
+		if len(next.buf) == 0 && !next.done {
+			if err := next.fill(ctx, stmt, predArgs, reader.PrincipalID); err != nil {
+				return nil, err
+			}
+		}
+		if len(next.buf) > 0 {
+			heap.Fix(&h, 0)
+		} else {
+			heap.Pop(&h)
+		}
+	}
+	return out, nil
+}
+
+// ListPendingNotifications returns one page of the feed for reader, under the
+// preferences of credentialID (the defaults when it has none): at most
+// schema.MaxPendingNotificationsPage summaries, ascending by message id, with
+// the cursor and more of schema.ListPendingNotificationsResponseV1. The
+// reader must be a scoped reader with a verified principal; the request's
+// readerFor reader is.
+//
+// A candidate qualifies when its channel is not muted and the policy admits
+// it: off admits nothing (and reads nothing), mentions a whisper the reader
+// received or a body that mentions the reader's current name, all every
+// candidate. The kind is whisper, then mention, then message, whatever the
+// policy. A page that fills stops at its last summary, so the cursor never
+// skips a match.
+//
+// author_name is given only as ListChannelAuthors would give it to this
+// reader in the message's channel, or as the guest attribution the message
+// carries for a guest's post. text is given only under preview, and never for
+// a spoiler: a body containing "||", or a message with an attachment whose
+// stored name starts with schema.SpoilerFilePrefix.
+func (s *Store) ListPendingNotifications(ctx context.Context, reader Reader, credentialID, after int64) (schema.ListPendingNotificationsResponseV1, error) {
+	if !reader.Scoped || reader.PrincipalID <= 0 {
+		return schema.ListPendingNotificationsResponseV1{}, errors.New("store: list pending notifications: the feed needs a scoped reader with a principal")
+	}
+	if after < 0 {
+		return schema.ListPendingNotificationsResponseV1{}, errors.New("store: list pending notifications: a cursor is never negative")
+	}
+	empty := schema.ListPendingNotificationsResponseV1{Summaries: []schema.NotificationSummaryV1{}, Cursor: after}
+	prefs, err := notificationPreferencesOf(ctx, s.db, credentialID)
+	if err != nil {
+		return schema.ListPendingNotificationsResponseV1{}, err
+	}
+	if prefs.Policy == schema.NotificationPolicyOff {
+		return empty, nil
+	}
+	var readerName string
+	if err := s.db.QueryRowContext(ctx, "SELECT name FROM principals WHERE id = ?", reader.PrincipalID).Scan(&readerName); err != nil {
+		return schema.ListPendingNotificationsResponseV1{}, fmt.Errorf("store: list pending notifications: reader: %w", err)
+	}
+
+	cands, err := s.pendingCandidates(ctx, reader, after, PendingNotificationScanBound+1)
+	if err != nil {
+		return schema.ListPendingNotificationsResponseV1{}, fmt.Errorf("store: list pending notifications: %w", err)
+	}
+
+	muted := make(map[int64]struct{}, len(prefs.Muted))
+	for _, id := range prefs.Muted {
+		muted[id] = struct{}{}
+	}
+	examine := cands
+	truncated := false
+	if len(examine) > PendingNotificationScanBound {
+		examine, truncated = examine[:PendingNotificationScanBound], true
+	}
+	resp := empty
+	var kept []pendingCandidate
+	pageFull := false
+	for i, c := range examine {
+		resp.Cursor = c.summary.MessageID
+		kind := schema.NotificationKindMessage
+		switch {
+		case c.whisper:
+			kind = schema.NotificationKindWhisper
+		case schema.Mentions(c.body, readerName):
+			kind = schema.NotificationKindMention
+		}
+		if _, isMuted := muted[c.summary.ChannelID]; isMuted {
+			continue
+		}
+		if prefs.Policy == schema.NotificationPolicyMentions && kind == schema.NotificationKindMessage {
+			continue
+		}
+		c.summary.Kind = kind
+		if prefs.Preview && !c.spoiler && !strings.Contains(c.body, "||") {
+			c.summary.Text = notificationText(c.body)
+		}
+		if c.guestName != "" {
+			c.summary.AuthorName = c.guestName
+		}
+		kept = append(kept, c)
+		if len(kept) == schema.MaxPendingNotificationsPage {
+			// The page is full: stop at this summary, so the cursor never
+			// passes a match that is not in it. A candidate beyond it, in
+			// the lookahead too, is what more reports.
+			resp.More = i+1 < len(cands)
+			pageFull = true
+			break
+		}
+	}
+	if !pageFull {
+		resp.More = truncated
+	}
+
+	// Names, once per channel and only for the page, through the authors
+	// rule. A guest's post carries its own attribution, set above.
+	byChannel := map[int64][]int64{}
+	for _, c := range kept {
+		if c.guestName == "" {
+			byChannel[c.summary.ChannelID] = append(byChannel[c.summary.ChannelID], c.summary.AuthorID)
+		}
+	}
+	names := map[[2]int64]string{}
+	for channelID, ids := range byChannel {
+		authors, err := s.ListChannelAuthors(ctx, channelID, reader, ids)
+		if err != nil {
+			return schema.ListPendingNotificationsResponseV1{}, fmt.Errorf("store: list pending notifications: %w", err)
+		}
+		for _, a := range authors {
+			names[[2]int64{channelID, a.PrincipalID}] = a.Name
+		}
+	}
+	for _, c := range kept {
+		if c.guestName == "" {
+			c.summary.AuthorName = names[[2]int64{c.summary.ChannelID, c.summary.AuthorID}]
+		}
+		resp.Summaries = append(resp.Summaries, c.summary)
+	}
+	return resp, nil
+}
+
+// PushWakeTarget is one registration a post should wake: what the sender needs
+// to address one wake, and the two times it coalesces by. The endpoint and the
+// keys are the registration's write-only target (see push_registrations.go):
+// they go to the sender and nowhere else, and no log line, error or audit row
+// holds them.
+type PushWakeTarget struct {
+	RegistrationID string
+	CredentialID   int64
+	PrincipalID    int64
+	Endpoint       string
+	P256DH         string
+	Auth           string
+	// LastWakeAt and LastFetchAt are the registration's own times, the zero
+	// time for "never".
+	LastWakeAt  time.Time
+	LastFetchAt time.Time
+}
+
+// PushTargetScanBound is the most registrations one post is evaluated for: the
+// ones on live members of the channel are few (a person holds at most
+// schema.MaxPushRegistrationsPerPrincipal), and a channel is bounded, so this
+// is a safety net, not a limit anyone meets.
+const PushTargetScanBound = 5000
+
+// pushTargetScanBound is the bound in force: PushTargetScanBound, a variable
+// only so a test can lower it.
+var pushTargetScanBound = PushTargetScanBound
+
+// pushCandidatesSQL selects the registrations of channelID's live members that
+// a wake could be for, before the message is looked at. A registration is
+// a candidate when
+//
+//   - it is active, and a webpush one;
+//   - its credential is live (liveCredentialWhere, the one predicate of
+//     push_registrations.go: not revoked, full scope, issued under its
+//     principal's present authentication generation, so a sign-in a restore
+//     killed is never woken, and neither expired nor idle past its bound); a
+//     guest's visit is checked in Go (credentialIdle.live);
+//   - its principal is a human, enabled, not hidden, and a live member of the
+//     channel (liveMembers: not banned), and did not write the message.
+//
+// Arguments, in order: the channel, the author, the bound.
+func pushCandidatesSQL(now time.Time) string {
+	// liveCredentialWhere is a constant of this package plus an integer.
+	return `SELECT r.id, r.credential_id, r.principal_id, r.endpoint, r.p256dh, r.auth,
+	       r.last_wake_at, r.last_fetch_at, p.name, ` + idleBoundColumns + `
+	FROM push_registrations r
+	JOIN credentials c ON c.id = r.credential_id AND c.principal_id = r.principal_id
+	JOIN principals p ON p.id = r.principal_id
+	JOIN ` + liveMembers + ` mem ON mem.channel_id = ?1 AND mem.principal_id = r.principal_id
+	WHERE r.state = 'active' AND r.transport = 'webpush'
+	  AND ` + liveCredentialWhere(now) + `
+	  AND p.kind = 'human' AND p.disabled_at IS NULL AND p.hidden_at IS NULL
+	  AND p.id <> ?2
+	ORDER BY r.id LIMIT ?3`
+}
+
+// pushMessageSQL reads the post being evaluated: its body and audience, and
+// only when it is in the channel and not removed. It is the only place the
+// push path reads a body, and the body leaves this file only as the answer of
+// pushPolicyAdmits.
+const pushMessageSQL = `SELECT m.body, m.audience_kind, m.author_id FROM messages m
+	WHERE m.id = ? AND m.channel_id = ? AND ` + notRemovedCond
+
+// pushVisibleSQL asks whether the message is visible to a scoped reader:
+// messageVisible (the audience rule, the reader being a recipient and a live
+// member for a scoped message, and the history bound) in the same statement
+// that selects the message, exactly as the lists embed it. Arguments: the
+// message id, then visibilityArgs' six for the reader.
+var pushVisibleSQL = `SELECT 1 FROM messages m WHERE m.id = ? AND ` + notRemovedCond + ` AND ` + messageVisible(true)
+
+// PushTargets returns the registrations that a new message should wake, for the
+// sender (issue #1715, docs/design/mobile-notifications.md §6.2). It is the
+// post-time counterpart of the pending feed, and answers the same question,
+// for the same reader rule: a registration is returned when
+//
+//   - it is a candidate (pushCandidatesSQL): an active webpush registration of
+//     a live, full-scope credential at its principal's present generation,
+//     whose principal is a human, enabled, not hidden, a live member of the
+//     channel and not the author;
+//   - the credential is within its idle bound at now (credentialIdle.live);
+//   - the message exists in the channel, is not removed, and is visible to
+//     that principal (messageVisible with their scoped reader, so a net
+//     message they are not in, a whisper to someone else, and what is before
+//     their history bound are not);
+//   - the credential's policy and mutes admit it (pushPolicyAdmits): off
+//     admits nothing, a muted channel nothing, mentions a whisper the
+//     principal received or a body that mentions their current name, all every
+//     message.
+//
+// Every one of those is read now, so a principal removed from the channel, a
+// credential revoked or a message removed between the post and this call is
+// not woken. It is bounded by PushTargetScanBound. A message that is not
+// found, or has no target, gives no targets and no error. The author excluded
+// is the message's own, read from its row.
+func (s *Store) PushTargets(ctx context.Context, channelID, messageID int64, now time.Time) ([]PushWakeTarget, error) {
+	var body string
+	var kind sql.NullString
+	var authorID int64 // the message's own author: never a caller's word for it
+	switch err := s.db.QueryRowContext(ctx, pushMessageSQL, messageID, channelID).Scan(&body, &kind, &authorID); {
+	case errors.Is(err, sql.ErrNoRows):
+		return nil, nil
+	case err != nil:
+		return nil, fmt.Errorf("store: push targets: message: %w", err)
+	}
+	whisper := kind.Valid && schema.AudienceKind(kind.String) == schema.AudienceKindPrincipals
+
+	rows, err := s.db.QueryContext(ctx, pushCandidatesSQL(now), channelID, authorID, pushTargetScanBound) // #nosec G202 -- constants plus an integer
+	if err != nil {
+		return nil, fmt.Errorf("store: push targets: candidates: %w", err)
+	}
+	type candidate struct {
+		target PushWakeTarget
+		name   string
+	}
+	var cands []candidate
+	for rows.Next() {
+		var c candidate
+		var wake, fetch sql.NullInt64
+		var idle credentialIdle
+		if err := rows.Scan(&c.target.RegistrationID, &c.target.CredentialID, &c.target.PrincipalID,
+			&c.target.Endpoint, &c.target.P256DH, &c.target.Auth, &wake, &fetch, &c.name,
+			&idle.createdAt, &idle.idleMs, &idle.lastUsedAt, &idle.guestState, &idle.guestExpiresAt); err != nil {
+			_ = rows.Close()
+			return nil, fmt.Errorf("store: push targets: scan: %w", err)
+		}
+		if !idle.live(now) {
+			continue
+		}
+		if wake.Valid {
+			c.target.LastWakeAt = time.UnixMilli(wake.Int64)
+		}
+		if fetch.Valid {
+			c.target.LastFetchAt = time.UnixMilli(fetch.Int64)
+		}
+		cands = append(cands, c)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, fmt.Errorf("store: push targets: %w", err)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: push targets: %w", err)
+	}
+
+	// Visibility is per principal, once each, however many registrations they
+	// hold; preferences are per credential.
+	visible := map[int64]bool{}
+	var out []PushWakeTarget
+	for _, c := range cands {
+		ok, seen := visible[c.target.PrincipalID]
+		if !seen {
+			_, args := visibilityArgs(Reader{PrincipalID: c.target.PrincipalID, Scoped: true})
+			var one int
+			switch err := s.db.QueryRowContext(ctx, pushVisibleSQL, append([]any{messageID}, args...)...).Scan(&one); {
+			case errors.Is(err, sql.ErrNoRows):
+				ok = false
+			case err != nil:
+				return nil, fmt.Errorf("store: push targets: visibility: %w", err)
+			default:
+				ok = true
+			}
+			visible[c.target.PrincipalID] = ok
+		}
+		if !ok {
+			continue
+		}
+		prefs, err := notificationPreferencesOf(ctx, s.db, c.target.CredentialID)
+		if err != nil {
+			return nil, err
+		}
+		if pushPolicyAdmits(prefs, channelID, whisper, body, c.name) {
+			out = append(out, c.target)
+		}
+	}
+	return out, nil
+}
+
+// pushPolicyAdmits is the policy of §6.2 for a message the principal may
+// already see: the credential's mutes first (a muted channel wakes nothing,
+// whatever the policy), then off (nothing), mentions (a whisper the principal
+// received, which the visibility condition has shown they are a recipient of,
+// or a body that mentions their current name by schema.Mentions) and all
+// (everything). A policy this code does not know admits nothing. It is the
+// same rule the feed applies to its candidates, so a wake is sent for exactly
+// the messages the feed would list.
+func pushPolicyAdmits(prefs schema.NotificationPreferencesV1, channelID int64, whisper bool, body, name string) bool {
+	if slices.Contains(prefs.Muted, channelID) {
+		return false
+	}
+	switch prefs.Policy {
+	case schema.NotificationPolicyAll:
+		return true
+	case schema.NotificationPolicyMentions:
+		return whisper || schema.Mentions(body, name)
+	default:
+		return false
+	}
 }

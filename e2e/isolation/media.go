@@ -355,6 +355,13 @@ func (w *world) mediaB(v *voiceA) error {
 	} else if screen, audio := lkit.ShareTracks(p); !screen || !audio {
 		return fmt.Errorf("ann's share ended while B looked: sources %v", p.Sources())
 	}
+	// B's people name ann, A's sharer, to the stop of a share (issue #1483,
+	// design §5.2) in B's own channel. B's manager is a moderator there, so
+	// the stop is 204 and changes nothing, as for an id that never existed;
+	// bob is not, and is refused 403 whoever he names: ann or a ghost.
+	if err := w.shareStopRows(v, bea, bob, ann); err != nil {
+		return err
+	}
 	// cam's camera is live while bob looks, too.
 	if ok, p, saw := lk.has(v.room, cam.cam.id); !ok {
 		return fmt.Errorf("cam left A's room while B looked: %s", saw)
@@ -397,6 +404,58 @@ func (w *world) mediaB(v *voiceA) error {
 	}
 	w.h.say("ok   media: bea's grant names B's room alone; the same token bent to A's room is refused by LiveKit (401); bob, subscribed to everything in B's room, hears bea and is told nothing of ann's screen, sound or microphone, of cam's camera, or of amy (by identity or by LiveKit SID)")
 	return w.cameraRowsA(v, cam)
+}
+
+// shareStopRows is B's moderator's stop of A's sharer, in B's own channel,
+// where B's manager has standing and B's plain member has none. Whoever B's
+// people name, ann or an id that never existed, the answer is the same; ann's
+// stream is not touched, and no voice_share_stopped row is written.
+func (w *world) shareStopRows(v *voiceA, bea, bob, ann *member) error {
+	stoppedBefore, err := w.auditRows(store.AuditVoiceShareStopped)
+	if err != nil {
+		return err
+	}
+	path := func(target int64) string {
+		return "/v1/channels/" + w.b.main() + "/voice/share?" + schema.VoiceSharePrincipalParam + "=" + itoa(target)
+	}
+	ghost := int64(987654321)
+	for _, target := range []int64{ann.id, ghost} {
+		status, body, err := bea.api.do(http.MethodDelete, path(target), nil)
+		if err != nil {
+			return err
+		}
+		if status != http.StatusNoContent || len(body) != 0 {
+			return fmt.Errorf("bea (B's manager) stops principal %d's share in B's channel: status %d %s, want 204 and nothing", target, status, w.h.redact(string(body)))
+		}
+	}
+	var refusals []string
+	for _, target := range []int64{ann.id, ghost} {
+		status, body, err := bob.api.do(http.MethodDelete, path(target), nil)
+		if err != nil {
+			return err
+		}
+		if status != http.StatusForbidden {
+			return fmt.Errorf("bob (a plain member) stops principal %d's share in B's channel: status %d %s, want 403", target, status, w.h.redact(string(body)))
+		}
+		refusals = append(refusals, string(body))
+	}
+	if refusals[0] != refusals[1] {
+		return fmt.Errorf("bob is told %q for ann's id and %q for a ghost's: the stop tells whether the person shares", refusals[0], refusals[1])
+	}
+	if ok, p, saw := w.lk.has(v.room, ann.id); !ok {
+		return fmt.Errorf("ann left A's room when B's people named her: %s", saw)
+	} else if screen, audio := lkit.ShareTracks(p); !screen || !audio {
+		return fmt.Errorf("naming ann in B ended her share: sources %v", p.Sources())
+	}
+	stoppedAfter, err := w.auditRows(store.AuditVoiceShareStopped)
+	if err != nil {
+		return err
+	}
+	if len(stoppedAfter) != len(stoppedBefore) {
+		return fmt.Errorf("a stop of a share by B wrote %d voice_share_stopped rows", len(stoppedAfter)-len(stoppedBefore))
+	}
+	w.h.say("ok   shares: B's manager stopping principal %d (A's sharer) or an id that never existed in B's channel is 204 with nothing written; B's plain member is 403 for both, with the same body; ann's share is untouched", ann.id)
+	return nil
 }
 
 // videoGrant decodes a LiveKit token's video grant (without checking its
@@ -701,6 +760,8 @@ func (w *world) cameraRowsA(v *voiceA, c *cameraA) error {
 		return err
 	}
 	den := w.a.channels[1]
+	// prev is the member who held a share in den on the row before.
+	var prev *member
 	isDemo := func(n string) bool { return n == "demo" }
 	isShareAudio := func(n string) bool { return strings.HasSuffix(n, "share-mismatch.ogg") }
 	for _, k := range []struct {
@@ -774,24 +835,35 @@ func (w *world) cameraRowsA(v *voiceA, c *cameraA) error {
 				hl.Stop()
 				return fmt.Errorf("%s's lk did not try to publish within 30 s", k.who)
 			}
-			// The row before this one removed its publisher holding den's
-			// share, which ends (reason=left) on the next pass that finds them
-			// gone: until then the claim is busy, and is asked again.
-			if err := waitFor(k.who+"'s share claim in den", 15*time.Second, func() (bool, string) {
-				status, body, err := m.api.do(http.MethodPost, "/v1/channels/"+den+"/voice/share", nil)
-				switch {
-				case err != nil:
-					return false, err.Error()
-				case status == http.StatusOK:
-					return true, ""
-				case status == http.StatusConflict && errorCode(body) == schema.ErrorCodeVoiceShareBusy:
-					return false, "den's share is still the last row's"
-				}
-				return false, fmt.Sprintf("status %d %s", status, body)
-			}); err != nil {
+			// Several shares can be held at once (issue #1483), so this claim
+			// succeeds at once, whatever the row before it left in den: the
+			// previous holder was removed with its publisher, and its stream
+			// ends (reason=left) on the next pass that finds them gone, within
+			// the bound, beside this one.
+			status, body, err := m.api.do(http.MethodPost, "/v1/channels/"+den+"/voice/share", nil)
+			if err != nil {
 				hl.Stop()
 				return err
 			}
+			if status != http.StatusOK {
+				hl.Stop()
+				return fmt.Errorf("%s's share claim in den: status %d %s, want 200 beside the last row's stream", k.who, status, body)
+			}
+			if prev != nil {
+				if err := waitFor("the previous row's stream in den to end left", 15*time.Second, func() (bool, string) {
+					rows, err := w.auditRows(store.AuditVoiceShareStopped)
+					if err != nil {
+						return false, err.Error()
+					}
+					return slices.ContainsFunc(rows, func(r schema.AuditEventV1) bool {
+						return strings.Contains(r.Detail, "principal="+itoa(prev.id)+" ") && strings.Contains(r.Detail, "reason=left")
+					}), fmt.Sprintf("no voice_share_stopped reason=left row for the previous holder among %d", len(rows))
+				}); err != nil {
+					hl.Stop()
+					return err
+				}
+			}
+			prev = m
 			gate.Release()
 		}
 		// Either LiveKit refuses the track (lk gives up and the track is never

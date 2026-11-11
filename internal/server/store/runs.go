@@ -416,7 +416,7 @@ func refuseOfflineSessionTx(ctx context.Context, tx execer, sessionID int64) err
 func principalUsableInChannelTx(ctx context.Context, tx execer, channelID, principalID int64) (bool, error) {
 	var one int
 	switch err := tx.QueryRowContext(ctx,
-		`SELECT 1 FROM channel_members c JOIN principals p ON p.id = c.principal_id
+		`SELECT 1 FROM `+liveMembers+` c JOIN principals p ON p.id = c.principal_id
 		 WHERE c.channel_id = ? AND c.principal_id = ? AND p.disabled_at IS NULL`, channelID, principalID).Scan(&one); {
 	case errors.Is(err, sql.ErrNoRows):
 		return false, nil

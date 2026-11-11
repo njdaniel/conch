@@ -8,14 +8,14 @@ import { JoiningSettings } from './joiningSettings';
 // the words are true of both. It stands where the conversation would, and is gone
 // once a channel exists. Its heading takes focus after sign-in as the
 // conversation's does.
-export function FirstRun({ onMakeChannel }: { readonly onMakeChannel: () => void }) {
+export function FirstRun({ onMakeChannel, operator }: { readonly onMakeChannel: () => void; readonly operator: boolean }) {
   const joining = useContext(JoiningSettings);
   return (
     <div className="first-run">
       <h2 id={headingId} tabIndex={-1}>
         You&apos;re not in any channels yet
       </h2>
-      <p className="hint">Make a channel to start talking, or ask an operator to add you to one.</p>
+      <p className="hint">{operator ? 'Make a channel to start talking.' : 'Make a channel to start talking, or ask an operator to add you to one.'}</p>
       <ul className="first-run-actions">
         <li>
           <button type="button" onClick={onMakeChannel}>

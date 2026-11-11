@@ -49,6 +49,7 @@ type run struct {
 	tr            tracker
 	nextID        int64
 	waiters       map[int64]*waiter
+	version       string // the schema the session speaks, chosen at the hello; "" reads as v1
 	ready         bool   // the start was acknowledged
 	leaving       bool   // Leave, Close or a cancelled Join stops it: idle once reaped
 	broken        bool   // its events are no longer believed
@@ -247,7 +248,12 @@ func (s *Supervisor) onEvent(r *run, line []byte, tooLong bool) {
 		close(r.helloCh)
 	case ev.State != nil:
 		if s.cur == r && r.supReason == "" {
-			s.status = fromState(r.gen, r.channel, r.tr.hello.HelperVersion, ev.State)
+			if rd.v2 != nil {
+				s.status = fromStateV2(r.gen, r.channel, r.tr.hello.HelperVersion, rd.v2)
+			} else {
+				s.status = fromState(r.gen, r.channel, r.tr.hello.HelperVersion, ev.State)
+				s.status.Protocol = schema.VoiceControlSchemaV1
+			}
 			if !s.closed {
 				s.muted, s.deafened = ev.State.Muted, ev.State.Deafened
 			}
@@ -290,9 +296,10 @@ func (s *Supervisor) resyncLocked(r *run) {
 		return
 	}
 	r.resyncing = true
+	version := r.version
 	go func() {
 		// The ack bound ends the exchange whatever happens.
-		_ = s.exchange(context.Background(), r, schema.VoiceControlCommandGetState, getState)
+		_ = s.exchange(context.Background(), r, schema.VoiceControlCommandGetState, func(id int64) schema.VoiceControlMessage { return getState(version, id) })
 		s.mu.Lock()
 		r.resyncing = false
 		s.mu.Unlock()
@@ -502,9 +509,7 @@ func (s *Supervisor) writeLeave(r *run) {
 	}
 	s.mu.Lock()
 	id := r.nextID + 1
-	line, err := schema.MarshalVoiceControlLine(schema.VoiceControlLeaveV1{
-		Schema: schema.VoiceControlSchemaV1, Kind: schema.VoiceControlCommandLeave, ID: id,
-	})
+	line, err := schema.MarshalVoiceControlLine(leaveMsg(r.version, id))
 	if err != nil || r.stdinClosed {
 		s.mu.Unlock()
 		<-r.slots

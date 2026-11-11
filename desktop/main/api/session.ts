@@ -11,7 +11,8 @@
 // carries a generation check").
 //
 // The token is a private field and has no getter that returns it other than
-// capture(), which only the request executor calls.
+// capture(), which only the request executor calls, and voiceCredential(), which
+// only the native voice service's Join and Retry call.
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 
 export interface Capture {
@@ -48,6 +49,11 @@ export class Session {
   #controller = new AbortController();
   readonly #challenges = new Map<string, PendingChallenge>();
   #pasted: Pasted | null = null;
+  // The one rotation of the current identity: the credential a write replaced
+  // and the one now in force. A request sent just before the write may be
+  // answered 401 for it; successor() says so. Cleared with every change of
+  // identity, so it never outlives the generation and origin it was made in.
+  #rotation: { readonly old: string; readonly next: string } | null = null;
 
   get generation(): number {
     return this.#generation;
@@ -69,6 +75,7 @@ export class Session {
     this.#controller = new AbortController();
     this.#challenges.clear();
     this.#pasted = null;
+    this.#rotation = null;
   }
 
   // setOrigin selects the server. Changing it is a change of identity; setting
@@ -84,6 +91,29 @@ export class Session {
   adopt(token: string): void {
     this.#bump();
     this.#token = token;
+  }
+
+  // rotate puts next in the place of the credential a write has just replaced
+  // at the server (a password change gives the same session a new token). It is
+  // the same identity: the generation does not move and nothing in flight is
+  // aborted, which is why it is not adopt. It does nothing, and says so, unless
+  // old is the credential in force now, so a sign-out, an account switch or
+  // another rotation in between is never undone by a late answer.
+  rotate(old: string, next: string): boolean {
+    if (this.#token === null || old !== this.#token) return false;
+    this.#token = next;
+    this.#rotation = { old, next };
+    return true;
+  }
+
+  // successor is the credential now in force, when token is the one rotate
+  // just replaced and capture is still this identity; else null. It is how a
+  // request that was sent with the replaced credential, and refused for that,
+  // is told from a credential that was really revoked.
+  successor(capture: Capture, token: string): string | null {
+    const rotation = this.#rotation;
+    if (rotation === null || !this.current(capture) || token !== rotation.old || this.#token !== rotation.next) return null;
+    return rotation.next;
   }
 
   // forget drops the credential and ends everything in flight. It returns the
@@ -121,6 +151,16 @@ export class Session {
 
   capture(): Capture {
     return { generation: this.#generation, origin: this.#origin, token: this.#token, signal: this.#controller.signal };
+  }
+
+  // voiceCredential is the second reader of the token, beside capture(): for
+  // the native voice service's start (issue #1373), at Join time only. The
+  // helper asks conchd for the person's own voice session with it
+  // (CONCH_TOKEN in the helper's environment, never argv); the caller passes
+  // it on at once and keeps no copy. The generation is the identity the credential belongs to: the caller
+  // fences on it. Null when signed out or no server is set.
+  voiceCredential(): { readonly origin: string; readonly token: string; readonly generation: number } | null {
+    return this.#origin === null || this.#token === null ? null : { origin: this.#origin, token: this.#token, generation: this.#generation };
   }
 
   // current says whether a capture is still the identity in force.

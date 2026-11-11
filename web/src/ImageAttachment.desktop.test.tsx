@@ -2,7 +2,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/re
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { fetchFileBytes, getFileMeta } from './api';
 import { ImageAttachment } from './ImageAttachment';
-import type { FileV1 } from './schema/file';
+import { SPOILER_FILE_PREFIX, type FileV1 } from './schema/file';
 
 // In the desktop shell, Download is main's native save dialog: the page names
 // the file by id, gets no bytes back, and makes no download link.
@@ -68,5 +68,19 @@ describe('Download in the desktop shell', () => {
     await waitFor(() => {
       expect(onUnauthorized).toHaveBeenCalledOnce();
     });
+  });
+});
+
+describe('Download of a hidden spoiler in the desktop shell', () => {
+  it('saves through main by id while hidden, fetching nothing in the page', async () => {
+    vi.mocked(getFileMeta).mockResolvedValue({ ok: true, value: { ...metadata, filename: `${SPOILER_FILE_PREFIX}photo.png`, media_type: 'image/png', size: 4 } });
+    render(<ImageAttachment fileId={17} channel="general" viewer={2} />);
+    await screen.findByRole('button', { name: 'Reveal photo.png' });
+    fireEvent.click(screen.getByRole('button', { name: 'Download' }));
+    await waitFor(() => {
+      expect(saveFile).toHaveBeenCalledExactlyOnceWith(17);
+    });
+    expect(fetchFileBytes).not.toHaveBeenCalled();
+    expect(screen.getByRole('button', { name: 'Reveal photo.png' }).getAttribute('aria-expanded')).toBe('false');
   });
 });

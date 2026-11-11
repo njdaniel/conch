@@ -1,0 +1,17 @@
+{
+  "schema": "conch.voice_control.v2",
+  "kind": "state",
+  "seq": 23,
+  "phase": "failed",
+  "reason": "voice_removed",
+  "capture": "off",
+  "playback": "off",
+  "transmitting": false,
+  "muted": false,
+  "deafened": false,
+  "blocked": [
+    "not_connected"
+  ],
+  "talk_mode": "push_to_talk",
+  "ptt": "ready"
+}

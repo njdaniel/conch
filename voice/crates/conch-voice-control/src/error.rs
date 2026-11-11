@@ -47,6 +47,15 @@ pub enum Error {
         file: String,
     },
 
+    /// `[keys]` is written as an inline table, with dotted keys, or with a value that is not
+    /// a string where [`crate::set_keys_value`] writes one, and neither it nor
+    /// [`crate::unset_keys_value`] edits those.
+    #[error("{file}: `[keys]` is written in a form this command does not edit: change it by hand")]
+    KeysFormNotEditable {
+        /// The file the caller said the text came from.
+        file: String,
+    },
+
     /// An edit [`crate::set_audio_value`] made did not pass its own check: the result read
     /// differently, or the text changed outside the one value. Nothing is to be written.
     #[error("{file}: setting `{key}` would change more than its value: change it by hand")]

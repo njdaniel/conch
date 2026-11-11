@@ -3,11 +3,38 @@
 // malicious IPC; TLS; and the canary scans (no secret in the renderer, its
 // storage, or main's log). The server is a disposable conchd on loopback
 // built from this checkout; see conchd.ts.
+import { existsSync, lstatSync, readdirSync, readlinkSync, realpathSync } from 'node:fs';
+import { resolve } from 'node:path';
+
 import { chromium, expect, test, type Browser, type Page } from '@playwright/test';
 
 import { makePki, sendJson, startHttps, type Fake, type Pki } from '../unit/support.ts';
 import { listedVersion, startConchd, type Disposable } from './conchd.ts';
-import { credentialField, launch, livePage, type Launched } from './launch.ts';
+import { APP, credentialField, launch, livePage, type Launched } from './launch.ts';
+
+// The helper electron-builder's step in scripts/desktop-voice-helper.sh puts
+// beside the app (issue #1377).
+const BUNDLED_HELPER = resolve(APP, '..', 'resources', 'conch-voice');
+
+// The helper's canonical path, as /proc/<pid>/exe names it.
+function helperPath(): string {
+  return existsSync(BUNDLED_HELPER) ? realpathSync(BUNDLED_HELPER) : BUNDLED_HELPER;
+}
+
+// The pids of processes running the bundled helper, by their executable: a
+// point-in-time check that none is running.
+function helperPids(): string[] {
+  return readdirSync('/proc')
+    .filter((d) => /^\d+$/.test(d))
+    .filter((d) => {
+      try {
+        // The kernel names the canonical path, and " (deleted)" once replaced.
+        return readlinkSync(`/proc/${d}/exe`).replace(/ \(deleted\)$/, '') === helperPath();
+      } catch {
+        return false; // gone, or not ours to read
+      }
+    });
+}
 
 // A conch credential has this shape; none may be anywhere the renderer or the
 // log can see, except a pasted one while it is being typed.
@@ -127,6 +154,21 @@ test.describe('the packaged app against a real conchd', () => {
     await page.getByRole('button', { name: 'Sign in', exact: true }).click();
     await expect(page.getByRole('button', { name: 'Settings' })).toBeVisible();
     await expect(page.getByRole('heading', { name: 'general' })).toBeVisible();
+  });
+
+  test('has the bundled voice helper when built with it, and starts none by launching and signing in', () => {
+    // DESKTOP_REQUIRE_VOICE=1 (the build's own switch) makes absence a failure
+    // here too; without it a build without the helper is a valid build.
+    if (process.env['DESKTOP_REQUIRE_VOICE'] === '1') expect(existsSync(BUNDLED_HELPER)).toBe(true);
+    if (existsSync(BUNDLED_HELPER)) {
+      const st = lstatSync(BUNDLED_HELPER);
+      expect(st.isFile()).toBe(true);
+      expect(st.mode & 0o777).toBe(0o755);
+    }
+    // No helper is running once the app is up and signed in: it runs only
+    // on an explicit Join. (A point-in-time check: one that started and
+    // already exited would not be seen.)
+    expect(helperPids()).toEqual([]);
   });
 
   test('lists channels, posts, and loads history through main', async () => {
@@ -254,6 +296,52 @@ test.describe('the packaged app against a real conchd', () => {
     expect(await renderer(page)).not.toContain(server.operatorToken);
     expect(await heap(page)).not.toContain(server.operatorToken);
     page = await signOutThroughSettings(browser, page);
+  });
+
+  // Issue #1422: a password change replaces the bearer, which main holds. It
+  // is the last test of this server because it ends every other sign-in of the
+  // account. The second member signs in on a third entry for this server.
+  test('changes a password through the same UI as the browser, and stays signed in, with no password or token in the renderer or the log', async () => {
+    const changed = 'smoke-changed-password-canary-9904';
+    await page.getByRole('button', { name: 'Servers' }).click();
+    await page.getByLabel('Server address').fill(server.origin);
+    await page.getByRole('button', { name: 'Continue' }).click();
+    page = await livePage(browser, page);
+    await page.getByLabel('Name', { exact: true }).fill(server.other.name);
+    await page.getByLabel('Password', { exact: true }).fill(server.other.password);
+    await page.getByRole('button', { name: 'Sign in', exact: true }).click();
+    await expect(page.getByRole('button', { name: 'Settings' })).toBeVisible();
+    await page.getByRole('button', { name: 'Settings' }).click();
+    await page.getByRole('button', { name: 'Password', exact: true }).click();
+    const form = page.getByRole('form', { name: 'Change your password' });
+    await form.getByLabel('Current password').fill(server.other.password);
+    await form.getByLabel('New password').fill(changed);
+    await form.getByLabel('Type it again').fill(changed);
+    await form.getByRole('button', { name: 'Change password' }).click();
+    await expect(page.getByText('Your password is changed.')).toBeVisible();
+    // Still signed in, as main's rotated bearer.
+    expect(await invoke(page, 'restore')).toMatchObject({ ok: true, who: { name: server.other.name } });
+    const channels = (await invoke(page, 'request', { operation: 'listChannels' })) as { kind: string; status: number };
+    expect(channels).toMatchObject({ kind: 'reply', status: 200 });
+    // The server took the new password, and the old token is no longer good.
+    const login = (password: string) =>
+      fetch(`${server.origin}/v1/login`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: server.other.name, password }) });
+    expect((await login(changed)).status).toBe(200);
+    expect((await login(server.other.password)).status).toBe(401);
+    expect((await server.api(server.other.token, 'GET', '/v1/whoami')).status).toBe(401);
+    // The renderer, its heap and main's log hold neither password nor a token.
+    const seen = await renderer(page);
+    for (const secret of [changed, server.other.password]) {
+      expect(seen).not.toContain(secret);
+      expect(app.output()).not.toContain(secret);
+    }
+    expect(seen).not.toMatch(TOKEN_SHAPE);
+    expect(app.output()).not.toMatch(TOKEN_SHAPE);
+    for (let scan = 0; scan < 2; scan++) expect(await heap(page)).not.toMatch(TOKEN_SHAPE);
+    // The bridge answers an extra key or a wrong type with a refusal.
+    expect(await invoke(page, 'replaceCredential', { operation: 'changePassword', body: { current: 'x', password: 'y' }, token: 'conch_x' })).toBe('rejected: refused');
+    expect(await invoke(page, 'replaceCredential', { operation: 'changePassword', body: { current: 1, password: 'y' } })).toBe('rejected: refused');
+    expect(await invoke(page, 'replaceCredential', { operation: 'login', body: { name: 'a', password: 'b' } })).toBe('rejected: refused');
   });
 });
 
