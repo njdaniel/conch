@@ -75,6 +75,8 @@ var principalReads = []principalRead{
 	// #1714: compares credentials' generations with their principal's, to end
 	// the registrations of dead credentials; reads no name and serves no one.
 	{"store/push_registrations.go", "endGenerationDeadPushTx", 1, readOwnOrInternal},
+	// #1713: the sweep compares a credential's generation with its principal's; never served.
+	{"store/notifications.go", "sweepNotificationPreferencesTx", 1, readOwnOrInternal},
 	// #1202: managers on the ?scope=all listing, for holders of manage_channels.
 	{"store/channels_self.go", "Store.channelDirectoryAll", 1, readOperatorOrMaker},
 	// #1150: the last-member count, never served to anyone.

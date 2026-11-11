@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -202,6 +203,10 @@ func TestRevocationEntryPointsEndNotifications(t *testing.T) {
 			_, err := w.s.DisablePrincipal(ctx, "principal:test", w.human.ID)
 			return err
 		}, true},
+		{"restore invalidates every credential without revoking one", func(t *testing.T, w world) error {
+			_, err := w.s.InvalidateRestored(ctx, time.Now())
+			return err
+		}, true},
 		{"bootstrap revokes every live credential", func(t *testing.T, w world) error {
 			_, err := w.s.BootstrapOperatorWith(ctx, "root", BootstrapOptions{})
 			return err
@@ -279,6 +284,19 @@ func TestSweepRemovesPreferencesOfDeadCredentials(t *testing.T) {
 			t.Errorf("%s: %d rows, want %d", c.name, n, c.rows)
 		}
 	}
+	// A generation-dead credential (not revoked: its principal's generation
+	// moved on) loses its row at the next sweep.
+	if _, err := s.db.Exec("UPDATE principals SET auth_generation = auth_generation + 1 WHERE id = ?", human.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.SweepSessions(ctx, now, time.Minute, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []int64{live, idleLive} {
+		if n := prefsRows(t, s, id); n != 0 {
+			t.Errorf("generation-dead credential %d kept %d rows", id, n)
+		}
+	}
 	// After it: the expired one goes too, and the rest stay.
 	if _, err := s.SweepSessions(ctx, now.Add(2*time.Hour), time.Minute, time.Hour); err != nil {
 		t.Fatal(err)
@@ -286,10 +304,14 @@ func TestSweepRemovesPreferencesOfDeadCredentials(t *testing.T) {
 	if n := prefsRows(t, s, expired.ID); n != 0 {
 		t.Errorf("expired credential kept %d rows", n)
 	}
-	if n := prefsRows(t, s, live); n != 1 {
-		t.Errorf("a credential with no bound has %d rows, want 1", n)
+	if n := prefsRows(t, s, live); n != 0 {
+		t.Errorf("a generation-dead credential has %d rows, want 0", n)
 	}
 }
+
+// revokesCredentialSQL matches a statement that sets credentials.revoked_at,
+// whatever its spelling: case, line breaks, spacing, other columns set first.
+var revokesCredentialSQL = regexp.MustCompile(`(?is)update\s+credentials\s+set\b.*?\brevoked_at\s*=`)
 
 // TestEveryCredentialRevocationEndsItsNotifications is the structural half of
 // "preferences die with the credential": every function in this package that
@@ -324,7 +346,7 @@ func TestEveryCredentialRevocationEndsItsNotifications(t *testing.T) {
 			ast.Inspect(fn.Body, func(n ast.Node) bool {
 				switch x := n.(type) {
 				case *ast.BasicLit:
-					if x.Kind == token.STRING && strings.Contains(strings.ToLower(x.Value), "update credentials set revoked_at") {
+					if x.Kind == token.STRING && revokesCredentialSQL.MatchString(x.Value) {
 						revokes = true
 					}
 				case *ast.CallExpr:
@@ -950,4 +972,61 @@ func TestPendingNotificationsNamesAndText(t *testing.T) {
 			t.Error("a removed message is in the feed")
 		}
 	})
+}
+
+// Where the page is full, or the scan bound is reached, with only hidden
+// messages after: more is false and the cursor is on the last visible
+// candidate, byte for byte as without the hidden ones. A hidden message never
+// makes more true and never moves the cursor.
+func TestPendingNotificationsHiddenAfterAFullPageOrTheBound(t *testing.T) {
+	ctx := context.Background()
+	tests := []struct {
+		name    string
+		policy  schema.NotificationPolicy
+		visible int
+		hidden  int
+	}{
+		{"a full page, then hidden messages", schema.NotificationPolicyAll, schema.MaxPendingNotificationsPage, 50},
+		{"the scan bound, then hidden messages", schema.NotificationPolicyMentions, PendingNotificationScanBound, 50},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			world := func(withHidden bool) (*feedFixture, string) {
+				f := newFeedFixture(t)
+				f.policy(t, tt.policy, true)
+				bulkInsert(t, f.s, f.ch.ID, f.frank.ID, tt.visible, "chatter")
+				if withHidden {
+					secret, err := f.s.CreateChannel(ctx, "secret")
+					if err != nil {
+						t.Fatal(err)
+					}
+					if _, err := f.s.AddChannelMember(ctx, "system", secret.ID, f.erin.ID, 0); err != nil {
+						t.Fatal(err)
+					}
+					bulkInsert(t, f.s, secret.ID, f.erin.ID, tt.hidden, "hidden @dave")
+					for range 3 {
+						f.whisper(t, f.erin, "whisper @dave", f.frank)
+					}
+				}
+				raw, err := json.Marshal(f.feed(t, 0))
+				if err != nil {
+					t.Fatal(err)
+				}
+				return f, string(raw)
+			}
+			_, with := world(true)
+			f, without := world(false)
+			if with != without {
+				t.Errorf("with hidden messages:    %.300s\nwithout hidden messages: %.300s", with, without)
+			}
+			page := f.feed(t, 0)
+			var last int64
+			if err := f.s.db.QueryRow("SELECT MAX(id) FROM messages").Scan(&last); err != nil {
+				t.Fatal(err)
+			}
+			if page.More || page.Cursor != last {
+				t.Errorf("more = %v, cursor = %d; want false and the last visible candidate %d", page.More, page.Cursor, last)
+			}
+		})
+	}
 }

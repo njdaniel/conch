@@ -83,6 +83,15 @@ type Status struct {
 	PTT           schema.VoiceControlPTT
 	PTTProblem    schema.VoiceControlPTTProblem
 	HelperVersion string
+	// Protocol is the schema name the session speaks (schema.VoiceControlSchemaV1
+	// or V2), chosen at the hello; "" until a hello has been read. Playback
+	// and TalkMode are v2's: they are "" in a v1 session, where the helper
+	// cannot say.
+	Protocol string
+	// Playback is the state of the speakers' stream, as of the last v2 state.
+	Playback schema.VoiceControlPlayback
+	// TalkMode is the talk mode in force, as of the last v2 state.
+	TalkMode schema.VoiceControlTalkMode
 }
 
 // clone copies s, so that what a caller holds never shares the supervisor's
@@ -112,6 +121,16 @@ func fromState(gen uint64, channel, helperVersion string, st *schema.VoiceContro
 		out.RetryIn = time.Duration(*st.RetryInMS) * time.Millisecond
 	}
 	out.Retryable = out.Phase == PhaseFailed && Retryable(out.Reason)
+	return out
+}
+
+// fromStateV2 is the status a v2 helper's state snapshot says: fromState's
+// fields, and the playback and talk mode only v2 reports.
+func fromStateV2(gen uint64, channel, helperVersion string, st *schema.VoiceControlStateV2) Status {
+	out := fromState(gen, channel, helperVersion, stateV1Of(st))
+	out.Protocol = schema.VoiceControlSchemaV2
+	out.Playback = st.Playback
+	out.TalkMode = st.TalkMode
 	return out
 }
 

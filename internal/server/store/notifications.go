@@ -162,24 +162,22 @@ func tableExistsTx(ctx context.Context, tx execer, name string) (bool, error) {
 }
 
 // sweepNotificationPreferencesTx deletes the preferences of credentials that
-// are no longer usable though nothing revoked them: expired, or idle past
-// their bound. resolve.go refuses such a credential, and nothing else would
-// ever remove its row. It returns how many it removed.
-func sweepNotificationPreferencesTx(ctx context.Context, tx execer, now time.Time) (int, error) {
-	res, err := tx.ExecContext(ctx,
+// are no longer usable though nothing revoked them: expired, idle past
+// their bound, or generation-dead (its auth_generation is not its principal's
+// now, as after InvalidateRestored, which bumps every principal without
+// setting revoked_at; resolve.go refuses such a credential),
+// and nothing else would ever remove its row.
+func sweepNotificationPreferencesTx(ctx context.Context, tx execer, now time.Time) error {
+	if _, err := tx.ExecContext(ctx,
 		`DELETE FROM notification_preferences WHERE credential_id IN (
 		     SELECT id FROM credentials
 		     WHERE (expires_at IS NOT NULL AND expires_at <= ?1)
-		        OR (idle_ms IS NOT NULL AND COALESCE(last_used_at, created_at) + idle_ms <= ?1))`,
-		now.UnixMilli())
-	if err != nil {
-		return 0, fmt.Errorf("store: sweep notification preferences: %w", err)
+		        OR (idle_ms IS NOT NULL AND COALESCE(last_used_at, created_at) + idle_ms <= ?1)
+		        OR auth_generation <> (SELECT p.auth_generation FROM principals p WHERE p.id = credentials.principal_id))`,
+		now.UnixMilli()); err != nil {
+		return fmt.Errorf("store: sweep notification preferences: %w", err)
 	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return 0, fmt.Errorf("store: sweep notification preferences: %w", err)
-	}
-	return int(n), nil
+	return nil
 }
 
 // notificationText is the text a summary carries under preview (§6.3): runs

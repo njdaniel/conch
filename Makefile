@@ -240,10 +240,13 @@ schema-compat:
 # The web client's wire types are generated from pkg/schema by
 # `go generate ./pkg/schema` (issue #348); this fails when the committed
 # web/src/schema/generated*.ts differ from what that writes. Go only, no Node.
-# The script's own test runs first.
+# The script's own test runs first. The Android spike's verbatim copy of
+# those files is checked against them too (issue #1719).
 schema-ts:
 	./scripts/schema-ts-check-test.sh
 	./scripts/schema-ts-check.sh
+	./scripts/spike-schema-check-test.sh
+	./scripts/spike-schema-check.sh
 
 # The emoji catalog is generated from the vendored third_party/unicode/
 # emoji-test.txt by `go generate ./pkg/schema` (issue #953): the vendored file
