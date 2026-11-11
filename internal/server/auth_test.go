@@ -333,6 +333,12 @@ var routeExpectations = map[string]routeExpectation{
 	// 0 writes nothing.
 	"GET /v1/read-state":                    {classAuth, "/v1/read-state", "", 200},
 	"PUT /v1/channels/{channel}/read-state": {classAuth, "/v1/channels/general/read-state", `{"last_read_id":0}`, 200},
+	// Notification preferences and the pending feed (issue #1713): people
+	// only, so an agent gets 403 on all three and AuthOff 400
+	// read_state_require_auth (both special-cased below).
+	"GET /v1/notifications/preferences": {classAuth, "/v1/notifications/preferences", "", 200},
+	"PUT /v1/notifications/preferences": {classAuth, "/v1/notifications/preferences", `{"policy":"off","muted":[]}`, 200},
+	"GET /v1/notifications/pending":     {classAuth, "/v1/notifications/pending", "", 200},
 	// Reactions (issue #765): message 9999 does not exist, so an authorized
 	// caller gets message_not_found; an agent is refused only at the two
 	// moderation routes (humans only), and AuthOff gets 400
@@ -713,7 +719,7 @@ func TestRoleMatrix(t *testing.T) {
 			}
 			// Read state is for people (issue #351): an agent is refused before
 			// any channel is looked at.
-			if strings.HasSuffix(rt.pattern, "/read-state") {
+			if strings.HasSuffix(rt.pattern, "/read-state") || strings.Contains(rt.pattern, "/v1/notifications/") {
 				agentWant = http.StatusForbidden
 			}
 			// The moderation routes of reactions (issue #765) administer a
@@ -807,8 +813,8 @@ func TestAuthOffUnchanged(t *testing.T) {
 				if strings.Contains(rt.pattern, "/v1/sessions") || strings.Contains(rt.pattern, "/v1/runs") || strings.Contains(rt.pattern, "/v1/interventions") {
 					want = http.StatusBadRequest // sessions_require_auth: a session, and so a run, is bound to a credential
 				}
-				if strings.HasSuffix(rt.pattern, "/read-state") {
-					want = http.StatusBadRequest // read_state_require_auth: a mark belongs to a principal
+				if strings.HasSuffix(rt.pattern, "/read-state") || strings.Contains(rt.pattern, "/v1/notifications/") {
+					want = http.StatusBadRequest // read_state_require_auth: a mark, and notification preferences, belong to a principal
 				}
 				if isReactionRoute(rt.pattern) {
 					want = http.StatusBadRequest // reactions_require_auth: a reaction belongs to a principal

@@ -264,6 +264,10 @@ type Server struct {
 	// channel (channel_write_limit.go), in memory only; its clock is now.
 	// Tests replace it with setChannelWriteLimit before serving.
 	channelWriteLimits *channelWriteLimiter
+	// notificationLimits bounds the notification routes
+	// (notification_limits.go), in memory only; its clock is now. Tests
+	// replace it with setNotificationLimits before serving.
+	notificationLimits *notificationLimiter
 	// messageEditLimits is the people's message edit limit (message_edit.go),
 	// in memory only; its clock is now. Tests replace it with
 	// setMessageEditLimit before serving.
@@ -324,7 +328,7 @@ func New(cfg Config, st *store.Store) *Server {
 				"missing", strings.Join(missing, ", "), "not_sent", ntfyNotSent(missing))
 		}
 	}
-	s := &Server{cfg: cfg, store: st, hub: hub.New(), approvals: approvals.New(st, notifier), broadcaster: broadcaster, credRecheckInterval: defaultCredentialRecheckInterval, sessionSweepInterval: defaultSessionSweepInterval, now: time.Now, renameFile: os.Rename, inviteLimits: newInviteLimiter(inviteLimitsFor(cfg)), reportLimits: newReportLimiter(defaultReportLimit()), reactionLimits: newReactionLimiter(defaultReactionLimit()), channelWriteLimits: newChannelWriteLimiter(defaultChannelWriteLimit()),
+	s := &Server{cfg: cfg, store: st, hub: hub.New(), approvals: approvals.New(st, notifier), broadcaster: broadcaster, credRecheckInterval: defaultCredentialRecheckInterval, sessionSweepInterval: defaultSessionSweepInterval, now: time.Now, renameFile: os.Rename, inviteLimits: newInviteLimiter(inviteLimitsFor(cfg)), reportLimits: newReportLimiter(defaultReportLimit()), reactionLimits: newReactionLimiter(defaultReactionLimit()), channelWriteLimits: newChannelWriteLimiter(defaultChannelWriteLimit()), notificationLimits: newNotificationLimiter(defaultNotificationWriteLimit(), defaultNotificationReadLimit()),
 		passwords: newPasswords(), logins: newLoginLimiter(loginLimitsFor(cfg)), addressMAC: newAddressMACKey(),
 		setupLimits: newSetupLimiter(cfg), messageEditLimits: newMessageEditLimiter(defaultMessageEditLimit())}
 	// The server's name is a permanent name nobody may take (issue #760):

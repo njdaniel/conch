@@ -156,6 +156,11 @@ func (s *Store) InvalidateRestored(ctx context.Context, now time.Time) (RestoreR
 				return err
 			}
 		}
+		// Every credential is generation-dead now: its notification
+		// preferences go in this transaction (the sweep would also find them).
+		if err := sweepNotificationPreferencesTx(ctx, tx, now); err != nil {
+			return err
+		}
 		res, err := tx.ExecContext(ctx, "DELETE FROM setup_tokens")
 		if err != nil {
 			return fmt.Errorf("store: restore: delete setup tokens: %w", err)

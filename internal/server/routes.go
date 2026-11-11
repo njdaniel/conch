@@ -190,6 +190,13 @@ func (s *Server) routeTable() []route {
 		// The handler applies the content rules (message_removal.go).
 		rt("DELETE /v2/channels/{channel}/messages/{message_id}", accessChannelManager, hf(s.handleRemoveMessage)),
 		rt("GET /v1/read-state", accessAuthenticated, hf(s.handleListReadState)),
+		// Notification preferences and the pending feed (issue #1713): people
+		// with a full credential only. An agent is refused in the handler
+		// (human_required), a guest by membersOnly (guest_not_allowed). Not
+		// previewable, not in setupScopeRoutes, not in the admin catalog.
+		rt("GET /v1/notifications/preferences", accessAuthenticated, s.membersOnly(hf(s.handleGetNotificationPreferences))),
+		rt("PUT /v1/notifications/preferences", accessAuthenticated, s.membersOnly(hf(s.handlePutNotificationPreferences))),
+		rt("GET /v1/notifications/pending", accessAuthenticated, s.membersOnly(hf(s.handleListPendingNotifications))),
 		rt("PUT /v1/channels/{channel}/read-state", accessAuthenticated, hf(s.handlePutReadState)),
 		rt("PUT /v1/principals/{id}/manifest", accessPermission, hf(s.handlePutManifest)).needs(schema.PermManageMembers),
 		// Operators, or the agent the manifest belongs to (checked in the handler).
