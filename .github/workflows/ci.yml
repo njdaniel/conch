@@ -366,6 +366,11 @@ jobs:
       # Line tables, not full debug info, as the rust job builds.
       CARGO_PROFILE_DEV_DEBUG: line-tables-only
       CARGO_PROFILE_TEST_DEBUG: line-tables-only
+      # The prebuilt libwebrtc win-x64 is built against the static C runtime
+      # (/MT). Linking conch-voice (#1309) failed with LNK2038 and LNK2005
+      # against the dynamic one (/MD) that rustc and cc-rs default to; with
+      # crt-static both use /MT, as the LiveKit Rust SDK documents for Windows.
+      RUSTFLAGS: -C target-feature=+crt-static
     steps:
       - uses: actions/checkout@v4
 
