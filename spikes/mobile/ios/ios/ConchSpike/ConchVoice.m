@@ -6,6 +6,7 @@
 @interface RCT_EXTERN_MODULE (ConchVoice, RCTEventEmitter)
 
 RCT_EXTERN_METHOD(requestMicrophone : (RCTPromiseResolveBlock)resolve rejecter : (RCTPromiseRejectBlock)reject)
+RCT_EXTERN_METHOD(requestCamera : (RCTPromiseResolveBlock)resolve rejecter : (RCTPromiseRejectBlock)reject)
 RCT_EXTERN_METHOD(startSession : (RCTPromiseResolveBlock)resolve rejecter : (RCTPromiseRejectBlock)reject)
 RCT_EXTERN_METHOD(stopSession : (RCTPromiseResolveBlock)resolve rejecter : (RCTPromiseRejectBlock)reject)
 RCT_EXTERN_METHOD(routes : (RCTPromiseResolveBlock)resolve rejecter : (RCTPromiseRejectBlock)reject)

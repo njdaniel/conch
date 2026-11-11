@@ -9,7 +9,7 @@
 //   told 'whoami_401' or 'ticket_401' so the app tears media down before it
 //   shows signed out (logic/auth.ts).
 // - Nothing here persists: no storage, no file. A relaunch is signed out.
-import type { ApiFailure, TransmitAnswer, VoiceSessionResult } from '../logic/api';
+import type { ApiFailure, CameraClaimResult, TransmitAnswer, VoiceSessionResult } from '../logic/api';
 import { afterAuthSignal } from '../logic/auth';
 import type { AuthSignal, AuthStep } from '../logic/auth';
 import { authorization, build, type Built, type RequestName } from '../logic/requests';
@@ -29,6 +29,7 @@ import {
   listChannelsResponse,
   loginResponseV1,
   redeemSignInLinkResponseV1,
+  voiceCameraV1,
   voicePresenceV1,
   voiceSessionResponseV1,
   whoAmIResponseV1,
@@ -149,6 +150,21 @@ export class ApiClient {
       return reply.failure === 'network' ? 'failed' : reply.status !== undefined && reply.status >= 500 ? 'failed' : reply.status === 429 ? 'rate_limited' : 'no_session';
     }
     return 'ok';
+  }
+
+  // claimCamera claims the camera: without startedAt it starts a claim (the
+  // camera button alone); with it, it names the claim it continues. Only
+  // `started_at` is ever sent as a query: never `participant=`.
+  async claimCamera(channel: string, startedAt?: string): Promise<CameraClaimResult> {
+    const reply = await this.send('claimCamera', { channel }, { started_at: startedAt }, undefined, true, undefined, 'whoami_401');
+    if (!reply.ok) return reply;
+    return this.read(reply.value, voiceCameraV1);
+  }
+
+  // releaseCamera ends the claim whose started_at it names, and no other.
+  async releaseCamera(channel: string, startedAt: string): Promise<Result<null>> {
+    const reply = await this.send('stopCamera', { channel }, { started_at: startedAt }, undefined, true, undefined, 'whoami_401');
+    return reply.ok ? { ok: true, value: null } : reply;
   }
 
   // ---- internals

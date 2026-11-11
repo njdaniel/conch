@@ -1,12 +1,16 @@
 /// <reference types="node" />
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import type { CameraClaimResult } from '../src/logic/api';
+import type { CameraRoom, KeptCamera } from '../src/logic/camera';
+import type { CameraWants } from '../src/app/camera/policy';
 import { VoiceController, type NativePort, type RoomEvents, type RoomPort, type VoiceApi } from '../src/app/controller';
 import { appStateOf, deliver } from '../src/app/bridge';
 import type { InterruptionEvent, RouteChangeEvent } from '../src/logic/ios';
 import { defaultTail, phoneMax } from '../src/logic/gate';
 import { reportWait } from '../src/logic/mic';
 import type { VoicePresenceV1, VoiceSessionResponseV1, VoiceTransmitState } from '../src/logic/schema/generated';
+import { tapAgain } from '../src/app/camera/controls';
 import { FakeClock, settle } from './fakes';
 
 const me = 7;
@@ -25,9 +29,55 @@ function session(canPublish = true, url = 'x'): VoiceSessionResponseV1 {
   return { livekit_url: url, identity: `p${me}`, rooms: [{ room: 'r', token: 't', can_publish: canPublish, expires_at: '2026-11-05T10:00:15Z' }] };
 }
 
+const startedAt = '2026-11-05T10:00:00Z';
+
+class FakeCamera implements CameraRoom {
+  captured = false;
+  grantError: Error | null = null;
+  constructor(private readonly log: string[]) {}
+  captureCamera(_choice: string | null, profile?: string): Promise<void> {
+    this.log.push(`capture ${profile ?? ''}`);
+    this.captured = true;
+    return Promise.resolve();
+  }
+  awaitCameraGrant(): Promise<void> {
+    this.log.push('camera grant');
+    return this.grantError === null ? Promise.resolve() : Promise.reject(this.grantError);
+  }
+  publishCamera(): Promise<void> {
+    this.log.push('camera publish');
+    return Promise.resolve();
+  }
+  stopCamera(): Promise<void> {
+    this.log.push('camera stop');
+    this.captured = false;
+    return Promise.resolve();
+  }
+  keepCamera(): KeptCamera | null {
+    this.log.push('camera keep');
+    return null;
+  }
+  adoptCamera(): void {
+    this.log.push('camera adopt');
+  }
+  cameraInUse(): string | null {
+    return this.captured ? 'front' : null;
+  }
+  switchCamera(): Promise<void> {
+    return Promise.resolve();
+  }
+}
+
 class FakeRoom implements RoomPort {
   events: RoomEvents | null = null;
-  constructor(private readonly log: string[]) {}
+  readonly camera: FakeCamera;
+  wants: CameraWants[] = [];
+  constructor(private readonly log: string[]) {
+    this.camera = new FakeCamera(log);
+  }
+  watchCameras(wants: CameraWants): void {
+    this.wants.push(wants);
+  }
   connect(_url: string, _token: string, publish: boolean, events: RoomEvents): Promise<void> {
     this.events = events;
     this.log.push(`room connect publish=${publish}`);
@@ -52,6 +102,7 @@ interface Rig {
   log: string[];
   rooms: FakeRoom[];
   reports: VoiceTransmitState[];
+  claims: CameraClaimResult[];
 }
 
 function rig(
@@ -65,17 +116,32 @@ function rig(
     asked?: string[];
     livekitUrl?: string;
     held?: string[];
+    camera?: boolean;
+    cameraPeers?: number[];
+    prompt?: (clock: FakeClock, c: () => VoiceController) => Promise<boolean>;
   } = {},
 ): Rig {
   const clock = new FakeClock();
   const log: string[] = [];
   const rooms: FakeRoom[] = [];
   const reports: VoiceTransmitState[] = [];
+  const claims: CameraClaimResult[] = [];
+  let self: VoiceController | null = null;
   const api: VoiceApi = {
     presence: (channel) => {
       log.push('presence');
       options.asked?.push(channel);
-      return Promise.resolve({ ok: true, value: presence(options.idsByChannel?.[channel] ?? options.ids ?? []) } as const);
+      const value = presence(options.idsByChannel?.[channel] ?? options.ids ?? []);
+      const rooms = value.rooms.map((r) => ({ ...r, participants: r.participants.map((p) => ({ ...p, ...(options.cameraPeers?.includes(p.principal_id) === true ? { camera: true } : {}) })) }));
+      return Promise.resolve({ ok: true, value: { ...value, rooms } } as const);
+    },
+    claimCamera: (channel, named) => {
+      log.push(`claim ${channel} ${named ?? 'new'}`);
+      return Promise.resolve(claims.shift() ?? ({ ok: true, value: { principal_id: me, started_at: startedAt } } as const));
+    },
+    releaseCamera: (channel, named) => {
+      log.push(`release ${channel} ${named}`);
+      return Promise.resolve(null);
     },
     voiceSession: () => (log.push('session'), Promise.resolve({ ok: true, value: session(options.canPublish ?? true, options.livekitUrl) } as const)),
     reportTransmit: (_c, state) => {
@@ -86,6 +152,11 @@ function rig(
   };
   const native: NativePort = {
     ensurePermissions: () => (log.push('permissions'), Promise.resolve(options.mic ?? 'granted')),
+    ensureCameraPermission: () => {
+      log.push('camera permission');
+      if (options.prompt !== undefined) return options.prompt(clock, () => self as VoiceController);
+      return Promise.resolve(options.camera !== false);
+    },
     startSession: () => (log.push('observers start'), options.session === false ? Promise.reject(new Error('AVAudioSessionErrorCodeCannotStartPlaying')) : Promise.resolve()),
     stopSession: () => (log.push('observers stop'), Promise.resolve()),
   };
@@ -101,9 +172,11 @@ function rig(
     random: () => 0.5,
     me: () => me,
     log: (m) => log.push(`log ${m}`),
+    now: () => clock.now,
     hold: (...secrets) => options.held?.push(...secrets),
   });
-  return { c, clock, log, rooms, reports };
+  self = c;
+  return { c, clock, log, rooms, reports, claims };
 }
 
 const steps = (log: string[]) => log.filter((l) => !l.startsWith('log '));
@@ -575,4 +648,201 @@ test('returning with no interruption pending adds no note', async () => {
   r.c.appState('background');
   r.c.appState('active');
   assert.equal(r.c.state.note, null);
+});
+
+// ---- the camera (M5-D), ported from Android's M4-D controller tests with its
+// review fixes. iOS shows the camera permission as a system alert over the
+// app, which the lifecycle sees as AppState 'inactive'; so the prompt takes the
+// app out of the foreground before it answers.
+const promptAway = (answer: boolean) => (_clock: FakeClock, self: () => VoiceController): Promise<boolean> => {
+  self().appState('inactive');
+  return Promise.resolve(answer);
+};
+
+const captures = (log: string[]) => log.filter((l) => l.startsWith('capture')).length;
+
+test('camera: off on joining; no permission asked, no claim, no capture (M-C2)', async () => {
+  const r = rig();
+  await joined(r);
+  assert.equal(r.c.state.cameraOn, false);
+  assert.ok(!r.log.includes('camera permission'));
+  assert.equal(captures(r.log), 0);
+  assert.ok(!r.log.some((l) => l.startsWith('claim ')));
+});
+
+test('camera tap: the permission is asked at the tap, then the claim, the capture and the publish (M-C1, M-C7)', async () => {
+  const r = rig();
+  await joined(r);
+  await r.c.cameraTap();
+  await settle();
+  const order = steps(r.log);
+  assert.ok(order.indexOf('camera permission') < order.findIndex((l) => l.startsWith('capture')));
+  assert.equal(r.c.state.camera.kind, 'sending');
+  assert.equal(r.c.state.cameraOn, true);
+  await r.c.cameraTap(); // off
+  await settle();
+  assert.ok(r.log.includes(`release general ${startedAt}`));
+  assert.equal(r.c.state.cameraOn, false);
+});
+
+test('camera tap: permission denied leaves the camera off with a note and no claim (M-C7)', async () => {
+  const r = rig({ camera: false });
+  await joined(r);
+  await r.c.cameraTap();
+  await settle();
+  assert.equal(captures(r.log), 0);
+  assert.ok(!r.log.some((l) => l.startsWith('claim ')));
+  assert.equal(r.c.state.cameraOn, false);
+  assert.equal(r.c.state.camera.kind, 'failed');
+});
+
+test('camera tap: Listen only says why and does nothing', async () => {
+  const r = rig({ canPublish: false });
+  await joined(r);
+  await r.c.cameraTap();
+  assert.equal(captures(r.log), 0);
+  assert.ok(!r.log.includes('camera permission'));
+  assert.notEqual(r.c.state.cameraExtra, null);
+});
+
+test('camera: every lifecycle reason ends it, and nothing turns it back on (M-C3 to M-C6)', async () => {
+  const cases: { name: string; start: (c: VoiceController) => void; end: (c: VoiceController) => void }[] = [
+    { name: 'background', start: (c) => c.appState('background'), end: (c) => c.appState('active') },
+    { name: 'inactive', start: (c) => c.appState('inactive'), end: (c) => c.appState('active') },
+    { name: 'interruption', start: (c) => c.interruption({ type: 'began' }), end: (c) => c.interruption({ type: 'ended', shouldResume: true }) },
+  ];
+  for (const t of cases) {
+    const r = rig();
+    await joined(r);
+    await r.c.cameraTap();
+    await settle();
+    assert.equal(r.c.state.camera.kind, 'sending', t.name);
+    t.start(r.c);
+    await settle();
+    assert.equal(r.c.state.cameraOn, false, `${t.name}: stopped`);
+    assert.ok(r.log.includes('camera stop'), t.name);
+    assert.ok(r.log.includes(`release general ${startedAt}`), `${t.name}: the claim is released`);
+    const before = captures(r.log);
+    t.end(r.c);
+    await settle();
+    r.clock.advance(3000);
+    await settle();
+    assert.equal(captures(r.log), before, `${t.name}: nothing restarts on resume`);
+    assert.equal(r.c.state.cameraOn, false, t.name);
+  }
+});
+
+test('camera tap: a grant just before the app goes away starts nothing when timers were frozen across a long gap', async () => {
+  const r = rig({ prompt: promptAway(true) });
+  await joined(r);
+  const tap = r.c.cameraTap();
+  await settle();
+  // Suspended: React Native's timers are paused. A minute passes on the wall
+  // clock and no tick runs; then the app returns.
+  r.clock.now += 60_000;
+  r.c.appState('active');
+  r.clock.advance(100);
+  await tap;
+  await settle();
+  assert.equal(captures(r.log), 0, 'no capture on resume, with no new tap');
+  assert.equal(r.c.state.cameraExtra, tapAgain);
+  assert.equal(r.c.state.cameraOn, false);
+});
+
+test('camera tap: the foreground back within the wait starts the camera', async () => {
+  const r = rig({ prompt: promptAway(true) });
+  await joined(r);
+  const tap = r.c.cameraTap();
+  await settle();
+  r.clock.advance(300);
+  r.c.appState('active');
+  r.clock.advance(100);
+  await tap;
+  await settle();
+  assert.equal(captures(r.log), 1);
+});
+
+test('camera tap: a block that begins after the permission answer abandons the tap', async () => {
+  const r = rig({ prompt: promptAway(true) });
+  await joined(r);
+  const tap = r.c.cameraTap();
+  await settle();
+  r.c.interruption({ type: 'began' }); // a new reason, after the answer
+  r.c.appState('active');
+  r.c.interruption({ type: 'ended', shouldResume: true }); // every block has lifted again
+  r.clock.advance(100);
+  await tap;
+  await settle();
+  assert.equal(captures(r.log), 0);
+  assert.equal(r.c.state.cameraExtra, tapAgain);
+});
+
+test('camera tap: a tap in flight does not survive Leave', async () => {
+  const r = rig({ prompt: promptAway(true) });
+  await joined(r);
+  const tap = r.c.cameraTap();
+  await settle();
+  const leaving = r.c.leave();
+  r.clock.advance(2000);
+  await leaving;
+  r.c.appState('active');
+  r.clock.advance(300);
+  await tap;
+  await settle();
+  assert.equal(captures(r.log), 0);
+  assert.equal(r.c.state.cameraOn, false);
+  assert.equal(r.c.state.phase, 'idle');
+});
+
+test('Leave stops the camera and releases the claim before the room goes', async () => {
+  const r = rig();
+  await joined(r);
+  await r.c.cameraTap();
+  await settle();
+  await r.c.leave();
+  const order = r.log;
+  assert.ok(order.indexOf('camera stop') >= 0 && order.indexOf(`release general ${startedAt}`) >= 0);
+  assert.ok(order.indexOf(`release general ${startedAt}`) < order.indexOf('room disconnect'));
+});
+
+test('tear-down stops the capture first, then drops the room, then waits for the release', async () => {
+  const r = rig();
+  await joined(r);
+  await r.c.cameraTap();
+  await settle();
+  assert.equal(r.c.state.camera.kind, 'sending');
+  await r.c.tearDown();
+  const stop = r.log.indexOf('camera stop');
+  const drop = r.log.indexOf('room disconnect');
+  assert.ok(stop >= 0 && drop > stop, 'capture stopped before the room went');
+});
+
+test('a reconnect tells the room what to receive again', async () => {
+  const r = rig();
+  await joined(r);
+  const room = r.rooms[0];
+  assert.ok(room !== undefined);
+  const before = room.wants.length;
+  room.events?.onReconnecting();
+  room.events?.onReconnected();
+  assert.ok(room.wants.length >= before + 2);
+});
+
+test('receive: a camera is wanted only from a claim holder, while the Voice view is open and nothing blocks', async () => {
+  const r = rig({ ids: [3, 4], cameraPeers: [3] });
+  r.c.watch('general');
+  await r.c.join('general');
+  await settle();
+  const room = r.rooms[0];
+  assert.ok(room !== undefined);
+  const last = (): CameraWants => room.wants[room.wants.length - 1] ?? { viewing: false, shown: false, claimed: new Set() };
+  assert.equal(last().viewing, false, 'the view has not said it is open');
+  r.c.setViewing(true);
+  assert.deepEqual([...last().claimed], [3]);
+  assert.equal(last().viewing && last().shown, true);
+  r.c.appState('inactive');
+  assert.equal(last().shown, false, 'the app is away: nothing is received');
+  r.c.appState('active');
+  r.c.setViewing(false);
+  assert.equal(last().viewing, false, 'the view closed: every camera is let go');
 });

@@ -1,7 +1,9 @@
 // The native module's JavaScript side (ConchVoice.swift): the microphone
 // permission and the AVAudioSession interruption and route observers, as the NativePort of
 // controller.ts, and the event stream the lifecycle bridge reads. The
-// microphone permission is asked here, at Join, never at launch (M-P1, M-P2).
+// microphone permission is asked here, at Join, never at launch (M-P1), and the
+// camera permission at the first tap of the camera button, never at launch or
+// at Join (M-C7, M5-D).
 import { NativeEventEmitter, NativeModules } from 'react-native';
 import type { NativeEvent } from './bridge';
 import type { NativePort } from './controller';
@@ -9,6 +11,8 @@ import type { NativePort } from './controller';
 interface Raw {
   // 'granted' | 'denied' | 'undetermined' after asking if undetermined.
   requestMicrophone(): Promise<string>;
+  // The same answers for the camera (AVCaptureDevice, video).
+  requestCamera(): Promise<string>;
   startSession(): Promise<string>;
   stopSession(): Promise<void>;
   // The output port types now in use, e.g. ["Speaker"], never a device name.
@@ -20,6 +24,9 @@ const raw = NativeModules.ConchVoice as Raw & object;
 export const nativePort: NativePort = {
   async ensurePermissions() {
     return (await raw.requestMicrophone()) === 'granted' ? 'granted' : 'microphone_denied';
+  },
+  async ensureCameraPermission() {
+    return (await raw.requestCamera()) === 'granted';
   },
   async startSession() {
     await raw.startSession();

@@ -1,6 +1,6 @@
 # Conch iOS spike (#1393 M5-A, #1394 M5-B, #1395 M5-C)
 
-A bare React Native 0.88.1 app (no Expo) for the iOS real-device experiment, under [ADR-016](../../../docs/adr/ADR-016-mobile-app.md) and [the design's section 7.2](../../../docs/design/mobile-app.md). M5-A is the scaffold, M5-B the logic (`src/logic/`, unit tested), and M5-C (this slice) the app: sign-in, the channel list, Join, hold to talk, mute, deafen, open microphone, listen-only, diagnostics, and the native bridge for `AVAudioSession`. The camera is M5-D. It lives outside `make check` and `web/`.
+A bare React Native 0.88.1 app (no Expo) for the iOS real-device experiment, under [ADR-016](../../../docs/adr/ADR-016-mobile-app.md) and [the design's section 7.2](../../../docs/design/mobile-app.md). M5-A is the scaffold, M5-B the logic (`src/logic/`, unit tested), and M5-C the app: sign-in, the channel list, Join, hold to talk, mute, deafen, open microphone, listen-only, diagnostics, and the native bridge for `AVAudioSession`. M5-D (this slice) adds the camera (`src/app/camera/`). It lives outside `make check` and `web/`.
 
 **Status: nothing iOS-native has been built or run.** M5-C was written on Linux, where Swift, Xcode and CocoaPods do not exist: `ConchVoice.swift`, `ConchVoice.m`, the bridging header, the `AppDelegate`, the `project.pbxproj` edits and `Info.plist` are uncompiled. Only the TypeScript is type-checked and unit tested (`npm test`, `./check.sh`). The Xcode project, `Podfile` and `Info.plist` are the React Native 0.88.1 template (`@react-native-community/template@0.88.1`), renamed. `ios/Podfile.lock` and the Pod licence inventory are produced on the Mac by Nick, by hand (decisions of 2026-11-05 on #1110); `./check.sh` reports them "pending the Mac build".
 
@@ -40,7 +40,7 @@ Layout: `src/app/` is the app (`client.ts` the API client holding the bearer in 
 | `ConchVoice.swift` | the `ConchVoice` module: microphone permission (asked at Join), `AVAudioSession` interruption and route-change observers, the output port types; emits `ConchVoiceEvent` |
 | `ConchVoice.m` | the `RCT_EXTERN_MODULE` registration of the above |
 | `ConchSpike-Bridging-Header.h` | React's module headers for the Swift file (set as `SWIFT_OBJC_BRIDGING_HEADER` in the project) |
-| `Info.plist` | `UIBackgroundModes` `audio`, `NSMicrophoneUsageDescription`, `NSLocalNetworkUsageDescription`, ATS `NSAllowsLocalNetworking` |
+| `Info.plist` | `UIBackgroundModes` `audio`, `NSMicrophoneUsageDescription`, `NSCameraUsageDescription` (M5-D), `NSLocalNetworkUsageDescription`, ATS `NSAllowsLocalNetworking` |
 
 The module only observes the session; `@livekit/react-native` owns its category and activation. Events go `ConchVoice.swift` -> `native.ts` -> `bridge.ts` -> `VoiceController.interruption / routeChange` -> `logic/ios.ts` `IosAudioEvents` -> `Lifecycle` and `TransmitGate`. AppState `inactive` and `background` are lifecycle reasons of their own. The "should resume" option is recorded in `controller.audio.delivered` and read by no decision.
 
@@ -64,7 +64,7 @@ Then, from `spikes/mobile/ios/ios`, open `ConchSpike.xcworkspace` and build the 
 
 ### Device run (iPhone, free provisioning, as Mac step 6)
 
-Same stack, with the Linux machine's LAN address (the phone, the Mac and the Linux machine on one Wi-Fi; accept the Local Network prompt). Build Debug with Metro on the Mac (or Release to embed the bundle). Then the rows of `docs/reviews/mobile-ios-voice.md` for M5-C: M-F1 to M-F7, M-L1 to M-L9 (lock, switch away, 5 min silence; background audio keeps the room only if `UIBackgroundModes` `audio` is honoured), M-B1 to M-B3, M-I1 to M-I3 (an incoming call while in voice and while a press is held; Siri; an alarm; microphone revoked in Settings), M-N1 to M-N3, M-K1 to M-K3, M-R1, M-R4, M-S1 to M-S6, M-P1, M-P2, M-A1, M-A2. Record the model, iOS build, Xcode and macOS versions, and the Diagnostics "delivered" list for each interruption row. Camera rows M-C1 to M-C10 are M5-D.
+Same stack, with the Linux machine's LAN address (the phone, the Mac and the Linux machine on one Wi-Fi; accept the Local Network prompt). Build Debug with Metro on the Mac (or Release to embed the bundle). Then the rows of `docs/reviews/mobile-ios-voice.md` for M5-C: M-F1 to M-F7, M-L1 to M-L9 (lock, switch away, 5 min silence; background audio keeps the room only if `UIBackgroundModes` `audio` is honoured), M-B1 to M-B3, M-I1 to M-I3 (an incoming call while in voice and while a press is held; Siri; an alarm; microphone revoked in Settings), M-N1 to M-N3, M-K1 to M-K3, M-R1, M-R4, M-S1 to M-S6, M-P1, M-P2, M-A1, M-A2. Record the model, iOS build, Xcode and macOS versions, and the Diagnostics "delivered" list for each interruption row. Camera rows M-C1 to M-C10 are M5-D (below).
 
 ### Review fixes ported from the Android spike
 
@@ -81,6 +81,8 @@ The Android spike (#1109) was reviewed after this slice was first written, and t
 | A pasted sign-in link must name the typed server; a malformed escape is a refusal; changing the server forgets the bearer (858b0bb5) | Ported: `signInTarget`, `setServer`, the two words in `ui/SignIn.tsx`; tests in `test/client.test.ts` |
 | A sign-in whose `whoami` fails signs out, and the password and link fields are cleared after every attempt (cc5fab02) | Ported: `ui/SignIn.tsx` |
 | The LiveKit host and `host:port` are held by the diagnostics; compressed IPv6 and more host endings are redacted (cc5fab02) | Ported: `logic/diagnostics.ts`, `controller.ts` and `services.ts` (`hold`); tests in `test/redact.test.ts` and `test/controller.test.ts` |
+| The camera tap waits by the wall clock, not by timer ticks; a pending tap is abandoned when a lifecycle block begins after the permission answer, and on stop, loss, reset and Leave (9515c1f5) | Ported in M5-D (`camera/controls.ts`, `controller.ts` `lifecycleChanged`); the permission alert is AppState `inactive` on iOS, which the same code handles. Tests: the `camera tap:` cases in `test/controller.test.ts` |
+| Leave stops the camera again after dropping the room; tear-down stops capture before awaiting the release; the capture's "stopping" mark is per track; wanted cameras follow the joined channel and reconnects; `claimedIn` takes `VoiceParticipant` (9515c1f5) | Ported in M5-D (`controller.ts`, `camera/capture.ts`, `camera/policy.ts`); tests `Leave stops the camera...`, `tear-down stops the capture first...`, `a reconnect tells the room...`, `test/camera.policy.test.ts` |
 | The blocked-camera note names Android settings (9515c1f5) | Ported with iOS words ("iOS Settings"): `logic/camera.ts`, test in `test/camera.test.ts` |
 | The manifest drops `SYSTEM_ALERT_WINDOW` and the `mediaProjection` service; the receipt quotes the merged manifest (cc5fab02) | Counterpart: nothing is declared that the matrix does not need. The template's empty `NSLocationWhenInUseUsageDescription` is gone (M5-A); the Info.plist holds `UIBackgroundModes` `audio`, the microphone and local-network descriptions, and ATS local networking; no entitlements, no push, no `voip`. The Mac run should quote the *built* app's Info.plist and entitlements, as the Android receipt quotes the merged manifest |
 | Cleartext only in the debug build | Different: one Info.plist. `NSAllowsLocalNetworking` exempts local addresses (an IP literal, a `.local` name) and never a public host, which is narrower than Android's debug-wide cleartext. A release build would drop it (M6) |
@@ -88,6 +90,25 @@ The Android spike (#1109) was reviewed after this slice was first written, and t
 | Hardware Back, the lock broadcast and the `isLocked` check on return, the foreground service and its `stopSelf` finding | Not applicable: no hardware back on iOS; locking is AppState `inactive` then `background`, and `active` lifts them; there is no foreground service |
 
 Findings for M6 that carry over (recorded, not fixed here): React Native's JavaScript timers pause while the app is suspended, so the report retry, presence poll and the camera logic's bounded waits may wait for the app's return (M-L2 and M-L5 should watch for it, and M5-D's camera does not wait for an unpublish for this reason); `livekit_url` from the session grant is used as given, and a production app must require `wss:`; tiles name people "Person N" because presence carries ids only.
+
+## M5-D: the camera
+
+`src/app/camera/` is the Android M4-D camera (`spikes/mobile/android/src/app/camera/`, #1392) with its review fixes, under [ADR-015](../../../docs/adr/ADR-015-webcam-video.md) and #1110 point 5: the `use_camera` capability, the claim `POST /v1/channels/{channel}/voice/camera`, off on joining, started only by the person's tap.
+
+| File | Does |
+| --- | --- |
+| `capture.ts` | `LiveKitCamera`, the `CameraRoom` of `logic/camera.ts`: capture (640x360 at 24 fps, front camera first), the wait for the grant, the publish, the stop (the capture stops synchronously, before any unpublish is awaited) |
+| `controls.ts` | the button: the permission at the first tap only, the claim order, the wall-clock wait for the foreground, abandon on a new lifecycle reason |
+| `policy.ts` | which remote cameras to receive: only from a claim holder, only while the Voice view is open and shown |
+| `store.ts`, `Grid.tsx` | the received cameras as a store, and the grid and the camera button |
+
+Wiring: `controller.ts` (`cameraTap`, `setViewing`, `updateWants`; the lifecycle's camera is `camera.client`), `livekit.ts` (receive), `client.ts` (`claimCamera`, `releaseCamera`), `native.ts` and `ConchVoice.swift` (`requestCamera`, an `AVCaptureDevice` permission request only; capture is LiveKit's), `Info.plist` (`NSCameraUsageDescription`). No entitlement is added: no multitasking camera access, no push, no `voip`, no Associated Domains. No new npm dependency and no new pod.
+
+What the lifecycle does to it: background, `inactive` (which includes the permission alert, Control Center and a call banner) and an `AVAudioSession` interruption each stop the capture and release the claim naming its `started_at`, and nothing starts it again. The 1 s bar of #1110 is checked on a device: M-C3 to M-C5. iOS itself may interrupt capture in the background first (expected, from memory); the receipt records what it did, and whether the app had time to release the claim before suspension or the server's idle end did it.
+
+What cannot be run on Linux: everything under the camera. The Simulator has no camera (as remembered), so M-C1 to M-C10 are device rows. `./check.sh` and `npm test` cover the logic and the controller's use of it with fakes: `test/camera.test.ts`, `test/camera.policy.test.ts`, and the `camera` cases in `test/controller.test.ts`.
+
+Unverified on a device: that iOS reports AppState `inactive` for the camera permission alert, and when (the tap's wall-clock wait handles either order); whether `createLocalVideoTrack` with `facingMode: 'user'` opens the front camera on `@livekit/react-native-webrtc` 150.1.1; whether the stop inside 1 s holds when the app is suspended mid-publish.
 
 ## Checks
 

@@ -1,6 +1,8 @@
 // ConchVoice: the spike's one native module (#1395, M5-C; ADR-016 Decisions 5
 // and 10). It owns what only iOS can say and JavaScript cannot see:
-//  - the microphone permission, asked at Join and never at launch;
+//  - the microphone permission, asked at Join and never at launch, and (M5-D,
+//    #1396) the camera permission, asked at the first tap of the camera button
+//    and never at launch or at Join;
 //  - AVAudioSession's interruption notification (a call, Siri, an alarm,
 //    another app taking the session) and its route-change notification (a
 //    headset or Bluetooth device attached or gone), delivered to JavaScript as
@@ -52,6 +54,24 @@ final class ConchVoice: RCTEventEmitter {
         session.requestRecordPermission { granted in
           resolve(granted ? "granted" : "denied")
         }
+      }
+    }
+  }
+
+  // The camera permission, the same three answers. The prompt appears the
+  // first time only; a denial is changed in Settings, not by asking again.
+  // AVCaptureDevice only asks. Capture itself is LiveKit's (createLocalVideoTrack
+  // in src/app/camera/capture.ts), and nothing here starts a capture session.
+  @objc func requestCamera(
+    _ resolve: @escaping RCTPromiseResolveBlock,
+    rejecter reject: @escaping RCTPromiseRejectBlock
+  ) {
+    switch AVCaptureDevice.authorizationStatus(for: .video) {
+    case .authorized: resolve("granted")
+    case .denied, .restricted: resolve("denied")
+    default:
+      AVCaptureDevice.requestAccess(for: .video) { granted in
+        resolve(granted ? "granted" : "denied")
       }
     }
   }
