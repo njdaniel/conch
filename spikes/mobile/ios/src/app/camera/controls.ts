@@ -14,8 +14,16 @@
 //    AppState 'inactive' (a reason of its own); so after a grant the capture
 //    starts once the foreground is back (waitForeground), and if it does not
 //    come in time nothing starts and the person taps again, with the
-//    permission now held. (Unverified on a device: that iOS reports 'inactive'
-//    for this alert, and when. The wait handles either order.)
+//    permission now held. While the alert is up, the one 'inactive' it causes
+//    is expected; any other lifecycle reason that begins before the answer
+//    (background, an interruption, a second 'inactive') abandons the tap at
+//    once, so an Allow tapped minutes later, after a lock or a call, starts
+//    nothing. After the answer, any reason that begins abandons it too. The
+//    wall-clock wait measures from the answer, as Android's does (9515c1f5:
+//    the freeze that mattered was after the grant). If the alert's 'inactive'
+//    reaches JavaScript only after the answer (unverified on a device), the
+//    capture starts and the lifecycle stops it at once: it fails shut, and the
+//    person taps again.
 //    "In time" is wall-clock time: React Native pauses its JS timers in the
 //    background, so counting ticks would let a tap granted just before a call
 //    start the camera minutes later, on resume, with no new tap. The tap is
@@ -59,6 +67,9 @@ export class CameraControls {
   private readonly onChange: () => void;
   private note: string | null = null;
   private asking = false;
+  // The permission has been answered; the alert's 'inactive' has been seen.
+  private answered = false;
+  private alertSeen = false;
   // Counts the stops, losses and leaves; a tap in flight that sees it change
   // is abandoned.
   private cancels = 0;
@@ -97,7 +108,12 @@ export class CameraControls {
   // tap is the camera button. Off: ask for the permission if it is not held,
   // then start. On: stop. It is the only way the camera starts.
   async tap(channel: string, room: CameraRoom, listenOnly: boolean): Promise<void> {
-    if (this.asking) return;
+    // The button reads "Turn camera off" while a tap is pending: a tap now
+    // cancels it.
+    if (this.asking) {
+      this.cancelTap();
+      return;
+    }
     if (cameraOn(this.client.current)) {
       await this.client.stop('self');
       return;
@@ -108,6 +124,8 @@ export class CameraControls {
     }
     if (this.ports.blocked()) return;
     this.asking = true;
+    this.answered = false;
+    this.alertSeen = false;
     this.note = null;
     const gen = this.cancels;
     this.onChange();
@@ -127,6 +145,7 @@ export class CameraControls {
     }
     // The prompt's own leaving of the foreground began before the answer; a
     // block that begins after it is a new reason to stay off.
+    this.answered = true;
     const blocks = this.blocks;
     const foreground = await this.waitForeground(gen, blocks);
     if (gen !== this.cancels) return;
@@ -138,10 +157,24 @@ export class CameraControls {
     await this.client.start(channel, room, null, 'phone');
   }
 
-  // blockBegan is the controller saying a lifecycle reason has begun: a tap
-  // still waiting for the foreground is abandoned.
-  blockBegan(): void {
+  // blockBegan is the controller saying a lifecycle reason has begun. After the
+  // answer, a tap still waiting for the foreground is abandoned. Before it, the
+  // permission alert's own 'inactive' (the first, once) is expected; any other
+  // reason abandons the tap now.
+  blockBegan(reason: string): void {
     this.blocks++;
+    if (!this.asking || this.answered) return;
+    if (reason === 'inactive' && !this.alertSeen) {
+      this.alertSeen = true;
+      return;
+    }
+    this.cancelTap();
+  }
+
+  // abandonTap abandons a tap in flight: the connection is reconnecting, so
+  // nothing may start on it.
+  abandonTap(): void {
+    this.cancelTap();
   }
 
   // cancelTap abandons a tap in flight (the permission prompt, or the wait
@@ -220,8 +253,12 @@ export class CameraControls {
   // reset forgets why the last camera ended, at a new join.
   reset(): void {
     this.cancelTap();
+    const hadNote = this.note !== null;
     this.note = null;
     this.client.reset();
+    // A note cleared while the camera state is unchanged still changes what
+    // the screen says (cameraExtra), so the controller is told.
+    if (hadNote) this.onChange();
   }
 }
 

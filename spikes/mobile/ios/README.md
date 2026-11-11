@@ -108,7 +108,7 @@ What the lifecycle does to it: background, `inactive` (which includes the permis
 
 What cannot be run on Linux: everything under the camera. The Simulator has no camera (as remembered), so M-C1 to M-C10 are device rows. `./check.sh` and `npm test` cover the logic and the controller's use of it with fakes: `test/camera.test.ts`, `test/camera.policy.test.ts`, and the `camera` cases in `test/controller.test.ts`.
 
-Unverified on a device: that iOS reports AppState `inactive` for the camera permission alert, and when (the tap's wall-clock wait handles either order); whether `createLocalVideoTrack` with `facingMode: 'user'` opens the front camera on `@livekit/react-native-webrtc` 150.1.1; whether the stop inside 1 s holds when the app is suspended mid-publish.
+Unverified on a device: that iOS reports AppState `inactive` for the camera permission alert, and when. The tap expects exactly one `inactive` while the alert is up; any other lifecycle reason before the answer (background, an interruption, a second `inactive`) abandons the tap at once, a button press while it is pending cancels it, and so does a reconnect. If the alert's `inactive` reaches JavaScript only after the answer, the capture may start and the lifecycle stops it at once (fail shut); the receipt records which order iOS used; whether `createLocalVideoTrack` with `facingMode: 'user'` opens the front camera on `@livekit/react-native-webrtc` 150.1.1; whether the stop inside 1 s holds when the app is suspended mid-publish.
 
 ## Checks
 

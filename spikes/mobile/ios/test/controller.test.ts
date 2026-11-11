@@ -118,6 +118,7 @@ function rig(
     held?: string[];
     camera?: boolean;
     cameraPeers?: number[];
+    cameraEnded?: { reason: 'operator'; started_at: string; ended_at: string };
     prompt?: (clock: FakeClock, c: () => VoiceController) => Promise<boolean>;
   } = {},
 ): Rig {
@@ -133,7 +134,7 @@ function rig(
       options.asked?.push(channel);
       const value = presence(options.idsByChannel?.[channel] ?? options.ids ?? []);
       const rooms = value.rooms.map((r) => ({ ...r, participants: r.participants.map((p) => ({ ...p, ...(options.cameraPeers?.includes(p.principal_id) === true ? { camera: true } : {}) })) }));
-      return Promise.resolve({ ok: true, value: { ...value, rooms } } as const);
+      return Promise.resolve({ ok: true, value: { ...value, rooms, ...(options.cameraEnded === undefined ? {} : { camera_ended: options.cameraEnded }) } } as const);
     },
     claimCamera: (channel, named) => {
       log.push(`claim ${channel} ${named ?? 'new'}`);
@@ -845,4 +846,104 @@ test('receive: a camera is wanted only from a claim holder, while the Voice view
   r.c.appState('active');
   r.c.setViewing(false);
   assert.equal(last().viewing, false, 'the view closed: every camera is let go');
+});
+
+test('the server ending the claim, told by presence, stops the camera through the controller', async () => {
+  const r = rig({ cameraEnded: { reason: 'operator', started_at: startedAt, ended_at: '2026-11-05T10:05:00Z' } });
+  r.c.watch('general');
+  await joined(r);
+  await r.c.cameraTap();
+  await settle();
+  assert.equal(r.c.state.camera.kind, 'sending');
+  r.clock.advance(3000); // the next presence read carries camera_ended
+  await settle();
+  assert.equal(r.c.state.cameraOn, false);
+  assert.ok(r.log.includes('camera stop'));
+});
+
+// ---- a tap waiting on the permission answer is abandoned (review of #1736).
+// The answer is held back by the test, so the tap is still inside permission()
+// when each of these happens; the alert's own 'inactive' has already come.
+function deferred(): { promise: Promise<boolean>; answer: (allowed: boolean) => void } {
+  let answer: (allowed: boolean) => void = () => undefined;
+  const promise = new Promise<boolean>((resolve) => {
+    answer = resolve;
+  });
+  return { promise, answer };
+}
+
+async function pendingTap() {
+  const d = deferred();
+  const r = rig({ prompt: () => d.promise });
+  await joined(r);
+  const tap = r.c.cameraTap();
+  await settle();
+  r.c.appState('inactive'); // the permission alert
+  return { r, d, tap };
+}
+
+test('camera tap: before the answer, each of these abandons it: no capture, no claim, even if Allow comes later', async () => {
+  const cases: { name: string; happen: (r: Rig) => Promise<void> | void }[] = [
+    { name: 'background', happen: (r) => r.c.appState('background') },
+    { name: 'a second inactive', happen: (r) => (r.c.appState('active'), r.c.appState('inactive')) },
+    { name: 'an interruption', happen: (r) => r.c.interruption({ type: 'began' }) },
+    { name: 'tear-down', happen: (r) => r.c.tearDown() },
+    { name: 'Leave', happen: async (r) => { const leaving = r.c.leave(); r.clock.advance(2000); await leaving; } },
+    { name: 'a lost connection', happen: (r) => r.rooms[0]?.events?.onDisconnected('lost') },
+    { name: 'reconnecting', happen: (r) => r.rooms[0]?.events?.onReconnecting() },
+    { name: 'a tap on the button, which reads Turn camera off', happen: (r) => r.c.cameraTap() },
+  ];
+  for (const c of cases) {
+    const { r, d, tap } = await pendingTap();
+    await c.happen(r);
+    await settle();
+    r.clock.now += 120_000; // the Allow comes minutes later
+    d.answer(true);
+    r.c.appState('active');
+    r.clock.advance(3000);
+    await tap;
+    await settle();
+    assert.equal(captures(r.log), 0, `${c.name}: no capture`);
+    assert.ok(!r.log.some((l) => l.startsWith('claim ')), `${c.name}: no claim`);
+    assert.equal(r.c.state.cameraOn, false, c.name);
+  }
+});
+
+test('camera tap: the alert alone (one inactive, then the answer) still starts the camera', async () => {
+  const { r, d, tap } = await pendingTap();
+  d.answer(true);
+  r.c.appState('active');
+  r.clock.advance(100);
+  await tap;
+  await settle();
+  assert.equal(captures(r.log), 1);
+});
+
+test('camera tap: the alert reaching JavaScript only after the answer fails shut: whatever started is stopped at once and the camera is off', async () => {
+  const d = deferred();
+  const r = rig({ prompt: () => d.promise });
+  await joined(r);
+  const tap = r.c.cameraTap();
+  await settle();
+  d.answer(true);
+  await settle(); // nothing blocks yet: the capture may begin
+  r.c.appState('inactive'); // the late alert event: the lifecycle stops it
+  await settle();
+  r.c.appState('active');
+  r.clock.advance(3000);
+  await tap;
+  await settle();
+  assert.equal(r.c.state.cameraOn, false);
+  assert.ok(captures(r.log) === 0 || r.log.includes('camera stop'), 'any capture that began was stopped');
+  assert.equal(r.c.state.camera.kind === 'sending', false);
+});
+
+test('camera tap: Leave then join clears a stale note (reset tells the screen)', async () => {
+  const r = rig({ canPublish: false });
+  await joined(r);
+  await r.c.cameraTap();
+  assert.notEqual(r.c.state.cameraExtra, null, 'Listen only says why');
+  await r.c.leave();
+  await r.c.join('general');
+  assert.equal(r.c.state.cameraExtra, null, 'the old note does not carry into the next join');
 });

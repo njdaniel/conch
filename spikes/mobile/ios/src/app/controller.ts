@@ -346,6 +346,8 @@ export class VoiceController {
         this.set({ phase: 'reconnecting' });
         this.applyBlock();
         this.updateWants();
+        // A tap still waiting must not start a capture on this connection.
+        this.camera.abandonTap();
       },
       onReconnected: () => {
         if (mine !== this.attempt) return;
@@ -647,7 +649,7 @@ export class VoiceController {
   // when one has begun (a camera tap waiting for the foreground gives up).
   private lifecycleChanged(before: readonly string[]): void {
     const now = this.lifecycle.reasons;
-    if (now.some((r) => !before.includes(r))) this.camera.blockBegan();
+    for (const r of now) if (!before.includes(r)) this.camera.blockBegan(r);
     this.set({ blocked: now });
     this.updateWants();
   }
