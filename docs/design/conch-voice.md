@@ -109,7 +109,7 @@ The client follows voice-control-plane.md §4: it asks `conchd` for a session im
 |---|---|
 | The room was deleted (a rotation, voice-control-plane.md §5) | Ask for a new session at once and join the channel's new room. If the user is still entitled this is a gap of about a second; if not, the request is refused and the client stops. |
 | The same identity joined from elsewhere | Stop, saying so. Reconnecting would only displace the other device in turn. |
-| `conchd`'s presence socket closes 1008 with the text `voice_removed` (a moderator removed this person from voice only, #850, #1409) | Stop, saying so. Still a member, so `conchd` would grant the next session; joining again is the person's own decision. The presence socket is not reopened. |
+| `conchd`'s presence socket closes 1008 with the text `voice_removed` (a moderator removed this person from voice only, #850, #1409) | Stop, saying so. Still a member, so `conchd` would grant the next session; joining again is the person's own decision. The presence socket is not reopened. A managed owner speaking `conch.voice_control.v2` is told `failed` with the reason `voice_removed` (#1457, tui-voice.md §20.4); a v1 owner is told `internal_error`, as before. |
 | `conchd` refuses the session: not signed in (401), not a member or no such channel (404), not a person (403), voice needs auth (400), voice not configured (503 `voice_not_configured`) | Stop with one line naming the reason and a nonzero exit. |
 | `conchd` or LiveKit unreachable, `voice_unavailable`, the connection lost, the server shutting down | Retry: wait 1 s, doubling to 30 s, with jitter; the wait resets after 30 s connected. |
 

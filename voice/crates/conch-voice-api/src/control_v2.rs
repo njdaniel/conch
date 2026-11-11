@@ -903,7 +903,7 @@ mod tests {
         "command-set-talk-mode.json",
     ];
 
-    const EVENTS: [&str; 14] = [
+    const EVENTS: [&str; 15] = [
         "event-ack.json",
         "event-ack-refused.json",
         "event-protocol-error.json",
@@ -918,6 +918,8 @@ mod tests {
         "event-state-open-key-device-lost.json",
         "event-state-open-max-transmit.json",
         "event-state-stopped.json",
+        // Issue #1457: failed because a moderator removed the person from voice.
+        "event-state-failed-voice-removed.json",
     ];
 
     /// The hello, which is v1's and read by v1's reader; `control.rs` writes it.

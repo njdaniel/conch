@@ -1831,6 +1831,7 @@ export type VoiceControlReason =
   | 'not_a_member'
   | 'voice_not_configured'
   | 'duplicate_identity'
+  | 'voice_removed'
   | 'audio_unavailable'
   | 'start_timeout'
   | 'protocol_error'
@@ -1859,6 +1860,7 @@ export const voiceControlReason = vocab<VoiceControlReason>({
   not_a_member: true,
   voice_not_configured: true,
   duplicate_identity: true,
+  voice_removed: true,
   audio_unavailable: true,
   start_timeout: true,
   protocol_error: true,

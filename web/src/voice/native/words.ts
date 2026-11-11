@@ -59,6 +59,9 @@ export const reasonWords: Readonly<Record<VoiceControlReason, string>> = {
   not_a_member: 'you are not a member of this channel',
   voice_not_configured: 'voice is not set up on this server',
   duplicate_identity: 'you are already in this call elsewhere',
+  // A moderator's voice kick (issue #1457): the browser client's own words for
+  // it (removedFromVoice in useVoice.ts), in this table's lower case.
+  voice_removed: 'you were removed from voice',
   audio_unavailable: 'no audio system is available',
   start_timeout: 'the voice helper did not start in time',
   protocol_error: 'the voice helper misbehaved',

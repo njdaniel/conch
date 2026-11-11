@@ -368,6 +368,8 @@ describe('state', () => {
       [{ status: 'unavailable', reason: 'runtime-dir-unset' }, { status: 'unavailable', retryable: false }],
       [{ status: 'ended', generation: 1, helper: helper({ phase: 'failed', reason: 'server_unreachable' }) }, { status: 'ended', problem: 'server_unreachable', retryable: true }],
       [{ status: 'ended', generation: 1, helper: helper({ phase: 'failed', reason: 'identity_mismatch' }) }, { status: 'ended', retryable: false }],
+      // Issue #1457: a voice kick is named, and is Join's to undo, not Retry's.
+      [{ status: 'ended', generation: 1, helper: helper({ phase: 'failed', reason: 'voice_removed' }) }, { status: 'ended', problem: 'voice_removed', retryable: false }],
     ];
     for (const [s, want] of cases) {
       fake.set(s);

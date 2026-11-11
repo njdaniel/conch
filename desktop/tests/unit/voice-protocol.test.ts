@@ -206,6 +206,30 @@ describe('the owner reads every conformance case as Go does', () => {
   });
 });
 
+// Issue #1457: voice_removed is a reason to fail, read in v2 and refused in v1.
+describe('voice_removed', () => {
+  const golden = readFixture<Record<string, unknown>>('voice-control-v2/event-state-failed-voice-removed.json');
+  const line = (doc: object): Buffer => Buffer.from(JSON.stringify(doc));
+
+  it('a v2 owner reads it with failed, and with stopping on the way there', () => {
+    const failed = parseEventV2(line(golden));
+    expect(failed).toMatchObject({ ok: true, event: { kind: 'state', state: { phase: 'failed', reason: 'voice_removed' } } });
+    expect(parseEventV2(line({ ...golden, phase: 'stopping' })).ok).toBe(true);
+  });
+
+  it('is not a reason to stop cleanly or to reconnect', () => {
+    expect(parseEventV2(line({ ...golden, phase: 'stopped' })).ok).toBe(false);
+    expect(parseEventV2(line({ ...golden, phase: 'reconnecting' })).ok).toBe(false);
+  });
+
+  it('a v1 state with it is refused, and the same state with a v1 reason is read', () => {
+    const v1 = { ...readFixture<Record<string, unknown>>('voice-control/event-state-stopped.json'), phase: 'failed' };
+    expect(parseEventV1(line({ ...v1, reason: 'internal_error' })).ok).toBe(true);
+    expect(parseEventV1(line({ ...v1, reason: 'voice_removed' })).ok).toBe(false);
+    expect(parseEventV1(line({ ...v1, phase: 'stopping', reason: 'voice_removed' })).ok).toBe(false);
+  });
+});
+
 describe('commands', () => {
   const start = { server: 'https://conch.example.org', channel: 'general', principalId: 7, muted: false, deafened: false };
 
