@@ -475,6 +475,9 @@ const FAIL_REASONS: readonly string[] = [
   'not_a_member',
   'voice_not_configured',
   'duplicate_identity',
+  // A moderator removed the person from voice only (issue #1457). v2's alone:
+  // stateProblem refuses it in a v1 state, as VoiceControlStateV1.Validate does.
+  'voice_removed',
   'audio_unavailable',
   'server_unreachable',
   'start_timeout',
@@ -482,6 +485,8 @@ const FAIL_REASONS: readonly string[] = [
   'internal_error',
 ];
 const ALL_REASONS: readonly string[] = [...RETRY_REASONS, ...STOP_REASONS, ...FAIL_REASONS];
+// The reasons v2 has and v1 does not: v1's are the ones it was published with.
+const V2_ONLY_REASONS: readonly string[] = ['voice_removed'];
 
 export function finalPhase(phase: VoiceControlPhase): boolean {
   return phase === 'stopped' || phase === 'failed';
@@ -579,6 +584,7 @@ function stateProblem(s: StateCore, v2?: { playback: VoiceControlPlayback; talk_
   }
   const blocked = blockedProblem(s.blocked);
   if (blocked !== null) return blocked;
+  if (v2 === undefined && s.reason !== undefined && V2_ONLY_REASONS.includes(s.reason)) return 'state reason is not a reason of v1';
   const reason = reasonProblem(s.phase, s.reason, s.retry_in_ms);
   if (reason !== null) return reason;
   const problem = s.ptt === 'unavailable' || s.ptt === 'lost';

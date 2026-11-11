@@ -143,6 +143,25 @@ describe('NativeVoicePanel', () => {
     s.unmount();
   });
 
+  // Issue #1457: a moderator's voice kick ends the helper with voice_removed.
+  // The strip says so, never an internal error, and Join is there to go back.
+  it('a voice kick says "removed from voice" and leaves Join on', async () => {
+    const fake = new Fake(running());
+    const s = strip(fake);
+    await frame(presence([1, '2026-01-01T00:00:00Z']));
+    fake.set({ status: 'ended', generation: 1, channel: 'general', retryable: false, problem: 'voice_removed', helper: helper({ phase: 'failed', reason: 'voice_removed', capture: 'off', blocked: ['not_connected'] }) });
+    await frame(presence());
+    expect(screen.getByText('voice ended: you were removed from voice')).toBeTruthy();
+    expect(screen.getByText(/Not in voice/)).toBeTruthy();
+    expect(screen.queryByText(/internal error/)).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Retry' })).toBeNull();
+    const join = screen.getByRole('button', { name: /Join voice in #general/ });
+    expect(join).toHaveProperty('disabled', false);
+    fireEvent.click(join);
+    await waitFor(() => { expect(fake.calls).toEqual(['join general muted=false deafened=false']); });
+    s.unmount();
+  });
+
   it('keeps its destination when the channel on screen changes while joined', async () => {
     const fake = new Fake(running());
     const s = strip(fake, 'general');

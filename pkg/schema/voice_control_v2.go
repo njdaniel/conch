@@ -330,7 +330,8 @@ type VoiceControlStateV2 struct {
 	Schema string                `json:"schema"`
 	Kind   VoiceControlEventKind `json:"kind"`
 	Seq    int64                 `json:"seq"`
-	// Phase, Reason and RetryInMS are as in VoiceControlStateV1.
+	// Phase, Reason and RetryInMS are as in VoiceControlStateV1, with one
+	// reason more: voice_removed, a reason to fail (issue #1457).
 	Phase     VoiceControlPhase  `json:"phase"`
 	Reason    VoiceControlReason `json:"reason,omitempty"`
 	RetryInMS *int64             `json:"retry_in_ms,omitempty"`

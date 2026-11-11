@@ -142,6 +142,8 @@ const RETRYABLE_PROBLEMS: ReadonlySet<string> = new Set([
 
 // The reasons a helper that ended on its own gives which a new attempt could
 // fix (§15's list, and the connection reasons a person would just retry).
+// voice_removed (issue #1457) is not one: a moderator put the person out, and
+// going back is theirs to choose with Join, which the ended view leaves on.
 const RETRYABLE_REASONS: ReadonlySet<string> = new Set([
   'duplicate_identity',
   'server_unreachable',

@@ -1085,19 +1085,25 @@ var reasonWords = map[string]string{
 	string(schema.VoiceControlReasonNotAMember):         "not a member of this channel",
 	string(schema.VoiceControlReasonVoiceNotConfigured): "this server has no voice",
 	string(schema.VoiceControlReasonDuplicateIdentity):  "this account joined voice elsewhere (a retry disconnects the other)",
-	string(schema.VoiceControlReasonAudioUnavailable):   "audio unavailable (PipeWire or the speakers)",
-	string(schema.VoiceControlReasonStartTimeout):       "conch-voice was not told to start in time",
-	string(schema.VoiceControlReasonProtocolError):      "conch-voice could not understand conch",
-	string(schema.VoiceControlReasonInternalError):      "conch-voice failed",
-	voicehelper.ReasonHelperNotFound:                    "conch-voice not found: install it beside conch or in PATH, or set CONCH_VOICE_HELPER",
-	voicehelper.ReasonHelperUntrusted:                   "conch-voice is not safe to run (see /voice status)",
-	voicehelper.ReasonHelperIncompatible:                "conch-voice does not match this conch: install the same release",
-	voicehelper.ReasonSpawnFailed:                       "conch-voice could not be started",
-	voicehelper.ReasonHelloTimeout:                      "conch-voice did not start in time",
-	voicehelper.ReasonAckTimeout:                        "conch-voice stopped answering",
-	voicehelper.ReasonBadEvent:                          "conch-voice broke the control protocol",
-	voicehelper.ReasonHelperExited:                      "conch-voice ended without saying why",
-	voicehelper.ReasonHelperCrashed:                     "conch-voice crashed",
+	// Issue #1457. A reason of conch.voice_control.v2 alone, and this TUI's
+	// sessions are v1 (voicehelper), where the helper still says
+	// internal_error; the removal itself is shown from the TUI's own presence
+	// socket, in these words (voiceRemoved in voice.go, issue #1456). Here so
+	// that the reason has words the day the TUI speaks v2.
+	string(schema.VoiceControlReasonVoiceRemoved):     "removed from voice; you are still a member and may join again",
+	string(schema.VoiceControlReasonAudioUnavailable): "audio unavailable (PipeWire or the speakers)",
+	string(schema.VoiceControlReasonStartTimeout):     "conch-voice was not told to start in time",
+	string(schema.VoiceControlReasonProtocolError):    "conch-voice could not understand conch",
+	string(schema.VoiceControlReasonInternalError):    "conch-voice failed",
+	voicehelper.ReasonHelperNotFound:                  "conch-voice not found: install it beside conch or in PATH, or set CONCH_VOICE_HELPER",
+	voicehelper.ReasonHelperUntrusted:                 "conch-voice is not safe to run (see /voice status)",
+	voicehelper.ReasonHelperIncompatible:              "conch-voice does not match this conch: install the same release",
+	voicehelper.ReasonSpawnFailed:                     "conch-voice could not be started",
+	voicehelper.ReasonHelloTimeout:                    "conch-voice did not start in time",
+	voicehelper.ReasonAckTimeout:                      "conch-voice stopped answering",
+	voicehelper.ReasonBadEvent:                        "conch-voice broke the control protocol",
+	voicehelper.ReasonHelperExited:                    "conch-voice ended without saying why",
+	voicehelper.ReasonHelperCrashed:                   "conch-voice crashed",
 }
 
 // voiceReasonWords is reason in words; one this TUI does not know is shown as

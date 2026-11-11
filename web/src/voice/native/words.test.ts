@@ -4,6 +4,7 @@ import type { VoiceControlBlock, VoiceControlPTT, VoiceControlPTTProblem, VoiceC
 import type { CompanionGrantError } from '../../platform/desktop/bridge';
 import type { ShareCause, ShareEnd, ShareState } from '../share';
 import { companionRefusals } from '../connection';
+import { removedFromVoice } from '../useVoice';
 import { blockWords, indicatorWords, pttProblemWords, pttWords, reasonWords, shareCauseWords, shareFailedWords, shareFullWords, shareNote, shareSourceClosedWords, shareUnavailableWords, statusWords, words } from './words';
 
 // Each Record is exhaustive at compile time; a vocabulary value added in Go
@@ -14,8 +15,8 @@ const reasons: Record<VoiceControlReason, true> = {
   room_deleted: true, participant_removed: true, connection_lost: true, reconnect_timed_out: true, connect_failed: true, server_unreachable: true,
   voice_unavailable: true, no_session: true, server_shutdown: true, left: true, owner_lost: true, signal: true, not_signed_in: true,
   identity_mismatch: true, bad_environment: true, bad_config: true, voice_requires_auth: true, not_a_person: true, voice_not_allowed: true,
-  not_a_member: true, voice_not_configured: true, duplicate_identity: true, audio_unavailable: true, start_timeout: true, protocol_error: true,
-  internal_error: true,
+  not_a_member: true, voice_not_configured: true, duplicate_identity: true, voice_removed: true, audio_unavailable: true, start_timeout: true,
+  protocol_error: true, internal_error: true,
 };
 const blocks: Record<VoiceControlBlock, true> = { not_connected: true, no_publish_grant: true, no_microphone: true, deafened: true, muted: true, key_device_lost: true, max_transmit: true };
 const ptts: Record<VoiceControlPTT, true> = { unknown: true, ready: true, not_configured: true, unavailable: true, lost: true };
@@ -67,6 +68,18 @@ describe('words', () => {
     const f = words(view({ status: 'failed', problem: 'connect_failed', retryable: true }));
     expect(f).toEqual({ text: 'voice failed: could not connect', retry: true });
     expect(words(view({ status: 'lost', problem: 'owner_lost' })).retry).toBe(false);
+  });
+
+  // Issue #1457: the helper ended because a moderator removed the person from
+  // voice. The strip says so in the browser client's words, never as an
+  // internal error, and offers no Retry: joining again is Join's.
+  it('says a voice kick as the browser client does, not as an internal error', () => {
+    const kicked = words(view({ status: 'ended', problem: 'voice_removed', helper: helper({ phase: 'failed', reason: 'voice_removed' }) }));
+    expect(kicked).toEqual({ text: 'voice ended: you were removed from voice', retry: false });
+    expect(kicked.text.toLowerCase()).toContain(removedFromVoice.toLowerCase());
+    expect(kicked.text).not.toContain(reasonWords.internal_error);
+    // While the helper is still on its way out, the same reason.
+    expect(words(view({ helper: helper({ phase: 'failed', reason: 'voice_removed' }) })).text).toBe('voice failed: you were removed from voice');
   });
 
   it('never shows a problem string that is not in the vocabulary', () => {

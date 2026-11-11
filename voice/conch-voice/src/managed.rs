@@ -403,11 +403,16 @@ impl Snapshot {
     /// The snapshot as an owner of `version` is shown it: a v1 state says nothing of the
     /// speakers or of the talk mode, so a change of either is no change to a v1 owner, and
     /// writes no state.
+    ///
+    /// Nor has v1 the reason `voice_removed` (issue #1457): a v1 owner is told
+    /// `internal_error`, as it was before v2 had the word, so a v1 session stays byte for
+    /// byte what it was.
     fn seen_in(&self, version: Version) -> Snapshot {
         let mut seen = self.clone();
         if version == Version::V1 {
             seen.playback = VoiceControlPlayback::Off;
             seen.talk_mode = VoiceControlTalkMode::PushToTalk;
+            seen.reason = seen.reason.map(VoiceControlReason::for_v1);
         }
         seen
     }
@@ -694,7 +699,9 @@ impl Owner {
     /// Tells the owner the final state, and gives it [`FINAL_STATE_LIMIT`] to be written.
     /// Nothing is written after it: this is the end of the owner.
     pub async fn finish(mut self, last: &Snapshot) {
-        self.events.state(last, Keep::Last);
+        // In the owner's version, as every state is: a v1 owner's last reason is one v1 has.
+        let last = last.seen_in(self.events.version);
+        self.events.state(&last, Keep::Last);
         if !self.events.flush(FINAL_STATE_LIMIT).await {
             log::warn!("managed: the final state was not read before leaving");
         }

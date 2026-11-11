@@ -1435,6 +1435,92 @@ async fn a_withheld_voice_is_named_to_the_owner_and_join_says_what_it_always_sai
     assert!(!written.contains("voice_not_allowed"), "{written}");
 }
 
+/// Issue #1457: conchd closes a kicked member's presence socket 1008 `voice_removed`
+/// (#1409), and the helper stops by its policy. A v2 owner is told why, in the protocol's
+/// own word, and never internal_error; a v1 owner, whose vocabulary is the one v1 was
+/// published with, is told internal_error as before, and never reads the new word. Either
+/// way the helper exits 1 and asks conchd for no second session.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn removed_from_voice_is_named_to_a_v2_owner_and_a_v1_owner_is_told_what_it_always_was() {
+    for v2 in [true, false] {
+        let mut rig = ManagedRig::start().await;
+        if v2 {
+            rig.send_start_v2();
+            rig.ready_v2().await;
+        } else {
+            rig.send_start();
+            rig.ready().await;
+        }
+        rig.until("the presence socket", |rig| {
+            rig.conchd.presence_sockets() == 1
+        })
+        .await;
+        rig.conchd.close_presence(1008, "voice_removed");
+        assert_eq!(rig.exit_code().await, 1, "v2: {v2}");
+        assert_eq!(
+            rig.conchd.session_requests(),
+            1,
+            "it does not go back for a session: conchd would grant one"
+        );
+
+        // Every state after connected, as (phase, reason): stopping at most, then failed.
+        let after: Vec<(VoiceControlPhase, Option<VoiceControlReason>)> = if v2 {
+            // Read by v2's reader, whose Validate is Go's.
+            let states = rig.states_v2();
+            states
+                .iter()
+                .skip_while(|state| state.phase != VoiceControlPhase::Connected)
+                .filter(|state| state.phase != VoiceControlPhase::Connected)
+                .map(|state| (state.phase, state.reason))
+                .collect()
+        } else {
+            // Read by v1's reader, which refuses a state with voice_removed.
+            rig.read()
+                .iter()
+                .filter_map(phase_of)
+                .skip_while(|(phase, _)| *phase != VoiceControlPhase::Connected)
+                .filter(|(phase, _)| *phase != VoiceControlPhase::Connected)
+                .collect()
+        };
+        let want = if v2 {
+            VoiceControlReason::VoiceRemoved
+        } else {
+            VoiceControlReason::InternalError
+        };
+        assert_eq!(
+            after.last(),
+            Some(&(VoiceControlPhase::Failed, Some(want))),
+            "v2: {v2}: {after:?}"
+        );
+        for (phase, reason) in &after {
+            assert!(
+                matches!(
+                    phase,
+                    VoiceControlPhase::Stopping | VoiceControlPhase::Failed
+                ),
+                "v2: {v2}: {after:?}"
+            );
+            assert_eq!(*reason, Some(want), "v2: {v2}: {after:?}");
+        }
+        let lines = rig.lines();
+        assert_eq!(
+            lines.iter().any(|line| line.contains("voice_removed")),
+            v2,
+            "{lines:?}"
+        );
+        if v2 {
+            // The last state is the golden one, but for what this session's own were.
+            let last: Value = serde_json::from_str(lines.last().unwrap()).unwrap();
+            let golden = fixture_v2("event-state-failed-voice-removed.json");
+            for field in [
+                "schema", "kind", "phase", "reason", "capture", "playback", "blocked",
+            ] {
+                assert_eq!(last[field], golden[field], "{field}");
+            }
+        }
+    }
+}
+
 // ------------------------------------------------------------------ the open microphone
 
 /// What the helper logs, from the moment the one test that reads it first asks. The log
