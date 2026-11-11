@@ -508,6 +508,23 @@ func TestPushPolicyThroughThePostPaths(t *testing.T) {
 	}
 }
 
+// outcomes lists the sender's non-zero wake outcome counters, for a failure
+// message: they say why a wake that was expected was not sent (coalesced,
+// backoff, over_budget and so on).
+func (f *sendFixture) outcomes(t *testing.T) string {
+	t.Helper()
+	var parts []string
+	for _, o := range push.Outcomes() {
+		if v := metricValue(t, f.srv, "conch_push_wakes_total", "transport", "webpush", "outcome", o); v != 0 {
+			parts = append(parts, fmt.Sprintf("%s=%v", o, v))
+		}
+	}
+	if len(parts) == 0 {
+		return "none"
+	}
+	return strings.Join(parts, " ")
+}
+
 func (f *sendFixture) regDeliveries(reg string) []pushtest.Delivery {
 	var out []pushtest.Delivery
 	for _, d := range f.prov.Deliveries() {
@@ -525,6 +542,10 @@ func TestPushEditsAndRemovalsNeverWake(t *testing.T) {
 	dave := f.phone(t, "dave", "all")
 	id := f.postAs(t, f.aliceTok, "general", "first")
 	f.prov.WaitFor(t, 1, 5*time.Second)
+	// The clock moves only once the sender is done with the first wake: it
+	// stamps the wake's coalescing time when the send returns, and a stamp
+	// taken after the jump would put the second post inside the 30 s window.
+	f.settled(t, 1)
 	f.advance(2 * time.Minute)
 	rec := f.do(t, "PUT", fmt.Sprintf("/v2/channels/general/messages/%d/body", id), f.aliceTok, `{"body":"first, edited @dave"}`)
 	if rec.Code != http.StatusOK {
@@ -534,7 +555,7 @@ func TestPushEditsAndRemovalsNeverWake(t *testing.T) {
 	f.postAs(t, f.aliceTok, "general", "second")
 	f.settled(t, 2)
 	if got := len(f.regDeliveries(dave.reg.ID)); got != 2 {
-		t.Errorf("dave was woken %d times, want 2 (the two posts, not the edit)", got)
+		t.Errorf("dave was woken %d times, want 2 (the two posts, not the edit); outcomes: %s", got, f.outcomes(t))
 	}
 }
 
