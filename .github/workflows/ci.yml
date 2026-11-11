@@ -577,7 +577,12 @@ jobs:
   desktop-deb:
     needs: desktop-deb-touched
     if: ${{ !cancelled() && (github.event_name == 'workflow_dispatch' || needs.desktop-deb-touched.outputs.build == 'true') }}
-    runs-on: ubuntu-latest
+    # Not ubuntu-latest (#1652): that is Ubuntu 26.04 now, and dpkg-shlibdeps
+    # on it made the package Depend on libc6 (>= 2.43) and libxcomposite1
+    # (>= 1:0.4.6), which Ubuntu 24.04 (the lifecycle test's container, and
+    # the oldest system the package should install on, scripts/desktop-deb.sh)
+    # does not have. Build on the oldest supported system.
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     env:
       DESKTOP_REQUIRE_VOICE: "1"
