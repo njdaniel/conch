@@ -60,6 +60,60 @@ llvm_dir="$cache/llvm-$LLVM_VERSION"
 deny_dir="$cache/cargo-deny-$DENY_VERSION"
 webrtc_dir="$cache/$WEBRTC_TAG"
 
+# Windows x64 (Git Bash on the CI runner; #890, docs/design/windows-desktop.md
+# section 1): only the verified win-x64 libwebrtc is fetched, into the same
+# cache layout ($cache/$WEBRTC_TAG/win-x64-release). The compiler is MSVC's,
+# which the runner has, and nothing is removed from the archive: it has no
+# PipeWire. cargo-deny is not fetched here (the Linux jobs run it). The Linux
+# path below is untouched.
+#
+# What is kept is the downloaded zip, never trusted unread: every run hashes it
+# against CONCH_WEBRTC_WIN_SHA256 and unpacks it afresh, so the tree the build
+# links is always the verified bytes (the Linux path re-hashes the archive it
+# links on every run, for the same reason). No lock: Git Bash has no flock, and
+# a CI runner runs one job at a time; two runs at once on one machine could
+# race on the final move.
+case "$(uname -s)" in
+MINGW* | MSYS* | CYGWIN*)
+    if [ "$only" = deny ]; then
+        echo "voice-toolchain: FAIL: cargo-deny is not fetched on Windows (the Linux jobs run it)" >&2
+        exit 1
+    fi
+    win_triple=win-x64-release
+    win_archive="webrtc-${win_triple}.zip"
+    win_url="${CONCH_VOICE_WEBRTC_URL:-https://github.com/livekit/rust-sdks/releases/download/${WEBRTC_TAG}/${win_archive}}"
+    zip="$webrtc_dir/$win_archive"
+    mkdir -p "$webrtc_dir"
+    work=$(mktemp -d "$cache/.fetch.XXXXXX")
+    trap 'rm -rf "$work"' EXIT
+    if [ -f "$zip" ] && [ "$(sha256sum "$zip" | cut -d' ' -f1)" = "$CONCH_WEBRTC_WIN_SHA256" ]; then
+        echo "voice-toolchain: libwebrtc $WEBRTC_TAG ($win_triple): the kept download matches its pin"
+    else
+        rm -f "$zip"
+        echo "voice-toolchain: downloading $win_url"
+        curl --fail --silent --show-error --location --output "$work/$win_archive" "$win_url"
+        got=$(sha256sum "$work/$win_archive" | cut -d' ' -f1)
+        if [ "$got" != "$CONCH_WEBRTC_WIN_SHA256" ]; then
+            echo "voice-toolchain: FAIL: SHA-256 of $win_url is $got, expected $CONCH_WEBRTC_WIN_SHA256; nothing was unpacked" >&2
+            exit 1
+        fi
+        mv "$work/$win_archive" "$zip"
+    fi
+    mkdir "$work/webrtc"
+    py=python3
+    command -v python3 >/dev/null 2>&1 || py=python
+    # Verified before this line. zipfile drops absolute paths, drive letters
+    # and ".." from member names; -I keeps a zipfile.py in the working
+    # directory from being imported.
+    "$py" -I -c 'import sys, zipfile; zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])' "$zip" "$work/webrtc"
+    test -f "$work/webrtc/$win_triple/webrtc.ninja"
+    rm -rf "${webrtc_dir:?}/$win_triple"
+    mv "$work/webrtc/$win_triple" "$webrtc_dir/$win_triple"
+    echo "voice-toolchain: libwebrtc $WEBRTC_TAG ($win_triple) unpacked from the verified download into $webrtc_dir"
+    exit 0
+    ;;
+esac
+
 if [ "$(uname -s)-$(uname -m)" != "Linux-x86_64" ]; then
     echo "voice-toolchain: FAIL: only Linux x86_64 is supported (ADR-006), this is $(uname -s) $(uname -m)" >&2
     exit 1

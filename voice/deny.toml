@@ -8,7 +8,9 @@
 # advisories.
 
 [graph]
-targets = ["x86_64-unknown-linux-gnu"]
+# Windows (#890, docs/design/windows-desktop.md section 1): so that a crate
+# pulled in under cfg(windows) is checked too.
+targets = ["x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc"]
 all-features = true
 
 [sources]

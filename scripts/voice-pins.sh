@@ -19,6 +19,10 @@ CONCH_DENY_SHA256=9f12ed4c49936e09b48bf862b595cde2fe64fcbd9d74dfacac6131ca824c8d
 # webrtc-sys-build crate names (scripts/rust-check.sh compares them).
 CONCH_WEBRTC_TAG=webrtc-89d790b
 CONCH_WEBRTC_SHA256=b167adad5291cea0e4d66a0454d9d52d2ad714e6b0ed70f4410317d3ebde70c5
+# The same tag's Windows x64 (MSVC) build, webrtc-win-x64-release.zip, for the
+# Windows CI job (#890; Nick's sign-off on #756, 2026-11-11). It matches the
+# digest GitHub's release API publishes for the asset.
+CONCH_WEBRTC_WIN_SHA256=5c2349c960bae4f06f71c102f58552d0d09c912a142811acfcadfb7c883cbf58
 
 # lib/libwebrtc.a from that download, with the one member pipewire_stubs.o
 # removed by the pinned llvm-ar (scripts/voice-toolchain.sh does it, into a
