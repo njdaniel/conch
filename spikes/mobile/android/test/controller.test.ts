@@ -24,8 +24,8 @@ function presence(ids: number[], options: { available?: boolean } = {}): VoicePr
   };
 }
 
-function session(canPublish = true): VoiceSessionResponseV1 {
-  return { livekit_url: 'x', identity: `p${me}`, rooms: [{ room: 'r', token: 't', can_publish: canPublish, expires_at: '2026-11-05T10:00:15Z' }] };
+function session(canPublish = true, url = 'x'): VoiceSessionResponseV1 {
+  return { livekit_url: url, identity: `p${me}`, rooms: [{ room: 'r', token: 't', can_publish: canPublish, expires_at: '2026-11-05T10:00:15Z' }] };
 }
 
 const startedAt = '2026-11-05T10:00:00Z';
@@ -118,6 +118,8 @@ function rig(
     cameraPeers?: number[];
     cameraEnded?: { reason: 'operator'; started_at: string; ended_at: string };
     prompt?: (clock: FakeClock, c: () => VoiceController) => Promise<boolean>;
+    livekitUrl?: string;
+    held?: string[];
   } = {},
 ): Rig {
   const clock = new FakeClock();
@@ -142,7 +144,7 @@ function rig(
       log.push(`release ${channel} ${named}`);
       return Promise.resolve(null);
     },
-    voiceSession: () => (log.push('session'), Promise.resolve({ ok: true, value: session(options.canPublish ?? true) } as const)),
+    voiceSession: () => (log.push('session'), Promise.resolve({ ok: true, value: session(options.canPublish ?? true, options.livekitUrl) } as const)),
     reportTransmit: (_c, state) => {
       log.push(`report ${state}`);
       reports.push(state);
@@ -175,6 +177,7 @@ function rig(
     me: () => me,
     log: (m) => log.push(`log ${m}`),
     now: () => clock.now,
+    hold: (...secrets) => options.held?.push(...secrets),
   });
   self = c;
   return { c, clock, log, rooms, reports, claims };
@@ -660,4 +663,69 @@ test('a reconnect tells the room what to receive again', async () => {
   room.events?.onReconnecting();
   room.events?.onReconnected();
   assert.ok(room.wants.length >= before + 2);
+});
+
+test('open mode: leaving the joined Voice view shuts the open gate, and it needs quiet and a fresh onset to reopen', async () => {
+  const r = rig();
+  await joined(r);
+  r.c.watch('general');
+  r.c.setMode('open');
+  r.c.level(0);
+  r.clock.advance(500);
+  r.c.level(0.9);
+  assert.equal(r.c.gate.open, true);
+  r.c.watch(null); // Back to Channels: the probe is gone, no more samples
+  assert.equal(r.c.gate.open, false, 'shut at once');
+  // The view comes back, with the same sound still there.
+  r.c.watch('general');
+  for (let i = 0; i < 5; i++) {
+    r.c.level(0.9);
+    r.clock.advance(100);
+  }
+  assert.equal(r.c.gate.open, false, 'no reopen on the same sound');
+  r.c.level(0);
+  r.clock.advance(500);
+  r.c.level(0);
+  r.c.level(0.9);
+  assert.equal(r.c.gate.open, true, 'quiet, then a fresh onset');
+});
+
+test('open mode: with no view and no samples at all the watchdog shuts the gate', async () => {
+  const r = rig();
+  await joined(r);
+  r.c.setMode('open');
+  r.c.level(0);
+  r.clock.advance(500);
+  r.c.level(0.9);
+  assert.equal(r.c.gate.open, true);
+  r.clock.advance(1600);
+  assert.equal(r.c.gate.open, false);
+});
+
+test('a press held while the joined Voice view unmounts shuts at once', async () => {
+  const r = rig();
+  await joined(r);
+  r.c.watch('general');
+  r.c.press();
+  assert.equal(r.c.gate.open, true);
+  r.c.watch(null);
+  assert.equal(r.c.gate.open, false);
+  await settle();
+  assert.deepEqual(r.reports, ['started', 'stopped']);
+});
+
+test('another channel\'s view closing does not shut the joined channel\'s gate', async () => {
+  const r = rig();
+  await joined(r);
+  r.c.press();
+  r.c.watch('elsewhere');
+  r.c.watch(null);
+  assert.equal(r.c.gate.open, true);
+});
+
+test('the LiveKit grant\'s host and host:port are registered with the diagnostics', async () => {
+  const held: string[] = [];
+  const r = rig({ livekitUrl: 'wss://livekit.example.me:7880', held });
+  await joined(r);
+  assert.deepEqual(held, ['wss://livekit.example.me:7880', 'livekit.example.me:7880', 'livekit.example.me']);
 });

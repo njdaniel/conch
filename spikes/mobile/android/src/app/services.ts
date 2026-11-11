@@ -89,6 +89,9 @@ export const controller = new VoiceController({
   log: (message) => {
     diagnostics.add('voice', message);
   },
+  hold: (...secrets) => {
+    diagnostics.hold(...secrets);
+  },
 });
 
 // signedIn records the principal and tells the diagnostics what must never
