@@ -60,6 +60,44 @@ llvm_dir="$cache/llvm-$LLVM_VERSION"
 deny_dir="$cache/cargo-deny-$DENY_VERSION"
 webrtc_dir="$cache/$WEBRTC_TAG"
 
+# Windows x64 (Git Bash on the CI runner; #890, docs/design/windows-desktop.md
+# section 1): only the verified win-x64 libwebrtc is fetched, into the same
+# cache layout ($cache/$WEBRTC_TAG/win-x64-release). The compiler is MSVC's,
+# which the runner has, and nothing is removed from the archive: it has no
+# PipeWire. cargo-deny is not fetched here (the Linux jobs run it). The Linux
+# path below is untouched.
+case "$(uname -s)" in
+MINGW* | MSYS* | CYGWIN*)
+    win_triple=win-x64-release
+    win_archive="webrtc-${win_triple}.zip"
+    win_url="${CONCH_VOICE_WEBRTC_URL:-https://github.com/livekit/rust-sdks/releases/download/${WEBRTC_TAG}/${win_archive}}"
+    if [ -f "$webrtc_dir/$win_triple/webrtc.ninja" ]; then
+        echo "voice-toolchain: libwebrtc $WEBRTC_TAG ($win_triple) is already in $webrtc_dir"
+        exit 0
+    fi
+    mkdir -p "$cache"
+    work=$(mktemp -d "$cache/.fetch.XXXXXX")
+    trap 'rm -rf "$work"' EXIT
+    echo "voice-toolchain: downloading $win_url"
+    curl --fail --silent --show-error --location --output "$work/$win_archive" "$win_url"
+    got=$(sha256sum "$work/$win_archive" | cut -d' ' -f1)
+    if [ "$got" != "$CONCH_WEBRTC_WIN_SHA256" ]; then
+        echo "voice-toolchain: FAIL: SHA-256 of $win_url is $got, expected $CONCH_WEBRTC_WIN_SHA256; nothing was unpacked" >&2
+        exit 1
+    fi
+    mkdir "$work/webrtc"
+    py=python3
+    command -v python3 >/dev/null 2>&1 || py=python
+    "$py" -c 'import sys, zipfile; zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])' "$work/$win_archive" "$work/webrtc"
+    rm -f "$work/$win_archive"
+    test -f "$work/webrtc/$win_triple/webrtc.ninja"
+    rm -rf "$webrtc_dir"
+    mv "$work/webrtc" "$webrtc_dir"
+    echo "voice-toolchain: libwebrtc $WEBRTC_TAG ($win_triple) unpacked into $webrtc_dir"
+    exit 0
+    ;;
+esac
+
 if [ "$(uname -s)-$(uname -m)" != "Linux-x86_64" ]; then
     echo "voice-toolchain: FAIL: only Linux x86_64 is supported (ADR-006), this is $(uname -s) $(uname -m)" >&2
     exit 1

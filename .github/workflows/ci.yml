@@ -347,6 +347,80 @@ jobs:
         if: always()
         run: df -h / && du -sh voice/target 2>/dev/null || true
 
+  # The Rust voice client's Windows build (#890, docs/design/windows-desktop.md
+  # section 1): x86_64-pc-windows-msvc on a hosted runner, with the pinned
+  # libwebrtc win-x64 build verified by scripts/voice-toolchain.sh. MSVC and the
+  # Windows SDK are on the runner image; cc-rs finds them through vswhere, so no
+  # Action installs them. Hosted only: there is no self-hosted Windows runner.
+  voice-windows:
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
+    runs-on: windows-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    env:
+      # Line tables, not full debug info, as the rust job builds.
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      CARGO_PROFILE_TEST_DEBUG: line-tables-only
+    steps:
+      - uses: actions/checkout@v4
+
+      # Keyed on the pins file, as the Linux job's cache is. Windows' own key
+      # (runner.os) keeps the two apart.
+      - name: rust toolchain cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/conch/webrtc-*
+          key: voice-toolchain-${{ runner.os }}-${{ hashFiles('scripts/voice-pins.sh') }}
+
+      - name: rust build cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            voice/target
+          key: voice-build-lt-${{ runner.os }}-${{ hashFiles('voice/Cargo.lock', 'voice/rust-toolchain.toml', 'scripts/voice-pins.sh') }}
+          restore-keys: |
+            voice-build-lt-${{ runner.os }}-
+
+      - name: rust toolchain
+        run: ./scripts/voice-toolchain.sh
+
+      # E1 (design section 1): what the runner has, recorded in the log.
+      - name: msvc and windows sdk on the runner
+        run: |
+          vswhere="/c/Program Files (x86)/Microsoft Visual Studio/Installer/vswhere.exe"
+          "$vswhere" -latest -products '*' -property installationVersion
+          "$vswhere" -latest -products '*' -property installationPath
+          ls "/c/Program Files (x86)/Windows Kits/10/Include" || true
+          rustc -Vv
+
+      # The SDK's C++ glue against the verified libwebrtc: the part this job
+      # exists to prove. -vv records the compiler it runs (E1). Not gated by
+      # #1309: it does not reach conch-voice's own source.
+      - name: build webrtc-sys (E1)
+        run: |
+          . scripts/voice-pins.sh
+          export LK_CUSTOM_WEBRTC="$(cygpath -m "$HOME/.cache/conch/$CONCH_WEBRTC_TAG/win-x64-release")"
+          cd voice
+          cargo build --locked -vv -p webrtc-sys 2>&1 | tee "$RUNNER_TEMP/webrtc-sys.log" | grep -iE "Compiling webrtc-sys|Finished|error|cl\.exe|clang|running:|warning: webrtc-sys" || true
+          test "${PIPESTATUS[0]}" -eq 0
+
+      # The workspace without conch-voice, which does not build on Windows
+      # until the Unix-only code is split out (#1309): its build waits on
+      # that issue, and this is the one place it is left out.
+      - name: cargo build, test and clippy (workspace except conch-voice, until #1309)
+        run: |
+          . scripts/voice-pins.sh
+          export LK_CUSTOM_WEBRTC="$(cygpath -m "$HOME/.cache/conch/$CONCH_WEBRTC_TAG/win-x64-release")"
+          cd voice
+          cargo build --locked --workspace --exclude conch-voice
+          cargo test --locked --workspace --exclude conch-voice
+          cargo clippy --locked --workspace --exclude conch-voice --all-targets -- -D warnings
+
   # The web client under web/ (ADR-007). setup-node installs exactly the
   # Node web/.nvmrc pins and caches npm's download cache by the lockfile.
   # web-check installs with npm ci only, and downloads no browser.
