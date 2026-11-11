@@ -4,6 +4,11 @@ on:
   pull_request:
   push:
     branches: [main]
+  # A manual run of the whole workflow on a branch. Its one purpose is to run
+  # the desktop-deb job (below) on a branch before merge, since that job is
+  # otherwise only for pushes to main (#1652). It adds no trigger for pull
+  # requests or pushes.
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -564,11 +569,14 @@ jobs:
   # The desktop .deb with the real voice helper, on pushes to main that touch
   # its inputs (above): a development package (no tag), built and checked by
   # scripts/desktop-deb-test.sh in full mode. Not on pull requests, because of
-  # the Rust build's cost; not in `check`'s needs, because it is often
-  # skipped. A passing run is a build check, not acceptance (#1603).
+  # the Rust build's cost (the lifecycle test below adds a container and an
+  # apt run to it: no reason to put either on every PR); not in `check`'s
+  # needs, because it is often skipped. A manual run (workflow_dispatch)
+  # always builds, to test a branch. A passing run is a build check, not
+  # acceptance (#1603).
   desktop-deb:
     needs: desktop-deb-touched
-    if: ${{ needs.desktop-deb-touched.outputs.build == 'true' }}
+    if: ${{ !cancelled() && (github.event_name == 'workflow_dispatch' || needs.desktop-deb-touched.outputs.build == 'true') }}
     runs-on: ubuntu-latest
     timeout-minutes: 60
     env:
@@ -647,6 +655,21 @@ jobs:
       # build, .deb and the package test in full mode
       - name: build the .deb
         run: make desktop-deb
+
+      # The lifecycle test (#1599) on this very package: install, upgrade,
+      # remove and purge in a clean ubuntu:24.04 container, with the ldd and
+      # helper checks on the real Electron executable and conch-voice. CI is
+      # set, so a missing Docker fails and does not skip. The old package is
+      # this one with the Debian version <version>~older: a main build has one
+      # version and desktop-deb.sh will not stamp a helper of another one, and
+      # no release has published a .deb to download (scripts/desktop-deb-older.sh
+      # says more). Pulls the digest-pinned image and apt fetches the Depends.
+      - name: lifecycle test on the real .deb
+        run: |
+          set -eu
+          new=$(ls desktop/dist/conch-desktop_*_amd64.deb)
+          ./scripts/desktop-deb-older.sh "$new" "$RUNNER_TEMP/old/old.deb"
+          ./scripts/desktop-deb-lifecycle.sh "$RUNNER_TEMP/old/old.deb" "$new"
 
       - name: disk after the build
         if: always()
