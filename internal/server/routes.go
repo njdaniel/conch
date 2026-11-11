@@ -197,6 +197,16 @@ func (s *Server) routeTable() []route {
 		rt("GET /v1/notifications/preferences", accessAuthenticated, s.membersOnly(hf(s.handleGetNotificationPreferences))),
 		rt("PUT /v1/notifications/preferences", accessAuthenticated, s.membersOnly(hf(s.handlePutNotificationPreferences))),
 		rt("GET /v1/notifications/pending", accessAuthenticated, s.membersOnly(hf(s.handleListPendingNotifications))),
+		// Push registrations (issue #1714): the same people-only rule, and the
+		// same limiter. The config is the one route any signed-in caller may
+		// read: nothing in it is secret. "mine" is a literal, so the mux never
+		// hands it to {id} (which has no GET anyway). Not previewable, not in
+		// setupScopeRoutes, not in the admin catalog.
+		rt("GET /v1/push/config", accessAuthenticated, hf(s.handleGetPushConfig)),
+		rt("POST /v1/push/registrations", accessAuthenticated, s.membersOnly(hf(s.handleCreatePushRegistration))),
+		rt("GET /v1/push/registrations/mine", accessAuthenticated, s.membersOnly(hf(s.handleListOwnPushRegistrations))),
+		rt("PUT /v1/push/registrations/{id}", accessAuthenticated, s.membersOnly(hf(s.handlePutPushRegistration))),
+		rt("DELETE /v1/push/registrations/{id}", accessAuthenticated, s.membersOnly(hf(s.handleDeletePushRegistration))),
 		rt("PUT /v1/channels/{channel}/read-state", accessAuthenticated, hf(s.handlePutReadState)),
 		rt("PUT /v1/principals/{id}/manifest", accessPermission, hf(s.handlePutManifest)).needs(schema.PermManageMembers),
 		// Operators, or the agent the manifest belongs to (checked in the handler).

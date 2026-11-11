@@ -221,7 +221,7 @@ func revokeLiveCredentialsTx(ctx context.Context, tx execer, now time.Time, ende
 			return 0, err
 		}
 		// Its sessions end with it, as on every other revocation (issue #265).
-		if err := endCredentialNotificationsTx(ctx, tx, c.id); err != nil {
+		if err := endCredentialNotificationsTx(ctx, tx, "system", c.id, now); err != nil {
 			return 0, err
 		}
 		if err := endCredentialSessionsTx(ctx, tx, "system", c.id, SessionEndedByRevocation, now, ended); err != nil {

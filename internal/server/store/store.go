@@ -1089,6 +1089,45 @@ BEGIN SELECT RAISE(ABORT, 'message removals are permanent'); END`,
 	updated_at             INTEGER NOT NULL
 )`,
 	},
+	// 49: push registrations (issue #1714, Mobile M11-B,
+	// docs/design/mobile-notifications.md §5). One row per registration: an
+	// address one credential (one sign-in) wants woken. id is 32 random bytes
+	// in unpadded base64url. The target (endpoint, p256dh, auth, provider,
+	// token) is write-only on the wire and is cleared when the row expires
+	// (threat T9): the CHECK makes that a property of the table, not only of
+	// the code that ends a registration. Only target_fingerprint, 8 bytes of
+	// SHA-256 in hex, survives. A registration holds no preference. Every
+	// site that revokes a credential expires its rows in the same transaction
+	// (endCredentialNotificationsTx), and the session sweep expires those of
+	// credentials that expired or went idle and those with no fetch and no
+	// update for 35 days.
+	{
+		`CREATE TABLE push_registrations (
+	id                 TEXT    PRIMARY KEY,
+	credential_id      INTEGER NOT NULL REFERENCES credentials (id),
+	principal_id       INTEGER NOT NULL REFERENCES principals (id),
+	transport          TEXT    NOT NULL CHECK (transport IN ('webpush', 'relay')),
+	platform           TEXT    NOT NULL CHECK (platform IN ('ios', 'android', 'web')),
+	app                TEXT    NOT NULL,
+	endpoint           TEXT    NOT NULL DEFAULT '',
+	p256dh             TEXT    NOT NULL DEFAULT '',
+	auth               TEXT    NOT NULL DEFAULT '',
+	provider           TEXT    NOT NULL DEFAULT '',
+	token              TEXT    NOT NULL DEFAULT '',
+	target_fingerprint TEXT    NOT NULL,
+	created_at         INTEGER NOT NULL,
+	updated_at         INTEGER NOT NULL,
+	last_wake_at       INTEGER,
+	last_fetch_at      INTEGER,
+	state              TEXT    NOT NULL CHECK (state IN ('active', 'expired')),
+	ended_at           INTEGER,
+	end_reason         TEXT,
+	CHECK (state = 'active' OR (ended_at IS NOT NULL AND end_reason IS NOT NULL
+		AND endpoint = '' AND p256dh = '' AND auth = '' AND provider = '' AND token = ''))
+)`,
+		`CREATE INDEX push_registrations_by_credential ON push_registrations (credential_id) WHERE state = 'active'`,
+		`CREATE INDEX push_registrations_by_principal ON push_registrations (principal_id) WHERE state = 'active'`,
+	},
 }
 
 // migrationSteps holds Go code that runs inside a migration's transaction

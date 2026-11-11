@@ -391,6 +391,10 @@ type SweepResult struct {
 	Offline int
 	// Expired is how many sessions were ended because their credential expired.
 	Expired int
+	// PushEnded is how many push registrations the pass ended: those of
+	// credentials that expired or went idle, and those silent for
+	// PushStaleAfter (issue #1714).
+	PushEnded int
 }
 
 // SweepSessions applies the liveness thresholds at now in one short
@@ -473,7 +477,12 @@ func (s *Store) SweepSessions(ctx context.Context, now time.Time, stale, offline
 		// A credential that expired or went idle is not revoked, so no
 		// revocation site removed its notification preferences (issue
 		// #1713); nothing else would.
-		_, err = sweepNotificationPreferencesTx(ctx, tx, now)
+		if _, err = sweepNotificationPreferencesTx(ctx, tx, now); err != nil {
+			return err
+		}
+		// The same for push registrations (issue #1714), which end as
+		// credential_expired and, after PushStaleAfter of silence, stale.
+		out.PushEnded, err = sweepPushRegistrationsTx(ctx, tx, now)
 		return err
 	})
 	if err != nil {
