@@ -36,16 +36,7 @@ const PROXY_VARIABLES: [&str; 6] = [
     "all_proxy",
 ];
 
-// Windows (#890): the child's last check expects a refused connection to a closed port, and
-// Windows retries a refused loopback connect for about two seconds, so the child's 2 s
-// timeout fires first (`Err(Timeout)`, not `Connect`). No connection reached the proxy
-// listener; only that check is timing-dependent there. Ignored on Windows until the test
-// is made independent of how fast the platform refuses.
 #[test]
-#[cfg_attr(
-    windows,
-    ignore = "Windows retries a refused loopback connect past the child's 2 s timeout (#890)"
-)]
 fn no_connection_is_made_to_a_proxy_named_in_the_environment() {
     let proxy = TcpListener::bind("127.0.0.1:0").unwrap();
     proxy.set_nonblocking(true).unwrap();
@@ -148,10 +139,17 @@ async fn the_calls_a_child_process_makes_with_proxy_variables_set() {
     let closed = closed_port().await;
     let secure = closed.url().replace("http://", "https://");
     let client = client_for(&secure, Duration::from_secs(2));
+    // Windows retries a refused loopback connect for about two seconds, so against the
+    // 2 s bound the refusal can surface as `Timeout` there (#890). Either way nothing was
+    // tunnelled, and the parent's count of connections to the proxy is what proves it.
+    let refused = |result: &Result<(), Error>| {
+        matches!(result, Err(Error::Connect { .. }))
+            || (cfg!(windows) && matches!(result, Err(Error::Timeout)))
+    };
     let rest = client.presence("general").await.map(|_| ());
-    assert!(matches!(rest, Err(Error::Connect { .. })), "{rest:?}");
+    assert!(refused(&rest), "{rest:?}");
     let socket = client.presence_stream("general").await.map(|_| ());
-    assert!(matches!(socket, Err(Error::Connect { .. })), "{socket:?}");
+    assert!(refused(&socket), "{socket:?}");
 
     println!("{CHILD_DONE}");
 }
