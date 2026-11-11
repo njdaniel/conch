@@ -203,6 +203,18 @@ var Vocabularies = map[string][]string{
 		AdminTargetHook, AdminTargetInvite, AdminTargetReport,
 	),
 	"AdminActionStatus": values(AdminActionRan, AdminActionPendingApproval),
+
+	// Phone push and notification preferences (issue #1712,
+	// docs/design/mobile-notifications.md §9.1).
+	"NotificationKind":   values(NotificationKindMessage, NotificationKindMention, NotificationKindWhisper),
+	"NotificationPolicy": values(NotificationPolicyOff, NotificationPolicyMentions, NotificationPolicyAll),
+	"PushPlatform":       values(PushPlatformIOS, PushPlatformAndroid, PushPlatformWeb),
+	"PushProvider":       values(PushProviderAPNs, PushProviderFCM),
+	"PushRegistrationEndReason": values(
+		PushRegistrationEndSelf, PushRegistrationEndCredentialRevoked, PushRegistrationEndCredentialExpired,
+		PushRegistrationEndProviderRejected, PushRegistrationEndStale,
+	),
+	"PushTransport": values(PushTransportWebPush, PushTransportRelay),
 }
 
 // values lists a vocabulary by its constants, so an entry above cannot hold a

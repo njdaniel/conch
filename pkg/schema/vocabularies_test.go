@@ -234,6 +234,14 @@ var validators = map[string]func(string) bool{
 	"InviteKindV2":      validOf[InviteKindV2](),
 	"DirectoryScope":    validOf[DirectoryScope](),
 
+	// Phone push and notification preferences (issue #1712).
+	"NotificationKind":          validOf[NotificationKind](),
+	"NotificationPolicy":        validOf[NotificationPolicy](),
+	"PushPlatform":              validOf[PushPlatform](),
+	"PushProvider":              validOf[PushProvider](),
+	"PushRegistrationEndReason": validOf[PushRegistrationEndReason](),
+	"PushTransport":             validOf[PushTransport](),
+
 	// AI administrators (issue #1326).
 	"AdminAction":       validOf[AdminAction](),
 	"AdminGate":         validOf[AdminGate](),

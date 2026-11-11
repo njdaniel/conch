@@ -2672,6 +2672,7 @@ export interface OwnCredentialV1 {
   renews?: boolean;
   current?: boolean;
   idle_expires_at?: string;
+  push?: boolean;
 }
 
 export const ownCredentialV1 = object<OwnCredentialV1>({
@@ -2682,6 +2683,7 @@ export const ownCredentialV1 = object<OwnCredentialV1>({
   renews: optional(bool),
   current: optional(bool),
   idle_expires_at: optional(timestamp),
+  push: optional(bool),
 });
 
 // schema.ListOwnCredentialsResponseV1
@@ -4638,6 +4640,219 @@ export interface GetAgentManifestResponseV1 {
 
 export const getAgentManifestResponseV1 = object<GetAgentManifestResponseV1>({
   manifest: agentManifestV1,
+});
+
+// schema.PushWakeV1
+export const pushWakeV1Schema = 'conch.push_wake.v1';
+
+export interface PushWakeV1 {
+  schema: typeof pushWakeV1Schema;
+  registration: string;
+}
+
+export const pushWakeV1 = object<PushWakeV1>({
+  schema: vocab<typeof pushWakeV1Schema>({ [pushWakeV1Schema]: true }),
+  registration: str,
+});
+
+// schema.PushTransport: closed on the server and client-tolerant, so a value this
+// bundle does not know is kept and shown by its name; KnownPushTransport is the known ones.
+export type KnownPushTransport = 'webpush' | 'relay';
+export type PushTransport = KnownPushTransport | (string & {});
+
+export const pushTransport = tolerant<KnownPushTransport>({ webpush: true, relay: true });
+
+// schema.PushPlatform
+export type PushPlatform = 'ios' | 'android' | 'web';
+
+export const pushPlatform = vocab<PushPlatform>({ ios: true, android: true, web: true });
+
+// schema.PushRegistrationV1
+export interface PushRegistrationV1 {
+  id: string;
+  transport: PushTransport;
+  platform: PushPlatform;
+  app: string;
+  target_fingerprint: string;
+  created_at: string;
+  last_wake_at?: string;
+  last_fetch_at?: string;
+}
+
+export const pushRegistrationV1 = object<PushRegistrationV1>({
+  id: str,
+  transport: pushTransport,
+  platform: pushPlatform,
+  app: str,
+  target_fingerprint: str,
+  created_at: timestamp,
+  last_wake_at: optional(timestamp),
+  last_fetch_at: optional(timestamp),
+});
+
+// schema.PushProvider: closed on the server and client-tolerant, so a value this
+// bundle does not know is kept and shown by its name; KnownPushProvider is the known ones.
+export type KnownPushProvider = 'apns' | 'fcm';
+export type PushProvider = KnownPushProvider | (string & {});
+
+export const pushProvider = tolerant<KnownPushProvider>({ apns: true, fcm: true });
+
+// schema.CreatePushRegistrationRequestV1
+export interface CreatePushRegistrationRequestV1 {
+  transport: PushTransport;
+  platform: PushPlatform;
+  app: string;
+  endpoint?: string;
+  p256dh?: string;
+  auth?: string;
+  provider?: PushProvider;
+  token?: string;
+}
+
+export const createPushRegistrationRequestV1 = object<CreatePushRegistrationRequestV1>({
+  transport: pushTransport,
+  platform: pushPlatform,
+  app: str,
+  endpoint: optional(str),
+  p256dh: optional(str),
+  auth: optional(str),
+  provider: optional(pushProvider),
+  token: optional(str),
+});
+
+// schema.UpdatePushRegistrationRequestV1
+export interface UpdatePushRegistrationRequestV1 {
+  transport: PushTransport;
+  platform: PushPlatform;
+  app: string;
+  endpoint?: string;
+  p256dh?: string;
+  auth?: string;
+  provider?: PushProvider;
+  token?: string;
+}
+
+export const updatePushRegistrationRequestV1 = object<UpdatePushRegistrationRequestV1>({
+  transport: pushTransport,
+  platform: pushPlatform,
+  app: str,
+  endpoint: optional(str),
+  p256dh: optional(str),
+  auth: optional(str),
+  provider: optional(pushProvider),
+  token: optional(str),
+});
+
+// schema.ListOwnPushRegistrationsResponseV1
+export interface ListOwnPushRegistrationsResponseV1 {
+  registrations: PushRegistrationV1[];
+}
+
+export const listOwnPushRegistrationsResponseV1 = object<ListOwnPushRegistrationsResponseV1>({
+  registrations: array(pushRegistrationV1),
+});
+
+// schema.PushConfigV1
+export interface PushConfigV1 {
+  transports: PushTransport[];
+  vapid_public_key?: string;
+  relay_providers?: PushProvider[];
+}
+
+export const pushConfigV1 = object<PushConfigV1>({
+  transports: array(pushTransport),
+  vapid_public_key: optional(str),
+  relay_providers: optional(array(pushProvider)),
+});
+
+// schema.NotificationPolicy
+export type NotificationPolicy = 'off' | 'mentions' | 'all';
+
+export const notificationPolicy = vocab<NotificationPolicy>({
+  off: true,
+  mentions: true,
+  all: true,
+});
+
+// schema.NotificationPreferencesV1
+export interface NotificationPreferencesV1 {
+  policy: NotificationPolicy;
+  muted: number[];
+  preview: boolean;
+  quiet_when_unreachable: boolean;
+}
+
+export const notificationPreferencesV1 = object<NotificationPreferencesV1>({
+  policy: notificationPolicy,
+  muted: array(int),
+  preview: bool,
+  quiet_when_unreachable: bool,
+});
+
+// schema.PutNotificationPreferencesRequestV1
+export interface PutNotificationPreferencesRequestV1 {
+  policy: NotificationPolicy;
+  muted: number[];
+  preview: boolean;
+  quiet_when_unreachable: boolean;
+}
+
+export const putNotificationPreferencesRequestV1 = object<PutNotificationPreferencesRequestV1>({
+  policy: notificationPolicy,
+  muted: array(int),
+  preview: bool,
+  quiet_when_unreachable: bool,
+});
+
+// schema.NotificationKind: closed on the server and client-tolerant, so a value this
+// bundle does not know is kept and shown by its name; KnownNotificationKind is the known ones.
+export type KnownNotificationKind = 'message' | 'mention' | 'whisper';
+export type NotificationKind = KnownNotificationKind | (string & {});
+
+export const notificationKind = tolerant<KnownNotificationKind>({
+  message: true,
+  mention: true,
+  whisper: true,
+});
+
+// schema.NotificationSummaryV1
+export const notificationSummaryV1Schema = 'conch.notification_summary.v1';
+
+export interface NotificationSummaryV1 {
+  schema: typeof notificationSummaryV1Schema;
+  channel_id: number;
+  channel_name: string;
+  message_id: number;
+  posted_at: string;
+  kind: NotificationKind;
+  author_id: number;
+  author_name?: string;
+  text?: string;
+}
+
+export const notificationSummaryV1 = object<NotificationSummaryV1>({
+  schema: vocab<typeof notificationSummaryV1Schema>({ [notificationSummaryV1Schema]: true }),
+  channel_id: int,
+  channel_name: str,
+  message_id: int,
+  posted_at: timestamp,
+  kind: notificationKind,
+  author_id: int,
+  author_name: optional(str),
+  text: optional(str),
+});
+
+// schema.ListPendingNotificationsResponseV1
+export interface ListPendingNotificationsResponseV1 {
+  summaries: NotificationSummaryV1[];
+  cursor: number;
+  more: boolean;
+}
+
+export const listPendingNotificationsResponseV1 = object<ListPendingNotificationsResponseV1>({
+  summaries: array(notificationSummaryV1),
+  cursor: int,
+  more: bool,
 });
 
 // schema.Error
