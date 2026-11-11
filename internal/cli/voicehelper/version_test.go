@@ -1,7 +1,10 @@
 package voicehelper
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -183,6 +186,30 @@ func TestTrackerChoosesVersion(t *testing.T) {
 			}
 		})
 	}
+	t.Run("the golden voice_removed state", func(t *testing.T) {
+		golden, err := os.ReadFile(filepath.Join(fixtureDir, "..", "voice-control-v2", "event-state-failed-voice-removed.json"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var line bytes.Buffer
+		if err := json.Compact(&line, golden); err != nil {
+			t.Fatal(err)
+		}
+		tr := &tracker{}
+		if _, err := tr.read([]byte(hello(v1, v2)), false); err != nil {
+			t.Fatal(err)
+		}
+		tr.choose()
+		tr.written(1, schema.VoiceControlCommandStart)
+		rd, err := tr.read(line.Bytes(), false)
+		if err != nil || rd.v2 == nil {
+			t.Fatalf("read: %+v, %v", rd, err)
+		}
+		st := fromStateV2(1, "c", "t", rd.v2)
+		if st.Phase != PhaseFailed || st.Reason != "voice_removed" || st.Retryable || !tr.final {
+			t.Errorf("status %+v, final %v", st, tr.final)
+		}
+	})
 	t.Run("a v2 state keeps playback and talk mode", func(t *testing.T) {
 		tr := &tracker{}
 		if _, err := tr.read([]byte(hello(v1, v2)), false); err != nil {
@@ -199,4 +226,33 @@ func TestTrackerChoosesVersion(t *testing.T) {
 			t.Errorf("status %+v", st)
 		}
 	})
+}
+
+// TestOpenMicStaysSaidWhileAFailedRunIsStopped: when the supervisor fails an
+// open-mode v2 run itself (here the helper hangs on a command and the ack
+// bound runs out), the status keeps the open talk mode and capture on until the
+// process has been reaped, so that a view can say the microphone may still be
+// live; after the reap capture is off.
+func TestOpenMicStaysSaidWhileAFailedRunIsStopped(t *testing.T) {
+	timings := Timings{Ack: 300 * time.Millisecond, StopTerm: 400 * time.Millisecond, StopKill: 1500 * time.Millisecond}
+	s := newSupervisor(t, storedProfile(t), timings, "-versions", v1+","+v2, "-talk-open", "-ignore", "set_mute", "-on-stop", "ignore-term")
+	ctx := ctxFor(t)
+	if err := s.Join(ctx, testChannel); err != nil {
+		t.Fatalf("join: %v", err)
+	}
+	if st := s.Status(); st.TalkMode != schema.VoiceControlTalkModeOpen {
+		t.Fatalf("status %+v, want the open talk mode", st)
+	}
+	if err := s.SetMute(ctx, true); reasonOf(err) != ReasonAckTimeout {
+		t.Fatalf("set_mute: %v, want %s", err, ReasonAckTimeout)
+	}
+	// Failed, not reaped (the helper ignores SIGTERM until SIGKILL).
+	st := s.Status()
+	if st.Phase != PhaseFailed || st.Reason != ReasonAckTimeout || st.TalkMode != schema.VoiceControlTalkModeOpen || st.Capture != schema.VoiceControlCaptureOn || s.current() == nil {
+		t.Fatalf("while stopping: %+v (running %v)", st, s.current() != nil)
+	}
+	waitReaped(t, s)
+	if st := s.Status(); st.Phase != PhaseFailed || st.Capture != schema.VoiceControlCaptureOff || s.current() != nil {
+		t.Errorf("after the reap: %+v", st)
+	}
 }

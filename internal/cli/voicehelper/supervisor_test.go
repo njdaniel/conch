@@ -317,6 +317,25 @@ func TestTranscriptsEndToEnd(t *testing.T) {
 				}
 			},
 		},
+		{
+			// A v2 owner's golden transcript: the owner's three commands, byte for
+			// byte, in v2, and the status says so.
+			file: "../voice-control-v2/transcript-negotiation-v2-owner.json", wantIdle: true,
+			drive: func(t *testing.T, ctx context.Context, s *Supervisor) {
+				if err := s.Join(ctx, testChannel); err != nil {
+					t.Fatalf("join: %v", err)
+				}
+				if err := s.Refresh(ctx); err != nil {
+					t.Fatalf("refresh: %v", err)
+				}
+				if st := s.Status(); st.Protocol != v2 || st.TalkMode != schema.VoiceControlTalkModePushToTalk || st.Playback != schema.VoiceControlPlaybackOn {
+					t.Fatalf("status %+v, want v2, push to talk, speakers on", st)
+				}
+				if err := s.Leave(ctx); err != nil {
+					t.Fatalf("leave: %v", err)
+				}
+			},
+		},
 		// transcript-version-mismatch.json is a v1 owner's fixture (the helper
 		// offers only v2); this owner speaks v2 (#1718), so it would start. The
 		// same handshake with a version neither speaks is in

@@ -18,6 +18,9 @@ release that Nick publishes.
   - **One mention rule**: `schema.Mentions` is the browser's rule in Go. Both are tested against one golden table, `pkg/schema/testdata/rules/mentions.json`.
   - `OwnCredentialV1` gains the optional `push`: this sign-in has an active push registration. A sign-in without one encodes as before.
 
+### Changed
+- **The TUI speaks `conch.voice_control.v2` to its voice helper** (#1718). It uses v2 when the helper offers it and v1 otherwise, so a moderator's voice kick reads as "removed from voice; you are still a member and may join again" in the helper status, with no retry or rejoin. The TUI now honours `talk_mode = "open"` from voice.toml (it was push-to-talk before, in every session), shown as "open mic" in the voice strip, and `/voice status` shows the talk mode, the speakers and the protocol.
+
 ### Fixed
 - **A voice kick in the desktop app says so** (#1457). When a moderator removes you from voice, the desktop app shows "voice ended: you were removed from voice" with Join available, where it showed an internal error. `pkg/schema` gains the additive `VoiceControlReason` value `voice_removed`, a reason to fail in `conch.voice_control.v2` only. A v1 session is unchanged and still reports `internal_error`. There's no new schema version.
 

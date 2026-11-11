@@ -4,8 +4,9 @@
 // A Supervisor owns at most one helper process at a time, started by Join for
 // one voice session and stopped by Leave or Close. It speaks
 // conch.voice_control.v2 when the helper offers it and conch.voice_control.v1
-// otherwise (chosen at the hello, design note §20.2), over two private pipes: commands to the helper's
-// standard input, events from its file descriptor 3. Its standard output is
+// otherwise (chosen at the hello, design note §20.2), over two private pipes:
+// commands to the helper's standard input, events from its file descriptor 3.
+// Its standard output is
 // drained unread and its standard error kept as a short, sanitized tail
 // (Diagnostics). Status reports only what the helper confirmed and what the
 // supervisor saw itself, never what was asked for.
@@ -271,6 +272,7 @@ func (s *Supervisor) Join(ctx context.Context, channel string) error {
 	r.version = version
 	if s.cur == r {
 		s.status.Protocol = version
+		s.publishLocked()
 	}
 	s.mu.Unlock()
 

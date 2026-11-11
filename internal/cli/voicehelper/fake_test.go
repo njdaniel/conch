@@ -681,7 +681,11 @@ func (f *fake) replay(term <-chan os.Signal) int {
 			_, _ = f.events.Write(append(line.Bytes(), '\n'))
 		case step.Close != "":
 			for got := range cmds {
-				cmd, err := schema.ParseVoiceControlCommand(got)
+				cmd, err := f.parseCommand(got)
+				if err != nil {
+					// A transcript of v2 ends in a v2 leave.
+					cmd, err = parseV2AsV1(got)
+				}
 				if !started || err != nil || cmd.Leave == nil {
 					return fakeFail("step %d: %q where standard input was to end", i, got)
 				}

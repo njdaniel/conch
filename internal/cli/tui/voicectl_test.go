@@ -315,6 +315,26 @@ func TestVoiceStripWords(t *testing.T) {
 		{name: "push to talk, v2, shows nothing new", st: with(connected("general"), func(s *voicehelper.Status) {
 			s.Protocol, s.TalkMode, s.Playback = schema.VoiceControlSchemaV2, schema.VoiceControlTalkModePushToTalk, schema.VoiceControlPlaybackOn
 		}), want: "voice: #general · mic on · hold the talk key to talk", notWant: "open mic"},
+		{name: "open mic, no talk key needed", st: with(connected("general"), func(s *voicehelper.Status) {
+			s.Protocol, s.TalkMode, s.PTT = schema.VoiceControlSchemaV2, schema.VoiceControlTalkModeOpen, schema.VoiceControlPTTNotConfigured
+		}), want: "voice: #general · mic on · open mic", notWant: "no talk key"},
+		{name: "open mic, key device lost is not said", st: with(connected("general"), func(s *voicehelper.Status) {
+			s.Protocol, s.TalkMode, s.PTT, s.PTTProblem = schema.VoiceControlSchemaV2, schema.VoiceControlTalkModeOpen, schema.VoiceControlPTTLost, schema.VoiceControlPTTProblemEnded
+		}), want: "voice: #general · mic on · open mic", notWant: "talk key lost"},
+		{name: "open mic, the limit stands until quiet", st: with(connected("general"), func(s *voicehelper.Status) {
+			s.Protocol, s.TalkMode = schema.VoiceControlSchemaV2, schema.VoiceControlTalkModeOpen
+			s.Blocked = []schema.VoiceControlBlock{schema.VoiceControlBlockMaxTransmit}
+		}), want: "voice: #general · mic on · open mic · talk limit reached: stands until quiet", notWant: "release the key"},
+		{name: "push to talk, the limit says release the key", st: with(connected("general"), func(s *voicehelper.Status) {
+			s.Protocol, s.TalkMode = schema.VoiceControlSchemaV2, schema.VoiceControlTalkModePushToTalk
+			s.Blocked = []schema.VoiceControlBlock{schema.VoiceControlBlockMaxTransmit}
+		}), want: "voice: #general · mic on", notWant: "stands until quiet"},
+		{name: "a failed open-mode helper not yet reaped", st: with(failed("general", voicehelper.ReasonAckTimeout), func(s *voicehelper.Status) {
+			s.Protocol, s.TalkMode, s.Capture = schema.VoiceControlSchemaV2, schema.VoiceControlTalkModeOpen, schema.VoiceControlCaptureOn
+		}), want: "voice: stopping conch-voice (open mic may still be live)", notWant: "/voice retry"},
+		{name: "the same once it is reaped", st: with(failed("general", voicehelper.ReasonAckTimeout), func(s *voicehelper.Status) {
+			s.Protocol, s.TalkMode = schema.VoiceControlSchemaV2, schema.VoiceControlTalkModeOpen
+		}), want: "voice stopped: conch-voice stopped answering · /voice retry", notWant: "may still be live"},
 		{name: "leaving", st: with(connected("general"), func(s *voicehelper.Status) { s.Phase, s.Reason = voicehelper.PhaseStopping, "left" }), want: "voice: leaving #general…"},
 		{name: "failed, retryable", st: failed("general", "duplicate_identity"), want: "voice stopped: this account joined voice elsewhere (a retry disconnects the other) · /voice retry"},
 		{name: "failed, not retryable", st: failed("general", "not_a_member"), want: "voice stopped: not a member of this channel", notWant: "/voice retry"},
@@ -820,10 +840,28 @@ func TestVoiceStatusPage(t *testing.T) {
 	if lines := strings.Join(m.voiceStatusLines(120), "\n"); !strings.Contains(lines, "open microphone") || !strings.Contains(lines, "speakers") || !strings.Contains(lines, schema.VoiceControlSchemaV2) {
 		t.Errorf("the v2 open page:\n%s", lines)
 	}
-	// A v1 session shows none of them.
-	m.vc.status = connected("general")
-	if lines := strings.Join(m.voiceStatusLines(120), "\n"); strings.Contains(lines, "talk mode") || strings.Contains(lines, "protocol") {
-		t.Errorf("the v1 page:\n%s", lines)
+	// A v1 session shows its protocol and neither the talk mode nor the
+	// speakers (its own "chosen speakers" row is another thing).
+	v1st := connected("general")
+	v1st.Protocol = schema.VoiceControlSchemaV1
+	m.vc.status = v1st
+	lines := strings.Join(m.voiceStatusLines(120), "\n")
+	if !strings.Contains(lines, "protocol") || !strings.Contains(lines, schema.VoiceControlSchemaV1) {
+		t.Errorf("the v1 page lacks the protocol:\n%s", lines)
+	}
+	for _, row := range []string{"talk mode", "\n         speakers", "last speakers"} {
+		if strings.Contains(lines, row) {
+			t.Errorf("the v1 page has %q:\n%s", row, lines)
+		}
+	}
+	// Once the helper has failed, the v2 rows are said as what was last true,
+	// and a live open microphone is warned of until the process is reaped.
+	live := open2
+	live.Phase, live.Reason = voicehelper.PhaseFailed, voicehelper.ReasonAckTimeout
+	m.vc.status = live
+	lines = strings.Join(m.voiceStatusLines(120), "\n")
+	if !strings.Contains(lines, "last talk mode") || !strings.Contains(lines, "may still be live") || !strings.Contains(lines, "an onset now") {
+		t.Errorf("the failed open page:\n%s", lines)
 	}
 	// With no supervisor yet it says so without calling anything.
 	m, _, _ = voiceTestModel(t)
