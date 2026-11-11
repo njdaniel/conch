@@ -359,7 +359,7 @@ func (g *grantedChannel) insertMessage(ctx context.Context, body string, payload
 		// A grant is only ever an agent's.
 		g.scope.s.metrics.messagePosted(store.PrincipalAgent)
 		g.scope.s.events.notifyReadState(g.channel.ID, g.scope.identity.principalID)
-		g.scope.s.events.notifyMessage(g.channel.ID, msg.ID, g.scope.identity.principalID)
+		g.scope.s.messageCommitted(g.channel.ID, msg.ID, g.scope.identity.principalID)
 	}
 	return msg, err
 }
@@ -902,6 +902,6 @@ func (s *Server) postReplyMCP(ctx context.Context, scope *agentScope, channelNam
 		s.broadcaster.BroadcastMessage(ctx, messageV0)
 	}
 	s.events.notifyReadState(granted.channel.ID, authorID)
-	s.events.notifyMessage(granted.channel.ID, stored.ID, authorID)
+	s.messageCommitted(granted.channel.ID, stored.ID, authorID)
 	return schema.PostMessageResponseV2{Message: message}, nil
 }

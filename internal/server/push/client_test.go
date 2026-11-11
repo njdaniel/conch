@@ -377,6 +377,7 @@ func TestClientProperties(t *testing.T) {
 	}{
 		{"no proxy", tr.Proxy == nil},
 		{"no keep-alives", tr.DisableKeepAlives},
+		{"no compression, so no Accept-Encoding", tr.DisableCompression},
 		{"HTTP/2 attempted", tr.ForceAttemptHTTP2},
 		{"dials through the pinned dialer", tr.DialContext != nil && tr.DialTLSContext == nil},
 		{"2s timeout", c.Timeout == 2*time.Second && RequestTimeout == 2*time.Second},

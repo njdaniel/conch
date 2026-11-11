@@ -126,6 +126,19 @@ func checkMessageReads(t *testing.T, fset *token.FileSet, path string, file *ast
 				}
 				return true
 			}
+			// The post-time wake query (issue #1715) reads a message body and
+			// decides, for other people, who may be told of it. It has no
+			// reader argument, because it asks for every registered principal
+			// in turn, each under their own scoped reader inside the store. It
+			// is therefore held to the one caller that may use it: the push
+			// sender's source, which hands the answer to the sender and to
+			// nothing else.
+			if name == "PushTargets" {
+				if filepath.Base(path) != "push_send.go" {
+					t.Errorf("%s: %s calls PushTargets; only the push sender's source (push_send.go) may", path, fset.Position(x.Pos()))
+				}
+				return true
+			}
 			// Any store method that mentions messages must be one of the
 			// known ones. A heuristic on the method's prefix alone would miss
 			// a read named, say, MessagesSince or LastMessage.

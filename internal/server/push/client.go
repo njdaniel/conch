@@ -18,6 +18,7 @@ const RequestTimeout = 2 * time.Second
 //   - never honours HTTP_PROXY or HTTPS_PROXY, because a proxy would make the
 //     connection to the proxy and bypass the pin;
 //   - never reuses a connection, so every request dials and checks;
+//   - asks for no compression, so no Accept-Encoding header is sent;
 //   - negotiates HTTP/2 where the server offers it;
 //   - follows no redirect: a 3xx is returned as a response;
 //   - gives up after RequestTimeout;
@@ -43,6 +44,7 @@ func newClient(d *Dialer, rootCAs *x509.CertPool) *http.Client {
 		Proxy:               nil,
 		DialContext:         d.DialContext,
 		DisableKeepAlives:   true,
+		DisableCompression:  true, // no Accept-Encoding: a wake needs no body, and none is read
 		ForceAttemptHTTP2:   true,
 		TLSHandshakeTimeout: RequestTimeout,
 		TLSClientConfig: &tls.Config{
