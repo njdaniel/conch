@@ -10,7 +10,7 @@ import { useEffect, useRef, useState } from 'react';
 import { Glyph } from '../Icons';
 import type { VoiceClient, VoiceState } from './connection';
 import { askedText, nextShortfall, noShortfall, shareReadout, type ShortfallState } from './sdk';
-import type { ShareDirection, ShareQuality, ShareSample } from './share';
+import type { SettledQuality, ShareDirection, ShareSample } from './share';
 
 // What the watch view needs of the client: the desktop's strip (issue #1582)
 // gives it the companion's, which is a narrower thing than the call view's.
@@ -29,7 +29,7 @@ export function ShareReadout({ client, direction, principal, prefix = '', asked,
   readonly direction: ShareDirection;
   readonly principal?: number;
   readonly prefix?: string;
-  readonly asked?: ShareQuality;
+  readonly asked?: SettledQuality;
   // The clock the 5 s holds count on, in ms.
   readonly now?: () => number;
 }) {
@@ -37,7 +37,7 @@ export function ShareReadout({ client, direction, principal, prefix = '', asked,
   const [reason, setReason] = useState<string | null>(null);
   const previous = useRef<ShareSample | null>(null);
   const shortfall = useRef<ShortfallState>(noShortfall);
-  const quality = useRef<ShareQuality | undefined>(asked);
+  const quality = useRef<SettledQuality | undefined>(asked);
   quality.current = asked;
   const clock = useRef(now);
   clock.current = now;

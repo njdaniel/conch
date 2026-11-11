@@ -127,7 +127,7 @@ import type { Camera, CameraProfile, KeptCamera } from './camera';
 import type { CameraTrack, Microphone, Output, Processing, Room, RoomEvents, ShareSink } from './connection';
 import { personOf, principalOf, publisherOf } from './presence';
 import { LogRing, Redactor } from './redact';
-import { defaultShareQuality, type Captured, type KeptScreen, type ShareDirection, type ShareLimitation, type ShareQuality, type ShareSample } from './share';
+import { autoFrameRate, defaultShareQuality, provisionalQuality, resolveAuto, settleQuality, type Captured, type KeptScreen, type SettledQuality, type SettledResolution, type ShareDirection, type ShareLimitation, type ShareQuality, type ShareSample } from './share';
 
 export { principalOf };
 
@@ -431,9 +431,13 @@ const sourceAsk = { width: 3840, height: 2160, frameRate: 60 } as const;
 
 // The SDK turns the resolution into an ideal (a maximum on Safari), never an
 // exact size or a minimum, so a smaller source is not scaled up or refused.
+// Auto (issue #1659) asks for the most (Source's size, at 30 fps) so that the
+// capture shows how large the screen is; it is then settled by its rule
+// (settleQuality) and the settled quality caps the capture and the encodings.
 function shareAsk(quality: ShareQuality): { readonly width: number; readonly height: number; readonly frameRate: number } {
   if (quality.resolution === '720p') return { width: 1280, height: 720, frameRate: quality.frameRate };
   if (quality.resolution === '1080p') return { width: 1920, height: 1080, frameRate: quality.frameRate };
+  if (quality.resolution === 'auto') return { ...sourceAsk, frameRate: autoFrameRate };
   return { ...sourceAsk, frameRate: quality.frameRate };
 }
 
@@ -465,9 +469,10 @@ function fitBox(width: number, height: number, boxWidth: number, boxHeight: numb
 }
 
 // shareEncodings chooses the top layer from the capture and the sharer's
-// choice, and the lower layers from the top, smallest first.
+// choice, and the lower layers from the top, smallest first. Auto is settled
+// against the capture first.
 export function shareEncodings(captured: CapturedVideo, quality: ShareQuality = defaultShareQuality): { readonly top: ShareLayer; readonly lower: readonly ShareLayer[] } {
-  const ask = shareAsk(quality);
+  const ask = shareAsk(settleQuality(quality, captured));
   const [capturedWidth, capturedHeight] = known(captured.width) && known(captured.height) ? [captured.width, captured.height] : [ask.width, ask.height];
   const [width, height] = fitBox(capturedWidth, capturedHeight, ask.width, ask.height);
   const fps = known(captured.frameRate) ? Math.min(captured.frameRate, ask.frameRate) : ask.frameRate;
@@ -489,6 +494,21 @@ export function shareEncodings(captured: CapturedVideo, quality: ShareQuality = 
     lower.push({ width: w, height: h, maxBitrate: layer.maxBitrate, maxFramerate: Math.min(layer.maxFramerate, fps) });
   }
   return { top: { width, height, maxBitrate, maxFramerate: fps }, lower };
+}
+
+// shareEstimateMbps is about what a share at this quality sends up, in Mbps:
+// the top layer's bitrate row and the lower layers beneath it, as
+// shareEncodings builds them for a capture at the size asked, summed as in
+// voice-multi-share.md §8. An estimate from those rows, not a measurement
+// (#1513 owes the measurement). Auto is estimated at its larger case, which is
+// also 1080p's (a capture to 1920 px is shared as it is, a larger one at
+// 1080p).
+export function shareEstimateMbps(quality: ShareQuality): number {
+  const settled: SettledQuality = quality.resolution === 'auto' ? { resolution: '1080p', frameRate: autoFrameRate } : { resolution: quality.resolution, frameRate: quality.frameRate };
+  const ask = shareAsk(settled);
+  const { top, lower } = shareEncodings({ width: ask.width, height: ask.height, frameRate: ask.frameRate }, settled);
+  const total = top.maxBitrate + lower.reduce((sum, layer) => sum + layer.maxBitrate, 0);
+  return Math.round(total / 1_000_000);
 }
 
 // What the picker asks for: the chosen picture caps, unprocessed sound, the
@@ -686,7 +706,7 @@ function lossText(share: number): string {
 
 // askedText says what the sharer asked for, labelled as asked: "Asked 1080p ·
 // 60 fps". It is the chosen quality, never a measurement.
-export function askedText(quality: ShareQuality): string {
+export function askedText(quality: SettledQuality): string {
   const size = quality.resolution === 'source' ? 'source size' : quality.resolution;
   return `Asked ${size} · ${String(quality.frameRate)} fps`;
 }
@@ -715,7 +735,7 @@ export const noShortfall: ShortfallState = { short: null, good: null, reason: nu
 // null when it is on target or nothing can be said. The reason comes only
 // from the stats and the capture's settings. An encoder that says it is not
 // limited (none) is not short on rate, as a still screen sends few frames.
-export function shortfallReason(sample: ShareSample, quality: ShareQuality): string | null {
+export function shortfallReason(sample: ShareSample, quality: SettledQuality): string | null {
   const ask = shareAsk(quality);
   const asked = quality.resolution === 'source' ? null : ask;
   const long = Math.max(sample.width, sample.height);
@@ -759,7 +779,7 @@ export function shortfallReason(sample: ShareSample, quality: ShareQuality): str
 // monotonic clock): it appears once the shortfall has held shortfallHold, and
 // clears shortfallHold after the picture is back on target. The reason shown
 // follows the latest while short.
-export function nextShortfall(state: ShortfallState, sample: ShareSample | null, quality: ShareQuality, now: number): ShortfallState {
+export function nextShortfall(state: ShortfallState, sample: ShareSample | null, quality: SettledQuality, now: number): ShortfallState {
   if (sample === null) return noShortfall;
   const base = state.publication === sample.publication ? state : noShortfall;
   const reason = shortfallReason(sample, quality);
@@ -843,10 +863,14 @@ const isShare = (source: Track.Source) => source === Track.Source.ScreenShare ||
 class Kept implements KeptScreen {
   readonly tracks: readonly LocalTrack[];
   readonly audio: boolean;
+  // What Auto settled to for this capture, if it was chosen (issue #1659), so
+  // the next connection declares and shapes the same.
+  readonly resolved: SettledResolution | null;
   onEnded: (() => void) | null = null;
 
-  constructor(tracks: readonly LocalTrack[]) {
+  constructor(tracks: readonly LocalTrack[], resolved: SettledResolution | null = null) {
     this.tracks = tracks;
+    this.resolved = resolved;
     this.audio = tracks.some((t) => t.source === Track.Source.ScreenShareAudio);
     const video = tracks.find((t) => t.source === Track.Source.ScreenShare);
     video?.mediaStreamTrack.addEventListener('ended', () => {
@@ -937,6 +961,10 @@ class LiveKitAdapter implements Room {
   private screen: LocalTrack[] = [];
   private shareQuality: ShareQuality = defaultShareQuality;
   private shareQualityChange: Promise<void> = Promise.resolve();
+  // What Auto settled to for the capture held (issue #1659): decided once, from
+  // the capture's size before any cap, and kept while the capture is, so a later
+  // change of the encodings does not read the capped size and flip it.
+  private autoResolved: SettledResolution | null = null;
   private stoppingScreen = false;
   // Called at the next change of this connection's own permission, and when
   // the share is stopped, kept or closed: where a share's publish refused for
@@ -1409,6 +1437,7 @@ class LiveKitAdapter implements Room {
     this.ensureOpen();
     this.shareQuality = quality;
     await this.stopScreen();
+    this.autoResolved = null;
     const made = await this.room.localParticipant.createScreenTracks(captureOptions(quality, !this.companion));
     // The companion has no sound to share on Linux: whatever the portal gave
     // beyond the picture is stopped and never held or published.
@@ -1423,7 +1452,8 @@ class LiveKitAdapter implements Room {
     const video = tracks.find((t): t is LocalVideoTrack => t.source === Track.Source.ScreenShare);
     if (video !== undefined) {
       try {
-        await this.constrainShare(video, quality);
+        // Auto is settled from the capture as it came, then capped as settled.
+        await this.constrainShare(video, await this.settleShare(video, quality, true));
         this.ensureOpen();
       } catch (err) {
         for (const t of tracks) t.stop();
@@ -1432,6 +1462,30 @@ class LiveKitAdapter implements Room {
     }
     this.holdScreen(tracks);
     return { audio: tracks.some((t) => t.source === Track.Source.ScreenShareAudio) };
+  }
+
+  // settled is the quality as it applies to the capture held: Auto as it was
+  // settled for it, anything else as it is; before a capture, the provisional
+  // value (provisionalQuality).
+  settled(quality: ShareQuality): SettledQuality {
+    if (quality.resolution === 'auto' && this.autoResolved !== null) return { resolution: this.autoResolved, frameRate: autoFrameRate };
+    return provisionalQuality(quality);
+  }
+
+  // settleShare decides what Auto comes to for a capture, once. A capture just
+  // picked (fresh) is read as it came. One already capped by an earlier choice
+  // has the cap lifted to Auto's ask first, so the size read is the screen's
+  // and not a smaller one.
+  private async settleShare(track: LocalVideoTrack, quality: ShareQuality, fresh = false): Promise<SettledQuality> {
+    if (quality.resolution !== 'auto') {
+      this.autoResolved = null;
+      return this.settled(quality);
+    }
+    if (this.autoResolved === null) {
+      if (!fresh) await this.constrainShare(track, quality);
+      this.autoResolved = resolveAuto(track.mediaStreamTrack.getSettings());
+    }
+    return this.settled(quality);
   }
 
   setShareQuality(quality: ShareQuality): Promise<void> {
@@ -1446,9 +1500,10 @@ class LiveKitAdapter implements Room {
   private async applyShareQuality(): Promise<void> {
     const track = this.screen.find((t): t is LocalVideoTrack => t.source === Track.Source.ScreenShare);
     if (track === undefined) return;
-    await this.constrainShare(track, this.shareQuality);
+    const settled = await this.settleShare(track, this.shareQuality);
+    await this.constrainShare(track, settled);
     this.ensureOpen();
-    await this.shapeSender(track, this.shareQuality);
+    await this.shapeSender(track, settled);
   }
 
   // constrainShare holds the chosen caps on the live capture.
@@ -1529,7 +1584,9 @@ class LiveKitAdapter implements Room {
     } finally {
       this.stoppingScreen = false;
     }
-    return new Kept(tracks);
+    const resolved = this.autoResolved;
+    this.autoResolved = null;
+    return new Kept(tracks, resolved);
   }
 
   adoptScreen(kept: KeptScreen): void {
@@ -1537,6 +1594,7 @@ class LiveKitAdapter implements Room {
     if (!(kept instanceof Kept)) throw new Error('voice: not a capture this page kept');
     // Sent again as captured, from this connection's publish on.
     for (const track of kept.tracks) track.mediaStreamTrack.enabled = true;
+    this.autoResolved = kept.resolved;
     this.holdScreen([...kept.tracks]);
   }
 
@@ -1551,12 +1609,12 @@ class LiveKitAdapter implements Room {
       const settings = track.mediaStreamTrack.getSettings();
       // The companion publishes the picture alone, whatever was captured.
       if (this.companion && track.source !== Track.Source.ScreenShare) continue;
-      const options = track.source === Track.Source.ScreenShareAudio ? audioPublishOptions((settings.channelCount ?? 1) >= 2) : videoPublishOptions(settings, this.shareQuality);
+      const options = track.source === Track.Source.ScreenShareAudio ? audioPublishOptions((settings.channelCount ?? 1) >= 2) : videoPublishOptions(settings, this.settled(this.shareQuality));
       await this.publishGranted(track, options, deadline);
       this.ensureOpen();
       // LiveKit builds the top layer from the real capture size: hold the cap
       // on it. A refusal leaves the share as published.
-      if (track.source === Track.Source.ScreenShare) await this.shapeSender(track as LocalVideoTrack, this.shareQuality).catch(() => undefined);
+      if (track.source === Track.Source.ScreenShare) await this.shapeSender(track as LocalVideoTrack, this.settled(this.shareQuality)).catch(() => undefined);
     }
   }
 

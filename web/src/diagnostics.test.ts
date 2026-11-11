@@ -1,5 +1,6 @@
 // The diagnostic ring (issue #446): bounded, in memory, and never holding a
 // token, a ticket, an invite code, a room name, a channel name or message text.
+import { provisionalQuality } from './voice/share';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as api from './api';
 import { forget, recent, record, ringSize, voiceState } from './diagnostics';
@@ -246,7 +247,8 @@ describe('what the voice client records', () => {
       setWatches: () => undefined,
       attachStream: () => undefined,
       pickScreen: () => Promise.reject(new Error('no screen in this test')),
-      setShareQuality: () => Promise.resolve(),
+      settled: provisionalQuality,
+    setShareQuality: () => Promise.resolve(),
       readShareStats: () => Promise.resolve(null),
       publishScreen: () => Promise.resolve(),
       stopScreen: () => Promise.resolve(),

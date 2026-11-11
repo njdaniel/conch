@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { ShareClaimResult } from '../api';
 import type { VoiceShareEnded, VoiceShareEndReason } from '../schema/voice';
 import { FakeClock, settle } from './fakes';
-import { browserFeatures, endedNote, othersShareNote, ownPageNote, pickCause, resumeLimit, ScreenShare, sharedNote, shortShareNote, soundNote, type Captured, type KeptScreen, type ShareFeatures, type ShareQuality, type ShareRoom, type ShareState } from './share';
+import { browserFeatures, endedNote, othersShareNote, ownPageNote, pickCause, resumeLimit, ScreenShare, settleQuality, sharedNote, shortShareNote, soundNote, type Captured, type KeptScreen, type SettledQuality, type ShareFeatures, type ShareQuality, type ShareRoom, type ShareState } from './share';
 
 interface Deferred<T> {
   readonly promise: Promise<T>;
@@ -33,12 +33,14 @@ function setup(claims: ShareClaimResult[] = []) {
   // The claim each release named, in order (issue #487).
   const released: string[] = [];
   const states: ShareState[] = [];
-  const claimedQualities: (ShareQuality | undefined)[] = [];
+  const claimedQualities: (SettledQuality | undefined)[] = [];
   const room = {
     pick: null as Deferred<Captured> | null,
     pickFails: false,
     publishFails: false,
     audio: true,
+    // The size of the screen captured, for Auto to settle against (#1659).
+    capture: { width: 1920, height: 1080 } as { width?: number; height?: number },
     // Issue #516: what keepScreen hands over, and whether its capture is live.
     kept: null as KeptScreen | null,
     live: true,
@@ -55,6 +57,7 @@ function setup(claims: ShareClaimResult[] = []) {
       if (room.pick !== null) return room.pick.promise;
       return room.pickFails ? Promise.reject(new Error('NotAllowedError')) : Promise.resolve({ audio: room.audio });
     },
+    settled: (quality) => settleQuality(quality, room.capture),
     setShareQuality: () => Promise.resolve(),
     readShareStats: () => Promise.resolve(null),
     publishScreen: () => {
@@ -132,6 +135,42 @@ describe('starting a share', () => {
     const changed: ShareQuality = { resolution: 'source', frameRate: 60 };
     await t.share.changeQuality(changed);
     expect(t.claimedQualities).toEqual([picked, picked, changed]);
+  });
+
+  // Auto (issue #1659) is local: every claim declares a concrete value, the
+  // provisional 1080p30 before the capture is known and what the capture
+  // resolved after it.
+  it.each([
+    { what: 'a 1080p screen is shared as it is', capture: { width: 1920, height: 1080 }, want: { resolution: 'source', frameRate: 30 } },
+    { what: 'a screen of 1920 px across is Source', capture: { width: 1920, height: 1200 }, want: { resolution: 'source', frameRate: 30 } },
+    { what: 'a 1440p screen is 1080p', capture: { width: 2560, height: 1440 }, want: { resolution: '1080p', frameRate: 30 } },
+    { what: 'a 4K screen is 1080p', capture: { width: 3840, height: 2160 }, want: { resolution: '1080p', frameRate: 30 } },
+    { what: 'a portrait screen counts its longest side', capture: { width: 1440, height: 2560 }, want: { resolution: '1080p', frameRate: 30 } },
+    { what: 'a small portrait screen is Source', capture: { width: 1080, height: 1920 }, want: { resolution: 'source', frameRate: 30 } },
+    { what: 'a size the browser does not report is 1080p', capture: {}, want: { resolution: '1080p', frameRate: 30 } },
+  ] satisfies { what: string; capture: { width?: number; height?: number }; want: SettledQuality }[])('Auto: $what', async ({ capture, want }) => {
+    const t = setup();
+    t.room.capture = capture;
+    await t.share.start('general', t.stub, { resolution: 'auto', frameRate: 30 });
+    expect(t.claimedQualities).toEqual([{ resolution: '1080p', frameRate: 30 }, want]);
+    expect(JSON.stringify(t.claimedQualities)).not.toContain('auto');
+  });
+
+  it('Auto declares its resolved value again on a resume, and on a change back to Auto while live', async () => {
+    const t = setup([granted, granted, granted, granted, granted]);
+    t.room.capture = { width: 1920, height: 1080 };
+    await t.share.start('general', t.stub, { resolution: 'auto', frameRate: 30 });
+    t.share.presence('me');
+    t.share.presence('none', { reason: 'rotated', started_at: '2026-10-16T00:00:00.000Z', ended_at: '2026-10-16T00:01:00.000Z' });
+    await t.share.lost(true);
+    t.share.connected('general', t.stub);
+    await settle();
+    expect(t.claimedQualities.at(-1)).toEqual({ resolution: 'source', frameRate: 30 });
+    await t.share.changeQuality({ resolution: '720p', frameRate: 60 });
+    t.room.capture = { width: 3840, height: 2160 };
+    await t.share.changeQuality({ resolution: 'auto', frameRate: 30 });
+    expect(t.claimedQualities.at(-1)).toEqual({ resolution: '1080p', frameRate: 30 });
+    expect(t.claimedQualities.every((q) => q?.resolution !== ('auto' as string))).toBe(true);
   });
 
   it('a quality changed while the picker is open is the one the second claim sends', async () => {

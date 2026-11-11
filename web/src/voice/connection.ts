@@ -86,7 +86,7 @@ import { afterDisconnect, afterRefusal, afterViewerRefusal, cameraAfter, retryDe
 import { clampTail, defaultTail, TransmitGate, type GateMode, type GateOptions } from './gate';
 import { cameraHolders, occupants, personOf, principalOf, sharers } from './presence';
 import { ReportQueue, type ReportEvent } from './reports';
-import { defaultShareQuality, idleShare, qualityLaterNote, resumeLimit, ScreenShare, type ScreenEnd, type ShareDirection, type ShareQuality, type ShareRoom, type ShareSample, type ShareState } from './share';
+import { autoFrameRate, defaultShareQuality, idleShare, qualityLaterNote, resumeLimit, ScreenShare, type ScreenEnd, type SettledQuality, type ShareDirection, type ShareQuality, type ShareRoom, type ShareSample, type ShareState } from './share';
 import { record } from '../diagnostics';
 
 // The names a browser gives the failures of a microphone it was asked for
@@ -427,7 +427,7 @@ export interface VoiceEnv {
   readonly companion?: CompanionEnv;
   readonly report: (channel: string, state: VoiceTransmitState, signal: AbortSignal) => Promise<TransmitAnswer>;
   readonly newRoom: () => Room;
-  readonly claimShare: (channel: string, quality?: ShareQuality) => Promise<ShareClaimResult>;
+  readonly claimShare: (channel: string, quality?: SettledQuality) => Promise<ShareClaimResult>;
   // Releases the share whose claim started at startedAt (issue #487).
   readonly stopShare: (channel: string, startedAt: string) => Promise<unknown>;
   // The camera's claim, un-named or naming the claim it continues, and its
@@ -477,7 +477,8 @@ export const reportWait = 1000;
 
 // What the desktop offers for a share (Q-D4-3 on #1578): 720p30, the default,
 // and 1080p30, until real captures are measured (#1584). Any other choice is
-// taken as the default.
+// taken as the default, Auto (issue #1659) among them: the desktop never
+// offers it and reads a stored one as 720p30.
 export const companionDefaultQuality: ShareQuality = { resolution: '720p', frameRate: 30 };
 export const companionQualities: readonly ShareQuality[] = [companionDefaultQuality, { resolution: '1080p', frameRate: 30 }];
 export function companionQuality(quality: ShareQuality): ShareQuality {
@@ -1122,8 +1123,9 @@ export class VoiceClient {
   // is kept even if this browser cannot apply it to the track already open,
   // and then conchd is not told: the stream did not change.
   async setShareQuality(asked: ShareQuality): Promise<void> {
-    // The desktop offers 720p30 and 1080p30 only (Q-D4-3 on #1578).
-    const quality = this.env.companion === undefined ? asked : companionQuality(asked);
+    // The desktop offers 720p30 and 1080p30 only (Q-D4-3 on #1578). Auto is
+    // always 30 fps (Q10 on #1614), whatever rate was left on the choice.
+    const quality = this.env.companion !== undefined ? companionQuality(asked) : asked.resolution === 'auto' ? { resolution: 'auto' as const, frameRate: autoFrameRate } : asked;
     this.set({ shareQuality: quality });
     try {
       await this.room?.setShareQuality(quality);

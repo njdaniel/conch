@@ -4,9 +4,9 @@ import type { ShareClaimResult, TransmitAnswer, VoiceSessionResult, VoiceViewerR
 import type { VoicePresenceV2 } from '../schema/voice';
 import type { CameraClaimResult } from '../api';
 import type { Camera, CameraProfile, KeptCamera } from './camera';
-import { VoiceClient, chosenGone, companionDefaultQuality, companionEnds, companionLeftWatching, companionLost, companionRefusals, type CompanionEnv, earlierGone, levelEvery, meterEvery, outputMoved, outputRefused, reconnectLimit, reportWait, type CameraTrack, type Microphone, type ModeStore, type Output, type Phase, type Processing, type ProcessingStore, type Room, type RoomEvents, type ShareSink } from './connection';
+import { VoiceClient, chosenGone, companionDefaultQuality, companionEnds, companionQuality, companionLeftWatching, companionLost, companionRefusals, type CompanionEnv, earlierGone, levelEvery, meterEvery, outputMoved, outputRefused, reconnectLimit, reportWait, type CameraTrack, type Microphone, type ModeStore, type Output, type Phase, type Processing, type ProcessingStore, type Room, type RoomEvents, type ShareSink } from './connection';
 import { shareNote } from './native/words';
-import { qualityLaterNote, resumeLimit, type Captured, type KeptScreen, type ShareQuality } from './share';
+import { qualityLaterNote, resumeLimit, settleQuality, type Captured, type KeptScreen, type SettledQuality, type ShareQuality } from './share';
 import { defaultTail } from './gate';
 import { FakeClock, settle } from './fakes';
 
@@ -123,6 +123,9 @@ class StubRoom implements Room {
     return this.pickFails ? Promise.reject(this.pickError ?? new Error('picker closed')) : Promise.resolve({ audio: this.pickAudio });
   };
   qualities: ShareQuality[] = [];
+  // The size of the screen captured, for Auto to settle against.
+  capture: { width: number; height: number } = { width: 1920, height: 1080 };
+  settled = (quality: ShareQuality): SettledQuality => settleQuality(quality, this.capture);
   setShareQuality = (quality: ShareQuality): Promise<void> => {
     this.qualities.push(quality);
     return Promise.resolve();
@@ -3750,6 +3753,33 @@ describe('the screen companion', () => {
     expect(t.client.snapshot().shareQuality).toEqual(companionDefaultQuality);
     await t.client.setShareQuality({ resolution: '720p', frameRate: 15 });
     expect(t.client.snapshot().shareQuality).toEqual(companionDefaultQuality);
+  });
+
+  // Issue #1659: Auto is the browser's alone. The desktop never offers it, and
+  // reads a stored one as its own default.
+  it.each([
+    { what: 'auto at 30', quality: { resolution: 'auto', frameRate: 30 } },
+    { what: 'auto at a stray 60', quality: { resolution: 'auto', frameRate: 60 } },
+  ] as const)('the desktop reads a stored $what as 720p30, and a chosen one the same', async ({ quality }) => {
+    const t = setup([], [], 0, false, undefined, undefined, undefined, undefined, undefined, [], (order) => ({ ...nativeCompanion(order, []).env, shareQuality: quality }));
+    expect(t.client.snapshot().shareQuality).toEqual(companionDefaultQuality);
+    await t.client.setShareQuality({ resolution: '1080p', frameRate: 30 });
+    await t.client.setShareQuality(quality);
+    expect(t.client.snapshot().shareQuality).toEqual(companionDefaultQuality);
+  });
+
+  it.each([
+    { asked: { resolution: 'auto', frameRate: 30 }, want: { resolution: '720p', frameRate: 30 } },
+    { asked: { resolution: '1080p', frameRate: 30 }, want: { resolution: '1080p', frameRate: 30 } },
+    { asked: { resolution: '1080p', frameRate: 60 }, want: { resolution: '720p', frameRate: 30 } },
+  ] as const)('the companion takes $asked.resolution at $asked.frameRate fps as $want.resolution', ({ asked, want }) => {
+    expect(companionQuality(asked)).toEqual(want);
+  });
+
+  it('the browser keeps Auto at 30 fps whatever rate was left on the choice', async () => {
+    const t = setup();
+    await t.client.setShareQuality({ resolution: 'auto', frameRate: 60 });
+    expect(t.client.snapshot().shareQuality).toEqual({ resolution: 'auto', frameRate: 30 });
   });
 
   it('the browser keeps every quality and 1080p30 by default', async () => {

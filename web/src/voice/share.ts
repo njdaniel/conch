@@ -41,14 +41,46 @@ import type { VoiceShareEnded, VoiceShareEndReason } from '../schema/voice';
 import type { Clock } from '../state/feed';
 
 // The sharer's choice of capture and top layer. It is a local preference,
-// never part of presence or another wire document.
-export type ShareResolution = '720p' | '1080p' | 'source';
+// never part of presence or another wire document. 'auto' is local only
+// (issue #1659): the wire vocabulary (VoiceShareResolution) is closed, so what
+// a claim declares and what viewers see is always a SettledQuality.
+export type SettledResolution = '720p' | '1080p' | 'source';
+export type ShareResolution = SettledResolution | 'auto';
 export type ShareFrameRate = 15 | 30 | 60;
 export interface ShareQuality {
   readonly resolution: ShareResolution;
   readonly frameRate: ShareFrameRate;
 }
+// A quality with a concrete resolution: the only kind sent to conchd.
+export interface SettledQuality {
+  readonly resolution: SettledResolution;
+  readonly frameRate: ShareFrameRate;
+}
 export const defaultShareQuality: ShareQuality = { resolution: '1080p', frameRate: 30 };
+
+// Auto's rule (Q10 on #1614): a capture whose longest side is 1920 px or less
+// is shared as it is (Source); a larger one at 1080p. Always 30 fps. A capture
+// whose size is not known is 1080p, which caps it.
+export const autoSourceLongest = 1920;
+export const autoFrameRate: ShareFrameRate = 30;
+export function resolveAuto(capture: { readonly width?: number; readonly height?: number }): SettledResolution {
+  const { width, height } = capture;
+  if (width === undefined || height === undefined || !Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) return '1080p';
+  return Math.max(width, height) <= autoSourceLongest ? 'source' : '1080p';
+}
+
+// provisionalQuality is what a quality declares before a capture is known:
+// itself, or for Auto the 1080p default, 30 fps. Auto's resolved value is
+// declared once the capture is taken (ScreenShare).
+export function provisionalQuality(quality: ShareQuality): SettledQuality {
+  return quality.resolution === 'auto' ? { resolution: '1080p', frameRate: autoFrameRate } : { resolution: quality.resolution, frameRate: quality.frameRate };
+}
+
+// settleQuality is a quality against a capture's size: Auto resolved by its
+// rule, anything else as it is.
+export function settleQuality(quality: ShareQuality, capture: { readonly width?: number; readonly height?: number }): SettledQuality {
+  return quality.resolution === 'auto' ? { resolution: resolveAuto(capture), frameRate: autoFrameRate } : { resolution: quality.resolution, frameRate: quality.frameRate };
+}
 
 // One stats sample of the received share, or of its sent top layer.
 export interface ShareSample {
@@ -116,6 +148,10 @@ export interface ShareRoom {
   // Opens the browser's picker at the chosen caps and keeps what was chosen,
   // unpublished. Rejects when nothing was chosen.
   readonly pickScreen: (quality?: ShareQuality) => Promise<Captured>;
+  // The quality as it applies to what is captured now: Auto resolved from the
+  // capture (and kept as long as the capture is), anything else as it is.
+  // Without a capture, what a quality declares before one (provisionalQuality).
+  readonly settled: (quality: ShareQuality) => SettledQuality;
   // Changes the capture and its existing sender encodings without republishing.
   readonly setShareQuality: (quality: ShareQuality) => Promise<void>;
   // The latest stats of the received share or the sent top layer.
@@ -234,7 +270,7 @@ export const qualityRetryLimit = 10;
 export const qualityLaterNote = 'Quality changes are limited to a few at a time: the others see the new quality on your stream in a moment.';
 
 export interface ShareApi {
-  readonly claim: (channel: string, quality?: ShareQuality) => Promise<ShareClaimResult>;
+  readonly claim: (channel: string, quality?: SettledQuality) => Promise<ShareClaimResult>;
   // Releases the claim whose started_at is startedAt, and no other.
   readonly release: (channel: string, startedAt: string) => Promise<unknown>;
 }
@@ -290,6 +326,9 @@ export class ScreenShare {
   private channel: string | null = null;
   private room: ShareRoom | null = null;
   private quality: ShareQuality = defaultShareQuality;
+  // What an Auto choice came to for the capture (room.settled), once there is
+  // one: declared on every claim after the first, including a resume's.
+  private resolved: SettledQuality | null = null;
   // Whether presence has shown this person sharing since the last claim: a
   // presence without them after that is the server ending the share.
   private seen = false;
@@ -354,13 +393,14 @@ export class ScreenShare {
     this.channel = channel;
     this.room = room;
     this.quality = quality;
+    this.resolved = null;
     this.seen = false;
     this.renewal = false;
     this.set({ kind: 'claiming' });
     // The channel as it is called now: renamed (issue #728) while the picker
     // was open, the next call names the new name.
     const at = () => this.channel ?? channel;
-    const first = await this.api.claim(channel, this.quality);
+    const first = await this.api.claim(channel, this.declared());
     if (first.ok) this.granted(first.value.started_at);
     if (mine !== this.attempt) {
       // Stopped while the claim was on its way: a claim granted since is ours
@@ -391,8 +431,10 @@ export class ScreenShare {
     this.set({ kind: 'publishing' });
     this.seen = false;
     // The choice as it is now: one changed while the picker was open is the
-    // one conchd is told.
-    const again = await this.api.claim(at(), this.quality);
+    // one conchd is told. An Auto choice is declared as what the capture
+    // resolved it to: the first claim could only say the provisional value.
+    this.settle(room);
+    const again = await this.api.claim(at(), this.declared());
     if (again.ok) this.granted(again.value.started_at);
     if (mine !== this.attempt) {
       await room.stopScreen();
@@ -449,8 +491,20 @@ export class ScreenShare {
   // what the last send came to.
   changeQuality(quality: ShareQuality): Promise<QualityAnswer> {
     this.quality = quality;
+    this.resolved = null;
+    if (this.state.kind === 'sharing') this.settle(this.room);
     this.endQualityRetry();
     return this.queueQuality(true);
+  }
+
+  // declared is the quality every claim carries: always a concrete value.
+  private declared(): SettledQuality {
+    return this.quality.resolution === 'auto' ? (this.resolved ?? provisionalQuality(this.quality)) : provisionalQuality(this.quality);
+  }
+
+  // settle takes what the room's capture makes of an Auto choice.
+  private settle(room: ShareRoom | null): void {
+    if (this.quality.resolution === 'auto' && room !== null) this.resolved = room.settled(this.quality);
   }
 
   // queueQuality marks the current choice as to be sent and starts the one
@@ -490,7 +544,7 @@ export class ScreenShare {
     const channel = this.channel;
     if (this.state.kind !== 'sharing' || channel === null) return 'sent';
     const mine = this.attempt;
-    const answer = await this.api.claim(channel, this.quality);
+    const answer = await this.api.claim(channel, this.declared());
     if (mine !== this.attempt) {
       // Stopped or ended meanwhile; a newer share's claim would have its own
       // start, and is left alone.
@@ -737,7 +791,7 @@ export class ScreenShare {
     const mine = ++this.attempt;
     this.reclaiming = true;
     this.seen = false;
-    const answer = await this.api.claim(channel, this.quality);
+    const answer = await this.api.claim(channel, this.declared());
     this.reclaiming = false;
     // Renamed meanwhile (issue #728): what follows names the new name.
     const at = () => this.channel ?? channel;
@@ -843,7 +897,7 @@ export class ScreenShare {
   async reconnected(): Promise<void> {
     if (this.state.kind !== 'sharing' || this.channel === null) return;
     const mine = this.attempt;
-    const answer = await this.api.claim(this.channel, this.quality);
+    const answer = await this.api.claim(this.channel, this.declared());
     if (mine !== this.attempt) return;
     if (answer.ok) {
       if (await this.newShare(answer.value.started_at)) return;

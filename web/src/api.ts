@@ -1,5 +1,5 @@
 import { disablePrincipalResponseV1, listChannelBansResponseV1, messageV2, revokeIssuedResponseV1, type DisablePrincipalResponseV1, type RevokeIssuedResponseV1, messageRemovedV1, type MessageRemovedV1 } from './schema/generated';
-import { defaultShareQuality, type ShareQuality } from './voice/share';
+import { defaultShareQuality, type SettledQuality, type ShareQuality } from './voice/share';
 // The only module that holds the credential in use, and the only one that
 // asks conchd anything. Where the token lives depends on whose it is (issue
 // #439, decision O1). A member's lasts: it is kept so that it survives closing
@@ -2632,16 +2632,19 @@ export function writeHideNonVideo(hide: boolean): void {
 const shareQualityKey = 'conch.web.voice.share-quality.v1';
 
 // keptShareQuality is the quality chosen earlier in this browser, or null if
-// none was (or the storage is refused): the desktop's default differs from the
-// browser's (issue #1581), so it must tell a choice from the default.
+// none was (or the storage is refused, or what is stored is not a quality):
+// the desktop's default differs from the browser's (issue #1581), so it must
+// tell a choice from the default. The resolution may be 'auto' (issue #1659),
+// which the browser offers and the desktop reads as its own default.
 export function keptShareQuality(): ShareQuality | null {
   try {
     const raw: unknown = JSON.parse(platform.credentials.readPreference(shareQualityKey) ?? 'null');
     if (typeof raw !== 'object' || raw === null) return null;
     const kept = raw as { resolution?: unknown; frameRate?: unknown };
-    const resolution = kept.resolution === '720p' || kept.resolution === '1080p' || kept.resolution === 'source' ? kept.resolution : null;
+    const resolution = kept.resolution === 'auto' || kept.resolution === '720p' || kept.resolution === '1080p' || kept.resolution === 'source' ? kept.resolution : null;
     const frameRate = kept.frameRate === 15 || kept.frameRate === 30 || kept.frameRate === 60 ? kept.frameRate : null;
-    return resolution === null || frameRate === null ? null : { resolution, frameRate };
+    // Auto is always 30 fps, whatever rate was stored with it.
+    return resolution === null || frameRate === null ? null : { resolution, frameRate: resolution === 'auto' ? 30 : frameRate };
   } catch {
     return null;
   }
@@ -3123,8 +3126,10 @@ export type ShareClaimResult =
 // claimVoiceShare claims the caller's own share, or claims it again after a
 // reconnect or quality change, which keeps the share as it was. A declared
 // quality is sent with the first claim, the post-picker claim and every later
-// claim (voice-multi-share.md §3.1, §5.1, issue #1509).
-export async function claimVoiceShare(channel: string, quality?: ShareQuality): Promise<ShareClaimResult> {
+// claim (voice-multi-share.md §3.1, §5.1, issue #1509). It is always a
+// concrete resolution: Auto (issue #1659) is a local choice, and the type says
+// so.
+export async function claimVoiceShare(channel: string, quality?: SettledQuality): Promise<ShareClaimResult> {
   const request: VoiceShareRequestV1 | undefined = quality === undefined ? undefined : { quality: { resolution: quality.resolution, frame_rate: quality.frameRate } };
   const reply = await authedPost(call('claimShare', { channel }), request);
   if (reply.kind === 'none') return { ok: false, failure: 'network' };

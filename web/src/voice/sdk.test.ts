@@ -1572,6 +1572,51 @@ describe('sharing a screen', () => {
     ]);
   });
 
+  // Auto (issue #1659): settled once from the capture as it came, then capped
+  // as settled; what it settled to is what is declared and published.
+  it.each([
+    { name: '1920x1080 is Source, capped at 4K', captured: { width: 1920, height: 1080, frameRate: 60 }, want: { resolution: 'source', frameRate: 30 }, cap: { width: { max: 3840 }, height: { max: 2160 }, frameRate: { max: 30 } }, top: 6_000_000 },
+    { name: '2560x1440 is 1080p, capped at 1080p', captured: { width: 2560, height: 1440, frameRate: 60 }, want: { resolution: '1080p', frameRate: 30 }, cap: { width: { max: 1920 }, height: { max: 1080 }, frameRate: { max: 30 } }, top: 6_000_000 },
+    { name: '4K is 1080p, capped at 1080p', captured: { width: 3840, height: 2160, frameRate: 60 }, want: { resolution: '1080p', frameRate: 30 }, cap: { width: { max: 1920 }, height: { max: 1080 }, frameRate: { max: 30 } }, top: 6_000_000 },
+  ])('Auto: $name', async ({ captured, want, cap, top }) => {
+    state.captured = captured;
+    const room = await connected();
+    expect(room.settled({ resolution: 'auto', frameRate: 30 })).toEqual({ resolution: '1080p', frameRate: 30 });
+    await room.pickScreen({ resolution: 'auto', frameRate: 30 });
+    expect(room.settled({ resolution: 'auto', frameRate: 30 })).toEqual(want);
+    await room.publishScreen();
+    const track = state.screenTracks[0];
+    expect(track?.mediaStreamTrack.constraints).toEqual([cap]);
+    expect(state.published[0]?.options).toMatchObject({ screenShareEncoding: { maxBitrate: top, maxFramerate: 30 } });
+    expect(track?.mediaStreamTrack.contentHint).toBe('motion');
+    // Other choices settle to themselves, and Auto stays as it was settled.
+    expect(room.settled({ resolution: '720p', frameRate: 15 })).toEqual({ resolution: '720p', frameRate: 15 });
+    await room.setShareQuality({ resolution: 'auto', frameRate: 30 });
+    expect(room.settled({ resolution: 'auto', frameRate: 30 })).toEqual(want);
+  });
+
+  it('Auto chosen live lifts an earlier cap to read the screen\'s size', async () => {
+    state.captured = { width: 2560, height: 1440, frameRate: 60 };
+    const old = await connected();
+    await old.pickScreen({ resolution: '720p', frameRate: 30 });
+    await old.publishScreen();
+    await old.setShareQuality({ resolution: 'auto', frameRate: 30 });
+    // The 720p cap was lifted to Auto's ask before the size was read.
+    expect(old.settled({ resolution: 'auto', frameRate: 30 })).toEqual({ resolution: '1080p', frameRate: 30 });
+  });
+
+  it('a kept capture carries what Auto settled to, for the next connection', async () => {
+    state.captured = { width: 1920, height: 1080, frameRate: 60 };
+    const old = await connected();
+    await old.pickScreen({ resolution: 'auto', frameRate: 30 });
+    expect(old.settled({ resolution: 'auto', frameRate: 30 })).toEqual({ resolution: 'source', frameRate: 30 });
+    const kept = old.keepScreen();
+    expect(kept).not.toBeNull();
+    const next = await connected();
+    if (kept !== null) next.adoptScreen(kept);
+    expect(next.settled({ resolution: 'auto', frameRate: 30 })).toEqual({ resolution: 'source', frameRate: 30 });
+  });
+
   it('publishes a Source 4K60 picture at 60 fps and 18 Mb/s with layers of 720p30 and 1080p30', async () => {
     state.captured = { width: 3840, height: 2160, frameRate: 60 };
     const room = await connected();
