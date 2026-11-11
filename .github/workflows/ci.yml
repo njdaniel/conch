@@ -408,8 +408,15 @@ jobs:
           cd voice
           # cc-rs prints each compiler command it runs when asked to.
           export CC_ENABLE_DEBUG_OUTPUT=1
-          cargo build --locked -vv -p webrtc-sys 2>&1 | tee "$RUNNER_TEMP/webrtc-sys.log" | grep -E "^\[webrtc-sys [0-9.]+\] (running|OPT_LEVEL|CXX|CC|compiler)|Compiling webrtc-sys|Finished|^error" | cut -c1-400 || true
-          test "${PIPESTATUS[0]}" -eq 0
+          # The build's own status decides the step. The grep only shows the
+          # compiler lines (and may match nothing), so it can never hide a
+          # failed build: with "|| true" after a pipe, PIPESTATUS would be
+          # true's, and the step would pass.
+          status=0
+          cargo build --locked -vv -p webrtc-sys > "$RUNNER_TEMP/webrtc-sys.log" 2>&1 || status=$?
+          grep -E "^\[webrtc-sys [0-9.]+\] (running|OPT_LEVEL|CXX|CC|compiler)|Compiling webrtc-sys|Finished|^error" "$RUNNER_TEMP/webrtc-sys.log" | cut -c1-400 || true
+          if [ "$status" -ne 0 ]; then tail -n 80 "$RUNNER_TEMP/webrtc-sys.log"; fi
+          exit "$status"
 
       # The workspace without conch-voice, which does not build on Windows
       # until the Unix-only code is split out (#1309): its build waits on
