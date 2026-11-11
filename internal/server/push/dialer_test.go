@@ -3,6 +3,7 @@ package push
 import (
 	"context"
 	"errors"
+	"net"
 	"net/netip"
 	"strings"
 	"testing"
@@ -146,5 +147,86 @@ func TestDialerErrorsCarryNoAddress(t *testing.T) {
 		if strings.Contains(err.Error(), bad) {
 			t.Errorf("error %q contains %q", err, bad)
 		}
+	}
+}
+
+// A zero-value Dialer must not panic: it falls back to the real connect, whose
+// check refuses before anything is dialled.
+func TestZeroValueDialerDoesNotPanic(t *testing.T) {
+	d := &Dialer{}
+	_, err := d.DialContext(context.Background(), "tcp", "10.0.0.1:443")
+	if got := Classify(err, nil); got != ClassAddressRefused {
+		t.Fatalf("class = %q, want %q", got, ClassAddressRefused)
+	}
+}
+
+// The real connect refuses the host's own addresses, from an injected list so
+// the test does not depend on this machine's interfaces. A public-looking
+// address is refused only when it is in the list, and the refusal comes from
+// the Control hook before any packet is sent (the local-address check runs
+// ahead of the connect).
+func TestConnectNumericRefusesLocalAddresses(t *testing.T) {
+	tests := []struct {
+		name    string
+		locals  []string
+		address string
+		want    string // "" means the Control hook admitted it
+	}{
+		{"own public v4", []string{"93.184.216.34"}, "93.184.216.34:9", ClassAddressRefused},
+		{"own public v6", []string{"2606:4700:4700::1111"}, "[2606:4700:4700::1111]:9", ClassAddressRefused},
+		{"own mapped form", []string{"93.184.216.34"}, "[::ffff:93.184.216.34]:9", ClassAddressRefused},
+		{"own LAN address under allowPrivate", []string{"192.168.1.5"}, "192.168.1.5:9", ClassAddressRefused},
+		{"docker0 under allowPrivate", []string{"172.17.0.1"}, "172.17.0.1:9", ClassAddressRefused},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			d := NewDialer(fixed(), true)
+			d.localAddrs = func() []netip.Addr {
+				var out []netip.Addr
+				for _, a := range tc.locals {
+					out = append(out, netip.MustParseAddr(a))
+				}
+				return out
+			}
+			conn, err := d.connectNumeric(context.Background(), "tcp", tc.address)
+			if err == nil {
+				_ = conn.Close()
+				t.Fatal("connected")
+			}
+			if got := connectClass(context.Background(), err); got.Error() != tc.want {
+				t.Errorf("class = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// testPermit skips the local-address check, so a loopback test server works
+// even though loopback is one of the host's own addresses: with the address
+// permitted the connect reaches the network (and finds a closed port), and
+// without the permit the same address is refused as local.
+func TestLocalCheckSkippedOnlyForTestPermit(t *testing.T) {
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := l.Addr().String()
+	_ = l.Close() // a closed port: connecting fails with a refusal from the kernel
+
+	d := NewDialer(fixed(), false)
+	d.localAddrs = func() []netip.Addr { return []netip.Addr{netip.MustParseAddr("127.0.0.1")} }
+	permitLoopback(t)
+	_, err = d.connectNumeric(context.Background(), "tcp", addr)
+	if got := Classify(err, nil); got != ClassConnRefused {
+		t.Errorf("permitted: class = %q, want %q", got, ClassConnRefused)
+	}
+
+	// Without the permit loopback is refused by the range table already; use
+	// a permit that admits the range but is withdrawn for the local check by
+	// listing a different local address.
+	testPermit = nil
+	d.localAddrs = func() []netip.Addr { return nil }
+	_, err = d.connectNumeric(context.Background(), "tcp", addr)
+	if got := Classify(err, nil); got != ClassAddressRefused {
+		t.Errorf("unpermitted: class = %q, want %q", got, ClassAddressRefused)
 	}
 }

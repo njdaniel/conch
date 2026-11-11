@@ -33,15 +33,17 @@ type rangeRow struct {
 // ULA. Link-local is never relaxed: no distributor is reached at a link-local
 // address (a zone-less fe80:: address cannot even be dialled), and 169.254/16
 // holds cloud services beyond the metadata address, such as AWS ECS's task
-// credentials at 169.254.170.2. Everything else is never a place a distributor lives, and
-// would only ever be reached by mistake or by an attack: loopback is conchd's
-// own host (its admin and metrics surface), unspecified, multicast and
-// reserved ranges are not unicast peers, and 169.254.169.254 and
-// the cloud metadata and credential addresses (169.254.169.254, 100.100.100.200,
+// credentials at 169.254.170.2. Everything else is never a place a
+// distributor lives, and would only ever be reached by mistake or by an
+// attack: loopback is conchd's own host (its admin and metrics surface),
+// unspecified, multicast and reserved ranges are not unicast peers, and the
+// cloud metadata and credential addresses (169.254.169.254, 100.100.100.200,
 // the fd00:ec2::/32 family and so on) sit inside the CGNAT and ULA rows, so
-// they get non-lan rows of their own. IPv6 is also a positive allow-list, see
-// ForbiddenWith. The predicate refuses
-// an address when any row that matches it is not relaxed.
+// they get non-lan rows of their own. So does 100.100.0.0/16, inside CGNAT:
+// it holds Tailscale's local tailscaled at 100.100.100.100 and Alibaba's
+// other internal services. IPv6 is also a positive allow-list, see
+// ForbiddenWith. The predicate refuses an address when any row that matches
+// it is not relaxed.
 var forbiddenRanges = []rangeRow{
 	{netip.MustParsePrefix("0.0.0.0/8"), false},          // "this network", unspecified
 	{netip.MustParsePrefix("10.0.0.0/8"), true},          // RFC 1918
@@ -50,7 +52,8 @@ var forbiddenRanges = []rangeRow{
 	{netip.MustParsePrefix("169.254.0.0/16"), false},     // link-local: never relaxed
 	{netip.MustParsePrefix("169.254.169.254/32"), false}, // cloud metadata
 	{netip.MustParsePrefix("168.63.129.16/32"), false},   // Azure wireserver
-	{netip.MustParsePrefix("100.100.100.200/32"), false}, // Alibaba metadata, inside CGNAT
+	{netip.MustParsePrefix("100.100.0.0/16"), false},     // Tailscale tailscaled, Alibaba services, inside CGNAT
+	{netip.MustParsePrefix("100.100.100.200/32"), false}, // Alibaba metadata
 	{netip.MustParsePrefix("192.0.2.0/24"), false},       // documentation
 	{netip.MustParsePrefix("198.51.100.0/24"), false},    // documentation
 	{netip.MustParsePrefix("203.0.113.0/24"), false},     // documentation
@@ -76,13 +79,14 @@ var forbiddenRanges = []rangeRow{
 	{netip.MustParsePrefix("fd20:ce::254/128"), false},       // GCP metadata v6
 	{netip.MustParsePrefix("fd00:c1::a9fe:a9fe/128"), false}, // Oracle metadata v6
 	{netip.MustParsePrefix("fec0::/10"), false},              // site-local, deprecated
-	{netip.MustParsePrefix("2001::/32"), false},              // Teredo, refused whole, not decoded
-	{netip.MustParsePrefix("2001:10::/28"), false},           // ORCHID
-	{netip.MustParsePrefix("2001:20::/28"), false},           // ORCHIDv2
-	{netip.MustParsePrefix("2001:db8::/32"), false},          // documentation
-	{netip.MustParsePrefix("3fff::/20"), false},              // documentation
-	{netip.MustParsePrefix("fe80::/10"), false},              // link-local: never relaxed
-	{netip.MustParsePrefix("ff00::/8"), false},               // multicast
+	// IETF protocol assignments (IANA: not globally reachable). It holds
+	// Teredo (2001::/32), PCP anycast, benchmarking, ORCHID and unassigned
+	// space, and is refused whole rather than slice by slice.
+	{netip.MustParsePrefix("2001::/23"), false},
+	{netip.MustParsePrefix("2001:db8::/32"), false}, // documentation
+	{netip.MustParsePrefix("3fff::/20"), false},     // documentation
+	{netip.MustParsePrefix("fe80::/10"), false},     // link-local: never relaxed
+	{netip.MustParsePrefix("ff00::/8"), false},      // multicast
 }
 
 // The IPv6 forms whose embedded IPv4 address is extracted. IPv4-mapped
@@ -98,8 +102,9 @@ var (
 
 // Forbidden reports whether a connection to a must be refused: it is in a
 // private, loopback, link-local, multicast or otherwise non-public range, or
-// it is an IPv6 form (IPv4-mapped, IPv4-compatible, NAT64, 6to4) of a
-// forbidden IPv4 address.
+// it is an IPv6 form of a forbidden IPv4 address. IPv4-mapped, well-known NAT64
+// and 6to4 addresses are refused by their embedded IPv4 address; IPv4-compatible
+// (::/96) and NAT64 local-use (64:ff9b:1::/48) are refused whole.
 func Forbidden(a netip.Addr) bool {
 	return ForbiddenWith(a, false)
 }
@@ -156,8 +161,13 @@ func ForbiddenWith(a netip.Addr, allowPrivate bool) bool {
 	return false
 }
 
-// embeddedV4 returns the IPv4 addresses a well-known NAT64 or 6to4 IPv6 address can
-// stand for. It returns nothing for any other address.
+// embeddedV4 returns the IPv4 address a well-known NAT64 (64:ff9b::/96) or
+// 6to4 address stands for. It returns nothing for any other address.
+//
+// Limit: a network-specific NAT64 prefix (RFC 6052) inside 2000::/3, as an
+// IPv6-only host with its own translator might use, is an ordinary global
+// unicast address here, and an embedded forbidden IPv4 address is not
+// decoded. An operator setting for extra NAT64 prefixes is future work.
 func embeddedV4(a netip.Addr) []netip.Addr {
 	if !a.Is6() {
 		return nil
@@ -178,14 +188,14 @@ type Resolver interface {
 	LookupNetIP(ctx context.Context, network, host string) ([]netip.Addr, error)
 }
 
-// DefaultResolver is the system resolver, the Resolver used when a caller
+// defaultResolver is the system resolver, the Resolver used when a caller
 // passes nil.
-var DefaultResolver Resolver = net.DefaultResolver
+var defaultResolver Resolver = net.DefaultResolver
 
 // Check resolves host and returns its addresses if every one of them is
 // allowed. An IP-literal host is checked directly, with no lookup. Every A
 // and AAAA answer is checked, and the whole host is refused if any one is
-// forbidden. A nil resolver means DefaultResolver. The lookup is bounded to
+// forbidden. A nil resolver means the system resolver. The lookup is bounded to
 // two seconds.
 //
 // The returned addresses are unmapped and carry no zone. Errors are
@@ -193,7 +203,7 @@ var DefaultResolver Resolver = net.DefaultResolver
 // ended, a timeout or request-failed class): none echoes the host.
 func Check(ctx context.Context, host string, resolver Resolver, allowPrivate bool) ([]netip.Addr, error) {
 	if resolver == nil {
-		resolver = DefaultResolver
+		resolver = defaultResolver
 	}
 	if host == "" {
 		return nil, ErrLookupFailed

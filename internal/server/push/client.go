@@ -24,8 +24,13 @@ const RequestTimeout = 2 * time.Second
 //   - verifies the server certificate against the system roots and the URL's
 //     host name. Verification is never switched off.
 //
-// A nil resolver means DefaultResolver. The caller must close every response
-// body. Classify reduces the outcome of a request to a failure class.
+// A nil resolver means the system resolver. The caller must close every
+// response body.
+//
+// The errors this client returns come from net/http and are *url.Error values
+// whose text is the full request URL; a Web Push URL's path holds the
+// subscription. A caller must therefore never log, audit or expose err.Error():
+// it reports only Classify(err, resp).
 func NewClient(resolver Resolver, allowPrivate bool) *http.Client {
 	return newClient(NewDialer(resolver, allowPrivate), nil)
 }
