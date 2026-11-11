@@ -87,6 +87,8 @@ func TestParseServeArgsPushSending(t *testing.T) {
 		{name: "flags win", args: []string{"--push-max-per-minute=7", "--push-expire=1h"}, env: map[string]string{"CONCHD_PUSH_MAX_PER_MINUTE": "5", "CONCHD_PUSH_EXPIRE": "672h"},
 			wantMax: 7, wantExpire: time.Hour},
 		{name: "expire past 28 days", args: []string{"--push-expire", "673h"}, wantErr: "--push-expire"},
+		{name: "expire under a second", args: []string{"--push-expire", "500ms"}, wantErr: "--push-expire"},
+		{name: "expire one second", args: []string{"--push-expire", "1s"}, wantMax: 600, wantExpire: time.Second},
 		{name: "expire zero", args: []string{"--push-expire", "0"}, wantErr: "--push-expire"},
 		{name: "expire negative", args: []string{"--push-expire=-1h"}, wantErr: "--push-expire"},
 		{name: "expire env unreadable", env: map[string]string{"CONCHD_PUSH_EXPIRE": "soon"}, wantErr: "CONCHD_PUSH_EXPIRE"},

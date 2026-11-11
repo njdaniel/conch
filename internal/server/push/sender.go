@@ -39,8 +39,11 @@ import (
 //     attempt; the retries are timers and never a sleep in a worker, at most
 //     MaxPendingRetries (256) are pending, and one past that is dropped and
 //     counted (retry_dropped);
-//   - the per-registration state (the coalescing and the hourly count) holds
-//     at most MaxTracked entries and forgets one an hour after its last wake.
+//   - the per-registration state (coalescing, the hourly count, the failure
+//     backoff) and the per-person budget share hold at most MaxTracked entries
+//     each and forget one an hour after its last wake (limiter.go);
+//   - a retry is preceded by a liveness check of the registration, and is dropped
+//     silently if it has ended.
 //
 // What is never in a log line, an error, a metric or an audit row: an endpoint,
 // a host, a path, a key, a token. A request's own error is a *url.Error whose
@@ -60,6 +63,9 @@ const (
 	OutcomeRetryDropped     = "retry_dropped"
 	OutcomeProviderRejected = "provider_rejected"
 	OutcomeFailed           = "failed"
+	// OutcomeBackoff: the registration is backing off after a network failure,
+	// and the wake was skipped.
+	OutcomeBackoff = "backoff"
 )
 
 // Outcomes returns every outcome, for a metric that wants its label set up
@@ -67,7 +73,7 @@ const (
 func Outcomes() []string {
 	return []string{
 		OutcomeSent, OutcomeCoalesced, OutcomeCapped, OutcomeOverBudget,
-		OutcomeQueueFull, OutcomeRetryDropped, OutcomeProviderRejected, OutcomeFailed,
+		OutcomeQueueFull, OutcomeRetryDropped, OutcomeProviderRejected, OutcomeFailed, OutcomeBackoff,
 	}
 }
 
@@ -116,9 +122,11 @@ type Post struct {
 // Target is one registration to wake, as a Source gives it.
 type Target struct {
 	RegistrationID string
-	Endpoint       string
-	P256DH         string
-	Auth           string
+	// PrincipalID is the person, for their share of the budget.
+	PrincipalID int64
+	Endpoint    string
+	P256DH      string
+	Auth        string
 	// LastWakeAt and LastFetchAt are the registration's own times; the zero
 	// time is "never".
 	LastWakeAt  time.Time
@@ -132,6 +140,9 @@ type Source interface {
 	Targets(ctx context.Context, p Post, now time.Time) ([]Target, error)
 	// MarkWake records a wake sent at now.
 	MarkWake(ctx context.Context, registrationID string, now time.Time) error
+	// Live reports whether the registration is still active and its
+	// credential still live, which is asked before a retry.
+	Live(ctx context.Context, registrationID string, now time.Time) (bool, error)
 	// Reject ends a registration the push service refused (404 or 410), with
 	// one audit row, once.
 	Reject(ctx context.Context, registrationID string, now time.Time) error
@@ -173,8 +184,8 @@ type SenderConfig struct {
 
 // ValidateExpire checks a --push-expire value.
 func ValidateExpire(d time.Duration) error {
-	if d <= 0 {
-		return errors.New("must be positive")
+	if d < time.Second {
+		return errors.New("must be at least 1s")
 	}
 	if d > MaxExpire {
 		return fmt.Errorf("must be at most %s", MaxExpire)
@@ -357,13 +368,16 @@ func (s *Sender) evaluatePost(ctx context.Context, p Post) {
 		return
 	}
 	for _, t := range targets {
-		if outcome := s.limits.admit(t); outcome != "" {
+		outcome, undo := s.limits.admitUndo(t)
+		if outcome != "" {
 			s.cfg.Observer.Wake(outcome)
 			continue
 		}
 		select {
 		case s.jobs <- &job{target: t, first: now}:
 		default:
+			// Dropped before it was sent: it takes back what it spent.
+			undo()
 			s.cfg.Observer.Wake(OutcomeQueueFull)
 		}
 	}
@@ -392,9 +406,20 @@ type result struct {
 
 // send makes one attempt of j and decides what comes next.
 func (s *Sender) send(ctx context.Context, j *job) {
+	if j.attempt > 0 && !s.stillLive(ctx, j.target.RegistrationID) {
+		// It ended, or its sign-in did, since the first attempt: drop the retry
+		// without a word. The stored target has been cleared, and the person
+		// has nothing to be told.
+		return
+	}
 	res := s.attempt(ctx, j.target)
 	if ctx.Err() != nil {
 		return
+	}
+	if res.class != "" && res.status == 0 {
+		// No answer at all: a timeout or another network failure, and not a
+		// status. The registration is skipped for a growing interval.
+		s.limits.networkFailed(j.target.RegistrationID, s.cfg.Now())
 	}
 	switch {
 	case res.class == "":
@@ -421,6 +446,15 @@ func (s *Sender) send(ctx context.Context, j *job) {
 		}
 	}
 	s.cfg.Observer.Wake(OutcomeFailed)
+}
+
+// stillLive asks the source whether a registration may still be retried. A
+// failed question is a no.
+func (s *Sender) stillLive(ctx context.Context, id string) bool {
+	sctx, cancel := context.WithTimeout(ctx, storeTimeout)
+	defer cancel()
+	ok, err := s.cfg.Source.Live(sctx, id, s.cfg.Now())
+	return err == nil && ok
 }
 
 // failedQuietly counts and logs one failed attempt: the class and the

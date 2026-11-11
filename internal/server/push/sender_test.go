@@ -9,6 +9,7 @@ import (
 	"crypto/x509"
 	"encoding/base64"
 	"fmt"
+	"hash/fnv"
 	"log/slog"
 	"net/http"
 	"net/netip"
@@ -86,6 +87,9 @@ type source struct {
 	marked  []string
 	reject  []string
 	err     error
+	// dead names registrations Live answers no for; liveChecks records the asks.
+	dead       map[string]bool
+	liveChecks []string
 }
 
 func (s *source) Targets(_ context.Context, p Post, _ time.Time) ([]Target, error) {
@@ -100,6 +104,13 @@ func (s *source) MarkWake(_ context.Context, id string, _ time.Time) error {
 	s.marked = append(s.marked, id)
 	s.mu.Unlock()
 	return nil
+}
+
+func (s *source) Live(_ context.Context, id string, _ time.Time) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.liveChecks = append(s.liveChecks, id)
+	return !s.dead[id], nil
 }
 
 func (s *source) Reject(_ context.Context, id string, _ time.Time) error {
@@ -303,7 +314,7 @@ func TestWakeContent(t *testing.T) {
 			// Every header but the ones net/http itself adds.
 			allowed := map[string]string{
 				"Authorization": "", "Ttl": tt.wantTTL, "Topic": "wake", "Urgency": "normal",
-				"Content-Encoding": "aes128gcm", "Content-Length": "", "Accept-Encoding": "", "Connection": "close",
+				"Content-Encoding": "aes128gcm", "Content-Length": "", "Connection": "close",
 			}
 			for k, v := range d.Header {
 				want, ok := allowed[k]
@@ -654,6 +665,7 @@ func TestSenderBounds(t *testing.T) {
 		for i := range MaxPendingRetries + 10 {
 			tg := h.target
 			tg.RegistrationID = fmt.Sprintf("reg-%043d", i)
+			tg.PrincipalID = int64(i + 1) // one person's share is not what this row tests
 			targets = append(targets, tg)
 		}
 		h.src.targets = targets
@@ -712,8 +724,12 @@ func TestNewSenderValidation(t *testing.T) {
 // TestLimiter covers coalescing, the hourly cap and the budget with an
 // injected clock.
 func TestLimiter(t *testing.T) {
+	// Every registration is its own person unless a row says otherwise, so the
+	// per-person share is not what a row about something else trips.
 	reg := func(id string, lastWake, lastFetch time.Time) Target {
-		return Target{RegistrationID: id, LastWakeAt: lastWake, LastFetchAt: lastFetch}
+		h := fnv.New32a()
+		_, _ = h.Write([]byte(id))
+		return Target{RegistrationID: id, PrincipalID: int64(h.Sum32()), LastWakeAt: lastWake, LastFetchAt: lastFetch}
 	}
 	t.Run("coalescing: one per 30 s unless it fetched", func(t *testing.T) {
 		c := newClock()
@@ -752,11 +768,11 @@ func TestLimiter(t *testing.T) {
 			t.Errorf("a wake a minute ago: %q", got)
 		}
 	})
-	t.Run("hourly cap, until a fetch", func(t *testing.T) {
+	t.Run("hourly cap: hard for the hour, whatever it fetches", func(t *testing.T) {
 		c := newClock()
 		l := newLimiter(1_000_000, c.Now)
 		// A phone that fetches after every wake is never coalesced, so only
-		// the cap bounds it.
+		// the cap bounds it, and its fetches must not clear the count.
 		fetching := func() Target { return reg("a", time.Time{}, c.Now()) }
 		for i := range HourlyCap {
 			c.Advance(time.Second)
@@ -764,43 +780,169 @@ func TestLimiter(t *testing.T) {
 				t.Fatalf("wake %d: %q", i, got)
 			}
 		}
-		c.Advance(time.Second)
-		cappedAt := c.Now()
-		if got := l.admit(fetching()); got != OutcomeCapped {
-			t.Errorf("wake %d = %q, want capped", HourlyCap+1, got)
+		for i := range 20 {
+			c.Advance(time.Second)
+			if got := l.admit(fetching()); got != OutcomeCapped {
+				t.Fatalf("wake %d past the cap = %q, want capped however often it fetches", HourlyCap+1+i, got)
+			}
 		}
-		// Still capped later, with no fetch since: only a fetch lifts it,
-		// and the hour passing does not.
-		c.Advance(3 * time.Hour)
-		if got := l.admit(reg("a", time.Time{}, time.Time{})); got != OutcomeCapped {
-			t.Errorf("after the hour = %q, want capped until a fetch", got)
-		}
-		if got := l.admit(reg("a", time.Time{}, cappedAt.Add(-time.Second))); got != OutcomeCapped {
-			t.Errorf("a fetch from before the cap = %q, want capped", got)
-		}
-		c.Advance(time.Minute)
+		// The hour passes from the first wake: the oldest wakes age out.
+		c.Advance(time.Hour)
 		if got := l.admit(fetching()); got != "" {
-			t.Errorf("after a fetch = %q", got)
+			t.Errorf("after the hour = %q", got)
 		}
 		// Another registration is unaffected.
 		if got := l.admit(reg("b", time.Time{}, time.Time{})); got != "" {
 			t.Errorf("another registration = %q", got)
 		}
 	})
-	t.Run("a fetch below the cap does not clear the count", func(t *testing.T) {
+	t.Run("the cap is a sliding hour, not a fixed window", func(t *testing.T) {
 		c := newClock()
 		l := newLimiter(1_000_000, c.Now)
-		for i := range HourlyCap {
+		for range HourlyCap { // all in the first two minutes
 			c.Advance(time.Second)
-			if got := l.admit(reg("a", time.Time{}, c.Now())); got != "" {
+			l.admit(reg("a", time.Time{}, c.Now()))
+		}
+		c.Advance(30 * time.Minute) // half an hour on: still capped
+		if got := l.admit(reg("a", time.Time{}, c.Now())); got != OutcomeCapped {
+			t.Errorf("half an hour on = %q, want capped", got)
+		}
+		c.Advance(31 * time.Minute) // past the hour from every one of them
+		if got := l.admit(reg("a", time.Time{}, c.Now())); got != "" {
+			t.Errorf("an hour on = %q", got)
+		}
+	})
+	t.Run("a person's share of the budget", func(t *testing.T) {
+		c := newClock()
+		l := newLimiter(80, c.Now) // a share of 10 a minute
+		person := func(id string) Target {
+			return Target{RegistrationID: id, PrincipalID: 7}
+		}
+		for i := range 10 {
+			if got := l.admit(person(fmt.Sprint("r", i))); got != "" {
 				t.Fatalf("wake %d: %q", i, got)
 			}
 		}
-		// Had each fetch cleared the count, this would be wake 1 of a new
-		// run and be sent.
+		if got := l.admit(person("one more")); got != OutcomeOverBudget {
+			t.Errorf("past the share = %q, want over_budget", got)
+		}
+		// Somebody else is untouched, and the server budget was spent only by
+		// the wakes that went out: 70 of 80 remain.
+		for i := range 70 {
+			if got := l.admit(Target{RegistrationID: fmt.Sprint("o", i), PrincipalID: int64(100 + i/10)}); got != "" {
+				t.Fatalf("another person's wake %d: %q", i, got)
+			}
+		}
+		// The share refills evenly: 80/8 = 10 a minute.
+		c.Advance(6 * time.Second)
+		if got := l.admit(person("later")); got != "" {
+			t.Errorf("after 6 s the share has one token back: %q", got)
+		}
+		if got := l.admit(person("later again")); got != OutcomeOverBudget {
+			t.Errorf("only one: %q", got)
+		}
+	})
+	t.Run("a refused wake spends nothing of the share or the budget", func(t *testing.T) {
+		c := newClock()
+		l := newLimiter(8, c.Now) // a share of 1
+		if got := l.admit(Target{RegistrationID: "a", PrincipalID: 1}); got != "" {
+			t.Fatal(got)
+		}
+		for range 5 {
+			if got := l.admit(Target{RegistrationID: "b", PrincipalID: 1}); got != OutcomeOverBudget {
+				t.Fatalf("= %q", got)
+			}
+		}
+		// Seven tokens of the server budget remain for seven other people.
+		for i := range 7 {
+			if got := l.admit(Target{RegistrationID: fmt.Sprint("p", i), PrincipalID: int64(10 + i)}); got != "" {
+				t.Fatalf("person %d: %q", i, got)
+			}
+		}
+	})
+	t.Run("backoff after a network failure, doubling, capped, reset by a success", func(t *testing.T) {
+		c := newClock()
+		l := newLimiter(1_000_000, c.Now)
+		tg := reg("a", time.Time{}, time.Time{})
+		want := []time.Duration{time.Minute, 2 * time.Minute, 4 * time.Minute, 8 * time.Minute, 16 * time.Minute, 32 * time.Minute, time.Hour, time.Hour, time.Hour}
+		for i, d := range want {
+			c.Advance(time.Hour * 2)
+			if got := l.admit(tg); got != "" {
+				t.Fatalf("round %d: %q", i, got)
+			}
+			l.networkFailed("a", c.Now())
+			c.Advance(d - time.Second)
+			if got := l.admit(tg); got != OutcomeBackoff {
+				t.Fatalf("round %d, just inside %s: %q, want backoff", i, d, got)
+			}
+			c.Advance(2 * time.Second)
+			if got := l.admit(tg); got == OutcomeBackoff {
+				t.Fatalf("round %d, just past %s: still backing off", i, d)
+			}
+			// Undo what that admit spent, so the next round starts clean.
+			c.Advance(time.Hour)
+		}
+		// A success ends it and starts the interval again.
+		l.sent("a", c.Now())
+		c.Advance(2 * time.Hour)
+		l.admit(tg)
+		l.networkFailed("a", c.Now())
+		c.Advance(time.Minute + time.Second)
+		if got := l.admit(tg); got == OutcomeBackoff {
+			t.Errorf("after a success the first interval is 1 minute again, got %q", got)
+		}
+		// A backoff in force is not forgotten by the sweep, and a skipped wake
+		// spends nothing.
+		l.networkFailed("a", c.Now())
+		l.mu.Lock()
+		l.sweep(c.Now().Add(30 * time.Second))
+		_, kept := l.regs["a"]
+		l.mu.Unlock()
+		if !kept {
+			t.Error("the sweep forgot a registration that is backing off")
+		}
+	})
+	t.Run("a wake dropped before it was sent is refunded", func(t *testing.T) {
+		c := newClock()
+		l := newLimiter(8, c.Now) // share 1, budget 8
+		tg := Target{RegistrationID: "a", PrincipalID: 1}
+		out, undo := l.admitUndo(tg)
+		if out != "" || undo == nil {
+			t.Fatalf("admit = %q", out)
+		}
+		undo()
+		// As if it never happened: not coalesced, the share and budget are back.
+		if got := l.admit(tg); got != "" {
+			t.Errorf("after the refund = %q, want it admitted", got)
+		}
+		if got := l.admit(Target{RegistrationID: "a2", PrincipalID: 1}); got != OutcomeOverBudget {
+			t.Errorf("the share holds one: %q", got)
+		}
+		l.mu.Lock()
+		n := len(l.regs["a"].wakes)
+		l.mu.Unlock()
+		if n != 1 {
+			t.Errorf("the registration has %d wakes counted, want 1", n)
+		}
+	})
+	t.Run("idle entries are swept, including ones that were at the cap", func(t *testing.T) {
+		c := newClock()
+		l := newLimiter(1_000_000, c.Now)
+		for range HourlyCap {
+			c.Advance(time.Second)
+			l.admit(reg("capped", time.Time{}, c.Now()))
+		}
 		c.Advance(time.Second)
-		if got := l.admit(reg("a", time.Time{}, c.Now())); got != OutcomeCapped {
-			t.Errorf("= %q, want capped", got)
+		if got := l.admit(reg("capped", time.Time{}, c.Now())); got != OutcomeCapped {
+			t.Fatalf("= %q", got)
+		}
+		c.Advance(2 * time.Hour)
+		l.mu.Lock()
+		l.sweep(c.Now())
+		_, kept := l.regs["capped"]
+		l.mu.Unlock()
+		if kept {
+			t.Error("a capped registration idle for two hours was kept")
 		}
 	})
 	t.Run("hourly count resets after an hour without reaching the cap", func(t *testing.T) {
@@ -1036,7 +1178,7 @@ func TestEndpointNowForbiddenIsRefusedOnEverySend(t *testing.T) {
 			testPermit = nil // the loopback stand-in is off: 127.0.0.1 is forbidden here
 			h.start(t)
 			for i := range 3 {
-				h.clk.Advance(time.Minute)
+				h.clk.Advance(2 * time.Hour) // past the backoff each refusal starts
 				h.sender.Enqueue(post)
 				want := i + 1
 				waitFor(t, "a refusal", func() bool { return h.obs.failure(ClassAddressRefused) == want })
@@ -1051,5 +1193,102 @@ func TestEndpointNowForbiddenIsRefusedOnEverySend(t *testing.T) {
 				t.Errorf("failed = %d, want 3", h.obs.wake(OutcomeFailed))
 			}
 		})
+	}
+}
+
+// TestBackoffThroughTheSender: after a network failure the registration's
+// wakes are skipped (counted as backoff, nothing dialled) for a minute, and
+// then tried again.
+func TestBackoffThroughTheSender(t *testing.T) {
+	res := sequence([]string{"10.0.0.7"}) // refused on every dial: a network failure
+	h := newHarness(t, harnessOpts{resolver: res})
+	h.start(t)
+	h.sender.Enqueue(post)
+	waitFor(t, "the first refusal", func() bool { return h.obs.failure(ClassAddressRefused) == 1 })
+	asked := res.calls()
+
+	h.clk.Advance(31 * time.Second) // past coalescing, inside the backoff
+	h.sender.Enqueue(post)
+	waitFor(t, "a skip", func() bool { return h.obs.wake(OutcomeBackoff) == 1 })
+	if res.calls() != asked {
+		t.Errorf("a backing-off registration was resolved again (%d lookups)", res.calls())
+	}
+
+	h.clk.Advance(31 * time.Second) // a minute and a bit after the failure
+	h.sender.Enqueue(post)
+	waitFor(t, "a new attempt", func() bool { return h.obs.failure(ClassAddressRefused) == 2 })
+
+	// A status is not a network failure: it starts no backoff.
+	h2 := newHarness(t, harnessOpts{})
+	h2.prov.Script(func(int, *pushtest.Delivery) pushtest.Reply { return pushtest.Reply{Status: 400} })
+	h2.start(t)
+	h2.sender.Enqueue(post)
+	waitFor(t, "failed", func() bool { return h2.obs.wake(OutcomeFailed) == 1 })
+	h2.clk.Advance(31 * time.Second)
+	h2.sender.Enqueue(post)
+	waitFor(t, "a second attempt", func() bool { return h2.prov.Count() == 2 })
+	if h2.obs.wake(OutcomeBackoff) != 0 {
+		t.Error("a 400 started a backoff")
+	}
+}
+
+// TestRetryRechecksTheRegistration: before any attempt after the first the
+// source is asked whether the registration is still live, and a retry for one
+// that is not is dropped without a request and without a count.
+func TestRetryRechecksTheRegistration(t *testing.T) {
+	h := newHarness(t, harnessOpts{})
+	h.prov.Script(func(int, *pushtest.Delivery) pushtest.Reply { return pushtest.Reply{Status: 500} })
+	h.start(t)
+	h.sender.Enqueue(post)
+	waitFor(t, "a retry", func() bool { return len(h.timers.delays()) == 1 })
+	h.src.mu.Lock()
+	if n := len(h.src.liveChecks); n != 0 {
+		t.Errorf("the first attempt asked %d liveness questions", n)
+	}
+	h.src.dead = map[string]bool{h.target.RegistrationID: true} // ended, revoked or removed since
+	h.src.mu.Unlock()
+	h.timers.fireNext()
+	waitFor(t, "the liveness check", func() bool { h.src.mu.Lock(); defer h.src.mu.Unlock(); return len(h.src.liveChecks) == 1 })
+	time.Sleep(30 * time.Millisecond)
+	if h.prov.Count() != 1 {
+		t.Errorf("the provider got %d requests; the dead registration's retry must not be sent", h.prov.Count())
+	}
+	if h.obs.wake(OutcomeFailed) != 0 || h.obs.wake(OutcomeRetryDropped) != 0 || h.obs.wake(OutcomeSent) != 0 {
+		t.Error("a silently dropped retry was counted")
+	}
+	if len(h.timers.delays()) != 0 {
+		t.Error("another retry was scheduled")
+	}
+}
+
+func TestOrigin(t *testing.T) {
+	tests := []struct {
+		in   string
+		want string
+		ok   bool
+	}{
+		{"https://push.example.net/wpush/abc", "https://push.example.net", true},
+		{"https://push.example.net:443/wpush/abc", "https://push.example.net", true},
+		{"https://push.example.net:8443/x", "https://push.example.net:8443", true},
+		{"https://[2001:db8::1]:443/x", "https://[2001:db8::1]", true},
+		{"https://[2001:db8::1]:8443/x", "https://[2001:db8::1]:8443", true},
+		{"http://push.example.net/x", "", false},
+		{"https:///x", "", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.in, func(t *testing.T) {
+			got, ok := Origin(tt.in)
+			if got != tt.want || ok != tt.ok {
+				t.Errorf("Origin = %q, %v; want %q, %v", got, ok, tt.want, tt.ok)
+			}
+		})
+	}
+}
+
+func TestValidateExpireFloor(t *testing.T) {
+	for d, ok := range map[time.Duration]bool{0: false, -time.Second: false, 999 * time.Millisecond: false, time.Second: true, MaxExpire: true, MaxExpire + 1: false} {
+		if err := ValidateExpire(d); (err == nil) != ok {
+			t.Errorf("ValidateExpire(%s) = %v, want ok=%v", d, err, ok)
+		}
 	}
 }

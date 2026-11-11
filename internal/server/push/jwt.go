@@ -74,7 +74,16 @@ func Origin(endpoint string) (string, bool) {
 	if err != nil || u.Scheme != "https" || u.Host == "" {
 		return "", false
 	}
-	return "https://" + u.Host, true
+	// An explicit :443 is the https default, so aud drops it (RFC 8292
+	// names the origin; a service compares it to its own).
+	host := u.Host
+	if u.Port() == "443" {
+		host = u.Hostname()
+		if strings.Contains(host, ":") {
+			host = "[" + host + "]"
+		}
+	}
+	return "https://" + host, true
 }
 
 // SignVAPID returns the compact JWT for a request to the push service at aud,

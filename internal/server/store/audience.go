@@ -2821,6 +2821,10 @@ type PushWakeTarget struct {
 // is a safety net, not a limit anyone meets.
 const PushTargetScanBound = 5000
 
+// pushTargetScanBound is the bound in force: PushTargetScanBound, a variable
+// only so a test can lower it.
+var pushTargetScanBound = PushTargetScanBound
+
 // pushCandidatesSQL selects the registrations of channelID's live members that
 // a wake could be for, before the message is looked at. A registration is
 // a candidate when
@@ -2854,7 +2858,7 @@ func pushCandidatesSQL(now time.Time) string {
 // only when it is in the channel and not removed. It is the only place the
 // push path reads a body, and the body leaves this file only as the answer of
 // pushPolicyAdmits.
-const pushMessageSQL = `SELECT m.body, m.audience_kind FROM messages m
+const pushMessageSQL = `SELECT m.body, m.audience_kind, m.author_id FROM messages m
 	WHERE m.id = ? AND m.channel_id = ? AND ` + notRemovedCond
 
 // pushVisibleSQL asks whether the message is visible to a scoped reader:
@@ -2886,11 +2890,13 @@ var pushVisibleSQL = `SELECT 1 FROM messages m WHERE m.id = ? AND ` + notRemoved
 // Every one of those is read now, so a principal removed from the channel, a
 // credential revoked or a message removed between the post and this call is
 // not woken. It is bounded by PushTargetScanBound. A message that is not
-// found, or has no target, gives no targets and no error.
-func (s *Store) PushTargets(ctx context.Context, channelID, messageID, authorID int64, now time.Time) ([]PushWakeTarget, error) {
+// found, or has no target, gives no targets and no error. The author excluded
+// is the message's own, read from its row.
+func (s *Store) PushTargets(ctx context.Context, channelID, messageID int64, now time.Time) ([]PushWakeTarget, error) {
 	var body string
 	var kind sql.NullString
-	switch err := s.db.QueryRowContext(ctx, pushMessageSQL, messageID, channelID).Scan(&body, &kind); {
+	var authorID int64 // the message's own author: never a caller's word for it
+	switch err := s.db.QueryRowContext(ctx, pushMessageSQL, messageID, channelID).Scan(&body, &kind, &authorID); {
 	case errors.Is(err, sql.ErrNoRows):
 		return nil, nil
 	case err != nil:
@@ -2898,7 +2904,7 @@ func (s *Store) PushTargets(ctx context.Context, channelID, messageID, authorID 
 	}
 	whisper := kind.Valid && schema.AudienceKind(kind.String) == schema.AudienceKindPrincipals
 
-	rows, err := s.db.QueryContext(ctx, pushCandidatesSQL(now), channelID, authorID, PushTargetScanBound) // #nosec G202 -- constants plus an integer
+	rows, err := s.db.QueryContext(ctx, pushCandidatesSQL(now), channelID, authorID, pushTargetScanBound) // #nosec G202 -- constants plus an integer
 	if err != nil {
 		return nil, fmt.Errorf("store: push targets: candidates: %w", err)
 	}

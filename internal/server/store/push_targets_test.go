@@ -26,9 +26,9 @@ func newPushTargetFixture(t *testing.T) *pushTargetFixture {
 }
 
 // targets asks PushTargets about message id in channel, by author, now.
-func (f *pushTargetFixture) targets(t *testing.T, channelID, messageID int64, author Principal) []string {
+func (f *pushTargetFixture) targets(t *testing.T, channelID, messageID int64) []string {
 	t.Helper()
-	got, err := f.s.PushTargets(context.Background(), channelID, messageID, author.ID, time.Now())
+	got, err := f.s.PushTargets(context.Background(), channelID, messageID, time.Now())
 	if err != nil {
 		t.Fatalf("PushTargets: %v", err)
 	}
@@ -39,9 +39,9 @@ func (f *pushTargetFixture) targets(t *testing.T, channelID, messageID int64, au
 	return ids
 }
 
-func (f *pushTargetFixture) wakes(t *testing.T, channelID, messageID int64, author Principal) bool {
+func (f *pushTargetFixture) wakes(t *testing.T, channelID, messageID int64, _ Principal) bool {
 	t.Helper()
-	return slices.Contains(f.targets(t, channelID, messageID, author), f.reg.ID)
+	return slices.Contains(f.targets(t, channelID, messageID), f.reg.ID)
 }
 
 func (f *pushTargetFixture) exec(t *testing.T, query string, args ...any) {
@@ -225,7 +225,7 @@ func TestPushTargetsFacts(t *testing.T) {
 		gr := registerPush(t, f.s, gc, webPushTarget("-ghost"))
 		relay := registerPush(t, f.s, f.cred, relayTarget())
 		id := f.post(t, f.ch.ID, f.frank, "hello")
-		got := f.targets(t, f.ch.ID, id, f.frank)
+		got := f.targets(t, f.ch.ID, id)
 		if slices.Contains(got, gr.ID) {
 			t.Error("a non-member's registration was woken")
 		}
@@ -250,12 +250,144 @@ func TestPushTargetsFacts(t *testing.T) {
 	})
 }
 
-// TestPushTargetsAreBounded: a channel with more registrations than the scan
-// bound is cut at it, never read whole. (The bound is a safety net; the test
-// shrinks nothing and checks the constant is in force by its SQL.)
+// TestPushTargetsAreBounded: with more candidates than the scan bound the
+// answer is cut at the bound, never read whole. The bound is lowered for the
+// test.
 func TestPushTargetsAreBounded(t *testing.T) {
+	f := newPushTargetFixture(t)
+	f.policy(t, schema.NotificationPolicyAll, false)
+	ctx := context.Background()
+	// Candidates: dave's, and three more people's, each a member with a phone.
+	for _, name := range []string{"p1", "p2", "p3"} {
+		p, err := f.s.CreatePrincipal(ctx, PrincipalHuman, name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := f.s.AddChannelMember(ctx, "system", f.ch.ID, p.ID, 0); err != nil {
+			t.Fatal(err)
+		}
+		c := credentialOf(t, f.s, p, "phone")
+		putPrefs(t, f.s, c, schema.NotificationPreferencesV1{Policy: "all", Muted: []int64{}})
+		registerPush(t, f.s, c, webPushTarget("-"+name))
+	}
+	id := f.post(t, f.ch.ID, f.alice, "hello")
+	all := f.targets(t, f.ch.ID, id)
+	if len(all) != 4 {
+		t.Fatalf("unbounded targets = %d, want 4", len(all))
+	}
+	old := pushTargetScanBound
+	pushTargetScanBound = 2
+	t.Cleanup(func() { pushTargetScanBound = old })
+	if got := f.targets(t, f.ch.ID, id); len(got) != 2 {
+		t.Errorf("with a bound of 2 the answer has %d targets, want 2 (cut, not read whole)", len(got))
+	}
 	if PushTargetScanBound < 1 || PushTargetScanBound > 100000 {
 		t.Errorf("PushTargetScanBound = %d", PushTargetScanBound)
+	}
+}
+
+// TestPushTargetsHistoryBoundAndGuests: a message before a member's history
+// bound does not wake them, and a guest is woken only for what is after their
+// admission and only while their visit lasts.
+func TestPushTargetsHistoryBoundAndGuests(t *testing.T) {
+	t.Run("a member's history bound", func(t *testing.T) {
+		f := newPushTargetFixture(t)
+		f.policy(t, schema.NotificationPolicyAll, false)
+		before := f.post(t, f.ch.ID, f.frank, "before the bound")
+		f.exec(t, "UPDATE channel_members SET history_after = ? WHERE channel_id = ? AND principal_id = ?", before, f.ch.ID, f.dave.ID)
+		after := f.post(t, f.ch.ID, f.frank, "after the bound")
+		if f.wakes(t, f.ch.ID, before, f.frank) {
+			t.Error("a message at the history bound woke the member")
+		}
+		if !f.wakes(t, f.ch.ID, after, f.frank) {
+			t.Error("a message after the history bound did not wake the member")
+		}
+	})
+	t.Run("a guest", func(t *testing.T) {
+		g := newGuestFixture(t)
+		ctx := context.Background()
+		old, err := g.s.InsertMessageV1(ctx, g.general.ID, g.alice.ID, "before the guest came", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		guest := g.guest("visitor")
+		putPrefs(t, g.s, guest.Credential.ID, schema.NotificationPreferencesV1{Policy: "all", Muted: []int64{}})
+		reg := registerPush(t, g.s, guest.Credential.ID, webPushTarget("-guest"))
+		fresh, err := g.s.InsertMessageV1(ctx, g.general.ID, g.alice.ID, "after the guest came", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		woken := func(id int64) bool {
+			got, err := g.s.PushTargets(ctx, g.general.ID, id, time.Now())
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, w := range got {
+				if w.RegistrationID == reg.ID {
+					return true
+				}
+			}
+			return false
+		}
+		if woken(old.ID) {
+			t.Error("a guest was woken for a message from before their visit")
+		}
+		if !woken(fresh.ID) {
+			t.Error("a guest was not woken for a message after their visit began")
+		}
+		// Past the visit's own deadline the credential is not live.
+		g.exec(t, "UPDATE guest_visits SET state = 'ended', ended_at = 1, end_reason = 'end_visit' WHERE principal_id = ?", guest.Principal.ID)
+		if woken(fresh.ID) {
+			t.Error("a guest whose visit ended was woken")
+		}
+	})
+}
+
+func (g *guestFixture) exec(t *testing.T, query string, args ...any) {
+	t.Helper()
+	if _, err := g.s.db.Exec(query, args...); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestPushRegistrationLive: the check made before a retry, by id.
+func TestPushRegistrationLive(t *testing.T) {
+	tests := []struct {
+		name   string
+		break_ func(t *testing.T, f *pushTargetFixture)
+		live   bool
+	}{
+		{"untouched", func(*testing.T, *pushTargetFixture) {}, true},
+		{"the registration ended", func(t *testing.T, f *pushTargetFixture) {
+			if err := f.s.DeletePushRegistration(context.Background(), f.cred, f.reg.ID, time.Now()); err != nil {
+				t.Fatal(err)
+			}
+		}, false},
+		{"the credential was revoked", func(t *testing.T, f *pushTargetFixture) {
+			f.exec(t, "UPDATE credentials SET revoked_at = 1 WHERE id = ?", f.cred)
+		}, false},
+		{"the generation moved on", func(t *testing.T, f *pushTargetFixture) {
+			f.exec(t, "UPDATE principals SET auth_generation = auth_generation + 1 WHERE id = ?", f.dave.ID)
+		}, false},
+		{"the principal was removed from the channel (not this check's business)", func(t *testing.T, f *pushTargetFixture) {
+			if _, err := f.s.RemoveChannelMember(context.Background(), "system", f.ch.ID, f.dave.ID); err != nil {
+				t.Fatal(err)
+			}
+		}, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := newPushTargetFixture(t)
+			tt.break_(t, f)
+			got, err := f.s.PushRegistrationLive(context.Background(), f.reg.ID, time.Now())
+			if err != nil || got != tt.live {
+				t.Errorf("live = %v, %v; want %v", got, err, tt.live)
+			}
+		})
+	}
+	f := newPushTargetFixture(t)
+	if got, _ := f.s.PushRegistrationLive(context.Background(), "no-such-id", time.Now()); got {
+		t.Error("an id never issued is live")
 	}
 }
 

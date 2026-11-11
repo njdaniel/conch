@@ -228,7 +228,7 @@ Flags for serve:
                          when it next opens the app.
   --push-expire          with --push-webpush, how long a push service keeps a wake it could
                          not deliver, such as while a phone is off (env CONCHD_PUSH_EXPIRE,
-                         default 24h; positive, at most 672h, which is 28 days). serve
+                         default 24h; at least 1s, at most 672h, which is 28 days). serve
                          refuses a value outside that.
   --test-relax-invite-limits
                          TEST SERVERS ONLY. Raises the per-address limits of the invite and

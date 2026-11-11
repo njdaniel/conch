@@ -351,6 +351,26 @@ func (s *Store) TouchPushFetch(ctx context.Context, credentialID int64, now time
 	return nil
 }
 
+// PushRegistrationLive reports whether registration id is still active and
+// its credential still live (liveCredentialWhere), by id and nothing else: it
+// is the small check made before a retry of a wake, which may be a minute
+// older than the decision to send it.
+func (s *Store) PushRegistrationLive(ctx context.Context, id string, now time.Time) (bool, error) {
+	var one int
+	err := s.db.QueryRowContext(ctx,
+		`SELECT 1 FROM push_registrations r
+		 JOIN credentials c ON c.id = r.credential_id AND c.principal_id = r.principal_id
+		 JOIN principals p ON p.id = r.principal_id
+		 WHERE r.id = ? AND r.state = 'active' AND `+liveCredentialWhere(now), id).Scan(&one) // #nosec G202 -- a constant of this package plus an integer
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return false, nil
+	case err != nil:
+		return false, fmt.Errorf("store: push registration liveness: %w", err)
+	}
+	return true, nil
+}
+
 // MarkPushWake records that a wake was sent to registration id at now
 // (last_wake_at). It writes nothing for a registration that has ended, and
 // that is not an error.

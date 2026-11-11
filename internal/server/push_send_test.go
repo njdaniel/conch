@@ -650,6 +650,8 @@ func TestServeRefusesBadPushSettings(t *testing.T) {
 		{"expire 28 days", PushConfig{Expire: 28 * 24 * time.Hour}, true},
 		{"expire past 28 days", PushConfig{Expire: 28*24*time.Hour + time.Second}, false},
 		{"expire negative", PushConfig{Expire: -time.Hour}, false},
+		{"expire under a second", PushConfig{Expire: 999 * time.Millisecond}, false},
+		{"expire one second", PushConfig{Expire: time.Second}, true},
 		{"budget negative", PushConfig{MaxPerMinute: -5}, false},
 		{"subject mailto", PushConfig{VAPIDSubject: "mailto:a@b.c"}, true},
 		{"subject http", PushConfig{VAPIDSubject: "http://a.b"}, false},
@@ -882,5 +884,38 @@ func TestPushLeak(t *testing.T) {
 	}
 	if !strings.Contains(logs.String(), "registration=") {
 		t.Error("the failure lines were not captured; the test proves nothing")
+	}
+}
+
+// TestPushRetryDroppedWhenTheRegistrationEnds: a wake that failed with a 5xx is
+// not retried once its registration was deleted or its sign-in revoked.
+func TestPushRetryDroppedWhenTheRegistrationEnds(t *testing.T) {
+	for _, how := range []string{"deleted", "revoked"} {
+		t.Run(how, func(t *testing.T) {
+			f := newSendFixture(t, sendOpts{})
+			f.prov.Script(func(int, *pushtest.Delivery) pushtest.Reply { return pushtest.Reply{Status: 503} })
+			dave := f.phone(t, "dave", "all")
+			f.postAs(t, f.aliceTok, "general", "one")
+			f.prov.WaitFor(t, 1, 5*time.Second)
+			deadline := time.Now().Add(5 * time.Second)
+			for f.timers.count() == 0 && time.Now().Before(deadline) {
+				time.Sleep(2 * time.Millisecond)
+			}
+			if f.timers.count() != 1 {
+				t.Fatalf("%d retries scheduled, want 1", f.timers.count())
+			}
+			if how == "deleted" {
+				if rec := f.do(t, "DELETE", "/v1/push/registrations/"+dave.reg.ID, dave.tok, ""); rec.Code != http.StatusNoContent {
+					t.Fatalf("delete = %d", rec.Code)
+				}
+			} else if err := f.srv.store.RevokeCredential(context.Background(), "system", dave.cred); err != nil {
+				t.Fatal(err)
+			}
+			f.timers.fireAll()
+			time.Sleep(100 * time.Millisecond)
+			if n := f.prov.Count(); n != 1 {
+				t.Errorf("the provider got %d requests, want 1: a retry was sent for an ended registration", n)
+			}
+		})
 	}
 }

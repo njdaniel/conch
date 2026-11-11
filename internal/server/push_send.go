@@ -39,14 +39,14 @@ func (s *Server) messageCommitted(channelID, messageID, authorID int64) {
 type pushSource struct{ st *store.Store }
 
 func (p pushSource) Targets(ctx context.Context, post push.Post, now time.Time) ([]push.Target, error) {
-	found, err := p.st.PushTargets(ctx, post.ChannelID, post.MessageID, post.AuthorID, now)
+	found, err := p.st.PushTargets(ctx, post.ChannelID, post.MessageID, now)
 	if err != nil {
 		return nil, err
 	}
 	out := make([]push.Target, len(found))
 	for i, f := range found {
 		out[i] = push.Target{
-			RegistrationID: f.RegistrationID, Endpoint: f.Endpoint, P256DH: f.P256DH, Auth: f.Auth,
+			RegistrationID: f.RegistrationID, PrincipalID: f.PrincipalID, Endpoint: f.Endpoint, P256DH: f.P256DH, Auth: f.Auth,
 			LastWakeAt: f.LastWakeAt, LastFetchAt: f.LastFetchAt,
 		}
 	}
@@ -55,6 +55,10 @@ func (p pushSource) Targets(ctx context.Context, post push.Post, now time.Time) 
 
 func (p pushSource) MarkWake(ctx context.Context, id string, now time.Time) error {
 	return p.st.MarkPushWake(ctx, id, now)
+}
+
+func (p pushSource) Live(ctx context.Context, id string, now time.Time) (bool, error) {
+	return p.st.PushRegistrationLive(ctx, id, now)
 }
 
 func (p pushSource) Reject(ctx context.Context, id string, now time.Time) error {
