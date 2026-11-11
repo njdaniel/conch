@@ -33,9 +33,9 @@ An ordinary Windows user installs one app, saves their servers, chats, joins voi
 | --- | --- | --- |
 | Rust | 1.96.1 (`voice/rust-toolchain.toml`, unchanged) | repository |
 | Rust target | `x86_64-pc-windows-msvc`, Tier 1 with host tools, "Windows 10+" | [rustc platform support](https://doc.rust-lang.org/rustc/platform-support.html) |
-| libwebrtc | tag `webrtc-89d790b` (`scripts/voice-pins.sh`), asset `webrtc-win-x64-release.zip`, published 2026-08-19 | [release assets via the GitHub API](https://api.github.com/repos/livekit/rust-sdks/releases/tags/webrtc-89d790b); the Windows SHA-256 is **pending**: fetch and pin it on Windows (experiment E1) |
+| libwebrtc | tag `webrtc-89d790b` (`scripts/voice-pins.sh`), asset `webrtc-win-x64-release.zip`, published 2026-08-19 | [release assets via the GitHub API](https://api.github.com/repos/livekit/rust-sdks/releases/tags/webrtc-89d790b); SHA-256 `5c2349c960bae4f06f71c102f58552d0d09c912a142811acfcadfb7c883cbf58` (pinned in `scripts/voice-pins.sh` by #890; equal to the digest the API publishes for the asset, and to a download hashed independently) |
 | LiveKit SDK | `livekit = "=0.9.4"` (unchanged) | repository |
-| MSVC and Windows SDK | **pending.** The LiveKit README names clang 21 as a requirement for Linux and says nothing about Windows ([rust-sdks README](https://github.com/livekit/rust-sdks)). Whether `webrtc-sys` on Windows wants MSVC's `cl`, clang-cl, or both, and which Windows SDK, is E1's first finding | not verifiable without a build |
+| MSVC and Windows SDK | **E1 finding (#890, CI run 43030162133, `windows-latest`, 2026-11-11):** `webrtc-sys` 0.3.48 compiles its C++ with **MSVC's `cl.exe` only**; no `clang-cl` or `clang++` appears in the build log, and `CC`/`CXX` were unset (cc-rs chose `cl.exe` through its own discovery). The runner had Visual Studio 18 Enterprise 18.11.12328.437 with MSVC toolset 14.51.36231 and Windows SDK 10.0.26100.0, and rustc 1.96.1 (`x86_64-pc-windows-msvc`, from `rust-toolchain.toml`). `cargo build -p webrtc-sys` against the verified `win-x64-release` archive took 2 min 13 s cold (dependencies included). No clang is fetched on Windows | CI log of that run |
 | Electron | the current stable when #770 creates `desktop/`: today that is **45.1.0** (Chromium 156.0.8078.49, Node 24.22.1, released 2026-10-27), with 44.10.0 and 43.8.4 the other supported majors ([releases.json](https://releases.electronjs.org/releases.json)); Electron supports "the latest three stable major versions" ([timelines](https://www.electronjs.org/docs/latest/tutorial/electron-timelines)) | pinned by #770, with Nick's sign-off as a new dependency |
 | Node for building | `web/.nvmrc` 24.21.0 today; the Electron runtime bundles its own Node | repository |
 
@@ -43,7 +43,7 @@ An ordinary Windows user installs one app, saves their servers, chats, joins voi
 
 **Platform-neutral.** The Rust version, the `livekit` version, `forbid(unsafe_code)`, `cargo-deny` and the depgate are shared. Only `scripts/voice-pins.sh` grows a second libwebrtc hash and `scripts/voice-toolchain.sh` a second triple (`win-x64-release`), and `deny.toml`'s `[graph] targets` gains `x86_64-pc-windows-msvc` so that Windows-only dependencies are checked too (today it lists only Linux, so a crate pulled in under `cfg(windows)` would be invisible to the licence check).
 
-**Open questions.** E1: does `webrtc-sys` build on `windows-latest` with the pinned libwebrtc, and with which compiler; does `pipewire_stubs.o` removal have a Windows analogue (it should not: the Windows archive has no PipeWire).
+**Open questions.** E1, answered by #890: `webrtc-sys` builds on `windows-latest` with the pinned libwebrtc, with MSVC `cl.exe` (table above); `pipewire_stubs.o` removal has no Windows analogue, as the Windows archive is linked as downloaded. Still open: whether the whole `conch-voice` links (it waits on #1309).
 
 **Follow-up.** F1 (§14).
 
