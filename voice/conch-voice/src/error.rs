@@ -177,13 +177,32 @@ pub enum Error {
     /// control channel, the inherited event pipe, the key devices, the configuration file's
     /// checks. The name is this program's own and holds nothing that was read. Windows has
     /// its own equivalents, which are separate issues (`docs/design/windows-desktop.md`).
-    #[error("{0} is not supported on this platform")]
-    Unsupported(&'static str),
+    ///
+    /// `what` is this program's own words and stays static; `path` is the file it was asked
+    /// to read, when there is one, and the message then says how to go on without it.
+    #[error("{what} is not supported on this platform{}", unsupported_note(.path))]
+    Unsupported {
+        /// The facility.
+        what: &'static str,
+        /// The configuration file that cannot be read here, if that is the facility.
+        path: Option<PathBuf>,
+    },
 
     /// `managed` failed for a reason it told its owner, as a failed state, and that no
     /// other error here describes. The sentence is this program's own.
     #[error("managed: {0}")]
     Managed(&'static str),
+}
+
+/// What follows an unsupported facility's name: nothing, or for a file the remedy.
+fn unsupported_note(path: &Option<PathBuf>) -> String {
+    match path {
+        Some(path) => format!(
+            ": {path:?} is not read on this platform yet; remove it, or name the server with \
+             CONCH_SERVER or --server"
+        ),
+        None => String::new(),
+    }
 }
 
 impl Error {
@@ -197,7 +216,7 @@ impl Error {
             | Error::NotATerminal
             | Error::EventPipe(_)
             | Error::Attach(_)
-            | Error::Unsupported(_) => 2,
+            | Error::Unsupported { .. } => 2,
             Error::Stopped { exit_code, .. } => *exit_code,
             _ => EXIT_STOPPED,
         }
@@ -217,7 +236,10 @@ mod tests {
             ),
             ("config set", "config set is not supported on this platform"),
         ] {
-            let error = Error::Unsupported(facility);
+            let error = Error::Unsupported {
+                what: facility,
+                path: None,
+            };
             assert_eq!(error.to_string(), line);
             assert_eq!(error.exit_code(), 2);
         }

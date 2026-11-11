@@ -1197,7 +1197,7 @@ pub fn watch_parent(parent: u32, inputs: mpsc::UnboundedSender<Input>, watchdog:
     });
 }
 
-/// Turns SIGTERM and SIGINT (on Windows, Ctrl-C) into [`Input::Signal`], which a managed session takes as
+/// Turns SIGTERM and SIGINT (on Windows, Ctrl-C only) into [`Input::Signal`], which a managed session takes as
 /// `leave` (§8.4), and arms the watchdog for a leave's bound. Must be called inside the
 /// runtime.
 ///
@@ -1267,7 +1267,10 @@ pub fn open_event_pipe() -> Result<File, Error> {
 /// holds its words.
 #[cfg(any(not(unix), test))]
 fn unsupported_event_pipe() -> Error {
-    Error::Unsupported("the inherited event pipe (file descriptor 3)")
+    Error::Unsupported {
+        what: "the inherited event pipe (file descriptor 3)",
+        path: None,
+    }
 }
 
 /// How the microphone and the speakers are opened, once the identity has been checked.
@@ -2075,7 +2078,7 @@ mod unsupported_tests {
     #[test]
     fn the_non_unix_event_pipe_is_a_typed_unsupported_error_that_names_fd_3() {
         let error = unsupported_event_pipe();
-        assert!(matches!(error, Error::Unsupported(_)));
+        assert!(matches!(error, Error::Unsupported { .. }));
         assert!(error.to_string().contains("file descriptor 3"), "{error}");
         assert_eq!(error.exit_code(), 2);
     }

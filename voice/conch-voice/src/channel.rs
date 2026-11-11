@@ -110,7 +110,10 @@ pub struct Endpoint {
 /// [`Error::Unsupported`], never a panic. Compiled on Linux too so that a test holds it.
 #[cfg(any(not(unix), test))]
 fn unsupported() -> Error {
-    Error::Unsupported("the events endpoint (--events-pipe)")
+    Error::Unsupported {
+        what: "the events endpoint (--events-pipe)",
+        path: None,
+    }
 }
 
 /// Whether the path is one this module will look at at all: it begins with `/`. A relative
@@ -320,7 +323,7 @@ mod unsupported_tests {
     #[test]
     fn the_non_unix_answer_is_typed_names_what_is_missing_and_exits_2() {
         let error = unsupported();
-        assert!(matches!(error, Error::Unsupported(_)));
+        assert!(matches!(error, Error::Unsupported { .. }));
         let text = error.to_string();
         assert!(text.contains("--events-pipe"), "{text}");
         assert!(text.contains("not supported on this platform"), "{text}");

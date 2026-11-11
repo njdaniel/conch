@@ -844,16 +844,19 @@ fn refuse_if_others_can_write(
 #[cfg(not(unix))]
 fn refuse_if_others_can_write(
     _meta: &std::fs::Metadata,
-    _path: &std::path::Path,
+    path: &std::path::Path,
 ) -> Result<(), Error> {
-    Err(unsupported_permission_check())
+    Err(unsupported_permission_check(path))
 }
 
 /// The error behind the non-Unix [`refuse_if_others_can_write`], compiled on Linux too so
 /// that a test holds it.
 #[cfg(any(not(unix), test))]
-fn unsupported_permission_check() -> Error {
-    Error::Unsupported("checking who may write the configuration file")
+fn unsupported_permission_check(path: &std::path::Path) -> Error {
+    Error::Unsupported {
+        what: "checking who may write the configuration file",
+        path: Some(path.to_owned()),
+    }
 }
 
 /// Lays the command line over the environment over the configuration file, and finds the
@@ -999,10 +1002,50 @@ mod unsupported_tests {
 
     #[test]
     fn the_non_unix_permission_check_is_typed_and_names_what_it_cannot_do() {
-        let error = unsupported_permission_check();
-        assert!(matches!(error, Error::Unsupported(_)));
+        let error = unsupported_permission_check(std::path::Path::new("voice.toml"));
+        let shown = error.to_string();
+        assert!(
+            shown.contains("voice.toml") && shown.contains("CONCH_SERVER"),
+            "{shown}"
+        );
+        assert!(matches!(error, Error::Unsupported { .. }));
         assert!(error.to_string().contains("who may write"), "{error}");
         assert_eq!(error.exit_code(), 2);
+    }
+}
+
+/// The refusal that is the only control on where the login token goes on a platform that
+/// cannot judge who may write `voice.toml`: a file there that names a server must never be
+/// read, and no file at all is still the default configuration.
+#[cfg(all(test, not(unix)))]
+mod windows_config_tests {
+    use super::*;
+
+    #[test]
+    fn a_voice_toml_that_names_a_server_is_refused_and_no_file_is_the_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("voice.toml");
+        assert_eq!(read_config(&path).unwrap(), Config::default());
+
+        std::fs::write(&path, "server = \"http://evil.test\"\n").unwrap();
+        let error = read_config(&path).unwrap_err();
+        assert!(matches!(error, Error::Unsupported { .. }), "{error:?}");
+        let shown = error.to_string();
+        assert!(
+            shown.contains("CONCH_SERVER") && !shown.contains("evil.test"),
+            "{shown}"
+        );
+
+        let environment = Environment {
+            conch_config_dir: Some(dir.path().as_os_str().to_owned()),
+            token: Some(Secret::new("conch_FAKE_login_token_do_not_print")),
+            ..Environment::default()
+        };
+        let args = match parse(["conch-voice", "join", "general"]).unwrap() {
+            Invocation::Join(args) => args,
+            other => panic!("not a join: {other:?}"),
+        };
+        assert!(resolve(&args, &environment).is_err());
     }
 }
 
@@ -1802,10 +1845,6 @@ mod tests {
     /// then the default. And when the default is used while logins are stored for other
     /// servers, what is said names them.
     #[test]
-    #[cfg_attr(
-        not(unix),
-        ignore = "reads voice.toml, which a non-Unix platform answers Error::Unsupported for until #904"
-    )]
     fn the_server_is_chosen_in_conchs_order_and_a_default_with_other_logins_names_them() {
         const DEFAULT: &str = "http://127.0.0.1:8080";
         const A: &str = "http://a.test:1";
@@ -1983,6 +2022,16 @@ mod tests {
             let name = case.name;
 
             let result = resolve(&join(&line), &environment);
+            // Where a configuration file is not read (#904), a case with one is refused
+            // whatever else it names: the file is the one thing that cannot be judged.
+            if case.file.is_some() && cfg!(not(unix)) {
+                assert!(
+                    matches!(result, Err(Error::Unsupported { .. })),
+                    "{}: {result:?}",
+                    case.name
+                );
+                continue;
+            }
             if case.not_signed_in {
                 let error = result.unwrap_err();
                 let mut want = format!("not signed in to {}: run 'conch login'", case.want);

@@ -211,9 +211,12 @@ pub fn stdin_lines(inputs: mpsc::UnboundedSender<Input>, at_end: AtEnd) {
     });
 }
 
-/// The signals that end the program: SIGINT (Ctrl-C) and SIGTERM on Unix; on Windows, which
-/// has no SIGTERM, Ctrl-C and Ctrl-Break. Built inside the runtime, so that nothing can
-/// take the default action between the install and the first wait.
+/// The signals that end the program: SIGINT (Ctrl-C) and SIGTERM on Unix. On Windows only
+/// Ctrl-C is installed: Ctrl-Break, closing the console and logoff or shutdown keep their
+/// default action, which ends the process at once; handling them is the managed
+/// transport's work (`docs/design/windows-desktop.md` section 3.6, #938). Built inside the
+/// runtime, so that nothing can take the default action between the install and the first
+/// wait.
 pub struct Interrupts {
     #[cfg(unix)]
     interrupt: tokio::signal::unix::Signal,

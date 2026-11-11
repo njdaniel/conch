@@ -58,15 +58,36 @@ pub const FILE_NAME: &str = "voice.toml";
 /// makes `credentials.json`.
 pub const NEW_FILE_MODE: u32 = 0o600;
 
-/// `O_NONBLOCK` on Linux (x86-64 and AArch64, the targets conch-voice is built for). std
-/// has no name for it and `libc` is not a dependency here; on a regular file it changes
-/// nothing.
-#[cfg(target_os = "linux")]
+/// `O_NONBLOCK` on Linux and Android. std has no name for it and `libc` is not a dependency
+/// here; on a regular file it changes nothing.
+#[cfg(any(target_os = "linux", target_os = "android"))]
 const O_NONBLOCK: i32 = 0o4000;
 
-/// `O_NONBLOCK` on the other Unix systems that share the BSD value (macOS, the BSDs).
-#[cfg(all(unix, not(target_os = "linux")))]
+/// `O_NONBLOCK` on the systems that share the BSD value.
+#[cfg(any(
+    target_os = "macos",
+    target_os = "ios",
+    target_os = "freebsd",
+    target_os = "netbsd",
+    target_os = "openbsd",
+    target_os = "dragonfly"
+))]
 const O_NONBLOCK: i32 = 0x0004;
+
+// Any other Unix has a value this file does not know, and a wrong one would open a file
+// with the wrong flags: say so at build time.
+#[cfg(not(any(
+    not(unix),
+    target_os = "linux",
+    target_os = "android",
+    target_os = "macos",
+    target_os = "ios",
+    target_os = "freebsd",
+    target_os = "netbsd",
+    target_os = "openbsd",
+    target_os = "dragonfly"
+)))]
+compile_error!("config_cmd.rs: O_NONBLOCK is not known for this Unix target");
 
 /// How many names are tried for the temporary file before giving up.
 #[cfg(unix)]
@@ -137,7 +158,10 @@ pub fn unset_keys(environment: &Environment, key: KeysKey) -> Result<(), Error> 
 /// test holds it.
 #[cfg(any(not(unix), test))]
 fn unsupported() -> Error {
-    Error::Unsupported("changing the configuration file (config set)")
+    Error::Unsupported {
+        what: "changing the configuration file (config set)",
+        path: None,
+    }
 }
 
 #[cfg(unix)]
@@ -399,7 +423,7 @@ mod unsupported_tests {
     #[test]
     fn the_non_unix_answer_is_typed_and_names_the_command() {
         let error = unsupported();
-        assert!(matches!(error, Error::Unsupported(_)));
+        assert!(matches!(error, Error::Unsupported { .. }));
         assert!(error.to_string().contains("config set"), "{error}");
         assert_eq!(error.exit_code(), 2);
     }

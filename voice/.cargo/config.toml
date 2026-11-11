@@ -1,0 +1,11 @@
+# Cargo configuration for the voice workspace (cargo reads it when run from voice/).
+#
+# x86_64-pc-windows-msvc: link the static C runtime (/MT). The prebuilt libwebrtc win-x64
+# archive (scripts/voice-pins.sh) is built /MT; rustc and cc-rs default to the dynamic
+# runtime (/MD), and mixing them fails to link (LNK2038, LNK2005). With crt-static both use
+# /MT. This is in a file, not in RUSTFLAGS, because the RUSTFLAGS variable would replace it.
+#
+# The macOS design (section 1, MF1) will want `-ObjC` for
+# aarch64-apple-darwin here too, in the same way.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
