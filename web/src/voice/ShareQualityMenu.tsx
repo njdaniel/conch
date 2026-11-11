@@ -27,6 +27,11 @@ export const resolutionWords: Readonly<Record<ShareResolution, string>> = {
 // What Auto does, in a line (Q10 on #1614).
 export const autoNote = 'Auto shares a screen up to 1920 px across as it is, and a larger one at 1080p, at 30 fps.';
 
+// The notes' ids: the choices they are about name them (aria-describedby),
+// because focus never rests on a note inside a menu and it is never announced.
+export const autoNoteId = 'share-chooser-auto-note';
+export const cautionId = 'share-chooser-caution';
+
 // The estimate beside a resolution: the sharer's uplink, labelled as an
 // estimate, because it comes from the layers' bitrate rows and not from a
 // measurement (#1513).
@@ -46,6 +51,11 @@ export function cautionFor(quality: ShareQuality): string | null {
 // rows the figure comes from.
 function estimateFor(resolution: ShareResolution, frameRate: ShareFrameRate): string {
   return estimateWords({ resolution, frameRate: resolution === 'auto' ? autoFrameRate : frameRate });
+}
+
+function describedBy(...ids: (string | undefined)[]): string | undefined {
+  const named = ids.filter((id): id is string => id !== undefined);
+  return named.length === 0 ? undefined : named.join(' ');
 }
 
 export function ShareQualityMenu({ quality, onChoose, disabled }: {
@@ -147,6 +157,7 @@ export function ShareQualityMenu({ quality, onChoose, disabled }: {
               type="button"
               role="menuitemradio"
               aria-checked={quality.resolution === resolution}
+              aria-describedby={describedBy(resolution === 'auto' && auto ? autoNoteId : undefined, resolution === 'source' && caution !== null ? cautionId : undefined)}
               tabIndex={-1}
               onClick={() => { onChoose({ resolution, frameRate: resolution === 'auto' ? autoFrameRate : quality.frameRate }); }}
             >
@@ -162,6 +173,7 @@ export function ShareQualityMenu({ quality, onChoose, disabled }: {
               type="button"
               role="menuitemradio"
               aria-checked={quality.frameRate === frameRate}
+              aria-describedby={describedBy(frameRate === 60 && caution !== null ? cautionId : undefined)}
               disabled={auto}
               tabIndex={-1}
               onClick={() => { onChoose({ resolution: quality.resolution, frameRate }); }}
@@ -170,8 +182,8 @@ export function ShareQualityMenu({ quality, onChoose, disabled }: {
             </button>
           ))}
         </div>
-        {auto ? <p className="hint">{autoNote}</p> : null}
-        {caution === null ? null : <p className="hint" role="note">{caution}</p>}
+        {auto ? <p id={autoNoteId} className="hint">{autoNote}</p> : null}
+        {caution === null ? null : <p id={cautionId} className="hint" role="note">{caution}</p>}
       </div>
     </div>
   );

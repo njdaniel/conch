@@ -965,6 +965,9 @@ class LiveKitAdapter implements Room {
   // the capture's size before any cap, and kept while the capture is, so a later
   // change of the encodings does not read the capped size and flip it.
   private autoResolved: SettledResolution | null = null;
+  // The choice the held capture was last capped to (constrainShare), or null
+  // for a capture not capped here (just picked, or adopted).
+  private cappedAs: string | null = null;
   private stoppingScreen = false;
   // Called at the next change of this connection's own permission, and when
   // the share is stopped, kept or closed: where a share's publish refused for
@@ -1438,6 +1441,7 @@ class LiveKitAdapter implements Room {
     this.shareQuality = quality;
     await this.stopScreen();
     this.autoResolved = null;
+    this.cappedAs = null;
     const made = await this.room.localParticipant.createScreenTracks(captureOptions(quality, !this.companion));
     // The companion has no sound to share on Linux: whatever the portal gave
     // beyond the picture is stopped and never held or published.
@@ -1452,8 +1456,10 @@ class LiveKitAdapter implements Room {
     const video = tracks.find((t): t is LocalVideoTrack => t.source === Track.Source.ScreenShare);
     if (video !== undefined) {
       try {
-        // Auto is settled from the capture as it came, then capped as settled.
-        await this.constrainShare(video, await this.settleShare(video, quality, true));
+        // The choice as it is now: one changed while the picker was open is the
+        // one the capture is settled and capped to. Auto is read from the
+        // capture as it came only if it was asked for at Auto's size.
+        await this.constrainShare(video, await this.settleShare(video, this.shareQuality, quality.resolution === 'auto'));
         this.ensureOpen();
       } catch (err) {
         for (const t of tracks) t.stop();
@@ -1506,8 +1512,10 @@ class LiveKitAdapter implements Room {
     await this.shapeSender(track, settled);
   }
 
-  // constrainShare holds the chosen caps on the live capture.
+  // constrainShare holds the chosen caps on the live capture, and notes which
+  // (publishScreen holds them again only when the choice has moved on).
   private async constrainShare(track: LocalVideoTrack, quality: ShareQuality): Promise<void> {
+    this.cappedAs = `${quality.resolution}/${String(quality.frameRate)}`;
     const capture = track.mediaStreamTrack;
     const ask = shareAsk(quality);
     capture.contentHint = quality.frameRate === 15 ? 'detail' : 'motion';
@@ -1595,6 +1603,7 @@ class LiveKitAdapter implements Room {
     // Sent again as captured, from this connection's publish on.
     for (const track of kept.tracks) track.mediaStreamTrack.enabled = true;
     this.autoResolved = kept.resolved;
+    this.cappedAs = null;
     this.holdScreen([...kept.tracks]);
   }
 
@@ -1609,7 +1618,19 @@ class LiveKitAdapter implements Room {
       const settings = track.mediaStreamTrack.getSettings();
       // The companion publishes the picture alone, whatever was captured.
       if (this.companion && track.source !== Track.Source.ScreenShare) continue;
-      const options = track.source === Track.Source.ScreenShareAudio ? audioPublishOptions((settings.channelCount ?? 1) >= 2) : videoPublishOptions(settings, this.settled(this.shareQuality));
+      // The picture is settled and capped to the choice as it is now before it
+      // is published: it may have changed while the share was being claimed or
+      // resumed, when nothing held a capture to apply it to (issue #1659).
+      let options: TrackPublishOptions;
+      if (track.source === Track.Source.ScreenShareAudio) {
+        options = audioPublishOptions((settings.channelCount ?? 1) >= 2);
+      } else {
+        const video = track as LocalVideoTrack;
+        const quality = await this.settleShare(video, this.shareQuality).catch(() => this.settled(this.shareQuality));
+        this.ensureOpen();
+        if (this.cappedAs !== `${quality.resolution}/${String(quality.frameRate)}`) await this.constrainShare(video, quality).catch(() => undefined);
+        options = videoPublishOptions(video.mediaStreamTrack.getSettings(), quality);
+      }
       await this.publishGranted(track, options, deadline);
       this.ensureOpen();
       // LiveKit builds the top layer from the real capture size: hold the cap

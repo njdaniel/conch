@@ -39,6 +39,8 @@ function setup(claims: ShareClaimResult[] = []) {
     pickFails: false,
     publishFails: false,
     audio: true,
+    // The quality each picker was opened with.
+    pickedWith: [] as ShareQuality[],
     // The size of the screen captured, for Auto to settle against (#1659).
     capture: { width: 1920, height: 1080 } as { width?: number; height?: number },
     // Issue #516: what keepScreen hands over, and whether its capture is live.
@@ -52,8 +54,9 @@ function setup(claims: ShareClaimResult[] = []) {
   };
   const clock = new FakeClock();
   const stub: ShareRoom = {
-    pickScreen: () => {
+    pickScreen: (quality) => {
       calls.push('pick');
+      if (quality !== undefined) room.pickedWith.push(quality);
       if (room.pick !== null) return room.pick.promise;
       return room.pickFails ? Promise.reject(new Error('NotAllowedError')) : Promise.resolve({ audio: room.audio });
     },
@@ -368,6 +371,97 @@ describe('starting a share', () => {
     await started;
     expect(t.calls).toEqual(['claim general', 'pick', 'stop screen', 'release general', 'stop screen']);
     expect(t.share.current).toEqual({ kind: 'idle', ended: 'left' });
+  });
+});
+
+// A choice made while the share is being claimed, picked, published or resumed
+// (issue #1659): the picker opens with the choice as it is, and conchd ends
+// with the declaration that matches the picture that is published, to Auto and
+// from it. The stub captures a 1920x1080 screen, which Auto shares as Source.
+describe('a quality change before the share is live', () => {
+  const auto: ShareQuality = { resolution: 'auto', frameRate: 30 };
+  const low: ShareQuality = { resolution: '720p', frameRate: 15 };
+  const wide: ShareQuality = { resolution: '1080p', frameRate: 60 };
+  const q = (resolution: SettledQuality['resolution'], frameRate: SettledQuality['frameRate']): SettledQuality => ({ resolution, frameRate });
+
+  // The claim bodies after the first (a first claim is the choice at the start,
+  // or what Auto declares before a capture), and what the picker was opened with.
+  async function through(phase: 'claiming' | 'picking' | 'publishing' | 'resuming', from: ShareQuality, to: ShareQuality) {
+    const t = setup();
+    if (phase === 'claiming') {
+      t.room.claim = deferred<ShareClaimResult>();
+      const first = t.room.claim;
+      const start = t.share.start('general', t.stub, from);
+      await settle();
+      expect(t.share.current.kind).toBe('claiming');
+      await t.share.changeQuality(to);
+      first.resolve(granted);
+      await start;
+    } else if (phase === 'picking') {
+      t.room.pick = deferred<Captured>();
+      const pick = t.room.pick;
+      const start = t.share.start('general', t.stub, from);
+      await settle();
+      expect(t.share.current.kind).toBe('picking');
+      await t.share.changeQuality(to);
+      pick.resolve({ audio: true });
+      await start;
+    } else if (phase === 'publishing') {
+      t.room.publish = deferred<undefined>();
+      const publish = t.room.publish;
+      const start = t.share.start('general', t.stub, from);
+      await settle();
+      expect(t.share.current.kind).toBe('publishing');
+      await t.share.changeQuality(to);
+      publish.resolve(undefined);
+      await start;
+      await settle();
+    } else {
+      await t.share.start('general', t.stub, from);
+      t.share.presence('me');
+      t.share.presence('none', { reason: 'rotated', started_at: '2026-10-16T00:00:00.000Z', ended_at: '2026-10-16T00:01:00.000Z' });
+      await t.share.lost(true);
+      expect(t.share.current.kind).toBe('resuming');
+      await t.share.changeQuality(to);
+      t.share.connected('general', t.stub);
+      await settle();
+    }
+    expect(t.share.current.kind === 'sharing' || t.share.current.kind === 'publishing').toBe(true);
+    return t;
+  }
+
+  it.each([
+    { phase: 'claiming', from: low, to: auto, picked: auto, last: q('source', 30) },
+    { phase: 'claiming', from: auto, to: wide, picked: wide, last: q('1080p', 60) },
+    { phase: 'picking', from: low, to: auto, picked: low, last: q('source', 30) },
+    { phase: 'picking', from: auto, to: low, picked: auto, last: q('720p', 15) },
+    { phase: 'publishing', from: low, to: auto, picked: low, last: q('source', 30) },
+    { phase: 'publishing', from: auto, to: wide, picked: auto, last: q('1080p', 60) },
+    { phase: 'resuming', from: low, to: auto, picked: low, last: q('source', 30) },
+    { phase: 'resuming', from: auto, to: low, picked: auto, last: q('720p', 15) },
+  ] as const)('$phase, to $to.resolution from $from.resolution: conchd ends with $last.resolution/$last.frameRate', async ({ phase, from, to, picked, last }) => {
+    const t = await through(phase, from, to);
+    // The picker was opened with the choice as it was when it opened.
+    expect(t.room.pickedWith[0]).toEqual(picked);
+    // The last thing conchd was told is what the picture is published as.
+    expect(t.claimedQualities.at(-1)).toEqual(last);
+    expect(t.claimedQualities.every((c) => c?.resolution !== ('auto' as string))).toBe(true);
+    // Live, an Auto choice says what it came to, for the sharer's readout; a
+    // concrete one is its own.
+    const state = t.share.current;
+    expect(state.kind).toBe('sharing');
+    if (state.kind === 'sharing') expect(state.settled).toEqual(to.resolution === 'auto' ? last : undefined);
+  });
+
+  it('keeps the settled quality of an Auto share in step with a change while live', async () => {
+    const t = setup();
+    await t.share.start('general', t.stub, auto);
+    expect(t.share.current).toEqual({ kind: 'sharing', audio: true, settled: q('source', 30) });
+    t.room.capture = { width: 3840, height: 2160 };
+    await t.share.changeQuality(auto);
+    expect(t.share.current).toEqual({ kind: 'sharing', audio: true, settled: q('1080p', 30) });
+    await t.share.changeQuality(low);
+    expect(t.share.current).toEqual({ kind: 'sharing', audio: true });
   });
 });
 

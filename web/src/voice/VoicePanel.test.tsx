@@ -1874,6 +1874,37 @@ describe('the share quality menu', () => {
     expect(rate.value).toBe('30');
   });
 
+  it('names the notes it shows on the choices they are about', () => {
+    render(<Harness start={{ resolution: 'source', frameRate: 30 }} />);
+    fireEvent.click(opener());
+    const describes = () => screen.getAllByRole('menuitemradio').filter((el) => el.hasAttribute('aria-describedby')).map((el) => `${el.textContent.split('about')[0] ?? ''}>${el.getAttribute('aria-describedby') ?? ''}`);
+    expect(describes()).toEqual([]);
+    fireEvent.click(screen.getByRole('menuitemradio', { name: '60 fps' }));
+    expect(describes()).toEqual(['Source (up to 4K)>share-chooser-caution', '60 fps>share-chooser-caution']);
+    expect(document.getElementById('share-chooser-caution')?.textContent).toBe(sourceSixtyNote);
+    fireEvent.click(screen.getByRole('menuitemradio', { name: /^Auto/ }));
+    expect(describes()).toEqual(['Auto>share-chooser-auto-note']);
+    expect(document.getElementById('share-chooser-auto-note')?.textContent).toMatch(/1920 px across/);
+  });
+
+  // The sharer's readout of an Auto share is held to what Auto settled to, which
+  // the state says: the Asked line and the shortfall reason both stand.
+  it.each([
+    { name: 'Source', settled: { resolution: 'source', frameRate: 30 }, sample: { width: 1280, height: 720, fps: 10, limitation: 'cpu', captured: { width: 1920, height: 1080 } }, asked: 'Asked source size · 30 fps', reason: 'Limited by CPU' },
+    { name: '1080p', settled: { resolution: '1080p', frameRate: 30 }, sample: { width: 1280, height: 720, fps: 30, limitation: 'bandwidth', captured: { width: 2560, height: 1440 } }, asked: 'Asked 1080p · 30 fps', reason: 'Limited by bandwidth' },
+  ] as const)('an Auto share settled to $name shows the Asked line and a shortfall reason', async ({ settled, sample, asked, reason }) => {
+    vi.useFakeTimers();
+    try {
+      const { voice, client } = panel(joined({ shareQuality: { resolution: 'auto', frameRate: 30 }, share: { kind: 'sharing', audio: false, settled } }), 'c');
+      vi.spyOn(client, 'readShareStats').mockResolvedValue(sample);
+      for (let i = 0; i < 9; i++) await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+      expect(within(voice).getByRole('status', { name: 'Share quality' }).textContent).toContain(asked);
+      expect(within(voice).getByRole('status', { name: 'Share quality' }).textContent).toContain(reason);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('is not offered while sharing, where Stop sharing stands alone', () => {
     const { voice } = panel(joined({ share: { kind: 'sharing', audio: false } }), 'c');
     expect(within(voice).queryByRole('button', { name: 'Share quality' })).toBeNull();

@@ -128,6 +128,8 @@ interface Stub {
   // browser leaves the capture as it was when constrained (it may).
   rids: string[];
   ignoreConstraints: boolean;
+  // When set, the next picker waits for the test to answer it (issue #1659).
+  pickGate: Deferred<undefined> | null;
   // Issue #658: the captures made, what each restart was asked for, when set
   // the next restart waits for the test or fails, the devices the browser
   // lists, what each listing was asked, and the audio contexts made.
@@ -245,6 +247,7 @@ const state = vi.hoisted((): Stub => {
     captured: { width: 1920, height: 1080, frameRate: 30 },
     rids: ['q', 'h'],
     ignoreConstraints: false,
+    pickGate: null,
     medias: [],
     restarts: [],
     restart: null,
@@ -540,7 +543,9 @@ vi.mock('livekit-client', () => {
         state.screenOptions = options;
         const tracks = [screenTrack('screen_share'), screenTrack('screen_share_audio')];
         state.screenTracks.push(...tracks);
-        return Promise.resolve(tracks);
+        const gate = state.pickGate;
+        state.pickGate = null;
+        return gate === null ? Promise.resolve(tracks) : gate.promise.then(() => tracks);
       },
       unpublishTrack: (track: StubScreenTrack, stop: boolean) => {
         state.calls.push(`unpublish ${track.source}`);
@@ -1615,6 +1620,49 @@ describe('sharing a screen', () => {
     const next = await connected();
     if (kept !== null) next.adoptScreen(kept);
     expect(next.settled({ resolution: 'auto', frameRate: 30 })).toEqual({ resolution: 'source', frameRate: 30 });
+  });
+
+  // A choice made while the share is being picked, or while a kept capture is
+  // resumed (issue #1659): the capture is settled and capped to the choice as it
+  // is when it is published, to Auto and from it.
+  it.each([
+    { name: 'to Auto while the picker is open', from: { resolution: '720p', frameRate: 15 }, to: { resolution: 'auto', frameRate: 30 }, captured: { width: 1920, height: 1080, frameRate: 60 }, settled: { resolution: 'source', frameRate: 30 }, cap: { width: { max: 3840 }, height: { max: 2160 }, frameRate: { max: 30 } } },
+    { name: 'to Auto on a larger screen while the picker is open', from: { resolution: '720p', frameRate: 15 }, to: { resolution: 'auto', frameRate: 30 }, captured: { width: 2560, height: 1440, frameRate: 60 }, settled: { resolution: '1080p', frameRate: 30 }, cap: { width: { max: 1920 }, height: { max: 1080 }, frameRate: { max: 30 } } },
+    { name: 'from Auto to 720p while the picker is open', from: { resolution: 'auto', frameRate: 30 }, to: { resolution: '720p', frameRate: 15 }, captured: { width: 3840, height: 2160, frameRate: 60 }, settled: { resolution: '720p', frameRate: 15 }, cap: { width: { max: 1280 }, height: { max: 720 }, frameRate: { max: 15 } } },
+    { name: 'from Source to 1080p60 while the picker is open', from: { resolution: 'source', frameRate: 30 }, to: { resolution: '1080p', frameRate: 60 }, captured: { width: 3840, height: 2160, frameRate: 60 }, settled: { resolution: '1080p', frameRate: 60 }, cap: { width: { max: 1920 }, height: { max: 1080 }, frameRate: { max: 60 } } },
+  ] as const)('picking: $name', async ({ from, to, captured, settled, cap }) => {
+    state.captured = captured;
+    const room = await connected();
+    state.pickGate = deferred();
+    const gate = state.pickGate;
+    const pick = room.pickScreen(from);
+    await Promise.resolve();
+    await room.setShareQuality(to);
+    gate.resolve(undefined);
+    await pick;
+    expect(room.settled(to)).toEqual(settled);
+    await room.publishScreen();
+    const track = state.screenTracks[0];
+    expect(track?.mediaStreamTrack.constraints.at(-1)).toEqual(cap);
+    expect(state.published[0]?.options).toMatchObject({ screenShareEncoding: { maxFramerate: settled.frameRate } });
+  });
+
+  it.each([
+    { name: 'to Auto', from: { resolution: '720p', frameRate: 15 }, to: { resolution: 'auto', frameRate: 30 }, settled: { resolution: 'source', frameRate: 30 }, cap: { width: { max: 3840 }, height: { max: 2160 }, frameRate: { max: 30 } } },
+    { name: 'from Auto to 720p', from: { resolution: 'auto', frameRate: 30 }, to: { resolution: '720p', frameRate: 15 }, settled: { resolution: '720p', frameRate: 15 }, cap: { width: { max: 1280 }, height: { max: 720 }, frameRate: { max: 15 } } },
+  ] as const)('resuming: a kept capture changed $name is settled and capped before it is published', async ({ from, to, settled, cap }) => {
+    state.captured = { width: 1920, height: 1080, frameRate: 60 };
+    const old = await connected();
+    await old.pickScreen(from);
+    const kept = old.keepScreen();
+    expect(kept).not.toBeNull();
+    const next = await connected();
+    // The choice is made after the capture was kept, before it is adopted.
+    await next.setShareQuality(to);
+    if (kept !== null) next.adoptScreen(kept);
+    await next.publishScreen();
+    expect(next.settled(to)).toEqual(settled);
+    expect(state.screenTracks[0]?.mediaStreamTrack.constraints.at(-1)).toEqual(cap);
   });
 
   it('publishes a Source 4K60 picture at 60 fps and 18 Mb/s with layers of 720p30 and 1080p30', async () => {

@@ -37,14 +37,14 @@
 // taken down when it completes; sdk.ts), and is published on the next. One wait (resumeLimit) covers the whole of it,
 // however many times the room is renewed before the share is back.
 import type { ShareClaimResult } from '../api';
-import type { VoiceShareEnded, VoiceShareEndReason } from '../schema/voice';
+import type { VoiceShareEnded, VoiceShareEndReason, VoiceShareResolution } from '../schema/voice';
 import type { Clock } from '../state/feed';
 
 // The sharer's choice of capture and top layer. It is a local preference,
 // never part of presence or another wire document. 'auto' is local only
 // (issue #1659): the wire vocabulary (VoiceShareResolution) is closed, so what
 // a claim declares and what viewers see is always a SettledQuality.
-export type SettledResolution = '720p' | '1080p' | 'source';
+export type SettledResolution = VoiceShareResolution;
 export type ShareResolution = SettledResolution | 'auto';
 export type ShareFrameRate = 15 | 30 | 60;
 export interface ShareQuality {
@@ -206,7 +206,10 @@ export type ShareState =
   | { readonly kind: 'picking' }
   | { readonly kind: 'publishing' }
   // resumed: the share carried on into a renewed room (issue #516).
-  | { readonly kind: 'sharing'; readonly audio: boolean; readonly resumed?: true }
+  // settled: for an Auto choice only, the concrete quality it came to and is
+  // declared as, which the sharer's readout compares the picture with (issue
+  // #1659). A concrete choice is its own and leaves it out.
+  | { readonly kind: 'sharing'; readonly audio: boolean; readonly resumed?: true; readonly settled?: SettledQuality }
   // The room was renewed: the capture is kept until this page is in the new
   // room and the share is claimed again.
   | { readonly kind: 'resuming' }
@@ -415,7 +418,7 @@ export class ScreenShare {
     this.set({ kind: 'picking' });
     let captured: Captured;
     try {
-      captured = await room.pickScreen(quality);
+      captured = await room.pickScreen(this.quality);
     } catch (err: unknown) {
       if (mine !== this.attempt) return;
       // Closed without choosing, or refused by the browser: the claim goes.
@@ -434,7 +437,8 @@ export class ScreenShare {
     // one conchd is told. An Auto choice is declared as what the capture
     // resolved it to: the first claim could only say the provisional value.
     this.settle(room);
-    const again = await this.api.claim(at(), this.declared());
+    const sent = this.declared();
+    const again = await this.api.claim(at(), sent);
     if (again.ok) this.granted(again.value.started_at);
     if (mine !== this.attempt) {
       await room.stopScreen();
@@ -464,7 +468,25 @@ export class ScreenShare {
       return;
     }
     if (mine !== this.attempt) return;
-    this.set({ kind: 'sharing', audio: captured.audio });
+    this.set({ kind: 'sharing', ...this.sharingFields(room, captured.audio) });
+    this.catchUp(sent);
+  }
+
+  // sharingFields is the live state's fields: the audio, and what an Auto
+  // choice has settled to. The capture is settled again first: a choice made
+  // while the claim or the publish was under way is the one it came to.
+  private sharingFields(room: ShareRoom | null, audio: boolean, resumed = false): { audio: boolean; resumed?: true; settled?: SettledQuality } {
+    this.settle(room);
+    return { audio, ...(resumed ? { resumed: true as const } : {}), ...(this.quality.resolution === 'auto' ? { settled: this.declared() } : {}) };
+  }
+
+  // catchUp sends the declaration again when a choice made since the claim
+  // that came before the live state (a change while the share was claiming,
+  // publishing or resuming, when no holder-repeat could be sent) leaves conchd
+  // with another quality than the one now declared.
+  private catchUp(sent: SettledQuality): void {
+    const now = this.declared();
+    if (now.resolution !== sent.resolution || now.frameRate !== sent.frameRate) void this.queueQuality(true);
   }
 
   // changeQuality keeps the declared choice for later claims and, while live,
@@ -492,9 +514,21 @@ export class ScreenShare {
   changeQuality(quality: ShareQuality): Promise<QualityAnswer> {
     this.quality = quality;
     this.resolved = null;
-    if (this.state.kind === 'sharing') this.settle(this.room);
+    // With a capture in hand (publishing, live) Auto is settled at once; before
+    // one, or while resuming, it is settled when the share is live (catchUp).
+    if (this.state.kind === 'sharing' || this.state.kind === 'publishing') this.settle(this.room);
+    if (this.state.kind === 'sharing') this.noteSettled(this.state);
     this.endQualityRetry();
     return this.queueQuality(true);
+  }
+
+  // noteSettled keeps the live state's settled quality (an Auto choice's
+  // concrete value) in step with the choice.
+  private noteSettled(state: Extract<ShareState, { kind: 'sharing' }>): void {
+    const settled = this.quality.resolution === 'auto' ? this.declared() : undefined;
+    if (state.settled?.resolution === settled?.resolution && state.settled?.frameRate === settled?.frameRate) return;
+    const live: Extract<ShareState, { kind: 'sharing' }> = { kind: 'sharing', audio: state.audio, ...(state.resumed === true ? { resumed: true as const } : {}) };
+    this.set(settled === undefined ? live : { ...live, settled });
   }
 
   // declared is the quality every claim carries: always a concrete value.
@@ -791,7 +825,8 @@ export class ScreenShare {
     const mine = ++this.attempt;
     this.reclaiming = true;
     this.seen = false;
-    const answer = await this.api.claim(channel, this.declared());
+    const sent = this.declared();
+    const answer = await this.api.claim(channel, sent);
     this.reclaiming = false;
     // Renamed meanwhile (issue #728): what follows names the new name.
     const at = () => this.channel ?? channel;
@@ -856,7 +891,8 @@ export class ScreenShare {
     // The share carried on: what ended the last room's is not about this one.
     this.endInterruption();
     this.told = null;
-    this.set({ kind: 'sharing', audio: kept.audio, resumed: true });
+    this.set({ kind: 'sharing', ...this.sharingFields(room, kept.audio, true) });
+    this.catchUp(sent);
   }
 
   // giveUp ends a share that was being resumed: the capture stops, and a
