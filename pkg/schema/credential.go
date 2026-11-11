@@ -126,6 +126,11 @@ type ListCredentialsResponseV1 struct {
 // sign-in link is labelled "sign-in link <id>", so the person can see that a
 // link was used for their account; one made by a device link carries the
 // label its maker gave the link. IdleExpiresAt is as on CredentialV1.
+//
+// Push is true for a sign-in that has an active push registration (issue
+// #1712, docs/design/mobile-notifications.md §5.1): this device is sent
+// wakes. It is omitted otherwise. A registration's own details are read only
+// by its own credential (ListOwnPushRegistrationsResponseV1).
 type OwnCredentialV1 struct {
 	ID            int64      `json:"id"`
 	Label         string     `json:"label"`
@@ -134,6 +139,7 @@ type OwnCredentialV1 struct {
 	Renews        bool       `json:"renews,omitempty"`
 	Current       bool       `json:"current,omitempty"`
 	IdleExpiresAt *Timestamp `json:"idle_expires_at,omitempty"`
+	Push          bool       `json:"push,omitempty"`
 }
 
 // ListOwnCredentialsResponseV1 is the response to GET /v1/credentials/mine:

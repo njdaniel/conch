@@ -1,0 +1,9 @@
+{
+  "policy": "mentions",
+  "muted": [
+    7,
+    12
+  ],
+  "preview": true,
+  "quiet_when_unreachable": false
+}

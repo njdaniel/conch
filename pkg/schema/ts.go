@@ -501,6 +501,23 @@ var TSTypes = []TSType{
 	{Value: PutAgentManifestRequestV1{}, Family: "put-agent-manifest-request-v1"},
 	{Value: GetAgentManifestResponseV1{}, Family: "get-agent-manifest-response-v1"},
 
+	// Phone push and notification preferences (issue #1712,
+	// docs/design/mobile-notifications.md §9.1): the wake, a credential's
+	// registrations and the server's transports, then the preferences and
+	// the pending feed. OwnCredentialV1 above carries the additive push
+	// field. The mention rule (Mentions) is not a type: the web client's own
+	// matcher is checked against testdata/rules/mentions.json.
+	{Value: PushWakeV1{}, Family: "push-wake-v1", Schema: PushWakeSchemaV1},
+	{Value: PushRegistrationV1{}, Family: "push-registration-v1"},
+	{Value: CreatePushRegistrationRequestV1{}, Family: "create-push-registration-request-v1"},
+	{Value: UpdatePushRegistrationRequestV1{}, Family: "update-push-registration-request-v1"},
+	{Value: ListOwnPushRegistrationsResponseV1{}, Family: "list-own-push-registrations-response-v1"},
+	{Value: PushConfigV1{}, Family: "push-config-v1"},
+	{Value: NotificationPreferencesV1{}, Family: "notification-preferences-v1"},
+	{Value: PutNotificationPreferencesRequestV1{}, Family: "put-notification-preferences-request-v1"},
+	{Value: NotificationSummaryV1{}, Family: "notification-summary-v1", Schema: NotificationSummarySchemaV1},
+	{Value: ListPendingNotificationsResponseV1{}, Family: "list-pending-notifications-response-v1"},
+
 	// The body of every refusal.
 	{Value: Error{}, Name: "ErrorV0", Family: "error"},
 }
@@ -597,6 +614,9 @@ var TSVocabularyModes = map[string]TSVocabularyMode{
 	// and a later kind of thing one acts on, which the page shows by name.
 	"AdminAction":     TSTolerant,
 	"AdminTargetKind": TSTolerant,
+	// The pending feed (notification.go, issue #1712): a later reason for a
+	// message to be in it. A phone still renders the summary.
+	"NotificationKind": TSTolerant,
 
 	// Strict: a union's tag. tagged() picks the variant by it and has no
 	// shape for a value it does not know.
@@ -687,6 +707,17 @@ var TSVocabularyModes = map[string]TSVocabularyMode{
 	"VoiceControlTalkMode":    TSStrict,
 	"VoiceDevicesConfig":      TSStrict,
 	"VoiceDevicesPipeWire":    TSStrict,
+
+	// Strict: phone push and notification preferences (issue #1712). A
+	// client writes the policy, the transport, the platform and the
+	// provider itself, and switches on the ones it reads to decide what to
+	// offer. The end reason is an audit detail, which no generated type
+	// carries.
+	"NotificationPolicy":        TSStrict,
+	"PushPlatform":              TSStrict,
+	"PushProvider":              TSStrict,
+	"PushRegistrationEndReason": TSStrict,
+	"PushTransport":             TSStrict,
 
 	// Strict: agent manifests and the Leviathan payload, which no generated
 	// client reads today. Strict is the default; a vocabulary becomes

@@ -1,0 +1,9 @@
+{
+  "schema": "conch.notification_summary.v1",
+  "channel_id": 12,
+  "channel_name": "ops",
+  "message_id": 4215,
+  "posted_at": "2026-11-10T12:33:40.500Z",
+  "kind": "whisper",
+  "author_id": 9
+}
