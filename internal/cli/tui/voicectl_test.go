@@ -210,6 +210,7 @@ func TestVoiceCommands(t *testing.T) {
 		{name: "mute with no helper", input: "/voice mute on", status: "not in voice; /voice join first", keepText: true},
 		{name: "mute while leaving", helper: &stopping, input: "/voice mute on", status: "not in voice", keepText: true},
 		{name: "retry a retryable failure", helper: ptr(failed("ops", "duplicate_identity")), input: "/voice retry", want: []string{"retry"}, status: "retrying #ops", busy: "retrying"},
+		{name: "retry after a voice kick", helper: ptr(failed("ops", "voice_removed")), input: "/voice retry", status: "a retry cannot fix this: removed from voice; you are still a member and may join again", keepText: true},
 		{name: "retry what a retry cannot fix", helper: ptr(failed("ops", "not_a_member")), input: "/voice retry", status: "a retry cannot fix this: not a member", keepText: true},
 		{name: "retry with nothing failed", helper: ptr(connected("general")), input: "/voice retry", status: "nothing to retry", keepText: true},
 		{name: "an unknown subcommand", input: "/voice talk", status: "usage: /voice join [channel]", keepText: true},
@@ -308,9 +309,17 @@ func TestVoiceStripWords(t *testing.T) {
 			s.Phase, s.Reason, s.RetryIn = voicehelper.PhaseReconnecting, "connection_lost", 2500*time.Millisecond
 			s.Blocked = []schema.VoiceControlBlock{schema.VoiceControlBlockNotConnected}
 		}), want: "voice: #general · reconnecting (connection lost), retry in 3 s"},
+		{name: "open microphone, v2", st: with(connected("general"), func(s *voicehelper.Status) {
+			s.Protocol, s.TalkMode, s.Playback = schema.VoiceControlSchemaV2, schema.VoiceControlTalkModeOpen, schema.VoiceControlPlaybackOn
+		}), want: "voice: #general · mic on · open mic", notWant: "hold the talk key"},
+		{name: "push to talk, v2, shows nothing new", st: with(connected("general"), func(s *voicehelper.Status) {
+			s.Protocol, s.TalkMode, s.Playback = schema.VoiceControlSchemaV2, schema.VoiceControlTalkModePushToTalk, schema.VoiceControlPlaybackOn
+		}), want: "voice: #general · mic on · hold the talk key to talk", notWant: "open mic"},
 		{name: "leaving", st: with(connected("general"), func(s *voicehelper.Status) { s.Phase, s.Reason = voicehelper.PhaseStopping, "left" }), want: "voice: leaving #general…"},
 		{name: "failed, retryable", st: failed("general", "duplicate_identity"), want: "voice stopped: this account joined voice elsewhere (a retry disconnects the other) · /voice retry"},
 		{name: "failed, not retryable", st: failed("general", "not_a_member"), want: "voice stopped: not a member of this channel", notWant: "/voice retry"},
+		{name: "removed from voice by a moderator (v2)", st: with(failed("general", "voice_removed"), func(s *voicehelper.Status) { s.Protocol = schema.VoiceControlSchemaV2 }),
+			want: "voice stopped: removed from voice; you are still a member and may join again", notWant: "/voice retry"},
 		{name: "helper not found", st: failed("general", voicehelper.ReasonHelperNotFound), want: "voice stopped: conch-voice not found", notWant: "/voice retry"},
 		{name: "stopped by a signal", st: with(failed("general", "signal"), func(s *voicehelper.Status) { s.Phase = voicehelper.PhaseStopped }), want: "voice off (stopped by a signal) · /voice join"},
 		{name: "muting, not yet acknowledged", st: connected("general"), busy: "muting", want: "voice: #general · mic on · hold the talk key to talk · muting…", notWant: "· muted"},
@@ -664,6 +673,37 @@ func TestVoiceFailureLeavesTextUsable(t *testing.T) {
 	}
 }
 
+// A voice kick, which a v2 helper reports as failed with voice_removed, is
+// shown in words in the strip and the status page, and the TUI asks the
+// helper for nothing more: no retry, no rejoin (issue #1718).
+func TestVoiceKickShowsRemovalAndStartsNothing(t *testing.T) {
+	m, fake, _ := voiceTestModel(t)
+	m, cmd := submitText(t, m, "/voice join")
+	for _, msg := range drain(cmd) {
+		m, _ = update(m, msg)
+	}
+	_, serial, _ := m.vc.owner.current()
+	st := failed("general", string(schema.VoiceControlReasonVoiceRemoved))
+	st.Protocol = schema.VoiceControlSchemaV2
+	m, cmd = update(m, voiceStatusMsg{serial: serial, st: st})
+	for _, msg := range drain(cmd) {
+		m, _ = update(m, msg)
+	}
+	const words = "removed from voice; you are still a member and may join again"
+	if got := m.voiceStrip(200); !strings.HasPrefix(got, "voice stopped: "+words) || strings.Contains(got, "conch-voice failed") || strings.Contains(got, "/voice retry") {
+		t.Errorf("strip %q", got)
+	}
+	m, _ = submitText(t, m, "/voice retry")
+	if got := m.status(); !strings.Contains(got, "a retry cannot fix this: "+words) {
+		t.Errorf("status %q after /voice retry", got)
+	}
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	if len(fake.calls) != 1 || fake.calls[0] != "join general" {
+		t.Errorf("supervisor calls %q, want only the first join", fake.calls)
+	}
+}
+
 // Sign-out, an identity change and the TUI's exit stop the helper, in a
 // command or (at exit) bounded by StopKill and a second.
 func TestVoiceStopsWithTheLogin(t *testing.T) {
@@ -769,6 +809,21 @@ func TestVoiceStatusPage(t *testing.T) {
 	}
 	if strings.Contains(view, "\x1b[31m") {
 		t.Error("an escape sequence from the log reached the screen")
+	}
+	// A v2 open session says its talk mode, speakers and protocol.
+	m, _, _ = voiceTestModel(t)
+	open2 := connected("general")
+	open2.Protocol, open2.TalkMode, open2.Playback = schema.VoiceControlSchemaV2, schema.VoiceControlTalkModeOpen, schema.VoiceControlPlaybackOn
+	m = withHelper(t, m, open2)
+	m.width, m.height = 120, 40
+	m.vc.status = open2
+	if lines := strings.Join(m.voiceStatusLines(120), "\n"); !strings.Contains(lines, "open microphone") || !strings.Contains(lines, "speakers") || !strings.Contains(lines, schema.VoiceControlSchemaV2) {
+		t.Errorf("the v2 open page:\n%s", lines)
+	}
+	// A v1 session shows none of them.
+	m.vc.status = connected("general")
+	if lines := strings.Join(m.voiceStatusLines(120), "\n"); strings.Contains(lines, "talk mode") || strings.Contains(lines, "protocol") {
+		t.Errorf("the v1 page:\n%s", lines)
 	}
 	// With no supervisor yet it says so without calling anything.
 	m, _, _ = voiceTestModel(t)

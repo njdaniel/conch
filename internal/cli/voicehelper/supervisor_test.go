@@ -317,18 +317,10 @@ func TestTranscriptsEndToEnd(t *testing.T) {
 				}
 			},
 		},
-		{
-			file: "transcript-version-mismatch.json",
-			drive: func(t *testing.T, ctx context.Context, s *Supervisor) {
-				if err := s.Join(ctx, testChannel); reasonOf(err) != ReasonHelperIncompatible {
-					t.Fatalf("join: %v, want %s", err, ReasonHelperIncompatible)
-				}
-				waitReaped(t, s)
-				if st := s.Status(); st.Phase != PhaseFailed || st.Reason != ReasonHelperIncompatible || st.Retryable {
-					t.Errorf("status %+v", st)
-				}
-			},
-		},
+		// transcript-version-mismatch.json is a v1 owner's fixture (the helper
+		// offers only v2); this owner speaks v2 (#1718), so it would start. The
+		// same handshake with a version neither speaks is in
+		// TestHandshakeFailures ("a hello without v1 or v2").
 		{
 			file: "transcript-identity-mismatch.json", exit: 1,
 			drive: func(t *testing.T, ctx context.Context, s *Supervisor) {
@@ -398,7 +390,7 @@ func TestHandshakeFailures(t *testing.T) {
 		{name: "no hello in time", args: []string{"-no-hello"}, timings: Timings{Hello: 400 * time.Millisecond}, reason: ReasonHelloTimeout, killed: true},
 		{name: "exits before its hello", args: []string{"-exit-before-hello", "2"}, reason: ReasonHelperIncompatible},
 		{name: "a state before its hello", args: []string{"-state-first"}, reason: ReasonBadEvent, killed: true},
-		{name: "a hello without v1", args: []string{"-versions", "conch.voice_control.v2"}, reason: ReasonHelperIncompatible, exitZero: true},
+		{name: "a hello without v1 or v2", args: []string{"-versions", "conch.voice_control.v3"}, reason: ReasonHelperIncompatible, exitZero: true},
 		{name: "no ack for the start", args: []string{"-no-ack-start"}, timings: Timings{Ack: 400 * time.Millisecond}, reason: ReasonAckTimeout, exitZero: true},
 	}
 	for _, tt := range tests {

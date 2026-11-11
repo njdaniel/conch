@@ -1085,11 +1085,11 @@ var reasonWords = map[string]string{
 	string(schema.VoiceControlReasonNotAMember):         "not a member of this channel",
 	string(schema.VoiceControlReasonVoiceNotConfigured): "this server has no voice",
 	string(schema.VoiceControlReasonDuplicateIdentity):  "this account joined voice elsewhere (a retry disconnects the other)",
-	// Issue #1457. A reason of conch.voice_control.v2 alone, and this TUI's
-	// sessions are v1 (voicehelper), where the helper still says
-	// internal_error; the removal itself is shown from the TUI's own presence
-	// socket, in these words (voiceRemoved in voice.go, issue #1456). Here so
-	// that the reason has words the day the TUI speaks v2.
+	// Issue #1457. A reason of conch.voice_control.v2 alone: a v1 helper
+	// still says internal_error. The TUI speaks v2 to a helper that offers
+	// it (voicehelper, issue #1718), so a moderator's voice kick reaches the
+	// helper status in these words; the removal itself is also shown from the
+	// TUI's own presence socket (voiceRemoved in voice.go, issue #1456).
 	string(schema.VoiceControlReasonVoiceRemoved):     "removed from voice; you are still a member and may join again",
 	string(schema.VoiceControlReasonAudioUnavailable): "audio unavailable (PipeWire or the speakers)",
 	string(schema.VoiceControlReasonStartTimeout):     "conch-voice was not told to start in time",
@@ -1196,8 +1196,8 @@ func (m Model) voiceSelf() string {
 }
 
 // connectedParts are the strip's words for a connected helper: capture and
-// transmission apart (a joined person with the gate shut is "mic on"), mute
-// and deafen, and the talk key.
+// transmission apart (a joined person with the gate shut is "mic on"), an
+// open microphone, mute and deafen, and the talk key.
 func connectedParts(st voicehelper.Status) []string {
 	var parts []string
 	switch {
@@ -1212,6 +1212,13 @@ func connectedParts(st voicehelper.Status) []string {
 	default:
 		parts = append(parts, "mic off")
 	}
+	// An open microphone (a v2 session whose voice.toml says so) sends on the
+	// microphone's own sound, so it is always said, and the talk key is not
+	// what to hold.
+	open := st.TalkMode == schema.VoiceControlTalkModeOpen
+	if open {
+		parts = append(parts, "open mic")
+	}
 	if st.Muted {
 		parts = append(parts, "muted")
 	}
@@ -1220,7 +1227,7 @@ func connectedParts(st voicehelper.Status) []string {
 	}
 	switch st.PTT {
 	case schema.VoiceControlPTTReady:
-		if len(st.Blocked) == 0 && !st.Transmitting {
+		if len(st.Blocked) == 0 && !st.Transmitting && !open {
 			parts = append(parts, "hold the talk key to talk")
 		}
 	case schema.VoiceControlPTTNotConfigured:
@@ -1276,6 +1283,17 @@ func (m Model) voiceStatusLines(cols int) []string {
 			schema.VoiceControlCaptureUnavailable: "unavailable",
 		}, st.Capture))
 		add("transmitting", yesNo[st.Transmitting])
+		if st.Protocol == schema.VoiceControlSchemaV2 {
+			add("talk mode", wordOr(map[schema.VoiceControlTalkMode]string{
+				schema.VoiceControlTalkModePushToTalk: "push to talk: hold the talk key",
+				schema.VoiceControlTalkModeOpen:       "open microphone: your microphone's own sound opens the gate, no key needed",
+			}, st.TalkMode))
+			add("speakers", wordOr(map[schema.VoiceControlPlayback]string{
+				schema.VoiceControlPlaybackOn:          "on",
+				schema.VoiceControlPlaybackOff:         "off",
+				schema.VoiceControlPlaybackUnavailable: "unavailable",
+			}, st.Playback))
+		}
 		add("muted", yesNo[st.Muted])
 		add("deafened", yesNo[st.Deafened])
 		key := wordOr(map[schema.VoiceControlPTT]string{
@@ -1314,6 +1332,9 @@ func (m Model) voiceStatusLines(cols int) []string {
 	}
 	if st.HelperVersion != "" {
 		add("helper version", sanitize(st.HelperVersion))
+	}
+	if st.Protocol != "" {
+		add("protocol", sanitize(st.Protocol))
 	}
 	path := sanitize(m.vc.path)
 	if path == "" {
