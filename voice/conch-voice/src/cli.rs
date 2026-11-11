@@ -27,6 +27,7 @@
 //! never writes that file.
 
 use std::ffi::OsString;
+#[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
 use std::path::PathBuf;
 use std::str::FromStr;
@@ -806,13 +807,7 @@ pub(crate) fn read_config(path: &std::path::Path) -> Result<Config, Error> {
             path: path.to_owned(),
         });
     }
-    let mode = meta.mode() & 0o777;
-    if mode & 0o022 != 0 {
-        return Err(Error::ConfigWritable {
-            path: path.to_owned(),
-            mode,
-        });
-    }
+    refuse_if_others_can_write(&meta, path)?;
     match std::fs::read_to_string(path) {
         Ok(text) => Ok(Config::parse(&text, &format!("{path:?}"))?),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Config::default()),
@@ -821,6 +816,44 @@ pub(crate) fn read_config(path: &std::path::Path) -> Result<Config, Error> {
             source,
         }),
     }
+}
+
+/// Refuses a configuration file that group or others can write.
+#[cfg(unix)]
+fn refuse_if_others_can_write(
+    meta: &std::fs::Metadata,
+    path: &std::path::Path,
+) -> Result<(), Error> {
+    let mode = meta.mode() & 0o777;
+    if mode & 0o022 != 0 {
+        return Err(Error::ConfigWritable {
+            path: path.to_owned(),
+            mode,
+        });
+    }
+    Ok(())
+}
+
+/// Who may write a file is a Windows ACL there, which has no mode to read; judging it is the
+/// Windows port of the configuration (#904). Until then a file that exists is not read,
+/// rather than read unchecked: its `server` decides where the login token is sent.
+///
+/// # Errors
+///
+/// Always [`Error::Unsupported`].
+#[cfg(not(unix))]
+fn refuse_if_others_can_write(
+    _meta: &std::fs::Metadata,
+    _path: &std::path::Path,
+) -> Result<(), Error> {
+    Err(unsupported_permission_check())
+}
+
+/// The error behind the non-Unix [`refuse_if_others_can_write`], compiled on Linux too so
+/// that a test holds it.
+#[cfg(any(not(unix), test))]
+fn unsupported_permission_check() -> Error {
+    Error::Unsupported("checking who may write the configuration file")
 }
 
 /// Lays the command line over the environment over the configuration file, and finds the
@@ -961,7 +994,21 @@ pub fn key_device(
 }
 
 #[cfg(test)]
+mod unsupported_tests {
+    use super::*;
+
+    #[test]
+    fn the_non_unix_permission_check_is_typed_and_names_what_it_cannot_do() {
+        let error = unsupported_permission_check();
+        assert!(matches!(error, Error::Unsupported(_)));
+        assert!(error.to_string().contains("who may write"), "{error}");
+        assert_eq!(error.exit_code(), 2);
+    }
+}
+
+#[cfg(test)]
 mod tests {
+    #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
 
     use super::*;
@@ -1002,9 +1049,11 @@ mod tests {
         let path = dir.join("voice.toml");
         std::fs::write(&path, text).unwrap();
         // Not left to the umask of whoever runs the tests.
+        #[cfg(unix)]
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_configuration_others_can_write_is_refused_and_a_fifo_is_not_waited_on() {
         for mode in [0o664, 0o646, 0o666, 0o620, 0o602] {
@@ -1053,6 +1102,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_configuration_error_is_one_line_even_if_the_directory_name_has_a_newline() {
         let parent = tempfile::tempdir().unwrap();
@@ -1072,6 +1122,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        not(unix),
+        ignore = "reads voice.toml, which a non-Unix platform answers Error::Unsupported for until #904"
+    )]
     fn voice_toml_and_the_login_move_with_the_configuration_directory() {
         let xdg = tempfile::tempdir().unwrap();
         let alice = tempfile::tempdir().unwrap();
@@ -1632,6 +1686,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        not(unix),
+        ignore = "reads voice.toml, which a non-Unix platform answers Error::Unsupported for until #904"
+    )]
     fn the_channel_and_server_come_from_the_file_when_nothing_else_names_them() {
         let dir = tempfile::tempdir().unwrap();
         write_config(
@@ -1645,6 +1703,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        not(unix),
+        ignore = "reads voice.toml, which a non-Unix platform answers Error::Unsupported for until #904"
+    )]
     fn the_environment_wins_over_the_file_and_the_command_line_over_both() {
         let dir = tempfile::tempdir().unwrap();
         write_config(
@@ -1676,6 +1738,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        not(unix),
+        ignore = "reads voice.toml, which a non-Unix platform answers Error::Unsupported for until #904"
+    )]
     fn a_configuration_with_an_unknown_key_is_an_error_that_names_it() {
         let dir = tempfile::tempdir().unwrap();
         write_config(dir.path(), "chanel = \"typo\"\n");
@@ -1695,6 +1761,7 @@ mod tests {
             format!("{{\"http://127.0.0.1:8080\":{{\"token\":\"{FAKE_LOGIN}\"}}}}"),
         )
         .unwrap();
+        #[cfg(unix)]
         std::fs::set_permissions(&credentials, std::fs::Permissions::from_mode(0o600)).unwrap();
         let mut environment = environment(dir.path());
         environment.token = None;
@@ -1721,6 +1788,7 @@ mod tests {
             .collect();
         let path = dir.join("credentials.json");
         std::fs::write(&path, serde_json::Value::Object(logins).to_string()).unwrap();
+        #[cfg(unix)]
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
     }
 
@@ -1734,6 +1802,10 @@ mod tests {
     /// then the default. And when the default is used while logins are stored for other
     /// servers, what is said names them.
     #[test]
+    #[cfg_attr(
+        not(unix),
+        ignore = "reads voice.toml, which a non-Unix platform answers Error::Unsupported for until #904"
+    )]
     fn the_server_is_chosen_in_conchs_order_and_a_default_with_other_logins_names_them() {
         const DEFAULT: &str = "http://127.0.0.1:8080";
         const A: &str = "http://a.test:1";

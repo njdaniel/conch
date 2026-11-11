@@ -17,6 +17,10 @@
 //! them), and one must never be handed to the helper by accident.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
+// Unix only: File descriptor 3, Unix sockets, shells and named pipes. Windows runs the unit
+// tests in `src/`, which include the answers a non-Unix platform gives, and the tests in
+// this directory that need none of this (#1309).
+#![cfg(unix)]
 
 mod support;
 

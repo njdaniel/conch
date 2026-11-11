@@ -46,33 +46,71 @@
 //! the search permission on the way to it.
 
 use std::io::{Read, Write};
+#[cfg(unix)]
 use std::os::unix::ffi::OsStrExt;
+#[cfg(unix)]
 use std::os::unix::fs::{FileTypeExt, MetadataExt};
+#[cfg(unix)]
 use std::os::unix::net::UnixStream;
 use std::path::Path;
-use std::sync::mpsc as std_mpsc;
 use std::time::Duration;
 
 use conch_voice_api::{
-    Secret, VOICE_CONTROL_HELLO_TIMEOUT_MS, VOICE_CONTROL_OWNER_LOSS_EXIT_MS,
-    VOICE_CONTROL_PIPE_NONCE_CHARS, VoiceControlPipeAttachedV1, to_line, validate_nonce,
+    Secret, VOICE_CONTROL_OWNER_LOSS_EXIT_MS, VOICE_CONTROL_PIPE_NONCE_CHARS,
+    VoiceControlPipeAttachedV1, to_line, validate_nonce,
 };
 use tokio::sync::mpsc;
 
 use crate::cli::Environment;
-use crate::devices;
 use crate::error::Error;
 use crate::managed::Watchdog;
 use crate::secrets::Scrubber;
 use crate::session::Input;
 
+/// The connection to the owner: a Unix stream socket.
+#[cfg(unix)]
+pub type Stream = UnixStream;
+
+/// The connection to the owner on a platform that has no Unix sockets: a type with no
+/// value, so that [`attach`], which only ever answers [`Error::Unsupported`] there, leaves
+/// nothing that could be written to or read from. Windows attaches to a named pipe instead
+/// (#938).
+#[cfg(not(unix))]
+#[derive(Debug)]
+pub enum Stream {}
+
+#[cfg(not(unix))]
+impl Read for Stream {
+    fn read(&mut self, _buf: &mut [u8]) -> std::io::Result<usize> {
+        match *self {}
+    }
+}
+
+#[cfg(not(unix))]
+impl Write for Stream {
+    fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
+        match *self {}
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        match *self {}
+    }
+}
+
 /// The connection to the owner, as the helper holds it once it has attached.
 #[derive(Debug)]
 pub struct Endpoint {
     /// Where the events are written: the connection, after the attach line.
-    pub events: UnixStream,
+    pub events: Stream,
     /// Another handle on the same connection, for [`watch_end`] to read.
-    pub end: UnixStream,
+    pub end: Stream,
+}
+
+/// What [`attach`] answers where this platform has no Unix control channel:
+/// [`Error::Unsupported`], never a panic. Compiled on Linux too so that a test holds it.
+#[cfg(any(not(unix), test))]
+fn unsupported() -> Error {
+    Error::Unsupported("the events endpoint (--events-pipe)")
 }
 
 /// Whether the path is one this module will look at at all: it begins with `/`. A relative
@@ -82,6 +120,7 @@ pub struct Endpoint {
 /// # Errors
 ///
 /// [`Error::Attach`] with the reason.
+#[cfg(unix)]
 pub fn require_absolute(path: &Path) -> Result<(), Error> {
     if path.as_os_str().as_bytes().first() == Some(&b'/') {
         Ok(())
@@ -122,6 +161,7 @@ pub fn nonce<'a>(environment: &'a Environment, scrubber: &Scrubber) -> Result<&'
 /// [`Error::Attach`] with the first reason that holds, the directory first: `parent is a
 /// symlink`, `parent not a directory`, `parent not owned`, `parent mode`, then `not a
 /// socket` and `not owned` (or that either could not be examined).
+#[cfg(unix)]
 pub fn check_endpoint(path: &Path, uid: u32) -> Result<(), Error> {
     // The directory first: it is the boundary, and what is in it is judged only once it is
     // known to be ours and private.
@@ -160,7 +200,10 @@ pub fn check_endpoint(path: &Path, uid: u32) -> Result<(), Error> {
 /// # Errors
 ///
 /// [`Error::Attach`] if the connect fails or does not finish in time.
+#[cfg(unix)]
 pub fn connect(path: &Path) -> Result<UnixStream, Error> {
+    use conch_voice_api::VOICE_CONTROL_HELLO_TIMEOUT_MS;
+    use std::sync::mpsc as std_mpsc;
     let path = path.to_owned();
     let (done, result) = std_mpsc::channel();
     std::thread::spawn(move || {
@@ -198,11 +241,14 @@ pub fn write_attach(out: &mut impl Write, nonce: &Secret) -> Result<(), Error> {
 /// # Errors
 ///
 /// [`Error::Attach`] with the reason, which never repeats the nonce.
+#[cfg(unix)]
 pub fn attach(
     path: &Path,
     environment: &Environment,
     scrubber: &Scrubber,
 ) -> Result<Endpoint, Error> {
+    use crate::devices;
+    use conch_voice_api::VOICE_CONTROL_HELLO_TIMEOUT_MS;
     require_absolute(path)?;
     let secret = nonce(environment, scrubber)?;
     let uid = devices::current_uid().ok_or(Error::Attach("own user unknown"))?;
@@ -222,6 +268,21 @@ pub fn attach(
         .try_clone()
         .map_err(|_| Error::Attach("cannot read"))?;
     Ok(Endpoint { events, end })
+}
+
+/// [`attach`] on a platform with no Unix control channel: nothing is checked, opened or
+/// connected.
+///
+/// # Errors
+///
+/// Always [`Error::Unsupported`].
+#[cfg(not(unix))]
+pub fn attach(
+    _path: &Path,
+    _environment: &Environment,
+    _scrubber: &Scrubber,
+) -> Result<Endpoint, Error> {
+    Err(unsupported())
 }
 
 /// Reads the connection on a thread of its own, only to see its end: the end of the
@@ -253,6 +314,21 @@ pub fn watch_end(
 }
 
 #[cfg(test)]
+mod unsupported_tests {
+    use super::*;
+
+    #[test]
+    fn the_non_unix_answer_is_typed_names_what_is_missing_and_exits_2() {
+        let error = unsupported();
+        assert!(matches!(error, Error::Unsupported(_)));
+        let text = error.to_string();
+        assert!(text.contains("--events-pipe"), "{text}");
+        assert!(text.contains("not supported on this platform"), "{text}");
+        assert_eq!(error.exit_code(), 2);
+    }
+}
+
+#[cfg(all(test, unix))]
 mod tests {
     use std::os::unix::fs::PermissionsExt;
     use std::os::unix::net::UnixListener;

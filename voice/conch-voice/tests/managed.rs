@@ -12,6 +12,10 @@
 //! tone, the speakers count, the keyboard is a named pipe, and LiveKit is the fake.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
+// Unix only: The rig reads its keyboard from a named pipe made with mkfifo. Windows runs
+// the unit tests in `src/`, which include the answers a non-Unix platform gives, and the
+// tests in this directory that need none of this (#1309).
+#![cfg(unix)]
 
 mod support;
 

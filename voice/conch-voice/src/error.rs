@@ -173,6 +173,13 @@ pub enum Error {
     #[error("managed: events endpoint: {0}; conch-voice managed is started by conch, not by hand")]
     Attach(&'static str),
 
+    /// A facility that has no implementation on this platform yet was asked for: the Unix
+    /// control channel, the inherited event pipe, the key devices, the configuration file's
+    /// checks. The name is this program's own and holds nothing that was read. Windows has
+    /// its own equivalents, which are separate issues (`docs/design/windows-desktop.md`).
+    #[error("{0} is not supported on this platform")]
+    Unsupported(&'static str),
+
     /// `managed` failed for a reason it told its owner, as a failed state, and that no
     /// other error here describes. The sentence is this program's own.
     #[error("managed: {0}")]
@@ -180,8 +187,8 @@ pub enum Error {
 }
 
 impl Error {
-    /// The exit code `main` ends with: 2 for a mistake on the command line or a `managed`
-    /// with no event pipe, the policy's code for a stop, and 1 otherwise.
+    /// The exit code `main` ends with: 2 for a mistake on the command line, a `managed`
+    /// with no event pipe or a facility the platform lacks, the policy's code for a stop, and 1 otherwise.
     #[must_use]
     pub fn exit_code(&self) -> u8 {
         match self {
@@ -189,9 +196,30 @@ impl Error {
             | Error::NoChannel
             | Error::NotATerminal
             | Error::EventPipe(_)
-            | Error::Attach(_) => 2,
+            | Error::Attach(_)
+            | Error::Unsupported(_) => 2,
             Error::Stopped { exit_code, .. } => *exit_code,
             _ => EXIT_STOPPED,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unsupported_names_the_facility_and_exits_as_a_usage_mistake_does() {
+        for (facility, line) in [
+            (
+                "the events endpoint",
+                "the events endpoint is not supported on this platform",
+            ),
+            ("config set", "config set is not supported on this platform"),
+        ] {
+            let error = Error::Unsupported(facility);
+            assert_eq!(error.to_string(), line);
+            assert_eq!(error.exit_code(), 2);
         }
     }
 }

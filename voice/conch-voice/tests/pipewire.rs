@@ -20,6 +20,10 @@
 //! one at a time by full name.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
+// Linux only: It needs PipeWire. Windows runs the unit tests in `src/`, which include the
+// answers a non-Unix platform gives, and the tests in this directory that need none of this
+// (#1309).
+#![cfg(target_os = "linux")]
 
 use std::process::{Child, Command, Stdio};
 use std::sync::Arc;

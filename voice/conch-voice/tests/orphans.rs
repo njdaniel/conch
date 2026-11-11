@@ -9,6 +9,10 @@
 //! which is why every test holds its client through [`Reaped`].
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
+// Unix only: It looks for a process under /proc. Windows runs the unit tests in `src/`,
+// which include the answers a non-Unix platform gives, and the tests in this directory that
+// need none of this (#1309).
+#![cfg(unix)]
 
 mod support;
 

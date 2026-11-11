@@ -352,9 +352,8 @@ jobs:
   # libwebrtc win-x64 build verified by scripts/voice-toolchain.sh. MSVC and the
   # Windows SDK are on the runner image; cc-rs finds them through vswhere, so no
   # Action installs them. Hosted only: there is no self-hosted Windows runner.
-  # Advisory for now, like voice-check and desktop-smoke: the required check
-  # job does not wait on it, so read its result before a merge (it becomes
-  # required once #1309 builds conch-voice here).
+  # Required (#1309): the check job waits on it, as on the rust job, now that
+  # conch-voice builds, tests and lints here.
   voice-windows:
     needs: changes
     if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
@@ -404,8 +403,8 @@ jobs:
           rustc -Vv
 
       # The SDK's C++ glue against the verified libwebrtc: the part this job
-      # exists to prove. -vv records the compiler it runs (E1). Not gated by
-      # #1309: it does not reach conch-voice's own source.
+      # exists to prove. -vv records the compiler it runs (E1). It does
+      # not reach conch-voice's own source.
       - name: build webrtc-sys (E1)
         run: |
           . scripts/voice-pins.sh
@@ -427,10 +426,13 @@ jobs:
           if [ "$status" -ne 0 ]; then tail -n 80 "$RUNNER_TEMP/webrtc-sys.log"; fi
           exit "$status"
 
-      # The workspace without conch-voice, which does not build on Windows
-      # until the Unix-only code is split out (#1309): its build waits on
-      # that issue, and this is the one place it is left out.
-      - name: cargo build, test and clippy (workspace except conch-voice, until #1309)
+      # The whole voice workspace, conch-voice included (#1309): its Unix-only
+      # code (the control channel, key devices, the configuration file's
+      # checks, fd 3) answers a typed "not supported on this platform" error
+      # here. Its integration tests that need Unix (named pipes, shells,
+      # /proc, file modes) or PipeWire are gated off Windows by `cfg` at the
+      # top of the file, each with its reason; the unit tests all run.
+      - name: cargo build, test and clippy (workspace)
         run: |
           . scripts/voice-pins.sh
           # The verified tree must be there: without it webrtc-sys downloads
@@ -439,9 +441,9 @@ jobs:
           test -f "$webrtc/webrtc.ninja"
           export LK_CUSTOM_WEBRTC="$webrtc"
           cd voice
-          cargo build --locked --workspace --exclude conch-voice
-          cargo test --locked --no-fail-fast --workspace --exclude conch-voice
-          cargo clippy --locked --workspace --exclude conch-voice --all-targets -- -D warnings
+          cargo build --locked --workspace
+          cargo test --locked --no-fail-fast --workspace
+          cargo clippy --locked --workspace --all-targets -- -D warnings
 
   # The web client under web/ (ADR-007). setup-node installs exactly the
   # Node web/.nvmrc pins and caches npm's download cache by the lockfile.
@@ -492,7 +494,7 @@ jobs:
   # itself is not judged: if it fails, code is unset and every job runs in
   # full, so a pass here still means every check ran and passed.
   check:
-    needs: [changes, go, go-test-server, go-test, rust, web, desktop]
+    needs: [changes, go, go-test-server, go-test, rust, voice-windows, web, desktop]
     if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
