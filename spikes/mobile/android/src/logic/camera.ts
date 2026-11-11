@@ -3,7 +3,7 @@
 //
 // Phone (ADR-016 Decision 10, #1109 M-C3 to M-C6):
 //  - lifecycleBlock stops the capture and releases the claim on background,
-//    inactive (iOS), lock and interruption; capture is stopped before anything
+//    inactive (iOS), lock, interruption and stopped (Android); capture is stopped before anything
 //    is awaited, so it ends within the 1 s bar. lifecycleUnblock lifts the
 //    block and starts nothing: only the button (start) captures;
 //  - while the block holds, start does nothing;
@@ -479,7 +479,7 @@ export class CameraClient {
   }
 
   // lifecycleBlock is the app leaving the foreground, the screen locking or
-  // an interruption (background, inactive, lock, interruption): the capture
+  // an interruption (background, inactive, lock, interruption, stopped): the capture
   // stops at once, the claim is released naming it, and nothing starts again
   // until the person presses the button after lifecycleUnblock. A capture
   // being asked of the OS is stopped when the OS answers. Never rejects.

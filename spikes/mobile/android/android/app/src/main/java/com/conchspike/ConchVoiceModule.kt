@@ -48,10 +48,11 @@ class ConchVoiceModule(private val context: ReactApplicationContext) : ReactCont
   private var devices: AudioDeviceCallback? = null
   private var pending: Promise? = null
   private var lifecycle: Application.ActivityLifecycleCallbacks? = null
-  // How many of the app's activities are started. Counted, so an activity
-  // recreated (rotation, a config change) is a stop then a start, and a second
-  // activity of the app does not look like leaving. Main thread only.
-  private var startedActivities = 0
+  // The app's activities now started, by identity. A set, not a count: a
+  // start this module missed, or an activity destroyed without a stop, cannot
+  // leave it wrong for long. Main thread only. (JS also lifts 'stopped' on
+  // AppState 'active'; both only ever lift a block, never undo an abandoned tap.)
+  private val startedActivities = mutableSetOf<Activity>()
 
   override fun initialize() {
     super.initialize()
@@ -76,26 +77,32 @@ class ConchVoiceModule(private val context: ReactApplicationContext) : ReactCont
     receiver = screen
 
     // Registered for the module's lifetime, like the screen receiver, on the
-    // Application so a recreated activity is still seen. Only onActivityStopped
+    // Application, not an activity, so any activity of the app is seen (rotation
+    // is handled by the manifest configChanges and gives neither event). Only onActivityStopped
     // and onActivityStarted are reported: onActivityPaused is not, because the
     // permission dialog pauses the activity without stopping it, and that must
     // not look like leaving. Callbacks run on the main thread.
     val app = context.applicationContext as Application
     val activities = object : Application.ActivityLifecycleCallbacks {
       override fun onActivityStarted(a: Activity) {
-        startedActivities++
-        if (startedActivities == 1) emit("activity", "started")
+        val wasEmpty = startedActivities.isEmpty()
+        startedActivities.add(a)
+        if (wasEmpty) emit("activity", "started")
       }
       override fun onActivityStopped(a: Activity) {
-        // Never below zero, so a start this module missed cannot hide a stop.
-        startedActivities = maxOf(0, startedActivities - 1)
-        if (startedActivities == 0) emit("activity", "stopped")
+        // Stopped only when none is left started, so a missed start still
+        // reports the stop (the safe side).
+        startedActivities.remove(a)
+        if (startedActivities.isEmpty()) emit("activity", "stopped")
+      }
+      override fun onActivityDestroyed(a: Activity) {
+        // Destroyed without a stop: drop it, and report the stop if it was the last.
+        if (startedActivities.remove(a) && startedActivities.isEmpty()) emit("activity", "stopped")
       }
       override fun onActivityCreated(a: Activity, b: Bundle?) {}
       override fun onActivityResumed(a: Activity) {}
       override fun onActivityPaused(a: Activity) {}
       override fun onActivitySaveInstanceState(a: Activity, b: Bundle) {}
-      override fun onActivityDestroyed(a: Activity) {}
     }
     app.registerActivityLifecycleCallbacks(activities)
     lifecycle = activities

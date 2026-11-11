@@ -125,6 +125,12 @@ export function bridgeLifecycle(): void {
   AppState.addEventListener('change', (state) => {
     diagnostics.add('lifecycle', `app ${state}`);
     controller.appState(appStateOf(state));
+    // Resync (#1758, S1): 'active' lifts a 'stopped' the native count may have
+    // left on (a start it missed). Safe against the abandon rule: a block that
+    // began has already abandoned any tap and is never undone by lifting it,
+    // and while the permission dialog is up the activity stays paused, so
+    // 'active' comes only after the answer.
+    if (state === 'active') controller.activityStopped(false);
     // Back in front: ask the OS whether it is still locked, so a missed
     // broadcast cannot leave the lock block on, or off.
     if (state === 'active') {

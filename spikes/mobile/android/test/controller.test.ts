@@ -296,7 +296,7 @@ test('mute, deafen and listen-only keep the gate shut', async () => {
   assert.ok(listen.log.includes('room connect publish=false'));
 });
 
-test('lifecycle: background, lock and interruption each shut a held press at once, and resume opens nothing', async () => {
+test('lifecycle: background, inactive, lock, interruption and stopped each shut a held press at once, and resume opens nothing', async () => {
   const cases: { name: string; start: (c: VoiceController) => void; end: (c: VoiceController) => void }[] = [
     { name: 'background', start: (c) => c.appState('background'), end: (c) => c.appState('active') },
     { name: 'inactive', start: (c) => c.appState('inactive'), end: (c) => c.appState('active') },
@@ -643,6 +643,51 @@ test('camera tap: the activity stopping after the answer abandons the tap', asyn
   await settle();
   assert.equal(captures(r.log), 0);
   assert.equal(r.c.state.cameraExtra, tapAgain);
+});
+
+test('camera tap: dialog background, stopped, started, then Allow and active: no capture, and the person is told to tap again', async () => {
+  const { r, d, tap } = await pendingTap();
+  r.c.activityStopped(true); // Home over the dialog
+  r.c.activityStopped(false); // back
+  d.answer(true);
+  r.c.appState('active');
+  r.clock.advance(3000);
+  await tap;
+  await settle();
+  assert.equal(captures(r.log), 0);
+  assert.ok(!r.log.some((l) => l.startsWith('claim ')));
+  assert.equal(r.c.state.cameraOn, false);
+  assert.equal(r.c.state.cameraExtra, tapAgain, 'N1: a granted answer after an abandoned tap says tap again');
+});
+
+test('Home is background and stopped together: active alone lifts both, opens nothing, and a press is needed', async () => {
+  const r = rig();
+  await joined(r);
+  r.c.appState('background');
+  r.c.activityStopped(true);
+  assert.deepEqual([...r.c.state.blocked].sort(), ['background', 'stopped']);
+  r.c.appState('active');
+  r.c.activityStopped(false); // the services.ts resync on 'active'
+  assert.deepEqual(r.c.state.blocked, []);
+  assert.equal(r.c.gate.open, false, 'nothing opens by itself');
+  assert.equal(r.c.state.cameraOn, false);
+  assert.equal(captures(r.log), 0);
+  r.c.press();
+  assert.equal(r.c.gate.open, true, 'a press opens it');
+});
+
+test('a stopped the native side left on (a missed start) is lifted by the resync on active', async () => {
+  const r = rig();
+  await joined(r);
+  r.c.activityStopped(true); // an activity opened and closed; the start was missed
+  r.c.press();
+  assert.equal(r.c.gate.open, false, 'stuck: the gate is shut while the app is in front');
+  r.c.appState('active'); // AppState alone does not lift it
+  assert.deepEqual(r.c.state.blocked, ['stopped']);
+  r.c.activityStopped(false); // services.ts calls this on every active
+  assert.deepEqual(r.c.state.blocked, []);
+  r.c.press();
+  assert.equal(r.c.gate.open, true);
 });
 
 test('camera tap: a tap in flight does not survive Leave', async () => {

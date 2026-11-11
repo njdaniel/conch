@@ -78,6 +78,9 @@ export class CameraControls {
   private cancels = 0;
   // Counts the lifecycle blocks that have begun (blockBegan).
   private blocks = 0;
+  // The tap generation a lifecycle block abandoned (N1): if its permission then
+  // comes back granted, the person is told to tap again, not left with nothing.
+  private blockCancelled = -1;
 
   constructor(ports: CameraPorts, onChange: () => void) {
     this.ports = ports;
@@ -139,7 +142,10 @@ export class CameraControls {
       allowed = false;
     }
     // Stopped, lost or left while the prompt was up: nothing more happens.
-    if (gen !== this.cancels) return;
+    if (gen !== this.cancels) {
+      if (allowed && this.blockCancelled === gen) this.say(tapAgain);
+      return;
+    }
     if (!allowed) {
       this.asking = false;
       this.client.fail('blocked');
@@ -171,6 +177,7 @@ export class CameraControls {
       this.backgroundSeen = true;
       return;
     }
+    this.blockCancelled = this.cancels;
     this.cancelTap();
   }
 
