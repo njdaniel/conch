@@ -5,7 +5,8 @@
 //  - the native module's "lock" events (screen off / the person got past the
 //    keyguard);
 //  - its "focus" events (audio focus lost or gained: a call, the assistant,
-//    another app) and "route" events (an audio device came or went).
+//    another app), "route" events (an audio device came or went) and the
+//    "service" event task_removed (the app was swiped away).
 // The OS's own "should resume" hint is not an input: a focus gain only lifts
 // the block, and nothing opens (the gate's resume latch and a fresh press).
 import type { AppState } from '../logic/lifecycle';
@@ -21,8 +22,11 @@ export interface NativeEvent {
 export interface LifecycleSink {
   appState(state: AppState): void;
   screenLocked(locked: boolean): void;
-  interrupted(interrupted: boolean): void;
+  // permanent is a loss the OS will never send a gain for (AUDIOFOCUS_LOSS).
+  interrupted(interrupted: boolean, permanent?: boolean): void;
   routeChanged(route: string): void;
+  // The task was swiped away: voice ends (VoiceService.onTaskRemoved).
+  taskRemoved(): void;
 }
 
 // appStateOf maps React Native's AppState string; anything it does not know is
@@ -42,11 +46,17 @@ export function deliver(sink: LifecycleSink, event: NativeEvent): string {
       break;
     case 'focus':
       // 'duck' is a notification sound: not an interruption.
-      if (event.state === 'lost' || event.state === 'lost_transient') sink.interrupted(true);
+      // 'lost' is permanent: Android never sends a gain after it, so the
+      // controller asks for the focus again when the app is next active.
+      if (event.state === 'lost') sink.interrupted(true, true);
+      else if (event.state === 'lost_transient') sink.interrupted(true);
       else if (event.state === 'gained') sink.interrupted(false);
       break;
     case 'route':
       sink.routeChanged(event.detail);
+      break;
+    case 'service':
+      if (event.state === 'task_removed') sink.taskRemoved();
       break;
   }
   return `native ${event.type}: ${event.state}`;

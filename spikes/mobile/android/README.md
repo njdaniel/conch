@@ -48,4 +48,4 @@ An emulator run is never device evidence.
     adb reverse tcp:8081 tcp:8081                   # Metro
     adb reverse tcp:<conchd> tcp:<conchd>; adb reverse tcp:<livekit> tcp:<livekit>; adb reverse tcp:<livekit+1> tcp:<livekit+1>
 
-The app takes the server address typed in at sign-in; the bearer is held in memory only. The SDK needs `LiveKitReactNative.setup` in `MainApplication.onCreate` (native). Audio focus is owned by `ConchVoiceModule.kt`, and the SDK is told not to manage it, so a focus loss reaches the lifecycle.
+The debug build allows cleartext, so it sends the password (and a sign-in link's code) over a typed `http://` origin: for the development profile only. The release build refuses cleartext. The app takes the server address typed in at sign-in; the bearer is held in memory only. The SDK needs `LiveKitReactNative.setup` in `MainApplication.onCreate` (native). Audio focus is owned by `ConchVoiceModule.kt`, and the SDK is told not to manage it, so a focus loss reaches the lifecycle.

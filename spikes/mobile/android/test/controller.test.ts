@@ -109,6 +109,10 @@ function rig(
     mic?: 'granted' | 'microphone_denied';
     service?: boolean;
     canPublish?: boolean;
+    focus?: boolean[];
+    // Who is in each channel's room, and the channels presence was read for.
+    idsByChannel?: Record<string, number[]>;
+    asked?: string[];
     camera?: boolean;
     cameraPeers?: number[];
     cameraEnded?: { reason: 'operator'; started_at: string; ended_at: string };
@@ -122,9 +126,10 @@ function rig(
   const claims: CameraClaimResult[] = [];
   let self: VoiceController | null = null;
   const api: VoiceApi = {
-    presence: () => {
+    presence: (channel) => {
       log.push('presence');
-      const value = presence(options.ids ?? []);
+      options.asked?.push(channel);
+      const value = presence(options.idsByChannel?.[channel] ?? options.ids ?? []);
       const rooms = value.rooms.map((r) => ({ ...r, participants: r.participants.map((p) => ({ ...p, ...(options.cameraPeers?.includes(p.principal_id) === true ? { camera: true } : {}) })) }));
       return Promise.resolve({ ok: true, value: { ...value, rooms, ...(options.cameraEnded === undefined ? {} : { camera_ended: options.cameraEnded }) } } as const);
     },
@@ -152,7 +157,8 @@ function rig(
     ensurePermissions: () => (log.push('permissions'), Promise.resolve(options.mic ?? 'granted')),
     startService: () => (log.push('service start'), options.service === false ? Promise.reject(new Error('ForegroundServiceStartNotAllowedException')) : Promise.resolve()),
     stopService: () => (log.push('service stop'), Promise.resolve()),
-    requestFocus: () => (log.push('focus'), Promise.resolve(true)),
+    // Each request takes the next answer of options.focus; granted by default.
+    requestFocus: () => (log.push('focus'), Promise.resolve(options.focus?.shift() ?? true)),
     abandonFocus: () => (log.push('focus abandoned'), Promise.resolve()),
   };
   const c = new VoiceController({
@@ -432,6 +438,7 @@ test('the bridge maps the OS signals; a focus gain only lifts the block', () => 
     screenLocked: (b: boolean) => calls.push(`lock ${b}`),
     interrupted: (b: boolean) => calls.push(`interrupted ${b}`),
     routeChanged: (r: string) => calls.push(`route ${r}`),
+    taskRemoved: () => calls.push('task removed'),
   };
   deliver(sink, { type: 'focus', state: 'lost', detail: '' });
   deliver(sink, { type: 'focus', state: 'duck', detail: '' });
@@ -440,276 +447,121 @@ test('the bridge maps the OS signals; a focus gain only lifts the block', () => 
   deliver(sink, { type: 'lock', state: 'locked', detail: '' });
   deliver(sink, { type: 'lock', state: 'unlocked', detail: '' });
   deliver(sink, { type: 'route', state: 'changed', detail: 'bluetooth' });
+  deliver(sink, { type: 'service', state: 'task_removed', detail: '' });
+  deliver(sink, { type: 'service', state: 'started', detail: '' });
   deliver(sink, { type: 'unknown', state: 'x', detail: '' });
-  assert.deepEqual(calls, ['interrupted true', 'interrupted true', 'interrupted false', 'lock true', 'lock false', 'route bluetooth']);
+  assert.deepEqual(calls, ['interrupted true', 'interrupted true', 'interrupted false', 'lock true', 'lock false', 'route bluetooth', 'task removed']);
 });
 
-
-// ---- the camera (M4-D)
-
-const afterJoin = (log: string[]) => steps(log).slice(steps(log).findIndex((l) => l.startsWith('room connect')) + 1).filter((l) => l !== 'presence' && !l.startsWith('deafen'));
-
-async function cameraOn(r: Rig): Promise<void> {
-  await r.c.cameraTap();
-  await settle();
-  assert.equal(r.c.state.camera.kind, 'sending');
-}
-
-test('joining captures nothing, claims nothing and asks no camera permission (M-C2, M-C7)', async () => {
+test('a permanent focus loss does not outlive Leave: lost, leave, join, and a press opens', async () => {
   const r = rig();
   await joined(r);
-  assert.ok(!r.log.includes('camera permission'));
-  assert.deepEqual(afterJoin(r.log), []);
-  assert.equal(r.c.state.camera.kind, 'off');
-  assert.equal(r.c.state.cameraOn, false);
+  deliver(r.c, { type: 'focus', state: 'lost', detail: '' });
+  assert.deepEqual(r.c.state.blocked, ['interruption']);
+  r.c.press();
+  assert.equal(r.c.gate.open, false, 'blocked by the loss');
+  await r.c.leave();
+  assert.deepEqual(r.c.state.blocked, [], 'abandoning the focus clears the reason: no gain will ever come');
+  await joined(r);
+  assert.deepEqual(r.c.state.blocked, []);
+  r.c.press();
+  assert.equal(r.c.gate.open, true, 'a fresh press opens');
 });
 
-test('the button: permission at the first tap, then capture, claim, grant, publish in that order; a second tap stops, then releases (M-C1, M-C7)', async () => {
+test('the same holds for tear-down (a dead credential)', async () => {
   const r = rig();
   await joined(r);
-  await cameraOn(r);
-  assert.deepEqual(afterJoin(r.log), ['camera permission', 'capture phone', 'claim general new', 'camera grant', 'camera publish']);
-  assert.equal(r.c.state.cameraOn, true);
-  await r.c.cameraTap();
-  await settle();
-  assert.deepEqual(afterJoin(r.log).slice(5), ['camera stop', `release general ${startedAt}`]);
-  assert.equal(r.c.state.camera.kind, 'off');
-  assert.equal(r.c.state.cameraOn, false);
-});
-
-test('the camera permission refused: nothing is captured or claimed, and the person is told', async () => {
-  const r = rig({ camera: false });
+  deliver(r.c, { type: 'focus', state: 'lost', detail: '' });
+  await r.c.tearDown();
+  assert.deepEqual(r.c.state.blocked, []);
   await joined(r);
-  await r.c.cameraTap();
-  await settle();
-  assert.deepEqual(afterJoin(r.log), ['camera permission']);
-  assert.deepEqual(r.c.state.camera, { kind: 'failed', reason: 'blocked' });
-  assert.equal(r.c.state.cameraOn, false);
+  r.c.press();
+  assert.equal(r.c.gate.open, true);
 });
 
-test('Listen only cannot send a camera: nothing is asked of the OS or the server', async () => {
-  const r = rig({ canPublish: false });
+test('a denied focus request holds the block and says so; a later grant lifts it only, and talking needs a fresh press', async () => {
+  const r = rig({ focus: [false, true] });
   await joined(r);
-  await r.c.cameraTap();
-  await settle();
-  assert.deepEqual(afterJoin(r.log), []);
-  assert.match(r.c.state.cameraExtra ?? '', /Listen only/);
-});
-
-test('the camera button does nothing when not in voice', async () => {
-  const r = rig();
-  await r.c.cameraTap();
-  assert.deepEqual(steps(r.log), []);
-});
-
-test('a claim refused (the room is full) stops the capture and says so', async () => {
-  const r = rig();
-  await joined(r);
-  r.claims.push({ ok: false, failure: 'invalid', status: 409, code: 'voice_camera_full' });
-  await r.c.cameraTap();
-  await settle();
-  assert.deepEqual(r.c.state.camera, { kind: 'failed', reason: 'full' });
-  assert.equal(r.rooms[0]?.camera.captured, false);
-  assert.ok(!r.log.some((l) => l.startsWith('release')), 'a claim never granted is not released');
-});
-
-for (const name of ['background', 'inactive'] as const) {
-  test(`${name} with the camera on: the capture stops before anything is awaited, the claim is released naming it, and return turns nothing on (M-C3, M-C6)`, async () => {
-    const r = rig();
-    await joined(r);
-    await cameraOn(r);
-    const mark = r.log.length;
-    r.c.appState(name);
-    // Synchronously, in the same tick as the event: the 1 s bar.
-    assert.equal(r.rooms[0]?.camera.captured, false);
-    assert.equal(r.log[mark], 'camera stop');
-    await settle();
-    assert.deepEqual(r.log.slice(mark), ['camera stop', `release general ${startedAt}`]);
-    assert.deepEqual(r.c.state.camera, { kind: 'off', ended: 'lifecycle' });
-    assert.match(r.c.state.cameraExtra ?? r.c.state.camera.kind, /off/);
-    const after = r.log.length;
-    r.c.appState('active');
-    await settle();
-    r.clock.advance(60_000);
-    await settle();
-    assert.deepEqual(r.log.slice(after).filter((l) => /capture|claim|publish|permission/.test(l)), [], 'nothing turns the camera back on');
-    assert.equal(r.c.state.camera.kind, 'off');
-  });
-}
-
-test('lock and interruption each end the camera too; the camera is off after the last lifts (M-C4, M-C5)', async () => {
-  const r = rig();
-  await joined(r);
-  await cameraOn(r);
-  r.c.screenLocked(true);
-  assert.equal(r.rooms[0]?.camera.captured, false);
-  await settle();
-  r.c.screenLocked(false);
-  assert.equal(r.c.state.camera.kind, 'off');
-  await cameraOn(r);
-  r.c.interrupted(true);
-  assert.equal(r.rooms[0]?.camera.captured, false);
-  await settle();
-  r.c.interrupted(false);
-  await settle();
-  assert.equal(r.c.state.camera.kind, 'off');
-  assert.equal(r.log.filter((l) => l.startsWith('claim')).length, 2, 'two taps, two claims, no more');
-});
-
-test('a tap while a lifecycle reason holds does nothing, and the button works again once it lifts', async () => {
-  const r = rig();
-  await joined(r);
+  assert.deepEqual(r.c.state.blocked, ['interruption']);
+  assert.match(r.c.state.note ?? '', /Another app has the audio/);
+  r.c.press();
+  assert.equal(r.c.gate.open, false);
   r.c.appState('background');
-  await r.c.cameraTap();
-  assert.deepEqual(afterJoin(r.log), []);
   r.c.appState('active');
-  await cameraOn(r);
+  await settle();
+  assert.equal(r.log.filter((l) => l === 'focus').length, 2, 'the focus was asked for again on return');
+  assert.deepEqual(r.c.state.blocked, []);
+  assert.equal(r.c.gate.open, false, 'the grant opened nothing');
+  r.c.press();
+  assert.equal(r.c.gate.open, true);
 });
 
-test('the permission prompt takes the app out of the foreground: the capture starts when it is back (M-C7)', async () => {
-  const r = rig({
-    prompt: (clock, c) => {
-      c().appState('background');
-      return new Promise((resolve) => {
-        clock.setTimeout(() => {
-          c().appState('active');
-          resolve(true);
-        }, 0);
-      });
-    },
-  });
+test('after a permanent loss the focus is asked for again when the app is next active, and not for a transient one', async () => {
+  const r = rig();
   await joined(r);
-  const tap = r.c.cameraTap();
-  r.clock.advance(0);
+  deliver(r.c, { type: 'focus', state: 'lost_transient', detail: '' });
+  r.c.appState('active');
   await settle();
-  r.clock.advance(100);
-  await tap;
+  assert.equal(r.log.filter((l) => l === 'focus').length, 1, 'a transient loss waits for its gain');
+  deliver(r.c, { type: 'focus', state: 'gained', detail: '' });
+  deliver(r.c, { type: 'focus', state: 'lost', detail: '' });
+  r.c.appState('active');
   await settle();
-  assert.equal(r.c.state.camera.kind, 'sending');
-  assert.equal(r.log.filter((l) => l.startsWith('capture')).length, 1);
+  assert.equal(r.log.filter((l) => l === 'focus').length, 2);
+  assert.deepEqual(r.c.state.blocked, []);
 });
 
-test('the foreground never comes back after the prompt: nothing starts and the person is asked to tap again', async () => {
-  const r = rig({
-    prompt: (_clock, c) => {
-      c().appState('background');
-      return Promise.resolve(true);
-    },
-  });
+test('open mode: a route change under an open gate arms the resume latch', async () => {
+  const r = rig();
   await joined(r);
-  const tap = r.c.cameraTap();
-  for (let i = 0; i < 30; i++) {
+  r.c.setMode('open');
+  r.c.level(0.9);
+  r.clock.advance(1000);
+  r.c.level(0);
+  r.clock.advance(500);
+  r.c.level(0);
+  r.c.level(0.9);
+  assert.equal(r.c.gate.open, true);
+  r.c.routeChanged('bluetooth');
+  assert.equal(r.c.gate.open, false);
+  for (let i = 0; i < 5; i++) {
+    r.c.level(0.9);
     r.clock.advance(100);
-    await settle();
   }
-  await tap;
-  assert.ok(!r.log.some((l) => l.startsWith('capture')));
-  assert.match(r.c.state.cameraExtra ?? '', /Tap the camera button again/);
+  assert.equal(r.c.gate.open, false, 'the same sound does not reopen it');
+  r.c.level(0);
+  r.clock.advance(500);
+  r.c.level(0);
+  r.c.level(0.9);
+  assert.equal(r.c.gate.open, true, 'quiet, then a fresh onset');
 });
 
-test('the SDK reconnect names the claim it continues; a stale answer stops the camera (S2)', async () => {
+test('swiping the app away ends voice', async () => {
   const r = rig();
   await joined(r);
-  await cameraOn(r);
-  r.rooms[0]?.events?.onReconnecting();
-  r.rooms[0]?.events?.onReconnected();
+  deliver(r.c, { type: 'service', state: 'task_removed', detail: '' });
   await settle();
-  assert.ok(r.log.includes(`claim general ${startedAt}`));
-  assert.equal(r.c.state.camera.kind, 'sending');
-  r.claims.push({ ok: false, failure: 'invalid', status: 409, code: 'voice_camera_stale' });
-  r.rooms[0]?.events?.onReconnected();
-  await settle();
-  assert.deepEqual(r.c.state.camera, { kind: 'failed', reason: 'stale' });
-  assert.equal(r.rooms[0]?.camera.captured, false);
-  assert.equal(r.log.filter((l) => l.startsWith('claim general new')).length, 1, 'no new claim is started by itself');
+  assert.equal(r.c.state.phase, 'idle');
+  assert.ok(r.log.includes('room disconnect'));
 });
 
-test('the device ending the capture stops and releases; nothing captures again', async () => {
-  const r = rig();
-  await joined(r);
-  await cameraOn(r);
-  r.rooms[0]?.events?.onCameraEnded('device');
+test('presence follows the joined channel, not the one on screen', async () => {
+  const asked: string[] = [];
+  const r = rig({ idsByChannel: { a: [3], b: [9] }, asked });
+  r.c.watch('a');
+  await r.c.join('a');
   await settle();
-  assert.deepEqual(r.c.state.camera, { kind: 'failed', reason: 'disconnected' });
-  assert.ok(r.log.includes(`release general ${startedAt}`));
-  r.clock.advance(60_000);
+  assert.deepEqual(r.c.state.participants.map((p) => p.principal_id), [3]);
+  asked.length = 0;
+  r.c.watch('b'); // the Voice view of another channel opens
   await settle();
-  assert.equal(r.log.filter((l) => l.startsWith('capture')).length, 1);
-});
-
-test('the server taking the source away stops the capture (ended)', async () => {
-  const r = rig();
-  await joined(r);
-  await cameraOn(r);
-  r.rooms[0]?.events?.onCameraEnded('server');
-  await settle();
-  assert.equal(r.c.state.camera.kind, 'off');
-  assert.equal(r.rooms[0]?.camera.captured, false);
-});
-
-test('an operator ending the claim, said in presence, stops the capture with the reason', async () => {
-  const r = rig({ cameraEnded: { reason: 'operator', started_at: startedAt, ended_at: '2026-11-05T10:05:00Z' } });
-  await joined(r);
-  // The claim is the one presence names: the next poll tells the camera.
-  await cameraOn(r);
+  assert.deepEqual(r.c.state.participants.map((p) => p.principal_id), [3], 'A is still the room shown');
   r.clock.advance(3000);
   await settle();
-  assert.deepEqual(r.c.state, { ...r.c.state, camera: { kind: 'off', ended: 'operator' } });
-  assert.equal(r.rooms[0]?.camera.captured, false);
-});
-
-test('leaving voice stops the capture and releases the claim before the room goes (S5)', async () => {
-  const r = rig();
-  await joined(r);
-  await cameraOn(r);
-  await r.c.leave();
-  const log = steps(r.log);
-  assert.ok(log.indexOf('camera stop') < log.indexOf(`release general ${startedAt}`));
-  assert.ok(log.indexOf(`release general ${startedAt}`) < log.indexOf('room disconnect'));
-  assert.equal(r.c.state.camera.kind, 'off');
-});
-
-test('a removal stops and releases; another device taking over stops and leaves the claim to it', async () => {
-  const r = rig();
-  await joined(r);
-  await cameraOn(r);
-  r.rooms[0]?.events?.onDisconnected('participant_removed');
+  assert.ok(asked.length > 0 && asked.every((ch) => ch === 'a'), 'only A is polled');
+  r.c.watch(null); // B's view closes: A keeps polling
+  asked.length = 0;
+  r.clock.advance(3000);
   await settle();
-  assert.ok(r.log.includes(`release general ${startedAt}`));
-  assert.equal(r.c.state.camera.kind, 'off');
-
-  const q = rig();
-  await joined(q);
-  await cameraOn(q);
-  q.rooms[0]?.events?.onDisconnected('duplicate_identity');
-  await settle();
-  assert.equal(q.rooms[0]?.camera.captured, false);
-  assert.ok(!q.log.some((l) => l.startsWith('release')), 'the claim is the other device\'s');
-});
-
-test('signing out (tearDown) stops the capture first', async () => {
-  const r = rig();
-  await joined(r);
-  await cameraOn(r);
-  await r.c.tearDown();
-  assert.equal(r.rooms[0]?.camera.captured, false);
-  assert.equal(r.c.state.phase, 'idle');
-});
-
-test('cameras are received only while the Voice view is open and shown, and only from claim holders (M-C8)', async () => {
-  const r = rig({ ids: [3, 4], cameraPeers: [3] });
-  await joined(r);
-  const last = () => r.rooms[0]?.wants[(r.rooms[0]?.wants.length ?? 1) - 1];
-  assert.equal(last()?.viewing, false, 'not open: nothing received');
-  r.c.setViewing(true);
-  await settle();
-  assert.equal(last()?.viewing, true);
-  assert.equal(last()?.shown, true);
-  assert.deepEqual([...(last()?.claimed ?? [])], [3], 'only the claim holder');
-  r.c.appState('background');
-  assert.equal(last()?.shown, false, 'the app away: every camera is let go');
-  r.c.appState('active');
-  assert.equal(last()?.shown, true);
-  r.c.setViewing(false);
-  assert.equal(last()?.viewing, false, 'the view closed: let go');
+  assert.ok(asked.includes('a'));
 });

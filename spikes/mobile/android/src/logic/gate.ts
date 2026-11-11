@@ -119,6 +119,14 @@ export class TransmitGate {
     return this.lifecycle;
   }
 
+  // shutAndArm shuts the gate at once and arms the resume latch, with no
+  // block to lift: the route changed under an open gate. Push to talk needs a
+  // new press; the open microphone needs quiet and then an onset.
+  shutAndArm(): void {
+    this.arm();
+    this.shut();
+  }
+
   // cancel is a touch cancel (the system took the touch): the gate shuts at
   // once, with no tail.
   cancel(): void {

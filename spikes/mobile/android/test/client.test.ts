@@ -1,7 +1,7 @@
 /// <reference types="node" />
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { ApiClient, signInCode, type Fetch, type HttpInit } from '../src/app/client';
+import { ApiClient, signInCode, signInTarget, type Fetch, type HttpInit } from '../src/app/client';
 
 interface Call {
   url: string;
@@ -68,10 +68,34 @@ test('a sign-in link is redeemed by its code; a whole link is accepted', async (
   assert.equal(signInCode('http://x.test/app/#/signin/abc%20d'), 'abc d');
   assert.equal(signInCode('  abc  '), 'abc');
   const { api, calls } = client(() => ({ status: 200, body: { principal, credential, token: 'tok' } }));
-  const r = await api.redeemSignInLink('http://x.test/app/#/signin/code9');
+  const r = await api.redeemSignInLink('http://example.test:1/app/#/signin/code9');
   assert.ok(r.ok);
   assert.equal(calls[0]?.init.body, JSON.stringify({ code: 'code9' }));
   assert.equal(api.signedIn, true);
+});
+
+test('a link made for another server is refused with no request; a bad escape does not throw', async () => {
+  const { api, calls } = client(() => ({ status: 200, body: { principal, credential, token: 'tok' } }));
+  const other = await api.redeemSignInLink('http://elsewhere.test/app/#/signin/code9');
+  assert.ok(!other.ok && other.code === 'link_other_server');
+  const bad = await api.redeemSignInLink('http://example.test:1/app/#/signin/100%');
+  assert.ok(!bad.ok && bad.code === 'link_malformed');
+  assert.equal(calls.length, 0, 'nothing was sent to either');
+  assert.equal(api.signedIn, false);
+  assert.deepEqual(signInTarget('HTTP://Example.test:1/app/#/signin/ok', 'http://example.test:1'), { ok: true, code: 'ok' }, 'the origin is compared without case');
+  assert.deepEqual(signInTarget(' barecode ', 'http://example.test:1'), { ok: true, code: 'barecode' });
+  assert.equal(signInCode('#/signin/100%'), '100%', 'signInCode never throws');
+});
+
+test('changing the server forgets the bearer; the same server keeps it', async () => {
+  const { api } = client(() => ({ status: 200, body: { next: 'signed_in', principal, credential, token: 'b' } }));
+  await api.login('sam', 'pw');
+  assert.equal(api.signedIn, true);
+  api.setServer('http://example.test:1');
+  assert.equal(api.signedIn, true, 'the same origin, spelt differently, is the same server');
+  api.setServer('http://other.test:1');
+  assert.equal(api.signedIn, false);
+  assert.equal(api.secret, null);
 });
 
 test('transmit reports map statuses as the browser does', async () => {
