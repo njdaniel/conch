@@ -240,9 +240,12 @@ func TestOpenMicStaysSaidWhileAFailedRunIsStopped(t *testing.T) {
 	if err := s.Join(ctx, testChannel); err != nil {
 		t.Fatalf("join: %v", err)
 	}
-	if st := s.Status(); st.TalkMode != schema.VoiceControlTalkModeOpen {
-		t.Fatalf("status %+v, want the open talk mode", st)
-	}
+	// Join returns once the start is acknowledged; the first connected
+	// state, which carries the open talk mode and capture on, may follow it
+	// (issue #1728). Wait for it before making the helper hang.
+	waitFor(t, s, "connected in the open talk mode with capture on", func(st Status) bool {
+		return st.Phase == PhaseConnected && st.TalkMode == schema.VoiceControlTalkModeOpen && st.Capture == schema.VoiceControlCaptureOn
+	})
 	if err := s.SetMute(ctx, true); reasonOf(err) != ReasonAckTimeout {
 		t.Fatalf("set_mute: %v, want %s", err, ReasonAckTimeout)
 	}
