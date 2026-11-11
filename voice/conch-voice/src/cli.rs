@@ -206,9 +206,10 @@ pub struct ManagedArgs {
     /// `--test-key-device`, test only: a named pipe of `input_event` records read instead
     /// of the key device `voice.toml` names, with the keys it binds.
     pub test_key_device: Option<PathBuf>,
-    /// `--events-pipe`: a Unix-socket path to connect to for events instead of file
-    /// descriptor 3. Not secret. The desktop owner passes it; nobody types it
-    /// (`docs/design/linux-desktop.md` §5.2). Checked by [`crate::channel`], not here.
+    /// `--events-pipe`: a Unix-socket path (on Windows a `\\.\pipe\` name) to connect to for
+    /// events instead of file descriptor 3. Not secret. The desktop owner passes it; nobody
+    /// types it (`docs/design/linux-desktop.md` §5.2, `docs/design/windows-desktop.md` §3.3).
+    /// Checked by [`crate::channel`], not here.
     pub events_pipe: Option<PathBuf>,
     /// `--share-audio-owner`, passed by an owner that runs a companion (`helper` for the
     /// TUI, which passes nothing).
@@ -410,7 +411,7 @@ pub fn command() -> Command {
                 .value_name("PATH")
                 // Any text, the empty one included: `channel` refuses it with a reason of its own.
                 .value_parser(clap::value_parser!(OsString))
-                .help("connect to this endpoint for events instead of file descriptor 3; conch passes a Unix-socket path, the desktop owner's, never typed by hand"),
+                .help("connect to this endpoint for events instead of file descriptor 3; the desktop owner passes a Unix-socket path, on Windows a \\\\.\\pipe\\ name, never typed by hand"),
         );
     let devices = Command::new("devices")
         .about("List microphones and speakers by the names the configuration takes, and keyboards")
@@ -1491,8 +1492,8 @@ mod tests {
             .to_string();
         assert!(
             help.contains(
-                "connect to this endpoint for events instead of file descriptor 3; conch passes \
-                 a Unix-socket path, the desktop owner's, never typed by hand"
+                "connect to this endpoint for events instead of file descriptor 3; the desktop \
+                 owner passes a Unix-socket path, on Windows a \\\\.\\pipe\\ name, never typed by hand"
             ),
             "{help}"
         );

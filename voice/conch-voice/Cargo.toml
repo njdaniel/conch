@@ -31,6 +31,12 @@ tokio = { version = "1.53", default-features = false, features = ["macros", "rt-
 # repository, by commit; the source is allowed by exact URL in deny.toml.
 dmn-audio = { git = "https://github.com/njdaniel/dmn-audio", rev = "39e7748c0b4bf3317681f6718117152e48df63c8" }
 
+# Windows only (issue #938): the named-pipe client the events endpoint opens, tokio's `net`
+# feature. A feature of a crate already here (the dev-dependency below has it), so Cargo.lock
+# gains no crate; Nick signed it off on #756, 2026-11-11.
+[target.'cfg(windows)'.dependencies]
+tokio = { version = "1.53", default-features = false, features = ["net"] }
+
 [dev-dependencies]
 # The stub conchd the tests talk to is written by hand on tokio's listener.
 tokio = { version = "1.53", default-features = false, features = ["io-util", "net"] }

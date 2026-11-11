@@ -298,10 +298,19 @@ pub fn managed(
     scrubber: Arc<Scrubber>,
     parent: u32,
 ) -> Result<(), Error> {
+    #[cfg(not(unix))]
+    let _ = parent;
+    // The runtime comes first: on Windows the pipe is registered with it when it is opened,
+    // and its events are written through it. Nothing has been opened or read yet.
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .map_err(Error::Runtime)?;
     // Where the events go: the endpoint the owner listens on, with the attach line already
     // written, or file descriptor 3. Exactly one is looked at.
-    let (events, end): (Box<dyn Write + Send>, Option<channel::Stream>) = match &args.events_pipe {
+    let (events, end): (Box<dyn Write + Send>, Option<channel::End>) = match &args.events_pipe {
         Some(path) => {
+            let _entered = runtime.enter();
             let endpoint = channel::attach(path, environment, &scrubber)?;
             (Box::new(endpoint.events), Some(endpoint.end))
         }
@@ -312,10 +321,6 @@ pub fn managed(
         conch_voice_attach: None,
         ..environment.clone()
     };
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .map_err(Error::Runtime)?;
     let keys = match &args.test_key_device {
         Some(pipe) => managed::KeySource::NamedPipe(pipe.clone()),
         None => managed::KeySource::Configured,
@@ -336,6 +341,9 @@ pub fn managed(
         host.transmit_ceiling_secs = args.transmit_ceiling_secs;
         host.no_mute_key = args.no_mute_key;
         managed::signals(inputs.clone(), host.watchdog.clone()).map_err(Error::Runtime)?;
+        // Windows has no parent to watch (`parent_id` is 0 there, ids are reused): its owner
+        // is noticed by the events pipe ending or failing to be written (#938).
+        #[cfg(unix)]
         managed::watch_parent(parent, inputs.clone(), host.watchdog.clone());
         if let Some(end) = end {
             channel::watch_end(end, inputs.clone(), host.watchdog.clone());
