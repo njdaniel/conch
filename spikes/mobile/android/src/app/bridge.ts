@@ -7,6 +7,9 @@
 //  - its "focus" events (audio focus lost or gained: a call, the assistant,
 //    another app), "route" events (an audio device came or went) and the
 //    "service" event task_removed (the app was swiped away).
+// Its "activity" events (the activity stopped or started: leaving the app, which
+// AppState does not report on Android while a permission dialog is up) are the
+// fourth.
 // The OS's own "should resume" hint is not an input: a focus gain only lifts
 // the block, and nothing opens (the gate's resume latch and a fresh press).
 import type { AppState } from '../logic/lifecycle';
@@ -22,6 +25,8 @@ export interface NativeEvent {
 export interface LifecycleSink {
   appState(state: AppState): void;
   screenLocked(locked: boolean): void;
+  // The app's activity stopped (true) or started (false), Android only.
+  activityStopped(stopped: boolean): void;
   // permanent is a loss the OS will never send a gain for (AUDIOFOCUS_LOSS).
   interrupted(interrupted: boolean, permanent?: boolean): void;
   routeChanged(route: string): void;
@@ -43,6 +48,10 @@ export function deliver(sink: LifecycleSink, event: NativeEvent): string {
   switch (event.type) {
     case 'lock':
       sink.screenLocked(event.state === 'locked');
+      break;
+    case 'activity':
+      if (event.state === 'stopped') sink.activityStopped(true);
+      else if (event.state === 'started') sink.activityStopped(false);
       break;
     case 'focus':
       // 'duck' is a notification sound: not an interruption.

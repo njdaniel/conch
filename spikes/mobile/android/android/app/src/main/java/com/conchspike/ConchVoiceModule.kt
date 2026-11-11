@@ -1,5 +1,7 @@
 package com.conchspike
 
+import android.app.Activity
+import android.app.Application
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
@@ -9,6 +11,7 @@ import android.media.AudioDeviceCallback
 import android.media.AudioDeviceInfo
 import android.media.AudioFocusRequest
 import android.media.AudioManager
+import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import com.facebook.react.bridge.Arguments
@@ -27,7 +30,10 @@ import com.facebook.react.modules.core.DeviceEventManagerModule
  *  - audio focus, owned here (the SDK is told not to manage it) so that its
  *    loss and gain reach JavaScript as the lifecycle's "interruption";
  *  - the screen-off and unlock broadcasts as the lifecycle's "lock";
- *  - audio device changes, as the "route".
+ *  - audio device changes, as the "route";
+ *  - the app's activity stopping and starting, as "activity" (#1758): the
+ *    camera permission dialog only pauses the activity, so a stop is the
+ *    person leaving (Home, Recents), which AppState never reports.
  *
  * Events go to JavaScript as "ConchVoiceEvent" with a "type" and a "state".
  * Nothing here carries a credential, an address or a device identifier.
@@ -41,6 +47,12 @@ class ConchVoiceModule(private val context: ReactApplicationContext) : ReactCont
   private var receiver: BroadcastReceiver? = null
   private var devices: AudioDeviceCallback? = null
   private var pending: Promise? = null
+  private var lifecycle: Application.ActivityLifecycleCallbacks? = null
+  // The app's activities now started, by identity. A set, not a count: a
+  // start this module missed, or an activity destroyed without a stop, cannot
+  // leave it wrong for long. Main thread only. (JS also lifts 'stopped' on
+  // AppState 'active'; both only ever lift a block, never undo an abandoned tap.)
+  private val startedActivities = mutableSetOf<Activity>()
 
   override fun initialize() {
     super.initialize()
@@ -63,6 +75,37 @@ class ConchVoiceModule(private val context: ReactApplicationContext) : ReactCont
     }
     context.registerReceiver(screen, filter, Context.RECEIVER_NOT_EXPORTED)
     receiver = screen
+
+    // Registered for the module's lifetime, like the screen receiver, on the
+    // Application, not an activity, so any activity of the app is seen (rotation
+    // is handled by the manifest configChanges and gives neither event). Only onActivityStopped
+    // and onActivityStarted are reported: onActivityPaused is not, because the
+    // permission dialog pauses the activity without stopping it, and that must
+    // not look like leaving. Callbacks run on the main thread.
+    val app = context.applicationContext as Application
+    val activities = object : Application.ActivityLifecycleCallbacks {
+      override fun onActivityStarted(a: Activity) {
+        val wasEmpty = startedActivities.isEmpty()
+        startedActivities.add(a)
+        if (wasEmpty) emit("activity", "started")
+      }
+      override fun onActivityStopped(a: Activity) {
+        // Stopped only when none is left started, so a missed start still
+        // reports the stop (the safe side).
+        startedActivities.remove(a)
+        if (startedActivities.isEmpty()) emit("activity", "stopped")
+      }
+      override fun onActivityDestroyed(a: Activity) {
+        // Destroyed without a stop: drop it, and report the stop if it was the last.
+        if (startedActivities.remove(a) && startedActivities.isEmpty()) emit("activity", "stopped")
+      }
+      override fun onActivityCreated(a: Activity, b: Bundle?) {}
+      override fun onActivityResumed(a: Activity) {}
+      override fun onActivityPaused(a: Activity) {}
+      override fun onActivitySaveInstanceState(a: Activity, b: Bundle) {}
+    }
+    app.registerActivityLifecycleCallbacks(activities)
+    lifecycle = activities
 
     val callback = object : AudioDeviceCallback() {
       override fun onAudioDevicesAdded(added: Array<out AudioDeviceInfo>?) = emit("route", "changed", kinds(added))
@@ -88,6 +131,7 @@ class ConchVoiceModule(private val context: ReactApplicationContext) : ReactCont
   override fun invalidate() {
     receiver?.let { context.unregisterReceiver(it) }
     devices?.let { audio.unregisterAudioDeviceCallback(it) }
+    lifecycle?.let { (context.applicationContext as Application).unregisterActivityLifecycleCallbacks(it) }
     abandon()
     VoiceService.listener = null
     super.invalidate()
