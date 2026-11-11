@@ -301,14 +301,39 @@ func (f *sendFixture) waitQueries(t *testing.T, n int64) {
 	t.Fatalf("the sender asked the store %d times, want %d", f.src.queries.Load(), n)
 }
 
-// settled waits for every post made so far to have been evaluated and for
-// in-flight sends to finish: the evaluator is one goroutine over a queue, so
-// when it has made n queries every earlier post was evaluated, and a short
-// pause lets the sends it queued land.
-func (f *sendFixture) settled(t *testing.T, n int64) {
+// settled waits until the sender has asked the store n times (so every post
+// made so far was picked up by the evaluator) and the sender is idle: nothing
+// queued for evaluation or a worker, no send in flight, no retry pending. Idle
+// must hold on two checks a few milliseconds apart, so a state caught between
+// two steps is not taken for the end. It has no fixed sleep, and fails after
+// 5 seconds saying which condition did not hold. A test whose sends leave
+// retries pending uses drained, or waits for the retries it expects.
+func (f *sendFixture) settled(t *testing.T, n int64) { f.await(t, n, false) }
+
+// drained is settled for a test whose wakes fail and are retried: whenever the
+// sender is not idle it fires the retries the fake clock holds, until the
+// sender is idle with none left.
+func (f *sendFixture) drained(t *testing.T, n int64) { f.await(t, n, true) }
+
+func (f *sendFixture) await(t *testing.T, n int64, fire bool) {
 	t.Helper()
 	f.waitQueries(t, n)
-	time.Sleep(60 * time.Millisecond)
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if f.srv.pushSender.Idle() {
+			time.Sleep(5 * time.Millisecond)
+			if f.srv.pushSender.Idle() && f.src.queries.Load() >= n {
+				return
+			}
+			continue
+		}
+		if fire {
+			f.timers.fireAll()
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	t.Fatalf("the push sender was not idle after 5s (store queries %d, want at least %d, %d retries held by the test clock)",
+		f.src.queries.Load(), n, f.timers.count())
 }
 
 func (f *sendFixture) pending(t *testing.T, tok string) schema.ListPendingNotificationsResponseV1 {
@@ -735,13 +760,8 @@ func TestPushOutage(t *testing.T) {
 				f.advance(31 * time.Second) // past the coalescing window
 				advanced += 31 * time.Second
 			}
-			f.settled(t, 5)
-			// The retries are timers: fire them until none is left. Each round
-			// of 6 failed first attempts leaves at most 6 retries, then 6 more.
-			for range 4 {
-				f.timers.fireAll()
-				time.Sleep(80 * time.Millisecond)
-			}
+			// The retries are timers: drained fires them until none is left.
+			f.drained(t, 5)
 			if f.timers.count() != 0 {
 				t.Errorf("%d retries still scheduled", f.timers.count())
 			}
@@ -811,7 +831,12 @@ func TestPushRetriesStayBounded(t *testing.T) {
 		f.phone(t, fmt.Sprint("p", i), "all")
 	}
 	f.postAs(t, f.aliceTok, "general", "x")
-	f.settled(t, 1)
+	f.waitQueries(t, 1)
+	// Every one of the ten failed first attempts leaves a retry held.
+	deadline := time.Now().Add(5 * time.Second)
+	for f.timers.count() < 10 && time.Now().Before(deadline) {
+		time.Sleep(2 * time.Millisecond)
+	}
 	if n := f.timers.count(); n > push.MaxPendingRetries {
 		t.Errorf("%d retries pending, bound %d", n, push.MaxPendingRetries)
 	}
@@ -852,9 +877,7 @@ func TestPushLeak(t *testing.T) {
 		f.advance(2 * time.Minute)
 		before := f.prov.Count()
 		f.postAs(t, f.aliceTok, "general", "leak check "+r.name)
-		f.settled(t, int64(i+1))
-		f.timers.fireAll()
-		time.Sleep(80 * time.Millisecond)
+		f.drained(t, int64(i+1))
 		if f.prov.Count() == before {
 			t.Fatalf("%s: nothing reached the provider", r.name)
 		}

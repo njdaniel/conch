@@ -227,6 +227,11 @@ type Sender struct {
 
 	mu      sync.Mutex
 	pending map[*job]func() bool // retries waiting, with their stop functions
+	// busy counts the posts queued for or under evaluation and the wakes
+	// queued for or held by a worker. It is raised before the item is put on
+	// its channel and dropped only when the item has been fully handled, so a
+	// hand-off never leaves a moment at which the item is counted nowhere.
+	busy    int
 	stopped bool
 	cancel  context.CancelFunc
 	wg      sync.WaitGroup
@@ -288,14 +293,37 @@ func NewSender(cfg SenderConfig) (*Sender, error) {
 // minute. It reads no message and does no I/O, so it is safe to call in the
 // middle of a request.
 func (s *Sender) Enqueue(p Post) {
+	s.addBusy(1)
 	select {
 	case s.posts <- p:
 	default:
+		s.addBusy(-1)
 		s.cfg.Observer.Wake(OutcomeQueueFull)
 		if n, ok := s.queueWarn.allow(s.cfg.Now()); ok {
 			slog.Warn("push: the wake queue is full; wakes are being dropped", "dropped_since_last_warning", n)
 		}
 	}
+}
+
+func (s *Sender) addBusy(d int) {
+	s.mu.Lock()
+	s.busy += d
+	s.mu.Unlock()
+}
+
+// Idle reports whether the sender has nothing left to do: no post is queued
+// for evaluation or being evaluated, no wake is queued for a worker or being
+// sent, and no retry is waiting on its timer. A post handed to Enqueue counts
+// as busy from the call until its wakes have been sent, dropped or scheduled
+// for retry, so Idle is false in the gap between Enqueue and the evaluator
+// picking the post up. A sender that was never started is not idle while it
+// holds a post; a stopped sender is always idle, because Stop drops
+// everything. It is for tests and diagnostics, and it takes the sender's
+// mutex briefly.
+func (s *Sender) Idle() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.stopped || (s.busy == 0 && len(s.pending) == 0)
 }
 
 // Start runs the sender: one goroutine that evaluates posts and Workers that
@@ -349,6 +377,7 @@ func (s *Sender) evaluate(ctx context.Context) {
 			return
 		case p := <-s.posts:
 			s.evaluatePost(ctx, p)
+			s.addBusy(-1)
 		}
 	}
 }
@@ -373,9 +402,11 @@ func (s *Sender) evaluatePost(ctx context.Context, p Post) {
 			s.cfg.Observer.Wake(outcome)
 			continue
 		}
+		s.addBusy(1)
 		select {
 		case s.jobs <- &job{target: t, first: now}:
 		default:
+			s.addBusy(-1)
 			// Dropped before it was sent: it takes back what it spent.
 			undo()
 			s.cfg.Observer.Wake(OutcomeQueueFull)
@@ -392,6 +423,7 @@ func (s *Sender) work(ctx context.Context) {
 			return
 		case j := <-s.jobs:
 			s.send(ctx, j)
+			s.addBusy(-1)
 		}
 	}
 }
@@ -518,6 +550,10 @@ func (s *Sender) fire(j *job) {
 	_, held := s.pending[j]
 	delete(s.pending, j)
 	stopped := s.stopped
+	if held && !stopped {
+		// Counted busy in the same critical section that leaves pending.
+		s.busy++
+	}
 	s.mu.Unlock()
 	if !held || stopped {
 		return
@@ -525,6 +561,7 @@ func (s *Sender) fire(j *job) {
 	select {
 	case s.jobs <- j:
 	default:
+		s.addBusy(-1)
 		s.cfg.Observer.Wake(OutcomeRetryDropped)
 	}
 }

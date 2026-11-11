@@ -1292,3 +1292,71 @@ func TestValidateExpireFloor(t *testing.T) {
 		}
 	}
 }
+
+// TestIdle: Idle is exactly "nothing queued for evaluation, nothing queued
+// for or held by a worker, no retry pending".
+func TestIdle(t *testing.T) {
+	t.Run("a post enqueued before Start is not idle", func(t *testing.T) {
+		h := newHarness(t, harnessOpts{})
+		if !h.sender.Idle() {
+			t.Fatal("a new sender is not idle")
+		}
+		h.sender.Enqueue(post)
+		if h.sender.Idle() {
+			t.Fatal("idle with a post queued and nothing to take it")
+		}
+		h.start(t)
+		waitFor(t, "the sender to be idle", h.sender.Idle)
+		if h.prov.Count() != 1 {
+			t.Errorf("requests = %d, want 1", h.prov.Count())
+		}
+	})
+	t.Run("a send in flight is not idle", func(t *testing.T) {
+		h := newHarness(t, harnessOpts{})
+		release := make(chan struct{})
+		h.prov.Script(func(int, *pushtest.Delivery) pushtest.Reply {
+			<-release
+			return pushtest.Reply{Status: 201}
+		})
+		h.start(t)
+		h.sender.Enqueue(post)
+		h.prov.WaitFor(t, 1, 5*time.Second)
+		for range 20 {
+			if h.sender.Idle() {
+				t.Fatal("idle while the provider holds the request")
+			}
+			time.Sleep(time.Millisecond)
+		}
+		close(release)
+		waitFor(t, "the sender to be idle after the send", h.sender.Idle)
+		if got := h.obs.wake(OutcomeSent); got != 1 {
+			t.Errorf("sent = %d, want 1 by the time the sender is idle", got)
+		}
+	})
+	t.Run("a pending retry is not idle", func(t *testing.T) {
+		h := newHarness(t, harnessOpts{})
+		h.prov.Script(func(n int, _ *pushtest.Delivery) pushtest.Reply {
+			if n == 1 {
+				return pushtest.Reply{Status: 503}
+			}
+			return pushtest.Reply{Status: 201}
+		})
+		h.start(t)
+		h.sender.Enqueue(post)
+		waitFor(t, "the retry to be scheduled", func() bool { return len(h.timers.delays()) == 1 })
+		for range 20 {
+			if h.sender.Idle() {
+				t.Fatal("idle while a retry is pending")
+			}
+			time.Sleep(time.Millisecond)
+		}
+		h.clk.Advance(2 * time.Second)
+		if !h.timers.fireNext() {
+			t.Fatal("no timer to fire")
+		}
+		waitFor(t, "the sender to be idle after the retry", h.sender.Idle)
+		if got := h.obs.wake(OutcomeSent); got != 1 {
+			t.Errorf("sent = %d, want 1", got)
+		}
+	})
+}
