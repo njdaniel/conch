@@ -101,6 +101,7 @@ export interface ControllerOptions {
 
 export const pollEvery = 3000;
 const away = 'Voice ended while the app was away. Join again when you want to talk.';
+const focusDenied = 'Another app has the audio (a call, perhaps), so the microphone stays shut. Come back to this screen when it is done.';
 const heldTooLong = 'The microphone shut after 30 s of one press. Release and press again.';
 
 const initial: VoiceState = {
@@ -139,6 +140,12 @@ export class VoiceController {
   private retryTimer: unknown = null;
   private pollTimer: unknown = null;
   private polling: string | null = null;
+  // The channel whose Voice view is on screen, joined or not (watch).
+  private viewing: string | null = null;
+  // The audio focus is gone and the OS will not give it back unasked: a
+  // permanent loss, or a request that was denied. Cleared by a gain, a grant,
+  // Leave and tear-down.
+  private focusLost = false;
 
   constructor(options: ControllerOptions) {
     this.o = options;
@@ -258,8 +265,41 @@ export class VoiceController {
     }
     this.retries = 0;
     this.everConnected = false;
-    await this.o.native.requestFocus().catch(() => false);
+    const granted = await this.o.native.requestFocus().catch(() => false);
+    if (mine !== this.attempt) return;
+    this.applyFocus(granted);
     await this.connect(channel, mine);
+  }
+
+  // applyFocus is the answer to a focus request: granted lifts an interruption
+  // left by an earlier loss; denied holds the block and says so.
+  private applyFocus(granted: boolean): void {
+    this.focusLost = !granted;
+    this.held = false;
+    this.lifecycle.interrupted(!granted);
+    this.set({
+      blocked: this.lifecycle.reasons,
+      ...(granted ? {} : { note: focusDenied }),
+    });
+  }
+
+  // regainFocus asks for the focus again, once the app is active and connected
+  // after a permanent loss. A grant only lifts the block: the gate's latch
+  // stays, and talking needs a fresh press.
+  private async regainFocus(): Promise<void> {
+    const mine = this.attempt;
+    if (!this.focusLost || (this.s.phase !== 'connected' && this.s.phase !== 'reconnecting')) return;
+    const granted = await this.o.native.requestFocus().catch(() => false);
+    if (mine !== this.attempt || !this.focusLost) return;
+    if (granted) this.applyFocus(true);
+  }
+
+  // clearFocus forgets the interruption after the focus was abandoned: nothing
+  // will ever send the gain, so it must not outlive the room.
+  private clearFocus(): void {
+    this.focusLost = false;
+    this.lifecycle.interrupted(false);
+    this.set({ blocked: this.lifecycle.reasons });
   }
 
   private async connect(channel: string, mine: number): Promise<void> {
@@ -387,8 +427,11 @@ export class VoiceController {
     if (mine !== this.attempt) return;
     this.dropRoom();
     await this.o.native.abandonFocus().catch(() => undefined);
+    this.clearFocus();
     await this.o.native.stopService().catch(() => undefined);
     this.set({ ...initialFor(this.s), phase: 'idle', channel: this.s.channel, why, warning: null, participants: [], transmitting: false, gateOpen: false });
+    // Presence follows the channel on screen again.
+    if (this.viewing !== null) this.startPolling(this.viewing);
   }
 
   // tearDown is the credential gone (a 401): media first, no waiting, and no
@@ -402,6 +445,7 @@ export class VoiceController {
     this.gate.setBlocked(true);
     this.dropRoom();
     await this.o.native.abandonFocus().catch(() => undefined);
+    this.clearFocus();
     await this.o.native.stopService().catch(() => undefined);
     this.set({ ...initial });
   }
@@ -425,12 +469,20 @@ export class VoiceController {
 
   // ---- presence
 
-  // watch reads the presence of a channel on screen, joined or not.
+  // watch reads the presence of the channel on screen. While the phone is in
+  // voice in one channel, presence follows that one, whatever is on screen: a
+  // Voice view of another channel neither replaces the joined room's
+  // participants nor stops their polling.
   watch(channel: string | null): void {
+    const was = this.viewing;
+    this.viewing = channel;
+    const joined = this.s.phase === 'idle' ? null : this.s.channel;
     if (channel === null) {
+      if (was !== null && joined !== null && was !== joined) return;
       this.stopPolling();
       return;
     }
+    if (joined !== null && channel !== joined) return;
     this.startPolling(channel);
   }
 
@@ -509,6 +561,7 @@ export class VoiceController {
     this.held = false;
     this.lifecycle.appState(state);
     this.set({ blocked: this.lifecycle.reasons });
+    if (state === 'active') void this.regainFocus();
   }
 
   screenLocked(locked: boolean): void {
@@ -517,10 +570,17 @@ export class VoiceController {
     this.set({ blocked: this.lifecycle.reasons });
   }
 
-  interrupted(interrupted: boolean): void {
+  interrupted(interrupted: boolean, permanent = false): void {
     this.held = false;
+    if (!interrupted) this.focusLost = false;
+    else if (permanent) this.focusLost = true;
     this.lifecycle.interrupted(interrupted);
     this.set({ blocked: this.lifecycle.reasons });
+  }
+
+  // taskRemoved is the app swiped away: voice ends with it.
+  taskRemoved(): void {
+    void this.tearDown();
   }
 
   // routeChanged is an audio device attached or detached. The microphone may
@@ -530,7 +590,9 @@ export class VoiceController {
     this.set({ route });
     if (this.gate.open) {
       this.held = false;
-      this.gate.shut();
+      // Shut, and arm the resume latch, so the open microphone does not
+      // reopen on the sound that is still there.
+      this.gate.shutAndArm();
     }
   }
 

@@ -92,6 +92,11 @@ Schema copy: `src/logic/schema/{generated,validate}.ts`, verbatim from `web/src/
 
 Not shown by the emulator: real audio (no audio device), LAN reachability, Bluetooth and wired routes, OS microphone indicator, `adb emu gsm call` interruption (not run), battery and data, TalkBack, Android 14 behaviour. Mute, deafen, open microphone, listen-only, the hand-off warning and displacement were not driven on the emulator (unit tests only).
 
+## Findings for M6 (recorded, not fixed in the spike)
+
+- React Native's JavaScript timers pause while the app is in the background. The presence poll, the retry timer and the `ReportQueue` retries all run on them, so a failed `stopped` report sent on Home waits for the app's return (the room stays up, and conchd's own unreported-transmit handling is the backstop). A production app needs a native or service-held timer for the report, or a report path that does not depend on JS being awake. Device rows M-L2 and M-L5 should watch for it.
+- `VoiceService` calls `stopSelf()` after a failed `startForeground`. On some Android builds, a service that was started with `startForegroundService` and then stops without having called `startForeground` successfully can raise the "did not then call Service.startForeground()" crash. Not seen on the emulator; under M-P3 the device run should look for it.
+
 ## Manifest (to quote)
 
 See `spikes/mobile/android/android/app/src/main/AndroidManifest.xml`: service `.VoiceService` `foregroundServiceType="microphone|mediaPlayback"`, no `camera` type; permissions RECORD_AUDIO, CAMERA (for M4-D), POST_NOTIFICATIONS, FOREGROUND_SERVICE(_MICROPHONE, _MEDIA_PLAYBACK), MODIFY_AUDIO_SETTINGS, ACCESS_NETWORK_STATE, CHANGE_NETWORK_STATE, BLUETOOTH_CONNECT (route rows M-B1 to M-B3); `allowBackup="false"`.

@@ -51,6 +51,9 @@ class VoiceService : Service() {
 
   // Swiping the app away ends voice: the next launch does not rejoin.
   override fun onTaskRemoved(rootIntent: Intent?) {
+    // Tell JavaScript first, if it is still there, so it leaves the room
+    // (ConchVoiceModule emits it as the "service" event task_removed).
+    report("task_removed")
     running = false
     stopForeground(STOP_FOREGROUND_REMOVE)
     stopSelf()

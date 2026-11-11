@@ -53,7 +53,7 @@ interface Rig {
   reports: VoiceTransmitState[];
 }
 
-function rig(options: { ids?: number[]; mic?: 'granted' | 'microphone_denied'; service?: boolean; canPublish?: boolean } = {}): Rig {
+function rig(options: { ids?: number[]; mic?: 'granted' | 'microphone_denied'; service?: boolean; canPublish?: boolean; focus?: boolean[] } = {}): Rig {
   const clock = new FakeClock();
   const log: string[] = [];
   const rooms: FakeRoom[] = [];
@@ -71,7 +71,8 @@ function rig(options: { ids?: number[]; mic?: 'granted' | 'microphone_denied'; s
     ensurePermissions: () => (log.push('permissions'), Promise.resolve(options.mic ?? 'granted')),
     startService: () => (log.push('service start'), options.service === false ? Promise.reject(new Error('ForegroundServiceStartNotAllowedException')) : Promise.resolve()),
     stopService: () => (log.push('service stop'), Promise.resolve()),
-    requestFocus: () => (log.push('focus'), Promise.resolve(true)),
+    // Each request takes the next answer of options.focus; granted by default.
+    requestFocus: () => (log.push('focus'), Promise.resolve(options.focus?.shift() ?? true)),
     abandonFocus: () => (log.push('focus abandoned'), Promise.resolve()),
   };
   const c = new VoiceController({
@@ -350,6 +351,7 @@ test('the bridge maps the OS signals; a focus gain only lifts the block', () => 
     screenLocked: (b: boolean) => calls.push(`lock ${b}`),
     interrupted: (b: boolean) => calls.push(`interrupted ${b}`),
     routeChanged: (r: string) => calls.push(`route ${r}`),
+    taskRemoved: () => calls.push('task removed'),
   };
   deliver(sink, { type: 'focus', state: 'lost', detail: '' });
   deliver(sink, { type: 'focus', state: 'duck', detail: '' });
@@ -358,6 +360,135 @@ test('the bridge maps the OS signals; a focus gain only lifts the block', () => 
   deliver(sink, { type: 'lock', state: 'locked', detail: '' });
   deliver(sink, { type: 'lock', state: 'unlocked', detail: '' });
   deliver(sink, { type: 'route', state: 'changed', detail: 'bluetooth' });
+  deliver(sink, { type: 'service', state: 'task_removed', detail: '' });
+  deliver(sink, { type: 'service', state: 'started', detail: '' });
   deliver(sink, { type: 'unknown', state: 'x', detail: '' });
-  assert.deepEqual(calls, ['interrupted true', 'interrupted true', 'interrupted false', 'lock true', 'lock false', 'route bluetooth']);
+  assert.deepEqual(calls, ['interrupted true', 'interrupted true', 'interrupted false', 'lock true', 'lock false', 'route bluetooth', 'task removed']);
+});
+
+test('a permanent focus loss does not outlive Leave: lost, leave, join, and a press opens', async () => {
+  const r = rig();
+  await joined(r);
+  deliver(r.c, { type: 'focus', state: 'lost', detail: '' });
+  assert.deepEqual(r.c.state.blocked, ['interruption']);
+  r.c.press();
+  assert.equal(r.c.gate.open, false, 'blocked by the loss');
+  await r.c.leave();
+  assert.deepEqual(r.c.state.blocked, [], 'abandoning the focus clears the reason: no gain will ever come');
+  await joined(r);
+  assert.deepEqual(r.c.state.blocked, []);
+  r.c.press();
+  assert.equal(r.c.gate.open, true, 'a fresh press opens');
+});
+
+test('the same holds for tear-down (a dead credential)', async () => {
+  const r = rig();
+  await joined(r);
+  deliver(r.c, { type: 'focus', state: 'lost', detail: '' });
+  await r.c.tearDown();
+  assert.deepEqual(r.c.state.blocked, []);
+  await joined(r);
+  r.c.press();
+  assert.equal(r.c.gate.open, true);
+});
+
+test('a denied focus request holds the block and says so; a later grant lifts it only, and talking needs a fresh press', async () => {
+  const r = rig({ focus: [false, true] });
+  await joined(r);
+  assert.deepEqual(r.c.state.blocked, ['interruption']);
+  assert.match(r.c.state.note ?? '', /Another app has the audio/);
+  r.c.press();
+  assert.equal(r.c.gate.open, false);
+  r.c.appState('background');
+  r.c.appState('active');
+  await settle();
+  assert.equal(r.log.filter((l) => l === 'focus').length, 2, 'the focus was asked for again on return');
+  assert.deepEqual(r.c.state.blocked, []);
+  assert.equal(r.c.gate.open, false, 'the grant opened nothing');
+  r.c.press();
+  assert.equal(r.c.gate.open, true);
+});
+
+test('after a permanent loss the focus is asked for again when the app is next active, and not for a transient one', async () => {
+  const r = rig();
+  await joined(r);
+  deliver(r.c, { type: 'focus', state: 'lost_transient', detail: '' });
+  r.c.appState('active');
+  await settle();
+  assert.equal(r.log.filter((l) => l === 'focus').length, 1, 'a transient loss waits for its gain');
+  deliver(r.c, { type: 'focus', state: 'gained', detail: '' });
+  deliver(r.c, { type: 'focus', state: 'lost', detail: '' });
+  r.c.appState('active');
+  await settle();
+  assert.equal(r.log.filter((l) => l === 'focus').length, 2);
+  assert.deepEqual(r.c.state.blocked, []);
+});
+
+test('open mode: a route change under an open gate arms the resume latch', async () => {
+  const r = rig();
+  await joined(r);
+  r.c.setMode('open');
+  r.c.level(0.9);
+  r.clock.advance(1000);
+  r.c.level(0);
+  r.clock.advance(500);
+  r.c.level(0);
+  r.c.level(0.9);
+  assert.equal(r.c.gate.open, true);
+  r.c.routeChanged('bluetooth');
+  assert.equal(r.c.gate.open, false);
+  for (let i = 0; i < 5; i++) {
+    r.c.level(0.9);
+    r.clock.advance(100);
+  }
+  assert.equal(r.c.gate.open, false, 'the same sound does not reopen it');
+  r.c.level(0);
+  r.clock.advance(500);
+  r.c.level(0);
+  r.c.level(0.9);
+  assert.equal(r.c.gate.open, true, 'quiet, then a fresh onset');
+});
+
+test('swiping the app away ends voice', async () => {
+  const r = rig();
+  await joined(r);
+  deliver(r.c, { type: 'service', state: 'task_removed', detail: '' });
+  await settle();
+  assert.equal(r.c.state.phase, 'idle');
+  assert.ok(r.log.includes('room disconnect'));
+});
+
+test('presence follows the joined channel, not the one on screen', async () => {
+  const asked: string[] = [];
+  const seen = { ids: { a: [3], b: [9] } as Record<string, number[]> };
+  const clock = new FakeClock();
+  const c = new VoiceController({
+    api: {
+      presence: (ch) => (asked.push(ch), Promise.resolve({ ok: true, value: presence(seen.ids[ch] ?? []) } as const)),
+      voiceSession: () => Promise.resolve({ ok: true, value: session() } as const),
+      reportTransmit: () => Promise.resolve('ok'),
+    },
+    native: { ensurePermissions: () => Promise.resolve('granted'), startService: () => Promise.resolve(), stopService: () => Promise.resolve(), requestFocus: () => Promise.resolve(true), abandonFocus: () => Promise.resolve() },
+    newRoom: () => new FakeRoom([]),
+    clock,
+    random: () => 0.5,
+    me: () => me,
+    log: () => undefined,
+  });
+  c.watch('a');
+  await c.join('a');
+  await settle();
+  assert.deepEqual(c.state.participants.map((p) => p.principal_id), [3]);
+  asked.length = 0;
+  c.watch('b'); // the Voice view of another channel opens
+  await settle();
+  assert.deepEqual(c.state.participants.map((p) => p.principal_id), [3], 'A is still the room shown');
+  clock.advance(3000);
+  await settle();
+  assert.ok(asked.every((ch) => ch === 'a'), 'only A is polled');
+  c.watch(null); // B's view closes: A keeps polling
+  asked.length = 0;
+  clock.advance(3000);
+  await settle();
+  assert.ok(asked.includes('a'));
 });

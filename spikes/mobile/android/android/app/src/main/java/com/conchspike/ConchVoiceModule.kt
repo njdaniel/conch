@@ -73,6 +73,11 @@ class ConchVoiceModule(private val context: ReactApplicationContext) : ReactCont
 
     VoiceService.listener = { state ->
       main.post {
+        // Not an answer to startService: the task was swiped away.
+        if (state == "task_removed") {
+          emit("service", "task_removed")
+          return@post
+        }
         val p = pending
         pending = null
         if (state.startsWith("failed:")) p?.reject("service_failed", state.removePrefix("failed:")) else p?.resolve(state)
@@ -94,6 +99,12 @@ class ConchVoiceModule(private val context: ReactApplicationContext) : ReactCont
   @ReactMethod
   fun startService(promise: Promise) {
     main.post {
+      // One start at a time: a second would overwrite the first's promise and
+      // leave it unsettled.
+      if (pending != null) {
+        promise.reject("service_busy", "A voice service start is already in progress")
+        return@post
+      }
       pending = promise
       try {
         context.startForegroundService(Intent(context, VoiceService::class.java))
