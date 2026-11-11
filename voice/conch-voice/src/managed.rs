@@ -1197,7 +1197,7 @@ pub fn watch_parent(parent: u32, inputs: mpsc::UnboundedSender<Input>, watchdog:
     });
 }
 
-/// Turns SIGTERM and SIGINT into [`Input::Signal`], which a managed session takes as
+/// Turns SIGTERM and SIGINT (on Windows, Ctrl-C) into [`Input::Signal`], which a managed session takes as
 /// `leave` (§8.4), and arms the watchdog for a leave's bound. Must be called inside the
 /// runtime.
 ///
@@ -1205,39 +1205,16 @@ pub fn watch_parent(parent: u32, inputs: mpsc::UnboundedSender<Input>, watchdog:
 ///
 /// What the operating system said, if a handler could not be installed.
 pub fn signals(inputs: mpsc::UnboundedSender<Input>, watchdog: Watchdog) -> std::io::Result<()> {
-    #[cfg(unix)]
-    {
-        use tokio::signal::unix::{SignalKind, signal};
-        let mut interrupt = signal(SignalKind::interrupt())?;
-        let mut terminate = signal(SignalKind::terminate())?;
-        tokio::spawn(async move {
-            loop {
-                tokio::select! {
-                    _ = interrupt.recv() => {}
-                    _ = terminate.recv() => {}
-                }
-                watchdog.arm(Duration::from_millis(VOICE_CONTROL_LEAVE_EXIT_MS));
-                if inputs.send(Input::Signal).is_err() {
-                    return;
-                }
+    let mut interrupts = input::Interrupts::install()?;
+    tokio::spawn(async move {
+        while interrupts.recv().await.is_some() {
+            watchdog.arm(Duration::from_millis(VOICE_CONTROL_LEAVE_EXIT_MS));
+            if inputs.send(Input::Signal).is_err() {
+                return;
             }
-        });
-        Ok(())
-    }
-    // Windows has no SIGTERM: Ctrl+C (and Ctrl+Break) is the interrupt it has.
-    #[cfg(not(unix))]
-    {
-        let mut interrupt = tokio::signal::windows::ctrl_c()?;
-        tokio::spawn(async move {
-            while interrupt.recv().await.is_some() {
-                watchdog.arm(Duration::from_millis(VOICE_CONTROL_LEAVE_EXIT_MS));
-                if inputs.send(Input::Signal).is_err() {
-                    return;
-                }
-            }
-        });
-        Ok(())
-    }
+        }
+    });
+    Ok(())
 }
 
 /// Opens the event pipe the owner handed over as file descriptor 3, without `unsafe`: the

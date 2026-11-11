@@ -19,7 +19,6 @@
 use std::io::{BufRead, BufReader, Read};
 
 use conch_voice_control::LineCommand;
-use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::mpsc;
 
 use crate::session::Input;
@@ -212,21 +211,67 @@ pub fn stdin_lines(inputs: mpsc::UnboundedSender<Input>, at_end: AtEnd) {
     });
 }
 
-/// Turns SIGINT (Ctrl-C) and SIGTERM into [`Input::Signal`]. Must be called inside the
-/// runtime.
+/// The signals that end the program: SIGINT (Ctrl-C) and SIGTERM on Unix; on Windows, which
+/// has no SIGTERM, Ctrl-C and Ctrl-Break. Built inside the runtime, so that nothing can
+/// take the default action between the install and the first wait.
+pub struct Interrupts {
+    #[cfg(unix)]
+    interrupt: tokio::signal::unix::Signal,
+    #[cfg(unix)]
+    terminate: tokio::signal::unix::Signal,
+    #[cfg(not(unix))]
+    ctrl_c: tokio::signal::windows::CtrlC,
+}
+
+impl Interrupts {
+    /// Installs the handlers.
+    ///
+    /// # Errors
+    ///
+    /// What the operating system said, if a handler could not be installed.
+    pub fn install() -> std::io::Result<Self> {
+        #[cfg(unix)]
+        {
+            use tokio::signal::unix::{SignalKind, signal};
+            Ok(Self {
+                interrupt: signal(SignalKind::interrupt())?,
+                terminate: signal(SignalKind::terminate())?,
+            })
+        }
+        #[cfg(not(unix))]
+        {
+            Ok(Self {
+                ctrl_c: tokio::signal::windows::ctrl_c()?,
+            })
+        }
+    }
+
+    /// Waits for the next one. `None` if the handlers can never fire again.
+    pub async fn recv(&mut self) -> Option<()> {
+        #[cfg(unix)]
+        {
+            tokio::select! {
+                got = self.interrupt.recv() => got,
+                got = self.terminate.recv() => got,
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            self.ctrl_c.recv().await
+        }
+    }
+}
+
+/// Turns SIGINT (Ctrl-C) and SIGTERM into [`Input::Signal`] (on Windows, Ctrl-C). Must be
+/// called inside the runtime.
 ///
 /// # Errors
 ///
 /// What the operating system said, if a handler could not be installed.
 pub fn signals(inputs: mpsc::UnboundedSender<Input>) -> std::io::Result<()> {
-    let mut interrupt = signal(SignalKind::interrupt())?;
-    let mut terminate = signal(SignalKind::terminate())?;
+    let mut interrupts = Interrupts::install()?;
     tokio::spawn(async move {
-        loop {
-            tokio::select! {
-                _ = interrupt.recv() => {}
-                _ = terminate.recv() => {}
-            }
+        while interrupts.recv().await.is_some() {
             if inputs.send(Input::Signal).is_err() {
                 return;
             }
