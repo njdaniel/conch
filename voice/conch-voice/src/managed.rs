@@ -1825,6 +1825,7 @@ impl Boot {
             environment.conch_config_dir.as_deref(),
             environment.xdg_config_home.as_deref(),
             environment.home.as_deref(),
+            environment.appdata.as_deref(),
         )
         .map_err(|error| Halt::Fail(Reason::BadConfig, Error::Api(error)))?;
         let config = match &config_dir {

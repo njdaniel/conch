@@ -174,8 +174,7 @@ pub enum Error {
     Attach(&'static str),
 
     /// A facility that has no implementation on this platform yet was asked for: the Unix
-    /// control channel, the inherited event pipe, the key devices, the configuration file's
-    /// checks. The name is this program's own and holds nothing that was read. Windows has
+    /// control channel, the inherited event pipe, the key devices. The name is this program's own and holds nothing that was read. Windows has
     /// its own equivalents, which are separate issues (`docs/design/windows-desktop.md`).
     ///
     /// `what` is this program's own words and stays static; `path` is the file it was asked
@@ -234,7 +233,10 @@ mod tests {
                 "the events endpoint",
                 "the events endpoint is not supported on this platform",
             ),
-            ("config set", "config set is not supported on this platform"),
+            (
+                "the key devices",
+                "the key devices is not supported on this platform",
+            ),
         ] {
             let error = Error::Unsupported {
                 what: facility,

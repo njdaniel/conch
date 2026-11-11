@@ -20,7 +20,7 @@
 //! at all (`keydev::DeviceRule`).
 //!
 //! The order in which a value is taken, first wins: the command line, the environment
-//! (`CONCH_SERVER`), the configuration file (`voice.toml` in the configuration directory: `$CONCH_CONFIG_DIR`, else `$XDG_CONFIG_HOME/conch`), the
+//! (`CONCH_SERVER`), the configuration file (`voice.toml` in the configuration directory: `$CONCH_CONFIG_DIR`, else `$XDG_CONFIG_HOME/conch`; on Windows `%APPDATA%\conch`), the
 //! default. For the server, the stored login comes before the default, as in `conch`: when
 //! exactly one login is stored and `CONCH_TOKEN` is not set, its server is used. The login
 //! token is `CONCH_TOKEN`, or else what `conch login` stored for the server; this program
@@ -58,6 +58,21 @@ pub const CHOOSE_A_SERVER: &str =
 
 /// The environment variable that moves the configuration directory, as for `conch`.
 pub const CONFIG_DIR_ENV: &str = "CONCH_CONFIG_DIR";
+
+/// What the help says of the default configuration directory.
+#[cfg(not(windows))]
+const CONFIG_DIR_DEFAULT_HELP: &str = "Default: $XDG_CONFIG_HOME/conch, else $HOME/.config/conch. ";
+
+/// What the help says of the default configuration directory on Windows, and of what is
+/// trusted there: the directory, not the file (`docs/design/windows-desktop.md` §2.7).
+#[cfg(windows)]
+const CONFIG_DIR_DEFAULT_HELP: &str = "Default: %APPDATA%\\conch (recommended). On Windows \
+     conch-voice trusts the directory, not the file: it checks only that the file itself is \
+     an ordinary file, not a link, and a link or junction at `conch`, at %APPDATA% or at any \
+     parent directory is followed. It cannot tell who may write a directory: a directory \
+     made under a drive root (C:\\work\\alice) is writable by every local user by default, \
+     and then another account can choose the server your token is sent to. Keep it under \
+     your profile. ";
 
 /// The peak level of `--mic tone:<hz>`: a quarter of full scale.
 pub const TONE_AMPLITUDE: f32 = 0.25;
@@ -496,17 +511,17 @@ pub fn command() -> Command {
         .subcommand(unset);
     Command::new("conch-voice")
         .about("The Conch voice client: push-to-talk voice for a channel")
-        .after_help(
+        .after_help(format!(
             "Environment:\n  \
              CONCH_CONFIG_DIR  The directory that holds voice.toml and the credentials.json \
              `conch login` wrote, used exactly as given (no `conch` is added); it must be an \
-             absolute path. Default: $XDG_CONFIG_HOME/conch, else $HOME/.config/conch. \
+             absolute path. {CONFIG_DIR_DEFAULT_HELP}\
              Use it to run two logins on one machine; `conch` reads the same variable.\n  \
              CONCH_SERVER      The address of conchd. Without it, --server or `server` in \
              voice.toml, the server of the stored login when exactly one is stored and \
              CONCH_TOKEN is not set, else http://127.0.0.1:8080.\n  \
-             CONCH_TOKEN       A login token, used instead of the stored one.",
-        )
+             CONCH_TOKEN       A login token, used instead of the stored one."
+        ))
         .version(version)
         .subcommand_required(true)
         .arg_required_else_help(true)
@@ -732,6 +747,8 @@ pub struct Environment {
     pub xdg_config_home: Option<OsString>,
     /// `HOME`.
     pub home: Option<OsString>,
+    /// `APPDATA`: where the configuration directory is on Windows, and read nowhere else.
+    pub appdata: Option<OsString>,
     /// `CONCH_SERVER`.
     pub server: Option<String>,
     /// `CONCH_TOKEN`. Held as a secret: its `Debug` is a placeholder.
@@ -751,6 +768,7 @@ impl Environment {
             conch_config_dir: std::env::var_os(CONFIG_DIR_ENV),
             xdg_config_home: std::env::var_os("XDG_CONFIG_HOME"),
             home: std::env::var_os("HOME"),
+            appdata: std::env::var_os("APPDATA"),
             server: text(SERVER_ENV),
             token: text(TOKEN_ENV).map(Secret::new),
             conch_voice_attach: None,
@@ -787,11 +805,23 @@ pub struct Resolved {
 }
 
 /// Reads `voice.toml`: a missing file is the default configuration. The file's `server`
-/// decides where the login token is sent, so a file that is not a regular file or that
-/// group or others can write is refused. Looked at before it is opened, because opening a
-/// FIFO waits for a writer. A symbolic link is followed: what counts is the file it names.
+/// decides where the login token is sent, so a file that is not a regular file is refused,
+/// and so is one that group or others can write on Unix. Looked at before it is opened,
+/// because opening a FIFO waits for a writer. On Unix a symbolic link is followed: what
+/// counts is the file it names.
+///
+/// On Windows the protection is the configuration directory's, not the file's: there are no
+/// mode bits, and an ACL cannot be read without a Win32 binding this program does not have.
+/// The file is trusted when it is an ordinary file, not a reparse point, in the directory
+/// (`docs/design/windows-desktop.md` §2.7). A link is refused rather than followed, and the
+/// file is opened as itself and its attributes checked on the opened handle, so a link
+/// swapped in after the look cannot make this read another file.
 pub(crate) fn read_config(path: &std::path::Path) -> Result<Config, Error> {
-    let meta = match std::fs::metadata(path) {
+    #[cfg(unix)]
+    let meta = std::fs::metadata(path);
+    #[cfg(windows)]
+    let meta = std::fs::symlink_metadata(path);
+    let meta = match meta {
         Ok(meta) => meta,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             return Ok(Config::default());
@@ -803,19 +833,49 @@ pub(crate) fn read_config(path: &std::path::Path) -> Result<Config, Error> {
             });
         }
     };
+    #[cfg(windows)]
+    if meta.file_type().is_symlink() {
+        return Err(Error::ConfigLink {
+            path: path.to_owned(),
+        });
+    }
     if !meta.is_file() {
         return Err(Error::ConfigNotRegular {
             path: path.to_owned(),
         });
     }
     refuse_if_others_can_write(&meta, path)?;
-    match std::fs::read_to_string(path) {
+    let unreadable = |source| Error::ConfigRead {
+        path: path.to_owned(),
+        source,
+    };
+    #[cfg(unix)]
+    let text = std::fs::read_to_string(path);
+    #[cfg(windows)]
+    let text = {
+        use std::io::Read;
+        match conch_voice_api::open_unfollowed(path) {
+            Ok(conch_voice_api::Unfollowed::File(mut file, _)) => {
+                let mut text = String::new();
+                file.read_to_string(&mut text).map(|_| text)
+            }
+            Ok(conch_voice_api::Unfollowed::Link) => {
+                return Err(Error::ConfigLink {
+                    path: path.to_owned(),
+                });
+            }
+            Ok(conch_voice_api::Unfollowed::NotRegular) => {
+                return Err(Error::ConfigNotRegular {
+                    path: path.to_owned(),
+                });
+            }
+            Err(error) => Err(error),
+        }
+    };
+    match text {
         Ok(text) => Ok(Config::parse(&text, &format!("{path:?}"))?),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Config::default()),
-        Err(source) => Err(Error::ConfigRead {
-            path: path.to_owned(),
-            source,
-        }),
+        Err(source) => Err(unreadable(source)),
     }
 }
 
@@ -835,29 +895,16 @@ fn refuse_if_others_can_write(
     Ok(())
 }
 
-/// Who may write a file is a Windows ACL there, which has no mode to read; judging it is the
-/// Windows port of the configuration (#904). Until then a file that exists is not read,
-/// rather than read unchecked: its `server` decides where the login token is sent.
-///
-/// # Errors
-///
-/// Always [`Error::Unsupported`].
+/// Windows has no mode to read, and the file's ACL cannot be read from safe Rust: nothing to
+/// refuse here. The protection is the directory's, not the file's, and the checks that a
+/// file must be an ordinary one are in [`read_config`].
 #[cfg(not(unix))]
+#[allow(clippy::unnecessary_wraps)]
 fn refuse_if_others_can_write(
     _meta: &std::fs::Metadata,
-    path: &std::path::Path,
+    _path: &std::path::Path,
 ) -> Result<(), Error> {
-    Err(unsupported_permission_check(path))
-}
-
-/// The error behind the non-Unix [`refuse_if_others_can_write`], compiled on Linux too so
-/// that a test holds it.
-#[cfg(any(not(unix), test))]
-fn unsupported_permission_check(path: &std::path::Path) -> Error {
-    Error::Unsupported {
-        what: "checking who may write the configuration file",
-        path: Some(path.to_owned()),
-    }
+    Ok(())
 }
 
 /// Lays the command line over the environment over the configuration file, and finds the
@@ -872,6 +919,7 @@ pub fn resolve(args: &JoinArgs, environment: &Environment) -> Result<Resolved, E
         environment.conch_config_dir.as_deref(),
         environment.xdg_config_home.as_deref(),
         environment.home.as_deref(),
+        environment.appdata.as_deref(),
     )?;
     let mut config = match &config_dir {
         Some(dir) => {
@@ -997,56 +1045,122 @@ pub fn key_device(
     }
 }
 
-#[cfg(test)]
-mod unsupported_tests {
-    use super::*;
-
-    #[test]
-    fn the_non_unix_permission_check_is_typed_and_names_what_it_cannot_do() {
-        let error = unsupported_permission_check(std::path::Path::new("voice.toml"));
-        let shown = error.to_string();
-        assert!(
-            shown.contains("voice.toml") && shown.contains("CONCH_SERVER"),
-            "{shown}"
-        );
-        assert!(matches!(error, Error::Unsupported { .. }));
-        assert!(error.to_string().contains("who may write"), "{error}");
-        assert_eq!(error.exit_code(), 2);
-    }
-}
-
-/// The refusal that is the only control on where the login token goes on a platform that
-/// cannot judge who may write `voice.toml`: a file there that names a server must never be
-/// read, and no file at all is still the default configuration.
-#[cfg(all(test, not(unix)))]
+/// The Windows rule for `voice.toml`: an ordinary file in the directory is trusted, a link or
+/// a directory is not, and a link swapped in after the look is caught on the opened handle
+/// (`docs/design/windows-desktop.md` §2.7(3), (4)).
+#[cfg(all(test, windows))]
 mod windows_config_tests {
     use super::*;
 
+    /// A file symbolic link at `link` to `target`, or false: that needs a privilege or
+    /// developer mode, and GitHub's Windows runners have it. On CI (`CI` or
+    /// `GITHUB_ACTIONS` set) a failure is a panic, never a skip: libtest captures the
+    /// message of a skip, so a skipped test would be invisible there.
+    fn symlink(target: &std::path::Path, link: &std::path::Path) -> bool {
+        match std::os::windows::fs::symlink_file(target, link) {
+            Ok(()) => true,
+            Err(error) => {
+                assert!(
+                    std::env::var_os("CI").is_none()
+                        && std::env::var_os("GITHUB_ACTIONS").is_none(),
+                    "a symbolic link cannot be created on CI: {error}"
+                );
+                eprintln!("skipped: this process may not create a symbolic link: {error}");
+                false
+            }
+        }
+    }
+
+    /// A directory junction at `link` to the directory `target`: `mklink /J` needs no
+    /// privilege.
+    fn junction(target: &std::path::Path, link: &std::path::Path) {
+        let status = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(link)
+            .arg(target)
+            .stdout(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        assert!(status.success(), "mklink /J failed");
+    }
+
     #[test]
-    fn a_voice_toml_that_names_a_server_is_refused_and_no_file_is_the_default() {
+    fn a_junction_at_the_path_is_refused_and_the_target_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        let other = dir.path().join("other");
+        std::fs::create_dir(&other).unwrap();
+        std::fs::write(other.join("voice.toml"), "server = \"http://evil.test\"\n").unwrap();
+        let path = dir.path().join("voice.toml");
+        junction(&other, &path);
+        let error = read_config(&path).unwrap_err();
+        assert!(
+            matches!(
+                error,
+                Error::ConfigLink { .. } | Error::ConfigNotRegular { .. }
+            ),
+            "{error:?}"
+        );
+        assert!(!error.to_string().contains("evil.test"), "{error}");
+    }
+
+    #[test]
+    fn an_ordinary_file_is_read_whatever_its_attributes_and_a_missing_one_is_the_default() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("voice.toml");
         assert_eq!(read_config(&path).unwrap(), Config::default());
 
-        std::fs::write(&path, "server = \"http://evil.test\"\n").unwrap();
-        let error = read_config(&path).unwrap_err();
-        assert!(matches!(error, Error::Unsupported { .. }), "{error:?}");
-        let shown = error.to_string();
-        assert!(
-            shown.contains("CONCH_SERVER") && !shown.contains("evil.test"),
-            "{shown}"
-        );
+        std::fs::write(&path, "channel = \"ops\"\n").unwrap();
+        let want = read_config(&path).unwrap();
+        assert_eq!(want.channel.as_deref(), Some("ops"));
+        // Read-only is an ordinary file still.
+        let mut permissions = std::fs::metadata(&path).unwrap().permissions();
+        permissions.set_readonly(true);
+        std::fs::set_permissions(&path, permissions).unwrap();
+        assert_eq!(read_config(&path).unwrap(), want);
+    }
 
-        let environment = Environment {
-            conch_config_dir: Some(dir.path().as_os_str().to_owned()),
-            token: Some(Secret::new("conch_FAKE_login_token_do_not_print")),
-            ..Environment::default()
-        };
-        let args = match parse(["conch-voice", "join", "general"]).unwrap() {
-            Invocation::Join(args) => args,
-            other => panic!("not a join: {other:?}"),
-        };
-        assert!(resolve(&args, &environment).is_err());
+    #[test]
+    fn a_directory_or_a_link_at_the_path_is_refused_and_names_no_text() {
+        // A directory.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("voice.toml");
+        std::fs::create_dir(&path).unwrap();
+        let error = read_config(&path).unwrap_err();
+        assert!(matches!(error, Error::ConfigNotRegular { .. }), "{error:?}");
+
+        // A link, even to a good file: refused, not followed.
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real.toml");
+        std::fs::write(&real, "server = \"http://evil.test\"\n").unwrap();
+        let path = dir.path().join("voice.toml");
+        if !symlink(&real, &path) {
+            return;
+        }
+        let error = read_config(&path).unwrap_err();
+        assert!(matches!(error, Error::ConfigLink { .. }), "{error:?}");
+        assert!(!error.to_string().contains("evil.test"), "{error}");
+    }
+
+    #[test]
+    fn a_link_swapped_in_after_the_look_is_opened_as_itself_and_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let other = dir.path().join("other.toml");
+        let other_text = "server = \"http://evil.test\"\n";
+        std::fs::write(&other, other_text).unwrap();
+        let path = dir.path().join("voice.toml");
+        std::fs::write(&path, "channel = \"ops\"\n").unwrap();
+        // Looked at: a regular file.
+        assert!(std::fs::symlink_metadata(&path).unwrap().is_file());
+        // Then replaced by a link to another file, before the open.
+        std::fs::remove_file(&path).unwrap();
+        if !symlink(&other, &path) {
+            return;
+        }
+        match conch_voice_api::open_unfollowed(&path).unwrap() {
+            conch_voice_api::Unfollowed::Link => {}
+            other => panic!("expected the link itself, got {other:?}"),
+        }
+        assert_eq!(std::fs::read_to_string(&other).unwrap(), other_text);
     }
 }
 
@@ -1073,18 +1187,21 @@ mod tests {
             conch_config_dir: Some(dir.as_os_str().to_owned()),
             xdg_config_home: None,
             home: None,
+            appdata: None,
             server: None,
             token: Some(Secret::new(FAKE_LOGIN)),
             conch_voice_attach: None,
         }
     }
 
-    /// A private configuration directory chosen by XDG_CONFIG_HOME alone, so the `conch`
-    /// directory under it is the one used.
+    /// A private configuration directory chosen by the user configuration directory alone
+    /// (XDG_CONFIG_HOME, and APPDATA where that is the one read), so the `conch` directory
+    /// under it is the one used.
     fn xdg_environment(dir: &std::path::Path) -> Environment {
         Environment {
             conch_config_dir: None,
             xdg_config_home: Some(dir.as_os_str().to_owned()),
+            appdata: Some(dir.as_os_str().to_owned()),
             ..environment(dir)
         }
     }
@@ -1166,10 +1283,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(
-        not(unix),
-        ignore = "reads voice.toml, which a non-Unix platform answers Error::Unsupported for until #904"
-    )]
     fn voice_toml_and_the_login_move_with_the_configuration_directory() {
         let xdg = tempfile::tempdir().unwrap();
         let alice = tempfile::tempdir().unwrap();
@@ -1183,6 +1296,7 @@ mod tests {
         // CONCH_CONFIG_DIR wins over XDG_CONFIG_HOME and is used without `conch` added.
         let mut both = environment(alice.path());
         both.xdg_config_home = Some(xdg.path().as_os_str().to_owned());
+        both.appdata = Some(xdg.path().as_os_str().to_owned());
         assert_eq!(resolve(&args, &both).unwrap().channel, "alice");
     }
 
@@ -1730,10 +1844,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(
-        not(unix),
-        ignore = "reads voice.toml, which a non-Unix platform answers Error::Unsupported for until #904"
-    )]
     fn the_channel_and_server_come_from_the_file_when_nothing_else_names_them() {
         let dir = tempfile::tempdir().unwrap();
         write_config(
@@ -1747,10 +1857,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(
-        not(unix),
-        ignore = "reads voice.toml, which a non-Unix platform answers Error::Unsupported for until #904"
-    )]
     fn the_environment_wins_over_the_file_and_the_command_line_over_both() {
         let dir = tempfile::tempdir().unwrap();
         write_config(
@@ -1782,10 +1888,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(
-        not(unix),
-        ignore = "reads voice.toml, which a non-Unix platform answers Error::Unsupported for until #904"
-    )]
     fn a_configuration_with_an_unknown_key_is_an_error_that_names_it() {
         let dir = tempfile::tempdir().unwrap();
         write_config(dir.path(), "chanel = \"typo\"\n");
@@ -2023,16 +2125,6 @@ mod tests {
             let name = case.name;
 
             let result = resolve(&join(&line), &environment);
-            // Where a configuration file is not read (#904), a case with one is refused
-            // whatever else it names: the file is the one thing that cannot be judged.
-            if case.file.is_some() && cfg!(not(unix)) {
-                assert!(
-                    matches!(result, Err(Error::Unsupported { .. })),
-                    "{}: {result:?}",
-                    case.name
-                );
-                continue;
-            }
             if case.not_signed_in {
                 let error = result.unwrap_err();
                 let mut want = format!("not signed in to {}: run 'conch login'", case.want);

@@ -429,11 +429,14 @@ jobs:
           exit "$status"
 
       # The whole voice workspace, conch-voice included (#1309): its Unix-only
-      # code (the control channel, key devices, the configuration file's
-      # checks, fd 3) answers a typed "not supported on this platform" error
-      # here. Its integration tests that need Unix (named pipes, shells,
-      # /proc, file modes) or PipeWire are gated off Windows by `cfg` at the
-      # top of the file, each with its reason; the unit tests all run.
+      # code (the control channel, key devices, fd 3) answers a typed "not
+      # supported on this platform" error here. The configuration layer runs
+      # (#904): voice.toml is read and written, and the Windows rules for
+      # discovery and for links are tested. Its integration tests that need
+      # Unix (named pipes, shells, /proc, file modes) or PipeWire are gated
+      # off Windows by `cfg` at the top of the file, each with its reason;
+      # the unit tests all run. On CI a test that cannot create a symbolic
+      # link fails instead of skipping.
       - name: cargo build, test and clippy (workspace)
         run: |
           . scripts/voice-pins.sh
@@ -446,6 +449,16 @@ jobs:
           cargo build --locked --workspace
           cargo test --locked --no-fail-fast --workspace
           cargo clippy --locked --workspace --all-targets -- -D warnings
+
+      # The Go client's side of the Windows configuration directory rule (#904):
+      # conch and conch-voice must look in the same directory from the same
+      # environment. The Rust side of the same vectors ran above.
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: config directory vectors (Go)
+        run: go test ./internal/cli -run TestConfigDirSharedVectorsWindows -count=1 -v
 
   # The web client under web/ (ADR-007). setup-node installs exactly the
   # Node web/.nvmrc pins and caches npm's download cache by the lockfile.

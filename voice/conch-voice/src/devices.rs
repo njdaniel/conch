@@ -578,6 +578,7 @@ pub fn config_view(environment: &Environment) -> (ConfigView, Option<Error>) {
         environment.conch_config_dir.as_deref(),
         environment.xdg_config_home.as_deref(),
         environment.home.as_deref(),
+        environment.appdata.as_deref(),
     ) {
         Ok(Some(dir)) => dir,
         Ok(None) => return (ConfigView::without_names(VoiceDevicesConfig::None), None),
