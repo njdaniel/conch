@@ -869,7 +869,9 @@ mod tests {
 
     #[test]
     fn a_problem_says_why_in_words_that_hold_nothing_read() {
-        let denied = OsError::from(&io::Error::from_raw_os_error(13));
+        // EACCES on Unix, ERROR_ACCESS_DENIED on Windows: the code that means "denied".
+        let code = if cfg!(windows) { 5 } else { 13 };
+        let denied = OsError::from(&io::Error::from_raw_os_error(code));
         assert_eq!(denied.kind(), io::ErrorKind::PermissionDenied);
         for (problem, code, retried) in [
             (Problem::CannotOpen(denied), "cannot_open", true),
@@ -897,7 +899,7 @@ mod tests {
         }
         assert_eq!(
             Problem::CannotOpen(denied).to_string(),
-            format!("cannot open it: {}", io::Error::from_raw_os_error(13))
+            format!("cannot open it: {}", io::Error::from_raw_os_error(code))
         );
         assert_eq!(
             Problem::Refused(Refusal::OutsideDevInput).to_string(),
