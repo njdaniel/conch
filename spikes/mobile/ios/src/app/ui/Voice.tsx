@@ -7,6 +7,7 @@ import { useTrackVolume } from '@livekit/react-native';
 import type { LocalAudioTrack } from 'livekit-client';
 import { controller, micStore, principal } from '../services';
 import { useVoiceState } from './useVoiceState';
+import { useAnnounceState } from './useAnnounce';
 import { Button, Note, Screen, colours, styles } from './common';
 import { CameraControl, CameraGrid } from '../camera/Grid';
 
@@ -55,6 +56,7 @@ function HoldToTalk(props: { enabled: boolean; open: boolean }) {
 
 export function Voice(props: { channel: string; onBack: () => void }) {
   const v = useVoiceState(controller);
+  useAnnounceState(v);
   const mic = useSyncExternalStore(micStore.subscribe, micStore.get);
   const inVoice = v.phase === 'connected' || v.phase === 'reconnecting';
   const mine = v.channel === props.channel;

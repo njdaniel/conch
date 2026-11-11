@@ -1,5 +1,6 @@
 import type { ReactNode } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
+import { useAnnounceText } from './useAnnounce';
 
 export const colours = {
   ink: '#101418',
@@ -45,6 +46,7 @@ export function Screen(props: { title: string; children: ReactNode; right?: Reac
 }
 
 export function Note(props: { text: string | null; kind?: 'warn' | 'plain' }) {
+  useAnnounceText(props.text);
   if (props.text === null || props.text === '') return null;
   return (
     <View style={[styles.note, props.kind === 'warn' && styles.noteWarn]} accessibilityLiveRegion="polite">
