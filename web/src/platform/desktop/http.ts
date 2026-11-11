@@ -13,6 +13,7 @@ import type { JoinAccountRequestV1, JoinGuestRequestV1 } from '../../schema/gues
 import type { CreateInviteRequestV2, RedeemInviteGuestRequestV1, RedeemInviteRequestV2 } from '../../schema/invite';
 import type { CreateCredentialRequestV1 } from '../../schema/credential';
 import type { CreateDeviceLinkRequestV1, CreateSignInLinkRequestV1, RedeemSignInLinkRequestV1 } from '../../schema/signin';
+import { DESKTOP_UNAVAILABLE } from '../../appLimit';
 import { operations, type Call, type OperationId } from '../operations';
 import type { HttpTransport } from '../types';
 import type { BridgeReply, BridgeRequest, ConchDesktopBridge, NoAnswerReason, ReplaceCredentialRequest, SignInOutcome } from './bridge';
@@ -35,7 +36,7 @@ const reasons: Readonly<Record<NoAnswerReason, string>> = {
 // What the page is told of an operation that main refused to make for it: not
 // a network failure, which "Cannot reach the server" would call it, but a
 // refusal of this app's, with a code of its own. The server was never asked.
-const UNAVAILABLE = { code: 'desktop_unavailable', message: 'The desktop app does not do this.' } as const;
+const UNAVAILABLE = { code: DESKTOP_UNAVAILABLE, message: 'The desktop app does not do this.' } as const;
 
 function unavailable(): Promise<Response> {
   return Promise.resolve(jsonResponse(501, UNAVAILABLE));

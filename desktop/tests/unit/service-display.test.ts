@@ -99,16 +99,30 @@ describe.each(rows)('$step', (row) => {
     expect(fake.seen).toEqual([]);
   });
 
-  it('never logs the secret, on an answer, a refusal or a document that is not the one promised', async () => {
+  it('never logs the secret, and neither the reply nor the log holds main’s bearer, on an answer, a refusal or a document that is not the one promised', async () => {
     for (const [status, answer] of [
       [200, row.answer],
       [403, { code: 'permission_denied', message: 'no' }],
       [200, { not: 'the document', leaked: SECRET }],
     ] as const) {
       const { service, logs } = await ready(conchd(row.route, status, answer));
-      await service.display(row.step, row.params, row.body);
+      const reply = await service.display(row.step, row.params, row.body);
       expect(logs.join('\n')).not.toContain(SECRET);
+      expect(logs.join('\n')).not.toContain(BEARER);
+      expect(JSON.stringify(reply)).not.toContain(BEARER);
     }
+  });
+
+  it('answers the declared document only: a valid one with a token of main’s and an extra key comes back without them', async () => {
+    const { service } = await ready(conchd(row.route, 200, { token: BEARER, extra: 1, ...(row.answer as Record<string, unknown>) }));
+    const reply = await service.display(row.step, row.params, row.body);
+    // A credential's or a hook's answer declares a field called token, which
+    // is the server's own and wins; where none is declared the injected one,
+    // like the extra key, is dropped by the response validator.
+    const declared = row.answer as Record<string, unknown>;
+    expect(reply).toEqual({ kind: 'reply', status: 200, body: declared });
+    expect(JSON.stringify(reply)).not.toContain(BEARER);
+    expect(JSON.stringify(reply)).not.toContain('extra');
   });
 
   it('answers a document that is not the one promised as no answer, without echoing it', async () => {

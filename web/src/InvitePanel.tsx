@@ -13,6 +13,7 @@
 // the server's message is never shown.
 import { useCallback, useContext, useEffect, useRef, useState, type SyntheticEvent } from 'react';
 import * as api from './api';
+import { DESKTOP_UNAVAILABLE, desktopUnavailableLine } from './appLimit';
 import { canDo } from './admin/permissions';
 import { clock } from './Conversation';
 import { Glyph } from './Icons';
@@ -75,6 +76,7 @@ type Refused = { readonly failure: api.ApiFailure; readonly code?: string; reado
 // createLine is the plain words for a link the server would not make.
 function createLine(result: Refused): string {
   if (result.failure === 'network') return 'Cannot reach the server. Try again.';
+  if (result.code === DESKTOP_UNAVAILABLE) return desktopUnavailableLine;
   if (result.code === 'rate_limited') return `You have made too many links for now. Try again in ${waitWords(result.retryAfter)}.`;
   if (result.code === 'invalid_request') return 'The server did not accept those settings. Check the number of people.';
   return (result.code === undefined ? undefined : createRefusals[result.code]) ?? 'The server refused the link.';

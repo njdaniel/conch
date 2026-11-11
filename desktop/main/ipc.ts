@@ -245,7 +245,11 @@ function signIn(step: SignInStep): Spec {
 // server's reply once. The body is checked against the operation's own request
 // validator; the operation is fixed by the function, never named by the page.
 // Rated as the sign-in steps are, since each makes something that grants
-// access. On a server the app may not sign in to, nothing is sent.
+// access, and the person's act alone (gesture: true): three of them mint a
+// bearer-equivalent for the signed-in account (a sign-in link for another
+// device, a script credential, a sign-in link for any person, one's own
+// included), so a script in the page cannot call them without a click or key in
+// the window just before. Every UI caller follows a click. On a server the app may not sign in to, nothing is sent.
 function display(step: DisplayStep): Spec {
   return {
     limit: 30,
@@ -255,6 +259,7 @@ function display(step: DisplayStep): Spec {
       return args.length === 1 && isRecord(body) && operations[step].request?.(body).length === 0 ? [body] : null;
     },
     run: ({ service, profiles }, [body]) => (profiles.signInPermitted() ? service.display(step, undefined, body) : INCOMPATIBLE_REPLY),
+    gesture: true,
   };
 }
 
@@ -276,6 +281,7 @@ function displayFor(step: DisplayStep): Spec {
       const { id, body } = request as { id: number; body: unknown };
       return service.display(step, { id }, body);
     },
+    gesture: true,
   };
 }
 
@@ -513,6 +519,7 @@ export const SPECS: Readonly<Record<InvokedFunction, Spec>> = {
     maxBytes: 0,
     parse: none,
     run: ({ service, profiles }) => (profiles.signInPermitted() ? service.display('totpEnroll', undefined, undefined) : INCOMPATIBLE_REPLY),
+    gesture: true,
   },
   createPrincipalSignInLink: displayFor('createPrincipalSignInLink'),
   createPrincipalCredential: displayFor('createPrincipalCredential'),

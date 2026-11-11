@@ -277,8 +277,9 @@ describe('arguments', () => {
     ['createPrincipalSignInLink', [{ id: 12, body: { purpose: 'sign_in' } }], ['display', ['createPrincipalSignInLink', { id: 12 }, { purpose: 'sign_in' }]]],
     ['createPrincipalCredential', [{ id: 12, body: { label: 'ci' } }], ['display', ['createPrincipalCredential', { id: 12 }, { label: 'ci' }]]],
     ['createHook', [{ channel: 'general', principal: 12 }], ['display', ['createHook', undefined, { channel: 'general', principal: 12 }]]],
-  ] as const)('runs %s as its own operation and nothing else', async (name, args, call) => {
+  ] as const)('runs %s as its own operation and nothing else, right after the person’s own click', async (name, args, call) => {
     const f = fixture();
+    f.input.recent = true;
     expect(await f.ipc.invoke(f.event(), name, args)).toEqual({ ok: true, value: { ran: 'display' } });
     expect(f.calls).toEqual([call]);
   });
@@ -299,6 +300,10 @@ describe('arguments', () => {
     ['createPrincipalCredential', [{ id: 12, body: { label: 5 } }]],
     ['createHook', [{ channel: 'general' }]],
     ['createHook', [{ channel: 'general', principal: 'x' }]],
+    ['createMemberLink', [{ kind: 'member', extra: 1 }]],
+    ['createPrincipalCredential', [{ id: 12, body: { label: 'ci', token: 'x' } }]],
+    ['createPrincipalCredential', [{ id: 2 ** 53, body: { label: 'ci' } }]],
+    ['createPrincipalSignInLink', [{ id: 2 ** 53, body: { purpose: 'sign_in' } }]],
   ] as const)('refuses a bad shape: %s %j', async (name, args) => {
     const f = fixture();
     expect(await f.ipc.invoke(f.event(), name, args)).toEqual({ ok: false, kind: 'refused' });
@@ -312,8 +317,38 @@ describe('arguments', () => {
     ['createPrincipalSignInLink', [{ id: 12, body: {} }]],
     ['createPrincipalCredential', [{ id: 12, body: { label: 'ci' } }]],
     ['createHook', [{ channel: 'general', principal: 12 }]],
+  ] as const)('refuses %s from a script with no click or key just before it, and sends nothing (issue #1768)', async (name, args) => {
+    const f = fixture();
+    expect(await f.ipc.invoke(f.event(), name, args)).toEqual({ ok: false, kind: 'refused' });
+    expect(f.logs.at(-1)).toContain('(gesture)');
+    expect(f.calls).toEqual([]);
+  });
+
+  it('keeps what a failing display function was given out of the log and the answer', async () => {
+    const f = fixture();
+    const marker = 'display-marker-canary-7731';
+    const logs: string[] = [];
+    const throwing = { display: () => Promise.reject(new Error(`boom ${marker}`)) } as unknown as Service;
+    const ipc = new Ipc({
+      owned: () => f.contents, gate: f.gate, service: throwing, feeds: {} as Feeds, files: {} as Files, gestures: { take: () => 'pointer' as const },
+      profiles: { signInPermitted: () => true } as unknown as ProfilesApi, voice: {} as VoiceApi, settings: {} as SettingsApi, installed: {} as InstalledApi,
+      notifications: {} as NotificationsApi, invites: {} as InvitesApi, now: () => 0, log: (line) => logs.push(line),
+    });
+    const answer = await ipc.invoke(f.event(), 'createHook', [{ channel: 'general', principal: 12, label: marker }]);
+    expect(answer).toEqual({ ok: false, kind: 'refused' });
+    expect(JSON.stringify([answer, logs])).not.toContain(marker);
+  });
+
+  it.each([
+    ['createMemberLink', [{ kind: 'member' }]],
+    ['createSignInLink', [{}]],
+    ['totpEnroll', []],
+    ['createPrincipalSignInLink', [{ id: 12, body: {} }]],
+    ['createPrincipalCredential', [{ id: 12, body: { label: 'ci' } }]],
+    ['createHook', [{ channel: 'general', principal: 12 }]],
   ] as const)('sends nothing for %s when the server is not one the app may sign in to', async (name, args) => {
     const f = fixture();
+    f.input.recent = true;
     f.permit.value = false;
     expect(await f.ipc.invoke(f.event(), name, args)).toEqual({ ok: true, value: { kind: 'none', reason: 'incompatible' } });
     expect(f.calls).toEqual([]);

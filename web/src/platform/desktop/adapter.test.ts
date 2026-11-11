@@ -129,6 +129,11 @@ describe('the desktop transport: a call of the table is a call of the bridge', (
     await expect(http.get(call('whoami'), STAND_IN)).rejects.toBeInstanceOf(TypeError);
   });
 
+  it.each(['redirect', 'oversize', 'invalid', 'stale', 'incompatible', 'no-server'] as const)('still rejects as no answer when main says %s', async (reason) => {
+    install(fakeBridge({ request: () => Promise.resolve({ kind: 'none', reason }) }));
+    await expect(http.get(call('whoami'), STAND_IN)).rejects.toBeInstanceOf(TypeError);
+  });
+
   it('uploads a file as base64 through the bridge, with the name and declared type, and reads the server’s answer', async () => {
     const uploadFile = vi.fn((): Promise<BridgeReply> => Promise.resolve({ kind: 'reply', status: 201, body: { id: 7 } }));
     install(fakeBridge({ uploadFile }));
