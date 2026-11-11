@@ -352,6 +352,9 @@ jobs:
   # libwebrtc win-x64 build verified by scripts/voice-toolchain.sh. MSVC and the
   # Windows SDK are on the runner image; cc-rs finds them through vswhere, so no
   # Action installs them. Hosted only: there is no self-hosted Windows runner.
+  # Advisory for now, like voice-check and desktop-smoke: the required check
+  # job does not wait on it, so read its result before a merge (it becomes
+  # required once #1309 builds conch-voice here).
   voice-windows:
     needs: changes
     if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
@@ -368,12 +371,14 @@ jobs:
       - uses: actions/checkout@v4
 
       # Keyed on the pins file, as the Linux job's cache is. Windows' own key
-      # (runner.os) keeps the two apart.
+      # (runner.os) keeps the two apart. Only the downloaded zip is kept, and
+      # voice-toolchain.sh hashes it against its pin on every run before
+      # unpacking it, so a cached tree is never linked unread.
       - name: rust toolchain cache
         uses: actions/cache@v4
         with:
-          path: ~/.cache/conch/webrtc-*
-          key: voice-toolchain-${{ runner.os }}-${{ hashFiles('scripts/voice-pins.sh') }}
+          path: ~/.cache/conch/webrtc-*/webrtc-win-x64-release.zip
+          key: voice-toolchain-zip-${{ runner.os }}-${{ hashFiles('scripts/voice-pins.sh') }}
 
       - name: rust build cache
         uses: actions/cache@v4
@@ -404,7 +409,11 @@ jobs:
       - name: build webrtc-sys (E1)
         run: |
           . scripts/voice-pins.sh
-          export LK_CUSTOM_WEBRTC="$(cygpath -m "$HOME/.cache/conch/$CONCH_WEBRTC_TAG/win-x64-release")"
+          # The verified tree must be there: without it webrtc-sys downloads
+          # its own copy unchecked (as voice-env.sh refuses on Linux).
+          webrtc="$(cygpath -m "$HOME/.cache/conch/$CONCH_WEBRTC_TAG/win-x64-release")"
+          test -f "$webrtc/webrtc.ninja"
+          export LK_CUSTOM_WEBRTC="$webrtc"
           cd voice
           # cc-rs prints each compiler command it runs when asked to.
           export CC_ENABLE_DEBUG_OUTPUT=1
@@ -424,7 +433,11 @@ jobs:
       - name: cargo build, test and clippy (workspace except conch-voice, until #1309)
         run: |
           . scripts/voice-pins.sh
-          export LK_CUSTOM_WEBRTC="$(cygpath -m "$HOME/.cache/conch/$CONCH_WEBRTC_TAG/win-x64-release")"
+          # The verified tree must be there: without it webrtc-sys downloads
+          # its own copy unchecked (as voice-env.sh refuses on Linux).
+          webrtc="$(cygpath -m "$HOME/.cache/conch/$CONCH_WEBRTC_TAG/win-x64-release")"
+          test -f "$webrtc/webrtc.ninja"
+          export LK_CUSTOM_WEBRTC="$webrtc"
           cd voice
           cargo build --locked --workspace --exclude conch-voice
           cargo test --locked --no-fail-fast --workspace --exclude conch-voice
