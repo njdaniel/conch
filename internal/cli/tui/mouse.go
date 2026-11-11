@@ -30,6 +30,10 @@ func (m Model) mouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 	l := m.layout()
+	if l.compact {
+		// The compact confirmation covers the panes.
+		return m, nil
+	}
 	switch msg.Button {
 	case tea.MouseButtonLeft:
 		return m.click(l, msg.X, msg.Y)

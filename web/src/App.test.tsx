@@ -1,6 +1,8 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { App } from './App';
+import { SPOILER_FILE_PREFIX } from './schema/file';
+import { attachmentNames, forgetFileNames, rememberFileName } from './spoilerFiles';
 
 const origin = 'http://127.0.0.1:8080';
 const secret = 'conch_secret_token_value';
@@ -364,7 +366,7 @@ describe('lobby', () => {
     signIn();
     await screen.findByRole('button', { name: 'general' });
     const list = screen.getByRole('navigation', { name: 'Channels' });
-    // Two channels and their ⋯, a voice-less one aside, and Browse channels.
+    // Two channels and their ⋯, a voice-less one aside, Browse channels. Find a channel (#1492) and Edit groups (#1493) sit beside the navigation, not in it.
     expect(list.querySelectorAll('button')).toHaveLength(7);
     expect(screen.getByRole('button', { name: 'general' }).getAttribute('aria-current')).toBe('true');
     expect(within(screen.getByRole('region', { name: 'Conversation' })).getByRole('heading', { level: 2 }).textContent).toBe('general');
@@ -428,12 +430,12 @@ describe('lobby', () => {
     expect(list.textContent).toContain('3');
     expect(screen.getByRole('button', { name: 'ops' }).textContent).toBe('ops');
     // Who is there, by name, nested under each channel (issue #1103): the
-    // viewer as You, and ops's people once its members have been read.
+    // viewer by their own name, and ops's people once its members have been read.
     const inOps = within(list).getByRole('list', { name: 'In voice in #ops' });
     await waitFor(() => {
-      expect(within(inOps).getAllByRole('listitem').map((li) => li.textContent)).toEqual(['You', 'eve', 'fay']);
+      expect(within(inOps).getAllByRole('listitem').map((li) => li.textContent)).toEqual(['ada', 'eve', 'fay']);
     });
-    expect(within(within(list).getByRole('list', { name: 'In voice in #general' })).getAllByRole('listitem').map((li) => li.textContent)).toEqual(['You']);
+    expect(within(within(list).getByRole('list', { name: 'In voice in #general' })).getAllByRole('listitem').map((li) => li.textContent)).toEqual(['ada']);
     expect(within(list).queryByRole('list', { name: 'In voice in #dev' })).toBeNull();
     // One read of ops's members for the names, and none of dev's (nobody
     // there); general's is the page's own, for the channel on screen.
@@ -468,7 +470,7 @@ describe('lobby', () => {
   });
 
   it('says voice is not set up when the server has no LiveKit, and offers no join', async () => {
-    const presence = { schema: 'conch.voice_presence.v1', channel_id: 1, configured: false, available: false, rooms: [] };
+    const presence = { schema: 'conch.voice_presence.v2', channel_id: 1, configured: false, available: false, rooms: [] };
     const sockets = socketsOf();
     serve({ ...asMember, '/v1/ws-tickets': () => json({ ticket: ticketValue, expires_at: created_at }, 201) });
     render(<App origin={origin} />);
@@ -622,6 +624,23 @@ describe('lobby', () => {
     expect(screen.getByRole('alert').textContent).toBe('');
     expect(window.localStorage.getItem('conch.web.token')).toBeNull();
     expect(window.sessionStorage.getItem('conch.web.token')).toBeNull();
+  });
+
+  it('forgets the file names recorded in a session when it ends, so none matches the next one', async () => {
+    serve({ ...asMember, '/v1/credentials/current': () => new Response(null, { status: 204 }) });
+    forgetFileNames();
+    render(<App origin={origin} />);
+    signIn();
+    fireEvent.click(await screen.findByRole('button', { name: 'Settings' }));
+    const stored = `${SPOILER_FILE_PREFIX}trip, day 1.png`;
+    const sent = { body: stored, payload: { schema: 'conch.file_attachment.v1', data: { file_ids: [1] } } };
+    // Named in the session, the whole body is one name; unknown, it splits in two parts for one file.
+    rememberFileName(1, stored);
+    expect(attachmentNames(sent)).toEqual([stored]);
+    fireEvent.click(await screen.findByRole('button', { name: 'Sign out' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Yes, sign out' }));
+    await screen.findByLabelText('Credential');
+    expect(attachmentNames(sent)).toBeNull();
   });
 
   // Issue #645: revoking the credential ends its sessions, so a session end

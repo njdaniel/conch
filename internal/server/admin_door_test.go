@@ -589,6 +589,10 @@ func TestAdminCatalogParity(t *testing.T) {
 		schema.AdminActionGetReport:              {target: missing(schema.AdminTargetReport)},
 		schema.AdminActionUpdateReport:           {target: missing(schema.AdminTargetReport), params: fixed(`{"state":"filed","issue":"https://example.com/1"}`)},
 		schema.AdminActionExportAudit:            {params: fixed(`{"limit":5}`)},
+		schema.AdminActionListChannelBans:        {target: gen},
+		schema.AdminActionBanChannelMember:       {target: gen, params: aliceIs(`{"principal_id":%d}`)},
+		schema.AdminActionUnbanChannelMember:     {target: gen, params: aliceIs(`{"principal_id":%d}`)},
+		schema.AdminActionSetChannelTopic:        {target: side, params: fixed(`{"topic":"plans"}`)},
 	}
 	answer := func(status int, body []byte) string {
 		if status < 400 {

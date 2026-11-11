@@ -20,6 +20,7 @@ export const editWindowMs = MESSAGE_EDIT_WINDOW_SECONDS * 1000;
 // they are), and within the window by the page's clock. A pending or failed
 // send is not a message yet and is never offered it.
 export function canEdit(message: MessageV2, viewer: number, kind: PrincipalKind | null | undefined, now: number): boolean {
+  if (message.removed === true) return false;
   if (message.author_id !== viewer || kind !== 'human') return false;
   if (message.payload !== undefined && message.payload.schema !== fileAttachmentPayloadSchema) return false;
   return now - Date.parse(message.created_at) <= editWindowMs;
@@ -64,6 +65,7 @@ export function EditedMarker({
   const at = message.edited_at;
   if (at === undefined) return null;
   const name = `Edited at ${when(at)}`;
+  if (message.removed === true) return null;
   if (message.author_id !== viewer) {
     return (
       <>
@@ -212,7 +214,7 @@ export function EarlierVersions({
                   <time dateTime={revision.created_at}>{when(revision.created_at)}</time>
                   {revision.revision === current ? <span className="version-current"> Current</span> : null}
                 </div>
-                <p className="version-body"><Linkified text={revision.body} /></p>
+                <div className="version-body"><Linkified text={revision.body} /></div>
               </li>
             ))}
           </ol>

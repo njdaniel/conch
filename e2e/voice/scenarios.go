@@ -195,6 +195,10 @@ func (l *live) removed(ctx context.Context) error {
 	if _, st := bobWS.closeStatus(); st != websocket.StatusPolicyViolation {
 		return fmt.Errorf("bob's presence socket was closed with status %d, want %d (policy violation: no longer a member)", st, websocket.StatusPolicyViolation)
 	}
+	// A real removal keeps its sentence: it is not the voice-only word (#1409).
+	if got := bobWS.closeReason(); got != "no longer a member of this channel" {
+		return fmt.Errorf("bob's presence socket was closed with reason %q, want %q", got, "no longer a member of this channel")
+	}
 	// The headless client has done its part; its retries would only hit the
 	// same refusal.
 	l.aliceHL.Stop()

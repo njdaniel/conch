@@ -94,6 +94,26 @@ describe('adding profiles', () => {
   });
 });
 
+describe('finding profiles by origin (issue #1591)', () => {
+  it('lists every profile for a canonical origin, with its account and whether it is active, and none for another', async () => {
+    const s = await setup();
+    const first = await addAndSwitch(s, ORIGIN_A);
+    expect(await s.service.signedIn(ADA)).toBe(true);
+    const second = (await s.service.add(ORIGIN_A)) as { ok: true; id: string };
+    const other = (await s.service.add(ORIGIN_B)) as { ok: true; id: string };
+    expect(s.service.findByOrigin(ORIGIN_A).map(({ id, account, active }) => ({ id, account, active }))).toEqual([
+      { id: first, account: 'ada', active: true },
+      { id: second.id, account: null, active: false },
+    ]);
+    expect(s.service.findByOrigin(ORIGIN_B).map((p) => p.id)).toEqual([other.id]);
+    expect(s.service.findByOrigin('https://c.example')).toEqual([]);
+    // Only the canonical form matches: the caller canonicalises first.
+    expect(s.service.findByOrigin('https://A.example')).toEqual([]);
+    // The same entries as the view's.
+    expect(s.service.findByOrigin(ORIGIN_A)).toEqual(s.service.view().profiles.filter((p) => p.origin === ORIGIN_A));
+  });
+});
+
 describe('binding', () => {
   it('refuses another principal on a bound profile, forgets and revokes that credential, and keeps the first', async () => {
     const s = await setup();

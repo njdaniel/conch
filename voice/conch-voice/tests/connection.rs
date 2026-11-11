@@ -252,6 +252,109 @@ async fn the_same_identity_joining_elsewhere_stops_the_client_with_its_message()
     assert_eq!(ended.conchd.reported(), ["started", "stopped"]);
 }
 
+// Issue #1409: conchd closes a kicked member's presence socket 1008 with the reason word
+// `voice_removed`. Still a member, so a session would be granted: the client stops instead.
+#[tokio::test]
+async fn removed_from_voice_by_a_moderator_stops_the_client_and_asks_for_no_session() {
+    let rig = Rig::start().await;
+    rig.ready().await;
+    rig.until("the presence socket", |rig| {
+        rig.conchd.presence_sockets() == 1
+    })
+    .await;
+    rig.conchd.close_presence(1008, "voice_removed");
+
+    let (result, ended) = rig.ended().await;
+    let error = result.unwrap_err();
+    assert!(
+        matches!(error, Error::Stopped { exit_code: 1, .. }),
+        "{error:?}"
+    );
+    assert_eq!(
+        error.to_string(),
+        "removed from voice by a moderator; you are still a member of the channel, and may join again"
+    );
+    assert_eq!(
+        ended.conchd.session_requests(),
+        1,
+        "it does not go back for a session: conchd would grant one, and the person was just put out"
+    );
+    assert_eq!(ended.sdk.count(Call::Connect), 1);
+    assert_eq!(
+        ended.conchd.presence_sockets(),
+        1,
+        "the presence socket is not opened again by itself"
+    );
+    let last = last_connection(&ended.out);
+    assert_eq!(last["state"], "stopped");
+}
+
+// The room's own disconnect for the kick can come first, and the room is still being closed
+// when the presence socket says `voice_removed`. The stop must not drop that close half way
+// (#1458 review): the client ends only once the room is closed, and asks for no session.
+// The close is held behind a barrier the test releases, so nothing here depends on time.
+#[tokio::test]
+async fn removed_from_voice_while_the_room_is_still_closing_lets_the_close_finish() {
+    let rig = Rig::start().await;
+    rig.ready().await;
+    rig.until("the presence socket", |rig| {
+        rig.conchd.presence_sockets() == 1
+    })
+    .await;
+    let release = rig.sdk.hold_close();
+    rig.sdk.disconnect(DisconnectReason::ParticipantRemoved);
+    rig.until("the room closing", |rig| rig.sdk.count(Call::Close) == 1)
+        .await;
+    rig.conchd.close_presence(1008, "voice_removed");
+    // The stop is decided while the close is still held.
+    rig.until("the stop", |rig| {
+        rig.connection_states().last().map(String::as_str) == Some("stopped")
+    })
+    .await;
+    assert_eq!(rig.sdk.closed(), 0, "the close is still under way");
+    release.notify_one();
+
+    let (result, ended) = rig.ended().await;
+    assert!(
+        matches!(result.unwrap_err(), Error::Stopped { exit_code: 1, .. }),
+        "stopped"
+    );
+    assert_eq!(
+        ended.sdk.closed(),
+        1,
+        "the close that was under way ran to its end"
+    );
+    assert_eq!(ended.conchd.session_requests(), 1);
+    assert_eq!(ended.sdk.count(Call::Connect), 1);
+    assert_eq!(last_connection(&ended.out)["state"], "stopped");
+}
+
+// A presence socket closed 1008 for any other reason is, as before, only the socket: it is
+// opened again after a wait, and the connection is untouched. Membership lost reaches the
+// client through the room and the refused session, not through this socket.
+#[tokio::test]
+async fn a_presence_socket_closed_for_another_reason_is_opened_again_and_voice_goes_on() {
+    let rig = Rig::start().await;
+    rig.ready().await;
+    rig.until("the presence socket", |rig| {
+        rig.conchd.presence_sockets() == 1
+    })
+    .await;
+    rig.conchd
+        .close_presence(1008, "no longer a member of this channel");
+    rig.until("the presence socket again", |rig| {
+        rig.conchd.presence_sockets() >= 2
+    })
+    .await;
+    assert_eq!(
+        rig.connection_states().last().map(String::as_str),
+        Some("connected")
+    );
+    assert_eq!(rig.conchd.session_requests(), 1);
+    rig.line(Down);
+    rig.frames_beyond(2).await;
+}
+
 #[tokio::test]
 async fn each_refusal_of_a_session_stops_the_client_with_its_reason_and_a_nonzero_exit() {
     for (status, code, message) in [

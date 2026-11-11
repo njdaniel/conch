@@ -12,6 +12,7 @@ import type { BrowserWindow } from 'electron';
 
 import { FEED_EVENTS } from '../../shared/bridge-names.ts';
 import { whoAmIResponseV1 } from '../../../web/src/schema/principal.ts';
+import { fromServer } from '../../../web/src/schema/validate.ts';
 import { Client } from '../api/client.ts';
 import { Feeds, type Connect } from '../api/feeds.ts';
 import type { Files } from '../files.ts';
@@ -106,9 +107,11 @@ export function activationFactory(env: ActivationEnv, live: Live): (spec: Activa
     const activation: Activation = {
       profileId: profile?.id ?? null,
       token: () => identity.capture().token,
+      voiceCredential: () => identity.voiceCredential(),
+      voiceCurrent: (generation) => identity.generation === generation && live.service === service,
       async whoami(): Promise<Account | null> {
         const outcome = await service.restore();
-        if (!outcome.ok || outcome.who === null || whoAmIResponseV1(outcome.who).length > 0) return null;
+        if (!outcome.ok || outcome.who === null || fromServer(whoAmIResponseV1)(outcome.who).length > 0) return null;
         const who = outcome.who;
         return { id: who.id, name: who.name, lasting: who.role === 'member' && who.guest === undefined, guest: who.guest !== undefined };
       },
@@ -212,7 +215,7 @@ export function verifier(log: (line: string) => void): (origin: string, token: s
     session.adopt(token);
     try {
       const outcome = await service.restore();
-      if (outcome.ok && outcome.who !== null && whoAmIResponseV1(outcome.who).length === 0) {
+      if (outcome.ok && outcome.who !== null && fromServer(whoAmIResponseV1)(outcome.who).length === 0) {
         const who = outcome.who;
         return { kind: 'account', account: { id: who.id, name: who.name, lasting: who.role === 'member' && who.guest === undefined, guest: who.guest !== undefined } };
       }

@@ -3,6 +3,7 @@
 // reducer; src/api.ts and the socket feed it through App.
 import { messageV2, type Audience, type MessageV2, type Payload } from '../schema/message';
 import { attachmentPayload, type DraftAttachment } from './attachments';
+import { fromServer } from '../schema/validate';
 
 // The most messages held per channel. Messages arriving live push the oldest
 // out (a pending send of our own is kept apart and never dropped). Loading
@@ -55,6 +56,8 @@ export type OlderStatus = 'idle' | 'loading' | 'error';
 export interface ChannelChat {
   // The id is the identity of a message: one that arrives twice is one.
   readonly byId: ReadonlyMap<number, MessageV2>;
+  // Safe envelopes survive a window replacement while older reads are in flight.
+  readonly removed?: ReadonlyMap<number, MessageV2>;
   readonly pending: readonly PendingSend[];
   // Messages this tab sent and the POST confirmed, shown as `Sent`.
   readonly sentIds: ReadonlySet<number>;
@@ -102,6 +105,9 @@ export type ChatAction =
   // `more` is whether the page was full, so there may be older history.
   | { readonly type: 'historyLoaded'; readonly channel: string; readonly messages: readonly MessageV2[]; readonly more: boolean }
   | { readonly type: 'historyFailed'; readonly channel: string }
+  // The window re-read after a reconnect: like historyLoaded, but a message
+  // the socket delivered after the read began (an id beyond the page) is kept.
+  | { readonly type: 'historyRefreshed'; readonly channel: string; readonly messages: readonly MessageV2[]; readonly more: boolean }
   // A message from the socket (already validated).
   // own: the message is the caller's, so it may stand for a pending send of
   // theirs whose POST has not answered yet (issue #490).
@@ -109,6 +115,7 @@ export type ChatAction =
   // An edited copy of a message the tab may hold (issue #845): the edit's own
   // answer, or the events socket's conch.message_edited.v1. Applied only to a
   // message held, under the client rule (isLater); never appended.
+  | { readonly type: 'removed'; readonly channel: string; readonly message: MessageV2 }
   | { readonly type: 'edited'; readonly channel: string; readonly message: MessageV2 }
   // The server refused an edit for good (issue #1031): the limit, the window
   // closed or not editable. The message is final for the page's life.
@@ -162,7 +169,8 @@ function editedMs(message: MessageV2): number {
 // so a history page read before an edit but answered after its frame, two
 // edit frames out of order and a replay overlap all leave the newest text.
 export function isLater(incoming: MessageV2, held: MessageV2): boolean {
-  return editedMs(incoming) >= editedMs(held);
+  if (held.removed === true) return incoming.removed === true;
+  return incoming.removed === true || editedMs(incoming) >= editedMs(held);
 }
 
 // mergeMessages is the TUI's: a map by id, so a message held already is
@@ -205,9 +213,16 @@ export function editsKnown(chat: ChannelChat, id: number): number {
 }
 
 // hold merges and keeps only the newest maxHeld.
+function remember(base: ChannelChat, incoming: readonly MessageV2[]) {
+  const removed = new Map(base.removed);
+  for (const message of incoming) if (message.removed === true) removed.set(message.id, message);
+  const messages = incoming.map((message) => removed.get(message.id) ?? message);
+  return { channel: { ...base, removed }, messages };
+}
 function hold(base: ChannelChat, incoming: readonly MessageV2[]): ChannelChat {
-  const c = track(base, incoming);
-  const merged = merge(c.byId, incoming);
+  const safe = remember(base, incoming);
+  const c = track(safe.channel, safe.messages);
+  const merged = merge(c.byId, safe.messages);
   if (merged.size <= maxHeld) return merged === c.byId ? c : { ...c, byId: merged };
   const newest = [...merged.keys()].sort((a, b) => a - b).slice(merged.size - maxHeld);
   const keep = new Set(newest);
@@ -282,6 +297,21 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
           action.messages,
         ),
       );
+    case 'historyRefreshed':
+      return update(state, action.channel, (c) => {
+        const top = action.messages.reduce((m, x) => Math.max(m, x.id), 0);
+        const after = [...c.byId.values()].filter((x) => x.id > top);
+        return reconcile(
+          {
+            ...prune(hold(track({ ...c, byId: new Map() }, action.messages), [...newest(c.byId, action.messages), ...after])),
+            history: 'ready',
+            older: 'idle',
+            trimmed: false,
+            exhausted: !action.more,
+          },
+          action.messages,
+        );
+      });
     case 'historyFailed':
       return update(state, action.channel, (c) => ({ ...c, history: 'error' }));
     case 'received':
@@ -301,6 +331,8 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
         const held = hold(c, [message]);
         return action.own === true ? reconcile(held, [message]) : held;
       });
+    case 'removed':
+      return known(state, action.channel, (c) => hold(c, [action.message]));
     case 'edited':
       return known(state, action.channel, (c) => (c.byId.has(action.message.id) ? hold(c, [action.message]) : c));
     case 'editFinal':
@@ -381,12 +413,15 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
       return known(state, action.channel, (c) => ({ ...c, older: 'loading' }));
     case 'olderLoaded':
       // Merged without hold's trim: canLoadOlder kept this page within maxHeld.
-      return known(state, action.channel, (c) => ({
-        ...track(c, action.messages),
-        byId: merge(c.byId, action.messages),
-        older: 'idle',
-        exhausted: !action.more,
-      }));
+      return known(state, action.channel, (c) => {
+        const safe = remember(c, action.messages);
+        return {
+          ...track(safe.channel, safe.messages),
+          byId: merge(c.byId, safe.messages),
+          older: 'idle',
+          exhausted: !action.more,
+        };
+      });
     case 'olderFailed':
       return known(state, action.channel, (c) => ({ ...c, older: 'error' }));
     case 'renamed':
@@ -467,7 +502,7 @@ export function parseFrame(data: unknown, channelId: number): MessageV2 | null {
   } catch {
     return null;
   }
-  if (messageV2(body).length > 0) return null;
+  if (fromServer(messageV2)(body).length > 0) return null;
   const message = body as MessageV2;
   return message.channel_id === channelId ? message : null;
 }

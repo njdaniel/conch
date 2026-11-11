@@ -314,6 +314,47 @@ async fn no_frame_is_sent_in_any_state_where_the_gate_must_be_shut() {
     assert_eq!(rig.sdk.frames_while_muted(), 0);
 }
 
+/// #1372: with a ceiling shorter than `max_transmit_secs`, a held press ends at the ceiling,
+/// repeats of the key (a `down` with no `up`) do not renew it, and only a release then a
+/// fresh press transmits again.
+#[tokio::test]
+async fn a_held_press_with_repeats_ends_at_the_push_to_talk_ceiling() {
+    let setup = Setup {
+        max_transmit: Duration::from_secs(120),
+        push_to_talk_max: Some(Duration::from_millis(100)),
+        release_tail_ms: 0,
+        ..Setup::default()
+    };
+    let rig = Rig::start_with(Stub::start().await, setup, |_| {}).await;
+    rig.ready().await;
+
+    rig.line(Down);
+    // The repeats are queued at once behind the press, and not spaced by sleeps or yields: on a loaded machine sleeps of 20 ms add up to more than
+    // the 100 ms ceiling, and a `down` that arrives after the ceiling is, by design, a new
+    // press (the machine cannot tell it from one whose release was lost, `Ptt::press`), which
+    // sends frames of its own (#1453). That the repeats do not move the ceiling is shown
+    // deterministically by the machine's own tests (`ptt.rs`), and the gate's frame count
+    // holds the bound whatever the timing.
+    for _ in 0..3 {
+        rig.line(Down);
+    }
+    rig.until("the ceiling", |rig| {
+        rig.own()["blocked"] == json!(["max_transmit"]) && rig.own()["transmitting"] == false
+    })
+    .await;
+    rig.reported(2).await;
+    let sent = rig.sdk.frames();
+    assert!(sent <= 10, "100 ms is ten frames, got {sent}");
+    several_frames().await;
+    assert_eq!(rig.sdk.frames(), sent, "the key is still down");
+    assert_eq!(rig.conchd.reported(), ["started", "stopped"]);
+
+    rig.line(Up);
+    rig.ready().await;
+    rig.line(Down);
+    rig.reported(3).await;
+}
+
 #[tokio::test]
 async fn a_press_longer_than_the_transmit_limit_is_cut_off_with_the_key_still_down() {
     let setup = Setup {

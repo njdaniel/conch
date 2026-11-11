@@ -260,9 +260,19 @@ func (c *Client) SendMessage(ctx context.Context, channel string, authorID int64
 
 // ListChannels returns every channel on the server, ordered by id.
 func (c *Client) ListChannels(ctx context.Context) (schema.ListChannelsResponse, error) {
+	return c.listChannels(ctx, 0)
+}
+
+func (c *Client) listChannels(ctx context.Context, previewAs int64) (schema.ListChannelsResponse, error) {
 	endpoint := c.resolve("v1", "channels")
 	var result channelListDoc
-	if err := c.roundTrip(ctx, "list channels", http.MethodGet, endpoint, nil, &result); err != nil {
+	var err error
+	if previewAs > 0 {
+		err = c.roundTripPreview(ctx, "list channels", endpoint, &result, previewAs)
+	} else {
+		err = c.roundTrip(ctx, "list channels", http.MethodGet, endpoint, nil, &result)
+	}
+	if err != nil {
 		return schema.ListChannelsResponse{}, err
 	}
 	return result.ListChannelsResponse, nil
@@ -327,6 +337,7 @@ func (c *Client) Subscribe(ctx context.Context, channel string, receive func(sch
 	}
 	query := endpoint.Query()
 	query.Set("channel", channel)
+	query.Set(schema.VoicePresenceSchemaParam, schema.VoicePresenceSchemaV2)
 	endpoint.RawQuery = query.Encode()
 	conn, resp, err := c.dial(ctx, endpoint.String())
 	if err != nil {
@@ -461,7 +472,7 @@ func (c *Client) resolve(parts ...string) *url.URL {
 
 func (c *Client) decodeError(resp *http.Response) error {
 	if resp.StatusCode >= 300 && resp.StatusCode < 400 {
-		return fmt.Errorf("server redirected to %s (HTTP %d); set --server to the final URL", safeLine(resp.Header.Get("Location")), resp.StatusCode)
+		return &redirectError{status: resp.StatusCode, text: fmt.Sprintf("server redirected to %s (HTTP %d); set --server to the final URL", safeLine(resp.Header.Get("Location")), resp.StatusCode)}
 	}
 	var serverError schema.Error
 	decoded := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&serverError) == nil
@@ -500,6 +511,27 @@ func retryAfterSeconds(header string, fallback int) int {
 		n = v
 	}
 	return max(0, min(n, maxRetryAfterSeconds))
+}
+
+// redirectError is a server's redirect. Its text names the Location the server
+// sent, which a command that prints only its own words must not show; status
+// lets it say what happened without that.
+type redirectError struct {
+	status int
+	text   string
+}
+
+func (e *redirectError) Error() string { return e.text }
+
+// noContent is the out of a call whose only good answer is 204, such as a
+// stop: any other 2xx (a 200 with a page, a 202) is not that answer.
+type noContent struct{}
+
+// unexpectedStatusError is a 2xx that was not the 204 a noContent call needs.
+type unexpectedStatusError struct{ status int }
+
+func (e *unexpectedStatusError) Error() string {
+	return fmt.Sprintf("cli: unexpected answer from the server (HTTP %d); expected 204", e.status)
 }
 
 // statusError is a refusal with no error document, such as the mux's 404 for
@@ -562,6 +594,14 @@ func (e *ServerError) Error() string {
 // it is set, has proved the password again: the refusal comes before the
 // route does anything, so the second send is the first that acts.
 func (c *Client) roundTrip(ctx context.Context, what, method string, endpoint *url.URL, in, out any) error {
+	return c.roundTripWithPreview(ctx, what, method, endpoint, in, out, 0)
+}
+
+func (c *Client) roundTripPreview(ctx context.Context, what string, endpoint *url.URL, out any, memberID int64) error {
+	return c.roundTripWithPreview(ctx, what, http.MethodGet, endpoint, nil, out, memberID)
+}
+
+func (c *Client) roundTripWithPreview(ctx context.Context, what, method string, endpoint *url.URL, in, out any, memberID int64) error {
 	var encoded []byte
 	if in != nil {
 		var err error
@@ -569,18 +609,18 @@ func (c *Client) roundTrip(ctx context.Context, what, method string, endpoint *u
 			return fmt.Errorf("cli: encode %s request: %w", what, err)
 		}
 	}
-	err := c.roundTripOnce(ctx, what, method, endpoint, encoded, in != nil, out)
+	err := c.roundTripOncePreview(ctx, what, method, endpoint, encoded, in != nil, out, memberID)
 	if c.reauth == nil || !IsServerCode(err, schema.ErrorCodeReauthRequired) {
 		return err
 	}
 	if err := c.reauth(ctx); err != nil {
 		return err
 	}
-	return c.roundTripOnce(ctx, what, method, endpoint, encoded, in != nil, out)
+	return c.roundTripOncePreview(ctx, what, method, endpoint, encoded, in != nil, out, memberID)
 }
 
-// roundTripOnce is one send of roundTrip's request.
-func (c *Client) roundTripOnce(ctx context.Context, what, method string, endpoint *url.URL, encoded []byte, hasBody bool, out any) error {
+// roundTripOncePreview is one send of roundTrip's request.
+func (c *Client) roundTripOncePreview(ctx context.Context, what, method string, endpoint *url.URL, encoded []byte, hasBody bool, out any, memberID int64) error {
 	var body io.Reader
 	if hasBody {
 		body = bytes.NewReader(encoded)
@@ -592,6 +632,9 @@ func (c *Client) roundTripOnce(ctx context.Context, what, method string, endpoin
 	if hasBody {
 		req.Header.Set("Content-Type", "application/json")
 	}
+	if memberID > 0 {
+		req.Header.Set(previewAsHeader, strconv.FormatInt(memberID, 10))
+	}
 	resp, err := c.do(req)
 	if err != nil {
 		return fmt.Errorf("cli: %s: %w", what, err)
@@ -601,6 +644,18 @@ func (c *Client) roundTripOnce(ctx context.Context, what, method string, endpoin
 		return c.decodeError(resp)
 	}
 	if out == nil {
+		return nil
+	}
+	if _, ok := out.(*noContent); ok {
+		if resp.StatusCode != http.StatusNoContent {
+			return &unexpectedStatusError{status: resp.StatusCode}
+		}
+		return nil
+	}
+	if _, ok := out.(interface{ emptyOK() }); ok && resp.StatusCode == http.StatusNoContent {
+		// Only a document that says so may be answered with nothing (an
+		// older server's disable): out keeps its zero value. Any other
+		// document-returning call treats an empty 204 as a bad answer.
 		return nil
 	}
 	var answer io.Reader = resp.Body
@@ -771,19 +826,36 @@ func (c *Client) RemoveNetMember(ctx context.Context, channel, name string, prin
 	return c.roundTrip(ctx, "remove net member", http.MethodDelete, endpoint, nil, nil)
 }
 
-// VoicePresence returns one snapshot of who is connected to channel's voice
-// and who is transmitting. A document that fails its own Validate is an error:
+// VoicePresence returns one snapshot of who is connected to channel's voice,
+// who is transmitting and who is sharing a screen, as v2 presence (it asks for
+// conch.voice_presence.v2, so every sharer is named, not only one). A document that fails its own Validate is an error:
 // presence is read to be believed, so a malformed one is never shown.
-func (c *Client) VoicePresence(ctx context.Context, channel string) (schema.VoicePresenceV1, error) {
+func (c *Client) VoicePresence(ctx context.Context, channel string) (schema.VoicePresenceV2, error) {
 	endpoint := c.resolve("v1", "channels", channel, "voice")
-	var result schema.VoicePresenceV1
+	query := endpoint.Query()
+	query.Set(schema.VoicePresenceSchemaParam, schema.VoicePresenceSchemaV2)
+	endpoint.RawQuery = query.Encode()
+	var result schema.VoicePresenceV2
 	if err := c.roundTrip(ctx, "voice presence", http.MethodGet, endpoint, nil, &result); err != nil {
-		return schema.VoicePresenceV1{}, err
+		return schema.VoicePresenceV2{}, err
 	}
 	if err := result.Validate(); err != nil {
-		return schema.VoicePresenceV1{}, fmt.Errorf("cli: invalid voice presence: %w", err)
+		return schema.VoicePresenceV2{}, fmt.Errorf("cli: invalid voice presence: %w", err)
 	}
 	return result, nil
+}
+
+// StopVoiceShare ends principalID's screen share in channel's voice room, for
+// a manager of the channel or an operator. It names the person always: an
+// un-named stop would end the caller's own share, which is the sharer's own
+// client's to do. The server answers 204 whether or not that person was
+// sharing, so nothing is returned.
+func (c *Client) StopVoiceShare(ctx context.Context, channel string, principalID int64) error {
+	endpoint := c.resolve("v1", "channels", channel, "voice", "share")
+	query := endpoint.Query()
+	query.Set(schema.VoiceSharePrincipalParam, strconv.FormatInt(principalID, 10))
+	endpoint.RawQuery = query.Encode()
+	return c.roundTrip(ctx, "stop voice share", http.MethodDelete, endpoint, nil, &noContent{})
 }
 
 // StopVoiceCamera turns off principalID's camera in channel's voice room. It
@@ -795,7 +867,7 @@ func (c *Client) StopVoiceCamera(ctx context.Context, channel string, principalI
 	query := endpoint.Query()
 	query.Set(schema.VoiceCameraPrincipalParam, strconv.FormatInt(principalID, 10))
 	endpoint.RawQuery = query.Encode()
-	return c.roundTrip(ctx, "stop voice camera", http.MethodDelete, endpoint, nil, nil)
+	return c.roundTrip(ctx, "stop voice camera", http.MethodDelete, endpoint, nil, &noContent{})
 }
 
 // VoiceOccupancy returns one snapshot of how many people are in the voice of
@@ -820,7 +892,7 @@ func (c *Client) VoiceOccupancy(ctx context.Context) (schema.VoiceOccupancyV1, e
 // error. A server shutdown is reported through websocket.StatusGoingAway, and
 // removal from the channel (or a disabled or signed-out credential) through
 // websocket.StatusPolicyViolation.
-func (c *Client) SubscribeVoicePresence(ctx context.Context, channel string, receive func(schema.VoicePresenceV1) error) error {
+func (c *Client) SubscribeVoicePresence(ctx context.Context, channel string, receive func(schema.VoicePresenceV2) error) error {
 	endpoint := c.resolve("v1", "voice", "ws")
 	if endpoint.Scheme == "http" {
 		endpoint.Scheme = "ws"
@@ -829,6 +901,7 @@ func (c *Client) SubscribeVoicePresence(ctx context.Context, channel string, rec
 	}
 	query := endpoint.Query()
 	query.Set("channel", channel)
+	query.Set(schema.VoicePresenceSchemaParam, schema.VoicePresenceSchemaV2)
 	endpoint.RawQuery = query.Encode()
 	conn, resp, err := c.dial(ctx, endpoint.String())
 	if err != nil {
@@ -840,7 +913,7 @@ func (c *Client) SubscribeVoicePresence(ctx context.Context, channel string, rec
 	}
 	defer func() { _ = conn.CloseNow() }()
 	for {
-		var doc schema.VoicePresenceV1
+		var doc schema.VoicePresenceV2
 		if err := wsjson.Read(ctx, conn, &doc); err != nil {
 			return fmt.Errorf("cli: read voice presence: %w", err)
 		}
@@ -911,10 +984,28 @@ func (c *Client) RenamePrincipal(ctx context.Context, id int64, name string) (sc
 	return result.Principal, nil
 }
 
-// DisablePrincipal switches a principal off and revokes its credentials.
-func (c *Client) DisablePrincipal(ctx context.Context, id int64) error {
+// DisablePrincipal switches a principal off and revokes its credentials. The
+// answer lists the live credentials and hooks the principal issued to others
+// (issue #1463); a server from before that answers 204, which is the zero
+// response.
+func (c *Client) DisablePrincipal(ctx context.Context, id int64) (schema.DisablePrincipalResponseV1, error) {
 	endpoint := c.resolve("v1", "principals", strconv.FormatInt(id, 10), "disable")
-	return c.roundTrip(ctx, "disable principal", http.MethodPost, endpoint, nil, nil)
+	var result disablePrincipalDoc
+	if err := c.roundTrip(ctx, "disable principal", http.MethodPost, endpoint, nil, &result); err != nil {
+		return schema.DisablePrincipalResponseV1{}, err
+	}
+	return result.DisablePrincipalResponseV1, nil
+}
+
+// RevokeIssued revokes every live credential and hook principal id issued to
+// others (owner only, recent proof; issue #1463).
+func (c *Client) RevokeIssued(ctx context.Context, id int64) (schema.RevokeIssuedResponseV1, error) {
+	endpoint := c.resolve("v1", "principals", strconv.FormatInt(id, 10), "issued", "revoke-all")
+	var result revokeIssuedDoc
+	if err := c.roundTrip(ctx, "revoke issued", http.MethodPost, endpoint, nil, &result); err != nil {
+		return schema.RevokeIssuedResponseV1{}, err
+	}
+	return result.RevokeIssuedResponseV1, nil
 }
 
 // EnablePrincipal switches a principal back on. It revives no credential.
@@ -1120,21 +1211,30 @@ type EventHandler struct {
 	Run          func(schema.RunV1) error
 	Activity     func(schema.AgentActivityV1) error
 	Intervention func(schema.InterventionV1) error
+	// Reaction is one message's whole reaction state, replacing earlier state.
+	Reaction func(schema.ReactionSummaryV1) error
+	// Members is the channel's whole member list, replacing earlier state.
+	Members func(schema.ChannelMembersV1) error
+	// MessageRemoved updates a held message; it is not a new-message notice.
+	MessageRemoved func(schema.MessageRemovedV1) error
 	// PermissionsChanged is called when the caller's effective permissions
 	// may have changed (ADR-014); the document carries nothing else, so the
 	// caller re-reads whoami.
 	PermissionsChanged func(schema.PermissionsChangedV1) error
+	// ChannelsChanged is called when the caller's channel list may have
+	// changed; the document carries nothing else, so the caller re-reads it.
+	ChannelsChanged func(schema.ChannelsChangedV1) error
 }
 
 // SubscribeEvents follows channel's events socket and calls the handler with
-// each document it sends: the session roster (the whole state on connect and
-// on every change), and the runs, activity entries and interventions the
-// caller may see, each whole and possibly repeated. With session set (the
-// caller's own, not ended) the server keeps that session online while the
-// socket is open. A frame of any other schema is skipped, so a newer server
+// each document it sends: the session and member rosters (whole state on
+// connect and every change), runs, activity entries, interventions, reaction
+// summaries and message-removal updates the caller may see. With session
+// set (the caller's own, not ended) the server keeps that session online while
+// the socket is open. A frame of any other schema is skipped, so a newer server
 // may send more. A document that fails Validate ends the subscription with an
-// error. There is no replay: a caller that reconnects takes the next roster as
-// the state and reads runs over REST. A server shutdown is reported through
+// error. There is no replay: a caller that reconnects takes the next rosters as
+// state and reads members, runs and reactions over REST. A server shutdown is reported through
 // websocket.StatusGoingAway, and loss of membership or of the credential
 // through websocket.StatusPolicyViolation.
 func (c *Client) SubscribeEvents(ctx context.Context, channel string, session int64, handler EventHandler) error {
@@ -1227,6 +1327,42 @@ func dispatchEvent(frame json.RawMessage, handler EventHandler) error {
 			return err
 		}
 		return receiveEvent(handler.PermissionsChanged(doc))
+	case schema.ChannelsChangedSchemaV1:
+		if handler.ChannelsChanged == nil {
+			return nil
+		}
+		var doc schema.ChannelsChangedV1
+		if err := decodeEvent(frame, &doc, "channels changed"); err != nil {
+			return err
+		}
+		return receiveEvent(handler.ChannelsChanged(doc))
+	case schema.ReactionSummarySchemaV1:
+		if handler.Reaction == nil {
+			return nil
+		}
+		var summary schema.ReactionSummaryV1
+		if err := decodeEvent(frame, &summary, "reaction summary"); err != nil {
+			return err
+		}
+		return receiveEvent(handler.Reaction(summary))
+	case schema.ChannelMembersSchemaV1:
+		if handler.Members == nil {
+			return nil
+		}
+		var members schema.ChannelMembersV1
+		if err := decodeEvent(frame, &members, "channel members"); err != nil {
+			return err
+		}
+		return receiveEvent(handler.Members(members))
+	case schema.MessageRemovedSchemaV1:
+		if handler.MessageRemoved == nil {
+			return nil
+		}
+		var removed schema.MessageRemovedV1
+		if err := decodeEvent(frame, &removed, "message removal"); err != nil {
+			return err
+		}
+		return receiveEvent(handler.MessageRemoved(removed))
 	}
 	return nil
 }

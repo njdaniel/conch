@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { linkify, maxLink, type Segment } from './linkify';
+import { linkify, maxLink, writtenAuthority, type Segment } from './linkify';
 
 const t = (text: string): Segment => ({ kind: 'text', text });
 const l = (text: string, href = text): Segment => ({ kind: 'link', text, href });
@@ -17,6 +17,8 @@ describe('linkify', () => {
     { name: 'uppercase scheme', body: 'HTTPS://EXAMPLE.COM/a', want: [l('HTTPS://EXAMPLE.COM/a', 'https://example.com/a')] },
     { name: 'javascript stays text', body: 'javascript:alert(1)', want: [t('javascript:alert(1)')] },
     { name: 'data stays text', body: 'data:text/html,<script>alert(1)</script>', want: [t('data:text/html,<script>alert(1)</script>')] },
+    { name: 'vbscript stays text', body: 'vbscript:msgbox(1)', want: [t('vbscript:msgbox(1)')] },
+    { name: 'file stays text', body: 'file:///etc/passwd', want: [t('file:///etc/passwd')] },
     { name: 'ftp stays text', body: 'ftp://x', want: [t('ftp://x')] },
     { name: 'www stays text', body: 'www.example.com', want: [t('www.example.com')] },
     { name: 'scheme alone stays text', body: 'http:// and https://', want: [t('http:// and https://')] },
@@ -48,6 +50,23 @@ describe('linkify', () => {
     expect(linkify(body)).toEqual(want);
   });
 
+  it('keeps the written host equal to the destination host in every safe case', () => {
+    let checked = 0;
+    for (const { body } of cases) {
+      for (const segment of linkify(body)) {
+        if (segment.kind !== 'link') continue;
+        // What the eye reads (the authority as written, lower-cased, without a
+        // default port) against what opens.
+        const defaultPort = /^https:/i.test(segment.text) ? ':443' : ':80';
+        let written = writtenAuthority(segment.text).toLowerCase();
+        if (written.endsWith(defaultPort)) written = written.slice(0, -defaultPort.length);
+        expect(written, segment.text).toBe(new URL(segment.href).host);
+        checked += 1;
+      }
+    }
+    expect(checked).toBeGreaterThan(5);
+  });
+
   it('leaves a link longer than the cap as text', () => {
     const body = `https://example.com/${'a'.repeat(maxLink)}`;
     expect(linkify(body)).toEqual([t(body)]);
@@ -65,6 +84,8 @@ describe('linkify', () => {
     ['many short links', 'https://a.example '.repeat(50_000)],
     ['no-host schemes', 'https:// '.repeat(100_000)],
     ['nested brackets', `https://example.com/${'(['.repeat(200_000)}`],
+    ['masked-link tails', 'https://a.co]('.repeat(75_000)],
+    ['masked-link tails, one run', 'https://a.co](x'.repeat(70_000)],
   ])('reads a long hostile body (%s) in bounded time', (_name, body) => {
     const started = performance.now();
     const out = linkify(body);

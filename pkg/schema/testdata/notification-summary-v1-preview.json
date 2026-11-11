@@ -1,0 +1,11 @@
+{
+  "schema": "conch.notification_summary.v1",
+  "channel_id": 7,
+  "channel_name": "general",
+  "message_id": 4212,
+  "posted_at": "2026-11-10T12:31:02.000Z",
+  "kind": "message",
+  "author_id": 3,
+  "author_name": "Ada",
+  "text": "The build is green again, thanks all"
+}

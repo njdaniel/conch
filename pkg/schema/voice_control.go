@@ -336,10 +336,19 @@ const (
 	VoiceControlReasonNotAMember         VoiceControlReason = "not_a_member"
 	VoiceControlReasonVoiceNotConfigured VoiceControlReason = "voice_not_configured"
 	VoiceControlReasonDuplicateIdentity  VoiceControlReason = "duplicate_identity"
-	VoiceControlReasonAudioUnavailable   VoiceControlReason = "audio_unavailable"
-	VoiceControlReasonStartTimeout       VoiceControlReason = "start_timeout"
-	VoiceControlReasonProtocolError      VoiceControlReason = "protocol_error"
-	VoiceControlReasonInternalError      VoiceControlReason = "internal_error"
+	// VoiceControlReasonVoiceRemoved: a moderator removed the person from
+	// voice only (issue #1409): conchd closed the helper's presence socket
+	// with SocketCloseVoiceRemoved. They are still a member, so joining again
+	// is theirs to decide and the helper does not try. A reason to fail, as
+	// duplicate_identity is: the helper stopped without being told to. Added
+	// in issue #1457 and written only in conch.voice_control.v2: a v1 state
+	// never carries it (VoiceControlStateV1.Validate), and a v1 owner is told
+	// internal_error, as before.
+	VoiceControlReasonVoiceRemoved     VoiceControlReason = "voice_removed"
+	VoiceControlReasonAudioUnavailable VoiceControlReason = "audio_unavailable"
+	VoiceControlReasonStartTimeout     VoiceControlReason = "start_timeout"
+	VoiceControlReasonProtocolError    VoiceControlReason = "protocol_error"
+	VoiceControlReasonInternalError    VoiceControlReason = "internal_error"
 )
 
 // Valid reports whether r is a recognized reason.
@@ -352,8 +361,8 @@ func (r VoiceControlReason) Valid() bool {
 		VoiceControlReasonNotSignedIn, VoiceControlReasonIdentityMismatch, VoiceControlReasonBadEnvironment,
 		VoiceControlReasonBadConfig, VoiceControlReasonVoiceRequiresAuth, VoiceControlReasonNotAPerson,
 		VoiceControlReasonVoiceNotAllowed, VoiceControlReasonNotAMember, VoiceControlReasonVoiceNotConfigured,
-		VoiceControlReasonDuplicateIdentity, VoiceControlReasonAudioUnavailable, VoiceControlReasonStartTimeout,
-		VoiceControlReasonProtocolError, VoiceControlReasonInternalError:
+		VoiceControlReasonDuplicateIdentity, VoiceControlReasonVoiceRemoved, VoiceControlReasonAudioUnavailable,
+		VoiceControlReasonStartTimeout, VoiceControlReasonProtocolError, VoiceControlReasonInternalError:
 		return true
 	default:
 		return false
@@ -377,8 +386,9 @@ var voiceControlFailReasons = []VoiceControlReason{
 	VoiceControlReasonNotSignedIn, VoiceControlReasonIdentityMismatch, VoiceControlReasonBadEnvironment,
 	VoiceControlReasonBadConfig, VoiceControlReasonVoiceRequiresAuth, VoiceControlReasonNotAPerson,
 	VoiceControlReasonVoiceNotAllowed, VoiceControlReasonNotAMember, VoiceControlReasonVoiceNotConfigured,
-	VoiceControlReasonDuplicateIdentity, VoiceControlReasonAudioUnavailable, VoiceControlReasonServerUnreachable,
-	VoiceControlReasonStartTimeout, VoiceControlReasonProtocolError, VoiceControlReasonInternalError,
+	VoiceControlReasonDuplicateIdentity, VoiceControlReasonVoiceRemoved, VoiceControlReasonAudioUnavailable,
+	VoiceControlReasonServerUnreachable, VoiceControlReasonStartTimeout, VoiceControlReasonProtocolError,
+	VoiceControlReasonInternalError,
 }
 
 // VoiceControlCapture is the state of the microphone stream, which is not the
@@ -925,13 +935,19 @@ func (s VoiceControlStateV1) Validate() error {
 	return nil
 }
 
-// validateReason checks the reason and retry_in_ms against the phase.
+// validateReason checks the reason and retry_in_ms against the phase. The
+// reasons of v1 are the ones it was published with: voice_removed came later
+// (issue #1457) and is v2's alone, so a v1 state with it is refused.
 func (s VoiceControlStateV1) validateReason() error {
+	if s.Reason == VoiceControlReasonVoiceRemoved {
+		return fmt.Errorf("schema: voice control state reason %q is not a reason of %s", s.Reason, VoiceControlSchemaV1)
+	}
 	return validateVoiceControlReason(s.Phase, s.Reason, s.RetryInMS)
 }
 
 // validateVoiceControlReason is the reason rule of every version's state: the
-// phases and reasons did not change in v2.
+// phases did not change in v2, and the reasons are v1's with voice_removed
+// added (a reason to fail, which VoiceControlStateV1 refuses before this).
 func validateVoiceControlReason(phase VoiceControlPhase, reason VoiceControlReason, retryInMS *int64) error {
 	if reason != "" && !reason.Valid() {
 		return fmt.Errorf("schema: voice control state reason %q is not recognized", reason)

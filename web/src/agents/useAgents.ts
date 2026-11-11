@@ -517,6 +517,7 @@ export function useAgents({
           case 'message':
             onMessage(frame.message);
             break;
+          case 'messageRemoved':
           case 'messageEdited':
             onMessageEdited?.(frame.message);
             break;

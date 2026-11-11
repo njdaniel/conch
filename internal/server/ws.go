@@ -365,6 +365,16 @@ func (s *Server) streamWSV1(ctx context.Context, conn *websocket.Conn, sub *hub.
 // replay read was already committed when it was read, and, being visible to
 // this reader (it was broadcast to them), was in that page.
 //
+// A removal (issue #852, moderation.md §7.4) adds per-id outcomes to the mark.
+// tombstoned holds the ids whose tombstone this socket has sent, whether the
+// replay read it already removed or the live frame arrived. A frame whose id
+// is in it is dropped, whatever it is: a duplicate tombstone, a buffered
+// original, or a buffered edit carrying the text from before the removal. A
+// tombstone is never dropped by the high-water mark: an original the replay
+// sent is followed by its tombstone, once, and so is a message older than the
+// replay's cursor that the client already holds. Every tombstone still passes
+// the history gate, so a bounded reader gets none for what it may not see.
+//
 // The mark does not move once the replay is over. Two posts can reach the hub
 // out of id order, because each handler broadcasts after its own commit, and a
 // mark that followed the live frames would drop the lower id when it came
@@ -373,9 +383,10 @@ func (s *Server) streamWSV1(ctx context.Context, conn *websocket.Conn, sub *hub.
 func (s *Server) streamWSV2(ctx context.Context, conn *websocket.Conn, sub *hub.SubscriptionV2, replay *wsReplay, gate historyGate, principalID, credID int64, recheck <-chan time.Time) {
 	channelID := gate.channelID
 	var replayed int64 // the last id the replay sent; 0 without one
+	tombstoned := make(map[int64]struct{})
 	if replay != nil {
 		var ok bool
-		if replayed, ok = s.replayWSV2(ctx, conn, sub, replay, channelID, principalID, credID, recheck); !ok {
+		if replayed, ok = s.replayWSV2(ctx, conn, sub, replay, channelID, principalID, credID, recheck, tombstoned); !ok {
 			return
 		}
 	}
@@ -393,12 +404,18 @@ func (s *Server) streamWSV2(ctx context.Context, conn *websocket.Conn, sub *hub.
 				s.closeDropped(ctx, conn, channelID, principalID, credID)
 				return
 			}
+			// Nothing follows a tombstone this socket has sent: not a copy
+			// of it, not an original or an edit from before the removal.
+			if _, done := tombstoned[msg.ID]; done {
+				continue
+			}
 			// Only an original is dropped: an edit of a message the replay
 			// already sent (issue #845, message-editing.md §7.1) carries
 			// edited_at and goes through the gate as usual. If the replay
 			// read the edited text already, the copy is the same, and a
-			// client keeps the one with the later edited_at.
-			if replay != nil && msg.ID <= replayed && msg.EditedAt == nil {
+			// client keeps the one with the later edited_at. A tombstone is
+			// an update, never dropped here.
+			if replay != nil && msg.ID <= replayed && msg.EditedAt == nil && !msg.Removed {
 				continue
 			}
 			send, ok := s.gateFrame(ctx, conn, gate, msg.ID)
@@ -412,6 +429,9 @@ func (s *Server) streamWSV2(ctx context.Context, conn *websocket.Conn, sub *hub.
 				closeWS(ctx, conn, schema.SocketCloseError, websocket.StatusInternalError, "write failed")
 				_ = conn.CloseNow()
 				return
+			}
+			if msg.Removed {
+				tombstoned[msg.ID] = struct{}{}
 			}
 		}
 	}
@@ -430,7 +450,9 @@ func (s *Server) streamWSV2(ctx context.Context, conn *websocket.Conn, sub *hub.
 // reading history; the client reconnects with the newest id it got. It does
 // not drain the subscription into memory of its own, which would be the same
 // queue without the bound.
-func (s *Server) replayWSV2(ctx context.Context, conn *websocket.Conn, sub *hub.SubscriptionV2, replay *wsReplay, channelID, principalID, credID int64, recheck <-chan time.Time) (last int64, ok bool) {
+//
+// tombstoned collects the ids of the tombstones the replay sends.
+func (s *Server) replayWSV2(ctx context.Context, conn *websocket.Conn, sub *hub.SubscriptionV2, replay *wsReplay, channelID, principalID, credID int64, recheck <-chan time.Time, tombstoned map[int64]struct{}) (last int64, ok bool) {
 	size := s.replayPageSize
 	if size <= 0 {
 		size = wsReplayPageSize
@@ -492,6 +514,9 @@ func (s *Server) replayWSV2(ctx context.Context, conn *websocket.Conn, sub *hub.
 				closeWS(ctx, conn, schema.SocketCloseError, websocket.StatusInternalError, "write failed")
 				_ = conn.CloseNow()
 				return last, false
+			}
+			if m.Removed {
+				tombstoned[m.ID] = struct{}{}
 			}
 			last, cursor = m.ID, m.ID
 		}

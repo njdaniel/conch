@@ -460,6 +460,7 @@ func TestRenameChannelManagerStandings(t *testing.T) {
 func TestRenameChannelManagerLimits(t *testing.T) {
 	t.Run("sixth rename", func(t *testing.T) {
 		f := newAdminFixture(t)
+		f.srv.relaxChannelWriteLimit()
 		from := "general"
 		for i := 1; i <= renamesPerDay; i++ {
 			name := fmt.Sprintf("renamed-%d", i)
@@ -480,6 +481,7 @@ func TestRenameChannelManagerLimits(t *testing.T) {
 	})
 	t.Run("21st attempt and unlimited operator", func(t *testing.T) {
 		f := newAdminFixture(t)
+		f.srv.relaxChannelWriteLimit()
 		for i := 1; i <= renameAttemptsPerDay; i++ {
 			rec := f.do(t, http.MethodPut, channelNamePath(f.general.ID), f.mgrTok, channelRenameBody(t, "general", "lobby"))
 			assertErrorBody(t, rec, http.StatusConflict, "channel_exists")
@@ -503,6 +505,7 @@ func TestRenameChannelManagerLimits(t *testing.T) {
 	})
 	t.Run("operator history does not count after demotion", func(t *testing.T) {
 		f := newAdminFixture(t)
+		f.srv.relaxChannelWriteLimit()
 		from := "general"
 		for i := 0; i < renamesPerDay; i++ {
 			name := fmt.Sprintf("operator-%d", i)

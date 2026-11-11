@@ -12,7 +12,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import * as api from '../api';
 import { memberName } from '../guestName';
-import type { VoicePresenceV1 } from '../schema/voice';
+import type { VoicePresenceV1, VoicePresenceV2 } from '../schema/voice';
 import type { Person } from '../useLiveChannel';
 import { occupants } from './presence';
 
@@ -35,7 +35,7 @@ export function useVoiceNames({
   readonly joined: string | null;
   readonly viewed: string | null;
   // The joined channel's presence while in voice.
-  readonly presence: VoicePresenceV1 | null;
+  readonly presence: VoicePresenceV1 | VoicePresenceV2 | null;
   // The people of the channel on screen.
   readonly people: ReadonlyMap<number, Person>;
 }): ReadonlyMap<number, Person> {

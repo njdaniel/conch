@@ -197,9 +197,18 @@ const (
 	// SocketCloseRevoked: the credential was revoked or expired, or its
 	// principal disabled.
 	SocketCloseRevoked SocketCloseReason = "revoked"
-	// SocketCloseRemoved: the principal was removed from the channel, or an
-	// agent's manifest no longer lets it read there.
+	// SocketCloseRemoved: the principal is no longer a member of the channel
+	// (removed, banned, or left), or an agent's manifest no longer lets it
+	// read there. A member put out of voice alone is SocketCloseVoiceRemoved.
 	SocketCloseRemoved SocketCloseReason = "removed"
+	// SocketCloseVoiceRemoved: a moderator removed the principal from voice
+	// only (DELETE /v1/channels/{channel}/voice/participants/{id}, issue
+	// #850), closing their presence socket in that channel. They are still a
+	// member, so a client treats it as out of voice and does not rejoin by
+	// itself; a deliberate join is accepted. It is the one close whose frame
+	// text is the reason itself, "voice_removed", so a client keys on the
+	// value and never on a sentence (issue #1409).
+	SocketCloseVoiceRemoved SocketCloseReason = "voice_removed"
 	// SocketCloseSlowConsumer: the reader fell too far behind.
 	SocketCloseSlowConsumer SocketCloseReason = "slow_consumer"
 	// SocketCloseSessionEnded: the session an events socket kept alive
@@ -213,7 +222,8 @@ const (
 func (r SocketCloseReason) Valid() bool {
 	switch r {
 	case SocketCloseClient, SocketCloseServerShutdown, SocketCloseKeepaliveTimeout, SocketCloseRevoked,
-		SocketCloseRemoved, SocketCloseSlowConsumer, SocketCloseSessionEnded, SocketCloseError:
+		SocketCloseRemoved, SocketCloseVoiceRemoved, SocketCloseSlowConsumer, SocketCloseSessionEnded,
+		SocketCloseError:
 		return true
 	default:
 		return false

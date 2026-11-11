@@ -5,13 +5,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/coder/websocket"
 	"slices"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
 	"unicode"
-	"unicode/utf8"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -23,6 +23,11 @@ import (
 // historyLimit is how many of a channel's newest messages the first load reads:
 // the most the server returns in one page.
 const historyLimit = 100
+
+const (
+	archivedChannelNotice = "This channel is archived."
+	archivedChannelTag    = " archived"
+)
 
 // API is the shared Conch client surface used by the TUI.
 type API interface {
@@ -59,6 +64,9 @@ type API interface {
 }
 
 type channelsLoaded struct {
+	// refresh marks a re-read after a channel-list signal or reconnect. A
+	// failure then keeps the list already on screen.
+	refresh  bool
 	channels []schema.ChannelV0
 	err      error
 }
@@ -66,6 +74,9 @@ type messagesLoaded struct {
 	channel  string
 	messages []schema.MessageV2
 	err      error
+	// rev is the revision of what the model held under the name when the read
+	// began (subscriptions.life); an answer of another revision is dropped.
+	rev int
 	// following is set on a load that opens the channel's message socket once
 	// the page is in (loadAndFollow); when that load fails there is no socket
 	// and the model retries it.
@@ -73,6 +84,8 @@ type messagesLoaded struct {
 }
 type messageReceived struct {
 	channel string
+	// gen is the generation of the socket that read it (subscriptions).
+	gen     int
 	message schema.MessageV2
 }
 
@@ -89,9 +102,10 @@ type netsLoaded struct {
 // membersLoaded carries a channel's member list, which names the authors of its
 // messages.
 type membersLoaded struct {
-	channel string
-	members []schema.ChannelMemberV1
-	err     error
+	channel  string
+	revision uint64
+	members  []schema.ChannelMemberV1
+	err      error
 }
 
 // netTarget is where plain messages go instead of the whole channel.
@@ -104,9 +118,13 @@ type netTarget struct {
 // subscriptionOpened says the server accepted channel's message socket. A
 // resumed stream may have nothing to send for a long time, so this, not a
 // message, is what ends "reconnecting".
-type subscriptionOpened struct{ channel string }
+type subscriptionOpened struct {
+	channel string
+	gen     int
+}
 type subscriptionEnded struct {
 	channel string
+	gen     int
 	err     error
 	// lived is how long the subscription ran; one that stayed up for a while
 	// was healthy, so the next drop starts the backoff over.
@@ -128,11 +146,13 @@ const (
 // messageSent is the result of one post. raw is the text as typed, so the input
 // is cleared only if the user has not started something new since.
 type messageSent struct {
-	channel string
-	raw     string
-	whisper bool
-	message schema.MessageV2
-	err     error
+	channel   string
+	channelID int64
+	rev       int
+	raw       string
+	whisper   bool
+	message   schema.MessageV2
+	err       error
 }
 type approvalsLoaded struct {
 	approvals []schema.ApprovalV1
@@ -189,8 +209,17 @@ type Model struct {
 	// <label> · <tag>", with when the visit ends. nil for everyone else.
 	visit *schema.GuestV1
 	// whoErr is why whoami failed; nil while it is pending or after success.
-	whoErr     error
-	channels   []string
+	whoErr   error
+	channels []string
+	// channelIDs lets a refresh follow a channel whose name changed.
+	channelIDs map[string]int64
+	// channelTopics is the one-line topic of each channel from the last list.
+	channelTopics map[string]string
+	// subs holds each channel's message socket and its generation.
+	subs *subscriptions
+	// archivedAt holds each archived channel's timestamp. Map presence marks an
+	// archive; a nil timestamp is one learned from a channel_archived refusal.
+	archivedAt map[string]*time.Time
 	selected   int
 	messages   map[string][]schema.MessageV2
 	subscribed map[string]bool
@@ -225,10 +254,12 @@ type Model struct {
 	// the same message at the bottom (scrollAnchor).
 	scroll int
 	// loadingChannels is true while the channel list is being fetched from the
-	// server; the model has no channels until channelsLoaded arrives.
+	// server; initially the model has no channels until channelsLoaded arrives.
 	loadingChannels bool
-	// notice is a channel-list problem that must survive the "connected"
-	// status the first backfill would otherwise write.
+	// channelsAgain collapses signals received during a fetch into one more.
+	channelsAgain bool
+	// notice is a channel-list notice that must survive the "connected" status
+	// a backfill would otherwise write.
 	notice string
 	// channelsErr is why the channel list could not be read. There are then
 	// no channels, and the message pane says what failed and where.
@@ -246,7 +277,8 @@ type Model struct {
 	// members is each channel's member names as last loaded, by principal id.
 	// A channel whose list never loaded has no entry, and its authors show as
 	// numbers.
-	members map[string]map[int64]schema.ChannelMemberV1
+	members        map[string]map[int64]schema.ChannelMemberV1
+	memberRevision map[string]uint64
 	// departed is what the channel's authors route named for authors the member
 	// list does not have, and authorsAsked the ids it has been asked about
 	// (authors.go). Both are dropped when the member list is read again.
@@ -321,6 +353,11 @@ type Model struct {
 	runs runsView
 	// rs is the person's read state: the unread counts and the read mark.
 	rs readState
+	// react is whole reaction state by channel and message, hydrated over REST
+	// and replaced by events or write responses.
+	react reactionModel
+	// mod is the confirmed moderation operation and its in-flight request.
+	mod moderationModel
 	// clockTicking is true while the once-a-second redraw (clockTick) is armed.
 	clockTicking bool
 	// focus is the pane of the chat view the arrow keys move. Like the draft
@@ -401,11 +438,12 @@ func NewModel(ctx context.Context, api API, authorID int64, channels []string) M
 		}
 	}
 	m := Model{ctx: ctx, api: api, authorID: authorID,
-		messages: make(map[string][]schema.MessageV2), nets: make(map[string][]schema.NetV1), members: make(map[string]map[int64]schema.ChannelMemberV1), now: time.Now, subscribed: make(map[string]bool),
+		channelIDs: make(map[string]int64), channelTopics: make(map[string]string), subs: newSubscriptions(), archivedAt: make(map[string]*time.Time),
+		messages: make(map[string][]schema.MessageV2), nets: make(map[string][]schema.NetV1), members: make(map[string]map[int64]schema.ChannelMemberV1), memberRevision: make(map[string]uint64), now: time.Now, subscribed: make(map[string]bool),
 		events: make(chan tea.Msg, 64), mode: modeChannels,
 		backoff: make(map[string]time.Duration), retryPending: make(map[string]bool), after: tickAfter, wrapped: &wrappedBody{},
 		own: &ownSession{}, loaded: make(map[string]bool), streamed: make(map[string]int64), expanded: make(map[int64]bool),
-		sessionRuns: make(map[sessionRunKey][]schema.RunV1), rs: newReadState()}
+		sessionRuns: make(map[sessionRunKey][]schema.RunV1), rs: newReadState(), react: newReactionModel(api), mod: newModerationModel(api)}
 	if v, ok := api.(VoiceAPI); ok {
 		m.voice.api = v
 	}
@@ -443,8 +481,38 @@ func (m Model) Init() tea.Cmd {
 	return tea.Batch(who, m.startSession(), m.loadAndFollow(), m.loadNets(false, ""), m.loadMembers(), m.kickVoice(), m.loadReadState(), m.waitEvent())
 }
 
+// typedBurst reports whether msg is several typed characters that arrived in
+// one read of the terminal. Bubble Tea hands those over as one KeyRunes
+// message, and its String() is the characters themselves, so the two typed
+// letters "u" and "p" read as the name of the up arrow, "e", "n", "d" as the
+// end key, and "t", "a", "b" as tab. The key handlers match on that string.
+// Pasted text (Paste set, whose String() is bracketed) and Alt chords are not
+// bursts.
+func typedBurst(msg tea.Msg) (tea.KeyMsg, bool) {
+	key, ok := msg.(tea.KeyMsg)
+	return key, ok && key.Type == tea.KeyRunes && len(key.Runes) > 1 && !key.Paste && !key.Alt
+}
+
+// typeBurst applies the characters of a burst one at a time, in order, as the
+// person typed them: text goes into the draft and none of it is a named key
+// (issue #1156, where "p309interrupted" lost its "up" and moved the selection
+// to the channel above).
+func (m Model) typeBurst(key tea.KeyMsg) (tea.Model, tea.Cmd) {
+	var next tea.Model = m
+	cmds := make([]tea.Cmd, 0, len(key.Runes))
+	for _, r := range key.Runes {
+		var cmd tea.Cmd
+		next, cmd = next.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+		cmds = append(cmds, cmd)
+	}
+	return next, tea.Batch(cmds...)
+}
+
 // Update applies keyboard, window, and injected API-result messages.
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if key, ok := typedBurst(msg); ok {
+		return m.typeBurst(key)
+	}
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		// A history read scrolled up keeps the same message at the bottom of
@@ -476,15 +544,33 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.communityKey(msg)
 		}
 		if m.mode == modeChannels {
+			if m.mod.pending != nil {
+				return m.moderationKey(msg)
+			}
 			// Not typed text: the directory and the community.
 			switch msg.String() {
 			case "ctrl+d":
 				return m.enterDirectory()
 			case "ctrl+p":
 				return m.enterCommunity()
+			case "ctrl+r", "ctrl+u":
+				if next, refused := m.refuseArchivedWrite(); refused {
+					return next, nil
+				}
+				command := "react"
+				if msg.String() == "ctrl+u" {
+					command = "unreact"
+				}
+				return m.reactionKeyCommand(command), nil
+			case "ctrl+o":
+				return m.reactionKeyCommand("reactors"), nil
 			}
 		}
 		if m.mode == modeRun {
+			if m.channelArchived(m.current()) && m.runWriteKey(msg) {
+				next, _ := m.refuseArchivedWrite()
+				return next, nil
+			}
 			return m.runKey(msg)
 		}
 		if m.mode == modeAgents {
@@ -664,14 +750,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		case "backspace":
 			// The Agents and Runs views have no input: the draft is the channel's.
-			if m.input != "" && m.mode != modeAgents && m.mode != modeRuns {
-				_, size := utf8.DecodeLastRuneInString(m.input)
-				m.input = m.input[:len(m.input)-size]
+			if m.input != "" && m.mode != modeAgents && m.mode != modeRuns && (m.mode != modeChannels || !m.channelArchived(m.current())) {
+				clusters := textClusters(m.input)
+				m.input = strings.TrimSuffix(m.input, clusters[len(clusters)-1].text)
 			}
 		default:
 			// A lone space arrives as KeySpace, not KeyRunes; both carry Runes.
 			if msg.Type == tea.KeyRunes || msg.Type == tea.KeySpace {
-				if m.mode == modeChannels || m.mode == modeDecision {
+				if m.mode == modeDecision || (m.mode == modeChannels && !m.channelArchived(m.current())) {
 					m.input += string(msg.Runes)
 				}
 			}
@@ -708,12 +794,43 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.sessionStarted(msg)
 	case eventsRosterReceived:
 		return m.eventsRoster(msg)
+	case reactionSummaryReceived:
+		return m.reactionEvent(msg)
+	case reactionConfirmationDue:
+		return m, m.retryReactionConfirmation(msg)
+	case reactionHydrationDue:
+		return m, m.flushReactionHydration(msg.channel)
+	case reactionsLoaded:
+		return m.reactionLoadDone(msg)
+	case reactionWritten:
+		if cli.IsServerCode(msg.err, schema.ErrorCodeChannelArchived) {
+			m.react.writing = false
+			return m.archiveRefusal(msg.channel, msg.channelID, msg.rev)
+		}
+		return m.reactionDone(msg)
+	case reactorsListed:
+		return m.reactorsDone(msg), nil
+	case moderationDone:
+		return m.moderationFinished(msg), nil
+	case membersEventReceived:
+		return m.membersEvent(msg)
+	case messageRemovalReceived:
+		return m.messageRemoval(msg)
+	case messagesReconciled:
+		return m.reconciled(msg)
+	case reconcileDue:
+		return m.reconcileRetry(msg)
 	case eventsRunReceived:
 		return m.eventsRun(msg)
 	case eventsActivityReceived:
 		return m.eventsActivity(msg)
 	case eventsInterventionReceived:
 		return m.eventsIntervention(msg)
+	case eventsChannelsReceived:
+		if msg.gen != m.ev.gen {
+			return m, m.waitEvent()
+		}
+		return m, tea.Batch(m.waitEvent(), m.refreshChannels())
 	case eventsPermissionsReceived:
 		// The frame says only that they may have changed: whoami is read
 		// again, and the pane and the offered commands follow its answer.
@@ -728,6 +845,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case interventionsRead:
 		return m.interventionsRead(msg)
 	case interventionSent:
+		if cli.IsServerCode(msg.err, schema.ErrorCodeChannelArchived) {
+			if msg.runID == m.rd.runID {
+				m.rd.sending = false
+			}
+			return m.archiveRefusal(msg.channel, msg.channelID, msg.rev)
+		}
 		return m.interventionSent(msg)
 	case sessionRunsLoaded:
 		return m.sessionRunsLoaded(msg)
@@ -812,57 +935,23 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.loadApprovals()
 		}
 	case channelsLoaded:
-		if !m.loadingChannels {
-			return m, nil
-		}
-		m.loadingChannels = false
-		names := make([]string, 0, len(msg.channels))
-		for _, channel := range msg.channels {
-			if name := strings.TrimSpace(channel.Name); name != "" {
-				names = append(names, name)
-			}
-		}
-		switch {
-		case msg.err != nil:
-			// No stand-in channel: one that may not exist, on a server that may
-			// not be there, only hid why nothing worked (issue #522). The
-			// message pane gives the whole error; the status line is too short.
-			m.channelsErr = msg.err
-			m.notice = "cannot read the channel list"
-			if errors.Is(msg.err, cli.ErrUnauthenticated) {
-				m.notice = msg.err.Error()
-			}
-			m.setStatus(modeChannels, m.notice)
-			return m, nil
-		case len(names) == 0:
-			m.notice = "no channels on server"
-			names = []string{defaultChannel}
-		}
-		m.setStatus(modeChannels, m.notice)
-		m.channels = names
-		m.selected = defaultSelection(names)
-		// The channel on screen may have changed under the user.
-		m.target = nil
-		m.pendingNet = ""
-		m.subscribed[m.current()] = true
-		return m, tea.Batch(m.loadAndFollow(), m.loadNets(false, ""), m.loadMembers(), m.beginVoice(), m.beginEvents())
+		return m.channelsLoadDone(msg)
 	case netsLoaded:
 		return m.netsLoaded(msg)
 	case membersLoaded:
 		// A failure changes nothing: names already known stay, and without any
 		// the authors show as numbers. The next open or reconnect asks again.
-		if msg.err == nil {
-			names := make(map[int64]schema.ChannelMemberV1, len(msg.members))
-			for _, member := range msg.members {
-				names[member.PrincipalID] = member
-			}
-			m.members[msg.channel] = names
-			m.forgetAuthors(msg.channel)
-			return m, m.nameAuthors(msg.channel)
+		if msg.err == nil && msg.revision == m.memberRevision[msg.channel] {
+			return m.replaceMembers(msg.channel, msg.members)
 		}
 	case authorsLoaded:
 		return m.authorsLoaded(msg)
 	case messagesLoaded:
+		if !m.subs.liveRev(msg.channel, msg.rev) {
+			// A read for a channel that was renamed or lost; the name may be
+			// another channel's now.
+			return m, nil
+		}
 		// The result of a channel the user has since left must not overwrite
 		// the status of the channel they are looking at.
 		stale := msg.channel != m.current()
@@ -870,10 +959,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// The socket was to open after this page: without it there is
 			// nothing to follow from, so it retries like a dropped one.
 			var retry tea.Cmd
+			if channelGone(msg.err) {
+				retry = m.refreshChannels()
+			}
 			if msg.following {
 				m.subscribed[msg.channel] = false
 				if !stale {
-					retry = m.scheduleResubscribe(msg.channel)
+					retry = tea.Batch(retry, m.scheduleResubscribe(msg.channel))
 				}
 			}
 			if stale {
@@ -892,8 +984,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.addMessages(msg.channel, msg.messages)
 		m.markStreamed(msg.channel, msg.messages...)
 		naming := m.nameAuthors(msg.channel)
+		hydrate := m.loadReactions(msg.channel, msg.messages)
 		if stale {
-			return m, naming
+			return m, tea.Batch(naming, hydrate)
 		}
 		switch {
 		case m.notice != "":
@@ -905,14 +998,31 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		default:
 			m.setStatus(modeChannels, "connected")
 		}
-		return m, tea.Batch(m.markReading(), naming)
+		return m, tea.Batch(m.markReading(), naming, hydrate)
 	case messageReceived:
+		if !m.subs.live(msg.channel, msg.gen) {
+			// A socket of a channel that was renamed or lost: its name may
+			// belong to another channel now.
+			return m, m.waitEvent()
+		}
 		// Data flowing proves the subscription is healthy.
 		delete(m.backoff, msg.channel)
+		var hydrate, arrival tea.Cmd
+		held := slices.ContainsFunc(m.messages[msg.channel], func(message schema.MessageV2) bool { return message.ID == msg.message.ID })
+		heldRemoved := slices.ContainsFunc(m.messages[msg.channel], func(message schema.MessageV2) bool { return message.ID == msg.message.ID && message.Removed })
+		if !msg.message.Removed && !heldRemoved && !m.mod.knows(msg.channel, msg.message.ID) {
+			arrival = m.countArrival(msg.channel, msg.message)
+			if !held {
+				hydrate = m.queueReactionHydration(msg.channel, msg.message)
+			}
+		}
 		m.addMessages(msg.channel, []schema.MessageV2{msg.message})
 		m.markStreamed(msg.channel, msg.message)
-		return m, tea.Batch(m.waitEvent(), m.countArrival(msg.channel, msg.message), m.markReading(), m.nameAuthors(msg.channel))
+		return m, tea.Batch(m.waitEvent(), arrival, m.markReading(), m.nameAuthors(msg.channel), hydrate)
 	case subscriptionOpened:
+		if !m.subs.live(msg.channel, msg.gen) {
+			return m, m.waitEvent()
+		}
 		if msg.channel == m.current() && m.channelStatus == statusReconnecting && m.notice == "" {
 			m.setStatus(modeChannels, "connected")
 		}
@@ -944,6 +1054,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(m.loadMembers(), m.startSubscription(msg.channel))
 	case messageSent:
 		m.sending = false
+		if cli.IsServerCode(msg.err, schema.ErrorCodeChannelArchived) {
+			return m.archiveRefusal(msg.channel, msg.channelID, msg.rev)
+		}
 		if msg.err != nil {
 			// The typed text stays so it can be fixed or retried by hand;
 			// nothing else is sent in its place. The error text comes from
@@ -972,8 +1085,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // delay so a subscription that fails immediately cannot spin.
 func (m Model) subscriptionEnded(msg subscriptionEnded) (tea.Model, tea.Cmd) {
 	wait := m.waitEvent()
-	if errors.Is(msg.err, context.Canceled) || m.ctx.Err() != nil {
+	if !m.subs.live(msg.channel, msg.gen) || errors.Is(msg.err, context.Canceled) || m.ctx.Err() != nil {
 		return m, wait
+	}
+	if channelGone(msg.err) {
+		// Removed from it, or it is gone: the list says which.
+		wait = tea.Batch(wait, m.refreshChannels())
 	}
 	m.subscribed[msg.channel] = false
 	m.rs.dropped[msg.channel] = true
@@ -1034,6 +1151,7 @@ func (m Model) openSelected() (Model, tea.Cmd) {
 	// A target belongs to the channel it was chosen in.
 	m.target = nil
 	m.pendingNet = ""
+	m.mod.pending = nil
 	m.setStatus(modeChannels, "loading…")
 	commands := []tea.Cmd{m.loadNets(false, ""), m.loadMembers(), m.beginVoice(), m.beginEvents(), m.markReading()}
 	// A pending retry timer will start the subscription itself.
@@ -1073,6 +1191,93 @@ func (m Model) current() string {
 	return m.channels[m.selected]
 }
 
+func (m Model) channelArchived(channel string) bool {
+	_, ok := m.archivedAt[channel]
+	return ok
+}
+
+func (m Model) markArchived(channel string) Model {
+	if channel == "" {
+		return m
+	}
+	if m.archivedAt == nil {
+		m.archivedAt = make(map[string]*time.Time)
+	}
+	if _, ok := m.archivedAt[channel]; ok {
+		return m
+	}
+	m.archivedAt[channel] = nil
+	selected := m.current()
+	selectedID := m.channelIDs[selected]
+	// Sorted on a copy: earlier models share the old slice.
+	m.channels = slices.Clone(m.channels)
+	sort.SliceStable(m.channels, func(i, j int) bool {
+		return !m.channelArchived(m.channels[i]) && m.channelArchived(m.channels[j])
+	})
+	for i, name := range m.channels {
+		if selectedID > 0 && m.channelIDs[name] == selectedID || selectedID == 0 && name == selected {
+			m.selected = i
+			break
+		}
+	}
+	return m
+}
+
+func (m Model) archiveRefusal(channel string, channelID int64, rev int) (Model, tea.Cmd) {
+	if channelID > 0 {
+		channel = ""
+		for name, id := range m.channelIDs {
+			if id == channelID {
+				channel = name
+				break
+			}
+		}
+	} else if !slices.Contains(m.channels, channel) || !m.subs.liveRev(channel, rev) {
+		// Without an id, only the same per-name lifetime may mark the channel.
+		channel = ""
+	}
+	selected := m.current()
+	if channel != "" {
+		m = m.markArchived(channel)
+		if channel == selected {
+			if m.mode == modeRun {
+				m.rd.status, m.rd.refusal = archivedChannelNotice, archivedChannelNotice
+			} else {
+				m.setStatus(modeChannels, archivedChannelNotice)
+			}
+		}
+	}
+	return m, m.refreshChannels()
+}
+
+func (m Model) refuseArchivedWrite() (Model, bool) {
+	if !m.channelArchived(m.current()) {
+		return m, false
+	}
+	if m.mode == modeRun {
+		m.rd.status, m.rd.refusal = archivedChannelNotice, archivedChannelNotice
+	} else {
+		m.setStatus(modeChannels, archivedChannelNotice)
+	}
+	return m, true
+}
+
+func (m Model) runWriteKey(msg tea.KeyMsg) bool {
+	key := msg.String()
+	switch m.rd.input {
+	case inputMessage:
+		return key == "enter"
+	case inputCancel:
+		return key == "y" || key == "Y"
+	default:
+		switch key {
+		case "m", "x", "p", "r":
+			return true
+		}
+	}
+	return false
+}
+
 func (m Model) noAuthorStatus(action string) string {
 	if m.authenticated {
 		if m.whoErr != nil {
@@ -1102,6 +1307,9 @@ func (m Model) reloadWhoAmI() tea.Cmd {
 // every-channel view needs manage_channels. The offered keys and hints are
 // decided from the permissions each time they are drawn.
 func (m Model) permissionsMoved() Model {
+	if m.mod.pending != nil && !m.moderationStanding() {
+		m.mod.pending = nil
+	}
 	if m.dir.all && !m.canManageChannels() {
 		m.dir.all, m.dir.rows, m.dir.loaded = false, nil, false
 	}
@@ -1122,22 +1330,190 @@ func (m Model) loadChannels() tea.Cmd {
 	}
 }
 
+// refreshChannels starts one channel-list re-read. Signals that arrive during
+// it ask for one more, never a parallel read.
+func (m *Model) refreshChannels() tea.Cmd {
+	if m.loadingChannels {
+		m.channelsAgain = true
+		return nil
+	}
+	m.loadingChannels = true
+	return m.reloadChannels()
+}
+
+func (m Model) reloadChannels() tea.Cmd {
+	return func() tea.Msg {
+		resp, err := m.api.ListChannels(m.ctx)
+		return channelsLoaded{channels: resp.Channels, err: err, refresh: true}
+	}
+}
+
+func (m *Model) nextChannelsLoad(again bool, cmd tea.Cmd) tea.Cmd {
+	if !again {
+		return cmd
+	}
+	return tea.Batch(cmd, m.refreshChannels())
+}
+
+func (m Model) channelsLoadDone(msg channelsLoaded) (tea.Model, tea.Cmd) {
+	if !m.loadingChannels {
+		return m, nil
+	}
+	m.loadingChannels = false
+	again := m.channelsAgain
+	m.channelsAgain = false
+	channels := make([]schema.ChannelV0, 0, len(msg.channels))
+	for _, channel := range msg.channels {
+		if name := strings.TrimSpace(channel.Name); name != "" {
+			channel.Name = name
+			channels = append(channels, channel)
+		}
+	}
+	sort.SliceStable(channels, func(i, j int) bool {
+		return channels[i].ArchivedAt == nil && channels[j].ArchivedAt != nil
+	})
+	names := make([]string, 0, len(channels))
+	ids := make([]int64, 0, len(channels))
+	nextArchived := make(map[string]*time.Time)
+	nextTopics := make(map[string]string, len(channels))
+	for _, channel := range channels {
+		names = append(names, channel.Name)
+		ids = append(ids, channel.ID)
+		nextTopics[channel.Name] = channel.Topic
+		if channel.ArchivedAt != nil {
+			nextArchived[channel.Name] = channel.ArchivedAt
+		}
+	}
+	if msg.err != nil {
+		notice := "cannot read the channel list"
+		if errors.Is(msg.err, cli.ErrUnauthenticated) {
+			notice = msg.err.Error()
+		}
+		if msg.refresh {
+			m.setStatus(modeChannels, notice)
+			return m, m.nextChannelsLoad(again, nil)
+		}
+		// No stand-in channel: one that may not exist, on a server that may
+		// not be there, only hid why nothing worked (issue #522). The
+		// message pane gives the whole error; the status line is too short.
+		m.channelsErr = msg.err
+		m.notice = notice
+		m.setStatus(modeChannels, notice)
+		return m, m.nextChannelsLoad(again, nil)
+	}
+
+	empty := len(names) == 0
+	if empty {
+		names = []string{defaultChannel}
+		ids = []int64{0}
+	}
+	nextIDs := make(map[string]int64, len(names))
+	for i, name := range names {
+		nextIDs[name] = ids[i]
+	}
+	if !msg.refresh {
+		m.channels = names
+		m.channelIDs = nextIDs
+		m.channelTopics = nextTopics
+		m.archivedAt = nextArchived
+		m.selected = defaultSelection(names)
+		m.notice = ""
+		if empty {
+			m.notice = "no channels on server"
+		}
+		m.setStatus(modeChannels, m.notice)
+		// The channel on screen may have changed under the user.
+		m.target = nil
+		m.pendingNet = ""
+		m.subscribed[m.current()] = true
+		cmd := tea.Batch(m.loadAndFollow(), m.loadNets(false, ""), m.loadMembers(), m.beginVoice(), m.beginEvents())
+		return m, m.nextChannelsLoad(again, cmd)
+	}
+
+	previous := m.current()
+	previousID := m.channelIDs[previous]
+	selected := -1
+	for i, name := range names {
+		if previousID > 0 && ids[i] == previousID || previousID == 0 && name == previous {
+			selected = i
+			break
+		}
+	}
+	lost := previous != "" && selected < 0
+	renamed := selected >= 0 && names[selected] != previous
+	// A name that left the list, lost or renamed away, may be taken by another
+	// channel: nothing of the old one stays under it, and its socket is closed.
+	m.forgetMissing(m.channelIDs, nextIDs)
+	if previous == "" {
+		selected = defaultSelection(names)
+	}
+	if selected < 0 {
+		selected = 0
+	}
+	m.channels = names
+	m.channelIDs = nextIDs
+	m.channelTopics = nextTopics
+	m.archivedAt = nextArchived
+	m.channelsErr = nil
+	// The names move with the revision, in one step: a read begun from here
+	// on carries both, so it cannot pair the old names with the new revision.
+	m.rs.listRev++
+	m.rs.names = make(map[int64]string, len(names))
+	for i, name := range names {
+		if ids[i] != 0 {
+			m.rs.names[ids[i]] = name
+		}
+	}
+	m.selected = selected
+	if !m.channelArchived(m.current()) {
+		if m.channelStatus == archivedChannelNotice {
+			m.channelStatus = ""
+		}
+		if m.rd.status == archivedChannelNotice {
+			m.rd.status, m.rd.refusal = "", ""
+		}
+	}
+	m.notice = ""
+	if empty {
+		m.notice = "no channels on server"
+	}
+	var cmd tea.Cmd
+	if lost || renamed || previous == "" {
+		status := m.channelStatus
+		m, cmd = m.openSelected()
+		switch {
+		case lost:
+			m.notice = sanitize(fmt.Sprintf("#%s is no longer available to you.", previous))
+			m.setStatus(modeChannels, m.notice)
+		case previous == "":
+			m.setStatus(modeChannels, m.notice)
+		default:
+			m.setStatus(modeChannels, status)
+		}
+	} else if m.notice != "" {
+		m.setStatus(modeChannels, m.notice)
+	}
+	cmd = tea.Batch(cmd, m.loadReadStateFor(msg.channels))
+	return m, m.nextChannelsLoad(again, cmd)
+}
+
 func (m Model) loadCurrent() tea.Cmd {
 	channel := m.current()
 	if channel == "" {
 		return nil
 	}
+	ctx, rev := m.subs.life(m.ctx, channel)
 	return func() tea.Msg {
 		// One request for the newest page, whatever the channel's size; older
 		// history is not shown, and the TUI has no scroll-back to fetch it.
-		page, err := m.api.ListMessagesV2Page(m.ctx, channel, cli.MessagesPage{NewestFirst: true}, historyLimit)
+		page, err := m.api.ListMessagesV2Page(ctx, channel, cli.MessagesPage{NewestFirst: true}, historyLimit)
 		if err != nil {
-			return messagesLoaded{channel: channel, err: err}
+			return messagesLoaded{channel: channel, rev: rev, err: err}
 		}
 		// The server sends newest first; the model holds ascending.
 		messages := slices.Clone(page.Messages)
 		slices.Reverse(messages)
-		return messagesLoaded{channel: channel, messages: messages}
+		return messagesLoaded{channel: channel, rev: rev, messages: messages}
 	}
 }
 
@@ -1150,6 +1526,7 @@ func (m Model) loadAndFollow() tea.Cmd {
 	if load == nil {
 		return nil
 	}
+	ctx, gen := m.subs.open(m.ctx, channel)
 	return func() tea.Msg {
 		loaded := load().(messagesLoaded)
 		loaded.following = true
@@ -1160,7 +1537,7 @@ func (m Model) loadAndFollow() tea.Cmd {
 					after = message.ID
 				}
 			}
-			m.follow(channel, after)
+			m.follow(ctx, gen, channel, after)
 		}
 		return loaded
 	}
@@ -1188,37 +1565,50 @@ func (m Model) startSubscription(channel string) tea.Cmd {
 		return nil
 	}
 	after := m.lastID(channel)
+	ctx, gen := m.subs.open(m.ctx, channel)
 	return func() tea.Msg {
-		m.follow(channel, after)
+		m.follow(ctx, gen, channel, after)
 		return nil
 	}
 }
 
 // follow opens channel's message socket after the message with id after, in a
 // goroutine that reports every message, and its end, as events.
-func (m Model) follow(channel string, after int64) {
+func (m Model) follow(ctx context.Context, gen int, channel string, after int64) {
 	go func() {
 		started := time.Now()
 		opened := func() {
 			select {
-			case m.events <- subscriptionOpened{channel: channel}:
-			case <-m.ctx.Done():
+			case m.events <- subscriptionOpened{channel: channel, gen: gen}:
+			case <-ctx.Done():
 			}
 		}
-		err := m.api.SubscribeV2After(m.ctx, channel, after, opened, func(message schema.MessageV2) error {
+		err := m.api.SubscribeV2After(ctx, channel, after, opened, func(message schema.MessageV2) error {
 			select {
-			case m.events <- messageReceived{channel: channel, message: message}:
+			case m.events <- messageReceived{channel: channel, gen: gen, message: message}:
 				return nil
-			case <-m.ctx.Done():
-				return m.ctx.Err()
+			case <-ctx.Done():
+				return ctx.Err()
 			}
 		})
 		select {
-		case m.events <- subscriptionEnded{channel: channel, err: err, lived: time.Since(started)}:
-		case <-m.ctx.Done():
+		case m.events <- subscriptionEnded{channel: channel, gen: gen, err: err, lived: time.Since(started)}:
+		case <-ctx.Done():
 		}
 	}()
 }
+
+// channelGone reports whether err says the person is no longer in the channel
+// the socket was opened for, or that it does not exist: a close for loss of
+// membership, or the refusal a later attempt meets.
+func channelGone(err error) bool {
+	return err != nil && (websocket.CloseStatus(err) == websocket.StatusPolicyViolation ||
+		cli.IsServerCode(err, errChannelNotFound))
+}
+
+// errChannelNotFound is the server's refusal for a channel the caller is not in
+// as for one that does not exist.
+const errChannelNotFound = "channel_not_found"
 
 func (m Model) waitEvent() tea.Cmd {
 	return func() tea.Msg {
@@ -1235,9 +1625,11 @@ func (m Model) waitEvent() tea.Cmd {
 // and no fallback: whatever the server answers is reported as is.
 func (m Model) send(channel, raw, body string, audience *schema.Audience, whisper bool) tea.Cmd {
 	author := m.authorID
+	channelID := m.channelIDs[channel]
+	_, rev := m.subs.life(m.ctx, channel)
 	return func() tea.Msg {
 		posted, err := m.api.PostMessageV2(m.ctx, channel, author, body, audience)
-		return messageSent{channel: channel, raw: raw, whisper: whisper, message: posted, err: err}
+		return messageSent{channel: channel, channelID: channelID, rev: rev, raw: raw, whisper: whisper, message: posted, err: err}
 	}
 }
 
@@ -1261,6 +1653,9 @@ func mergeMessages(existing, incoming []schema.MessageV2) []schema.MessageV2 {
 		byID[message.ID] = message
 	}
 	for _, message := range incoming {
+		if held, ok := byID[message.ID]; ok && held.Removed && !message.Removed {
+			continue
+		}
 		byID[message.ID] = message
 	}
 	merged := make([]schema.MessageV2, 0, len(byID))
@@ -1288,6 +1683,7 @@ func min(a, b int) int {
 // scrolled up, messages that arrive push the scroll along with them by the
 // lines they take, so the lines on screen do not move.
 func (m *Model) addMessages(channel string, incoming []schema.MessageV2) {
+	incoming = m.mod.withoutRemoved(channel, incoming)
 	if channel == m.current() && m.scroll > 0 {
 		held := make(map[int64]bool, len(m.messages[channel])+len(incoming))
 		for _, message := range m.messages[channel] {
@@ -1599,20 +1995,59 @@ func (m Model) scrollBody(down bool) Model {
 	return m
 }
 
-// runeCells is how many cells r takes on a terminal, rounded up: never less
-// than lipgloss measures it as, so text fitted with it cannot wrap.
-func runeCells(r rune) int {
-	if r < utf8.RuneSelf {
-		return 1
-	}
-	return max(1, lipgloss.Width(string(r)))
+type textCluster struct {
+	text  string
+	width int
 }
 
-// cellWidth is the width of s as runeCells counts it.
+// textClusters keeps terminal emoji and combining sequences together. It is
+// deliberately local: the terminal already measures whole strings through
+// lipgloss, and no additional dependency is needed for these Unicode rules.
+func textClusters(s string) []textCluster {
+	var clusters []textCluster
+	start := 0
+	for i, r := range s {
+		if i == 0 || !clusterContinues(s[start:i], r) {
+			if i > 0 {
+				text := s[start:i]
+				clusters = append(clusters, textCluster{text: text, width: max(1, lipgloss.Width(text))})
+			}
+			start = i
+		}
+	}
+	if start < len(s) {
+		text := s[start:]
+		clusters = append(clusters, textCluster{text: text, width: max(1, lipgloss.Width(text))})
+	}
+	return clusters
+}
+
+func clusterContinues(cluster string, r rune) bool {
+	if r == '\u200d' || unicode.Is(unicode.Mn, r) || unicode.Is(unicode.Me, r) ||
+		r == '\ufe0e' || r == '\ufe0f' || r >= 0x1f3fb && r <= 0x1f3ff || r >= 0xe0020 && r <= 0xe007f {
+		return true
+	}
+	if strings.HasSuffix(cluster, "\u200d") {
+		return true
+	}
+	if r >= 0x1f1e6 && r <= 0x1f1ff {
+		indicators := 0
+		for _, existing := range cluster {
+			if existing >= 0x1f1e6 && existing <= 0x1f1ff {
+				indicators++
+			}
+		}
+		return indicators%2 == 1
+	}
+	return false
+}
+
+// cellWidth measures whole emoji clusters, so a ZWJ sequence, skin tone or flag
+// is neither split nor charged once per code point.
 func cellWidth(s string) int {
 	n := 0
-	for _, r := range s {
-		n += runeCells(r)
+	for _, cluster := range textClusters(s) {
+		n += cluster.width
 	}
 	return n
 }
@@ -1627,12 +2062,12 @@ func fitCells(s string, width int) string {
 	}
 	var b strings.Builder
 	used := 0
-	for _, r := range s {
-		if used+runeCells(r) > width-1 {
+	for _, cluster := range textClusters(s) {
+		if used+cluster.width > width-1 {
 			break
 		}
-		used += runeCells(r)
-		b.WriteRune(r)
+		used += cluster.width
+		b.WriteString(cluster.text)
 	}
 	return b.String() + "…"
 }
@@ -1646,14 +2081,14 @@ func wrapCells(s string, width int) []string {
 	var lines []string
 	var b strings.Builder
 	used := 0
-	for _, r := range s {
-		if w := runeCells(r); used+w > width && used > 0 {
+	for _, cluster := range textClusters(s) {
+		if used+cluster.width > width && used > 0 {
 			lines = append(lines, b.String())
 			b.Reset()
 			used = 0
 		}
-		used += runeCells(r)
-		b.WriteRune(r)
+		used += cluster.width
+		b.WriteString(cluster.text)
 	}
 	return append(lines, b.String())
 }
@@ -1670,20 +2105,25 @@ func clipTail(value string, width int) string {
 	if cellWidth(value) <= width {
 		return value
 	}
-	runes := []rune(value)
-	used, start := 0, len(runes)
-	for start > 0 && used+runeCells(runes[start-1]) <= width-1 {
+	clusters := textClusters(value)
+	used, start := 0, len(clusters)
+	for start > 0 && used+clusters[start-1].width <= width-1 {
 		start--
-		used += runeCells(runes[start])
+		used += clusters[start].width
 	}
-	return "…" + string(runes[start:])
+	var b strings.Builder
+	b.WriteString("…")
+	for _, cluster := range clusters[start:] {
+		b.WriteString(cluster.text)
+	}
+	return b.String()
 }
 
 // whisperNotice mirrors the plain CLI's note: a whisper is discretion, not
 // secrecy, and users should not mistake it for the latter.
 const whisperNotice = "note: whispers are recorded in the audit log"
 
-const slashHint = `commands: /net [name], /w <ids> <text>, /channels, /people, /voice help, /help; start a message with // to send a literal /`
+const slashHint = `commands: /net [name], /w <ids> <text>, /react, /unreact, /reactors, /emoji, /channels, /people, /voice help, /help; start a message with // to send a literal /`
 
 // submit handles enter in the channel pane: a slash command, or a message sent
 // to the current target. Every refusal leaves the input as typed and sends
@@ -1702,11 +2142,11 @@ func (m Model) submit() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	if !strings.HasPrefix(body, "/") {
-		return m.sendToTarget(body)
+		return m.sendToTarget(cli.ExpandShortcodes(body))
 	}
 	// "//text" is the escape for a message that really starts with "/".
 	if strings.HasPrefix(body, "//") {
-		return m.sendToTarget(body[1:])
+		return m.sendToTarget(cli.ExpandShortcodes(body[1:]))
 	}
 	name, rest := splitCommand(body)
 	switch name {
@@ -1714,6 +2154,17 @@ func (m Model) submit() (tea.Model, tea.Cmd) {
 		return m.netCommand(rest)
 	case "/w":
 		return m.whisperCommand(rest)
+	case "/react", "/unreact", "/reactors":
+		if name != "/reactors" {
+			if next, refused := m.refuseArchivedWrite(); refused {
+				return next, nil
+			}
+		}
+		return m.reactionCommand(strings.TrimPrefix(name, "/"), rest)
+	case "/emoji":
+		return m.emojiCommand(rest), nil
+	case "/voice-kick", "/member-remove", "/ban", "/unban", "/bans", "/remove-message":
+		return m.moderationCommand(strings.TrimPrefix(name, "/"), rest)
 	case "/help":
 		m.input = ""
 		m.help, m.helpTop, m.helpTopic = true, 0, topicKeys
@@ -1758,6 +2209,9 @@ func (m Model) sendToTarget(text string) (tea.Model, tea.Cmd) {
 
 // post starts one send. The input is cleared only when the server accepts it.
 func (m Model) post(text string, audience *schema.Audience, whisper bool) (tea.Model, tea.Cmd) {
+	if next, refused := m.refuseArchivedWrite(); refused {
+		return next, nil
+	}
 	if m.authorID <= 0 {
 		m.setStatus(modeChannels, m.noAuthorStatus("send"))
 		return m, nil
@@ -1784,7 +2238,7 @@ func (m Model) whisperCommand(rest string) (tea.Model, tea.Cmd) {
 		m.setStatus(modeChannels, "/w: a whisper needs someone other than you")
 		return m, nil
 	}
-	return m.post(text, &schema.Audience{Kind: schema.AudienceKindPrincipals, PrincipalIDs: ids}, true)
+	return m.post(cli.ExpandShortcodes(text), &schema.Audience{Kind: schema.AudienceKindPrincipals, PrincipalIDs: ids}, true)
 }
 
 // parsePrincipalIDs reads a comma-separated list of positive, distinct
@@ -1889,9 +2343,10 @@ func (m Model) loadMembers() tea.Cmd {
 	if channel == "" {
 		return nil
 	}
+	revision := m.memberRevision[channel]
 	return func() tea.Msg {
 		resp, err := m.api.ListChannelMembers(m.ctx, channel)
-		return membersLoaded{channel: channel, members: resp.Members, err: err}
+		return membersLoaded{channel: channel, revision: revision, members: resp.Members, err: err}
 	}
 }
 

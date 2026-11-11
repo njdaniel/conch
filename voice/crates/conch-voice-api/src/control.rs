@@ -296,6 +296,11 @@ vocabulary!(
     VoiceNotConfigured = "voice_not_configured",
     /// The same account joined voice elsewhere.
     DuplicateIdentity = "duplicate_identity",
+    /// A moderator removed the person from voice only: `conchd` closed the presence socket
+    /// with `voice_removed` (issue #1409). Still a member, so the helper does not try
+    /// again. Written in `conch.voice_control.v2` alone (issue #1457): a v1 state never
+    /// carries it, and a v1 owner is told [`VoiceControlReason::InternalError`], as before.
+    VoiceRemoved = "voice_removed",
     /// PipeWire or the speakers could not be opened.
     AudioUnavailable = "audio_unavailable",
     /// No start in time.
@@ -333,6 +338,9 @@ impl VoiceControlReason {
     }
 
     /// Whether this reason may come with `failed`.
+    ///
+    /// [`VoiceControlReason::VoiceRemoved`] is one, and v2's alone: see
+    /// [`VoiceControlReason::in_v1`].
     pub fn is_failure(self) -> bool {
         use VoiceControlReason::*;
         matches!(
@@ -347,12 +355,34 @@ impl VoiceControlReason {
                 | NotAMember
                 | VoiceNotConfigured
                 | DuplicateIdentity
+                | VoiceRemoved
                 | AudioUnavailable
                 | ServerUnreachable
                 | StartTimeout
                 | ProtocolError
                 | InternalError
         )
+    }
+}
+
+impl VoiceControlReason {
+    /// Whether `conch.voice_control.v1` has this reason. Every reason but
+    /// [`VoiceControlReason::VoiceRemoved`], which was added to v2 alone (issue #1457): v1 is
+    /// published, and its vocabulary stays the one it was published with.
+    pub fn in_v1(self) -> bool {
+        self != VoiceControlReason::VoiceRemoved
+    }
+
+    /// This reason as a v1 owner is told it: itself when v1 has it, and
+    /// [`VoiceControlReason::InternalError`] otherwise, which is what a v1 owner was told
+    /// of a removal from voice before the reason existed.
+    #[must_use]
+    pub fn for_v1(self) -> Self {
+        if self.in_v1() {
+            self
+        } else {
+            VoiceControlReason::InternalError
+        }
     }
 }
 
@@ -1506,6 +1536,13 @@ impl VoiceControlStateV1 {
             ));
         }
         check_blocked(&self.blocked)?;
+        // v1's reasons are the ones it was published with (issue #1457).
+        if let Some(reason) = self.reason.filter(|reason| !reason.in_v1()) {
+            return Err(format!(
+                "voice control state reason {:?} is not a reason of {VOICE_CONTROL_SCHEMA_V1}",
+                reason.as_str()
+            ));
+        }
         check_reason(self.phase, self.reason, self.retry_in_ms)?;
         check_ptt_problem(self.ptt, self.ptt_problem)?;
         if self.muted != self.blocks(Block::Muted) {
@@ -1599,7 +1636,8 @@ pub(crate) fn check_ptt_problem(
     Ok(())
 }
 
-/// The reason, and `retry_in_ms`, fit the phase: §6's table, the same in both versions.
+/// The reason, and `retry_in_ms`, fit the phase: §6's table, the same in both versions but
+/// for `voice_removed`, a reason to fail that v1's state refuses before this (issue #1457).
 pub(crate) fn check_reason(
     phase: VoiceControlPhase,
     reason: Option<VoiceControlReason>,
@@ -2460,6 +2498,34 @@ mod tests {
         }
         assert!(VoiceControlReason::ServerUnreachable.is_retry());
         assert!(VoiceControlReason::ServerUnreachable.is_failure());
+        // voice_removed (issue #1457) is a reason to fail and nothing else, and v2's alone.
+        let removed = VoiceControlReason::VoiceRemoved;
+        assert!(removed.is_failure() && !removed.is_stop() && !removed.is_retry());
+        for reason in VoiceControlReason::ALL {
+            assert_eq!(reason.in_v1(), *reason != removed, "{reason}");
+            let told = reason.for_v1();
+            assert!(told.in_v1(), "{reason}");
+            assert_eq!(told == *reason, reason.in_v1(), "{reason}");
+        }
+        assert_eq!(removed.for_v1(), VoiceControlReason::InternalError);
+    }
+
+    /// A v1 state never carries voice_removed, in either phase v2 allows it in: the writer
+    /// refuses it and so does the reader (issue #1457).
+    #[test]
+    fn a_v1_state_refuses_voice_removed() {
+        for phase in [VoiceControlPhase::Failed, VoiceControlPhase::Stopping] {
+            let mut state: VoiceControlStateV1 =
+                serde_json::from_value(fixture("event-state-stopped.json")).unwrap();
+            state.phase = phase;
+            state.reason = Some(VoiceControlReason::InternalError);
+            let line = to_line(&state).unwrap();
+            assert!(parse_event(line.as_bytes()).is_ok(), "{phase}");
+            state.reason = Some(VoiceControlReason::VoiceRemoved);
+            assert!(to_line(&state).is_err(), "{phase}");
+            let line = line.replace("internal_error", "voice_removed");
+            assert!(parse_event(line.as_bytes()).is_err(), "{phase}");
+        }
     }
 
     fn state() -> VoiceControlStateV1 {

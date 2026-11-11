@@ -404,7 +404,7 @@ func memberActorStandingTx(ctx context.Context, tx execer, channelID, actorID in
 	}
 	var manages int
 	switch err := tx.QueryRowContext(ctx,
-		"SELECT manages FROM channel_members WHERE channel_id = ? AND principal_id = ?",
+		"SELECT manages FROM "+liveMembers+" WHERE channel_id = ? AND principal_id = ?",
 		channelID, actorID).Scan(&manages); {
 	case errors.Is(err, sql.ErrNoRows):
 		return 0, ErrManagerRefused
@@ -510,6 +510,10 @@ func (s *Store) putChannelMember(ctx context.Context, actor string, actorID, cha
 			if err := checkManagerAddTargetTx(ctx, tx, actorID, principalID); err != nil {
 				return err
 			}
+			// A banned principal is not added (issue #851).
+			if err := refuseBannedTx(ctx, tx, channelID, principalID); err != nil {
+				return err
+			}
 			// The archived guard of adding a member (issue #844), after the
 			// actor's standing is decided.
 			if err := channelNotArchivedTx(ctx, tx, channelID); err != nil {
@@ -548,6 +552,10 @@ func (s *Store) putChannelMember(ctx context.Context, actor string, actorID, cha
 		}
 		if standing == standingOperator && target.IsOwner() && canDecide != nil {
 			return ErrOwnerProtected
+		}
+		// A banned principal is not added, nor its row touched (issue #851).
+		if err := refuseBannedTx(ctx, tx, channelID, principalID); err != nil {
+			return err
 		}
 		// A guest never decides approvals or manages channels, and every
 		// membership it gets has a fresh history bound (issue #705, #789).
@@ -715,6 +723,10 @@ func (s *Store) AddChannelMemberIfAbsent(ctx context.Context, actor string, chan
 				return ErrOwnerProtected
 			}
 		}
+		// A banned principal is not added (issue #851), for a name and an id.
+		if err := refuseBannedTx(ctx, tx, channelID, targetID); err != nil {
+			return err
+		}
 		decide := canDecide != nil && *canDecide
 		res, err := tx.ExecContext(ctx,
 			`INSERT INTO channel_members (channel_id, principal_id, added_by, created_at, can_decide, manages) VALUES (?, ?, ?, ?, ?, 0)
@@ -842,7 +854,7 @@ func setCanDecideTx(ctx context.Context, tx execer, actor string, channelID, pri
 	}
 	var current int
 	switch err := tx.QueryRowContext(ctx,
-		"SELECT can_decide FROM channel_members WHERE channel_id = ? AND principal_id = ?", channelID, principalID).Scan(&current); {
+		"SELECT can_decide FROM "+liveMembers+" WHERE channel_id = ? AND principal_id = ?", channelID, principalID).Scan(&current); {
 	case errors.Is(err, sql.ErrNoRows):
 		return false, ErrNotMember
 	case err != nil:
@@ -877,7 +889,7 @@ func setManagesTx(ctx context.Context, tx execer, actor string, channelID int64,
 	}
 	var current int
 	switch err := tx.QueryRowContext(ctx,
-		"SELECT manages FROM channel_members WHERE channel_id = ? AND principal_id = ?", channelID, target.ID).Scan(&current); {
+		"SELECT manages FROM "+liveMembers+" WHERE channel_id = ? AND principal_id = ?", channelID, target.ID).Scan(&current); {
 	case errors.Is(err, sql.ErrNoRows):
 		return false, ErrNotMember
 	case err != nil:
@@ -905,7 +917,7 @@ func (s *Store) ManagesChannel(ctx context.Context, channelID, principalID int64
 	var manages int
 	err := s.db.QueryRowContext(ctx,
 		`SELECT m.manages AND p.kind = 'human' AND p.disabled_at IS NULL AND p.hidden_at IS NULL AND NOT `+activeGuestSQL+`
-		 FROM channel_members m
+		 FROM `+liveMembers+` m
 		 JOIN principals p ON p.id = m.principal_id
 		 WHERE m.channel_id = ? AND m.principal_id = ?`, channelID, principalID).Scan(&manages)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -925,7 +937,7 @@ func (s *Store) CanDecideApprovals(ctx context.Context, channelID, principalID i
 	// A guest never holds the right, whatever its row says (issue #706): the
 	// same condition the deciding transaction applies.
 	err := s.db.QueryRowContext(ctx,
-		`SELECT m.can_decide AND NOT `+activeGuestSQL+` FROM channel_members m
+		`SELECT m.can_decide AND NOT `+activeGuestSQL+` FROM `+liveMembers+` m
 		 JOIN principals p ON p.id = m.principal_id
 		 WHERE m.channel_id = ? AND m.principal_id = ?`, channelID, principalID).Scan(&can)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -941,7 +953,7 @@ func (s *Store) CanDecideApprovals(ctx context.Context, channelID, principalID i
 // member holding the right to decide approvals, as a set.
 func (s *Store) DecidingChannels(ctx context.Context, principalID int64) (map[int64]bool, error) {
 	rows, err := s.db.QueryContext(ctx,
-		"SELECT channel_id FROM channel_members WHERE principal_id = ? AND can_decide = 1", principalID)
+		"SELECT channel_id FROM "+liveMembers+" WHERE principal_id = ? AND can_decide = 1", principalID)
 	if err != nil {
 		return nil, fmt.Errorf("store: list deciding channels of %d: %w", principalID, err)
 	}
@@ -1054,7 +1066,7 @@ func removeChannelMemberTx(ctx context.Context, tx execer, actor string, channel
 func (s *Store) IsChannelMember(ctx context.Context, channelID, principalID int64) (bool, error) {
 	var one int
 	err := s.db.QueryRowContext(ctx,
-		"SELECT 1 FROM channel_members WHERE channel_id = ? AND principal_id = ?", channelID, principalID).Scan(&one)
+		"SELECT 1 FROM "+liveMembers+" WHERE channel_id = ? AND principal_id = ?", channelID, principalID).Scan(&one)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
 	}
@@ -1075,7 +1087,7 @@ func (s *Store) HistoryBounded(ctx context.Context, channelID, principalID int64
 	var bounded bool
 	err := s.db.QueryRowContext(ctx,
 		`SELECT EXISTS (SELECT 1 FROM guest_visits WHERE principal_id = ? AND state = 'active')
-		     OR EXISTS (SELECT 1 FROM channel_members
+		     OR EXISTS (SELECT 1 FROM `+liveMembers+`
 		                WHERE channel_id = ? AND principal_id = ? AND history_after IS NOT NULL)`,
 		principalID, channelID, principalID).Scan(&bounded)
 	if err != nil {
@@ -1146,7 +1158,7 @@ func scanChannelMember(scan func(dest ...any) error) (ChannelMember, error) {
 func channelMemberTx(ctx context.Context, tx execer, channelID, principalID int64) (ChannelMember, error) {
 	row := tx.QueryRowContext(ctx,
 		`SELECT m.principal_id, m.added_by, m.created_at, p.name, p.kind, p.role, m.can_decide, (m.manages AND `+listedManagerSQL+`), m.history_after, v.handle, v.label
-		 FROM channel_members m
+		 FROM `+liveMembers+` m
 		 JOIN principals p ON p.id = m.principal_id
 		 LEFT JOIN guest_visits v ON v.principal_id = m.principal_id AND v.state = 'active'
 		 WHERE m.channel_id = ? AND m.principal_id = ?`, channelID, principalID)
@@ -1164,7 +1176,7 @@ func channelMemberTx(ctx context.Context, tx execer, channelID, principalID int6
 func (s *Store) ListChannelMembers(ctx context.Context, channelID int64) ([]ChannelMember, error) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT m.principal_id, m.added_by, m.created_at, p.name, p.kind, p.role, m.can_decide, (m.manages AND `+listedManagerSQL+`), m.history_after, v.handle, v.label
-		 FROM channel_members m
+		 FROM `+liveMembers+` m
 		 JOIN principals p ON p.id = m.principal_id
 		 LEFT JOIN guest_visits v ON v.principal_id = m.principal_id AND v.state = 'active'
 		 WHERE m.channel_id = ? ORDER BY m.principal_id ASC`, channelID)
@@ -1192,8 +1204,8 @@ func (s *Store) ListChannelMembers(ctx context.Context, channelID int64) ([]Chan
 // slice when there are none.
 func (s *Store) ListChannelsForPrincipal(ctx context.Context, principalID int64) ([]Channel, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT c.id, c.name, c.created_at, c.visibility, c.is_default, c.archived_at, m.manages FROM channels c
-		 JOIN channel_members m ON m.channel_id = c.id
+		`SELECT c.id, c.name, c.created_at, c.visibility, c.is_default, c.archived_at, c.topic, m.manages FROM channels c
+		 JOIN `+liveMembers+` m ON m.channel_id = c.id
 		 WHERE m.principal_id = ? ORDER BY c.id ASC`, principalID)
 	if err != nil {
 		return nil, fmt.Errorf("store: list channels of principal %d: %w", principalID, err)
@@ -1213,6 +1225,23 @@ func (s *Store) ListChannelsForPrincipal(ctx context.Context, principalID int64)
 		return nil, fmt.Errorf("store: list channels of principal %d: %w", principalID, err)
 	}
 	return channels, nil
+}
+
+// CheckChannelModerator re-reads the acting principal's moderation standing in
+// channelID under the write lock and returns ErrManagerRefused (or
+// ErrNotFound for an unknown channel) when it has none: an owner, an operator
+// holding manage_channels, or a member holding manages passes. A zero actor
+// (authentication off) passes. It changes nothing; it is for a moderation that
+// does its work outside the store, so that a grant revoked after the route
+// guard is met before the work starts (docs/design/moderation.md §3.1).
+func (s *Store) CheckChannelModerator(ctx context.Context, channelID, actorID int64) error {
+	return s.withImmediateTx(ctx, func(tx execer) error {
+		if err := checkChannelExistsTx(ctx, tx, channelID); err != nil {
+			return err
+		}
+		_, err := memberActorStandingTx(ctx, tx, channelID, actorID)
+		return err
+	})
 }
 
 // CheckManagerAddTarget applies the manager-add bound without changing the

@@ -90,7 +90,7 @@ func TestAdminCommands(t *testing.T) {
 		{name: "member add without the right", args: []string{"member", "add", "--no-decide", "ops", "2"}, wantStdout: "added 2 to ops, without the right to decide its approvals\n"},
 		{name: "manifest put from stdin", args: []string{"manifest", "put", "4"}, stdin: testManifest, wantStdout: "stored manifest for principal 4\n"},
 		{name: "manifest get", args: []string{"manifest", "get", "4"}, wantStdout: "4 tier A capabilities messages.read,messages.post channels 1:read,post deploy-bot\n"},
-		{name: "member remove", args: []string{"member", "remove", "ops", "4"}, wantStdout: "removed 4 from ops\n"},
+		{name: "member remove", args: []string{"member", "remove", "ops", "4", "--yes"}, wantStdout: "principal 4 is removed or was already absent from ops and its nets; this is not a ban and no account was revoked\n"},
 		{name: "disable", args: []string{"principal", "disable", "4"}, wantStdout: "disabled principal 4\n"},
 		{name: "enable", args: []string{"principal", "enable", "4"}, wantStdout: "enabled principal 4\n"},
 		{name: "rename", args: []string{"principal", "rename", "3", "Alice Liddell"}, wantStdout: "renamed principal 3 to Alice Liddell\n"},
@@ -320,7 +320,7 @@ func TestAdminMemberRefused(t *testing.T) {
 		{"credential list", []string{"credential", "list", "2"}, "", "forbidden"},
 		{"credential revoke", []string{"credential", "revoke", "1"}, "", "forbidden"},
 		{"member add", []string{"member", "add", "ops", "2"}, "", "channel_not_found"},
-		{"member remove", []string{"member", "remove", "ops", "2"}, "", "channel_not_found"},
+		{"member remove", []string{"member", "remove", "ops", "2", "--yes"}, "", "channel_not_found"},
 		{"manifest put", []string{"manifest", "put", "2"}, testManifest, "forbidden"},
 		{"manifest get", []string{"manifest", "get", "1"}, "", "forbidden"},
 		{"principal list", []string{"principal", "list"}, "", "forbidden"},
@@ -333,7 +333,7 @@ func TestAdminMemberRefused(t *testing.T) {
 			if err == nil {
 				t.Fatalf("a member ran %v without error", tt.args)
 			}
-			if !strings.Contains(err.Error(), tt.code) {
+			if !IsServerCode(err, tt.code) {
 				t.Errorf("error = %q, want the server's %s code", err, tt.code)
 			}
 			if strings.Contains(ErrorLine(err), "\n") {
@@ -396,7 +396,7 @@ func TestAdminUsageErrors(t *testing.T) {
 		args []string
 		want string
 	}{
-		{"no subcommand", []string{"admin"}, "usage: conch admin <channel|principal|credential|member|manifest|invite|join|guest|reports|sign-in-link|permissions|directory|ai-admin>"},
+		{"no subcommand", []string{"admin"}, "usage: conch admin <channel|principal|credential|member|ban|message|manifest|invite|join|guest|reports|sign-in-link|permissions|directory|ai-admin|reaction>"},
 		{"unknown group", []string{"admin", "frob"}, `unknown subcommand "frob"`},
 		{"group without verb", []string{"admin", "member"}, "usage: conch admin member <add|manage|decide|remove>"},
 		{"principal group lists role", []string{"admin", "principal"}, "create|disable|enable|rename|role|list|hide"},

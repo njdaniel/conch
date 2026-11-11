@@ -72,6 +72,7 @@ func (s *Server) handleChannelDirectory(w http.ResponseWriter, r *http.Request) 
 			Joined:     l.Joined,
 			Manages:    l.Joined && l.Manages,
 			ArchivedAt: archivedAtWire(l.Channel),
+			Topic:      l.Topic,
 		}
 		if all {
 			n := l.Members

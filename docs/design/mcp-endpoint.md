@@ -89,7 +89,8 @@ compatibility is a property of the schema layer, inherited for free.
     "payload": { "schema": "leviathan.trade_signal.v1", "data": { } },
     "audience": { "kind": "net", "net_id": 5 },  // absent for a channel-wide message
     "thread_root_id": 40,  // absent unless the message is a reply
-    "guest_author": { "handle": "guest-...", "tag": "7h3k" }  // absent unless posted during a guest visit
+    "guest_author": { "handle": "guest-...", "tag": "7h3k" },  // absent unless posted during a guest visit
+    "removed": true  // absent unless a moderator removed the message; body is then the fixed tombstone text, with no payload
 } }
 ```
 
@@ -154,14 +155,20 @@ with an audience the agent is a recipient of. Projection of
 | after | `after` | integer, optional | Cursor: return messages with id > `after`. Default 0 (from the start). Maps to the REST `after` query param. |
 | limit | `limit` | integer, optional | Page size. Default 50, max 100 — **identical bounds to REST** (`defaultMessageLimit`/`maxMessageLimit`). Out-of-range is an input error. |
 
-**Output** — exactly `schema.ListMessagesResponseV2`:
+**Output** — `schema.ListMessagesResponseV2`, plus the channel's topic:
 
 ```jsonc
 {
   "messages": [ /* schema.MessageV2, ... */ ],
-  "next_after": 91          // omitted/0 when no further page (same convention as REST)
+  "next_after": 91,         // omitted/0 when no further page (same convention as REST)
+  "topic": "Incidents"      // omitted when the channel has none (issue #1506)
 }
 ```
+
+`topic` is the channel's one-line purpose, set by its managers
+([channel-topic.md](channel-topic.md) §8.4). It comes from the channel the agent
+was already granted `read` on, so a refused agent learns no topic. REST carries it
+on the channel (`GET /v1/channels`), not on the message page.
 
 **Parity:** identical pagination semantics, identical caps, identical cursor.
 A reader must see the same messages via `read_channel` and via the REST v2
@@ -182,7 +189,7 @@ the id of the last message returned.
 | MCP tool | REST/WS equivalent | Core operation | Canonical types |
 |---|---|---|---|
 | `post_message` | `POST /v2/channels/{channel}/messages` + WS broadcast | `store.InsertMessage` → hub/broadcaster; with an audience, `store.InsertScopedMessage` → the recipients' v2 sockets | in: `PostMessageRequestV2` (author from auth); out: `PostMessageResponseV2` |
-| `read_channel` | `GET /v2/channels/{channel}/messages` | `store.ListVisibleMessages` | out: `ListMessagesResponseV2` |
+| `read_channel` | `GET /v2/channels/{channel}/messages`, and the channel's `topic` from `GET /v1/channels` | `store.ListVisibleMessages` | out: `ListMessagesResponseV2` plus `topic` |
 | `set_reaction`, `remove_reaction` (`messages.post`) | `PUT` / `DELETE /v2/channels/{channel}/messages/{message_id}/reactions/{emoji}` | `store.SetReaction` / `store.RemoveReaction`; the agent also needs `messages.read` and `read` in the channel, and the permission it would need to reply in the message's audience (`post`, `post_net`, `whisper`) | in: channel, message_id, emoji (author from auth); out: `ReactionSummaryV1` |
 | `read_reactions` (`messages.read`) | `GET /v2/channels/{channel}/reactions?messages=…` | `store.ReactionSummariesOf` | out: `ReactionSummariesResponseV1` |
 | `list_reactors` (`messages.read`) | `GET /v2/channels/{channel}/messages/{message_id}/reactions/{emoji}` | `store.ListReactorsOf` | out: `ListReactorsResponseV1` |

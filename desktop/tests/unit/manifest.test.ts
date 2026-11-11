@@ -1,11 +1,11 @@
 import { createHash } from 'node:crypto';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { afterEach, describe, expect, it } from 'vitest';
 
-import { buildManifest } from '../../build/manifest.ts';
+import { buildCompat, buildManifest } from '../../build/manifest.ts';
 import { parseManifest } from '../../main/scheme.ts';
 
 const dirs: string[] = [];
@@ -39,5 +39,41 @@ describe('buildManifest', () => {
 
   it('fails without an index.html', () => {
     expect(() => buildManifest(tree({ 'a.js': 'b' }))).toThrow(/index\.html/);
+  });
+});
+
+describe('buildCompat', () => {
+  const hand = '{"version":1,"servers":["v0.1.0-alpha.9","v0.1.0-alpha.18"]}\n';
+  const none = '{"version":1,"servers":[]}';
+  const servers = (text: string): unknown => (JSON.parse(text) as { servers: unknown }).servers;
+
+  it('without a tag keeps the hand list exactly', () => {
+    expect(buildCompat(null, hand, none)).toBe(hand);
+  });
+
+  it('with a tag lists it first, then the extra releases', () => {
+    const extra = '{"version":1,"servers":["v0.1.0-alpha.17.1"]}';
+    expect(servers(buildCompat('v0.1.0-alpha.18', hand, extra))).toEqual(['v0.1.0-alpha.18', 'v0.1.0-alpha.17.1']);
+    expect(servers(buildCompat('v0.1.0-alpha.18', hand, none))).toEqual(['v0.1.0-alpha.18']);
+  });
+
+  it('does not list the tag twice and ignores the hand list', () => {
+    const extra = '{"version":1,"servers":["v0.1.0-alpha.18","v0.1.0-alpha.19"]}';
+    expect(servers(buildCompat('v0.1.0-alpha.18', hand, extra))).toEqual(['v0.1.0-alpha.18', 'v0.1.0-alpha.19']);
+  });
+
+  it.each(['0.1.0', 'v1', 'v1.2.3+build', 'latest', 'v1.2.3 ', '>=v1.0.0'])('refuses the tag %s', (tag) => {
+    expect(() => buildCompat(tag, hand, none)).toThrow(/not a release tag/);
+  });
+
+  it('refuses an invalid extra or hand list', () => {
+    expect(() => buildCompat('v1.2.3', hand, '{"version":1,"servers":[">=v1.0.0"]}')).toThrow(/compat-extra/);
+    expect(() => buildCompat(null, '{}', none)).toThrow(/compat\.json/);
+  });
+
+  it('the checked-in lists are valid', () => {
+    const read = (f: string): string => readFileSync(join(import.meta.dirname, '..', '..', 'build', f), 'utf8');
+    expect(() => buildCompat(null, read('compat.json'), read('compat-extra.json'))).not.toThrow();
+    expect(() => buildCompat('v0.1.0-alpha.18', read('compat.json'), read('compat-extra.json'))).not.toThrow();
   });
 });

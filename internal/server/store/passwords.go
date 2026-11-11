@@ -416,6 +416,12 @@ func bumpAuthGenerationTx(ctx context.Context, tx execer, actor string, principa
 	if err := closeOpenSignInLinksTx(ctx, tx, actor, principalID, false, SignInLinkCloseAuthChanged, now); err != nil {
 		return 0, err
 	}
+	// The generation killed the principal's credentials without setting
+	// revoked_at, so no revocation site ran for them: their push
+	// registrations end here, in the same transaction (issue #1714).
+	if err := endGenerationDeadPushTx(ctx, tx, actor, "principal_id = ?", []any{principalID}, now); err != nil {
+		return 0, err
+	}
 	return generation, nil
 }
 
@@ -682,6 +688,9 @@ func rotateSessionTx(ctx context.Context, tx execer, actor string, credentialID 
 	}
 	if err := appendAuditEventTx(ctx, tx, actor, "credential_rotated", principalActor(principalID),
 		credentialDetail(c.ID, c.Label)+fmt.Sprintf(" replaces=%d", credentialID), now); err != nil {
+		return schema.CredentialV1{}, err
+	}
+	if err := endCredentialNotificationsTx(ctx, tx, actor, credentialID, now); err != nil {
 		return schema.CredentialV1{}, err
 	}
 	if err := endCredentialSessionsTx(ctx, tx, actor, credentialID, SessionEndedByRevocation, now, runs); err != nil {

@@ -957,7 +957,7 @@ END`,
 	// history bounds step 5 clears; and invites.link (step 8), 'legacy' for
 	// every existing invite. The Go step (migrateToCommunity) runs the
 	// preflight and steps 3 to 11 in this same transaction. open_channels
-	// stays, unread, until a later migration drops it (I13).
+	// stays, unread, until migration 46 drops it (I13).
 	{
 		`ALTER TABLE channels ADD COLUMN visibility TEXT NOT NULL DEFAULT 'private' CHECK (visibility IN ('public', 'private'))`,
 		`ALTER TABLE channels ADD COLUMN is_default INTEGER NOT NULL DEFAULT 0 CHECK (is_default IN (0, 1))`,
@@ -1024,6 +1024,110 @@ BEGIN SELECT RAISE(ABORT, 'a default channel must be public'); END`,
 	// (issue #1361), and a server that existed before keeps it off. No SQL:
 	// pinCameraOff stores the old value where no cell was stored.
 	{},
+	// 45: Channel moderation (issue #849, docs/design/moderation.md §6 and
+	// §7, signed off 2026-11-05). channel_bans keeps a principal out of a
+	// channel, keyed by id so a rename, conversion or hide does not lift it;
+	// no name is stored, the list reads the principal's current one.
+	// message_removals marks a message removed: the messages row is never
+	// touched (migration 38's messages_only_body_changes stays as it is) and
+	// the tombstone is projected on read. Both are append-only in meaning;
+	// the triggers make "no unremove" a database fact, as message revisions
+	// are append-only. created_by and removed_by are NULL for a write with
+	// authentication off (the system actor), as credentials.issued_by is.
+	// Nothing is backfilled; no published field changes meaning.
+	{
+		`CREATE TABLE channel_bans (
+	channel_id   INTEGER NOT NULL REFERENCES channels (id),
+	principal_id INTEGER NOT NULL REFERENCES principals (id),
+	created_by   INTEGER REFERENCES principals (id),
+	created_at   INTEGER NOT NULL,
+	PRIMARY KEY (channel_id, principal_id)
+)`,
+		`CREATE TABLE message_removals (
+	message_id INTEGER PRIMARY KEY REFERENCES messages (id),
+	channel_id INTEGER NOT NULL REFERENCES channels (id),
+	removed_by INTEGER REFERENCES principals (id),
+	removed_at INTEGER NOT NULL
+)`,
+		`CREATE TRIGGER message_removals_no_update BEFORE UPDATE ON message_removals
+BEGIN SELECT RAISE(ABORT, 'message removals are permanent'); END`,
+		`CREATE TRIGGER message_removals_no_delete BEFORE DELETE ON message_removals
+BEGIN SELECT RAISE(ABORT, 'message removals are permanent'); END`,
+	},
+	// 46: drop open_channels (issue #998, design I13). Migration 40 turned
+	// every channel listed there into a public default channel
+	// (channels.is_default, default_listed_by) and left the table in place,
+	// unread, for one release cycle; nothing reads or writes it since. The
+	// joining settings' open_channels is now a projection of the default
+	// channels. Every other table is untouched. A rollback to an older
+	// binary uses the pre-upgrade backup, not this table.
+	{
+		`DROP TABLE open_channels`,
+	},
+	// 47 (channelTopicMigration): a channel's one-line topic (issue #1503,
+	// docs/design/channel-topic.md). The empty string is no topic, so every
+	// existing channel has none; there is no audit row and no fill step.
+	{
+		`ALTER TABLE channels ADD COLUMN topic TEXT NOT NULL DEFAULT ''`,
+	},
+	// 48: per-credential notification preferences (issue #1713, Mobile M11-A,
+	// docs/design/mobile-notifications.md §6.1). One row per credential, which
+	// is one sign-in; no row means the defaults (policy off). muted is a JSON
+	// array of channel ids, at most schema.MaxMutedChannels, ascending and
+	// without duplicates, and is never checked against membership. The row
+	// lives and dies with its credential: every site that sets
+	// credentials.revoked_at deletes it in the same transaction
+	// (endCredentialNotificationsTx), and the session sweep deletes the rows
+	// of credentials that have expired or gone idle.
+	{
+		`CREATE TABLE notification_preferences (
+	credential_id          INTEGER PRIMARY KEY REFERENCES credentials (id),
+	policy                 TEXT    NOT NULL CHECK (policy IN ('off', 'mentions', 'all')),
+	preview                INTEGER NOT NULL CHECK (preview IN (0, 1)),
+	quiet_when_unreachable INTEGER NOT NULL CHECK (quiet_when_unreachable IN (0, 1)),
+	muted                  TEXT    NOT NULL CHECK (json_valid(muted)),
+	updated_at             INTEGER NOT NULL
+)`,
+	},
+	// 49: push registrations (issue #1714, Mobile M11-B,
+	// docs/design/mobile-notifications.md §5). One row per registration: an
+	// address one credential (one sign-in) wants woken. id is 32 random bytes
+	// in unpadded base64url. The target (endpoint, p256dh, auth, provider,
+	// token) is write-only on the wire and is cleared when the row expires
+	// (threat T9): the CHECK makes that a property of the table, not only of
+	// the code that ends a registration. Only target_fingerprint, 8 bytes of
+	// SHA-256 in hex, survives. A registration holds no preference. Every
+	// site that revokes a credential expires its rows in the same transaction
+	// (endCredentialNotificationsTx), and the session sweep expires those of
+	// credentials that expired or went idle and those with no fetch and no
+	// update for 35 days.
+	{
+		`CREATE TABLE push_registrations (
+	id                 TEXT    PRIMARY KEY,
+	credential_id      INTEGER NOT NULL REFERENCES credentials (id),
+	principal_id       INTEGER NOT NULL REFERENCES principals (id),
+	transport          TEXT    NOT NULL CHECK (transport IN ('webpush', 'relay')),
+	platform           TEXT    NOT NULL CHECK (platform IN ('ios', 'android', 'web')),
+	app                TEXT    NOT NULL,
+	endpoint           TEXT    NOT NULL DEFAULT '',
+	p256dh             TEXT    NOT NULL DEFAULT '',
+	auth               TEXT    NOT NULL DEFAULT '',
+	provider           TEXT    NOT NULL DEFAULT '',
+	token              TEXT    NOT NULL DEFAULT '',
+	target_fingerprint TEXT    NOT NULL,
+	created_at         INTEGER NOT NULL,
+	updated_at         INTEGER NOT NULL,
+	last_wake_at       INTEGER,
+	last_fetch_at      INTEGER,
+	state              TEXT    NOT NULL CHECK (state IN ('active', 'expired')),
+	ended_at           INTEGER,
+	end_reason         TEXT,
+	CHECK (state = 'active' OR (ended_at IS NOT NULL AND end_reason IS NOT NULL
+		AND endpoint = '' AND p256dh = '' AND auth = '' AND provider = '' AND token = ''))
+)`,
+		`CREATE INDEX push_registrations_by_credential ON push_registrations (credential_id) WHERE state = 'active'`,
+		`CREATE INDEX push_registrations_by_principal ON push_registrations (principal_id) WHERE state = 'active'`,
+	},
 }
 
 // migrationSteps holds Go code that runs inside a migration's transaction

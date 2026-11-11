@@ -20,14 +20,24 @@ import (
 // tapBroadcaster is the Config.Broadcaster tap. Scoped messages must
 // never reach it: it carries the v0 envelope, which cannot express an audience.
 type tapBroadcaster struct {
-	mu  sync.Mutex
-	ids []int64
+	mu   sync.Mutex
+	ids  []int64
+	msgs []schema.MessageV0
 }
 
 func (b *tapBroadcaster) BroadcastMessage(_ context.Context, m schema.MessageV0) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.ids = append(b.ids, m.ID)
+	b.msgs = append(b.msgs, m)
+}
+
+// messages is every v0 message the tap was given, in order: what a consumer
+// of the Broadcaster seam would have seen.
+func (b *tapBroadcaster) messages() []schema.MessageV0 {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return append([]schema.MessageV0(nil), b.msgs...)
 }
 
 func (b *tapBroadcaster) seen() []int64 {

@@ -21,6 +21,11 @@ scripts/web-licences.sh "$rel/package-lock.json" "$rel/licences-allowlist.txt"
 (cd "$here" && npm ci --ignore-scripts && npx tsc --noEmit)
 echo "check: tsc OK"
 
+# The logic's unit tests (node --test over tsc output; no test dependency) and
+# the byte-identity check of the schema copy.
+(cd "$here" && npm test)
+echo "check: unit tests OK"
+
 # Gradle: the lockfiles must exist and name only exact versions (the build's
 # plugins in buildscript-gradle.lockfile, the app's classpaths in
 # app/gradle.lockfile).

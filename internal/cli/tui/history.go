@@ -3,7 +3,6 @@ package tui
 import (
 	"strconv"
 	"strings"
-	"unicode/utf8"
 
 	"github.com/njdaniel/conch/pkg/schema"
 )
@@ -102,7 +101,8 @@ func (m Model) messageBlock(channel string, message schema.MessageV2, width int)
 	paras := blockParagraphs(message.Body)
 	if h.fits && len(paras) == 1 && cellWidth(paras[0]) <= inner-h.cells && paras[0] == escapeBadge(sanitize(message.Body)) {
 		// The common case: a one-line body that fits beside the head.
-		return []string{m.messageLine(channel, message, width)}
+		lines := []string{m.messageLine(channel, message, width)}
+		return append(lines, m.reactionLines(channel, message.ID, inner)...)
 	}
 
 	// Never less than 2: a head never starts with a space (a name is
@@ -120,7 +120,8 @@ func (m Model) messageBlock(channel string, message schema.MessageV2, width int)
 		first, room = h.styled, inner-h.cells
 	}
 	if len(paras) == 0 {
-		return []string{first}
+		lines := []string{first}
+		return append(lines, m.reactionLines(channel, message.ID, inner)...)
 	}
 	var lines []string
 	for i, p := range paras {
@@ -139,7 +140,7 @@ func (m Model) messageBlock(channel string, message schema.MessageV2, width int)
 			lines = append(lines, cont+c)
 		}
 	}
-	return lines
+	return append(lines, m.reactionLines(channel, message.ID, inner)...)
 }
 
 // blockParagraphs is a body as lines without control characters: its own
@@ -170,17 +171,17 @@ func wrapWords(s string, first, rest int) []string {
 	width := max(first, 1)
 	var lines []string
 	for cellWidth(s) > width {
-		used, cut, space := 0, 0, -1
-		for i, r := range s {
-			w := runeCells(r)
-			if used+w > width {
-				cut = i
+		used, cut, space, offset := 0, 0, -1, 0
+		for _, cluster := range textClusters(s) {
+			if used+cluster.width > width {
+				cut = offset
 				break
 			}
-			used += w
-			if r == ' ' {
-				space = i
+			used += cluster.width
+			if cluster.text == " " {
+				space = offset
 			}
+			offset += len(cluster.text)
 		}
 		switch {
 		case space > 0:
@@ -190,11 +191,11 @@ func wrapWords(s string, first, rest int) []string {
 			lines = append(lines, s[:cut])
 			s = s[cut:]
 		default:
-			// Not one character fits: give it a line of its own rather than
-			// loop. Only a width under a wide character's two cells does this.
-			_, size := utf8.DecodeRuneInString(s)
-			lines = append(lines, s[:size])
-			s = s[size:]
+			// Not one cluster fits: give it a line of its own rather than split
+			// a wide character or compound emoji or loop for ever.
+			cluster := textClusters(s)[0]
+			lines = append(lines, cluster.text)
+			s = s[len(cluster.text):]
 		}
 		width = max(rest, 1)
 	}

@@ -145,6 +145,7 @@ type fakeOptions struct {
 	failWith        string
 	failOn          string
 	linger          time.Duration
+	talkOpen        bool
 }
 
 func parseFakeOptions(args []string) (fakeOptions, error) {
@@ -168,12 +169,14 @@ func parseFakeOptions(args []string) (fakeOptions, error) {
 	fs.StringVar(&o.failWith, "fail-with", "", "once connected, fail with this reason")
 	fs.StringVar(&o.failOn, "fail-on", "", "on a command of kind, fail with reason (kind:reason), unanswered")
 	fs.DurationVar(&o.linger, "linger", 0, "after failing for -fail-on, wait this long before exiting")
+	fs.BoolVar(&o.talkOpen, "talk-open", false, "in v2, report the open talk mode once connected")
 	return o, fs.Parse(args)
 }
 
 // fake is the fake helper's event writer and push-to-talk state.
 type fake struct {
 	o        fakeOptions
+	v2       bool // the session is in v2: the owner's start said so
 	events   *os.File
 	seq      int64
 	muted    bool
@@ -211,7 +214,7 @@ func fakeMain(args []string) int {
 	versions := strings.Split(o.versions, ",")
 	f.emit(&schema.VoiceControlHelloV1{Schema: schema.VoiceControlSchemaV1, Kind: schema.VoiceControlEventHello, Versions: versions, HelperVersion: "fake 1.0"})
 	cmds := f.readCommands()
-	if !slices.Contains(versions, schema.VoiceControlSchemaV1) {
+	if !slices.Contains(versions, schema.VoiceControlSchemaV1) && !slices.Contains(versions, schema.VoiceControlSchemaV2) {
 		// Told nothing: the owner must write nothing and close.
 		if line, ok := <-cmds; ok {
 			return fakeFail("the owner wrote %q to a helper it cannot speak to", line)
@@ -222,9 +225,26 @@ func fakeMain(args []string) int {
 	if !ok {
 		return 0
 	}
+	// The version is the schema of the start, as the helper reads it: v1, or
+	// v2 when it was offered. The rest of the session is in it.
 	cmd, err := schema.ParseVoiceControlCommand(first)
-	if err != nil || cmd.Start == nil {
-		return fakeFail("the first command is not a valid start: %v", err)
+	if err != nil {
+		var v2err error
+		if cmd, v2err = parseV2AsV1(first); v2err != nil {
+			return fakeFail("the first command is not a valid start: %v", err)
+		}
+		f.v2 = true
+	}
+	if cmd.Start == nil {
+		return fakeFail("the first command is not a start")
+	}
+	if offered := schema.VoiceControlSchemaV1; f.v2 {
+		offered = schema.VoiceControlSchemaV2
+		if !slices.Contains(versions, offered) {
+			return fakeFail("the start is in %s, which the hello did not offer", offered)
+		}
+	} else if !slices.Contains(versions, offered) {
+		return fakeFail("the start is in %s, which the hello did not offer", offered)
 	}
 	if o.dump != "" {
 		if err := writeDump(o.dump, first); err != nil {
@@ -276,7 +296,7 @@ func (f *fake) serve(cmds <-chan []byte, term <-chan os.Signal) int {
 			if f.o.ackDelay > 0 {
 				time.Sleep(f.o.ackDelay)
 			}
-			cmd, err := schema.ParseVoiceControlCommand(line)
+			cmd, err := f.parseCommand(line)
 			if err != nil {
 				return fakeFail("an invalid command: %v", err)
 			}
@@ -348,6 +368,47 @@ func (f *fake) serve(cmds <-chan []byte, term <-chan os.Signal) int {
 			return 0
 		}
 	}
+}
+
+// parseCommand reads a command in the session's version, as the helper does:
+// a line of the other version is refused. A v2 command comes back as the v1
+// command of the same kind (the five kinds the owner writes are the same in
+// both).
+func (f *fake) parseCommand(line []byte) (schema.VoiceControlCommand, error) {
+	if f.v2 {
+		return parseV2AsV1(line)
+	}
+	return schema.ParseVoiceControlCommand(line)
+}
+
+// parseV2AsV1 reads a v2 command and returns it as v1's, for the kinds the
+// supervisor writes; set_devices and set_talk_mode are an error here, since it
+// never sends them.
+func parseV2AsV1(line []byte) (schema.VoiceControlCommand, error) {
+	c, err := schema.ParseVoiceControlCommandV2(line)
+	if err != nil {
+		return schema.VoiceControlCommand{}, err
+	}
+	var out schema.VoiceControlCommand
+	switch {
+	case c.Start != nil:
+		out.Start = &schema.VoiceControlStartV1{
+			Schema: schema.VoiceControlSchemaV1, Kind: c.Start.Kind, ID: c.Start.ID, Server: c.Start.Server,
+			Channel: c.Start.Channel, PrincipalID: c.Start.PrincipalID, Credential: c.Start.Credential,
+			Muted: c.Start.Muted, Deafened: c.Start.Deafened,
+		}
+	case c.SetMute != nil:
+		out.SetMute = &schema.VoiceControlSetMuteV1{Schema: schema.VoiceControlSchemaV1, Kind: c.SetMute.Kind, ID: c.SetMute.ID, Muted: c.SetMute.Muted}
+	case c.SetDeafen != nil:
+		out.SetDeafen = &schema.VoiceControlSetDeafenV1{Schema: schema.VoiceControlSchemaV1, Kind: c.SetDeafen.Kind, ID: c.SetDeafen.ID, Deafened: c.SetDeafen.Deafened}
+	case c.GetState != nil:
+		out.GetState = &schema.VoiceControlGetStateV1{Schema: schema.VoiceControlSchemaV1, Kind: c.GetState.Kind, ID: c.GetState.ID}
+	case c.Leave != nil:
+		out.Leave = &schema.VoiceControlLeaveV1{Schema: schema.VoiceControlSchemaV1, Kind: c.Leave.Kind, ID: c.Leave.ID}
+	default:
+		return schema.VoiceControlCommand{}, fmt.Errorf("the owner sent %s, which the supervisor never does", c.Kind())
+	}
+	return out, nil
 }
 
 func reasonIf(cond bool, r schema.VoiceControlReason) schema.VoiceControlReason {
@@ -490,6 +551,10 @@ func (f *fake) readCommands() <-chan []byte {
 func (f *fake) emit(msg schema.VoiceControlMessage) {
 	f.seq++
 	switch m := msg.(type) {
+	case *schema.VoiceControlAckV2:
+		m.Seq = f.seq
+	case *schema.VoiceControlStateV2:
+		m.Seq = f.seq
 	case *schema.VoiceControlHelloV1:
 		m.Seq = f.seq
 	case *schema.VoiceControlAckV1:
@@ -512,12 +577,41 @@ func (f *fake) ack(id int64, code schema.VoiceControlErrorCode) {
 	// Counted before it is written: once written, the owner may read it and
 	// write the next command before this goroutine runs again.
 	f.answered.Add(1)
+	if f.v2 {
+		f.emit(&schema.VoiceControlAckV2{Schema: schema.VoiceControlSchemaV2, Kind: schema.VoiceControlEventAck, ID: id, OK: code == "", Error: code})
+		return
+	}
 	f.emit(&schema.VoiceControlAckV1{Schema: schema.VoiceControlSchemaV1, Kind: schema.VoiceControlEventAck, ID: id, OK: code == "", Error: code})
 }
 
 func (f *fake) state(phase schema.VoiceControlPhase, reason schema.VoiceControlReason) {
 	st := f.snapshot(phase, reason)
+	if f.v2 {
+		st2 := f.snapshotV2(st)
+		f.emit(&st2)
+		return
+	}
 	f.emit(&st)
+}
+
+// snapshotV2 is st in v2: the speakers on while a call is up (and while
+// stopping, which may be anything), push to talk, or whatever -talk-mode and
+// -playback say.
+func (f *fake) snapshotV2(st schema.VoiceControlStateV1) schema.VoiceControlStateV2 {
+	out := schema.VoiceControlStateV2{
+		Schema: schema.VoiceControlSchemaV2, Kind: st.Kind, Seq: st.Seq, Phase: st.Phase, Reason: st.Reason,
+		RetryInMS: st.RetryInMS, Capture: st.Capture, Playback: schema.VoiceControlPlaybackOff,
+		Transmitting: st.Transmitting, Muted: st.Muted, Deafened: st.Deafened, Blocked: st.Blocked,
+		TalkMode: schema.VoiceControlTalkModePushToTalk, PTT: st.PTT, PTTProblem: st.PTTProblem,
+	}
+	switch st.Phase {
+	case schema.VoiceControlPhaseConnecting, schema.VoiceControlPhaseConnected, schema.VoiceControlPhaseReconnecting, schema.VoiceControlPhaseStopping:
+		out.Playback = schema.VoiceControlPlaybackOn
+		if f.o.talkOpen && st.Phase != schema.VoiceControlPhaseStopping {
+			out.TalkMode = schema.VoiceControlTalkModeOpen
+		}
+	}
+	return out
 }
 
 // snapshot is a consistent state for phase, with the fake's mute and deafen.
@@ -587,7 +681,11 @@ func (f *fake) replay(term <-chan os.Signal) int {
 			_, _ = f.events.Write(append(line.Bytes(), '\n'))
 		case step.Close != "":
 			for got := range cmds {
-				cmd, err := schema.ParseVoiceControlCommand(got)
+				cmd, err := f.parseCommand(got)
+				if err != nil {
+					// A transcript of v2 ends in a v2 leave.
+					cmd, err = parseV2AsV1(got)
+				}
 				if !started || err != nil || cmd.Leave == nil {
 					return fakeFail("step %d: %q where standard input was to end", i, got)
 				}

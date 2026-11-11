@@ -1,10 +1,12 @@
-import { Fragment, useEffect, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
+import { Fragment, useEffect, useId, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
 import * as api from './api';
 import { isArchived } from './archived';
 import { Glyph } from './Icons';
 import { ActionsMenu, useOpeners, type MenuItem } from './MessageMenu';
 import { leaveLine } from './leaveChannel';
 import type { SettingsChange } from './ChannelSettingsAsk';
+import { MoveToGroup, type ArrangementControls } from './ChannelGroups';
+import { emptyArrangement, expandGroup, layoutOf, moveToGroup, moveWithin, toggleCollapsed, toggleFavorite, type Group } from './arrangement';
 import type { ChannelV0 } from './schema/channel';
 import { badgeText } from './useReadState';
 import { nobody, type InVoice, type Voices } from './voice/useOccupancy';
@@ -18,6 +20,7 @@ const noNames: ReadonlyMap<number, string> = new Map();
 const badgeId = (channel: number) => `unread-${String(channel)}`;
 const voiceId = (channel: number) => `in-voice-${String(channel)}`;
 const privateId = (channel: number) => `private-${String(channel)}`;
+const topicId = (channel: number) => `topic-${String(channel)}`;
 const managesId = (channel: number) => `manages-${String(channel)}`;
 
 // The count after a channel's name, with a name of its own ("3 unread") that the
@@ -48,10 +51,14 @@ function VoiceMark({ id, count }: { readonly id: number; readonly count: number 
 }
 
 // voiceName is how someone in a channel's voice is named in the list: the
-// viewer is "You"; anyone else by the name the page has for them, or, until
-// the channel's members have been read, by their id.
-function voiceName(id: number, viewer: number, names: ReadonlyMap<number, string>): string {
-  if (id === viewer) return 'You';
+// viewer is their own name (names has it, from the signed-in identity), or
+// "You" until that is known; anyone else by the name the page has for them,
+// or, until the channel's members have been read, by their id.
+export function voiceName(id: number, viewer: number, names: ReadonlyMap<number, string>): string {
+  if (id === viewer) {
+    const own = names.get(id);
+    return own === undefined || own === '' ? 'You' : own;
+  }
   return names.get(id) ?? `Member ${String(id)}`;
 }
 
@@ -101,6 +108,20 @@ function VoicePeople({
   );
 }
 
+// What a row needs to offer the person's arrangement (issue #1493).
+interface RowArrange {
+  readonly favorite: boolean;
+  // In favorites or in a group: it can be moved up and down there.
+  readonly section: boolean;
+  readonly canUp: boolean;
+  readonly canDown: boolean;
+  readonly groups: readonly Group[];
+  readonly groupId: string | null;
+  readonly onFavorite: () => void;
+  readonly onMove: (direction: -1 | 1) => void;
+  readonly onMoveToGroup: (groupId: string | null) => void;
+}
+
 // One channel's row (issues #1135, #1095): its button, which opens the channel,
 // its badges, and, when the viewer may do anything to the channel, one ⋯ menu
 // beside them (never inside the button). The menu is the message log's
@@ -119,6 +140,8 @@ function ChannelRow({
   viewer,
   mayRename,
   renderRename,
+  maySetTopic,
+  renderTopic,
   mayManage,
   renderSettings,
   onInvite,
@@ -127,6 +150,7 @@ function ChannelRow({
   register,
   onMove,
   onOpen,
+  arrange,
 }: {
   readonly channel: ChannelV0;
   readonly index: number;
@@ -138,6 +162,8 @@ function ChannelRow({
   readonly viewer: number;
   readonly mayRename: boolean;
   readonly renderRename: ((channel: ChannelV0, close: () => void) => ReactNode) | undefined;
+  readonly maySetTopic: boolean;
+  readonly renderTopic: ((channel: ChannelV0, close: () => void) => ReactNode) | undefined;
   readonly mayManage: boolean;
   readonly renderSettings: ((channel: ChannelV0, change: SettingsChange, close: () => void) => ReactNode) | undefined;
   readonly onInvite: ((channel: ChannelV0) => void) | undefined;
@@ -146,9 +172,13 @@ function ChannelRow({
   readonly register: (name: string, el: HTMLButtonElement | null) => void;
   readonly onMove: (event: KeyboardEvent, from: number) => void;
   readonly onOpen: (name: string) => void;
+  // The person's own arrangement (issue #1493); absent, the row offers none.
+  readonly arrange: RowArrange | undefined;
 }) {
+  const [moving, setMoving] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const [renaming, setRenaming] = useState(false);
+  const [settingTopic, setSettingTopic] = useState(false);
   // The settings change being confirmed or sent (issue #1183), in place under the row.
   const [change, setChange] = useState<SettingsChange | null>(null);
   const [askingLeave, setAskingLeave] = useState(false);
@@ -179,6 +209,11 @@ function ChannelRow({
     setRenaming(false);
     main.current?.focus();
   }, [mayRename, renaming]);
+  useEffect(() => {
+    if (maySetTopic || !settingTopic) return;
+    setSettingTopic(false);
+    main.current?.focus();
+  }, [maySetTopic, settingTopic]);
   // The grant to manage channels went while a change was open: it goes,
   // unsent, and focus, if it was in it, goes to the row's button.
   useEffect(() => {
@@ -191,7 +226,8 @@ function ChannelRow({
   }, [mayManage, change]);
   // What describes the button: private, a manager grant, who is in its voice, then its unread.
   const inVoice = voiced?.count ?? 0;
-  const described = [isPrivate ? privateId(channel.id) : null, channel.manages === true ? managesId(channel.id) : null, inVoice > 0 ? voiceId(channel.id) : null, unread > 0 ? badgeId(channel.id) : null].filter(
+  const hasTopic = channel.topic !== undefined && channel.topic !== '';
+  const described = [hasTopic ? topicId(channel.id) : null, isPrivate ? privateId(channel.id) : null, channel.manages === true ? managesId(channel.id) : null, inVoice > 0 ? voiceId(channel.id) : null, unread > 0 ? badgeId(channel.id) : null].filter(
     (x) => x !== null,
   );
 
@@ -243,7 +279,21 @@ function ChannelRow({
         setAskingLeave(false);
         setLeaveRefusal(null);
         setChange(null);
+        setSettingTopic(false);
         setRenaming(true);
+      },
+    });
+  }
+  if (maySetTopic && renderTopic !== undefined) {
+    items.push({
+      key: 'topic',
+      label: 'Set topic',
+      onSelect: () => {
+        setAskingLeave(false);
+        setLeaveRefusal(null);
+        setChange(null);
+        setRenaming(false);
+        setSettingTopic(true);
       },
     });
   }
@@ -309,6 +359,46 @@ function ChannelRow({
       },
     });
   }
+  // The arrangement is last: the menu's first item stays what it was (issue #1493).
+  if (arrange !== undefined && !archived) {
+    items.push({
+      key: 'favorite',
+      label: arrange.favorite ? 'Unfavorite' : 'Favorite',
+      onSelect: () => {
+        arrange.onFavorite();
+      },
+    });
+    if (arrange.section) {
+      items.push({
+        key: 'move-up',
+        label: 'Move up',
+        ...(arrange.canUp ? {} : { disabled: true, reason: 'Already first.' }),
+        onSelect: () => {
+          arrange.onMove(-1);
+        },
+      });
+      items.push({
+        key: 'move-down',
+        label: 'Move down',
+        ...(arrange.canDown ? {} : { disabled: true, reason: 'Already last.' }),
+        onSelect: () => {
+          arrange.onMove(1);
+        },
+      });
+    }
+    if (arrange.groups.length > 0) {
+      items.push({
+        key: 'move-group',
+        label: 'Move to group…',
+        onSelect: () => {
+          setRenaming(false);
+          setChange(null);
+          setAskingLeave(false);
+          setMoving(true);
+        },
+      });
+    }
+  }
   const openers = useOpeners(items.length > 0, () => {
     setMenuOpen(true);
   });
@@ -330,11 +420,16 @@ function ChannelRow({
         onKeyDown={(event) => {
           onMove(event, index);
         }}
-        title={channel.name}
+        title={hasTopic ? `${channel.name} — ${channel.topic ?? ''}` : channel.name}
       >
         {isPrivate ? <Glyph name="lock" /> : null}
         <span className="channel-name">{channel.name}</span>
       </button>
+      {hasTopic ? (
+        <span id={topicId(channel.id)} hidden>
+          {channel.topic}
+        </span>
+      ) : null}
       {isPrivate ? (
         <span id={privateId(channel.id)} hidden>
           private channel
@@ -360,6 +455,28 @@ function ChannelRow({
             (more.current ?? main.current)?.focus();
           })
         : null}
+      {settingTopic && maySetTopic && renderTopic !== undefined
+        ? renderTopic(channel, () => {
+            setSettingTopic(false);
+            (more.current ?? main.current)?.focus();
+          })
+        : null}
+      {moving && arrange !== undefined ? (
+        <MoveToGroup
+          channel={channel.name}
+          favorite={arrange.favorite}
+          groups={arrange.groups}
+          current={arrange.groupId}
+          onMove={(groupId) => {
+            setMoving(false);
+            arrange.onMoveToGroup(groupId);
+          }}
+          onClose={() => {
+            setMoving(false);
+            (more.current ?? main.current)?.focus();
+          }}
+        />
+      ) : null}
       {change !== null && mayManage && renderSettings !== undefined
         ? // Keyed on the change: another menu item remounts the confirmation, so
           // what the row holds and what is shown never disagree.
@@ -408,7 +525,7 @@ function ChannelRow({
 // move between channels (Home and End jump), Enter or Space opens the one
 // focused. A row may carry a ⋯ menu of what the viewer can do to that channel
 // (issues #1135, #1095): Invite people when `onInvite` is given, Rename channel…
-// when `canRename` says so for it, and Leave channel when `onLeft` is given.
+// and Set topic when allowed, and Leave channel when `onLeft` is given.
 // Managed channels carry a badge.
 export function ChannelList({
   channels,
@@ -420,12 +537,15 @@ export function ChannelList({
   empty = 'No channels yet: an operator needs to add you to one',
   canRename,
   renderRename,
+  canSetTopic,
+  renderTopic,
   canManage = false,
   renderSettings,
   onInvite,
   onLeft,
   onUnauthorized,
   onOpen,
+  arrangement,
 }: {
   readonly channels: readonly ChannelV0[];
   readonly selected: string | null;
@@ -447,6 +567,12 @@ export function ChannelList({
   // The rename form for a channel, shown in place under its row; `close`
   // hides it and returns focus to the row's ⋯.
   readonly renderRename?: (channel: ChannelV0, close: () => void) => ReactNode;
+  // Whether this viewer may set that channel's topic (an operator, or its
+  // manager); absent, nobody. The server still decides.
+  readonly canSetTopic?: (channel: ChannelV0) => boolean;
+  // The set-topic form for a channel, shown in place under its row; `close`
+  // hides it and returns focus to the row's ⋯.
+  readonly renderTopic?: (channel: ChannelV0, close: () => void) => ReactNode;
   // Whether this viewer holds manage_channels (whoami says so; the server still
   // decides). Only then does a row's ⋯ offer to make its channel public or
   // private, or a default, and `renderSettings` draws the confirmation or the
@@ -461,6 +587,9 @@ export function ChannelList({
   readonly onLeft?: (name: string) => void;
   readonly onUnauthorized?: () => void;
   readonly onOpen: (name: string) => void;
+  // The person's favorites, groups and order (issue #1493), kept in this
+  // browser. Absent, the list is drawn as the server gave it.
+  readonly arrangement?: ArrangementControls;
 }) {
   const buttons = useRef(new Map<string, HTMLButtonElement>());
   const list = useRef<HTMLUListElement>(null);
@@ -473,7 +602,40 @@ export function ChannelList({
   useEffect(() => {
     if (selectedArchived) setExpanded(true);
   }, [selectedArchived]);
-  const shown = expanded ? [...live, ...archived] : live;
+  const arranged = arrangement?.arrangement ?? emptyArrangement;
+  const layout = layoutOf(arranged, live);
+  const sections = layout.favorites.length > 0 || layout.groups.length > 0;
+  // What is drawn, in order: a folded group shows only the open channel, so
+  // the open one stays in sight.
+  const drawn = (group: { readonly group: Group; readonly channels: readonly ChannelV0[] }) => (group.group.collapsed ? group.channels.filter((c) => c.name === selected) : group.channels);
+  const visible = [...layout.favorites, ...layout.groups.flatMap(drawn), ...layout.rest];
+  const shown = expanded ? [...visible, ...archived] : visible;
+  const indexOf = new Map(shown.map((c, i) => [c.name, i]));
+  const sectionId = useId();
+  const [note, setNote] = useState('');
+  // The channel a line names: the line goes the moment it is not held.
+  const [noteChannel, setNoteChannel] = useState<number | null>(null);
+  const heldNote = noteChannel === null || channels.some((c) => c.id === noteChannel) ? note : '';
+  const [noted, setNoted] = useState(false);
+  const noteTimer = useRef<number | null>(null);
+  function announce(text: string, channel: number | null = null) {
+    setNote(text);
+    setNoteChannel(channel);
+    setNoted(true);
+    // The line is only for the moment it is read; it must not outlive a
+    // channel that is revoked meanwhile.
+    if (noteTimer.current !== null) window.clearTimeout(noteTimer.current);
+    noteTimer.current = window.setTimeout(() => {
+      setNote('');
+      noteTimer.current = null;
+    }, 4000);
+  }
+  useEffect(
+    () => () => {
+      if (noteTimer.current !== null) window.clearTimeout(noteTimer.current);
+    },
+    [],
+  );
   // The one button in the tab order: the open channel, or the first.
   const stop = selected !== null && shown.some((channel) => channel.name === selected) ? selected : (shown[0]?.name ?? null);
 
@@ -517,11 +679,53 @@ export function ChannelList({
   if (channels.length === 0) {
     return <p className="empty">{empty}</p>;
   }
-  const row = (channel: ChannelV0, i: number) => (
+  const rowArrange = (channel: ChannelV0): RowArrange | undefined => {
+    if (arrangement === undefined) return undefined;
+    const { edit, arrangement: a } = arrangement;
+    const favorite = a.favorites.includes(channel.id);
+    const group = a.groups.find((g) => g.channels.includes(channel.id));
+    const section = favorite || group !== undefined;
+    return {
+      favorite,
+      section,
+      canUp: section && moveWithin(a, live, channel.id, -1) !== a,
+      canDown: section && moveWithin(a, live, channel.id, 1) !== a,
+      groups: a.groups,
+      groupId: group?.id ?? null,
+      onFavorite: () => {
+        edit((x) => toggleFavorite(x, channel.id));
+        announce(favorite ? `${channel.name} removed from favorites` : `${channel.name} added to favorites`, channel.id);
+        refocus(channel.name);
+      },
+      onMove: (direction) => {
+        edit((x) => moveWithin(x, live, channel.id, direction));
+        const where = favorite ? 'favorites' : (group?.name ?? '');
+        const list = favorite ? layout.favorites : (layout.groups.find((g) => g.group.id === group?.id)?.channels ?? []);
+        const from = list.findIndex((c) => c.id === channel.id);
+        announce(`${channel.name} moved ${direction === -1 ? 'up' : 'down'} in ${where}, position ${String(from + direction + 1)} of ${String(list.length)}`, channel.id);
+        refocus(channel.name);
+      },
+      onMoveToGroup: (groupId) => {
+        // A folded group the channel goes into is opened, so it is in sight and
+        // keeps focus.
+        edit((x) => (groupId === null ? moveToGroup(x, channel.id, null) : expandGroup(moveToGroup(x, channel.id, groupId), groupId)));
+        announce(groupId === null ? `${channel.name} taken out of its group` : `${channel.name} moved to ${a.groups.find((g) => g.id === groupId)?.name ?? 'the group'}`, channel.id);
+        refocus(channel.name);
+      },
+    };
+  };
+  // After an arrangement change the row may have moved to another list and
+  // been drawn again: focus goes to its button, not to the page.
+  function refocus(name: string) {
+    window.setTimeout(() => {
+      buttons.current.get(name)?.focus();
+    }, 0);
+  }
+  const row = (channel: ChannelV0) => (
     <ChannelRow
       key={channel.id}
       channel={channel}
-      index={i}
+      index={indexOf.get(channel.name) ?? 0}
       selected={selected}
       stop={stop}
       unread={unread.get(channel.name) ?? 0}
@@ -530,6 +734,8 @@ export function ChannelList({
       viewer={viewer}
       mayRename={canRename?.(channel) === true}
       renderRename={renderRename}
+      maySetTopic={canSetTopic?.(channel) === true}
+      renderTopic={renderTopic}
       mayManage={canManage}
       renderSettings={renderSettings}
       onInvite={onInvite}
@@ -538,13 +744,56 @@ export function ChannelList({
       register={register}
       onMove={move}
       onOpen={onOpen}
+      arrange={rowArrange(channel)}
     />
   );
   return (
     <>
-      <ul ref={list} className="channel-list" tabIndex={-1}>
-        {live.map((channel, i) => row(channel, i))}
-      </ul>
+      {layout.favorites.length === 0 ? null : (
+        <div className="channel-group" role="group" aria-label="Favorites">
+          <h3 className="channel-group-head">Favorites</h3>
+          <ul className="channel-list">{layout.favorites.map(row)}</ul>
+        </div>
+      )}
+      {layout.groups.map((entry) => {
+        const { group } = entry;
+        const body = `${sectionId}-${group.id}`;
+        return (
+          <div key={group.id} className="channel-group" role="group" aria-label={group.name}>
+            <h3 className="channel-group-head">
+              <button
+                type="button"
+                aria-expanded={!group.collapsed}
+                aria-controls={body}
+                onClick={() => {
+                  arrangement?.edit((a) => toggleCollapsed(a, group.id));
+                }}
+              >
+                <span className="channel-group-caret" aria-hidden="true">
+                  {group.collapsed ? '▸' : '▾'}
+                </span>
+                <span className="channel-group-name">{group.name}</span>
+                <span className="channel-group-count"> ({entry.channels.length})</span>
+              </button>
+            </h3>
+            <div id={body}>
+              {drawn(entry).length > 0 ? (
+                <ul className="channel-list">{drawn(entry).map(row)}</ul>
+              ) : group.collapsed ? null : (
+                <p className="hint">Empty. Use a channel's ⋯ menu, Move to group…, to add one.</p>
+              )}
+            </div>
+          </div>
+        );
+      })}
+      {layout.rest.length === 0 && sections ? null : (
+        <>
+          {sections ? <h3 className="channel-group-head">Channels</h3> : null}
+          <ul ref={list} className="channel-list" tabIndex={-1}>
+            {layout.rest.map(row)}
+          </ul>
+        </>
+      )}
       {archived.length === 0 ? null : (
         <div className="archived-channels">
           <button
@@ -560,11 +809,16 @@ export function ChannelList({
           </button>
           {expanded ? (
             <ul id="archived-channel-list" className="channel-list" aria-label="Archived channels">
-              {archived.map((channel, i) => row(channel, live.length + i))}
+              {archived.map(row)}
             </ul>
           ) : null}
         </div>
       )}
+      {noted ? (
+        <p role="status" className="vh">
+          {heldNote}
+        </p>
+      ) : null}
     </>
   );
 }

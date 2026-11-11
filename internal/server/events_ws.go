@@ -89,6 +89,9 @@ const (
 	// eventMessageEdited is one message whose text its author changed (issue
 	// #845): id is the message and channelID its channel.
 	eventMessageEdited
+	// eventMessageRemoved is one message a moderator removed (issue #852):
+	// id is the message and channelID its channel.
+	eventMessageRemoved
 )
 
 // eventRef names a document that changed. It carries no content.
@@ -505,6 +508,23 @@ func (h *eventsHub) notifyMessageEdited(channelID, messageID int64) {
 	for sub := range h.subs {
 		if _, member := sub.memberships[channelID]; sub.human && member {
 			sub.push(eventRef{kind: eventMessageEdited, id: messageID, channelID: channelID})
+		}
+	}
+}
+
+// notifyMessageRemoved queues a removed message for every human who holds a
+// membership of channelID, as notifyMessageEdited does for an edit
+// (docs/design/moderation.md §7.4). The reference names the message and
+// nothing more: each subscriber's goroutine reads it, when it sends, with its
+// own reader, and sends conch.message_removed.v1 (the tombstone) or, if it may
+// not see the message, nothing. A removal is not a new message: no read state
+// is owed and no notification fires.
+func (h *eventsHub) notifyMessageRemoved(channelID, messageID int64) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for sub := range h.subs {
+		if _, member := sub.memberships[channelID]; sub.human && member {
+			sub.push(eventRef{kind: eventMessageRemoved, id: messageID, channelID: channelID})
 		}
 	}
 }
@@ -1209,7 +1229,9 @@ func (e *eventsStream) sendRef(ctx context.Context, ref eventRef) bool {
 		if err != nil {
 			return e.failed(ctx, "read a notification message", err)
 		}
-		if len(messages) != 1 || messages[0].ID != ref.id || !e.sub.hasMembership(ref.channelID) {
+		// A message removed since it was queued is no new message: its
+		// tombstone goes out as conch.message_removed.v1 instead.
+		if len(messages) != 1 || messages[0].ID != ref.id || messages[0].Removed || !e.sub.hasMembership(ref.channelID) {
 			return true
 		}
 		raw, ok := e.encode(ctx, messageV2FromStore(messages[0]))
@@ -1229,6 +1251,21 @@ func (e *eventsStream) sendRef(ctx context.Context, ref eventRef) bool {
 			return true
 		}
 		return e.sendDoc(ctx, schema.MessageEditedV1{Schema: schema.MessageEditedSchemaV1, Message: messageV2FromStore(messages[0])})
+	case eventMessageRemoved:
+		// The tombstone as this reader may see it now, read as eventMessage
+		// reads one; nothing if the reader cannot, or is no longer a member.
+		// It never touches read state: a removal changes no count.
+		if !e.sub.hasMembership(ref.channelID) {
+			return true
+		}
+		messages, err := s.store.ListVisibleMessages(ctx, ref.channelID, readerFor(e.r, apiV2), ref.id-1, 1)
+		if err != nil {
+			return e.failed(ctx, "read a removed message", err)
+		}
+		if len(messages) != 1 || messages[0].ID != ref.id || !messages[0].Removed || !e.sub.hasMembership(ref.channelID) {
+			return true
+		}
+		return e.sendDoc(ctx, schema.MessageRemovedV1{Schema: schema.MessageRemovedSchemaV1, Message: messageV2FromStore(messages[0])})
 	case eventReactions:
 		// The message's whole reaction state for this reader, or nothing: no
 		// row when the message is not visible to the reader, or when the reader
@@ -1270,6 +1307,7 @@ func (e *eventsStream) sendRef(ctx context.Context, ref eventRef) bool {
 			Visibility: ch.Visibility,
 			Default:    ch.IsDefault,
 			ArchivedAt: archivedAtWire(ch),
+			Topic:      ch.Topic,
 		})
 	}
 	return true

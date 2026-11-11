@@ -72,6 +72,9 @@ var TSConstants = []TSConstant{
 	{Name: "MESSAGE_EDIT_WINDOW_SECONDS", Value: MessageEditWindowSeconds},
 	{Name: "MAX_MESSAGE_EDITS", Value: MaxMessageEdits},
 	{Name: "MAX_POST_REQUEST_BYTES", Value: MaxPostRequestBytes},
+	// A spoiler attachment (issue #1500): presentation only, no shape change.
+	{Name: "SPOILER_FILE_PREFIX", Value: SpoilerFilePrefix},
+	{Name: "MAX_FILE_NAME_BYTES", Value: MaxFileNameBytes},
 
 	// The managed voice-helper control protocol, for the desktop owner's
 	// supervisor (issue #948, Q10 of #770): the helper's command line, the
@@ -96,6 +99,7 @@ var TSConstants = []TSConstant{
 	{Name: "VOICE_CONTROL_STOP_KILL_AFTER_MS", Value: VoiceControlStopKillAfterMS},
 	{Name: "VOICE_CONTROL_DEVICE_DEFAULT", Value: VoiceControlDeviceDefault},
 	{Name: "VOICE_DEVICES_MAX_NAME_BYTES", Value: VoiceDevicesMaxNameBytes},
+	{Name: "VOICE_DEVICES_MAX_BYTES", Value: VoiceDevicesMaxBytes},
 	{Name: "VOICE_CONTROL_PIPE_FLAG", Value: VoiceControlPipeFlag},
 	{Name: "VOICE_CONTROL_PIPE_NONCE_ENV", Value: VoiceControlPipeNonceEnv},
 	{Name: "VOICE_CONTROL_PIPE_NONCE_BYTES", Value: VoiceControlPipeNonceBytes},
@@ -104,6 +108,9 @@ var TSConstants = []TSConstant{
 	// The community model (ADR-013, issue #978): the authors route's batch
 	// size, and the default expiry the link form shows when none is typed.
 	{Name: "MAX_CHANNEL_AUTHOR_IDS", Value: MaxChannelAuthorIDs},
+	// The channel topic (issue #1503): the page bounds its control by the
+	// number the server refuses at.
+	{Name: "MAX_CHANNEL_TOPIC_LENGTH", Value: MaxChannelTopicLength},
 	{Name: "DEFAULT_MEMBER_LINK_EXPIRY_SECONDS", Value: DefaultMemberLinkExpirySeconds},
 
 	// AI administrators (issue #1326): the bounds of an agent's admin
@@ -137,11 +144,16 @@ var TSTypes = []TSType{
 	{Value: RenameChannelRequestV1{}, Family: "rename-channel-request-v1"},
 	{Value: RenameChannelResponseV1{}, Family: "rename-channel-response-v1"},
 	{Value: ChannelDocV1{}, Family: "channel-v1", Schema: ChannelSchemaV1},
+	{Value: SetChannelTopicRequestV1{}, Family: "set-channel-topic-request-v1"},
+	{Value: SetChannelTopicResponseV1{}, Family: "set-channel-topic-response-v1"},
 	{Value: ChannelMemberV1{}, Family: "channel-member-v1"},
 	{Value: ListChannelMembersResponseV1{}, Family: "list-channel-members-response-v1"},
 	{Value: ChannelMembersV1{}, Family: "channel-members-v1", Schema: ChannelMembersSchemaV1},
 	{Value: PutChannelMemberRequestV1{}, Family: "put-channel-member-request-v1"},
 	{Value: AddChannelMemberRequestV1{}, Family: "add-channel-member-request-v1"},
+	// The channel's ban list (issue #849, docs/design/moderation.md §6).
+	{Value: ChannelBanV1{}, Family: "channel-ban-v1"},
+	{Value: ListChannelBansResponseV1{}, Family: "list-channel-bans-response-v1"},
 
 	// Messages, and the ticket that opens the socket that streams them.
 	{Value: Payload{}},
@@ -158,6 +170,9 @@ var TSTypes = []TSType{
 	{Value: MessageRevisionV1{}, Family: "message-revision-v1"},
 	{Value: ListMessageRevisionsResponseV1{}, Family: "list-message-revisions-response-v1"},
 	{Value: MessageEditedV1{}, Family: "message-edited-v1", Schema: MessageEditedSchemaV1},
+	// A moderator removes a message (issue #849); the events socket says so
+	// with a frame of its own, carrying the tombstone.
+	{Value: MessageRemovedV1{}, Family: "message-removed-v1", Schema: MessageRemovedSchemaV1},
 
 	// An approval, as a message carries it in its payload.
 	{Value: Option{}, Family: "approval-option-v1"},
@@ -202,6 +217,9 @@ var TSTypes = []TSType{
 	// the presence snapshot its socket streams, and the transmit report.
 	{Value: VoiceRoomGrant{}},
 	{Value: VoiceSessionResponseV1{}, Family: "voice-session-response-v1"},
+	// The quality a sharer declared (issue #1483, design §3.2): on their
+	// participant in presence, in the claim's body and in its answer.
+	{Value: VoiceShareQuality{}},
 	{Value: VoiceParticipant{}},
 	{Value: VoicePresenceRoom{}},
 	// Why the reader's own share ended (issue #487), in their presence alone.
@@ -209,6 +227,13 @@ var TSTypes = []TSType{
 	// Why the reader's own camera ended (ADR-015, issue #1238), likewise.
 	{Value: VoiceCameraEnded{}},
 	{Value: VoicePresenceV1{}, Family: "voice-presence-v1", Schema: VoicePresenceSchemaV1},
+	// Presence v2 (issue #1483, design §2.2): v1 without the one-share rule,
+	// which the page asks for with ?schema=conch.voice_presence.v2. Its
+	// participant carries the share's start and quality; v1's is closed and
+	// gains nothing (object() refuses an unknown key).
+	{Value: VoiceParticipantV2{}},
+	{Value: VoicePresenceRoomV2{}},
+	{Value: VoicePresenceV2{}, Family: "voice-presence-v2", Schema: VoicePresenceSchemaV2},
 	{Value: VoiceTransmitReportV1{}, Family: "voice-transmit-report-v1"},
 	// Companion and viewer participants (issue #933).
 	{Value: VoiceCompanionRequestV1{}, Family: "voice-companion-request-v1"},
@@ -217,9 +242,13 @@ var TSTypes = []TSType{
 	// scope, and the answer naming the share it belongs to.
 	{Value: VoiceCompanionAudioRequestV1{}, Family: "voice-companion-audio-request-v1"},
 	{Value: VoiceCompanionAudioV1{}, Family: "voice-companion-audio-v1"},
-	// Screen share (issue #443): the claim the page is given when the room's
-	// share is its own. Presence says who shares (VoiceParticipant above).
+	// Screen share (issue #443): the claim the page is given when it may
+	// share. Presence says who shares (VoiceParticipant above). The claim's
+	// optional body declares the quality (issue #1483, design §3.1), and a
+	// claim that declared one is answered with the v2 claim, which echoes it.
+	{Value: VoiceShareRequestV1{}, Family: "voice-share-request-v1"},
 	{Value: VoiceShareV1{}, Family: "voice-share-v1"},
+	{Value: VoiceShareV2{}, Family: "voice-share-v2"},
 	// The camera claim (ADR-015, issue #1238): the page may publish a camera
 	// while conchd holds it. Presence says who has one (VoiceParticipant).
 	{Value: VoiceCameraV1{}, Family: "voice-camera-v1"},
@@ -253,6 +282,13 @@ var TSTypes = []TSType{
 	{Value: VoiceControlStateV2{}, Schema: VoiceControlSchemaV2},
 	{Value: VoiceControlProtocolErrorV2{}, Schema: VoiceControlSchemaV2},
 	{Value: VoiceControlPipeAttachedV1{}, Schema: VoiceControlPipeSchemaV1},
+	// The device list `conch-voice devices --json` writes (issue #1378, D3-7
+	// of #771): the desktop owner reads it from a one-shot run. Its fixtures
+	// are in testdata/voice-devices/, so the rows name no family;
+	// desktop/tests/unit/voice-oneshot.test.ts checks every one of them and
+	// every case of cases.json against this validator.
+	{Value: VoiceDevice{}},
+	{Value: VoiceDevicesV1{}, Schema: VoiceDevicesSchemaV1},
 	// Invites: the way in (ADR-008 §4). The code is in the create response
 	// alone; the new principal is in the redeem response.
 	{Value: PrincipalV0{}, Family: "principal-v0"},
@@ -405,6 +441,12 @@ var TSTypes = []TSType{
 	{Value: PermissionChangeV1{}},
 	{Value: PutPermissionsRequestV1{}, Family: "put-permissions-request-v1"},
 	{Value: PermissionsChangedV1{}, Family: "permissions-changed-v1", Schema: PermissionsChangedSchemaV1},
+
+	// Preview as member (issue #1007, docs/design/permission-preview.md
+	// §6.1): the entry read's answer, the previewed member's standing and
+	// effective permissions, which the page feeds to the same controls it
+	// keys on whoami. The other preview reads answer existing shapes.
+	{Value: PreviewResponseV1{}, Family: "preview-response-v1"},
 	// What an operator issued to others, on disable and on the owner's
 	// revoke-all of it (issue #1024, ADR-014 O13); the demotion answer is
 	// RoleChangeResponseV1 above, with the same optional list.
@@ -458,6 +500,23 @@ var TSTypes = []TSType{
 	{Value: AgentManifestV1{}, Family: "agent-manifest-v1", Schema: AgentManifestSchemaV1},
 	{Value: PutAgentManifestRequestV1{}, Family: "put-agent-manifest-request-v1"},
 	{Value: GetAgentManifestResponseV1{}, Family: "get-agent-manifest-response-v1"},
+
+	// Phone push and notification preferences (issue #1712,
+	// docs/design/mobile-notifications.md §9.1): the wake, a credential's
+	// registrations and the server's transports, then the preferences and
+	// the pending feed. OwnCredentialV1 above carries the additive push
+	// field. The mention rule (Mentions) is not a type: the web client's own
+	// matcher is checked against testdata/rules/mentions.json.
+	{Value: PushWakeV1{}, Family: "push-wake-v1", Schema: PushWakeSchemaV1},
+	{Value: PushRegistrationV1{}, Family: "push-registration-v1"},
+	{Value: CreatePushRegistrationRequestV1{}, Family: "create-push-registration-request-v1"},
+	{Value: UpdatePushRegistrationRequestV1{}, Family: "update-push-registration-request-v1"},
+	{Value: ListOwnPushRegistrationsResponseV1{}, Family: "list-own-push-registrations-response-v1"},
+	{Value: PushConfigV1{}, Family: "push-config-v1"},
+	{Value: NotificationPreferencesV1{}, Family: "notification-preferences-v1"},
+	{Value: PutNotificationPreferencesRequestV1{}, Family: "put-notification-preferences-request-v1"},
+	{Value: NotificationSummaryV1{}, Family: "notification-summary-v1", Schema: NotificationSummarySchemaV1},
+	{Value: ListPendingNotificationsResponseV1{}, Family: "list-pending-notifications-response-v1"},
 
 	// The body of every refusal.
 	{Value: Error{}, Name: "ErrorV0", Family: "error"},
@@ -555,6 +614,9 @@ var TSVocabularyModes = map[string]TSVocabularyMode{
 	// and a later kind of thing one acts on, which the page shows by name.
 	"AdminAction":     TSTolerant,
 	"AdminTargetKind": TSTolerant,
+	// The pending feed (notification.go, issue #1712): a later reason for a
+	// message to be in it. A phone still renders the summary.
+	"NotificationKind": TSTolerant,
 
 	// Strict: a union's tag. tagged() picks the variant by it and has no
 	// shape for a value it does not know.
@@ -565,6 +627,10 @@ var TSVocabularyModes = map[string]TSVocabularyMode{
 	// Strict: the page switches on an action's gate class to say whether a
 	// person will be asked.
 	"AdminGate": TSStrict,
+	// Strict: the page switches on it to pick the preview banner (design
+	// §8); a simulation it does not know it cannot label honestly, and must
+	// never show as a person's view.
+	"PreviewSimulation": TSStrict,
 
 	// Strict: a state, kind, mode, role, outcome or reason the page switches
 	// on to decide what to show or offer. A value it does not know it cannot
@@ -608,6 +674,11 @@ var TSVocabularyModes = map[string]TSVocabularyMode{
 	// (voice.go; webcam-video.md §10 keeps the camera's reasons the same way).
 	"VoiceShareEndReason":  TSStrict,
 	"VoiceCameraEndReason": TSStrict,
+	// Strict: the sharer's declared resolution (issue #1483, design §3.2) is
+	// the picker's closed vocabulary; a new value is a new version of
+	// presence, as a new end reason is, and the page sends only what its
+	// picker offers.
+	"VoiceShareResolution": TSStrict,
 	"VoiceTransmitState":   TSStrict,
 
 	// Strict: written by the page itself in a problem report (issue #446);
@@ -636,6 +707,19 @@ var TSVocabularyModes = map[string]TSVocabularyMode{
 	"VoiceControlTalkMode":    TSStrict,
 	"VoiceDevicesConfig":      TSStrict,
 	"VoiceDevicesPipeWire":    TSStrict,
+
+	// Phone push and notification preferences (issue #1712). Strict: the
+	// policy and the platform, which a client writes itself, and the end
+	// reason, an audit detail that no generated type carries. Tolerant: the
+	// transport and the provider, which a client also reads in
+	// PushConfigV1, so that a later server offering a new one (the relay,
+	// #1716) costs an older client only that one entry, not the whole
+	// config.
+	"NotificationPolicy":        TSStrict,
+	"PushPlatform":              TSStrict,
+	"PushProvider":              TSTolerant,
+	"PushRegistrationEndReason": TSStrict,
+	"PushTransport":             TSTolerant,
 
 	// Strict: agent manifests and the Leviathan payload, which no generated
 	// client reads today. Strict is the default; a vocabulary becomes

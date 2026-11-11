@@ -11,7 +11,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { directoryCoalesce } from './useDirectoryChanged';
 import { App } from './App';
 import { AdminConsole } from './AdminConsole';
+import { CommunityMembers } from './Members';
 import { SettingsOpen } from './joiningSettings';
+import { AIAdminCard, ManifestReads, type ManifestReadControl } from './admin/AIAdminCard';
 import type { ChannelListingV1 } from './schema/channel';
 import type { Permission, PermissionsResponseV1 } from './schema/permission';
 import type { ServerMemberV1, WhoAmIResponseV1 } from './schema/principal';
@@ -240,8 +242,9 @@ describe('the list', () => {
     expect(row.textContent).toContain('voice on');
     expect(row.textContent).toContain('can invite');
     expect(row.textContent).toContain('invited by owner');
-    expect(within(rowOf(region, 'builder')).getByText('Agent')).toBeTruthy();
-    expect(within(rowOf(region, 'owner-2')).getByText('Owner')).toBeTruthy();
+    expect(within(rowOf(region, 'builder')).getByText('Agent').classList.contains('identity-label')).toBe(true);
+    expect(within(rowOf(region, 'owner-2')).getByText('Owner').classList.contains('identity-label')).toBe(true);
+    expect(Array.from(rowOf(region, 'owner').querySelectorAll('.identity-mark')).map((mark) => mark.getAttribute('data-identity'))).toEqual(['you', 'owner', 'operator']);
   });
 
   it('shows no operator field the server did not send, and offers no action, to an operator without manage_members', async () => {
@@ -258,6 +261,21 @@ describe('the list', () => {
     // manage_channels is still held: adding to a channel is all there is.
     const m = await menu(rowOf(region, 'member-1'), 'member-1');
     expect(labels(m)).toEqual(['Add to a channel…']);
+  });
+
+  it('shows no Owner when a plain-member payload omits owner, while keeping carried role and self marks', async () => {
+    const plain = stripped(everyone);
+    for (const member of plain) delete member.owner;
+    const viewer: WhoAmIResponseV1 = { ...owner, id: 3, name: 'member-1', role: 'member', owner: false, identity_class: 'member', permissions: ['see_member_directory'] };
+    serve(viewer, { members: () => plain });
+    window.sessionStorage.setItem(key, 'conch_member_session_token');
+    window.location.hash = '#/c/channel-a';
+    render(<App origin={origin} />);
+    const region = await screen.findByRole('region', { name: 'Members list' });
+    await within(region).findByRole('list', { name: 'People' });
+    expect(within(region).queryByText('Owner')).toBeNull();
+    expect(within(rowOf(region, 'operator-1')).getByText('Operator')).toBeTruthy();
+    expect(within(rowOf(region, 'member-1')).getByText('You')).toBeTruthy();
   });
 
   it('reads the directory for the console only while Settings is open', async () => {
@@ -293,6 +311,7 @@ describe('what each viewer is offered', () => {
     const region = await open();
     const m = await menu(rowOf(region, 'member-1'), 'member-1');
     expect(labels(m)).toEqual([
+      'Preview as member',
       'Turn voice off',
       'Stop member links',
       'Add to a channel…',
@@ -1036,6 +1055,57 @@ describe('the section follows the directory frame (issue #1226)', () => {
     expect(reads(calls)).toBe(before + 1);
   });
 
+  it('draws its own answer when the shared order calls it stale', async () => {
+    serve(owner);
+    await signedIn();
+    // Another view's newer answer was applied first: the order refuses this one.
+    const applied: number[] = [];
+    const control: ManifestReadControl = {
+      mayRead: () => true,
+      generation: () => 0,
+      stop: () => undefined,
+      beginDirectory: () => ({ ticket: 1, generation: 0 }),
+      acceptDirectory: (request) => {
+        applied.push(request.ticket);
+        return false;
+      },
+    };
+    render(<ManifestReads.Provider value={control}>{console(true, 0)}</ManifestReads.Provider>);
+    const region = await screen.findByRole('region', { name: 'Members' });
+    await within(region).findByRole('list', { name: 'People' });
+    expect(applied.length).toBeGreaterThan(0);
+  });
+
+  it('records a manifest 404 for the session even when the card has gone before it answers', async () => {
+    let answer: (response: Response) => void = () => undefined;
+    serve(owner, { routes: { 'GET /v1/principals/4/manifest': () => new Promise<Response>((resolve) => { answer = resolve; }) } });
+    await signedIn();
+    const stopped: [number, number][] = [];
+    const control: ManifestReadControl = {
+      mayRead: () => true,
+      generation: () => 7,
+      stop: (id, sent) => {
+        stopped.push([id, sent]);
+      },
+      beginDirectory: () => ({ ticket: 1, generation: 7 }),
+      acceptDirectory: () => true,
+    };
+    const agent: ServerMemberV1 = { id: 4, kind: 'agent', name: 'builder', created_at: at };
+    const view = render(
+      <ManifestReads.Provider value={control}>
+        <AIAdminCard who={owner} person={agent} onChanged={() => undefined} onUnauthorized={() => undefined} />
+      </ManifestReads.Provider>,
+    );
+    await settled();
+    view.unmount();
+    await act(async () => {
+      answer(json({}, 404));
+      await Promise.resolve();
+    });
+    await settled();
+    expect(stopped).toEqual([[4, 7]]);
+  });
+
   it('sends nothing while hidden', async () => {
     const calls = serve(owner);
     await signedIn();
@@ -1067,5 +1137,266 @@ describe('the section follows the directory frame (issue #1226)', () => {
     await settled();
     expect(within(rowOf(region, 'member-1')).getByRole('button', { name: 'Yes, remove' })).toBe(yes);
     expect(document.activeElement).toBe(yes);
+  });
+});
+
+// What a disabled or demoted person issued to others (issue #1464): listed under
+// them, and the owner's one Revoke all.
+describe('what a person issued to others', () => {
+  const stamp = '2026-10-23T12:00:00Z';
+  const issuedList = [
+    { kind: 'credential', id: 41, principal_id: 3, issued_by: 2, issued_at: stamp },
+    { kind: 'credential', id: 42, principal_id: 9, issued_by: 2, issued_at: stamp },
+    { kind: 'hook', id: 7, principal_id: 3, issued_by: 2, issued_at: stamp },
+  ];
+  const roleAnswer = (more: Record<string, unknown> = {}) => ({
+    principal: { id: 2, kind: 'human', name: 'operator-1', role: 'member', created_at: at, live_credentials: 0 },
+    manages: [],
+    invites_closed: 0,
+    credentials_revoked: 0,
+    hooks_revoked: 0,
+    live_credentials: 0,
+    hooks_bound: 0,
+    ...more,
+  });
+  const disableOperator = async (region: HTMLElement) => {
+    const row = rowOf(region, 'operator-1');
+    await choose(row, 'operator-1', 'Disable sign-in…');
+    fireEvent.click(within(row).getByRole('button', { name: 'Yes, disable' }));
+    return row;
+  };
+
+  it('lists them under the person after a disable, by the names the page knows', async () => {
+    serve(owner, { routes: { 'POST /v1/principals/2/disable': () => json({ issued_to_others: issuedList }) } });
+    const region = await open();
+    await disableOperator(region);
+    const list = await within(region).findByRole('region', { name: 'Issued to others by operators' });
+    expect(within(list).getByText(/credential #41 for member-1, issued by operator-1/i)).toBeTruthy();
+    expect(within(list).getByText(/credential #42 for person #9, issued by operator-1/i)).toBeTruthy();
+    expect(within(list).getByText(/hook #7 for member-1/i)).toBeTruthy();
+    expect(within(list).getByRole('button', { name: 'Revoke all (3)' })).toBeTruthy();
+  });
+
+  it('keeps the list and Revoke all when the directory drops the disabled person', async () => {
+    let disabled = false;
+    const calls = serve(owner, {
+      members: () => (disabled ? everyone.filter((p) => p.id !== 2) : everyone),
+      routes: {
+        'POST /v1/principals/2/disable': () => {
+          disabled = true;
+          return json({ issued_to_others: issuedList });
+        },
+        'POST /v1/principals/2/issued/revoke-all': () => json({ credentials_revoked: 2, hooks_revoked: 1 }),
+      },
+    });
+    const region = await open();
+    await disableOperator(region);
+    await waitFor(() => {
+      expect(Array.from(region.querySelectorAll('.community-name')).map((e) => e.textContent)).not.toContain('operator-1');
+    });
+    const list = await within(region).findByRole('region', { name: 'Issued to others by operators' });
+    expect(within(list).getByText(/credential #41 for member-1, issued by operator-1/i)).toBeTruthy();
+    fireEvent.click(within(list).getByRole('button', { name: 'Revoke all (3)' }));
+    fireEvent.click(within(list).getByRole('button', { name: 'Yes, revoke all' }));
+    expect(await within(list).findByText('Revoked 2 credentials and 1 hooks.')).toBeTruthy();
+    expect(sent(calls, 'POST', /issued\/revoke-all$/).length).toBe(1);
+    expect(list.querySelectorAll('li').length).toBe(0);
+  });
+
+  it('keeps the result when the directory drops the person before the answer lands', async () => {
+    let disabled = false;
+    let answer: (r: Response) => void = () => undefined;
+    serve(owner, {
+      members: () => (disabled ? everyone.filter((p) => p.id !== 2) : everyone),
+      routes: {
+        'POST /v1/principals/2/disable': () => {
+          disabled = true;
+          return new Promise<Response>((resolve) => {
+            answer = resolve;
+          });
+        },
+      },
+    });
+    const region = await open();
+    await disableOperator(region);
+    await waitFor(() => {
+      expect(answer).not.toBe(undefined);
+      expect(disabled).toBe(true);
+    });
+    await directoryFrame();
+    await waitFor(() => {
+      expect(Array.from(region.querySelectorAll('.community-name')).map((e) => e.textContent)).not.toContain('operator-1');
+    });
+    answer(json({ issued_to_others: issuedList }));
+    expect(await within(region).findByRole('region', { name: 'Issued to others by operators' })).toBeTruthy();
+  });
+
+  it('takes the list away, with its names, when the viewer loses manage_members', async () => {
+    let viewer: WhoAmIResponseV1 = owner;
+    serve(() => viewer, { routes: { 'POST /v1/principals/2/disable': () => json({ issued_to_others: issuedList }) } });
+    const region = await open();
+    await disableOperator(region);
+    await within(region).findByRole('region', { name: 'Issued to others by operators' });
+    viewer = { ...owner, owner: false, permissions: operatorRights.filter((p) => p !== 'manage_members' && p !== 'act_as_members') };
+    await tick();
+    await waitFor(() => {
+      expect(document.querySelector('.issued-list')).toBeNull();
+    });
+    expect(document.body.textContent).not.toContain('issued by operator-1');
+    // Given back, the list is still gone: it was cleared, not only hidden.
+    viewer = owner;
+    await tick();
+    await within(region).findByRole('list', { name: 'People' });
+    await settled();
+    expect(document.querySelector('.issued-list')).toBeNull();
+  });
+
+  // An answer to a request sent before a change of standing, person or server
+  // does not refill the list (it is dropped, not held).
+  it.each([
+    ['standing lost and given back', { ...owner, owner: false, permissions: operatorRights.filter((p) => p !== 'manage_members') }, origin, true],
+    ['another principal', { ...operator, id: 7, name: 'someone-else' }, origin, false],
+    ['another server', owner, 'http://127.0.0.1:9090', false],
+  ])('drops a late answer after %s', async (_label, mid, midOrigin, back) => {
+    let answer: (r: Response) => void = () => undefined;
+    let asked = false;
+    serve(owner, {
+      routes: {
+        'POST /v1/principals/2/disable': () =>
+          new Promise<Response>((resolve) => {
+            asked = true;
+            answer = resolve;
+          }),
+      },
+    });
+    window.sessionStorage.setItem(key, 'conch_owner_session_token');
+    const props = { channelIds: '1', onUnauthorized: () => undefined };
+    const shown = render(<CommunityMembers viewer={owner.id} who={owner} origin={origin} {...props} />);
+    const region = await screen.findByRole('region', { name: 'Community members' });
+    await within(region).findByRole('list', { name: 'People' });
+    await disableOperator(region);
+    await waitFor(() => {
+      expect(asked).toBe(true);
+    });
+    shown.rerender(<CommunityMembers viewer={mid.id} who={mid} origin={midOrigin} {...props} />);
+    if (back) shown.rerender(<CommunityMembers viewer={owner.id} who={owner} origin={origin} {...props} />);
+    answer(json({ issued_to_others: issuedList }));
+    await settled();
+    expect(document.querySelector('.issued-list')).toBeNull();
+    expect(document.body.textContent).not.toContain('issued by operator-1');
+  });
+
+  // The App ignores a whoami for another principal (auth.ts, 'refreshed'), so
+  // this identity change is made on the list itself, the way a switch of person
+  // or server reaches it.
+  it.each([
+    ['another principal who also holds manage_members', { ...operator, id: 7, name: 'someone-else' }, origin],
+    ['the same principal on another server', owner, 'http://127.0.0.1:9090'],
+  ])('takes every list away when the viewer becomes %s', async (_label, next, nextOrigin) => {
+    serve(owner, { routes: { 'POST /v1/principals/2/disable': () => json({ issued_to_others: issuedList }) } });
+    window.sessionStorage.setItem(key, 'conch_owner_session_token');
+    const props = { channelIds: '1', onUnauthorized: () => undefined };
+    const shown = render(<CommunityMembers viewer={owner.id} who={owner} origin={origin} {...props} />);
+    const region = await screen.findByRole('region', { name: 'Community members' });
+    await within(region).findByRole('list', { name: 'People' });
+    await disableOperator(region);
+    await within(region).findByRole('region', { name: 'Issued to others by operators' });
+    shown.rerender(<CommunityMembers viewer={next.id} who={next} origin={nextOrigin} {...props} />);
+    await waitFor(() => {
+      expect(document.querySelector('.issued-list')).toBeNull();
+    });
+    expect(document.body.textContent).not.toContain('issued by operator-1');
+  });
+
+  it('lists them after a demotion too', async () => {
+    serve(owner, { routes: { 'PUT /v1/principals/2/role': () => json(roleAnswer({ issued_to_others: issuedList })) } });
+    const region = await open();
+    const row = rowOf(region, 'operator-1');
+    await choose(row, 'operator-1', 'Change role…');
+    fireEvent.click(within(row).getByRole('radio', { name: 'Member' }));
+    fireEvent.click(within(row).getByRole('button', { name: 'Make a member' }));
+    expect(await within(region).findByRole('region', { name: 'Issued to others by operators' })).toBeTruthy();
+  });
+
+  it.each([
+    ['an empty list', () => json({ issued_to_others: [] })],
+    ['no list', () => json({})],
+    ['a 204 from an older server', noContent],
+  ])('shows today’s line and no list for %s', async (_label, answer) => {
+    serve(owner, { routes: { 'POST /v1/principals/2/disable': answer } });
+    const region = await open();
+    await disableOperator(region);
+    expect(await within(region).findByText('operator-1 is disabled and signed out.')).toBeTruthy();
+    expect(region.querySelector('.issued-list')).toBeNull();
+  });
+
+  it('offers no Revoke all to an operator, who may still revoke one', async () => {
+    const calls = serve(operator, {
+      routes: {
+        'POST /v1/principals/3/disable': () => json({ issued_to_others: [issuedList[0]] }),
+        'DELETE /v1/credentials/41': noContent,
+      },
+    });
+    const region = await open();
+    const row = rowOf(region, 'member-1');
+    await choose(row, 'member-1', 'Disable sign-in…');
+    fireEvent.click(within(row).getByRole('button', { name: 'Yes, disable' }));
+    const list = await within(region).findByRole('region', { name: 'Issued to others by operators' });
+    expect(within(list).queryByRole('button', { name: /Revoke all/ })).toBeNull();
+    fireEvent.click(within(list).getByRole('button', { name: 'Revoke credential #41' }));
+    await waitFor(() => {
+      expect(sent(calls, 'DELETE', /credentials\/41$/).length).toBe(1);
+    });
+    expect(await within(list).findByText('Revoked credential #41.')).toBeTruthy();
+    expect(within(list).queryByText(/credential #41 for/i)).toBeNull();
+  });
+
+  it('asks with the real scope, proves it is the owner again, reports the counts and clears the list', async () => {
+    let proved = false;
+    const calls = serve(owner, {
+      routes: {
+        'POST /v1/principals/2/disable': () => json({ issued_to_others: issuedList }),
+        'POST /v1/principals/2/issued/revoke-all': () => (proved ? json({ credentials_revoked: 3, hooks_revoked: 1 }) : refusal(403, 'reauth_required')),
+        'POST /v1/reauth': () => {
+          proved = true;
+          return json({ until: later });
+        },
+      },
+    });
+    const region = await open();
+    await disableOperator(region);
+    const list = await within(region).findByRole('region', { name: 'Issued to others by operators' });
+    fireEvent.click(within(list).getByRole('button', { name: 'Revoke all (3)' }));
+    const question = within(list).getByRole('group', { name: 'Confirm' });
+    expect(question.textContent).toContain('operator-1 issued to other people');
+    expect(question.textContent).toContain('2 credentials and 1 hook');
+    expect(sent(calls, 'POST', /issued\/revoke-all$/)).toEqual([]);
+    fireEvent.click(within(question).getByRole('button', { name: 'Yes, revoke all' }));
+    const dialog = await screen.findByRole('dialog', { name: 'Confirm it is you' });
+    fireEvent.change(within(dialog).getByLabelText('Your password'), { target: { value: 'a long enough password' } });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Confirm' }));
+    expect(await within(list).findByText('Revoked 3 credentials and 1 hooks.')).toBeTruthy();
+    expect(sent(calls, 'POST', /issued\/revoke-all$/).length).toBe(2);
+    expect(list.querySelectorAll('li').length).toBe(0);
+    expect(within(list).queryByRole('button', { name: /Revoke all/ })).toBeNull();
+  });
+
+  it('keeps the list and says why when the server refuses Revoke all', async () => {
+    serve(owner, {
+      routes: {
+        'POST /v1/principals/2/disable': () => json({ issued_to_others: issuedList }),
+        'POST /v1/principals/2/issued/revoke-all': () => refusal(403, 'forbidden'),
+      },
+    });
+    const region = await open();
+    await disableOperator(region);
+    const list = await within(region).findByRole('region', { name: 'Issued to others by operators' });
+    fireEvent.click(within(list).getByRole('button', { name: 'Revoke all (3)' }));
+    fireEvent.click(within(list).getByRole('button', { name: 'Yes, revoke all' }));
+    await waitFor(() => {
+      expect(within(list).getByText(/Nothing was revoked/)).toBeTruthy();
+    });
+    expect(list.querySelectorAll('li').length).toBe(3);
+    expect(region.textContent).not.toContain(leak);
   });
 });

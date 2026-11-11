@@ -68,6 +68,10 @@ func (h *harness) checkCoverage() ([]routetable.Route, error) {
 	if len(problems) > 0 {
 		return nil, fmt.Errorf("%s", strings.Join(problems, "; "))
 	}
+	// The preview phase (preview.go) has a row for every route too.
+	if err := previewCoverage(table); err != nil {
+		return nil, fmt.Errorf("the preview phase: %w", err)
+	}
 	return table, nil
 }
 

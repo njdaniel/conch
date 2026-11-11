@@ -9,19 +9,47 @@
 // "refused" and nothing more. No function takes a channel, a URL, a header map
 // or a method, and nothing here holds an ipcRenderer, an event or a credential.
 //
+// One call is synchronous: notificationSupported sends on the channel
+// `conch:notificationSupported` (ipcRenderer.sendSync) outside the invoke
+// registry, and unwraps the same Envelope from the returned value.
+//
+// onVoiceState hands the page each NativeVoiceView main sends on the voice
+// channel, and drops any message that is not exactly one. onCompanion does
+// the same for a CompanionEvent on the companion channel (issue #1579).
+//
+// onUpdateState hands the page each InstalledView main sends on the update
+// channel (issue #1600), and drops any message that is not exactly one.
+//
+// onInviteArrived tells the page that a conch:// link reached the app (issue
+// #1592). The message carries nothing: exactly {type: 'arrived'}, and the page
+// then asks inviteArrived, so a link or code never rides an event.
+//
 // subscribe numbers each feed itself (so main's first event for it can never
 // arrive before the number is known here), asks main to open it, hands the
 // page each frame of a batch in order and then acknowledges the batch, which
 // is what lets main send the next. An unsubscribed feed is forgotten here at
 // once: whatever main had already sent for it is dropped.
-import type { ConchDesktopBridge, FeedHandlers, FeedRequest, Unsubscribe } from '../../web/src/platform/desktop/bridge.ts';
-import { channelOf, type Envelope, type FeedEvent, type InvokedFunction } from '../shared/bridge-names.ts';
+import type { CompanionEndReason, CompanionEvent, ExposedDesktopBridge, FeedHandlers, FeedRequest, InstalledView, NativeVoiceView, NotificationClick, Unsubscribe } from '../../web/src/platform/desktop/bridge.ts';
+import {
+  voiceControlBlock,
+  voiceControlCapture,
+  voiceControlPhase,
+  voiceControlPlayback,
+  voiceControlPTT,
+  voiceControlPTTProblem,
+  voiceControlReason,
+  voiceControlTalkMode,
+} from '../../web/src/schema/generated.ts';
+import { channelOf, NOTIFICATION_SUPPORT, TAG_MAX, type Envelope, type FeedEvent, type InvokedFunction } from '../shared/bridge-names.ts';
 
 export type Invoke = (channel: string, ...args: unknown[]) => Promise<unknown>;
 
 // Listen calls back with each message main sends on the feed channel; only
 // the message, never the event it came in.
 export type Listen = (callback: (message: unknown) => void) => void;
+
+// Sync makes one named synchronous call and returns its unvalidated answer.
+export type Sync = (channel: string) => unknown;
 
 // What a refused subscription is told: a close the page's feed retries later.
 const REFUSED = 1013;
@@ -42,13 +70,107 @@ function isFeedEvent(value: unknown): value is FeedEvent {
   }
 }
 
+function isNotificationClick(value: unknown): value is NotificationClick {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
+  const record = value as Record<string, unknown>;
+  return Object.keys(record).length === 2 && record['type'] === 'click' && typeof record['tag'] === 'string' && record['tag'].length > 0 && record['tag'].length <= TAG_MAX;
+}
+
+const STATUSES: ReadonlySet<unknown> = new Set(['idle', 'unavailable', 'starting', 'running', 'stopping', 'ended', 'failed', 'lost']);
+
+const only = (record: Record<string, unknown>, keys: readonly string[]): boolean => Object.keys(record).every((key) => keys.includes(key));
+const absent = (value: unknown): boolean => value === undefined;
+const isCount = (value: unknown): value is number => typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
+const isVocab = (check: (value: unknown) => string[], value: unknown): boolean => check(value).length === 0;
+
+function isHelper(value: unknown): boolean {
+  if (typeof value !== 'object' || value === null) return false;
+  const h = value as Record<string, unknown>;
+  const keys = ['version', 'phase', 'reason', 'retryInMs', 'capture', 'playback', 'transmitting', 'muted', 'deafened', 'blocked', 'talkMode', 'ptt', 'pttProblem'];
+  return (
+    only(h, keys) &&
+    (h['version'] === 1 || h['version'] === 2) &&
+    isVocab(voiceControlPhase, h['phase']) &&
+    (absent(h['reason']) || isVocab(voiceControlReason, h['reason'])) &&
+    (absent(h['retryInMs']) || isCount(h['retryInMs'])) &&
+    isVocab(voiceControlCapture, h['capture']) &&
+    (absent(h['playback']) || isVocab(voiceControlPlayback, h['playback'])) &&
+    typeof h['transmitting'] === 'boolean' &&
+    typeof h['muted'] === 'boolean' &&
+    typeof h['deafened'] === 'boolean' &&
+    Array.isArray(h['blocked']) &&
+    h['blocked'].every((block) => isVocab(voiceControlBlock, block)) &&
+    (absent(h['talkMode']) || isVocab(voiceControlTalkMode, h['talkMode'])) &&
+    isVocab(voiceControlPTT, h['ptt']) &&
+    (absent(h['pttProblem']) || isVocab(voiceControlPTTProblem, h['pttProblem']))
+  );
+}
+
+// A voice message is exactly a NativeVoiceView: nothing else, and no key it
+// does not have, reaches the page.
+function isNativeVoiceView(value: unknown): value is NativeVoiceView {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
+  const v = value as Record<string, unknown>;
+  return (
+    only(v, ['status', 'generation', 'channel', 'problem', 'retryable', 'helper', 'mutedByLock']) &&
+    STATUSES.has(v['status']) &&
+    isCount(v['generation']) &&
+    (v['channel'] === null || (typeof v['channel'] === 'string' && v['channel'].length <= 1024)) &&
+    (absent(v['problem']) || (typeof v['problem'] === 'string' && v['problem'].length <= 256)) &&
+    typeof v['retryable'] === 'boolean' &&
+    (absent(v['helper']) || isHelper(v['helper'])) &&
+    (absent(v['mutedByLock']) || v['mutedByLock'] === true)
+  );
+}
+
+// An update message is exactly an InstalledView: a boolean and a short string
+// or null, and no other key.
+function isInstalledView(value: unknown): value is InstalledView {
+  if (typeof value !== 'object' || value === null) return false;
+  const v = value as Record<string, unknown>;
+  const keys = Object.keys(v);
+  if (keys.length !== 2 || !keys.includes('updated') || !keys.includes('version')) return false;
+  return typeof v['updated'] === 'boolean' && (v['version'] === null || (typeof v['version'] === 'string' && v['version'].length <= 64));
+}
+
+// Checked by the compiler against CompanionEndReason: a reason added there
+// and not here fails tsc.
+const COMPANION_END_REASONS: Readonly<Record<CompanionEndReason, true>> = {
+  leave: true,
+  helper: true,
+  renewal: true,
+  'sign-out': true,
+  switch: true,
+  quit: true,
+  crash: true,
+  reload: true,
+  lock: true,
+  suspend: true,
+};
+
+// A companion message is exactly a CompanionEvent.
+function isCompanionEvent(value: unknown): value is CompanionEvent {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
+  const v = value as Record<string, unknown>;
+  return only(v, ['type', 'reason']) && v['type'] === 'end' && typeof v['reason'] === 'string' && Object.hasOwn(COMPANION_END_REASONS, v['reason']);
+}
+
 function isEnvelope(value: unknown): value is Envelope {
   if (typeof value !== 'object' || value === null) return false;
   const record = value as Record<string, unknown>;
   return (record['ok'] === true && 'value' in record) || (record['ok'] === false && record['kind'] === 'refused');
 }
 
-export function createBridge(invoke: Invoke, listen: Listen): Readonly<ConchDesktopBridge> {
+export function createBridge(
+  invoke: Invoke,
+  listen: Listen,
+  listenVoice: Listen,
+  listenCompanion: Listen = () => undefined,
+  listenNotification: Listen = () => undefined,
+  sync: Sync = () => ({ ok: false, kind: 'refused' }),
+  listenUpdate: Listen = () => undefined,
+  listenInvite: Listen = () => undefined,
+): Readonly<ExposedDesktopBridge> {
   const call =
     <T>(name: InvokedFunction) =>
     async (...args: unknown[]): Promise<T> => {
@@ -91,6 +213,115 @@ export function createBridge(invoke: Invoke, listen: Listen): Readonly<ConchDesk
     }
   });
 
+  // Voice state: the helper's confirmed view, from main, to each listener.
+  const voiceListeners = new Set<(view: NativeVoiceView) => void>();
+  listenVoice((message) => {
+    if (!isNativeVoiceView(message)) return;
+    for (const listener of [...voiceListeners]) {
+      try {
+        listener(message);
+      } catch (error) {
+        queueMicrotask(() => {
+          throw error;
+        });
+      }
+    }
+  });
+  const onVoiceState = (listener: (view: NativeVoiceView) => void): Unsubscribe => {
+    voiceListeners.add(listener);
+    return () => {
+      voiceListeners.delete(listener);
+    };
+  };
+
+  // The companion's end, from main, to each listener (issue #1579).
+  const companionListeners = new Set<(event: CompanionEvent) => void>();
+  listenCompanion((message) => {
+    if (!isCompanionEvent(message)) return;
+    for (const listener of [...companionListeners]) {
+      try {
+        listener(message);
+      } catch (error) {
+        queueMicrotask(() => {
+          throw error;
+        });
+      }
+    }
+  });
+  // Notification clicks carry only a bounded tag to listeners of this bridge.
+  const notificationListeners = new Set<(event: NotificationClick) => void>();
+  listenNotification((message) => {
+    if (!isNotificationClick(message)) return;
+    for (const listener of [...notificationListeners]) {
+      try {
+        listener(message);
+      } catch (error) {
+        queueMicrotask(() => {
+          throw error;
+        });
+      }
+    }
+  });
+  const onCompanion = (listener: (event: CompanionEvent) => void): Unsubscribe => {
+    companionListeners.add(listener);
+    return () => {
+      companionListeners.delete(listener);
+    };
+  };
+  const onNotification = (listener: (event: NotificationClick) => void): Unsubscribe => {
+    notificationListeners.add(listener);
+    return () => {
+      notificationListeners.delete(listener);
+    };
+  };
+  const notificationSupported = (): boolean => {
+    const answer = sync(channelOf(NOTIFICATION_SUPPORT));
+    if (!isEnvelope(answer) || !answer.ok || typeof answer.value !== 'boolean') throw new Error('refused');
+    return answer.value;
+  };
+  // The installed state: main's view of whether the files were replaced.
+  const updateListeners = new Set<(view: InstalledView) => void>();
+  listenUpdate((message) => {
+    if (!isInstalledView(message)) return;
+    for (const listener of [...updateListeners]) {
+      try {
+        listener(message);
+      } catch (error) {
+        queueMicrotask(() => {
+          throw error;
+        });
+      }
+    }
+  });
+  // An invite link arrived: a bare word, nothing more.
+  const inviteListeners = new Set<() => void>();
+  listenInvite((message) => {
+    if (typeof message !== 'object' || message === null || Array.isArray(message)) return;
+    const record = message as Record<string, unknown>;
+    if (Object.keys(record).length !== 1 || record['type'] !== 'arrived') return;
+    for (const listener of [...inviteListeners]) {
+      try {
+        listener();
+      } catch (error) {
+        queueMicrotask(() => {
+          throw error;
+        });
+      }
+    }
+  });
+  const onInviteArrived = (listener: () => void): Unsubscribe => {
+    inviteListeners.add(listener);
+    return () => {
+      inviteListeners.delete(listener);
+    };
+  };
+  const onUpdateState = (listener: (view: InstalledView) => void): Unsubscribe => {
+    updateListeners.add(listener);
+    return () => {
+      updateListeners.delete(listener);
+    };
+  };
+
   const subscribe = (feed: FeedRequest, handlers: FeedHandlers): Unsubscribe => {
     const id = ++next;
     feeds.set(id, handlers);
@@ -109,7 +340,7 @@ export function createBridge(invoke: Invoke, listen: Listen): Readonly<ConchDesk
     };
   };
 
-  return Object.freeze<ConchDesktopBridge>({
+  return Object.freeze<ExposedDesktopBridge>({
     serverAddress: call('serverAddress'),
     request: call('request'),
     subscribe,
@@ -126,9 +357,15 @@ export function createBridge(invoke: Invoke, listen: Listen): Readonly<ConchDesk
     joinAsGuest: call('joinAsGuest'),
     createAccount: call('createAccount'),
     signOut: call('signOut'),
+    replaceCredential: call('replaceCredential'),
     uploadFile: call('uploadFile'),
     downloadFile: call('downloadFile'),
     saveFile: call('saveFile'),
+    // Desktop notifications (issue #1590): no native event object crosses.
+    notify: call('notify'),
+    notifyClose: call('notifyClose'),
+    notificationSupported,
+    onNotification,
     // The saved server profiles (issue #945).
     profiles: call('profiles'),
     profileAdd: call('profileAdd'),
@@ -137,5 +374,44 @@ export function createBridge(invoke: Invoke, listen: Listen): Readonly<ConchDesk
     profileSwitch: call('profileSwitch'),
     storageRetry: call('storageRetry'),
     profilesRecover: call('profilesRecover'),
+    // Native voice (issue #1374). No press or release: the helper reads the
+    // talk key itself.
+    voiceState: call('voiceState'),
+    voiceJoin: call('voiceJoin'),
+    voiceLeave: call('voiceLeave'),
+    voiceRetry: call('voiceRetry'),
+    voiceSetMute: call('voiceSetMute'),
+    voiceSetDeafen: call('voiceSetDeafen'),
+    voiceSetDevices: call('voiceSetDevices'),
+    voiceSetTalkMode: call('voiceSetTalkMode'),
+    voiceDevices: call('voiceDevices'),
+    voiceSaveDevice: call('voiceSaveDevice'),
+    voiceKeyDevices: call('voiceKeyDevices'),
+    voiceSaveTalkBinding: call('voiceSaveTalkBinding'),
+    // Opening an invite link (issue #1591). The code comes back from
+    // inviteTake only, once.
+    inviteCheck: call('inviteCheck'),
+    inviteAccept: call('inviteAccept'),
+    inviteCancel: call('inviteCancel'),
+    inviteTake: call('inviteTake'),
+    // A conch:// link that reached the app (issue #1592): main's word, then
+    // the page's ask. The code is still only ever returned by inviteTake.
+    inviteArrived: call('inviteArrived'),
+    onInviteArrived,
+    // The app's own settings (issue #1587).
+    settings: call('settings'),
+    settingsSet: call('settingsSet'),
+    integrations: call('integrations'),
+    onVoiceState,
+    // The screen companion (issue #1579): its grant, its end, and main's word
+    // that it has ended.
+    companionGrant: call('companionGrant'),
+    companionEnd: call('companionEnd'),
+    shareArm: call('shareArm'),
+    onCompanion,
+    // The installed files replaced under the running app (issue #1600).
+    updateState: call('updateState'),
+    updateRestart: call('updateRestart'),
+    onUpdateState,
   });
 }

@@ -73,7 +73,8 @@ var Vocabularies = map[string][]string{
 	),
 	"SocketCloseReason": values(
 		SocketCloseClient, SocketCloseServerShutdown, SocketCloseKeepaliveTimeout, SocketCloseRevoked,
-		SocketCloseRemoved, SocketCloseSlowConsumer, SocketCloseSessionEnded, SocketCloseError,
+		SocketCloseRemoved, SocketCloseVoiceRemoved, SocketCloseSlowConsumer, SocketCloseSessionEnded,
+		SocketCloseError,
 	),
 	"RunState": values(
 		RunStateQueued, RunStateStarting, RunStateRunning, RunStateBlocked,
@@ -130,8 +131,8 @@ var Vocabularies = map[string][]string{
 		VoiceControlReasonNotSignedIn, VoiceControlReasonIdentityMismatch, VoiceControlReasonBadEnvironment,
 		VoiceControlReasonBadConfig, VoiceControlReasonVoiceRequiresAuth, VoiceControlReasonNotAPerson,
 		VoiceControlReasonVoiceNotAllowed, VoiceControlReasonNotAMember, VoiceControlReasonVoiceNotConfigured,
-		VoiceControlReasonDuplicateIdentity, VoiceControlReasonAudioUnavailable, VoiceControlReasonStartTimeout,
-		VoiceControlReasonProtocolError, VoiceControlReasonInternalError,
+		VoiceControlReasonDuplicateIdentity, VoiceControlReasonVoiceRemoved, VoiceControlReasonAudioUnavailable,
+		VoiceControlReasonStartTimeout, VoiceControlReasonProtocolError, VoiceControlReasonInternalError,
 	),
 	"VoiceControlTalkMode": values(VoiceControlTalkModePushToTalk, VoiceControlTalkModeOpen),
 	"VoiceDevicesConfig": values(
@@ -146,7 +147,10 @@ var Vocabularies = map[string][]string{
 		VoiceCameraEndSelf, VoiceCameraEndOperator, VoiceCameraEndLeft,
 		VoiceCameraEndAccessLost, VoiceCameraEndRotated, VoiceCameraEndIdle,
 	),
-	"VoiceTransmitState": values(VoiceTransmitStateStarted, VoiceTransmitStateStopped),
+	// The sharer's declared resolution (issue #1483): the picker's three
+	// (#1488, web/src/voice/share.ts ShareResolution), exactly.
+	"VoiceShareResolution": values(VoiceShareResolution720p, VoiceShareResolution1080p, VoiceShareResolutionSource),
+	"VoiceTransmitState":   values(VoiceTransmitStateStarted, VoiceTransmitStateStopped),
 
 	// Roles and permissions (ADR-014, issue #1012). Permission is in catalog
 	// order, the order of Permissions. Row 12, use_camera, is ADR-015's.
@@ -159,6 +163,10 @@ var Vocabularies = map[string][]string{
 	"PermissionPreset":   values(PresetPersonal, PresetGroup),
 	"PermissionsWarning": values(PermissionsWarningDefaultChannelExposesMembers, PermissionsWarningOpenSignupOn),
 	"IssuedKind":         values(IssuedCredential, IssuedHook),
+
+	// Preview as member (issue #1007, docs/design/permission-preview.md §8):
+	// what kind of nobody a preview answer is the view of.
+	"PreviewSimulation": values(PreviewSimulationRole),
 
 	// The community model (ADR-013, issue #978). InviteKindV2 and
 	// DirectoryScope are closed and client-tolerant.
@@ -186,6 +194,8 @@ var Vocabularies = map[string][]string{
 		AdminActionGetPermissions, AdminActionSetPermissions,
 		AdminActionListReports, AdminActionGetReport, AdminActionUpdateReport,
 		AdminActionExportAudit,
+		AdminActionListChannelBans, AdminActionBanChannelMember, AdminActionUnbanChannelMember,
+		AdminActionSetChannelTopic,
 	),
 	"AdminGate": values(AdminGateDirect, AdminGateApproval),
 	"AdminTargetKind": values(
@@ -193,6 +203,18 @@ var Vocabularies = map[string][]string{
 		AdminTargetHook, AdminTargetInvite, AdminTargetReport,
 	),
 	"AdminActionStatus": values(AdminActionRan, AdminActionPendingApproval),
+
+	// Phone push and notification preferences (issue #1712,
+	// docs/design/mobile-notifications.md §9.1).
+	"NotificationKind":   values(NotificationKindMessage, NotificationKindMention, NotificationKindWhisper),
+	"NotificationPolicy": values(NotificationPolicyOff, NotificationPolicyMentions, NotificationPolicyAll),
+	"PushPlatform":       values(PushPlatformIOS, PushPlatformAndroid, PushPlatformWeb),
+	"PushProvider":       values(PushProviderAPNs, PushProviderFCM),
+	"PushRegistrationEndReason": values(
+		PushRegistrationEndSelf, PushRegistrationEndCredentialRevoked, PushRegistrationEndCredentialExpired,
+		PushRegistrationEndProviderRejected, PushRegistrationEndStale,
+	),
+	"PushTransport": values(PushTransportWebPush, PushTransportRelay),
 }
 
 // values lists a vocabulary by its constants, so an entry above cannot hold a

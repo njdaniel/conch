@@ -109,12 +109,13 @@ describe('local storage', () => {
     expect(code).not.toMatch(storageCallOtherKey);
     expect(code).not.toMatch(/\.(key|clear)\(|[sS]torage\.length/);
     // The preference methods take the key from their caller, and the only
-    // callers name the notification preferences' key, the setup card's
-    // (a per-account mark that the card was put off) and the voice mode's
-    // (issue #1244).
+    // callers name the notification and appearance preferences' keys, the setup
+    // card's (a per-account mark that the card was put off), the channel
+    // arrangement's (issue #1493), the voice mode and share quality, the call
+    // view's non-video filter (issue #1487) and the talk key's name (issue #1382).
     const api = withoutComments(sources['./api.ts'] ?? '');
-    expect(api.match(/credentials\.(read|write)Preference\(\s*(?!notificationPreferencesKey\(|setupCardKey\(|voiceModeKey\b)/g) ?? []).toEqual([]);
-    expect(api.match(/credentials\.(read|write)Preference\(/g)?.length).toBe(6);
+    expect(api.match(/credentials\.(read|write)Preference\(\s*(?!notificationPreferencesKey\(|appearancePreferencesKey\(|arrangementKey\(|setupCardKey\(|voiceModeKey\b|shareQualityKey\b|hideNonVideoKey\b|talkKeyLabelKey\b)/g) ?? []).toEqual([]);
+    expect(api.match(/credentials\.(read|write)Preference\(/g)?.length).toBe(16);
   });
 
   it('is not missed by the rules: a bare test of each', () => {
@@ -344,11 +345,24 @@ const channelReplace = "window.history.replaceState(null, '', addressWithoutFrag
 // navigates says whether a source writes the address bar other than through
 // the hash. Comments are left out first; then the exception is taken out
 // (from route.ts only, and only once).
+// The third (issue #1534): UpdateNotice.tsx, once, reloads the page when the
+// person presses Reload on the notice that the server was updated. Nothing
+// reloads the page by itself.
+const updateReload = 'window.location.reload()';
+
 function navigates(path: string, code: string): boolean {
   const bare = withoutComments(code);
-  const checked = path === './route.ts' ? bare.replace(inviteReplace, '').replace(channelReplace, '') : bare;
+  let checked = path === './route.ts' ? bare.replace(inviteReplace, '').replace(channelReplace, '') : bare;
+  if (path === './UpdateNotice.tsx') checked = checked.replace(updateReload, '');
   return navigation.some((rule) => rule.test(checked));
 }
+
+describe('the reload exception', () => {
+  it('is one call in src/UpdateNotice.tsx, run by a click', () => {
+    const code = sources['./UpdateNotice.tsx'] ?? '';
+    expect(code.split(updateReload)).toHaveLength(2);
+  });
+});
 
 describe('the history exception', () => {
   it('is two calls in src/route.ts, each once: the address without its fragment, and the shown channel’s hash', () => {
@@ -743,12 +757,13 @@ const seamForbidden: readonly (readonly [string, RegExp])[] = [
 // route.ts alone reads location.origin: it builds the address without its
 // fragment for the history entry, and an invite link, from the address bar
 // itself, not from the server's origin (issue #440).
-// The desktop adapter is a platform implementation too: its copyText is the
-// page's own clipboard write, which main permits for the app window right
+// The desktop adapter is a platform implementation too: its copyText (kept in
+// platform/desktop/clipboard.ts, which the adapter and the desktop screens
+// share) is the page's own clipboard write, which main permits for the app window right
 // after a click (issue #947).
 const seamExceptions: Readonly<Record<string, readonly string[]>> = {
   'the page origin or protocol': ['./route.ts'],
-  'the clipboard': ['./platform/desktop/index.ts'],
+  'the clipboard': ['./platform/desktop/clipboard.ts'],
 };
 
 describe('the platform seam', () => {
@@ -799,8 +814,12 @@ describe('the platform seam', () => {
 
   it('keeps the desktop adapter out of the browser graph', () => {
     // Only the build-selected alias reaches the adapter; no source imports it.
+    // A type-only import of the bridge contract is erased and is allowed (the
+    // native-voice view types, issue #1375).
+    // The DOM-to-evdev table is pure data and imports nothing (issue #1382).
+    const typeOnlyBridge = /^import (type )?[^;]*from\s+'[^']*desktop\/(bridge|evdev)';?$/gm;
     const importing = Object.entries(sources)
-      .filter(([path, code]) => !path.startsWith('./platform/desktop/') && /platform\/desktop|from\s+['"]\.\/desktop/.test(code))
+      .filter(([path, code]) => !path.startsWith('./platform/desktop/') && /platform\/desktop|from\s+['"]\.\/desktop/.test(code.replace(typeOnlyBridge, '')))
       .map(([path]) => path);
     expect(importing).toEqual([]);
     expect(sources['./platform/index.ts']).toContain("from '#platform-selected'");

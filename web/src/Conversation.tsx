@@ -1,10 +1,16 @@
+import { ModerationConfirm, useMayModerate, useTombstones } from './Moderation';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
 import * as api from './api';
 import { archivedLine } from './archived';
+import { ReactionBar, ReactionScope, useHasReactions } from './Reactions';
 import { Composer } from './Composer';
 import { guestName } from './guestName';
 import { Avatar, PrivateMark } from './Icons';
-import { Linkified } from './Linkified';
+import { IdentityMarks } from './Identity';
+import { ProfileCard } from './ProfileCard';
+import type { IdentityKey } from './identity';
+import { Linkified, previewText } from './Linkified';
+import { displayBody, useKnownFileNames } from './spoilerFiles';
 import { ImageAttachment } from './ImageAttachment';
 import { loadStored, saveEdit, saveReplies } from './state/draftStore';
 import { canEdit, EditedMarker, editEnds, editsLeft, editWindowMs, MessageEditor } from './MessageEdit';
@@ -21,6 +27,7 @@ import type { LiveStatus, Person } from './useLiveChannel';
 import { mentions } from './useNotifications';
 import { useAuthorNames } from './useAuthorNames';
 import { timeOf } from './time';
+import { fromServer } from './schema/validate';
 
 // The time of day, in the reader's own locale and time zone (time.ts).
 export function clock(when: string | number): string {
@@ -56,7 +63,7 @@ export function audienceLabel(audience: Audience, viewer: number, nets: Readonly
 // (or one that is not the shape this client knows: then it is a plain message).
 function approvalOf(message: MessageV2): ApprovalV1 | null {
   const payload = message.payload;
-  if (payload?.schema !== approvalPayloadSchema || approvalV1(payload.data).length > 0) return null;
+  if (payload?.schema !== approvalPayloadSchema || fromServer(approvalV1)(payload.data).length > 0) return null;
   return payload.data as ApprovalV1;
 }
 
@@ -80,41 +87,45 @@ function ApprovalCard({ approval, people }: { readonly approval: ApprovalV1; rea
 // without their name and time again (both stay in the text read out).
 const sameRun = 5 * 60 * 1000;
 
+const authorMarks: readonly IdentityKey[] = ['agent', 'manager', 'operator'];
+
 function Line({
   time,
   author,
   authorId,
-  kind,
+  person,
+  viewer,
   badge,
   tag,
   tone,
+  interactive = true,
+  onCardDisappear,
   children,
 }: {
   readonly time: string;
   readonly author: string;
   readonly authorId: number;
-  readonly kind: Person['kind'];
+  readonly person: Person | undefined;
+  readonly viewer: number;
   readonly badge: string | null;
   readonly tag: string | null;
   readonly tone?: 'failed' | 'unconfirmed';
+  readonly interactive?: boolean;
+  readonly onCardDisappear?: () => void;
   readonly children: ReactNode;
 }) {
   // The badge comes first, as in the TUI, so a name or a body cannot pass for
-  // one. On screen the header reads name, agent, time, audience (app.css).
+  // one. On screen the header reads name, identity marks, time, audience.
   return (
     <>
       <Avatar id={authorId} name={author} />
       <div className="msg-head">
         {badge === null ? null : <span className="audience">{badge} </span>}
-        <time>{time}</time> <span className="author">{author}</span>
-        {kind === 'agent' ? (
-          <span className="kind">
-            <span className="vh"> [</span>agent<span className="vh">]</span>
-          </span>
-        ) : null}
+        <time>{time}</time> {interactive ? <ProfileCard id={authorId} person={person} viewer={viewer} name={author} className="author" onDisappear={onCardDisappear} /> : <span className="author">{author}</span>}
+        <IdentityMarks kind={person?.kind} role={person?.role} manages={person?.manages} only={authorMarks} textForm />
         <span className="vh">: </span>
       </div>
-      <span className="body">{children}</span>
+      <div className="body">{children}</div>
       {tag === null ? null : <span className={tone === undefined ? 'state' : `state ${tone}`}> {tag}</span>}
     </>
   );
@@ -130,7 +141,7 @@ export function authorOf(message: MessageV2, people: ReadonlyMap<number, Person>
 
 function attachmentsOf(message: MessageV2): FileAttachmentV1 | null {
   const payload = message.payload;
-  if (payload?.schema !== fileAttachmentPayloadSchema || fileAttachmentV1(payload.data).length > 0) return null;
+  if (payload?.schema !== fileAttachmentPayloadSchema || fromServer(fileAttachmentV1)(payload.data).length > 0) return null;
   return payload.data as FileAttachmentV1;
 }
 
@@ -159,6 +170,7 @@ export function Message({
   editor,
   notice,
   stop = false,
+  reactionNavigation = false,
 }: {
   readonly message: MessageV2;
   readonly people: ReadonlyMap<number, Person>;
@@ -187,16 +199,26 @@ export function Message({
   readonly notice?: string | null;
   // This message is the log's one tab stop (issue #1040); the rest are -1.
   readonly stop?: boolean;
+  readonly reactionNavigation?: boolean;
 }) {
+  const row = useRef<HTMLLIElement>(null);
+  useLayoutEffect(() => {
+    const node = row.current;
+    return () => { if (node?.contains(document.activeElement) === true) node.focus(); };
+  }, [message.removed]);
+  const mayModerate = useMayModerate();
+  const [removing, setRemoving] = useState(false);
+  useEffect(() => { if (message.removed === true || !mayModerate) setRemoving(false); }, [message.removed, mayModerate]);
+  const hasReactions = useHasReactions() && message.removed !== true;
   const who = messageName(message, people);
-  const approval = approvalOf(message);
-  const attachments = attachmentsOf(message);
+  const approval = message.removed === true ? null : approvalOf(message);
+  const attachments = message.removed === true ? null : attachmentsOf(message);
   // An image sent with no text has its filename as the body, and the figure
   // shows that name already: the name shows once. Display only; the post is
   // unchanged (F26).
-  const [fileName, setFileName] = useState<string | null>(null);
-  const nameOnly = attachments !== null && attachments.file_ids.length === 1 && fileName !== null && message.body === fileName;
-  const items = editor === undefined ? actions ?? [] : [];
+  const [fileNames, setFileNames] = useState<ReadonlyMap<number, string>>(new Map());
+  const nameOnly = attachments !== null && attachments.file_ids.every((id) => fileNames.has(id)) && message.body === attachments.file_ids.map((id) => fileNames.get(id)).join(', ');
+  const items: readonly MenuItem[] = message.removed === true ? [] : [...(editor === undefined ? actions ?? [] : []), ...(mayModerate ? [{ key: 'remove-message', label: 'Remove message', onSelect: () => { setRemoving(true); } }] : [])];
   const [menuOpen, setMenuOpen] = useState(false);
   const more = useRef<HTMLButtonElement>(null);
   const openers = useOpeners(items.length > 0, () => {
@@ -205,7 +227,7 @@ export function Message({
   const named = approval === null && editor === undefined && mentions(message.body, people.get(viewer)?.name ?? '');
   const classes = ['message', ...(cont ? ['cont'] : []), ...(named ? ['mentions-you'] : []), ...(items.length > 0 ? ['has-actions'] : []), ...(editor === undefined ? [] : ['editing'])];
   return (
-    <li className={classes.join(' ')} data-message-id={message.id} tabIndex={stop ? 0 : -1} {...(context === undefined ? {} : { 'aria-describedby': `reply-context-${String(message.id)}` })} {...openers}>
+    <li ref={row} className={classes.join(' ')} data-message-id={message.id} tabIndex={stop ? 0 : -1} aria-description={hasReactions && reactionNavigation ? "Use Right Arrow for reaction controls; Left and Right Arrow move between them, Escape returns to the message." : undefined} {...(context === undefined ? {} : { 'aria-describedby': `reply-context-${String(message.id)}` })} {...openers}>
       {named ? <span className="vh">Mentions you. </span> : null}
       {context === undefined ? null : (
         <p className="reply-context" id={`reply-context-${String(message.id)}`}>
@@ -216,20 +238,23 @@ export function Message({
         time={clock(message.created_at)}
         author={authorOf(message, people)}
         authorId={message.author_id}
-        kind={people.get(message.author_id)?.kind ?? null}
+        person={people.get(message.author_id)}
+        viewer={viewer}
+        interactive={message.removed !== true && !cont}
+        onCardDisappear={() => { row.current?.focus(); }}
         badge={message.audience === undefined ? null : audienceLabel(message.audience, viewer, nets)}
         tag={sent ? 'Sent' : null}
       >
-        {editor ?? (approval === null ? (
+        {(message.removed === true ? null : editor) ?? (approval === null ? (
           <>
-            {nameOnly ? null : <Linkified text={message.body} />}
+            {nameOnly ? null : <Linkified text={displayBody(message)} />}
             <EditedMarker message={message} channel={channel} viewer={viewer} onUnauthorized={onUnauthorized} />
           </>
         ) : <ApprovalCard approval={approval} people={people} />)}
         {attachments === null ? null : (
           <span className="attachments">
             {attachments.file_ids.map((fileId) => (
-              <ImageAttachment key={fileId} fileId={fileId} channel={channel} viewer={viewer} onUnauthorized={onUnauthorized} onFilename={setFileName} />
+              <ImageAttachment key={fileId} fileId={fileId} channel={channel} viewer={viewer} onUnauthorized={onUnauthorized} onFilename={(name) => { setFileNames((known) => (known.get(fileId) === name ? known : new Map(known).set(fileId, name))); }} />
             ))}
           </span>
         )}
@@ -241,15 +266,18 @@ export function Message({
       {onOpen === undefined ? null : <button type="button" className="search-open" aria-label={`Open context for ${who}`} onClick={() => {
         onOpen(message.id);
       }}>Open context</button>}
-      {onReply === undefined || message.thread_root_id !== undefined ? null : <button type="button" className="message-action reply-action" aria-label={`Reply to ${who}`} onClick={(event) => {
-        onReply(message.id, event.currentTarget);
-      }}>Reply</button>}
-      {onOpenThread === undefined || message.thread_root_id === undefined ? null : <button type="button" className="message-action" aria-label={`Open thread for ${who}`} onClick={(event) => {
-        onOpenThread(message.thread_root_id as number, event.currentTarget);
-      }}>Open thread</button>}
-      {replies === undefined || replies === 0 || onOpenThread === undefined ? null : <button type="button" className="message-action reply-count" onClick={(event) => {
-        onOpenThread(message.id, event.currentTarget);
-      }}>{replies === 1 ? '1 reply' : `${String(replies)} replies`}</button>}
+      <ReactionBar enabled={message.removed !== true} logNavigation={reactionNavigation} id={message.id} channel={channel} label={who} people={people} onUnauthorized={onUnauthorized}>
+        {onReply === undefined || message.removed === true || message.thread_root_id !== undefined ? null : <button type="button" className="message-action reply-action" aria-label={`Reply to ${who}`} onClick={(event) => {
+          onReply(message.id, event.currentTarget);
+        }}>Reply</button>}
+        {onOpenThread === undefined || message.thread_root_id === undefined ? null : <button type="button" className="message-action" aria-label={`Open thread for ${who}`} onClick={(event) => {
+          onOpenThread(message.thread_root_id as number, event.currentTarget);
+        }}>Open thread</button>}
+        {replies === undefined || replies === 0 || onOpenThread === undefined ? null : <button type="button" className="message-action reply-count" onClick={(event) => {
+          onOpenThread(message.id, event.currentTarget);
+        }}>{replies === 1 ? '1 reply' : `${String(replies)} replies`}</button>}
+      </ReactionBar>
+      {removing && mayModerate ? <ModerationConfirm op="removeMessage" id={message.id} name={who} channel={channel} onUnauthorized={onUnauthorized} onClose={() => { setRemoving(false); more.current?.focus(); }} /> : null}
       {thread}
     </li>
   );
@@ -266,15 +294,17 @@ const excerptLength = 80;
 // excerptOf is the first line of a body, cut to about excerptLength characters.
 // It is drawn as text: markup in it shows as the characters it is.
 export function excerptOf(body: string): string {
-  const line = (body.split('\n').find((part) => part.trim() !== '') ?? '').trim();
+  const line = (previewText(body).split('\n').find((part) => part.trim() !== '') ?? '').trim();
   const chars = Array.from(line);
   return chars.length <= excerptLength ? line : `${chars.slice(0, excerptLength).join('').trimEnd()}…`;
 }
 
 // replyContext quotes the root from the copy this page holds, which the
-// server sent to this viewer only if they may read it; no copy, no quote.
+// server sent to this viewer only if they may read it; no copy, no quote. An
+// image-only root is quoted by its shown names, the stored ones matched when
+// they are known (see attachmentNames).
 function replyContext(root: MessageV2 | undefined, people: ReadonlyMap<number, Person>): ReplyContext | null {
-  return root === undefined ? null : { author: authorOf(root, people), excerpt: excerptOf(root.body) };
+  return root === undefined ? null : { author: authorOf(root, people), excerpt: excerptOf(displayBody(root)) };
 }
 
 function Pending({
@@ -302,7 +332,8 @@ function Pending({
         time={clock(send.at)}
         author={me.name}
         authorId={viewer}
-        kind={me.kind}
+        person={me}
+        viewer={viewer}
         badge={send.audience === undefined ? null : audienceLabel(send.audience, viewer, nets)}
         tag={tag}
         {...(send.status === 'sending' ? {} : { tone: send.status })}
@@ -370,6 +401,14 @@ function ThreadView({ rootId, root, chat, channel, live, archived, people: known
   readonly onDismissSend: (localId: number) => void;
   readonly onUnauthorized?: () => void;
 }) {
+  const { removed, safe } = useTombstones();
+  const previousLive = useRef(live);
+  useEffect(() => {
+    const reconnect = previousLive.current !== 'open' && live === 'open';
+    previousLive.current = live;
+    if (live !== 'open') setFetched((old) => old.length === 0 ? old : []);
+    if (reconnect) void load(0, false);
+  });
   const [fetched, setFetched] = useState<readonly MessageV2[]>([]);
   const [nextAfter, setNextAfter] = useState<number | undefined>();
   const [status, setStatus] = useState<'loading' | 'ready' | 'error'>('loading');
@@ -390,10 +429,10 @@ function ThreadView({ rootId, root, chat, channel, live, archived, people: known
       } else setStatus('error');
       return;
     }
-    setFetched((previous) => append ? [...previous, ...result.value.messages] : result.value.messages);
+    setFetched((previous) => append ? [...previous, ...result.value.messages.map(safe)] : result.value.messages.map(safe));
     setNextAfter(result.value.next_after);
     setStatus('ready');
-  }, [channel, rootId]);
+  }, [channel, rootId, safe]);
 
   useEffect(() => {
     setFetched([]);
@@ -404,13 +443,14 @@ function ThreadView({ rootId, root, chat, channel, live, archived, people: known
     };
   }, [load]);
 
+  useEffect(() => { setFetched((old) => old.map((m) => removed.get(m.id) ?? m)); }, [removed]);
   const byId = new Map<number, MessageV2>();
   if (root !== undefined) byId.set(root.id, root);
   for (const message of [...fetched, ...ordered(chat)]) {
     if (message.id !== rootId && message.thread_root_id !== rootId) continue;
     // The thread's own read and the channel's copy: the later edit wins.
     const held = byId.get(message.id);
-    if (held === undefined || isLater(message, held)) byId.set(message.id, message);
+    if (held === undefined || isLater(message, held)) byId.set(message.id, safe(message));
   }
   const messages = [...byId.values()].sort((a, b) => a.id - b.id);
   const sentMark = newestSent(messages, viewer, chat.sentIds);
@@ -420,6 +460,7 @@ function ThreadView({ rootId, root, chat, channel, live, archived, people: known
   const me = people.get(viewer) ?? { name: `#${String(viewer)}`, kind: null };
   const pending = chat.pending.filter((send) => send.threadRootId === rootId);
   return (
+    <ReactionScope key={`${String(viewer)}/${channel}/${String(rootId)}`} channel={channel} channelId={messages[0]?.channel_id ?? 0} ids={messages.filter((m) => m.removed !== true).map((m) => m.id)} onUnauthorized={onUnauthorized}>
     <section className="thread-view" aria-label={rootMessage === undefined ? 'Thread' : `Thread around ${messageName(rootMessage, people)}`}>
       <div className="thread-head">
         <h3>Thread</h3>
@@ -443,7 +484,7 @@ function ThreadView({ rootId, root, chat, channel, live, archived, people: known
           void load(nextAfter, true);
         }}>Load more replies</button>
       )}
-      {rootMessage === undefined ? null : archived ? (
+      {rootMessage === undefined || rootMessage.removed === true ? null : archived ? (
         <p role="status" className="hint archived-note">{archivedLine}</p>
       ) : (
         <form className="reply-composer" onSubmit={(event) => {
@@ -470,6 +511,7 @@ function ThreadView({ rootId, root, chat, channel, live, archived, people: known
         </form>
       )}
     </section>
+    </ReactionScope>
   );
 }
 
@@ -507,10 +549,29 @@ function syncStops(list: HTMLElement, stop: number | null) {
 // How close to the bottom still counts as being at it, in pixels.
 const nearBottom = 24;
 
+// The message at the top of the log's view and its offset below the log's
+// top. Only the log's own rows count: an expanded thread repeats ids inside
+// its root's row. Rows are in document order, so a binary search finds it.
+function topOfView(log: HTMLElement): { readonly id: string; readonly offset: number } | null {
+  const rows = log.querySelectorAll<HTMLElement>(':scope > .messages > li[data-message-id]');
+  const top = log.getBoundingClientRect().top;
+  let lo = 0;
+  let hi = rows.length - 1;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if ((rows[mid]?.getBoundingClientRect().bottom ?? 0) > top) hi = mid;
+    else lo = mid + 1;
+  }
+  const row = rows[lo];
+  if (row === undefined) return null;
+  return { id: row.dataset.messageId ?? '', offset: row.getBoundingClientRect().top - top };
+}
+
 // The open channel: its messages in id order, and the box to write in.
 export function Conversation({
   channelId,
   channel,
+  topic,
   chat,
   live,
   people: members,
@@ -535,10 +596,13 @@ export function Conversation({
   historyBounded = false,
   visibility,
   archived = false,
+  density = '',
 }: {
   // The channel is archived (issue #844): it opens read-only. History, search
   // and threads read as before; the composer is replaced by one line.
   readonly archived?: boolean;
+  // The chat density in force (issue #1497); a change of it keeps the reader's place.
+  readonly density?: string;
   // The viewer's own membership here has a history bound (history_after), so
   // what was said before they joined is not shown (issue #1034). False when
   // it has none or is not known yet: the page never claims hiding it cannot see.
@@ -550,6 +614,7 @@ export function Conversation({
   // without it nothing is kept.
   readonly channelId?: number;
   readonly channel: string;
+  readonly topic?: string;
   readonly chat: ChannelChat;
   readonly live: LiveStatus;
   readonly people: ReadonlyMap<number, Person>;
@@ -581,6 +646,9 @@ export function Conversation({
   // stay the member list alone.
   const authorIds = useMemo(() => [...new Set([...chat.byId.values()].filter((m) => m.guest_author === undefined).map((m) => m.author_id))], [chat.byId]);
   const people = useAuthorNames(channel, authorIds, members, onUnauthorized);
+  // A file name recorded later (an attachment's metadata loads) redraws the
+  // reply excerpts that quote it.
+  useKnownFileNames();
   const log = useRef<HTMLDivElement>(null);
   // Whether the reader is at the bottom, so new messages follow them.
   const atBottom = useRef(true);
@@ -589,6 +657,11 @@ export function Conversation({
   // renders in between (the request starting).
   const anchor = useRef<{ readonly height: number; readonly top: number; readonly oldest: number } | null>(null);
   const seen = useRef('');
+  // The message at the top of the view and how far below the log's top it
+  // sits, kept as the reader scrolls, so a change of chat density (which
+  // changes every message's height) can put that message back.
+  const view = useRef<{ readonly id: string; readonly offset: number } | null>(null);
+  const shownDensity = useRef(density);
   // The log's height as the observer below last handled it; null before it
   // has, or without one.
   const sized = useRef<number | null>(null);
@@ -727,6 +800,12 @@ export function Conversation({
     }
     setEditSettled(true);
   }, [chat.history, chat.byId, chat.older, chat.exhausted, viewerKind, viewer, onEdited, onLoadOlder]);
+  useEffect(() => {
+    if (edit !== null && chat.byId.get(edit.id)?.removed === true) {
+      focusBack.current = edit.id;
+      setEdit(null);
+    }
+  }, [chat.byId, edit]);
   const editMessage = edit?.id ?? null;
   const editText = edit?.text ?? '';
   useEffect(() => {
@@ -794,6 +873,11 @@ export function Conversation({
     const at = all.indexOf(item);
     let to: number;
     switch (event.key) {
+      case 'ArrowRight': {
+        const reaction = item.querySelector<HTMLButtonElement>(':scope > .reaction-controls [data-reaction-control]:not(:disabled):not([aria-disabled="true"])');
+        if (reaction !== null) { event.preventDefault(); reaction.focus(); }
+        return;
+      }
       case 'ArrowUp':
         to = Math.max(0, at - 1);
         break;
@@ -844,6 +928,23 @@ export function Conversation({
     else setUnseen(true);
   });
 
+  // A change of chat density makes every message taller or shorter without
+  // changing the newest one or the log: a reader at the bottom stays there,
+  // and one who has scrolled up keeps the message they were reading in view.
+  useLayoutEffect(() => {
+    if (shownDensity.current === density) return;
+    shownDensity.current = density;
+    const el = log.current;
+    if (el === null) return;
+    if (atBottom.current) {
+      el.scrollTop = el.scrollHeight;
+      return;
+    }
+    const held = view.current;
+    const row = held === null ? null : el.querySelector<HTMLElement>(`:scope > .messages > li[data-message-id="${held.id}"]`);
+    if (held !== null && row !== null) el.scrollTop += row.getBoundingClientRect().top - el.getBoundingClientRect().top - held.offset;
+  }, [density]);
+
   // Anything that changes the log's own height (the whisper picker, the voice
   // strip, a share's stage) keeps a reader at the newest message there; one
   // who has scrolled up is left where they are. Browsers without a
@@ -879,15 +980,18 @@ export function Conversation({
   }
 
   return (
-    <>
+    <ReactionScope key={`${String(viewer)}/${String(channelId ?? channel)}`} channel={channel} channelId={channelId ?? shown[0]?.channel_id ?? 0} ids={shown.filter((m) => m.removed !== true).map((m) => m.id)} onUnauthorized={onUnauthorized}>
       <header className="conv-head">
         <span className="hash" aria-hidden="true">
           #
         </span>
         {visibility === 'private' ? <PrivateMark /> : null}
-        <h2 id={headingId} tabIndex={-1}>
-          {channel}
-        </h2>
+        <div className="channel-heading">
+          <h2 id={headingId} tabIndex={-1}>
+            {channel}
+          </h2>
+          {topic === undefined || topic === '' ? null : <p className="channel-topic">{topic}</p>}
+        </div>
         {onSearch === undefined ? null : <button id="channel-search-open" type="button" onClick={onSearch}>Search</button>}
       </header>
       {live === 'reconnecting' ? <p className="stale banner">This conversation may be out of date</p> : null}
@@ -920,6 +1024,7 @@ export function Conversation({
             onBottom(atBottom.current);
             if (atBottom.current) setUnseen(false);
           }
+          view.current = topOfView(el);
           if (el.scrollTop === 0 && hasOlder && !loadingOlder && chat.older !== 'error') showOlder();
         }}
       >
@@ -949,6 +1054,7 @@ export function Conversation({
           {shown.map((message, i) => (
             <Message
               stop={message.id === stop}
+              reactionNavigation
               replies={replyCounts.get(message.id) ?? 0}
               {...(message.thread_root_id === undefined ? {} : { context: replyContext(chat.byId.get(message.thread_root_id), people) })}
               key={message.id}
@@ -1064,6 +1170,6 @@ export function Conversation({
         }}
       />
       )}
-    </>
+    </ReactionScope>
   );
 }
