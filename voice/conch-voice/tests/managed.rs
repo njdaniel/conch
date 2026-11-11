@@ -12,6 +12,10 @@
 //! tone, the speakers count, the keyboard is a named pipe, and LiveKit is the fake.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
+// Unix only: The rig reads its keyboard from a named pipe made with mkfifo. Windows runs
+// the unit tests in `src/`, which include the answers a non-Unix platform gives, and the
+// tests in this directory that need none of this (#1309).
+#![cfg(unix)]
 
 mod support;
 
@@ -595,6 +599,136 @@ async fn leave_while_the_talk_key_is_held_has_no_release_tail_and_ends_within_it
     assert_eq!(last.phase, VoiceControlPhase::Stopped);
     assert_eq!(last.reason, Some(VoiceControlReason::Left));
     assert_eq!(rig.conchd.reported(), ["started", "stopped"]);
+}
+
+/// Issue #1685: the owner writes `leave` and closes standard input in the same tick (the
+/// supervisor's first step, `docs/design/tui-voice.md` §8.5). The end of input is not
+/// owner loss here: the room step is not cut at the owner-loss step of 1 s, so the LiveKit
+/// Leave is sent even when leaving the room takes longer. The process still ends within
+/// the owner-loss bound.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn leave_then_the_end_of_input_in_the_same_tick_lets_the_room_close_finish() {
+    let mut rig = ManagedRig::start().await;
+    rig.send_start();
+    rig.ready().await;
+    rig.sdk.close_takes(Duration::from_millis(1500));
+
+    let asked = Instant::now();
+    rig.send(&ManagedRig::command("leave", 2, json!({})));
+    rig.close();
+    let code = rig.exit_code().await;
+    let exited = asked.elapsed();
+    assert_eq!(code, 0);
+    assert_eq!(rig.sdk.closed(), 1, "the room close was cancelled");
+    assert!(
+        exited >= Duration::from_millis(1500),
+        "ended {exited:?} after leave, before the room was left"
+    );
+    assert!(
+        exited < Duration::from_millis(conch_voice_api::VOICE_CONTROL_OWNER_LOSS_EXIT_MS),
+        "ended {exited:?} after leave"
+    );
+    assert!(rig.ack(2).await.ok);
+    let last = rig.state().unwrap();
+    assert_eq!(last.phase, VoiceControlPhase::Stopped);
+    assert_eq!(last.reason, Some(VoiceControlReason::Left));
+}
+
+/// The end of input with no `leave` is owner loss: the room step is cut at 1 s, the
+/// abandoned leave is logged, and the process ends within the owner-loss bound.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_end_of_input_without_leave_cuts_the_room_step_at_one_second_and_says_so() {
+    let log = helper_log();
+    let mut rig = ManagedRig::start().await;
+    rig.send_start();
+    rig.ready().await;
+    rig.sdk.close_takes(Duration::from_millis(2500));
+    let before = log
+        .text()
+        .matches("the room leave was abandoned after 1000 ms")
+        .count();
+
+    let gone = Instant::now();
+    rig.close();
+    let code = rig.exit_code().await;
+    let exited = gone.elapsed();
+    assert_eq!(code, 0);
+    assert_eq!(rig.sdk.closed(), 0, "the room close was waited for");
+    assert!(
+        exited >= conch_voice::managed::OWNER_LOST_STEP,
+        "ended {exited:?}, before the room step's second"
+    );
+    assert!(
+        exited < Duration::from_millis(conch_voice_api::VOICE_CONTROL_OWNER_LOSS_EXIT_MS),
+        "ended {exited:?} after the owner went"
+    );
+    let after = log
+        .text()
+        .matches("the room leave was abandoned after 1000 ms")
+        .count();
+    assert!(after > before, "the abandoned leave was not logged");
+}
+
+/// Issue #1690: a signal first, then the owner's `leave` and the end of input. The owner
+/// asked to leave, so the room step keeps its full limit whatever came first; the process
+/// is still bounded by the owner-loss watchdog.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_signal_then_leave_and_the_end_of_input_lets_the_room_close_finish() {
+    let mut rig = ManagedRig::start().await;
+    rig.send_start();
+    rig.ready().await;
+    rig.sdk.close_takes(Duration::from_millis(1500));
+
+    let asked = Instant::now();
+    rig.signal();
+    rig.send(&ManagedRig::command("leave", 2, json!({})));
+    rig.close();
+    let code = rig.exit_code().await;
+    let exited = asked.elapsed();
+    assert_eq!(code, 0);
+    assert_eq!(rig.sdk.closed(), 1, "the room close was cancelled");
+    assert!(
+        exited >= Duration::from_millis(1500),
+        "ended {exited:?} after the signal, before the room was left"
+    );
+    assert!(
+        exited < Duration::from_millis(conch_voice_api::VOICE_CONTROL_OWNER_LOSS_EXIT_MS),
+        "ended {exited:?} after the signal"
+    );
+}
+
+/// A signal alone is today's behaviour: reason `signal`, the room step given `ROOM_LIMIT`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_signal_alone_gives_the_room_step_its_full_limit() {
+    let mut rig = ManagedRig::start().await;
+    rig.send_start();
+    rig.ready().await;
+    rig.sdk.close_takes(Duration::from_millis(1500));
+    rig.signal();
+    assert_eq!(rig.exit_code().await, 0);
+    assert_eq!(rig.sdk.closed(), 1, "the room close was cancelled");
+    let last = rig.state().unwrap();
+    assert_eq!(last.reason, Some(VoiceControlReason::Signal));
+}
+
+/// A signal and then the end of input, with no `leave`, is owner loss: the room step is
+/// cut at 1 s, as before.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_signal_then_the_end_of_input_without_leave_cuts_the_room_step_at_one_second() {
+    let mut rig = ManagedRig::start().await;
+    rig.send_start();
+    rig.ready().await;
+    rig.sdk.close_takes(Duration::from_millis(1500));
+    let gone = Instant::now();
+    rig.signal();
+    rig.close();
+    assert_eq!(rig.exit_code().await, 0);
+    assert!(
+        gone.elapsed() < Duration::from_millis(1400),
+        "{:?}",
+        gone.elapsed()
+    );
+    assert_eq!(rig.sdk.closed(), 0);
 }
 
 /// Issue #631: under load, the thread handing a frame to the track can be taken away after
@@ -1303,6 +1437,92 @@ async fn a_withheld_voice_is_named_to_the_owner_and_join_says_what_it_always_sai
         })
     );
     assert!(!written.contains("voice_not_allowed"), "{written}");
+}
+
+/// Issue #1457: conchd closes a kicked member's presence socket 1008 `voice_removed`
+/// (#1409), and the helper stops by its policy. A v2 owner is told why, in the protocol's
+/// own word, and never internal_error; a v1 owner, whose vocabulary is the one v1 was
+/// published with, is told internal_error as before, and never reads the new word. Either
+/// way the helper exits 1 and asks conchd for no second session.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn removed_from_voice_is_named_to_a_v2_owner_and_a_v1_owner_is_told_what_it_always_was() {
+    for v2 in [true, false] {
+        let mut rig = ManagedRig::start().await;
+        if v2 {
+            rig.send_start_v2();
+            rig.ready_v2().await;
+        } else {
+            rig.send_start();
+            rig.ready().await;
+        }
+        rig.until("the presence socket", |rig| {
+            rig.conchd.presence_sockets() == 1
+        })
+        .await;
+        rig.conchd.close_presence(1008, "voice_removed");
+        assert_eq!(rig.exit_code().await, 1, "v2: {v2}");
+        assert_eq!(
+            rig.conchd.session_requests(),
+            1,
+            "it does not go back for a session: conchd would grant one"
+        );
+
+        // Every state after connected, as (phase, reason): stopping at most, then failed.
+        let after: Vec<(VoiceControlPhase, Option<VoiceControlReason>)> = if v2 {
+            // Read by v2's reader, whose Validate is Go's.
+            let states = rig.states_v2();
+            states
+                .iter()
+                .skip_while(|state| state.phase != VoiceControlPhase::Connected)
+                .filter(|state| state.phase != VoiceControlPhase::Connected)
+                .map(|state| (state.phase, state.reason))
+                .collect()
+        } else {
+            // Read by v1's reader, which refuses a state with voice_removed.
+            rig.read()
+                .iter()
+                .filter_map(phase_of)
+                .skip_while(|(phase, _)| *phase != VoiceControlPhase::Connected)
+                .filter(|(phase, _)| *phase != VoiceControlPhase::Connected)
+                .collect()
+        };
+        let want = if v2 {
+            VoiceControlReason::VoiceRemoved
+        } else {
+            VoiceControlReason::InternalError
+        };
+        assert_eq!(
+            after.last(),
+            Some(&(VoiceControlPhase::Failed, Some(want))),
+            "v2: {v2}: {after:?}"
+        );
+        for (phase, reason) in &after {
+            assert!(
+                matches!(
+                    phase,
+                    VoiceControlPhase::Stopping | VoiceControlPhase::Failed
+                ),
+                "v2: {v2}: {after:?}"
+            );
+            assert_eq!(*reason, Some(want), "v2: {v2}: {after:?}");
+        }
+        let lines = rig.lines();
+        assert_eq!(
+            lines.iter().any(|line| line.contains("voice_removed")),
+            v2,
+            "{lines:?}"
+        );
+        if v2 {
+            // The last state is the golden one, but for what this session's own were.
+            let last: Value = serde_json::from_str(lines.last().unwrap()).unwrap();
+            let golden = fixture_v2("event-state-failed-voice-removed.json");
+            for field in [
+                "schema", "kind", "phase", "reason", "capture", "playback", "blocked",
+            ] {
+                assert_eq!(last[field], golden[field], "{field}");
+            }
+        }
+    }
 }
 
 // ------------------------------------------------------------------ the open microphone
@@ -2778,4 +2998,48 @@ async fn a_device_that_cannot_be_opened_is_logged_without_its_name() {
     );
     assert!(!written.contains("_FAKE_name"), "{written}");
     assert!(!rig.events.text().contains("_FAKE_name"));
+}
+
+/// #1631: without `--no-mute-key` the mute key mutes, as the TUI relies on; with it, the
+/// key changes nothing, so a session the owner muted (the desktop's lock) stays muted. The
+/// deafen key struck after the mute key is the barrier: keys come off one pipe in order, so
+/// once it has been taken, the mute key before it has been taken too.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_mute_key_mutes_unless_the_owner_started_the_helper_with_no_mute_key() {
+    // As the TUI starts it: the key toggles the mute.
+    let mut rig = ManagedRig::start().await;
+    rig.send_start();
+    rig.ready().await;
+    rig.strike_mute();
+    rig.until("muted by the key", |rig| rig.state().unwrap().muted)
+        .await;
+    rig.close();
+    assert_eq!(rig.exit_code().await, 0);
+
+    // As the desktop starts it: muted by the owner, then the key is struck.
+    let setup = ManagedSetup {
+        no_mute_key: true,
+        ..ManagedSetup::default()
+    };
+    let mut rig = ManagedRig::start_with(Stub::start().await, setup, |_| {}).await;
+    rig.send_start();
+    rig.ready().await;
+    rig.send(&ManagedRig::command("set_mute", 2, json!({"muted": true})));
+    assert!(rig.ack(2).await.ok);
+    assert!(rig.state().unwrap().muted);
+    rig.strike_mute();
+    rig.strike_deafen();
+    rig.until("the deafen key taken", |rig| rig.state().unwrap().deafened)
+        .await;
+    assert!(
+        rig.state().unwrap().muted,
+        "the mute key unmuted the session"
+    );
+    assert_eq!(
+        rig.sdk.count(Call::Unmute),
+        0,
+        "the mute key unmuted the track"
+    );
+    rig.close();
+    assert_eq!(rig.exit_code().await, 0);
 }

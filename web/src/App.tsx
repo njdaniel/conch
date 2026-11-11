@@ -20,6 +20,7 @@ import { OperatorWarning } from './OperatorWarning';
 import { archivedLine, channelArchived, isArchived } from './archived';
 import { ChannelSettingsAsk } from './ChannelSettingsAsk';
 import { RenameChannel } from './RenameChannel';
+import { SetTopic } from './SetTopic';
 import { channelFromHash, forgetChannel, hashForChannel, rememberChannel, rememberedChannel, showChannelInAddress, takeLinkFromAddress } from './route';
 import type { ChannelDocV1 } from './schema/channel';
 import type { WhoAmIResponseV1 } from './schema/principal';
@@ -489,6 +490,7 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
   const onChannel = useCallback(
     (doc: ChannelDocV1) => {
       renamed(doc.channel_id, doc.name);
+      dispatchChannels({ type: 'topic', id: doc.channel_id, topic: doc.topic });
       dispatchChannels({ type: 'settings', id: doc.channel_id, visibility: doc.visibility, default: doc.default, archivedAt: doc.archived_at });
     },
     [renamed, dispatchChannels],
@@ -1848,6 +1850,8 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
             : {})}
           onSettingsOpen={readWho}
           admin={
+            // By role on purpose: the console's routes are accessOperator, and
+            // its sections gate their own writes with canDo.
             auth.principal.role === 'operator' ? (
               // The names the page knows are the open channel's members.
               <AdminConsole
@@ -1884,9 +1888,10 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
               onOpen={onOpen}
             /></ModerationScope>
           }
-          // Operators and each channel's managers may rename it, from that
-          // row's ⋯ menu (issues #728, #1135). A visit gets no rename.
-          canRename={(channel) => visit === null && (auth.principal.role === 'operator' || channel.manages === true)}
+          // Operators and each channel's managers may rename it, and set its
+          // topic, from that row's ⋯ menu (issues #728, #1135, #1504). A visit
+          // gets neither.
+          canRename={(channel) => visit === null && (canDo(auth.principal, 'manage_channels') || channel.manages === true)}
           renderRename={(channel, close) => (
             <RenameChannel
               channel={channel}
@@ -1894,6 +1899,17 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
                 renamed(renamedTo.id, renamedTo.name);
               }}
               onStale={refind}
+              onUnauthorized={onUnauthorized}
+              onClose={close}
+            />
+          )}
+          canSetTopic={(channel) => visit === null && (canDo(auth.principal, 'manage_channels') || channel.manages === true)}
+          renderTopic={(channel, close) => (
+            <SetTopic
+              channel={channel}
+              onSet={(updated) => {
+                dispatchChannels({ type: 'topic', id: updated.id, topic: updated.topic });
+              }}
               onUnauthorized={onUnauthorized}
               onClose={close}
             />
@@ -1969,10 +1985,16 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
             visit === null ? <InvitePanel origin={origin} me={auth.principal} request={inviteAsk} onUnauthorized={onUnauthorized} /> : null
           }
           firstRun={
-            // An operator on a server with no channels is shown what to do
-            // first; anyone else keeps the channel list's own line.
-            channels.loaded && channels.channels.length === 0 && auth.principal.role === 'operator' && visit === null ? (
+            // Whoever may make a channel (POST /v1/channels checks
+            // create_public_channels and create_private_channels in the
+            // store) on a server with no channels is shown what to do first;
+            // anyone else keeps the channel list's own line.
+            channels.loaded &&
+            channels.channels.length === 0 &&
+            (canDo(auth.principal, 'create_public_channels') || canDo(auth.principal, 'create_private_channels')) &&
+            visit === null ? (
               <FirstRun
+                operator={auth.principal.role === 'operator'}
                 onMakeChannel={() => {
                   setCreateAsks((n) => n + 1);
                 }}
@@ -2006,6 +2028,7 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
                 historyBounded={agents.membersFor === channelId && (agents.members.find((m) => m.principal_id === auth.principal.id)?.history_after ?? 0) > 0}
                 channelId={channelId}
                 channel={selected}
+                topic={currentChannel?.topic}
                 {...(currentChannel?.visibility === undefined ? {} : { visibility: currentChannel.visibility })}
                 archived={isArchived(currentChannel)}
                 chat={chatFor(chat, selected)}

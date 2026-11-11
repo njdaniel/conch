@@ -1085,19 +1085,25 @@ var reasonWords = map[string]string{
 	string(schema.VoiceControlReasonNotAMember):         "not a member of this channel",
 	string(schema.VoiceControlReasonVoiceNotConfigured): "this server has no voice",
 	string(schema.VoiceControlReasonDuplicateIdentity):  "this account joined voice elsewhere (a retry disconnects the other)",
-	string(schema.VoiceControlReasonAudioUnavailable):   "audio unavailable (PipeWire or the speakers)",
-	string(schema.VoiceControlReasonStartTimeout):       "conch-voice was not told to start in time",
-	string(schema.VoiceControlReasonProtocolError):      "conch-voice could not understand conch",
-	string(schema.VoiceControlReasonInternalError):      "conch-voice failed",
-	voicehelper.ReasonHelperNotFound:                    "conch-voice not found: install it beside conch or in PATH, or set CONCH_VOICE_HELPER",
-	voicehelper.ReasonHelperUntrusted:                   "conch-voice is not safe to run (see /voice status)",
-	voicehelper.ReasonHelperIncompatible:                "conch-voice does not match this conch: install the same release",
-	voicehelper.ReasonSpawnFailed:                       "conch-voice could not be started",
-	voicehelper.ReasonHelloTimeout:                      "conch-voice did not start in time",
-	voicehelper.ReasonAckTimeout:                        "conch-voice stopped answering",
-	voicehelper.ReasonBadEvent:                          "conch-voice broke the control protocol",
-	voicehelper.ReasonHelperExited:                      "conch-voice ended without saying why",
-	voicehelper.ReasonHelperCrashed:                     "conch-voice crashed",
+	// Issue #1457. A reason of conch.voice_control.v2 alone: a v1 helper
+	// still says internal_error. The TUI speaks v2 to a helper that offers
+	// it (voicehelper, issue #1718), so a moderator's voice kick reaches the
+	// helper status in these words; the removal itself is also shown from the
+	// TUI's own presence socket (voiceRemoved in voice.go, issue #1456).
+	string(schema.VoiceControlReasonVoiceRemoved):     "removed from voice; you are still a member and may join again",
+	string(schema.VoiceControlReasonAudioUnavailable): "audio unavailable (PipeWire or the speakers)",
+	string(schema.VoiceControlReasonStartTimeout):     "conch-voice was not told to start in time",
+	string(schema.VoiceControlReasonProtocolError):    "conch-voice could not understand conch",
+	string(schema.VoiceControlReasonInternalError):    "conch-voice failed",
+	voicehelper.ReasonHelperNotFound:                  "conch-voice not found: install it beside conch or in PATH, or set CONCH_VOICE_HELPER",
+	voicehelper.ReasonHelperUntrusted:                 "conch-voice is not safe to run (see /voice status)",
+	voicehelper.ReasonHelperIncompatible:              "conch-voice does not match this conch: install the same release",
+	voicehelper.ReasonSpawnFailed:                     "conch-voice could not be started",
+	voicehelper.ReasonHelloTimeout:                    "conch-voice did not start in time",
+	voicehelper.ReasonAckTimeout:                      "conch-voice stopped answering",
+	voicehelper.ReasonBadEvent:                        "conch-voice broke the control protocol",
+	voicehelper.ReasonHelperExited:                    "conch-voice ended without saying why",
+	voicehelper.ReasonHelperCrashed:                   "conch-voice crashed",
 }
 
 // voiceReasonWords is reason in words; one this TUI does not know is shown as
@@ -1165,6 +1171,13 @@ func (m Model) voiceSelf() string {
 	case voicehelper.PhaseStopped:
 		text = "voice off (" + voiceReasonWords(st.Reason) + ") · /voice join"
 	case voicehelper.PhaseFailed:
+		if openMicMayBeLive(st) {
+			// conch stopped a helper it no longer believes (it hung, or broke
+			// the protocol) and has not yet seen the process end: an open
+			// microphone sends on its own sound until the helper is signalled.
+			text = "voice: stopping conch-voice (open mic may still be live)"
+			break
+		}
 		text = "voice stopped: " + voiceReasonWords(st.Reason)
 		if st.Retryable {
 			text += " · /voice retry"
@@ -1189,9 +1202,29 @@ func (m Model) voiceSelf() string {
 	return text
 }
 
+// openMicMayBeLive reports whether a failed status is one of a helper that has
+// not been reaped yet and was in open mode with its microphone on: the
+// supervisor keeps the last confirmed state when it fails a run itself, and
+// clears the capture only once the process has ended. A final state from the
+// helper has capture off, so it is never this.
+func openMicMayBeLive(st voicehelper.Status) bool {
+	return st.Phase == voicehelper.PhaseFailed && st.TalkMode == schema.VoiceControlTalkModeOpen &&
+		st.Capture == schema.VoiceControlCaptureOn
+}
+
+// blockText is a block reason in words, for a session in the talk mode of st:
+// the limit in open mode stands until the microphone is quiet, not until a
+// key is released.
+func blockText(st voicehelper.Status, b schema.VoiceControlBlock) string {
+	if b == schema.VoiceControlBlockMaxTransmit && st.TalkMode == schema.VoiceControlTalkModeOpen {
+		return "talk limit reached: stands until quiet"
+	}
+	return wordOr(blockWords, b)
+}
+
 // connectedParts are the strip's words for a connected helper: capture and
-// transmission apart (a joined person with the gate shut is "mic on"), mute
-// and deafen, and the talk key.
+// transmission apart (a joined person with the gate shut is "mic on"), an
+// open microphone, mute and deafen, and the talk key.
 func connectedParts(st voicehelper.Status) []string {
 	var parts []string
 	switch {
@@ -1206,26 +1239,41 @@ func connectedParts(st voicehelper.Status) []string {
 	default:
 		parts = append(parts, "mic off")
 	}
+	// An open microphone (a v2 session whose voice.toml says so) sends on the
+	// microphone's own sound, so it is always said, and the talk key is not
+	// what to hold.
+	open := st.TalkMode == schema.VoiceControlTalkModeOpen
+	if open {
+		parts = append(parts, "open mic")
+	}
 	if st.Muted {
 		parts = append(parts, "muted")
 	}
 	if st.Deafened {
 		parts = append(parts, "deafened")
 	}
+	// The talk key is not what opens the gate in open mode, so nothing is
+	// said about it there.
 	switch st.PTT {
 	case schema.VoiceControlPTTReady:
-		if len(st.Blocked) == 0 && !st.Transmitting {
+		if len(st.Blocked) == 0 && !st.Transmitting && !open {
 			parts = append(parts, "hold the talk key to talk")
 		}
 	case schema.VoiceControlPTTNotConfigured:
-		parts = append(parts, "no talk key: set [keys] in voice.toml (conch-voice devices)")
+		if !open {
+			parts = append(parts, "no talk key: set [keys] in voice.toml (conch-voice devices)")
+		}
 	case schema.VoiceControlPTTUnavailable:
-		parts = append(parts, "talk key unavailable ("+wordOr(pttProblemWords, st.PTTProblem)+")")
+		if !open {
+			parts = append(parts, "talk key unavailable ("+wordOr(pttProblemWords, st.PTTProblem)+")")
+		}
 	case schema.VoiceControlPTTLost:
-		parts = append(parts, "talk key lost: presses refused")
+		if !open {
+			parts = append(parts, "talk key lost: presses refused")
+		}
 	}
 	if slices.Contains(st.Blocked, schema.VoiceControlBlockMaxTransmit) {
-		parts = append(parts, blockWords[schema.VoiceControlBlockMaxTransmit])
+		parts = append(parts, blockText(st, schema.VoiceControlBlockMaxTransmit))
 	}
 	return parts
 }
@@ -1270,6 +1318,22 @@ func (m Model) voiceStatusLines(cols int) []string {
 			schema.VoiceControlCaptureUnavailable: "unavailable",
 		}, st.Capture))
 		add("transmitting", yesNo[st.Transmitting])
+		if st.Protocol == schema.VoiceControlSchemaV2 {
+			// Said as what was last true once the helper is not running.
+			modeRow, speakersRow := "talk mode", "speakers"
+			if st.Phase == voicehelper.PhaseFailed || st.Phase == voicehelper.PhaseStopped {
+				modeRow, speakersRow = "last talk mode", "last speakers"
+			}
+			add(modeRow, wordOr(map[schema.VoiceControlTalkMode]string{
+				schema.VoiceControlTalkModePushToTalk: "push to talk: hold the talk key",
+				schema.VoiceControlTalkModeOpen:       "open microphone: your microphone's own sound opens the gate, no key needed",
+			}, st.TalkMode))
+			add(speakersRow, wordOr(map[schema.VoiceControlPlayback]string{
+				schema.VoiceControlPlaybackOn:          "on",
+				schema.VoiceControlPlaybackOff:         "off",
+				schema.VoiceControlPlaybackUnavailable: "unavailable",
+			}, st.Playback))
+		}
 		add("muted", yesNo[st.Muted])
 		add("deafened", yesNo[st.Deafened])
 		key := wordOr(map[schema.VoiceControlPTT]string{
@@ -1284,14 +1348,24 @@ func (m Model) voiceStatusLines(cols int) []string {
 		}
 		add("talk key", key)
 		press := "would transmit"
+		if st.TalkMode == schema.VoiceControlTalkModeOpen {
+			press = "would open the gate: your microphone's sound would be sent"
+		}
 		if len(st.Blocked) > 0 {
 			var why []string
 			for _, b := range st.Blocked {
-				why = append(why, wordOr(blockWords, b))
+				why = append(why, blockText(st, b))
 			}
 			press = "would do nothing: " + strings.Join(why, ", ")
 		}
-		add("a press now", press)
+		pressRow := "a press now"
+		if st.TalkMode == schema.VoiceControlTalkModeOpen {
+			pressRow = "an onset now"
+		}
+		add(pressRow, press)
+		if openMicMayBeLive(st) {
+			add("warning", "conch-voice is being stopped and its open microphone may still be live until it ends")
+		}
 		if st.Reason != "" {
 			add("reason", voiceReasonWords(st.Reason)+" ("+sanitize(st.Reason)+")")
 		}
@@ -1308,6 +1382,9 @@ func (m Model) voiceStatusLines(cols int) []string {
 	}
 	if st.HelperVersion != "" {
 		add("helper version", sanitize(st.HelperVersion))
+	}
+	if st.Protocol != "" {
+		add("protocol", sanitize(st.Protocol))
 	}
 	path := sanitize(m.vc.path)
 	if path == "" {

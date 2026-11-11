@@ -22,9 +22,11 @@ use conch_voice::{LAST_WORDS_LIMIT, error_line, panic_line};
 use log::LevelFilter;
 
 fn main() {
+    // The time the events endpoint may take to attach is counted from here (`channel`).
+    conch_voice::channel::process_start();
     // A managed helper's owner is the process that started it: recorded before anything
     // else, so that an owner that dies at any moment after is noticed (`managed.rs`).
-    let parent = std::os::unix::process::parent_id();
+    let parent = conch_voice::managed::parent_id();
     // First, before the command line is even read: from here on every log record in the
     // process goes through this logger, and nothing can install another.
     let scrubber = Scrubber::new();

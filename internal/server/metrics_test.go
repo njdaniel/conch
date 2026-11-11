@@ -13,6 +13,7 @@ import (
 
 	"github.com/coder/websocket"
 
+	"github.com/njdaniel/conch/internal/server/push"
 	"github.com/njdaniel/conch/pkg/schema"
 )
 
@@ -650,6 +651,8 @@ func TestMetricsLabelValues(t *testing.T) {
 				"conch_messages_posted_total":         {"kind": set(metricsPrincipalKinds...)},
 				"conch_auth_failures_total":           {"reason": set(metricsAuthFailureReasons...)},
 				"conch_problem_reports_total":         {},
+				"conch_push_wakes_total":              {"transport": set(push.TransportWebPush), "outcome": set(push.Outcomes()...)},
+				"conch_push_failures_total":           {"transport": set(push.TransportWebPush), "class": set(push.Classes()...)},
 				"conch_build_info":                    {"version": set("v1.2.3-test")},
 			}
 			seen := map[string]bool{}

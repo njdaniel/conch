@@ -88,6 +88,11 @@ export function useNotifications({
   const previousLive = useRef(false);
   const latestOpen = useRef(onOpen);
   latestOpen.current = onOpen;
+  // The channels as of the latest render, so a click on a notification shown
+  // earlier resolves the channel by id to its name now, not to the name it
+  // had when the notification was shown (issue #1620).
+  const latestChannels = useRef(channels);
+  latestChannels.current = channels;
   const skipWrite = useRef(true);
 
   const close = useCallback((id: string) => {
@@ -177,11 +182,19 @@ export function useNotifications({
       const title = mention ? `Mention in #${channel.name}` : `New message in #${channel.name}`;
       const notification = platform.services.notifications.show(title, snippet(message), id, channel.name);
       natives.current.set(id, notification);
+      // The name passed to show() is the one the desktop bridge needs when it
+      // raises the notification; the click itself opens by id (issue #1620).
+      const channelId = channel.id;
       notification.onclick = () => {
+        // A notification already closed (access withdrawn, message removed)
+        // is stale: a late click opens nothing.
+        const live = natives.current.get(id) === notification;
         window.focus();
         close(id);
         setAlerts((previous) => previous.filter((candidate) => candidate.id !== id));
-        latestOpen.current(channel.name);
+        if (!live) return;
+        const current = latestChannels.current.find((candidate) => candidate.id === channelId);
+        if (current !== undefined) latestOpen.current(current.name);
       };
     }
   }, [signedIn, eventsLive, principal, preferences, browserPermission, channels, origin, account, close]);

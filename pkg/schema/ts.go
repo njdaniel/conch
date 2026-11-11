@@ -108,6 +108,9 @@ var TSConstants = []TSConstant{
 	// The community model (ADR-013, issue #978): the authors route's batch
 	// size, and the default expiry the link form shows when none is typed.
 	{Name: "MAX_CHANNEL_AUTHOR_IDS", Value: MaxChannelAuthorIDs},
+	// The channel topic (issue #1503): the page bounds its control by the
+	// number the server refuses at.
+	{Name: "MAX_CHANNEL_TOPIC_LENGTH", Value: MaxChannelTopicLength},
 	{Name: "DEFAULT_MEMBER_LINK_EXPIRY_SECONDS", Value: DefaultMemberLinkExpirySeconds},
 
 	// AI administrators (issue #1326): the bounds of an agent's admin
@@ -141,6 +144,8 @@ var TSTypes = []TSType{
 	{Value: RenameChannelRequestV1{}, Family: "rename-channel-request-v1"},
 	{Value: RenameChannelResponseV1{}, Family: "rename-channel-response-v1"},
 	{Value: ChannelDocV1{}, Family: "channel-v1", Schema: ChannelSchemaV1},
+	{Value: SetChannelTopicRequestV1{}, Family: "set-channel-topic-request-v1"},
+	{Value: SetChannelTopicResponseV1{}, Family: "set-channel-topic-response-v1"},
 	{Value: ChannelMemberV1{}, Family: "channel-member-v1"},
 	{Value: ListChannelMembersResponseV1{}, Family: "list-channel-members-response-v1"},
 	{Value: ChannelMembersV1{}, Family: "channel-members-v1", Schema: ChannelMembersSchemaV1},
@@ -496,6 +501,23 @@ var TSTypes = []TSType{
 	{Value: PutAgentManifestRequestV1{}, Family: "put-agent-manifest-request-v1"},
 	{Value: GetAgentManifestResponseV1{}, Family: "get-agent-manifest-response-v1"},
 
+	// Phone push and notification preferences (issue #1712,
+	// docs/design/mobile-notifications.md §9.1): the wake, a credential's
+	// registrations and the server's transports, then the preferences and
+	// the pending feed. OwnCredentialV1 above carries the additive push
+	// field. The mention rule (Mentions) is not a type: the web client's own
+	// matcher is checked against testdata/rules/mentions.json.
+	{Value: PushWakeV1{}, Family: "push-wake-v1", Schema: PushWakeSchemaV1},
+	{Value: PushRegistrationV1{}, Family: "push-registration-v1"},
+	{Value: CreatePushRegistrationRequestV1{}, Family: "create-push-registration-request-v1"},
+	{Value: UpdatePushRegistrationRequestV1{}, Family: "update-push-registration-request-v1"},
+	{Value: ListOwnPushRegistrationsResponseV1{}, Family: "list-own-push-registrations-response-v1"},
+	{Value: PushConfigV1{}, Family: "push-config-v1"},
+	{Value: NotificationPreferencesV1{}, Family: "notification-preferences-v1"},
+	{Value: PutNotificationPreferencesRequestV1{}, Family: "put-notification-preferences-request-v1"},
+	{Value: NotificationSummaryV1{}, Family: "notification-summary-v1", Schema: NotificationSummarySchemaV1},
+	{Value: ListPendingNotificationsResponseV1{}, Family: "list-pending-notifications-response-v1"},
+
 	// The body of every refusal.
 	{Value: Error{}, Name: "ErrorV0", Family: "error"},
 }
@@ -592,6 +614,9 @@ var TSVocabularyModes = map[string]TSVocabularyMode{
 	// and a later kind of thing one acts on, which the page shows by name.
 	"AdminAction":     TSTolerant,
 	"AdminTargetKind": TSTolerant,
+	// The pending feed (notification.go, issue #1712): a later reason for a
+	// message to be in it. A phone still renders the summary.
+	"NotificationKind": TSTolerant,
 
 	// Strict: a union's tag. tagged() picks the variant by it and has no
 	// shape for a value it does not know.
@@ -682,6 +707,19 @@ var TSVocabularyModes = map[string]TSVocabularyMode{
 	"VoiceControlTalkMode":    TSStrict,
 	"VoiceDevicesConfig":      TSStrict,
 	"VoiceDevicesPipeWire":    TSStrict,
+
+	// Phone push and notification preferences (issue #1712). Strict: the
+	// policy and the platform, which a client writes itself, and the end
+	// reason, an audit detail that no generated type carries. Tolerant: the
+	// transport and the provider, which a client also reads in
+	// PushConfigV1, so that a later server offering a new one (the relay,
+	// #1716) costs an older client only that one entry, not the whole
+	// config.
+	"NotificationPolicy":        TSStrict,
+	"PushPlatform":              TSStrict,
+	"PushProvider":              TSTolerant,
+	"PushRegistrationEndReason": TSStrict,
+	"PushTransport":             TSTolerant,
 
 	// Strict: agent manifests and the Leviathan payload, which no generated
 	// client reads today. Strict is the default; a vocabulary becomes

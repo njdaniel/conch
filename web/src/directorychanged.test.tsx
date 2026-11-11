@@ -158,12 +158,22 @@ describe('the community follows the server', () => {
 
   it('adds and removes the Operator mark on a community row, and drops a disabled agent with its mark, from the frame alone', async () => {
     const events = await openChat();
+    // The page reads the directory behind a coalescing timer
+    // (directoryCoalesce); the test advances that timer itself, so none of the
+    // four frames below waits on the wall clock.
+    vi.useFakeTimers({ shouldAdvanceTime: true, toFake: ['setTimeout', 'clearTimeout'] });
+    const frameRead = async () => {
+      events.send(frame);
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(directoryCoalesce);
+      });
+    };
     const row = (name: string): HTMLElement | undefined =>
       Array.from(screen.getByRole('list', { name: 'People' }).querySelectorAll<HTMLElement>('li.community-member')).find((li) => li.querySelector('.community-name')?.textContent === name);
     const marks = (name: string) => Array.from(row(name)?.querySelectorAll('[data-identity]') ?? []).map((m) => m.getAttribute('data-identity'));
     const bot = { id: 5, kind: 'agent', name: 'bot', created_at: at };
     server.directory = [person(2, 'ada'), person(3, 'bob'), person(4, 'cyd'), bot];
-    events.send(frame);
+    await frameRead();
     await waitFor(() => {
       expect(marks('bot')).toEqual(['agent']);
     });
@@ -171,20 +181,20 @@ describe('the community follows the server', () => {
     expect(marks('bob')).toEqual([]);
 
     server.directory = [person(2, 'ada'), { ...person(3, 'bob'), role: 'operator' }, person(4, 'cyd'), bot];
-    events.send(frame);
+    await frameRead();
     await waitFor(() => {
       expect(marks('bob')).toEqual(['operator']);
     });
     expect(row('bob')).toBe(held);
 
     server.directory = [person(2, 'ada'), person(3, 'bob'), person(4, 'cyd'), bot];
-    events.send(frame);
+    await frameRead();
     await waitFor(() => {
       expect(marks('bob')).toEqual([]);
     });
 
     server.directory = [person(2, 'ada'), person(3, 'bob'), person(4, 'cyd')];
-    events.send(frame);
+    await frameRead();
     await waitFor(() => {
       expect(row('bot')).toBeUndefined();
     });

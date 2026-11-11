@@ -317,6 +317,9 @@ func (s *Store) RevokeIssued(ctx context.Context, actor string, actorID, issuerI
 				credentialDetail(c.id, c.label)+" reason="+reason, now); err != nil {
 				return err
 			}
+			if err := endCredentialNotificationsTx(ctx, tx, actor, c.id, now); err != nil {
+				return err
+			}
 			if err := endCredentialSessionsTx(ctx, tx, actor, c.id, SessionEndedByRevocation, now, &runs); err != nil {
 				return err
 			}

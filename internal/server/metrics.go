@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"slices"
 	"strconv"
 	"time"
 
@@ -15,6 +16,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/collectors"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
+	"github.com/njdaniel/conch/internal/server/push"
 	"github.com/njdaniel/conch/internal/server/store"
 	"github.com/njdaniel/conch/pkg/schema"
 )
@@ -146,6 +148,8 @@ type serverMetrics struct {
 	messagesPosted *prometheus.CounterVec
 	authFailures   *prometheus.CounterVec
 	problemReports prometheus.Counter
+	pushWakes      *prometheus.CounterVec
+	pushFailures   *prometheus.CounterVec
 }
 
 // newServerMetrics builds s's registry: its own metrics, the state collector,
@@ -186,6 +190,14 @@ func newServerMetrics(s *Server) *serverMetrics {
 			Name: "conch_problem_reports_total",
 			Help: "Problem reports received.",
 		}),
+		pushWakes: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "conch_push_wakes_total",
+			Help: "Phone wakes, by transport and what became of each. Zero when push is off.",
+		}, []string{"transport", "outcome"}),
+		pushFailures: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "conch_push_failures_total",
+			Help: "Failed attempts to send a wake, by transport and failure class. Zero when push is off.",
+		}, []string{"transport", "class"}),
 	}
 	buildInfo := prometheus.NewGauge(prometheus.GaugeOpts{
 		Name:        "conch_build_info",
@@ -196,6 +208,7 @@ func newServerMetrics(s *Server) *serverMetrics {
 	m.reg.MustRegister(
 		m.httpRequests, m.httpDuration, m.wsConnections, m.wsDisconnects,
 		m.voiceTokens, m.messagesPosted, m.authFailures, m.problemReports,
+		m.pushWakes, m.pushFailures,
 		buildInfo, newStateCollector(s),
 		collectors.NewGoCollector(),
 		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
@@ -216,6 +229,12 @@ func newServerMetrics(s *Server) *serverMetrics {
 	}
 	for _, r := range metricsAuthFailureReasons {
 		m.authFailures.WithLabelValues(r)
+	}
+	for _, o := range push.Outcomes() {
+		m.pushWakes.WithLabelValues(push.TransportWebPush, o)
+	}
+	for _, c := range push.Classes() {
+		m.pushFailures.WithLabelValues(push.TransportWebPush, c)
 	}
 	return m
 }
@@ -261,6 +280,21 @@ func (m *serverMetrics) authFailed(reason string) {
 }
 
 func (m *serverMetrics) problemReported() { m.problemReports.Inc() }
+
+// pushWake counts one wake's outcome; outcome is one of push.Outcomes. A value
+// outside the set is not counted, so no caller can add a series.
+func (m *serverMetrics) pushWake(outcome string) {
+	if slices.Contains(push.Outcomes(), outcome) {
+		m.pushWakes.WithLabelValues(push.TransportWebPush, outcome).Inc()
+	}
+}
+
+// pushFailure counts one failed attempt; class is one of push.Classes.
+func (m *serverMetrics) pushFailure(class string) {
+	if slices.Contains(push.Classes(), class) {
+		m.pushFailures.WithLabelValues(push.TransportWebPush, class).Inc()
+	}
+}
 
 // metricsRoute is the route label of a request: the pattern the route wrapper
 // recorded or, for a request refused before it reached a route (by

@@ -97,7 +97,7 @@ test('start does nothing unless the camera is off', async () => {
   assert.equal(r.claimsSent.length, 1);
 });
 
-const reasons: readonly LifecycleReason[] = ['background', 'inactive', 'lock', 'interruption'];
+const reasons: readonly LifecycleReason[] = ['background', 'inactive', 'lock', 'interruption', 'stopped'];
 
 for (const reason of reasons) {
   test(`${reason} with the camera sending: capture stops at once, then DELETE names the claim`, async () => {
@@ -109,6 +109,7 @@ for (const reason of reasons) {
     const t0 = r.clock.now;
     if (reason === 'background' || reason === 'inactive') life.appState(reason);
     else if (reason === 'lock') life.screenLocked(true);
+    else if (reason === 'stopped') life.activityStopped(true);
     else life.interrupted(true);
     // Synchronously, before anything is awaited: the capture is stopped.
     assert.deepEqual(r.log, ['stop capture']);

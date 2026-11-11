@@ -91,7 +91,6 @@ pub mod status;
 pub mod transmit;
 
 use std::io::{IsTerminal, Write};
-use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -299,24 +298,40 @@ pub fn managed(
     scrubber: Arc<Scrubber>,
     parent: u32,
 ) -> Result<(), Error> {
-    // Where the events go: the endpoint the owner listens on, with the attach line already
-    // written, or file descriptor 3. Exactly one is looked at.
-    let (events, end): (Box<dyn Write + Send>, Option<UnixStream>) = match &args.events_pipe {
-        Some(path) => {
-            let endpoint = channel::attach(path, environment, &scrubber)?;
-            (Box::new(endpoint.events), Some(endpoint.end))
-        }
-        None => (Box::new(managed::open_event_pipe()?), None),
+    #[cfg(not(unix))]
+    let _ = parent;
+    // Descriptor 3 is looked at before anything is created: a runtime holds descriptors of
+    // its own (epoll), and with 3 closed one of them would become 3 and be judged in place
+    // of what the owner handed over (Linux's behaviour is unchanged by `--events-pipe`
+    // existing). Nothing else has been opened or read yet. Exactly one of the two sources
+    // is looked at.
+    let fd3 = match &args.events_pipe {
+        Some(_) => None,
+        None => Some(managed::open_event_pipe()?),
     };
+    // The runtime next: on Windows the pipe is registered with it when it is opened, and its
+    // events are written through it.
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .map_err(Error::Runtime)?;
+    // Where the events go: the endpoint the owner listens on, with the attach line already
+    // written, or file descriptor 3.
+    let (events, end): (Box<dyn Write + Send>, Option<channel::End>) =
+        match (&args.events_pipe, fd3) {
+            (Some(path), _) => {
+                let _entered = runtime.enter();
+                let endpoint = channel::attach(path, environment, &scrubber)?;
+                (Box::new(endpoint.events), Some(endpoint.end))
+            }
+            (None, Some(fd3)) => (Box::new(fd3), None),
+            (None, None) => return Err(Error::EventPipe("is not open")),
+        };
     // The nonce was spent on the attach line: the session is given an environment without it.
     let environment = Environment {
         conch_voice_attach: None,
         ..environment.clone()
     };
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .map_err(Error::Runtime)?;
     let keys = match &args.test_key_device {
         Some(pipe) => managed::KeySource::NamedPipe(pipe.clone()),
         None => managed::KeySource::Configured,
@@ -335,7 +350,11 @@ pub fn managed(
             args.share_audio_owner,
         );
         host.transmit_ceiling_secs = args.transmit_ceiling_secs;
+        host.no_mute_key = args.no_mute_key;
         managed::signals(inputs.clone(), host.watchdog.clone()).map_err(Error::Runtime)?;
+        // Windows has no parent to watch (`parent_id` is 0 there, ids are reused): its owner
+        // is noticed by the events pipe ending or failing to be written (#938).
+        #[cfg(unix)]
         managed::watch_parent(parent, inputs.clone(), host.watchdog.clone());
         if let Some(end) = end {
             channel::watch_end(end, inputs.clone(), host.watchdog.clone());

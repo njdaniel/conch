@@ -165,6 +165,16 @@ var routePermissions = map[string]schema.Permission{
 	"GET /v1/audit":                                                   schema.PermReadAuditLog,
 }
 
+// authTestPushBody is a valid Web Push registration request, for the route
+// table: the endpoint is never looked up, as push is off.
+const authTestPushBody = `{"transport":"webpush","platform":"web","app":"https://app.example","endpoint":"https://push.example/x","p256dh":"BGcgk_hM5FumxxG6GMUm7aSR_ccjoEV9Par_u_xOGOW2Yhl_pplE_MS0Nq75kpvAP0RoZwEi-1HPIqR4w4tUGcE","auth":"UjWbXUnDSgTzOXcC2Bq_Xg"}`
+
+// isPushPeopleRoute reports whether pattern is a push registration route,
+// which is for people alone; the config is for anyone signed in.
+func isPushPeopleRoute(pattern string) bool {
+	return strings.Contains(pattern, "/v1/push/") && !strings.HasSuffix(pattern, "/v1/push/config")
+}
+
 // routeExpectation pins, per route pattern: its class, the request to send,
 // and the status an authorized caller gets (the same status AuthOff gives).
 type routeExpectation struct {
@@ -333,6 +343,21 @@ var routeExpectations = map[string]routeExpectation{
 	// 0 writes nothing.
 	"GET /v1/read-state":                    {classAuth, "/v1/read-state", "", 200},
 	"PUT /v1/channels/{channel}/read-state": {classAuth, "/v1/channels/general/read-state", `{"last_read_id":0}`, 200},
+	// Notification preferences and the pending feed (issue #1713): people
+	// only, so an agent gets 403 on all three and AuthOff 400
+	// read_state_require_auth (both special-cased below).
+	"GET /v1/notifications/preferences": {classAuth, "/v1/notifications/preferences", "", 200},
+	"PUT /v1/notifications/preferences": {classAuth, "/v1/notifications/preferences", `{"policy":"off","muted":[]}`, 200},
+	"GET /v1/notifications/pending":     {classAuth, "/v1/notifications/pending", "", 200},
+	// Push registrations (issue #1714): the config is for any signed-in
+	// caller; the rest are for people, so an agent gets 403 and AuthOff 400
+	// (special-cased below). With no push flag the server answers a POST or a
+	// PUT 409 push_not_configured, and a DELETE of an id it does not hold 404.
+	"GET /v1/push/config":                {classAuth, "/v1/push/config", "", 200},
+	"POST /v1/push/registrations":        {classAuth, "/v1/push/registrations", authTestPushBody, 409},
+	"GET /v1/push/registrations/mine":    {classAuth, "/v1/push/registrations/mine", "", 200},
+	"PUT /v1/push/registrations/{id}":    {classAuth, "/v1/push/registrations/none", authTestPushBody, 409},
+	"DELETE /v1/push/registrations/{id}": {classAuth, "/v1/push/registrations/none", "", 404},
 	// Reactions (issue #765): message 9999 does not exist, so an authorized
 	// caller gets message_not_found; an agent is refused only at the two
 	// moderation routes (humans only), and AuthOff gets 400
@@ -503,7 +528,8 @@ var routeExpectations = map[string]routeExpectation{
 
 	// Renaming a channel (issues #727, #791): the manager class resolves the
 	// id before the body, so an unknown channel is 404 and changes nothing.
-	"PUT /v1/channels/{id}/name": {classManager, "/v1/channels/9999/name", `{}`, 404},
+	"PUT /v1/channels/{id}/name":  {classManager, "/v1/channels/9999/name", `{}`, 404},
+	"PUT /v1/channels/{id}/topic": {classManager, "/v1/channels/9999/topic", `{"topic":5}`, 404},
 
 	// Changing a role or the owner mark (issue #790): an empty body is a 400
 	// before the target is looked up.
@@ -680,7 +706,7 @@ func TestRoleMatrix(t *testing.T) {
 			if exp.class == classOp || exp.class == classSelf || exp.class == classOwner || exp.class == classManager || exp.class == classPerm {
 				memberWant = http.StatusForbidden
 			}
-			if rt.pattern == "PUT /v1/channels/{id}/name" {
+			if rt.pattern == "PUT /v1/channels/{id}/name" || rt.pattern == "PUT /v1/channels/{id}/topic" {
 				memberWant = exp.allowed // a non-member cannot discover the channel id
 			}
 			// Nobody makes v1 invites (issue #1134): the route answers
@@ -693,7 +719,7 @@ func TestRoleMatrix(t *testing.T) {
 			// The approval REST routes are the human surface: an agent
 			// credential is refused there and uses MCP instead (issue #79).
 			agentWant := memberWant
-			if rt.pattern == "PUT /v1/channels/{id}/name" {
+			if rt.pattern == "PUT /v1/channels/{id}/name" || rt.pattern == "PUT /v1/channels/{id}/topic" {
 				agentWant = http.StatusForbidden // kind is refused before channel lookup
 			}
 			if rt.pattern == "GET /v1/directory/members" || strings.Contains(rt.pattern, "/v1/approvals") || strings.Contains(rt.pattern, "/voice/session") || strings.Contains(rt.pattern, "/voice/transmit") || strings.Contains(rt.pattern, "/voice/share") || strings.Contains(rt.pattern, "/voice/camera") || strings.Contains(rt.pattern, "/voice/companion") || rt.pattern == "GET /v1/channels/{channel}/voice" || strings.Contains(rt.pattern, "/v1/voice/occupancy") || isFileRoute(rt.pattern) {
@@ -712,7 +738,7 @@ func TestRoleMatrix(t *testing.T) {
 			}
 			// Read state is for people (issue #351): an agent is refused before
 			// any channel is looked at.
-			if strings.HasSuffix(rt.pattern, "/read-state") {
+			if strings.HasSuffix(rt.pattern, "/read-state") || strings.Contains(rt.pattern, "/v1/notifications/") || isPushPeopleRoute(rt.pattern) {
 				agentWant = http.StatusForbidden
 			}
 			// The moderation routes of reactions (issue #765) administer a
@@ -797,7 +823,7 @@ func TestAuthOffUnchanged(t *testing.T) {
 				if strings.Contains(rt.pattern, "/voice/session") || strings.Contains(rt.pattern, "/voice/transmit") || strings.Contains(rt.pattern, "/voice/share") || strings.Contains(rt.pattern, "/voice/camera") || strings.Contains(rt.pattern, "/voice/companion") || rt.pattern == "GET /v1/channels/{channel}/voice" || strings.Contains(rt.pattern, "/v1/voice/occupancy") {
 					want = http.StatusBadRequest // voice_requires_auth: voice is never anonymous
 				}
-				if rt.pattern == "PUT /v1/channels/{id}/name" {
+				if rt.pattern == "PUT /v1/channels/{id}/name" || rt.pattern == "PUT /v1/channels/{id}/topic" {
 					want = http.StatusBadRequest // AuthOff skips the guard and reaches body validation
 				}
 				if isFileRoute(rt.pattern) {
@@ -806,8 +832,8 @@ func TestAuthOffUnchanged(t *testing.T) {
 				if strings.Contains(rt.pattern, "/v1/sessions") || strings.Contains(rt.pattern, "/v1/runs") || strings.Contains(rt.pattern, "/v1/interventions") {
 					want = http.StatusBadRequest // sessions_require_auth: a session, and so a run, is bound to a credential
 				}
-				if strings.HasSuffix(rt.pattern, "/read-state") {
-					want = http.StatusBadRequest // read_state_require_auth: a mark belongs to a principal
+				if strings.HasSuffix(rt.pattern, "/read-state") || strings.Contains(rt.pattern, "/v1/notifications/") || isPushPeopleRoute(rt.pattern) {
+					want = http.StatusBadRequest // read_state_require_auth: a mark, and notification preferences, belong to a principal
 				}
 				if isReactionRoute(rt.pattern) {
 					want = http.StatusBadRequest // reactions_require_auth: a reaction belongs to a principal

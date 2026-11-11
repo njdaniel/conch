@@ -602,6 +602,7 @@ vi.mock('livekit-client', () => {
     RoomEvent: {
       Reconnecting: 'rc',
       Reconnected: 'rd',
+      SignalReconnecting: 'src',
       Disconnected: 'dc',
       ActiveSpeakersChanged: 'as',
       TrackPublished: 'tp',
@@ -1274,6 +1275,54 @@ describe('the watch view', () => {
     expect(layers()).toHaveLength(3);
   });
 
+  // Issue #1512 (voice-multi-share.md §7.4, §11.6): the desktop's companion
+  // under B2 takes the watched streams' tracks by publisher and nothing else:
+  // the focused one at the top layer, the others at the lowest; never its own
+  // person's stream (the person's p7 or the companion's own p7.screen), never
+  // an unwatched one, never a voice or a camera, whoever is in the room.
+  it('the companion subscribes the watched streams only, the focused at the top layer and the others at LOW, and never its own tracks, a voice or a camera', async () => {
+    const entries: Record<string, StubRemotePub[]> = {
+      p8: [remotePub('screen_share'), remotePub('screen_share_audio'), remotePub('microphone'), remotePub('camera')],
+      'p9.screen': [remotePub('screen_share'), remotePub('screen_share_audio')],
+      p10: [remotePub('screen_share'), remotePub('screen_share_audio'), remotePub('microphone')],
+      // This person's own: the person's identity and their own companion's.
+      p7: [remotePub('screen_share'), remotePub('screen_share_audio'), remotePub('microphone')],
+      'p7.screen': [remotePub('screen_share'), remotePub('screen_share_audio')],
+    };
+    for (const [identity, pubs] of Object.entries(entries)) {
+      state.remote.set(identity, { identity, trackPublications: new Map(pubs.map((p, i) => [String(i), p])) } as unknown as { trackPublications: Map<string, StubRemotePub> });
+    }
+    const asked = (identity: string): string[] => (entries[identity] ?? []).map((p) => `${p.source}:${String(p.isSubscribed)}`);
+    const room = newLiveKitRoom();
+    room.setCompanion?.(true);
+    await room.connect('wss://lk.example', 'tok-abcdef', 'room-abcdef', false, events);
+    expect(Object.keys(entries).flatMap(asked).filter((s) => s.endsWith(':true')), 'nothing before a Watch').toEqual([]);
+    room.setWatches(new Set([8, 9, 7]), 8);
+    expect(asked('p8')).toEqual(['screen_share:true', 'screen_share_audio:true', 'microphone:false', 'camera:false']);
+    expect(asked('p9.screen')).toEqual(['screen_share:true', 'screen_share_audio:true']);
+    expect(asked('p10')).toEqual(['screen_share:false', 'screen_share_audio:false', 'microphone:false']);
+    expect(asked('p7')).toEqual(['screen_share:false', 'screen_share_audio:false', 'microphone:false']);
+    expect(asked('p7.screen')).toEqual(['screen_share:false', 'screen_share_audio:false']);
+    // 8, focused, is left to adaptive stream; 9 is held to the lowest layer;
+    // the sound has no layer.
+    expect(layers()).toEqual(['quality screen_share 0']);
+    expect(entries.p8?.[0]?.videoQuality).toBe(2);
+    expect(entries['p9.screen']?.[0]?.videoQuality).toBe(0);
+    // Focus moves: 9 is lifted, 8 is held. Voices and cameras stay unasked.
+    room.setWatches(new Set([8, 9]), 9);
+    expect(entries.p8?.[0]?.videoQuality).toBe(0);
+    expect(entries['p9.screen']?.[0]?.videoQuality).toBe(2);
+    expect(asked('p8')).toEqual(['screen_share:true', 'screen_share_audio:true', 'microphone:false', 'camera:false']);
+    // A voice published later is not taken either.
+    const late = remotePub('microphone');
+    state.handlers.get('tp')?.(late, { identity: 'p8' });
+    expect(late.isSubscribed).toBe(false);
+    // Stop watching 8: its picture and sound are let go; 9's stay.
+    room.setWatches(new Set([9]), 9);
+    expect(asked('p8').slice(0, 2)).toEqual(['screen_share:false', 'screen_share_audio:false']);
+    expect(asked('p9.screen')).toEqual(['screen_share:true', 'screen_share_audio:true']);
+  });
+
   it('a stream held at LOW, let go and watched again focused, has its cap lifted: the cap is the publication\'s', async () => {
     const nine = remotePub('screen_share');
     state.remote.set('p9', { identity: 'p9', trackPublications: new Map([['a', nine]]) } as unknown as { trackPublications: Map<string, StubRemotePub> });
@@ -1285,6 +1334,19 @@ describe('the watch view', () => {
     expect(nine.isSubscribed).toBe(false);
     room.setWatches(new Set([9]), 9);
     expect(layers()).toEqual(['quality screen_share 0', 'dimensions screen_share 7680x4320']);
+  });
+
+  it('a signal-only resume is reported as reconnecting and then reconnected', async () => {
+    const seen: string[] = [];
+    const room = newLiveKitRoom();
+    await room.connect('wss://lk.example', 'tok-abcdef', 'room-abcdef', false, {
+      ...events,
+      onReconnecting: () => seen.push('reconnecting'),
+      onReconnected: () => seen.push('reconnected'),
+    });
+    state.handlers.get('src')?.();
+    state.handlers.get('rd')?.();
+    expect(seen).toEqual(['reconnecting', 'reconnected']);
   });
 
   it('after a full reconnect a new publication under the same sid is capped at LOW again', async () => {

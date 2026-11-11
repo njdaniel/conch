@@ -80,11 +80,11 @@ test.describe('the packaged shell', () => {
         // Talk-key setup (#1381).
         'voiceKeyDevices', 'voiceSaveTalkBinding',
         // Opening an invite link (#1591).
-        'inviteCheck', 'inviteAccept', 'inviteCancel', 'inviteTake',
+        'inviteCheck', 'inviteAccept', 'inviteCancel', 'inviteTake', 'inviteArrived', 'onInviteArrived',
         // Desktop notifications (#1590): two calls, support and the click event.
         'notify', 'notifyClose', 'notificationSupported', 'onNotification',
-        // The app's own settings (#1587).
-        'settings', 'settingsSet',
+        // The app's own settings (#1587), and what works here (#1593).
+        'settings', 'settingsSet', 'integrations',
         // The screen companion (#1579): its grant, its end and its event; and
         // the share allowance's arming (#1580).
         'companionGrant', 'companionEnd', 'shareArm', 'onCompanion',

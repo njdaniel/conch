@@ -58,19 +58,39 @@ export const test = base.extend<{
         for (const where of await leaks(page, [...allTokens(world), ...secrets])) found.push(where);
       }
     } finally {
-      // Each page is closed before its context, as a person closes a tab: its
-      // pagehide ends the session the page started. Closing the context alone
-      // fires no pagehide and leaves the session live until conchd marks it
-      // offline, counted against the credential's budget of live sessions,
-      // which a spec run again and again soon spends (issue #802).
-      for (const { page } of people) if (!page.isClosed()) await page.close();
-      for (const { context } of people) await context.close();
+      for (const { context } of people) await closeAll(context);
     }
     expect(found, 'a credential in the address bar, in performance.getEntries() or in the page').toEqual([]);
   },
 });
 
 export { expect };
+
+// closeAll closes every page of context, then the context: the only way a spec
+// closes a context that has had a page. Each page goes first, as a person closes
+// a tab, for two reasons:
+//  - its pagehide ends the session the page started. Closing the context alone
+//    fires no pagehide and leaves the session live until conchd marks it
+//    offline, counted against the credential's budget of live sessions, which
+//    a spec run again and again soon spends (issue #802).
+//  - Playwright records a page's WebSocket frames live into a trace file, and
+//    context.close zips the trace; a socket still busy then makes the zip fail
+//    with "file data stream has unexpected number of bytes" or "End of central
+//    directory record signature not found" (issues #1660, #1684, seen under
+//    load). A closed page has closed its sockets.
+// The context closes even if a page fails to. Safe to call twice.
+//
+// runBeforeUnload runs each page's beforeunload handlers first (issue #1703):
+// livekit-client leaves its room from one, which Firefox does not run on a
+// plain close. Off by default, as a handler that prompts would hold the close;
+// the web client registers none, and only voice leaves (people.ts leave) ask.
+export async function closeAll(context: BrowserContext, options: { runBeforeUnload?: boolean } = {}): Promise<void> {
+  try {
+    for (const page of context.pages()) if (!page.isClosed()) await page.close({ runBeforeUnload: options.runBeforeUnload === true });
+  } finally {
+    await context.close();
+  }
+}
 
 // ---------------------------------------------------------------- the page
 

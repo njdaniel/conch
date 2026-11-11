@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { VOICE_CONTROL_STOP_KILL_AFTER_MS } from '../../../web/src/schema/generated.ts';
 import { Supervisor, type CommandResult, type StartRequest, type VoiceState } from '../../main/voice/supervisor.ts';
-import { CEILING_ARGS, DESKTOP_MISSED_RELEASE_SECS, HELPER_ARGS, SHARE_AUDIO_ARGS, VoiceService, type VoiceIdentity, type VoiceSupervisor } from '../../main/voice/service.ts';
+import { CEILING_ARGS, DESKTOP_MISSED_RELEASE_SECS, HELPER_ARGS, MUTE_OWNER_ARGS, SHARE_AUDIO_ARGS, VoiceService, type VoiceIdentity, type VoiceSupervisor } from '../../main/voice/service.ts';
 import type { NativeVoiceDevicesResult, NativeVoiceView, VoiceDeviceKey, VoiceSaveResult } from '../../../web/src/platform/desktop/bridge.ts';
 import { FAKE_TOKEN, fixture, scratch, until, type Scratch } from './voice-support.ts';
 
@@ -139,7 +139,7 @@ describe('join', () => {
         principalId: 7,
         muted: true,
         deafened: false,
-        extraArgs: ['--share-audio-owner', 'companion', '--transmit-ceiling-secs', '30'],
+        extraArgs: ['--share-audio-owner', 'companion', '--no-mute-key', '--transmit-ceiling-secs', '30'],
       },
     ]);
     expect(DESKTOP_MISSED_RELEASE_SECS).toBe(30);
@@ -149,12 +149,20 @@ describe('join', () => {
 
   it('every start carries --share-audio-owner companion beside the ceiling, and a retry too (#1581)', async () => {
     expect(SHARE_AUDIO_ARGS).toEqual(['--share-audio-owner', 'companion']);
-    expect(HELPER_ARGS).toEqual(['--share-audio-owner', 'companion', '--transmit-ceiling-secs', '30']);
+    expect(HELPER_ARGS).toEqual(['--share-audio-owner', 'companion', '--no-mute-key', '--transmit-ceiling-secs', '30']);
     await join('general');
     await svc.leave();
     await join('ops');
     expect(fake.starts.map((s) => s.extraArgs)).toEqual([HELPER_ARGS, HELPER_ARGS]);
     expect(fake.starts.every((s) => s.extraArgs?.includes('companion') === true)).toBe(true);
+  });
+
+  it('every start tells the helper not to read keys.mute, so main alone mutes, and a retry too (#1631)', async () => {
+    expect(MUTE_OWNER_ARGS).toEqual(['--no-mute-key']);
+    await join('general');
+    await svc.leave();
+    await join('ops');
+    expect(fake.starts.every((s) => s.extraArgs?.includes('--no-mute-key') === true)).toBe(true);
   });
 
   it('a second join while one runs is refused busy and starts nothing', async () => {
@@ -360,6 +368,8 @@ describe('state', () => {
       [{ status: 'unavailable', reason: 'runtime-dir-unset' }, { status: 'unavailable', retryable: false }],
       [{ status: 'ended', generation: 1, helper: helper({ phase: 'failed', reason: 'server_unreachable' }) }, { status: 'ended', problem: 'server_unreachable', retryable: true }],
       [{ status: 'ended', generation: 1, helper: helper({ phase: 'failed', reason: 'identity_mismatch' }) }, { status: 'ended', retryable: false }],
+      // Issue #1457: a voice kick is named, and is Join's to undo, not Retry's.
+      [{ status: 'ended', generation: 1, helper: helper({ phase: 'failed', reason: 'voice_removed' }) }, { status: 'ended', problem: 'voice_removed', retryable: false }],
     ];
     for (const [s, want] of cases) {
       fake.set(s);
@@ -394,7 +404,7 @@ describe('retry', () => {
     const v = await svc.retry();
     expect(v.status).toBe('running');
     expect(fake.starts.length).toBe(2);
-    expect(fake.starts[1]).toMatchObject({ channel: 'ops', muted: true, deafened: true, extraArgs: ['--share-audio-owner', 'companion', '--transmit-ceiling-secs', '30'] });
+    expect(fake.starts[1]).toMatchObject({ channel: 'ops', muted: true, deafened: true, extraArgs: ['--share-audio-owner', 'companion', '--no-mute-key', '--transmit-ceiling-secs', '30'] });
   });
 
   it('is refused for a failure a retry cannot fix', async () => {

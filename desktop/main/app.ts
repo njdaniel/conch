@@ -16,12 +16,12 @@ import { app, BrowserWindow, desktopCapturer, dialog, ipcMain, Menu, Notificatio
 
 import { allowUnlisted, OVERRIDE_FLAG, parseCompat } from './compat.ts';
 import { activationFactory, healthReader, Live, prober, revoker, verifier } from './profiles/activation.ts';
-import { Invites } from './invites.ts';
+import { deliverInvite, Invites } from './invites.ts';
 import { createProfileFiles } from './profiles/files.ts';
 import { TeardownHooks } from './profiles/hooks.ts';
 import { ProfilesService } from './profiles/service.ts';
 import { ProfileStore } from './profiles/store.ts';
-import { acquire, prepareRoot } from './instance.ts';
+import { acquire, keepNewest, prepareRoot } from './instance.ts';
 import { Client } from './api/client.ts';
 import { Session } from './api/session.ts';
 import { deliverVoice } from './voice/events.ts';
@@ -38,11 +38,13 @@ import { captureVerdict, DisplayCapture } from './display-capture.ts';
 import { Files } from './files.ts';
 import { Gestures } from './gestures.ts';
 import { ShareAllowance } from './share-allowance.ts';
+import { shareTeardown } from './share-hook.ts';
 import { installGuards } from './guards.ts';
 import { deliverUpdate, Installed, shouldAskAfterFailure } from './installed.ts';
 import { updateDialogButtons, updateDialogDetail, updateDialogMessage } from '../../web/src/platform/desktop/ui/text.ts';
 import { Ipc } from './ipc.ts';
 import { Links } from './links.ts';
+import { integrationsView } from './integrations.ts';
 import { Lifecycle } from './lifecycle.ts';
 import { LinuxLifecycle } from './lifecycle-linux.ts';
 import { executable, Portal, runFile } from './portal.ts';
@@ -159,14 +161,28 @@ export async function start(): Promise<void> {
 
   // One instance per data root: the lock comes before anything reads or
   // writes the root. A second launch focuses the first and exits.
-  const first = acquire(app, () => {
-    const window = live.window;
-    if (window === null || window.isDestroyed()) return;
-    if (window.isMinimized()) window.restore();
-    // A window hidden by a close comes back.
-    window.show();
-    window.focus();
-  });
+  //
+  // A conch:// invite link (issue #1592) arrives in a launch's arguments. The
+  // invite router does not exist yet at this point, so what a second launch
+  // sends before it does is kept (the newest four, newest last) and given to it first
+  // thing. The arguments are never logged.
+  let argvSink: ((argv: readonly string[]) => void) | null = null;
+  const earlyArgv: (readonly string[])[] = [];
+  const first = acquire(
+    app,
+    () => {
+      const window = live.window;
+      if (window === null || window.isDestroyed()) return;
+      if (window.isMinimized()) window.restore();
+      // A window hidden by a close comes back.
+      window.show();
+      window.focus();
+    },
+    (argv) => {
+      if (argvSink !== null) argvSink(argv);
+      else keepNewest(earlyArgv, argv, 4);
+    },
+  );
   if (!first) return;
 
   // The app's settings, once the data root is known (below). Until then, and
@@ -254,6 +270,8 @@ export async function start(): Promise<void> {
     log,
   });
   await settings.load();
+  // An entry written earlier is judged again: the install may have been loosened since.
+  await settings.rejudge();
   const store = new ProfileStore(
     checked.ok
       ? files
@@ -496,15 +514,15 @@ export async function start(): Promise<void> {
     log,
   });
   liveOrigin = () => companion.liveOrigin();
-  teardownHooks.media('share', async ({ reason }) => {
-    // From here on the identity is ending: no grant is asked for under it.
-    // A page's grant request after this end (the click of a switch or a
-    // sign-out is still armed) is refused as failed, and one in flight finds
-    // the client changed and removes what conchd issued. The next
-    // activation's makeFiles sets the client again.
-    activeClient = null;
-    await companion.end(reason);
-  });
+  teardownHooks.media(
+    'share',
+    shareTeardown({
+      dropClient: () => {
+        activeClient = null;
+      },
+      companion,
+    }),
+  );
   app.on('render-process-gone', (_event, contents) => {
     if (contents === live.owned()) void companion.end('crash');
   });
@@ -556,6 +574,15 @@ export async function start(): Promise<void> {
     now: Date.now,
     log,
   });
+  // A scheme link in any launch's arguments, this one's or a later one's, is
+  // kept by the router and the page told; the page asks for it, and the same
+  // checks and the same choice as a pasted link follow. A link arriving while
+  // a sign-in or switch is under way waits for the page like any other.
+  argvSink = (argv) => {
+    if (invites.arrive(argv)) deliverInvite({ contents: () => (live.owned() === null ? null : (live.window?.webContents ?? null)), gate: () => live.gate });
+  };
+  for (const argv of [process.argv, ...earlyArgv]) argvSink(argv);
+  earlyArgv.length = 0;
   const ipc = new Ipc({
     owned: () => live.owned(),
     get gate() {
@@ -578,6 +605,18 @@ export async function start(): Promise<void> {
     invites,
     notifications,
     settings,
+    integrations: {
+      view: () =>
+        integrationsView({
+          settings: () => settingsService.view(),
+          notificationSupported: () => notifications.supported(),
+          lockObservation: () => lifecycle.lockObservation,
+          lockTrying: () => watcher?.trying ?? false,
+          share: () => portal.last(),
+          storage: () => profiles.view().storage,
+          voice: () => voice.state(),
+        }),
+    },
     companion,
     now: Date.now,
     log,

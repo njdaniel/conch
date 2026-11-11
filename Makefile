@@ -11,7 +11,7 @@ LINT    = golangci-lint
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null)
 LDFLAGS  = -X main.version=$(VERSION)
 
-.PHONY: build test lint vet fmt fmt-check invisible-check check schema-compat schema-ts emoji-catalog depgate go-scope deploy-test agent-claim-test rust-check rust-build web-node web-check web-build web-embed build-web-embedded web-e2e desktop-node desktop-check desktop-build desktop-deb desktop-smoke desktop-voice-it desktop-voice-e2e p3-local p3-reset hooks-install clean
+.PHONY: build test lint vet fmt fmt-check invisible-check check schema-compat schema-ts emoji-catalog depgate go-scope deploy-test agent-claim-test rust-check rust-build web-node web-check web-build web-embed build-web-embedded web-e2e web-e2e-heavy desktop-node desktop-check desktop-build desktop-deb desktop-deb-lifecycle desktop-smoke desktop-voice-it desktop-voice-e2e p3-local p3-reset hooks-install clean
 
 build:
 	$(GO) build ./...
@@ -101,6 +101,13 @@ web-e2e: web-node
 	@cd web && node --input-type=module -e "import { chromium } from '@playwright/test'; import { existsSync } from 'node:fs'; if (!existsSync(chromium.executablePath())) { console.error('web-e2e: FAIL: the browser Playwright pins is not installed; run: cd web && npx playwright install chromium'); process.exit(1); }"
 	cd web && npm run e2e -- $(E2E_ARGS)
 
+# The tests tagged @heavy, which the pull request lane skips (issue #1613,
+# docs/testing.md). A thin wrapper over web-e2e; the nightly workflow
+# .github/workflows/e2e-heavy.yml runs the same arguments. A caller's E2E_ARGS
+# is appended, not replaced: make web-e2e-heavy E2E_ARGS=--headed.
+web-e2e-heavy:
+	$(MAKE) web-e2e E2E_ARGS="--grep @heavy --pass-with-no-tests $(E2E_ARGS)"
+
 # The desktop shell under desktop/ (issue #940, ADR-007, linux-desktop.md): an
 # Electron app that serves the web client from packaged files. desktop-check
 # runs the repository's gates for it (the fetch script's test, the lint rules,
@@ -151,6 +158,15 @@ desktop-deb: desktop-node
 	./scripts/desktop-deb.sh
 	./scripts/desktop-deb-test.sh desktop/dist/conch-desktop_*_amd64.deb
 
+# Installs, upgrades, removes and purges the .deb in a clean ubuntu:24.04
+# container (issue #1599). With no argument it builds two fixture packages;
+# `make desktop-deb-lifecycle DEB_OLD=a.deb DEB_NEW=b.deb` uses real ones (NEW
+# a higher version). Needs Docker and network (apt fetches the Depends). Without
+# Docker it says SKIPPED and why; with CI set it fails. Never runs the app.
+# Not part of `make check`.
+desktop-deb-lifecycle:
+	./scripts/desktop-deb-lifecycle.sh $(if $(DEB_OLD)$(DEB_NEW),"$(DEB_OLD)" "$(DEB_NEW)")
+
 # The packaged smoke test: drives the built app over Chromium's remote-debugging
 # port (desktop/tests/smoke/launch.ts says why). Needs a display: CI runs it
 # under xvfb-run; CONCH_SMOKE_HEADLESS=1 uses Chromium's headless Ozone
@@ -175,10 +191,18 @@ desktop-voice-it: desktop-node
 # sink and synthetic input only (a tone, a named pipe of key records). The Go
 # program e2e/desktop-voice is the world and runs desktop/tests/e2e under
 # Vitest. Builds conch-voice with the pinned toolchain unless CONCH_VOICE_BIN
-# names one. Not part of check. Without Docker or the toolchain it says
-# SKIPPED and why; with CI set, it fails instead.
-desktop-voice-e2e: desktop-node
+# names one, and the web client (web-build) that conchd serves to the browser
+# principal of the screen companion's test (issue #1583, D4-06; the browser the
+# test drives is the one Playwright pins: `npx playwright install chromium`).
+# It also typechecks and lints tests/e2e first: that project resolves livekit-client and
+# react from web/node_modules, so it lives here, not in desktop-check, which
+# needs nothing from web. Not part of check. Without
+# Docker or the toolchain it says SKIPPED and why; with CI set, it fails
+# instead.
+desktop-voice-e2e: desktop-node web-build
 	cd desktop && npm ci --no-audit
+	cd desktop && npm run typecheck:e2e
+	cd desktop && npm run lint:e2e
 	$(GO) run ./e2e/desktop-voice
 
 # The P3 local prototype (issue #283, docs/p3-walkthrough.md): p3-local builds
@@ -217,10 +241,13 @@ schema-compat:
 # The web client's wire types are generated from pkg/schema by
 # `go generate ./pkg/schema` (issue #348); this fails when the committed
 # web/src/schema/generated*.ts differ from what that writes. Go only, no Node.
-# The script's own test runs first.
+# The script's own test runs first. The Android spike's verbatim copy of
+# those files is checked against them too (issue #1719).
 schema-ts:
 	./scripts/schema-ts-check-test.sh
 	./scripts/schema-ts-check.sh
+	./scripts/spike-schema-check-test.sh
+	./scripts/spike-schema-check.sh
 
 # The emoji catalog is generated from the vendored third_party/unicode/
 # emoji-test.txt by `go generate ./pkg/schema` (issue #953): the vendored file

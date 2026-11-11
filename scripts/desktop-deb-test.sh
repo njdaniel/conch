@@ -28,8 +28,10 @@
 #   - a desktop file that desktop-file-validate rejects (when the tool is
 #     installed; the run says when it is not), or one with the wrong Exec, Icon
 #     or StartupWMClass;
-#   - more than one Exec= line in the desktop file, or any MimeType= or
-#     Actions= line (no URL scheme is registered; #1592 decides one later);
+#   - more than one Exec= line in the desktop file, any Actions= line, or a
+#     MimeType= line that is not exactly 'MimeType=x-scheme-handler/conch;'
+#     (the one URL scheme the app takes, conch://invite?..., #1592; no other
+#     scheme, no file type, and exactly one such line);
 #   - the text --no-sandbox in any text file, maintainer scripts included;
 #   - control members other than control, conffiles, postinst and postrm, or a
 #     postinst or postrm that is not byte-identical to desktop/build/deb/ (they
@@ -164,7 +166,10 @@ check_deb() {
             desktop-file-validate "$df" >"$tmp/dfv" 2>&1 || sed 's/^/desktop-file-validate: /' "$tmp/dfv" >>"$problems"
         fi
         [ "$(grep -cE '^[[:space:]]*Exec=' "$df")" = 1 ] || echo "desktop file: not exactly one Exec= line (an Action with its own Exec= is a second command)" >>"$problems"
-        grep -qE '^[[:space:]]*(MimeType|Actions)=' "$df" && echo "desktop file: MimeType= or Actions= is set (#1592 decides a URL scheme later)" >>"$problems"
+        grep -qE '^[[:space:]]*Actions=' "$df" && echo "desktop file: Actions= is set" >>"$problems"
+        # The one scheme (#1592): exactly one MimeType= line, and exactly this
+        # text. A second line, another type, an indented or empty one all fail.
+        [ "$(grep -cE '^[[:space:]]*MimeType' "$df")" = 1 ] && grep -qx 'MimeType=x-scheme-handler/conch;' "$df" || echo "desktop file: MimeType is not exactly 'MimeType=x-scheme-handler/conch;' (one line)" >>"$problems"
         grep -qx 'Exec=conch-desktop %U' "$df" || echo "desktop file: Exec is not 'conch-desktop %U'" >>"$problems"
         grep -qx 'Icon=chat.conch.desktop' "$df" || echo "desktop file: Icon is not chat.conch.desktop" >>"$problems"
         grep -qx 'StartupWMClass=conch-desktop' "$df" || echo "desktop file: StartupWMClass is not the executable's name" >>"$problems"
@@ -369,6 +374,10 @@ m_action() {
     printf 'Actions=New;\n\n[Desktop Action New]\nName=New\nExec=/opt/conch-desktop/conch-desktop --evil\n' >>"$1/usr/share/applications/chat.conch.desktop.desktop"
 }
 m_mimetype() { echo 'MimeType=x-scheme-handler/conch;' >>"$1/usr/share/applications/chat.conch.desktop.desktop"; }
+m_mimetype_other() { sed -i 's|^MimeType=.*|MimeType=x-scheme-handler/conch;x-scheme-handler/https;|' "$1/usr/share/applications/chat.conch.desktop.desktop"; }
+m_mimetype_filetype() { sed -i 's|^MimeType=.*|MimeType=text/plain;|' "$1/usr/share/applications/chat.conch.desktop.desktop"; }
+m_mimetype_gone() { sed -i '/^MimeType=/d' "$1/usr/share/applications/chat.conch.desktop.desktop"; }
+m_mimetype_second() { echo 'MimeType=x-scheme-handler/http;' >>"$1/usr/share/applications/chat.conch.desktop.desktop"; }
 m_sandbox_plain() { cp "$1/opt/conch-desktop/conch-desktop" "$1/opt/conch-desktop/chrome-sandbox"; chmod 755 "$1/opt/conch-desktop/chrome-sandbox"; }
 m_sandbox_suid() { cp "$1/opt/conch-desktop/conch-desktop" "$1/opt/conch-desktop/chrome-sandbox"; chmod 4755 "$1/opt/conch-desktop/chrome-sandbox"; }
 m_symlink() { ln -s /tmp/evil "$1/opt/conch-desktop/evil"; }
@@ -412,8 +421,12 @@ break_it postinst-install-mode "DEBIAN/postinst: [0-9]*:install -m 4755" 1 m_pos
 break_it extra-preinst "DEBIAN members are" 1 m_preinst
 break_it extra-triggers "DEBIAN members are" 1 m_triggers
 break_it desktop-action-exec "not exactly one Exec" 1 m_action
-break_it desktop-actions-line "MimeType= or Actions=" 1 m_action
-break_it desktop-mimetype "MimeType= or Actions=" 1 m_mimetype
+break_it desktop-actions-line "Actions= is set" 1 m_action
+break_it desktop-mimetype-twice "MimeType is not exactly" 1 m_mimetype
+break_it desktop-mimetype-second-line "MimeType is not exactly" 1 m_mimetype_second
+break_it desktop-mimetype-more-schemes "MimeType is not exactly" 1 m_mimetype_other
+break_it desktop-mimetype-file-type "MimeType is not exactly" 1 m_mimetype_filetype
+break_it desktop-mimetype-missing "MimeType is not exactly" 1 m_mimetype_gone
 break_it chrome-sandbox-plain "chrome-sandbox in the package" 1 m_sandbox_plain
 break_it chrome-sandbox-setuid "chrome-sandbox in the package" 1 m_sandbox_suid
 break_it symlink-in-opt "symbolic link (only" 1 m_symlink

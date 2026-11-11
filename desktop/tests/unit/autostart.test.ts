@@ -2,9 +2,9 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSyn
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { Autostart, autostartPath, carriesMarker, entryText, execValue } from '../../main/autostart.ts';
+import { Autostart, autostartPath, carriesMarker, entryText, execValue, trustedTarget } from '../../main/autostart.ts';
 
 const dirs: string[] = [];
 function tmp(): string {
@@ -13,6 +13,7 @@ function tmp(): string {
   return dir;
 }
 afterEach(() => {
+  vi.restoreAllMocks();
   for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
 });
 
@@ -146,6 +147,33 @@ describe('where the executable may sit', () => {
     expect(await auto.enable()).toEqual({ ok: false, reason: 'unsafe-location' });
     expect(existsSync(join(config, 'autostart'))).toBe(false);
     expect(logs.join('\n')).toMatch(/only you or the system/);
+  });
+
+  // An otherwise good 0755 tree is judged against the running user: other
+  // owners are refused, and so is an unknown user (no getuid): fail closed.
+  it('accepts the good 0755 tree for the real uid (control)', async () => {
+    const { top, exec } = tree();
+    expect(await trustedTarget(exec, top)).toBe(realpathSync(exec));
+  });
+
+  // A root-owned tree is trusted whatever the uid, so these two need a user
+  // that owns the temporary tree; run as root they would prove nothing.
+  it.skipIf(process.getuid?.() === 0)('refuses a tree owned by another uid', async () => {
+    const { top, exec } = tree();
+    vi.spyOn(process, 'getuid').mockReturnValue((process.getuid?.() ?? 0) + 4242);
+    expect(await trustedTarget(exec, top)).toBeNull();
+  });
+
+  it.skipIf(process.getuid?.() === 0)('refuses when process.getuid is missing (uid null)', async () => {
+    const { top, exec } = tree();
+    const had = Object.getOwnPropertyDescriptor(process, 'getuid');
+    Object.defineProperty(process, 'getuid', { value: undefined, configurable: true, writable: true });
+    try {
+      expect(await trustedTarget(exec, top)).toBeNull();
+    } finally {
+      if (had === undefined) Reflect.deleteProperty(process, 'getuid');
+      else Object.defineProperty(process, 'getuid', had);
+    }
   });
 
   it('gives a sticky, world-writable ancestor no allowance', async () => {

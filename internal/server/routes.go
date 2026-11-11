@@ -50,6 +50,7 @@ func (s *Server) routeTable() []route {
 		// addressed by id since the name is what it changes. /name is a literal
 		// no {channel} route ends in, so no two patterns meet.
 		rt("PUT /v1/channels/{id}/name", accessChannelManager, hf(s.handleRenameChannel)),
+		rt("PUT /v1/channels/{id}/topic", accessChannelManager, hf(s.handleSetChannelTopic)),
 		rt("POST /v0/principals", accessPermission, hf(s.handleCreatePrincipal)).needs(schema.PermManageMembers),
 		// Renaming (issue #441): operators rename anyone, a person themselves
 		// (checked in the handler).
@@ -189,6 +190,23 @@ func (s *Server) routeTable() []route {
 		// The handler applies the content rules (message_removal.go).
 		rt("DELETE /v2/channels/{channel}/messages/{message_id}", accessChannelManager, hf(s.handleRemoveMessage)),
 		rt("GET /v1/read-state", accessAuthenticated, hf(s.handleListReadState)),
+		// Notification preferences and the pending feed (issue #1713): people
+		// with a full credential only. An agent is refused in the handler
+		// (human_required), a guest by membersOnly (guest_not_allowed). Not
+		// previewable, not in setupScopeRoutes, not in the admin catalog.
+		rt("GET /v1/notifications/preferences", accessAuthenticated, s.membersOnly(hf(s.handleGetNotificationPreferences))),
+		rt("PUT /v1/notifications/preferences", accessAuthenticated, s.membersOnly(hf(s.handlePutNotificationPreferences))),
+		rt("GET /v1/notifications/pending", accessAuthenticated, s.membersOnly(hf(s.handleListPendingNotifications))),
+		// Push registrations (issue #1714): the same people-only rule, and the
+		// same limiter. The config is the one route any signed-in caller may
+		// read: nothing in it is secret. "mine" is a literal, so the mux never
+		// hands it to {id} (which has no GET anyway). Not previewable, not in
+		// setupScopeRoutes, not in the admin catalog.
+		rt("GET /v1/push/config", accessAuthenticated, hf(s.handleGetPushConfig)),
+		rt("POST /v1/push/registrations", accessAuthenticated, s.membersOnly(hf(s.handleCreatePushRegistration))),
+		rt("GET /v1/push/registrations/mine", accessAuthenticated, s.membersOnly(hf(s.handleListOwnPushRegistrations))),
+		rt("PUT /v1/push/registrations/{id}", accessAuthenticated, s.membersOnly(hf(s.handlePutPushRegistration))),
+		rt("DELETE /v1/push/registrations/{id}", accessAuthenticated, s.membersOnly(hf(s.handleDeletePushRegistration))),
 		rt("PUT /v1/channels/{channel}/read-state", accessAuthenticated, hf(s.handlePutReadState)),
 		rt("PUT /v1/principals/{id}/manifest", accessPermission, hf(s.handlePutManifest)).needs(schema.PermManageMembers),
 		// Operators, or the agent the manifest belongs to (checked in the handler).

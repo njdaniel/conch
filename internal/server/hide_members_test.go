@@ -625,3 +625,62 @@ func TestHideMembersBaseSetWins(t *testing.T) {
 		}
 	}
 }
+
+// TestPendingNotificationsNameAuthorsByTheAuthorsRoute: a summary names its
+// author only as GET /v1/channels/{channel}/authors would name that author to
+// the reader, whether or not members hold see_member_directory (issue #1713,
+// design §5.5); author_id is always sent. A whisper the reader was not sent is
+// not in the feed at all, so its author is neither named nor counted.
+func TestPendingNotificationsNameAuthorsByTheAuthorsRoute(t *testing.T) {
+	for _, hidden := range []bool{false, true} {
+		t.Run(fmt.Sprintf("members hidden=%v", hidden), func(t *testing.T) {
+			f := newHideFixture(t)
+			f.srv.relaxNotificationLimits()
+			if _, err := f.srv.store.PutChannelMember(context.Background(), "system", f.chA.ID, f.carol.ID, 0, nil); err != nil {
+				t.Fatal(err)
+			}
+			post := func(tok, body string) {
+				t.Helper()
+				if rec := f.do(t, "POST", "/v2/channels/hide-a/messages", tok, body); rec.Code != http.StatusCreated {
+					t.Fatalf("post %s = %d %s", body, rec.Code, rec.Body)
+				}
+			}
+			post(f.daveTok, `{"body":"from dave"}`)
+			post(f.rootTok, `{"body":"from root"}`)
+			// carol's only message to zed is a whisper to the owner: zed is
+			// not in its audience.
+			post(f.carolTok, `{"body":"psst",`+whisperAudience(f.root.ID)+`}`)
+			if hidden {
+				f.membersSee(t, false)
+			}
+			if rec := f.do(t, "PUT", "/v1/notifications/preferences", f.zedTok, `{"policy":"all","muted":[],"preview":true}`); rec.Code != http.StatusOK {
+				t.Fatalf("PUT preferences = %d %s", rec.Code, rec.Body)
+			}
+			rec := f.do(t, "GET", "/v1/notifications/pending", f.zedTok, "")
+			if rec.Code != http.StatusOK {
+				t.Fatalf("pending = %d %s", rec.Code, rec.Body)
+			}
+			page := decodeBody[schema.ListPendingNotificationsResponseV1](t, rec)
+			if len(page.Summaries) != 2 {
+				t.Fatalf("zed's feed = %+v, want dave's and root's posts only", page.Summaries)
+			}
+			for _, s := range page.Summaries {
+				if s.AuthorID <= 0 {
+					t.Errorf("message %d carries no author_id", s.MessageID)
+				}
+				route := decodeBody[schema.ChannelAuthorsResponseV1](t, f.do(t, "GET",
+					fmt.Sprintf("/v1/channels/hide-a/authors?ids=%d", s.AuthorID), f.zedTok, ""))
+				want := ""
+				if len(route.Authors) == 1 {
+					want = route.Authors[0].Name
+				}
+				if s.AuthorName != want {
+					t.Errorf("message %d: author_name %q, the authors route names %q", s.MessageID, s.AuthorName, want)
+				}
+			}
+			if strings.Contains(rec.Body.String(), "carol") || strings.Contains(rec.Body.String(), "psst") {
+				t.Errorf("a whisper zed was not sent is in his feed: %s", rec.Body)
+			}
+		})
+	}
+}

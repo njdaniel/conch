@@ -20,6 +20,10 @@
 // onUpdateState hands the page each InstalledView main sends on the update
 // channel (issue #1600), and drops any message that is not exactly one.
 //
+// onInviteArrived tells the page that a conch:// link reached the app (issue
+// #1592). The message carries nothing: exactly {type: 'arrived'}, and the page
+// then asks inviteArrived, so a link or code never rides an event.
+//
 // subscribe numbers each feed itself (so main's first event for it can never
 // arrive before the number is known here), asks main to open it, hands the
 // page each frame of a batch in order and then acknowledges the batch, which
@@ -165,6 +169,7 @@ export function createBridge(
   listenNotification: Listen = () => undefined,
   sync: Sync = () => ({ ok: false, kind: 'refused' }),
   listenUpdate: Listen = () => undefined,
+  listenInvite: Listen = () => undefined,
 ): Readonly<ExposedDesktopBridge> {
   const call =
     <T>(name: InvokedFunction) =>
@@ -288,6 +293,28 @@ export function createBridge(
       }
     }
   });
+  // An invite link arrived: a bare word, nothing more.
+  const inviteListeners = new Set<() => void>();
+  listenInvite((message) => {
+    if (typeof message !== 'object' || message === null || Array.isArray(message)) return;
+    const record = message as Record<string, unknown>;
+    if (Object.keys(record).length !== 1 || record['type'] !== 'arrived') return;
+    for (const listener of [...inviteListeners]) {
+      try {
+        listener();
+      } catch (error) {
+        queueMicrotask(() => {
+          throw error;
+        });
+      }
+    }
+  });
+  const onInviteArrived = (listener: () => void): Unsubscribe => {
+    inviteListeners.add(listener);
+    return () => {
+      inviteListeners.delete(listener);
+    };
+  };
   const onUpdateState = (listener: (view: InstalledView) => void): Unsubscribe => {
     updateListeners.add(listener);
     return () => {
@@ -367,9 +394,14 @@ export function createBridge(
     inviteAccept: call('inviteAccept'),
     inviteCancel: call('inviteCancel'),
     inviteTake: call('inviteTake'),
+    // A conch:// link that reached the app (issue #1592): main's word, then
+    // the page's ask. The code is still only ever returned by inviteTake.
+    inviteArrived: call('inviteArrived'),
+    onInviteArrived,
     // The app's own settings (issue #1587).
     settings: call('settings'),
     settingsSet: call('settingsSet'),
+    integrations: call('integrations'),
     onVoiceState,
     // The screen companion (issue #1579): its grant, its end, and main's word
     // that it has ended.

@@ -3,7 +3,7 @@
 // person; a channel they lose leaves it; moving about never touches voice.
 import type { Page } from '@playwright/test';
 import { makeChannel, memberOf, post } from './api';
-import { channelButton, conversation, expect, expectFits, mainNav, phones, rememberPushToTalk, signIn, test } from './fixtures';
+import { closeAll, channelButton, conversation, expect, expectFits, mainNav, phones, rememberPushToTalk, signIn, test } from './fixtures';
 import { dockerAvailable, startVoiceWorld, type VoiceWorld } from './voice-world';
 import { loadWorld, principalId, setChannelVisibility } from './world';
 
@@ -239,8 +239,7 @@ test.describe('with a voice session', () => {
       await expect(voice.getByRole('button', { name: 'Join voice' })).toHaveCount(0);
       expect((await voice.innerText()).includes('Connected in #voice-room')).toBe(before.includes('Connected in #voice-room'));
     } finally {
-      await page.close();
-      await context.close();
+      await closeAll(context);
     }
   });
 });

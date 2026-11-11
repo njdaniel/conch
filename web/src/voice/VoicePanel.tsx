@@ -1422,6 +1422,7 @@ function ShareNotes({ voice, onMore, othersShare }: { readonly voice: VoiceContr
   const { state, features, client } = voice;
   const share = state.share;
   if (state.listenOnly) return null;
+  const inCall = state.phase !== 'idle' && state.phase !== 'stopped';
   const line = (
     <p className="hint share-line voice-supplemental">
       {shortShareNote(features)}{' '}
@@ -1436,7 +1437,7 @@ function ShareNotes({ voice, onMore, othersShare }: { readonly voice: VoiceContr
       return (
         <>
           <p role="status" className="sharing-note">{sharedNote(share.audio, features)}</p>
-          <p className="hint voice-supplemental"><ShareReadout client={client} direction="sent" prefix="Sending: " /></p>
+          <p className="hint voice-supplemental"><ShareReadout client={client} direction="sent" prefix="Sending: " asked={state.shareQuality} /></p>
           {share.resumed === true ? <p className="hint">{resumedNote}</p> : null}
         </>
       );
@@ -1452,7 +1453,7 @@ function ShareNotes({ voice, onMore, othersShare }: { readonly voice: VoiceContr
       return (
         <>
           {line}
-          {share.ended === null ? null : share.ended === 'self' ? <StoppedNote key="self" text={endedNote(share.ended)} othersShare={othersShare} /> : <p role="status" className="hint">{endedNote(share.ended)}</p>}
+          {share.ended === null ? null : share.ended === 'self' ? <StoppedNote key="self" text={endedNote(share.ended, inCall)} othersShare={othersShare} /> : <p role="status" className="hint">{endedNote(share.ended, inCall)}</p>}
         </>
       );
   }

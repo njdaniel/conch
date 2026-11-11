@@ -80,11 +80,13 @@ export const VOICE_FUNCTIONS = [
 export type VoiceFunction = (typeof VOICE_FUNCTIONS)[number];
 
 // Opening an invite link (issue #1591, D5-05): DesktopInviteBridge.
-export const INVITE_FUNCTIONS = ['inviteCheck', 'inviteAccept', 'inviteCancel', 'inviteTake'] as const satisfies readonly (keyof DesktopInviteBridge)[];
+// onInviteArrived is its event, not an invoke (INVITE_EVENTS below).
+export const INVITE_FUNCTIONS = ['inviteCheck', 'inviteAccept', 'inviteCancel', 'inviteTake', 'inviteArrived'] as const satisfies readonly (keyof DesktopInviteBridge)[];
 
 export type InviteFunction = (typeof INVITE_FUNCTIONS)[number];
-// The app's own settings (issue #1587): read them, change them.
-export const SETTINGS_FUNCTIONS = ['settings', 'settingsSet'] as const satisfies readonly (keyof DesktopSettingsBridge)[];
+// The app's own settings (issue #1587): read them, change them; and read what
+// works on this desktop (issue #1593).
+export const SETTINGS_FUNCTIONS = ['settings', 'settingsSet', 'integrations'] as const satisfies readonly (keyof DesktopSettingsBridge)[];
 
 export type SettingsFunction = (typeof SETTINGS_FUNCTIONS)[number];
 // The screen companion (issue #1579, D4-02 of #772): the invoked functions of
@@ -159,3 +161,9 @@ export const COMPANION_EVENTS = 'conch:companion';
 // Another channel main sends on: the installed state, an InstalledView as
 // the message, when it changes. Same targets and gate as VOICE_EVENTS.
 export const UPDATE_EVENTS = 'conch:update';
+
+// Another: a payload-free word that a conch:// invite link reached the app
+// (issue #1592). The link itself stays in main until the page asks for it
+// (inviteArrived), so nothing on this channel can carry a code.
+export const INVITE_EVENTS = 'conch:invite';
+export const INVITE_ARRIVED = { type: 'arrived' } as const;

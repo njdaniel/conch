@@ -34,7 +34,11 @@ for (const [size, options, phone] of sizes) {
   test(`P1094 at ${size} an operator makes someone a manager and removes them through the row's menu`, async ({ meet, secrets, world }) => {
     const suffix = Date.now().toString(36).slice(-5);
     const channel = `p1094-${suffix}${phone ? 'p' : 'w'}`;
-    const name = `q${suffix}${phone ? 'p' : 'w'}`;
+    // Digits only, so the name's width is bounded: a base-36 suffix with an m
+    // and a w in it is wide enough on a phone to wrap the Approver badge onto
+    // a second line and make the row 71.6 px (issue #1647). The row's height
+    // budget below is for a name of ordinary width, not for the widest glyphs.
+    const name = `q${String(Math.floor(Math.random() * 100000)).padStart(5, '0')}${phone ? 'p' : 'w'}`;
     const request: CreateChannelRequest = { name: channel };
     await ok(world, world.tokens.operator, 'POST', '/v0/channels', createChannelResponse, request);
     const principal: CreatePrincipalRequest = { kind: 'human', name };
@@ -64,8 +68,15 @@ for (const [size, options, phone] of sizes) {
     await expect(more).toBeVisible();
 
     // A row is a line of name and state plus a line of badges at most, not a block of controls.
-    const box = await row.boundingBox();
-    expect(box?.height ?? 0, `the row is ${String(box?.height)} px tall`).toBeLessThan(64);
+    // The row is first drawn from the member list alone; the roster's status
+    // and the identity badges join it a moment later and can wrap onto a
+    // second line until the row settles, so the budget (64 px) is polled, not
+    // read once: it must hold once the layout is settled, and a row that stays
+    // taller still fails when the poll times out. (A row that stayed at 71.6 px
+    // in CI was a name too wide for one line, not timing: see the name above.)
+    await expect
+      .poll(async () => (await row.boundingBox())?.height ?? Number.POSITIVE_INFINITY, { message: 'the row stays taller than its budget' })
+      .toBeLessThan(64);
     await expectFits(page, `${size}: the members panel with a ⋯ per row`);
 
     const press = async (target: Locator) => (phone ? target.tap() : target.click());

@@ -27,6 +27,7 @@
 //! never writes that file.
 
 use std::ffi::OsString;
+#[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
 use std::path::PathBuf;
 use std::str::FromStr;
@@ -205,9 +206,10 @@ pub struct ManagedArgs {
     /// `--test-key-device`, test only: a named pipe of `input_event` records read instead
     /// of the key device `voice.toml` names, with the keys it binds.
     pub test_key_device: Option<PathBuf>,
-    /// `--events-pipe`: a Unix-socket path to connect to for events instead of file
-    /// descriptor 3. Not secret. The desktop owner passes it; nobody types it
-    /// (`docs/design/linux-desktop.md` §5.2). Checked by [`crate::channel`], not here.
+    /// `--events-pipe`: a Unix-socket path (on Windows a `\\.\pipe\` name) to connect to for
+    /// events instead of file descriptor 3. Not secret. The desktop owner passes it; nobody
+    /// types it (`docs/design/linux-desktop.md` §5.2, `docs/design/windows-desktop.md` §3.3).
+    /// Checked by [`crate::channel`], not here.
     pub events_pipe: Option<PathBuf>,
     /// `--share-audio-owner`, passed by an owner that runs a companion (`helper` for the
     /// TUI, which passes nothing).
@@ -215,6 +217,10 @@ pub struct ManagedArgs {
     /// `--transmit-ceiling-secs`, passed by the desktop owner: a missed-release bound for
     /// push-to-talk presses, in seconds. A shorter `audio.max_transmit_secs` still wins.
     pub transmit_ceiling_secs: Option<u32>,
+    /// `--no-mute-key`, passed by an owner that alone mutes (the desktop app, #1631): the
+    /// helper does not read `keys.mute`, so no key press can unmute a session the owner
+    /// muted, a locked screen's included. `conch` passes nothing, and `keys.mute` works.
+    pub no_mute_key: bool,
 }
 
 /// What the command line asked for.
@@ -394,12 +400,18 @@ pub fn command() -> Command {
                 .help("Cap each push-to-talk press at SECONDS (1 to 600), or at audio.max_transmit_secs if that is shorter; open mode is not capped by it"),
         )
         .arg(
+            Arg::new("no-mute-key")
+                .long("no-mute-key")
+                .action(clap::ArgAction::SetTrue)
+                .help("Do not read keys.mute: the owner alone mutes (the desktop app passes this)"),
+        )
+        .arg(
             Arg::new("events-pipe")
                 .long("events-pipe")
                 .value_name("PATH")
                 // Any text, the empty one included: `channel` refuses it with a reason of its own.
                 .value_parser(clap::value_parser!(OsString))
-                .help("connect to this endpoint for events instead of file descriptor 3; conch passes a Unix-socket path, the desktop owner's, never typed by hand"),
+                .help("connect to this endpoint for events instead of file descriptor 3; the desktop owner passes a Unix-socket path, on Windows a \\\\.\\pipe\\ name, never typed by hand"),
         );
     let devices = Command::new("devices")
         .about("List microphones and speakers by the names the configuration takes, and keyboards")
@@ -662,6 +674,7 @@ where
                     .map(PathBuf::from),
                 share_audio_owner: share_audio_owner(managed),
                 transmit_ceiling_secs: managed.get_one::<u32>("transmit-ceiling-secs").copied(),
+                no_mute_key: managed.get_flag("no-mute-key"),
             }));
         }
         Some(("devices", devices)) => {
@@ -795,13 +808,7 @@ pub(crate) fn read_config(path: &std::path::Path) -> Result<Config, Error> {
             path: path.to_owned(),
         });
     }
-    let mode = meta.mode() & 0o777;
-    if mode & 0o022 != 0 {
-        return Err(Error::ConfigWritable {
-            path: path.to_owned(),
-            mode,
-        });
-    }
+    refuse_if_others_can_write(&meta, path)?;
     match std::fs::read_to_string(path) {
         Ok(text) => Ok(Config::parse(&text, &format!("{path:?}"))?),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Config::default()),
@@ -809,6 +816,47 @@ pub(crate) fn read_config(path: &std::path::Path) -> Result<Config, Error> {
             path: path.to_owned(),
             source,
         }),
+    }
+}
+
+/// Refuses a configuration file that group or others can write.
+#[cfg(unix)]
+fn refuse_if_others_can_write(
+    meta: &std::fs::Metadata,
+    path: &std::path::Path,
+) -> Result<(), Error> {
+    let mode = meta.mode() & 0o777;
+    if mode & 0o022 != 0 {
+        return Err(Error::ConfigWritable {
+            path: path.to_owned(),
+            mode,
+        });
+    }
+    Ok(())
+}
+
+/// Who may write a file is a Windows ACL there, which has no mode to read; judging it is the
+/// Windows port of the configuration (#904). Until then a file that exists is not read,
+/// rather than read unchecked: its `server` decides where the login token is sent.
+///
+/// # Errors
+///
+/// Always [`Error::Unsupported`].
+#[cfg(not(unix))]
+fn refuse_if_others_can_write(
+    _meta: &std::fs::Metadata,
+    path: &std::path::Path,
+) -> Result<(), Error> {
+    Err(unsupported_permission_check(path))
+}
+
+/// The error behind the non-Unix [`refuse_if_others_can_write`], compiled on Linux too so
+/// that a test holds it.
+#[cfg(any(not(unix), test))]
+fn unsupported_permission_check(path: &std::path::Path) -> Error {
+    Error::Unsupported {
+        what: "checking who may write the configuration file",
+        path: Some(path.to_owned()),
     }
 }
 
@@ -950,7 +998,61 @@ pub fn key_device(
 }
 
 #[cfg(test)]
+mod unsupported_tests {
+    use super::*;
+
+    #[test]
+    fn the_non_unix_permission_check_is_typed_and_names_what_it_cannot_do() {
+        let error = unsupported_permission_check(std::path::Path::new("voice.toml"));
+        let shown = error.to_string();
+        assert!(
+            shown.contains("voice.toml") && shown.contains("CONCH_SERVER"),
+            "{shown}"
+        );
+        assert!(matches!(error, Error::Unsupported { .. }));
+        assert!(error.to_string().contains("who may write"), "{error}");
+        assert_eq!(error.exit_code(), 2);
+    }
+}
+
+/// The refusal that is the only control on where the login token goes on a platform that
+/// cannot judge who may write `voice.toml`: a file there that names a server must never be
+/// read, and no file at all is still the default configuration.
+#[cfg(all(test, not(unix)))]
+mod windows_config_tests {
+    use super::*;
+
+    #[test]
+    fn a_voice_toml_that_names_a_server_is_refused_and_no_file_is_the_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("voice.toml");
+        assert_eq!(read_config(&path).unwrap(), Config::default());
+
+        std::fs::write(&path, "server = \"http://evil.test\"\n").unwrap();
+        let error = read_config(&path).unwrap_err();
+        assert!(matches!(error, Error::Unsupported { .. }), "{error:?}");
+        let shown = error.to_string();
+        assert!(
+            shown.contains("CONCH_SERVER") && !shown.contains("evil.test"),
+            "{shown}"
+        );
+
+        let environment = Environment {
+            conch_config_dir: Some(dir.path().as_os_str().to_owned()),
+            token: Some(Secret::new("conch_FAKE_login_token_do_not_print")),
+            ..Environment::default()
+        };
+        let args = match parse(["conch-voice", "join", "general"]).unwrap() {
+            Invocation::Join(args) => args,
+            other => panic!("not a join: {other:?}"),
+        };
+        assert!(resolve(&args, &environment).is_err());
+    }
+}
+
+#[cfg(test)]
 mod tests {
+    #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
 
     use super::*;
@@ -991,9 +1093,11 @@ mod tests {
         let path = dir.join("voice.toml");
         std::fs::write(&path, text).unwrap();
         // Not left to the umask of whoever runs the tests.
+        #[cfg(unix)]
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_configuration_others_can_write_is_refused_and_a_fifo_is_not_waited_on() {
         for mode in [0o664, 0o646, 0o666, 0o620, 0o602] {
@@ -1042,6 +1146,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_configuration_error_is_one_line_even_if_the_directory_name_has_a_newline() {
         let parent = tempfile::tempdir().unwrap();
@@ -1061,6 +1166,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        not(unix),
+        ignore = "reads voice.toml, which a non-Unix platform answers Error::Unsupported for until #904"
+    )]
     fn voice_toml_and_the_login_move_with_the_configuration_directory() {
         let xdg = tempfile::tempdir().unwrap();
         let alice = tempfile::tempdir().unwrap();
@@ -1278,6 +1387,20 @@ mod tests {
     }
 
     #[test]
+    fn managed_takes_no_mute_key_and_join_does_not() {
+        let no_mute = |args: &[&str]| match parse(args.iter().copied()) {
+            Ok(Invocation::Managed(args)) => Some(args.no_mute_key),
+            _ => None,
+        };
+        assert_eq!(no_mute(&["conch-voice", "managed"]), Some(false));
+        assert_eq!(
+            no_mute(&["conch-voice", "managed", "--no-mute-key"]),
+            Some(true)
+        );
+        assert!(parse(["conch-voice", "join", "--no-mute-key"]).is_err());
+    }
+
+    #[test]
     fn managed_takes_no_channel_server_or_login_and_hides_its_test_options() {
         assert_eq!(
             parse(["conch-voice", "managed"]).unwrap(),
@@ -1289,6 +1412,7 @@ mod tests {
                 events_pipe: None,
                 share_audio_owner: ShareAudioOwner::Helper,
                 transmit_ceiling_secs: None,
+                no_mute_key: false,
             })
         );
         assert_eq!(
@@ -1313,6 +1437,7 @@ mod tests {
                 events_pipe: None,
                 share_audio_owner: ShareAudioOwner::Helper,
                 transmit_ceiling_secs: None,
+                no_mute_key: false,
             })
         );
         // Nothing that names what to join, or where, or as whom.
@@ -1367,8 +1492,8 @@ mod tests {
             .to_string();
         assert!(
             help.contains(
-                "connect to this endpoint for events instead of file descriptor 3; conch passes \
-                 a Unix-socket path, the desktop owner's, never typed by hand"
+                "connect to this endpoint for events instead of file descriptor 3; the desktop \
+                 owner passes a Unix-socket path, on Windows a \\\\.\\pipe\\ name, never typed by hand"
             ),
             "{help}"
         );
@@ -1605,6 +1730,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        not(unix),
+        ignore = "reads voice.toml, which a non-Unix platform answers Error::Unsupported for until #904"
+    )]
     fn the_channel_and_server_come_from_the_file_when_nothing_else_names_them() {
         let dir = tempfile::tempdir().unwrap();
         write_config(
@@ -1618,6 +1747,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        not(unix),
+        ignore = "reads voice.toml, which a non-Unix platform answers Error::Unsupported for until #904"
+    )]
     fn the_environment_wins_over_the_file_and_the_command_line_over_both() {
         let dir = tempfile::tempdir().unwrap();
         write_config(
@@ -1649,6 +1782,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        not(unix),
+        ignore = "reads voice.toml, which a non-Unix platform answers Error::Unsupported for until #904"
+    )]
     fn a_configuration_with_an_unknown_key_is_an_error_that_names_it() {
         let dir = tempfile::tempdir().unwrap();
         write_config(dir.path(), "chanel = \"typo\"\n");
@@ -1668,6 +1805,7 @@ mod tests {
             format!("{{\"http://127.0.0.1:8080\":{{\"token\":\"{FAKE_LOGIN}\"}}}}"),
         )
         .unwrap();
+        #[cfg(unix)]
         std::fs::set_permissions(&credentials, std::fs::Permissions::from_mode(0o600)).unwrap();
         let mut environment = environment(dir.path());
         environment.token = None;
@@ -1694,6 +1832,7 @@ mod tests {
             .collect();
         let path = dir.join("credentials.json");
         std::fs::write(&path, serde_json::Value::Object(logins).to_string()).unwrap();
+        #[cfg(unix)]
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
     }
 
@@ -1884,6 +2023,16 @@ mod tests {
             let name = case.name;
 
             let result = resolve(&join(&line), &environment);
+            // Where a configuration file is not read (#904), a case with one is refused
+            // whatever else it names: the file is the one thing that cannot be judged.
+            if case.file.is_some() && cfg!(not(unix)) {
+                assert!(
+                    matches!(result, Err(Error::Unsupported { .. })),
+                    "{}: {result:?}",
+                    case.name
+                );
+                continue;
+            }
             if case.not_signed_in {
                 let error = result.unwrap_err();
                 let mut want = format!("not signed in to {}: run 'conch login'", case.want);

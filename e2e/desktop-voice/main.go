@@ -19,11 +19,19 @@
 //	GET    /second-session                       whether it is still running
 //	DELETE /second-session                       stops it
 //
+// A fourth principal, V, is a browser (issue #1583, D4-06): conchd serves the
+// web client's build (make web-build) at /app/, and the owner side's second
+// file, companion-live.test.ts, drives V in a Chromium beside the desktop's
+// own screen companion (desktop/main/voice/companion.ts) running A's share
+// and watch. V's credential and the app's address are in its environment.
+//
 // Everything is synthetic: microphones are `--mic tone:<hz>`, the key is a
 // named pipe of hand-built input_event records (`--test-key-device`), the
 // speakers `--sink count`. No microphone, PipeWire, keyboard or compositor.
-// This proves the owner's lifecycle, the ceiling, the gate and one microphone
-// publisher on one machine; it proves nothing about a real keyboard, real
+// The screens are Chromium's fake screen (launch flags the test gives the
+// browsers it starts). This proves the owner's lifecycle, the ceiling, the
+// gate and one microphone publisher on one machine, and the companion's share
+// and watch between a desktop and a browser; it proves nothing about a real keyboard, real
 // audio or Electron's own process tree (D3-13, D3-14).
 //
 // With no Docker, no network for the image or lk, or no pinned Rust
@@ -329,6 +337,10 @@ func run(ctx context.Context, h *harness) (string, error) {
 	if err := h.checkDesktopDeps(); err != nil {
 		return "", err
 	}
+	webDir, err := h.webDist()
+	if err != nil {
+		return "", err
+	}
 	conchd, err := h.buildConchd()
 	if err != nil {
 		return "", err
@@ -341,7 +353,7 @@ func run(ctx context.Context, h *harness) (string, error) {
 	h.secret("LiveKit API key", srv.Key)
 	h.secret("LiveKit API secret", srv.Secret)
 
-	d, err := h.startConchd(conchd, srv)
+	d, err := h.startConchd(conchd, srv, webDir)
 	if err != nil {
 		return "", err
 	}
@@ -357,7 +369,11 @@ func run(ctx context.Context, h *harness) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	h.say("ok   conchd is up on %s with principals A (p%d), B (p%d, the listener) and C (p%d)", d.baseURL, a.id, b.id, c.id)
+	v, err := d.newPrincipal("view-v")
+	if err != nil {
+		return "", err
+	}
+	h.say("ok   conchd is up on %s with principals A (p%d), B (p%d, the listener), C (p%d) and V (p%d, a browser)", d.baseURL, a.id, b.id, c.id, v.id)
 
 	ears, err := h.startListener(voiceBin, d, b)
 	if err != nil {
@@ -379,11 +395,18 @@ func run(ctx context.Context, h *harness) (string, error) {
 		"CONCH_E2E_A_TOKEN="+a.token,
 		"CONCH_E2E_C_ID="+strconv.FormatInt(c.id, 10),
 		"CONCH_E2E_C_TOKEN="+c.token,
+		"CONCH_E2E_V_ID="+strconv.FormatInt(v.id, 10),
+		"CONCH_E2E_V_TOKEN="+v.token,
+		"CONCH_E2E_APP_URL="+d.baseURL+"/app/",
+		// The operator's credential, for the operator stop of a stream
+		// (issue #1512); it is a registered secret, so it is redacted from
+		// everything this program prints.
+		"CONCH_E2E_OPERATOR_TOKEN="+d.operator,
 		"CONCH_E2E_TONE_A="+strconv.Itoa(toneA),
 		"CONCH_E2E_TONE_C="+strconv.Itoa(toneC),
 		"CONCH_E2E_CHANNEL="+channel,
 	)
-	h.say("== the owner side: desktop/tests/e2e/voice-live.test.ts ==")
+	h.say("== the owner side: desktop/tests/e2e (voice-live.test.ts, companion-live.test.ts) ==")
 	if err := h.runOwnerSide(ctx, env); err != nil {
 		return "", err
 	}
@@ -412,6 +435,17 @@ func (h *harness) checkDesktopDeps() error {
 		return errors.New("desktop/node_modules is not installed; run make desktop-voice-e2e (it runs npm ci first)")
 	}
 	return nil
+}
+
+// webDist is the web client's build, which conchd serves at /app/ so that V, a
+// browser, can sign in and share: make desktop-voice-e2e builds it first
+// (make web-build). Missing, it fails; it does not skip.
+func (h *harness) webDist() (string, error) {
+	dir := filepath.Join(h.repo, "web", "dist")
+	if _, err := os.Stat(filepath.Join(dir, "index.html")); err != nil {
+		return "", errors.New("web/dist is not built; run make desktop-voice-e2e (it builds the web client first)")
+	}
+	return dir, nil
 }
 
 // runOwnerSide runs Vitest, its output through the redaction list line by
@@ -532,7 +566,7 @@ type conchdProc struct {
 	stopped  bool
 }
 
-func (h *harness) startConchd(bin string, srv *lkit.Server) (*conchdProc, error) {
+func (h *harness) startConchd(bin string, srv *lkit.Server, webDir string) (*conchdProc, error) {
 	root, err := h.mkdir("conchd-")
 	if err != nil {
 		return nil, err
@@ -565,7 +599,7 @@ func (h *harness) startConchd(bin string, srv *lkit.Server) (*conchdProc, error)
 	if err != nil {
 		return nil, err
 	}
-	cmd := lkit.GroupStart(bin, "serve", "--data", dataDir, "--listen", addr, "--livekit-url", srv.WSURL)
+	cmd := lkit.GroupStart(bin, "serve", "--data", dataDir, "--listen", addr, "--livekit-url", srv.WSURL, "--web-dir", webDir)
 	cmd.Env = env
 	cmd.Stdout, cmd.Stderr = logFile, logFile
 	if err := cmd.Start(); err != nil {

@@ -900,6 +900,59 @@ func TestGoToMessageWithWrappedHistory(t *testing.T) {
 	}
 }
 
+func TestChatTitleTopic(t *testing.T) {
+	tests := []struct {
+		name  string
+		topic string
+		want  string
+	}{
+		{name: "set", topic: "Incidents and their follow-ups", want: "# ops · Incidents and their follow-ups"},
+		{name: "unset", want: "# ops"},
+		{name: "hostile text is sanitized", topic: "incident\x1b[2J \u202eevil\u202c", want: "# ops · incident[2J evil"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := loadChannelsForTest(NewModel(context.Background(), stubAPI{}, 7, nil), []schema.ChannelV0{{ID: 1, Name: "ops", Topic: tt.topic}})
+			if got := m.chatTitle(); got != tt.want {
+				t.Errorf("chatTitle = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestChatTitleTopicTruncation(t *testing.T) {
+	m := loadChannelsForTest(NewModel(context.Background(), stubAPI{}, 7, nil), []schema.ChannelV0{{ID: 1, Name: "ops", Topic: "Incidents and their follow-ups"}})
+	pane := stripANSI(paneBox(m.chatTitle(), false, nil, 24, 1, ""))
+	if !strings.Contains(pane, "# ops · Incidents…") {
+		t.Errorf("truncated pane title is missing:\n%s", pane)
+	}
+	for _, line := range strings.Split(pane, "\n") {
+		if got := cellWidth(line); got > 24 {
+			t.Errorf("pane line is %d cells, want at most 24: %q", got, line)
+		}
+	}
+}
+
+func TestChannelsChangedRefreshesChatTitleTopic(t *testing.T) {
+	api := &channelRefreshAPI{answers: []channelListAnswer{
+		{channels: []schema.ChannelV0{{ID: 1, Name: "general"}, {ID: 2, Name: "ops", Topic: "before"}}},
+		{channels: []schema.ChannelV0{{ID: 1, Name: "general"}, {ID: 2, Name: "ops", Topic: "after"}}},
+	}}
+	m := channelRefreshModel(t, api)
+	if got := m.chatTitle(); got != "# ops · before" {
+		t.Fatalf("initial chatTitle = %q", got)
+	}
+	m, cmd := update(m, eventsChannelsReceived{gen: m.ev.gen})
+	loaded, ok := channelRefreshResult(t, runChannelRefreshCommand(m, cmd))
+	if !ok {
+		t.Fatal("channels_changed did not re-read the channel list")
+	}
+	m, _ = update(m, loaded)
+	if got := m.chatTitle(); got != "# ops · after" {
+		t.Errorf("refreshed chatTitle = %q, want %q", got, "# ops · after")
+	}
+}
+
 func TestArchivedChannelView(t *testing.T) {
 	stamp := time.Date(2026, time.November, 7, 12, 0, 0, 0, time.UTC)
 	tests := []struct {
@@ -953,6 +1006,67 @@ func TestArchivedChannelView(t *testing.T) {
 			}
 			if tt.wantArchived && strings.Contains(view, "enter send") {
 				t.Errorf("archived view still offers sending:\n%s", view)
+			}
+		})
+	}
+}
+
+func TestChatTitleFitKeepsMarkers(t *testing.T) {
+	const long = "Incidents and their follow-ups, escalation paths and the on-call rota"
+	tests := []struct {
+		name   string
+		room   int
+		net    bool
+		stale  bool
+		topic  string
+		want   string
+		wantIn []string
+	}{
+		{name: "no limit", topic: long, want: "# ops · " + long},
+		{name: "fits", room: 80, topic: "short", want: "# ops · short"},
+		{name: "topic truncated, net and stale kept", room: 36, net: true, stale: true, topic: long, want: "# ops · Incident… › net blue [stale]"},
+		{name: "stale kept", room: 24, stale: true, topic: long, want: "# ops · Inciden… [stale]"},
+		{name: "no room for a topic drops it", room: 24, net: true, stale: true, topic: long, want: "# ops › net blue [stale]"},
+		{name: "narrow pane keeps stale, drops net", room: 16, net: true, stale: true, topic: long, want: "# ops [stale]"},
+		{name: "wide first character leaves no topic", room: 18, stale: true, topic: "😀😀😀😀", want: "# ops [stale]"},
+		{name: "wide topic truncated", room: 21, stale: true, topic: "😀😀😀😀", want: "# ops · 😀😀… [stale]"},
+		{name: "no topic", room: 40, net: true, stale: true, want: "# ops › net blue [stale]"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := loadChannelsForTest(NewModel(context.Background(), stubAPI{}, 7, nil), []schema.ChannelV0{{ID: 1, Name: "ops", Topic: tt.topic}})
+			if tt.net {
+				m.target = &netTarget{channel: "ops", name: "blue"}
+			}
+			if tt.stale {
+				m.mod.stale = map[string]bool{"ops": true}
+			}
+			got := m.chatTitleFit(tt.room)
+			if got != tt.want {
+				t.Errorf("chatTitleFit(%d) = %q, want %q", tt.room, got, tt.want)
+			}
+			if tt.room > 0 && cellWidth(got) > tt.room {
+				t.Errorf("title is %d cells, want at most %d", cellWidth(got), tt.room)
+			}
+		})
+	}
+}
+
+func TestChatTitleRoom(t *testing.T) {
+	m := loadChannelsForTest(NewModel(context.Background(), stubAPI{}, 7, nil), []schema.ChannelV0{{ID: 1, Name: "ops"}})
+	tests := []struct {
+		name  string
+		focus paneFocus
+		want  int
+	}{
+		{name: "unfocused", focus: focusChannels, want: 24 - 6},
+		{name: "focused loses the mark", focus: focusMessages, want: 24 - 6 - cellWidth(focusMark)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m.focus = tt.focus
+			if got := m.chatTitleRoom(24); got != tt.want {
+				t.Errorf("chatTitleRoom = %d, want %d", got, tt.want)
 			}
 		})
 	}

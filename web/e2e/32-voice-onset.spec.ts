@@ -20,129 +20,13 @@
 //
 // Without Docker it fails when CI is set and is skipped otherwise.
 import type { Page } from '@playwright/test';
-import { chooseMicrophone, expect, openChannel, signIn, test } from './fixtures';
+import { chooseMicrophone, expect, test } from './fixtures';
+import { enter, joinVoice, leave, type Someone } from './people';
 import { burstAudioFailure, burstMeasure, median, p90, pressMeasure, type Sample } from './onset';
-import { dockerAvailable, startVoiceWorld, watchPage, type VoiceWorld } from './voice-world';
+import { recordHeard, startListening, syntheticMicrophone } from './synthetic-mic';
+import { dockerAvailable, startVoiceWorld, type VoiceWorld } from './voice-world';
 
 const voiceRegion = (page: Page) => page.getByRole('region', { name: 'Voice' });
-
-// syntheticMicrophone answers a request for audio with a tone whose gain the
-// spec controls (window.__signal), and marks the talk key's presses and the
-// indicator's changes. The device's own capture is asked for as before, so
-// permissions and device errors are the browser's, and is stopped with the
-// tone.
-const syntheticMicrophone = () => {
-  const now = () => performance.timeOrigin + performance.now();
-  const w = window as unknown as {
-    __signal?: (on: boolean) => number;
-    __marks: { down: number[]; up: number[]; on: number[]; off: number[] };
-  };
-  w.__marks = { down: [], up: [], on: [], off: [] };
-  window.addEventListener(
-    'keydown',
-    (e) => {
-      if (e.code === 'Backquote' && !e.repeat) w.__marks.down.push(now());
-    },
-    true,
-  );
-  window.addEventListener(
-    'keyup',
-    (e) => {
-      if (e.code === 'Backquote') w.__marks.up.push(now());
-    },
-    true,
-  );
-  // The indicator: "Transmitting", as the strip says it.
-  let shown = false;
-  new MutationObserver(() => {
-    const text = document.querySelector('.voice-tx')?.textContent ?? '';
-    const on = text.endsWith('Transmitting') && !text.endsWith('Not transmitting');
-    if (on !== shown) {
-      shown = on;
-      (on ? w.__marks.on : w.__marks.off).push(now());
-    }
-  }).observe(document, { subtree: true, childList: true, characterData: true });
-  const devices = navigator.mediaDevices;
-  const original = devices.getUserMedia.bind(devices);
-  devices.getUserMedia = async (constraints?: MediaStreamConstraints) => {
-    const real = await original(constraints);
-    if (constraints?.audio === undefined || constraints.audio === false) return real;
-    const context = new AudioContext();
-    const tone = context.createOscillator();
-    tone.frequency.value = 440;
-    const gain = context.createGain();
-    gain.gain.value = 0;
-    const out = context.createMediaStreamDestination();
-    tone.connect(gain).connect(out);
-    tone.start();
-    void context.resume();
-    w.__signal = (on: boolean) => {
-      gain.gain.setValueAtTime(on ? 0.6 : 0, context.currentTime);
-      return now();
-    };
-    const track = out.stream.getAudioTracks()[0];
-    if (track === undefined) return real;
-    const stop = track.stop.bind(track);
-    track.stop = () => {
-      for (const t of real.getTracks()) t.stop();
-      stop();
-    };
-    return new MediaStream([track]);
-  };
-};
-
-// recordHeard keeps every audio track the listener's page receives, so what
-// it plays can be read.
-const recordHeard = () => {
-  const w = window as unknown as { __heardTracks: MediaStreamTrack[] };
-  w.__heardTracks = [];
-  const Original = window.RTCPeerConnection;
-  const Wrapped = function (this: unknown, ...args: ConstructorParameters<typeof RTCPeerConnection>) {
-    const pc = new Original(...args);
-    pc.addEventListener('track', (e) => {
-      if (e.track.kind === 'audio') w.__heardTracks.push(e.track);
-    });
-    return pc;
-  } as unknown as typeof RTCPeerConnection;
-  Wrapped.prototype = Original.prototype;
-  Object.setPrototypeOf(Wrapped, Original);
-  window.RTCPeerConnection = Wrapped;
-};
-
-// startListening reads the level of what the listener's page receives every
-// 5 ms, from 256 samples (5 ms at 48 kHz), into window.__heard: the loudest
-// of the tracks received.
-async function startListening(page: Page): Promise<void> {
-  await page.evaluate(() => {
-    const w = window as unknown as { __heardTracks: MediaStreamTrack[]; __heard: { t: number; rms: number }[] };
-    w.__heard = [];
-    const context = new AudioContext();
-    void context.resume();
-    const analysers: AnalyserNode[] = [];
-    let wired = 0;
-    const buffer = new Float32Array(256);
-    const read = () => {
-      for (; wired < w.__heardTracks.length; wired++) {
-        const track = w.__heardTracks[wired];
-        if (track === undefined) continue;
-        const analyser = context.createAnalyser();
-        analyser.fftSize = 256;
-        context.createMediaStreamSource(new MediaStream([track])).connect(analyser);
-        analysers.push(analyser);
-      }
-      let rms = 0;
-      for (const a of analysers) {
-        a.getFloatTimeDomainData(buffer);
-        let sum = 0;
-        for (const v of buffer) sum += v * v;
-        rms = Math.max(rms, Math.sqrt(sum / buffer.length));
-      }
-      w.__heard.push({ t: performance.timeOrigin + performance.now(), rms });
-      setTimeout(read, 5);
-    };
-    read();
-  });
-}
 
 async function heard(page: Page): Promise<Sample[]> {
   return page.evaluate(() => (window as unknown as { __heard: Sample[] }).__heard.slice());
@@ -177,23 +61,18 @@ test.describe('speech kept at the edges of a transmission', () => {
   test('push to talk and the open microphone, timed at the listener', async ({ browser }) => {
     // Full retry allowances sleep for 450 s; leave 150 s for setup and browser work.
     test.setTimeout(600_000);
-    const talkerContext = await browser.newContext();
-    const listenerContext = await browser.newContext();
+    const people: Someone[] = [];
     try {
-      const talker = await talkerContext.newPage();
-      const listener = await listenerContext.newPage();
-      await watchPage(talker, vw);
-      await watchPage(listener, vw);
-      await talker.addInitScript(syntheticMicrophone);
-      await listener.addInitScript(recordHeard);
-      await signIn(talker, vw, vw.alice.token, vw.alice.name);
-      await signIn(listener, vw, vw.bob.token, vw.bob.name);
-      await openChannel(talker, vw.channel);
-      await openChannel(listener, vw.channel);
+      // Both on the open microphone, the default (issue #1244): neither chose push to talk.
+      const alice = await enter(browser, vw, vw.alice, { mode: 'unchosen', before: async (page) => { await page.addInitScript(syntheticMicrophone); } });
+      people.push(alice);
+      const bob = await enter(browser, vw, vw.bob, { mode: 'unchosen', before: async (page) => { await page.addInitScript(recordHeard); } });
+      people.push(bob);
+      const talker = alice.page;
+      const listener = bob.page;
       const tv = voiceRegion(talker);
-      await tv.getByRole('button', { name: 'Join voice' }).click();
-      await voiceRegion(listener).getByRole('button', { name: 'Join voice' }).click();
-      for (const p of [talker, listener]) await expect(voiceRegion(p)).toContainText(/Connected in #voice-room/, { timeout: 30_000 });
+      await joinVoice(alice, 'Join voice');
+      await joinVoice(bob, 'Join voice');
       // The open microphone is the default (issue #1244); the first half is of push to talk.
       for (const p of [talker, listener]) await chooseMicrophone(voiceRegion(p), 'push to talk');
       await expect(voiceRegion(listener).getByRole('list', { name: 'In voice' })).toContainText('alice');
@@ -342,8 +221,7 @@ test.describe('speech kept at the edges of a transmission', () => {
       await tv.getByRole('button', { name: 'Leave voice' }).click();
       await voiceRegion(listener).getByRole('button', { name: 'Leave voice' }).click();
     } finally {
-      await talkerContext.close();
-      await listenerContext.close();
+      for (const p of people) await leave(p);
     }
   });
 });

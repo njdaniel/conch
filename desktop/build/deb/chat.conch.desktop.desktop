@@ -8,5 +8,7 @@ Exec=conch-desktop %U
 Icon=chat.conch.desktop
 Terminal=false
 Categories=Network;InstantMessaging;
+# The one URL scheme the app takes (issue #1592): conch://invite?server=...&code=...
+MimeType=x-scheme-handler/conch;
 StartupWMClass=conch-desktop
 StartupNotify=true

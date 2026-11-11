@@ -213,6 +213,8 @@ type Model struct {
 	channels []string
 	// channelIDs lets a refresh follow a channel whose name changed.
 	channelIDs map[string]int64
+	// channelTopics is the one-line topic of each channel from the last list.
+	channelTopics map[string]string
 	// subs holds each channel's message socket and its generation.
 	subs *subscriptions
 	// archivedAt holds each archived channel's timestamp. Map presence marks an
@@ -436,7 +438,7 @@ func NewModel(ctx context.Context, api API, authorID int64, channels []string) M
 		}
 	}
 	m := Model{ctx: ctx, api: api, authorID: authorID,
-		channelIDs: make(map[string]int64), subs: newSubscriptions(), archivedAt: make(map[string]*time.Time),
+		channelIDs: make(map[string]int64), channelTopics: make(map[string]string), subs: newSubscriptions(), archivedAt: make(map[string]*time.Time),
 		messages: make(map[string][]schema.MessageV2), nets: make(map[string][]schema.NetV1), members: make(map[string]map[int64]schema.ChannelMemberV1), memberRevision: make(map[string]uint64), now: time.Now, subscribed: make(map[string]bool),
 		events: make(chan tea.Msg, 64), mode: modeChannels,
 		backoff: make(map[string]time.Duration), retryPending: make(map[string]bool), after: tickAfter, wrapped: &wrappedBody{},
@@ -479,8 +481,38 @@ func (m Model) Init() tea.Cmd {
 	return tea.Batch(who, m.startSession(), m.loadAndFollow(), m.loadNets(false, ""), m.loadMembers(), m.kickVoice(), m.loadReadState(), m.waitEvent())
 }
 
+// typedBurst reports whether msg is several typed characters that arrived in
+// one read of the terminal. Bubble Tea hands those over as one KeyRunes
+// message, and its String() is the characters themselves, so the two typed
+// letters "u" and "p" read as the name of the up arrow, "e", "n", "d" as the
+// end key, and "t", "a", "b" as tab. The key handlers match on that string.
+// Pasted text (Paste set, whose String() is bracketed) and Alt chords are not
+// bursts.
+func typedBurst(msg tea.Msg) (tea.KeyMsg, bool) {
+	key, ok := msg.(tea.KeyMsg)
+	return key, ok && key.Type == tea.KeyRunes && len(key.Runes) > 1 && !key.Paste && !key.Alt
+}
+
+// typeBurst applies the characters of a burst one at a time, in order, as the
+// person typed them: text goes into the draft and none of it is a named key
+// (issue #1156, where "p309interrupted" lost its "up" and moved the selection
+// to the channel above).
+func (m Model) typeBurst(key tea.KeyMsg) (tea.Model, tea.Cmd) {
+	var next tea.Model = m
+	cmds := make([]tea.Cmd, 0, len(key.Runes))
+	for _, r := range key.Runes {
+		var cmd tea.Cmd
+		next, cmd = next.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+		cmds = append(cmds, cmd)
+	}
+	return next, tea.Batch(cmds...)
+}
+
 // Update applies keyboard, window, and injected API-result messages.
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if key, ok := typedBurst(msg); ok {
+		return m.typeBurst(key)
+	}
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		// A history read scrolled up keeps the same message at the bottom of
@@ -1343,9 +1375,11 @@ func (m Model) channelsLoadDone(msg channelsLoaded) (tea.Model, tea.Cmd) {
 	names := make([]string, 0, len(channels))
 	ids := make([]int64, 0, len(channels))
 	nextArchived := make(map[string]*time.Time)
+	nextTopics := make(map[string]string, len(channels))
 	for _, channel := range channels {
 		names = append(names, channel.Name)
 		ids = append(ids, channel.ID)
+		nextTopics[channel.Name] = channel.Topic
 		if channel.ArchivedAt != nil {
 			nextArchived[channel.Name] = channel.ArchivedAt
 		}
@@ -1380,6 +1414,7 @@ func (m Model) channelsLoadDone(msg channelsLoaded) (tea.Model, tea.Cmd) {
 	if !msg.refresh {
 		m.channels = names
 		m.channelIDs = nextIDs
+		m.channelTopics = nextTopics
 		m.archivedAt = nextArchived
 		m.selected = defaultSelection(names)
 		m.notice = ""
@@ -1417,6 +1452,7 @@ func (m Model) channelsLoadDone(msg channelsLoaded) (tea.Model, tea.Cmd) {
 	}
 	m.channels = names
 	m.channelIDs = nextIDs
+	m.channelTopics = nextTopics
 	m.archivedAt = nextArchived
 	m.channelsErr = nil
 	// The names move with the revision, in one step: a read begun from here

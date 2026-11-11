@@ -391,6 +391,10 @@ type SweepResult struct {
 	Offline int
 	// Expired is how many sessions were ended because their credential expired.
 	Expired int
+	// PushEnded is how many push registrations the pass ended: those of
+	// credentials that expired or went idle, and those silent for
+	// PushStaleAfter (issue #1714).
+	PushEnded int
 }
 
 // SweepSessions applies the liveness thresholds at now in one short
@@ -401,7 +405,9 @@ type SweepResult struct {
 // by last_seen_at, so a revived session starts over. Every session that has
 // not ended whose credential expired at or before now is ended, with cause
 // credential_expired, whatever its state; a credential without an expiry is
-// never a reason. Rows are never deleted.
+// never a reason. Session rows are never deleted. The notification
+// preferences of a credential that has expired, or is idle past its bound,
+// are (issue #1713).
 func (s *Store) SweepSessions(ctx context.Context, now time.Time, stale, offline time.Duration) (SweepResult, error) {
 	now = now.Truncate(time.Millisecond)
 	var out SweepResult
@@ -465,6 +471,18 @@ func (s *Store) SweepSessions(ctx context.Context, now time.Time, stale, offline
 		out.Expired, err = endSessionsTx(ctx, tx, "system",
 			"credential_id IN (SELECT id FROM credentials WHERE expires_at IS NOT NULL AND expires_at <= ?)",
 			[]any{now.UnixMilli()}, SessionEndedExpiry, now, &runs)
+		if err != nil {
+			return err
+		}
+		// A credential that expired or went idle is not revoked, so no
+		// revocation site removed its notification preferences (issue
+		// #1713); nothing else would.
+		if err = sweepNotificationPreferencesTx(ctx, tx, now); err != nil {
+			return err
+		}
+		// The same for push registrations (issue #1714), which end as
+		// credential_expired and, after PushStaleAfter of silence, stale.
+		out.PushEnded, err = sweepPushRegistrationsTx(ctx, tx, now)
 		return err
 	})
 	if err != nil {

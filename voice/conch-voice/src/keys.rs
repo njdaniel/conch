@@ -23,7 +23,6 @@ use std::io::{self, Read, Write};
 use std::path::Path;
 
 use conch_voice_control::{INPUT_EVENT_LEN, KeyCode};
-use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::mpsc;
 
 use crate::error::Error;
@@ -245,8 +244,7 @@ pub fn until_interrupted(device: &Path, rule: DeviceRule, terminal: bool) -> Res
         .build()
         .map_err(Error::Runtime)?;
     runtime.block_on(async {
-        let mut interrupt = signal(SignalKind::interrupt()).map_err(Error::Runtime)?;
-        let mut terminate = signal(SignalKind::terminate()).map_err(Error::Runtime)?;
+        let mut interrupts = crate::input::Interrupts::install().map_err(Error::Runtime)?;
         let (ended, mut end) = mpsc::unbounded_channel();
         let device = device.to_owned();
         // The reads block, so they are on a thread of their own.
@@ -254,8 +252,7 @@ pub fn until_interrupted(device: &Path, rule: DeviceRule, terminal: bool) -> Res
             let _ = ended.send(run(&device, rule, terminal, &mut io::stdout()));
         });
         tokio::select! {
-            _ = interrupt.recv() => Ok(()),
-            _ = terminate.recv() => Ok(()),
+            _ = interrupts.recv() => Ok(()),
             result = end.recv() => result.unwrap_or(Ok(())),
         }
     })

@@ -5,7 +5,7 @@ import type { Feeds } from '../../main/api/feeds.ts';
 import type { Files } from '../../main/files.ts';
 import type { Service } from '../../main/api/service.ts';
 import { DocumentGate } from '../../main/document.ts';
-import { checkCaller, Ipc, parseRequest, plain, type CompanionApi, type InstalledApi, type InvitesApi, type NotificationsApi, type ProfilesApi, type VoiceApi, type SettingsApi, type ContentsLike, type FrameLike, type InvokeEvent } from '../../main/ipc.ts';
+import { checkCaller, Ipc, parseRequest, plain, type CompanionApi, type InstalledApi, type IntegrationsApi, type InvitesApi, type NotificationsApi, type ProfilesApi, type VoiceApi, type SettingsApi, type ContentsLike, type FrameLike, type InvokeEvent } from '../../main/ipc.ts';
 import { COMPANION_FUNCTIONS, INVOKED_FUNCTIONS, TAG_MAX, VOICE_EVENTS, VOICE_FUNCTIONS } from '../../shared/bridge-names.ts';
 import { ShareAllowance } from '../../main/share-allowance.ts';
 import { deliverVoice } from '../../main/voice/events.ts';
@@ -62,11 +62,12 @@ function fixture(): Fixture {
   } });
   const invites = new Proxy({} as InvitesApi, { get: (_t, name: string) => record(`invites.${name}`) });
   const settings = new Proxy({} as SettingsApi, { get: (_t, name: string) => record(`settings.${name}`) });
+  const integrations = new Proxy({} as IntegrationsApi, { get: (_t, name: string) => record(`integrations.${name}`) });
   const companion = new Proxy({} as CompanionApi, { get: (_t, name: string) => record(`companion.${name}`) });
   const gestures = { take: () => (input.recent ? ('pointer' as const) : null) };
   const installed = new Proxy({} as InstalledApi, { get: (_t, name: string) => record(`installed.${name}`) });
   const share = new ShareAllowance({ now: () => clock.now, generation: () => gate.generation });
-  const ipc = new Ipc({ owned: () => contents, gate, service, feeds, files, gestures, profiles, voice, invites, notifications, settings, companion, share, installed, now: () => clock.now, log: (line) => logs.push(line) });
+  const ipc = new Ipc({ owned: () => contents, gate, service, feeds, files, gestures, profiles, voice, invites, notifications, settings, integrations, companion, share, installed, now: () => clock.now, log: (line) => logs.push(line) });
   return { ipc, gate, contents, main, calls, logs, clock, permit, input, share, activation, event: (over = {}) => ({ sender: contents, senderFrame: main, ...over }) };
 }
 
@@ -1149,6 +1150,15 @@ describe('the invite functions (issue #1591)', () => {
     const f = fixture();
     await f.ipc.invoke(f.event(), 'inviteCheck', ['https://chat.example.org/app/#/invite/CANARY', 'x']);
     expect(f.logs.join('\n')).not.toContain('CANARY');
+  });
+});
+
+describe('what works on this desktop (issue #1593)', () => {
+  it('reads without a gesture, takes no arguments, and passes nothing on', async () => {
+    const f = fixture();
+    expect(await f.ipc.invoke(f.event(), 'integrations', [])).toEqual({ ok: true, value: { ran: 'integrations.view' } });
+    expect(f.calls).toEqual([['integrations.view', []]]);
+    expect(await f.ipc.invoke(f.event(), 'integrations', ['x'])).toEqual({ ok: false, kind: 'refused' });
   });
 });
 

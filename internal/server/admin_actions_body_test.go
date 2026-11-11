@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/njdaniel/conch/pkg/schema"
@@ -32,6 +33,15 @@ func TestAdminDispatchedBodies(t *testing.T) {
 		{"rights: decides", schema.AdminActionSetChannelMemberRights, channel, `{"principal_id":7,"can_decide":true}`, `{"can_decide":true}`, false},
 		{"rights: manages", schema.AdminActionSetChannelMemberRights, channel, `{"principal_id":7,"manages":false}`, `{"manages":false}`, false},
 		{"rights: both", schema.AdminActionSetChannelMemberRights, channel, `{"principal_id":7,"can_decide":false,"manages":true}`, `{"can_decide":false,"manages":true}`, false},
+		// set_channel_topic (issue #1523): exactly {"topic":…}; "" clears it,
+		// a missing topic is not a clear, and the topic is validated here.
+		{"set a topic", schema.AdminActionSetChannelTopic, channel, `{"topic":"Incidents"}`, `{"topic":"Incidents"}`, false},
+		{"clear the topic", schema.AdminActionSetChannelTopic, channel, `{"topic":""}`, `{"topic":""}`, false},
+		{"topic missing", schema.AdminActionSetChannelTopic, channel, `{}`, "", true},
+		{"topic null", schema.AdminActionSetChannelTopic, channel, `{"topic":null}`, "", true},
+		{"topic with another field", schema.AdminActionSetChannelTopic, channel, `{"topic":"x","from":"y"}`, "", true},
+		{"topic with a control character", schema.AdminActionSetChannelTopic, channel, `{"topic":"a\u0007b"}`, "", true},
+		{"topic too long", schema.AdminActionSetChannelTopic, channel, `{"topic":"` + strings.Repeat("x", schema.MaxChannelTopicLength+1) + `"}`, "", true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

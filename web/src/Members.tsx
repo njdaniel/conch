@@ -113,7 +113,9 @@ function AddPeople(props: MemberControlsProps) {
     for (const result of results) {
       if (!result.ok) continue;
       for (const member of result.value) {
-        const addable = viewer.role === 'operator' || (member.kind === 'human' && member.guest === undefined);
+        // manage_channels may add anyone; a manager only humans (PUT
+        // /v1/channels/{channel}/members: memberWriteAsManager).
+        const addable = canDo(viewer, 'manage_channels') || (member.kind === 'human' && member.guest === undefined);
         if (addable && !here.has(member.principal_id) && !found.has(member.principal_id)) found.set(member.principal_id, member);
       }
     }
@@ -265,7 +267,7 @@ export function MemberRow({
     if (confirming) cancel.current?.focus();
   }, [confirming]);
 
-  const operator = !viewer.guest && ((viewer.role === 'operator' && viewer.owner === true) || (viewer.permissions === undefined ? viewer.role === 'operator' : viewer.permissions.includes('manage_channels')));
+  const operator = !viewer.guest && canDo(viewer, 'manage_channels');
   const manager = !operator && !viewer.guest && channel.manages === true;
   const human = member !== undefined && member.kind === 'human' && member.guest === undefined;
 
@@ -432,7 +434,7 @@ export function Members({ people, ...controls }: MemberControlsProps & { readonl
       return keep.length === Object.keys(cur.byId).length ? cur : { channel: cur.channel, byId: Object.fromEntries(keep) };
     });
   }, [present, controls.channel.id]);
-  const operator = !controls.viewer.guest && ((controls.viewer.role === 'operator' && controls.viewer.owner === true) || (controls.viewer.permissions === undefined ? controls.viewer.role === 'operator' : controls.viewer.permissions.includes('manage_channels')));
+  const operator = !controls.viewer.guest && canDo(controls.viewer, 'manage_channels');
   const manager = !operator && !controls.viewer.guest && controls.channel.manages === true;
   const canAdd = operator || manager;
   const online = people.filter((p) => p.state !== 'offline');

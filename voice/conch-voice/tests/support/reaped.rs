@@ -9,6 +9,7 @@
 
 use std::io;
 use std::ops::{Deref, DerefMut};
+#[cfg(unix)]
 use std::os::unix::process::CommandExt;
 use std::process::{Child, Command};
 
@@ -16,6 +17,7 @@ use std::process::{Child, Command};
 pub struct Reaped {
     child: Child,
     /// Whether the child leads a process group of its own, which is then killed whole.
+    #[cfg(unix)]
     group: bool,
 }
 
@@ -24,12 +26,14 @@ impl Reaped {
     pub fn spawn(command: &mut Command) -> io::Result<Self> {
         Ok(Self {
             child: command.spawn()?,
+            #[cfg(unix)]
             group: false,
         })
     }
 
     /// Starts the command as the leader of a process group of its own, and at the end kills
     /// the whole group: for a shell that leaves the binary running in the background.
+    #[cfg(unix)]
     pub fn spawn_in_group(command: &mut Command) -> io::Result<Self> {
         Ok(Self {
             child: command.process_group(0).spawn()?,
@@ -54,6 +58,7 @@ impl DerefMut for Reaped {
 
 impl Drop for Reaped {
     fn drop(&mut self) {
+        #[cfg(unix)]
         if self.group {
             // The group is named by its leader's pid, which is not reused while the leader
             // has not been waited for. A group that is already gone is not an error.

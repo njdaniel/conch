@@ -18,7 +18,7 @@ import type { Person } from '../useLiveChannel';
 import { VoiceClient, type Room, type RoomEvents, type ShareSink } from './connection';
 import { FakeClock, noCamera, settle } from './fakes';
 import type { Captured, KeptScreen, ShareFeatures, ShareQuality, ShareSample } from './share';
-import { ShareView } from './ShareView';
+import { ShareReadout, ShareView } from './ShareView';
 import type { Snapshot, VoiceControl } from './useVoice';
 import { VoicePanel } from './VoicePanel';
 
@@ -570,6 +570,19 @@ describe('sharing', () => {
     expect(await within(voice()).findByText('Sending: 1280×720 · 15 fps')).toBeTruthy();
   });
 
+  it('the sharer\'s line is one status line: what was asked, then what is sent', async () => {
+    const t = setup();
+    t.client.join('general');
+    await act(settle);
+    const room = t.rooms[0];
+    if (room === undefined) throw new Error('no room');
+    room.sample = { width: 1920, height: 1080, fps: 30, lost: 0.004 };
+    fireEvent.click(within(voice()).getByRole('button', { name: 'Share screen' }));
+    await act(settle);
+    const line = await within(voice()).findByRole('status', { name: 'Share quality' });
+    expect(line.textContent).toBe('Asked 1080p · 30 fps. Sending: 1920×1080 · 30 fps · 0.4% lost');
+  });
+
   it('a second person trying to share is told who is sharing', async () => {
     const t = setup([busy]);
     t.client.join('general');
@@ -590,7 +603,7 @@ describe('sharing', () => {
     for (const [reason, text] of [
       ['operator', 'An operator stopped your share.'],
       ['left', 'You left voice, so your share ended.'],
-      ['access_lost', 'Your share ended: you no longer have voice in this channel.'],
+      ['access_lost', "Your share ended: you're no longer allowed to share in this channel."],
       // Not an end while the capture lasts: the share is resumed (issue #516).
       ['rotated', 'The voice room was renewed. Resuming your share…'],
       ['idle', 'Your share ended because nothing was shared for a while.'],
@@ -752,5 +765,78 @@ describe('removing someone from voice', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Confirm' }));
     await act(settle);
     expect(api.moderate).toHaveBeenCalledWith('general', 'kickVoice', 8);
+  });
+});
+
+describe('ShareReadout over time', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  const client = (samples: { current: ShareSample | null }) => ({ readShareStats: (): Promise<ShareSample | null> => Promise.resolve(samples.current) });
+
+  it('explains a shortfall after 5 s, and clears it 5 s after recovery, on a fake clock', async () => {
+    vi.useFakeTimers();
+    let clock = 0;
+    const samples: { current: ShareSample | null } = { current: { width: 1920, height: 1080, fps: 31, limitation: 'cpu' } };
+    const asked: ShareQuality = { resolution: '1080p', frameRate: 60 };
+    const view = render(<ShareReadout client={client(samples)} direction="sent" prefix="Sending: " asked={asked} now={() => clock} />);
+    // A second at a time, as the readout samples, the clock moving with it.
+    const tick = async (ms: number) => {
+      for (let spent = 0; spent < ms; spent += 1000) {
+        clock += 1000;
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(1000);
+        });
+      }
+    };
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    const line = () => view.getByRole('status', { name: 'Share quality' }).textContent;
+    expect(line()).toBe('Asked 1080p · 60 fps. Sending: 1920×1080 · 31 fps');
+    await tick(4000);
+    expect(line()).not.toContain('Limited');
+    await tick(2000);
+    expect(line()).toBe('Asked 1080p · 60 fps. Sending: 1920×1080 · 31 fps. Limited by CPU.');
+    samples.current = { width: 1920, height: 1080, fps: 60, limitation: 'none' };
+    await tick(4000);
+    expect(line()).toContain('Limited by CPU');
+    await tick(2000);
+    expect(line()).toBe('Asked 1080p · 60 fps. Sending: 1920×1080 · 60 fps');
+  });
+
+  it('a changed ask starts the explanation over', async () => {
+    vi.useFakeTimers();
+    let clock = 0;
+    // 1280×720 from a 1080p capture on a CPU-limited encoder.
+    const samples: { current: ShareSample | null } = { current: { width: 1280, height: 720, fps: 30, limitation: 'cpu', captured: { width: 1920, height: 1080 } } };
+    const source = client(samples);
+    const view = render(<ShareReadout client={source} direction="sent" prefix="Sending: " asked={{ resolution: '1080p', frameRate: 30 }} now={() => clock} />);
+    for (let spent = 0; spent <= 6000; spent += 1000) {
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1000);
+      });
+      clock += 1000;
+    }
+    const line = () => view.getByRole('status', { name: 'Share quality' }).textContent;
+    expect(line()).toContain('Limited by CPU');
+    // The sharer lowers the ask to what is sent: the old reason goes at once.
+    view.rerender(<ShareReadout client={source} direction="sent" prefix="Sending: " asked={{ resolution: '720p', frameRate: 30 }} now={() => clock} />);
+    expect(line()).toBe('Asked 720p · 30 fps. Sending: 1280×720 · 30 fps');
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3000);
+    });
+    expect(line()).not.toContain('Limited');
+  });
+
+  it('without an asked quality it is the measurement alone, and never a reason', async () => {
+    vi.useFakeTimers();
+    const samples: { current: ShareSample | null } = { current: { width: 1280, height: 720, fps: 3, limitation: 'cpu', lost: 0.005 } };
+    const view = render(<ShareReadout client={client(samples)} direction="received" principal={3} />);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10_000);
+    });
+    expect(view.getByRole('status', { name: 'Share quality' }).textContent).toBe('1280×720 · 3 fps · 0.5% lost');
   });
 });

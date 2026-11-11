@@ -78,6 +78,8 @@ export function Lobby({
   newChannel,
   canRename,
   renderRename,
+  canSetTopic,
+  renderTopic,
   canManage,
   renderSettings,
   onInviteTo,
@@ -132,10 +134,16 @@ export function Lobby({
   // who may not make one.
   readonly newChannel?: ReactNode;
   // Per-channel actions in each row's ⋯ menu (issues #1135, #1095): who may
-  // rename which channel, the rename form for one, the opener of the invite
-  // panel, and the channel-removal handler after a Leave succeeds.
+  // rename or set the topic of which channel, their forms, the opener of the
+  // invite panel, and the channel-removal handler after a Leave succeeds.
   readonly canRename?: (channel: ChannelV0) => boolean;
   readonly renderRename?: (channel: ChannelV0, close: () => void) => ReactNode;
+  // Whether this viewer may set that channel's topic (an operator, or its
+  // manager); absent, nobody. The server still decides.
+  readonly canSetTopic?: (channel: ChannelV0) => boolean;
+  // The set-topic form for a channel, shown in place under its row; `close`
+  // hides it and returns focus to the row's ⋯.
+  readonly renderTopic?: (channel: ChannelV0, close: () => void) => ReactNode;
   readonly canManage?: boolean;
   readonly renderSettings?: (channel: ChannelV0, change: SettingsChange, close: () => void) => ReactNode;
   readonly onInviteTo?: (channel: ChannelV0) => void;
@@ -455,6 +463,8 @@ export function Lobby({
                   empty={newChannel === null || newChannel === undefined ? undefined : 'No channels yet'}
                   {...(canRename === undefined ? {} : { canRename })}
                   {...(renderRename === undefined ? {} : { renderRename })}
+                  {...(canSetTopic === undefined ? {} : { canSetTopic })}
+                  {...(renderTopic === undefined ? {} : { renderTopic })}
                   {...(canManage === undefined ? {} : { canManage })}
                   {...(renderSettings === undefined ? {} : { renderSettings })}
                   {...(onInviteTo === undefined ? {} : { onInvite: onInviteTo })}

@@ -15,10 +15,20 @@
 // (profiles/switch.ts), and the invite views join only on their own button.
 //
 // The parsed shape (origin, code) is what the link scheme of #1592 (D5-06,
-// conch://invite?server=<origin>&code=<code>) hands to the same router.
+// conch://invite?server=<origin>&code=<code>; linux-desktop.md section 9)
+// hands to the same router. A scheme URL reaches the app as an argument, at a
+// first launch or in a second one (the single-instance lock); schemeLinkFrom
+// picks at most one such argument, parseSchemeLink maps it onto
+// parseInviteLink's rules, and arrive() keeps it behind nothing but a timer
+// until the page asks (arrived()), when it goes through exactly the checks of
+// a pasted link and the same choice of profile. Nothing is contacted, added
+// or switched by a URL, and an argument that is not one well-formed URL of the
+// scheme is ignored, a flag never read as one. argv is never logged.
 import { randomBytes } from 'node:crypto';
 
+import type { DocumentGate } from './document.ts';
 import type { InviteAccept, InviteCheck, InviteRefusal, InviteTarget, ProfileView } from '../../web/src/platform/desktop/bridge.ts';
+import { INVITE_ARRIVED, INVITE_EVENTS } from '../shared/bridge-names.ts';
 import { parseServerAddress } from './api/origin.ts';
 import { hasUnsafeCharacter } from './links.ts';
 
@@ -30,6 +40,12 @@ export const MAX_INVITE_CODE_LENGTH = 256;
 // is not kept for a person who walked away.
 export const PENDING_MS = 5 * 60_000;
 export const STAGED_MS = 2 * 60_000;
+// A handle made by arrived() (a conch: link) is not accepted for this long
+// after it was made (issue #1592, security review S1). A newer link replaces
+// the choice on the page in place, and a click aimed at the old server must
+// not act on the new one. The page is not trusted to hold this: accept
+// refuses with 'just-arrived', and does not spend the handle.
+export const SWAP_GUARD_MS = 1_000;
 const MAX_PENDING = 4;
 
 export type InviteParse = { readonly ok: true; readonly origin: string; readonly code: string } | { readonly ok: false; readonly refusal: InviteRefusal };
@@ -117,6 +133,69 @@ export function parseInviteLink(input: unknown): InviteParse {
   return { ok: true, origin: server.origin, code };
 }
 
+// What a scheme URL may be, once decoded: the values are percent-encoded and
+// nothing else, so a raw colon, slash, plus, space or non-ASCII character in
+// the query is a refusal.
+const QUERY_VALUE = /^[A-Za-z0-9._~%-]*$/u;
+// The server value, decoded, is an origin and only an origin. parseInviteLink
+// then applies every host rule of a pasted link to it.
+const SERVER_ORIGIN = /^https?:\/\/[^/?#@\\\s]+$/iu;
+// The most arguments looked at, and the scheme's name.
+const MAX_ARGV = 64;
+const SCHEME = 'conch:';
+
+// schemeLinkFrom picks the one argument that is a link of the scheme: the
+// first that is a string, does not start with "-" (a switch, however it
+// continues), and starts with "conch:" in any case. Later ones are not
+// considered, whether or not the first parses. Index 0 is the executable.
+export function schemeLinkFrom(argv: unknown): string | null {
+  if (!Array.isArray(argv)) return null;
+  for (const arg of argv.slice(1, MAX_ARGV) as unknown[]) {
+    if (typeof arg !== 'string' || arg.startsWith('-')) continue;
+    if (arg.slice(0, SCHEME.length).toLowerCase() === SCHEME) return arg;
+  }
+  return null;
+}
+
+// parseSchemeLink accepts exactly conch://invite?server=<percent-encoded
+// origin>&code=<code>, the two parameters once each in either order, and then
+// holds the result to parseInviteLink's rules by building the https link it
+// names. Anything else is one refusal naming the rule, never repeating the
+// input. No trimming and no repair: the text is one argument as given.
+export function parseSchemeLink(input: unknown): InviteParse {
+  if (typeof input !== 'string') return refuse('type');
+  if (input.length === 0 || input.length > MAX_INVITE_LINK_LENGTH) return refuse('length');
+  if (hasUnsafeCharacter(input) || /[\s\\]/u.test(input)) return refuse('characters');
+  if (input.slice(0, SCHEME.length).toLowerCase() !== SCHEME) return refuse('scheme');
+  const rest = input.slice(SCHEME.length);
+  if (!rest.startsWith('//invite?')) return refuse('malformed');
+  const query = rest.slice('//invite?'.length);
+  if (query.includes('#')) return refuse('fragment');
+  const parts = query.split('&');
+  if (parts.length !== 2) return refuse('malformed');
+  const values = new Map<string, string>();
+  for (const part of parts) {
+    const eq = part.indexOf('=');
+    if (eq < 0 || part.indexOf('=', eq + 1) >= 0) return refuse('malformed');
+    const name = part.slice(0, eq);
+    const value = part.slice(eq + 1);
+    if ((name !== 'server' && name !== 'code') || values.has(name)) return refuse('malformed');
+    if (value === '' || !QUERY_VALUE.test(value)) return refuse(name === 'server' ? 'host' : 'code');
+    values.set(name, value);
+  }
+  let server: string;
+  let code: string;
+  try {
+    server = decodeURIComponent(values.get('server') ?? '');
+    code = decodeURIComponent(values.get('code') ?? '');
+  } catch {
+    return refuse('malformed');
+  }
+  if (!SERVER_ORIGIN.test(server)) return refuse('host');
+  if (!CODE.test(code)) return refuse('code');
+  return parseInviteLink(`${server}/app/#/invite/${encodeURIComponent(code)}`);
+}
+
 export interface InvitesDeps {
   readonly profiles: {
     findByOrigin(origin: string): readonly ProfileView[];
@@ -139,6 +218,9 @@ interface Pending {
   // Whether the person was told voice was running when they were shown this
   // link; accept compares it with voice now.
   readonly voice: boolean;
+  // When arrived() made this handle; null for a pasted link, which the person
+  // put on the page themselves.
+  readonly shownAt: number | null;
   readonly timer: ReturnType<typeof setTimeout>;
 }
 
@@ -151,9 +233,18 @@ interface Staged {
 type AcceptRefusal = Extract<InviteAccept, { ok: false }>['refusal'];
 const ADD_REFUSALS: readonly AcceptRefusal[] = ['full', 'unreachable', 'certificate', 'not-conch'];
 
+interface Arrival {
+  readonly origin: string;
+  readonly code: string;
+  readonly timer: ReturnType<typeof setTimeout>;
+}
+
 export class Invites {
   readonly #deps: InvitesDeps;
   readonly #pending = new Map<string, Pending>();
+  // The one scheme link waiting for the page to ask for it; a newer link
+  // replaces it.
+  #arrival: Arrival | null = null;
   #staged: Staged | null = null;
   #stagedTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -170,6 +261,49 @@ export class Invites {
       this.#deps.log(`conch-desktop: refused an invite link (${parsed.refusal})`);
       return { ok: false, refusal: parsed.refusal };
     }
+    return this.#register(parsed, false);
+  }
+
+  // arrive is a launch's arguments: a first launch's, or a second one's while
+  // this process holds the lock. It keeps the one scheme link in them, if it
+  // is well-formed, until arrived() takes it (or PENDING_MS passes). It
+  // contacts nothing and answers whether a link was kept, which is the cue to
+  // tell the page.
+  arrive(argv: unknown): boolean {
+    const link = schemeLinkFrom(argv);
+    if (link === null) return false;
+    const parsed = parseSchemeLink(link);
+    if (!parsed.ok) {
+      this.#deps.log(`conch-desktop: refused a conch: link (${parsed.refusal})`);
+      return false;
+    }
+    this.#dropArrival();
+    const timer = setTimeout(() => {
+      this.#arrival = null;
+    }, PENDING_MS);
+    timer.unref();
+    this.#arrival = { origin: parsed.origin, code: parsed.code, timer };
+    this.#deps.log('conch-desktop: a conch: invite link arrived');
+    return true;
+  }
+
+  // arrived hands the page what arrive kept, once, as a check of a pasted
+  // link is handed: a handle, the server and its profiles, never the code.
+  arrived(): InviteCheck | null {
+    const kept = this.#arrival;
+    this.#dropArrival();
+    if (kept === null) return null;
+    return this.#register({ origin: kept.origin, code: kept.code }, true);
+  }
+
+  #dropArrival(): void {
+    if (this.#arrival !== null) clearTimeout(this.#arrival.timer);
+    this.#arrival = null;
+  }
+
+  // #register keeps a parsed link's code behind a new handle and answers the
+  // choice shown to the person.
+  #register(parsed: { readonly origin: string; readonly code: string }, fromScheme: boolean): InviteCheck {
     const now = this.#deps.now();
     for (const [handle, p] of this.#pending) if (p.expiresAt <= now) this.#spend(handle);
     while (this.#pending.size >= MAX_PENDING) {
@@ -185,7 +319,7 @@ export class Invites {
       this.#pending.delete(handle);
     }, PENDING_MS);
     timer.unref();
-    this.#pending.set(handle, { origin: parsed.origin, code: parsed.code, expiresAt: now + PENDING_MS, voice, timer });
+    this.#pending.set(handle, { origin: parsed.origin, code: parsed.code, expiresAt: now + PENDING_MS, voice, shownAt: fromScheme ? now : null, timer });
     return {
       ok: true,
       handle,
@@ -220,6 +354,9 @@ export class Invites {
   // existing sequence, which leaves voice first.
   async accept(handle: string, target: InviteTarget): Promise<InviteAccept> {
     const pending = this.#pending.get(handle);
+    // A handle that just arrived is refused and kept: the person may have
+    // meant the choice it replaced, and chooses again after reading it.
+    if (pending !== undefined && pending.shownAt !== null && this.#deps.now() - pending.shownAt < SWAP_GUARD_MS) return { ok: false, refusal: 'just-arrived' };
     this.#spend(handle);
     this.#clearStaged();
     if (pending === undefined || pending.expiresAt <= this.#deps.now()) return { ok: false, refusal: 'expired' };
@@ -273,4 +410,20 @@ export class Invites {
 
 function defaultHandle(): string {
   return `invite-${randomBytes(16).toString('hex')}`;
+}
+
+export interface InviteArrivalTarget {
+  // The owned web contents' send, or null when there is no live window.
+  readonly contents: () => { send(channel: string, message: typeof INVITE_ARRIVED): void } | null;
+  readonly gate: () => DocumentGate;
+}
+
+// deliverInvite tells the owned page, once its current document has committed,
+// that a scheme link is waiting. The message holds nothing of the link. A page
+// that is not there yet asks for it when it mounts.
+export function deliverInvite(target: InviteArrivalTarget): void {
+  const contents = target.contents();
+  const gate = target.gate();
+  if (contents === null || !gate.shows(gate.generation)) return;
+  contents.send(INVITE_EVENTS, INVITE_ARRIVED);
 }

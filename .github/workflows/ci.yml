@@ -120,11 +120,13 @@ jobs:
       # The web client's wire types are generated from pkg/schema (#348): this
       # fails when web/src/schema/generated*.ts differ from what
       # `go generate ./pkg/schema` writes. Go only. The script's own test
-      # runs first.
+      # runs first. The Android spike's copy of them must match too (#1719).
       - name: generated TypeScript wire types
         run: |
           ./scripts/schema-ts-check-test.sh
           ./scripts/schema-ts-check.sh
+          ./scripts/spike-schema-check-test.sh
+          ./scripts/spike-schema-check.sh
 
       # The emoji catalog (#953): the vendored third_party/unicode/emoji-test.txt
       # matches its pinned hash and scripts/emoji-update.sh refuses a mismatch.
@@ -345,6 +347,106 @@ jobs:
         if: always()
         run: df -h / && du -sh voice/target 2>/dev/null || true
 
+  # The Rust voice client's Windows build (#890, docs/design/windows-desktop.md
+  # section 1): x86_64-pc-windows-msvc on a hosted runner, with the pinned
+  # libwebrtc win-x64 build verified by scripts/voice-toolchain.sh. MSVC and the
+  # Windows SDK are on the runner image; cc-rs finds them through vswhere, so no
+  # Action installs them. Hosted only: there is no self-hosted Windows runner.
+  # Required (#1309): the check job waits on it, as on the rust job, now that
+  # conch-voice builds, tests and lints here.
+  voice-windows:
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
+    runs-on: windows-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    env:
+      # Line tables, not full debug info, as the rust job builds.
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      CARGO_PROFILE_TEST_DEBUG: line-tables-only
+      # The static C runtime flag for libwebrtc's /MT build is in voice/.cargo/config.toml,
+      # not in RUSTFLAGS here, which would replace it.
+    steps:
+      - uses: actions/checkout@v4
+
+      # Keyed on the pins file, as the Linux job's cache is. Windows' own key
+      # (runner.os) keeps the two apart. Only the downloaded zip is kept, and
+      # voice-toolchain.sh hashes it against its pin on every run before
+      # unpacking it, so a cached tree is never linked unread.
+      - name: rust toolchain cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/conch/webrtc-*/webrtc-win-x64-release.zip
+          key: voice-toolchain-zip-${{ runner.os }}-${{ hashFiles('scripts/voice-pins.sh') }}
+
+      - name: rust build cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            voice/target
+          key: voice-build-lt-${{ runner.os }}-${{ hashFiles('voice/Cargo.lock', 'voice/rust-toolchain.toml', 'scripts/voice-pins.sh') }}
+          restore-keys: |
+            voice-build-lt-${{ runner.os }}-
+
+      - name: rust toolchain
+        run: ./scripts/voice-toolchain.sh
+
+      # E1 (design section 1): what the runner has, recorded in the log.
+      - name: msvc and windows sdk on the runner
+        run: |
+          vswhere="/c/Program Files (x86)/Microsoft Visual Studio/Installer/vswhere.exe"
+          "$vswhere" -latest -products '*' -property installationVersion
+          "$vswhere" -latest -products '*' -property installationPath
+          ls "/c/Program Files (x86)/Windows Kits/10/Include" || true
+          rustc -Vv
+
+      # The SDK's C++ glue against the verified libwebrtc: the part this job
+      # exists to prove. -vv records the compiler it runs (E1). It does
+      # not reach conch-voice's own source.
+      - name: build webrtc-sys (E1)
+        run: |
+          . scripts/voice-pins.sh
+          # The verified tree must be there: without it webrtc-sys downloads
+          # its own copy unchecked (as voice-env.sh refuses on Linux).
+          webrtc="$(cygpath -m "$HOME/.cache/conch/$CONCH_WEBRTC_TAG/win-x64-release")"
+          test -f "$webrtc/webrtc.ninja"
+          export LK_CUSTOM_WEBRTC="$webrtc"
+          cd voice
+          # cc-rs prints each compiler command it runs when asked to.
+          export CC_ENABLE_DEBUG_OUTPUT=1
+          # The build's own status decides the step. The grep only shows the
+          # compiler lines (and may match nothing), so it can never hide a
+          # failed build: with "|| true" after a pipe, PIPESTATUS would be
+          # true's, and the step would pass.
+          status=0
+          cargo build --locked -vv -p webrtc-sys > "$RUNNER_TEMP/webrtc-sys.log" 2>&1 || status=$?
+          grep -E "^\[webrtc-sys [0-9.]+\] (running|OPT_LEVEL|CXX|CC|compiler)|Compiling webrtc-sys|Finished|^error" "$RUNNER_TEMP/webrtc-sys.log" | cut -c1-400 || true
+          if [ "$status" -ne 0 ]; then tail -n 80 "$RUNNER_TEMP/webrtc-sys.log"; fi
+          exit "$status"
+
+      # The whole voice workspace, conch-voice included (#1309): its Unix-only
+      # code (the control channel, key devices, the configuration file's
+      # checks, fd 3) answers a typed "not supported on this platform" error
+      # here. Its integration tests that need Unix (named pipes, shells,
+      # /proc, file modes) or PipeWire are gated off Windows by `cfg` at the
+      # top of the file, each with its reason; the unit tests all run.
+      - name: cargo build, test and clippy (workspace)
+        run: |
+          . scripts/voice-pins.sh
+          # The verified tree must be there: without it webrtc-sys downloads
+          # its own copy unchecked (as voice-env.sh refuses on Linux).
+          webrtc="$(cygpath -m "$HOME/.cache/conch/$CONCH_WEBRTC_TAG/win-x64-release")"
+          test -f "$webrtc/webrtc.ninja"
+          export LK_CUSTOM_WEBRTC="$webrtc"
+          cd voice
+          cargo build --locked --workspace
+          cargo test --locked --no-fail-fast --workspace
+          cargo clippy --locked --workspace --all-targets -- -D warnings
+
   # The web client under web/ (ADR-007). setup-node installs exactly the
   # Node web/.nvmrc pins and caches npm's download cache by the lockfile.
   # web-check installs with npm ci only, and downloads no browser.
@@ -394,7 +496,7 @@ jobs:
   # itself is not judged: if it fails, code is unset and every job runs in
   # full, so a pass here still means every check ran and passed.
   check:
-    needs: [changes, go, go-test-server, go-test, rust, web, desktop]
+    needs: [changes, go, go-test-server, go-test, rust, voice-windows, web, desktop]
     if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -958,7 +1060,10 @@ jobs:
         run: npx playwright install --with-deps chromium
 
       - name: web-e2e
-        run: make web-e2e E2E_ARGS=--shard=${{ matrix.shard }}/3
+        # --grep-invert @heavy (#1613): a test tagged @heavy runs only in the
+        # heavy lane (e2e-heavy.yml, nightly and on demand), never here. See
+        # docs/testing.md for the tags and the PR budget.
+        run: make web-e2e E2E_ARGS="--shard=${{ matrix.shard }}/3 --grep-invert @heavy"
 
       # The spec removes its own container on every path; this is for the case
       # where the runner killed it. Only the container of this run.
@@ -1095,7 +1200,9 @@ jobs:
     # the same toolchain, caches and runner, and so the same cost: it needs
     # the Rust build (the cached voice/target, from which the program's own
     # `cargo build` finds little or nothing to do) and Docker, and about a
-    # minute of its own on top. CI=true makes a skip a failure.
+    # minute of its own on top. The screen companion's live test (#1583,
+    # D4-06) runs in the same program: it adds the web build and a Chromium.
+    # CI=true makes a skip a failure.
     # On GitHub-hosted runners (#1318), or on the self-hosted ones for this
     # repository's own branches when the variable HEAVY_RUNNER is "local".
     runs-on: ${{ vars.HEAVY_RUNNER == 'local' && (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","conch-4tb"]') || 'ubuntu-latest' }}
@@ -1181,12 +1288,25 @@ jobs:
       - name: rust toolchain
         run: ./scripts/voice-toolchain.sh
 
-      # desktop/.nvmrc names the Node the desktop's tests run under.
+      # desktop/.nvmrc names the Node the desktop's tests run under. The
+      # companion's test (#1583) also builds the web client (web-build) and
+      # drives two Chromium pages, so web's lockfile is cached as well.
       - uses: actions/setup-node@v4
         with:
           node-version-file: desktop/.nvmrc
           cache: npm
-          cache-dependency-path: desktop/package-lock.json
+          cache-dependency-path: |
+            desktop/package-lock.json
+            web/package-lock.json
+
+      # The screen companion's page and the browser principal V run in the
+      # Chromium Playwright's own version pins (#1583). Locally, `npx
+      # playwright install chromium` alone. The npm ci comes first so that npx
+      # runs the Playwright desktop/package-lock.json pins, not whatever npx
+      # would fetch; make desktop-voice-e2e then installs again, harmlessly.
+      - name: browser for the companion test
+        working-directory: desktop
+        run: npm ci --no-audit && npx playwright install --with-deps chromium
 
       - name: desktop voice live test
         run: make desktop-voice-e2e

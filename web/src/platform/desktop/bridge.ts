@@ -515,7 +515,7 @@ export type InviteAccept =
       // force, and this page takes it now.
       readonly switched: boolean;
     }
-  | { readonly ok: false; readonly refusal: 'expired' | 'voice-started' | 'unknown-profile' | 'unsupported' | 'full' | 'unreachable' | 'certificate' | 'not-conch' };
+  | { readonly ok: false; readonly refusal: 'expired' | 'just-arrived' | 'voice-started' | 'unknown-profile' | 'unsupported' | 'full' | 'unreachable' | 'certificate' | 'not-conch' };
 
 export interface DesktopInviteBridge {
   inviteCheck(link: string): Promise<InviteCheck>;
@@ -525,6 +525,14 @@ export interface DesktopInviteBridge {
   // The invite code staged for the profile now in force, once: a second call,
   // or one from any other profile, gets null.
   inviteTake(): Promise<string | null>;
+  // A conch:// link that reached the app (issue #1592, D5-06), checked by main
+  // exactly as a pasted one is: the same answer as inviteCheck, with a handle
+  // and no code, and null when nothing arrived or it was taken already. It
+  // contacts nothing; the person's click is still inviteAccept.
+  inviteArrived(): Promise<InviteCheck | null>;
+  // Main's word that a link arrived, so the page asks inviteArrived. The
+  // listener is told nothing else: no link, no origin, no code.
+  onInviteArrived(listener: () => void): Unsubscribe;
 }
 
 // The app's own settings (issue #1587; linux-desktop.md §9). App-wide, kept by
@@ -561,10 +569,62 @@ export type SettingsResult =
   | { readonly ok: true; readonly view: DesktopSettingsView }
   | { readonly ok: false; readonly reason: 'unpackaged' | 'unsafe-location' | 'foreign-file' | 'no-tray' | 'failed' };
 
+// What works on this desktop (issue #1593, D5-07 of #773; UX-23). One row per
+// integration, read from the state main already holds: nothing is probed to
+// answer it (no device is opened, no capture started, no portal dialog
+// shown). A row says only which integration, its state and a fixed code for
+// why; the sentence is the page's. No path, device name, address, token or
+// user name is in any row.
+export type IntegrationId = 'tray' | 'notifications' | 'lock' | 'capture' | 'storage' | 'launch' | 'shareSound' | 'voiceHelper' | 'talkKey';
+
+// working; unavailable (here, with a reason); unknown (main cannot tell yet).
+export type IntegrationState = 'working' | 'unavailable' | 'unknown';
+
+export type IntegrationWhy =
+  | 'no-tray-host'
+  | 'tray-off'
+  | 'tray-unconfirmed'
+  | 'notifications-unsupported'
+  | 'lock-unobserved'
+  | 'lock-checking'
+  | 'no-portal'
+  | 'not-wayland'
+  | 'portal-unasked'
+  | 'secret-store-missing'
+  | 'insecure-backend'
+  | 'unknown-backend'
+  | 'unsafe-root'
+  | 'secret-store-silent'
+  | 'unpackaged'
+  | 'unsafe-location'
+  | 'share-silent'
+  | 'not-installed'
+  | 'untrusted'
+  | 'helper-not-started'
+  | 'helper-starting'
+  | 'helper-failed'
+  | 'voice-unavailable'
+  | 'key-not-configured'
+  | 'key-unsure'
+  | 'key-unavailable';
+
+export interface IntegrationRow {
+  readonly id: IntegrationId;
+  readonly state: IntegrationState;
+  // Absent for working.
+  readonly why?: IntegrationWhy;
+}
+
+export interface IntegrationsView {
+  readonly rows: readonly IntegrationRow[];
+}
+
 export interface DesktopSettingsBridge {
   settings(): Promise<DesktopSettingsView>;
   // The person's act: main refuses it without a recent gesture in the window.
   settingsSet(change: SettingsChange): Promise<SettingsResult>;
+  // What works on this desktop (issue #1593). Read-only; needs no gesture.
+  integrations(): Promise<IntegrationsView>;
 }
 
 

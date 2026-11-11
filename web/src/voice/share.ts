@@ -61,7 +61,28 @@ export interface ShareSample {
   // taken between two different ones.
   readonly stream?: string;
   readonly publication?: string;
+  // Why the encoder holds the picture back (outbound-rtp
+  // qualityLimitationReason), where the engine says. Absent where it does not.
+  readonly limitation?: ShareLimitation;
+  // Share of packets lost, 0 to 1: the receiver's report on the sent top layer
+  // (remote-inbound-rtp), per interval. Absent where
+  // the engine does not say.
+  readonly lost?: number;
+  // A viewer's packet counters, from which a readout takes loss over the
+  // interval between two samples.
+  readonly packetsReceived?: number;
+  readonly packetsLost?: number;
+  // The sender's top layer is not being sent (every viewer takes a lower
+  // layer): a smaller picture then is not a shortfall.
+  readonly paused?: boolean;
+  // A layer is off whose place among the layers could not be told; it excuses
+  // a picture smaller than the capture fitted to the ask, and nothing else.
+  readonly layerOff?: boolean;
+  // The capture's own size and rate (getSettings) of the sender's screen, when
+  // the browser reports them. A sent sample only.
+  readonly captured?: { readonly width?: number; readonly height?: number; readonly fps?: number };
 }
+export type ShareLimitation = 'none' | 'cpu' | 'bandwidth' | 'other';
 export type ShareDirection = 'received' | 'sent';
 
 // What the browser's picker gave: the picture always, sound when the browser
@@ -950,7 +971,10 @@ export function watchNote(who: string | null, audio: boolean): string {
 
 // endedNote says why the last share ended, or why one did not start. A full
 // refusal names the room's six-stream cap, not another sharer (#1509).
-export function endedNote(end: ShareEnd): string {
+// access_lost covers losing voice and losing only the right to share; the
+// page tells them apart by its own state: inVoice is true while it is still in
+// the call, so only sharing was withdrawn (#1672).
+export function endedNote(end: ShareEnd, inVoice = false): string {
   switch (end) {
     case 'self':
       return 'You stopped sharing.';
@@ -965,7 +989,7 @@ export function endedNote(end: ShareEnd): string {
     case 'operator':
       return 'An operator stopped your share.';
     case 'access_lost':
-      return 'Your share ended: you no longer have voice in this channel.';
+      return inVoice ? "Your share ended: you're no longer allowed to share in this channel." : 'Your share ended: you no longer have voice in this channel.';
     case 'rotated':
       return 'Your share ended because the voice room was renewed. Share again once you are back in voice.';
     case 'idle':
