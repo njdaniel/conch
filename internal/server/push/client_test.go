@@ -11,6 +11,7 @@ import (
 	"net/netip"
 	"net/url"
 	"strconv"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -28,8 +29,19 @@ type tlsFixture struct {
 
 func newFixture(t *testing.T, res *fakeResolver, h http.Handler) *tlsFixture {
 	t.Helper()
+	return newFixtureOn(t, res, h, nil)
+}
+
+// newFixtureOn is newFixture with the server on listener l (nil for the
+// default 127.0.0.1 listener).
+func newFixtureOn(t *testing.T, res *fakeResolver, h http.Handler, l net.Listener) *tlsFixture {
+	t.Helper()
 	permitLoopback(t)
 	srv := httptest.NewUnstartedServer(h)
+	if l != nil {
+		srv.Listener.Close() //nolint:errcheck,gosec // replaced below
+		srv.Listener = l
+	}
 	srv.EnableHTTP2 = true
 	srv.Config.ErrorLog = log.New(io.Discard, "", 0)
 	srv.StartTLS()
@@ -351,9 +363,13 @@ func TestT16Row8AllowPrivate(t *testing.T) {
 
 func TestClientProperties(t *testing.T) {
 	c := NewClient(fixed("93.184.216.34"), false)
-	tr, ok := c.Transport.(*http.Transport)
+	guard, ok := c.Transport.(httpsOnly)
 	if !ok {
 		t.Fatalf("transport is %T", c.Transport)
+	}
+	tr, ok := guard.next.(*http.Transport)
+	if !ok {
+		t.Fatalf("inner transport is %T", guard.next)
 	}
 	tests := []struct {
 		name string
@@ -421,7 +437,9 @@ func TestClientIgnoresProxyEnvironment(t *testing.T) {
 	}
 }
 
-// Two requests make two dials, and two lookups: no connection is reused.
+// Two requests make two dials, and two lookups: no connection is reused. The
+// exchange is HTTP/2, so the absence of reuse is the client's doing, not the
+// protocol's. Five overlapping requests make one dial and one lookup each on its own connection.
 func TestClientReusesNoConnection(t *testing.T) {
 	res := fixed("127.0.0.1")
 	f := newFixture(t, res, http.HandlerFunc(ok204))
@@ -430,6 +448,9 @@ func TestClientReusesNoConnection(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		if resp.ProtoMajor != 2 {
+			t.Errorf("request %d: ProtoMajor = %d, want 2", i, resp.ProtoMajor)
+		}
 		_ = resp.Body.Close()
 	}
 	if got := len(f.rec.seen()); got != 2 {
@@ -437,6 +458,156 @@ func TestClientReusesNoConnection(t *testing.T) {
 	}
 	if res.calls() != 2 {
 		t.Errorf("lookups = %d, want 2", res.calls())
+	}
+
+	const n = 5
+	hold := make(chan struct{})
+	var arrived atomic.Int32
+	var remotes sync.Map
+	g := newFixture(t, fixed("127.0.0.1"), http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		remotes.Store(r.RemoteAddr, true)
+		if arrived.Add(1) == n {
+			close(hold)
+		}
+		select {
+		case <-hold:
+		case <-time.After(5 * time.Second):
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	var wg sync.WaitGroup
+	errs := make(chan error, n)
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, "https://example.com:"+g.port+"/", nil)
+			if err != nil {
+				errs <- err
+				return
+			}
+			resp, err := g.client.Do(req)
+			if err == nil {
+				_ = resp.Body.Close()
+			}
+			errs <- err
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("overlapping request: %v", err)
+		}
+	}
+	conns := 0
+	remotes.Range(func(_, _ any) bool { conns++; return true })
+	// net/http may start one speculative dial beyond the requests when
+	// requests race (an h2 single-use connection that is then not needed), so
+	// the dial count is checked as "at least one per request" and equal to the
+	// lookup count: every dial, speculative or not, was resolved and checked.
+	// What must hold is that no two requests shared a connection.
+	if conns != n {
+		t.Errorf("requests ran on %d connections, want %d", conns, n)
+	}
+	if got := len(g.rec.seen()); got < n || got != g.res.calls() {
+		t.Errorf("dials = %d, lookups = %d, want dials >= %d and equal to lookups", got, g.res.calls(), n)
+	}
+}
+
+// The client refuses any scheme but https before it resolves or dials.
+func TestClientRefusesNonHTTPS(t *testing.T) {
+	for _, scheme := range []string{"http", "ftp", "ws", "file"} {
+		t.Run(scheme, func(t *testing.T) {
+			res := fixed("93.184.216.34")
+			rec := &recorder{}
+			d := NewDialer(res, false)
+			d.connect = rec.connect
+			c := newClient(d, nil)
+			req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, scheme+"://push.example.com/x", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			resp, err := c.Do(req)
+			if resp != nil {
+				_ = resp.Body.Close()
+			}
+			if got := Classify(err, resp); got != ClassRequestFailed {
+				t.Fatalf("class = %q (err %v), want %q", got, err, ClassRequestFailed)
+			}
+			if res.calls() != 0 || len(rec.seen()) != 0 {
+				t.Errorf("lookups %d, dials %v: want none", res.calls(), rec.seen())
+			}
+		})
+	}
+}
+
+// The real connect path (connectNumeric, with its Control hook) is used, and
+// the socket's peer is one of the addresses the check returned.
+func TestRealConnectPeerIsCheckedAddress(t *testing.T) {
+	tests := []struct {
+		name   string
+		listen string
+		answer string
+	}{
+		{"v4 loopback", "127.0.0.1:0", "127.0.0.1"},
+		{"v6 loopback", "[::1]:0", "::1"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			l, err := net.Listen("tcp", tc.listen)
+			if err != nil {
+				t.Skipf("cannot listen on %s here: %v", tc.listen, err)
+			}
+			res := fixed(tc.answer)
+			f := newFixtureOn(t, res, http.HandlerFunc(ok204), l)
+			testPermit = func(a netip.Addr) bool { return a.IsLoopback() }
+
+			// Rebuild the dialer around the real connect, wrapped to record
+			// the peer of every connection.
+			d := NewDialer(res, false)
+			var peers []netip.Addr
+			var mu sync.Mutex
+			real := d.connect
+			d.connect = func(ctx context.Context, network, address string) (net.Conn, error) {
+				conn, err := real(ctx, network, address)
+				if err == nil {
+					ap, perr := netip.ParseAddrPort(conn.RemoteAddr().String())
+					if perr != nil {
+						_ = conn.Close()
+						return nil, perr
+					}
+					mu.Lock()
+					peers = append(peers, ap.Addr())
+					mu.Unlock()
+				}
+				return conn, err
+			}
+			pool := x509.NewCertPool()
+			pool.AddCert(f.srv.Certificate())
+			f.client = newClient(d, pool)
+
+			resp, err := f.get(t, "example.com", "/")
+			if err != nil || resp.StatusCode != http.StatusNoContent {
+				t.Fatalf("request: %v", err)
+			}
+			checked, err := Check(context.Background(), "example.com", res, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			if len(peers) != 1 {
+				t.Fatalf("peers = %v, want one", peers)
+			}
+			found := false
+			for _, a := range checked {
+				found = found || a == peers[0]
+			}
+			if !found {
+				t.Errorf("peer %v is not in the checked set %v", peers[0], checked)
+			}
+		})
 	}
 }
 
@@ -501,8 +672,10 @@ func TestClientConnectionRefused(t *testing.T) {
 	}
 }
 
-// Nothing Classify reports, for any outcome above, carries the marker values
-// used for the host, the address and the path.
+// Classify only ever returns the class constants, so this test cannot fail on
+// a leak; it checks that every outcome lands on a known class. The guarantee
+// that no error carries a host or an address is held by
+// TestDialerErrorsCarryNoAddress and TestCheckErrorsCarryNoHost.
 func TestClassifyCarriesNoMarkers(t *testing.T) {
 	permitLoopback(t)
 	res := &fakeResolver{fn: func(call int, h string) ([]netip.Addr, error) {

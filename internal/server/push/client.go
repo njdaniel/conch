@@ -12,6 +12,7 @@ const RequestTimeout = 2 * time.Second
 
 // NewClient returns the *http.Client a push request is sent with. It
 //
+//   - refuses any scheme but https before resolving or dialling;
 //   - sends every request through a Dialer, so each connection resolves,
 //     checks and pins its address;
 //   - never honours HTTP_PROXY or HTTPS_PROXY, because a proxy would make the
@@ -45,10 +46,24 @@ func newClient(d *Dialer, rootCAs *x509.CertPool) *http.Client {
 		},
 	}
 	return &http.Client{
-		Transport: tr,
+		Transport: httpsOnly{next: tr},
 		Timeout:   RequestTimeout,
 		CheckRedirect: func(*http.Request, []*http.Request) error {
 			return http.ErrUseLastResponse
 		},
 	}
+}
+
+// httpsOnly refuses any request whose scheme is not https, before anything is
+// resolved or dialled. The error is a fixed class.
+type httpsOnly struct{ next http.RoundTripper }
+
+func (h httpsOnly) RoundTrip(req *http.Request) (*http.Response, error) {
+	if req.URL == nil || req.URL.Scheme != "https" {
+		if req.Body != nil {
+			_ = req.Body.Close()
+		}
+		return nil, classedError(ClassRequestFailed)
+	}
+	return h.next.RoundTrip(req)
 }

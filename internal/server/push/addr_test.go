@@ -56,6 +56,37 @@ func TestForbidden(t *testing.T) {
 		{"multicast v6", "ff02::1", never},
 		{"public v6", "2606:4700:4700::1111", ok},
 		{"public v6 b", "2a00:1450:4001::200e", ok},
+		// Strict embedded check: a translator path to a private v4 does not
+		// reach the operator's LAN, so allowPrivate does not admit it.
+		// Metadata and credential addresses inside the LAN rows.
+		{"link-local ECS credentials", "169.254.170.2", never},
+		{"Alibaba metadata", "100.100.100.200", never},
+		{"Azure wireserver", "168.63.129.16", never},
+		{"AWS IMDS v6", "fd00:ec2::254", never},
+		{"EKS Pod Identity", "fd00:ec2::23", never},
+		{"GCP metadata v6", "fd20:ce::254", never},
+		{"Oracle metadata v6", "fd00:c1::a9fe:a9fe", never},
+		{"site-local", "fec0::1", never},
+		{"site-local high", "feff::1", never},
+		{"Teredo", "2001::1", never},
+		{"Teredo high", "2001:0:ffff::1", never},
+		{"ORCHID", "2001:10::1", never},
+		{"ORCHIDv2", "2001:20::1", never},
+		{"documentation 192.0.2", "192.0.2.1", never},
+		{"documentation 198.51.100", "198.51.100.1", never},
+		{"documentation 203.0.113", "203.0.113.1", never},
+		{"documentation v6", "2001:db8::1", never},
+		{"documentation 3fff", "3fff::1", never},
+		{"6to4 relay anycast", "192.88.99.1", never},
+		// Outside 2000::/3 and the other admitted blocks: refused because not
+		// listed, even though they are not in a deny row.
+		{"discard prefix", "100::1", never},
+		{"5f00 segment routing", "5f00::1", never},
+		{"SIIT mapped", "::ffff:0:1:2", never},
+		{"SIIT mapped 2", "::ffff:0:a00:1", never},
+		{"unassigned 4000::", "4000::1", never},
+		{"just inside 2000::/3", "3ffe::1", ok},
+		{"top of 2000::/3", "3fff:1000::1", ok},
 		// IPv4-mapped.
 		{"mapped private", "::ffff:10.0.0.1", lan},
 		{"mapped loopback", "::ffff:127.0.0.1", never},
@@ -66,10 +97,10 @@ func TestForbidden(t *testing.T) {
 		{"compatible loopback", "::127.0.0.1", never},
 		{"compatible public", "::8.8.8.8", never},
 		// NAT64 well-known /96.
-		{"nat64 private", "64:ff9b::a00:1", lan},
+		{"nat64 private", "64:ff9b::a00:1", never},
 		{"nat64 loopback", "64:ff9b::7f00:1", never},
 		{"nat64 metadata", "64:ff9b::a9fe:a9fe", never},
-		{"nat64 192.168", "64:ff9b::c0a8:1", lan},
+		{"nat64 192.168", "64:ff9b::c0a8:1", never},
 		{"nat64 public", "64:ff9b::808:808", ok},
 		// NAT64 local-use /48 is refused whole, whichever layout the
 		// mapping uses.
@@ -79,10 +110,10 @@ func TestForbidden(t *testing.T) {
 		{"nat64 local metadata rfc6052", "64:ff9b:1:a9fe:a9:fe00::", never},
 		{"nat64 local public", "64:ff9b:1::808:808", never},
 		// 6to4.
-		{"6to4 private", "2002:0a00:0001::", lan},
+		{"6to4 private", "2002:0a00:0001::", never},
 		{"6to4 loopback", "2002:7f00:0001::", never},
 		{"6to4 metadata", "2002:a9fe:a9fe::", never},
-		{"6to4 192.168", "2002:c0a8:0101::1", lan},
+		{"6to4 192.168", "2002:c0a8:0101::1", never},
 		{"6to4 public", "2002:0808:0808::", ok},
 	}
 	for _, tc := range tests {

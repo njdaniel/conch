@@ -37,8 +37,10 @@ type rangeRow struct {
 // would only ever be reached by mistake or by an attack: loopback is conchd's
 // own host (its admin and metrics surface), unspecified, multicast and
 // reserved ranges are not unicast peers, and 169.254.169.254 and
-// fd00:ec2::254 are cloud metadata endpoints that sit inside the link-local
-// and ULA rows, so they get a non-lan row of their own. The predicate refuses
+// the cloud metadata and credential addresses (169.254.169.254, 100.100.100.200,
+// the fd00:ec2::/32 family and so on) sit inside the CGNAT and ULA rows, so
+// they get non-lan rows of their own. IPv6 is also a positive allow-list, see
+// ForbiddenWith. The predicate refuses
 // an address when any row that matches it is not relaxed.
 var forbiddenRanges = []rangeRow{
 	{netip.MustParsePrefix("0.0.0.0/8"), false},          // "this network", unspecified
@@ -47,6 +49,12 @@ var forbiddenRanges = []rangeRow{
 	{netip.MustParsePrefix("127.0.0.0/8"), false},        // loopback
 	{netip.MustParsePrefix("169.254.0.0/16"), false},     // link-local: never relaxed
 	{netip.MustParsePrefix("169.254.169.254/32"), false}, // cloud metadata
+	{netip.MustParsePrefix("168.63.129.16/32"), false},   // Azure wireserver
+	{netip.MustParsePrefix("100.100.100.200/32"), false}, // Alibaba metadata, inside CGNAT
+	{netip.MustParsePrefix("192.0.2.0/24"), false},       // documentation
+	{netip.MustParsePrefix("198.51.100.0/24"), false},    // documentation
+	{netip.MustParsePrefix("203.0.113.0/24"), false},     // documentation
+	{netip.MustParsePrefix("192.88.99.0/24"), false},     // 6to4 relay anycast
 	{netip.MustParsePrefix("172.16.0.0/12"), true},       // RFC 1918
 	{netip.MustParsePrefix("192.0.0.0/24"), false},       // IETF protocol assignments
 	{netip.MustParsePrefix("192.168.0.0/16"), true},      // RFC 1918
@@ -61,10 +69,20 @@ var forbiddenRanges = []rangeRow{
 	// where the address sits), and it is not the public internet. The whole
 	// range is refused rather than guessing where the address is.
 	{netip.MustParsePrefix("64:ff9b:1::/48"), false},
-	{netip.MustParsePrefix("fc00::/7"), true},           // ULA
-	{netip.MustParsePrefix("fd00:ec2::254/128"), false}, // cloud metadata (AWS IPv6)
-	{netip.MustParsePrefix("fe80::/10"), false},         // link-local: never relaxed
-	{netip.MustParsePrefix("ff00::/8"), false},          // multicast
+	{netip.MustParsePrefix("fc00::/7"), true}, // ULA
+	// Cloud metadata and credential addresses inside the ULA row, so
+	// allowPrivate must not admit them.
+	{netip.MustParsePrefix("fd00:ec2::/32"), false},          // AWS IMDS v6, EKS Pod Identity
+	{netip.MustParsePrefix("fd20:ce::254/128"), false},       // GCP metadata v6
+	{netip.MustParsePrefix("fd00:c1::a9fe:a9fe/128"), false}, // Oracle metadata v6
+	{netip.MustParsePrefix("fec0::/10"), false},              // site-local, deprecated
+	{netip.MustParsePrefix("2001::/32"), false},              // Teredo, refused whole, not decoded
+	{netip.MustParsePrefix("2001:10::/28"), false},           // ORCHID
+	{netip.MustParsePrefix("2001:20::/28"), false},           // ORCHIDv2
+	{netip.MustParsePrefix("2001:db8::/32"), false},          // documentation
+	{netip.MustParsePrefix("3fff::/20"), false},              // documentation
+	{netip.MustParsePrefix("fe80::/10"), false},              // link-local: never relaxed
+	{netip.MustParsePrefix("ff00::/8"), false},               // multicast
 }
 
 // The IPv6 forms whose embedded IPv4 address is extracted. IPv4-mapped
@@ -74,6 +92,8 @@ var forbiddenRanges = []rangeRow{
 var (
 	nat64WellKnown = netip.MustParsePrefix("64:ff9b::/96")
 	sixToFour      = netip.MustParsePrefix("2002::/16")
+	// globalUnicastV6 is the only block IPv6 addresses are admitted from.
+	globalUnicastV6 = netip.MustParsePrefix("2000::/3")
 )
 
 // Forbidden reports whether a connection to a must be refused: it is in a
@@ -85,9 +105,19 @@ func Forbidden(a netip.Addr) bool {
 }
 
 // ForbiddenWith is Forbidden with the operator's allowPrivate setting. When
-// allowPrivate is true the RFC 1918, CGNAT, ULA and link-local rows are
-// admitted; loopback, unspecified, multicast, reserved ranges and the
-// metadata addresses stay forbidden.
+// allowPrivate is true the RFC 1918, CGNAT and ULA rows are admitted, except
+// the cloud metadata addresses inside them; link-local, loopback, unspecified,
+// multicast, reserved and documentation ranges stay forbidden.
+//
+// IPv4 is a deny list: a public address is any global unicast address no row
+// matches. IPv6 is a positive allow-list: after unmapping, an address is
+// admitted only if it is in the global unicast block 2000::/3, or in the
+// well-known NAT64 prefix 64:ff9b::/96, or (under allowPrivate) in a lan row,
+// and no deny row matches it. Everything else, such as site-local fec0::/10,
+// 100::/64, 5f00::/16 and SIIT ::ffff:0:0:0/96, is refused because it is not
+// listed. The embedded IPv4 address of a NAT64 or 6to4 form is always checked
+// in strict mode: a translator path to 10.0.0.1 reaches the translator's
+// network, not the operator's LAN.
 func ForbiddenWith(a netip.Addr, allowPrivate bool) bool {
 	if !a.IsValid() {
 		return true
@@ -107,16 +137,19 @@ func ForbiddenWith(a netip.Addr, allowPrivate bool) bool {
 		}
 		return true
 	}
+	if a.Is4() {
+		return !a.IsGlobalUnicast()
+	}
 	if relaxed {
-		// Link-local fails IsGlobalUnicast, so a relaxed row must not fall
-		// through to the catch-all below.
+		// Only ULA is a relaxed IPv6 row. It lies outside 2000::/3, so it
+		// has to be admitted here, before the allow-list below.
 		return false
 	}
-	if !a.IsGlobalUnicast() {
+	if !globalUnicastV6.Contains(a) && !nat64WellKnown.Contains(a) {
 		return true
 	}
 	for _, v4 := range embeddedV4(a) {
-		if ForbiddenWith(v4, allowPrivate) {
+		if ForbiddenWith(v4, false) {
 			return true
 		}
 	}
