@@ -473,7 +473,7 @@ func (s *Store) SweepSessions(ctx context.Context, now time.Time, stale, offline
 		// A credential that expired or went idle is not revoked, so no
 		// revocation site removed its notification preferences (issue
 		// #1713); nothing else would.
-		_, err = sweepNotificationPreferencesTx(ctx, tx, now)
+		err = sweepNotificationPreferencesTx(ctx, tx, now)
 		return err
 	})
 	if err != nil {

@@ -72,6 +72,8 @@ var principalReads = []principalRead{
 	{"store/audience.go", "Store.AuthorReaders", 1, readGated},
 	// #1713: the reader's own current name, to match "@name" in the feed.
 	{"store/audience.go", "Store.ListPendingNotifications", 1, readOwnOrInternal},
+	// #1713: the sweep compares a credential's generation with its principal's; never served.
+	{"store/notifications.go", "sweepNotificationPreferencesTx", 1, readOwnOrInternal},
 	// #1202: managers on the ?scope=all listing, for holders of manage_channels.
 	{"store/channels_self.go", "Store.channelDirectoryAll", 1, readOperatorOrMaker},
 	// #1150: the last-member count, never served to anyone.
