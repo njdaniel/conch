@@ -118,6 +118,12 @@ type Config struct {
 	// was recorded, so a Config that allows password-only over a store that
 	// does not still asks for the code.
 	OperatorTOTP store.OperatorTOTP
+	// Push configures phone push (issue #1714). The zero value is push off:
+	// the routes answer as the design says and nothing is sent. conchd loads
+	// the VAPID key and records it with the store before New (see
+	// cmd/conchd), so a key that changed has already ended the registrations
+	// made under the old one.
+	Push PushConfig
 }
 
 // temporary reports whether the server runs in temporary mode. It decides

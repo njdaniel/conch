@@ -482,7 +482,7 @@ func endSetupCredentialTx(ctx context.Context, tx execer, actor string, principa
 		credentialDetail(credentialID, SetupCredentialLabel)+" reason=setup complete", now); err != nil {
 		return err
 	}
-	if err := endCredentialNotificationsTx(ctx, tx, credentialID); err != nil {
+	if err := endCredentialNotificationsTx(ctx, tx, actor, credentialID, now); err != nil {
 		return err
 	}
 	return endCredentialSessionsTx(ctx, tx, actor, credentialID, SessionEndedByRevocation, now, runs)

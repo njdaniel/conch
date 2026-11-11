@@ -114,28 +114,51 @@ func (s *Store) PutNotificationPreferences(ctx context.Context, credentialID int
 	return prefs, nil
 }
 
-// endCredentialNotificationsTx deletes the notification preferences of
-// credentialID, in the caller's transaction. It is called, next to
-// endCredentialSessionsTx, by every site that sets credentials.revoked_at, so
-// there is no moment at which the credential is dead and its preferences are
-// not. If the revocation is refused and the transaction rolls back, the row
-// stays. Issue #1714 extends it to end the credential's push registrations.
-func endCredentialNotificationsTx(ctx context.Context, tx execer, credentialID int64) error {
+// endCredentialNotificationsTx ends everything a credential holds for phone
+// notifications, in the caller's transaction: it deletes the notification
+// preferences of credentialID (issue #1713) and ends its active push
+// registrations with reason credential_revoked, clearing their targets and
+// writing one push_registration_ended row each as actor (issue #1714). It is
+// called, next to endCredentialSessionsTx, by every site that sets
+// credentials.revoked_at, so there is no moment at which the credential is dead
+// and its preferences or its registrations are not. If the revocation is
+// refused and the transaction rolls back, everything stays. It is the one
+// helper for both, so the structural guard over it holds for the registrations
+// too.
+func endCredentialNotificationsTx(ctx context.Context, tx execer, actor string, credentialID int64, now time.Time) error {
 	// An older migration's Go step (the community migration, 40) ends guest
-	// visits through the revocation helpers, before the table exists. There
-	// is then nothing to delete: no row can predate the table.
-	var exists int
-	switch err := tx.QueryRowContext(ctx,
-		"SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'notification_preferences'").Scan(&exists); {
-	case errors.Is(err, sql.ErrNoRows):
-		return nil
-	case err != nil:
+	// visits through the revocation helpers, before the tables exist. There
+	// is then nothing to end: no row can predate its table.
+	prefs, err := tableExistsTx(ctx, tx, "notification_preferences")
+	if err != nil {
 		return fmt.Errorf("store: remove notification preferences of credential %d: %w", credentialID, err)
 	}
-	if _, err := tx.ExecContext(ctx, "DELETE FROM notification_preferences WHERE credential_id = ?", credentialID); err != nil {
-		return fmt.Errorf("store: remove notification preferences of credential %d: %w", credentialID, err)
+	if prefs {
+		if _, err := tx.ExecContext(ctx, "DELETE FROM notification_preferences WHERE credential_id = ?", credentialID); err != nil {
+			return fmt.Errorf("store: remove notification preferences of credential %d: %w", credentialID, err)
+		}
+	}
+	push, err := tableExistsTx(ctx, tx, "push_registrations")
+	if err != nil {
+		return fmt.Errorf("store: end push registrations of credential %d: %w", credentialID, err)
+	}
+	if push {
+		return endCredentialPushTx(ctx, tx, actor, credentialID, now)
 	}
 	return nil
+}
+
+// tableExistsTx reports whether the database has a table called name.
+func tableExistsTx(ctx context.Context, tx execer, name string) (bool, error) {
+	var exists int
+	switch err := tx.QueryRowContext(ctx,
+		"SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", name).Scan(&exists); {
+	case errors.Is(err, sql.ErrNoRows):
+		return false, nil
+	case err != nil:
+		return false, err
+	}
+	return true, nil
 }
 
 // sweepNotificationPreferencesTx deletes the preferences of credentials that

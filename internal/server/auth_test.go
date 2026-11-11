@@ -165,6 +165,16 @@ var routePermissions = map[string]schema.Permission{
 	"GET /v1/audit":                                                   schema.PermReadAuditLog,
 }
 
+// authTestPushBody is a valid Web Push registration request, for the route
+// table: the endpoint is never looked up, as push is off.
+const authTestPushBody = `{"transport":"webpush","platform":"web","app":"https://app.example","endpoint":"https://push.example/x","p256dh":"BGcgk_hM5FumxxG6GMUm7aSR_ccjoEV9Par_u_xOGOW2Yhl_pplE_MS0Nq75kpvAP0RoZwEi-1HPIqR4w4tUGcE","auth":"UjWbXUnDSgTzOXcC2Bq_Xg"}`
+
+// isPushPeopleRoute reports whether pattern is a push registration route,
+// which is for people alone; the config is for anyone signed in.
+func isPushPeopleRoute(pattern string) bool {
+	return strings.Contains(pattern, "/v1/push/") && !strings.HasSuffix(pattern, "/v1/push/config")
+}
+
 // routeExpectation pins, per route pattern: its class, the request to send,
 // and the status an authorized caller gets (the same status AuthOff gives).
 type routeExpectation struct {
@@ -339,6 +349,15 @@ var routeExpectations = map[string]routeExpectation{
 	"GET /v1/notifications/preferences": {classAuth, "/v1/notifications/preferences", "", 200},
 	"PUT /v1/notifications/preferences": {classAuth, "/v1/notifications/preferences", `{"policy":"off","muted":[]}`, 200},
 	"GET /v1/notifications/pending":     {classAuth, "/v1/notifications/pending", "", 200},
+	// Push registrations (issue #1714): the config is for any signed-in
+	// caller; the rest are for people, so an agent gets 403 and AuthOff 400
+	// (special-cased below). With no push flag the server answers a POST or a
+	// PUT 409 push_not_configured, and a DELETE of an id it does not hold 404.
+	"GET /v1/push/config":                {classAuth, "/v1/push/config", "", 200},
+	"POST /v1/push/registrations":        {classAuth, "/v1/push/registrations", authTestPushBody, 409},
+	"GET /v1/push/registrations/mine":    {classAuth, "/v1/push/registrations/mine", "", 200},
+	"PUT /v1/push/registrations/{id}":    {classAuth, "/v1/push/registrations/none", authTestPushBody, 409},
+	"DELETE /v1/push/registrations/{id}": {classAuth, "/v1/push/registrations/none", "", 404},
 	// Reactions (issue #765): message 9999 does not exist, so an authorized
 	// caller gets message_not_found; an agent is refused only at the two
 	// moderation routes (humans only), and AuthOff gets 400
@@ -719,7 +738,7 @@ func TestRoleMatrix(t *testing.T) {
 			}
 			// Read state is for people (issue #351): an agent is refused before
 			// any channel is looked at.
-			if strings.HasSuffix(rt.pattern, "/read-state") || strings.Contains(rt.pattern, "/v1/notifications/") {
+			if strings.HasSuffix(rt.pattern, "/read-state") || strings.Contains(rt.pattern, "/v1/notifications/") || isPushPeopleRoute(rt.pattern) {
 				agentWant = http.StatusForbidden
 			}
 			// The moderation routes of reactions (issue #765) administer a
@@ -813,7 +832,7 @@ func TestAuthOffUnchanged(t *testing.T) {
 				if strings.Contains(rt.pattern, "/v1/sessions") || strings.Contains(rt.pattern, "/v1/runs") || strings.Contains(rt.pattern, "/v1/interventions") {
 					want = http.StatusBadRequest // sessions_require_auth: a session, and so a run, is bound to a credential
 				}
-				if strings.HasSuffix(rt.pattern, "/read-state") || strings.Contains(rt.pattern, "/v1/notifications/") {
+				if strings.HasSuffix(rt.pattern, "/read-state") || strings.Contains(rt.pattern, "/v1/notifications/") || isPushPeopleRoute(rt.pattern) {
 					want = http.StatusBadRequest // read_state_require_auth: a mark, and notification preferences, belong to a principal
 				}
 				if isReactionRoute(rt.pattern) {

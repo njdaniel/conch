@@ -235,9 +235,18 @@ func (s *Server) handleListOwnCredentials(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusInternalServerError, "internal_error", "internal server error")
 		return
 	}
+	// Which of them have push (issue #1714): the person sees which sign-ins
+	// can be woken, never where.
+	withPush, err := s.store.PushCredentials(ctx, caller.ID)
+	if err != nil {
+		slog.ErrorContext(ctx, "credentials: own push list failed", "principal", caller.ID, "error", err)
+		writeError(w, http.StatusInternalServerError, "internal_error", "internal server error")
+		return
+	}
 	out := make([]schema.OwnCredentialV1, 0, len(creds))
 	for _, c := range creds {
 		out = append(out, schema.OwnCredentialV1{
+			Push:      withPush[c.ID],
 			ID:        c.ID,
 			Label:     c.Label,
 			CreatedAt: c.CreatedAt,

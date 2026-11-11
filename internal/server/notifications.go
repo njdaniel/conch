@@ -138,6 +138,12 @@ func (s *Server) handleListPendingNotifications(w http.ResponseWriter, r *http.R
 	if !s.takeNotificationReadToken(w, credentialID) {
 		return
 	}
+	// This credential has just read its feed: its registrations are not
+	// stale (design §5.8). The update is best effort: a failure is logged,
+	// with no target in it, and the feed is answered all the same.
+	if err := s.store.TouchPushFetch(ctx, credentialID, s.now()); err != nil {
+		slog.WarnContext(ctx, "notifications: could not record the fetch", "credential", credentialID, "error", err)
+	}
 	// The reader is built here, in the call, as the guard test requires.
 	page, err := s.store.ListPendingNotifications(ctx, readerFor(r, apiV2), credentialID, after)
 	if err != nil {

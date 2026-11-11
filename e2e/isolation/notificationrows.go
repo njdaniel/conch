@@ -1,11 +1,15 @@
 package main
 
 import (
+	"crypto/ecdh"
+	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/url"
 	"slices"
+	"strings"
 
 	"github.com/njdaniel/conch/pkg/schema"
 )
@@ -22,6 +26,59 @@ var allPreferences = schema.PutNotificationPreferencesRequestV1{
 	Policy: schema.NotificationPolicyAll, Muted: []int64{}, Preview: true,
 }
 
+// aPushReg is A's push registration, by id (issue #1714).
+func aPushReg(w *world) subject { return subject{kind: "push_registration", name: w.a.pushRegID} }
+
+// pushPath is the path of the registration a subject names; a row asked about
+// no subject (the route check) names an id that is not one.
+func pushPath(s subject) string {
+	if s.name == "" {
+		return "/v1/push/registrations/none"
+	}
+	return "/v1/push/registrations/" + s.name
+}
+
+// pushHost is the public IP literal the rows register at: the address check
+// needs no lookup for it, and nothing is ever sent there.
+const pushHost = "https://93.184.216.34/"
+
+// registerPush has api register a Web Push endpoint at pushHost plus path with
+// fresh keys. With mark, the keys are markers of A's.
+func (w *world) registerPush(a api, path string, mark bool) (schema.PushRegistrationV1, error) {
+	var reg schema.PushRegistrationV1
+	req, err := pushRequest(path, func(p256dh, auth string) {
+		if mark {
+			w.marks.secret("A's push p256dh", p256dh)
+			w.marks.secret("A's push auth", auth)
+		}
+	})
+	if err != nil {
+		return reg, err
+	}
+	err = a.call(http.MethodPost, "/v1/push/registrations", req, &reg)
+	return reg, err
+}
+
+// pushRequest is a Web Push registration request at pushHost plus path, with
+// a fresh key pair and secret; keys sees them.
+func pushRequest(path string, keys func(p256dh, auth string)) (schema.CreatePushRegistrationRequestV1, error) {
+	k, err := ecdh.P256().GenerateKey(rand.Reader)
+	if err != nil {
+		return schema.CreatePushRegistrationRequestV1{}, err
+	}
+	authRaw := make([]byte, schema.PushAuthBytes)
+	if _, err := rand.Read(authRaw); err != nil {
+		return schema.CreatePushRegistrationRequestV1{}, err
+	}
+	p256dh := base64.RawURLEncoding.EncodeToString(k.PublicKey().Bytes())
+	auth := base64.RawURLEncoding.EncodeToString(authRaw)
+	keys(p256dh, auth)
+	return schema.CreatePushRegistrationRequestV1{
+		Transport: schema.PushTransportWebPush, Platform: schema.PushPlatformWeb, App: "https://isolation.example",
+		Endpoint: pushHost + path, P256DH: p256dh, Auth: auth,
+	}, nil
+}
+
 // notificationMatrixRows are B's members' rows.
 func notificationMatrixRows() []row {
 	own := func(route, what string, p func(w *world, s subject) probe) row {
@@ -34,7 +91,55 @@ func notificationMatrixRows() []row {
 			func(*world, subject) probe { return put("/v1/notifications/preferences", allPreferences) }),
 		{route: "GET /v1/notifications/pending", what: "reads her own pending notifications", own: true, after: checkPendingFeedOfB,
 			probe: func(*world, subject) probe { return get("/v1/notifications/pending") }},
+
+		// Push registrations (issue #1714). The config and the own list
+		// answer about the caller alone; a registration is created for her
+		// own credential and answered without its target; and A's
+		// registration id is the 404 of any id that is not hers: byte for
+		// byte the answer to one never issued (the ghost comparison).
+		own("GET /v1/push/config", "reads which push transports are on",
+			func(*world, subject) probe { return get("/v1/push/config") }),
+		own("GET /v1/push/registrations/mine", "lists her own sign-in's push registrations",
+			func(*world, subject) probe { return get("/v1/push/registrations/mine") }),
+		{route: "POST /v1/push/registrations", what: "registers her own sign-in for push", own: true, inspect: checkOwnPushRegistration,
+			probe: func(w *world, _ subject) probe {
+				req, err := pushRequest(w.bName("pushep"), func(string, string) {})
+				if err != nil {
+					panic(err) // crypto/rand failed: nothing sensible can run
+				}
+				return post("/v1/push/registrations", req)
+			}},
+		{route: "PUT /v1/push/registrations/{id}", what: "replaces the target of A's push registration", pick: aPushReg,
+			want: answer{http.StatusNotFound, "push_registration_not_found"},
+			probe: func(w *world, s subject) probe {
+				req, err := pushRequest(w.bName("pushep"), func(string, string) {})
+				if err != nil {
+					panic(err)
+				}
+				return put(pushPath(s), schema.UpdatePushRegistrationRequestV1(req))
+			}},
+		{route: "DELETE /v1/push/registrations/{id}", what: "ends A's push registration", pick: aPushReg,
+			want:  answer{http.StatusNotFound, "push_registration_not_found"},
+			probe: func(_ *world, s subject) probe { return del(pushPath(s)) }},
 	}
+}
+
+// checkOwnPushRegistration requires that a registration's answer is a valid
+// registration with no part of the target in it.
+func checkOwnPushRegistration(_ *world, _ api, body []byte) error {
+	var reg schema.PushRegistrationV1
+	if err := json.Unmarshal(body, &reg); err != nil {
+		return fmt.Errorf("the registration is not one: %w", err)
+	}
+	if err := reg.Validate(); err != nil {
+		return err
+	}
+	for _, field := range []string{"endpoint", "p256dh", "auth", "token", "provider"} {
+		if strings.Contains(string(body), `"`+field+`"`) {
+			return fmt.Errorf("the registration answers with its %s", field)
+		}
+	}
+	return nil
 }
 
 // checkPendingFeedOfB sets the prober's preferences to everything with text,
