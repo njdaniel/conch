@@ -232,7 +232,13 @@ func pressKey(m Model, keys ...string) Model {
 			msg = tea.KeyMsg{Type: tea.KeyBackspace}
 		case "tab":
 			msg = tea.KeyMsg{Type: tea.KeyTab}
+		case "pgdown":
+			msg = tea.KeyMsg{Type: tea.KeyPgDown}
+		case "pgup":
+			msg = tea.KeyMsg{Type: tea.KeyPgUp}
 		default:
+			// Text, typed one character at a time as a terminal delivers it
+			// when the keys are not struck in the same instant.
 			msg = tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(k)}
 		}
 		var cmd tea.Cmd

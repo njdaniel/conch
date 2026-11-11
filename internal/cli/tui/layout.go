@@ -52,6 +52,12 @@ type layout struct {
 	// members is the members line, "" outside the channels view and in the
 	// wide layout, where the people pane says more.
 	members string
+	// confirm is the pending moderation request as wrapped rows above the
+	// status line, nil when there is none.
+	confirm []string
+	// compact is set when a pending confirmation cannot share the screen
+	// with the panes: View then draws only compactConfirmation.
+	compact bool
 }
 
 // titled reports whether the screen has a title bar: from fullWidth x
@@ -87,14 +93,33 @@ func (m Model) layout() layout {
 		if l.peopleW == 0 {
 			l.members = m.membersLine(width)
 		}
+		l.confirm = m.confirmationLines(width)
 	}
-	l.contentH = height - l.top - 4
-	if l.voice != "" {
-		l.contentH--
+	rows := func() int {
+		n := l.top + 4 + len(l.confirm)
+		if l.voice != "" {
+			n++
+		}
+		if l.members != "" {
+			n++
+		}
+		return n
 	}
-	if l.members != "" {
-		l.contentH--
+	const minContent = 4
+	if len(l.confirm) > 0 && height-rows() < minContent {
+		// A confirmation has priority over everything it shares the screen
+		// with: first the title bar, the voice strip and the members line
+		// give way, and if it still does not fit, it fills the screen as one
+		// compact form (compactConfirmation).
+		l.top, l.voice, l.members = 0, "", ""
+		if height-rows() < minContent {
+			l.compact = true
+			l.confirm = nil
+			l.contentH = minContent
+			return l
+		}
 	}
+	l.contentH = height - rows()
 	if l.contentH < 4 {
 		l.contentH = 4
 	}

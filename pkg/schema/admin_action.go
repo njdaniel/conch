@@ -82,6 +82,15 @@ const (
 	AdminActionUpdateReport AdminAction = "update_report"
 	// The audit trail (read_audit_log).
 	AdminActionExportAudit AdminAction = "export_audit"
+	// Channel entry bans (manage_channels; moderation M3, issue #851, signed
+	// off with #849 Q4). Added at the end, as the vocabulary only grows.
+	AdminActionListChannelBans    AdminAction = "list_channel_bans"
+	AdminActionBanChannelMember   AdminAction = "ban_channel_member"
+	AdminActionUnbanChannelMember AdminAction = "unban_channel_member"
+	// A channel's topic (manage_channels; issue #1523, the approval-path part
+	// of #1503, docs/design/channel-topic.md §4.3). Added at the end, as the
+	// vocabulary only grows.
+	AdminActionSetChannelTopic AdminAction = "set_channel_topic"
 )
 
 // AdminActions is the catalog in wire order: the order of every list of
@@ -104,6 +113,8 @@ var AdminActions = []AdminAction{
 	AdminActionGetPermissions, AdminActionSetPermissions,
 	AdminActionListReports, AdminActionGetReport, AdminActionUpdateReport,
 	AdminActionExportAudit,
+	AdminActionListChannelBans, AdminActionBanChannelMember, AdminActionUnbanChannelMember,
+	AdminActionSetChannelTopic,
 }
 
 // Valid reports whether a is an action of the catalog.
@@ -125,7 +136,9 @@ func (a AdminAction) Valid() bool {
 		AdminActionGetJoinSettings, AdminActionSetJoinSettings,
 		AdminActionGetPermissions, AdminActionSetPermissions,
 		AdminActionListReports, AdminActionGetReport, AdminActionUpdateReport,
-		AdminActionExportAudit:
+		AdminActionExportAudit,
+		AdminActionListChannelBans, AdminActionBanChannelMember, AdminActionUnbanChannelMember,
+		AdminActionSetChannelTopic:
 		return true
 	default:
 		return false

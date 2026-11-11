@@ -304,6 +304,9 @@ func (s *Server) handleRenameChannel(w http.ResponseWriter, r *http.Request) {
 	}
 
 	caller, authed := callerFrom(ctx)
+	if !s.takeChannelWriteToken(w, caller.ID, id) {
+		return
+	}
 	var opt store.ChannelRenameOptions
 	if authed {
 		opt = store.ChannelRenameOptions{CallerID: caller.ID, Limits: store.RenameLimits{Renames: renamesPerDay, Attempts: renameAttemptsPerDay}}
@@ -358,6 +361,60 @@ func (s *Server) handleRenameChannel(w http.ResponseWriter, r *http.Request) {
 		s.channelRenamedLists(ctx, id)
 	}
 	writeJSON(w, http.StatusOK, schema.RenameChannelResponseV1{Channel: channelFromStore(res.Channel)})
+}
+
+// handleSetChannelTopic serves PUT /v1/channels/{id}/topic (issue #1503,
+// docs/design/channel-topic.md §3). The route class (accessChannelManager)
+// hides an unknown or non-member channel before the body is read and
+// refuses a member who does not manage the channel; the store decides the
+// standing again in the write transaction. There is no precondition and no
+// attempt limit, and an archived channel takes the write. The same string
+// is a 200 that writes, audits and sends nothing.
+func (s *Server) handleSetChannelTopic(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	id, ok := pathID(w, r, "id", "channel")
+	if !ok {
+		return
+	}
+	var req schema.SetChannelTopicRequestV1
+	if err := decodeJSONBody(w, r, &req); err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			writeError(w, http.StatusRequestEntityTooLarge, "request_too_large", "request body exceeds the maximum size")
+			return
+		}
+		writeError(w, http.StatusBadRequest, "invalid_request", "request body must be valid JSON")
+		return
+	}
+	if err := req.Validate(); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
+
+	caller, _ := callerFrom(ctx)
+	if !s.takeChannelWriteToken(w, caller.ID, id) {
+		return
+	}
+	res, err := s.store.SetChannelTopic(ctx, auditActor(ctx), caller.ID, id, req.Topic, s.now())
+	switch {
+	case errors.Is(err, store.ErrNotFound):
+		writeChannelNotFound(w)
+		return
+	case errors.Is(err, store.ErrManagerRefused):
+		s.denyForbiddenFor(w, r, caller, "forbidden", "operator role or channel manager required", refusedPermission(caller, schema.PermManageChannels))
+		return
+	case err != nil:
+		slog.ErrorContext(ctx, "channels: set topic failed", "channel", id, "error", err)
+		writeError(w, http.StatusInternalServerError, "internal_error", "internal server error")
+		return
+	}
+	if res.Changed {
+		// Every open events socket of the channel is sent the channel as it
+		// now is, and its human members' lists are told to re-read.
+		s.events.notifyChannel(id, eventRef{kind: eventChannel, id: id})
+		s.channelRenamedLists(ctx, id)
+	}
+	writeJSON(w, http.StatusOK, schema.SetChannelTopicResponseV1{Channel: channelFromStore(res.Channel)})
 }
 
 // channelRenamedLists tells every human member of a renamed channel that
@@ -438,5 +495,6 @@ func channelFromStore(channel store.Channel) schema.ChannelV0 {
 		CreatedAt:  channel.CreatedAt.UTC(),
 		Visibility: channel.Visibility,
 		Default:    channel.IsDefault,
+		Topic:      channel.Topic,
 	}
 }

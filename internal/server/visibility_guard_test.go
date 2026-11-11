@@ -115,6 +115,30 @@ func checkMessageReads(t *testing.T, fset *token.FileSet, path string, file *ast
 				return true
 			}
 			name := sel.Sel.Name
+			// The pending-notification feed (issue #1713) reads messages
+			// across channels and has no channel argument, so it is held to
+			// the reader rule on its own: the reader, its second argument,
+			// is the request's readerFor(r, version), as for every other
+			// message read, and never ChannelWideOnly or a hand-built value.
+			if recv := types.ExprString(sel.X); name == "ListPendingNotifications" && (recv == "store" || strings.HasSuffix(recv, ".store")) {
+				if len(x.Args) < 2 || !strings.HasPrefix(types.ExprString(x.Args[1]), "readerFor(") {
+					t.Errorf("%s: %s calls ListPendingNotifications with a reader that is not readerFor(r, version)", path, fset.Position(x.Pos()))
+				}
+				return true
+			}
+			// The post-time wake query (issue #1715) reads a message body and
+			// decides, for other people, who may be told of it. It has no
+			// reader argument, because it asks for every registered principal
+			// in turn, each under their own scoped reader inside the store. It
+			// is therefore held to the one caller that may use it: the push
+			// sender's source, which hands the answer to the sender and to
+			// nothing else.
+			if name == "PushTargets" {
+				if filepath.Base(path) != "push_send.go" {
+					t.Errorf("%s: %s calls PushTargets; only the push sender's source (push_send.go) may", path, fset.Position(x.Pos()))
+				}
+				return true
+			}
 			// Any store method that mentions messages must be one of the
 			// known ones. A heuristic on the method's prefix alone would miss
 			// a read named, say, MessagesSince or LastMessage.
@@ -129,16 +153,17 @@ func checkMessageReads(t *testing.T, fset *token.FileSet, path string, file *ast
 				// in the same statement, held to the same reader rule below.
 				// EditOwnMessage and OwnMessageRevisions (issue #845) select the
 				// reader's own message by the same condition and are held to
-				// the same reader rule below.
+				// the same reader rule below. RemoveMessage (issue #852) finds the
+				// message to remove by the same condition and is held to it too.
 				case "ListVisibleMessages", "ListVisibleMessagesPage", "SearchVisibleMessages", "CountVisibleMessagesAfter", "CountVisibleUnreadMessagesAfter", "ListThreadMessages", "ReplyRootMessage", "InsertReplyMessage",
-					"InsertMessage", "InsertMessageV1", "InsertScopedMessage", "EditOwnMessage", "OwnMessageRevisions":
+					"InsertMessage", "InsertMessageV1", "InsertScopedMessage", "EditOwnMessage", "OwnMessageRevisions", "RemoveMessage":
 				default:
 					t.Errorf("%s: %s calls the store's %s; server code may only use the visibility functions and the inserts", path, fset.Position(x.Pos()), name)
 					return true
 				}
 			}
 			takesReader := name == "ReplyRootMessage" || name == "InsertReplyMessage" || name == "ListThreadMessages" ||
-				name == "EditOwnMessage" || name == "OwnMessageRevisions"
+				name == "EditOwnMessage" || name == "OwnMessageRevisions" || name == "RemoveMessage"
 			listsMessages := takesReader || strings.Contains(name, "Message") &&
 				(strings.HasPrefix(name, "List") || strings.HasPrefix(name, "Read") || strings.HasPrefix(name, "Get") ||
 					strings.HasPrefix(name, "Fetch") || strings.HasPrefix(name, "Query") || strings.HasPrefix(name, "Search") ||

@@ -98,6 +98,12 @@ func (s *Store) JoinChannel(ctx context.Context, channelID, principalID int64, n
 		if err != nil {
 			return err
 		}
+		// A ban bars a self-join as the other bars do (issue #851).
+		if banned, err := channelBannedTx(ctx, tx, channelID, principalID); err != nil {
+			return err
+		} else if banned {
+			barred = true
+		}
 		if barred {
 			return ErrChannelNotJoinable
 		}
@@ -155,7 +161,7 @@ func (s *Store) LeaveChannel(ctx context.Context, channelID, principalID int64, 
 		if schema.ChannelVisibility(visibility) != schema.ChannelPublic {
 			var others int
 			if err := tx.QueryRowContext(ctx,
-				`SELECT COUNT(*) FROM channel_members cm JOIN principals p ON p.id = cm.principal_id
+				`SELECT COUNT(*) FROM `+liveMembers+` cm JOIN principals p ON p.id = cm.principal_id
 				 WHERE cm.channel_id = ? AND cm.principal_id != ? AND `+memberPredicateSQL,
 				channelID, principalID).Scan(&others); err != nil {
 				return fmt.Errorf("store: count members of channel %d: %w", channelID, err)
@@ -204,10 +210,10 @@ func (s *Store) ChannelDirectory(ctx context.Context, viewerID int64, all bool) 
 		return s.channelDirectoryAll(ctx, viewerID)
 	}
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT c.id, c.name, c.created_at, c.visibility, c.is_default, c.archived_at,
+		`SELECT c.id, c.name, c.created_at, c.visibility, c.is_default, c.archived_at, c.topic,
 		        m.principal_id IS NOT NULL, COALESCE(m.manages, 0)
 		 FROM channels c
-		 LEFT JOIN channel_members m ON m.channel_id = c.id AND m.principal_id = ?
+		 LEFT JOIN `+liveMembers+` m ON m.channel_id = c.id AND m.principal_id = ?
 		 WHERE (c.visibility = 'public' AND c.archived_at IS NULL) OR m.principal_id IS NOT NULL
 		 ORDER BY c.id ASC`, viewerID)
 	if err != nil {
@@ -241,13 +247,13 @@ func (s *Store) ChannelDirectory(ctx context.Context, viewerID int64, all bool) 
 // are.
 func (s *Store) channelDirectoryAll(ctx context.Context, viewerID int64) ([]ChannelListing, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT c.id, c.name, c.created_at, c.visibility, c.is_default, c.archived_at,
+		`SELECT c.id, c.name, c.created_at, c.visibility, c.is_default, c.archived_at, c.topic,
 		        m.principal_id IS NOT NULL, COALESCE(m.manages, 0),
-		        (SELECT COUNT(*) FROM channel_members n WHERE n.channel_id = c.id),
+		        (SELECT COUNT(*) FROM `+liveMembers+` n WHERE n.channel_id = c.id),
 		        g.principal_id, p.name, p.kind
 		 FROM channels c
-		 LEFT JOIN channel_members m ON m.channel_id = c.id AND m.principal_id = ?
-		 LEFT JOIN (channel_members g JOIN principals p ON p.id = g.principal_id AND `+listedManagerSQL+`)
+		 LEFT JOIN `+liveMembers+` m ON m.channel_id = c.id AND m.principal_id = ?
+		 LEFT JOIN (`+liveMembers+` g JOIN principals p ON p.id = g.principal_id AND `+listedManagerSQL+`)
 		        ON g.channel_id = c.id AND g.manages = 1
 		 ORDER BY c.id ASC, g.principal_id ASC`, viewerID)
 	if err != nil {

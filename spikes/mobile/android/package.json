@@ -6,9 +6,13 @@
   "scripts": {
     "start": "react-native start",
     "android": "react-native run-android",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "rm -rf build/test && tsc -p tsconfig.test.json && node --test \"build/test/test/*.test.js\""
   },
   "dependencies": {
+    "@livekit/react-native": "3.1.0",
+    "@livekit/react-native-webrtc": "150.1.1",
+    "livekit-client": "2.22.3",
     "react": "19.3.0",
     "react-native": "0.88.1"
   },

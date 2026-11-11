@@ -14,11 +14,13 @@
 // fails when CI is set and is skipped otherwise, as in 10-voice.
 import type { Browser, BrowserContextOptions, Locator, Page } from '@playwright/test';
 import type { PostMessageRequestV2 } from '../src/schema/generated';
-import { chooseMicrophone, expect, expectFits, mainNav, messages, openChannel, phoneSizes, showView, signIn, test } from './fixtures';
+import { closeAll, chooseMicrophone, expect, expectFits, mainNav, messages, openChannel, phoneSizes, showView, signIn, test } from './fixtures';
 import { dockerAvailable, startVoiceWorld, type Member, type VoiceWorld } from './voice-world';
 
 const voiceRegion = (page: Page) => page.getByRole('region', { name: 'Voice' });
 const shareView = (page: Page) => page.getByRole('region', { name: 'Shared screen' });
+// A stream tile's Watch, on the stage (voice-multi-share.md §7.1).
+const watchButton = (page: Page) => page.locator('.call-share').getByRole('button', { name: 'Watch', exact: true });
 
 // The two sizes of the audit's finding.
 const sizes = phoneSizes.filter(([size]) => size === '320×640' || size === '390×844');
@@ -65,6 +67,20 @@ async function tapUntil(target: Locator, done: () => Promise<boolean>): Promise<
   }).toPass({ timeout: 30_000 });
 }
 
+// openVoiceView taps the strip's state button, which opens the Voice view.
+// The button's name is the connection's state ("In voice in #room", but
+// "Reconnecting to #room" while the connection is coming back), so on a
+// loaded machine that dips for a moment the name this looks for is not there
+// to tap. A bare tap would then wait for the whole test's time (issue #1441,
+// the third flake of this spec: the trace ended in this tap, with no error to
+// show for it): this waits for the state a person would, a button saying the
+// phone is in voice, and taps until the Voice view is the one shown.
+async function openVoiceView(page: Page): Promise<void> {
+  const state = voiceRegion(page).getByRole('button', { name: stateButton });
+  await expect(state, 'the strip says the phone is in voice').toBeVisible({ timeout: 45_000 });
+  await tapUntil(state, async () => (await mainNav(page).getByRole('button', { name: 'Voice', exact: true }).getAttribute('aria-current')) === 'page');
+}
+
 // Whether two boxes share any area.
 function overlap(a: Box, b: Box): boolean {
   return a.x < b.x + b.width && b.x < a.x + a.width && a.y < b.y + b.height && b.y < a.y + a.height;
@@ -100,6 +116,9 @@ function hitEverywhere(el: Locator): Promise<boolean> {
 }
 
 test.describe('the phone voice strip with LiveKit', () => {
+  // An action that cannot be done fails in 20 s naming itself, and not at the
+  // end of the test's 300 s with only "Test ended" (issue #1441).
+  test.use({ actionTimeout: 20_000 });
   let vw: VoiceWorld;
   let stopWorld: (() => void) | undefined;
 
@@ -120,6 +139,7 @@ test.describe('the phone voice strip with LiveKit', () => {
   interface Someone {
     readonly page: Page;
     readonly size: string;
+    readonly name: string;
     readonly close: () => Promise<void>;
   }
 
@@ -128,13 +148,8 @@ test.describe('the phone voice strip with LiveKit', () => {
     const page = await context.newPage();
     await signIn(page, vw, member.token, member.name);
     await openChannel(page, vw.channel);
-    // The page is closed before its context, as fixtures.ts does: its pagehide
-    // ends the session it started (issue #802).
-    const close = async () => {
-      if (!page.isClosed()) await page.close();
-      await context.close();
-    };
-    return { page, size, close };
+    const close = () => closeAll(context);
+    return { page, size, name: member.name, close };
   }
 
   // join joins voice, which is in the open microphone for a browser that never
@@ -346,21 +361,22 @@ test.describe('the phone voice strip with LiveKit', () => {
       for (const p of phones) await measure(p, 'in voice');
 
       // A share on, not watched. Watch shows in the Voice view once the
-      // share is known.
+      // share is known: on the stream's tile, on the stage
+      // (voice-multi-share.md §7.1).
       const desk = voiceRegion(a.page);
       await desk.getByRole('button', { name: 'Share screen' }).click();
       await expect(desk).toContainText('You are sharing your screen', { timeout: 30_000 });
       for (const p of phones) {
         await showView(p.page, 'Voice');
-        await expect(voiceRegion(p.page).getByRole('button', { name: 'Watch', exact: true })).toBeVisible({ timeout: 15_000 });
+        await expect(watchButton(p.page)).toBeVisible({ timeout: 15_000 });
         await measure(p, 'share on');
       }
 
       // Watching the share: the stage is above the conversation under Chat.
       for (const p of phones) {
         await showView(p.page, 'Voice');
-        await voiceRegion(p.page).getByRole('button', { name: 'Watch', exact: true }).tap();
-        await expect(shareView(p.page)).toContainText('alice is sharing', { timeout: 30_000 });
+        await watchButton(p.page).tap();
+        await expect(shareView(p.page)).toContainText('alice · LIVE', { timeout: 30_000 });
         await measure(p, 'watching');
       }
 
@@ -370,25 +386,27 @@ test.describe('the phone voice strip with LiveKit', () => {
         const { page } = p;
         await showView(page, 'Chat');
         const voice = voiceRegion(page);
-        await voice.getByRole('button', { name: stateButton }).tap();
+        await openVoiceView(page);
         await expect(mainNav(page).getByRole('button', { name: 'Voice', exact: true })).toHaveAttribute('aria-current', 'page');
         // Each phone before this one has left, and presence says so a few
         // seconds later: the roster is above the controls, so a person waits
         // for it to settle before reaching for one, as this does (the CI
         // flake of issue #1163: a row went while Voice options was tapped).
-        await expect(voice.getByRole('list', { name: `${String(3 - turn)} in voice` })).toContainText('You', { timeout: 30_000 });
+        await expect(voice.getByRole('list', { name: `${String(3 - turn)} in voice` })).toContainText(p.name, { timeout: 30_000 });
         await expect(voice).toContainText('Connected in #voice-room');
         await expect(voice.getByText('Microphone in use')).toBeVisible();
         await voice.getByRole('button', { name: 'Deafen' }).tap();
         await expect(voice).toContainText('Deafened');
         await voice.getByRole('button', { name: 'Undeafen' }).tap();
         await expect(voice).not.toContainText('Deafened');
-        // Someone else shares, so Share screen is there and off.
-        await expect(voice.getByRole('button', { name: 'Share screen' })).toBeDisabled();
+        // Someone else shares, and Share screen is there and on: several may
+        // stream at once (voice-multi-share.md §7.1; was off under the
+        // one-share rule, O5).
+        await expect(voice.getByRole('button', { name: 'Share screen' })).toBeEnabled();
         await shareView(page).getByRole('button', { name: 'Stop watching' }).tap();
         await expect(shareView(page)).toHaveCount(0);
-        await voice.getByRole('button', { name: 'Watch', exact: true }).tap();
-        await expect(shareView(page)).toContainText('alice is sharing', { timeout: 30_000 });
+        await watchButton(page).tap();
+        await expect(shareView(page)).toContainText('alice · LIVE', { timeout: 30_000 });
         const options = voice.getByRole('button', { name: 'Voice options' });
         const expanded = (want: 'true' | 'false') => async () => (await options.getAttribute('aria-expanded')) === want;
         await tapUntil(options, expanded('true'));
@@ -399,7 +417,7 @@ test.describe('the phone voice strip with LiveKit', () => {
         await expect(voice.getByLabel('Open microphone')).toBeChecked();
         await showView(page, 'Chat');
         await expectOpenMicrophone(p);
-        await voice.getByRole('button', { name: stateButton }).tap();
+        await openVoiceView(page);
         await tapUntil(voice.getByLabel('Push to talk'), () => voice.getByLabel('Push to talk').isChecked());
         await expect(voice.getByLabel('Push to talk')).toBeChecked();
         await tapUntil(options, expanded('false'));

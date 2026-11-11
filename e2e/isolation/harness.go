@@ -373,7 +373,11 @@ func (h *harness) startConchd(srv *lkit.Server) (*conchdProc, error) {
 	ntfy := newNtfyRecorder()
 	h.onCleanup(ntfy.srv.Close)
 	args := []string{"serve", "--data", dataDir, "--listen", addr, "--trusted-proxies", trustedProxy,
-		"--ntfy-server", ntfy.srv.URL, "--ntfy-topic", "isolation-approvals", "--ntfy-urgent-topic", "isolation-urgent"}
+		"--ntfy-server", ntfy.srv.URL, "--ntfy-topic", "isolation-approvals", "--ntfy-urgent-topic", "isolation-urgent",
+		// Web Push on, so the registration routes answer as they do in
+		// use (issue #1714). The rows register at a public IP literal: the
+		// address check needs no lookup, and nothing is ever sent there.
+		"--push-webpush"}
 	if srv != nil {
 		args = append(args, "--livekit-url", srv.WSURL)
 		env = append(env, "CONCHD_LIVEKIT_API_KEY="+srv.Key, "CONCHD_LIVEKIT_API_SECRET="+srv.Secret)

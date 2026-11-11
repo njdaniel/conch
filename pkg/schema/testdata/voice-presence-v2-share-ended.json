@@ -1,0 +1,42 @@
+{
+  "schema": "conch.voice_presence.v2",
+  "channel_id": 7,
+  "configured": true,
+  "available": true,
+  "rooms": [
+    {
+      "participants": [
+        {
+          "principal_id": 3,
+          "can_publish": true,
+          "transmitting": false,
+          "joined_at": "2026-11-07T11:58:02.250Z",
+          "camera": true
+        },
+        {
+          "principal_id": 7,
+          "can_publish": true,
+          "transmitting": true,
+          "joined_at": "2026-11-07T12:00:31.000Z",
+          "sharing": true,
+          "share_started_at": "2026-11-07T12:02:10.500Z",
+          "share_quality": {
+            "resolution": "720p",
+            "frame_rate": 30
+          }
+        },
+        {
+          "principal_id": 9,
+          "can_publish": true,
+          "transmitting": false,
+          "joined_at": "2026-11-07T12:01:05.750Z"
+        }
+      ]
+    }
+  ],
+  "share_ended": {
+    "reason": "self",
+    "started_at": "2026-11-07T12:00:04.125Z",
+    "ended_at": "2026-11-07T12:05:40.500Z"
+  }
+}

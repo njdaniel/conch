@@ -17,6 +17,8 @@ export const MAX_REACTOR_LIMIT = 100;
 export const MESSAGE_EDIT_WINDOW_SECONDS = 3600;
 export const MAX_MESSAGE_EDITS = 10;
 export const MAX_POST_REQUEST_BYTES = 1048576;
+export const SPOILER_FILE_PREFIX = 'SPOILER_';
+export const MAX_FILE_NAME_BYTES = 255;
 export const VOICE_CONTROL_SUBCOMMAND = 'managed';
 export const VOICE_CONTROL_MAX_LINE_BYTES = 4096;
 export const VOICE_CONTROL_MAX_ID = 9007199254740991;
@@ -36,11 +38,13 @@ export const VOICE_CONTROL_STOP_TERM_AFTER_MS = 4000;
 export const VOICE_CONTROL_STOP_KILL_AFTER_MS = 5000;
 export const VOICE_CONTROL_DEVICE_DEFAULT = 'default';
 export const VOICE_DEVICES_MAX_NAME_BYTES = 255;
+export const VOICE_DEVICES_MAX_BYTES = 262144;
 export const VOICE_CONTROL_PIPE_FLAG = '--events-pipe';
 export const VOICE_CONTROL_PIPE_NONCE_ENV = 'CONCH_VOICE_ATTACH';
 export const VOICE_CONTROL_PIPE_NONCE_BYTES = 32;
 export const VOICE_CONTROL_PIPE_NONCE_CHARS = 43;
 export const MAX_CHANNEL_AUTHOR_IDS = 100;
+export const MAX_CHANNEL_TOPIC_LENGTH = 250;
 export const DEFAULT_MEMBER_LINK_EXPIRY_SECONDS = 604800;
 export const DEFAULT_ADMIN_APPROVAL_TTL_SECONDS = 86400;
 export const MIN_ADMIN_APPROVAL_TTL_SECONDS = 300;
@@ -237,6 +241,7 @@ export interface ChannelV0 {
   visibility?: ChannelVisibility;
   default?: boolean;
   archived_at?: string;
+  topic?: string;
 }
 
 export const channelV0 = object<ChannelV0>({
@@ -247,6 +252,7 @@ export const channelV0 = object<ChannelV0>({
   visibility: optional(channelVisibility),
   default: optional(bool),
   archived_at: optional(timestamp),
+  topic: optional(str),
 });
 
 // schema.ListChannelsResponse
@@ -307,6 +313,7 @@ export interface ChannelDocV1 {
   visibility?: ChannelVisibility;
   default?: boolean;
   archived_at?: string;
+  topic?: string;
 }
 
 export const channelDocV1 = object<ChannelDocV1>({
@@ -317,6 +324,25 @@ export const channelDocV1 = object<ChannelDocV1>({
   visibility: optional(channelVisibility),
   default: optional(bool),
   archived_at: optional(timestamp),
+  topic: optional(str),
+});
+
+// schema.SetChannelTopicRequestV1
+export interface SetChannelTopicRequestV1 {
+  topic: string;
+}
+
+export const setChannelTopicRequestV1 = object<SetChannelTopicRequestV1>({
+  topic: str,
+});
+
+// schema.SetChannelTopicResponseV1
+export interface SetChannelTopicResponseV1 {
+  channel: ChannelV0;
+}
+
+export const setChannelTopicResponseV1 = object<SetChannelTopicResponseV1>({
+  channel: channelV0,
 });
 
 // schema.GuestAttributionV1
@@ -407,6 +433,30 @@ export const addChannelMemberRequestV1 = object<AddChannelMemberRequestV1>({
   can_decide: optional(bool),
 });
 
+// schema.ChannelBanV1
+export interface ChannelBanV1 {
+  principal_id: number;
+  name: string;
+  created_by?: number;
+  created_at: string;
+}
+
+export const channelBanV1 = object<ChannelBanV1>({
+  principal_id: int,
+  name: str,
+  created_by: optional(int),
+  created_at: timestamp,
+});
+
+// schema.ListChannelBansResponseV1
+export interface ListChannelBansResponseV1 {
+  bans: ChannelBanV1[];
+}
+
+export const listChannelBansResponseV1 = object<ListChannelBansResponseV1>({
+  bans: array(channelBanV1),
+});
+
 // schema.Payload
 export interface Payload {
   schema: string;
@@ -462,6 +512,7 @@ export interface MessageV2 {
   thread_root_id?: number;
   guest_author?: GuestAttributionV1;
   edited_at?: string;
+  removed?: boolean;
 }
 
 export const messageV2 = object<MessageV2>({
@@ -476,6 +527,7 @@ export const messageV2 = object<MessageV2>({
   thread_root_id: optional(int),
   guest_author: optional(guestAttributionV1),
   edited_at: optional(timestamp),
+  removed: optional(bool),
 });
 
 // schema.PostMessageRequestV2
@@ -591,6 +643,19 @@ export interface MessageEditedV1 {
 
 export const messageEditedV1 = object<MessageEditedV1>({
   schema: vocab<typeof messageEditedV1Schema>({ [messageEditedV1Schema]: true }),
+  message: messageV2,
+});
+
+// schema.MessageRemovedV1
+export const messageRemovedV1Schema = 'conch.message_removed.v1';
+
+export interface MessageRemovedV1 {
+  schema: typeof messageRemovedV1Schema;
+  message: MessageV2;
+}
+
+export const messageRemovedV1 = object<MessageRemovedV1>({
+  schema: vocab<typeof messageRemovedV1Schema>({ [messageRemovedV1Schema]: true }),
   message: messageV2,
 });
 
@@ -1183,6 +1248,26 @@ export const voiceSessionResponseV1 = object<VoiceSessionResponseV1>({
   companion_identity: optional(str),
 });
 
+// schema.VoiceShareResolution
+export type VoiceShareResolution = '720p' | '1080p' | 'source';
+
+export const voiceShareResolution = vocab<VoiceShareResolution>({
+  '720p': true,
+  '1080p': true,
+  source: true,
+});
+
+// schema.VoiceShareQuality
+export interface VoiceShareQuality {
+  resolution: VoiceShareResolution;
+  frame_rate: number;
+}
+
+export const voiceShareQuality = object<VoiceShareQuality>({
+  resolution: voiceShareResolution,
+  frame_rate: int,
+});
+
 // schema.VoiceParticipant
 export interface VoiceParticipant {
   principal_id: number;
@@ -1294,6 +1379,65 @@ export const voicePresenceV1 = object<VoicePresenceV1>({
   camera_ended: optional(voiceCameraEnded),
 });
 
+// schema.VoiceParticipantV2
+export interface VoiceParticipantV2 {
+  principal_id: number;
+  can_publish: boolean;
+  transmitting: boolean;
+  joined_at: string;
+  sharing?: boolean;
+  sharing_audio?: boolean;
+  share_started_at?: string;
+  share_quality?: VoiceShareQuality;
+  camera?: boolean;
+}
+
+export const voiceParticipantV2 = object<VoiceParticipantV2>({
+  principal_id: int,
+  can_publish: bool,
+  transmitting: bool,
+  joined_at: timestamp,
+  sharing: optional(bool),
+  sharing_audio: optional(bool),
+  share_started_at: optional(timestamp),
+  share_quality: optional(voiceShareQuality),
+  camera: optional(bool),
+});
+
+// schema.VoicePresenceRoomV2
+export interface VoicePresenceRoomV2 {
+  audience?: Audience;
+  participants: VoiceParticipantV2[];
+}
+
+export const voicePresenceRoomV2 = object<VoicePresenceRoomV2>({
+  audience: optional(audience),
+  participants: array(voiceParticipantV2),
+});
+
+// schema.VoicePresenceV2
+export const voicePresenceV2Schema = 'conch.voice_presence.v2';
+
+export interface VoicePresenceV2 {
+  schema: typeof voicePresenceV2Schema;
+  channel_id: number;
+  configured: boolean;
+  available: boolean;
+  rooms: VoicePresenceRoomV2[];
+  share_ended?: VoiceShareEnded;
+  camera_ended?: VoiceCameraEnded;
+}
+
+export const voicePresenceV2 = object<VoicePresenceV2>({
+  schema: vocab<typeof voicePresenceV2Schema>({ [voicePresenceV2Schema]: true }),
+  channel_id: int,
+  configured: bool,
+  available: bool,
+  rooms: array(voicePresenceRoomV2),
+  share_ended: optional(voiceShareEnded),
+  camera_ended: optional(voiceCameraEnded),
+});
+
 // schema.VoiceTransmitState
 export type VoiceTransmitState = 'started' | 'stopped';
 
@@ -1375,6 +1519,15 @@ export const voiceCompanionAudioV1 = object<VoiceCompanionAudioV1>({
   started_at: timestamp,
 });
 
+// schema.VoiceShareRequestV1
+export interface VoiceShareRequestV1 {
+  quality?: VoiceShareQuality;
+}
+
+export const voiceShareRequestV1 = object<VoiceShareRequestV1>({
+  quality: optional(voiceShareQuality),
+});
+
 // schema.VoiceShareV1
 export interface VoiceShareV1 {
   principal_id: number;
@@ -1386,6 +1539,21 @@ export const voiceShareV1 = object<VoiceShareV1>({
   principal_id: int,
   started_at: timestamp,
   audio: bool,
+});
+
+// schema.VoiceShareV2
+export interface VoiceShareV2 {
+  principal_id: number;
+  started_at: string;
+  audio: boolean;
+  quality: VoiceShareQuality;
+}
+
+export const voiceShareV2 = object<VoiceShareV2>({
+  principal_id: int,
+  started_at: timestamp,
+  audio: bool,
+  quality: voiceShareQuality,
 });
 
 // schema.VoiceCameraV1
@@ -1663,6 +1831,7 @@ export type VoiceControlReason =
   | 'not_a_member'
   | 'voice_not_configured'
   | 'duplicate_identity'
+  | 'voice_removed'
   | 'audio_unavailable'
   | 'start_timeout'
   | 'protocol_error'
@@ -1691,6 +1860,7 @@ export const voiceControlReason = vocab<VoiceControlReason>({
   not_a_member: true,
   voice_not_configured: true,
   duplicate_identity: true,
+  voice_removed: true,
   audio_unavailable: true,
   start_timeout: true,
   protocol_error: true,
@@ -2041,6 +2211,63 @@ export const voiceControlPipeAttachedV1 = object<VoiceControlPipeAttachedV1>({
   schema: vocab<typeof voiceControlPipeAttachedV1Schema>({ [voiceControlPipeAttachedV1Schema]: true }),
   kind: voiceControlPipeKind,
   nonce: str,
+});
+
+// schema.VoiceDevice
+export interface VoiceDevice {
+  name: string;
+  description: string;
+  default: boolean;
+}
+
+export const voiceDevice = object<VoiceDevice>({
+  name: str,
+  description: str,
+  default: bool,
+});
+
+// schema.VoiceDevicesPipeWire
+export type VoiceDevicesPipeWire = 'ok' | 'unavailable';
+
+export const voiceDevicesPipeWire = vocab<VoiceDevicesPipeWire>({ ok: true, unavailable: true });
+
+// schema.VoiceDevicesConfig
+export type VoiceDevicesConfig = 'ok' | 'missing' | 'refused' | 'none';
+
+export const voiceDevicesConfig = vocab<VoiceDevicesConfig>({
+  ok: true,
+  missing: true,
+  refused: true,
+  none: true,
+});
+
+// schema.VoiceDevicesV1
+export const voiceDevicesV1Schema = 'conch.voice_devices.v1';
+
+export interface VoiceDevicesV1 {
+  schema: typeof voiceDevicesV1Schema;
+  pipewire: VoiceDevicesPipeWire;
+  synced: boolean;
+  microphones: VoiceDevice[];
+  speakers: VoiceDevice[];
+  unshown_microphones: number;
+  unshown_speakers: number;
+  config: VoiceDevicesConfig;
+  configured_input?: string;
+  configured_output?: string;
+}
+
+export const voiceDevicesV1 = object<VoiceDevicesV1>({
+  schema: vocab<typeof voiceDevicesV1Schema>({ [voiceDevicesV1Schema]: true }),
+  pipewire: voiceDevicesPipeWire,
+  synced: bool,
+  microphones: array(voiceDevice),
+  speakers: array(voiceDevice),
+  unshown_microphones: int,
+  unshown_speakers: int,
+  config: voiceDevicesConfig,
+  configured_input: optional(str),
+  configured_output: optional(str),
 });
 
 // schema.PrincipalV0
@@ -2445,6 +2672,7 @@ export interface OwnCredentialV1 {
   renews?: boolean;
   current?: boolean;
   idle_expires_at?: string;
+  push?: boolean;
 }
 
 export const ownCredentialV1 = object<OwnCredentialV1>({
@@ -2455,6 +2683,7 @@ export const ownCredentialV1 = object<OwnCredentialV1>({
   renews: optional(bool),
   current: optional(bool),
   idle_expires_at: optional(timestamp),
+  push: optional(bool),
 });
 
 // schema.ListOwnCredentialsResponseV1
@@ -3388,6 +3617,7 @@ export type SocketCloseReason =
   | 'keepalive_timeout'
   | 'revoked'
   | 'removed'
+  | 'voice_removed'
   | 'slow_consumer'
   | 'session_ended'
   | 'error';
@@ -3398,6 +3628,7 @@ export const socketCloseReason = vocab<SocketCloseReason>({
   keepalive_timeout: true,
   revoked: true,
   removed: true,
+  voice_removed: true,
   slow_consumer: true,
   session_ended: true,
   error: true,
@@ -3712,6 +3943,38 @@ export const permissionsChangedV1 = object<PermissionsChangedV1>({
   schema: vocab<typeof permissionsChangedV1Schema>({ [permissionsChangedV1Schema]: true }),
 });
 
+// schema.PreviewSimulation
+export type PreviewSimulation = 'role';
+
+export const previewSimulation = vocab<PreviewSimulation>({ role: true });
+
+// schema.PreviewResponseV1
+export interface PreviewResponseV1 {
+  id: number;
+  kind: PrincipalKind;
+  name: string;
+  role: PrincipalRole;
+  owner: boolean;
+  permissions: Permission[];
+  permissions_revision: number;
+  may_invite: boolean;
+  voice_allowed: boolean;
+  simulation?: PreviewSimulation;
+}
+
+export const previewResponseV1 = object<PreviewResponseV1>({
+  id: int,
+  kind: principalKind,
+  name: str,
+  role: principalRole,
+  owner: bool,
+  permissions: array(permission),
+  permissions_revision: int,
+  may_invite: bool,
+  voice_allowed: bool,
+  simulation: optional(previewSimulation),
+});
+
 // schema.DisablePrincipalResponseV1
 export interface DisablePrincipalResponseV1 {
   issued_to_others?: IssuedByOperatorV1[];
@@ -3777,6 +4040,7 @@ export interface ChannelListingV1 {
   members?: number;
   managers?: ChannelAuthorV1[];
   archived_at?: string;
+  topic?: string;
 }
 
 export const channelListingV1 = object<ChannelListingV1>({
@@ -3790,6 +4054,7 @@ export const channelListingV1 = object<ChannelListingV1>({
   members: optional(int),
   managers: optional(array(channelAuthorV1)),
   archived_at: optional(timestamp),
+  topic: optional(str),
 });
 
 // schema.ChannelDirectoryResponseV1
@@ -4072,7 +4337,11 @@ export type KnownAdminAction =
   | 'list_reports'
   | 'get_report'
   | 'update_report'
-  | 'export_audit';
+  | 'export_audit'
+  | 'list_channel_bans'
+  | 'ban_channel_member'
+  | 'unban_channel_member'
+  | 'set_channel_topic';
 export type AdminAction = KnownAdminAction | (string & {});
 
 export const adminAction = tolerant<KnownAdminAction>({
@@ -4116,6 +4385,10 @@ export const adminAction = tolerant<KnownAdminAction>({
   get_report: true,
   update_report: true,
   export_audit: true,
+  list_channel_bans: true,
+  ban_channel_member: true,
+  unban_channel_member: true,
+  set_channel_topic: true,
 });
 
 // schema.AgentAdminV1
@@ -4367,6 +4640,219 @@ export interface GetAgentManifestResponseV1 {
 
 export const getAgentManifestResponseV1 = object<GetAgentManifestResponseV1>({
   manifest: agentManifestV1,
+});
+
+// schema.PushWakeV1
+export const pushWakeV1Schema = 'conch.push_wake.v1';
+
+export interface PushWakeV1 {
+  schema: typeof pushWakeV1Schema;
+  registration: string;
+}
+
+export const pushWakeV1 = object<PushWakeV1>({
+  schema: vocab<typeof pushWakeV1Schema>({ [pushWakeV1Schema]: true }),
+  registration: str,
+});
+
+// schema.PushTransport: closed on the server and client-tolerant, so a value this
+// bundle does not know is kept and shown by its name; KnownPushTransport is the known ones.
+export type KnownPushTransport = 'webpush' | 'relay';
+export type PushTransport = KnownPushTransport | (string & {});
+
+export const pushTransport = tolerant<KnownPushTransport>({ webpush: true, relay: true });
+
+// schema.PushPlatform
+export type PushPlatform = 'ios' | 'android' | 'web';
+
+export const pushPlatform = vocab<PushPlatform>({ ios: true, android: true, web: true });
+
+// schema.PushRegistrationV1
+export interface PushRegistrationV1 {
+  id: string;
+  transport: PushTransport;
+  platform: PushPlatform;
+  app: string;
+  target_fingerprint: string;
+  created_at: string;
+  last_wake_at?: string;
+  last_fetch_at?: string;
+}
+
+export const pushRegistrationV1 = object<PushRegistrationV1>({
+  id: str,
+  transport: pushTransport,
+  platform: pushPlatform,
+  app: str,
+  target_fingerprint: str,
+  created_at: timestamp,
+  last_wake_at: optional(timestamp),
+  last_fetch_at: optional(timestamp),
+});
+
+// schema.PushProvider: closed on the server and client-tolerant, so a value this
+// bundle does not know is kept and shown by its name; KnownPushProvider is the known ones.
+export type KnownPushProvider = 'apns' | 'fcm';
+export type PushProvider = KnownPushProvider | (string & {});
+
+export const pushProvider = tolerant<KnownPushProvider>({ apns: true, fcm: true });
+
+// schema.CreatePushRegistrationRequestV1
+export interface CreatePushRegistrationRequestV1 {
+  transport: PushTransport;
+  platform: PushPlatform;
+  app: string;
+  endpoint?: string;
+  p256dh?: string;
+  auth?: string;
+  provider?: PushProvider;
+  token?: string;
+}
+
+export const createPushRegistrationRequestV1 = object<CreatePushRegistrationRequestV1>({
+  transport: pushTransport,
+  platform: pushPlatform,
+  app: str,
+  endpoint: optional(str),
+  p256dh: optional(str),
+  auth: optional(str),
+  provider: optional(pushProvider),
+  token: optional(str),
+});
+
+// schema.UpdatePushRegistrationRequestV1
+export interface UpdatePushRegistrationRequestV1 {
+  transport: PushTransport;
+  platform: PushPlatform;
+  app: string;
+  endpoint?: string;
+  p256dh?: string;
+  auth?: string;
+  provider?: PushProvider;
+  token?: string;
+}
+
+export const updatePushRegistrationRequestV1 = object<UpdatePushRegistrationRequestV1>({
+  transport: pushTransport,
+  platform: pushPlatform,
+  app: str,
+  endpoint: optional(str),
+  p256dh: optional(str),
+  auth: optional(str),
+  provider: optional(pushProvider),
+  token: optional(str),
+});
+
+// schema.ListOwnPushRegistrationsResponseV1
+export interface ListOwnPushRegistrationsResponseV1 {
+  registrations: PushRegistrationV1[];
+}
+
+export const listOwnPushRegistrationsResponseV1 = object<ListOwnPushRegistrationsResponseV1>({
+  registrations: array(pushRegistrationV1),
+});
+
+// schema.PushConfigV1
+export interface PushConfigV1 {
+  transports: PushTransport[];
+  vapid_public_key?: string;
+  relay_providers?: PushProvider[];
+}
+
+export const pushConfigV1 = object<PushConfigV1>({
+  transports: array(pushTransport),
+  vapid_public_key: optional(str),
+  relay_providers: optional(array(pushProvider)),
+});
+
+// schema.NotificationPolicy
+export type NotificationPolicy = 'off' | 'mentions' | 'all';
+
+export const notificationPolicy = vocab<NotificationPolicy>({
+  off: true,
+  mentions: true,
+  all: true,
+});
+
+// schema.NotificationPreferencesV1
+export interface NotificationPreferencesV1 {
+  policy: NotificationPolicy;
+  muted: number[];
+  preview: boolean;
+  quiet_when_unreachable: boolean;
+}
+
+export const notificationPreferencesV1 = object<NotificationPreferencesV1>({
+  policy: notificationPolicy,
+  muted: array(int),
+  preview: bool,
+  quiet_when_unreachable: bool,
+});
+
+// schema.PutNotificationPreferencesRequestV1
+export interface PutNotificationPreferencesRequestV1 {
+  policy: NotificationPolicy;
+  muted: number[];
+  preview: boolean;
+  quiet_when_unreachable: boolean;
+}
+
+export const putNotificationPreferencesRequestV1 = object<PutNotificationPreferencesRequestV1>({
+  policy: notificationPolicy,
+  muted: array(int),
+  preview: bool,
+  quiet_when_unreachable: bool,
+});
+
+// schema.NotificationKind: closed on the server and client-tolerant, so a value this
+// bundle does not know is kept and shown by its name; KnownNotificationKind is the known ones.
+export type KnownNotificationKind = 'message' | 'mention' | 'whisper';
+export type NotificationKind = KnownNotificationKind | (string & {});
+
+export const notificationKind = tolerant<KnownNotificationKind>({
+  message: true,
+  mention: true,
+  whisper: true,
+});
+
+// schema.NotificationSummaryV1
+export const notificationSummaryV1Schema = 'conch.notification_summary.v1';
+
+export interface NotificationSummaryV1 {
+  schema: typeof notificationSummaryV1Schema;
+  channel_id: number;
+  channel_name: string;
+  message_id: number;
+  posted_at: string;
+  kind: NotificationKind;
+  author_id: number;
+  author_name?: string;
+  text?: string;
+}
+
+export const notificationSummaryV1 = object<NotificationSummaryV1>({
+  schema: vocab<typeof notificationSummaryV1Schema>({ [notificationSummaryV1Schema]: true }),
+  channel_id: int,
+  channel_name: str,
+  message_id: int,
+  posted_at: timestamp,
+  kind: notificationKind,
+  author_id: int,
+  author_name: optional(str),
+  text: optional(str),
+});
+
+// schema.ListPendingNotificationsResponseV1
+export interface ListPendingNotificationsResponseV1 {
+  summaries: NotificationSummaryV1[];
+  cursor: number;
+  more: boolean;
+}
+
+export const listPendingNotificationsResponseV1 = object<ListPendingNotificationsResponseV1>({
+  summaries: array(notificationSummaryV1),
+  cursor: int,
+  more: bool,
 });
 
 // schema.Error

@@ -96,7 +96,7 @@ pub fn presence(participants: &[(i64, bool)]) -> String {
         })
         .collect();
     serde_json::json!({
-        "schema": "conch.voice_presence.v1",
+        "schema": "conch.voice_presence.v2",
         "channel_id": 7,
         "configured": true,
         "available": true,
@@ -122,10 +122,17 @@ struct State {
     transmit_plan: VecDeque<Reply>,
     on_report: Option<OnReport>,
     presence: Option<String>,
-    presence_sockets: Vec<mpsc::UnboundedSender<String>>,
+    presence_sockets: Vec<mpsc::UnboundedSender<PresenceFrame>>,
     /// Connections the client closed, in the order it closed them.
     closed: Vec<u64>,
     connections: u64,
+}
+
+/// What a presence socket is given to send: a document, or the close that ends it.
+#[derive(Debug, Clone)]
+enum PresenceFrame {
+    Text(String),
+    Close(u16, String),
 }
 
 /// A running stub. Dropping it stops it.
@@ -242,8 +249,27 @@ impl Stub {
         let mut state = self.lock();
         state
             .presence_sockets
-            .retain(|socket| socket.send(document.clone()).is_ok());
+            .retain(|socket| socket.send(PresenceFrame::Text(document.clone())).is_ok());
         state.presence = Some(document);
+    }
+
+    /// Closes every open presence socket with this close frame, as conchd does when it
+    /// ends a subscription (1008 and a reason). A socket opened afterwards is served as
+    /// usual, with the latest document.
+    pub fn close_presence(&self, code: u16, reason: &str) {
+        let mut state = self.lock();
+        for socket in state.presence_sockets.drain(..) {
+            let _ = socket.send(PresenceFrame::Close(code, reason.to_owned()));
+        }
+    }
+
+    /// How many presence sockets the client has opened.
+    pub fn presence_sockets(&self) -> usize {
+        self.lock()
+            .requests
+            .iter()
+            .filter(|request| request.target.starts_with("/v1/voice/ws"))
+            .count()
     }
 
     // ------------------------------------------------------------- what a test observes
@@ -486,17 +512,32 @@ async fn presence_socket(stream: &mut TcpStream, key: &str, state: &Mutex<State>
     {
         let mut state = state.lock().unwrap();
         if let Some(latest) = &state.presence {
-            let _ = documents.send(latest.clone());
+            let _ = documents.send(PresenceFrame::Text(latest.clone()));
         }
         state.presence_sockets.push(documents);
     }
     let mut sink = [0u8; 1024];
     loop {
         tokio::select! {
-            document = queued.recv() => {
-                let Some(document) = document else { return };
-                if stream.write_all(&text_frame(document.as_bytes())).await.is_err() {
-                    return;
+            frame = queued.recv() => {
+                let Some(frame) = frame else { return };
+                match frame {
+                    PresenceFrame::Text(document) => {
+                        if stream.write_all(&text_frame(document.as_bytes())).await.is_err() {
+                            return;
+                        }
+                    }
+                    PresenceFrame::Close(code, reason) => {
+                        // The close frame, then the client's own close is waited for a
+                        // moment, as conchd does, and the connection ends.
+                        let _ = stream.write_all(&close_frame(code, &reason)).await;
+                        let _ = tokio::time::timeout(
+                            std::time::Duration::from_millis(200),
+                            stream.read(&mut sink),
+                        )
+                        .await;
+                        return;
+                    }
                 }
             }
             read = stream.read(&mut sink) => match read {
@@ -506,6 +547,15 @@ async fn presence_socket(stream: &mut TcpStream, key: &str, state: &Mutex<State>
             },
         }
     }
+}
+
+/// One unmasked WebSocket close frame: the code, then the reason.
+fn close_frame(code: u16, reason: &str) -> Vec<u8> {
+    let mut payload = code.to_be_bytes().to_vec();
+    payload.extend_from_slice(reason.as_bytes());
+    let mut frame = vec![0x88, payload.len() as u8];
+    frame.extend_from_slice(&payload);
+    frame
 }
 
 /// One unmasked WebSocket text frame, as a server sends it.

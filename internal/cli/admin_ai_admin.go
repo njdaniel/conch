@@ -286,7 +286,7 @@ func adminAIAdminCreate(ctx context.Context, r *adminRun) error {
 	token := ""
 	rollback := func(step string, cause error) error {
 		cause = scrub(cause, token)
-		if derr := r.client.DisablePrincipal(ctx, agent.ID); derr != nil {
+		if _, derr := r.client.DisablePrincipal(ctx, agent.ID); derr != nil {
 			return fmt.Errorf("%s: %s failed (%w); and disabling the new principal %d failed too (%w): run `conch admin principal disable %d`",
 				cmd, step, cause, agent.ID, scrub(derr, token), agent.ID)
 		}
@@ -498,7 +498,7 @@ func adminAIAdminRevoke(ctx context.Context, r *adminRun) error {
 	if _, err := holdsGrant(ctx, r, "revoke"); err != nil {
 		return err
 	}
-	if err := r.client.DisablePrincipal(ctx, r.id); err != nil {
+	if _, err := r.client.DisablePrincipal(ctx, r.id); err != nil {
 		return err
 	}
 	return r.say("revoked AI administrator %d: disabled, credentials revoked, sessions ended\n", r.id)

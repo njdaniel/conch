@@ -208,6 +208,27 @@ describe('new channel', () => {
     expect(within(screen.getByRole('region', { name: 'Members list' })).queryByText('Connecting…')).toBeNull();
   });
 
+  // Issue #1701: POST /v1/channels checks the create permissions, not
+  // manage_channels and not the role.
+  const panel = () => screen.queryByRole('heading', { name: "You're not in any channels yet" });
+  const emptyList = async () => within(await screen.findByRole('navigation', { name: 'Channels' })).findByText('No channels yet');
+
+  it('offers an operator with manage_channels but both create cells off no first-run panel', async () => {
+    serve({ ...operator, permissions: ['manage_channels'] }, (name) => made(name, 1), []);
+    render(<App origin={origin} />);
+    expect(await emptyList()).toBeDefined();
+    expect(panel()).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Make a channel' })).toBeNull();
+  });
+
+  it('shows an operator with only create_public_channels the first-run panel, in an operator’s words', async () => {
+    serve({ ...operator, permissions: ['create_public_channels'] }, (name) => made(name, 1), []);
+    render(<App origin={origin} />);
+    expect(await screen.findByRole('heading', { name: "You're not in any channels yet" })).toBeDefined();
+    expect(screen.getByRole('button', { name: 'Make a channel' })).toBeDefined();
+    expect(screen.queryByText(/ask an operator/)).toBeNull();
+  });
+
   it('opens the New channel form from the first-run panel, and the panel is gone once the channel is made and open', async () => {
     serve(operator, (name) => made(name, 1), []);
     render(<App origin={origin} />);

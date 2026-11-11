@@ -25,6 +25,7 @@ const maxManifestInput = 1 << 20
 type adminOpts struct {
 	server    string
 	asJSON    bool
+	previewAs string
 	kind      string
 	label     string
 	expiresAt string
@@ -57,7 +58,9 @@ type adminOpts struct {
 	community communityOpts
 	// aiAdmin holds the flags of `ai-admin create` (issue #1332), in
 	// admin_ai_admin.go.
-	aiAdmin aiAdminOpts
+	aiAdmin       aiAdminOpts
+	reactionYes   bool
+	moderationYes bool
 }
 
 // principalOpts holds the flags of the principal list, hide and sign-in-link
@@ -113,6 +116,7 @@ type adminCommand struct {
 // adminCommands is the whole of `conch admin`, in the order the usage line
 // lists the groups.
 var adminCommands = []adminCommand{
+	{group: "preview", args: []string{"member"}, run: adminPreview},
 	{group: "channel", verb: "create", args: []string{"name"}, run: adminChannelCreate},
 	// The community model (ADR-013, issue #994), in admin_community.go.
 	{group: "channel", verb: "settings", args: []string{"channel"}, flags: "[--public|--private] [--default on|off] [--archive|--restore] ",
@@ -167,7 +171,23 @@ var adminCommands = []adminCommand{
 			fs.BoolVar(&o.off, "off", false, "take the right away instead of granting it")
 		},
 		run: adminMemberDecide},
-	{group: "member", verb: "remove", args: []string{"channel", "principal-id"}, idAt: 2, run: adminMemberRemove},
+	{group: "member", verb: "remove", args: []string{"channel", "principal-id"}, idAt: 2, flags: "[--yes] ",
+		bind: func(fs *flag.FlagSet, o *adminOpts) {
+			fs.BoolVar(&o.moderationYes, "yes", false, "remove without asking")
+		}, run: adminMemberRemove},
+	{group: "ban", verb: "list", args: []string{"channel"}, run: adminBanList},
+	{group: "ban", verb: "add", args: []string{"channel", "principal-id"}, idAt: 2, flags: "[--yes] ",
+		bind: func(fs *flag.FlagSet, o *adminOpts) {
+			fs.BoolVar(&o.moderationYes, "yes", false, "ban without asking")
+		}, run: adminBanAdd},
+	{group: "ban", verb: "remove", args: []string{"channel", "principal-id"}, idAt: 2, flags: "[--yes] ",
+		bind: func(fs *flag.FlagSet, o *adminOpts) {
+			fs.BoolVar(&o.moderationYes, "yes", false, "unban without asking")
+		}, run: adminBanRemove},
+	{group: "message", verb: "remove", args: []string{"channel", "message-id"}, idAt: 2, flags: "[--yes] ",
+		bind: func(fs *flag.FlagSet, o *adminOpts) {
+			fs.BoolVar(&o.moderationYes, "yes", false, "remove without asking")
+		}, run: adminMessageRemove},
 	{group: "manifest", verb: "put", args: []string{"principal-id"}, idAt: 1, flags: "[--file <path>] ",
 		bind: func(fs *flag.FlagSet, o *adminOpts) {
 			fs.StringVar(&o.file, "file", "", "read the manifest from this file instead of standard input")
@@ -193,6 +213,9 @@ var adminCommands = []adminCommand{
 	{group: "invite", verb: "pause", run: adminInvitePause},
 	{group: "invite", verb: "resume", run: adminInviteResume},
 	{group: "invite", verb: "status", run: adminInviteStatus},
+	// What a principal issued to others (issue #1463).
+	{group: "principal", verb: "revoke-issued", args: []string{"id"}, idAt: 1, flags: "[--yes] ",
+		bind: bindIssuedYes, run: adminPrincipalRevokeIssued},
 	{group: "principal", verb: "invite-permission", args: []string{"id", "on|off"}, idAt: 1, run: adminPrincipalInvitePermission},
 	{group: "principal", verb: "disable-invitees", args: []string{"id"}, idAt: 1, flags: "[--all] [--yes] ",
 		bind: bindDisableInvitees, run: adminPrincipalDisableInvitees},
@@ -218,7 +241,11 @@ var adminCommands = []adminCommand{
 		bind: bindPermissionsSet, run: adminPermissionsSet},
 	{group: "permissions", verb: "preset", args: []string{"personal|group"}, flags: "[--yes] ",
 		bind: bindYes, run: adminPermissionsPreset},
-	{group: "directory", verb: "members", run: adminDirectoryMembers},
+	{group: "directory", verb: "members", flags: "[--preview-as <member>] ", bind: bindPreviewAs, run: adminDirectoryMembers},
+	{group: "reaction", verb: "remove", args: []string{"channel", "message-id", "principal-id", "emoji"}, idAt: 3, optionalArgs: 1, flags: "[--yes] ",
+		bind: func(fs *flag.FlagSet, o *adminOpts) {
+			fs.BoolVar(&o.reactionYes, "yes", false, "remove without asking")
+		}, run: adminReactionRemove},
 	// Webhook hooks (issue #1228), in admin_hook.go.
 	{group: "hook", verb: "list", run: adminHookList},
 	{group: "hook", verb: "revoke", args: []string{"hook-id"}, idAt: 1, run: adminHookRevoke},
@@ -228,11 +255,13 @@ var adminCommands = []adminCommand{
 	{group: "reports", verb: "file", args: []string{"id", "issue-url"}, idAt: 1, run: adminReportsFile},
 }
 
-const adminGroups = "channel|principal|credential|member|manifest|invite|join|guest|reports|sign-in-link|permissions|directory|ai-admin"
+const adminGroups = "channel|principal|credential|member|ban|message|manifest|invite|join|guest|reports|sign-in-link|permissions|directory|ai-admin|reaction"
+
+func (c adminCommand) name() string { return strings.TrimSpace(c.group + " " + c.verb) }
 
 // usage is the one line shown for a malformed command.
 func (c adminCommand) usage() string {
-	line := "conch admin " + c.group + " " + c.verb + " [--server <url>] [--json] " + c.flags
+	line := "conch admin " + c.name() + " [--server <url>] [--json] " + c.flags
 	args := ""
 	for i, a := range c.args {
 		arg := "<" + a + ">"
@@ -249,6 +278,13 @@ func runAdmin(ctx context.Context, args []string, stdin io.Reader, stdout, stder
 		return fmt.Errorf("cli: admin: usage: conch admin <%s> <subcommand>", adminGroups)
 	}
 	group := args[0]
+	if group == "preview" {
+		for _, c := range adminCommands {
+			if c.group == group && c.verb == "" {
+				return runAdminCommand(ctx, c, args[1:], stdin, stdout, stderr)
+			}
+		}
+	}
 	var verbs []string
 	for _, c := range adminCommands {
 		if c.group == group {
@@ -270,11 +306,12 @@ func runAdmin(ctx context.Context, args []string, stdin io.Reader, stdout, stder
 }
 
 func runAdminCommand(ctx context.Context, c adminCommand, args []string, stdin io.Reader, stdout, stderr io.Writer) error {
+	name := c.name()
 	usageErr := func(format string, a ...any) error {
-		return fmt.Errorf("cli: admin %s %s: %s (usage: %s)", c.group, c.verb, fmt.Sprintf(format, a...), c.usage())
+		return fmt.Errorf("cli: admin %s: %s (usage: %s)", name, fmt.Sprintf(format, a...), c.usage())
 	}
 	o := &adminOpts{}
-	fs := newFlagSet("admin "+c.group+" "+c.verb, io.Discard)
+	fs := newFlagSet("admin "+name, io.Discard)
 	fs.StringVar(&o.server, "server", serverEnvOr(), "conchd HTTP URL")
 	fs.BoolVar(&o.asJSON, "json", false, "print the server's response document")
 	if c.bind != nil {
@@ -403,9 +440,55 @@ func adminPrincipalRole(ctx context.Context, r *adminRun) error {
 	for i, id := range resp.Manages {
 		channels[i] = strconv.FormatInt(id, 10)
 	}
-	return r.say("principal %d role %s owner %t manages %s invites closed %d credentials revoked %d hooks revoked %d live credentials %d hooks bound %d\n",
+	if err := r.say("principal %d role %s owner %t manages %s invites closed %d credentials revoked %d hooks revoked %d live credentials %d hooks bound %d\n",
 		resp.Principal.ID, safeLine(string(resp.Principal.Role)), resp.Principal.Owner, dashIfEmpty(strings.Join(channels, ",")),
-		resp.InvitesClosed, resp.CredentialsRevoked, resp.HooksRevoked, resp.LiveCredentials, resp.HooksBound)
+		resp.InvitesClosed, resp.CredentialsRevoked, resp.HooksRevoked, resp.LiveCredentials, resp.HooksBound); err != nil {
+		return err
+	}
+	return r.sayIssued(resp.Principal.ID, resp.IssuedToOthers)
+}
+
+// sayIssued prints one line per live credential or hook principal id issued
+// to someone else, which a demotion or a disable leaves live, and how to end
+// them. Nothing is printed when there are none.
+func (r *adminRun) sayIssued(id int64, items []schema.IssuedByOperatorV1) error {
+	if len(items) == 0 {
+		return nil
+	}
+	if err := r.say("%d issued to others and still live:\n", len(items)); err != nil {
+		return err
+	}
+	for _, it := range items {
+		if err := r.say("  %s %d held by principal %d issued %s\n", safeLine(string(it.Kind)), it.ID, it.PrincipalID, formatTimestamp(it.IssuedAt)); err != nil {
+			return err
+		}
+	}
+	return r.say("the owner may end them with: conch admin principal revoke-issued %d\n", id)
+}
+
+func bindIssuedYes(fs *flag.FlagSet, o *adminOpts) {
+	fs.BoolVar(&o.invite.yes, "yes", false, "do it; without it, only say what it would do")
+}
+
+// issuedRefusals are revoke-issued's own words. Only the owner may do it.
+var issuedRefusals = refusalLines{
+	"forbidden": "only an owner may revoke what someone issued to others",
+}
+
+// adminPrincipalRevokeIssued revokes every live credential and hook the
+// principal issued to others. Without --yes it changes nothing.
+func adminPrincipalRevokeIssued(ctx context.Context, r *adminRun) error {
+	if !r.opts.invite.yes {
+		return r.say("would revoke every live credential and hook principal %d issued to others; run again with --yes to do it\n", r.id)
+	}
+	resp, err := r.client.RevokeIssued(ctx, r.id)
+	if err != nil {
+		return refused(err, issuedRefusals)
+	}
+	if r.opts.asJSON {
+		return r.printJSON(resp)
+	}
+	return r.say("revoked %d credential(s) and %d hook(s)\n", resp.CredentialsRevoked, resp.HooksRevoked)
 }
 
 func bindPrincipalList(fs *flag.FlagSet, o *adminOpts) {
@@ -542,13 +625,21 @@ func adminPrincipalHide(ctx context.Context, r *adminRun) error {
 }
 
 // The commands that answer 204 have no response document, so --json prints
-// nothing for them and the exit status is the result.
+// nothing for them and the exit status is the result. Disable answers 200
+// with a body from a current server (issue #1463) and 204 from an older one.
 
 func adminPrincipalDisable(ctx context.Context, r *adminRun) error {
-	if err := r.client.DisablePrincipal(ctx, r.id); err != nil {
+	resp, err := r.client.DisablePrincipal(ctx, r.id)
+	if err != nil {
 		return err
 	}
-	return r.say("disabled principal %d\n", r.id)
+	if r.opts.asJSON {
+		return r.printJSON(resp)
+	}
+	if err := r.say("disabled principal %d\n", r.id); err != nil {
+		return err
+	}
+	return r.sayIssued(r.id, resp.IssuedToOthers)
 }
 
 func adminPrincipalEnable(ctx context.Context, r *adminRun) error {
@@ -626,10 +717,15 @@ func adminMemberDecide(ctx context.Context, r *adminRun) error {
 }
 
 func adminMemberRemove(ctx context.Context, r *adminRun) error {
-	if err := r.client.RemoveChannelMember(ctx, r.pos[0], r.id); err != nil {
+	channel := safeLine(r.pos[0])
+	question := fmt.Sprintf("Remove principal %d from %s and its nets. This does not ban them or revoke their account; an authorized actor can re-add them.", r.id, channel)
+	if err := confirmModeration(r.prompt, r.opts.moderationYes, question); err != nil {
 		return err
 	}
-	return r.say("removed %d from %s\n", r.id, safeLine(r.pos[0]))
+	if err := r.client.RemoveChannelMember(ctx, r.pos[0], r.id); err != nil {
+		return refused(err, moderationRefusals)
+	}
+	return r.say("principal %d is removed or was already absent from %s and its nets; this is not a ban and no account was revoked\n", r.id, channel)
 }
 
 // say prints a result line unless --json asked for documents only.

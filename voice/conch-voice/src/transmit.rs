@@ -307,6 +307,14 @@ pub fn gate_config(release_tail_ms: u32, max_transmit: Duration) -> GateConfig {
     }
 }
 
+/// The gate's cap for one push-to-talk press, in the same unit as [`gate_config`]'s: the
+/// shorter of the press limit and the transmit limit (a press limit is never above it).
+#[must_use]
+pub fn press_cap_ms(max_transmit: Duration, push_to_talk_max: Duration) -> u32 {
+    let shorter = max_transmit.min(push_to_talk_max);
+    u32::try_from(shorter.as_millis()).unwrap_or(u32::MAX)
+}
+
 /// The gate's name for one of the push-to-talk machine's reasons.
 fn force(reason: ShutReason) -> ForceShut {
     match reason {
@@ -355,7 +363,26 @@ pub fn spawn_with_level<F: MicFeed>(
     level: LevelConfig,
     clock: TxClock,
 ) -> Result<Transmitter<F>, AudioError> {
-    let gate = TransmitGate::new(config)?;
+    spawn_with_press_cap(config, config.max_open_ms, level, clock)
+}
+
+/// As [`spawn_with_level`], with a cap for a push-to-talk press of its own (`press_max_ms`,
+/// see [`press_cap_ms`]) while `config.max_open_ms` caps each opening in open mode. Both are
+/// the gate's own counts of frames, so neither depends on any timer (issue #1453). The task
+/// starts in push-to-talk mode, so the press cap is in force first.
+///
+/// # Errors
+///
+/// [`AudioError::InvalidSetting`] if the gate refuses `config` or `press_max_ms`, or the
+/// detector `level`.
+pub fn spawn_with_press_cap<F: MicFeed>(
+    config: GateConfig,
+    press_max_ms: Option<u32>,
+    level: LevelConfig,
+    clock: TxClock,
+) -> Result<Transmitter<F>, AudioError> {
+    let mut gate = TransmitGate::new(config)?;
+    gate.set_max_open_ms(press_max_ms)?;
     let tail = Duration::from_millis(u64::from(config.release_tail_ms));
     let listen = Listen::new(level, tail, clock)?;
     let (commands, command_rx) = mpsc::unbounded_channel();
@@ -364,6 +391,8 @@ pub fn spawn_with_level<F: MicFeed>(
     let track_lock = TrackLock::new();
     let task = Task {
         gate,
+        open_max_ms: config.max_open_ms,
+        press_max_ms,
         mic: None,
         mic_present: false,
         mic_heard: true,
@@ -389,6 +418,10 @@ pub fn spawn_with_level<F: MicFeed>(
 
 struct Task<F> {
     gate: TransmitGate,
+    /// The gate's cap on one opening in open mode, and on one press in push-to-talk mode. Both
+    /// were accepted by the gate when the task was made.
+    open_max_ms: Option<u32>,
+    press_max_ms: Option<u32>,
     mic: Option<BoxedMic>,
     /// What was last reported about the microphone.
     mic_present: bool,
@@ -638,6 +671,13 @@ impl<F: MicFeed> Task<F> {
                     self.shut(shut);
                 }
                 self.listen.mode = mode;
+                let cap = if mode == TalkMode::Open {
+                    self.open_max_ms
+                } else {
+                    self.press_max_ms
+                };
+                // Accepted at spawn; were it ever refused the cap stays as it was.
+                let _kept = self.gate.set_max_open_ms(cap);
             }
             // A microphone just opened is heard from quiet (the restart below): however loud
             // it begins, it is no onset.
@@ -985,6 +1025,8 @@ mod tests {
         let (ring, record) = (Ring::default(), Record::default());
         let mut task = Task {
             gate: TransmitGate::new(gate_config(0, Duration::from_secs(60))).unwrap(),
+            open_max_ms: None,
+            press_max_ms: None,
             mic: Some(Box::new(RingMic(ring.clone()))),
             mic_present: true,
             mic_heard: true,
@@ -1014,6 +1056,89 @@ mod tests {
         assert_eq!(record.heard(), [6.0]);
     }
 
+    /// #1453: a push-to-talk press is capped by the gate's own count of frames, at the press
+    /// limit and not the longer transmit limit, and open mode takes the transmit limit back.
+    /// No timer acts here: 30 frames are waiting at once, and exactly ten go through.
+    #[tokio::test]
+    async fn a_press_is_capped_by_the_gate_at_the_press_limit_whatever_the_timing() {
+        let (events, _) = mpsc::unbounded_channel();
+        let (_, commands) = mpsc::unbounded_channel();
+        let (ring, record) = (Ring::default(), Record::default());
+        let (press, open) = (Duration::from_millis(100), Duration::from_millis(300));
+        let mut gate = TransmitGate::new(gate_config(0, open)).unwrap();
+        gate.set_max_open_ms(Some(press_cap_ms(open, press)))
+            .unwrap();
+        let mut task = Task {
+            gate,
+            open_max_ms: Some(300),
+            press_max_ms: Some(100),
+            mic: Some(Box::new(RingMic(ring.clone()))),
+            mic_present: true,
+            mic_heard: true,
+            pace: Pace::new(Pacing::Ring),
+            feed: Some(record.clone()),
+            commands,
+            events,
+            frames_sent: Arc::new(AtomicU64::new(0)),
+            track_lock: open_lock(),
+            listen: push_to_talk(),
+            mic_changes: 0,
+        };
+        // Opens the gate, offers `n` frames that are all waiting at once, and says how many
+        // went through: the gate's own limit, since no timer acts here.
+        async fn sent(task: &mut Task<Record>, ring: &Ring, record: &Record, n: usize) -> usize {
+            let before = record.heard().len();
+            task.obey(TxCommand::Gate(GateCommand::Open));
+            for k in 1..=n {
+                ring.push(k);
+            }
+            let mut captured = SILENCE;
+            for _ in 0..n {
+                task.frame(&mut captured).await;
+            }
+            record.heard().len() - before
+        }
+
+        assert_eq!(
+            sent(&mut task, &ring, &record, 40).await,
+            10,
+            "a press: 100 ms"
+        );
+        task.obey(TxCommand::Gate(GateCommand::TalkMode(TalkMode::Open)));
+        assert_eq!(
+            sent(&mut task, &ring, &record, 60).await,
+            30,
+            "open mode: 300 ms"
+        );
+        task.obey(TxCommand::Gate(GateCommand::TalkMode(TalkMode::PushToTalk)));
+        assert_eq!(
+            sent(&mut task, &ring, &record, 40).await,
+            10,
+            "a press again"
+        );
+
+        // A switch during a transmission ends it: nothing passes until a fresh open, which
+        // then has the new mode's limit.
+        task.obey(TxCommand::Gate(GateCommand::Open));
+        ring.push(1);
+        let mut captured = SILENCE;
+        task.frame(&mut captured).await;
+        for mode in [TalkMode::Open, TalkMode::PushToTalk] {
+            task.obey(TxCommand::Gate(GateCommand::Open));
+            let before = record.heard().len();
+            task.obey(TxCommand::Gate(GateCommand::TalkMode(mode)));
+            for k in 1..=5 {
+                ring.push(k);
+            }
+            for _ in 0..5 {
+                task.frame(&mut captured).await;
+            }
+            assert_eq!(record.heard().len(), before, "{mode:?}: shut by the switch");
+            let want = if mode == TalkMode::Open { 30 } else { 10 };
+            assert_eq!(sent(&mut task, &ring, &record, 60).await, want, "{mode:?}");
+        }
+    }
+
     /// The bound between a lost key device and the gate shutting, the half this test can
     /// show: every frame counted passed the gate while it was open, and once the shut is
     /// obeyed none passes, however many wait in the ring. (The other half, that `run`
@@ -1027,6 +1152,8 @@ mod tests {
         let counted = Arc::new(AtomicU64::new(0));
         let mut task = Task {
             gate: TransmitGate::new(gate_config(0, Duration::from_secs(60))).unwrap(),
+            open_max_ms: None,
+            press_max_ms: None,
             mic: Some(Box::new(RingMic(ring.clone()))),
             mic_present: true,
             mic_heard: true,
@@ -1073,6 +1200,8 @@ mod tests {
         let (ring, record) = (Ring::default(), Record::default());
         let mut task = Task {
             gate: TransmitGate::new(gate_config(0, Duration::from_secs(60))).unwrap(),
+            open_max_ms: None,
+            press_max_ms: None,
             mic: Some(Box::new(RingMic(ring.clone()))),
             mic_present: true,
             mic_heard: true,
@@ -1157,6 +1286,8 @@ mod tests {
         let track_lock = open_lock();
         let mut task = Task {
             gate: TransmitGate::new(gate_config(0, Duration::from_secs(60))).unwrap(),
+            open_max_ms: None,
+            press_max_ms: None,
             mic: Some(Box::new(RingMic(ring.clone()))),
             mic_present: true,
             mic_heard: true,
@@ -1213,6 +1344,8 @@ mod tests {
             let (ring, record) = (Ring::default(), Record::default());
             let task = Task {
                 gate: TransmitGate::new(gate_config(tail_ms, Duration::from_secs(60))).unwrap(),
+                open_max_ms: None,
+                press_max_ms: None,
                 mic: Some(Box::new(RingMic(ring.clone()))),
                 mic_present: true,
                 mic_heard: true,

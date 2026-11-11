@@ -434,6 +434,16 @@ func (w *world) restrictedPhase() (int, error) {
 		// manage_channels and is not in A's channel.
 		{"DELETE /v1/channels/{channel}/voice/camera?principal=", http.MethodDelete,
 			"/v1/channels/" + aChan + "/voice/camera?principal=" + itoa(w.a.people[0].id), "/v1/channels/" + ghost + "/voice/camera?principal=" + itoa(w.a.people[0].id)},
+		// Removing an A member from voice only (issue #850, moderation.md
+		// §9 case 1): the same uniform 404.
+		// Channel entry bans (issue #851): the same uniform 404.
+		{"GET /v1/channels/{channel}/bans", http.MethodGet, "/v1/channels/" + aChan + "/bans", "/v1/channels/" + ghost + "/bans"},
+		{"PUT /v1/channels/{channel}/bans/{principal_id}", http.MethodPut,
+			"/v1/channels/" + aChan + "/bans/" + itoa(w.a.people[0].id), "/v1/channels/" + ghost + "/bans/" + itoa(w.a.people[0].id)},
+		{"DELETE /v1/channels/{channel}/bans/{principal_id}", http.MethodDelete,
+			"/v1/channels/" + aChan + "/bans/" + itoa(w.a.people[0].id), "/v1/channels/" + ghost + "/bans/" + itoa(w.a.people[0].id)},
+		{"DELETE /v1/channels/{channel}/voice/participants/{principal_id}", http.MethodDelete,
+			"/v1/channels/" + aChan + "/voice/participants/" + itoa(w.a.people[0].id), "/v1/channels/" + ghost + "/voice/participants/" + itoa(w.a.people[0].id)},
 	} {
 		var body any
 		if c.method == http.MethodPost || c.method == http.MethodPut {
@@ -954,7 +964,7 @@ func (w *world) restrictedPhase() (int, error) {
 		if err != nil {
 			return rows, fmt.Errorf("the restricted member's live voice rows: %w", err)
 		}
-		w.h.say("ok   voice gates: a member whose voice was switched off was removed before the PUT answered, a token signed before the switch was removed by the next pass, and a share whose share_screen was cut in the store was ended by the pass; with the cell back each is entitled again")
+		w.h.say("ok   voice gates: a member whose voice was switched off was removed before the PUT answered, a token signed before the switch was removed by the next pass, and a share whose share_screen was cut in the store was ended by the pass; a camera whose use_camera was cut in the store was ended by the pass, and a camera holder demoted to a role without use_camera had its camera withdrawn and audited within the bound; with the cell back each is entitled again")
 	} else {
 		skipped += "; the live-media voice gates (a participant removed when use_voice is cut, a share ended when share_screen is cut)"
 	}

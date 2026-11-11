@@ -419,11 +419,11 @@ describe('shortcode completion', () => {
 // While a send with images is under way the box is read-only, and so is
 // everything that would edit the draft the send was made from.
 describe('a send in progress', () => {
-  const image = (status: DraftAttachment['status']): DraftAttachment => ({ clientId: 1, filename: 'a.png', mediaType: 'image/png', size: 1, bytes: new Blob(['x']), status, attempt: 1 });
+  const image = (status: DraftAttachment['status']): DraftAttachment => ({ clientId: 1, filename: 'a.png', mediaType: 'image/png', size: 1, bytes: new Blob(['x']), spoiler: false, status, attempt: 1 });
   function WithImage({ status }: { readonly status: DraftAttachment['status'] }) {
     const [draft, setDraft] = useState('caption :fire');
     return (
-      <ComposerAttachmentProvider value={{ attachments: [image(status)], add: () => undefined, remove: () => undefined, cancel: () => undefined, retry: () => undefined, editing: () => undefined }}>
+      <ComposerAttachmentProvider value={{ attachments: [image(status)], add: () => undefined, remove: () => undefined, spoiler: () => undefined, cancel: () => undefined, retry: () => undefined, editing: () => undefined }}>
         <Composer channel="general" target={target} nets={new Map()} monitored={new Set()} people={new Map()} viewer={2} draft={draft} enabled paused={false} onDraft={setDraft} onTarget={() => undefined} onSend={() => undefined} atBottom={() => undefined} />
       </ComposerAttachmentProvider>
     );

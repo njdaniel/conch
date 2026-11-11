@@ -1,12 +1,19 @@
-import { useCallback, useEffect, useId, useRef, useState, type KeyboardEvent, type ReactNode, type SyntheticEvent } from 'react';
+import { ModerationConfirm, type ModerationOperation } from './Moderation';
+import type { ChannelBanV1 } from './schema/generated';
+import { useCallback, useContext, useEffect, useId, useRef, useState, type KeyboardEvent, type ReactNode, type SyntheticEvent } from 'react';
 import * as api from './api';
+import { ManifestReads } from './admin/AIAdminCard';
 import { Avatar } from './Icons';
+import { IdentityMarks } from './Identity';
+import { ProfileCard } from './ProfileCard';
 import { memberName } from './guestName';
 import { ActionsMenu, useOpeners, type MenuItem } from './MessageMenu';
 import type { Entry } from './agents/join';
 import { PersonActions } from './admin/PersonActions';
 import { memberActions } from './memberActions';
-import type { PermissionRowV1 } from './schema/permission';
+import { canDo } from './admin/permissions';
+import type { IssuedByOperatorV1, PermissionRowV1 } from './schema/permission';
+import { IssuedList } from './admin/PermissionsSection';
 import type { ChannelMemberV1, ChannelV0, PutChannelMemberRequestV1 } from './schema/channel';
 import type { ServerMemberV1, ServerMembersResponseV1, WhoAmIResponseV1 } from './schema/principal';
 
@@ -19,12 +26,18 @@ export interface MemberControlsProps {
   readonly channels: readonly ChannelV0[];
   readonly members: readonly ChannelMemberV1[];
   // id is the viewer's own: their own row offers no action on themself.
-  readonly viewer: Pick<WhoAmIResponseV1, 'role'> & { readonly guest: boolean; readonly id?: number };
+  readonly viewer: Pick<WhoAmIResponseV1, 'role' | 'owner' | 'permissions'> & { readonly guest: boolean; readonly id?: number };
   readonly refreshMembers: () => void;
+  readonly onModerated?: (line: string) => void;
   // Counts the server's words that the directory changed (issue #993): an
   // open picker reads the other channels again and replaces its candidates.
   readonly directoryTick?: number;
   readonly onUnauthorized: () => void;
+  // Set by Members (issue #1450): the open menu and pending question per
+  // person, kept above the Online and Offline lists.
+  readonly rowUi?: (principalId: number) => RowUi;
+  readonly setRowUi?: (principalId: number, patch: Partial<RowUi>) => void;
+  readonly onProfileDisappear?: () => void;
 }
 
 function displayName(member: ChannelMemberV1): string {
@@ -100,7 +113,9 @@ function AddPeople(props: MemberControlsProps) {
     for (const result of results) {
       if (!result.ok) continue;
       for (const member of result.value) {
-        const addable = viewer.role === 'operator' || (member.kind === 'human' && member.guest === undefined);
+        // manage_channels may add anyone; a manager only humans (PUT
+        // /v1/channels/{channel}/members: memberWriteAsManager).
+        const addable = canDo(viewer, 'manage_channels') || (member.kind === 'human' && member.guest === undefined);
         if (addable && !here.has(member.principal_id) && !found.has(member.principal_id)) found.set(member.principal_id, member);
       }
     }
@@ -202,35 +217,57 @@ function AddPeople(props: MemberControlsProps) {
 }
 
 // MemberRow is one person's row in the members panel (issue #1094): the
-// caller's content, the Manager and Approver badges, and one ⋯ menu with the
+// caller's content, the carried identity marks, and one ⋯ menu with the
 // actions this viewer may use on this person. The menu is the message log's
 // (MessageMenu.tsx), opened by its button, Enter or Space on it, a right-click
 // on the row or a long press. A row with no actions draws no button and
 // suppresses no native menu. A refusal after an action stays in the row.
+export interface RowUi {
+  readonly menuOpen: boolean;
+  readonly confirming: boolean;
+  readonly moderating: ModerationOperation | null;
+  readonly profileOpen: boolean;
+}
+const noUi: RowUi = { menuOpen: false, confirming: false, moderating: null, profileOpen: false };
+
 export function MemberRow({
   className,
   principalId,
   children,
   after,
+  showIdentity = true,
   ...controls
-}: MemberControlsProps & { readonly principalId: number; readonly className: string; readonly children: ReactNode; readonly after?: ReactNode }) {
+}: MemberControlsProps & { readonly principalId: number; readonly className: string; readonly children: ReactNode; readonly after?: ReactNode; readonly showIdentity?: boolean }) {
   const { channel, members, viewer, refreshMembers, onUnauthorized } = controls;
   const member = members.find((m) => m.principal_id === principalId);
   const [busy, setBusy] = useState(false);
   const [line, setLine] = useState<string | null>(null);
-  const [menuOpen, setMenuOpen] = useState(false);
+  const [localUi, setLocalUi] = useState<RowUi>(noUi);
+  // The open menu and a pending question live above the Online and Offline
+  // lists when Members hosts the row (issue #1450), so a person changing
+  // presence, which remounts their row, does not close them.
+  const ui = controls.rowUi?.(principalId) ?? localUi;
+  const setUi = (patch: Partial<RowUi>) => {
+    if (controls.setRowUi === undefined) setLocalUi((cur) => ({ ...cur, ...patch }));
+    else controls.setRowUi(principalId, patch);
+  };
+  const menuOpen = ui.menuOpen;
+  const setMenuOpen = (v: boolean) => { setUi({ menuOpen: v }); };
+  const moderating = ui.moderating;
+  const setModerating = (v: ModerationOperation | null) => { setUi({ moderating: v }); };
+  const confirming = ui.confirming;
+  const setConfirming = (v: boolean) => { setUi({ confirming: v }); };
   const more = useRef<HTMLButtonElement>(null);
   // Removal asks first (issue #1083): "Remove from channel" opens this
   // question in the row, with focus on Cancel; Escape and Cancel put focus
   // back on the row's ⋯ button.
-  const [confirming, setConfirming] = useState(false);
   const cancel = useRef<HTMLButtonElement>(null);
   const questionId = useId();
   useEffect(() => {
     if (confirming) cancel.current?.focus();
   }, [confirming]);
 
-  const operator = viewer.role === 'operator';
+  const operator = !viewer.guest && canDo(viewer, 'manage_channels');
   const manager = !operator && !viewer.guest && channel.manages === true;
   const human = member !== undefined && member.kind === 'human' && member.guest === undefined;
 
@@ -242,6 +279,10 @@ export function MemberRow({
     const result = request === null ? await api.removeChannelMember(channel.name, member.principal_id) : await api.putChannelMember(channel.name, member.principal_id, request);
     setBusy(false);
     if (result.ok) {
+      if (request === null) {
+        setLine('Membership removed or already absent.');
+        controls.onModerated?.('Membership removed or already absent.');
+      }
       refreshMembers();
       return;
     }
@@ -258,8 +299,10 @@ export function MemberRow({
   // member who does not decide approvals. The server still decides.
   const items: MenuItem[] = [];
   if (member !== undefined && (operator || manager) && member.principal_id !== viewer.id) {
-    const removable = operator || (member.role === 'member' && member.kind === 'human' && member.can_decide === false);
+    const removable = operator || ((member.role === 'member' || member.guest !== undefined) && member.kind === 'human' && member.can_decide === false);
+    if (member.kind === 'human') items.push({ key: 'voice', label: 'Remove from voice', disabled: busy, onSelect: () => { setModerating('kickVoice'); } });
     if (removable) {
+      items.push({ key: 'ban', label: 'Ban from channel', disabled: busy, onSelect: () => { setModerating('banMember'); } });
       items.push({
         key: 'remove',
         label: 'Remove from channel',
@@ -300,15 +343,14 @@ export function MemberRow({
   return (
     <li className={`${className} member-row${items.length > 0 ? ' has-actions' : ''}`} {...openers}>
       {children}
-      {member?.manages === true ? <span className="ag-badge">Manager</span> : null}
-      {member?.can_decide === true ? <span className="ag-badge">Approver</span> : null}
+      {showIdentity && member !== undefined ? <IdentityMarks {...member} id={member.principal_id} viewer={viewer.id} /> : null}
       {after}
       {items.length === 0 || member === undefined ? null : (
         <ActionsMenu label={`Actions for ${displayName(member)}`} items={items} open={menuOpen} onOpenChange={setMenuOpen} button={more} />
       )}
-      {confirming && member !== undefined ? (
+      {confirming && (operator || manager) && member !== undefined ? (
         <div role="group" aria-labelledby={questionId} className="member-confirm" onKeyDown={leave}>
-          <p id={questionId}>{`Remove ${displayName(member)} from #${channel.name}? They lose this channel and its history.`}</p>
+          <p id={questionId}>{`Remove ${displayName(member)} from #${channel.name} and its nets? They lose this channel and its history. This does not ban them or revoke their account.`}</p>
           <div className="actions">
             <button
               type="button"
@@ -333,6 +375,7 @@ export function MemberRow({
           </div>
         </div>
       ) : null}
+      {moderating === null || member === undefined || (!operator && !manager) ? null : <ModerationConfirm op={moderating} id={member.principal_id} name={displayName(member)} channel={channel.name} onUnauthorized={onUnauthorized} onDone={() => { controls.onModerated?.(moderating === 'banMember' ? 'Ban is in place, including if already banned.' : 'Removed from voice or already absent. They can rejoin.'); refreshMembers(); }} onClose={() => { setModerating(null); more.current?.focus(); }} />}
       {line === null ? null : <span role="status" className="member-line">{line}</span>}
     </li>
   );
@@ -344,27 +387,63 @@ function PeopleGroup({ title, people, controls }: { readonly title: string; read
     <>
       <h4>{`${title} — ${String(people.length)}`}</h4>
       <ul aria-label={`${title} — ${String(people.length)}`}>
-        {people.map((person) => (
-          <MemberRow key={`${String(controls.channel.id)}:${String(person.id)}`} {...controls} principalId={person.id} className={`ag-person state-${person.state}`}>
-            <Avatar id={person.id} name={person.name} />
-            <span className="ag-name">{person.name}</span>
-            {person.live > 1 ? <span> ({person.live} sessions)</span> : null} <span className="ag-status">{person.state}</span>
-          </MemberRow>
-        ))}
+        {people.map((person) => {
+          const member = controls.members.find((m) => m.principal_id === person.id);
+          return (
+            <MemberRow key={`${String(controls.channel.id)}:${String(person.id)}`} {...controls} principalId={person.id} className={`ag-person state-${person.state}`}>
+              <Avatar id={person.id} name={person.name} />
+              <ProfileCard
+                id={person.id}
+                person={{ ...person, role: member?.role, manages: member?.manages, can_decide: member?.can_decide, guest: member?.guest }}
+                viewer={controls.viewer.id}
+                className="ag-name"
+                open={controls.rowUi?.(person.id).profileOpen}
+                onOpenChange={(open) => { controls.setRowUi?.(person.id, { profileOpen: open }); }}
+                onDisappear={controls.onProfileDisappear}
+              />
+              {person.live > 1 ? <span> ({person.live} sessions)</span> : null} <span className="ag-status">{person.state}</span>
+            </MemberRow>
+          );
+        })}
       </ul>
     </>
   );
 }
 
 export function Members({ people, ...controls }: MemberControlsProps & { readonly people: readonly Entry[] }) {
-  const operator = controls.viewer.role === 'operator';
+  const [feedback, setFeedback] = useState<string | null>(null);
+  const heading = useRef<HTMLHeadingElement>(null);
+  const [rowUis, setRowUis] = useState<{ readonly channel: number; readonly byId: Readonly<Record<number, RowUi>> }>({ channel: controls.channel.id, byId: {} });
+  const byId = rowUis.channel === controls.channel.id ? rowUis.byId : {};
+  const rowUi = (id: number): RowUi => byId[id] ?? noUi;
+  const setRowUi = (id: number, patch: Partial<RowUi>) => {
+    setRowUis((cur) => {
+      const base = cur.channel === controls.channel.id ? cur.byId : {};
+      return { channel: controls.channel.id, byId: { ...base, [id]: { ...(base[id] ?? noUi), ...patch } } };
+    });
+  };
+  // A person who leaves the channel takes their open menu and question with
+  // them, so they do not return if the person is added again; presence
+  // changes keep them. A channel that goes away drops its whole map.
+  const present = people.map((p) => p.id).join(',') + '|' + controls.members.map((m) => m.principal_id).join(',');
+  useEffect(() => {
+    const here = new Set<number>([...people.map((p) => p.id), ...controls.members.map((m) => m.principal_id)]);
+    setRowUis((cur) => {
+      if (cur.channel !== controls.channel.id) return { channel: controls.channel.id, byId: {} };
+      const keep = Object.entries(cur.byId).filter(([id]) => here.has(Number(id)));
+      return keep.length === Object.keys(cur.byId).length ? cur : { channel: cur.channel, byId: Object.fromEntries(keep) };
+    });
+  }, [present, controls.channel.id]);
+  const operator = !controls.viewer.guest && canDo(controls.viewer, 'manage_channels');
   const manager = !operator && !controls.viewer.guest && controls.channel.manages === true;
   const canAdd = operator || manager;
   const online = people.filter((p) => p.state !== 'offline');
   const offline = people.filter((p) => p.state === 'offline');
   return (
     <>
-      <h3>People</h3>
+      <h3 ref={heading} tabIndex={-1}>People</h3>
+      {feedback === null ? null : <p role="status">{feedback}</p>}
+      {canAdd ? <BanList key={`bans-${String(controls.channel.id)}`} {...controls} operator={operator} /> : null}
       {canAdd ? <AddPeople key={controls.channel.id} {...controls} /> : null}
       {controls.viewer.guest ? <p className="hint">A guest visit cannot do this; create an account and ask an operator.</p> : null}
       {/* One line at most (issue #1020): what this viewer cannot do, in one. */}
@@ -374,8 +453,8 @@ export function Members({ people, ...controls }: MemberControlsProps & { readonl
         <p className="empty">Nobody</p>
       ) : (
         <>
-          <PeopleGroup title="Online" people={online} controls={controls} />
-          <PeopleGroup title="Offline" people={offline} controls={controls} />
+          <PeopleGroup title="Online" people={online} controls={{ ...controls, onModerated: setFeedback, rowUi, setRowUi, onProfileDisappear: () => { heading.current?.focus(); } }} />
+          <PeopleGroup title="Offline" people={offline} controls={{ ...controls, onModerated: setFeedback, rowUi, setRowUi, onProfileDisappear: () => { heading.current?.focus(); } }} />
         </>
       )}
     </>
@@ -383,8 +462,8 @@ export function Members({ people, ...controls }: MemberControlsProps & { readonl
 }
 
 // What the community member panel says of one person, from the directory's
-// row. An agent is marked as one (ADR-013 O11) and a human shows their role
-// (O4). The operator fields (owner, voice, who may invite, who invited them)
+// row. An agent or operator is marked as one (ADR-013 O11, O4). The operator
+// fields (owner, voice, who may invite, who invited them)
 // are drawn only when the row carries them: the server sends them to a holder
 // of manage_members alone, so the page cannot show a member what it was not
 // told. The controls that act on them are another issue's (#992).
@@ -400,6 +479,7 @@ export interface RowManage {
   readonly readRows: () => void;
   readonly onChanged: (done?: string) => void;
   readonly onUnauthorized: () => void;
+  readonly beginIssued: () => (person: ServerMemberV1, items: readonly IssuedByOperatorV1[]) => void;
 }
 
 function CommunityRow({
@@ -407,11 +487,13 @@ function CommunityRow({
   byId,
   viewer,
   manage,
+  onProfileDisappear,
 }: {
   readonly person: ServerMemberV1;
   readonly byId: ReadonlyMap<number, ServerMemberV1>;
   readonly viewer: number;
   readonly manage?: RowManage | undefined;
+  readonly onProfileDisappear: () => void;
 }) {
   const inviter = person.invited_by === undefined ? undefined : byId.get(person.invited_by);
   const [menuOpen, setMenuOpen] = useState(false);
@@ -429,11 +511,8 @@ function CommunityRow({
   return (
     <li className={`community-member${has ? ' member-row has-actions' : ''}`} {...openers}>
       <Avatar id={person.id} name={person.name} />
-      <span className="community-name">{person.name}</span>
-      {person.id === viewer ? <span className="ag-badge">You</span> : null}
-      {person.kind === 'agent' ? <span className="ag-badge">Agent</span> : null}
-      {person.kind === 'human' && person.role !== undefined ? <span className="ag-badge">{person.role === 'operator' ? 'Operator' : 'Member'}</span> : null}
-      {person.owner === true ? <span className="ag-badge">Owner</span> : null}
+      <ProfileCard id={person.id} person={person} viewer={viewer} className="community-name" onDisappear={onProfileDisappear} />
+      <IdentityMarks {...person} id={person.id} viewer={viewer} />
       {person.voice_allowed === undefined ? null : <span className="hint">{person.voice_allowed ? ' · voice on' : ' · voice off'}</span>}
       {person.may_invite === undefined ? null : <span className="hint">{person.may_invite ? ' · can invite' : ' · cannot invite'}</span>}
       {person.invited_by === undefined ? null : <span className="hint">{` · invited by ${inviter?.name ?? `#${String(person.invited_by)}`}`}</span>}
@@ -449,6 +528,12 @@ function CommunityRow({
           button={more}
           onChanged={manage.onChanged}
           onUnauthorized={manage.onUnauthorized}
+          beginIssued={() => {
+            const settle = manage.beginIssued();
+            return (items) => {
+              settle(person, items);
+            };
+          }}
         />
       )}
     </li>
@@ -499,12 +584,17 @@ export function CommunityMembers({
   readonly onUnauthorized: () => void;
 }) {
   const headingId = useId();
+  const manifestReads = useContext(ManifestReads);
   const [answer, setAnswer] = useState<ServerMembersResponseV1 | 'failed' | null>(null);
   // The permissions document's rows, for the voice line beside the voice
   // switch (design §5); every operator may read it.
   const [rows, setRows] = useState<readonly PermissionRowV1[] | null>(null);
   // What the last change said, at the list's level: the row may be gone.
   const [note, setNote] = useState('');
+  // What disabled or demoted people issued to others, kept here and not in
+  // their rows: a disabled person leaves the directory, and the owner's way to
+  // end what they issued must stay until dismissed or emptied (issue #1464).
+  const [issued, setIssued] = useState<readonly { readonly id: number; readonly name: string; readonly items: readonly IssuedByOperatorV1[] }[]>([]);
   const noteLine = useRef<HTMLParagraphElement>(null);
   const wantsFocus = useRef(false);
   const seq = useRef(0);
@@ -519,9 +609,33 @@ export function CommunityMembers({
     };
   }, []);
 
+  // Losing the standing, or another person or server, takes the lists away.
+  const viewerId = who?.id;
+  const holdsMembers = who !== undefined && canDo(who, 'manage_members');
+  // Every such change starts a new context; an answer to a request sent in an
+  // earlier one is dropped (a late answer cannot refill a cleared list).
+  const context = useRef(0);
+  useEffect(() => {
+    if (!holdsMembers) {
+      context.current += 1;
+      setIssued([]);
+    }
+  }, [holdsMembers]);
+  useEffect(() => {
+    context.current += 1;
+    setIssued([]);
+  }, [viewerId, origin]);
+
   const load = useCallback(() => {
     const mine = ++seq.current;
+    const request = manifestReads.beginDirectory();
     void api.directoryMembers().then((result) => {
+      // What this view shows is its own newest answer. The session-wide order
+      // governs only the shared stops on manifest reads: an answer older than
+      // one already applied there changes none of them, whether or not this
+      // view has closed or asked again, but is still drawn here (#1562). This
+      // answer, never a channel's members, controls manifest reads.
+      if (result.ok) manifestReads.acceptDirectory(request, result.value.members);
       if (mine !== seq.current || !live.current) return;
       if (result.ok) {
         setAnswer(result.value);
@@ -533,7 +647,7 @@ export function CommunityMembers({
       }
       setAnswer('failed');
     });
-  }, []);
+  }, [manifestReads.beginDirectory, manifestReads.acceptDirectory]);
   // The permissions document is read when a person's menu opens, so a switch
   // that would do nothing says so (the voice line); not with the list.
   const readRows = useCallback(() => {
@@ -555,6 +669,14 @@ export function CommunityMembers({
 
   const byId = new Map<number, ServerMemberV1>();
   if (answer !== null && answer !== 'failed') for (const m of answer.members) byId.set(m.id, m);
+  // The lists are the viewer's to see only while they hold manage_members; the
+  // names are the current directory's, plus each issuer's own, kept from the
+  // moment the viewer disabled or demoted them.
+  const standing = who !== undefined && canDo(who, 'manage_members');
+  const names = new Map<number, string>();
+  if (standing) for (const entry of issued) names.set(entry.id, entry.name);
+  for (const [id, m] of byId) names.set(id, m.name);
+  const sameIssuer = (id: number) => (entry: { readonly id: number }) => entry.id !== id;
   return (
     <section {...(showTitle ? { 'aria-labelledby': headingId } : { 'aria-label': title })} className="community-members">
       {!showTitle ? null : level === 4 ? <h4 id={headingId}>{title}</h4> : <h3 id={headingId}>{title}</h3>}
@@ -562,6 +684,28 @@ export function CommunityMembers({
       <p ref={noteLine} role="status" className="hint" tabIndex={-1}>
         {note}
       </p>
+      {who === undefined || !standing
+        ? null
+        : issued.map((entry) => (
+            <IssuedList
+              key={entry.id}
+              who={who}
+              items={entry.items}
+              names={names}
+              title={`Still working after this change, issued by ${entry.name}`}
+              intro={`${entry.name} issued these to other people. Taking away or ending ${entry.name}’s access does not end them.`}
+              revokeAllFor={{ principal: entry.id, name: entry.name }}
+              onDone={(gone) => {
+                setIssued((now) => now.map((e) => (e.id === entry.id ? { ...e, items: e.items.filter((i) => !gone(i)) } : e)));
+              }}
+              onDismiss={() => {
+                setIssued((now) => now.filter(sameIssuer(entry.id)));
+              }}
+              onUnauthorized={() => {
+                latest.current();
+              }}
+            />
+          ))}
       {answer === null ? (
         <p className="empty">Loading…</p>
       ) : answer === 'failed' ? (
@@ -581,7 +725,14 @@ export function CommunityMembers({
                   person={person}
                   byId={byId}
                   viewer={viewer}
-                  manage={who === undefined ? undefined : { who, origin, rows, readRows, onChanged: (done) => {
+                  onProfileDisappear={() => { noteLine.current?.focus(); }}
+                  manage={who === undefined ? undefined : { who, origin, rows, readRows, beginIssued: () => {
+                      const started = context.current;
+                      return (issuer, items) => {
+                        if (started !== context.current) return;
+                        setIssued((now) => [...now.filter(sameIssuer(issuer.id)), ...(items.length === 0 ? [] : [{ id: issuer.id, name: issuer.name, items }])]);
+                      };
+                    }, onChanged: (done) => {
                       setNote(done ?? '');
                       wantsFocus.current = true;
                       load();
@@ -597,10 +748,40 @@ export function CommunityMembers({
       {/* A list that is not told of directory changes keeps a Refresh; the
           community panel and the admin console's follow the frame. */}
       {directoryTick !== undefined ? null : (
-        <button type="button" className="quiet" onClick={load}>
+        <button
+          type="button"
+          className="quiet"
+          onClick={load}
+        >
           Refresh
         </button>
       )}
     </section>
   );
+}
+
+function BanList({ channel, viewer, operator, onUnauthorized }: MemberControlsProps & { readonly operator: boolean }) {
+  const [open, setOpen] = useState(false);
+  const [bans, setBans] = useState<readonly ChannelBanV1[]>([]);
+  const [line, setLine] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [selected, setSelected] = useState<ChannelBanV1 | null>(null);
+  const opener = useRef<HTMLButtonElement>(null);
+  async function load() {
+    setBusy(true); setLine(null);
+    const result = await api.listChannelBans(channel.name);
+    setBusy(false);
+    if (result.ok) setBans(result.value.bans);
+    else if (result.failure === 'unauthorized') onUnauthorized();
+    else setLine(refusalLine(result));
+  }
+  return <section aria-label="Channel bans" className="member-admin">
+    <button ref={opener} type="button" aria-expanded={open} onClick={() => { setOpen(!open); if (!open) void load(); }}>Channel bans</button>
+    {!open ? null : <>
+      <p className="hint">Bans apply to a principal in this channel. A new account or guest visit is not identified by a ban. Unban does not re-add anyone.</p>
+      <button type="button" disabled={busy} onClick={() => void load()}>Refresh bans</button>
+      {busy ? <p role="status">Loading bans…</p> : line !== null ? <p role="alert">{line}</p> : bans.length === 0 ? <p>No channel bans.</p> : <ul>{bans.map((ban) => <li key={ban.principal_id}>{ban.name} (#{ban.principal_id}){operator || (viewer.id !== undefined && ban.created_by === viewer.id) ? <button type="button" onClick={() => { setSelected(ban); }}>Unban {ban.name}</button> : <span>Only the banning manager or an operator can lift this ban.</span>}</li>)}</ul>}
+      {selected === null ? null : <ModerationConfirm key={selected.principal_id} op="unbanMember" id={selected.principal_id} name={selected.name} channel={channel.name} onUnauthorized={onUnauthorized} onDone={() => void load()} onClose={() => { setSelected(null); opener.current?.focus(); }} />}
+    </>}
+  </section>;
 }

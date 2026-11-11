@@ -1,0 +1,31 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "allowImportingTsExtensions": false,
+    "module": "nodenext",
+    "moduleResolution": "nodenext",
+    "customConditions": [],
+    "target": "es2022",
+    "types": [
+      "node"
+    ],
+    "outDir": "build/test",
+    "rootDir": ".",
+    "sourceMap": false
+  },
+  "include": [
+    "src/logic/**/*.ts",
+    "src/app/client.ts",
+    "src/app/controller.ts",
+    "src/app/camera/controls.ts",
+    "src/app/camera/policy.ts",
+    "src/app/bridge.ts",
+    "test/**/*.ts"
+  ],
+  "exclude": [
+    "**/node_modules",
+    "android",
+    "build"
+  ]
+}

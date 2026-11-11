@@ -504,6 +504,215 @@ impl AudioKey {
     }
 }
 
+/// A key under `[keys]` that [`set_keys_value`] writes and [`unset_keys_value`] removes: the
+/// event device, or one of the three bindings. It touches no other.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeysKey {
+    /// `device`: the event device to read, under `/dev/input/`.
+    Device,
+    /// `talk`: held to transmit.
+    Talk,
+    /// `mute`: pressed to mute or unmute.
+    Mute,
+    /// `deafen`: pressed to deafen or undeafen.
+    Deafen,
+}
+
+impl KeysKey {
+    /// The key's name in `[keys]`.
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            KeysKey::Device => "device",
+            KeysKey::Talk => "talk",
+            KeysKey::Mute => "mute",
+            KeysKey::Deafen => "deafen",
+        }
+    }
+
+    /// The key's name dotted from the top of the file, as errors and the command line give it.
+    #[must_use]
+    pub fn dotted(self) -> &'static str {
+        match self {
+            KeysKey::Device => "keys.device",
+            KeysKey::Talk => "keys.talk",
+            KeysKey::Mute => "keys.mute",
+            KeysKey::Deafen => "keys.deafen",
+        }
+    }
+
+    /// Why `value` cannot be saved for this key, in words that do not repeat it, or `Ok`.
+    /// The device is a path under `/dev/input/` with no empty, `.` or `..` part, no white space
+    /// around it and no quotation mark, backslash or control character; a binding is a
+    /// `KEY_*` name from the table or a decimal code, as [`KeyCode`]'s `FromStr` takes.
+    ///
+    /// # Errors
+    ///
+    /// The reason, as one line.
+    pub fn check(self, value: &str) -> Result<(), &'static str> {
+        match self {
+            KeysKey::Device => {
+                let clean = value.trim() == value
+                    && !value.contains(['"', '\\'])
+                    && !value.chars().any(char::is_control);
+                let under = value.strip_prefix("/dev/input/").is_some_and(|rest| {
+                    // Every part named: no `.` or `..`, and no empty part (`//` or a
+                    // trailing `/`), which only a directory could be.
+                    !rest.is_empty()
+                        && !rest
+                            .split('/')
+                            .any(|part| part.is_empty() || part == ".." || part == ".")
+                });
+                if clean && under {
+                    Ok(())
+                } else {
+                    Err(
+                        "must be a path under /dev/input/, such as /dev/input/by-id/...-event-kbd, with no quotation mark, backslash, control character or white space around it",
+                    )
+                }
+            }
+            KeysKey::Talk | KeysKey::Mute | KeysKey::Deafen => {
+                if value.parse::<KeyCode>().is_ok() {
+                    Ok(())
+                } else {
+                    Err("must be a KEY_* name this client knows, or a key code from 1 to 767")
+                }
+            }
+        }
+    }
+
+    fn clear(self, keys: &mut KeysConfig) {
+        match self {
+            KeysKey::Device => keys.device = None,
+            KeysKey::Talk => keys.talk = None,
+            KeysKey::Mute => keys.mute = None,
+            KeysKey::Deafen => keys.deafen = None,
+        }
+    }
+}
+
+/// `text`, the configuration file, with `[keys]`'s `key` set to `value` and nothing else
+/// changed, as [`set_audio_value`] does for `[audio]`: same edit, same self-check, same
+/// forms refused. A binding is written as the string the person gave, which the parser
+/// reads as a name or a code.
+///
+/// # Errors
+///
+/// - What [`Config::parse`] says of `text`.
+/// - [`Error::InvalidConfigValue`] for a `value` that
+///   [`KeysKey::check`] refuses, or a binding the others already use.
+/// - [`Error::KeysFormNotEditable`] when `keys` is an inline table or dotted keys, or the
+///   key's value is not a string.
+/// - [`Error::AudioEditUnchecked`] if the result does not pass the check.
+pub fn set_keys_value(text: &str, file: &str, key: KeysKey, value: &str) -> Result<String, Error> {
+    let mut want = Config::parse(text, file)?;
+    let invalid = |message: &str| Error::InvalidConfigValue {
+        file: file.to_owned(),
+        key: key.dotted().to_owned(),
+        message: message.to_owned(),
+    };
+    key.check(value).map_err(invalid)?;
+    match key {
+        KeysKey::Device => want.keys.device = Some(value.to_owned()),
+        KeysKey::Talk | KeysKey::Mute | KeysKey::Deafen => {
+            let code = value.parse::<KeyCode>().ok();
+            match key {
+                KeysKey::Talk => want.keys.talk = code,
+                KeysKey::Mute => want.keys.mute = code,
+                _ => want.keys.deafen = code,
+            }
+        }
+    }
+    // A binding another key already has is refused with the reason `parse` gives.
+    want.validate(file)?;
+    let quoted = format!("\"{value}\"");
+    let not_editable = || Error::KeysFormNotEditable {
+        file: file.to_owned(),
+    };
+    let (range, replacement) =
+        plan_table_edit(text, file, "keys", key.name(), &quoted, true, &not_editable)?;
+    let mut edited = String::with_capacity(text.len() + replacement.len());
+    edited.push_str(&text[..range.start]);
+    edited.push_str(&replacement);
+    edited.push_str(&text[range.end..]);
+
+    let unchecked = || Error::AudioEditUnchecked {
+        file: file.to_owned(),
+        key: key.dotted().to_owned(),
+    };
+    let after = Config::parse(&edited, file).map_err(|_| unchecked())?;
+    if after != want {
+        return Err(unchecked());
+    }
+    let changed = changed_region(text, &edited);
+    let within = range.start <= changed.start && changed.end <= range.end;
+    if !changed.is_empty() && !within {
+        return Err(unchecked());
+    }
+    Ok(edited)
+}
+
+/// `text` with `[keys]`'s `key` removed: its whole line, with the comment on it, and
+/// nothing else. A key that is not there leaves the text as it is.
+///
+/// # Errors
+///
+/// - What [`Config::parse`] says of `text`.
+/// - [`Error::KeysFormNotEditable`] when `keys` is an inline table or dotted keys.
+/// - [`Error::AudioEditUnchecked`] if the result does not pass the check.
+pub fn unset_keys_value(text: &str, file: &str, key: KeysKey) -> Result<String, Error> {
+    let mut want = Config::parse(text, file)?;
+    key.clear(&mut want.keys);
+    let not_editable = || Error::KeysFormNotEditable {
+        file: file.to_owned(),
+    };
+    let unchecked = || Error::AudioEditUnchecked {
+        file: file.to_owned(),
+        key: key.dotted().to_owned(),
+    };
+    let document = DeTable::parse(text).map_err(|error| locate(text, file, &error))?;
+    let Some((_, keys)) = document
+        .get_ref()
+        .iter()
+        .find(|(name, _)| name.get_ref() == "keys")
+    else {
+        return Ok(text.to_owned());
+    };
+    let header = text
+        .get(keys.span())
+        .is_some_and(|header| header.starts_with('[') && !header.starts_with("[["));
+    let DeValue::Table(table) = keys.get_ref() else {
+        return Err(not_editable());
+    };
+    if !header {
+        return Err(not_editable());
+    }
+    let Some((name, value)) = table.iter().find(|(name, _)| name.get_ref() == key.name()) else {
+        return Ok(text.to_owned());
+    };
+    // The whole line, if nothing but white space is before the key and nothing but white
+    // space or a comment after the value; any other shape is not removed.
+    let start = text[..name.span().start]
+        .rfind('\n')
+        .map_or(0, |newline| newline + 1);
+    let end = text[value.span().end..]
+        .find('\n')
+        .map_or(text.len(), |newline| value.span().end + newline + 1);
+    let before = &text[start..name.span().start];
+    let after = text[value.span().end..end].trim();
+    if !before.trim().is_empty() || !(after.is_empty() || after.starts_with('#')) {
+        return Err(not_editable());
+    }
+    let mut edited = String::with_capacity(text.len());
+    edited.push_str(&text[..start]);
+    edited.push_str(&text[end..]);
+    let parsed = Config::parse(&edited, file).map_err(|_| unchecked())?;
+    if parsed != want {
+        return Err(unchecked());
+    }
+    Ok(edited)
+}
+
 /// `text`, the configuration file, with `[audio]`'s `key` set to `value` and nothing else
 /// changed: every comment, blank line, key and table stays as it was written, byte for byte.
 /// `file` names the text in errors, as for [`Config::parse`]. For a device, `"default"` is
@@ -571,7 +780,18 @@ pub fn set_audio_value(
         }
     }
     let quoted = format!("\"{value}\"");
-    let (range, replacement) = plan_audio_edit(text, file, key, &quoted)?;
+    let not_editable = || Error::AudioFormNotEditable {
+        file: file.to_owned(),
+    };
+    let (range, replacement) = plan_table_edit(
+        text,
+        file,
+        "audio",
+        key.name(),
+        &quoted,
+        false,
+        &not_editable,
+    )?;
     let mut edited = String::with_capacity(text.len() + replacement.len());
     edited.push_str(&text[..range.start]);
     edited.push_str(&replacement);
@@ -598,27 +818,30 @@ pub fn set_audio_value(
 }
 
 /// Where in `text` the edit goes, and what replaces that range: an empty range is an
-/// insertion.
-fn plan_audio_edit(
+/// insertion. `table` is the `[table]` the string `name` is set in, to `quoted` (a value
+/// with its quotation marks), replacing a value that is a string, or an integer if
+/// `integer_too` (a key code); `not_editable` makes the error for a table in a form that is
+/// not edited.
+fn plan_table_edit(
     text: &str,
     file: &str,
-    key: AudioKey,
+    table_name: &str,
+    name: &str,
     quoted: &str,
+    integer_too: bool,
+    not_editable: &dyn Fn() -> Error,
 ) -> Result<(Range<usize>, String), Error> {
-    let not_editable = || Error::AudioFormNotEditable {
-        file: file.to_owned(),
-    };
     let document = DeTable::parse(text).map_err(|error| locate(text, file, &error))?;
-    let audio = document
+    let found = document
         .get_ref()
         .iter()
-        .find(|(name, _)| name.get_ref() == "audio")
+        .find(|(entry, _)| entry.get_ref() == table_name)
         .map(|(_, value)| value);
     let eol = line_ending(text);
-    let line = format!("{} = {quoted}", key.name());
+    let line = format!("{name} = {quoted}");
 
-    let Some(audio) = audio else {
-        // A file with no `audio` at all: the table goes at the end, after a blank line.
+    let Some(found) = found else {
+        // A file with no such table at all: it goes at the end, after a blank line.
         let mut added = String::new();
         if !text.is_empty() {
             if !text.ends_with('\n') {
@@ -626,21 +849,23 @@ fn plan_audio_edit(
             }
             added.push_str(eol);
         }
-        added.push_str("[audio]");
+        added.push('[');
+        added.push_str(table_name);
+        added.push(']');
         added.push_str(eol);
         added.push_str(&line);
         added.push_str(eol);
         return Ok((text.len()..text.len(), added));
     };
 
-    // A table opened by a `[audio]` header has the header's text as its span. An inline
+    // A table opened by a `[table]` header has the header's text as its span. An inline
     // table's span starts with `{`, and a table made by dotted keys has the span of its
     // name in the first of them, which never starts with `[`.
-    let span = audio.span();
+    let span = found.span();
     let header = text
         .get(span.clone())
         .is_some_and(|header| header.starts_with('[') && !header.starts_with("[["));
-    let DeValue::Table(table) = audio.get_ref() else {
+    let DeValue::Table(table) = found.get_ref() else {
         return Err(not_editable());
     };
     if !header {
@@ -648,10 +873,15 @@ fn plan_audio_edit(
     }
     let present = table
         .iter()
-        .find(|(name, _)| name.get_ref() == key.name())
+        .find(|(entry, _)| entry.get_ref() == name)
         .map(|(_, value)| value);
     match present {
-        Some(present) if present.get_ref().is_str() => Ok((present.span(), quoted.to_owned())),
+        Some(present)
+            if present.get_ref().is_str()
+                || (integer_too && present.get_ref().as_integer().is_some()) =>
+        {
+            Ok((present.span(), quoted.to_owned()))
+        }
         Some(_) => Err(not_editable()),
         // Directly after the header's line, which ends with a line ending unless it is the
         // last line of the file.

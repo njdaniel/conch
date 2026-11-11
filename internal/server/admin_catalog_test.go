@@ -88,6 +88,7 @@ func TestAdminCatalogMatchesRouteTable(t *testing.T) {
 		schema.AdminActionSetChannelVisibility, schema.AdminActionArchiveChannel, schema.AdminActionRemoveChannelMember,
 		schema.AdminActionSetChannelMemberRights, schema.AdminActionDisableLinkJoiners, schema.AdminActionDisableInvitees,
 		schema.AdminActionResumeInvites, schema.AdminActionSetJoinSettings, schema.AdminActionSetPermissions,
+		schema.AdminActionBanChannelMember, schema.AdminActionUnbanChannelMember,
 	} {
 		if adminCatalogByAction[a].gate != schema.AdminGateApproval {
 			t.Errorf("%s must be gated by approval", a)

@@ -309,6 +309,9 @@ func revokeMatchingTx(ctx context.Context, tx execer, query string, now time.Tim
 			credentialDetail(c.id, c.label)+" reason="+modeRevokedReason, now); err != nil {
 			return 0, err
 		}
+		if err := endCredentialNotificationsTx(ctx, tx, hostActor, c.id, now); err != nil {
+			return 0, err
+		}
 		if err := endCredentialSessionsTx(ctx, tx, hostActor, c.id, SessionEndedByRevocation, now, runs); err != nil {
 			return 0, err
 		}

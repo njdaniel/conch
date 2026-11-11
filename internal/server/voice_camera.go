@@ -315,6 +315,9 @@ func (s *Server) handleVoiceCameraStop(w http.ResponseWriter, r *http.Request) {
 		if !ok {
 			return
 		}
+		// Agents do not moderate voice (issue #1546): one that holds
+		// manage_channels is refused as a member is.
+		standing = standing && caller.Kind == store.PrincipalHuman
 		ch, err := s.store.ChannelByName(ctx, r.PathValue("channel"))
 		if errors.Is(err, store.ErrNotFound) {
 			writeChannelNotFound(w)
@@ -949,7 +952,8 @@ func (p *voicePoller) camWithdrawConfirmed(r *voiceRoomState, key voiceWithdrawK
 // none, so a write made while a rotation is forgetting the room never grants
 // a share back. The caller holds p.mu, and the room's claims.
 func (p *voicePoller) shareHeldLocked(r *voiceRoomState, principalID int64) bool {
-	return !r.retired && r.share != nil && !r.share.pending && r.share.principalID == principalID
+	c := r.shares[principalID]
+	return !r.retired && c != nil && !c.pending
 }
 
 // cameraHeldLocked is the camera term of every write: whether principalID

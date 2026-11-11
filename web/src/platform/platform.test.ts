@@ -62,6 +62,7 @@ describe('the desktop bridge type', () => {
       joinAsGuest: true,
       createAccount: true,
       signOut: true,
+      replaceCredential: true,
       profiles: true,
       profileAdd: true,
       profileRename: true,
@@ -72,7 +73,11 @@ describe('the desktop bridge type', () => {
       uploadFile: true,
       downloadFile: true,
       saveFile: true,
+      notify: true,
+      notifyClose: true,
+      notificationSupported: true,
+      onNotification: true,
     };
-    expect(Object.keys(named)).toHaveLength(26);
+    expect(Object.keys(named)).toHaveLength(31);
   });
 });

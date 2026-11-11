@@ -160,3 +160,14 @@ func TestFileAttachmentV1Validate(t *testing.T) {
 		})
 	}
 }
+
+func TestSpoilerFilePrefix(t *testing.T) {
+	if SpoilerFilePrefix != "SPOILER_" {
+		t.Fatalf("SpoilerFilePrefix = %q", SpoilerFilePrefix)
+	}
+	for _, rest := range []string{"x.png", "a", strings.Repeat("a", MaxFileNameBytes-len(SpoilerFilePrefix))} {
+		if err := ValidateFileName(SpoilerFilePrefix + rest); err != nil {
+			t.Errorf("ValidateFileName(prefix+%.10q) = %v", rest, err)
+		}
+	}
+}

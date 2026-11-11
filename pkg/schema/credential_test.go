@@ -31,6 +31,8 @@ func TestCredentialGoldenFixtures(t *testing.T) {
 		{"list-credentials-response-v1-empty.json", func() any { return new(ListCredentialsResponseV1) }},
 		{"own-credential-v1.json", func() any { return new(OwnCredentialV1) }},
 		{"own-credential-v1-current.json", func() any { return new(OwnCredentialV1) }},
+		// A sign-in with an active push registration (issue #1712).
+		{"own-credential-v1-push.json", func() any { return new(OwnCredentialV1) }},
 		{"list-own-credentials-response-v1.json", func() any { return new(ListOwnCredentialsResponseV1) }},
 		{"list-own-credentials-response-v1-empty.json", func() any { return new(ListOwnCredentialsResponseV1) }},
 	}
@@ -103,8 +105,8 @@ func TestCredentialV1HasNoSecretFields(t *testing.T) {
 // holder sees it (issue #496): no token, hash or secret, and no principal.
 func TestOwnCredentialV1HasNoSecretFields(t *testing.T) {
 	ts := NewTimestamp(time.Date(2026, 10, 17, 12, 0, 0, 0, time.UTC))
-	full := OwnCredentialV1{ID: 1, Label: "l", CreatedAt: ts, ExpiresAt: &ts, Renews: true, Current: true}
-	if got, want := jsonKeys(t, full), "created_at,current,expires_at,id,label,renews"; got != want {
+	full := OwnCredentialV1{ID: 1, Label: "l", CreatedAt: ts, ExpiresAt: &ts, Renews: true, Current: true, Push: true}
+	if got, want := jsonKeys(t, full), "created_at,current,expires_at,id,label,push,renews"; got != want {
 		t.Errorf("OwnCredentialV1 keys = %s, want %s", got, want)
 	}
 	if got, want := jsonKeys(t, OwnCredentialV1{}), "created_at,id,label"; got != want {

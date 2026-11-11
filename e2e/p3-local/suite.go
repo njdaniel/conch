@@ -16,8 +16,8 @@ import (
 	"github.com/njdaniel/conch/pkg/schema"
 )
 
-// The automated P3 suite (issue #284): the thirteen rows of the brief's test
-// table (docs/design/p3-local-prototype.md, section 4) asserted against the
+// The automated P3 suite (issue #284): the brief's test table and later
+// end-to-end scenarios asserted against the
 // binaries this run built. The terminal clients run on pseudo-terminals and
 // are driven with keys, the agents are conch-adapter processes running the
 // fixture scripts, and the API is called to look at what the server shows,
@@ -123,16 +123,21 @@ func (s *suite) until(what string, d time.Duration, f func() (bool, error)) erro
 
 // ------------------------------------------------------------ the CLI
 
-// cli runs the conch CLI as nick-test, through a shell with the participant's
-// environment file, as the walkthrough's commands do. Arguments are quoted.
+// cli runs the conch CLI as nick-test.
 func (s *suite) cli(args ...string) (string, error) {
+	return s.cliAs(partNick, args...)
+}
+
+// cliAs runs the conch CLI as part, through a shell with the participant's
+// environment file, as the walkthrough's commands do. Arguments are quoted.
+func (s *suite) cliAs(part string, args ...string) (string, error) {
 	quoted := make([]string, len(args))
 	for i, a := range args {
 		quoted[i] = shq(a)
 	}
-	out, err := s.r.shell(s.r.asConch(partNick, quoted...))
+	out, err := s.r.shell(s.r.asConch(part, quoted...))
 	if err != nil {
-		return "", fmt.Errorf("conch %s: %w", strings.Join(args[:min(len(args), 2)], " "), err)
+		return "", fmt.Errorf("conch %s as %s: %w", strings.Join(args[:min(len(args), 2)], " "), part, err)
 	}
 	return out, nil
 }
@@ -515,9 +520,11 @@ func (r *runner) runSuite() error {
 	}{
 		{"P3-01", "five participants, five credentials, one roster", s.p301Roster},
 		{"P3-02", "a message from each client arrives once, in order, everywhere", s.p302Send},
+		{"P3-16", "browser, terminal and CLI see the same reactions", s.p316Reactions},
 		{"P3-03", "two terminals, two channels, two drafts", s.p303Drafts},
 		{"P3-04", "one person in two terminals", s.p304TwoSessions},
 		{"P3-05", "a restricted channel, a net and a whisper", s.p305Scope},
+		{"P3-17", "voice, membership, bans and message removal", s.p317Moderation},
 		// P3-09 and P3-10 come before the rows about agents: a revoked
 		// credential's sockets close up to half a minute after the revoke,
 		// and P3-06 to P3-08 are the rows that fill the wait. The restart

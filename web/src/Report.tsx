@@ -171,7 +171,7 @@ export function ReportProblem({ onUnauthorized }: { readonly onUnauthorized: () 
           <form aria-label="Report a problem" onSubmit={review}>
             <p className="hint">
               Your report goes to this server’s operator, who reads it before it goes anywhere else. Please leave out passwords, invite links and credentials
-              (anything starting with conch_).
+              (anything starting with conch_). Do not paste browser console output into a report: it can contain live voice tokens.
             </p>
             {field('did', 'What you did')}
             {field('expected', 'What you expected')}

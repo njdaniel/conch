@@ -17,6 +17,7 @@ import (
 	"github.com/njdaniel/conch/internal/server/approvals"
 	"github.com/njdaniel/conch/internal/server/hub"
 	"github.com/njdaniel/conch/internal/server/livekit"
+	"github.com/njdaniel/conch/internal/server/push"
 	"github.com/njdaniel/conch/internal/server/store"
 	"github.com/njdaniel/conch/pkg/schema"
 )
@@ -118,6 +119,12 @@ type Config struct {
 	// was recorded, so a Config that allows password-only over a store that
 	// does not still asks for the code.
 	OperatorTOTP store.OperatorTOTP
+	// Push configures phone push (issue #1714). The zero value is push off:
+	// the routes answer as the design says and nothing is sent. conchd loads
+	// the VAPID key and records it with the store before New (see
+	// cmd/conchd), so a key that changed has already ended the registrations
+	// made under the old one.
+	Push PushConfig
 }
 
 // temporary reports whether the server runs in temporary mode. It decides
@@ -175,8 +182,11 @@ type Server struct {
 	// metrics is the server's own registry and counts (metrics.go). It is
 	// always kept, in memory; only metricsLn, bound when MetricsListen is
 	// set, ever serves it.
-	metrics   *serverMetrics
-	metricsLn net.Listener
+	metrics *serverMetrics
+	// pushSender sends the wakes (push_send.go); nil with Web Push off, and
+	// then no goroutine of it ever runs.
+	pushSender *push.Sender
+	metricsLn  net.Listener
 	// routes is the route table (routes.go); mux and routeByPattern are
 	// derived from it and nothing else registers routes.
 	routes         []route
@@ -260,6 +270,14 @@ type Server struct {
 	// memory only; its clock is now. Tests replace it with setReactionLimit
 	// before serving.
 	reactionLimits *reactionLimiter
+	// channelWriteLimits bounds a manager's name and topic changes of one
+	// channel (channel_write_limit.go), in memory only; its clock is now.
+	// Tests replace it with setChannelWriteLimit before serving.
+	channelWriteLimits *channelWriteLimiter
+	// notificationLimits bounds the notification routes
+	// (notification_limits.go), in memory only; its clock is now. Tests
+	// replace it with setNotificationLimits before serving.
+	notificationLimits *notificationLimiter
 	// messageEditLimits is the people's message edit limit (message_edit.go),
 	// in memory only; its clock is now. Tests replace it with
 	// setMessageEditLimit before serving.
@@ -320,7 +338,7 @@ func New(cfg Config, st *store.Store) *Server {
 				"missing", strings.Join(missing, ", "), "not_sent", ntfyNotSent(missing))
 		}
 	}
-	s := &Server{cfg: cfg, store: st, hub: hub.New(), approvals: approvals.New(st, notifier), broadcaster: broadcaster, credRecheckInterval: defaultCredentialRecheckInterval, sessionSweepInterval: defaultSessionSweepInterval, now: time.Now, renameFile: os.Rename, inviteLimits: newInviteLimiter(inviteLimitsFor(cfg)), reportLimits: newReportLimiter(defaultReportLimit()), reactionLimits: newReactionLimiter(defaultReactionLimit()),
+	s := &Server{cfg: cfg, store: st, hub: hub.New(), approvals: approvals.New(st, notifier), broadcaster: broadcaster, credRecheckInterval: defaultCredentialRecheckInterval, sessionSweepInterval: defaultSessionSweepInterval, now: time.Now, renameFile: os.Rename, inviteLimits: newInviteLimiter(inviteLimitsFor(cfg)), reportLimits: newReportLimiter(defaultReportLimit()), reactionLimits: newReactionLimiter(defaultReactionLimit()), channelWriteLimits: newChannelWriteLimiter(defaultChannelWriteLimit()), notificationLimits: newNotificationLimiter(defaultNotificationWriteLimit(), defaultNotificationReadLimit()),
 		passwords: newPasswords(), logins: newLoginLimiter(loginLimitsFor(cfg)), addressMAC: newAddressMACKey(),
 		setupLimits: newSetupLimiter(cfg), messageEditLimits: newMessageEditLimiter(defaultMessageEditLimit())}
 	// The server's name is a permanent name nobody may take (issue #760):
@@ -330,6 +348,7 @@ func New(cfg Config, st *store.Store) *Server {
 	s.voice = newVoicePoller(s)
 	s.events = newEventsHub()
 	s.metrics = newServerMetrics(s)
+	s.pushSender = s.newPushSender()
 	// Runs that end with their session change without SetRunState, so the
 	// store reports them here, after its commit (issue #405).
 	st.OnRunsEnded(func(runs []store.EndedRun) {
@@ -355,7 +374,7 @@ func New(cfg Config, st *store.Store) *Server {
 	s.mux = http.NewServeMux()
 	for _, rt := range s.routes {
 		s.routeByPattern[rt.pattern] = rt
-		s.mux.Handle(rt.pattern, traceRoute(s.guard(rt)))
+		s.mux.Handle(rt.pattern, traceRoute(s.guarded(rt)))
 	}
 	s.logAgentsWithoutManifest(context.Background())
 	s.logServerNameHolders(context.Background())
@@ -500,6 +519,10 @@ func (s *Server) Serve(ctx context.Context) error {
 	if err := ValidateSessionThresholds(stale, offline); err != nil {
 		return fmt.Errorf("server: %w", err)
 	}
+	// Push settings that cannot work are a configuration error too.
+	if err := ValidatePushConfig(s.cfg.Push); err != nil {
+		return fmt.Errorf("server: %w", err)
+	}
 	if err := s.Listen(); err != nil {
 		return err
 	}
@@ -539,6 +562,10 @@ func (s *Server) Serve(ctx context.Context) error {
 
 	// Pending logins: spent and expired challenges are deleted (issue #709).
 	defer s.startPendingLoginSweeper(ctx)()
+
+	// The Web Push sender, when Web Push is on (issue #1715): stopped with
+	// the rest, and waited for. Wakes still queued are dropped.
+	defer s.startPushSender(ctx)()
 
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- s.http.Serve(s.ln) }()

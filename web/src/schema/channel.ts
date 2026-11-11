@@ -1,5 +1,7 @@
-// The wire types of pkg/schema/channel.go and channel_member.go, generated into generated.ts.
+// The wire types of pkg/schema/channel.go, channel_member.go and
+// moderation.go (the ban list, issue #849), generated into generated.ts.
 export {
+  channelBanV1,
   channelDocV1,
   channelDocV1Schema as channelDocSchema,
   channelMembersV1,
@@ -12,9 +14,13 @@ export {
   createChannelResponse,
   createChannelResponseV1,
   joinChannelResponseV1,
+  listChannelBansResponseV1,
   listChannelMembersResponseV1,
   listChannelsResponse,
   renameChannelResponseV1,
+  setChannelTopicResponseV1,
+  MAX_CHANNEL_TOPIC_LENGTH,
+  type ChannelBanV1,
   type ChannelDocV1,
   type ChannelMembersV1,
   type AddChannelMemberRequestV1,
@@ -30,9 +36,12 @@ export {
   type CreateChannelRequestV1,
   type CreateChannelResponse,
   type JoinChannelResponseV1,
+  type ListChannelBansResponseV1,
   type ListChannelMembersResponseV1,
   type ListChannelsResponse,
   type PutChannelMemberRequestV1,
   type RenameChannelRequestV1,
   type RenameChannelResponseV1,
+  type SetChannelTopicRequestV1,
+  type SetChannelTopicResponseV1,
 } from './generated';

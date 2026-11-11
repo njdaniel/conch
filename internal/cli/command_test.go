@@ -1245,7 +1245,7 @@ func (f *voiceFake) seen() []string {
 
 func TestVoiceStatusSnapshot(t *testing.T) {
 	const joined = "2026-10-09T08:30:00Z"
-	people := []schema.VoiceParticipant{voicePerson(9, false), voicePerson(3, true), voicePerson(42, false)}
+	people := []schema.VoiceParticipantV2{voicePerson(9, false), voicePerson(3, true), voicePerson(42, false)}
 	apiError := func(code string) schema.Error { return schema.Error{Code: code, Message: "refused by test"} }
 	tests := []struct {
 		name       string
@@ -1291,7 +1291,7 @@ func TestVoiceStatusSnapshot(t *testing.T) {
 			name: "server text cannot break the error line", status: http.StatusForbidden,
 			snapshot: schema.Error{Code: "forbidden", Message: "no\n\x1b[2Jfake line"}, wantErr: `no\n\x1b[2Jfake line`,
 		},
-		{name: "invalid document is not printed", snapshot: schema.VoicePresenceV1{Schema: "conch.voice_presence.v9", ChannelID: 2}, wantErr: "invalid voice presence"},
+		{name: "invalid document is not printed", snapshot: schema.VoicePresenceV2{Schema: "conch.voice_presence.v9", ChannelID: 2}, wantErr: "invalid voice presence"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1456,10 +1456,19 @@ func TestVoiceStatusWatch(t *testing.T) {
 			wantErr: "no longer a member",
 		},
 		{
+			name: "removed from voice only is not a lost channel",
+			socket: func(ctx context.Context, conn *websocket.Conn) {
+				_ = wsjson.Write(ctx, conn, voiceDoc(true, true, three))
+				_ = conn.Close(websocket.StatusPolicyViolation, string(schema.SocketCloseVoiceRemoved))
+			},
+			wantOut: stamp + "3 - quiet " + joined + "\n",
+			wantErr: "you were removed from voice; you are still a member of the channel and may join again",
+		},
+		{
 			name: "an invalid frame ends it with an error",
 			socket: func(ctx context.Context, conn *websocket.Conn) {
 				_ = wsjson.Write(ctx, conn, voiceDoc(true, true, three))
-				_ = wsjson.Write(ctx, conn, schema.VoicePresenceV1{Schema: "nope"})
+				_ = wsjson.Write(ctx, conn, schema.VoicePresenceV2{Schema: "nope"})
 				<-ctx.Done()
 			},
 			wantOut: stamp + "3 - quiet " + joined + "\n",
@@ -1575,13 +1584,13 @@ func TestVoiceNameFields(t *testing.T) {
 // as being in the channel's room.
 func TestVoicePresenceScopedRoomAddsAField(t *testing.T) {
 	at := schema.NewTimestamp(time.Date(2026, time.October, 9, 8, 30, 0, 0, time.UTC))
-	person := func(id int64, talking bool) schema.VoiceParticipant {
-		return schema.VoiceParticipant{PrincipalID: id, CanPublish: true, Transmitting: talking, JoinedAt: at}
+	person := func(id int64, talking bool) schema.VoiceParticipantV2 {
+		return schema.VoiceParticipantV2{PrincipalID: id, CanPublish: true, Transmitting: talking, JoinedAt: at}
 	}
-	doc := schema.VoicePresenceV1{Schema: schema.VoicePresenceSchemaV1, ChannelID: 1, Configured: true, Available: true, Rooms: []schema.VoicePresenceRoom{
-		{Participants: []schema.VoiceParticipant{person(9, false), person(3, true)}},
-		{Audience: &schema.Audience{Kind: schema.AudienceKindNet, NetID: 4}, Participants: []schema.VoiceParticipant{person(7, true), person(5, false)}},
-		{Audience: &schema.Audience{Kind: "future kind"}, Participants: []schema.VoiceParticipant{person(8, false)}},
+	doc := schema.VoicePresenceV2{Schema: schema.VoicePresenceSchemaV2, ChannelID: 1, Configured: true, Available: true, Rooms: []schema.VoicePresenceRoomV2{
+		{Participants: []schema.VoiceParticipantV2{person(9, false), person(3, true)}},
+		{Audience: &schema.Audience{Kind: schema.AudienceKindNet, NetID: 4}, Participants: []schema.VoiceParticipantV2{person(7, true), person(5, false)}},
+		{Audience: &schema.Audience{Kind: "future kind"}, Participants: []schema.VoiceParticipantV2{person(8, false)}},
 	}}
 	var out strings.Builder
 	if err := writeVoicePresence(&out, "general", doc, map[int64]string{3: "nick"}); err != nil {
