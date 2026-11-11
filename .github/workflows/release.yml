@@ -149,7 +149,14 @@ jobs:
     # of #774; decisions Q-D6-4 and Q-D6-7 of #1595). It runs beside the
     # gates on the same tag, and publish waits for it: a missing helper, a
     # version that is not the tag's or a failed package test stops the release.
-    runs-on: ubuntu-latest
+    #
+    # ubuntu-24.04, not ubuntu-latest: dpkg-shlibdeps takes each Depends floor
+    # from the build machine's libraries, and ubuntu-latest is now 26.04, whose
+    # .deb asks for libc6 (>= 2.43) and so cannot be installed on 24.04, the
+    # oldest system desktop-deb.sh supports (found by #1652's lifecycle run,
+    # 43098834902). Build on the oldest supported release; the Go jobs are
+    # static (CGO_ENABLED=0) and are unaffected.
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     env:
       # The release's tag, as scripts/desktop-build.sh and desktop-deb.sh take
