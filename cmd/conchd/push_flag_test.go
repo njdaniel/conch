@@ -65,6 +65,78 @@ func TestParseServeArgsPush(t *testing.T) {
 	}
 }
 
+// TestParseServeArgsPushSending: the sender's three settings have defaults,
+// environment twins, flags that win over them, and are refused when they are
+// out of range or unreadable, whether or not push is on.
+func TestParseServeArgsPushSending(t *testing.T) {
+	tests := []struct {
+		name        string
+		args        []string
+		env         map[string]string
+		wantSubject string
+		wantMax     int
+		wantExpire  time.Duration
+		wantErr     string
+	}{
+		{name: "defaults", wantMax: 600, wantExpire: 24 * time.Hour},
+		{name: "flags", args: []string{"--push-vapid-subject", "mailto:ops@example.org", "--push-max-per-minute", "60", "--push-expire", "2h"},
+			wantSubject: "mailto:ops@example.org", wantMax: 60, wantExpire: 2 * time.Hour},
+		{name: "https subject", args: []string{"--push-vapid-subject=https://example.org/c"}, wantSubject: "https://example.org/c", wantMax: 600, wantExpire: 24 * time.Hour},
+		{name: "env twins", env: map[string]string{"CONCHD_PUSH_VAPID_SUBJECT": "mailto:a@b.c", "CONCHD_PUSH_MAX_PER_MINUTE": "5", "CONCHD_PUSH_EXPIRE": "672h"},
+			wantSubject: "mailto:a@b.c", wantMax: 5, wantExpire: 672 * time.Hour},
+		{name: "flags win", args: []string{"--push-max-per-minute=7", "--push-expire=1h"}, env: map[string]string{"CONCHD_PUSH_MAX_PER_MINUTE": "5", "CONCHD_PUSH_EXPIRE": "672h"},
+			wantMax: 7, wantExpire: time.Hour},
+		{name: "expire past 28 days", args: []string{"--push-expire", "673h"}, wantErr: "--push-expire"},
+		{name: "expire zero", args: []string{"--push-expire", "0"}, wantErr: "--push-expire"},
+		{name: "expire negative", args: []string{"--push-expire=-1h"}, wantErr: "--push-expire"},
+		{name: "expire env unreadable", env: map[string]string{"CONCHD_PUSH_EXPIRE": "soon"}, wantErr: "CONCHD_PUSH_EXPIRE"},
+		{name: "budget zero", args: []string{"--push-max-per-minute", "0"}, wantErr: "--push-max-per-minute"},
+		{name: "budget negative", args: []string{"--push-max-per-minute=-3"}, wantErr: "--push-max-per-minute"},
+		{name: "budget env unreadable", env: map[string]string{"CONCHD_PUSH_MAX_PER_MINUTE": "many"}, wantErr: "CONCHD_PUSH_MAX_PER_MINUTE"},
+		{name: "subject http", args: []string{"--push-vapid-subject", "http://example.org"}, wantErr: "--push-vapid-subject"},
+		{name: "subject bare address", args: []string{"--push-vapid-subject", "ops@example.org"}, wantErr: "--push-vapid-subject"},
+		{name: "subject with a space", args: []string{"--push-vapid-subject", "mailto:a b@c.d"}, wantErr: "--push-vapid-subject"},
+		{name: "subject env bad", env: map[string]string{"CONCHD_PUSH_VAPID_SUBJECT": "tel:123"}, wantErr: "--push-vapid-subject"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			for _, k := range []string{"CONCHD_PUSH_VAPID_SUBJECT", "CONCHD_PUSH_MAX_PER_MINUTE", "CONCHD_PUSH_EXPIRE", "CONCHD_PUSH_WEBPUSH", "CONCHD_PUSH_WEBPUSH_ALLOW_PRIVATE"} {
+				t.Setenv(k, "")
+			}
+			for k, v := range tt.env {
+				t.Setenv(k, v)
+			}
+			opts, err := parseServeArgs(append([]string{"--data", t.TempDir()}, tt.args...))
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("error = %v, want one containing %q", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if opts.pushSubject != tt.wantSubject || opts.pushMaxPerMinute != tt.wantMax || opts.pushExpire != tt.wantExpire {
+				t.Errorf("subject %q max %d expire %s, want %q %d %s", opts.pushSubject, opts.pushMaxPerMinute, opts.pushExpire, tt.wantSubject, tt.wantMax, tt.wantExpire)
+			}
+			cfg, err := startPush(context.Background(), openPushStore(t), serveOptions{dataDir: t.TempDir(), pushWebPush: true,
+				pushSubject: opts.pushSubject, pushMaxPerMinute: opts.pushMaxPerMinute, pushExpire: opts.pushExpire}, mustKey(t), time.Now())
+			if err != nil || cfg.VAPIDSubject != tt.wantSubject || cfg.MaxPerMinute != tt.wantMax || cfg.Expire != tt.wantExpire {
+				t.Errorf("config = %+v, %v", cfg, err)
+			}
+		})
+	}
+}
+
+func mustKey(t *testing.T) *push.VAPIDKey {
+	t.Helper()
+	key, err := push.LoadOrCreateVAPIDKey(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return key
+}
+
 // The usage text lists both flags and both environment variables.
 func TestUsageNamesPushFlags(t *testing.T) {
 	f, err := os.CreateTemp(t.TempDir(), "usage")
@@ -79,7 +151,8 @@ func TestUsageNamesPushFlags(t *testing.T) {
 	if _, err := buf.ReadFrom(f); err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"--push-webpush", "CONCHD_PUSH_WEBPUSH=1", "--push-webpush-allow-private", "CONCHD_PUSH_WEBPUSH_ALLOW_PRIVATE=1", "push-vapid-key.pem"} {
+	for _, want := range []string{"--push-webpush", "CONCHD_PUSH_WEBPUSH=1", "--push-webpush-allow-private", "CONCHD_PUSH_WEBPUSH_ALLOW_PRIVATE=1", "push-vapid-key.pem",
+		"--push-vapid-subject", "CONCHD_PUSH_VAPID_SUBJECT", "--push-max-per-minute", "CONCHD_PUSH_MAX_PER_MINUTE", "--push-expire", "CONCHD_PUSH_EXPIRE"} {
 		if !strings.Contains(buf.String(), want) {
 			t.Errorf("usage does not mention %q", want)
 		}

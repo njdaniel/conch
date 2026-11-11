@@ -6,7 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
-	"strconv"
+	"time"
 
 	"github.com/njdaniel/conch/internal/server/push"
 	"github.com/njdaniel/conch/internal/server/store"
@@ -66,6 +66,27 @@ type PushConfig struct {
 	// Resolver looks endpoint hosts up for the address check. Nil is the
 	// system resolver; tests set a fake, so no test needs DNS.
 	Resolver push.Resolver
+	// VAPIDSubject is the optional VAPID sub claim (--push-vapid-subject):
+	// "mailto:" or "https:", sent with every wake when set (RFC 8292 section
+	// 2.1), omitted when empty.
+	VAPIDSubject string
+	// MaxPerMinute is the per-server budget of wakes (--push-max-per-minute).
+	// Zero means push.DefaultMaxPerMinute.
+	MaxPerMinute int
+	// Expire is the TTL of a wake at the push service (--push-expire). Zero
+	// means push.DefaultExpire.
+	Expire time.Duration
+
+	// client and afterFunc are test seams, set only by this package's tests:
+	// the client that trusts a test provider's certificate, and the clock of
+	// the retry timers. Nil in conchd, which then sends only through
+	// push.NewClient and time.AfterFunc.
+	client    *http.Client
+	afterFunc func(d time.Duration, f func()) (stop func() bool)
+	// queueSize is the sender's queue capacity; wrapSource wraps its source,
+	// so a test can see each targets query. Zero and nil are the defaults.
+	queueSize  int
+	wrapSource func(push.Source) push.Source
 }
 
 // webPushOn reports whether the Web Push transport is on.
@@ -126,34 +147,17 @@ func (s *Server) transportAvailable(w http.ResponseWriter, transport schema.Push
 }
 
 // checkPushEndpoint reports whether endpoint, which passed schema's form
-// check, may be registered: its port, and then every address its host resolves
-// to (push.Check, #1717), with the operator's allow-private switch. It answers
-// nothing about why a refusal was one: the caller sends the one fixed message.
-// It never returns, logs or wraps err.Error() of anything it called.
-//
-// Port: without --push-webpush-allow-private only 443 (the port an https URL
-// has when it names none) is accepted. Every public push service speaks on
-// 443: Google's, Mozilla's and Apple's, and a UnifiedPush distributor behind a
-// public name does too. Any other port is a service a member picked on a public
-// host, and conchd would be posting to it from the server's address:
-// restricting the port narrows what a hostile endpoint can reach to the port a
-// push service has. With the switch on, the operator has said their
-// distributor lives on their own network, where it may be on any port, and any
-// port but 0 is accepted.
+// check, may be registered: its port (push.EndpointPortAllowed, the rule the
+// sender applies again before every send), and then every address its host
+// resolves to (push.Check, #1717), with the operator's allow-private switch. It
+// answers nothing about why a refusal was one: the caller sends the one fixed
+// message. It never returns, logs or wraps err.Error() of anything it called.
 func (s *Server) checkPushEndpoint(ctx context.Context, endpoint string) bool {
-	u, err := url.Parse(endpoint)
-	if err != nil {
+	if !push.EndpointPortAllowed(endpoint, s.cfg.Push.AllowPrivate) {
 		return false
 	}
-	port := 443
-	if p := u.Port(); p != "" {
-		n, err := strconv.Atoi(p)
-		if err != nil || n < 1 || n > 65535 {
-			return false
-		}
-		port = n
-	}
-	if port != 443 && !s.cfg.Push.AllowPrivate {
+	u, err := url.Parse(endpoint)
+	if err != nil {
 		return false
 	}
 	_, err = push.Check(ctx, u.Hostname(), s.cfg.Push.Resolver, s.cfg.Push.AllowPrivate)

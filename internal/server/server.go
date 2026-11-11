@@ -17,6 +17,7 @@ import (
 	"github.com/njdaniel/conch/internal/server/approvals"
 	"github.com/njdaniel/conch/internal/server/hub"
 	"github.com/njdaniel/conch/internal/server/livekit"
+	"github.com/njdaniel/conch/internal/server/push"
 	"github.com/njdaniel/conch/internal/server/store"
 	"github.com/njdaniel/conch/pkg/schema"
 )
@@ -181,8 +182,11 @@ type Server struct {
 	// metrics is the server's own registry and counts (metrics.go). It is
 	// always kept, in memory; only metricsLn, bound when MetricsListen is
 	// set, ever serves it.
-	metrics   *serverMetrics
-	metricsLn net.Listener
+	metrics *serverMetrics
+	// pushSender sends the wakes (push_send.go); nil with Web Push off, and
+	// then no goroutine of it ever runs.
+	pushSender *push.Sender
+	metricsLn  net.Listener
 	// routes is the route table (routes.go); mux and routeByPattern are
 	// derived from it and nothing else registers routes.
 	routes         []route
@@ -344,6 +348,7 @@ func New(cfg Config, st *store.Store) *Server {
 	s.voice = newVoicePoller(s)
 	s.events = newEventsHub()
 	s.metrics = newServerMetrics(s)
+	s.pushSender = s.newPushSender()
 	// Runs that end with their session change without SetRunState, so the
 	// store reports them here, after its commit (issue #405).
 	st.OnRunsEnded(func(runs []store.EndedRun) {
@@ -514,6 +519,10 @@ func (s *Server) Serve(ctx context.Context) error {
 	if err := ValidateSessionThresholds(stale, offline); err != nil {
 		return fmt.Errorf("server: %w", err)
 	}
+	// Push settings that cannot work are a configuration error too.
+	if err := ValidatePushConfig(s.cfg.Push); err != nil {
+		return fmt.Errorf("server: %w", err)
+	}
 	if err := s.Listen(); err != nil {
 		return err
 	}
@@ -553,6 +562,10 @@ func (s *Server) Serve(ctx context.Context) error {
 
 	// Pending logins: spent and expired challenges are deleted (issue #709).
 	defer s.startPendingLoginSweeper(ctx)()
+
+	// The Web Push sender, when Web Push is on (issue #1715): stopped with
+	// the rest, and waited for. Wakes still queued are dropped.
+	defer s.startPushSender(ctx)()
 
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- s.http.Serve(s.ln) }()

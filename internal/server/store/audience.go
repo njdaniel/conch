@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -2794,4 +2795,197 @@ func (s *Store) ListPendingNotifications(ctx context.Context, reader Reader, cre
 		resp.Summaries = append(resp.Summaries, c.summary)
 	}
 	return resp, nil
+}
+
+// PushWakeTarget is one registration a post should wake: what the sender needs
+// to address one wake, and the two times it coalesces by. The endpoint and the
+// keys are the registration's write-only target (see push_registrations.go):
+// they go to the sender and nowhere else, and no log line, error or audit row
+// holds them.
+type PushWakeTarget struct {
+	RegistrationID string
+	CredentialID   int64
+	PrincipalID    int64
+	Endpoint       string
+	P256DH         string
+	Auth           string
+	// LastWakeAt and LastFetchAt are the registration's own times, the zero
+	// time for "never".
+	LastWakeAt  time.Time
+	LastFetchAt time.Time
+}
+
+// PushTargetScanBound is the most registrations one post is evaluated for: the
+// ones on live members of the channel are few (a person holds at most
+// schema.MaxPushRegistrationsPerPrincipal), and a channel is bounded, so this
+// is a safety net, not a limit anyone meets.
+const PushTargetScanBound = 5000
+
+// pushCandidatesSQL selects the registrations of channelID's live members that
+// a wake could be for, before the message is looked at. A registration is
+// a candidate when
+//
+//   - it is active, and a webpush one;
+//   - its credential is live (liveCredentialWhere, the one predicate of
+//     push_registrations.go: not revoked, full scope, issued under its
+//     principal's present authentication generation, so a sign-in a restore
+//     killed is never woken, and neither expired nor idle past its bound); a
+//     guest's visit is checked in Go (credentialIdle.live);
+//   - its principal is a human, enabled, not hidden, and a live member of the
+//     channel (liveMembers: not banned), and did not write the message.
+//
+// Arguments, in order: the channel, the author, the bound.
+func pushCandidatesSQL(now time.Time) string {
+	// liveCredentialWhere is a constant of this package plus an integer.
+	return `SELECT r.id, r.credential_id, r.principal_id, r.endpoint, r.p256dh, r.auth,
+	       r.last_wake_at, r.last_fetch_at, p.name, ` + idleBoundColumns + `
+	FROM push_registrations r
+	JOIN credentials c ON c.id = r.credential_id AND c.principal_id = r.principal_id
+	JOIN principals p ON p.id = r.principal_id
+	JOIN ` + liveMembers + ` mem ON mem.channel_id = ?1 AND mem.principal_id = r.principal_id
+	WHERE r.state = 'active' AND r.transport = 'webpush'
+	  AND ` + liveCredentialWhere(now) + `
+	  AND p.kind = 'human' AND p.disabled_at IS NULL AND p.hidden_at IS NULL
+	  AND p.id <> ?2
+	ORDER BY r.id LIMIT ?3`
+}
+
+// pushMessageSQL reads the post being evaluated: its body and audience, and
+// only when it is in the channel and not removed. It is the only place the
+// push path reads a body, and the body leaves this file only as the answer of
+// pushPolicyAdmits.
+const pushMessageSQL = `SELECT m.body, m.audience_kind FROM messages m
+	WHERE m.id = ? AND m.channel_id = ? AND ` + notRemovedCond
+
+// pushVisibleSQL asks whether the message is visible to a scoped reader:
+// messageVisible (the audience rule, the reader being a recipient and a live
+// member for a scoped message, and the history bound) in the same statement
+// that selects the message, exactly as the lists embed it. Arguments: the
+// message id, then visibilityArgs' six for the reader.
+var pushVisibleSQL = `SELECT 1 FROM messages m WHERE m.id = ? AND ` + notRemovedCond + ` AND ` + messageVisible(true)
+
+// PushTargets returns the registrations that a new message should wake, for the
+// sender (issue #1715, docs/design/mobile-notifications.md §6.2). It is the
+// post-time counterpart of the pending feed, and answers the same question,
+// for the same reader rule: a registration is returned when
+//
+//   - it is a candidate (pushCandidatesSQL): an active webpush registration of
+//     a live, full-scope credential at its principal's present generation,
+//     whose principal is a human, enabled, not hidden, a live member of the
+//     channel and not the author;
+//   - the credential is within its idle bound at now (credentialIdle.live);
+//   - the message exists in the channel, is not removed, and is visible to
+//     that principal (messageVisible with their scoped reader, so a net
+//     message they are not in, a whisper to someone else, and what is before
+//     their history bound are not);
+//   - the credential's policy and mutes admit it (pushPolicyAdmits): off
+//     admits nothing, a muted channel nothing, mentions a whisper the
+//     principal received or a body that mentions their current name, all every
+//     message.
+//
+// Every one of those is read now, so a principal removed from the channel, a
+// credential revoked or a message removed between the post and this call is
+// not woken. It is bounded by PushTargetScanBound. A message that is not
+// found, or has no target, gives no targets and no error.
+func (s *Store) PushTargets(ctx context.Context, channelID, messageID, authorID int64, now time.Time) ([]PushWakeTarget, error) {
+	var body string
+	var kind sql.NullString
+	switch err := s.db.QueryRowContext(ctx, pushMessageSQL, messageID, channelID).Scan(&body, &kind); {
+	case errors.Is(err, sql.ErrNoRows):
+		return nil, nil
+	case err != nil:
+		return nil, fmt.Errorf("store: push targets: message: %w", err)
+	}
+	whisper := kind.Valid && schema.AudienceKind(kind.String) == schema.AudienceKindPrincipals
+
+	rows, err := s.db.QueryContext(ctx, pushCandidatesSQL(now), channelID, authorID, PushTargetScanBound) // #nosec G202 -- constants plus an integer
+	if err != nil {
+		return nil, fmt.Errorf("store: push targets: candidates: %w", err)
+	}
+	type candidate struct {
+		target PushWakeTarget
+		name   string
+	}
+	var cands []candidate
+	for rows.Next() {
+		var c candidate
+		var wake, fetch sql.NullInt64
+		var idle credentialIdle
+		if err := rows.Scan(&c.target.RegistrationID, &c.target.CredentialID, &c.target.PrincipalID,
+			&c.target.Endpoint, &c.target.P256DH, &c.target.Auth, &wake, &fetch, &c.name,
+			&idle.createdAt, &idle.idleMs, &idle.lastUsedAt, &idle.guestState, &idle.guestExpiresAt); err != nil {
+			_ = rows.Close()
+			return nil, fmt.Errorf("store: push targets: scan: %w", err)
+		}
+		if !idle.live(now) {
+			continue
+		}
+		if wake.Valid {
+			c.target.LastWakeAt = time.UnixMilli(wake.Int64)
+		}
+		if fetch.Valid {
+			c.target.LastFetchAt = time.UnixMilli(fetch.Int64)
+		}
+		cands = append(cands, c)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, fmt.Errorf("store: push targets: %w", err)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: push targets: %w", err)
+	}
+
+	// Visibility is per principal, once each, however many registrations they
+	// hold; preferences are per credential.
+	visible := map[int64]bool{}
+	var out []PushWakeTarget
+	for _, c := range cands {
+		ok, seen := visible[c.target.PrincipalID]
+		if !seen {
+			_, args := visibilityArgs(Reader{PrincipalID: c.target.PrincipalID, Scoped: true})
+			var one int
+			switch err := s.db.QueryRowContext(ctx, pushVisibleSQL, append([]any{messageID}, args...)...).Scan(&one); {
+			case errors.Is(err, sql.ErrNoRows):
+				ok = false
+			case err != nil:
+				return nil, fmt.Errorf("store: push targets: visibility: %w", err)
+			default:
+				ok = true
+			}
+			visible[c.target.PrincipalID] = ok
+		}
+		if !ok {
+			continue
+		}
+		prefs, err := notificationPreferencesOf(ctx, s.db, c.target.CredentialID)
+		if err != nil {
+			return nil, err
+		}
+		if pushPolicyAdmits(prefs, channelID, whisper, body, c.name) {
+			out = append(out, c.target)
+		}
+	}
+	return out, nil
+}
+
+// pushPolicyAdmits is the policy of §6.2 for a message the principal may
+// already see: the credential's mutes first (a muted channel wakes nothing,
+// whatever the policy), then off (nothing), mentions (a whisper the principal
+// received, which the visibility condition has shown they are a recipient of,
+// or a body that mentions their current name by schema.Mentions) and all
+// (everything). A policy this code does not know admits nothing. It is the
+// same rule the feed applies to its candidates, so a wake is sent for exactly
+// the messages the feed would list.
+func pushPolicyAdmits(prefs schema.NotificationPreferencesV1, channelID int64, whisper bool, body, name string) bool {
+	if slices.Contains(prefs.Muted, channelID) {
+		return false
+	}
+	switch prefs.Policy {
+	case schema.NotificationPolicyAll:
+		return true
+	case schema.NotificationPolicyMentions:
+		return whisper || schema.Mentions(body, name)
+	default:
+		return false
+	}
 }

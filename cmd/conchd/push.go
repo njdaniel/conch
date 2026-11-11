@@ -39,5 +39,8 @@ func startPush(ctx context.Context, st *store.Store, opts serveOptions, key *pus
 		slog.Warn("push: --push-webpush-allow-private is on: push endpoints on private addresses and any port are accepted")
 	}
 	slog.Info("push: Web Push is on", "allow_private", opts.pushAllowPrivate)
-	return server.PushConfig{WebPush: true, AllowPrivate: opts.pushAllowPrivate, VAPID: key}, nil
+	return server.PushConfig{
+		WebPush: true, AllowPrivate: opts.pushAllowPrivate, VAPID: key,
+		VAPIDSubject: opts.pushSubject, MaxPerMinute: opts.pushMaxPerMinute, Expire: opts.pushExpire,
+	}, nil
 }

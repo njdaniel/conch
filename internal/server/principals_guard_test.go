@@ -72,6 +72,10 @@ var principalReads = []principalRead{
 	{"store/audience.go", "Store.AuthorReaders", 1, readGated},
 	// #1713: the reader's own current name, to match "@name" in the feed.
 	{"store/audience.go", "Store.ListPendingNotifications", 1, readOwnOrInternal},
+	// #1715: the push sender's target query reads each candidate's name (for
+	// the mention rule), kind, disabled, hidden and generation, to decide whom
+	// to wake. It serves nothing: a wake carries only a registration id.
+	{"store/audience.go", "pushCandidatesSQL", 1, readOwnOrInternal},
 	// #1714: compares credentials' generations with their principal's, to end
 	// the registrations of dead credentials; reads no name and serves no one.
 	{"store/push_registrations.go", "endGenerationDeadPushTx", 1, readOwnOrInternal},

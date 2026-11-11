@@ -38,7 +38,8 @@ import (
 //     call endCredentialNotificationsTx;
 //   - credential_expired and stale: the session sweep (SweepSessions);
 //   - stale again: the server's VAPID key changed (ReconcilePushVAPIDKey);
-//   - provider_rejected: #1715.
+//   - provider_rejected: the push service answered 404 or 410 to a wake
+//     (EndPushRegistrationRejected, #1715).
 
 // PushStaleAfter is how long a registration may go with no fetch and no update
 // before the sweep ends it as stale (design §5.8: FCM's "a month" with slack).
@@ -348,6 +349,37 @@ func (s *Store) TouchPushFetch(ctx context.Context, credentialID int64, now time
 		return fmt.Errorf("store: record push fetch of credential %d: %w", credentialID, err)
 	}
 	return nil
+}
+
+// MarkPushWake records that a wake was sent to registration id at now
+// (last_wake_at). It writes nothing for a registration that has ended, and
+// that is not an error.
+func (s *Store) MarkPushWake(ctx context.Context, id string, now time.Time) error {
+	if _, err := s.db.ExecContext(ctx,
+		"UPDATE push_registrations SET last_wake_at = ? WHERE id = ? AND state = 'active'",
+		now.UnixMilli(), id); err != nil {
+		return fmt.Errorf("store: record push wake: %w", err)
+	}
+	return nil
+}
+
+// EndPushRegistrationRejected ends registration id with reason
+// provider_rejected, for the push service's 404 or 410: the subscription is gone,
+// and nothing will ever make a send to it succeed. It is one transaction with
+// the one push_registration_ended row, as the other endings are, written by the
+// system as the actor. It reports whether this call ended it: a registration
+// that already ended (another wake got the same answer first, or its owner
+// deleted it) writes nothing and reports false, so there is exactly one row.
+func (s *Store) EndPushRegistrationRejected(ctx context.Context, id string, now time.Time) (bool, error) {
+	now = now.Truncate(time.Millisecond)
+	var ended bool
+	err := s.withImmediateTx(ctx, func(tx execer) error {
+		n, err := expirePushRegistrationsTx(ctx, tx, "system", "id = ?", []any{id},
+			schema.PushRegistrationEndProviderRejected, now)
+		ended = n > 0
+		return err
+	})
+	return ended, err
 }
 
 // expirePushRegistrationsTx ends every active registration that matches
