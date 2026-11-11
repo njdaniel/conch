@@ -27,6 +27,10 @@ export const nativePort: NativePort = {
     await PermissionsAndroid.request(PermissionsAndroid.PERMISSIONS.POST_NOTIFICATIONS).catch(() => undefined);
     return 'granted';
   },
+  async ensureCameraPermission() {
+    const camera = await PermissionsAndroid.request(PermissionsAndroid.PERMISSIONS.CAMERA);
+    return camera === PermissionsAndroid.RESULTS.GRANTED;
+  },
   async startService() {
     await raw.startService();
   },

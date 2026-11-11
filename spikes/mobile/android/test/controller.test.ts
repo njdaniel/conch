@@ -1,11 +1,15 @@
 /// <reference types="node" />
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import type { CameraClaimResult } from '../src/logic/api';
+import type { CameraRoom, KeptCamera } from '../src/logic/camera';
+import type { CameraWants } from '../src/app/camera/policy';
 import { VoiceController, type NativePort, type RoomEvents, type RoomPort, type VoiceApi } from '../src/app/controller';
 import { appStateOf, deliver } from '../src/app/bridge';
 import { defaultTail, phoneMax } from '../src/logic/gate';
 import { reportWait } from '../src/logic/mic';
 import type { VoicePresenceV1, VoiceSessionResponseV1, VoiceTransmitState } from '../src/logic/schema/generated';
+import { tapAgain } from '../src/app/camera/controls';
 import { FakeClock, settle } from './fakes';
 
 const me = 7;
@@ -24,9 +28,55 @@ function session(canPublish = true, url = 'x'): VoiceSessionResponseV1 {
   return { livekit_url: url, identity: `p${me}`, rooms: [{ room: 'r', token: 't', can_publish: canPublish, expires_at: '2026-11-05T10:00:15Z' }] };
 }
 
+const startedAt = '2026-11-05T10:00:00Z';
+
+class FakeCamera implements CameraRoom {
+  captured = false;
+  grantError: Error | null = null;
+  constructor(private readonly log: string[]) {}
+  captureCamera(_choice: string | null, profile?: string): Promise<void> {
+    this.log.push(`capture ${profile ?? ''}`);
+    this.captured = true;
+    return Promise.resolve();
+  }
+  awaitCameraGrant(): Promise<void> {
+    this.log.push('camera grant');
+    return this.grantError === null ? Promise.resolve() : Promise.reject(this.grantError);
+  }
+  publishCamera(): Promise<void> {
+    this.log.push('camera publish');
+    return Promise.resolve();
+  }
+  stopCamera(): Promise<void> {
+    this.log.push('camera stop');
+    this.captured = false;
+    return Promise.resolve();
+  }
+  keepCamera(): KeptCamera | null {
+    this.log.push('camera keep');
+    return null;
+  }
+  adoptCamera(): void {
+    this.log.push('camera adopt');
+  }
+  cameraInUse(): string | null {
+    return this.captured ? 'front' : null;
+  }
+  switchCamera(): Promise<void> {
+    return Promise.resolve();
+  }
+}
+
 class FakeRoom implements RoomPort {
   events: RoomEvents | null = null;
-  constructor(private readonly log: string[]) {}
+  readonly camera: FakeCamera;
+  wants: CameraWants[] = [];
+  constructor(private readonly log: string[]) {
+    this.camera = new FakeCamera(log);
+  }
+  watchCameras(wants: CameraWants): void {
+    this.wants.push(wants);
+  }
   connect(_url: string, _token: string, publish: boolean, events: RoomEvents): Promise<void> {
     this.events = events;
     this.log.push(`room connect publish=${publish}`);
@@ -51,15 +101,49 @@ interface Rig {
   log: string[];
   rooms: FakeRoom[];
   reports: VoiceTransmitState[];
+  claims: CameraClaimResult[];
 }
 
-function rig(options: { ids?: number[]; mic?: 'granted' | 'microphone_denied'; service?: boolean; canPublish?: boolean; focus?: boolean[]; livekitUrl?: string; held?: string[] } = {}): Rig {
+function rig(
+  options: {
+    ids?: number[];
+    mic?: 'granted' | 'microphone_denied';
+    service?: boolean;
+    canPublish?: boolean;
+    focus?: boolean[];
+    // Who is in each channel's room, and the channels presence was read for.
+    idsByChannel?: Record<string, number[]>;
+    asked?: string[];
+    camera?: boolean;
+    cameraPeers?: number[];
+    cameraEnded?: { reason: 'operator'; started_at: string; ended_at: string };
+    prompt?: (clock: FakeClock, c: () => VoiceController) => Promise<boolean>;
+    livekitUrl?: string;
+    held?: string[];
+  } = {},
+): Rig {
   const clock = new FakeClock();
   const log: string[] = [];
   const rooms: FakeRoom[] = [];
   const reports: VoiceTransmitState[] = [];
+  const claims: CameraClaimResult[] = [];
+  let self: VoiceController | null = null;
   const api: VoiceApi = {
-    presence: () => (log.push('presence'), Promise.resolve({ ok: true, value: presence(options.ids ?? []) } as const)),
+    presence: (channel) => {
+      log.push('presence');
+      options.asked?.push(channel);
+      const value = presence(options.idsByChannel?.[channel] ?? options.ids ?? []);
+      const rooms = value.rooms.map((r) => ({ ...r, participants: r.participants.map((p) => ({ ...p, ...(options.cameraPeers?.includes(p.principal_id) === true ? { camera: true } : {}) })) }));
+      return Promise.resolve({ ok: true, value: { ...value, rooms, ...(options.cameraEnded === undefined ? {} : { camera_ended: options.cameraEnded }) } } as const);
+    },
+    claimCamera: (channel, named) => {
+      log.push(`claim ${channel} ${named ?? 'new'}`);
+      return Promise.resolve(claims.shift() ?? ({ ok: true, value: { principal_id: me, started_at: startedAt } } as const));
+    },
+    releaseCamera: (channel, named) => {
+      log.push(`release ${channel} ${named}`);
+      return Promise.resolve(null);
+    },
     voiceSession: () => (log.push('session'), Promise.resolve({ ok: true, value: session(options.canPublish ?? true, options.livekitUrl) } as const)),
     reportTransmit: (_c, state) => {
       log.push(`report ${state}`);
@@ -68,6 +152,11 @@ function rig(options: { ids?: number[]; mic?: 'granted' | 'microphone_denied'; s
     },
   };
   const native: NativePort = {
+    ensureCameraPermission: () => {
+      log.push('camera permission');
+      if (options.prompt !== undefined) return options.prompt(clock, () => self as VoiceController);
+      return Promise.resolve(options.camera !== false);
+    },
     ensurePermissions: () => (log.push('permissions'), Promise.resolve(options.mic ?? 'granted')),
     startService: () => (log.push('service start'), options.service === false ? Promise.reject(new Error('ForegroundServiceStartNotAllowedException')) : Promise.resolve()),
     stopService: () => (log.push('service stop'), Promise.resolve()),
@@ -87,9 +176,11 @@ function rig(options: { ids?: number[]; mic?: 'granted' | 'microphone_denied'; s
     random: () => 0.5,
     me: () => me,
     log: (m) => log.push(`log ${m}`),
+    now: () => clock.now,
     hold: (...secrets) => options.held?.push(...secrets),
   });
-  return { c, clock, log, rooms, reports };
+  self = c;
+  return { c, clock, log, rooms, reports, claims };
 }
 
 const steps = (log: string[]) => log.filter((l) => !l.startsWith('log '));
@@ -461,37 +552,117 @@ test('swiping the app away ends voice', async () => {
 
 test('presence follows the joined channel, not the one on screen', async () => {
   const asked: string[] = [];
-  const seen = { ids: { a: [3], b: [9] } as Record<string, number[]> };
-  const clock = new FakeClock();
-  const c = new VoiceController({
-    api: {
-      presence: (ch) => (asked.push(ch), Promise.resolve({ ok: true, value: presence(seen.ids[ch] ?? []) } as const)),
-      voiceSession: () => Promise.resolve({ ok: true, value: session() } as const),
-      reportTransmit: () => Promise.resolve('ok'),
-    },
-    native: { ensurePermissions: () => Promise.resolve('granted'), startService: () => Promise.resolve(), stopService: () => Promise.resolve(), requestFocus: () => Promise.resolve(true), abandonFocus: () => Promise.resolve() },
-    newRoom: () => new FakeRoom([]),
-    clock,
-    random: () => 0.5,
-    me: () => me,
-    log: () => undefined,
-  });
-  c.watch('a');
-  await c.join('a');
+  const r = rig({ idsByChannel: { a: [3], b: [9] }, asked });
+  r.c.watch('a');
+  await r.c.join('a');
   await settle();
-  assert.deepEqual(c.state.participants.map((p) => p.principal_id), [3]);
+  assert.deepEqual(r.c.state.participants.map((p) => p.principal_id), [3]);
   asked.length = 0;
-  c.watch('b'); // the Voice view of another channel opens
+  r.c.watch('b'); // the Voice view of another channel opens
   await settle();
-  assert.deepEqual(c.state.participants.map((p) => p.principal_id), [3], 'A is still the room shown');
-  clock.advance(3000);
+  assert.deepEqual(r.c.state.participants.map((p) => p.principal_id), [3], 'A is still the room shown');
+  r.clock.advance(3000);
   await settle();
-  assert.ok(asked.every((ch) => ch === 'a'), 'only A is polled');
-  c.watch(null); // B's view closes: A keeps polling
+  assert.ok(asked.length > 0 && asked.every((ch) => ch === 'a'), 'only A is polled');
+  r.c.watch(null); // B's view closes: A keeps polling
   asked.length = 0;
-  clock.advance(3000);
+  r.clock.advance(3000);
   await settle();
   assert.ok(asked.includes('a'));
+});
+
+// The permission prompt takes the activity out of the foreground (Android shows
+// it in front), so the app reports 'background' before it answers.
+const promptAway = (answer: boolean) => (_clock: FakeClock, self: () => VoiceController): Promise<boolean> => {
+  self().appState('background');
+  return Promise.resolve(answer);
+};
+
+const captures = (log: string[]) => log.filter((l) => l.startsWith('capture')).length;
+
+test('camera tap: a grant just before the app goes away starts nothing when timers were frozen across a long gap', async () => {
+  const r = rig({ prompt: promptAway(true) });
+  await joined(r);
+  const tap = r.c.cameraTap();
+  await settle();
+  // Backgrounded: React Native's timers are paused. A minute passes on the
+  // wall clock and no tick runs; then the app returns.
+  r.clock.now += 60_000;
+  r.c.appState('active');
+  r.clock.advance(100);
+  await tap;
+  await settle();
+  assert.equal(captures(r.log), 0, 'no capture on resume, with no new tap');
+  assert.equal(r.c.state.cameraExtra, tapAgain);
+  assert.equal(r.c.state.cameraOn, false);
+});
+
+test('camera tap: the foreground back within the wait starts the camera', async () => {
+  const r = rig({ prompt: promptAway(true) });
+  await joined(r);
+  const tap = r.c.cameraTap();
+  await settle();
+  r.clock.advance(300);
+  r.c.appState('active');
+  r.clock.advance(100);
+  await tap;
+  await settle();
+  assert.equal(captures(r.log), 1);
+});
+
+test('camera tap: a block that begins after the permission answer abandons the tap', async () => {
+  const r = rig({ prompt: promptAway(true) });
+  await joined(r);
+  const tap = r.c.cameraTap();
+  await settle();
+  r.c.screenLocked(true); // a new reason, after the answer
+  r.c.appState('active');
+  r.c.screenLocked(false); // every block has lifted again
+  r.clock.advance(100);
+  await tap;
+  await settle();
+  assert.equal(captures(r.log), 0);
+  assert.equal(r.c.state.cameraExtra, tapAgain);
+});
+
+test('camera tap: a tap in flight does not survive Leave', async () => {
+  const r = rig({ prompt: promptAway(true) });
+  await joined(r);
+  const tap = r.c.cameraTap();
+  await settle();
+  const leaving = r.c.leave();
+  r.clock.advance(2000);
+  await leaving;
+  r.c.appState('active');
+  r.clock.advance(300);
+  await tap;
+  await settle();
+  assert.equal(captures(r.log), 0);
+  assert.equal(r.c.state.cameraOn, false);
+  assert.equal(r.c.state.phase, 'idle');
+});
+
+test('tear-down stops the capture first, then drops the room, then waits for the release', async () => {
+  const r = rig();
+  await joined(r);
+  await r.c.cameraTap();
+  await settle();
+  assert.equal(r.c.state.camera.kind, 'sending');
+  await r.c.tearDown();
+  const stop = r.log.indexOf('camera stop');
+  const drop = r.log.indexOf('room disconnect');
+  assert.ok(stop >= 0 && drop > stop, 'capture stopped before the room went');
+});
+
+test('a reconnect tells the room what to receive again', async () => {
+  const r = rig();
+  await joined(r);
+  const room = r.rooms[0];
+  assert.ok(room !== undefined);
+  const before = room.wants.length;
+  room.events?.onReconnecting();
+  room.events?.onReconnected();
+  assert.ok(room.wants.length >= before + 2);
 });
 
 test('open mode: leaving the joined Voice view shuts the open gate, and it needs quiet and a fresh onset to reopen', async () => {

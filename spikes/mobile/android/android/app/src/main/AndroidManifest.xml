@@ -15,7 +15,7 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
     <!-- The service's notification (Android 13+); refused, the app still works (M-P2). -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
-    <!-- Declared for M4-D; nothing in this slice opens the camera, and the service has no camera type. -->
+    <!-- The camera (M4-D): asked at the first tap of the camera button, never at launch or Join. The service has no camera type: capture stops when the app leaves the foreground. -->
     <uses-permission android:name="android.permission.CAMERA" />
     <!-- Not needed here, and brought in by libraries: React Native's debug manifest
          adds the draw-over-apps permission for its dev overlay (the spike's dev
