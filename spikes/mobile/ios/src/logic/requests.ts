@@ -1,4 +1,4 @@
-// Copied from spikes/mobile/android at ea00f74f (#1390, M4-B) for the iOS spike (#1394, M5-B); the sign-in and channel routes are from M4-C (#1391).
+// Copied from spikes/mobile/android at 477c0ce7 (#1390, M4-B, with its review fixes) for the iOS spike (#1394, M5-B).
 // The request list: every route the spike may call, and the one place a
 // request is built (#1109: Credential and API use). Routes and methods are
 // those of web/src/platform/operations.ts at ed4a68f9.

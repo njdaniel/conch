@@ -35,9 +35,12 @@
 	  <!-- Do not change NSAllowsArbitraryLoads to true, or you will risk app rejection! -->
 		<key>NSAllowsArbitraryLoads</key>
 		<false/>
-		<!-- The dev stack (conchd and LiveKit on the Mac, by .local name or LAN
-		     address, over http and ws) needs local networking. Nothing else is
-		     allowed; this spike does not ship. -->
+		<!-- The dev stack (conchd and LiveKit on the Linux dev machine, by LAN
+		     address or .local name, over http and ws) needs local networking.
+		     This key exempts local addresses only, never a public host; the
+		     Android spike's debug-only cleartext is wider. Nothing else is
+		     allowed; this spike does not ship. A release build would drop it
+		     (M6). -->
 		<key>NSAllowsLocalNetworking</key>
 		<true/>
 	</dict>
@@ -45,8 +48,6 @@
 	<string>Conch Spike connects to the conch server and the voice server on your local network during development.</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Conch Spike uses the microphone to talk in a voice channel when you press and hold to talk.</string>
-	<key>NSLocationWhenInUseUsageDescription</key>
-	<string></string>
 	<key>RCTNewArchEnabled</key>
 	<true/>
 	<key>UIApplicationSceneManifest</key>

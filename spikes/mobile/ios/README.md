@@ -8,7 +8,7 @@ A bare React Native 0.88.1 app (no Expo) for the iOS real-device experiment, und
 
 React Native 0.88.1, React 19.3.0, Node 24.21.0 (`.nvmrc`, `engines`), Xcode 27.2 on macOS 26.6 or later, iOS 16.4 deployment floor. Every npm dependency is an exact version; `deps-allowlist.txt` and `licences-allowlist.txt` are signed line by line in the PR that adds them. No test dependencies: no jest, eslint or prettier.
 
-Deviations from the RN template: the deployment target is 16.4 (the template follows `min_ios_version_supported`, 15.1), the bundle id is `com.conchspike`, and the display name is "Conch Spike". The Android project, `react-native-safe-area-context` and `@react-native/new-app-screen` are dropped.
+Deviations from the RN template: the deployment target is 16.4 (the template follows `min_ios_version_supported`, 15.1), the bundle id is `com.conchspike`, and the display name is "Conch Spike". The template's empty `NSLocationWhenInUseUsageDescription` is dropped: nothing here reads the location, and the spike declares only the permissions and capabilities its matrix needs (the iOS counterpart of trimming the Android manifest). The Android project, `react-native-safe-area-context` and `@react-native/new-app-screen` are dropped.
 
 The `Gemfile` is kept because `pod install` is run through it (`bundle exec pod install`, the template's way of pinning CocoaPods). Its gem requirements are ranges, so the Mac run produces `Gemfile.lock` with the exact versions, and that is committed too.
 

@@ -1,4 +1,4 @@
-// Copied from spikes/mobile/android at ea00f74f (#1390, M4-B) for the iOS spike (#1394, M5-B).
+// Copied from spikes/mobile/android at cc5fab02 (#1390, M4-B, with its review fixes) for the iOS spike (#1394, M5-B).
 // The diagnostics export (#1109): a bounded, redacted record that holds no
 // bearer, no address and no device identifier. Built on the browser's
 // Redactor (redact.ts), which hides registered secrets and signed tokens; this
@@ -16,9 +16,12 @@ const patterns: readonly RegExp[] = [
   /\b\d{1,3}(?:\.\d{1,3}){3}(?::\d{1,5})?\b/g,
   // A bracketed or bare IPv6 address.
   /\[?\b(?:[0-9a-f]{1,4}:){2,7}[0-9a-f]{1,4}\]?/gi,
-  // A host name with a dot and a letters-only last label (server.example.com).
-  /\b(?:[a-z0-9-]+\.)+(?:com|net|org|io|dev|app|local|lan|home|internal|test)\b(?::\d{1,5})?/gi,
-  // A UUID, the Android ID (16 hex digits), a MAC address.
+  // A compressed IPv6 address, with "::" (2001:db8::1, fe80::1c2a:3b4c, ::1).
+  /\[?(?<![\w:])(?:[0-9a-f]{1,4}(?::[0-9a-f]{1,4}){0,6})?::(?:[0-9a-f]{1,4}(?::[0-9a-f]{1,4}){0,6})?(?![\w:])\]?/gi,
+  // A host name with a dot and a well-known last label (server.example.com,
+  // conch.example.co.uk). A name the list misses is caught only when held.
+  /\b(?:[a-z0-9-]+\.)+(?:com|net|org|io|dev|app|local|lan|home|internal|test|me|co|uk|de|fr|eu|nl|se|ca|au|us|cloud|xyz|info|biz)\b(?::\d{1,5})?/gi,
+  // A UUID (also the iOS vendor identifier), the Android ID (16 hex digits), a MAC address.
   /\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi,
   /\b[0-9a-f]{16}\b/gi,
   /\b(?:[0-9a-f]{2}:){5}[0-9a-f]{2}\b/gi,

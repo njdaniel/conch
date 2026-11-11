@@ -3,7 +3,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import type { CameraClaimResult } from '../src/logic/api';
-import { CameraClient, cameraOff, endNote, type CameraApi, type CameraRoom, type CameraState, type KeptCamera } from '../src/logic/camera';
+import { CameraClient, cameraOff, endNote, failureNote, type CameraApi, type CameraRoom, type CameraState, type KeptCamera } from '../src/logic/camera';
 import { Lifecycle, type LifecycleReason } from '../src/logic/lifecycle';
 import { TransmitGate } from '../src/logic/gate';
 import { wanted, type TrackKind, type TrackSource } from '../src/logic/subscribe';
@@ -283,4 +283,12 @@ test('a camera is wanted only while viewed, shown and claimed', () => {
   assert.equal(wanted('camera', 'video', { viewing: false, shown: true, claimed: true }), false);
   assert.equal(wanted('camera', 'video', { viewing: true, shown: false, claimed: true }), false);
   assert.equal(wanted('camera', 'video', { viewing: true, shown: true, claimed: false }), false);
+});
+
+// The phone's wording for a blocked camera names the app's settings, not a
+// browser's site settings (ported from Android's #1392 review, worded for iOS).
+test('failureNote: a blocked camera names iOS Settings, never a browser', () => {
+  const note = failureNote('blocked');
+  assert.match(note, /iOS Settings/);
+  assert.doesNotMatch(note, /browser|site/i);
 });
