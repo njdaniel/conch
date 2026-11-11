@@ -68,7 +68,13 @@ func configDir() (string, error) {
 		return dir, nil
 	}
 	// No user configuration directory is not an error: there is no stored login.
-	if base, err := userConfigDir(); err == nil && base != "" {
+	// On Windows os.UserConfigDir (os/file.go) answers Getenv("AppData") and nothing
+	// else: an error when it is empty, and the value as it is when it is relative,
+	// where on Linux a relative XDG_CONFIG_HOME is an error. A relative base would put
+	// the login wherever the shell happened to be, so it is no directory here, as
+	// conch-voice's default_config_dir takes it
+	// (testdata/config-dir-vectors-windows.json).
+	if base, err := userConfigDir(); err == nil && base != "" && filepath.IsAbs(base) {
 		return filepath.Join(base, credentialsDirName), nil
 	}
 	return "", nil

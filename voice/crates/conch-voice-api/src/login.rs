@@ -4,7 +4,7 @@
 //! `<configuration directory>/credentials.json`, where the directory is `CONCH_CONFIG_DIR`
 //! as given or else `<user configuration directory>/conch` ([`default_config_dir`]; the
 //! shared vectors in `internal/cli/testdata/config-dir-vectors.json` hold the two programs
-//! to one rule), a JSON object from a server's key
+//! to one rule; Windows has its own, `%APPDATA%\conch`), a JSON object from a server's key
 //! ([`ServerAddress::key`]) to `{"token": "..."}`; on unix a file that group or others can
 //! touch is refused; and `CONCH_TOKEN`, when it is set to more than white space, wins over
 //! the file.
@@ -20,6 +20,8 @@ use std::ffi::OsStr;
 use std::io::Read;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
+#[cfg(windows)]
+use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 
 use crate::error::Error;
@@ -37,19 +39,71 @@ const CREDENTIALS_FILE: &str = "credentials.json";
 /// More than any credentials file holds; a larger one is not read into memory.
 const MAX_CREDENTIALS_BYTES: u64 = 1 << 20;
 
+/// `FILE_FLAG_OPEN_REPARSE_POINT`, the `dwFlagsAndAttributes` value of `CreateFileW` that
+/// opens a symbolic link or junction as itself instead of following it. Hand-defined, as
+/// `O_NONBLOCK` is in `conch-voice`'s `config_cmd.rs`: the value is from the Windows SDK's
+/// `winbase.h` (0x00200000), and `windows-sys` is not a dependency here.
+#[cfg(windows)]
+const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+
+/// `FILE_ATTRIBUTE_REPARSE_POINT`, the attribute a symbolic link or junction carries:
+/// `winnt.h`, 0x400.
+#[cfg(windows)]
+const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
+
+/// What [`open_unfollowed`] found at a path.
+#[cfg(windows)]
+#[derive(Debug)]
+pub enum Unfollowed {
+    /// An ordinary file, open for reading.
+    File(std::fs::File),
+    /// A reparse point (a symbolic link or junction): opened as itself, never followed.
+    Link,
+    /// Something that is not a file.
+    NotRegular,
+}
+
+/// Opens `path` for reading on Windows without following a link, and says what was opened.
+/// The check is on the opened handle: `FILE_FLAG_OPEN_REPARSE_POINT` makes a link open as
+/// itself, and the handle's attributes then show it, so a file swapped for a link after the
+/// caller looked at the path cannot make this read another file. On Windows the protection
+/// of a file is its directory's, not its own (`docs/design/windows-desktop.md` §2.7).
+///
+/// # Errors
+///
+/// What the operating system answers to the open, including a sharing violation.
+#[cfg(windows)]
+pub fn open_unfollowed(path: &Path) -> std::io::Result<Unfollowed> {
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)?;
+    let meta = file.metadata()?;
+    if meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        return Ok(Unfollowed::Link);
+    }
+    if !meta.is_file() {
+        return Ok(Unfollowed::NotRegular);
+    }
+    Ok(Unfollowed::File(file))
+}
+
 /// The directory that holds `credentials.json` (and `conch-voice`'s `voice.toml`), from the
-/// values of `CONCH_CONFIG_DIR`, `XDG_CONFIG_HOME` and `HOME`, by the rule of `configDir` in
-/// `internal/cli/credentials.go`:
+/// values of `CONCH_CONFIG_DIR`, `XDG_CONFIG_HOME`, `HOME` and `APPDATA`, by the rule of
+/// `configDir` in `internal/cli/credentials.go`:
 ///
 /// 1. `CONCH_CONFIG_DIR`, if it holds more than white space, is the directory exactly as
 ///    given (not trimmed, no `conch` appended). It must be absolute: a relative one is
 ///    [`Error::ConfigDirNotAbsolute`], not resolved against the working directory.
 /// 2. Otherwise the user's configuration directory plus `conch`, by the rule of Go's
-///    `os.UserConfigDir` on Linux: `XDG_CONFIG_HOME` if it is set and absolute, otherwise
-///    `$HOME/.config`.
+///    `os.UserConfigDir`.
+///    - Off Windows: `XDG_CONFIG_HOME` if it is set and absolute, otherwise
+///      `$HOME/.config`. `APPDATA` is not read.
+///    - On Windows: `%APPDATA%`, if it is non-empty and absolute. `XDG_CONFIG_HOME` and
+///      `HOME` are not read.
 ///
-/// `Ok(None)` means there is none (a relative `XDG_CONFIG_HOME`, or neither variable set),
-/// and then there is no stored login.
+/// `Ok(None)` means there is none (a relative `XDG_CONFIG_HOME`, or neither variable set;
+/// on Windows an empty or relative `%APPDATA%`), and then there is no stored login.
 ///
 /// # Errors
 ///
@@ -58,6 +112,7 @@ pub fn default_config_dir(
     conch_config_dir: Option<&OsStr>,
     xdg_config_home: Option<&OsStr>,
     home: Option<&OsStr>,
+    appdata: Option<&OsStr>,
 ) -> Result<Option<PathBuf>, Error> {
     // A value that is not UTF-8 is not white space.
     let given = conch_config_dir.filter(|dir| dir.to_str().is_none_or(|s| !s.trim().is_empty()));
@@ -68,13 +123,38 @@ pub fn default_config_dir(
             Err(Error::ConfigDirNotAbsolute)
         };
     }
-    let base = match xdg_config_home.filter(|dir| !dir.is_empty()) {
+    Ok(user_config_dir(xdg_config_home, home, appdata).map(|base| base.join(CONFIG_DIR_NAME)))
+}
+
+/// Go's `os.UserConfigDir` on Windows reads `%AppData%` and nothing else, and on its own
+/// answers an empty one with an error and a relative one as given; `configDir` in
+/// `internal/cli/credentials.go` takes only an absolute base, so both are no directory here.
+#[cfg(windows)]
+fn user_config_dir(
+    _xdg_config_home: Option<&OsStr>,
+    _home: Option<&OsStr>,
+    appdata: Option<&OsStr>,
+) -> Option<PathBuf> {
+    appdata
+        .filter(|dir| !dir.is_empty() && Path::new(dir).is_absolute())
+        .map(PathBuf::from)
+}
+
+/// Go's `os.UserConfigDir` off Windows (Linux's rule): `XDG_CONFIG_HOME` if set and
+/// absolute (a relative one is no directory, with no fallback to `HOME`), otherwise
+/// `$HOME/.config`.
+#[cfg(not(windows))]
+fn user_config_dir(
+    xdg_config_home: Option<&OsStr>,
+    home: Option<&OsStr>,
+    _appdata: Option<&OsStr>,
+) -> Option<PathBuf> {
+    match xdg_config_home.filter(|dir| !dir.is_empty()) {
         Some(dir) => Path::new(dir).is_absolute().then(|| PathBuf::from(dir)),
         None => home
             .filter(|dir| !dir.is_empty())
             .map(|dir| Path::new(dir).join(".config")),
-    };
-    Ok(base.map(|base| base.join(CONFIG_DIR_NAME)))
+    }
 }
 
 /// Where the credentials file is, in the configuration directory [`default_config_dir`]
@@ -173,13 +253,29 @@ fn read_logins(path: &Path) -> Result<Option<HashMap<String, Option<StoredCreden
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(unreadable(e)),
     }
+    #[cfg(not(windows))]
     let file = match std::fs::File::open(path) {
         Ok(file) => file,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(unreadable(e)),
     };
+    // On Windows the open itself does not follow a link, and the opened handle is checked,
+    // so a swap after the look above cannot change which file is read.
+    #[cfg(windows)]
+    let file = match open_unfollowed(path) {
+        Ok(Unfollowed::File(file)) => file,
+        Ok(Unfollowed::Link | Unfollowed::NotRegular) => {
+            return Err(Error::CredentialsNotRegular {
+                path: path.to_owned(),
+            });
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(unreadable(e)),
+    };
     // The open file is what is checked, so the check cannot be about another file.
-    // The mode bits exist on unix only; elsewhere there is no group/other rule to apply.
+    // The mode bits exist on unix only. On Windows there is no group/other rule to apply and
+    // an ACL cannot be read from safe Rust: the protection is the directory's, not the
+    // file's (`docs/design/windows-desktop.md` §2.7).
     #[cfg(unix)]
     {
         let mode = file.metadata().map_err(unreadable)?.permissions().mode() & 0o777;
@@ -221,7 +317,7 @@ fn read_logins(path: &Path) -> Result<Option<HashMap<String, Option<StoredCreden
     }
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod tests {
     use std::fs;
 
@@ -236,13 +332,17 @@ mod tests {
     }
 
     /// A private configuration directory holding a credentials file with these bytes and
-    /// this mode.
+    /// this mode (where there are modes: on Windows the mode is not applied, and the
+    /// protection is the directory's).
     fn config_with(contents: &str, mode: u32) -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
         let path = credentials_path(dir.path());
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(&path, contents).unwrap();
+        #[cfg(unix)]
         fs::set_permissions(&path, fs::Permissions::from_mode(mode)).unwrap();
+        #[cfg(not(unix))]
+        let _ = mode;
         dir
     }
 
@@ -387,6 +487,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_file_others_can_touch_is_refused_naming_the_file_and_the_fix() {
         // (mode, refused)
@@ -507,6 +608,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = credentials_path(dir.path());
         fs::create_dir_all(&path).unwrap();
+        #[cfg(unix)]
         fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
         let error = resolve(None, "http://a:1", &dir).unwrap_err();
         match &error {
@@ -516,6 +618,7 @@ mod tests {
         assert!(error.to_string().contains("credentials.json"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_file_this_user_may_not_open_is_an_error_that_names_it_and_not_a_missing_login() {
         let dir = config_with(&as_go_writes_it(), 0o000);
@@ -571,6 +674,7 @@ mod tests {
             fs::metadata(&path).unwrap().modified().unwrap(),
         );
         assert_eq!(before, after);
+        #[cfg(unix)]
         assert_eq!(
             fs::metadata(&path).unwrap().permissions().mode() & 0o777,
             0o600
@@ -582,6 +686,7 @@ mod tests {
         assert_eq!(entries, [OsStr::new("credentials.json")]);
     }
 
+    #[cfg(not(windows))]
     #[derive(serde::Deserialize)]
     struct ConfigDirVector {
         note: String,
@@ -592,6 +697,7 @@ mod tests {
         want_error: bool,
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn the_directory_matches_go_for_every_shared_vector() {
         let path = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -609,6 +715,50 @@ mod tests {
                 var(&v.conch_config_dir),
                 var(&v.xdg_config_home),
                 var(&v.home),
+                None,
+            );
+            if v.want_error {
+                let error = got.unwrap_err();
+                assert!(matches!(error, Error::ConfigDirNotAbsolute), "{}", v.note);
+                continue;
+            }
+            let want = (!v.want.is_empty()).then(|| PathBuf::from(&v.want));
+            assert_eq!(got.unwrap(), want, "{}", v.note);
+        }
+    }
+
+    #[cfg(windows)]
+    #[derive(serde::Deserialize)]
+    struct WindowsConfigDirVector {
+        note: String,
+        conch_config_dir: String,
+        appdata: String,
+        want: String,
+        want_error: bool,
+    }
+
+    /// The Windows rule, from the vectors Go's `TestConfigDirSharedVectorsWindows` runs: only
+    /// where `Path::is_absolute` is the Windows one.
+    #[cfg(windows)]
+    #[test]
+    fn the_windows_directory_matches_go_for_every_shared_vector() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../internal/cli/testdata/config-dir-vectors-windows.json");
+        let text =
+            fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+        let vectors: Vec<WindowsConfigDirVector> = serde_json::from_str(&text).unwrap();
+        assert!(vectors.len() >= 10, "only {} vectors", vectors.len());
+        fn var(value: &str) -> Option<&OsStr> {
+            (!value.is_empty()).then(|| OsStr::new(value))
+        }
+        for v in &vectors {
+            // XDG_CONFIG_HOME and HOME are set to values that would win off Windows: they
+            // are not read here.
+            let got = default_config_dir(
+                var(&v.conch_config_dir),
+                Some(OsStr::new("C:\\xdg")),
+                Some(OsStr::new("C:\\home")),
+                var(&v.appdata),
             );
             if v.want_error {
                 let error = got.unwrap_err();
@@ -625,6 +775,7 @@ mod tests {
         let error = default_config_dir(
             Some(OsStr::new("relative/FAKE_secret_dir")),
             Some(OsStr::new("/made/up/xdg")),
+            None,
             None,
         )
         .unwrap_err();
@@ -644,6 +795,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     /// A FIFO at `dir/credentials.json`, or None (with a message) without `mkfifo`.
     fn fifo_in(dir: &Path) -> Option<PathBuf> {
         let path = credentials_path(dir);
@@ -656,6 +808,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_fifo_is_refused_at_once_and_does_not_hang() {
         let dir = tempfile::tempdir().unwrap();
@@ -682,8 +835,21 @@ mod tests {
     fn a_symlink_at_the_leaf_is_refused_even_to_a_good_file() {
         let real = config_with(&as_go_writes_it(), 0o600);
         let dir = tempfile::tempdir().unwrap();
+        #[cfg(unix)]
         std::os::unix::fs::symlink(credentials_path(real.path()), credentials_path(dir.path()))
             .unwrap();
+        // Creating a file symbolic link on Windows needs a privilege or developer mode
+        // (GitHub's Windows runners have it): without it this says why it did not run.
+        #[cfg(windows)]
+        if std::os::windows::fs::symlink_file(
+            credentials_path(real.path()),
+            credentials_path(dir.path()),
+        )
+        .is_err()
+        {
+            eprintln!("skipped: this process may not create a symbolic link");
+            return;
+        }
         let result = resolve_token(None, &server("http://a:1"), Some(dir.path()));
         assert!(
             matches!(result, Err(Error::CredentialsNotRegular { .. })),
@@ -696,6 +862,7 @@ mod tests {
         assert!(matches!(result, Err(Error::CredentialsNotRegular { .. })));
     }
 
+    #[cfg(unix)]
     #[test]
     fn an_error_is_one_line_even_if_the_directory_name_has_a_newline() {
         let parent = tempfile::tempdir().unwrap();
@@ -756,21 +923,29 @@ mod tests {
         assert!(stored_servers(Some(empty.path())).is_empty());
         assert!(stored_servers(Some(&empty.path().join("gone"))).is_empty());
         // Others may read it: conch would not use it, and neither does this.
-        let exposed = config_with(&as_go_writes_it(), 0o644);
-        assert!(stored_servers(Some(exposed.path())).is_empty());
+        #[cfg(unix)]
+        {
+            let exposed = config_with(&as_go_writes_it(), 0o644);
+            assert!(stored_servers(Some(exposed.path())).is_empty());
+        }
         // A link to a good file, a directory in its place, a FIFO that would never answer.
-        let real = config_with(&as_go_writes_it(), 0o600);
-        let linked = tempfile::tempdir().unwrap();
-        std::os::unix::fs::symlink(
-            credentials_path(real.path()),
-            credentials_path(linked.path()),
-        )
-        .unwrap();
-        assert!(stored_servers(Some(linked.path())).is_empty());
+        #[cfg(unix)]
+        {
+            let real = config_with(&as_go_writes_it(), 0o600);
+            let linked = tempfile::tempdir().unwrap();
+            std::os::unix::fs::symlink(
+                credentials_path(real.path()),
+                credentials_path(linked.path()),
+            )
+            .unwrap();
+            assert!(stored_servers(Some(linked.path())).is_empty());
+        }
         let directory = tempfile::tempdir().unwrap();
         fs::create_dir(credentials_path(directory.path())).unwrap();
         assert!(stored_servers(Some(directory.path())).is_empty());
+        #[cfg(unix)]
         let fifo = tempfile::tempdir().unwrap();
+        #[cfg(unix)]
         if fifo_in(fifo.path()).is_some() {
             let path = fifo.path().to_owned();
             let (tx, rx) = std::sync::mpsc::channel();

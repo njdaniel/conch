@@ -15,38 +15,43 @@
 //! The file's `server` decides where the login token is sent, so the save asks of the file
 //! what `cli::read_config` asks, and more:
 //!
-//! - A symbolic link, anything that is not a regular file, and a file that group or others
-//!   can write are refused. Each is looked at before it is opened, so a FIFO cannot make the
-//!   command wait, and the file opened is checked to be the one looked at.
+//! - A symbolic link, anything that is not a regular file, and (on Unix) a file that group
+//!   or others can write are refused. Each is looked at before it is opened, so a FIFO
+//!   cannot make the command wait, and the file opened is checked to be the one looked at:
+//!   on Unix by device and inode, on Windows by opening it with
+//!   `FILE_FLAG_OPEN_REPARSE_POINT` and refusing the opened handle if it is a reparse
+//!   point. **On Windows the protection is the directory's, not the file's:** there are no
+//!   mode bits and an ACL cannot be read from safe Rust, so an ordinary file in the
+//!   configuration directory is trusted (`docs/design/windows-desktop.md` §2.7).
 //! - The text is edited by `set_audio_value`, `set_keys_value` or `unset_keys_value`, which refuse a file the parser refuses and
 //!   checks its own result: the same configuration but for the one field, and the same
 //!   bytes but for the one value.
 //! - The new text goes to a new file in the same directory, created exclusively, written
-//!   and synced, with the old file's mode (0600 for a new file); a rename puts it in
-//!   `voice.toml`'s place, and the directory is synced. A reader sees the old file or the
-//!   new one, never half of either.
-//! - Just before the rename, `voice.toml` is read again. If anything changed it, the new
+//!   and synced, with the old file's mode (0600 for a new file) on Unix; a rename puts it in
+//!   `voice.toml`'s place, and the directory is synced where it can be. A reader sees the
+//!   old file or the new one, never half of either. On Windows a rename that the system
+//!   refuses (the file is read-only, or another handle is open on it without share-delete)
+//!   is `Error::ConfigWrite`, naming the file, with the original as it was.
+//! - Just before the rename, `voice.toml` is read again. If anything changed it (its text,
+//!   and its mode and identity on Unix or its size and attributes on Windows), the new
 //!   file is removed and the save refused: what the other writer wrote is kept.
 //!
 //! What remains: a change made between that last read and the rename is lost. Closing that
 //! window would need a lock every writer takes, a person's editor included.
 
-#[cfg(unix)]
-use std::fs::{self, File, OpenOptions, Permissions};
-#[cfg(unix)]
+use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 #[cfg(unix)]
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
-#[cfg(unix)]
+#[cfg(windows)]
+use std::os::windows::fs::MetadataExt;
 use std::path::{Path, PathBuf};
-#[cfg(unix)]
 use std::time::{SystemTime, UNIX_EPOCH};
 
-#[cfg(unix)]
 use conch_voice_api::default_config_dir;
-use conch_voice_control::{AudioKey, KeysKey};
-#[cfg(unix)]
-use conch_voice_control::{Config, set_audio_value, set_keys_value, unset_keys_value};
+use conch_voice_control::{
+    AudioKey, Config, KeysKey, set_audio_value, set_keys_value, unset_keys_value,
+};
 
 use crate::cli::Environment;
 use crate::error::Error;
@@ -55,7 +60,8 @@ use crate::error::Error;
 pub const FILE_NAME: &str = "voice.toml";
 
 /// The mode of a `voice.toml` this command creates: the person's own, as `conch login`
-/// makes `credentials.json`.
+/// makes `credentials.json`. Unix only: on Windows the file takes the directory's ACL.
+#[cfg(unix)]
 pub const NEW_FILE_MODE: u32 = 0o600;
 
 /// `O_NONBLOCK` on Linux and Android. std has no name for it and `libc` is not a dependency
@@ -90,7 +96,6 @@ const O_NONBLOCK: i32 = 0x0004;
 compile_error!("config_cmd.rs: O_NONBLOCK is not known for this Unix target");
 
 /// How many names are tried for the temporary file before giving up.
-#[cfg(unix)]
 const TEMPORARY_NAMES: u32 = 16;
 
 /// Sets `key` to `value` in `voice.toml` in the configuration directory `environment`
@@ -103,16 +108,8 @@ const TEMPORARY_NAMES: u32 = 16;
 /// [`Error::NoConfigDir`] when there is no configuration directory; what
 /// [`default_config_dir`] says of `CONCH_CONFIG_DIR`; and what [`save`] says.
 pub fn set(environment: &Environment, key: AudioKey, value: &str) -> Result<(), Error> {
-    #[cfg(unix)]
-    {
-        let dir = config_dir(environment)?;
-        save(&dir, key, value, &mut || {})
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = (environment, key, value);
-        Err(unsupported())
-    }
+    let dir = config_dir(environment)?;
+    save(&dir, key, value, &mut || {})
 }
 
 /// Sets `key` under `[keys]` to `value`, as [`set`] does for `[audio]`.
@@ -121,16 +118,8 @@ pub fn set(environment: &Environment, key: AudioKey, value: &str) -> Result<(), 
 ///
 /// As [`set`].
 pub fn set_keys(environment: &Environment, key: KeysKey, value: &str) -> Result<(), Error> {
-    #[cfg(unix)]
-    {
-        let dir = config_dir(environment)?;
-        save_keys(&dir, key, value, &mut || {})
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = (environment, key, value);
-        Err(unsupported())
-    }
+    let dir = config_dir(environment)?;
+    save_keys(&dir, key, value, &mut || {})
 }
 
 /// Removes `key` from `[keys]`; a key that is not there, or no file, is a success that
@@ -140,36 +129,16 @@ pub fn set_keys(environment: &Environment, key: KeysKey, value: &str) -> Result<
 ///
 /// As [`set`].
 pub fn unset_keys(environment: &Environment, key: KeysKey) -> Result<(), Error> {
-    #[cfg(unix)]
-    {
-        let dir = config_dir(environment)?;
-        unset_keys_in(&dir, key, &mut || {})
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = (environment, key);
-        Err(unsupported())
-    }
+    let dir = config_dir(environment)?;
+    unset_keys_in(&dir, key, &mut || {})
 }
 
-/// What the three commands above answer where the file's checks and its atomic replace
-/// have no Windows form yet (the Windows port of the configuration is #904):
-/// [`Error::Unsupported`], with `voice.toml` untouched. Compiled on Linux too so that a
-/// test holds it.
-#[cfg(any(not(unix), test))]
-fn unsupported() -> Error {
-    Error::Unsupported {
-        what: "changing the configuration file (config set)",
-        path: None,
-    }
-}
-
-#[cfg(unix)]
 fn config_dir(environment: &Environment) -> Result<PathBuf, Error> {
     default_config_dir(
         environment.conch_config_dir.as_deref(),
         environment.xdg_config_home.as_deref(),
         environment.home.as_deref(),
+        environment.appdata.as_deref(),
     )?
     .ok_or(Error::NoConfigDir)
 }
@@ -189,7 +158,6 @@ fn config_dir(environment: &Environment) -> Result<PathBuf, Error> {
 /// - [`Error::ConfigRead`] and [`Error::ConfigWrite`] for what the operating system refused.
 ///
 /// In every case `voice.toml` is as it was, and no temporary file is left.
-#[cfg(unix)]
 pub(crate) fn save(
     dir: &Path,
     key: AudioKey,
@@ -204,7 +172,6 @@ pub(crate) fn save(
 }
 
 /// [`save`] for a `[keys]` value.
-#[cfg(unix)]
 pub(crate) fn save_keys(
     dir: &Path,
     key: KeysKey,
@@ -219,7 +186,6 @@ pub(crate) fn save_keys(
 }
 
 /// [`save`] for the removal of a `[keys]` value.
-#[cfg(unix)]
 pub(crate) fn unset_keys_in(
     dir: &Path,
     key: KeysKey,
@@ -234,7 +200,6 @@ pub(crate) fn unset_keys_in(
 
 /// The save every command shares: `edit` turns the file's text (and the name to call it in
 /// errors) into the new text.
-#[cfg(unix)]
 fn save_with(
     dir: &Path,
     edit: &dyn Fn(&str, &str) -> Result<String, Error>,
@@ -269,16 +234,18 @@ fn save_with(
     };
     // Never more open than the file it replaces: its mode without group or other write,
     // which the snapshot has already refused, taken off again all the same.
+    #[cfg(unix)]
     let mode = before
         .as_ref()
         .map_or(NEW_FILE_MODE, |before| before.mode & !0o022);
     let mut temporary = Temporary::create(dir).map_err(write)?;
+    temporary.file.write_all(new.as_bytes()).map_err(write)?;
+    #[cfg(unix)]
     temporary
         .file
-        .write_all(new.as_bytes())
-        .and_then(|()| temporary.file.set_permissions(Permissions::from_mode(mode)))
-        .and_then(|()| temporary.file.sync_all())
+        .set_permissions(fs::Permissions::from_mode(mode))
         .map_err(write)?;
+    temporary.file.sync_all().map_err(write)?;
 
     before_rename();
     if Snapshot::take(&path)? != before {
@@ -294,16 +261,24 @@ fn save_with(
 
 /// `voice.toml` as it was found: its text, and what would show that it was replaced or
 /// changed.
-#[cfg(unix)]
 #[derive(Debug, PartialEq, Eq)]
 struct Snapshot {
     text: String,
+    #[cfg(unix)]
     mode: u32,
+    #[cfg(unix)]
     device: u64,
+    #[cfg(unix)]
     inode: u64,
+    /// Windows: the size and attributes, which with the text show a change. Metadata alone
+    /// is not enough: a same-length edit through a handle still open need not change the
+    /// modification time until that handle closes.
+    #[cfg(windows)]
+    size: u64,
+    #[cfg(windows)]
+    attributes: u32,
 }
 
-#[cfg(unix)]
 impl Snapshot {
     /// Reads the file at `path`, or `None` if there is none. Refuses what `save` documents,
     /// looking before it opens.
@@ -327,49 +302,72 @@ impl Snapshot {
                 path: path.to_owned(),
             });
         }
-        let mode = meta.mode() & 0o777;
-        if mode & 0o022 != 0 {
-            return Err(Error::ConfigWritable {
-                path: path.to_owned(),
+        #[cfg(unix)]
+        {
+            let mode = meta.mode() & 0o777;
+            if mode & 0o022 != 0 {
+                return Err(Error::ConfigWritable {
+                    path: path.to_owned(),
+                    mode,
+                });
+            }
+            // Opened without waiting: a FIFO put in the file's place since it was looked at
+            // would otherwise block the open until something writes to it. The check below
+            // then refuses it as a change.
+            let mut file = OpenOptions::new()
+                .read(true)
+                .custom_flags(O_NONBLOCK)
+                .open(path)
+                .map_err(read)?;
+            // What was opened must be what was looked at: a link or another file put in its
+            // place between the two is a change.
+            let opened = file.metadata().map_err(read)?;
+            if (opened.dev(), opened.ino()) != (meta.dev(), meta.ino()) {
+                return Err(Error::ConfigChanged {
+                    path: path.to_owned(),
+                });
+            }
+            let mut text = String::new();
+            file.read_to_string(&mut text).map_err(read)?;
+            Ok(Some(Self {
+                text,
                 mode,
-            });
+                device: meta.dev(),
+                inode: meta.ino(),
+            }))
         }
-        // Opened without waiting: a FIFO put in the file's place since it was looked at
-        // would otherwise block the open until something writes to it. The check below
-        // then refuses it as a change.
-        let mut file = OpenOptions::new()
-            .read(true)
-            .custom_flags(O_NONBLOCK)
-            .open(path)
-            .map_err(read)?;
-        // What was opened must be what was looked at: a link or another file put in its
-        // place between the two is a change.
-        let opened = file.metadata().map_err(read)?;
-        if (opened.dev(), opened.ino()) != (meta.dev(), meta.ino()) {
-            return Err(Error::ConfigChanged {
-                path: path.to_owned(),
-            });
+        #[cfg(windows)]
+        {
+            // Opened as itself, never through a link, and the opened handle is what is
+            // checked: a link or another kind of thing put in the file's place since it was
+            // looked at is a change. Named pipes cannot be planted in a user directory, so
+            // there is no FIFO to wait on and no `O_NONBLOCK` to port.
+            let mut file = match conch_voice_api::open_unfollowed(path).map_err(read)? {
+                conch_voice_api::Unfollowed::File(file) => file,
+                conch_voice_api::Unfollowed::Link | conch_voice_api::Unfollowed::NotRegular => {
+                    return Err(Error::ConfigChanged {
+                        path: path.to_owned(),
+                    });
+                }
+            };
+            let mut text = String::new();
+            file.read_to_string(&mut text).map_err(read)?;
+            Ok(Some(Self {
+                text,
+                size: meta.file_size(),
+                attributes: meta.file_attributes(),
+            }))
         }
-        let mut text = String::new();
-        file.read_to_string(&mut text).map_err(read)?;
-        Ok(Some(Self {
-            text,
-            mode,
-            device: meta.dev(),
-            inode: meta.ino(),
-        }))
     }
 }
 
 /// The new file, beside `voice.toml` until it is renamed to it, and removed if it is not.
-#[cfg(unix)]
 struct Temporary {
     path: PathBuf,
     file: File,
     renamed: bool,
 }
 
-#[cfg(unix)]
 impl Temporary {
     /// Creates a file no one else has made, in `dir`, readable and writable by its owner
     /// only until its mode is set.
@@ -380,13 +378,13 @@ impl Temporary {
             .map_or(0, |since| since.subsec_nanos());
         for attempt in 0..TEMPORARY_NAMES {
             let path = dir.join(format!(".{FILE_NAME}.{process}-{nanos}-{attempt}.tmp"));
-            // O_CREAT | O_EXCL: never a file or a link that is already there.
-            match OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .mode(NEW_FILE_MODE)
-                .open(&path)
-            {
+            // O_CREAT | O_EXCL (CREATE_NEW on Windows): never a file or a link that is already
+            // there.
+            let mut options = OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)]
+            options.mode(NEW_FILE_MODE);
+            match options.open(&path) {
                 Ok(file) => {
                     return Ok(Self {
                         path,
@@ -405,7 +403,6 @@ impl Temporary {
     }
 }
 
-#[cfg(unix)]
 impl Drop for Temporary {
     fn drop(&mut self) {
         if !self.renamed {
@@ -416,22 +413,10 @@ impl Drop for Temporary {
     }
 }
 
-#[cfg(test)]
-mod unsupported_tests {
-    use super::*;
-
-    #[test]
-    fn the_non_unix_answer_is_typed_and_names_the_command() {
-        let error = unsupported();
-        assert!(matches!(error, Error::Unsupported { .. }));
-        assert!(error.to_string().contains("config set"), "{error}");
-        assert_eq!(error.exit_code(), 2);
-    }
-}
-
 #[cfg(all(test, unix))]
 mod tests {
     use std::ffi::OsString;
+    use std::fs::Permissions;
     use std::sync::mpsc;
     use std::time::Duration;
 
@@ -1088,6 +1073,204 @@ mod tests {
         assert!(matches!(error, Error::ConfigChanged { .. }), "{error}");
         assert!(!error.to_string().contains("Mouse"));
         assert_eq!(fs::read_to_string(&path).unwrap(), "[keys]\ntalk = 97\n");
+        assert_eq!(names(dir.path()), [FILE_NAME]);
+    }
+}
+
+/// The save on Windows (`docs/design/windows-desktop.md` §2.7(3), (4)): the same shape as on
+/// Unix, with the checks a Windows file has. They run in the `voice-windows` CI job.
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use std::ffi::OsString;
+    use std::os::windows::fs::OpenOptionsExt;
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+
+    use super::*;
+
+    const KEPT: &str = "# mine\nserver = \"http://127.0.0.1:8080\" # here\n\n[audio]\n# the headset\ninput = \"old\" # by hand\nrelease_tail_ms = 150\n";
+    /// `FILE_SHARE_READ`: another handle that allows others to read and nothing else, so the
+    /// file can be neither written, renamed over nor deleted while it is open.
+    const FILE_SHARE_READ: u32 = 0x1;
+
+    /// The names in `dir`, sorted: a temporary file left behind would be among them.
+    fn names(dir: &Path) -> Vec<OsString> {
+        let mut names: Vec<_> = fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        names.sort();
+        names
+    }
+
+    fn save_now(dir: &Path, value: &str) -> Result<(), Error> {
+        save(dir, AudioKey::Input, value, &mut || {})
+    }
+
+    /// A file symbolic link at `link` to `target`, or false (and a message): that needs a
+    /// privilege or developer mode, which GitHub's Windows runners have.
+    fn symlink(target: &Path, link: &Path) -> bool {
+        match std::os::windows::fs::symlink_file(target, link) {
+            Ok(()) => true,
+            Err(error) => {
+                eprintln!("skipped: this process may not create a symbolic link: {error}");
+                false
+            }
+        }
+    }
+
+    #[test]
+    fn only_the_value_changes_and_a_missing_file_is_created() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(FILE_NAME);
+        save_now(dir.path(), "default").unwrap();
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "[audio]\ninput = \"default\"\n"
+        );
+
+        fs::write(&path, KEPT).unwrap();
+        save_now(dir.path(), "new").unwrap();
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            KEPT.replace("\"old\"", "\"new\"")
+        );
+        assert_eq!(names(dir.path()), [FILE_NAME]);
+        // What was saved is what `join` reads.
+        let config = crate::cli::read_config(&path).unwrap();
+        assert_eq!(config.audio.input.as_deref(), Some("new"));
+        assert_eq!(config.server.as_deref(), Some("http://127.0.0.1:8080"));
+    }
+
+    #[test]
+    fn a_reparse_point_or_a_directory_at_the_path_is_refused_and_the_target_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        let other = dir.path().join("other.toml");
+        fs::write(&other, KEPT).unwrap();
+        let path = dir.path().join(FILE_NAME);
+        if symlink(&other, &path) {
+            let error = save_now(dir.path(), "new").unwrap_err();
+            assert!(matches!(error, Error::ConfigLink { .. }), "{error:?}");
+            assert_eq!(fs::read_to_string(&other).unwrap(), KEPT);
+            fs::remove_file(&path).unwrap();
+        }
+        fs::create_dir(&path).unwrap();
+        let error = save_now(dir.path(), "new").unwrap_err();
+        assert!(matches!(error, Error::ConfigNotRegular { .. }), "{error:?}");
+    }
+
+    #[test]
+    fn a_swap_for_a_link_after_the_look_is_refused_and_the_other_file_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        let other = dir.path().join("other.toml");
+        let other_text = "server = \"http://evil.test\"\n";
+        fs::write(&other, other_text).unwrap();
+        let path = dir.path().join(FILE_NAME);
+        fs::write(&path, KEPT).unwrap();
+        let mut skipped = false;
+        let result = save(dir.path(), AudioKey::Input, "new", &mut || {
+            // After the file was read and before it is looked at again.
+            fs::remove_file(&path).unwrap();
+            skipped = !symlink(&other, &path);
+        });
+        if skipped {
+            return;
+        }
+        let error = result.unwrap_err();
+        assert!(
+            matches!(
+                error,
+                Error::ConfigLink { .. } | Error::ConfigChanged { .. }
+            ),
+            "{error:?}"
+        );
+        assert!(!error.to_string().contains("evil.test"), "{error}");
+        assert_eq!(fs::read_to_string(&other).unwrap(), other_text);
+        assert!(
+            !names(dir.path())
+                .iter()
+                .any(|n| n.to_string_lossy().ends_with(".tmp"))
+        );
+    }
+
+    #[test]
+    fn replacement_while_another_handle_is_open_is_a_typed_error_naming_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(FILE_NAME);
+        fs::write(&path, KEPT).unwrap();
+        let held = OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ)
+            .open(&path)
+            .unwrap();
+        let error = save_now(dir.path(), "new").unwrap_err();
+        drop(held);
+        match &error {
+            Error::ConfigWrite { path: named, .. } | Error::ConfigRead { path: named, .. } => {
+                assert_eq!(named, &path);
+            }
+            other => panic!("expected a typed error naming the file, got {other:?}"),
+        }
+        assert!(error.to_string().contains(FILE_NAME), "{error}");
+        assert_eq!(fs::read_to_string(&path).unwrap(), KEPT);
+        assert_eq!(names(dir.path()), [FILE_NAME]);
+    }
+
+    #[test]
+    fn an_interrupted_write_leaves_the_original_and_no_temporary_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(FILE_NAME);
+        fs::write(&path, KEPT).unwrap();
+        // The new file is written; the process is interrupted before the rename.
+        let interrupted = catch_unwind(AssertUnwindSafe(|| {
+            let _ = save(dir.path(), AudioKey::Input, "new", &mut || {
+                panic!("interrupted");
+            });
+        }));
+        assert!(interrupted.is_err());
+        assert_eq!(fs::read_to_string(&path).unwrap(), KEPT);
+        assert_eq!(names(dir.path()), [FILE_NAME]);
+    }
+
+    #[test]
+    fn a_read_only_file_is_never_half_written() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(FILE_NAME);
+        fs::write(&path, KEPT).unwrap();
+        let mut permissions = fs::metadata(&path).unwrap().permissions();
+        permissions.set_readonly(true);
+        fs::set_permissions(&path, permissions).unwrap();
+        // Whether the system lets a rename replace a read-only file is its own rule: the
+        // save either fails with a typed error naming the file and leaves the original, or
+        // replaces it whole.
+        match save_now(dir.path(), "new") {
+            Ok(()) => {
+                let text = fs::read_to_string(&path).unwrap();
+                assert_eq!(text, KEPT.replace("\"old\"", "\"new\""));
+            }
+            Err(error) => {
+                assert!(matches!(error, Error::ConfigWrite { .. }), "{error:?}");
+                assert!(error.to_string().contains(FILE_NAME), "{error}");
+                assert_eq!(fs::read_to_string(&path).unwrap(), KEPT);
+            }
+        }
+        // The read-only temporary-free state is the same either way.
+        assert_eq!(names(dir.path()), [FILE_NAME]);
+    }
+
+    #[test]
+    fn an_edit_between_load_and_rename_is_changed_meanwhile_and_is_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(FILE_NAME);
+        fs::write(&path, KEPT).unwrap();
+        // The same length, so only the text can show it.
+        let theirs = KEPT.replace("\"old\"", "\"zzz\"");
+        assert_eq!(theirs.len(), KEPT.len());
+        let error = save(dir.path(), AudioKey::Input, "new", &mut || {
+            fs::write(&path, &theirs).unwrap();
+        })
+        .unwrap_err();
+        assert!(matches!(error, Error::ConfigChanged { .. }), "{error:?}");
+        assert_eq!(fs::read_to_string(&path).unwrap(), theirs);
         assert_eq!(names(dir.path()), [FILE_NAME]);
     }
 }

@@ -1,0 +1,14 @@
+[
+  {"note": "nothing set: no directory, and that is not an error", "conch_config_dir": "", "appdata": "", "want": "", "want_error": false},
+  {"note": "APPDATA only: %APPDATA%\\conch", "conch_config_dir": "", "appdata": "C:\\Users\\alice\\AppData\\Roaming", "want": "C:\\Users\\alice\\AppData\\Roaming\\conch", "want_error": false},
+  {"note": "APPDATA empty: no directory", "conch_config_dir": "", "appdata": "", "want": "", "want_error": false},
+  {"note": "a relative APPDATA is no directory, not an error", "conch_config_dir": "", "appdata": "AppData\\Roaming", "want": "", "want_error": false},
+  {"note": "CONCH_CONFIG_DIR is used as given, no conch\\ appended", "conch_config_dir": "C:\\work\\alice", "appdata": "", "want": "C:\\work\\alice", "want_error": false},
+  {"note": "CONCH_CONFIG_DIR wins over APPDATA", "conch_config_dir": "C:\\work\\alice", "appdata": "C:\\Users\\alice\\AppData\\Roaming", "want": "C:\\work\\alice", "want_error": false},
+  {"note": "white space only is unset: falls back to APPDATA", "conch_config_dir": "   ", "appdata": "C:\\Users\\alice\\AppData\\Roaming", "want": "C:\\Users\\alice\\AppData\\Roaming\\conch", "want_error": false},
+  {"note": "white space only is unset, and then nothing is set", "conch_config_dir": " \t", "appdata": "", "want": "", "want_error": false},
+  {"note": "a relative path is an error", "conch_config_dir": "alice", "appdata": "", "want": "", "want_error": true},
+  {"note": "a relative path is an error even when APPDATA would do", "conch_config_dir": "alice\\conch", "appdata": "C:\\Users\\alice\\AppData\\Roaming", "want": "", "want_error": true},
+  {"note": "a drive-relative path is an error", "conch_config_dir": "C:alice", "appdata": "C:\\Users\\alice\\AppData\\Roaming", "want": "", "want_error": true},
+  {"note": "a rooted path without a drive is not absolute on Windows: an error", "conch_config_dir": "\\work\\alice", "appdata": "C:\\Users\\alice\\AppData\\Roaming", "want": "", "want_error": true}
+]
