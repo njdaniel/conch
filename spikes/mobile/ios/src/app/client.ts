@@ -15,8 +15,11 @@ import type { AuthSignal, AuthStep } from '../logic/auth';
 import { authorization, build, type Built, type RequestName } from '../logic/requests';
 import type {
   ListChannelsResponse,
+  LoginRequestV1,
   LoginResponseV1,
+  RedeemSignInLinkRequestV1,
   RedeemSignInLinkResponseV1,
+  VoiceTransmitReportV1,
   VoicePresenceV1,
   VoiceTransmitState,
   WhoAmIResponseV1,
@@ -69,9 +72,14 @@ export class ApiClient {
   }
 
   // The server the person typed. Plain HTTP is the development profile (the
-  // debug build allows cleartext; the release build does not).
+  // spike's Info.plist allows local networking only, NSAllowsLocalNetworking:
+  // an IP address or a .local name, never a public host).
+  // A different server is a different credential's world: the bearer held for
+  // the old one is forgotten, never sent to the new one.
   setServer(origin: string): void {
-    this.origin = origin.trim().replace(/\/+$/, '');
+    const next = origin.trim().replace(/\/+$/, '');
+    if (next !== this.origin) this.bearer = null;
+    this.origin = next;
   }
 
   get server(): string {
@@ -93,7 +101,8 @@ export class ApiClient {
   }
 
   async login(name: string, password: string): Promise<Result<LoginResponseV1>> {
-    const reply = await this.send('login', {}, {}, { name, password }, false);
+    const body: LoginRequestV1 = { name, password };
+    const reply = await this.send('login', {}, {}, body, false);
     if (!reply.ok) return reply;
     const out = await this.read(reply.value, loginResponseV1);
     if (out.ok && out.value.next === 'signed_in') this.bearer = out.value.token;
@@ -103,7 +112,10 @@ export class ApiClient {
   // redeemSignInLink spends a one-use code. The link may be pasted whole
   // (<origin>/app/#/signin/<code>) or as the bare code.
   async redeemSignInLink(codeOrLink: string): Promise<Result<RedeemSignInLinkResponseV1>> {
-    const reply = await this.send('redeemSignInLink', {}, {}, { code: signInCode(codeOrLink) }, false);
+    const target = signInTarget(codeOrLink, this.origin);
+    if (!target.ok) return { ok: false, failure: 'invalid', code: target.code };
+    const body: RedeemSignInLinkRequestV1 = { code: target.code };
+    const reply = await this.send('redeemSignInLink', {}, {}, body, false);
     if (!reply.ok) return reply;
     const out = await this.read(reply.value, redeemSignInLinkResponseV1);
     if (out.ok) this.bearer = out.value.token;
@@ -130,7 +142,8 @@ export class ApiClient {
 
   // reportTransmit is one transmit report; the ReportQueue calls it.
   async reportTransmit(channel: string, state: VoiceTransmitState, signal: AbortSignal): Promise<TransmitAnswer> {
-    const reply = await this.send('voiceTransmit', { channel }, {}, { state }, true, signal);
+    const body: VoiceTransmitReportV1 = { state };
+    const reply = await this.send('voiceTransmit', { channel }, {}, body, true, signal);
     if (!reply.ok) {
       if (reply.failure === 'unauthorized') return 'unauthorized';
       return reply.failure === 'network' ? 'failed' : reply.status !== undefined && reply.status >= 500 ? 'failed' : reply.status === 429 ? 'rate_limited' : 'no_session';
@@ -210,9 +223,41 @@ async function refusalCode(res: HttpResponse): Promise<string | undefined> {
   return undefined;
 }
 
-// signInCode is the code of a pasted sign-in link, or the text as typed.
+// Why a pasted sign-in link is refused before anything is sent. The app turns
+// each code into words (ui/SignIn.tsx).
+export type SignInRefusal = 'link_other_server' | 'link_malformed';
+
+// signInTarget reads a pasted sign-in link (<origin>/app/#/signin/<code>) or a
+// bare code. A link names the server it was made for; one that names another
+// server than the one typed is refused, so a code is never handed to a server
+// the person did not mean. A malformed percent escape is a refusal, never a
+// throw.
+export function signInTarget(text: string, server: string): { readonly ok: true; readonly code: string } | { readonly ok: false; readonly code: SignInRefusal } {
+  const t = text.trim();
+  const match = /^(https?:\/\/[^/?#\s]+)[^#\s]*#\/signin\/([^/?\s]+)/i.exec(t);
+  if (match?.[1] === undefined || match[2] === undefined) {
+    // No link shape: the text as typed is a bare code (a link of another shape
+    // is not a code and the server refuses it).
+    return /#\/signin\//.test(t) ? { ok: false, code: 'link_malformed' } : { ok: true, code: t };
+  }
+  const origin = (s: string): string => s.trim().replace(/\/+$/, '').toLowerCase();
+  if (origin(match[1]) !== origin(server)) return { ok: false, code: 'link_other_server' };
+  try {
+    return { ok: true, code: decodeURIComponent(match[2]) };
+  } catch {
+    return { ok: false, code: 'link_malformed' };
+  }
+}
+
+// signInCode is the code of a pasted sign-in link, or the text as typed. A
+// malformed escape leaves the code as it is written.
 export function signInCode(text: string): string {
   const t = text.trim();
   const match = /#\/signin\/([^/?\s]+)/.exec(t);
-  return match?.[1] === undefined ? t : decodeURIComponent(match[1]);
+  if (match?.[1] === undefined) return t;
+  try {
+    return decodeURIComponent(match[1]);
+  } catch {
+    return match[1];
+  }
 }

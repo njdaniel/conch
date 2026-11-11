@@ -97,10 +97,17 @@ export interface ControllerOptions {
   readonly log: (message: string) => void;
   // How often presence is read while a channel is open, in ms.
   readonly pollEvery?: number;
+  // Registers values the diagnostics must never show (the LiveKit host).
+  readonly hold?: (...secrets: string[]) => void;
 }
 
 export const pollEvery = 3000;
 const away = 'Voice ended while the app was away. Join again when you want to talk.';
+// Shown when the app returns and an interruption (a call, Siri) has not
+// reported its end. iOS does not always deliver the end to an app that was in
+// the background, and there is no call to ask the session; the gate stays shut,
+// which is the safe side, and Leave clears it.
+const interruptionPending = 'An audio interruption (a call, Siri) has not said it is over, so the microphone stays shut. If it is over, leave voice and join again.';
 const heldTooLong = 'The microphone shut after 30 s of one press. Release and press again.';
 
 const initial: VoiceState = {
@@ -142,6 +149,8 @@ export class VoiceController {
   private retryTimer: unknown = null;
   private pollTimer: unknown = null;
   private polling: string | null = null;
+  // The channel whose Voice view is on screen, joined or not (watch).
+  private viewedChannel: string | null = null;
 
   constructor(options: ControllerOptions) {
     this.o = options;
@@ -277,6 +286,10 @@ export class VoiceController {
       this.act({ kind: 'stop', why: 'This channel has no voice room for everyone.' }, mine);
       return;
     }
+    // The grant's address is the server's, and never for a log: its host, and
+    // host:port, are held by the diagnostics whatever shape they take.
+    const target = /^[a-z][a-z0-9+.-]*:\/\/([^/?#]+)/i.exec(session.value.livekit_url)?.[1];
+    this.o.hold?.(session.value.livekit_url, ...(target === undefined ? [] : [target, target.replace(/:\d+$/, '')]));
     const room = this.o.newRoom();
     this.room = room;
     this.transmitter.reset();
@@ -390,7 +403,10 @@ export class VoiceController {
     if (mine !== this.attempt) return;
     this.dropRoom();
     await this.o.native.stopSession().catch(() => undefined);
+    this.clearInterruption();
     this.set({ ...initialFor(this.s), phase: 'idle', channel: this.s.channel, why, warning: null, participants: [], transmitting: false, gateOpen: false });
+    // Presence follows the channel on screen again.
+    if (this.viewedChannel !== null) this.startPolling(this.viewedChannel);
   }
 
   // tearDown is the credential gone (a 401): media first, no waiting, and no
@@ -404,7 +420,16 @@ export class VoiceController {
     this.gate.setBlocked(true);
     this.dropRoom();
     await this.o.native.stopSession().catch(() => undefined);
+    this.clearInterruption();
     this.set({ ...initial });
+  }
+
+  // clearInterruption forgets an interruption after the observers stopped:
+  // nothing will deliver its end any more, so it must not outlive the room (a
+  // stale reason would hold the next join's gate shut for good).
+  private clearInterruption(): void {
+    this.lifecycle.interrupted(false);
+    this.set({ blocked: this.lifecycle.reasons, note: this.s.note === interruptionPending ? null : this.s.note });
   }
 
   private fail(why: string): void {
@@ -426,12 +451,27 @@ export class VoiceController {
 
   // ---- presence
 
-  // watch reads the presence of a channel on screen, joined or not.
+  // watch reads the presence of the channel on screen. While the phone is in
+  // voice in one channel, presence follows that one, whatever is on screen: a
+  // Voice view of another channel neither replaces the joined room's
+  // participants nor stops their polling.
   watch(channel: string | null): void {
+    const was = this.viewedChannel;
+    this.viewedChannel = channel;
+    const joined = this.s.phase === 'idle' ? null : this.s.channel;
+    // The joined channel's Voice view closing takes the level probe, and with
+    // it the open microphone's samples, so the gate must not stay open: it
+    // shuts, arms the resume latch, and a held press ends.
+    if (channel === null && joined !== null && was === joined) {
+      this.held = false;
+      this.gate.shutAndArm();
+    }
     if (channel === null) {
+      if (was !== null && joined !== null && was !== joined) return;
       this.stopPolling();
       return;
     }
+    if (joined !== null && channel !== joined) return;
     this.startPolling(channel);
   }
 
@@ -509,7 +549,9 @@ export class VoiceController {
   appState(state: AppState): void {
     this.held = false;
     this.lifecycle.appState(state);
-    this.set({ blocked: this.lifecycle.reasons });
+    // Back in front with an interruption that never said it ended: say so.
+    const stuck = state === 'active' && this.s.phase !== 'idle' && this.lifecycle.reasons.includes('interruption');
+    this.set({ blocked: this.lifecycle.reasons, ...(stuck ? { note: interruptionPending } : {}) });
   }
 
   // interruption is AVAudioSession's interruption notification (began/ended).
@@ -517,7 +559,8 @@ export class VoiceController {
   interruption(event: InterruptionEvent): void {
     this.held = false;
     this.audio.interruption(event);
-    this.set({ blocked: this.lifecycle.reasons });
+    // The end arrived after all: the note about a missing end is no longer true.
+    this.set({ blocked: this.lifecycle.reasons, ...(event.type === 'ended' && this.s.note === interruptionPending ? { note: null } : {}) });
   }
 
   // routeChange is AVAudioSession's route-change notification. A held press

@@ -10,6 +10,8 @@ const refusals: Readonly<Record<string, string>> = {
   auth_failed: 'The name or password is not right.',
   sign_in_link_invalid: 'That link no longer works. Ask for a new one.',
   rate_limited: 'Too many tries. Wait a minute and try again.',
+  link_other_server: 'That link is for a different server than the one typed above. Check the address, or ask for a new link.',
+  link_malformed: 'That link is not written correctly. Paste it again, or paste just its code.',
 };
 
 export function SignIn(props: { onDone: () => void }) {
@@ -23,6 +25,10 @@ export function SignIn(props: { onDone: () => void }) {
   const finish = async (): Promise<void> => {
     const me = await client.whoami();
     if (!me.ok) {
+      // A credential held for a person we cannot name is not kept.
+      client.signOut();
+      setPassword('');
+      setLink('');
       setProblem('Signed in, but the server did not say who you are.');
       return;
     }
@@ -45,7 +51,10 @@ export function SignIn(props: { onDone: () => void }) {
     const result = await client.login(name.trim(), password);
     if (!result.ok) {
       setProblem(words(result));
+      setPassword('');
+      setLink('');
     } else if (result.value.next === 'totp') {
+      setPassword('');
       setProblem('This account uses a second step. The spike does not support it; use a sign-in link.');
     } else {
       await finish();
@@ -58,8 +67,11 @@ export function SignIn(props: { onDone: () => void }) {
     setProblem(null);
     client.setServer(server);
     const result = await client.redeemSignInLink(link);
-    if (!result.ok) setProblem(words(result));
-    else await finish();
+    if (!result.ok) {
+      setProblem(words(result));
+      setPassword('');
+      setLink('');
+    } else await finish();
     setBusy(false);
   };
 

@@ -58,6 +58,9 @@ export function Voice(props: { channel: string; onBack: () => void }) {
   const inVoice = v.phase === 'connected' || v.phase === 'reconnecting';
   const mine = v.channel === props.channel;
   const me = principal().id;
+  // The people shown are the joined room's: while in voice in another channel,
+  // this view does not show that room as this one's (controller.watch).
+  const shown = mine || v.phase === 'idle';
 
   useEffect(() => {
     controller.watch(props.channel);
@@ -125,8 +128,11 @@ export function Voice(props: { channel: string; onBack: () => void }) {
       ) : null}
 
       <Text style={styles.label}>In this voice room</Text>
-      {v.participants.length === 0 ? <Text style={styles.small}>Nobody.</Text> : null}
-      {v.participants.map((p) => (
+      {/* Presence follows the joined channel (controller.watch): while in voice
+          elsewhere, this view does not show that room's people as this one's. */}
+      {!mine && v.phase !== 'idle' ? <Text style={styles.small}>{'You are in voice in # ' + String(v.channel) + '.'}</Text> : null}
+      {shown && v.participants.length === 0 ? <Text style={styles.small}>Nobody.</Text> : null}
+      {(shown ? v.participants : []).map((p) => (
         <Text key={p.principal_id} style={{ fontSize: 16, color: colours.ink }}>
           {(p.principal_id === me ? 'You' : 'Person ' + String(p.principal_id)) + (p.transmitting ? ' (transmitting)' : '') + (p.can_publish ? '' : ' (listening)')}
         </Text>

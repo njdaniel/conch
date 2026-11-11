@@ -52,8 +52,8 @@ Then, from `spikes/mobile/ios/ios`, open `ConchSpike.xcworkspace` and build the 
 
 ### Simulator dry run (needs #1366: the dev stack in LAN mode)
 
-1. On the Mac, start the dev stack as #1366 describes (conchd and LiveKit reachable on the Mac's LAN address or `.local` name); mint a one-use sign-in link for a test principal. Write the server's address down (it is typed into the app, never stored).
-2. `npx react-native start` in `spikes/mobile/ios`, and Run `ConchSpike` on an iPhone Simulator (Debug). The Simulator reaches the Mac's `localhost`.
+1. Start the dev stack on the Linux dev machine with `CONCH_DEV_LAN=<its LAN address> scripts/dev-stack.sh up` (#1366: conchd and LiveKit listen on that address, plain HTTP); mint a one-use sign-in link for a test principal (`conch admin principal sign-in-link <id>`). The server's address is typed into the app as `http://<address>:<conchd port>` and never stored; a pasted link made for a different address is refused.
+2. `npx react-native start` in `spikes/mobile/ios`, and Run `ConchSpike` on an iPhone Simulator (Debug). The Simulator reaches the Linux machine by its LAN address, like the phone (it shares the Mac's network); the Mac must be on the same network.
 3. Sign in by link: the server typed in, the code pasted. Expect the channel list to show your channels only.
 4. Open a channel, Join. Expect: presence check, then the microphone prompt (at Join, not launch), then connected. If the SDK says "Audio device module is not initialized", `LivekitReactNative.setup()` did not run first.
 5. Hold to talk for 3 to 8 s. In the server's presence (`GET /v1/channels/{c}/voice/presence`) `transmitting` is true while held and false after; the audit shows `voice_transmit_started` and `_stopped` and no `_unreported`.
@@ -64,7 +64,30 @@ Then, from `spikes/mobile/ios/ios`, open `ConchSpike.xcworkspace` and build the 
 
 ### Device run (iPhone, free provisioning, as Mac step 6)
 
-Same stack with the Mac's LAN address (the phone and the Mac on one Wi-Fi; accept the Local Network prompt). Build Debug with Metro on the Mac (or Release to embed the bundle). Then the rows of `docs/reviews/mobile-ios-voice.md` for M5-C: M-F1 to M-F7, M-L1 to M-L9 (lock, switch away, 5 min silence; background audio keeps the room only if `UIBackgroundModes` `audio` is honoured), M-B1 to M-B3, M-I1 to M-I3 (an incoming call while in voice and while a press is held; Siri; an alarm; microphone revoked in Settings), M-N1 to M-N3, M-K1 to M-K3, M-R1, M-R4, M-S1 to M-S6, M-P1, M-P2, M-A1, M-A2. Record the model, iOS build, Xcode and macOS versions, and the Diagnostics "delivered" list for each interruption row. Camera rows M-C1 to M-C10 are M5-D.
+Same stack, with the Linux machine's LAN address (the phone, the Mac and the Linux machine on one Wi-Fi; accept the Local Network prompt). Build Debug with Metro on the Mac (or Release to embed the bundle). Then the rows of `docs/reviews/mobile-ios-voice.md` for M5-C: M-F1 to M-F7, M-L1 to M-L9 (lock, switch away, 5 min silence; background audio keeps the room only if `UIBackgroundModes` `audio` is honoured), M-B1 to M-B3, M-I1 to M-I3 (an incoming call while in voice and while a press is held; Siri; an alarm; microphone revoked in Settings), M-N1 to M-N3, M-K1 to M-K3, M-R1, M-R4, M-S1 to M-S6, M-P1, M-P2, M-A1, M-A2. Record the model, iOS build, Xcode and macOS versions, and the Diagnostics "delivered" list for each interruption row. Camera rows M-C1 to M-C10 are M5-D.
+
+### Review fixes ported from the Android spike
+
+The Android spike (#1109) was reviewed after this slice was first written, and the iOS code mirrors its logic and wiring, so each fix there was checked here. What each one became:
+
+| Android fix | iOS |
+| --- | --- |
+| The open microphone fails shut: the gate's 1.5 s sample watchdog, and the joined channel's Voice view closing shuts the gate and arms the resume latch (cc5fab02) | Ported: `logic/gate.ts` (`sampleWatchdog`, `shutAndArm`, M5-B) and `VoiceController.watch` (M5-C); tests in `test/gate.test.ts` and `test/controller.test.ts` |
+| Audio focus latch: a permanent loss or a denied request holds the block, a grant after Leave must not find a stale loss (858b0bb5) | Different: iOS has no focus. The same hazard is an interruption that *began* and whose *end* never arrives (the observers stop at Leave, or the app was suspended). Leave and tear-down now clear it, so the next join is not shut for good; on return to the foreground with one still pending the gate stays shut and the app says so, because there is no call to ask the session. Test: `an interruption that never ended does not outlive Leave`. Device rows M-I1 and M-I2 record whether iOS delivers the end |
+| Route change under an open gate arms the resume latch (858b0bb5) | Already true by construction: `IosAudioEvents.routeChange` blocks and unblocks the gate, which arms the latch. A controller-level test now pins it for the open microphone |
+| Swipe-away ends voice (`onTaskRemoved`) | Not applicable: iOS tells the app nothing when it is force-quit. Voice ends with the process, and conchd's own unreported-transmit handling is the backstop (row M-K1) |
+| Presence follows the joined channel, not the one on screen; Leave starts it for the channel on screen again (858b0bb5) | Ported: `controller.ts` `watch` and `leave`, `ui/Voice.tsx` |
+| Client typing: request bodies are the generated `*RequestV1` types (858b0bb5) | Ported: `client.ts` |
+| A pasted sign-in link must name the typed server; a malformed escape is a refusal; changing the server forgets the bearer (858b0bb5) | Ported: `signInTarget`, `setServer`, the two words in `ui/SignIn.tsx`; tests in `test/client.test.ts` |
+| A sign-in whose `whoami` fails signs out, and the password and link fields are cleared after every attempt (cc5fab02) | Ported: `ui/SignIn.tsx` |
+| The LiveKit host and `host:port` are held by the diagnostics; compressed IPv6 and more host endings are redacted (cc5fab02) | Ported: `logic/diagnostics.ts`, `controller.ts` and `services.ts` (`hold`); tests in `test/redact.test.ts` and `test/controller.test.ts` |
+| The blocked-camera note names Android settings (9515c1f5) | Ported with iOS words ("iOS Settings"): `logic/camera.ts`, test in `test/camera.test.ts` |
+| The manifest drops `SYSTEM_ALERT_WINDOW` and the `mediaProjection` service; the receipt quotes the merged manifest (cc5fab02) | Counterpart: nothing is declared that the matrix does not need. The template's empty `NSLocationWhenInUseUsageDescription` is gone (M5-A); the Info.plist holds `UIBackgroundModes` `audio`, the microphone and local-network descriptions, and ATS local networking; no entitlements, no push, no `voip`. The Mac run should quote the *built* app's Info.plist and entitlements, as the Android receipt quotes the merged manifest |
+| Cleartext only in the debug build | Different: one Info.plist. `NSAllowsLocalNetworking` exempts local addresses (an IP literal, a `.local` name) and never a public host, which is narrower than Android's debug-wide cleartext. A release build would drop it (M6) |
+| `allowBackup="false"` | Not applicable: the spike writes nothing to disk (the bearer is in memory), so there is nothing for a backup to carry |
+| Hardware Back, the lock broadcast and the `isLocked` check on return, the foreground service and its `stopSelf` finding | Not applicable: no hardware back on iOS; locking is AppState `inactive` then `background`, and `active` lifts them; there is no foreground service |
+
+Findings for M6 that carry over (recorded, not fixed here): React Native's JavaScript timers pause while the app is suspended, so the report retry, presence poll and the camera logic's bounded waits may wait for the app's return (M-L2 and M-L5 should watch for it, and M5-D's camera does not wait for an unpublish for this reason); `livekit_url` from the session grant is used as given, and a production app must require `wss:`; tiles name people "Person N" because presence carries ids only.
 
 ## Checks
 

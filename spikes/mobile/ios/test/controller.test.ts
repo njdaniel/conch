@@ -21,8 +21,8 @@ function presence(ids: number[], options: { available?: boolean } = {}): VoicePr
   };
 }
 
-function session(canPublish = true): VoiceSessionResponseV1 {
-  return { livekit_url: 'x', identity: `p${me}`, rooms: [{ room: 'r', token: 't', can_publish: canPublish, expires_at: '2026-11-05T10:00:15Z' }] };
+function session(canPublish = true, url = 'x'): VoiceSessionResponseV1 {
+  return { livekit_url: url, identity: `p${me}`, rooms: [{ room: 'r', token: 't', can_publish: canPublish, expires_at: '2026-11-05T10:00:15Z' }] };
 }
 
 class FakeRoom implements RoomPort {
@@ -54,14 +54,30 @@ interface Rig {
   reports: VoiceTransmitState[];
 }
 
-function rig(options: { ids?: number[]; mic?: 'granted' | 'microphone_denied'; session?: boolean; canPublish?: boolean } = {}): Rig {
+function rig(
+  options: {
+    ids?: number[];
+    mic?: 'granted' | 'microphone_denied';
+    session?: boolean;
+    canPublish?: boolean;
+    // Who is in each channel's room, and the channels presence was read for.
+    idsByChannel?: Record<string, number[]>;
+    asked?: string[];
+    livekitUrl?: string;
+    held?: string[];
+  } = {},
+): Rig {
   const clock = new FakeClock();
   const log: string[] = [];
   const rooms: FakeRoom[] = [];
   const reports: VoiceTransmitState[] = [];
   const api: VoiceApi = {
-    presence: () => (log.push('presence'), Promise.resolve({ ok: true, value: presence(options.ids ?? []) } as const)),
-    voiceSession: () => (log.push('session'), Promise.resolve({ ok: true, value: session(options.canPublish ?? true) } as const)),
+    presence: (channel) => {
+      log.push('presence');
+      options.asked?.push(channel);
+      return Promise.resolve({ ok: true, value: presence(options.idsByChannel?.[channel] ?? options.ids ?? []) } as const);
+    },
+    voiceSession: () => (log.push('session'), Promise.resolve({ ok: true, value: session(options.canPublish ?? true, options.livekitUrl) } as const)),
     reportTransmit: (_c, state) => {
       log.push(`report ${state}`);
       reports.push(state);
@@ -85,6 +101,7 @@ function rig(options: { ids?: number[]; mic?: 'granted' | 'microphone_denied'; s
     random: () => 0.5,
     me: () => me,
     log: (m) => log.push(`log ${m}`),
+    hold: (...secrets) => options.held?.push(...secrets),
   });
   return { c, clock, log, rooms, reports };
 }
@@ -381,4 +398,181 @@ test('the bridge maps the OS signals; an interruption ending only lifts the bloc
     'route oldDeviceUnavailable Speaker',
     'route unknown Speaker',
   ]);
+});
+
+test('open mode: a route change under an open gate arms the resume latch', async () => {
+  const r = rig();
+  await joined(r);
+  r.c.setMode('open');
+  r.c.level(0.9);
+  r.clock.advance(1000);
+  r.c.level(0);
+  r.clock.advance(500);
+  r.c.level(0);
+  r.c.level(0.9);
+  assert.equal(r.c.gate.open, true);
+  r.c.routeChange({ reason: 'oldDeviceUnavailable' }, 'Speaker');
+  assert.equal(r.c.gate.open, false);
+  for (let i = 0; i < 5; i++) {
+    r.c.level(0.9);
+    r.clock.advance(100);
+  }
+  assert.equal(r.c.gate.open, false, 'the same sound does not reopen it');
+  r.c.level(0);
+  r.clock.advance(500);
+  r.c.level(0);
+  r.c.level(0.9);
+  assert.equal(r.c.gate.open, true, 'quiet, then a fresh onset');
+});
+
+test('presence follows the joined channel, not the one on screen', async () => {
+  const asked: string[] = [];
+  const r = rig({ idsByChannel: { a: [3], b: [9] }, asked });
+  r.c.watch('a');
+  await r.c.join('a');
+  await settle();
+  assert.deepEqual(r.c.state.participants.map((p) => p.principal_id), [3]);
+  asked.length = 0;
+  r.c.watch('b'); // the Voice view of another channel opens
+  await settle();
+  assert.deepEqual(r.c.state.participants.map((p) => p.principal_id), [3], 'A is still the room shown');
+  r.clock.advance(3000);
+  await settle();
+  assert.ok(asked.length > 0 && asked.every((ch) => ch === 'a'), 'only A is polled');
+  r.c.watch(null); // B's view closes: A keeps polling
+  asked.length = 0;
+  r.clock.advance(3000);
+  await settle();
+  assert.ok(asked.includes('a'));
+});
+
+test('Leave starts presence for the channel on screen again', async () => {
+  const asked: string[] = [];
+  const r = rig({ idsByChannel: { a: [3], b: [9] }, asked });
+  r.c.watch('b');
+  await r.c.join('a');
+  await settle();
+  await r.c.leave();
+  asked.length = 0;
+  r.clock.advance(3000);
+  await settle();
+  assert.ok(asked.includes('b'), 'B, the view on screen, is read again');
+});
+
+test('open mode: leaving the joined Voice view shuts the open gate, and it needs quiet and a fresh onset to reopen', async () => {
+  const r = rig();
+  await joined(r);
+  r.c.watch('general');
+  r.c.setMode('open');
+  r.c.level(0);
+  r.clock.advance(500);
+  r.c.level(0.9);
+  assert.equal(r.c.gate.open, true);
+  r.c.watch(null); // Back to Channels: the probe is gone, no more samples
+  assert.equal(r.c.gate.open, false, 'shut at once');
+  // The view comes back, with the same sound still there.
+  r.c.watch('general');
+  for (let i = 0; i < 5; i++) {
+    r.c.level(0.9);
+    r.clock.advance(100);
+  }
+  assert.equal(r.c.gate.open, false, 'no reopen on the same sound');
+  r.c.level(0);
+  r.clock.advance(500);
+  r.c.level(0);
+  r.c.level(0.9);
+  assert.equal(r.c.gate.open, true, 'quiet, then a fresh onset');
+});
+
+test('open mode: with no view and no samples at all the watchdog shuts the gate', async () => {
+  const r = rig();
+  await joined(r);
+  r.c.setMode('open');
+  r.c.level(0);
+  r.clock.advance(500);
+  r.c.level(0.9);
+  assert.equal(r.c.gate.open, true);
+  r.clock.advance(1600);
+  assert.equal(r.c.gate.open, false);
+});
+
+test('a press held while the joined Voice view unmounts shuts at once', async () => {
+  const r = rig();
+  await joined(r);
+  r.c.watch('general');
+  r.c.press();
+  assert.equal(r.c.gate.open, true);
+  r.c.watch(null);
+  assert.equal(r.c.gate.open, false);
+  await settle();
+  assert.deepEqual(r.reports, ['started', 'stopped']);
+});
+
+test("another channel's view closing does not shut the joined channel's gate", async () => {
+  const r = rig();
+  await joined(r);
+  r.c.press();
+  r.c.watch('elsewhere');
+  r.c.watch(null);
+  assert.equal(r.c.gate.open, true);
+});
+
+test("the LiveKit grant's host and host:port are registered with the diagnostics", async () => {
+  const held: string[] = [];
+  const r = rig({ livekitUrl: 'wss://livekit.example.me:7880', held });
+  await joined(r);
+  assert.deepEqual(held, ['wss://livekit.example.me:7880', 'livekit.example.me:7880', 'livekit.example.me']);
+});
+
+// iOS's counterpart of Android's permanent focus loss: an interruption that
+// began and whose end the app never hears (the observers stopped at Leave, or
+// the app was suspended). It must not outlive the room.
+test('an interruption that never ended does not outlive Leave: began, leave, join, and a press opens', async () => {
+  const r = rig();
+  await joined(r);
+  r.c.interruption({ type: 'began' });
+  assert.deepEqual(r.c.state.blocked, ['interruption']);
+  r.c.press();
+  assert.equal(r.c.gate.open, false, 'blocked by the interruption');
+  await r.c.leave();
+  assert.deepEqual(r.c.state.blocked, [], 'stopping the observers clears it: no end will ever come');
+  await joined(r);
+  assert.deepEqual(r.c.state.blocked, []);
+  r.c.press();
+  assert.equal(r.c.gate.open, true, 'a fresh press opens');
+});
+
+test('the same holds for tear-down (a dead credential)', async () => {
+  const r = rig();
+  await joined(r);
+  r.c.interruption({ type: 'began' });
+  await r.c.tearDown();
+  assert.deepEqual(r.c.state.blocked, []);
+  await joined(r);
+  r.c.press();
+  assert.equal(r.c.gate.open, true);
+});
+
+test('back in front with an interruption that never ended: the gate stays shut and the person is told; its end clears the note', async () => {
+  const r = rig();
+  await joined(r);
+  r.c.interruption({ type: 'began' });
+  r.c.appState('background');
+  r.c.appState('active');
+  assert.deepEqual(r.c.state.blocked, ['interruption'], 'nothing lifted it');
+  assert.match(r.c.state.note ?? '', /has not said it is over/);
+  r.c.press();
+  assert.equal(r.c.gate.open, false);
+  r.c.interruption({ type: 'ended', shouldResume: false });
+  assert.deepEqual(r.c.state.blocked, []);
+  assert.equal(r.c.state.note, null, 'the end arrived after all');
+  assert.equal(r.c.gate.open, false, 'and it opened nothing');
+});
+
+test('returning with no interruption pending adds no note', async () => {
+  const r = rig();
+  await joined(r);
+  r.c.appState('background');
+  r.c.appState('active');
+  assert.equal(r.c.state.note, null);
 });
