@@ -4653,10 +4653,12 @@ export const pushWakeV1 = object<PushWakeV1>({
   registration: str,
 });
 
-// schema.PushTransport
-export type PushTransport = 'webpush' | 'relay';
+// schema.PushTransport: closed on the server and client-tolerant, so a value this
+// bundle does not know is kept and shown by its name; KnownPushTransport is the known ones.
+export type KnownPushTransport = 'webpush' | 'relay';
+export type PushTransport = KnownPushTransport | (string & {});
 
-export const pushTransport = vocab<PushTransport>({ webpush: true, relay: true });
+export const pushTransport = tolerant<KnownPushTransport>({ webpush: true, relay: true });
 
 // schema.PushPlatform
 export type PushPlatform = 'ios' | 'android' | 'web';
@@ -4686,10 +4688,12 @@ export const pushRegistrationV1 = object<PushRegistrationV1>({
   last_fetch_at: optional(timestamp),
 });
 
-// schema.PushProvider
-export type PushProvider = 'apns' | 'fcm';
+// schema.PushProvider: closed on the server and client-tolerant, so a value this
+// bundle does not know is kept and shown by its name; KnownPushProvider is the known ones.
+export type KnownPushProvider = 'apns' | 'fcm';
+export type PushProvider = KnownPushProvider | (string & {});
 
-export const pushProvider = vocab<PushProvider>({ apns: true, fcm: true });
+export const pushProvider = tolerant<KnownPushProvider>({ apns: true, fcm: true });
 
 // schema.CreatePushRegistrationRequestV1
 export interface CreatePushRegistrationRequestV1 {

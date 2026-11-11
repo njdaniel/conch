@@ -301,10 +301,10 @@ func (r PushRegistrationV1) Validate() error {
 		return fmt.Errorf("schema: push registration id: %w", err)
 	}
 	if !r.Transport.Valid() {
-		return fmt.Errorf("schema: push registration transport %q is not one of webpush, relay", r.Transport)
+		return errors.New("schema: push registration transport is not one of webpush, relay")
 	}
 	if !r.Platform.Valid() {
-		return fmt.Errorf("schema: push registration platform %q is not one of ios, android, web", r.Platform)
+		return errors.New("schema: push registration platform is not one of ios, android, web")
 	}
 	if err := validatePushApp(r.App); err != nil {
 		return fmt.Errorf("schema: push registration app %w", err)
@@ -407,10 +407,10 @@ type pushTarget struct {
 
 func validatePushRegistrationRequest(r pushTarget) error {
 	if !r.Transport.Valid() {
-		return fmt.Errorf("schema: push registration transport %q is not one of webpush, relay", r.Transport)
+		return errors.New("schema: push registration transport is not one of webpush, relay")
 	}
 	if !r.Platform.Valid() {
-		return fmt.Errorf("schema: push registration platform %q is not one of ios, android, web", r.Platform)
+		return errors.New("schema: push registration platform is not one of ios, android, web")
 	}
 	if err := validatePushApp(r.App); err != nil {
 		return fmt.Errorf("schema: push registration app %w", err)
@@ -447,7 +447,7 @@ func validatePushRegistrationRequest(r pushTarget) error {
 			return errors.New("schema: push registration auth is not a relay field")
 		}
 		if !r.Provider.Valid() {
-			return fmt.Errorf("schema: push registration provider %q is not one of apns, fcm", r.Provider)
+			return errors.New("schema: push registration provider is not one of apns, fcm")
 		}
 		if err := validatePushToken(r.Token); err != nil {
 			return fmt.Errorf("schema: push registration token %w", err)

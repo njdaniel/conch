@@ -223,7 +223,7 @@ The phone keeps, per saved server profile and account, the registration id it wa
 
 In the same transaction that revokes a credential, for every reason there is today (self sign-out, ending another sign-in by id, operator revoke, rotate, revoke-all, disable, expiry when it is reaped, idle expiry), every registration of that credential is set `expired` with that reason and is never woken again. This is the device-link rule of #712 applied once more, and it is the only rule: there is no "keep notifications after logout". The app, on its side, deletes the registration (`DELETE /v1/push/registrations/{id}`) before it revokes the credential when it can, does not depend on it, and keeps the id as a tombstone (§5.2) so that a wake already in flight still sweeps the profiles that remain.
 
-Audit: `push_registration_created` and `push_registration_ended` (detail: reason `self` | `credential_revoked` | `credential_expired` | `provider_rejected` | `stale`; `credential_expired` is kept apart from `credential_revoked` by #1116's decision 3, the transport and the registration id; never a token, endpoint or app id string), on the principal as subject. Wake attempts are **not** audit rows (§5.6).
+Audit: `push_registration_created` and `push_registration_ended` (detail: reason `self` | `credential_revoked` | `credential_expired` | `provider_rejected` | `stale`, the transport and the registration id; never a token, endpoint or app id string), on the principal as subject. `credential_expired` is kept apart from `credential_revoked` (#1116, decision 3). Wake attempts are **not** audit rows (§5.6).
 
 ### 5.5 Channel access loss, mutes, hide_members
 

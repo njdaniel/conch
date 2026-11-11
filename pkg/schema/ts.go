@@ -708,16 +708,18 @@ var TSVocabularyModes = map[string]TSVocabularyMode{
 	"VoiceDevicesConfig":      TSStrict,
 	"VoiceDevicesPipeWire":    TSStrict,
 
-	// Strict: phone push and notification preferences (issue #1712). A
-	// client writes the policy, the transport, the platform and the
-	// provider itself, and switches on the ones it reads to decide what to
-	// offer. The end reason is an audit detail, which no generated type
-	// carries.
+	// Phone push and notification preferences (issue #1712). Strict: the
+	// policy and the platform, which a client writes itself, and the end
+	// reason, an audit detail that no generated type carries. Tolerant: the
+	// transport and the provider, which a client also reads in
+	// PushConfigV1, so that a later server offering a new one (the relay,
+	// #1716) costs an older client only that one entry, not the whole
+	// config.
 	"NotificationPolicy":        TSStrict,
 	"PushPlatform":              TSStrict,
-	"PushProvider":              TSStrict,
+	"PushProvider":              TSTolerant,
 	"PushRegistrationEndReason": TSStrict,
-	"PushTransport":             TSStrict,
+	"PushTransport":             TSTolerant,
 
 	// Strict: agent manifests and the Leviathan payload, which no generated
 	// client reads today. Strict is the default; a vocabulary becomes

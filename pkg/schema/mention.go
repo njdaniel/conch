@@ -47,10 +47,12 @@ import (
 // An empty name never matches. The caller passes the reader's current
 // display name.
 //
-// The folding is the Unicode version of this Go's tables. A browser with
-// newer tables folds the letters that a later Unicode gave a case (Garay,
-// for one, in Unicode 16), and Go does not until its tables catch up. No
-// letter that had a case in an earlier version differs.
+// The folding is the Unicode version of this Go's tables (15.0 in Go 1.25).
+// A browser with newer tables folds the pairs that a later Unicode created,
+// and Go does not until its tables catch up. Every pair that differs
+// involves at least one code point added in Unicode 16 or later: Garay,
+// Latin U+A7CB to U+A7DC (which gave capitals to old letters such as U+019B
+// and U+0264), Cyrillic U+1C89 and U+1C8A, and Beria Erfe in 17.
 func Mentions(body, name string) bool {
 	if name == "" {
 		return false

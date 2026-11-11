@@ -343,6 +343,22 @@ func TestPushRegistrationRequestRefusalsHoldNoTarget(t *testing.T) {
 			r.App = secret + " "
 			return r
 		}(),
+		// A secret put in a vocabulary field by mistake is not echoed either.
+		func() CreatePushRegistrationRequestV1 {
+			r := relayRequest()
+			r.Provider = PushProvider(secret)
+			return r
+		}(),
+		func() CreatePushRegistrationRequestV1 {
+			r := webpushRequest()
+			r.Transport = PushTransport("https://push.example.net/" + secret)
+			return r
+		}(),
+		func() CreatePushRegistrationRequestV1 {
+			r := webpushRequest()
+			r.Platform = PushPlatform(secret)
+			return r
+		}(),
 	}
 	for i, req := range tests {
 		err := req.Validate()
