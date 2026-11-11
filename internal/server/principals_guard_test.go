@@ -70,6 +70,8 @@ var principalReads = []principalRead{
 	// would name it for, decided per reader by messageVisible; the ids go only
 	// to the hide signal, never to a member.
 	{"store/audience.go", "Store.AuthorReaders", 1, readGated},
+	// #1713: the reader's own current name, to match "@name" in the feed.
+	{"store/audience.go", "Store.ListPendingNotifications", 1, readOwnOrInternal},
 	// #1202: managers on the ?scope=all listing, for holders of manage_channels.
 	{"store/channels_self.go", "Store.channelDirectoryAll", 1, readOperatorOrMaker},
 	// #1150: the last-member count, never served to anyone.

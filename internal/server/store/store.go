@@ -1070,6 +1070,25 @@ BEGIN SELECT RAISE(ABORT, 'message removals are permanent'); END`,
 	{
 		`ALTER TABLE channels ADD COLUMN topic TEXT NOT NULL DEFAULT ''`,
 	},
+	// 48: per-credential notification preferences (issue #1713, Mobile M11-A,
+	// docs/design/mobile-notifications.md §6.1). One row per credential, which
+	// is one sign-in; no row means the defaults (policy off). muted is a JSON
+	// array of channel ids, at most schema.MaxMutedChannels, ascending and
+	// without duplicates, and is never checked against membership. The row
+	// lives and dies with its credential: every site that sets
+	// credentials.revoked_at deletes it in the same transaction
+	// (endCredentialNotificationsTx), and the session sweep deletes the rows
+	// of credentials that have expired or gone idle.
+	{
+		`CREATE TABLE notification_preferences (
+	credential_id          INTEGER PRIMARY KEY REFERENCES credentials (id),
+	policy                 TEXT    NOT NULL CHECK (policy IN ('off', 'mentions', 'all')),
+	preview                INTEGER NOT NULL CHECK (preview IN (0, 1)),
+	quiet_when_unreachable INTEGER NOT NULL CHECK (quiet_when_unreachable IN (0, 1)),
+	muted                  TEXT    NOT NULL CHECK (json_valid(muted)),
+	updated_at             INTEGER NOT NULL
+)`,
+	},
 }
 
 // migrationSteps holds Go code that runs inside a migration's transaction

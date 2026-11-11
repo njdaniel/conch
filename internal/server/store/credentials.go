@@ -393,6 +393,9 @@ func (s *Store) RotateCredential(ctx context.Context, actor string, credentialID
 		}
 		// The old credential is dead as of this transaction, and so are its
 		// sessions; they are not carried over to the new one.
+		if err := endCredentialNotificationsTx(ctx, tx, credentialID); err != nil {
+			return err
+		}
 		return endCredentialSessionsTx(ctx, tx, actor, credentialID, SessionEndedByRevocation, now, &runs)
 	})
 	if err != nil {
@@ -518,6 +521,9 @@ func (s *Store) revokeCredential(ctx context.Context, actor string, credentialID
 			return err
 		}
 		// Its sessions end with it, in this transaction (issue #265).
+		if err := endCredentialNotificationsTx(ctx, tx, credentialID); err != nil {
+			return err
+		}
 		if err := endCredentialSessionsTx(ctx, tx, actor, credentialID, SessionEndedByRevocation, now, &runs); err != nil {
 			return err
 		}

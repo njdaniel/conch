@@ -684,6 +684,9 @@ func rotateSessionTx(ctx context.Context, tx execer, actor string, credentialID 
 		credentialDetail(c.ID, c.Label)+fmt.Sprintf(" replaces=%d", credentialID), now); err != nil {
 		return schema.CredentialV1{}, err
 	}
+	if err := endCredentialNotificationsTx(ctx, tx, credentialID); err != nil {
+		return schema.CredentialV1{}, err
+	}
 	if err := endCredentialSessionsTx(ctx, tx, actor, credentialID, SessionEndedByRevocation, now, runs); err != nil {
 		return schema.CredentialV1{}, err
 	}

@@ -119,6 +119,9 @@ func revokeCredentialsExceptTx(ctx context.Context, tx execer, actor string, pri
 			credentialDetail(c.id, c.label)+" reason="+reason, now); err != nil {
 			return 0, err
 		}
+		if err := endCredentialNotificationsTx(ctx, tx, c.id); err != nil {
+			return 0, err
+		}
 		if err := endCredentialSessionsTx(ctx, tx, actor, c.id, sessionCause, now, ended); err != nil {
 			return 0, err
 		}

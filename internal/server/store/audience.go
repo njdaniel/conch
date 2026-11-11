@@ -2583,3 +2583,215 @@ func (s *Store) RemoveMessage(ctx context.Context, channelID int64, reader Reade
 	}
 	return out, nil
 }
+
+// The pending-notification feed (issue #1713, Mobile M11-A;
+// docs/design/mobile-notifications.md §4.3 and §5.5).
+//
+// ListPendingNotifications answers what is new for a reader now, shaped by
+// the preferences of the credential that asks. It is a message read, so it
+// is held to the rule of this file, and to one rule more: the answer is
+// never a function of a message the reader cannot read. A page of "the next
+// 2,000 rows above the cursor, filtered afterwards" would let any member who
+// passes any `after` learn how much is said in channels they are not in and
+// in whispers not to them (the activity-volume oracle of §4.2): the cursor
+// would stop on a hidden row, or the bound would be spent on one. So the
+// candidates are chosen in the statement, and only these reach Go:
+//
+//   - messageVisible: the audience predicate and the history bound, for the
+//     scoped reader, exactly as the lists embed it;
+//   - the reader is a live member of the message's channel now, so a
+//     message in a channel they have left, been banned from, or that went
+//     private without them is not a candidate whatever the audience says;
+//   - the id is above both after and the reader's read mark in that channel
+//     (a channel never marked starts at 0), which is where unread starts;
+//   - the message was not written by the reader, and is not removed.
+//
+// Every one of those is a fact the reader holds or may read, so the bound
+// counts only candidates, the cursor is the id of a candidate the reader may
+// read or after itself, and `more` means "a candidate exists above the
+// cursor". What runs in Go after that, over candidates only, is what depends
+// on the credential's preferences: the mutes and the policy. A candidate
+// that does not match is examined, counted against the bound and may carry
+// the cursor.
+
+// PendingNotificationScanBound is the most candidates one call examines, so
+// that the mentions filter cannot make a call unbounded. When it is reached
+// the call answers what matched, with the cursor at the highest candidate
+// examined and more set.
+const PendingNotificationScanBound = 2000
+
+// pendingNotificationsHead and Tail wrap the message visibility condition,
+// as listHead and listTail do, and select candidates ascending, one past the
+// bound so that "more" needs no second query. Arguments, in order: the
+// spoiler prefix's length and text, the reader (member), the reader (read
+// mark), after, the reader (author), then messageVisible's six, then the
+// limit. The statement is built from constants only.
+const (
+	pendingNotificationsHead = `SELECT m.id, m.channel_id, ch.name, m.author_id, m.body, m.created_at, m.audience_kind,
+	(SELECT g.handle FROM message_guest_attribution g WHERE g.message_id = m.id),
+	(SELECT g.label FROM message_guest_attribution g WHERE g.message_id = m.id),
+	EXISTS (SELECT 1 FROM files sf WHERE sf.message_id = m.id AND substr(sf.filename, 1, ?) = ?)
+	FROM messages m
+	JOIN channels ch ON ch.id = m.channel_id
+	JOIN ` + liveMembers + ` mem ON mem.channel_id = m.channel_id AND mem.principal_id = ?
+	LEFT JOIN read_marks rm ON rm.principal_id = ? AND rm.channel_id = m.channel_id
+	WHERE m.id > ? AND m.id > COALESCE(rm.last_read_id, 0)
+	  AND m.author_id <> ? AND ` + notRemovedCond + `
+	  AND `
+	pendingNotificationsTail = `
+	ORDER BY m.id ASC LIMIT ?`
+)
+
+func pendingNotificationsSQL() string {
+	return pendingNotificationsHead + messageVisible(true) + pendingNotificationsTail
+}
+
+// ListPendingNotifications returns one page of the feed for reader, under the
+// preferences of credentialID (the defaults when it has none): at most
+// schema.MaxPendingNotificationsPage summaries, ascending by message id, with
+// the cursor and more of schema.ListPendingNotificationsResponseV1. The
+// reader must be a scoped reader with a verified principal; the request's
+// readerFor reader is.
+//
+// A candidate qualifies when its channel is not muted and the policy admits
+// it: off admits nothing (and reads nothing), mentions a whisper the reader
+// received or a body that mentions the reader's current name, all every
+// candidate. The kind is whisper, then mention, then message, whatever the
+// policy. A page that fills stops at its last summary, so the cursor never
+// skips a match.
+//
+// author_name is given only as ListChannelAuthors would give it to this
+// reader in the message's channel, or as the guest attribution the message
+// carries for a guest's post. text is given only under preview, and never for
+// a spoiler: a body containing "||", or a message with an attachment whose
+// stored name starts with schema.SpoilerFilePrefix.
+func (s *Store) ListPendingNotifications(ctx context.Context, reader Reader, credentialID, after int64) (schema.ListPendingNotificationsResponseV1, error) {
+	if !reader.Scoped || reader.PrincipalID <= 0 {
+		return schema.ListPendingNotificationsResponseV1{}, errors.New("store: list pending notifications: the feed needs a scoped reader with a principal")
+	}
+	if after < 0 {
+		return schema.ListPendingNotificationsResponseV1{}, errors.New("store: list pending notifications: a cursor is never negative")
+	}
+	empty := schema.ListPendingNotificationsResponseV1{Summaries: []schema.NotificationSummaryV1{}, Cursor: after}
+	prefs, err := notificationPreferencesOf(ctx, s.db, credentialID)
+	if err != nil {
+		return schema.ListPendingNotificationsResponseV1{}, err
+	}
+	if prefs.Policy == schema.NotificationPolicyOff {
+		return empty, nil
+	}
+	var readerName string
+	if err := s.db.QueryRowContext(ctx, "SELECT name FROM principals WHERE id = ?", reader.PrincipalID).Scan(&readerName); err != nil {
+		return schema.ListPendingNotificationsResponseV1{}, fmt.Errorf("store: list pending notifications: reader: %w", err)
+	}
+
+	_, predArgs := visibilityArgs(Reader{PrincipalID: reader.PrincipalID, Scoped: true})
+	args := []any{len(schema.SpoilerFilePrefix), schema.SpoilerFilePrefix, reader.PrincipalID, reader.PrincipalID, after, reader.PrincipalID}
+	args = append(append(args, predArgs...), PendingNotificationScanBound+1)
+	rows, err := s.db.QueryContext(ctx, pendingNotificationsSQL(), args...)
+	if err != nil {
+		return schema.ListPendingNotificationsResponseV1{}, fmt.Errorf("store: list pending notifications: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	type candidate struct {
+		summary   schema.NotificationSummaryV1
+		body      string
+		whisper   bool
+		guestName string
+		spoiler   bool
+	}
+	var cands []candidate
+	for rows.Next() {
+		var c candidate
+		var created int64
+		var kind, guestHandle, guestLabel sql.NullString
+		if err := rows.Scan(&c.summary.MessageID, &c.summary.ChannelID, &c.summary.ChannelName, &c.summary.AuthorID, &c.body,
+			&created, &kind, &guestHandle, &guestLabel, &c.spoiler); err != nil {
+			return schema.ListPendingNotificationsResponseV1{}, fmt.Errorf("store: list pending notifications: %w", err)
+		}
+		c.summary.Schema = schema.NotificationSummarySchemaV1
+		c.summary.PostedAt = schema.NewTimestamp(time.UnixMilli(created))
+		c.whisper = kind.Valid && schema.AudienceKind(kind.String) == schema.AudienceKindPrincipals
+		if guestHandle.Valid {
+			c.guestName = schema.GuestDisplayName(guestLabel.String, guestHandle.String)
+		}
+		cands = append(cands, c)
+	}
+	if err := rows.Err(); err != nil {
+		return schema.ListPendingNotificationsResponseV1{}, fmt.Errorf("store: list pending notifications: %w", err)
+	}
+
+	muted := make(map[int64]struct{}, len(prefs.Muted))
+	for _, id := range prefs.Muted {
+		muted[id] = struct{}{}
+	}
+	examine := cands
+	truncated := false
+	if len(examine) > PendingNotificationScanBound {
+		examine, truncated = examine[:PendingNotificationScanBound], true
+	}
+	resp := empty
+	var kept []candidate
+	pageFull := false
+	for i, c := range examine {
+		resp.Cursor = c.summary.MessageID
+		kind := schema.NotificationKindMessage
+		switch {
+		case c.whisper:
+			kind = schema.NotificationKindWhisper
+		case schema.Mentions(c.body, readerName):
+			kind = schema.NotificationKindMention
+		}
+		if _, isMuted := muted[c.summary.ChannelID]; isMuted {
+			continue
+		}
+		if prefs.Policy == schema.NotificationPolicyMentions && kind == schema.NotificationKindMessage {
+			continue
+		}
+		c.summary.Kind = kind
+		if prefs.Preview && !c.spoiler && !strings.Contains(c.body, "||") {
+			c.summary.Text = notificationText(c.body)
+		}
+		if c.guestName != "" {
+			c.summary.AuthorName = c.guestName
+		}
+		kept = append(kept, c)
+		if len(kept) == schema.MaxPendingNotificationsPage {
+			// The page is full: stop at this summary, so the cursor never
+			// passes a match that is not in it. A candidate beyond it, in
+			// the lookahead too, is what more reports.
+			resp.More = i+1 < len(cands)
+			pageFull = true
+			break
+		}
+	}
+	if !pageFull {
+		resp.More = truncated
+	}
+
+	// Names, once per channel and only for the page, through the authors
+	// rule. A guest's post carries its own attribution, set above.
+	byChannel := map[int64][]int64{}
+	for _, c := range kept {
+		if c.guestName == "" {
+			byChannel[c.summary.ChannelID] = append(byChannel[c.summary.ChannelID], c.summary.AuthorID)
+		}
+	}
+	names := map[[2]int64]string{}
+	for channelID, ids := range byChannel {
+		authors, err := s.ListChannelAuthors(ctx, channelID, reader, ids)
+		if err != nil {
+			return schema.ListPendingNotificationsResponseV1{}, fmt.Errorf("store: list pending notifications: %w", err)
+		}
+		for _, a := range authors {
+			names[[2]int64{channelID, a.PrincipalID}] = a.Name
+		}
+	}
+	for _, c := range kept {
+		if c.guestName == "" {
+			c.summary.AuthorName = names[[2]int64{c.summary.ChannelID, c.summary.AuthorID}]
+		}
+		resp.Summaries = append(resp.Summaries, c.summary)
+	}
+	return resp, nil
+}

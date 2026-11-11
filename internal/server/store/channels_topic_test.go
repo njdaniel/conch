@@ -210,6 +210,9 @@ func TestMigrationChannelTopic(t *testing.T) {
 	if _, err := s.db.Exec("ALTER TABLE channels DROP COLUMN topic"); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := s.db.Exec("DROP TABLE notification_preferences"); err != nil { // migration 48 (issue #1713)
+		t.Fatal(err)
+	}
 	if _, err := s.db.Exec(fmt.Sprintf("PRAGMA user_version = %d", channelTopicMigration-1)); err != nil {
 		t.Fatal(err)
 	}
