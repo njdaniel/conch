@@ -11,7 +11,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/njdaniel/conch/pkg/schema"
 )
@@ -135,6 +137,62 @@ func TestVAPIDKeyRefusals(t *testing.T) {
 			t.Fatal(err)
 		}
 		if _, err := LoadOrCreateVAPIDKey(dir); err == nil || !strings.Contains(err.Error(), "regular file") {
+			t.Errorf("error = %v", err)
+		}
+	})
+	t.Run("a symbolic link, even to a good key", func(t *testing.T) {
+		dir := t.TempDir()
+		target := filepath.Join(dir, "real.pem")
+		if err := os.WriteFile(target, good, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		link := filepath.Join(dir, KeyFileName)
+		if err := os.Symlink(target, link); err != nil {
+			t.Skip("no symbolic links here: " + err.Error())
+		}
+		if _, err := LoadOrCreateVAPIDKey(dir); err == nil || !strings.Contains(err.Error(), "symbolic link") {
+			t.Errorf("error = %v", err)
+		}
+		// A dangling one is refused too, and nothing is created through it.
+		if err := os.Remove(target); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := LoadOrCreateVAPIDKey(dir); err == nil {
+			t.Error("a dangling link was accepted")
+		}
+		if _, err := os.Stat(target); !os.IsNotExist(err) {
+			t.Errorf("a key was created through the link: %v", err)
+		}
+	})
+	t.Run("a FIFO does not hang the start", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := syscall.Mkfifo(filepath.Join(dir, KeyFileName), 0o600); err != nil {
+			t.Skip("no FIFOs here: " + err.Error())
+		}
+		done := make(chan error, 1)
+		go func() { _, err := LoadOrCreateVAPIDKey(dir); done <- err }()
+		select {
+		case err := <-done:
+			if err == nil || !strings.Contains(err.Error(), "regular file") {
+				t.Errorf("error = %v", err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("startup hung on a FIFO")
+		}
+	})
+	t.Run("a file owned by another user", func(t *testing.T) {
+		if os.Geteuid() != 0 {
+			t.Skip("changing a file's owner needs root")
+		}
+		dir := t.TempDir()
+		path := filepath.Join(dir, KeyFileName)
+		if err := os.WriteFile(path, good, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chown(path, 12345, 12345); err != nil {
+			t.Skip("cannot chown: " + err.Error())
+		}
+		if _, err := LoadOrCreateVAPIDKey(dir); err == nil || !strings.Contains(err.Error(), "not owned") {
 			t.Errorf("error = %v", err)
 		}
 	})

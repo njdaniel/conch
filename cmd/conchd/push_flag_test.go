@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -191,5 +192,29 @@ func TestServeRefusesAnUnusableKey(t *testing.T) {
 	}
 	if _, statErr := os.Stat(filepath.Join(dir, "conch.db")); !os.IsNotExist(statErr) {
 		t.Errorf("the database was opened before the key was refused: %v", statErr)
+	}
+}
+
+// --push-webpush-allow-private is warned about at start, as
+// --metrics-allow-remote is; without it there is no such warning.
+func TestStartPushWarnsOfAllowPrivate(t *testing.T) {
+	for _, private := range []bool{false, true} {
+		var buf bytes.Buffer
+		prev := slog.Default()
+		slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo})))
+		dir := t.TempDir()
+		key, err := push.LoadOrCreateVAPIDKey(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = startPush(context.Background(), openPushStore(t), serveOptions{dataDir: dir, pushWebPush: true, pushAllowPrivate: private}, key, time.Now())
+		slog.SetDefault(prev)
+		if err != nil {
+			t.Fatal(err)
+		}
+		warned := strings.Contains(buf.String(), "level=WARN") && strings.Contains(buf.String(), "allow-private")
+		if warned != private {
+			t.Errorf("allow-private %v: warned %v in %q", private, warned, buf.String())
+		}
 	}
 }

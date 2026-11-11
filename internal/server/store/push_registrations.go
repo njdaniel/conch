@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"strconv"
 	"time"
 
 	"github.com/njdaniel/conch/pkg/schema"
@@ -90,6 +91,21 @@ func (t PushTarget) Fingerprint() string {
 	return hex.EncodeToString(sum[:8])
 }
 
+// liveCredentialWhere is the liveness of a credential, c, whose principal is
+// p, at now: not revoked, of the full scope,
+// issued under its principal's current authentication generation, and neither
+// expired nor idle past its bound. It is the check resolve.go makes, repeated
+// inside the transaction that writes a registration, so a request that
+// authenticated just before a restore, a revoke-all or a password reset
+// committed cannot leave an active row for a credential that is dead by then.
+// The time is an integer written into the text, never request text.
+func liveCredentialWhere(now time.Time) string {
+	ms := strconv.FormatInt(now.UnixMilli(), 10)
+	return `c.revoked_at IS NULL AND c.scope = 'full' AND c.auth_generation = p.auth_generation
+	AND (c.expires_at IS NULL OR c.expires_at > ` + ms + `)
+	AND (c.idle_ms IS NULL OR COALESCE(c.last_used_at, c.created_at) + c.idle_ms > ` + ms + `)`
+}
+
 // pushRegistrationColumns are the columns a registration is read from: none of
 // the target.
 const pushRegistrationColumns = `id, transport, platform, app, target_fingerprint, created_at, last_wake_at, last_fetch_at`
@@ -141,7 +157,8 @@ func (s *Store) CreatePushRegistration(ctx context.Context, credentialID int64, 
 	err := s.withImmediateTx(ctx, func(tx execer) error {
 		var principalID int64
 		switch err := tx.QueryRowContext(ctx,
-			"SELECT principal_id FROM credentials WHERE id = ? AND revoked_at IS NULL", credentialID).Scan(&principalID); {
+			`SELECT c.principal_id FROM credentials c JOIN principals p ON p.id = c.principal_id
+			 WHERE c.id = ? AND `+liveCredentialWhere(now), credentialID).Scan(&principalID); { // #nosec G202 -- liveCredentialWhere is a constant of this package plus an integer
 		case errors.Is(err, sql.ErrNoRows):
 			return ErrNotFound
 		case err != nil:
@@ -267,7 +284,9 @@ func (s *Store) ReplacePushTarget(ctx context.Context, credentialID int64, id st
 		res, err := tx.ExecContext(ctx,
 			`UPDATE push_registrations SET app = ?, endpoint = ?, p256dh = ?, auth = ?, provider = ?, token = ?,
 			        target_fingerprint = ?, updated_at = ?
-			 WHERE id = ? AND credential_id = ? AND state = 'active' AND transport = ? AND platform = ?`,
+			 WHERE id = ? AND credential_id = ? AND state = 'active' AND transport = ? AND platform = ?
+			   AND credential_id IN (SELECT c.id FROM credentials c JOIN principals p ON p.id = c.principal_id
+			                         WHERE `+liveCredentialWhere(now)+`)`, // #nosec G202 -- a constant of this package plus an integer
 			t.App, t.Endpoint, t.P256DH, t.Auth, string(t.Provider), t.Token, t.Fingerprint(), now.UnixMilli(),
 			id, credentialID, string(t.Transport), string(t.Platform))
 		if err != nil {

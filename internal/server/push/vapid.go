@@ -43,7 +43,8 @@ type VAPIDKey struct {
 // It refuses, with an error that names the file and never any of its contents,
 // a file that cannot be read, is not a regular file, is readable or writable
 // by group or others (a private key anyone on the host can read is not a
-// secret), is not one PEM block holding a PKCS#8 key, or is a key on another
+// secret), is not owned by the user conchd runs as, is a symbolic link (not
+// followed) or a FIFO (not blocked on), is not one PEM block holding a PKCS#8 key, or is a key on another
 // curve than P-256.
 func LoadOrCreateVAPIDKey(dataDir string) (*VAPIDKey, error) {
 	path := filepath.Join(dataDir, KeyFileName)
@@ -64,10 +65,13 @@ func LoadOrCreateVAPIDKey(dataDir string) (*VAPIDKey, error) {
 }
 
 func loadVAPIDKey(path string) (*VAPIDKey, error) {
-	f, err := os.Open(path) // #nosec G304 -- the operator's data directory
+	f, err := os.OpenFile(path, os.O_RDONLY|keyOpenFlags, 0) // #nosec G304 -- the operator's data directory
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil, err
+		}
+		if isSymlinkRefusal(err) {
+			return nil, fmt.Errorf("push: VAPID key file %s is a symbolic link, which is not accepted; put the key file itself there", path)
 		}
 		return nil, fmt.Errorf("push: VAPID key file %s cannot be opened: %w", path, errors.Unwrap(err))
 	}
@@ -79,6 +83,9 @@ func loadVAPIDKey(path string) (*VAPIDKey, error) {
 	}
 	if !info.Mode().IsRegular() {
 		return nil, fmt.Errorf("push: VAPID key file %s is not a regular file", path)
+	}
+	if !keyOwnedByUs(info) {
+		return nil, fmt.Errorf("push: VAPID key file %s is not owned by the user conchd runs as", path)
 	}
 	if perm := info.Mode().Perm(); perm&0o077 != 0 {
 		return nil, fmt.Errorf("push: VAPID key file %s is accessible to group or others (mode %04o); run chmod 600 on it, or delete it to make a new key, which ends every Web Push registration", path, perm)

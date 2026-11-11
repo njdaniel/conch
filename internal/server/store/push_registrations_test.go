@@ -3,7 +3,9 @@ package store
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -324,9 +326,6 @@ func TestSweepEndsPushRegistrations(t *testing.T) {
 	silent := credentialOf(t, s, human, "silent")
 	fetched := credentialOf(t, s, human, "fetched")
 	updated := credentialOf(t, s, human, "updated")
-	if _, err := s.db.Exec("UPDATE credentials SET idle_ms = 60000, last_used_at = ? WHERE id = ?", now.Add(-time.Hour).UnixMilli(), idle); err != nil {
-		t.Fatal(err)
-	}
 	reg := func(c int64, at time.Time) string {
 		r, err := s.CreatePushRegistration(ctx, c, webPushTarget("s"), at)
 		if err != nil {
@@ -337,6 +336,11 @@ func TestSweepEndsPushRegistrations(t *testing.T) {
 	old := now.Add(-PushStaleAfter - time.Hour)
 	rExpiring, rIdle := reg(expiring.ID, now), reg(idle, now)
 	rSilent, rFetched, rUpdated := reg(silent, old), reg(fetched, old), reg(updated, old)
+	// The idle bound is set after it registered: a credential already idle
+	// past its bound cannot register.
+	if _, err := s.db.Exec("UPDATE credentials SET idle_ms = 60000, last_used_at = ? WHERE id = ?", now.Add(-time.Hour).UnixMilli(), idle); err != nil {
+		t.Fatal(err)
+	}
 	if err := s.TouchPushFetch(ctx, fetched, now.Add(-time.Hour)); err != nil {
 		t.Fatal(err)
 	}
@@ -424,5 +428,119 @@ func TestPushAuditHoldsNoTarget(t *testing.T) {
 	}
 	if n := len(pushAuditDetails(t, s, schema.AuditActionPushRegistrationCreated)); n != 2 {
 		t.Errorf("%d created rows, want 2", n)
+	}
+}
+
+// A request that authenticated before a generation bump, a revoke-all or an
+// expiry cannot write for the credential once it is dead: the liveness check
+// is inside the write's transaction (issue #1714 review S1).
+func TestPushWritesRefuseADeadCredential(t *testing.T) {
+	ctx := context.Background()
+	rows := func(s *Store) int {
+		var n int
+		if err := s.db.QueryRow("SELECT COUNT(*) FROM push_registrations").Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+	kill := []struct {
+		name string
+		do   func(t *testing.T, s *Store, human Principal, cred int64)
+	}{
+		{"generation bump (restore, password reset)", func(t *testing.T, s *Store, human Principal, _ int64) {
+			if _, err := s.BumpAuthGeneration(ctx, "system", human.ID, "test", notificationsT0); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"credential expired", func(t *testing.T, s *Store, _ Principal, cred int64) {
+			if _, err := s.db.Exec("UPDATE credentials SET expires_at = ? WHERE id = ?", notificationsT0.Add(-time.Hour).UnixMilli(), cred); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"idle past its bound", func(t *testing.T, s *Store, _ Principal, cred int64) {
+			if _, err := s.db.Exec("UPDATE credentials SET idle_ms = 1000, last_used_at = ? WHERE id = ?", notificationsT0.Add(-time.Hour).UnixMilli(), cred); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"a setup-scope credential", func(t *testing.T, s *Store, _ Principal, cred int64) {
+			if _, err := s.db.Exec("UPDATE credentials SET scope = 'setup' WHERE id = ?", cred); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"revoked", func(t *testing.T, s *Store, human Principal, cred int64) {
+			if err := s.RevokeCredentialOf(ctx, "principal:test", human.ID, cred); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	}
+	for _, tt := range kill {
+		t.Run(tt.name, func(t *testing.T) {
+			s, _, human := credentialFixture(t)
+			cred := credentialOf(t, s, human, "phone")
+			// A live registration first, so the replace has something to find
+			// that a bump does not end (the bump ends it; the others leave it).
+			reg := registerPush(t, s, cred, webPushTarget("a"))
+			tt.do(t, s, human, cred)
+			before := rows(s)
+			if _, err := s.CreatePushRegistration(ctx, cred, webPushTarget("b"), notificationsT0); !errors.Is(err, ErrNotFound) {
+				t.Errorf("create for a dead credential = %v, want ErrNotFound", err)
+			}
+			if _, err := s.ReplacePushTarget(ctx, cred, reg.ID, webPushTarget("c"), notificationsT0); !errors.Is(err, ErrPushRegistrationNotFound) {
+				t.Errorf("replace for a dead credential = %v, want ErrPushRegistrationNotFound", err)
+			}
+			if after := rows(s); after != before {
+				t.Errorf("a refused write changed the table: %d rows, was %d", after, before)
+			}
+			// What the replace did not write is still the old target's.
+			if fp := pushFingerprintOf(t, s, reg.ID); fp != reg.TargetFingerprint {
+				t.Errorf("the target of a dead credential's registration was replaced")
+			}
+		})
+	}
+}
+
+func pushFingerprintOf(t *testing.T, s *Store, id string) string {
+	t.Helper()
+	var fp string
+	if err := s.db.QueryRow("SELECT target_fingerprint FROM push_registrations WHERE id = ?", id).Scan(&fp); err != nil {
+		t.Fatal(err)
+	}
+	return fp
+}
+
+// Concurrent creates for one credential cannot exceed its limit (review S5).
+func TestPushConcurrentCreatesHoldTheLimit(t *testing.T) {
+	s, _, human := credentialFixture(t)
+	ctx := context.Background()
+	cred := credentialOf(t, s, human, "phone")
+	const n = 12
+	errs := make(chan error, n)
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, err := s.CreatePushRegistration(ctx, cred, webPushTarget(fmt.Sprint(i)), notificationsT0)
+			errs <- err
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	created, refused := 0, 0
+	for err := range errs {
+		switch {
+		case err == nil:
+			created++
+		case errors.Is(err, ErrTooManyPushRegistrations):
+			refused++
+		default:
+			t.Errorf("unexpected error: %v", err)
+		}
+	}
+	if created != schema.MaxPushRegistrationsPerCredential || refused != n-created {
+		t.Errorf("created %d, refused %d of %d; want %d created", created, refused, n, schema.MaxPushRegistrationsPerCredential)
+	}
+	if got, _ := s.ListOwnPushRegistrations(ctx, cred); len(got) != schema.MaxPushRegistrationsPerCredential {
+		t.Errorf("%d active rows", len(got))
 	}
 }

@@ -33,6 +33,11 @@ func startPush(ctx context.Context, st *store.Store, opts serveOptions, key *pus
 		slog.Warn("push: the VAPID key is not the one the registrations were made under (it was lost or replaced); every Web Push registration was ended as stale, and each app must register again",
 			"registrations_ended", ended, "key_file", push.KeyFileName)
 	}
+	if opts.pushAllowPrivate {
+		// As --metrics-allow-remote is warned about: the operator has loosened a
+		// protection, and says so in the log on every start.
+		slog.Warn("push: --push-webpush-allow-private is on: push endpoints on private addresses and any port are accepted")
+	}
 	slog.Info("push: Web Push is on", "allow_private", opts.pushAllowPrivate)
 	return server.PushConfig{WebPush: true, AllowPrivate: opts.pushAllowPrivate, VAPID: key}, nil
 }

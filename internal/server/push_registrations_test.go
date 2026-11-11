@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"net/netip"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -533,3 +534,48 @@ func TestPushAuditAndLogsHoldNoTarget(t *testing.T) {
 
 // schemaStaleWindow is a little more than the stale window.
 const schemaStaleWindow = store.PushStaleAfter + time.Hour
+
+// N people-sized requests at once for one credential: at most two rows, and the
+// rest 409 too_many_push_registrations (review S5).
+func TestPushConcurrentPostsHoldTheLimit(t *testing.T) {
+	f := newPushFixture(t, PushConfig{WebPush: true})
+	const n = 10
+	codes := make(chan int, n)
+	bodies := make(chan string, n)
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			rec := f.do(t, "POST", "/v1/push/registrations", f.aliceTok, pushBody(fmt.Sprintf("https://push.example/c%d", i)))
+			codes <- rec.Code
+			bodies <- rec.Body.String()
+		}()
+	}
+	wg.Wait()
+	close(codes)
+	close(bodies)
+	created, refused := 0, 0
+	for c := range codes {
+		switch c {
+		case http.StatusCreated:
+			created++
+		case http.StatusConflict:
+			refused++
+		default:
+			t.Errorf("status %d", c)
+		}
+	}
+	for b := range bodies {
+		if strings.Contains(b, `"code"`) && !strings.Contains(b, schema.ErrorCodeTooManyPushRegistrations) {
+			t.Errorf("a refusal that is not too_many_push_registrations: %s", b)
+		}
+	}
+	if created != schema.MaxPushRegistrationsPerCredential || refused != n-created {
+		t.Errorf("created %d, refused %d; want %d created", created, refused, schema.MaxPushRegistrationsPerCredential)
+	}
+	got := decodeBody[schema.ListOwnPushRegistrationsResponseV1](t, f.do(t, "GET", "/v1/push/registrations/mine", f.aliceTok, ""))
+	if len(got.Registrations) != schema.MaxPushRegistrationsPerCredential {
+		t.Errorf("%d active rows", len(got.Registrations))
+	}
+}
