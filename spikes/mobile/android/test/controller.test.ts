@@ -642,6 +642,104 @@ test('camera tap: a tap in flight does not survive Leave', async () => {
   assert.equal(r.c.state.phase, 'idle');
 });
 
+// ---- a tap waiting on the permission answer is abandoned (the Android port of
+// the iOS review fixes, d67e9336). The answer is held back by the test, so the
+// tap is still inside permission() when each of these happens; the dialog's own
+// first 'background' has already come.
+function deferred(): { promise: Promise<boolean>; answer: (allowed: boolean) => void } {
+  let answer: (allowed: boolean) => void = () => undefined;
+  const promise = new Promise<boolean>((resolve) => {
+    answer = resolve;
+  });
+  return { promise, answer };
+}
+
+async function pendingTap() {
+  const d = deferred();
+  const r = rig({ prompt: () => d.promise });
+  await joined(r);
+  const tap = r.c.cameraTap();
+  await settle();
+  r.c.appState('background'); // the permission dialog
+  return { r, d, tap };
+}
+
+test('camera tap: before the answer, each of these abandons it: no capture, no claim, even if Allow comes later', async (t) => {
+  const cases: { name: string; happen: (r: Rig) => Promise<void> | void }[] = [
+    { name: 'a screen lock', happen: (r) => r.c.screenLocked(true) },
+    { name: 'a second background', happen: (r) => (r.c.appState('active'), r.c.appState('background')) },
+    { name: 'an interruption', happen: (r) => r.c.interrupted(true) },
+    { name: 'tear-down', happen: (r) => r.c.tearDown() },
+    { name: 'Leave', happen: async (r) => { const leaving = r.c.leave(); r.clock.advance(2000); await leaving; } },
+    { name: 'a lost connection', happen: (r) => r.rooms[0]?.events?.onDisconnected('lost') },
+    { name: 'reconnecting', happen: (r) => r.rooms[0]?.events?.onReconnecting() },
+    { name: 'a tap on the button, which reads Turn camera off', happen: (r) => r.c.cameraTap() },
+  ];
+  // One subtest per case, so each row passes or fails on its own.
+  for (const c of cases) await t.test(c.name, async () => {
+    const { r, d, tap } = await pendingTap();
+    await c.happen(r);
+    await settle();
+    r.clock.now += 120_000; // the Allow comes minutes later
+    d.answer(true);
+    r.c.appState('active');
+    r.c.screenLocked(false);
+    r.c.interrupted(false);
+    r.clock.advance(3000);
+    await tap;
+    await settle();
+    assert.equal(captures(r.log), 0, `${c.name}: no capture`);
+    assert.ok(!r.log.some((l) => l.startsWith('claim ')), `${c.name}: no claim`);
+    assert.equal(r.c.state.cameraOn, false, c.name);
+  });
+});
+
+test('camera tap: the dialog alone (one background, then the answer) still starts the camera, measured from the answer', async () => {
+  const { r, d, tap } = await pendingTap();
+  r.clock.now += 120_000; // the dialog stayed up a long while
+  d.answer(true);
+  r.c.appState('active');
+  r.clock.advance(100);
+  await tap;
+  await settle();
+  assert.equal(captures(r.log), 1);
+});
+
+test('camera tap: the dialog reaching JavaScript only after the answer fails shut: whatever started is stopped at once and the camera is off', async () => {
+  const d = deferred();
+  const r = rig({ prompt: () => d.promise });
+  await joined(r);
+  const tap = r.c.cameraTap();
+  await settle();
+  d.answer(true);
+  await settle(); // nothing blocks yet: the capture may begin
+  r.c.appState('background'); // the late dialog event: the lifecycle stops it
+  await settle();
+  r.c.appState('active');
+  r.clock.advance(3000);
+  await tap;
+  await settle();
+  // Fails shut means: whatever began was stopped by the lifecycle, and every
+  // claim taken was released. Not "nothing started": the capture may begin
+  // before the late dialog event arrives.
+  assert.equal(r.c.state.cameraOn, false);
+  assert.ok(captures(r.log) === 0 || r.log.includes('camera stop'), 'any capture that began was stopped');
+  const claims = r.log.filter((l) => l.startsWith('claim ')).length;
+  const releases = r.log.filter((l) => l.startsWith('release ')).length;
+  assert.equal(releases, claims, 'every claim is released');
+  assert.deepEqual(r.c.state.camera, { kind: 'off', ended: 'lifecycle' });
+});
+
+test('camera tap: Leave then join clears a stale note (reset tells the screen)', async () => {
+  const r = rig({ canPublish: false });
+  await joined(r);
+  await r.c.cameraTap();
+  assert.notEqual(r.c.state.cameraExtra, null, 'Listen only says why');
+  await r.c.leave();
+  await r.c.join('general');
+  assert.equal(r.c.state.cameraExtra, null, 'the old note does not carry into the next join');
+});
+
 test('tear-down stops the capture first, then drops the room, then waits for the release', async () => {
   const r = rig();
   await joined(r);
