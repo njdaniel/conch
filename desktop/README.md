@@ -11,7 +11,7 @@ credential held in main's memory only (restart means signing in again), and
 live feeds that main opens and holds for the page (issue #943, D2-4). **What it
 does not do yet:** saved profiles and persistence (#944, #945), attachments, clipboard, notifications and
 links (#947, #773), the operations whose answers hold a credential the renderer
-may not see (re-authentication, password change, invite and device-link codes),
+may not see (re-authentication, password change),
 voice in the UI (#771: the supervisor that runs `conch-voice` exists, in
 `main/voice/`, but nothing starts it yet), tray, installer. Later children of
 #770 add those.
@@ -31,7 +31,7 @@ voice in the UI (#771: the supervisor that runs `conch-voice` exists, in
 | `main/api/target.ts` | an operation id plus values to a request target; refuses anything that is not a call of the table |
 | `main/api/client.ts` | the one request executor: bearer only for bearer operations, no Origin or Cookie, no redirects, size cap, response validation, generation check |
 | `main/api/session.ts` | the in-memory credential, the server address and the generation; holds the operator code-step challenge behind a handle |
-| `main/api/service.ts` | what each bridge function does: the sign-in sequence, sign-out, restore |
+| `main/api/service.ts` | what each bridge function does: the sign-in sequence, sign-out, restore, and the six secrets made for someone else (`display`) |
 | `main/api/feeds.ts` | the live feeds: subscriptions, frame validation, the bounded queue, the held-socket count and cap, and teardown at unsubscribe, reload, crash and sign-out |
 | `main/api/socket.ts` | the feed socket: Node's `WebSocket` with the bearer header, through undici's `Agent` for the frame-size cap and a connection main can destroy |
 | `main/api/trust.ts` | adds the system trust store to Node's roots; classifies a certificate failure |
@@ -297,6 +297,22 @@ operation signs the window out. Sign-in steps (password, operator code,
 invite, sign-in link, setup token, reset, guest, account, pasted credential)
 are bridge functions of their own: main consumes the token and returns the
 account; the operator's code-step challenge stays in main behind a handle.
+
+Six operations make a secret for someone or something else, which the person
+has to read or copy (issue #1768): an invite's link (`createMemberLink`), a
+sign-in link for another device (`createSignInLink`), the authenticator's seed
+(`totpEnroll`), an administrator's sign-in link for a person
+(`createPrincipalSignInLink`), a script credential (`createPrincipalCredential`)
+and a hook's secret (`createHook`). They are not the app's own credentials, so
+unlike a bearer the page may hold them for display. Each is a bridge function of
+its own (`Service.display` in `main/api/service.ts`, never a generic
+pass-through): main makes the request with its bearer, exactly as the page
+would, and the server's validated reply goes back once, in that call's result.
+Main does not log it (a line names the operation and a reason, never a body),
+store it or keep it after returning. The operations stay `renderer: false`, so
+the generic `request` still refuses all six. The page shows and copies the
+secret, and keeps it in no URL, title or log; a copy button goes through main's
+clipboard write in the click handler, as AddDevice and the invite panel do.
 
 Every IPC invocation is checked in `main/ipc.ts` before anything else: the
 sender is the owned web contents and is not destroyed; the frame is its live

@@ -6,6 +6,7 @@
 // Unknown permission values are tolerated: a permission a newer server
 // names is shown by its name and never sent anywhere.
 import type { ApiFailure } from '../api';
+import { DESKTOP_UNAVAILABLE, desktopUnavailableLine } from '../appLimit';
 import type { Permission } from '../schema/permission';
 import type { WhoAmIResponseV1 } from '../schema/principal';
 
@@ -84,6 +85,7 @@ export interface Refusal {
 // nothing says what was left as it was.
 export function refusalLine(result: Refusal, nothing: string): string {
   if (result.failure === 'network') return `Cannot reach the server. ${nothing}`;
+  if (result.code === DESKTOP_UNAVAILABLE) return `${desktopUnavailableLine} ${nothing}`;
   switch (result.code) {
     case 'permission_denied':
       return result.permission === undefined

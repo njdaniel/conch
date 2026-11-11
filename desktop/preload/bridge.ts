@@ -358,6 +358,13 @@ export function createBridge(
     createAccount: call('createAccount'),
     signOut: call('signOut'),
     replaceCredential: call('replaceCredential'),
+    // The secrets made for someone else (issue #1768): one function each.
+    createMemberLink: call('createMemberLink'),
+    createSignInLink: call('createSignInLink'),
+    totpEnroll: call('totpEnroll'),
+    createPrincipalSignInLink: call('createPrincipalSignInLink'),
+    createPrincipalCredential: call('createPrincipalCredential'),
+    createHook: call('createHook'),
     uploadFile: call('uploadFile'),
     downloadFile: call('downloadFile'),
     saveFile: call('saveFile'),

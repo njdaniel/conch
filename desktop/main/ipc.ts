@@ -27,9 +27,9 @@ import { isProfileId } from './profiles/ids.ts';
 import type { Invites } from './invites.ts';
 import { MISMATCH, type ProfilesService } from './profiles/service.ts';
 import { parseFeedRequest, type Feeds } from './api/feeds.ts';
-import { targetOf, isOperationId } from './api/target.ts';
+import { targetOf, isOperationId, paramOk } from './api/target.ts';
 import { previewable } from './api/target.ts';
-import { invocable, type ReplaceStep, type Service, type SignInStep } from './api/service.ts';
+import { invocable, type DisplayStep, type ReplaceStep, type Service, type SignInStep } from './api/service.ts';
 import { isFileId, parseUpload, MAX_UPLOAD_BYTES, type Files } from './files.ts';
 import { LINK_GESTURE_MS, type Gestures } from './gestures.ts';
 import type { DocumentGate } from './document.ts';
@@ -237,6 +237,51 @@ function signIn(step: SignInStep): Spec {
     },
     run: async ({ service, profiles }, [body]) =>
       profiles.signInPermitted() ? bound(profiles, await service.signIn(step, body as Record<string, unknown>)) : INCOMPATIBLE,
+  };
+}
+
+// display is the spec of a function that makes one of the six operations whose
+// answer holds a secret for someone else (issue #1768) and hands the page the
+// server's reply once. The body is checked against the operation's own request
+// validator; the operation is fixed by the function, never named by the page.
+// Rated as the sign-in steps are, since each makes something that grants
+// access, and the person's act alone (gesture: true): three of them mint a
+// bearer-equivalent for the signed-in account (a sign-in link for another
+// device, a script credential, a sign-in link for any person, one's own
+// included), so a script in the page cannot call them without a click or key in
+// the window just before. Every UI caller follows a click. On a server the app may not sign in to, nothing is sent.
+function display(step: DisplayStep): Spec {
+  return {
+    limit: 30,
+    maxBytes: 16 * 1024,
+    parse: (args) => {
+      const [body] = args;
+      return args.length === 1 && isRecord(body) && operations[step].request?.(body).length === 0 ? [body] : null;
+    },
+    run: ({ service, profiles }, [body]) => (profiles.signInPermitted() ? service.display(step, undefined, body) : INCOMPATIBLE_REPLY),
+    gesture: true,
+  };
+}
+
+// displayFor is display for the two admin operations on another person: the
+// request is exactly { id, body }, the id a principal's number.
+function displayFor(step: DisplayStep): Spec {
+  return {
+    limit: 30,
+    maxBytes: 16 * 1024,
+    parse: (args) => {
+      const [request] = args;
+      if (args.length !== 1 || !isRecord(request) || !hasExactKeys(request, ['id', 'body'])) return null;
+      const { id, body } = request;
+      if (typeof id !== 'number' || !paramOk(id) || !isRecord(body) || operations[step].request?.(body).length !== 0) return null;
+      return [{ id, body }];
+    },
+    run: ({ service, profiles }, [request]) => {
+      if (!profiles.signInPermitted()) return INCOMPATIBLE_REPLY;
+      const { id, body } = request as { id: number; body: unknown };
+      return service.display(step, { id }, body);
+    },
+    gesture: true,
   };
 }
 
@@ -465,6 +510,20 @@ export const SPECS: Readonly<Record<InvokedFunction, Spec>> = {
       return bound(profiles, await service.replaceCredential(operation, body));
     },
   },
+  // The secrets made for someone else (issue #1768): one function each, the
+  // server's reply back once for display and copy, nothing kept in main.
+  createMemberLink: display('createMemberLink'),
+  createSignInLink: display('createSignInLink'),
+  totpEnroll: {
+    limit: 30,
+    maxBytes: 0,
+    parse: none,
+    run: ({ service, profiles }) => (profiles.signInPermitted() ? service.display('totpEnroll', undefined, undefined) : INCOMPATIBLE_REPLY),
+    gesture: true,
+  },
+  createPrincipalSignInLink: displayFor('createPrincipalSignInLink'),
+  createPrincipalCredential: displayFor('createPrincipalCredential'),
+  createHook: display('createHook'),
   // The saved server profiles (issue #945). Ids are 32 hex characters; a
   // label is plain text of at most 64 characters (main trims and checks it).
   profiles: { limit: 120, maxBytes: 0, parse: none, run: ({ profiles }) => profiles.view() },

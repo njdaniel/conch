@@ -162,7 +162,12 @@ export interface Operation {
   // unaffected; it holds all of these itself.
   readonly renderer: boolean;
   // The response fields that are credentials, which the desktop main consumes
-  // and never returns to the renderer.
+  // and never returns to the renderer. The exception is a secret made for
+  // someone or something else (issue #1768: createMemberLink, createSignInLink,
+  // totpEnroll, createPrincipalSignInLink, createPrincipalCredential,
+  // createHook): the person has to see and copy it, so main's one bridge
+  // function for the operation returns it once, in that call's result. The
+  // operation stays renderer: false, so the generic request still refuses it.
   readonly credentials?: readonly string[];
   // True for a WebSocket upgrade: GET, opened with a single-use ticket.
   readonly socket?: true;
