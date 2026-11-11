@@ -50,6 +50,19 @@ func TestNotificationFixturesValidate(t *testing.T) {
 	}
 }
 
+// A refusal never repeats the policy a client sent: it is logged and sent
+// back.
+func TestNotificationPreferencesRefusalDoesNotEchoThePolicy(t *testing.T) {
+	const sent = "s3cr3t-policy-value"
+	err := PutNotificationPreferencesRequestV1{Policy: sent, Muted: []int64{}}.Validate()
+	if err == nil {
+		t.Fatal("Validate() = nil, want a refusal")
+	}
+	if strings.Contains(err.Error(), sent) {
+		t.Errorf("the refusal %q repeats the client's value", err)
+	}
+}
+
 func TestDefaultNotificationPreferences(t *testing.T) {
 	got := DefaultNotificationPreferences()
 	want := NotificationPreferencesV1{Policy: NotificationPolicyOff, Muted: []int64{}}
@@ -222,6 +235,7 @@ func TestListPendingNotificationsResponseV1Validate(t *testing.T) {
 		{"a page, the cursor its last id", ListPendingNotificationsResponseV1{Summaries: page(5, 9, 12), Cursor: 12}, ""},
 		{"a page, the cursor above its last id", ListPendingNotificationsResponseV1{Summaries: page(5, 9, 12), Cursor: 40}, ""},
 		{"a full page with more", ListPendingNotificationsResponseV1{Summaries: page(fullIDs...), Cursor: 119, More: true}, ""},
+		{"more with a cursor that is no message", ListPendingNotificationsResponseV1{Summaries: page(), Cursor: 0, More: true}, "cursor must be a message id"},
 		{"null summaries", ListPendingNotificationsResponseV1{Cursor: 3}, "summaries must be a list"},
 		{"a page past the bound", ListPendingNotificationsResponseV1{Summaries: page(append(fullIDs, 120)...), Cursor: 120}, "at most 20"},
 		{"a negative cursor", ListPendingNotificationsResponseV1{Summaries: page(), Cursor: -1}, "cursor"},

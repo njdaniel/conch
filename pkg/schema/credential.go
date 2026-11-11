@@ -127,10 +127,11 @@ type ListCredentialsResponseV1 struct {
 // link was used for their account; one made by a device link carries the
 // label its maker gave the link. IdleExpiresAt is as on CredentialV1.
 //
-// Push is true for a sign-in that has an active push registration (issue
-// #1712, docs/design/mobile-notifications.md §5.1): this device is sent
-// wakes. It is omitted otherwise. A registration's own details are read only
-// by its own credential (ListOwnPushRegistrationsResponseV1).
+// Push is true when this sign-in has an active push registration (issue
+// #1712, docs/design/mobile-notifications.md §5.1), and is omitted
+// otherwise. It says that an address is registered, not that wakes are
+// sent: under the policy "off" none are. A registration's own details are
+// read only by its own credential (ListOwnPushRegistrationsResponseV1).
 type OwnCredentialV1 struct {
 	ID            int64      `json:"id"`
 	Label         string     `json:"label"`

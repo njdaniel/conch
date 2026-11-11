@@ -222,6 +222,22 @@ func TestPushRegistrationRequestValidate(t *testing.T) {
 			r.Provider, r.Platform, r.Token = PushProviderFCM, PushPlatformAndroid, "fMEP0vJqS0:APA91bH-example_token"
 		}), ""},
 		{"padded keys", web(func(r *CreatePushRegistrationRequestV1) { r.P256DH += "="; r.Auth += "==" }), ""},
+		{"a padded p256dh alone", web(func(r *CreatePushRegistrationRequestV1) { r.P256DH += "=" }), ""},
+		{"a padded auth alone", web(func(r *CreatePushRegistrationRequestV1) { r.Auth += "==" }), ""},
+		// Padding is none, or exactly what the length calls for.
+		{"p256dh with one = too many", web(func(r *CreatePushRegistrationRequestV1) { r.P256DH += "==" }), "p256dh must be base64url, unpadded or correctly padded"},
+		{"p256dh with a run of =", web(func(r *CreatePushRegistrationRequestV1) { r.P256DH += "=====" }), "p256dh must be base64url, unpadded or correctly padded"},
+		{"auth with one = too few", web(func(r *CreatePushRegistrationRequestV1) { r.Auth += "=" }), "auth must be base64url, unpadded or correctly padded"},
+		{"auth with one = too many", web(func(r *CreatePushRegistrationRequestV1) { r.Auth += "===" }), "auth must be base64url, unpadded or correctly padded"},
+		{"auth with a run of =", web(func(r *CreatePushRegistrationRequestV1) { r.Auth += "======" }), "auth must be base64url, unpadded or correctly padded"},
+		{"auth that is only padding", web(func(r *CreatePushRegistrationRequestV1) { r.Auth = "====" }), "auth"},
+
+		// A relay's provider suits its platform.
+		{"fcm on the web", relay(func(r *CreatePushRegistrationRequestV1) { r.Provider, r.Platform = PushProviderFCM, PushPlatformWeb }), ""},
+		{"fcm on ios", relay(func(r *CreatePushRegistrationRequestV1) { r.Provider, r.Platform = PushProviderFCM, PushPlatformIOS }), ""},
+		{"apns on android", relay(func(r *CreatePushRegistrationRequestV1) { r.Platform = PushPlatformAndroid }), "provider apns is for the platform ios"},
+		{"apns on the web", relay(func(r *CreatePushRegistrationRequestV1) { r.Platform = PushPlatformWeb }), "provider apns is for the platform ios"},
+
 		{"an endpoint at the bound", web(func(r *CreatePushRegistrationRequestV1) { r.Endpoint = longEndpoint }), ""},
 		{"an endpoint with a port and a query", web(func(r *CreatePushRegistrationRequestV1) { r.Endpoint = "https://ntfy.example.org:8443/upABC?up=1" }), ""},
 		{"an origin as the app", web(func(r *CreatePushRegistrationRequestV1) {

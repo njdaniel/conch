@@ -82,11 +82,15 @@ const (
 	// (HTTP 409). GET /v1/push/config says so first, with an empty list.
 	ErrorCodePushNotConfigured = "push_not_configured"
 	// ErrorCodePushTransportUnavailable: push is on, and the transport the
-	// request names is not (HTTP 409).
+	// request names is not (HTTP 409). It answers a PUT as it answers a
+	// POST: a registration whose transport has since been switched off
+	// cannot be given a new target.
 	ErrorCodePushTransportUnavailable = "push_transport_unavailable"
 	// ErrorCodePushEndpointRefused: the endpoint is well-formed and conchd
-	// will not post to it: an address it resolves to is forbidden (§5.7).
-	// A malformed endpoint is invalid_request instead (HTTP 400).
+	// will not post to it: an address it resolves to is forbidden (§5.7;
+	// HTTP 400). The refusal's message names neither the endpoint nor any
+	// address it resolved to. A malformed endpoint is invalid_request
+	// instead (also HTTP 400).
 	ErrorCodePushEndpointRefused = "push_endpoint_refused"
 	// ErrorCodeTooManyPushRegistrations: the credential already holds
 	// MaxPushRegistrationsPerCredential, or its principal
@@ -172,26 +176,39 @@ func (p PushProvider) Valid() bool {
 
 // PushRegistrationEndReason is why a registration ended: the reason in the
 // detail of a push_registration_ended audit row (§5.4). The vocabulary is
-// closed.
+// closed. Every way a registration ends has one reason:
+//
+//   - its own credential deletes it (DELETE /v1/push/registrations/{id}),
+//     as an app does before it signs out: self;
+//   - its credential is revoked: a sign-out that did not delete it first,
+//     ending another sign-in, revoke-all, a rotation, an operator's revoke,
+//     a disabled principal: credential_revoked;
+//   - its credential expires, by its expiry or its idle bound:
+//     credential_expired;
+//   - the push service answers that the target is gone (404 or 410):
+//     provider_rejected;
+//   - no fetch and no update for the stale window (35 days), or the server's
+//     VAPID key was lost or replaced: stale.
 type PushRegistrationEndReason string
 
 const (
 	// PushRegistrationEndSelf: its own credential deleted it.
 	PushRegistrationEndSelf PushRegistrationEndReason = "self"
 	// PushRegistrationEndCredentialRevoked: its credential was revoked, for
-	// any of the reasons one is: a sign-out, a rotation, an operator's
+	// any of the reasons one is: a sign-out that left the registration in
+	// place, ending another sign-in, revoke-all, a rotation, an operator's
 	// revoke, a disabled principal.
 	PushRegistrationEndCredentialRevoked PushRegistrationEndReason = "credential_revoked" // #nosec G101 -- a reason name, not a credential
-	// PushRegistrationEndCredentialExpired: its credential expired and the
-	// sweeper reaped it. Nobody revoked anything, so this is its own
-	// reason; the design's §5.4 list does not have it (decision 3 on
-	// #1116).
+	// PushRegistrationEndCredentialExpired: its credential expired, by its
+	// expiry or its idle bound, and the sweeper reaped it. Nobody revoked
+	// anything, so this is its own reason (decision 3 on #1116).
 	PushRegistrationEndCredentialExpired PushRegistrationEndReason = "credential_expired" // #nosec G101 -- a reason name, not a credential
 	// PushRegistrationEndProviderRejected: the push service said the target
-	// is gone (§5.6).
+	// is gone, with a 404 or a 410 (§5.6).
 	PushRegistrationEndProviderRejected PushRegistrationEndReason = "provider_rejected"
 	// PushRegistrationEndStale: no fetch and no update for the stale
-	// window (§5.8), or the server's VAPID key was replaced.
+	// window of 35 days (§5.8), or the server's VAPID key was lost or
+	// replaced (decision 6 on #1116).
 	PushRegistrationEndStale PushRegistrationEndReason = "stale"
 )
 
@@ -274,8 +291,13 @@ func ValidatePushRegistrationID(id string) error {
 // write-only on the wire, as a credential's token is: TargetFingerprint is
 // PushTargetFingerprintLength lowercase hex characters the server derives
 // from the target, so an app can tell whether the server holds the target it
-// last sent, and nobody can read one back. It has no preference either:
-// those are NotificationPreferencesV1.
+// last sent, and nobody can read one back. The server derives it from the
+// target as Normalized leaves it, and the same target always gives the same
+// fingerprint, so it is stable for as long as the registration keeps its
+// target and changes only when a PUT replaces that. How it is derived is the
+// server's: a client never computes one. It keeps the value its last write
+// was answered with and compares what it reads later against that. It has no
+// preference either: those are NotificationPreferencesV1.
 //
 // App is what the request gave. LastWakeAt is when the server last sent this
 // registration a wake, and LastFetchAt when its credential last read the
@@ -332,8 +354,13 @@ func (r PushRegistrationV1) Validate() error {
 // only: which addresses the host may resolve to is the server's check, at
 // registration and again at every dial (§5.7), and its refusal is
 // push_endpoint_refused. P256DH is base64url of a PushP256DHBytes-byte
-// uncompressed P-256 point, and Auth base64url of PushAuthBytes bytes;
-// padding is accepted, and Normalized drops it.
+// uncompressed P-256 point, and Auth base64url of PushAuthBytes bytes.
+// Each may be unpadded or correctly padded, with exactly the "=" its length
+// calls for and no other; Normalized drops the padding.
+//
+// A relay registration's provider must suit its platform: apns is for ios
+// alone, and is refused with android or web. fcm is accepted with any
+// platform, android and web among them.
 //
 // App is the app's bundle id, package name or origin: 1 to MaxPushAppBytes
 // bytes of ASCII letters, digits and ".", "-", "_", ":" and "/". Token is 1
@@ -367,6 +394,14 @@ func (r CreatePushRegistrationRequestV1) Normalized() CreatePushRegistrationRequ
 // /v1/push/registrations/{id} (§5.3): the same fields as the create request,
 // under the same rules. It replaces the registration's target, which is how
 // an app reports a device token or an endpoint that changed; the id stays.
+//
+// Transport and Platform must be the registration's own: a PUT that names
+// another of either is refused with invalid_request, and an app that changes
+// transport deletes the registration and creates one. App may change. A PUT
+// to a registration whose transport the server has since switched off is
+// refused with push_transport_unavailable, as a POST naming it would be.
+// Validate checks the body alone; what the registration holds is the
+// server's check.
 type UpdatePushRegistrationRequestV1 struct {
 	Transport PushTransport `json:"transport"`
 	Platform  PushPlatform  `json:"platform"`
@@ -449,6 +484,9 @@ func validatePushRegistrationRequest(r pushTarget) error {
 		if !r.Provider.Valid() {
 			return errors.New("schema: push registration provider is not one of apns, fcm")
 		}
+		if r.Provider == PushProviderAPNs && r.Platform != PushPlatformIOS {
+			return errors.New("schema: push registration provider apns is for the platform ios alone")
+		}
 		if err := validatePushToken(r.Token); err != nil {
 			return fmt.Errorf("schema: push registration token %w", err)
 		}
@@ -530,14 +568,20 @@ func validatePushEndpoint(endpoint string) error {
 	return nil
 }
 
-// decodePushBase64 decodes base64url. With padded, trailing "=" padding is
-// accepted, as a browser's subscription may carry it; without, it is refused.
+// decodePushBase64 decodes base64url. With padded, correct "=" padding is
+// accepted as well as none, as a browser's subscription may carry it:
+// exactly as many "=" as bring the length to a multiple of four, and no
+// other run of them. Without padded, any padding is refused.
 func decodePushBase64(s string, padded bool) ([]byte, error) {
 	if s == "" {
 		return nil, errors.New("must not be empty")
 	}
 	if padded {
-		s = strings.TrimRight(s, "=")
+		body := strings.TrimRight(s, "=")
+		if pad := len(s) - len(body); pad != 0 && (len(s)%4 != 0 || pad > 2) {
+			return nil, errors.New("must be base64url, unpadded or correctly padded")
+		}
+		s = body
 	}
 	// The longest value decoded here is a 65-byte point: 88 characters
 	// padded. Anything much longer is refused before it is decoded.

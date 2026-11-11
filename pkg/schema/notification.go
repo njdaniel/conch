@@ -126,7 +126,9 @@ func validateNotificationPreferences(policy NotificationPolicy, muted []int64) e
 		return errors.New("schema: notification preferences policy is required")
 	}
 	if !policy.Valid() {
-		return fmt.Errorf("schema: notification preferences policy %q is not one of off, mentions, all", policy)
+		// The client's value is not repeated: a refusal is logged and sent
+		// back.
+		return errors.New("schema: notification preferences policy is not one of off, mentions, all")
 	}
 	if muted == nil {
 		return errors.New("schema: notification preferences muted must be a list, not null or missing")
@@ -146,12 +148,19 @@ func validateNotificationPreferences(policy NotificationPolicy, muted []int64) e
 // is closed, and Valid refuses a value outside it. A client tolerates a kind
 // it does not know: it still reads the summary and renders it, so a later
 // kind is an addition, not a new version (as JoinWarning is).
+//
+// A message has one kind, and it does not depend on the policy: whisper
+// before mention before message. A whisper to the reader is "whisper" even
+// when its body also mentions them, and a message that mentions them is
+// "mention" under the policy "all" as under "mentions".
 type NotificationKind string
 
 const (
-	// NotificationKindMessage: a message, under the policy "all".
+	// NotificationKindMessage: neither of the others. Only the policy "all"
+	// puts one in the feed.
 	NotificationKindMessage NotificationKind = "message"
-	// NotificationKindMention: the body mentions the reader (Mentions).
+	// NotificationKindMention: the body mentions the reader (Mentions), and
+	// the message is not a whisper to them.
 	NotificationKindMention NotificationKind = "mention"
 	// NotificationKindWhisper: a whisper addressed to the reader. It counts
 	// as a mention under the policy "mentions" (Q3 on #1116).
@@ -172,12 +181,26 @@ func (k NotificationKind) Valid() bool {
 // (conch.notification_summary.v1, §4.3): what a phone needs to render one
 // notification and to open the right place when it is tapped.
 //
-// AuthorName is omitted when the reader may not be told who wrote it (the
-// channel hides its members and the routes' author predicate says no).
-// Text is the start of the message, at most MaxNotificationTextChars
-// characters. It is omitted unless the credential's preview switch is on,
-// and omitted then too when the server will not excerpt the message (a
-// spoiler, or a message with no text).
+// A removed message, the tombstone a moderator leaves (MessageV2.Removed),
+// is never summarised.
+//
+// AuthorID is always sent, as MessageV2 always carries its author. Only
+// AuthorName passes through the hide-members predicate: it is the name the
+// channel's authors route (ChannelAuthorV1) would give this reader, whether
+// or not they hold see_member_directory, and it is omitted when that rule
+// gives them no name. For a message posted during a guest visit it is the
+// guest attribution the message carries (MessageV2.GuestAuthor), never the
+// current name of a member the guest has since become.
+//
+// Text is the start of the message's body. It is omitted unless the
+// credential's preview switch is on. It is omitted then too for a spoiler,
+// which is a message whose body contains "||" or that has an attachment
+// whose stored name starts with SpoilerFilePrefix (decision 2 on #1116; the
+// rule fails safe, so a body that only looks like a spoiler is withheld as
+// well), and for a message with no text. The cut is the browser's: runs of
+// whitespace become one space, the ends are trimmed, and a body longer than
+// MaxNotificationTextChars characters is cut to its first 159 and "…", which
+// is MaxNotificationTextChars in all.
 type NotificationSummaryV1 struct {
 	Schema      string           `json:"schema"`
 	ChannelID   int64            `json:"channel_id"`
@@ -230,20 +253,34 @@ func (s NotificationSummaryV1) Validate() error {
 // Summaries is never null, is ascending by message_id, and holds at most
 // MaxPendingNotificationsPage.
 //
+// The request's after is optional and defaults to 0: a non-negative int64.
+// One that is malformed or negative is refused with invalid_request.
+//
+// A candidate is a message above after that this reader may read: it passes
+// the audience predicate and is in a channel the reader is in now. The
+// server examines a bounded number of candidates per request, about 2,000,
+// and the bound counts candidates only. A message the reader cannot see is
+// never examined, never counted and never moves the cursor.
+//
 // Cursor is the id to pass as after in the next request. Every match at or
 // below it has been returned, in this page or an earlier one, so a client
-// stores it as its high-water mark once it has rendered the page. It is
-// the highest message id the server examined for this answer, which may be
-// above the last summary's and is never below it. The server examines a
-// bounded number of candidates per request, about 2,000. When it reaches
-// that bound before the page is full, the cursor is the highest id it
-// examined, so a long run of messages that do not match costs a client
-// nothing and never holds it in place. When there was nothing above after
-// to examine, the cursor is after itself.
+// stores it as its high-water mark once it has rendered the page. It is the
+// id of the highest candidate examined for this answer, which may be above
+// the last summary's and is never below it. When the bound is reached
+// before the page is full, the cursor is the highest candidate examined, so
+// a long run of messages that do not match costs a client nothing and never
+// holds it in place. When there was no candidate above after, the cursor is
+// after itself. So the cursor is always the id of a message the reader may
+// read, or after: like SearchMessagesResponseV2.NextBefore, it is never a
+// function of messages the caller cannot see, and says nothing about how
+// many of those there are or where their ids lie.
 //
-// More is true when the server stopped before the newest message, because
+// More is true when the server stopped before the newest candidate, because
 // the page was full or the bound was reached: the client asks again with
-// Cursor. It is false when everything up to now has been examined.
+// Cursor. It is false when every candidate up to now has been examined. It
+// refers to the newest message this reader may read, never to the newest
+// message on the server. When More is true the cursor is above after, so a
+// client that asks again always makes progress.
 //
 // The single cursor assumes message ids are globally monotonic: one counter
 // across every channel, so that "above the cursor" means "newer" whichever
@@ -259,8 +296,9 @@ type ListPendingNotificationsResponseV1 struct {
 
 // Validate reports whether the page is well-formed: summaries is a list, not
 // null, of at most MaxPendingNotificationsPage valid summaries in strictly
-// ascending message_id, and cursor is not negative and not below the last
-// summary's message_id.
+// ascending message_id, and cursor is not negative, not below the last
+// summary's message_id, and positive when more is true (it is then the id
+// of a message, above the request's after).
 func (r ListPendingNotificationsResponseV1) Validate() error {
 	if r.Summaries == nil {
 		return errors.New("schema: pending notifications summaries must be a list, not null")
@@ -283,6 +321,9 @@ func (r ListPendingNotificationsResponseV1) Validate() error {
 	}
 	if r.Cursor < last {
 		return errors.New("schema: pending notifications cursor must not be below the last summary's message_id")
+	}
+	if r.More && r.Cursor == 0 {
+		return errors.New("schema: pending notifications cursor must be a message id when more is true")
 	}
 	return nil
 }
