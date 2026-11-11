@@ -16,7 +16,9 @@
 //! and the read side for its end (`BlockingReader`), each on a thread that is not the
 //! runtime's. A write that fails is owner loss as well as the read's end: on Windows
 //! nothing else tells the helper its owner is gone, because there is no parent watch
-//! (`managed::parent_id` is 0 there).
+//! (`managed::parent_id` is 0 there). The watch on the end depends on the runtime's I/O
+//! driver being alive; if it is not, the std thread that reads standard input (its end is
+//! owner loss too) and the watchdog are the backstop.
 //!
 //! Input: the path from the command line; the nonce from `CONCH_VOICE_ATTACH` (read by
 //! `main` only when the option is given); the file system's word on the socket and its
@@ -353,11 +355,12 @@ pub fn attach(
     scrubber: &Scrubber,
 ) -> Result<Endpoint, Error> {
     use conch_voice_api::VOICE_CONTROL_HELLO_TIMEOUT_MS;
-    let began = Instant::now();
+    // One deadline for the retry and the attach write together: the hello's time from the
+    // start of the process, so the worst case is one hello timeout.
+    let deadline = process_start() + Duration::from_millis(VOICE_CONTROL_HELLO_TIMEOUT_MS);
     require_pipe_name(path)?;
     let secret = nonce(environment, scrubber)?;
     let handle = tokio::runtime::Handle::try_current().map_err(|_| Error::Attach("no runtime"))?;
-    let deadline = began + Duration::from_millis(VOICE_CONTROL_HELLO_TIMEOUT_MS);
     let client = open_with_retry(
         || client_options().open(path),
         deadline,
@@ -367,13 +370,21 @@ pub fn attach(
     let half = Arc::new(client);
     let mut events = BlockingWriter::new(Arc::clone(&half), handle.clone());
     // The attach line is small; a peer that does not read it must not hold the helper.
-    events.limit = Some(Duration::from_millis(VOICE_CONTROL_HELLO_TIMEOUT_MS));
+    events.limit = Some(deadline.saturating_duration_since(Instant::now()));
     write_attach(&mut events, secret)?;
     // The events are written without a limit, as to a pipe: a slow owner loses events
     // (`managed::Events`), not the helper.
     events.limit = None;
     let end = BlockingReader::new(half, handle);
     Ok(Endpoint { events, end })
+}
+
+/// The time the process began, as far as this module knows: `main` calls this first thing
+/// and it keeps that moment; a caller that never did (a test) gets the moment of its first
+/// call. The events endpoint's time to attach is counted from it.
+pub fn process_start() -> std::time::Instant {
+    static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    *START.get_or_init(std::time::Instant::now)
 }
 
 /// The Windows error for a pipe that exists and has no instance waiting for a client.
@@ -388,11 +399,16 @@ const PIPE_BUSY_RETRY: Duration = Duration::from_millis(50);
 #[cfg(any(windows, test))]
 const PIPE_PREFIX: &str = r"\\.\pipe\";
 
-/// Whether `path` is a pipe name this module will open: `\\.\pipe\` and then one name. A
-/// server's pipe (`\\host\pipe\x`), a relative name, a Unix path and the empty text are
-/// refused, and so is a name that would leave the pipe namespace (`..`) or that has a
-/// separator in it: the owner's names are `conch-voice-` and hex. Nothing is opened for any
-/// of them.
+/// The longest name after the prefix that is opened.
+#[cfg(any(windows, test))]
+const PIPE_NAME_MAX: usize = 200;
+
+/// Whether `path` is a pipe name this module will open: `\\.\pipe\` and then one name of
+/// ASCII letters, digits, `-` and `_`, 1 to 200 bytes: the owner's names are `conch-voice-`
+/// and hex. A server's pipe (`\\host\pipe\x`), a relative name, a Unix path, the empty text
+/// and anything with a dot, a separator, a NUL or a space in the name are refused, so that
+/// nothing can leave the pipe namespace (`..`) or be read differently by the system than
+/// here. Nothing is opened for any of them.
 ///
 /// # Errors
 ///
@@ -409,7 +425,8 @@ pub fn require_pipe_name(path: &Path) -> Result<(), Error> {
         return Err(Error::Attach(REFUSED));
     }
     let name = &text[PIPE_PREFIX.len()..];
-    if name.is_empty() || name == "." || name == ".." || name.contains(['\\', '/']) {
+    let allowed = |byte: u8| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_';
+    if name.is_empty() || name.len() > PIPE_NAME_MAX || !name.bytes().all(allowed) {
         return Err(Error::Attach(REFUSED));
     }
     Ok(())
@@ -673,6 +690,15 @@ mod bridge_tests {
     }
 
     #[test]
+    fn a_name_of_200_bytes_is_the_longest_opened() {
+        let long = format!(r"\\.\pipe\{}", "a".repeat(200));
+        assert!(require_pipe_name(Path::new(&long)).is_ok());
+        let longer = format!("{long}a");
+        assert!(require_pipe_name(Path::new(&longer)).is_err());
+        assert!(require_pipe_name(Path::new(r"\\.\pipe\under_score-9")).is_ok());
+    }
+
+    #[test]
     fn only_a_name_in_the_local_pipe_namespace_is_opened() {
         for good in [
             r"\\.\pipe\conch-voice-0123456789abcdef0123456789abcdef",
@@ -695,6 +721,12 @@ mod bridge_tests {
             "@abstract",
             r"\\.\pipe\..",
             r"\\.\pipe\..\COM1",
+            "\\\\.\\pipe\\x\0",
+            r"\\.\pipe\...",
+            r"\\.\pipe\. ",
+            r"\\.\pipe\x.",
+            "//./pipe/x",
+            r"\\.\pipe\x\",
             r"\\.\pipe\a\b",
             r"\\.\pipe\a/b",
             r" \\.\pipe\x",
@@ -925,8 +957,10 @@ mod bridge_tests {
         assert_eq!(ours, expected);
         assert!(ours.contains("generic_read: true"), "{ours}");
         assert!(ours.contains("generic_write: true"), "{ours}");
-        // Not zero: the default sets SECURITY_SQOS_PRESENT, and nothing here overrides it.
-        assert!(!ours.contains("security_qos_flags: 0,"), "{ours}");
+        // SECURITY_SQOS_PRESENT (0x0010_0000) | SECURITY_IDENTIFICATION (0x0001_0000): the
+        // default, which nothing here overrides. A tokio that changed it would fail here.
+        let flags = format!("security_qos_flags: {}", 0x0011_0000_u32);
+        assert!(ours.contains(&flags), "{ours}");
     }
 }
 

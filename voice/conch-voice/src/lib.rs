@@ -300,22 +300,33 @@ pub fn managed(
 ) -> Result<(), Error> {
     #[cfg(not(unix))]
     let _ = parent;
-    // The runtime comes first: on Windows the pipe is registered with it when it is opened,
-    // and its events are written through it. Nothing has been opened or read yet.
+    // Descriptor 3 is looked at before anything is created: a runtime holds descriptors of
+    // its own (epoll), and with 3 closed one of them would become 3 and be judged in place
+    // of what the owner handed over (Linux's behaviour is unchanged by `--events-pipe`
+    // existing). Nothing else has been opened or read yet. Exactly one of the two sources
+    // is looked at.
+    let fd3 = match &args.events_pipe {
+        Some(_) => None,
+        None => Some(managed::open_event_pipe()?),
+    };
+    // The runtime next: on Windows the pipe is registered with it when it is opened, and its
+    // events are written through it.
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .map_err(Error::Runtime)?;
     // Where the events go: the endpoint the owner listens on, with the attach line already
-    // written, or file descriptor 3. Exactly one is looked at.
-    let (events, end): (Box<dyn Write + Send>, Option<channel::End>) = match &args.events_pipe {
-        Some(path) => {
-            let _entered = runtime.enter();
-            let endpoint = channel::attach(path, environment, &scrubber)?;
-            (Box::new(endpoint.events), Some(endpoint.end))
-        }
-        None => (Box::new(managed::open_event_pipe()?), None),
-    };
+    // written, or file descriptor 3.
+    let (events, end): (Box<dyn Write + Send>, Option<channel::End>) =
+        match (&args.events_pipe, fd3) {
+            (Some(path), _) => {
+                let _entered = runtime.enter();
+                let endpoint = channel::attach(path, environment, &scrubber)?;
+                (Box::new(endpoint.events), Some(endpoint.end))
+            }
+            (None, Some(fd3)) => (Box::new(fd3), None),
+            (None, None) => return Err(Error::EventPipe("is not open")),
+        };
     // The nonce was spent on the attach line: the session is given an environment without it.
     let environment = Environment {
         conch_voice_attach: None,
