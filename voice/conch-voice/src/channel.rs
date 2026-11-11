@@ -1112,7 +1112,7 @@ mod pipe_tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_write_to_a_pipe_the_owner_closed_is_an_error() {
         let name = pipe_name();
-        let mut owner = server(&name, true);
+        let owner = server(&name, true);
         let (endpoint, ()) = tokio::join!(
             async { attach_on_a_thread(name.clone()).await.unwrap() },
             async { owner.connect().await.unwrap() }
