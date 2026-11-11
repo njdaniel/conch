@@ -1030,3 +1030,52 @@ func TestPendingNotificationsHiddenAfterAFullPageOrTheBound(t *testing.T) {
 		})
 	}
 }
+
+// The per-channel candidate statement is read through messages_by_channel in
+// id order, with no sort, on a database that has never been analyzed and on
+// one that has (issue #1725): its cost is a seek and the rows it returns, not
+// the backlog or other channels' messages.
+func TestPendingNotificationsPlan(t *testing.T) {
+	for _, analyze := range []bool{false, true} {
+		t.Run(fmt.Sprintf("analyze=%v", analyze), func(t *testing.T) {
+			f := newFeedFixture(t)
+			bulkInsert(t, f.s, f.ch.ID, f.frank.ID, 300, "chatter")
+			bulkInsert(t, f.s, f.other.ID, f.frank.ID, 300, "elsewhere")
+			if analyze {
+				if _, err := f.s.db.Exec("ANALYZE"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			_, visible := visibilityArgs(Reader{PrincipalID: f.dave.ID, Scoped: true})
+			args := []any{len(schema.SpoilerFilePrefix), schema.SpoilerFilePrefix, f.ch.ID, int64(0), f.dave.ID, f.dave.ID}
+			args = append(append(args, visible...), 2001)
+			rows, err := f.s.db.Query("EXPLAIN QUERY PLAN "+pendingNotificationsSQL(), args...)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = rows.Close() }()
+			var plan []string
+			for rows.Next() {
+				var id, parent, unused int
+				var detail string
+				if err := rows.Scan(&id, &parent, &unused, &detail); err != nil {
+					t.Fatal(err)
+				}
+				plan = append(plan, detail)
+			}
+			if err := rows.Err(); err != nil {
+				t.Fatal(err)
+			}
+			text := strings.Join(plan, "\n")
+			t.Log("\n" + text)
+			if strings.Contains(text, "TEMP B-TREE") {
+				t.Errorf("the plan sorts in a temp B-tree:\n%s", text)
+			}
+			// The channel row is one rowid lookup the planner may put first; the
+			// messages themselves must be a range search of the channel index.
+			if !strings.Contains(text, "SEARCH m USING INDEX messages_by_channel (channel_id=? AND id>?)") || strings.Contains(text, "SCAN m") {
+				t.Errorf("the messages are not read through messages_by_channel:\n%s", text)
+			}
+		})
+	}
+}
