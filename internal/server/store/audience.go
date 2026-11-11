@@ -2621,22 +2621,47 @@ func (s *Store) RemoveMessage(ctx context.Context, channelID int64, reader Reade
 // examined and more set.
 const PendingNotificationScanBound = 2000
 
+// The candidates are read one channel at a time, and merged (issue #1725).
+// A single statement over every channel the reader is in joins their
+// memberships and sorts every unread candidate before it applies its limit,
+// so its cost follows the reader's backlog (and, with a plan that walks
+// messages by id, other channels' messages too). The global first N
+// candidates in id order are always within each channel's first N, so the
+// statement below takes one channel's candidates above a lower bound, in id
+// order, through messages_by_channel, with every condition of the single
+// statement, and ListPendingNotifications merges channels by id and stops
+// at the bound. The answer is the same byte for byte; the work is a seek per
+// channel and about the bound's worth of rows, not the backlog.
+
+// pendingChannelsSQL lists the reader's live channels with their read marks
+// (0 for a channel never marked), in channel id order. Arguments: the reader
+// (read mark), the reader (member). It reads no message. It is a list of
+// channels the reader is in, which they hold.
+const pendingChannelsSQL = `SELECT mem.channel_id, COALESCE(rm.last_read_id, 0)
+	FROM ` + liveMembers + ` mem
+	LEFT JOIN read_marks rm ON rm.principal_id = ? AND rm.channel_id = mem.channel_id
+	WHERE mem.principal_id = ?
+	ORDER BY mem.channel_id`
+
 // pendingNotificationsHead and Tail wrap the message visibility condition,
-// as listHead and listTail do, and select candidates ascending, one past the
-// bound so that "more" needs no second query. Arguments, in order: the
-// spoiler prefix's length and text, the reader (member), the reader (read
-// mark), after, the reader (author), then messageVisible's six, then the
-// limit. The statement is built from constants only.
+// as listHead and listTail do, and select one channel's candidates
+// ascending, at most the batch asked for. The index is named because, once
+// the database has been ANALYZEd, the planner on a server with few channels
+// prefers a walk of messages by id above the bound, filtering the channel
+// afterwards, which reads every channel's messages (measured in #1725). Arguments, in order: the spoiler
+// prefix's length and text, the channel, the lower bound (the greater of
+// after and the channel's read mark), the reader (member), the reader
+// (author), then messageVisible's six, then the limit. The statement is
+// built from constants only.
 const (
 	pendingNotificationsHead = `SELECT m.id, m.channel_id, ch.name, m.author_id, m.body, m.created_at, m.audience_kind,
 	(SELECT g.handle FROM message_guest_attribution g WHERE g.message_id = m.id),
 	(SELECT g.label FROM message_guest_attribution g WHERE g.message_id = m.id),
 	EXISTS (SELECT 1 FROM files sf WHERE sf.message_id = m.id AND substr(sf.filename, 1, ?) = ?)
-	FROM messages m
+	FROM messages m INDEXED BY messages_by_channel
 	JOIN channels ch ON ch.id = m.channel_id
-	JOIN ` + liveMembers + ` mem ON mem.channel_id = m.channel_id AND mem.principal_id = ?
-	LEFT JOIN read_marks rm ON rm.principal_id = ? AND rm.channel_id = m.channel_id
-	WHERE m.id > ? AND m.id > COALESCE(rm.last_read_id, 0)
+	WHERE m.channel_id = ? AND m.id > ?
+	  AND EXISTS (SELECT 1 FROM ` + liveMembers + ` mem WHERE mem.channel_id = m.channel_id AND mem.principal_id = ?)
 	  AND m.author_id <> ? AND ` + notRemovedCond + `
 	  AND `
 	pendingNotificationsTail = `
@@ -2645,6 +2670,155 @@ const (
 
 func pendingNotificationsSQL() string {
 	return pendingNotificationsHead + messageVisible(true) + pendingNotificationsTail
+}
+
+// pendingFirstBatch and pendingMaxBatch size a channel's reads in the merge:
+// the first read of a channel takes one row (most channels have nothing, and
+// the merge needs only each channel's next candidate to start), and every
+// later read of the same channel doubles, up to the maximum. The sizes shape
+// the work and never the answer.
+const (
+	pendingFirstBatch = 1
+	pendingMaxBatch   = 256
+)
+
+// pendingCandidate is one row the feed selected: a message the reader may
+// read, above their mark, that they did not write.
+type pendingCandidate struct {
+	summary   schema.NotificationSummaryV1
+	body      string
+	whisper   bool
+	guestName string
+	spoiler   bool
+}
+
+// pendingChannel is the merge's state for one channel: the candidates read
+// and not yet taken (in id order), the id to read above next, and whether
+// the channel has no more.
+type pendingChannel struct {
+	id    int64
+	above int64
+	batch int
+	buf   []pendingCandidate
+	done  bool
+}
+
+// fill reads the channel's next batch of candidates above its last read id.
+func (c *pendingChannel) fill(ctx context.Context, stmt *sql.Stmt, predArgs []any, reader int64) error {
+	args := []any{len(schema.SpoilerFilePrefix), schema.SpoilerFilePrefix, c.id, c.above, reader, reader}
+	args = append(append(args, predArgs...), c.batch)
+	rows, err := stmt.QueryContext(ctx, args...)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = rows.Close() }()
+	n := 0
+	for rows.Next() {
+		var cand pendingCandidate
+		var created int64
+		var kind, guestHandle, guestLabel sql.NullString
+		if err := rows.Scan(&cand.summary.MessageID, &cand.summary.ChannelID, &cand.summary.ChannelName, &cand.summary.AuthorID, &cand.body,
+			&created, &kind, &guestHandle, &guestLabel, &cand.spoiler); err != nil {
+			return err
+		}
+		cand.summary.Schema = schema.NotificationSummarySchemaV1
+		cand.summary.PostedAt = schema.NewTimestamp(time.UnixMilli(created))
+		cand.whisper = kind.Valid && schema.AudienceKind(kind.String) == schema.AudienceKindPrincipals
+		if guestHandle.Valid {
+			cand.guestName = schema.GuestDisplayName(guestLabel.String, guestHandle.String)
+		}
+		c.buf = append(c.buf, cand)
+		c.above = cand.summary.MessageID
+		n++
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	// A short batch means the channel has no more above its last id. A
+	// full one may or may not.
+	c.done = n < c.batch
+	c.batch = min(c.batch*2, pendingMaxBatch)
+	return nil
+}
+
+// pendingCandidates returns the first limit candidates for reader above
+// after, across the reader's live channels, in message id order: what the
+// single statement of issue #1713 returned, chosen by merging the channels'
+// own first candidates (see the comment above pendingChannelsSQL). It runs in
+// one read transaction, a snapshot, as the single statement did.
+//
+// Its work is bounded: one channel list, one seek per channel the reader is
+// in, and, in the merge, about limit candidates plus what each channel's last
+// batch over-read (at most pendingMaxBatch each). The count of channels is
+// the reader's own membership, and every channel counts: leaving one out
+// would change the answer.
+func (s *Store) pendingCandidates(ctx context.Context, reader Reader, after int64, limit int) ([]pendingCandidate, error) {
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	rows, err := tx.QueryContext(ctx, pendingChannelsSQL, reader.PrincipalID, reader.PrincipalID)
+	if err != nil {
+		return nil, err
+	}
+	var chans []*pendingChannel
+	for rows.Next() {
+		c := &pendingChannel{batch: pendingFirstBatch}
+		var mark int64
+		if err := rows.Scan(&c.id, &mark); err != nil {
+			_ = rows.Close()
+			return nil, err
+		}
+		c.above = max(after, mark)
+		chans = append(chans, c)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+
+	// Prepared once: the statement is long, and parsing it per channel would
+	// cost more than reading a channel with nothing new.
+	stmt, err := tx.PrepareContext(ctx, pendingNotificationsSQL())
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = stmt.Close() }()
+	_, predArgs := visibilityArgs(Reader{PrincipalID: reader.PrincipalID, Scoped: true})
+	for _, c := range chans {
+		if err := c.fill(ctx, stmt, predArgs, reader.PrincipalID); err != nil {
+			return nil, err
+		}
+	}
+	// Merge: take the lowest head, and read more of its channel when the
+	// buffer is empty and the channel may have more, before the next
+	// comparison, so every unfinished channel always shows its true next
+	// candidate.
+	out := make([]pendingCandidate, 0, min(limit, 64))
+	for len(out) < limit {
+		var next *pendingChannel
+		for _, c := range chans {
+			if len(c.buf) > 0 && (next == nil || c.buf[0].summary.MessageID < next.buf[0].summary.MessageID) {
+				next = c
+			}
+		}
+		if next == nil {
+			break
+		}
+		out = append(out, next.buf[0])
+		next.buf = next.buf[1:]
+		if len(next.buf) == 0 && !next.done {
+			if err := next.fill(ctx, stmt, predArgs, reader.PrincipalID); err != nil {
+				return nil, err
+			}
+		}
+	}
+	return out, nil
 }
 
 // ListPendingNotifications returns one page of the feed for reader, under the
@@ -2686,39 +2860,8 @@ func (s *Store) ListPendingNotifications(ctx context.Context, reader Reader, cre
 		return schema.ListPendingNotificationsResponseV1{}, fmt.Errorf("store: list pending notifications: reader: %w", err)
 	}
 
-	_, predArgs := visibilityArgs(Reader{PrincipalID: reader.PrincipalID, Scoped: true})
-	args := []any{len(schema.SpoilerFilePrefix), schema.SpoilerFilePrefix, reader.PrincipalID, reader.PrincipalID, after, reader.PrincipalID}
-	args = append(append(args, predArgs...), PendingNotificationScanBound+1)
-	rows, err := s.db.QueryContext(ctx, pendingNotificationsSQL(), args...)
+	cands, err := s.pendingCandidates(ctx, reader, after, PendingNotificationScanBound+1)
 	if err != nil {
-		return schema.ListPendingNotificationsResponseV1{}, fmt.Errorf("store: list pending notifications: %w", err)
-	}
-	defer func() { _ = rows.Close() }()
-	type candidate struct {
-		summary   schema.NotificationSummaryV1
-		body      string
-		whisper   bool
-		guestName string
-		spoiler   bool
-	}
-	var cands []candidate
-	for rows.Next() {
-		var c candidate
-		var created int64
-		var kind, guestHandle, guestLabel sql.NullString
-		if err := rows.Scan(&c.summary.MessageID, &c.summary.ChannelID, &c.summary.ChannelName, &c.summary.AuthorID, &c.body,
-			&created, &kind, &guestHandle, &guestLabel, &c.spoiler); err != nil {
-			return schema.ListPendingNotificationsResponseV1{}, fmt.Errorf("store: list pending notifications: %w", err)
-		}
-		c.summary.Schema = schema.NotificationSummarySchemaV1
-		c.summary.PostedAt = schema.NewTimestamp(time.UnixMilli(created))
-		c.whisper = kind.Valid && schema.AudienceKind(kind.String) == schema.AudienceKindPrincipals
-		if guestHandle.Valid {
-			c.guestName = schema.GuestDisplayName(guestLabel.String, guestHandle.String)
-		}
-		cands = append(cands, c)
-	}
-	if err := rows.Err(); err != nil {
 		return schema.ListPendingNotificationsResponseV1{}, fmt.Errorf("store: list pending notifications: %w", err)
 	}
 
@@ -2732,7 +2875,7 @@ func (s *Store) ListPendingNotifications(ctx context.Context, reader Reader, cre
 		examine, truncated = examine[:PendingNotificationScanBound], true
 	}
 	resp := empty
-	var kept []candidate
+	var kept []pendingCandidate
 	pageFull := false
 	for i, c := range examine {
 		resp.Cursor = c.summary.MessageID
