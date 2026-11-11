@@ -406,7 +406,9 @@ jobs:
           . scripts/voice-pins.sh
           export LK_CUSTOM_WEBRTC="$(cygpath -m "$HOME/.cache/conch/$CONCH_WEBRTC_TAG/win-x64-release")"
           cd voice
-          cargo build --locked -vv -p webrtc-sys 2>&1 | tee "$RUNNER_TEMP/webrtc-sys.log" | grep -iE "Compiling webrtc-sys|Finished|error|cl\.exe|clang|running:|warning: webrtc-sys" || true
+          # cc-rs prints each compiler command it runs when asked to.
+          export CC_ENABLE_DEBUG_OUTPUT=1
+          cargo build --locked -vv -p webrtc-sys 2>&1 | tee "$RUNNER_TEMP/webrtc-sys.log" | grep -E "^\[webrtc-sys [0-9.]+\] (running|OPT_LEVEL|CXX|CC|compiler)|Compiling webrtc-sys|Finished|^error" | cut -c1-400 || true
           test "${PIPESTATUS[0]}" -eq 0
 
       # The workspace without conch-voice, which does not build on Windows
@@ -418,7 +420,7 @@ jobs:
           export LK_CUSTOM_WEBRTC="$(cygpath -m "$HOME/.cache/conch/$CONCH_WEBRTC_TAG/win-x64-release")"
           cd voice
           cargo build --locked --workspace --exclude conch-voice
-          cargo test --locked --workspace --exclude conch-voice
+          cargo test --locked --no-fail-fast --workspace --exclude conch-voice
           cargo clippy --locked --workspace --exclude conch-voice --all-targets -- -D warnings
 
   # The web client under web/ (ADR-007). setup-node installs exactly the
