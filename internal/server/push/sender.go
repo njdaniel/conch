@@ -287,11 +287,11 @@ func NewSender(cfg SenderConfig) (*Sender, error) {
 	}, nil
 }
 
-// Enqueue offers a committed message to the sender. It never blocks and never
-// waits on anything: if the queue is full, or the sender has stopped, the wake
-// is dropped and counted (queue_full), and a warning is logged at most once a
-// minute. It reads no message and does no I/O, so it is safe to call in the
-// middle of a request.
+// Enqueue offers a committed message to the sender. It does no I/O and never
+// blocks on a send or on the store; it takes the sender's mutex only briefly,
+// to update a counter. If the queue is full the wake is dropped and counted
+// (queue_full), and a warning is logged at most once a minute. It reads no
+// message, so it is safe to call in the middle of a request.
 func (s *Sender) Enqueue(p Post) {
 	s.addBusy(1)
 	select {

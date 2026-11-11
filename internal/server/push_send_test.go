@@ -322,7 +322,7 @@ func (f *sendFixture) await(t *testing.T, n int64, fire bool) {
 	for time.Now().Before(deadline) {
 		if f.srv.pushSender.Idle() {
 			time.Sleep(5 * time.Millisecond)
-			if f.srv.pushSender.Idle() && f.src.queries.Load() >= n {
+			if f.srv.pushSender.Idle() {
 				return
 			}
 			continue
@@ -836,6 +836,9 @@ func TestPushRetriesStayBounded(t *testing.T) {
 	deadline := time.Now().Add(5 * time.Second)
 	for f.timers.count() < 10 && time.Now().Before(deadline) {
 		time.Sleep(2 * time.Millisecond)
+	}
+	if n := f.timers.count(); n != 10 {
+		t.Fatalf("%d retries held, want 10: one per failed first attempt", n)
 	}
 	if n := f.timers.count(); n > push.MaxPendingRetries {
 		t.Errorf("%d retries pending, bound %d", n, push.MaxPendingRetries)

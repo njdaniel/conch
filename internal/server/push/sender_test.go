@@ -222,6 +222,7 @@ type harnessOpts struct {
 	expire   time.Duration
 	perMin   int
 	queue    int
+	workers  int
 }
 
 // newHarness builds a sender that reaches the provider through the real
@@ -255,7 +256,7 @@ func newHarness(t *testing.T, o harnessOpts) *harness {
 	h.sender, err = NewSender(SenderConfig{
 		Source: h.src, Observer: h.obs, Client: client, Key: h.key,
 		Subject: o.subject, AllowPrivate: true, Expire: o.expire, MaxPerMinute: o.perMin,
-		Now: h.clk.Now, AfterFunc: h.timers.after, QueueSize: o.queue,
+		Now: h.clk.Now, AfterFunc: h.timers.after, QueueSize: o.queue, Workers: o.workers,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1358,5 +1359,61 @@ func TestIdle(t *testing.T) {
 		if got := h.obs.wake(OutcomeSent); got != 1 {
 			t.Errorf("sent = %d, want 1", got)
 		}
+	})
+	t.Run("items dropped as queue_full are not left counted", func(t *testing.T) {
+		// One worker, and queues of one. The post queue is overfilled before
+		// Start; the send queue is overfilled while the worker is held by the
+		// provider; and a retry that fires into the full send queue is dropped.
+		h := newHarness(t, harnessOpts{queue: 1, workers: 1})
+		release := make(chan struct{})
+		h.prov.Script(func(n int, _ *pushtest.Delivery) pushtest.Reply {
+			switch n {
+			case 1:
+				return pushtest.Reply{Status: 503}
+			case 2:
+				<-release
+			}
+			return pushtest.Reply{Status: 201}
+		})
+		target := func(i int) Target {
+			tg := h.target
+			tg.RegistrationID = fmt.Sprintf("reg-%043d", i)
+			tg.PrincipalID = int64(i + 1)
+			return tg
+		}
+
+		// Posts: one is queued, the other four are dropped.
+		for range 5 {
+			h.sender.Enqueue(post)
+		}
+		if got := h.obs.wake(OutcomeQueueFull); got != 4 {
+			t.Fatalf("queue_full after overfilling the post queue = %d, want 4", got)
+		}
+		h.src.targets = []Target{target(0)}
+		h.start(t)
+		// The first wake fails with a 503 and leaves a retry pending.
+		waitFor(t, "the retry to be scheduled", func() bool { return len(h.timers.delays()) == 1 })
+
+		// Three wakes: one held by the worker, one queued, one dropped.
+		h.src.targets = []Target{target(1), target(2), target(3)}
+		h.sender.Enqueue(post)
+		h.prov.WaitFor(t, 2, 5*time.Second)
+		waitFor(t, "the send queue to overflow", func() bool { return h.obs.wake(OutcomeQueueFull) == 5 })
+		if h.sender.Idle() {
+			t.Fatal("idle with a send held and a wake queued")
+		}
+
+		// The retry fires into the full send queue and is dropped.
+		if !h.timers.fireNext() {
+			t.Fatal("no retry to fire")
+		}
+		if got := h.obs.wake(OutcomeRetryDropped); got != 1 {
+			t.Fatalf("retry_dropped = %d, want 1", got)
+		}
+		if h.sender.Idle() {
+			t.Fatal("idle with a send held and a wake queued")
+		}
+		close(release)
+		waitFor(t, "the sender to be idle after every drop", h.sender.Idle)
 	})
 }
