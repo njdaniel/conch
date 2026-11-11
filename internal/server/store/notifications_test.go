@@ -1076,6 +1076,25 @@ func TestPendingNotificationsPlan(t *testing.T) {
 			if !strings.Contains(text, "SEARCH m USING INDEX messages_by_channel (channel_id=? AND id>?)") || strings.Contains(text, "SCAN m") {
 				t.Errorf("the messages are not read through messages_by_channel:\n%s", text)
 			}
+			// The correlated subqueries run once per row the seek passes, so each
+			// is an index or rowid search, never a scan (issue #1730).
+			for _, tc := range []struct{ what, want string }{
+				{"removals", "SEARCH mrm USING INTEGER PRIMARY KEY (rowid=?)"},
+				{"recipients", "SEARCH r USING COVERING INDEX sqlite_autoindex_message_recipients_1 (message_id=? AND principal_id=?)"},
+				{"bans", "SEARCH lb USING COVERING INDEX sqlite_autoindex_channel_bans_1 (channel_id=? AND principal_id=?)"},
+				{"memberships", "SEARCH lm USING"},
+				{"files", "SEARCH sf USING INDEX files_by_message (message_id=?)"},
+				{"guest attribution", "SEARCH g USING INTEGER PRIMARY KEY (rowid=?)"},
+			} {
+				if !strings.Contains(text, tc.want) {
+					t.Errorf("the %s subquery is not %q:\n%s", tc.what, tc.want, text)
+				}
+			}
+			for _, line := range plan {
+				if strings.HasPrefix(line, "SCAN") {
+					t.Errorf("the plan scans: %q\n%s", line, text)
+				}
+			}
 		})
 	}
 }

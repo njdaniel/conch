@@ -262,6 +262,16 @@ func (s NotificationSummaryV1) Validate() error {
 // and the bound counts candidates only. A message the reader cannot see is
 // never examined, never counted and never moves the cursor.
 //
+// One residual is not a candidate bound: the server passes over, without
+// selecting them, the reader's own posts, removed messages and whispers not
+// addressed to the reader, in the channels the reader is in, above their read
+// mark. A request's latency grows with that volume. It tells the reader how
+// much was said in whispers in their own channels, a timing form of the
+// activity-volume oracle of docs/design/mobile-notifications.md section 4.2;
+// it changes no content, cursor or more, and it concerns only channels the
+// reader is already in. History the reader may not read (before their history
+// bound) is not walked.
+//
 // Cursor is the id to pass as after in the next request. Every match at or
 // below it has been returned, in this page or an earlier one, so a client
 // stores it as its high-water mark once it has rendered the page. It is the

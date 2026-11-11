@@ -167,6 +167,8 @@ The push body is one document, `conch.push_wake.v1` (§9), and the whole of it i
 
 The consequence, accepted: every wake looks the same. A provider learns **that** this app on this device received a push at this time from this source. That is the metadata floor of every push system; it is not reducible except by sending nothing.
 
+**A residual of the pending feed (§4.3), accepted (#1730).** The feed bounds the candidates a request examines, not the rows its per-channel seek passes without selecting: the reader's own posts, removed messages and whispers not addressed to the reader, in the reader's own channels and above their read mark. A request's latency therefore grows with the volume of hidden whispers in channels the reader is in (measured in #1725's review: 48 ms with 100,000, 188 ms with 400,000, each with an empty answer). That is a timing form of the activity-volume oracle above, bounded to channels the reader already belongs to; the content, the cursor and `more` are unaffected, and the answer is byte-identical with or without hidden rows. Pre-history rows (at or below the reader's history bound) are skipped by starting each seek there. The alternative, a stored per-reader high-water mark of examined ids, was rejected: it would be new state written on a read path, and revocation (a removal or ban lifted) or a whisper that gains a recipient after the mark would each put a visible row below it, so the mark would have to be invalidated by every such write. The residual is the cheaper, and obviously correct, choice.
+
 ### 4.3 Fetch after authentication: the pending feed
 
 On a wake the phone (the iOS notification service extension, the Android FCM/UnifiedPush receiver) does, with the credential of the registration:

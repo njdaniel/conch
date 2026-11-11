@@ -171,3 +171,98 @@ func TestPendingNotificationsManyChannelsTiming(t *testing.T) {
 		t.Errorf("took %v", d)
 	}
 }
+
+// A reader in a very great many channels (issue #1730): the heap merge makes
+// the merge itself O(output x log channels), so the cost is the seek per
+// channel. 20,000 channels of 5 messages each, all unread.
+func TestPendingNotificationsVeryManyChannelsTiming(t *testing.T) {
+	if testing.Short() || os.Getenv("CONCH_BENCH") == "" {
+		t.Skip("set CONCH_BENCH=1 to build a 100k-message, 20,000-channel server")
+	}
+	w := newLargeFeedWorld(t, 20_000, 0, 5)
+	f := w.f
+	for _, policy := range []schema.NotificationPolicy{schema.NotificationPolicyMentions, schema.NotificationPolicyAll} {
+		f.policy(t, policy, false)
+		start := time.Now()
+		resp := f.feed(t, 0)
+		d := time.Since(start)
+		t.Logf("20000 channels, 100k unread, %s policy: %v", policy, d)
+		wantPage := policy == schema.NotificationPolicyAll
+		if (len(resp.Summaries) == schema.MaxPendingNotificationsPage) != wantPage || !resp.More {
+			t.Errorf("%s: answer = %d summaries, more=%v", policy, len(resp.Summaries), resp.More)
+		}
+		if d > 10*time.Second {
+			t.Errorf("%s: took %v", policy, d)
+		}
+	}
+}
+
+// Hidden whispers in the reader's own channel (issue #1730): the residual the
+// design accepts. Every whisper is addressed to someone else, so the answer
+// is empty whatever the volume; the time is the walk past them, and is
+// logged, to show that it grows with the volume and that the answer does not.
+func TestPendingNotificationsHiddenWhispersTiming(t *testing.T) {
+	if testing.Short() || os.Getenv("CONCH_BENCH") == "" {
+		t.Skip("set CONCH_BENCH=1 to build a 400k-whisper server")
+	}
+	f := newFeedFixture(t)
+	f.policy(t, schema.NotificationPolicyAll, false)
+	ctx := context.Background()
+	ch, err := f.s.CreateChannel(ctx, "whispers")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []int64{f.dave.ID, f.frank.ID, f.erin.ID} {
+		if _, err := f.s.AddChannelMember(ctx, "system", ch.ID, p, 0); err != nil {
+			t.Fatal(err)
+		}
+	}
+	tx, err := f.s.db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	msg, err := tx.Prepare("INSERT INTO messages (channel_id, author_id, body, created_at, audience_kind) VALUES (?, ?, 'psst', ?, 'principals')")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rcpt, err := tx.Prepare("INSERT INTO message_recipients (message_id, principal_id) VALUES (?, ?)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	built := 0
+	for _, volume := range []int{100_000, 400_000} {
+		for ; built < volume; built++ {
+			res, err := msg.Exec(ch.ID, f.frank.ID, notificationsT0.UnixMilli()+int64(built))
+			if err != nil {
+				t.Fatal(err)
+			}
+			id, _ := res.LastInsertId()
+			if _, err := rcpt.Exec(id, f.erin.ID); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := tx.Commit(); err != nil {
+			t.Fatal(err)
+		}
+		start := time.Now()
+		resp := f.feed(t, 0)
+		d := time.Since(start)
+		t.Logf("%d whispers not to the reader, in their channel: %v", volume, d)
+		if len(resp.Summaries) != 0 || resp.More {
+			t.Errorf("answer = %d summaries, more=%v, want an empty answer", len(resp.Summaries), resp.More)
+		}
+		if d > 5*time.Second {
+			t.Errorf("%d whispers: took %v", volume, d)
+		}
+		if tx, err = f.s.db.Begin(); err != nil {
+			t.Fatal(err)
+		}
+		if msg, err = tx.Prepare("INSERT INTO messages (channel_id, author_id, body, created_at, audience_kind) VALUES (?, ?, 'psst', ?, 'principals')"); err != nil {
+			t.Fatal(err)
+		}
+		if rcpt, err = tx.Prepare("INSERT INTO message_recipients (message_id, principal_id) VALUES (?, ?)"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_ = tx.Rollback()
+}
