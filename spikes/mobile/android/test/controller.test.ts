@@ -664,7 +664,7 @@ async function pendingTap() {
   return { r, d, tap };
 }
 
-test('camera tap: before the answer, each of these abandons it: no capture, no claim, even if Allow comes later', async () => {
+test('camera tap: before the answer, each of these abandons it: no capture, no claim, even if Allow comes later', async (t) => {
   const cases: { name: string; happen: (r: Rig) => Promise<void> | void }[] = [
     { name: 'a screen lock', happen: (r) => r.c.screenLocked(true) },
     { name: 'a second background', happen: (r) => (r.c.appState('active'), r.c.appState('background')) },
@@ -675,7 +675,8 @@ test('camera tap: before the answer, each of these abandons it: no capture, no c
     { name: 'reconnecting', happen: (r) => r.rooms[0]?.events?.onReconnecting() },
     { name: 'a tap on the button, which reads Turn camera off', happen: (r) => r.c.cameraTap() },
   ];
-  for (const c of cases) {
+  // One subtest per case, so each row passes or fails on its own.
+  for (const c of cases) await t.test(c.name, async () => {
     const { r, d, tap } = await pendingTap();
     await c.happen(r);
     await settle();
@@ -690,7 +691,7 @@ test('camera tap: before the answer, each of these abandons it: no capture, no c
     assert.equal(captures(r.log), 0, `${c.name}: no capture`);
     assert.ok(!r.log.some((l) => l.startsWith('claim ')), `${c.name}: no claim`);
     assert.equal(r.c.state.cameraOn, false, c.name);
-  }
+  });
 });
 
 test('camera tap: the dialog alone (one background, then the answer) still starts the camera, measured from the answer', async () => {
@@ -718,9 +719,15 @@ test('camera tap: the dialog reaching JavaScript only after the answer fails shu
   r.clock.advance(3000);
   await tap;
   await settle();
+  // Fails shut means: whatever began was stopped by the lifecycle, and every
+  // claim taken was released. Not "nothing started": the capture may begin
+  // before the late dialog event arrives.
   assert.equal(r.c.state.cameraOn, false);
   assert.ok(captures(r.log) === 0 || r.log.includes('camera stop'), 'any capture that began was stopped');
-  assert.equal(r.c.state.camera.kind === 'sending', false);
+  const claims = r.log.filter((l) => l.startsWith('claim ')).length;
+  const releases = r.log.filter((l) => l.startsWith('release ')).length;
+  assert.equal(releases, claims, 'every claim is released');
+  assert.deepEqual(r.c.state.camera, { kind: 'off', ended: 'lifecycle' });
 });
 
 test('camera tap: Leave then join clears a stale note (reset tells the screen)', async () => {
