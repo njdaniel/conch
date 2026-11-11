@@ -1,4 +1,4 @@
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" xmlns:tools="http://schemas.android.com/tools">
 
     <uses-permission android:name="android.permission.INTERNET" />
     <!-- Voice: the microphone, and the audio routing LiveKit's audio switch does. -->
@@ -17,6 +17,12 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <!-- Declared for M4-D; nothing in this slice opens the camera, and the service has no camera type. -->
     <uses-permission android:name="android.permission.CAMERA" />
+    <!-- Not needed here, and brought in by libraries: React Native's debug manifest
+         adds the draw-over-apps permission for its dev overlay (the spike's dev
+         loop is Metro over adb reverse, and the red box does not need it), and
+         the WebRTC module declares a screen-capture service (phone screen
+         broadcasting is out of scope, ADR-016). Removed from the merged manifest. -->
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" tools:node="remove" />
     <uses-feature android:name="android.hardware.microphone" android:required="false" />
     <uses-feature android:name="android.hardware.camera" android:required="false" />
 
@@ -45,5 +51,8 @@
         android:name=".VoiceService"
         android:exported="false"
         android:foregroundServiceType="microphone|mediaPlayback" />
+      <service
+        android:name="com.oney.WebRTCModule.MediaProjectionService"
+        tools:node="remove" />
     </application>
 </manifest>

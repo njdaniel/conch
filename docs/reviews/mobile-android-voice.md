@@ -96,10 +96,25 @@ Not shown by the emulator: real audio (no audio device), LAN reachability, Bluet
 
 - React Native's JavaScript timers pause while the app is in the background. The presence poll, the retry timer and the `ReportQueue` retries all run on them, so a failed `stopped` report sent on Home waits for the app's return (the room stays up, and conchd's own unreported-transmit handling is the backstop). A production app needs a native or service-held timer for the report, or a report path that does not depend on JS being awake. Device rows M-L2 and M-L5 should watch for it.
 - `VoiceService` calls `stopSelf()` after a failed `startForeground`. On some Android builds, a service that was started with `startForegroundService` and then stops without having called `startForeground` successfully can raise the "did not then call Service.startForeground()" crash. Not seen on the emulator; under M-P3 the device run should look for it.
+- `livekit_url` from the session grant is used as given. The server is the trust root for voice, so that is fine for the spike; a production release build must require `wss:` and refuse anything else.
 
 ## Manifest (to quote)
 
-See `spikes/mobile/android/android/app/src/main/AndroidManifest.xml`: service `.VoiceService` `foregroundServiceType="microphone|mediaPlayback"`, no `camera` type; permissions RECORD_AUDIO, CAMERA (for M4-D), POST_NOTIFICATIONS, FOREGROUND_SERVICE(_MICROPHONE, _MEDIA_PLAYBACK), MODIFY_AUDIO_SETTINGS, ACCESS_NETWORK_STATE, CHANGE_NETWORK_STATE, BLUETOOTH_CONNECT (route rows M-B1 to M-B3); `allowBackup="false"`.
+Source: `spikes/mobile/android/android/app/src/main/AndroidManifest.xml`. Service `.VoiceService` has `foregroundServiceType="microphone|mediaPlayback"` and no `camera` type; `allowBackup="false"`. The app declares RECORD_AUDIO, CAMERA (for M4-D), POST_NOTIFICATIONS, FOREGROUND_SERVICE(_MICROPHONE, _MEDIA_PLAYBACK), MODIFY_AUDIO_SETTINGS, ACCESS_NETWORK_STATE, CHANGE_NETWORK_STATE, BLUETOOTH_CONNECT (route rows M-B1 to M-B3), INTERNET.
+
+The **merged debug manifest** (`app/build/intermediates/merged_manifest/debug/processDebugMainManifest/AndroidManifest.xml`) adds the following from libraries. What the spike keeps, and why:
+
+| Entry | Brought by | Verdict |
+| --- | --- | --- |
+| WAKE_LOCK | `@livekit/react-native` | Kept. The SDK and its audio switch hold wake locks while a call runs; the foreground service already keeps the process up, so a device run (M-L2, M-L3) should show whether it is needed at all. |
+| BLUETOOTH (max SDK 30) | `@livekit/react-native` | Kept, inert: `minSdkVersion` is 31, so it never applies. |
+| BLUETOOTH_ADMIN | `@livekit/react-native` | Kept. The audio switch uses it for the Bluetooth headset route on the way to M-B1 to M-B3; Android 12+ routes also need BLUETOOTH_CONNECT (declared). Revisit once the device rows say whether it matters. |
+| ACCESS_LOCAL_NETWORK | React Native's debug manifest | Kept, debug only. On Android 17 an app declaring it must hold it to reach a dev server over the LAN; Metro over `adb reverse` is loopback and exempt. |
+| `DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION` (signature) | AndroidX core | Kept. Generated for the non-exported receiver the screen-state broadcast uses. |
+| SYSTEM_ALERT_WINDOW | React Native's debug manifest (dev overlay) | **Removed** with `tools:node="remove"`: the spike's dev loop does not need draw-over-apps. |
+| `com.oney.WebRTCModule.MediaProjectionService` (`foregroundServiceType="mediaProjection"`, not exported) | `@livekit/react-native-webrtc` | **Removed** with `tools:node="remove"`: phone screen broadcasting is out of scope (ADR-016), and a mediaProjection service type has no place in a voice and camera spike. |
+
+After the change `assembleDebug` builds and neither entry is in the merged manifest.
 
 ## Answers, recommendation
 

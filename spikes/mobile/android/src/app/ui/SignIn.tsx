@@ -25,6 +25,10 @@ export function SignIn(props: { onDone: () => void }) {
   const finish = async (): Promise<void> => {
     const me = await client.whoami();
     if (!me.ok) {
+      // A credential held for a person we cannot name is not kept.
+      client.signOut();
+      setPassword('');
+      setLink('');
       setProblem('Signed in, but the server did not say who you are.');
       return;
     }
@@ -50,6 +54,7 @@ export function SignIn(props: { onDone: () => void }) {
       setPassword('');
       setLink('');
     } else if (result.value.next === 'totp') {
+      setPassword('');
       setProblem('This account uses a second step. The spike does not support it; use a sign-in link.');
     } else {
       await finish();

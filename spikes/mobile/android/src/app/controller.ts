@@ -95,6 +95,8 @@ export interface ControllerOptions {
   // The signed-in principal's id; the presence check compares with it.
   readonly me: () => number;
   readonly log: (message: string) => void;
+  // Registers values the diagnostics must never show (the LiveKit host).
+  readonly hold?: (...secrets: string[]) => void;
   // How often presence is read while a channel is open, in ms.
   readonly pollEvery?: number;
 }
@@ -314,6 +316,10 @@ export class VoiceController {
       this.act({ kind: 'stop', why: 'This channel has no voice room for everyone.' }, mine);
       return;
     }
+    // The grant's address is the server's, and never for a log: its host, and
+    // host:port, are held by the diagnostics whatever shape they take.
+    const target = /^[a-z][a-z0-9+.-]*:\/\/([^/?#]+)/i.exec(session.value.livekit_url)?.[1];
+    this.o.hold?.(session.value.livekit_url, ...(target === undefined ? [] : [target, target.replace(/:\d+$/, '')]));
     const room = this.o.newRoom();
     this.room = room;
     this.transmitter.reset();
@@ -477,6 +483,13 @@ export class VoiceController {
     const was = this.viewing;
     this.viewing = channel;
     const joined = this.s.phase === 'idle' ? null : this.s.channel;
+    // The joined channel's Voice view closing takes the level probe, and with
+    // it the open microphone's samples, so the gate must not stay open: it
+    // shuts, arms the resume latch, and a held press ends.
+    if (channel === null && joined !== null && was === joined) {
+      this.held = false;
+      this.gate.shutAndArm();
+    }
     if (channel === null) {
       if (was !== null && joined !== null && was !== joined) return;
       this.stopPolling();
