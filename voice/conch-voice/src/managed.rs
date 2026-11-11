@@ -24,6 +24,16 @@
 //! and that same-user unlink-and-rebind is out of scope by design
 //! (`docs/design/linux-desktop.md` §5.2). Without the option nothing here changes and
 //! `CONCH_VOICE_ATTACH` is not read.
+//! On Windows `--events-pipe` takes the name of a named pipe the owner created
+//! (`\\.\pipe\conch-voice-<id>`, `docs/design/windows-desktop.md` §3.3, #938) and is the
+//! only events channel there is: file descriptor 3 does not exist. The session on it is
+//! byte for byte the one above, attach line and hello first. There is no parent watch
+//! ([`parent_id`] is 0), so owner loss is the pipe's end or error, a byte received on it,
+//! the end of standard input, or an events write that fails; each is [`Input::OwnerLost`].
+//! The attach line is a spawn-to-pipe binding, **not authentication**, there as here: a
+//! process of the same user that creates another instance of the pipe's name
+//! (`CreateNamedPipeW`) can be the one the helper opens, and that is out of scope by design
+//! and named (§3.4 to §3.5).
 //! Owns: the event writer and its numbering; the thread that reads standard input; the
 //! watch on the parent; and the watchdog that ends the process when it does not end by
 //! itself in time after its owner has gone or asked it to leave. The voice session itself
@@ -1164,8 +1174,8 @@ pub fn spawn_reader(
 /// [`watch_parent`].
 ///
 /// Windows has no such call in `std` and its process ids are reused, so there the answer is
-/// always 0 and [`watch_parent`] never sees it change: a Windows owner is noticed by its
-/// events endpoint ending (#938), not by this poll.
+/// always 0, and [`watch_parent`] is not run there: a Windows owner is noticed by its events
+/// pipe ending or failing to be written (`channel`, #938), not by this poll.
 #[must_use]
 pub fn parent_id() -> u32 {
     #[cfg(unix)]

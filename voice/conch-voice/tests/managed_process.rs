@@ -376,6 +376,26 @@ fn without_its_event_pipe_it_exits_2_having_done_nothing() {
     );
 }
 
+/// The reason is the one for what the owner handed over (or did not): the runtime's own
+/// descriptors, made after fd 3 is looked at, must not stand in for it (#938).
+#[test]
+fn the_event_pipe_refusal_names_what_fd_3_is_not_the_runtimes_descriptor() {
+    let private = Private::new(None);
+    let file = private.path().join("not-a-pipe");
+    std::fs::write(&file, b"").unwrap();
+    for (fd3, said) in [
+        (Fd3::Closed, "is not open"),
+        (Fd3::File(file.clone()), "is not a pipe"),
+    ] {
+        let mut helper = spawn(&private, fd3, &NO_DEVICES, false);
+        helper.send_to_a_helper_that_may_have_exited("{}");
+        assert_eq!(helper.exit_within(Duration::from_secs(10)), Some(2));
+        let stderr = helper.stderr();
+        assert_eq!(stderr.lines().count(), 1, "{stderr}");
+        assert!(stderr.contains(said), "{said}: {stderr}");
+    }
+}
+
 #[test]
 fn the_hello_comes_first_and_an_owner_that_never_starts_it_ends_it() {
     let private = Private::new(None);
