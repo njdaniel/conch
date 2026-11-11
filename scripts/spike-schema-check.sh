@@ -16,10 +16,17 @@ set -euo pipefail
 
 cd "$(git rev-parse --show-toplevel)"
 
-dir=${1:-spikes/mobile/android/src/logic/schema}
+default=spikes/mobile/android/src/logic/schema
+dir=${1:-$default}
 src=web/src/schema
 
 if [ ! -d "$dir" ]; then
+    # Only the default may be absent: the spike may be gone (M6, #1111). A
+    # directory named on the command line that doesn't exist is a mistake.
+    if [ "$#" -gt 0 ]; then
+        echo "spike-schema-check: FAIL: $dir is not a directory"
+        exit 1
+    fi
     echo "spike-schema-check: OK (no spike copy at $dir)"
     exit 0
 fi
