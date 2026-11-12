@@ -31,9 +31,9 @@ use wasapi::{
     WasapiError, WaveFormat, deinitialize, initialize_mta,
 };
 
-use crate::audio_windows::{
+use super::windows::{
     Audio, Endpoint, Failure, Kind, Notice, Stream, Target, WasapiMic, WasapiSpeakers, decode_mono,
-    default_changed, encode_mono, list, post,
+    default_changed, encode_mono, failure_from_hresult, list, post,
 };
 use conch_voice_audio::SAMPLE_RATE;
 
@@ -70,7 +70,7 @@ fn kind_of(direction: Direction) -> Kind {
 /// a device is kept: the failures hold none of it.
 fn classify(error: &WasapiError) -> Failure {
     match error {
-        WasapiError::Windows(error) => crate::audio_windows::failure_from_hresult(error.code().0),
+        WasapiError::Windows(error) => failure_from_hresult(error.code().0),
         WasapiError::DeviceNotFound(_) => Failure::Gone,
         WasapiError::UnsupportedFormat => Failure::Unsupported,
         _ => Failure::Other("the sound system failed".to_owned()),
@@ -85,7 +85,7 @@ impl Com {
     fn join() -> Result<Self, Failure> {
         initialize_mta()
             .ok()
-            .map_err(|error| crate::audio_windows::failure_from_hresult(error.code().0))?;
+            .map_err(|error| failure_from_hresult(error.code().0))?;
         Ok(Self)
     }
 }
