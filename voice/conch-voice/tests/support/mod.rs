@@ -12,7 +12,6 @@
 
 pub mod fake;
 pub mod keyboard;
-#[cfg(unix)]
 pub mod managed;
 pub mod reaped;
 pub mod script;

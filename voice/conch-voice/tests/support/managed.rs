@@ -7,10 +7,21 @@
 //! microphones hear anything: for `conch.voice_control.v2`'s device switch and open
 //! microphone.
 //!
+//! On Unix the events go to an in-memory buffer and the keyboard is a `mkfifo`. On Windows
+//! (#1766) the events go through a real named pipe: a tokio `NamedPipeServer` the rig holds
+//! as the owner, reached by `channel::attach` as `conch-voice managed --events-pipe` reaches
+//! it, with the attach line read and checked before the helper's hello. There is no keyboard
+//! on Windows: its push-to-talk is Raw Input behind a crate-private `EventSource`
+//! (`keys_windows`, #1781), which a test in this directory cannot reach, so the rig reads no
+//! key device there and the tests that press a key are ignored there with that reason.
+//!
 //! No test here needs a microphone, PipeWire, a keyboard or LiveKit.
 
-use std::fs::{File, OpenOptions};
+use std::fs::File;
+#[cfg(unix)]
+use std::fs::OpenOptions;
 use std::io::{PipeWriter, Write};
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -34,7 +45,9 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
 use super::fake::FakeSdk;
-use super::keyboard::{DEAFEN, MUTE, Pipe, TALK, press, quick_keys, release};
+#[cfg(unix)]
+use super::keyboard::Pipe;
+use super::keyboard::{DEAFEN, MUTE, TALK, press, quick_keys, release};
 use super::stub::{FAKE_LOGIN, OWN_PRINCIPAL, Stub};
 use super::{Reader, Written, quick};
 
@@ -45,7 +58,14 @@ pub const CHANNEL: &str = "general";
 const PATIENCE: Duration = Duration::from_secs(10);
 
 /// What a rig's `voice.toml` binds: the three keys of `keyboard.rs`, a short release tail.
+#[cfg(unix)]
 pub const KEYS_TOML: &str = "[keys]\ntalk = \"KEY_F13\"\nmute = \"KEY_F14\"\ndeafen = \"KEY_F15\"\n\n[audio]\nrelease_tail_ms = 20\n";
+
+/// What a rig's `voice.toml` binds on Windows: no keys. The keys of the Linux file are in
+/// the Linux form, which `voice.toml` refuses on Windows, and a Windows key is read by Raw
+/// Input, which no test here can feed (see the top of this file).
+#[cfg(not(unix))]
+pub const KEYS_TOML: &str = "[audio]\nrelease_tail_ms = 20\n";
 
 /// Where the helper is told its login is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -66,6 +86,7 @@ pub struct ManagedSetup {
     /// The text of `voice.toml`; `None` for no file.
     pub voice_toml: Option<String>,
     /// Read keys from the named pipe (`--test-key-device`), with the bindings of `voice_toml`.
+    /// On Windows there is no such pipe and this is not looked at: the rig reads no keys.
     pub keyboard: bool,
     /// Open the keyboard's end of the key device's pipe only when the test plugs it in
     /// ([`ManagedRig::plug_keyboard`]): until then the key device's watcher waits to open
@@ -84,7 +105,7 @@ impl Default for ManagedSetup {
         Self {
             login: Login::Stored,
             voice_toml: Some(KEYS_TOML.to_owned()),
-            keyboard: true,
+            keyboard: cfg!(unix),
             keyboard_unplugged: false,
             start_timeout: Duration::from_secs(10),
             no_mute_key: false,
@@ -297,14 +318,21 @@ pub struct ManagedRig {
     stdin: Option<PipeWriter>,
     /// Where signals and the like reach the session.
     pub inputs: mpsc::UnboundedSender<Input>,
-    /// The keyboard's end of the key device's pipe, if the rig reads keys.
+    /// The keyboard's end of the key device's pipe, if the rig reads keys. Never set on
+    /// Windows.
     keyboard: Option<File>,
+    /// Whether the rig has a key device at all: never on Windows.
+    reads_keys: bool,
+    /// Windows: what the helper wrote to the named pipe against what the owner has read of it.
+    #[cfg(windows)]
+    owner: owner_pipe::Owner,
     mic_opened: Arc<AtomicU32>,
     mic_closed: Arc<AtomicU32>,
     sink_closed: Arc<AtomicU32>,
     task: Option<JoinHandle<Result<(), Error>>>,
     /// Holds the configuration directory and the pipe for as long as the rig lives.
     _dir: tempfile::TempDir,
+    #[cfg(unix)]
     pipe: Pipe,
 }
 
@@ -332,11 +360,13 @@ impl ManagedRig {
                 json!({ conchd.url(): {"token": FAKE_LOGIN} }).to_string(),
             )
             .unwrap();
+            #[cfg(unix)]
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
         }
         if let Some(text) = &setup.voice_toml {
             let path = dir.path().join("voice.toml");
             std::fs::write(&path, text).unwrap();
+            #[cfg(unix)]
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
         }
         let token =
@@ -352,7 +382,10 @@ impl ManagedRig {
 
         // The keyboard's end is opened to read and write, so that it does not wait for the
         // watcher, and the watcher's open does not wait for it.
+        let reads_keys = cfg!(unix) && setup.keyboard;
+        #[cfg(unix)]
         let pipe = Pipe::new();
+        #[cfg(unix)]
         let keyboard = (setup.keyboard && !setup.keyboard_unplugged).then(|| {
             OpenOptions::new()
                 .read(true)
@@ -360,6 +393,8 @@ impl ManagedRig {
                 .open(&pipe.path)
                 .unwrap()
         });
+        #[cfg(not(unix))]
+        let keyboard: Option<File> = None;
 
         let mic_opened = Arc::new(AtomicU32::new(0));
         let mic_closed = Arc::new(AtomicU32::new(0));
@@ -420,16 +455,21 @@ impl ManagedRig {
         let mut timings = quick();
         // A wait the policy asks for is a few milliseconds, as in the other tests.
         timings.wait_divisor = 200;
+        #[cfg(unix)]
+        let keys = if setup.keyboard {
+            KeySource::NamedPipe(pipe.path.clone())
+        } else {
+            KeySource::Configured
+        };
+        // No key device is named, and `voice.toml` binds no key: nothing is read.
+        #[cfg(not(unix))]
+        let keys = KeySource::Configured;
         let host = Host {
             environment,
             transport: sdk.clone(),
             scrubber: Arc::clone(&scrubber),
             devices,
-            keys: if setup.keyboard {
-                KeySource::NamedPipe(pipe.path.clone())
-            } else {
-                KeySource::Configured
-            },
+            keys,
             share_audio_owner: ShareAudioOwner::Helper,
             transmit_ceiling_secs: None,
             no_mute_key: setup.no_mute_key,
@@ -445,13 +485,14 @@ impl ManagedRig {
             ..Reader::default()
         };
         let (inputs, received) = mpsc::unbounded_channel();
-        let task = tokio::spawn(managed::run(
-            host,
-            stdin,
-            Box::new(reader.clone()),
-            inputs.clone(),
-            received,
-        ));
+        // Unix: the owner's reader is the sink. Windows: a real named pipe is, and a thread
+        // of the rig reads it into the reader.
+        #[cfg(unix)]
+        let out: Box<dyn Write + Send> = Box::new(reader.clone());
+        #[cfg(windows)]
+        let (out, owner) =
+            owner_pipe::attach(&reader, &scrubber, &inputs, host.watchdog.clone()).await;
+        let task = tokio::spawn(managed::run(host, stdin, out, inputs.clone(), received));
         Self {
             sdk,
             conchd,
@@ -461,11 +502,15 @@ impl ManagedRig {
             stdin: Some(writer),
             inputs,
             keyboard,
+            reads_keys,
+            #[cfg(windows)]
+            owner,
             mic_opened,
             mic_closed,
             sink_closed,
             task: Some(task),
             _dir: dir,
+            #[cfg(unix)]
             pipe,
         }
     }
@@ -478,13 +523,18 @@ impl ManagedRig {
 
     /// The keyboard is there (again): its end of the pipe is opened.
     pub fn plug_keyboard(&mut self) {
-        self.keyboard = Some(
-            OpenOptions::new()
-                .read(true)
-                .write(true)
-                .open(&self.pipe.path)
-                .unwrap(),
-        );
+        #[cfg(unix)]
+        {
+            self.keyboard = Some(
+                OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open(&self.pipe.path)
+                    .unwrap(),
+            );
+        }
+        #[cfg(not(unix))]
+        panic!("the rig has no key device on Windows");
     }
 
     /// The start of a v2 session: the usual one, written in `conch.voice_control.v2`.
@@ -734,11 +784,17 @@ impl ManagedRig {
             rig.state().is_some_and(|state| {
                 state.phase.as_str() == "connected"
                     && state.blocked.is_empty()
-                    && state.ptt.as_str() == "ready"
+                    && rig.ptt_is_as_it_can_be(state.ptt.as_str())
                     && state.capture.as_str() == "on"
             })
         })
         .await;
+    }
+
+    /// Whether the state's push-to-talk is as good as this rig's gets: `ready` with a key
+    /// device, `not_configured` without one (on Windows, and where a test asks for none).
+    fn ptt_is_as_it_can_be(&self, ptt: &str) -> bool {
+        ptt == "ready" || (!self.reads_keys && ptt == "not_configured")
     }
 
     /// Waits until the helper is joined, capturing, and reading the key device, whatever
@@ -747,7 +803,7 @@ impl ManagedRig {
         self.until("joined", |rig| {
             rig.state().is_some_and(|state| {
                 state.phase.as_str() == "connected"
-                    && state.ptt.as_str() == "ready"
+                    && rig.ptt_is_as_it_can_be(state.ptt.as_str())
                     && state.capture.as_str() == "on"
             })
         })
@@ -806,9 +862,173 @@ impl ManagedRig {
             .await
             .unwrap_or_else(|_| panic!("the helper did not end\n{}", self.events.text()))
             .unwrap();
+        // The helper's last write is in the pipe; the owner has it once its reader has.
+        #[cfg(windows)]
+        self.owner.drained(PATIENCE).await;
         match result {
             Ok(()) => 0,
             Err(error) => i32::from(error.exit_code()),
         }
+    }
+}
+
+/// The owner's end of the events endpoint on Windows: a real named pipe, as the desktop app's
+/// owner holds one, in place of the in-memory buffer the Unix rig writes to.
+#[cfg(windows)]
+mod owner_pipe {
+    use std::path::PathBuf;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+    use std::time::{Duration, Instant};
+
+    use conch_voice::channel;
+    use conch_voice::cli::Environment;
+    use conch_voice::managed::Watchdog;
+    use conch_voice::secrets::Scrubber;
+    use conch_voice::session::Input;
+    use conch_voice_api::{Secret, parse_attached};
+    use tokio::io::AsyncReadExt;
+    use tokio::net::windows::named_pipe::ServerOptions;
+    use tokio::sync::mpsc;
+
+    use super::super::Reader;
+    use super::PATIENCE;
+
+    /// A fake nonce from `pkg/schema/testdata/voice-control-pipe/sensitive.json`.
+    const FAKE_NONCE: &str = "FAKE_nonce_do_not_print_0123456789abcdefghA";
+
+    /// How much the helper wrote to the pipe, and how much of it the owner has read.
+    #[derive(Clone, Default)]
+    struct Counts {
+        written: Arc<AtomicU64>,
+        read: Arc<AtomicU64>,
+    }
+
+    /// The helper's event writer, counting what reaches the pipe.
+    struct Counted<W> {
+        inner: W,
+        written: Arc<AtomicU64>,
+    }
+
+    impl<W: std::io::Write> std::io::Write for Counted<W> {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            let wrote = self.inner.write(buf)?;
+            self.written.fetch_add(wrote as u64, Ordering::SeqCst);
+            Ok(wrote)
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            self.inner.flush()
+        }
+    }
+
+    /// What the rig keeps of the pipe: the counts, to tell when the owner has read all.
+    pub struct Owner(Counts);
+
+    impl Owner {
+        /// Waits until the owner has read everything the helper wrote to the pipe, or `limit`.
+        /// Not an error to run out: the owner may be stopped, and the test sees what it sees.
+        pub async fn drained(&self, limit: Duration) {
+            let until = Instant::now() + limit;
+            while self.0.read.load(Ordering::SeqCst) < self.0.written.load(Ordering::SeqCst)
+                && Instant::now() < until
+            {
+                tokio::time::sleep(Duration::from_millis(2)).await;
+            }
+        }
+    }
+
+    /// A pipe name no other test, and no other run, uses.
+    fn pipe_name() -> String {
+        static NEXT: AtomicU32 = AtomicU32::new(0);
+        format!(
+            r"\\.\pipe\conch-voice-rig-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::SeqCst)
+        )
+    }
+
+    /// Makes the owner's pipe, attaches the helper's end to it with `channel::attach` as
+    /// `managed()` does (the attach line is checked here and is not among the events), and
+    /// has a thread read what the helper writes into `reader`. Returns the helper's event
+    /// writer. The pipe's end is watched as `managed()` watches it.
+    pub async fn attach(
+        reader: &Reader,
+        scrubber: &Arc<Scrubber>,
+        inputs: &mpsc::UnboundedSender<Input>,
+        watchdog: Watchdog,
+    ) -> (Box<dyn std::io::Write + Send>, Owner) {
+        let name = pipe_name();
+        let mut server = ServerOptions::new()
+            .first_pipe_instance(true)
+            .reject_remote_clients(true)
+            .create(&name)
+            .unwrap();
+        let environment = Environment {
+            conch_voice_attach: Some(Secret::new(FAKE_NONCE)),
+            ..Environment::default()
+        };
+        // `attach` writes the attach line through the runtime and so must not be on one of
+        // its threads.
+        let (path, helper_scrubber) = (PathBuf::from(&name), Arc::clone(scrubber));
+        let attaching = tokio::task::spawn_blocking(move || {
+            channel::attach(&path, &environment, &helper_scrubber)
+        });
+        tokio::time::timeout(PATIENCE, server.connect())
+            .await
+            .unwrap_or_else(|_| panic!("the helper's end did not connect"))
+            .unwrap();
+        let endpoint = attaching
+            .await
+            .unwrap()
+            .unwrap_or_else(|error| panic!("the helper's end did not attach: {error}"));
+
+        // The attach line, then whatever came with it.
+        let mut got = Vec::new();
+        let mut chunk = [0_u8; 4096];
+        let line_end = loop {
+            if let Some(at) = got.iter().position(|byte| *byte == b'\n') {
+                break at;
+            }
+            let read = tokio::time::timeout(PATIENCE, server.read(&mut chunk))
+                .await
+                .unwrap_or_else(|_| panic!("no attach line"))
+                .unwrap();
+            assert_ne!(read, 0, "the helper's end closed before its attach line");
+            got.extend_from_slice(&chunk[..read]);
+        };
+        let attached = parse_attached(&got[..line_end]).unwrap();
+        assert!(attached.matches(FAKE_NONCE), "the attach line");
+        let rest = got.split_off(line_end + 1);
+
+        let counts = Counts::default();
+        let pumped = Arc::clone(&counts.read);
+        let mut reader = reader.clone();
+        let handle = tokio::runtime::Handle::current();
+        std::thread::spawn(move || {
+            use std::io::Write;
+            let read = pumped;
+            let mut chunk = [0_u8; 4096];
+            // What came with the attach line, the helper's writer has counted already.
+            let mut next = rest;
+            loop {
+                if !next.is_empty() {
+                    if reader.write_all(&next).is_err() {
+                        return;
+                    }
+                    read.fetch_add(next.len() as u64, Ordering::SeqCst);
+                }
+                match handle.block_on(server.read(&mut chunk)) {
+                    Ok(0) | Err(_) => return,
+                    Ok(count) => next = chunk[..count].to_vec(),
+                }
+            }
+        });
+        channel::watch_end(endpoint.end, inputs.clone(), watchdog);
+        let events = Counted {
+            inner: endpoint.events,
+            written: Arc::clone(&counts.written),
+        };
+        (Box::new(events), Owner(counts))
     }
 }
