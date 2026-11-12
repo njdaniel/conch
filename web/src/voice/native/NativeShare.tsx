@@ -15,10 +15,11 @@ import { useRef, type ReactNode } from 'react';
 import { Glyph } from '../../Icons';
 import type { Person } from '../../useLiveChannel';
 import { companionDefaultQuality, companionQualities } from '../connection';
+import { cautionFor, estimateWords } from '../ShareQualityMenu';
 import { qualityLabel, sharers, type Sharer } from '../presence';
 import type { VoicePresenceV2 } from '../../schema/voice';
-import { ShareView } from '../ShareView';
-import type { ShareQuality } from '../share';
+import { ShareReadout, ShareView } from '../ShareView';
+import { provisionalQuality, type ShareQuality } from '../share';
 import { nameOf } from '../VoicePanel';
 import type { Companion } from './useCompanion';
 import { indicatorWords, shareDisabledWords, shareElsewhereWords, shareNote, shareQualityWords, silentShareBefore, silentShareWhile } from './words';
@@ -35,6 +36,7 @@ export function shareDisabledReason({ joined, shown, live }: { readonly joined: 
 }
 
 const shareDescription = 'native-share-why';
+const cautionId = 'native-share-caution';
 
 // ShareButton is Share, or Stop sharing while a share is starting, live or
 // resuming. It is disabled with its reason, which the notes say.
@@ -89,6 +91,7 @@ export function ShareNotes({ companion, joined, reason, soundRoute = false }: { 
   const starting = share.kind === 'claiming' || share.kind === 'picking';
   const note = share.kind === 'idle' ? shareNote(share, state.companionRefusal, state.phase === 'stopped' ? state.why : null, state.companionShareUnavailable) : null;
   const quality = companionQualities.find((q) => qualityKey(q) === qualityKey(state.shareQuality)) ?? companionDefaultQuality;
+  const caution = cautionFor(quality);
   return (
     <>
       {reason === null ? null : <p id={shareDescription} role="status" className="hint">{reason}</p>}
@@ -98,11 +101,17 @@ export function ShareNotes({ companion, joined, reason, soundRoute = false }: { 
         </p>
       ) : null}
       {!soundRoute && (share.kind === 'idle' ? reason === null : starting) ? <p className="hint">{silentShareBefore}</p> : null}
+      {share.kind === 'sharing' ? (
+        <p className="hint voice-supplemental">
+          <ShareReadout client={client} direction="sent" prefix="Sending: " asked={provisionalQuality(quality)} />
+        </p>
+      ) : null}
       {!soundRoute && live ? <p className="hint">{silentShareWhile}</p> : null}
       {share.kind === 'idle' && reason === null ? (
         <label className="share-quality">
           <span className="label">Share quality</span>
           <select
+            aria-describedby={caution === null ? undefined : cautionId}
             value={qualityKey(quality)}
             onChange={(e) => {
               const next = companionQualities.find((q) => qualityKey(q) === e.target.value);
@@ -111,12 +120,13 @@ export function ShareNotes({ companion, joined, reason, soundRoute = false }: { 
           >
             {companionQualities.map((q) => (
               <option key={qualityKey(q)} value={qualityKey(q)}>
-                {q.resolution === '720p' || q.resolution === '1080p' ? shareQualityWords[q.resolution] : qualityKey(q)}
+                {shareQualityWords(q)} · {estimateWords(q)}
               </option>
             ))}
           </select>
         </label>
       ) : null}
+      {share.kind === 'idle' && reason === null && caution !== null ? <p id={cautionId} className="hint" role="note">{caution}</p> : null}
       {note === null || note === reason ? null : <p role="status" className="hint">{note}</p>}
     </>
   );

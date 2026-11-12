@@ -21,7 +21,7 @@
 // No network, no microphone, no screen.
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { VoiceSessionResult } from '../api';
-import { VoiceClient } from './connection';
+import { VoiceClient, companionQualities } from './connection';
 import { FakeClock, settle } from './fakes';
 
 type Sink = (...args: unknown[]) => void;
@@ -2607,6 +2607,39 @@ describe('the screen companion room (issue #1581)', () => {
     expect(state.screenTracks.map((t) => t.source)).toEqual(['screen_share', 'screen_share_audio']);
     await room.publishScreen();
     expect(state.published.map((p) => p.source)).toEqual(['screen_share']);
+  });
+
+  // Issue #1772: the companion captures and publishes through the same rows as
+  // the browser (shareAsk, shareTops, contentHint), so each of the desktop's
+  // choices reaches the picker's constraints, the capture's caps and the
+  // encodings: the top layer is never larger than asked and its fps is the
+  // chosen one. The capture here is a 4K60 screen, larger than any ask.
+  it.each([
+    { name: '720p30', q: { resolution: '720p', frameRate: 30 }, ask: { width: 1280, height: 720, frameRate: 30 }, top: { maxBitrate: 6_000_000, maxFramerate: 30 } },
+    { name: '1080p30', q: { resolution: '1080p', frameRate: 30 }, ask: { width: 1920, height: 1080, frameRate: 30 }, top: { maxBitrate: 6_000_000, maxFramerate: 30 } },
+    { name: '1080p60', q: { resolution: '1080p', frameRate: 60 }, ask: { width: 1920, height: 1080, frameRate: 60 }, top: { maxBitrate: 6_000_000, maxFramerate: 60 } },
+    { name: 'Source 30', q: { resolution: 'source', frameRate: 30 }, ask: { width: 3840, height: 2160, frameRate: 30 }, top: { maxBitrate: 18_000_000, maxFramerate: 30 } },
+    { name: 'Source 60', q: { resolution: 'source', frameRate: 60 }, ask: { width: 3840, height: 2160, frameRate: 60 }, top: { maxBitrate: 18_000_000, maxFramerate: 60 } },
+  ] as const)('the companion captures and publishes $name as asked', async ({ q, ask, top }) => {
+    expect(companionQualities).toContainEqual(q);
+    state.captured = { width: 3840, height: 2160, frameRate: 60 };
+    state.ignoreConstraints = false;
+    const room = newLiveKitRoom();
+    room.setCompanion?.(true);
+    await room.connect('wss://lk.example', 'tok-abcdef', 'room-abcdef', false, events);
+    await room.pickScreen(q);
+    expect(state.screenOptions).toMatchObject({ video: true, audio: false, resolution: ask, contentHint: 'motion' });
+    await room.publishScreen();
+    const track = state.screenTracks.find((t) => t.source === 'screen_share');
+    expect(track?.mediaStreamTrack.constraints.at(-1)).toEqual({ width: { max: ask.width }, height: { max: ask.height }, frameRate: { max: ask.frameRate } });
+    expect(track?.mediaStreamTrack.contentHint).toBe('motion');
+    expect(state.published.map((p) => p.source)).toEqual(['screen_share']);
+    expect(state.published[0]?.options).toMatchObject({ screenShareEncoding: top });
+    const topEncoding = track?.sender?.parameters.encodings.at(-1);
+    expect(topEncoding).toMatchObject({ maxBitrate: top.maxBitrate, maxFramerate: top.maxFramerate });
+    // Never larger than asked: the capture is scaled down to the ask.
+    expect(track?.mediaStreamTrack.getSettings().width).toBeLessThanOrEqual(ask.width);
+    expect(track?.mediaStreamTrack.getSettings().height).toBeLessThanOrEqual(ask.height);
   });
 
   it('never captures or publishes a microphone', async () => {
