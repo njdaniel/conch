@@ -55,6 +55,7 @@ import { createSettingsFiles, memorySettingsFiles, SettingsService } from './set
 import { saveChosenFile } from './save-file.ts';
 import { parseManifest, SCHEME, SCHEME_PRIVILEGES } from './scheme.ts';
 import { electronStorage } from './vault/electron-storage.ts';
+import { profileConfigDir } from './vault/files.ts';
 import { createVault, type Vault } from './vault/vault.ts';
 
 // The hooks #771 (native voice) and #772 (share) register their teardown on:
@@ -451,7 +452,7 @@ export async function start(): Promise<void> {
       let read = -1;
       return {
         profileId: id,
-        configDir: join(root, 'profiles', id),
+        configDir: profileConfigDir(root, id),
         principalId: principal.id,
         credential: () => {
           const c = activation.voiceCredential();

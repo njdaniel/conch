@@ -17,6 +17,7 @@
     "lint:e2e": "DESKTOP_LINT_E2E_PAGE=1 eslint --max-warnings 0 tests/e2e/page",
     "lint": "eslint --max-warnings 0 .",
     "test": "vitest run",
+    "test:windows": "vitest run --config vitest.windows.config.ts",
     "test:integration": "vitest run --config vitest.integration.config.ts",
     "test:e2e": "vitest run --config vitest.e2e.config.ts",
     "smoke": "playwright test",

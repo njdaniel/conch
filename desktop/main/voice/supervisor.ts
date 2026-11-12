@@ -1,7 +1,15 @@
 // The Electron owner's supervisor for conch-voice on Linux (issue #948, D2-9
-// of #770; linux-desktop.md §5.3, L-F3). Model B: the helper is the person's
-// one voice participant, and main owns it.
+// of #770; linux-desktop.md §5.3, L-F3) and on Windows (issue #1785;
+// windows-desktop.md §3.4, §3.6). Model B: the helper is the person's one
+// voice participant, and main owns it.
 //
+// Windows differs only where the platform does: the events endpoint is a
+// named pipe the owner creates (no runtime directory), the nonce is spent at
+// the attach and not kept, a stray 43-character token-shaped value is
+// redacted from the stderr tail, and a stop has no SIGTERM step (Node's
+// kill() on Windows is forcible, so it is the one escalation, at
+// VoiceControlStopKillAfterMS). There is no parent-pid watch on Windows: the
+// helper leaves on the end of its standard input or of the events pipe.//
 // Input: a start request from main (the profile, its configuration
 // directory, the token, the server, the channel, the principal), and
 // set_mute, set_deafen, get_state, set_devices, set_talk_mode and stop.
@@ -28,6 +36,9 @@
 //     breaks the protocol) is one typed state, and only that: the rest of the
 //     app goes on;
 //   - neither the token nor the nonce is ever logged, in argv, or in a state.
+//     Not even the nonce's shape: on Windows any 43-character base64url run in
+//     the stderr tail is replaced, so that nothing needs to keep the nonce
+//     after the attach has spent it.
 import { randomBytes } from 'node:crypto';
 import type { ChildProcessWithoutNullStreams } from 'node:child_process';
 import type { Socket } from 'node:net';
@@ -37,6 +48,7 @@ import {
   VOICE_CONTROL_HELLO_TIMEOUT_MS,
   VOICE_CONTROL_MAX_IN_FLIGHT,
   VOICE_CONTROL_PIPE_NONCE_BYTES,
+  VOICE_CONTROL_PIPE_NONCE_CHARS,
   VOICE_CONTROL_STOP_KILL_AFTER_MS,
   VOICE_CONTROL_STOP_TERM_AFTER_MS,
   type VoiceControlAckV1,
@@ -54,7 +66,8 @@ import {
   type VoiceControlStateV2,
   type VoiceControlTalkMode,
 } from '../../../web/src/schema/generated.ts';
-import { EndpointError, listen, profileDir, runtimeDir, sweep, type AttachFailure, type EndpointDeps, type EndpointRefusal, type Listening } from './endpoint.ts';
+import { EndpointError, listen, listenPipe, profileDir, runtimeDir, sweep, type AttachFailure, type EndpointDeps, type EndpointRefusal, type Listening } from './endpoint.ts';
+import { validProfileId } from '../vault/files.ts';
 import { SCHEMA_V2, LineSplitter, Tracker, command, encodeCommand, finalPhase, negotiate, startCommand, type Command, type Event, type Version, type Want } from './protocol.ts';
 import { defaultSpawn, findHelper, HelperError, helperArgs, helperEnv, spawnHelper, type FindDeps, type HelperRefusal, type SpawnFn } from './spawn.ts';
 
@@ -136,6 +149,9 @@ export interface SupervisorDeps {
   readonly env: NodeJS.ProcessEnv;
   readonly log: (line: string) => void;
   readonly spawn?: SpawnFn;
+  // The platform whose rules apply: process.platform by default. A test
+  // stands in for Windows on Linux.
+  readonly platform?: NodeJS.Platform;
   // Test seams.
   readonly nonce?: () => string;
   readonly endpoint?: EndpointDeps;
@@ -164,6 +180,9 @@ class Run {
   readonly splitter = new LineSplitter();
   readonly waiters = new Map<number, Waiter>();
   readonly stderr: StderrTail;
+  // What must never be shown: the token and the nonce. On Windows the nonce
+  // is removed after the attach has spent it.
+  readonly secrets: string[];
   child: ChildProcessWithoutNullStreams | null = null;
   listening: Listening | null = null;
   socket: Socket | null = null;
@@ -189,9 +208,11 @@ class Run {
 
   constructor(
     readonly generation: number,
-    readonly secrets: readonly string[],
+    secrets: readonly string[],
+    readonly windows = false,
   ) {
-    this.stderr = new StderrTail(secrets);
+    this.secrets = [...secrets];
+    this.stderr = new StderrTail(this.secrets, windows);
     this.reaped = new Promise((resolve) => {
       this.markReaped = resolve;
     });
@@ -219,12 +240,16 @@ function viewOf(state: VoiceControlStateV1 | VoiceControlStateV2, helperVersion:
 
 // printable keeps a stderr line showable: printable ASCII, bounded, with
 // every secret replaced.
-function printable(line: string, secrets: readonly string[]): string {
+function printable(line: string, secrets: readonly string[], nonceShape: boolean): string {
   let out = line;
   for (const s of secrets) if (s !== '') out = out.split(s).join('<redacted>');
+  if (nonceShape) out = out.replace(NONCE_SHAPE, '<redacted>');
   out = out.replace(/[^\x20-\x7e]/g, '?');
   return out.length > STDERR_LINE_BYTES ? `${out.slice(0, STDERR_LINE_BYTES)}…` : out;
 }
+
+// NONCE_SHAPE is a run as long as the attach nonce, in its alphabet.
+const NONCE_SHAPE = new RegExp(`[A-Za-z0-9_-]{${String(VOICE_CONTROL_PIPE_NONCE_CHARS)}}`, 'g');
 
 // The longest partial line held while waiting for its line feed.
 const STDERR_PARTIAL_MAX = STDERR_LINE_BYTES * 4;
@@ -241,7 +266,13 @@ export class StderrTail {
   private skipping = false;
   readonly lines: string[] = [];
 
-  constructor(private readonly secrets: readonly string[]) {}
+  // secrets is the caller's own list, read at every line: a secret removed
+  // from it is no longer replaced by value. nonceShape is for a caller that
+  // removes the nonce: the shape is replaced instead (Windows).
+  constructor(
+    private readonly secrets: readonly string[],
+    private readonly nonceShape = false,
+  ) {}
 
   private keep(line: string): void {
     this.lines.push(line);
@@ -267,7 +298,7 @@ export class StderrTail {
       if (lf < 0) {
         this.partial += piece;
       } else {
-        this.keep(printable(this.partial + piece, this.secrets));
+        this.keep(printable(this.partial + piece, this.secrets, this.nonceShape));
         this.partial = '';
       }
     }
@@ -280,10 +311,12 @@ export class Supervisor {
   private stateValue: VoiceState = { status: 'idle' };
   private readonly listeners = new Set<(s: VoiceState) => void>();
   private readonly timings: Timings;
+  private readonly platform: NodeJS.Platform;
   private starting = false;
 
   constructor(private readonly deps: SupervisorDeps) {
     this.timings = { ...CONTRACT_TIMINGS, ...deps.timings };
+    this.platform = deps.platform ?? process.platform;
   }
 
   get state(): VoiceState {
@@ -347,35 +380,45 @@ export class Supervisor {
       this.log('voice: the start is not one the helper could accept');
       return { status: 'failed', generation, reason: 'invalid-start' };
     }
+    const windows = this.platform === 'win32';
     let executable: string;
-    let dir: string;
+    let dir = '';
     try {
-      executable = await findHelper(this.deps.resources, this.deps.find);
-      const runtime = await runtimeDir(this.deps.env, this.deps.endpoint);
-      dir = await profileDir(runtime, req.profileId, this.deps.endpoint);
-      await sweep(dir, (l) => {
-        this.log(l);
-      });
+      executable = await findHelper(this.deps.resources, { ...this.deps.find, platform: this.platform });
+      if (windows) {
+        // A pipe has no directory to verify or sweep; the profile id is still
+        // checked, as the Linux endpoint's directory name is.
+        if (!validProfileId(req.profileId)) throw new EndpointError('profile-id-invalid');
+      } else {
+        const runtime = await runtimeDir(this.deps.env, this.deps.endpoint);
+        dir = await profileDir(runtime, req.profileId, this.deps.endpoint);
+        await sweep(dir, (l) => {
+          this.log(l);
+        });
+      }
     } catch (err) {
       return this.unavailable(err);
     }
     let listening: Listening;
     try {
-      listening = await listen(dir, { ...this.deps.endpoint, log: (l) => { this.log(l); } });
+      const deps = { ...this.deps.endpoint, log: (l: string) => { this.log(l); } };
+      listening = windows ? await listenPipe(deps) : await listen(dir, deps);
     } catch (err) {
       return this.unavailable(err);
     }
-    const nonce = this.deps.nonce?.() ?? randomBytes(VOICE_CONTROL_PIPE_NONCE_BYTES).toString('base64url');
-    const run = new Run(generation, [req.token, nonce]);
+    // A new nonce for every spawn, never reused (windows-desktop.md §3.4
+    // rule 6).
+    let nonce = this.deps.nonce?.() ?? randomBytes(VOICE_CONTROL_PIPE_NONCE_BYTES).toString('base64url');
+    const run = new Run(generation, [req.token, nonce], windows);
     run.listening = listening;
     this.current = run;
     this.set({ status: 'starting', generation });
 
     let child: ChildProcessWithoutNullStreams;
     try {
-      const env = helperEnv({ parent: this.deps.env, configDir: req.configDir, token: req.token, nonce });
+      const env = helperEnv({ parent: this.deps.env, configDir: req.configDir, token: req.token, nonce, platform: this.platform });
       const args = helperArgs(listening.path, req.extraArgs ?? [], run.secrets);
-      child = spawnHelper(this.deps.spawn ?? defaultSpawn, executable, args, env);
+      child = spawnHelper(this.deps.spawn ?? defaultSpawn, executable, args, env, this.platform);
     } catch {
       listening.close();
       run.exited = true;
@@ -394,7 +437,11 @@ export class Supervisor {
     let rest: Buffer;
     try {
       ({ socket, rest } = await listening.attach(nonce, deadline));
+      if (windows) this.spend(run, nonce);
+      nonce = '';
     } catch (err) {
+      if (windows) this.spend(run, nonce);
+      nonce = '';
       const reason: AttachFailure = err instanceof EndpointError && err.reason.startsWith('attach-') ? (err.reason as AttachFailure) : 'attach-ended';
       if (run.outcome === null) run.outcome = { status: 'failed', generation, reason };
       void this.stopRun(run, false);
@@ -455,6 +502,14 @@ export class Supervisor {
     run.ready = true;
     this.publish(run);
     return this.stateValue;
+  }
+
+  // spend forgets the nonce once the attach has used it, or failed: the
+  // owner keeps no copy of it (windows-desktop.md §3.4 rule 6). The stderr
+  // tail redacts its shape from then on.
+  private spend(run: Run, nonce: string): void {
+    const at = run.secrets.indexOf(nonce);
+    if (at >= 0) run.secrets.splice(at, 1);
   }
 
   private unavailable(err: unknown): VoiceState {
@@ -712,16 +767,22 @@ export class Supervisor {
       child.stdin.end();
       run.listening?.close();
       run.socket?.destroy();
+      // Windows has no graceful signal: kill() there ends the process
+      // forcibly, so the SIGTERM step is skipped and the one escalation is
+      // the kill (windows-desktop.md §3.6). Still through the ChildProcess
+      // object, never a pid or a name.
+      const windows = this.platform === 'win32';
       const term = setTimeout(() => {
-        if (!run.exited) {
+        if (!run.exited && !windows) {
           this.log(`voice: helper ${String(run.generation)} still running; SIGTERM`);
           child.kill('SIGTERM');
         }
       }, this.timings.termAfterMs);
       const kill = setTimeout(() => {
         if (!run.exited) {
-          this.log(`voice: helper ${String(run.generation)} still running; SIGKILL`);
-          child.kill('SIGKILL');
+          this.log(`voice: helper ${String(run.generation)} still running; ${windows ? 'killing it' : 'SIGKILL'}`);
+          if (windows) child.kill();
+          else child.kill('SIGKILL');
         }
       }, this.timings.killAfterMs);
       await run.reaped;

@@ -22,6 +22,16 @@ export function validProfileId(id: string): boolean {
   return PROFILE_ID.test(id);
 }
 
+// profileConfigDir is <root>/profiles/<id>: one profile's own folder under the
+// data root, which is also the CONCH_CONFIG_DIR the voice helper is given
+// (issue #1785): it reads its voice.toml from there and from nowhere shared,
+// so it can never read another profile's. On Windows the root is userData,
+// under %APPDATA%, whose default ACL is the protection; no drive root is ever
+// the base (windows-desktop.md §2.7).
+export function profileConfigDir(root: string, id: string): string {
+  return profileDir(root, id);
+}
+
 function profileDir(root: string, id: string): string {
   if (!validProfileId(id)) {
     // Never echo the value: it may be hostile input.

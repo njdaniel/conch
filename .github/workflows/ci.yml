@@ -501,6 +501,44 @@ jobs:
       - name: desktop check
         run: make desktop-check
 
+  # The desktop shell's Windows leg (#1785, docs/design/windows-desktop.md
+  # section 3): the owner of conch-voice on a named pipe. typecheck, lint and
+  # the unit tests written to hold on Windows (desktop/vitest.windows.config.ts),
+  # among them a real Node named pipe. Electron-to-helper interop on a Windows
+  # machine is E2 (#903), not this job. Hosted only; no new Action.
+  desktop-windows:
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
+    runs-on: windows-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: desktop/.nvmrc
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+
+      - name: npm ci
+        working-directory: desktop
+        run: npm ci --no-audit
+
+      - name: typecheck
+        working-directory: desktop
+        run: npm run typecheck
+
+      - name: lint
+        working-directory: desktop
+        run: npm run lint
+
+      - name: unit tests on Windows
+        working-directory: desktop
+        run: npm run test:windows
+
   # The required status check. It runs the text checks every pull request
   # gets, docs-only ones included, then passes only if every job above that
   # should have run succeeded: skipped is accepted only for a docs-only
@@ -509,7 +547,7 @@ jobs:
   # itself is not judged: if it fails, code is unset and every job runs in
   # full, so a pass here still means every check ran and passed.
   check:
-    needs: [changes, go, go-test-server, go-test, rust, voice-windows, web, desktop]
+    needs: [changes, go, go-test-server, go-test, rust, voice-windows, web, desktop, desktop-windows]
     if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
