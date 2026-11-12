@@ -685,6 +685,36 @@ describe('talking', () => {
     expect(t.reports).toEqual(['started', 'stopped']);
   });
 
+  // The tap that reads the level could not be made (a browser refused the
+  // audio context): the connection stays, the open microphone cannot hear, and
+  // its gate stays shut however loud the room is; push to talk still sends.
+  it('with no level meter the open microphone stays shut, and the state says so', async () => {
+    const t = await joined();
+    const room = t.rooms[0];
+    if (room === undefined) throw new Error('no room');
+    room.events?.onMeter(false);
+    t.client.setMode('open');
+    room.levelNow = 1;
+    t.clock.advance(100);
+    expect(t.client.snapshot()).toMatchObject({ phase: 'connected', meter: false, talking: false, transmitting: false });
+    await settle();
+    expect(t.reports).toEqual([]);
+    // The meter comes back (a later capture made a tap): the open microphone hears again.
+    room.events?.onMeter(true);
+    t.clock.advance(50);
+    expect(t.client.snapshot()).toMatchObject({ meter: true, talking: true });
+  });
+
+  it('with no level meter push to talk still transmits', async () => {
+    const t = await joined();
+    t.rooms[0]?.events?.onMeter(false);
+    t.client.press();
+    await settle();
+    expect(t.client.snapshot()).toMatchObject({ phase: 'connected', meter: false, talking: true });
+    expect(t.rooms[0]?.sending).toEqual([true]);
+    expect(t.reports).toEqual(['started']);
+  });
+
   it('shows who is speaking', async () => {
     const t = await joined();
     t.rooms[0]?.events?.onSpeakers([3, 9]);

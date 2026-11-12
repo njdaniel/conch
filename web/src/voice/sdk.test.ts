@@ -773,6 +773,7 @@ const events = {
   onScreenEnded: () => undefined,
   onStreamTracks: () => undefined,
   onMicrophoneLost: () => undefined,
+  onMeter: () => undefined,
   onDevicesChanged: () => undefined,
   onOutputMoved: () => undefined,
   onCameraEnded: () => undefined,
@@ -787,6 +788,25 @@ describe('the SDK adapter', () => {
     await newLiveKitRoom().connect('wss://lk.example', 'tok-abcdef', 'room-abcdef', true, events);
     expect(state.captureOptions).toEqual({ echoCancellation: true, noiseSuppression: true, autoGainControl: true });
     expect(state.calls).toEqual(['connect', 'capture', 'premute', 'publish', 'mute']);
+  });
+
+  // The tap only feeds the level meter: an audio context the browser refuses
+  // must not tear down a join that worked, or the client would retry for ever.
+  it('a tap that cannot be made leaves the room connected and the track published, and says there is no meter', async () => {
+    vi.stubGlobal(
+      'AudioContext',
+      function AudioContext() {
+        throw new DOMException('too many audio contexts', 'NotSupportedError');
+      },
+    );
+    const meter: boolean[] = [];
+    const room = newLiveKitRoom();
+    await room.connect('wss://lk.example', 'tok-abcdef', 'room-abcdef', true, { ...events, onMeter: (on: boolean) => meter.push(on) });
+    expect(state.calls).toEqual(['connect', 'capture', 'premute', 'publish', 'mute']);
+    expect(meter).toEqual([false]);
+    expect(room.level()).toBe(0);
+    await room.setSending(true);
+    await room.close();
   });
 
   it('a Leave while the captured track is being muted stops it, and publishes nothing', async () => {

@@ -206,6 +206,9 @@ export interface RoomEvents {
   // The microphone was lost: its capture ended, or the device chosen is no
   // longer listed. The room has stopped the capture.
   readonly onMicrophoneLost: () => void;
+  // Whether the level meter (the tap on the microphone) works. Without it
+  // the open microphone cannot hear speech, so its gate stays shut.
+  readonly onMeter: (available: boolean) => void;
   // The browser's devices changed: microphones came or went.
   readonly onDevicesChanged: () => void;
   // The output in use went, and the SDK moved every voice to this one.
@@ -373,6 +376,10 @@ export interface VoiceState {
   // The microphone was lost, or a switch failed: nothing is captured and the
   // gate is blocked until the person chooses a microphone.
   readonly missing: boolean;
+  // Whether the microphone's level can be read: false when the browser
+  // refused the audio context that reads it. The open microphone needs it;
+  // push to talk does not.
+  readonly meter: boolean;
   // Whether this browser lets the page choose the speakers (issue #660);
   // the outputs it lists, or null while they are not read; the output chosen
   // and in use, null being the system default; and what the page says of a
@@ -558,6 +565,7 @@ export const initialVoice: VoiceState = {
   processing: true,
   reported: null,
   missing: false,
+  meter: true,
   outputSelection: false,
   outputs: null,
   output: null,
@@ -784,6 +792,7 @@ export class VoiceClient {
       focusedShare: null,
       streamTracks: new Map(),
       missing: false,
+      meter: true,
     });
     if (companion) this.followCompanion();
     void this.connect();
@@ -1500,6 +1509,7 @@ export class VoiceClient {
       microphones: null,
       ...nothingInUse,
       missing: false,
+      meter: true,
       outputs: null,
       outputNote: null,
       viewing: false,
@@ -1871,6 +1881,10 @@ export class VoiceClient {
         this.applyBlock();
         void this.readMicrophones(mine, room);
       },
+      onMeter: (available) => {
+        if (mine !== this.attempt) return;
+        if (available !== this.state.meter) this.set({ meter: available });
+      },
       onDevicesChanged: () => {
         if (mine !== this.attempt) return;
         void this.readMicrophones(mine, room);
@@ -2045,7 +2059,9 @@ export class VoiceClient {
     const tick = () => {
       if (mine !== this.attempt) return;
       const raw = room.level();
-      this.gate.level(raw);
+      // No meter, no voice detection: the open microphone's gate stays shut
+      // (push to talk does not read the level).
+      if (this.state.meter) this.gate.level(raw);
       // Quantised, and told every meterEvery ms, so a meter does not
       // re-render the page at every read.
       if (++reads * levelEvery >= meterEvery) {

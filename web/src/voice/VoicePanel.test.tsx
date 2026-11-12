@@ -1270,6 +1270,15 @@ describe('voice processing', () => {
     redraw(using({ mode: 'ptt', processing: false, reported: off }));
     expect(opts.textContent).not.toContain(thresholdHint);
   });
+
+  it('says the open microphone needs the level meter when there is none, and only then', () => {
+    const { voice, redraw } = panel(using({ mode: 'open' }), 'c');
+    expect(voice.textContent).not.toContain('needs the level meter');
+    redraw(using({ mode: 'open', meter: false }));
+    expect(voice.textContent).toContain('Open microphone needs the level meter');
+    redraw(using({ mode: 'ptt', meter: false }));
+    expect(voice.textContent).not.toContain('needs the level meter');
+  });
 });
 
 // Issue #660: the speakers in Voice options, where the browser lets a page

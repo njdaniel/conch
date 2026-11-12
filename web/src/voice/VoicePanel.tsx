@@ -623,6 +623,11 @@ export function VoicePanel({
                 {missingNote}
               </p>
             ) : null}
+            {state.mode === 'open' && !state.meter && !state.listenOnly && !state.watchOnly && !state.missing ? (
+              <p role="status" className="hint">
+                {meterNote}
+              </p>
+            ) : null}
             {state.mode === 'ptt' && silenced && !state.listenOnly && !state.watchOnly ? (
               <p id="voice-talk-why" className="hint">
                 {state.deafened ? 'Hold to talk sends nothing while you are deafened. Undeafen to talk.' : 'Hold to talk sends nothing while you are muted. Unmute to talk.'}
@@ -972,6 +977,10 @@ function Volumes({ voice, others }: { readonly voice: VoiceControl; readonly oth
 
 // What the notes say while the microphone is missing.
 export const cutOffNote = 'Voice server unreachable. You may be cut off.';
+// The open microphone listens through the level meter; a browser that refused the
+// audio context behind it leaves the gate shut (push to talk is unaffected).
+const meterNote = 'Open microphone needs the level meter, which this browser would not start, so nothing is sent. Switch to Push to talk.';
+
 export const missingNote = 'Your microphone was disconnected. Choose a microphone in Voice options.';
 
 // The values of the microphone list: System default, a device by id, and
