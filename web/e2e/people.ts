@@ -96,6 +96,23 @@ export async function joinVoice(p: Someone, how: 'Join voice' | 'Watch only'): P
   await expect(voiceRegion(p.page)).toContainText(new RegExp(`Connected in #${p.channel.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`), { timeout: 30_000 });
 }
 
+// How long LiveKit may take to drop someone whose Leave reached it. The page
+// sends Leave and LiveKit removes the participant at once, so 5 s is generous
+// (a delivered leave measured 4 to 7 ms over 5 runs); a leave that did not
+// arrive is removed only by LiveKit's dead-connection window (about 20 s, see
+// vanishedWithin in 67-voice-recovery), so 5 s tells the two apart.
+export const leaveWithin = 5_000;
+
+// leaveVoice leaves voice by the page's own button (the person leaves; the
+// page stays) and waits for "Join voice". That shows once the client is out of
+// voice and has started closing its room, which sends LiveKit its leave
+// (issue #1764): it does not say LiveKit has been told. A test that needs that
+// polls LiveKit's own list within leaveWithin.
+export async function leaveVoice(p: Someone): Promise<void> {
+  await voiceRegion(p.page).getByRole('button', { name: 'Leave voice' }).click();
+  await expect(voiceRegion(p.page).getByRole('button', { name: 'Join voice' })).toBeVisible();
+}
+
 // leave closes the person's pages and then their context (closeAll in
 // fixtures.ts says why in that order), the context even if a page will not
 // close. Safe to call twice.

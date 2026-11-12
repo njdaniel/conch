@@ -93,6 +93,8 @@ interface Stub {
   // Run inside connect, before it resolves (the SDK's signal events).
   duringConnect: (() => void) | null;
   audioContexts: number;
+  // When set, an AudioContext's close() settles only when this does.
+  contextClose: Promise<void> | null;
   // The global names that were there before any module of this file loaded.
   baseline: ReadonlySet<string>;
   // Issue #444: what the room was made and joined with, the share's tracks
@@ -231,6 +233,7 @@ const state = vi.hoisted((): Stub => {
     connectLog: null,
     duringConnect: null,
     audioContexts: 0,
+    contextClose: null,
     baseline: new Set(Object.getOwnPropertyNames(globalThis)),
     roomOptions: undefined,
     connectOptions: undefined,
@@ -703,6 +706,7 @@ beforeEach(() => {
   state.connectLog = null;
   state.duringConnect = null;
   state.audioContexts = 0;
+  state.contextClose = null;
   state.roomOptions = undefined;
   state.connectOptions = undefined;
   state.screenOptions = undefined;
@@ -752,7 +756,7 @@ beforeEach(() => {
       }
       close() {
         this.made.closed++;
-        return Promise.resolve();
+        return state.contextClose ?? Promise.resolve();
       }
     },
   );
@@ -1055,6 +1059,22 @@ describe('the microphone chosen', () => {
     expect(state.medias.every((m) => m.readyState === 'ended')).toBe(true);
     expect(room.microphoneInUse()).toBeNull();
     expect(state.contexts.every((c) => c.closed > 0)).toBe(true);
+  });
+
+  // Issue #1764: the leave must not wait for the tap's AudioContext to close;
+  // a page closed meanwhile never sent it.
+  it('close starts the disconnect at once, even when the tap\'s AudioContext close hangs', async () => {
+    const { room } = await connected('mic-1');
+    let release: () => void = () => undefined;
+    state.contextClose = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    state.calls.length = 0;
+    const closing = room.close();
+    await settle();
+    expect(state.calls).toContain('disconnect');
+    release();
+    await closing;
   });
 
   it('a close during a switch leaves no capture open', async () => {

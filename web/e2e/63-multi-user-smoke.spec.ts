@@ -14,7 +14,7 @@
 import type { Page } from '@playwright/test';
 import { history, post } from './api';
 import { expect, messages, say, signIn, statusLine, test } from './fixtures';
-import { enter, expectClean, joinVoice, leave, type Someone } from './people';
+import { enter, expectClean, joinVoice, leave, leaveVoice, leaveWithin, type Someone } from './people';
 import { answered } from './livekit-admin';
 import { dockerAvailable, emptiesWithin, startVoiceWorld, type VoiceWorld } from './voice-world';
 import { loadWorld, principalId } from './world';
@@ -94,6 +94,22 @@ test.describe('@smoke @cross @voice with LiveKit', () => {
       await expect.poll(() => answered(vw.participants()), { timeout: 15_000 }).toEqual(members.map((m) => `p${String(m.id)}`).sort());
 
       for (const p of people) await expectClean(vw, p);
+
+      // Each person leaves by the page's own button, and LiveKit's own list
+      // loses exactly that person within leaveWithin, while the pages are
+      // still open (issue #1764). A page closed instead is left to
+      // livekit-client's pagehide handler, which races the page's teardown;
+      // the tab-close and vanished-page paths are 67-voice-recovery's. The
+      // bound is people.ts's leaveWithin, far under the 20 s a leave that never
+      // arrived takes to time out.
+      const remaining = [...people];
+      for (const p of people) {
+        await leaveVoice(p);
+        remaining.splice(remaining.indexOf(p), 1);
+        await expect
+          .poll(() => answered(vw.participants()), { timeout: leaveWithin, message: `${p.member.name} leaves LiveKit at once` })
+          .toEqual(remaining.map((r) => `p${String(r.member.id)}`).sort());
+      }
     } finally {
       for (const p of people) await leave(p);
     }

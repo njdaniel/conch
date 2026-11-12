@@ -2129,9 +2129,15 @@ class LiveKitAdapter implements Room {
     track?.stop();
     for (const t of this.screen) t.stop();
     this.screen = [];
-    await untapped;
+    // The leave starts at once, not after the untap (issue #1764): closing the
+    // AudioContext can take long under load, and a page closed meanwhile never
+    // sent its leave, so LiveKit listed the person until it timed the dead
+    // connection out. The two run side by side; a failed untap was never
+    // thrown (untap swallows it), and a failed disconnect still is.
+    const disconnected = this.room.disconnect(true);
     try {
-      await this.room.disconnect(true);
+      const [, left] = await Promise.allSettled([untapped, disconnected]);
+      if (left.status === 'rejected') throw left.reason;
     } finally {
       redactor.release(this);
     }
