@@ -248,8 +248,10 @@ function printable(line: string, secrets: readonly string[], nonceShape: boolean
   return out.length > STDERR_LINE_BYTES ? `${out.slice(0, STDERR_LINE_BYTES)}…` : out;
 }
 
-// NONCE_SHAPE is a run as long as the attach nonce, in its alphabet.
-const NONCE_SHAPE = new RegExp(`[A-Za-z0-9_-]{${String(VOICE_CONTROL_PIPE_NONCE_CHARS)}}`, 'g');
+// NONCE_SHAPE is a run at least as long as the attach nonce, in its alphabet
+// (a longer run is replaced whole, so a nonce after other characters of the
+// alphabet leaves no tail).
+const NONCE_SHAPE = new RegExp(`[A-Za-z0-9_-]{${String(VOICE_CONTROL_PIPE_NONCE_CHARS)},}`, 'g');
 
 // The longest partial line held while waiting for its line feed.
 const STDERR_PARTIAL_MAX = STDERR_LINE_BYTES * 4;
@@ -421,6 +423,7 @@ export class Supervisor {
       child = spawnHelper(this.deps.spawn ?? defaultSpawn, executable, args, env, this.platform);
     } catch {
       listening.close();
+      if (windows) this.spend(run, nonce);
       run.exited = true;
       run.markReaped();
       return this.finish(run, { status: 'failed', generation, reason: 'spawn-failed' });
@@ -439,6 +442,8 @@ export class Supervisor {
       ({ socket, rest } = await listening.attach(nonce, deadline));
       if (windows) this.spend(run, nonce);
       nonce = '';
+      // The listener has done its work and holds the nonce's bytes no more.
+      run.listening = null;
     } catch (err) {
       if (windows) this.spend(run, nonce);
       nonce = '';

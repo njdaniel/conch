@@ -357,17 +357,18 @@ describe('rule 2: the first line', () => {
     expect(await outcome(l.attach(NONCE, Date.now() - 1))).toBe('attach-timeout');
   });
 
-  it('more than the bound of waiting connections: the excess is closed at once', async () => {
+  it('at the bound of waiting connections the oldest is closed, and the helper’s own connection, the newest, still attaches', async () => {
     const h = pipes();
     const l = await listening(h);
     const attached = l.attach(NONCE, Date.now() + 5000);
     const clients: Client[] = [];
     for (let i = 0; i < PIPE_MAX_PENDING + 4; i++) clients.push(new Client(h, l.path));
-    await until(() => clients.filter((c) => c.closed).length >= 4, 3000, 'the excess connections to be closed');
-    expect(clients.filter((c) => c.closed).length).toBe(4);
-    // The waiting ones are served: a good first line from one of them wins.
-    const winner = clients.find((c) => !c.closed);
-    await winner?.send(attachLine(NONCE));
+    await until(() => clients.filter((c) => c.closed).length >= 4, 3000, 'the oldest connections to be closed');
+    expect(clients.slice(0, 4).every((c) => c.closed)).toBe(true);
+    expect(clients.slice(4).every((c) => !c.closed)).toBe(true);
+    // The helper arrives with the pipe full of silent opens: it still attaches.
+    const helper = new Client(h, l.path);
+    await helper.send(attachLine(NONCE));
     (await attached).socket.destroy();
   });
 });
@@ -771,12 +772,12 @@ describe('the supervisor on Windows', () => {
     const c = await helperJoins(r);
     await started;
     // After the attach: the nonce is no longer kept, and its shape is replaced.
-    sp?.child.stderr.write(`after nonce=${nonce} other=${OTHER_NONCE} token=${FAKE_TOKEN}\n`);
+    sp?.child.stderr.write(`after nonce=${nonce} other=${OTHER_NONCE} token=${FAKE_TOKEN} glued=CONCH_VOICE_ATTACH_${nonce}\n`);
     await until(() => r.sup.diagnostics().length === 2, 5000, 'the stderr lines');
     await r.sup.stop();
     const seen = [JSON.stringify(r.states), JSON.stringify(r.logs), JSON.stringify(r.sup.diagnostics()), JSON.stringify(r.sup.state)].join('\n');
     expect(r.sup.diagnostics().join('\n')).toContain('before token=<redacted> nonce=<redacted>');
-    expect(r.sup.diagnostics().join('\n')).toContain('after nonce=<redacted> other=<redacted> token=<redacted>');
+    expect(r.sup.diagnostics().join('\n')).toContain('after nonce=<redacted> other=<redacted> token=<redacted> glued=<redacted>');
     expect(seen).not.toContain(nonce);
     expect(seen).not.toContain(OTHER_NONCE);
     expect(seen).not.toContain(FAKE_TOKEN);
@@ -793,8 +794,8 @@ describe('the supervisor on Windows', () => {
     // Nothing the run holds, but the process handle (which is the test's
     // fake) and the connection, has the nonce in it.
     const current = (r.sup as unknown as { current: unknown })['current'];
-    expect(holds(current, first, new Set(['child', 'socket', 'listening']))).toBe(false);
-    expect(holds(current, FAKE_TOKEN, new Set(['child', 'socket', 'listening']))).toBe(true);
+    expect(holds(current, first, new Set(['child', 'socket']))).toBe(false);
+    expect(holds(current, FAKE_TOKEN, new Set(['child', 'socket']))).toBe(true);
     await r.sup.stop();
     c1.socket.destroy();
 

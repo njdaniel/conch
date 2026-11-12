@@ -304,7 +304,7 @@ export async function listenPipe(deps: EndpointDeps = {}): Promise<Listening> {
 // On a pipe (pipe = true), which other users can open read-only and same-user
 // code can flood (§3.5), every connection has its own first line and its own
 // failure: a bad one is closed and the wait goes on to the deadline, and a
-// connection beyond PIPE_MAX_PENDING is closed at once (§3.4 rule 2).
+// connection past PIPE_MAX_PENDING closes the oldest one waiting (§3.4 rule 2).
 function listening(server: Server, path: string, pipe = false): Listening {
   // Every connection that arrived, in order. On a socket the first is the
   // candidate and a second before the attach is settled fails it; on a pipe
@@ -337,10 +337,15 @@ function listening(server: Server, path: string, pipe = false): Listening {
   };
   server.on('connection', (s: Socket) => {
     s.on('error', () => undefined);
-    if (closed || (pipe && connections.length >= PIPE_MAX_PENDING)) {
+    if (closed) {
       s.destroy();
       return;
     }
+    // At the bound the oldest waiting connection goes, not the newcomer: a
+    // flood of silent opens made before the helper connects cannot keep its
+    // connection out.
+    const oldest = connections[0];
+    if (pipe && connections.length >= PIPE_MAX_PENDING && oldest !== undefined) drop(oldest);
     connections.push(s);
     if (!pipe && connections.length > 1) {
       fail?.('attach-second-connection');
@@ -364,6 +369,8 @@ function listening(server: Server, path: string, pipe = false): Listening {
         fail = (reason: AttachFailure): void => {
           if (settled) return;
           settled = true;
+          want.fill(0);
+          onFirst = null;
           fail = null;
           clearTimeout(timer);
           close();
@@ -372,6 +379,8 @@ function listening(server: Server, path: string, pipe = false): Listening {
         const succeed = (s: Socket, rest: Buffer): void => {
           if (settled) return;
           settled = true;
+          want.fill(0);
+          onFirst = null;
           fail = null;
           clearTimeout(timer);
           s.pause();
