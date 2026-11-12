@@ -94,6 +94,21 @@ test.describe('@smoke @cross @voice with LiveKit', () => {
       await expect.poll(() => answered(vw.participants()), { timeout: 15_000 }).toEqual(members.map((m) => `p${String(m.id)}`).sort());
 
       for (const p of people) await expectClean(vw, p);
+
+      // Each person leaves by the page's own button, and the page waits for the
+      // client to say it has left, which it does after room.disconnect() has
+      // sent LiveKit its leave (issue #1764). Closing the page instead leaves
+      // that to livekit-client's pagehide/beforeunload handler, an async
+      // disconnect that races the page's teardown: when the close wins, no
+      // leave reaches LiveKit, which then lists the person until it times the
+      // dead connection out. That is longer than emptiesWithin (a CI run
+      // listed one of the three, "p4", for the whole 20 s). The tab-close and
+      // vanished-page paths have their own test, in 67-voice-recovery.
+      for (const p of people) {
+        const region = p.page.getByRole('region', { name: 'Voice' });
+        await region.getByRole('button', { name: 'Leave voice' }).click();
+        await expect(region.getByRole('button', { name: 'Join voice' })).toBeVisible({ timeout: 15_000 });
+      }
     } finally {
       for (const p of people) await leave(p);
     }
