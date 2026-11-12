@@ -123,6 +123,11 @@ pub fn set(environment: &Environment, key: AudioKey, value: &str) -> Result<(), 
 /// As [`set`].
 pub fn set_keys(environment: &Environment, key: KeysKey, value: &str) -> Result<(), Error> {
     let dir = config_dir(environment)?;
+    // On Windows a device path and an evdev key are refused, not written: they would look
+    // as if they bound a key and never would (docs/design/windows-desktop.md section 4.5).
+    if cfg!(windows) {
+        key.require_windows(value, "voice.toml")?;
+    }
     save_keys(&dir, key, value, &mut || {})
 }
 

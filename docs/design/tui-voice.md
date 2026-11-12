@@ -277,6 +277,8 @@ Nothing else is added, and nothing secret is ever in the command line, which is 
 
 **Server and channel.** The helper uses `start.server` and `start.channel`. In managed mode `CONCH_SERVER` (removed anyway), `--server`, `server` and `channel` in `voice.toml`, the stored-login fallback and the default server are not consulted, and a `voice.toml` that sets `server` or `channel` is not an error: the file is shared with standalone use. `[keys]` and `[audio]` are read as today, so the key device and audio devices a person set up for `conch-voice` are the ones the TUI uses.
 
+**The `[keys]` grammar on Windows** (`docs/design/windows-desktop.md` §4.5, #1781). On Windows there is no key device: `keys.device` is refused, and a binding is a scan code or a mouse button, `talk = "sc:0x29"`, `mute = "sc:0xE0,0x1D"`, `deafen = "mouse:5"` (`sc:0xNN` from `01` to `7F`, `sc:0xE0,0xNN` with the `E0` prefix, `mouse:4`, `mouse:5`; nothing else, and no path). `conch-voice config set keys.talk <value>` writes the form, and the desktop's shell writes it the same way from the renderer's `KeyboardEvent.code`. On Linux these forms are refused and the `KEY_*` names and decimal codes are as they were. The states and reasons (`ptt: ready`, `lost`, `ptt_problem`) are the same on both.
+
 **Two TUIs.** Each TUI has its own configuration directory (`CONCH_CONFIG_DIR`, UX-08), its own supervisor and its own helper, started by it and stopped only by it. Neither can see, signal or reconfigure the other's.
 
 ## 10. Finding the helper

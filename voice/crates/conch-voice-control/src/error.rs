@@ -77,6 +77,33 @@ pub enum Error {
         name: String,
     },
 
+    /// A key binding in the form of the other platform: `sc:` or `mouse:` on Linux, a `KEY_*`
+    /// name or a number on Windows.
+    #[error("`{name}` is not a key binding this platform reads: use {here}")]
+    WrongKeyForm {
+        /// The binding as it was written.
+        name: String,
+        /// What this platform reads.
+        here: &'static str,
+    },
+
+    /// A text in the shape of a Windows binding (`sc:` or `mouse:`) that the grammar does not
+    /// take.
+    #[error("`{name}` is not a Windows key binding: use sc:0x29, sc:0xE0,0x1D, mouse:4 or mouse:5")]
+    InvalidWindowsBinding {
+        /// The binding as it was written.
+        name: String,
+    },
+
+    /// `keys.device`, which names an evdev path, on Windows, where every keyboard is read.
+    #[error(
+        "{file}: `keys.device` is a Linux setting: on Windows keys are bound by scan code, with no device"
+    )]
+    KeyDeviceNotOnWindows {
+        /// The file the caller said the text came from.
+        file: String,
+    },
+
     /// Two of talk, mute and deafen are bound to the same key.
     #[error("the {first} and {second} keys are bound to the same key")]
     DuplicateKeyBinding {

@@ -20,6 +20,16 @@
 //! as a release of the talk key.
 //!
 //! Nothing here logs, and no error or `Debug` rendering includes a byte that was read.
+//!
+//! **On Windows** (`docs/design/windows-desktop.md` section 4.5) a binding is not an evdev
+//! code but a scan code or a mouse button, written `sc:0x29`, `sc:0xE0,0x1D`, `mouse:4` or
+//! `mouse:5`. The grammar is [`parse_windows_binding`], which is built on every platform so
+//! that it is tested on every platform. [`KeyCode`]'s `FromStr` reads it on Windows and
+//! refuses it, with a typed error, everywhere else. A Windows binding is held in the same
+//! `u16` as an evdev code, in a range no evdev code has (see [`KeyCode::windows_binding`]),
+//! so that one can never be taken for the other; [`require_windows_keys`] is what Windows
+//! asks of a configuration before it reads any key. The Linux decoder below never sees such
+//! a code.
 
 use std::fmt;
 use std::str::FromStr;
@@ -43,6 +53,141 @@ const VALUE_RELEASE: i32 = 0;
 /// The largest key code (`KEY_MAX` in `linux/input-event-codes.h`). Code 0 is `KEY_RESERVED`
 /// and is not a key.
 pub const KEY_CODE_MAX: u16 = 0x2ff;
+
+/// What a Windows binding names (`docs/design/windows-desktop.md` section 4.5): a key by its
+/// scan code, with the `E0` prefix in the high byte when the grammar gave one (`sc:0xE0,0x1D`
+/// is `Scan(0xE01D)`), or a mouse button by the number people give it (4 and 5).
+///
+/// It is the configured binding and nothing that was read: nothing builds it from an event.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum WindowsBinding {
+    /// A key, by scan code.
+    Scan(u16),
+    /// A mouse button: 4 or 5, the two side buttons.
+    Mouse(u8),
+}
+
+/// A Windows binding is held in a [`KeyCode`] as this and the rest below it: above
+/// [`KEY_CODE_MAX`], so no evdev code is one and no Windows binding is an evdev code.
+const WINDOWS_BASE: u16 = 0x8000;
+/// Added to [`WINDOWS_BASE`] for a scan code with the `E0` prefix.
+const WINDOWS_EXTENDED: u16 = 0x0100;
+/// Added to [`WINDOWS_BASE`] for a mouse button, with the button's number below it.
+const WINDOWS_MOUSE: u16 = 0x0200;
+
+/// The grammar Windows reads, for the error that refuses the other's.
+const WINDOWS_GRAMMAR: &str = "sc:0x29, sc:0xE0,0x1D, mouse:4 or mouse:5";
+/// The grammar Linux reads, for the error that refuses the other's.
+const EVDEV_GRAMMAR: &str = "a KEY_* name such as KEY_RIGHTCTRL, or a key code from 1 to 767";
+
+/// True for a text that is in the Windows grammar's shape (`sc:` or `mouse:`, in either
+/// case), whether or not what follows is valid.
+fn windows_shaped(text: &str) -> bool {
+    let starts = |prefix: &str| {
+        text.get(..prefix.len())
+            .is_some_and(|head| head.eq_ignore_ascii_case(prefix))
+    };
+    starts("sc:") || starts("mouse:")
+}
+
+/// A hexadecimal byte written `0x` and one or two digits, in either case.
+fn hex_byte(text: &str) -> Option<u8> {
+    let digits = text
+        .strip_prefix("0x")
+        .or_else(|| text.strip_prefix("0X"))?;
+    if digits.is_empty() || digits.len() > 2 || !digits.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    u8::from_str_radix(digits, 16).ok()
+}
+
+/// The Windows `[keys]` grammar, closed: `sc:0xNN` (a scan code from `0x01` to `0x7F`),
+/// `sc:0xE0,0xNN` (the same with the `E0` prefix) and `mouse:4` or `mouse:5`. Case of the
+/// letters is free; white space, a sign, a decimal scan code, an `E1` prefix and every other
+/// mouse button are not. It names no path.
+///
+/// Built on every platform, so that it is tested on every platform; only Windows reads it
+/// from the configuration ([`KeyCode`]'s `FromStr`).
+///
+/// # Errors
+///
+/// [`Error::InvalidWindowsBinding`] for anything else, with the text as it was written.
+pub fn parse_windows_binding(text: &str) -> Result<KeyCode, Error> {
+    let invalid = || Error::InvalidWindowsBinding {
+        name: text.to_owned(),
+    };
+    let lower = text.to_ascii_lowercase();
+    if let Some(button) = lower.strip_prefix("mouse:") {
+        return match button {
+            "4" => Ok(KeyCode(WINDOWS_BASE | WINDOWS_MOUSE | 4)),
+            "5" => Ok(KeyCode(WINDOWS_BASE | WINDOWS_MOUSE | 5)),
+            _ => Err(invalid()),
+        };
+    }
+    let Some(codes) = lower.strip_prefix("sc:") else {
+        return Err(invalid());
+    };
+    let (extended, code) = match codes.split_once(',') {
+        None => (0, hex_byte(codes)),
+        Some((prefix, code)) => match hex_byte(prefix) {
+            Some(0xE0) => (WINDOWS_EXTENDED, hex_byte(code)),
+            _ => return Err(invalid()),
+        },
+    };
+    match code {
+        Some(code @ 0x01..=0x7F) => Ok(KeyCode(WINDOWS_BASE | extended | u16::from(code))),
+        _ => Err(invalid()),
+    }
+}
+
+/// A binding as Windows takes it from a person: in the Windows grammar, and in no other. This
+/// is the strict form of [`KeyCode`]'s `FromStr` on Windows (which also takes an evdev name,
+/// for the sake of the shared configuration layer); `config set` asks for it on Windows.
+///
+/// # Errors
+///
+/// [`Error::WrongKeyForm`] for an evdev name or number, [`Error::InvalidWindowsBinding`] for
+/// a text in the grammar's shape that is not in the grammar.
+pub fn parse_windows_only(text: &str) -> Result<KeyCode, Error> {
+    if windows_shaped(text) {
+        parse_windows_binding(text)
+    } else {
+        Err(Error::WrongKeyForm {
+            name: text.to_owned(),
+            here: WINDOWS_GRAMMAR,
+        })
+    }
+}
+
+/// What Windows asks of a configuration before it reads a key: no `keys.device`, which is a
+/// Linux event device and has no meaning there, and every binding in the Windows grammar,
+/// since an evdev code would never match a key and would look as if it were bound. Refused
+/// rather than ignored, so that a file carried over from Linux says so.
+///
+/// Built on every platform so that it is tested on every platform; Windows calls it where it
+/// starts its key source and where `config set` writes a key.
+///
+/// # Errors
+///
+/// [`Error::KeyDeviceNotOnWindows`] naming `file`, or [`Error::WrongKeyForm`] for an evdev
+/// binding.
+pub fn require_windows_keys(keys: &crate::KeysConfig, file: &str) -> Result<(), Error> {
+    if keys.device.is_some() {
+        return Err(Error::KeyDeviceNotOnWindows {
+            file: file.to_owned(),
+        });
+    }
+    for binding in [keys.talk, keys.mute, keys.deafen].into_iter().flatten() {
+        if binding.windows_binding().is_none() {
+            return Err(Error::WrongKeyForm {
+                // Not the binding: it is an evdev code, and the message needs only the form.
+                name: "a KEY_* name or a key code".to_owned(),
+                here: WINDOWS_GRAMMAR,
+            });
+        }
+    }
+    Ok(())
+}
 
 /// Names from `linux/input-event-codes.h` for the keys someone is likely to talk, mute or
 /// deafen with: modifiers, function keys, navigation and the keypad. Any other key can be
@@ -138,6 +283,24 @@ impl KeyCode {
         self.0
     }
 
+    /// The Windows binding this code is, or `None` for an evdev code. Only
+    /// [`parse_windows_binding`] makes a code that is one.
+    #[must_use]
+    pub fn windows_binding(self) -> Option<WindowsBinding> {
+        let code = self.0.checked_sub(WINDOWS_BASE)?;
+        if code >= WINDOWS_MOUSE {
+            u8::try_from(code - WINDOWS_MOUSE)
+                .ok()
+                .map(WindowsBinding::Mouse)
+        } else {
+            Some(WindowsBinding::Scan(if code >= WINDOWS_EXTENDED {
+                0xE000 | (code - WINDOWS_EXTENDED)
+            } else {
+                code
+            }))
+        }
+    }
+
     /// A code given as a number, if it is in the range of key codes.
     pub(crate) fn from_number(number: u64) -> Option<Self> {
         u16::try_from(number)
@@ -152,6 +315,19 @@ impl FromStr for KeyCode {
 
     /// A key name from the table, in either case, or a decimal key code.
     fn from_str(s: &str) -> Result<Self, Error> {
+        // The Windows grammar is read on Windows alone. (An evdev name still parses there, as
+        // the shared configuration layer is exercised with it; `require_windows_keys` is
+        // what stops one being used.)
+        if windows_shaped(s) {
+            return if cfg!(windows) {
+                parse_windows_binding(s)
+            } else {
+                Err(Error::WrongKeyForm {
+                    name: s.to_owned(),
+                    here: EVDEV_GRAMMAR,
+                })
+            };
+        }
         let unknown = || Error::UnknownKeyName { name: s.to_owned() };
         if !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()) {
             let number = s.parse::<u64>().map_err(|_| unknown())?;
@@ -826,5 +1002,224 @@ mod tests {
         assert_eq!(bound.mute().map(KeyCode::code), Some(183));
         assert_eq!(bound.deafen().map(KeyCode::code), Some(184));
         assert!(!bound.is_empty());
+    }
+
+    // The Windows grammar (`docs/design/windows-desktop.md` section 4.5).
+
+    #[test]
+    fn the_windows_grammar_is_closed_and_every_form_has_one_binding() {
+        use WindowsBinding::{Mouse, Scan};
+        for (text, want) in [
+            ("sc:0x29", Scan(0x29)),
+            ("sc:0x01", Scan(0x01)),
+            ("sc:0x7F", Scan(0x7F)),
+            ("sc:0x7f", Scan(0x7F)),
+            ("SC:0X29", Scan(0x29)),
+            ("sc:0x5", Scan(0x05)),
+            ("sc:0xE0,0x1D", Scan(0xE01D)),
+            ("sc:0xe0,0x1d", Scan(0xE01D)),
+            ("sc:0xE0,0x7F", Scan(0xE07F)),
+            ("mouse:4", Mouse(4)),
+            ("mouse:5", Mouse(5)),
+            ("Mouse:5", Mouse(5)),
+        ] {
+            let code = parse_windows_binding(text).unwrap();
+            assert_eq!(code.windows_binding(), Some(want), "{text}");
+            // No Windows binding is an evdev code, so neither is taken for the other.
+            assert!(code.code() > KEY_CODE_MAX, "{text}");
+        }
+        for text in [
+            "",
+            "sc:",
+            "sc:0x",
+            "sc:0x00",
+            "sc:0x80",
+            "sc:0xFF",
+            "sc:0x100",
+            "sc:0x029",
+            "sc:41",
+            "sc: 0x29",
+            "sc:0x29 ",
+            " sc:0x29",
+            "sc:+0x29",
+            "sc:-0x29",
+            "sc:0x2G",
+            "sc:0xE0",
+            "sc:0xE0,",
+            "sc:0xE0,0x00",
+            "sc:0xE0,0x80",
+            "sc:0xE1,0x1D",
+            "sc:0xE2,0x1D",
+            "sc:0x00,0x1D",
+            "sc:0xE0,0xE0,0x1D",
+            "sc:0x29,0x1D",
+            "sc:0xE0, 0x1D",
+            "mouse:",
+            "mouse:0",
+            "mouse:1",
+            "mouse:3",
+            "mouse:6",
+            "mouse:04",
+            "mouse: 4",
+            "mouse:4 ",
+            "mouse:+4",
+            "mouse:four",
+            "KEY_F13",
+            "97",
+            "/dev/input/event3",
+            "C:\\keys",
+        ] {
+            assert_eq!(
+                parse_windows_binding(text),
+                Err(Error::InvalidWindowsBinding {
+                    name: text.to_owned()
+                }),
+                "{text:?}"
+            );
+        }
+        // Distinct forms are distinct bindings.
+        let codes: Vec<u16> = ["sc:0x1D", "sc:0xE0,0x1D", "mouse:4", "mouse:5", "sc:0x04"]
+            .iter()
+            .map(|text| parse_windows_binding(text).unwrap().code())
+            .collect();
+        for (i, a) in codes.iter().enumerate() {
+            for b in &codes[i + 1..] {
+                assert_ne!(a, b);
+            }
+        }
+    }
+
+    #[test]
+    fn an_evdev_code_is_not_a_windows_binding() {
+        for text in ["KEY_F13", "KEY_RIGHTCTRL", "97", "767", "1"] {
+            // Windows reads both, and the evdev form still parses to its own code.
+            if let Ok(code) = text.parse::<KeyCode>() {
+                assert_eq!(code.windows_binding(), None, "{text}");
+            }
+        }
+    }
+
+    /// On Linux the Windows forms are refused with a typed error that says what is read; on
+    /// Windows they are read, and the evdev forms stay readable for the shared layer.
+    #[cfg(not(windows))]
+    #[test]
+    fn linux_refuses_the_windows_forms_with_a_typed_error() {
+        for text in [
+            "sc:0x29",
+            "sc:0xE0,0x1D",
+            "mouse:4",
+            "mouse:5",
+            "SC:0x29",
+            "mouse:",
+        ] {
+            let error = text.parse::<KeyCode>().unwrap_err();
+            assert_eq!(
+                error,
+                Error::WrongKeyForm {
+                    name: text.to_owned(),
+                    here: EVDEV_GRAMMAR
+                },
+                "{text}"
+            );
+            assert!(error.to_string().contains("KEY_*"), "{error}");
+        }
+        // The Linux grammar is unchanged.
+        assert_eq!(
+            "KEY_RIGHTCTRL".parse::<KeyCode>().map(KeyCode::code),
+            Ok(97)
+        );
+        assert_eq!("97".parse::<KeyCode>().map(KeyCode::code), Ok(97));
+        assert_eq!(
+            "scroll".parse::<KeyCode>(),
+            Err(Error::UnknownKeyName {
+                name: "scroll".to_owned()
+            })
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_reads_the_windows_forms_from_the_configuration() {
+        use WindowsBinding::{Mouse, Scan};
+        for (text, want) in [
+            ("sc:0x29", Scan(0x29)),
+            ("sc:0xE0,0x1D", Scan(0xE01D)),
+            ("mouse:4", Mouse(4)),
+        ] {
+            assert_eq!(
+                text.parse::<KeyCode>().unwrap().windows_binding(),
+                Some(want),
+                "{text}"
+            );
+        }
+        assert!(matches!(
+            "sc:0x80".parse::<KeyCode>(),
+            Err(Error::InvalidWindowsBinding { .. })
+        ));
+    }
+
+    #[test]
+    fn windows_asks_for_no_device_and_no_evdev_key_before_it_reads_any() {
+        use crate::KeysConfig;
+        let windows = |text| parse_windows_binding(text).unwrap();
+        let ok = KeysConfig {
+            device: None,
+            talk: Some(windows("sc:0x29")),
+            mute: Some(windows("mouse:4")),
+            deafen: None,
+        };
+        assert_eq!(require_windows_keys(&ok, "voice.toml"), Ok(()));
+        assert_eq!(
+            require_windows_keys(&KeysConfig::default(), "voice.toml"),
+            Ok(())
+        );
+
+        let device = KeysConfig {
+            device: Some("/dev/input/by-id/x-event-kbd".to_owned()),
+            ..ok.clone()
+        };
+        assert_eq!(
+            require_windows_keys(&device, "voice.toml"),
+            Err(Error::KeyDeviceNotOnWindows {
+                file: "voice.toml".to_owned()
+            })
+        );
+        let error = require_windows_keys(&device, "voice.toml").unwrap_err();
+        assert!(!error.to_string().contains("x-event-kbd"), "{error}");
+
+        let evdev = KeysConfig {
+            deafen: Some("KEY_F13".parse().unwrap()),
+            ..ok
+        };
+        assert!(matches!(
+            require_windows_keys(&evdev, "voice.toml"),
+            Err(Error::WrongKeyForm { .. })
+        ));
+    }
+
+    #[test]
+    fn what_windows_takes_from_a_person_is_the_grammar_and_nothing_else() {
+        assert!(parse_windows_only("sc:0x29").is_ok());
+        assert!(parse_windows_only("mouse:5").is_ok());
+        assert!(matches!(
+            parse_windows_only("KEY_F13"),
+            Err(Error::WrongKeyForm { .. })
+        ));
+        assert!(matches!(
+            parse_windows_only("97"),
+            Err(Error::WrongKeyForm { .. })
+        ));
+        assert!(matches!(
+            parse_windows_only("sc:0x80"),
+            Err(Error::InvalidWindowsBinding { .. })
+        ));
+    }
+
+    #[test]
+    fn a_windows_binding_names_no_path_and_a_message_about_one_shows_no_secret() {
+        // The grammar has no form that holds a path or a name from outside it.
+        for text in ["sc:/dev/input/event3", "mouse:\\.\\pipe\\x", "sc:C:\\x"] {
+            assert!(parse_windows_binding(text).is_err(), "{text}");
+        }
     }
 }

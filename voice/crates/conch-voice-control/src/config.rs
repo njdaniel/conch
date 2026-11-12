@@ -544,7 +544,8 @@ impl KeysKey {
     /// Why `value` cannot be saved for this key, in words that do not repeat it, or `Ok`.
     /// The device is a path under `/dev/input/` with no empty, `.` or `..` part, no white space
     /// around it and no quotation mark, backslash or control character; a binding is a
-    /// `KEY_*` name from the table or a decimal code, as [`KeyCode`]'s `FromStr` takes.
+    /// `KEY_*` name from the table or a decimal code, as [`KeyCode`]'s `FromStr` takes (on
+    /// Windows, besides, a binding of its grammar: `sc:0x29`, `mouse:4`).
     ///
     /// # Errors
     ///
@@ -574,9 +575,33 @@ impl KeysKey {
             KeysKey::Talk | KeysKey::Mute | KeysKey::Deafen => {
                 if value.parse::<KeyCode>().is_ok() {
                     Ok(())
+                } else if cfg!(windows) {
+                    Err(
+                        "must be sc:0x29 (a scan code from 0x01 to 0x7F), sc:0xE0,0x1D (with the E0 prefix), mouse:4 or mouse:5, or a KEY_* name this client knows",
+                    )
                 } else {
                     Err("must be a KEY_* name this client knows, or a key code from 1 to 767")
                 }
+            }
+        }
+    }
+
+    /// What Windows asks of a value for this key before it is written: no device, which is a
+    /// Linux event device, and a binding in the Windows grammar only (`config set` on Windows
+    /// calls this; on Linux nothing does). Built on every platform so that it is tested on
+    /// every platform.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::KeyDeviceNotOnWindows`] (naming `file`) for the device, [`Error::WrongKeyForm`]
+    /// or [`Error::InvalidWindowsBinding`] for a binding.
+    pub fn require_windows(self, value: &str, file: &str) -> Result<(), Error> {
+        match self {
+            KeysKey::Device => Err(Error::KeyDeviceNotOnWindows {
+                file: file.to_owned(),
+            }),
+            KeysKey::Talk | KeysKey::Mute | KeysKey::Deafen => {
+                crate::keys::parse_windows_only(value).map(drop)
             }
         }
     }
@@ -2247,5 +2272,89 @@ open_hang_ms = 650
         );
         assert_eq!(AudioKey::TalkMode.dotted(), "audio.talk_mode");
         assert_eq!(AudioKey::TalkMode.name(), "talk_mode");
+    }
+
+    // `[keys]` on Windows (`docs/design/windows-desktop.md` section 4.5).
+
+    #[test]
+    fn windows_refuses_a_device_and_an_evdev_key_when_config_set_would_write_them() {
+        for (key, value, ok) in [
+            (KeysKey::Talk, "sc:0x29", true),
+            (KeysKey::Mute, "sc:0xE0,0x1D", true),
+            (KeysKey::Deafen, "mouse:5", true),
+            (KeysKey::Talk, "mouse:4", true),
+            (KeysKey::Talk, "KEY_F13", false),
+            (KeysKey::Talk, "183", false),
+            (KeysKey::Mute, "sc:0x80", false),
+            (KeysKey::Deafen, "mouse:3", false),
+            (KeysKey::Device, "/dev/input/by-id/x-event-kbd", false),
+            (KeysKey::Device, "sc:0x29", false),
+        ] {
+            let got = key.require_windows(value, "voice.toml");
+            assert_eq!(got.is_ok(), ok, "{key:?} {value}: {got:?}");
+        }
+        assert_eq!(
+            KeysKey::Device.require_windows("/dev/input/x", "voice.toml"),
+            Err(Error::KeyDeviceNotOnWindows {
+                file: "voice.toml".to_owned()
+            })
+        );
+    }
+
+    /// Linux: the Windows forms are refused where they are written and where they are read.
+    #[cfg(not(windows))]
+    #[test]
+    fn linux_refuses_a_windows_binding_in_the_file_and_in_config_set() {
+        let error = Config::parse("[keys]\ntalk = \"sc:0x29\"\n", FILE).unwrap_err();
+        assert!(
+            matches!(&error, Error::InvalidConfigValue { key, .. } if key == "keys.talk"),
+            "{error:?}"
+        );
+        assert!(error.to_string().contains("KEY_*"), "{error}");
+        for value in ["sc:0x29", "sc:0xE0,0x1D", "mouse:4"] {
+            assert_eq!(
+                KeysKey::Talk.check(value),
+                Err("must be a KEY_* name this client knows, or a key code from 1 to 767")
+            );
+            assert!(
+                set_keys_value("", FILE, KeysKey::Talk, value).is_err(),
+                "{value}"
+            );
+        }
+        // Linux's own grammar is as it was.
+        assert!(set_keys_value("", FILE, KeysKey::Talk, "KEY_F13").is_ok());
+        assert!(set_keys_value("", FILE, KeysKey::Talk, "183").is_ok());
+    }
+
+    /// Windows: the grammar round-trips through `config set`, which changes one line.
+    #[cfg(windows)]
+    #[test]
+    fn windows_bindings_round_trip_through_config_set() {
+        use crate::WindowsBinding::{Mouse, Scan};
+        let text = "# mine\nserver = \"http://127.0.0.1:8080\"\n\n[keys]\n# the keys\ntalk = \"sc:0x29\" # grave\n\n[audio]\ninput = \"x\"\n";
+        for (key, value, binding) in [
+            (KeysKey::Talk, "sc:0x1D", Scan(0x1D)),
+            (KeysKey::Mute, "sc:0xE0,0x1D", Scan(0xE01D)),
+            (KeysKey::Deafen, "mouse:5", Mouse(5)),
+            (KeysKey::Talk, "mouse:4", Mouse(4)),
+        ] {
+            let edited = set_keys_value(text, FILE, key, value).unwrap();
+            assert!(edited.contains(&format!("\"{value}\"")), "{edited}");
+            assert!(edited.contains("[audio]\ninput = \"x\"\n"), "{edited}");
+            let read = Config::parse(&edited, FILE).unwrap();
+            let got = match key {
+                KeysKey::Talk => read.keys.talk,
+                KeysKey::Mute => read.keys.mute,
+                _ => read.keys.deafen,
+            };
+            assert_eq!(got.and_then(|code| code.windows_binding()), Some(binding));
+            // And nothing about a device was invented.
+            assert_eq!(read.keys.device, None);
+        }
+        // A key bound twice is refused as it always was.
+        assert!(set_keys_value(text, FILE, KeysKey::Mute, "sc:0x29").is_err());
+        // Not the grammar: refused with the form this platform reads.
+        let error = set_keys_value(text, FILE, KeysKey::Talk, "sc:0x80").unwrap_err();
+        assert!(error.to_string().contains("sc:0x29"), "{error}");
     }
 }
