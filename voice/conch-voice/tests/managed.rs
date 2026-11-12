@@ -2419,6 +2419,31 @@ fn the_transcripts_without_a_key_device_are_the_ones_windows_plays() {
     );
 }
 
+/// Windows: a rig that is dropped leaves no thread of its owner's pipe behind: the reader of
+/// the owner's end and the watcher of the helper's end each hold the other's pipe handle
+/// until the owner lets go (#1789).
+#[cfg(windows)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_dropped_rig_leaves_no_thread_of_its_pipe_behind() {
+    let mut rig = ManagedRig::start().await;
+    rig.send_start();
+    rig.ready().await;
+    rig.send(&ManagedRig::command("leave", 2, json!({})));
+    rig.close();
+    assert_eq!(rig.exit_code().await, 0);
+    let threads = rig.owner_threads();
+    assert_eq!(threads.load(std::sync::atomic::Ordering::SeqCst), 2);
+    drop(rig);
+    let until = Instant::now() + Duration::from_secs(10);
+    while threads.load(std::sync::atomic::Ordering::SeqCst) != 0 {
+        assert!(
+            Instant::now() < until,
+            "a thread of the pipe outlived its rig"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+}
+
 /// The hello is v1's frozen shape, offering exactly v1 and v2, whichever the owner then
 /// chooses; the start fixes the version, and every event after it is in it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

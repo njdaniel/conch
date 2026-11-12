@@ -850,6 +850,12 @@ impl ManagedRig {
         self.sink_closed.load(Ordering::SeqCst)
     }
 
+    /// Windows: how many threads of the owner's end are running; both end when the rig drops.
+    #[cfg(windows)]
+    pub fn owner_threads(&self) -> Arc<AtomicU32> {
+        self.owner.threads()
+    }
+
     /// Whether the helper has ended.
     pub fn has_ended(&self) -> bool {
         self.task.as_ref().is_none_or(JoinHandle::is_finished)
@@ -889,7 +895,7 @@ mod owner_pipe {
     use conch_voice_api::{Secret, parse_attached};
     use tokio::io::AsyncReadExt;
     use tokio::net::windows::named_pipe::ServerOptions;
-    use tokio::sync::mpsc;
+    use tokio::sync::{mpsc, oneshot};
 
     use super::super::Reader;
     use super::PATIENCE;
@@ -922,15 +928,49 @@ mod owner_pipe {
         }
     }
 
-    /// What the rig keeps of the pipe: the counts, to tell when the owner has read all.
-    pub struct Owner(Counts);
+    /// Counts a thread of the owner's end down when it ends, however it ends.
+    struct Alive(Arc<AtomicU32>);
+
+    impl Drop for Alive {
+        fn drop(&mut self) {
+            self.0.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+
+    /// The helper's end of the pipe as `watch_end` reads it, with its thread counted.
+    struct Watching<R> {
+        inner: R,
+        _alive: Alive,
+    }
+
+    impl<R: std::io::Read> std::io::Read for Watching<R> {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            self.inner.read(buf)
+        }
+    }
+
+    /// What the rig keeps of the pipe: the counts, to tell when the owner has read all, and
+    /// the hold on the owner's reading thread: dropping this ends it, and with it the
+    /// pipe, which ends the thread that watches the helper's end.
+    pub struct Owner {
+        counts: Counts,
+        /// Threads of the owner's end still running: the reader and the end's watcher.
+        alive: Arc<AtomicU32>,
+        _cancel: oneshot::Sender<()>,
+    }
 
     impl Owner {
+        /// How many threads of the owner's end are still running; the rig's drop ends them.
+        pub fn threads(&self) -> Arc<AtomicU32> {
+            Arc::clone(&self.alive)
+        }
+
         /// Waits until the owner has read everything the helper wrote to the pipe, or `limit`.
         /// Not an error to run out: the owner may be stopped, and the test sees what it sees.
         pub async fn drained(&self, limit: Duration) {
             let until = Instant::now() + limit;
-            while self.0.read.load(Ordering::SeqCst) < self.0.written.load(Ordering::SeqCst)
+            while self.counts.read.load(Ordering::SeqCst)
+                < self.counts.written.load(Ordering::SeqCst)
                 && Instant::now() < until
             {
                 tokio::time::sleep(Duration::from_millis(2)).await;
@@ -999,36 +1039,61 @@ mod owner_pipe {
         };
         let attached = parse_attached(&got[..line_end]).unwrap();
         assert!(attached.matches(FAKE_NONCE), "the attach line");
-        let rest = got.split_off(line_end + 1);
+        assert_eq!(
+            line_end + 1,
+            got.len(),
+            "bytes followed the attach line before the session started"
+        );
+        let (cancel, cancelled) = oneshot::channel::<()>();
+        let alive = Arc::new(AtomicU32::new(2));
 
         let counts = Counts::default();
         let pumped = Arc::clone(&counts.read);
         let mut reader = reader.clone();
         let handle = tokio::runtime::Handle::current();
+        let reading = Alive(Arc::clone(&alive));
         std::thread::spawn(move || {
             use std::io::Write;
+            let _reading = reading;
             let read = pumped;
+            let mut cancelled = cancelled;
             let mut chunk = [0_u8; 4096];
-            // What came with the attach line, the helper's writer has counted already.
-            let mut next = rest;
             loop {
-                if !next.is_empty() {
-                    if reader.write_all(&next).is_err() {
-                        return;
+                // The owner is dropped: `server` is dropped with this thread, which is what
+                // the helper's end (watched by `watch_end`) sees end.
+                let step = handle.block_on(async {
+                    tokio::select! {
+                        read = server.read(&mut chunk) => Some(read),
+                        _ = &mut cancelled => None,
                     }
-                    read.fetch_add(next.len() as u64, Ordering::SeqCst);
-                }
-                match handle.block_on(server.read(&mut chunk)) {
-                    Ok(0) | Err(_) => return,
-                    Ok(count) => next = chunk[..count].to_vec(),
+                });
+                match step {
+                    Some(Ok(count)) if count > 0 => {
+                        if reader.write_all(&chunk[..count]).is_err() {
+                            return;
+                        }
+                        read.fetch_add(count as u64, Ordering::SeqCst);
+                    }
+                    _ => return,
                 }
             }
         });
-        channel::watch_end(endpoint.end, inputs.clone(), watchdog);
+        let end = Watching {
+            inner: endpoint.end,
+            _alive: Alive(Arc::clone(&alive)),
+        };
+        channel::watch_end(end, inputs.clone(), watchdog);
         let events = Counted {
             inner: endpoint.events,
             written: Arc::clone(&counts.written),
         };
-        (Box::new(events), Owner(counts))
+        (
+            Box::new(events),
+            Owner {
+                counts,
+                alive,
+                _cancel: cancel,
+            },
+        )
     }
 }

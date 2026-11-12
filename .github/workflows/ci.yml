@@ -429,8 +429,10 @@ jobs:
           exit "$status"
 
       # The whole voice workspace, conch-voice included (#1309): its Unix-only
-      # code (the control channel, key devices, fd 3) answers a typed "not
-      # supported on this platform" error here. The configuration layer runs
+      # code (fd 3, the evdev key devices) answers a typed "not supported on
+      # this platform" error here; `--events-pipe` is a real named pipe on
+      # Windows, and `tests/managed.rs` runs against one (#1766), with its
+      # key-device tests ignored there, each with its reason. The configuration layer runs
       # (#904): voice.toml is read and written, and the Windows rules for
       # discovery and for links are tested. Its integration tests that need
       # Unix (named pipes, shells, /proc, file modes) or PipeWire are gated
