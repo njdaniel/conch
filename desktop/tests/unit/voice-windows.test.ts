@@ -11,7 +11,7 @@
 // job. What only hardware answers (libuv's listener against tokio's client,
 // ERROR_PIPE_BUSY, the DACL, cross-user access) is E2 (#903).
 import { EventEmitter } from 'node:events';
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { connect, Server, type Socket } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -45,7 +45,9 @@ const OTHER_NONCE = 'WIN_other_do_not_print_0123456789abcdefghiA';
 
 let dir: string;
 beforeEach(() => {
-  dir = mkdtempSync(join(tmpdir(), 'conch-win-'));
+  // The real path: on Windows tmpdir() may be an 8.3 short name (RUNNER~1),
+  // which realpath, as findHelper returns it, expands.
+  dir = realpathSync.native(mkdtempSync(join(tmpdir(), 'conch-win-')));
 });
 afterEach(() => {
   rmSync(dir, { recursive: true, force: true });
@@ -123,14 +125,25 @@ class Client {
   }
 }
 
+// connectFails: a connection is not accepted. On a Unix socket that is an
+// error at once. On a real pipe whose attached instance is still open, libuv's
+// connect meets ERROR_PIPE_BUSY and waits for an instance that never comes
+// (up to 30 s), so a connect that has not succeeded after a short while is
+// not accepted either.
 async function connectFails(h: Harness, name: string): Promise<boolean> {
   return new Promise((resolve) => {
     const s = h.connect(name);
+    const timer = setTimeout(() => {
+      s.destroy();
+      resolve(true);
+    }, 600);
     s.once('connect', () => {
+      clearTimeout(timer);
       s.destroy();
       resolve(false);
     });
     s.once('error', () => {
+      clearTimeout(timer);
       resolve(true);
     });
   });
