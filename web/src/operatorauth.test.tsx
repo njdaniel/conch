@@ -25,6 +25,7 @@ const setupToken = `conch_setup_${'S'.repeat(43)}`;
 const setupCredential = 'conch_setup_credential_token';
 const password = 'an operator passphrase long enough';
 const totpSecret = 'JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP';
+const qrName = 'QR code for the authenticator app';
 
 const operatorWho: WhoAmIResponseV1 = {
   id: 1,
@@ -464,7 +465,7 @@ describe('an operator’s setup from a host-made token', () => {
   });
   const enrollment = { secret: totpSecret, issuer: 'conch.example', account: 'root@conch.example', algorithm: 'SHA1', digits: 6, period_seconds: 30, uri: `otpauth://totp/x?secret=${totpSecret}` };
 
-  function setupServer() {
+  function setupServer(enrolment: typeof enrollment = enrollment) {
     const state = { password_set: false, totp_enrolled: false, ended: false };
     const calls = serve({
       'GET /v1/join': () => json(frontDoor),
@@ -479,7 +480,7 @@ describe('an operator’s setup from a host-made token', () => {
         state.password_set = true;
         return json({ revoked: 0 });
       },
-      'POST /v1/totp/enroll': (c) => (c.auth === `Bearer ${setupCredential}` ? json(enrollment) : json({}, 401)),
+      'POST /v1/totp/enroll': (c) => (c.auth === `Bearer ${setupCredential}` ? json(enrolment) : json({}, 401)),
       'POST /v1/totp/confirm': (c) => {
         if ((c.body as { code?: string }).code !== '246810') return refusal(401, 'auth_failed');
         state.totp_enrolled = true;
@@ -508,15 +509,23 @@ describe('an operator’s setup from a host-made token', () => {
     expect(screen.getByRole<HTMLButtonElement>('button', { name: 'Show the key' }).disabled).toBe(true);
     expect(screen.getByText(/This tab is sharing its screen/)).toBeDefined();
     expect(calls.filter((c) => c.path === '/v1/totp/enroll')).toEqual([]);
+    expect(screen.queryByRole('img', { name: qrName })).toBeNull();
     await act(async () => {
       await share.stop();
     });
     fireEvent.click(screen.getByRole('button', { name: 'Show the key' }));
     expect(await screen.findByText('JBSW Y3DP EHPK 3PXP JBSW Y3DP EHPK 3PXP')).toBeDefined();
+    const qr = screen.getByRole('img', { name: qrName });
+    expect(qr.querySelectorAll('rect').length).toBeGreaterThan(100);
+    expect(qr.hasAttribute('style')).toBe(false);
+    expect(qr.querySelector('[style]')).toBeNull();
+    expect(qr.getAttribute('aria-label')).not.toContain('JBSW');
+    expect(screen.getByText('SHA1 · 6 digits · 30 s')).toBeDefined();
     // A share that starts hides it at once.
     const again = await holdShare();
     await act(async () => {});
     expect(screen.queryByText('JBSW Y3DP EHPK 3PXP JBSW Y3DP EHPK 3PXP')).toBeNull();
+    expect(screen.queryByRole('img', { name: qrName })).toBeNull();
     await act(async () => {
       await again.stop();
     });
@@ -533,6 +542,28 @@ describe('an operator’s setup from a host-made token', () => {
     expect(window.localStorage.length + window.sessionStorage.length).toBe(0);
     expectNoSecret(container, setupToken, setupCredential, password, totpSecret);
   });
+
+  for (const [name, uri] of [
+    ['a URI that is not a TOTP one', `https://example.com/?secret=${totpSecret}`],
+    ['a URI too long for version 10', `otpauth://totp/x?secret=${totpSecret}&pad=${'p'.repeat(220)}`],
+  ] as const) {
+    it(`shows the text key and says the QR code is not available for ${name}`, async () => {
+      setupServer({ ...enrollment, uri });
+      render(<App origin={origin} />);
+      fireEvent.click(await screen.findByRole('button', { name: 'Set up an operator account' }));
+      fireEvent.change(screen.getByLabelText('Setup token'), { target: { value: setupToken } });
+      fireEvent.click(screen.getByRole('button', { name: 'Continue' }));
+      fireEvent.change(await screen.findByLabelText('Choose a password'), { target: { value: password } });
+      fireEvent.change(screen.getByLabelText('Type it again'), { target: { value: password } });
+      fireEvent.click(screen.getByRole('button', { name: 'Set password' }));
+      await screen.findByRole('heading', { name: 'Your authenticator app' });
+      expect(screen.queryByText(/QR code isn’t available/)).toBeNull();
+      fireEvent.click(screen.getByRole('button', { name: 'Show the key' }));
+      expect(await screen.findByText('JBSW Y3DP EHPK 3PXP JBSW Y3DP EHPK 3PXP')).toBeDefined();
+      expect(screen.getByText(/QR code isn’t available/)).toBeDefined();
+      expect(screen.queryByRole('img', { name: qrName })).toBeNull();
+    });
+  }
 
   it('says so for a token that does not work', async () => {
     setupServer();
