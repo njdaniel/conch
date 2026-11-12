@@ -1843,14 +1843,22 @@ describe('a long channel', () => {
     expect(screen.getByRole<HTMLButtonElement>('button', { name: 'Load older messages' }).disabled).toBe(false);
   });
 
+  // The newest page is 100 and the older page one short of it, which is all
+  // the rule needs: 101 rows, not 150 (issue #1780). Every row is a list item
+  // with several buttons, and a role query walks them all, so this test's cost
+  // is its row count and its role queries; under a loaded machine that cost,
+  // against findBy's 1 s, was what failed. The button is found by its text
+  // (it is the only element with it), which walks no accessibility tree.
   it('hides the button at the end of history: a page shorter than 100', async () => {
-    server.history.general = Array.from({ length: 150 }, (_, i) => message(i + 1, `m${String(i + 1)}`));
+    server.history.general = Array.from({ length: 101 }, (_, i) => message(i + 1, `m${String(i + 1)}`));
     await openChat();
-    await screen.findByText('m150');
-    fireEvent.click(screen.getByRole('button', { name: 'Load older messages' }));
-    await screen.findByText('m1');
-    expect(lines()).toHaveLength(150);
-    expect(olderButton()).toBeNull();
+    // Two renders of up to 101 rows from real fetch bodies: a hang detector
+    // just under the 5 s test timeout, not a measure of the work.
+    await screen.findByText('m101', undefined, { timeout: 4000 });
+    fireEvent.click(screen.getByText('Load older messages'));
+    await screen.findByText('m1', undefined, { timeout: 4000 });
+    expect(lines()).toHaveLength(101);
+    expect(screen.queryByText('Load older messages')).toBeNull();
   });
 
   it('hides the button at once when the newest page is short', async () => {
