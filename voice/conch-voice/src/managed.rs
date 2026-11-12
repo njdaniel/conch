@@ -2116,6 +2116,7 @@ mod tests {
     }
 
     /// One evdev key record: the event type EV_KEY (1), a code and a value (1 is a press).
+    #[cfg(not(windows))]
     fn record(code: u16, value: i32) -> [u8; conch_voice_control::INPUT_EVENT_LEN] {
         let mut bytes = [0u8; conch_voice_control::INPUT_EVENT_LEN];
         bytes[16..18].copy_from_slice(&1u16.to_le_bytes());
