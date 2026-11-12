@@ -743,7 +743,9 @@ impl Handoff {
     /// with the machine as it was handed over.
     pub async fn fail(self, error: &Error) {
         let reason = match error {
-            Error::PipeWire { .. } | Error::Audio(_) => VoiceControlReason::AudioUnavailable,
+            Error::PipeWire { .. } | Error::Wasapi { .. } | Error::Audio(_) => {
+                VoiceControlReason::AudioUnavailable
+            }
             _ => VoiceControlReason::InternalError,
         };
         let key = match self.key_state {

@@ -44,12 +44,13 @@
 //! scrubber's ([`secrets`]), which are compared with text about to be written and nothing
 //! else.
 //!
-//! Audio is PipeWire's: the default microphone and output, or the ones `[audio]` in the
-//! configuration names. `join`'s test options replace them with a tone or a WAV file and a
+//! Audio is PipeWire's on Linux and WASAPI's on Windows: the default microphone and output, or
+//! the ones `[audio]` in the configuration names. `join`'s test options replace them with a tone or a WAV file and a
 //! sink that counts, and nothing else does: a test that does not name them is a test that
 //! needs PipeWire.
 //!
-//! - [`audio`]: the microphone and speakers, over `dmn-audio`'s PipeWire streams.
+//! - [`audio`]: the microphone and speakers, over `dmn-audio`'s PipeWire streams, or on
+//!   Windows over WASAPI through the `wasapi` crate.
 //! - [`session`]: the loop that decides everything, written against the traits in [`sdk`].
 //! - [`managed`]: `conch-voice managed`, the helper `conch`'s TUI starts and drives.
 //! - [`livekit`]: those traits over LiveKit's SDK, kept thin.
@@ -369,8 +370,20 @@ pub fn managed(
 /// The platform's devices as the neutral table: connects, reads the list and lets go. On a
 /// platform with no audio backend that is [`Error::Audio`] holding `NoBackend`, which
 /// `devices` prints as one line, as for a PipeWire that cannot be reached.
+#[cfg(not(windows))]
 fn list_devices(wait: Duration) -> Result<devices::DeviceTable, Error> {
     PipeWire::connect()?.list_devices(wait)
+}
+
+/// On Windows `devices` still answers that there is no backend, though the backend can list
+/// endpoints (`Wasapi::list_devices`): `conch.voice_devices.v1` has a field that would say
+/// `pipewire: ok`, and a Windows helper writing it would be lying. The listing waits for
+/// `conch.voice_devices.v2` (#891, a schema sign-off; `docs/design/windows-desktop.md` §2.6).
+#[cfg(windows)]
+fn list_devices(_wait: Duration) -> Result<devices::DeviceTable, Error> {
+    Err(Error::Audio(conch_voice_audio::AudioError::NoBackend {
+        platform: std::env::consts::OS,
+    }))
 }
 
 /// `conch-voice devices`: the microphones and speakers PipeWire has, by the names the

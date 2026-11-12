@@ -121,6 +121,18 @@ pub enum Error {
         detail: String,
     },
 
+    /// The Windows audio system (WASAPI) could not be reached, or refused a stream
+    /// (`docs/design/windows-desktop.md` §2). The detail is this program's own words, or the
+    /// name of a Windows setting that is blocking the microphone; it holds nothing the system
+    /// said about a device.
+    #[error("cannot {doing}: {detail}")]
+    Wasapi {
+        /// What was being done.
+        doing: &'static str,
+        /// Why not.
+        detail: String,
+    },
+
     /// `conchd` issued a session with no grant for the channel's own room. V4 joins that
     /// room and no other.
     #[error("conchd issued a voice session with no grant for the channel's own room")]
@@ -245,5 +257,18 @@ mod tests {
             assert_eq!(error.to_string(), line);
             assert_eq!(error.exit_code(), 2);
         }
+    }
+
+    #[test]
+    fn a_wasapi_refusal_says_what_was_being_done_and_why_and_is_not_a_usage_mistake() {
+        let error = Error::Wasapi {
+            doing: "open the microphone",
+            detail: "Windows is not letting programs use the microphone".to_owned(),
+        };
+        assert_eq!(
+            error.to_string(),
+            "cannot open the microphone: Windows is not letting programs use the microphone"
+        );
+        assert_eq!(error.exit_code(), EXIT_STOPPED);
     }
 }
