@@ -97,9 +97,9 @@ Fable (Claude, Principal Engineer) owns the project day-to-day. Nick is Tier-H (
 - New dependencies in `go.mod` (enforced by `scripts/depgate.sh` + `deps-allowlist.txt`).
 - Releases.
 - Roadmap changes.
-- Any merge touching the approval path (request → notify → resolve → audit): **Nick merges these personally.**
+- Any merge touching the approval path (request → notify → resolve → audit): **Nick merges these, or authorizes the principal to on the record.** *Amended 2026-11-09 (Nick: "rule merge a"):* the record is a quoted line of Nick's OK in the PR itself, naming the PR or the session's standing "merge when reviewed" grant, posted before the merge.
 
-**Merge rule:** green CI + Fable review required on everything; Nick additionally merges approval-path PRs himself.
+**Merge rule:** green CI + Fable review required on everything; approval-path PRs are additionally merged by Nick, or by the principal under his recorded authorization.
 
 ## The ownership loop
 
