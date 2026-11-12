@@ -49,7 +49,7 @@
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
-use std::sync::mpsc::{self, Receiver, Sender, SyncSender};
+use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -85,9 +85,11 @@ const RETRY: Duration = Duration::from_secs(1);
 /// notifications.
 const POLL: Duration = Duration::from_secs(2);
 /// How long opening a microphone or speakers waits for the first answer of the worker, which
-/// says whether the device could be started, so that a refusal can fail the open. A device
-/// that is slower than this is taken to be starting.
-const FIRST_ANSWER: Duration = Duration::from_millis(1500);
+/// says whether the device could be started, so that a refusal can fail the open. The open
+/// runs on the session loop, so this is short rather than the open being made elsewhere: a
+/// device starts in tens of milliseconds, and one that is slower is taken to be starting, its
+/// refusal, if one comes, surfacing as the `Denied` or `Lost` state and a log line.
+const FIRST_ANSWER: Duration = Duration::from_millis(250);
 
 /// What Windows says to a person whose microphone is blocked. The setting is one switch for
 /// all desktop apps: this program cannot be allowed on its own.
@@ -155,7 +157,7 @@ pub fn failure_from_hresult(code: i32) -> Failure {
 }
 
 /// What the system says has changed. Posted from the system's own thread.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum Notice {
     /// An endpoint was added.
     Added(String),
@@ -165,6 +167,18 @@ pub enum Notice {
     State(String),
     /// The default changed: to this endpoint, or to none.
     DefaultChanged(Option<String>),
+}
+
+impl std::fmt::Debug for Notice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The IDs are left out: names are never logged (tui-voice.md §20.7).
+        f.write_str(match self {
+            Notice::Added(_) => "Notice::Added",
+            Notice::Removed(_) => "Notice::Removed",
+            Notice::State(_) => "Notice::State",
+            Notice::DefaultChanged(_) => "Notice::DefaultChanged",
+        })
+    }
 }
 
 impl Notice {
@@ -182,10 +196,48 @@ impl Notice {
     }
 }
 
-/// Posts a notice to the worker and returns. The channel is unbounded, so this never waits;
-/// a worker that is gone is not an error for the system's thread.
-pub fn post(to: &Sender<Notice>, notice: Notice) {
-    let _ = to.send(notice);
+/// How many notices wait for the worker at most.
+const NOTICES: usize = 64;
+
+/// The system's end of the notice channel. Cloning shares it.
+#[derive(Clone)]
+pub struct Poster {
+    to: SyncSender<Notice>,
+    /// Set when a notice was lost because the channel was full: the worker then looks at
+    /// what the system has whatever the notices said.
+    full: Arc<AtomicBool>,
+}
+
+/// The worker's end of the notice channel.
+pub struct Inbox {
+    from: Receiver<Notice>,
+    full: Arc<AtomicBool>,
+}
+
+/// A bounded channel for notices: the system's thread never waits on it, and a flood of
+/// notices costs one look and not memory.
+#[must_use]
+pub fn notice_channel() -> (Poster, Inbox) {
+    let (to, from) = mpsc::sync_channel(NOTICES);
+    let full = Arc::new(AtomicBool::new(false));
+    (
+        Poster {
+            to,
+            full: Arc::clone(&full),
+        },
+        Inbox { from, full },
+    )
+}
+
+/// Posts a notice to the worker and returns. It never waits: a full channel sets the flag
+/// that makes the worker look anyway, and a worker that is gone is not an error for the
+/// system's thread.
+pub fn post(to: &Poster, notice: Notice) {
+    match to.to.try_send(notice) {
+        Ok(()) => {}
+        Err(TrySendError::Full(_)) => to.full.store(true, Ordering::Release),
+        Err(TrySendError::Disconnected(_)) => {}
+    }
 }
 
 /// The notice for a default that changed, if it is one the side follows: the kind of audio is
@@ -213,6 +265,14 @@ pub trait Audio {
     /// The system could not be asked.
     fn endpoints(&mut self, kind: Kind) -> Result<Vec<Endpoint>, Failure>;
 
+    /// The IDs of the active endpoints of a kind, and nothing else about them: what the
+    /// worker looks at whenever something changed, which has no use for a friendly name.
+    ///
+    /// # Errors
+    ///
+    /// The system could not be asked.
+    fn active_ids(&mut self, kind: Kind) -> Result<Vec<String>, Failure>;
+
     /// The ID of the default endpoint of a kind, if there is one.
     ///
     /// # Errors
@@ -232,7 +292,7 @@ pub trait Audio {
     /// # Errors
     ///
     /// The system would not take the subscription.
-    fn subscribe(&mut self, kind: Kind, to: Sender<Notice>) -> Result<(), Failure>;
+    fn subscribe(&mut self, kind: Kind, to: Poster) -> Result<(), Failure>;
 }
 
 /// A running stream: the sound card's side of a ring.
@@ -322,8 +382,8 @@ impl Target {
 /// it is listed as active: if it is not, nothing is wanted, and in particular not the default.
 /// The default is wanted only if the system lists it.
 #[must_use]
-pub fn decide(target: &Target, active: &[Endpoint], default: Option<&str>) -> Option<String> {
-    let listed = |id: &str| active.iter().any(|endpoint| endpoint.id == id);
+pub fn decide(target: &Target, active: &[String], default: Option<&str>) -> Option<String> {
+    let listed = |id: &str| active.iter().any(|listed| listed == id);
     match target {
         Target::Named(id) => listed(id).then(|| id.clone()),
         Target::Default => default.filter(|id| listed(id)).map(str::to_owned),
@@ -511,9 +571,11 @@ struct Worker<A: Audio> {
     kind: Kind,
     target: Target,
     shared: Arc<Shared>,
-    notices: Receiver<Notice>,
+    notices: Inbox,
     /// Look at what the system has at the next step.
     dirty: bool,
+    /// How many streams in a row went away at once after being started.
+    gone_streak: u32,
     /// When to look again by itself, while there is no stream.
     retry_at: Option<Instant>,
     /// When to look again by itself because no notice can come, if that is so.
@@ -523,13 +585,7 @@ struct Worker<A: Audio> {
 }
 
 impl<A: Audio> Worker<A> {
-    fn new(
-        audio: A,
-        kind: Kind,
-        target: Target,
-        shared: Arc<Shared>,
-        notices: Receiver<Notice>,
-    ) -> Self {
+    fn new(audio: A, kind: Kind, target: Target, shared: Arc<Shared>, notices: Inbox) -> Self {
         Self {
             stream: None,
             audio,
@@ -538,6 +594,7 @@ impl<A: Audio> Worker<A> {
             shared,
             notices,
             dirty: true,
+            gone_streak: 0,
             retry_at: None,
             poll_at: None,
             first: None,
@@ -548,17 +605,20 @@ impl<A: Audio> Worker<A> {
     fn take_notices(&mut self) {
         let running = self.stream.as_ref().map(|running| running.id.as_str());
         let mut concerned = false;
-        while let Ok(notice) = self.notices.try_recv() {
+        while let Ok(notice) = self.notices.from.try_recv() {
             concerned |= notice.concerns(&self.target, running);
         }
+        // Notices were lost: look, whatever they were.
+        concerned |= self.notices.full.swap(false, Ordering::AcqRel);
         self.dirty |= concerned;
     }
 
     /// Drops the stream, if there is one. Whoever reads the microphone next is told once.
     fn drop_stream(&mut self) {
         if self.stream.take().is_some() {
-            // The state first: a reader that still sees the old state must see the new epoch,
-            // and one that sees the new state throws away what the old stream left.
+            // Under the ring's lock, which a read of the microphone holds while it looks at
+            // the state and the epoch: it sees both changed or neither.
+            let _ring = self.shared.ring();
             self.shared.set_state(State::Starting);
             self.shared.epoch.fetch_add(1, Ordering::AcqRel);
         }
@@ -573,7 +633,7 @@ impl<A: Audio> Worker<A> {
     /// Makes what runs match what is wanted now.
     fn reconcile(&mut self, now: Instant) {
         let kind = self.kind;
-        let looked = self.audio.endpoints(kind).and_then(|active| {
+        let looked = self.audio.active_ids(kind).and_then(|active| {
             let default = match self.target {
                 Target::Default => self.audio.default_id(kind)?,
                 Target::Named(_) => None,
@@ -601,12 +661,17 @@ impl<A: Audio> Worker<A> {
         };
         match self.audio.start(kind, &id) {
             Ok(stream) => {
-                // What was captured before is not for this stream's listener.
-                if kind == Kind::Capture {
-                    self.shared.ring().clear();
-                }
                 self.stream = Some(Running { id, stream });
-                self.shared.set_state(State::Streaming);
+                // What was captured before is not for this stream's listener. Emptying the
+                // ring and saying the stream is up are one step to a reader of the microphone,
+                // so that nothing of the new device reaches a transmission of the old one.
+                {
+                    let mut ring = self.shared.ring();
+                    if kind == Kind::Capture {
+                        ring.clear();
+                    }
+                    self.shared.set_state(State::Streaming);
+                }
                 self.answer(Ok(()));
             }
             Err(failure) => self.lose(&failure, now),
@@ -661,15 +726,25 @@ impl<A: Audio> Worker<A> {
                 .stream
                 .render(wait, &mut |out| shared.ring().pop(out)),
         };
-        if let Err(failure) = moved {
-            // A device that went away is looked for at once: it may be listed still, or
-            // another may be wanted. Anything else is tried again in a while.
-            self.drop_stream();
-            if failure == Failure::Gone {
-                self.shared.set_state(State::NoDevice);
-                self.dirty = true;
-            } else {
-                self.lose(&failure, now);
+        match moved {
+            Ok(()) => self.gone_streak = 0,
+            Err(failure) => {
+                // A device that went away is looked for at once: it may be listed still, or
+                // another may be wanted. But one that goes away again as soon as it is
+                // started waits a while, so that this never spins. Anything else is tried
+                // again in a while.
+                self.drop_stream();
+                if failure == Failure::Gone {
+                    self.gone_streak += 1;
+                    self.shared.set_state(State::NoDevice);
+                    if self.gone_streak >= 2 {
+                        self.retry_at = Some(now + RETRY);
+                    } else {
+                        self.dirty = true;
+                    }
+                } else {
+                    self.lose(&failure, now);
+                }
             }
         }
         Stepped::Pumped
@@ -697,6 +772,19 @@ fn error_for(doing: &'static str, kind: Kind, failure: Failure) -> Error {
     Error::Wasapi { doing, detail }
 }
 
+/// What a worker leaves behind whichever way it ends: the state is `Lost` and the epoch has
+/// moved, so a reader is told the stream is gone, once, and is not left with `Streaming` for
+/// good.
+struct Ends(Arc<Shared>);
+
+impl Drop for Ends {
+    fn drop(&mut self) {
+        let _ring = self.0.ring();
+        self.0.set_state(State::Lost);
+        self.0.epoch.fetch_add(1, Ordering::AcqRel);
+    }
+}
+
 /// Starts the worker for one microphone or speakers, with a ring of `capacity` samples, and
 /// waits a moment for its first answer, so that a refusal fails the open.
 ///
@@ -717,6 +805,9 @@ fn spawn<A: Audio>(
     let started = std::thread::Builder::new()
         .name(name.to_owned())
         .spawn(move || {
+            // However this thread ends, a panic included, the microphone stops saying the
+            // stream is up.
+            let _ends = Ends(Arc::clone(&for_worker));
             let audio = match make() {
                 Ok(audio) => audio,
                 Err(failure) => {
@@ -724,7 +815,7 @@ fn spawn<A: Audio>(
                     return;
                 }
             };
-            let (post_to, notices) = mpsc::channel();
+            let (post_to, notices) = notice_channel();
             let mut audio = audio;
             let subscribed = audio.subscribe(kind, post_to).is_ok();
             let mut worker = Worker::new(audio, kind, target, for_worker, notices);
@@ -834,10 +925,13 @@ impl WasapiMic {
 
 impl MicSource for WasapiMic {
     fn read(&mut self, frame: &mut Frame) -> MicRead {
-        let state = self.shared.state();
+        // The ring's lock first: the worker changes the state, the epoch and the ring under it,
+        // so what is read here is one moment and no frame of a new device can follow the old.
+        let shared = Arc::clone(&self.shared);
+        let mut ring = shared.ring();
+        let state = shared.state();
+        let epoch = shared.epoch();
         self.note(state);
-        let epoch = self.shared.epoch();
-        let mut ring = self.shared.ring();
         if epoch != self.epoch {
             // The stream was dropped since the last read, and may be running again already
             // on the default's new device: say so once, so that a transmission ends first.
@@ -1053,8 +1147,6 @@ pub fn encode_mono(mono: &[f32], channels: usize, out: &mut Vec<u8>) {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::mpsc::TryRecvError;
-
     use conch_voice_api::VoiceDevicesConfig;
     use conch_voice_audio::SILENCE;
 
@@ -1093,7 +1185,12 @@ mod tests {
         /// Whether `subscribe` is taken.
         can_subscribe: bool,
         /// The channel the system posts its notices to.
-        posts: Option<Sender<Notice>>,
+        posts: Option<Poster>,
+        /// Whether the next start, or the next capture pump, panics.
+        panic_on_start: bool,
+        panic_in_capture: bool,
+        /// The kind of every start, which the fake checks against the endpoint's.
+        started_kinds: Vec<Kind>,
     }
 
     type Fake = Arc<Mutex<World>>;
@@ -1123,6 +1220,14 @@ mod tests {
             })
         }
 
+        fn active_ids(&mut self, kind: Kind) -> Result<Vec<String>, Failure> {
+            Ok(self
+                .endpoints(kind)?
+                .into_iter()
+                .map(|endpoint| endpoint.id)
+                .collect())
+        }
+
         fn default_id(&mut self, kind: Kind) -> Result<Option<String>, Failure> {
             let world = with(&self.0);
             Ok(match kind {
@@ -1131,8 +1236,21 @@ mod tests {
             })
         }
 
-        fn start(&mut self, _kind: Kind, id: &str) -> Result<FakeStream, Failure> {
+        fn start(&mut self, kind: Kind, id: &str) -> Result<FakeStream, Failure> {
             let mut world = with(&self.0);
+            // As the real system does: an endpoint of the other kind is not this one's.
+            let of_kind = match kind {
+                Kind::Capture => &world.capture,
+                Kind::Render => &world.render,
+            };
+            if !of_kind.iter().any(|endpoint| endpoint.id == id) {
+                return Err(Failure::Gone);
+            }
+            if std::mem::take(&mut world.panic_on_start) {
+                drop(world);
+                panic!("FAKE: the sound system fell over");
+            }
+            world.started_kinds.push(kind);
             world.started.push(id.to_owned());
             if let Some(failure) = world.start_failures.pop_front() {
                 return Err(failure);
@@ -1140,7 +1258,7 @@ mod tests {
             Ok(FakeStream(Arc::clone(&self.0)))
         }
 
-        fn subscribe(&mut self, _kind: Kind, to: Sender<Notice>) -> Result<(), Failure> {
+        fn subscribe(&mut self, _kind: Kind, to: Poster) -> Result<(), Failure> {
             let mut world = with(&self.0);
             if !world.can_subscribe {
                 return Err(Failure::Other("no".to_owned()));
@@ -1157,6 +1275,10 @@ mod tests {
             deliver: &mut dyn FnMut(&[f32]),
         ) -> Result<(), Failure> {
             let mut world = with(&self.0);
+            if world.panic_in_capture {
+                drop(world);
+                panic!("FAKE: the stream fell over");
+            }
             if let Some(failure) = world.pump_failure.take() {
                 return Err(failure);
             }
@@ -1198,7 +1320,7 @@ mod tests {
                 Kind::Render => PLAYBACK_RING,
             };
             let shared = Arc::new(Shared::new(capacity));
-            let (post_to, notices) = mpsc::channel();
+            let (post_to, notices) = notice_channel();
             let mut audio = FakeAudio(Arc::clone(&world));
             audio.subscribe(kind, post_to).unwrap();
             Self {
@@ -1250,7 +1372,7 @@ mod tests {
 
     #[test]
     fn what_to_follow_is_decided_from_what_is_there_and_nothing_is_substituted() {
-        let active = [endpoint(MIC_A), endpoint(MIC_B)];
+        let active = [MIC_A.to_owned(), MIC_B.to_owned()];
         let named = |id: &str| Target::Named(id.to_owned());
         for (target, default, want, why) in [
             (Target::Default, Some(MIC_A), Some(MIC_A), "the default"),
@@ -1695,18 +1817,83 @@ mod tests {
     #[test]
     fn the_systems_thread_posts_and_returns_whatever_the_worker_is_doing() {
         // No receiver: nothing to wait for, and no panic.
-        let (to, notices) = mpsc::channel();
-        drop(notices);
+        let (to, inbox) = notice_channel();
+        drop(inbox);
         post(&to, Notice::Removed(MIC_A.to_owned()));
-        // A receiver that never reads: the thousandth post returns as the first did.
-        let (to, notices) = mpsc::channel();
+        // A receiver that never reads: the thousandth post returns as the first did, and
+        // the channel holds no more than its bound.
+        let (to, inbox) = notice_channel();
         let began = Instant::now();
         for n in 0..10_000 {
             post(&to, Notice::State(format!("FAKE-{n}")));
         }
         assert!(began.elapsed() < Duration::from_secs(5));
-        assert_eq!(notices.try_iter().count(), 10_000);
-        assert!(matches!(notices.try_recv(), Err(TryRecvError::Empty)));
+        assert_eq!(inbox.from.try_iter().count(), NOTICES);
+        // What was lost is not forgotten: the worker is told to look anyway.
+        assert!(inbox.full.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn a_flood_of_notices_makes_the_worker_look_at_what_there_is() {
+        let world = world();
+        mics(&world, &[], None);
+        let mut rig = Rig::new(Kind::Capture, Target::Named(MIC_A.to_owned()), world);
+        rig.step();
+        assert_eq!(rig.state(), State::NoDevice);
+        // The device comes, and its notice is among thousands of others about other
+        // devices, most of which did not fit.
+        mics(&rig.world, &[MIC_A], Some(MIC_A));
+        for n in 0..1_000 {
+            rig.notify(Notice::Removed(format!("FAKE-OTHER-{n}")));
+        }
+        rig.step();
+        assert_eq!(rig.state(), State::Streaming);
+    }
+
+    #[test]
+    fn a_device_that_goes_away_again_at_once_is_not_spun_on() {
+        let world = world();
+        mics(&world, &[MIC_A], Some(MIC_A));
+        let mut rig = Rig::new(Kind::Capture, Target::Named(MIC_A.to_owned()), world);
+        rig.step();
+        // The first time it is looked for at once; the second time it waits.
+        with(&rig.world).pump_failure = Some(Failure::Gone);
+        rig.step();
+        assert_eq!(rig.started().len(), 1);
+        with(&rig.world).pump_failure = Some(Failure::Gone);
+        rig.step();
+        assert_eq!(rig.started().len(), 2);
+        for _ in 0..5 {
+            assert_eq!(rig.step(), Stepped::Idle);
+        }
+        assert_eq!(rig.started().len(), 2, "no spinning");
+        rig.later(RETRY);
+        rig.step();
+        assert_eq!(rig.started().len(), 3);
+        assert_eq!(rig.state(), State::Streaming);
+        // A pump that works ends the streak.
+        rig.step();
+        assert_eq!(rig.worker.gone_streak, 0);
+    }
+
+    #[test]
+    fn a_capture_target_naming_a_render_endpoint_starts_nothing() {
+        let world = world();
+        with(&world).render = vec![endpoint(OUT_A)];
+        with(&world).default_render = Some(OUT_A.to_owned());
+        mics(&world, &[MIC_A], Some(MIC_A));
+        let mut rig = Rig::new(Kind::Capture, Target::Named(OUT_A.to_owned()), world);
+        rig.step();
+        assert!(rig.started().is_empty());
+        assert_eq!(rig.state(), State::NoDevice);
+        // Nor does it fall back on the microphone that is there.
+        rig.later(RETRY * 2);
+        rig.step();
+        assert!(with(&rig.world).started_kinds.is_empty());
+        // And the system itself refuses an endpoint of the other kind.
+        let mut audio = FakeAudio(Arc::clone(&rig.world));
+        assert_eq!(audio.start(Kind::Capture, OUT_A).err(), Some(Failure::Gone));
+        assert_eq!(audio.start(Kind::Render, MIC_A).err(), Some(Failure::Gone));
     }
 
     #[test]
@@ -1899,7 +2086,11 @@ mod tests {
         let mut rig = Rig::new(Kind::Capture, Target::Named(secret.to_owned()), world);
         rig.step();
         let shown = format!(
-            "{:?} {:?} {:?} {:?}",
+            "{:?} {:?} {:?} {:?} {:?} {:?} {:?} {:?}",
+            Notice::Added(secret.to_owned()),
+            Notice::Removed(secret.to_owned()),
+            Notice::State(secret.to_owned()),
+            Notice::DefaultChanged(Some(secret.to_owned())),
             rig.mic(),
             Target::Named(secret.to_owned()),
             endpoint(secret),
@@ -1937,14 +2128,70 @@ mod tests {
             heard
         });
         assert!(delivered);
-        let posts = with(&world).posts.clone();
+        let shared = Arc::clone(&mic.shared);
         drop(mic);
-        // The worker saw the stop and dropped its end of the notice channel with itself.
-        assert!(within_five_seconds(|| {
-            posts
-                .as_ref()
-                .is_some_and(|to| to.send(Notice::State(MIC_B.to_owned())).is_err())
-        }));
+        // The worker saw the stop and ended, leaving the stream not up.
+        assert!(within_five_seconds(|| shared.state() == State::Lost));
+    }
+
+    #[test]
+    fn a_worker_that_panics_leaves_a_stream_that_is_not_up_and_a_microphone_that_can_be_opened_again()
+     {
+        let world = world();
+        mics(&world, &[MIC_A], Some(MIC_A));
+        let for_thread = Arc::clone(&world);
+        let mut mic = WasapiMic::start(
+            move || Ok(FakeAudio(for_thread)),
+            Target::Named(MIC_A.to_owned()),
+        )
+        .unwrap();
+        let mut frame = SILENCE;
+        assert!(within_five_seconds(
+            || mic.read(&mut frame) == MicRead::NotYet
+        ));
+        // The stream falls over in the worker's thread.
+        with(&world).panic_in_capture = true;
+        assert!(within_five_seconds(|| mic.shared.state() == State::Lost));
+        assert_eq!(mic.read(&mut frame), MicRead::NoMicrophone, "told once");
+        assert_eq!(
+            mic.read(&mut frame),
+            MicRead::NoMicrophone,
+            "and still none"
+        );
+        // The same named microphone is opened again, by whoever reopens it.
+        with(&world).panic_in_capture = false;
+        let for_thread = Arc::clone(&world);
+        let mut again = WasapiMic::start(
+            move || Ok(FakeAudio(for_thread)),
+            Target::Named(MIC_A.to_owned()),
+        )
+        .unwrap();
+        assert!(within_five_seconds(
+            || again.read(&mut frame) == MicRead::NotYet
+        ));
+        assert_eq!(with(&world).started, [MIC_A, MIC_A]);
+    }
+
+    #[test]
+    fn a_system_that_panics_while_starting_fails_the_open_and_is_not_left_streaming() {
+        let world = world();
+        mics(&world, &[MIC_A], Some(MIC_A));
+        with(&world).panic_on_start = true;
+        let for_thread = Arc::clone(&world);
+        let error = WasapiMic::start(move || Ok(FakeAudio(for_thread)), Target::Default)
+            .err()
+            .map(|error| error.to_string())
+            .unwrap_or_default();
+        assert_eq!(
+            error,
+            "cannot open the microphone: the audio thread stopped"
+        );
+        // Opened again, it starts.
+        let mut mic = WasapiMic::start(move || Ok(FakeAudio(world)), Target::Default).unwrap();
+        let mut frame = SILENCE;
+        assert!(within_five_seconds(
+            || mic.read(&mut frame) == MicRead::NotYet
+        ));
     }
 
     #[test]

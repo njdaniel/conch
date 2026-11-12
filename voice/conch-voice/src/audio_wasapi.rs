@@ -22,7 +22,6 @@
 //! thread, never moves, and is dropped there, its COM objects before the apartment goes.
 //! The notification handlers run on a thread of the system's own and only [`post`].
 
-use std::sync::mpsc::Sender;
 use std::time::Duration;
 
 use wasapi::{
@@ -32,8 +31,8 @@ use wasapi::{
 };
 
 use super::windows::{
-    Audio, Endpoint, Failure, Kind, Notice, Stream, Target, WasapiMic, WasapiSpeakers, decode_mono,
-    default_changed, encode_mono, failure_from_hresult, list, post,
+    Audio, Endpoint, Failure, Kind, Notice, Poster, Stream, Target, WasapiMic, WasapiSpeakers,
+    decode_mono, default_changed, encode_mono, failure_from_hresult, list, post,
 };
 use conch_voice_audio::SAMPLE_RATE;
 
@@ -143,6 +142,21 @@ impl Audio for System {
         Ok(found)
     }
 
+    fn active_ids(&mut self, kind: Kind) -> Result<Vec<String>, Failure> {
+        // IDs only: a friendly name is read when a device is listed for a person, not on
+        // every look the worker takes.
+        let collection = self
+            .enumerator
+            .get_device_collection(&direction(kind))
+            .map_err(|error| classify(&error))?;
+        let count = collection
+            .get_nbr_devices()
+            .map_err(|error| classify(&error))?;
+        Ok((0..count)
+            .filter_map(|index| collection.get_device_at_index(index).ok()?.get_id().ok())
+            .collect())
+    }
+
     fn default_id(&mut self, kind: Kind) -> Result<Option<String>, Failure> {
         // The console role: the one Windows calls the default (`default_changed`).
         let device = match self
@@ -160,6 +174,11 @@ impl Audio for System {
     fn start(&mut self, kind: Kind, id: &str) -> Result<Running, Failure> {
         // An ID that is no endpoint, for whatever reason, is a device that is not there.
         let device = self.enumerator.get_device(id).map_err(|_| Failure::Gone)?;
+        // An endpoint of the other kind is not this one's: `wasapi` turns a capture client
+        // on a render endpoint into loopback, which would capture everything the PC plays.
+        if device.get_direction() != direction(kind) {
+            return Err(Failure::Gone);
+        }
         // Mono first, which the engine converts; stereo if the driver will not.
         let mut refused = Failure::Unsupported;
         for channels in [1_usize, 2] {
@@ -184,7 +203,7 @@ impl Audio for System {
         Err(refused)
     }
 
-    fn subscribe(&mut self, kind: Kind, to: Sender<Notice>) -> Result<(), Failure> {
+    fn subscribe(&mut self, kind: Kind, to: Poster) -> Result<(), Failure> {
         let mut callbacks = DeviceEventCallbacks::new();
         let added = to.clone();
         callbacks.set_device_added_callback(move |id| post(&added, Notice::Added(id)));
