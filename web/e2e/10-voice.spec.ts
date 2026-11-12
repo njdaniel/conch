@@ -1537,7 +1537,27 @@ test('a push-to-talk whose reports are slow is audited as the reported pair and 
       await vw.startLiveKit();
       await expect(voice).toContainText('Connected in', { timeout: 120_000 });
       await expect(voice).not.toContainText('Voice server unreachable');
-      await expectClean(a);
+      // While LiveKit was down the SDK's retries made Chromium log "WebSocket
+      // connection to 'ws://<livekit>/rtc/v1?access_token=<join token>...'
+      // failed: ... net::ERR_CONNECTION_REFUSED" (not an app log; issue
+      // #1760). Whether a retry fell in that window is timing, so lines of
+      // exactly that shape are allowed here and nowhere else.
+      await expectClean({ ...a, allowLiveKitRefusals: true });
+    } finally {
+      await closeAll(a.context);
+    }
+  });
+
+  // The allowance above is for Chromium's refusal line only: a secret that the
+  // page itself logs still fails expectClean in the test that has it.
+  test('a secret in the console still fails expectClean where refusals are allowed', async ({ browser }) => {
+    const a = await person(browser, 'alice');
+    try {
+      await expectClean({ ...a, allowLiveKitRefusals: true });
+      await a.page.evaluate((x) => {
+        console.log(x);
+      }, a.member.token);
+      await expect(expectClean({ ...a, allowLiveKitRefusals: true })).rejects.toThrow();
     } finally {
       await closeAll(a.context);
     }

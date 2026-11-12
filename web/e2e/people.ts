@@ -11,6 +11,7 @@
 // Someone.close), never with context.close alone: see closeAll in fixtures.ts.
 import type { Browser, BrowserContext, BrowserContextOptions, Page } from '@playwright/test';
 import { closeAll, expect, openChannel, rememberPushToTalk, showView, signIn } from './fixtures';
+import { withoutJoinTokenInSocketRefusals } from './console-lines';
 import { watchPage, type Member, type VoiceWorld, type Watch } from './voice-world';
 
 export interface Someone {
@@ -167,7 +168,17 @@ export async function inbound(page: Page, options: { perTrack?: boolean } = {}):
 // its /rtc/v1/validate request and the resource timing records that URL
 // (docs/manual.md, "Voice in the browser"); that parameter, in a URL on
 // LiveKit's origin with exactly that path, is left out of the timing entries.
-export async function expectClean(vw: VoiceWorld, p: Pick<Someone, 'page' | 'watch'> & { readonly member: Pick<Member, 'token'> }): Promise<void> {
+//
+// allowLiveKitRefusals is for a test that stops LiveKit while the page is
+// joined (issue #1760): the SDK's retries then make Chromium log "WebSocket
+// connection to 'ws://<livekit>/rtc/v1?access_token=<join token>...' failed:
+// ... net::ERR_CONNECTION_REFUSED", and whether one lands is timing. Lines of
+// exactly that shape lose the join token before the check (console-lines.ts);
+// every other line, and every other secret, is checked as always.
+export async function expectClean(
+  vw: VoiceWorld,
+  p: Pick<Someone, 'page' | 'watch'> & { readonly member: Pick<Member, 'token'>; readonly allowLiveKitRefusals?: boolean },
+): Promise<void> {
   await p.watch.settled();
   const livekit = new URL(vw.livekitOrigin.replace(/^ws/, 'http')).origin;
   const { kept, credentials } = await p.page.evaluate((livekitHttp) => {
@@ -203,7 +214,8 @@ export async function expectClean(vw: VoiceWorld, p: Pick<Someone, 'page' | 'wat
   for (const credential of credentials) {
     expect(credential === null || credential === p.member.token, "the stored credential is the member's own").toBe(true);
   }
-  const said = p.watch.console.join('\n');
+  const lines = p.allowLiveKitRefusals === true ? withoutJoinTokenInSocketRefusals(p.watch.console, vw.livekitOrigin) : p.watch.console;
+  const said = lines.join('\n');
   // Asserted as booleans: a failing not.toContain would print the secret
   // and the whole page text into the report and the CI log.
   vw.secrets.forEach((s, i) => {
