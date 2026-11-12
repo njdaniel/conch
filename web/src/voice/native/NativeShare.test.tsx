@@ -6,16 +6,19 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { CompanionGrantError } from '../../platform/desktop/bridge';
 import type { VoicePresenceV2 } from '../../schema/voice';
 import type { Person } from '../../useLiveChannel';
-import { companionDefaultQuality, companionRefusals, initialVoice, type VoiceState } from '../connection';
-import type { ShareState } from '../share';
+import { companionDefaultQuality, companionQualities, companionRefusals, initialVoice, type VoiceState } from '../connection';
+import { askedText } from '../sdk';
+import type { SettledQuality, ShareDirection, ShareSample, ShareState } from '../share';
+import { estimateWords, sourceSixtyNote } from '../ShareQualityMenu';
 import { NativeStreams, ShareButton, ShareNotes, shareDisabledReason } from './NativeShare';
 import type { Companion, CompanionClient } from './useCompanion';
 import { shareCauseWords, shareDisabledWords, shareElsewhereWords, shareFailedWords, shareFullWords, shareSourceClosedWords, shareUnavailableWords, silentShareBefore, silentShareWhile } from './words';
 
 afterEach(cleanup);
 
-function fake(over: Partial<VoiceState> = {}): { readonly companion: Companion; readonly calls: string[] } {
+function fake(over: Partial<VoiceState> = {}, stats: ShareSample | null = null): { readonly companion: Companion; readonly calls: string[]; readonly reads: [ShareDirection, number | undefined][] } {
   const calls: string[] = [];
+  const reads: [ShareDirection, number | undefined][] = [];
   const client: CompanionClient = {
     subscribe: () => () => undefined,
     snapshot: () => state,
@@ -27,11 +30,11 @@ function fake(over: Partial<VoiceState> = {}): { readonly companion: Companion; 
     setShareQuality: (q) => { calls.push(`quality ${q.resolution}${String(q.frameRate)}`); return Promise.resolve(); },
     presence: () => undefined,
     attachStream: () => undefined,
-    readShareStats: () => Promise.resolve(null),
+    readShareStats: (direction, principal) => { reads.push([direction, principal]); return Promise.resolve(stats); },
   };
   // The real client starts at the desktop's default, 720p30 (Q-D4-3).
   const state: VoiceState = { ...initialVoice, shareQuality: companionDefaultQuality, ...over };
-  return { companion: { client, state }, calls };
+  return { companion: { client, state }, calls, reads };
 }
 
 const idleShare = (over: Partial<Extract<ShareState, { kind: 'idle' }>> = {}): ShareState => ({ kind: 'idle', ended: null, ...over });
@@ -200,20 +203,54 @@ describe('the refusals, each in its own words', () => {
   });
 });
 
-describe('the quality choices (Q-D4-3)', () => {
-  it('are 720p30, the default, and 1080p30 only', () => {
+describe('the quality choices (Q-D4-3, #1772)', () => {
+  it('are 720p30 (the default), 1080p30, 1080p60, Source 30 and Source 60, and never Auto', () => {
     const t = fake();
     strip(t.companion);
     const select = screen.getByLabelText<HTMLSelectElement>('Share quality');
-    expect(Array.from(select.options).map((o) => o.value)).toEqual(['720p30', '1080p30']);
+    expect(Array.from(select.options).map((o) => o.value)).toEqual(['720p30', '1080p30', '1080p60', 'source30', 'source60']);
+    expect(Array.from(select.options).map((o) => o.textContent)).not.toContain('Auto');
     expect(select.value).toBe('720p30');
     expect(companionDefaultQuality).toEqual({ resolution: '720p', frameRate: 30 });
-    fireEvent.change(select, { target: { value: '1080p30' } });
-    expect(t.calls).toEqual(['quality 1080p30']);
   });
 
   it.each([
-    { what: 'one that is not offered', quality: { resolution: 'source', frameRate: 60 } },
+    { value: '720p30', label: '720p, 30 fps' },
+    { value: '1080p30', label: '1080p, 30 fps' },
+    { value: '1080p60', label: '1080p, 60 fps' },
+    { value: 'source30', label: 'Source (up to 4K), 30 fps' },
+    { value: 'source60', label: 'Source (up to 4K), 60 fps' },
+  ])('names $value and gives the browser’s estimate beside it', ({ value, label }) => {
+    strip(fake().companion);
+    const option = Array.from(screen.getByLabelText<HTMLSelectElement>('Share quality').options).find((o) => o.value === value);
+    const quality = companionQualities.find((q) => `${q.resolution}${String(q.frameRate)}` === value);
+    expect(quality).toBeDefined();
+    expect(option?.textContent).toBe(`${label} · ${estimateWords(quality ?? companionDefaultQuality)}`);
+  });
+
+  it.each(['1080p30', '1080p60', 'source30', 'source60'])('chooses %s', (value) => {
+    const t = fake();
+    strip(t.companion);
+    fireEvent.change(screen.getByLabelText('Share quality'), { target: { value } });
+    expect(t.calls).toEqual([`quality ${value}`]);
+  });
+
+  it('shows the 4K60 caution for Source at 60 fps and for no other choice', () => {
+    for (const q of companionQualities) {
+      const view = strip(fake({ shareQuality: q }).companion);
+      const caution = screen.queryByRole('note');
+      if (q.resolution === 'source' && q.frameRate === 60) {
+        expect(caution?.textContent).toBe(sourceSixtyNote);
+        expect(screen.getByLabelText('Share quality').getAttribute('aria-describedby')).toBe(caution?.id);
+      } else {
+        expect(caution).toBeNull();
+      }
+      view.unmount();
+    }
+  });
+
+  it.each([
+    { what: 'one that is not offered', quality: { resolution: '720p', frameRate: 60 } },
     { what: 'a stored Auto (issue #1659)', quality: { resolution: 'auto', frameRate: 30 } },
   ] as const)('shows $what as the default, and never offers Auto', ({ quality }) => {
     strip(fake({ shareQuality: quality }).companion);
@@ -226,6 +263,39 @@ describe('the quality choices (Q-D4-3)', () => {
   it('is not offered while sharing', () => {
     strip(fake({ share: { kind: 'sharing', audio: false } }).companion);
     expect(screen.queryByLabelText('Share quality')).toBeNull();
+  });
+});
+
+// The sharer's Sending line (#1772): the browser's ShareReadout, fed from the
+// companion's own publication stats (readShareStats), asked next to sending.
+describe('the sharer’s readout', () => {
+  const sample: ShareSample = { width: 1920, height: 1080, fps: 60, bytes: 1000, timestamp: 1000 };
+
+  it.each(companionQualities.map((q) => ({ q })))('says what was asked of $q.resolution at $q.frameRate fps next to what is sent', async ({ q }) => {
+    const t = fake({ shareQuality: q, phase: 'connected', channel: 'general', companion: true, share: { kind: 'sharing', audio: false } }, { ...sample, fps: q.frameRate });
+    strip(t.companion);
+    const readout = await screen.findByRole('status', { name: 'Share quality' });
+    expect(readout.textContent).toContain(`${askedText(q as SettledQuality)}. `);
+    expect(readout.textContent).toContain('Sending: ');
+    expect(readout.textContent).toContain(`${String(q.frameRate)} fps`);
+    expect(t.reads).toContainEqual(['sent', undefined]);
+  });
+
+  it('reads the companion’s own stats, not a watched stream’s', async () => {
+    const t = fake({ phase: 'connected', channel: 'general', companion: true, share: { kind: 'sharing', audio: false } }, sample);
+    strip(t.companion);
+    await screen.findByRole('status', { name: 'Share quality' });
+    expect(t.reads.every(([direction]) => direction === 'sent')).toBe(true);
+  });
+
+  it.each([
+    { kind: 'idle' as const },
+    { kind: 'picking' as const },
+    { kind: 'publishing' as const },
+  ])('is not shown while the share is $kind', ({ kind }) => {
+    const t = fake({ share: kind === 'idle' ? idleShare() : { kind } }, sample);
+    strip(t.companion);
+    expect(screen.queryByRole('status', { name: 'Share quality' })).toBeNull();
   });
 });
 

@@ -4,7 +4,7 @@ import type { ShareClaimResult, TransmitAnswer, VoiceSessionResult, VoiceViewerR
 import type { VoicePresenceV2 } from '../schema/voice';
 import type { CameraClaimResult } from '../api';
 import type { Camera, CameraProfile, KeptCamera } from './camera';
-import { VoiceClient, chosenGone, companionDefaultQuality, companionEnds, companionQuality, companionLeftWatching, companionLost, companionRefusals, type CompanionEnv, earlierGone, levelEvery, meterEvery, outputMoved, outputRefused, reconnectLimit, reportWait, type CameraTrack, type Microphone, type ModeStore, type Output, type Phase, type Processing, type ProcessingStore, type Room, type RoomEvents, type ShareSink } from './connection';
+import { VoiceClient, chosenGone, companionDefaultQuality, companionQualities, companionEnds, companionQuality, companionLeftWatching, companionLost, companionRefusals, type CompanionEnv, earlierGone, levelEvery, meterEvery, outputMoved, outputRefused, reconnectLimit, reportWait, type CameraTrack, type Microphone, type ModeStore, type Output, type Phase, type Processing, type ProcessingStore, type Room, type RoomEvents, type ShareSink } from './connection';
 import { shareNote } from './native/words';
 import { qualityLaterNote, resumeLimit, settleQuality, type Captured, type KeptScreen, type SettledQuality, type ShareQuality } from './share';
 import { defaultTail } from './gate';
@@ -3743,15 +3743,33 @@ describe('the screen companion', () => {
     expect(t.client.snapshot().deafened).toBe(true);
   });
 
-  it('offers 720p30 by default and 1080p30, and takes any other choice as the default', async () => {
+  it('lists 720p30 (the default), 1080p30, 1080p60 and Source at 30 and 60, and never Auto (#1772)', () => {
+    expect(companionDefaultQuality).toEqual({ resolution: '720p', frameRate: 30 });
+    expect(companionQualities).toEqual([
+      { resolution: '720p', frameRate: 30 },
+      { resolution: '1080p', frameRate: 30 },
+      { resolution: '1080p', frameRate: 60 },
+      { resolution: 'source', frameRate: 30 },
+      { resolution: 'source', frameRate: 60 },
+    ]);
+  });
+
+  it.each(companionQualities.map((q) => ({ q })))('the desktop starts at 720p30 and chooses $q.resolution at $q.frameRate fps', async ({ q }) => {
     const t = companionSetup();
     expect(t.client.snapshot().shareQuality).toEqual(companionDefaultQuality);
-    expect(companionDefaultQuality).toEqual({ resolution: '720p', frameRate: 30 });
-    await t.client.setShareQuality({ resolution: '1080p', frameRate: 30 });
-    expect(t.client.snapshot().shareQuality).toEqual({ resolution: '1080p', frameRate: 30 });
-    await t.client.setShareQuality({ resolution: 'source', frameRate: 60 });
-    expect(t.client.snapshot().shareQuality).toEqual(companionDefaultQuality);
-    await t.client.setShareQuality({ resolution: '720p', frameRate: 15 });
+    await t.client.setShareQuality(q);
+    expect(t.client.snapshot().shareQuality).toEqual(q);
+  });
+
+  it.each([
+    { what: '720p at 15 fps', quality: { resolution: '720p', frameRate: 15 } },
+    { what: '720p at 60 fps', quality: { resolution: '720p', frameRate: 60 } },
+    { what: '1080p at 15 fps', quality: { resolution: '1080p', frameRate: 15 } },
+    { what: 'source at 15 fps', quality: { resolution: 'source', frameRate: 15 } },
+  ] as const)('the desktop takes a choice not offered ($what) as the default', async ({ quality }) => {
+    const t = companionSetup();
+    await t.client.setShareQuality({ resolution: '1080p', frameRate: 60 });
+    await t.client.setShareQuality(quality);
     expect(t.client.snapshot().shareQuality).toEqual(companionDefaultQuality);
   });
 
@@ -3771,7 +3789,10 @@ describe('the screen companion', () => {
   it.each([
     { asked: { resolution: 'auto', frameRate: 30 }, want: { resolution: '720p', frameRate: 30 } },
     { asked: { resolution: '1080p', frameRate: 30 }, want: { resolution: '1080p', frameRate: 30 } },
-    { asked: { resolution: '1080p', frameRate: 60 }, want: { resolution: '720p', frameRate: 30 } },
+    { asked: { resolution: '1080p', frameRate: 60 }, want: { resolution: '1080p', frameRate: 60 } },
+    { asked: { resolution: 'source', frameRate: 60 }, want: { resolution: 'source', frameRate: 60 } },
+    { asked: { resolution: 'source', frameRate: 15 }, want: { resolution: '720p', frameRate: 30 } },
+    { asked: { resolution: '720p', frameRate: 60 }, want: { resolution: '720p', frameRate: 30 } },
   ] as const)('the companion takes $asked.resolution at $asked.frameRate fps as $want.resolution', ({ asked, want }) => {
     expect(companionQuality(asked)).toEqual(want);
   });

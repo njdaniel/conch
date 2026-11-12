@@ -268,11 +268,13 @@ export function shareNote(share: ShareState, refusal: CompanionGrantError | null
   return endedNote(share.ended);
 }
 
-// The quality choices (Q-D4-3): 720p30, the default, and 1080p30.
-export const shareQualityWords: Readonly<Record<'720p' | '1080p', string>> = {
-  '720p': '720p, 30 fps',
-  '1080p': '1080p, 30 fps',
-};
+// What each of the desktop's quality choices is called (Q-D4-3, #1772), by
+// resolution and frame rate; the estimate beside it and the Source at 60 fps
+// caution are the browser's (ShareQualityMenu).
+export function shareQualityWords(quality: { readonly resolution: string; readonly frameRate: number }): string {
+  const resolution = quality.resolution === 'source' ? 'Source (up to 4K)' : quality.resolution;
+  return `${resolution}, ${String(quality.frameRate)} fps`;
+}
 
 export function indicatorWords(channel: string): string {
   return `Sharing your screen in #${channel}`;

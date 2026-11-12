@@ -277,6 +277,18 @@ class Desk {
     );
   }
 
+  // setQuality is the strip's quality select; it answers the choice the
+  // companion holds (a choice the desktop does not offer comes back as 720p30).
+  setQuality(quality: { resolution: string; frameRate: number }): Promise<{ resolution: string; frameRate: number }> {
+    return this.p.evaluate((q) => (window as unknown as { companionPage: { setQuality: (q: unknown) => Promise<{ resolution: string; frameRate: number }> } }).companionPage.setQuality(q), quality);
+  }
+
+  // readout is the sharer's Sending line as the strip builds it, from the
+  // companion's own publication stats (issue #1772).
+  readout(): Promise<{ asked: string; sending: string | null }> {
+    return this.p.evaluate(() => (window as unknown as { companionPage: { readout: () => Promise<{ asked: string; sending: string | null }> } }).companionPage.readout());
+  }
+
   stopShare(): Promise<void> {
     return this.p.evaluate(() => {
       (window as unknown as { companionPage: { stopShare: () => void } }).companionPage.stopShare();
@@ -540,6 +552,26 @@ describe('the desktop screen companion with the real helper, conchd, LiveKit and
       expect(lines.filter((l) => l.includes(secret)), 'a token in a captured log or console line').toEqual([]);
     }
     note('share, watch and no voice held');
+  });
+
+  // Issue #1772: the desktop offers 1080p60 and Source, and the sharer sees what
+  // is sent. The companion shares at 1080p60 (the choice reaches the capture's
+  // constraints and the encodings, as the unit tests assert row by row), and
+  // its own publication stats say what went out: the Sending line the strip
+  // shows next to "Asked 1080p · 60 fps". The fake screen is Chromium's, so the
+  // measured size and rate are whatever it gives; that a line is measured at
+  // all is what this proves, not that this machine reaches 60 fps (#1584).
+  it('shares at 1080p60 and the sharer reads Asked and Sending from the companion’s own stats', async () => {
+    const a = desk(owner({ name: 'desk-a', who: world.a }));
+    await a.owner.join();
+    await onlyOnce(world.a);
+    await a.open();
+    expect(await a.setQuality({ resolution: '1080p', frameRate: 60 })).toEqual({ resolution: '1080p', frameRate: 60 });
+    await startShare(a);
+    const readout = await a.readout();
+    expect(readout.asked).toBe('Asked 1080p · 60 fps');
+    expect(readout.sending, 'the companion’s stats give a Sending line').toMatch(/^\d+×\d+ · \d+ fps/);
+    note(`1080p60 readout: ${readout.asked}; Sending ${readout.sending ?? 'none'}`);
   });
 
   // Issue #1512 (voice-multi-share.md §7.4, §11.6): two desktops in one room,

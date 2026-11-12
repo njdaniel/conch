@@ -475,12 +475,23 @@ const leaveDrain = 1000;
 // reported.
 export const reportWait = 1000;
 
-// What the desktop offers for a share (Q-D4-3 on #1578): 720p30, the default,
-// and 1080p30, until real captures are measured (#1584). Any other choice is
-// taken as the default, Auto (issue #1659) among them: the desktop never
-// offers it and reads a stored one as 720p30.
+// What the desktop offers for a share (Q-D4-3 on #1578, lifted by Nick on
+// 2026-11-11, #1772): 720p30, the default, 1080p30, 1080p60 and Source at 30
+// and 60 fps. #1584 still measures the real numbers and may hide a choice
+// again; the sharer's Sending line (the browser's ShareReadout, fed from the
+// companion's own publication stats) says what is actually sent. Any other
+// choice is taken as the default, Auto (issue #1659) among them: the desktop
+// never offers it and reads a stored one as 720p30. The companion captures
+// and publishes through the same sdk.ts rows as the browser (shareAsk,
+// shareTops, contentHint), so each choice means what it means there.
 export const companionDefaultQuality: ShareQuality = { resolution: '720p', frameRate: 30 };
-export const companionQualities: readonly ShareQuality[] = [companionDefaultQuality, { resolution: '1080p', frameRate: 30 }];
+export const companionQualities: readonly ShareQuality[] = [
+  companionDefaultQuality,
+  { resolution: '1080p', frameRate: 30 },
+  { resolution: '1080p', frameRate: 60 },
+  { resolution: 'source', frameRate: 30 },
+  { resolution: 'source', frameRate: 60 },
+];
 export function companionQuality(quality: ShareQuality): ShareQuality {
   return companionQualities.find((q) => q.resolution === quality.resolution && q.frameRate === quality.frameRate) ?? companionDefaultQuality;
 }
@@ -1123,8 +1134,10 @@ export class VoiceClient {
   // is kept even if this browser cannot apply it to the track already open,
   // and then conchd is not told: the stream did not change.
   async setShareQuality(asked: ShareQuality): Promise<void> {
-    // The desktop offers 720p30 and 1080p30 only (Q-D4-3 on #1578). Auto is
-    // always 30 fps (Q10 on #1614), whatever rate was left on the choice.
+    // The desktop offers companionQualities only (Q-D4-3 on #1578, widened by
+    // #1772); a choice outside them, Auto included, is its 720p30 default.
+    // The browser's Auto is always 30 fps (Q10 on #1614), whatever rate was
+    // left on the choice.
     const quality = this.env.companion !== undefined ? companionQuality(asked) : asked.resolution === 'auto' ? { resolution: 'auto' as const, frameRate: autoFrameRate } : asked;
     this.set({ shareQuality: quality });
     try {
