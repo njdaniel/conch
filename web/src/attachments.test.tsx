@@ -169,11 +169,12 @@ async function openChat(onRender?: (view: ReturnType<typeof render>) => void, st
   // timers nor a flushed microtask queue can order. Its bound is therefore a
   // hang detector, not a measure: just under the 5 s test timeout, so a real
   // hang still names the missing element instead of timing the test out.
-  await screen.findByLabelText('Messages', undefined, { timeout: bootMs });
-  await waitFor(() => { expect(FakeSocket.all.length).toBeGreaterThan(0); });
+  const log = await screen.findByLabelText('Messages', undefined, { timeout: bootMs });
+  expect(log.getAttribute('role')).toBe('log');
+  await waitFor(() => { expect(FakeSocket.all.length).toBeGreaterThan(0); }, { timeout: bootMs });
   const socket = FakeSocket.all.at(-1) as FakeSocket;
   socket.open();
-  await waitFor(() => { expect(screen.getByLabelText<HTMLTextAreaElement>('Message #general').disabled).toBe(false); });
+  await waitFor(() => { expect(screen.getByLabelText<HTMLTextAreaElement>('Message #general').disabled).toBe(false); }, { timeout: bootMs });
   return socket;
 }
 
@@ -182,9 +183,11 @@ function choose(...files: File[]) {
 }
 
 function clickSend() {
-  // The button's label, which a click on bubbles to the button; no role query
-  // (issue #1780).
-  fireEvent.click(screen.getByText('Send'));
+  // The button's label, then its enclosing button, which is clicked: no role
+  // query (issue #1780).
+  const button = screen.getByText('Send').closest('button');
+  expect(button).not.toBeNull();
+  fireEvent.click(button as HTMLButtonElement);
 }
 
 beforeEach(() => {

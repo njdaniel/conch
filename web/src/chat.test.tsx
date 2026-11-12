@@ -7,6 +7,8 @@ import { pausedText } from './Composer';
 import { clock } from './Conversation';
 import { maxHeld, pageSize } from './state/messages';
 
+// The bound on the app's first boot, under the 5 s test timeout (see openChat).
+const bootMs = 4000;
 const origin = 'http://127.0.0.1:8080';
 const secret = 'conch_secret_token_value';
 const ticketValue = 'conch_wst_TICKETTICKETTICKETTICKETTICKETTICKETTICKET';
@@ -156,10 +158,16 @@ async function openChat(hash = '') {
   window.sessionStorage.setItem('conch.web.token', secret);
   window.location.hash = hash;
   render(<App origin={origin} />);
-  await screen.findByRole('log', { name: 'Messages' });
+  // By label, then one role check, not a role query: that walks the whole
+  // page's accessibility tree on every poll and competes with the render it
+  // waits for. The bound is a hang detector, just under the 5 s test timeout
+  // (the boot is real fetch bodies, which nothing can order), so a real hang
+  // still names the missing element (issue #1780).
+  const log = await screen.findByLabelText('Messages', undefined, { timeout: bootMs });
+  expect(log.getAttribute('role')).toBe('log');
   await waitFor(() => {
     expect(FakeSocket.all.length).toBeGreaterThan(0);
-  });
+  }, { timeout: bootMs });
   return FakeSocket.all[FakeSocket.all.length - 1] as FakeSocket;
 }
 
@@ -168,10 +176,12 @@ async function connect(socket: FakeSocket) {
   socket.open();
   await waitFor(() => {
     expect(screen.getByLabelText<HTMLTextAreaElement>('Message #general').disabled).toBe(false);
-  });
+  }, { timeout: bootMs });
 }
 
-const lines = () => within(screen.getByRole('log', { name: 'Messages' })).queryAllByRole('listitem').map((li) => {
+// The log's own items, by selector: a role walk over every row costs what the
+// rows do, and a loaded machine feels it (issue #1780).
+const lines = () => Array.from(screen.getByLabelText('Messages').querySelectorAll<HTMLElement>('ol.messages > li')).map((li) => {
   const copy = li.cloneNode(true) as HTMLElement;
   // Action buttons are controls, not message text. The author's name is a
   // button too (issue #1544), but stays in the HH:MM name [agent]: text.
@@ -1843,8 +1853,8 @@ describe('a long channel', () => {
     expect(screen.getByRole<HTMLButtonElement>('button', { name: 'Load older messages' }).disabled).toBe(false);
   });
 
-  // The newest page is 100 and the older page one short of it, which is all
-  // the rule needs: 101 rows, not 150 (issue #1780). Every row is a list item
+  // The newest page is 100 and the older page is 1 row, shorter than 100,
+  // which is all the rule needs: 101 rows, not 150 (issue #1780). Every row is a list item
   // with several buttons, and a role query walks them all, so this test's cost
   // is its row count and its role queries; under a loaded machine that cost,
   // against findBy's 1 s, was what failed. The button is found by its text
@@ -1854,9 +1864,11 @@ describe('a long channel', () => {
     await openChat();
     // Two renders of up to 101 rows from real fetch bodies: a hang detector
     // just under the 5 s test timeout, not a measure of the work.
-    await screen.findByText('m101', undefined, { timeout: 4000 });
-    fireEvent.click(screen.getByText('Load older messages'));
-    await screen.findByText('m1', undefined, { timeout: 4000 });
+    await screen.findByText('m101', undefined, { timeout: bootMs });
+    const older = screen.getByText('Load older messages');
+    expect(older.tagName).toBe('BUTTON');
+    fireEvent.click(older);
+    await screen.findByText('m1', undefined, { timeout: bootMs });
     expect(lines()).toHaveLength(101);
     expect(screen.queryByText('Load older messages')).toBeNull();
   });
