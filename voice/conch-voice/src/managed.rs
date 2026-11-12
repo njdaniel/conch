@@ -2116,6 +2116,7 @@ mod tests {
     }
 
     /// One evdev key record: the event type EV_KEY (1), a code and a value (1 is a press).
+    #[cfg(not(windows))]
     fn record(code: u16, value: i32) -> [u8; conch_voice_control::INPUT_EVENT_LEN] {
         let mut bytes = [0u8; conch_voice_control::INPUT_EVENT_LEN];
         bytes[16..18].copy_from_slice(&1u16.to_le_bytes());
@@ -2124,10 +2125,50 @@ mod tests {
         bytes
     }
 
+    /// #1631 on Windows: the same rule, for a source with no device, bound in the grammar of
+    /// the design's section 4.5. (The test below is the Linux one, with a device and evdev
+    /// records.)
+    #[cfg(windows)]
+    #[test]
+    fn on_windows_the_mute_key_is_not_read_with_no_mute_key_and_is_read_without() {
+        let bind = |text: &str| conch_voice_control::parse_windows_binding(text).unwrap();
+        let mut config = Config::default();
+        config.keys.talk = Some(bind("sc:0x29"));
+        config.keys.mute = Some(bind("mouse:4"));
+        config.keys.deafen = Some(bind("sc:0xE0,0x1D"));
+
+        let (_, bindings, _) = key_source(&config, &KeySource::Configured, false)
+            .unwrap()
+            .unwrap();
+        assert_eq!(bindings.mute(), config.keys.mute);
+
+        let (_, bindings, _) = key_source(&config, &KeySource::Configured, true)
+            .unwrap()
+            .unwrap();
+        assert_eq!(bindings.mute(), None, "mute is bound");
+        assert_eq!(bindings.talk(), config.keys.talk);
+        assert_eq!(bindings.deafen(), config.keys.deafen);
+
+        let mut only_mute = Config::default();
+        only_mute.keys.mute = config.keys.mute;
+        assert!(
+            key_source(&only_mute, &KeySource::Configured, false)
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            key_source(&only_mute, &KeySource::Configured, true)
+                .unwrap()
+                .is_none(),
+            "only mute, and the owner mutes alone"
+        );
+    }
+
     /// #1631: with `--no-mute-key`, `keys.mute` never reaches the key device, so no key
     /// press can unmute a session the owner locked. Talk and deafen are kept; with only
     /// mute bound there is nothing to read. Without the flag (the TUI) the mute key is read.
     /// No keyboard: the decoder is given hand-built records.
+    #[cfg(not(windows))]
     #[test]
     fn the_mute_key_is_not_read_with_no_mute_key_and_is_read_without() {
         let toml = "[keys]\ndevice = \"/dev/input/event-fake\"\ntalk = \"KEY_F13\"\nmute = \"KEY_F14\"\ndeafen = \"KEY_F15\"\n";

@@ -612,6 +612,14 @@ pub fn spawn(
     timings: KeyTimings,
     inputs: mpsc::UnboundedSender<Input>,
 ) -> io::Result<()> {
+    // On Windows the keys come from Raw Input, not from a device that is opened
+    // (`keys_windows`); the device and the timings are Linux's. The test rules keep the
+    // watcher, which answers `Unsupported` there.
+    #[cfg(windows)]
+    if rule == DeviceRule::EventDevice {
+        let _ = (&device, timings);
+        return crate::keys_windows::spawn(&bindings, inputs);
+    }
     let watcher = Watcher {
         device,
         rule,

@@ -1012,6 +1012,49 @@ pub fn stored_elsewhere(
     ))
 }
 
+/// What the key source is called where there is no device to name: on Windows, Raw Input
+/// reads every keyboard and mouse (`docs/design/windows-desktop.md` section 4.5), and what is
+/// shown as the "device" must not be a path.
+pub const WINDOWS_KEY_SOURCE: &str = "raw-input";
+
+/// The key source `join` and `managed` start, by platform: on Windows the keys named in the
+/// grammar of section 4.5 and read from Raw Input, with no device; elsewhere the event device
+/// [`evdev_key_device`] names.
+///
+/// # Errors
+///
+/// [`Error::Config`] if two of talk, mute and deafen are bound to one key; on Windows also if
+/// `keys.device` is set or a key is bound in the Linux form, which would look bound and never
+/// be.
+pub fn key_device(
+    config: &Config,
+    stdin_only: bool,
+) -> Result<Option<(PathBuf, KeyBindings)>, Error> {
+    #[cfg(windows)]
+    {
+        windows_key_device(config, stdin_only)
+    }
+    #[cfg(not(windows))]
+    {
+        evdev_key_device(config, stdin_only)
+    }
+}
+
+/// [`key_device`] on Windows: the keys, with a name that is not a path, if there are any to
+/// read and `--stdin-keys` was not given.
+#[cfg(any(windows, test))]
+fn windows_key_device(
+    config: &Config,
+    stdin_only: bool,
+) -> Result<Option<(PathBuf, KeyBindings)>, Error> {
+    conch_voice_control::require_windows_keys(&config.keys, "voice.toml")?;
+    let bindings = config.key_bindings()?;
+    if stdin_only || bindings.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some((PathBuf::from(WINDOWS_KEY_SOURCE), bindings)))
+}
+
 /// The device to watch and the keys to look for on it, if `join` is to watch one at all:
 /// not with `--stdin-keys`, not without a device, and not without a key to look for, since
 /// a keyboard is not opened for nothing.
@@ -1019,7 +1062,8 @@ pub fn stored_elsewhere(
 /// # Errors
 ///
 /// [`Error::Config`] if two of talk, mute and deafen are bound to one key.
-pub fn key_device(
+#[cfg(any(not(windows), test))]
+fn evdev_key_device(
     config: &Config,
     stdin_only: bool,
 ) -> Result<Option<(PathBuf, KeyBindings)>, Error> {
@@ -1831,16 +1875,68 @@ mod tests {
     fn a_key_device_is_watched_only_with_a_device_a_key_and_no_stdin_keys() {
         let both =
             config("[keys]\ndevice = \"/dev/input/by-id/x-event-kbd\"\ntalk = \"KEY_F13\"\n");
-        let (device, keys) = key_device(&both, false).unwrap().unwrap();
+        let (device, keys) = evdev_key_device(&both, false).unwrap().unwrap();
         assert_eq!(device, PathBuf::from("/dev/input/by-id/x-event-kbd"));
         assert_eq!(keys.talk().map(|key| key.code()), Some(183));
-        assert!(key_device(&both, true).unwrap().is_none(), "--stdin-keys");
+        assert!(
+            evdev_key_device(&both, true).unwrap().is_none(),
+            "--stdin-keys"
+        );
 
         let no_key = config("[keys]\ndevice = \"/dev/input/by-id/x-event-kbd\"\n");
-        assert!(key_device(&no_key, false).unwrap().is_none());
+        assert!(evdev_key_device(&no_key, false).unwrap().is_none());
         let no_device = config("[keys]\ntalk = \"KEY_F13\"\n");
-        assert!(key_device(&no_device, false).unwrap().is_none());
-        assert!(key_device(&Config::default(), false).unwrap().is_none());
+        assert!(evdev_key_device(&no_device, false).unwrap().is_none());
+        assert!(
+            evdev_key_device(&Config::default(), false)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    /// What Windows asks of a configuration before it starts a key source. The configuration
+    /// is built from parts, since `sc:` is read from a file on Windows alone; what is tested
+    /// is `windows_key_device`, which is built on every platform.
+    #[test]
+    fn the_windows_key_source_has_no_device_and_refuses_what_is_linux() {
+        use conch_voice_control::{Error as ControlError, parse_windows_binding};
+
+        let bind = |text: &str| parse_windows_binding(text).unwrap();
+        let mut config = Config::default();
+        assert!(
+            windows_key_device(&config, false).unwrap().is_none(),
+            "no key"
+        );
+
+        config.keys.talk = Some(bind("sc:0x29"));
+        config.keys.mute = Some(bind("mouse:4"));
+        let (name, keys) = windows_key_device(&config, false).unwrap().unwrap();
+        assert_eq!(name, PathBuf::from(WINDOWS_KEY_SOURCE));
+        assert!(
+            !name.to_string_lossy().contains('/') && !name.to_string_lossy().contains('\\'),
+            "what is shown for the source is not a path"
+        );
+        assert_eq!(keys.talk(), config.keys.talk);
+        assert!(
+            windows_key_device(&config, true).unwrap().is_none(),
+            "--stdin-keys"
+        );
+
+        // A device is a Linux setting, refused rather than ignored.
+        let mut with_device = config.clone();
+        with_device.keys.device = Some("/dev/input/by-id/x-event-kbd".to_owned());
+        assert!(matches!(
+            windows_key_device(&with_device, false),
+            Err(Error::Config(ControlError::KeyDeviceNotOnWindows { .. }))
+        ));
+
+        // An evdev binding would look bound and never be.
+        let mut evdev = Config::default();
+        evdev.keys.talk = Some("KEY_F13".parse().unwrap());
+        assert!(matches!(
+            windows_key_device(&evdev, false),
+            Err(Error::Config(ControlError::WrongKeyForm { .. }))
+        ));
     }
 
     #[test]
