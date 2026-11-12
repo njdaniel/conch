@@ -209,7 +209,7 @@ export class OneShot {
     if (run.cancelled) return { ok: false, error: 'cancelled' };
     let child: OneShotChild;
     try {
-      child = (this.deps.spawn ?? defaultOneShotSpawn)(executable, args, oneShotSpawnOptions(oneShotEnv(this.deps.env, configDir)));
+      child = (this.deps.spawn ?? defaultOneShotSpawn)(executable, args, oneShotSpawnOptions(oneShotEnv(this.deps.env, configDir, this.deps.find?.platform), this.deps.find?.platform));
     } catch {
       this.deps.log(`voice: ${what}: the helper could not be started`);
       return { ok: false, error: 'spawn-failed' };

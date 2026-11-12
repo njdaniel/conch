@@ -37,9 +37,9 @@ voice in the UI (#771: the supervisor that runs `conch-voice` exists, in
 | `main/api/trust.ts` | adds the system trust store to Node's roots; classifies a certificate failure |
 | `main/ipc.ts` | the one registry of IPC handlers and the caller check every invocation passes |
 | `main/voice/protocol.ts` | the voice-control protocol as the owner speaks it: Go's framing and event rules over the types generated into `web/src/schema`, version negotiation, the stream tracker (#948) |
-| `main/voice/endpoint.ts` | the helper's Linux events endpoint: the verified `$XDG_RUNTIME_DIR`, `conch/<profile-id>` (0700), the stale sweep, the `sun_path` budget, the socket and the attach (#948) |
-| `main/voice/spawn.ts` | the bundled `conch-voice` and its trusted-path checks, the environment built from empty by an allowlist, the spawn options (#948) |
-| `main/voice/supervisor.ts` | one helper per instance: start, commands and acks, the stop escalation and the reap, helper loss as one typed state (#948) |
+| `main/voice/endpoint.ts` | the helper's Linux events endpoint: the verified `$XDG_RUNTIME_DIR`, `conch/<profile-id>` (0700), the stale sweep, the `sun_path` budget, the socket and the attach (#948); on Windows the owner's named pipe `\\.\pipe\conch-voice-<id>` and the same attach (#1785) |
+| `main/voice/spawn.ts` | the bundled `conch-voice` and its trusted-path checks, the environment built from empty by an allowlist, the spawn options (#948); on Windows `conch-voice.exe`, the case-insensitive allowlist and `%SystemRoot%` as its directory (#1785) |
+| `main/voice/supervisor.ts` | one helper per instance: start, commands and acks, the stop escalation and the reap, helper loss as one typed state (#948); on Windows the nonce is spent at the attach and the stop has no SIGTERM step (#1785) |
 | `main/instance.ts` | one instance per data root (`requestSingleInstanceLock`), and the data root made 0700 with its ancestors checked (#945) |
 | `main/profiles/store.ts`, `files.ts`, `ids.ts` | the saved servers: random 128-bit ids, the (origin, principal) binding rule, `profiles.json` (non-secret, 0600, atomic) and the profile directories (#945) |
 | `main/profiles/switch.ts`, `hooks.ts` | the switch sequence (media hooks, sockets, requests, renderer, helper hooks, then the next profile, each bounded) and the hook interface #771 and #772 register on (#945) |
