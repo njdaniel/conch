@@ -89,7 +89,7 @@ test.describe('with LiveKit', () => {
   // joins (issue #1244: one that never chose joins in the open microphone,
   // which transmits on the fake microphone's tone, and the tests that count
   // what a held key reports start from silence). 'unchosen' is a fresh browser.
-  function person(browser: Browser, who: 'alice' | 'bob' | 'carol' | Member, options?: BrowserContextOptions, before?: (page: Page) => void, mode: 'push to talk' | 'unchosen' = 'push to talk') {
+  function person(browser: Browser, who: 'alice' | 'bob' | 'carol' | Member, options?: BrowserContextOptions, before?: (page: Page) => void | Promise<void>, mode: 'push to talk' | 'unchosen' = 'push to talk') {
     return enter(browser, vw, typeof who === 'string' ? vw[who] : who, { mode, ...(options === undefined ? {} : { context: options }), ...(before === undefined ? {} : { before }) });
   }
 
@@ -1275,6 +1275,51 @@ test('a push-to-talk whose reports are slow is audited as the reported pair and 
     } finally {
       await closeAll(a.context);
       await closeAll(b.context);
+    }
+  });
+
+  // Issue #1792: on an iPhone in Safari voice joined for a second and dropped,
+  // for ever, because the level meter's audio context was refused and that
+  // ended the connect. Only the meter's context is made to fail here (it is
+  // the one that makes an analyser; LiveKit's own do not): the join must stay,
+  // the page must say why the open microphone is shut, and push to talk still
+  // works. Tagged @voice because WebKit, the browser of the report, has no
+  // fake microphone to join with; the same defect is reproduced on Chromium.
+  test('@voice a level meter the browser will not start leaves voice connected, and the open microphone says it needs one', async ({ browser }) => {
+    const member = await vw.addMember('pia');
+    const refuseMeter = async (page: Page): Promise<void> => {
+      await page.addInitScript(() => {
+        const w = window as unknown as { meterRefused: number };
+        w.meterRefused = 0;
+        AudioContext.prototype.createAnalyser = function createAnalyser(): AnalyserNode {
+          w.meterRefused++;
+          throw new DOMException('refused for the test', 'NotSupportedError');
+        };
+      });
+    };
+    const a = await person(browser, member, undefined, refuseMeter, 'unchosen');
+    try {
+      const voice = voiceRegion(a.page);
+      await voice.getByRole('button', { name: 'Join voice' }).click();
+      await expect(voice).toContainText('Connected in #voice-room', { timeout: 30_000 });
+      // The open microphone is the default, and says what it lacks.
+      await expect(voice.getByRole('button', { name: 'Open mic', exact: true })).toHaveAttribute('aria-pressed', 'true');
+      await expect(voice).toContainText('Open microphone needs the level meter');
+      expect(await a.page.evaluate(() => (window as unknown as { meterRefused: number }).meterRefused)).toBeGreaterThan(0);
+      // The old behaviour dropped within about a second and retried after 1 s.
+      // A few seconds on, it is still the one connection.
+      await a.page.waitForTimeout(5000);
+      await expect(voice).toContainText('Connected in #voice-room');
+      await expect(voice).not.toContainText('trying again');
+      await expect(voice).not.toContainText('Reconnecting');
+      // Push to talk is unaffected.
+      await voice.getByRole('button', { name: 'Open mic', exact: true }).click();
+      await expect(voice.getByRole('button', { name: 'Hold to talk' })).toBeVisible();
+      await expect(voice).not.toContainText('needs the level meter');
+      await voice.getByRole('button', { name: 'Leave voice' }).click();
+      await expect(voice).toContainText('Not in voice', { timeout: 10_000 });
+    } finally {
+      await closeAll(a.context);
     }
   });
 

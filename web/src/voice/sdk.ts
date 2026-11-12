@@ -1339,15 +1339,31 @@ class LiveKitAdapter implements Room {
     if (this.closed) return;
     // A tap left from an earlier capture is let go: one device open at a time.
     void this.untap();
-    const clone = track.mediaStreamTrack.clone();
-    // A clone copies the track's enabled flag, and the track was muted just
-    // before this: the tap must hear the room whatever the published track does.
-    clone.enabled = true;
-    const context = new AudioContext();
-    const analyser = context.createAnalyser();
-    analyser.fftSize = levelWindow;
-    context.createMediaStreamSource(new MediaStream([clone])).connect(analyser);
-    this.tap = { context, analyser, clone };
+    let clone: MediaStreamTrack | null = null;
+    let context: AudioContext | null = null;
+    try {
+      clone = track.mediaStreamTrack.clone();
+      // A clone copies the track's enabled flag, and the track was muted just
+      // before this: the tap must hear the room whatever the published track does.
+      clone.enabled = true;
+      context = new AudioContext();
+      const analyser = context.createAnalyser();
+      analyser.fftSize = levelWindow;
+      context.createMediaStreamSource(new MediaStream([clone])).connect(analyser);
+      this.tap = { context, analyser, clone };
+    } catch (err: unknown) {
+      // The tap only feeds the level meter and the open microphone's voice
+      // detection (a browser may refuse the audio context, or run out of
+      // them). The connection and the published track are good without it:
+      // what was made is let go, and the client is told there is no meter.
+      clone?.stop();
+      void context?.close().catch(() => undefined);
+      // Said by the error's name alone.
+      const name = typeof err === 'object' && err !== null && 'name' in err && typeof err.name === 'string' ? err.name : undefined;
+      this.events?.onMeter(false, name);
+      return;
+    }
+    this.events?.onMeter(true);
     // The page was interacted with to get here, so the browser lets it run;
     // a context that starts suspended would read silence.
     void context.resume().catch(() => undefined);

@@ -206,6 +206,10 @@ export interface RoomEvents {
   // The microphone was lost: its capture ended, or the device chosen is no
   // longer listed. The room has stopped the capture.
   readonly onMicrophoneLost: () => void;
+  // Whether the level meter (the tap on the microphone) works. Without it
+  // the open microphone cannot hear speech, so its gate stays shut.
+  // When it does not, name is the browser's error name, if it gave one.
+  readonly onMeter: (available: boolean, name?: string) => void;
   // The browser's devices changed: microphones came or went.
   readonly onDevicesChanged: () => void;
   // The output in use went, and the SDK moved every voice to this one.
@@ -373,6 +377,10 @@ export interface VoiceState {
   // The microphone was lost, or a switch failed: nothing is captured and the
   // gate is blocked until the person chooses a microphone.
   readonly missing: boolean;
+  // Whether the microphone's level can be read: false when the browser
+  // refused the audio context that reads it. The open microphone needs it;
+  // push to talk does not.
+  readonly meter: boolean;
   // Whether this browser lets the page choose the speakers (issue #660);
   // the outputs it lists, or null while they are not read; the output chosen
   // and in use, null being the system default; and what the page says of a
@@ -558,6 +566,7 @@ export const initialVoice: VoiceState = {
   processing: true,
   reported: null,
   missing: false,
+  meter: true,
   outputSelection: false,
   outputs: null,
   output: null,
@@ -784,6 +793,7 @@ export class VoiceClient {
       focusedShare: null,
       streamTracks: new Map(),
       missing: false,
+      meter: true,
     });
     if (companion) this.followCompanion();
     void this.connect();
@@ -1500,6 +1510,7 @@ export class VoiceClient {
       microphones: null,
       ...nothingInUse,
       missing: false,
+      meter: true,
       outputs: null,
       outputNote: null,
       viewing: false,
@@ -1739,7 +1750,9 @@ export class VoiceClient {
     this.room = null;
     // A switch under way goes with its connection; its choice is kept.
     this.switching = false;
-    this.set({ speaking: new Set(), level: 0, talking: false, transmitting: false, streamTracks: new Map(), cameraTracks: noCameraTracks, ...nothingInUse, ...this.cameraNow() });
+    // The meter is the next room's to say: a note about this one's would
+    // stay up through the retry.
+    this.set({ speaking: new Set(), level: 0, talking: false, transmitting: false, meter: true, streamTracks: new Map(), cameraTracks: noCameraTracks, ...nothingInUse, ...this.cameraNow() });
     if (room !== null) void room.close().catch(() => undefined);
     if (companion && !fromMain) void this.endCompanion();
     this.act(next, mine);
@@ -1870,6 +1883,16 @@ export class VoiceClient {
         this.set({ missing: true, ...nothingInUse });
         this.applyBlock();
         void this.readMicrophones(mine, room);
+      },
+      onMeter: (available, name) => {
+        if (mine !== this.attempt) return;
+        // Said by the error's name alone, as a device's error is (record keeps
+        // only a name of the shape of an error's).
+        if (!available && typeof name === 'string') record({ kind: 'device_error', name });
+        if (available !== this.state.meter) this.set({ meter: available });
+        // Nothing feeds the gate's level once the meter is gone: an open
+        // microphone that was talking would stay open. It is shut.
+        if (!available && this.state.mode === 'open') this.gate.shut();
       },
       onDevicesChanged: () => {
         if (mine !== this.attempt) return;
@@ -2045,7 +2068,9 @@ export class VoiceClient {
     const tick = () => {
       if (mine !== this.attempt) return;
       const raw = room.level();
-      this.gate.level(raw);
+      // No meter, no voice detection: the open microphone's gate stays shut
+      // (push to talk does not read the level).
+      if (this.state.meter) this.gate.level(raw);
       // Quantised, and told every meterEvery ms, so a meter does not
       // re-render the page at every read.
       if (++reads * levelEvery >= meterEvery) {
