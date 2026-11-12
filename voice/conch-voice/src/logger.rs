@@ -38,6 +38,10 @@ pub const RECORD_CHARS: usize = 2_000;
 
 /// The targets whose records are this workspace's own: each crate's module path. A target
 /// is one of these, or one of these followed by `::`.
+///
+/// Never add `wasapi` (the Windows audio crate) here: its debug and trace lines name devices
+/// (`default device {:?}` with a friendly name) and are only kept out of the output because
+/// it counts as foreign, so that `FOREIGN_MOST` cuts it to warnings and errors.
 const OWN_TARGETS: [&str; 4] = [
     "conch_voice",
     "conch_voice_api",
@@ -407,9 +411,26 @@ mod tests {
             "conch",
             "",
             "livekit::conch_voice",
+            "wasapi",
+            "wasapi::api",
+            "wasapi::events",
         ] {
             assert!(!is_own(target), "{target}");
         }
+    }
+
+    #[test]
+    fn the_windows_audio_crates_device_lines_are_never_written() {
+        // It logs a device's friendly name at debug and trace: foreign, so cut to warn.
+        let (logger, written, _scrubber) = logger(LevelFilter::Trace);
+        for (level, target) in [
+            (Level::Trace, "wasapi::api"),
+            (Level::Debug, "wasapi::api"),
+            (Level::Info, "wasapi::events"),
+        ] {
+            write(&logger, level, target, "default device FAKE-FRIENDLY-NAME");
+        }
+        assert_eq!(written.text(), "");
     }
 
     #[test]

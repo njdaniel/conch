@@ -37,6 +37,13 @@ dmn-audio = { git = "https://github.com/njdaniel/dmn-audio", rev = "39e7748c0b4b
 [target.'cfg(windows)'.dependencies]
 tokio = { version = "1.53", default-features = false, features = ["net"] }
 
+[target.'cfg(target_os = "windows")'.dependencies]
+# Windows only (issue #1774, docs/design/windows-desktop.md section 2): the WASAPI microphone
+# and speakers, as `dmn-audio` is PipeWire's. MIT, one maintainer, "the presented API is all
+# safe Rust": the crate holds the native calls and every crate here still forbids them.
+# Pinned exactly. Nick signed it off on #756, 2026-11-11.
+wasapi = "=0.26.0"
+
 [dev-dependencies]
 # The stub conchd the tests talk to is written by hand on tokio's listener.
 tokio = { version = "1.53", default-features = false, features = ["io-util", "net"] }
