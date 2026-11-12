@@ -208,7 +208,8 @@ export interface RoomEvents {
   readonly onMicrophoneLost: () => void;
   // Whether the level meter (the tap on the microphone) works. Without it
   // the open microphone cannot hear speech, so its gate stays shut.
-  readonly onMeter: (available: boolean) => void;
+  // When it does not, name is the browser's error name, if it gave one.
+  readonly onMeter: (available: boolean, name?: string) => void;
   // The browser's devices changed: microphones came or went.
   readonly onDevicesChanged: () => void;
   // The output in use went, and the SDK moved every voice to this one.
@@ -1749,7 +1750,9 @@ export class VoiceClient {
     this.room = null;
     // A switch under way goes with its connection; its choice is kept.
     this.switching = false;
-    this.set({ speaking: new Set(), level: 0, talking: false, transmitting: false, streamTracks: new Map(), cameraTracks: noCameraTracks, ...nothingInUse, ...this.cameraNow() });
+    // The meter is the next room's to say: a note about this one's would
+    // stay up through the retry.
+    this.set({ speaking: new Set(), level: 0, talking: false, transmitting: false, meter: true, streamTracks: new Map(), cameraTracks: noCameraTracks, ...nothingInUse, ...this.cameraNow() });
     if (room !== null) void room.close().catch(() => undefined);
     if (companion && !fromMain) void this.endCompanion();
     this.act(next, mine);
@@ -1881,9 +1884,15 @@ export class VoiceClient {
         this.applyBlock();
         void this.readMicrophones(mine, room);
       },
-      onMeter: (available) => {
+      onMeter: (available, name) => {
         if (mine !== this.attempt) return;
+        // Said by the error's name alone, as a device's error is (record keeps
+        // only a name of the shape of an error's).
+        if (!available && typeof name === 'string') record({ kind: 'device_error', name });
         if (available !== this.state.meter) this.set({ meter: available });
+        // Nothing feeds the gate's level once the meter is gone: an open
+        // microphone that was talking would stay open. It is shut.
+        if (!available && this.state.mode === 'open') this.gate.shut();
       },
       onDevicesChanged: () => {
         if (mine !== this.attempt) return;

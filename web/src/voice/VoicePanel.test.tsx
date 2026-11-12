@@ -14,7 +14,7 @@ import { ShareQualityMenu, sourceSixtyNote } from './ShareQualityMenu';
 import { useState } from 'react';
 import { MicTestShown, VoiceLive, VoiceStrip } from '../phone';
 import type { Snapshot, VoiceControl } from './useVoice';
-import { followsNote, missingNote, noOtherOutputs, noOutputChoice, processingLabel, processingOffNote, processingUseNote, reportedNote, stoppedFor, thresholdHint, VoicePanel } from './VoicePanel';
+import { followsNote, meterNote, meterStripNote, missingNote, noOtherOutputs, noOutputChoice, processingLabel, processingOffNote, processingUseNote, reportedNote, stoppedFor, thresholdHint, VoicePanel } from './VoicePanel';
 
 const chrome: ShareFeatures = { canShare: true, chromium: true, platform: 'linux' };
 const presence: VoicePresenceV2 = { schema: 'conch.voice_presence.v2', channel_id: 1, configured: true, available: true, rooms: [] };
@@ -1279,6 +1279,27 @@ describe('voice processing', () => {
     redraw(using({ mode: 'ptt', meter: false }));
     expect(voice.textContent).not.toContain('needs the level meter');
   });
+
+  // The note is about a microphone this page holds: not a listen-only or
+  // watch-only one, not one that went, and not while no connection is up
+  // (a retry's note would be the last room's).
+  it.each([
+    ['listen only', { listenOnly: true }],
+    ['watch only', { watchOnly: true }],
+    ['a missing microphone', { missing: true }],
+    ['connecting', { phase: 'connecting' as const }],
+    ['unavailable', { phase: 'unavailable' as const }],
+  ])('does not say it %s', (_name, patch) => {
+    const { voice } = panel(using({ mode: 'open', meter: false, ...patch }), 'c');
+    expect(within(voice).queryByText(meterNote)).toBeNull();
+  });
+
+  it('says it while connected and while reconnecting', () => {
+    const { voice, redraw } = panel(using({ mode: 'open', meter: false }), 'c');
+    expect(within(voice).getByText(meterNote).getAttribute('role')).toBe('status');
+    redraw(using({ mode: 'open', meter: false, phase: 'reconnecting' }));
+    expect(within(voice).getByText(meterNote)).toBeTruthy();
+  });
 });
 
 // Issue #660: the speakers in Voice options, where the browser lets a page
@@ -1560,6 +1581,23 @@ describe('the phone strip under Chat and Channels (issue #1028)', () => {
     // The words stay, for a screen reader, in their own span, which the strip
     // hides on screen so the meter has the room.
     expect(meter.parentElement?.querySelector('.open-mic-label')?.textContent).toBe('Open microphone');
+  });
+
+  // The notes are hidden in the strip, and the open microphone is the default
+  // mode: without its own line the strip shows a flat meter and no reason.
+  it('says in the strip, in short, that the open microphone has no level meter, and only then', () => {
+    const { voice } = mount({ ...inVoice('connected', 'channel-a'), mode: 'open' }, () => undefined);
+    expect(voice.querySelector('.strip-note')).toBeNull();
+    cleanup();
+    const gone = mount({ ...inVoice('connected', 'channel-a'), mode: 'open', meter: false }, () => undefined);
+    const note = gone.voice.querySelector('.strip-note');
+    expect(note?.textContent).toBe(meterStripNote);
+    expect(note?.getAttribute('role')).toBe('status');
+    // Not inside the hidden notes.
+    expect(note?.closest('.voice-notes')).toBeNull();
+    cleanup();
+    const ptt = mount({ ...inVoice('connected', 'channel-a'), mode: 'ptt', meter: false }, () => undefined);
+    expect(ptt.voice.querySelector('.strip-note')).toBeNull();
   });
 
   it('opens the Voice view from the state button, and its Leave voice leaves', () => {

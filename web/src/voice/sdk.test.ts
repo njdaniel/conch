@@ -800,12 +800,101 @@ describe('the SDK adapter', () => {
       },
     );
     const meter: boolean[] = [];
+    const names: (string | undefined)[] = [];
     const room = newLiveKitRoom();
-    await room.connect('wss://lk.example', 'tok-abcdef', 'room-abcdef', true, { ...events, onMeter: (on: boolean) => meter.push(on) });
+    await room.connect('wss://lk.example', 'tok-abcdef', 'room-abcdef', true, {
+      ...events,
+      onMeter: (on: boolean, name?: string) => {
+        meter.push(on);
+        names.push(name);
+      },
+    });
     expect(state.calls).toEqual(['connect', 'capture', 'premute', 'publish', 'mute']);
     expect(meter).toEqual([false]);
+    // The browser's error is named to the client.
+    expect(names).toEqual(['NotSupportedError']);
+    // The clone made before the context failed is let go.
+    expect(state.medias[0]?.clones[0]?.stopped).toBe(1);
     expect(room.level()).toBe(0);
     await room.setSending(true);
+    await room.close();
+  });
+
+  // An AudioContext whose source cannot be made: the failure is after the
+  // context exists, so the context itself is closed too. fails is read at
+  // each construction, so a test can let the first tap work and fail the next.
+  function sourceThrows(fails: () => boolean) {
+    vi.stubGlobal(
+      'AudioContext',
+      class {
+        private readonly made = { closed: 0 };
+        private readonly fail = fails();
+        constructor() {
+          state.audioContexts++;
+          state.contexts.push(this.made);
+        }
+        createAnalyser() {
+          return { fftSize: 0, getByteTimeDomainData: () => undefined };
+        }
+        createMediaStreamSource() {
+          if (this.fail) throw new DOMException('no source', 'InvalidStateError');
+          return { connect: () => undefined };
+        }
+        resume() {
+          return Promise.resolve();
+        }
+        close() {
+          this.made.closed++;
+          return Promise.resolve();
+        }
+      },
+    );
+  }
+
+  it('a source that cannot be made closes the context and its clone, and says there is no meter', async () => {
+    sourceThrows(() => true);
+    const meter: boolean[] = [];
+    const room = newLiveKitRoom();
+    await room.connect('wss://lk.example', 'tok-abcdef', 'room-abcdef', true, { ...events, onMeter: (on: boolean) => meter.push(on) });
+    expect(meter).toEqual([false]);
+    expect(state.contexts).toHaveLength(1);
+    expect(state.contexts[0]?.closed).toBe(1);
+    expect(state.medias[0]?.clones[0]?.stopped).toBe(1);
+    expect(room.level()).toBe(0);
+    await room.close();
+  });
+
+  // Switching microphones makes a new tap, so the meter can come back or go.
+  it('a tap that failed at the join is made again by a switch, and says the meter is back', async () => {
+    let failing = true;
+    sourceThrows(() => failing);
+    const meter: boolean[] = [];
+    const room = newLiveKitRoom();
+    await room.connect('wss://lk.example', 'tok-abcdef', 'room-abcdef', true, { ...events, onMeter: (on: boolean) => meter.push(on) });
+    expect(meter).toEqual([false]);
+    failing = false;
+    await room.switchMicrophone('mic-2');
+    expect(meter).toEqual([false, true]);
+    await room.close();
+  });
+
+  it('a tap that works and then fails at a switch says the meter is gone, and lets the old tap go', async () => {
+    let failing = false;
+    sourceThrows(() => failing);
+    const meter: boolean[] = [];
+    const room = newLiveKitRoom();
+    await room.connect('wss://lk.example', 'tok-abcdef', 'room-abcdef', true, { ...events, onMeter: (on: boolean) => meter.push(on) });
+    expect(meter).toEqual([true]);
+    const old = state.medias[0];
+    failing = true;
+    await room.switchMicrophone('mic-2');
+    expect(meter).toEqual([true, false]);
+    expect(old?.clones[0]?.stopped).toBe(1);
+    expect(state.contexts[0]?.closed).toBe(1);
+    // The failed tap's own context and clone are let go as well.
+    expect(state.contexts[1]?.closed).toBe(1);
+    expect(state.medias[1]?.clones[0]?.stopped).toBe(1);
+    expect(room.level()).toBe(0);
     await room.close();
   });
 

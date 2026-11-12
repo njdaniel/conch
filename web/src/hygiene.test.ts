@@ -623,8 +623,9 @@ describe('the diagnostic ring', () => {
       }
     }
     // Every recording site was seen: two failures, an open, a close, a
-    // reconnect, a voice state and a device error.
-    expect(calls).toBe(7);
+    // reconnect, a voice state and two device errors (a microphone refused,
+    // and a level meter the browser would not start).
+    expect(calls).toBe(8);
   });
 
   it('is not missed by the rules: a bare test of each', () => {

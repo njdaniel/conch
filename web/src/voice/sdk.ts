@@ -1351,15 +1351,16 @@ class LiveKitAdapter implements Room {
       analyser.fftSize = levelWindow;
       context.createMediaStreamSource(new MediaStream([clone])).connect(analyser);
       this.tap = { context, analyser, clone };
-    } catch {
+    } catch (err: unknown) {
       // The tap only feeds the level meter and the open microphone's voice
       // detection (a browser may refuse the audio context, or run out of
       // them). The connection and the published track are good without it:
       // what was made is let go, and the client is told there is no meter.
       clone?.stop();
       void context?.close().catch(() => undefined);
-      this.tap = null;
-      this.events?.onMeter(false);
+      // Said by the error's name alone.
+      const name = typeof err === 'object' && err !== null && 'name' in err && typeof err.name === 'string' ? err.name : undefined;
+      this.events?.onMeter(false, name);
       return;
     }
     this.events?.onMeter(true);

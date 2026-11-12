@@ -179,6 +179,11 @@ export function VoicePanel({
   const about = useRef<HTMLElement>(null);
   const [toAbout, setToAbout] = useState(false);
   const inVoice = state.phase !== 'idle' && state.phase !== 'stopped';
+  // The open microphone has no level meter to hear with, while a connection
+  // holds the microphone (as VoiceStatus's captured): said in the notes, and
+  // in the phone's strip, where the notes are hidden.
+  const noMeter =
+    (state.phase === 'connected' || state.phase === 'reconnecting') && state.mode === 'open' && !state.meter && !state.listenOnly && !state.watchOnly && !state.missing;
   // The phone layout's Voice button and strip follow it (issue #929).
   const reportLive = useContext(VoiceLive);
   const micTestShown = useContext(MicTestShown);
@@ -602,6 +607,11 @@ export function VoicePanel({
             )}
           </div>
         </div>
+        {strip && noMeter ? (
+          <p role="status" className="hint strip-note">
+            {meterStripNote}
+          </p>
+        ) : null}
       </div>
 
       <div className="voice-notes" hidden={strip}>
@@ -623,7 +633,7 @@ export function VoicePanel({
                 {missingNote}
               </p>
             ) : null}
-            {state.mode === 'open' && !state.meter && !state.listenOnly && !state.watchOnly && !state.missing ? (
+            {noMeter ? (
               <p role="status" className="hint">
                 {meterNote}
               </p>
@@ -977,11 +987,12 @@ function Volumes({ voice, others }: { readonly voice: VoiceControl; readonly oth
 
 // What the notes say while the microphone is missing.
 export const cutOffNote = 'Voice server unreachable. You may be cut off.';
+export const missingNote = 'Your microphone was disconnected. Choose a microphone in Voice options.';
 // The open microphone listens through the level meter; a browser that refused the
 // audio context behind it leaves the gate shut (push to talk is unaffected).
-const meterNote = 'Open microphone needs the level meter, which this browser would not start, so nothing is sent. Switch to Push to talk.';
-
-export const missingNote = 'Your microphone was disconnected. Choose a microphone in Voice options.';
+// The strip, which has one row and hides the notes, says it shorter.
+export const meterNote = 'Open microphone needs the level meter, which this browser would not start, so nothing is sent. Switch to Push to talk.';
+export const meterStripNote = 'Open mic needs the level meter; use Push to talk.';
 
 // The values of the microphone list: System default, a device by id, and
 // the entry shown while nothing is chosen (the microphone went), so that

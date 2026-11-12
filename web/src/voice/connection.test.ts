@@ -8,6 +8,7 @@ import { VoiceClient, chosenGone, companionDefaultQuality, companionQualities, c
 import { shareNote } from './native/words';
 import { qualityLaterNote, resumeLimit, settleQuality, type Captured, type KeptScreen, type SettledQuality, type ShareQuality } from './share';
 import { defaultTail } from './gate';
+import { forget, recent } from '../diagnostics';
 import { FakeClock, settle } from './fakes';
 
 const token = 'join-token-secret-value';
@@ -703,6 +704,57 @@ describe('talking', () => {
     room.events?.onMeter(true);
     t.clock.advance(50);
     expect(t.client.snapshot()).toMatchObject({ meter: true, talking: true });
+  });
+
+  // The gate is fed its level by the meter alone: once the meter goes, an
+  // open microphone that was talking would stay open with nothing to close it.
+  it('an open microphone that is talking shuts when the meter goes', async () => {
+    const t = await joined();
+    const room = t.rooms[0];
+    if (room === undefined) throw new Error('no room');
+    t.client.setMode('open');
+    room.levelNow = 1;
+    t.clock.advance(100);
+    await settle();
+    expect(t.client.snapshot().talking).toBe(true);
+    expect(t.reports).toEqual(['started']);
+    room.events?.onMeter(false);
+    await settle();
+    expect(t.client.snapshot()).toMatchObject({ meter: false, talking: false });
+    expect(t.reports).toEqual(['started', 'stopped']);
+  });
+
+  it('the browser\'s error name, when it gave one, is kept in the diagnostics ring', async () => {
+    forget();
+    const t = await joined();
+    t.rooms[0]?.events?.onMeter(false, 'NotSupportedError');
+    expect(recent().filter((e) => e.kind === 'device_error').map((e) => e.name)).toEqual(['NotSupportedError']);
+    forget();
+  });
+
+  it('the meter is back after a leave, and after a rejoin', async () => {
+    const t = await joined();
+    t.rooms[0]?.events?.onMeter(false);
+    expect(t.client.snapshot().meter).toBe(false);
+    await t.client.leave();
+    expect(t.client.snapshot().meter).toBe(true);
+    t.client.join('general');
+    await settle();
+    expect(t.client.snapshot()).toMatchObject({ phase: 'connected', meter: true });
+  });
+
+  // A drop and its retry: the note about the room that went is not shown
+  // while the next one connects.
+  it('a drop clears the meter note for the retry, and the new room says its own', async () => {
+    const t = await joined();
+    t.rooms[0]?.events?.onMeter(false);
+    t.rooms[0]?.events?.onDisconnected('lost');
+    expect(t.client.snapshot()).toMatchObject({ phase: 'unavailable', meter: true });
+    t.clock.advance(1000);
+    await settle();
+    expect(t.client.snapshot()).toMatchObject({ phase: 'connected', meter: true });
+    t.rooms[1]?.events?.onMeter(false);
+    expect(t.client.snapshot().meter).toBe(false);
   });
 
   it('with no level meter push to talk still transmits', async () => {
