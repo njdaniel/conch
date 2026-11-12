@@ -29,7 +29,7 @@ use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use conch_voice::audio::PipeWire;
+use conch_voice::audio::AudioSystem;
 use conch_voice_audio::{FRAME_LEN, Frame, MicRead, MicSource, SAMPLE_RATE, SILENCE, SignalMeter};
 use conch_voice_audio::{SpeakerSink, ToneSource};
 use dmn_audio::{CaptureTarget, MicCapture, PipeWireContext, Playback, SinkTarget};
@@ -172,7 +172,7 @@ fn stream_gone(node: &str) -> bool {
 #[test]
 #[ignore = "needs a running PipeWire session; reads its list of devices and opens none"]
 fn live_the_device_list_is_read_and_names_the_defaults() {
-    let pw = PipeWire::connect().expect("PipeWire running");
+    let pw = AudioSystem::connect().expect("PipeWire running");
     let table = pw.nodes(conch_voice::audio::LISTING_WAIT);
     assert!(table.synced, "PipeWire did not finish listing");
     let mut text = Vec::new();
@@ -192,7 +192,7 @@ fn live_a_tone_played_into_a_virtual_source_is_counted_by_the_microphone() {
     refuse_if_streams_exist();
     let name = format!("conch-voice-test-mic-{}", std::process::id());
     let sink = format!("{name}-sink");
-    let pw = PipeWire::connect().expect("PipeWire running");
+    let pw = AudioSystem::connect().expect("PipeWire running");
     let _loopback = Loopback::new(&name);
     wait_for("the virtual devices", Duration::from_secs(5), || {
         let table = pw.nodes(Duration::from_millis(100));
@@ -246,7 +246,7 @@ fn live_a_clients_playback_is_captured_from_the_sink_monitor() {
     refuse_if_streams_exist();
     let name = format!("conch-voice-test-spk-{}", std::process::id());
     let sink = format!("{name}-sink");
-    let pw = PipeWire::connect().expect("PipeWire running");
+    let pw = AudioSystem::connect().expect("PipeWire running");
     let _loopback = Loopback::new(&name);
     wait_for("the virtual devices", Duration::from_secs(5), || {
         let table = pw.nodes(Duration::from_millis(100));
@@ -309,7 +309,7 @@ fn live_a_clients_playback_is_captured_from_the_sink_monitor() {
 fn live_a_named_microphone_that_is_unplugged_gives_none_and_resumes_when_it_is_back() {
     refuse_if_streams_exist();
     let name = format!("conch-voice-test-hot-{}", std::process::id());
-    let pw = PipeWire::connect().expect("PipeWire running");
+    let pw = AudioSystem::connect().expect("PipeWire running");
     let first = Loopback::new(&name);
     wait_for("the virtual source", Duration::from_secs(5), || {
         pw.nodes(Duration::from_millis(100))
@@ -346,7 +346,7 @@ fn live_a_named_microphone_that_is_unplugged_gives_none_and_resumes_when_it_is_b
 #[test]
 #[ignore = "BY HAND: records the default microphone (and throws it away); needs PipeWire with a session manager and a default source"]
 fn by_hand_a_named_microphone_that_is_absent_is_not_stood_in_for_by_the_default() {
-    let pw = PipeWire::connect().expect("PipeWire running");
+    let pw = AudioSystem::connect().expect("PipeWire running");
     let mut mic = pw
         .microphone(Some("conch-voice-test-no-such-microphone"))
         .unwrap();
@@ -376,7 +376,7 @@ fn by_hand_playback_to_the_default_follows_it_when_the_default_changes() {
         format!("conch-voice-test-b-{pid}"),
     );
     let (a_sink, b_sink) = (format!("{a}-sink"), format!("{b}-sink"));
-    let pw = PipeWire::connect().expect("PipeWire running");
+    let pw = AudioSystem::connect().expect("PipeWire running");
     let _first = Loopback::new(&a);
     let _second = Loopback::new(&b);
     wait_for("both virtual sinks", Duration::from_secs(5), || {
@@ -527,7 +527,7 @@ async fn live_ten_minutes_of_pacing_from_the_rings_drops_nothing_and_inserts_no_
     let mic_pair = format!("conch-voice-test-pace-mic-{pid}");
     let spk_pair = format!("conch-voice-test-pace-spk-{pid}");
     let (mic_sink, spk_sink) = (format!("{mic_pair}-sink"), format!("{spk_pair}-sink"));
-    let pw = PipeWire::connect().expect("PipeWire running");
+    let pw = AudioSystem::connect().expect("PipeWire running");
     let _mic_loopback = Loopback::new(&mic_pair);
     let _spk_loopback = Loopback::new(&spk_pair);
     wait_for("the virtual devices", Duration::from_secs(5), || {

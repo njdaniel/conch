@@ -101,7 +101,7 @@ fn microphones(log: &Log) -> OpenNamedMic {
             Some("absent") => Some(Box::new(Absent) as BoxedMic),
             Some("nothing") => None,
             Some(_) => {
-                return Err(Error::PipeWire {
+                return Err(Error::AudioSystem {
                     doing: "open the microphone",
                     detail: "FAKE: the stream could not be made".to_owned(),
                 });
@@ -577,7 +577,7 @@ fn speakers(default: &Heard, headset: &Heard) -> OpenNamedSink {
     Arc::new(move |name| match name {
         None => Ok(Box::new(HeardSink(default.clone())) as BoxedSink),
         Some("headset") => Ok(Box::new(HeardSink(headset.clone())) as BoxedSink),
-        Some(_) => Err(Error::PipeWire {
+        Some(_) => Err(Error::AudioSystem {
             doing: "open the speakers",
             detail: "FAKE: the stream could not be made".to_owned(),
         }),

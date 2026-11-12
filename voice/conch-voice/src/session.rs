@@ -2362,7 +2362,7 @@ mod tests {
                 match name {
                     None => Ok(Box::new(CountingSink::new(&[])?) as BoxedSink),
                     Some("headset") => Ok(Box::new(Plugged(Arc::clone(&absent))) as BoxedSink),
-                    Some(_) => Err(Error::PipeWire {
+                    Some(_) => Err(Error::AudioSystem {
                         doing: "open the speakers",
                         detail: "FAKE: the stream could not be made".to_owned(),
                     }),

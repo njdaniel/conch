@@ -44,6 +44,7 @@ use conch_voice_control::{
 };
 use log::LevelFilter;
 
+use crate::audio::SYSTEM_NAME;
 use crate::error::Error;
 use crate::livekit::ShareAudioOwner;
 use crate::secrets::one_line;
@@ -80,10 +81,10 @@ pub const TONE_AMPLITUDE: f32 = 0.25;
 /// What stands in for the microphone.
 #[derive(Debug, Clone, PartialEq)]
 pub enum MicChoice {
-    /// No `--mic`: the microphone PipeWire has, or the one `audio.input` names. There is no
+    /// No `--mic`: the microphone the audio system has, or the one `audio.input` names. There is no
     /// spelling for it on the command line: it is what a user gets, and the options below
     /// are for tests.
-    PipeWire,
+    AudioSystem,
     /// `--mic none`: no microphone.
     None,
     /// `--mic tone:<hz>`: a steady tone of this frequency.
@@ -121,7 +122,7 @@ impl FromStr for MicChoice {
 #[derive(Debug, Clone, PartialEq)]
 pub enum SinkChoice {
     /// No `--sink`: the output PipeWire has, or the one `audio.output` names.
-    PipeWire,
+    AudioSystem,
     /// `--sink count[:<hz>,<hz>,...]`: a sink that plays nothing and counts, looking for
     /// these tones.
     Count(Vec<f32>),
@@ -339,14 +340,14 @@ pub fn command() -> Command {
                 .long("mic")
                 .value_name("SOURCE")
                 .value_parser(MicChoice::from_str)
-                .help("Test microphone instead of PipeWire's: tone:<hz>, wav:<path> (48 kHz mono 16-bit) or none"),
+                .help(format!("Test microphone instead of {SYSTEM_NAME}'s: tone:<hz>, wav:<path> (48 kHz mono 16-bit) or none")),
         )
         .arg(
             Arg::new("sink")
                 .long("sink")
                 .value_name("SINK")
                 .value_parser(sink_tones)
-                .help("Test speakers instead of PipeWire's: count, or count:<hz>,<hz>,... to name the tones to look for"),
+                .help(format!("Test speakers instead of {SYSTEM_NAME}'s: count, or count:<hz>,<hz>,... to name the tones to look for")),
         )
         .arg(
             Arg::new("stdin-keys")
@@ -388,7 +389,7 @@ pub fn command() -> Command {
                 .value_name("SOURCE")
                 .value_parser(MicChoice::from_str)
                 .hide(true)
-                .help("Test only: tone:<hz>, wav:<path> or none instead of PipeWire's microphone"),
+                .help(format!("Test only: tone:<hz>, wav:<path> or none instead of {SYSTEM_NAME}'s microphone")),
         )
         .arg(
             Arg::new("sink")
@@ -396,7 +397,7 @@ pub fn command() -> Command {
                 .value_name("SINK")
                 .value_parser(sink_tones)
                 .hide(true)
-                .help("Test only: count or count:<hz>,... instead of PipeWire's speakers"),
+                .help(format!("Test only: count or count:<hz>,... instead of {SYSTEM_NAME}'s speakers")),
         )
         .arg(
             Arg::new("test-key-device")
@@ -430,14 +431,14 @@ pub fn command() -> Command {
         );
     let devices = Command::new("devices")
         .about("List microphones and speakers by the names the configuration takes, and keyboards")
-        .long_about(
-            "Lists the microphones and the speakers PipeWire has, by the names `input` and \
+        .long_about(format!(
+            "Lists the microphones and the speakers {SYSTEM_NAME} has, by the names `input` and \
              `output` under [audio] in the configuration file take, and marks the defaults. \
              Then lists the keyboards under /dev/input/by-id, says for each whether you can \
              read it, and prints a udev rule that would grant you read access to that one \
              device. It opens each keyboard to see whether it can, and reads nothing from any \
-             of them; it opens no audio device.",
-        )
+             of them; it opens no audio device."
+        ))
         .arg(
             Arg::new("json")
                 .long("json")
@@ -485,7 +486,7 @@ pub fn command() -> Command {
             Arg::new("value")
                 .required(true)
                 .value_name("VALUE")
-                .help("For a device, its name as `conch-voice devices` lists it, or `default` for PipeWire's default; for audio.talk_mode, push_to_talk or open; for keys.device, a path under /dev/input/; for keys.talk, keys.mute and keys.deafen, a KEY_* name or a key code"),
+                .help(format!("For a device, its name as `conch-voice devices` lists it, or `default` for {SYSTEM_NAME}'s default; for audio.talk_mode, push_to_talk or open; for keys.device, a path under /dev/input/; for keys.talk, keys.mute and keys.deafen, a KEY_* name or a key code")),
         );
     let unset = Command::new("unset")
         .about("Remove the key device or a key binding from voice.toml")
@@ -678,11 +679,11 @@ where
                 mic: managed
                     .get_one::<MicChoice>("mic")
                     .cloned()
-                    .unwrap_or(MicChoice::PipeWire),
+                    .unwrap_or(MicChoice::AudioSystem),
                 sink: managed
                     .get_one::<Vec<f32>>("sink")
                     .cloned()
-                    .map_or(SinkChoice::PipeWire, SinkChoice::Count),
+                    .map_or(SinkChoice::AudioSystem, SinkChoice::Count),
                 test_key_device: managed.get_one::<PathBuf>("test-key-device").cloned(),
                 events_pipe: managed
                     .get_one::<OsString>("events-pipe")
@@ -723,11 +724,11 @@ where
         mic: join
             .get_one::<MicChoice>("mic")
             .cloned()
-            .unwrap_or(MicChoice::PipeWire),
+            .unwrap_or(MicChoice::AudioSystem),
         sink: join
             .get_one::<Vec<f32>>("sink")
             .cloned()
-            .map_or(SinkChoice::PipeWire, SinkChoice::Count),
+            .map_or(SinkChoice::AudioSystem, SinkChoice::Count),
         log_level: join
             .get_one::<LevelFilter>("log-level")
             .copied()
@@ -1381,8 +1382,8 @@ mod tests {
                 channel: None,
                 server: None,
                 json: false,
-                mic: MicChoice::PipeWire,
-                sink: SinkChoice::PipeWire,
+                mic: MicChoice::AudioSystem,
+                sink: SinkChoice::AudioSystem,
                 log_level: LevelFilter::Warn,
                 stdin_keys: false,
                 share_audio_owner: ShareAudioOwner::Helper,
@@ -1564,8 +1565,8 @@ mod tests {
             parse(["conch-voice", "managed"]).unwrap(),
             Invocation::Managed(ManagedArgs {
                 log_level: LevelFilter::Warn,
-                mic: MicChoice::PipeWire,
-                sink: SinkChoice::PipeWire,
+                mic: MicChoice::AudioSystem,
+                sink: SinkChoice::AudioSystem,
                 test_key_device: None,
                 events_pipe: None,
                 share_audio_owner: ShareAudioOwner::Helper,
