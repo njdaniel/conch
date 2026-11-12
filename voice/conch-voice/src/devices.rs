@@ -40,6 +40,7 @@ use conch_voice_api::{
 };
 use conch_voice_control::DEFAULT_MAX_TRANSMIT_SECS;
 
+use crate::audio::SYSTEM_NAME;
 use crate::cli::{Environment, read_config};
 use crate::error::Error;
 use crate::keydev::{self, DeviceRule, Problem};
@@ -199,16 +200,15 @@ where
 {
     let table = DeviceTable::from(table);
     let mut lines: Vec<String> = vec![
-        "Audio devices (PipeWire)".to_owned(),
+        format!("Audio devices ({SYSTEM_NAME})"),
         "  Name one under [audio] in the configuration file, or leave `input` and `output`"
             .to_owned(),
-        "  out, or write \"default\", to follow PipeWire's default as it changes.".to_owned(),
+        format!("  out, or write \"default\", to follow {SYSTEM_NAME}'s default as it changes."),
     ];
     if !table.synced {
-        lines.push(
-            "  PipeWire had not finished listing its devices; this list may be incomplete."
-                .to_owned(),
-        );
+        lines.push(format!(
+            "  {SYSTEM_NAME} had not finished listing its devices; this list may be incomplete."
+        ));
     }
     lines.push(String::new());
     let input = audio_section(
@@ -263,7 +263,7 @@ where
 ///
 /// What the operating system said, if `out` cannot be written to.
 pub fn audio_unavailable(why: &str, out: &mut dyn Write) -> io::Result<()> {
-    writeln!(out, "Audio devices (PipeWire)")?;
+    writeln!(out, "Audio devices ({SYSTEM_NAME})")?;
     writeln!(out, "  not listed: {}", one_line(why))?;
     writeln!(out)?;
     out.flush()
@@ -862,7 +862,7 @@ Speakers (`output`)
         audio_unavailable("no such\nserver", &mut written).unwrap();
         assert_eq!(
             String::from_utf8(written).unwrap(),
-            "Audio devices (PipeWire)\n  not listed: no such server\n\n"
+            format!("Audio devices ({SYSTEM_NAME})\n  not listed: no such server\n\n")
         );
     }
 

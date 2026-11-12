@@ -135,7 +135,7 @@ impl World {
     fn refuse(&self, doing: &'static str, name: Option<&str>) -> Result<(), Error> {
         match name {
             Some(name) if self.0.broken.lock().unwrap().iter().any(|b| b == name) => {
-                Err(Error::PipeWire {
+                Err(Error::AudioSystem {
                     doing,
                     detail: format!("FAKE: no node is named {name}"),
                 })

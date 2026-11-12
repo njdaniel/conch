@@ -769,7 +769,7 @@ fn error_for(doing: &'static str, kind: Kind, failure: Failure) -> Error {
         Failure::Unsupported => "the sound system would not take 48 kHz audio".to_owned(),
         Failure::Other(line) => line,
     };
-    Error::Wasapi { doing, detail }
+    Error::AudioSystem { doing, detail }
 }
 
 /// What a worker leaves behind whichever way it ends: the state is `Lost` and the epoch has
@@ -827,7 +827,7 @@ fn spawn<A: Audio>(
             worker.run();
         });
     if started.is_err() {
-        return Err(Error::Wasapi {
+        return Err(Error::AudioSystem {
             doing,
             detail: "no thread could be started".to_owned(),
         });
@@ -840,7 +840,7 @@ fn spawn<A: Audio>(
         }
         Err(mpsc::RecvTimeoutError::Disconnected) => {
             shared.stop.store(true, Ordering::Release);
-            Err(Error::Wasapi {
+            Err(Error::AudioSystem {
                 doing,
                 detail: "the audio thread stopped".to_owned(),
             })

@@ -111,22 +111,13 @@ pub enum Error {
     #[error(transparent)]
     Audio(#[from] conch_voice_audio::AudioError),
 
-    /// PipeWire could not be reached, or refused a stream. The detail is `dmn-audio`'s own
-    /// words and holds nothing from the server or the login.
+    /// The platform's audio system (PipeWire on Linux, WASAPI on Windows,
+    /// `docs/design/windows-desktop.md` §2) could not be reached, or refused a stream. The
+    /// detail is `dmn-audio`'s own words on Linux; on Windows it is this program's own words,
+    /// or the name of a Windows setting that is blocking the microphone. It holds nothing from
+    /// the server or the login, nor anything the system said about a device.
     #[error("cannot {doing}: {detail}")]
-    PipeWire {
-        /// What was being done.
-        doing: &'static str,
-        /// Why not.
-        detail: String,
-    },
-
-    /// The Windows audio system (WASAPI) could not be reached, or refused a stream
-    /// (`docs/design/windows-desktop.md` §2). The detail is this program's own words, or the
-    /// name of a Windows setting that is blocking the microphone; it holds nothing the system
-    /// said about a device.
-    #[error("cannot {doing}: {detail}")]
-    Wasapi {
+    AudioSystem {
         /// What was being done.
         doing: &'static str,
         /// Why not.
@@ -260,8 +251,8 @@ mod tests {
     }
 
     #[test]
-    fn a_wasapi_refusal_says_what_was_being_done_and_why_and_is_not_a_usage_mistake() {
-        let error = Error::Wasapi {
+    fn an_audio_system_refusal_says_what_was_being_done_and_why_and_is_not_a_usage_mistake() {
+        let error = Error::AudioSystem {
             doing: "open the microphone",
             detail: "Windows is not letting programs use the microphone".to_owned(),
         };

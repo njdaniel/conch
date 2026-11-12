@@ -45,7 +45,7 @@
 //! - **Nothing is captured before a valid start, and nothing before the identity check**
 //!   (§8.1). The hello is written before anything is read, opened or asked. After the start
 //!   the configuration is read, the login taken from where the start says, `conchd` asked
-//!   who that login is, and only for the account the owner named are PipeWire, the
+//!   who that login is, and only for the account the owner named are the audio system, the
 //!   speakers and the key device opened, and the session loop run. The loop opens the
 //!   microphone when a session first allows publishing, as for `join`.
 //! - **Standard input is the owner, not a key.** Its end is the owner gone, never "a
@@ -111,7 +111,7 @@ use conch_voice_control::{
 };
 use tokio::sync::{mpsc, oneshot};
 
-use crate::audio::PipeWire;
+use crate::audio::{AudioSystem, CONNECTION_LOST};
 use crate::cli::{self, Environment, MicChoice, SinkChoice};
 use crate::error::Error;
 use crate::input::{self, Bounded, Ended, LastLine};
@@ -743,9 +743,7 @@ impl Handoff {
     /// with the machine as it was handed over.
     pub async fn fail(self, error: &Error) {
         let reason = match error {
-            Error::PipeWire { .. } | Error::Wasapi { .. } | Error::Audio(_) => {
-                VoiceControlReason::AudioUnavailable
-            }
+            Error::AudioSystem { .. } | Error::Audio(_) => VoiceControlReason::AudioUnavailable,
             _ => VoiceControlReason::InternalError,
         };
         let key = match self.key_state {
@@ -1895,17 +1893,14 @@ impl Boot {
             ));
         }
 
-        // PipeWire and the speakers. The microphone is the session loop's to open.
+        // The audio system and the speakers. The microphone is the session loop's to open.
         let audio_unavailable = |error| Halt::Fail(Reason::AudioUnavailable, error);
         let (open_mic, sink, sink_tones) = match devices {
             Devices::Choices { mic, sink } => {
-                let pipewire = if mic == MicChoice::PipeWire || sink == SinkChoice::PipeWire {
-                    let connecting = tokio::task::spawn_blocking(PipeWire::connect);
+                let audio = if mic == MicChoice::AudioSystem || sink == SinkChoice::AudioSystem {
+                    let connecting = tokio::task::spawn_blocking(AudioSystem::connect);
                     let connected = self.wait(connecting).await?.map_err(|_| {
-                        Halt::Fail(
-                            Reason::InternalError,
-                            Error::Managed("the connection to PipeWire was lost"),
-                        )
+                        Halt::Fail(Reason::InternalError, Error::Managed(CONNECTION_LOST))
                     })?;
                     Some(connected.map_err(audio_unavailable)?)
                 } else {
@@ -1913,10 +1908,10 @@ impl Boot {
                 };
                 let sink_tones = match &sink {
                     SinkChoice::Count(tones) => tones.clone(),
-                    SinkChoice::PipeWire => Vec::new(),
+                    SinkChoice::AudioSystem => Vec::new(),
                 };
-                let open_mic = crate::mic_opener(mic, pipewire.clone());
-                let open_sink = crate::sink_opener(sink, pipewire);
+                let open_mic = crate::mic_opener(mic, audio.clone());
+                let open_sink = crate::sink_opener(sink, audio);
                 (open_mic, open_sink, sink_tones)
             }
             Devices::Given {

@@ -1,7 +1,7 @@
 //! The audio backend of a platform that has none yet: every way of opening a device fails
 //! with a typed error, and nothing is reachable that could produce a sound.
 //!
-//! Input: nothing. Output: [`AudioError::NoBackend`] from [`PipeWire::connect`], which is
+//! Input: nothing. Output: [`AudioError::NoBackend`] from [`AudioSystem::connect`], which is
 //! where every caller starts, so the devices below it can never be built. Owns: the type
 //! names the callers use, kept the same as on Linux so that they need no `cfg`.
 
@@ -25,11 +25,11 @@ fn no_backend() -> Error {
 
 /// The connection to the platform's audio system. There is none: it is never built.
 #[derive(Clone)]
-pub struct PipeWire {
+pub struct AudioSystem {
     _never: (),
 }
 
-impl PipeWire {
+impl AudioSystem {
     /// Always fails: this platform has no audio backend yet.
     ///
     /// # Errors
@@ -39,7 +39,7 @@ impl PipeWire {
         Err(no_backend())
     }
 
-    /// Always fails, as [`PipeWire::connect`] does: there is no list to give. The
+    /// Always fails, as [`AudioSystem::connect`] does: there is no list to give. The
     /// signature is the Linux one, so that `devices` needs no `cfg`.
     ///
     /// # Errors
@@ -49,7 +49,7 @@ impl PipeWire {
         Err(no_backend())
     }
 
-    /// Always fails, as [`PipeWire::connect`] does.
+    /// Always fails, as [`AudioSystem::connect`] does.
     ///
     /// # Errors
     ///
@@ -58,7 +58,7 @@ impl PipeWire {
         Err(no_backend())
     }
 
-    /// Always fails, as [`PipeWire::connect`] does.
+    /// Always fails, as [`AudioSystem::connect`] does.
     ///
     /// # Errors
     ///
@@ -93,7 +93,7 @@ mod tests {
 
     #[test]
     fn connecting_says_the_platform_has_no_audio_backend() {
-        let error = PipeWire::connect().err().map(|error| error.to_string());
+        let error = AudioSystem::connect().err().map(|error| error.to_string());
         let error = error.unwrap_or_default();
         assert!(error.contains("no audio backend"), "{error}");
         assert!(error.contains(std::env::consts::OS), "{error}");
@@ -101,7 +101,7 @@ mod tests {
 
     #[test]
     fn listing_devices_answers_no_backend_and_never_panics() {
-        let listed = PipeWire::connect().and_then(|pipewire| pipewire.list_devices(LISTING_WAIT));
+        let listed = AudioSystem::connect().and_then(|audio| audio.list_devices(LISTING_WAIT));
         assert!(matches!(
             listed,
             Err(Error::Audio(AudioError::NoBackend { .. }))
@@ -118,8 +118,8 @@ mod tests {
             &environment,
             &scrubber,
             || {
-                PipeWire::connect()
-                    .and_then(|pipewire| pipewire.list_devices(LISTING_WAIT))
+                AudioSystem::connect()
+                    .and_then(|audio| audio.list_devices(LISTING_WAIT))
                     .map_err(|error| error.to_string())
             },
             |_| Ok(()),
@@ -135,7 +135,7 @@ mod tests {
     #[test]
     fn the_error_is_the_audio_one_so_the_helper_reports_audio_unavailable() {
         assert!(matches!(
-            PipeWire::connect().err(),
+            AudioSystem::connect().err(),
             Some(Error::Audio(AudioError::NoBackend { .. }))
         ));
     }

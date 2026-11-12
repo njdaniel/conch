@@ -101,7 +101,7 @@ use std::time::Duration;
 use conch_voice_audio::{CountingSink, ToneSource, WavSource};
 use tokio::sync::mpsc;
 
-use crate::audio::PipeWire;
+use crate::audio::AudioSystem;
 use crate::cli::{
     Environment, JoinArgs, ManagedArgs, MicChoice, Resolved, SinkChoice, TONE_AMPLITUDE,
 };
@@ -122,13 +122,13 @@ use crate::transmit::BoxedMic;
 /// What opens the microphone `--mic` chose, by the name it is given (`audio.input` first,
 /// then whatever a switch names; `None` for PipeWire's default). Nothing is opened until this
 /// is called, which is first when a session first allows publishing: a client that may only
-/// listen never captures. `pipewire` is the connection, if the choice needs one. The test
+/// listen never captures. `audio` is the connection, if the choice needs one. The test
 /// choices, a tone, a WAV file or none, take no name and open the same each time.
-pub(crate) fn mic_opener(choice: MicChoice, pipewire: Option<PipeWire>) -> OpenMic {
+pub(crate) fn mic_opener(choice: MicChoice, audio: Option<AudioSystem>) -> OpenMic {
     Box::new(move |name| {
         Ok(match &choice {
-            MicChoice::PipeWire => match &pipewire {
-                Some(pipewire) => Some(Box::new(pipewire.microphone(name)?) as BoxedMic),
+            MicChoice::AudioSystem => match &audio {
+                Some(audio) => Some(Box::new(audio.microphone(name)?) as BoxedMic),
                 None => None,
             },
             MicChoice::None => None,
@@ -143,13 +143,13 @@ pub(crate) fn mic_opener(choice: MicChoice, pipewire: Option<PipeWire>) -> OpenM
 /// What opens the speakers `--sink` chose, by the name it is given (`audio.output` when the
 /// session starts, then whatever a switch names; `None` for PipeWire's default). The
 /// counting sink takes no name.
-pub(crate) fn sink_opener(choice: SinkChoice, pipewire: Option<PipeWire>) -> OpenSink {
+pub(crate) fn sink_opener(choice: SinkChoice, audio: Option<AudioSystem>) -> OpenSink {
     Box::new(move |name| {
-        Ok(match (&choice, &pipewire) {
+        Ok(match (&choice, &audio) {
             (SinkChoice::Count(tones), _) => Box::new(CountingSink::new(tones)?) as BoxedSink,
-            (SinkChoice::PipeWire, Some(pipewire)) => Box::new(pipewire.speakers(name)?),
+            (SinkChoice::AudioSystem, Some(audio)) => Box::new(audio.speakers(name)?),
             // Not reached: `join` connects whenever either choice is PipeWire.
-            (SinkChoice::PipeWire, None) => Box::new(CountingSink::new(&[])?),
+            (SinkChoice::AudioSystem, None) => Box::new(CountingSink::new(&[])?),
         })
     })
 }
@@ -217,20 +217,20 @@ pub fn join(
     let key_device = cli::key_device(&resolved.config, args.stdin_keys)?;
     // One connection to PipeWire for the microphone and the speakers, made only if one of
     // them is PipeWire's. A machine without it fails here, before anything is joined.
-    let pipewire = if args.mic == MicChoice::PipeWire || args.sink == SinkChoice::PipeWire {
-        Some(PipeWire::connect()?)
+    let audio = if args.mic == MicChoice::AudioSystem || args.sink == SinkChoice::AudioSystem {
+        Some(AudioSystem::connect()?)
     } else {
         None
     };
     let settings = Settings {
         channel: resolved.channel,
-        open_mic: mic_opener(args.mic.clone(), pipewire.clone()),
-        open_sink: sink_opener(args.sink.clone(), pipewire),
+        open_mic: mic_opener(args.mic.clone(), audio.clone()),
+        open_sink: sink_opener(args.sink.clone(), audio),
         input: resolved.config.audio.input.clone(),
         output: resolved.config.audio.output.clone(),
         sink_tones: match &args.sink {
             SinkChoice::Count(tones) => tones.clone(),
-            SinkChoice::PipeWire => Vec::new(),
+            SinkChoice::AudioSystem => Vec::new(),
         },
         release_tail_ms: resolved.config.audio.release_tail_ms,
         max_transmit: Duration::from_secs(u64::from(resolved.config.audio.max_transmit_secs)),
@@ -374,7 +374,7 @@ pub fn managed(
 /// `devices` prints as one line, as for a PipeWire that cannot be reached.
 #[cfg(not(windows))]
 fn list_devices(wait: Duration) -> Result<devices::DeviceTable, Error> {
-    PipeWire::connect()?.list_devices(wait)
+    AudioSystem::connect()?.list_devices(wait)
 }
 
 /// On Windows `devices` still answers that there is no backend, though the backend can list

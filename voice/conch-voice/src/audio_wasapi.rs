@@ -381,7 +381,7 @@ fn wasapi_error(doing: &'static str, failure: Failure) -> Error {
         Failure::Unsupported => "the sound system would not take 48 kHz audio".to_owned(),
         Failure::Other(line) => line,
     };
-    Error::Wasapi { doing, detail }
+    Error::AudioSystem { doing, detail }
 }
 
 /// The connection to the Windows audio system. There is nothing to hold open: each microphone
@@ -396,7 +396,7 @@ impl Wasapi {
     ///
     /// # Errors
     ///
-    /// [`Error::Wasapi`] if there is no audio system to reach (the service is stopped, or COM
+    /// [`Error::AudioSystem`] if there is no audio system to reach (the service is stopped, or COM
     /// cannot be set up).
     pub fn connect() -> Result<Self, Error> {
         const DOING: &str = "reach the Windows audio system";
@@ -422,7 +422,7 @@ impl Wasapi {
     ///
     /// # Errors
     ///
-    /// [`Error::Wasapi`] if the system cannot be asked.
+    /// [`Error::AudioSystem`] if the system cannot be asked.
     pub fn list_devices(&self, _wait: Duration) -> Result<DeviceTable, Error> {
         const DOING: &str = "list the audio devices";
         let listed = std::thread::Builder::new()
@@ -447,7 +447,7 @@ impl Wasapi {
     ///
     /// # Errors
     ///
-    /// [`Error::Wasapi`] if Windows refuses the microphone (the words name the privacy
+    /// [`Error::AudioSystem`] if Windows refuses the microphone (the words name the privacy
     /// setting), or the engine would not take the format.
     pub fn microphone(&self, configured: Option<&str>) -> Result<WasapiMic, Error> {
         WasapiMic::start(System::new, Target::from_config(configured))
@@ -459,7 +459,7 @@ impl Wasapi {
     ///
     /// # Errors
     ///
-    /// [`Error::Wasapi`] if the engine would not take the format, or the system failed.
+    /// [`Error::AudioSystem`] if the engine would not take the format, or the system failed.
     pub fn speakers(&self, configured: Option<&str>) -> Result<WasapiSpeakers, Error> {
         WasapiSpeakers::start(System::new, Target::from_config(configured))
     }
