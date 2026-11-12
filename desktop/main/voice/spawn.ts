@@ -304,8 +304,14 @@ export function spawnOptions(env: Record<string, string>, platform: NodeJS.Platf
   return { stdio: ['pipe', 'pipe', 'pipe'], detached: false, shell: false, windowsHide: true, env, cwd: workingDir(env, platform) };
 }
 
+// workingDir is / (Linux, macOS) or, on Windows, the system root from the
+// environment being passed, which must be a drive-absolute path: there is no
+// guessed C:\Windows, and a spawn without one fails.
 function workingDir(env: Record<string, string>, platform: NodeJS.Platform): string {
-  return platform === 'win32' ? (env['SYSTEMROOT'] ?? 'C:\\Windows') : '/';
+  if (platform !== 'win32') return '/';
+  const root = env['SYSTEMROOT'];
+  if (root === undefined || !/^[A-Za-z]:[\\/]/.test(root)) throw new Error('voice: no usable SYSTEMROOT for the helper');
+  return root;
 }
 
 // OneShotChild is a one-shot run's process: no standard input to write to.

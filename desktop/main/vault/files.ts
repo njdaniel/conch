@@ -10,6 +10,8 @@ import { randomBytes } from 'node:crypto';
 import { chmod, lstat, mkdir, open, readFile, rename, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 
+import { isProfileId } from '../profiles/ids.ts';
+
 const FILE_NAME = 'credential.bin';
 const DIR_MODE = 0o700;
 const FILE_MODE = 0o600;
@@ -29,6 +31,9 @@ export function validProfileId(id: string): boolean {
 // under %APPDATA%, whose default ACL is the protection; no drive root is ever
 // the base (windows-desktop.md §2.7).
 export function profileConfigDir(root: string, id: string): string {
+  // The profile store's own id: 32 lowercase hex, which no path syntax can
+  // use to leave profiles/.
+  if (!isProfileId(id)) throw new Error('invalid profile id');
   return profileDir(root, id);
 }
 

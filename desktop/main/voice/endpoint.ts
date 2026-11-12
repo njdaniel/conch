@@ -219,9 +219,10 @@ export const PIPE_PREFIX = '\\\\.\\pipe\\conch-voice-';
 const PIPE_ID_BYTES = 16;
 const PIPE_ID_RE = /^[0-9a-f]{32}$/;
 
-// The most connections a pipe holds while waiting for the attach: more are
-// closed at once. Bounded by the first-line deadline as well.
-export const PIPE_MAX_PENDING = 16;
+// The most connections a pipe holds while waiting for the attach; past it the
+// oldest one that has delivered no byte is closed (see listening). Bounded by
+// the first-line deadline as well.
+export const PIPE_MAX_PENDING = 256;
 
 function randomPipeId(): string {
   return randomBytes(PIPE_ID_BYTES).toString('hex');
@@ -304,7 +305,12 @@ export async function listenPipe(deps: EndpointDeps = {}): Promise<Listening> {
 // On a pipe (pipe = true), which other users can open read-only and same-user
 // code can flood (§3.5), every connection has its own first line and its own
 // failure: a bad one is closed and the wait goes on to the deadline, and a
-// connection past PIPE_MAX_PENDING closes the oldest one waiting (§3.4 rule 2).
+// connection past PIPE_MAX_PENDING closes the oldest waiting one that has
+// delivered no byte (§3.4 rule 2). What holds, and what does not: a cross-user
+// client can never deliver a byte (§3.5), so the helper, once it has written
+// any, is never the one closed; but a flood of PIPE_MAX_PENDING or more silent
+// opens between the helper's open and its first byte can still close it. That
+// fails closed and is the attach flood §3.5 names as a residual.
 function listening(server: Server, path: string, pipe = false): Listening {
   // Every connection that arrived, in order. On a socket the first is the
   // candidate and a second before the attach is settled fails it; on a pipe
@@ -333,19 +339,23 @@ function listening(server: Server, path: string, pipe = false): Listening {
   const drop = (s: Socket): void => {
     const i = connections.indexOf(s);
     if (i >= 0) connections.splice(i, 1);
+    s.removeAllListeners('data');
     s.destroy();
   };
+  // spoke is the connections that have delivered at least one byte.
+  const spoke = new WeakSet<Socket>();
   server.on('connection', (s: Socket) => {
     s.on('error', () => undefined);
     if (closed) {
       s.destroy();
       return;
     }
-    // At the bound the oldest waiting connection goes, not the newcomer: a
-    // flood of silent opens made before the helper connects cannot keep its
-    // connection out.
-    const oldest = connections[0];
-    if (pipe && connections.length >= PIPE_MAX_PENDING && oldest !== undefined) drop(oldest);
+    // At the bound the oldest connection that has delivered no byte goes
+    // (the oldest of all if every one has), not the newcomer.
+    if (pipe && connections.length >= PIPE_MAX_PENDING) {
+      const victim = connections.find((c) => !spoke.has(c)) ?? connections[0];
+      if (victim !== undefined) drop(victim);
+    }
     connections.push(s);
     if (!pipe && connections.length > 1) {
       fail?.('attach-second-connection');
@@ -387,7 +397,8 @@ function listening(server: Server, path: string, pipe = false): Listening {
           // The attached connection is the caller's now; every other one, and
           // the listener, goes. After attach no further connection is
           // accepted.
-          connections.splice(connections.indexOf(s), 1);
+          const at = connections.indexOf(s);
+          if (at >= 0) connections.splice(at, 1);
           close();
           resolve({ socket: s, rest });
         };
@@ -404,6 +415,7 @@ function listening(server: Server, path: string, pipe = false): Listening {
             refused(s, 'attach-ended');
           };
           const onData = (chunk: Buffer): void => {
+            spoke.add(s);
             const lf = chunk.indexOf(0x0a);
             const take = lf < 0 ? chunk : chunk.subarray(0, lf);
             size += take.length;
@@ -417,15 +429,24 @@ function listening(server: Server, path: string, pipe = false): Listening {
             s.off('data', onData);
             s.off('end', onEnd);
             s.off('close', onEnd);
-            const parsed = parseAttached(Buffer.concat(chunks));
+            const line = Buffer.concat(chunks);
+            const parsed = parseAttached(line);
+            // The line and the copies of it are wiped once compared: the
+            // nonce is spent, or this was not it.
+            const wipe = (...bufs: Buffer[]): void => {
+              for (const b of [line, ...chunks, ...bufs]) b.fill(0);
+            };
             if (!parsed.ok) {
+              wipe();
               refused(s, 'attach-refused');
               return;
             }
             const got = Buffer.from(parsed.attached.nonce, 'utf8');
             // Both are 43 bytes once parsed; timingSafeEqual throws on a
             // length mismatch, so the length is compared first.
-            if (got.length !== want.length || !timingSafeEqual(got, want)) {
+            const same = got.length === want.length && timingSafeEqual(got, want);
+            wipe(got);
+            if (!same) {
               refused(s, 'attach-refused');
               return;
             }

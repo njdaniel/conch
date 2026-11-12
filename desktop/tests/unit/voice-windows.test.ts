@@ -264,9 +264,7 @@ describe('rule 1: the listener', () => {
   });
 
   it.runIf(ON_WINDOWS)('a real squat on a real pipe name makes listen fail and a new name is picked', async () => {
-    const taken = new Server();
     const first = await listenPipe({ pipeId: () => ID1 });
-    taken.close();
     const ids = [ID1, ID2];
     const second = await listenPipe({ pipeId: () => ids.shift() ?? ID2 });
     try {
@@ -357,7 +355,7 @@ describe('rule 2: the first line', () => {
     expect(await outcome(l.attach(NONCE, Date.now() - 1))).toBe('attach-timeout');
   });
 
-  it('at the bound of waiting connections the oldest is closed, and the helper’s own connection, the newest, still attaches', async () => {
+  it('at the bound of waiting connections the oldest silent one is closed, and the helper’s own connection, the newest, still attaches', async () => {
     const h = pipes();
     const l = await listening(h);
     const attached = l.attach(NONCE, Date.now() + 5000);
@@ -369,6 +367,61 @@ describe('rule 2: the first line', () => {
     // The helper arrives with the pipe full of silent opens: it still attaches.
     const helper = new Client(h, l.path);
     await helper.send(attachLine(NONCE));
+    (await attached).socket.destroy();
+  });
+
+  // paddedAttach is a good attach line of exactly n bytes before its line
+  // feed: unknown fields are ignored, so the padding is one.
+  function paddedAttach(n: number): string {
+    const base = JSON.stringify({ ...readFixture<Record<string, unknown>>('voice-control-pipe/attached.json'), nonce: NONCE, pad: '' });
+    return `${JSON.stringify({ ...readFixture<Record<string, unknown>>('voice-control-pipe/attached.json'), nonce: NONCE, pad: 'p'.repeat(n - base.length) })}\n`;
+  }
+
+  it.each([
+    ['4096 bytes is within the cap', 4096, 'attached'],
+    ['4097 bytes is past it: the connection is closed', 4097, 'closed'],
+  ])('the line cap on a pipe: %s', async (_what, n, want) => {
+    const h = pipes();
+    const l = await listening(h);
+    const attached = l.attach(NONCE, Date.now() + (want === 'attached' ? 5000 : 400));
+    const c = new Client(h, l.path);
+    await c.send(paddedAttach(n));
+    if (want === 'attached') {
+      (await attached).socket.destroy();
+    } else {
+      await until(() => c.closed, 3000, 'the connection to be closed');
+      expect(await outcome(attached)).toBe('attach-timeout');
+    }
+  });
+
+  it('the gap: the helper opens, silent opens follow (one short of the bound), the helper writes later, and attaches', async () => {
+    const h = pipes();
+    const l = await listening(h);
+    const attached = l.attach(NONCE, Date.now() + 10_000);
+    const helper = new Client(h, l.path);
+    await helper.opened;
+    const silent: Client[] = [];
+    for (let i = 0; i < PIPE_MAX_PENDING - 1; i++) silent.push(new Client(h, l.path));
+    await Promise.all(silent.map((c) => c.opened));
+    expect(helper.closed).toBe(false);
+    await helper.send(attachLine(NONCE));
+    (await attached).socket.destroy();
+  });
+
+  it('a connection that has delivered a byte is not the one evicted: a flood past the bound closes the silent ones', async () => {
+    const h = pipes();
+    const l = await listening(h);
+    const attached = l.attach(NONCE, Date.now() + 10_000);
+    const helper = new Client(h, l.path);
+    // The first bytes of its line, not the whole of it.
+    const line = attachLine(NONCE);
+    await helper.send(line.slice(0, 10));
+    await new Promise((r) => setTimeout(r, 100));
+    const silent: Client[] = [];
+    for (let i = 0; i < PIPE_MAX_PENDING + 8; i++) silent.push(new Client(h, l.path));
+    await until(() => silent.filter((c) => c.closed).length >= 8, 5000, 'silent connections to be evicted');
+    expect(helper.closed).toBe(false);
+    await helper.send(line.slice(10));
     (await attached).socket.destroy();
   });
 });
@@ -470,6 +523,14 @@ describe('the helper on Windows', () => {
     expect(await refusal(findHelper(res, win))).toBe('untrusted');
   });
 
+  it.runIf(ON_WINDOWS)('the resources prefix is compared without regard to case', async () => {
+    const res = join(dir, 'resources');
+    mkdirSync(res);
+    writeFileSync(join(res, WINDOWS_HELPER_NAME), 'MZ');
+    const found = await findHelper(res.toUpperCase(), win);
+    expect(found.toLowerCase()).toBe(join(res, WINDOWS_HELPER_NAME).toLowerCase());
+  });
+
   it('has no mode or owner rule: Windows has neither', async () => {
     const res = join(dir, 'resources');
     mkdirSync(res);
@@ -554,7 +615,11 @@ describe('the helper’s environment on Windows', () => {
     const env = helperEnv({ parent: { SystemRoot: 'C:\\Windows' }, configDir, token: FAKE_TOKEN, nonce: NONCE, platform: 'win32' });
     expect(spawnOptions(env, 'win32')).toEqual({ stdio: ['pipe', 'pipe', 'pipe'], detached: false, shell: false, windowsHide: true, env, cwd: 'C:\\Windows' });
     expect(oneShotSpawnOptions(env, 'win32').stdio).toEqual(['ignore', 'pipe', 'pipe']);
-    expect(spawnOptions({}, 'win32').cwd).toBe('C:\\Windows');
+    // No system root, or one that is not drive-absolute: no guess, no spawn.
+    expect(() => spawnOptions({}, 'win32')).toThrow(/SYSTEMROOT/);
+    expect(() => spawnOptions({ SYSTEMROOT: '\\Windows' }, 'win32')).toThrow(/SYSTEMROOT/);
+    expect(() => spawnOptions({ SYSTEMROOT: 'Windows' }, 'win32')).toThrow(/SYSTEMROOT/);
+    expect(() => oneShotSpawnOptions({}, 'win32')).toThrow(/SYSTEMROOT/);
     // Linux and macOS: unchanged.
     expect(spawnOptions(env, 'linux').cwd).toBe('/');
     expect(spawnOptions(env, 'darwin').cwd).toBe('/');
@@ -566,14 +631,16 @@ describe('the helper’s environment on Windows', () => {
 describe('CONCH_CONFIG_DIR', () => {
   it('is the profile’s own folder under userData, and never another profile’s', () => {
     const root = join(dir, 'AppData', 'Roaming', 'Conch');
-    const a = profileConfigDir(root, 'p1');
-    const b = profileConfigDir(root, 'p2');
-    expect(a).toBe(join(root, 'profiles', 'p1'));
-    expect(b).toBe(join(root, 'profiles', 'p2'));
+    const id1 = '0123456789abcdef0123456789abcdef';
+    const id2 = 'fedcba9876543210fedcba9876543210';
+    const a = profileConfigDir(root, id1);
+    const b = profileConfigDir(root, id2);
+    expect(a).toBe(join(root, 'profiles', id1));
+    expect(b).toBe(join(root, 'profiles', id2));
     expect(a.startsWith(root)).toBe(true);
     expect(a).not.toBe(b);
     expect(a.startsWith(b)).toBe(false);
-    for (const bad of ['', '..', '../p2', 'p1/../p2', 'p1\\..\\p2', 'a b']) expect(() => profileConfigDir(root, bad), bad).toThrow(/invalid profile id/);
+    for (const bad of ['', '..', '../p2', 'p1', 'p1/../p2', 'p1\\..\\p2', 'a b', id1.toUpperCase(), `${id1}0`, id1.slice(1)]) expect(() => profileConfigDir(root, bad), bad).toThrow(/invalid profile id/);
   });
 });
 
@@ -646,7 +713,7 @@ interface Rig {
   child(): FakeChild;
 }
 
-function rig(opts: { behaviour?: 'cooperative' | 'hung'; nonce?: () => string; timings?: { helloTimeoutMs?: number; killAfterMs?: number; termAfterMs?: number }; extra?: EndpointDeps } = {}): Rig {
+function rig(opts: { behaviour?: 'cooperative' | 'hung'; nonce?: () => string; timings?: { helloTimeoutMs?: number; killAfterMs?: number; termAfterMs?: number }; extra?: EndpointDeps; env?: NodeJS.ProcessEnv } = {}): Rig {
   const resources = join(dir, 'resources');
   mkdirSync(resources, { recursive: true });
   writeFileSync(join(resources, WINDOWS_HELPER_NAME), 'MZ');
@@ -656,7 +723,7 @@ function rig(opts: { behaviour?: 'cooperative' | 'hung'; nonce?: () => string; t
   const spawns: Rig['spawns'] = [];
   const sup = new Supervisor({
     resources,
-    env: { SystemRoot: 'C:\\Windows', Path: 'C:\\Windows\\System32', Conch_Token: 'leak', RUST_LOG: 'trace' },
+    env: opts.env ?? { SystemRoot: 'C:\\Windows', Path: 'C:\\Windows\\System32', Conch_Token: 'leak', RUST_LOG: 'trace' },
     log: (l) => logs.push(l),
     platform: 'win32',
     ...(opts.nonce === undefined ? {} : { nonce: opts.nonce }),
@@ -841,6 +908,32 @@ function holds(root: unknown, needle: string, skip: ReadonlySet<string>): boolea
   };
   return walk(root, 0);
 }
+
+describe('rule 6 on the failure paths', () => {
+  it('a failed attach: the nonce is kept nowhere, and one echoed afterwards is redacted', async () => {
+    const r = rig({ nonce: () => NONCE, timings: { helloTimeoutMs: 200 } });
+    const st = await r.sup.start(request);
+    expect(st).toEqual({ status: 'failed', generation: 1, reason: 'attach-timeout' });
+    const current = (r.sup as unknown as { current: unknown })['current'];
+    expect(holds(current, NONCE, new Set(['child', 'socket']))).toBe(false);
+    expect(holds(current, FAKE_TOKEN, new Set(['child', 'socket']))).toBe(true);
+    r.child().stderr.write(`late nonce=${NONCE}\n`);
+    await until(() => r.sup.diagnostics().length === 1, 5000, 'the stderr line');
+    expect(r.sup.diagnostics().join('\n')).toBe('late nonce=<redacted>');
+    expect(JSON.stringify([r.states, r.logs])).not.toContain(NONCE);
+  });
+
+  it('a spawn that fails (no usable SYSTEMROOT): failed spawn-failed, the nonce kept nowhere, the pipe closed, and no guessed directory', async () => {
+    const r = rig({ nonce: () => NONCE, env: { Path: 'C:\\Windows\\System32' } });
+    const st = await r.sup.start(request);
+    expect(st).toEqual({ status: 'failed', generation: 1, reason: 'spawn-failed' });
+    expect(r.spawns).toHaveLength(0);
+    const current = (r.sup as unknown as { current: unknown })['current'];
+    expect(holds(current, NONCE, new Set(['child', 'socket']))).toBe(false);
+    expect(await connectFails(r.h, r.h.names[0] ?? '')).toBe(true);
+    expect(JSON.stringify([r.states, r.logs])).not.toContain(NONCE);
+  });
+});
 
 describe('owner loss on Windows (§3.6)', () => {
   async function running(r: Rig): Promise<Client> {
