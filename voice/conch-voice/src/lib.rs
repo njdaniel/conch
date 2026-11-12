@@ -120,7 +120,7 @@ use crate::session::{
 use crate::transmit::BoxedMic;
 
 /// What opens the microphone `--mic` chose, by the name it is given (`audio.input` first,
-/// then whatever a switch names; `None` for PipeWire's default). Nothing is opened until this
+/// then whatever a switch names; `None` for the audio system's default). Nothing is opened until this
 /// is called, which is first when a session first allows publishing: a client that may only
 /// listen never captures. `audio` is the connection, if the choice needs one. The test
 /// choices, a tone, a WAV file or none, take no name and open the same each time.
@@ -141,14 +141,14 @@ pub(crate) fn mic_opener(choice: MicChoice, audio: Option<AudioSystem>) -> OpenM
 }
 
 /// What opens the speakers `--sink` chose, by the name it is given (`audio.output` when the
-/// session starts, then whatever a switch names; `None` for PipeWire's default). The
+/// session starts, then whatever a switch names; `None` for the audio system's default). The
 /// counting sink takes no name.
 pub(crate) fn sink_opener(choice: SinkChoice, audio: Option<AudioSystem>) -> OpenSink {
     Box::new(move |name| {
         Ok(match (&choice, &audio) {
             (SinkChoice::Count(tones), _) => Box::new(CountingSink::new(tones)?) as BoxedSink,
             (SinkChoice::AudioSystem, Some(audio)) => Box::new(audio.speakers(name)?),
-            // Not reached: `join` connects whenever either choice is PipeWire.
+            // Not reached: `join` connects whenever either choice is the audio system.
             (SinkChoice::AudioSystem, None) => Box::new(CountingSink::new(&[])?),
         })
     })
@@ -215,8 +215,8 @@ pub fn join(
     // The keyboard to read, if any. The rule for what may be opened as one is written
     // out below and is not a setting: only an event device under /dev/input.
     let key_device = cli::key_device(&resolved.config, args.stdin_keys)?;
-    // One connection to PipeWire for the microphone and the speakers, made only if one of
-    // them is PipeWire's. A machine without it fails here, before anything is joined.
+    // One connection to the audio system (PipeWire, WASAPI) for the microphone and the speakers, made only if one of
+    // them uses it. A machine without it fails here, before anything is joined.
     let audio = if args.mic == MicChoice::AudioSystem || args.sink == SinkChoice::AudioSystem {
         Some(AudioSystem::connect()?)
     } else {
