@@ -1548,6 +1548,50 @@ test('a push-to-talk whose reports are slow is audited as the reported pair and 
     }
   });
 
+  // The allowance on a real refused socket, made on purpose: the page opens a
+  // WebSocket to LiveKit's address with its own join token, with LiveKit
+  // stopped, as the SDK does. Chromium logs it as an error entry whose text
+  // holds the address and so the token; expectClean refuses that, and
+  // refuses it no less with the allowance for any other line.
+  test('a refused LiveKit socket fails expectClean unless refusals are allowed', async ({ browser }) => {
+    const a = await person(browser, 'alice');
+    try {
+      const voice = voiceRegion(a.page);
+      await voice.getByRole('button', { name: 'Join voice' }).click();
+      await expect(voice).toContainText('Connected in', { timeout: 60_000 });
+      await a.watch.settled();
+      const join = vw.secrets.filter((x) => x.startsWith('eyJ')).at(-1);
+      if (join === undefined) throw new Error('no join token was captured from the session answers');
+      vw.stopLiveKit();
+      try {
+        await a.page.evaluate(
+          ([o, t]) =>
+            new Promise<void>((done) => {
+              const ws = new WebSocket(`${o ?? ''}/rtc/v1?access_token=${t ?? ''}&join_request=x`);
+              ws.onerror = () => {
+                done();
+              };
+              ws.onopen = () => {
+                done();
+              };
+            }),
+          [vw.livekitOrigin, join],
+        );
+        await expect.poll(() => a.watch.console.filter((l) => l.includes('WebSocket connection to')).length, { timeout: 10_000 }).toBeGreaterThan(0);
+        await expect(expectClean(a), 'the refused socket, without the allowance').rejects.toThrow();
+        await expectClean({ ...a, allowLiveKitRefusals: true });
+        await a.page.evaluate((x) => {
+          console.log(x);
+        }, join);
+        await expect(expectClean({ ...a, allowLiveKitRefusals: true }), 'a logged token, with the allowance').rejects.toThrow();
+      } finally {
+        await vw.startLiveKit();
+      }
+    } finally {
+      await closeAll(a.context);
+    }
+  });
+
   // The allowance above is for Chromium's refusal line only: a secret that the
   // page itself logs still fails expectClean in the test that has it.
   test('a secret in the console still fails expectClean where refusals are allowed', async ({ browser }) => {
