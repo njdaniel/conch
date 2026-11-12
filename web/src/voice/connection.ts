@@ -1471,6 +1471,12 @@ export class VoiceClient {
     const viewer = this.state.viewer;
     this.room = null;
     this.channel = null;
+    // The room's close starts here, before the page says it is out of voice,
+    // so that the LiveKit leave is already on its way when "Join voice"
+    // shows, and a page closed from now on still has it sent (issue #1764;
+    // LiveKitVoiceRoom.close starts its disconnect at once). It is awaited,
+    // bounded, below. "Join voice" still does not mean LiveKit has been told.
+    const closing = room !== null ? room.close().catch(() => undefined) : null;
     this.endAwaiting();
     this.streamSinks.clear();
     // Nobody's camera is received out of voice; the next join reads presence.
@@ -1503,7 +1509,7 @@ export class VoiceClient {
       cameraInUse: null,
     });
     // Bounded, so that a close that never settles cannot keep the gate shut.
-    if (room !== null) await this.within(room.close().catch(() => undefined), leaveDrain);
+    if (closing !== null) await this.within(closing, leaveDrain);
     // The viewer is removed from the room as the page goes; a refusal is not
     // news, since its token lives seconds and the room drops it anyway.
     const remove = this.env.removeViewer;
