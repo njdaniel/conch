@@ -70,6 +70,8 @@ pub enum WindowsBinding {
 /// A Windows binding is held in a [`KeyCode`] as this and the rest below it: above
 /// [`KEY_CODE_MAX`], so no evdev code is one and no Windows binding is an evdev code.
 const WINDOWS_BASE: u16 = 0x8000;
+/// The `E0` prefix, as the high byte of a scan code (`WindowsBinding::Scan(0xE01D)`).
+const EXTENDED_PREFIX: u16 = 0xE000;
 /// Added to [`WINDOWS_BASE`] for a scan code with the `E0` prefix.
 const WINDOWS_EXTENDED: u16 = 0x0100;
 /// Added to [`WINDOWS_BASE`] for a mouse button, with the button's number below it.
@@ -135,10 +137,31 @@ pub fn parse_windows_binding(text: &str) -> Result<KeyCode, Error> {
         },
     };
     match code {
-        Some(code @ 0x01..=0x7F) => Ok(KeyCode(WINDOWS_BASE | extended | u16::from(code))),
+        Some(code @ 0x01..=0x7F) => {
+            let scan = if extended == 0 {
+                u16::from(code)
+            } else {
+                EXTENDED_PREFIX | u16::from(code)
+            };
+            // Scan codes that Raw Input reports but that never reach a binding as written
+            // (found by reading what `winit` makes of each, design section 4.6): a binding
+            // that looks bound and never fires is refused, not kept.
+            if NEVER_FIRE.contains(&scan) {
+                return Err(Error::UnreachableWindowsBinding {
+                    name: text.to_owned(),
+                });
+            }
+            Ok(KeyCode(WINDOWS_BASE | extended | u16::from(code)))
+        }
         _ => Err(invalid()),
     }
 }
+
+/// Scan codes of the grammar that no event ever matches, because `winit` reports the key under
+/// another one or drops it: `0x0054` is Alt+PrintScreen, which it names `PrintScreen`, and
+/// PrintScreen's own code is `0xE037`; `0xE046` is Ctrl+Pause, named `Pause`, whose code is
+/// `0x0045`; `0xE02A` is the fake Shift that comes before PrintScreen, which it drops.
+const NEVER_FIRE: [u16; 3] = [0x0054, 0xE046, 0xE02A];
 
 /// A binding as Windows takes it from a person: in the Windows grammar, and in no other. This
 /// is the strict form of [`KeyCode`]'s `FromStr` on Windows (which also takes an evdev name,
@@ -294,7 +317,7 @@ impl KeyCode {
                 .map(WindowsBinding::Mouse)
         } else {
             Some(WindowsBinding::Scan(if code >= WINDOWS_EXTENDED {
-                0xE000 | (code - WINDOWS_EXTENDED)
+                EXTENDED_PREFIX | (code - WINDOWS_EXTENDED)
             } else {
                 code
             }))
@@ -1087,6 +1110,52 @@ mod tests {
                 assert_ne!(a, b);
             }
         }
+    }
+
+    /// S6: the scan codes of the grammar that no event matches are refused, and their
+    /// neighbours, the keys that do fire, are not.
+    #[test]
+    fn a_scan_code_that_never_fires_is_refused_and_the_key_it_stands_for_is_not() {
+        for text in [
+            "sc:0x54",
+            "sc:0x054",
+            "sc:0xE0,0x46",
+            "sc:0xe0,0x2a",
+            "SC:0X54",
+        ] {
+            let error = parse_windows_binding(text).unwrap_err();
+            let expected = if text == "sc:0x054" {
+                Error::InvalidWindowsBinding {
+                    name: text.to_owned(),
+                }
+            } else {
+                Error::UnreachableWindowsBinding {
+                    name: text.to_owned(),
+                }
+            };
+            assert_eq!(error, expected, "{text}");
+        }
+        // PrintScreen, Pause (0x45), NumLock (E0 45), ScrollLock, and the codes beside the
+        // refused ones, all fire.
+        for text in [
+            "sc:0xE0,0x37",
+            "sc:0x45",
+            "sc:0xE0,0x45",
+            "sc:0x46",
+            "sc:0x53",
+            "sc:0x55",
+            "sc:0xE0,0x45",
+            "sc:0xE0,0x47",
+            "sc:0xE0,0x29",
+        ] {
+            assert!(parse_windows_binding(text).is_ok(), "{text}");
+        }
+        assert!(
+            parse_windows_binding("sc:0x54")
+                .unwrap_err()
+                .to_string()
+                .contains("sc:0xE0,0x37")
+        );
     }
 
     #[test]

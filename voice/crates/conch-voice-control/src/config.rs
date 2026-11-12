@@ -589,21 +589,28 @@ impl KeysKey {
     /// What Windows asks of a value for this key before it is written: no device, which is a
     /// Linux event device, and a binding in the Windows grammar only (`config set` on Windows
     /// calls this; on Linux nothing does). Built on every platform so that it is tested on
-    /// every platform.
+    /// every platform. The refusal is a fixed message that does not repeat `value`.
     ///
     /// # Errors
     ///
-    /// [`Error::KeyDeviceNotOnWindows`] (naming `file`) for the device, [`Error::WrongKeyForm`]
-    /// or [`Error::InvalidWindowsBinding`] for a binding.
+    /// [`Error::InvalidConfigValue`] naming `file` and the key.
     pub fn require_windows(self, value: &str, file: &str) -> Result<(), Error> {
-        match self {
-            KeysKey::Device => Err(Error::KeyDeviceNotOnWindows {
-                file: file.to_owned(),
-            }),
-            KeysKey::Talk | KeysKey::Mute | KeysKey::Deafen => {
-                crate::keys::parse_windows_only(value).map(drop)
+        let message = match self {
+            KeysKey::Device => {
+                "is a Linux setting: on Windows keys are bound by scan code, and every keyboard is read"
             }
-        }
+            KeysKey::Talk | KeysKey::Mute | KeysKey::Deafen => {
+                if crate::keys::parse_windows_only(value).is_ok() {
+                    return Ok(());
+                }
+                "must be sc:0x29 (a scan code from 0x01 to 0x7F that fires), sc:0xE0,0x1D (with the E0 prefix), mouse:4 or mouse:5"
+            }
+        };
+        Err(Error::InvalidConfigValue {
+            file: file.to_owned(),
+            key: self.dotted().to_owned(),
+            message: message.to_owned(),
+        })
     }
 
     fn clear(self, keys: &mut KeysConfig) {
@@ -2293,12 +2300,19 @@ open_hang_ms = 650
             let got = key.require_windows(value, "voice.toml");
             assert_eq!(got.is_ok(), ok, "{key:?} {value}: {got:?}");
         }
-        assert_eq!(
-            KeysKey::Device.require_windows("/dev/input/x", "voice.toml"),
-            Err(Error::KeyDeviceNotOnWindows {
-                file: "voice.toml".to_owned()
-            })
-        );
+        // The message is fixed: it does not repeat what was given.
+        for (key, value) in [
+            (KeysKey::Device, "/dev/input/by-id/SECRET-event-kbd"),
+            (KeysKey::Talk, "KEY_SECRETKEY"),
+            (KeysKey::Mute, "sc:0xSECRET"),
+        ] {
+            let error = key.require_windows(value, "voice.toml").unwrap_err();
+            assert!(
+                matches!(&error, Error::InvalidConfigValue { key: k, .. } if k == key.dotted()),
+                "{error:?}"
+            );
+            assert!(!format!("{error:?} {error}").contains("SECRET"), "{error}");
+        }
     }
 
     /// Linux: the Windows forms are refused where they are written and where they are read.

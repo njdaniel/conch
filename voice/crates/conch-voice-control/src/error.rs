@@ -95,6 +95,16 @@ pub enum Error {
         name: String,
     },
 
+    /// A binding in the Windows grammar that no key event ever matches (`sc:0x54`,
+    /// `sc:0xE0,0x46`, `sc:0xE0,0x2A`).
+    #[error(
+        "`{name}` is a scan code that never fires: Alt+PrintScreen is reported as sc:0xE0,0x37, Ctrl+Pause as sc:0x45, and the shift before PrintScreen is dropped: bind the key's own code"
+    )]
+    UnreachableWindowsBinding {
+        /// The binding as it was written.
+        name: String,
+    },
+
     /// `keys.device`, which names an evdev path, on Windows, where every keyboard is read.
     #[error(
         "{file}: `keys.device` is a Linux setting: on Windows keys are bound by scan code, with no device"

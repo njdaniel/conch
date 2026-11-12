@@ -10,7 +10,14 @@
 //! - The events come from `winit`'s device events, which register for the keyboard and the
 //!   mouse with `RIDEV_INPUTSINK | RIDEV_DEVNOTIFY` and nothing else (the audit at 0.30.13 is
 //!   in the design note, section 4.3). A hidden window of `winit`'s own receives them; there
-//!   is no window of this program's, no hook and no polling of key state.
+//!   is no window of this program's, no hook, no injection and no polling of key state *by
+//!   this program*. `winit` itself contains code that polls key state (`GetAsyncKeyState`, in
+//!   `keyboard.rs`'s `get_async_kbd_state`, run when one of its windows gains focus) and code
+//!   that injects input (`SendInput`, in `window.rs`'s `force_window_active`, run when one of
+//!   its windows is created or shown). Both are reached only through a `winit` `Window`, and
+//!   **the helper never creates a `winit` `Window`** (the audit, design section 4.6): that
+//!   invariant, not a feature flag, is what keeps them unreached, so it is the thing to check
+//!   when `winit` is updated.
 //! - [`Binder`] compares each event with the configured bindings and drops it. What leaves it
 //!   is a [`KeyEvent`] (talk, mute or deafen went down or up) and a device state (the keys are
 //!   being read, or are not, and why). Neither can hold a scan code, a time or a count of
@@ -36,20 +43,38 @@
 //! - **Repeats.** A press while the key is down is nothing ([`Binder`]: a slot is `down`).
 //! - **Unknown initial state.** Raw Input cannot be asked whether a key is down, so a binding
 //!   starts unarmed and is armed by a release it has seen: a key held when the helper starts
-//!   transmits nothing until it has been let go of once ([`Binder`]: `armed`).
+//!   transmits nothing until it has been let go of once ([`Binder`]: `armed`). **The cost is
+//!   that the first press after every start, device removal or wake gap only arms**: a tap is
+//!   swallowed, and then the keys work. At the start nothing in the existing state vocabulary
+//!   can say so without holding the session back until a key is tapped, so it is documented
+//!   (design section 4.4, the manual). After a removal or a gap the keys are reported lost
+//!   (`ptt: lost`) and are reported ready again by the first release of the talk binding (the
+//!   first binding bound, if there is no talk key), so the state says what is true.
 //! - **`max_transmit_secs`.** The push-to-talk machine shuts the gate on a held key and keeps
 //!   holding it; the repeats that go on arriving change nothing here, so only a release and a
 //!   press open it again (tested with the machine itself).
 //! - **A stalled input thread.** The input thread beats a [`Heartbeat`] whenever it is woken
 //!   (and `winit` is told to wake it every few hundred milliseconds); the monitor thread
 //!   reports the keys lost, with `read_failed`, when a key is down and the beat is more than
-//!   one `VoiceControlOwnerPollMS` old. When the thread comes back it releases whatever it
-//!   thought was down and forgets which keys were armed.
+//!   one `VoiceControlOwnerPollMS` old; the stall is re-checked under the reporter's lock
+//!   ([`Reporter::not_ready_if`]), so a recovery cannot be followed by a stale loss. When the
+//!   thread comes back it releases whatever it thought was down, forgets which keys were armed
+//!   and reports the keys lost until the talk key has been released once.
 //! - **Device removal.** `WM_INPUT_DEVICE_CHANGE`'s removal (`DeviceEvent::Removed`) while a key
-//!   is down is a release, and the keys are lost until a device has arrived or a bound key has
-//!   been seen again. `winit` does not say which device it was, so a removal is taken as the
+//!   is down is a release, and the keys are lost until the talk key has been released once
+//!   (an arrival alone does not arm it). `winit` does not say which device it was, so a removal is taken as the
 //!   keyboard (or the mouse) being gone, which is the side that fails closed.
 //! - **Focus.** A change of focus is not an input here: [`RawEvent::FocusChanged`] does nothing.
+//! - **The session ends.** Every event, a tick included, ends the input thread once the session
+//!   loop has gone ([`Pump::handle`]).
+//!
+//! **Injected input.** Raw Input delivers events that a program running as the same user sends
+//! with `SendInput`, as it does those of a keyboard; this module cannot tell them apart (no
+//! device is named in what `winit` hands over). Another program of the user's can therefore
+//! press the bound key (design section 5).
+//!
+//! **One event loop per process.** `winit` allows one event loop in a process, so
+//! [`spawn`] is to be called once, which it is: from `join` or `managed`, once each.
 
 use std::fmt;
 use std::io;
@@ -67,7 +92,7 @@ use crate::session::Input;
 /// to this module's threads: a scan code is in it, so it is not formatted, and its `Debug`
 /// says only which kind it is.
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub enum RawEvent {
+pub(crate) enum RawEvent {
     /// A key went down (`RI_KEY_MAKE`, which repeats while it is held) or up
     /// (`RI_KEY_BREAK`), by scan code with the `E0` prefix in the high byte.
     Key {
@@ -110,7 +135,7 @@ impl fmt::Debug for RawEvent {
 /// What the [`Binder`] sends on: a press or release of a configured key, or a change in
 /// whether the keys are being read. The only things that leave this module.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Out {
+pub(crate) enum Out {
     /// The talk, mute or deafen key went down or came up.
     Key(KeyEvent),
     /// The keys are being read again.
@@ -134,7 +159,9 @@ struct Slot {
 /// Reduces Raw Input's events to presses and releases of the configured keys, and keeps the
 /// rules of the design's section 4.4 that need no clock. It holds the bindings, which of them
 /// are armed and which are down, and whether the keys are lost; it holds no event.
-pub struct Binder {
+pub(crate) struct Binder {
+    /// Talk, mute, deafen, in that order, for the ones bound. The first is the one whose
+    /// release reports the keys read again.
     slots: Vec<Slot>,
     lost: bool,
 }
@@ -151,7 +178,7 @@ impl Binder {
     /// evdev one) is left out: [`conch_voice_control::require_windows_keys`] refuses a
     /// configuration with one before it gets here.
     #[must_use]
-    pub fn new(bindings: &KeyBindings) -> Self {
+    pub(crate) fn new(bindings: &KeyBindings) -> Self {
         let slots = [
             (Key::Talk, bindings.talk()),
             (Key::Mute, bindings.mute()),
@@ -172,13 +199,25 @@ impl Binder {
 
     /// True while a configured key is down.
     #[must_use]
-    pub fn any_down(&self) -> bool {
+    pub(crate) fn any_down(&self) -> bool {
         self.slots.iter().any(|slot| slot.down)
+    }
+
+    /// The keys are not being read, for `problem`: whatever is down is released, nothing is
+    /// armed, and they stay lost until the talk key (the first binding, without one) has been
+    /// released once. Returns the releases, and the loss if it was not already one.
+    pub(crate) fn mark_lost(&mut self, problem: Problem) -> Vec<Out> {
+        let mut out = self.forget();
+        if !self.lost {
+            self.lost = true;
+            out.push(Out::Lost(problem));
+        }
+        out
     }
 
     /// Releases whatever is down and forgets which keys were armed: the state of every key is
     /// unknown, as it is at the start. Returns the releases.
-    pub fn forget(&mut self) -> Vec<Out> {
+    pub(crate) fn forget(&mut self) -> Vec<Out> {
         let mut out = Vec::new();
         for slot in &mut self.slots {
             if slot.down {
@@ -193,45 +232,32 @@ impl Binder {
         out
     }
 
-    fn slot_of(&mut self, what: WindowsBinding) -> Option<&mut Slot> {
-        self.slots.iter_mut().find(|slot| slot.binding == what)
-    }
-
     /// Takes one event and returns what leaves the module because of it, in order.
-    pub fn on_event(&mut self, event: RawEvent) -> Vec<Out> {
+    pub(crate) fn on_event(&mut self, event: RawEvent) -> Vec<Out> {
         let (what, down) = match event {
             RawEvent::Key { scan, down } => (WindowsBinding::Scan(scan), down),
             RawEvent::Button { button, down } => (WindowsBinding::Mouse(button), down),
-            RawEvent::DeviceRemoved => {
-                // A key that was down on a device that is gone will never be released, so
-                // it is released now; and nothing is armed again until a release is seen.
-                let mut out = self.forget();
-                if !self.lost {
-                    self.lost = true;
-                    out.push(Out::Lost(Problem::Ended));
-                }
-                return out;
+            // A key that was down on a device that is gone will never be released, so it is
+            // released now; and nothing is armed again until a release is seen.
+            RawEvent::DeviceRemoved => return self.mark_lost(Problem::Ended),
+            // Neither an arrival nor anything else here says that a key is up: the keys are
+            // read again by the talk key's release, which arms it.
+            RawEvent::DeviceAdded | RawEvent::FocusChanged | RawEvent::Tick => {
+                return Vec::new();
             }
-            RawEvent::DeviceAdded => {
-                return if self.lost {
-                    self.lost = false;
-                    vec![Out::Ready]
-                } else {
-                    Vec::new()
-                };
-            }
-            // Neither says anything about a key.
-            RawEvent::FocusChanged | RawEvent::Tick => return Vec::new(),
         };
-        let was_lost = self.lost;
-        let Some(slot) = self.slot_of(what) else {
+        let Some(index) = self.slots.iter().position(|slot| slot.binding == what) else {
             return Vec::new();
         };
         let mut out = Vec::new();
-        if was_lost {
-            // A configured key was seen, so a device is there.
+        if self.lost && !down && index == 0 {
+            // The key that has to be armed was let go of: it is armed now, and read again.
+            self.lost = false;
             out.push(Out::Ready);
         }
+        let Some(slot) = self.slots.get_mut(index) else {
+            return out;
+        };
         if down {
             // A press is a press only of a key known to have been up, and only once: a
             // repeat, or a key held since before anything was read, is nothing.
@@ -252,17 +278,23 @@ impl Binder {
                 }));
             }
         }
-        self.lost = false;
         out
     }
 }
 
 /// The input thread's sign of life, read by the monitor. Times are those of the owner of the
 /// heartbeat's clock, as durations from its start.
-#[derive(Debug, Default)]
-pub struct Heartbeat {
+#[derive(Default)]
+pub(crate) struct Heartbeat {
     last_ms: AtomicU64,
     held: AtomicBool,
+}
+
+/// Shows that there is a heartbeat and nothing of whether a key is down.
+impl fmt::Debug for Heartbeat {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Heartbeat").finish_non_exhaustive()
+    }
 }
 
 /// A duration in whole milliseconds, saturating.
@@ -272,19 +304,19 @@ fn millis(at: Duration) -> u64 {
 
 impl Heartbeat {
     /// The input thread was woken at `at`. Returns how long it had been since the last time.
-    pub fn beat(&self, at: Duration) -> Duration {
+    pub(crate) fn beat(&self, at: Duration) -> Duration {
         let before = self.last_ms.swap(millis(at), Ordering::SeqCst);
         Duration::from_millis(millis(at).saturating_sub(before))
     }
 
     /// Whether a configured key is down, as the input thread last saw.
-    pub fn set_held(&self, held: bool) {
+    pub(crate) fn set_held(&self, held: bool) {
         self.held.store(held, Ordering::SeqCst);
     }
 
     /// True if a key is down and the last beat is more than `limit` before `at`.
     #[must_use]
-    pub fn stalled(&self, at: Duration, limit: Duration) -> bool {
+    pub(crate) fn stalled(&self, at: Duration, limit: Duration) -> bool {
         self.held.load(Ordering::SeqCst)
             && millis(at).saturating_sub(self.last_ms.load(Ordering::SeqCst)) > millis(limit)
     }
@@ -305,7 +337,7 @@ struct Told {
 /// Tells the session loop whether the keys are being read, from either thread, once for each
 /// change.
 #[derive(Debug)]
-pub struct Reporter {
+pub(crate) struct Reporter {
     inputs: mpsc::UnboundedSender<Input>,
     told: Mutex<Told>,
 }
@@ -313,7 +345,7 @@ pub struct Reporter {
 impl Reporter {
     /// A reporter into the session loop's inputs.
     #[must_use]
-    pub fn new(inputs: mpsc::UnboundedSender<Input>) -> Self {
+    pub(crate) fn new(inputs: mpsc::UnboundedSender<Input>) -> Self {
         Self {
             inputs,
             told: Mutex::new(Told::default()),
@@ -322,18 +354,18 @@ impl Reporter {
 
     /// True once the session loop is gone, so nobody is reading keys for it.
     #[must_use]
-    pub fn closed(&self) -> bool {
+    pub(crate) fn closed(&self) -> bool {
         self.inputs.is_closed()
     }
 
     /// Passes on a key. False if the session loop has gone away.
-    pub fn key(&self, event: KeyEvent) -> bool {
+    pub(crate) fn key(&self, event: KeyEvent) -> bool {
         self.inputs.send(Input::Key(event)).is_ok()
     }
 
     /// Says the keys are being read, unless that is what was last said. False if the session
     /// loop has gone away.
-    pub fn ready(&self) -> bool {
+    pub(crate) fn ready(&self) -> bool {
         let mut told = self.told.lock().unwrap_or_else(PoisonError::into_inner);
         if told.said && !told.not_ready {
             return !self.closed();
@@ -351,9 +383,17 @@ impl Reporter {
     /// Says the keys are not being read, unless that is what was last said (a reason that
     /// changes while it goes on is not said again). It is a loss if they had been read and an
     /// absence if not. False if the session loop has gone away.
-    pub fn not_ready(&self, problem: Problem) -> bool {
+    pub(crate) fn not_ready(&self, problem: Problem) -> bool {
+        self.not_ready_if(problem, || true)
+    }
+
+    /// As [`Reporter::not_ready`], if `still` is true, which is asked **under the lock** that
+    /// every report is made under. The monitor asks whether the input thread is stalled this
+    /// way: it cannot decide that, be overtaken by the thread's recovery (and its report that
+    /// the keys are read again), and then report a loss that nothing will ever clear.
+    pub(crate) fn not_ready_if(&self, problem: Problem, still: impl FnOnce() -> bool) -> bool {
         let mut told = self.told.lock().unwrap_or_else(PoisonError::into_inner);
-        if told.said && told.not_ready {
+        if !still() || (told.said && told.not_ready) {
             return !self.closed();
         }
         let state = if told.was_ready {
@@ -369,7 +409,7 @@ impl Reporter {
 
 /// How the input thread answers its event source: told that the source has registered, and
 /// handed each event.
-pub trait Sink {
+pub(crate) trait Sink {
     /// The source is registered and will deliver events.
     fn started(&mut self);
     /// One event. [`Flow::Stop`] asks the source to end.
@@ -378,7 +418,7 @@ pub trait Sink {
 
 /// Whether the source goes on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Flow {
+pub(crate) enum Flow {
     /// Go on.
     Continue,
     /// End: the session loop has gone away.
@@ -387,7 +427,7 @@ pub enum Flow {
 
 /// Where the raw events come from: `winit`'s event loop on Windows, a scripted list in the
 /// tests. It runs on the input thread, to its end.
-pub trait EventSource: Send + 'static {
+pub(crate) trait EventSource: Send + 'static {
     /// Registers, calls [`Sink::started`], and then delivers events to `sink` until it says
     /// [`Flow::Stop`] or the source ends. A [`RawEvent::Tick`] is delivered at least every
     /// `tick` while nothing else happens.
@@ -399,7 +439,7 @@ pub trait EventSource: Send + 'static {
 }
 
 /// The input thread's half: the [`Binder`], the heartbeat and the way out.
-pub struct Pump {
+pub(crate) struct Pump {
     binder: Binder,
     beat: Arc<Heartbeat>,
     reporter: Arc<Reporter>,
@@ -413,7 +453,7 @@ impl Pump {
     /// A pump for `bindings`, beating `beat` and reporting to `reporter`. `limit` is the
     /// longest the input thread may go without waking while a key is down.
     #[must_use]
-    pub fn new(
+    pub(crate) fn new(
         bindings: &KeyBindings,
         beat: Arc<Heartbeat>,
         reporter: Arc<Reporter>,
@@ -431,21 +471,21 @@ impl Pump {
 
     /// Whether the source ever said it had started.
     #[must_use]
-    pub fn started(&self) -> bool {
+    pub(crate) fn started(&self) -> bool {
         self.started
     }
 
     /// One event, at `at` (from the clock the heartbeat is read against).
-    pub fn handle(&mut self, at: Duration, event: RawEvent) -> Flow {
+    pub(crate) fn handle(&mut self, at: Duration, event: RawEvent) -> Flow {
         let gap = self.beat.beat(at);
         let mut alive = true;
         let mut outs = Vec::new();
         if gap > self.limit {
             // The thread was not running for longer than a stall: any key it thought was
-            // down may have come up meanwhile, so it is released, nothing is armed, and the
-            // keys are read again.
-            outs.extend(self.binder.forget());
-            outs.push(Out::Ready);
+            // down may have come up meanwhile, so it is released and nothing is armed. The
+            // keys are lost (said once, as the monitor's report is) until the talk key has
+            // been released.
+            outs.extend(self.binder.mark_lost(stalled_problem()));
         }
         outs.extend(self.binder.on_event(event));
         for out in outs {
@@ -456,7 +496,13 @@ impl Pump {
             };
         }
         self.beat.set_held(self.binder.any_down());
-        if alive { Flow::Continue } else { Flow::Stop }
+        // A tick or an unbound key still ends the thread once the session has gone: nothing
+        // else would, and winit allows one event loop in the process.
+        if alive && !self.reporter.closed() {
+            Flow::Continue
+        } else {
+            Flow::Stop
+        }
     }
 }
 
@@ -492,7 +538,9 @@ fn spawn_monitor(
             while !reporter.closed() {
                 std::thread::sleep(limit / 4);
                 if beat.stalled(clock.elapsed(), limit) {
-                    reporter.not_ready(stalled_problem());
+                    // Asked again under the reporter's lock: the thread may have recovered.
+                    reporter
+                        .not_ready_if(stalled_problem(), || beat.stalled(clock.elapsed(), limit));
                 }
             }
         })
@@ -506,7 +554,7 @@ fn spawn_monitor(
 /// # Errors
 ///
 /// What the operating system said, if a thread could not be started.
-pub fn spawn_with(
+pub(crate) fn spawn_with(
     source: impl EventSource,
     bindings: &KeyBindings,
     inputs: mpsc::UnboundedSender<Input>,
@@ -536,13 +584,18 @@ pub fn spawn_with(
         .map(|_| ())
 }
 
-/// [`spawn_with`] on Raw Input, through `winit`.
+/// [`spawn_with`] on Raw Input, through `winit`. **Once per process:** `winit` allows one event
+/// loop in a process, and a second would fail to be created (the keys would then be reported
+/// absent, as any start failure is).
 ///
 /// # Errors
 ///
 /// What the operating system said, if a thread could not be started.
 #[cfg(windows)]
-pub fn spawn(bindings: &KeyBindings, inputs: mpsc::UnboundedSender<Input>) -> io::Result<()> {
+pub(crate) fn spawn(
+    bindings: &KeyBindings,
+    inputs: mpsc::UnboundedSender<Input>,
+) -> io::Result<()> {
     spawn_with(
         raw_input::Winit,
         bindings,
@@ -572,7 +625,7 @@ mod raw_input {
     const FIRST_SIDE_BUTTON: u32 = 3;
 
     /// `winit`'s Windows backend as an [`EventSource`].
-    pub struct Winit;
+    pub(crate) struct Winit;
 
     /// An error of the event loop, as what the operating system said. `winit`'s own text is
     /// not kept: only that it failed.
@@ -642,15 +695,20 @@ mod raw_input {
         fn resumed(&mut self, _: &ActiveEventLoop) {}
 
         fn window_event(&mut self, event_loop: &ActiveEventLoop, _: WindowId, event: WindowEvent) {
-            if matches!(event, WindowEvent::Focused(_)) {
-                self.forward(event_loop, RawEvent::FocusChanged);
-            }
+            // Every callback is a sign of life, whatever it says.
+            let raw = if matches!(event, WindowEvent::Focused(_)) {
+                RawEvent::FocusChanged
+            } else {
+                RawEvent::Tick
+            };
+            self.forward(event_loop, raw);
         }
 
         fn device_event(&mut self, event_loop: &ActiveEventLoop, _: DeviceId, event: DeviceEvent) {
-            if let Some(raw) = translate(event) {
-                self.forward(event_loop, raw);
-            }
+            // An event that is not one of the kinds that matter (a mouse's movement, say) is
+            // dropped here, but still beats the heartbeat.
+            let raw = translate(event).unwrap_or(RawEvent::Tick);
+            self.forward(event_loop, raw);
         }
 
         fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
@@ -830,22 +888,36 @@ mod tests {
         assert!(!binder.any_down());
         // Said once.
         assert_eq!(binder.on_event(RawEvent::DeviceRemoved), vec![]);
-        // Nothing is armed: a key held on the device that stayed is not a press.
-        assert_eq!(binder.on_event(key(TALK, true)), vec![Out::Ready]);
-        // (The bound key was seen, so the device is there: ready, and still not a press.)
+        assert!(binder.lost);
+        // Nothing is armed: a key held on the device that stayed is not a press, and does
+        // not say the keys are read again.
+        assert_eq!(binder.on_event(key(TALK, true)), vec![]);
         assert!(!binder.any_down());
-
-        // The other way back: a device arrives.
-        let mut binder = Binder::new(&bindings());
-        binder.on_event(RawEvent::DeviceRemoved);
-        assert_eq!(binder.on_event(RawEvent::DeviceAdded), vec![Out::Ready]);
+        // Neither does an arrival, nor the release of a binding that is not the talk key.
         assert_eq!(binder.on_event(RawEvent::DeviceAdded), vec![]);
-        // Armed only by a release, after a removal as at the start.
-        assert_eq!(run(&mut binder, &[key(TALK, true)]), vec![]);
-        assert_eq!(
-            run(&mut binder, &[key(TALK, false), key(TALK, true)]),
-            vec![press(Key::Talk)]
+        assert_eq!(binder.on_event(key(MUTE, false)), vec![]);
+        assert!(binder.lost);
+        // The talk key's release arms it and says the keys are read again; then a press is one.
+        assert_eq!(binder.on_event(key(TALK, false)), vec![Out::Ready]);
+        assert!(!binder.lost);
+        assert_eq!(binder.on_event(key(TALK, true)), vec![press(Key::Talk)]);
+    }
+
+    #[test]
+    fn without_a_talk_key_the_first_binding_is_the_one_whose_release_reads_the_keys_again() {
+        let key_of = |text| conch_voice_control::parse_windows_binding(text).unwrap();
+        let mut binder = Binder::new(
+            &KeyBindings::new(None, Some(key_of("sc:0xE0,0x1D")), Some(key_of("mouse:5"))).unwrap(),
         );
+        binder.on_event(RawEvent::DeviceRemoved);
+        assert_eq!(
+            binder.on_event(RawEvent::Button {
+                button: 5,
+                down: false
+            }),
+            vec![]
+        );
+        assert_eq!(binder.on_event(key(MUTE, false)), vec![Out::Ready]);
     }
 
     #[test]
@@ -1091,23 +1163,25 @@ mod tests {
         );
 
         // The thread wakes, 5 s later, with the key now up and then pressed again. It
-        // released what it thought was down and forgot what was armed, so the first thing
-        // that follows is a release (arming it), and only the press after that counts.
+        // released what it thought was down and forgot what was armed; the loss is already
+        // said, so it is not said twice, and the keys are read again only when the talk key
+        // has been released (which arms it), and only the press after that counts.
         pump.handle(at(5_000), RawEvent::Tick);
         let back = drain(&mut received);
         assert_eq!(
             back,
-            vec![
-                Input::Key(KeyEvent {
-                    key: Key::Talk,
-                    action: KeyAction::Release
-                }),
-                Input::KeyDevice(DeviceState::Ready),
-            ]
+            vec![Input::Key(KeyEvent {
+                key: Key::Talk,
+                action: KeyAction::Release
+            })]
         );
         pump.handle(at(5_010), key(TALK, true));
         assert_eq!(drain(&mut received), vec![], "armed by nothing yet");
         pump.handle(at(5_020), key(TALK, false));
+        assert_eq!(
+            drain(&mut received),
+            vec![Input::KeyDevice(DeviceState::Ready)]
+        );
         pump.handle(at(5_030), key(TALK, true));
         assert_eq!(
             drain(&mut received),
@@ -1116,6 +1190,58 @@ mod tests {
                 action: KeyAction::Press
             })]
         );
+    }
+
+    /// S1: the monitor decides the thread is stalled, the thread recovers (and arms, and says
+    /// the keys are read again), and only then does the monitor report. The report is asked
+    /// again under the reporter's lock and is not made, so nothing stale is left standing.
+    #[test]
+    fn a_loss_the_monitor_decided_on_before_a_recovery_is_not_reported_after_it() {
+        let limit = at(250);
+        let (mut pump, beat, reporter, mut received) = pump_with(limit);
+        pump.started = true;
+        reporter.ready();
+        pump.handle(at(0), key(TALK, false));
+        pump.handle(at(10), key(TALK, true));
+        drain(&mut received);
+
+        // The monitor's look, at 400 ms: stalled. It has not yet reported.
+        assert!(beat.stalled(at(400), limit));
+
+        // The thread comes back, is lost until the talk key is released, and that happens.
+        pump.handle(at(5_000), RawEvent::Tick);
+        pump.handle(at(5_010), key(TALK, false));
+        assert_eq!(
+            drain(&mut received)
+                .iter()
+                .filter(|input| matches!(input, Input::KeyDevice(_)))
+                .count(),
+            2,
+            "lost, then ready"
+        );
+
+        // The monitor now reports what it decided, with the question put again under the lock.
+        reporter.not_ready_if(stalled_problem(), || beat.stalled(at(5_020), limit));
+        assert_eq!(drain(&mut received), vec![], "no loss after the recovery");
+        // And a monitor that did not ask again would have left the keys lost for good.
+        assert!(reporter.not_ready(stalled_problem()));
+        assert_eq!(drain(&mut received).len(), 1);
+    }
+
+    /// S2: the input thread does not outlive the session, on a tick or an unbound key.
+    #[test]
+    fn once_the_session_has_gone_every_event_stops_the_input_thread() {
+        for (name, event) in [
+            ("a tick", RawEvent::Tick),
+            ("an unbound key", key(OTHER, true)),
+            ("a change of focus", RawEvent::FocusChanged),
+            ("a bound key", key(TALK, false)),
+        ] {
+            let (mut pump, _beat, _reporter, received) = pump_with(at(250));
+            assert_eq!(pump.handle(at(1), RawEvent::Tick), Flow::Continue, "{name}");
+            drop(received);
+            assert_eq!(pump.handle(at(2), event), Flow::Stop, "{name}");
+        }
     }
 
     #[test]
@@ -1261,10 +1387,16 @@ mod tests {
     /// and a person: `cargo test -p conch-voice --lib -- --ignored --nocapture hold_a_key`.
     ///
     /// It binds talk to the grave key (`sc:0x29`) and mute to Mouse 4, starts the real Raw Input
-    /// source, and waits 60 seconds for each of: the grave key held and let go, then Mouse 4
-    /// held and let go. **Switch to another window, or a game, first: the point is that the
-    /// helper hears them in the background.** It checks that each arrives as exactly one press
-    /// and one release (so that repeats are nothing), and prints nothing of any key.
+    /// source and asks for two things. **Switch to another window, or a game, first: the point
+    /// is that the helper hears them in the background.**
+    ///
+    /// 1. For 15 seconds, **tap** each of the grave key and Mouse 4 once, and do not hold them.
+    ///    A binding is armed by a release it has seen, so a tap only arms: the test asserts
+    ///    that nothing but the keys being ready came of it.
+    /// 2. Then, within 60 seconds, **hold** each in turn, a second or two, and let go. Each is
+    ///    exactly one press and one release (so that the repeats of a held key are nothing).
+    ///
+    /// It prints no key.
     #[cfg(windows)]
     #[test]
     #[ignore = "needs a Windows desktop, a keyboard and a mouse with Mouse 4, and a person pressing them in the background (E7, #903)"]
@@ -1273,21 +1405,38 @@ mod tests {
         let bindings = KeyBindings::new(Some(key("sc:0x29")), Some(key("mouse:4")), None).unwrap();
         let (inputs, mut received) = mpsc::unbounded_channel();
         spawn(&bindings, inputs).unwrap();
-        let deadline = Instant::now() + Duration::from_secs(60);
+
+        eprintln!(
+            "E7 step 1 (15 s): switch to another window, then TAP the grave key and Mouse 4 once each. Do not hold them."
+        );
+        let tapping = Instant::now() + Duration::from_secs(15);
         let mut seen = Vec::new();
-        // Ready, then press and release of each: five inputs.
-        while Instant::now() < deadline && seen.len() < 5 {
+        while Instant::now() < tapping {
             std::thread::sleep(Duration::from_millis(20));
             seen.extend(drain(&mut received));
         }
-        let keys: Vec<(Key, KeyAction)> = seen
-            .iter()
-            .filter_map(|input| match input {
-                Input::Key(event) => Some((event.key, event.action)),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(seen.first(), Some(&Input::KeyDevice(DeviceState::Ready)));
+        assert_eq!(
+            seen,
+            vec![Input::KeyDevice(DeviceState::Ready)],
+            "the first press of each only arms it: nothing but ready may come of the taps"
+        );
+
+        eprintln!(
+            "E7 step 2 (60 s): now HOLD the grave key for a second or two and let go, then the same with Mouse 4."
+        );
+        let deadline = Instant::now() + Duration::from_secs(60);
+        let mut keys = Vec::new();
+        while Instant::now() < deadline && keys.len() < 4 {
+            std::thread::sleep(Duration::from_millis(20));
+            keys.extend(
+                drain(&mut received)
+                    .into_iter()
+                    .filter_map(|input| match input {
+                        Input::Key(event) => Some((event.key, event.action)),
+                        _ => None,
+                    }),
+            );
+        }
         assert_eq!(
             keys,
             vec![

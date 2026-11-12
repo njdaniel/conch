@@ -77,7 +77,7 @@ pub mod input;
 pub mod keydev;
 pub mod keys;
 #[cfg(any(windows, test))]
-pub mod keys_windows;
+pub(crate) mod keys_windows;
 pub mod lines;
 pub mod livekit;
 pub mod logger;
