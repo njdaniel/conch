@@ -1,0 +1,34 @@
+# Direct npm dependencies of the iOS spike (#1393, M5-A), under ADR-016.
+# One package name per line; comments and blank lines ignored. Each line needs
+# Nick's sign-off in the PR that adds it. Enforced by check.sh through
+# scripts/web-depgate.sh. The exact versions are in package.json; the
+# transitive ones follow, pinned by package-lock.json.
+#
+# No test dependencies (jest), linter (eslint) or formatter (prettier): unit
+# tests run with `node --test` on `tsc` output.
+
+# Runtime
+react
+react-native
+
+# Build: the React Native CLI (CocoaPods autolinking, Metro), Babel and Metro.
+@react-native-community/cli
+@react-native-community/cli-platform-ios
+@react-native/babel-preset
+@react-native/metro-config
+@babel/core
+@babel/runtime
+
+# Types and the compiler (typecheck only).
+@react-native/typescript-config
+@types/react
+typescript
+
+# Voice (M5-C, #1395): the LiveKit React Native SDK 3.1.0, its WebRTC peer
+# (^150.1.0; 150.1.1 is what npm resolves) and livekit-client 2.22.3, the
+# repository's version (web/package.json). The same three lines, at the same
+# versions, as the Android spike (#1391). The CocoaPods they pull (WebRTC) are
+# inventoried on the Mac.
+@livekit/react-native
+@livekit/react-native-webrtc
+livekit-client
