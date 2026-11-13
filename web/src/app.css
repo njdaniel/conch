@@ -1605,9 +1605,6 @@ label {
   /* Its messages never make the column taller: it scrolls instead. */
   contain: size;
   overflow-y: auto;
-  /* A wheel or swipe past either end of the messages stops here: it does not
-     scroll the column or the page behind (issue #1813). */
-  overscroll-behavior: contain;
   padding: var(--s2) var(--s2) var(--s3);
 }
 
@@ -4834,25 +4831,24 @@ button.link {
 }
 
 /* A short window (200% zoom of a laptop's screen is about 720×450, issue
-   #536): no column is squeezed past what is usable. The lobby keeps a height
-   of its own, the window's, so the side columns scroll inside themselves and
-   the conversation ends at the voice dock (issue #1813; a lobby as tall as its
-   tallest column left a band under the composer and let the page scroll). It
-   is never shorter than 31rem: the top bar, the dock, the conversation's
-   header, 12rem of messages and the composer add up to about 482 px. In a
-   window shorter than that the page scrolls as a document, with the composer
-   still on the dock. */
+   #536): the page scrolls as a document rather than squeezing each column into
+   the window. The conversation sets the height of the middle row (the channel
+   list and the members panel scroll inside themselves, so they no longer make
+   the row as tall as their content: that left an empty band under the
+   composer, issue #1813). When the page is taller than the window it scrolls
+   and the composer stays directly above the voice dock; when it is shorter the
+   row fills the window and the log takes what is left, never less than 12rem,
+   so it still scrolls and loads older messages as before. */
 @media (max-height: 560px) {
-  .lobby:not(.phone) {
-    height: max(calc(100vh - var(--notice-h, 0px)), 31rem);
-    height: max(calc(100dvh - var(--notice-h, 0px)), 31rem);
+  .lobby {
+    height: auto;
+    min-height: calc(100vh - var(--notice-h, 0px));
+    min-height: calc(100dvh - var(--notice-h, 0px));
   }
 
-  /* The phone layout keeps its own (the rule above): the document scrolls
-     there, under a navigation that stays at the bottom edge. */
-  .lobby.phone {
-    height: auto;
-    min-height: 100vh;
+  .lobby:not(.phone) .channels,
+  .lobby:not(.phone) .panel {
+    contain: size;
   }
 
   .share-frame video {
@@ -4870,7 +4866,9 @@ button.link {
     min-height: 12rem;
   }
 
-  .dock {
+  /* The dock keeps its half of the window (Voice options open can be taller
+     than the window), scrolling inside itself, except on a phone. */
+  .lobby.phone .dock {
     max-height: none;
   }
 }

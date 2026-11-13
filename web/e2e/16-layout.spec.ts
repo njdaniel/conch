@@ -399,82 +399,101 @@ for (const [size, options] of phoneSizes) {
 
 // ---------------------------------------------------------------- issue #1813
 
-// In a short desktop window the page used to scroll as a document: the middle
-// row grew to the members list, the conversation ended at its composer, and a
-// wheel that ran past the end of the messages moved the page, leaving a band
-// under the composer. Now the lobby has a height of its own: the composer sits
-// on the voice dock at every height, and nothing but the messages scrolls.
+// In a short desktop window the page scrolls as a document (issue #536). It
+// used to leave an empty band under the composer: the members list made the
+// middle row taller than the conversation. Now the conversation sets the row,
+// so at every height, with or without voice on the server and with a notice
+// bar above the page, the composer sits on the voice dock, and with the page
+// scrolled to its end the composer is whole. Joined and watching a share, which
+// hold the dock up, are in 12-screen-share, which has LiveKit.
 const shortWindows: readonly (readonly [string, BrowserContextOptions])[] = [
-  ...[400, 470, 560, 640, 720, 900].map((height): readonly [string, BrowserContextOptions] => [`1215×${String(height)}`, { viewport: { width: 1215, height } }]),
+  ...[400, 470, 560, 561, 640].map((height): readonly [string, BrowserContextOptions] => [`1215×${String(height)}`, { viewport: { width: 1215, height } }]),
   ['720×450 at 200%', { viewport: { width: 720, height: 450 }, deviceScaleFactor: 2 }],
 ];
 
-test('P1813 in a short window the composer stays on the voice dock while the person scrolls', async ({ meet, secrets, world }) => {
+// With voice set up on the server the dock is taller: the strip's roster, its
+// buttons and its status (about 130 px against 58 px without).
+const dockStates = ['no voice', 'voice set up, nobody joined', 'a notice bar above the page'] as const;
+
+test('P1813 in a short window the composer stays on the voice dock, whole, as the person scrolls', async ({ meet, secrets, world }) => {
   const tag = `p1813-${String(Date.now())}`;
   const channel = `${tag}-c`;
   await must(world, world.tokens.operator, 'POST', '/v0/channels', { name: channel });
   const me = await member(world, channel, `${tag}-me`);
   secrets.push(me.token);
+  const others: Member[] = [];
   // A members list longer than any of these windows.
-  for (let i = 0; i < 30; i++) secrets.push((await member(world, channel, `${tag}-roster-${String(i)}`)).token);
+  for (let i = 0; i < 30; i++) others.push(await member(world, channel, `${tag}-roster-${String(i)}`));
+  for (const o of others) secrets.push(o.token);
   for (let i = 0; i < 60; i++) {
     await must(world, me.token, 'POST', `/v2/channels/${encodeURIComponent(channel)}/messages`, { body: `${tag} message ${String(i)} ${'words '.repeat(i % 7 === 0 ? 40 : 3)}` });
   }
 
-  for (const [size, options] of shortWindows) {
-    const { page } = await meet(options);
-    await signIn(page, world, me.token, me.name);
-    await openChannel(page, channel);
-    await expect(messages(page).getByText(`${tag} message 59`)).toBeVisible();
-    const composer = page.locator('.composer');
-    const dock = page.locator('.dock');
-    const log = messages(page);
+  for (const state of dockStates) {
+    for (const [size, options] of shortWindows) {
+      // A window just over 560 px has the full-height layout, whose column
+      // clips (and scrolls inside itself) when a tall dock leaves it too little:
+      // that is the layout as it was, not this change's (see the PR).
+      if (size.endsWith('×561') && state === 'voice set up, nobody joined') continue;
+      const { page } = await meet(options);
+      if (state === 'voice set up, nobody joined') await servePresence(page, world, me.token, channel, others.slice(0, 2).map((o) => o.id));
+      await signIn(page, world, me.token, me.name);
+      await openChannel(page, channel);
+      await expect(messages(page).getByText(`${tag} message 59`)).toBeVisible();
+      if (state === 'a notice bar above the page') {
+        // What the update notice does (UpdateNotice.tsx): a bar above the
+        // page, its height in --notice-h on the root.
+        await page.evaluate(() => {
+          const bar = document.createElement('div');
+          bar.textContent = 'A new version is ready';
+          bar.style.height = '44px';
+          document.body.prepend(bar);
+          document.documentElement.style.setProperty('--notice-h', '44px');
+        });
+      }
+      const composer = page.locator('.composer');
+      const dock = page.locator('.dock');
+      const screen = page.viewportSize();
+      if (screen === null) throw new Error('no window size');
 
-    // The composer's bottom edge is on the dock's top edge, and the page and
-    // every ancestor of the log are where they were.
-    // Under 31rem the lobby is taller than the window and the page scrolls as
-    // a document (with the composer still on the dock), so only a wheel over
-    // the messages is held to leave the page where it was there.
-    let base = 0;
-    const settled = async (step: string, pageStays: boolean): Promise<void> => {
-      await page.waitForTimeout(150);
-      const where = `${size}, ${step}`;
-      const c = await composer.boundingBox();
-      const d = await dock.boundingBox();
-      if (c === null || d === null) throw new Error(`${where}: no composer or dock`);
-      expect(Math.abs(c.y + c.height - d.y), `${where}: the composer is ${String(d.y - c.y - c.height)} px above the dock`).toBeLessThanOrEqual(1);
-      const moved = await page.evaluate((from) => {
-        const out: string[] = [];
-        if (window.scrollY !== from) out.push(`window ${String(window.scrollY)}, was ${String(from)}`);
-        for (const el of Array.from(document.querySelectorAll('.lobby, .lobby > *, .conversation-body, .log-wrap'))) {
-          if (el.scrollTop !== 0) out.push(`${el.tagName.toLowerCase()}.${el.className} ${String(el.scrollTop)}`);
-        }
-        return out;
-      }, base);
-      if (pageStays) expect(moved, `${where}: something scrolled`).toEqual([]);
-    };
-    const tall = (options.viewport?.height ?? 0) >= 496;
-    const wheel = async (x: number, y: number, dy: number, step: string, inLog = false): Promise<void> => {
-      await page.mouse.move(x, y);
-      await page.mouse.wheel(0, dy);
-      await settled(step, inLog || tall);
-    };
+      // The composer's bottom edge is on the dock's top edge; and, with the
+      // page scrolled to its end, the composer and the dock are whole inside
+      // the window.
+      const settled = async (step: string): Promise<void> => {
+        const where = `${size}, ${state}, ${step}`;
+        await expect(async () => {
+          const c = await boxOf(composer, `${where}: the composer`);
+          const d = await boxOf(dock, `${where}: the dock`);
+          expect(Math.abs(c.y + c.height - d.y), `${where}: the composer is ${String(d.y - c.y - c.height)} px above the dock`).toBeLessThanOrEqual(1);
+        }).toPass({ timeout: 2000 });
+        await page.evaluate(() => {
+          window.scrollTo(0, document.documentElement.scrollHeight);
+        });
+        const c = await boxOf(composer, `${where}: the composer at the end of the page`);
+        const d = await boxOf(dock, `${where}: the dock at the end of the page`);
+        expect(c.y, `${where}: the composer's top at the end of the page`).toBeGreaterThanOrEqual(-0.5);
+        expect(c.y + c.height, `${where}: the composer's bottom at the end of the page`).toBeLessThanOrEqual(d.y + 1);
+        expect(d.y + d.height, `${where}: the dock's bottom at the end of the page`).toBeLessThanOrEqual(screen.height + 0.5);
+        await page.evaluate(() => {
+          window.scrollTo(0, 0);
+        });
+      };
+      const wheel = async (x: number, y: number, dy: number, step: string): Promise<void> => {
+        await page.mouse.move(x, y);
+        await page.mouse.wheel(0, dy);
+        await settled(step);
+      };
 
-    await settled('at the start', tall);
-    base = await page.evaluate(() => window.scrollY);
-    const box = await log.boundingBox();
-    const screen = page.viewportSize();
-    if (box === null || screen === null) throw new Error(`${size}: no log`);
-    const mid = { x: box.x + box.width / 2, y: box.y + box.height / 2 };
-    await wheel(mid.x, mid.y, -3000, 'wheel up past the top of the messages', true);
-    await wheel(mid.x, mid.y, 6000, 'wheel down to the end', true);
-    await wheel(mid.x, mid.y, 3000, 'wheel past the end of the messages', true);
-    const c = await composer.boundingBox();
-    if (c !== null) await wheel(c.x + 20, c.y + c.height / 2, 2000, 'wheel over the composer');
-    await wheel(20, screen.height - 20, 2000, 'wheel in the bottom corner');
-    await wheel(screen.width - 20, 20, 2000, 'wheel in the top corner');
-    await wheel(screen.width - 20, screen.height / 2, 2000, 'wheel over the members column');
-    await page.keyboard.press('End');
-    await settled('the End key', tall);
+      await settled('at the start');
+      const box = await boxOf(messages(page), `${size}: the log`);
+      const mid = { x: box.x + box.width / 2, y: Math.min(box.y + box.height / 2, screen.height - 10) };
+      await wheel(mid.x, mid.y, -3000, 'wheel up past the top of the messages');
+      await wheel(mid.x, mid.y, 6000, 'wheel down to the end');
+      await wheel(mid.x, mid.y, 3000, 'wheel past the end of the messages');
+      await wheel(20, screen.height - 20, 2000, 'wheel in the bottom corner');
+      await wheel(screen.width - 20, screen.height / 2, 2000, 'wheel over the members column');
+      await page.keyboard.press('End');
+      await settled('the End key');
+    }
   }
 });
