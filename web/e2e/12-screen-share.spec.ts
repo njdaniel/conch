@@ -981,7 +981,7 @@ test.describe('screen share with LiveKit', () => {
       };
       // 561 px is the full-height layout, which squeezes a share to nothing in
       // a window this short whatever the page does at 560 (a pre-existing
-      // limit, not this change's); joined, the composer is on the dock there too.
+      // limit, not this change's: issue #1815); joined, the composer is on the dock there too.
       const heights: readonly (readonly [number, number])[] = [[1215, 560], [1215, 470], [1215, 400], [720, 450]];
       for (const [width, height] of [...heights, [1215, 561]] as const) {
         await b.page.setViewportSize({ width, height });

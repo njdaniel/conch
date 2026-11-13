@@ -433,7 +433,7 @@ test('P1813 in a short window the composer stays on the voice dock, whole, as th
     for (const [size, options] of shortWindows) {
       // A window just over 560 px has the full-height layout, whose column
       // clips (and scrolls inside itself) when a tall dock leaves it too little:
-      // that is the layout as it was, not this change's (see the PR).
+      // that is the layout as it was, not this change's (issue #1815).
       if (size.endsWith('×561') && state === 'voice set up, nobody joined') continue;
       const { page } = await meet(options);
       if (state === 'voice set up, nobody joined') await servePresence(page, world, me.token, channel, others.slice(0, 2).map((o) => o.id));
