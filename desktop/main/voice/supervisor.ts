@@ -69,7 +69,7 @@ import {
 import { EndpointError, listen, listenPipe, profileDir, runtimeDir, sweep, type AttachFailure, type EndpointDeps, type EndpointRefusal, type Listening } from './endpoint.ts';
 import { validProfileId } from '../vault/files.ts';
 import { SCHEMA_V2, LineSplitter, Tracker, command, encodeCommand, finalPhase, negotiate, startCommand, type Command, type Event, type Version, type Want } from './protocol.ts';
-import { defaultSpawn, findHelper, HelperError, helperArgs, helperEnv, spawnHelper, type FindDeps, type HelperRefusal, type SpawnFn } from './spawn.ts';
+import { defaultSpawn, findHelper, HelperError, helperArgs, helperEnv, spawnHelper, type FindDeps, type HelperRefusal, type SpawnFn, type UntrustedCause } from './spawn.ts';
 
 // What the helper says it is doing, as the UI may show it.
 export interface HelperView {
@@ -102,12 +102,17 @@ export type VoiceState =
   // Voice cannot start on this machine or in this app: the helper is not
   // installed (text stays usable), not trusted, or the runtime directory or
   // socket refused. Nothing was spawned.
-  | { readonly status: 'unavailable'; readonly reason: HelperRefusal | EndpointRefusal }
+  | { readonly status: 'unavailable'; readonly reason: HelperRefusal | EndpointRefusal; readonly cause?: UntrustedCause }
   | { readonly status: 'starting'; readonly generation: number }
-  | { readonly status: 'running'; readonly generation: number; readonly helper: HelperView }
+  // detail, while the helper reconnects for a connection reason, is as the
+  // ended state's.
+  | { readonly status: 'running'; readonly generation: number; readonly helper: HelperView; readonly detail?: string }
   | { readonly status: 'stopping'; readonly generation: number }
   // The helper reported its final state, as asked or for its own reason.
-  | { readonly status: 'ended'; readonly generation: number; readonly helper: HelperView }
+  // detail, for an end with a connection reason (connect_failed,
+  // server_unreachable, internal_error), is the helper's own words for it,
+  // redacted, printable and bounded.
+  | { readonly status: 'ended'; readonly generation: number; readonly helper: HelperView; readonly detail?: string }
   | { readonly status: 'failed'; readonly generation: number; readonly reason: StartFailure }
   | { readonly status: 'lost'; readonly generation: number; readonly reason: LossReason };
 
@@ -188,6 +193,9 @@ class Run {
   socket: Socket | null = null;
   hello: VoiceControlHelloV1 | null = null;
   view: HelperView | null = null;
+  // The last connection reason logged with its detail, so a state that
+  // repeats it is not logged again.
+  noted = '';
   version: Version | null = null;
   nextId = 1;
   started = false;
@@ -243,9 +251,43 @@ function viewOf(state: VoiceControlStateV1 | VoiceControlStateV2, helperVersion:
 function printable(line: string, secrets: readonly string[], nonceShape: boolean): string {
   let out = line;
   for (const s of secrets) if (s !== '') out = out.split(s).join('<redacted>');
+  out = out.replace(JWT_SHAPE, '<redacted>').replace(TOKEN_QUERY, '$1=<redacted>');
   if (nonceShape) out = out.replace(NONCE_SHAPE, '<redacted>');
   out = out.replace(/[^\x20-\x7e]/g, '?');
   return out.length > STDERR_LINE_BYTES ? `${out.slice(0, STDERR_LINE_BYTES)}…` : out;
+}
+
+// JWT_SHAPE is anything shaped like a JWT (a LiveKit access token is one):
+// three base64url segments separated by dots. TOKEN_QUERY is the value of an
+// access_token or token parameter, in a URL or a line of text.
+const JWT_SHAPE = /[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/g;
+const TOKEN_QUERY = /\b((?:access_)?token)=[^\s&"')\]]*/gi;
+
+// The reasons whose words a person may be shown, and the log keeps.
+const DETAIL_REASONS: ReadonlySet<string> = new Set(['connect_failed', 'server_unreachable', 'internal_error']);
+const DETAIL_BYTES = 200;
+
+// detailFrom finds the helper's words for a reason in its standard error: the
+// helper's status line reads "not connected: connect failed (the error's
+// text); ...". The control protocol has no detail field, so the stderr tail
+// is the only place main can read it, and only a line of that shape counts:
+// another line is not this reason's words. The result is redacted again,
+// printable and bounded.
+export function detailFrom(lines: readonly string[], reason: string, secrets: readonly string[] = [], nonceShape = false): string | undefined {
+  if (!DETAIL_REASONS.has(reason)) return undefined;
+  const phrase = reason.replace(/_/g, ' ');
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i] ?? '';
+    const at = line.indexOf(`${phrase} (`);
+    if (at < 0) continue;
+    const inner = line.slice(at + phrase.length + 2).replace(/\)(?:; [^)]*)?$/, '');
+    return bound(printable(inner, secrets, nonceShape));
+  }
+  return undefined;
+}
+
+function bound(text: string): string {
+  return text.length > DETAIL_BYTES ? `${text.slice(0, DETAIL_BYTES)}…` : text;
 }
 
 // NONCE_SHAPE is a run at least as long as the attach nonce, in its alphabet
@@ -520,8 +562,11 @@ export class Supervisor {
   private unavailable(err: unknown): VoiceState {
     if (err instanceof HelperError || err instanceof EndpointError) {
       const reason = err.reason as HelperRefusal | EndpointRefusal;
-      this.log(`voice: unavailable: ${reason}`);
-      const next: VoiceState = { status: 'unavailable', reason };
+      // A HelperError's words name the folder or file that failed: a path,
+      // which is no secret, kept to main's log and off the page.
+      const why = err instanceof HelperError ? `: ${printable(err.why, [], false)}` : '';
+      this.log(`voice: unavailable: ${reason}${why}`);
+      const next: VoiceState = { status: 'unavailable', reason, ...(err instanceof HelperError && err.trustCause !== undefined ? { cause: err.trustCause } : {}) };
       this.set(next);
       return next;
     }
@@ -548,12 +593,30 @@ export class Supervisor {
     if (this.current !== run || run.outcome !== null || run.stopping || !run.ready) return;
     const view = run.view ?? null;
     if (view === null) return;
+    const detail = view.reason === undefined || !(finalPhase(view.phase) || view.phase === 'reconnecting') ? undefined : this.noteDetail(run, view);
+    const shown = detail === undefined ? {} : { detail };
     if (finalPhase(view.phase)) {
-      run.outcome = { status: 'ended', generation: run.generation, helper: view };
+      run.outcome = { status: 'ended', generation: run.generation, helper: view, ...shown };
       this.set(run.outcome);
       return;
     }
-    this.set({ status: 'running', generation: run.generation, helper: view });
+    this.set({ status: 'running', generation: run.generation, helper: view, ...shown });
+  }
+
+  // noteDetail logs a connection reason once for each time the helper gives
+  // it, with the helper's words for it if its standard error has them, and
+  // returns those words. The helper's connect error is written to its
+  // standard error only if the helper does so; the log says when it did not.
+  private noteDetail(run: Run, view: HelperView): string | undefined {
+    const reason = view.reason ?? '';
+    if (!DETAIL_REASONS.has(reason)) return undefined;
+    const detail = detailFrom(run.stderr.lines, reason, run.secrets, run.windows);
+    const key = `${view.phase}:${reason}:${detail ?? ''}`;
+    if (run.noted !== key) {
+      run.noted = key;
+      this.log(`voice: helper ${String(run.generation)} ${finalPhase(view.phase) ? 'ended' : view.phase}: ${reason}: ${detail ?? 'no detail from the helper'}`);
+    }
+    return detail;
   }
 
   private watchChild(run: Run, child: ChildProcessWithoutNullStreams): void {
@@ -584,6 +647,7 @@ export class Supervisor {
     if (run.exited) return;
     run.exited = true;
     this.log(`voice: helper ${String(run.generation)} exited (${signal === null ? `code ${String(code)}` : signal})`);
+    this.logStderr(run);
     run.listening?.close();
     run.socket?.destroy();
     for (const [, w] of run.waiters) {
@@ -598,6 +662,16 @@ export class Supervisor {
     // Whatever was waiting for the hello waits no longer.
     run.broken('exited');
     run.markReaped();
+  }
+
+  // logStderr writes the helper's redacted stderr tail to the log when it
+  // went wrong: it exited unexpectedly, was lost, failed, or ended in a
+  // failed phase. A helper that was asked to stop writes nothing.
+  private logStderr(run: Run): void {
+    const o = run.outcome;
+    const wrong = o === null ? !run.stopping : o.status === 'lost' || o.status === 'failed' || (o.status === 'ended' && o.helper.phase === 'failed');
+    if (!wrong) return;
+    for (const line of run.stderr.lines) this.log(`voice: helper ${String(run.generation)} stderr: ${line}`);
   }
 
   private readEvents(run: Run, socket: Socket, rest: Buffer): void {

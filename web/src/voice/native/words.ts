@@ -109,6 +109,22 @@ function problemText(problem: string | undefined): string | undefined {
   return has(reasonWords, problem) ? reasonWords[problem] : 'something went wrong with voice';
 }
 
+// The short reason the strip gives beside "not available here", by the kind
+// of refusal main reports (a closed set; any other kind says nothing more).
+// An untrusted helper whose folder other users can change says so (issue
+// #1850); the folder's name stays in main's log.
+const unavailableReasonWords: Readonly<Record<string, string>> = {
+  'not-installed': "the voice helper isn't installed",
+  untrusted: "the voice helper isn't trusted",
+  'profile-dir-unsafe': "the voice runtime folder isn't safe",
+};
+const folderWritableWords = "the voice helper's folder can be changed by other users";
+
+function unavailableReason(view: NativeVoiceView): string | undefined {
+  if (view.problem === 'untrusted' && view.cause === 'folder-writable') return folderWritableWords;
+  return has(unavailableReasonWords, view.problem) ? unavailableReasonWords[view.problem] : undefined;
+}
+
 function where(view: NativeVoiceView): string {
   return view.channel === null ? '' : ` #${view.channel}`;
 }
@@ -133,9 +149,13 @@ export function words(view: NativeVoiceView, binding?: string): VoiceWords {
     case 'unavailable':
     case 'stopping':
     case 'ended': {
-      const reason = view.status === 'idle' || view.status === 'stopping' ? undefined : problemText(view.problem);
       const base = statusWords[view.status];
-      return { text: reason === undefined || view.status === 'unavailable' ? base : `${base}: ${reason}`, retry: false };
+      if (view.status === 'unavailable') {
+        const why = unavailableReason(view);
+        return { text: why === undefined ? base : `${base}: ${why}`, retry: false };
+      }
+      const reason = view.status === 'idle' || view.status === 'stopping' ? undefined : problemText(view.problem);
+      return { text: reason === undefined ? base : `${base}: ${reason}`, retry: false };
     }
     case 'failed':
     case 'lost': {

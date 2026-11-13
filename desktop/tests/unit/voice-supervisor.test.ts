@@ -5,10 +5,13 @@
 // no real helper, no Electron.
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
+import { chmodSync } from 'node:fs';
+import { join } from 'node:path';
+
 import type { ChildProcessWithoutNullStreams } from 'node:child_process';
 
 import { PASSED_THROUGH, defaultSpawn } from '../../main/voice/spawn.ts';
-import { StderrTail, Supervisor, type StartRequest, type Timings, type VoiceState } from '../../main/voice/supervisor.ts';
+import { StderrTail, Supervisor, detailFrom, type StartRequest, type Timings, type VoiceState } from '../../main/voice/supervisor.ts';
 import { FAKE_TOKEN, fixture, ownerLines, readFixture, scratch, until, type Scratch } from './voice-support.ts';
 
 let s: Scratch;
@@ -372,5 +375,107 @@ describe("the helper's standard error", () => {
     tail.push(`token=${FAKE_TOKEN.slice(0, 10)}`);
     tail.push(`${FAKE_TOKEN.slice(10)} done\n`);
     expect(tail.lines).toEqual(['token=<redacted> done']);
+  });
+});
+
+describe('a failure says why (issue #1850)', () => {
+  const JWT = 'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ1c2VyLTcifQ.c2lnbmF0dXJlLWJ5dGVzLWhlcmU';
+
+  it('an untrusted refusal logs the HelperError message, naming the folder that failed, and the state carries only the closed cause', async () => {
+    s.helper({ transcript: fixture('voice-control-v2/transcript-negotiation-v2-owner.json') });
+    chmodSync(s.root, 0o775);
+    const v = supervisor();
+    const got = await v.start(request);
+    expect(got).toEqual({ status: 'unavailable', reason: 'untrusted', cause: 'folder-writable' });
+    expect(logs.map((l) => l.line)).toContain(`voice: unavailable: untrusted: ${s.root} may be changed by other users`);
+    expect(JSON.stringify(got)).not.toContain(s.root);
+    expect(spawned()).toBe(0);
+  });
+
+  it('an untrusted refusal for another cause names the file and has no cause', async () => {
+    s.helper({ transcript: fixture('voice-control-v2/transcript-negotiation-v2-owner.json') });
+    chmodSync(join(s.resources, 'conch-voice'), 0o644);
+    const v = supervisor();
+    expect(await v.start(request)).toEqual({ status: 'unavailable', reason: 'untrusted' });
+    expect(logs.some((l) => l.line === 'voice: unavailable: untrusted: the voice helper is not executable')).toBe(true);
+  });
+
+  // connect_failed is a reason to reconnect (the helper stays running);
+  // server_unreachable and internal_error end the session.
+  it.each([
+    ['connect_failed', 'voice-control/transcript-rotation-then-duplicate.json', 7, 'running'],
+    ['server_unreachable', 'voice-control/transcript-identity-mismatch.json', undefined, 'ended'],
+    ['internal_error', 'voice-control/transcript-identity-mismatch.json', undefined, 'ended'],
+  ] as const)('the detail of %s is logged and carried, redacted of a JWT, a token= value and the nonce', async (reason, transcript, stopAt, status) => {
+    s.helper({
+      transcript: fixture(transcript),
+      ...(stopAt === undefined ? {} : { stopAt }),
+      failReason: reason,
+      stderrLines: [
+        'unrelated line',
+        `not connected: ${reason.replace(/_/g, ' ')} (could not reach wss://lk.example/rtc?access_token=${JWT}&x=1 with ${JWT} for {nonce} and token={token}); asking conchd for a new session`,
+      ],
+    });
+    const v = supervisor();
+    await v.start(request);
+    await until(() => v.state.status === status && ('helper' in v.state && v.state.helper.reason === reason), 5000, 'the state');
+    const st = v.state;
+    const detail = st.status === 'ended' || st.status === 'running' ? st.detail : undefined;
+    expect(detail).toBe('could not reach wss://lk.example/rtc?access_token=<redacted>&x=1 with <redacted> for <redacted> and token=<redacted>');
+    const nonce = (reported('env')[0]?.['env'] as Record<string, string>)['CONCH_VOICE_ATTACH'] ?? '';
+    const phase = status === 'ended' ? 'ended' : 'reconnecting';
+    expect(logs.map((l) => l.line)).toContain(`voice: helper 1 ${phase}: ${reason}: ${detail ?? ''}`);
+    if (status === 'ended') {
+      // The stderr tail is logged too, redacted the same way.
+      await until(() => logs.filter((l) => l.line.startsWith('voice: helper 1 stderr: ')).length === 2, 5000, 'the stderr tail');
+    }
+    const seen = [JSON.stringify(states), JSON.stringify(logs)].join('\n');
+    for (const secret of [FAKE_TOKEN, nonce, JWT, 'eyJhbGci']) expect(seen).not.toContain(secret);
+  });
+
+  it('a connection reason the helper gave no words for is logged as such, and carries no detail', async () => {
+    s.helper({ transcript: fixture('voice-control/transcript-rotation-then-duplicate.json'), stopAt: 7, failReason: 'connect_failed', stderrLines: ['an unrelated line'] });
+    const v = supervisor();
+    await v.start(request);
+    await until(() => v.state.status === 'running' && v.state.helper.reason === 'connect_failed', 5000, 'the state');
+    expect(v.state.status === 'running' && v.state.detail).toBeUndefined();
+    expect(logs.map((l) => l.line)).toContain('voice: helper 1 reconnecting: connect_failed: no detail from the helper');
+  });
+
+  it('a helper that exits unexpectedly has its redacted stderr tail logged with the prefix', async () => {
+    s.helper({ transcript: fixture('voice-control-v2/transcript-negotiation-v2-owner.json'), stopAt: 6, then: 'exit', exitCode: 3, stderrLines: ['boom token={token} {nonce}'] });
+    const v = supervisor();
+    await v.start(request);
+    await until(() => logs.some((l) => l.line.startsWith('voice: helper 1 stderr: ')), 5000, 'the stderr log');
+    expect(logs.map((l) => l.line)).toContain('voice: helper 1 stderr: boom token=<redacted> <redacted>');
+    expect(JSON.stringify(logs)).not.toContain(FAKE_TOKEN);
+  });
+
+  it('a helper that was asked to stop logs no stderr tail', async () => {
+    s.helper({ transcript: fixture('voice-control-v2/transcript-negotiation-v2-owner.json'), stopAt: 6, stderrLines: ['chatter'] });
+    const v = supervisor();
+    await v.start(request);
+    await v.stop();
+    expect(logs.some((l) => l.line.includes('stderr:'))).toBe(false);
+  });
+});
+
+describe('the redaction of the stderr tail and the detail (issue #1850)', () => {
+  const JWT = 'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ1c2VyLTcifQ.c2lnbmF0dXJlLWJ5dGVzLWhlcmU';
+
+  it('a JWT-shaped string and a token value are redacted in the stderr tail', () => {
+    const tail = new StderrTail(['NONCE-NONCE-NONCE']);
+    tail.push(`jwt ${JWT} url wss://h/x?access_token=abc123&token=def456 n=NONCE-NONCE-NONCE\n`);
+    expect(tail.lines).toEqual(['jwt <redacted> url wss://h/x?access_token=<redacted>&token=<redacted> n=<redacted>']);
+  });
+
+  it('detailFrom takes the words of the last matching line, redacted, printable and bounded', () => {
+    expect(detailFrom(['x', `not connected: connect failed (bad ${JWT}); trying again in 2.0 s`], 'connect_failed')).toBe('bad <redacted>');
+    expect(detailFrom(['not connected: internal error (token=zzz and NONCE-NONCE-NONCE)'], 'internal_error', ['NONCE-NONCE-NONCE'])).toBe('token=<redacted> and <redacted>');
+    expect(detailFrom(['an unrelated line'], 'server_unreachable')).toBeUndefined();
+    expect(detailFrom([`connect failed (${'a b'.repeat(200)})`], 'connect_failed')?.length).toBe(201);
+    expect(detailFrom(['connect failed (caf\u00e9\u0007)'], 'connect_failed')).toBe('caf??');
+    expect(detailFrom([], 'connect_failed')).toBeUndefined();
+    expect(detailFrom(['x'], 'left')).toBeUndefined();
   });
 });

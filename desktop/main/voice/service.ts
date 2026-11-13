@@ -279,16 +279,16 @@ export class VoiceService {
       case 'idle':
         return { status, generation: this.lastGeneration, channel: null, retryable: false };
       case 'unavailable':
-        return { status, generation: this.lastGeneration, channel: null, problem: s.reason, retryable: false };
+        return { status, generation: this.lastGeneration, channel: null, problem: s.reason, retryable: false, ...(s.cause === undefined ? {} : { cause: s.cause }) };
       case 'starting':
       case 'stopping':
         return { status, generation: s.generation, channel: this.channel, retryable: false };
       case 'running':
-        return { status, generation: s.generation, channel: this.channel, retryable: false, helper: helperOf(s.helper) };
+        return { status, generation: s.generation, channel: this.channel, retryable: false, helper: helperOf(s.helper), ...(s.detail === undefined ? {} : { detail: s.detail }) };
       case 'ended': {
         const reason = s.helper.reason;
         const retryable = reason !== undefined && RETRYABLE_REASONS.has(reason);
-        return { status, generation: s.generation, channel: this.channel, ...(reason === undefined ? {} : { problem: reason }), retryable, helper: helperOf(s.helper) };
+        return { status, generation: s.generation, channel: this.channel, ...(reason === undefined ? {} : { problem: reason }), retryable, helper: helperOf(s.helper), ...(s.detail === undefined ? {} : { detail: s.detail }) };
       }
       case 'failed':
       case 'lost':
