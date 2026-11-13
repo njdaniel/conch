@@ -264,6 +264,7 @@ describe('what the voice client records', () => {
       outputs: () => Promise.resolve([]),
       setSending: () => Promise.resolve(),
       setDeafened: () => undefined,
+      startAudio: () => Promise.resolve(),
       setVolume: () => undefined,
       level: () => 0,
       close: () => Promise.resolve(),

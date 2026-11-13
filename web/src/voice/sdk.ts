@@ -1129,6 +1129,11 @@ class LiveKitAdapter implements Room {
       .on(RoomEvent.ParticipantPermissionsChanged, (_prev: unknown, participant: Participant) => {
         if (participant === room.localParticipant) this.wakeGrant();
       })
+      .on(RoomEvent.AudioPlaybackStatusChanged, () => {
+        // The room's own answer, read as the event fires: playing starts and
+        // is refused again (a call, an interruption) as the browser decides.
+        if (!this.closed) events.onPlayback(room.canPlaybackAudio);
+      })
       .on(RoomEvent.MediaDevicesChanged, () => {
         void this.devicesChanged();
       })
@@ -1165,6 +1170,8 @@ class LiveKitAdapter implements Room {
     this.ensureOpen();
     // Whoever was already in the room: their tracks are subscribed by choice too.
     this.subscribeAll();
+    // Whether the browser lets this page play what it just subscribed to.
+    events.onPlayback(room.canPlaybackAudio);
     if (!publish) return;
     await this.publishMicrophone();
   }
@@ -1384,6 +1391,12 @@ class LiveKitAdapter implements Room {
     if (pub === null) return;
     if (on) await pub.unmute();
     else await pub.mute();
+  }
+
+  // Called from the tap, with nothing awaited before the SDK's own call: the
+  // browser counts only a call made inside the gesture.
+  startAudio(): Promise<void> {
+    return this.room.startAudio();
   }
 
   setDeafened(on: boolean): void {

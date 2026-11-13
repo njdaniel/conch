@@ -149,6 +149,11 @@ interface Stub {
   outputSelection: boolean;
   outputs: string[];
   outputFails: Error | null;
+  // The room's canPlaybackAudio, and what startAudio does: how many times it
+  // was called, and the error it rejects with (null: it succeeds).
+  canPlayback: boolean;
+  startAudios: number;
+  startAudioFails: Error | null;
   // ADR-015: what each camera capture was asked for, the captures made, a
   // refusal of the next one, and this connection's permission as LiveKit
   // last told it.
@@ -262,6 +267,9 @@ const state = vi.hoisted((): Stub => {
     outputSelection: true,
     outputs: [],
     outputFails: null,
+    canPlayback: true,
+    startAudios: 0,
+    startAudioFails: null,
     videoOptions: [],
     videoTracks: [],
     videoFails: null,
@@ -578,6 +586,16 @@ vi.mock('livekit-client', () => {
       state.handlers.set(event, fn);
       return this;
     }
+    get canPlaybackAudio() {
+      return state.canPlayback;
+    }
+    startAudio() {
+      state.startAudios++;
+      if (state.startAudioFails !== null) return Promise.reject(state.startAudioFails);
+      state.canPlayback = true;
+      state.handlers.get('apc')?.(true);
+      return Promise.resolve();
+    }
     connect(_url: string, token: string, options: unknown) {
       state.connectOptions = options;
       state.calls.push('connect');
@@ -623,6 +641,7 @@ vi.mock('livekit-client', () => {
       MediaDevicesChanged: 'mdc',
       ActiveDeviceChanged: 'adc',
       SignalConnected: 'sc',
+      AudioPlaybackStatusChanged: 'apc',
     },
     TrackEvent: { Ended: 'ended' },
     PublishTrackError,
@@ -706,6 +725,9 @@ beforeEach(() => {
   state.connectLog = null;
   state.duringConnect = null;
   state.audioContexts = 0;
+  state.canPlayback = true;
+  state.startAudios = 0;
+  state.startAudioFails = null;
   state.contextClose = null;
   state.roomOptions = undefined;
   state.connectOptions = undefined;
@@ -774,6 +796,7 @@ const events = {
   onStreamTracks: () => undefined,
   onMicrophoneLost: () => undefined,
   onMeter: () => undefined,
+  onPlayback: () => undefined,
   onDevicesChanged: () => undefined,
   onOutputMoved: () => undefined,
   onCameraEnded: () => undefined,
@@ -850,6 +873,73 @@ describe('the SDK adapter', () => {
       },
     );
   }
+
+  // iOS Safari plays nothing until a tap: the adapter tells the client what the
+  // room says after the join and whenever it changes, and the tap goes to the
+  // room's startAudio in the same call.
+  describe('playback held back until a tap', () => {
+    it('says what the room says after the join', async () => {
+      state.canPlayback = false;
+      const told: boolean[] = [];
+      const room = newLiveKitRoom();
+      await room.connect('wss://lk.example', 'tok-abcdef', 'room-abcdef', true, { ...events, onPlayback: (on: boolean) => told.push(on) });
+      expect(told).toEqual([false]);
+      await room.close();
+    });
+
+    it('says true after the join when the browser lets it play', async () => {
+      const told: boolean[] = [];
+      const room = newLiveKitRoom();
+      await room.connect('wss://lk.example', 'tok-abcdef', 'room-abcdef', false, { ...events, onPlayback: (on: boolean) => told.push(on) });
+      expect(told).toEqual([true]);
+      await room.close();
+    });
+
+    it('says what the room says whenever the event fires', async () => {
+      const told: boolean[] = [];
+      const room = newLiveKitRoom();
+      await room.connect('wss://lk.example', 'tok-abcdef', 'room-abcdef', true, { ...events, onPlayback: (on: boolean) => told.push(on) });
+      state.canPlayback = false;
+      state.handlers.get('apc')?.(false);
+      state.canPlayback = true;
+      state.handlers.get('apc')?.(true);
+      expect(told).toEqual([true, false, true]);
+      await room.close();
+    });
+
+    it('the tap calls startAudio at once, and success is told by the event', async () => {
+      state.canPlayback = false;
+      const told: boolean[] = [];
+      const room = newLiveKitRoom();
+      await room.connect('wss://lk.example', 'tok-abcdef', 'room-abcdef', true, { ...events, onPlayback: (on: boolean) => told.push(on) });
+      const done = room.startAudio();
+      // Called in the same turn as the tap, before anything was awaited.
+      expect(state.startAudios).toBe(1);
+      await done;
+      expect(told).toEqual([false, true]);
+      await room.close();
+    });
+
+    it('a refusal rejects with the browser\'s error and tells nothing more', async () => {
+      state.canPlayback = false;
+      const told: boolean[] = [];
+      const room = newLiveKitRoom();
+      await room.connect('wss://lk.example', 'tok-abcdef', 'room-abcdef', true, { ...events, onPlayback: (on: boolean) => told.push(on) });
+      state.startAudioFails = new DOMException('blocked', 'NotAllowedError');
+      await expect(room.startAudio()).rejects.toMatchObject({ name: 'NotAllowedError' });
+      expect(told).toEqual([false]);
+      await room.close();
+    });
+
+    it('tells nothing after a close', async () => {
+      const told: boolean[] = [];
+      const room = newLiveKitRoom();
+      await room.connect('wss://lk.example', 'tok-abcdef', 'room-abcdef', true, { ...events, onPlayback: (on: boolean) => told.push(on) });
+      await room.close();
+      state.handlers.get('apc')?.(false);
+      expect(told).toEqual([true]);
+    });
+  });
 
   it('a source that cannot be made closes the context and its clone, and says there is no meter', async () => {
     sourceThrows(() => true);

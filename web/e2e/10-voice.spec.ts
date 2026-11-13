@@ -1323,6 +1323,61 @@ test('a push-to-talk whose reports are slow is audited as the reported pair and 
     }
   });
 
+  // Issue #1793: on an iPhone in Safari the page may not play audio until it
+  // is tapped. A browser that refuses playback is made here by an init script
+  // on bob's page: an audio element's play() rejects, as Safari's does, until
+  // the page says it may (the test lets it only after it has seen the button).
+  // The real SDK then emits its playback event, the page shows "Tap to hear
+  // the channel", and the tap reaches room.startAudio: a tap that is refused
+  // leaves the button, one that is allowed clears it.
+  test('@voice a browser that holds playback back shows Tap to hear the channel, and the tap starts it', async ({ browser }) => {
+    const holdPlayback = async (page: Page): Promise<void> => {
+      await page.addInitScript(() => {
+        const w = window as unknown as { playAllowed: boolean; playRefused: number };
+        w.playAllowed = false;
+        w.playRefused = 0;
+        const real: unknown = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, 'play')?.value;
+        HTMLMediaElement.prototype.play = function held(this: HTMLMediaElement): Promise<void> {
+          if (this instanceof HTMLAudioElement && !w.playAllowed) {
+            w.playRefused++;
+            return Promise.reject(new DOMException('play() needs a tap', 'NotAllowedError'));
+          }
+          return typeof real === 'function' ? (Reflect.apply(real, this, []) as Promise<void>) : Promise.resolve();
+        };
+      });
+    };
+    const a = await person(browser, 'alice');
+    const b = await person(browser, 'bob', undefined, holdPlayback);
+    try {
+      const voice = voiceRegion(b.page);
+      await voiceRegion(a.page).getByRole('button', { name: 'Join voice' }).click();
+      await expect(voiceRegion(a.page)).toContainText('Connected in #voice-room', { timeout: 30_000 });
+      await voice.getByRole('button', { name: 'Join voice' }).click();
+      await expect(voice).toContainText('Connected in #voice-room', { timeout: 30_000 });
+      // Alice's voice reaches bob's page, whose browser will not play it.
+      const hear = voice.getByRole('button', { name: 'Tap to hear the channel' });
+      await expect(hear).toBeVisible({ timeout: 15_000 });
+      // Alice has no such button: her browser plays.
+      await expect(voiceRegion(a.page).getByRole('button', { name: 'Tap to hear the channel' })).toHaveCount(0);
+      // A tap the browser still refuses leaves it.
+      await hear.click();
+      await expect.poll(() => b.page.evaluate(() => (window as unknown as { playRefused: number }).playRefused)).toBeGreaterThan(1);
+      await expect(hear).toBeVisible();
+      // Allowed, the tap starts playback and the button goes.
+      await b.page.evaluate(() => {
+        (window as unknown as { playAllowed: boolean }).playAllowed = true;
+      });
+      await hear.click();
+      await expect(hear).toHaveCount(0, { timeout: 10_000 });
+      await expect(voice).toContainText('Connected in #voice-room');
+      await voice.getByRole('button', { name: 'Leave voice' }).click();
+      await expect(voice).toContainText('Not in voice', { timeout: 10_000 });
+    } finally {
+      await closeAll(a.context);
+      await closeAll(b.context);
+    }
+  });
+
   // Issue #591 (F24): one person's credential open on two pages, one of them
   // in voice. The other names them "cy (on another device)" and says that
   // joining there moves their voice; the one in voice names them "cy", and

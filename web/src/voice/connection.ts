@@ -210,6 +210,11 @@ export interface RoomEvents {
   // the open microphone cannot hear speech, so its gate stays shut.
   // When it does not, name is the browser's error name, if it gave one.
   readonly onMeter: (available: boolean, name?: string) => void;
+  // Whether this page may play audio now (the room's canPlaybackAudio): told
+  // after the join and whenever it changes. A browser such as iOS Safari
+  // plays nothing until the page has been tapped; Room.startAudio, called
+  // from the tap, lets it.
+  readonly onPlayback: (canPlay: boolean) => void;
   // The browser's devices changed: microphones came or went.
   readonly onDevicesChanged: () => void;
   // The output in use went, and the SDK moved every voice to this one.
@@ -290,6 +295,9 @@ export interface Room extends ShareRoom, CameraRoom {
   // Opens or closes the track: unmute or mute. Muted again after any republish.
   setSending: (on: boolean) => Promise<void>;
   setDeafened: (on: boolean) => void;
+  // Lets the browser play the room's audio. It must be called from the
+  // gesture itself (a tap): the promise rejects if the browser still refuses.
+  startAudio: () => Promise<void>;
   // How loud this page plays one person's microphone, by principal, 0 to 1:
   // now and whenever their microphone arrives later on this connection.
   // Deafen silences everyone whatever their volume.
@@ -381,6 +389,10 @@ export interface VoiceState {
   // refused the audio context that reads it. The open microphone needs it;
   // push to talk does not.
   readonly meter: boolean;
+  // Whether this page may play the channel's audio: false while the browser
+  // holds playback back until a tap (iOS Safari). VoiceClient.startAudio
+  // asks for it from the tap.
+  readonly playback: boolean;
   // Whether this browser lets the page choose the speakers (issue #660);
   // the outputs it lists, or null while they are not read; the output chosen
   // and in use, null being the system default; and what the page says of a
@@ -567,6 +579,7 @@ export const initialVoice: VoiceState = {
   reported: null,
   missing: false,
   meter: true,
+  playback: true,
   outputSelection: false,
   outputs: null,
   output: null,
@@ -794,6 +807,7 @@ export class VoiceClient {
       streamTracks: new Map(),
       missing: false,
       meter: true,
+      playback: true,
     });
     if (companion) this.followCompanion();
     void this.connect();
@@ -1511,6 +1525,7 @@ export class VoiceClient {
       ...nothingInUse,
       missing: false,
       meter: true,
+      playback: true,
       outputs: null,
       outputNote: null,
       viewing: false,
@@ -1544,6 +1559,20 @@ export class VoiceClient {
   setMuted(muted: boolean): void {
     this.set({ muted });
     this.applyBlock();
+  }
+
+  // startAudio is the tap on "Tap to hear the channel": the room is asked
+  // synchronously, inside the click, which is the gesture the browser wants.
+  // Success is told by the room's playback event (which clears the state);
+  // a refusal leaves it, and is kept in the diagnostics ring by its name.
+  startAudio(): void {
+    const room = this.room;
+    if (room === null) return;
+    const mine = this.attempt;
+    room.startAudio().catch((err: unknown) => {
+      const name = errorName(err);
+      if (mine === this.attempt && typeof name === 'string') record({ kind: 'device_error', name });
+    });
   }
 
   setDeafened(deafened: boolean): void {
@@ -1750,9 +1779,9 @@ export class VoiceClient {
     this.room = null;
     // A switch under way goes with its connection; its choice is kept.
     this.switching = false;
-    // The meter is the next room's to say: a note about this one's would
-    // stay up through the retry.
-    this.set({ speaking: new Set(), level: 0, talking: false, transmitting: false, meter: true, streamTracks: new Map(), cameraTracks: noCameraTracks, ...nothingInUse, ...this.cameraNow() });
+    // The meter and the playback are the next room's to say: a note or a
+    // button about this one's would stay up through the retry.
+    this.set({ speaking: new Set(), level: 0, talking: false, transmitting: false, meter: true, playback: true, streamTracks: new Map(), cameraTracks: noCameraTracks, ...nothingInUse, ...this.cameraNow() });
     if (room !== null) void room.close().catch(() => undefined);
     if (companion && !fromMain) void this.endCompanion();
     this.act(next, mine);
@@ -1893,6 +1922,10 @@ export class VoiceClient {
         // Nothing feeds the gate's level once the meter is gone: an open
         // microphone that was talking would stay open. It is shut.
         if (!available && this.state.mode === 'open') this.gate.shut();
+      },
+      onPlayback: (canPlay) => {
+        if (mine !== this.attempt) return;
+        if (canPlay !== this.state.playback) this.set({ playback: canPlay });
       },
       onDevicesChanged: () => {
         if (mine !== this.attempt) return;

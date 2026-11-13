@@ -72,6 +72,13 @@ class StubRoom implements Room {
     this.volumes.push({ principal, volume, connected: this.connectArgs !== null });
   };
   level = (): number => this.levelNow;
+  // Each tap's call, and what the room answers: nothing waited for before it.
+  startAudioCalls = 0;
+  startAudioFailure: Error | null = null;
+  startAudio = (): Promise<void> => {
+    this.startAudioCalls++;
+    return this.startAudioFailure === null ? Promise.resolve() : Promise.reject(this.startAudioFailure);
+  };
   // When set, closing the room reports it disconnected, as the SDK does for
   // a room that had joined.
   disconnectOnClose = false;
@@ -755,6 +762,78 @@ describe('talking', () => {
     expect(t.client.snapshot()).toMatchObject({ phase: 'connected', meter: true });
     t.rooms[1]?.events?.onMeter(false);
     expect(t.client.snapshot().meter).toBe(false);
+  });
+
+  // iOS Safari plays nothing until a tap: the room says so, and the tap is the
+  // client's startAudio, which calls the room at once.
+  describe('playback held back until a tap', () => {
+    it('is false when the room says so, and true again when it starts', async () => {
+      const t = await joined();
+      expect(t.client.snapshot().playback).toBe(true);
+      t.rooms[0]?.events?.onPlayback(false);
+      expect(t.client.snapshot().playback).toBe(false);
+      t.rooms[0]?.events?.onPlayback(true);
+      expect(t.client.snapshot().playback).toBe(true);
+    });
+
+    it('the tap calls the room\'s startAudio in the same call, before anything settles', async () => {
+      const t = await joined();
+      t.rooms[0]?.events?.onPlayback(false);
+      t.client.startAudio();
+      expect(t.rooms[0]?.startAudioCalls).toBe(1);
+      await settle();
+      // Success is the room's event, not the call's: nothing cleared it yet.
+      expect(t.client.snapshot().playback).toBe(false);
+      t.rooms[0]?.events?.onPlayback(true);
+      expect(t.client.snapshot().playback).toBe(true);
+    });
+
+    it('a refusal keeps it, and records the error\'s name', async () => {
+      forget();
+      const t = await joined();
+      t.rooms[0]?.events?.onPlayback(false);
+      const refusal = new Error('not allowed');
+      refusal.name = 'NotAllowedError';
+      if (t.rooms[0] !== undefined) t.rooms[0].startAudioFailure = refusal;
+      t.client.startAudio();
+      await settle();
+      expect(t.client.snapshot().playback).toBe(false);
+      expect(recent().filter((e) => e.kind === 'device_error').map((e) => e.name)).toEqual(['NotAllowedError']);
+      forget();
+    });
+
+    it('does nothing with no room', () => {
+      const t = setup();
+      expect(() => { t.client.startAudio(); }).not.toThrow();
+    });
+
+    it('is back to true after a leave, and after a rejoin', async () => {
+      const t = await joined();
+      t.rooms[0]?.events?.onPlayback(false);
+      await t.client.leave();
+      expect(t.client.snapshot().playback).toBe(true);
+      t.client.join('general');
+      await settle();
+      expect(t.client.snapshot()).toMatchObject({ phase: 'connected', playback: true });
+    });
+
+    it('a drop clears it for the retry, and the new room says its own', async () => {
+      const t = await joined();
+      t.rooms[0]?.events?.onPlayback(false);
+      t.rooms[0]?.events?.onDisconnected('lost');
+      expect(t.client.snapshot()).toMatchObject({ phase: 'unavailable', playback: true });
+      t.clock.advance(1000);
+      await settle();
+      t.rooms[1]?.events?.onPlayback(false);
+      expect(t.client.snapshot().playback).toBe(false);
+    });
+
+    it('an event from a room that was let go is ignored', async () => {
+      const t = await joined();
+      t.rooms[0]?.events?.onDisconnected('lost');
+      t.rooms[0]?.events?.onPlayback(false);
+      expect(t.client.snapshot().playback).toBe(true);
+    });
   });
 
   it('with no level meter push to talk still transmits', async () => {
