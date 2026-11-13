@@ -1,7 +1,8 @@
 # Design: the screen's sound from the Linux desktop ("everything but the call")
 
-- **Status:** **Proposed, for Nick's sign-off**, 2026-11-09, by the protocol-designer (issue [#1585](https://github.com/njdaniel/conch/issues/1585), D4-08; parent #772). It answers the Linux half of [#1552](https://github.com/njdaniel/conch/issues/1552) (Nick, 2026-11-07: a desktop share carries the screen's sound by default, scope `system_excluding_call`, where a route exists). Nothing here is implemented; no code, dependency, schema version or migration lands with this note. What needs Nick is in §15; the rest is a recommendation with its reason, made under the principal's delegation.
-- **Changes to accepted text:** none made here. Where this note would change text Nick signed (model B's "share audio is the companion's", [linux-desktop.md](linux-desktop.md) §6 and §8; "main never calls the route on Linux", [voice-control-plane.md](voice-control-plane.md) §13), it says so and lists the amendment for his yes (§17). Until he signs, every accepted document stands as written and the Linux share is silent and says so (#1582, D4-05).
+- **Status:** **Accepted by Nick, 2026-11-13** ("yes to recommendations"): D-1 to D-5 as recommended in §15; D-6 to D-8 accepted by the principal under Nick's delegation.
+- **History:** Proposed, for Nick's sign-off, 2026-11-09, by the protocol-designer (issue [#1585](https://github.com/njdaniel/conch/issues/1585), D4-08; parent #772). It answers the Linux half of [#1552](https://github.com/njdaniel/conch/issues/1552) (Nick, 2026-11-07: a desktop share carries the screen's sound by default, scope `system_excluding_call`, where a route exists). Nothing here is implemented; no code, dependency, schema version or migration lands with this note. What needs Nick is in §15; the rest is a recommendation with its reason, made under the principal's delegation.
+- **Changes to accepted text:** made in the PR that accepted this note (#1606), on Nick's yes, as §17 lists them: model B's "share audio is the companion's" ([linux-desktop.md](linux-desktop.md) §6 and §8) and "main never calls the route on Linux" ([voice-control-plane.md](voice-control-plane.md) §13), with the smaller ones of §17. As proposed, this note changed none of them and listed each for his yes. Until the implementation of §16 ships and L-S6 passes (§14.4), the Linux share is silent and says so (#1582, D4-05).
 - **Reads:** [linux-desktop.md](linux-desktop.md) §1, §6, §8, §9, §10 (model B, the §8 safety rules, the threat table); [voice-control-plane.md](voice-control-plane.md) §12–13 (the claim, the companion, its share audio by consent); [voice-multi-share.md](voice-multi-share.md) §5.4, §7.3–7.4 (audio per sharer; the helper under B2 plays none of it); [windows-desktop.md](windows-desktop.md) §8 (the three scopes; exclusion by process tree); [conch-voice.md](conch-voice.md) §13 row 7 (why the helper owns PipeWire in its process); [tui-voice.md](tui-voice.md) and `pkg/schema/voice_control*.go` (the control channel, v1 and v2); the capability report [linux-desktop-capabilities.md](../reviews/linux-desktop-capabilities.md) rows L-S5, L-S6 and experiment LE8.
 - **Current-code baseline:** `main` at `aaea4d11` (alpha.18), inspected 2026-11-09, in the worktree of this issue. Evidence markers: a claim checked in source or a document today is cited; a claim from memory says **(memory)**; a claim nobody has run says **(unverified)**.
 
@@ -298,6 +299,21 @@ The default and the remembered choice per profile; "Share without sound" sends n
 
 Nick signs D-1 to D-5 (architecture, a schema version, a route on the share-audio path, a dependency change). D-6 to D-8 are his to delegate to the principal. The amendments of §17 are made in the PR that flips this note to Accepted, with his yes recorded here.
 
+**Signed, 2026-11-13.** Nick, in his words: "i approve of those prs, yes to recommendations" (this note's PR, #1606, among them; recorded there the same day). That is his yes to D-1 to D-5, each as recommended:
+
+| # | Decided | By |
+| --- | --- | --- |
+| D-1 | **A**: the helper captures and publishes `ScreenshareAudio` on `p<id>` | Nick, 2026-11-13 |
+| D-2 | **`conch.voice_control.v3` as proposed in §7** | Nick, 2026-11-13 |
+| D-3 | **S2**: an optional `publisher` field on the companion audio request | Nick, 2026-11-13 |
+| D-4 | **The capture lives in `dmn-audio`**: a rev bump, no new crate | Nick, 2026-11-13 |
+| D-5 | **48 kHz stereo** | Nick, 2026-11-13 |
+| D-6 | "This application" is **unsupported on Linux for now** (L-S5) | the principal (Fable) under Nick's delegation, 2026-11-13 |
+| D-7 | **The exclusion rule as proposed** (§5.2) | the principal (Fable) under Nick's delegation, 2026-11-13 |
+| D-8 | **Five issues** (§16) | the principal (Fable) under Nick's delegation, 2026-11-13 |
+
+What the yes does not do: it implements nothing and offers nothing. The schema version lands with D4-09a under the `schema-change` skill, the `dmn-audio` commit with D4-09b, and no release offers "with sound" on Linux before L-S6 passes by hand (§14.4, §16's release rule).
+
 ## 16. Implementation split, and #1586 re-sized
 
 #1586 (D4-09) as filed is **L, estimate**. From this note it is **XL as one issue**: a schema version, a change in Nick's `dmn-audio`, a helper feature with a new PipeWire capture path, a server change on the share-audio path, main and web work, and a by-hand gate. Recommended: **promote the stub to five issues**, filed to the template when §15 is signed, each executable cold with this note; the stub itself becomes the helper issue (c), which is the one #1552 named. None touches the approval path (`.github/workflows/process-checks.yml`'s list); each says so.
@@ -315,7 +331,7 @@ Release rule: the Linux desktop offers "with sound" only in a release whose note
 
 ## 17. Amendments to accepted text, for the PR that accepts this note
 
-None is made now. On Nick's yes:
+**Made in the PR that accepted this note (#1606), on Nick's yes of 2026-11-13 (§15)**, against `main` at `ad48eb92` (merged into the branch first; every sentence quoted below stood there unchanged). The list is kept as it was proposed; "As made", after it, says where the text that landed differs from the list.
 
 - **linux-desktop.md §6**, the sentence "voice audio is the helper's, share audio is the companion's": add "**for playback**; on Linux the share's sound is **captured and published by the helper on `p<id>`** (linux-share-audio.md), and the companion's grant is never widened to audio there". §6.4 first bullet: "On Linux, where §8 has no audio route yet, main never asks and the companion never has it" becomes "On Linux main records the consent with `publisher: person` and the companion is never granted audio". D1-6 in §0 and the §12 gates table gain a row for this note.
 - **linux-desktop.md §8**: the table's "this application" row becomes **unsupported for now** with the portal reason; the "everything but the call" row becomes **the route of linux-share-audio.md §5, gated by L-S6**; "off by default" becomes "on by default where a route exists (#1552), chosen per profile, with one-click off"; the safety sentence is kept word for word. §10 gains the rows of §12 here, and the row "Share audio published without a press or a gate" is tightened as §12 says. §14 L-F10 points here.
@@ -324,6 +340,16 @@ None is made now. On Nick's yes:
 - **client-experience.md UX-15**: the one-line default note of §9.
 - **voice-multi-share.md §7.3**: "It shows no share text and plays share audio by the existing rules" gains "and on the Linux desktop publishes the person's share sound (linux-share-audio.md)".
 - **#1552** and **#772**: a comment each, recording D-1 to D-5 and linking this note; #1586 rewritten as §16.
+
+**As made (2026-11-13).** The documents carry the list above, with these differences, each the smallest that kept the amended text true to itself:
+
+- **linux-desktop.md, Status:** one sentence records the amendment, its date and who decided, as the #1578 amendment did.
+- **linux-desktop.md §0:** D1-6 keeps its text as signed and gains a row under it, **D1-6a**, which says what it supersedes ("share audio off by default"); §12 gains one row.
+- **linux-desktop.md §8:** besides the two rows and "off by default", the **none** row's status changes from "default" to the one-click alternative, since both could not be the default; the #1552 paragraph above the table (added by #1578 after this note was written) gains a sentence pointing here and still says the share is silent until the route exists and is demonstrated. The safety sentence is word for word.
+- **linux-desktop.md §10:** the row "Share audio returns the room's own voices" is **replaced** by §12's row of the same name, not kept beside it (the old one said "audio scopes off by default"); "Share audio published without a press or a gate" is tightened and keeps its Windows half; the other seven rows of §12 are added, each prefixed "Linux share sound" and with its section references naming this note.
+- **voice-control-plane.md §13:** the replaced sentence drops "so the companion never has audio on Linux", which the new sentence says; the `publisher` field and the audit detail are added as a dated paragraph and an audit line, both marked **not yet implemented** (D4-09d), because the rest of that section describes merged behaviour.
+- **voice-multi-share.md §7.3:** the clause is added after the #906 parenthesis, and the rest of the sentence ("which hold with several sharers unchanged") becomes its own sentence so that it still reads as about playback.
+- **Not done in the PR:** the comments on #1552 and #772, the rewrite of #1586 and the four new issues of §16. They are the principal's to file.
 
 ## 18. Sources
 
