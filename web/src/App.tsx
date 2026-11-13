@@ -2,6 +2,7 @@ import { ModerationScope } from './Moderation';
 // The browser client's top level: sign-in, the operator warning, then the
 // lobby. The auth, connection and channels reducers hold the state; src/api.ts
 // does every call and is the only code that sees the credential.
+import { flushSync } from 'react-dom';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState } from 'react';
 import * as api from './api';
 import { uploadRefusalLine } from './fileSize';
@@ -598,6 +599,11 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
   const [readStateEvent, setReadStateEvent] = useState<ReadStateV1 | null>(null);
   const [messageEvent, setMessageEvent] = useState<MessageV2 | null>(null);
   const [editEvent, setEditEvent] = useState<MessageV2 | null>(null);
+  const onMessageFrame = useCallback((message: MessageV2) => {
+    flushSync(() => {
+      setMessageEvent(message);
+    });
+  }, []);
   useEffect(() => {
     setReadStateEvent(null);
     setMessageEvent(null);
@@ -665,7 +671,10 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
     onManages,
     onMissing,
     onReadState: setReadStateEvent,
-    onMessage: setMessageEvent,
+    // Synchronous, so two frames handled in one tick each reach the
+    // notification hook: it is fed through this one slot, and its cursor
+    // moves past a frame the slot overwrote before a render (issue #1824).
+    onMessage: onMessageFrame,
     onMessageEdited,
     onChannelsChanged: refreshChannels,
     onPermissionsChanged: permissionsChanged,
