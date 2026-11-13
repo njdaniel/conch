@@ -190,13 +190,80 @@ describe('browser permission and cleanup', () => {
     rerender({ ...props(), eventsLive: false });
     expect(result.current.alerts).toHaveLength(0);
     expect(FakeNotification.all[0]?.closed).toHaveBeenCalled();
-    history.mockResolvedValue({ ok: true, complete: true, value: [message(2), message(3), message(4)] });
+    // Message 2 came live, so the cursor is already at 2 (issue: it used to
+    // stay at the first read's 1 and the reconnect re-walked the session).
+    history.mockResolvedValue({ ok: true, complete: true, value: [message(3), message(4)] });
     rerender({ ...props(), eventsLive: true });
     await vi.waitFor(() => {
       expect(result.current.alerts.map((item) => item.message.id)).toEqual([3, 4]);
     });
-    expect(history).toHaveBeenLastCalledWith('general', 1);
+    expect(history).toHaveBeenLastCalledWith('general', 2);
     expect(FakeNotification.all).toHaveLength(3);
+  });
+
+  it('does not announce an old message when a preference changes before a reconnect', async () => {
+    const history = vi.spyOn(api, 'loadMessagesAscending').mockResolvedValue({ ok: true, complete: true, value: [message(1)] });
+    const { result, rerender } = renderHook((p: Props) => useNotifications(p), { initialProps: props() });
+    await act(async () => {
+      await Promise.resolve();
+    });
+    // Policy is off: these arrive live and are, rightly, not announced.
+    const older = message(2, 'older @ada');
+    const old = message(3, 'old @ada');
+    rerender({ ...props(), event: older });
+    rerender({ ...props(), event: old });
+    act(() => {
+      result.current.setPolicy('all');
+    });
+    rerender({ ...props(), event: old, eventsLive: false });
+    history.mockResolvedValue({ ok: true, complete: true, value: [message(4, 'new')] });
+    rerender({ ...props(), event: old, eventsLive: true });
+    await vi.waitFor(() => {
+      expect(result.current.alerts.map((item) => item.message.id)).toEqual([4]);
+    });
+    expect(history).toHaveBeenLastCalledWith('general', 3);
+  });
+
+  it('keeps the cursor where it was for a message that arrives as the socket returns', async () => {
+    const history = vi.spyOn(api, 'loadMessagesAscending').mockResolvedValue({ ok: true, complete: true, value: [message(1)] });
+    const { result, rerender } = renderHook((p: Props) => useNotifications(p), { initialProps: props() });
+    await act(async () => {
+      await Promise.resolve();
+    });
+    act(() => {
+      result.current.setPolicy('all');
+    });
+    rerender({ ...props(), eventsLive: false });
+    history.mockResolvedValue({ ok: true, complete: true, value: [message(2), message(3)] });
+    rerender({ ...props(), eventsLive: true, event: message(3) });
+    await vi.waitFor(() => {
+      expect(result.current.alerts.map((item) => item.message.id)).toEqual([3, 2]);
+    });
+    expect(history).toHaveBeenLastCalledWith('general', 1);
+  });
+
+  it('delivers what a long absence read and continues from there when the page cap is hit', async () => {
+    const history = vi.spyOn(api, 'loadMessagesAscending').mockResolvedValue({ ok: true, complete: true, value: [message(1)] });
+    const { result, rerender } = renderHook((p: Props) => useNotifications(p), { initialProps: props() });
+    await act(async () => {
+      await Promise.resolve();
+    });
+    act(() => {
+      result.current.setPolicy('all');
+    });
+    rerender({ ...props(), eventsLive: false });
+    history.mockResolvedValue({ ok: true, complete: false, value: [message(2), message(3)] });
+    rerender({ ...props(), eventsLive: true });
+    await vi.waitFor(() => {
+      expect(result.current.alerts.map((item) => item.message.id)).toEqual([2, 3]);
+    });
+    rerender({ ...props(), eventsLive: false });
+    history.mockResolvedValue({ ok: true, complete: true, value: [message(4)] });
+    rerender({ ...props(), eventsLive: true });
+    await vi.waitFor(() => {
+      expect(result.current.alerts.map((item) => item.message.id)).toEqual([4]);
+    });
+    expect(history).toHaveBeenLastCalledWith('general', 3);
   });
 
   it('restarts backfill when a channel is renamed during reconciliation', async () => {
