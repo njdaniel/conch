@@ -958,6 +958,47 @@ describe('the SDK adapter', () => {
       await room.close();
     });
 
+    // The room says canPlaybackAudio the moment any one element plays, while
+    // a voice the browser refused earlier stays paused (#1793).
+    it('stays false while a voice the browser refused is paused, and says true when it plays', async () => {
+      const told: boolean[] = [];
+      const room = newLiveKitRoom();
+      await room.connect('wss://lk.example', 'tok-abcdef', 'room-abcdef', false, { ...events, onPlayback: (on: boolean) => told.push(on) });
+      const made: HTMLAudioElement[] = [];
+      const refused = { source: 'microphone', kind: 'audio', sid: 'r1', attach: () => { const el = document.createElement('audio'); made.push(el); return el; }, detach: () => made.splice(0) };
+      state.handlers.get('ts')?.(refused, undefined, { identity: 'p8' });
+      const el = made[0];
+      expect(el).toBeDefined();
+      if (el === undefined) return;
+      // jsdom's element is paused; another track played, so the room says true.
+      state.canPlayback = true;
+      state.handlers.get('apc')?.(true);
+      expect(told).toEqual([true, false]);
+      let paused = true;
+      Object.defineProperty(el, 'paused', { get: () => paused });
+      paused = false;
+      el.dispatchEvent(new Event('playing'));
+      expect(told).toEqual([true, false, true]);
+      // The browser lets go of it again (an interruption): the tap is back.
+      paused = true;
+      el.dispatchEvent(new Event('pause'));
+      expect(told).toEqual([true, false, true, false]);
+      await room.close();
+    });
+
+    it('a voice that left no longer holds playback back', async () => {
+      const told: boolean[] = [];
+      const room = newLiveKitRoom();
+      await room.connect('wss://lk.example', 'tok-abcdef', 'room-abcdef', false, { ...events, onPlayback: (on: boolean) => told.push(on) });
+      const made: HTMLAudioElement[] = [];
+      const refused = { source: 'microphone', kind: 'audio', sid: 'r1', attach: () => { const el = document.createElement('audio'); made.push(el); return el; }, detach: () => made.splice(0) };
+      state.handlers.get('ts')?.(refused, undefined, { identity: 'p8' });
+      state.handlers.get('apc')?.(true);
+      state.handlers.get('tu')?.(refused, undefined, { identity: 'p8' });
+      expect(told).toEqual([true, false, true]);
+      await room.close();
+    });
+
     it('tells nothing after a close', async () => {
       const told: boolean[] = [];
       const room = newLiveKitRoom();

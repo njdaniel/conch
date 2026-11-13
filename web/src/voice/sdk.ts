@@ -1091,6 +1091,10 @@ class LiveKitAdapter implements Room {
           if (el.muted !== this.deafened) el.muted = this.deafened;
         };
         el.addEventListener('volumechange', held);
+        // A voice the browser refused (paused) or let go of is told as the
+        // page's playback, not only the room's: see playbackAllowed.
+        el.addEventListener('playing', this.reportPlayback);
+        el.addEventListener('pause', this.reportPlayback);
         this.elements.set(track.sid ?? '', { el, principal, held });
         document.body.appendChild(el);
       })
@@ -1107,7 +1111,10 @@ class LiveKitAdapter implements Room {
         for (const el of track.detach()) el.remove();
         const gone = this.elements.get(track.sid ?? '');
         gone?.el.removeEventListener('volumechange', gone.held);
+        gone?.el.removeEventListener('playing', this.reportPlayback);
+        gone?.el.removeEventListener('pause', this.reportPlayback);
         this.elements.delete(track.sid ?? '');
+        this.reportPlayback();
       })
       .on(RoomEvent.LocalTrackPublished, (pub: LocalTrackPublication) => {
         // Published again by the SDK after a full reconnect: muted again.
@@ -1153,7 +1160,7 @@ class LiveKitAdapter implements Room {
         // is refused again (a call, an interruption) as the browser decides.
         if (this.closed) return;
         this.keepDeafened();
-        events.onPlayback(room.canPlaybackAudio);
+        events.onPlayback(this.playbackAllowed());
       })
       .on(RoomEvent.MediaDevicesChanged, () => {
         void this.devicesChanged();
@@ -1192,7 +1199,7 @@ class LiveKitAdapter implements Room {
     // Whoever was already in the room: their tracks are subscribed by choice too.
     this.subscribeAll();
     // Whether the browser lets this page play what it just subscribed to.
-    events.onPlayback(room.canPlaybackAudio);
+    events.onPlayback(this.playbackAllowed());
     if (!publish) return;
     await this.publishMicrophone();
   }
@@ -1488,6 +1495,21 @@ class LiveKitAdapter implements Room {
     this.keepDeafened();
     return started;
   }
+
+  // The room's canPlaybackAudio goes true as soon as any one element plays,
+  // while an element the browser refused earlier stays paused: that voice is
+  // silent and the tap that would start it is gone. Playback is allowed only
+  // when the room says so and no voice element is paused (#1793).
+  private playbackAllowed(): boolean {
+    if (!this.room.canPlaybackAudio) return false;
+    for (const { el } of this.elements.values()) if (el.paused) return false;
+    return true;
+  }
+
+  private readonly reportPlayback = (): void => {
+    if (this.closed) return;
+    this.events?.onPlayback(this.playbackAllowed());
+  };
 
   // Every voice element is muted exactly when the person is deafened.
   private keepDeafened(): void {
