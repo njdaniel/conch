@@ -153,12 +153,46 @@ at the next start. On success each file is audited as `file_uploaded` and
 
 **The request cap.** An `/mcp` request is at most `schema.MaxPostRequestBytes`
 (1 MiB), with one exception: for an authenticated agent whose manifest grants
-`files.upload`, on a server that takes agents' uploads, the cap is the base64
-length of `--max-upload-bytes` plus 1 MiB. The larger cap is room for image
-data only: a request over 1 MiB is refused (`413 request_too_large`) unless it
-is a single `tools/call` of `post_message` in which everything but the
-`data_base64` values is within 1 MiB. The message that is stored is therefore
-within the bound every client reads (`schema.MaxMessageFrameBytes`), as before.
+`files.upload` and, in at least one channel, `attach`, on a server that takes
+agents' uploads, the cap is the base64 length of `--max-upload-bytes` plus
+1 MiB. (The whole grant cannot be decided before the body is read: the channel
+is in the body. The tool decides it.) The larger cap is room for image data
+only: a request over 1 MiB is refused (`413 request_too_large`), before the MCP
+library decodes it, unless it is a single `tools/call` of `post_message` in
+which
+
+- there are at most 4 attachments;
+- each `data_base64` is a JSON string of padded standard base64 and nothing
+  else (no escape, no line break);
+- those strings decode to at most `--max-upload-bytes` together;
+- everything else in the request is within 1 MiB.
+
+The message that is stored is therefore within the bound every client reads
+(`schema.MaxMessageFrameBytes`), as before. The bytes let through as image data
+are always values at `params.arguments.attachments[i].data_base64`, which the
+MCP library can read only as an attachment's data or not at all, however keys
+are repeated or cased; every other byte is held to the bound.
+
+**Large requests, a few at a time.** One request over 1 MiB costs 150 to
+400 MiB of heap while it is decoded, so the server handles two at once
+(`mcpLargeRequestSlots`), server-wide. One more is answered
+`503 server_busy` with `Retry-After` (and `retry_after_seconds` in the error
+body) before its body is read; a request that does not declare its length is
+read up to 1 MiB + 1 byte first, to learn that it is large. It is 503 and not
+429 because the limit is the server's, shared by every agent: it says nothing
+about the caller's own rate and is not audited as the caller's rate limit.
+Nothing of a refused request was done, so the same call may be sent again.
+Requests within 1 MiB take no place. The body of a large request must arrive
+within two minutes, so that a slow sender cannot hold a place.
+
+**Files uploaded earlier.** An agent may also attach a file it uploaded over
+REST by naming it in a `conch.file_attachment.v1` `payload`, as a person does.
+That takes the same grant, at the moment of the post, on every post path here
+and over REST (`agentAttachRefusal`): without it the call is refused with
+`invalid_file_attachment`, the answer every unusable attachment gets, and
+audited as `access_denied` with `capability=files.upload`. So removing
+`files.upload` or `attach` also ends the agent's use of what it uploaded
+before.
 
 An agent cannot fetch a file, so it cannot read back what it posted; no tool
 returns file bytes or metadata.
@@ -287,6 +321,8 @@ MCP separates two failure classes; Conch maps its existing REST error taxonomy
 | Attachments over the upload size limit in total | 413 `file_too_large` (one upload) | tool error, `schema.Error{code:"file_too_large"}` |
 | The agent's upload budget is used up | 429 `rate_limited` | tool error, `schema.Error{code:"rate_limited"}` with `retry_after_seconds` |
 | Agents' uploads are off on this server | 403 `uploads_disabled` | tool error, `schema.Error{code:"uploads_disabled"}` |
+| A request over 1 MiB while the server is handling two already | (no REST request is that large) | **transport 503** `server_busy` with `Retry-After`, before the body is read |
+| A `payload` naming the agent's own earlier upload, without the grant now | 400 `invalid_file_attachment` | tool error, `schema.Error{code:"invalid_file_attachment"}` |
 | No grant to upload: `files.upload`, or `attach` in the channel | 403 `forbidden` | tool error, `schema.Error{code:"forbidden"}` |
 | Author (token principal) unknown/disabled | 400 `author_not_found` | **transport 401** (it is an auth failure at the MCP layer, not a body field) |
 | Store failure | 500 `internal_error` | tool error, `schema.Error{code:"internal_error"}`, detail withheld |

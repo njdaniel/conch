@@ -99,6 +99,12 @@ func (s *Server) postMessage(
 			return
 		}
 	}
+	// And for an agent it takes the grant to upload, now (issue #1798): a
+	// file it put by while it held the grant is not its to publish after.
+	if serr := s.callerAttachRefusal(r, channel, payload); serr != nil {
+		writeError(w, scopedPostStatus(serr.Code), serr.Code, serr.Message)
+		return
+	}
 
 	if authorID <= 0 {
 		writeError(w, http.StatusBadRequest, "invalid_request", "author_id must be positive")
@@ -568,6 +574,12 @@ func (s *Server) postScopedMessage(w http.ResponseWriter, r *http.Request, req s
 		writeError(w, http.StatusBadRequest, "invalid_request", "body must not be empty")
 		return
 	}
+	// An agent that attaches files it uploaded earlier needs the grant to
+	// upload, now, as on every post route (agentAttachRefusal).
+	if serr := s.callerAttachRefusal(r, channel, req.Payload); serr != nil {
+		writeError(w, scopedPostStatus(serr.Code), serr.Code, serr.Message)
+		return
+	}
 	// Only an agent's refusals are audited as access_denied; for a human
 	// the subject is empty and nothing is written.
 	agentSubject := agentSubjectFor(r, caller)
@@ -736,12 +748,17 @@ func (s *Server) postReply(w http.ResponseWriter, r *http.Request, req schema.Po
 		}
 	}
 
-	// As for any post: attaching a file takes the uploader's own credential.
+	// As for any post: attaching a file takes the uploader's own credential,
+	// and for an agent the grant to upload, now (agentAttachRefusal).
 	if req.Payload != nil && req.Payload.Schema == schema.FileAttachmentV1Name {
 		if _, verified := callerFrom(ctx); !verified {
 			writeError(w, http.StatusBadRequest, errFilesNeedAuth.Code, "attaching a file requires the uploader's own credential")
 			return
 		}
+	}
+	if serr := s.callerAttachRefusal(r, channel, req.Payload); serr != nil {
+		writeError(w, scopedPostStatus(serr.Code), serr.Code, serr.Message)
+		return
 	}
 	if strings.TrimSpace(req.Body) == "" {
 		writeError(w, http.StatusBadRequest, "invalid_request", "body must not be empty")

@@ -52,6 +52,18 @@ import (
 //   - MCP: the attachments argument of post_message, at most
 //     schema.MaxAgentAttachments items. The server uploads them and posts one
 //     message that carries them, all or nothing (agentScope.prepareUploads).
+//
+// The grant is asked for again wherever time has passed since it was last
+// decided, so that taking it away takes effect at once:
+//
+//   - an upload over REST is decided before the body is read and again before
+//     its row is made (handleUploadFile): the body can take a while;
+//   - a file an agent uploaded earlier and has not attached is its own only
+//     while it holds the grant. Every post by an agent that names existing
+//     files in a conch.file_attachment.v1 payload needs the grant in that
+//     channel at that moment (agentAttachRefusal), over MCP and over REST.
+//     Without that, an agent whose grant was removed could go on publishing
+//     what it had put by while it held it.
 
 const (
 	// DefaultAgentUploadsPerHour is the upload budget of each agent conchd
@@ -155,6 +167,23 @@ func (s *Server) setAgentUploadsPerHour(perHour int) {
 // caller turns the reason into its own protocol's refusal, and must go on to
 // spendAgentUploads before anything is stored.
 func (s *Server) agentUploadGrant(ctx context.Context, principalID int64, subject, channelName string) (schema.AgentManifestV1, store.Channel, string, error) {
+	return s.decideAgentUpload(ctx, principalID, subject, func() (store.Channel, error) {
+		return s.store.ChannelByName(ctx, channelName)
+	})
+}
+
+// agentUploadGrantIn is agentUploadGrant for a channel the caller has already
+// resolved: a post that is past its own gates, or an upload whose body has
+// arrived. The manifest and the membership are read afresh all the same.
+func (s *Server) agentUploadGrantIn(ctx context.Context, principalID int64, subject string, channel store.Channel) (schema.AgentManifestV1, string, error) {
+	m, _, reason, err := s.decideAgentUpload(ctx, principalID, subject, func() (store.Channel, error) { return channel, nil })
+	return m, reason, err
+}
+
+// decideAgentUpload is the one decision behind agentUploadGrant and
+// agentUploadGrantIn. find gives the channel, or store.ErrNotFound for none; it
+// is called only for an agent whose manifest holds the capability.
+func (s *Server) decideAgentUpload(ctx context.Context, principalID int64, subject string, find func() (store.Channel, error)) (schema.AgentManifestV1, store.Channel, string, error) {
 	deny := func(channelID int64, reason string) (schema.AgentManifestV1, store.Channel, string, error) {
 		s.auditAgentDenial(ctx, principalID, subject, schema.CapabilityFilesUpload, channelID, reason)
 		return schema.AgentManifestV1{}, store.Channel{}, reason, nil
@@ -172,7 +201,7 @@ func (s *Server) agentUploadGrant(ctx context.Context, principalID int64, subjec
 	if reason != "" {
 		return deny(0, reason)
 	}
-	channel, err := s.store.ChannelByName(ctx, channelName)
+	channel, err := find()
 	if errors.Is(err, store.ErrNotFound) {
 		return deny(0, denyNotMember)
 	}
@@ -209,6 +238,55 @@ func (s *Server) agentUploadChannel(w http.ResponseWriter, r *http.Request, agen
 		return schema.AgentManifestV1{}, store.Channel{}, false
 	}
 	return m, channel, true
+}
+
+// agentAttachRefusal decides whether a post by agent agentID in channel may
+// carry payload, and returns the refusal, or nil when it may. It concerns only
+// a conch.file_attachment.v1 payload, which names files that already exist:
+// any other payload, and none, is not its business.
+//
+// Attaching publishes a file, so it takes the grant that uploading takes, at
+// the moment of the post: files.upload, attach in this channel, membership.
+// The store's own rule (the file is the author's, in this channel, not yet
+// attached) says whose file it is; it cannot say whether the agent may still
+// publish. Without the grant the answer is the one every unusable attachment
+// gets, invalid_file_attachment, so the refusal says nothing a refused file
+// would not; the audit row (access_denied, capability files.upload) says why.
+// An agent no longer in the channel gets the unknown-channel answer, as from
+// the post itself.
+//
+// Every path by which an agent posts calls it, after the post's own gates and
+// before the insert: postMessage, postScopedMessage and postReply over REST,
+// and the three ways of post_message over MCP (grantedChannel.attachRefusal,
+// postReplyMCP). A post that brings its files with it (attachments) does not:
+// prepareUploads has decided the same grant for it already.
+func (s *Server) agentAttachRefusal(ctx context.Context, agentID int64, subject string, channel store.Channel, payload *schema.Payload) *schema.Error {
+	if payload == nil || payload.Schema != schema.FileAttachmentV1Name {
+		return nil
+	}
+	_, reason, err := s.agentUploadGrantIn(ctx, agentID, subject, channel)
+	switch {
+	case err != nil:
+		slog.ErrorContext(ctx, "files: decide agent attach grant failed", "principal", agentID, "error", err)
+		return errInternal
+	case reason == denyNotMember:
+		return errChannelNotFound
+	case reason != "":
+		return errInvalidFileAttachment
+	}
+	return nil
+}
+
+// callerAttachRefusal is agentAttachRefusal for a REST post: it concerns only
+// a request made with an agent's own credential. It returns nil for anyone
+// else; a post with no verified caller that names files is refused before it
+// gets here (errFilesNeedAuth).
+func (s *Server) callerAttachRefusal(r *http.Request, channel store.Channel, payload *schema.Payload) *schema.Error {
+	caller, ok := callerFrom(r.Context())
+	if !ok || caller.Kind != store.PrincipalAgent {
+		return nil
+	}
+	return s.agentAttachRefusal(r.Context(), caller.ID, routeSubject(r), channel, payload)
 }
 
 // routeSubject is the audit subject of a REST request: its route pattern,

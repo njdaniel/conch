@@ -18,17 +18,19 @@ import (
 // When this was written no agent could upload, so that was every file. Since
 // issue #1798 an agent may hold a grant to upload images (files.upload and
 // attach), and attaches those with the attachments argument or by naming its
-// own upload; agent_uploads_test.go has both. The agent here has every
-// capability and no attach in the channel, so it has uploaded nothing, and
-// what it cannot do is unchanged: attach someone else's file, or one that does
-// not exist.
+// own upload; agent_uploads_test.go has both. The agent here holds that grant
+// and has uploaded nothing, and what it cannot do is unchanged: attach someone
+// else's file, or one that does not exist. It holds the grant because a post
+// that names files without it is refused before the store is asked, and
+// audited as a denial (TestAgentAttachingNeedsTheGrantNow); this test is about
+// the store's refusal, which is the caller's mistake and writes no audit row.
 func TestMCPPostWithFileAttachmentIsRefusedAsInvalid(t *testing.T) {
 	f := newFileFixture(t)
 	// A real file, uploaded by a human and never attached: the agent must not
 	// be able to attach it either.
 	theirs := f.mustUpload(t, "ann", "plan.txt", []byte("ann's file"))
 	f.manifest(t, "aria", nil, schema.ChannelPermissionRead, schema.ChannelPermissionPost,
-		schema.ChannelPermissionPostNet, schema.ChannelPermissionWhisper)
+		schema.ChannelPermissionPostNet, schema.ChannelPermissionWhisper, schema.ChannelPermissionAttach)
 	f.seat(t, "net1", "aria", schema.NetRoleMember)
 
 	var logs strings.Builder

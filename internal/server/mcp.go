@@ -374,6 +374,11 @@ func (s *Server) postMessageMCP(ctx context.Context, scope *agentScope, in mcpPo
 	if serr != nil {
 		return schema.PostMessageResponseV2{}, serr
 	}
+	// Files the agent uploaded earlier and names in a payload take the grant
+	// to upload, now, as on the REST post (issue #1798).
+	if serr := channel.attachRefusal(ctx, schemaPayload); serr != nil {
+		return schema.PostMessageResponseV2{}, serr
+	}
 	stored, err := channel.insertMessage(ctx, in.Body, schemaPayload, uploads)
 	if errors.Is(err, errAttachmentRefused) {
 		// The caller's mistake, not ours: nothing was stored, and the answer
@@ -413,6 +418,9 @@ func (s *Server) postMessageMCP(ctx context.Context, scope *agentScope, in mcpPo
 func (s *Server) postScopedMessageMCP(ctx context.Context, scope *agentScope, channelName, body string, payload *schema.Payload, audience schema.Audience, uploads *pendingUploads) (schema.PostMessageResponseV2, *schema.Error) {
 	channel, serr := scope.channelForAudience(ctx, channelName, audience)
 	if serr != nil {
+		return schema.PostMessageResponseV2{}, serr
+	}
+	if serr := channel.attachRefusal(ctx, payload); serr != nil {
 		return schema.PostMessageResponseV2{}, serr
 	}
 	message, recipients, serr := channel.insertScopedMessage(ctx, body, payload, uploads)

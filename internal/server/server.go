@@ -288,6 +288,10 @@ type Server struct {
 	// memory only; its clock is now. Tests replace it with
 	// setAgentUploadsPerHour before serving.
 	agentUploadLimits *agentUploadLimiter
+	// mcpLargeSlots holds one token for each /mcp request over
+	// schema.MaxPostRequestBytes being handled (mcp_auth.go); its capacity is
+	// how many the server takes at once. Tests replace it before serving.
+	mcpLargeSlots chan struct{}
 	// messageEditLimits is the people's message edit limit (message_edit.go),
 	// in memory only; its clock is now. Tests replace it with
 	// setMessageEditLimit before serving.
@@ -348,7 +352,7 @@ func New(cfg Config, st *store.Store) *Server {
 				"missing", strings.Join(missing, ", "), "not_sent", ntfyNotSent(missing))
 		}
 	}
-	s := &Server{cfg: cfg, store: st, hub: hub.New(), approvals: approvals.New(st, notifier), broadcaster: broadcaster, credRecheckInterval: defaultCredentialRecheckInterval, sessionSweepInterval: defaultSessionSweepInterval, now: time.Now, renameFile: os.Rename, inviteLimits: newInviteLimiter(inviteLimitsFor(cfg)), reportLimits: newReportLimiter(defaultReportLimit()), reactionLimits: newReactionLimiter(defaultReactionLimit()), channelWriteLimits: newChannelWriteLimiter(defaultChannelWriteLimit()), notificationLimits: newNotificationLimiter(defaultNotificationWriteLimit(), defaultNotificationReadLimit()), agentUploadLimits: newAgentUploadLimiter(cfg.AgentUploadsPerHour),
+	s := &Server{cfg: cfg, store: st, hub: hub.New(), approvals: approvals.New(st, notifier), broadcaster: broadcaster, credRecheckInterval: defaultCredentialRecheckInterval, sessionSweepInterval: defaultSessionSweepInterval, now: time.Now, renameFile: os.Rename, inviteLimits: newInviteLimiter(inviteLimitsFor(cfg)), reportLimits: newReportLimiter(defaultReportLimit()), reactionLimits: newReactionLimiter(defaultReactionLimit()), channelWriteLimits: newChannelWriteLimiter(defaultChannelWriteLimit()), notificationLimits: newNotificationLimiter(defaultNotificationWriteLimit(), defaultNotificationReadLimit()), agentUploadLimits: newAgentUploadLimiter(cfg.AgentUploadsPerHour), mcpLargeSlots: make(chan struct{}, mcpLargeRequestSlots),
 		passwords: newPasswords(), logins: newLoginLimiter(loginLimitsFor(cfg)), addressMAC: newAddressMACKey(),
 		setupLimits: newSetupLimiter(cfg), messageEditLimits: newMessageEditLimiter(defaultMessageEditLimit())}
 	// The server's name is a permanent name nobody may take (issue #760):

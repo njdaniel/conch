@@ -377,6 +377,14 @@ func (g *grantedChannel) insertMessage(ctx context.Context, body string, payload
 	return msg, err
 }
 
+// attachRefusal decides whether the agent may attach the files payload names
+// to a post in this channel: agentAttachRefusal, for the two ways of
+// post_message that hold a grantedChannel (channel-wide and scoped). It
+// returns nil for a payload that names no files.
+func (g *grantedChannel) attachRefusal(ctx context.Context, payload *schema.Payload) *schema.Error {
+	return g.scope.s.agentAttachRefusal(ctx, g.scope.identity.principalID, g.scope.subject, g.channel, payload)
+}
+
 // errArchivedRefused is the error insertMessage and createApproval give for a
 // write to an archived channel (issues #844 and #1296). Nothing was stored.
 var errArchivedRefused = errors.New("server: channel is archived")
@@ -914,6 +922,11 @@ func (s *Server) postReplyMCP(ctx context.Context, scope *agentScope, channelNam
 		if !allowed {
 			return schema.PostMessageResponseV2{}, errForbidden
 		}
+	}
+	// As on the REST reply: files the agent uploaded earlier take the grant
+	// to upload, now (agentAttachRefusal).
+	if serr := s.agentAttachRefusal(ctx, authorID, scope.subject, granted.channel, payload); serr != nil {
+		return schema.PostMessageResponseV2{}, serr
 	}
 	stored, recipients, err := granted.insertReply(ctx, rootID, body, payload, uploads)
 	if serr := s.scopedPostRefusal(ctx, err, granted.channel.ID, authorID, scope.subject); serr != nil {

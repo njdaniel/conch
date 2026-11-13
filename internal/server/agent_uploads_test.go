@@ -1054,9 +1054,32 @@ func TestMCPRequestCapForAttachments(t *testing.T) {
 		{name: "a granted agent, more image than one upload may be", who: "aria", body: func(t *testing.T) []byte {
 			return toolCall(t, "post_message", postWith(attachment("huge.png", schema.MediaTypePNG, pngOfSize(uploadLimit+(1<<20), 'h'))))
 		}, wantStatus: 413},
+		// Refused before the MCP library decodes it: the probe adds up what
+		// the data decodes to.
 		{name: "a granted agent, one byte more image than one upload may be", who: "aria", body: func(t *testing.T) []byte {
 			return toolCall(t, "post_message", postWith(attachment("over.png", schema.MediaTypePNG, pngOfSize(uploadLimit+1, 'o'))))
-		}, wantStatus: 200, wantCode: "file_too_large"},
+		}, wantStatus: 413},
+		{name: "a granted agent, two images that are together one byte more", who: "aria", body: func(t *testing.T) []byte {
+			return toolCall(t, "post_message", postWith(
+				attachment("a.png", schema.MediaTypePNG, pngOfSize(uploadLimit/2, 'a')), attachment("b.png", schema.MediaTypePNG, pngOfSize(uploadLimit/2+1, 'b'))))
+		}, wantStatus: 413},
+		{name: "a granted agent, five images", who: "aria", body: func(t *testing.T) []byte {
+			one := attachment("a.png", schema.MediaTypePNG, pngOfSize(1<<19, 'a'))
+			return toolCall(t, "post_message", postWith(one, one, one, one, one))
+		}, wantStatus: 413},
+		{name: "a granted agent, data that is not base64", who: "aria", body: func(*testing.T) []byte {
+			return fmt.Appendf(nil, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"post_message","arguments":{"channel":"ops","body":"x","attachments":[{"name":"a.png","media_type":"image/png","data_base64":"%s"}]}}}`,
+				strings.Repeat("\xff", 2<<20))
+		}, wantStatus: 413},
+		// The larger limit is for an agent that could post an image somewhere:
+		// files.upload, and attach in at least one channel.
+		{name: "an agent with files.upload and attach nowhere", who: "nowhere", body: func(t *testing.T) []byte { return toolCall(t, "post_message", withImage) }, wantStatus: 413},
+		{name: "an agent with files.upload and attach nowhere, no Content-Length", who: "nowhere", chunked: true,
+			body: func(t *testing.T) []byte { return toolCall(t, "post_message", withImage) }, wantStatus: 413},
+		// Which channel the call is for is in the body, so an agent with
+		// attach in another channel gets the limit, and the tool's refusal.
+		{name: "an agent with attach in another channel only", who: "elsewhere", body: func(t *testing.T) []byte { return toolCall(t, "post_message", withImage) },
+			wantStatus: 200, wantCode: errForbidden.Code},
 		{name: "a granted agent, as much image as one upload may be", who: "aria", body: func(t *testing.T) []byte {
 			return toolCall(t, "post_message", postWith(attachment("full.png", schema.MediaTypePNG, pngOfSize(uploadLimit, 'f'))))
 		}, wantStatus: 200},
@@ -1071,6 +1094,23 @@ func TestMCPRequestCapForAttachments(t *testing.T) {
 			f.manifest(t, "arlo", []schema.Capability{schema.CapabilityMessagesRead, schema.CapabilityMessagesPost},
 				schema.ChannelPermissionRead, schema.ChannelPermissionPost, schema.ChannelPermissionAttach)
 			f.add(t, "ghost", store.PrincipalAgent, true)
+			// nowhere holds files.upload and no attach in any channel;
+			// elsewhere holds attach, but in another channel than ops.
+			f.add(t, "nowhere", store.PrincipalAgent, true)
+			f.manifest(t, "nowhere", nil, schema.ChannelPermissionRead, schema.ChannelPermissionPost)
+			f.add(t, "elsewhere", store.PrincipalAgent, true)
+			other, err := f.srv.store.CreateChannel(t.Context(), "other")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, _, err := f.srv.store.PutAgentManifest(t.Context(), "system", f.p("elsewhere").ID, schema.PutAgentManifestRequestV1{
+				DisplayName: "elsewhere", Tier: schema.AgentTierC, Capabilities: schema.Capabilities(),
+				Channels: []schema.ChannelGrant{
+					{ChannelID: f.ops.ID, Permissions: []schema.ChannelPermission{schema.ChannelPermissionRead, schema.ChannelPermissionPost}},
+					{ChannelID: other.ID, Permissions: []schema.ChannelPermission{schema.ChannelPermissionAttach}},
+				}}); err != nil {
+				t.Fatal(err)
+			}
 			messages := f.messageCount(t)
 			body := tt.body(t)
 			if len(body) <= schema.MaxPostRequestBytes {
@@ -1123,10 +1163,16 @@ func TestMCPRequestCapIsTheOldOneWhenAgentsCannotUpload(t *testing.T) {
 }
 
 func TestMCPOversizeIsAttachments(t *testing.T) {
-	data := strings.Repeat("A", 2<<20)
+	const maxUpload = 4 << 20
+	data := strings.Repeat("A", 2<<20) // 1.5 MiB of image, as base64
 	over := strings.Repeat("b", schema.MaxPostRequestBytes)
 	call := func(format string, args ...any) []byte {
 		return fmt.Appendf(nil, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":`+format+`}`, args...)
+	}
+	// items is a post with n attachments of size base64 characters each.
+	items := func(n, size int) []byte {
+		one := fmt.Sprintf(`{"data_base64":%q}`, strings.Repeat("A", size))
+		return call(`{"name":"post_message","arguments":{"attachments":[%s]}}`, strings.Join(slicesRepeat(one, n), ","))
 	}
 	tests := []struct {
 		name string
@@ -1135,6 +1181,12 @@ func TestMCPOversizeIsAttachments(t *testing.T) {
 	}{
 		{"a post with one large attachment", call(`{"name":"post_message","arguments":{"channel":"ops","body":"x","attachments":[{"name":"a.png","media_type":"image/png","data_base64":%q}]}}`, data), true},
 		{"a post with two", call(`{"name":"post_message","arguments":{"attachments":[{"data_base64":%q},{"data_base64":%q}]}}`, data, data), true},
+		{"padded data", call(`{"name":"post_message","arguments":{"attachments":[{"data_base64":%q}]}}`, data[:len(data)-2]+"=="), true},
+		{"as many attachments as a call may carry", items(schema.MaxAgentAttachments, 1<<20), true},
+		{"one attachment more than a call may carry", items(schema.MaxAgentAttachments+1, 1<<20), false},
+		{"exactly as much image as one upload may be", items(1, maxUpload/3*4), true},
+		{"three bytes more image than one upload may be", items(1, maxUpload/3*4+4), false},
+		{"the items together more than one upload may be", items(3, 2<<20), false},
 		{"the rest of the request is over the bound", call(`{"name":"post_message","arguments":{"body":%q,"attachments":[{"data_base64":%q}]}}`, over, data), false},
 		{"the data is under another key", call(`{"name":"post_message","arguments":{"attachments":[{"data":%q}]}}`, data), false},
 		{"the data is the body", call(`{"name":"post_message","arguments":{"body":%q}}`, data), false},
@@ -1143,25 +1195,98 @@ func TestMCPOversizeIsAttachments(t *testing.T) {
 		{"another method", fmt.Appendf(nil, `{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{"name":"post_message","arguments":{"attachments":[{"data_base64":%q}]}}}`, data), false},
 		{"a batch", append(append([]byte("["), call(`{"name":"post_message","arguments":{"attachments":[{"data_base64":%q}]}}`, data)...), ']'), false},
 		{"not json", []byte(data), false},
-		{"attachments given twice, the large one first", call(`{"name":"post_message","arguments":{"attachments":[{"data_base64":%q}],"attachments":[]}}`, data), false},
+		// What stands where image data should is held to being image data:
+		// base64 and nothing else. Bytes that are not text grow threefold
+		// when a decoder reads them, in memory, and were let through before.
+		{"data of bytes that are not text", call(`{"name":"post_message","arguments":{"attachments":[{"data_base64":"%s"}]}}`, strings.Repeat("\xff", 2<<20)), false},
+		{"data with a character outside the alphabet", call(`{"name":"post_message","arguments":{"attachments":[{"data_base64":%q}]}}`, data[:len(data)-4]+"AA-_"), false},
+		{"data with an escape in it", call(`{"name":"post_message","arguments":{"attachments":[{"data_base64":"%s"}]}}`, data[:len(data)-8]+`AA\u0041A`), false},
+		{"data broken into lines", call(`{"name":"post_message","arguments":{"attachments":[{"data_base64":"%s"}]}}`, data[:len(data)-4]+`AA\nA`), false},
+		{"data with padding in the middle", call(`{"name":"post_message","arguments":{"attachments":[{"data_base64":%q}]}}`, "AA=="+data), false},
+		{"data with three characters of padding", call(`{"name":"post_message","arguments":{"attachments":[{"data_base64":%q}]}}`, data[:len(data)-3]+"==="), false},
+		{"data that is not a whole number of groups", call(`{"name":"post_message","arguments":{"attachments":[{"data_base64":%q}]}}`, data+"AA"), false},
+		{"data that is an object", call(`{"name":"post_message","arguments":{"attachments":[{"data_base64":{"k":%q}}]}}`, data), false},
+		{"data that is a list", call(`{"name":"post_message","arguments":{"attachments":[{"data_base64":[%q]}]}}`, data), false},
+		{"an attachment with no data beside one with", call(`{"name":"post_message","arguments":{"attachments":[{"data_base64":%q},{"name":"b.png"}]}}`, data), false},
+		// Repeated keys. The standard library's decoder, which the probe
+		// uses, and the MCP library's do not read these alike, and the probe
+		// does not need them to: what it lets through is only ever a value
+		// at params.arguments.attachments[i].data_base64, and everything else
+		// is held to the bound (see mcpOversizeIsAttachments).
+		{"attachments given twice, the second list empty", call(`{"name":"post_message","arguments":{"attachments":[{"data_base64":%q}],"attachments":[]}}`, data), false},
+		// The second list is decoded into the elements of the first, so the
+		// first list's data is still counted and the request passes. That is
+		// safe: the data stands where only attachment data can, and the MCP
+		// library, which sees an attachment with no fields, refuses the call.
+		{"attachments given twice, the second with an empty item", call(`{"name":"post_message","arguments":{"attachments":[{"data_base64":%q}],"attachments":[{}]}}`, data), true},
+		{"attachments given twice, and text over the bound", call(`{"name":"post_message","arguments":{"body":%q,"attachments":[{"data_base64":%q}],"attachments":[{}]}}`, over, data), false},
 		{"data given twice in one item", call(`{"name":"post_message","arguments":{"attachments":[{"data_base64":%q,"data_base64":"AAAA"}]}}`, data), false},
 		{"arguments given twice, the text in the second", call(`{"name":"post_message","arguments":{"attachments":[{"data_base64":%q}]},"arguments":{"body":%q}}`, data, over), false},
-		// Only the bytes as they stand in the request are let through: a
-		// string that decoding would lengthen is counted at its own length.
-		{"data of bytes that are not text", call(`{"name":"post_message","arguments":{"body":%q,"attachments":[{"data_base64":"%s"}]}}`,
-			strings.Repeat("b", schema.MaxPostRequestBytes/2), strings.Repeat("\xff", 1<<20)), true},
-		{"data of bytes that are not text, and the rest over the bound", call(`{"name":"post_message","arguments":{"body":%q,"attachments":[{"data_base64":"%s"}]}}`,
-			over, strings.Repeat("\xff", 1<<20)), false},
+		{"keys in another case", call(`{"name":"post_message","arguments":{"body":%q,"ATTACHMENTS":[{"DATA_BASE64":%q}]}}`, over, data), false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			if len(tt.body) <= schema.MaxPostRequestBytes {
 				t.Fatalf("the request is only %d bytes", len(tt.body))
 			}
-			if got := mcpOversizeIsAttachments(tt.body); got != tt.want {
+			if got := mcpOversizeIsAttachments(tt.body, maxUpload); got != tt.want {
 				t.Errorf("mcpOversizeIsAttachments = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+// slicesRepeat is n copies of s.
+func slicesRepeat(s string, n int) []string {
+	out := make([]string, n)
+	for i := range out {
+		out[i] = s
+	}
+	return out
+}
+
+func TestBase64StringLen(t *testing.T) {
+	tests := []struct {
+		raw    string
+		want   int64
+		wantOK bool
+	}{
+		{`""`, 0, true},
+		{`"AAAA"`, 3, true},
+		{`"AAA="`, 2, true},
+		{`"AA=="`, 1, true},
+		{`"+/09azAZ"`, 6, true},
+		{`"A==="`, 0, false},
+		{`"===="`, 0, false},
+		{`"AA=A"`, 0, false},
+		{`"AAA"`, 0, false},
+		{`"AAAAA"`, 0, false},
+		{`"AA-_"`, 0, false},
+		{`"AA A"`, 0, false},
+		{`"AAA\n"`, 0, false},
+		{`"\u0041AAA"`, 0, false},
+		{`AAAA`, 0, false},
+		{`"AAAA`, 0, false},
+		{`{"k":"AAAA"}`, 0, false},
+		{`null`, 0, false},
+		{`"`, 0, false},
+		{``, 0, false},
+	}
+	for _, tt := range tests {
+		if got, ok := base64StringLen([]byte(tt.raw)); ok != tt.wantOK || got != tt.want {
+			t.Errorf("base64StringLen(%s) = %d, %v; want %d, %v", tt.raw, got, ok, tt.want, tt.wantOK)
+		}
+	}
+	// What it accepts and measures is what the tool then decodes.
+	for size := range 64 {
+		data := bytes.Repeat([]byte{0xA5}, size)
+		raw, err := json.Marshal(base64.StdEncoding.EncodeToString(data))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, ok := base64StringLen(raw); !ok || got != int64(size) {
+			t.Errorf("base64StringLen of %d encoded bytes = %d, %v", size, got, ok)
+		}
 	}
 }
 

@@ -65,6 +65,13 @@ const (
 	// REST). People's uploads are never answered with it: they may be of any
 	// type.
 	ErrorCodeUnsupportedMediaType = "unsupported_media_type"
+
+	// ErrorCodeServerBusy is the Error.Code of an /mcp request larger than
+	// MaxPostRequestBytes (a post_message that carries images) that arrives
+	// while the server is already handling as many such requests as it takes
+	// at once (HTTP 503, with Retry-After and RetryAfterSeconds). Nothing of
+	// the request was done; the same call may be sent again.
+	ErrorCodeServerBusy = "server_busy"
 )
 
 // AgentUploadMediaTypes returns the media types an agent may upload, in

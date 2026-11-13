@@ -230,6 +230,26 @@ func (s *Server) handleUploadFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// An agent's grant is decided again, now that the body has arrived: the
+	// first decision was made before a byte was read, and an upload can take
+	// as long as its sender likes. An agent whose grant was taken away in the
+	// meantime gets the 403 of an agent without one, and no row. The bytes are
+	// already under their hash; they stay there, referenced by nothing, as
+	// for every upload whose row is refused (the archived channel below), and
+	// the upload stays counted against the agent's budget.
+	if agent {
+		_, reason, err := s.agentUploadGrantIn(ctx, caller.ID, routeSubject(r), channel)
+		if err != nil {
+			slog.ErrorContext(ctx, "files: decide agent upload grant again failed", "principal", caller.ID, "error", err)
+			writeInternalError(w)
+			return
+		}
+		if reason != "" {
+			writeError(w, http.StatusForbidden, errForbidden.Code, agentFilesRefusal)
+			return
+		}
+	}
+
 	// The row is recorded only after the bytes are in place, so a row never
 	// points at nothing.
 	stored, err := s.store.InsertFile(ctx, store.NewFile{
