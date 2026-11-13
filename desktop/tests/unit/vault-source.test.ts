@@ -63,7 +63,7 @@ describe('secret handling in desktop/main', () => {
     // autostart.ts the one XDG autostart entry (#1587). Each says what it
     // writes in its own header.
     const writers = new Set(['vault/files.ts', 'profiles/files.ts', 'instance.ts', 'settings.ts', 'autostart.ts']);
-    const readOnly = new Set(['readFile', 'readFileSync', 'readdir', 'readdirSync', 'stat', 'lstat', 'readlink', 'realpath', 'access', 'existsSync']);
+    const readOnly = new Set(['readFile', 'readFileSync', 'readdir', 'readdirSync', 'stat', 'lstat', 'readlink', 'realpath', 'realpathSync', 'lstatSync', 'access', 'existsSync']);
     // The voice endpoint (#948) makes its private runtime directories and
     // removes stale sockets from them; it writes no file's content.
     const endpointOnly = new Set(['mkdir', 'chmod', 'unlink']);

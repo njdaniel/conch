@@ -21,6 +21,7 @@ import { createProfileFiles } from './profiles/files.ts';
 import { TeardownHooks } from './profiles/hooks.ts';
 import { ProfilesService } from './profiles/service.ts';
 import { ProfileStore } from './profiles/store.ts';
+import { dataRootVerdict } from './data-root.ts';
 import { acquire, keepNewest, prepareRoot } from './instance.ts';
 import { Client } from './api/client.ts';
 import { Session } from './api/session.ts';
@@ -94,6 +95,17 @@ export async function start(): Promise<void> {
   // A launch that turned the PipeWire capturer off would let one source
   // stand in for the portal's pick (display-capture.ts).
   if (captureVerdict(app.isPackaged, (name) => app.commandLine.getSwitchValue(name), log) === 'refused') {
+    app.exit(1);
+    return;
+  }
+  // On Windows, a --user-data-dir must be under the user's profile, whose ACL
+  // keeps other local accounts out (data-root.ts, issue #1788). Checked before
+  // the lock below, which is the first thing to write into the root.
+  const rootVerdict = dataRootVerdict(
+    { platform: process.platform, hasSwitch: (name) => app.commandLine.hasSwitch(name), root: app.getPath('userData'), env: process.env },
+    log,
+  );
+  if (rootVerdict === 'refused') {
     app.exit(1);
     return;
   }
