@@ -42,6 +42,7 @@ The complete operational guide: setup, the CLI and TUI, MCP and adapters, nets, 
   - [Screen share](#screen-share)
   - [Camera](#camera)
   - [Verify voice](#verify-voice)
+- [The desktop app on Windows (unsigned preview)](#the-desktop-app-on-windows-unsigned-preview)
 - [Diagnostics](#diagnostics)
 
 ## Why Conch?
@@ -1449,6 +1450,16 @@ go run ./e2e/voice
 ```
 
 This proves both halves against real processes. The degraded half needs no LiveKit: `conchd` with no LiveKit settings, and with settings and nothing listening, each followed by the approval dogfood. The live half starts the pinned LiveKit image and removes it when done, and joins a headless participant with `lk` 2.19.0 on the token `conchd` issued. The participant joins and is seen, unmutes and mutes and is seen to, an outsider is refused, removing a member who held a session rotates the room and locks that member out, removing one who never had a session changes nothing, and LiveKit is stopped. Then three real `conch-voice` clients, each with a tone for a microphone, join one channel: each is heard by the other two only while it holds its key, every press is in the audit log as a reported pair, a false report is caught, a removed member's client stops while the others move to the new room, and they reconnect by themselves when LiveKit is restarted. A member claims a screen share and an `lk` participant publishes a screen and its sound, which another subscribes to; the share is stopped and its tracks disappear; publishing those without a claim is refused by LiveKit. It checks that no token, secret or room name reaches its output, `conchd`'s log, the audit log or anything a client wrote, and prints one `voice-check: PASS` line. It needs Docker on Linux and network access for the image and `lk`; without them the live half is skipped with one line and exit status 0. The `conch-voice` part also needs the pinned Rust toolchain (`./scripts/voice-toolchain.sh`, once); without it that part alone is skipped and the last line says so. With `CI` set any skip is a failure.
+
+## The desktop app on Windows (unsigned preview)
+
+**This build is unsigned. It is a preview for testing on your own PC, not a release.** Signing is issue #780. Because the build is unsigned, Windows may warn that the publisher is unknown. Nothing here asks you to turn off SmartScreen or your antivirus.
+
+- **Where to get it.** The CI job `desktop-windows` builds `Conch-<version>-unsigned-preview-setup.exe` and keeps it as a workflow artifact of the same name. No release carries it yet.
+- **Installing.** The installer is for one user and needs no administrator. It never installs for all users, even with `/allusers`. It installs into `%LOCALAPPDATA%\Programs\Conch`, and you can choose another folder. It bundles the voice helper as `resources\conch-voice.exe`. It adds Start menu and desktop shortcuts, and registers `conch://` invite links for your account only (`HKEY_CURRENT_USER\Software\Classes\conch`).
+- **Your data.** Saved servers and settings live in `%APPDATA%\conch-desktop`.
+- **Removing it.** Use *Apps* in Settings, or run `Uninstall Conch.exe` in the install folder. That removes the program, its shortcuts and the `conch://` handler. It keeps `%APPDATA%\conch-desktop`. Delete that folder yourself to forget your saved servers.
+- **What has been checked.** CI installs it silently, checks the files and the `conch://` key, uninstalls it and checks that a seeded profile is still there, all on a GitHub-hosted runner. It never starts the app there. Running the app on a real PC, with voice, is issue #903. Developers: [desktop/README.md](../desktop/README.md).
 
 ## Diagnostics
 

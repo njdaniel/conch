@@ -49,10 +49,12 @@ voice in the UI (#771: the supervisor that runs `conch-voice` exists, in
 | `main/vault/electron-storage.ts` | the one adapter from Electron's `safeStorage` to the vault (#945) |
 | `main/document.ts` | which frame shows the current document (the document generation) |
 | `main/app.ts`, `main/main.ts` | startup |
+| `main/app-user-model.ts` | the Windows AppUserModelID (the app id), set by `main.ts` before `start()` can make a window or a notification (#900) |
 | `preload/bridge.ts`, `preload/index.ts` | `window.conchDesktop`: a frozen object whose keys are exactly the functions of `web/src/platform/desktop/bridge.ts`; the page-side copy is not frozen, so nothing may rely on that |
 | `shared/bridge-names.ts` | the function names and channels, shared by the preload and main |
 | `build/manifest.ts` | writes `out/ui-manifest.json` (path, SHA-256, content type) |
-| `build/electron-builder.config.json` | the Linux `dir` target, asar and the fuses |
+| `build/electron-builder.config.json` | the Linux `dir` target, the Windows NSIS target (#900), asar and the fuses |
+| `build/installer.nsh` | the Windows installer's own steps: per-user only, and the `conch://` key under HKCU (#900) |
 | `tests/unit/` | Vitest, no Electron runtime, no display, no network |
 | `tests/fixtures/fake-helper.ts` | a stand-in `conch-voice` that replays `pkg/schema/testdata/voice-control*/` transcripts |
 | `tests/integration/` | the supervisor with the real `conch-voice` and a stub conchd (`make desktop-voice-it`) |
@@ -216,6 +218,91 @@ display, portal, keyring or PipeWire; Chromium's sandbox under Docker's seccomp 
 representative), so the script never runs the app: the app on a real machine is #1602
 (D6-08). Without Docker it prints `SKIPPED`; with `CI` set it fails. It is not part of
 `make check` or `make desktop-check`, and has no CI job yet (it follows #1598's `.deb` job).
+
+### The Windows installer (issue #900): an unsigned preview
+
+**Unsigned.** It is a preview for testing on Nick's own PC (#903), not a release. Signing
+is #780 (decision record: [docs/design/windows-signing.md](../docs/design/windows-signing.md)),
+updates are deferred ([windows-desktop.md](../docs/design/windows-desktop.md) §9.5), and no
+release carries it. Its name says so: `Conch-<version>-unsigned-preview-setup.exe`, and the
+`desktop-windows` CI job keeps it as the artifact of the same name. Using it:
+[docs/manual.md](../docs/manual.md#the-desktop-app-on-windows-unsigned-preview).
+
+It is electron-builder's NSIS target (§9.3), the same `electron-builder` 26.17.0 that packs
+the Linux tree; no dependency was added. The options, each read in that version's
+`app-builder-lib/out/targets/nsis/nsisOptions.d.ts` and `NsisTarget.js` (§9.3 had them from
+memory):
+
+- `oneClick: false` (its default is `true`): the assisted installer, which may show the
+  folder page; `allowToChangeInstallationDirectory: true` turns that page on (default
+  `false`, assisted only).
+- `perMachine: false` (the default): per-user. On an assisted installer that alone still
+  shows a page offering "all users" too, which an administrator could pick, and
+  `/allusers` on the command line asks for elevation whatever `allowElevation` says
+  (`templates/nsis/multiUserUi.nsh`, `assistedInstaller.nsh`). `build/installer.nsh`
+  therefore makes every install the current user's, `/allusers` included, and the page
+  is never shown. One gap remains: the uninstaller, started by hand with `/allusers`,
+  asks for elevation before any hook runs, and then still removes only the current
+  user's install.
+- `allowElevation: false` (default `true`, assisted only) and `packElevateHelper: false`
+  (default `true`; it exists for electron-updater's per-machine updates): no elevation is
+  asked for and no `elevate.exe` is shipped.
+- `deleteAppDataOnUninstall: false` (the default; the type says one-click only, but
+  `uninstaller.nsh` honours it either way). The uninstaller removes the program, its
+  shortcuts, its uninstall entry and the `conch://` key, and leaves `%APPDATA%`. The app's
+  data is Electron's `userData`, `%APPDATA%\conch-desktop` (the package name, as
+  `~/.config/conch-desktop` on Linux). Only `Uninstall Conch.exe --delete-app-data`, which
+  someone must type, removes it.
+- `artifactName` puts `unsigned-preview` in the file name.
+
+The `conch://` handler: electron-builder's `protocols` is macOS only
+(`out/options/PlatformSpecificBuildOptions.d.ts`), so `build/installer.nsh` writes
+`HKCU\Software\Classes\conch` (`URL Protocol`, and `shell\open\command` =
+`"<install dir>\Conch.exe" "%1"`), as the `.deb`'s `MimeType=x-scheme-handler/conch;` does on
+Linux, and its uninstall step deletes it. The link reaches the app on its command line, which
+`main/instance.ts` and `main/invites.ts` read on every platform.
+
+The install goes to NSIS's per-user `$LocalAppData\Programs\Conch` (the `UserProgramFiles`
+known folder, `%LOCALAPPDATA%\Programs` by default): `Conch.exe`, and `resources\` with
+`app.asar`, `conch-voice.exe` (the one path `findHelper` runs on Windows,
+`main/voice/spawn.ts`) and `version` (the installed stamp, `main/installed.ts`). The executable
+keeps electron-builder's Windows name, `Conch.exe`: the Linux name `conch-desktop` avoids the
+CLI's `conch` on `PATH`, and the per-user install folder is not on `PATH`. The Start menu and
+desktop shortcuts carry the AppUserModelID `chat.conch.desktop`, the `appId`, which
+`main/app-user-model.ts` also sets in the app.
+
+**It is built on Windows only.** On Linux, electron-builder 26.17.0 packs everything and then
+runs the uninstaller it has just compiled under `wine` to extract it (`NsisTarget.js`,
+`computeScriptAndSignUninstaller`): tried on 2026-11-12, it fails there with `spawn wine
+ENOENT`. The repository installs no wine, so there is no Make target. `npm run dist:win` is the
+build step, and CI's `desktop-windows` job runs it after the steps of
+`scripts/desktop-build.sh` that are not Linux's: the release `conch-voice.exe` (`cargo build
+--release -p conch-voice`), the Windows Electron, web's Vite build, the bundles and the
+manifest. It stages the helper and the stamp in `out/win-resources/` (`win.extraResources`),
+because electron-builder packs the installer itself. With a compile-only stand-in for `wine`,
+both halves of the script compiled on Linux under `makensis -WX`. That installer was never run.
+
+What electron-builder downloads for it, each checked against a SHA-256 written in its own
+source before it is unpacked (`downloadBuilderToolset` in `out/util/electronGet.js` passes the
+hash to `@electron/get` 5.1.0, whose `validateArtifact` refuses a mismatch), from
+`electron-userland/electron-builder-binaries`: `nsis-3.0.4.1.7z` and `nsis-resources-3.4.1.7z`
+(the default `toolsets.nsis` "0.0.0"; `out/toolsets/windows.js`), `7zip-win-x64.tar.gz`
+(`out/toolsets/7zip.js`) and `icons-bundle.tar.gz` (the icon from `build/icons/`,
+`out/toolsets/icons.js`). The version resource is edited in JavaScript (`resedit`), so no
+`rcedit` and no `winCodeSign` is fetched, and nothing is signed. Electron itself is not
+downloaded by electron-builder: the job fetches `electron-v<version>-win32-x64.zip` from
+Electron's GitHub release and unpacks it only if its SHA-256 equals the hash in
+`node_modules/electron/checksums.json`, which `npm ci` verified against the lockfile, then
+passes it as `electronDist`. That is one of the two hashes `scripts/desktop-electron.sh` checks
+on Linux. `scripts/desktop-pins.sh` has no Windows hash, and adding one is a pin change.
+
+CI installs it with `/S` on `windows-latest` and checks the files, `Conch.exe`'s version
+resource (the app has no window-less version check), the HKCU `conch` key and uninstall
+entry, the Start menu shortcut, and that nothing went to `Program Files` or `HKLM`. It then
+seeds `%APPDATA%\conch-desktop` and `%APPDATA%\Conch`, uninstalls with `/S`, and waits for the
+copy the uninstaller runs from `%TEMP%` to finish. The program, the key, the entry and the
+shortcut must be gone, and every seeded file must be unchanged. The job does not start the app.
+Electron and `conch-voice` together on a Windows machine is #903.
 
 ### The smoke test
 
