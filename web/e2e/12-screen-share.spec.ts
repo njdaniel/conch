@@ -935,4 +935,76 @@ test.describe('screen share with LiveKit', () => {
       }
     }
   });
+
+  // Issue #1813: in a short desktop window the page scrolls as a document and
+  // the composer sits on the voice dock, joined (the dock is 200 px or more),
+  // watching a share (the picture keeps its room: the stage is not squeezed to
+  // its padding) and with Voice options open, at every short height.
+  test('in a short window, joined and watching a share, the composer is on the dock and the picture keeps its room', async ({ browser }) => {
+    const a = await person(browser, 'alice');
+    const b = await person(browser, 'bob', { viewport: { width: 1215, height: 560 } });
+    try {
+      await joinVoice(a, 'Join voice');
+      await joinVoice(b, 'Join voice');
+      const composer = b.page.locator('.composer');
+      const dock = b.page.locator('.dock');
+      const check = async (what: string, stage: boolean): Promise<void> => {
+        const size = b.page.viewportSize();
+        if (size === null) throw new Error('no window size');
+        const where = `${String(size.width)}×${String(size.height)}, ${what}`;
+        await expect(async () => {
+          const c = await composer.boundingBox();
+          const d = await dock.boundingBox();
+          if (c === null || d === null) throw new Error(`${where}: no composer or dock`);
+          expect(Math.abs(c.y + c.height - d.y), `${where}: the composer is ${String(d.y - c.y - c.height)} px above the dock`).toBeLessThanOrEqual(1);
+        }).toPass({ timeout: 5000 });
+        // Scrolled to its end, the page shows the composer whole above the dock.
+        await expect(async () => {
+          await b.page.evaluate(() => {
+            window.scrollTo(0, document.documentElement.scrollHeight);
+          });
+          const c = await composer.boundingBox();
+          const d = await dock.boundingBox();
+          if (c === null || d === null) throw new Error(`${where}: no composer or dock`);
+          expect(c.y, `${where}: the composer's top at the end of the page`).toBeGreaterThanOrEqual(-0.5);
+          expect(c.y + c.height, `${where}: the composer's bottom at the end of the page`).toBeLessThanOrEqual(d.y + 1);
+          expect(d.y + d.height, `${where}: the dock's bottom at the end of the page`).toBeLessThanOrEqual(size.height + 0.5);
+        }).toPass({ timeout: 5000 });
+        if (stage) {
+          const picture = await b.page.locator('.stage').boundingBox();
+          // On main at these heights the stage is 465 to 480 px.
+          expect(picture?.height ?? 0, `${where}: the stage while watching`).toBeGreaterThanOrEqual(300);
+        }
+        await b.page.evaluate(() => {
+          window.scrollTo(0, 0);
+        });
+      };
+      // 561 px is the full-height layout, which squeezes a share to nothing in
+      // a window this short whatever the page does at 560 (a pre-existing
+      // limit, not this change's: issue #1815); joined, the composer is on the dock there too.
+      const heights: readonly (readonly [number, number])[] = [[1215, 560], [1215, 470], [1215, 400], [720, 450]];
+      for (const [width, height] of [...heights, [1215, 561]] as const) {
+        await b.page.setViewportSize({ width, height });
+        await check('joined', false);
+      }
+      await b.page.setViewportSize({ width: 1215, height: 560 });
+      await share(a);
+      await watching(b);
+      for (const [width, height] of heights) {
+        await b.page.setViewportSize({ width, height });
+        await check('watching', true);
+      }
+      await voiceRegion(b.page).getByRole('button', { name: 'Voice options' }).click();
+      for (const [width, height] of heights) {
+        await b.page.setViewportSize({ width, height });
+        await check('watching, Voice options open', false);
+        const areas = await b.page.locator('.areas').boundingBox();
+        expect(areas?.height ?? 0, `${String(width)}×${String(height)}: the conversation with Voice options open`).toBeGreaterThanOrEqual(200);
+      }
+      await voiceRegion(a.page).getByRole('button', { name: 'Stop sharing' }).click();
+    } finally {
+      await a.close();
+      await b.close();
+    }
+  });
 });
