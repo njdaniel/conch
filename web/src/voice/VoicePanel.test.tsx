@@ -142,6 +142,48 @@ describe('Join voice and Watch only', () => {
     expect(calls).toEqual(['join', 'watch only']);
   });
 
+  // Issue #1794: the click is the gesture iOS needs the meter's audio context
+  // made in, so the button calls the join itself, in the click: nothing is
+  // deferred, and nothing is passed that could make it wait.
+  it('Join voice calls the join in the click itself, synchronously', () => {
+    const { voice, calls } = panel(initialVoice, 'general');
+    const before = calls.length;
+    fireEvent.click(within(voice).getByRole('button', { name: 'Join voice in #general' }));
+    // Not after a microtask or a timer: the very next statement sees it.
+    expect(calls.slice(before)).toEqual(['join']);
+  });
+
+  // Issue #1794: Use microphone, after Watch only, makes the meter's audio
+  // context first in its click, before the capture's awaits.
+  it('Use microphone makes the meter\'s audio context in the click', () => {
+    const made: string[] = [];
+    vi.stubGlobal(
+      'AudioContext',
+      class {
+        constructor() {
+          made.push('create');
+        }
+        resume() {
+          made.push('resume');
+          return Promise.resolve();
+        }
+        close() {
+          made.push('close');
+          return Promise.resolve();
+        }
+      },
+    );
+    try {
+      const { voice } = panel({ ...inVoice('connected', 'general'), watchOnly: true }, 'general');
+      fireEvent.click(within(voice).getByRole('button', { name: 'Use microphone' }));
+      // The client here has no room, so it takes nothing and lets it go: all
+      // of it ran in the click.
+      expect(made).toEqual(['create', 'resume', 'close']);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   // N08: one space between the verb and the channel, in the text itself; the
   // stylesheet adds no margin to the span.
   it('have one space between the verb and the channel', () => {

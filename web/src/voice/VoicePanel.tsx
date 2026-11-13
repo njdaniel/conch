@@ -59,7 +59,7 @@ import { cameraNote, cameraOffForYou, cameraOn, listenOnlyCamera, watchOnlyCamer
 import { CallView, callTiles, type Tile } from './CallView';
 import { CameraTest } from './CameraTest';
 import type { Person } from '../useLiveChannel';
-import type { Phase, Processing } from './connection';
+import { openAudio, type Phase, type Processing } from './connection';
 import { clampTail, maxTail, releasePage, releaseStep } from './gate';
 import { keyLabel, talkKeyForMouseButton } from './keys';
 import { occupants, qualityLabel, sharers, type Occupant } from './presence';
@@ -568,7 +568,7 @@ export function VoicePanel({
                 <TalkControl voice={voice} silenced={silenced} />
                 <ModeToggle voice={voice} />
                 {state.watchOnly && !state.listenOnly && !state.viewer ? (
-                  <button type="button" onClick={() => { void client.useMicrophone(); }} disabled={state.phase !== 'connected'}>
+                  <button type="button" onClick={() => { void client.useMicrophone(openAudio()); }} disabled={state.phase !== 'connected'}>
                     Use microphone
                   </button>
                 ) : null}

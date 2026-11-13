@@ -19,7 +19,7 @@
 // microphone, at attach and at every change, 0 included; apart from deafen,
 // kept through an output switch, and never on a share's sound.
 // No network, no microphone, no screen.
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { VoiceSessionResult } from '../api';
 import { VoiceClient, companionQualities } from './connection';
 import { FakeClock, settle } from './fakes';
@@ -141,7 +141,7 @@ interface Stub {
   restartFails: Error | null;
   devices: StubDevice[];
   listed: unknown[][];
-  contexts: { closed: number }[];
+  contexts: StubAudio[];
   // Issue #659: the filters the browser keeps on whatever it is asked.
   keptOn: string[];
   // Issue #660: whether the browser can choose an output, each output the
@@ -698,12 +698,60 @@ vi.mock('livekit-client', () => {
 });
 
 import { cameraOptions, cameraPublishOptions, captureOptions, grantWait, newLiveKitRoom, principalOf, sdkLog, shareEncodings, wanted, type ShareLayer } from './sdk';
-import type { Room } from './connection';
+import type { Room, RoomEvents } from './connection';
 import { CameraClient } from './camera';
 import { Track } from 'livekit-client';
 
 // What the module did to the SDK's loggers when it loaded, before any test.
 const atLoad = { levelCalls: [...state.levelCalls], factoryReplaced: state.logger.methodFactory !== state.stubFactory, calls: [...state.calls] };
+
+// An audio context as the browser has one: it runs, may be suspended, says so
+// to its listeners, and counts what is done to it (issue #1794). sample is the
+// byte every read of the analyser fills the buffer with (128 is silence).
+class StubAudio {
+  closed = 0;
+  resumed = 0;
+  state: 'running' | 'suspended' | 'interrupted' | 'closed' = 'running';
+  // What resume() does: runs the context, leaves it as it is, or refuses.
+  onResume: 'run' | 'stay' | 'refuse' = 'run';
+  sample = 128;
+  sources = 0;
+  disconnected = 0;
+  readonly listeners = new Set<() => void>();
+  createAnalyser() {
+    return { fftSize: 0, getByteTimeDomainData: (b: Uint8Array) => b.fill(this.sample), disconnect: () => { this.disconnected++; } };
+  }
+  createMediaStreamSource() {
+    this.sources++;
+    return { connect: () => undefined, disconnect: () => { this.disconnected++; } };
+  }
+  addEventListener(type: string, l: () => void) {
+    if (type === 'statechange') this.listeners.add(l);
+  }
+  removeEventListener(type: string, l: () => void) {
+    if (type === 'statechange') this.listeners.delete(l);
+  }
+  resume() {
+    this.resumed++;
+    if (this.onResume === 'refuse') return Promise.reject(new DOMException('no gesture', 'NotAllowedError'));
+    if (this.onResume === 'run') this.become('running');
+    return Promise.resolve();
+  }
+  close() {
+    this.closed++;
+    this.state = 'closed';
+    return state.contextClose ?? Promise.resolve();
+  }
+  // The browser changing the context's state, and saying so.
+  become(next: StubAudio['state']) {
+    if (this.state === next) return;
+    this.state = next;
+    for (const l of [...this.listeners]) l();
+  }
+  asContext(): AudioContext {
+    return this as unknown as AudioContext;
+  }
+}
 
 function deferred<T>(): Deferred<T> {
   let resolve: (value: T) => void = () => undefined;
@@ -763,24 +811,11 @@ beforeEach(() => {
   state.permissions = undefined;
   vi.stubGlobal(
     'AudioContext',
-    class {
-      private readonly made = { closed: 0 };
+    class extends StubAudio {
       constructor() {
+        super();
         state.audioContexts++;
-        state.contexts.push(this.made);
-      }
-      createAnalyser() {
-        return { fftSize: 0, getByteTimeDomainData: () => undefined };
-      }
-      createMediaStreamSource() {
-        return { connect: () => undefined };
-      }
-      resume() {
-        return Promise.resolve();
-      }
-      close() {
-        this.made.closed++;
-        return state.contextClose ?? Promise.resolve();
+        state.contexts.push(this);
       }
     },
   );
@@ -851,26 +886,16 @@ describe('the SDK adapter', () => {
   function sourceThrows(fails: () => boolean) {
     vi.stubGlobal(
       'AudioContext',
-      class {
-        private readonly made = { closed: 0 };
+      class extends StubAudio {
         private readonly fail = fails();
         constructor() {
+          super();
           state.audioContexts++;
-          state.contexts.push(this.made);
+          state.contexts.push(this);
         }
-        createAnalyser() {
-          return { fftSize: 0, getByteTimeDomainData: () => undefined };
-        }
-        createMediaStreamSource() {
+        override createMediaStreamSource(): ReturnType<StubAudio['createMediaStreamSource']> {
           if (this.fail) throw new DOMException('no source', 'InvalidStateError');
-          return { connect: () => undefined };
-        }
-        resume() {
-          return Promise.resolve();
-        }
-        close() {
-          this.made.closed++;
-          return Promise.resolve();
+          return super.createMediaStreamSource();
         }
       },
     );
@@ -3467,5 +3492,299 @@ describe('the camera', () => {
     room.attachSelf(self);
     await room.captureCamera(null);
     expect(state.videoTracks.at(-1)?.attached).toEqual([self]);
+  });
+});
+
+// Issue #1794: the meter listens with the audio context the client made in
+// the Join gesture, because iOS leaves one made later suspended; and it
+// reports and reads the meter only while that context runs.
+describe('the meter\'s audio context', () => {
+  const connect = (room: Room, audio: StubAudio | null, on: Partial<RoomEvents> = {}) =>
+    room.connect('wss://lk.example', 'tok-abcdef', 'room-abcdef', true, { ...events, ...on }, audio?.asContext() ?? null);
+
+  it('listens with the context it was given, and makes none of its own', async () => {
+    const given = new StubAudio();
+    const meter: boolean[] = [];
+    const room = newLiveKitRoom();
+    await connect(room, given, { onMeter: (on: boolean) => meter.push(on) });
+    expect(state.contexts).toHaveLength(0);
+    expect(given.sources).toBe(1);
+    expect(meter).toEqual([true]);
+    // The room never closes what it does not own, and lets go of what it added.
+    await room.close();
+    expect(given.closed).toBe(0);
+    expect(given.listeners.size).toBe(0);
+    expect(given.disconnected).toBeGreaterThan(0);
+  });
+
+  it('a mic switch taps the same context again, and makes no new one', async () => {
+    const given = new StubAudio();
+    const room = newLiveKitRoom();
+    await connect(room, given, {});
+    await room.switchMicrophone('mic-2');
+    await room.switchMicrophone('mic-3');
+    expect(state.contexts).toHaveLength(0);
+    expect(state.audioContexts).toBe(0);
+    expect(given.sources).toBe(3);
+    expect(given.closed).toBe(0);
+    // One listener, the newest tap's.
+    expect(given.listeners.size).toBe(1);
+    await room.close();
+  });
+
+  it('a given context that is already closed is not used: the room makes its own, as before', async () => {
+    const given = new StubAudio();
+    given.state = 'closed';
+    const meter: boolean[] = [];
+    const room = newLiveKitRoom();
+    await connect(room, given, { onMeter: (on: boolean) => meter.push(on) });
+    expect(given.sources).toBe(0);
+    expect(state.contexts).toHaveLength(1);
+    expect(state.contexts[0]?.sources).toBe(1);
+    expect(meter).toEqual([true]);
+    await room.close();
+    // What the room made, it closes.
+    expect(state.contexts[0]?.closed).toBe(1);
+    expect(given.closed).toBe(0);
+  });
+
+  it('with none given the room makes its own, and if the browser refuses it the meter is gone (#1795)', async () => {
+    vi.stubGlobal('AudioContext', function AudioContext() {
+      throw new DOMException('refused', 'NotSupportedError');
+    });
+    const meter: boolean[] = [];
+    const room = newLiveKitRoom();
+    await connect(room, null, { onMeter: (on: boolean) => meter.push(on) });
+    expect(meter).toEqual([false]);
+    await room.close();
+  });
+
+  it('a given context whose source cannot be made is left to the client to close, and says there is no meter', async () => {
+    const given = new StubAudio();
+    given.createMediaStreamSource = () => {
+      throw new DOMException('no source', 'InvalidStateError');
+    };
+    const meter: boolean[] = [];
+    const room = newLiveKitRoom();
+    await connect(room, given, { onMeter: (on: boolean) => meter.push(on) });
+    expect(meter).toEqual([false]);
+    expect(given.closed).toBe(0);
+    await room.close();
+  });
+
+  it('level() is 0 while the context is suspended or interrupted, whatever the analyser last held', async () => {
+    const given = new StubAudio();
+    given.sample = 255;
+    const room = newLiveKitRoom();
+    await connect(room, given, {});
+    expect(room.level()).toBeGreaterThan(0.5);
+    // The page would resume it; here the browser does not.
+    given.onResume = 'stay';
+    given.become('suspended');
+    expect(room.level()).toBe(0);
+    given.become('interrupted');
+    expect(room.level()).toBe(0);
+    given.become('running');
+    expect(room.level()).toBeGreaterThan(0.5);
+    await room.close();
+  });
+
+  it('a state change tells the client: running is a working meter, anything else is not', async () => {
+    const given = new StubAudio();
+    const meter: boolean[] = [];
+    const room = newLiveKitRoom();
+    await connect(room, given, { onMeter: (on: boolean) => meter.push(on) });
+    expect(meter).toEqual([true]);
+    given.become('suspended');
+    given.become('running');
+    given.become('interrupted');
+    expect(meter).toEqual([true, false, true, false]);
+    // After the room is closed nothing is told.
+    await room.close();
+    given.become('running');
+    expect(meter).toEqual([true, false, true, false]);
+  });
+
+  it('a switch drops the old tap\'s listener: one state change tells the client once', async () => {
+    const given = new StubAudio();
+    const meter: boolean[] = [];
+    const room = newLiveKitRoom();
+    await connect(room, given, { onMeter: (on: boolean) => meter.push(on) });
+    await room.switchMicrophone('mic-2');
+    meter.length = 0;
+    given.onResume = 'stay';
+    given.become('suspended');
+    expect(meter).toEqual([false]);
+    await room.close();
+  });
+
+  it('does not say the meter works before the context runs', async () => {
+    const given = new StubAudio();
+    given.state = 'suspended';
+    given.onResume = 'stay';
+    const meter: boolean[] = [];
+    const room = newLiveKitRoom();
+    await connect(room, given, { onMeter: (on: boolean) => meter.push(on) });
+    expect(given.resumed).toBe(1);
+    await settle();
+    // A context that never runs is not a working meter: silently, with no
+    // name, the client is told there is none.
+    expect(meter.length).toBeGreaterThan(0);
+    expect(meter.every((on) => !on)).toBe(true);
+    expect(room.level()).toBe(0);
+    given.become('running');
+    expect(meter.at(-1)).toBe(true);
+    await room.close();
+  });
+
+  it('a context that stays pending or comes back not running is no meter, and records no name', async () => {
+    const given = new StubAudio();
+    given.state = 'suspended';
+    given.onResume = 'stay';
+    const names: (string | undefined)[] = [];
+    const room = newLiveKitRoom();
+    await connect(room, given, { onMeter: (_on: boolean, name?: string) => names.push(name) });
+    await settle();
+    expect(names.every((n) => n === undefined)).toBe(true);
+    await room.close();
+  });
+
+  it('a context that the room resumes is said working once it runs, and never before', async () => {
+    const given = new StubAudio();
+    given.state = 'suspended';
+    const meter: boolean[] = [];
+    const room = newLiveKitRoom();
+    await connect(room, given, { onMeter: (on: boolean) => meter.push(on) });
+    await settle();
+    // Not working until it runs, then working, and it ends working.
+    expect(meter[0]).toBe(false);
+    expect(meter.at(-1)).toBe(true);
+    await room.close();
+  });
+
+  it('a resume the browser refuses says there is no meter', async () => {
+    const given = new StubAudio();
+    given.state = 'suspended';
+    given.onResume = 'refuse';
+    const meter: boolean[] = [];
+    const room = newLiveKitRoom();
+    await connect(room, given, { onMeter: (on: boolean) => meter.push(on) });
+    await settle();
+    expect(meter.length).toBeGreaterThan(0);
+    expect(meter.every((on) => !on)).toBe(true);
+    await room.close();
+  });
+
+  // Issue #1794 review: nothing else brings back a context an interruption
+  // suspended, so the page resumes it when it is visible.
+  describe('after an interruption', () => {
+    const visible = (v: 'visible' | 'hidden'): void => {
+      Object.defineProperty(document, 'visibilityState', { value: v, configurable: true });
+    };
+    afterEach(() => {
+      Reflect.deleteProperty(document, 'visibilityState');
+    });
+
+    it('a context that suspends while the page is visible is resumed', async () => {
+      visible('visible');
+      const given = new StubAudio();
+      const room = newLiveKitRoom();
+      await connect(room, given, {});
+      given.onResume = 'stay';
+      given.become('suspended');
+      expect(given.resumed).toBe(1);
+      await room.close();
+    });
+
+    it('a context that suspends while the page is hidden waits for it to be visible', async () => {
+      visible('hidden');
+      const given = new StubAudio();
+      const room = newLiveKitRoom();
+      await connect(room, given, {});
+      given.onResume = 'stay';
+      given.become('suspended');
+      expect(given.resumed).toBe(0);
+      visible('visible');
+      document.dispatchEvent(new Event('visibilitychange'));
+      expect(given.resumed).toBe(1);
+      await room.close();
+    });
+
+    it('a visible page does not resume a context that runs', async () => {
+      visible('visible');
+      const given = new StubAudio();
+      const room = newLiveKitRoom();
+      await connect(room, given, {});
+      document.dispatchEvent(new Event('visibilitychange'));
+      expect(given.resumed).toBe(0);
+      await room.close();
+    });
+
+    it('stops listening for the page being visible when the tap goes', async () => {
+      visible('visible');
+      const given = new StubAudio();
+      const room = newLiveKitRoom();
+      await connect(room, given, {});
+      await room.close();
+      given.state = 'suspended';
+      document.dispatchEvent(new Event('visibilitychange'));
+      expect(given.resumed).toBe(0);
+    });
+  });
+
+  // Use microphone after Watch only: a click, so its context is the page's.
+  it('a microphone published after a watch only join taps the context handed to it', async () => {
+    const given = new StubAudio();
+    const meter: boolean[] = [];
+    const room = newLiveKitRoom();
+    await room.connect('wss://lk.example', 'tok-abcdef', 'room-abcdef', false, { ...events, onMeter: (on: boolean) => meter.push(on) });
+    expect(given.sources).toBe(0);
+    await room.publishMicrophone(given.asContext());
+    expect(state.contexts).toHaveLength(0);
+    expect(given.sources).toBe(1);
+    expect(meter).toEqual([true]);
+    await room.close();
+    expect(given.closed).toBe(0);
+  });
+
+  // The gate: an open microphone that was talking on speech must not stay open
+  // on a buffer the suspended analyser kept.
+  it('a context that suspends shuts an open microphone that was talking, and a running one lets it open again', async () => {
+    const given = new StubAudio();
+    given.sample = 255;
+    const session: VoiceSessionResult = {
+      ok: true,
+      value: { livekit_url: 'wss://lk.example', identity: 'p7', rooms: [{ room: 'r', token: 't', can_publish: true, expires_at: '2026-11-13T10:00:15.000Z' }] },
+    };
+    const clock = new FakeClock();
+    const client = new VoiceClient({
+      clock,
+      random: () => 0.5,
+      createSession: () => Promise.resolve(session),
+      report: () => Promise.resolve('ok'),
+      newRoom: newLiveKitRoom,
+      claimShare: () => Promise.resolve({ ok: false, failure: 'network' }),
+      stopShare: () => Promise.resolve(),
+    });
+    client.join('general', { audio: given.asContext() });
+    await settle();
+    await settle();
+    expect(client.snapshot()).toMatchObject({ phase: 'connected', meter: true });
+    client.setMode('open');
+    clock.advance(100);
+    expect(client.snapshot().talking).toBe(true);
+    given.onResume = 'stay';
+    given.become('suspended');
+    await settle();
+    expect(client.snapshot()).toMatchObject({ meter: false, talking: false });
+    // Still loud in its buffer, still shut.
+    clock.advance(100);
+    expect(client.snapshot().talking).toBe(false);
+    given.become('running');
+    clock.advance(100);
+    expect(client.snapshot()).toMatchObject({ meter: true, talking: true });
+    await client.leave();
+    // Closed once, by the client; the room's close did not.
+    expect(given.closed).toBe(1);
   });
 });

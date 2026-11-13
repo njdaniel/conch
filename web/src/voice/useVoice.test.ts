@@ -895,6 +895,84 @@ describe('presence of the channel on screen', () => {
     expect(live()).toHaveLength(1);
   });
 
+  // Issue #1794: iOS Safari runs an AudioContext only if it was made and
+  // resumed inside the gesture, so the Join click makes the meter's before
+  // anything is awaited, and the session is not asked for until after.
+  it('the Join click makes and resumes the meter\'s audio context before any await, then asks for the session', async () => {
+    const order: string[] = [];
+    const made: { closed: number }[] = [];
+    vi.stubGlobal(
+      'AudioContext',
+      class {
+        closed = 0;
+        constructor() {
+          order.push('create');
+          made.push(this);
+        }
+        resume() {
+          order.push('resume');
+          return Promise.resolve();
+        }
+        close() {
+          this.closed++;
+          return Promise.resolve();
+        }
+      },
+    );
+    try {
+      fake.session = () => {
+        order.push('session');
+        return new Promise(() => undefined);
+      };
+      const { result } = hook();
+      await flush();
+      open([7]);
+      // No await between the click and these: all of it ran in the click.
+      act(() => {
+        result.current.join();
+      });
+      expect(order).toEqual(['create', 'resume', 'session']);
+      expect(made).toHaveLength(1);
+      expect(result.current.state.phase).toBe('connecting');
+      // Leaving closes it, once.
+      await act(async () => {
+        result.current.leave();
+        await Promise.resolve();
+        await vi.advanceTimersByTimeAsync(5000);
+      });
+      expect(made[0]?.closed).toBe(1);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('Watch only makes no audio context: there is no microphone to meter until Use microphone', async () => {
+    let created = 0;
+    vi.stubGlobal(
+      'AudioContext',
+      class {
+        constructor() {
+          created++;
+        }
+        resume() {
+          return Promise.resolve();
+        }
+      },
+    );
+    try {
+      fake.session = () => new Promise(() => undefined);
+      const { result } = hook();
+      await flush();
+      open([7]);
+      act(() => {
+        result.current.watchOnly();
+      });
+      expect(created).toBe(0);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it('after leaving voice while the server is down, is live again once it is back (F06)', async () => {
     const { result, rerender } = hook();
     await flush();
