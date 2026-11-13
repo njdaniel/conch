@@ -1165,6 +1165,10 @@ async fn without_a_key_device_hold_to_talk_is_not_configured_and_the_rest_works(
     assert_eq!(rig.exit_code().await, 0);
 }
 
+#[cfg_attr(
+    windows,
+    ignore = "#1808: on Windows a stalled owner makes the helper drop no state (the events pipe holds more than the queue); under investigation"
+)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_slow_owner_loses_events_sees_the_gap_and_resynchronises() {
     const STRIKES: i64 = 400;
@@ -1241,6 +1245,10 @@ async fn a_slow_owner_loses_events_sees_the_gap_and_resynchronises() {
 /// Commands read while the owner is not reading and the queue is full are still answered,
 /// each exactly once and in order, once the owner reads again: an ack, and the state that
 /// answers `get_state`, are never dropped (§5, rules 8 and 10; #571).
+#[cfg_attr(
+    windows,
+    ignore = "#1808: on Windows a stalled owner makes the helper drop no state (the events pipe holds more than the queue); under investigation"
+)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn commands_sent_to_an_owner_that_is_not_reading_are_answered_once_it_reads() {
     // Odd, so that the last strike mutes and the track says when it has been taken.
