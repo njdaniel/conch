@@ -396,3 +396,85 @@ for (const [size, options] of phoneSizes) {
     expect(sessions, `${size}: nothing asked for a voice session`).toBe(0);
   });
 }
+
+// ---------------------------------------------------------------- issue #1813
+
+// In a short desktop window the page used to scroll as a document: the middle
+// row grew to the members list, the conversation ended at its composer, and a
+// wheel that ran past the end of the messages moved the page, leaving a band
+// under the composer. Now the lobby has a height of its own: the composer sits
+// on the voice dock at every height, and nothing but the messages scrolls.
+const shortWindows: readonly (readonly [string, BrowserContextOptions])[] = [
+  ...[400, 470, 560, 640, 720, 900].map((height): readonly [string, BrowserContextOptions] => [`1215×${String(height)}`, { viewport: { width: 1215, height } }]),
+  ['720×450 at 200%', { viewport: { width: 720, height: 450 }, deviceScaleFactor: 2 }],
+];
+
+test('P1813 in a short window the composer stays on the voice dock while the person scrolls', async ({ meet, secrets, world }) => {
+  const tag = `p1813-${String(Date.now())}`;
+  const channel = `${tag}-c`;
+  await must(world, world.tokens.operator, 'POST', '/v0/channels', { name: channel });
+  const me = await member(world, channel, `${tag}-me`);
+  secrets.push(me.token);
+  // A members list longer than any of these windows.
+  for (let i = 0; i < 30; i++) secrets.push((await member(world, channel, `${tag}-roster-${String(i)}`)).token);
+  for (let i = 0; i < 60; i++) {
+    await must(world, me.token, 'POST', `/v2/channels/${encodeURIComponent(channel)}/messages`, { body: `${tag} message ${String(i)} ${'words '.repeat(i % 7 === 0 ? 40 : 3)}` });
+  }
+
+  for (const [size, options] of shortWindows) {
+    const { page } = await meet(options);
+    await signIn(page, world, me.token, me.name);
+    await openChannel(page, channel);
+    await expect(messages(page).getByText(`${tag} message 59`)).toBeVisible();
+    const composer = page.locator('.composer');
+    const dock = page.locator('.dock');
+    const log = messages(page);
+
+    // The composer's bottom edge is on the dock's top edge, and the page and
+    // every ancestor of the log are where they were.
+    // Under 31rem the lobby is taller than the window and the page scrolls as
+    // a document (with the composer still on the dock), so only a wheel over
+    // the messages is held to leave the page where it was there.
+    let base = 0;
+    const settled = async (step: string, pageStays: boolean): Promise<void> => {
+      await page.waitForTimeout(150);
+      const where = `${size}, ${step}`;
+      const c = await composer.boundingBox();
+      const d = await dock.boundingBox();
+      if (c === null || d === null) throw new Error(`${where}: no composer or dock`);
+      expect(Math.abs(c.y + c.height - d.y), `${where}: the composer is ${String(d.y - c.y - c.height)} px above the dock`).toBeLessThanOrEqual(1);
+      const moved = await page.evaluate((from) => {
+        const out: string[] = [];
+        if (window.scrollY !== from) out.push(`window ${String(window.scrollY)}, was ${String(from)}`);
+        for (const el of Array.from(document.querySelectorAll('.lobby, .lobby > *, .conversation-body, .log-wrap'))) {
+          if (el.scrollTop !== 0) out.push(`${el.tagName.toLowerCase()}.${el.className} ${String(el.scrollTop)}`);
+        }
+        return out;
+      }, base);
+      if (pageStays) expect(moved, `${where}: something scrolled`).toEqual([]);
+    };
+    const tall = (options.viewport?.height ?? 0) >= 496;
+    const wheel = async (x: number, y: number, dy: number, step: string, inLog = false): Promise<void> => {
+      await page.mouse.move(x, y);
+      await page.mouse.wheel(0, dy);
+      await settled(step, inLog || tall);
+    };
+
+    await settled('at the start', tall);
+    base = await page.evaluate(() => window.scrollY);
+    const box = await log.boundingBox();
+    const screen = page.viewportSize();
+    if (box === null || screen === null) throw new Error(`${size}: no log`);
+    const mid = { x: box.x + box.width / 2, y: box.y + box.height / 2 };
+    await wheel(mid.x, mid.y, -3000, 'wheel up past the top of the messages', true);
+    await wheel(mid.x, mid.y, 6000, 'wheel down to the end', true);
+    await wheel(mid.x, mid.y, 3000, 'wheel past the end of the messages', true);
+    const c = await composer.boundingBox();
+    if (c !== null) await wheel(c.x + 20, c.y + c.height / 2, 2000, 'wheel over the composer');
+    await wheel(20, screen.height - 20, 2000, 'wheel in the bottom corner');
+    await wheel(screen.width - 20, 20, 2000, 'wheel in the top corner');
+    await wheel(screen.width - 20, screen.height / 2, 2000, 'wheel over the members column');
+    await page.keyboard.press('End');
+    await settled('the End key', tall);
+  }
+});
