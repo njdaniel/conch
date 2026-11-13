@@ -142,6 +142,17 @@ describe('Join voice and Watch only', () => {
     expect(calls).toEqual(['join', 'watch only']);
   });
 
+  // Issue #1794: the click is the gesture iOS needs the meter's audio context
+  // made in, so the button calls the join itself, in the click: nothing is
+  // deferred, and nothing is passed that could make it wait.
+  it('Join voice calls the join in the click itself, synchronously', () => {
+    const { voice, calls } = panel(initialVoice, 'general');
+    const before = calls.length;
+    fireEvent.click(within(voice).getByRole('button', { name: 'Join voice in #general' }));
+    // Not after a microtask or a timer: the very next statement sees it.
+    expect(calls.slice(before)).toEqual(['join']);
+  });
+
   // N08: one space between the verb and the channel, in the text itself; the
   // stylesheet adds no margin to the span.
   it('have one space between the verb and the channel', () => {

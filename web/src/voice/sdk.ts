@@ -933,7 +933,15 @@ class LiveKitAdapter implements Room {
   private events: RoomEvents | null = null;
   private track: LocalAudioTrack | null = null;
   private publication: LocalTrackPublication | null = null;
-  private tap: { readonly context: AudioContext; readonly analyser: AnalyserNode; readonly clone: MediaStreamTrack } | null = null;
+  // The tap on the microphone. owned is whether the tap made its context
+  // (and so closes it) or was given the client's, which outlives the tap: a
+  // mic switch makes a new tap on the same context (issue #1794). stop undoes
+  // what the tap added to a context it does not own: the listener, and the
+  // nodes.
+  private tap: { readonly context: AudioContext; readonly analyser: AnalyserNode; readonly clone: MediaStreamTrack; readonly owned: boolean; readonly stop: () => void } | null = null;
+  // The audio context the client made inside the Join gesture, for the meter
+  // (issue #1794). Never closed here: the client does.
+  private given: AudioContext | null = null;
   private wantSending = false;
   // The microphone chosen, by device id, or null for the system default; and
   // whether the capture was lost, when nothing captures until a new choice.
@@ -1020,9 +1028,10 @@ class LiveKitAdapter implements Room {
   private readonly remoteCameras = new Map<number, RemoteTrack>();
   private readonly cameraViews = new Map<number, HTMLVideoElement>();
 
-  async connect(url: string, token: string, roomName: string, publish: boolean, events: RoomEvents): Promise<void> {
+  async connect(url: string, token: string, roomName: string, publish: boolean, events: RoomEvents, audio?: AudioContext | null): Promise<void> {
     this.ensureOpen();
     this.events = events;
+    this.given = audio ?? null;
     // Held for this adapter alone: its close() releases these and no other
     // connection's.
     redactor.hold(this, token, roomName);
@@ -1354,47 +1363,93 @@ class LiveKitAdapter implements Room {
   // listen taps a clone of the microphone for the level meter and the voice
   // detection: the published track is muted while the gate is shut, and a
   // muted track carries silence.
+  //
+  // It listens with the audio context the client made in the Join gesture
+  // (issue #1794), while that is open: iOS leaves a context made later
+  // suspended, and a suspended one reads silence. A mic switch comes here too,
+  // outside any gesture, and reuses it; it never makes one while there is one
+  // to use. Without one (a watch only joined, a browser without) or with one
+  // closed, it makes its own, as before. The meter is reported working only
+  // once the context runs, and follows its state from then on.
   private listen(track: LocalAudioTrack): void {
     if (this.closed) return;
     // A tap left from an earlier capture is let go: one device open at a time.
     void this.untap();
     let clone: MediaStreamTrack | null = null;
     let context: AudioContext | null = null;
+    const given = this.given !== null && this.given.state !== 'closed' ? this.given : null;
     try {
       clone = track.mediaStreamTrack.clone();
       // A clone copies the track's enabled flag, and the track was muted just
       // before this: the tap must hear the room whatever the published track does.
       clone.enabled = true;
-      context = new AudioContext();
-      const analyser = context.createAnalyser();
+      const ctx = given ?? new AudioContext();
+      context = ctx;
+      const analyser = ctx.createAnalyser();
       analyser.fftSize = levelWindow;
-      context.createMediaStreamSource(new MediaStream([clone])).connect(analyser);
-      this.tap = { context, analyser, clone };
+      const src = ctx.createMediaStreamSource(new MediaStream([clone]));
+      src.connect(analyser);
+      // The meter works exactly while the context runs: a suspended or
+      // interrupted one (a call, the screen locked) reads nothing, or its last
+      // buffer. A change reaches the client, and an open microphone's gate is
+      // shut by the client when it hears the meter is gone.
+      const changed = (): void => {
+        this.events?.onMeter(ctx.state === 'running');
+      };
+      ctx.addEventListener('statechange', changed);
+      this.tap = {
+        context: ctx,
+        analyser,
+        clone,
+        owned: given === null,
+        stop: () => {
+          ctx.removeEventListener('statechange', changed);
+          // The nodes of a context that stays are let go; a context closed
+          // goes with its own.
+          src.disconnect();
+          analyser.disconnect();
+        },
+      };
     } catch (err: unknown) {
       // The tap only feeds the level meter and the open microphone's voice
       // detection (a browser may refuse the audio context, or run out of
       // them). The connection and the published track are good without it:
-      // what was made is let go, and the client is told there is no meter.
+      // what was made is let go, and the client is told there is no meter. A
+      // context that was given is the client's to close.
       clone?.stop();
-      void context?.close().catch(() => undefined);
+      if (given === null) void context?.close().catch(() => undefined);
       // Said by the error's name alone.
       const name = typeof err === 'object' && err !== null && 'name' in err && typeof err.name === 'string' ? err.name : undefined;
       this.events?.onMeter(false, name);
       return;
     }
-    this.events?.onMeter(true);
-    // The page was interacted with to get here, so the browser lets it run;
-    // a context that starts suspended would read silence.
-    void context.resume().catch(() => undefined);
+    if (context.state === 'running') {
+      this.events?.onMeter(true);
+      return;
+    }
+    // Not running yet (a context made here, or one the browser has not
+    // started): resumed, and said working only when it is. The statechange
+    // listener says it too; this is for a resume that is refused.
+    const waiting = context;
+    waiting.resume().then(
+      () => {
+        if (this.tap?.context === waiting && waiting.state === 'running') this.events?.onMeter(true);
+      },
+      () => {
+        if (this.tap?.context === waiting) this.events?.onMeter(false);
+      },
+    );
   }
 
-  // untap stops the tap's clone and closes its audio context.
+  // untap stops the tap's clone and, when the tap made its context, closes it.
+  // A context the client gave stays open for the next tap.
   private async untap(): Promise<void> {
     const tap = this.tap;
     this.tap = null;
     if (tap === null) return;
+    tap.stop();
     tap.clone.stop();
-    await tap.context.close().catch(() => undefined);
+    if (tap.owned) await tap.context.close().catch(() => undefined);
   }
 
   async setSending(on: boolean): Promise<void> {
@@ -1441,7 +1496,10 @@ class LiveKitAdapter implements Room {
 
   level(): number {
     const tap = this.tap;
-    if (tap === null) return 0;
+    // A context that does not run (suspended, interrupted) may hold the last
+    // buffer it had; if that was speech the open microphone's gate would stay
+    // open on it (issue #1794).
+    if (tap === null || tap.context.state !== 'running') return 0;
     tap.analyser.getByteTimeDomainData(this.buffer);
     let sum = 0;
     for (const v of this.buffer) {

@@ -249,7 +249,13 @@ export interface Room extends ShareRoom, CameraRoom {
   // Resolves once the room is joined and, when publish is set, the
   // microphone track is published and muted. It rejects if any of that fails
   // (a microphone refused included).
-  connect: (url: string, token: string, roomName: string, publish: boolean, events: RoomEvents) => Promise<void>;
+  //
+  // audio is the audio context the level meter listens with (issue #1794),
+  // made and resumed inside the Join gesture, which is the only place iOS
+  // lets one run. The room uses it and never closes it: the client does, once,
+  // when the person leaves or a join fails for good. Absent, or already
+  // closed, the room makes its own.
+  connect: (url: string, token: string, roomName: string, publish: boolean, events: RoomEvents, audio?: AudioContext | null) => Promise<void>;
   // Captures and publishes the microphone, muted, on a connection made
   // without it (watch only).
   publishMicrophone: () => Promise<void>;
@@ -483,6 +489,28 @@ export interface VoiceEnv {
 export const reconnectLimit = 20_000;
 // A connection that lasted this long starts the retry wait over.
 export const healthyAfter = 30_000;
+// openAudio makes the level meter's audio context and resumes it, in this
+// call, with nothing awaited before: iOS Safari starts a context suspended
+// unless it was made and resumed inside a user gesture, and the meter is made
+// long after the Join tap (issue #1794). Called first in the Join click. A
+// browser that has none, or refuses one, gets null: the room then makes its
+// own, and a refusal there is the meter note's (issue #1795).
+export function openAudio(): AudioContext | null {
+  if (typeof AudioContext !== 'function') return null;
+  try {
+    const context = new AudioContext();
+    void context.resume().catch(() => undefined);
+    return context;
+  } catch {
+    return null;
+  }
+}
+
+// closeAudio lets a context go; a failure to close is not news.
+function closeAudio(audio: AudioContext | null): void {
+  if (audio !== null) void audio.close().catch(() => undefined);
+}
+
 // How often the microphone level is read, for the open microphone's gate, and
 // how often the meter is told of it. The gate's read was every 50 ms until
 // issue #965: an onset waited up to that long before the gate opened.
@@ -618,6 +646,9 @@ export class VoiceClient {
   private state: VoiceState = initialVoice;
   private listeners = new Set<() => void>();
   private room: Room | null = null;
+  // The meter's audio context, made in the Join gesture (issue #1794) and
+  // kept for the whole stay in voice, retries included; see releaseAudio.
+  private audio: AudioContext | null = null;
   private channel: string | null = null;
   // Each attempt has a number; answers for an older one are discarded.
   private attempt = 0;
@@ -772,13 +803,22 @@ export class VoiceClient {
   // companion is for the desktop (issue #1581): the page then connects as the
   // person's screen companion, p<id>.screen, with the grant main hands over,
   // and never as the person (the helper is) or with a microphone.
-  join(channel: string, options: { readonly watchOnly?: boolean; readonly beside?: boolean; readonly companion?: boolean } = {}): void {
-    if (this.state.phase !== 'idle' && this.state.phase !== 'stopped') return;
+  //
+  // audio is the level meter's audio context (openAudio), made and resumed
+  // by the caller inside the click, before anything else (issue #1794). A join
+  // that is not made closes it.
+  join(channel: string, options: { readonly watchOnly?: boolean; readonly beside?: boolean; readonly companion?: boolean; readonly audio?: AudioContext | null } = {}): void {
     const companion = options.companion === true;
     // A companion is not joined while the last one is still being left (its
     // room closing, main not yet told); the gate is only ever cleared by the
     // leave that owns it.
-    if (companion && this.companionLeaving !== null) return;
+    if ((this.state.phase !== 'idle' && this.state.phase !== 'stopped') || (companion && this.companionLeaving !== null)) {
+      closeAudio(options.audio ?? null);
+      return;
+    }
+    // One from an earlier stay that nothing released is let go first.
+    this.releaseAudio();
+    this.audio = options.audio ?? null;
     this.channel = channel;
     this.joins++;
     this.share.setCompanion(companion);
@@ -1494,6 +1534,7 @@ export class VoiceClient {
     const left = this.channel;
     const viewer = this.state.viewer;
     this.room = null;
+    this.releaseAudio();
     this.channel = null;
     // The room's close starts here, before the page says it is out of voice,
     // so that the LiveKit leave is already on its way when "Join voice"
@@ -1625,6 +1666,14 @@ export class VoiceClient {
   dispose(): void {
     void this.leave();
     this.listeners.clear();
+  }
+
+  // releaseAudio closes the meter's audio context, once: the field is cleared
+  // first, so a leave and a stop that both get here close it one time.
+  private releaseAudio(): void {
+    const audio = this.audio;
+    this.audio = null;
+    closeAudio(audio);
   }
 
   private applyBlock(): void {
@@ -1795,6 +1844,8 @@ export class VoiceClient {
         this.unfollowCompanion();
         this.share.abandon();
         this.camera.abandon();
+        // A join that failed for good: nobody is left to hear with it.
+        this.releaseAudio();
         this.set({ phase: 'stopped', why: next.why, viewing: false, cameraTracks: noCameraTracks });
         break;
       case 'new_session':
@@ -1992,7 +2043,7 @@ export class VoiceClient {
     const processing = this.state.processing;
     room.setProcessing(processing);
     try {
-      await room.connect(session.value.livekit_url, grant.token, grant.room, publish && !this.state.missing, events);
+      await room.connect(session.value.livekit_url, grant.token, grant.room, publish && !this.state.missing, events, this.audio);
     } catch (err: unknown) {
       // A microphone refused or missing is said by the error's name alone.
       const name = errorName(err);

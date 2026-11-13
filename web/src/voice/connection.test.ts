@@ -1,10 +1,10 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type { CompanionEndReason, CompanionGrantResult } from '../platform/desktop/bridge';
 import type { ShareClaimResult, TransmitAnswer, VoiceSessionResult, VoiceViewerResult } from '../api';
 import type { VoicePresenceV2 } from '../schema/voice';
 import type { CameraClaimResult } from '../api';
 import type { Camera, CameraProfile, KeptCamera } from './camera';
-import { VoiceClient, chosenGone, companionDefaultQuality, companionQualities, companionEnds, companionQuality, companionLeftWatching, companionLost, companionRefusals, type CompanionEnv, earlierGone, levelEvery, meterEvery, outputMoved, outputRefused, reconnectLimit, reportWait, type CameraTrack, type Microphone, type ModeStore, type Output, type Phase, type Processing, type ProcessingStore, type Room, type RoomEvents, type ShareSink } from './connection';
+import { VoiceClient, openAudio, chosenGone, companionDefaultQuality, companionQualities, companionEnds, companionQuality, companionLeftWatching, companionLost, companionRefusals, type CompanionEnv, earlierGone, levelEvery, meterEvery, outputMoved, outputRefused, reconnectLimit, reportWait, type CameraTrack, type Microphone, type ModeStore, type Output, type Phase, type Processing, type ProcessingStore, type Room, type RoomEvents, type ShareSink } from './connection';
 import { shareNote } from './native/words';
 import { qualityLaterNote, resumeLimit, settleQuality, type Captured, type KeptScreen, type SettledQuality, type ShareQuality } from './share';
 import { defaultTail } from './gate';
@@ -34,8 +34,11 @@ class StubRoom implements Room {
   heldMute: (() => void) | null = null;
   holdUnmute = false;
   heldUnmute: (() => void) | null = null;
-  connect = (url: string, tok: string, name: string, publish: boolean, events: RoomEvents): Promise<void> => {
+  // The audio context the client handed the last connect (issue #1794).
+  audioArg: AudioContext | null | undefined = undefined;
+  connect = (url: string, tok: string, name: string, publish: boolean, events: RoomEvents, audio?: AudioContext | null): Promise<void> => {
     this.connectArgs = { url, token: tok, roomName: name, publish };
+    this.audioArg = audio;
     this.events = events;
     if (this.connectFailure !== null) return Promise.reject(this.connectFailure);
     return this.connectError ? Promise.reject(new Error('unreachable')) : Promise.resolve();
@@ -3978,5 +3981,140 @@ describe('the screen companion', () => {
     t.order.length = 0;
     await t.client.leave();
     expect(t.order).toEqual(['close', 'end']);
+  });
+});
+
+// Issue #1794: the meter's audio context is made in the Join gesture and
+// handed to every room of the stay; the client closes it, once, when the
+// person leaves or a join fails for good, and a retry reuses it.
+describe('the meter\'s audio context', () => {
+  function fakeAudio() {
+    return { state: 'running', closed: 0, close() { this.closed++; return Promise.resolve(); } };
+  }
+  const asContext = (a: ReturnType<typeof fakeAudio>): AudioContext => a as unknown as AudioContext;
+
+  it('is handed to the room that connects, and closed once when the person leaves', async () => {
+    const audio = fakeAudio();
+    const t = setup();
+    t.client.join('general', { audio: asContext(audio) });
+    await settle();
+    expect(t.rooms[0]?.audioArg).toBe(audio);
+    expect(audio.closed).toBe(0);
+    await t.client.leave();
+    expect(audio.closed).toBe(1);
+    // A second leave has nothing to close.
+    await t.client.leave();
+    expect(audio.closed).toBe(1);
+  });
+
+  it('is closed once when a join fails for good', async () => {
+    const audio = fakeAudio();
+    const t = setup([okSession()], [], 0, false, (room) => {
+      room.connectFailure = deviceError('NotAllowedError');
+    });
+    t.client.join('general', { audio: asContext(audio) });
+    await settle();
+    expect(t.client.snapshot().phase).toBe('stopped');
+    expect(audio.closed).toBe(1);
+    await t.client.leave();
+    expect(audio.closed).toBe(1);
+  });
+
+  it('is closed when conchd refuses the session for good', async () => {
+    const audio = fakeAudio();
+    const t = setup([{ ok: false, failure: 'invalid', status: 404 }]);
+    t.client.join('general', { audio: asContext(audio) });
+    await settle();
+    expect(t.client.snapshot().phase).toBe('stopped');
+    expect(audio.closed).toBe(1);
+  });
+
+  it('is kept through a drop and handed to the retry\'s room, which finds it still open', async () => {
+    const audio = fakeAudio();
+    const t = setup([okSession(), okSession()]);
+    t.client.join('general', { audio: asContext(audio) });
+    await settle();
+    t.rooms[0]?.events?.onDisconnected('lost');
+    expect(audio.closed).toBe(0);
+    t.clock.advance(1000);
+    await settle();
+    expect(t.rooms).toHaveLength(2);
+    expect(t.rooms[1]?.audioArg).toBe(audio);
+    expect(audio.closed).toBe(0);
+    await t.client.leave();
+    expect(audio.closed).toBe(1);
+  });
+
+  it('is kept when an unreachable LiveKit is retried', async () => {
+    const audio = fakeAudio();
+    const t = setup([okSession(), okSession()], [], 1);
+    t.client.join('general', { audio: asContext(audio) });
+    await settle();
+    expect(t.client.snapshot().phase).toBe('unavailable');
+    expect(audio.closed).toBe(0);
+    t.clock.advance(1000);
+    await settle();
+    expect(t.rooms[1]?.audioArg).toBe(audio);
+    expect(t.client.snapshot().phase).toBe('connected');
+  });
+
+  it('a context that closed meanwhile is still handed over: the room falls back, not the client', async () => {
+    const audio = fakeAudio();
+    const t = setup([okSession(), okSession()]);
+    t.client.join('general', { audio: asContext(audio) });
+    await settle();
+    audio.state = 'closed';
+    t.rooms[0]?.events?.onDisconnected('lost');
+    t.clock.advance(1000);
+    await settle();
+    expect(t.rooms[1]?.audioArg).toBe(audio);
+    expect(t.client.snapshot().phase).toBe('connected');
+  });
+
+  it('a join with none gives the room none', async () => {
+    const t = setup();
+    t.client.join('general');
+    await settle();
+    expect(t.rooms[0]?.audioArg).toBeNull();
+  });
+
+  it('a join that is not made, because the client is already in voice, closes the one it was given', async () => {
+    const first = fakeAudio();
+    const second = fakeAudio();
+    const t = setup();
+    t.client.join('general', { audio: asContext(first) });
+    await settle();
+    t.client.join('general', { audio: asContext(second) });
+    expect(second.closed).toBe(1);
+    expect(first.closed).toBe(0);
+    expect(t.rooms).toHaveLength(1);
+  });
+
+  it('openAudio makes the context and resumes it in the same call, and says null when the browser has none', () => {
+    const calls: string[] = [];
+    vi.stubGlobal(
+      'AudioContext',
+      class {
+        constructor() {
+          calls.push('create');
+        }
+        resume() {
+          calls.push('resume');
+          return Promise.resolve();
+        }
+      },
+    );
+    try {
+      expect(openAudio()).not.toBeNull();
+      expect(calls).toEqual(['create', 'resume']);
+      vi.stubGlobal('AudioContext', function AudioContext() {
+        throw new DOMException('refused', 'NotSupportedError');
+      });
+      expect(openAudio()).toBeNull();
+      vi.stubGlobal('AudioContext', undefined);
+      expect(openAudio()).toBeNull();
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });
