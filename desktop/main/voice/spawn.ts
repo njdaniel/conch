@@ -84,10 +84,15 @@ export const PASSED_THROUGH_WINDOWS: readonly string[] = ['SYSTEMROOT', 'PATH', 
 // Why the helper cannot be run.
 export type HelperRefusal = 'not-installed' | 'untrusted';
 
+// A closed set of more exact causes of an 'untrusted' refusal that the page
+// may say in words (never the path, which stays in main's log).
+export type UntrustedCause = 'folder-writable';
+
 export class HelperError extends Error {
   constructor(
     readonly reason: HelperRefusal,
     readonly why: string,
+    readonly trustCause?: UntrustedCause,
   ) {
     super(`voice: the helper ${reason === 'not-installed' ? 'is not installed' : 'is not trusted'}: ${why}`);
   }
@@ -190,6 +195,12 @@ async function findHelperWindows(resources: string): Promise<string> {
 // change what runs. And a root-owned sticky directory (/tmp, where an
 // unpacked build or a test may live) is accepted: in it, other users may add
 // entries but cannot rename or remove ours (unlink(2), "sticky bit").
+// shown is a path as a refusal may say it: printable ASCII, so a folder named
+// with a newline or an escape cannot forge a line of the log it reaches.
+function shown(path: string): string {
+  return path.replace(/[^\x20-\x7e]/g, '?');
+}
+
 async function safeAncestors(dir: string, own: number): Promise<void> {
   let at = dir;
   for (;;) {
@@ -197,13 +208,13 @@ async function safeAncestors(dir: string, own: number): Promise<void> {
     try {
       st = await lstat(at);
     } catch {
-      throw new HelperError('untrusted', 'a directory above the voice helper cannot be read');
+      throw new HelperError('untrusted', `${shown(at)} above the voice helper cannot be read`);
     }
     const closed = (st.mode & 0o022) === 0;
     const rootSticky = (st.mode & 0o1000) !== 0 && st.uid === 0;
-    if (!st.isDirectory() || !safeOwner(st.uid, own) || !(closed || rootSticky)) {
-      throw new HelperError('untrusted', 'the voice helper is under a directory other users can change');
-    }
+    if (!st.isDirectory()) throw new HelperError('untrusted', `${shown(at)} is not a directory`);
+    if (!safeOwner(st.uid, own)) throw new HelperError('untrusted', `${shown(at)} is not owned by you or by root`);
+    if (!(closed || rootSticky)) throw new HelperError('untrusted', `${shown(at)} may be changed by other users`, 'folder-writable');
     const up = dirname(at);
     if (up === at) return;
     at = up;

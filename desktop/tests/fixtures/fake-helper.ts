@@ -47,6 +47,13 @@ export interface Scenario {
   // Print the token and the nonce to standard error, as a careless helper
   // might, so that the owner's redaction is tested.
   readonly leakToStderr?: boolean;
+  // Lines written to standard error at the start, as the helper's own
+  // status line would be (the text may name CONCH_TOKEN and CONCH_VOICE_ATTACH
+  // as {token} and {nonce}).
+  readonly stderrLines?: readonly string[];
+  // Replaces the reason of the transcript's failed or reconnecting state (a
+  // transcript that fails for one reason, told as another).
+  readonly failReason?: string;
 }
 
 const scenarioPath = process.argv[2] ?? '';
@@ -68,6 +75,10 @@ process.on('SIGTERM', () => {
 
 if (scenario.leakToStderr === true) {
   process.stderr.write(`token=${process.env['CONCH_TOKEN'] ?? ''} nonce=${process.env['CONCH_VOICE_ATTACH'] ?? ''}\n`);
+}
+
+for (const line of scenario.stderrLines ?? []) {
+  process.stderr.write(`${line.split('{token}').join(process.env['CONCH_TOKEN'] ?? '').split('{nonce}').join(process.env['CONCH_VOICE_ATTACH'] ?? '')}\n`);
 }
 
 const at = args.indexOf('--events-pipe');
@@ -183,6 +194,7 @@ async function main(): Promise<void> {
       // The transcript's own attach line is replaced by the one above.
       if (step.message['kind'] === 'attached') continue;
       if (step.message['kind'] === 'hello' && scenario.helloVersions !== undefined) write({ ...step.message, versions: scenario.helloVersions });
+      else if (scenario.failReason !== undefined && (step.message['phase'] === 'failed' || step.message['phase'] === 'reconnecting')) write({ ...step.message, reason: scenario.failReason });
       else write(step.message);
     } else if (step.from === 'owner' && step.message !== undefined) {
       const line = await nextLine();

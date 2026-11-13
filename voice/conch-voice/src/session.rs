@@ -878,8 +878,10 @@ pub async fn serve<T: Transport>(
     handoff: Handoff,
 ) -> Result<(), Error> {
     // Standard output carries a managed helper's native noise, which its owner discards;
-    // nothing of this program's goes there.
-    let out = Output::new(false, Box::new(std::io::sink()));
+    // nothing of this program's goes there. Standard error is the owner's to read, and it
+    // keeps the tail of it: so the connection's changes are written there, with the
+    // error's text (scrubbed), and nothing of who is in the room or the user's own state.
+    let out = Output::queued(false, Box::new(std::io::stderr())).diagnostics_only();
     let mut session = match Session::new(settings, conchd, transport, scrubber, inputs, out) {
         Ok(session) => session,
         Err(error) => {
@@ -1238,7 +1240,9 @@ impl<T: Transport> Session<T> {
                     Failure::Sdk(error) => self.decide(Ended {
                         outcome: Outcome::ConnectFailed,
                         reason: "connect_failed",
-                        detail: Some(error.to_string()),
+                        // Scrubbed where it was made; once more here, since this text
+                        // is written to a managed helper's standard error.
+                        detail: Some(self.shown_text(&error)),
                     }),
                 }
             }
@@ -2462,6 +2466,52 @@ mod tests {
         assert_eq!(
             shown,
             "SwitchDevices(DeviceSwitch { input: Some(\"..\"), output: None })"
+        );
+    }
+
+    /// What a test's [`Output`] wrote, shared with the test.
+    #[derive(Clone, Default)]
+    struct Written(Arc<Mutex<Vec<u8>>>);
+
+    impl std::io::Write for Written {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// A managed session writes why the connection failed to the stream it was given, with
+    /// the error's text scrubbed, and nothing else of its own state.
+    #[tokio::test]
+    async fn a_managed_session_writes_the_connection_failure_scrubbed_to_its_stream() {
+        let open_sink: OpenSink = Box::new(|_| Ok(Box::new(CountingSink::new(&[])?) as BoxedSink));
+        let mut session = session(open_sink);
+        let written = Written::default();
+        session.out = Output::new(false, Box::new(written.clone())).diagnostics_only();
+        session
+            .scrubber
+            .always(&Secret::new("FAKE-login-token-do-not-print"));
+        let jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJwNyJ9.c2lnbmF0dXJlLWJ5dGVz";
+        session.on_progress(Progress::Established(Err(Failure::Sdk(
+            SdkError::scrubbed(format!(
+                "could not connect: token FAKE-login-token-do-not-print and {jwt}\nsecond line"
+            )),
+        ))));
+        let text = String::from_utf8(written.0.lock().unwrap().clone()).unwrap();
+        assert!(
+            text.starts_with(
+                "not connected: connect failed (could not connect: token [redacted] and [redacted] second line);"
+            ),
+            "{text}"
+        );
+        assert_eq!(text.matches('\n').count(), 1, "one line: {text}");
+        assert!(
+            !text.contains("FAKE-login-token") && !text.contains("eyJ"),
+            "{text}"
         );
     }
 }
