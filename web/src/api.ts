@@ -811,6 +811,9 @@ export async function restore(): Promise<ApiResult<Restored>> {
   }
   if (held.place === 'lasting' && result.value.role === 'operator') {
     platform.credentials.drop(held);
+    // A member made an operator keeps the sign-in, and its registration: but
+    // it is no longer a lasting one, which is the only kind push is offered.
+    await forgetPush();
     pending = held.token;
     return { ok: true, value: { principal: result.value, warn: true } };
   }
@@ -818,6 +821,7 @@ export async function restore(): Promise<ApiResult<Restored>> {
     // A visit is never kept to last: found there, it is moved to this tab,
     // and the other tabs of the origin no longer have it.
     platform.credentials.drop(held);
+    await forgetPush();
     const moved: Held = { token: held.token, place: 'tab' };
     const kept = platform.credentials.write(moved.token, moved.place);
     if (kept === null) {
@@ -2734,7 +2738,10 @@ export async function forgetPush(account?: number): Promise<void> {
   } catch {
     // Nothing is registered to wake it.
   }
-  keepPushRegistration(null);
+  // The record is cleared only if it is still the one dropped: a registration
+  // another tab (or enable) made in the gap is not this call's to clear.
+  const now = readPushRegistration();
+  if (now?.id === record.id && now.account === record.account) keepPushRegistration(null);
 }
 
 // How a person arranges the channel list (issue #1493): favorites, groups and

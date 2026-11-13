@@ -1103,23 +1103,46 @@ describe('what the pump sends', () => {
     expect(puts(server)[0]?.body).toMatchObject({ policy: 'mentions', muted: [4, 5] });
   });
 
-  it('is not sent under a credential that ends with the tab, though a record is there', async () => {
+  it('is not sent under a credential that ends with the tab: the registration it owns is ended instead (a member made an operator)', async () => {
+    // restore moved the credential out of the lasting place; the record is still the account's.
     window.localStorage.removeItem(tokenKey);
     window.sessionStorage.setItem(tokenKey, 'conch_operator_secret');
     const server = serve();
     expect((await api.restore()).ok).toBe(true);
-    platform.services.push = fakePush({}, true);
+    const fake = fakePush({}, true);
+    platform.services.push = fake;
     api.keepPushRegistration(record);
     server.requests.length = 0;
     const hook = renderHook((p: Props) => usePushStored(p), { initialProps: props() });
     await waitFor(() => {
       expect(hook.result.current.state.kind).toBe('session-only');
     });
+    await waitFor(() => {
+      expect(api.readPushRegistration()).toBeNull();
+    });
     hook.rerender(props({ policy: 'off' }));
     await act(async () => {
       await Promise.resolve();
     });
+    expect(server.requests).toEqual([{ method: 'DELETE', path: '/v1/push/registrations/reg-1', body: undefined }]);
+    expect(fake.calls).toEqual(['unsubscribe']);
+  });
+
+  it('leaves another account’s record alone when the sign-in is a tab’s', async () => {
+    window.localStorage.removeItem(tokenKey);
+    window.sessionStorage.setItem(tokenKey, 'conch_operator_secret');
+    const server = serve();
+    expect((await api.restore()).ok).toBe(true);
+    const fake = fakePush({}, true);
+    platform.services.push = fake;
+    api.keepPushRegistration({ id: 'reg-9', account: 9 });
+    server.requests.length = 0;
+    const hook = renderHook(() => usePushStored(props()));
+    await waitFor(() => {
+      expect(hook.result.current.state.kind).toBe('session-only');
+    });
     expect(server.requests).toEqual([]);
+    expect(api.readPushRegistration()).toEqual({ id: 'reg-9', account: 9 });
   });
 
   it('schedules nothing for a send that was in flight when the page went away', async () => {
@@ -1180,5 +1203,111 @@ describe('the bound on the sign-out push request, where AbortSignal.timeout is m
     expect(await out).toBe(true);
     expect(fake.calls).toEqual(['unsubscribe']);
     expect(api.readPushRegistration()).toBeNull();
+  });
+});
+
+describe('a member made an operator', () => {
+  it('has the subscription and record dropped, locally, where restore moves the credential out of the lasting place', async () => {
+    const fake = fakePush({}, true);
+    platform.services.push = fake;
+    api.keepPushRegistration(record);
+    const server = serve();
+    server.answer = (request) => (request.path === '/v1/whoami' ? json({ id: 2, kind: 'human', name: 'ada', role: 'operator' }) : json({}, 404));
+    const restored = await api.restore();
+    expect(restored).toMatchObject({ ok: true, value: { warn: true } });
+    expect(window.localStorage.getItem(tokenKey)).toBeNull();
+    expect(fake.calls).toEqual(['unsubscribe']);
+    expect(api.readPushRegistration()).toBeNull();
+    expect(server.requests.map((request) => request.path)).toEqual(['/v1/whoami']);
+  });
+
+  it('has them dropped for a visit moved to the tab as well', async () => {
+    const fake = fakePush({}, true);
+    platform.services.push = fake;
+    api.keepPushRegistration(record);
+    const server = serve();
+    server.answer = (request) =>
+      request.path === '/v1/whoami' ? json({ id: 2, kind: 'human', name: 'ada', role: 'member', guest: { state: 'active', origin: 'address', handle: 'g', tag: 'a7k4', started_at: '2026-10-21T10:00:00.000Z', expires_at: '2099-10-22T12:00:00.000Z', idle_expires_at: '2099-10-21T14:00:00.000Z', can_convert: true } }) : json({}, 404);
+    await api.restore();
+    expect(fake.calls).toEqual(['unsubscribe']);
+    expect(api.readPushRegistration()).toBeNull();
+  });
+});
+
+describe('a record dropped while another is written', () => {
+  it('is not cleared if a registration was made in the gap', async () => {
+    let finish: () => void = () => undefined;
+    const fake = fakePush({
+      unsubscribe: vi.fn(
+        () =>
+          new Promise<void>((resolve) => {
+            finish = resolve;
+          }),
+      ),
+    }, true);
+    platform.services.push = fake;
+    api.keepPushRegistration(record);
+    const dropping = api.forgetPush(2);
+    api.keepPushRegistration({ id: 'reg-2', account: 2 });
+    finish();
+    await dropping;
+    expect(api.readPushRegistration()).toEqual({ id: 'reg-2', account: 2 });
+  });
+});
+
+describe('a tab that did not make the change', () => {
+  it('reads the server’s copy before writing what another tab stored, and writes nothing when it agrees', async () => {
+    platform.services.push = fakePush({}, true);
+    const server = serve();
+    api.keepPushRegistration(record);
+    api.writeNotificationPreferences(window.location.origin, 2, { policy: 'mentions', muted: [7], native: false });
+    const base = server.answer;
+    server.answer = (request) => (request.path === '/v1/push/registrations/mine' ? json({ registrations: [registration()] }) : base(request));
+    // This tab's memory says mentions and it sent that.
+    const hook = renderHook(() => usePush(props({ policy: 'mentions', muted: new Set([7]) })));
+    await settled(server, hook, 'on');
+    await waitFor(() => {
+      expect(puts(server)).toHaveLength(1);
+    });
+    server.requests.length = 0;
+    // Another tab chose all, kept it in storage and sent it.
+    api.writeNotificationPreferences(window.location.origin, 2, { policy: 'all', muted: [7], native: false });
+    server.answer = (request) =>
+      request.path === '/v1/push/registrations/mine' ? json({ registrations: [registration()] }) : request.method === 'GET' && request.path === '/v1/notifications/preferences' ? prefs('all', [7]) : base(request);
+    act(() => {
+      window.dispatchEvent(new StorageEvent('storage', { key: registrationKey, storageArea: window.localStorage }));
+    });
+    await waitFor(() => {
+      expect(server.requests.some((request) => request.method === 'GET' && request.path === '/v1/notifications/preferences')).toBe(true);
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(puts(server)).toEqual([]);
+  });
+});
+
+describe('the drop of another account’s record at load', () => {
+  it('is waited for before the state is read, so a registration made meanwhile is not mistaken for it', async () => {
+    let finish: () => void = () => undefined;
+    const fake = fakePush({
+      unsubscribe: vi.fn(
+        () =>
+          new Promise<void>((resolve) => {
+            finish = resolve;
+          }),
+      ),
+    }, true);
+    platform.services.push = fake;
+    const server = serve();
+    api.keepPushRegistration({ id: 'reg-9', account: 9 });
+    const hook = renderHook(() => usePushStored(props()));
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    });
+    expect(hook.result.current.state.kind).toBe('checking');
+    expect(server.requests.some((request) => request.path === '/v1/push/config')).toBe(false);
+    finish();
+    await settled(server, hook, 'off');
   });
 });

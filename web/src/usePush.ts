@@ -60,12 +60,13 @@ export function usePush({
   // the credential is replaced: the state is read again.
   const [tick, setTick] = useState(0);
   const vapid = useRef('');
-  const live = useRef({ signedIn, eligible, account });
-  live.current = { signedIn, eligible, account };
+  const live = useRef({ signedIn, eligible, account, key: '' });
+  live.current = { signedIn, eligible, account, key: '' };
   // What changed locally; what is SENT is read from storage at send time (see
   // stored), so a tab holding an older choice in memory never writes it over a
   // newer one made in another tab.
   const wanted = shape(policy, muted);
+  live.current.key = wanted.key;
   const gone = useRef(false);
   const isGone = () => gone.current;
 
@@ -108,13 +109,16 @@ export function usePush({
     // with no sign-out to end the registration.
     if (api.heldPlace() !== 'lasting') {
       setState({ kind: 'session-only' });
+      // A registration this account's lasting sign-in made (a member made an
+      // operator keeps the sign-in) is this tab's credential's own: the DELETE
+      // lands, and closing the tab strands nothing.
+      if (api.readPushRegistration()?.account === account) void api.endPush(account, true);
       return;
     }
     // Under a lasting credential, the origin's one, another account's record
     // is stale: its subscription would wake this browser for someone who is
     // gone. Dropped here, with no request (that credential is not ours).
     const held = api.readPushRegistration();
-    if (held !== null && held.account !== account) void api.forgetPush(held.account);
     const push = platform.services.push;
     if (push === undefined || !push.supported()) {
       setState({ kind: 'unsupported' });
@@ -124,6 +128,8 @@ export function usePush({
     const stale = () => run.cancelled;
     if (!again) setState({ kind: 'checking' });
     void (async () => {
+      if (held !== null && held.account !== account) await api.forgetPush(held.account);
+      if (stale()) return;
       const config = await api.pushConfig();
       if (stale()) return;
       if (!config.ok || !config.value.transports.includes('webpush') || config.value.vapid_public_key === undefined || config.value.vapid_public_key === '') {
@@ -181,6 +187,9 @@ export function usePush({
           setFailure((previous) => (previous === 'mirror' ? null : previous));
           return;
         }
+        // What is stored is not what this tab holds in memory: another tab
+        // changed it, and has sent it. Read before writing, as at a load.
+        if (want.key !== now.key) known.current = false;
         // The first send of a load: a read is on another budget than a write,
         // so when the server's copy already agrees nothing is written.
         if (!known.current) {
