@@ -1156,8 +1156,9 @@ class LiveKitAdapter implements Room {
         if (participant === room.localParticipant) this.wakeGrant();
       })
       .on(RoomEvent.AudioPlaybackStatusChanged, () => {
-        // The room's own answer, read as the event fires: playing starts and
-        // is refused again (a call, an interruption) as the browser decides.
+        // Read as the event fires, with the room's answer and every voice
+        // element's (playbackAllowed): playing starts and is refused again (a
+        // call, an interruption) as the browser decides.
         if (this.closed) return;
         this.keepDeafened();
         events.onPlayback(this.playbackAllowed());
@@ -2254,6 +2255,10 @@ class LiveKitAdapter implements Room {
     this.wakeGrant();
     for (const { el, held } of this.elements.values()) {
       el.removeEventListener('volumechange', held);
+      // livekit keeps a detached element for its next attach: nothing of
+      // this closed room may stay on it.
+      el.removeEventListener('playing', this.reportPlayback);
+      el.removeEventListener('pause', this.reportPlayback);
       el.remove();
     }
     this.elements.clear();

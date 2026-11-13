@@ -999,6 +999,30 @@ describe('the SDK adapter', () => {
       await room.close();
     });
 
+    it('a voice element tells nothing once it has left, or once the room is closed', async () => {
+      const told: boolean[] = [];
+      const room = newLiveKitRoom();
+      await room.connect('wss://lk.example', 'tok-abcdef', 'room-abcdef', false, { ...events, onPlayback: (on: boolean) => told.push(on) });
+      const made: HTMLAudioElement[] = [];
+      const left = { source: 'microphone', kind: 'audio', sid: 'r1', attach: () => { const el = document.createElement('audio'); made.push(el); return el; }, detach: () => made.splice(0) };
+      state.handlers.get('ts')?.(left, undefined, { identity: 'p8' });
+      const gone = made[0];
+      state.handlers.get('tu')?.(left, undefined, { identity: 'p8' });
+      const before = [...told];
+      gone?.dispatchEvent(new Event('pause'));
+      gone?.dispatchEvent(new Event('playing'));
+      expect(told).toEqual(before);
+      // A voice still attached at the close: livekit may reuse its element.
+      const kept = { source: 'microphone', kind: 'audio', sid: 'r2', attach: () => { const el = document.createElement('audio'); made.push(el); return el; }, detach: () => made.splice(0) };
+      state.handlers.get('ts')?.(kept, undefined, { identity: 'p9' });
+      const reused = made[0];
+      expect(reused).toBeDefined();
+      if (reused === undefined) return;
+      const removal = vi.spyOn(reused, 'removeEventListener');
+      await room.close();
+      expect(removal.mock.calls.map((call) => call[0])).toEqual(expect.arrayContaining(['playing', 'pause']));
+    });
+
     it('tells nothing after a close', async () => {
       const told: boolean[] = [];
       const room = newLiveKitRoom();
