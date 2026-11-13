@@ -8,6 +8,6 @@ import { defineConfig } from 'vitest/config';
 export default defineConfig({
   test: {
     environment: 'node',
-    include: ['tests/unit/voice-windows.test.ts', 'tests/unit/voice-protocol.test.ts'],
+    include: ['tests/unit/voice-windows.test.ts', 'tests/unit/voice-protocol.test.ts', 'tests/unit/app-user-model.test.ts'],
   },
 });
