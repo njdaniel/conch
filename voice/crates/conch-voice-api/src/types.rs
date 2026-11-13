@@ -1531,6 +1531,14 @@ mod tests {
             "voice-companion-audio-v1.json",
             "the companion audio route is the desktop renderer's",
         ),
+        (
+            "voice-companion-audio-request-v1-person.json",
+            "the companion audio route is the desktop renderer's",
+        ),
+        (
+            "voice-companion-audio-v1-person.json",
+            "the companion audio route is the desktop renderer's",
+        ),
     ];
 
     #[test]

@@ -41,7 +41,8 @@ import (
 // beside the screen. It means nothing without share, and nothing for a
 // person, whose share grant always carries the sound (VoiceShareV1.audio).
 // Every withdrawal passes false; the consent is read, under the room's
-// claims, from the share it belongs to (voiceShare.audioScope), never from a
+// claims, from the share it belongs to (voiceShare.companionAudio: a consent
+// naming the companion, issue #1853), never from a
 // snapshot.
 type publishInput struct {
 	canPublish   bool

@@ -1499,23 +1499,35 @@ export const voiceShareAudioScope = vocab<VoiceShareAudioScope>({
   system_excluding_call: true,
 });
 
+// schema.VoiceShareAudioPublisher
+export type VoiceShareAudioPublisher = 'companion' | 'person';
+
+export const voiceShareAudioPublisher = vocab<VoiceShareAudioPublisher>({
+  companion: true,
+  person: true,
+});
+
 // schema.VoiceCompanionAudioRequestV1
 export interface VoiceCompanionAudioRequestV1 {
   scope: VoiceShareAudioScope;
+  publisher?: VoiceShareAudioPublisher;
 }
 
 export const voiceCompanionAudioRequestV1 = object<VoiceCompanionAudioRequestV1>({
   scope: voiceShareAudioScope,
+  publisher: optional(voiceShareAudioPublisher),
 });
 
 // schema.VoiceCompanionAudioV1
 export interface VoiceCompanionAudioV1 {
   scope: VoiceShareAudioScope;
+  publisher?: VoiceShareAudioPublisher;
   started_at: string;
 }
 
 export const voiceCompanionAudioV1 = object<VoiceCompanionAudioV1>({
   scope: voiceShareAudioScope,
+  publisher: optional(voiceShareAudioPublisher),
   started_at: timestamp,
 });
 
