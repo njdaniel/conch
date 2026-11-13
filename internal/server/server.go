@@ -53,6 +53,12 @@ type Config struct {
 	// disables uploads (fetching existing files still works). conchd defaults
 	// it to DefaultMaxUploadBytes; the zero value here is off.
 	MaxUploadBytes int64
+	// AgentUploadsPerHour is how many files an hour each agent may upload,
+	// under the grant of issue #1798 (agent_uploads.go). Zero or less means
+	// agents upload nothing, whatever their manifests grant. conchd defaults
+	// it to DefaultAgentUploadsPerHour; the zero value here is off. People
+	// have no upload budget.
+	AgentUploadsPerHour int
 	// WebDir, when set, is a built web client served at /app/ (see
 	// static.go). It wins over WebFS. With neither, no /app/ routes exist.
 	WebDir string
@@ -278,6 +284,14 @@ type Server struct {
 	// (notification_limits.go), in memory only; its clock is now. Tests
 	// replace it with setNotificationLimits before serving.
 	notificationLimits *notificationLimiter
+	// agentUploadLimits is each agent's upload budget (agent_uploads.go), in
+	// memory only; its clock is now. Tests replace it with
+	// setAgentUploadsPerHour before serving.
+	agentUploadLimits *agentUploadLimiter
+	// mcpLargeSlots holds one token for each /mcp request over
+	// schema.MaxPostRequestBytes being handled (mcp_auth.go); its capacity is
+	// how many the server takes at once. Tests replace it before serving.
+	mcpLargeSlots chan struct{}
 	// messageEditLimits is the people's message edit limit (message_edit.go),
 	// in memory only; its clock is now. Tests replace it with
 	// setMessageEditLimit before serving.
@@ -338,7 +352,7 @@ func New(cfg Config, st *store.Store) *Server {
 				"missing", strings.Join(missing, ", "), "not_sent", ntfyNotSent(missing))
 		}
 	}
-	s := &Server{cfg: cfg, store: st, hub: hub.New(), approvals: approvals.New(st, notifier), broadcaster: broadcaster, credRecheckInterval: defaultCredentialRecheckInterval, sessionSweepInterval: defaultSessionSweepInterval, now: time.Now, renameFile: os.Rename, inviteLimits: newInviteLimiter(inviteLimitsFor(cfg)), reportLimits: newReportLimiter(defaultReportLimit()), reactionLimits: newReactionLimiter(defaultReactionLimit()), channelWriteLimits: newChannelWriteLimiter(defaultChannelWriteLimit()), notificationLimits: newNotificationLimiter(defaultNotificationWriteLimit(), defaultNotificationReadLimit()),
+	s := &Server{cfg: cfg, store: st, hub: hub.New(), approvals: approvals.New(st, notifier), broadcaster: broadcaster, credRecheckInterval: defaultCredentialRecheckInterval, sessionSweepInterval: defaultSessionSweepInterval, now: time.Now, renameFile: os.Rename, inviteLimits: newInviteLimiter(inviteLimitsFor(cfg)), reportLimits: newReportLimiter(defaultReportLimit()), reactionLimits: newReactionLimiter(defaultReactionLimit()), channelWriteLimits: newChannelWriteLimiter(defaultChannelWriteLimit()), notificationLimits: newNotificationLimiter(defaultNotificationWriteLimit(), defaultNotificationReadLimit()), agentUploadLimits: newAgentUploadLimiter(cfg.AgentUploadsPerHour), mcpLargeSlots: make(chan struct{}, mcpLargeRequestSlots),
 		passwords: newPasswords(), logins: newLoginLimiter(loginLimitsFor(cfg)), addressMAC: newAddressMACKey(),
 		setupLimits: newSetupLimiter(cfg), messageEditLimits: newMessageEditLimiter(defaultMessageEditLimit())}
 	// The server's name is a permanent name nobody may take (issue #760):

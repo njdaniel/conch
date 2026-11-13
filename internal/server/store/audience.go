@@ -879,6 +879,9 @@ type ReplyPost struct {
 	RootID  int64
 	Body    string
 	Payload *schema.Payload
+	// Uploads are files the reply brings with it (see MessageUploads), or
+	// nil. With them Payload must be nil: the store writes the attachment.
+	Uploads *MessageUploads
 }
 
 // InsertReplyMessage stores a reply to post.RootID and returns it with the
@@ -941,15 +944,23 @@ func (s *Store) InsertReplyMessage(ctx context.Context, post ReplyPost, reader R
 		case err != nil:
 			return fmt.Errorf("store: check thread root %d: %w", post.RootID, err)
 		}
+		// Files the reply brings with it are recorded here, once the root is
+		// known to be usable, and attached by the insert below (issue #1798).
+		payload, err := recordUploadsTx(ctx, tx, post.ChannelID, post.AuthorID, post.Uploads, post.Payload, now)
+		if err != nil {
+			return err
+		}
 		if !kind.Valid {
-			id, err := insertChannelWideTx(ctx, tx, post.ChannelID, post.AuthorID, post.Body, post.Payload, post.RootID, now)
+			id, err := insertChannelWideTx(ctx, tx, post.ChannelID, post.AuthorID, post.Body, payload, post.RootID, now)
 			if err != nil {
 				return err
 			}
-			msg = Message{ID: id, ChannelID: post.ChannelID, AuthorID: post.AuthorID, Body: post.Body, Payload: post.Payload,
+			msg = Message{ID: id, ChannelID: post.ChannelID, AuthorID: post.AuthorID, Body: post.Body, Payload: payload,
 				CreatedAt: now, ThreadRootID: post.RootID}
-			msg.GuestAuthor, err = guestAuthorTx(ctx, tx, id)
-			return err
+			if msg.GuestAuthor, err = guestAuthorTx(ctx, tx, id); err != nil {
+				return err
+			}
+			return post.Uploads.place()
 		}
 		// The candidates are the people who can see the root now: its
 		// recipients, less any who have since left the channel. Not the net's
@@ -969,7 +980,7 @@ func (s *Store) InsertReplyMessage(ctx context.Context, post ReplyPost, reader R
 				recipients = append(recipients, id)
 			}
 		}
-		scopedPost := ScopedPost{ChannelID: post.ChannelID, AuthorID: post.AuthorID, Body: post.Body, Payload: post.Payload}
+		scopedPost := ScopedPost{ChannelID: post.ChannelID, AuthorID: post.AuthorID, Body: post.Body, Payload: payload}
 		var audience schema.Audience
 		var net any
 		switch schema.AudienceKind(kind.String) {
@@ -1007,8 +1018,10 @@ func (s *Store) InsertReplyMessage(ctx context.Context, post ReplyPost, reader R
 			return fmt.Errorf("store: message %d has an unreadable audience %q", post.RootID, kind.String)
 		}
 		scopedPost.Audience = audience
-		msg, err = insertScopedTx(ctx, tx, scopedPost, post.RootID, net, audience, recipients, now)
-		return err
+		if msg, err = insertScopedTx(ctx, tx, scopedPost, post.RootID, net, audience, recipients, now); err != nil {
+			return err
+		}
+		return post.Uploads.place()
 	})
 	if err != nil {
 		return Message{}, nil, err
@@ -1061,6 +1074,9 @@ type ScopedPost struct {
 	// Audience is the normalized audience: for a principals audience the
 	// sorted, de-duplicated list including the author (schema.Audience.Normalize).
 	Audience schema.Audience
+	// Uploads are files the message brings with it (see MessageUploads), or
+	// nil. With them Payload must be nil: the store writes the attachment.
+	Uploads *MessageUploads
 }
 
 // InsertScopedMessage resolves the audience, stores the message, its
@@ -1111,8 +1127,16 @@ func (s *Store) InsertScopedMessage(ctx context.Context, p ScopedPost) (Message,
 			return fmt.Errorf("%w: kind %q", ErrInvalidAudience, p.Audience.Kind)
 		}
 
-		msg, err = insertScopedTx(ctx, tx, p, 0, netID, audience, recipients, now)
-		return err
+		// Files the message brings with it are recorded here, once the
+		// audience is resolved, and attached by the insert below (issue
+		// #1798).
+		if p.Payload, err = recordUploadsTx(ctx, tx, p.ChannelID, p.AuthorID, p.Uploads, p.Payload, now); err != nil {
+			return err
+		}
+		if msg, err = insertScopedTx(ctx, tx, p, 0, netID, audience, recipients, now); err != nil {
+			return err
+		}
+		return p.Uploads.place()
 	})
 	if err != nil {
 		return Message{}, nil, err

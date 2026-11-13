@@ -151,6 +151,10 @@ Flags for serve:
   --max-upload-bytes     largest file an upload may carry, in bytes; 0 disables uploads
                          (env CONCHD_MAX_UPLOAD_BYTES, default 10485760). Files are stored
                          under <data>/files, not in the database.
+  --agent-uploads-per-hour  how many images an hour each agent may upload, when its
+                         manifest grants files.upload; 0 lets no agent upload
+                         (env CONCHD_AGENT_UPLOADS_PER_HOUR, default 20). People have no
+                         upload budget.
   --session-stale        how long without a heartbeat before a session shows as stale
                          (env CONCHD_SESSION_STALE, default 30s)
   --session-offline      how long without a heartbeat before a session shows as offline
@@ -286,6 +290,7 @@ type serveOptions struct {
 	livekit           livekit.Config
 	livekitRoomPrefix string
 	maxUploadBytes    int64
+	agentUploads      int
 	webDir            string
 	webFS             fs.FS  // the embedded client, when it is the one served
 	webSource         string // what the start-up line names: dir <path>, embedded or none
@@ -405,6 +410,15 @@ func parseServeArgs(args []string) (serveOptions, error) {
 		}
 		*maxUpload = v
 	}
+	agentUploadsDefault := server.DefaultAgentUploadsPerHour
+	if raw := os.Getenv("CONCHD_AGENT_UPLOADS_PER_HOUR"); raw != "" {
+		v, err := strconv.Atoi(raw)
+		if err != nil {
+			return serveOptions{}, fmt.Errorf("serve: CONCHD_AGENT_UPLOADS_PER_HOUR: %q is not a whole number", raw)
+		}
+		agentUploadsDefault = v
+	}
+	agentUploads := fs.Int("agent-uploads-per-hour", agentUploadsDefault, "how many images an hour each agent may upload, when its manifest grants files.upload; 0 lets no agent upload")
 	if err := fs.Parse(args); err != nil {
 		return serveOptions{}, err
 	}
@@ -413,6 +427,9 @@ func parseServeArgs(args []string) (serveOptions, error) {
 	}
 	if *maxUpload < 0 {
 		return serveOptions{}, errors.New("serve: --max-upload-bytes must not be negative (0 disables uploads)")
+	}
+	if *agentUploads < 0 {
+		return serveOptions{}, errors.New("serve: --agent-uploads-per-hour must not be negative (0 lets no agent upload)")
 	}
 	// Zero would read as "nobody may invite" but mean the default to the
 	// store, so it is refused rather than reinterpreted.
@@ -500,7 +517,7 @@ func parseServeArgs(args []string) (serveOptions, error) {
 	}
 	return serveOptions{
 		webDir: *webDir, webFS: webFS, webSource: webSource, allowedOrigins: origins,
-		livekit: lk, livekitRoomPrefix: *livekitRoomPrefix, maxUploadBytes: *maxUpload,
+		livekit: lk, livekitRoomPrefix: *livekitRoomPrefix, maxUploadBytes: *maxUpload, agentUploads: *agentUploads,
 		sessionStale: *sessionStale, sessionOffline: *sessionOffline,
 		trustedProxies: trustedProxies, inviteAllowance: *inviteAllowance,
 		metricsListen: *metricsListen, metricsRemote: *metricsRemote, relaxInviteLimits: *relaxInviteLimits,
@@ -639,6 +656,7 @@ func runServe(args []string) error {
 		AuthMode:              opts.authMode,
 		LiveKit:               opts.livekit,
 		MaxUploadBytes:        opts.maxUploadBytes,
+		AgentUploadsPerHour:   opts.agentUploads,
 		WebDir:                opts.webDir,
 		WebFS:                 opts.webFS,
 		AllowedOrigins:        opts.allowedOrigins,

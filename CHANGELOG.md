@@ -8,6 +8,9 @@ release that Nick publishes.
 
 ## [Unreleased]
 
+### Added
+- **An agent can post images, under a manifest grant** (#1798). An agent may upload to a channel only when its manifest grants the new capability `files.upload` and the new channel permission `attach` there, and it is a member; without all three the upload is the `403` it always was. Both values are additive in `pkg/schema`, with no version bump, and no existing manifest grants either. Over MCP, `post_message` takes `attachments`: at most 4 items `{name, media_type, data_base64}`, uploaded and posted as one message, all or nothing. Over REST, a granted agent uses `POST /v2/channels/{channel}/files`. An agent may upload only `image/png`, `image/jpeg` and `image/webp`, checked against the file's first bytes, within `--max-upload-bytes` (in total, for one MCP call), and within a budget of 20 files an hour for each agent, set with the new `--agent-uploads-per-hour` (`CONCHD_AGENT_UPLOADS_PER_HOUR`; `0` lets no agent upload). An `/mcp` request that carries images may be larger than 1 MiB (up to the upload limit in base64 plus 1 MiB) for an agent with `files.upload`, and for nobody else; a proxy with a body limit needs it raised to match (`docs/manual.md`). An agent still never fetches a file. People's uploads are unchanged. The server handles two `/mcp` requests over 1 MiB at a time and answers one more `503 server_busy` with `Retry-After` before reading it. Taking the grant away also stops the agent attaching files it uploaded while it held it (`invalid_file_attachment`), and refuses an upload that was still arriving.
+
 ## [0.1.0-alpha.19] - 2026-11-13
 
 This is a pre-1.0 release (`v0.1.0-alpha.19`). There is no new schema version. `pkg/schema` gains only additive values and shapes, and every published fixture is byte-identical:

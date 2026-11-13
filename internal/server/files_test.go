@@ -896,6 +896,10 @@ func TestFileUploadsDisabledStillServesExistingFiles(t *testing.T) {
 	}
 }
 
+// The agents of the fixture hold every capability, files.upload included, and
+// no attach in the channel: none has the grant of issue #1798, so each is
+// refused on every file route, as before there was a grant. The grant itself
+// is in agent_uploads_test.go (TestAgentFileRoutesGrantMatrix).
 func TestFileRoutesRefuseAgents(t *testing.T) {
 	f := newFileFixture(t)
 	meta := f.mustUpload(t, "ann", "a.txt", []byte("x"))

@@ -42,6 +42,56 @@ const (
 	SpoilerFilePrefix = "SPOILER_"
 )
 
+// Agent uploads (issue #1798). An agent uploads only what its manifest grants
+// (the capability files.upload, the channel permission attach, and membership
+// of the channel), and only images. These are the bounds a client of
+// post_message's attachments argument and the server must agree on.
+const (
+	// MaxAgentAttachments is the most files one post_message call may carry
+	// in its attachments argument. It is below MaxFileAttachments, so the
+	// message the server posts for them is always a valid attachment.
+	MaxAgentAttachments = 4
+
+	// MediaTypePNG, MediaTypeJPEG and MediaTypeWebP are the media types an
+	// agent may upload. The server checks the declared type against this
+	// list and the first bytes of the file against the declared type.
+	MediaTypePNG  = "image/png"
+	MediaTypeJPEG = "image/jpeg"
+	MediaTypeWebP = "image/webp"
+
+	// ErrorCodeUnsupportedMediaType is the Error.Code of an agent's upload
+	// whose declared media type is not one of AgentUploadMediaTypes, or
+	// whose bytes are not a file of the type it declares (HTTP 415 over
+	// REST). People's uploads are never answered with it: they may be of any
+	// type.
+	ErrorCodeUnsupportedMediaType = "unsupported_media_type"
+
+	// ErrorCodeServerBusy is the Error.Code of an /mcp request larger than
+	// MaxPostRequestBytes (a post_message that carries images) that arrives
+	// while the server is already handling as many such requests as it takes
+	// at once (HTTP 503, with Retry-After and RetryAfterSeconds). Nothing of
+	// the request was done; the same call may be sent again.
+	ErrorCodeServerBusy = "server_busy"
+)
+
+// AgentUploadMediaTypes returns the media types an agent may upload, in
+// declaration order. The slice is freshly allocated; callers may modify it.
+func AgentUploadMediaTypes() []string {
+	return []string{MediaTypePNG, MediaTypeJPEG, MediaTypeWebP}
+}
+
+// IsAgentUploadMediaType reports whether mt, a bare "type/subtype" in lower
+// case, is one an agent may upload. The match is exact: a parameter, another
+// case or surrounding space is a different string and is refused.
+func IsAgentUploadMediaType(mt string) bool {
+	switch mt {
+	case MediaTypePNG, MediaTypeJPEG, MediaTypeWebP:
+		return true
+	default:
+		return false
+	}
+}
+
 // FileV1 is the metadata of an uploaded file.
 //
 // Filename and MediaType are what the uploader said (the media type reduced to

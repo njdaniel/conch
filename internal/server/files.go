@@ -43,8 +43,10 @@ const (
 	// is a constant of ours; the random part comes from os.CreateTemp.
 	uploadTempPrefix = ".upload-"
 
-	// denyAgentFiles is an agent refused on a file route. The manifest has no
-	// capability for files, so agents cannot upload or fetch (issue #23).
+	// denyAgentFiles is an agent refused on a route that fetches a file. No
+	// capability lets an agent read one (issues #23, #1798): files.upload is
+	// for uploading, and its refusals have the reasons of every manifest gate
+	// (agent_uploads.go).
 	denyAgentFiles = "agents_no_files"
 )
 
@@ -117,13 +119,20 @@ func fileToWire(f store.File) schema.FileV1 {
 }
 
 // handleUploadFile serves POST /v2/channels/{channel}/files?filename=<name>:
-// the request body is the file. Humans only (the route is wrapped in
-// humansOnlyFiles).
+// the request body is the file. It is for people, and for an agent that holds
+// the grant of issue #1798 (agent_uploads.go): files.upload, attach in the
+// channel, and membership of it. An agent without the grant is refused here,
+// first, with the 403 it always got on this route.
 //
 // The order of the checks is part of the design. A caller who is not a member
 // of the channel is told it does not exist before anything else is said, so
 // the disabled and size answers are never a way to probe a channel. Everything
 // that can be refused without reading the body is refused before it is read.
+//
+// An agent's upload is held to more than a person's, in this order after the
+// grant: the declared media type must be an image an agent may upload; the
+// first bytes of the body must be that type; and its upload budget must have
+// a file left. Nothing here changes what a person may upload.
 func (s *Server) handleUploadFile(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	caller, ok := callerFrom(ctx)
@@ -131,13 +140,20 @@ func (s *Server) handleUploadFile(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, errFilesNeedAuth.Code, errFilesNeedAuth.Message)
 		return
 	}
-	channel, ok := s.channelForCaller(w, r, r.PathValue("channel"), schema.CapabilityMessagesPost, schema.ChannelPermissionPost)
+	agent := caller.Kind == store.PrincipalAgent
+	var channel store.Channel
+	var manifest schema.AgentManifestV1
+	if agent {
+		manifest, channel, ok = s.agentUploadChannel(w, r, caller.ID)
+	} else {
+		channel, ok = s.channelForCaller(w, r, r.PathValue("channel"), schema.CapabilityMessagesPost, schema.ChannelPermissionPost)
+	}
 	if !ok {
 		return
 	}
 	limit := s.cfg.MaxUploadBytes
-	if limit <= 0 || s.filesDir() == "" {
-		writeError(w, http.StatusForbidden, "uploads_disabled", "file uploads are disabled on this server")
+	if limit <= 0 || s.filesDir() == "" || (agent && !s.agentUploadsEnabled()) {
+		writeError(w, http.StatusForbidden, errUploadsDisabled.Code, errUploadsDisabled.Message)
 		return
 	}
 	names := r.URL.Query()["filename"]
@@ -158,6 +174,11 @@ func (s *Server) handleUploadFile(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusRequestEntityTooLarge, "file_too_large",
 			fmt.Sprintf("a file may be at most %d bytes", limit))
 	}
+	mediaType := schema.NormalizeMediaType(r.Header.Get("Content-Type"))
+	if agent && !schema.IsAgentUploadMediaType(mediaType) {
+		writeError(w, http.StatusUnsupportedMediaType, errAgentMediaType.Code, errAgentMediaType.Message)
+		return
+	}
 	if r.ContentLength > limit {
 		tooLarge()
 		return
@@ -165,8 +186,36 @@ func (s *Server) handleUploadFile(w http.ResponseWriter, r *http.Request) {
 
 	// The limit is enforced while reading, whatever the request claims about
 	// its own length, and the bytes are hashed as they are written.
-	sum, size, err := s.storeBlob(http.MaxBytesReader(w, r.Body, limit))
+	var body io.Reader = http.MaxBytesReader(w, r.Body, limit)
 	var over *http.MaxBytesError
+	if agent {
+		checked, refusal, err := checkAgentUploadHead(body, mediaType)
+		switch {
+		case errors.As(err, &over):
+			tooLarge()
+			return
+		case err != nil:
+			writeError(w, http.StatusBadRequest, "upload_interrupted", "the upload was not received in full")
+			return
+		case refusal != nil:
+			writeError(w, http.StatusUnsupportedMediaType, refusal.Code, refusal.Message)
+			return
+		}
+		// Last before anything is written, so only an upload every check
+		// allowed uses budget.
+		if limited := s.spendAgentUploads(ctx, caller.ID, routeSubject(r), manifest, 1); limited != nil {
+			writeRateLimited(w, limited)
+			return
+		}
+		body = checked
+	}
+	sum, size, err := s.storeBlob(body)
+	if err != nil && agent {
+		// Nothing was stored, so nothing is counted. Once the bytes are in
+		// place the upload stays counted, whatever becomes of its row: the
+		// budget is what bounds the disk an agent can fill.
+		s.refundAgentUploads(caller.ID, 1)
+	}
 	switch {
 	case errors.As(err, &over):
 		tooLarge()
@@ -181,11 +230,31 @@ func (s *Server) handleUploadFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// An agent's grant is decided again, now that the body has arrived: the
+	// first decision was made before a byte was read, and an upload can take
+	// as long as its sender likes. An agent whose grant was taken away in the
+	// meantime gets the 403 of an agent without one, and no row. The bytes are
+	// already under their hash; they stay there, referenced by nothing, as
+	// for every upload whose row is refused (the archived channel below), and
+	// the upload stays counted against the agent's budget.
+	if agent {
+		_, reason, err := s.agentUploadGrantIn(ctx, caller.ID, routeSubject(r), channel)
+		if err != nil {
+			slog.ErrorContext(ctx, "files: decide agent upload grant again failed", "principal", caller.ID, "error", err)
+			writeInternalError(w)
+			return
+		}
+		if reason != "" {
+			writeError(w, http.StatusForbidden, errForbidden.Code, agentFilesRefusal)
+			return
+		}
+	}
+
 	// The row is recorded only after the bytes are in place, so a row never
 	// points at nothing.
 	stored, err := s.store.InsertFile(ctx, store.NewFile{
 		ChannelID: channel.ID, UploaderID: caller.ID, Filename: names[0],
-		MediaType: schema.NormalizeMediaType(r.Header.Get("Content-Type")), Size: size, SHA256: sum,
+		MediaType: mediaType, Size: size, SHA256: sum,
 	})
 	switch {
 	case errors.Is(err, store.ErrNotChannelMember):
@@ -219,59 +288,109 @@ var errUploadRead = errors.New("server: read upload")
 // file under a hash name. Identical content is stored once.
 //
 // On any error nothing is left behind.
+//
+// It is stageBlob and then place, at once. An agent's post with attachments
+// (agent_uploads.go) takes the two steps apart, with the store's transaction
+// between them; both ways the bytes go through the same code to the same
+// place.
 func (s *Server) storeBlob(body io.Reader) (sum string, size int64, err error) {
+	b, err := s.stageBlob(body)
+	if err != nil {
+		return "", 0, err
+	}
+	defer b.discard()
+	if err := b.place(); err != nil {
+		return "", 0, err
+	}
+	return b.sum, b.size, nil
+}
+
+// stagedBlob is an upload whose bytes are written, synced and hashed, in a
+// temporary file of the files directory, and not yet under their hash. It ends
+// in place or in discard; a crash before either leaves a ".upload-" file,
+// which the next start removes (removeStaleUploads).
+type stagedBlob struct {
+	s *Server
+	// tmp is the temporary file, or "" once it has been placed or removed.
+	tmp  string
+	sum  string
+	size int64
+}
+
+// stageBlob copies body into a temporary file of the files directory and
+// returns it with the SHA-256 and size of what it read. On any error nothing
+// is left behind.
+func (s *Server) stageBlob(body io.Reader) (*stagedBlob, error) {
 	root := s.filesDir()
 	if err := os.MkdirAll(root, 0o750); err != nil { // #nosec G301,G703 -- under the operator's data directory
-		return "", 0, fmt.Errorf("server: create files directory: %w", err)
+		return nil, fmt.Errorf("server: create files directory: %w", err)
 	}
 	tmp, err := os.CreateTemp(root, uploadTempPrefix+"*") // #nosec G304,G703 -- fixed prefix under the operator's data directory
 	if err != nil {
-		return "", 0, fmt.Errorf("server: create temporary file: %w", err)
+		return nil, fmt.Errorf("server: create temporary file: %w", err)
 	}
-	tmpName := tmp.Name()
-	renamed := false
+	b := &stagedBlob{s: s, tmp: tmp.Name()}
+	staged := false
 	defer func() {
-		if !renamed {
+		if !staged {
 			_ = tmp.Close()
-			_ = os.Remove(tmpName)
+			b.discard()
 		}
 	}()
 
 	h := sha256.New()
-	size, err = io.Copy(io.MultiWriter(tmp, h), body)
+	b.size, err = io.Copy(io.MultiWriter(tmp, h), body)
 	if err != nil {
 		// io.Copy does not say which side failed. A write error is ours, but
 		// the limit and a dropped connection arrive here too, and the caller
 		// must tell a MaxBytesError apart: keep it wrapped.
 		if isWriteError(err) {
-			return "", 0, fmt.Errorf("server: write upload: %w", err)
+			return nil, fmt.Errorf("server: write upload: %w", err)
 		}
-		return "", 0, fmt.Errorf("%w: %w", errUploadRead, err)
+		return nil, fmt.Errorf("%w: %w", errUploadRead, err)
 	}
 	if err := tmp.Sync(); err != nil {
-		return "", 0, fmt.Errorf("server: sync upload: %w", err)
+		return nil, fmt.Errorf("server: sync upload: %w", err)
 	}
 	if err := tmp.Close(); err != nil {
-		return "", 0, fmt.Errorf("server: close upload: %w", err)
+		return nil, fmt.Errorf("server: close upload: %w", err)
 	}
-	sum = hex.EncodeToString(h.Sum(nil))
-	dest, err := s.blobPath(sum)
+	b.sum = hex.EncodeToString(h.Sum(nil))
+	staged = true
+	return b, nil
+}
+
+// place moves the staged bytes to <sha256[:2]>/<sha256>, or, when that content
+// is already stored, leaves it there and removes the temporary file. On an
+// error the temporary file is still there, for discard.
+func (b *stagedBlob) place() error {
+	dest, err := b.s.blobPath(b.sum)
 	if err != nil {
-		return "", 0, err
+		return err
 	}
 	if err := os.MkdirAll(filepath.Dir(dest), 0o750); err != nil { // #nosec G301,G703 -- derived from the hash
-		return "", 0, fmt.Errorf("server: create hash directory: %w", err)
+		return fmt.Errorf("server: create hash directory: %w", err)
 	}
-	if st, serr := os.Lstat(dest); serr == nil && st.Mode().IsRegular() && st.Size() == size {
-		// Already stored. The temporary file is removed by the defer.
-		return sum, size, nil
+	if st, serr := os.Lstat(dest); serr == nil && st.Mode().IsRegular() && st.Size() == b.size {
+		// Already stored.
+		b.discard()
+		return nil
 	}
-	if err := s.renameFile(tmpName, dest); err != nil {
-		return "", 0, fmt.Errorf("server: place upload: %w", err)
+	if err := b.s.renameFile(b.tmp, dest); err != nil {
+		return fmt.Errorf("server: place upload: %w", err)
 	}
-	renamed = true
+	b.tmp = ""
 	syncDir(filepath.Dir(dest))
-	return sum, size, nil
+	return nil
+}
+
+// discard removes the temporary file, if place has not moved it.
+func (b *stagedBlob) discard() {
+	if b.tmp == "" {
+		return
+	}
+	_ = os.Remove(b.tmp) // #nosec G703 -- a name os.CreateTemp made under the operator's data directory
+	b.tmp = ""
 }
 
 // isWriteError reports whether err came from writing the temporary file
