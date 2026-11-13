@@ -1181,11 +1181,16 @@ mod win_keys {
         [kind, low, high, u8::from(down)]
     }
 
-    /// A pipe name no other test, and no other run, uses.
+    /// A pipe name no other test, and no other run, uses, and nobody can guess: the pipe
+    /// namespace is the machine's, and whoever creates a name first serves it.
     pub fn pipe_name() -> String {
+        use std::hash::{BuildHasher, Hasher};
         static NEXT: AtomicU32 = AtomicU32::new(0);
+        let unguessable = std::collections::hash_map::RandomState::new()
+            .build_hasher()
+            .finish();
         format!(
-            r"\\.\pipe\conch-voice-rig-keys-{}-{}",
+            r"\\.\pipe\conch-voice-rig-keys-{}-{}-{unguessable:016x}",
             std::process::id(),
             NEXT.fetch_add(1, Ordering::SeqCst)
         )

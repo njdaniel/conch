@@ -612,6 +612,9 @@ pub(crate) fn is_test_pipe(path: &Path) -> bool {
 const TEST_PIPE_PREFIX: &str = r"\\.\pipe\";
 /// The longest name of such a pipe the seam takes; Windows allows 256.
 const TEST_PIPE_NAME_MAX: usize = 200;
+/// `SECURITY_IDENTIFICATION`, the impersonation level the test pipe is opened at.
+#[cfg(windows)]
+const SECURITY_IDENTIFICATION: u32 = 0x0001_0000;
 /// The size of one record on the test pipe.
 pub(crate) const TEST_RECORD_LEN: usize = 4;
 /// The kinds of record on the test pipe: its first byte.
@@ -663,8 +666,11 @@ type OpenPipe = Box<dyn FnMut() -> io::Result<Box<dyn io::Read + Send>> + Send>;
 /// namespace and no path, so no file, no device and no keyboard can be read through it,
 /// and the records it reads are four-byte [`decode_test_record`]s, which the same user's other
 /// programs could as easily send to the helper's real input with `SendInput` (design section 5).
-/// Like the attach pipe, a pipe of the same user's is whatever process created it: that is not
-/// authentication either.
+/// The pipe namespace is the machine's, not the user's, and the source does not ask who
+/// created the pipe: any local process that creates the name first is the one that feeds it,
+/// so the test rig picks a name nobody can guess. The pipe is opened at the identification
+/// level (`SECURITY_IDENTIFICATION`), as the events pipe is, so whoever serves it cannot
+/// impersonate the helper (security review of #1807).
 ///
 /// Until the pipe can be opened (nobody has created it yet) it waits, and ticks, as the Linux
 /// watcher waits on a fifo; once it is, the keys are ready. A pipe that ends is a removal of
@@ -705,7 +711,16 @@ impl PipeSource {
         let path = path.to_path_buf();
         Ok(Self::new(
             Box::new(move || {
-                let file = std::fs::OpenOptions::new().read(true).open(&path)?;
+                let mut options = std::fs::OpenOptions::new();
+                options.read(true);
+                // Identification only: the pipe's server, whoever created it, cannot
+                // impersonate the helper (std adds SECURITY_SQOS_PRESENT).
+                #[cfg(windows)]
+                {
+                    use std::os::windows::fs::OpenOptionsExt;
+                    options.security_qos_flags(SECURITY_IDENTIFICATION);
+                }
+                let file = options.open(&path)?;
                 Ok(Box::new(file) as Box<dyn io::Read + Send>)
             }),
             Duration::from_millis(5),
