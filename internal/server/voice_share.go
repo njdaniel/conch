@@ -113,6 +113,12 @@ type voiceShare struct {
 	// and it goes with the share: every end of the share ends it, and
 	// voice_share_audio_stopped is written beside voice_share_stopped.
 	audioScope schema.VoiceShareAudioScope
+	// audioPublisher is who the consent names as the sound's publisher
+	// (issue #1853): empty means the companion, today's behaviour. Set and
+	// cleared with audioScope, under the same locks. Only a consent naming
+	// the companion lets the companion's sound be the share's
+	// (companionAudio).
+	audioPublisher schema.VoiceShareAudioPublisher
 	// audioStarted says the consent's voice_share_audio_started row is in
 	// the log: set under order once it is written, after LiveKit's grant.
 	// Only a consent that started is stopped with a row; one whose grant was
@@ -120,6 +126,23 @@ type voiceShare struct {
 	// forgot the room) has no started row to close, and its grant is taken
 	// back by the consent's own undo.
 	audioStarted bool
+}
+
+// publisher is the publisher the recorded consent names: the person when the
+// consent says so, the companion otherwise. The caller holds p.mu.
+func (c *voiceShare) publisher() schema.VoiceShareAudioPublisher {
+	if c.audioPublisher == schema.VoiceShareAudioPublisherPerson {
+		return schema.VoiceShareAudioPublisherPerson
+	}
+	return schema.VoiceShareAudioPublisherCompanion
+}
+
+// companionAudio says the share carries a consent that names the companion as
+// the sound's publisher (issue #1853): the only consent that justifies the
+// companion publishing screen_share_audio. A consent naming the person, like no
+// consent, leaves a companion's sound unclaimed. The caller holds p.mu.
+func (c *voiceShare) companionAudio() bool {
+	return c != nil && c.audioScope != "" && c.publisher() == schema.VoiceShareAudioPublisherCompanion
 }
 
 // Errors of the share endpoints, each answered as the handlers say.
@@ -999,7 +1022,7 @@ func (p *voicePoller) grantCompanion(ctx context.Context, r *voiceRoomState, roo
 	// holder claiming again keeps the consent they recorded, so their
 	// companion (perhaps a new connection) is restored to what they hold.
 	sh := r.shares[principalID]
-	audio := sh != nil && sh.audioScope != ""
+	audio := sh.companionAudio()
 	p.mu.Unlock()
 	if !c.screen {
 		return
@@ -1174,7 +1197,7 @@ func (p *voicePoller) shareStoppedLocked(channelID int64, c *voiceShare, actor i
 			detail: fmt.Sprintf("channel=%d principal=%d reason=%s", channelID, c.principalID, reason),
 		})
 	}
-	c.audioScope, c.audioStarted = "", false
+	c.audioScope, c.audioPublisher, c.audioStarted = "", "", false
 	return append(events, voiceEvent{
 		actor: fmt.Sprintf("principal:%d", actor), action: store.AuditVoiceShareStopped, channelID: channelID,
 		detail: fmt.Sprintf("channel=%d principal=%d reason=%s", channelID, c.principalID, reason),
@@ -1290,7 +1313,7 @@ func (p *voicePoller) judgeShareLocked(r *voiceRoomState, now time.Time, seen ma
 			// The companion's sound is the share's only under the holder's
 			// consent (issue #898); without it the track is unclaimed and
 			// being withdrawn (consider below), not the share's audio.
-			audio := part.ScreenShareAudioPublished || (screen.ScreenShareAudioPublished && c.audioScope != "")
+			audio := part.ScreenShareAudioPublished || (screen.ScreenShareAudioPublished && c.companionAudio())
 			if sharing {
 				c.published, c.lastTrack = true, now
 			}
@@ -1332,7 +1355,7 @@ func (p *voicePoller) judgeShareLocked(r *voiceRoomState, now time.Time, seen ma
 			// share is held, the companion's entry in withdrawing is this
 			// audio withdrawal's; a claim clears it and the share's end
 			// owes a whole one.
-			if holder.audioScope != "" || !part.ScreenShareAudioPublished {
+			if holder.companionAudio() || !part.ScreenShareAudioPublished {
 				if !quiet || stamp == 0 {
 					delete(r.withdrawing, key) // consented, or nothing left to withdraw
 				}
@@ -1457,7 +1480,7 @@ func (p *voicePoller) withdrawShares(ctx context.Context, r *voiceRoomState, lis
 		p.mu.Lock()
 		sh := r.shares[w.principalID]
 		holds := w.role != voiceRoleView && sh != nil
-		consented := holds && sh.audioScope != ""
+		consented := holds && sh.companionAudio()
 		gone := r.retired
 		p.mu.Unlock()
 		if gone {

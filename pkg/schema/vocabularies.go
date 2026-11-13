@@ -129,8 +129,9 @@ var Vocabularies = map[string][]string{
 		VoiceControlPTTProblemCannotOpen, VoiceControlPTTProblemRefused, VoiceControlPTTProblemReadFailed,
 		VoiceControlPTTProblemEnded, VoiceControlPTTProblemPartialRecord,
 	),
-	"VoiceCompanionPublish": values(VoiceCompanionPublishScreen, VoiceCompanionPublishNone),
-	"VoiceShareAudioScope":  values(VoiceShareAudioScopeApplication, VoiceShareAudioScopeSystemExcludingCall),
+	"VoiceCompanionPublish":    values(VoiceCompanionPublishScreen, VoiceCompanionPublishNone),
+	"VoiceShareAudioScope":     values(VoiceShareAudioScopeApplication, VoiceShareAudioScopeSystemExcludingCall),
+	"VoiceShareAudioPublisher": values(VoiceShareAudioPublisherCompanion, VoiceShareAudioPublisherPerson),
 	"VoiceControlReason": values(
 		VoiceControlReasonRoomDeleted, VoiceControlReasonParticipantRemoved, VoiceControlReasonConnectionLost,
 		VoiceControlReasonReconnectTimedOut, VoiceControlReasonConnectFailed, VoiceControlReasonServerUnreachable,

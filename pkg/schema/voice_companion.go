@@ -206,6 +206,35 @@ func (s VoiceShareAudioScope) Valid() bool {
 	}
 }
 
+// VoiceShareAudioPublisher names which participant publishes the share's
+// sound, the one the consent is for (docs/design/linux-share-audio.md §8,
+// decision D-3, issue #1853). The vocabulary is closed and case-sensitive;
+// absent on the wire means companion.
+type VoiceShareAudioPublisher string
+
+const (
+	// VoiceShareAudioPublisherCompanion: the person's companion (p<id>.screen)
+	// publishes the sound, and is granted screen_share_audio for it. The
+	// default, and the route Windows uses.
+	VoiceShareAudioPublisherCompanion VoiceShareAudioPublisher = "companion"
+	// VoiceShareAudioPublisherPerson: the person's own participant (p<id>)
+	// publishes the sound, which its share grant already carries. The consent
+	// is recorded and the companion is granted nothing.
+	VoiceShareAudioPublisherPerson VoiceShareAudioPublisher = "person"
+)
+
+// Valid reports whether p is a recognized publisher. The empty value is not
+// one: it is how a struct says the field is absent (omitempty), which the
+// request and response Validate accept.
+func (p VoiceShareAudioPublisher) Valid() bool {
+	switch p {
+	case VoiceShareAudioPublisherCompanion, VoiceShareAudioPublisherPerson:
+		return true
+	default:
+		return false
+	}
+}
+
 // VoiceCompanionAudioRequestV1 is the body of
 // PUT /v1/channels/{channel}/voice/companion/audio: the share holder's
 // consent to their companion publishing the share's sound, and to which
@@ -214,14 +243,32 @@ func (s VoiceShareAudioScope) Valid() bool {
 type VoiceCompanionAudioRequestV1 struct {
 	// Scope is the sound consented to. Required.
 	Scope VoiceShareAudioScope `json:"scope"`
+	// Publisher says who publishes the sound. Optional; absent means
+	// companion. A server from before issue #1853 refuses the field (the
+	// request is decoded strictly), which a client reads as "no sound route
+	// on this server".
+	Publisher VoiceShareAudioPublisher `json:"publisher,omitempty"`
 }
 
-// Validate reports whether the request is well-formed: a known scope.
+// Validate reports whether the request is well-formed: a known scope, and a
+// known publisher when one is named.
 func (r VoiceCompanionAudioRequestV1) Validate() error {
 	if !r.Scope.Valid() {
 		return fmt.Errorf("schema: voice share audio scope %q is not one of application, system_excluding_call", r.Scope)
 	}
+	if r.Publisher != "" && !r.Publisher.Valid() {
+		return fmt.Errorf("schema: voice share audio publisher %q is not one of companion, person", r.Publisher)
+	}
 	return nil
+}
+
+// EffectivePublisher is the publisher the request means: the one named, or
+// companion when it names none.
+func (r VoiceCompanionAudioRequestV1) EffectivePublisher() VoiceShareAudioPublisher {
+	if r.Publisher == "" {
+		return VoiceShareAudioPublisherCompanion
+	}
+	return r.Publisher
 }
 
 // DecodeVoiceCompanionAudioRequestV1 reads one request from r and is the only
@@ -262,6 +309,10 @@ type VoiceCompanionAudioV1 struct {
 	// Scope is the consent recorded: the request's, or on a repeated request
 	// the new one.
 	Scope VoiceShareAudioScope `json:"scope"`
+	// Publisher echoes the publisher recorded, when the request named one;
+	// absent means companion, as on the request (so a response to a request
+	// that named none is byte-identical to what v1 always sent).
+	Publisher VoiceShareAudioPublisher `json:"publisher,omitempty"`
 	// StartedAt is the started_at of the caller's share (VoiceShareV1), the
 	// one the consent is part of: it ends with that share. UTC, ms
 	// precision.
@@ -273,6 +324,9 @@ type VoiceCompanionAudioV1 struct {
 func (a VoiceCompanionAudioV1) Validate() error {
 	if !a.Scope.Valid() {
 		return fmt.Errorf("schema: voice share audio scope %q is not one of application, system_excluding_call", a.Scope)
+	}
+	if a.Publisher != "" && !a.Publisher.Valid() {
+		return fmt.Errorf("schema: voice share audio publisher %q is not one of companion, person", a.Publisher)
 	}
 	if a.StartedAt.IsZero() {
 		return errors.New("schema: voice companion audio started_at is required")
