@@ -1360,8 +1360,10 @@ test('a push-to-talk whose reports are slow is audited as the reported pair and 
       // Alice has no such button: her browser plays.
       await expect(voiceRegion(a.page).getByRole('button', { name: 'Tap to hear the channel' })).toHaveCount(0);
       // A tap the browser still refuses leaves it.
+      const refused = () => b.page.evaluate(() => (window as unknown as { playRefused: number }).playRefused);
+      const before = await refused();
       await hear.click();
-      await expect.poll(() => b.page.evaluate(() => (window as unknown as { playRefused: number }).playRefused)).toBeGreaterThan(1);
+      await expect.poll(refused).toBeGreaterThan(before);
       await expect(hear).toBeVisible();
       // Allowed, the tap starts playback and the button goes.
       await b.page.evaluate(() => {
@@ -1369,6 +1371,13 @@ test('a push-to-talk whose reports are slow is audited as the reported pair and 
       });
       await hear.click();
       await expect(hear).toHaveCount(0, { timeout: 10_000 });
+      // Playing: every audio element of the page is.
+      await expect
+        .poll(() => b.page.evaluate(() => {
+          const audios = [...document.querySelectorAll('audio')];
+          return audios.length > 0 && audios.every((el) => !el.paused);
+        }))
+        .toBe(true);
       await expect(voice).toContainText('Connected in #voice-room');
       await voice.getByRole('button', { name: 'Leave voice' }).click();
       await expect(voice).toContainText('Not in voice', { timeout: 10_000 });

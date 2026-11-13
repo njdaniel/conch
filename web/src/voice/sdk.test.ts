@@ -592,6 +592,8 @@ vi.mock('livekit-client', () => {
     startAudio() {
       state.startAudios++;
       if (state.startAudioFails !== null) return Promise.reject(state.startAudioFails);
+      // As the SDK's: every element it plays is unmuted first, synchronously.
+      for (const el of document.querySelectorAll('audio')) el.muted = false;
       state.canPlayback = true;
       state.handlers.get('apc')?.(true);
       return Promise.resolve();
@@ -2497,6 +2499,51 @@ describe('the volume of each person', () => {
     room.setDeafened(false);
     expect(played().map((el) => [el.muted, el.volume])).toEqual([[false, 0], [false, 0.4], [false, 1]]);
     await room.close();
+  });
+
+  // The SDK's startAudio unmutes every element it plays; the tap must not
+  // undo a deafen.
+  it('a tap while deafened leaves every voice muted, and while not deafened plays them', async () => {
+    const room = await connected();
+    arrive(voice('a'), 'p8');
+    arrive(voice('b'), 'p9');
+    room.setDeafened(true);
+    await room.startAudio();
+    expect(played().map((el) => el.muted)).toEqual([true, true]);
+    room.setDeafened(false);
+    await room.startAudio();
+    expect(played().map((el) => el.muted)).toEqual([false, false]);
+    await room.close();
+  });
+
+  it('the playback event re-mutes the voices while deafened', async () => {
+    const room = await connected();
+    arrive(voice('a'), 'p8');
+    room.setDeafened(true);
+    for (const el of played()) el.muted = false;
+    state.handlers.get('apc')?.(true);
+    expect(played().map((el) => el.muted)).toEqual([true]);
+    await room.close();
+  });
+
+  it('a volumechange that unmuted a voice while deafened is undone, and left alone otherwise', async () => {
+    const room = await connected();
+    arrive(voice('a'), 'p8');
+    const el = played()[0];
+    if (el === undefined) throw new Error('no element');
+    room.setDeafened(true);
+    el.muted = false;
+    el.dispatchEvent(new Event('volumechange'));
+    expect(el.muted).toBe(true);
+    room.setDeafened(false);
+    el.dispatchEvent(new Event('volumechange'));
+    expect(el.muted).toBe(false);
+    // A closed room's elements no longer hold anything.
+    room.setDeafened(true);
+    await room.close();
+    el.muted = false;
+    el.dispatchEvent(new Event('volumechange'));
+    expect(el.muted).toBe(false);
   });
 
   it('holds through a switch of the speakers', async () => {

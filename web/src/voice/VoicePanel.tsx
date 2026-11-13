@@ -186,7 +186,7 @@ export function VoicePanel({
     (state.phase === 'connected' || state.phase === 'reconnecting') && state.mode === 'open' && !state.meter && !state.listenOnly && !state.watchOnly && !state.missing;
   // The browser holds playback back until a tap (iOS Safari): said by a
   // button, in the notes and in the phone's strip, which hides them.
-  const noPlayback = (state.phase === 'connected' || state.phase === 'reconnecting') && !state.playback;
+  const noPlayback = (state.phase === 'connected' || state.phase === 'reconnecting') && !state.playback && !state.companion;
   // The phone layout's Voice button and strip follow it (issue #929).
   const reportLive = useContext(VoiceLive);
   const micTestShown = useContext(MicTestShown);
@@ -995,7 +995,7 @@ function Volumes({ voice, others }: { readonly voice: VoiceControl; readonly oth
 // no longer counts it as the gesture.
 function HearButton({ voice }: { readonly voice: VoiceControl }) {
   return (
-    <button type="button" className="hear-channel" onClick={() => { voice.client.startAudio(); }}>
+    <button type="button" onClick={() => { voice.client.startAudio(); }}>
       {hearLabel}
     </button>
   );
