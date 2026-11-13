@@ -128,6 +128,7 @@ desktop-check: desktop-node
 	./scripts/desktop-lint-test.sh
 	./scripts/desktop-voice-helper-test.sh
 	./scripts/desktop-version-test.sh
+	./scripts/desktop-release-guard-test.sh
 	./scripts/desktop-deb-test.sh
 	./scripts/desktop-lint.sh
 	./scripts/web-depgate.sh desktop

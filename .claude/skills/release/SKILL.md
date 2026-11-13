@@ -46,10 +46,34 @@ sign-off act; `release.yml` turns a plain `v*` tag into a draft GitHub release, 
    under his explicit, recorded authorization for this release.
 4. Verify the `release.yml` run: `make check`, dogfood-check and
    p2-hardening-check re-ran green, binaries built for all three platforms,
-   the release created (a draft, or for a pre-release tag a published pre-release).
+   the `desktop-deb` job built the Linux desktop `.deb` (its first step,
+   `scripts/desktop-release-guard.sh`, refuses unless the tag is the commit
+   built, the tree is clean and `voice/Cargo.toml`'s version is the tag's),
+   the `attest` job wrote `checksums.txt` and attested every file, and the
+   release was created by `publish` (a draft, or for a pre-release tag a
+   published pre-release). If any of the first three jobs fails, no release
+   exists: fix on `main` and tag a new version, never move the tag. Never re-run a
+   release (the run or a job of it): tag a new version. `attest` asserts the
+   exact file set and `publish` verifies every attestation before it creates
+   the release.
 5. Sanity-check the artifacts (download one, `--version`, run against a temp
    db), note the dogfood-check run in the release notes, hand the draft to
    Nick to publish (a pre-release is already published: check its notes and tester checklist).
+6. Verify the desktop `.deb` the way a tester does, from a directory holding
+   the release's files:
+   `sha256sum -c --ignore-missing checksums.txt` (the one `checksums.txt`
+   covers every file), then `gh attestation verify conch-desktop_*_amd64.deb
+   --repo njdaniel/conch --signer-workflow
+   njdaniel/conch/.github/workflows/release.yml --source-ref
+   refs/tags/<tag>`. With the two pinning flags it checks that this
+   repository's `release.yml`, run for that tag, signed the file; `--repo`
+   alone accepts an attestation from any workflow on any ref. `dpkg-deb -I` shows the package's Version (the tag with the
+   first `-` as `~`). The `.deb` is a **technical preview** until real-device
+   acceptance is recorded (#1603), and the release notes say so. **A green
+   CI or release run, a CI artifact, a checksum or an attestation says the
+   package was built from this tag by this workflow; it does not say the app
+   works, and it is not approval or real-device acceptance.** Only the
+   acceptance record (#1603) is that.
 
 ## Desktop release notes section
 
@@ -75,5 +99,9 @@ run is "not tried", never "works". Link the user page,
 ## Never
 
 - Tag on a failing or stale dogfood-check or p2-hardening-check.
-- Tag without recorded sign-off, or move/delete a pushed tag.
+- Tag without recorded sign-off, or move/delete a pushed tag, or re-run a
+  release: tag a new version.
+- Tag a commit that is not on `main`: the guard refuses it, but that is only
+  accident protection. The real control is a `v*` tag ruleset on the
+  repository (Nick's setting).
 - Edit a published release's artifacts — regressions get a new patch release.
