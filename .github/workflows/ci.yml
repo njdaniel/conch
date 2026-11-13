@@ -612,7 +612,9 @@ jobs:
           if ! [[ "$want" =~ ^[0-9a-f]{64}$ ]]; then echo "checksums.json has no SHA-256 for $archive"; exit 1; fi
           curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
             --output "$RUNNER_TEMP/$archive" "https://github.com/electron/electron/releases/download/v${CONCH_ELECTRON_VERSION}/$archive"
-          got=$(sha256sum "$RUNNER_TEMP/$archive" | cut -d' ' -f1)
+          # From standard input: Git Bash's sha256sum prefixes the hash with a
+          # backslash when the file name holds one, as $RUNNER_TEMP does.
+          got=$(sha256sum < "$RUNNER_TEMP/$archive" | cut -d' ' -f1)
           if [ "$got" != "$want" ]; then echo "SHA-256 of $archive is $got, but checksums.json says $want; nothing was unpacked"; exit 1; fi
           rm -rf desktop/out/electron-dist-win
           py=python3
