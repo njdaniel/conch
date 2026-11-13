@@ -408,7 +408,7 @@ checksum = "6e8ccc4ea9f6acc32d102c0f6d471d11d913ad15f20c04de743374861fa1d414"
 
 [[package]]
 name = "conch-voice"
-version = "0.1.0"
+version = "0.1.0-alpha.19"
 dependencies = [
  "clap",
  "conch-voice-api",
@@ -428,7 +428,7 @@ dependencies = [
 
 [[package]]
 name = "conch-voice-api"
-version = "0.1.0"
+version = "0.1.0-alpha.19"
 dependencies = [
  "futures-util",
  "reqwest",
@@ -442,14 +442,14 @@ dependencies = [
 
 [[package]]
 name = "conch-voice-audio"
-version = "0.1.0"
+version = "0.1.0-alpha.19"
 dependencies = [
  "thiserror 2.0.21",
 ]
 
 [[package]]
 name = "conch-voice-control"
-version = "0.1.0"
+version = "0.1.0-alpha.19"
 dependencies = [
  "serde",
  "thiserror 2.0.21",
