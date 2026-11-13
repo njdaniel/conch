@@ -70,6 +70,24 @@ var principalReads = []principalRead{
 	// would name it for, decided per reader by messageVisible; the ids go only
 	// to the hide signal, never to a member.
 	{"store/audience.go", "Store.AuthorReaders", 1, readGated},
+	// #1713: the reader's own current name, to match "@name" in the feed.
+	{"store/audience.go", "Store.ListPendingNotifications", 1, readOwnOrInternal},
+	// #1715: the push sender's target query reads each candidate's name (for
+	// the mention rule), kind, disabled, hidden and generation, to decide whom
+	// to wake. It serves nothing: a wake carries only a registration id.
+	{"store/audience.go", "pushCandidatesSQL", 1, readOwnOrInternal},
+	// #1715: the check before a retry: the registration's credential is live,
+	// which reads its principal's generation. It returns a yes or a no.
+	{"store/push_registrations.go", "Store.PushRegistrationLive", 1, readOwnOrInternal},
+	// #1714: compares credentials' generations with their principal's, to end
+	// the registrations of dead credentials; reads no name and serves no one.
+	{"store/push_registrations.go", "endGenerationDeadPushTx", 1, readOwnOrInternal},
+	// #1714: the liveness join of a registration's write, over the caller's
+	// own credential and its principal's generation; names nothing.
+	{"store/push_registrations.go", "Store.CreatePushRegistration", 1, readOwnOrInternal},
+	{"store/push_registrations.go", "Store.ReplacePushTarget", 1, readOwnOrInternal},
+	// #1713: the sweep compares a credential's generation with its principal's; never served.
+	{"store/notifications.go", "sweepNotificationPreferencesTx", 1, readOwnOrInternal},
 	// #1202: managers on the ?scope=all listing, for holders of manage_channels.
 	{"store/channels_self.go", "Store.channelDirectoryAll", 1, readOperatorOrMaker},
 	// #1150: the last-member count, never served to anyone.

@@ -24,7 +24,7 @@
 // and are skipped otherwise, as in 10-voice.
 import { type Browser, type BrowserContextOptions, type Locator, type Page } from '@playwright/test';
 import type { VoicePresenceV1 } from '../src/schema/voice';
-import { expect, openChannel, rememberPushToTalk, signIn, test } from './fixtures';
+import { closeAll, expect, openChannel, rememberPushToTalk, signIn, test } from './fixtures';
 import { dockerAvailable, startVoiceWorld, watchPage, type Member, type VoiceWorld } from './voice-world';
 
 const voiceRegion = (page: Page) => page.getByRole('region', { name: 'Voice' });
@@ -166,7 +166,7 @@ test.describe('the call view in a small group, with LiveKit', () => {
     const member: Member = vw[who];
     await signIn(page, vw, member.token, member.name);
     await openChannel(page, vw.channel);
-    return { page, close: () => ctx.close() };
+    return { page, close: () => closeAll(ctx) };
   }
 
   async function join(p: Someone): Promise<void> {

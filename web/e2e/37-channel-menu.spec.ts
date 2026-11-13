@@ -65,7 +65,7 @@ for (const [size, options, phone] of sizes) {
     // focused; Escape closes it and puts focus back.
     await more.focus();
     await page.keyboard.press('Enter');
-    await expect(row.getByRole('menuitem')).toHaveText(['Rename channel…', 'Leave channel', 'Favorite']);
+    await expect(row.getByRole('menuitem')).toHaveText(['Rename channel…', 'Set topic', 'Leave channel', 'Favorite']);
     await expect(row.getByRole('menuitem', { name: 'Rename channel…' })).toBeFocused();
     await page.keyboard.press('Escape');
     await expect(row.getByRole('menu')).toHaveCount(0);

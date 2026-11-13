@@ -3,6 +3,11 @@
 // attach line #893): a verified runtime directory, a Unix socket bound under
 // it, and the attach that binds the one connection to the spawn.
 //
+// On Windows (issue #1785; windows-desktop.md §3.3–§3.5) the endpoint is a
+// named pipe the owner creates under \\.\pipe\, listenPipe below: no
+// directory, no sweep, a random 128-bit name, and the same attach with the
+// per-connection first-line rules of §3.4.
+//
 // Input: the environment's XDG_RUNTIME_DIR, the profile id, a nonce, and
 // whatever arrives on the socket. Output: a refusal with its reason, or the
 // attached connection (and any bytes that came after the attach line).
@@ -71,6 +76,8 @@ export interface EndpointDeps {
   readonly uid?: number;
   // A fresh socket name, without its directory. Test seam for squats.
   readonly name?: () => string;
+  // A fresh pipe id (the hex after the pipe prefix). Test seam for squats.
+  readonly pipeId?: () => string;
   // Binds the server to path. Test seam for EACCES.
   readonly listen?: (server: Server, path: string) => Promise<void>;
   readonly log?: (line: string) => void;
@@ -205,6 +212,22 @@ function defaultListen(server: Server, path: string): Promise<void> {
   });
 }
 
+// PIPE_PREFIX is where every one of the owner's pipes is; the name is that
+// and 128 random bits in hex. It is passed in argv and is no secret
+// (windows-desktop.md §3.3): it carries no authority.
+export const PIPE_PREFIX = '\\\\.\\pipe\\conch-voice-';
+const PIPE_ID_BYTES = 16;
+const PIPE_ID_RE = /^[0-9a-f]{32}$/;
+
+// The most connections a pipe holds while waiting for the attach; past it the
+// oldest one that has delivered no byte is closed (see listening). Bounded by
+// the first-line deadline as well.
+export const PIPE_MAX_PENDING = 256;
+
+function randomPipeId(): string {
+  return randomBytes(PIPE_ID_BYTES).toString('hex');
+}
+
 // Listening is a bound endpoint waiting for its one connection.
 export interface Listening {
   readonly path: string;
@@ -247,9 +270,51 @@ export async function listen(dir: string, deps: EndpointDeps = {}): Promise<List
   throw new EndpointError('socket-unbindable');
 }
 
-function listening(server: Server, path: string): Listening {
-  // Every connection that arrived, in order. The first is the candidate; a
-  // second before the attach is settled fails it.
+// listenPipe creates the owner's named pipe: \\.\pipe\conch-voice-<128 random
+// bits> through Node's net (libuv), with no readableAll or writableAll (the
+// default security descriptor is the cross-user boundary, §3.5). A listen
+// failure on the name (a squat: FILE_FLAG_FIRST_PIPE_INSTANCE makes it
+// EACCES, a busy name EADDRINUSE) picks a new random name.
+export async function listenPipe(deps: EndpointDeps = {}): Promise<Listening> {
+  const nextId = deps.pipeId ?? randomPipeId;
+  const bind = deps.listen ?? defaultListen;
+  for (let attempt = 0; attempt < BIND_ATTEMPTS; attempt++) {
+    const id = nextId();
+    if (!PIPE_ID_RE.test(id)) throw new EndpointError('socket-unbindable');
+    const name = PIPE_PREFIX + id;
+    const server = createServer({ pauseOnConnect: true, allowHalfOpen: false });
+    try {
+      await bind(server, name);
+    } catch (err) {
+      server.close();
+      const code = codeOf(err);
+      if (code === 'EADDRINUSE' || code === 'EACCES') {
+        deps.log?.(`voice: the pipe name was taken (${code}); trying another`);
+        continue;
+      }
+      throw new EndpointError('socket-unbindable');
+    }
+    return listening(server, name, true);
+  }
+  throw new EndpointError('socket-unbindable');
+}
+
+// listening is the attach of one bound endpoint. On a Unix socket in the
+// private directory, where only the helper can connect, the first connection
+// is the candidate and any failure, or a second connection, fails the attach.
+// On a pipe (pipe = true), which other users can open read-only and same-user
+// code can flood (§3.5), every connection has its own first line and its own
+// failure: a bad one is closed and the wait goes on to the deadline, and a
+// connection past PIPE_MAX_PENDING closes the oldest waiting one that has
+// delivered no byte (§3.4 rule 2). What holds, and what does not: a cross-user
+// client can never deliver a byte (§3.5), so the helper, once it has written
+// any, is never the one closed; but a flood of PIPE_MAX_PENDING or more silent
+// opens between the helper's open and its first byte can still close it. That
+// fails closed and is the attach flood §3.5 names as a residual.
+function listening(server: Server, path: string, pipe = false): Listening {
+  // Every connection that arrived, in order. On a socket the first is the
+  // candidate and a second before the attach is settled fails it; on a pipe
+  // each is read for itself.
   const connections: Socket[] = [];
   let closed = false;
   let attachCalled = false;
@@ -269,14 +334,30 @@ function listening(server: Server, path: string): Listening {
   // Errors end the attempt through attach's own handlers; these keep a stray
   // one from being thrown.
   server.on('error', () => undefined);
+  // drop closes one pipe connection that failed its first line; the attach
+  // goes on waiting for another.
+  const drop = (s: Socket): void => {
+    const i = connections.indexOf(s);
+    if (i >= 0) connections.splice(i, 1);
+    s.removeAllListeners('data');
+    s.destroy();
+  };
+  // spoke is the connections that have delivered at least one byte.
+  const spoke = new WeakSet<Socket>();
   server.on('connection', (s: Socket) => {
     s.on('error', () => undefined);
     if (closed) {
       s.destroy();
       return;
     }
+    // At the bound the oldest connection that has delivered no byte goes
+    // (the oldest of all if every one has), not the newcomer.
+    if (pipe && connections.length >= PIPE_MAX_PENDING) {
+      const victim = connections.find((c) => !spoke.has(c)) ?? connections[0];
+      if (victim !== undefined) drop(victim);
+    }
     connections.push(s);
-    if (connections.length > 1) {
+    if (!pipe && connections.length > 1) {
       fail?.('attach-second-connection');
       return;
     }
@@ -298,6 +379,8 @@ function listening(server: Server, path: string): Listening {
         fail = (reason: AttachFailure): void => {
           if (settled) return;
           settled = true;
+          want.fill(0);
+          onFirst = null;
           fail = null;
           clearTimeout(timer);
           close();
@@ -306,29 +389,39 @@ function listening(server: Server, path: string): Listening {
         const succeed = (s: Socket, rest: Buffer): void => {
           if (settled) return;
           settled = true;
+          want.fill(0);
+          onFirst = null;
           fail = null;
           clearTimeout(timer);
           s.pause();
           // The attached connection is the caller's now; every other one, and
           // the listener, goes. After attach no further connection is
           // accepted.
-          connections.splice(connections.indexOf(s), 1);
+          const at = connections.indexOf(s);
+          if (at >= 0) connections.splice(at, 1);
           close();
           resolve({ socket: s, rest });
+        };
+        // refused ends the attempt on a socket and only this connection on a
+        // pipe.
+        const refused = (s: Socket, reason: AttachFailure): void => {
+          if (pipe) drop(s);
+          else fail?.(reason);
         };
         const read = (s: Socket): void => {
           const chunks: Buffer[] = [];
           let size = 0;
           const onEnd = (): void => {
-            fail?.('attach-ended');
+            refused(s, 'attach-ended');
           };
           const onData = (chunk: Buffer): void => {
+            spoke.add(s);
             const lf = chunk.indexOf(0x0a);
             const take = lf < 0 ? chunk : chunk.subarray(0, lf);
             size += take.length;
             if (size > VOICE_CONTROL_MAX_LINE_BYTES) {
               s.off('data', onData);
-              fail?.('attach-too-long');
+              refused(s, 'attach-too-long');
               return;
             }
             chunks.push(Buffer.from(take));
@@ -336,16 +429,25 @@ function listening(server: Server, path: string): Listening {
             s.off('data', onData);
             s.off('end', onEnd);
             s.off('close', onEnd);
-            const parsed = parseAttached(Buffer.concat(chunks));
+            const line = Buffer.concat(chunks);
+            const parsed = parseAttached(line);
+            // The line and the copies of it are wiped once compared: the
+            // nonce is spent, or this was not it.
+            const wipe = (...bufs: Buffer[]): void => {
+              for (const b of [line, ...chunks, ...bufs]) b.fill(0);
+            };
             if (!parsed.ok) {
-              fail?.('attach-refused');
+              wipe();
+              refused(s, 'attach-refused');
               return;
             }
             const got = Buffer.from(parsed.attached.nonce, 'utf8');
             // Both are 43 bytes once parsed; timingSafeEqual throws on a
             // length mismatch, so the length is compared first.
-            if (got.length !== want.length || !timingSafeEqual(got, want)) {
-              fail?.('attach-refused');
+            const same = got.length === want.length && timingSafeEqual(got, want);
+            wipe(got);
+            if (!same) {
+              refused(s, 'attach-refused');
               return;
             }
             succeed(s, Buffer.from(chunk.subarray(lf + 1)));
@@ -355,6 +457,12 @@ function listening(server: Server, path: string): Listening {
           s.once('close', onEnd);
           s.resume();
         };
+        if (pipe) {
+          // Every connection that is already here, and every one to come.
+          onFirst = read;
+          for (const c of [...connections]) read(c);
+          return;
+        }
         if (connections.length > 1) {
           fail('attach-second-connection');
           return;

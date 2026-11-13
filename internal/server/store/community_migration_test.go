@@ -29,6 +29,9 @@ func rewindToBeforeCommunity(t *testing.T, path string) {
 	}
 	defer func() { _ = db.Close() }()
 	for _, stmt := range []string{
+		"DROP TABLE push_registrations",          // migration 49 (issue #1714)
+		"DROP TABLE notification_preferences",    // migration 48 (issue #1713)
+		"ALTER TABLE channels DROP COLUMN topic", // migration 47 (issue #1503)
 		`CREATE TABLE open_channels (channel_id INTEGER PRIMARY KEY REFERENCES channels (id), added_by INTEGER REFERENCES principals (id), added_at INTEGER NOT NULL)`, // migration 46 (issue #998)
 		"DROP TABLE message_removals",                         // migration 45 (issue #849); its triggers go with it
 		"DROP TABLE channel_bans",                             // migration 45 (issue #849)

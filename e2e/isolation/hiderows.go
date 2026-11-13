@@ -148,6 +148,13 @@ func (w *world) buildHideWorld(name func(string) string, mtag, atag string) (*hi
 		hw.marksBob.str(m.name+"'s name", m.name)
 		hw.marksBob.id("principal", m.name+"'s id", m.id)
 	}
+	// Alice and bob ask for every notification with its text, so that the
+	// feed is one more read that names authors (issue #1713).
+	for _, m := range []*member{hw.alice, hw.bob} {
+		if err := m.api.call(http.MethodPut, "/v1/notifications/preferences", allPreferences, nil); err != nil {
+			return nil, fmt.Errorf("%s sets her notification preferences: %w", m.name, err)
+		}
+	}
 	// Sockets, open before the cell is cut.
 	open := func(a api, what, channel string) (*feed, error) {
 		f, r, err := dialSocket(a, what, "/v1/events/ws", url.Values{"channel": {channel}}, false)
@@ -371,6 +378,8 @@ func (hw *hideWorld) reads(p1 string, linkID, authorID int64) []hideRead {
 		{"GET /v1/sessions", "/v1/sessions?channel=" + url.QueryEscape(p1)},
 		{"GET /v1/runs", "/v1/runs?channel=" + url.QueryEscape(p1)},
 		{"GET /v1/read-state", "/v1/read-state"},
+		{"GET /v1/notifications/preferences", "/v1/notifications/preferences"},
+		{"GET /v1/notifications/pending", "/v1/notifications/pending"},
 		{"GET /v1/approvals", "/v1/approvals"},
 		{"GET /v1/invites", "/v1/invites"},
 		{"GET /v2/invites", "/v2/invites"},
@@ -402,7 +411,11 @@ func (w *world) checkReads(hw *hideWorld, phase string, who *member, marks *mark
 			return n, err
 		}
 	}
-	return n + 1, nil
+	// The feed names an author only where the authors route would.
+	if err := w.checkPendingNames(hw, phase, who, marks, who == hw.alice); err != nil {
+		return n, err
+	}
+	return n + 2, nil
 }
 
 // checkHideReadsAreRoutes requires that every read of the world is a request

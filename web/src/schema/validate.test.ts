@@ -28,7 +28,7 @@ function legacyObject<T>(shape: Record<string, Validator<unknown> | { optional: 
 
 const at = '2026-01-02T03:04:05Z';
 
-describe('a ChannelV0 that carries a key an older bundle lacks (the channel topic)', () => {
+describe('a ChannelV0 that carries a key an older bundle lacks (one added after this bundle was built; the channel topic was the first, #1534)', () => {
   const legacyChannel = legacyObject<ChannelV0>({
     id: int,
     name: str,
@@ -41,14 +41,14 @@ describe('a ChannelV0 that carries a key an older bundle lacks (the channel topi
   });
 
   it('is accepted when read from the server, and the key is not on the value', () => {
-    const value: unknown = { id: 1, name: 'general', created_at: at, topic: 'hello' };
+    const value: unknown = { id: 1, name: 'general', created_at: at, not_yet_known: 'hello' };
     expect(fromServer(channelV0)(value)).toEqual([]);
     expect(value).toEqual({ id: 1, name: 'general', created_at: at });
   });
 
   it('is refused by default: IPC, the voice protocol and the fixtures stay strict', () => {
-    expect(channelV0({ id: 1, name: 'general', created_at: at, topic: 'hello' })).toEqual([
-      '$.topic: key is not in the TypeScript type',
+    expect(channelV0({ id: 1, name: 'general', created_at: at, not_yet_known: 'hello' })).toEqual([
+      '$.not_yet_known: key is not in the TypeScript type',
     ]);
   });
 });

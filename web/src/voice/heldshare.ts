@@ -3,7 +3,7 @@
 // SDK, no network, no device: the picker never answers until the share is
 // stopped. Imported by tests only.
 import { FakeClock, settle } from './fakes';
-import { ScreenShare, type ShareRoom } from './share';
+import { provisionalQuality, ScreenShare, type ShareRoom } from './share';
 
 export async function holdShare(): Promise<{ readonly stop: () => Promise<void> }> {
   const share = new ScreenShare(
@@ -16,6 +16,7 @@ export async function holdShare(): Promise<{ readonly stop: () => Promise<void> 
   );
   const room: ShareRoom = {
     pickScreen: () => new Promise(() => undefined),
+    settled: provisionalQuality,
     setShareQuality: () => Promise.resolve(),
     readShareStats: () => Promise.resolve(null),
     publishScreen: () => Promise.resolve(),

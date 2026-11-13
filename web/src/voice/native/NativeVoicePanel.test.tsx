@@ -4,14 +4,16 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testi
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as api from '../../api';
 import type { NativeVoiceHelper, NativeVoiceView } from '../../platform/desktop/bridge';
-import type { NativeVoice, NativeVoiceOutcome } from '../../platform/types';
+import type { NativeVoice, NativeVoiceError, NativeVoiceOutcome } from '../../platform/types';
 import type { ChannelV0 } from '../../schema/channel';
 import type { VoicePresenceV2 } from '../../schema/voice';
 import type { SocketEvents } from '../../state/feed';
 import type { Person } from '../../useLiveChannel';
 import * as sdk from '../sdk';
 import { confirmWithin, duplicateWarning, NativeVoicePanel } from './NativeVoicePanel';
-import { statusWords, words } from './words';
+import { initialVoice, type VoiceState } from '../connection';
+import type { Companion, CompanionClient } from './useCompanion';
+import { shareDisabledWords, silentShareBefore, statusWords, words } from './words';
 
 const idle: NativeVoiceView = { status: 'idle', generation: 0, channel: null, retryable: false };
 const helper = (over: Partial<NativeVoiceHelper> = {}): NativeVoiceHelper => ({ version: 2, phase: 'connected', capture: 'on', transmitting: false, muted: false, deafened: false, blocked: [], ptt: 'ready', ...over });
@@ -31,7 +33,7 @@ class Fake {
   view: NativeVoiceView;
   readonly calls: string[] = [];
   private readonly listeners = new Set<() => void>();
-  deferred: ((out: { ok: true }) => void) | null = null;
+  deferred: ((out: { ok: true } | { ok: false; error: NativeVoiceError }) => void) | null = null;
   constructor(view: NativeVoiceView = idle) {
     this.view = view;
   }
@@ -141,6 +143,25 @@ describe('NativeVoicePanel', () => {
     s.unmount();
   });
 
+  // Issue #1457: a moderator's voice kick ends the helper with voice_removed.
+  // The strip says so, never an internal error, and Join is there to go back.
+  it('a voice kick says "removed from voice" and leaves Join on', async () => {
+    const fake = new Fake(running());
+    const s = strip(fake);
+    await frame(presence([1, '2026-01-01T00:00:00Z']));
+    fake.set({ status: 'ended', generation: 1, channel: 'general', retryable: false, problem: 'voice_removed', helper: helper({ phase: 'failed', reason: 'voice_removed', capture: 'off', blocked: ['not_connected'] }) });
+    await frame(presence());
+    expect(screen.getByText('voice ended: you were removed from voice')).toBeTruthy();
+    expect(screen.getByText(/Not in voice/)).toBeTruthy();
+    expect(screen.queryByText(/internal error/)).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Retry' })).toBeNull();
+    const join = screen.getByRole('button', { name: /Join voice in #general/ });
+    expect(join).toHaveProperty('disabled', false);
+    fireEvent.click(join);
+    await waitFor(() => { expect(fake.calls).toEqual(['join general muted=false deafened=false']); });
+    s.unmount();
+  });
+
   it('keeps its destination when the channel on screen changes while joined', async () => {
     const fake = new Fake(running());
     const s = strip(fake, 'general');
@@ -226,6 +247,36 @@ describe('NativeVoicePanel', () => {
     });
   });
 
+  it('says the person was muted at a screen lock until they unmute or leave', async () => {
+    const note = 'You were muted when your screen locked';
+    const fake = new Fake({ ...running({ muted: true }), mutedByLock: true });
+    strip(fake);
+    await frame(presence([1, '2026-01-01T00:00:00Z']));
+    expect(screen.getByText(note)).toBeTruthy();
+    // Unmuted (main drops the marker with the mute): the note is gone.
+    fake.set(running({ muted: false }));
+    expect(screen.queryByText(note)).toBeNull();
+    // A marker with no mute in force is not shown either.
+    fake.set({ ...running({ muted: false }), mutedByLock: true });
+    expect(screen.queryByText(note)).toBeNull();
+    // Left: gone.
+    fake.set(idle);
+    expect(screen.queryByText(note)).toBeNull();
+  });
+
+  it('says why an unmute was refused while the screen is locked', async () => {
+    const fake = new Fake({ ...running({ muted: true }), mutedByLock: true });
+    strip(fake);
+    await frame(presence([1, '2026-01-01T00:00:00Z']));
+    fireEvent.click(screen.getByRole('button', { name: 'Unmute' }));
+    expect(fake.calls).toEqual(['mute false']);
+    await act(async () => {
+      fake.deferred?.({ ok: false, error: 'locked' });
+      await Promise.resolve();
+    });
+    expect(screen.getByText('Your screen is locked. Unlock it to unmute.')).toBeTruthy();
+  });
+
   it('Leave calls leave', async () => {
     const fake = new Fake(running());
     strip(fake);
@@ -261,6 +312,11 @@ describe('NativeVoicePanel', () => {
       strip(new Fake({ status: 'unavailable', generation: 1, channel: null, retryable: false, problem: 'untrusted' }));
       expect(screen.getByText('The voice helper is not trusted, so it was not started.')).toBeTruthy();
       expect(screen.queryByRole('button', { name: /Join/ })).toBeNull();
+    });
+    it('says to restart after an update replaced the install, and offers neither Join nor Retry (issue #1600)', () => {
+      strip(new Fake({ status: 'unavailable', generation: 1, channel: null, retryable: false, problem: 'update-pending' }));
+      expect(screen.getByText('Restart Conch to finish the update.')).toBeTruthy();
+      expect(screen.queryByRole('button', { name: /Join|Retry/ })).toBeNull();
     });
     it('uses the talk key name given, and the fallback otherwise', () => {
       strip(new Fake(running()), 'general', 'Right Ctrl');
@@ -345,5 +401,107 @@ describe('NativeVoicePanel', () => {
     cleanup();
     strip(new Fake(running({ ptt: 'ready' })));
     expect(await screen.findByText(/hold your talk key to talk/)).toBeTruthy();
+  });
+
+  describe('share and watch (#1582)', () => {
+    function companionOf(over: Partial<VoiceState> = {}) {
+      const calls: string[] = [];
+      const presences: VoicePresenceV2[] = [];
+      const state: VoiceState = { ...initialVoice, ...over };
+      const client: CompanionClient = {
+        subscribe: () => () => undefined,
+        snapshot: () => state,
+        startCompanionShare: (c) => { calls.push(`share ${c}`); },
+        watchCompanionStream: (c, p) => { calls.push(`watch ${c} ${String(p)}`); },
+        stopShare: () => { calls.push('stop'); },
+        watchStream: () => undefined,
+        focusShare: () => undefined,
+        setShareQuality: () => Promise.resolve(),
+        presence: (p) => { presences.push(p); },
+        attachStream: () => undefined,
+        readShareStats: () => Promise.resolve(null),
+      };
+      const companion: Companion = { client, state };
+      return { companion, calls, presences };
+    }
+    function withCompanion(fake: Fake, companion: Companion | null, channel = 'general') {
+      return render(
+        <NativeVoicePanel source={fake.nv} signedIn channel={channel} viewer={1} people={people} voiceAllowed channels={channels} companion={companion} onUnauthorized={() => undefined} onOpen={() => undefined} />,
+      );
+    }
+    const sharingPresence = (): VoicePresenceV2 => {
+      const p = presence([1, '2026-01-01T00:00:00Z'], [2, '2026-01-01T00:00:01Z']);
+      const second = p.rooms[0]?.participants[1];
+      if (second !== undefined) Object.assign(second, { sharing: true, share_started_at: '2026-01-01T00:00:02Z' });
+      return p;
+    };
+
+    it('offers no share where the bridge has no companion', async () => {
+      withCompanion(new Fake(running()), null);
+      await frame(presence([1, '2026-01-01T00:00:00Z']));
+      expect(screen.queryByRole('button', { name: 'Share screen' })).toBeNull();
+    });
+
+    it('Share starts the companion in the joined channel and leaves mute and deafen alone', async () => {
+      const fake = new Fake(running());
+      const c = companionOf();
+      withCompanion(fake, c.companion);
+      await frame(presence([1, '2026-01-01T00:00:00Z']));
+      expect(screen.getByText(silentShareBefore)).toBeTruthy();
+      fireEvent.click(screen.getByRole('button', { name: 'Share screen' }));
+      expect(c.calls).toEqual(['share general']);
+      expect(fake.calls).toEqual([]);
+      expect(screen.getByRole('button', { name: 'Mute' })).toBeTruthy();
+      expect(screen.getByRole('button', { name: 'Deafen' })).toBeTruthy();
+    });
+
+    it('while sharing, the indicator names the channel and Stop returns to the strip with voice untouched', async () => {
+      const fake = new Fake(running({ muted: true }));
+      const c = companionOf({ phase: 'connected', channel: 'general', companion: true, share: { kind: 'sharing', audio: false } });
+      withCompanion(fake, c.companion);
+      await frame(presence([1, '2026-01-01T00:00:00Z']));
+      expect(screen.getByText('Sharing your screen in #general')).toBeTruthy();
+      fireEvent.click(screen.getByRole('button', { name: 'Stop sharing' }));
+      expect(c.calls).toEqual(['stop']);
+      expect(fake.calls).toEqual([]);
+      expect(screen.getByRole('button', { name: 'Unmute' })).toBeTruthy();
+      expect(screen.getByRole('button', { name: 'Leave voice' })).toBeTruthy();
+    });
+
+    it('is disabled with its reason out of voice, and while the helper connects', async () => {
+      const out = withCompanion(new Fake(idle), companionOf().companion);
+      await frame(presence());
+      expect(screen.getByRole<HTMLButtonElement>('button', { name: 'Share screen' }).disabled).toBe(true);
+      expect(screen.getByText(shareDisabledWords.notJoined)).toBeTruthy();
+      out.unmount();
+      cleanup();
+      withCompanion(new Fake(running({ phase: 'connecting' })), companionOf().companion);
+      await frame(presence([1, '2026-01-01T00:00:00Z']));
+      expect(screen.getByRole<HTMLButtonElement>('button', { name: 'Share screen' }).disabled).toBe(true);
+      expect(screen.getByText(shareDisabledWords.connecting)).toBeTruthy();
+    });
+
+    it('is disabled when the channel on screen is not the one joined', async () => {
+      withCompanion(new Fake(running()), companionOf().companion, 'random');
+      await frame(presence([1, '2026-01-01T00:00:00Z']));
+      expect(screen.getByRole<HTMLButtonElement>('button', { name: 'Share screen' }).disabled).toBe(true);
+    });
+
+    it('gives the companion the joined channel’s presence, and tiles for the others’ streams with Watch', async () => {
+      const c = companionOf();
+      withCompanion(new Fake(running()), c.companion);
+      await frame(sharingPresence());
+      expect(c.presences.length).toBeGreaterThan(0);
+      fireEvent.click(within(screen.getByRole('region', { name: "Ada's stream" })).getByRole('button', { name: 'Watch' }));
+      expect(c.calls).toEqual(['watch general 2']);
+    });
+
+    it('draws no tiles and gives no presence out of voice', async () => {
+      const c = companionOf();
+      withCompanion(new Fake(idle), c.companion);
+      await frame(sharingPresence());
+      expect(c.presences).toEqual([]);
+      expect(screen.queryByRole('region', { name: "Ada's stream" })).toBeNull();
+    });
   });
 });

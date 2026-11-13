@@ -5,13 +5,15 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react';
 import * as api from '../api';
 import { pageHiddenOnPhone } from '../phone';
+import { platform } from '../platform';
 import type { ChannelV0 } from '../schema/channel';
 import type { SocketCloseReason } from '../schema/generated';
 import type { VoicePresenceV2 } from '../schema/voice';
 import { Feed, type FeedStatus } from '../state/feed';
 import type { Camera } from './camera';
-import { VoiceClient, type Microphone, type ModeStore, type Output, type ProcessingStore, type VoiceState } from './connection';
+import { openAudio, VoiceClient, type Microphone, type ModeStore, type Output, type ProcessingStore, type VoiceState } from './connection';
 import { defaultTail, snapTail } from './gate';
+import { companionEnv } from './native/companionEnv';
 import { defaultTalkKey, isTyping, mouseButtonForTalkKey } from './keys';
 import { parsePresence } from './presence';
 import { canChooseOutput, newLiveKitRoom } from './sdk';
@@ -337,6 +339,8 @@ export function useVoice({
       createSession: api.createVoiceSession,
       createViewer: api.createVoiceViewer,
       removeViewer: api.removeVoiceViewer,
+      // The desktop's screen companion; absent in the browser (issue #1581).
+      companion: companionEnv(platform.nativeVoice),
       report: api.reportVoiceTransmit,
       newRoom: newLiveKitRoom,
       claimShare: api.claimVoiceShare,
@@ -347,7 +351,9 @@ export function useVoice({
       microphone: readMicrophone(),
       processing: processingChoices(),
       mode: modeChoice(),
-      shareQuality: api.readShareQuality(),
+      // The desktop's default is its own (Q-D4-3 on #1578), so there a choice
+      // is passed only if one was made.
+      shareQuality: platform.nativeVoice?.companion === undefined ? api.readShareQuality() : (api.keptShareQuality() ?? undefined),
       outputSelection: canChooseOutput(),
       output: readOutput(),
       gate: { tail: readRelease() },
@@ -679,8 +685,11 @@ export function useVoice({
   }, [client]);
   const join = useCallback(() => {
     if (channel === null) return;
+    // The meter's audio context is made first, in the click, with nothing
+    // before or between (issue #1794): iOS only runs one made in a gesture.
+    const audio = openAudio();
     note(channel);
-    client.join(channel);
+    client.join(channel, { audio });
   }, [channel, client, note]);
   const watchOnly = useCallback((beside = false) => {
     if (channel === null) return;

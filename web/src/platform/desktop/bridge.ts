@@ -12,7 +12,8 @@
 //    validates with the table's validators;
 //  - the bearer credential, a socket ticket, a proof and the person's own
 //    voice grant never cross it: main keeps them, and answers sanitised state
-//    (a WhoAmIResponseV1, or a refusal kind) instead;
+//    (a WhoAmIResponseV1, or a refusal kind) instead. The one credential that
+//    does is the screen companion's grant (DesktopCompanionBridge below);
 //  - every body is a type of web/src/schema, so none of this is a new wire
 //    shape (decision Q1: these in-process messages carry only existing
 //    pkg/schema types).
@@ -39,9 +40,11 @@ import type {
   TOTPLoginRequestV1,
 } from '../../schema/auth';
 import type { ConvertGuestRequestV1, JoinAccountRequestV1, JoinGuestRequestV1 } from '../../schema/guest';
-import type { RedeemInviteGuestRequestV1, RedeemInviteRequestV2 } from '../../schema/invite';
+import type { CreateHookRequest } from '../../schema/admin';
+import type { CreateCredentialRequestV1 } from '../../schema/credential';
+import type { CreateInviteRequestV2, RedeemInviteGuestRequestV1, RedeemInviteRequestV2 } from '../../schema/invite';
 import type { WhoAmIResponseV1 } from '../../schema/principal';
-import type { RedeemSignInLinkRequestV1 } from '../../schema/signin';
+import type { CreateDeviceLinkRequestV1, CreateSignInLinkRequestV1, RedeemSignInLinkRequestV1 } from '../../schema/signin';
 import type { OperationId, Params } from '../operations';
 
 // The server this window talks to: the canonical origin of the selected
@@ -234,6 +237,22 @@ export type DownloadReply = BridgeReply | { readonly kind: 'bytes'; readonly dat
 // failed is anything else (no answer, too large, not writable).
 export type SaveOutcome = 'saved' | 'cancelled' | 'failed' | 'unauthorized';
 
+// A desktop notification (issue #1590): exactly the fields main may show or
+// retain. The channel is owned by main's activation record; clicks carry only
+// the tag back to the document that showed it.
+export interface NotifyRequest {
+  readonly tag: string;
+  readonly title: string;
+  readonly body: string;
+  readonly channel: ChannelName;
+}
+
+// The only notification event: no title, body, channel or native event object.
+export interface NotificationClick {
+  readonly type: 'click';
+  readonly tag: string;
+}
+
 export interface ConchDesktopBridge {
   // The server address of the active profile (null: none is active).
   serverAddress(): Promise<ServerAddress>;
@@ -276,6 +295,22 @@ export interface ConchDesktopBridge {
   // once and kept nowhere.
   replaceCredential(request: ReplaceCredentialRequest): Promise<SignInOutcome>;
 
+  // The six operations whose answer holds a secret made for someone or
+  // something else (issue #1768): an invite's link, a sign-in link for another
+  // device, the authenticator's seed, a sign-in link for a person, a script's
+  // credential, a hook's secret. Each is its own function: main makes the one
+  // request with its bearer, exactly as the page would, and answers once with
+  // the server's validated reply (the secret in it) for the page to show and
+  // copy. Main logs, stores and keeps none of it; the page keeps none in a URL,
+  // a title or a log, and drops it when the view closes. The generic request
+  // still refuses all six (renderer: false), so these are the only way.
+  createMemberLink(request: CreateInviteRequestV2): Promise<BridgeReply>;
+  createSignInLink(request: CreateDeviceLinkRequestV1): Promise<BridgeReply>;
+  totpEnroll(): Promise<BridgeReply>;
+  createPrincipalSignInLink(request: { readonly id: number; readonly body: CreateSignInLinkRequestV1 }): Promise<BridgeReply>;
+  createPrincipalCredential(request: { readonly id: number; readonly body: CreateCredentialRequestV1 }): Promise<BridgeReply>;
+  createHook(request: CreateHookRequest): Promise<BridgeReply>;
+
   // Attachments (issue #947). Upload sends the operation uploadFile; the
   // answer is the server's, validated. Download gives a file's bytes for a
   // blob preview; nothing is written or opened. Save asks main to show the
@@ -285,6 +320,12 @@ export interface ConchDesktopBridge {
   uploadFile(request: UploadRequest): Promise<BridgeReply>;
   downloadFile(id: number): Promise<DownloadReply>;
   saveFile(id: number): Promise<SaveOutcome>;
+  // Desktop notifications (issue #1590). Support is a narrow synchronous IPC
+  // because the platform's permission API is synchronous; clicks carry no text.
+  notify(request: NotifyRequest): Promise<boolean>;
+  notifyClose(request: { readonly tag: string }): Promise<boolean>;
+  notificationSupported(): boolean;
+  onNotification(listener: (event: NotificationClick) => void): Unsubscribe;
   // The saved server profiles (issue #945). Ids are opaque to the page.
   profiles(): Promise<ProfilesView>;
   profileAdd(address: string): Promise<ProfileAddResult>;
@@ -303,7 +344,7 @@ export interface ConchDesktopBridge {
 declare global {
   interface Window {
     // Present only in the desktop shell's renderer.
-    readonly conchDesktop?: ConchDesktopBridge & Partial<DesktopVoiceBridge>;
+    readonly conchDesktop?: ConchDesktopBridge & Partial<DesktopVoiceBridge> & Partial<DesktopSettingsBridge> & Partial<DesktopCompanionBridge> & Partial<DesktopInviteBridge>;
   }
 }
 
@@ -342,11 +383,14 @@ export interface NativeVoiceView {
   readonly problem?: string;
   readonly retryable: boolean;
   readonly helper?: NativeVoiceHelper;
+  // Set while main's mute at a screen lock (issue #1588) is still in force:
+  // the strip says "You were muted when your screen locked".
+  readonly mutedByLock?: true;
 }
 
 export type VoiceCommandResult =
   | { readonly ok: true }
-  | { readonly ok: false; readonly error: VoiceControlErrorCode | 'not-running' | 'busy' | 'unsupported' | 'lost' };
+  | { readonly ok: false; readonly error: VoiceControlErrorCode | 'not-running' | 'busy' | 'unsupported' | 'lost' | 'locked' };
 
 // The helper's one-shot runs (issue #1378, D3-7): the device list and a save.
 // Why a run did not give what was asked; never text of the helper's.
@@ -362,7 +406,9 @@ export type VoiceOneShotError =
   | 'unsupported'
   | 'failed'
   | 'bad-output'
-  | 'cancelled';
+  | 'cancelled'
+  // The installed files were replaced under this running app (issue #1600).
+  | 'update-pending';
 
 // The device list as the page gets it: the validated document's microphones
 // and speakers (each with its default flag), and whether PipeWire was
@@ -443,6 +489,259 @@ export interface DesktopVoiceBridge {
   onVoiceState(listener: (view: NativeVoiceView) => void): Unsubscribe;
 }
 
-// The object the preload exposes: the bridge and the voice family. Still no
-// press, release, gate or transmit function in either.
-export type ExposedDesktopBridge = ConchDesktopBridge & DesktopVoiceBridge;
+// Opening an invite link in the app (issue #1591, D5-05 of #773). Its own
+// interface, beside ConchDesktopBridge, so a fake of the main bridge needs
+// no change. The link is untrusted text: main parses it (the page's own parse
+// is never trusted), keeps the code behind a one-time handle and answers
+// only the server it names. Nothing is contacted, switched or added until
+// inviteAccept, which is the person's click.
+//
+// Why a link was not accepted. Fixed words, never the link or its code.
+export type InviteRefusal = 'type' | 'length' | 'characters' | 'scheme' | 'userinfo' | 'host' | 'path' | 'query' | 'fragment' | 'code' | 'malformed';
+
+// A saved profile for the invite's server, offered by name and account.
+export interface InviteProfile {
+  readonly id: string;
+  readonly label: string;
+  readonly account: string | null;
+  readonly active: boolean;
+}
+
+export type InviteCheck =
+  | {
+      readonly ok: true;
+      // One-time handle for inviteAccept or inviteCancel. Not the code.
+      readonly handle: string;
+      // The canonical origin the link names, and its host: what the person
+      // is shown before anything is contacted.
+      readonly origin: string;
+      readonly host: string;
+      readonly profiles: readonly InviteProfile[];
+      // Voice is running now, in whatever profile: switching leaves it.
+      readonly voice: boolean;
+    }
+  | { readonly ok: false; readonly refusal: InviteRefusal };
+
+// Open it with a saved profile, or add the server as a new entry.
+export type InviteTarget = { readonly profile: string } | { readonly add: true };
+
+export type InviteAccept =
+  | {
+      readonly ok: true;
+      // True: the window's page is being replaced by that profile's, which
+      // takes the code itself (inviteTake). False: the profile is the one in
+      // force, and this page takes it now.
+      readonly switched: boolean;
+    }
+  | { readonly ok: false; readonly refusal: 'expired' | 'just-arrived' | 'voice-started' | 'unknown-profile' | 'unsupported' | 'full' | 'unreachable' | 'certificate' | 'not-conch' };
+
+export interface DesktopInviteBridge {
+  inviteCheck(link: string): Promise<InviteCheck>;
+  // The person's click. The code never comes back from this.
+  inviteAccept(handle: string, target: InviteTarget): Promise<InviteAccept>;
+  inviteCancel(handle: string): Promise<boolean>;
+  // The invite code staged for the profile now in force, once: a second call,
+  // or one from any other profile, gets null.
+  inviteTake(): Promise<string | null>;
+  // A conch:// link that reached the app (issue #1592, D5-06), checked by main
+  // exactly as a pasted one is: the same answer as inviteCheck, with a handle
+  // and no code, and null when nothing arrived or it was taken already. It
+  // contacts nothing; the person's click is still inviteAccept.
+  inviteArrived(): Promise<InviteCheck | null>;
+  // Main's word that a link arrived, so the page asks inviteArrived. The
+  // listener is told nothing else: no link, no origin, no code.
+  onInviteArrived(listener: () => void): Unsubscribe;
+}
+
+// The app's own settings (issue #1587; linux-desktop.md §9). App-wide, kept by
+// main in <userData>/settings.json, not per account. In-process TypeScript, not
+// a wire shape.
+export interface DesktopSettingsView {
+  // Closing the window keeps the app running, in the tray. Takes effect only
+  // while trayWorking.
+  readonly closeToTray: boolean;
+  // Open the app when the person logs in.
+  readonly launchAtLogin: boolean;
+  // Whether a working tray exists right now.
+  readonly trayWorking: boolean;
+  // Whether a tray host is on the session bus right now: the choice can be
+  // made only then.
+  readonly trayDetected: boolean;
+  // Whether the person has confirmed, this run, that they can see the icon.
+  readonly trayConfirmed: boolean;
+  // Whether this build may set launch at login (an installed build may).
+  readonly launchAvailable: boolean;
+  // Why not, when it is not: an unpackaged run, or an app that sits where
+  // others could change it.
+  readonly launchUnavailable?: 'unpackaged' | 'unsafe-location';
+}
+
+export interface SettingsChange {
+  readonly closeToTray?: boolean;
+  readonly launchAtLogin?: boolean;
+  // The answer to "Can you see the Conch icon in your panel?" (Q-D5-2).
+  readonly trayConfirmed?: boolean;
+}
+
+export type SettingsResult =
+  | { readonly ok: true; readonly view: DesktopSettingsView }
+  | { readonly ok: false; readonly reason: 'unpackaged' | 'unsafe-location' | 'foreign-file' | 'no-tray' | 'failed' };
+
+// What works on this desktop (issue #1593, D5-07 of #773; UX-23). One row per
+// integration, read from the state main already holds: nothing is probed to
+// answer it (no device is opened, no capture started, no portal dialog
+// shown). A row says only which integration, its state and a fixed code for
+// why; the sentence is the page's. No path, device name, address, token or
+// user name is in any row.
+export type IntegrationId = 'tray' | 'notifications' | 'lock' | 'capture' | 'storage' | 'launch' | 'shareSound' | 'voiceHelper' | 'talkKey';
+
+// working; unavailable (here, with a reason); unknown (main cannot tell yet).
+export type IntegrationState = 'working' | 'unavailable' | 'unknown';
+
+export type IntegrationWhy =
+  | 'no-tray-host'
+  | 'tray-off'
+  | 'tray-unconfirmed'
+  | 'notifications-unsupported'
+  | 'lock-unobserved'
+  | 'lock-checking'
+  | 'no-portal'
+  | 'not-wayland'
+  | 'portal-unasked'
+  | 'secret-store-missing'
+  | 'insecure-backend'
+  | 'unknown-backend'
+  | 'unsafe-root'
+  | 'secret-store-silent'
+  | 'unpackaged'
+  | 'unsafe-location'
+  | 'share-silent'
+  | 'not-installed'
+  | 'untrusted'
+  | 'helper-not-started'
+  | 'helper-starting'
+  | 'helper-failed'
+  | 'voice-unavailable'
+  | 'key-not-configured'
+  | 'key-unsure'
+  | 'key-unavailable';
+
+export interface IntegrationRow {
+  readonly id: IntegrationId;
+  readonly state: IntegrationState;
+  // Absent for working.
+  readonly why?: IntegrationWhy;
+}
+
+export interface IntegrationsView {
+  readonly rows: readonly IntegrationRow[];
+}
+
+export interface DesktopSettingsBridge {
+  settings(): Promise<DesktopSettingsView>;
+  // The person's act: main refuses it without a recent gesture in the window.
+  settingsSet(change: SettingsChange): Promise<SettingsResult>;
+  // What works on this desktop (issue #1593). Read-only; needs no gesture.
+  integrations(): Promise<IntegrationsView>;
+}
+
+
+// The screen companion (issue #1579, D4-02 of #772; linux-desktop.md §4,
+// §6.4): the renderer's own LiveKit participant, p<id>.screen, which publishes
+// the screen and watches others' shares (B2). Main asks conchd for its grant
+// only on the person's act, only for the voice destination while the helper
+// is connected there, and hands over the grant alone: never the bearer, the
+// room's name or the person's own voice grant. The token lives 15 s, and
+// every grant needs a new act (Q-D4-2 on #1578: a share is not resumed after a
+// room renewal). In-process TypeScript, as the voice family (decision Q1 on
+// #770), not a wire shape.
+export interface CompanionGrant {
+  // The LiveKit server to connect to, as conchd names it.
+  readonly livekitUrl: string;
+  // The companion's join token: the one credential the renderer holds.
+  readonly token: string;
+  // The companion's identity, p<id>.screen.
+  readonly identity: string;
+  // When the token stops being accepted for a join (RFC 3339).
+  readonly expiresAt: string;
+}
+
+// Why no grant was given. not-in-voice: voice is not connected in that
+// channel (browsing another channel never gets one). not-yet: conchd has not
+// yet seen the person's voice in the room; try again shortly. elsewhere: a
+// companion of this person is already live, here or on another device.
+// ended: a Leave, a lock or a switch overtook the request. failed: anything
+// else, said no more precisely.
+export type CompanionGrantError = 'not-in-voice' | 'not-yet' | 'elsewhere' | 'ended' | 'failed';
+
+// Why this desktop cannot share a screen, said beside a grant (#1580, D4-03;
+// Q-D4-4 on #1578): the grant still serves watching others' shares. Share
+// goes only through the screen-cast portal's own picker. no-portal: the
+// portal does not answer for ScreenCast; not-wayland: the session is not
+// Wayland, where Chromium would not use the portal. The page says "share
+// unavailable: no screen-cast portal" for either, and main opens no capture.
+export type CompanionShareUnavailable = 'no-portal' | 'not-wayland';
+
+export type CompanionGrantResult =
+  | { readonly ok: true; readonly grant: CompanionGrant; readonly shareUnavailable?: CompanionShareUnavailable }
+  | { readonly ok: false; readonly error: CompanionGrantError };
+
+// Why main ended the live companion on its own. leave: the person left
+// voice; helper: the helper stopped, failed or lost its connection; renewal:
+// conchd renewed the voice room (the page says "The voice room was renewed.
+// Share again to carry on"); sign-out, switch, quit: the identity is ending;
+// crash and reload: the document that held the grant has gone; lock and
+// suspend: the session was locked or is going to sleep (#1588, D5-02).
+export type CompanionEndReason = 'leave' | 'helper' | 'renewal' | 'sign-out' | 'switch' | 'quit' | 'crash' | 'reload' | 'lock' | 'suspend';
+
+// What main tells the page on the companion channel: always before it asks
+// conchd to remove the companion, so the page disconnects its room first.
+export interface CompanionEvent {
+  readonly type: 'end';
+  readonly reason: CompanionEndReason;
+}
+
+export interface DesktopCompanionBridge {
+  // The companion's grant for the voice destination. Only right after the
+  // person's own click or key.
+  // The result's shareUnavailable ('no-portal' | 'not-wayland') is how the
+  // page learns, before it picks, that this desktop has no screen-cast portal.
+  companionGrant(request: { readonly channel: ChannelName }): Promise<CompanionGrantResult>;
+  // Arms the share allowance (issue #1580, D4-03): the page calls this
+  // synchronously at the very start of the Share click, before anything else
+  // (before the join, the grant, any await). It takes the person's click or
+  // key and, for 10 s, lets exactly one companionGrant and one screen
+  // capture follow without a click of their own; a second of either
+  // needs a new shareArm. Nothing but this arms a capture: a raw click or the
+  // Enter that sends a message does not. Watching needs no arming: its
+  // companionGrant uses its own fresh click as before. Answers true when
+  // armed, false when main had nothing to arm for. Rejects (refused) when
+  // there was no click, in a subframe or after a reload. A new call replaces
+  // the allowance; it is cleared by any companion end, a reload, a crash,
+  // sign-out, a switch and quit.
+  shareArm(): Promise<boolean>;
+  // Removes the live companion, if there is one, and says whether there was.
+  companionEnd(): Promise<boolean>;
+  onCompanion(listener: (event: CompanionEvent) => void): Unsubscribe;
+}
+
+// Whether the installed files were replaced under this running app (issue
+// #1600, D6-06). version is the installed release, shown to the person, and is
+// null until updated. Main decides; the page only shows and asks to restart.
+export interface InstalledView {
+  readonly updated: boolean;
+  readonly version: string | null;
+}
+
+// The update family: the state, the person's click on Restart (main quits
+// through its normal teardown and relaunches; nothing restarts without it),
+// and the event main sends when the state changes.
+export interface DesktopUpdateBridge {
+  updateState(): Promise<InstalledView>;
+  updateRestart(): Promise<void>;
+  onUpdateState(listener: (view: InstalledView) => void): Unsubscribe;
+}
+
+// The object the preload exposes: the bridge, the voice family, the settings,
+// the companion, the invite family and the update family. Still no press, release, gate or transmit function in any.
+export type ExposedDesktopBridge = ConchDesktopBridge & DesktopVoiceBridge & DesktopSettingsBridge & DesktopCompanionBridge & DesktopInviteBridge & DesktopUpdateBridge;

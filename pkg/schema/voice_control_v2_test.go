@@ -48,6 +48,9 @@ var voiceControlV2Golden = []struct {
 	{file: "event-state-open-key-device-lost.json", event: true, new: func() any { return new(VoiceControlStateV2) }},
 	{file: "event-state-open-max-transmit.json", event: true, new: func() any { return new(VoiceControlStateV2) }},
 	{file: "event-state-stopped.json", event: true, new: func() any { return new(VoiceControlStateV2) }},
+	// Issue #1457: the helper failed because a moderator removed the person
+	// from voice. A reason v2 has and v1 does not.
+	{file: "event-state-failed-voice-removed.json", event: true, new: func() any { return new(VoiceControlStateV2) }},
 }
 
 func readVoiceControlV2Fixture(t *testing.T, name string) []byte {
@@ -994,6 +997,20 @@ func TestVoiceControlStateV2Validate(t *testing.T) {
 		{name: "open mode while failed", mutate: func(s *VoiceControlStateV2) {
 			s.Phase, s.Reason, s.Capture, s.Playback, s.TalkMode, s.Blocked = VoiceControlPhaseFailed, VoiceControlReasonDuplicateIdentity, VoiceControlCaptureOff, VoiceControlPlaybackOff, VoiceControlTalkModeOpen, []VoiceControlBlock{VoiceControlBlockNotConnected}
 		}},
+		// voice_removed (issue #1457) is a reason to fail, as duplicate_identity
+		// is: with failed, and with stopping on the way there, and nowhere else.
+		{name: "voice_removed while failed", mutate: func(s *VoiceControlStateV2) {
+			s.Phase, s.Reason, s.Capture, s.Playback, s.Blocked = VoiceControlPhaseFailed, VoiceControlReasonVoiceRemoved, VoiceControlCaptureOff, VoiceControlPlaybackOff, []VoiceControlBlock{VoiceControlBlockNotConnected}
+		}},
+		{name: "voice_removed while stopping", mutate: func(s *VoiceControlStateV2) {
+			s.Phase, s.Reason, s.Blocked = VoiceControlPhaseStopping, VoiceControlReasonVoiceRemoved, []VoiceControlBlock{VoiceControlBlockNotConnected}
+		}},
+		{name: "voice_removed while stopped", mutate: func(s *VoiceControlStateV2) {
+			s.Phase, s.Reason, s.Capture, s.Playback, s.Blocked = VoiceControlPhaseStopped, VoiceControlReasonVoiceRemoved, VoiceControlCaptureOff, VoiceControlPlaybackOff, []VoiceControlBlock{VoiceControlBlockNotConnected}
+		}, wantErr: "stopped needs one of left, owner_lost, signal"},
+		{name: "voice_removed while reconnecting", mutate: func(s *VoiceControlStateV2) {
+			s.Phase, s.Reason, s.Blocked = VoiceControlPhaseReconnecting, VoiceControlReasonVoiceRemoved, []VoiceControlBlock{VoiceControlBlockNotConnected}
+		}, wantErr: "is not a reason to reconnect"},
 		{name: "no talk_mode", mutate: func(s *VoiceControlStateV2) { s.TalkMode = "" }, wantErr: "talk_mode"},
 		{name: "no playback", mutate: func(s *VoiceControlStateV2) { s.Playback = "" }, wantErr: "playback"},
 		{name: "a v1 schema", mutate: func(s *VoiceControlStateV2) { s.Schema = VoiceControlSchemaV1 }, wantErr: "schema must be"},
@@ -1156,6 +1173,54 @@ func TestVoiceControlV2Doc(t *testing.T) {
 	} {
 		if !strings.Contains(doc, want) {
 			t.Errorf("the design note does not name %s", want)
+		}
+	}
+}
+
+// TestVoiceControlVoiceRemovedIsV2Only pins issue #1457's version rule: the
+// reason is read and written in conch.voice_control.v2 and refused in v1,
+// whose reasons are the ones it was published with.
+func TestVoiceControlVoiceRemovedIsV2Only(t *testing.T) {
+	if !VoiceControlReasonVoiceRemoved.Valid() {
+		t.Fatal("voice_removed is not a recognized reason")
+	}
+	v2 := readVoiceControlV2Fixture(t, "event-state-failed-voice-removed.json")
+	var compact bytes.Buffer
+	if err := json.Compact(&compact, v2); err != nil {
+		t.Fatal(err)
+	}
+	ev, err := ParseVoiceControlEventV2(compact.Bytes())
+	if err != nil {
+		t.Fatalf("the v2 reader refuses it: %v", err)
+	}
+	if ev.State == nil || ev.State.Phase != VoiceControlPhaseFailed || ev.State.Reason != VoiceControlReasonVoiceRemoved {
+		t.Fatalf("read as %+v, want failed with voice_removed", ev.State)
+	}
+
+	for _, phase := range []VoiceControlPhase{VoiceControlPhaseFailed, VoiceControlPhaseStopping} {
+		v1 := VoiceControlStateV1{
+			Schema: VoiceControlSchemaV1, Kind: VoiceControlEventState, Seq: 5,
+			Phase: phase, Reason: VoiceControlReasonVoiceRemoved, Capture: VoiceControlCaptureOff,
+			Blocked: []VoiceControlBlock{VoiceControlBlockNotConnected}, PTT: VoiceControlPTTReady,
+		}
+		if err := v1.Validate(); err == nil || !strings.Contains(err.Error(), "is not a reason of "+VoiceControlSchemaV1) {
+			t.Errorf("v1 %s with voice_removed: Validate() = %v, want it refused as not a v1 reason", phase, err)
+		}
+		// The same state with a reason v1 has is accepted, so the refusal is the reason's.
+		v1.Reason = VoiceControlReasonInternalError
+		if err := v1.Validate(); err != nil {
+			t.Errorf("v1 %s with internal_error: Validate() = %v, want nil", phase, err)
+		}
+		line, err := json.Marshal(VoiceControlStateV1{
+			Schema: VoiceControlSchemaV1, Kind: VoiceControlEventState, Seq: 5,
+			Phase: phase, Reason: VoiceControlReasonVoiceRemoved, Capture: VoiceControlCaptureOff,
+			Blocked: []VoiceControlBlock{VoiceControlBlockNotConnected}, PTT: VoiceControlPTTReady,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := ParseVoiceControlEvent(line); err == nil {
+			t.Errorf("the v1 reader accepts a %s state with voice_removed", phase)
 		}
 	}
 }

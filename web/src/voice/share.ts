@@ -37,18 +37,50 @@
 // taken down when it completes; sdk.ts), and is published on the next. One wait (resumeLimit) covers the whole of it,
 // however many times the room is renewed before the share is back.
 import type { ShareClaimResult } from '../api';
-import type { VoiceShareEnded, VoiceShareEndReason } from '../schema/voice';
+import type { VoiceShareEnded, VoiceShareEndReason, VoiceShareResolution } from '../schema/voice';
 import type { Clock } from '../state/feed';
 
 // The sharer's choice of capture and top layer. It is a local preference,
-// never part of presence or another wire document.
-export type ShareResolution = '720p' | '1080p' | 'source';
+// never part of presence or another wire document. 'auto' is local only
+// (issue #1659): the wire vocabulary (VoiceShareResolution) is closed, so what
+// a claim declares and what viewers see is always a SettledQuality.
+export type SettledResolution = VoiceShareResolution;
+export type ShareResolution = SettledResolution | 'auto';
 export type ShareFrameRate = 15 | 30 | 60;
 export interface ShareQuality {
   readonly resolution: ShareResolution;
   readonly frameRate: ShareFrameRate;
 }
+// A quality with a concrete resolution: the only kind sent to conchd.
+export interface SettledQuality {
+  readonly resolution: SettledResolution;
+  readonly frameRate: ShareFrameRate;
+}
 export const defaultShareQuality: ShareQuality = { resolution: '1080p', frameRate: 30 };
+
+// Auto's rule (Q10 on #1614): a capture whose longest side is 1920 px or less
+// is shared as it is (Source); a larger one at 1080p. Always 30 fps. A capture
+// whose size is not known is 1080p, which caps it.
+export const autoSourceLongest = 1920;
+export const autoFrameRate: ShareFrameRate = 30;
+export function resolveAuto(capture: { readonly width?: number; readonly height?: number }): SettledResolution {
+  const { width, height } = capture;
+  if (width === undefined || height === undefined || !Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) return '1080p';
+  return Math.max(width, height) <= autoSourceLongest ? 'source' : '1080p';
+}
+
+// provisionalQuality is what a quality declares before a capture is known:
+// itself, or for Auto the 1080p default, 30 fps. Auto's resolved value is
+// declared once the capture is taken (ScreenShare).
+export function provisionalQuality(quality: ShareQuality): SettledQuality {
+  return quality.resolution === 'auto' ? { resolution: '1080p', frameRate: autoFrameRate } : { resolution: quality.resolution, frameRate: quality.frameRate };
+}
+
+// settleQuality is a quality against a capture's size: Auto resolved by its
+// rule, anything else as it is.
+export function settleQuality(quality: ShareQuality, capture: { readonly width?: number; readonly height?: number }): SettledQuality {
+  return quality.resolution === 'auto' ? { resolution: resolveAuto(capture), frameRate: autoFrameRate } : { resolution: quality.resolution, frameRate: quality.frameRate };
+}
 
 // One stats sample of the received share, or of its sent top layer.
 export interface ShareSample {
@@ -61,7 +93,28 @@ export interface ShareSample {
   // taken between two different ones.
   readonly stream?: string;
   readonly publication?: string;
+  // Why the encoder holds the picture back (outbound-rtp
+  // qualityLimitationReason), where the engine says. Absent where it does not.
+  readonly limitation?: ShareLimitation;
+  // Share of packets lost, 0 to 1: the receiver's report on the sent top layer
+  // (remote-inbound-rtp), per interval. Absent where
+  // the engine does not say.
+  readonly lost?: number;
+  // A viewer's packet counters, from which a readout takes loss over the
+  // interval between two samples.
+  readonly packetsReceived?: number;
+  readonly packetsLost?: number;
+  // The sender's top layer is not being sent (every viewer takes a lower
+  // layer): a smaller picture then is not a shortfall.
+  readonly paused?: boolean;
+  // A layer is off whose place among the layers could not be told; it excuses
+  // a picture smaller than the capture fitted to the ask, and nothing else.
+  readonly layerOff?: boolean;
+  // The capture's own size and rate (getSettings) of the sender's screen, when
+  // the browser reports them. A sent sample only.
+  readonly captured?: { readonly width?: number; readonly height?: number; readonly fps?: number };
 }
+export type ShareLimitation = 'none' | 'cpu' | 'bandwidth' | 'other';
 export type ShareDirection = 'received' | 'sent';
 
 // What the browser's picker gave: the picture always, sound when the browser
@@ -95,6 +148,10 @@ export interface ShareRoom {
   // Opens the browser's picker at the chosen caps and keeps what was chosen,
   // unpublished. Rejects when nothing was chosen.
   readonly pickScreen: (quality?: ShareQuality) => Promise<Captured>;
+  // The quality as it applies to what is captured now: Auto resolved from the
+  // capture (and kept as long as the capture is), anything else as it is.
+  // Without a capture, what a quality declares before one (provisionalQuality).
+  readonly settled: (quality: ShareQuality) => SettledQuality;
   // Changes the capture and its existing sender encodings without republishing.
   readonly setShareQuality: (quality: ShareQuality) => Promise<void>;
   // The latest stats of the received share or the sent top layer.
@@ -130,13 +187,29 @@ export type ShareEnd =
   | 'unavailable'
   | 'failed';
 
+// What more is known of a share that did not start, for a client that says it
+// in its own words (the desktop's, issue #1582). It never changes `ended`, so
+// the browser's words are the same with or without it.
+//   denied: the pick failed in a way the person should hear of. In the
+//     browser that is NotAllowedError, the picker closed or refused, which it
+//     says (as it always has); on the desktop companion it is any failure but
+//     the person cancelling the picker (AbortError, silent): main refusing
+//     (no allowance, no grant), the PipeWire stream failing, a capture that
+//     could not be constrained. A
+//     desktop with no screen-cast portal is said before the pick, from the
+//     grant (VoiceState.companionShareUnavailable), never from a failed pick.
+export type ShareCause = 'denied';
+
 export type ShareState =
-  | { readonly kind: 'idle'; readonly ended: ShareEnd | null }
+  | { readonly kind: 'idle'; readonly ended: ShareEnd | null; readonly cause?: ShareCause }
   | { readonly kind: 'claiming' }
   | { readonly kind: 'picking' }
   | { readonly kind: 'publishing' }
   // resumed: the share carried on into a renewed room (issue #516).
-  | { readonly kind: 'sharing'; readonly audio: boolean; readonly resumed?: true }
+  // settled: for an Auto choice only, the concrete quality it came to and is
+  // declared as, which the sharer's readout compares the picture with (issue
+  // #1659). A concrete choice is its own and leaves it out.
+  | { readonly kind: 'sharing'; readonly audio: boolean; readonly resumed?: true; readonly settled?: SettledQuality }
   // The room was renewed: the capture is kept until this page is in the new
   // room and the share is claimed again.
   | { readonly kind: 'resuming' }
@@ -200,7 +273,7 @@ export const qualityRetryLimit = 10;
 export const qualityLaterNote = 'Quality changes are limited to a few at a time: the others see the new quality on your stream in a moment.';
 
 export interface ShareApi {
-  readonly claim: (channel: string, quality?: ShareQuality) => Promise<ShareClaimResult>;
+  readonly claim: (channel: string, quality?: SettledQuality) => Promise<ShareClaimResult>;
   // Releases the claim whose started_at is startedAt, and no other.
   readonly release: (channel: string, startedAt: string) => Promise<unknown>;
 }
@@ -215,6 +288,20 @@ export function refusalEnd(r: Refusal): ShareEnd {
   return 'failed';
 }
 
+// pickCause is the more that a failed pick says, from the shapes getDisplayMedia
+// gives. In the browser, NotAllowedError is the picker closed or refused (or
+// main refusing, on the desktop), which is said; AbortError and anything else
+// say nothing more. On the desktop companion (companion), only AbortError, the
+// picker cancelled, is silent: NotAllowedError (main refusing: no allowance,
+// no grant), NotReadableError (the PipeWire stream failed), LiveKit's
+// DeviceUnsupportedError, a failure to constrain the capture, or a rejection
+// that is no Error at all, are all a screen that could not be captured.
+export function pickCause(err: unknown, companion = false): ShareCause | undefined {
+  if (companion) return err instanceof Error && err.name === 'AbortError' ? undefined : 'denied';
+  if (!(err instanceof Error)) return undefined;
+  return err.name === 'NotAllowedError' ? 'denied' : undefined;
+}
+
 // Every reason the server gives the sharer is an end the page can say: its
 // own stop and leaving as the page says them, the rest in their own words. A
 // reason added to the schema without a word for it fails to compile here.
@@ -225,6 +312,10 @@ const toldEnd: (reason: VoiceShareEndReason) => ShareEnd = (reason) => reason;
 function sameInstant(a: string, b: string): boolean {
   const x = Date.parse(a);
   return !Number.isNaN(x) && x === Date.parse(b);
+}
+
+function causeOf(cause: ShareCause | undefined): { readonly cause?: ShareCause } {
+  return cause === undefined ? {} : { cause };
 }
 
 export class ScreenShare {
@@ -238,6 +329,9 @@ export class ScreenShare {
   private channel: string | null = null;
   private room: ShareRoom | null = null;
   private quality: ShareQuality = defaultShareQuality;
+  // What an Auto choice came to for the capture (room.settled), once there is
+  // one: declared on every claim after the first, including a resume's.
+  private resolved: SettledQuality | null = null;
   // Whether presence has shown this person sharing since the last claim: a
   // presence without them after that is the server ending the share.
   private seen = false;
@@ -270,6 +364,11 @@ export class ScreenShare {
   // air until it is shared again or ends. The resume timer runs for the whole
   // of it, so a room renewed again meanwhile does not start the wait over.
   private interrupted = false;
+  // Whether this is the desktop's screen companion (issue #1581). Its share is
+  // never resumed after a renewal without a new consent (Q-D4-2 on #1578): it
+  // ends, with the renewal's words, whichever of presence or the room said so
+  // first.
+  private companion = false;
 
   constructor(api: ShareApi, onChange: (state: ShareState) => void, clock: Clock) {
     this.api = api;
@@ -297,13 +396,14 @@ export class ScreenShare {
     this.channel = channel;
     this.room = room;
     this.quality = quality;
+    this.resolved = null;
     this.seen = false;
     this.renewal = false;
     this.set({ kind: 'claiming' });
     // The channel as it is called now: renamed (issue #728) while the picker
     // was open, the next call names the new name.
     const at = () => this.channel ?? channel;
-    const first = await this.api.claim(channel, this.quality);
+    const first = await this.api.claim(channel, this.declared());
     if (first.ok) this.granted(first.value.started_at);
     if (mine !== this.attempt) {
       // Stopped while the claim was on its way: a claim granted since is ours
@@ -318,13 +418,13 @@ export class ScreenShare {
     this.set({ kind: 'picking' });
     let captured: Captured;
     try {
-      captured = await room.pickScreen(quality);
-    } catch {
+      captured = await room.pickScreen(this.quality);
+    } catch (err: unknown) {
       if (mine !== this.attempt) return;
       // Closed without choosing, or refused by the browser: the claim goes.
       this.set({ kind: 'stopping' });
       await this.releaseHeld(at());
-      if (mine === this.attempt) this.set({ kind: 'idle', ended: 'cancelled' });
+      if (mine === this.attempt) this.set({ kind: 'idle', ended: 'cancelled', ...causeOf(pickCause(err, this.companion)) });
       return;
     }
     if (mine !== this.attempt) {
@@ -334,8 +434,11 @@ export class ScreenShare {
     this.set({ kind: 'publishing' });
     this.seen = false;
     // The choice as it is now: one changed while the picker was open is the
-    // one conchd is told.
-    const again = await this.api.claim(at(), this.quality);
+    // one conchd is told. An Auto choice is declared as what the capture
+    // resolved it to: the first claim could only say the provisional value.
+    this.settle(room);
+    const sent = this.declared();
+    const again = await this.api.claim(at(), sent);
     if (again.ok) this.granted(again.value.started_at);
     if (mine !== this.attempt) {
       await room.stopScreen();
@@ -365,7 +468,25 @@ export class ScreenShare {
       return;
     }
     if (mine !== this.attempt) return;
-    this.set({ kind: 'sharing', audio: captured.audio });
+    this.set({ kind: 'sharing', ...this.sharingFields(room, captured.audio) });
+    this.catchUp(sent);
+  }
+
+  // sharingFields is the live state's fields: the audio, and what an Auto
+  // choice has settled to. The capture is settled again first: a choice made
+  // while the claim or the publish was under way is the one it came to.
+  private sharingFields(room: ShareRoom | null, audio: boolean, resumed = false): { audio: boolean; resumed?: true; settled?: SettledQuality } {
+    this.settle(room);
+    return { audio, ...(resumed ? { resumed: true as const } : {}), ...(this.quality.resolution === 'auto' ? { settled: this.declared() } : {}) };
+  }
+
+  // catchUp sends the declaration again when a choice made since the claim
+  // that came before the live state (a change while the share was claiming,
+  // publishing or resuming, when no holder-repeat could be sent) leaves conchd
+  // with another quality than the one now declared.
+  private catchUp(sent: SettledQuality): void {
+    const now = this.declared();
+    if (now.resolution !== sent.resolution || now.frameRate !== sent.frameRate) void this.queueQuality(true);
   }
 
   // changeQuality keeps the declared choice for later claims and, while live,
@@ -392,8 +513,32 @@ export class ScreenShare {
   // what the last send came to.
   changeQuality(quality: ShareQuality): Promise<QualityAnswer> {
     this.quality = quality;
+    this.resolved = null;
+    // With a capture in hand (publishing, live) Auto is settled at once; before
+    // one, or while resuming, it is settled when the share is live (catchUp).
+    if (this.state.kind === 'sharing' || this.state.kind === 'publishing') this.settle(this.room);
+    if (this.state.kind === 'sharing') this.noteSettled(this.state);
     this.endQualityRetry();
     return this.queueQuality(true);
+  }
+
+  // noteSettled keeps the live state's settled quality (an Auto choice's
+  // concrete value) in step with the choice.
+  private noteSettled(state: Extract<ShareState, { kind: 'sharing' }>): void {
+    const settled = this.quality.resolution === 'auto' ? this.declared() : undefined;
+    if (state.settled?.resolution === settled?.resolution && state.settled?.frameRate === settled?.frameRate) return;
+    const live: Extract<ShareState, { kind: 'sharing' }> = { kind: 'sharing', audio: state.audio, ...(state.resumed === true ? { resumed: true as const } : {}) };
+    this.set(settled === undefined ? live : { ...live, settled });
+  }
+
+  // declared is the quality every claim carries: always a concrete value.
+  private declared(): SettledQuality {
+    return this.quality.resolution === 'auto' ? (this.resolved ?? provisionalQuality(this.quality)) : provisionalQuality(this.quality);
+  }
+
+  // settle takes what the room's capture makes of an Auto choice.
+  private settle(room: ShareRoom | null): void {
+    if (this.quality.resolution === 'auto' && room !== null) this.resolved = room.settled(this.quality);
   }
 
   // queueQuality marks the current choice as to be sent and starts the one
@@ -433,7 +578,7 @@ export class ScreenShare {
     const channel = this.channel;
     if (this.state.kind !== 'sharing' || channel === null) return 'sent';
     const mine = this.attempt;
-    const answer = await this.api.claim(channel, this.quality);
+    const answer = await this.api.claim(channel, this.declared());
     if (mine !== this.attempt) {
       // Stopped or ended meanwhile; a newer share's claim would have its own
       // start, and is left alone.
@@ -441,6 +586,7 @@ export class ScreenShare {
       return 'sent';
     }
     if (answer.ok) {
+      if (await this.newShare(answer.value.started_at)) return 'sent';
       this.granted(answer.value.started_at);
       return 'sent';
     }
@@ -469,8 +615,10 @@ export class ScreenShare {
 
   // stop ends the share from this side: the Stop sharing button, the
   // browser's own stop control, leaving voice, or a connection that was lost
-  // and replaced. conchd is asked to end it while it is still held.
-  async stop(cause: 'self' | 'browser' | 'left' | 'lost'): Promise<void> {
+  // and replaced. conchd is asked to end it while it is still held. 'rotated'
+  // is the desktop companion's room renewed: its share is not resumed (Q-D4-2
+  // on #1578), so it ends with the renewal's words.
+  async stop(cause: 'self' | 'browser' | 'left' | 'lost' | 'rotated'): Promise<void> {
     if (this.state.kind === 'idle' || this.state.kind === 'stopping') return;
     const mine = ++this.attempt;
     const { channel, room } = this;
@@ -562,7 +710,8 @@ export class ScreenShare {
   // presence has said was renewed, is kept for the next connection; any other
   // ends, as before.
   lost(roomDeleted: boolean): Promise<void> {
-    if (this.onAir() && (roomDeleted || this.renewed())) this.suspend();
+    if (this.companion && this.renewed()) return this.stop('rotated');
+    if (!this.companion && this.onAir() && (roomDeleted || this.renewed())) this.suspend();
     // A resume under way on the connection going stops where it is; the next
     // connection resumes again.
     else if (this.state.kind === 'resuming') this.attempt++;
@@ -617,6 +766,12 @@ export class ScreenShare {
     return this.state.kind === 'sharing' || this.state.kind === 'publishing';
   }
 
+  // setCompanion makes this the desktop's screen companion's share (set when
+  // the companion is joined), which is never suspended to be resumed.
+  setCompanion(on: boolean): void {
+    this.companion = on;
+  }
+
   // renewed reports whether the server ended the share published or being
   // published because its room was renewed.
   private renewed(): boolean {
@@ -637,6 +792,13 @@ export class ScreenShare {
   // what is left of the first wait, and one whose wait ran out while it was
   // being published ends here.
   private suspend(): void {
+    // A companion's share is not resumable: the helper's connection may
+    // already be in the renewed room, so a claim made again without a click
+    // could succeed and publish onto the retired one.
+    if (this.companion) {
+      void this.serverEnded();
+      return;
+    }
     this.attempt++;
     this.set({ kind: 'resuming' });
     if (!this.interrupted) {
@@ -663,7 +825,8 @@ export class ScreenShare {
     const mine = ++this.attempt;
     this.reclaiming = true;
     this.seen = false;
-    const answer = await this.api.claim(channel, this.quality);
+    const sent = this.declared();
+    const answer = await this.api.claim(channel, sent);
     this.reclaiming = false;
     // Renamed meanwhile (issue #728): what follows names the new name.
     const at = () => this.channel ?? channel;
@@ -728,7 +891,8 @@ export class ScreenShare {
     // The share carried on: what ended the last room's is not about this one.
     this.endInterruption();
     this.told = null;
-    this.set({ kind: 'sharing', audio: kept.audio, resumed: true });
+    this.set({ kind: 'sharing', ...this.sharingFields(room, kept.audio, true) });
+    this.catchUp(sent);
   }
 
   // giveUp ends a share that was being resumed: the capture stops, and a
@@ -769,13 +933,26 @@ export class ScreenShare {
   async reconnected(): Promise<void> {
     if (this.state.kind !== 'sharing' || this.channel === null) return;
     const mine = this.attempt;
-    const answer = await this.api.claim(this.channel, this.quality);
+    const answer = await this.api.claim(this.channel, this.declared());
     if (mine !== this.attempt) return;
     if (answer.ok) {
+      if (await this.newShare(answer.value.started_at)) return;
       this.granted(answer.value.started_at);
       return;
     }
     if (refusalEnd(answer) === 'full') await this.serverEnded();
+  }
+
+  // newShare handles a claim granted again to a companion with a started_at
+  // other than the share's: the server ended that share and this is a new one,
+  // made without a click. A companion's share is never adopted so (Q-D4-2 on
+  // #1578): the new claim is taken only to be released, and the share ends
+  // with the renewal's words. It says whether it did.
+  private async newShare(startedAt: string): Promise<boolean> {
+    if (!this.companion || this.claimed === null || sameInstant(this.claimed, startedAt)) return false;
+    this.granted(startedAt);
+    await this.stop('rotated');
+    return true;
   }
 
   private async serverEnded(): Promise<void> {
@@ -884,7 +1061,10 @@ export function watchNote(who: string | null, audio: boolean): string {
 
 // endedNote says why the last share ended, or why one did not start. A full
 // refusal names the room's six-stream cap, not another sharer (#1509).
-export function endedNote(end: ShareEnd): string {
+// access_lost covers losing voice and losing only the right to share; the
+// page tells them apart by its own state: inVoice is true while it is still in
+// the call, so only sharing was withdrawn (#1672).
+export function endedNote(end: ShareEnd, inVoice = false): string {
   switch (end) {
     case 'self':
       return 'You stopped sharing.';
@@ -899,7 +1079,7 @@ export function endedNote(end: ShareEnd): string {
     case 'operator':
       return 'An operator stopped your share.';
     case 'access_lost':
-      return 'Your share ended: you no longer have voice in this channel.';
+      return inVoice ? "Your share ended: you're no longer allowed to share in this channel." : 'Your share ended: you no longer have voice in this channel.';
     case 'rotated':
       return 'Your share ended because the voice room was renewed. Share again once you are back in voice.';
     case 'idle':

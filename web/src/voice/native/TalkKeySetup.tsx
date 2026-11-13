@@ -12,6 +12,7 @@
 // and copied with services.copyText; nothing here executes it.
 import { useCallback, useEffect, useId, useRef, useState } from 'react';
 import { keyboardKeys, keyForCode, keyForMouseButton, mouseKeys, type EvdevKey } from '../../platform/desktop/evdev';
+import { updatePendingWords } from './words';
 import type { VoiceKeyDevice, VoiceKeyDevicesResult, VoiceOneShotError, VoiceTalkBindingResult } from '../../platform/desktop/bridge';
 import { platform } from '../../platform';
 import type { NativeVoice } from '../../platform/types';
@@ -29,6 +30,7 @@ const oneShotWords: Readonly<Record<VoiceOneShotError, string>> = {
   failed: 'The voice helper failed.',
   'bad-output': 'The voice helper gave an answer that could not be read.',
   cancelled: 'It was cancelled.',
+  'update-pending': updatePendingWords,
 };
 
 export const takeEffect = 'It takes effect when you next join.';

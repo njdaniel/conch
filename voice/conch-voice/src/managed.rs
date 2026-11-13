@@ -24,6 +24,16 @@
 //! and that same-user unlink-and-rebind is out of scope by design
 //! (`docs/design/linux-desktop.md` §5.2). Without the option nothing here changes and
 //! `CONCH_VOICE_ATTACH` is not read.
+//! On Windows `--events-pipe` takes the name of a named pipe the owner created
+//! (`\\.\pipe\conch-voice-<id>`, `docs/design/windows-desktop.md` §3.3, #938) and is the
+//! only events channel there is: file descriptor 3 does not exist. The session on it is
+//! byte for byte the one above, attach line and hello first. There is no parent watch
+//! ([`parent_id`] is 0), so owner loss is the pipe's end or error, a byte received on it,
+//! the end of standard input, or an events write that fails; each is [`Input::OwnerLost`].
+//! The attach line is a spawn-to-pipe binding, **not authentication**, there as here: a
+//! process of the same user that creates another instance of the pipe's name
+//! (`CreateNamedPipeW`) can be the one the helper opens, and that is out of scope by design
+//! and named (§3.4 to §3.5).
 //! Owns: the event writer and its numbering; the thread that reads standard input; the
 //! watch on the parent; and the watchdog that ends the process when it does not end by
 //! itself in time after its owner has gone or asked it to leave. The voice session itself
@@ -35,7 +45,7 @@
 //! - **Nothing is captured before a valid start, and nothing before the identity check**
 //!   (§8.1). The hello is written before anything is read, opened or asked. After the start
 //!   the configuration is read, the login taken from where the start says, `conchd` asked
-//!   who that login is, and only for the account the owner named are PipeWire, the
+//!   who that login is, and only for the account the owner named are the audio system, the
 //!   speakers and the key device opened, and the session loop run. The loop opens the
 //!   microphone when a session first allows publishing, as for `join`.
 //! - **Standard input is the owner, not a key.** Its end is the owner gone, never "a
@@ -70,28 +80,30 @@
 //! what was found; a change made by a command or a mute or deafen key while starting is
 //! shown at once, as every other change is.
 
-use std::fs::{File, OpenOptions};
+use std::fs::File;
+#[cfg(unix)]
+use std::fs::OpenOptions;
 use std::future::Future;
 use std::io::{Read, Write};
+#[cfg(unix)]
 use std::os::unix::fs::FileTypeExt;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 pub use conch_voice_api::VoiceControlCapture as Capture;
 use conch_voice_api::{
-    Error as ApiError, ServerAddress, VOICE_CONTROL_EVENT_FD, VOICE_CONTROL_EVENT_QUEUE_LINES,
-    VOICE_CONTROL_HELLO_TIMEOUT_MS, VOICE_CONTROL_LEAVE_EXIT_MS, VOICE_CONTROL_MAX_IN_FLIGHT,
-    VOICE_CONTROL_MAX_LINE_BYTES, VOICE_CONTROL_MAX_RETRY_IN_MS, VOICE_CONTROL_OWNER_LOSS_EXIT_MS,
-    VOICE_CONTROL_OWNER_POLL_MS, VOICE_CONTROL_SCHEMA_V1, VOICE_CONTROL_SCHEMA_V2,
-    VOICE_CONTROL_START_TIMEOUT_MS, VoiceControlAckV1, VoiceControlAckV2, VoiceControlBlock,
-    VoiceControlCommand, VoiceControlCommandV2, VoiceControlCredential, VoiceControlErrorCode,
-    VoiceControlEventKind, VoiceControlHelloV1, VoiceControlPhase, VoiceControlPlayback,
-    VoiceControlProtocolErrorV1, VoiceControlProtocolErrorV2, VoiceControlPtt,
-    VoiceControlPttProblem, VoiceControlReason, VoiceControlStartV1, VoiceControlStartV2,
-    VoiceControlStateV1, VoiceControlStateV2, VoiceControlTalkMode, default_config_dir,
-    parse_command, parse_command_v2, resolve_token, to_line,
+    Error as ApiError, ServerAddress, VOICE_CONTROL_EVENT_QUEUE_LINES, VOICE_CONTROL_LEAVE_EXIT_MS,
+    VOICE_CONTROL_MAX_IN_FLIGHT, VOICE_CONTROL_MAX_LINE_BYTES, VOICE_CONTROL_MAX_RETRY_IN_MS,
+    VOICE_CONTROL_OWNER_LOSS_EXIT_MS, VOICE_CONTROL_OWNER_POLL_MS, VOICE_CONTROL_SCHEMA_V1,
+    VOICE_CONTROL_SCHEMA_V2, VOICE_CONTROL_START_TIMEOUT_MS, VoiceControlAckV1, VoiceControlAckV2,
+    VoiceControlBlock, VoiceControlCommand, VoiceControlCommandV2, VoiceControlCredential,
+    VoiceControlErrorCode, VoiceControlEventKind, VoiceControlHelloV1, VoiceControlPhase,
+    VoiceControlPlayback, VoiceControlProtocolErrorV1, VoiceControlProtocolErrorV2,
+    VoiceControlPtt, VoiceControlPttProblem, VoiceControlReason, VoiceControlStartV1,
+    VoiceControlStartV2, VoiceControlStateV1, VoiceControlStateV2, VoiceControlTalkMode,
+    default_config_dir, parse_command, parse_command_v2, resolve_token, to_line,
 };
 use conch_voice_control::{
     Config, Key, KeyAction, KeyBindings, KeyEvent, LineCommand, Ptt, PttInput, PttStatus,
@@ -99,7 +111,7 @@ use conch_voice_control::{
 };
 use tokio::sync::{mpsc, oneshot};
 
-use crate::audio::PipeWire;
+use crate::audio::{AudioSystem, CONNECTION_LOST};
 use crate::cli::{self, Environment, MicChoice, SinkChoice};
 use crate::error::Error;
 use crate::input::{self, Bounded, Ended, LastLine};
@@ -118,7 +130,9 @@ use crate::session::{
 pub const REPORT_LIMIT: Duration = Duration::from_secs(1);
 /// How long leaving the room is given after `leave` or a signal (§8.2).
 pub const ROOM_LIMIT: Duration = Duration::from_secs(2);
-/// How long the report and the room are each given once the owner is gone (§8.3).
+/// How long the report and the room are each given once the owner is gone (§8.3). It does
+/// not apply to the room step after an explicit `leave`: the end of input that follows
+/// `leave` is the owner finishing, and that step keeps [`ROOM_LIMIT`] (#1685).
 pub const OWNER_LOST_STEP: Duration = Duration::from_secs(1);
 /// How long the final state is given to be written (§5, rule 11).
 pub const FINAL_STATE_LIMIT: Duration = Duration::from_millis(250);
@@ -401,11 +415,16 @@ impl Snapshot {
     /// The snapshot as an owner of `version` is shown it: a v1 state says nothing of the
     /// speakers or of the talk mode, so a change of either is no change to a v1 owner, and
     /// writes no state.
+    ///
+    /// Nor has v1 the reason `voice_removed` (issue #1457): a v1 owner is told
+    /// `internal_error`, as it was before v2 had the word, so a v1 session stays byte for
+    /// byte what it was.
     fn seen_in(&self, version: Version) -> Snapshot {
         let mut seen = self.clone();
         if version == Version::V1 {
             seen.playback = VoiceControlPlayback::Off;
             seen.talk_mode = VoiceControlTalkMode::PushToTalk;
+            seen.reason = seen.reason.map(VoiceControlReason::for_v1);
         }
         seen
     }
@@ -692,7 +711,9 @@ impl Owner {
     /// Tells the owner the final state, and gives it [`FINAL_STATE_LIMIT`] to be written.
     /// Nothing is written after it: this is the end of the owner.
     pub async fn finish(mut self, last: &Snapshot) {
-        self.events.state(last, Keep::Last);
+        // In the owner's version, as every state is: a v1 owner's last reason is one v1 has.
+        let last = last.seen_in(self.events.version);
+        self.events.state(&last, Keep::Last);
         if !self.events.flush(FINAL_STATE_LIMIT).await {
             log::warn!("managed: the final state was not read before leaving");
         }
@@ -722,7 +743,7 @@ impl Handoff {
     /// with the machine as it was handed over.
     pub async fn fail(self, error: &Error) {
         let reason = match error {
-            Error::PipeWire { .. } | Error::Audio(_) => VoiceControlReason::AudioUnavailable,
+            Error::AudioSystem { .. } | Error::Audio(_) => VoiceControlReason::AudioUnavailable,
             _ => VoiceControlReason::InternalError,
         };
         let key = match self.key_state {
@@ -815,7 +836,7 @@ impl Watchdog {
         std::thread::spawn(move || {
             // The ordinary exit is tried first, and is itself given EXIT_GRACE.
             std::thread::sleep(within.saturating_sub(EXIT_GRACE));
-            log::warn!("managed: the helper did not exit in time; ending it");
+            log::warn!("{}", fire_line(room_leave_under_way()));
             lines::exit(code.load(Ordering::SeqCst));
         });
     }
@@ -832,6 +853,28 @@ impl Watchdog {
         }
         *armed = Some(at);
         true
+    }
+}
+
+/// Whether a leave's room step is running: the watchdog, if it fires then, says the room
+/// leave was abandoned (§8.3).
+static ROOM_LEAVE: AtomicBool = AtomicBool::new(false);
+
+/// Records that a leave's room step has begun or ended.
+pub(crate) fn set_room_leave_under_way(under_way: bool) {
+    ROOM_LEAVE.store(under_way, Ordering::SeqCst);
+}
+
+fn room_leave_under_way() -> bool {
+    ROOM_LEAVE.load(Ordering::SeqCst)
+}
+
+/// What the watchdog logs as it ends the process. It names neither the room nor a token.
+fn fire_line(room_leave_under_way: bool) -> &'static str {
+    if room_leave_under_way {
+        "managed: the room leave was abandoned: the helper did not exit in time; ending it"
+    } else {
+        "managed: the helper did not exit in time; ending it"
     }
 }
 
@@ -1127,6 +1170,24 @@ pub fn spawn_reader(
     });
 }
 
+/// The process id of this process's parent, to be recorded before anything else and given to
+/// [`watch_parent`].
+///
+/// Windows has no such call in `std` and its process ids are reused, so there the answer is
+/// always 0, and [`watch_parent`] is not run there: a Windows owner is noticed by its events
+/// pipe ending or failing to be written (`channel`, #938), not by this poll.
+#[must_use]
+pub fn parent_id() -> u32 {
+    #[cfg(unix)]
+    {
+        std::os::unix::process::parent_id()
+    }
+    #[cfg(not(unix))]
+    {
+        0
+    }
+}
+
 /// Looks every [`VOICE_CONTROL_OWNER_POLL_MS`] at whether the process that started this one
 /// is still its parent, and says the owner is lost when it is not: a dead owner's children
 /// are given to another parent, which catches a death the control pipe misses (§8.3).
@@ -1137,7 +1198,7 @@ pub fn watch_parent(parent: u32, inputs: mpsc::UnboundedSender<Input>, watchdog:
             if inputs.is_closed() {
                 return;
             }
-            if std::os::unix::process::parent_id() != parent {
+            if parent_id() != parent {
                 watchdog.arm(Duration::from_millis(VOICE_CONTROL_OWNER_LOSS_EXIT_MS));
                 let _ = inputs.send(Input::OwnerLost);
                 return;
@@ -1146,7 +1207,7 @@ pub fn watch_parent(parent: u32, inputs: mpsc::UnboundedSender<Input>, watchdog:
     });
 }
 
-/// Turns SIGTERM and SIGINT into [`Input::Signal`], which a managed session takes as
+/// Turns SIGTERM and SIGINT (on Windows, Ctrl-C only) into [`Input::Signal`], which a managed session takes as
 /// `leave` (§8.4), and arms the watchdog for a leave's bound. Must be called inside the
 /// runtime.
 ///
@@ -1154,15 +1215,9 @@ pub fn watch_parent(parent: u32, inputs: mpsc::UnboundedSender<Input>, watchdog:
 ///
 /// What the operating system said, if a handler could not be installed.
 pub fn signals(inputs: mpsc::UnboundedSender<Input>, watchdog: Watchdog) -> std::io::Result<()> {
-    use tokio::signal::unix::{SignalKind, signal};
-    let mut interrupt = signal(SignalKind::interrupt())?;
-    let mut terminate = signal(SignalKind::terminate())?;
+    let mut interrupts = input::Interrupts::install()?;
     tokio::spawn(async move {
-        loop {
-            tokio::select! {
-                _ = interrupt.recv() => {}
-                _ = terminate.recv() => {}
-            }
+        while interrupts.recv().await.is_some() {
             watchdog.arm(Duration::from_millis(VOICE_CONTROL_LEAVE_EXIT_MS));
             if inputs.send(Input::Signal).is_err() {
                 return;
@@ -1181,7 +1236,9 @@ pub fn signals(inputs: mpsc::UnboundedSender<Input>, watchdog: Watchdog) -> std:
 /// # Errors
 ///
 /// [`Error::EventPipe`] if file descriptor 3 is not open, is not a pipe, or has no reader.
+#[cfg(unix)]
 pub fn open_event_pipe() -> Result<File, Error> {
+    use conch_voice_api::{VOICE_CONTROL_EVENT_FD, VOICE_CONTROL_HELLO_TIMEOUT_MS};
     let path = PathBuf::from(format!("/proc/self/fd/{VOICE_CONTROL_EVENT_FD}"));
     let named = std::fs::metadata(&path).map_err(|_| Error::EventPipe("is not open"))?;
     if !named.file_type().is_fifo() {
@@ -1202,6 +1259,28 @@ pub fn open_event_pipe() -> Result<File, Error> {
         return Err(Error::EventPipe("is not a pipe"));
     }
     Ok(file)
+}
+
+/// What [`open_event_pipe`] answers where there is no inherited file descriptor 3 to open
+/// by name: [`Error::Unsupported`]. A Windows owner attaches to a named pipe instead, with
+/// `--events-pipe` (#938).
+///
+/// # Errors
+///
+/// Always [`Error::Unsupported`].
+#[cfg(not(unix))]
+pub fn open_event_pipe() -> Result<File, Error> {
+    Err(unsupported_event_pipe())
+}
+
+/// The error behind the non-Unix [`open_event_pipe`], compiled on Linux too so that a test
+/// holds its words.
+#[cfg(any(not(unix), test))]
+fn unsupported_event_pipe() -> Error {
+    Error::Unsupported {
+        what: "the inherited event pipe (file descriptor 3)",
+        path: None,
+    }
 }
 
 /// How the microphone and the speakers are opened, once the identity has been checked.
@@ -1229,7 +1308,8 @@ pub enum Devices {
 pub enum KeySource {
     /// The key device `voice.toml` names, read as an event device.
     Configured,
-    /// `--test-key-device`: a named pipe of records, with the keys `voice.toml` binds.
+    /// `--test-key-device`: a named pipe of records, with the keys `voice.toml` binds. On Windows
+    /// the records are `keys_windows`'s four-byte fake Raw Input transitions (#1791).
     NamedPipe(PathBuf),
 }
 
@@ -1250,6 +1330,8 @@ pub struct Host<T: Transport> {
     pub share_audio_owner: ShareAudioOwner,
     /// `--transmit-ceiling-secs`: a bound on each push-to-talk press, if the owner passed one.
     pub transmit_ceiling_secs: Option<u32>,
+    /// `--no-mute-key`: `keys.mute` is not read (#1631).
+    pub no_mute_key: bool,
     /// The session loop's waits.
     pub timings: Timings,
     /// The key device's waits.
@@ -1279,6 +1361,7 @@ impl<T: Transport> Host<T> {
             keys,
             share_audio_owner,
             transmit_ceiling_secs: None,
+            no_mute_key: false,
             timings: Timings::default(),
             key_timings: KeyTimings::default(),
             start_timeout: Duration::from_millis(VOICE_CONTROL_START_TIMEOUT_MS),
@@ -1375,6 +1458,7 @@ pub async fn run<T: Transport>(
         keys,
         share_audio_owner,
         transmit_ceiling_secs,
+        no_mute_key,
         timings,
         key_timings,
         ..
@@ -1382,6 +1466,7 @@ pub async fn run<T: Transport>(
     let setup = Setup {
         share_audio_owner,
         transmit_ceiling_secs,
+        no_mute_key,
         environment: &environment,
         scrubber: &scrubber,
         keys: &keys,
@@ -1492,6 +1577,7 @@ struct Setup<'a> {
     key_timings: KeyTimings,
     share_audio_owner: ShareAudioOwner,
     transmit_ceiling_secs: Option<u32>,
+    no_mute_key: bool,
     inputs: &'a mpsc::UnboundedSender<Input>,
 }
 
@@ -1740,6 +1826,7 @@ impl Boot {
             environment.conch_config_dir.as_deref(),
             environment.xdg_config_home.as_deref(),
             environment.home.as_deref(),
+            environment.appdata.as_deref(),
         )
         .map_err(|error| Halt::Fail(Reason::BadConfig, Error::Api(error)))?;
         let config = match &config_dir {
@@ -1747,7 +1834,7 @@ impl Boot {
                 .map_err(|error| Halt::Fail(Reason::BadConfig, error))?,
             None => Config::default(),
         };
-        let keys = key_source(&config, setup.keys)
+        let keys = key_source(&config, setup.keys, setup.no_mute_key)
             .map_err(|error| Halt::Fail(Reason::BadConfig, error))?;
         self.key = match &keys {
             Some(_) => KeyView::Unknown,
@@ -1807,17 +1894,14 @@ impl Boot {
             ));
         }
 
-        // PipeWire and the speakers. The microphone is the session loop's to open.
+        // The audio system and the speakers. The microphone is the session loop's to open.
         let audio_unavailable = |error| Halt::Fail(Reason::AudioUnavailable, error);
         let (open_mic, sink, sink_tones) = match devices {
             Devices::Choices { mic, sink } => {
-                let pipewire = if mic == MicChoice::PipeWire || sink == SinkChoice::PipeWire {
-                    let connecting = tokio::task::spawn_blocking(PipeWire::connect);
+                let audio = if mic == MicChoice::AudioSystem || sink == SinkChoice::AudioSystem {
+                    let connecting = tokio::task::spawn_blocking(AudioSystem::connect);
                     let connected = self.wait(connecting).await?.map_err(|_| {
-                        Halt::Fail(
-                            Reason::InternalError,
-                            Error::Managed("the connection to PipeWire was lost"),
-                        )
+                        Halt::Fail(Reason::InternalError, Error::Managed(CONNECTION_LOST))
                     })?;
                     Some(connected.map_err(audio_unavailable)?)
                 } else {
@@ -1825,10 +1909,10 @@ impl Boot {
                 };
                 let sink_tones = match &sink {
                     SinkChoice::Count(tones) => tones.clone(),
-                    SinkChoice::PipeWire => Vec::new(),
+                    SinkChoice::AudioSystem => Vec::new(),
                 };
-                let open_mic = crate::mic_opener(mic, pipewire.clone());
-                let open_sink = crate::sink_opener(sink, pipewire);
+                let open_mic = crate::mic_opener(mic, audio.clone());
+                let open_sink = crate::sink_opener(sink, audio);
                 (open_mic, open_sink, sink_tones)
             }
             Devices::Given {
@@ -1967,10 +2051,24 @@ fn whoami_reason(error: &ApiError) -> VoiceControlReason {
 /// The key device to read, the keys to look for on it and the rule it is read under, if
 /// any: the one `voice.toml` names, as for `join`, or the test option's named pipe with the
 /// keys `voice.toml` binds.
+///
+/// With `no_mute_key` (`--no-mute-key`, #1631) `keys.mute` is not one of them: the owner
+/// alone mutes. The desktop app locks a session by muting it through `set_mute`, and a mute
+/// key read here would toggle the machine without that path, so it could unmute a locked
+/// session. The desktop's own settings cannot bind it (`saveDevice` and `saveTalkBinding`
+/// exclude it); this covers a hand-edited `voice.toml`. A file that binds only mute then
+/// opens no key device. Without the flag, as for `conch`'s TUI and for `join`, `keys.mute`
+/// is read as it always was.
 fn key_source(
     config: &Config,
     keys: &KeySource,
+    no_mute_key: bool,
 ) -> Result<Option<(PathBuf, KeyBindings, DeviceRule)>, Error> {
+    let mut config = config.clone();
+    if no_mute_key {
+        config.keys.mute = None;
+    }
+    let config = &config;
     match keys {
         KeySource::Configured => Ok(cli::key_device(config, false)?
             .map(|(device, bindings)| (device, bindings, DeviceRule::EventDevice))),
@@ -1983,7 +2081,169 @@ fn key_source(
 }
 
 #[cfg(test)]
+mod unsupported_tests {
+    use super::*;
+
+    #[test]
+    fn the_non_unix_event_pipe_is_a_typed_unsupported_error_that_names_fd_3() {
+        let error = unsupported_event_pipe();
+        assert!(matches!(error, Error::Unsupported { .. }));
+        assert!(error.to_string().contains("file descriptor 3"), "{error}");
+        assert_eq!(error.exit_code(), 2);
+    }
+
+    /// Where there is no parent id to read, the poll must never see it change.
+    #[cfg(not(unix))]
+    #[test]
+    fn without_unix_the_parent_id_is_zero_and_never_changes() {
+        assert_eq!(parent_id(), 0);
+        assert_eq!(parent_id(), parent_id());
+    }
+}
+
+#[cfg(test)]
 mod tests {
+    use super::*;
+
+    #[test]
+    fn the_watchdog_says_when_it_ends_a_room_leave_still_running() {
+        assert!(fire_line(true).contains("the room leave was abandoned"));
+        assert!(!fire_line(false).contains("room leave"));
+    }
+
+    /// One evdev key record: the event type EV_KEY (1), a code and a value (1 is a press).
+    #[cfg(not(windows))]
+    fn record(code: u16, value: i32) -> [u8; conch_voice_control::INPUT_EVENT_LEN] {
+        let mut bytes = [0u8; conch_voice_control::INPUT_EVENT_LEN];
+        bytes[16..18].copy_from_slice(&1u16.to_le_bytes());
+        bytes[18..20].copy_from_slice(&code.to_le_bytes());
+        bytes[20..24].copy_from_slice(&value.to_le_bytes());
+        bytes
+    }
+
+    /// The seam of #1791 (and Linux's pipe before it) is behind the hidden option alone: a
+    /// run without `--test-key-device` is [`KeySource::Configured`], and that is read as an
+    /// event device and nothing else, whatever `voice.toml` says.
+    #[cfg(not(windows))]
+    #[test]
+    fn a_normal_run_reads_its_keys_under_the_event_device_rule_and_never_the_pipe_rule() {
+        let toml = "[keys]\ndevice = \"/dev/input/event-fake\"\ntalk = \"KEY_F13\"\n";
+        let config = Config::parse(toml, "voice.toml").unwrap();
+        for no_mute_key in [false, true] {
+            let (_, _, rule) = key_source(&config, &KeySource::Configured, no_mute_key)
+                .unwrap()
+                .unwrap();
+            assert_eq!(rule, DeviceRule::EventDevice);
+        }
+        let (_, _, rule) = key_source(&config, &KeySource::NamedPipe(PathBuf::from("p")), false)
+            .unwrap()
+            .unwrap();
+        assert_eq!(rule, DeviceRule::NamedPipeForTests);
+    }
+
+    /// #1631 on Windows: the same rule, for a source with no device, bound in the grammar of
+    /// the design's section 4.5. (The test below is the Linux one, with a device and evdev
+    /// records.)
+    #[cfg(windows)]
+    #[test]
+    fn on_windows_the_mute_key_is_not_read_with_no_mute_key_and_is_read_without() {
+        let bind = |text: &str| conch_voice_control::parse_windows_binding(text).unwrap();
+        let mut config = Config::default();
+        config.keys.talk = Some(bind("sc:0x29"));
+        config.keys.mute = Some(bind("mouse:4"));
+        config.keys.deafen = Some(bind("sc:0xE0,0x1D"));
+
+        let (_, bindings, _) = key_source(&config, &KeySource::Configured, false)
+            .unwrap()
+            .unwrap();
+        assert_eq!(bindings.mute(), config.keys.mute);
+
+        let (_, bindings, _) = key_source(&config, &KeySource::Configured, true)
+            .unwrap()
+            .unwrap();
+        assert_eq!(bindings.mute(), None, "mute is bound");
+        assert_eq!(bindings.talk(), config.keys.talk);
+        assert_eq!(bindings.deafen(), config.keys.deafen);
+
+        let mut only_mute = Config::default();
+        only_mute.keys.mute = config.keys.mute;
+        assert!(
+            key_source(&only_mute, &KeySource::Configured, false)
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            key_source(&only_mute, &KeySource::Configured, true)
+                .unwrap()
+                .is_none(),
+            "only mute, and the owner mutes alone"
+        );
+    }
+
+    /// #1631: with `--no-mute-key`, `keys.mute` never reaches the key device, so no key
+    /// press can unmute a session the owner locked. Talk and deafen are kept; with only
+    /// mute bound there is nothing to read. Without the flag (the TUI) the mute key is read.
+    /// No keyboard: the decoder is given hand-built records.
+    #[cfg(not(windows))]
+    #[test]
+    fn the_mute_key_is_not_read_with_no_mute_key_and_is_read_without() {
+        let toml = "[keys]\ndevice = \"/dev/input/event-fake\"\ntalk = \"KEY_F13\"\nmute = \"KEY_F14\"\ndeafen = \"KEY_F15\"\n";
+        let config = Config::parse(toml, "voice.toml").unwrap();
+        let (mute, talk, deafen) = (
+            config.keys.mute.unwrap().code(),
+            config.keys.talk.unwrap().code(),
+            config.keys.deafen.unwrap().code(),
+        );
+        for source in [
+            KeySource::Configured,
+            KeySource::NamedPipe(PathBuf::from("/fake/keys.pipe")),
+        ] {
+            // Without the flag: as before.
+            let (_, bindings, _) = key_source(&config, &source, false).unwrap().unwrap();
+            assert_eq!(bindings.mute(), config.keys.mute, "{source:?}");
+            let mut decoder = conch_voice_control::KeyDecoder::new(bindings);
+            assert_eq!(
+                decoder.feed(&record(mute, 1)).len(),
+                1,
+                "{source:?}: mute pressed"
+            );
+
+            // With it: no mute event, talk and deafen as before.
+            let (_, bindings, _) = key_source(&config, &source, true).unwrap().unwrap();
+            assert_eq!(bindings.mute(), None, "{source:?}: mute is bound");
+            assert_eq!(bindings.talk(), config.keys.talk, "{source:?}");
+            assert_eq!(bindings.deafen(), config.keys.deafen, "{source:?}");
+            let mut decoder = conch_voice_control::KeyDecoder::new(bindings);
+            assert_eq!(
+                decoder.feed(&record(mute, 1)),
+                [],
+                "{source:?}: mute pressed"
+            );
+            assert_eq!(decoder.feed(&record(talk, 1)).len(), 1, "{source:?}: talk");
+            assert_eq!(
+                decoder.feed(&record(deafen, 1)).len(),
+                1,
+                "{source:?}: deafen"
+            );
+        }
+
+        let only_mute = "[keys]\ndevice = \"/dev/input/event-fake\"\nmute = \"KEY_F14\"\n";
+        let config = Config::parse(only_mute, "voice.toml").unwrap();
+        for source in [
+            KeySource::Configured,
+            KeySource::NamedPipe(PathBuf::from("/fake/keys.pipe")),
+        ] {
+            assert!(
+                key_source(&config, &source, false).unwrap().is_some(),
+                "{source:?}"
+            );
+            assert!(
+                key_source(&config, &source, true).unwrap().is_none(),
+                "{source:?}"
+            );
+        }
+    }
+
     /// #1372: the push-to-talk limit is the shorter of the file's value and the ceiling;
     /// without a ceiling it is the file's value.
     #[test]
@@ -2004,8 +2264,6 @@ mod tests {
             );
         }
     }
-
-    use super::*;
 
     fn line(text: &str) -> Bounded<'_> {
         Bounded::Line(text.as_bytes())

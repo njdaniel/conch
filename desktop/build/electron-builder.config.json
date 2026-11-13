@@ -3,7 +3,7 @@
   "productName": "Conch",
   "copyright": "AGPL-3.0-only",
   "directories": { "output": "dist" },
-  "files": ["package.json", "out/main/**", "out/preload/**", "out/ui/**", "out/ui-manifest.json", "out/compat.json"],
+  "files": ["package.json", "out/main/**", "out/preload/**", "out/ui/**", "out/ui-manifest.json", "out/compat.json", "build/icons/tray/*.png"],
   "asar": true,
   "npmRebuild": false,
   "nodeGypRebuild": false,
@@ -20,7 +20,21 @@
   },
   "linux": {
     "target": [{ "target": "dir", "arch": ["x64"] }],
-    "executableName": "conch",
+    "executableName": "conch-desktop",
     "category": "Network"
+  },
+  "win": {
+    "target": [{ "target": "nsis", "arch": ["x64"] }],
+    "extraResources": [{ "from": "out/win-resources", "to": ".", "filter": ["conch-voice.exe", "version"] }]
+  },
+  "nsis": {
+    "oneClick": false,
+    "perMachine": false,
+    "allowElevation": false,
+    "packElevateHelper": false,
+    "allowToChangeInstallationDirectory": true,
+    "deleteAppDataOnUninstall": false,
+    "include": "build/installer.nsh",
+    "artifactName": "${productName}-${version}-unsigned-preview-setup.${ext}"
   }
 }

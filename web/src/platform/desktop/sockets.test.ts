@@ -46,6 +46,12 @@ function install(): Subscription[] {
     createAccount: unexpected('createAccount'),
     signOut: unexpected('signOut'),
     replaceCredential: unexpected('replaceCredential'),
+    createMemberLink: unexpected('createMemberLink'),
+    createSignInLink: unexpected('createSignInLink'),
+    totpEnroll: unexpected('totpEnroll'),
+    createPrincipalSignInLink: unexpected('createPrincipalSignInLink'),
+    createPrincipalCredential: unexpected('createPrincipalCredential'),
+    createHook: unexpected('createHook'),
     profiles: unexpected('profiles'),
     profileAdd: unexpected('profileAdd'),
     profileRename: unexpected('profileRename'),
@@ -56,6 +62,10 @@ function install(): Subscription[] {
     uploadFile: unexpected('uploadFile'),
     downloadFile: unexpected('downloadFile'),
     saveFile: unexpected('saveFile'),
+    notify: unexpected('notify'),
+    notifyClose: unexpected('notifyClose'),
+    notificationSupported: () => false,
+    onNotification: () => () => undefined,
   };
   Object.defineProperty(window, 'conchDesktop', { value: bridge, configurable: true, writable: true });
   return subscriptions;

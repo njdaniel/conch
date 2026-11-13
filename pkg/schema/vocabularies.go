@@ -131,8 +131,8 @@ var Vocabularies = map[string][]string{
 		VoiceControlReasonNotSignedIn, VoiceControlReasonIdentityMismatch, VoiceControlReasonBadEnvironment,
 		VoiceControlReasonBadConfig, VoiceControlReasonVoiceRequiresAuth, VoiceControlReasonNotAPerson,
 		VoiceControlReasonVoiceNotAllowed, VoiceControlReasonNotAMember, VoiceControlReasonVoiceNotConfigured,
-		VoiceControlReasonDuplicateIdentity, VoiceControlReasonAudioUnavailable, VoiceControlReasonStartTimeout,
-		VoiceControlReasonProtocolError, VoiceControlReasonInternalError,
+		VoiceControlReasonDuplicateIdentity, VoiceControlReasonVoiceRemoved, VoiceControlReasonAudioUnavailable,
+		VoiceControlReasonStartTimeout, VoiceControlReasonProtocolError, VoiceControlReasonInternalError,
 	),
 	"VoiceControlTalkMode": values(VoiceControlTalkModePushToTalk, VoiceControlTalkModeOpen),
 	"VoiceDevicesConfig": values(
@@ -195,6 +195,7 @@ var Vocabularies = map[string][]string{
 		AdminActionListReports, AdminActionGetReport, AdminActionUpdateReport,
 		AdminActionExportAudit,
 		AdminActionListChannelBans, AdminActionBanChannelMember, AdminActionUnbanChannelMember,
+		AdminActionSetChannelTopic,
 	),
 	"AdminGate": values(AdminGateDirect, AdminGateApproval),
 	"AdminTargetKind": values(
@@ -202,6 +203,18 @@ var Vocabularies = map[string][]string{
 		AdminTargetHook, AdminTargetInvite, AdminTargetReport,
 	),
 	"AdminActionStatus": values(AdminActionRan, AdminActionPendingApproval),
+
+	// Phone push and notification preferences (issue #1712,
+	// docs/design/mobile-notifications.md §9.1).
+	"NotificationKind":   values(NotificationKindMessage, NotificationKindMention, NotificationKindWhisper),
+	"NotificationPolicy": values(NotificationPolicyOff, NotificationPolicyMentions, NotificationPolicyAll),
+	"PushPlatform":       values(PushPlatformIOS, PushPlatformAndroid, PushPlatformWeb),
+	"PushProvider":       values(PushProviderAPNs, PushProviderFCM),
+	"PushRegistrationEndReason": values(
+		PushRegistrationEndSelf, PushRegistrationEndCredentialRevoked, PushRegistrationEndCredentialExpired,
+		PushRegistrationEndProviderRejected, PushRegistrationEndStale,
+	),
+	"PushTransport": values(PushTransportWebPush, PushTransportRelay),
 }
 
 // values lists a vocabulary by its constants, so an entry above cannot hold a

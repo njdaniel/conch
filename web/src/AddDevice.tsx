@@ -15,6 +15,7 @@
 // and to sign out whoever is signed in there first (SignInLink.tsx).
 import { useCallback, useEffect, useId, useRef, useState, type SyntheticEvent } from 'react';
 import * as api from './api';
+import { DESKTOP_UNAVAILABLE, desktopUnavailableLine } from './appLimit';
 import { waitWords } from './Invite';
 import { platform } from './platform';
 import { revealLimits, sharingLine, useTabSharing } from './Reveal';
@@ -28,6 +29,7 @@ type Line = { readonly text: string; readonly refused: boolean };
 // makeLine is the plain words for a link the server would not make.
 function makeLine(result: { readonly failure: api.ApiFailure; readonly code?: string; readonly retryAfter?: number }): string {
   if (result.failure === 'network') return 'Cannot reach the server. No link was made; try again.';
+  if (result.code === DESKTOP_UNAVAILABLE) return `${desktopUnavailableLine} No link was made.`;
   switch (result.code) {
     case 'too_many_device_links':
       return 'You already have as many open device links as you may. Close one below first.';

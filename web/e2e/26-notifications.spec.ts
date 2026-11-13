@@ -37,13 +37,13 @@ const alertItems = (page: Page) => page.getByRole('list', { name: 'Recent notifi
 async function policy(page: Page, value: 'off' | 'mentions' | 'all'): Promise<void> {
   await page.getByRole('button', { name: 'Settings' }).click();
   await page.getByLabel('Message notifications').selectOption(value);
-  await page.getByRole('button', { name: 'Close' }).click();
+  await page.getByRole('button', { name: 'Close', exact: true }).click();
 }
 
 async function enableNative(page: Page): Promise<void> {
   await page.getByRole('button', { name: 'Settings' }).click();
   await page.getByRole('button', { name: 'Enable browser notifications' }).click();
-  await page.getByRole('button', { name: 'Close' }).click();
+  await page.getByRole('button', { name: 'Close', exact: true }).click();
 }
 
 async function toggleMute(page: Page, channel: string): Promise<void> {
@@ -51,7 +51,7 @@ async function toggleMute(page: Page, channel: string): Promise<void> {
   const checkbox = page.getByLabel(`Mute notifications for #${channel}`);
   if (await checkbox.isHidden()) await page.getByText('Channel mutes', { exact: true }).click();
   await checkbox.click();
-  await page.getByRole('button', { name: 'Close' }).click();
+  await page.getByRole('button', { name: 'Close', exact: true }).click();
 }
 
 async function openCenter(page: Page): Promise<void> {

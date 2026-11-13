@@ -40,3 +40,15 @@ tempfile
 # URL in deny.toml. It brings the PipeWire bindings (needing libclang and the PipeWire headers
 # to build), a resampler and a ring buffer. From #184.
 dmn-audio
+# The WASAPI microphone and speakers on Windows, as `dmn-audio` is PipeWire's on Linux: shared,
+# event-driven capture and playback, device enumeration and device-change notifications. MIT,
+# Windows-only (a `cfg(target_os = "windows")` dependency of conch-voice, pinned `=0.26.0`); it
+# brings the `windows` family of Microsoft's bindings, Windows-only too. Nick's sign-off on
+# #756, 2026-11-11 (issue #1774; docs/design/windows-desktop.md section 2).
+wasapi
+# Raw Input on Windows, for background push-to-talk (issue #1781, docs/design/windows-desktop.md
+# section 4.3): winit's device events (`DeviceEvent::Key`, `Button`, `Added`, `Removed`),
+# registered with RIDEV_INPUTSINK | RIDEV_DEVNOTIFY. Apache-2.0, a `cfg(windows)` dependency of
+# conch-voice, pinned `=0.30.13` with `default-features = false`. Nick's sign-off on #756,
+# 2026-11-11.
+winit

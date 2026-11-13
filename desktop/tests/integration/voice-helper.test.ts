@@ -129,8 +129,9 @@ describe.runIf(have)('the supervisor with the real conch-voice', () => {
   // D3-2 (#1373), D-9: the service's start carries the ceiling flag, and the
   // real helper accepts it (it refuses an unknown option), so drift in the
   // flag's name fails here.
-  it('the service joins with --transmit-ceiling-secs 30 and the real helper accepts it', async () => {
+  it('the service joins with --no-mute-key and --transmit-ceiling-secs 30 and the real helper accepts them', async () => {
     const service = new VoiceService({
+      locked: () => false,
       supervisor: sup,
       oneShot: new OneShot({ resources: s.resources, env: { HOME: s.root, XDG_RUNTIME_DIR: s.run }, log: () => undefined }),
       identity: () =>

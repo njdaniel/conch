@@ -10,25 +10,36 @@
 // order is fixed: caller, name, rate, size and shape of the arguments, then
 // the function. Arguments are plain data checked here; the renderer cannot
 // name a channel, a URL, a header or a method.
+//
+// One channel sits outside that registry: the synchronous `conch:notificationSupported`
+// (registerNotificationSupport), which Electron's ipcMain.on answers through
+// event.returnValue. notificationSupported() runs the same caller, rate and
+// shape checks and returns an Envelope too.
 import type { IpcMain } from 'electron';
 
-import type { BridgeReply, BridgeRequest, FeedRequest, SignInOutcome, VoiceDeviceKey } from '../../web/src/platform/desktop/bridge.ts';
+import type { BridgeReply, BridgeRequest, FeedRequest, IntegrationsView, InviteTarget, NotifyRequest, SettingsChange, SignInOutcome, VoiceDeviceKey } from '../../web/src/platform/desktop/bridge.ts';
 import { VOICE_DEVICES_MAX_NAME_BYTES, voiceControlTalkMode, type VoiceControlTalkMode } from '../../web/src/schema/generated.ts';
 import { isPageSaveKey, keyCodeText, saveValueFits } from './voice/oneshot.ts';
 import { validChannel, validDeviceName } from './voice/protocol.ts';
 import { operations } from '../../web/src/platform/operations.ts';
-import { channelOf, INVOKED_FUNCTIONS, type Envelope, type InvokedFunction } from '../shared/bridge-names.ts';
+import { channelOf, INVOKED_FUNCTIONS, NOTIFICATION_SUPPORT, TAG_MAX, type Envelope, type InvokedFunction } from '../shared/bridge-names.ts';
 import { isProfileId } from './profiles/ids.ts';
+import type { Invites } from './invites.ts';
 import { MISMATCH, type ProfilesService } from './profiles/service.ts';
 import { parseFeedRequest, type Feeds } from './api/feeds.ts';
-import { targetOf, isOperationId } from './api/target.ts';
+import { targetOf, isOperationId, paramOk } from './api/target.ts';
 import { previewable } from './api/target.ts';
-import { invocable, type ReplaceStep, type Service, type SignInStep } from './api/service.ts';
+import { invocable, type DisplayStep, type ReplaceStep, type Service, type SignInStep } from './api/service.ts';
 import { isFileId, parseUpload, MAX_UPLOAD_BYTES, type Files } from './files.ts';
 import { LINK_GESTURE_MS, type Gestures } from './gestures.ts';
 import type { DocumentGate } from './document.ts';
+import type { Notifications } from './notifications.ts';
 import { HOST, SCHEME } from './scheme.ts';
+import type { Installed } from './installed.ts';
 import type { VoiceService } from './voice/service.ts';
+import type { SettingsService } from './settings.ts';
+import type { Companion } from './voice/companion.ts';
+import type { ShareAllowance } from './share-allowance.ts';
 
 export interface FrameLike {
   readonly frameToken: string;
@@ -62,16 +73,51 @@ export interface IpcDeps {
   readonly profiles: ProfilesApi;
   // Native voice (issue #1374): main's one owner of the helper.
   readonly voice: VoiceApi;
+  // The installed files replaced under the running app (issue #1600).
+  readonly installed: InstalledApi;
+  // Opening an invite link (issue #1591).
+  readonly invites: InvitesApi;
+  // Desktop notifications (issue #1590): owned by the active activation.
+  readonly notifications: NotificationsApi;
+  // The app's own settings (issue #1587).
+  readonly settings: SettingsApi;
+  // What works on this desktop (issue #1593): read-only. Absent: main answers
+  // no rows at all (NO_INTEGRATIONS), and the page shows no list.
+  readonly integrations?: IntegrationsApi;
+  // The screen companion (issue #1579). Absent: every grant is refused as
+  // failed, and nothing is held to end.
+  readonly companion?: CompanionApi;
+  // The share allowance (share-allowance.ts). Absent: shareArm arms nothing
+  // and a grant needs its own fresh act.
+  readonly share?: Pick<ShareAllowance, 'arm' | 'takeGrant'>;
   readonly now: () => number;
   readonly log: (line: string) => void;
 }
 
 export type ProfilesApi = Pick<
   ProfilesService,
-  'view' | 'add' | 'rename' | 'remove' | 'switchTo' | 'retry' | 'recover' | 'signOut' | 'signedIn' | 'keptCredential' | 'signInPermitted'
+  'view' | 'add' | 'rename' | 'remove' | 'switchTo' | 'retry' | 'recover' | 'signOut' | 'signedIn' | 'keptCredential' | 'signInPermitted' | 'active'
 >;
 
+export type InstalledApi = Pick<Installed, 'view' | 'restart'>;
+export type InvitesApi = Pick<Invites, 'check' | 'accept' | 'cancel' | 'take' | 'arrived'>;
+
 export type VoiceApi = Pick<VoiceService, 'state' | 'join' | 'leave' | 'retry' | 'setMute' | 'setDeafen' | 'setDevices' | 'setTalkMode' | 'devices' | 'saveDevice' | 'keyDevices' | 'saveTalkBinding'>;
+export type NotificationsApi = Pick<Notifications, 'show' | 'close' | 'supported'>;
+
+export type SettingsApi = Pick<SettingsService, 'view' | 'set'>;
+export interface IntegrationsApi {
+  view(): Promise<IntegrationsView>;
+}
+export type CompanionApi = Pick<Companion, 'grant' | 'stop' | 'end'>;
+
+const NO_INTEGRATIONS: IntegrationsApi = { view: () => Promise.resolve({ rows: [] }) };
+
+const NO_COMPANION: CompanionApi = {
+  grant: () => Promise.resolve({ ok: false, error: 'failed' }),
+  stop: () => Promise.resolve(false),
+  end: () => Promise.resolve(false),
+};
 
 // What a sign-in step answers when the server's release is not one the app may
 // sign in to (issue #946): nothing was sent.
@@ -149,9 +195,12 @@ interface Spec {
   // A function of the arguments, for one that is the person's act only in some
   // of its forms (open-mic mode transmits without a press).
   readonly gesture?: true | ((args: readonly unknown[]) => boolean);
+  // True for a function whose act may instead be the share allowance's grant
+  // use (companionGrant: Share armed it, Watch has a fresh act of its own).
+  readonly shareGrant?: true;
 }
 
-// What a function runs against: the service, the feeds, and the document
+// What a function runs against: the services, the activation, and the document
 // generation of the caller (already checked to be the current one).
 interface Handlers {
   readonly service: Service;
@@ -159,7 +208,14 @@ interface Handlers {
   readonly files: IpcDeps['files'];
   readonly profiles: ProfilesApi;
   readonly voice: VoiceApi;
+  readonly installed: InstalledApi;
+  readonly invites: InvitesApi;
+  readonly notifications: NotificationsApi;
+  readonly settings: SettingsApi;
+  readonly integrations: IntegrationsApi;
+  readonly companion: CompanionApi;
   readonly document: number;
+  readonly arm: () => boolean;
 }
 
 // A feed's number, which the preload chose: a positive whole number.
@@ -181,6 +237,51 @@ function signIn(step: SignInStep): Spec {
     },
     run: async ({ service, profiles }, [body]) =>
       profiles.signInPermitted() ? bound(profiles, await service.signIn(step, body as Record<string, unknown>)) : INCOMPATIBLE,
+  };
+}
+
+// display is the spec of a function that makes one of the six operations whose
+// answer holds a secret for someone else (issue #1768) and hands the page the
+// server's reply once. The body is checked against the operation's own request
+// validator; the operation is fixed by the function, never named by the page.
+// Rated as the sign-in steps are, since each makes something that grants
+// access, and the person's act alone (gesture: true): three of them mint a
+// bearer-equivalent for the signed-in account (a sign-in link for another
+// device, a script credential, a sign-in link for any person, one's own
+// included), so a script in the page cannot call them without a click or key in
+// the window just before. Every UI caller follows a click. On a server the app may not sign in to, nothing is sent.
+function display(step: DisplayStep): Spec {
+  return {
+    limit: 30,
+    maxBytes: 16 * 1024,
+    parse: (args) => {
+      const [body] = args;
+      return args.length === 1 && isRecord(body) && operations[step].request?.(body).length === 0 ? [body] : null;
+    },
+    run: ({ service, profiles }, [body]) => (profiles.signInPermitted() ? service.display(step, undefined, body) : INCOMPATIBLE_REPLY),
+    gesture: true,
+  };
+}
+
+// displayFor is display for the two admin operations on another person: the
+// request is exactly { id, body }, the id a principal's number.
+function displayFor(step: DisplayStep): Spec {
+  return {
+    limit: 30,
+    maxBytes: 16 * 1024,
+    parse: (args) => {
+      const [request] = args;
+      if (args.length !== 1 || !isRecord(request) || !hasExactKeys(request, ['id', 'body'])) return null;
+      const { id, body } = request;
+      if (typeof id !== 'number' || !paramOk(id) || !isRecord(body) || operations[step].request?.(body).length !== 0) return null;
+      return [{ id, body }];
+    },
+    run: ({ service, profiles }, [request]) => {
+      if (!profiles.signInPermitted()) return INCOMPATIBLE_REPLY;
+      const { id, body } = request as { id: number; body: unknown };
+      return service.display(step, { id }, body);
+    },
+    gesture: true,
   };
 }
 
@@ -244,6 +345,17 @@ const hasExactKeys = (value: Record<string, unknown>, keys: readonly string[]): 
   return own.length === keys.length && keys.every((key) => own.includes(key));
 };
 
+// A settings change is a non-empty object of known keys with boolean values.
+function parseSettingsChange(args: readonly unknown[]): readonly unknown[] | null {
+  const [change] = args;
+  if (args.length !== 1 || !isRecord(change)) return null;
+  const keys = Object.keys(change);
+  if (keys.length === 0 || !keys.every((key) => key === 'closeToTray' || key === 'launchAtLogin' || key === 'trayConfirmed')) return null;
+  const { closeToTray, launchAtLogin, trayConfirmed } = change;
+  if ([closeToTray, launchAtLogin, trayConfirmed].some((value) => value !== undefined && typeof value !== 'boolean')) return null;
+  return [{ ...(closeToTray === undefined ? {} : { closeToTray }), ...(launchAtLogin === undefined ? {} : { launchAtLogin }), ...(trayConfirmed === undefined ? {} : { trayConfirmed }) }];
+}
+
 const REPLACE_STEPS: readonly ReplaceStep[] = ['changePassword', 'setPassword', 'convertGuest', 'reauth'];
 
 // parseReplace is exactly { operation, body }: an operation of the replacing
@@ -268,6 +380,22 @@ function parseJoin(args: readonly unknown[]): readonly unknown[] | null {
   return [{ channel, muted, deafened }];
 }
 
+// Notifications carry exactly four bounded fields, or exactly a tag to close.
+function parseNotify(args: readonly unknown[]): readonly unknown[] | null {
+  const [request] = args;
+  if (args.length !== 1 || !isRecord(request) || !hasExactKeys(request, ['tag', 'title', 'body', 'channel'])) return null;
+  const { tag, title, body, channel } = request;
+  if (typeof tag !== 'string' || tag.length === 0 || tag.length > TAG_MAX) return null;
+  if (typeof title !== 'string' || title.length > 128 || typeof body !== 'string' || body.length > 200 || !isChannel(channel)) return null;
+  return [{ tag, title, body, channel }];
+}
+
+function parseNotifyClose(args: readonly unknown[]): readonly unknown[] | null {
+  const [request] = args;
+  if (args.length !== 1 || !isRecord(request) || !hasExactKeys(request, ['tag'])) return null;
+  return typeof request['tag'] === 'string' && request['tag'].length > 0 && request['tag'].length <= TAG_MAX ? [request] : null;
+}
+
 // A save is exactly a key `config set` takes from the page and a value that
 // fits it (a device name or `default`, a talk mode): checked again, in the
 // same way, by the one-shot run before anything is passed.
@@ -290,6 +418,15 @@ function parseTalkBinding(args: readonly unknown[]): readonly unknown[] | null {
   return [{ deviceId, code }];
 }
 
+// A companion grant is asked for exactly one channel, checked as a voice
+// destination is; the service then compares it to the destination itself.
+function parseCompanionGrant(args: readonly unknown[]): readonly unknown[] | null {
+  const [request] = args;
+  if (args.length !== 1 || !isRecord(request) || !hasExactKeys(request, ['channel'])) return null;
+  const { channel } = request;
+  return isChannel(channel) ? [{ channel }] : null;
+}
+
 // At least one of input and output; each a printable device name.
 function parseDevices(args: readonly unknown[]): readonly unknown[] | null {
   const [devices] = args;
@@ -299,6 +436,17 @@ function parseDevices(args: readonly unknown[]): readonly unknown[] | null {
   const { input, output } = devices;
   if ((input !== undefined && !isDeviceName(input)) || (output !== undefined && !isDeviceName(output))) return null;
   return [{ ...(input === undefined ? {} : { input }), ...(output === undefined ? {} : { output }) }];
+}
+
+const isInviteHandle = (value: unknown): value is string => typeof value === 'string' && /^invite-[0-9a-f]{32}$/u.test(value);
+
+// A handle and exactly one target: { profile: <profile id> } or { add: true }.
+function parseInviteAccept(args: readonly unknown[]): readonly unknown[] | null {
+  const [handle, target] = args;
+  if (args.length !== 2 || !isInviteHandle(handle) || !isRecord(target)) return null;
+  if (hasExactKeys(target, ['profile']) && isProfileId(target['profile'])) return [handle, { profile: target['profile'] }];
+  if (hasExactKeys(target, ['add']) && target['add'] === true) return [handle, { add: true }];
+  return null;
 }
 
 export const SPECS: Readonly<Record<InvokedFunction, Spec>> = {
@@ -362,6 +510,20 @@ export const SPECS: Readonly<Record<InvokedFunction, Spec>> = {
       return bound(profiles, await service.replaceCredential(operation, body));
     },
   },
+  // The secrets made for someone else (issue #1768): one function each, the
+  // server's reply back once for display and copy, nothing kept in main.
+  createMemberLink: display('createMemberLink'),
+  createSignInLink: display('createSignInLink'),
+  totpEnroll: {
+    limit: 30,
+    maxBytes: 0,
+    parse: none,
+    run: ({ service, profiles }) => (profiles.signInPermitted() ? service.display('totpEnroll', undefined, undefined) : INCOMPATIBLE_REPLY),
+    gesture: true,
+  },
+  createPrincipalSignInLink: displayFor('createPrincipalSignInLink'),
+  createPrincipalCredential: displayFor('createPrincipalCredential'),
+  createHook: display('createHook'),
   // The saved server profiles (issue #945). Ids are 32 hex characters; a
   // label is plain text of at most 64 characters (main trims and checks it).
   profiles: { limit: 120, maxBytes: 0, parse: none, run: ({ profiles }) => profiles.view() },
@@ -429,6 +591,22 @@ export const SPECS: Readonly<Record<InvokedFunction, Spec>> = {
     run: ({ files }, [id]) => files.save(id as number),
     gesture: true,
   },
+  // Notifications are activation-owned and carry no action or activation data.
+  // The byte bounds fit the largest request parseNotify accepts, every
+  // character quoted as JSON escapes it (a tag of TAG_MAX, title 128, body 200,
+  // a channel at its byte bound), so a size check never refuses a valid one.
+  notify: {
+    limit: 30,
+    maxBytes: 4096,
+    parse: parseNotify,
+    run: ({ notifications, profiles, document }, [request]) => notifications.show(profiles.active, document, request as NotifyRequest),
+  },
+  notifyClose: {
+    limit: 600,
+    maxBytes: 2048,
+    parse: parseNotifyClose,
+    run: ({ notifications, profiles, document }, [request]) => notifications.close(profiles.active, document, (request as { tag: string }).tag),
+  },
   // Native voice (issue #1374). Every argument is main's to check; none is a
   // token, a path or a press: the talk key is read by the helper itself, and
   // nothing here starts a transmission. Join, retry and open-mic mode (which
@@ -441,7 +619,19 @@ export const SPECS: Readonly<Record<InvokedFunction, Spec>> = {
     run: ({ voice }, [request]) => voice.join(request as { channel: string; muted: boolean; deafened: boolean }),
     gesture: true,
   },
-  voiceLeave: { limit: 60, maxBytes: 0, parse: none, run: ({ voice }) => voice.leave() },
+  // The person's Leave ends the screen companion too (issue #1579): the page
+  // is told and the DELETE sent before the helper is asked to leave.
+  voiceLeave: {
+    limit: 60,
+    maxBytes: 0,
+    parse: none,
+    run: async ({ voice, companion }) => {
+      const ended = companion.end('leave');
+      const view = await voice.leave();
+      await ended;
+      return view;
+    },
+  },
   voiceRetry: { limit: 20, maxBytes: 0, parse: none, run: ({ voice }) => voice.retry(), gesture: true },
   voiceSetMute: { limit: 120, maxBytes: 16, parse: oneBoolean, run: ({ voice }, [muted]) => voice.setMute(muted as boolean) },
   voiceSetDeafen: { limit: 120, maxBytes: 16, parse: oneBoolean, run: ({ voice }, [deafened]) => voice.setDeafen(deafened as boolean) },
@@ -480,12 +670,82 @@ export const SPECS: Readonly<Record<InvokedFunction, Spec>> = {
     run: ({ voice }, [request]) => voice.saveTalkBinding(request as { deviceId: string; code: number }),
     gesture: true,
   },
+  // The update family (issue #1600). Restart is the person's act alone: it
+  // runs only right after a click or key in the window, and nothing else
+  // restarts the app.
+  updateState: { limit: 120, maxBytes: 0, parse: none, run: ({ installed }) => installed.view() },
+  updateRestart: {
+    limit: 6,
+    maxBytes: 0,
+    parse: none,
+    run: ({ installed }) => {
+      installed.restart();
+    },
+    gesture: true,
+  },
+  // Opening an invite link (issue #1591). A link is untrusted text, capped;
+  // main parses it. Checking contacts nothing. Accepting adds, switches or
+  // stages, so it is the person's act alone. The handle is what main issued,
+  // never the code, and the code leaves only through inviteTake, once.
+  inviteCheck: {
+    limit: 30,
+    maxBytes: 4 * 1024,
+    parse: (args) => (args.length === 1 && typeof args[0] === 'string' && args[0].length <= 4096 ? args : null),
+    run: ({ invites }, [link]) => invites.check(link),
+  },
+  inviteAccept: {
+    limit: 20,
+    maxBytes: 256,
+    parse: parseInviteAccept,
+    run: ({ invites }, [handle, target]) => invites.accept(handle as string, target as InviteTarget),
+    gesture: true,
+  },
+  inviteCancel: {
+    limit: 30,
+    maxBytes: 128,
+    parse: (args) => (args.length === 1 && isInviteHandle(args[0]) ? args : null),
+    run: ({ invites }, [handle]) => invites.cancel(handle as string),
+  },
+  inviteTake: { limit: 60, maxBytes: 0, parse: none, run: ({ invites }) => invites.take() },
+  // A conch:// link main was handed (issue #1592) is answered as a pasted one
+  // is: a handle and the server, never the code. Taking it is not an act that
+  // switches or contacts anything.
+  inviteArrived: { limit: 60, maxBytes: 0, parse: none, run: ({ invites }) => invites.arrived() },
+  // The app's own settings (issue #1587). A change is the person's act alone.
+  settings: { limit: 120, maxBytes: 0, parse: none, run: ({ settings }) => settings.view() },
+  settingsSet: {
+    limit: 30,
+    maxBytes: 128,
+    parse: parseSettingsChange,
+    run: ({ settings }, [change]) => settings.set(change as SettingsChange),
+    gesture: true,
+  },
+  // What works on this desktop (issue #1593): a read of held state.
+  integrations: { limit: 60, maxBytes: 0, parse: none, run: ({ integrations }) => integrations.view() },
   feedUnsubscribe: { limit: 600, maxBytes: 32, parse: feedId, run: ({ feeds, document }, [id]) => feeds.unsubscribe(document, id as number) },
+  // The screen companion (issue #1579, D4-02 of #772). A grant is the
+  // person's act alone, and only ever the companion's: never the bearer or
+  // the person's own voice grant. Stopping needs no act.
+  companionGrant: {
+    limit: 20,
+    maxBytes: 1024,
+    parse: parseCompanionGrant,
+    run: ({ companion }, [request]) => companion.grant(request as { channel: string }),
+    gesture: true,
+    shareGrant: true,
+  },
+  // Arms the share allowance (share-allowance.ts): the person's Share click,
+  // taken here, stands for the grant and the capture that follow it. The page
+  // calls it synchronously at the start of the click, before anything else.
+  // It carries no argument: nothing the page says is trusted.
+  shareArm: { limit: 20, maxBytes: 0, parse: none, run: ({ arm }) => arm(), gesture: true },
+  companionEnd: { limit: 60, maxBytes: 0, parse: none, run: ({ companion }) => companion.stop() },
 };
 
 export class Ipc {
   readonly #deps: IpcDeps;
   readonly #limits = new Map<InvokedFunction, RateLimit>(INVOKED_FUNCTIONS.map((name) => [name, new RateLimit(SPECS[name].limit)]));
+  readonly #supportLimit = new RateLimit(120);
   #refusals = 0;
 
   constructor(deps: IpcDeps) {
@@ -512,10 +772,16 @@ export class Ipc {
     if (this.#limits.get(fn)?.allow(this.#deps.now()) !== true) return this.#refuse('rate');
     if (!plain(args)) return this.#refuse('shape');
     if (JSON.stringify(args).length > spec.maxBytes + 2) return this.#refuse('size');
+    const owned = this.#deps.owned();
     const parsed = spec.parse(args);
     if (parsed === null) return this.#refuse('shape');
     const needsGesture = spec.gesture === true || (typeof spec.gesture === 'function' && spec.gesture(parsed));
-    if (needsGesture && this.#deps.gestures.take(this.#deps.owned(), LINK_GESTURE_MS) === null) return this.#refuse('gesture');
+    // A fresh act first, so a Watch click is never answered from a Share
+    // allowance and keeps it; a grant with none falls back to the allowance's
+    // grant use (consumed), the cold Share path.
+    if (needsGesture && this.#deps.gestures.take(owned, LINK_GESTURE_MS) === null) {
+      if (spec.shareGrant !== true || this.#deps.share?.takeGrant(owned) !== true) return this.#refuse('gesture');
+    }
     try {
       const to: Handlers = {
         service: this.#deps.service,
@@ -523,11 +789,33 @@ export class Ipc {
         files: this.#deps.files,
         profiles: this.#deps.profiles,
         voice: this.#deps.voice,
+        installed: this.#deps.installed,
+        invites: this.#deps.invites,
+        notifications: this.#deps.notifications,
+        settings: this.#deps.settings,
+        integrations: this.#deps.integrations ?? NO_INTEGRATIONS,
+        companion: this.#deps.companion ?? NO_COMPANION,
         document: this.#deps.gate.generation,
+        arm: () => this.#deps.share?.arm(owned) ?? false,
       };
       return { ok: true, value: await spec.run(to, parsed) };
     } catch {
       // A bug in a function is not the renderer's to learn about.
+      return this.#refuse('error');
+    }
+  }
+
+  // The synchronous support check passes the same caller, rate and shape gates.
+  notificationSupported(event: InvokeEvent, args: readonly unknown[]): Envelope {
+    const why = checkCaller(event, this.#deps.owned(), this.#deps.gate);
+    if (why !== null) return this.#refuse(why);
+    if (!this.#supportLimit.allow(this.#deps.now())) return this.#refuse('rate');
+    if (!plain(args)) return this.#refuse('shape');
+    if (JSON.stringify(args).length > 2) return this.#refuse('size');
+    if (args.length !== 0) return this.#refuse('shape');
+    try {
+      return { ok: true, value: this.#deps.notifications.supported() };
+    } catch {
       return this.#refuse('error');
     }
   }
@@ -537,5 +825,12 @@ export class Ipc {
     for (const name of INVOKED_FUNCTIONS) {
       ipcMain.handle(channelOf(name), (event, ...args: unknown[]) => this.invoke(event, name, args));
     }
+  }
+
+  // Registers the one synchronous call, whose answer is still an Envelope.
+  registerNotificationSupport(ipcMain: Pick<IpcMain, 'on'>): void {
+    ipcMain.on(channelOf(NOTIFICATION_SUPPORT), (event, ...args: unknown[]) => {
+      event.returnValue = this.notificationSupported(event, args);
+    });
   }
 }

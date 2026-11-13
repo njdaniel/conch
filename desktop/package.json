@@ -7,17 +7,22 @@
   "author": "Conch contributors",
   "type": "module",
   "main": "out/main/main.cjs",
+  "desktopName": "chat.conch.desktop.desktop",
   "engines": {
     "node": "24.21.0"
   },
   "scripts": {
     "typecheck": "tsc --noEmit && tsc --noEmit -p tests/smoke",
+    "typecheck:e2e": "tsc --noEmit -p tests/e2e",
+    "lint:e2e": "DESKTOP_LINT_E2E_PAGE=1 eslint --max-warnings 0 tests/e2e/page",
     "lint": "eslint --max-warnings 0 .",
     "test": "vitest run",
+    "test:windows": "vitest run --config vitest.windows.config.ts",
     "test:integration": "vitest run --config vitest.integration.config.ts",
     "test:e2e": "vitest run --config vitest.e2e.config.ts",
     "smoke": "playwright test",
-    "bundle": "vite build --config vite.main.config.ts && vite build --config vite.preload.config.ts"
+    "bundle": "vite build --config vite.main.config.ts && vite build --config vite.preload.config.ts",
+    "dist:win": "electron-builder --win nsis --x64 --publish never --config build/electron-builder.config.json"
   },
   "devDependencies": {
     "@playwright/test": "1.61.0",

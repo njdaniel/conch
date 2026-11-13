@@ -1440,6 +1440,17 @@ label {
   min-width: 0;
 }
 
+.channel-heading {
+  min-width: 0;
+}
+
+.channel-heading .channel-topic {
+  margin: 0;
+  overflow-wrap: anywhere;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
 .hash {
   color: var(--muted);
   font-size: 1.3rem;
@@ -3004,6 +3015,77 @@ label {
   gap: var(--s2);
   max-width: 100%;
   margin-left: auto;
+}
+
+/* Share screen with its quality menu beside it (issue #1659): one control to
+   the eye, two buttons to the keyboard. */
+.share-split {
+  display: inline-flex;
+  align-items: stretch;
+}
+
+.share-split > button {
+  border-top-right-radius: 0;
+  border-bottom-right-radius: 0;
+}
+
+.share-chooser {
+  position: relative;
+  display: inline-flex;
+}
+
+.share-chooser-button {
+  border-top-left-radius: 0;
+  border-bottom-left-radius: 0;
+  margin-left: -1px;
+  padding-inline: 0.5rem;
+}
+
+.share-chooser-menu:not([hidden]) {
+  position: absolute;
+  top: 100%;
+  right: 0;
+  z-index: 20;
+  display: grid;
+  gap: var(--s2);
+  width: max-content;
+  max-width: min(22rem, 90vw);
+  margin-top: var(--s1);
+  padding: var(--s2);
+  background: var(--bg);
+  border: 1px solid var(--border-strong);
+  border-radius: 0.5rem;
+}
+
+.voice.strip .share-chooser-menu:not([hidden]) {
+  top: auto;
+  bottom: 100%;
+  margin-top: 0;
+  margin-bottom: var(--s1);
+}
+
+.share-chooser-menu [role='group'] {
+  display: grid;
+  gap: var(--s1);
+}
+
+.share-chooser-menu button[role^='menuitem'] {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 0 var(--s3);
+  text-align: left;
+}
+
+.share-chooser-menu button[aria-checked='true'] {
+  border-color: var(--accent);
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.share-chooser-menu .item-hint {
+  font-size: 0.8125rem;
+  opacity: 0.8;
 }
 
 .voice .talk {
@@ -4748,27 +4830,45 @@ button.link {
   }
 }
 
-/* A short window (200% zoom of a laptop's screen is about 720×450): the page
-   scrolls as a document rather than squeezing each column into the window.
-   The conversation keeps a height of its own, so it still scrolls and loads
-   older messages as before. */
+/* A short window (200% zoom of a laptop's screen is about 720×450, issue
+   #536): the page scrolls as a document rather than squeezing each column into
+   the window. The conversation sets the height of the middle row (the channel
+   list and the members panel scroll inside themselves, so they no longer make
+   the row as tall as their content: that left an empty band under the
+   composer, issue #1813). When the page is taller than the window it scrolls
+   and the composer stays directly above the voice dock; when it is shorter the
+   row fills the window and the log takes what is left, never less than 12rem,
+   so it still scrolls and loads older messages as before. */
 @media (max-height: 560px) {
   .lobby {
     height: auto;
-    min-height: 100vh;
+    min-height: calc(100vh - var(--notice-h, 0px));
+    min-height: calc(100dvh - var(--notice-h, 0px));
+  }
+
+  .lobby:not(.phone) .channels,
+  .lobby:not(.phone) .panel {
+    contain: size;
   }
 
   .share-frame video {
     max-height: 60vh;
   }
 
-  .log-wrap {
+  .lobby:not(.phone) .log-wrap {
+    flex: 1 1 auto;
+    min-height: 12rem;
+  }
+
+  .lobby.phone .log-wrap {
     flex: none;
     height: 70vh;
     min-height: 12rem;
   }
 
-  .dock {
+  /* The dock keeps its half of the window (Voice options open can be taller
+     than the window), scrolling inside itself, except on a phone. */
+  .lobby.phone .dock {
     max-height: none;
   }
 }
@@ -4927,6 +5027,25 @@ button.link {
 
 .desktop-bar button {
   margin-left: auto;
+}
+
+/* Two buttons in the strip: only the first takes the free space. */
+.desktop-bar .desktop-bar-settings + button {
+  margin-left: 0;
+}
+
+.desktop-settings {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+  padding: var(--s3);
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+}
+
+.desktop-settings-note {
+  color: var(--muted);
+  font-size: var(--small);
 }
 
 .desktop-servers {
@@ -5455,6 +5574,17 @@ button.link {
 .channel-directory .directory-row .channel-name {
   min-width: 0;
   overflow-wrap: anywhere;
+}
+
+.channel-directory .directory-channel {
+  min-width: 0;
+}
+
+.channel-directory .directory-channel .channel-topic {
+  margin: 0;
+  overflow-wrap: anywhere;
+  color: var(--muted);
+  font-size: 0.9rem;
 }
 
 .channel-directory .directory-row > p,
@@ -6053,4 +6183,19 @@ button.link {
   min-width: 0;
   max-width: 100%;
   min-height: 2.25rem;
+}
+
+/* The desktop strip's streams and share quality (issue #1582): others' stream
+   tiles under the strip, and the quality choice among the share notes. */
+.voice-streams {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s2);
+  margin-top: var(--s2);
+}
+
+.share-quality {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s2);
 }

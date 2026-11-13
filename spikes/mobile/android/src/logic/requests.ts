@@ -23,6 +23,12 @@ function route(method: Method, path: string, query: readonly string[] = [], sock
 }
 
 export const requests = {
+  // Sign-in (M4-C): a password, or the code of a one-use sign-in link. Neither
+  // carries a credential in the URL; both answer with the bearer, which the app
+  // holds in memory only.
+  login: route('POST', '/v1/login'),
+  redeemSignInLink: route('POST', '/v1/sign-in-links/redeem'),
+  listChannels: route('GET', '/v1/channels'),
   whoami: route('GET', '/v1/whoami'),
   wsTicket: route('POST', '/v1/ws-tickets'),
   voiceSession: route('POST', '/v1/channels/{channel}/voice/session'),

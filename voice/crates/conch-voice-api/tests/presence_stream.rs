@@ -293,6 +293,8 @@ async fn other_close_codes_are_reported_with_their_code() {
 
 #[tokio::test]
 async fn a_socket_closed_mid_stream_with_no_close_frame_is_a_drop() {
+    // `Step::Reset` pings and waits for the pong before it resets, so on Windows (#890)
+    // the RST cannot overtake the upgrade response: both steps run everywhere.
     for last in [Step::Drop, Step::Reset] {
         let stub = Stub::websocket(vec![
             text(&snapshot(&[3])),

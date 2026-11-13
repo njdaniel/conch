@@ -113,7 +113,11 @@ pub enum Step {
     CloseAndStall(u16, &'static str, Duration),
     /// Close the TCP connection with no close frame.
     Drop,
-    /// Reset the TCP connection.
+    /// Reset the TCP connection, once the client has shown it read everything sent so
+    /// far: the stub pings with its own payload and waits for that pong (at most
+    /// `RESET_PONG_WAIT`; a client that has already gone is reset at once). A reset sent
+    /// at once can overtake the upgrade response on Windows, and the client would then
+    /// fail to open the socket instead of seeing it reset.
     Reset,
 }
 
@@ -357,6 +361,10 @@ async fn answer(
     stream.shutdown().await
 }
 
+// Step::Reset's ping payload, and how long it waits for the matching pong.
+const RESET_PING: &[u8] = b"reset";
+const RESET_PONG_WAIT: Duration = Duration::from_secs(5);
+
 async fn play(
     stream: TcpStream,
     script: Vec<Step>,
@@ -421,6 +429,25 @@ async fn play(
             }
             Step::Drop => return Ok(()),
             Step::Reset => {
+                // The client answers a ping only after it has read the upgrade response
+                // and every frame before the ping, so the reset cannot overtake them. The
+                // payload is this step's own, so a pong owed to an earlier `Step::Ping`
+                // does not count; and a client that never answers fails the test within
+                // RESET_PONG_WAIT instead of hanging it.
+                socket
+                    .send(Message::Ping(RESET_PING.to_vec().into()))
+                    .await?;
+                let answered = tokio::time::timeout(RESET_PONG_WAIT, async {
+                    while let Some(Ok(message)) = socket.next().await {
+                        if matches!(&message, Message::Pong(payload) if payload.as_ref() == RESET_PING) {
+                            break;
+                        }
+                    }
+                })
+                .await;
+                if answered.is_err() {
+                    return Err("Step::Reset: the client did not answer the ping".into());
+                }
                 socket.get_ref().set_zero_linger()?;
                 return Ok(());
             }

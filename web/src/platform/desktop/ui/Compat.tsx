@@ -33,7 +33,7 @@ export function Unsupported({ view, onView }: { readonly view: ProfilesView; rea
           Check again
         </button>
       )}
-      <ServerList view={view} onView={onView} heading />
+      <ServerList view={view} onView={onView} heading clientMounted={false} />
     </main>
   );
 }

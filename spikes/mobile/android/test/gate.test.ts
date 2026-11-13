@@ -1,7 +1,7 @@
 /// <reference types="node" />
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { TransmitGate, defaultHang, defaultTail, phoneMax, type GateMode } from '../src/logic/gate';
+import { TransmitGate, sampleWatchdog, defaultHang, defaultTail, phoneMax, type GateMode } from '../src/logic/gate';
 import { FakeClock } from './fakes';
 
 function rig(mode: GateMode = 'ptt') {
@@ -172,4 +172,39 @@ test('the OS "should resume" hint opens nothing (lifecycle end, either answer)',
     r.gate.level(0.9);
     assert.equal(r.gate.open, false, mode);
   }
+});
+
+test('watchdog: when the samples stop, an open gate shuts and arms the latch; steady samples keep it open', () => {
+  const r = rig('open');
+  quietThenOnset(r);
+  assert.equal(r.gate.open, true);
+  // Steady samples, each inside the watchdog: still open, however long.
+  for (let i = 0; i < 20; i++) {
+    r.clock.advance(sampleWatchdog - 100);
+    r.gate.level(0.9);
+  }
+  assert.equal(r.gate.open, true, 'steady samples keep it open');
+  // The samples stop (the probe is gone): it shuts at the watchdog.
+  r.clock.advance(sampleWatchdog - 1);
+  assert.equal(r.gate.open, true, 'one ms short');
+  r.clock.advance(1);
+  assert.equal(r.gate.open, false, 'no sample in time: shut');
+  // The latch is armed: the same loud sound reopens nothing; quiet, then an onset does.
+  r.gate.level(0.9);
+  assert.equal(r.gate.open, false);
+  quietThenOnset(r);
+  assert.equal(r.gate.open, true);
+});
+
+test('watchdog: a closed gate and push to talk are not touched by it', () => {
+  const r = rig('open');
+  r.gate.level(0);
+  r.clock.advance(defaultHang);
+  r.clock.advance(sampleWatchdog * 3);
+  r.gate.level(0.9);
+  assert.equal(r.gate.open, true, 'quiet with no samples did not re-arm the latch');
+  const p = rig('ptt');
+  p.gate.press();
+  p.clock.advance(sampleWatchdog * 3);
+  assert.equal(p.gate.open, true, 'a held press needs no samples');
 });

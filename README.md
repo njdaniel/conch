@@ -28,7 +28,7 @@ People and agents share one conversation log, but they are not the same kind of 
 
 - **Chat with context.** Channels, threads, files, search, unread state and typed messages, in the browser, the TUI, the CLI, REST and WebSocket.
 - **Keep audiences explicit.** Text nets and whispers let a lead coordinate across groups without telling everyone everything.
-- **Talk and share.** Browser voice, screen sharing and webcam, and a native Linux/PipeWire `conch-voice` client, through optional LiveKit media.
+- **Talk and share.** Browser voice, screen sharing and webcam, and a native Linux/PipeWire `conch-voice` client, through optional LiveKit media. (Windows push-to-talk is built and awaiting hardware checks. Its input warning is the Linux one: `conch-voice` receives every key you press in every application, keeps only the keys you bound, and logs none.)
 - **See what agents do.** Sessions, runs, activity and supported message, cancel, pause and resume interventions.
 - **Ask before acting.** Agents request approvals over MCP. A person decides with a reason, and the request, the decision and the outcome are audited.
 - **Run it yourself.** One Go server with embedded SQLite handles messaging, identity, approvals and audit. It needs no other service.
@@ -101,6 +101,7 @@ Then follow [create the operator and start `conchd`](docs/manual.md#2-create-the
 | [Manual](docs/manual.md) | Setup step by step, the CLI and TUI, MCP, AI administrators, adapters, nets, invites, TLS, voice, screen sharing, diagnostics |
 | [Deployment runbook](docs/deploy.md) | A public server with Caddy, LiveKit, systemd, backups, upgrade and rollback |
 | [Alpha tester guide](docs/alpha-tester-guide.md) | Joining and using Conch as an invited tester |
+| [Linux desktop app](docs/desktop/linux.md) | Install, verify, update and remove the `.deb`, and what is supported where |
 | [Contributing](CONTRIBUTING.md) | Toolchains, checks, and the issue and PR workflow |
 | [Roadmap](ROADMAP.md) | Shipped phases, the private alpha, later direction |
 | [Client experience](docs/design/client-experience.md) | Interaction design, including voice and failure states |

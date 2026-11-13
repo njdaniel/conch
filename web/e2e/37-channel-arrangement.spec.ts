@@ -3,7 +3,7 @@
 // changes a membership, and nothing touches voice.
 import type { Page, WebSocketRoute } from '@playwright/test';
 import { makeChannel, memberOf } from './api';
-import { channelButton, conversation, expect, expectFits, mainNav, phones, rememberPushToTalk, showView, signIn, test } from './fixtures';
+import { closeAll, channelButton, conversation, expect, expectFits, mainNav, phones, rememberPushToTalk, showView, signIn, test } from './fixtures';
 import { dockerAvailable, startVoiceWorld, type VoiceWorld } from './voice-world';
 import { listChannelsResponse } from '../src/schema/channel';
 import { loadWorld, ok, principalId } from './world';
@@ -330,8 +330,7 @@ test.describe('with a voice session', () => {
       await expect(voice.getByRole('button', { name: 'Stop sharing' })).toBeVisible();
       await voice.getByRole('button', { name: 'Stop sharing' }).click();
     } finally {
-      await page.close();
-      await context.close();
+      await closeAll(context);
     }
   });
 });

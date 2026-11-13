@@ -8,7 +8,7 @@ import { guestName } from './guestName';
 import { Avatar, PrivateMark } from './Icons';
 import { IdentityMarks } from './Identity';
 import { ProfileCard } from './ProfileCard';
-import type { IdentityKey } from './identity';
+import type { IdentityKey } from './identityMarks';
 import { Linkified, previewText } from './Linkified';
 import { displayBody, useKnownFileNames } from './spoilerFiles';
 import { ImageAttachment } from './ImageAttachment';
@@ -571,6 +571,7 @@ function topOfView(log: HTMLElement): { readonly id: string; readonly offset: nu
 export function Conversation({
   channelId,
   channel,
+  topic,
   chat,
   live,
   people: members,
@@ -613,6 +614,7 @@ export function Conversation({
   // without it nothing is kept.
   readonly channelId?: number;
   readonly channel: string;
+  readonly topic?: string;
   readonly chat: ChannelChat;
   readonly live: LiveStatus;
   readonly people: ReadonlyMap<number, Person>;
@@ -984,9 +986,12 @@ export function Conversation({
           #
         </span>
         {visibility === 'private' ? <PrivateMark /> : null}
-        <h2 id={headingId} tabIndex={-1}>
-          {channel}
-        </h2>
+        <div className="channel-heading">
+          <h2 id={headingId} tabIndex={-1}>
+            {channel}
+          </h2>
+          {topic === undefined || topic === '' ? null : <p className="channel-topic">{topic}</p>}
+        </div>
         {onSearch === undefined ? null : <button id="channel-search-open" type="button" onClick={onSearch}>Search</button>}
       </header>
       {live === 'reconnecting' ? <p className="stale banner">This conversation may be out of date</p> : null}

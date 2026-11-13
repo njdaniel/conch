@@ -6,13 +6,14 @@
 // Unknown permission values are tolerated: a permission a newer server
 // names is shown by its name and never sent anywhere.
 import type { ApiFailure } from '../api';
+import { DESKTOP_UNAVAILABLE, desktopUnavailableLine } from '../appLimit';
 import type { Permission } from '../schema/permission';
 import type { WhoAmIResponseV1 } from '../schema/principal';
 
 // canDo reports whether whoami says the caller holds permission. The owner
 // always does. A server that predates permissions sends none: an operator is
 // then taken to hold all of them (the server answers each request itself).
-export function canDo(who: WhoAmIResponseV1, permission: Permission): boolean {
+export function canDo(who: Pick<WhoAmIResponseV1, 'role' | 'owner' | 'permissions'>, permission: Permission): boolean {
   if (who.role === 'operator' && who.owner === true) return true;
   if (who.permissions === undefined) return who.role === 'operator';
   return who.permissions.includes(permission);
@@ -84,6 +85,7 @@ export interface Refusal {
 // nothing says what was left as it was.
 export function refusalLine(result: Refusal, nothing: string): string {
   if (result.failure === 'network') return `Cannot reach the server. ${nothing}`;
+  if (result.code === DESKTOP_UNAVAILABLE) return `${desktopUnavailableLine} ${nothing}`;
   switch (result.code) {
     case 'permission_denied':
       return result.permission === undefined

@@ -19,8 +19,9 @@
 // person with the devices (#474).
 import type { Browser, BrowserContextOptions, Locator, Page } from '@playwright/test';
 import type { VoicePresenceV2 } from '../src/schema/voice';
-import { expect, expectFits, openChannel, phones, rememberPushToTalk, showView, signIn, test } from './fixtures';
-import { dockerAvailable, startVoiceWorld, watchPage, type Member, type VoiceWorld, type Watch } from './voice-world';
+import { expect, expectFits, openChannel, phones, showView, test } from './fixtures';
+import { enter, expectClean as expectCleanPage, inbound, joinVoice, type Someone } from './people';
+import { dockerAvailable, startVoiceWorld, type Member, type VoiceWorld } from './voice-world';
 
 const voiceRegion = (page: Page) => page.getByRole('region', { name: 'Voice' });
 const shareView = (page: Page) => page.getByRole('region', { name: 'Shared screen' });
@@ -33,24 +34,15 @@ const narrow: BrowserContextOptions = { viewport: { width: 360, height: 740 } };
 // larger one than a phone does.
 const fullHD: BrowserContextOptions = { viewport: { width: 1920, height: 1080 } };
 
-// Installed before the page's own scripts: keeps every peer connection the
-// SDK makes (for getStats), keeps the screen the picker gave (so a test can
-// end it as the browser's stop control does), and counts microphone requests.
+// Installed before the page's own scripts: keeps the screen the picker gave (so
+// a test can end it as the browser's stop control does), and counts microphone
+// requests and picker openings. (The peer connections are kept by enter, for
+// inbound.)
 const instrument = () => {
-  const w = window as unknown as { __pcs: RTCPeerConnection[]; __screen: MediaStream | null; __micAsks: number; __picks: number };
-  w.__pcs = [];
+  const w = window as unknown as { __screen: MediaStream | null; __micAsks: number; __picks: number };
   w.__screen = null;
   w.__micAsks = 0;
   w.__picks = 0;
-  const Original = window.RTCPeerConnection;
-  const Wrapped = function (this: unknown, ...args: ConstructorParameters<typeof RTCPeerConnection>) {
-    const pc = new Original(...args);
-    w.__pcs.push(pc);
-    return pc;
-  } as unknown as typeof RTCPeerConnection;
-  Wrapped.prototype = Original.prototype;
-  Object.setPrototypeOf(Wrapped, Original);
-  window.RTCPeerConnection = Wrapped;
   const devices = navigator.mediaDevices;
   const display = devices.getDisplayMedia.bind(devices);
   devices.getDisplayMedia = async (options?: DisplayMediaStreamOptions) => {
@@ -106,38 +98,6 @@ async function routeSignal(page: Page, late: LateSignal): Promise<void> {
         void ws.close({ code, reason });
       });
     });
-  });
-}
-
-interface Inbound {
-  readonly frames: number;
-  readonly width: number;
-  readonly audioBytes: number;
-}
-
-// inbound sums what this page has received: video frames decoded, the width
-// of the latest video frame, and audio bytes.
-async function inbound(page: Page): Promise<Inbound> {
-  return page.evaluate(async () => {
-    const w = window as unknown as { __pcs: RTCPeerConnection[] };
-    let frames = 0;
-    let width = 0;
-    let audioBytes = 0;
-    for (const pc of w.__pcs) {
-      // A connection closed (a room renewed, issue #516) has no stats to give.
-      if (pc.signalingState === 'closed') continue;
-      const stats = await pc.getStats();
-      stats.forEach((r: { type: string; kind?: string; framesDecoded?: number; frameWidth?: number; bytesReceived?: number }) => {
-        if (r.type !== 'inbound-rtp') return;
-        if (r.kind === 'video') {
-          frames += r.framesDecoded ?? 0;
-          width = Math.max(width, r.frameWidth ?? 0);
-        } else if (r.kind === 'audio') {
-          audioBytes += r.bytesReceived ?? 0;
-        }
-      });
-    }
-    return { frames, width, audioBytes };
   });
 }
 
@@ -217,38 +177,17 @@ test.describe('screen share with LiveKit', () => {
     stopWorld?.();
   });
 
-  interface Someone {
-    readonly page: Page;
-    readonly watch: Watch;
-    readonly member: Member;
-    readonly close: () => Promise<void>;
-  }
-
-  async function person(browser: Browser, who: 'alice' | 'bob' | 'carol' | Member, options?: BrowserContextOptions, late?: LateSignal, crowd = 0): Promise<Someone> {
-    const context = await browser.newContext(options);
-    // Not about the mode: push to talk, chosen before joining (issue #1244).
-    await rememberPushToTalk(context);
-    const page = await context.newPage();
-    const watch = await watchPage(page, vw);
-    await page.addInitScript(instrument);
-    if (late !== undefined) await routeSignal(page, late);
-    if (crowd > 0) await addToRoom(page, crowd);
-    const member = typeof who === 'string' ? vw[who] : who;
-    await signIn(page, vw, member.token, member.name);
-    await openChannel(page, vw.channel);
-    return { page, watch, member, close: () => context.close() };
-  }
-
-  async function join(p: Someone, how: 'Join voice' | 'Watch only'): Promise<void> {
-    await showView(p.page, 'Voice');
-    // Watch only beside the person's voice in another client is the viewer
-    // (issue #936), which has no Share screen. Presence lingers a few seconds
-    // after an earlier page of the same member closed, and reads as that other
-    // client; a test that needs the plain Watch only waits for it to clear.
-    // (A real page is no longer refused for it: issue #1340.)
-    if (how === 'Watch only') await expect(voiceRegion(p.page)).not.toContainText('You are in voice on another device', { timeout: 30_000 });
-    await voiceRegion(p.page).getByRole('button', { name: how }).click();
-    await expect(voiceRegion(p.page)).toContainText(/Connected in #voice-room/, { timeout: 30_000 });
+  // A person of this spec: enter (people.ts) with the instrument script, and
+  // optionally the late signal and the crowded room.
+  function person(browser: Browser, who: 'alice' | 'bob' | 'carol' | Member, options?: BrowserContextOptions, late?: LateSignal, crowd = 0): Promise<Someone> {
+    return enter(browser, vw, typeof who === 'string' ? vw[who] : who, {
+      ...(options === undefined ? {} : { context: options }),
+      before: async (page) => {
+        await page.addInitScript(instrument);
+        if (late !== undefined) await routeSignal(page, late);
+        if (crowd > 0) await addToRoom(page, crowd);
+      },
+    });
   }
 
   async function share(p: Someone): Promise<void> {
@@ -288,25 +227,15 @@ test.describe('screen share with LiveKit', () => {
     expect(await audio.evaluate((a: HTMLAudioElement) => a.paused)).toBe(false);
   }
 
-  // Nothing secret in what the page said, and no policy refused anything: the
+  // Nothing secret anywhere on the page, and no policy refused anything: the
   // page's Permissions-Policy lets it capture a screen.
   //
   // Until the camera was the page's own (ADR-015, #1242), Chromium reported
   // camera=() once per share, from the picker call itself (a bare
   // getDisplayMedia() made it). With camera=(self) it reports nothing, and
-  // any report fails.
-  async function expectClean(p: Someone): Promise<void> {
-    await p.watch.settled();
-    const said = p.watch.console.join('\n');
-    for (const s of vw.secrets) expect(said, 'a secret in the console').not.toContain(s);
-    const reports = p.watch.console.filter((l) => /Content Security Policy|Refused to|[Pp]ermissions policy/.test(l));
-    expect(reports).toEqual([]);
-    // The same, as the page's ReportingObserver is told (issue #595).
-    expect(p.watch.policy, 'Permissions-Policy reports').toEqual([]);
-    // And no request to conchd the browser counts as failed: a stopped
-    // share's 204 is read to its end, as a transmit report's is.
-    expect(p.watch.failed, 'requests to conchd that failed').toEqual([]);
-  }
+  // any report fails. A stopped share's 204 is read to its end, as a transmit
+  // report's is, so no request to conchd counts as failed.
+  const expectClean = (p: Someone) => expectCleanPage(vw, p);
 
   async function shareRows(): Promise<{ action: string; detail: string }[]> {
     return (await vw.audit()).filter((e) => e.action.startsWith('voice_share_')).map(({ action, detail }) => ({ action, detail }));
@@ -320,7 +249,7 @@ test.describe('screen share with LiveKit', () => {
   test('F7 starting a share at 1440×900 logs no console error', async ({ browser }) => {
     const a = await person(browser, 'alice', { viewport: { width: 1440, height: 900 } });
     try {
-      await join(a, 'Join voice');
+      await joinVoice(a, 'Join voice');
       await share(a);
       await a.watch.settled();
       const errors = a.watch.console.filter((l) => l.startsWith('error: '));
@@ -337,8 +266,8 @@ test.describe('screen share with LiveKit', () => {
     const a = await person(browser, 'alice');
     const b = await person(browser, 'bob');
     try {
-      await join(a, 'Join voice');
-      await join(b, 'Watch only');
+      await joinVoice(a, 'Join voice');
+      await joinVoice(b, 'Watch only');
       await share(a);
       await watching(b);
       // Focused, so bob takes the top layer: an unfocused watched tile is held
@@ -361,10 +290,90 @@ test.describe('screen share with LiveKit', () => {
       await expect.poll(async () => (await shareRows()).at(-1)?.action, { timeout: 15_000 }).toBe('voice_share_stopped');
       await a.page.reload();
       await openChannel(a.page, vw.channel);
-      await join(a, 'Join voice');
+      await joinVoice(a, 'Join voice');
       await voiceRegion(a.page).getByRole('button', { name: 'Voice options' }).click();
       await expect(voiceRegion(a.page).getByLabel('Share resolution')).toHaveValue('720p');
       await expect(voiceRegion(a.page).getByLabel('Share frame rate')).toHaveValue('15');
+      await expectClean(a);
+      await expectClean(b);
+    } finally {
+      for (const p of [a, b]) await p.close();
+    }
+  });
+
+  // Issue #1660: the sharer's line says what was asked beside what is sent.
+  // The fake screen on a runner may or may not reach 60 fps; either outcome is
+  // accepted and recorded. A reason must never show while on target.
+  test('the sharer\'s readout shows what was asked beside what is sent', async ({ browser }) => {
+    const a = await person(browser, 'alice');
+    const b = await person(browser, 'bob');
+    try {
+      await joinVoice(a, 'Join voice');
+      await joinVoice(b, 'Watch only');
+      await share(a);
+      // The top layer sends only while a viewer takes it: bob watches it
+      // focused, as in the live quality change test.
+      await watching(b);
+      await shareView(b.page).getByRole('button', { name: "Focus alice's screen" }).click();
+      const voice = voiceRegion(a.page);
+      await voice.getByRole('button', { name: 'Voice options' }).click();
+      await voice.getByLabel('Share resolution').selectOption('1080p');
+      await voice.getByLabel('Share frame rate').selectOption('60');
+      const line = voice.getByRole('status', { name: 'Share quality' });
+      await expect(line).toContainText('Asked 1080p · 60 fps', { timeout: 30_000 });
+      await expect(line).toContainText(/Sending: \d+×\d+ · \d+ fps/, { timeout: 30_000 });
+      // Sample for a while: past the 5 s hold, a reason may appear if the
+      // runner falls short, and only then.
+      let outcome = 'on target';
+      // Samples in a row on target (the rate at 80% of 60 or more, at full
+      // size; the component compares the unrounded rate, so 49 shown is
+      // safely above 47.99): the reason clears 5 s after recovery and the
+      // sampling is about a second apart, so a run of 9 on target must show
+      // none.
+      let steady = 0;
+      for (let i = 0; i < 16; i++) {
+        await a.page.waitForTimeout(1000);
+        const text = (await line.textContent()) ?? '';
+        const sent = /Sending: (\d+)×(\d+) · (\d+) fps/.exec(text);
+        const reason = /Limited by (CPU|bandwidth)|smaller than|doesn't say why/.exec(text)?.[0];
+        if (reason !== undefined) outcome = `reason: ${reason}`;
+        const onTarget = sent !== null && Number(sent[3]) >= 49 && Number(sent[1]) === 1920 && Number(sent[2]) === 1080;
+        steady = onTarget ? steady + 1 : 0;
+        if (steady >= 9) expect(reason, 'a reason never shows while on target').toBeUndefined();
+      }
+      test.info().annotations.push({ type: 'readout', description: `${outcome}: ${(await line.textContent()) ?? ''}` });
+      await voice.getByRole('button', { name: 'Stop sharing' }).click();
+      await expect.poll(async () => (await shareRows()).at(-1)?.action, { timeout: 15_000 }).toBe('voice_share_stopped');
+      await expectClean(a);
+      await expectClean(b);
+    } finally {
+      for (const p of [a, b]) await p.close();
+    }
+  });
+
+  // Issue #1660, review: an unfocused viewer holds the top layer to the lowest,
+  // dynacast stops it, and the sent picture is a lower layer. That is the
+  // sender doing what viewers asked, not a shortfall: no reason shows.
+  test('a share every viewer holds unfocused shows no reason for the smaller layer', async ({ browser }) => {
+    const a = await person(browser, 'alice');
+    const b = await person(browser, 'bob');
+    try {
+      await joinVoice(a, 'Join voice');
+      await joinVoice(b, 'Watch only');
+      await share(a);
+      await watching(b);
+      const line = voiceRegion(a.page).getByRole('status', { name: 'Share quality' });
+      await expect(line).toContainText('Asked 1080p · 30 fps', { timeout: 30_000 });
+      await expect(line).toContainText(/Sending: \d+×\d+ · \d+ fps/, { timeout: 30_000 });
+      // Past the 5 s hold and well beyond.
+      for (let i = 0; i < 12; i++) {
+        await a.page.waitForTimeout(1000);
+        const text = (await line.textContent()) ?? '';
+        expect(text, 'no reason for a layer nobody takes').not.toMatch(/Limited by|smaller than|doesn't say why/);
+      }
+      test.info().annotations.push({ type: 'readout', description: (await line.textContent()) ?? '' });
+      await voiceRegion(a.page).getByRole('button', { name: 'Stop sharing' }).click();
+      await expect.poll(async () => (await shareRows()).at(-1)?.action, { timeout: 15_000 }).toBe('voice_share_stopped');
       await expectClean(a);
       await expectClean(b);
     } finally {
@@ -376,8 +385,8 @@ test.describe('screen share with LiveKit', () => {
     const a = await person(browser, 'alice');
     const b = await person(browser, 'bob');
     try {
-      await join(a, 'Join voice');
-      await join(b, 'Watch only');
+      await joinVoice(a, 'Join voice');
+      await joinVoice(b, 'Watch only');
       await share(a);
       await watching(b);
       const voice = voiceRegion(a.page);
@@ -406,7 +415,7 @@ test.describe('screen share with LiveKit', () => {
   // a new page at once is not refused as a viewer of a voice that is gone.
   test('Watch only at once on a new page, after the old one closed in voice, is connected', async ({ browser }) => {
     const first = await person(browser, 'alice');
-    await join(first, 'Join voice');
+    await joinVoice(first, 'Join voice');
     await first.close();
     const second = await person(browser, 'alice');
     try {
@@ -425,9 +434,9 @@ test.describe('screen share with LiveKit', () => {
     const b = await person(browser, 'bob');
     const c = await person(browser, 'carol');
     try {
-      await join(a, 'Join voice');
-      await join(b, 'Watch only');
-      await join(c, 'Join voice');
+      await joinVoice(a, 'Join voice');
+      await joinVoice(b, 'Watch only');
+      await joinVoice(c, 'Join voice');
       await share(a);
 
       // B watches, having asked for no microphone, and the share's sound
@@ -474,8 +483,8 @@ test.describe('screen share with LiveKit', () => {
     const a = await person(browser, 'alice');
     const b = await person(browser, 'bob');
     try {
-      await join(a, 'Join voice');
-      await join(b, 'Watch only');
+      await joinVoice(a, 'Join voice');
+      await joinVoice(b, 'Watch only');
       await share(a);
       await watching(b);
       await shareView(b.page).getByLabel('Share volume').fill('0.25');
@@ -503,8 +512,8 @@ test.describe('screen share with LiveKit', () => {
     const a = await person(browser, 'alice');
     const b = await person(browser, 'bob');
     try {
-      await join(a, 'Join voice');
-      await join(b, 'Watch only');
+      await joinVoice(a, 'Join voice');
+      await joinVoice(b, 'Watch only');
 
       // The browser's stop control: the capture ends.
       await share(a);
@@ -557,8 +566,8 @@ test.describe('screen share with LiveKit', () => {
     const a = await person(browser, 'alice');
     const b = await person(browser, 'bob');
     try {
-      await join(a, 'Join voice');
-      await join(b, 'Join voice');
+      await joinVoice(a, 'Join voice');
+      await joinVoice(b, 'Join voice');
       await share(b);
       const alice = voiceRegion(a.page);
       const button = alice.getByRole('button', { name: 'Share screen' });
@@ -621,9 +630,9 @@ test.describe('screen share with LiveKit', () => {
     const d = await person(browser, dave);
     const e = await person(browser, erin);
     try {
-      await join(a, 'Join voice');
-      await join(b, 'Watch only');
-      await join(d, 'Join voice');
+      await joinVoice(a, 'Join voice');
+      await joinVoice(b, 'Watch only');
+      await joinVoice(d, 'Join voice');
       await share(a);
       await watching(b);
 
@@ -648,7 +657,7 @@ test.describe('screen share with LiveKit', () => {
       // back; the capture is stopped.
       await voiceRegion(a.page).getByRole('button', { name: 'Stop sharing' }).click();
       await expect(voiceRegion(a.page)).toContainText('You stopped sharing.');
-      await join(e, 'Join voice');
+      await joinVoice(e, 'Join voice');
       await share(e);
       await expect(shareView(b.page)).toHaveCount(0, { timeout: 15_000 });
       await watching(b, 'erin');
@@ -684,10 +693,10 @@ test.describe('screen share with LiveKit', () => {
     const g = await person(browser, gina);
     const h = await person(browser, hugo);
     try {
-      await join(a, 'Join voice');
-      await join(b, 'Watch only');
-      await join(g, 'Join voice');
-      await join(h, 'Join voice');
+      await joinVoice(a, 'Join voice');
+      await joinVoice(b, 'Watch only');
+      await joinVoice(g, 'Join voice');
+      await joinVoice(h, 'Join voice');
       await share(a);
       await watching(b);
 
@@ -729,8 +738,8 @@ test.describe('screen share with LiveKit', () => {
     const a = await person(browser, 'alice');
     const b = await person(browser, 'bob', { viewport: { width: 1440, height: 900 } });
     try {
-      await join(a, 'Join voice');
-      await join(b, 'Join voice');
+      await joinVoice(a, 'Join voice');
+      await joinVoice(b, 'Join voice');
       await share(a);
       await watching(b);
       const kept = () =>
@@ -782,9 +791,9 @@ test.describe('screen share with LiveKit', () => {
     const b = await person(browser, 'bob', fullHD);
     const c = await person(browser, 'carol', narrow);
     try {
-      await join(a, 'Join voice');
-      await join(b, 'Watch only');
-      await join(c, 'Watch only');
+      await joinVoice(a, 'Join voice');
+      await joinVoice(b, 'Watch only');
+      await joinVoice(c, 'Watch only');
       await share(a);
       await watching(b);
       await watching(c);
@@ -823,7 +832,7 @@ test.describe('screen share with LiveKit', () => {
   test('on a phone with eight in voice the strip stays compact, joined and while watching', async ({ browser }) => {
     const a = await person(browser, 'alice');
     try {
-      await join(a, 'Join voice');
+      await joinVoice(a, 'Join voice');
       for (const [size, options] of phones) {
         const b = await person(browser, 'bob', options, undefined, 6);
         try {
@@ -838,7 +847,7 @@ test.describe('screen share with LiveKit', () => {
   });
 
   async function joinAndMeasure(size: string, a: Someone, b: Someone): Promise<void> {
-    await join(b, 'Join voice');
+    await joinVoice(b, 'Join voice');
     const voice = voiceRegion(b.page);
     // Eight, or a ninth if an earlier page of bob's has not yet left the room on the server.
     const count = voice.getByRole('heading', { name: /^[89] in voice$/ });
@@ -887,8 +896,8 @@ test.describe('screen share with LiveKit', () => {
     const a = await person(browser, 'alice');
     const c = await person(browser, 'carol', narrow);
     try {
-      await join(a, 'Join voice');
-      await join(c, 'Watch only');
+      await joinVoice(a, 'Join voice');
+      await joinVoice(c, 'Watch only');
       await share(a);
       const card = c.page.locator('.call-share').filter({ hasText: 'alice · LIVE' });
       const watch = card.getByRole('button', { name: 'Watch' });
@@ -918,12 +927,84 @@ test.describe('screen share with LiveKit', () => {
       const c = await person(browser, 'carol', options);
       try {
         await expectFits(c.page, `${size}: before joining`);
-        await join(c, 'Watch only');
+        await joinVoice(c, 'Watch only');
         await expect(voiceRegion(c.page).getByRole('button', { name: 'Share screen' })).toBeVisible();
         await expectFits(c.page, `${size}: watching only, with the share controls`);
       } finally {
         await c.close();
       }
+    }
+  });
+
+  // Issue #1813: in a short desktop window the page scrolls as a document and
+  // the composer sits on the voice dock, joined (the dock is 200 px or more),
+  // watching a share (the picture keeps its room: the stage is not squeezed to
+  // its padding) and with Voice options open, at every short height.
+  test('in a short window, joined and watching a share, the composer is on the dock and the picture keeps its room', async ({ browser }) => {
+    const a = await person(browser, 'alice');
+    const b = await person(browser, 'bob', { viewport: { width: 1215, height: 560 } });
+    try {
+      await joinVoice(a, 'Join voice');
+      await joinVoice(b, 'Join voice');
+      const composer = b.page.locator('.composer');
+      const dock = b.page.locator('.dock');
+      const check = async (what: string, stage: boolean): Promise<void> => {
+        const size = b.page.viewportSize();
+        if (size === null) throw new Error('no window size');
+        const where = `${String(size.width)}×${String(size.height)}, ${what}`;
+        await expect(async () => {
+          const c = await composer.boundingBox();
+          const d = await dock.boundingBox();
+          if (c === null || d === null) throw new Error(`${where}: no composer or dock`);
+          expect(Math.abs(c.y + c.height - d.y), `${where}: the composer is ${String(d.y - c.y - c.height)} px above the dock`).toBeLessThanOrEqual(1);
+        }).toPass({ timeout: 5000 });
+        // Scrolled to its end, the page shows the composer whole above the dock.
+        await expect(async () => {
+          await b.page.evaluate(() => {
+            window.scrollTo(0, document.documentElement.scrollHeight);
+          });
+          const c = await composer.boundingBox();
+          const d = await dock.boundingBox();
+          if (c === null || d === null) throw new Error(`${where}: no composer or dock`);
+          expect(c.y, `${where}: the composer's top at the end of the page`).toBeGreaterThanOrEqual(-0.5);
+          expect(c.y + c.height, `${where}: the composer's bottom at the end of the page`).toBeLessThanOrEqual(d.y + 1);
+          expect(d.y + d.height, `${where}: the dock's bottom at the end of the page`).toBeLessThanOrEqual(size.height + 0.5);
+        }).toPass({ timeout: 5000 });
+        if (stage) {
+          const picture = await b.page.locator('.stage').boundingBox();
+          // On main at these heights the stage is 465 to 480 px.
+          expect(picture?.height ?? 0, `${where}: the stage while watching`).toBeGreaterThanOrEqual(300);
+        }
+        await b.page.evaluate(() => {
+          window.scrollTo(0, 0);
+        });
+      };
+      // 561 px is the full-height layout, which squeezes a share to nothing in
+      // a window this short whatever the page does at 560 (a pre-existing
+      // limit, not this change's: issue #1815); joined, the composer is on the dock there too.
+      const heights: readonly (readonly [number, number])[] = [[1215, 560], [1215, 470], [1215, 400], [720, 450]];
+      for (const [width, height] of [...heights, [1215, 561]] as const) {
+        await b.page.setViewportSize({ width, height });
+        await check('joined', false);
+      }
+      await b.page.setViewportSize({ width: 1215, height: 560 });
+      await share(a);
+      await watching(b);
+      for (const [width, height] of heights) {
+        await b.page.setViewportSize({ width, height });
+        await check('watching', true);
+      }
+      await voiceRegion(b.page).getByRole('button', { name: 'Voice options' }).click();
+      for (const [width, height] of heights) {
+        await b.page.setViewportSize({ width, height });
+        await check('watching, Voice options open', false);
+        const areas = await b.page.locator('.areas').boundingBox();
+        expect(areas?.height ?? 0, `${String(width)}×${String(height)}: the conversation with Voice options open`).toBeGreaterThanOrEqual(200);
+      }
+      await voiceRegion(a.page).getByRole('button', { name: 'Stop sharing' }).click();
+    } finally {
+      await a.close();
+      await b.close();
     }
   });
 });

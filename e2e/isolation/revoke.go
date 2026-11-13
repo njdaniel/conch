@@ -381,6 +381,10 @@ func (w *world) revoke(v *voiceA, bounds voiceBounds) ([]timing, error) {
 	if err != nil {
 		return nil, err
 	}
+	secondPush, err := w.registerPush(second.api, w.aName("pushsecond"), true)
+	if err != nil {
+		return nil, fmt.Errorf("ann's second credential registers for push: %w", err)
+	}
 	feeds, err := openAll(second, camp)
 	if err != nil {
 		return nil, err
@@ -400,6 +404,14 @@ func (w *world) revoke(v *voiceA, bounds voiceBounds) ([]timing, error) {
 		return nil, err
 	}
 	out = append(out, t)
+	// Her second credential's push registration ended with it, and her first's
+	// did not (issue #1714).
+	if err := w.pushEnded(secondPush.ID, "credential_revoked", true); err != nil {
+		return nil, fmt.Errorf("after ann's second credential was revoked: %w", err)
+	}
+	if err := w.pushEnded(w.a.pushRegID, "credential_revoked", false); err != nil {
+		return nil, fmt.Errorf("after ann's second credential was revoked: %w", err)
+	}
 	// The revoke closed its sockets before it answered, so one of her first
 	// credential's closed by mistake would have closed with them. Give that a
 	// second to show, then every one of them must still be open.
@@ -472,6 +484,10 @@ func (w *world) revoke(v *voiceA, bounds voiceBounds) ([]timing, error) {
 		return nil, err
 	} else if status != http.StatusUnauthorized {
 		return nil, fmt.Errorf("ann's credential after she was disabled: status %d, want 401", status)
+	}
+	// Disabling her ended the registration of her first credential too.
+	if err := w.pushEnded(w.a.pushRegID, "credential_revoked", true); err != nil {
+		return nil, fmt.Errorf("after ann was disabled: %w", err)
 	}
 	if v != nil {
 		// The share went with her: nobody is sharing in A's channel, as an
@@ -584,4 +600,31 @@ func (w *world) revoke(v *voiceA, bounds voiceBounds) ([]timing, error) {
 	}
 	w.h.say("ok   revoked 4/4: the open link is closed; redeeming and previewing it answer 404 invite_invalid (v1 redeem: 409 password_required)")
 	return out, nil
+}
+
+// pushEnded checks the audit log for a push_registration_ended row of
+// registration id with reason: that there is one when want, and none when not.
+// The row holds the id, the transport and the reason, and nothing of the
+// target.
+func (w *world) pushEnded(id, reason string, want bool) error {
+	rows, err := w.auditRows(schema.AuditActionPushRegistrationEnded)
+	if err != nil {
+		return err
+	}
+	found := false
+	for _, r := range rows {
+		if strings.Contains(r.Detail, "registration="+id+" ") {
+			if !strings.HasSuffix(r.Detail, "reason="+reason) {
+				return fmt.Errorf("the registration ended with %q, want reason=%s", r.Detail, reason)
+			}
+			found = true
+		}
+	}
+	switch {
+	case want && !found:
+		return fmt.Errorf("no push_registration_ended reason=%s row for the registration", reason)
+	case !want && found:
+		return errors.New("a push registration ended that should not have")
+	}
+	return nil
 }

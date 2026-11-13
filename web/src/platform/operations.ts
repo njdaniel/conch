@@ -87,6 +87,12 @@ import {
   listOwnCredentialsResponseV1,
   listOwnSignInLinksResponseV1,
   listReadStateResponseV1,
+  listOwnPushRegistrationsResponseV1,
+  notificationPreferencesV1,
+  putNotificationPreferencesRequestV1,
+  pushConfigV1,
+  pushRegistrationV1,
+  createPushRegistrationRequestV1,
   listRunsResponseV1,
   loginRequestV1,
   loginResponseV1,
@@ -109,6 +115,8 @@ import {
   channelSettingsResponseV1,
   renameChannelRequestV1,
   renameChannelResponseV1,
+  setChannelTopicRequestV1,
+  setChannelTopicResponseV1,
   renamePrincipalRequestV1,
   renamePrincipalResponseV1,
   readStateV1,
@@ -129,6 +137,8 @@ import {
   voicePresenceV2,
   voiceSessionResponseV1,
   voiceShareRequestV1,
+  voiceShareV1,
+  voiceShareV2,
   voiceTransmitReportV1,
   whoAmIResponseV1,
   wsTicketV1,
@@ -153,11 +163,17 @@ export interface Operation {
   // answers a wrong one 401 auth_failed: that 401 does not end the sign-in.
   readonly secret?: true;
   // False when the desktop renderer must not invoke the operation itself: its
-  // answer holds a credential, or a grant that only main may hold. The browser
-  // is unaffected; it holds both itself.
+  // answer holds a credential, or a grant that only main may hold, or it ends
+  // something main keeps the record of (the screen companion). The browser is
+  // unaffected; it holds all of these itself.
   readonly renderer: boolean;
   // The response fields that are credentials, which the desktop main consumes
-  // and never returns to the renderer.
+  // and never returns to the renderer. The exception is a secret made for
+  // someone or something else (issue #1768: createMemberLink, createSignInLink,
+  // totpEnroll, createPrincipalSignInLink, createPrincipalCredential,
+  // createHook): the person has to see and copy it, so main's one bridge
+  // function for the operation returns it once, in that call's result. The
+  // operation stays renderer: false, so the generic request still refuses it.
   readonly credentials?: readonly string[];
   // True for a WebSocket upgrade: GET, opened with a single-use ticket.
   readonly socket?: true;
@@ -185,6 +201,16 @@ const check = <T>(validator: Validator<T>): Validator<never> => validator as unk
 // (issue #1534). A request stays strict: the desktop main refuses an extra key
 // from the renderer.
 const reply = <T>(validator: Validator<T>): Validator<never> => check(fromServer(validator));
+
+// shareReply is the share claim's answer: VoiceShareV2 when the claim sent a
+// quality, else VoiceShareV1 (web/src/api.ts claimVoiceShare). V2 is tried
+// first, because a validator strips the keys it does not declare from a value
+// it passes, so V1 would pass a V2 answer and drop its quality (issue #1638).
+// Without it the desktop main forwards no body, and every desktop share fails.
+const shareReply: Validator<never> = check((value: unknown, path?: string) => {
+  const asV2 = fromServer(voiceShareV2)(value, path);
+  return asV2.length === 0 ? asV2 : fromServer(voiceShareV1)(value, path);
+});
 
 export const operations = {
   health: op('GET', '/healthz', 'none', { response: reply(health) }),
@@ -331,6 +357,7 @@ export const operations = {
   leaveChannel: op('POST', '/v1/channels/{channel}/leave', 'bearer'),
   directoryMembers: op('GET', '/v1/directory/members', 'bearer', { response: reply(serverMembersResponseV1), previewable: true }),
   renameChannel: op('PUT', '/v1/channels/{id}/name', 'bearer', { request: check(renameChannelRequestV1), response: reply(renameChannelResponseV1) }),
+  setChannelTopic: op('PUT', '/v1/channels/{id}/topic', 'bearer', { request: check(setChannelTopicRequestV1), response: reply(setChannelTopicResponseV1) }),
   channelSettings: op('PUT', '/v1/channels/{id}/settings', 'bearer', { request: check(channelSettingsRequestV1), response: reply(channelSettingsResponseV1) }),
   listMembers: op('GET', '/v1/channels/{channel}/members', 'bearer', { response: reply(listChannelMembersResponseV1), previewable: true }),
   channelAuthors: op('GET', '/v1/channels/{channel}/authors', 'bearer', { response: reply(channelAuthorsResponseV1) }),
@@ -355,6 +382,15 @@ export const operations = {
   listReactors: op('GET', '/v2/channels/{channel}/messages/{id}/reactions/{emoji}', 'bearer', { response: reply(listReactorsResponseV1) }),
   setReaction: op('PUT', '/v2/channels/{channel}/messages/{id}/reactions/{emoji}', 'bearer', { response: reply(reactionSummaryV1) }),
   removeReaction: op('DELETE', '/v2/channels/{channel}/messages/{id}/reactions/{emoji}', 'bearer', { response: reply(reactionSummaryV1) }),
+  // Background push (issue #1826): the browser's Web Push registration and the
+  // server's copy of its notification policy. Members only; the server refuses
+  // a guest or an agent.
+  pushConfig: op('GET', '/v1/push/config', 'bearer', { response: reply(pushConfigV1) }),
+  listPushRegistrations: op('GET', '/v1/push/registrations/mine', 'bearer', { response: reply(listOwnPushRegistrationsResponseV1) }),
+  createPushRegistration: op('POST', '/v1/push/registrations', 'bearer', { request: check(createPushRegistrationRequestV1), response: reply(pushRegistrationV1) }),
+  endPushRegistration: op('DELETE', '/v1/push/registrations/{id}', 'bearer'),
+  getNotificationPreferences: op('GET', '/v1/notifications/preferences', 'bearer', { response: reply(notificationPreferencesV1) }),
+  putNotificationPreferences: op('PUT', '/v1/notifications/preferences', 'bearer', { request: check(putNotificationPreferencesRequestV1), response: reply(notificationPreferencesV1) }),
   moderateReaction: op('DELETE', '/v2/channels/{channel}/messages/{id}/reactions/{emoji}/{principal}', 'bearer', { response: reply(reactionSummaryV1) }),
   removeReactor: op('DELETE', '/v2/channels/{channel}/messages/{id}/reactors/{principal}', 'bearer', { response: reply(reactionSummaryV1) }),
   messageRevisions: op('GET', '/v2/channels/{channel}/messages/{id}/revisions', 'bearer', { response: reply(listMessageRevisionsResponseV1) }),
@@ -387,14 +423,17 @@ export const operations = {
   voicePresence: op('GET', '/v1/channels/{channel}/voice', 'bearer', { response: reply(voicePresenceV2) }),
   voiceTransmit: op('POST', '/v1/channels/{channel}/voice/transmit', 'bearer', { request: check(voiceTransmitReportV1) }),
   voiceOccupancy: op('GET', '/v1/voice/occupancy', 'bearer', { response: reply(voiceOccupancyV1) }),
-  claimShare: op('POST', '/v1/channels/{channel}/voice/share', 'bearer', { request: check(voiceShareRequestV1) }),
+  claimShare: op('POST', '/v1/channels/{channel}/voice/share', 'bearer', { request: check(voiceShareRequestV1), response: shareReply }),
   stopShare: op('DELETE', '/v1/channels/{channel}/voice/share', 'bearer'),
   // The viewer (issue #936, voice-control-plane.md §13): the second
   // participant, p<id>.view, that lets a tab watch beside the voice of
-  // another client. Its answer holds a join token, so the renderer never
-  // invokes it; the DELETE removes it and answers 204.
+  // another client; and, on the desktop, main's screen companion,
+  // p<id>.screen (issue #1579). Its answer holds a join token, so the
+  // renderer never invokes it; the DELETE removes it and answers 204. The
+  // desktop renderer does not invoke the DELETE either: main holds the record
+  // of its companion (and the LiveKit origin it allows), and ends it itself.
   voiceViewer: op('POST', '/v1/channels/{channel}/voice/companion', 'bearer', { request: check(voiceCompanionRequestV1), response: reply(voiceCompanionResponseV1), renderer: false, credentials: token }),
-  voiceViewerEnd: op('DELETE', '/v1/channels/{channel}/voice/companion', 'bearer'),
+  voiceViewerEnd: op('DELETE', '/v1/channels/{channel}/voice/companion', 'bearer', { renderer: false }),
   // The camera claim (ADR-015): claimed by the person's camera button, or
   // continued by naming the claim (?started_at=), and released.
   claimCamera: op('POST', '/v1/channels/{channel}/voice/camera', 'bearer', { response: reply(voiceCameraV1) }),

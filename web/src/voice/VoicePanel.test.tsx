@@ -9,10 +9,12 @@ import type { VoicePresenceV2 } from '../schema/voice';
 import type { Person } from '../useLiveChannel';
 import { initialVoice, VoiceClient, type Phase, type Processing, type VoiceState } from './connection';
 import { FakeClock } from './fakes';
-import { ownPageNote, soundNote, type ShareFeatures } from './share';
+import { ownPageNote, soundNote, type ShareFeatures, type ShareQuality } from './share';
+import { ShareQualityMenu, sourceSixtyNote } from './ShareQualityMenu';
+import { useState } from 'react';
 import { MicTestShown, VoiceLive, VoiceStrip } from '../phone';
 import type { Snapshot, VoiceControl } from './useVoice';
-import { followsNote, missingNote, noOtherOutputs, noOutputChoice, processingLabel, processingOffNote, processingUseNote, reportedNote, stoppedFor, thresholdHint, VoicePanel } from './VoicePanel';
+import { followsNote, hearLabel, meterNote, meterStripNote, missingNote, noOtherOutputs, noOutputChoice, processingLabel, processingOffNote, processingUseNote, reportedNote, stoppedFor, thresholdHint, VoicePanel } from './VoicePanel';
 
 const chrome: ShareFeatures = { canShare: true, chromium: true, platform: 'linux' };
 const presence: VoicePresenceV2 = { schema: 'conch.voice_presence.v2', channel_id: 1, configured: true, available: true, rooms: [] };
@@ -138,6 +140,48 @@ describe('Join voice and Watch only', () => {
     fireEvent.click(join);
     fireEvent.click(watch);
     expect(calls).toEqual(['join', 'watch only']);
+  });
+
+  // Issue #1794: the click is the gesture iOS needs the meter's audio context
+  // made in, so the button calls the join itself, in the click: nothing is
+  // deferred, and nothing is passed that could make it wait.
+  it('Join voice calls the join in the click itself, synchronously', () => {
+    const { voice, calls } = panel(initialVoice, 'general');
+    const before = calls.length;
+    fireEvent.click(within(voice).getByRole('button', { name: 'Join voice in #general' }));
+    // Not after a microtask or a timer: the very next statement sees it.
+    expect(calls.slice(before)).toEqual(['join']);
+  });
+
+  // Issue #1794: Use microphone, after Watch only, makes the meter's audio
+  // context first in its click, before the capture's awaits.
+  it('Use microphone makes the meter\'s audio context in the click', () => {
+    const made: string[] = [];
+    vi.stubGlobal(
+      'AudioContext',
+      class {
+        constructor() {
+          made.push('create');
+        }
+        resume() {
+          made.push('resume');
+          return Promise.resolve();
+        }
+        close() {
+          made.push('close');
+          return Promise.resolve();
+        }
+      },
+    );
+    try {
+      const { voice } = panel({ ...inVoice('connected', 'general'), watchOnly: true }, 'general');
+      fireEvent.click(within(voice).getByRole('button', { name: 'Use microphone' }));
+      // The client here has no room, so it takes nothing and lets it go: all
+      // of it ran in the click.
+      expect(made).toEqual(['create', 'resume', 'close']);
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 
   // N08: one space between the verb and the channel, in the text itself; the
@@ -1268,6 +1312,64 @@ describe('voice processing', () => {
     redraw(using({ mode: 'ptt', processing: false, reported: off }));
     expect(opts.textContent).not.toContain(thresholdHint);
   });
+
+  it('says the open microphone needs the level meter when there is none, and only then', () => {
+    const { voice, redraw } = panel(using({ mode: 'open' }), 'c');
+    expect(voice.textContent).not.toContain('needs the level meter');
+    redraw(using({ mode: 'open', meter: false }));
+    expect(voice.textContent).toContain('Open microphone needs the level meter');
+    redraw(using({ mode: 'ptt', meter: false }));
+    expect(voice.textContent).not.toContain('needs the level meter');
+  });
+
+  // The note is about a microphone this page holds: not a listen-only or
+  // watch-only one, not one that went, and not while no connection is up
+  // (a retry's note would be the last room's).
+  it.each([
+    ['listen only', { listenOnly: true }],
+    ['watch only', { watchOnly: true }],
+    ['a missing microphone', { missing: true }],
+    ['connecting', { phase: 'connecting' as const }],
+    ['unavailable', { phase: 'unavailable' as const }],
+  ])('does not say it %s', (_name, patch) => {
+    const { voice } = panel(using({ mode: 'open', meter: false, ...patch }), 'c');
+    expect(within(voice).queryByText(meterNote)).toBeNull();
+  });
+
+  it('says it while connected and while reconnecting', () => {
+    const { voice, redraw } = panel(using({ mode: 'open', meter: false }), 'c');
+    expect(within(voice).getByText(meterNote).getAttribute('role')).toBe('status');
+    redraw(using({ mode: 'open', meter: false, phase: 'reconnecting' }));
+    expect(within(voice).getByText(meterNote)).toBeTruthy();
+  });
+});
+
+// The browser holds playback back until a tap (iOS Safari): the button that
+// asks for it, with the tap going to the client at once.
+describe('Tap to hear the channel', () => {
+  const using = (patch: Partial<VoiceState> = {}): VoiceState => ({ ...inVoice('connected', 'c'), playback: false, ...patch });
+
+  it('is in the notes while connected and while reconnecting, and calls the client\'s startAudio on a click', () => {
+    const { voice, client, redraw } = panel(using(), 'c');
+    const start = vi.spyOn(client, 'startAudio').mockImplementation(() => undefined);
+    const button = within(voice).getByRole('button', { name: hearLabel });
+    expect(button.closest('.voice-notes')).not.toBeNull();
+    fireEvent.click(button);
+    expect(start).toHaveBeenCalledTimes(1);
+    redraw(using({ phase: 'reconnecting' }));
+    expect(within(voice).getByRole('button', { name: hearLabel })).toBeTruthy();
+  });
+
+  it('is gone once playback is allowed', () => {
+    const { voice, redraw } = panel(using(), 'c');
+    redraw(using({ playback: true }));
+    expect(within(voice).queryByRole('button', { name: hearLabel })).toBeNull();
+  });
+
+  it.each([['connecting' as const], ['unavailable' as const], ['idle' as const]])('is not there while %s', (phase) => {
+    const { voice } = panel(using({ phase }), 'c');
+    expect(within(voice).queryByRole('button', { name: hearLabel })).toBeNull();
+  });
 });
 
 // Issue #660: the speakers in Voice options, where the browser lets a page
@@ -1551,6 +1653,40 @@ describe('the phone strip under Chat and Channels (issue #1028)', () => {
     expect(meter.parentElement?.querySelector('.open-mic-label')?.textContent).toBe('Open microphone');
   });
 
+  // The notes are hidden in the strip, and the open microphone is the default
+  // mode: without its own line the strip shows a flat meter and no reason.
+  it('says in the strip, in short, that the open microphone has no level meter, and only then', () => {
+    const { voice } = mount({ ...inVoice('connected', 'channel-a'), mode: 'open' }, () => undefined);
+    expect(voice.querySelector('.strip-note')).toBeNull();
+    cleanup();
+    const gone = mount({ ...inVoice('connected', 'channel-a'), mode: 'open', meter: false }, () => undefined);
+    const note = gone.voice.querySelector('.strip-note');
+    expect(note?.textContent).toBe(meterStripNote);
+    expect(note?.getAttribute('role')).toBe('status');
+    // Not inside the hidden notes.
+    expect(note?.closest('.voice-notes')).toBeNull();
+    cleanup();
+    const ptt = mount({ ...inVoice('connected', 'channel-a'), mode: 'ptt', meter: false }, () => undefined);
+    expect(ptt.voice.querySelector('.strip-note')).toBeNull();
+  });
+
+  // The strip hides the notes: the button to hear the channel is its own.
+  it('shows Tap to hear the channel in the strip while connected or reconnecting with no playback, and only then', () => {
+    for (const phase of ['connected', 'reconnecting'] as const) {
+      const shown = mount({ ...inVoice(phase, 'channel-a'), playback: false }, () => undefined);
+      const button = within(shown.voice).getByRole('button', { name: hearLabel });
+      expect(button.closest('.voice-notes')).toBeNull();
+      cleanup();
+    }
+    for (const phase of ['connecting', 'unavailable', 'idle'] as const) {
+      const hidden = mount({ ...inVoice(phase, 'channel-a'), playback: false }, () => undefined);
+      expect(within(hidden.voice).queryByRole('button', { name: hearLabel })).toBeNull();
+      cleanup();
+    }
+    const playing = mount(inVoice('connected', 'channel-a'), () => undefined);
+    expect(within(playing.voice).queryByRole('button', { name: hearLabel })).toBeNull();
+  });
+
   it('opens the Voice view from the state button, and its Leave voice leaves', () => {
     let opened = 0;
     const { voice, calls } = mount(inVoice('connected', 'channel-a'), () => {
@@ -1746,5 +1882,166 @@ describe('the compact call workspace (issue #1498)', () => {
     } finally {
       set.mockRestore();
     }
+  });
+});
+
+// The share quality chooser beside Share screen (issue #1659).
+describe('the share quality menu', () => {
+  const joined = (patch: Partial<VoiceState> = {}): VoiceState => ({ ...inVoice('connected', 'c'), ...patch });
+
+  // The menu with a state of its own, as the strip keeps one in the client.
+  function Harness({ start }: { readonly start: ShareQuality }) {
+    const [quality, setQuality] = useState(start);
+    return (
+      <>
+        <ShareQualityMenu quality={quality} onChoose={setQuality} />
+        <output aria-label="chosen">{`${quality.resolution}/${String(quality.frameRate)}`}</output>
+      </>
+    );
+  }
+  const chosen = () => screen.getByLabelText('chosen').textContent;
+  const opener = () => screen.getByRole('button', { name: 'Share quality' });
+  const key = (el: HTMLElement, k: string) => { fireEvent.keyDown(el, { key: k }); };
+
+  it('sits beside Share screen as a menu button, and Share screen alone still shares at once', () => {
+    const { voice } = panel(joined(), 'c');
+    const split = voice.querySelector('.share-split');
+    expect(split).not.toBeNull();
+    expect(within(voice).getByRole('button', { name: 'Share screen' })).toBeTruthy();
+    const button = within(voice).getByRole('button', { name: 'Share quality' });
+    expect(button.getAttribute('aria-haspopup')).toBe('menu');
+    expect(button.getAttribute('aria-expanded')).toBe('false');
+  });
+
+  it('opens on a click with the current choice checked, and shows each choice with an estimate', () => {
+    render(<Harness start={{ resolution: '1080p', frameRate: 30 }} />);
+    fireEvent.click(opener());
+    expect(opener().getAttribute('aria-expanded')).toBe('true');
+    const checked = screen.getAllByRole('menuitemradio', { checked: true }).map((el) => el.textContent);
+    expect(checked).toHaveLength(2);
+    expect(checked[0]).toContain('1080p');
+    expect(checked[1]).toBe('30 fps');
+    const names = screen.getAllByRole('menuitemradio').map((el) => el.textContent);
+    expect(names.slice(0, 4).map((n) => n.split('about')[0])).toEqual(['Auto', '720p', '1080p', 'Source (up to 4K)']);
+    for (const name of names.slice(0, 4)) expect(name).toMatch(/about \d+ Mbps up \(estimate\)/);
+  });
+
+  it('chooses by a click and stays open for a frame rate; the choice is the one checked', () => {
+    render(<Harness start={{ resolution: '1080p', frameRate: 30 }} />);
+    fireEvent.click(opener());
+    fireEvent.click(screen.getByRole('menuitemradio', { name: /^Source/ }));
+    fireEvent.click(screen.getByRole('menuitemradio', { name: '60 fps' }));
+    expect(chosen()).toBe('source/60');
+    expect(screen.getByRole('menuitemradio', { name: /^Source/ }).getAttribute('aria-checked')).toBe('true');
+    expect(screen.getByText(sourceSixtyNote)).toBeTruthy();
+  });
+
+  it.each([
+    { what: 'Source at 30 fps', start: { resolution: 'source', frameRate: 30 }, shown: false },
+    { what: 'Source at 60 fps', start: { resolution: 'source', frameRate: 60 }, shown: true },
+    { what: '1080p at 60 fps', start: { resolution: '1080p', frameRate: 60 }, shown: false },
+  ] as const)('says the 4K60 caution only for $what', ({ start, shown }) => {
+    render(<Harness start={start} />);
+    fireEvent.click(opener());
+    expect(screen.queryByText(sourceSixtyNote) !== null).toBe(shown);
+  });
+
+  it('Auto is 30 fps: the frame rates are off and the choice says what Auto does', () => {
+    render(<Harness start={{ resolution: '1080p', frameRate: 60 }} />);
+    fireEvent.click(opener());
+    fireEvent.click(screen.getByRole('menuitemradio', { name: /^Auto/ }));
+    expect(chosen()).toBe('auto/30');
+    for (const name of ['15 fps', '30 fps', '60 fps']) expect(screen.getByRole('menuitemradio', { name }).hasAttribute('disabled')).toBe(true);
+    expect(screen.getByText(/1920 px across/)).toBeTruthy();
+  });
+
+  it('works by keyboard: Down opens it at the checked choice, arrows move, Enter chooses, Escape returns focus to the button', async () => {
+    render(<Harness start={{ resolution: '1080p', frameRate: 30 }} />);
+    opener().focus();
+    key(opener(), 'ArrowDown');
+    await act(async () => { await Promise.resolve(); });
+    expect(opener().getAttribute('aria-expanded')).toBe('true');
+    const items = () => screen.getAllByRole('menuitemradio');
+    expect(document.activeElement).toBe(items()[2]);
+    key(document.activeElement as HTMLElement, 'ArrowDown');
+    expect(document.activeElement).toBe(items()[3]);
+    // Enter or Space on a focused button is a click, which is what chooses.
+    fireEvent.click(document.activeElement as HTMLElement);
+    expect(chosen()).toBe('source/30');
+    key(document.activeElement as HTMLElement, 'ArrowUp');
+    expect(document.activeElement).toBe(items()[2]);
+    key(document.activeElement as HTMLElement, 'Home');
+    expect(document.activeElement).toBe(items()[0]);
+    key(document.activeElement as HTMLElement, 'End');
+    expect(document.activeElement).toBe(items()[items().length - 1]);
+    key(document.activeElement as HTMLElement, 'Escape');
+    expect(opener().getAttribute('aria-expanded')).toBe('false');
+    expect(document.activeElement).toBe(opener());
+  });
+
+  it('wraps at the ends and skips the frame rates while Auto is chosen', async () => {
+    render(<Harness start={{ resolution: 'auto', frameRate: 30 }} />);
+    key(opener(), 'ArrowUp');
+    await act(async () => { await Promise.resolve(); });
+    const items = () => screen.getAllByRole('menuitemradio').filter((el) => !el.hasAttribute('disabled'));
+    expect(document.activeElement).toBe(items()[0]);
+    key(document.activeElement as HTMLElement, 'ArrowUp');
+    expect(document.activeElement).toBe(items()[items().length - 1]);
+    expect(items()).toHaveLength(4);
+  });
+
+  it('closes on a click outside, without taking focus', () => {
+    render(<><Harness start={{ resolution: '1080p', frameRate: 30 }} /><button type="button">elsewhere</button></>);
+    fireEvent.click(opener());
+    fireEvent.mouseDown(screen.getByRole('button', { name: 'elsewhere' }));
+    expect(opener().getAttribute('aria-expanded')).toBe('false');
+  });
+
+  it('the Voice options selects offer Auto and the relabelled Source, bound to the same choice', () => {
+    const { voice } = panel(joined({ shareQuality: { resolution: 'auto', frameRate: 30 } }), 'c');
+    fireEvent.click(within(voice).getByRole('button', { name: 'Voice options' }));
+    const resolution = within(voice).getByLabelText<HTMLSelectElement>('Share resolution');
+    expect(Array.from(resolution.options).map((o) => [o.value, o.textContent])).toEqual([['auto', 'Auto'], ['720p', '720p'], ['1080p', '1080p'], ['source', 'Source (up to 4K)']]);
+    expect(resolution.value).toBe('auto');
+    const rate = within(voice).getByLabelText<HTMLSelectElement>('Share frame rate');
+    expect(rate.disabled).toBe(true);
+    expect(rate.value).toBe('30');
+  });
+
+  it('names the notes it shows on the choices they are about', () => {
+    render(<Harness start={{ resolution: 'source', frameRate: 30 }} />);
+    fireEvent.click(opener());
+    const describes = () => screen.getAllByRole('menuitemradio').filter((el) => el.hasAttribute('aria-describedby')).map((el) => `${el.textContent.split('about')[0] ?? ''}>${el.getAttribute('aria-describedby') ?? ''}`);
+    expect(describes()).toEqual([]);
+    fireEvent.click(screen.getByRole('menuitemradio', { name: '60 fps' }));
+    expect(describes()).toEqual(['Source (up to 4K)>share-chooser-caution', '60 fps>share-chooser-caution']);
+    expect(document.getElementById('share-chooser-caution')?.textContent).toBe(sourceSixtyNote);
+    fireEvent.click(screen.getByRole('menuitemradio', { name: /^Auto/ }));
+    expect(describes()).toEqual(['Auto>share-chooser-auto-note']);
+    expect(document.getElementById('share-chooser-auto-note')?.textContent).toMatch(/1920 px across/);
+  });
+
+  // The sharer's readout of an Auto share is held to what Auto settled to, which
+  // the state says: the Asked line and the shortfall reason both stand.
+  it.each([
+    { name: 'Source', settled: { resolution: 'source', frameRate: 30 }, sample: { width: 1280, height: 720, fps: 10, limitation: 'cpu', captured: { width: 1920, height: 1080 } }, asked: 'Asked source size · 30 fps', reason: 'Limited by CPU' },
+    { name: '1080p', settled: { resolution: '1080p', frameRate: 30 }, sample: { width: 1280, height: 720, fps: 30, limitation: 'bandwidth', captured: { width: 2560, height: 1440 } }, asked: 'Asked 1080p · 30 fps', reason: 'Limited by bandwidth' },
+  ] as const)('an Auto share settled to $name shows the Asked line and a shortfall reason', async ({ settled, sample, asked, reason }) => {
+    vi.useFakeTimers();
+    try {
+      const { voice, client } = panel(joined({ shareQuality: { resolution: 'auto', frameRate: 30 }, share: { kind: 'sharing', audio: false, settled } }), 'c');
+      vi.spyOn(client, 'readShareStats').mockResolvedValue(sample);
+      for (let i = 0; i < 9; i++) await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+      expect(within(voice).getByRole('status', { name: 'Share quality' }).textContent).toContain(asked);
+      expect(within(voice).getByRole('status', { name: 'Share quality' }).textContent).toContain(reason);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('is not offered while sharing, where Stop sharing stands alone', () => {
+    const { voice } = panel(joined({ share: { kind: 'sharing', audio: false } }), 'c');
+    expect(within(voice).queryByRole('button', { name: 'Share quality' })).toBeNull();
+    expect(within(voice).getByRole('button', { name: 'Stop sharing' })).toBeTruthy();
   });
 });

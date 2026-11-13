@@ -112,10 +112,10 @@ describe('local storage', () => {
     // callers name the notification and appearance preferences' keys, the setup
     // card's (a per-account mark that the card was put off), the channel
     // arrangement's (issue #1493), the voice mode and share quality, the call
-    // view's non-video filter (issue #1487) and the talk key's name (issue #1382).
+    // view's non-video filter (issue #1487), the talk key's name (issue #1382) and the push registration's id (issue #1826).
     const api = withoutComments(sources['./api.ts'] ?? '');
-    expect(api.match(/credentials\.(read|write)Preference\(\s*(?!notificationPreferencesKey\(|appearancePreferencesKey\(|arrangementKey\(|setupCardKey\(|voiceModeKey\b|shareQualityKey\b|hideNonVideoKey\b|talkKeyLabelKey\b)/g) ?? []).toEqual([]);
-    expect(api.match(/credentials\.(read|write)Preference\(/g)?.length).toBe(16);
+    expect(api.match(/credentials\.(read|write)Preference\(\s*(?!notificationPreferencesKey\(|appearancePreferencesKey\(|arrangementKey\(|setupCardKey\(|voiceModeKey\b|shareQualityKey\b|hideNonVideoKey\b|talkKeyLabelKey\b|pushRegistrationKey\()/g) ?? []).toEqual([]);
+    expect(api.match(/credentials\.(read|write)Preference\(/g)?.length).toBe(18);
   });
 
   it('is not missed by the rules: a bare test of each', () => {
@@ -623,8 +623,9 @@ describe('the diagnostic ring', () => {
       }
     }
     // Every recording site was seen: two failures, an open, a close, a
-    // reconnect, a voice state and a device error.
-    expect(calls).toBe(7);
+    // reconnect, a voice state and three device errors (a microphone refused,
+    // a level meter the browser would not start, and playback refused a tap).
+    expect(calls).toBe(9);
   });
 
   it('is not missed by the rules: a bare test of each', () => {
@@ -757,12 +758,13 @@ const seamForbidden: readonly (readonly [string, RegExp])[] = [
 // route.ts alone reads location.origin: it builds the address without its
 // fragment for the history entry, and an invite link, from the address bar
 // itself, not from the server's origin (issue #440).
-// The desktop adapter is a platform implementation too: its copyText is the
-// page's own clipboard write, which main permits for the app window right
+// The desktop adapter is a platform implementation too: its copyText (kept in
+// platform/desktop/clipboard.ts, which the adapter and the desktop screens
+// share) is the page's own clipboard write, which main permits for the app window right
 // after a click (issue #947).
 const seamExceptions: Readonly<Record<string, readonly string[]>> = {
   'the page origin or protocol': ['./route.ts'],
-  'the clipboard': ['./platform/desktop/index.ts'],
+  'the clipboard': ['./platform/desktop/clipboard.ts'],
 };
 
 describe('the platform seam', () => {
@@ -849,5 +851,28 @@ describe('times and dates', () => {
       .filter(([path, code]) => path !== './time.ts' && /\.toLocale(Date|Time)?String\(|\bIntl\.DateTimeFormat\b/.test(withoutComments(code)))
       .map(([path]) => path);
     expect(formatting).toEqual([]);
+  });
+});
+
+// Windows' and macOS's filesystems ignore case, so './Identity' found
+// identity.ts there and the desktop build broke on Windows (issue #1801). No two
+// modules here may differ only in case once the extension is dropped.
+const allModules = Object.keys(import.meta.glob(['./**/*.ts', './**/*.tsx']));
+
+describe('module names', () => {
+  it('finds the modules', () => {
+    expect(allModules.length).toBeGreaterThan(5);
+  });
+
+  it('has no two that differ only in case', () => {
+    const seen = new Map<string, string>();
+    const clashes: string[] = [];
+    for (const path of allModules) {
+      const key = path.replace(/\.tsx?$/, '').toLowerCase();
+      const other = seen.get(key);
+      if (other !== undefined && other.replace(/\.tsx?$/, '') !== path.replace(/\.tsx?$/, '')) clashes.push(`${other} and ${path}`);
+      seen.set(key, path);
+    }
+    expect(clashes).toEqual([]);
   });
 });

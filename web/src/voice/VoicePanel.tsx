@@ -59,11 +59,12 @@ import { cameraNote, cameraOffForYou, cameraOn, listenOnlyCamera, watchOnlyCamer
 import { CallView, callTiles, type Tile } from './CallView';
 import { CameraTest } from './CameraTest';
 import type { Person } from '../useLiveChannel';
-import type { Phase, Processing } from './connection';
+import { openAudio, type Phase, type Processing } from './connection';
 import { clampTail, maxTail, releasePage, releaseStep } from './gate';
 import { keyLabel, talkKeyForMouseButton } from './keys';
 import { occupants, qualityLabel, sharers, type Occupant } from './presence';
 import { endedNote, ownPageNote, resumedNote, resumingNote, sharedNote, shortShareNote, soundNote, type ShareFrameRate, type ShareResolution } from './share';
+import { ShareQualityMenu, autoNote, cautionFor, estimateWords, resolutionWords, shareFrameRates, shareResolutions } from './ShareQualityMenu';
 import { ShareReadout, ShareView } from './ShareView';
 import { nobody, type InVoice } from './useOccupancy';
 import type { VoiceControl } from './useVoice';
@@ -178,6 +179,14 @@ export function VoicePanel({
   const about = useRef<HTMLElement>(null);
   const [toAbout, setToAbout] = useState(false);
   const inVoice = state.phase !== 'idle' && state.phase !== 'stopped';
+  // The open microphone has no level meter to hear with, while a connection
+  // holds the microphone (as VoiceStatus's captured): said in the notes, and
+  // in the phone's strip, where the notes are hidden.
+  const noMeter =
+    (state.phase === 'connected' || state.phase === 'reconnecting') && state.mode === 'open' && !state.meter && !state.listenOnly && !state.watchOnly && !state.missing;
+  // The browser holds playback back until a tap (iOS Safari): said by a
+  // button, in the notes and in the phone's strip, which hides them.
+  const noPlayback = (state.phase === 'connected' || state.phase === 'reconnecting') && !state.playback && !state.companion;
   // The phone layout's Voice button and strip follow it (issue #929).
   const reportLive = useContext(VoiceLive);
   const micTestShown = useContext(MicTestShown);
@@ -559,7 +568,7 @@ export function VoicePanel({
                 <TalkControl voice={voice} silenced={silenced} />
                 <ModeToggle voice={voice} />
                 {state.watchOnly && !state.listenOnly && !state.viewer ? (
-                  <button type="button" onClick={() => { void client.useMicrophone(); }} disabled={state.phase !== 'connected'}>
+                  <button type="button" onClick={() => { void client.useMicrophone(openAudio()); }} disabled={state.phase !== 'connected'}>
                     Use microphone
                   </button>
                 ) : null}
@@ -601,6 +610,12 @@ export function VoicePanel({
             )}
           </div>
         </div>
+        {strip && noMeter ? (
+          <p role="status" className="hint strip-note">
+            {meterStripNote}
+          </p>
+        ) : null}
+        {strip && noPlayback ? <HearButton voice={voice} /> : null}
       </div>
 
       <div className="voice-notes" hidden={strip}>
@@ -609,6 +624,7 @@ export function VoicePanel({
         {state.reportNote === 'retrying' ? <p role="status" className="hint">Reporting your talking is slow; retrying</p> : null}
         {inVoice ? (
           <>
+            {!strip && noPlayback ? <HearButton voice={voice} /> : null}
             {cutOff ? <p role="status" className="hint">{cutOffNote}</p> : null}
             <CameraNote voice={voice} />
             {state.outputNote === null ? null : (
@@ -620,6 +636,11 @@ export function VoicePanel({
             {state.missing && state.why === null ? (
               <p role="status" className="hint">
                 {missingNote}
+              </p>
+            ) : null}
+            {noMeter ? (
+              <p role="status" className="hint">
+                {meterNote}
               </p>
             ) : null}
             {state.mode === 'ptt' && silenced && !state.listenOnly && !state.watchOnly ? (
@@ -969,9 +990,27 @@ function Volumes({ voice, others }: { readonly voice: VoiceControl; readonly oth
   );
 }
 
+// The tap that lets the browser play the channel. startAudio is called inside
+// the click itself: no await, timer or effect comes before it, or the browser
+// no longer counts it as the gesture.
+function HearButton({ voice }: { readonly voice: VoiceControl }) {
+  return (
+    <button type="button" onClick={() => { voice.client.startAudio(); }}>
+      {hearLabel}
+    </button>
+  );
+}
+
+export const hearLabel = 'Tap to hear the channel';
+
 // What the notes say while the microphone is missing.
 export const cutOffNote = 'Voice server unreachable. You may be cut off.';
 export const missingNote = 'Your microphone was disconnected. Choose a microphone in Voice options.';
+// The open microphone listens through the level meter; a browser that refused the
+// audio context behind it leaves the gate shut (push to talk is unaffected).
+// The strip, which has one row and hides the notes, says it shorter.
+export const meterNote = 'Open microphone needs the level meter, which this browser would not start, so nothing is sent. Switch to Push to talk.';
+export const meterStripNote = 'Open mic needs the level meter; use Push to talk.';
 
 // The values of the microphone list: System default, a device by id, and
 // the entry shown while nothing is chosen (the microphone went), so that
@@ -1342,30 +1381,37 @@ function Options({ voice, open, sharable, about, others, cameraAllowed }: {
             Share resolution
             <select
               value={state.shareQuality.resolution}
+              aria-describedby="voice-share-estimate"
               onChange={(e) => {
                 const resolution = e.target.value as ShareResolution;
                 void client.setShareQuality({ ...state.shareQuality, resolution });
               }}
             >
-              <option value="720p">720p</option>
-              <option value="1080p">1080p</option>
-              <option value="source">Source</option>
+              {shareResolutions.map((resolution) => (
+                <option key={resolution} value={resolution}>{resolutionWords[resolution]}</option>
+              ))}
             </select>
           </label>
           <label>
             Share frame rate
             <select
               value={state.shareQuality.frameRate}
+              disabled={state.shareQuality.resolution === 'auto'}
               onChange={(e) => {
                 const frameRate = Number(e.target.value) as ShareFrameRate;
                 void client.setShareQuality({ ...state.shareQuality, frameRate });
               }}
             >
-              <option value={15}>15 fps</option>
-              <option value={30}>30 fps</option>
-              <option value={60}>60 fps</option>
+              {shareFrameRates.map((frameRate) => (
+                <option key={frameRate} value={frameRate}>{String(frameRate)} fps</option>
+              ))}
             </select>
           </label>
+          <p id="voice-share-estimate" className="hint">
+            {resolutionWords[state.shareQuality.resolution]}: {estimateWords(state.shareQuality)}.
+            {state.shareQuality.resolution === 'auto' ? ` ${autoNote}` : null}
+            {` ${cautionFor(state.shareQuality) ?? ''}`}
+          </p>
           <p className="hint">{soundNote(features)}</p>
           <p className="hint">{ownPageNote}</p>
         </section>
@@ -1383,10 +1429,13 @@ function ShareButton({ voice }: { readonly voice: VoiceControl }) {
   const share = state.share;
   if (state.listenOnly || !features.canShare || share.kind === 'stopping') return null;
   if (share.kind === 'idle') return (
-    <button type="button" onClick={() => { client.startShare(); }} disabled={state.phase !== 'connected'}>
-      <Glyph name="screen" />
-      <span className="label">Share screen</span>
-    </button>
+    <span className="share-split">
+      <button type="button" onClick={() => { client.startShare(); }} disabled={state.phase !== 'connected'}>
+        <Glyph name="screen" />
+        <span className="label">Share screen</span>
+      </button>
+      <ShareQualityMenu quality={state.shareQuality} onChoose={(next) => { void client.setShareQuality(next); }} />
+    </span>
   );
   return (
     <button type="button" className="sharing" onClick={() => { client.stopShare(); }}>
@@ -1422,6 +1471,7 @@ function ShareNotes({ voice, onMore, othersShare }: { readonly voice: VoiceContr
   const { state, features, client } = voice;
   const share = state.share;
   if (state.listenOnly) return null;
+  const inCall = state.phase !== 'idle' && state.phase !== 'stopped';
   const line = (
     <p className="hint share-line voice-supplemental">
       {shortShareNote(features)}{' '}
@@ -1436,7 +1486,7 @@ function ShareNotes({ voice, onMore, othersShare }: { readonly voice: VoiceContr
       return (
         <>
           <p role="status" className="sharing-note">{sharedNote(share.audio, features)}</p>
-          <p className="hint voice-supplemental"><ShareReadout client={client} direction="sent" prefix="Sending: " /></p>
+          <p className="hint voice-supplemental"><ShareReadout client={client} direction="sent" prefix="Sending: " asked={state.shareQuality.resolution === 'auto' ? share.settled : { resolution: state.shareQuality.resolution, frameRate: state.shareQuality.frameRate }} /></p>
           {share.resumed === true ? <p className="hint">{resumedNote}</p> : null}
         </>
       );
@@ -1452,7 +1502,7 @@ function ShareNotes({ voice, onMore, othersShare }: { readonly voice: VoiceContr
       return (
         <>
           {line}
-          {share.ended === null ? null : share.ended === 'self' ? <StoppedNote key="self" text={endedNote(share.ended)} othersShare={othersShare} /> : <p role="status" className="hint">{endedNote(share.ended)}</p>}
+          {share.ended === null ? null : share.ended === 'self' ? <StoppedNote key="self" text={endedNote(share.ended, inCall)} othersShare={othersShare} /> : <p role="status" className="hint">{endedNote(share.ended, inCall)}</p>}
         </>
       );
   }

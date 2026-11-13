@@ -14,7 +14,7 @@ async function settled(world: World, page: Page, sentinel: string): Promise<void
   await expect(messages(page).getByText(sentinel)).toHaveCount(1);
 }
 
-test('P3-02 a message sent in the browser appears once in both contexts and once in the history', async ({ meet, world }) => {
+test('@cross P3-02 a message sent in the browser appears once in both contexts and once in the history', async ({ meet, world }) => {
   const browser = (await meet()).page;
   const guest = (await meet()).page;
   await signIn(browser, world, world.tokens.browser, 'browser-test');
@@ -41,7 +41,7 @@ test('P3-02 a message sent in the browser appears once in both contexts and once
   await expect(messages(guest).getByText(body)).toHaveCount(1);
 });
 
-test('P3-02 a message posted through the API as nick-test appears once in the browser', async ({ meet, world }) => {
+test('@cross P3-02 a message posted through the API as nick-test appears once in the browser', async ({ meet, world }) => {
   const { page } = await meet();
   await signIn(page, world, world.tokens.browser, 'browser-test');
 
@@ -57,7 +57,7 @@ test('P3-02 a message posted through the API as nick-test appears once in the br
   expect((await history(world, world.tokens.browser, 'general')).filter((m) => m.body === body)).toHaveLength(1);
 });
 
-test('F14 a typed draft survives a reload, and sending it leaves an empty box after the next', async ({ meet, world }) => {
+test('@cross F14 a typed draft survives a reload, and sending it leaves an empty box after the next', async ({ meet, world }) => {
   const { page } = await meet();
   await signIn(page, world, world.tokens.browser, 'browser-test');
   const box = page.getByLabel('Message #general');
@@ -74,7 +74,7 @@ test('F14 a typed draft survives a reload, and sending it leaves an empty box af
   await expect(page.getByLabel('Message #general')).toHaveValue('');
 });
 
-test('F26 a posted URL is a link that opens safely, and a javascript: string is not', async ({ meet, world }) => {
+test('@cross F26 a posted URL is a link that opens safely, and a javascript: string is not', async ({ meet, world }) => {
   const { page } = await meet();
   await signIn(page, world, world.tokens.browser, 'browser-test');
 
@@ -151,7 +151,7 @@ test('F15 with 30 messages held the log is one tab stop, and no control is named
   await expect(messages(page).getByRole('button', { name: /^Reply to owner-.+'s message, \d\d:\d\d$/ }).first()).toBeAttached();
 });
 
-test('F15 arrow keys move between messages, and a keyboard alone edits and replies', async ({ meet, secrets, world }) => {
+test('@cross F15 arrow keys move between messages, and a keyboard alone edits and replies', async ({ meet, secrets, world }) => {
   const { channel, owner, member } = await logCommunity(world, secrets, 'keys');
   await post(world, owner.token, channel, 'f15 first from the owner');
   const { page } = await meet({ viewport: { width: 1440, height: 900 } });

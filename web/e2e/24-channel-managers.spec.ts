@@ -1,5 +1,5 @@
 import type { BrowserContextOptions, Locator, Page } from '@playwright/test';
-import { createChannelResponse, listChannelMembersResponseV1, type CreateChannelRequest } from '../src/schema/channel';
+import { createChannelResponse, listChannelMembersResponseV1, type CreateChannelRequest, type PutChannelMemberRequestV1 } from '../src/schema/channel';
 import { createCredentialResponseV1, createPrincipalResponse, type CreateCredentialRequestV1, type CreatePrincipalRequest } from '../src/schema/credential';
 import { whoAmIResponseV1 } from '../src/schema/principal';
 import { channelButton, credentialField, expect, showView, signIn, statusLine, test } from './fixtures';
@@ -195,3 +195,50 @@ for (const [size, options, phone] of removeSizes) {
     await expect(channelButton(gone, channel)).toHaveCount(0, { timeout: 10_000 });
   });
 }
+
+// Issue #1670: a manager who is not an operator is offered neither Make
+// private, Make default nor Archive: the menu is Rename, Set topic, Leave and
+// Favorite. The requests behind the three hidden items, sent from the
+// manager's page with its own credential, are refused 403 `forbidden` (as
+// TestChannelSettingsRefusals and TestArchivePermissionMatrix have it).
+test('C1670 a manager who is not an operator is not offered Make private, Make default or Archive, and the server refuses each', async ({ meet, secrets, world }) => {
+  // Digits only, so the name is as wide as it is long (issue #1647).
+  const suffix = String(Date.now()).slice(-8);
+  const channel = `c1670-${suffix}`;
+  const request: CreateChannelRequest = { name: channel };
+  const made = (await ok(world, world.tokens.operator, 'POST', '/v0/channels', createChannelResponse, request)).channel;
+  const name = `m${suffix}`;
+  const principal: CreatePrincipalRequest = { kind: 'human', name };
+  const id = (await ok(world, world.tokens.operator, 'POST', '/v0/principals', createPrincipalResponse, principal)).principal.id;
+  const credential: CreateCredentialRequestV1 = { label: name };
+  const { token } = await ok(world, world.tokens.operator, 'POST', `/v1/principals/${String(id)}/credentials`, createCredentialResponseV1, credential);
+  secrets.push(token);
+  const membership: PutChannelMemberRequestV1 = { manages: true, can_decide: false };
+  await done(world, 'PUT', `/v1/channels/${encodeURIComponent(channel)}/members/${String(id)}`, membership);
+
+  const { page } = await meet({ viewport: { width: 1440, height: 900 } });
+  await signIn(page, world, token, name);
+  await expect(nav(page).getByText('manages', { exact: true })).toBeVisible();
+  const row = nav(page).locator('li').filter({ has: page.getByRole('button', { name: channel, exact: true }) });
+  await row.getByRole('button', { name: `Actions for ${channel}` }).click();
+  await expect(row.getByRole('menuitem')).toHaveText(['Rename channel…', 'Set topic', 'Leave channel', 'Favorite']);
+  await page.keyboard.press('Escape');
+
+  // The three hidden actions, each from this page with this page's credential.
+  const asked: readonly (readonly [string, object])[] = [
+    ['Make private', { visibility: 'private' }],
+    ['Make default', { default: true }],
+    ['Archive', { archived: true }],
+  ];
+  for (const [action, body] of asked) {
+    const reply = await page.evaluate(
+      async ({ path, bearer, payload }) => {
+        const res = await fetch(path, { method: 'PUT', headers: { Authorization: `Bearer ${bearer}`, 'Content-Type': 'application/json', Accept: 'application/json' }, body: JSON.stringify(payload) });
+        return { status: res.status, text: await res.text() };
+      },
+      { path: `/v1/channels/${String(made.id)}/settings`, bearer: token, payload: body },
+    );
+    expect(reply.status, action).toBe(403);
+    expect((JSON.parse(reply.text) as { code?: unknown }).code, action).toBe('forbidden');
+  }
+});

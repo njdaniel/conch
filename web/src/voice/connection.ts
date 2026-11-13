@@ -69,15 +69,24 @@
 // it is shown. Whether the page captures or sends video is read from the
 // local track alone (S5). The microphone and the camera are independent:
 // mute, deafen and the share leave the camera as it is.
+//
+// On the Linux desktop the person's own voice is the helper's, and this client
+// is the screen companion (issue #1581, linux-desktop.md §6.4): a second
+// participant, p<id>.screen, connected only with a grant main hands over, only
+// after a Share or Watch act, publishing the screen and nothing else, and
+// subscribing to no voice. It never reconnects by itself: every grant needs a
+// new act, and any end (its own, main's, a lost connection, a renewed room)
+// stops it and the share with it, in words.
 import type { CameraClaimResult, ShareClaimResult, TransmitAnswer, VoiceSessionResult, VoiceViewerResult } from '../api';
+import type { CompanionEndReason, CompanionGrantError, CompanionGrantResult, CompanionShareUnavailable } from '../platform/desktop/bridge';
 import type { VoicePresenceV2, VoiceTransmitState } from '../schema/voice';
 import type { Clock } from '../state/feed';
 import { CameraClient, cameraOff, cameraOn, findCamera, type Camera, type CameraLoss, type CameraProfile, type CameraRoom, type CameraState } from './camera';
 import { afterDisconnect, afterRefusal, afterViewerRefusal, cameraAfter, retryDelay, type DisconnectCause, type Next } from './disconnect';
 import { clampTail, defaultTail, TransmitGate, type GateMode, type GateOptions } from './gate';
-import { cameraHolders, occupants, principalOf, sharers } from './presence';
+import { cameraHolders, occupants, personOf, principalOf, sharers } from './presence';
 import { ReportQueue, type ReportEvent } from './reports';
-import { defaultShareQuality, idleShare, qualityLaterNote, resumeLimit, ScreenShare, type ScreenEnd, type ShareDirection, type ShareQuality, type ShareRoom, type ShareSample, type ShareState } from './share';
+import { autoFrameRate, defaultShareQuality, idleShare, qualityLaterNote, resumeLimit, ScreenShare, type ScreenEnd, type SettledQuality, type ShareDirection, type ShareQuality, type ShareRoom, type ShareSample, type ShareState } from './share';
 import { record } from '../diagnostics';
 
 // The names a browser gives the failures of a microphone it was asked for
@@ -197,6 +206,16 @@ export interface RoomEvents {
   // The microphone was lost: its capture ended, or the device chosen is no
   // longer listed. The room has stopped the capture.
   readonly onMicrophoneLost: () => void;
+  // Whether the level meter (the tap on the microphone) works. Without it
+  // the open microphone cannot hear speech, so its gate stays shut.
+  // When it does not, name is the browser's error name, if it gave one.
+  readonly onMeter: (available: boolean, name?: string) => void;
+  // Whether this page may play audio now: the room's canPlaybackAudio, and no
+  // voice element the browser holds paused (#1823). Told after the join and
+  // whenever it changes. A browser such as iOS Safari
+  // plays nothing until the page has been tapped; Room.startAudio, called
+  // from the tap, lets it.
+  readonly onPlayback: (canPlay: boolean) => void;
   // The browser's devices changed: microphones came or went.
   readonly onDevicesChanged: () => void;
   // The output in use went, and the SDK moved every voice to this one.
@@ -231,10 +250,18 @@ export interface Room extends ShareRoom, CameraRoom {
   // Resolves once the room is joined and, when publish is set, the
   // microphone track is published and muted. It rejects if any of that fails
   // (a microphone refused included).
-  connect: (url: string, token: string, roomName: string, publish: boolean, events: RoomEvents) => Promise<void>;
+  //
+  // audio is the audio context the level meter listens with (issue #1794),
+  // made and resumed inside the Join gesture, which is the only place iOS
+  // lets one run. The room uses it and never closes it: the client does, once,
+  // when the person leaves or a join fails for good. Absent, or already
+  // closed, the room makes its own.
+  connect: (url: string, token: string, roomName: string, publish: boolean, events: RoomEvents, audio?: AudioContext | null) => Promise<void>;
   // Captures and publishes the microphone, muted, on a connection made
   // without it (watch only).
-  publishMicrophone: () => Promise<void>;
+  // audio is the meter's context made in the click that asked for it (issue
+  // #1794), as at connect.
+  publishMicrophone: (audio?: AudioContext | null) => Promise<void>;
   // The microphone to capture: a device by id, captured exactly or not at
   // all, or null for the system default. Set before connecting.
   setMicrophone: (choice: string | null) => void;
@@ -267,11 +294,19 @@ export interface Room extends ShareRoom, CameraRoom {
   // and every other held to the lowest; unwatched streams get nothing
   // (voice-multi-share.md §7.1, §8). Microphones are always subscribed.
   setWatches: (watched: ReadonlySet<number>, focused: number | null) => void;
+  // Makes this connection the desktop's screen companion (issue #1581), before
+  // it connects: no voice is subscribed, no microphone is captured or
+  // published, and the share's capture asks for no sound. Absent on a room that
+  // is never the companion.
+  setCompanion?: (on: boolean) => void;
   // Plays one publisher's watched share into these elements, or into none.
   attachStream: (principal: number, sink: ShareSink | null) => void;
   // Opens or closes the track: unmute or mute. Muted again after any republish.
   setSending: (on: boolean) => Promise<void>;
   setDeafened: (on: boolean) => void;
+  // Lets the browser play the room's audio. It must be called from the
+  // gesture itself (a tap): the promise rejects if the browser still refuses.
+  startAudio: () => Promise<void>;
   // How loud this page plays one person's microphone, by principal, 0 to 1:
   // now and whenever their microphone arrives later on this connection.
   // Deafen silences everyone whatever their volume.
@@ -315,6 +350,15 @@ export interface VoiceState {
   // connected as the viewer, p<id>.view, which publishes nothing and so
   // displaces nobody.
   readonly viewer: boolean;
+  // The desktop's screen companion (issue #1581): connected as p<id>.screen,
+  // which publishes a screen and nothing else and subscribes to no voice.
+  readonly companion: boolean;
+  // Why the grant for it was refused, or null (the words are in why).
+  readonly companionRefusal: CompanionGrantError | null;
+  // Why this desktop cannot share a screen, as the grant said (issue #1580):
+  // the share is not tried (no picker is opened), though watching works. Null
+  // until a grant says so; the next join clears it.
+  readonly companionShareUnavailable: CompanionShareUnavailable | null;
   // The gate is open: the key is held (or in its release delay), or the open
   // microphone hears speech. Nothing may be sent yet: see transmitting.
   readonly talking: boolean;
@@ -350,6 +394,14 @@ export interface VoiceState {
   // The microphone was lost, or a switch failed: nothing is captured and the
   // gate is blocked until the person chooses a microphone.
   readonly missing: boolean;
+  // Whether the microphone's level can be read: false when the browser
+  // refused the audio context that reads it. The open microphone needs it;
+  // push to talk does not.
+  readonly meter: boolean;
+  // Whether this page may play the channel's audio: false while the browser
+  // holds playback back until a tap (iOS Safari). VoiceClient.startAudio
+  // asks for it from the tap.
+  readonly playback: boolean;
   // Whether this browser lets the page choose the speakers (issue #660);
   // the outputs it lists, or null while they are not read; the output chosen
   // and in use, null being the system default; and what the page says of a
@@ -376,6 +428,21 @@ export interface VoiceState {
   readonly cameraTracks: ReadonlySet<number>;
 }
 
+// What the screen companion needs of the desktop shell: the grant main hands
+// over (asked for only on the person's act), the end of the companion, main's
+// word that it ended, and the native voice's deafen, which the companion's
+// playback of watched shares follows (the helper owns the person's deafen).
+export interface CompanionEnv {
+  readonly grant: (channel: string) => Promise<CompanionGrantResult>;
+  // Arms the share allowance: called synchronously at the start of the Share
+  // click (issue #1580), before the grant.
+  readonly arm: () => Promise<unknown>;
+  readonly end: () => Promise<unknown>;
+  readonly onEnd: (listener: (reason: CompanionEndReason) => void) => () => void;
+  readonly deafened: () => boolean;
+  readonly onDeafened: (listener: () => void) => () => void;
+}
+
 export interface VoiceEnv {
   readonly clock: Clock;
   readonly random: () => number;
@@ -384,9 +451,12 @@ export interface VoiceEnv {
   // beside another client is refused, never made as the person's own p<id>.
   readonly createViewer?: (channel: string) => Promise<VoiceViewerResult>;
   readonly removeViewer?: (channel: string) => Promise<unknown>;
+  // The desktop's screen companion (issue #1581), over the native voice
+  // bridge. Absent in the browser, which never connects as the companion.
+  readonly companion?: CompanionEnv;
   readonly report: (channel: string, state: VoiceTransmitState, signal: AbortSignal) => Promise<TransmitAnswer>;
   readonly newRoom: () => Room;
-  readonly claimShare: (channel: string, quality?: ShareQuality) => Promise<ShareClaimResult>;
+  readonly claimShare: (channel: string, quality?: SettledQuality) => Promise<ShareClaimResult>;
   // Releases the share whose claim started at startedAt (issue #487).
   readonly stopShare: (channel: string, startedAt: string) => Promise<unknown>;
   // The camera's claim, un-named or naming the claim it continues, and its
@@ -422,6 +492,28 @@ export interface VoiceEnv {
 export const reconnectLimit = 20_000;
 // A connection that lasted this long starts the retry wait over.
 export const healthyAfter = 30_000;
+// openAudio makes the level meter's audio context and resumes it, in this
+// call, with nothing awaited before: iOS Safari starts a context suspended
+// unless it was made and resumed inside a user gesture, and the meter is made
+// long after the Join tap (issue #1794). Called first in the Join click. A
+// browser that has none, or refuses one, gets null: the room then makes its
+// own, and a refusal there is the meter note's (issue #1795).
+export function openAudio(): AudioContext | null {
+  if (typeof AudioContext !== 'function') return null;
+  try {
+    const context = new AudioContext();
+    void context.resume().catch(() => undefined);
+    return context;
+  } catch {
+    return null;
+  }
+}
+
+// closeAudio lets a context go; a failure to close is not news.
+function closeAudio(audio: AudioContext | null): void {
+  if (audio !== null) void audio.close().catch(() => undefined);
+}
+
 // How often the microphone level is read, for the open microphone's gate, and
 // how often the meter is told of it. The gate's read was every 50 ms until
 // issue #965: an onset waited up to that long before the gate opened.
@@ -434,6 +526,58 @@ const leaveDrain = 1000;
 // reported.
 export const reportWait = 1000;
 
+// What the desktop offers for a share (Q-D4-3 on #1578, lifted by Nick on
+// 2026-11-11, #1772): 720p30, the default, 1080p30, 1080p60 and Source at 30
+// and 60 fps. #1584 still measures the real numbers and may hide a choice
+// again; the sharer's Sending line (the browser's ShareReadout, fed from the
+// companion's own publication stats) says what is actually sent. Any other
+// choice is taken as the default, Auto (issue #1659) among them: the desktop
+// never offers it and reads a stored one as 720p30. The companion captures
+// and publishes through the same sdk.ts rows as the browser (shareAsk,
+// shareTops, contentHint), so each choice means what it means there.
+export const companionDefaultQuality: ShareQuality = { resolution: '720p', frameRate: 30 };
+export const companionQualities: readonly ShareQuality[] = [
+  companionDefaultQuality,
+  { resolution: '1080p', frameRate: 30 },
+  { resolution: '1080p', frameRate: 60 },
+  { resolution: 'source', frameRate: 30 },
+  { resolution: 'source', frameRate: 60 },
+];
+export function companionQuality(quality: ShareQuality): ShareQuality {
+  return companionQualities.find((q) => q.resolution === quality.resolution && q.frameRate === quality.frameRate) ?? companionDefaultQuality;
+}
+
+// Why no grant was given, in words (CompanionGrantError). The one table: the
+// strip's notes say the same words (native/words.ts).
+export const companionRefusals: Readonly<Record<CompanionGrantError, string>> = {
+  'not-in-voice': 'Join voice first, then share or watch a screen.',
+  'not-yet': 'Voice is still connecting; try again in a moment',
+  elsewhere: 'Your screen is being shared from another device of yours',
+  ended: 'Voice ended before the screen could start.',
+  failed: 'Screens could not start. Try again.',
+};
+
+// Why main ended the companion, in words (CompanionEndReason). A share ends
+// with the same words (Q-D4-2 on #1578: a renewed room is not resumed).
+export const companionEnds: Readonly<Record<CompanionEndReason, string>> = {
+  leave: 'You left voice, so your screen ended.',
+  helper: 'The voice connection dropped, so your screen ended. Share again if you want to.',
+  renewal: 'The voice room was renewed, so your screen ended. Share again to carry on.',
+  'sign-out': 'You signed out, so your screen ended.',
+  switch: 'You switched accounts, so your screen ended.',
+  quit: 'The app closed, so your screen ended.',
+  crash: 'The page restarted, so your screen ended.',
+  reload: 'The page reloaded, so your screen ended.',
+  lock: 'The screen locked, so your screen ended.',
+  suspend: 'The computer went to sleep, so your screen ended.',
+};
+
+// Leaving voice for someone who only watched: no screen of theirs ended.
+export const companionLeftWatching = 'You left voice, so the screens you were watching ended.';
+
+// The companion's own connection lost: it is not reconnected by itself.
+export const companionLost = 'The screen connection dropped. Share or watch again if you want to.';
+
 export const initialVoice: VoiceState = {
   phase: 'idle',
   channel: null,
@@ -444,6 +588,9 @@ export const initialVoice: VoiceState = {
   listenOnly: false,
   watchOnly: false,
   viewer: false,
+  companion: false,
+  companionRefusal: null,
+  companionShareUnavailable: null,
   talking: false,
   transmitting: false,
   releaseDelay: defaultTail,
@@ -462,6 +609,8 @@ export const initialVoice: VoiceState = {
   processing: true,
   reported: null,
   missing: false,
+  meter: true,
+  playback: true,
   outputSelection: false,
   outputs: null,
   output: null,
@@ -500,6 +649,9 @@ export class VoiceClient {
   private state: VoiceState = initialVoice;
   private listeners = new Set<() => void>();
   private room: Room | null = null;
+  // The meter's audio context, made in the Join gesture (issue #1794) and
+  // kept for the whole stay in voice, retries included; see releaseAudio.
+  private audio: AudioContext | null = null;
   private channel: string | null = null;
   // Each attempt has a number; answers for an older one are discarded.
   private attempt = 0;
@@ -551,6 +703,27 @@ export class VoiceClient {
   private readonly modes: ModeStore | null;
   // Numbers the changes of output: only the last one's refusal counts.
   private outputTurn = 0;
+  // The desktop's screen companion (issue #1581): what it listens to (main's
+  // end of it, the native deafen), whether it is being left by this client,
+  // and the act that asked for it to be joined, carried out once connected.
+  private companionOffs: (() => void)[] = [];
+  // companionLeaving is the attempt number of the leave that owns the busy
+  // gate, null when none does: only that leave clears it, so a superseded one
+  // waking up cannot reopen the gate under the leave that took over.
+  private companionLeaving: number | null = null;
+  // Counts joins, so the tail of a leave ends only the companion it left, not
+  // one joined while its room was closing.
+  private joins = 0;
+  private afterConnect: 'share' | null = null;
+  // What the last companion grant said of sharing on this desktop. It is kept
+  // here and put in the state (companionShareUnavailable) only once a Share
+  // has been tried, so a Watch alone never shows the note.
+  private grantUnavailable: CompanionShareUnavailable | null = null;
+  // Whether this companion was joined by a Share click, so that its grant is
+  // the answer to that click. A companion joined by a Watch holds a grant that
+  // may be old by the time Share is clicked: a portal started since is not
+  // seen in it (startShare).
+  private joinedByShare = false;
 
   constructor(env: VoiceEnv, now: () => number = () => Date.now()) {
     this.env = env;
@@ -560,7 +733,7 @@ export class VoiceClient {
     this.state = {
       ...initialVoice,
       mode: this.modes?.get() ?? initialVoice.mode,
-      shareQuality: env.shareQuality ?? defaultShareQuality,
+      shareQuality: env.companion === undefined ? (env.shareQuality ?? defaultShareQuality) : companionQuality(env.shareQuality ?? companionDefaultQuality),
       ...this.chosen(env.microphone ?? null),
       outputSelection: env.outputSelection === true,
       output: env.output ?? null,
@@ -575,6 +748,7 @@ export class VoiceClient {
       { claim: env.claimShare, release: env.stopShare },
       (share) => {
         this.set({ share });
+        this.settleCompanion();
       },
       env.clock,
     );
@@ -628,17 +802,152 @@ export class VoiceClient {
   // beside is for Watch only when the person's own voice is in another client
   // (the helper, the TUI): the page then connects as the viewer and never as
   // the person's own p<id>, which would knock that client out of the room.
-  join(channel: string, options: { readonly watchOnly?: boolean; readonly beside?: boolean } = {}): void {
-    if (this.state.phase !== 'idle' && this.state.phase !== 'stopped') return;
+  //
+  // companion is for the desktop (issue #1581): the page then connects as the
+  // person's screen companion, p<id>.screen, with the grant main hands over,
+  // and never as the person (the helper is) or with a microphone.
+  //
+  // audio is the level meter's audio context (openAudio), made and resumed
+  // by the caller inside the click, before anything else (issue #1794). A join
+  // that is not made closes it.
+  join(channel: string, options: { readonly watchOnly?: boolean; readonly beside?: boolean; readonly companion?: boolean; readonly audio?: AudioContext | null } = {}): void {
+    const companion = options.companion === true;
+    // A companion is not joined while the last one is still being left (its
+    // room closing, main not yet told); the gate is only ever cleared by the
+    // leave that owns it.
+    if ((this.state.phase !== 'idle' && this.state.phase !== 'stopped') || (companion && this.companionLeaving !== null)) {
+      closeAudio(options.audio ?? null);
+      return;
+    }
+    // One from an earlier stay that nothing released is let go first.
+    this.releaseAudio();
+    this.audio = options.audio ?? null;
     this.channel = channel;
+    this.joins++;
+    this.share.setCompanion(companion);
+    this.afterConnect = null;
+    this.grantUnavailable = null;
+    this.joinedByShare = false;
     this.failures = 0;
     // The camera is off on joining (design §3.4): only its button turns it
     // on, and why the last one ended is not news here.
     this.camera.reset();
     // Joining is the person's own choice: a microphone missing before is
     // asked for again, as chosen.
-    this.set({ phase: 'connecting', channel, why: null, reportNote: null, watchOnly: options.watchOnly === true, viewer: options.watchOnly === true && options.beside === true, watched: new Set(), focusedShare: null, streamTracks: new Map(), missing: false });
+    this.set({
+      phase: 'connecting',
+      channel,
+      why: null,
+      reportNote: null,
+      watchOnly: options.watchOnly === true || companion,
+      viewer: !companion && options.watchOnly === true && options.beside === true,
+      companion,
+      companionRefusal: null,
+      companionShareUnavailable: null,
+      ...(companion ? { shareQuality: companionQuality(this.state.shareQuality) } : {}),
+      watched: new Set(),
+      focusedShare: null,
+      streamTracks: new Map(),
+      missing: false,
+      meter: true,
+      playback: true,
+    });
+    if (companion) this.followCompanion();
     void this.connect();
+  }
+
+  // startCompanionShare is the desktop's Share button (issue #1581): the
+  // companion is joined if it is not, then the share is claimed, picked and
+  // published as for any share. The grant is asked of main in this call, so
+  // that it follows the person's click. The order at conchd is the person's
+  // own connection (the helper), the claim, then the companion's publish; a
+  // companion that connects before the claim is parked by conchd until it.
+  //
+  // shareArm is called first, synchronously, before anything else (before the
+  // join, the grant, any await): main takes the click for the grant and the
+  // capture that follow. The allowance is spent even if the grant then fails;
+  // a retry is a new click.
+  startCompanionShare(channel: string): void {
+    this.env.companion?.arm().catch(() => undefined);
+    const joins = this.state.phase === 'idle' || this.state.phase === 'stopped';
+    const state = this.companionReady(channel);
+    // Joined by this click: the grant it asks for is the answer to it.
+    if (joins && state === 'joining') this.joinedByShare = true;
+    if (state === 'ready') this.startShare();
+    else if (state === 'joining') this.afterConnect = 'share';
+  }
+
+  // watchCompanionStream is the desktop's Watch button: the companion is
+  // joined if it is not, and the publisher's share is watched on it.
+  watchCompanionStream(channel: string, principal: number): void {
+    if (this.companionReady(channel) !== 'busy') this.watchStream(principal, true);
+  }
+
+  // companionReady joins the companion if nothing is joined, and says where it
+  // is: connected, on its way, or not available (the page is in voice some
+  // other way).
+  private companionReady(channel: string): 'ready' | 'joining' | 'busy' {
+    const { phase, companion } = this.state;
+    // The last companion is still being left (its room closing, main not yet
+    // told): nothing new is joined until that tail is done.
+    if (this.companionLeaving !== null) return 'busy';
+    if (phase === 'idle' || phase === 'stopped') {
+      this.join(channel, { companion: true });
+      return 'joining';
+    }
+    if (!companion || this.channel !== channel) return 'busy';
+    return phase === 'connected' ? 'ready' : 'joining';
+  }
+
+  // followCompanion listens for main's end of the companion and for the
+  // native voice's deafen, for as long as the companion is joined.
+  private followCompanion(): void {
+    this.unfollowCompanion();
+    const c = this.env.companion;
+    if (c === undefined) return;
+    this.companionOffs = [
+      c.onEnd((reason) => {
+        this.companionEnded(reason);
+      }),
+      c.onDeafened(() => {
+        this.setDeafened(c.deafened());
+      }),
+    ];
+    this.setDeafened(c.deafened());
+  }
+
+  private unfollowCompanion(): void {
+    const offs = this.companionOffs;
+    this.companionOffs = [];
+    for (const off of offs) off();
+  }
+
+  // companionEnded is main ending the companion (leave, helper loss, renewal,
+  // lock, suspend, sign-out, crash...): capture stops and the room is left at
+  // once, in words, and nothing reconnects. Main has told conchd already.
+  private companionEnded(reason: CompanionEndReason): void {
+    const s = this.state;
+    if (!s.companion || (s.phase !== 'connecting' && s.phase !== 'connected' && s.phase !== 'reconnecting' && s.phase !== 'unavailable')) return;
+    // Someone only watching had no screen of their own to end.
+    const why = reason === 'leave' && s.share.kind === 'idle' ? companionLeftWatching : companionEnds[reason];
+    void this.share.stop(reason === 'leave' ? 'left' : reason === 'renewal' ? 'rotated' : 'lost');
+    this.drop({ kind: 'stop', why }, 'stop', reason === 'renewal', true);
+  }
+
+  // endCompanion tells main the companion is over, so that conchd is asked to
+  // remove it. It never rejects.
+  private endCompanion(): Promise<void> {
+    const end = this.env.companion?.end;
+    return end === undefined ? Promise.resolve() : end().then(() => undefined, () => undefined);
+  }
+
+  // settleCompanion lets the companion go once it has nothing to do: no share
+  // and no watch. It is not asked for again by itself.
+  private settleCompanion(): void {
+    const s = this.state;
+    if (!s.companion || this.companionLeaving !== null || s.phase !== 'connected' || this.afterConnect !== null) return;
+    if (s.share.kind !== 'idle' || s.watched.size > 0) return;
+    void this.leaveVoice(s.companionShareUnavailable !== null);
   }
 
   // renamed is the channel voice is in renamed (issue #728), from the name
@@ -655,9 +964,18 @@ export class VoiceClient {
 
   // useMicrophone ends watch only: the microphone is captured, published and
   // muted, as on a full join, and the talk controls work from then on.
-  async useMicrophone(): Promise<void> {
+  //
+  // audio is the meter's audio context (openAudio), made first in the click
+  // that asked (issue #1794): the capture is made after awaits, where iOS
+  // would leave a new context suspended. Not used, it is closed.
+  async useMicrophone(audio: AudioContext | null = null): Promise<void> {
     const room = this.room;
-    if (!this.state.watchOnly || this.state.viewer || this.state.listenOnly || this.state.phase !== 'connected' || room === null) return;
+    if (!this.state.watchOnly || this.state.viewer || this.state.companion || this.state.listenOnly || this.state.phase !== 'connected' || room === null) {
+      closeAudio(audio);
+      return;
+    }
+    this.releaseAudio();
+    this.audio = audio;
     const mine = this.attempt;
     this.set({ watchOnly: false });
     try {
@@ -665,7 +983,7 @@ export class VoiceClient {
       if (mine !== this.attempt) return;
       room.setMicrophone(this.state.microphone?.id ?? null);
       room.setProcessing(this.state.processing);
-      await room.publishMicrophone();
+      await room.publishMicrophone(audio);
     } catch (err: unknown) {
       if (mine !== this.attempt) return;
       // The connection stays: the person keeps watching, told why. A chosen
@@ -859,7 +1177,31 @@ export class VoiceClient {
     const channel = this.channel;
     const room = this.room;
     if (this.state.phase !== 'connected' || channel === null || room === null) return;
-    void this.share.start(channel, room, this.state.shareQuality);
+    const unavailable = this.state.companion ? this.grantUnavailable : null;
+    if (unavailable !== null && this.joinedByShare) {
+      // The grant this Share asked for said this desktop cannot share: no
+      // picker is opened. The companion goes if nothing is watched; the note
+      // is the state's, and is said now because a Share was tried.
+      this.set({ companionShareUnavailable: unavailable });
+      this.settleCompanion();
+      return;
+    }
+    if (unavailable === null) {
+      void this.share.start(channel, room, this.state.shareQuality);
+      return;
+    }
+    // The companion is live from a Watch, whose grant said this desktop cannot
+    // share: that was then, and a portal started since is not seen in it. The
+    // attempt goes ahead (the arm of this click is out already), and the words
+    // are said only if the pick is refused; a share that starts clears them.
+    void this.share.start(channel, room, this.state.shareQuality).then(() => {
+      if (this.channel !== channel || this.room !== room || this.grantUnavailable !== unavailable) return;
+      const share = this.state.share;
+      if (share.kind === 'idle' && share.cause === 'denied') {
+        this.set({ companionShareUnavailable: unavailable });
+        this.settleCompanion();
+      } else if (share.kind !== 'idle') this.grantUnavailable = null;
+    });
   }
 
   // A quality choice applies to the next picker, and to a live capture and
@@ -867,7 +1209,12 @@ export class VoiceClient {
   // is told, for the others' label (share.ts changeQuality). The local choice
   // is kept even if this browser cannot apply it to the track already open,
   // and then conchd is not told: the stream did not change.
-  async setShareQuality(quality: ShareQuality): Promise<void> {
+  async setShareQuality(asked: ShareQuality): Promise<void> {
+    // The desktop offers companionQualities only (Q-D4-3 on #1578, widened by
+    // #1772); a choice outside them, Auto included, is its 720p30 default.
+    // The browser's Auto is always 30 fps (Q10 on #1614), whatever rate was
+    // left on the choice.
+    const quality = this.env.companion !== undefined ? companionQuality(asked) : asked.resolution === 'auto' ? { resolution: 'auto' as const, frameRate: autoFrameRate } : asked;
     this.set({ shareQuality: quality });
     try {
       await this.room?.setShareQuality(quality);
@@ -1084,6 +1431,7 @@ export class VoiceClient {
     const streamTracks = new Map([...this.state.streamTracks].filter(([principal]) => watched.has(principal)));
     this.room?.setWatches(watched, focusedShare);
     this.set({ watched, focusedShare, streamTracks });
+    this.settleCompanion();
   }
 
   // attachStream plays one watched publisher into its tile, on this connection
@@ -1160,7 +1508,17 @@ export class VoiceClient {
   }
 
   async leave(): Promise<void> {
+    return this.leaveVoice(false);
+  }
+
+  // leaveVoice is leave; keepNote is the companion settling after a Share it
+  // could not make on a desktop that cannot share, whose note stays to be
+  // read. A person leaving voice clears it.
+  private async leaveVoice(keepNote: boolean): Promise<void> {
     const mine = ++this.attempt;
+    const companion = this.state.companion;
+    if (companion) this.companionLeaving = mine;
+    this.afterConnect = null;
     this.clearTimers();
     this.gate.setBlocked(true);
     // Leaving ends the camera first: the capture stops and conchd is told,
@@ -1174,7 +1532,13 @@ export class VoiceClient {
     await this.reports.drain(leaveDrain);
     await sharing;
     await camera;
-    if (mine !== this.attempt) return;
+    if (mine !== this.attempt) {
+      // Taken over (dropped, or left again): this tail will not run. The gate
+      // is cleared only if this leave still owns it: a later leave that took
+      // it over keeps it until its own tail is done.
+      if (companion && this.companionLeaving === mine) this.companionLeaving = null;
+      return;
+    }
     this.talk++;
     this.steps = Promise.resolve();
     this.reports.reset();
@@ -1183,6 +1547,15 @@ export class VoiceClient {
     const viewer = this.state.viewer;
     this.room = null;
     this.channel = null;
+    // The room's close starts here, before the page says it is out of voice,
+    // so that the LiveKit leave is already on its way when "Join voice"
+    // shows, and a page closed from now on still has it sent (issue #1764;
+    // LiveKitVoiceRoom.close starts its disconnect at once). It is awaited,
+    // bounded, below. "Join voice" still does not mean LiveKit has been told.
+    const closing = room !== null ? room.close().catch(() => undefined) : null;
+    // The context goes after the room's close has started: the room lets go of
+    // its tap on it first.
+    this.releaseAudio();
     this.endAwaiting();
     this.streamSinks.clear();
     // Nobody's camera is received out of voice; the next join reads presence.
@@ -1197,12 +1570,17 @@ export class VoiceClient {
       level: 0,
       speaking: new Set(),
       reportNote: null,
+      companion: false,
+      companionRefusal: null,
+      ...(keepNote ? {} : { companionShareUnavailable: null }),
       watched: new Set(),
       focusedShare: null,
       streamTracks: new Map(),
       microphones: null,
       ...nothingInUse,
       missing: false,
+      meter: true,
+      playback: true,
       outputs: null,
       outputNote: null,
       viewing: false,
@@ -1211,11 +1589,20 @@ export class VoiceClient {
       cameraTrack: 'none',
       cameraInUse: null,
     });
-    if (room !== null) await room.close().catch(() => undefined);
+    // Bounded, so that a close that never settles cannot keep the gate shut.
+    if (closing !== null) await this.within(closing, leaveDrain);
     // The viewer is removed from the room as the page goes; a refusal is not
     // news, since its token lives seconds and the room drops it anyway.
     const remove = this.env.removeViewer;
     if (viewer && left !== null && remove !== undefined) await remove(left).catch(() => undefined);
+    // The room is left before main is asked to remove the companion.
+    // The join gate is shut until here, so this is the companion this leave
+    // ended, and main's record of it is always ended, whoever else woke up.
+    if (companion) {
+      this.unfollowCompanion();
+      await this.within(this.endCompanion(), leaveDrain);
+      if (this.companionLeaving === mine) this.companionLeaving = null;
+    }
   }
 
   setMode(mode: GateMode): void {
@@ -1227,6 +1614,20 @@ export class VoiceClient {
   setMuted(muted: boolean): void {
     this.set({ muted });
     this.applyBlock();
+  }
+
+  // startAudio is the tap on "Tap to hear the channel": the room is asked
+  // synchronously, inside the click, which is the gesture the browser wants.
+  // Success is told by the room's playback event (which clears the state);
+  // a refusal leaves it, and is kept in the diagnostics ring by its name.
+  startAudio(): void {
+    const room = this.room;
+    if (room === null) return;
+    const mine = this.attempt;
+    room.startAudio().catch((err: unknown) => {
+      const name = errorName(err);
+      if (mine === this.attempt && typeof name === 'string') record({ kind: 'device_error', name });
+    });
   }
 
   setDeafened(deafened: boolean): void {
@@ -1281,9 +1682,22 @@ export class VoiceClient {
     this.listeners.clear();
   }
 
+  // releaseAudio closes the meter's audio context, once: the field is cleared
+  // first, so a leave and a stop that both get here close it one time.
+  private releaseAudio(): void {
+    const audio = this.audio;
+    this.audio = null;
+    closeAudio(audio);
+  }
+
   private applyBlock(): void {
     const s = this.state;
     this.gate.setBlocked(s.phase !== 'connected' || s.muted || s.deafened || s.listenOnly || s.watchOnly || s.missing || this.switching);
+  }
+
+  private clearReconnectTimer(): void {
+    if (this.reconnectTimer !== null) this.env.clock.clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = null;
   }
 
   private clearTimers(): void {
@@ -1397,7 +1811,14 @@ export class VoiceClient {
   // deleted the room, as conchd does when it renews one. camera is what the
   // end means for the camera (disconnect.ts cameraAfter); a client that stops
   // always stops it.
-  private drop(next: Next, camera: CameraLoss, roomDeleted = false): void {
+  //
+  // The screen companion is never reconnected by itself (every grant needs the
+  // person's act, and a share is not resumed in a renewed room, Q-D4-2 on
+  // #1578): any end stops it, and a renewal says so. fromMain: main ended it
+  // and has told conchd, so main is not told again.
+  private drop(wanted: Next, camera: CameraLoss, roomDeleted = false, fromMain = false): void {
+    const companion = this.state.companion;
+    const next: Next = companion && wanted.kind !== 'stop' ? { kind: 'stop', why: roomDeleted ? companionEnds.renewal : companionLost } : wanted;
     const mine = ++this.attempt;
     // The camera first, before anything else is done (S5): stopped and
     // released, or taken off this connection for the next.
@@ -1412,7 +1833,7 @@ export class VoiceClient {
     // A share does not outlive its connection: the next one starts without it,
     // unless its room was renewed, when the next connection resumes it. A
     // client that stops resumes nothing.
-    if (next.kind === 'stop') void this.share.stop('lost');
+    if (next.kind === 'stop') void this.share.stop(companion && roomDeleted ? 'rotated' : 'lost');
     else void this.share.lost(roomDeleted);
     // Every watched share goes with a deleted room and is waited for, whether
     // presence has said so yet or not (#1509).
@@ -1421,16 +1842,25 @@ export class VoiceClient {
     this.room = null;
     // A switch under way goes with its connection; its choice is kept.
     this.switching = false;
-    this.set({ speaking: new Set(), level: 0, talking: false, transmitting: false, streamTracks: new Map(), cameraTracks: noCameraTracks, ...nothingInUse, ...this.cameraNow() });
+    // The meter and the playback are the next room's to say: a note or a
+    // button about this one's would stay up through the retry.
+    this.set({ speaking: new Set(), level: 0, talking: false, transmitting: false, meter: true, playback: true, streamTracks: new Map(), cameraTracks: noCameraTracks, ...nothingInUse, ...this.cameraNow() });
     if (room !== null) void room.close().catch(() => undefined);
+    if (companion && !fromMain) void this.endCompanion();
     this.act(next, mine);
   }
 
-  private act(next: Next, mine: number): void {
+  private act(requested: Next, mine: number): void {
+    const next: Next = this.state.companion && requested.kind !== 'stop' ? { kind: 'stop', why: companionLost } : requested;
     switch (next.kind) {
       case 'stop':
+        this.afterConnect = null;
+        this.unfollowCompanion();
         this.share.abandon();
         this.camera.abandon();
+        // The stay is over (a join that failed for good, or a stop): nobody is
+        // left to hear with it.
+        this.releaseAudio();
         this.set({ phase: 'stopped', why: next.why, viewing: false, cameraTracks: noCameraTracks });
         break;
       case 'new_session':
@@ -1455,8 +1885,23 @@ export class VoiceClient {
     const mine = known ?? ++this.attempt;
     const channel = this.channel;
     if (channel === null) return;
-    let session = this.state.viewer ? await this.viewerSession(channel) : await this.env.createSession(channel);
-    if (mine !== this.attempt) return;
+    let session: VoiceSessionResult;
+    if (this.state.companion) {
+      // Only with the grant main hands over, and never a session of the
+      // person's own.
+      const given = await this.companionSession(channel);
+      if (mine !== this.attempt) return;
+      if (given.ok) this.grantUnavailable = given.shareUnavailable ?? null;
+      else {
+        this.set({ companionRefusal: given.error });
+        this.act({ kind: 'stop', why: companionRefusals[given.error] }, mine);
+        return;
+      }
+      session = given.session;
+    } else {
+      session = this.state.viewer ? await this.viewerSession(channel) : await this.env.createSession(channel);
+      if (mine !== this.attempt) return;
+    }
     // Presence of a page that closed without leaving lingers a few seconds and
     // reads as the person's voice in another client (issue #1340). The viewer
     // grant's 409 voice_no_session says no voice of theirs is in the room, so
@@ -1479,14 +1924,18 @@ export class VoiceClient {
       return;
     }
     // The viewer's identity is p<id>.view: the person it stands for is p<id>.
-    this.me = principalOf(session.value.identity.replace(/\.view$/, ''));
+    this.me = this.state.companion ? personOf(session.value.identity) : principalOf(session.value.identity.replace(/\.view$/, ''));
     const room = this.env.newRoom();
     this.room = room;
+    if (this.state.companion) room.setCompanion?.(true);
     const events: RoomEvents = {
       onReconnecting: () => {
         if (mine !== this.attempt) return;
         this.set({ phase: 'reconnecting' });
         this.applyBlock();
+        // A signal-only resume that escalates to a full restart reports
+        // Reconnecting again: the limit runs from the first of them.
+        if (this.reconnectTimer !== null) return;
         this.reconnectTimer = this.env.clock.setTimeout(() => {
           this.reconnectTimer = null;
           if (mine !== this.attempt) return;
@@ -1529,6 +1978,20 @@ export class VoiceClient {
         this.set({ missing: true, ...nothingInUse });
         this.applyBlock();
         void this.readMicrophones(mine, room);
+      },
+      onMeter: (available, name) => {
+        if (mine !== this.attempt) return;
+        // Said by the error's name alone, as a device's error is (record keeps
+        // only a name of the shape of an error's).
+        if (!available && typeof name === 'string') record({ kind: 'device_error', name });
+        if (available !== this.state.meter) this.set({ meter: available });
+        // Nothing feeds the gate's level once the meter is gone: an open
+        // microphone that was talking would stay open. It is shut.
+        if (!available && this.state.mode === 'open') this.gate.shut();
+      },
+      onPlayback: (canPlay) => {
+        if (mine !== this.attempt) return;
+        if (canPlay !== this.state.playback) this.set({ playback: canPlay });
       },
       onDevicesChanged: () => {
         if (mine !== this.attempt) return;
@@ -1595,7 +2058,7 @@ export class VoiceClient {
     const processing = this.state.processing;
     room.setProcessing(processing);
     try {
-      await room.connect(session.value.livekit_url, grant.token, grant.room, publish && !this.state.missing, events);
+      await room.connect(session.value.livekit_url, grant.token, grant.room, publish && !this.state.missing, events, this.audio);
     } catch (err: unknown) {
       // A microphone refused or missing is said by the error's name alone.
       const name = errorName(err);
@@ -1605,6 +2068,10 @@ export class VoiceClient {
       // microphone failed fires its Disconnected, which must not act again
       // (it would turn a stop into a retry).
       const next = ++this.attempt;
+      // A Reconnecting the failed room reported first armed a give-up that is
+      // this attempt's no longer: left standing, it would stop the next
+      // attempt's Reconnecting from arming its own.
+      this.clearReconnectTimer();
       void room.close().catch(() => undefined);
       this.room = null;
       // A microphone that cannot be had stops: the next attempt is the
@@ -1623,6 +2090,9 @@ export class VoiceClient {
         return;
       }
       const why = deviceReason(name);
+      // A companion that cannot connect is over: main is told, and the next
+      // grant is the person's next act.
+      if (this.state.companion) void this.endCompanion();
       this.act(why === null ? { kind: 'retry' } : { kind: 'stop', why }, next);
       return;
     }
@@ -1639,10 +2109,19 @@ export class VoiceClient {
     const now = this.state.microphone?.id ?? null;
     if (publish && !this.state.missing && (now !== microphone || this.state.processing !== processing)) void this.switchTo(room, now);
     void this.readMicrophones(mine, room);
-    void this.readCameras(mine, room);
+    // The companion never touches a camera.
+    if (!this.state.companion) void this.readCameras(mine, room);
     this.watchLevel(mine, room);
     this.share.connected(channel, room);
     this.camera.connected(channel, room);
+    // A companion that connected with nothing left to do (a watch undone, or a
+    // share ended, while it was connecting) does not hold the slot.
+    this.settleCompanion();
+    // The act that joined the companion, carried out now that it is up.
+    if (this.afterConnect === 'share') {
+      this.afterConnect = null;
+      this.startShare();
+    }
     // A connection that lasts starts the retry wait over.
     this.env.clock.setTimeout(() => {
       if (mine === this.attempt && this.now() - this.connectedAt >= healthyAfter) this.failures = 0;
@@ -1661,12 +2140,36 @@ export class VoiceClient {
     return { ok: true, value: { livekit_url: v.livekit_url, identity: v.identity, rooms: [{ room: v.room, token: v.token, can_publish: false, expires_at: v.expires_at }] } };
   }
 
+  // companionSession asks main for the companion's grant and shapes it as a
+  // session, so that connecting is one path. The grant names no room (main
+  // does not hand it over) and the companion publishes a screen only: the
+  // microphone is never asked for (join makes it watch only).
+  private async companionSession(channel: string): Promise<{ readonly ok: true; readonly session: VoiceSessionResult; readonly shareUnavailable?: CompanionShareUnavailable } | { readonly ok: false; readonly error: CompanionGrantError }> {
+    const ask = this.env.companion?.grant;
+    if (ask === undefined) return { ok: false, error: 'failed' };
+    let answer: CompanionGrantResult;
+    try {
+      answer = await ask(channel);
+    } catch {
+      return { ok: false, error: 'failed' };
+    }
+    if (!answer.ok) return answer;
+    const g = answer.grant;
+    return {
+      ok: true,
+      ...(answer.shareUnavailable === undefined ? {} : { shareUnavailable: answer.shareUnavailable }),
+      session: { ok: true, value: { livekit_url: g.livekitUrl, identity: g.identity, rooms: [{ room: '', token: g.token, can_publish: true, expires_at: g.expiresAt }] } },
+    };
+  }
+
   private watchLevel(mine: number, room: Room): void {
     let reads = 0;
     const tick = () => {
       if (mine !== this.attempt) return;
       const raw = room.level();
-      this.gate.level(raw);
+      // No meter, no voice detection: the open microphone's gate stays shut
+      // (push to talk does not read the level).
+      if (this.state.meter) this.gate.level(raw);
       // Quantised, and told every meterEvery ms, so a meter does not
       // re-render the page at every read.
       if (++reads * levelEvery >= meterEvery) {

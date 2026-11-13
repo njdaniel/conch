@@ -2,7 +2,7 @@ import { createPortal } from 'react-dom';
 import { useEffect, useId, useRef, useState, type KeyboardEvent } from 'react';
 import * as api from './api';
 import { isArchived } from './archived';
-import { matchChannels, nextUnread, sidebarOrder, stepChannel } from './channelNav';
+import { matchChannels, nextUnread, sidebarOrder, stepChannel } from './channelOrder';
 import { Glyph, PrivateMark } from './Icons';
 import type { ChannelListingV1, ChannelV0 } from './schema/channel';
 import { badgeText } from './useReadState';

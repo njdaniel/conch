@@ -7,10 +7,23 @@
 //! microphones hear anything: for `conch.voice_control.v2`'s device switch and open
 //! microphone.
 //!
+//! On Unix the events go to an in-memory buffer and the keyboard is a `mkfifo`. On Windows
+//! (#1766) the events go through a real named pipe: a tokio `NamedPipeServer` the rig holds
+//! as the owner, reached by `channel::attach` as `conch-voice managed --events-pipe` reaches
+//! it, with the attach line read and checked before the helper's hello. The keyboard on
+//! Windows (#1791) is a named pipe the rig creates (`win_keys`), which the helper reads
+//! through its hidden `--test-key-device` as it reads a `mkfifo` on Linux: Windows
+//! push-to-talk is Raw Input, and the test seam of `keys_windows` (`PipeSource`) reads the
+//! fake transitions the rig writes to it in place of Raw Input.
+//!
 //! No test here needs a microphone, PipeWire, a keyboard or LiveKit.
 
-use std::fs::{File, OpenOptions};
+#[cfg(unix)]
+use std::fs::File;
+#[cfg(unix)]
+use std::fs::OpenOptions;
 use std::io::{PipeWriter, Write};
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -34,7 +47,11 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
 use super::fake::FakeSdk;
-use super::keyboard::{DEAFEN, MUTE, Pipe, TALK, press, quick_keys, release};
+#[cfg(unix)]
+use super::keyboard::Pipe;
+use super::keyboard::quick_keys;
+#[cfg(unix)]
+use super::keyboard::{DEAFEN, MUTE, TALK, press, release};
 use super::stub::{FAKE_LOGIN, OWN_PRINCIPAL, Stub};
 use super::{Reader, Written, quick};
 
@@ -45,7 +62,14 @@ pub const CHANNEL: &str = "general";
 const PATIENCE: Duration = Duration::from_secs(10);
 
 /// What a rig's `voice.toml` binds: the three keys of `keyboard.rs`, a short release tail.
+#[cfg(unix)]
 pub const KEYS_TOML: &str = "[keys]\ntalk = \"KEY_F13\"\nmute = \"KEY_F14\"\ndeafen = \"KEY_F15\"\n\n[audio]\nrelease_tail_ms = 20\n";
+
+/// What a rig's `voice.toml` binds on Windows: the same three keys, in Windows' grammar (the
+/// Linux form is refused there), as the scan codes of F13, F14 and F15, which `win_keys`
+/// writes. A short release tail.
+#[cfg(not(unix))]
+pub const KEYS_TOML: &str = "[keys]\ntalk = \"sc:0x64\"\nmute = \"sc:0x65\"\ndeafen = \"sc:0x66\"\n\n[audio]\nrelease_tail_ms = 20\n";
 
 /// Where the helper is told its login is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -72,6 +96,8 @@ pub struct ManagedSetup {
     /// it, and the start-up waits for the watcher.
     pub keyboard_unplugged: bool,
     pub start_timeout: Duration,
+    /// Start the helper with `--no-mute-key` (#1631).
+    pub no_mute_key: bool,
     /// Microphones and speakers opened by name, as the test arranges them; `None` for the
     /// tone and the counting sink, whatever is asked for.
     pub world: Option<World>,
@@ -85,6 +111,7 @@ impl Default for ManagedSetup {
             keyboard: true,
             keyboard_unplugged: false,
             start_timeout: Duration::from_secs(10),
+            no_mute_key: false,
             world: None,
         }
     }
@@ -97,6 +124,33 @@ pub fn level_of(name: Option<&str>) -> f32 {
     match name {
         None => 0.25,
         Some(_) => 0.5,
+    }
+}
+
+/// The three keys a rig's `voice.toml` binds.
+#[derive(Debug, Clone, Copy)]
+enum Wanted {
+    Talk,
+    Mute,
+    Deafen,
+}
+
+/// The bytes the helper's key source reads for `key` going down or up: `input_event` records
+/// for the evdev watcher on Unix, the four-byte records of `keys_windows`'s test seam on
+/// Windows. Either way the helper's expected bytes are the same.
+fn transition(key: Wanted, down: bool) -> Vec<u8> {
+    #[cfg(unix)]
+    {
+        let code = match key {
+            Wanted::Talk => TALK,
+            Wanted::Mute => MUTE,
+            Wanted::Deafen => DEAFEN,
+        };
+        if down { press(code) } else { release(code) }
+    }
+    #[cfg(windows)]
+    {
+        win_keys::record(win_keys::KEY, win_keys::scan(key), down).to_vec()
     }
 }
 
@@ -132,7 +186,7 @@ impl World {
     fn refuse(&self, doing: &'static str, name: Option<&str>) -> Result<(), Error> {
         match name {
             Some(name) if self.0.broken.lock().unwrap().iter().any(|b| b == name) => {
-                Err(Error::PipeWire {
+                Err(Error::AudioSystem {
                     doing,
                     detail: format!("FAKE: no node is named {name}"),
                 })
@@ -294,16 +348,31 @@ pub struct ManagedRig {
     stdin: Option<PipeWriter>,
     /// Where signals and the like reach the session.
     pub inputs: mpsc::UnboundedSender<Input>,
-    /// The keyboard's end of the key device's pipe, if the rig reads keys.
-    keyboard: Option<File>,
+    /// The keyboard's end of the key device's pipe, if the rig reads keys and it is plugged in.
+    keyboard: Option<Keyboard>,
+    /// Whether the rig has a key device at all.
+    reads_keys: bool,
+    /// Windows: what the helper wrote to the named pipe against what the owner has read of it.
+    #[cfg(windows)]
+    owner: owner_pipe::Owner,
     mic_opened: Arc<AtomicU32>,
     mic_closed: Arc<AtomicU32>,
     sink_closed: Arc<AtomicU32>,
     task: Option<JoinHandle<Result<(), Error>>>,
     /// Holds the configuration directory and the pipe for as long as the rig lives.
     _dir: tempfile::TempDir,
+    #[cfg(unix)]
     pipe: Pipe,
+    /// Windows: the name of the key device's pipe.
+    #[cfg(windows)]
+    key_pipe: String,
 }
+
+/// The keyboard's end of the key device's pipe: a file on Unix, a writer on Windows.
+#[cfg(unix)]
+type Keyboard = File;
+#[cfg(windows)]
+type Keyboard = win_keys::Keyboard;
 
 impl ManagedRig {
     /// Starts a helper with the usual setup and nothing written to it yet.
@@ -329,11 +398,13 @@ impl ManagedRig {
                 json!({ conchd.url(): {"token": FAKE_LOGIN} }).to_string(),
             )
             .unwrap();
+            #[cfg(unix)]
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
         }
         if let Some(text) = &setup.voice_toml {
             let path = dir.path().join("voice.toml");
             std::fs::write(&path, text).unwrap();
+            #[cfg(unix)]
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
         }
         let token =
@@ -349,7 +420,10 @@ impl ManagedRig {
 
         // The keyboard's end is opened to read and write, so that it does not wait for the
         // watcher, and the watcher's open does not wait for it.
+        let reads_keys = setup.keyboard;
+        #[cfg(unix)]
         let pipe = Pipe::new();
+        #[cfg(unix)]
         let keyboard = (setup.keyboard && !setup.keyboard_unplugged).then(|| {
             OpenOptions::new()
                 .read(true)
@@ -357,6 +431,11 @@ impl ManagedRig {
                 .open(&pipe.path)
                 .unwrap()
         });
+        #[cfg(windows)]
+        let key_pipe = win_keys::pipe_name();
+        #[cfg(windows)]
+        let keyboard = (setup.keyboard && !setup.keyboard_unplugged)
+            .then(|| win_keys::Keyboard::plug(&key_pipe));
 
         let mic_opened = Arc::new(AtomicU32::new(0));
         let mic_closed = Arc::new(AtomicU32::new(0));
@@ -417,18 +496,27 @@ impl ManagedRig {
         let mut timings = quick();
         // A wait the policy asks for is a few milliseconds, as in the other tests.
         timings.wait_divisor = 200;
+        #[cfg(unix)]
+        let keys = if setup.keyboard {
+            KeySource::NamedPipe(pipe.path.clone())
+        } else {
+            KeySource::Configured
+        };
+        #[cfg(windows)]
+        let keys = if setup.keyboard {
+            KeySource::NamedPipe(std::path::PathBuf::from(&key_pipe))
+        } else {
+            KeySource::Configured
+        };
         let host = Host {
             environment,
             transport: sdk.clone(),
             scrubber: Arc::clone(&scrubber),
             devices,
-            keys: if setup.keyboard {
-                KeySource::NamedPipe(pipe.path.clone())
-            } else {
-                KeySource::Configured
-            },
+            keys,
             share_audio_owner: ShareAudioOwner::Helper,
             transmit_ceiling_secs: None,
+            no_mute_key: setup.no_mute_key,
             timings,
             key_timings: quick_keys(),
             start_timeout: setup.start_timeout,
@@ -441,13 +529,14 @@ impl ManagedRig {
             ..Reader::default()
         };
         let (inputs, received) = mpsc::unbounded_channel();
-        let task = tokio::spawn(managed::run(
-            host,
-            stdin,
-            Box::new(reader.clone()),
-            inputs.clone(),
-            received,
-        ));
+        // Unix: the owner's reader is the sink. Windows: a real named pipe is, and a thread
+        // of the rig reads it into the reader.
+        #[cfg(unix)]
+        let out: Box<dyn Write + Send> = Box::new(reader.clone());
+        #[cfg(windows)]
+        let (out, owner) =
+            owner_pipe::attach(&reader, &scrubber, &inputs, host.watchdog.clone()).await;
+        let task = tokio::spawn(managed::run(host, stdin, out, inputs.clone(), received));
         Self {
             sdk,
             conchd,
@@ -457,12 +546,18 @@ impl ManagedRig {
             stdin: Some(writer),
             inputs,
             keyboard,
+            reads_keys,
+            #[cfg(windows)]
+            owner,
             mic_opened,
             mic_closed,
             sink_closed,
             task: Some(task),
             _dir: dir,
+            #[cfg(unix)]
             pipe,
+            #[cfg(windows)]
+            key_pipe,
         }
     }
 
@@ -474,13 +569,20 @@ impl ManagedRig {
 
     /// The keyboard is there (again): its end of the pipe is opened.
     pub fn plug_keyboard(&mut self) {
-        self.keyboard = Some(
-            OpenOptions::new()
-                .read(true)
-                .write(true)
-                .open(&self.pipe.path)
-                .unwrap(),
-        );
+        #[cfg(unix)]
+        {
+            self.keyboard = Some(
+                OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open(&self.pipe.path)
+                    .unwrap(),
+            );
+        }
+        #[cfg(windows)]
+        {
+            self.keyboard = Some(win_keys::Keyboard::plug(&self.key_pipe));
+        }
     }
 
     /// The start of a v2 session: the usual one, written in `conch.voice_control.v2`.
@@ -651,27 +753,30 @@ impl ManagedRig {
 
     fn keys(&mut self, bytes: &[u8]) {
         let keyboard = self.keyboard.as_mut().expect("the rig reads no keys");
+        #[cfg(unix)]
         keyboard.write_all(bytes).unwrap();
+        #[cfg(windows)]
+        keyboard.write(bytes);
     }
 
     pub fn press_talk(&mut self) {
-        self.keys(&press(TALK));
+        self.keys(&transition(Wanted::Talk, true));
     }
 
     pub fn release_talk(&mut self) {
-        self.keys(&release(TALK));
+        self.keys(&transition(Wanted::Talk, false));
     }
 
     /// The mute key, pressed and released: a toggle.
     pub fn strike_mute(&mut self) {
-        let mut bytes = press(MUTE);
-        bytes.extend(release(MUTE));
+        let mut bytes = transition(Wanted::Mute, true);
+        bytes.extend(transition(Wanted::Mute, false));
         self.keys(&bytes);
     }
 
     pub fn strike_deafen(&mut self) {
-        let mut bytes = press(DEAFEN);
-        bytes.extend(release(DEAFEN));
+        let mut bytes = transition(Wanted::Deafen, true);
+        bytes.extend(transition(Wanted::Deafen, false));
         self.keys(&bytes);
     }
 
@@ -730,11 +835,17 @@ impl ManagedRig {
             rig.state().is_some_and(|state| {
                 state.phase.as_str() == "connected"
                     && state.blocked.is_empty()
-                    && state.ptt.as_str() == "ready"
+                    && rig.ptt_is_as_it_can_be(state.ptt.as_str())
                     && state.capture.as_str() == "on"
             })
         })
         .await;
+    }
+
+    /// Whether the state's push-to-talk is as good as this rig's gets: `ready` with a key
+    /// device, `not_configured` without one (on Windows, and where a test asks for none).
+    fn ptt_is_as_it_can_be(&self, ptt: &str) -> bool {
+        ptt == "ready" || (!self.reads_keys && ptt == "not_configured")
     }
 
     /// Waits until the helper is joined, capturing, and reading the key device, whatever
@@ -743,7 +854,7 @@ impl ManagedRig {
         self.until("joined", |rig| {
             rig.state().is_some_and(|state| {
                 state.phase.as_str() == "connected"
-                    && state.ptt.as_str() == "ready"
+                    && rig.ptt_is_as_it_can_be(state.ptt.as_str())
                     && state.capture.as_str() == "on"
             })
         })
@@ -790,6 +901,12 @@ impl ManagedRig {
         self.sink_closed.load(Ordering::SeqCst)
     }
 
+    /// Windows: how many threads of the owner's end are running; both end when the rig drops.
+    #[cfg(windows)]
+    pub fn owner_threads(&self) -> Arc<AtomicU32> {
+        self.owner.threads()
+    }
+
     /// Whether the helper has ended.
     pub fn has_ended(&self) -> bool {
         self.task.as_ref().is_none_or(JoinHandle::is_finished)
@@ -802,9 +919,339 @@ impl ManagedRig {
             .await
             .unwrap_or_else(|_| panic!("the helper did not end\n{}", self.events.text()))
             .unwrap();
+        // The helper's last write is in the pipe; the owner has it once its reader has.
+        #[cfg(windows)]
+        self.owner.drained(PATIENCE).await;
         match result {
             Ok(()) => 0,
             Err(error) => i32::from(error.exit_code()),
+        }
+    }
+}
+
+/// The owner's end of the events endpoint on Windows: a real named pipe, as the desktop app's
+/// owner holds one, in place of the in-memory buffer the Unix rig writes to.
+#[cfg(windows)]
+mod owner_pipe {
+    use std::path::PathBuf;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+    use std::time::{Duration, Instant};
+
+    use conch_voice::channel;
+    use conch_voice::cli::Environment;
+    use conch_voice::managed::Watchdog;
+    use conch_voice::secrets::Scrubber;
+    use conch_voice::session::Input;
+    use conch_voice_api::{Secret, parse_attached};
+    use tokio::io::AsyncReadExt;
+    use tokio::net::windows::named_pipe::ServerOptions;
+    use tokio::sync::{mpsc, oneshot};
+
+    use super::super::Reader;
+    use super::PATIENCE;
+
+    /// A fake nonce from `pkg/schema/testdata/voice-control-pipe/sensitive.json`.
+    const FAKE_NONCE: &str = "FAKE_nonce_do_not_print_0123456789abcdefghA";
+
+    /// How much the helper wrote to the pipe, and how much of it the owner has read.
+    #[derive(Clone, Default)]
+    struct Counts {
+        written: Arc<AtomicU64>,
+        read: Arc<AtomicU64>,
+    }
+
+    /// The helper's event writer, counting what reaches the pipe.
+    struct Counted<W> {
+        inner: W,
+        written: Arc<AtomicU64>,
+    }
+
+    impl<W: std::io::Write> std::io::Write for Counted<W> {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            let wrote = self.inner.write(buf)?;
+            self.written.fetch_add(wrote as u64, Ordering::SeqCst);
+            Ok(wrote)
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            self.inner.flush()
+        }
+    }
+
+    /// Counts a thread of the owner's end down when it ends, however it ends.
+    struct Alive(Arc<AtomicU32>);
+
+    impl Drop for Alive {
+        fn drop(&mut self) {
+            self.0.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+
+    /// The helper's end of the pipe as `watch_end` reads it, with its thread counted.
+    struct Watching<R> {
+        inner: R,
+        _alive: Alive,
+    }
+
+    impl<R: std::io::Read> std::io::Read for Watching<R> {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            self.inner.read(buf)
+        }
+    }
+
+    /// What the rig keeps of the pipe: the counts, to tell when the owner has read all, and
+    /// the hold on the owner's reading thread: dropping this ends it, and with it the
+    /// pipe, which ends the thread that watches the helper's end.
+    pub struct Owner {
+        counts: Counts,
+        /// Threads of the owner's end still running: the reader and the end's watcher.
+        alive: Arc<AtomicU32>,
+        _cancel: oneshot::Sender<()>,
+    }
+
+    impl Owner {
+        /// How many threads of the owner's end are still running; the rig's drop ends them.
+        pub fn threads(&self) -> Arc<AtomicU32> {
+            Arc::clone(&self.alive)
+        }
+
+        /// Waits until the owner has read everything the helper wrote to the pipe, or `limit`.
+        /// Not an error to run out: the owner may be stopped, and the test sees what it sees.
+        pub async fn drained(&self, limit: Duration) {
+            let until = Instant::now() + limit;
+            while self.counts.read.load(Ordering::SeqCst)
+                < self.counts.written.load(Ordering::SeqCst)
+                && Instant::now() < until
+            {
+                tokio::time::sleep(Duration::from_millis(2)).await;
+            }
+        }
+    }
+
+    /// A pipe name no other test, and no other run, uses.
+    fn pipe_name() -> String {
+        static NEXT: AtomicU32 = AtomicU32::new(0);
+        format!(
+            r"\\.\pipe\conch-voice-rig-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::SeqCst)
+        )
+    }
+
+    /// Makes the owner's pipe, attaches the helper's end to it with `channel::attach` as
+    /// `managed()` does (the attach line is checked here and is not among the events), and
+    /// has a thread read what the helper writes into `reader`. Returns the helper's event
+    /// writer. The pipe's end is watched as `managed()` watches it.
+    pub async fn attach(
+        reader: &Reader,
+        scrubber: &Arc<Scrubber>,
+        inputs: &mpsc::UnboundedSender<Input>,
+        watchdog: Watchdog,
+    ) -> (Box<dyn std::io::Write + Send>, Owner) {
+        let name = pipe_name();
+        let mut server = ServerOptions::new()
+            .first_pipe_instance(true)
+            .reject_remote_clients(true)
+            .create(&name)
+            .unwrap();
+        let environment = Environment {
+            conch_voice_attach: Some(Secret::new(FAKE_NONCE)),
+            ..Environment::default()
+        };
+        // `attach` writes the attach line through the runtime and so must not be on one of
+        // its threads.
+        let (path, helper_scrubber) = (PathBuf::from(&name), Arc::clone(scrubber));
+        let attaching = tokio::task::spawn_blocking(move || {
+            channel::attach(&path, &environment, &helper_scrubber)
+        });
+        tokio::time::timeout(PATIENCE, server.connect())
+            .await
+            .unwrap_or_else(|_| panic!("the helper's end did not connect"))
+            .unwrap();
+        let endpoint = attaching
+            .await
+            .unwrap()
+            .unwrap_or_else(|error| panic!("the helper's end did not attach: {error}"));
+
+        // The attach line, then whatever came with it.
+        let mut got = Vec::new();
+        let mut chunk = [0_u8; 4096];
+        let line_end = loop {
+            if let Some(at) = got.iter().position(|byte| *byte == b'\n') {
+                break at;
+            }
+            let read = tokio::time::timeout(PATIENCE, server.read(&mut chunk))
+                .await
+                .unwrap_or_else(|_| panic!("no attach line"))
+                .unwrap();
+            assert_ne!(read, 0, "the helper's end closed before its attach line");
+            got.extend_from_slice(&chunk[..read]);
+        };
+        let attached = parse_attached(&got[..line_end]).unwrap();
+        assert!(attached.matches(FAKE_NONCE), "the attach line");
+        assert_eq!(
+            line_end + 1,
+            got.len(),
+            "bytes followed the attach line before the session started"
+        );
+        let (cancel, cancelled) = oneshot::channel::<()>();
+        let alive = Arc::new(AtomicU32::new(2));
+
+        let counts = Counts::default();
+        let pumped = Arc::clone(&counts.read);
+        let mut reader = reader.clone();
+        let handle = tokio::runtime::Handle::current();
+        let reading = Alive(Arc::clone(&alive));
+        std::thread::spawn(move || {
+            use std::io::Write;
+            let _reading = reading;
+            let read = pumped;
+            let mut cancelled = cancelled;
+            let mut chunk = [0_u8; 4096];
+            loop {
+                // The owner is dropped: `server` is dropped with this thread, which is what
+                // the helper's end (watched by `watch_end`) sees end.
+                let step = handle.block_on(async {
+                    tokio::select! {
+                        read = server.read(&mut chunk) => Some(read),
+                        _ = &mut cancelled => None,
+                    }
+                });
+                match step {
+                    Some(Ok(count)) if count > 0 => {
+                        if reader.write_all(&chunk[..count]).is_err() {
+                            return;
+                        }
+                        read.fetch_add(count as u64, Ordering::SeqCst);
+                    }
+                    _ => return,
+                }
+            }
+        });
+        let end = Watching {
+            inner: endpoint.end,
+            _alive: Alive(Arc::clone(&alive)),
+        };
+        channel::watch_end(end, inputs.clone(), watchdog);
+        let events = Counted {
+            inner: endpoint.events,
+            written: Arc::clone(&counts.written),
+        };
+        (
+            Box::new(events),
+            Owner {
+                counts,
+                alive,
+                _cancel: cancel,
+            },
+        )
+    }
+}
+
+/// The keyboard on Windows (#1791): a named pipe the rig creates, one-way, whose client is the
+/// helper (`conch-voice managed --test-key-device`, through `keys_windows`'s test seam). What
+/// the rig writes is that seam's four-byte records: the kind, a little-endian `u16` (a scan
+/// code, or a mouse button's number) and `1` for down or `0` for up.
+#[cfg(windows)]
+mod win_keys {
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    use tokio::io::AsyncWriteExt;
+    use tokio::net::windows::named_pipe::ServerOptions;
+    use tokio::sync::{mpsc, oneshot};
+
+    use super::Wanted;
+
+    /// The kind of record that is a key going down or up.
+    pub const KEY: u8 = 1;
+
+    /// The scan codes of F13, F14 and F15, as [`super::KEYS_TOML`] binds them.
+    pub fn scan(key: Wanted) -> u16 {
+        match key {
+            Wanted::Talk => 0x64,
+            Wanted::Mute => 0x65,
+            Wanted::Deafen => 0x66,
+        }
+    }
+
+    /// One record of the seam.
+    pub fn record(kind: u8, value: u16, down: bool) -> [u8; 4] {
+        let [low, high] = value.to_le_bytes();
+        [kind, low, high, u8::from(down)]
+    }
+
+    /// A pipe name no other test, and no other run, uses, and nobody can guess: the pipe
+    /// namespace is the machine's, and whoever creates a name first serves it.
+    pub fn pipe_name() -> String {
+        use std::hash::{BuildHasher, Hasher};
+        static NEXT: AtomicU32 = AtomicU32::new(0);
+        let unguessable = std::collections::hash_map::RandomState::new()
+            .build_hasher()
+            .finish();
+        format!(
+            r"\\.\pipe\conch-voice-rig-keys-{}-{}-{unguessable:016x}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::SeqCst)
+        )
+    }
+
+    /// A keyboard that is plugged in: the server end of the pipe, written by a task of the
+    /// runtime. Dropping it is unplugging: what was written is read first, and then the
+    /// helper's end reads the end of the pipe.
+    pub struct Keyboard {
+        bytes: mpsc::UnboundedSender<Vec<u8>>,
+        /// Dropping this ends a task that is still waiting for the helper to open the pipe.
+        _cancel: oneshot::Sender<()>,
+    }
+
+    impl Keyboard {
+        /// Creates the pipe `name`, and writes the release of each key, so that each is armed
+        /// (a Windows key's first press only arms it, `keys_windows`; a Linux keyboard has no
+        /// such rule) and, after an unplugging, the talk key's release reads the keys again.
+        /// Must be called from within the runtime.
+        pub fn plug(name: &str) -> Self {
+            let server = ServerOptions::new()
+                .first_pipe_instance(true)
+                .reject_remote_clients(true)
+                .access_inbound(false)
+                .create(name)
+                .unwrap();
+            let (bytes, mut written) = mpsc::unbounded_channel::<Vec<u8>>();
+            let (cancel, mut cancelled) = oneshot::channel::<()>();
+            tokio::spawn(async move {
+                let mut server = server;
+                tokio::select! {
+                    connected = server.connect() => {
+                        if connected.is_err() {
+                            return;
+                        }
+                    }
+                    _ = &mut cancelled => return,
+                }
+                while let Some(more) = written.recv().await {
+                    if server.write_all(&more).await.is_err() {
+                        return;
+                    }
+                }
+                // The keyboard is unplugged: the helper reads what is left, and then the end.
+                let _ = server.flush().await;
+            });
+            let keyboard = Self {
+                bytes,
+                _cancel: cancel,
+            };
+            let arm = [Wanted::Talk, Wanted::Mute, Wanted::Deafen]
+                .into_iter()
+                .flat_map(|key| record(KEY, scan(key), false))
+                .collect::<Vec<u8>>();
+            keyboard.write(&arm);
+            keyboard
+        }
+
+        /// Writes to the pipe, after what was written before.
+        pub fn write(&self, bytes: &[u8]) {
+            self.bytes.send(bytes.to_vec()).unwrap();
         }
     }
 }

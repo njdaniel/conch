@@ -31,6 +31,25 @@ tokio = { version = "1.53", default-features = false, features = ["macros", "rt-
 # repository, by commit; the source is allowed by exact URL in deny.toml.
 dmn-audio = { git = "https://github.com/njdaniel/dmn-audio", rev = "39e7748c0b4bf3317681f6718117152e48df63c8" }
 
+# Windows only (issue #938): the named-pipe client the events endpoint opens, tokio's `net`
+# feature. A feature of a crate already here (the dev-dependency below has it), so Cargo.lock
+# gains no crate; Nick signed it off on #756, 2026-11-11.
+[target.'cfg(windows)'.dependencies]
+tokio = { version = "1.53", default-features = false, features = ["net"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+# Windows only (issue #1774, docs/design/windows-desktop.md section 2): the WASAPI microphone
+# and speakers, as `dmn-audio` is PipeWire's. MIT, one maintainer, "the presented API is all
+# safe Rust": the crate holds the native calls and every crate here still forbids them.
+# Pinned exactly. Nick signed it off on #756, 2026-11-11.
+wasapi = "=0.26.0"
+# Windows only (issue #1781, docs/design/windows-desktop.md sections 4.3 and 4.4): Raw Input
+# for the push-to-talk keys, in the background, through `winit`'s device events. Apache-2.0,
+# pinned exactly and without its default features (no X11, no Wayland, no raw-window-handle,
+# so only the Windows backend). The audit at this version is in the pull request and in the
+# design note. Nick signed it off on #756, 2026-11-11.
+winit = { version = "=0.30.13", default-features = false }
+
 [dev-dependencies]
 # The stub conchd the tests talk to is written by hand on tokio's listener.
 tokio = { version = "1.53", default-features = false, features = ["io-util", "net"] }

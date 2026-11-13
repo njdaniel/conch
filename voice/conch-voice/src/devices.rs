@@ -29,6 +29,7 @@
 //!   Every line passes [`one_line`] as well.
 
 use std::io::{self, Write};
+#[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 
@@ -39,6 +40,7 @@ use conch_voice_api::{
 };
 use conch_voice_control::DEFAULT_MAX_TRANSMIT_SECS;
 
+use crate::audio::SYSTEM_NAME;
 use crate::cli::{Environment, read_config};
 use crate::error::Error;
 use crate::keydev::{self, DeviceRule, Problem};
@@ -198,16 +200,15 @@ where
 {
     let table = DeviceTable::from(table);
     let mut lines: Vec<String> = vec![
-        "Audio devices (PipeWire)".to_owned(),
+        format!("Audio devices ({SYSTEM_NAME})"),
         "  Name one under [audio] in the configuration file, or leave `input` and `output`"
             .to_owned(),
-        "  out, or write \"default\", to follow PipeWire's default as it changes.".to_owned(),
+        format!("  out, or write \"default\", to follow {SYSTEM_NAME}'s default as it changes."),
     ];
     if !table.synced {
-        lines.push(
-            "  PipeWire had not finished listing its devices; this list may be incomplete."
-                .to_owned(),
-        );
+        lines.push(format!(
+            "  {SYSTEM_NAME} had not finished listing its devices; this list may be incomplete."
+        ));
     }
     lines.push(String::new());
     let input = audio_section(
@@ -262,7 +263,7 @@ where
 ///
 /// What the operating system said, if `out` cannot be written to.
 pub fn audio_unavailable(why: &str, out: &mut dyn Write) -> io::Result<()> {
-    writeln!(out, "Audio devices (PipeWire)")?;
+    writeln!(out, "Audio devices ({SYSTEM_NAME})")?;
     writeln!(out, "  not listed: {}", one_line(why))?;
     writeln!(out)?;
     out.flush()
@@ -360,9 +361,17 @@ pub fn udev_rule(name: &str, uid: u32) -> Option<String> {
 /// The user this process runs as, from the owner of its own entry under `/proc`.
 #[must_use]
 pub fn current_uid() -> Option<u32> {
-    std::fs::metadata("/proc/self")
-        .ok()
-        .map(|metadata| metadata.uid())
+    #[cfg(unix)]
+    {
+        std::fs::metadata("/proc/self")
+            .ok()
+            .map(|metadata| metadata.uid())
+    }
+    // A Windows user has no numeric id of this kind; callers take `None` as "unknown".
+    #[cfg(not(unix))]
+    {
+        None
+    }
 }
 
 /// What read access to a keyboard gives. Printed before any way of granting it.
@@ -569,6 +578,7 @@ pub fn config_view(environment: &Environment) -> (ConfigView, Option<Error>) {
         environment.conch_config_dir.as_deref(),
         environment.xdg_config_home.as_deref(),
         environment.home.as_deref(),
+        environment.appdata.as_deref(),
     ) {
         Ok(Some(dir)) => dir,
         Ok(None) => return (ConfigView::without_names(VoiceDevicesConfig::None), None),
@@ -711,7 +721,11 @@ pub fn write_device_list(list: &VoiceDevicesV1, out: &mut dyn Write) -> io::Resu
     out.flush()
 }
 
+/// The tests that build a PipeWire node table, which is `dmn-audio`'s and Linux's alone: a
+/// platform without PipeWire has the neutral [`DeviceTable`] only, and no way to make one
+/// from a table of nodes.
 #[cfg(test)]
+#[cfg(target_os = "linux")]
 mod tests {
     use dmn_audio::{NodeTable, RegistryEvent};
 
@@ -848,7 +862,7 @@ Speakers (`output`)
         audio_unavailable("no such\nserver", &mut written).unwrap();
         assert_eq!(
             String::from_utf8(written).unwrap(),
-            "Audio devices (PipeWire)\n  not listed: no such server\n\n"
+            format!("Audio devices ({SYSTEM_NAME})\n  not listed: no such server\n\n")
         );
     }
 
@@ -1098,6 +1112,7 @@ Speakers (`output`)
         assert!(out.is_empty());
     }
 
+    #[cfg(unix)]
     fn environment(dir: &std::path::Path) -> Environment {
         Environment {
             conch_config_dir: Some(dir.as_os_str().to_owned()),
@@ -1105,6 +1120,7 @@ Speakers (`output`)
         }
     }
 
+    #[cfg(unix)]
     fn voice_toml(dir: &std::path::Path, text: &str, mode: u32) {
         use std::os::unix::fs::PermissionsExt;
         let path = dir.join("voice.toml");
@@ -1112,6 +1128,7 @@ Speakers (`output`)
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
     }
 
+    #[cfg(unix)]
     #[test]
     fn the_configuration_is_ok_missing_refused_or_none() {
         let dir = tempfile::tempdir().unwrap();
@@ -1145,5 +1162,24 @@ Speakers (`output`)
         let (view, why) = config_view(&Environment::default());
         assert_eq!(view.state, VoiceDevicesConfig::None);
         assert!(why.is_none());
+    }
+}
+
+#[cfg(test)]
+mod uid_tests {
+    use super::*;
+
+    /// A Windows user has no numeric id: the answer is "unknown", never a guess.
+    #[cfg(not(unix))]
+    #[test]
+    fn without_unix_the_current_user_is_unknown() {
+        assert_eq!(current_uid(), None);
+    }
+
+    /// Where there is a `/proc`, the user is known.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn on_linux_the_current_user_is_known() {
+        assert!(current_uid().is_some());
     }
 }

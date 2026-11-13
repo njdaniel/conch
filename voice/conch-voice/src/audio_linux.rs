@@ -6,7 +6,7 @@
 //! the speakers a `Playback`, both mono `f32` at 48 kHz. Output: a [`MicSource`] that gives
 //! the captured audio a frame at a time, and a [`SpeakerSink`] that takes the mix a frame at a
 //! time, and says whether it is playing ([`Speakers`]). Owns: the one connection to PipeWire
-//! ([`PipeWire`]), the capture stream from the moment the microphone is opened until it is
+//! ([`AudioSystem`]), the capture stream from the moment the microphone is opened until it is
 //! dropped, and the playback stream from the moment the speakers are opened until they are.
 //! A switch of device inside a session opens a new stream for the new name and drops the
 //! old one, so a name that is absent, or names a device of the other kind, is treated the
@@ -68,8 +68,8 @@ const TARGET_FILL: usize = 4 * FRAME_LEN;
 /// How long `devices` waits for PipeWire to finish listing what it has.
 pub const LISTING_WAIT: Duration = Duration::from_secs(3);
 
-fn pipewire_error(doing: &'static str, detail: impl std::fmt::Display) -> Error {
-    Error::PipeWire {
+fn audio_error(doing: &'static str, detail: impl std::fmt::Display) -> Error {
+    Error::AudioSystem {
         doing,
         detail: detail.to_string(),
     }
@@ -78,19 +78,19 @@ fn pipewire_error(doing: &'static str, detail: impl std::fmt::Display) -> Error 
 /// The connection to PipeWire, shared by the microphone and the speakers. Cloning shares it;
 /// the connection closes when the last clone and everything opened through it are gone.
 #[derive(Clone)]
-pub struct PipeWire {
+pub struct AudioSystem {
     context: Arc<PipeWireContext>,
 }
 
-impl PipeWire {
+impl AudioSystem {
     /// Connects to the PipeWire server this user's session runs.
     ///
     /// # Errors
     ///
-    /// [`Error::PipeWire`] if there is none to reach.
+    /// [`Error::AudioSystem`] if there is none to reach.
     pub fn connect() -> Result<Self, Error> {
         let context = PipeWireContext::connect()
-            .map_err(|error| pipewire_error("connect to PipeWire", error))?;
+            .map_err(|error| audio_error("connect to PipeWire", error))?;
         Ok(Self {
             context: Arc::new(context),
         })
@@ -103,7 +103,7 @@ impl PipeWire {
         self.context.wait_for_sync(wait)
     }
 
-    /// [`PipeWire::nodes`] as the backend-neutral table that `devices` formats. Always
+    /// [`AudioSystem::nodes`] as the backend-neutral table that `devices` formats. Always
     /// answers on Linux; the signature is the same on a platform with no backend, where it
     /// is an error.
     ///
@@ -119,7 +119,7 @@ impl PipeWire {
     ///
     /// # Errors
     ///
-    /// [`Error::PipeWire`] if the stream cannot be created.
+    /// [`Error::AudioSystem`] if the stream cannot be created.
     pub fn microphone(&self, configured: Option<&str>) -> Result<PipeWireMic, Error> {
         let target = CaptureTarget::mic(configured.unwrap_or_default());
         let mut capture = MicCapture::new(
@@ -128,11 +128,11 @@ impl PipeWire {
             SAMPLE_RATE,
             CAPTURE_RING_MS,
         )
-        .map_err(|error| pipewire_error("open the microphone", error))?;
+        .map_err(|error| audio_error("open the microphone", error))?;
         let status = capture.status();
         let ring = capture
             .start()
-            .map_err(|error| pipewire_error("open the microphone", error))?;
+            .map_err(|error| audio_error("open the microphone", error))?;
         Ok(PipeWireMic {
             capture,
             ring,
@@ -147,7 +147,7 @@ impl PipeWire {
     ///
     /// # Errors
     ///
-    /// [`Error::PipeWire`] if the stream cannot be created.
+    /// [`Error::AudioSystem`] if the stream cannot be created.
     pub fn speakers(&self, configured: Option<&str>) -> Result<PipeWireSpeakers, Error> {
         let target = SinkTarget::from_config(configured.unwrap_or_default());
         let mut playback = Playback::new(
@@ -156,11 +156,11 @@ impl PipeWire {
             SAMPLE_RATE,
             PLAYBACK_RING_MS,
         )
-        .map_err(|error| pipewire_error("open the speakers", error))?;
+        .map_err(|error| audio_error("open the speakers", error))?;
         let status = playback.status();
         let ring = playback
             .start()
-            .map_err(|error| pipewire_error("open the speakers", error))?;
+            .map_err(|error| audio_error("open the speakers", error))?;
         Ok(PipeWireSpeakers {
             playback,
             ring,
@@ -275,7 +275,7 @@ pub fn take_frame(ring: &mut impl Samples, usable: bool, frame: &mut Frame) -> M
 }
 
 /// The microphone: PipeWire's default, or the one named in the configuration. It is open,
-/// and PipeWire's desktop indicator shows it, from [`PipeWire::microphone`] until it is
+/// and PipeWire's desktop indicator shows it, from [`AudioSystem::microphone`] until it is
 /// dropped.
 ///
 /// It yields captured audio and nothing more: it is for sending only after the transmit
@@ -467,7 +467,7 @@ pub fn frames_wanted(ring: &impl Room, playing: bool, idle: &mut IdleClock, now:
 }
 
 /// The speakers: PipeWire's default output, or the one named in the configuration. The
-/// stream is open from [`PipeWire::speakers`] until it is dropped.
+/// stream is open from [`AudioSystem::speakers`] until it is dropped.
 pub struct PipeWireSpeakers {
     // Declaration order is drop order: the stream closes before its ring goes.
     #[expect(
