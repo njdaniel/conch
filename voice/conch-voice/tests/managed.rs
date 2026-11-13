@@ -1167,41 +1167,27 @@ async fn without_a_key_device_hold_to_talk_is_not_configured_and_the_rest_works(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_slow_owner_loses_events_sees_the_gap_and_resynchronises() {
+    const STRIKES: i64 = 400;
     let mut rig = ManagedRig::start().await;
     rig.send_start();
     rig.ready().await;
     let base = rig.read().last().unwrap().seq();
     let track_muted = rig.sdk.count(Call::Mute);
     // The owner stops reading; meanwhile the mute key is struck far more often than the
-    // queue holds states. Each strike is one change, and so one state, and one seq. How many
-    // states the transport itself buffers before the writer waits differs by platform (a
-    // Windows pipe holds far more than a Unix socket), so the key is struck in batches until
-    // the writer waits on the owner, and then more than the queue holds, an even number in
-    // all.
+    // queue holds states. Each strike is one change, and so one state, and one seq.
     rig.reader.stop(true);
-    let mut strikes: i64 = 0;
-    while !rig.reader.is_waited_for() {
-        assert!(strikes < 20_000, "the writer never waited on the owner");
-        for _ in 0..50 {
-            rig.strike_mute();
-        }
-        strikes += 50;
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-    let beyond = 2 * VOICE_CONTROL_EVENT_QUEUE_LINES as i64;
-    for _ in 0..beyond {
+    for _ in 0..STRIKES {
         rig.strike_mute();
     }
-    strikes += beyond;
-    if strikes % 2 == 1 {
-        rig.strike_mute();
-        strikes += 1;
-    }
+    rig.until("the writer waiting on the owner", |rig| {
+        rig.reader.is_waited_for()
+    })
+    .await;
     // The owner reads again only once the helper has taken the strikes, all but perhaps
     // the last: each strike that mutes mutes the track as well. That is more states than
     // the helper holds for an owner who does not read, so some were dropped.
     rig.until("the strikes taken", |rig| {
-        rig.sdk.count(Call::Mute) >= track_muted + strikes as usize / 2
+        rig.sdk.count(Call::Mute) >= track_muted + STRIKES as usize / 2
     })
     .await;
     rig.reader.stop(false);
@@ -1232,7 +1218,7 @@ async fn a_slow_owner_loses_events_sees_the_gap_and_resynchronises() {
             VoiceControlEvent::State(state) => state.clone(),
             other => panic!("get_state answered without a state just before: {other:?}"),
         };
-        if state.seq > base + strikes {
+        if state.seq > base + STRIKES {
             break state;
         }
         id += 1;
