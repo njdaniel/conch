@@ -10,13 +10,15 @@
 //! On Unix the events go to an in-memory buffer and the keyboard is a `mkfifo`. On Windows
 //! (#1766) the events go through a real named pipe: a tokio `NamedPipeServer` the rig holds
 //! as the owner, reached by `channel::attach` as `conch-voice managed --events-pipe` reaches
-//! it, with the attach line read and checked before the helper's hello. There is no keyboard
-//! on Windows: its push-to-talk is Raw Input behind a crate-private `EventSource`
-//! (`keys_windows`, #1781), which a test in this directory cannot reach, so the rig reads no
-//! key device there and the tests that press a key are ignored there with that reason.
+//! it, with the attach line read and checked before the helper's hello. The keyboard on
+//! Windows (#1791) is a named pipe the rig creates (`win_keys`), which the helper reads
+//! through its hidden `--test-key-device` as it reads a `mkfifo` on Linux: Windows
+//! push-to-talk is Raw Input, and the test seam of `keys_windows` (`PipeSource`) reads the
+//! fake transitions the rig writes to it in place of Raw Input.
 //!
 //! No test here needs a microphone, PipeWire, a keyboard or LiveKit.
 
+#[cfg(unix)]
 use std::fs::File;
 #[cfg(unix)]
 use std::fs::OpenOptions;
@@ -47,7 +49,9 @@ use tokio::task::JoinHandle;
 use super::fake::FakeSdk;
 #[cfg(unix)]
 use super::keyboard::Pipe;
-use super::keyboard::{DEAFEN, MUTE, TALK, press, quick_keys, release};
+use super::keyboard::quick_keys;
+#[cfg(unix)]
+use super::keyboard::{DEAFEN, MUTE, TALK, press, release};
 use super::stub::{FAKE_LOGIN, OWN_PRINCIPAL, Stub};
 use super::{Reader, Written, quick};
 
@@ -61,11 +65,11 @@ const PATIENCE: Duration = Duration::from_secs(10);
 #[cfg(unix)]
 pub const KEYS_TOML: &str = "[keys]\ntalk = \"KEY_F13\"\nmute = \"KEY_F14\"\ndeafen = \"KEY_F15\"\n\n[audio]\nrelease_tail_ms = 20\n";
 
-/// What a rig's `voice.toml` binds on Windows: no keys. The keys of the Linux file are in
-/// the Linux form, which `voice.toml` refuses on Windows, and a Windows key is read by Raw
-/// Input, which no test here can feed (see the top of this file).
+/// What a rig's `voice.toml` binds on Windows: the same three keys, in Windows' grammar (the
+/// Linux form is refused there), as the scan codes of F13, F14 and F15, which `win_keys`
+/// writes. A short release tail.
 #[cfg(not(unix))]
-pub const KEYS_TOML: &str = "[audio]\nrelease_tail_ms = 20\n";
+pub const KEYS_TOML: &str = "[keys]\ntalk = \"sc:0x64\"\nmute = \"sc:0x65\"\ndeafen = \"sc:0x66\"\n\n[audio]\nrelease_tail_ms = 20\n";
 
 /// Where the helper is told its login is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -86,7 +90,6 @@ pub struct ManagedSetup {
     /// The text of `voice.toml`; `None` for no file.
     pub voice_toml: Option<String>,
     /// Read keys from the named pipe (`--test-key-device`), with the bindings of `voice_toml`.
-    /// On Windows there is no such pipe and this is not looked at: the rig reads no keys.
     pub keyboard: bool,
     /// Open the keyboard's end of the key device's pipe only when the test plugs it in
     /// ([`ManagedRig::plug_keyboard`]): until then the key device's watcher waits to open
@@ -105,7 +108,7 @@ impl Default for ManagedSetup {
         Self {
             login: Login::Stored,
             voice_toml: Some(KEYS_TOML.to_owned()),
-            keyboard: cfg!(unix),
+            keyboard: true,
             keyboard_unplugged: false,
             start_timeout: Duration::from_secs(10),
             no_mute_key: false,
@@ -121,6 +124,33 @@ pub fn level_of(name: Option<&str>) -> f32 {
     match name {
         None => 0.25,
         Some(_) => 0.5,
+    }
+}
+
+/// The three keys a rig's `voice.toml` binds.
+#[derive(Debug, Clone, Copy)]
+enum Wanted {
+    Talk,
+    Mute,
+    Deafen,
+}
+
+/// The bytes the helper's key source reads for `key` going down or up: `input_event` records
+/// for the evdev watcher on Unix, the four-byte records of `keys_windows`'s test seam on
+/// Windows. Either way the helper's expected bytes are the same.
+fn transition(key: Wanted, down: bool) -> Vec<u8> {
+    #[cfg(unix)]
+    {
+        let code = match key {
+            Wanted::Talk => TALK,
+            Wanted::Mute => MUTE,
+            Wanted::Deafen => DEAFEN,
+        };
+        if down { press(code) } else { release(code) }
+    }
+    #[cfg(windows)]
+    {
+        win_keys::record(win_keys::KEY, win_keys::scan(key), down).to_vec()
     }
 }
 
@@ -318,10 +348,9 @@ pub struct ManagedRig {
     stdin: Option<PipeWriter>,
     /// Where signals and the like reach the session.
     pub inputs: mpsc::UnboundedSender<Input>,
-    /// The keyboard's end of the key device's pipe, if the rig reads keys. Never set on
-    /// Windows.
-    keyboard: Option<File>,
-    /// Whether the rig has a key device at all: never on Windows.
+    /// The keyboard's end of the key device's pipe, if the rig reads keys and it is plugged in.
+    keyboard: Option<Keyboard>,
+    /// Whether the rig has a key device at all.
     reads_keys: bool,
     /// Windows: what the helper wrote to the named pipe against what the owner has read of it.
     #[cfg(windows)]
@@ -334,7 +363,16 @@ pub struct ManagedRig {
     _dir: tempfile::TempDir,
     #[cfg(unix)]
     pipe: Pipe,
+    /// Windows: the name of the key device's pipe.
+    #[cfg(windows)]
+    key_pipe: String,
 }
+
+/// The keyboard's end of the key device's pipe: a file on Unix, a writer on Windows.
+#[cfg(unix)]
+type Keyboard = File;
+#[cfg(windows)]
+type Keyboard = win_keys::Keyboard;
 
 impl ManagedRig {
     /// Starts a helper with the usual setup and nothing written to it yet.
@@ -382,7 +420,7 @@ impl ManagedRig {
 
         // The keyboard's end is opened to read and write, so that it does not wait for the
         // watcher, and the watcher's open does not wait for it.
-        let reads_keys = cfg!(unix) && setup.keyboard;
+        let reads_keys = setup.keyboard;
         #[cfg(unix)]
         let pipe = Pipe::new();
         #[cfg(unix)]
@@ -393,8 +431,11 @@ impl ManagedRig {
                 .open(&pipe.path)
                 .unwrap()
         });
-        #[cfg(not(unix))]
-        let keyboard: Option<File> = None;
+        #[cfg(windows)]
+        let key_pipe = win_keys::pipe_name();
+        #[cfg(windows)]
+        let keyboard = (setup.keyboard && !setup.keyboard_unplugged)
+            .then(|| win_keys::Keyboard::plug(&key_pipe));
 
         let mic_opened = Arc::new(AtomicU32::new(0));
         let mic_closed = Arc::new(AtomicU32::new(0));
@@ -461,9 +502,12 @@ impl ManagedRig {
         } else {
             KeySource::Configured
         };
-        // No key device is named, and `voice.toml` binds no key: nothing is read.
-        #[cfg(not(unix))]
-        let keys = KeySource::Configured;
+        #[cfg(windows)]
+        let keys = if setup.keyboard {
+            KeySource::NamedPipe(std::path::PathBuf::from(&key_pipe))
+        } else {
+            KeySource::Configured
+        };
         let host = Host {
             environment,
             transport: sdk.clone(),
@@ -512,6 +556,8 @@ impl ManagedRig {
             _dir: dir,
             #[cfg(unix)]
             pipe,
+            #[cfg(windows)]
+            key_pipe,
         }
     }
 
@@ -533,8 +579,10 @@ impl ManagedRig {
                     .unwrap(),
             );
         }
-        #[cfg(not(unix))]
-        panic!("the rig has no key device on Windows");
+        #[cfg(windows)]
+        {
+            self.keyboard = Some(win_keys::Keyboard::plug(&self.key_pipe));
+        }
     }
 
     /// The start of a v2 session: the usual one, written in `conch.voice_control.v2`.
@@ -705,27 +753,30 @@ impl ManagedRig {
 
     fn keys(&mut self, bytes: &[u8]) {
         let keyboard = self.keyboard.as_mut().expect("the rig reads no keys");
+        #[cfg(unix)]
         keyboard.write_all(bytes).unwrap();
+        #[cfg(windows)]
+        keyboard.write(bytes);
     }
 
     pub fn press_talk(&mut self) {
-        self.keys(&press(TALK));
+        self.keys(&transition(Wanted::Talk, true));
     }
 
     pub fn release_talk(&mut self) {
-        self.keys(&release(TALK));
+        self.keys(&transition(Wanted::Talk, false));
     }
 
     /// The mute key, pressed and released: a toggle.
     pub fn strike_mute(&mut self) {
-        let mut bytes = press(MUTE);
-        bytes.extend(release(MUTE));
+        let mut bytes = transition(Wanted::Mute, true);
+        bytes.extend(transition(Wanted::Mute, false));
         self.keys(&bytes);
     }
 
     pub fn strike_deafen(&mut self) {
-        let mut bytes = press(DEAFEN);
-        bytes.extend(release(DEAFEN));
+        let mut bytes = transition(Wanted::Deafen, true);
+        bytes.extend(transition(Wanted::Deafen, false));
         self.keys(&bytes);
     }
 
@@ -1095,5 +1146,107 @@ mod owner_pipe {
                 _cancel: cancel,
             },
         )
+    }
+}
+
+/// The keyboard on Windows (#1791): a named pipe the rig creates, one-way, whose client is the
+/// helper (`conch-voice managed --test-key-device`, through `keys_windows`'s test seam). What
+/// the rig writes is that seam's four-byte records: the kind, a little-endian `u16` (a scan
+/// code, or a mouse button's number) and `1` for down or `0` for up.
+#[cfg(windows)]
+mod win_keys {
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    use tokio::io::AsyncWriteExt;
+    use tokio::net::windows::named_pipe::ServerOptions;
+    use tokio::sync::{mpsc, oneshot};
+
+    use super::Wanted;
+
+    /// The kind of record that is a key going down or up.
+    pub const KEY: u8 = 1;
+
+    /// The scan codes of F13, F14 and F15, as [`super::KEYS_TOML`] binds them.
+    pub fn scan(key: Wanted) -> u16 {
+        match key {
+            Wanted::Talk => 0x64,
+            Wanted::Mute => 0x65,
+            Wanted::Deafen => 0x66,
+        }
+    }
+
+    /// One record of the seam.
+    pub fn record(kind: u8, value: u16, down: bool) -> [u8; 4] {
+        let [low, high] = value.to_le_bytes();
+        [kind, low, high, u8::from(down)]
+    }
+
+    /// A pipe name no other test, and no other run, uses.
+    pub fn pipe_name() -> String {
+        static NEXT: AtomicU32 = AtomicU32::new(0);
+        format!(
+            r"\\.\pipe\conch-voice-rig-keys-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::SeqCst)
+        )
+    }
+
+    /// A keyboard that is plugged in: the server end of the pipe, written by a task of the
+    /// runtime. Dropping it is unplugging: what was written is read first, and then the
+    /// helper's end reads the end of the pipe.
+    pub struct Keyboard {
+        bytes: mpsc::UnboundedSender<Vec<u8>>,
+        /// Dropping this ends a task that is still waiting for the helper to open the pipe.
+        _cancel: oneshot::Sender<()>,
+    }
+
+    impl Keyboard {
+        /// Creates the pipe `name`, and writes the release of each key, so that each is armed
+        /// (a Windows key's first press only arms it, `keys_windows`; a Linux keyboard has no
+        /// such rule) and, after an unplugging, the talk key's release reads the keys again.
+        /// Must be called from within the runtime.
+        pub fn plug(name: &str) -> Self {
+            let server = ServerOptions::new()
+                .first_pipe_instance(true)
+                .reject_remote_clients(true)
+                .access_inbound(false)
+                .create(name)
+                .unwrap();
+            let (bytes, mut written) = mpsc::unbounded_channel::<Vec<u8>>();
+            let (cancel, mut cancelled) = oneshot::channel::<()>();
+            tokio::spawn(async move {
+                let mut server = server;
+                tokio::select! {
+                    connected = server.connect() => {
+                        if connected.is_err() {
+                            return;
+                        }
+                    }
+                    _ = &mut cancelled => return,
+                }
+                while let Some(more) = written.recv().await {
+                    if server.write_all(&more).await.is_err() {
+                        return;
+                    }
+                }
+                // The keyboard is unplugged: the helper reads what is left, and then the end.
+                let _ = server.flush().await;
+            });
+            let keyboard = Self {
+                bytes,
+                _cancel: cancel,
+            };
+            let arm = [Wanted::Talk, Wanted::Mute, Wanted::Deafen]
+                .into_iter()
+                .flat_map(|key| record(KEY, scan(key), false))
+                .collect::<Vec<u8>>();
+            keyboard.write(&arm);
+            keyboard
+        }
+
+        /// Writes to the pipe, after what was written before.
+        pub fn write(&self, bytes: &[u8]) {
+            self.bytes.send(bytes.to_vec()).unwrap();
+        }
     }
 }

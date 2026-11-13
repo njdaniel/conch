@@ -220,7 +220,9 @@ pub struct ManagedArgs {
     /// `--sink`, test only.
     pub sink: SinkChoice,
     /// `--test-key-device`, test only: a named pipe of `input_event` records read instead
-    /// of the key device `voice.toml` names, with the keys it binds.
+    /// of the key device `voice.toml` names, with the keys it binds. On Windows, a pipe named
+    /// `\\.\pipe\` and a name, of `keys_windows`'s fake Raw Input records (#1791); any other
+    /// path is refused.
     pub test_key_device: Option<PathBuf>,
     /// `--events-pipe`: a Unix-socket path (on Windows a `\\.\pipe\` name) to connect to for
     /// events instead of file descriptor 3. Not secret. The desktop owner passes it; nobody

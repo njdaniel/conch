@@ -33,7 +33,9 @@
 //! no more than the compositor's own input thread shows.
 //!
 //! Input: the bindings and an [`EventSource`] (`winit`'s, on Windows; a scripted one in the
-//! tests, since the runner has no keyboard to press). Output: [`Input::Key`] and
+//! tests, since the runner has no keyboard to press; and [`PipeSource`], the test seam of
+//! #1791, which reads fake transitions from a named pipe and whose gate its own doc comment
+//! sets out). Output: [`Input::Key`] and
 //! [`Input::KeyDevice`] to the session loop, which owns every decision. Owns: two threads, the
 //! input thread's (the event loop, which `winit` requires to be one thread, and the [`Binder`])
 //! and a small monitor, and the [`Heartbeat`] between them.
@@ -78,6 +80,7 @@
 
 use std::fmt;
 use std::io;
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
@@ -582,6 +585,229 @@ pub(crate) fn spawn_with(
             }
         })
         .map(|_| ())
+}
+
+/// The test seam's gate (#1791): what may be opened as the pipe the seam reads fake key
+/// transitions from. A Windows named pipe, written `\\.\pipe\` and a name, and nothing else:
+/// the name is letters, digits, `.`, `_` and `-` (not only dots), so that no `\`, `/`, drive
+/// letter or `..` can lead out of the pipe namespace to a file, and a real keyboard is not
+/// a pipe. Built on every platform, so that it is tested on every platform.
+#[must_use]
+pub(crate) fn is_test_pipe(path: &Path) -> bool {
+    let Some(name) = path
+        .to_str()
+        .and_then(|text| text.strip_prefix(TEST_PIPE_PREFIX))
+    else {
+        return false;
+    };
+    !name.is_empty()
+        && name.len() <= TEST_PIPE_NAME_MAX
+        && name.bytes().any(|byte| byte != b'.')
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+}
+
+/// Where every pipe the test seam reads is, in the kernel's namespace of named pipes.
+const TEST_PIPE_PREFIX: &str = r"\\.\pipe\";
+/// The longest name of such a pipe the seam takes; Windows allows 256.
+const TEST_PIPE_NAME_MAX: usize = 200;
+/// The size of one record on the test pipe.
+pub(crate) const TEST_RECORD_LEN: usize = 4;
+/// The kinds of record on the test pipe: its first byte.
+const TEST_KEY: u8 = 1;
+const TEST_BUTTON: u8 = 2;
+const TEST_DEVICE_ADDED: u8 = 3;
+const TEST_DEVICE_REMOVED: u8 = 4;
+const TEST_FOCUS: u8 = 5;
+
+/// One record of the test pipe as the [`RawEvent`] it stands for. A record is four bytes: the
+/// kind, a little-endian `u16` (the scan code of a key, with the `E0` prefix in the high byte,
+/// or the number of a mouse button, 4 or 5; zero for the other kinds) and `1` for down or `0`
+/// for up. Anything else (an unknown kind, a mouse button that is not a side button) is a
+/// [`RawEvent::Tick`]: it says only that the source is alive, as an event `winit` drops does.
+#[must_use]
+pub(crate) fn decode_test_record(record: [u8; TEST_RECORD_LEN]) -> RawEvent {
+    let [kind, low, high, down] = record;
+    let value = u16::from_le_bytes([low, high]);
+    let down = down != 0;
+    match kind {
+        TEST_KEY => RawEvent::Key { scan: value, down },
+        TEST_BUTTON => match u8::try_from(value) {
+            Ok(button @ (4 | 5)) => RawEvent::Button { button, down },
+            _ => RawEvent::Tick,
+        },
+        TEST_DEVICE_ADDED => RawEvent::DeviceAdded,
+        TEST_DEVICE_REMOVED => RawEvent::DeviceRemoved,
+        TEST_FOCUS => RawEvent::FocusChanged,
+        _ => RawEvent::Tick,
+    }
+}
+
+/// How the test seam opens its pipe. Each call is one attempt.
+type OpenPipe = Box<dyn FnMut() -> io::Result<Box<dyn io::Read + Send>> + Send>;
+
+/// **The test seam (#1791): an [`EventSource`] that reads [`RawEvent`]s from a named pipe
+/// instead of from Raw Input**, so that a test of the whole helper can press keys on Windows
+/// as it writes `input_event` records to a `mkfifo` on Linux.
+///
+/// **How it is kept out of a normal run**, as the evdev watcher's `--test-key-device` is
+/// (`keydev`'s `DeviceRule::NamedPipeForTests`), and no tighter: the only way to it is that
+/// hidden option of `managed` (`--test-key-device`, not in `--help`), which `lib.rs` turns into
+/// `KeySource::NamedPipe`, which `managed::key_source` turns into
+/// `DeviceRule::NamedPipeForTests`, which `keydev::spawn` answers with [`spawn_pipe`]. Nothing
+/// else names that rule: neither `join`, nor `keys`, nor `devices`, nor `voice.toml` (which has
+/// nowhere to hold a pipe), nor the environment. Without the option the helper reads Raw
+/// Input and nothing else ([`spawn`]). It is not left out of release builds by a `cfg`, as
+/// the Linux option is not; what bounds it is [`is_test_pipe`]: a name in the kernel's pipe
+/// namespace and no path, so no file, no device and no keyboard can be read through it,
+/// and the records it reads are four-byte [`decode_test_record`]s, which the same user's other
+/// programs could as easily send to the helper's real input with `SendInput` (design section 5).
+/// Like the attach pipe, a pipe of the same user's is whatever process created it: that is not
+/// authentication either.
+///
+/// Until the pipe can be opened (nobody has created it yet) it waits, and ticks, as the Linux
+/// watcher waits on a fifo; once it is, the keys are ready. A pipe that ends is a removal of
+/// the device, and opening it again is its arrival.
+pub(crate) struct PipeSource {
+    open: OpenPipe,
+    /// How long to wait between attempts to open the pipe.
+    wait: Duration,
+}
+
+/// Shows that there is a source and nothing of what it reads.
+impl fmt::Debug for PipeSource {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PipeSource").finish_non_exhaustive()
+    }
+}
+
+impl PipeSource {
+    /// A source that opens its pipe with `open`, trying again every `wait`.
+    #[must_use]
+    pub(crate) fn new(open: OpenPipe, wait: Duration) -> Self {
+        Self { open, wait }
+    }
+
+    /// A source of the pipe at `path`, which must pass [`is_test_pipe`].
+    ///
+    /// # Errors
+    ///
+    /// [`io::ErrorKind::InvalidInput`] for a path that is not a test pipe's. The path is not
+    /// in the error.
+    pub(crate) fn at(path: &Path) -> io::Result<Self> {
+        if !is_test_pipe(path) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "the test key pipe is not a named pipe",
+            ));
+        }
+        let path = path.to_path_buf();
+        Ok(Self::new(
+            Box::new(move || {
+                let file = std::fs::OpenOptions::new().read(true).open(&path)?;
+                Ok(Box::new(file) as Box<dyn io::Read + Send>)
+            }),
+            Duration::from_millis(5),
+        ))
+    }
+}
+
+impl EventSource for PipeSource {
+    fn run(mut self, tick: Duration, sink: &mut dyn Sink) -> Result<(), OsError> {
+        let mut started = false;
+        loop {
+            // Waits for the pipe, for as long as the session loop is there to want it.
+            let mut pipe = loop {
+                match (self.open)() {
+                    Ok(pipe) => break pipe,
+                    Err(_) => {
+                        if sink.event(RawEvent::Tick) == Flow::Stop {
+                            return Ok(());
+                        }
+                        std::thread::sleep(self.wait.min(tick));
+                    }
+                }
+            };
+            // The read blocks, so a thread of its own does it and the source keeps its beat.
+            let (bytes, arrived) = std::sync::mpsc::channel::<Vec<u8>>();
+            std::thread::Builder::new()
+                .name("conch-voice-keys-pipe".to_owned())
+                .spawn(move || {
+                    let mut buffer = [0_u8; 64];
+                    while let Ok(count) = io::Read::read(&mut pipe, &mut buffer) {
+                        let Some(read) = buffer.get(..count).filter(|read| !read.is_empty()) else {
+                            break;
+                        };
+                        if bytes.send(read.to_vec()).is_err() {
+                            break;
+                        }
+                    }
+                })
+                .map_err(|error| OsError::from(&error))?;
+            let flow = if started {
+                sink.event(RawEvent::DeviceAdded)
+            } else {
+                started = true;
+                sink.started();
+                Flow::Continue
+            };
+            if flow == Flow::Stop {
+                return Ok(());
+            }
+            let mut pending: Vec<u8> = Vec::new();
+            loop {
+                match arrived.recv_timeout(tick) {
+                    Ok(more) => {
+                        pending.extend(more);
+                        let whole = pending.len() - pending.len() % TEST_RECORD_LEN;
+                        let records: Vec<u8> = pending.drain(..whole).collect();
+                        for record in records.chunks_exact(TEST_RECORD_LEN) {
+                            if let Ok(record) = <[u8; TEST_RECORD_LEN]>::try_from(record)
+                                && sink.event(decode_test_record(record)) == Flow::Stop
+                            {
+                                return Ok(());
+                            }
+                        }
+                    }
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                        if sink.event(RawEvent::Tick) == Flow::Stop {
+                            return Ok(());
+                        }
+                    }
+                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                        // The pipe ended: the device is gone, and the next open is it
+                        // arriving.
+                        if sink.event(RawEvent::DeviceRemoved) == Flow::Stop {
+                            return Ok(());
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// [`spawn_with`] on the test seam's pipe at `path` ([`PipeSource`]). Only
+/// `keydev::spawn`, for `DeviceRule::NamedPipeForTests`, calls it.
+///
+/// # Errors
+///
+/// [`io::ErrorKind::InvalidInput`] if `path` is not a named pipe ([`is_test_pipe`]); otherwise
+/// what the operating system said, if a thread could not be started.
+#[cfg(windows)]
+pub(crate) fn spawn_pipe(
+    path: &Path,
+    bindings: &KeyBindings,
+    inputs: mpsc::UnboundedSender<Input>,
+) -> io::Result<()> {
+    spawn_with(
+        PipeSource::at(path)?,
+        bindings,
+        inputs,
+        Duration::from_millis(conch_voice_api::VOICE_CONTROL_OWNER_POLL_MS),
+    )
 }
 
 /// [`spawn_with`] on Raw Input, through `winit`. **Once per process:** `winit` allows one event
@@ -1334,6 +1560,183 @@ mod tests {
                 Input::KeyDevice(DeviceState::Lost(Problem::Ended)),
             ]
         );
+    }
+
+    /// A record of the test pipe, as the rig writes it.
+    fn record(kind: u8, value: u16, down: bool) -> [u8; TEST_RECORD_LEN] {
+        let [low, high] = value.to_le_bytes();
+        [kind, low, high, u8::from(down)]
+    }
+
+    #[test]
+    fn the_test_pipe_is_a_name_in_the_pipe_namespace_and_no_path() {
+        let accepted = [
+            r"\\.\pipe\conch-voice-rig-keys-1234-0",
+            r"\\.\pipe\a",
+            r"\\.\pipe\a.b_c-D",
+        ];
+        for path in accepted {
+            assert!(is_test_pipe(Path::new(path)), "{path}");
+        }
+        let refused = [
+            // The things a keyboard, a file or another pipe namespace would be.
+            "",
+            "keys",
+            "/dev/input/event3",
+            "/tmp/pipe",
+            r"C:\Windows\System32\config\SAM",
+            r"\\.\C:\file",
+            r"\\.\HID#VID_1234",
+            r"\\.\PhysicalDrive0",
+            r"\\?\C:\file",
+            r"\\?\pipe\x",
+            r"\\server\pipe\x",
+            r"\pipe\x",
+            // Nothing after the prefix, or something that leaves the namespace.
+            r"\\.\pipe\",
+            r"\\.\pipe\..",
+            r"\\.\pipe\.",
+            r"\\.\pipe\..\..\C:\file",
+            r"\\.\pipe\a\b",
+            r"\\.\pipe\a/b",
+            r"\\.\pipe\a:b",
+            "\\\\.\\pipe\\a\0b",
+            r"\\.\pipe\a b",
+        ];
+        for path in refused {
+            assert!(!is_test_pipe(Path::new(path)), "{path:?}");
+        }
+        assert!(!is_test_pipe(Path::new(&format!(
+            "{TEST_PIPE_PREFIX}{}",
+            "x".repeat(TEST_PIPE_NAME_MAX + 1)
+        ))));
+    }
+
+    /// A normal run cannot use the seam: the source of a path that is not a pipe is not made,
+    /// and what the error says does not hold the path.
+    #[test]
+    fn a_path_that_is_not_a_pipe_is_refused_without_being_named() {
+        let error = PipeSource::at(Path::new("/dev/input/event3-FAKE")).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert!(!error.to_string().contains("FAKE"), "{error}");
+        assert!(PipeSource::at(Path::new(r"\\.\pipe\fine")).is_ok());
+    }
+
+    #[test]
+    fn a_record_is_one_event_and_what_is_not_a_record_is_a_tick() {
+        let cases = [
+            (record(1, TALK, true), key(TALK, true)),
+            (record(1, MUTE, false), key(MUTE, false)),
+            (
+                record(2, 5, true),
+                RawEvent::Button {
+                    button: 5,
+                    down: true,
+                },
+            ),
+            (record(2, 3, true), RawEvent::Tick),
+            (record(2, 6, false), RawEvent::Tick),
+            (record(2, 0x0104, false), RawEvent::Tick),
+            (record(3, 0, false), RawEvent::DeviceAdded),
+            (record(4, 0, false), RawEvent::DeviceRemoved),
+            (record(5, 0, true), RawEvent::FocusChanged),
+            (record(0, 7, true), RawEvent::Tick),
+            (record(200, 7, true), RawEvent::Tick),
+        ];
+        for (bytes, event) in cases {
+            assert_eq!(decode_test_record(bytes), event, "{bytes:?}");
+        }
+    }
+
+    /// A pipe in memory: what is sent to it is read, and dropping the sender ends it.
+    struct Fed(std::sync::mpsc::Receiver<Vec<u8>>, Vec<u8>);
+
+    impl io::Read for Fed {
+        fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
+            if self.1.is_empty() {
+                match self.0.recv() {
+                    Ok(more) => self.1 = more,
+                    Err(_) => return Ok(0),
+                }
+            }
+            let count = out.len().min(self.1.len());
+            out[..count].copy_from_slice(&self.1[..count]);
+            self.1.drain(..count);
+            Ok(count)
+        }
+    }
+
+    /// What the helper does with a keyboard that is plugged in, struck, unplugged and plugged
+    /// in again, as the rig of `tests/managed.rs` does it on Windows: the source waits for
+    /// the pipe, then the keys are ready; a record split in two is still one; the pipe ending
+    /// is a loss, and the pipe back, with the talk key released, is ready again.
+    #[test]
+    fn a_pipe_that_is_plugged_struck_unplugged_and_plugged_again_is_read_as_a_keyboard() {
+        let (first_in, first) = std::sync::mpsc::channel();
+        let (second_in, second) = std::sync::mpsc::channel();
+        let pipes = Arc::new(Mutex::new(vec![
+            Fed(second, Vec::new()),
+            Fed(first, Vec::new()),
+        ]));
+        let attempts = Arc::new(AtomicU64::new(0));
+        let (opens, tries) = (Arc::clone(&pipes), Arc::clone(&attempts));
+        let source = PipeSource::new(
+            Box::new(move || {
+                // The first two attempts find no pipe, as before the rig has made it.
+                if tries.fetch_add(1, Ordering::SeqCst) < 2 {
+                    return Err(io::Error::from(io::ErrorKind::NotFound));
+                }
+                let pipe = opens.lock().unwrap().pop().ok_or(io::ErrorKind::NotFound)?;
+                Ok(Box::new(pipe) as Box<dyn io::Read + Send>)
+            }),
+            Duration::from_millis(1),
+        );
+        let (inputs, mut received) = mpsc::unbounded_channel();
+        spawn_with(source, &bindings(), inputs, Duration::from_secs(5)).unwrap();
+
+        let seen = wait_for(&mut received, 1);
+        assert_eq!(seen, vec![Input::KeyDevice(DeviceState::Ready)]);
+        // Arm by a release; then a press whose record arrives in two pieces; then the release.
+        let arm = record(1, TALK, false);
+        let down = record(1, TALK, true);
+        first_in.send(arm.to_vec()).unwrap();
+        first_in.send(down[..3].to_vec()).unwrap();
+        first_in.send([&down[3..], &arm[..]].concat()).unwrap();
+        let seen = wait_for(&mut received, 2);
+        assert_eq!(
+            seen,
+            vec![
+                Input::Key(KeyEvent {
+                    key: Key::Talk,
+                    action: KeyAction::Press
+                }),
+                Input::Key(KeyEvent {
+                    key: Key::Talk,
+                    action: KeyAction::Release
+                }),
+            ]
+        );
+        // Press and leave it down, and unplug: released, lost.
+        first_in.send(down.to_vec()).unwrap();
+        let seen = wait_for(&mut received, 1);
+        assert_eq!(seen.len(), 1);
+        drop(first_in);
+        let seen = wait_for(&mut received, 2);
+        assert_eq!(
+            seen,
+            vec![
+                Input::Key(KeyEvent {
+                    key: Key::Talk,
+                    action: KeyAction::Release
+                }),
+                Input::KeyDevice(DeviceState::Lost(Problem::Ended)),
+            ]
+        );
+        // Plugged in again: nothing until the talk key is released, and then ready.
+        second_in.send(record(1, TALK, true).to_vec()).unwrap();
+        second_in.send(arm.to_vec()).unwrap();
+        let seen = wait_for(&mut received, 1);
+        assert_eq!(seen, vec![Input::KeyDevice(DeviceState::Ready)]);
     }
 
     #[test]

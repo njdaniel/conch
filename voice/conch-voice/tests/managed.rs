@@ -13,12 +13,12 @@
 //!
 //! **On Windows** (#1766) the same tests run against a real named pipe: the rig holds the
 //! owner's end of `--events-pipe` as a tokio `NamedPipeServer`, and the helper reaches it
-//! through `channel::attach`, so what is checked is what crosses the pipe. What is not run
-//! there is everything that needs a key device: the rig's keyboard is a `mkfifo`, and a
-//! Windows helper's keys are Raw Input behind a crate-private `EventSource` (#1781), which a
-//! test in this directory cannot feed. Those tests are `#[ignore]`d on Windows with that
-//! reason, and the transcripts whose states show a key device (`ptt` `ready` or `lost`) are
-//! skipped there, named in the test's output.
+//! through `channel::attach`, so what is checked is what crosses the pipe. The keyboard
+//! (#1791) is a named pipe too, the rig's end of it a one-way `NamedPipeServer`, read by the
+//! helper's key source through the hidden `--test-key-device` (`keys_windows`'s
+//! `PipeSource`, gated as Linux's option is) in place of Raw Input: the key-driven tests and
+//! every transcript, `ptt` `ready` and `lost` included, run there with the bytes Linux
+//! expects.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -53,19 +53,6 @@ fn fixture(name: &str) -> Value {
     let path = fixtures().join(name);
     let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
     serde_json::from_str(&text).unwrap()
-}
-
-/// Why a test that needs a key device is not run on Windows (#1766).
-const NO_KEY_DEVICE: &str = "needs a key device: Windows push-to-talk is Raw Input behind a crate-private EventSource (keys_windows, #1781) that tests/ cannot feed";
-
-/// Whether a transcript's helper states show a key device being read (`ptt` `ready` or
-/// `lost`), so that a helper with no key device cannot play it: on Windows the rig has none.
-fn needs_a_key_device(doc: &Value) -> bool {
-    doc["steps"].as_array().unwrap().iter().any(|step| {
-        step["from"] == "helper"
-            && step["message"]["kind"] == "state"
-            && (step["message"]["ptt"] == "ready" || step["message"]["ptt"] == "lost")
-    })
 }
 
 /// One step of what happened, in the order the owner saw it.
@@ -424,10 +411,6 @@ const DRIVEN: [&str; 8] = [
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn each_transcript_played_by_its_owner_gets_the_helper_side_it_shows() {
     for name in DRIVEN {
-        if cfg!(windows) && needs_a_key_device(&fixture(name)) {
-            eprintln!("{name}: not run on Windows: {NO_KEY_DEVICE}");
-            continue;
-        }
         let conchd = Stub::start().await;
         if name == "transcript-identity-mismatch.json" {
             conchd.next_whoami(whoami(8));
@@ -554,10 +537,6 @@ async fn gate_shut_within_its_bound(rig: &ManagedRig, since: Instant) {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[cfg_attr(
-    windows,
-    ignore = "needs a key device: Windows push-to-talk is Raw Input behind a crate-private EventSource (keys_windows, #1781) that tests/ cannot feed"
-)]
 async fn the_owner_going_while_the_talk_key_is_held_stops_everything_within_the_bounds() {
     let mut rig = ManagedRig::start().await;
     talking(&mut rig).await;
@@ -604,10 +583,6 @@ async fn the_owner_going_while_the_talk_key_is_held_stops_everything_within_the_
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[cfg_attr(
-    windows,
-    ignore = "needs a key device: Windows push-to-talk is Raw Input behind a crate-private EventSource (keys_windows, #1781) that tests/ cannot feed"
-)]
 async fn leave_while_the_talk_key_is_held_has_no_release_tail_and_ends_within_its_bound() {
     let mut rig = ManagedRig::start().await;
     talking(&mut rig).await;
@@ -765,10 +740,6 @@ async fn a_signal_then_the_end_of_input_without_leave_cuts_the_room_step_at_one_
 /// the gate let the frame through and before the SDK took it, while the session loop
 /// leaves and mutes the track. That frame reaches the track before the mute or not at all.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[cfg_attr(
-    windows,
-    ignore = "needs a key device: Windows push-to-talk is Raw Input behind a crate-private EventSource (keys_windows, #1781) that tests/ cannot feed"
-)]
 async fn a_frame_on_its_way_into_the_track_at_leave_never_follows_the_mute() {
     let mut rig = ManagedRig::start().await;
     talking(&mut rig).await;
@@ -802,10 +773,6 @@ async fn a_frame_on_its_way_into_the_track_at_leave_never_follows_the_mute() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[cfg_attr(
-    windows,
-    ignore = "needs a key device: Windows push-to-talk is Raw Input behind a crate-private EventSource (keys_windows, #1781) that tests/ cannot feed"
-)]
 async fn a_signal_while_the_talk_key_is_held_leaves_as_leave_does() {
     let mut rig = ManagedRig::start().await;
     talking(&mut rig).await;
@@ -822,10 +789,6 @@ async fn a_signal_while_the_talk_key_is_held_leaves_as_leave_does() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[cfg_attr(
-    windows,
-    ignore = "needs a key device: Windows push-to-talk is Raw Input behind a crate-private EventSource (keys_windows, #1781) that tests/ cannot feed"
-)]
 async fn setting_mute_or_deafen_twice_changes_nothing_the_second_time() {
     let mut rig = ManagedRig::start().await;
     rig.send_start();
@@ -1203,10 +1166,6 @@ async fn without_a_key_device_hold_to_talk_is_not_configured_and_the_rest_works(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[cfg_attr(
-    windows,
-    ignore = "needs a key device: Windows push-to-talk is Raw Input behind a crate-private EventSource (keys_windows, #1781) that tests/ cannot feed"
-)]
 async fn a_slow_owner_loses_events_sees_the_gap_and_resynchronises() {
     const STRIKES: i64 = 400;
     let mut rig = ManagedRig::start().await;
@@ -1283,10 +1242,6 @@ async fn a_slow_owner_loses_events_sees_the_gap_and_resynchronises() {
 /// each exactly once and in order, once the owner reads again: an ack, and the state that
 /// answers `get_state`, are never dropped (§5, rules 8 and 10; #571).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[cfg_attr(
-    windows,
-    ignore = "needs a key device: Windows push-to-talk is Raw Input behind a crate-private EventSource (keys_windows, #1781) that tests/ cannot feed"
-)]
 async fn commands_sent_to_an_owner_that_is_not_reading_are_answered_once_it_reads() {
     // Odd, so that the last strike mutes and the track says when it has been taken.
     const STRIKES: i64 = 401;
@@ -1626,10 +1581,6 @@ impl std::io::Write for Captured {
 /// so in one log line (`docs/design/tui-voice.md` §20.6). The talk key transmits, as it
 /// would not in open mode.
 #[tokio::test]
-#[cfg_attr(
-    windows,
-    ignore = "needs a key device: Windows push-to-talk is Raw Input behind a crate-private EventSource (keys_windows, #1781) that tests/ cannot feed"
-)]
 async fn a_v1_helper_with_open_mode_configured_runs_push_to_talk_and_logs_one_line() {
     use conch_voice::managed::V1_PUSH_TO_TALK;
 
@@ -2334,10 +2285,6 @@ const TRANSCRIPTS_V2: [Transcript; 9] = [
 async fn each_v2_transcript_played_by_its_owner_gets_the_helper_side_it_shows() {
     for transcript in &TRANSCRIPTS_V2 {
         let name = transcript.name;
-        if cfg!(windows) && needs_a_key_device(&fixture_v2(name)) {
-            eprintln!("{name}: not run on Windows: {NO_KEY_DEVICE}");
-            continue;
-        }
         let world = World::default();
         for device in transcript.unplugged {
             world.unplug(device);
@@ -2383,40 +2330,6 @@ fn every_v2_transcript_is_driven_here() {
             assert!(driven.contains(&name.as_str()), "{name} is not run");
         }
     }
-}
-
-/// The transcripts Windows plays are the ones that show no key device, and the rest are the
-/// ones it names as not run (#1766): the list here and the test above that skips by it must
-/// not drift apart, and a new transcript is one or the other without anyone deciding.
-#[test]
-fn the_transcripts_without_a_key_device_are_the_ones_windows_plays() {
-    let mut played: Vec<String> = Vec::new();
-    for (dir, version) in [(fixtures(), 1), (fixtures_v2(), 2)] {
-        for entry in std::fs::read_dir(dir).unwrap() {
-            let name = entry.unwrap().file_name().into_string().unwrap();
-            if !name.starts_with("transcript-") {
-                continue;
-            }
-            let doc = if version == 1 {
-                fixture(&name)
-            } else {
-                fixture_v2(&name)
-            };
-            if !needs_a_key_device(&doc) {
-                played.push(format!("v{version} {name}"));
-            }
-        }
-    }
-    played.sort();
-    assert_eq!(
-        played,
-        [
-            "v1 transcript-bad-first-command.json",
-            "v1 transcript-identity-mismatch.json",
-            "v1 transcript-version-mismatch.json",
-            "v2 transcript-open-mode.json",
-        ]
-    );
 }
 
 /// Windows: a rig that is dropped leaves no thread of its owner's pipe behind: the reader of
@@ -2553,10 +2466,6 @@ fn sent_levels(rig: &ManagedRig, from: u64) -> Vec<f32> {
 /// stopped transmitting; the next states show the new microphone's capture; and only a
 /// fresh press sends again, from the new microphone.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[cfg_attr(
-    windows,
-    ignore = "needs a key device: Windows push-to-talk is Raw Input behind a crate-private EventSource (keys_windows, #1781) that tests/ cannot feed"
-)]
 async fn a_microphone_switch_during_a_transmission_ends_it_and_a_fresh_press_is_needed() {
     let (mut rig, world) = world_rig("", |_| {}).await;
     rig.send_start_v2();
@@ -2624,10 +2533,6 @@ async fn a_microphone_switch_during_a_transmission_ends_it_and_a_fresh_press_is_
 /// the ack says `capture: unavailable` with `no_microphone`, or `playback: unavailable`,
 /// nothing is captured or played from another device meanwhile, and a press sends nothing.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[cfg_attr(
-    windows,
-    ignore = "needs a key device: Windows push-to-talk is Raw Input behind a crate-private EventSource (keys_windows, #1781) that tests/ cannot feed"
-)]
 async fn an_absent_device_after_set_devices_is_unavailable_and_none_other_is_used() {
     let (mut rig, world) = world_rig("", |world| {
         world.unplug(USB_MIC);
@@ -2755,10 +2660,6 @@ async fn set_talk_mode_open_then_sound_transmits_and_muting_sends_nothing() {
 /// change of talk mode in the middle of a transmission, either way, sends no frame after
 /// it, and the state before the ack already says `transmitting: false`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[cfg_attr(
-    windows,
-    ignore = "needs a key device: Windows push-to-talk is Raw Input behind a crate-private EventSource (keys_windows, #1781) that tests/ cannot feed"
-)]
 async fn a_mode_change_mid_transmission_sends_nothing_after_it_and_says_so_at_once() {
     let (mut rig, world) = world_rig("", |_| {}).await;
     rig.send_start_v2();
@@ -2926,10 +2827,6 @@ async fn devices_and_the_mode_set_while_starting_are_used_once_the_session_runs(
 /// session runs, are switched to as the session starts: the configured ones are closed, and
 /// the speakers playing are the ones named.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[cfg_attr(
-    windows,
-    ignore = "needs a key device: Windows push-to-talk is Raw Input behind a crate-private EventSource (keys_windows, #1781) that tests/ cannot feed"
-)]
 async fn speakers_named_after_the_start_up_opened_others_are_switched_to_when_the_session_runs() {
     let world = World::default();
     let setup = ManagedSetup {
@@ -3018,10 +2915,6 @@ async fn no_secret_reaches_the_event_pipe_in_v2() {
 /// for the default) opens nothing. The side is unavailable, no other device is used in its
 /// place, and the opener is never called with it. Only the exact `default` is the default.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[cfg_attr(
-    windows,
-    ignore = "needs a key device: Windows push-to-talk is Raw Input behind a crate-private EventSource (keys_windows, #1781) that tests/ cannot feed"
-)]
 async fn a_padded_device_name_opens_nothing_and_only_default_is_the_default() {
     let (mut rig, world) = world_rig("", |_| {}).await;
     rig.send_start_v2();
@@ -3142,10 +3035,6 @@ async fn a_device_that_cannot_be_opened_is_logged_without_its_name() {
 /// deafen key struck after the mute key is the barrier: keys come off one pipe in order, so
 /// once it has been taken, the mute key before it has been taken too.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[cfg_attr(
-    windows,
-    ignore = "needs a key device: Windows push-to-talk is Raw Input behind a crate-private EventSource (keys_windows, #1781) that tests/ cannot feed"
-)]
 async fn the_mute_key_mutes_unless_the_owner_started_the_helper_with_no_mute_key() {
     // As the TUI starts it: the key toggles the mute.
     let mut rig = ManagedRig::start().await;
