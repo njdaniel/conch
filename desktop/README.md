@@ -200,20 +200,27 @@ but `/usr/bin/conch-desktop`.
 package's lifecycle test: in an `ubuntu:24.04` container (pinned by digest) it installs
 an older build with `apt install ./old.deb` (apt resolves `Depends` from the archive, so
 it needs Docker and network), checks the files, owners and modes, the launcher link, the
-desktop file and `xdg-mime query default x-scheme-handler/conch`, seeds a test user's
-`~/.config/Conch/profiles.json` and `settings.json`, upgrades to a higher version
-(those files stay byte-identical, and `/opt/conch-desktop` is `diff -r`-identical to the
+desktop file and `xdg-mime query default x-scheme-handler/conch`, seeds six files in a
+test user's `~/.config/conch-desktop`, where the app keeps its data (`profiles.json`,
+`settings.json`, files under `profiles/p1/` and `Local Storage/leveldb/`), upgrades to a higher version
+(every seeded file keeps its SHA-256 and none is added, and `/opt/conch-desktop` is `diff -r`-identical to the
 new `.deb`'s own tree, as it was to the old one after the install), checks that `ldd`
 resolves every library of every ELF file (a `.so` may name a sibling in the tree; real
 packages must have `conch-desktop` and `conch-voice` among them) and
 that `resources/conch-voice` passes `findHelper`'s trust rules, then removes and purges
 (nothing of the package left in `/opt`, `/usr` or `/etc`; the conffile goes at purge; the
-user's `~/.config/Conch` stays). `postinst` must succeed with no AppArmor in the
+user's seeded files are checked the same way after each). The folder's name is not
+assumed: it is Electron's `userData`, `~/.config/<productName or name>` of the
+`package.json` packed in `resources/app.asar`, which the script reads from each `.deb`
+(with `python3`). Both packages must name the same folder and it must be `conch-desktop`
+(docs/desktop/linux.md), so a rename fails the test instead of moving every user's data.
+The fixture packages carry a small `app.asar` with `desktop/package.json` in it, as
+electron-builder packs it (`extraMetadata` over it). `postinst` must succeed with no AppArmor in the
 container. With no argument it builds two fixture packages (`v0.1.0-alpha.1` and
 `.2`); `make desktop-deb-lifecycle DEB_OLD=<a.deb> DEB_NEW=<b.deb>` takes real ones.
 `scripts/desktop-deb-lifecycle.sh --broken` is the test of the test: the fixture packages
 without `Depends` must fail at the `ldd` check, and `--broken=userdata` (a `postinst` that
-writes under `~/.config/Conch`) must fail at the user-data check. The fixture run needs a
+appends to the seeded `settings.json`) must fail at the user-data check. The fixture run needs a
 host no newer than Ubuntu 24.04 with `curl` installed (its ELF stand-in). A container is not a clean machine (no
 display, portal, keyring or PipeWire; Chromium's sandbox under Docker's seccomp is not
 representative), so the script never runs the app: the app on a real machine is #1602
