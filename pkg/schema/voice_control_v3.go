@@ -155,8 +155,9 @@ const (
 	// than everything.
 	VoiceControlShareAudioProblemNoProcessTree VoiceControlShareAudioProblem = "no_process_tree"
 	// VoiceControlShareAudioProblemPublishRefused: the media server refused
-	// the track (the share's grant is not there yet). The owner may send the
-	// command again.
+	// the track (the share's grant is not there yet), or the publish did not
+	// resolve within the helper's own bound (see VoiceControlSetShareAudioV3).
+	// The owner may send the command again.
 	VoiceControlShareAudioProblemPublishRefused VoiceControlShareAudioProblem = "publish_refused"
 	// VoiceControlShareAudioProblemUnsupportedScope: the scope asked for is
 	// one this platform cannot capture (application, on Linux).
@@ -360,6 +361,15 @@ func (c VoiceControlSetTalkModeV3) Validate() error {
 // platform cannot capture, unsupported for a session with no companion,
 // not_connected when the helper is not connected). Nothing here opens the
 // transmit gate: the share's sound is a track of its own.
+//
+// The ack of a set_share_audio with capturing true follows the state that
+// says how it went (tui-voice §5 rule 7), so it waits on the publish. The
+// helper therefore bounds the publish well under VoiceControlAckTimeoutMS
+// (an owner treats a later ack as a broken helper and the call drops): a
+// publish still pending at its bound is given up and reported as
+// share_audio unavailable with publish_refused. Commands that arrive while
+// that ack is held are applied at once; only their acks wait, in order
+// (rule 10), so a set_mute is never delayed by a slow publish.
 type VoiceControlSetShareAudioV3 struct {
 	Schema string                    `json:"schema"`
 	Kind   VoiceControlCommandKindV3 `json:"kind"`
