@@ -50,6 +50,17 @@ interface Case {
   readonly switches?: readonly string[];
   readonly env?: Readonly<Record<string, string | undefined>>;
   readonly realpath?: (path: string) => string;
+  readonly lstat?: (path: string) => unknown;
+}
+
+// lstat for the fakes: an entry exists at exactly these paths (a dangling
+// link among them), and nowhere else.
+function fakeLstat(entries: readonly string[]): (path: string) => unknown {
+  const there = new Set(entries.map((e) => e.toLowerCase()));
+  return (path) => {
+    if (!there.has(path.toLowerCase())) throw enoent(path);
+    return {};
+  };
 }
 
 const CASES: readonly Case[] = [
@@ -91,6 +102,10 @@ const CASES: readonly Case[] = [
   { name: 'empty profile variables', root: 'C:\\Users\\nick\\conch', env: { USERPROFILE: '', APPDATA: '', LOCALAPPDATA: '' }, want: 'refused' },
   { name: 'a relative %USERPROFILE%', root: 'C:\\Users\\nick\\conch', env: { USERPROFILE: 'nick' }, want: 'refused' },
   { name: 'a drive-root %USERPROFILE%', root: 'C:\\conch-data', env: { USERPROFILE: 'C:' }, want: 'refused' },
+  { name: 'a %USERPROFILE% that is the volume root', root: 'C:\\conch-data', env: { USERPROFILE: 'C:\\' }, want: 'refused' },
+  { name: 'an %APPDATA% that is the volume root, with a forward slash', root: 'C:\\conch-data', env: { APPDATA: 'C:/' }, want: 'refused' },
+  { name: 'an %APPDATA% that is a share root', root: '\\\\srv\\pub\\conch', env: { APPDATA: '\\\\srv\\pub' }, want: 'refused' },
+  { name: 'an %APPDATA% below a share root', root: '\\\\srv\\pub\\nick\\conch', env: { APPDATA: '\\\\srv\\pub\\nick' }, want: 'inside' },
 
   // Links are resolved before the comparison.
   {
@@ -105,10 +120,40 @@ const CASES: readonly Case[] = [
     realpath: fakeRealpath([...PROFILE_DIRS, 'C:\\conch-data'], { 'C:\\Users\\nick\\shared': 'C:\\conch-data' }),
     want: 'refused',
   },
+  // The root as given counts too: the app keeps using that path, and a
+  // junction at a shared place can be pointed elsewhere by whoever owns it
+  // (the security review of #1806).
   {
     name: 'a link from a drive root into the profile',
     root: 'C:\\conch-link',
     realpath: fakeRealpath([...PROFILE_DIRS, 'C:\\Users\\nick\\AppData\\Local\\conch'], { 'C:\\conch-link': 'C:\\Users\\nick\\AppData\\Local\\conch' }),
+    want: 'refused',
+  },
+  {
+    name: "a junction another account planted at a drive root, into the user's %LOCALAPPDATA%",
+    root: 'C:\\conch-data',
+    realpath: fakeRealpath(PROFILE_DIRS, { 'C:\\conch-data': 'C:\\Users\\nick\\AppData\\Local' }),
+    want: 'refused',
+  },
+  {
+    name: 'a dangling link inside the profile, to a place that does not exist yet',
+    root: 'C:\\Users\\nick\\link\\data',
+    realpath: fakeRealpath(PROFILE_DIRS),
+    lstat: fakeLstat(['C:\\Users\\nick\\link']),
+    want: 'refused',
+  },
+  {
+    name: 'a root whose every ancestor fails to resolve',
+    root: 'C:\\Users\\nick\\conch',
+    realpath: (p) => {
+      throw Object.assign(new Error(`ENOENT: ${p}`), { code: 'ENOENT' });
+    },
+    want: 'refused',
+  },
+  {
+    name: 'a missing root inside the profile (a first launch) is judged by its parent',
+    root: 'C:\\Users\\nick\\AppData\\Local\\conch\\new',
+    realpath: fakeRealpath(PROFILE_DIRS),
     want: 'inside',
   },
   {
@@ -174,6 +219,7 @@ describe('dataRootVerdict', () => {
         // With no links, every path resolves to itself, as a path that exists
         // and holds no link does.
         realpath: c.realpath ?? ((p) => p),
+        lstat: c.lstat ?? fakeLstat([]),
       },
       (line) => lines.push(line),
     );

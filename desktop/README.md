@@ -319,12 +319,16 @@ there and choose the helper's devices and keys (not its server or login: in the 
 from the owner's `start` command), or change the app's other files.
 
 So on Windows, when `--user-data-dir` is given, `main/data-root.ts` checks where it resolved to
-before the single-instance lock writes anything into it. The root, with junctions and symbolic
-links resolved by `fs.realpathSync.native` (through its nearest existing ancestor when it does not
-exist yet), must be inside `%USERPROFILE%`, `%APPDATA%` or `%LOCALAPPDATA%` (each as written and
-resolved), compared case-insensitively on whole path segments, so `C:\Users\nickx` is not inside
-`C:\Users\nick`. A relative, drive-relative (`C:foo`) or root-relative (`\foo`) path is refused,
-as is a root that cannot be resolved. Refused, the app prints one line saying the data root must be
+before the single-instance lock writes anything into it. The root must be inside `%USERPROFILE%`,
+`%APPDATA%` or `%LOCALAPPDATA%` (each as written and resolved) twice over: as given, and with
+junctions and symbolic links resolved by `fs.realpathSync.native` (through its nearest existing
+ancestor when it does not exist yet). The path as given counts because the app goes on using it: a
+junction at a shared place such as `C:\conch-data` that leads into the profile is refused, since
+whoever owns that junction could point it elsewhere later. Paths are compared case-insensitively on
+whole path segments, so `C:\Users\nickx` is not inside `C:\Users\nick`. A relative, drive-relative
+(`C:foo`) or root-relative (`\foo`) path is refused, as are a root that cannot be resolved, a
+dangling link on its path, and a base variable that names a volume or share root (`C:\`,
+`\\server\share`). Refused, the app prints one line saying the data root must be
 under your user profile and exits. `--allow-shared-user-data-dir` is the deliberate way past it: the
 app starts and prints a warning that other local accounts may be able to change its files, the
 voice helper's settings among them. Without `--user-data-dir` nothing is checked, and Linux and

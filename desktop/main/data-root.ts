@@ -21,7 +21,7 @@
 // It is a guard against a mistaken launch, not against an attacker running as
 // this user (who can pass the override flag too), and it does not prove the
 // ACL: a profile directory whose ACL someone has widened passes.
-import { realpathSync } from 'node:fs';
+import { lstatSync, realpathSync } from 'node:fs';
 import { win32 } from 'node:path';
 
 export const USER_DATA_SWITCH = 'user-data-dir';
@@ -52,11 +52,14 @@ export interface DataRootInputs {
   // fs.realpathSync.native unless a test says otherwise: it resolves
   // junctions and symbolic links and throws (ENOENT) for a missing path.
   readonly realpath?: (path: string) => string;
+  // fs.lstatSync unless a test says otherwise: whether an entry exists at a
+  // path without following it (a dangling link exists; realpath says ENOENT).
+  readonly lstat?: (path: string) => unknown;
 }
 
 export function dataRootVerdict(inputs: DataRootInputs, log: (line: string) => void): DataRootVerdict {
   if (inputs.platform !== 'win32' || !inputs.hasSwitch(USER_DATA_SWITCH)) return 'unchecked';
-  if (underPrivateBase(inputs.root, inputs.env, inputs.realpath ?? realpathSync.native)) return 'inside';
+  if (underPrivateBase(inputs.root, inputs.env, inputs.realpath ?? realpathSync.native, inputs.lstat ?? lstatSync)) return 'inside';
   if (inputs.hasSwitch(ALLOW_SHARED_SWITCH)) {
     log(SHARED_LINE);
     return 'allowed';
@@ -65,21 +68,41 @@ export function dataRootVerdict(inputs: DataRootInputs, log: (line: string) => v
   return 'refused';
 }
 
-// underPrivateBase: whether root, made real, is inside one of the bases, each
-// taken as written and as made real (a redirected %APPDATA% is a junction to
-// where the files really are). A root that is not fully qualified, or cannot
-// be resolved, is not inside anything; a base that is empty or not fully
-// qualified is ignored.
-export function underPrivateBase(root: string, env: Readonly<Record<string, string | undefined>>, realpath: (path: string) => string): boolean {
-  const real = qualified(root) ? resolved(win32.normalize(root), realpath) : null;
+// underPrivateBase: whether root is inside one of the bases both as given and
+// made real, each base taken as written and as made real (a redirected
+// %APPDATA% is a junction to where the files really are). The root as given
+// counts because the app goes on using that path: a junction at a shared
+// place (C:\conch-data) that leads into the profile passes the resolved test,
+// but whoever owns the junction can point it elsewhere later (the security
+// review of #1806). A root that is not fully qualified, or cannot be resolved,
+// is not inside anything; a base that is empty, not fully qualified or a
+// volume or share root (C:\, \\server\share) is ignored.
+export function underPrivateBase(
+  root: string,
+  env: Readonly<Record<string, string | undefined>>,
+  realpath: (path: string) => string,
+  lstat: (path: string) => unknown,
+): boolean {
+  if (!qualified(root)) return false;
+  const given = stripVerbatim(win32.normalize(root));
+  const real = resolved(given, realpath, lstat);
   if (real === null) return false;
   return PRIVATE_BASES.some((name) => {
     const base = env[name];
     if (base === undefined || !qualified(base)) return false;
     const plain = win32.normalize(base);
-    const realBase = resolved(plain, realpath);
-    return isInside(real, plain) || (realBase !== null && isInside(real, realBase));
+    if (!belowVolumeRoot(plain)) return false;
+    const realBase = resolved(plain, realpath, lstat);
+    const within = (path: string): boolean => isInside(path, plain) || (realBase !== null && belowVolumeRoot(realBase) && isInside(path, realBase));
+    return within(given) && within(real);
   });
+}
+
+// belowVolumeRoot: the path names a directory below a drive or share root,
+// not the root itself: C:\Users is, C:\ and \\server\share are not.
+function belowVolumeRoot(path: string): boolean {
+  const parts = segments(path);
+  return /^[A-Za-z]:$/.test(parts[0] ?? '') ? parts.length >= 2 : parts.length >= 5;
 }
 
 // qualified: a drive-letter path (C:\...) or a UNC one (\\server\share\...).
@@ -92,19 +115,34 @@ export function qualified(path: string): boolean {
 
 // resolved: the path with every junction and symbolic link resolved. A path
 // that does not exist yet (a first launch) is its nearest existing ancestor,
-// resolved, with the rest added back. Any failure but ENOENT is null.
-function resolved(path: string, realpath: (path: string) => string): string | null {
+// resolved, with the rest added back. Any failure but ENOENT is null, and so
+// is a dangling link (an entry is there, but realpath says ENOENT: it points
+// at nothing yet, so where it leads is not known) and a path none of whose
+// ancestors resolves.
+function resolved(path: string, realpath: (path: string) => string, lstat: (path: string) => unknown): string | null {
   const rest: string[] = [];
   for (let dir = path; ; ) {
     try {
       return win32.join(stripVerbatim(realpath(dir)), ...rest);
     } catch (error) {
       if (!(error instanceof Error) || (error as NodeJS.ErrnoException).code !== 'ENOENT') return null;
+      if (entryExists(dir, lstat)) return null;
       const parent = win32.dirname(dir);
-      if (parent === dir) return path;
+      if (parent === dir) return null;
       rest.unshift(win32.basename(dir));
       dir = parent;
     }
+  }
+}
+
+// entryExists: whether lstat finds an entry at path (a link counts, followed
+// or not). Any failure but ENOENT counts as existing, so the caller refuses.
+function entryExists(path: string, lstat: (path: string) => unknown): boolean {
+  try {
+    lstat(path);
+    return true;
+  } catch (error) {
+    return !(error instanceof Error) || (error as NodeJS.ErrnoException).code !== 'ENOENT';
   }
 }
 
