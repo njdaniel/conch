@@ -953,7 +953,9 @@ class LiveKitAdapter implements Room {
   private output = '';
   // The elements playing each microphone, by track sid, and whose it is; and
   // the volume of each person not at full volume, by principal (issue #661).
-  private readonly elements = new Map<string, { readonly el: HTMLMediaElement; readonly principal: number | null }>();
+  // held is the element's volumechange listener, which keeps deafen on (the
+  // SDK unmutes an element when it starts playback, a tap's or its own).
+  private readonly elements = new Map<string, { readonly el: HTMLMediaElement; readonly principal: number | null; readonly held: () => void }>();
   private readonly volumes = new Map<number, number>();
   private readonly buffer = new Uint8Array(levelWindow);
   // The share this page captured, until it is stopped; and whether this
@@ -1074,7 +1076,13 @@ class LiveKitAdapter implements Room {
         const el = track.attach();
         el.muted = this.deafened;
         el.volume = this.volumeOf(principal);
-        this.elements.set(track.sid ?? '', { el, principal });
+        // A muted flag changed under us (the SDK's restart of playback when
+        // an iOS page is visible again) is put back to deafen's.
+        const held = (): void => {
+          if (el.muted !== this.deafened) el.muted = this.deafened;
+        };
+        el.addEventListener('volumechange', held);
+        this.elements.set(track.sid ?? '', { el, principal, held });
         document.body.appendChild(el);
       })
       .on(RoomEvent.TrackUnsubscribed, (track: RemoteTrack, _pub: RemoteTrackPublication, participant?: RemoteParticipant) => {
@@ -1088,6 +1096,8 @@ class LiveKitAdapter implements Room {
           return;
         }
         for (const el of track.detach()) el.remove();
+        const gone = this.elements.get(track.sid ?? '');
+        gone?.el.removeEventListener('volumechange', gone.held);
         this.elements.delete(track.sid ?? '');
       })
       .on(RoomEvent.LocalTrackPublished, (pub: LocalTrackPublication) => {
@@ -1129,6 +1139,13 @@ class LiveKitAdapter implements Room {
       .on(RoomEvent.ParticipantPermissionsChanged, (_prev: unknown, participant: Participant) => {
         if (participant === room.localParticipant) this.wakeGrant();
       })
+      .on(RoomEvent.AudioPlaybackStatusChanged, () => {
+        // The room's own answer, read as the event fires: playing starts and
+        // is refused again (a call, an interruption) as the browser decides.
+        if (this.closed) return;
+        this.keepDeafened();
+        events.onPlayback(room.canPlaybackAudio);
+      })
       .on(RoomEvent.MediaDevicesChanged, () => {
         void this.devicesChanged();
       })
@@ -1165,6 +1182,8 @@ class LiveKitAdapter implements Room {
     this.ensureOpen();
     // Whoever was already in the room: their tracks are subscribed by choice too.
     this.subscribeAll();
+    // Whether the browser lets this page play what it just subscribed to.
+    events.onPlayback(room.canPlaybackAudio);
     if (!publish) return;
     await this.publishMicrophone();
   }
@@ -1386,9 +1405,24 @@ class LiveKitAdapter implements Room {
     else await pub.mute();
   }
 
+  // Called from the tap, with nothing awaited before the SDK's own call: the
+  // browser counts only a call made inside the gesture.
+  startAudio(): Promise<void> {
+    const started = this.room.startAudio();
+    // The SDK unmutes every attached element, synchronously, before its first
+    // await: deafen is put back at once.
+    this.keepDeafened();
+    return started;
+  }
+
+  // Every voice element is muted exactly when the person is deafened.
+  private keepDeafened(): void {
+    for (const { el } of this.elements.values()) el.muted = this.deafened;
+  }
+
   setDeafened(on: boolean): void {
     this.deafened = on;
-    for (const { el } of this.elements.values()) el.muted = on;
+    this.keepDeafened();
   }
 
   // setVolume sets how loud this page plays one person's microphone, 0 to
@@ -2119,7 +2153,10 @@ class LiveKitAdapter implements Room {
     this.wantSending = false;
     // A share's or a camera's publish waiting for a grant stops waiting.
     this.wakeGrant();
-    for (const { el } of this.elements.values()) el.remove();
+    for (const { el, held } of this.elements.values()) {
+      el.removeEventListener('volumechange', held);
+      el.remove();
+    }
     this.elements.clear();
     for (const principal of [...this.streamSinks.keys()]) this.attachStream(principal, null);
     for (const tracks of this.remoteShares.values()) {

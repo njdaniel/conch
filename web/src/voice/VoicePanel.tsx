@@ -184,6 +184,9 @@ export function VoicePanel({
   // in the phone's strip, where the notes are hidden.
   const noMeter =
     (state.phase === 'connected' || state.phase === 'reconnecting') && state.mode === 'open' && !state.meter && !state.listenOnly && !state.watchOnly && !state.missing;
+  // The browser holds playback back until a tap (iOS Safari): said by a
+  // button, in the notes and in the phone's strip, which hides them.
+  const noPlayback = (state.phase === 'connected' || state.phase === 'reconnecting') && !state.playback && !state.companion;
   // The phone layout's Voice button and strip follow it (issue #929).
   const reportLive = useContext(VoiceLive);
   const micTestShown = useContext(MicTestShown);
@@ -612,6 +615,7 @@ export function VoicePanel({
             {meterStripNote}
           </p>
         ) : null}
+        {strip && noPlayback ? <HearButton voice={voice} /> : null}
       </div>
 
       <div className="voice-notes" hidden={strip}>
@@ -620,6 +624,7 @@ export function VoicePanel({
         {state.reportNote === 'retrying' ? <p role="status" className="hint">Reporting your talking is slow; retrying</p> : null}
         {inVoice ? (
           <>
+            {!strip && noPlayback ? <HearButton voice={voice} /> : null}
             {cutOff ? <p role="status" className="hint">{cutOffNote}</p> : null}
             <CameraNote voice={voice} />
             {state.outputNote === null ? null : (
@@ -984,6 +989,19 @@ function Volumes({ voice, others }: { readonly voice: VoiceControl; readonly oth
     </fieldset>
   );
 }
+
+// The tap that lets the browser play the channel. startAudio is called inside
+// the click itself: no await, timer or effect comes before it, or the browser
+// no longer counts it as the gesture.
+function HearButton({ voice }: { readonly voice: VoiceControl }) {
+  return (
+    <button type="button" onClick={() => { voice.client.startAudio(); }}>
+      {hearLabel}
+    </button>
+  );
+}
+
+export const hearLabel = 'Tap to hear the channel';
 
 // What the notes say while the microphone is missing.
 export const cutOffNote = 'Voice server unreachable. You may be cut off.';

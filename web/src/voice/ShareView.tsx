@@ -145,14 +145,15 @@ export function ShareView({
   // Deafened hears nothing, a share's sound included. The SDK unmutes an
   // element each time it attaches a track with sound to it (a track arriving,
   // or attached again on a new connection), so the tile's own mute and volume
-  // are set again whenever this stream's tracks change.
+  // are set again whenever this stream's tracks change, and after a tap that
+  // starts playback (the SDK's startAudio unmutes every element it plays).
   const arrived = state.streamTracks.get(principal);
   useEffect(() => {
     const a = sound.current;
     if (a === null) return;
     a.volume = volume;
     a.muted = muted || state.deafened;
-  }, [volume, muted, state.deafened, arrived]);
+  }, [volume, muted, state.deafened, arrived, state.playback]);
 
   const tracks = arrived ?? { video: false, audio: false };
   const hasSound = tracks.audio;

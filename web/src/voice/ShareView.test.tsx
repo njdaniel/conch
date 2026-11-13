@@ -38,6 +38,7 @@ class StubRoom implements Room {
   };
   setSending = (): Promise<void> => Promise.resolve();
   setDeafened = (): void => undefined;
+  startAudio = (): Promise<void> => Promise.resolve();
   setVolume = (): void => undefined;
   level = (): number => 0;
   close = (): Promise<void> => Promise.resolve();
@@ -294,6 +295,25 @@ describe('watching', () => {
     });
     expect(screen.getAllByRole('region', { name: 'Shared screen' })).toHaveLength(1);
     expect(within(streamView('bea')).queryByText('Waiting for the picture')).toBeNull();
+  });
+
+  // The SDK's startAudio (the tap) unmutes every element it plays, the share's
+  // sound included, and then the playback event comes.
+  it('keeps a muted share muted after the tap that starts playback', async () => {
+    const t = await watching();
+    const view = await screen.findByRole('region', { name: 'Shared screen' });
+    const audio = t.rooms[0]?.streamSinks.get(8)?.audio;
+    if (audio === undefined) throw new Error('no sink');
+    act(() => {
+      t.rooms[0]?.events?.onPlayback(false);
+    });
+    fireEvent.click(within(view).getByRole('button', { name: 'Mute share' }));
+    expect(audio.muted).toBe(true);
+    audio.muted = false;
+    act(() => {
+      t.rooms[0]?.events?.onPlayback(true);
+    });
+    expect(audio.muted).toBe(true);
   });
 
   it("keeps the tile's mute and volume when the SDK attaches its sound again, which unmutes the element", async () => {

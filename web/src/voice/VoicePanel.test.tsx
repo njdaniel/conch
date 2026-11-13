@@ -14,7 +14,7 @@ import { ShareQualityMenu, sourceSixtyNote } from './ShareQualityMenu';
 import { useState } from 'react';
 import { MicTestShown, VoiceLive, VoiceStrip } from '../phone';
 import type { Snapshot, VoiceControl } from './useVoice';
-import { followsNote, meterNote, meterStripNote, missingNote, noOtherOutputs, noOutputChoice, processingLabel, processingOffNote, processingUseNote, reportedNote, stoppedFor, thresholdHint, VoicePanel } from './VoicePanel';
+import { followsNote, hearLabel, meterNote, meterStripNote, missingNote, noOtherOutputs, noOutputChoice, processingLabel, processingOffNote, processingUseNote, reportedNote, stoppedFor, thresholdHint, VoicePanel } from './VoicePanel';
 
 const chrome: ShareFeatures = { canShare: true, chromium: true, platform: 'linux' };
 const presence: VoicePresenceV2 = { schema: 'conch.voice_presence.v2', channel_id: 1, configured: true, available: true, rooms: [] };
@@ -1302,6 +1302,34 @@ describe('voice processing', () => {
   });
 });
 
+// The browser holds playback back until a tap (iOS Safari): the button that
+// asks for it, with the tap going to the client at once.
+describe('Tap to hear the channel', () => {
+  const using = (patch: Partial<VoiceState> = {}): VoiceState => ({ ...inVoice('connected', 'c'), playback: false, ...patch });
+
+  it('is in the notes while connected and while reconnecting, and calls the client\'s startAudio on a click', () => {
+    const { voice, client, redraw } = panel(using(), 'c');
+    const start = vi.spyOn(client, 'startAudio').mockImplementation(() => undefined);
+    const button = within(voice).getByRole('button', { name: hearLabel });
+    expect(button.closest('.voice-notes')).not.toBeNull();
+    fireEvent.click(button);
+    expect(start).toHaveBeenCalledTimes(1);
+    redraw(using({ phase: 'reconnecting' }));
+    expect(within(voice).getByRole('button', { name: hearLabel })).toBeTruthy();
+  });
+
+  it('is gone once playback is allowed', () => {
+    const { voice, redraw } = panel(using(), 'c');
+    redraw(using({ playback: true }));
+    expect(within(voice).queryByRole('button', { name: hearLabel })).toBeNull();
+  });
+
+  it.each([['connecting' as const], ['unavailable' as const], ['idle' as const]])('is not there while %s', (phase) => {
+    const { voice } = panel(using({ phase }), 'c');
+    expect(within(voice).queryByRole('button', { name: hearLabel })).toBeNull();
+  });
+});
+
 // Issue #660: the speakers in Voice options, where the browser lets a page
 // choose them: System default first, then each output listed, the one in use
 // selected; a line where it cannot choose, and where it lists none; and
@@ -1598,6 +1626,23 @@ describe('the phone strip under Chat and Channels (issue #1028)', () => {
     cleanup();
     const ptt = mount({ ...inVoice('connected', 'channel-a'), mode: 'ptt', meter: false }, () => undefined);
     expect(ptt.voice.querySelector('.strip-note')).toBeNull();
+  });
+
+  // The strip hides the notes: the button to hear the channel is its own.
+  it('shows Tap to hear the channel in the strip while connected or reconnecting with no playback, and only then', () => {
+    for (const phase of ['connected', 'reconnecting'] as const) {
+      const shown = mount({ ...inVoice(phase, 'channel-a'), playback: false }, () => undefined);
+      const button = within(shown.voice).getByRole('button', { name: hearLabel });
+      expect(button.closest('.voice-notes')).toBeNull();
+      cleanup();
+    }
+    for (const phase of ['connecting', 'unavailable', 'idle'] as const) {
+      const hidden = mount({ ...inVoice(phase, 'channel-a'), playback: false }, () => undefined);
+      expect(within(hidden.voice).queryByRole('button', { name: hearLabel })).toBeNull();
+      cleanup();
+    }
+    const playing = mount(inVoice('connected', 'channel-a'), () => undefined);
+    expect(within(playing.voice).queryByRole('button', { name: hearLabel })).toBeNull();
   });
 
   it('opens the Voice view from the state button, and its Leave voice leaves', () => {
