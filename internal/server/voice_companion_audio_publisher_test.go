@@ -1,10 +1,13 @@
 package server
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/njdaniel/conch/internal/server/store"
@@ -20,6 +23,7 @@ import (
 const (
 	audioApplicationPerson    = `{"scope":"application","publisher":"person"}`
 	audioApplicationCompanion = `{"scope":"application","publisher":"companion"}`
+	audioSystemCompanion      = `{"scope":"system_excluding_call","publisher":"companion"}`
 	audioSystemPerson         = `{"scope":"system_excluding_call","publisher":"person"}`
 )
 
@@ -441,5 +445,250 @@ func TestVoiceCompanionAudioPersonEndsWithTheShare(t *testing.T) {
 				t.Errorf("unclaimed rows = %d, want 0", n)
 			}
 		})
+	}
+}
+
+// failAudioStarted makes every voice_share_audio_started row fail to write
+// until the returned restore is called; other rows are written as before.
+func (f *presenceFixture) failAudioStarted() (restore func()) {
+	write := f.srv.voice.appendAuditNow
+	f.srv.voice.appendAuditNow = func(ctx context.Context, actor, action, subject, detail string) (store.AuditEvent, error) {
+		if action == store.AuditVoiceShareAudioStarted {
+			return store.AuditEvent{}, errors.New("disk full")
+		}
+		return write(ctx, actor, action, subject, detail)
+	}
+	return func() { f.srv.voice.appendAuditNow = write }
+}
+
+// TestVoiceCompanionAudioPersonWithdrawalRefused: a consent that changes from
+// the companion to the person asks LiveKit to take the sound back; a refusal
+// removes a companion that is publishing the sound (fail closed) and leaves
+// the withdrawal owed, quietly, to a companion that is not.
+func TestVoiceCompanionAudioPersonWithdrawalRefused(t *testing.T) {
+	t.Run("publishing the sound: removed", func(t *testing.T) {
+		f, room := shareWithCompanion(t)
+		f.at(1_000)
+		share := f.mustClaim(t, "ann")
+		f.mustConsent(t, audioApplication, share)
+		f.publishScreen(room, true, true)
+		f.at(1_500)
+		f.pass(t)
+		f.lk.setUpdateFail(f.screenID("ann"), true)
+		f.mustConsent(t, audioApplicationPerson, share)
+		if f.lk.in(room, f.screenID("ann")) {
+			t.Fatal("the companion is still connected with the sound published and no withdrawal taken")
+		}
+		if !f.lk.in(room, f.identity("ann")) {
+			t.Error("ann herself was removed")
+		}
+		want := fmt.Sprintf("channel=%d audience=channel principal=%d reason=%s participant=screen source=observed", f.ops.ID, f.ids["ann"], voiceReasonShareNotWithdrawn)
+		if got := f.removedRows(t); !slices.Equal(got, []string{want}) {
+			t.Errorf("removal rows = %q, want %q", got, want)
+		}
+		if got := f.shareRows(t); !slices.Equal(got, []string{
+			"ann started audio=true", "ann audio_started scope=application", "ann audio_started scope=application publisher=person",
+		}) {
+			t.Errorf("share rows %q", got)
+		}
+	})
+	t.Run("not publishing: the withdrawal stays owed", func(t *testing.T) {
+		f, room := shareWithCompanion(t)
+		f.at(1_000)
+		share := f.mustClaim(t, "ann")
+		f.mustConsent(t, audioApplication, share)
+		f.publishScreen(room, true, false)
+		f.at(1_500)
+		f.pass(t)
+		f.lk.setUpdateFail(f.screenID("ann"), true)
+		f.mustConsent(t, audioApplicationPerson, share)
+		if !f.lk.in(room, f.screenID("ann")) {
+			t.Fatal("a companion publishing no sound was removed")
+		}
+		if got := f.removedRows(t); len(got) != 0 {
+			t.Errorf("removal rows = %q, want none", got)
+		}
+		// LiveKit answers again and the sound appears: the owed withdrawal is
+		// made by the pass, without an unclaimed row.
+		f.lk.setUpdateFail(f.screenID("ann"), false)
+		f.publishScreen(room, true, true)
+		f.at(2_000)
+		f.pass(t)
+		if up := f.lastCompanionUpdate(t); !slices.Equal(up.sources, screenOnly) {
+			t.Errorf("the pass set %+v, want %v", up, screenOnly)
+		}
+		if n := len(f.audits(t, store.AuditVoiceShareUnclaimed)); n != 0 {
+			t.Errorf("a withdrawal the change owed was audited as unclaimed %d times", n)
+		}
+	})
+}
+
+// TestVoiceCompanionAudioStartedRowFails: a voice_share_audio_started row
+// that cannot be written is a 500 and the consent is put back as it was, on
+// every branch of the route that writes one.
+func TestVoiceCompanionAudioStartedRowFails(t *testing.T) {
+	status := func(t *testing.T, res wireResult) {
+		t.Helper()
+		if res.status != http.StatusInternalServerError {
+			t.Fatalf("with the row failing: %d %s, want 500", res.status, res.body)
+		}
+	}
+	t.Run("a first person consent is not recorded", func(t *testing.T) {
+		f, _ := shareWithCompanion(t)
+		f.at(1_000)
+		share := f.mustClaim(t, "ann")
+		restore := f.failAudioStarted()
+		status(t, f.companionAudio(t, "ann", audioApplicationPerson))
+		restore()
+		// Nothing was recorded: asking again writes a first row.
+		f.mustConsent(t, audioApplicationPerson, share)
+		want := []string{"ann started audio=true", "ann audio_started scope=application publisher=person"}
+		if got := f.shareRows(t); !slices.Equal(got, want) {
+			t.Errorf("share rows %q, want %q", got, want)
+		}
+	})
+	t.Run("a scope change on a person consent is put back", func(t *testing.T) {
+		f, _ := shareWithCompanion(t)
+		f.at(1_000)
+		share := f.mustClaim(t, "ann")
+		f.mustConsent(t, audioApplicationPerson, share)
+		restore := f.failAudioStarted()
+		status(t, f.companionAudio(t, "ann", audioSystemPerson))
+		restore()
+		// The old scope stands: asking for it is a no-op, the new one a change.
+		f.mustConsent(t, audioApplicationPerson, share)
+		f.mustConsent(t, audioSystemPerson, share)
+		want := []string{
+			"ann started audio=true", "ann audio_started scope=application publisher=person",
+			"ann audio_started scope=system_excluding_call publisher=person",
+		}
+		if got := f.shareRows(t); !slices.Equal(got, want) {
+			t.Errorf("share rows %q, want %q", got, want)
+		}
+	})
+	t.Run("companion to person puts the companion consent back", func(t *testing.T) {
+		f, room := shareWithCompanion(t)
+		f.at(1_000)
+		share := f.mustClaim(t, "ann")
+		f.mustConsent(t, audioApplication, share)
+		f.publishScreen(room, true, true)
+		f.at(1_500)
+		f.pass(t)
+		updates := f.companionUpdates()
+		restore := f.failAudioStarted()
+		status(t, f.companionAudio(t, "ann", audioApplicationPerson))
+		restore()
+		if n := f.companionUpdates(); n != updates {
+			t.Errorf("a failed change updated the companion (%d updates, had %d)", n, updates)
+		}
+		// The companion's consent still justifies its sound.
+		f.at(2_000)
+		f.pass(t)
+		if got := f.sharing(t, f.ops); got != "ann+audio" {
+			t.Errorf("presence shows %q, want ann+audio under the companion's consent", got)
+		}
+		if n := len(f.audits(t, store.AuditVoiceShareUnclaimed)); n != 0 {
+			t.Errorf("the companion's consented sound was audited as unclaimed %d times", n)
+		}
+		// And it is still the recorded consent: a repeat is a no-op, the
+		// change goes through once the log takes the row.
+		f.mustConsent(t, audioApplication, share)
+		f.mustConsent(t, audioApplicationPerson, share)
+		want := []string{
+			"ann started audio=true", "ann audio_started scope=application",
+			"ann audio_started scope=application publisher=person",
+		}
+		if got := f.shareRows(t); !slices.Equal(got, want) {
+			t.Errorf("share rows %q, want %q", got, want)
+		}
+	})
+	t.Run("person to companion puts the person consent back", func(t *testing.T) {
+		f, room := shareWithCompanion(t)
+		f.at(1_000)
+		share := f.mustClaim(t, "ann")
+		f.mustConsent(t, audioApplicationPerson, share)
+		restore := f.failAudioStarted()
+		status(t, f.companionAudio(t, "ann", audioApplicationCompanion))
+		restore()
+		// The grant LiveKit took is taken back at once.
+		if up := f.lastCompanionUpdate(t); !slices.Equal(up.sources, screenOnly) {
+			t.Errorf("the failed change left the companion %+v, want %v", up, screenOnly)
+		}
+		// The person's consent governs: the companion's sound is unclaimed.
+		f.publishScreen(room, true, true)
+		f.at(1_500)
+		f.pass(t)
+		if n := len(f.audits(t, store.AuditVoiceShareUnclaimed)); n != 1 {
+			t.Errorf("unclaimed rows = %d, want 1", n)
+		}
+		// A repeat of the person consent is a no-op, and the share's end
+		// closes the one consent once.
+		f.mustConsent(t, audioApplicationPerson, share)
+		f.at(2_000)
+		f.mustStop(t, "ann")
+		want := []string{
+			"ann started audio=true", "ann audio_started scope=application publisher=person",
+			"ann unclaimed sources=screen_share_audio participant=screen source=observed",
+			"ann audio_stopped principal=ann reason=self", "ann stopped principal=ann reason=self",
+		}
+		if got := f.shareRows(t); !slices.Equal(got, want) {
+			t.Errorf("share rows %q, want %q", got, want)
+		}
+	})
+}
+
+// TestVoiceCompanionAudioConcurrentPublisherChanges: publisher-change PUTs,
+// DELETEs and passes racing one another end with the last consent row agreeing
+// with the last permission written to the companion.
+func TestVoiceCompanionAudioConcurrentPublisherChanges(t *testing.T) {
+	f, room := shareWithCompanion(t)
+	f.at(1_000)
+	f.mustClaim(t, "ann")
+	f.publishScreen(room, true, false)
+
+	bodies := []string{audioApplication, audioApplicationPerson, audioSystemPerson, audioSystemCompanion, audioApplicationCompanion}
+	var wg sync.WaitGroup
+	for w := 0; w < 4; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < 12; i++ {
+				switch (i + w) % 4 {
+				case 3:
+					f.stopCompanionAudio(t, "ann")
+				default:
+					f.companionAudio(t, "ann", bodies[(i*3+w)%len(bodies)])
+				}
+			}
+		}()
+	}
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 20; i++ {
+			f.pass(t)
+		}
+	}()
+	wg.Wait()
+	f.pass(t)
+
+	// The last consent row, and what it says about the companion.
+	var last store.AuditEvent
+	for _, e := range f.audit(t) {
+		if e.Action == store.AuditVoiceShareAudioStarted || e.Action == store.AuditVoiceShareAudioStopped {
+			last = e
+		}
+	}
+	if last.Action == "" {
+		t.Fatal("no consent row was written")
+	}
+	companionHolds := last.Action == store.AuditVoiceShareAudioStarted && !strings.Contains(last.Detail, "publisher=person")
+	up := f.lastCompanionUpdate(t)
+	withAudio := slices.Equal(up.sources, screenAndAudio)
+	if !withAudio && !slices.Equal(up.sources, screenOnly) {
+		t.Fatalf("the last permission written to the companion is %+v", up)
+	}
+	if withAudio != companionHolds {
+		t.Errorf("the last consent row is %s %q but the last permission written is %+v", last.Action, last.Detail, up)
 	}
 }

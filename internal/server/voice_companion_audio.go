@@ -78,7 +78,7 @@ func (s *Server) handleVoiceCompanionAudio(w http.ResponseWriter, r *http.Reques
 			return
 		}
 		// A fixed message: the decoder's own names what the client sent.
-		writeError(w, http.StatusBadRequest, "invalid_request", `request body must be a voice companion audio request: a scope of application or system_excluding_call`)
+		writeError(w, http.StatusBadRequest, "invalid_request", `request body must be a voice companion audio request: a scope of application or system_excluding_call, and publisher companion or person if given`)
 		return
 	}
 
@@ -308,8 +308,11 @@ func (p *voicePoller) grantCompanionAudio(ctx context.Context, room store.VoiceR
 		// idle, say, or a rotation forgot the room): its end owed the
 		// companion a whole withdrawal and wrote voice_share_stopped alone,
 		// since no voice_share_audio_started row exists to close
-		// (audioStarted was never set). The consent is void, and what was
-		// just granted is taken back now rather than left to the pass.
+		// (audioStarted was never set) or, for a person-to-companion change
+		// in flight, the share's end found audioStarted set by the person's
+		// consent and wrote voice_share_audio_stopped for it. The consent is
+		// void, and what was just granted is taken back now rather than left
+		// to the pass.
 		p.mu.Unlock()
 		r.order.Unlock()
 		if p.withdrawCompanion(ctx, r, principalID, voiceRoleScreen, comp.screenSubscribes) {

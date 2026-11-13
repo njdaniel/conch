@@ -106,9 +106,9 @@ type voiceShare struct {
 	published bool
 	lastTrack time.Time
 	audio     bool
-	// audioScope is the holder's recorded consent to their companion
-	// publishing the share's sound (issue #898, voice_companion_audio.go):
-	// the scope they gave, or empty when none is recorded. It is set and
+	// audioScope is the scope of the holder's recorded consent to the share's
+	// sound (issue #898, voice_companion_audio.go), whoever publishes it
+	// (audioPublisher), or empty when none is recorded. It is set and
 	// cleared under the room's claims as well as order and voicePoller.mu,
 	// and it goes with the share: every end of the share ends it, and
 	// voice_share_audio_stopped is written beside voice_share_stopped.
@@ -120,7 +120,10 @@ type voiceShare struct {
 	// (companionAudio).
 	audioPublisher schema.VoiceShareAudioPublisher
 	// audioStarted says the consent's voice_share_audio_started row is in
-	// the log: set under order once it is written, after LiveKit's grant.
+	// the log: set under order once it is written, after LiveKit's grant for
+	// a consent naming the companion, or after the row alone for one naming
+	// the person (which asks LiveKit for nothing). It stays set while a
+	// consent is changed.
 	// Only a consent that started is stopped with a row; one whose grant was
 	// still in flight when the share ended (a pass ended it idle, a rotation
 	// forgot the room) has no started row to close, and its grant is taken
