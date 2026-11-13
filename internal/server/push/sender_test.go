@@ -223,6 +223,9 @@ type harnessOpts struct {
 	perMin   int
 	queue    int
 	workers  int
+	// clientTimeout, when set, replaces the client's whole-request budget, so a
+	// test of the timeout does not race waitFor's wall-clock budget.
+	clientTimeout time.Duration
 }
 
 // newHarness builds a sender that reaches the provider through the real
@@ -241,6 +244,9 @@ func newHarness(t *testing.T, o harnessOpts) *harness {
 	pool := x509.NewCertPool()
 	pool.AddCert(h.prov.Certificate())
 	client := newClient(NewDialer(h.res, false), pool)
+	if o.clientTimeout > 0 {
+		client.Timeout = o.clientTimeout
+	}
 
 	u, err := url.Parse(h.prov.Endpoint(h.sub))
 	if err != nil {
@@ -622,7 +628,9 @@ func TestPortRuleBeforeSend(t *testing.T) {
 // TestHangingProviderTimesOut: a provider that never answers costs one worker
 // for the client's timeout, and is a "timeout" failure. Other wakes go on.
 func TestHangingProviderTimesOut(t *testing.T) {
-	h := newHarness(t, harnessOpts{})
+	// A short client timeout, far under waitFor's budget: the test must not
+	// depend on headroom between two wall-clock timeouts.
+	h := newHarness(t, harnessOpts{clientTimeout: 200 * time.Millisecond})
 	h.prov.Script(func(n int, _ *pushtest.Delivery) pushtest.Reply {
 		if n == 1 {
 			return pushtest.Reply{Hang: true}
@@ -1106,7 +1114,7 @@ func TestNoEndpointInLogsOrCounts(t *testing.T) {
 	var markers []string
 	for _, o := range outcomes {
 		t.Run(o.name, func(t *testing.T) {
-			h := newHarness(t, harnessOpts{resolver: o.res})
+			h := newHarness(t, harnessOpts{resolver: o.res, clientTimeout: 200 * time.Millisecond})
 			h.prov.Script(func(int, *pushtest.Delivery) pushtest.Reply { return o.reply })
 			u, _ := url.Parse(h.target.Endpoint)
 			h.src.targets[0].Endpoint = "https://example.com:" + u.Port() + u.Path + "?marker-query=MARKER-QUERY-1f2e"
