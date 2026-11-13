@@ -1058,13 +1058,13 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
     // The session is ended first, and waited for: the request needs the
     // credential that signing out revokes, and the revoke ends the session.
     void releaseSession()
-      .then(() => api.signOut())
+      .then(() => api.signOut(principalId ?? undefined))
       .then((told) => {
         signingOut.current = false;
         forgetChannel();
         dispatchAuth({ type: 'signOut', notice: told ? null : 'untold' });
       });
-  }, [releaseSession]);
+  }, [releaseSession, principalId]);
 
   // Sign out everywhere revokes every credential of the person. If the server
   // does not do it, the person stays signed in here and is told, so they can
@@ -1386,11 +1386,11 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
   // revoked, before the invite or the link signs someone in.
   const leaveForInvite = useCallback(async (): Promise<boolean> => {
     await releaseSession();
-    const told = await api.signOut();
+    const told = await api.signOut(principalId ?? undefined);
     forgetChannel();
     dispatchAuth({ type: 'signOut', notice: told ? null : 'untold' });
     return told;
-  }, [releaseSession]);
+  }, [releaseSession, principalId]);
 
   // Joined, or signed back in through a sign-in link: the code is dropped and
   // the lobby opens, on the first channel an invite granted. A redemption is
@@ -1813,6 +1813,7 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
                 push={{
                   state: push.state,
                   failure: push.failure,
+                  mutesCut: push.mutesCut,
                   onEnable: () => {
                     void push.enable();
                   },

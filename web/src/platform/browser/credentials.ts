@@ -63,10 +63,10 @@ export const credentials: CredentialStore = {
 
   // The browser fires the storage event only in the other tabs, never in the
   // one that made the change.
-  onLastingChange(callback) {
+  onLastingChange(callback, key = tokenKey) {
     const listener = (event: StorageEvent) => {
       // key null is the whole storage cleared.
-      if (event.key !== null && event.key !== tokenKey) return;
+      if (event.key !== null && event.key !== key) return;
       try {
         if (event.storageArea !== window.localStorage) return;
       } catch {

@@ -29,6 +29,7 @@ function BackgroundPush({ push, policy }: { readonly push: PushSettings; readonl
     <div className="background-push">
       <h4>When Conch is closed</h4>
       {state.kind === 'unsupported' ? <p className="hint">Notifications when Conch is closed are not available in this browser.</p> : null}
+      {state.kind === 'session-only' ? <p className="hint">Notifications when Conch is closed need a sign-in that lasts. This sign-in ends with the tab.</p> : null}
       {state.kind === 'not-configured' ? <p className="hint">Notifications when Conch is closed are not turned on at this server.</p> : null}
       {state.kind === 'denied' ? <p className="hint">Notifications are blocked for this site. Allow them in your browser settings to be told when Conch is closed.</p> : null}
       {state.kind === 'off' ? (
@@ -41,6 +42,7 @@ function BackgroundPush({ push, policy }: { readonly push: PushSettings; readonl
       {state.kind === 'on' ? (
         <>
           <p className="hint">You’ll get a notice that there is new activity when Conch is closed, for the messages the setting above allows.{policy === 'off' ? ' It is off above, so nothing will arrive until you choose Mentions only or All messages.' : ''} While a Conch tab is open you may see it as well as the alerts here.</p>
+          {push.mutesCut === true ? <p className="hint">Only your newest 256 muted channels are copied to the server. Older mutes still apply here, but not when Conch is closed.</p> : null}
           <button type="button" onClick={push.onDisable}>Stop notifying me when Conch is closed</button>
         </>
       ) : null}
@@ -52,6 +54,8 @@ function BackgroundPush({ push, policy }: { readonly push: PushSettings; readonl
 export interface PushSettings {
   readonly state: PushState;
   readonly failure: PushFailure | null;
+  // More mutes than the server can hold: the oldest are not copied.
+  readonly mutesCut?: boolean;
   readonly onEnable: () => void;
   readonly onDisable: () => void;
 }

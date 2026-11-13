@@ -77,8 +77,9 @@ export interface CredentialStore {
   // Forgets held, but only if it is still the one stored there.
   drop(held: Held): void;
   // Calls back when another tab removes or replaces the lasting credential
-  // (or clears the storage). Returns the function that stops listening.
-  onLastingChange(callback: () => void): () => void;
+  // (or clears the storage), or, given key, changes that preference key.
+  // Returns the function that stops listening.
+  onLastingChange(callback: () => void, key?: string): () => void;
   // Small, non-secret, per-account preferences kept beside it, in the lasting
   // storage. readPreference gives null when there is none or the storage is
   // refused.

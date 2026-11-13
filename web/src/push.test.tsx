@@ -104,7 +104,11 @@ describe('the service worker', () => {
   });
 
   it('holds no credential and makes no request', () => {
-    expect(workerSource).not.toMatch(/\bfetch\s*\(|XMLHttpRequest|WebSocket|localStorage|sessionStorage|indexedDB|Authorization|\btoken\b|importScripts/);
+    expect(workerSource).not.toMatch(/\bfetch\s*\(|XMLHttpRequest|WebSocket|localStorage|sessionStorage|indexedDB|Authorization|\btoken\b|importScripts|event\.data|\bcaches\b|BroadcastChannel|postMessage|MessageChannel/);
+    // A scan that cannot see these would pass a worker that read the push.
+    for (const sample of ['event.data.text()', 'caches.open(x)', 'new BroadcastChannel(x)', 'client.postMessage(x)']) {
+      expect(sample).toMatch(/event\.data|\bcaches\b|BroadcastChannel|postMessage/);
+    }
   });
 });
 
@@ -201,6 +205,7 @@ interface Request {
 
 const tokenKey = 'conch.web.token';
 const registrationKey = `conch.web.push.v1.${window.location.origin}`;
+const record = { id: 'reg-1', account: 2 };
 const member = { id: 2, kind: 'human', name: 'ada', role: 'member' };
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status });
 const registration = (id = 'reg-1') => ({
@@ -230,6 +235,7 @@ function serve(): Server {
           return json({ registrations: [] });
         case 'POST /v1/push/registrations':
           return json(registration(), 201);
+        case 'GET /v1/notifications/preferences':
         case 'PUT /v1/notifications/preferences':
           return json({ policy: 'off', muted: [], preview: false, quiet_when_unreachable: false });
         case 'DELETE /v1/push/registrations/reg-1':
@@ -253,18 +259,21 @@ function serve(): Server {
   return server;
 }
 
-function fakePush(overrides: Partial<PushService> = {}): PushService & { readonly calls: string[] } {
+function fakePush(overrides: Partial<PushService> = {}, held = false): PushService & { readonly calls: string[] } {
   const calls: string[] = [];
+  let subscribed = held;
   return {
     calls,
     supported: () => true,
     subscribe: vi.fn((key: string) => {
       calls.push(`subscribe ${key}`);
+      subscribed = true;
       return Promise.resolve({ endpoint: 'https://push.example/e', p256dh: 'BAUG', auth: 'Bwg' });
     }),
-    subscribed: vi.fn(() => Promise.resolve(true)),
+    subscribed: vi.fn(() => Promise.resolve(subscribed)),
     unsubscribe: vi.fn(() => {
       calls.push('unsubscribe');
+      subscribed = false;
       return Promise.resolve();
     }),
     ...overrides,
@@ -356,9 +365,9 @@ describe('the settings state', () => {
   });
 
   it('is on when a record, a subscription and a registration the server still holds agree', async () => {
-    platform.services.push = fakePush();
+    platform.services.push = fakePush({}, true);
     const server = serve();
-    api.keepPushRegistration('reg-1');
+    api.keepPushRegistration(record);
     server.answer = ((base) => (request: Request) => (request.path === '/v1/push/registrations/mine' ? json({ registrations: [registration()] }) : base(request)))(server.answer);
     const hook = renderHook(() => usePush(props()));
     await settled(server, hook, 'on');
@@ -368,7 +377,7 @@ describe('the settings state', () => {
     const fake = fakePush();
     platform.services.push = fake;
     const server = serve();
-    api.keepPushRegistration('reg-1');
+    api.keepPushRegistration(record);
     const hook = renderHook(() => usePush(props()));
     await settled(server, hook, 'off');
     expect(api.readPushRegistration()).toBeNull();
@@ -387,7 +396,7 @@ describe('turning it on', () => {
     return { fake, server, hook };
   }
 
-  it('asks permission, subscribes with the server’s key, registers as a web subscription of this origin, then mirrors the policy and mutes', async () => {
+  it('asks permission, subscribes with the server’s key, mirrors the policy and mutes, then registers as a web subscription of this origin', async () => {
     permission = 'default';
     const { fake, server, hook } = await ready();
     await act(async () => {
@@ -395,16 +404,17 @@ describe('turning it on', () => {
     });
     expect(hook.result.current.state.kind).toBe('on');
     expect(fake.calls).toEqual(['subscribe AQID']);
+    // The policy first: preferences with no registration wake nothing.
     expect(server.requests).toEqual([
+      { method: 'PUT', path: '/v1/notifications/preferences', body: { policy: 'mentions', muted: [7], preview: false, quiet_when_unreachable: false } },
       {
         method: 'POST',
         path: '/v1/push/registrations',
         body: { transport: 'webpush', platform: 'web', app: window.location.origin, endpoint: 'https://push.example/e', p256dh: 'BAUG', auth: 'Bwg' },
       },
-      { method: 'PUT', path: '/v1/notifications/preferences', body: { policy: 'mentions', muted: [7], preview: false, quiet_when_unreachable: false } },
     ]);
-    expect(api.readPushRegistration()).toBe('reg-1');
-    expect(window.localStorage.getItem(registrationKey)).toBe('reg-1');
+    expect(api.readPushRegistration()).toEqual(record);
+    expect(window.localStorage.getItem(registrationKey)).toBe(JSON.stringify(record));
   });
 
   it('leaves nothing registered when permission is refused, and says which step', async () => {
@@ -432,19 +442,20 @@ describe('turning it on', () => {
     expect(api.readPushRegistration()).toBeNull();
   });
 
-  it('drops the subscription when the server refuses the registration, and mirrors nothing', async () => {
+  it('drops the subscription when the server refuses the registration', async () => {
     const { fake, server, hook } = await ready();
-    server.answer = (request) => (request.method === 'POST' ? json({ code: 'push_endpoint_refused', message: 'no' }, 400) : json({}, 404));
+    const base = server.answer;
+    server.answer = (request) => (request.method === 'POST' ? json({ code: 'push_endpoint_refused', message: 'no' }, 400) : base(request));
     await act(async () => {
       await hook.result.current.enable();
     });
     expect(hook.result.current).toMatchObject({ state: { kind: 'off' }, failure: 'register' });
     expect(fake.calls).toEqual(['subscribe AQID', 'unsubscribe']);
-    expect(server.requests.map((request) => request.method)).toEqual(['POST']);
+    expect(server.requests.map((request) => request.method)).toEqual(['PUT', 'POST']);
     expect(api.readPushRegistration()).toBeNull();
   });
 
-  it('ends the registration and drops the subscription when the policy cannot be mirrored', async () => {
+  it('registers nothing and drops the subscription when the policy cannot be mirrored', async () => {
     const { fake, server, hook } = await ready();
     const base = server.answer;
     server.answer = (request) => (request.method === 'PUT' ? json({ code: 'internal_error', message: 'no' }, 500) : base(request));
@@ -453,11 +464,7 @@ describe('turning it on', () => {
     });
     expect(hook.result.current).toMatchObject({ state: { kind: 'off' }, failure: 'preferences' });
     expect(fake.calls).toEqual(['subscribe AQID', 'unsubscribe']);
-    expect(server.requests.map((request) => `${request.method} ${request.path}`)).toEqual([
-      'POST /v1/push/registrations',
-      'PUT /v1/notifications/preferences',
-      'DELETE /v1/push/registrations/reg-1',
-    ]);
+    expect(server.requests.map((request) => `${request.method} ${request.path}`)).toEqual(['PUT /v1/notifications/preferences']);
     expect(api.readPushRegistration()).toBeNull();
   });
 
@@ -482,24 +489,6 @@ describe('turning it on', () => {
       await Promise.resolve();
     });
     expect(server.requests).toHaveLength(1);
-  });
-
-  it('says so when a change could not be copied, and sends it again on the next change', async () => {
-    const { server, hook } = await ready();
-    await act(async () => {
-      await hook.result.current.enable();
-    });
-    const base = server.answer;
-    server.answer = (request) => (request.method === 'PUT' ? json({ code: 'internal_error', message: 'no' }, 500) : base(request));
-    hook.rerender(props({ policy: 'all' }));
-    await waitFor(() => {
-      expect(hook.result.current.failure).toBe('mirror');
-    });
-    server.answer = base;
-    hook.rerender(props({ policy: 'off' }));
-    await waitFor(() => {
-      expect(hook.result.current.failure).toBeNull();
-    });
   });
 });
 
@@ -547,7 +536,7 @@ describe('turning it off', () => {
     });
     expect(hook.result.current).toMatchObject({ state: { kind: 'on' }, failure: 'end' });
     expect(fake.calls).toEqual([]);
-    expect(api.readPushRegistration()).toBe('reg-1');
+    expect(api.readPushRegistration()).toEqual(record);
   });
 });
 
@@ -555,14 +544,14 @@ describe('signing out', () => {
   function registered() {
     const fake = fakePush();
     platform.services.push = fake;
-    api.keepPushRegistration('reg-1');
+    api.keepPushRegistration(record);
     const server = serve();
     return { fake, server };
   }
 
   it('ends the registration and drops the subscription before the credential is revoked', async () => {
     const { fake, server } = registered();
-    expect(await api.signOut()).toBe(true);
+    expect(await api.signOut(2)).toBe(true);
     expect(server.requests.map((request) => `${request.method} ${request.path}`)).toEqual(['DELETE /v1/push/registrations/reg-1', 'DELETE /v1/credentials/current']);
     expect(fake.calls).toEqual(['unsubscribe']);
     expect(api.readPushRegistration()).toBeNull();
@@ -572,7 +561,7 @@ describe('signing out', () => {
     const { fake, server } = registered();
     const base = server.answer;
     server.answer = (request) => (request.path === '/v1/push/registrations/reg-1' ? json({ code: 'internal_error', message: 'no' }, 500) : base(request));
-    expect(await api.signOut()).toBe(true);
+    expect(await api.signOut(2)).toBe(true);
     expect(fake.calls).toEqual(['unsubscribe']);
     expect(api.readPushRegistration()).toBeNull();
     expect(window.localStorage.getItem(tokenKey)).toBeNull();
@@ -581,7 +570,7 @@ describe('signing out', () => {
   it('asks nothing about push of a browser that never registered', async () => {
     platform.services.push = fakePush();
     const server = serve();
-    expect(await api.signOut()).toBe(true);
+    expect(await api.signOut(2)).toBe(true);
     expect(server.requests.map((request) => request.path)).toEqual(['/v1/credentials/current']);
   });
 
@@ -599,7 +588,7 @@ describe('signing out', () => {
     server.answer = () => json({ code: 'internal_error', message: 'no' }, 500);
     expect((await api.signOutEverywhere(2)).ok).toBe(false);
     expect(fake.calls).toEqual([]);
-    expect(api.readPushRegistration()).toBe('reg-1');
+    expect(api.readPushRegistration()).toEqual(record);
   });
 });
 
@@ -640,5 +629,416 @@ describe('the settings section', () => {
     const on = settings({ kind: 'on' });
     fireEvent.click(screen.getByRole('button', { name: 'Stop notifying me when Conch is closed' }));
     expect(on.onDisable).toHaveBeenCalled();
+  });
+});
+
+// The review of #1846: wakes must not reach someone who opted out or signed
+// out, so a copy that did not take is sent again, every tab keeps it in step,
+// and a record is only ever its own account's.
+const prefs = (policy: string, muted: number[]) => json({ policy, muted, preview: false, quiet_when_unreachable: false });
+const refusedWrite = (retryAfter?: string) =>
+  new Response(JSON.stringify({ code: 'rate_limited', message: 'slow down' }), { status: 429, headers: retryAfter === undefined ? {} : { 'Retry-After': retryAfter } });
+const puts = (server: Server) => server.requests.filter((request) => request.method === 'PUT' && request.path === '/v1/notifications/preferences');
+
+async function turnedOn(over: Partial<Props> = {}) {
+  const fake = fakePush();
+  platform.services.push = fake;
+  const server = serve();
+  const hook = renderHook((p: Props) => usePush(p), { initialProps: props(over) });
+  await settled(server, hook, 'off');
+  await act(async () => {
+    await hook.result.current.enable();
+  });
+  fake.calls.length = 0;
+  server.requests.length = 0;
+  return { fake, server, hook };
+}
+
+describe('a copy of the policy that did not take', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('is sent again after the server’s Retry-After, and not before', async () => {
+    const { server, hook } = await turnedOn();
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    const base = server.answer;
+    server.answer = (request) => (request.method === 'PUT' ? refusedWrite('30') : base(request));
+    hook.rerender(props({ policy: 'off' }));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(hook.result.current.failure).toBe('mirror');
+    expect(puts(server)).toHaveLength(1);
+    server.answer = base;
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(29_000);
+    });
+    expect(puts(server)).toHaveLength(1);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2000);
+    });
+    expect(puts(server)).toHaveLength(2);
+    expect(puts(server)[1]?.body).toMatchObject({ policy: 'off' });
+    expect(hook.result.current.failure).toBeNull();
+  });
+
+  it('is sent again after a growing wait when no Retry-After was given, and the latest is what is sent', async () => {
+    const { server, hook } = await turnedOn();
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    const base = server.answer;
+    server.answer = (request) => (request.method === 'PUT' ? json({ code: 'internal_error', message: 'no' }, 500) : base(request));
+    hook.rerender(props({ policy: 'off' }));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    hook.rerender(props({ policy: 'all' }));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    const before = puts(server).length;
+    // The first wait is 1 s and the next 2 s: both have passed.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3000);
+    });
+    expect(puts(server).length).toBeGreaterThan(before);
+    server.answer = base;
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5000);
+    });
+    expect(puts(server).at(-1)?.body).toMatchObject({ policy: 'all' });
+    expect(hook.result.current.failure).toBeNull();
+  });
+
+  it.each([
+    { name: 'the browser comes back online', wake: () => window.dispatchEvent(new Event('online')) },
+    { name: 'the tab is shown', wake: () => document.dispatchEvent(new Event('visibilitychange')) },
+  ])('is sent again at once when $name, if the server gave no Retry-After, without waiting out the backoff', async ({ wake }) => {
+    const { server, hook } = await turnedOn();
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    const base = server.answer;
+    server.answer = (request) => (request.method === 'PUT' ? json({ code: 'internal_error', message: 'no' }, 500) : base(request));
+    hook.rerender(props({ policy: 'off' }));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(hook.result.current.failure).toBe('mirror');
+    server.answer = base;
+    await act(async () => {
+      wake();
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(hook.result.current.failure).toBeNull();
+    expect(puts(server).at(-1)?.body).toMatchObject({ policy: 'off' });
+  });
+
+  it('is not sent again by a wake before the server’s Retry-After', async () => {
+    const { server, hook } = await turnedOn();
+    const base = server.answer;
+    server.answer = (request) => (request.method === 'PUT' ? refusedWrite('60') : base(request));
+    hook.rerender(props({ policy: 'off' }));
+    await waitFor(() => {
+      expect(hook.result.current.failure).toBe('mirror');
+    });
+    const sent = puts(server).length;
+    await act(async () => {
+      window.dispatchEvent(new Event('online'));
+      await Promise.resolve();
+    });
+    expect(puts(server)).toHaveLength(sent);
+  });
+
+  it('is not written at load when the server’s copy already agrees, and is when it does not', async () => {
+    platform.services.push = fakePush({}, true);
+    const server = serve();
+    api.keepPushRegistration(record);
+    const base = server.answer;
+    server.answer = (request) => (request.path === '/v1/push/registrations/mine' ? json({ registrations: [registration()] }) : base(request));
+    const agree = renderHook(() => usePush(props()));
+    await settled(server, agree, 'on');
+    // Muted 7 and the policy are the server's own: the read matched, so no write.
+    server.answer = (request) => (request.path === '/v1/push/registrations/mine' ? json({ registrations: [registration()] }) : request.method === 'GET' && request.path === '/v1/notifications/preferences' ? prefs('mentions', [7]) : base(request));
+    server.requests.length = 0;
+    agree.unmount();
+    const same = renderHook(() => usePush(props()));
+    await settled(server, same, 'on');
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(server.requests.some((request) => request.path === '/v1/notifications/preferences' && request.method === 'GET')).toBe(true);
+    expect(puts(server)).toEqual([]);
+    same.unmount();
+    server.answer = (request) => (request.path === '/v1/push/registrations/mine' ? json({ registrations: [registration()] }) : request.method === 'GET' && request.path === '/v1/notifications/preferences' ? prefs('all', []) : base(request));
+    server.requests.length = 0;
+    const differ = renderHook(() => usePush(props()));
+    await settled(server, differ, 'on');
+    await waitFor(() => {
+      expect(puts(server)).toHaveLength(1);
+    });
+  });
+});
+
+describe('every tab of the origin', () => {
+  it('copies a change to the server when another tab turned push on, though this tab reads off', async () => {
+    const fake = fakePush();
+    platform.services.push = fake;
+    const server = serve();
+    const hook = renderHook((p: Props) => usePush(p), { initialProps: props({ policy: 'all', muted: new Set() }) });
+    await settled(server, hook, 'off');
+    server.requests.length = 0;
+    // The other tab registers: its record is the origin's.
+    api.keepPushRegistration(record);
+    hook.rerender(props({ policy: 'mentions', muted: new Set() }));
+    await waitFor(() => {
+      expect(puts(server)).toHaveLength(1);
+    });
+    expect(puts(server)[0]?.body).toMatchObject({ policy: 'mentions' });
+  });
+
+  it('reads the state again when another tab turns push on or off', async () => {
+    const fake = fakePush({}, true);
+    platform.services.push = fake;
+    const server = serve();
+    const hook = renderHook(() => usePush(props()));
+    await settled(server, hook, 'off');
+    const base = server.answer;
+    server.answer = (request) => (request.path === '/v1/push/registrations/mine' ? json({ registrations: [registration()] }) : base(request));
+    api.keepPushRegistration(record);
+    act(() => {
+      window.dispatchEvent(new StorageEvent('storage', { key: registrationKey, storageArea: window.localStorage }));
+    });
+    await settled(server, hook, 'on');
+    api.keepPushRegistration(null);
+    act(() => {
+      window.dispatchEvent(new StorageEvent('storage', { key: registrationKey, storageArea: window.localStorage }));
+    });
+    await settled(server, hook, 'off');
+  });
+
+  it('ignores a change of another key', async () => {
+    platform.services.push = fakePush();
+    const server = serve();
+    const hook = renderHook(() => usePush(props()));
+    await settled(server, hook, 'off');
+    server.requests.length = 0;
+    act(() => {
+      window.dispatchEvent(new StorageEvent('storage', { key: 'conch.web.other', storageArea: window.localStorage }));
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(server.requests).toEqual([]);
+  });
+
+  it('reads the state again after a password change rotated the credential, and clears the registration that ended with it', async () => {
+    let tell: ((event: api.ReplacingEvent) => void) | undefined;
+    vi.spyOn(api, 'onCredentialReplacing').mockImplementation((listener) => {
+      tell = listener;
+      return () => undefined;
+    });
+    const { fake, server, hook } = await turnedOn();
+    expect(hook.result.current.state.kind).toBe('on');
+    // The server ended the old credential's registration with it.
+    const base = server.answer;
+    server.answer = (request) => (request.path === '/v1/push/registrations/mine' ? json({ registrations: [] }) : base(request));
+    act(() => {
+      tell?.({ phase: 'end', id: 1, rotated: true, late: false });
+    });
+    await settled(server, hook, 'off');
+    expect(api.readPushRegistration()).toBeNull();
+    expect(fake.calls).toEqual(['unsubscribe']);
+  });
+});
+
+describe('a sign-in that ends with the tab', () => {
+  it('is not offered background push, and nothing about push is asked of the server', async () => {
+    window.localStorage.removeItem(tokenKey);
+    window.sessionStorage.setItem(tokenKey, 'conch_operator_secret');
+    const server = serve();
+    expect((await api.restore()).ok).toBe(true);
+    platform.services.push = fakePush();
+    server.requests.length = 0;
+    const hook = renderHook(() => usePush(props()));
+    await waitFor(() => {
+      expect(hook.result.current.state.kind).toBe('session-only');
+    });
+    expect(server.requests).toEqual([]);
+  });
+
+  it('says why in one line', () => {
+    render(<NotificationSettings policy="off" native={false} permission="default" supported onPolicy={vi.fn()} onEnable={vi.fn()} push={{ state: { kind: 'session-only' }, failure: null, onEnable: vi.fn(), onDisable: vi.fn() }} />);
+    expect(screen.getByText(/need a sign-in that lasts/)).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /when Conch is closed/ })).toBeNull();
+  });
+});
+
+describe('a record that is another account’s', () => {
+  const theirs = { id: 'reg-9', account: 9 };
+
+  it('is left alone on load: nothing is ended or dropped, and this account reads off', async () => {
+    const fake = fakePush();
+    platform.services.push = fake;
+    const server = serve();
+    api.keepPushRegistration(theirs);
+    const hook = renderHook(() => usePush(props()));
+    await settled(server, hook, 'off');
+    expect(api.readPushRegistration()).toEqual(theirs);
+    expect(fake.calls).toEqual([]);
+    expect(server.requests.some((request) => request.method === 'DELETE')).toBe(false);
+  });
+
+  it('is left alone by a sign-out and by turning off', async () => {
+    const fake = fakePush();
+    platform.services.push = fake;
+    const server = serve();
+    api.keepPushRegistration(theirs);
+    expect(await api.endPush(2)).toBe(true);
+    expect(await api.signOut(2)).toBe(true);
+    expect(fake.calls).toEqual([]);
+    expect(api.readPushRegistration()).toEqual(theirs);
+    expect(server.requests.map((request) => request.path)).toEqual(['/v1/credentials/current']);
+  });
+
+  it('is not touched by a sign-out that does not know its account', async () => {
+    const fake = fakePush();
+    platform.services.push = fake;
+    serve();
+    api.keepPushRegistration(record);
+    expect(await api.signOut()).toBe(true);
+    expect(fake.calls).toEqual([]);
+    expect(api.readPushRegistration()).toEqual(record);
+  });
+
+  it('is replaced, not shared, when this account turns push on: the subscription it holds is dropped first', async () => {
+    const fake = fakePush({}, true);
+    platform.services.push = fake;
+    const server = serve();
+    api.keepPushRegistration(theirs);
+    const hook = renderHook(() => usePush(props()));
+    await settled(server, hook, 'off');
+    await act(async () => {
+      await hook.result.current.enable();
+    });
+    expect(fake.calls).toEqual(['unsubscribe', 'subscribe AQID']);
+    expect(api.readPushRegistration()).toEqual(record);
+  });
+
+  it('keeps the subscription of its own record when it turns push on again', async () => {
+    const fake = fakePush({}, true);
+    platform.services.push = fake;
+    const server = serve();
+    const hook = renderHook(() => usePush(props()));
+    await settled(server, hook, 'off');
+    api.keepPushRegistration(record);
+    await act(async () => {
+      await hook.result.current.enable();
+    });
+    expect(fake.calls).toEqual(['subscribe AQID']);
+  });
+});
+
+describe('the push request of a sign-out', () => {
+  it('is bounded: a server that never answers it does not hold the sign-out, and the subscription still goes', async () => {
+    const fake = fakePush();
+    platform.services.push = fake;
+    api.keepPushRegistration(record);
+    const requests: string[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+        const path = typeof input === 'string' ? input : input instanceof URL ? input.pathname : input.url;
+        requests.push(`${init?.method ?? 'GET'} ${path}`);
+        if (path === '/v1/push/registrations/reg-1') {
+          return new Promise<Response>((_, reject) => {
+            init?.signal?.addEventListener('abort', () => {
+              reject(new DOMException('aborted', 'AbortError'));
+            });
+          });
+        }
+        return Promise.resolve(new Response(null, { status: 204 }));
+      }),
+    );
+    expect(await api.signOut(2)).toBe(true);
+    expect(requests).toEqual(['DELETE /v1/push/registrations/reg-1', 'DELETE /v1/credentials/current']);
+    expect(fake.calls).toEqual(['unsubscribe']);
+    expect(api.readPushRegistration()).toBeNull();
+    expect(window.localStorage.getItem(tokenKey)).toBeNull();
+  }, 10_000);
+});
+
+describe('signing out of a sign-in that ends with the tab', () => {
+  it('leaves the member’s record and subscription alone', async () => {
+    const fake = fakePush();
+    platform.services.push = fake;
+    api.keepPushRegistration(record);
+    window.localStorage.removeItem(tokenKey);
+    window.sessionStorage.setItem(tokenKey, 'conch_operator_secret');
+    const server = serve();
+    expect((await api.restore()).ok).toBe(true);
+    server.requests.length = 0;
+    expect(await api.signOut(2)).toBe(true);
+    expect(fake.calls).toEqual([]);
+    expect(api.readPushRegistration()).toEqual(record);
+    expect(server.requests.map((request) => request.path)).toEqual(['/v1/credentials/current']);
+  });
+});
+
+describe('forgetting a sign-in that could not be checked', () => {
+  it('drops the subscription and the record with the credential, with no push request', async () => {
+    const fake = fakePush();
+    platform.services.push = fake;
+    // A page load whose server did not answer: the credential is stored, unchecked.
+    api.keepPushRegistration(record);
+    const calls: string[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+        const path = typeof input === 'string' ? input : input instanceof URL ? input.pathname : input.url;
+        calls.push(`${init?.method ?? 'GET'} ${path}`);
+        return path === '/v1/whoami' ? Promise.reject(new TypeError('Failed to fetch')) : Promise.reject(new TypeError('Failed to fetch'));
+      }),
+    );
+    expect((await api.restore()).ok).toBe(false);
+    expect(await api.forgetStored()).toBe(false);
+    expect(fake.calls).toEqual(['unsubscribe']);
+    expect(api.readPushRegistration()).toBeNull();
+    expect(calls.some((call) => call.includes('/v1/push/'))).toBe(false);
+    expect(window.localStorage.getItem(tokenKey)).toBeNull();
+  });
+
+  it('leaves the member’s subscription when the credential it forgets is a tab’s', async () => {
+    const fake = fakePush();
+    platform.services.push = fake;
+    api.keepPushRegistration(record);
+    window.localStorage.removeItem(tokenKey);
+    window.sessionStorage.setItem(tokenKey, 'conch_operator_secret');
+    vi.stubGlobal('fetch', vi.fn(() => Promise.reject(new TypeError('Failed to fetch'))));
+    expect((await api.restore()).ok).toBe(false);
+    await api.forgetStored();
+    expect(fake.calls).toEqual([]);
+    expect(api.readPushRegistration()).toEqual(record);
+  });
+});
+
+describe('more mutes than the server can hold', () => {
+  it('keeps the newest, and the settings say the oldest are cut', async () => {
+    const fake = fakePush();
+    platform.services.push = fake;
+    const server = serve();
+    const many = new Set(Array.from({ length: 300 }, (_, i) => i + 1));
+    const hook = renderHook((p: Props) => usePush(p), { initialProps: props({ muted: many }) });
+    await settled(server, hook, 'off');
+    server.requests.length = 0;
+    await act(async () => {
+      await hook.result.current.enable();
+    });
+    const body = puts(server)[0]?.body as { muted: number[] };
+    expect(body.muted).toHaveLength(256);
+    expect(body.muted[0]).toBe(45);
+    expect(body.muted.at(-1)).toBe(300);
+    expect(hook.result.current.mutesCut).toBe(true);
+    expect(api.serverMutes([1, 2, 3])).toEqual([1, 2, 3]);
+    render(<NotificationSettings policy="all" native={false} permission="default" supported onPolicy={vi.fn()} onEnable={vi.fn()} push={{ state: { kind: 'on' }, failure: null, mutesCut: true, onEnable: vi.fn(), onDisable: vi.fn() }} />);
+    expect(screen.getByText(/newest 256 muted channels/)).toBeTruthy();
   });
 });

@@ -389,6 +389,7 @@ export const operations = {
   listPushRegistrations: op('GET', '/v1/push/registrations/mine', 'bearer', { response: reply(listOwnPushRegistrationsResponseV1) }),
   createPushRegistration: op('POST', '/v1/push/registrations', 'bearer', { request: check(createPushRegistrationRequestV1), response: reply(pushRegistrationV1) }),
   endPushRegistration: op('DELETE', '/v1/push/registrations/{id}', 'bearer'),
+  getNotificationPreferences: op('GET', '/v1/notifications/preferences', 'bearer', { response: reply(notificationPreferencesV1) }),
   putNotificationPreferences: op('PUT', '/v1/notifications/preferences', 'bearer', { request: check(putNotificationPreferencesRequestV1), response: reply(notificationPreferencesV1) }),
   moderateReaction: op('DELETE', '/v2/channels/{channel}/messages/{id}/reactions/{emoji}/{principal}', 'bearer', { response: reply(reactionSummaryV1) }),
   removeReactor: op('DELETE', '/v2/channels/{channel}/messages/{id}/reactors/{principal}', 'bearer', { response: reply(reactionSummaryV1) }),
