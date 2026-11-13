@@ -219,7 +219,7 @@ const registration = (id = 'reg-1') => ({
 
 interface Server {
   readonly requests: Request[];
-  answer: (request: Request) => Response;
+  answer: (request: Request) => Response | Promise<Response>;
 }
 
 function serve(): Server {
@@ -315,6 +315,13 @@ interface Props {
   readonly policy: 'off' | 'mentions' | 'all';
   readonly muted: ReadonlySet<number>;
 }
+// usePushStored is usePush as the page runs it: useNotifications writes the
+// local preferences to storage before usePush's effects run, and the pump sends
+// what is stored.
+const usePushStored = (p: Props) => {
+  api.writeNotificationPreferences(window.location.origin, p.account, { policy: p.policy, muted: [...p.muted], native: false });
+  return usePush(p);
+};
 const props = (over: Partial<Props> = {}): Props => ({ signedIn: true, eligible: true, account: 2, policy: 'mentions', muted: new Set([7]), ...over });
 
 async function settled(server: Server, hook: { result: { current: ReturnType<typeof usePush> } }, kind: PushState['kind']) {
@@ -328,17 +335,17 @@ describe('the settings state', () => {
   it('offers nothing to a guest or an agent, or before sign-in', () => {
     platform.services.push = fakePush();
     const server = serve();
-    expect(renderHook(() => usePush(props({ eligible: false }))).result.current.state.kind).toBe('hidden');
-    expect(renderHook(() => usePush(props({ signedIn: false }))).result.current.state.kind).toBe('hidden');
+    expect(renderHook(() => usePushStored(props({ eligible: false }))).result.current.state.kind).toBe('hidden');
+    expect(renderHook(() => usePushStored(props({ signedIn: false }))).result.current.state.kind).toBe('hidden');
     expect(server.requests).toEqual([]);
   });
 
   it('is unsupported where the browser has no push, without asking the server', () => {
     platform.services.push = fakePush({ supported: () => false });
     const server = serve();
-    expect(renderHook(() => usePush(props())).result.current.state.kind).toBe('unsupported');
+    expect(renderHook(() => usePushStored(props())).result.current.state.kind).toBe('unsupported');
     platform.services.push = undefined;
-    expect(renderHook(() => usePush(props())).result.current.state.kind).toBe('unsupported');
+    expect(renderHook(() => usePushStored(props())).result.current.state.kind).toBe('unsupported');
     expect(server.requests).toEqual([]);
   });
 
@@ -350,17 +357,17 @@ describe('the settings state', () => {
     platform.services.push = fakePush();
     const server = serve();
     server.answer = (request) => (request.path === '/v1/push/config' ? config() : json({}, 404));
-    const hook = renderHook(() => usePush(props()));
+    const hook = renderHook(() => usePushStored(props()));
     await settled(server, hook, 'not-configured');
   });
 
   it('is off when configured and nothing is registered, and denied when the browser blocks notifications', async () => {
     platform.services.push = fakePush();
     const server = serve();
-    const off = renderHook(() => usePush(props()));
+    const off = renderHook(() => usePushStored(props()));
     await settled(server, off, 'off');
     permission = 'denied';
-    const denied = renderHook(() => usePush(props()));
+    const denied = renderHook(() => usePushStored(props()));
     await settled(server, denied, 'denied');
   });
 
@@ -369,7 +376,7 @@ describe('the settings state', () => {
     const server = serve();
     api.keepPushRegistration(record);
     server.answer = ((base) => (request: Request) => (request.path === '/v1/push/registrations/mine' ? json({ registrations: [registration()] }) : base(request)))(server.answer);
-    const hook = renderHook(() => usePush(props()));
+    const hook = renderHook(() => usePushStored(props()));
     await settled(server, hook, 'on');
   });
 
@@ -378,7 +385,7 @@ describe('the settings state', () => {
     platform.services.push = fake;
     const server = serve();
     api.keepPushRegistration(record);
-    const hook = renderHook(() => usePush(props()));
+    const hook = renderHook(() => usePushStored(props()));
     await settled(server, hook, 'off');
     expect(api.readPushRegistration()).toBeNull();
     expect(fake.calls).toEqual(['unsubscribe']);
@@ -390,7 +397,7 @@ describe('turning it on', () => {
     const fake = fakePush();
     platform.services.push = fake;
     const server = serve();
-    const hook = renderHook((p: Props) => usePush(p), { initialProps: props(over) });
+    const hook = renderHook((p: Props) => usePushStored(p), { initialProps: props(over) });
     await settled(server, hook, 'off');
     server.requests.length = 0;
     return { fake, server, hook };
@@ -497,7 +504,7 @@ describe('turning it off', () => {
     const fake = fakePush();
     platform.services.push = fake;
     const server = serve();
-    const hook = renderHook(() => usePush(props()));
+    const hook = renderHook(() => usePushStored(props()));
     await settled(server, hook, 'off');
     await act(async () => {
       await hook.result.current.enable();
@@ -644,7 +651,7 @@ async function turnedOn(over: Partial<Props> = {}) {
   const fake = fakePush();
   platform.services.push = fake;
   const server = serve();
-  const hook = renderHook((p: Props) => usePush(p), { initialProps: props(over) });
+  const hook = renderHook((p: Props) => usePushStored(p), { initialProps: props(over) });
   await settled(server, hook, 'off');
   await act(async () => {
     await hook.result.current.enable();
@@ -754,13 +761,13 @@ describe('a copy of the policy that did not take', () => {
     api.keepPushRegistration(record);
     const base = server.answer;
     server.answer = (request) => (request.path === '/v1/push/registrations/mine' ? json({ registrations: [registration()] }) : base(request));
-    const agree = renderHook(() => usePush(props()));
+    const agree = renderHook(() => usePushStored(props()));
     await settled(server, agree, 'on');
     // Muted 7 and the policy are the server's own: the read matched, so no write.
     server.answer = (request) => (request.path === '/v1/push/registrations/mine' ? json({ registrations: [registration()] }) : request.method === 'GET' && request.path === '/v1/notifications/preferences' ? prefs('mentions', [7]) : base(request));
     server.requests.length = 0;
     agree.unmount();
-    const same = renderHook(() => usePush(props()));
+    const same = renderHook(() => usePushStored(props()));
     await settled(server, same, 'on');
     await act(async () => {
       await Promise.resolve();
@@ -770,7 +777,7 @@ describe('a copy of the policy that did not take', () => {
     same.unmount();
     server.answer = (request) => (request.path === '/v1/push/registrations/mine' ? json({ registrations: [registration()] }) : request.method === 'GET' && request.path === '/v1/notifications/preferences' ? prefs('all', []) : base(request));
     server.requests.length = 0;
-    const differ = renderHook(() => usePush(props()));
+    const differ = renderHook(() => usePushStored(props()));
     await settled(server, differ, 'on');
     await waitFor(() => {
       expect(puts(server)).toHaveLength(1);
@@ -783,7 +790,7 @@ describe('every tab of the origin', () => {
     const fake = fakePush();
     platform.services.push = fake;
     const server = serve();
-    const hook = renderHook((p: Props) => usePush(p), { initialProps: props({ policy: 'all', muted: new Set() }) });
+    const hook = renderHook((p: Props) => usePushStored(p), { initialProps: props({ policy: 'all', muted: new Set() }) });
     await settled(server, hook, 'off');
     server.requests.length = 0;
     // The other tab registers: its record is the origin's.
@@ -799,7 +806,7 @@ describe('every tab of the origin', () => {
     const fake = fakePush({}, true);
     platform.services.push = fake;
     const server = serve();
-    const hook = renderHook(() => usePush(props()));
+    const hook = renderHook(() => usePushStored(props()));
     await settled(server, hook, 'off');
     const base = server.answer;
     server.answer = (request) => (request.path === '/v1/push/registrations/mine' ? json({ registrations: [registration()] }) : base(request));
@@ -818,7 +825,7 @@ describe('every tab of the origin', () => {
   it('ignores a change of another key', async () => {
     platform.services.push = fakePush();
     const server = serve();
-    const hook = renderHook(() => usePush(props()));
+    const hook = renderHook(() => usePushStored(props()));
     await settled(server, hook, 'off');
     server.requests.length = 0;
     act(() => {
@@ -858,7 +865,7 @@ describe('a sign-in that ends with the tab', () => {
     expect((await api.restore()).ok).toBe(true);
     platform.services.push = fakePush();
     server.requests.length = 0;
-    const hook = renderHook(() => usePush(props()));
+    const hook = renderHook(() => usePushStored(props()));
     await waitFor(() => {
       expect(hook.result.current.state.kind).toBe('session-only');
     });
@@ -875,47 +882,51 @@ describe('a sign-in that ends with the tab', () => {
 describe('a record that is another account’s', () => {
   const theirs = { id: 'reg-9', account: 9 };
 
-  it('is left alone on load: nothing is ended or dropped, and this account reads off', async () => {
-    const fake = fakePush();
+  it('is dropped on load under a lasting credential, locally: no request is made, and this account reads off', async () => {
+    const fake = fakePush({}, true);
     platform.services.push = fake;
     const server = serve();
     api.keepPushRegistration(theirs);
-    const hook = renderHook(() => usePush(props()));
+    const hook = renderHook(() => usePushStored(props()));
     await settled(server, hook, 'off');
-    expect(api.readPushRegistration()).toEqual(theirs);
-    expect(fake.calls).toEqual([]);
+    expect(api.readPushRegistration()).toBeNull();
+    expect(fake.calls).toEqual(['unsubscribe']);
     expect(server.requests.some((request) => request.method === 'DELETE')).toBe(false);
   });
 
-  it('is left alone by a sign-out and by turning off', async () => {
+  it('is not ended by turning off, and is dropped, with no request for it, by a sign-out', async () => {
     const fake = fakePush();
     platform.services.push = fake;
     const server = serve();
     api.keepPushRegistration(theirs);
     expect(await api.endPush(2)).toBe(true);
-    expect(await api.signOut(2)).toBe(true);
     expect(fake.calls).toEqual([]);
     expect(api.readPushRegistration()).toEqual(theirs);
+    expect(await api.signOut(2)).toBe(true);
+    expect(fake.calls).toEqual(['unsubscribe']);
+    expect(api.readPushRegistration()).toBeNull();
     expect(server.requests.map((request) => request.path)).toEqual(['/v1/credentials/current']);
   });
 
-  it('is not touched by a sign-out that does not know its account', async () => {
+  it('is dropped locally by a sign-out that does not know its account, with no request for it', async () => {
     const fake = fakePush();
     platform.services.push = fake;
-    serve();
+    const server = serve();
     api.keepPushRegistration(record);
     expect(await api.signOut()).toBe(true);
-    expect(fake.calls).toEqual([]);
-    expect(api.readPushRegistration()).toEqual(record);
+    expect(fake.calls).toEqual(['unsubscribe']);
+    expect(api.readPushRegistration()).toBeNull();
+    expect(server.requests.map((request) => request.path)).toEqual(['/v1/credentials/current']);
   });
 
   it('is replaced, not shared, when this account turns push on: the subscription it holds is dropped first', async () => {
     const fake = fakePush({}, true);
     platform.services.push = fake;
     const server = serve();
-    api.keepPushRegistration(theirs);
-    const hook = renderHook(() => usePush(props()));
+    const hook = renderHook(() => usePushStored(props()));
     await settled(server, hook, 'off');
+    // Another tab of this origin signed in as someone else since the load.
+    api.keepPushRegistration(theirs);
     await act(async () => {
       await hook.result.current.enable();
     });
@@ -927,7 +938,7 @@ describe('a record that is another account’s', () => {
     const fake = fakePush({}, true);
     platform.services.push = fake;
     const server = serve();
-    const hook = renderHook(() => usePush(props()));
+    const hook = renderHook(() => usePushStored(props()));
     await settled(server, hook, 'off');
     api.keepPushRegistration(record);
     await act(async () => {
@@ -1026,7 +1037,7 @@ describe('more mutes than the server can hold', () => {
     platform.services.push = fake;
     const server = serve();
     const many = new Set(Array.from({ length: 300 }, (_, i) => i + 1));
-    const hook = renderHook((p: Props) => usePush(p), { initialProps: props({ muted: many }) });
+    const hook = renderHook((p: Props) => usePushStored(p), { initialProps: props({ muted: many }) });
     await settled(server, hook, 'off');
     server.requests.length = 0;
     await act(async () => {
@@ -1040,5 +1051,134 @@ describe('more mutes than the server can hold', () => {
     expect(api.serverMutes([1, 2, 3])).toEqual([1, 2, 3]);
     render(<NotificationSettings policy="all" native={false} permission="default" supported onPolicy={vi.fn()} onEnable={vi.fn()} push={{ state: { kind: 'on' }, failure: null, mutesCut: true, onEnable: vi.fn(), onDisable: vi.fn() }} />);
     expect(screen.getByText(/newest 256 muted channels/)).toBeTruthy();
+  });
+});
+
+describe('what the pump sends', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  // Two tabs. The first changed the policy to off and mirrored it. The second
+  // was loaded before that and still holds 'all' in memory: it must send what
+  // is stored (off), never its own memory, or an opted-out person is woken.
+  it('is the stored choice, not the tab’s older memory of it', async () => {
+    platform.services.push = fakePush({}, true);
+    const server = serve();
+    api.keepPushRegistration(record);
+    api.writeNotificationPreferences(window.location.origin, 2, { policy: 'off', muted: [], native: false });
+    const base = server.answer;
+    server.answer = (request) =>
+      request.path === '/v1/push/registrations/mine' ? json({ registrations: [registration()] }) : request.method === 'GET' && request.path === '/v1/notifications/preferences' ? prefs('off', []) : base(request);
+    // The raw hook: this tab's memory says 'all' and it wrote nothing to storage.
+    const stale = renderHook(() => usePush(props({ policy: 'all', muted: new Set() })));
+    await settled(server, stale, 'on');
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(puts(server)).toEqual([]);
+    // And when the server's copy is behind, what is sent is the stored choice.
+    server.answer = (request) =>
+      request.path === '/v1/push/registrations/mine' ? json({ registrations: [registration()] }) : request.method === 'GET' && request.path === '/v1/notifications/preferences' ? prefs('all', []) : base(request);
+    stale.unmount();
+    const behind = renderHook(() => usePush(props({ policy: 'all', muted: new Set() })));
+    await settled(server, behind, 'on');
+    await waitFor(() => {
+      expect(puts(server)).toHaveLength(1);
+    });
+    expect(puts(server)[0]?.body).toMatchObject({ policy: 'off', muted: [] });
+  });
+
+  it('sends the stored mutes on enable, too', async () => {
+    const fake = fakePush();
+    platform.services.push = fake;
+    const server = serve();
+    const hook = renderHook(() => usePush(props({ policy: 'all', muted: new Set([1]) })));
+    await settled(server, hook, 'off');
+    api.writeNotificationPreferences(window.location.origin, 2, { policy: 'mentions', muted: [4, 5], native: false });
+    server.requests.length = 0;
+    await act(async () => {
+      await hook.result.current.enable();
+    });
+    expect(puts(server)[0]?.body).toMatchObject({ policy: 'mentions', muted: [4, 5] });
+  });
+
+  it('is not sent under a credential that ends with the tab, though a record is there', async () => {
+    window.localStorage.removeItem(tokenKey);
+    window.sessionStorage.setItem(tokenKey, 'conch_operator_secret');
+    const server = serve();
+    expect((await api.restore()).ok).toBe(true);
+    platform.services.push = fakePush({}, true);
+    api.keepPushRegistration(record);
+    server.requests.length = 0;
+    const hook = renderHook((p: Props) => usePushStored(p), { initialProps: props() });
+    await waitFor(() => {
+      expect(hook.result.current.state.kind).toBe('session-only');
+    });
+    hook.rerender(props({ policy: 'off' }));
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(server.requests).toEqual([]);
+  });
+
+  it('schedules nothing for a send that was in flight when the page went away', async () => {
+    const { server, hook } = await turnedOn();
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    let answerLate: (response: Response) => void = () => undefined;
+    const base = server.answer;
+    server.answer = (request) =>
+      request.method === 'PUT'
+        ? new Promise<Response>((resolve) => {
+            answerLate = resolve;
+          })
+        : base(request);
+    hook.rerender(props({ policy: 'off' }));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(puts(server)).toHaveLength(1);
+    hook.unmount();
+    answerLate(json({ code: 'internal_error', message: 'no' }, 500));
+    await vi.advanceTimersByTimeAsync(0);
+    // No resend is waiting, and none is sent later.
+    expect(vi.getTimerCount()).toBe(0);
+    await vi.advanceTimersByTimeAsync(300_000);
+    expect(puts(server)).toHaveLength(1);
+  });
+});
+
+describe('the bound on the sign-out push request, where AbortSignal.timeout is missing', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('is a controller and a timer', async () => {
+    vi.stubGlobal('AbortSignal', Object.assign(function AbortSignal() {
+      return undefined;
+    }, { timeout: undefined }));
+    const fake = fakePush();
+    platform.services.push = fake;
+    api.keepPushRegistration(record);
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+        const path = typeof input === 'string' ? input : input instanceof URL ? input.pathname : input.url;
+        if (path === '/v1/push/registrations/reg-1') {
+          return new Promise<Response>((_, reject) => {
+            init?.signal?.addEventListener('abort', () => {
+              reject(new DOMException('aborted', 'AbortError'));
+            });
+          });
+        }
+        return Promise.resolve(new Response(null, { status: 204 }));
+      }),
+    );
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const out = api.signOut(2);
+    await vi.advanceTimersByTimeAsync(3100);
+    expect(await out).toBe(true);
+    expect(fake.calls).toEqual(['unsubscribe']);
+    expect(api.readPushRegistration()).toBeNull();
   });
 });

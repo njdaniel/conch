@@ -34,7 +34,7 @@ const retryMax = 60_000;
 
 // shape is what the server's copy would hold for the local preferences: the
 // policy, and the mutes it can hold (the newest, past its bound), in order.
-function shape(policy: NotificationPolicy, muted: ReadonlySet<number>): { readonly policy: NotificationPolicy; readonly muted: number[]; readonly key: string } {
+function shape(policy: NotificationPolicy, muted: ReadonlySet<number> | readonly number[]): { readonly policy: NotificationPolicy; readonly muted: number[]; readonly key: string } {
   const kept = api.serverMutes([...muted]);
   return { policy, muted: kept, key: JSON.stringify({ policy, muted: [...kept].sort((a, b) => a - b) }) };
 }
@@ -60,9 +60,14 @@ export function usePush({
   // the credential is replaced: the state is read again.
   const [tick, setTick] = useState(0);
   const vapid = useRef('');
-  const live = useRef({ signedIn, eligible, account, policy, muted });
-  live.current = { signedIn, eligible, account, policy, muted };
+  const live = useRef({ signedIn, eligible, account });
+  live.current = { signedIn, eligible, account };
+  // What changed locally; what is SENT is read from storage at send time (see
+  // stored), so a tab holding an older choice in memory never writes it over a
+  // newer one made in another tab.
   const wanted = shape(policy, muted);
+  const gone = useRef(false);
+  const isGone = () => gone.current;
 
   // The mirror. sent is what the server's copy last took; known says whether
   // it has been read this load; the timer and notBefore hold a resend.
@@ -105,6 +110,11 @@ export function usePush({
       setState({ kind: 'session-only' });
       return;
     }
+    // Under a lasting credential, the origin's one, another account's record
+    // is stale: its subscription would wake this browser for someone who is
+    // gone. Dropped here, with no request (that credential is not ours).
+    const held = api.readPushRegistration();
+    if (held !== null && held.account !== account) void api.forgetPush(held.account);
     const push = platform.services.push;
     if (push === undefined || !push.supported()) {
       setState({ kind: 'unsupported' });
@@ -149,6 +159,13 @@ export function usePush({
   // origin holds this account's registration, whichever tab made it, until the
   // server has taken the latest. One send at a time; a refusal (the write
   // budget it shares with registrations, a network fault) is sent again.
+  // stored is the newest choice: useNotifications writes it before this hook's
+  // effects run, and another tab's is there too.
+  const stored = (who: number) => {
+    const preferences = api.readNotificationPreferences(platform.services.origin(), who);
+    return shape(preferences.policy, preferences.muted);
+  };
+
   const pump = useCallback(async () => {
     if (running.current) return;
     running.current = true;
@@ -157,8 +174,8 @@ export function usePush({
       for (;;) {
         const now = live.current;
         const record = api.readPushRegistration();
-        if (!now.signedIn || !now.eligible || record === null || record.account !== now.account) return;
-        const want = shape(now.policy, now.muted);
+        if (gone.current || !now.signedIn || !now.eligible || api.heldPlace() !== 'lasting' || record === null || record.account !== now.account) return;
+        const want = stored(now.account);
         if (sent.current === want.key) {
           attempts.current = 0;
           setFailure((previous) => (previous === 'mirror' ? null : previous));
@@ -179,7 +196,7 @@ export function usePush({
           sent.current = want.key;
           continue;
         }
-        if (result.failure === 'unauthorized') return;
+        if (result.failure === 'unauthorized' || isGone()) return;
         // Not hidden: until it takes, the server wakes this browser by the
         // earlier copy.
         setFailure('mirror');
@@ -203,6 +220,7 @@ export function usePush({
   // A copy that could not be sent is tried again when the browser comes back
   // online or the tab is shown, but never before the server's Retry-After.
   useEffect(() => {
+    gone.current = false;
     const retry = () => {
       if (document.visibilityState === 'hidden' || Date.now() < notBefore.current) return;
       void pump();
@@ -212,6 +230,7 @@ export function usePush({
     return () => {
       window.removeEventListener('online', retry);
       document.removeEventListener('visibilitychange', retry);
+      gone.current = true;
       clearTimeout(timer.current);
     };
   }, [pump]);
@@ -249,7 +268,7 @@ export function usePush({
     }
     // The policy goes first: preferences with no registration wake nothing,
     // while a registration under the server's earlier copy could.
-    const want = shape(live.current.policy, live.current.muted);
+    const want = stored(mine);
     const mirrored = await api.mirrorNotificationPreferences(want.policy, want.muted);
     if (!mirrored.ok) {
       await fail('preferences', () => push.unsubscribe());

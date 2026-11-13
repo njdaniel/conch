@@ -852,7 +852,12 @@ export async function signOut(account?: number): Promise<boolean> {
   const held = current();
   // This browser's background push ends first: its registration is the
   // credential's, and the request needs the credential that is revoked below.
-  if (held !== null && held.place === 'lasting' && account !== undefined) await endPush(account, true);
+  if (held !== null && held.place === 'lasting') {
+    if (account !== undefined) await endPush(account, true);
+    // What is left is another account's, or one nobody can name: under a
+    // lasting credential, which is this origin's one, it is stale. Dropped here.
+    await forgetPush();
+  }
   pin(null);
   forgetDiagnostics();
   if (held === null) return true;
@@ -2685,6 +2690,17 @@ export function heldPlace(): Place | null {
 // follows ends the registration anyway.
 const pushSignOutWait = 3000;
 
+// abortAfter is a signal that aborts after ms: AbortSignal.timeout where the
+// browser has it (Chrome 103), else a controller and a timer.
+function abortAfter(ms: number): AbortSignal {
+  if (typeof AbortSignal.timeout === 'function') return AbortSignal.timeout(ms);
+  const controller = new AbortController();
+  setTimeout(() => {
+    controller.abort();
+  }, ms);
+  return controller.signal;
+}
+
 // endPush ends this browser's background push for account: the registration
 // at the server, then the subscription here. force drops the subscription and
 // the record even when the server could not be told, and bounds the request,
@@ -2696,7 +2712,7 @@ export async function endPush(account: number, force = false): Promise<boolean> 
   const push = platform.services.push;
   const record = readPushRegistration();
   if (push === undefined || record === null || record.account !== account) return true;
-  const ended = await endPushRegistration(record.id, force ? AbortSignal.timeout(pushSignOutWait) : undefined);
+  const ended = await endPushRegistration(record.id, force ? abortAfter(pushSignOutWait) : undefined);
   if (!ended.ok && !force) return false;
   try {
     await push.unsubscribe();
@@ -2710,7 +2726,7 @@ export async function endPush(account: number, force = false): Promise<boolean> 
 // forgetPush drops the subscription and the record here, with no request: for
 // a credential that is already gone and took its registrations with it. With
 // an account it leaves another account's record alone.
-async function forgetPush(account?: number): Promise<void> {
+export async function forgetPush(account?: number): Promise<void> {
   const record = readPushRegistration();
   if (record === null || (account !== undefined && record.account !== account)) return;
   try {
