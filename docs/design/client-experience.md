@@ -162,6 +162,8 @@ to include supported system audio. Preview the selection before publishing. Show
 an unmistakable sharing indicator and Stop sharing control; source closure or lost
 permission stops the share and reports why. Keep microphone and stream-audio mute
 independent. OS/browser limitations appear before starting, not as silent failures.
+On the desktop app the choice is on by default where a route exists, with one-click
+"Share without sound", remembered per profile (#1552; [linux-share-audio.md](linux-share-audio.md) §9).
 
 **UX-16 — Watch.** A share becomes the central stage with participant strip and
 optional captions. Expand/fullscreen and stream volume affect only the local view.

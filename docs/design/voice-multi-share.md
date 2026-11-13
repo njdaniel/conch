@@ -247,7 +247,7 @@ The TUI reads v2 and names every sharer in its presence text: "sam is sharing a 
 
 ### 7.3 The voice helper (`conch-voice`)
 
-`conch-voice-api` gains the v2 types and the two participant fields, and asks for `?schema=conch.voice_presence.v2` on its presence stream, so the helper never reads the degraded document. It shows no share text and plays share audio by the existing rules (#906: never its own companion's tracks; never other participants' `ScreenshareAudio` when its companion owns share playback), which hold with several sharers unchanged: with a companion, every watched stream's sound is the companion's to play. One small issue.
+`conch-voice-api` gains the v2 types and the two participant fields, and asks for `?schema=conch.voice_presence.v2` on its presence stream, so the helper never reads the degraded document. It shows no share text and plays share audio by the existing rules (#906: never its own companion's tracks; never other participants' `ScreenshareAudio` when its companion owns share playback), and on the Linux desktop publishes the person's share sound ([linux-share-audio.md](linux-share-audio.md); amended 2026-11-13, #1585, and that note's own issues). The playback rules hold with several sharers unchanged: with a companion, every watched stream's sound is the companion's to play. One small issue.
 
 ### 7.4 Desktop (Electron companion, model B)
 
