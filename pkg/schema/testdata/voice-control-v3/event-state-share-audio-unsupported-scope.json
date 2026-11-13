@@ -1,0 +1,18 @@
+{
+  "schema": "conch.voice_control.v3",
+  "kind": "state",
+  "seq": 7,
+  "phase": "connected",
+  "capture": "on",
+  "playback": "on",
+  "transmitting": false,
+  "muted": false,
+  "deafened": false,
+  "blocked": [],
+  "talk_mode": "push_to_talk",
+  "ptt": "ready",
+  "share_audio": "unavailable",
+  "share_audio_muted": false,
+  "share_audio_problem": "unsupported_scope",
+  "share_audio_sources": 0
+}

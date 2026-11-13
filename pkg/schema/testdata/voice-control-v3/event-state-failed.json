@@ -1,0 +1,20 @@
+{
+  "schema": "conch.voice_control.v3",
+  "kind": "state",
+  "seq": 17,
+  "phase": "failed",
+  "reason": "voice_removed",
+  "capture": "off",
+  "playback": "off",
+  "transmitting": false,
+  "muted": false,
+  "deafened": false,
+  "blocked": [
+    "not_connected"
+  ],
+  "talk_mode": "push_to_talk",
+  "ptt": "ready",
+  "share_audio": "off",
+  "share_audio_muted": false,
+  "share_audio_sources": 0
+}
