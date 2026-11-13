@@ -240,7 +240,10 @@ memory):
   shows a page offering "all users" too, which an administrator could pick, and
   `/allusers` on the command line asks for elevation whatever `allowElevation` says
   (`templates/nsis/multiUserUi.nsh`, `assistedInstaller.nsh`). `build/installer.nsh`
-  therefore makes every install the current user's and the page is never shown.
+  therefore makes every install the current user's, `/allusers` included, and the page
+  is never shown. One gap remains: the uninstaller, started by hand with `/allusers`,
+  asks for elevation before any hook runs, and then still removes only the current
+  user's install.
 - `allowElevation: false` (default `true`, assisted only) and `packElevateHelper: false`
   (default `true`; it exists for electron-updater's per-machine updates): no elevation is
   asked for and no `elevate.exe` is shipped.

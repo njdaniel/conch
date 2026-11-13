@@ -10,7 +10,9 @@
 ;     and /allusers on the command line asks for elevation even when
 ;     allowElevation is false (multiUserUi.nsh, assistedInstaller.nsh). This
 ;     installer never installs for all users: the choice is made here, and the
-;     page is not shown.
+;     page is not shown. One gap no hook can close: the uninstaller, started
+;     by hand with /allusers, asks for elevation before any hook runs (it then
+;     still removes only the current user's install).
 ;   - the conch:// handler (conch://invite?server=<origin>&code=<code>,
 ;     linux-desktop.md section 9.1), as the Linux desktop file's
 ;     MimeType=x-scheme-handler/conch; does. electron-builder's "protocols" is
@@ -26,10 +28,27 @@
   !insertmacro setInstallModePerUser
 !macroend
 
-; The install-mode page, in the installer and the uninstaller alike: skipped,
-; always the current user (multiUserUi.nsh, isForceCurrentInstall).
+; The uninstaller's .onInit, after its initMultiUser (uninstaller.nsh). An
+; uninstaller started by hand with /allusers has already asked for elevation by
+; then, and nothing before this hook can stop that prompt; what runs is still
+; the current user's uninstall, the only kind this installer makes.
+!macro customUnInit
+  StrCpy $hasPerMachineInstallation "0"
+  StrCpy $hasPerUserInstallation "1"
+  !insertmacro setInstallModePerUser
+!macroend
+
+; The install-mode page's pre-function, in the installer and the uninstaller
+; alike (multiUserUi.nsh). The template tests /allusers right after this macro
+; and, before it ever looks at isForceCurrentInstall, elevates and goes
+; per-machine; so the mode is set here and the page left with Abort, before
+; that test runs. A GUI install with /allusers stays the current user's and
+; asks for nothing.
 !macro customInstallMode
-  StrCpy $isForceCurrentInstall "1"
+  StrCpy $hasPerMachineInstallation "0"
+  StrCpy $hasPerUserInstallation "1"
+  !insertmacro setInstallModePerUser
+  Abort
 !macroend
 
 ; After the files and shortcuts (installSection.nsh). An upgrade runs the old

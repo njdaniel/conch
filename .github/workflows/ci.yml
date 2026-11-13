@@ -679,8 +679,14 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $setup = @(Get-ChildItem -LiteralPath desktop/dist -Filter '*-unsigned-preview-setup.exe')
           if ($setup.Count -ne 1) { throw "expected one installer, found $($setup.Count)" }
-          $p = Start-Process -FilePath $setup[0].FullName -ArgumentList '/S' -Wait -PassThru
-          if ($p.ExitCode -ne 0) { throw "the installer exited $($p.ExitCode)" }
+          # /allusers is the path installer.nsh's customInit closes: the
+          # checks below (per-user folder, no HKLM key) prove it held. The
+          # second run is an upgrade over the first: the old uninstaller
+          # removes the conch:// key and customInstall writes it again.
+          foreach ($run in @('install', 'upgrade')) {
+            $p = Start-Process -FilePath $setup[0].FullName -ArgumentList '/S', '/allusers' -Wait -PassThru
+            if ($null -eq $p.ExitCode -or $p.ExitCode -ne 0) { throw "the installer ($run) exited $($p.ExitCode)" }
+          }
 
       # What the install must have left: the app, conch-voice.exe in its
       # resources (the one path main/voice/spawn.ts findHelper runs on
@@ -746,6 +752,7 @@ jobs:
             Set-Content -LiteralPath (Join-Path $data 'settings.json') -Value '{"closeToTray":false}' -NoNewline
             foreach ($f in Get-ChildItem -LiteralPath $data -Recurse -File) { $seeded[$f.FullName] = (Get-FileHash -LiteralPath $f.FullName).Hash }
           }
+          if ($seeded.Count -ne 4) { throw "expected 4 seeded files, seeded $($seeded.Count)" }
           $p = Start-Process -FilePath (Join-Path $dir 'Uninstall Conch.exe') -ArgumentList '/S' -Wait -PassThru
           if ($p.ExitCode -ne 0) { throw "the uninstaller exited $($p.ExitCode)" }
           $uninstall = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall'
