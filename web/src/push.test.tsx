@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as api from './api';
 import { NotificationSettings } from './NotificationSettings';
 import { platform } from './platform';
-import { fromBase64url, push as browserPush, toBase64url } from './platform/browser/push';
+import { fromBase64url, push as browserPush, toBase64url, workerScope } from './platform/browser/push';
 import type { PushService } from './platform/types';
 import { usePush, type PushFailure, type PushState } from './usePush';
 
@@ -164,7 +164,9 @@ describe('the browser’s subscription', () => {
   it('registers the worker in the client’s scope (/app/ in a build) and subscribes with the server’s key, userVisibleOnly', async () => {
     const browser = fakeBrowser();
     const target = await browserPush.subscribe('AQID');
-    expect(browser.serviceWorker.register).toHaveBeenCalledWith(`${import.meta.env.BASE_URL}sw.js`, { scope: import.meta.env.BASE_URL, updateViaCache: 'none' });
+    // The scope is vite.config's base; push.ts writes it out (see there).
+    expect(readFileSync('vite.config.ts', 'utf8')).toContain(`base: '${workerScope}'`);
+    expect(browser.serviceWorker.register).toHaveBeenCalledWith('/app/sw.js', { scope: '/app/', updateViaCache: 'none' });
     expect(browser.pushManager.subscribe).toHaveBeenCalledWith({ userVisibleOnly: true, applicationServerKey: new Uint8Array([1, 2, 3]) });
     expect(target).toEqual({ endpoint: 'https://push.example/new', p256dh: 'BAUG', auth: 'Bwg' });
   });

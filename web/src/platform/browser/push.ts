@@ -6,8 +6,10 @@
 import type { PushService, PushSubscriptionTarget } from '../types';
 
 // The worker is a file of the build, beside index.html: its scope is the
-// client's own, never the whole origin, so it can see no other page.
-const workerScope = import.meta.env.BASE_URL;
+// client's own, never the whole origin, so it can see no other page. It is
+// vite.config's base, written out: this module is also compiled where Vite's
+// import.meta.env is not typed (the desktop's e2e typecheck).
+export const workerScope = '/app/';
 const workerUrl = `${workerScope}sw.js`;
 
 function supported(): boolean {
