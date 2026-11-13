@@ -1,0 +1,8 @@
+{
+  "schema": "conch.voice_control.v3",
+  "kind": "set_share_audio",
+  "id": 8,
+  "capturing": true,
+  "scope": "system_excluding_call",
+  "application_name": "Conch"
+}

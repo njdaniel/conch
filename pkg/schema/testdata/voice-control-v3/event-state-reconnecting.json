@@ -1,0 +1,21 @@
+{
+  "schema": "conch.voice_control.v3",
+  "kind": "state",
+  "seq": 12,
+  "phase": "reconnecting",
+  "reason": "connection_lost",
+  "retry_in_ms": 2000,
+  "capture": "on",
+  "playback": "on",
+  "transmitting": false,
+  "muted": false,
+  "deafened": false,
+  "blocked": [
+    "not_connected"
+  ],
+  "talk_mode": "push_to_talk",
+  "ptt": "ready",
+  "share_audio": "off",
+  "share_audio_muted": false,
+  "share_audio_sources": 0
+}

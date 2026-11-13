@@ -51,6 +51,7 @@ use serde::de::{self, DeserializeOwned, IgnoredAny, MapAccess, SeqAccess, Visito
 use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::control_v2::VOICE_CONTROL_SCHEMA_V2;
+use crate::control_v3::VOICE_CONTROL_SCHEMA_V3;
 use crate::error::Error;
 use crate::types::wire_object;
 
@@ -661,6 +662,20 @@ impl VoiceControlHelloV1 {
         )
     }
 
+    /// The hello of a helper that speaks v1, v2 and v3: written in v1, in the same frozen
+    /// shape, so that an owner of any of the three reads it and picks
+    /// (`docs/design/linux-share-audio.md` §7).
+    pub fn v1_v2_and_v3(helper_version: impl Into<String>) -> Self {
+        Self::offering(
+            &[
+                VOICE_CONTROL_SCHEMA_V1,
+                VOICE_CONTROL_SCHEMA_V2,
+                VOICE_CONTROL_SCHEMA_V3,
+            ],
+            helper_version,
+        )
+    }
+
     fn offering(versions: &[&str], helper_version: impl Into<String>) -> Self {
         Self {
             schema: VOICE_CONTROL_SCHEMA_V1.to_owned(),
@@ -1240,6 +1255,15 @@ impl Head {
     pub(crate) fn command_kind(&self) -> Option<VoiceControlCommandKind> {
         match &self.kind {
             Some(Loose::Text(word)) => VoiceControlCommandKind::from_word(word),
+            _ => None,
+        }
+    }
+
+    /// The kind the line names, as written, when it is a string: for the reader of a
+    /// version whose command kinds are a vocabulary of their own (`control_v3.rs`).
+    pub(crate) fn kind_word(&self) -> Option<&str> {
+        match &self.kind {
+            Some(Loose::Text(word)) => Some(word),
             _ => None,
         }
     }

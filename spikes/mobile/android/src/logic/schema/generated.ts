@@ -2193,6 +2193,309 @@ export const voiceControlProtocolErrorV2 = object<VoiceControlProtocolErrorV2>({
   code: voiceControlErrorCode,
 });
 
+// schema.VoiceControlCommandKindV3
+export type VoiceControlCommandKindV3 =
+  | 'start'
+  | 'set_mute'
+  | 'set_deafen'
+  | 'get_state'
+  | 'leave'
+  | 'set_devices'
+  | 'set_talk_mode'
+  | 'set_share_audio'
+  | 'set_share_audio_mute';
+
+export const voiceControlCommandKindV3 = vocab<VoiceControlCommandKindV3>({
+  start: true,
+  set_mute: true,
+  set_deafen: true,
+  get_state: true,
+  leave: true,
+  set_devices: true,
+  set_talk_mode: true,
+  set_share_audio: true,
+  set_share_audio_mute: true,
+});
+
+// schema.VoiceControlStartV3
+export const voiceControlStartV3Schema = 'conch.voice_control.v3';
+
+export interface VoiceControlStartV3 {
+  schema: typeof voiceControlStartV3Schema;
+  kind: VoiceControlCommandKindV3;
+  id: number;
+  server: string;
+  channel: string;
+  principal_id: number;
+  credential: VoiceControlCredential;
+  muted: boolean;
+  deafened: boolean;
+}
+
+export const voiceControlStartV3 = object<VoiceControlStartV3>({
+  schema: vocab<typeof voiceControlStartV3Schema>({ [voiceControlStartV3Schema]: true }),
+  kind: voiceControlCommandKindV3,
+  id: int,
+  server: str,
+  channel: str,
+  principal_id: int,
+  credential: voiceControlCredential,
+  muted: bool,
+  deafened: bool,
+});
+
+// schema.VoiceControlSetMuteV3
+export const voiceControlSetMuteV3Schema = 'conch.voice_control.v3';
+
+export interface VoiceControlSetMuteV3 {
+  schema: typeof voiceControlSetMuteV3Schema;
+  kind: VoiceControlCommandKindV3;
+  id: number;
+  muted: boolean;
+}
+
+export const voiceControlSetMuteV3 = object<VoiceControlSetMuteV3>({
+  schema: vocab<typeof voiceControlSetMuteV3Schema>({ [voiceControlSetMuteV3Schema]: true }),
+  kind: voiceControlCommandKindV3,
+  id: int,
+  muted: bool,
+});
+
+// schema.VoiceControlSetDeafenV3
+export const voiceControlSetDeafenV3Schema = 'conch.voice_control.v3';
+
+export interface VoiceControlSetDeafenV3 {
+  schema: typeof voiceControlSetDeafenV3Schema;
+  kind: VoiceControlCommandKindV3;
+  id: number;
+  deafened: boolean;
+}
+
+export const voiceControlSetDeafenV3 = object<VoiceControlSetDeafenV3>({
+  schema: vocab<typeof voiceControlSetDeafenV3Schema>({ [voiceControlSetDeafenV3Schema]: true }),
+  kind: voiceControlCommandKindV3,
+  id: int,
+  deafened: bool,
+});
+
+// schema.VoiceControlGetStateV3
+export const voiceControlGetStateV3Schema = 'conch.voice_control.v3';
+
+export interface VoiceControlGetStateV3 {
+  schema: typeof voiceControlGetStateV3Schema;
+  kind: VoiceControlCommandKindV3;
+  id: number;
+}
+
+export const voiceControlGetStateV3 = object<VoiceControlGetStateV3>({
+  schema: vocab<typeof voiceControlGetStateV3Schema>({ [voiceControlGetStateV3Schema]: true }),
+  kind: voiceControlCommandKindV3,
+  id: int,
+});
+
+// schema.VoiceControlLeaveV3
+export const voiceControlLeaveV3Schema = 'conch.voice_control.v3';
+
+export interface VoiceControlLeaveV3 {
+  schema: typeof voiceControlLeaveV3Schema;
+  kind: VoiceControlCommandKindV3;
+  id: number;
+}
+
+export const voiceControlLeaveV3 = object<VoiceControlLeaveV3>({
+  schema: vocab<typeof voiceControlLeaveV3Schema>({ [voiceControlLeaveV3Schema]: true }),
+  kind: voiceControlCommandKindV3,
+  id: int,
+});
+
+// schema.VoiceControlSetDevicesV3
+export const voiceControlSetDevicesV3Schema = 'conch.voice_control.v3';
+
+export interface VoiceControlSetDevicesV3 {
+  schema: typeof voiceControlSetDevicesV3Schema;
+  kind: VoiceControlCommandKindV3;
+  id: number;
+  input?: string;
+  output?: string;
+}
+
+export const voiceControlSetDevicesV3 = object<VoiceControlSetDevicesV3>({
+  schema: vocab<typeof voiceControlSetDevicesV3Schema>({ [voiceControlSetDevicesV3Schema]: true }),
+  kind: voiceControlCommandKindV3,
+  id: int,
+  input: optional(str),
+  output: optional(str),
+});
+
+// schema.VoiceControlSetTalkModeV3
+export const voiceControlSetTalkModeV3Schema = 'conch.voice_control.v3';
+
+export interface VoiceControlSetTalkModeV3 {
+  schema: typeof voiceControlSetTalkModeV3Schema;
+  kind: VoiceControlCommandKindV3;
+  id: number;
+  talk_mode: VoiceControlTalkMode;
+}
+
+export const voiceControlSetTalkModeV3 = object<VoiceControlSetTalkModeV3>({
+  schema: vocab<typeof voiceControlSetTalkModeV3Schema>({ [voiceControlSetTalkModeV3Schema]: true }),
+  kind: voiceControlCommandKindV3,
+  id: int,
+  talk_mode: voiceControlTalkMode,
+});
+
+// schema.VoiceControlSetShareAudioV3
+export const voiceControlSetShareAudioV3Schema = 'conch.voice_control.v3';
+
+export interface VoiceControlSetShareAudioV3 {
+  schema: typeof voiceControlSetShareAudioV3Schema;
+  kind: VoiceControlCommandKindV3;
+  id: number;
+  capturing: boolean;
+  scope?: VoiceShareAudioScope;
+  application_name?: string;
+}
+
+export const voiceControlSetShareAudioV3 = object<VoiceControlSetShareAudioV3>({
+  schema: vocab<typeof voiceControlSetShareAudioV3Schema>({ [voiceControlSetShareAudioV3Schema]: true }),
+  kind: voiceControlCommandKindV3,
+  id: int,
+  capturing: bool,
+  scope: optional(voiceShareAudioScope),
+  application_name: optional(str),
+});
+
+// schema.VoiceControlSetShareAudioMuteV3
+export const voiceControlSetShareAudioMuteV3Schema = 'conch.voice_control.v3';
+
+export interface VoiceControlSetShareAudioMuteV3 {
+  schema: typeof voiceControlSetShareAudioMuteV3Schema;
+  kind: VoiceControlCommandKindV3;
+  id: number;
+  muted: boolean;
+}
+
+export const voiceControlSetShareAudioMuteV3 = object<VoiceControlSetShareAudioMuteV3>({
+  schema: vocab<typeof voiceControlSetShareAudioMuteV3Schema>({ [voiceControlSetShareAudioMuteV3Schema]: true }),
+  kind: voiceControlCommandKindV3,
+  id: int,
+  muted: bool,
+});
+
+// schema.VoiceControlAckV3
+export const voiceControlAckV3Schema = 'conch.voice_control.v3';
+
+export interface VoiceControlAckV3 {
+  schema: typeof voiceControlAckV3Schema;
+  kind: VoiceControlEventKind;
+  seq: number;
+  id: number;
+  ok: boolean;
+  error?: VoiceControlErrorCode;
+}
+
+export const voiceControlAckV3 = object<VoiceControlAckV3>({
+  schema: vocab<typeof voiceControlAckV3Schema>({ [voiceControlAckV3Schema]: true }),
+  kind: voiceControlEventKind,
+  seq: int,
+  id: int,
+  ok: bool,
+  error: optional(voiceControlErrorCode),
+});
+
+// schema.VoiceControlShareAudio
+export type VoiceControlShareAudio = 'off' | 'on' | 'unavailable';
+
+export const voiceControlShareAudio = vocab<VoiceControlShareAudio>({
+  off: true,
+  on: true,
+  unavailable: true,
+});
+
+// schema.VoiceControlShareAudioProblem
+export type VoiceControlShareAudioProblem =
+  | 'no_pipewire'
+  | 'no_process_tree'
+  | 'publish_refused'
+  | 'unsupported_scope'
+  | 'unsupported'
+  | 'not_connected'
+  | 'no_sources';
+
+export const voiceControlShareAudioProblem = vocab<VoiceControlShareAudioProblem>({
+  no_pipewire: true,
+  no_process_tree: true,
+  publish_refused: true,
+  unsupported_scope: true,
+  unsupported: true,
+  not_connected: true,
+  no_sources: true,
+});
+
+// schema.VoiceControlStateV3
+export const voiceControlStateV3Schema = 'conch.voice_control.v3';
+
+export interface VoiceControlStateV3 {
+  schema: typeof voiceControlStateV3Schema;
+  kind: VoiceControlEventKind;
+  seq: number;
+  phase: VoiceControlPhase;
+  reason?: VoiceControlReason;
+  retry_in_ms?: number;
+  capture: VoiceControlCapture;
+  playback: VoiceControlPlayback;
+  transmitting: boolean;
+  muted: boolean;
+  deafened: boolean;
+  blocked: VoiceControlBlock[];
+  talk_mode: VoiceControlTalkMode;
+  ptt: VoiceControlPTT;
+  ptt_problem?: VoiceControlPTTProblem;
+  share_audio: VoiceControlShareAudio;
+  share_audio_muted: boolean;
+  share_audio_problem?: VoiceControlShareAudioProblem;
+  share_audio_sources: number;
+}
+
+export const voiceControlStateV3 = object<VoiceControlStateV3>({
+  schema: vocab<typeof voiceControlStateV3Schema>({ [voiceControlStateV3Schema]: true }),
+  kind: voiceControlEventKind,
+  seq: int,
+  phase: voiceControlPhase,
+  reason: optional(voiceControlReason),
+  retry_in_ms: optional(int),
+  capture: voiceControlCapture,
+  playback: voiceControlPlayback,
+  transmitting: bool,
+  muted: bool,
+  deafened: bool,
+  blocked: array(voiceControlBlock),
+  talk_mode: voiceControlTalkMode,
+  ptt: voiceControlPTT,
+  ptt_problem: optional(voiceControlPTTProblem),
+  share_audio: voiceControlShareAudio,
+  share_audio_muted: bool,
+  share_audio_problem: optional(voiceControlShareAudioProblem),
+  share_audio_sources: int,
+});
+
+// schema.VoiceControlProtocolErrorV3
+export const voiceControlProtocolErrorV3Schema = 'conch.voice_control.v3';
+
+export interface VoiceControlProtocolErrorV3 {
+  schema: typeof voiceControlProtocolErrorV3Schema;
+  kind: VoiceControlEventKind;
+  seq: number;
+  code: VoiceControlErrorCode;
+}
+
+export const voiceControlProtocolErrorV3 = object<VoiceControlProtocolErrorV3>({
+  schema: vocab<typeof voiceControlProtocolErrorV3Schema>({ [voiceControlProtocolErrorV3Schema]: true }),
+  kind: voiceControlEventKind,
+  seq: int,
+  code: voiceControlErrorCode,
+});
+
 // schema.VoiceControlPipeKind
 export type VoiceControlPipeKind = 'attached';
 

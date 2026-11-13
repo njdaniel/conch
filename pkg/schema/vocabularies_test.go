@@ -219,6 +219,11 @@ var validators = map[string]func(string) bool{
 	"VoiceCameraEndReason":     validOf[VoiceCameraEndReason](),
 	"VoiceTransmitState":       validOf[VoiceTransmitState](),
 
+	// Version 3 of the voice-helper control protocol (issue #1851).
+	"VoiceControlCommandKindV3":     validOf[VoiceControlCommandKindV3](),
+	"VoiceControlShareAudio":        validOf[VoiceControlShareAudio](),
+	"VoiceControlShareAudioProblem": validOf[VoiceControlShareAudioProblem](),
+
 	// Roles and permissions (ADR-014, issue #1012).
 	"Permission":         validOf[Permission](),
 	"PermissionRole":     validOf[PermissionRole](),

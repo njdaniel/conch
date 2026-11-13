@@ -1,0 +1,1293 @@
+{
+  "description": "Conformance cases for the two v3 readers: direction command is the helper reading the owner's lines (ParseVoiceControlCommandV3), direction event is the owner reading the helper's (ParseVoiceControlEventV3). The forms and results are those of voice-control/cases.json; a hello never comes out of the v3 event reader (the hello is v1, read before the version is chosen), so there is no offers field. The framing rules are v1's and v2's and are not repeated case by case here beyond one of each code; what these cases pin is what v3 adds: set_share_audio and set_share_audio_mute, the state's share_audio, share_audio_muted, share_audio_problem and share_audio_sources and the rules that hold them together, that v2's rules stand unchanged beside them, and that the v3 readers take a line of no other version. What a string may hold is in cases-strings.json.",
+  "cases": [
+    {
+      "name": "start",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v3\",\"kind\":\"start\",\"id\":1,\"server\":\"https://conch.example.org\",\"channel\":\"general\",\"principal_id\":7,\"credential\":\"stored\",\"muted\":false,\"deafened\":false}",
+      "want": {
+        "result": "accept",
+        "kind": "start"
+      }
+    },
+    {
+      "name": "start with capturing in it: a share's sound is not started with the session, and the field is ignored",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v3\",\"kind\":\"start\",\"id\":1,\"server\":\"https://conch.example.org\",\"channel\":\"general\",\"principal_id\":7,\"credential\":\"stored\",\"muted\":false,\"deafened\":false,\"capturing\":true,\"scope\":\"system_excluding_call\",\"application_name\":\"Conch\"}",
+      "want": {
+        "result": "accept",
+        "kind": "start"
+      }
+    },
+    {
+      "name": "start with a field it does not declare, named token: ignored, and never repeated",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v3\",\"kind\":\"start\",\"id\":1,\"server\":\"https://conch.example.org\",\"channel\":\"general\",\"principal_id\":7,\"credential\":\"stored\",\"muted\":false,\"deafened\":false,\"token\":\"conch_FAKE_login_token_do_not_print\"}",
+      "want": {
+        "result": "accept",
+        "kind": "start"
+      }
+    },
+    {
+      "name": "set_mute",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v3\",\"kind\":\"set_mute\",\"id\":7,\"muted\":true}",
+      "want": {
+        "result": "accept",
+        "kind": "set_mute"
+      }
+    },
+    {
+      "name": "set_deafen",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v3\",\"kind\":\"set_deafen\",\"id\":7,\"deafened\":false}",
+      "want": {
+        "result": "accept",
+        "kind": "set_deafen"
+      }
+    },
+    {
+      "name": "get_state",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v3\",\"kind\":\"get_state\",\"id\":7}",
+      "want": {
+        "result": "accept",
+        "kind": "get_state"
+      }
+    },
+    {
+      "name": "leave",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v3\",\"kind\":\"leave\",\"id\":7}",
+      "want": {
+        "result": "accept",
+        "kind": "leave"
+      }
+    },
+    {
+      "name": "set_devices, both sides",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v3\",\"kind\":\"set_devices\",\"id\":7,\"input\":\"speech_out\",\"output\":\"alsa_output.usb-Generic_USB_Audio-00.analog-stereo\"}",
+      "want": {
+        "result": "accept",
+        "kind": "set_devices"
+      }
+    },
+    {
+      "name": "set_devices, the speakers back to the default",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v3\",\"kind\":\"set_devices\",\"id\":7,\"output\":\"default\"}",
+      "want": {
+        "result": "accept",
+        "kind": "set_devices"
+      }
+    },
+    {
+      "name": "set_talk_mode open",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v3\",\"kind\":\"set_talk_mode\",\"id\":7,\"talk_mode\":\"open\"}",
+      "want": {
+        "result": "accept",
+        "kind": "set_talk_mode"
+      }
+    },
+    {
+      "name": "set_share_audio: everything the system plays but the call",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v3\",\"kind\":\"set_share_audio\",\"id\":7,\"capturing\":true,\"scope\":\"system_excluding_call\",\"application_name\":\"Conch\"}",
+      "want": {
+        "result": "accept",
+        "kind": "set_share_audio"
+      }
+    },
+    {
+      "name": "set_share_audio with the application scope: a valid command, which a helper that cannot capture one application refuses into the state, not here",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v3\",\"kind\":\"set_share_audio\",\"id\":7,\"capturing\":true,\"scope\":\"application\",\"application_name\":\"Conch\"}",
+      "want": {
+        "result": "accept",
+        "kind": "set_share_audio"
+      }
+    },
+    {
+      "name": "set_share_audio to stop: no scope and no name",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v3\",\"kind\":\"set_share_audio\",\"id\":7,\"capturing\":false}",
+      "want": {
+        "result": "accept",
+        "kind": "set_share_audio"
+      }
+    },
+    {
+      "name": "set_share_audio with the longest application name",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v3\",\"kind\":\"set_share_audio\",\"id\":7,\"capturing\":true,\"scope\":\"system_excluding_call\",\"application_name\":\"nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn\"}",
+      "want": {
+        "result": "accept",
+        "kind": "set_share_audio"
+      }
+    },
+    {
+      "name": "set_share_audio with a one-byte application name",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v3\",\"kind\":\"set_share_audio\",\"id\":7,\"capturing\":true,\"scope\":\"system_excluding_call\",\"application_name\":\"c\"}",
+      "want": {
+        "result": "accept",
+        "kind": "set_share_audio"
+      }
+    },
+    {
+      "name": "set_share_audio with spaces and punctuation in the name: all of printable ASCII is allowed",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v3\",\"kind\":\"set_share_audio\",\"id\":7,\"capturing\":true,\"scope\":\"system_excluding_call\",\"application_name\":\"Conch (beta) ~ dev/2 #1\"}",
+      "want": {
+        "result": "accept",
+        "kind": "set_share_audio"
+      }
+    },
+    {
+      "name": "set_share_audio with a quotation mark and a backslash in the name: unlike a device name it is never written into a file",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v3\",\"kind\":\"set_share_audio\",\"id\":7,\"capturing\":true,\"scope\":\"system_excluding_call\",\"application_name\":\"my \\\"app\\\" a\\\\b\"}",
+      "want": {
+        "result": "accept",
+        "kind": "set_share_audio"
+      }
+    },
+    {
+      "name": "set_share_audio with a field it does not declare: ignored",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v3\",\"kind\":\"set_share_audio\",\"id\":7,\"capturing\":true,\"scope\":\"system_excluding_call\",\"application_name\":\"Conch\",\"gain_db\":-3}",
+      "want": {
+        "result": "accept",
+        "kind": "set_share_audio"
+      }
+    },
+    {
+      "name": "set_share_audio_mute",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v3\",\"kind\":\"set_share_audio_mute\",\"id\":7,\"muted\":true}",
+      "want": {
+        "result": "accept",
+        "kind": "set_share_audio_mute"
+      }
+    },
+    {
+      "name": "set_share_audio_mute, to unmute",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v3\",\"kind\":\"set_share_audio_mute\",\"id\":7,\"muted\":false}",
+      "want": {
+        "result": "accept",
+        "kind": "set_share_audio_mute"
+      }
+    },
+    {
+      "name": "exactly the longest line",
+      "direction": "command",
+      "line_file": "lines/command-at-limit.txt",
+      "want": {
+        "result": "accept",
+        "kind": "get_state"
+      }
+    },
+    {
+      "name": "one byte longer than the longest line",
+      "direction": "command",
+      "line_file": "lines/command-too-long.txt",
+      "want": {
+        "result": "refuse",
+        "code": "too_long"
+      }
+    },
+    {
+      "name": "not JSON: a standalone line command",
+      "direction": "command",
+      "line": "down",
+      "want": {
+        "result": "refuse",
+        "code": "malformed"
+      }
+    },
+    {
+      "name": "a key given twice",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v3\",\"kind\":\"set_share_audio\",\"id\":7,\"capturing\":true,\"scope\":\"application\",\"scope\":\"system_excluding_call\",\"application_name\":\"Conch\"}",
+      "want": {
+        "result": "refuse",
+        "code": "malformed"
+      }
+    },
+    {
+      "name": "not valid UTF-8",
+      "direction": "command",
+      "line_hex": "7b22736368656d61223a22636f6e63682e766f6963655f636f6e74726f6c2e7633222c226b696e64223a227365745f73686172655f617564696f222c226964223a372c22636170747572696e67223a747275652c2273636f7065223a2273797374656d5f6578636c7564696e675f63616c6c222c226170706c69636174696f6e5f6e616d65223a22c328227d",
+      "want": {
+        "result": "refuse",
+        "code": "malformed"
+      }
+    },
+    {
+      "name": "a v2 line: the version is fixed when the owner writes its start",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v2\",\"kind\":\"set_mute\",\"id\":7,\"muted\":true}",
+      "want": {
+        "result": "refuse",
+        "code": "unknown_schema"
+      }
+    },
+    {
+      "name": "a v1 line",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v1\",\"kind\":\"set_mute\",\"id\":7,\"muted\":true}",
+      "want": {
+        "result": "refuse",
+        "code": "unknown_schema"
+      }
+    },
+    {
+      "name": "a later version",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v4\",\"kind\":\"set_mute\",\"id\":7,\"muted\":true}",
+      "want": {
+        "result": "refuse",
+        "code": "unknown_schema"
+      }
+    },
+    {
+      "name": "no schema",
+      "direction": "command",
+      "line": "{\"kind\":\"set_mute\",\"id\":7,\"muted\":true}",
+      "want": {
+        "result": "refuse",
+        "code": "unknown_schema"
+      }
+    },
+    {
+      "name": "no id",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v3\",\"kind\":\"set_share_audio\",\"capturing\":true,\"scope\":\"system_excluding_call\",\"application_name\":\"Conch\"}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid"
+      }
+    },
+    {
+      "name": "there is still no command to press or release the talk key",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v3\",\"kind\":\"press\",\"id\":7}",
+      "want": {
+        "result": "refuse",
+        "code": "unknown_kind",
+        "id": 7
+      }
+    },
+    {
+      "name": "no command opens the gate for the share's sound either",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v3\",\"kind\":\"open_gate\",\"id\":7}",
+      "want": {
+        "result": "refuse",
+        "code": "unknown_kind",
+        "id": 7
+      }
+    },
+    {
+      "name": "a share-audio kind of no version",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v3\",\"kind\":\"set_share_audio_volume\",\"id\":7,\"level\":3}",
+      "want": {
+        "result": "refuse",
+        "code": "unknown_kind",
+        "id": 7
+      }
+    },
+    {
+      "name": "a kind in another case: kinds are exact",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v3\",\"kind\":\"SET_SHARE_AUDIO\",\"id\":7,\"capturing\":false}",
+      "want": {
+        "result": "refuse",
+        "code": "unknown_kind",
+        "id": 7
+      }
+    },
+    {
+      "name": "set_share_audio without capturing",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v3\",\"kind\":\"set_share_audio\",\"id\":7,\"scope\":\"system_excluding_call\",\"application_name\":\"Conch\"}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid",
+        "id": 7
+      }
+    },
+    {
+      "name": "set_share_audio with capturing as a string",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v3\",\"kind\":\"set_share_audio\",\"id\":7,\"capturing\":\"yes\",\"scope\":\"system_excluding_call\",\"application_name\":\"Conch\"}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid",
+        "id": 7
+      }
+    },
+    {
+      "name": "set_share_audio with capturing null",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v3\",\"kind\":\"set_share_audio\",\"id\":7,\"capturing\":null,\"scope\":\"system_excluding_call\",\"application_name\":\"Conch\"}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid",
+        "id": 7
+      }
+    },
+    {
+      "name": "set_share_audio capturing without a scope",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v3\",\"kind\":\"set_share_audio\",\"id\":7,\"capturing\":true,\"application_name\":\"Conch\"}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid",
+        "id": 7
+      }
+    },
+    {
+      "name": "set_share_audio capturing without an application name: the helper could not leave the owner's own sound out",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v3\",\"kind\":\"set_share_audio\",\"id\":7,\"capturing\":true,\"scope\":\"system_excluding_call\"}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid",
+        "id": 7
+      }
+    },
+    {
+      "name": "set_share_audio capturing with neither",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v3\",\"kind\":\"set_share_audio\",\"id\":7,\"capturing\":true}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid",
+        "id": 7
+      }
+    },
+    {
+      "name": "set_share_audio with a scope of no version",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v3\",\"kind\":\"set_share_audio\",\"id\":7,\"capturing\":true,\"scope\":\"system\",\"application_name\":\"Conch\"}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid",
+        "id": 7
+      }
+    },
+    {
+      "name": "set_share_audio with a scope in another case: the vocabulary is exact",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v3\",\"kind\":\"set_share_audio\",\"id\":7,\"capturing\":true,\"scope\":\"System_Excluding_Call\",\"application_name\":\"Conch\"}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid",
+        "id": 7
+      }
+    },
+    {
+      "name": "set_share_audio with a scope that is not a string",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v3\",\"kind\":\"set_share_audio\",\"id\":7,\"capturing\":true,\"scope\":2,\"application_name\":\"Conch\"}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid",
+        "id": 7
+      }
+    },
+    {
+      "name": "set_share_audio with a scope that is null",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v3\",\"kind\":\"set_share_audio\",\"id\":7,\"capturing\":true,\"application_name\":\"Conch\",\"scope\":null}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid",
+        "id": 7
+      }
+    },
+    {
+      "name": "set_share_audio with the scope under another name: field names are exact",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v3\",\"kind\":\"set_share_audio\",\"id\":7,\"capturing\":true,\"application_name\":\"Conch\",\"audio_scope\":\"system_excluding_call\"}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid",
+        "id": 7
+      }
+    },
+    {
+      "name": "set_share_audio with an application name one byte too long",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v3\",\"kind\":\"set_share_audio\",\"id\":7,\"capturing\":true,\"scope\":\"system_excluding_call\",\"application_name\":\"nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn\"}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid",
+        "id": 7
+      }
+    },
+    {
+      "name": "set_share_audio with an escape sequence in the name",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v3\",\"kind\":\"set_share_audio\",\"id\":7,\"capturing\":true,\"scope\":\"system_excluding_call\",\"application_name\":\"\\u001b[2JConch\"}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid",
+        "id": 7
+      }
+    },
+    {
+      "name": "set_share_audio with a line feed in the name",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v3\",\"kind\":\"set_share_audio\",\"id\":7,\"capturing\":true,\"scope\":\"system_excluding_call\",\"application_name\":\"two\\nlines\"}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid",
+        "id": 7
+      }
+    },
+    {
+      "name": "set_share_audio with a tab in the name",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v3\",\"kind\":\"set_share_audio\",\"id\":7,\"capturing\":true,\"scope\":\"system_excluding_call\",\"application_name\":\"Conch\\tDesktop\"}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid",
+        "id": 7
+      }
+    },
+    {
+      "name": "set_share_audio with the delete character in the name: not printable",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v3\",\"kind\":\"set_share_audio\",\"id\":7,\"capturing\":true,\"scope\":\"system_excluding_call\",\"application_name\":\"Conch\\u007f\"}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid",
+        "id": 7
+      }
+    },
+    {
+      "name": "set_share_audio with a letter outside ASCII in the name",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v3\",\"kind\":\"set_share_audio\",\"id\":7,\"capturing\":true,\"scope\":\"system_excluding_call\",\"application_name\":\"Cönch\"}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid",
+        "id": 7
+      }
+    },
+    {
+      "name": "set_share_audio with a name in another script",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v3\",\"kind\":\"set_share_audio\",\"id\":7,\"capturing\":true,\"scope\":\"system_excluding_call\",\"application_name\":\"раковина\"}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid",
+        "id": 7
+      }
+    },
+    {
+      "name": "set_share_audio with a name that is not a string",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v3\",\"kind\":\"set_share_audio\",\"id\":7,\"capturing\":true,\"scope\":\"system_excluding_call\",\"application_name\":7}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid",
+        "id": 7
+      }
+    },
+    {
+      "name": "set_share_audio with a name that is null",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v3\",\"kind\":\"set_share_audio\",\"id\":7,\"capturing\":true,\"scope\":\"system_excluding_call\",\"application_name\":null}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid",
+        "id": 7
+      }
+    },
+    {
+      "name": "set_share_audio to stop with a scope: a stop names no scope, so that one left over is never read as a consent",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v3\",\"kind\":\"set_share_audio\",\"id\":7,\"capturing\":false,\"scope\":\"system_excluding_call\"}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid",
+        "id": 7
+      }
+    },
+    {
+      "name": "set_share_audio to stop with an application name",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v3\",\"kind\":\"set_share_audio\",\"id\":7,\"capturing\":false,\"application_name\":\"Conch\"}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid",
+        "id": 7
+      }
+    },
+    {
+      "name": "set_share_audio to stop with both",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v3\",\"kind\":\"set_share_audio\",\"id\":7,\"capturing\":false,\"scope\":\"system_excluding_call\",\"application_name\":\"Conch\"}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid",
+        "id": 7
+      }
+    },
+    {
+      "name": "set_share_audio to stop with a scope of no version: still a scope",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v3\",\"kind\":\"set_share_audio\",\"id\":7,\"capturing\":false,\"scope\":\"system\"}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid",
+        "id": 7
+      }
+    },
+    {
+      "name": "set_share_audio_mute without muted",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v3\",\"kind\":\"set_share_audio_mute\",\"id\":7}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid",
+        "id": 7
+      }
+    },
+    {
+      "name": "set_share_audio_mute with muted as a string",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v3\",\"kind\":\"set_share_audio_mute\",\"id\":7,\"muted\":\"yes\"}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid",
+        "id": 7
+      }
+    },
+    {
+      "name": "set_share_audio_mute with the field under set_share_audio's name: field names are exact",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v3\",\"kind\":\"set_share_audio_mute\",\"id\":7,\"capturing\":false}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid",
+        "id": 7
+      }
+    },
+    {
+      "name": "set_devices naming neither side",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v3\",\"kind\":\"set_devices\",\"id\":7}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid",
+        "id": 7
+      }
+    },
+    {
+      "name": "set_devices with a quotation mark in the name: the device rule is v2's",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v3\",\"kind\":\"set_devices\",\"id\":7,\"input\":\"my \\\"mic\\\"\"}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid",
+        "id": 7
+      }
+    },
+    {
+      "name": "set_talk_mode with a mode of no version: always on is not a mode",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v3\",\"kind\":\"set_talk_mode\",\"id\":7,\"talk_mode\":\"always_on\"}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid",
+        "id": 7
+      }
+    },
+    {
+      "name": "set_mute with muted as a string",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v3\",\"kind\":\"set_mute\",\"id\":7,\"muted\":\"yes\"}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid",
+        "id": 7
+      }
+    },
+    {
+      "name": "start without deafened",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v3\",\"kind\":\"start\",\"id\":1,\"server\":\"https://conch.example.org\",\"channel\":\"general\",\"principal_id\":7,\"credential\":\"stored\",\"muted\":false}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid",
+        "id": 1
+      }
+    },
+    {
+      "name": "start with a trailing slash",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v3\",\"kind\":\"start\",\"id\":1,\"server\":\"https://conch.example.org/\",\"channel\":\"general\",\"principal_id\":7,\"credential\":\"stored\",\"muted\":false,\"deafened\":false}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid",
+        "id": 1
+      }
+    },
+    {
+      "name": "ack",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v3\",\"kind\":\"ack\",\"seq\":3,\"id\":1,\"ok\":true}",
+      "want": {
+        "result": "accept",
+        "kind": "ack"
+      }
+    },
+    {
+      "name": "ack refusing with stopping",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v3\",\"kind\":\"ack\",\"seq\":9,\"id\":6,\"ok\":false,\"error\":\"stopping\"}",
+      "want": {
+        "result": "accept",
+        "kind": "ack"
+      }
+    },
+    {
+      "name": "ack refusing a set_share_audio that breaks its shape",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v3\",\"kind\":\"ack\",\"seq\":9,\"id\":6,\"ok\":false,\"error\":\"invalid\"}",
+      "want": {
+        "result": "accept",
+        "kind": "ack"
+      }
+    },
+    {
+      "name": "protocol_error",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v3\",\"kind\":\"protocol_error\",\"seq\":8,\"code\":\"unknown_schema\"}",
+      "want": {
+        "result": "accept",
+        "kind": "protocol_error"
+      }
+    },
+    {
+      "name": "state with no share's sound asked for: v2's fields and the four of v3",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v3\",\"kind\":\"state\",\"seq\":5,\"phase\":\"connected\",\"capture\":\"on\",\"playback\":\"on\",\"transmitting\":false,\"muted\":false,\"deafened\":false,\"blocked\":[],\"talk_mode\":\"push_to_talk\",\"ptt\":\"ready\",\"share_audio\":\"off\",\"share_audio_muted\":false,\"share_audio_sources\":0}",
+      "want": {
+        "result": "accept",
+        "kind": "state"
+      }
+    },
+    {
+      "name": "share audio on, three applications playing",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v3\",\"kind\":\"state\",\"seq\":7,\"phase\":\"connected\",\"capture\":\"on\",\"playback\":\"on\",\"transmitting\":false,\"muted\":false,\"deafened\":false,\"blocked\":[],\"talk_mode\":\"push_to_talk\",\"ptt\":\"ready\",\"share_audio\":\"on\",\"share_audio_muted\":false,\"share_audio_sources\":3}",
+      "want": {
+        "result": "accept",
+        "kind": "state"
+      }
+    },
+    {
+      "name": "share audio on and nothing playing: no_sources is a note, not a failure",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v3\",\"kind\":\"state\",\"seq\":8,\"phase\":\"connected\",\"capture\":\"on\",\"playback\":\"on\",\"transmitting\":false,\"muted\":false,\"deafened\":false,\"blocked\":[],\"talk_mode\":\"push_to_talk\",\"ptt\":\"ready\",\"share_audio\":\"on\",\"share_audio_muted\":false,\"share_audio_problem\":\"no_sources\",\"share_audio_sources\":0}",
+      "want": {
+        "result": "accept",
+        "kind": "state"
+      }
+    },
+    {
+      "name": "share audio on with the most sources a state may count",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v3\",\"kind\":\"state\",\"seq\":8,\"phase\":\"connected\",\"capture\":\"on\",\"playback\":\"on\",\"transmitting\":false,\"muted\":false,\"deafened\":false,\"blocked\":[],\"talk_mode\":\"push_to_talk\",\"ptt\":\"ready\",\"share_audio\":\"on\",\"share_audio_muted\":false,\"share_audio_sources\":1024}",
+      "want": {
+        "result": "accept",
+        "kind": "state"
+      }
+    },
+    {
+      "name": "share audio on and muted: the track stays published",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v3\",\"kind\":\"state\",\"seq\":9,\"phase\":\"connected\",\"capture\":\"on\",\"playback\":\"on\",\"transmitting\":false,\"muted\":false,\"deafened\":false,\"blocked\":[],\"talk_mode\":\"push_to_talk\",\"ptt\":\"ready\",\"share_audio\":\"on\",\"share_audio_muted\":true,\"share_audio_sources\":2}",
+      "want": {
+        "result": "accept",
+        "kind": "state"
+      }
+    },
+    {
+      "name": "share audio unavailable: the application scope on a platform that cannot capture one application",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v3\",\"kind\":\"state\",\"seq\":7,\"phase\":\"connected\",\"capture\":\"on\",\"playback\":\"on\",\"transmitting\":false,\"muted\":false,\"deafened\":false,\"blocked\":[],\"talk_mode\":\"push_to_talk\",\"ptt\":\"ready\",\"share_audio\":\"unavailable\",\"share_audio_muted\":false,\"share_audio_problem\":\"unsupported_scope\",\"share_audio_sources\":0}",
+      "want": {
+        "result": "accept",
+        "kind": "state"
+      }
+    },
+    {
+      "name": "share audio unavailable: a session with no companion",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v3\",\"kind\":\"state\",\"seq\":7,\"phase\":\"connected\",\"capture\":\"on\",\"playback\":\"on\",\"transmitting\":false,\"muted\":false,\"deafened\":false,\"blocked\":[],\"talk_mode\":\"push_to_talk\",\"ptt\":\"ready\",\"share_audio\":\"unavailable\",\"share_audio_muted\":false,\"share_audio_problem\":\"unsupported\",\"share_audio_sources\":0}",
+      "want": {
+        "result": "accept",
+        "kind": "state"
+      }
+    },
+    {
+      "name": "share audio unavailable: the sound system is not reachable",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v3\",\"kind\":\"state\",\"seq\":7,\"phase\":\"connected\",\"capture\":\"on\",\"playback\":\"on\",\"transmitting\":false,\"muted\":false,\"deafened\":false,\"blocked\":[],\"talk_mode\":\"push_to_talk\",\"ptt\":\"ready\",\"share_audio\":\"unavailable\",\"share_audio_muted\":false,\"share_audio_problem\":\"no_pipewire\",\"share_audio_sources\":0}",
+      "want": {
+        "result": "accept",
+        "kind": "state"
+      }
+    },
+    {
+      "name": "share audio unavailable: the helper could not tell which streams are the call's own",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v3\",\"kind\":\"state\",\"seq\":7,\"phase\":\"connected\",\"capture\":\"on\",\"playback\":\"on\",\"transmitting\":false,\"muted\":false,\"deafened\":false,\"blocked\":[],\"talk_mode\":\"push_to_talk\",\"ptt\":\"ready\",\"share_audio\":\"unavailable\",\"share_audio_muted\":false,\"share_audio_problem\":\"no_process_tree\",\"share_audio_sources\":0}",
+      "want": {
+        "result": "accept",
+        "kind": "state"
+      }
+    },
+    {
+      "name": "share audio unavailable: the publish was refused",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v3\",\"kind\":\"state\",\"seq\":7,\"phase\":\"connected\",\"capture\":\"on\",\"playback\":\"on\",\"transmitting\":false,\"muted\":false,\"deafened\":false,\"blocked\":[],\"talk_mode\":\"push_to_talk\",\"ptt\":\"ready\",\"share_audio\":\"unavailable\",\"share_audio_muted\":false,\"share_audio_problem\":\"publish_refused\",\"share_audio_sources\":0}",
+      "want": {
+        "result": "accept",
+        "kind": "state"
+      }
+    },
+    {
+      "name": "share audio unavailable: asked for while connecting",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v3\",\"kind\":\"state\",\"seq\":4,\"phase\":\"connecting\",\"capture\":\"off\",\"playback\":\"on\",\"transmitting\":false,\"muted\":false,\"deafened\":false,\"blocked\":[\"not_connected\",\"no_publish_grant\",\"no_microphone\"],\"talk_mode\":\"push_to_talk\",\"ptt\":\"ready\",\"share_audio\":\"unavailable\",\"share_audio_muted\":false,\"share_audio_problem\":\"not_connected\",\"share_audio_sources\":0}",
+      "want": {
+        "result": "accept",
+        "kind": "state"
+      }
+    },
+    {
+      "name": "share audio unavailable and muted: the mute is kept for when there is a track",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v3\",\"kind\":\"state\",\"seq\":7,\"phase\":\"connected\",\"capture\":\"on\",\"playback\":\"on\",\"transmitting\":false,\"muted\":false,\"deafened\":false,\"blocked\":[],\"talk_mode\":\"push_to_talk\",\"ptt\":\"ready\",\"share_audio\":\"unavailable\",\"share_audio_muted\":true,\"share_audio_problem\":\"publish_refused\",\"share_audio_sources\":0}",
+      "want": {
+        "result": "accept",
+        "kind": "state"
+      }
+    },
+    {
+      "name": "transmitting while the share's sound is on: the two do not depend on each other",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v3\",\"kind\":\"state\",\"seq\":10,\"phase\":\"connected\",\"capture\":\"on\",\"playback\":\"on\",\"transmitting\":true,\"muted\":false,\"deafened\":false,\"blocked\":[],\"talk_mode\":\"push_to_talk\",\"ptt\":\"ready\",\"share_audio\":\"on\",\"share_audio_muted\":false,\"share_audio_sources\":1}",
+      "want": {
+        "result": "accept",
+        "kind": "state"
+      }
+    },
+    {
+      "name": "share audio on while the microphone is muted: set_mute does not touch it",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v3\",\"kind\":\"state\",\"seq\":10,\"phase\":\"connected\",\"capture\":\"on\",\"playback\":\"on\",\"transmitting\":false,\"muted\":true,\"deafened\":false,\"blocked\":[\"muted\"],\"talk_mode\":\"push_to_talk\",\"ptt\":\"ready\",\"share_audio\":\"on\",\"share_audio_muted\":false,\"share_audio_sources\":2}",
+      "want": {
+        "result": "accept",
+        "kind": "state"
+      }
+    },
+    {
+      "name": "share audio on while deafened",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v3\",\"kind\":\"state\",\"seq\":10,\"phase\":\"connected\",\"capture\":\"on\",\"playback\":\"on\",\"transmitting\":false,\"muted\":false,\"deafened\":true,\"blocked\":[\"deafened\"],\"talk_mode\":\"push_to_talk\",\"ptt\":\"ready\",\"share_audio\":\"on\",\"share_audio_muted\":false,\"share_audio_sources\":2}",
+      "want": {
+        "result": "accept",
+        "kind": "state"
+      }
+    },
+    {
+      "name": "share audio on with no microphone: it needs none",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v3\",\"kind\":\"state\",\"seq\":10,\"phase\":\"connected\",\"capture\":\"unavailable\",\"playback\":\"on\",\"transmitting\":false,\"muted\":false,\"deafened\":false,\"blocked\":[\"no_microphone\"],\"talk_mode\":\"push_to_talk\",\"ptt\":\"ready\",\"share_audio\":\"on\",\"share_audio_muted\":false,\"share_audio_sources\":2}",
+      "want": {
+        "result": "accept",
+        "kind": "state"
+      }
+    },
+    {
+      "name": "share audio on in open mode with no talk key",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v3\",\"kind\":\"state\",\"seq\":10,\"phase\":\"connected\",\"capture\":\"on\",\"playback\":\"on\",\"transmitting\":false,\"muted\":false,\"deafened\":false,\"blocked\":[],\"talk_mode\":\"open\",\"ptt\":\"not_configured\",\"share_audio\":\"on\",\"share_audio_muted\":false,\"share_audio_sources\":2}",
+      "want": {
+        "result": "accept",
+        "kind": "state"
+      }
+    },
+    {
+      "name": "share audio on while reconnecting: only starting and the final phases must have it off",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v3\",\"kind\":\"state\",\"seq\":13,\"phase\":\"reconnecting\",\"reason\":\"connection_lost\",\"retry_in_ms\":2000,\"capture\":\"on\",\"playback\":\"on\",\"transmitting\":false,\"muted\":false,\"deafened\":false,\"blocked\":[\"not_connected\"],\"talk_mode\":\"push_to_talk\",\"ptt\":\"ready\",\"share_audio\":\"on\",\"share_audio_muted\":false,\"share_audio_sources\":2}",
+      "want": {
+        "result": "accept",
+        "kind": "state"
+      }
+    },
+    {
+      "name": "share audio may be anything while stopping",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v3\",\"kind\":\"state\",\"seq\":16,\"phase\":\"stopping\",\"reason\":\"left\",\"capture\":\"on\",\"playback\":\"on\",\"transmitting\":false,\"muted\":false,\"deafened\":false,\"blocked\":[\"not_connected\"],\"talk_mode\":\"push_to_talk\",\"ptt\":\"ready\",\"share_audio\":\"on\",\"share_audio_muted\":false,\"share_audio_sources\":1}",
+      "want": {
+        "result": "accept",
+        "kind": "state"
+      }
+    },
+    {
+      "name": "share_audio_muted while starting: a desired state, true in any phase",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v3\",\"kind\":\"state\",\"seq\":2,\"phase\":\"starting\",\"capture\":\"off\",\"playback\":\"off\",\"transmitting\":false,\"muted\":false,\"deafened\":false,\"blocked\":[\"not_connected\",\"no_publish_grant\",\"no_microphone\"],\"talk_mode\":\"push_to_talk\",\"ptt\":\"unknown\",\"share_audio\":\"off\",\"share_audio_muted\":true,\"share_audio_sources\":0}",
+      "want": {
+        "result": "accept",
+        "kind": "state"
+      }
+    },
+    {
+      "name": "share_audio_muted after stopping",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v3\",\"kind\":\"state\",\"seq\":17,\"phase\":\"stopped\",\"reason\":\"left\",\"capture\":\"off\",\"playback\":\"off\",\"transmitting\":false,\"muted\":false,\"deafened\":false,\"blocked\":[\"not_connected\"],\"talk_mode\":\"push_to_talk\",\"ptt\":\"ready\",\"share_audio\":\"off\",\"share_audio_muted\":true,\"share_audio_sources\":0}",
+      "want": {
+        "result": "accept",
+        "kind": "state"
+      }
+    },
+    {
+      "name": "share_audio_muted with the share's sound off",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v3\",\"kind\":\"state\",\"seq\":11,\"phase\":\"connected\",\"capture\":\"on\",\"playback\":\"on\",\"transmitting\":false,\"muted\":false,\"deafened\":false,\"blocked\":[],\"talk_mode\":\"push_to_talk\",\"ptt\":\"ready\",\"share_audio\":\"off\",\"share_audio_muted\":true,\"share_audio_sources\":0}",
+      "want": {
+        "result": "accept",
+        "kind": "state"
+      }
+    },
+    {
+      "name": "state with a field it does not declare: ignored",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v3\",\"kind\":\"state\",\"seq\":7,\"phase\":\"connected\",\"capture\":\"on\",\"playback\":\"on\",\"transmitting\":false,\"muted\":false,\"deafened\":false,\"blocked\":[],\"talk_mode\":\"push_to_talk\",\"ptt\":\"ready\",\"share_audio\":\"on\",\"share_audio_muted\":false,\"share_audio_sources\":3,\"share_audio_level_db\":-31}",
+      "want": {
+        "result": "accept",
+        "kind": "state"
+      }
+    },
+    {
+      "name": "exactly the longest line",
+      "direction": "event",
+      "line_file": "lines/event-at-limit.txt",
+      "want": {
+        "result": "accept",
+        "kind": "state"
+      }
+    },
+    {
+      "name": "an event of a kind this version does not know",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v3\",\"kind\":\"level\",\"seq\":7,\"db\":-31}",
+      "want": {
+        "result": "skip",
+        "kind": "level"
+      }
+    },
+    {
+      "name": "one byte longer than the longest line",
+      "direction": "event",
+      "line_file": "lines/event-too-long.txt",
+      "want": {
+        "result": "refuse",
+        "code": "too_long"
+      }
+    },
+    {
+      "name": "a line of native output on the event descriptor",
+      "direction": "event",
+      "line": "pipewire: could not connect to the daemon",
+      "want": {
+        "result": "refuse",
+        "code": "malformed"
+      }
+    },
+    {
+      "name": "a v2 state: not read as v3",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v2\",\"kind\":\"state\",\"seq\":5,\"phase\":\"connected\",\"capture\":\"on\",\"playback\":\"on\",\"transmitting\":false,\"muted\":false,\"deafened\":false,\"blocked\":[],\"talk_mode\":\"push_to_talk\",\"ptt\":\"ready\"}",
+      "want": {
+        "result": "refuse",
+        "code": "unknown_schema"
+      }
+    },
+    {
+      "name": "a v1 state: not read as v3",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v1\",\"kind\":\"state\",\"seq\":5,\"phase\":\"connected\",\"capture\":\"on\",\"transmitting\":false,\"muted\":false,\"deafened\":false,\"blocked\":[],\"ptt\":\"ready\"}",
+      "want": {
+        "result": "refuse",
+        "code": "unknown_schema"
+      }
+    },
+    {
+      "name": "a hello, which is v1, is not read by the v3 reader: the owner reads it with the v1 reader before choosing",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v1\",\"kind\":\"hello\",\"seq\":1,\"versions\":[\"conch.voice_control.v1\",\"conch.voice_control.v2\",\"conch.voice_control.v3\"],\"helper_version\":\"0.3.0 (48000 Hz, 10 ms frames)\"}",
+      "want": {
+        "result": "refuse",
+        "code": "unknown_schema"
+      }
+    },
+    {
+      "name": "a hello written in v3: there is no such thing",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v3\",\"kind\":\"hello\",\"seq\":1,\"versions\":[\"conch.voice_control.v3\"],\"helper_version\":\"0.3.0 (48000 Hz, 10 ms frames)\"}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid"
+      }
+    },
+    {
+      "name": "an event of a later version",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v4\",\"kind\":\"state\",\"seq\":5}",
+      "want": {
+        "result": "refuse",
+        "code": "unknown_schema"
+      }
+    },
+    {
+      "name": "an event with no seq",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v3\",\"kind\":\"ack\",\"id\":1,\"ok\":true}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid"
+      }
+    },
+    {
+      "name": "ack with a code that only a protocol_error may carry",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v3\",\"kind\":\"ack\",\"seq\":9,\"id\":6,\"ok\":false,\"error\":\"too_long\"}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid"
+      }
+    },
+    {
+      "name": "a v2 state under v3's name: the share-audio fields are always written, and a state without them is not read as off",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v3\",\"kind\":\"state\",\"seq\":5,\"phase\":\"connected\",\"capture\":\"on\",\"playback\":\"on\",\"transmitting\":false,\"muted\":false,\"deafened\":false,\"blocked\":[],\"talk_mode\":\"push_to_talk\",\"ptt\":\"ready\"}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid"
+      }
+    },
+    {
+      "name": "state without share_audio",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v3\",\"kind\":\"state\",\"seq\":5,\"phase\":\"connected\",\"capture\":\"on\",\"playback\":\"on\",\"transmitting\":false,\"muted\":false,\"deafened\":false,\"blocked\":[],\"talk_mode\":\"push_to_talk\",\"ptt\":\"ready\",\"share_audio_muted\":false,\"share_audio_sources\":0}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid"
+      }
+    },
+    {
+      "name": "state without share_audio_muted",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v3\",\"kind\":\"state\",\"seq\":5,\"phase\":\"connected\",\"capture\":\"on\",\"playback\":\"on\",\"transmitting\":false,\"muted\":false,\"deafened\":false,\"blocked\":[],\"talk_mode\":\"push_to_talk\",\"ptt\":\"ready\",\"share_audio\":\"off\",\"share_audio_sources\":0}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid"
+      }
+    },
+    {
+      "name": "state without share_audio_sources",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v3\",\"kind\":\"state\",\"seq\":5,\"phase\":\"connected\",\"capture\":\"on\",\"playback\":\"on\",\"transmitting\":false,\"muted\":false,\"deafened\":false,\"blocked\":[],\"talk_mode\":\"push_to_talk\",\"ptt\":\"ready\",\"share_audio\":\"off\",\"share_audio_muted\":false}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid"
+      }
+    },
+    {
+      "name": "a share_audio of no version: muted is a field of its own",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v3\",\"kind\":\"state\",\"seq\":5,\"phase\":\"connected\",\"capture\":\"on\",\"playback\":\"on\",\"transmitting\":false,\"muted\":false,\"deafened\":false,\"blocked\":[],\"talk_mode\":\"push_to_talk\",\"ptt\":\"ready\",\"share_audio\":\"muted\",\"share_audio_muted\":false,\"share_audio_sources\":0}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid"
+      }
+    },
+    {
+      "name": "share_audio as a boolean",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v3\",\"kind\":\"state\",\"seq\":5,\"phase\":\"connected\",\"capture\":\"on\",\"playback\":\"on\",\"transmitting\":false,\"muted\":false,\"deafened\":false,\"blocked\":[],\"talk_mode\":\"push_to_talk\",\"ptt\":\"ready\",\"share_audio\":true,\"share_audio_muted\":false,\"share_audio_sources\":0}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid"
+      }
+    },
+    {
+      "name": "a share_audio_problem of no version",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v3\",\"kind\":\"state\",\"seq\":7,\"phase\":\"connected\",\"capture\":\"on\",\"playback\":\"on\",\"transmitting\":false,\"muted\":false,\"deafened\":false,\"blocked\":[],\"talk_mode\":\"push_to_talk\",\"ptt\":\"ready\",\"share_audio\":\"unavailable\",\"share_audio_muted\":false,\"share_audio_problem\":\"no_consent\",\"share_audio_sources\":0}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid"
+      }
+    },
+    {
+      "name": "share_audio_muted as a string",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v3\",\"kind\":\"state\",\"seq\":5,\"phase\":\"connected\",\"capture\":\"on\",\"playback\":\"on\",\"transmitting\":false,\"muted\":false,\"deafened\":false,\"blocked\":[],\"talk_mode\":\"push_to_talk\",\"ptt\":\"ready\",\"share_audio\":\"off\",\"share_audio_muted\":\"no\",\"share_audio_sources\":0}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid"
+      }
+    },
+    {
+      "name": "share_audio_sources as a string",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v3\",\"kind\":\"state\",\"seq\":7,\"phase\":\"connected\",\"capture\":\"on\",\"playback\":\"on\",\"transmitting\":false,\"muted\":false,\"deafened\":false,\"blocked\":[],\"talk_mode\":\"push_to_talk\",\"ptt\":\"ready\",\"share_audio\":\"on\",\"share_audio_muted\":false,\"share_audio_sources\":\"3\"}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid"
+      }
+    },
+    {
+      "name": "share_audio_sources with a fraction",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v3\",\"kind\":\"state\",\"seq\":7,\"phase\":\"connected\",\"capture\":\"on\",\"playback\":\"on\",\"transmitting\":false,\"muted\":false,\"deafened\":false,\"blocked\":[],\"talk_mode\":\"push_to_talk\",\"ptt\":\"ready\",\"share_audio\":\"on\",\"share_audio_muted\":false,\"share_audio_sources\":2.5}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid"
+      }
+    },
+    {
+      "name": "share_audio_sources below zero",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v3\",\"kind\":\"state\",\"seq\":7,\"phase\":\"connected\",\"capture\":\"on\",\"playback\":\"on\",\"transmitting\":false,\"muted\":false,\"deafened\":false,\"blocked\":[],\"talk_mode\":\"push_to_talk\",\"ptt\":\"ready\",\"share_audio\":\"on\",\"share_audio_muted\":false,\"share_audio_sources\":-1}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid"
+      }
+    },
+    {
+      "name": "share_audio_sources one more than a state may count",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v3\",\"kind\":\"state\",\"seq\":7,\"phase\":\"connected\",\"capture\":\"on\",\"playback\":\"on\",\"transmitting\":false,\"muted\":false,\"deafened\":false,\"blocked\":[],\"talk_mode\":\"push_to_talk\",\"ptt\":\"ready\",\"share_audio\":\"on\",\"share_audio_muted\":false,\"share_audio_sources\":1025}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid"
+      }
+    },
+    {
+      "name": "share audio on while starting: nothing is published before the session has joined",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v3\",\"kind\":\"state\",\"seq\":2,\"phase\":\"starting\",\"capture\":\"off\",\"playback\":\"off\",\"transmitting\":false,\"muted\":false,\"deafened\":false,\"blocked\":[\"not_connected\",\"no_publish_grant\",\"no_microphone\"],\"talk_mode\":\"push_to_talk\",\"ptt\":\"unknown\",\"share_audio\":\"on\",\"share_audio_muted\":false,\"share_audio_sources\":1}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid"
+      }
+    },
+    {
+      "name": "share audio unavailable while starting",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v3\",\"kind\":\"state\",\"seq\":2,\"phase\":\"starting\",\"capture\":\"off\",\"playback\":\"off\",\"transmitting\":false,\"muted\":false,\"deafened\":false,\"blocked\":[\"not_connected\",\"no_publish_grant\",\"no_microphone\"],\"talk_mode\":\"push_to_talk\",\"ptt\":\"unknown\",\"share_audio\":\"unavailable\",\"share_audio_muted\":false,\"share_audio_problem\":\"not_connected\",\"share_audio_sources\":0}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid"
+      }
+    },
+    {
+      "name": "share audio on after stopping",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v3\",\"kind\":\"state\",\"seq\":17,\"phase\":\"stopped\",\"reason\":\"left\",\"capture\":\"off\",\"playback\":\"off\",\"transmitting\":false,\"muted\":false,\"deafened\":false,\"blocked\":[\"not_connected\"],\"talk_mode\":\"push_to_talk\",\"ptt\":\"ready\",\"share_audio\":\"on\",\"share_audio_muted\":false,\"share_audio_sources\":1}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid"
+      }
+    },
+    {
+      "name": "share audio unavailable after failing",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v3\",\"kind\":\"state\",\"seq\":17,\"phase\":\"failed\",\"reason\":\"protocol_error\",\"capture\":\"off\",\"playback\":\"off\",\"transmitting\":false,\"muted\":false,\"deafened\":false,\"blocked\":[\"not_connected\"],\"talk_mode\":\"push_to_talk\",\"ptt\":\"ready\",\"share_audio\":\"unavailable\",\"share_audio_muted\":false,\"share_audio_problem\":\"not_connected\",\"share_audio_sources\":0}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid"
+      }
+    },
+    {
+      "name": "share audio on with a problem that is not no_sources",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v3\",\"kind\":\"state\",\"seq\":7,\"phase\":\"connected\",\"capture\":\"on\",\"playback\":\"on\",\"transmitting\":false,\"muted\":false,\"deafened\":false,\"blocked\":[],\"talk_mode\":\"push_to_talk\",\"ptt\":\"ready\",\"share_audio\":\"on\",\"share_audio_muted\":false,\"share_audio_problem\":\"publish_refused\",\"share_audio_sources\":2}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid"
+      }
+    },
+    {
+      "name": "share audio on with unsupported_scope: a scope that cannot be captured is unavailable, never on",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v3\",\"kind\":\"state\",\"seq\":7,\"phase\":\"connected\",\"capture\":\"on\",\"playback\":\"on\",\"transmitting\":false,\"muted\":false,\"deafened\":false,\"blocked\":[],\"talk_mode\":\"push_to_talk\",\"ptt\":\"ready\",\"share_audio\":\"on\",\"share_audio_muted\":false,\"share_audio_problem\":\"unsupported_scope\",\"share_audio_sources\":0}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid"
+      }
+    },
+    {
+      "name": "share audio unavailable with no problem",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v3\",\"kind\":\"state\",\"seq\":7,\"phase\":\"connected\",\"capture\":\"on\",\"playback\":\"on\",\"transmitting\":false,\"muted\":false,\"deafened\":false,\"blocked\":[],\"talk_mode\":\"push_to_talk\",\"ptt\":\"ready\",\"share_audio\":\"unavailable\",\"share_audio_muted\":false,\"share_audio_sources\":0}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid"
+      }
+    },
+    {
+      "name": "share audio unavailable with no_sources: nothing playing is not a failure",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v3\",\"kind\":\"state\",\"seq\":7,\"phase\":\"connected\",\"capture\":\"on\",\"playback\":\"on\",\"transmitting\":false,\"muted\":false,\"deafened\":false,\"blocked\":[],\"talk_mode\":\"push_to_talk\",\"ptt\":\"ready\",\"share_audio\":\"unavailable\",\"share_audio_muted\":false,\"share_audio_problem\":\"no_sources\",\"share_audio_sources\":0}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid"
+      }
+    },
+    {
+      "name": "share audio off with a problem",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v3\",\"kind\":\"state\",\"seq\":7,\"phase\":\"connected\",\"capture\":\"on\",\"playback\":\"on\",\"transmitting\":false,\"muted\":false,\"deafened\":false,\"blocked\":[],\"talk_mode\":\"push_to_talk\",\"ptt\":\"ready\",\"share_audio\":\"off\",\"share_audio_muted\":false,\"share_audio_problem\":\"not_connected\",\"share_audio_sources\":0}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid"
+      }
+    },
+    {
+      "name": "share audio off with no_sources",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v3\",\"kind\":\"state\",\"seq\":7,\"phase\":\"connected\",\"capture\":\"on\",\"playback\":\"on\",\"transmitting\":false,\"muted\":false,\"deafened\":false,\"blocked\":[],\"talk_mode\":\"push_to_talk\",\"ptt\":\"ready\",\"share_audio\":\"off\",\"share_audio_muted\":false,\"share_audio_problem\":\"no_sources\",\"share_audio_sources\":0}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid"
+      }
+    },
+    {
+      "name": "sources counted while the share's sound is off",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v3\",\"kind\":\"state\",\"seq\":7,\"phase\":\"connected\",\"capture\":\"on\",\"playback\":\"on\",\"transmitting\":false,\"muted\":false,\"deafened\":false,\"blocked\":[],\"talk_mode\":\"push_to_talk\",\"ptt\":\"ready\",\"share_audio\":\"off\",\"share_audio_muted\":false,\"share_audio_sources\":2}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid"
+      }
+    },
+    {
+      "name": "sources counted while the share's sound is unavailable",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v3\",\"kind\":\"state\",\"seq\":7,\"phase\":\"connected\",\"capture\":\"on\",\"playback\":\"on\",\"transmitting\":false,\"muted\":false,\"deafened\":false,\"blocked\":[],\"talk_mode\":\"push_to_talk\",\"ptt\":\"ready\",\"share_audio\":\"unavailable\",\"share_audio_muted\":false,\"share_audio_problem\":\"no_pipewire\",\"share_audio_sources\":2}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid"
+      }
+    },
+    {
+      "name": "share audio on with no_sources and sources counted: the two must agree",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v3\",\"kind\":\"state\",\"seq\":7,\"phase\":\"connected\",\"capture\":\"on\",\"playback\":\"on\",\"transmitting\":false,\"muted\":false,\"deafened\":false,\"blocked\":[],\"talk_mode\":\"push_to_talk\",\"ptt\":\"ready\",\"share_audio\":\"on\",\"share_audio_muted\":false,\"share_audio_problem\":\"no_sources\",\"share_audio_sources\":2}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid"
+      }
+    },
+    {
+      "name": "share audio on with nothing counted and no no_sources: the two must agree",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v3\",\"kind\":\"state\",\"seq\":7,\"phase\":\"connected\",\"capture\":\"on\",\"playback\":\"on\",\"transmitting\":false,\"muted\":false,\"deafened\":false,\"blocked\":[],\"talk_mode\":\"push_to_talk\",\"ptt\":\"ready\",\"share_audio\":\"on\",\"share_audio_muted\":false,\"share_audio_sources\":0}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid"
+      }
+    },
+    {
+      "name": "transmitting in push_to_talk without ptt ready: the share's sound changes no rule of the microphone's",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v3\",\"kind\":\"state\",\"seq\":10,\"phase\":\"connected\",\"capture\":\"on\",\"playback\":\"on\",\"transmitting\":true,\"muted\":false,\"deafened\":false,\"blocked\":[],\"talk_mode\":\"push_to_talk\",\"ptt\":\"not_configured\",\"share_audio\":\"on\",\"share_audio_muted\":false,\"share_audio_sources\":2}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid"
+      }
+    },
+    {
+      "name": "transmitting while muted, whatever the share's sound",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v3\",\"kind\":\"state\",\"seq\":10,\"phase\":\"connected\",\"capture\":\"on\",\"playback\":\"on\",\"transmitting\":true,\"muted\":true,\"deafened\":false,\"blocked\":[\"muted\"],\"talk_mode\":\"push_to_talk\",\"ptt\":\"ready\",\"share_audio\":\"on\",\"share_audio_muted\":false,\"share_audio_sources\":2}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid"
+      }
+    },
+    {
+      "name": "playback off while connected",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v3\",\"kind\":\"state\",\"seq\":7,\"phase\":\"connected\",\"capture\":\"on\",\"playback\":\"off\",\"transmitting\":false,\"muted\":false,\"deafened\":false,\"blocked\":[],\"talk_mode\":\"push_to_talk\",\"ptt\":\"ready\",\"share_audio\":\"on\",\"share_audio_muted\":false,\"share_audio_sources\":2}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid"
+      }
+    },
+    {
+      "name": "not connected but nothing blocks",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v3\",\"kind\":\"state\",\"seq\":13,\"phase\":\"reconnecting\",\"reason\":\"connection_lost\",\"retry_in_ms\":2000,\"capture\":\"on\",\"playback\":\"on\",\"transmitting\":false,\"muted\":false,\"deafened\":false,\"blocked\":[],\"talk_mode\":\"push_to_talk\",\"ptt\":\"ready\",\"share_audio\":\"on\",\"share_audio_muted\":false,\"share_audio_sources\":2}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid"
+      }
+    },
+    {
+      "name": "open mode while starting",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v3\",\"kind\":\"state\",\"seq\":2,\"phase\":\"starting\",\"capture\":\"off\",\"playback\":\"off\",\"transmitting\":false,\"muted\":false,\"deafened\":false,\"blocked\":[\"not_connected\",\"no_publish_grant\",\"no_microphone\"],\"talk_mode\":\"open\",\"ptt\":\"unknown\",\"share_audio\":\"off\",\"share_audio_muted\":false,\"share_audio_sources\":0}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid"
+      }
+    },
+    {
+      "name": "state without talk_mode",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v3\",\"kind\":\"state\",\"seq\":5,\"phase\":\"connected\",\"capture\":\"on\",\"playback\":\"on\",\"transmitting\":false,\"muted\":false,\"deafened\":false,\"blocked\":[],\"ptt\":\"ready\",\"share_audio\":\"off\",\"share_audio_muted\":false,\"share_audio_sources\":0}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid"
+      }
+    },
+    {
+      "name": "state without playback",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v3\",\"kind\":\"state\",\"seq\":5,\"phase\":\"connected\",\"capture\":\"on\",\"transmitting\":false,\"muted\":false,\"deafened\":false,\"blocked\":[],\"talk_mode\":\"push_to_talk\",\"ptt\":\"ready\",\"share_audio\":\"off\",\"share_audio_muted\":false,\"share_audio_sources\":0}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid"
+      }
+    },
+    {
+      "name": "block reasons out of order",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v3\",\"kind\":\"state\",\"seq\":9,\"phase\":\"connected\",\"capture\":\"on\",\"playback\":\"on\",\"transmitting\":false,\"muted\":true,\"deafened\":true,\"blocked\":[\"muted\",\"deafened\"],\"talk_mode\":\"push_to_talk\",\"ptt\":\"ready\",\"share_audio\":\"on\",\"share_audio_muted\":false,\"share_audio_sources\":2}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid"
+      }
+    }
+  ]
+}
