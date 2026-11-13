@@ -61,7 +61,9 @@ function ownerOf(uid: number | undefined): number | null {
 // owned by this user or by root and is not writable by group or others (a
 // sticky one, such as /tmp, is allowed: others cannot replace our entry in
 // it). POSIX only; Windows has no such mode bits and relies on the profile
-// directory's ACL.
+// directory's ACL. No ACL is read here: a --user-data-dir outside the profile
+// is refused by path before this runs, unless --allow-shared-user-data-dir
+// was given (data-root.ts, #1788).
 export async function prepareRoot(root: string, options: { readonly uid?: number } = {}): Promise<RootCheck> {
   const owner = ownerOf(options.uid);
   const ownedByUs = (st: { readonly uid: number }): boolean => owner === null || st.uid === owner;

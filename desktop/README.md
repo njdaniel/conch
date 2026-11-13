@@ -41,6 +41,7 @@ voice in the UI (#771: the supervisor that runs `conch-voice` exists, in
 | `main/voice/spawn.ts` | the bundled `conch-voice` and its trusted-path checks, the environment built from empty by an allowlist, the spawn options (#948); on Windows `conch-voice.exe`, the case-insensitive allowlist and `%SystemRoot%` as its directory (#1785) |
 | `main/voice/supervisor.ts` | one helper per instance: start, commands and acks, the stop escalation and the reap, helper loss as one typed state (#948); on Windows the nonce is spent at the attach and the stop has no SIGTERM step (#1785) |
 | `main/instance.ts` | one instance per data root (`requestSingleInstanceLock`), and the data root made 0700 with its ancestors checked (#945) |
+| `main/data-root.ts` | on Windows, a `--user-data-dir` must be under `%USERPROFILE%`, `%APPDATA%` or `%LOCALAPPDATA%`, or the app does not start; `--allow-shared-user-data-dir` overrides it with a warning (#1788) |
 | `main/profiles/store.ts`, `files.ts`, `ids.ts` | the saved servers: random 128-bit ids, the (origin, principal) binding rule, `profiles.json` (non-secret, 0600, atomic) and the profile directories (#945) |
 | `main/profiles/switch.ts`, `hooks.ts` | the switch sequence (media hooks, sockets, requests, renderer, helper hooks, then the next profile, each bounded) and the hook interface #771 and #772 register on (#945) |
 | `main/profiles/service.ts` | which profile is active, where its credential lives (the vault, or main's memory when storage is not protected), sign-out and remove; the compatibility gate of #946 is in `tokenFor`, before the vault is read or the server is asked about a credential (#945, #946) |
@@ -303,6 +304,39 @@ seeds `%APPDATA%\conch-desktop` and `%APPDATA%\Conch`, uninstalls with `/S`, and
 copy the uninstaller runs from `%TEMP%` to finish. The program, the key, the entry and the
 shortcut must be gone, and every seeded file must be unchanged. The job does not start the app.
 Electron and `conch-voice` together on a Windows machine is #903.
+
+### A data root of your own on Windows (`--user-data-dir`, issue #1788)
+
+Chromium's `--user-data-dir=<dir>` moves the data root (`app.getPath('userData')`, by default
+`%APPDATA%\conch-desktop`): `profiles.json`, `settings.json`, the vault, each profile's
+`voice.toml` for the helper, and Chromium's own files. On Linux and macOS `main/instance.ts`
+judges it by its mode bits and its ancestors' (0700, no group- or other-writable parent). Windows
+has no mode bits: the data is private only because the folder it is in is. `%USERPROFILE%`,
+`%APPDATA%` and `%LOCALAPPDATA%` are, under their default ACL (you, SYSTEM and
+Administrators), but a folder made under a drive root (`C:\conch-data`) gives Authenticated
+Users Modify by default, so any other local account could write `profiles\<id>\voice.toml`
+there and choose the helper's devices and keys (not its server or login: in the app those come
+from the owner's `start` command), or change the app's other files.
+
+So on Windows, when `--user-data-dir` is given, `main/data-root.ts` checks where it resolved to
+before the single-instance lock writes anything into it. The root, with junctions and symbolic
+links resolved by `fs.realpathSync.native` (through its nearest existing ancestor when it does not
+exist yet), must be inside `%USERPROFILE%`, `%APPDATA%` or `%LOCALAPPDATA%` (each as written and
+resolved), compared case-insensitively on whole path segments, so `C:\Users\nickx` is not inside
+`C:\Users\nick`. A relative, drive-relative (`C:foo`) or root-relative (`\foo`) path is refused,
+as is a root that cannot be resolved. Refused, the app prints one line saying the data root must be
+under your user profile and exits. `--allow-shared-user-data-dir` is the deliberate way past it: the
+app starts and prints a warning that other local accounts may be able to change its files, the
+voice helper's settings among them. Without `--user-data-dir` nothing is checked, and Linux and
+macOS are unchanged.
+
+**Why by path, not by ACL:** Node has no API that reads a Windows ACL; one would need a native
+module (or a new dependency that ships one), which this app does not take. So the check is a
+guard against a mistaken launch, not proof: a profile folder whose ACL someone has widened passes,
+and a user who passes the override flag is trusted to mean it, as is anything else running as that
+user. The standalone helper has the same residual for a `CONCH_CONFIG_DIR` under a drive root
+([windows-desktop.md](../docs/design/windows-desktop.md) §2.7, #904); it is documented there and not
+checked.
 
 ### The smoke test
 
