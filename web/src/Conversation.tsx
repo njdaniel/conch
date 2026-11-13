@@ -8,7 +8,7 @@ import { guestName } from './guestName';
 import { Avatar, PrivateMark } from './Icons';
 import { IdentityMarks } from './Identity';
 import { ProfileCard } from './ProfileCard';
-import type { IdentityKey } from './identity';
+import type { IdentityKey } from './identityMarks';
 import { Linkified, previewText } from './Linkified';
 import { displayBody, useKnownFileNames } from './spoilerFiles';
 import { ImageAttachment } from './ImageAttachment';

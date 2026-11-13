@@ -853,3 +853,26 @@ describe('times and dates', () => {
     expect(formatting).toEqual([]);
   });
 });
+
+// Windows' and macOS's filesystems ignore case, so './Identity' found
+// identity.ts there and the desktop build broke on Windows (issue #1801). No two
+// modules here may differ only in case once the extension is dropped.
+const allModules = Object.keys(import.meta.glob(['./**/*.ts', './**/*.tsx']));
+
+describe('module names', () => {
+  it('finds the modules', () => {
+    expect(allModules.length).toBeGreaterThan(5);
+  });
+
+  it('has no two that differ only in case', () => {
+    const seen = new Map<string, string>();
+    const clashes: string[] = [];
+    for (const path of allModules) {
+      const key = path.replace(/\.tsx?$/, '').toLowerCase();
+      const other = seen.get(key);
+      if (other !== undefined && other.replace(/\.tsx?$/, '') !== path.replace(/\.tsx?$/, '')) clashes.push(`${other} and ${path}`);
+      seen.set(key, path);
+    }
+    expect(clashes).toEqual([]);
+  });
+});
