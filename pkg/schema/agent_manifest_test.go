@@ -27,6 +27,7 @@ func TestAgentManifestGoldenFixtures(t *testing.T) {
 		{"agent-manifest-v1-nets.json", func() any { return new(AgentManifestV1) }},
 		{"agent-manifest-v1-sessions.json", func() any { return new(AgentManifestV1) }},
 		{"agent-manifest-v1-admin.json", func() any { return new(AgentManifestV1) }},
+		{"agent-manifest-v1-files.json", func() any { return new(AgentManifestV1) }},
 		{"put-agent-manifest-request-v1.json", func() any { return new(PutAgentManifestRequestV1) }},
 		{"put-agent-manifest-request-v1-admin.json", func() any { return new(PutAgentManifestRequestV1) }},
 		{"put-agent-manifest-response-v1.json", func() any { return new(PutAgentManifestResponseV1) }},
@@ -618,6 +619,7 @@ func TestSessionAndRunCapabilities(t *testing.T) {
 		CapabilityMessagesRead, CapabilityMessagesPost,
 		CapabilityApprovalsRequest, CapabilityApprovalsAwait, CapabilityApprovalsCheck,
 		CapabilitySessionsManage, CapabilityRunsManage, CapabilityAdminAct,
+		CapabilityFilesUpload,
 	}
 	if got := Capabilities(); strings.Join(capabilityStrings(got), ",") != strings.Join(capabilityStrings(want), ",") {
 		t.Errorf("Capabilities() = %v, want %v", got, want)
@@ -715,6 +717,7 @@ func TestChannelPermissionsListsTheWholeVocabulary(t *testing.T) {
 		ChannelPermissionPostNet,
 		ChannelPermissionWhisper,
 		ChannelPermissionWhisperAgent,
+		ChannelPermissionAttach,
 	}
 	if len(all) != len(want) {
 		t.Fatalf("ChannelPermissions() = %v, want %v", all, want)
@@ -944,8 +947,10 @@ func TestAdminActCapability(t *testing.T) {
 	if CapabilityAdminAct != "admin.act" || !CapabilityAdminAct.Valid() {
 		t.Fatalf("CapabilityAdminAct = %q, Valid() = %v", CapabilityAdminAct, CapabilityAdminAct.Valid())
 	}
-	if all := Capabilities(); all[len(all)-1] != CapabilityAdminAct {
-		t.Errorf("Capabilities() ends in %q, want admin.act last", all[len(all)-1])
+	// Eighth, where it was added: the vocabulary grows at the end, and a
+	// later capability (files.upload, issue #1798) comes after it.
+	if all := Capabilities(); len(all) < 8 || all[7] != CapabilityAdminAct {
+		t.Errorf("Capabilities() = %v, want admin.act eighth", all)
 	}
 	for _, c := range []Capability{"admin", "admin.*", "admin.act ", "ADMIN.ACT", "admin_act", "admin.actions"} {
 		if c.Valid() {
@@ -975,6 +980,87 @@ func TestAdminActCapability(t *testing.T) {
 		}
 		if adminTools[tool] && c != CapabilityAdminAct {
 			t.Errorf("admin tool %q maps to %q, want admin.act", tool, c)
+		}
+	}
+}
+
+// files.upload and attach (issue #1798) are the ninth capability and the
+// sixth channel permission: additive, so no version bump. A manifest may grant
+// and rate-limit them, neither implies or is implied by anything, and no tool
+// is mapped to files.upload: post_message stays messages.post, and the server
+// asks for files.upload only when the call carries attachments.
+func TestFilesUploadCapabilityAndAttachPermission(t *testing.T) {
+	if CapabilityFilesUpload != "files.upload" || !CapabilityFilesUpload.Valid() {
+		t.Fatalf("CapabilityFilesUpload = %q, Valid() = %v", CapabilityFilesUpload, CapabilityFilesUpload.Valid())
+	}
+	if ChannelPermissionAttach != "attach" || !ChannelPermissionAttach.Valid() {
+		t.Fatalf("ChannelPermissionAttach = %q, Valid() = %v", ChannelPermissionAttach, ChannelPermissionAttach.Valid())
+	}
+	if all := Capabilities(); all[len(all)-1] != CapabilityFilesUpload {
+		t.Errorf("Capabilities() ends in %q, want files.upload last", all[len(all)-1])
+	}
+	if all := ChannelPermissions(); all[len(all)-1] != ChannelPermissionAttach {
+		t.Errorf("ChannelPermissions() ends in %q, want attach last", all[len(all)-1])
+	}
+	for _, c := range []Capability{"files", "files.*", "files.upload ", "FILES.UPLOAD", "files_upload", "files.read", "files.fetch"} {
+		if c.Valid() {
+			t.Errorf("capability %q should be invalid", c)
+		}
+	}
+	for _, p := range []ChannelPermission{"attach ", "ATTACH", "attachments", "upload", "files.upload"} {
+		if p.Valid() {
+			t.Errorf("channel permission %q should be invalid", p)
+		}
+	}
+	for tool, c := range MCPToolCapabilities() {
+		if c == CapabilityFilesUpload {
+			t.Errorf("tool %q is mapped to files.upload; it is checked inside post_message, for a call with attachments", tool)
+		}
+	}
+	if c, ok := MCPToolCapability("post_message"); !ok || c != CapabilityMessagesPost {
+		t.Errorf("post_message maps to %q, %v; want messages.post", c, ok)
+	}
+
+	var m AgentManifestV1
+	readFixture(t, "agent-manifest-v1-files.json", &m)
+	tests := []struct {
+		name      string
+		channelID int64
+		perm      ChannelPermission
+		want      bool
+	}{
+		{"attach where granted", 7, ChannelPermissionAttach, true},
+		{"post where granted", 7, ChannelPermissionPost, true},
+		{"attach does not imply read", 7, ChannelPermissionRead, false},
+		{"post does not imply attach", 9, ChannelPermissionAttach, false},
+		{"no grant in another channel", 11, ChannelPermissionAttach, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := m.AllowsChannel(tt.channelID, tt.perm); got != tt.want {
+				t.Errorf("AllowsChannel(%d, %q) = %v, want %v", tt.channelID, tt.perm, got, tt.want)
+			}
+		})
+	}
+	if !m.Allows(CapabilityFilesUpload) || m.Allows(CapabilityMessagesRead) {
+		t.Errorf("the fixture allows files.upload = %v, messages.read = %v; want true, false", m.Allows(CapabilityFilesUpload), m.Allows(CapabilityMessagesRead))
+	}
+	if l, ok := m.RateLimitFor(CapabilityFilesUpload); !ok || l.Max != 10 || l.WindowSeconds != 3600 {
+		t.Errorf("RateLimitFor(files.upload) = %+v, %v", l, ok)
+	}
+
+	// The fixtures that predate the grant decode with neither value: an
+	// upgrade lets no agent upload.
+	for _, file := range []string{"agent-manifest-v1.json", "agent-manifest-v1-deny-all.json", "agent-manifest-v1-nets.json", "agent-manifest-v1-sessions.json", "agent-manifest-v1-admin.json"} {
+		var old AgentManifestV1
+		readFixture(t, file, &old)
+		if old.Allows(CapabilityFilesUpload) {
+			t.Errorf("%s allows files.upload", file)
+		}
+		for _, g := range old.Channels {
+			if old.AllowsChannel(g.ChannelID, ChannelPermissionAttach) {
+				t.Errorf("%s grants attach in channel %d", file, g.ChannelID)
+			}
 		}
 	}
 }

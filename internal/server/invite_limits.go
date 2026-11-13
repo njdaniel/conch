@@ -141,24 +141,39 @@ func (b *tokenBucket) level(l inviteLimit, now time.Time) float64 {
 // take spends one token if there is one. When there is not, it reports how
 // long until there is, in whole seconds, at least one.
 func (b *tokenBucket) take(l inviteLimit, now time.Time) (bool, time.Duration) {
+	return b.takeN(l, 1, now)
+}
+
+// takeN spends n tokens if there are n, and none of them otherwise: a caller
+// that needs several (an agent's post with several attachments, issue #1798)
+// never ends up holding some. When there are not n, it reports how long until
+// there are, in whole seconds, at least one. More than the burst can never be
+// had; that is answered with the whole window.
+func (b *tokenBucket) takeN(l inviteLimit, n int, now time.Time) (bool, time.Duration) {
 	spent := b.level(l, now)
 	if b.at.IsZero() || now.After(b.at) {
 		b.at = now
 	}
 	b.spent = spent
-	if spent+1 <= float64(l.burst) {
-		b.spent++
+	if spent+float64(n) <= float64(l.burst) {
+		b.spent += float64(n)
 		return true, 0
 	}
-	wait := (spent + 1 - float64(l.burst)) / l.rate()
+	if n > l.burst {
+		return false, max(l.window.Truncate(time.Second), time.Second)
+	}
+	wait := (spent + float64(n) - float64(l.burst)) / l.rate()
 	// Less a microsecond, so that float error on a whole number of seconds
 	// does not round it up by one.
 	return false, max(time.Duration(math.Ceil(wait-1e-6))*time.Second, time.Second)
 }
 
 // refund gives back one token taken by take.
-func (b *tokenBucket) refund(l inviteLimit, now time.Time) {
-	b.spent = math.Max(0, b.level(l, now)-1)
+func (b *tokenBucket) refund(l inviteLimit, now time.Time) { b.refundN(l, 1, now) }
+
+// refundN gives back n tokens taken by takeN.
+func (b *tokenBucket) refundN(l inviteLimit, n int, now time.Time) {
+	b.spent = math.Max(0, b.level(l, now)-float64(n))
 	if now.After(b.at) {
 		b.at = now
 	}

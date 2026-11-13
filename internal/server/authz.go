@@ -338,9 +338,22 @@ type grantedChannel struct {
 	audience *schema.Audience
 }
 
-// insertMessage stores a message in the channel, authored by the agent.
-func (g *grantedChannel) insertMessage(ctx context.Context, body string, payload *schema.Payload) (store.Message, error) {
-	msg, err := g.scope.s.store.InsertMessageV1(ctx, g.channel.ID, g.scope.identity.principalID, body, payload)
+// insertMessage stores a message in the channel, authored by the agent. With
+// uploads (issue #1798) the message brings its files with it: they are
+// recorded and attached in the same transaction, and payload is nil.
+func (g *grantedChannel) insertMessage(ctx context.Context, body string, payload *schema.Payload, uploads *pendingUploads) (store.Message, error) {
+	var msg store.Message
+	var err error
+	if uploads != nil {
+		msg, err = g.scope.s.store.InsertMessageWithUploads(ctx, g.channel.ID, g.scope.identity.principalID, body, uploads.forStore(ctx))
+	} else {
+		msg, err = g.scope.s.store.InsertMessageV1(ctx, g.channel.ID, g.scope.identity.principalID, body, payload)
+	}
+	if errors.Is(err, store.ErrNotChannelMember) {
+		// Removed from the channel since the scope's lookup. Only the insert
+		// with uploads asks, in its transaction, as an upload does.
+		return store.Message{}, errMembershipRefused
+	}
 	if errors.Is(err, store.ErrFileAttachment) {
 		// A refusal of the post, not a failure of the store; the tools tell
 		// the two apart by this error, without reaching into the store
@@ -373,9 +386,15 @@ var errArchivedRefused = errors.New("server: channel is archived")
 var errReservedPayloadRefused = errors.New("server: reserved payload schema")
 
 // errAttachmentRefused is insertMessage's error for a post whose file
-// attachment cannot be honoured (an agent cannot upload, so for an agent that
-// is every attachment). Nothing was stored.
+// attachment cannot be honoured: a file the agent names must be one it
+// uploaded itself to this channel (which takes the grant of issue #1798) and
+// has not yet attached. Nothing was stored.
 var errAttachmentRefused = errors.New("server: file attachment refused")
+
+// errMembershipRefused is insertMessage's error for an agent that stopped
+// being a member of the channel between the scope's lookup and the insert.
+// Nothing was stored.
+var errMembershipRefused = errors.New("server: no longer a channel member")
 
 // listMessages reads one page of the channel's messages as the agent: the
 // channel-wide ones, and the scoped ones it is a recipient of. The MCP tools
@@ -391,13 +410,17 @@ func (g *grantedChannel) listMessages(ctx context.Context, after int64, limit in
 // body cannot post as another principal or widen the audience after the check.
 // The refusals are computed by storeScopedPost, the same function the REST
 // post uses.
-func (g *grantedChannel) insertScopedMessage(ctx context.Context, body string, payload *schema.Payload) (schema.MessageV2, []int64, *schema.Error) {
+//
+// With uploads (issue #1798) the message brings its files with it, as in
+// insertMessage.
+func (g *grantedChannel) insertScopedMessage(ctx context.Context, body string, payload *schema.Payload, uploads *pendingUploads) (schema.MessageV2, []int64, *schema.Error) {
 	if g.audience == nil {
 		slog.ErrorContext(ctx, "authz: scoped insert on a grant without an audience")
 		return schema.MessageV2{}, nil, errInternal
 	}
 	return g.scope.s.storeScopedPost(ctx, store.ScopedPost{
 		ChannelID: g.channel.ID, AuthorID: g.scope.identity.principalID, Body: body, Payload: payload, Audience: *g.audience,
+		Uploads: uploads.forStore(ctx),
 	}, g.scope.subject)
 }
 
@@ -554,10 +577,12 @@ func (g *replyChannel) replyRoot(ctx context.Context, rootID int64) (store.Messa
 }
 
 // insertReply stores the agent's reply to rootID and returns it with the
-// recipients resolved at post time. The author is the agent.
-func (g *replyChannel) insertReply(ctx context.Context, rootID int64, body string, payload *schema.Payload) (store.Message, []int64, error) {
+// recipients resolved at post time. The author is the agent. With uploads
+// (issue #1798) the reply brings its files with it, as in insertMessage.
+func (g *replyChannel) insertReply(ctx context.Context, rootID int64, body string, payload *schema.Payload, uploads *pendingUploads) (store.Message, []int64, error) {
 	return g.scope.s.store.InsertReplyMessage(ctx, store.ReplyPost{
 		ChannelID: g.channel.ID, AuthorID: g.scope.identity.principalID, RootID: rootID, Body: body, Payload: payload,
+		Uploads: uploads.forStore(ctx),
 	}, g.scope.reader())
 }
 
@@ -777,11 +802,15 @@ func (s *Server) humansOnly(next http.Handler) http.Handler {
 	return s.humansOnlyBecause(denyAgentOnHumanRoute, "agents use the MCP endpoint for approvals", next)
 }
 
-// humansOnlyFiles refuses an agent caller on a file route (issue #23). The
-// manifest has no capability for files, so an agent can neither upload nor
-// fetch; the refusal comes before the handler looks at the channel or the file.
+// humansOnlyFiles refuses an agent caller on a route that fetches a file: the
+// bytes and the metadata (issue #23). No capability lets an agent read a file,
+// so the refusal comes before the handler looks at the file, and it is the
+// same for an agent that may upload (issue #1798): posting an image needs no
+// read, and files.upload grants none. The upload route is not wrapped in this:
+// its handler refuses an agent without the grant (agentUploadChannel) with the
+// same 403.
 func (s *Server) humansOnlyFiles(next http.Handler) http.Handler {
-	return s.humansOnlyBecause(denyAgentFiles, "agents cannot use files", next)
+	return s.humansOnlyBecause(denyAgentFiles, agentFilesRefusal, next)
 }
 
 // membersOnly refuses a guest caller (issue #706, design §4.3): a guest reads
@@ -848,7 +877,7 @@ func (s *Server) logAgentsWithoutManifest(ctx context.Context) {
 // audience (a channel-wide root needs the post permission, a net or whisper
 // root its own grant). The store judges the root's visibility again inside the
 // insert transaction.
-func (s *Server) postReplyMCP(ctx context.Context, scope *agentScope, channelName string, rootID int64, body string, payload *schema.Payload) (schema.PostMessageResponseV2, *schema.Error) {
+func (s *Server) postReplyMCP(ctx context.Context, scope *agentScope, channelName string, rootID int64, body string, payload *schema.Payload, uploads *pendingUploads) (schema.PostMessageResponseV2, *schema.Error) {
 	authorID := scope.identity.principalID
 	granted, serr := scope.memberChannel(ctx, channelName)
 	if serr != nil {
@@ -886,7 +915,7 @@ func (s *Server) postReplyMCP(ctx context.Context, scope *agentScope, channelNam
 			return schema.PostMessageResponseV2{}, errForbidden
 		}
 	}
-	stored, recipients, err := granted.insertReply(ctx, rootID, body, payload)
+	stored, recipients, err := granted.insertReply(ctx, rootID, body, payload, uploads)
 	if serr := s.scopedPostRefusal(ctx, err, granted.channel.ID, authorID, scope.subject); serr != nil {
 		return schema.PostMessageResponseV2{}, serr
 	}

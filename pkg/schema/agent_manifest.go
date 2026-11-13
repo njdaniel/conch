@@ -72,6 +72,12 @@ const (
 	// Permissions of its manifest, and a manifest with neither grants no
 	// administration. Like sessions.manage it is checked without a channel.
 	CapabilityAdminAct Capability = "admin.act"
+	// CapabilityFilesUpload permits an agent to upload an image to a channel
+	// (issue #1798): over REST, or as an attachment of post_message. It needs
+	// the channel permission attach there as well, and membership. It grants
+	// no reading: an agent is refused on every route that fetches a file, with
+	// or without it.
+	CapabilityFilesUpload Capability = "files.upload"
 )
 
 // Valid reports whether c is a recognized capability.
@@ -79,7 +85,8 @@ func (c Capability) Valid() bool {
 	switch c {
 	case CapabilityMessagesRead, CapabilityMessagesPost,
 		CapabilityApprovalsRequest, CapabilityApprovalsAwait, CapabilityApprovalsCheck,
-		CapabilitySessionsManage, CapabilityRunsManage, CapabilityAdminAct:
+		CapabilitySessionsManage, CapabilityRunsManage, CapabilityAdminAct,
+		CapabilityFilesUpload:
 		return true
 	default:
 		return false
@@ -98,6 +105,7 @@ func Capabilities() []Capability {
 		CapabilitySessionsManage,
 		CapabilityRunsManage,
 		CapabilityAdminAct,
+		CapabilityFilesUpload,
 	}
 }
 
@@ -111,6 +119,12 @@ func Capabilities() []Capability {
 // submit_admin_action, run_approved_action) map to CapabilityAdminAct, as
 // agent-manifest.md §6 requires: the server's structural tests hold this
 // table and the registered tools to the same set.
+//
+// post_message stays one tool with one capability. A call that carries
+// attachments (issue #1798) needs CapabilityFilesUpload as well, and the
+// channel permission attach. The server checks both inside the tool: this
+// table holds one capability for each tool, and cannot say "and another, for
+// this argument".
 var mcpToolCapabilities = map[string]Capability{
 	"post_message":     CapabilityMessagesPost,
 	"read_channel":     CapabilityMessagesRead,
@@ -186,13 +200,19 @@ const (
 	// agents. It is a separate grant for the same reason reply-to-agent is:
 	// agent-to-agent traffic nobody reads is its own risk.
 	ChannelPermissionWhisperAgent ChannelPermission = "whisper_agent"
+	// ChannelPermissionAttach permits uploading an image to the channel
+	// (issue #1798), together with the capability files.upload. It is not a
+	// way to post: the message that carries the image needs its own
+	// permission (post, post_net or whisper), and attach implies none of them.
+	ChannelPermissionAttach ChannelPermission = "attach"
 )
 
 // Valid reports whether p is a recognized channel permission.
 func (p ChannelPermission) Valid() bool {
 	switch p {
 	case ChannelPermissionRead, ChannelPermissionPost,
-		ChannelPermissionPostNet, ChannelPermissionWhisper, ChannelPermissionWhisperAgent:
+		ChannelPermissionPostNet, ChannelPermissionWhisper, ChannelPermissionWhisperAgent,
+		ChannelPermissionAttach:
 		return true
 	default:
 		return false
@@ -208,6 +228,7 @@ func ChannelPermissions() []ChannelPermission {
 		ChannelPermissionPostNet,
 		ChannelPermissionWhisper,
 		ChannelPermissionWhisperAgent,
+		ChannelPermissionAttach,
 	}
 }
 

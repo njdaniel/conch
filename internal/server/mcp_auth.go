@@ -3,6 +3,7 @@ package server
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
@@ -74,15 +75,31 @@ func (s *Server) mcpHandler() http.Handler {
 		// It is read here, after authentication and never before, so that the
 		// refusal is one stable answer instead of whatever the MCP library
 		// makes of a body that ends early.
+		//
+		// One caller may send more (issue #1798): an agent whose manifest
+		// grants files.upload, for the images of a post_message. The limit is
+		// chosen after the caller is known, and the manifest is read only for
+		// a request that says it is larger than the bound, or does not say:
+		// every other request is read exactly as before. A larger request is
+		// then let through only if it is such a post and everything in it but
+		// the image data is within the bound (mcpOversizeIsAttachments).
 		if r.Method == http.MethodPost && r.Body != nil {
-			body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, schema.MaxPostRequestBytes))
+			limit := int64(schema.MaxPostRequestBytes)
+			if r.ContentLength > limit || r.ContentLength < 0 {
+				limit = s.mcpRequestLimit(r.Context(), identity)
+			}
+			body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, limit))
 			if err != nil {
 				var tooLarge *http.MaxBytesError
 				if errors.As(err, &tooLarge) {
-					writeError(w, http.StatusRequestEntityTooLarge, "request_too_large", "request body exceeds the maximum size")
+					writeMCPRequestTooLarge(w)
 					return
 				}
 				writeError(w, http.StatusBadRequest, "invalid_request", "request body could not be read")
+				return
+			}
+			if len(body) > schema.MaxPostRequestBytes && !mcpOversizeIsAttachments(body) {
+				writeMCPRequestTooLarge(w)
 				return
 			}
 			r.Body = io.NopCloser(bytes.NewReader(body))
@@ -90,6 +107,88 @@ func (s *Server) mcpHandler() http.Handler {
 		}
 		h.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), mcpIdentityKey{}, identity)))
 	})
+}
+
+func writeMCPRequestTooLarge(w http.ResponseWriter) {
+	writeError(w, http.StatusRequestEntityTooLarge, "request_too_large", "request body exceeds the maximum size")
+}
+
+// mcpRequestLimit is the most bytes of an /mcp request body the server reads
+// from identity: schema.MaxPostRequestBytes, and, for an agent whose manifest
+// grants files.upload on a server that takes agents' uploads, that plus the
+// base64 length of one upload (issue #1798). The attachments of one call
+// share one MaxUploadBytes in total, so one call can never carry more than
+// one upload by a person can.
+//
+// Everything that is not a clear grant is the smaller limit: no manifest, an
+// invalid one, a store failure. Nothing is audited here; the tool decides the
+// grant again, and audits a refusal.
+func (s *Server) mcpRequestLimit(ctx context.Context, identity mcpIdentity) int64 {
+	base := int64(schema.MaxPostRequestBytes)
+	if !s.agentUploadsEnabled() {
+		return base
+	}
+	m, reason, err := s.agentManifest(ctx, identity.principalID)
+	if err != nil {
+		slog.ErrorContext(ctx, "mcp: load manifest for the request limit failed", "principal", identity.principalID, "error", err)
+		return base
+	}
+	if reason != "" || !m.Allows(schema.CapabilityFilesUpload) {
+		return base
+	}
+	return base + base64Len(s.cfg.MaxUploadBytes)
+}
+
+// base64Len is the length of n bytes in padded base64, held to a value that
+// cannot overflow whatever n is configured.
+func base64Len(n int64) int64 {
+	const most = 1 << 60
+	if n > most/2 {
+		return most
+	}
+	return (n + 2) / 3 * 4
+}
+
+// mcpOversizeIsAttachments reports whether body, a request larger than
+// schema.MaxPostRequestBytes, is one the larger limit is for: a single
+// tools/call of post_message, in which everything but the data of its
+// attachments is within schema.MaxPostRequestBytes. Anything else that large
+// is refused as it always was: another tool, a batch, or a post whose text or
+// payload is what makes it large. So the larger limit is room for image bytes
+// and for nothing else, and no message can be stored from more than
+// MaxPostRequestBytes of request (schema.MaxMessageFrameBytes depends on it).
+//
+// The data is measured as it stands in the request (json.RawMessage), not
+// after decoding, which can lengthen a string. This reads the request with
+// the standard library and the MCP library reads it again with its own
+// decoder. Where the two could differ (a key repeated, or in another case),
+// this counts at most the bytes of one attachments list and holds every other
+// byte of the request to the bound, so bytes it lets through as image data
+// are never bytes the tool can read as anything but an attachment's data.
+// post_message bounds its text again for itself.
+func mcpOversizeIsAttachments(body []byte) bool {
+	var call struct {
+		Method string `json:"method"`
+		Params struct {
+			Name      string `json:"name"`
+			Arguments struct {
+				Attachments []struct {
+					Data json.RawMessage `json:"data_base64"`
+				} `json:"attachments"`
+			} `json:"arguments"`
+		} `json:"params"`
+	}
+	if err := json.Unmarshal(body, &call); err != nil {
+		return false
+	}
+	if call.Method != "tools/call" || call.Params.Name != "post_message" {
+		return false
+	}
+	rest := len(body)
+	for _, a := range call.Params.Arguments.Attachments {
+		rest -= len(a.Data)
+	}
+	return rest <= schema.MaxPostRequestBytes
 }
 
 // authenticateMCP resolves the request's bearer token to an agent principal.

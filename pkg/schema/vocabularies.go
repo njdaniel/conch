@@ -24,10 +24,11 @@ var Vocabularies = map[string][]string{
 		CapabilityMessagesRead, CapabilityMessagesPost,
 		CapabilityApprovalsRequest, CapabilityApprovalsAwait, CapabilityApprovalsCheck,
 		CapabilitySessionsManage, CapabilityRunsManage, CapabilityAdminAct,
+		CapabilityFilesUpload,
 	),
 	"ChannelPermission": values(
 		ChannelPermissionRead, ChannelPermissionPost, ChannelPermissionPostNet,
-		ChannelPermissionWhisper, ChannelPermissionWhisperAgent,
+		ChannelPermissionWhisper, ChannelPermissionWhisperAgent, ChannelPermissionAttach,
 	),
 	"DiagnosticEventKind": values(
 		DiagnosticSocketOpen, DiagnosticSocketClose, DiagnosticReconnect,
