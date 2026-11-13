@@ -83,6 +83,10 @@ export function useNotifications({
   const delivered = useRef(new Set<string>());
   const lastSeen = useRef(new Map<number, number>());
   const initialized = useRef(new Set<number>());
+  // Channels whose last reconciliation read ran to the end: only for these may
+  // a live message move the cursor, or it would skip a gap a failed, capped or
+  // discarded read left behind it.
+  const caughtUp = useRef(new Set<number>());
   const accessEpoch = useRef(new Map<number, number>());
   const requests = useRef(new Map<number, object>());
   const previousLive = useRef(false);
@@ -117,6 +121,7 @@ export function useNotifications({
     delivered.current.clear();
     lastSeen.current.clear();
     initialized.current.clear();
+    caughtUp.current.clear();
     accessEpoch.current.clear();
     requests.current.clear();
     previousLive.current = false;
@@ -162,15 +167,24 @@ export function useNotifications({
     if (channel !== undefined) latestOpen.current(channel.name);
   }, [alerts, channels, close]);
 
-  const deliver = useCallback((message: MessageV2) => {
-    if (message.removed === true || removed.current.has(message.id)) return;
-    if (!signedIn || !eventsLive || principal === null || preferences.policy === 'off' || preferences.muted.includes(message.channel_id) || message.author_id === principal.id) return;
+  // Whether a message would be announced now, and as what. Separate from the
+  // announcing so a backfill can pick the newest few of those that qualify.
+  const eligible = useCallback((message: MessageV2) => {
+    if (message.removed === true || removed.current.has(message.id)) return null;
+    if (!signedIn || !eventsLive || principal === null || preferences.policy === 'off' || preferences.muted.includes(message.channel_id) || message.author_id === principal.id) return null;
     const channel = channels.find((candidate) => candidate.id === message.channel_id);
-    if (channel === undefined) return;
+    if (channel === undefined) return null;
     const mention = mentions(message.body, principal.name);
-    if (preferences.policy === 'mentions' && !mention) return;
+    if (preferences.policy === 'mentions' && !mention) return null;
     const id = `${origin}:${String(account)}:${String(message.id)}`;
-    if (delivered.current.has(id)) return;
+    if (delivered.current.has(id)) return null;
+    return { channel, mention, id };
+  }, [signedIn, eventsLive, principal, preferences, channels, origin, account]);
+
+  const deliver = useCallback((message: MessageV2) => {
+    const found = eligible(message);
+    if (found === null) return;
+    const { channel, mention, id } = found;
     delivered.current.add(id);
     const alert = { id, message, channel: channel.name, mention };
     setAlerts((previous) => {
@@ -197,7 +211,7 @@ export function useNotifications({
         if (current !== undefined) latestOpen.current(current.name);
       };
     }
-  }, [signedIn, eventsLive, principal, preferences, browserPermission, channels, origin, account, close]);
+  }, [eligible, browserPermission, close]);
   useEffect(() => {
     if (editEvent === null) return;
     if (editEvent.removed === true) removed.current.add(editEvent.id);
@@ -219,6 +233,8 @@ export function useNotifications({
 
   const latestDeliver = useRef(deliver);
   latestDeliver.current = deliver;
+  const latestEligible = useRef(eligible);
+  latestEligible.current = eligible;
 
   useEffect(() => {
     if (event === null || consumed.current === event) return;
@@ -229,7 +245,7 @@ export function useNotifications({
     // the page cap, delivers nothing). Only while the feed has been live since
     // the last reconciliation and none is under way: a message that arrives
     // in the render the socket returns in must not hide the gap behind it.
-    if (eventsLive && previousLive.current && initialized.current.has(event.channel_id) && !requests.current.has(event.channel_id)) {
+    if (eventsLive && previousLive.current && caughtUp.current.has(event.channel_id) && !requests.current.has(event.channel_id)) {
       lastSeen.current.set(event.channel_id, Math.max(lastSeen.current.get(event.channel_id) ?? 0, event.id));
     }
     deliver(event);
@@ -238,6 +254,7 @@ export function useNotifications({
   useEffect(() => {
     const reconnect = previousLive.current !== eventsLive;
     previousLive.current = eventsLive;
+    if (reconnect) caughtUp.current.clear();
     if (!signedIn || !eventsLive || !loaded || account === 0) return;
     let cancelled = false;
     void Promise.all(channels.map(async (channel) => {
@@ -248,6 +265,7 @@ export function useNotifications({
       const epoch = accessEpoch.current.get(channel.id) ?? 0;
       const request = {};
       requests.current.set(channel.id, request);
+      caughtUp.current.delete(channel.id);
       try {
         const result = await api.loadMessagesAscending(channel.name, after);
         // A first read must be whole: it is the baseline nothing earlier than
@@ -257,10 +275,16 @@ export function useNotifications({
         // than announce nothing at all (and never advance) in a busy channel.
         if (!result.ok || (first && !result.complete) || cancelled || requests.current.get(channel.id) !== request || epoch !== (accessEpoch.current.get(channel.id) ?? 0)) return;
         initialized.current.add(channel.id);
+        if (result.complete) caughtUp.current.add(channel.id);
+        // The cursor moves over every message; only the newest ten of those
+        // that would be announced are, which is all the page keeps anyway, so
+        // a long backlog does not raise one native notification apiece.
+        const announce: MessageV2[] = [];
         for (const message of result.value) {
           lastSeen.current.set(channel.id, Math.max(lastSeen.current.get(channel.id) ?? 0, message.id));
-          if (!first) latestDeliver.current(message);
+          if (!first && latestEligible.current(message) !== null) announce.push(message);
         }
+        for (const message of announce.slice(-10)) latestDeliver.current(message);
       } finally {
         if (requests.current.get(channel.id) === request) requests.current.delete(channel.id);
       }

@@ -266,6 +266,147 @@ describe('browser permission and cleanup', () => {
     expect(history).toHaveBeenLastCalledWith('general', 3);
   });
 
+  const baseline = async () => {
+    const hook = renderHook((p: Props) => useNotifications(p), { initialProps: props() });
+    await act(async () => {
+      await Promise.resolve();
+    });
+    act(() => {
+      hook.result.current.setPolicy('all');
+    });
+    return hook;
+  };
+  const ids = (alerts: readonly NotificationAlert[]) => alerts.map((item) => item.message.id).sort((a, b) => a - b);
+
+  it('keeps the cursor behind a reconnect read that failed, whatever arrives live after it', async () => {
+    const history = vi.spyOn(api, 'loadMessagesAscending').mockResolvedValue({ ok: true, complete: true, value: [message(1)] });
+    const { result, rerender } = await baseline();
+    rerender({ ...props(), eventsLive: false });
+    history.mockResolvedValue({ ok: false, failure: 'network' });
+    rerender({ ...props(), eventsLive: true });
+    await act(async () => {
+      await Promise.resolve();
+    });
+    rerender({ ...props(), event: message(4) });
+    rerender({ ...props(), event: message(4), eventsLive: false });
+    history.mockResolvedValue({ ok: true, complete: true, value: [message(2), message(3), message(4)] });
+    rerender({ ...props(), event: message(4), eventsLive: true });
+    await vi.waitFor(() => {
+      expect(result.current.alerts.map((item) => item.message.id)).toEqual([2, 3]);
+    });
+    expect(history).toHaveBeenLastCalledWith('general', 1);
+  });
+
+  it('continues from the end of a capped read even when a message arrives live before the next one', async () => {
+    const history = vi.spyOn(api, 'loadMessagesAscending').mockResolvedValue({ ok: true, complete: true, value: [message(1)] });
+    const { result, rerender } = await baseline();
+    rerender({ ...props(), eventsLive: false });
+    history.mockResolvedValue({ ok: true, complete: false, value: [message(2), message(3)] });
+    rerender({ ...props(), eventsLive: true });
+    await vi.waitFor(() => {
+      expect(result.current.alerts.map((item) => item.message.id)).toEqual([2, 3]);
+    });
+    rerender({ ...props(), event: message(9) });
+    rerender({ ...props(), event: message(9), eventsLive: false });
+    history.mockResolvedValue({ ok: true, complete: true, value: [message(4)] });
+    rerender({ ...props(), event: message(9), eventsLive: true });
+    await vi.waitFor(() => {
+      expect(result.current.alerts.map((item) => item.message.id)).toEqual([4]);
+    });
+    expect(history).toHaveBeenLastCalledWith('general', 3);
+  });
+
+  it('does not move the cursor for a message that arrives live while a read is in flight', async () => {
+    const history = vi.spyOn(api, 'loadMessagesAscending').mockResolvedValue({ ok: true, complete: true, value: [message(1)] });
+    const { result, rerender } = await baseline();
+    rerender({ ...props(), eventsLive: false });
+    let finish: (value: Awaited<ReturnType<typeof api.loadMessagesAscending>>) => void = () => undefined;
+    history.mockReturnValue(new Promise((resolve) => {
+      finish = resolve;
+    }));
+    rerender({ ...props(), eventsLive: true });
+    rerender({ ...props(), event: message(9) });
+    await act(async () => {
+      finish({ ok: true, complete: false, value: [message(2), message(3)] });
+      await Promise.resolve();
+    });
+    rerender({ ...props(), event: message(9), eventsLive: false });
+    history.mockResolvedValue({ ok: true, complete: true, value: [message(4)] });
+    rerender({ ...props(), event: message(9), eventsLive: true });
+    await vi.waitFor(() => {
+      expect(ids(result.current.alerts)).toEqual([4]);
+    });
+    expect(history).toHaveBeenLastCalledWith('general', 3);
+  });
+
+  it('never moves the cursor from a live message after an incomplete first read', async () => {
+    const history = vi.spyOn(api, 'loadMessagesAscending').mockResolvedValue({ ok: true, complete: false, value: [message(1)] });
+    const { rerender } = await baseline();
+    rerender({ ...props(), event: message(5) });
+    rerender({ ...props(), event: message(5), eventsLive: false });
+    history.mockResolvedValue({ ok: true, complete: true, value: [message(1), message(5)] });
+    rerender({ ...props(), event: message(5), eventsLive: true });
+    await vi.waitFor(() => {
+      expect(history).toHaveBeenCalledTimes(2);
+    });
+    expect(history).toHaveBeenLastCalledWith('general', 0);
+  });
+
+  it('keeps the cursor behind a reconnect that came while the channels were not loaded', async () => {
+    const history = vi.spyOn(api, 'loadMessagesAscending').mockResolvedValue({ ok: true, complete: true, value: [message(1)] });
+    const { result, rerender } = await baseline();
+    rerender({ ...props(), eventsLive: false });
+    rerender({ ...props(), eventsLive: true, loaded: false });
+    expect(history).toHaveBeenCalledTimes(1);
+    rerender({ ...props(), event: message(4), loaded: false });
+    rerender({ ...props(), event: message(4), eventsLive: false });
+    history.mockResolvedValue({ ok: true, complete: true, value: [message(2), message(3), message(4)] });
+    rerender({ ...props(), event: message(4), eventsLive: true });
+    await vi.waitFor(() => {
+      expect(ids(result.current.alerts)).toEqual([2, 3]);
+    });
+    expect(history).toHaveBeenLastCalledWith('general', 1);
+  });
+
+  it('announces only the newest ten of a long backlog, capped or whole, and still moves the cursor over all of it', async () => {
+    visibility('hidden');
+    const history = vi.spyOn(api, 'loadMessagesAscending').mockResolvedValue({ ok: true, complete: true, value: [message(1)] });
+    const { result, rerender } = await baseline();
+    await act(async () => {
+      await result.current.enableNative();
+    });
+    rerender({ ...props(), eventsLive: false });
+    const backlog = Array.from({ length: 30 }, (_, index) => message(index + 2));
+    history.mockResolvedValue({ ok: true, complete: false, value: backlog });
+    rerender({ ...props(), eventsLive: true });
+    await vi.waitFor(() => {
+      expect(ids(result.current.alerts)).toEqual(backlog.slice(-10).map((item) => item.id));
+    });
+    expect(FakeNotification.all).toHaveLength(10);
+    rerender({ ...props(), eventsLive: false });
+    history.mockResolvedValue({ ok: true, complete: true, value: [message(32)] });
+    rerender({ ...props(), eventsLive: true });
+    await vi.waitFor(() => {
+      expect(history).toHaveBeenLastCalledWith('general', 31);
+    });
+  });
+
+  it('picks the newest ten of the messages that would be announced, not of the whole read', async () => {
+    const history = vi.spyOn(api, 'loadMessagesAscending').mockResolvedValue({ ok: true, complete: true, value: [message(1)] });
+    const { result, rerender } = await baseline();
+    act(() => {
+      result.current.setPolicy('mentions');
+    });
+    rerender({ ...props(), eventsLive: false });
+    // Two mentions early, a long run of others after them.
+    const read = [message(2, 'hi @ada'), message(3, 'hi @ada'), ...Array.from({ length: 28 }, (_, index) => message(index + 4))];
+    history.mockResolvedValue({ ok: true, complete: true, value: read });
+    rerender({ ...props(), eventsLive: true });
+    await vi.waitFor(() => {
+      expect(ids(result.current.alerts)).toEqual([2, 3]);
+    });
+  });
+
   it('restarts backfill when a channel is renamed during reconciliation', async () => {
     const history = vi.spyOn(api, 'loadMessagesAscending').mockResolvedValue({ ok: true, complete: true, value: [message(1)] });
     const { result, rerender } = renderHook((p: Props) => useNotifications(p), { initialProps: props() });
