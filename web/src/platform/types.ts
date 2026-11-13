@@ -94,7 +94,35 @@ export interface NativeNotification {
   close(): void;
 }
 
+// A browser's Web Push subscription as the server's registration takes it
+// (CreatePushRegistrationRequestV1): the push service's address and the two
+// keys, base64url without padding.
+export interface PushSubscriptionTarget {
+  readonly endpoint: string;
+  readonly p256dh: string;
+  readonly auth: string;
+}
+
+// Background push through a service worker (issue #1826). Only the browser
+// has it; the desktop shell raises its own notifications and has no use for
+// one.
+export interface PushService {
+  // Whether this browser has service workers, push and notifications.
+  supported(): boolean;
+  // Registers the worker if need be and subscribes with the server's key
+  // (base64url), replacing an earlier subscription made with another key.
+  // Rejects when the browser refuses.
+  subscribe(applicationServerKey: string): Promise<PushSubscriptionTarget>;
+  // Whether this browser holds a subscription now.
+  subscribed(): Promise<boolean>;
+  // Drops the subscription, if any. The worker stays: it does nothing
+  // without one.
+  unsubscribe(): Promise<void>;
+}
+
 export interface Services {
+  // Absent where the place has no service workers (the desktop shell).
+  push?: PushService;
   // The address the client is served from: the server's own, for the browser.
   origin(): string;
   // Puts text on the clipboard; rejects, or throws, when there is no

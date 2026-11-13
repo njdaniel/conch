@@ -847,7 +847,11 @@ func (r *runner) serveArgs(listen string) []string {
 		args = append(args, "--session-stale", suiteSessionStale, "--session-offline", suiteSessionOffline)
 	}
 	if r.relaxInviteLimits {
-		args = append(args, "--test-relax-invite-limits")
+		// The browser suite's run: its Web Push spec registers a subscription
+		// whose endpoint is on loopback (issue #1826), which only
+		// --push-webpush-allow-private admits. conchd keeps its own VAPID key
+		// in the data directory.
+		args = append(args, "--test-relax-invite-limits", "--push-webpush", "--push-webpush-allow-private")
 	}
 	return args
 }

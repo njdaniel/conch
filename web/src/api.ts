@@ -1,4 +1,5 @@
 import { disablePrincipalResponseV1, listChannelBansResponseV1, messageV2, revokeIssuedResponseV1, type DisablePrincipalResponseV1, type RevokeIssuedResponseV1, messageRemovedV1, type MessageRemovedV1 } from './schema/generated';
+import { listOwnPushRegistrationsResponseV1, pushConfigV1, pushRegistrationV1, type CreatePushRegistrationRequestV1, type PushConfigV1, type PushRegistrationV1, type PutNotificationPreferencesRequestV1 } from './schema/generated';
 import { defaultShareQuality, type SettledQuality, type ShareQuality } from './voice/share';
 // The only module that holds the credential in use, and the only one that
 // asks conchd anything. Where the token lives depends on whose it is (issue
@@ -214,7 +215,7 @@ import { fromServer, type Validator } from './schema/validate';
 import { call, fileQuery, operations, previewCall, queryOf, type Call, type OperationId } from './platform/operations';
 import { previewResponseV1, type PreviewResponseV1 } from './schema/preview';
 import { platform } from './platform';
-import type { FeedConnection, Held, Place } from './platform/types';
+import type { FeedConnection, Held, Place, PushSubscriptionTarget } from './platform/types';
 import type { FeedSocket, OpenSocket, SocketEvents } from './state/feed';
 import { forget as forgetDiagnostics, record } from './diagnostics';
 import { visitOf } from './guestName';
@@ -849,6 +850,9 @@ export function whoAmI(): Promise<ApiResult<WhoAmIResponseV1>> {
 export async function signOut(): Promise<boolean> {
   pending = null;
   const held = current();
+  // This browser's background push ends first: its registration is the
+  // credential's, and the request needs the credential that is revoked below.
+  if (held !== null) await endPush(true);
   pin(null);
   forgetDiagnostics();
   if (held === null) return true;
@@ -874,7 +878,9 @@ export async function signOutEverywhere(principal: number): Promise<ApiResult<nu
   if (reply.kind === 'unauthorized') return { ok: false, failure: 'unauthorized' };
   if (!reply.res.ok) return refused(reply.res);
   // A success: the credentials are revoked, this one with them, whatever the
-  // body turns out to be.
+  // body turns out to be. Their registrations ended with them; what this
+  // browser holds of its own goes too.
+  await forgetPush();
   forget(held);
   try {
     const parsed: unknown = await reply.res.json();
@@ -2535,6 +2541,136 @@ export function writeNotificationPreferences(origin: string, account: number, pr
   } catch {
     // Storage can be unavailable; the in-memory preference still applies.
   }
+}
+
+// Background push (issue #1826, docs/design/mobile-notifications.md O6). The
+// browser subscribes through its service worker, hands the subscription to
+// conchd as a registration (platform web, transport webpush), and mirrors its
+// own notification policy to the server's copy, which is what the sender
+// reads to decide whether to wake it. The local preferences stay the source
+// of truth (design D-5). The worker holds no credential.
+
+export function pushConfig(): Promise<ApiResult<PushConfigV1>> {
+  return authed(call('pushConfig'), pushConfigV1);
+}
+
+export async function ownPushRegistrations(): Promise<ApiResult<PushRegistrationV1[]>> {
+  const result = await authed(call('listPushRegistrations'), listOwnPushRegistrationsResponseV1);
+  return result.ok ? { ok: true, value: result.value.registrations } : result;
+}
+
+// createPushRegistration registers a subscription as this credential's address
+// for wakes. The refusal carries the server's code (push_not_configured,
+// push_endpoint_refused, and the like).
+export async function createPushRegistration(target: PushSubscriptionTarget): Promise<ApiResult<PushRegistrationV1>> {
+  const request: CreatePushRegistrationRequestV1 = {
+    transport: 'webpush',
+    platform: 'web',
+    app: platform.services.origin(),
+    endpoint: target.endpoint,
+    p256dh: target.p256dh,
+    auth: target.auth,
+  };
+  const reply = await authedSend(call('createPushRegistration'), request);
+  if (reply.kind === 'none') return { ok: false, failure: 'network' };
+  if (reply.kind === 'unauthorized') return { ok: false, failure: 'unauthorized' };
+  if (!reply.res.ok) return refused(reply.res);
+  const body = await readBody(reply.res, pushRegistrationV1);
+  return body.ok ? body : { ok: false, failure: 'invalid' };
+}
+
+// endPushRegistration ends one of this credential's registrations. One the
+// server has already ended, or never issued, is the same 404 and counts as
+// ended: that is what the caller wanted.
+export async function endPushRegistration(id: string): Promise<ApiResult<null>> {
+  const reply = await authedSend(call('endPushRegistration', { id }));
+  if (reply.kind === 'none') return { ok: false, failure: 'network' };
+  if (reply.kind === 'unauthorized') return { ok: false, failure: 'unauthorized' };
+  if (reply.res.status === 404) {
+    await discard(reply.res);
+    return { ok: true, value: null };
+  }
+  if (!reply.res.ok) return refused(reply.res);
+  return { ok: true, value: null };
+}
+
+// pkg/schema MaxMutedChannels.
+const maxMutedChannels = 256;
+
+// mirrorNotificationPreferences writes the browser's policy and mutes to the
+// server's copy for this credential. The preview and quiet switches are the
+// server's own and stay off: the worker shows no text, and the browser has no
+// such preference to copy.
+export async function mirrorNotificationPreferences(policy: NotificationPolicy, muted: readonly number[]): Promise<ApiResult<null>> {
+  const request: PutNotificationPreferencesRequestV1 = {
+    policy,
+    // The server bounds the list; a browser holding more mutes than that keeps
+    // the rest only here.
+    muted: muted.slice(0, maxMutedChannels),
+    preview: false,
+    quiet_when_unreachable: false,
+  };
+  const reply = await authedSend(call('putNotificationPreferences'), request);
+  if (reply.kind === 'none') return { ok: false, failure: 'network' };
+  if (reply.kind === 'unauthorized') return { ok: false, failure: 'unauthorized' };
+  if (!reply.res.ok) return refused(reply.res);
+  await discard(reply.res);
+  return { ok: true, value: null };
+}
+
+// The id of this browser's registration, kept beside the other preferences of
+// this origin: one browser holds one subscription for the client's scope.
+const pushRegistrationKey = (origin: string) => `conch.web.push.v1.${origin}`;
+
+export function readPushRegistration(): string | null {
+  try {
+    const id = platform.credentials.readPreference(pushRegistrationKey(platform.services.origin()));
+    return id === null || id === '' ? null : id;
+  } catch {
+    return null;
+  }
+}
+
+export function keepPushRegistration(id: string | null): void {
+  try {
+    platform.credentials.writePreference(pushRegistrationKey(platform.services.origin()), id ?? '');
+  } catch {
+    // Storage can be unavailable; the registration then ends with its
+    // credential at sign-out.
+  }
+}
+
+// endPush ends this browser's background push: the registration at the server,
+// then the subscription here. force drops the subscription and the record even
+// when the server could not be told, which a sign-out does: the credential the
+// registration belongs to is about to end, and with it the registration. It
+// resolves to whether nothing is left behind. It makes no request, and drops
+// nothing, for a browser that never registered.
+export async function endPush(force = false): Promise<boolean> {
+  const push = platform.services.push;
+  const id = readPushRegistration();
+  if (push === undefined || id === null) return true;
+  const ended = await endPushRegistration(id);
+  if (!ended.ok && !force) return false;
+  try {
+    await push.unsubscribe();
+  } catch {
+    // The browser refused to drop it; with no registration it wakes nothing.
+  }
+  keepPushRegistration(null);
+  return ended.ok;
+}
+
+// forgetPush drops the subscription and the record here, with no request: for
+// a credential that is already gone and took its registrations with it.
+async function forgetPush(): Promise<void> {
+  if (readPushRegistration() === null) return;
+  try {
+    await platform.services.push?.unsubscribe();
+  } catch {
+    // Nothing is registered to wake it.
+  }
+  keepPushRegistration(null);
 }
 
 // How a person arranges the channel list (issue #1493): favorites, groups and

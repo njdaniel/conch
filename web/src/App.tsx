@@ -57,6 +57,7 @@ import {
 import { canLoadOlder, chatFor, chatReducer, initialChat, lastId, oldestId, ordered, sameSend, type ChatAction, type PendingSend } from './state/messages';
 import { useLiveChannel } from './useLiveChannel';
 import { useNotifications } from './useNotifications';
+import { usePush } from './usePush';
 import { NotificationCenter } from './NotificationCenter';
 import { NotificationSettings } from './NotificationSettings';
 import { SearchPanel } from './SearchPanel';
@@ -751,6 +752,15 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
     editEvent,
     readStateEvent,
     onOpen,
+  });
+  // "Notify me when Conch is closed" (issue #1826). Only a person with a full
+  // credential: the server refuses a guest and an agent.
+  const push = usePush({
+    signedIn,
+    eligible: principal !== null && principal.kind === 'human' && visit === null,
+    account: principal?.id ?? 0,
+    policy: notifications.policy,
+    muted: notifications.muted,
   });
 
   const now = useNow(signedIn);
@@ -1800,6 +1810,16 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
                 channels={channels.channels}
                 muted={notifications.muted}
                 onToggleMute={notifications.toggleMute}
+                push={{
+                  state: push.state,
+                  failure: push.failure,
+                  onEnable: () => {
+                    void push.enable();
+                  },
+                  onDisable: () => {
+                    void push.disable();
+                  },
+                }}
                 onPolicy={notifications.setPolicy}
                 onEnable={() => {
                   void notifications.enableNative();
