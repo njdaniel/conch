@@ -223,6 +223,9 @@ type harnessOpts struct {
 	perMin   int
 	queue    int
 	workers  int
+	// clientTimeout, when set, replaces the client's whole-request budget, so a
+	// test of the timeout does not race waitFor's wall-clock budget.
+	clientTimeout time.Duration
 }
 
 // newHarness builds a sender that reaches the provider through the real
@@ -241,6 +244,9 @@ func newHarness(t *testing.T, o harnessOpts) *harness {
 	pool := x509.NewCertPool()
 	pool.AddCert(h.prov.Certificate())
 	client := newClient(NewDialer(h.res, false), pool)
+	if o.clientTimeout > 0 {
+		client.Timeout = o.clientTimeout
+	}
 
 	u, err := url.Parse(h.prov.Endpoint(h.sub))
 	if err != nil {
@@ -622,7 +628,9 @@ func TestPortRuleBeforeSend(t *testing.T) {
 // TestHangingProviderTimesOut: a provider that never answers costs one worker
 // for the client's timeout, and is a "timeout" failure. Other wakes go on.
 func TestHangingProviderTimesOut(t *testing.T) {
-	h := newHarness(t, harnessOpts{})
+	// A short client timeout, far under waitFor's budget: the test must not
+	// depend on headroom between two wall-clock timeouts.
+	h := newHarness(t, harnessOpts{clientTimeout: 200 * time.Millisecond})
 	h.prov.Script(func(n int, _ *pushtest.Delivery) pushtest.Reply {
 		if n == 1 {
 			return pushtest.Reply{Hang: true}
@@ -1093,20 +1101,23 @@ func TestNoEndpointInLogsOrCounts(t *testing.T) {
 		name  string
 		reply pushtest.Reply
 		res   *fakeResolver
+		// timeout replaces the client's budget for the row that hangs only, so
+		// it does not race waitFor (#1804) and no other row depends on it.
+		timeout time.Duration
 	}{
-		{"sent", pushtest.Reply{Status: 201}, nil},
-		{"rejected", pushtest.Reply{Status: 410}, nil},
-		{"4xx", pushtest.Reply{Status: 400}, nil},
-		{"5xx", pushtest.Reply{Status: 503}, nil},
-		{"3xx", pushtest.Reply{Status: 302, Location: "https://marker-location.example/MARKER-LOC"}, nil},
-		{"hang", pushtest.Reply{Hang: true}, nil},
-		{"private address", pushtest.Reply{}, sequence([]string{"10.1.2.3"})},
-		{"lookup failure", pushtest.Reply{}, &fakeResolver{fn: func(int, string) ([]netipAddr, error) { return nil, fmt.Errorf("marker-resolver-error") }}},
+		{"sent", pushtest.Reply{Status: 201}, nil, 0},
+		{"rejected", pushtest.Reply{Status: 410}, nil, 0},
+		{"4xx", pushtest.Reply{Status: 400}, nil, 0},
+		{"5xx", pushtest.Reply{Status: 503}, nil, 0},
+		{"3xx", pushtest.Reply{Status: 302, Location: "https://marker-location.example/MARKER-LOC"}, nil, 0},
+		{"hang", pushtest.Reply{Hang: true}, nil, 200 * time.Millisecond},
+		{"private address", pushtest.Reply{}, sequence([]string{"10.1.2.3"}), 0},
+		{"lookup failure", pushtest.Reply{}, &fakeResolver{fn: func(int, string) ([]netipAddr, error) { return nil, fmt.Errorf("marker-resolver-error") }}, 0},
 	}
 	var markers []string
 	for _, o := range outcomes {
 		t.Run(o.name, func(t *testing.T) {
-			h := newHarness(t, harnessOpts{resolver: o.res})
+			h := newHarness(t, harnessOpts{resolver: o.res, clientTimeout: o.timeout})
 			h.prov.Script(func(int, *pushtest.Delivery) pushtest.Reply { return o.reply })
 			u, _ := url.Parse(h.target.Endpoint)
 			h.src.targets[0].Endpoint = "https://example.com:" + u.Port() + u.Path + "?marker-query=MARKER-QUERY-1f2e"
