@@ -1308,7 +1308,8 @@ pub enum Devices {
 pub enum KeySource {
     /// The key device `voice.toml` names, read as an event device.
     Configured,
-    /// `--test-key-device`: a named pipe of records, with the keys `voice.toml` binds.
+    /// `--test-key-device`: a named pipe of records, with the keys `voice.toml` binds. On Windows
+    /// the records are `keys_windows`'s four-byte fake Raw Input transitions (#1791).
     NamedPipe(PathBuf),
 }
 
@@ -2118,6 +2119,26 @@ mod tests {
         bytes[18..20].copy_from_slice(&code.to_le_bytes());
         bytes[20..24].copy_from_slice(&value.to_le_bytes());
         bytes
+    }
+
+    /// The seam of #1791 (and Linux's pipe before it) is behind the hidden option alone: a
+    /// run without `--test-key-device` is [`KeySource::Configured`], and that is read as an
+    /// event device and nothing else, whatever `voice.toml` says.
+    #[cfg(not(windows))]
+    #[test]
+    fn a_normal_run_reads_its_keys_under_the_event_device_rule_and_never_the_pipe_rule() {
+        let toml = "[keys]\ndevice = \"/dev/input/event-fake\"\ntalk = \"KEY_F13\"\n";
+        let config = Config::parse(toml, "voice.toml").unwrap();
+        for no_mute_key in [false, true] {
+            let (_, _, rule) = key_source(&config, &KeySource::Configured, no_mute_key)
+                .unwrap()
+                .unwrap();
+            assert_eq!(rule, DeviceRule::EventDevice);
+        }
+        let (_, _, rule) = key_source(&config, &KeySource::NamedPipe(PathBuf::from("p")), false)
+            .unwrap()
+            .unwrap();
+        assert_eq!(rule, DeviceRule::NamedPipeForTests);
     }
 
     /// #1631 on Windows: the same rule, for a source with no device, bound in the grammar of

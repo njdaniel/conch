@@ -92,7 +92,9 @@ pub const BUFFER_LEN: usize = RECORDS_PER_READ * INPUT_EVENT_LEN;
 /// `conch_voice_control::Config` has nowhere to hold one. The one other rule the binary
 /// can be given is [`DeviceRule::NamedPipeForTests`], by `managed`'s hidden, test-only
 /// `--test-key-device`: a named pipe, which no keyboard is, so that option cannot read a
-/// keyboard either. (The configuration separately refuses a `keys.device` that is not
+/// keyboard either. On Windows the same option reads fake Raw Input transitions from a named
+/// pipe in the kernel's pipe namespace (`\\.\pipe\`) and nothing else, by the same hidden
+/// option and no other route (`keys_windows::PipeSource`, #1791). (The configuration separately refuses a `keys.device` that is not
 /// written as a path under `/dev/input/`; this rule is about where the path leads and what
 /// was opened.)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -613,12 +615,20 @@ pub fn spawn(
     inputs: mpsc::UnboundedSender<Input>,
 ) -> io::Result<()> {
     // On Windows the keys come from Raw Input, not from a device that is opened
-    // (`keys_windows`); the device and the timings are Linux's. The test rules keep the
+    // (`keys_windows`); the device and the timings are Linux's. The test rule that names a
+    // pipe reads fake transitions from it instead (`keys_windows::PipeSource`, #1791, which
+    // `--test-key-device` alone leads to, as on Linux). The other test rule keeps the
     // watcher, which answers `Unsupported` there.
     #[cfg(windows)]
-    if rule == DeviceRule::EventDevice {
-        let _ = (&device, timings);
-        return crate::keys_windows::spawn(&bindings, inputs);
+    {
+        if rule == DeviceRule::EventDevice {
+            let _ = (&device, timings);
+            return crate::keys_windows::spawn(&bindings, inputs);
+        }
+        if rule == DeviceRule::NamedPipeForTests {
+            let _ = timings;
+            return crate::keys_windows::spawn_pipe(&device, &bindings, inputs);
+        }
     }
     let watcher = Watcher {
         device,
