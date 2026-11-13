@@ -1,4 +1,5 @@
 import { disablePrincipalResponseV1, listChannelBansResponseV1, messageV2, revokeIssuedResponseV1, type DisablePrincipalResponseV1, type RevokeIssuedResponseV1, messageRemovedV1, type MessageRemovedV1 } from './schema/generated';
+import { listOwnPushRegistrationsResponseV1, notificationPreferencesV1, pushConfigV1, pushRegistrationV1, type CreatePushRegistrationRequestV1, type NotificationPreferencesV1, type PushConfigV1, type PushRegistrationV1, type PutNotificationPreferencesRequestV1 } from './schema/generated';
 import { defaultShareQuality, type SettledQuality, type ShareQuality } from './voice/share';
 // The only module that holds the credential in use, and the only one that
 // asks conchd anything. Where the token lives depends on whose it is (issue
@@ -214,7 +215,7 @@ import { fromServer, type Validator } from './schema/validate';
 import { call, fileQuery, operations, previewCall, queryOf, type Call, type OperationId } from './platform/operations';
 import { previewResponseV1, type PreviewResponseV1 } from './schema/preview';
 import { platform } from './platform';
-import type { FeedConnection, Held, Place } from './platform/types';
+import type { FeedConnection, Held, Place, PushSubscriptionTarget } from './platform/types';
 import type { FeedSocket, OpenSocket, SocketEvents } from './state/feed';
 import { forget as forgetDiagnostics, record } from './diagnostics';
 import { visitOf } from './guestName';
@@ -810,6 +811,9 @@ export async function restore(): Promise<ApiResult<Restored>> {
   }
   if (held.place === 'lasting' && result.value.role === 'operator') {
     platform.credentials.drop(held);
+    // A member made an operator keeps the sign-in, and its registration: but
+    // it is no longer a lasting one, which is the only kind push is offered.
+    await forgetPush();
     pending = held.token;
     return { ok: true, value: { principal: result.value, warn: true } };
   }
@@ -817,6 +821,7 @@ export async function restore(): Promise<ApiResult<Restored>> {
     // A visit is never kept to last: found there, it is moved to this tab,
     // and the other tabs of the origin no longer have it.
     platform.credentials.drop(held);
+    await forgetPush();
     const moved: Held = { token: held.token, place: 'tab' };
     const kept = platform.credentials.write(moved.token, moved.place);
     if (kept === null) {
@@ -846,9 +851,17 @@ export function whoAmI(): Promise<ApiResult<WhoAmIResponseV1>> {
 // server was told: true when it revoked the credential, when the credential
 // was no longer valid anyway (401), or when none was stored; false when there
 // was no answer or a refusal, and the credential may still work elsewhere.
-export async function signOut(): Promise<boolean> {
+export async function signOut(account?: number): Promise<boolean> {
   pending = null;
   const held = current();
+  // This browser's background push ends first: its registration is the
+  // credential's, and the request needs the credential that is revoked below.
+  if (held !== null && held.place === 'lasting') {
+    if (account !== undefined) await endPush(account, true);
+    // What is left is another account's, or one nobody can name: under a
+    // lasting credential, which is this origin's one, it is stale. Dropped here.
+    await forgetPush();
+  }
   pin(null);
   forgetDiagnostics();
   if (held === null) return true;
@@ -874,7 +887,9 @@ export async function signOutEverywhere(principal: number): Promise<ApiResult<nu
   if (reply.kind === 'unauthorized') return { ok: false, failure: 'unauthorized' };
   if (!reply.res.ok) return refused(reply.res);
   // A success: the credentials are revoked, this one with them, whatever the
-  // body turns out to be.
+  // body turns out to be. Their registrations ended with them; what this
+  // browser holds of its own goes too.
+  await forgetPush(principal);
   forget(held);
   try {
     const parsed: unknown = await reply.res.json();
@@ -1470,6 +1485,9 @@ export async function forgetStored(): Promise<boolean> {
   if (held === null || !stillStored(held)) return true;
   const reply = await sendAs(held, call('logout'));
   platform.credentials.drop(held);
+  // A lasting credential is the one a push registration belongs to; the
+  // server may never be told, so the subscription goes here, with no request.
+  if (held.place === 'lasting') await forgetPush();
   return reply.kind === 'unauthorized' || (reply.kind === 'reply' && reply.res.ok);
 }
 
@@ -2535,6 +2553,195 @@ export function writeNotificationPreferences(origin: string, account: number, pr
   } catch {
     // Storage can be unavailable; the in-memory preference still applies.
   }
+}
+
+// Background push (issue #1826, docs/design/mobile-notifications.md O6). The
+// browser subscribes through its service worker, hands the subscription to
+// conchd as a registration (platform web, transport webpush), and mirrors its
+// own notification policy to the server's copy, which is what the sender
+// reads to decide whether to wake it. The local preferences stay the source
+// of truth (design D-5). The worker holds no credential.
+
+export function pushConfig(): Promise<ApiResult<PushConfigV1>> {
+  return authed(call('pushConfig'), pushConfigV1);
+}
+
+export async function ownPushRegistrations(): Promise<ApiResult<PushRegistrationV1[]>> {
+  const result = await authed(call('listPushRegistrations'), listOwnPushRegistrationsResponseV1);
+  return result.ok ? { ok: true, value: result.value.registrations } : result;
+}
+
+// createPushRegistration registers a subscription as this credential's address
+// for wakes. The refusal carries the server's code (push_not_configured,
+// push_endpoint_refused, and the like).
+export async function createPushRegistration(target: PushSubscriptionTarget): Promise<ApiResult<PushRegistrationV1>> {
+  const request: CreatePushRegistrationRequestV1 = {
+    transport: 'webpush',
+    platform: 'web',
+    app: platform.services.origin(),
+    endpoint: target.endpoint,
+    p256dh: target.p256dh,
+    auth: target.auth,
+  };
+  const reply = await authedSend(call('createPushRegistration'), request);
+  if (reply.kind === 'none') return { ok: false, failure: 'network' };
+  if (reply.kind === 'unauthorized') return { ok: false, failure: 'unauthorized' };
+  if (!reply.res.ok) return refused(reply.res);
+  const body = await readBody(reply.res, pushRegistrationV1);
+  return body.ok ? body : { ok: false, failure: 'invalid' };
+}
+
+// endPushRegistration ends one of this credential's registrations. One the
+// server has already ended, or never issued, is the same 404 and counts as
+// ended: that is what the caller wanted. signal bounds the request.
+export async function endPushRegistration(id: string, signal?: AbortSignal): Promise<ApiResult<null>> {
+  const reply = await authedSend(call('endPushRegistration', { id }), undefined, false, signal);
+  if (reply.kind === 'none') return { ok: false, failure: 'network' };
+  if (reply.kind === 'unauthorized') return { ok: false, failure: 'unauthorized' };
+  if (reply.res.status === 404) {
+    await discard(reply.res);
+    return { ok: true, value: null };
+  }
+  if (!reply.res.ok) return refused(reply.res);
+  return { ok: true, value: null };
+}
+
+// pkg/schema MaxMutedChannels.
+export const maxMutedChannels = 256;
+
+// serverMutes is the mutes the server's copy can hold: past the bound, the
+// newest (the last muted) are kept, since the one just muted is the one the
+// person is waiting to go quiet.
+export function serverMutes(muted: readonly number[]): number[] {
+  return muted.slice(-maxMutedChannels);
+}
+
+// serverNotificationPreferences reads the server's copy of this credential's
+// notification policy. A read has a budget of its own, apart from the writes'.
+export function serverNotificationPreferences(): Promise<ApiResult<NotificationPreferencesV1>> {
+  return authed(call('getNotificationPreferences'), notificationPreferencesV1);
+}
+
+// mirrorNotificationPreferences writes the browser's policy and mutes to the
+// server's copy for this credential. The preview and quiet switches are the
+// server's own and stay off: the worker shows no text, and the browser has no
+// such preference to copy. A refusal for the write budget carries the
+// server's Retry-After.
+export async function mirrorNotificationPreferences(policy: NotificationPolicy, muted: readonly number[]): Promise<ApiResult<null>> {
+  const request: PutNotificationPreferencesRequestV1 = {
+    policy,
+    muted: serverMutes(muted),
+    preview: false,
+    quiet_when_unreachable: false,
+  };
+  const reply = await authedSend(call('putNotificationPreferences'), request);
+  if (reply.kind === 'none') return { ok: false, failure: 'network' };
+  if (reply.kind === 'unauthorized') return { ok: false, failure: 'unauthorized' };
+  if (!reply.res.ok) {
+    const wait = Number(reply.res.headers.get('Retry-After'));
+    const refusal = await refused(reply.res);
+    return Number.isFinite(wait) && wait > 0 ? { ...refusal, retryAfter: wait } : refusal;
+  }
+  await discard(reply.res);
+  return { ok: true, value: null };
+}
+
+// What this browser keeps of its background push: the id of the registration
+// and the account it was made for, beside the other preferences of this origin.
+// One browser holds one subscription for the client's scope, so one record: an
+// account that is not the record's never ends, or drops, what is another's.
+export interface PushRecord {
+  readonly id: string;
+  readonly account: number;
+}
+
+const pushRegistrationKey = (origin: string) => `conch.web.push.v1.${origin}`;
+
+export function readPushRegistration(): PushRecord | null {
+  try {
+    const raw = platform.credentials.readPreference(pushRegistrationKey(platform.services.origin()));
+    if (raw === null || raw === '') return null;
+    const record = JSON.parse(raw) as { id?: unknown; account?: unknown };
+    return typeof record.id === 'string' && record.id !== '' && typeof record.account === 'number' ? { id: record.id, account: record.account } : null;
+  } catch {
+    return null;
+  }
+}
+
+export function keepPushRegistration(record: PushRecord | null): void {
+  try {
+    platform.credentials.writePreference(pushRegistrationKey(platform.services.origin()), record === null ? '' : JSON.stringify(record));
+  } catch {
+    // Storage can be unavailable; the registration then ends with its
+    // credential at sign-out.
+  }
+}
+
+// onPushRegistrationChange calls listener when another tab of this origin
+// turns background push on or off, and returns the function that stops it.
+export function onPushRegistrationChange(listener: () => void): () => void {
+  return platform.credentials.onLastingChange(listener, pushRegistrationKey(platform.services.origin()));
+}
+
+// heldPlace is where the credential in use is kept: only a lasting one (a
+// member's) is offered background push, since a tab's ends with the tab
+// without a sign-out to end the registration.
+export function heldPlace(): Place | null {
+  return current()?.place ?? null;
+}
+
+// pushSignOutWait bounds the push request a sign-out makes: the revoke that
+// follows ends the registration anyway.
+const pushSignOutWait = 3000;
+
+// abortAfter is a signal that aborts after ms: AbortSignal.timeout where the
+// browser has it (Chrome 103), else a controller and a timer.
+function abortAfter(ms: number): AbortSignal {
+  if (typeof AbortSignal.timeout === 'function') return AbortSignal.timeout(ms);
+  const controller = new AbortController();
+  setTimeout(() => {
+    controller.abort();
+  }, ms);
+  return controller.signal;
+}
+
+// endPush ends this browser's background push for account: the registration
+// at the server, then the subscription here. force drops the subscription and
+// the record even when the server could not be told, and bounds the request,
+// which a sign-out does: the credential the registration belongs to is about
+// to end, and with it the registration. It resolves to whether nothing is left
+// behind. It makes no request, and drops nothing, for a browser that never
+// registered or whose record is another account's.
+export async function endPush(account: number, force = false): Promise<boolean> {
+  const push = platform.services.push;
+  const record = readPushRegistration();
+  if (push === undefined || record === null || record.account !== account) return true;
+  const ended = await endPushRegistration(record.id, force ? abortAfter(pushSignOutWait) : undefined);
+  if (!ended.ok && !force) return false;
+  try {
+    await push.unsubscribe();
+  } catch {
+    // The browser refused to drop it; with no registration it wakes nothing.
+  }
+  keepPushRegistration(null);
+  return ended.ok;
+}
+
+// forgetPush drops the subscription and the record here, with no request: for
+// a credential that is already gone and took its registrations with it. With
+// an account it leaves another account's record alone.
+export async function forgetPush(account?: number): Promise<void> {
+  const record = readPushRegistration();
+  if (record === null || (account !== undefined && record.account !== account)) return;
+  try {
+    await platform.services.push?.unsubscribe();
+  } catch {
+    // Nothing is registered to wake it.
+  }
+  // The record is cleared only if it is still the one dropped: a registration
+  // another tab (or enable) made in the gap is not this call's to clear.
+  const now = readPushRegistration();
+  if (now?.id === record.id && now.account === record.account) keepPushRegistration(null);
 }
 
 // How a person arranges the channel list (issue #1493): favorites, groups and

@@ -3,6 +3,7 @@
 // browser's API up when called, not when loaded, so a page without one (or a
 // test that installs one) is read as it stands.
 import type { NativeNotification, NotificationPermissionState, Services } from '../types';
+import { push } from './push';
 
 function supported(): boolean {
   return typeof window.Notification === 'function';
@@ -10,6 +11,8 @@ function supported(): boolean {
 
 export const services: Services = {
   origin: () => window.location.origin,
+
+  push,
 
   // No clipboard here (a page not served over https) throws or rejects; the
   // caller says so and offers the text to copy by hand.
