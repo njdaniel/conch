@@ -113,7 +113,10 @@ pub enum Step {
     CloseAndStall(u16, &'static str, Duration),
     /// Close the TCP connection with no close frame.
     Drop,
-    /// Reset the TCP connection.
+    /// Reset the TCP connection, once the client has shown it read everything sent so
+    /// far: the stub pings and waits for the pong. A reset sent at once can overtake the
+    /// upgrade response on Windows, and the client would then fail to open the socket
+    /// instead of seeing it reset.
     Reset,
 }
 
@@ -421,6 +424,14 @@ async fn play(
             }
             Step::Drop => return Ok(()),
             Step::Reset => {
+                // The client answers a ping only after it has read the upgrade response
+                // and every frame before the ping, so the reset cannot overtake them.
+                socket.send(Message::Ping(Vec::new().into())).await?;
+                while let Some(Ok(message)) = socket.next().await {
+                    if matches!(message, Message::Pong(_)) {
+                        break;
+                    }
+                }
                 socket.get_ref().set_zero_linger()?;
                 return Ok(());
             }

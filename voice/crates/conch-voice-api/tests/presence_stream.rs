@@ -293,16 +293,9 @@ async fn other_close_codes_are_reported_with_their_code() {
 
 #[tokio::test]
 async fn a_socket_closed_mid_stream_with_no_close_frame_is_a_drop() {
-    // Windows (#890): `Step::Reset` is not run there. The stub's RST can overtake the
-    // upgrade response, so opening the socket fails with `Transport` (os error 10054)
-    // instead of the stream ending as `Dropped`. Follow-up: make the stub send the reset
-    // only after the client has read the handshake, then run both steps everywhere.
-    let steps = if cfg!(windows) {
-        vec![Step::Drop]
-    } else {
-        vec![Step::Drop, Step::Reset]
-    };
-    for last in steps {
+    // `Step::Reset` pings and waits for the pong before it resets, so on Windows (#890)
+    // the RST cannot overtake the upgrade response: both steps run everywhere.
+    for last in [Step::Drop, Step::Reset] {
         let stub = Stub::websocket(vec![
             text(&snapshot(&[3])),
             text(&snapshot(&[3, 7])),
