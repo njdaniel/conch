@@ -22,5 +22,19 @@
     "target": [{ "target": "dir", "arch": ["x64"] }],
     "executableName": "conch-desktop",
     "category": "Network"
+  },
+  "win": {
+    "target": [{ "target": "nsis", "arch": ["x64"] }],
+    "extraResources": [{ "from": "out/win-resources", "to": ".", "filter": ["conch-voice.exe", "version"] }]
+  },
+  "nsis": {
+    "oneClick": false,
+    "perMachine": false,
+    "allowElevation": false,
+    "packElevateHelper": false,
+    "allowToChangeInstallationDirectory": true,
+    "deleteAppDataOnUninstall": false,
+    "include": "build/installer.nsh",
+    "artifactName": "${productName}-${version}-unsigned-preview-setup.${ext}"
   }
 }

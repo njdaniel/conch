@@ -508,22 +508,35 @@ jobs:
   # the unit tests written to hold on Windows (desktop/vitest.windows.config.ts),
   # among them a real Node named pipe. Electron-to-helper interop on a Windows
   # machine is E2 (#903), not this job. Hosted only; no new Action.
+  #
+  # Then the installer (#900, section 9.3): the release conch-voice.exe, the
+  # Windows Electron (checked against the electron package's checksums.json),
+  # and the unsigned per-user NSIS installer around them
+  # (desktop/build/electron-builder.config.json, desktop/build/installer.nsh).
+  # It is uploaded as the artifact Conch-<version>-unsigned-preview-setup, then
+  # installed silently on this runner, its files and the conch:// key checked,
+  # and uninstalled, with a seeded profile left as it was. It does not start
+  # the app: that is #903 on a real machine. The helper's release build is most
+  # of the time, as voice-windows' build is of its own, hence its 60 minutes.
   desktop-windows:
     needs: changes
     if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
     runs-on: windows-latest
-    timeout-minutes: 20
+    timeout-minutes: 60
     defaults:
       run:
         shell: bash
     steps:
       - uses: actions/checkout@v4
 
+      # web/ too: the installer's UI is web's own build.
       - uses: actions/setup-node@v4
         with:
           node-version-file: desktop/.nvmrc
           cache: npm
-          cache-dependency-path: desktop/package-lock.json
+          cache-dependency-path: |
+            web/package-lock.json
+            desktop/package-lock.json
 
       - name: npm ci
         working-directory: desktop
@@ -540,6 +553,216 @@ jobs:
       - name: unit tests on Windows
         working-directory: desktop
         run: npm run test:windows
+
+      # The verified libwebrtc zip, as voice-windows keeps it (same key).
+      - name: rust toolchain cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/conch/webrtc-*/webrtc-win-x64-release.zip
+          key: voice-toolchain-zip-${{ runner.os }}-${{ hashFiles('scripts/voice-pins.sh') }}
+
+      # The release build's own cache: voice-windows' holds a debug target.
+      - name: rust release build cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            voice/target
+          key: voice-release-${{ runner.os }}-${{ hashFiles('voice/Cargo.lock', 'voice/rust-toolchain.toml', 'scripts/voice-pins.sh') }}
+          restore-keys: |
+            voice-release-${{ runner.os }}-
+
+      - name: rust toolchain
+        run: ./scripts/voice-toolchain.sh
+
+      # The helper the installer bundles, as the issue names it: `cargo build
+      # --release -p conch-voice`. --version must run (scripts/desktop-voice-helper.sh
+      # asks the same of the Linux copy): a truncated or wrong-architecture file
+      # would otherwise ship.
+      - name: build the voice helper (release)
+        run: |
+          . scripts/voice-pins.sh
+          # The verified tree must be there: without it webrtc-sys downloads
+          # its own copy unchecked (as voice-env.sh refuses on Linux).
+          webrtc="$(cygpath -m "$HOME/.cache/conch/$CONCH_WEBRTC_TAG/win-x64-release")"
+          test -f "$webrtc/webrtc.ninja"
+          export LK_CUSTOM_WEBRTC="$webrtc"
+          cd voice
+          cargo build --locked --release -p conch-voice
+          ./target/release/conch-voice.exe --version
+
+      # The Windows Electron of the pinned version, for electronDist, so that
+      # electron-builder downloads no Electron itself. It is kept only if its
+      # SHA-256 equals the hash in desktop/node_modules/electron/checksums.json,
+      # which npm ci verified against desktop/package-lock.json, the second of
+      # the two hashes scripts/desktop-electron.sh checks on Linux.
+      # scripts/desktop-pins.sh has no Windows hash: adding one is a pin change
+      # (Nick's sign-off). Unpacked with Python's zipfile, as
+      # voice-toolchain.sh unpacks libwebrtc here.
+      - name: windows electron
+        run: |
+          . scripts/desktop-pins.sh
+          have=$(node -p "require('./desktop/package.json').devDependencies.electron")
+          if [ "$have" != "$CONCH_ELECTRON_VERSION" ]; then
+            echo "desktop/package.json pins electron $have but scripts/desktop-pins.sh pins $CONCH_ELECTRON_VERSION"; exit 1
+          fi
+          archive="electron-v${CONCH_ELECTRON_VERSION}-win32-x64.zip"
+          want=$(node -p "require('./desktop/node_modules/electron/checksums.json')['$archive'] || ''")
+          if ! [[ "$want" =~ ^[0-9a-f]{64}$ ]]; then echo "checksums.json has no SHA-256 for $archive"; exit 1; fi
+          curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
+            --output "$RUNNER_TEMP/$archive" "https://github.com/electron/electron/releases/download/v${CONCH_ELECTRON_VERSION}/$archive"
+          got=$(sha256sum "$RUNNER_TEMP/$archive" | cut -d' ' -f1)
+          if [ "$got" != "$want" ]; then echo "SHA-256 of $archive is $got, but checksums.json says $want; nothing was unpacked"; exit 1; fi
+          rm -rf desktop/out/electron-dist-win
+          py=python3
+          command -v python3 >/dev/null 2>&1 || py=python
+          "$py" -I -c 'import sys, zipfile; zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])' "$RUNNER_TEMP/$archive" desktop/out/electron-dist-win
+          test -f desktop/out/electron-dist-win/electron.exe
+          echo "Electron $CONCH_ELECTRON_VERSION (win32-x64, $got) unpacked into desktop/out/electron-dist-win"
+
+      # The steps of scripts/desktop-build.sh that are not Linux's, in its
+      # order: web's own Vite build into desktop/out/ui, main and the preload,
+      # the manifest (and out/compat.json, the development list), then
+      # electron-builder around the Electron above. A development build:
+      # version 0.0.0-dev+<short sha>. The helper and the installed stamp
+      # (main/installed.ts) go in through win.extraResources, from
+      # out/win-resources, because the installer is packed by electron-builder
+      # itself. MSYS_NO_PATHCONV keeps Git Bash from turning `--base /` into a
+      # Windows path; every path passed is already one (cygpath -m).
+      - name: build the installer
+        id: installer
+        run: |
+          . scripts/desktop-pins.sh
+          root=$(cygpath -m "$PWD")
+          version="0.0.0-dev+$(git rev-parse --short HEAD)"
+          (cd web && npm ci --no-audit)
+          (cd web && MSYS_NO_PATHCONV=1 ./node_modules/.bin/vite build --mode desktop --base / --outDir "$root/desktop/out/ui" --emptyOutDir)
+          (cd desktop && npm run bundle && node build/manifest.ts)
+          rm -rf desktop/out/win-resources desktop/dist
+          mkdir -p desktop/out/win-resources
+          cp voice/target/release/conch-voice.exe desktop/out/win-resources/conch-voice.exe
+          printf '%s\n' "$version" >desktop/out/win-resources/version
+          # CI=true keeps electron-builder from asking the registry for a
+          # newer electron-builder; dist:win passes --publish never.
+          (cd desktop && CI=true npm run dist:win -- \
+            "-c.electronDist=$root/desktop/out/electron-dist-win" "-c.electronVersion=$CONCH_ELECTRON_VERSION" \
+            "-c.extraMetadata.version=$version")
+          setups=(desktop/dist/*-unsigned-preview-setup.exe)
+          if [ "${#setups[@]}" -ne 1 ] || [ ! -f "${setups[0]}" ]; then
+            echo "expected one *-unsigned-preview-setup.exe in desktop/dist:"; ls -la desktop/dist; exit 1
+          fi
+          echo "installer: ${setups[0]} (version $version)"
+          echo "version=$version" >>"$GITHUB_OUTPUT"
+
+      # Uploaded before the install test, so that a failing check still leaves
+      # the installer to look at. It is unsigned and says so in its name.
+      - name: upload the installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: Conch-${{ steps.installer.outputs.version }}-unsigned-preview-setup
+          path: desktop/dist/*-unsigned-preview-setup.exe
+          retention-days: 30
+          if-no-files-found: error
+
+      # /S is NSIS's silent install. The per-user directory is NSIS's
+      # $LocalAppData\Programs\<product> (multiUser.nsh in electron-builder's
+      # templates; UserProgramFiles, %LOCALAPPDATA%\Programs by default). This
+      # runner's user is an administrator: an install that still lands
+      # per-user, writes no HKLM key and asks for nothing is the per-user rule
+      # of installer.nsh working where an all-users install was possible.
+      - name: install silently
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $setup = @(Get-ChildItem -LiteralPath desktop/dist -Filter '*-unsigned-preview-setup.exe')
+          if ($setup.Count -ne 1) { throw "expected one installer, found $($setup.Count)" }
+          $p = Start-Process -FilePath $setup[0].FullName -ArgumentList '/S' -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "the installer exited $($p.ExitCode)" }
+
+      # What the install must have left: the app, conch-voice.exe in its
+      # resources (the one path main/voice/spawn.ts findHelper runs on
+      # Windows), the uninstaller, the version in the executable's resource
+      # (the app has no window-less version flag) and in the uninstall entry,
+      # the conch:// handler under HKCU only, and nothing per-machine.
+      - name: check the installed files
+        shell: pwsh
+        env:
+          APP_VERSION: ${{ steps.installer.outputs.version }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $dir = Join-Path $env:LOCALAPPDATA 'Programs\Conch'
+          $exe = Join-Path $dir 'Conch.exe'
+          $helper = Join-Path $dir 'resources\conch-voice.exe'
+          foreach ($f in @($exe, $helper, (Join-Path $dir 'resources\app.asar'), (Join-Path $dir 'resources\version'), (Join-Path $dir 'Uninstall Conch.exe'))) {
+            if (-not (Test-Path -LiteralPath $f -PathType Leaf)) { throw "missing $f" }
+          }
+          if (Test-Path -LiteralPath (Join-Path $dir 'resources\elevate.exe')) { throw 'elevate.exe was installed (packElevateHelper is false)' }
+          foreach ($d in @("$env:ProgramFiles\Conch", "${env:ProgramFiles(x86)}\Conch")) {
+            if (Test-Path -LiteralPath $d) { throw "a per-machine install exists at $d" }
+          }
+          $stamp = (Get-Content -LiteralPath (Join-Path $dir 'resources\version') -Raw).Trim()
+          if ($stamp -ne $env:APP_VERSION) { throw "resources\version says '$stamp', not '$env:APP_VERSION'" }
+          $vi = (Get-Item -LiteralPath $exe).VersionInfo
+          Write-Output "Conch.exe: ProductName '$($vi.ProductName)', FileVersion '$($vi.FileVersion)'"
+          if ($vi.ProductName -ne 'Conch') { throw "Conch.exe's ProductName is '$($vi.ProductName)'" }
+          if ($vi.FileVersion -ne $env:APP_VERSION) { throw "Conch.exe's FileVersion is '$($vi.FileVersion)', not '$env:APP_VERSION'" }
+          & $helper --version
+          if ($LASTEXITCODE -ne 0) { throw "the installed conch-voice.exe --version exited $LASTEXITCODE" }
+          $key = 'HKCU:\Software\Classes\conch'
+          if (-not (Test-Path -LiteralPath $key)) { throw "$key is missing" }
+          if ((Get-Item -LiteralPath $key).GetValueNames() -notcontains 'URL Protocol') { throw "$key has no 'URL Protocol' value" }
+          $command = (Get-Item -LiteralPath "$key\shell\open\command").GetValue('')
+          $want = '"' + $exe + '" "%1"'
+          if ($command -ne $want) { throw "conch:// opens '$command', not '$want'" }
+          if (Test-Path -LiteralPath 'HKLM:\Software\Classes\conch') { throw 'a per-machine conch:// key exists' }
+          $entries = @(Get-ChildItem -LiteralPath 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall' | Get-ItemProperty | Where-Object { $_.DisplayName -like 'Conch *' })
+          if ($entries.Count -ne 1) { throw "expected one per-user uninstall entry, found $($entries.Count)" }
+          if ($entries[0].DisplayVersion -ne $env:APP_VERSION) { throw "the uninstall entry says '$($entries[0].DisplayVersion)'" }
+          $link = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\Conch.lnk'
+          if (-not (Test-Path -LiteralPath $link)) { throw "no per-user Start menu shortcut at $link" }
+          Write-Output "installed per-user at $dir, conch:// -> $command"
+
+      # A user's data, seeded where the app keeps it: Electron's userData,
+      # %APPDATA%\<package name> (conch-desktop, from desktop/package.json, as
+      # ~/.config/conch-desktop on Linux), and %APPDATA%\Conch, the product
+      # name's directory, which the uninstaller removes only when asked to
+      # delete app data. deleteAppDataOnUninstall is false, so both stay. The
+      # uninstaller copies itself to %TEMP% and returns before that copy has
+      # finished, so the step waits for the program and its uninstall entry to
+      # go, for at most three minutes.
+      - name: uninstall silently, keeping the user's data
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $dir = Join-Path $env:LOCALAPPDATA 'Programs\Conch'
+          $seeded = @{}
+          foreach ($name in @('conch-desktop', 'Conch')) {
+            $data = Join-Path $env:APPDATA $name
+            New-Item -ItemType Directory -Force -Path (Join-Path $data 'profiles\0123456789abcdef0123456789abcdef') | Out-Null
+            Set-Content -LiteralPath (Join-Path $data 'profiles.json') -Value "{`"seeded`":`"#900 $name`"}" -NoNewline
+            Set-Content -LiteralPath (Join-Path $data 'settings.json') -Value '{"closeToTray":false}' -NoNewline
+            foreach ($f in Get-ChildItem -LiteralPath $data -Recurse -File) { $seeded[$f.FullName] = (Get-FileHash -LiteralPath $f.FullName).Hash }
+          }
+          $p = Start-Process -FilePath (Join-Path $dir 'Uninstall Conch.exe') -ArgumentList '/S' -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "the uninstaller exited $($p.ExitCode)" }
+          $uninstall = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall'
+          $deadline = (Get-Date).AddMinutes(3)
+          do {
+            $left = @(Get-ChildItem -LiteralPath $uninstall | Get-ItemProperty | Where-Object { $_.DisplayName -like 'Conch *' })
+            $done = -not (Test-Path -LiteralPath $dir) -and $left.Count -eq 0
+            if (-not $done) { Start-Sleep -Seconds 2 }
+          } until ($done -or (Get-Date) -gt $deadline)
+          if (Test-Path -LiteralPath $dir) { throw "$dir is still there" }
+          if ($left.Count -ne 0) { throw 'the uninstall entry is still there' }
+          if (Test-Path -LiteralPath 'HKCU:\Software\Classes\conch') { throw 'HKCU\Software\Classes\conch is still there' }
+          $link = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\Conch.lnk'
+          if (Test-Path -LiteralPath $link) { throw "$link is still there" }
+          foreach ($f in $seeded.Keys) {
+            if (-not (Test-Path -LiteralPath $f)) { throw "the user's $f was removed" }
+            if ((Get-FileHash -LiteralPath $f).Hash -ne $seeded[$f]) { throw "the user's $f was changed" }
+          }
+          Write-Output "uninstalled: $dir, the conch:// key and the shortcut are gone; $($seeded.Count) seeded files are unchanged"
 
   # The required status check. It runs the text checks every pull request
   # gets, docs-only ones included, then passes only if every job above that
