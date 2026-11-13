@@ -1101,20 +1101,23 @@ func TestNoEndpointInLogsOrCounts(t *testing.T) {
 		name  string
 		reply pushtest.Reply
 		res   *fakeResolver
+		// timeout replaces the client's budget for the row that hangs only, so
+		// it does not race waitFor (#1804) and no other row depends on it.
+		timeout time.Duration
 	}{
-		{"sent", pushtest.Reply{Status: 201}, nil},
-		{"rejected", pushtest.Reply{Status: 410}, nil},
-		{"4xx", pushtest.Reply{Status: 400}, nil},
-		{"5xx", pushtest.Reply{Status: 503}, nil},
-		{"3xx", pushtest.Reply{Status: 302, Location: "https://marker-location.example/MARKER-LOC"}, nil},
-		{"hang", pushtest.Reply{Hang: true}, nil},
-		{"private address", pushtest.Reply{}, sequence([]string{"10.1.2.3"})},
-		{"lookup failure", pushtest.Reply{}, &fakeResolver{fn: func(int, string) ([]netipAddr, error) { return nil, fmt.Errorf("marker-resolver-error") }}},
+		{"sent", pushtest.Reply{Status: 201}, nil, 0},
+		{"rejected", pushtest.Reply{Status: 410}, nil, 0},
+		{"4xx", pushtest.Reply{Status: 400}, nil, 0},
+		{"5xx", pushtest.Reply{Status: 503}, nil, 0},
+		{"3xx", pushtest.Reply{Status: 302, Location: "https://marker-location.example/MARKER-LOC"}, nil, 0},
+		{"hang", pushtest.Reply{Hang: true}, nil, 200 * time.Millisecond},
+		{"private address", pushtest.Reply{}, sequence([]string{"10.1.2.3"}), 0},
+		{"lookup failure", pushtest.Reply{}, &fakeResolver{fn: func(int, string) ([]netipAddr, error) { return nil, fmt.Errorf("marker-resolver-error") }}, 0},
 	}
 	var markers []string
 	for _, o := range outcomes {
 		t.Run(o.name, func(t *testing.T) {
-			h := newHarness(t, harnessOpts{resolver: o.res, clientTimeout: 200 * time.Millisecond})
+			h := newHarness(t, harnessOpts{resolver: o.res, clientTimeout: o.timeout})
 			h.prov.Script(func(int, *pushtest.Delivery) pushtest.Reply { return o.reply })
 			u, _ := url.Parse(h.target.Endpoint)
 			h.src.targets[0].Endpoint = "https://example.com:" + u.Port() + u.Path + "?marker-query=MARKER-QUERY-1f2e"
