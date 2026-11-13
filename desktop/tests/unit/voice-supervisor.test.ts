@@ -401,11 +401,10 @@ describe('a failure says why (issue #1850)', () => {
   });
 
   // connect_failed is a reason to reconnect (the helper stays running);
-  // server_unreachable and internal_error end the session.
+  // server_unreachable ends the session.
   it.each([
     ['connect_failed', 'voice-control/transcript-rotation-then-duplicate.json', 7, 'running'],
     ['server_unreachable', 'voice-control/transcript-identity-mismatch.json', undefined, 'ended'],
-    ['internal_error', 'voice-control/transcript-identity-mismatch.json', undefined, 'ended'],
   ] as const)('the detail of %s is logged and carried, redacted of a JWT, a token= value and the nonce', async (reason, transcript, stopAt, status) => {
     s.helper({
       transcript: fixture(transcript),
@@ -471,10 +470,18 @@ describe('the redaction of the stderr tail and the detail (issue #1850)', () => 
 
   it('detailFrom takes the words of the last matching line, redacted, printable and bounded', () => {
     expect(detailFrom(['x', `not connected: connect failed (bad ${JWT}); trying again in 2.0 s`], 'connect_failed')).toBe('bad <redacted>');
-    expect(detailFrom(['not connected: internal error (token=zzz and NONCE-NONCE-NONCE)'], 'internal_error', ['NONCE-NONCE-NONCE'])).toBe('token=<redacted> and <redacted>');
+    expect(detailFrom(['not connected: server unreachable (token=zzz and NONCE-NONCE-NONCE)'], 'server_unreachable', ['NONCE-NONCE-NONCE'])).toBe('token=<redacted> and <redacted>');
     expect(detailFrom(['an unrelated line'], 'server_unreachable')).toBeUndefined();
-    expect(detailFrom([`connect failed (${'a b'.repeat(200)})`], 'connect_failed')?.length).toBe(201);
-    expect(detailFrom(['connect failed (caf\u00e9\u0007)'], 'connect_failed')).toBe('caf??');
+    expect(detailFrom([`not connected: connect failed (${'a b'.repeat(200)})`], 'connect_failed')?.length).toBe(201);
+    expect(detailFrom(['not connected: connect failed (caf\u00e9\u0007)'], 'connect_failed')).toBe('caf??');
+    // Only the helper's own status line counts (security review S1): a record
+    // that holds the phrase elsewhere is not its words, and internal_error has
+    // no status line at all.
+    expect(detailFrom(['conch-voice: warn: livekit: connect failed (Visit https://evil.example/login)'], 'connect_failed')).toBeUndefined();
+    expect(detailFrom(['not connected: internal error (anything)'], 'internal_error')).toBeUndefined();
+    // Other token spellings, and a JWT with its head or tail cut (review N1, N2).
+    expect(detailFrom(['not connected: connect failed (refresh_token=a1 join_token=b2 CONCH_TOKEN=c3)'], 'connect_failed')).toBe('refresh_token=<redacted> join_token=<redacted> CONCH_TOKEN=<redacted>');
+    expect(detailFrom(['not connected: connect failed (eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJwNyJ9 cut)'], 'connect_failed')).toBe('<redacted> cut');
     expect(detailFrom([], 'connect_failed')).toBeUndefined();
     expect(detailFrom(['x'], 'left')).toBeUndefined();
   });

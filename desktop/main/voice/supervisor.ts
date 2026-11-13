@@ -251,36 +251,42 @@ function viewOf(state: VoiceControlStateV1 | VoiceControlStateV2, helperVersion:
 function printable(line: string, secrets: readonly string[], nonceShape: boolean): string {
   let out = line;
   for (const s of secrets) if (s !== '') out = out.split(s).join('<redacted>');
-  out = out.replace(JWT_SHAPE, '<redacted>').replace(TOKEN_QUERY, '$1=<redacted>');
+  // The dot check keeps a long dotless run from costing the pattern's backtracking.
+  if (out.includes('.')) out = out.replace(JWT_SHAPE, '<redacted>');
+  out = out.replace(TOKEN_QUERY, '$1=<redacted>');
   if (nonceShape) out = out.replace(NONCE_SHAPE, '<redacted>');
   out = out.replace(/[^\x20-\x7e]/g, '?');
   return out.length > STDERR_LINE_BYTES ? `${out.slice(0, STDERR_LINE_BYTES)}…` : out;
 }
 
 // JWT_SHAPE is anything shaped like a JWT (a LiveKit access token is one):
-// three base64url segments separated by dots. TOKEN_QUERY is the value of an
-// access_token or token parameter, in a URL or a line of text.
-const JWT_SHAPE = /[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/g;
-const TOKEN_QUERY = /\b((?:access_)?token)=[^\s&"')\]]*/gi;
+// three base64url segments separated by dots, or two beginning eyJ (a JWT
+// with its head or tail cut is still credential-equivalent). TOKEN_QUERY is
+// the value of a token, access_token or any <word>_token parameter, in a URL
+// or a line of text.
+const JWT_SHAPE = /[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}|eyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{8,}/g;
+const TOKEN_QUERY = /\b((?:[a-z0-9]+_)*token)=[^\s&"')\]]*/gi;
 
 // The reasons whose words a person may be shown, and the log keeps.
-const DETAIL_REASONS: ReadonlySet<string> = new Set(['connect_failed', 'server_unreachable', 'internal_error']);
+// internal_error is not among them: the helper writes no status line for it,
+// so any line that seemed to give its words would be someone else's.
+const DETAIL_REASONS: ReadonlySet<string> = new Set(['connect_failed', 'server_unreachable']);
 const DETAIL_BYTES = 200;
 
 // detailFrom finds the helper's words for a reason in its standard error: the
 // helper's status line reads "not connected: connect failed (the error's
 // text); ...". The control protocol has no detail field, so the stderr tail
-// is the only place main can read it, and only a line of that shape counts:
-// another line is not this reason's words. The result is redacted again,
-// printable and bounded.
+// is the only place main can read it, and only a line that begins with that
+// status (output.rs, Connection::Waiting) counts: an SDK record or a native
+// library's line that happens to hold the phrase is not this reason's words.
+// The result is redacted again, printable and bounded.
 export function detailFrom(lines: readonly string[], reason: string, secrets: readonly string[] = [], nonceShape = false): string | undefined {
   if (!DETAIL_REASONS.has(reason)) return undefined;
-  const phrase = reason.replace(/_/g, ' ');
+  const prefix = `not connected: ${reason.replace(/_/g, ' ')} (`;
   for (let i = lines.length - 1; i >= 0; i--) {
     const line = lines[i] ?? '';
-    const at = line.indexOf(`${phrase} (`);
-    if (at < 0) continue;
-    const inner = line.slice(at + phrase.length + 2).replace(/\)(?:; [^)]*)?$/, '');
+    if (!line.startsWith(prefix)) continue;
+    const inner = line.slice(prefix.length).replace(/\)(?:; [^)]*)?$/, '');
     return bound(printable(inner, secrets, nonceShape));
   }
   return undefined;
@@ -626,6 +632,13 @@ export class Supervisor {
     child.stderr.setEncoding('utf8');
     child.stderr.on('data', (chunk: string) => {
       run.stderr.push(chunk);
+      // The helper's status line and its event travel apart: when the words
+      // for a reason already shown arrive after it, show them then.
+      const v = run.view;
+      if (run.outcome === null && v !== null && v.phase === 'reconnecting' && v.reason !== undefined && DETAIL_REASONS.has(v.reason)) {
+        const d = detailFrom(run.stderr.lines, v.reason, run.secrets, run.windows);
+        if (`${v.phase}:${v.reason}:${d ?? ''}` !== run.noted) this.publish(run);
+      }
     });
     child.stdin.on('error', () => {
       if (!run.stopping) this.lose(run, 'write-failed');

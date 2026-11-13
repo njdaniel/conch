@@ -195,6 +195,12 @@ async function findHelperWindows(resources: string): Promise<string> {
 // change what runs. And a root-owned sticky directory (/tmp, where an
 // unpacked build or a test may live) is accepted: in it, other users may add
 // entries but cannot rename or remove ours (unlink(2), "sticky bit").
+// shown is a path as a refusal may say it: printable ASCII, so a folder named
+// with a newline or an escape cannot forge a line of the log it reaches.
+function shown(path: string): string {
+  return path.replace(/[^\x20-\x7e]/g, '?');
+}
+
 async function safeAncestors(dir: string, own: number): Promise<void> {
   let at = dir;
   for (;;) {
@@ -202,13 +208,13 @@ async function safeAncestors(dir: string, own: number): Promise<void> {
     try {
       st = await lstat(at);
     } catch {
-      throw new HelperError('untrusted', `${at} above the voice helper cannot be read`);
+      throw new HelperError('untrusted', `${shown(at)} above the voice helper cannot be read`);
     }
     const closed = (st.mode & 0o022) === 0;
     const rootSticky = (st.mode & 0o1000) !== 0 && st.uid === 0;
-    if (!st.isDirectory()) throw new HelperError('untrusted', `${at} is not a directory`);
-    if (!safeOwner(st.uid, own)) throw new HelperError('untrusted', `${at} is not owned by you or by root`);
-    if (!(closed || rootSticky)) throw new HelperError('untrusted', `${at} may be changed by other users`, 'folder-writable');
+    if (!st.isDirectory()) throw new HelperError('untrusted', `${shown(at)} is not a directory`);
+    if (!safeOwner(st.uid, own)) throw new HelperError('untrusted', `${shown(at)} is not owned by you or by root`);
+    if (!(closed || rootSticky)) throw new HelperError('untrusted', `${shown(at)} may be changed by other users`, 'folder-writable');
     const up = dirname(at);
     if (up === at) return;
     at = up;
