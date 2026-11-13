@@ -19,7 +19,7 @@
 // microphone, at attach and at every change, 0 included; apart from deafen,
 // kept through an output switch, and never on a share's sound.
 // No network, no microphone, no screen.
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { VoiceSessionResult } from '../api';
 import { VoiceClient, companionQualities } from './connection';
 import { FakeClock, settle } from './fakes';
@@ -3578,6 +3578,8 @@ describe('the meter\'s audio context', () => {
     const room = newLiveKitRoom();
     await connect(room, given, {});
     expect(room.level()).toBeGreaterThan(0.5);
+    // The page would resume it; here the browser does not.
+    given.onResume = 'stay';
     given.become('suspended');
     expect(room.level()).toBe(0);
     given.become('interrupted');
@@ -3610,6 +3612,7 @@ describe('the meter\'s audio context', () => {
     await connect(room, given, { onMeter: (on: boolean) => meter.push(on) });
     await room.switchMicrophone('mic-2');
     meter.length = 0;
+    given.onResume = 'stay';
     given.become('suspended');
     expect(meter).toEqual([false]);
     await room.close();
@@ -3623,10 +3626,26 @@ describe('the meter\'s audio context', () => {
     const room = newLiveKitRoom();
     await connect(room, given, { onMeter: (on: boolean) => meter.push(on) });
     expect(given.resumed).toBe(1);
-    expect(meter).toEqual([]);
+    await settle();
+    // A context that never runs is not a working meter: silently, with no
+    // name, the client is told there is none.
+    expect(meter.length).toBeGreaterThan(0);
+    expect(meter.every((on) => !on)).toBe(true);
     expect(room.level()).toBe(0);
     given.become('running');
-    expect(meter).toEqual([true]);
+    expect(meter.at(-1)).toBe(true);
+    await room.close();
+  });
+
+  it('a context that stays pending or comes back not running is no meter, and records no name', async () => {
+    const given = new StubAudio();
+    given.state = 'suspended';
+    given.onResume = 'stay';
+    const names: (string | undefined)[] = [];
+    const room = newLiveKitRoom();
+    await connect(room, given, { onMeter: (_on: boolean, name?: string) => names.push(name) });
+    await settle();
+    expect(names.every((n) => n === undefined)).toBe(true);
     await room.close();
   });
 
@@ -3636,8 +3655,10 @@ describe('the meter\'s audio context', () => {
     const meter: boolean[] = [];
     const room = newLiveKitRoom();
     await connect(room, given, { onMeter: (on: boolean) => meter.push(on) });
-    expect(meter.length).toBeGreaterThan(0);
-    expect(meter.every((on) => on)).toBe(true);
+    await settle();
+    // Not working until it runs, then working, and it ends working.
+    expect(meter[0]).toBe(false);
+    expect(meter.at(-1)).toBe(true);
     await room.close();
   });
 
@@ -3649,8 +3670,81 @@ describe('the meter\'s audio context', () => {
     const room = newLiveKitRoom();
     await connect(room, given, { onMeter: (on: boolean) => meter.push(on) });
     await settle();
-    expect(meter).toEqual([false]);
+    expect(meter.length).toBeGreaterThan(0);
+    expect(meter.every((on) => !on)).toBe(true);
     await room.close();
+  });
+
+  // Issue #1794 review: nothing else brings back a context an interruption
+  // suspended, so the page resumes it when it is visible.
+  describe('after an interruption', () => {
+    const visible = (v: 'visible' | 'hidden'): void => {
+      Object.defineProperty(document, 'visibilityState', { value: v, configurable: true });
+    };
+    afterEach(() => {
+      Reflect.deleteProperty(document, 'visibilityState');
+    });
+
+    it('a context that suspends while the page is visible is resumed', async () => {
+      visible('visible');
+      const given = new StubAudio();
+      const room = newLiveKitRoom();
+      await connect(room, given, {});
+      given.onResume = 'stay';
+      given.become('suspended');
+      expect(given.resumed).toBe(1);
+      await room.close();
+    });
+
+    it('a context that suspends while the page is hidden waits for it to be visible', async () => {
+      visible('hidden');
+      const given = new StubAudio();
+      const room = newLiveKitRoom();
+      await connect(room, given, {});
+      given.onResume = 'stay';
+      given.become('suspended');
+      expect(given.resumed).toBe(0);
+      visible('visible');
+      document.dispatchEvent(new Event('visibilitychange'));
+      expect(given.resumed).toBe(1);
+      await room.close();
+    });
+
+    it('a visible page does not resume a context that runs', async () => {
+      visible('visible');
+      const given = new StubAudio();
+      const room = newLiveKitRoom();
+      await connect(room, given, {});
+      document.dispatchEvent(new Event('visibilitychange'));
+      expect(given.resumed).toBe(0);
+      await room.close();
+    });
+
+    it('stops listening for the page being visible when the tap goes', async () => {
+      visible('visible');
+      const given = new StubAudio();
+      const room = newLiveKitRoom();
+      await connect(room, given, {});
+      await room.close();
+      given.state = 'suspended';
+      document.dispatchEvent(new Event('visibilitychange'));
+      expect(given.resumed).toBe(0);
+    });
+  });
+
+  // Use microphone after Watch only: a click, so its context is the page's.
+  it('a microphone published after a watch only join taps the context handed to it', async () => {
+    const given = new StubAudio();
+    const meter: boolean[] = [];
+    const room = newLiveKitRoom();
+    await room.connect('wss://lk.example', 'tok-abcdef', 'room-abcdef', false, { ...events, onMeter: (on: boolean) => meter.push(on) });
+    expect(given.sources).toBe(0);
+    await room.publishMicrophone(given.asContext());
+    expect(state.contexts).toHaveLength(0);
+    expect(given.sources).toBe(1);
+    expect(meter).toEqual([true]);
+    await room.close();
+    expect(given.closed).toBe(0);
   });
 
   // The gate: an open microphone that was talking on speech must not stay open
@@ -3679,6 +3773,7 @@ describe('the meter\'s audio context', () => {
     client.setMode('open');
     clock.advance(100);
     expect(client.snapshot().talking).toBe(true);
+    given.onResume = 'stay';
     given.become('suspended');
     await settle();
     expect(client.snapshot()).toMatchObject({ meter: false, talking: false });

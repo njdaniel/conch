@@ -946,7 +946,7 @@ describe('presence of the channel on screen', () => {
     }
   });
 
-  it('Watch only makes no audio context: it has no microphone to meter', async () => {
+  it('Watch only makes no audio context: there is no microphone to meter until Use microphone', async () => {
     let created = 0;
     vi.stubGlobal(
       'AudioContext',

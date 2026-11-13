@@ -1205,9 +1205,12 @@ class LiveKitAdapter implements Room {
     this.processing = on;
   }
 
-  async publishMicrophone(): Promise<void> {
+  // audio is the meter's context when the capture follows a click (Use
+  // microphone after Watch only, issue #1794): the tap uses it, as at a join.
+  async publishMicrophone(audio?: AudioContext | null): Promise<void> {
     this.ensureOpen();
     if (this.companion) throw new Error('voice: a companion has no microphone');
+    if (audio !== undefined) this.given = audio;
     // One under way is joined, to its end: its track is set before it is
     // published.
     if (this.publishing === null) {
@@ -1370,7 +1373,10 @@ class LiveKitAdapter implements Room {
   // outside any gesture, and reuses it; it never makes one while there is one
   // to use. Without one (a watch only joined, a browser without) or with one
   // closed, it makes its own, as before. The meter is reported working only
-  // once the context runs, and follows its state from then on.
+  // once the context runs, and follows its state from then on: a context that
+  // is not running when the tap is made is reported as no meter (silently, no
+  // name) until it runs. A context interrupted (a call, the screen locked) is
+  // resumed when the page is visible again.
   private listen(track: LocalAudioTrack): void {
     if (this.closed) return;
     // A tap left from an earlier capture is let go: one device open at a time.
@@ -1393,10 +1399,16 @@ class LiveKitAdapter implements Room {
       // interrupted one (a call, the screen locked) reads nothing, or its last
       // buffer. A change reaches the client, and an open microphone's gate is
       // shut by the client when it hears the meter is gone.
+      const resumeIfVisible = (): void => {
+        if (ctx.state !== 'running' && ctx.state !== 'closed' && document.visibilityState === 'visible') void ctx.resume().catch(() => undefined);
+      };
       const changed = (): void => {
         this.events?.onMeter(ctx.state === 'running');
+        // Nothing else brings back a context an interruption suspended.
+        if (ctx.state === 'suspended') resumeIfVisible();
       };
       ctx.addEventListener('statechange', changed);
+      document.addEventListener('visibilitychange', resumeIfVisible);
       this.tap = {
         context: ctx,
         analyser,
@@ -1404,10 +1416,15 @@ class LiveKitAdapter implements Room {
         owned: given === null,
         stop: () => {
           ctx.removeEventListener('statechange', changed);
+          document.removeEventListener('visibilitychange', resumeIfVisible);
           // The nodes of a context that stays are let go; a context closed
-          // goes with its own.
-          src.disconnect();
-          analyser.disconnect();
+          // goes with its own. A node already gone is not news.
+          try {
+            src.disconnect();
+            analyser.disconnect();
+          } catch {
+            // nothing to disconnect
+          }
         },
       };
     } catch (err: unknown) {
@@ -1428,15 +1445,17 @@ class LiveKitAdapter implements Room {
       return;
     }
     // Not running yet (a context made here, or one the browser has not
-    // started): resumed, and said working only when it is. The statechange
-    // listener says it too; this is for a resume that is refused.
+    // started): reported as no meter, with no name (nothing for the
+    // diagnostics), until it runs, so a context that never does is not taken
+    // for a working meter. The resume or the statechange listener says true.
     const waiting = context;
+    this.events?.onMeter(false);
     waiting.resume().then(
       () => {
-        if (this.tap?.context === waiting && waiting.state === 'running') this.events?.onMeter(true);
+        if (this.tap?.context === waiting) this.events?.onMeter(waiting.state === 'running');
       },
       () => {
-        if (this.tap?.context === waiting) this.events?.onMeter(false);
+        if (this.tap?.context === waiting) this.events?.onMeter(waiting.state === 'running');
       },
     );
   }
@@ -1447,8 +1466,8 @@ class LiveKitAdapter implements Room {
     const tap = this.tap;
     this.tap = null;
     if (tap === null) return;
-    tap.stop();
     tap.clone.stop();
+    tap.stop();
     if (tap.owned) await tap.context.close().catch(() => undefined);
   }
 

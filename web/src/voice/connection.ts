@@ -258,7 +258,9 @@ export interface Room extends ShareRoom, CameraRoom {
   connect: (url: string, token: string, roomName: string, publish: boolean, events: RoomEvents, audio?: AudioContext | null) => Promise<void>;
   // Captures and publishes the microphone, muted, on a connection made
   // without it (watch only).
-  publishMicrophone: () => Promise<void>;
+  // audio is the meter's context made in the click that asked for it (issue
+  // #1794), as at connect.
+  publishMicrophone: (audio?: AudioContext | null) => Promise<void>;
   // The microphone to capture: a device by id, captured exactly or not at
   // all, or null for the system default. Set before connecting.
   setMicrophone: (choice: string | null) => void;
@@ -961,9 +963,18 @@ export class VoiceClient {
 
   // useMicrophone ends watch only: the microphone is captured, published and
   // muted, as on a full join, and the talk controls work from then on.
-  async useMicrophone(): Promise<void> {
+  //
+  // audio is the meter's audio context (openAudio), made first in the click
+  // that asked (issue #1794): the capture is made after awaits, where iOS
+  // would leave a new context suspended. Not used, it is closed.
+  async useMicrophone(audio: AudioContext | null = null): Promise<void> {
     const room = this.room;
-    if (!this.state.watchOnly || this.state.viewer || this.state.companion || this.state.listenOnly || this.state.phase !== 'connected' || room === null) return;
+    if (!this.state.watchOnly || this.state.viewer || this.state.companion || this.state.listenOnly || this.state.phase !== 'connected' || room === null) {
+      closeAudio(audio);
+      return;
+    }
+    this.releaseAudio();
+    this.audio = audio;
     const mine = this.attempt;
     this.set({ watchOnly: false });
     try {
@@ -971,7 +982,7 @@ export class VoiceClient {
       if (mine !== this.attempt) return;
       room.setMicrophone(this.state.microphone?.id ?? null);
       room.setProcessing(this.state.processing);
-      await room.publishMicrophone();
+      await room.publishMicrophone(audio);
     } catch (err: unknown) {
       if (mine !== this.attempt) return;
       // The connection stays: the person keeps watching, told why. A chosen
@@ -1534,7 +1545,6 @@ export class VoiceClient {
     const left = this.channel;
     const viewer = this.state.viewer;
     this.room = null;
-    this.releaseAudio();
     this.channel = null;
     // The room's close starts here, before the page says it is out of voice,
     // so that the LiveKit leave is already on its way when "Join voice"
@@ -1542,6 +1552,9 @@ export class VoiceClient {
     // LiveKitVoiceRoom.close starts its disconnect at once). It is awaited,
     // bounded, below. "Join voice" still does not mean LiveKit has been told.
     const closing = room !== null ? room.close().catch(() => undefined) : null;
+    // The context goes after the room's close has started: the room lets go of
+    // its tap on it first.
+    this.releaseAudio();
     this.endAwaiting();
     this.streamSinks.clear();
     // Nobody's camera is received out of voice; the next join reads presence.
@@ -1844,7 +1857,8 @@ export class VoiceClient {
         this.unfollowCompanion();
         this.share.abandon();
         this.camera.abandon();
-        // A join that failed for good: nobody is left to hear with it.
+        // The stay is over (a join that failed for good, or a stop): nobody is
+        // left to hear with it.
         this.releaseAudio();
         this.set({ phase: 'stopped', why: next.why, viewing: false, cameraTracks: noCameraTracks });
         break;

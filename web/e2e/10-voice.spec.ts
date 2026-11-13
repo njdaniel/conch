@@ -1323,10 +1323,11 @@ test('a push-to-talk whose reports are slow is audited as the reported pair and 
     }
   });
 
-  // Issue #1794: on an iPhone in Safari an AudioContext made outside a tap
-  // starts suspended and cannot be resumed there, so a meter made after the
-  // join read silence: the open microphone never heard anyone. Chromium lets
-  // any page run one, so the init script makes it behave as Safari does: a
+  // Issue #1794: on an iPhone in Safari, as the issue reads it, an
+  // AudioContext made outside a tap starts suspended and cannot be resumed
+  // there, so a meter made after the join reads silence: the open microphone
+  // never hears anyone. Chromium lets any page run one, so the init script
+  // makes it behave as the issue assumes Safari does: a
   // context made outside a click is suspended, and a resume outside a click
   // never settles. Every context is recorded with whether it was made in a
   // click. The page must make the meter's inside the Join click, and the
@@ -1337,21 +1338,32 @@ test('a push-to-talk whose reports are slow is audited as the reported pair and 
       await page.addInitScript(() => {
         interface Seen {
           gesture: boolean;
+          // Whether it made an analyser: the meter's context is the one that does
+          // (LiveKit makes contexts of its own, outside any click).
+          analyser: boolean;
         }
         const w = window as unknown as { seen: Seen[] };
         w.seen = [];
         let inClick = false;
         // Capture runs before the page's handler, bubble after it.
-        window.addEventListener('click', () => { inClick = true; }, true);
+        // A handler that stops propagation never reaches the bubble listener,
+        // so the flag is also cleared on a timer.
+        window.addEventListener('click', () => { inClick = true; setTimeout(() => { inClick = false; }, 0); }, true);
         window.addEventListener('click', () => { inClick = false; }, false);
         const Real = window.AudioContext;
         const made = new WeakMap<object, boolean>();
         class Strict extends Real {
+          private readonly entry: Seen;
           constructor(options?: AudioContextOptions) {
             super(options);
             made.set(this, inClick);
-            w.seen.push({ gesture: inClick });
+            this.entry = { gesture: inClick, analyser: false };
+            w.seen.push(this.entry);
             if (!inClick) void super.suspend();
+          }
+          override createAnalyser(): AnalyserNode {
+            this.entry.analyser = true;
+            return super.createAnalyser();
           }
           override resume(): Promise<void> {
             if (made.get(this) === true || inClick) return super.resume();
@@ -1372,9 +1384,11 @@ test('a push-to-talk whose reports are slow is audited as the reported pair and 
       // does not say the open microphone has no meter.
       await expect.poll(async () => Number(await voice.getByRole('meter', { name: 'Microphone level' }).getAttribute('value')), { timeout: 15_000 }).toBeGreaterThan(0);
       await expect(voice).not.toContainText('needs the level meter');
-      // The first context the page made was made in the click.
-      const seen = await a.page.evaluate(() => (window as unknown as { seen: { gesture: boolean }[] }).seen);
-      expect(seen[0]?.gesture, `contexts made: ${JSON.stringify(seen)}`).toBe(true);
+      // The first context the page made, before the join's own awaits, was
+      // made in the click and is the one the meter reads from. (Later ones are
+      // other code's, LiveKit's among them, and may be made outside a click.)
+      const seen = await a.page.evaluate(() => (window as unknown as { seen: { gesture: boolean; analyser: boolean }[] }).seen);
+      expect(seen[0], `contexts made: ${JSON.stringify(seen)}`).toEqual({ gesture: true, analyser: true });
       await voice.getByRole('button', { name: 'Leave voice' }).click();
       await expect(voice).toContainText('Not in voice', { timeout: 10_000 });
     } finally {

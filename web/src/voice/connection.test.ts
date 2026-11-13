@@ -115,7 +115,10 @@ class StubRoom implements Room {
   setCompanion = (on: boolean): void => {
     this.companion = on;
   };
-  publishMicrophone = (): Promise<void> => {
+  // The audio context the client handed publishMicrophone (issue #1794).
+  microphoneAudio: AudioContext | null | undefined = undefined;
+  publishMicrophone = (audio?: AudioContext | null): Promise<void> => {
+    this.microphoneAudio = audio;
     this.calls.push('microphone');
     return this.microphoneFailure === null ? Promise.resolve() : Promise.reject(this.microphoneFailure);
   };
@@ -4088,6 +4091,28 @@ describe('the meter\'s audio context', () => {
     expect(second.closed).toBe(1);
     expect(first.closed).toBe(0);
     expect(t.rooms).toHaveLength(1);
+  });
+
+  it('Use microphone after Watch only hands the room the context made in its click, and the leave closes it once', async () => {
+    const audio = fakeAudio();
+    const t = setup();
+    t.client.join('general', { watchOnly: true });
+    await settle();
+    expect(t.rooms[0]?.audioArg).toBeNull();
+    await t.client.useMicrophone(asContext(audio));
+    expect(t.rooms[0]?.microphoneAudio).toBe(audio);
+    expect(audio.closed).toBe(0);
+    await t.client.leave();
+    expect(audio.closed).toBe(1);
+  });
+
+  it('Use microphone that is not made (not watching only) closes the context it was given', async () => {
+    const audio = fakeAudio();
+    const t = setup();
+    t.client.join('general');
+    await settle();
+    await t.client.useMicrophone(asContext(audio));
+    expect(audio.closed).toBe(1);
   });
 
   it('openAudio makes the context and resumes it in the same call, and says null when the browser has none', () => {
