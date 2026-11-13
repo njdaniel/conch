@@ -4830,27 +4830,45 @@ button.link {
   }
 }
 
-/* A short window (200% zoom of a laptop's screen is about 720×450): the page
-   scrolls as a document rather than squeezing each column into the window.
-   The conversation keeps a height of its own, so it still scrolls and loads
-   older messages as before. */
+/* A short window (200% zoom of a laptop's screen is about 720×450, issue
+   #536): the page scrolls as a document rather than squeezing each column into
+   the window. The conversation sets the height of the middle row (the channel
+   list and the members panel scroll inside themselves, so they no longer make
+   the row as tall as their content: that left an empty band under the
+   composer, issue #1813). When the page is taller than the window it scrolls
+   and the composer stays directly above the voice dock; when it is shorter the
+   row fills the window and the log takes what is left, never less than 12rem,
+   so it still scrolls and loads older messages as before. */
 @media (max-height: 560px) {
   .lobby {
     height: auto;
-    min-height: 100vh;
+    min-height: calc(100vh - var(--notice-h, 0px));
+    min-height: calc(100dvh - var(--notice-h, 0px));
+  }
+
+  .lobby:not(.phone) .channels,
+  .lobby:not(.phone) .panel {
+    contain: size;
   }
 
   .share-frame video {
     max-height: 60vh;
   }
 
-  .log-wrap {
+  .lobby:not(.phone) .log-wrap {
+    flex: 1 1 auto;
+    min-height: 12rem;
+  }
+
+  .lobby.phone .log-wrap {
     flex: none;
     height: 70vh;
     min-height: 12rem;
   }
 
-  .dock {
+  /* The dock keeps its half of the window (Voice options open can be taller
+     than the window), scrolling inside itself, except on a phone. */
+  .lobby.phone .dock {
     max-height: none;
   }
 }
