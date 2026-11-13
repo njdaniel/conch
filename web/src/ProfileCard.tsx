@@ -2,7 +2,7 @@ import { useCallback, useEffect, useId, useRef, useState, type KeyboardEvent } f
 import { Avatar } from './Icons';
 import { IdentityMarks } from './Identity';
 import { longPressMs } from './MessageMenu';
-import type { IdentityInput } from './identity';
+import type { IdentityInput } from './identityMarks';
 import type { Entry } from './agents/join';
 import type { Person } from './useLiveChannel';
 

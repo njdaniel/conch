@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { identityMarks, identityText, type IdentityInput, type IdentityKey } from './identity';
+import { identityMarks, identityText, type IdentityInput, type IdentityKey } from './identityMarks';
 
 const all: IdentityInput = {
   id: 3,
