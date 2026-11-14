@@ -229,7 +229,8 @@ func (p *voicePoller) grantCompanionAudio(ctx context.Context, room store.VoiceR
 		// names the source). Recorded, then the row; a failed row puts the
 		// consent back. A companion that was granted the sound under the
 		// consent this one replaces is owed a withdrawal, which is written
-		// after the row (the passes retry what LiveKit will not take).
+		// after the row (the passes retry what LiveKit will not take until it
+		// confirms, whether or not any sound is published).
 		c.audioScope, c.audioPublisher = scope, named
 		withdraw := hadCompanion && publisher == schema.VoiceShareAudioPublisherPerson
 		p.mu.Unlock()
@@ -370,9 +371,15 @@ func (p *voicePoller) stopCompanionAudio(ctx context.Context, room store.VoiceRo
 		r.order.Unlock()
 		return
 	}
+	// Only a consent naming the companion granted it the sound; one naming
+	// the person granted it nothing, so there is nothing to withdraw (a
+	// withdrawal still owed from an earlier change stays the passes').
+	owes := c.companionAudio()
 	c.audioScope, c.audioPublisher, c.audioStarted = "", "", false
 	key := voiceWithdrawKey{principalID, voiceRoleScreen}
-	r.withdrawing[key] = 0
+	if owes {
+		r.withdrawing[key] = 0
+	}
 	row := voiceEvent{
 		actor: fmt.Sprintf("principal:%d", principalID), action: store.AuditVoiceShareAudioStopped, channelID: r.channelID,
 		detail: fmt.Sprintf("channel=%d principal=%d reason=%s", r.channelID, principalID, voiceShareStopSelf),
@@ -380,7 +387,9 @@ func (p *voicePoller) stopCompanionAudio(ctx context.Context, room store.VoiceRo
 	p.mu.Unlock()
 	p.writeEvents(ctx, row)
 	r.order.Unlock()
-	p.withdrawCompanionAudioNow(ctx, r, principalID)
+	if owes {
+		p.withdrawCompanionAudioNow(ctx, r, principalID)
+	}
 }
 
 // withdrawCompanionAudio sets principalID's companion back to the screen

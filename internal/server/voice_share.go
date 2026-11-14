@@ -1358,9 +1358,23 @@ func (p *voicePoller) judgeShareLocked(r *voiceRoomState, now time.Time, seen ma
 			// share is held, the companion's entry in withdrawing is this
 			// audio withdrawal's; a claim clears it and the share's end
 			// owes a whole one.
-			if holder.companionAudio() || !part.ScreenShareAudioPublished {
+			if holder.companionAudio() {
 				if !quiet || stamp == 0 {
-					delete(r.withdrawing, key) // consented, or nothing left to withdraw
+					delete(r.withdrawing, key) // consented
+				}
+				return
+			}
+			if !part.ScreenShareAudioPublished {
+				if quiet && stamp == 0 {
+					// A withdrawal conchd owes (a consent that moved to the
+					// person, or was ended) that LiveKit has not confirmed:
+					// the companion may still hold the audio source though
+					// no sound is published, so it is retried, quietly, on
+					// every pass until LiveKit takes it. Not sharing: a
+					// failure removes no one, as there is no sound to stop.
+					withdraw = append(withdraw, shareWithdrawal{principalID: pid, role: role, joinedAt: part.JoinedAt, canSubscribe: part.CanSubscribe, audioOnly: true})
+				} else if !quiet {
+					delete(r.withdrawing, key) // nothing left to withdraw
 				}
 				return
 			}
