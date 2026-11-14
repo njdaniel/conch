@@ -1034,7 +1034,18 @@ func (p *voicePoller) grantCompanion(ctx context.Context, r *voiceRoomState, roo
 	// permission whole, and a publish-only companion must not be handed the
 	// right to receive everyone's voice by being given its screen.
 	if _, err := p.setPublishPermission(ctx, r, principalID, voiceRoleScreen, publishInput{canSubscribe: c.screenSubscribes, share: true, audio: audio}); err != nil {
-		slog.WarnContext(ctx, "voice: granting the screen to a companion failed; the next claim restores it", "channel", room.ChannelID, "principal", principalID, "error", err)
+		slog.WarnContext(ctx, "voice: granting the screen to a companion failed; the passes retry what it may still hold", "channel", room.ChannelID, "principal", principalID, "error", err)
+		if !audio {
+			// The write may have been refused with an earlier grant's
+			// sound still on the companion (a claim just dropped the
+			// withdrawal the last share's end owed): that is owed again,
+			// and the passes retry it quietly until LiveKit confirms.
+			p.mu.Lock()
+			if r.shares[principalID] == sh && !r.retired {
+				r.withdrawing[voiceWithdrawKey{principalID, voiceRoleScreen}] = 0
+			}
+			p.mu.Unlock()
+		}
 	}
 }
 
@@ -1271,11 +1282,14 @@ type shareWithdrawal struct {
 	unclaimed    bool
 	canPublish   bool
 	canSubscribe bool
-	// audioOnly is the holder's own companion publishing the share's sound
-	// without a consent recorded (issue #898): only screen_share_audio is
-	// withdrawn, the screen is kept, and it is made only while the person
-	// still holds the share without a consent, checked again under the
-	// claims.
+	// audioOnly is the holder's own companion holding or publishing the
+	// share's sound without a consent naming it (issue #898): only
+	// screen_share_audio is withdrawn, the screen is kept, and it is made
+	// only while the person still holds the share without such a consent,
+	// checked again under the claims. It is queued when the sound is
+	// published (unclaimed unless owed), and, quietly and with sharing
+	// false, whenever a withdrawal is owed though no sound is published
+	// (issue #1859), until LiveKit confirms it.
 	audioOnly bool
 }
 

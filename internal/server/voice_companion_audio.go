@@ -121,8 +121,10 @@ func (s *Server) handleVoiceCompanionAudio(w http.ResponseWriter, r *http.Reques
 // DELETE /v1/channels/{channel}/voice/companion/audio: the share's holder
 // withdraws their consent. Checks 1-5 (voiceSessionCaller: a route that lets
 // go keeps working in an archived channel), then the caller's companion is set
-// back to screen_share alone and voice_share_audio_stopped (reason=self) is
-// written, when a consent of theirs was recorded. 204 either way: a consent
+// back to screen_share alone, when the consent named the companion (one
+// naming the person granted it nothing, so LiveKit is not asked), and
+// voice_share_audio_stopped (reason=self) is written, when a consent of theirs
+// was recorded. 204 either way: a consent
 // that is not there, a share that is not the caller's and a room nobody is in
 // all leave nothing to withdraw. A withdrawal LiveKit will not take is retried
 // by the passes, and a companion still publishing the sound is removed.
@@ -158,7 +160,9 @@ func (s *Server) handleVoiceCompanionAudioDelete(w http.ResponseWriter, r *http.
 //   - a consent naming the person (issue #1853): it is recorded and its row
 //     written under the room's order, and LiveKit is not asked to grant
 //     anything. If it replaces a consent that named the companion, the
-//     companion is set back to the screen alone, as a DELETE does;
+//     companion is set back to the screen alone, as a DELETE of a consent
+//     naming the companion does (a DELETE of one naming the person asks
+//     LiveKit nothing);
 //   - another scope on a consent naming the companion: the consent is changed
 //     and a voice_share_audio_started row says so; the permission already
 //     names the source;
@@ -349,7 +353,10 @@ func (p *voicePoller) grantCompanionAudio(ctx context.Context, room store.VoiceR
 // stopCompanionAudio ends principalID's consent to their companion's sound in
 // room, if one is recorded on the share they hold: the voice_share_audio_stopped
 // row (reason=self) is written under the room's order, and the companion is
-// set back to the screen alone. A room with no such consent is left as it is.
+// set back to the screen alone, unless the consent named the person, which
+// granted the companion nothing and asks LiveKit nothing (a withdrawal still
+// owed from an earlier change stays the passes'). A room with no such consent
+// is left as it is.
 // Under the room's claims, so that no claim or pass writes the companion's
 // permission meanwhile. The row is written before LiveKit is asked, as a stop
 // does: a withdrawal that fails is retried by the passes (withdrawing), and a
