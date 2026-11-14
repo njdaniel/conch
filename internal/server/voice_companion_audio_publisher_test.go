@@ -692,3 +692,320 @@ func TestVoiceCompanionAudioConcurrentPublisherChanges(t *testing.T) {
 		t.Errorf("the last consent row is %s %q but the last permission written is %+v", last.Action, last.Detail, up)
 	}
 }
+
+// TestVoiceCompanionAudioOwedWithdrawalWithoutSound (issue #1859): a
+// withdrawal conchd owes is retried on every pass until LiveKit confirms it,
+// whether or not the companion publishes any sound, and is never audited as
+// unclaimed.
+func TestVoiceCompanionAudioOwedWithdrawalWithoutSound(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		end  func(t *testing.T, f *presenceFixture, share schema.VoiceShareV1)
+	}{
+		{"publisher changes to the person", func(t *testing.T, f *presenceFixture, share schema.VoiceShareV1) {
+			f.mustConsent(t, audioApplicationPerson, share)
+		}},
+		{"consent deleted", func(t *testing.T, f *presenceFixture, _ schema.VoiceShareV1) {
+			if res := f.stopCompanionAudio(t, "ann"); res.status != http.StatusNoContent {
+				t.Fatalf("DELETE: %d %s", res.status, res.body)
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f, room := shareWithCompanion(t)
+			f.at(1_000)
+			share := f.mustClaim(t, "ann")
+			f.mustConsent(t, audioApplication, share)
+			f.publishScreen(room, true, false) // the screen only, no sound track
+			f.at(1_500)
+			f.pass(t)
+			f.lk.setUpdateFail(f.screenID("ann"), true)
+			tc.end(t, f, share)
+			if !f.lk.in(room, f.screenID("ann")) {
+				t.Fatal("a companion publishing no sound was removed")
+			}
+			before := f.companionUpdates()
+			for i := range 3 {
+				f.at(2_000 + 500*i)
+				f.pass(t)
+				if got := f.companionUpdates(); got != before+i+1 {
+					t.Fatalf("after pass %d the companion saw %d updates, want %d: the owed withdrawal was dropped", i+1, got, before+i+1)
+				}
+			}
+			// LiveKit takes it: the pass confirms, then stops asking.
+			f.lk.setUpdateFail(f.screenID("ann"), false)
+			f.at(4_000)
+			f.pass(t)
+			if up := f.lastCompanionUpdate(t); !slices.Equal(up.sources, screenOnly) {
+				t.Errorf("the confirming pass set %+v, want %v", up, screenOnly)
+			}
+			confirmed := f.companionUpdates()
+			for i := range 2 {
+				f.at(4_500 + 500*i)
+				f.pass(t)
+			}
+			if got := f.companionUpdates(); got != confirmed {
+				t.Errorf("%d updates after confirmation, want none more", got-confirmed)
+			}
+			if got := f.removedRows(t); len(got) != 0 {
+				t.Errorf("removal rows = %q, want none", got)
+			}
+			if n := len(f.audits(t, store.AuditVoiceShareUnclaimed)); n != 0 {
+				t.Errorf("a withdrawal conchd owed was audited as unclaimed %d times", n)
+			}
+		})
+	}
+}
+
+// TestVoiceCompanionAudioDeletePersonConsent (issue #1859): ending a consent
+// that names the person writes nothing to LiveKit and removes no one, even
+// when LiveKit is failing.
+func TestVoiceCompanionAudioDeletePersonConsent(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		fail func(f *presenceFixture)
+	}{
+		{"updates fail", func(f *presenceFixture) { f.lk.setUpdateFail(f.screenID("ann"), true) }},
+		{"lookup and updates fail", func(f *presenceFixture) {
+			f.lk.setUpdateFail(f.screenID("ann"), true)
+			f.lk.setGetStatus(http.StatusServiceUnavailable)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f, room := shareWithCompanion(t)
+			f.at(1_000)
+			share := f.mustClaim(t, "ann")
+			f.mustConsent(t, audioApplicationPerson, share)
+			f.publishScreen(room, true, false)
+			f.at(1_500)
+			f.pass(t)
+			before := f.companionUpdates()
+			tc.fail(f)
+			if res := f.stopCompanionAudio(t, "ann"); res.status != http.StatusNoContent {
+				t.Fatalf("DELETE: %d %s", res.status, res.body)
+			}
+			if !f.lk.in(room, f.screenID("ann")) {
+				t.Fatal("the screen-only companion was removed")
+			}
+			if got := f.companionUpdates(); got != before {
+				t.Errorf("DELETE made %d LiveKit writes, want none", got-before)
+			}
+			if got := f.removedRows(t); len(got) != 0 {
+				t.Errorf("removal rows = %q, want none", got)
+			}
+		})
+	}
+}
+
+// owedScreen reports ann's companion's entry in the room's owed withdrawals.
+func (f *presenceFixture) owedScreen(room string) (stamp uint64, owed bool) {
+	p := f.srv.voice
+	r := p.roomNamed(room)
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	stamp, owed = r.withdrawing[voiceWithdrawKey{f.ids["ann"], voiceRoleScreen}]
+	return stamp, owed
+}
+
+// requireOwed fails unless ann's companion's withdrawal is owed and
+// unconfirmed.
+func (f *presenceFixture) requireOwed(t *testing.T, room, when string) {
+	t.Helper()
+	if stamp, owed := f.owedScreen(room); !owed || stamp != 0 {
+		t.Fatalf("%s: withdrawal entry = %d, %v; want owed and unconfirmed", when, stamp, owed)
+	}
+}
+
+// retryThenConfirm runs three passes with LiveKit refusing, each of which
+// must make exactly one write to ann's companion, then lets LiveKit answer:
+// the next pass confirms with the screen alone, and the passes after it make
+// no more writes and leave no entry. at is the fixture clock to start from.
+func (f *presenceFixture) retryThenConfirm(t *testing.T, room string, at int) {
+	t.Helper()
+	before := f.companionUpdates()
+	for i := range 3 {
+		f.at(at + 500*i)
+		f.pass(t)
+		if got := f.companionUpdates(); got != before+i+1 {
+			t.Fatalf("pass %d: the companion saw %d writes, want %d", i+1, got, before+i+1)
+		}
+	}
+	f.lk.setUpdateFail(f.screenID("ann"), false)
+	f.at(at + 2_000)
+	f.pass(t)
+	if up := f.lastCompanionUpdate(t); !slices.Equal(up.sources, screenOnly) {
+		t.Errorf("the confirming pass set %+v, want %v", up, screenOnly)
+	}
+	confirmed := f.companionUpdates()
+	for i := range 2 {
+		f.at(at + 2_500 + 500*i)
+		f.pass(t)
+	}
+	if got := f.companionUpdates(); got != confirmed {
+		t.Errorf("%d writes after confirmation, want none", got-confirmed)
+	}
+	if _, owed := f.owedScreen(room); owed {
+		t.Error("the entry outlived its confirmation")
+	}
+	if got := f.removedRows(t); len(got) != 0 {
+		t.Errorf("removal rows = %q, want none", got)
+	}
+	if n := len(f.audits(t, store.AuditVoiceShareUnclaimed)); n != 0 {
+		t.Errorf("a withdrawal conchd owed was audited as unclaimed %d times", n)
+	}
+}
+
+// TestVoiceCompanionAudioDeletePersonConsentKeepsOwed (issue #1859): a
+// DELETE of a person consent writes nothing, and leaves a withdrawal that an
+// earlier change still owes to the passes, which retry it once each and stop
+// at LiveKit's confirmation.
+func TestVoiceCompanionAudioDeletePersonConsentKeepsOwed(t *testing.T) {
+	t.Run("replaced a companion consent still owed", func(t *testing.T) {
+		for _, lookupFails := range []bool{false, true} {
+			name := "updates fail"
+			if lookupFails {
+				name = "lookup and updates fail"
+			}
+			t.Run(name, func(t *testing.T) {
+				f, room := shareWithCompanion(t)
+				f.at(1_000)
+				share := f.mustClaim(t, "ann")
+				f.mustConsent(t, audioApplication, share)
+				f.publishScreen(room, true, false)
+				f.at(1_500)
+				f.pass(t)
+				f.lk.setUpdateFail(f.screenID("ann"), true)
+				f.mustConsent(t, audioApplicationPerson, share)
+				f.requireOwed(t, room, "after the change")
+				if lookupFails {
+					f.lk.setGetStatus(http.StatusServiceUnavailable)
+				}
+				before := f.companionUpdates()
+				if res := f.stopCompanionAudio(t, "ann"); res.status != http.StatusNoContent {
+					t.Fatalf("DELETE: %d %s", res.status, res.body)
+				}
+				if got := f.companionUpdates(); got != before {
+					t.Errorf("DELETE made %d LiveKit writes, want none", got-before)
+				}
+				if !f.lk.in(room, f.screenID("ann")) {
+					t.Fatal("the companion was removed")
+				}
+				f.requireOwed(t, room, "after the DELETE")
+				f.retryThenConfirm(t, room, 2_000)
+			})
+		}
+	})
+	t.Run("after a refused person-to-companion grant", func(t *testing.T) {
+		f, room := shareWithCompanion(t)
+		f.at(1_000)
+		share := f.mustClaim(t, "ann")
+		f.mustConsent(t, audioApplicationPerson, share)
+		f.publishScreen(room, true, false)
+		f.at(1_500)
+		f.pass(t)
+		f.lk.setUpdateFail(f.screenID("ann"), true)
+		if res := f.companionAudio(t, "ann", audioApplicationCompanion); res.status == http.StatusOK {
+			t.Fatalf("the refused grant was answered 200: %s", res.body)
+		}
+		f.requireOwed(t, room, "after the refused grant")
+		before := f.companionUpdates()
+		if res := f.stopCompanionAudio(t, "ann"); res.status != http.StatusNoContent {
+			t.Fatalf("DELETE: %d %s", res.status, res.body)
+		}
+		if got := f.companionUpdates(); got != before {
+			t.Errorf("DELETE made %d LiveKit writes, want none", got-before)
+		}
+		f.requireOwed(t, room, "after the DELETE")
+		f.retryThenConfirm(t, room, 2_000)
+	})
+}
+
+// TestVoiceCompanionAudioOwedWithdrawalStops (issue #1859): an owed
+// withdrawal is dropped when the companion leaves the room and when a consent
+// naming it is recorded.
+func TestVoiceCompanionAudioOwedWithdrawalStops(t *testing.T) {
+	t.Run("the companion leaves", func(t *testing.T) {
+		f, room := shareWithCompanion(t)
+		f.at(1_000)
+		share := f.mustClaim(t, "ann")
+		f.mustConsent(t, audioApplication, share)
+		f.publishScreen(room, true, false)
+		f.at(1_500)
+		f.pass(t)
+		f.lk.setUpdateFail(f.screenID("ann"), true)
+		f.mustConsent(t, audioApplicationPerson, share)
+		f.at(2_000)
+		f.pass(t)
+		f.lk.drop(room, f.screenID("ann"))
+		before := f.companionUpdates()
+		f.at(2_500)
+		f.pass(t)
+		if _, owed := f.owedScreen(room); owed {
+			t.Error("the entry outlived the companion")
+		}
+		f.at(3_000)
+		f.pass(t)
+		if got := f.companionUpdates(); got != before {
+			t.Errorf("%d writes after the companion left, want none", got-before)
+		}
+	})
+	t.Run("a consent naming the companion", func(t *testing.T) {
+		f, room := shareWithCompanion(t)
+		f.at(1_000)
+		share := f.mustClaim(t, "ann")
+		f.mustConsent(t, audioApplication, share)
+		f.publishScreen(room, true, false)
+		f.at(1_500)
+		f.pass(t)
+		f.lk.setUpdateFail(f.screenID("ann"), true)
+		f.mustConsent(t, audioApplicationPerson, share)
+		f.at(2_000)
+		f.pass(t)
+		f.lk.setUpdateFail(f.screenID("ann"), false)
+		f.mustConsent(t, audioApplicationCompanion, share)
+		if _, owed := f.owedScreen(room); owed {
+			t.Error("the entry outlived a consent naming the companion")
+		}
+		before := f.companionUpdates()
+		f.publishScreen(room, true, true)
+		for i := range 3 {
+			f.at(2_500 + 500*i)
+			f.pass(t)
+		}
+		if got := f.companionUpdates(); got != before {
+			t.Errorf("%d writes under the new consent, want none; last %+v", got-before, f.lastCompanionUpdate(t))
+		}
+		if up := f.lastCompanionUpdate(t); !slices.Equal(up.sources, screenAndAudio) {
+			t.Errorf("last write %+v, want the sound kept", up)
+		}
+		if n := len(f.audits(t, store.AuditVoiceShareUnclaimed)); n != 0 {
+			t.Errorf("unclaimed rows = %d, want none", n)
+		}
+		if got := f.removedRows(t); len(got) != 0 {
+			t.Errorf("removal rows = %q, want none", got)
+		}
+	})
+}
+
+// TestVoiceCompanionAudioReclaimAfterRefusedWithdrawal (issue #1859): a share
+// with a companion consent ends while LiveKit refuses the companion's
+// withdrawal, and the person claims again with LiveKit still refusing: the
+// claim's own grant fails, so the withdrawal is owed again and the passes
+// retry it, quietly, until LiveKit confirms.
+func TestVoiceCompanionAudioReclaimAfterRefusedWithdrawal(t *testing.T) {
+	f, room := shareWithCompanion(t)
+	f.at(1_000)
+	share := f.mustClaim(t, "ann")
+	f.mustConsent(t, audioApplication, share)
+	f.at(1_500)
+	f.pass(t)
+	f.lk.setUpdateFail(f.screenID("ann"), true)
+	f.mustStop(t, "ann")
+	if !f.lk.in(room, f.screenID("ann")) {
+		t.Fatal("the companion was removed at the stop")
+	}
+	f.at(1_600)
+	f.mustClaim(t, "ann")
+	f.requireOwed(t, room, "after the second claim")
+	f.retryThenConfirm(t, room, 2_000)
+}
