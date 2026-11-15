@@ -11,12 +11,13 @@ import { execFileSync } from 'node:child_process';
 import type { ChildProcessWithoutNullStreams } from 'node:child_process';
 import { copyFileSync, chmodSync, existsSync } from 'node:fs';
 import { createServer, type Server } from 'node:http';
-import type { AddressInfo } from 'node:net';
+import type { AddressInfo, Socket } from 'node:net';
 import { join, resolve } from 'node:path';
 
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 
 import { VOICE_CONTROL_OWNER_LOSS_EXIT_MS, VOICE_CONTROL_STOP_KILL_AFTER_MS } from '../../../web/src/schema/generated.ts';
+import type { VoiceSessionResponseV1 } from '../../../web/src/schema/generated.ts';
 import { HELPER_NAME, defaultSpawn } from '../../main/voice/spawn.ts';
 import { OneShot } from '../../main/voice/oneshot.ts';
 import { CEILING_ARGS, VoiceService } from '../../main/voice/service.ts';
@@ -33,11 +34,60 @@ if (!have) {
   console.warn(`voice-helper integration: SKIPPED: ${why}`);
 }
 
+// Synthetic values, no real credential: a JWT-shaped canary the helper's own
+// redaction layers should never let through if an error body echoed it back.
+const JWT_CANARY = 'eyJhbGciOiJub25lIn0.eyJzdWIiOiJzeW50aGV0aWMtY2FuYXJ5In0.c3ludGhldGljLXNpZ25hdHVyZS1jYW5hcnk';
+
+// NotLiveKit listens where a session says LiveKit is and answers every HTTP
+// request and every upgrade with 404 and a body of synthetic secrets. Like
+// NotLiveKit in voice/conch-voice/tests/binary.rs, it keeps what reached it
+// and closes every connection it holds.
+class NotLiveKit {
+  readonly requests: string[] = [];
+  private readonly sockets = new Set<Socket>();
+  url = '';
+  private readonly server: Server;
+
+  constructor(echo: () => string) {
+    this.server = createServer((req, res) => {
+      this.requests.push(`${req.url ?? ''} ${req.headers.authorization ?? ''}`);
+      req.resume();
+      const body = Buffer.from(echo());
+      res.writeHead(404, { 'content-type': 'text/plain', 'content-length': body.length, connection: 'close' }).end(body);
+    });
+    this.server.on('upgrade', (req, socket: Socket) => {
+      this.requests.push(`${req.url ?? ''} ${req.headers.authorization ?? ''}`);
+      const body = Buffer.from(echo());
+      socket.on('error', () => undefined);
+      socket.end(`HTTP/1.1 404 Not Found\r\nContent-Type: text/plain\r\nContent-Length: ${String(body.length)}\r\nConnection: close\r\n\r\n${body.toString('latin1')}`);
+    });
+    this.server.on('connection', (socket: Socket) => {
+      this.sockets.add(socket);
+      socket.on('close', () => this.sockets.delete(socket));
+    });
+  }
+
+  async listen(): Promise<this> {
+    await new Promise<void>((r) => this.server.listen(0, '127.0.0.1', r));
+    this.url = `ws://127.0.0.1:${String((this.server.address() as AddressInfo).port)}`;
+    return this;
+  }
+
+  async close(): Promise<void> {
+    for (const s of this.sockets) s.destroy();
+    await new Promise<void>((r) => this.server.close(() => { r(); }));
+  }
+}
+
 describe.runIf(have)('the supervisor with the real conch-voice', () => {
   const whoami = readFixture<{ id: number }>('whoami-response-v1.json');
+  const template = readFixture<VoiceSessionResponseV1>('voice-session-response-v1.json');
+  const [grant] = template.rooms;
   let conchd: Server;
   let origin = '';
   const seen: string[] = [];
+  // Where the stub says LiveKit is; empty refuses every session (the default).
+  let livekitUrl = '';
 
   beforeAll(async () => {
     conchd = createServer((req, res) => {
@@ -47,8 +97,14 @@ describe.runIf(have)('the supervisor with the real conch-voice', () => {
         res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify(whoami));
         return;
       }
-      // Every voice session is refused for now, so the helper stays
-      // reconnecting: no LiveKit is needed.
+      if (livekitUrl !== '' && req.method === 'POST' && req.url === '/v1/channels/general/voice/session') {
+        const expires = new Date(Date.now() + 10 * 60_000).toISOString();
+        const session: VoiceSessionResponseV1 = { ...template, livekit_url: livekitUrl, rooms: template.rooms.map((r) => ({ ...r, expires_at: expires })) };
+        res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify(session));
+        return;
+      }
+      // Unless a test supplies an SDK endpoint, refuse the session so the
+      // helper stays reconnecting without contacting LiveKit.
       res.writeHead(503, { 'content-type': 'application/json' }).end(JSON.stringify(readFixture('error.json')));
     });
     await new Promise<void>((r) => conchd.listen(0, '127.0.0.1', r));
@@ -65,7 +121,11 @@ describe.runIf(have)('the supervisor with the real conch-voice', () => {
   let children: ChildProcessWithoutNullStreams[];
   let nonces: string[];
   let sup: Supervisor;
+  let notLiveKit: NotLiveKit | null;
   beforeEach(() => {
+    seen.length = 0;
+    livekitUrl = '';
+    notLiveKit = null;
     s = scratch();
     copyFileSync(binary, join(s.resources, HELPER_NAME));
     chmodSync(join(s.resources, HELPER_NAME), 0o755);
@@ -87,8 +147,16 @@ describe.runIf(have)('the supervisor with the real conch-voice', () => {
     sup.subscribe((st) => states.push(st));
   });
   afterEach(async () => {
-    await sup.stop();
-    s.cleanup();
+    try {
+      await sup.stop();
+    } finally {
+      try {
+        await notLiveKit?.close();
+      } finally {
+        livekitUrl = '';
+        s.cleanup();
+      }
+    }
   });
 
   const start = (): Promise<VoiceState> =>
@@ -156,6 +224,62 @@ describe.runIf(have)('the supervisor with the real conch-voice', () => {
     expect(service.state().status).toBe('idle');
     expect(logs.map((l) => l.line)).toContain('voice: helper 1 exited (code 0)');
     service.close();
+  });
+
+  // #1861: the real SDK is reached (a session is granted, LiveKit is a
+  // loopback endpoint that answers 404), the helper's connect error travels
+  // by standard error and its state by the events endpoint, and the owner
+  // shows the words, redacted and bounded. What the SDK reflects of the
+  // body is not assumed: only that nothing synthetic is shown.
+  it('a real SDK connection failure shows connect_failed with bounded, redacted detail, and a stop reaps the helper', async () => {
+    const room = grant?.room ?? '?';
+    const joinToken = grant?.token ?? '?';
+    expect(room).not.toBe('?');
+    expect(joinToken).not.toBe('?');
+    notLiveKit = new NotLiveKit(
+      () => `join token ${joinToken} room ${room} login ${FAKE_TOKEN} jwt ${JWT_CANARY} control \u0001\u0007\u001b[31m end`,
+    );
+    await notLiveKit.listen();
+    livekitUrl = notLiveKit.url;
+
+    const started = await start();
+    expect(started.status, JSON.stringify({ started, logs, diag: sup.diagnostics() })).toBe('running');
+
+    // The status line and the event travel apart, so the first reconnecting
+    // state may have no detail: look for the one that has.
+    const failed = (): VoiceState | undefined =>
+      states.find((st) => (st.status === 'running' || st.status === 'ended') && st.helper.reason === 'connect_failed' && (st.detail ?? '') !== '');
+    await until(() => failed() !== undefined, 30_000, 'connect_failed with a detail');
+    const shownState = failed();
+    const detail = shownState?.status === 'running' || shownState?.status === 'ended' ? (shownState.detail ?? '') : '';
+    const failureDiagnostics = sup.diagnostics();
+
+    // Both ends were reached: conchd's session route and the SDK's endpoint.
+    expect(seen).toContain('POST /v1/channels/general/voice/session');
+    expect(notLiveKit.requests.length).toBeGreaterThan(0);
+    expect(notLiveKit.requests.join('\n')).toContain(joinToken);
+
+    // Actionable (the SDK's own words for the refusal), printable, bounded:
+    // 200 printable ASCII characters and at most one ellipsis.
+    expect(detail).toMatch(/404|not found|websocket|http/i);
+    expect(detail).toMatch(/^[\x20-\x7e]+…?$/);
+    expect(detail.length).toBeLessThanOrEqual(201);
+    // The same words are in the log.
+    expect(logs.map((l) => l.line).some((l) => /^voice: helper 1 (reconnecting|ended): connect_failed: /.test(l) && l.endsWith(`connect_failed: ${detail}`))).toBe(true);
+
+    const t0 = Date.now();
+    await sup.stop();
+    const took = Date.now() - t0;
+    expect(sup.state).toEqual({ status: 'idle' });
+    expect(logs.map((l) => l.line)).toContain('voice: helper 1 exited (code 0)');
+    expect(logs.some((l) => /SIGTERM|SIGKILL/.test(l.line))).toBe(false);
+    expect(took).toBeLessThan(VOICE_CONTROL_STOP_KILL_AFTER_MS);
+
+    const shown = JSON.stringify([logs, states, failureDiagnostics, sup.diagnostics()]);
+    expect(nonces[0]?.length).toBe(43);
+    for (const secret of [nonces[0] ?? '?', FAKE_TOKEN, joinToken, room, JWT_CANARY]) {
+      expect(shown).not.toContain(secret);
+    }
   });
 
   it('owner loss: the end of standard input, and the helper stops with owner_lost and exits within the bound', async () => {
