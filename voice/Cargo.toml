@@ -17,7 +17,9 @@ publish = false
 # there fails scripts/voice-depgate.sh. New crates need Nick's sign-off.
 [workspace.dependencies]
 # Exact: its build downloads a prebuilt libwebrtc chosen by this version.
-livekit = "=0.9.4"
+# The SDK's default enables native networking but no TLS. Deployed signaling
+# is wss://; use the system roots, as conch-voice-api does for HTTPS.
+livekit = { version = "=0.9.4", features = ["rustls-tls-native-roots"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
