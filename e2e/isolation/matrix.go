@@ -225,6 +225,7 @@ func coreMatrixRows() []row {
 	transmit := schema.VoiceTransmitReportV1{State: schema.VoiceTransmitStateStarted}
 	companion := schema.VoiceCompanionRequestV1{Publish: schema.VoiceCompanionPublishScreen, Subscribe: true}
 	companionAudio := schema.VoiceCompanionAudioRequestV1{Scope: schema.VoiceShareAudioScopeApplication}
+	companionAudioPerson := schema.VoiceCompanionAudioRequestV1{Scope: schema.VoiceShareAudioScopeApplication, Publisher: schema.VoiceShareAudioPublisherPerson}
 	return []row{
 		// Sockets: refused before the upgrade.
 		byChannel("GET /v0/ws", "opens the v0 message socket of A's channel", func(_ *world, s subject) probe { return sock("/v0/ws", s.name, nil, false) }),
@@ -573,6 +574,11 @@ func coreMatrixRows() []row {
 		byChannel("DELETE /v1/channels/{channel}/voice/companion", "removes a companion from A's room", func(_ *world, s subject) probe { return del(ch(s) + "/voice/companion") }),
 		// The companion's share audio (issue #898): the consent and its withdrawal.
 		byChannel("PUT /v1/channels/{channel}/voice/companion/audio", "consents to share audio in A's room", func(_ *world, s subject) probe { return put(ch(s)+"/voice/companion/audio", companionAudio) }),
+		// The consent naming the person as the publisher (issue #1853): the same
+		// refusals, for the same subjects, as the consent without the field.
+		byChannel("PUT /v1/channels/{channel}/voice/companion/audio", "consents to share audio published by the person in A's room", func(_ *world, s subject) probe {
+			return put(ch(s)+"/voice/companion/audio", companionAudioPerson)
+		}),
 		byChannel("DELETE /v1/channels/{channel}/voice/companion/audio", "withdraws share audio in A's room", func(_ *world, s subject) probe { return del(ch(s) + "/voice/companion/audio") }),
 		byChannel("GET /v1/channels/{channel}/voice", "reads A's voice presence", func(_ *world, s subject) probe { return get(ch(s) + "/voice") }),
 		// The presence version (issue #1483): v2 is refused exactly as v1 is,
