@@ -737,7 +737,7 @@ dependencies = [
 [[package]]
 name = "dmn-audio"
 version = "0.1.0"
-source = "git+https://github.com/njdaniel/dmn-audio?rev=39e7748c0b4bf3317681f6718117152e48df63c8#39e7748c0b4bf3317681f6718117152e48df63c8"
+source = "git+https://github.com/njdaniel/dmn-audio?rev=bbb1ec700b4fcd0714d4330a756ad05acf497745#bbb1ec700b4fcd0714d4330a756ad05acf497745"
 dependencies = [
  "hound",
  "pipewire",
