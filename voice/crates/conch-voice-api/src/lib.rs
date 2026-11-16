@@ -5,7 +5,7 @@
 //! Output: who the login is, voice sessions, presence snapshots and the presence stream,
 //! and the answers to transmit reports, as Rust copies of the wire types in `pkg/schema`;
 //! or one [`Error`] that says which refusal or failure it was. The managed helper's
-//! commands, read, and its events, written (`conch.voice_control.v1` and `v2`).
+//! commands, read, and its events, written (`conch.voice_control.v1`, `v2` and `v3`).
 //! `pkg/schema` is the single source of truth; the types here are checked against its
 //! golden fixtures.
 //! Owns: nothing that outlives a call, other than the connections a [`Client`] keeps open
@@ -31,7 +31,10 @@
 //!   [`Client::presence`], [`Client::presence_stream`].
 //! - [`parse_command`], [`parse_event`], [`to_line`]: the managed helper's control
 //!   protocol (`docs/design/tui-voice.md`); [`parse_command_v2`], [`parse_event_v2`]: its
-//!   version 2 (§20), which the hello offers beside v1.
+//!   version 2 (§20), which the hello offers beside v1; [`parse_command_v3`],
+//!   [`parse_event_v3`]: its version 3, v2 and the sound of a screen share
+//!   (`docs/design/linux-share-audio.md` §7), offered beside both by
+//!   [`VoiceControlHelloV1::v1_v2_and_v3`].
 //! - [`VoiceControlPipeAttachedV1`], [`validate_nonce`], [`parse_attached`]: the attach line
 //!   a helper writes first when its events channel is an endpoint it connects to rather than
 //!   fd 3 (`conch.voice_control_pipe.v1`; `docs/design/windows-desktop.md` §3.4,
@@ -50,6 +53,7 @@ mod client;
 mod control;
 mod control_pipe;
 mod control_v2;
+mod control_v3;
 mod error;
 mod login;
 mod presence;
@@ -86,6 +90,15 @@ pub use control_v2::{
     VoiceControlSetDevicesV2, VoiceControlSetMuteV2, VoiceControlSetTalkModeV2,
     VoiceControlStartV2, VoiceControlStateV2, VoiceControlTalkMode, parse_command_v2,
     parse_event_v2,
+};
+pub use control_v3::{
+    VOICE_CONTROL_MAX_APPLICATION_NAME_BYTES, VOICE_CONTROL_MAX_SHARE_AUDIO_SOURCES,
+    VOICE_CONTROL_SCHEMA_V3, VoiceControlAckV3, VoiceControlCommandKindV3, VoiceControlCommandV3,
+    VoiceControlEventV3, VoiceControlGetStateV3, VoiceControlLeaveV3, VoiceControlProtocolErrorV3,
+    VoiceControlSetDeafenV3, VoiceControlSetDevicesV3, VoiceControlSetMuteV3,
+    VoiceControlSetShareAudioMuteV3, VoiceControlSetShareAudioV3, VoiceControlSetTalkModeV3,
+    VoiceControlShareAudio, VoiceControlShareAudioProblem, VoiceControlStartV3,
+    VoiceControlStateV3, VoiceShareAudioScope, parse_command_v3, parse_event_v3,
 };
 pub use error::{Error, Refusal, code};
 pub use login::{TOKEN_ENV, credentials_path, default_config_dir, resolve_token, stored_servers};

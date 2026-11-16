@@ -4,6 +4,11 @@
 // every event and attach case of cases*.json is read as Go reads it, the
 // command builders write the golden commands, and the tracker accepts every
 // transcript and refuses the stream rules' breaches.
+//
+// voice-control-v3/ (issue #1851) is held to its generated validators here
+// and to nothing else yet: the owner does not speak v3 until #1854, so there
+// is no v3 reader, builder or tracker in protocol.ts to hold to its cases
+// and transcripts.
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
@@ -12,24 +17,36 @@ import { describe, expect, it } from 'vitest';
 import {
   voiceControlAckV1,
   voiceControlAckV2,
+  voiceControlAckV3,
   voiceControlGetStateV1,
   voiceControlGetStateV2,
+  voiceControlGetStateV3,
   voiceControlHelloV1,
   voiceControlLeaveV1,
   voiceControlLeaveV2,
+  voiceControlLeaveV3,
   voiceControlPipeAttachedV1,
   voiceControlProtocolErrorV1,
   voiceControlProtocolErrorV2,
+  voiceControlProtocolErrorV3,
   voiceControlSetDeafenV1,
   voiceControlSetDeafenV2,
+  voiceControlSetDeafenV3,
   voiceControlSetDevicesV2,
+  voiceControlSetDevicesV3,
   voiceControlSetMuteV1,
   voiceControlSetMuteV2,
+  voiceControlSetMuteV3,
+  voiceControlSetShareAudioMuteV3,
+  voiceControlSetShareAudioV3,
   voiceControlSetTalkModeV2,
+  voiceControlSetTalkModeV3,
   voiceControlStartV1,
   voiceControlStartV2,
+  voiceControlStartV3,
   voiceControlStateV1,
   voiceControlStateV2,
+  voiceControlStateV3,
   type VoiceControlHelloV1,
 } from '../../../web/src/schema/generated.ts';
 import type { Validator } from '../../../web/src/schema/validate.ts';
@@ -78,6 +95,24 @@ const validators: Record<string, Record<string, Validator<unknown>>> = {
     'event-state': voiceControlStateV2,
     'event-protocol-error': voiceControlProtocolErrorV2,
   },
+  'voice-control-v3': {
+    'command-start': voiceControlStartV3,
+    'command-set-mute': voiceControlSetMuteV3,
+    'command-set-deafen': voiceControlSetDeafenV3,
+    'command-get-state': voiceControlGetStateV3,
+    'command-leave': voiceControlLeaveV3,
+    'command-set-devices': voiceControlSetDevicesV3,
+    'command-set-talk-mode': voiceControlSetTalkModeV3,
+    // The longer family wins: a set-share-audio-mute fixture is not a
+    // set-share-audio one.
+    'command-set-share-audio': voiceControlSetShareAudioV3,
+    'command-set-share-audio-mute': voiceControlSetShareAudioMuteV3,
+    // The v3 directory's hello is the v1 hello offering the three versions.
+    'event-hello': voiceControlHelloV1,
+    'event-ack': voiceControlAckV3,
+    'event-state': voiceControlStateV3,
+    'event-protocol-error': voiceControlProtocolErrorV3,
+  },
   'voice-control-pipe': {
     attached: voiceControlPipeAttachedV1,
   },
@@ -114,6 +149,47 @@ describe('golden fixtures match the generated types', () => {
     expect(voiceControlStateV2({ ...readFixture<object>('voice-control-v2/event-state-connected.json'), token: 'x' })).toContain(
       '$.token: key is not in the TypeScript type',
     );
+  });
+
+  // v3 (issue #1851): the same of every one of its documents, the hello
+  // included, and neither version's state validator takes the other's state.
+  const v3 = cases.filter((c) => c.dir === 'voice-control-v3');
+
+  it('every kind of v3 document has a fixture', () => {
+    const families = new Set(v3.map((c) => c.file.replace(/\.json$/, '')).map((base) =>
+      Object.keys(validators['voice-control-v3'] ?? {})
+        .filter((f) => base === f || base.startsWith(`${f}-`))
+        .sort((a, b) => b.length - a.length)[0],
+    ));
+    expect([...families].sort()).toEqual(Object.keys(validators['voice-control-v3'] ?? {}).sort());
+  });
+
+  it.each(v3)('$dir/$file with an added key is refused', ({ dir, file }) => {
+    const doc = readFixture<object>(`${dir}/${file}`);
+    expect(validatorOf(dir, file)?.({ ...doc, token: 'x' })).toContain('$.token: key is not in the TypeScript type');
+  });
+
+  it('a state of one version is not a state of the other', () => {
+    const state2 = readFixture<object>('voice-control-v2/event-state-connected.json');
+    const state3 = readFixture<object>('voice-control-v3/event-state-share-audio-on.json');
+    expect(voiceControlStateV3(state3)).toEqual([]);
+    expect(voiceControlStateV3(state2)).not.toEqual([]);
+    expect(voiceControlStateV2(state3)).not.toEqual([]);
+    // Not by the schema name alone: a v2 state under v3's name lacks the
+    // fields v3 always writes.
+    expect(voiceControlStateV3({ ...state2, schema: 'conch.voice_control.v3' })).toContain('$.share_audio: required key is missing');
+  });
+
+  it('the vocabularies of v3 are strict', () => {
+    const state = readFixture<object>('voice-control-v3/event-state-share-audio-publish-refused.json');
+    expect(voiceControlStateV3({ ...state, share_audio: 'starting' })).not.toEqual([]);
+    expect(voiceControlStateV3({ ...state, share_audio_problem: 'no_consent' })).not.toEqual([]);
+    expect(voiceControlStateV3({ ...state, share_audio_problem: '' })).not.toEqual([]);
+    const ask = readFixture<object>('voice-control-v3/command-set-share-audio.json');
+    expect(voiceControlSetShareAudioV3({ ...ask, scope: 'system' })).not.toEqual([]);
+    expect(voiceControlSetShareAudioV3({ ...ask, kind: 'set_volume' })).not.toEqual([]);
+    // A kind of v3 is not a kind of the published versions' types.
+    expect(voiceControlSetMuteV2({ schema: 'conch.voice_control.v2', kind: 'set_share_audio_mute', id: 1, muted: true })).not.toEqual([]);
   });
 });
 

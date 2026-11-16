@@ -257,7 +257,7 @@ var TSTypes = []TSType{
 	{Value: VoiceChannelOccupancy{}},
 	{Value: VoiceOccupancyV1{}, Family: "voice-occupancy-v1", Schema: VoiceOccupancySchemaV1},
 	// The managed voice-helper control protocol (issue #948, Q10 of #770):
-	// what the desktop owner writes to conch-voice and reads back, v1 and v2,
+	// what the desktop owner writes to conch-voice and reads back, v1 to v3,
 	// and the attach line of its events endpoint. Their fixtures are in
 	// testdata/voice-control*/, a directory per version, so the rows name no
 	// family; desktop/tests/unit/voice-protocol.test.ts checks every one of
@@ -281,6 +281,20 @@ var TSTypes = []TSType{
 	{Value: VoiceControlAckV2{}, Schema: VoiceControlSchemaV2},
 	{Value: VoiceControlStateV2{}, Schema: VoiceControlSchemaV2},
 	{Value: VoiceControlProtocolErrorV2{}, Schema: VoiceControlSchemaV2},
+	// v3 (issue #1851, docs/design/linux-share-audio.md §7): v2 and the
+	// sound of a screen share. Its fixtures are in testdata/voice-control-v3/.
+	{Value: VoiceControlStartV3{}, Schema: VoiceControlSchemaV3},
+	{Value: VoiceControlSetMuteV3{}, Schema: VoiceControlSchemaV3},
+	{Value: VoiceControlSetDeafenV3{}, Schema: VoiceControlSchemaV3},
+	{Value: VoiceControlGetStateV3{}, Schema: VoiceControlSchemaV3},
+	{Value: VoiceControlLeaveV3{}, Schema: VoiceControlSchemaV3},
+	{Value: VoiceControlSetDevicesV3{}, Schema: VoiceControlSchemaV3},
+	{Value: VoiceControlSetTalkModeV3{}, Schema: VoiceControlSchemaV3},
+	{Value: VoiceControlSetShareAudioV3{}, Schema: VoiceControlSchemaV3},
+	{Value: VoiceControlSetShareAudioMuteV3{}, Schema: VoiceControlSchemaV3},
+	{Value: VoiceControlAckV3{}, Schema: VoiceControlSchemaV3},
+	{Value: VoiceControlStateV3{}, Schema: VoiceControlSchemaV3},
+	{Value: VoiceControlProtocolErrorV3{}, Schema: VoiceControlSchemaV3},
 	{Value: VoiceControlPipeAttachedV1{}, Schema: VoiceControlPipeSchemaV1},
 	// The device list `conch-voice devices --json` writes (issue #1378, D3-7
 	// of #771): the desktop owner reads it from a one-shot run. Its fixtures
@@ -707,6 +721,12 @@ var TSVocabularyModes = map[string]TSVocabularyMode{
 	"VoiceControlTalkMode":    TSStrict,
 	"VoiceDevicesConfig":      TSStrict,
 	"VoiceDevicesPipeWire":    TSStrict,
+
+	// Strict, for the same reason: version 3 of that protocol (issue #1851),
+	// its command kinds and the state of a share's sound.
+	"VoiceControlCommandKindV3":     TSStrict,
+	"VoiceControlShareAudio":        TSStrict,
+	"VoiceControlShareAudioProblem": TSStrict,
 
 	// Phone push and notification preferences (issue #1712). Strict: the
 	// policy and the platform, which a client writes itself, and the end
