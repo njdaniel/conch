@@ -683,7 +683,8 @@ var TSVocabularyModes = map[string]TSVocabularyMode{
 	"VoiceCompanionPublish": TSStrict,
 	// Strict: a consent the desktop writes (issue #898); it sends only a
 	// scope it knows, and a value it does not know it cannot have asked for.
-	"VoiceShareAudioScope": TSStrict,
+	"VoiceShareAudioScope":     TSStrict,
+	"VoiceShareAudioPublisher": TSStrict,
 	// A new share end reason is a new version of presence, by its contract
 	// (voice.go; webcam-video.md §10 keeps the camera's reasons the same way).
 	"VoiceShareEndReason":  TSStrict,
