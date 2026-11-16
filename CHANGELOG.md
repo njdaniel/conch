@@ -8,6 +8,11 @@ release that Nick publishes.
 
 ## [Unreleased]
 
+### Fixed
+- Native voice can connect to secure (`wss://`) LiveKit endpoints. The SDK now
+  enables rustls with system certificate roots; certificate and hostname
+  validation remain required (#1864).
+
 ## [0.1.0-alpha.19] - 2026-11-13
 
 This is a pre-1.0 release (`v0.1.0-alpha.19`). There is no new schema version. `pkg/schema` gains only additive values and shapes, and every published fixture is byte-identical:
