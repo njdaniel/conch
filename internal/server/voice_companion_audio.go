@@ -26,6 +26,13 @@ import (
 // (judgeShareLocked). The scope is consent, recorded: both scopes grant the
 // same LiveKit source.
 //
+// The consent also names who publishes (issue #1853, linux-share-audio.md §8):
+// the companion by default, or the person's own participant (publisher:
+// person), whose share grant already carries the sound. A consent naming the
+// person is recorded and audited (publisher=person in the detail) and asks
+// LiveKit nothing: the companion stays at screen_share, and a companion track
+// seen under it is unclaimed exactly as under no consent (companionAudio).
+//
 // Nothing here puts a token, the API secret or a room name in a log line, an
 // audit row or a response body.
 
@@ -43,13 +50,18 @@ import (
 // the room as the last pass listed it (else 409 voice_no_session). Then the
 // companion is granted screen_share and screen_share_audio, the
 // voice_share_audio_started row is written (actor the person, detail
-// channel=<id> scope=<scope>), and the consent is answered as
-// VoiceCompanionAudioV1 with the share's started_at.
+// channel=<id> scope=<scope>, with publisher=person added when the consent
+// names the person), and the consent is answered as VoiceCompanionAudioV1
+// with the share's started_at and the publisher as the request named it.
+// With publisher: person LiveKit is not asked and the companion is not
+// granted the sound.
 //
-// Asking again with the scope already recorded is a no-op 200: nothing is
-// written to LiveKit or the log. Asking with another scope records the new
-// one and writes a row saying so; the permission is unchanged, since both
-// scopes grant the same source.
+// Asking again with the scope and publisher already recorded is a no-op 200:
+// nothing is written to LiveKit or the log. Asking with another scope records
+// the new one and writes a row saying so; the permission is unchanged, since
+// both scopes grant the same source. Changing the publisher is a scope change
+// too: a row with the new detail, and the companion's sound is added or
+// withdrawn to match.
 func (s *Server) handleVoiceCompanionAudio(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	channel, caller, ok := s.voiceClaimCaller(w, r)
@@ -66,7 +78,7 @@ func (s *Server) handleVoiceCompanionAudio(w http.ResponseWriter, r *http.Reques
 			return
 		}
 		// A fixed message: the decoder's own names what the client sent.
-		writeError(w, http.StatusBadRequest, "invalid_request", `request body must be a voice companion audio request: a scope of application or system_excluding_call`)
+		writeError(w, http.StatusBadRequest, "invalid_request", `request body must be a voice companion audio request: a scope of application or system_excluding_call, and publisher companion or person if given`)
 		return
 	}
 
@@ -81,7 +93,7 @@ func (s *Server) handleVoiceCompanionAudio(w http.ResponseWriter, r *http.Reques
 		writeVoiceNoSession(w)
 		return
 	}
-	audio, err := s.voice.grantCompanionAudio(ctx, room, caller.ID, req.Scope)
+	audio, err := s.voice.grantCompanionAudio(ctx, room, caller.ID, req.Scope, req.Publisher)
 	switch {
 	case errors.Is(err, errVoiceShareNotConnected), errors.Is(err, errVoiceShareRoomGone):
 		writeVoiceNoSession(w)
@@ -132,34 +144,41 @@ func (s *Server) handleVoiceCompanionAudioDelete(w http.ResponseWriter, r *http.
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// grantCompanionAudio records principalID's consent, with scope, to their
-// companion publishing the sound of the share they hold in room, and has
-// LiveKit let the companion publish it. Under the room's claims, like a claim
-// (claimShare), so that no pass withdraws what is being granted and no stop
-// runs between the check and the grant:
+// grantCompanionAudio records principalID's consent, with scope and publisher
+// (empty means the companion), to the sound of the share they hold in room, and
+// has LiveKit let the companion publish it when the companion is the publisher.
+// Under the room's claims, like a claim (claimShare), so that no pass withdraws
+// what is being granted and no stop runs between the check and the grant:
 //
 //   - the caller holds no share, or a pending one: errVoiceShareRoomGone;
 //     the caller's companion is not in the
 //     room as the last pass listed it: errVoiceShareNotConnected;
-//   - the scope is the one recorded: nothing is done, and the consent is
-//     answered;
-//   - another scope: the consent is changed and a voice_share_audio_started
-//     row says so; the permission already names the source;
-//   - a first consent: it is recorded before LiveKit is asked (a pass sees it
+//   - the scope and publisher are the ones recorded: nothing is done, and the
+//     consent is answered;
+//   - a consent naming the person (issue #1853): it is recorded and its row
+//     written under the room's order, and LiveKit is not asked to grant
+//     anything. If it replaces a consent that named the companion, the
+//     companion is set back to the screen alone, as a DELETE does;
+//   - another scope on a consent naming the companion: the consent is changed
+//     and a voice_share_audio_started row says so; the permission already
+//     names the source;
+//   - a first consent naming the companion, or one replacing a consent that
+//     named the person: it is recorded before LiveKit is asked (a pass sees it
 //     and leaves the sound alone), the companion is granted the screen and the
 //     sound with its own canSubscribe, and the row is written under the room's
 //     order, before the answer. If LiveKit refuses, or cannot be asked, or the
 //     companion is gone (not found), or the row cannot be written, the consent
-//     is taken back and whatever LiveKit may have granted is left owed to the
-//     passes, which withdraw it quietly (withdrawing). A share that ended while
-//     LiveKit was being asked takes the grant with it: what was granted is
-//     withdrawn and the caller is told there is no share. A rotation that
-//     committed meanwhile and is not yet forgotten is read from the store
+//     is put back as it was and whatever LiveKit may have granted is left owed
+//     to the passes, which withdraw it quietly (withdrawing). A share that
+//     ended while LiveKit was being asked takes the grant with it: what was
+//     granted is withdrawn and the caller is told there is no share. A rotation
+//     that committed meanwhile and is not yet forgotten is read from the store
 //     (roomRotatedUnder) and ends the share the same way, before any row.
 //
 // Registered with claimRunning (issue #1265), like a claim: a revocation's
 // stop path finds it and waits, and a rotation hands it the withdrawal.
-func (p *voicePoller) grantCompanionAudio(ctx context.Context, room store.VoiceRoom, principalID int64, scope schema.VoiceShareAudioScope) (schema.VoiceCompanionAudioV1, error) {
+func (p *voicePoller) grantCompanionAudio(ctx context.Context, room store.VoiceRoom, principalID int64, scope schema.VoiceShareAudioScope, named schema.VoiceShareAudioPublisher) (schema.VoiceCompanionAudioV1, error) {
+	publisher := schema.VoiceCompanionAudioRequestV1{Scope: scope, Publisher: named}.EffectivePublisher()
 	r := p.roomNamed(room.RoomName)
 	if r == nil {
 		return schema.VoiceCompanionAudioV1{}, errVoiceShareRoomGone
@@ -187,40 +206,61 @@ func (p *voicePoller) grantCompanionAudio(ctx context.Context, room store.VoiceR
 		r.order.Unlock()
 		return schema.VoiceCompanionAudioV1{}, errVoiceShareNotConnected
 	}
-	answer := schema.VoiceCompanionAudioV1{Scope: scope, StartedAt: schema.NewTimestamp(c.startedAt)}
+	answer := schema.VoiceCompanionAudioV1{Scope: scope, Publisher: named, StartedAt: schema.NewTimestamp(c.startedAt)}
 	key := voiceWithdrawKey{principalID, voiceRoleScreen}
+	detail := fmt.Sprintf("channel=%d scope=%s", r.channelID, scope)
+	if publisher == schema.VoiceShareAudioPublisherPerson {
+		detail += " publisher=person"
+	}
 	row := voiceEvent{
 		actor: fmt.Sprintf("principal:%d", principalID), action: store.AuditVoiceShareAudioStarted, channelID: r.channelID,
-		detail: fmt.Sprintf("channel=%d scope=%s", r.channelID, scope),
+		detail: detail,
 	}
-	switch recorded := c.audioScope; {
-	case recorded == scope:
+	prevScope, prevPublisher := c.audioScope, c.audioPublisher
+	hadCompanion := c.companionAudio()
+	switch {
+	case prevScope == scope && c.publisher() == publisher:
 		p.mu.Unlock()
 		r.order.Unlock()
 		return answer, nil
-	case recorded != "":
-		// The consent changes; what LiveKit grants does not.
-		c.audioScope = scope
+	case publisher == schema.VoiceShareAudioPublisherPerson, hadCompanion:
+		// No grant is asked of LiveKit: a consent naming the person, or a
+		// scope change on one naming the companion (the permission already
+		// names the source). Recorded, then the row; a failed row puts the
+		// consent back. A companion that was granted the sound under the
+		// consent this one replaces is owed a withdrawal, which is written
+		// after the row (the passes retry what LiveKit will not take).
+		c.audioScope, c.audioPublisher = scope, named
+		withdraw := hadCompanion && publisher == schema.VoiceShareAudioPublisherPerson
 		p.mu.Unlock()
 		wctx, wcancel := context.WithTimeout(context.WithoutCancel(ctx), voiceEvictTimeout)
 		err := p.writeEvent(wctx, row)
 		wcancel()
+		p.mu.Lock()
 		if err != nil {
-			p.mu.Lock()
 			if r.shares[principalID] == c {
-				c.audioScope = recorded
+				c.audioScope, c.audioPublisher = prevScope, prevPublisher
 			}
 			p.mu.Unlock()
 			r.order.Unlock()
 			return schema.VoiceCompanionAudioV1{}, fmt.Errorf("voice: audit voice_share_audio_started: %w", err)
 		}
+		c.audioStarted = true
+		if withdraw {
+			r.withdrawing[key] = 0
+		}
+		p.mu.Unlock()
 		r.order.Unlock()
+		if withdraw {
+			p.withdrawCompanionAudioNow(ctx, r, principalID)
+		}
 		return answer, nil
 	}
-	// A first consent: recorded before LiveKit is asked, so that a pass
-	// listing the sound meanwhile sees it consented to. Any withdrawal the
-	// companion still owed (a DELETE just before) is superseded by the grant.
-	c.audioScope = scope
+	// A consent naming the companion where there was none, or one naming the
+	// person: recorded before LiveKit is asked, so that a pass listing the
+	// sound meanwhile sees it consented to. Any withdrawal the companion
+	// still owed (a DELETE just before) is superseded by the grant.
+	c.audioScope, c.audioPublisher = scope, named
 	delete(r.withdrawing, key)
 	p.mu.Unlock()
 	r.order.Unlock()
@@ -232,8 +272,8 @@ func (p *voicePoller) grantCompanionAudio(ctx context.Context, room store.VoiceR
 	undo := func() {
 		r.order.Lock()
 		p.mu.Lock()
-		if r.shares[principalID] == c && c.audioScope == scope {
-			c.audioScope = ""
+		if r.shares[principalID] == c && c.audioScope == scope && c.companionAudio() {
+			c.audioScope, c.audioPublisher = prevScope, prevPublisher
 			// Whatever LiveKit may have granted is the passes' to take
 			// back, without auditing it: the sound was not published by a
 			// stranger.
@@ -268,8 +308,11 @@ func (p *voicePoller) grantCompanionAudio(ctx context.Context, room store.VoiceR
 		// idle, say, or a rotation forgot the room): its end owed the
 		// companion a whole withdrawal and wrote voice_share_stopped alone,
 		// since no voice_share_audio_started row exists to close
-		// (audioStarted was never set). The consent is void, and what was
-		// just granted is taken back now rather than left to the pass.
+		// (audioStarted was never set) or, for a person-to-companion change
+		// in flight, the share's end found audioStarted set by the person's
+		// consent and wrote voice_share_audio_stopped for it. The consent is
+		// void, and what was just granted is taken back now rather than left
+		// to the pass.
 		p.mu.Unlock()
 		r.order.Unlock()
 		if p.withdrawCompanion(ctx, r, principalID, voiceRoleScreen, comp.screenSubscribes) {
@@ -327,7 +370,7 @@ func (p *voicePoller) stopCompanionAudio(ctx context.Context, room store.VoiceRo
 		r.order.Unlock()
 		return
 	}
-	c.audioScope, c.audioStarted = "", false
+	c.audioScope, c.audioPublisher, c.audioStarted = "", "", false
 	key := voiceWithdrawKey{principalID, voiceRoleScreen}
 	r.withdrawing[key] = 0
 	row := voiceEvent{
