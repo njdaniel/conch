@@ -381,6 +381,14 @@ export interface NativeVoiceView {
   // A supervisor refusal, failure or loss kind, or a helper's reason: a
   // fixed vocabulary, never free text.
   readonly problem?: string;
+  // A closed set refining problem 'untrusted': the helper's folder can be
+  // changed by other users. The path itself never reaches the page.
+  readonly cause?: 'folder-writable';
+  // For an end with a connection reason (connect_failed, server_unreachable,
+  // internal_error): the helper's own words, redacted by main of the token,
+  // the session nonce and any JWT-shaped text, printable ASCII, at most 201
+  // characters. Shown as text behind "Details", never parsed.
+  readonly detail?: string;
   readonly retryable: boolean;
   readonly helper?: NativeVoiceHelper;
   // Set while main's mute at a screen lock (issue #1588) is still in force:

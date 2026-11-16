@@ -363,6 +363,23 @@ describe('the preload’s voice family', () => {
     expect(seen).toEqual([marked]);
   });
 
+  it('passes the closed cause and a bounded printable detail, and drops anything else (issue #1850)', () => {
+    const { bridge, sendVoice } = wired();
+    const seen: NativeVoiceView[] = [];
+    bridge.onVoiceState((v) => seen.push(v));
+    const unavailable = { status: 'unavailable', generation: 1, channel: null, retryable: false, problem: 'untrusted', cause: 'folder-writable' };
+    const ended = { ...running, status: 'ended', detail: 'could not reach <redacted>' };
+    sendVoice(unavailable);
+    sendVoice(ended);
+    for (const odd of [
+      { ...unavailable, cause: '/home/x/code' },
+      { ...ended, detail: 'line\nbreak' },
+      { ...ended, detail: 'x'.repeat(202) },
+      { ...ended, detail: 7 },
+    ]) sendVoice(odd);
+    expect(seen).toEqual([unavailable, ended]);
+  });
+
   it('drops a message that is not exactly a NativeVoiceView', () => {
     const { bridge, sendVoice } = wired();
     const seen: unknown[] = [];

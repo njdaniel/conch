@@ -313,6 +313,38 @@ describe('NativeVoicePanel', () => {
       expect(screen.getByText('The voice helper is not trusted, so it was not started.')).toBeTruthy();
       expect(screen.queryByRole('button', { name: /Join/ })).toBeNull();
     });
+    it('says the folder is the problem for an untrusted helper in a writable folder (issue #1850)', () => {
+      strip(new Fake({ status: 'unavailable', generation: 1, channel: null, retryable: false, problem: 'untrusted', cause: 'folder-writable' }));
+      expect(screen.getByText("voice is not available here; text chat is unaffected: the voice helper's folder can be changed by other users")).toBeTruthy();
+      expect(screen.getByText('The voice helper is in a folder that other users can change, so it was not started.')).toBeTruthy();
+    });
+    it('keeps the connection detail behind Details, as text (issue #1850)', () => {
+      const detail = '<b>could not reach</b> wss://lk.example/rtc?access_token=<redacted>';
+      strip(new Fake({ status: 'ended', generation: 1, channel: 'general', retryable: true, problem: 'connect_failed', helper: helper(), detail }));
+      expect(screen.queryByText(detail)).toBeNull();
+      const toggle = screen.getByRole('button', { name: 'Details' });
+      expect(toggle.getAttribute('aria-expanded')).toBe('false');
+      fireEvent.click(toggle);
+      expect(screen.getByText(detail).tagName).toBe('P');
+      expect(screen.getByText(detail).querySelector('b')).toBeNull();
+      expect(toggle.getAttribute('aria-expanded')).toBe('true');
+    });
+    it('says the folder is the problem for an untrusted helper in a writable folder (issue #1850)', () => {
+      strip(new Fake({ status: 'unavailable', generation: 1, channel: null, retryable: false, problem: 'untrusted', cause: 'folder-writable' }));
+      expect(screen.getByText("voice is not available here; text chat is unaffected: the voice helper's folder can be changed by other users")).toBeTruthy();
+      expect(screen.getByText('The voice helper is in a folder that other users can change, so it was not started.')).toBeTruthy();
+    });
+    it('keeps the connection detail behind Details, as text (issue #1850)', () => {
+      const detail = '<b>could not reach</b> wss://lk.example/rtc?access_token=<redacted>';
+      strip(new Fake({ status: 'ended', generation: 1, channel: 'general', retryable: true, problem: 'connect_failed', helper: helper(), detail }));
+      expect(screen.queryByText(detail)).toBeNull();
+      const toggle = screen.getByRole('button', { name: 'Details' });
+      expect(toggle.getAttribute('aria-expanded')).toBe('false');
+      fireEvent.click(toggle);
+      expect(screen.getByText(detail).tagName).toBe('P');
+      expect(screen.getByText(detail).querySelector('b')).toBeNull();
+      expect(toggle.getAttribute('aria-expanded')).toBe('true');
+    });
     it('says to restart after an update replaced the install, and offers neither Join nor Retry (issue #1600)', () => {
       strip(new Fake({ status: 'unavailable', generation: 1, channel: null, retryable: false, problem: 'update-pending' }));
       expect(screen.getByText('Restart Conch to finish the update.')).toBeTruthy();

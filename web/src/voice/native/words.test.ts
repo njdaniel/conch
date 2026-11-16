@@ -64,6 +64,24 @@ describe('words', () => {
     expect(words(view({ status: 'running' })).text).toBe('joining #general…');
   });
 
+  it("says why voice is unavailable, by the kind and for an untrusted helper's writable folder (issue #1850)", () => {
+    const unavailable = (v: Partial<NativeVoiceView>) => words(view({ status: 'unavailable', ...v })).text;
+    expect(unavailable({ problem: 'untrusted', cause: 'folder-writable' })).toBe("voice is not available here; text chat is unaffected: the voice helper's folder can be changed by other users");
+    expect(unavailable({ problem: 'untrusted' })).toContain("the voice helper isn't trusted");
+    expect(unavailable({ problem: 'not-installed' })).toContain("the voice helper isn't installed");
+    expect(unavailable({ problem: 'runtime-dir-unset' })).toBe('voice is not available here; text chat is unaffected');
+    expect(unavailable({ problem: 'unsupported' })).toBe('voice is not available here; text chat is unaffected');
+  });
+
+  it("says why voice is unavailable, by the kind and for an untrusted helper's writable folder (issue #1850)", () => {
+    const unavailable = (v: Partial<NativeVoiceView>) => words(view({ status: 'unavailable', ...v })).text;
+    expect(unavailable({ problem: 'untrusted', cause: 'folder-writable' })).toBe("voice is not available here; text chat is unaffected: the voice helper's folder can be changed by other users");
+    expect(unavailable({ problem: 'untrusted' })).toContain("the voice helper isn't trusted");
+    expect(unavailable({ problem: 'not-installed' })).toContain("the voice helper isn't installed");
+    expect(unavailable({ problem: 'runtime-dir-unset' })).toBe('voice is not available here; text chat is unaffected');
+    expect(unavailable({ problem: 'unsupported' })).toBe('voice is not available here; text chat is unaffected');
+  });
+
   it('names a failure by its reason and offers Retry only when retryable', () => {
     const f = words(view({ status: 'failed', problem: 'connect_failed', retryable: true }));
     expect(f).toEqual({ text: 'voice failed: could not connect', retry: true });
