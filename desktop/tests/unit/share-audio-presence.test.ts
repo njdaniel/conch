@@ -132,10 +132,12 @@ describe('presence ends the share’s sound', () => {
   it('a share presence never showed ends after two answers in a row of this person sharing nothing', async () => {
     const r = make();
     await sounding(r);
-    // An answer that says nothing does not break the run, nor count.
-    await read(r, doc(idle(SELF)), unavailable, doc(idle(OTHER)));
+    // An unavailable answer says nothing: it does not break the run, nor count.
+    await read(r, doc(idle(SELF)), unavailable);
     expect(r.events.filter((e) => e !== 'http:GET presence')).toEqual([]);
-    await read(r, doc(idle(SELF)));
+    // Before presence has shown the share, an answer that does not list the
+    // person counts too: it may be another channel's (issue #1880).
+    await read(r, doc(idle(OTHER)));
     expect(r.events.filter((e) => e !== 'http:GET presence')).toEqual(['helper:capture off', 'http:DELETE audio']);
   });
 
@@ -297,6 +299,63 @@ describe('a rename of the share’s channel', () => {
     await read(r, doc(sharing(SELF, STARTED)));
     expect(names(r, 'voicePresence').at(-1)).toBe('lounge');
     expect(quiet(r)).toEqual([]);
+  });
+
+  it('the name taken over before main’s first read: answers that never show the share teach no id, and end the pick', async () => {
+    const r = make();
+    await sounding(r);
+    // Another channel (9) now answers to the share's name, and lists nobody.
+    await read(r, { ...doc(), channel_id: 9 }, { ...doc(idle(OTHER)), channel_id: 9 });
+    expect(quiet(r)).toEqual(['helper:capture off', 'http:DELETE audio']);
+    expect(await r.sound?.start(DOC)).toEqual({ ok: false, error: 'no-share' });
+  });
+
+  it('the id is learned only from an answer that shows the share', async () => {
+    const r = make();
+    await sounding(r);
+    // One answer of another channel, then the share's own: its id (1) is the
+    // one followed after a rename.
+    await read(r, { ...doc(idle(OTHER)), channel_id: 9 }, doc(sharing(SELF, STARTED)));
+    renamed(r, channels({ id: 9, name: 'trap' }, { id: 1, name: 'lounge' }));
+    await read(r, doc(sharing(SELF, STARTED)));
+    expect(names(r, 'voicePresence').at(-1)).toBe('lounge');
+    expect(quiet(r)).toEqual([]);
+  });
+
+  it('a rename to a name main cannot put in a path ends the sound', async () => {
+    for (const name of ['50% off', 'dev/ops', 'a\\b']) {
+      const r = make();
+      await sounding(r);
+      await read(r, doc(sharing(SELF, STARTED)));
+      renamed(r, channels({ id: 1, name }));
+      for (let i = 0; i < 5; i++) await settle();
+      expect(quiet(r)).toEqual(['helper:capture off', 'http:DELETE audio (old name)']);
+      expect(names(r, 'voicePresence')).not.toContain(name);
+    }
+  });
+
+  it('a leave’s withdrawal still follows the rename when the companion’s end comes before it finishes', async () => {
+    const r = make();
+    await sounding(r);
+    await read(r, doc(sharing(SELF, STARTED)));
+    renamed(r, channels({ id: 1, name: 'lounge' }));
+    const share = r.companion.current();
+    expect(share).not.toBeNull();
+    const leave = r.sound?.leaving();
+    if (share !== null) void r.sound?.ended(share, 'stopped');
+    await leave;
+    await settle();
+    expect(names(r, 'voiceShareAudioEnd')).toEqual(['general', 'lounge']);
+  });
+
+  it('a 404 that is not conchd’s channel_not_found is not a rename', async () => {
+    const r = make();
+    await sounding(r);
+    r.presence.push(refusal(404), refusal(404, 'not_found'), refusal(404));
+    for (let i = 0; i < 10 && r.presence.length > 0; i++) await settle();
+    expect(quiet(r)).toEqual([]);
+    expect(r.events).not.toContain('http:GET channels');
+    expect(r.sup.audio.state).toBe('on');
   });
 
   it('the old name answering for another channel is not judged: the sound follows its own channel', async () => {

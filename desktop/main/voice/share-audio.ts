@@ -76,6 +76,7 @@ import { VOICE_CONTROL_CAPTURE_STOP_MS, listChannelsResponse, voicePresenceV2, v
 import type { NativeVoiceView, ShareSoundChooseResult, ShareSoundChoice, ShareSoundReason, ShareSoundStartResult, ShareSoundView, VoiceCommandResult } from '../../../web/src/platform/desktop/bridge.ts';
 import { fromServer } from '../../../web/src/schema/validate.ts';
 import type { Exchange, Send } from '../api/client.ts';
+import { paramOk } from '../api/target.ts';
 import { LINUX_SHARE_AUDIO_SCOPE, validApplicationName } from './protocol.ts';
 import type { CommandResult } from './supervisor.ts';
 import type { Companion, RemoveReason, ShareRef } from './companion.ts';
@@ -162,7 +163,10 @@ const PRESENCE_TIMEOUT_MS = 10_000;
 // two cannot.
 const UNSHOWN_READS = 2;
 
-const isNotFound = (e: Exchange): boolean => e.kind === 'answer' && e.status === 404;
+// conchd's word that it has no channel of that name for the caller (the voice
+// routes' 404, channel_not_found): any other 404 is not a rename.
+const isNotFound = (e: Exchange): boolean =>
+  e.kind === 'answer' && e.status === 404 && typeof e.body === 'object' && e.body !== null && (e.body as { code?: unknown }).code === 'channel_not_found';
 
 type Outcome = 'ok' | 'unavailable' | 'failed' | 'ended';
 
@@ -493,8 +497,10 @@ export class ShareSound {
     return c !== null && c.companion === share.id ? c.id : null;
   }
 
-  // #learnId keeps the channel's id from a presence answer for the share: the
-  // first valid one only. A later answer for another id never replaces it
+  // #learnId keeps the channel's id from a presence answer that showed this
+  // share (this person sharing, with the consent's start once there is one):
+  // the first one only. An answer read by name that does not show the share
+  // may be another channel's, one that took the name, so it teaches nothing. A later answer for another id never replaces it
   // (#presenceMoved handles that before it gets here).
   #learnId(share: ShareRef, id: number): void {
     if (!Number.isSafeInteger(id) || id <= 0) return;
@@ -520,39 +526,51 @@ export class ShareSound {
   // current name. When `moved` says the answer shows the channel is not at
   // that name, it looks the name up by id and sends the request once more
   // with it. `lost`: the channel cannot be named any more (no id learned, the
-  // id not in the list, or the retry moved again). A list that cannot be read
-  // is not lost: the first answer stands and the next request asks again.
-  async #sendFollowing(share: ShareRef, request: Omit<Send, 'params'>, moved: (e: Exchange) => boolean = isNotFound): Promise<{ exchange: Exchange; lost: boolean }> {
+  // id not in the list, a name main's client cannot send, or the retry moved
+  // again). A list that cannot be read is not lost, and the next request asks
+  // again; an answer that was another channel's is then not handed on to be
+  // judged. The request's timeout bounds all of it, the list read and the
+  // retry included, so an end's withdrawal keeps its bound.
+  async #sendFollowing(share: ShareRef, request: Omit<Send, 'params'> & { readonly timeoutMs: number }, moved: (e: Exchange) => boolean = isNotFound): Promise<{ exchange: Exchange; lost: boolean }> {
+    const deadline = Date.now() + request.timeoutMs;
+    const left = (): number => deadline - Date.now();
     const sendBy = async (name: string): Promise<Exchange> => {
+      const ms = left();
+      if (ms <= 0) return { kind: 'none' };
       try {
-        return await share.client.send({ ...request, params: { channel: name } });
+        return await share.client.send({ ...request, params: { channel: name }, timeoutMs: ms });
       } catch {
         return { kind: 'none' };
       }
     };
     const first = await sendBy(this.#channelOf(share));
     if (!moved(first)) return { exchange: first, lost: false };
-    const name = await this.#currentName(share);
-    if (name === 'unknown') return { exchange: first, lost: false };
+    const name = await this.#currentName(share, left());
+    if (name === 'unknown') return { exchange: isNotFound(first) ? first : { kind: 'none' }, lost: false };
     if (name === 'gone') return { exchange: first, lost: true };
     const again = await sendBy(name.name);
+    if (again.kind === 'none' && left() <= 0) return { exchange: again, lost: false };
     return { exchange: again, lost: moved(again) };
   }
 
   // #currentName reads conchd's channel list for the id learned, with the
-  // companion's own client, and keeps and returns the name it has now.
-  async #currentName(share: ShareRef): Promise<{ readonly name: string } | 'gone' | 'unknown'> {
+  // companion's own client, and keeps and returns the name it has now. A name
+  // main's client would refuse to put in a path (a separator, a percent: see
+  // paramOk) cannot be followed, and is 'gone': the sound ends rather than
+  // every later request being refused before the wire.
+  async #currentName(share: ShareRef, timeoutMs: number): Promise<{ readonly name: string } | 'gone' | 'unknown'> {
     const id = this.#idOf(share);
     if (id === null) return 'gone';
+    if (timeoutMs <= 0) return 'unknown';
     let answer: Exchange;
     try {
-      answer = await share.client.send({ op: 'listChannels', timeoutMs: PRESENCE_TIMEOUT_MS });
+      answer = await share.client.send({ op: 'listChannels', timeoutMs });
     } catch {
       return 'unknown';
     }
     if (answer.kind !== 'answer' || !answer.ok || fromServer(listChannelsResponse)(answer.body).length !== 0) return 'unknown';
     const found = (answer.body as ListChannelsResponse).channels.find((c) => c.id === id);
-    if (found === undefined) return 'gone';
+    if (found === undefined || !paramOk(found.name)) return 'gone';
     if (this.#channel?.companion === share.id) this.#channel.name = found.name;
     return { name: found.name };
   }
@@ -587,18 +605,20 @@ export class ShareSound {
   //  - presence has not shown it, and UNSHOWN_READS answers in a row list this
   //    person sharing nothing: a pick no claim stood behind (or one released
   //    before main's first read) keeps no capture for a later share.
-  // An answer that is not `available` (LiveKit unreachable) and one that does
-  // not list this person (a room hidden after an outage) say nothing, so a
-  // failed LiveKit call never cuts a live share's sound. A share listed with
-  // no start ties to nothing and ends nothing.
+  // An answer that is not `available` (LiveKit unreachable) says nothing, and
+  // once presence has shown the share, neither does one that does not list
+  // this person (a room hidden after an outage), so a failed LiveKit call
+  // never cuts a live share's sound. A share listed with no start ties to
+  // nothing and ends nothing.
   //
   // A rename of the channel is followed before an answer gets here
-  // (#sendFollowing, by the id this learns from `channel_id`): an answer that
-  // names another channel than the learned id is never judged, and one that
-  // cannot be followed ends the sound (#channelLost).
+  // (#sendFollowing, by the id learned from `channel_id` of an answer that
+  // showed the share): once the id is known an answer that names another
+  // channel is never judged, and one that cannot be followed ends the sound
+  // (#channelLost). Before the id is known, the two-answer rule above ends a
+  // pick whose answers never show the share, whichever channel answered.
   #judgePresence(share: ShareRef, doc: VoicePresenceV2): void {
     if (this.#presenceWanted()?.id !== share.id) return;
-    this.#learnId(share, doc.channel_id);
     const o = this.#owned?.share.id === share.id ? this.#owned : null;
     if (this.#watch?.companion !== share.id || this.#watch.pick !== this.#pick) this.#watch = { companion: share.id, pick: this.#pick, start: null, unshown: 0 };
     const watch = this.#watch;
@@ -623,7 +643,14 @@ export class ShareSound {
         else starts.push(at);
       }
     }
-    if (!listed) return;
+    const shown = watch.start !== null && watch.start === bound;
+    // Not listed: no word, once presence has shown the share (a room hidden
+    // after an outage). Before that it counts as sharing nothing: an answer
+    // read by name that never shows the person may be another channel's.
+    if (!listed) {
+      if (!shown && ++watch.unshown >= UNSHOWN_READS) this.#presenceEnd(share, o);
+      return;
+    }
     if (watch.start !== null && !Number.isNaN(ours) && ours !== watch.start) {
       this.#presenceEnd(share, o);
       return;
@@ -635,11 +662,11 @@ export class ShareSound {
     if (bound === null ? starts.length > 0 : starts.includes(bound)) {
       watch.start = bound ?? Math.max(...starts);
       watch.unshown = 0;
+      this.#learnId(share, doc.channel_id);
       return;
     }
     if (starts.length > 0 || unbound) return;
     // Listed, sharing nothing.
-    const shown = watch.start !== null && watch.start === bound;
     if (shown || ++watch.unshown >= UNSHOWN_READS) this.#presenceEnd(share, o);
   }
 
@@ -667,14 +694,16 @@ export class ShareSound {
     if (reason === 'switch' || reason === 'sign-out' || reason === 'quit') this.#serverRefused = false;
     if (this.#capture?.companion === share.id) this.#capture = null;
     const o = this.#owned;
-    if (o === null || o.share.id !== share.id) {
-      this.#dropChannel(share.id);
-      return Promise.resolve();
-    }
-    // The withdrawal of this end still needs the channel's current name.
-    return this.#end(o, reason).finally(() => {
-      this.#dropChannel(share.id);
-    });
+    const done = o === null || o.share.id !== share.id ? Promise.resolve() : this.#end(o, reason);
+    // The withdrawals still in flight (this end's, and an earlier end's of the
+    // same companion, such as a leave's) need the channel's current name:
+    // it is forgotten only after them.
+    void this.#tail
+      .catch(() => undefined)
+      .then(() => {
+        this.#dropChannel(share.id);
+      });
+    return done;
   }
 
   // leaving is a leave of voice (any: the person's, a suspend's, a teardown's):
