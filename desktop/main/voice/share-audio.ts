@@ -35,8 +35,12 @@
 //    say its share ended keeps the record as long as the companion lives once
 //    one pick was answered, and can ask for sound on that companion later.
 //    conchd records the consent only for a share claimed at that moment, which
-//    such a page can claim again. Main ending the sound when presence shows the
-//    share ended is a separate issue;
+//    such a page can claim again. Main closes that gap itself (issue #1876,
+//    the presence section below): while a capture or a sound record stands,
+//    it reads conchd's voice presence for the share's channel with the
+//    companion's own client, every PRESENCE_POLL_MS, and ends the record (the
+//    stop, then the DELETE, then the capture) once conchd says the share
+//    ended, whatever the page does or opens;
 //  - every step after an await asks again whether this record is still the
 //    one (not ended, not replaced) before it writes anything, so a consent
 //    answer that arrives after a stop, a leave or a new share sends no command
@@ -55,8 +59,9 @@
 //
 // No log line carries a token, a room, a channel, a path, a device or an
 // application name: reasons only.
-import { VOICE_CONTROL_CAPTURE_STOP_MS, type VoiceCompanionAudioRequestV1, type VoiceControlShareAudioProblem } from '../../../web/src/schema/generated.ts';
+import { VOICE_CONTROL_CAPTURE_STOP_MS, voicePresenceV2, voicePresenceV2Schema, type VoiceCompanionAudioRequestV1, type VoiceControlShareAudioProblem, type VoicePresenceV2 } from '../../../web/src/schema/generated.ts';
 import type { NativeVoiceView, ShareSoundChooseResult, ShareSoundChoice, ShareSoundReason, ShareSoundStartResult, ShareSoundView, VoiceCommandResult } from '../../../web/src/platform/desktop/bridge.ts';
+import { fromServer } from '../../../web/src/schema/validate.ts';
 import type { Exchange } from '../api/client.ts';
 import { LINUX_SHARE_AUDIO_SCOPE, validApplicationName } from './protocol.ts';
 import type { CommandResult } from './supervisor.ts';
@@ -129,7 +134,14 @@ export interface ShareSoundDeps {
   readonly consentRetryMs?: number;
   readonly publishRetryMs?: number;
   readonly stopAckBoundMs?: number;
+  // How often main reads presence while a capture or a record stands.
+  readonly presencePollMs?: number;
 }
+
+// Main's own read of conchd's presence (issue #1876): how often, and the
+// bound on one read. A read that fails or times out says nothing.
+const PRESENCE_POLL_MS = 5000;
+const PRESENCE_TIMEOUT_MS = 10_000;
 
 type Outcome = 'ok' | 'unavailable' | 'failed' | 'ended';
 
@@ -183,6 +195,15 @@ export class ShareSound {
   // companion held and the document, when the portal's pick was answered with
   // a source. Cleared by the share sound's end and by the companion's.
   #capture: { readonly companion: number; readonly document: number } | null = null;
+  // What main's own presence reads have learned of the live companion's
+  // share: the start (ms) presence showed this person sharing with, once it
+  // showed one. Cleared by a new pick and by the presence end.
+  #watch: { readonly companion: number; start: number | null } | null = null;
+  // The next presence read, and whether one is in flight: one at a time, so
+  // the answers are judged in the order conchd gave them.
+  #pollTimer: NodeJS.Timeout | null = null;
+  #polling = false;
+  #closed = false;
   readonly #off: () => void;
 
   constructor(deps: ShareSoundDeps) {
@@ -195,6 +216,9 @@ export class ShareSound {
 
   // close detaches from the voice service.
   close(): void {
+    this.#closed = true;
+    if (this.#pollTimer !== null) clearTimeout(this.#pollTimer);
+    this.#pollTimer = null;
     this.#off();
   }
 
@@ -212,6 +236,9 @@ export class ShareSound {
   captureGranted(document: number): void {
     const share = this.#deps.companion.current();
     this.#capture = share === null || share.document !== document ? null : { companion: share.id, document };
+    // A new pick is learned afresh by presence.
+    this.#watch = null;
+    this.#schedulePresence();
   }
 
   // captured says whether main granted a capture while this companion was
@@ -369,6 +396,128 @@ export class ShareSound {
     }
     if (had) this.#changed();
     return had;
+  }
+
+  // ------------------------------------------------------------ presence
+
+  // Main's own read of conchd's presence (issue #1876). While a capture or a
+  // sound record of the live companion stands, main asks conchd for the
+  // share's channel's presence (v2) with the companion's own client: not the
+  // page's feed, so a page that opens no feed, or another channel's, changes
+  // nothing. The answers are read one at a time, in order.
+
+  // #presenceWanted: a capture or a record of the live companion stands.
+  #presenceWanted(): ShareRef | null {
+    const share = this.#deps.companion.current();
+    if (share === null) return null;
+    return this.#captured(share) || this.#owned?.share.id === share.id ? share : null;
+  }
+
+  #schedulePresence(): void {
+    if (this.#closed || this.#pollTimer !== null || this.#polling || this.#presenceWanted() === null) return;
+    const timer = setTimeout(() => {
+      this.#pollTimer = null;
+      void this.#pollPresence();
+    }, this.#deps.presencePollMs ?? PRESENCE_POLL_MS);
+    timer.unref();
+    this.#pollTimer = timer;
+  }
+
+  async #pollPresence(): Promise<void> {
+    const share = this.#presenceWanted();
+    if (share === null || this.#closed) return;
+    this.#polling = true;
+    try {
+      let answer: Exchange;
+      try {
+        answer = await share.client.send({ op: 'voicePresence', params: { channel: share.channel }, query: `schema=${voicePresenceV2Schema}`, timeoutMs: PRESENCE_TIMEOUT_MS });
+      } catch {
+        answer = { kind: 'none' };
+      }
+      if (answer.kind === 'answer' && answer.ok && fromServer(voicePresenceV2)(answer.body).length === 0) this.#judgePresence(share, answer.body as VoicePresenceV2);
+    } finally {
+      this.#polling = false;
+      this.#schedulePresence();
+    }
+  }
+
+  // #judgePresence reads one presence answer for `share`. Only this person's
+  // own participant counts (the principal the companion's grant named,
+  // p<id>.screen); another participant's share never touches the sound.
+  //
+  // The share is named by its start: the consent's started_at once there is
+  // one, else the start presence first showed after the pick. The share has
+  // ended when conchd says so:
+  //  - share_ended (conchd's own record of the sharer's last share, in their
+  //    document alone) names that start; no earlier sight is needed;
+  //  - presence lists this person sharing with a newer start (a new claim
+  //    replaced it), or a start other than the consent's after it learned one;
+  //  - presence showed the share and now lists this person, not sharing.
+  // An answer that is not `available` (LiveKit unreachable) and one that does
+  // not list this person (a room hidden after an outage) say nothing, so a
+  // failed LiveKit call never cuts a live share's sound. A share listed with
+  // no start ties to nothing and ends nothing. Before presence has shown the
+  // share, "not sharing" ends nothing (a claim not shown yet).
+  #judgePresence(share: ShareRef, doc: VoicePresenceV2): void {
+    if (this.#presenceWanted()?.id !== share.id) return;
+    const o = this.#owned?.share.id === share.id ? this.#owned : null;
+    if (this.#watch?.companion !== share.id) this.#watch = { companion: share.id, start: null };
+    const watch = this.#watch;
+    const ours = o?.startedAt == null ? Number.NaN : Date.parse(o.startedAt);
+    const ended = doc.share_ended === undefined ? Number.NaN : Date.parse(doc.share_ended.started_at);
+    if (!Number.isNaN(ended) && (ended === watch.start || ended === ours)) {
+      this.#presenceEnd(share, o);
+      return;
+    }
+    if (!doc.available) return;
+    let listed = false;
+    let unbound = false;
+    const starts: number[] = [];
+    for (const room of doc.rooms) {
+      for (const p of room.participants) {
+        if (p.principal_id !== share.principal) continue;
+        listed = true;
+        if (p.sharing !== true) continue;
+        const at = p.share_started_at === undefined ? Number.NaN : Date.parse(p.share_started_at);
+        if (Number.isNaN(at)) unbound = true;
+        else starts.push(at);
+      }
+    }
+    if (!listed) return;
+    if (watch.start !== null && !Number.isNaN(ours) && ours !== watch.start) {
+      this.#presenceEnd(share, o);
+      return;
+    }
+    const bound = Number.isNaN(ours) ? watch.start : ours;
+    if (bound === null) {
+      if (starts.length > 0) watch.start = Math.max(...starts);
+      return;
+    }
+    if (starts.some((at) => at > bound)) {
+      this.#presenceEnd(share, o);
+      return;
+    }
+    if (starts.includes(bound)) {
+      watch.start = bound;
+      return;
+    }
+    if (watch.start === bound && starts.length === 0 && !unbound) this.#presenceEnd(share, o);
+  }
+
+  // #presenceEnd: the record ends as every other end does (the stop, then the
+  // DELETE, then the capture); with no record, the capture alone goes, so no
+  // later choice can add sound to a share that has ended.
+  #presenceEnd(share: ShareRef, o: Owned | null): void {
+    this.#watch = null;
+    this.#deps.log('share sound: presence shows the share ended');
+    if (o !== null) {
+      void this.#end(o, 'presence share end').catch(() => undefined);
+      return;
+    }
+    if (this.#capture?.companion === share.id) {
+      this.#capture = null;
+      this.#changed();
+    }
   }
 
   // ------------------------------------------------------------ the ends

@@ -195,6 +195,9 @@ export interface Rig {
   readonly put: (Exchange | Promise<Exchange>)[];
   readonly withdraw: (Exchange | Promise<Exchange>)[];
   readonly removal: (Exchange | Promise<Exchange>)[];
+  // Main's own presence reads (issue #1876): each read takes the next
+  // answer; with none queued it fails (says nothing).
+  readonly presence: (Exchange | Promise<Exchange>)[];
   readonly client: CompanionClient;
   readonly views: ReturnType<VoiceService['state']>[];
   // Joins voice, gets the companion and has main grant the capture of a pick
@@ -215,6 +218,7 @@ export interface RigOptions {
   readonly consentRetryMs?: number;
   readonly publishRetryMs?: number;
   readonly stopAckBoundMs?: number;
+  readonly presencePollMs?: number;
 }
 
 export function rig(opts: RigOptions = {}): Rig {
@@ -224,6 +228,7 @@ export function rig(opts: RigOptions = {}): Rig {
   const put: Rig['put'] = [];
   const withdraw: Rig['withdraw'] = [];
   const removal: Rig['removal'] = [];
+  const presence: Rig['presence'] = [];
   const sup = new FakeSupervisor(events);
   sup.version = opts.version ?? 3;
   const prefs: Rig['prefs'] = { choice: opts.choice ?? 'system_excluding_call', saves: [], failSave: false };
@@ -259,6 +264,12 @@ export function rig(opts: RigOptions = {}): Rig {
         case 'voiceShareAudioEnd':
           events.push('http:DELETE audio');
           return Promise.resolve(withdraw.shift() ?? ok());
+        case 'voicePresence': {
+          const next = presence.shift();
+          if (next === undefined) return Promise.resolve({ kind: 'none' });
+          events.push('http:GET presence');
+          return Promise.resolve(next);
+        }
         default:
           return Promise.resolve({ kind: 'none' });
       }
@@ -293,6 +304,7 @@ export function rig(opts: RigOptions = {}): Rig {
       ...(opts.consentRetryMs === undefined ? {} : { consentRetryMs: opts.consentRetryMs }),
       ...(opts.publishRetryMs === undefined ? {} : { publishRetryMs: opts.publishRetryMs }),
       ...(opts.stopAckBoundMs === undefined ? {} : { stopAckBoundMs: opts.stopAckBoundMs }),
+      ...(opts.presencePollMs === undefined ? {} : { presencePollMs: opts.presencePollMs }),
     };
     const made = new ShareSound(deps);
     sound = made;
@@ -310,6 +322,7 @@ export function rig(opts: RigOptions = {}): Rig {
     put,
     withdraw,
     removal,
+    presence,
     client,
     views,
     live: async () => {

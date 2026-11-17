@@ -143,6 +143,9 @@ export interface ShareRef {
   readonly generation: number;
   readonly document: number;
   readonly client: CompanionClient;
+  // The principal the grant's identity (p<id>.screen) names: this person's own
+  // participant in presence. From conchd's answer, never the page's.
+  readonly principal: number;
 }
 
 // The live companion: what it was asked for, and with what.
@@ -158,6 +161,7 @@ interface Held {
   // The owned contents when it was given: null when none was known.
   readonly contents: object | null;
   readonly origin: string;
+  readonly principal: number;
 }
 
 type Asking = Pick<Held, 'channel' | 'generation'>;
@@ -213,15 +217,17 @@ function livekitOrigin(text: string): string | null {
 // grantOf is the part of conchd's answer the renderer is given, and the
 // origin main remembers, or null for an answer that is not a screen
 // companion's grant as asked for.
-function grantOf(body: unknown): { readonly grant: CompanionGrant; readonly origin: string } | null {
+function grantOf(body: unknown): { readonly grant: CompanionGrant; readonly origin: string; readonly principal: number } | null {
   if (fromServer(voiceCompanionResponseV1)(body).length > 0) return null;
   const answer = body as VoiceCompanionResponseV1;
   if (answer.publish !== REQUEST.publish || answer.subscribe !== REQUEST.subscribe) return null;
   if (!COMPANION_IDENTITY.test(answer.identity) || answer.token === '' || answer.token.length > MAX_TOKEN_LENGTH) return null;
   const origin = livekitOrigin(answer.livekit_url);
   if (origin === null) return null;
+  const principal = Number(/^p([1-9][0-9]{0,18})\./u.exec(answer.identity)?.[1]);
+  if (!Number.isSafeInteger(principal)) return null;
   // Exactly these four: never the room's name, the bearer or the session.
-  return { origin, grant: { livekitUrl: answer.livekit_url, token: answer.token, identity: answer.identity, expiresAt: answer.expires_at } };
+  return { origin, principal, grant: { livekitUrl: answer.livekit_url, token: answer.token, identity: answer.identity, expiresAt: answer.expires_at } };
 }
 
 function codeOf(exchange: Exchange): string | null {
@@ -287,7 +293,7 @@ export class Companion {
   // no companion is live. It is main's own record: nothing the page says.
   current(): ShareRef | null {
     const held = this.#held;
-    return held === null ? null : { id: held.id, channel: held.channel, generation: held.generation, document: held.document, client: held.client };
+    return held === null ? null : { id: held.id, channel: held.channel, generation: held.generation, document: held.document, client: held.client, principal: held.principal };
   }
 
   // #endSound tells the share's sound that this share ended, and never throws.
@@ -295,7 +301,7 @@ export class Companion {
     const sound = this.#deps.soundEnded;
     if (sound === undefined) return Promise.resolve();
     try {
-      return sound({ id: held.id, channel: held.channel, generation: held.generation, document: held.document, client: held.client }, reason).catch(() => {
+      return sound({ id: held.id, channel: held.channel, generation: held.generation, document: held.document, client: held.client, principal: held.principal }, reason).catch(() => {
         this.#deps.log(`companion: the share's sound could not be ended after ${reason}`);
       });
     } catch {
@@ -368,7 +374,7 @@ export class Companion {
       return refuse(given === null ? 'failed' : 'ended');
     }
     const contents = this.#deps.contents?.() ?? null;
-    this.#held = { ...asking, id: ++this.#serial, client, document, contents, origin: given.origin };
+    this.#held = { ...asking, id: ++this.#serial, client, document, contents, origin: given.origin, principal: given.principal };
     try {
       this.#deps.granted?.(contents, document);
     } catch {
