@@ -271,7 +271,7 @@ export function rig(opts: RigOptions = {}): Rig {
           return Promise.resolve(removal.shift() ?? ok());
         case 'voiceShareAudio':
           events.push('http:PUT audio');
-          return Promise.resolve(put.shift() ?? consent());
+          return Promise.resolve(put.shift() ?? consent(STARTED, opts.grantChannelId === undefined ? {} : { channel_id: opts.grantChannelId }));
         case 'voiceShareAudioEnd':
           if (rename.from !== null && request.params?.['channel'] === rename.from) {
             events.push('http:DELETE audio (old name)');

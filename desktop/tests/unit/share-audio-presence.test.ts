@@ -67,7 +67,7 @@ describe('presence ends the share’s sound', () => {
     await sounding(r);
     await read(r, doc(sharing(SELF, STARTED), idle(OTHER)));
     await read(r, doc(idle(SELF), idle(OTHER)));
-    expect(r.events.filter((e) => e !== 'http:GET presence')).toEqual(['helper:capture off', 'http:DELETE audio']);
+    expect(r.events.filter((e) => !e.startsWith('http:GET'))).toEqual(['helper:capture off', 'http:DELETE audio']);
     expect(await r.sound?.start(DOC)).toEqual({ ok: false, error: 'no-share' });
     // Nothing stands, so main stops reading.
     const before = reads(r);
@@ -80,7 +80,7 @@ describe('presence ends the share’s sound', () => {
     const r = make();
     await sounding(r);
     await read(r, endedOf(STARTED));
-    expect(r.events.filter((e) => e !== 'http:GET presence')).toEqual(['helper:capture off', 'http:DELETE audio']);
+    expect(r.events.filter((e) => !e.startsWith('http:GET'))).toEqual(['helper:capture off', 'http:DELETE audio']);
   });
 
   it('a share_ended of an earlier share ends nothing', async () => {
@@ -94,7 +94,7 @@ describe('presence ends the share’s sound', () => {
     const r = make();
     await sounding(r);
     await read(r, doc(sharing(SELF, LATER)));
-    expect(r.events.filter((e) => e !== 'http:GET presence')).toEqual(['helper:capture off', 'http:DELETE audio']);
+    expect(r.events.filter((e) => !e.startsWith('http:GET'))).toEqual(['helper:capture off', 'http:DELETE audio']);
   });
 
   it('LiveKit unreachable (available false) and a hidden room say nothing: the live share keeps its sound', async () => {
@@ -126,7 +126,7 @@ describe('presence ends the share’s sound', () => {
     await read(r, doc(idle(SELF)));
     expect(r.events.filter((e) => e !== 'http:GET presence')).toEqual([]);
     await read(r, doc(sharing(SELF, STARTED)), doc(idle(SELF)));
-    expect(r.events.filter((e) => e !== 'http:GET presence')).toEqual(['helper:capture off', 'http:DELETE audio']);
+    expect(r.events.filter((e) => !e.startsWith('http:GET'))).toEqual(['helper:capture off', 'http:DELETE audio']);
   });
 
   it('a share presence never showed ends after two answers in a row of this person sharing nothing', async () => {
@@ -138,7 +138,7 @@ describe('presence ends the share’s sound', () => {
     // Before presence has shown the share, an answer that does not list the
     // person counts too: it may be another channel's (issue #1880).
     await read(r, doc(idle(OTHER)));
-    expect(r.events.filter((e) => e !== 'http:GET presence')).toEqual(['helper:capture off', 'http:DELETE audio']);
+    expect(r.events.filter((e) => !e.startsWith('http:GET'))).toEqual(['helper:capture off', 'http:DELETE audio']);
   });
 
   it('a pick no claim stood behind keeps no capture: a later share gets no sound without a new pick', async () => {
@@ -153,7 +153,7 @@ describe('presence ends the share’s sound', () => {
     const r = make();
     await sounding(r);
     await read(r, endedOf(LATER));
-    expect(r.events.filter((e) => e !== 'http:GET presence')).toEqual(['helper:capture off', 'http:DELETE audio']);
+    expect(r.events.filter((e) => !e.startsWith('http:GET'))).toEqual(['helper:capture off', 'http:DELETE audio']);
   });
 
   it('a read sent before a new pick says nothing of it: the new share is not bound to the old one', async () => {
@@ -270,6 +270,38 @@ describe('the channel id of the grant', () => {
     r.put.push(consent(STARTED, { channel_id: 1 }));
     await r.live();
     expect(await r.sound?.start(DOC)).toMatchObject({ ok: true });
+  });
+
+  it('with a grant id, a consent answer that names no channel fails', async () => {
+    const r = granted(1);
+    r.put.push(consent(STARTED));
+    await r.live();
+    expect(await r.sound?.start(DOC)).toMatchObject({ ok: false });
+    expect(r.events).not.toContain('helper:capture on');
+  });
+
+  it('the withdrawal’s 2xx by a name another channel took is not taken: the DELETE goes to the id’s name now', async () => {
+    const r = granted(1);
+    await sounding(r);
+    r.rename.list = channels({ id: 1, name: 'lounge' }, { id: 9, name: 'general' });
+    expect(await r.sound?.shareEnded(DOC)).toBe(true);
+    expect(names(r, 'voiceShareAudioEnd')).toEqual(['general', 'lounge']);
+    expect(r.logs).not.toContain('share sound: the withdrawal was not confirmed');
+  });
+
+  it('the withdrawal’s 2xx stands when the id still has that name, and is unconfirmed when it cannot be checked', async () => {
+    const same = granted(1);
+    await sounding(same);
+    same.rename.list = channels({ id: 1, name: 'general' });
+    await same.sound?.shareEnded(DOC);
+    expect(names(same, 'voiceShareAudioEnd')).toEqual(['general']);
+    expect(same.logs).not.toContain('share sound: the withdrawal was not confirmed');
+    const unread = granted(1);
+    await sounding(unread);
+    unread.rename.list = { kind: 'none' };
+    await unread.sound?.shareEnded(DOC);
+    expect(names(unread, 'voiceShareAudioEnd')).toEqual(['general']);
+    expect(unread.logs).toContain('share sound: the withdrawal was not confirmed');
   });
 
   it('without a grant id the fallback stands: a consent naming any channel is taken', async () => {
