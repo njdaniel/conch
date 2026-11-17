@@ -664,8 +664,9 @@ mod bridge_tests {
         write_error: Option<ErrorKind>,
         /// A write that never finishes.
         write_hangs: bool,
-        /// A write that is not ready on its first poll and is a moment later.
-        write_pending_once: bool,
+        /// A write that is not ready on its first poll and is a moment later: cleared by the
+        /// first write, so only that one is pending.
+        write_pending_once: std::sync::atomic::AtomicBool,
         reads: Mutex<VecDeque<std::io::Result<Vec<u8>>>>,
     }
 
@@ -674,7 +675,10 @@ mod bridge_tests {
             if self.write_hangs {
                 std::future::pending::<()>().await;
             }
-            if self.write_pending_once {
+            if self
+                .write_pending_once
+                .swap(false, std::sync::atomic::Ordering::SeqCst)
+            {
                 // Pending for real time, as an IOCP completion is, not just for a repoll.
                 tokio::time::sleep(Duration::from_millis(20)).await;
             }
@@ -906,20 +910,23 @@ mod bridge_tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn the_attach_write_has_its_own_budget_when_the_first_poll_is_pending() {
-        // A connection that is not writable on the first poll, as an IOCP pipe can be,
-        // after a process old enough that a budget counted from its start is spent.
+        // A connection that is not writable on the first poll, as an IOCP pipe can be. The
+        // write's budget is its own (write_attach_on takes no start), so nothing spent
+        // before it, by the open or by an old process, can leave it none.
         let half = Arc::new(Fake {
-            write_pending_once: true,
+            write_pending_once: std::sync::atomic::AtomicBool::new(true),
             ..Fake::default()
         });
         let kept = Arc::clone(&half);
         let handle = handle();
-        tokio::task::spawn_blocking(move || {
-            write_attach_on(half, handle, &Secret::new(FAKE_NONCE)).map(|_| ())
+        let events = tokio::task::spawn_blocking(move || {
+            write_attach_on(half, handle, &Secret::new(FAKE_NONCE))
         })
         .await
         .unwrap()
         .unwrap();
+        // The events after the attach are written without a limit, as to a pipe.
+        assert!(events.limit.is_none());
         assert_eq!(kept.written.lock().unwrap().last(), Some(&b'\n'));
     }
 
