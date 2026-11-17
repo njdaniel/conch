@@ -41,9 +41,10 @@
 //  - the DELETE follows a rename of the channel (issue #1881, as the share's
 //    sound does, #1880): conchd resolves the channel by its current name, so
 //    after a rename the held name answers 404 channel_not_found. When main
-//    holds the channel's id (channelId, learned by the share's sound from a
-//    presence answer that showed this person's share, never from the page),
-//    that 404 alone makes main read conchd's channel list, find the id and
+//    holds the channel's id (issue #1883: the grant answer's channel_id, the
+//    channel conchd resolved and granted for; for a server that sends none,
+//    learned by the share's sound from a presence answer that showed this
+//    person's share; never from the page), that 404 alone makes main read conchd's channel list, find the id and
 //    send the DELETE once more by the name it has now. With no id, or a name
 //    main's client would refuse, the one DELETE by the held name stands, as it
 //    did, and its failure is logged. One bound covers the DELETE, the list
@@ -134,7 +135,8 @@ export interface CompanionDeps {
   // is held (app.ts: clears the share allowance, share-allowance.ts).
   readonly ended?: () => void;
   // The id of the live share's channel, as main learned it from conchd's own
-  // answers (ShareSound.channelId), or null when none was learned. Read at the
+  // answers (ShareSound.channelId), or null when none was learned. Only the
+  // fallback for a grant that carried no id (Held.channelId). Read at the
   // start of every end() and stop(), synchronously and before any await: the
   // share's sound (soundEnded) forgets the id once its own withdrawals are
   // done, and the companion's DELETE runs alongside it and may need the id
@@ -165,6 +167,10 @@ export interface ShareRef {
   // The principal the grant's identity (p<id>.screen) names: this person's own
   // participant in presence. From conchd's answer, never the page's.
   readonly principal: number;
+  // The id of the channel conchd resolved and granted for (the grant answer's
+  // channel_id, issue #1883), or null when the server did not say. From
+  // conchd's answer, never the page's.
+  readonly channelId: number | null;
 }
 
 // The live companion: what it was asked for, and with what.
@@ -181,6 +187,8 @@ interface Held {
   readonly contents: object | null;
   readonly origin: string;
   readonly principal: number;
+  // The grant answer's channel_id, or null (see ShareRef.channelId).
+  readonly channelId: number | null;
 }
 
 type Asking = Pick<Held, 'channel' | 'generation'>;
@@ -236,7 +244,7 @@ function livekitOrigin(text: string): string | null {
 // grantOf is the part of conchd's answer the renderer is given, and the
 // origin main remembers, or null for an answer that is not a screen
 // companion's grant as asked for.
-function grantOf(body: unknown): { readonly grant: CompanionGrant; readonly origin: string; readonly principal: number } | null {
+function grantOf(body: unknown): { readonly grant: CompanionGrant; readonly origin: string; readonly principal: number; readonly channelId: number | null } | null {
   if (fromServer(voiceCompanionResponseV1)(body).length > 0) return null;
   const answer = body as VoiceCompanionResponseV1;
   if (answer.publish !== REQUEST.publish || answer.subscribe !== REQUEST.subscribe) return null;
@@ -245,8 +253,11 @@ function grantOf(body: unknown): { readonly grant: CompanionGrant; readonly orig
   if (origin === null) return null;
   const principal = Number(/^p([1-9][0-9]{0,18})\./u.exec(answer.identity)?.[1]);
   if (!Number.isSafeInteger(principal)) return null;
+  // The channel conchd granted for: only a safe integer above zero counts;
+  // anything else, absent or not, is "this server doesn't say".
+  const channelId = answer.channel_id !== undefined && Number.isSafeInteger(answer.channel_id) && answer.channel_id > 0 ? answer.channel_id : null;
   // Exactly these four: never the room's name, the bearer or the session.
-  return { origin, principal, grant: { livekitUrl: answer.livekit_url, token: answer.token, identity: answer.identity, expiresAt: answer.expires_at } };
+  return { origin, principal, channelId, grant: { livekitUrl: answer.livekit_url, token: answer.token, identity: answer.identity, expiresAt: answer.expires_at } };
 }
 
 function codeOf(exchange: Exchange): string | null {
@@ -312,16 +323,18 @@ export class Companion {
   // no companion is live. It is main's own record: nothing the page says.
   current(): ShareRef | null {
     const held = this.#held;
-    return held === null ? null : { id: held.id, channel: held.channel, generation: held.generation, document: held.document, client: held.client, principal: held.principal };
+    return held === null ? null : { id: held.id, channel: held.channel, generation: held.generation, document: held.document, client: held.client, principal: held.principal, channelId: held.channelId };
   }
 
   #refOf(held: Held): ShareRef {
-    return { id: held.id, channel: held.channel, generation: held.generation, document: held.document, client: held.client, principal: held.principal };
+    return { id: held.id, channel: held.channel, generation: held.generation, document: held.document, client: held.client, principal: held.principal, channelId: held.channelId };
   }
 
-  // #idOf is the id of the held share's channel, if main learned one; never
-  // throws. Taken before #endSound (see CompanionDeps.channelId).
+  // #idOf is the id of the held share's channel: the grant's, else the one
+  // the share's sound learned, if any; never throws. Taken before #endSound
+  // (see CompanionDeps.channelId).
   #idOf(held: Held): number | null {
+    if (held.channelId !== null) return held.channelId;
     try {
       return this.#deps.channelId?.(this.#refOf(held)) ?? null;
     } catch {
@@ -403,11 +416,11 @@ export class Companion {
     if (given === null || overtaken) {
       // conchd has issued a companion nobody will use: remove it.
       if (given === null) this.#deps.log('companion: the answer was not the grant asked for');
-      await this.#remove(client, asking.channel, 'unused');
+      await this.#remove(client, asking.channel, 'unused', given?.channelId ?? null);
       return refuse(given === null ? 'failed' : 'ended');
     }
     const contents = this.#deps.contents?.() ?? null;
-    this.#held = { ...asking, id: ++this.#serial, client, document, contents, origin: given.origin, principal: given.principal };
+    this.#held = { ...asking, id: ++this.#serial, client, document, contents, origin: given.origin, principal: given.principal, channelId: given.channelId };
     try {
       this.#deps.granted?.(contents, document);
     } catch {
@@ -526,14 +539,15 @@ export class Companion {
 
   // The one DELETE of an end. True when conchd confirmed it, for the share's
   // own channel when its id is known. It is sent by the held name. When `id`
-  // is known (it is not for an unused grant, which no share's sound ever saw,
-  // nor for a watch with no share, nor with the share sound switched off), the
-  // channel's name now is found by that id: a 404 channel_not_found is sent
+  // is known (the grant's, issue #1883; for a server that sends none, only one
+  // the share's sound learned, so not for an unused grant, nor a watch with no
+  // share, nor with the share sound switched off), the channel's name now is found by that id: a 404 channel_not_found is sent
   // once more by it, and a 2xx stands only if the name is unchanged. Nothing
   // else is retried, and a name main's client refuses (paramOk, in
   // currentName) is not sent. One deadline bounds the DELETE, the list read
-  // and the retry. With no id, a 2xx by the held name is taken as it comes
-  // (#1883 would give main the id from the grant).
+  // and the retry. With no id (a server that does not send one), a 2xx by the
+  // held name is taken as it comes. The answer is 204 with no body, so it
+  // cannot name the channel itself.
   async #remove(client: CompanionClient, channel: string, reason: RemoveReason, id: number | null = null): Promise<boolean> {
     const deadline = Date.now() + COMPANION_REMOVE_TIMEOUT_MS;
     const sendBy = async (name: string, first = false): Promise<Exchange> => {
