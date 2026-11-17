@@ -39,6 +39,7 @@ import type { Installed } from './installed.ts';
 import type { VoiceService } from './voice/service.ts';
 import type { SettingsService } from './settings.ts';
 import type { Companion } from './voice/companion.ts';
+import type { ShareSound } from './voice/share-audio.ts';
 import type { ShareAllowance } from './share-allowance.ts';
 
 export interface FrameLike {
@@ -58,7 +59,7 @@ export interface InvokeEvent {
   readonly senderFrame: FrameLike | null;
 }
 
-export type Refusal = 'sender' | 'destroyed' | 'frame' | 'subframe' | 'origin' | 'generation' | 'name' | 'rate' | 'size' | 'shape' | 'gesture' | 'error';
+export type Refusal = 'sender' | 'destroyed' | 'frame' | 'subframe' | 'origin' | 'generation' | 'name' | 'rate' | 'size' | 'shape' | 'gesture' | 'disabled' | 'error';
 
 export interface IpcDeps {
   // The one web contents that may call main.
@@ -89,7 +90,11 @@ export interface IpcDeps {
   readonly companion?: CompanionApi;
   // The share allowance (share-allowance.ts). Absent: shareArm arms nothing
   // and a grant needs its own fresh act.
-  readonly share?: Pick<ShareAllowance, 'arm' | 'takeGrant'>;
+  readonly share?: Pick<ShareAllowance, 'arm' | 'takeGrant'> & Partial<Pick<ShareAllowance, 'takeSound'>>;
+  // The Linux screen share's sound (issue #1854). Absent unless main's own
+  // switch is on: then none of the four share-sound functions answers, and
+  // every call is refused (the page cannot turn the switch on).
+  readonly shareSound?: ShareSoundApi;
   readonly now: () => number;
   readonly log: (line: string) => void;
 }
@@ -110,6 +115,7 @@ export interface IntegrationsApi {
   view(): Promise<IntegrationsView>;
 }
 export type CompanionApi = Pick<Companion, 'grant' | 'stop' | 'end'>;
+export type ShareSoundApi = Pick<ShareSound, 'start' | 'choose' | 'mute' | 'end' | 'shareEnded'>;
 
 const NO_INTEGRATIONS: IntegrationsApi = { view: () => Promise.resolve({ rows: [] }) };
 
@@ -198,6 +204,14 @@ interface Spec {
   // True for a function whose act may instead be the share allowance's grant
   // use (companionGrant: Share armed it, Watch has a fresh act of its own).
   readonly shareGrant?: true;
+  // True for a function whose only act is the share allowance's sound use
+  // (shareSoundStart: the Share click's arm, once main granted the capture of
+  // its pick). A fresh click is not taken for it: a click is not the person
+  // choosing a screen to share.
+  readonly shareSound?: true;
+  // True for the share-sound family: refused outright, before any act is
+  // taken, unless main's own switch gave it a handler.
+  readonly soundFamily?: true;
 }
 
 // What a function runs against: the services, the activation, and the document
@@ -214,6 +228,8 @@ interface Handlers {
   readonly settings: SettingsApi;
   readonly integrations: IntegrationsApi;
   readonly companion: CompanionApi;
+  // Absent (the switch off): a share-sound function never reaches its run.
+  readonly shareSound: ShareSoundApi | null;
   readonly document: number;
   readonly arm: () => boolean;
 }
@@ -425,6 +441,23 @@ function parseCompanionGrant(args: readonly unknown[]): readonly unknown[] | nul
   if (args.length !== 1 || !isRecord(request) || !hasExactKeys(request, ['channel'])) return null;
   const { channel } = request;
   return isChannel(channel) ? [{ channel }] : null;
+}
+
+// The share sound's choice is exactly one of the two words of its vocabulary:
+// no scope, application or name rides with it (main builds those).
+function parseShareSoundChoose(args: readonly unknown[]): readonly unknown[] | null {
+  const [request] = args;
+  if (args.length !== 1 || !isRecord(request) || !hasExactKeys(request, ['choice'])) return null;
+  const { choice } = request;
+  return choice === 'system_excluding_call' || choice === 'none' ? [{ choice }] : null;
+}
+
+// An end names a share by the number main gave the page for it.
+function parseShareSoundEnd(args: readonly unknown[]): readonly unknown[] | null {
+  const [request] = args;
+  if (args.length !== 1 || !isRecord(request) || !hasExactKeys(request, ['share'])) return null;
+  const { share } = request;
+  return typeof share === 'number' && Number.isSafeInteger(share) && share > 0 ? [{ share }] : null;
 }
 
 // At least one of input and output; each a printable device name.
@@ -740,7 +773,66 @@ export const SPECS: Readonly<Record<InvokedFunction, Spec>> = {
   // It carries no argument: nothing the page says is trusted.
   shareArm: { limit: 20, maxBytes: 0, parse: none, run: ({ arm }) => arm(), gesture: true },
   companionEnd: { limit: 60, maxBytes: 0, parse: none, run: ({ companion }) => companion.stop() },
+  // The Linux screen share's sound (issue #1854). Each is refused outright
+  // unless main's own switch is on. None carries a scope, an application, a
+  // process, a device or a gesture flag: main builds the first four, and the
+  // person's act is taken from main's own record of the window's input, never
+  // from a word in a payload.
+  //
+  // Start follows the Share click: its one act is the click's arm (the sound
+  // use of the allowance, available only once main granted the capture of
+  // that click's pick). Choose is the person's click on the toggle: a fresh
+  // act only. A mute and an end only reduce what is shared and need none (as
+  // voiceSetMute and companionEnd need none); an unmute resumes what is
+  // shared, so it is the person's act (as voiceSetTalkMode's open mic is).
+  shareSoundStart: {
+    limit: 20,
+    maxBytes: 0,
+    parse: none,
+    run: ({ shareSound, document }) => requireSound(shareSound).start(document),
+    shareSound: true,
+    soundFamily: true,
+  },
+  shareSoundChoose: {
+    limit: 30,
+    maxBytes: 128,
+    parse: parseShareSoundChoose,
+    run: ({ shareSound, document }, [request]) => requireSound(shareSound).choose((request as { choice: 'system_excluding_call' | 'none' }).choice, document),
+    gesture: true,
+    soundFamily: true,
+  },
+  shareSoundMute: {
+    limit: 120,
+    maxBytes: 16,
+    parse: oneBoolean,
+    run: ({ shareSound, document }, [muted]) => requireSound(shareSound).mute(muted as boolean, document),
+    gesture: (args) => args[0] === false,
+    soundFamily: true,
+  },
+  shareSoundEnd: {
+    limit: 60,
+    maxBytes: 64,
+    parse: parseShareSoundEnd,
+    run: ({ shareSound }, [request]) => requireSound(shareSound).end((request as { share: number }).share),
+    soundFamily: true,
+  },
+  // The page's share ended, whether or not its sound was ever asked: no token,
+  // no act, no argument. It only takes away (the capture's record of a share,
+  // and any sound of a share in the caller's document), for the caller's own
+  // document.
+  shareSoundShareEnded: {
+    limit: 60,
+    maxBytes: 0,
+    parse: none,
+    run: ({ shareSound, document }) => requireSound(shareSound).shareEnded(document),
+    soundFamily: true,
+  },
 };
+
+function requireSound(sound: ShareSoundApi | null): ShareSoundApi {
+  if (sound === null) throw new Error('no share sound');
+  return sound;
+}
 
 export class Ipc {
   readonly #deps: IpcDeps;
@@ -775,12 +867,19 @@ export class Ipc {
     const owned = this.#deps.owned();
     const parsed = spec.parse(args);
     if (parsed === null) return this.#refuse('shape');
+    // The share sound's family answers only where main's switch gave it a
+    // handler; nothing is taken, and nothing runs, otherwise.
+    if (spec.soundFamily === true && this.#deps.shareSound === undefined) return this.#refuse('disabled');
     const needsGesture = spec.gesture === true || (typeof spec.gesture === 'function' && spec.gesture(parsed));
-    // A fresh act first, so a Watch click is never answered from a Share
-    // allowance and keeps it; a grant with none falls back to the allowance's
-    // grant use (consumed), the cold Share path.
-    if (needsGesture && this.#deps.gestures.take(owned, LINK_GESTURE_MS) === null) {
-      if (spec.shareGrant !== true || this.#deps.share?.takeGrant(owned) !== true) return this.#refuse('gesture');
+    // A share sound's start takes the allowance's sound use and nothing else:
+    // a fresh click is not a granted capture.
+    if (spec.shareSound === true) {
+      if (this.#deps.share?.takeSound?.(owned) !== true) return this.#refuse('gesture');
+    } else if (needsGesture && this.#deps.gestures.take(owned, LINK_GESTURE_MS) === null) {
+      // A fresh act first, so a Watch click is never answered from a Share
+      // allowance and keeps it; a grant with none falls back to the
+      // allowance's grant use (consumed), the cold Share path.
+      if (!(spec.shareGrant === true && this.#deps.share?.takeGrant(owned) === true)) return this.#refuse('gesture');
     }
     try {
       const to: Handlers = {
@@ -795,6 +894,7 @@ export class Ipc {
         settings: this.#deps.settings,
         integrations: this.#deps.integrations ?? NO_INTEGRATIONS,
         companion: this.#deps.companion ?? NO_COMPANION,
+        shareSound: this.#deps.shareSound ?? null,
         document: this.#deps.gate.generation,
         arm: () => this.#deps.share?.arm(owned) ?? false,
       };

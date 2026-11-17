@@ -1,9 +1,36 @@
 import { describe, expect, it, vi } from 'vitest';
 
-import type { CompanionEvent, ConchDesktopBridge, DesktopCompanionBridge, DesktopInviteBridge, DesktopSettingsBridge, DesktopUpdateBridge, DesktopVoiceBridge, NativeVoiceView } from '../../../web/src/platform/desktop/bridge.ts';
+import type {
+  CompanionEvent,
+  ConchDesktopBridge,
+  DesktopCompanionBridge,
+  DesktopInviteBridge,
+  DesktopSettingsBridge,
+  DesktopShareSoundBridge,
+  DesktopUpdateBridge,
+  DesktopVoiceBridge,
+  NativeVoiceView,
+} from '../../../web/src/platform/desktop/bridge.ts';
 import type { FeedHandlers } from '../../../web/src/platform/desktop/bridge.ts';
 import { createBridge, type Invoke } from '../../preload/bridge.ts';
-import { BRIDGE_FUNCTIONS, COMPANION_EVENTS, COMPANION_FUNCTIONS, INVITE_FUNCTIONS, NOTIFY_FUNCTIONS, PROFILE_FUNCTIONS, VOICE_FUNCTIONS, SETTINGS_FUNCTIONS, UPDATE_FUNCTIONS, FEED_EVENTS, INVITE_EVENTS, NOTIFICATION_EVENTS, UPDATE_EVENTS, VOICE_EVENTS, INVOKED_FUNCTIONS } from '../../shared/bridge-names.ts';
+import {
+  BRIDGE_FUNCTIONS,
+  COMPANION_EVENTS,
+  COMPANION_FUNCTIONS,
+  INVITE_FUNCTIONS,
+  NOTIFY_FUNCTIONS,
+  PROFILE_FUNCTIONS,
+  SHARE_SOUND_FUNCTIONS,
+  VOICE_FUNCTIONS,
+  SETTINGS_FUNCTIONS,
+  UPDATE_FUNCTIONS,
+  FEED_EVENTS,
+  INVITE_EVENTS,
+  NOTIFICATION_EVENTS,
+  UPDATE_EVENTS,
+  VOICE_EVENTS,
+  INVOKED_FUNCTIONS,
+} from '../../shared/bridge-names.ts';
 
 const { exposeInMainWorld, invoke, on, sendSync } = vi.hoisted(() => ({ exposeInMainWorld: vi.fn(), invoke: vi.fn(), on: vi.fn(), sendSync: vi.fn() }));
 vi.mock('electron', () => ({ contextBridge: { exposeInMainWorld }, ipcRenderer: { invoke, on, sendSync } }));
@@ -12,7 +39,15 @@ const noListen = (): void => undefined;
 
 // Checked by the compiler against the interface: a function added to the
 // bridge and not listed here, or listed and not declared, fails tsc.
-const named: Record<keyof ConchDesktopBridge | keyof DesktopVoiceBridge | keyof DesktopInviteBridge | keyof DesktopSettingsBridge | keyof DesktopCompanionBridge | keyof DesktopUpdateBridge, true> = {
+const named: Record<
+  keyof ConchDesktopBridge | keyof DesktopVoiceBridge | keyof DesktopInviteBridge | keyof DesktopSettingsBridge | keyof DesktopCompanionBridge | keyof DesktopUpdateBridge | keyof DesktopShareSoundBridge,
+  true
+> = {
+  shareSoundStart: true,
+  shareSoundChoose: true,
+  shareSoundMute: true,
+  shareSoundEnd: true,
+  shareSoundShareEnded: true,
   serverAddress: true,
   request: true,
   subscribe: true,
@@ -89,7 +124,7 @@ describe('the preload', () => {
     expect(name).toBe('conchDesktop');
     expect(Object.isFrozen(api)).toBe(true);
     expect(Reflect.ownKeys(api).sort()).toEqual(Object.keys(named).sort());
-    expect([...BRIDGE_FUNCTIONS, ...PROFILE_FUNCTIONS, ...VOICE_FUNCTIONS, ...INVITE_FUNCTIONS, ...NOTIFY_FUNCTIONS, ...SETTINGS_FUNCTIONS, 'notificationSupported', 'onNotification', 'onVoiceState', 'onInviteArrived', ...COMPANION_FUNCTIONS, 'onCompanion', ...UPDATE_FUNCTIONS, 'onUpdateState'].sort()).toEqual(Object.keys(named).sort());
+    expect([...BRIDGE_FUNCTIONS, ...PROFILE_FUNCTIONS, ...VOICE_FUNCTIONS, ...INVITE_FUNCTIONS, ...NOTIFY_FUNCTIONS, ...SETTINGS_FUNCTIONS, 'notificationSupported', 'onNotification', 'onVoiceState', 'onInviteArrived', ...COMPANION_FUNCTIONS, 'onCompanion', ...UPDATE_FUNCTIONS, 'onUpdateState', ...SHARE_SOUND_FUNCTIONS].sort()).toEqual(Object.keys(named).sort());
     for (const key of Reflect.ownKeys(api)) expect(typeof api[key as string], String(key)).toBe('function');
     for (const forbidden of ['ipcRenderer', 'invoke', 'send', 'on', 'sendSync', 'electron', 'require', 'process']) expect(forbidden in api).toBe(false);
     // It listens on the feed, voice, companion, notification, update and
@@ -118,7 +153,8 @@ describe('the preload', () => {
     expect(invoke).toHaveBeenLastCalledWith('conch:notifyClose', { tag: 't' });
     await bridge.settingsSet({ launchAtLogin: true });
     expect(invoke).toHaveBeenLastCalledWith('conch:settingsSet', { launchAtLogin: true });
-    expect(INVOKED_FUNCTIONS).toHaveLength(62);
+    // 62 before the Linux share sound's four (issue #1854).
+    expect(INVOKED_FUNCTIONS).toHaveLength(67);
   });
 
   it('rejects with a bare "refused" when main refuses, or answers anything but an envelope', async () => {
@@ -363,6 +399,23 @@ describe('the preload’s voice family', () => {
     expect(seen).toEqual([marked]);
   });
 
+  it('passes the closed cause and a bounded printable detail, and drops anything else (issue #1850)', () => {
+    const { bridge, sendVoice } = wired();
+    const seen: NativeVoiceView[] = [];
+    bridge.onVoiceState((v) => seen.push(v));
+    const unavailable = { status: 'unavailable', generation: 1, channel: null, retryable: false, problem: 'untrusted', cause: 'folder-writable' };
+    const ended = { ...running, status: 'ended', detail: 'could not reach <redacted>' };
+    sendVoice(unavailable);
+    sendVoice(ended);
+    for (const odd of [
+      { ...unavailable, cause: '/home/x/code' },
+      { ...ended, detail: 'line\nbreak' },
+      { ...ended, detail: 'x'.repeat(202) },
+      { ...ended, detail: 7 },
+    ]) sendVoice(odd);
+    expect(seen).toEqual([unavailable, ended]);
+  });
+
   it('drops a message that is not exactly a NativeVoiceView', () => {
     const { bridge, sendVoice } = wired();
     const seen: unknown[] = [];
@@ -477,5 +530,67 @@ describe('the preload’s companion (issue #1579)', () => {
     sendCompanion({ type: 'end', reason: 'crash' });
     expect(seen).toEqual([{ type: 'end', reason: 'crash' }]);
     expect(await caught).toEqual(new Error('companion listener'));
+  });
+});
+
+describe('the preload’s share sound (issue #1854)', () => {
+  const helper = { version: 3, phase: 'connected', capture: 'on', transmitting: false, muted: false, deafened: false, blocked: [], talkMode: 'push_to_talk', ptt: 'ready' };
+  const audio = { state: 'on', muted: false, sources: 2 };
+  const running = { status: 'running', generation: 2, channel: 'general', retryable: false };
+
+  it('sends each function on its own channel with exactly the argument given', async () => {
+    const { bridge, calls } = wired();
+    await bridge.shareSoundStart();
+    await bridge.shareSoundChoose({ choice: 'none' });
+    await bridge.shareSoundMute(true);
+    await bridge.shareSoundEnd({ share: 3 });
+    await bridge.shareSoundShareEnded();
+    expect(calls).toEqual([
+      ['conch:shareSoundStart', []],
+      ['conch:shareSoundChoose', [{ choice: 'none' }]],
+      ['conch:shareSoundMute', [true]],
+      ['conch:shareSoundEnd', [{ share: 3 }]],
+      ['conch:shareSoundShareEnded', []],
+    ]);
+  });
+
+  it('rejects with a bare "refused" when main refuses (the switch off, a subframe, a stale document, no act)', async () => {
+    const bridge = createBridge(() => Promise.resolve({ ok: false, kind: 'refused' }), noListen, noListen, noListen);
+    await expect(bridge.shareSoundStart()).rejects.toThrow(/^refused$/);
+    await expect(bridge.shareSoundChoose({ choice: 'none' })).rejects.toThrow(/^refused$/);
+  });
+
+  it('hands the page a v3 helper with its confirmed share sound, and main’s choice and reason, and nothing else', () => {
+    const { bridge, sendVoice } = wired();
+    const seen: unknown[] = [];
+    bridge.onVoiceState((v) => seen.push(v));
+    const withSound = { ...running, helper: { ...helper, shareAudio: audio }, shareSound: { choice: 'system_excluding_call' } };
+    const failed = { ...running, helper: { ...helper, shareAudio: { state: 'unavailable', muted: true, problem: 'no_pipewire', sources: 0 } }, shareSound: { choice: 'none', unavailable: 'no-pipewire' } };
+    sendVoice(withSound);
+    sendVoice(failed);
+    expect(seen).toEqual([withSound, failed]);
+  });
+
+  it('drops a view whose share sound is not exactly that', () => {
+    const { bridge, sendVoice } = wired();
+    const seen: unknown[] = [];
+    bridge.onVoiceState((v) => seen.push(v));
+    const good = { ...running, helper: { ...helper, shareAudio: audio } };
+    for (const odd of [
+      // v3 without its state, v2 with one, an unknown word, a count out of range, an extra key.
+      { ...running, helper },
+      { ...running, helper: { ...helper, version: 2, shareAudio: audio } },
+      { ...good, helper: { ...helper, shareAudio: { ...audio, state: 'starting' } } },
+      { ...good, helper: { ...helper, shareAudio: { ...audio, problem: 'no_consent' } } },
+      { ...good, helper: { ...helper, shareAudio: { ...audio, sources: -1 } } },
+      { ...good, helper: { ...helper, shareAudio: { ...audio, sources: 1025 } } },
+      { ...good, helper: { ...helper, shareAudio: { ...audio, application: 'Firefox' } } },
+      { ...good, helper: { ...helper, shareAudio: { ...audio, muted: 'no' } } },
+      { ...good, shareSound: { choice: 'application' } },
+      { ...good, shareSound: { choice: 'none', unavailable: '/dev/snd' } },
+      { ...good, shareSound: { choice: 'none', scope: 'application' } },
+      { ...good, shareSound: 'on' },
+    ]) sendVoice(odd);
+    expect(seen).toEqual([]);
   });
 });

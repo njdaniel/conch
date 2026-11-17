@@ -15,14 +15,16 @@ use std::time::Duration;
 
 use conch_voice_api::{
     Audience, AudienceKind, Client, Error, ErrorBody, PresenceEvent, Refusal, Secret,
-    ServerAddress, StreamEnd, Timestamp, VoiceControlAckV1, VoiceControlAckV2, VoiceControlCommand,
-    VoiceControlErrorCode, VoiceControlHelloV1, VoiceControlPipeAttachedV1, VoiceControlPlayback,
-    VoiceControlProtocolErrorV1, VoiceControlProtocolErrorV2, VoiceControlRefusal,
-    VoiceControlTalkMode, VoiceDevice, VoiceDevicesConfig, VoiceDevicesPipeWire, VoiceDevicesV1,
-    VoiceParticipant, VoiceParticipantV2, VoicePresenceRoom, VoicePresenceRoomV2, VoicePresenceV1,
-    VoicePresenceV2, VoiceRoomGrant, VoiceSessionResponseV1, VoiceTransmitReportV1,
-    VoiceTransmitState, WhoAmIResponseV1, parse_command, parse_command_v2, parse_event,
-    parse_event_v2,
+    ServerAddress, StreamEnd, Timestamp, VoiceControlAckV1, VoiceControlAckV2, VoiceControlAckV3,
+    VoiceControlCommand, VoiceControlCommandKindV3, VoiceControlErrorCode, VoiceControlHelloV1,
+    VoiceControlPipeAttachedV1, VoiceControlPlayback, VoiceControlProtocolErrorV1,
+    VoiceControlProtocolErrorV2, VoiceControlProtocolErrorV3, VoiceControlRefusal,
+    VoiceControlShareAudio, VoiceControlShareAudioProblem, VoiceControlTalkMode, VoiceDevice,
+    VoiceDevicesConfig, VoiceDevicesPipeWire, VoiceDevicesV1, VoiceParticipant, VoiceParticipantV2,
+    VoicePresenceRoom, VoicePresenceRoomV2, VoicePresenceV1, VoicePresenceV2, VoiceRoomGrant,
+    VoiceSessionResponseV1, VoiceShareAudioScope, VoiceTransmitReportV1, VoiceTransmitState,
+    WhoAmIResponseV1, parse_command, parse_command_v2, parse_command_v3, parse_event,
+    parse_event_v2, parse_event_v3,
 };
 use serde_json::json;
 use support::{FAKE_TOKEN, Reply, Request, Step, Stub, client_for, closed_port};
@@ -295,6 +297,42 @@ async fn every_public_type_can_be_printed_without_showing_a_secret() {
         ),
         debug("VoiceControlTalkMode", &VoiceControlTalkMode::Open),
         debug("VoiceControlPlayback", &VoiceControlPlayback::Unavailable),
+        // Version 3: the same again, and the application name a set_share_audio carries,
+        // which is not a secret, is not shown either; here it is one of the fake secrets,
+        // to show that.
+        debug("VoiceControlCommandV3", &control_v3_start_with_a_token()),
+        debug(
+            "VoiceControlCommandV3 (set_share_audio)",
+            &control_v3_share_audio(),
+        ),
+        debug("VoiceControlCommandV3 (set_devices)", &control_v3_devices()),
+        debug_and_display("VoiceControlRefusal (v3)", &control_v3_refusal()),
+        debug(
+            "VoiceControlEventV3",
+            &parse_event_v3(control_v3_state().as_bytes()).unwrap(),
+        ),
+        debug(
+            "VoiceControlHelloV1 (v1, v2 and v3)",
+            &VoiceControlHelloV1::v1_v2_and_v3("0.3.0"),
+        ),
+        debug("VoiceControlAckV3", &VoiceControlAckV3::new(3, 1, None)),
+        debug(
+            "VoiceControlProtocolErrorV3",
+            &VoiceControlProtocolErrorV3::new(2, VoiceControlErrorCode::TooLong),
+        ),
+        debug(
+            "VoiceControlCommandKindV3",
+            &VoiceControlCommandKindV3::SetShareAudio,
+        ),
+        debug("VoiceControlShareAudio", &VoiceControlShareAudio::On),
+        debug(
+            "VoiceControlShareAudioProblem",
+            &VoiceControlShareAudioProblem::PublishRefused,
+        ),
+        debug(
+            "VoiceShareAudioScope",
+            &VoiceShareAudioScope::SystemExcludingCall,
+        ),
         // The attach line holds the one secret-shaped value of any control channel: the
         // nonce, which its Debug prints as a placeholder.
         debug(
@@ -377,6 +415,54 @@ fn control_v2_refusal() -> VoiceControlRefusal {
 fn control_v2_ack() -> String {
     json!({"schema": "conch.voice_control.v2", "kind": "ack", "seq": 3, "id": 1,
            "ok": true, "note": FAKE_ROOM})
+    .to_string()
+}
+
+fn control_v3_start_with_a_token() -> conch_voice_api::VoiceControlCommandV3 {
+    let line = json!({
+        "schema": "conch.voice_control.v3", "kind": "start", "id": 1,
+        "server": "https://conch.example.org", "channel": "general", "principal_id": 7,
+        "credential": "stored", "muted": false, "deafened": false, "token": FAKE_TOKEN,
+    });
+    parse_command_v3(line.to_string().as_bytes()).unwrap()
+}
+
+fn control_v3_share_audio() -> conch_voice_api::VoiceControlCommandV3 {
+    let line = json!({
+        "schema": "conch.voice_control.v3", "kind": "set_share_audio", "id": 2,
+        "capturing": true, "scope": "system_excluding_call", "application_name": FAKE_ROOM,
+        "note": FAKE_JOIN,
+    });
+    parse_command_v3(line.to_string().as_bytes()).unwrap()
+}
+
+fn control_v3_devices() -> conch_voice_api::VoiceControlCommandV3 {
+    let line = json!({
+        "schema": "conch.voice_control.v3", "kind": "set_devices", "id": 3,
+        "input": FAKE_ROOM, "output": FAKE_JOIN,
+    });
+    parse_command_v3(line.to_string().as_bytes()).unwrap()
+}
+
+/// A set_share_audio whose application name breaks the rule and holds a fake secret: the
+/// refusal says which command and nothing of the name.
+fn control_v3_refusal() -> VoiceControlRefusal {
+    let line = json!({
+        "schema": "conch.voice_control.v3", "kind": "set_share_audio", "id": 4,
+        "capturing": true, "scope": "system_excluding_call",
+        "application_name": format!("{FAKE_TOKEN}\n"),
+    });
+    parse_command_v3(line.to_string().as_bytes()).unwrap_err()
+}
+
+fn control_v3_state() -> String {
+    json!({
+        "schema": "conch.voice_control.v3", "kind": "state", "seq": 5, "phase": "connected",
+        "capture": "on", "playback": "on", "transmitting": false, "muted": false,
+        "deafened": false, "blocked": [], "talk_mode": "push_to_talk", "ptt": "ready",
+        "share_audio": "on", "share_audio_muted": false, "share_audio_sources": 2,
+        "note": FAKE_ROOM,
+    })
     .to_string()
 }
 

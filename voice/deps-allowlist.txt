@@ -34,11 +34,12 @@ clap
 log
 # Tests only: private temporary directories, so no test touches the user's files.
 tempfile
-# The PipeWire microphone and speakers, with hot-plug: capture and playback at 48 kHz mono
-# through lock-free rings. Its own public repository (njdaniel/dmn-audio, MIT), a git
-# dependency pinned by commit in voice/conch-voice/Cargo.toml; the source is allowed by exact
-# URL in deny.toml. It brings the PipeWire bindings (needing libclang and the PipeWire headers
-# to build), a resampler and a ring buffer. From #184.
+# The PipeWire microphone and speakers, with hot-plug: capture and playback, including
+# application streams, at 48 kHz mono or stereo through lock-free rings.
+# Its own public repository (njdaniel/dmn-audio, MIT), pinned by commit in
+# voice/conch-voice/Cargo.toml; the source is allowed by exact URL in deny.toml.
+# It brings PipeWire bindings (needing libclang and PipeWire headers), a resampler
+# and a ring buffer. From #184.
 dmn-audio
 # The WASAPI microphone and speakers on Windows, as `dmn-audio` is PipeWire's on Linux: shared,
 # event-driven capture and playback, device enumeration and device-change notifications. MIT,

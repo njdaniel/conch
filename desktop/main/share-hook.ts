@@ -10,6 +10,12 @@ export interface ShareHookDeps {
   // identity.
   readonly dropClient: () => void;
   readonly companion: { end(reason: CompanionEndReason): Promise<boolean> };
+  // The Linux share sound (issue #1854), when main's switch is on: told after
+  // the companion's end that the identity has gone, so what it learned of the
+  // server is not carried to the next. The sound's own stop and withdrawal ride
+  // on companion.end (Companion's soundEnded), in that order, before the end's
+  // own removal is awaited.
+  readonly sound?: { forget(): void };
 }
 
 export function shareTeardown(deps: ShareHookDeps): (arg: { reason: CompanionEndReason }) => Promise<void> {
@@ -23,5 +29,6 @@ export function shareTeardown(deps: ShareHookDeps): (arg: { reason: CompanionEnd
     // liveOrigin(), which leans on this order.
     deps.dropClient();
     await deps.companion.end(reason);
+    deps.sound?.forget();
   };
 }

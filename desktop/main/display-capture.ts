@@ -112,8 +112,14 @@ export interface DisplayCaptureDeps {
   // The owned window's document gate now.
   readonly gate: () => { current(frame: { readonly frameToken: string }): boolean };
   // The share allowance (share-allowance.ts): the capture use is the only
-  // thing that arms a capture. A raw click or key no longer does.
-  readonly share: Pick<ShareAllowance, 'peekCapture' | 'takeCapture'>;
+  // thing that arms a capture. A raw click or key no longer does. A pick that
+  // is answered with a source is recorded on it (grantCapture), which alone
+  // makes the arm's sound use available (issue #1854).
+  readonly share: Pick<ShareAllowance, 'peekCapture' | 'takeCapture' | 'grantCapture'>;
+  // Told when main answered the pick with a source, after every check: the
+  // capture is granted, for the share's sound (ShareSound.captureGranted).
+  // Never for a refusal, a cancel or a stale pick.
+  readonly granted?: () => void;
   // Whether a companion grant is live (companion.liveOrigin() !== null).
   readonly live: () => boolean;
   // The portal's latest answer (Portal.last).
@@ -317,6 +323,14 @@ export class DisplayCapture {
       this.#refuse('the grant or the document ended during the pick');
       answer(null);
       return;
+    }
+    // The capture is granted: the arm's sound use, and the share sound's
+    // record of a share (not a watch), start here and nowhere else.
+    this.#deps.share.grantCapture(this.#deps.owned());
+    try {
+      this.#deps.granted?.();
+    } catch {
+      // The share sound's record is its own; the capture goes on.
     }
     // Video only: never an audio member.
     answer({ video: only });

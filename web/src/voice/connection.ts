@@ -210,8 +210,9 @@ export interface RoomEvents {
   // the open microphone cannot hear speech, so its gate stays shut.
   // When it does not, name is the browser's error name, if it gave one.
   readonly onMeter: (available: boolean, name?: string) => void;
-  // Whether this page may play audio now (the room's canPlaybackAudio): told
-  // after the join and whenever it changes. A browser such as iOS Safari
+  // Whether this page may play audio now: the room's canPlaybackAudio, and no
+  // voice element the browser holds paused (#1823). Told after the join and
+  // whenever it changes. A browser such as iOS Safari
   // plays nothing until the page has been tapped; Room.startAudio, called
   // from the tap, lets it.
   readonly onPlayback: (canPlay: boolean) => void;

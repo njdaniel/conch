@@ -53,6 +53,7 @@ import {
   VOICE_CONTROL_STOP_TERM_AFTER_MS,
   type VoiceControlAckV1,
   type VoiceControlAckV2,
+  type VoiceControlAckV3,
   type VoiceControlBlock,
   type VoiceControlCapture,
   type VoiceControlErrorCode,
@@ -62,18 +63,37 @@ import {
   type VoiceControlPTT,
   type VoiceControlPTTProblem,
   type VoiceControlReason,
+  type VoiceControlShareAudio,
+  type VoiceControlShareAudioProblem,
   type VoiceControlStateV1,
   type VoiceControlStateV2,
+  type VoiceControlStateV3,
   type VoiceControlTalkMode,
 } from '../../../web/src/schema/generated.ts';
 import { EndpointError, listen, listenPipe, profileDir, runtimeDir, sweep, type AttachFailure, type EndpointDeps, type EndpointRefusal, type Listening } from './endpoint.ts';
 import { validProfileId } from '../vault/files.ts';
-import { SCHEMA_V2, LineSplitter, Tracker, command, encodeCommand, finalPhase, negotiate, startCommand, type Command, type Event, type Version, type Want } from './protocol.ts';
-import { defaultSpawn, findHelper, HelperError, helperArgs, helperEnv, spawnHelper, type FindDeps, type HelperRefusal, type SpawnFn } from './spawn.ts';
+import {
+  LINUX_SHARE_AUDIO_SCOPE,
+  OWNER_VERSIONS,
+  SCHEMA_V2,
+  SCHEMA_V3,
+  LineSplitter,
+  Tracker,
+  command,
+  encodeCommand,
+  finalPhase,
+  negotiate,
+  startCommand,
+  type Command,
+  type Event,
+  type Version,
+  type Want,
+} from './protocol.ts';
+import { defaultSpawn, findHelper, HelperError, helperArgs, helperEnv, spawnHelper, type FindDeps, type HelperRefusal, type SpawnFn, type UntrustedCause } from './spawn.ts';
 
 // What the helper says it is doing, as the UI may show it.
 export interface HelperView {
-  readonly version: 1 | 2;
+  readonly version: 1 | 2 | 3;
   readonly helperVersion: string;
   readonly phase: VoiceControlPhase;
   readonly reason?: VoiceControlReason;
@@ -87,6 +107,16 @@ export interface HelperView {
   readonly talkMode?: VoiceControlTalkMode;
   readonly ptt: VoiceControlPTT;
   readonly pttProblem?: VoiceControlPTTProblem;
+  // The confirmed state of the share's sound (v3 only): what the helper said,
+  // never what was asked.
+  readonly shareAudio?: ShareAudioView;
+}
+
+export interface ShareAudioView {
+  readonly state: VoiceControlShareAudio;
+  readonly muted: boolean;
+  readonly problem?: VoiceControlShareAudioProblem;
+  readonly sources: number;
 }
 
 // Why a start did not get as far as a running session.
@@ -102,12 +132,17 @@ export type VoiceState =
   // Voice cannot start on this machine or in this app: the helper is not
   // installed (text stays usable), not trusted, or the runtime directory or
   // socket refused. Nothing was spawned.
-  | { readonly status: 'unavailable'; readonly reason: HelperRefusal | EndpointRefusal }
+  | { readonly status: 'unavailable'; readonly reason: HelperRefusal | EndpointRefusal; readonly cause?: UntrustedCause }
   | { readonly status: 'starting'; readonly generation: number }
-  | { readonly status: 'running'; readonly generation: number; readonly helper: HelperView }
+  // detail, while the helper reconnects for a connection reason, is as the
+  // ended state's.
+  | { readonly status: 'running'; readonly generation: number; readonly helper: HelperView; readonly detail?: string }
   | { readonly status: 'stopping'; readonly generation: number }
   // The helper reported its final state, as asked or for its own reason.
-  | { readonly status: 'ended'; readonly generation: number; readonly helper: HelperView }
+  // detail, for an end with a connection reason (connect_failed,
+  // server_unreachable, internal_error), is the helper's own words for it,
+  // redacted, printable and bounded.
+  | { readonly status: 'ended'; readonly generation: number; readonly helper: HelperView; readonly detail?: string }
   | { readonly status: 'failed'; readonly generation: number; readonly reason: StartFailure }
   | { readonly status: 'lost'; readonly generation: number; readonly reason: LossReason };
 
@@ -157,6 +192,10 @@ export interface SupervisorDeps {
   readonly endpoint?: EndpointDeps;
   readonly find?: FindDeps;
   readonly timings?: Partial<Timings>;
+  // The versions offered to the helper, best first. Absent: OWNER_VERSIONS,
+  // which has no v3, so with the Linux share-sound switch off (issue #1854) the
+  // app negotiates what it always did.
+  readonly versions?: readonly Version[];
 }
 
 export type CommandResult = { readonly ok: true } | { readonly ok: false; readonly error: VoiceControlErrorCode | 'not-running' | 'busy' | 'unsupported' | 'lost' };
@@ -188,6 +227,9 @@ class Run {
   socket: Socket | null = null;
   hello: VoiceControlHelloV1 | null = null;
   view: HelperView | null = null;
+  // The last connection reason logged with its detail, so a state that
+  // repeats it is not logged again.
+  noted = '';
   version: Version | null = null;
   nextId = 1;
   started = false;
@@ -219,10 +261,11 @@ class Run {
   }
 }
 
-function viewOf(state: VoiceControlStateV1 | VoiceControlStateV2, helperVersion: string): HelperView {
-  const v2 = state.schema === SCHEMA_V2 ? state : null;
+function viewOf(state: VoiceControlStateV1 | VoiceControlStateV2 | VoiceControlStateV3, helperVersion: string): HelperView {
+  const v3 = state.schema === SCHEMA_V3 ? state : null;
+  const v2 = v3 ?? (state.schema === SCHEMA_V2 ? state : null);
   return {
-    version: v2 === null ? 1 : 2,
+    version: v3 !== null ? 3 : v2 === null ? 1 : 2,
     helperVersion,
     phase: state.phase,
     ...(state.reason === undefined ? {} : { reason: state.reason }),
@@ -235,6 +278,16 @@ function viewOf(state: VoiceControlStateV1 | VoiceControlStateV2, helperVersion:
     blocked: [...state.blocked],
     ptt: state.ptt,
     ...(state.ptt_problem === undefined ? {} : { pttProblem: state.ptt_problem }),
+    ...(v3 === null
+      ? {}
+      : {
+          shareAudio: {
+            state: v3.share_audio,
+            muted: v3.share_audio_muted,
+            ...(v3.share_audio_problem === undefined ? {} : { problem: v3.share_audio_problem }),
+            sources: v3.share_audio_sources,
+          },
+        }),
   };
 }
 
@@ -243,9 +296,49 @@ function viewOf(state: VoiceControlStateV1 | VoiceControlStateV2, helperVersion:
 function printable(line: string, secrets: readonly string[], nonceShape: boolean): string {
   let out = line;
   for (const s of secrets) if (s !== '') out = out.split(s).join('<redacted>');
+  // The dot check keeps a long dotless run from costing the pattern's backtracking.
+  if (out.includes('.')) out = out.replace(JWT_SHAPE, '<redacted>');
+  out = out.replace(TOKEN_QUERY, '$1=<redacted>');
   if (nonceShape) out = out.replace(NONCE_SHAPE, '<redacted>');
   out = out.replace(/[^\x20-\x7e]/g, '?');
   return out.length > STDERR_LINE_BYTES ? `${out.slice(0, STDERR_LINE_BYTES)}…` : out;
+}
+
+// JWT_SHAPE is anything shaped like a JWT (a LiveKit access token is one):
+// three base64url segments separated by dots, or two beginning eyJ (a JWT
+// with its head or tail cut is still credential-equivalent). TOKEN_QUERY is
+// the value of a token, access_token or any <word>_token parameter, in a URL
+// or a line of text.
+const JWT_SHAPE = /[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}|eyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{8,}/g;
+const TOKEN_QUERY = /\b((?:[a-z0-9]+_)*token)=[^\s&"')\]]*/gi;
+
+// The reasons whose words a person may be shown, and the log keeps.
+// internal_error is not among them: the helper writes no status line for it,
+// so any line that seemed to give its words would be someone else's.
+const DETAIL_REASONS: ReadonlySet<string> = new Set(['connect_failed', 'server_unreachable']);
+const DETAIL_BYTES = 200;
+
+// detailFrom finds the helper's words for a reason in its standard error: the
+// helper's status line reads "not connected: connect failed (the error's
+// text); ...". The control protocol has no detail field, so the stderr tail
+// is the only place main can read it, and only a line that begins with that
+// status (output.rs, Connection::Waiting) counts: an SDK record or a native
+// library's line that happens to hold the phrase is not this reason's words.
+// The result is redacted again, printable and bounded.
+export function detailFrom(lines: readonly string[], reason: string, secrets: readonly string[] = [], nonceShape = false): string | undefined {
+  if (!DETAIL_REASONS.has(reason)) return undefined;
+  const prefix = `not connected: ${reason.replace(/_/g, ' ')} (`;
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i] ?? '';
+    if (!line.startsWith(prefix)) continue;
+    const inner = line.slice(prefix.length).replace(/\)(?:; [^)]*)?$/, '');
+    return bound(printable(inner, secrets, nonceShape));
+  }
+  return undefined;
+}
+
+function bound(text: string): string {
+  return text.length > DETAIL_BYTES ? `${text.slice(0, DETAIL_BYTES)}…` : text;
 }
 
 // NONCE_SHAPE is a run at least as long as the attach nonce, in its alphabet
@@ -479,7 +572,7 @@ export class Supervisor {
     }
     if (typeof got === 'string') return run.ownerStopped ? (run.outcome ?? this.stateValue) : this.settle(run);
     run.hello = got;
-    const version = negotiate(got);
+    const version = negotiate(got, this.deps.versions ?? OWNER_VERSIONS);
     if (version === null) {
       // Nothing is written: the helper, never started, exits on the end of
       // its standard input having opened nothing.
@@ -520,8 +613,11 @@ export class Supervisor {
   private unavailable(err: unknown): VoiceState {
     if (err instanceof HelperError || err instanceof EndpointError) {
       const reason = err.reason as HelperRefusal | EndpointRefusal;
-      this.log(`voice: unavailable: ${reason}`);
-      const next: VoiceState = { status: 'unavailable', reason };
+      // A HelperError's words name the folder or file that failed: a path,
+      // which is no secret, kept to main's log and off the page.
+      const why = err instanceof HelperError ? `: ${printable(err.why, [], false)}` : '';
+      this.log(`voice: unavailable: ${reason}${why}`);
+      const next: VoiceState = { status: 'unavailable', reason, ...(err instanceof HelperError && err.trustCause !== undefined ? { cause: err.trustCause } : {}) };
       this.set(next);
       return next;
     }
@@ -548,12 +644,30 @@ export class Supervisor {
     if (this.current !== run || run.outcome !== null || run.stopping || !run.ready) return;
     const view = run.view ?? null;
     if (view === null) return;
+    const detail = view.reason === undefined || !(finalPhase(view.phase) || view.phase === 'reconnecting') ? undefined : this.noteDetail(run, view);
+    const shown = detail === undefined ? {} : { detail };
     if (finalPhase(view.phase)) {
-      run.outcome = { status: 'ended', generation: run.generation, helper: view };
+      run.outcome = { status: 'ended', generation: run.generation, helper: view, ...shown };
       this.set(run.outcome);
       return;
     }
-    this.set({ status: 'running', generation: run.generation, helper: view });
+    this.set({ status: 'running', generation: run.generation, helper: view, ...shown });
+  }
+
+  // noteDetail logs a connection reason once for each time the helper gives
+  // it, with the helper's words for it if its standard error has them, and
+  // returns those words. The helper's connect error is written to its
+  // standard error only if the helper does so; the log says when it did not.
+  private noteDetail(run: Run, view: HelperView): string | undefined {
+    const reason = view.reason ?? '';
+    if (!DETAIL_REASONS.has(reason)) return undefined;
+    const detail = detailFrom(run.stderr.lines, reason, run.secrets, run.windows);
+    const key = `${view.phase}:${reason}:${detail ?? ''}`;
+    if (run.noted !== key) {
+      run.noted = key;
+      this.log(`voice: helper ${String(run.generation)} ${finalPhase(view.phase) ? 'ended' : view.phase}: ${reason}: ${detail ?? 'no detail from the helper'}`);
+    }
+    return detail;
   }
 
   private watchChild(run: Run, child: ChildProcessWithoutNullStreams): void {
@@ -563,6 +677,13 @@ export class Supervisor {
     child.stderr.setEncoding('utf8');
     child.stderr.on('data', (chunk: string) => {
       run.stderr.push(chunk);
+      // The helper's status line and its event travel apart: when the words
+      // for a reason already shown arrive after it, show them then.
+      const v = run.view;
+      if (run.outcome === null && v !== null && v.phase === 'reconnecting' && v.reason !== undefined && DETAIL_REASONS.has(v.reason)) {
+        const d = detailFrom(run.stderr.lines, v.reason, run.secrets, run.windows);
+        if (`${v.phase}:${v.reason}:${d ?? ''}` !== run.noted) this.publish(run);
+      }
     });
     child.stdin.on('error', () => {
       if (!run.stopping) this.lose(run, 'write-failed');
@@ -584,6 +705,7 @@ export class Supervisor {
     if (run.exited) return;
     run.exited = true;
     this.log(`voice: helper ${String(run.generation)} exited (${signal === null ? `code ${String(code)}` : signal})`);
+    this.logStderr(run);
     run.listening?.close();
     run.socket?.destroy();
     for (const [, w] of run.waiters) {
@@ -598,6 +720,16 @@ export class Supervisor {
     // Whatever was waiting for the hello waits no longer.
     run.broken('exited');
     run.markReaped();
+  }
+
+  // logStderr writes the helper's redacted stderr tail to the log when it
+  // went wrong: it exited unexpectedly, was lost, failed, or ended in a
+  // failed phase. A helper that was asked to stop writes nothing.
+  private logStderr(run: Run): void {
+    const o = run.outcome;
+    const wrong = o === null ? !run.stopping : o.status === 'lost' || o.status === 'failed' || (o.status === 'ended' && o.helper.phase === 'failed');
+    if (!wrong) return;
+    for (const line of run.stderr.lines) this.log(`voice: helper ${String(run.generation)} stderr: ${line}`);
   }
 
   private readEvents(run: Run, socket: Socket, rest: Buffer): void {
@@ -658,7 +790,7 @@ export class Supervisor {
     }
   }
 
-  private answered(run: Run, ack: VoiceControlAckV1 | VoiceControlAckV2, kind: Command['kind'] | undefined): void {
+  private answered(run: Run, ack: VoiceControlAckV1 | VoiceControlAckV2 | VoiceControlAckV3, kind: Command['kind'] | undefined): void {
     const w = run.waiters.get(ack.id);
     if (w === undefined) return;
     run.waiters.delete(ack.id);
@@ -721,6 +853,18 @@ export class Supervisor {
 
   setTalkMode(talkMode: VoiceControlTalkMode): Promise<CommandResult> {
     return this.send({ kind: 'set_talk_mode', talkMode });
+  }
+
+  // setShareAudio and setShareAudioMute are v3's (issue #1854): in a v1 or v2
+  // session they are unsupported and nothing is written. Only main's share
+  // sound calls them, after a recorded consent. The scope is the one literal
+  // of the Linux route; the page never supplies it, or the name.
+  setShareAudio(want: { readonly capturing: false } | { readonly capturing: true; readonly applicationName: string }): Promise<CommandResult> {
+    return this.send(want.capturing ? { kind: 'set_share_audio', capturing: true, scope: LINUX_SHARE_AUDIO_SCOPE, applicationName: want.applicationName } : { kind: 'set_share_audio', capturing: false });
+  }
+
+  setShareAudioMute(muted: boolean): Promise<CommandResult> {
+    return this.send({ kind: 'set_share_audio_mute', muted });
   }
 
   // lose makes a running helper's loss its one state, and stops it.

@@ -2,6 +2,7 @@ import { ModerationScope } from './Moderation';
 // The browser client's top level: sign-in, the operator warning, then the
 // lobby. The auth, connection and channels reducers hold the state; src/api.ts
 // does every call and is the only code that sees the credential.
+import { flushSync } from 'react-dom';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState } from 'react';
 import * as api from './api';
 import { uploadRefusalLine } from './fileSize';
@@ -57,6 +58,7 @@ import {
 import { canLoadOlder, chatFor, chatReducer, initialChat, lastId, oldestId, ordered, sameSend, type ChatAction, type PendingSend } from './state/messages';
 import { useLiveChannel } from './useLiveChannel';
 import { useNotifications } from './useNotifications';
+import { usePush } from './usePush';
 import { NotificationCenter } from './NotificationCenter';
 import { NotificationSettings } from './NotificationSettings';
 import { SearchPanel } from './SearchPanel';
@@ -598,6 +600,11 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
   const [readStateEvent, setReadStateEvent] = useState<ReadStateV1 | null>(null);
   const [messageEvent, setMessageEvent] = useState<MessageV2 | null>(null);
   const [editEvent, setEditEvent] = useState<MessageV2 | null>(null);
+  const onMessageFrame = useCallback((message: MessageV2) => {
+    flushSync(() => {
+      setMessageEvent(message);
+    });
+  }, []);
   useEffect(() => {
     setReadStateEvent(null);
     setMessageEvent(null);
@@ -665,7 +672,10 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
     onManages,
     onMissing,
     onReadState: setReadStateEvent,
-    onMessage: setMessageEvent,
+    // Synchronous, so two frames handled in one tick each reach the
+    // notification hook: it is fed through this one slot, and its cursor
+    // moves past a frame the slot overwrote before a render (issue #1824).
+    onMessage: onMessageFrame,
     onMessageEdited,
     onChannelsChanged: refreshChannels,
     onPermissionsChanged: permissionsChanged,
@@ -751,6 +761,15 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
     editEvent,
     readStateEvent,
     onOpen,
+  });
+  // "Notify me when Conch is closed" (issue #1826). Only a person with a full
+  // credential: the server refuses a guest and an agent.
+  const push = usePush({
+    signedIn,
+    eligible: principal !== null && principal.kind === 'human' && visit === null,
+    account: principal?.id ?? 0,
+    policy: notifications.policy,
+    muted: notifications.muted,
   });
 
   const now = useNow(signedIn);
@@ -1048,13 +1067,13 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
     // The session is ended first, and waited for: the request needs the
     // credential that signing out revokes, and the revoke ends the session.
     void releaseSession()
-      .then(() => api.signOut())
+      .then(() => api.signOut(principalId ?? undefined))
       .then((told) => {
         signingOut.current = false;
         forgetChannel();
         dispatchAuth({ type: 'signOut', notice: told ? null : 'untold' });
       });
-  }, [releaseSession]);
+  }, [releaseSession, principalId]);
 
   // Sign out everywhere revokes every credential of the person. If the server
   // does not do it, the person stays signed in here and is told, so they can
@@ -1376,11 +1395,11 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
   // revoked, before the invite or the link signs someone in.
   const leaveForInvite = useCallback(async (): Promise<boolean> => {
     await releaseSession();
-    const told = await api.signOut();
+    const told = await api.signOut(principalId ?? undefined);
     forgetChannel();
     dispatchAuth({ type: 'signOut', notice: told ? null : 'untold' });
     return told;
-  }, [releaseSession]);
+  }, [releaseSession, principalId]);
 
   // Joined, or signed back in through a sign-in link: the code is dropped and
   // the lobby opens, on the first channel an invite granted. A redemption is
@@ -1800,6 +1819,17 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
                 channels={channels.channels}
                 muted={notifications.muted}
                 onToggleMute={notifications.toggleMute}
+                push={{
+                  state: push.state,
+                  failure: push.failure,
+                  mutesCut: push.mutesCut,
+                  onEnable: () => {
+                    void push.enable();
+                  },
+                  onDisable: () => {
+                    void push.disable();
+                  },
+                }}
                 onPolicy={notifications.setPolicy}
                 onEnable={() => {
                   void notifications.enableNative();

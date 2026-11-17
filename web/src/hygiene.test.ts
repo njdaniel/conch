@@ -112,10 +112,10 @@ describe('local storage', () => {
     // callers name the notification and appearance preferences' keys, the setup
     // card's (a per-account mark that the card was put off), the channel
     // arrangement's (issue #1493), the voice mode and share quality, the call
-    // view's non-video filter (issue #1487) and the talk key's name (issue #1382).
+    // view's non-video filter (issue #1487), the talk key's name (issue #1382) and the push registration's id (issue #1826).
     const api = withoutComments(sources['./api.ts'] ?? '');
-    expect(api.match(/credentials\.(read|write)Preference\(\s*(?!notificationPreferencesKey\(|appearancePreferencesKey\(|arrangementKey\(|setupCardKey\(|voiceModeKey\b|shareQualityKey\b|hideNonVideoKey\b|talkKeyLabelKey\b)/g) ?? []).toEqual([]);
-    expect(api.match(/credentials\.(read|write)Preference\(/g)?.length).toBe(16);
+    expect(api.match(/credentials\.(read|write)Preference\(\s*(?!notificationPreferencesKey\(|appearancePreferencesKey\(|arrangementKey\(|setupCardKey\(|voiceModeKey\b|shareQualityKey\b|hideNonVideoKey\b|talkKeyLabelKey\b|pushRegistrationKey\()/g) ?? []).toEqual([]);
+    expect(api.match(/credentials\.(read|write)Preference\(/g)?.length).toBe(18);
   });
 
   it('is not missed by the rules: a bare test of each', () => {

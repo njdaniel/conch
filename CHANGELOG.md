@@ -11,26 +11,28 @@ release that Nick publishes.
 ### Added
 - **An agent can post images, under a manifest grant** (#1798). An agent may upload to a channel only when its manifest grants the new capability `files.upload` and the new channel permission `attach` there, and it is a member; without all three the upload is the `403` it always was. Both values are additive in `pkg/schema`, with no version bump, and no existing manifest grants either. Over MCP, `post_message` takes `attachments`: at most 4 items `{name, media_type, data_base64}`, uploaded and posted as one message, all or nothing. Over REST, a granted agent uses `POST /v2/channels/{channel}/files`. An agent may upload only `image/png`, `image/jpeg` and `image/webp`, checked against the file's first bytes, within `--max-upload-bytes` (in total, for one MCP call), and within a budget of 20 files an hour for each agent, set with the new `--agent-uploads-per-hour` (`CONCHD_AGENT_UPLOADS_PER_HOUR`; `0` lets no agent upload). An `/mcp` request that carries images may be larger than 1 MiB (up to the upload limit in base64 plus 1 MiB) for an agent with `files.upload`, and for nobody else; a proxy with a body limit needs it raised to match (`docs/manual.md`). An agent still never fetches a file. People's uploads are unchanged. The server handles two `/mcp` requests over 1 MiB at a time and answers one more `503 server_busy` with `Retry-After` before reading it. Taking the grant away also stops the agent attaching files it uploaded while it held it (`invalid_file_attachment`), and refuses an upload that was still arriving.
 
-## [0.1.0-alpha.19] - 2026-11-13
+## [0.1.0-alpha.19] - 2026-11-16
 
-This is a pre-1.0 release (`v0.1.0-alpha.19`). There is no new schema version. `pkg/schema` gains only additive values and shapes, and every published fixture is byte-identical:
+This is a pre-1.0 release (`v0.1.0-alpha.19`). It has one new schema version, `conch.voice_control.v3`, which defines the voice helper's commands and state for a share's sound (#1851, signed by Nick). Nothing uses it yet: the helper and the desktop app still speak v1 and v2, and no sound is shared (see "Not shipped yet"). Apart from v3, `pkg/schema` gains only additive values and shapes, and every published fixture is byte-identical:
 - the `topic` field (`omitempty`) on `ChannelV0`, `ChannelListingV1` and `ChannelDocV1`, with `MaxChannelTopicLength` (250), `SetChannelTopicRequestV1` and `SetChannelTopicResponseV1` (#1503);
 - the `AdminAction` value `set_channel_topic` (#1523);
 - the `VoiceControlReason` value `voice_removed`, written on `conch.voice_control.v2` only (#1457);
-- the push and notification shapes (#1712, listed under Added).
+- the push and notification shapes (#1712, listed under Added);
+- an optional `publisher` field, `companion` (the default) or `person`, on `VoiceCompanionAudioRequestV1` and `VoiceCompanionAudioV1` (#1853); no client sends it yet.
 
 The server schema gains three migrations: 47 (the channel topic), 48 (notification preferences) and 49 (push registrations). A binary from before them refuses a database that has them, so rolling back to `alpha.18` restores the pre-upgrade backup (docs/deploy.md step 11; the rollback script does it), and what was written since is forgotten. After the upgrade, an open browser tab offers a reload. **Testers: reload any open tab once** to get the topic and the voice fixes below. Push is off until an operator sets `--push-webpush`, and without it nothing is sent. The preferences and pending-feed routes need no flag and are live on every server.
 
-The desktop app, Windows and Android work that merged since `alpha.18` is not part of this release. See "Desktop app" and "Not shipped yet" at the end.
+**This is the first release with the Linux desktop app.** `release.yml` now builds, attests and attaches its x86_64 `.deb` (#1598). It is a preview for testers, not a supported client, until real-device acceptance is recorded (#1603); #754 holds that claim for Nick. Windows, macOS and Android work is not part of this release. See "Desktop app" and "Not shipped yet" at the end.
 
 ### Added
+- **A notice when Conch is closed** (#1826). With push on (the operator's `--push-webpush`, and the person's own choice), the browser shows one fixed, content-free notice, "New activity in Conch", even when no Conch tab is open. With a tab open, it may show beside the page's own alert. The service worker holds no credential, ignores the push's payload and makes no request. A click opens or focuses Conch, which catches up through its usual backfill. Turning push on mirrors the browser's notification policy and mutes to the server, which is what the sender reads.
 - **A channel's topic** (#1503, #1504, #1505, #1506, #1523). A topic is one line of text that says what a channel is for, up to 250 characters. A manager sets it; everyone who can see the channel sees it.
   - **Server** (#1503). `PUT /v1/channels/{id}/topic` is open to an operator or the channel's manager, as rename is. An empty string clears it, and the same string is a no-op. An archived channel accepts it. A change writes a `channel_topic_changed` audit row and reaches the channel's sockets as `conch.channel.v1` and its human members as `channels_changed`. The topic rides wherever the name rides (`GET /v1/channels`, the directory), and a private channel's topic never reaches a non-member.
   - **Browser** (#1504). The topic shows under the name in the conversation header and under each row's name in the channel directory, as plain text. "Set topic" sits in the channel's ⋯ menu beside Rename, for an operator or the channel's manager. It is prefilled, bounded, has Clear, and keeps your text when the server refuses. Other members' tabs update live.
   - **CLI and TUI** (#1505). `conch channels topic <channel> [<text>] [--clear] [--json]` reads, sets or clears a topic. `--clear` with text is a usage error. The `conch channels list` text output is unchanged and `--json` carries `topic`. The TUI's chat title reads `# name · topic` and follows changes. The TUI sets nothing.
   - **An agent reads it** (#1506). MCP's `read_channel` returns `topic` beside the page when the channel has one, and omits it when not. The agent's own read grant applies, so a refused agent gets no topic. The description labels it as descriptive text.
   - **An AI administrator sets it** (#1523). The admin door gains `set_channel_topic` (`manage_channels`, direct, as `rename_channel` is). An agent needs `manage_channels` to use it, and the owner can require an approval for it per agent. `pkg/schema` gains the additive `AdminAction` value `set_channel_topic`. There's no new schema version.
-- **Phone push and the notification feed, the server half** (#1116: #1712, #1713, #1714, #1715 and #1717). Five slices land together; nothing in them has a phone or browser client yet.
+- **Phone push and the notification feed, the server half** (#1116: #1712, #1713, #1714, #1715 and #1717). Five slices land together. There's no phone client yet; the browser's first one is the notice above (#1826).
   - **The wire shapes** (#1712, the first slice; `docs/design/mobile-notifications.md` §9.1). These are additive shapes with no version bump and no published shape changed, approved as D-8 in [the go-ahead on #1116](https://github.com/njdaniel/conch/issues/1116#issuecomment-6784081948).
     - **The wake**, `PushWakeV1` (`conch.push_wake.v1`): a schema name and an opaque registration id, and nothing else, ever.
     - **Registrations**: `PushRegistrationV1` (no target and no preference), `CreatePushRegistrationRequestV1` and `UpdatePushRegistrationRequestV1` (a Web Push endpoint and keys, or a relay provider and token), `ListOwnPushRegistrationsResponseV1`, and the server's `PushConfigV1`. The vocabularies are `PushTransport`, `PushPlatform`, `PushProvider` and `PushRegistrationEndReason`. There are five error codes (`push_not_configured`, `push_transport_unavailable`, `push_endpoint_refused`, `too_many_push_registrations`, `push_registration_not_found`) and two audit actions (`push_registration_created`, `push_registration_ended`).
@@ -81,7 +83,10 @@ The desktop app, Windows and Android work that merged since `alpha.18` is not pa
 - **Controls follow the permission the server checks** (#1701). The add-from-another-channel picker, the first-run "make a channel" and the invite panel's "resume in Settings" now follow `manage_channels` or `manage_members`, not the operator role.
 
 ### Fixed
-- **A voice kick in the desktop app says so** (#1457, development builds only; see "Desktop app").
+- **The voice helper connects to secure (`wss://`) LiveKit** (#1864), for the TUI and the desktop app. Its SDK now enables rustls with the system's certificate roots; certificate and hostname checks are still required.
+- **Browser notifications no longer go silent or announce old messages after a reconnect** (#1824). A live message now advances the read cursor, and a later read that hits the page cap delivers what it read. So a busy channel keeps announcing, and a message that arrived while notifications were off isn't announced later.
+- **"Tap to hear the channel" stays while any voice is still paused** (#1823). On iOS Safari the tap could disappear as soon as one voice played, leaving an earlier one silent.
+- **A voice kick in the desktop app says so** (#1457, desktop app; see "Desktop app").
   - When a moderator removes you from voice, the desktop app shows "voice ended: you were removed from voice" with Join available, where it showed an internal error.
   - `pkg/schema` gains the additive `VoiceControlReason` value `voice_removed`, a reason to fail in `conch.voice_control.v2` only. A v1 session is unchanged and still reports `internal_error`. There's no new schema version.
 - **A level meter that won't start no longer ends the voice join** (#1792, #1794). The browser looped on "Voice unavailable; trying again" and the join lasted a second. Now the join keeps the connection and the track.
@@ -96,12 +101,20 @@ The desktop app, Windows and Android work that merged since `alpha.18` is not pa
 - **A restricted operator sees only what it holds** (#1698). An operator with `manage_channels` off was offered Rename and Set topic, which the server refuses.
 - **A notification click opens the channel as it is now** (#1620). After a rename it opened the old name, and after a removal it opened a channel you can't see. A click on a notification already closed opens nothing.
 - **Typed letters are never read as a key name in the TUI** (#1156). Fast typing, or a pty, delivers letters in one read, and "up" moved the channel selection, "esc" quit, and "end", "tab", "enter", "home", "pgup" and "down" misfired. Real arrow keys, pastes and Alt chords are unchanged.
-- **The voice helper keeps its room close after an explicit leave** (#1685, #1690). The desktop app (development builds) writes `leave` and closes stdin together; the helper cut the close at 1 s and could drop LiveKit's Leave, so LiveKit kept the person for about 21 s. A leave after a signal keeps the full room step too. An abandoned leave is now logged.
+- **The voice helper keeps its room close after an explicit leave** (#1685, #1690). The desktop app writes `leave` and closes stdin together; the helper cut the close at 1 s and could drop LiveKit's Leave, so LiveKit kept the person for about 21 s. A leave after a signal keeps the full room step too. An abandoned leave is now logged.
 - **A closed tab leaves LiveKit at once** (#1764). Leaving voice now starts the LiveKit disconnect immediately, so a tab closed just after Leave no longer stays listed in the call for about 20 s.
 - **Channel topic follow-ups** (#1673). The TUI title keeps its ` › net …` and ` [stale]` markers and cuts the topic to fit. A `--json` topic read prints one channel. An empty topic argument without `--clear` is refused ("the topic text is empty or blank; use --clear to clear the topic").
 
-### Desktop app (development builds, not attached to this release)
-`release.yml` builds neither the desktop app nor the `.deb`, and the Linux desktop isn't a supported client yet (#754). Nothing here is supported.
+### Desktop app (Linux `.deb`, a preview attached to this release)
+The release attaches one x86_64 `.deb` with the bundled voice helper (#1598, #1634):
+- It is built on Ubuntu 24.04, the oldest release it supports, and is attested with the other assets.
+- The CI build of the `.deb` on main (and on a manual run) installs, upgrades, removes and purges that package in a clean Ubuntu 24.04 container, with the library and helper checks (#1599, #1652, #1869).
+
+The Linux desktop isn't a supported client yet (#754).
+- **Voice failures say why** (#1850). When native voice is unavailable or can't connect, the strip says why. Either the helper's folder can be changed by other users (the log names the folder; the page gets only the cause), or it shows the connection's own error, bounded to 200 printable characters, with tokens, room names and similar values redacted.
+
+  A test runs the real helper against a refused connection and checks the detail (#1861).
+- **Native voice connects to secure LiveKit** (#1864): see Fixed. This should fix the "could not connect" Nick saw against the alpha server's TLS LiveKit; it hasn't been confirmed there yet.
 - **Screen sharing through the companion** (#1579, #1580, #1581, #1582, #1583, #1632, #1638). Main grants the renderer a screen companion for the voice room it is in. The page shares and watches in the voice strip (the OS picker is the consent; the qualities are in the next bullet), and the capture window is 10 s. A share's claim answer now reaches the page, where every desktop Share failed after the pick. A live test runs the companion against a real conchd and LiveKit.
 - **Share quality** (#1772). The desktop share offers 720p30 (the default), 1080p30, 1080p60, Source at 30 and Source at 60, each with its Mbps estimate and the sending readout. Auto is never offered. A stored choice outside the list is 720p30.
 - **Settings, tray, lock and notifications** (#1587, #1588, #1589, #1590, #1619, #1593, #1631).
@@ -120,6 +133,12 @@ This release ships no Windows or macOS desktop app and no Android app; the `conc
 - **Windows** (#890, #1309, #938, #904, #1774, #1781, #1779, #1785, #1766, #1762, #1788, #1791, #900, #1801): `conch-voice` compiles for Windows, with a CI job, a named-pipe events endpoint, a configuration layer, WASAPI capture and playback, push-to-talk through Raw Input and the desktop as owner of the helper. An unsigned per-user NSIS installer is built. Two fixes serve the Windows build: no two web modules differ only in case, and a `--user-data-dir` outside the user's profile is refused. The signing decision record (`docs/design/windows-signing.md`, #901) is a proposal for Nick. The Windows build adds Windows-only Rust dependencies (`wasapi`, `winit`, each signed off on #756) and a Windows libwebrtc pin in `scripts/voice-pins.sh`; none is in a Linux or macOS build. An ADR-006 amendment for Windows is recorded as proposed, not accepted.
 - **Android** (#1391, #1392, #1756, #1758): a spike with voice wiring and a camera tap, which abandons on a lock, a call or leaving the app during the permission dialog. It stays in `spikes/mobile/android/`.
 - **macOS** (#755): a desk-research design and capability matrix. Nothing was built or run on macOS.
+- **The screen's sound on a Linux desktop share** (#1552). The design was accepted by Nick on 2026-11-13: the share carries everything the computer plays except the call, captured by the helper (`docs/design/linux-share-audio.md`, #1585). Its groundwork is in this release, but no sound is shared yet:
+  - the v3 protocol (#1851);
+  - conchd records the consent with `publisher: person`. An owed withdrawal is retried until LiveKit confirms it, and a DELETE of a person's consent writes nothing to LiveKit (#1853, #1859, #1867);
+  - the pinned `dmn-audio` capture API (#1852).
+
+  The helper's capture (#1586) and the desktop's toggle (#1854) are still in progress, and stay off in releases until the by-hand feedback test L-S6 passes.
 
 ## [0.1.0-alpha.18] - 2026-11-09
 
