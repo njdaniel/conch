@@ -536,6 +536,8 @@ export const reportWait = 1000;
 // and publishes through the same sdk.ts rows as the browser (shareAsk,
 // shareTops, contentHint), so each choice means what it means there.
 export const companionDefaultQuality: ShareQuality = { resolution: '720p', frameRate: 30 };
+// What a live capture that cannot take a quality change says (setShareQuality).
+export const shareQualityRefusedNote = 'The share quality could not be changed on this capture.';
 export const companionQualities: readonly ShareQuality[] = [
   companionDefaultQuality,
   { resolution: '1080p', frameRate: 30 },
@@ -1210,6 +1212,9 @@ export class VoiceClient {
   // is kept even if this browser cannot apply it to the track already open,
   // and then conchd is not told: the stream did not change.
   async setShareQuality(asked: ShareQuality): Promise<void> {
+    // A new choice replaces any note an earlier choice left (it is about that
+    // choice, not this one); the note comes back only if this one fails too.
+    if (this.state.why === shareQualityRefusedNote || this.state.why === qualityLaterNote) this.set({ why: null });
     // The desktop offers companionQualities only (Q-D4-3 on #1578, widened by
     // #1772); a choice outside them, Auto included, is its 720p30 default.
     // The browser's Auto is always 30 fps (Q10 on #1614), whatever rate was
@@ -1219,7 +1224,7 @@ export class VoiceClient {
     try {
       await this.room?.setShareQuality(quality);
     } catch {
-      if (this.state.shareQuality === quality) this.set({ why: 'The share quality could not be changed on this capture.' });
+      if (this.state.shareQuality === quality) this.set({ why: shareQualityRefusedNote });
       return;
     }
     const answer = await this.share.changeQuality(quality);

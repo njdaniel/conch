@@ -14,12 +14,12 @@
 import { useRef, type ReactNode } from 'react';
 import { Glyph } from '../../Icons';
 import type { Person } from '../../useLiveChannel';
-import { companionDefaultQuality, companionQualities } from '../connection';
+import { companionDefaultQuality, companionQualities, shareQualityRefusedNote } from '../connection';
 import { cautionFor, estimateWords } from '../ShareQualityMenu';
 import { qualityLabel, sharers, type Sharer } from '../presence';
 import type { VoicePresenceV2 } from '../../schema/voice';
 import { ShareReadout, ShareView } from '../ShareView';
-import { provisionalQuality, type ShareQuality } from '../share';
+import { provisionalQuality, qualityLaterNote, type ShareQuality } from '../share';
 import { nameOf } from '../VoicePanel';
 import type { Companion } from './useCompanion';
 import type { ShareSoundUi } from './useShareSound';
@@ -180,12 +180,15 @@ export function ShareNotes({
   const note = share.kind === 'idle' ? shareNote(share, state.companionRefusal, state.phase === 'stopped' ? state.why : null, state.companionShareUnavailable) : null;
   const quality = companionQualities.find((q) => qualityKey(q) === qualityKey(state.shareQuality)) ?? companionDefaultQuality;
   const caution = cautionFor(quality);
-  // The picker is open before a share and while one is live,
-  // never while it is starting or stopping. A live change reaches the
-  // capture and the sender without ending the share; if the capture cannot
-  // take it, state.why says so and the choice is kept for the next share.
-  const pickerOpen = share.kind === 'idle' ? reason === null : live;
-  const liveWhy = live ? state.why : null;
+  // The picker is open before a share and while one is sharing: never while
+  // it is claiming, picking, publishing (the capture and its sender are not
+  // settled yet), resuming or stopping. A live change reaches the capture and
+  // the sender without ending the share; if the capture cannot take it, or
+  // conchd defers the label, setShareQuality's note says so, and the choice
+  // is kept for the next share. Only those two notes are shown here: any
+  // other `why` is not this picker's.
+  const pickerOpen = share.kind === 'idle' ? reason === null : share.kind === 'sharing';
+  const liveWhy = share.kind === 'sharing' && (state.why === shareQualityRefusedNote || state.why === qualityLaterNote) ? state.why : null;
   // The toggle: before the picker, and during a share only when the hook
   // counts it live (sharing or resuming, not publishing), so a choice is never
   // made for a share the hook does not hold yet.

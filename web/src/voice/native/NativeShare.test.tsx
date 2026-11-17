@@ -6,9 +6,9 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { CompanionGrantError, ShareSoundReason } from '../../platform/desktop/bridge';
 import type { VoicePresenceV2 } from '../../schema/voice';
 import type { Person } from '../../useLiveChannel';
-import { companionDefaultQuality, companionQualities, companionRefusals, initialVoice, type VoiceState } from '../connection';
+import { companionDefaultQuality, companionQualities, companionRefusals, initialVoice, shareQualityRefusedNote, type VoiceState } from '../connection';
 import { askedText } from '../sdk';
-import type { SettledQuality, ShareDirection, ShareSample, ShareState } from '../share';
+import { qualityLaterNote, type SettledQuality, type ShareDirection, type ShareSample, type ShareState } from '../share';
 import { estimateWords, sourceSixtyNote } from '../ShareQualityMenu';
 import { NativeStreams, ShareButton, ShareNotes, ShareSoundMute, shareDisabledReason } from './NativeShare';
 import type { Companion, CompanionClient } from './useCompanion';
@@ -244,22 +244,26 @@ describe('the quality choices (Q-D4-3, #1772)', () => {
     expect(option?.textContent).toBe(`${label} · ${estimateWords(quality ?? companionDefaultQuality)}`);
   });
 
-  it.each([{ kind: 'sharing' }, { kind: 'resuming' }, { kind: 'publishing' }])('is offered while the share is $kind, and a choice is sent to the client', ({ kind }) => {
+  it.each([{ kind: 'sharing' }])('is offered while the share is $kind, and a choice is sent to the client', ({ kind }) => {
     const t = fake({ phase: 'connected', channel: 'general', companion: true, share: { kind, audio: false } as unknown as ShareState });
     strip(t.companion);
     fireEvent.change(screen.getByLabelText('Share quality'), { target: { value: '1080p60' } });
     expect(t.calls).toEqual(['quality 1080p60']);
   });
 
-  it.each([{ kind: 'claiming' }, { kind: 'picking' }, { kind: 'stopping' }])('is not offered while the share is $kind', (share) => {
+  it.each([{ kind: 'claiming' }, { kind: 'picking' }, { kind: 'publishing' }, { kind: 'resuming' }, { kind: 'stopping' }])('is not offered while the share is $kind', (share) => {
     strip(fake({ phase: 'connected', channel: 'general', companion: true, share: share as unknown as ShareState }).companion);
     expect(screen.queryByLabelText('Share quality')).toBeNull();
   });
 
-  it('says why when the live capture could not take the choice', () => {
-    const why = 'The share quality could not be changed on this capture.';
+  it.each([shareQualityRefusedNote, qualityLaterNote])('says why while sharing when the choice did not apply: %s', (why) => {
     strip(fake({ phase: 'connected', channel: 'general', companion: true, share: { kind: 'sharing', audio: false }, why }).companion);
     expect(screen.getByText(why)).toBeTruthy();
+  });
+
+  it('shows no other note beside the live picker: it is not the picker’s', () => {
+    strip(fake({ phase: 'connected', channel: 'general', companion: true, share: { kind: 'sharing', audio: false }, why: 'Something else went wrong earlier.' }).companion);
+    expect(screen.queryByText('Something else went wrong earlier.')).toBeNull();
   });
 
   it.each(['1080p30', '1080p60', 'source30', 'source60'])('chooses %s', (value) => {
