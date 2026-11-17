@@ -122,10 +122,32 @@ export interface CompanionDeps {
   // Called at the start of every end() and stop(), whether or not a companion
   // is held (app.ts: clears the share allowance, share-allowance.ts).
   readonly ended?: () => void;
+  // The share's sound (issue #1854): told of every end and stop of a held
+  // companion, once, with the share's ref and after the record is forgotten.
+  // It sends the helper's stop and then the consent's DELETE, and resolves
+  // when both are done (bounded); the companion's own removal does not wait
+  // for it and it does not wait for the removal. Absent (the switch off):
+  // nothing.
+  readonly soundEnded?: (share: ShareRef, reason: RemoveReason) => Promise<void>;
+}
+
+// The live share as the share's sound (issue #1854, voice/share-audio.ts) holds
+// it: a number main made for this companion alone (never the page's, never
+// reused), the destination, the helper generation it was asked under, the
+// document that was given the grant and the client of the activation it was
+// asked with. A stop of the sound names the share by `id`, so a late stop of
+// an older share can never stop a newer one's sound.
+export interface ShareRef {
+  readonly id: number;
+  readonly channel: string;
+  readonly generation: number;
+  readonly document: number;
+  readonly client: CompanionClient;
 }
 
 // The live companion: what it was asked for, and with what.
 interface Held {
+  readonly id: number;
   readonly channel: string;
   // The voice helper's generation it was asked under: a new helper is not
   // the parent this companion was folded into.
@@ -140,6 +162,9 @@ interface Held {
 
 type Asking = Pick<Held, 'channel' | 'generation'>;
 
+// Why a removal was sent, for its log line.
+export type RemoveReason = CompanionEndReason | 'stopped' | 'unused';
+
 // stillHeldBy says whether the owned window is still the one that held a
 // grant: the same web contents object, and the same document generation (S2
 // of #1621). Only then is a reload for an unconfirmed removal the end of what
@@ -147,9 +172,6 @@ type Asking = Pick<Held, 'channel' | 'generation'>;
 export function stillHeldBy(now: { readonly contents: object | null; readonly generation: number }, held: { readonly contents: object | null; readonly document: number }): boolean {
   return now.contents !== null && now.contents === held.contents && now.generation === held.document;
 }
-
-// Why a removal was sent, for its log line.
-type RemoveReason = CompanionEndReason | 'stopped' | 'unused';
 
 const refuse = (error: CompanionGrantError): CompanionGrantResult => ({ ok: false, error });
 
@@ -220,6 +242,8 @@ export class Companion {
   readonly #changed = new Set<() => void>();
   // Counts ends and stops: a request begun before one is overtaken by it.
   #epoch = 0;
+  // Numbers the companions held, from 1: a share's identity for its sound.
+  #serial = 0;
 
   constructor(deps: CompanionDeps) {
     this.#deps = deps;
@@ -257,6 +281,27 @@ export class Companion {
   // companion is live (#1580, D4-03: the request filter allows it alone).
   liveOrigin(): string | null {
     return this.#held?.origin ?? null;
+  }
+
+  // current is the live share, as its sound holds it (ShareRef), or null when
+  // no companion is live. It is main's own record: nothing the page says.
+  current(): ShareRef | null {
+    const held = this.#held;
+    return held === null ? null : { id: held.id, channel: held.channel, generation: held.generation, document: held.document, client: held.client };
+  }
+
+  // #endSound tells the share's sound that this share ended, and never throws.
+  #endSound(held: Held, reason: RemoveReason): Promise<void> {
+    const sound = this.#deps.soundEnded;
+    if (sound === undefined) return Promise.resolve();
+    try {
+      return sound({ id: held.id, channel: held.channel, generation: held.generation, document: held.document, client: held.client }, reason).catch(() => {
+        this.#deps.log(`companion: the share's sound could not be ended after ${reason}`);
+      });
+    } catch {
+      this.#deps.log(`companion: the share's sound could not be ended after ${reason}`);
+      return Promise.resolve();
+    }
   }
 
   // grant asks conchd for the companion's grant for the voice destination
@@ -323,7 +368,7 @@ export class Companion {
       return refuse(given === null ? 'failed' : 'ended');
     }
     const contents = this.#deps.contents?.() ?? null;
-    this.#held = { ...asking, client, document, contents, origin: given.origin };
+    this.#held = { ...asking, id: ++this.#serial, client, document, contents, origin: given.origin };
     try {
       this.#deps.granted?.(contents, document);
     } catch {
@@ -348,9 +393,13 @@ export class Companion {
     // Ended is called above, before the record goes: no listener sees a held
     // grant after it.
     this.#announce();
+    // The share's sound ends first, at once: its stop is written now, ahead
+    // of anything the removal does.
+    const sound = this.#endSound(held, 'stopped');
     const closing = this.#close();
     const removed = await this.#remove(held.client, held.channel, 'stopped');
     await closing;
+    await sound;
     this.#unconfirmed(removed, held, 'stopped');
     return true;
   }
@@ -371,10 +420,14 @@ export class Companion {
     } catch {
       // A window that cannot be told is not a reason to keep the companion.
     }
+    // The share's sound ends at once, with the end: its stop is written before
+    // anything else here, and its withdrawal follows the stop.
+    const sound = this.#endSound(held, reason);
     // Begun at once, alongside the DELETE: neither waits for the other.
     const closing = this.#close();
     const removed = await this.#remove(held.client, held.channel, reason);
     await closing;
+    await sound;
     this.#unconfirmed(removed, held, reason);
     return true;
   }

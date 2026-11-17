@@ -53,6 +53,7 @@ import {
   VOICE_CONTROL_STOP_TERM_AFTER_MS,
   type VoiceControlAckV1,
   type VoiceControlAckV2,
+  type VoiceControlAckV3,
   type VoiceControlBlock,
   type VoiceControlCapture,
   type VoiceControlErrorCode,
@@ -62,18 +63,37 @@ import {
   type VoiceControlPTT,
   type VoiceControlPTTProblem,
   type VoiceControlReason,
+  type VoiceControlShareAudio,
+  type VoiceControlShareAudioProblem,
   type VoiceControlStateV1,
   type VoiceControlStateV2,
+  type VoiceControlStateV3,
   type VoiceControlTalkMode,
 } from '../../../web/src/schema/generated.ts';
 import { EndpointError, listen, listenPipe, profileDir, runtimeDir, sweep, type AttachFailure, type EndpointDeps, type EndpointRefusal, type Listening } from './endpoint.ts';
 import { validProfileId } from '../vault/files.ts';
-import { SCHEMA_V2, LineSplitter, Tracker, command, encodeCommand, finalPhase, negotiate, startCommand, type Command, type Event, type Version, type Want } from './protocol.ts';
+import {
+  LINUX_SHARE_AUDIO_SCOPE,
+  OWNER_VERSIONS,
+  SCHEMA_V2,
+  SCHEMA_V3,
+  LineSplitter,
+  Tracker,
+  command,
+  encodeCommand,
+  finalPhase,
+  negotiate,
+  startCommand,
+  type Command,
+  type Event,
+  type Version,
+  type Want,
+} from './protocol.ts';
 import { defaultSpawn, findHelper, HelperError, helperArgs, helperEnv, spawnHelper, type FindDeps, type HelperRefusal, type SpawnFn, type UntrustedCause } from './spawn.ts';
 
 // What the helper says it is doing, as the UI may show it.
 export interface HelperView {
-  readonly version: 1 | 2;
+  readonly version: 1 | 2 | 3;
   readonly helperVersion: string;
   readonly phase: VoiceControlPhase;
   readonly reason?: VoiceControlReason;
@@ -87,6 +107,16 @@ export interface HelperView {
   readonly talkMode?: VoiceControlTalkMode;
   readonly ptt: VoiceControlPTT;
   readonly pttProblem?: VoiceControlPTTProblem;
+  // The confirmed state of the share's sound (v3 only): what the helper said,
+  // never what was asked.
+  readonly shareAudio?: ShareAudioView;
+}
+
+export interface ShareAudioView {
+  readonly state: VoiceControlShareAudio;
+  readonly muted: boolean;
+  readonly problem?: VoiceControlShareAudioProblem;
+  readonly sources: number;
 }
 
 // Why a start did not get as far as a running session.
@@ -162,6 +192,10 @@ export interface SupervisorDeps {
   readonly endpoint?: EndpointDeps;
   readonly find?: FindDeps;
   readonly timings?: Partial<Timings>;
+  // The versions offered to the helper, best first. Absent: OWNER_VERSIONS,
+  // which has no v3, so with the Linux share-sound switch off (issue #1854) the
+  // app negotiates what it always did.
+  readonly versions?: readonly Version[];
 }
 
 export type CommandResult = { readonly ok: true } | { readonly ok: false; readonly error: VoiceControlErrorCode | 'not-running' | 'busy' | 'unsupported' | 'lost' };
@@ -227,10 +261,11 @@ class Run {
   }
 }
 
-function viewOf(state: VoiceControlStateV1 | VoiceControlStateV2, helperVersion: string): HelperView {
-  const v2 = state.schema === SCHEMA_V2 ? state : null;
+function viewOf(state: VoiceControlStateV1 | VoiceControlStateV2 | VoiceControlStateV3, helperVersion: string): HelperView {
+  const v3 = state.schema === SCHEMA_V3 ? state : null;
+  const v2 = v3 ?? (state.schema === SCHEMA_V2 ? state : null);
   return {
-    version: v2 === null ? 1 : 2,
+    version: v3 !== null ? 3 : v2 === null ? 1 : 2,
     helperVersion,
     phase: state.phase,
     ...(state.reason === undefined ? {} : { reason: state.reason }),
@@ -243,6 +278,16 @@ function viewOf(state: VoiceControlStateV1 | VoiceControlStateV2, helperVersion:
     blocked: [...state.blocked],
     ptt: state.ptt,
     ...(state.ptt_problem === undefined ? {} : { pttProblem: state.ptt_problem }),
+    ...(v3 === null
+      ? {}
+      : {
+          shareAudio: {
+            state: v3.share_audio,
+            muted: v3.share_audio_muted,
+            ...(v3.share_audio_problem === undefined ? {} : { problem: v3.share_audio_problem }),
+            sources: v3.share_audio_sources,
+          },
+        }),
   };
 }
 
@@ -527,7 +572,7 @@ export class Supervisor {
     }
     if (typeof got === 'string') return run.ownerStopped ? (run.outcome ?? this.stateValue) : this.settle(run);
     run.hello = got;
-    const version = negotiate(got);
+    const version = negotiate(got, this.deps.versions ?? OWNER_VERSIONS);
     if (version === null) {
       // Nothing is written: the helper, never started, exits on the end of
       // its standard input having opened nothing.
@@ -745,7 +790,7 @@ export class Supervisor {
     }
   }
 
-  private answered(run: Run, ack: VoiceControlAckV1 | VoiceControlAckV2, kind: Command['kind'] | undefined): void {
+  private answered(run: Run, ack: VoiceControlAckV1 | VoiceControlAckV2 | VoiceControlAckV3, kind: Command['kind'] | undefined): void {
     const w = run.waiters.get(ack.id);
     if (w === undefined) return;
     run.waiters.delete(ack.id);
@@ -808,6 +853,18 @@ export class Supervisor {
 
   setTalkMode(talkMode: VoiceControlTalkMode): Promise<CommandResult> {
     return this.send({ kind: 'set_talk_mode', talkMode });
+  }
+
+  // setShareAudio and setShareAudioMute are v3's (issue #1854): in a v1 or v2
+  // session they are unsupported and nothing is written. Only main's share
+  // sound calls them, after a recorded consent. The scope is the one literal
+  // of the Linux route; the page never supplies it, or the name.
+  setShareAudio(want: { readonly capturing: false } | { readonly capturing: true; readonly applicationName: string }): Promise<CommandResult> {
+    return this.send(want.capturing ? { kind: 'set_share_audio', capturing: true, scope: LINUX_SHARE_AUDIO_SCOPE, applicationName: want.applicationName } : { kind: 'set_share_audio', capturing: false });
+  }
+
+  setShareAudioMute(muted: boolean): Promise<CommandResult> {
+    return this.send({ kind: 'set_share_audio_mute', muted });
   }
 
   // lose makes a running helper's loss its one state, and stops it.

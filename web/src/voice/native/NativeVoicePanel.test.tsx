@@ -535,5 +535,118 @@ describe('NativeVoicePanel', () => {
       expect(c.presences).toEqual([]);
       expect(screen.queryByRole('region', { name: "Ada's stream" })).toBeNull();
     });
+
+    // The Linux share's sound (issue #1854): main's view carries it only with
+    // main's switch on.
+    describe('the share’s sound', () => {
+      const v3 = (audio: NonNullable<NativeVoiceHelper['shareAudio']>, over: Partial<NativeVoiceHelper> = {}): NativeVoiceHelper =>
+        helper({ version: 3, playback: 'on', talkMode: 'push_to_talk', shareAudio: audio, ...over });
+      const on = { state: 'on', muted: false, sources: 2 } as const;
+      const sounding = (audio: NonNullable<NativeVoiceHelper['shareAudio']> = on): NativeVoiceView => ({
+        status: 'running',
+        generation: 1,
+        channel: 'general',
+        retryable: false,
+        helper: v3(audio),
+        shareSound: { choice: 'system_excluding_call' },
+      });
+      const sharing = (): Companion => companionOf({ phase: 'connected', channel: 'general', companion: true, share: { kind: 'sharing', audio: false } }).companion;
+
+      function withSource(fake: Fake, calls: string[], companion: Companion) {
+        const source: NativeVoice = {
+          ...fake.nv,
+          shareSound: {
+            start: () => {
+              calls.push('start');
+              return Promise.resolve({ ok: false, error: 'not-offered' });
+            },
+            choose: (c) => {
+              calls.push(`choose ${c}`);
+              return Promise.resolve({ ok: true, share: null });
+            },
+            mute: (m) => {
+              calls.push(`share-mute ${String(m)}`);
+              return Promise.resolve({ ok: true });
+            },
+            end: () => {
+              calls.push('end');
+              return Promise.resolve(true);
+            },
+            shareEnded: () => {
+              calls.push('share ended');
+              return Promise.resolve(true);
+            },
+          },
+        };
+        return render(
+          <NativeVoicePanel source={source} signedIn channel="general" viewer={1} people={people} voiceAllowed channels={channels} companion={companion} onUnauthorized={() => undefined} onOpen={() => undefined} />,
+        );
+      }
+
+      it('with the switch off (no share sound in the view): no toggle, no mute, the silent words, and nothing asked of main', async () => {
+        const calls: string[] = [];
+        withSource(new Fake({ status: 'running', generation: 1, channel: 'general', retryable: false, helper: v3(on) }), calls, sharing());
+        await frame(presence([1, '2026-01-01T00:00:00Z']));
+        expect(screen.queryByRole('checkbox', { name: 'Share with sound' })).toBeNull();
+        expect(screen.queryByRole('button', { name: /share sound/ })).toBeNull();
+        expect(screen.getByText('Sharing your screen in #general')).toBeTruthy();
+        expect(calls).toEqual([]);
+      });
+
+      it('the mute sits beside Stop, shows the helper’s confirmed state, and is apart from the microphone’s Mute and Deafen', async () => {
+        const calls: string[] = [];
+        const fake = new Fake(sounding());
+        withSource(fake, calls, sharing());
+        await frame(presence([1, '2026-01-01T00:00:00Z']));
+        const stop = screen.getByRole('button', { name: 'Stop sharing' });
+        const mute = screen.getByRole('button', { name: 'Mute share sound' });
+        expect(stop.nextElementSibling).toBe(mute);
+        expect(mute.getAttribute('aria-pressed')).toBe('false');
+        expect(screen.getByText('Sharing your screen and its sound in #general (sound from 2 apps)')).toBeTruthy();
+        // The share-sound mute asks main for the share's mute and nothing of the microphone's.
+        fireEvent.click(mute);
+        await waitFor(() => { expect(calls).toContain('share-mute true'); });
+        expect(fake.calls).toEqual([]);
+        // The microphone's Mute is its own and asks for no share mute.
+        calls.length = 0;
+        fireEvent.click(screen.getByRole('button', { name: 'Mute' }));
+        expect(fake.calls).toEqual(['mute true']);
+        expect(calls.filter((c) => c.startsWith('share-mute'))).toEqual([]);
+        // The helper's word moves the button, nothing else.
+        fake.set(sounding({ state: 'on', muted: true, sources: 2 }));
+        expect(screen.getByRole('button', { name: 'Unmute share sound' }).getAttribute('aria-pressed')).toBe('true');
+      });
+
+      it('says without sound until the helper says on, then with it', async () => {
+        const fake = new Fake(sounding({ state: 'off', muted: false, sources: 0 }));
+        withSource(fake, [], sharing());
+        await frame(presence([1, '2026-01-01T00:00:00Z']));
+        expect(screen.getByText('Sharing your screen without sound in #general')).toBeTruthy();
+        expect(screen.queryByRole('button', { name: /share sound/ })).toBeNull();
+        fake.set(sounding());
+        expect(screen.getByText(/Sharing your screen and its sound in #general/)).toBeTruthy();
+        expect(screen.getByRole('button', { name: 'Mute share sound' })).toBeTruthy();
+      });
+
+      it('asks main to add the sound when the share goes live (the end is the hook’s, tested with it)', async () => {
+        const calls: string[] = [];
+        const fake = new Fake(sounding({ state: 'off', muted: false, sources: 0 }));
+        withSource(fake, calls, sharing());
+        await frame(presence([1, '2026-01-01T00:00:00Z']));
+        await waitFor(() => { expect(calls).toEqual(['start']); });
+      });
+
+      it('the toggle before the picker: on by default, and one click to “without sound”', async () => {
+        const calls: string[] = [];
+        const idleShare = companionOf({ phase: 'connected', channel: 'general', companion: true }).companion;
+        withSource(new Fake(sounding({ state: 'off', muted: false, sources: 0 })), calls, idleShare);
+        await frame(presence([1, '2026-01-01T00:00:00Z']));
+        const box = screen.getByRole<HTMLInputElement>('checkbox', { name: 'Share with sound' });
+        expect(box.checked).toBe(true);
+        expect(screen.queryByText(silentShareBefore)).toBeNull();
+        fireEvent.click(box);
+        await waitFor(() => { expect(calls).toEqual(['choose none']); });
+      });
+    });
   });
 });

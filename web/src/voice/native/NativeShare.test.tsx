@@ -3,16 +3,32 @@
 // and the tiles. No room, no portal, no network.
 import { cleanup, fireEvent, render, screen, within } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import type { CompanionGrantError } from '../../platform/desktop/bridge';
+import type { CompanionGrantError, ShareSoundReason } from '../../platform/desktop/bridge';
 import type { VoicePresenceV2 } from '../../schema/voice';
 import type { Person } from '../../useLiveChannel';
 import { companionDefaultQuality, companionQualities, companionRefusals, initialVoice, type VoiceState } from '../connection';
 import { askedText } from '../sdk';
 import type { SettledQuality, ShareDirection, ShareSample, ShareState } from '../share';
 import { estimateWords, sourceSixtyNote } from '../ShareQualityMenu';
-import { NativeStreams, ShareButton, ShareNotes, shareDisabledReason } from './NativeShare';
+import { NativeStreams, ShareButton, ShareNotes, ShareSoundMute, shareDisabledReason } from './NativeShare';
 import type { Companion, CompanionClient } from './useCompanion';
-import { shareCauseWords, shareDisabledWords, shareElsewhereWords, shareFailedWords, shareFullWords, shareSourceClosedWords, shareUnavailableWords, silentShareBefore, silentShareWhile } from './words';
+import type { ShareSoundUi } from './useShareSound';
+import {
+  indicatorWords,
+  shareCauseWords,
+  shareDisabledWords,
+  shareElsewhereWords,
+  shareFailedWords,
+  shareFullWords,
+  shareSoundWords,
+  shareSourceClosedWords,
+  shareUnavailableWords,
+  shareWithSoundLabel,
+  shareWithoutSoundNote,
+  silentShareBefore,
+  silentShareWhile,
+  soundIndicatorWords,
+} from './words';
 
 afterEach(cleanup);
 
@@ -388,5 +404,277 @@ describe('no raw HTML or inline style', () => {
     const { container } = strip(fake({ share: idleShare({ ended: 'failed' }) }).companion);
     expect(container.querySelector('[style]')).toBeNull();
     expect(spy).not.toHaveBeenCalled();
+  });
+});
+
+// ---- the Linux share's sound (issue #1854)
+
+const reasonsOfSound: readonly ShareSoundReason[] = ['old-helper', 'old-server', 'consent-failed', 'no-pipewire', 'no-process-tree', 'publish-refused', 'unavailable'];
+
+// A share sound as the hook gives it, with its calls recorded.
+function soundUi(over: Partial<ShareSoundUi> = {}): { readonly sound: ShareSoundUi; readonly calls: string[] } {
+  const calls: string[] = [];
+  const sound: ShareSoundUi = {
+    view: { choice: 'system_excluding_call' },
+    audio: undefined,
+    live: false,
+    busy: false,
+    note: null,
+    choose: (c) => { calls.push(`choose ${c}`); },
+    mute: (m) => { calls.push(`mute ${String(m)}`); },
+    ...over,
+  };
+  return { sound, calls };
+}
+
+const sharingState = (over: Partial<VoiceState> = {}): Companion => fake({ phase: 'connected', channel: 'general', companion: true, share: { kind: 'sharing', audio: false }, ...over }).companion;
+
+function withSound(c: Companion, sound: ShareSoundUi | undefined, over: { joined?: string | null; reason?: string | null } = {}) {
+  const joined = over.joined === undefined ? 'general' : over.joined;
+  const reason = over.reason === undefined ? null : over.reason;
+  return render(
+    <>
+      <ShareButton companion={c} joined={joined} reason={reason} />
+      <ShareNotes companion={c} joined={joined} reason={reason} {...(sound === undefined ? {} : { sound })} />
+      {sound === undefined ? null : <ShareSoundMute sound={sound} />}
+    </>,
+  );
+}
+
+describe('with main’s switch off (no share sound in the view)', () => {
+  it('shows no toggle and no mute, and says what it said before', () => {
+    withSound(fake().companion, undefined);
+    expect(screen.queryByLabelText(shareWithSoundLabel)).toBeNull();
+    expect(screen.queryByRole('button', { name: /share sound/ })).toBeNull();
+    expect(screen.getByText(silentShareBefore)).toBeTruthy();
+  });
+
+  it('shows the original indicator and silent words while sharing', () => {
+    withSound(sharingState(), undefined);
+    expect(screen.getByText(indicatorWords('general'))).toBeTruthy();
+    expect(screen.getByText(silentShareWhile)).toBeTruthy();
+    expect(screen.queryByText(/its sound/)).toBeNull();
+  });
+});
+
+describe('the toggle, before the picker', () => {
+  it('is “Share with sound”, on by default, and replaces the silent note', () => {
+    const { sound } = soundUi();
+    withSound(fake().companion, sound);
+    const box = screen.getByRole<HTMLInputElement>('checkbox', { name: shareWithSoundLabel });
+    expect(box.checked).toBe(true);
+    expect(box.disabled).toBe(false);
+    expect(box.getAttribute('aria-describedby')).toBeNull();
+    expect(screen.queryByText(silentShareBefore)).toBeNull();
+    expect(screen.queryByText(shareWithoutSoundNote)).toBeNull();
+  });
+
+  it('“Share without sound” is one click: the choice goes to main, and the page shows main’s answer, not its own', () => {
+    const { sound, calls } = soundUi();
+    withSound(fake().companion, sound);
+    fireEvent.click(screen.getByRole('checkbox', { name: shareWithSoundLabel }));
+    expect(calls).toEqual(['choose none']);
+    // Nothing is optimistic: the box still shows the confirmed choice.
+    expect(screen.getByRole<HTMLInputElement>('checkbox', { name: shareWithSoundLabel }).checked).toBe(true);
+  });
+
+  it('with the choice none it is unchecked, says the share will be without sound, and one click turns it on', () => {
+    const { sound, calls } = soundUi({ view: { choice: 'none' } });
+    withSound(fake().companion, sound);
+    const box = screen.getByRole<HTMLInputElement>('checkbox', { name: shareWithSoundLabel });
+    expect(box.checked).toBe(false);
+    expect(screen.getByText(shareWithoutSoundNote)).toBeTruthy();
+    fireEvent.click(box);
+    expect(calls).toEqual(['choose system_excluding_call']);
+  });
+
+  it('is operable from the keyboard: focusable, with a label', () => {
+    const { sound } = soundUi();
+    withSound(fake().companion, sound);
+    const box = screen.getByRole<HTMLInputElement>('checkbox', { name: shareWithSoundLabel });
+    box.focus();
+    expect(document.activeElement).toBe(box);
+    expect(box.tabIndex).toBe(0);
+  });
+
+  it.each(['old-helper', 'old-server'] as const)('is disabled with its reason when there is no route (%s), still shows main’s choice, and the share goes on silent', (reason) => {
+    const { sound, calls } = soundUi({ view: { choice: 'system_excluding_call', unavailable: reason } });
+    const t = fake();
+    withSound(t.companion, sound);
+    const box = screen.getByRole<HTMLInputElement>('checkbox', { name: shareWithSoundLabel });
+    expect(box.disabled).toBe(true);
+    // The box is main's choice, which the next share acts on (#1854 review F3).
+    expect(box.checked).toBe(true);
+    expect(box.getAttribute('aria-describedby')).toBe('native-share-sound-why');
+    expect(screen.getByText(shareSoundWords[reason]).getAttribute('id')).toBe('native-share-sound-why');
+    fireEvent.click(box);
+    expect(calls).toEqual([]);
+    // The share itself is still offered.
+    fireEvent.click(screen.getByRole('button', { name: 'Share screen' }));
+    expect(t.calls).toEqual(['share general']);
+  });
+
+  it.each(reasonsOfSound.filter((r) => r !== 'old-helper' && r !== 'old-server'))('is disabled before the picker when the helper’s last state is a failure (%s), with its words, and still shows main’s choice', (reason) => {
+    const { sound, calls } = soundUi({ view: { choice: 'system_excluding_call', unavailable: reason } });
+    withSound(fake().companion, sound);
+    const box = screen.getByRole<HTMLInputElement>('checkbox', { name: shareWithSoundLabel });
+    expect(box.disabled).toBe(true);
+    expect(box.checked).toBe(true);
+    expect(box.getAttribute('aria-describedby')).toBe('native-share-sound-why');
+    expect(screen.getByText(shareSoundWords[reason])).toBeTruthy();
+    fireEvent.click(box);
+    expect(calls).toEqual([]);
+  });
+
+  it.each(reasonsOfSound)('agrees with main’s choice none whatever the reason (%s): unchecked', (reason) => {
+    const { sound } = soundUi({ view: { choice: 'none', unavailable: reason } });
+    withSound(fake().companion, sound);
+    expect(screen.getByRole<HTMLInputElement>('checkbox', { name: shareWithSoundLabel }).checked).toBe(false);
+  });
+
+  // #1854 review round 2: while the share is only publishing the hook does
+  // not hold it, so a choice then would end its sound at once. The toggle is
+  // shown only where the hook counts the share live.
+  it('is not shown while the share is publishing, and is again once it is sharing', () => {
+    const { sound } = soundUi({ live: false });
+    const r = withSound(sharingState({ share: { kind: 'publishing' } }), sound);
+    expect(screen.queryByRole('checkbox', { name: shareWithSoundLabel })).toBeNull();
+    r.unmount();
+    const { sound: live } = soundUi({ live: true });
+    withSound(sharingState(), live);
+    expect(screen.getByRole('checkbox', { name: shareWithSoundLabel })).toBeTruthy();
+  });
+
+  it('is disabled while a choice waits for main', () => {
+    const { sound } = soundUi({ busy: true });
+    withSound(fake().companion, sound);
+    expect(screen.getByRole<HTMLInputElement>('checkbox', { name: shareWithSoundLabel }).disabled).toBe(true);
+  });
+
+  it('is not offered while Share itself is off with its reason, and not while the picker opens', () => {
+    const { sound } = soundUi();
+    withSound(fake().companion, sound, { reason: shareDisabledWords.notJoined, joined: null });
+    expect(screen.queryByLabelText(shareWithSoundLabel)).toBeNull();
+    cleanup();
+    withSound(fake({ share: { kind: 'picking' } }).companion, sound);
+    expect(screen.queryByLabelText(shareWithSoundLabel)).toBeNull();
+    expect(screen.queryByText(silentShareBefore)).toBeNull();
+  });
+
+  it('says a note for a choice that could not be kept', () => {
+    const { sound } = soundUi({ note: "That choice couldn't be saved." });
+    withSound(fake().companion, sound);
+    expect(screen.getByText("That choice couldn't be saved.")).toBeTruthy();
+  });
+});
+
+describe('every reason, said', () => {
+  it.each(reasonsOfSound)('during a share, %s has its words, and the share goes on', (reason) => {
+    const { sound } = soundUi({ view: { choice: 'system_excluding_call', unavailable: reason }, live: true });
+    withSound(sharingState(), sound);
+    expect(screen.getByText(shareSoundWords[reason])).toBeTruthy();
+    // Still sharing; the indicator does not claim sound.
+    expect(screen.getByText(soundIndicatorWords('general', undefined))).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Stop sharing' })).toBeTruthy();
+  });
+
+  it.each(reasonsOfSound.filter((r) => r !== 'old-helper' && r !== 'old-server'))('a failure of the sound (%s) leaves the toggle usable, to try again', (reason) => {
+    const { sound, calls } = soundUi({ view: { choice: 'system_excluding_call', unavailable: reason }, live: true });
+    withSound(sharingState(), sound);
+    const box = screen.getByRole<HTMLInputElement>('checkbox', { name: shareWithSoundLabel });
+    expect(box.disabled).toBe(false);
+    expect(box.checked).toBe(true);
+    fireEvent.click(box);
+    expect(calls).toEqual(['choose none']);
+  });
+});
+
+describe('the indicator', () => {
+  const live = (audio: ShareSoundUi['audio']) => {
+    const { sound } = soundUi({ audio, live: true });
+    withSound(sharingState(), sound);
+  };
+
+  it('says with sound only once the helper said on, and names the channel', () => {
+    live({ state: 'on', muted: false, sources: 3 });
+    expect(screen.getByText('Sharing your screen and its sound in #general (sound from 3 apps)')).toBeTruthy();
+  });
+
+  it('on with nothing playing says nothing is playing', () => {
+    live({ state: 'on', muted: false, sources: 0, problem: 'no_sources' });
+    expect(screen.getByText('Sharing your screen and its sound in #general (nothing is playing)')).toBeTruthy();
+  });
+
+  it.each([
+    ['no state yet (before the helper answered)', undefined],
+    ['off', { state: 'off', muted: false, sources: 0 }],
+    ['unavailable', { state: 'unavailable', muted: false, sources: 0, problem: 'no_pipewire' }],
+  ] as const)('never says with sound with %s', (_name, audio) => {
+    live(audio);
+    expect(screen.getByText('Sharing your screen without sound in #general')).toBeTruthy();
+    expect(screen.queryByText(/its sound/)).toBeNull();
+  });
+
+  it('is “Starting” before the share is live, and never with sound then either', () => {
+    const { sound } = soundUi({ audio: { state: 'on', muted: false, sources: 2 } });
+    withSound(fake({ share: { kind: 'picking' } }).companion, sound);
+    expect(screen.getByText('Starting your screen share…')).toBeTruthy();
+    expect(screen.queryByText(/its sound/)).toBeNull();
+  });
+
+  it('is not said at all outside a share', () => {
+    const { sound } = soundUi({ audio: { state: 'on', muted: false, sources: 2 } });
+    withSound(fake().companion, sound);
+    expect(screen.queryByText(/Sharing your screen/)).toBeNull();
+  });
+});
+
+describe('the share-sound mute', () => {
+  const mute = (muted: boolean, over: Partial<ShareSoundUi> = {}) => {
+    const u = soundUi({ audio: { state: 'on', muted, sources: 2 }, live: true, ...over });
+    withSound(sharingState(), u.sound);
+    return u;
+  };
+
+  it('sits beside Stop, labelled as the share’s sound, and is not pressed when the helper says it is not muted', () => {
+    mute(false);
+    const button = screen.getByRole<HTMLButtonElement>('button', { name: 'Mute share sound' });
+    expect(button.getAttribute('aria-pressed')).toBe('false');
+    expect(button.disabled).toBe(false);
+    // Not the microphone's: there is no "Mute" here, and Stop is its neighbour in the strip.
+    expect(screen.queryByRole('button', { name: 'Mute' })).toBeNull();
+    expect(screen.getByRole('button', { name: 'Stop sharing' })).toBeTruthy();
+  });
+
+  it('shows the helper’s confirmed mute: pressed and “Unmute share sound”', () => {
+    mute(true);
+    const button = screen.getByRole('button', { name: 'Unmute share sound' });
+    expect(button.getAttribute('aria-pressed')).toBe('true');
+  });
+
+  it('a click asks for the other state, and nothing else', () => {
+    const a = mute(false);
+    fireEvent.click(screen.getByRole('button', { name: 'Mute share sound' }));
+    expect(a.calls).toEqual(['mute true']);
+    cleanup();
+    const b = mute(true);
+    fireEvent.click(screen.getByRole('button', { name: 'Unmute share sound' }));
+    expect(b.calls).toEqual(['mute false']);
+  });
+
+  it('waits for main while a call is out', () => {
+    mute(false, { busy: true });
+    expect(screen.getByRole<HTMLButtonElement>('button', { name: 'Mute share sound' }).disabled).toBe(true);
+  });
+
+  it.each([
+    ['the sound is not on', { state: 'unavailable', muted: false, sources: 0, problem: 'no_pipewire' }, true],
+    ['the sound is off', { state: 'off', muted: false, sources: 0 }, true],
+    ['the helper has no state (v1, v2)', undefined, true],
+    ['the share is not live', { state: 'on', muted: false, sources: 1 }, false],
+  ] as const)('is not offered when %s', (_name, audio, live) => {
+    const { sound } = soundUi({ audio, live });
+    withSound(live ? sharingState() : fake().companion, sound);
+    expect(screen.queryByRole('button', { name: /share sound/ })).toBeNull();
   });
 });

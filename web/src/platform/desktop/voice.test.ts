@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import type { CompanionEvent, CompanionGrantResult, DesktopCompanionBridge, DesktopVoiceBridge, NativeVoiceView } from './bridge';
+import type { CompanionEvent, CompanionGrantResult, DesktopCompanionBridge, DesktopShareSoundBridge, DesktopVoiceBridge, NativeVoiceView } from './bridge';
 import { createNativeVoice } from './voice';
 
 const v = (generation: number, over: Partial<NativeVoiceView> = {}): NativeVoiceView => ({ status: 'running', generation, channel: 'general', retryable: false, ...over });
@@ -180,6 +180,70 @@ describe('createNativeVoice companion (issue #1581)', () => {
       const seen = vi.fn();
       nv.companion?.onEnd(seen)();
       expect(seen).not.toHaveBeenCalled();
+    }
+  });
+});
+
+describe('createNativeVoice: the share’s sound (issue #1854)', () => {
+  function withSound() {
+    const f = fake();
+    const s = {
+      shareSoundStart: vi.fn<DesktopShareSoundBridge['shareSoundStart']>(() => Promise.resolve({ ok: true, share: 4 })),
+      shareSoundChoose: vi.fn<DesktopShareSoundBridge['shareSoundChoose']>(() => Promise.resolve({ ok: true, share: null })),
+      shareSoundMute: vi.fn<DesktopShareSoundBridge['shareSoundMute']>(() => Promise.resolve({ ok: true })),
+      shareSoundEnd: vi.fn<DesktopShareSoundBridge['shareSoundEnd']>(() => Promise.resolve(true)),
+      shareSoundShareEnded: vi.fn<DesktopShareSoundBridge['shareSoundShareEnded']>(() => Promise.resolve(true)),
+    } satisfies DesktopShareSoundBridge;
+    return { b: { ...f.b, ...s }, s };
+  }
+
+  it('hands each request to the bridge with exactly its argument, and the answer as it is', async () => {
+    const w = withSound();
+    const nv = createNativeVoice(() => w.b);
+    expect(await nv.shareSound?.start()).toEqual({ ok: true, share: 4 });
+    expect(w.s.shareSoundStart).toHaveBeenCalledWith();
+    expect(await nv.shareSound?.choose('none')).toEqual({ ok: true, share: null });
+    expect(w.s.shareSoundChoose).toHaveBeenCalledWith({ choice: 'none' });
+    expect(await nv.shareSound?.mute(true)).toEqual({ ok: true });
+    expect(w.s.shareSoundMute).toHaveBeenCalledWith(true);
+    expect(await nv.shareSound?.end(4)).toBe(true);
+    expect(w.s.shareSoundEnd).toHaveBeenCalledWith({ share: 4 });
+    expect(await nv.shareSound?.shareEnded()).toBe(true);
+    expect(w.s.shareSoundShareEnded).toHaveBeenCalledWith();
+  });
+
+  it('never gives the bridge a scope, an application name or an identifier of its own', async () => {
+    const w = withSound();
+    const nv = createNativeVoice(() => w.b);
+    await nv.shareSound?.start();
+    await nv.shareSound?.choose('system_excluding_call');
+    for (const call of [...w.s.shareSoundStart.mock.calls, ...w.s.shareSoundChoose.mock.calls]) {
+      expect(JSON.stringify(call)).not.toMatch(/application|scope|publisher|pid/);
+    }
+  });
+
+  it('a refusal by main is the call’s own "no": nothing was added, kept, muted or ended', async () => {
+    const w = withSound();
+    w.s.shareSoundStart.mockRejectedValueOnce(new Error('refused'));
+    w.s.shareSoundChoose.mockRejectedValueOnce(new Error('refused'));
+    w.s.shareSoundMute.mockRejectedValueOnce(new Error('refused'));
+    w.s.shareSoundEnd.mockRejectedValueOnce(new Error('refused'));
+    w.s.shareSoundShareEnded.mockRejectedValueOnce(new Error('refused'));
+    const nv = createNativeVoice(() => w.b);
+    expect(await nv.shareSound?.start()).toEqual({ ok: false, error: 'not-offered' });
+    expect(await nv.shareSound?.choose('none')).toEqual({ ok: false, error: 'not-saved' });
+    expect(await nv.shareSound?.mute(true)).toEqual({ ok: false, error: 'lost' });
+    expect(await nv.shareSound?.end(1)).toBe(false);
+    expect(await nv.shareSound?.shareEnded()).toBe(false);
+  });
+
+  it('with no bridge, or a preload that lacks the calls, every call says no and reaches nothing', async () => {
+    for (const get of [() => undefined, () => fake().b]) {
+      const nv = createNativeVoice(get);
+      expect(await nv.shareSound?.start()).toEqual({ ok: false, error: 'not-offered' });
+      expect(await nv.shareSound?.choose('none')).toEqual({ ok: false, error: 'not-offered' });
+      expect(await nv.shareSound?.mute(true)).toEqual({ ok: false, error: 'unsupported' });
+      expect(await nv.shareSound?.end(1)).toBe(false);
     }
   });
 });
