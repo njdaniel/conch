@@ -198,6 +198,9 @@ export interface Rig {
   // Main's own presence reads (issue #1876): each read takes the next
   // answer; with none queued it fails (says nothing).
   readonly presence: (Exchange | Promise<Exchange>)[];
+  // A rename of the channel (issue #1880): requests that name `from` get 404
+  // channel_not_found, and the channel list answers `list` (none: it fails).
+  readonly rename: { from: string | null; list: Exchange | null };
   readonly client: CompanionClient;
   readonly views: ReturnType<VoiceService['state']>[];
   // Joins voice, gets the companion and has main grant the capture of a pick
@@ -229,6 +232,7 @@ export function rig(opts: RigOptions = {}): Rig {
   const withdraw: Rig['withdraw'] = [];
   const removal: Rig['removal'] = [];
   const presence: Rig['presence'] = [];
+  const rename: Rig['rename'] = { from: null, list: null };
   const sup = new FakeSupervisor(events);
   sup.version = opts.version ?? 3;
   const prefs: Rig['prefs'] = { choice: opts.choice ?? 'system_excluding_call', saves: [], failSave: false };
@@ -262,9 +266,21 @@ export function rig(opts: RigOptions = {}): Rig {
           events.push('http:PUT audio');
           return Promise.resolve(put.shift() ?? consent());
         case 'voiceShareAudioEnd':
+          if (rename.from !== null && request.params?.['channel'] === rename.from) {
+            events.push('http:DELETE audio (old name)');
+            return Promise.resolve(refusal(404, 'channel_not_found'));
+          }
           events.push('http:DELETE audio');
           return Promise.resolve(withdraw.shift() ?? ok());
+        case 'listChannels': {
+          events.push('http:GET channels');
+          return Promise.resolve(rename.list ?? { kind: 'none' });
+        }
         case 'voicePresence': {
+          if (rename.from !== null && request.params?.['channel'] === rename.from) {
+            events.push('http:GET presence (old name)');
+            return Promise.resolve(refusal(404, 'channel_not_found'));
+          }
           const next = presence.shift();
           if (next === undefined) return Promise.resolve({ kind: 'none' });
           events.push('http:GET presence');
@@ -323,6 +339,7 @@ export function rig(opts: RigOptions = {}): Rig {
     withdraw,
     removal,
     presence,
+    rename,
     client,
     views,
     live: async () => {
