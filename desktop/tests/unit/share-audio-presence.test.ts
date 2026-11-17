@@ -223,6 +223,63 @@ describe('presence ends the share’s sound', () => {
 // A rename of the channel during a share (issue #1880): conchd answers 404 to
 // the old name. Main follows the channel by the id presence gave it, or ends
 // the share's sound.
+// The grant named the channel (issue #1883): the id is known from the start,
+// presence only checks answers against it, and a consent answer naming another
+// channel is refused.
+describe('the channel id of the grant', () => {
+  const channels = (...list: { id: number; name: string }[]): Exchange => ok({ channels: list.map((c) => ({ ...c, created_at: joined })) });
+  const names = (r: Rig, op: string): unknown[] => r.sends.filter((s) => s.op === op).map((s) => s.params?.['channel']);
+  const quiet = (r: Rig): string[] => r.events.filter((e) => !e.startsWith('http:GET'));
+  const granted = (grantChannelId?: number): Rig => rig({ presencePollMs: 1, ...(grantChannelId === undefined ? {} : { grantChannelId }) });
+
+  // The takeover of #1882, caught on the first read: the name answers for
+  // another channel (3) that lists nobody. With no id from the grant that
+  // would count toward ending the pick; with it, the answer is never judged
+  // and the read follows the id to the channel's name now.
+  it('the first answer of another channel is never judged: it triggers the follow', async () => {
+    const r = granted(1);
+    await sounding(r);
+    r.rename.list = channels({ id: 1, name: 'lounge' });
+    await read(r, { ...doc(idle(OTHER)), channel_id: 3 }, doc(sharing(SELF, STARTED)));
+    expect(r.sends.filter((s) => s.op === 'listChannels')).toHaveLength(1);
+    expect(names(r, 'voicePresence').slice(0, 2)).toEqual(['general', 'lounge']);
+    expect(quiet(r)).toEqual([]);
+    expect(r.sup.audio.state).toBe('on');
+  });
+
+  it('presence teaches no id over the grant’s', async () => {
+    const r = granted(1);
+    await sounding(r);
+    await read(r, { ...doc(sharing(SELF, STARTED)), channel_id: 5 });
+    const share = r.companion.current();
+    expect(share?.channelId).toBe(1);
+    expect(share === null ? null : r.sound?.channelId(share)).toBe(1);
+  });
+
+  it('a consent answer naming another channel fails', async () => {
+    const r = granted(1);
+    r.put.push(consent(STARTED, { channel_id: 3 }));
+    await r.live();
+    expect(await r.sound?.start(DOC)).toMatchObject({ ok: false });
+    expect(r.seen()).toEqual({ choice: 'system_excluding_call', unavailable: 'consent-failed' });
+    expect(r.events).not.toContain('helper:capture on');
+  });
+
+  it('a consent answer naming the same channel is taken', async () => {
+    const r = granted(1);
+    r.put.push(consent(STARTED, { channel_id: 1 }));
+    await r.live();
+    expect(await r.sound?.start(DOC)).toMatchObject({ ok: true });
+  });
+
+  it('without a grant id the fallback stands: a consent naming any channel is taken', async () => {
+    const r = granted();
+    r.put.push(consent(STARTED, { channel_id: 3 }));
+    await r.live();
+    expect(await r.sound?.start(DOC)).toMatchObject({ ok: true });
+  });
+});
+
 describe('a rename of the share’s channel', () => {
   const channels = (...list: { id: number; name: string }[]): Exchange => ok({ channels: list.map((c) => ({ ...c, created_at: joined })) });
   const names = (r: Rig, op: string): unknown[] => r.sends.filter((s) => s.op === op).map((s) => s.params?.['channel']);

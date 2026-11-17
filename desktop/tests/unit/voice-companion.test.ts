@@ -453,6 +453,29 @@ describe('the companion’s change signal (the tray follows it)', () => {
 // A rename of the channel during a share or a watch (issue #1881): conchd
 // answers 404 to the old name. The companion's own DELETE follows the channel
 // by the id main learned, never the page's, or stays as it was.
+describe('the channel id of the grant (issue #1883)', () => {
+  it.each<[string, number | undefined, number | null]>([
+    ['7', 7, 7],
+    ['0', 0, null],
+    ['-1', -1, null],
+    ['absent', undefined, null],
+  ])('channel_id %s is held as %s', async (_n, sent, held) => {
+    const r = rig();
+    r.answers.push(ok({ ...ANSWER, ...(sent === undefined ? {} : { channel_id: sent }) }));
+    expect(await r.companion.grant({ channel: 'general' })).toEqual({ ok: true, grant: GRANT });
+    expect(r.companion.current()?.channelId).toBe(held);
+  });
+
+  // The generated validator refuses a non-integer, so such an answer is no
+  // grant at all (and what it recorded is removed, as for any bad answer).
+  it.each([1.5, 2 ** 53, '7'])('a non-integer channel_id (%s) is not a grant', async (sent) => {
+    const r = rig();
+    r.answers.push(ok({ ...ANSWER, channel_id: sent }));
+    expect(await r.companion.grant({ channel: 'general' })).toEqual({ ok: false, error: 'failed' });
+    expect(r.companion.current()).toBeNull();
+  });
+});
+
 describe('the companion’s DELETE after a channel rename', () => {
   const list = (...channels: { id: number; name: string }[]): Exchange => ok({ channels: channels.map((c) => ({ ...c, created_at: '2026-01-01T00:00:00Z' })) });
   const deletes = (r: Rig): unknown[] => r.sends().filter((s) => s.op === 'voiceViewerEnd').map((s) => s.params?.['channel']);
@@ -502,7 +525,7 @@ describe('the companion’s DELETE after a channel rename', () => {
     expect(order).toEqual(['id', 'sound']);
   });
 
-  it('the unused-grant cleanup has no id, so it sends one DELETE by the held name', async () => {
+  it('the unused-grant cleanup of a grant with no id sends one DELETE by the held name', async () => {
     const r = rig();
     r.rename.to = 'lounge';
     r.rename.list = list({ id: 7, name: 'lounge' });
@@ -514,6 +537,47 @@ describe('the companion’s DELETE after a channel rename', () => {
     expect(deletes(r)).toEqual(['general']);
     expect(lists(r)).toBe(0);
     expect(r.id.asked).toBe(0);
+  });
+
+  it('the unused-grant cleanup follows a rename by the grant’s id', async () => {
+    const r = rig();
+    r.rename.to = 'lounge';
+    r.rename.list = list({ id: 7, name: 'lounge' });
+    r.answers.push(ok({ ...ANSWER, channel_id: 7 }));
+    const p = r.companion.grant({ channel: 'general' });
+    r.voice.set(idle);
+    expect(await p).toEqual({ ok: false, error: 'ended' });
+    expect(deletes(r)).toEqual(['general', 'lounge']);
+    expect(lists(r)).toBe(1);
+    // The sound's id is only the fallback: never asked for an unused grant.
+    expect(r.id.asked).toBe(0);
+  });
+
+  it('the grant’s id is used at the end, and the sound’s is not asked', async () => {
+    const r = rig();
+    r.answers.push(ok({ ...ANSWER, channel_id: 7 }));
+    await r.companion.grant({ channel: 'general' });
+    r.steps.length = 0;
+    r.rename.to = 'lounge';
+    r.rename.list = list({ id: 7, name: 'lounge' }, { id: 9, name: 'other' });
+    r.id.value = 9;
+    await r.companion.end('lock');
+    expect(deletes(r)).toEqual(['general', 'lounge']);
+    expect(r.id.asked).toBe(0);
+  });
+
+  it('a grant with an id: a 2xx by a name another channel took is not a confirmation', async () => {
+    const r = rig();
+    r.answers.push(ok({ ...ANSWER, channel_id: 7 }));
+    await r.companion.grant({ channel: 'general' });
+    r.steps.length = 0;
+    // The id is not in the list now: the 204 by the held name, which may be
+    // another channel's, confirms nothing.
+    r.rename.list = list({ id: 9, name: 'general' });
+    await r.companion.stop();
+    expect(deletes(r)).toEqual(['general']);
+    expect(r.logs).toContain('companion: the removal after stopped was not confirmed');
+    expect(r.reloads.count).toBe(1);
   });
 
   it('no id known: one DELETE by the held name, logged when it fails', async () => {

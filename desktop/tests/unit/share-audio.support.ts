@@ -222,6 +222,9 @@ export interface RigOptions {
   readonly publishRetryMs?: number;
   readonly stopAckBoundMs?: number;
   readonly presencePollMs?: number;
+  // The channel_id the fake conchd puts in the grant answer (issue #1883); any
+  // value, valid or not. Absent: the answer carries none, as an older server's.
+  readonly grantChannelId?: number;
 }
 
 export function rig(opts: RigOptions = {}): Rig {
@@ -258,7 +261,7 @@ export function rig(opts: RigOptions = {}): Rig {
       switch (request.op) {
         case 'voiceViewer':
           events.push('http:POST companion');
-          return Promise.resolve(ok(ANSWER));
+          return Promise.resolve(ok(opts.grantChannelId === undefined ? ANSWER : { ...ANSWER, channel_id: opts.grantChannelId }));
         case 'voiceViewerEnd':
           if (rename.from !== null && request.params?.['channel'] === rename.from) {
             events.push('http:DELETE companion (old name)');
