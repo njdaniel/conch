@@ -387,6 +387,8 @@ impl Rig {
             key_device: setup.key_device,
             unreachable_note: setup.unreachable_note,
             share_audio_owner: setup.share_audio_owner,
+            // `join` never captures a share's sound.
+            share_audio: conch_voice::share_capture::ShareSource::Unsupported,
             timings: setup.timings,
         };
         let out = Written::default();

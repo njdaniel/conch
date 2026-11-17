@@ -2,11 +2,14 @@
 //!
 //! Input: 48 kHz mono `f32` frames of 10 ms (480 samples) from a microphone source and from
 //! each remote speaker, commands to open and shut the transmit gate, and, for the open
-//! microphone, the time that passed with no captured frame.
-//! Output: the frames the gate lets through, one mixed frame per tick for the speakers, and
-//! for the open microphone when its sound starts and when quiet starts.
+//! microphone, the time that passed with no captured frame; and 48 kHz stereo frames of
+//! 10 ms (480 samples a channel, interleaved) from each source of a screen share's sound.
+//! Output: the frames the gate lets through, one mixed frame per tick for the speakers, one
+//! stereo mixed frame per tick for a share's sound ([`StereoMixer`]), and for the open
+//! microphone when its sound starts and when quiet starts.
 //! Owns: the transmit gate (microphone audio is handed onward only while it is open), the
-//! open microphone's level detector, one jitter buffer per speaker, and the mixer. Nothing
+//! open microphone's level detector, one jitter buffer per speaker, the mono mixer, and the
+//! stereo mixer of a share's sound, which never touches the gate or the speakers. Nothing
 //! here writes audio to disk. It is platform-neutral: the real microphone and speakers, one
 //! backend per platform, live in `conch-voice` (`src/audio.rs` and `src/audio_*.rs`), behind the two traits below.
 //!
@@ -36,6 +39,7 @@ mod level;
 mod mixer;
 mod sink;
 mod source;
+mod stereo_mixer;
 mod wav;
 
 pub use error::AudioError;
@@ -48,6 +52,7 @@ pub use level::{LevelChange, LevelConfig, LevelDetector};
 pub use mixer::Mixer;
 pub use sink::{CountingSink, SignalMeter, SpeakerSink};
 pub use source::{MicRead, MicSource, Pacing, ToneSource};
+pub use stereo_mixer::{STEREO_FRAME_LEN, STEREO_SILENCE, StereoFrame, StereoMixer};
 pub use wav::WavSource;
 
 /// Sample rate of every frame in this crate, in Hz.

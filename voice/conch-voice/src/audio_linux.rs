@@ -103,6 +103,13 @@ impl AudioSystem {
         self.context.wait_for_sync(wait)
     }
 
+    /// Where a screen share's sound is captured from: this same connection, one capture per
+    /// eligible application stream (`share_capture_linux.rs`). Nothing is opened here.
+    #[must_use]
+    pub fn share_source(&self) -> crate::share_capture::ShareSource {
+        crate::share_capture::linux::pipewire_source(Some(Arc::clone(&self.context)))
+    }
+
     /// [`AudioSystem::nodes`] as the backend-neutral table that `devices` formats. Always
     /// answers on Linux; the signature is the same on a platform with no backend, where it
     /// is an error.

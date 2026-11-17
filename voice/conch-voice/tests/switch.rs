@@ -125,6 +125,12 @@ fn assert_frames_only_while_unmuted(calls: &[Call]) {
             Call::Mute | Call::Publish | Call::Close => unmuted = false,
             Call::Frame => assert!(unmuted, "a frame at call {at} outside a press: {calls:?}"),
             Call::Connect | Call::Disable => {}
+            // The share's track is another track: nothing done to it is the microphone's.
+            Call::SharePublish
+            | Call::ShareMute
+            | Call::ShareUnmute
+            | Call::ShareDisable
+            | Call::ShareUnpublish => {}
         }
     }
 }

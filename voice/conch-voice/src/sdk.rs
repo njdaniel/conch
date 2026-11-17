@@ -13,12 +13,22 @@
 //!   back is in two parts, for two owners: the [`MicTrack`], which the session loop mutes
 //!   and unmutes, and the [`MicFeed`], which the transmit task alone holds and which takes
 //!   nothing but a [`GatedFrame`].
+//! - A screen share's sound is a second local track of the same participant, published only
+//!   on its owner's command ([`RoomHandle::publish_share_audio`],
+//!   `docs/design/linux-share-audio.md` §5.1): its [`ShareAudioTrack`], muted and unmuted on
+//!   its own and never by the microphone's mute, and its [`ShareAudioFeed`], which takes the
+//!   stereo mix of the captures and has nothing to do with the gate. Republishing and
+//!   unpublishing it are reported apart from the microphone's ([`SdkEvent::ShareRepublished`]),
+//!   so that one is never taken for the other. The server taking the share's grant back is
+//!   seen only as a change of what this participant may publish
+//!   ([`SdkEvent::PermissionChanged`], then [`ShareAudioTrack::is_allowed`]): the SDK reports
+//!   no unpublish of a local track the server closed.
 
 use std::fmt;
 use std::future::Future;
 
 use conch_voice_api::Secret;
-use conch_voice_audio::{Frame, GatedFrame};
+use conch_voice_audio::{Frame, GatedFrame, StereoFrame};
 
 use crate::livekit::Subscription;
 use tokio::sync::mpsc;
@@ -64,6 +74,21 @@ pub enum SdkEvent {
     /// The SDK published the microphone track again, after a full reconnect. The track is
     /// enabled again whatever its mute state was (§13 row 12).
     Republished,
+    /// The SDK published the share-audio track again, after a full reconnect: unmuted,
+    /// whatever its mute was. Never the microphone's. The track keeps its handle: the
+    /// handle follows the new publication (its id changes).
+    ShareRepublished,
+    /// The server changed what this participant may publish. `allowed` is whether the
+    /// permission this event carried lets it publish a share's sound. The session also asks
+    /// the track for the permission the SDK holds now ([`ShareAudioTrack::is_allowed`]), and
+    /// ends the share's sound when either says no: so a revoke that a re-grant follows at
+    /// once is still seen. A revoke and a re-grant that both happen while the signal
+    /// connection is down cannot be seen with livekit 0.9.4: the SDK learns only the final
+    /// permission when it is back.
+    PermissionChanged {
+        /// Whether the event's own permission allows the share's sound.
+        allowed: bool,
+    },
     /// The connection is over.
     Disconnected(DisconnectReason),
 }
@@ -84,6 +109,11 @@ impl fmt::Debug for SdkEvent {
             SdkEvent::Reconnecting => f.write_str("Reconnecting"),
             SdkEvent::Reconnected => f.write_str("Reconnected"),
             SdkEvent::Republished => f.write_str("Republished"),
+            SdkEvent::ShareRepublished => f.write_str("ShareRepublished"),
+            SdkEvent::PermissionChanged { allowed } => f
+                .debug_struct("PermissionChanged")
+                .field("allowed", allowed)
+                .finish(),
             SdkEvent::Disconnected(reason) => f.debug_tuple("Disconnected").field(reason).finish(),
         }
     }
@@ -146,8 +176,47 @@ pub trait RoomHandle: Send + 'static {
         &self,
     ) -> impl Future<Output = Result<(Self::Track, Self::Feed), SdkError>> + Send;
 
+    /// The published share-audio track, as the session loop sees it.
+    type ShareTrack: ShareAudioTrack;
+    /// The published share-audio track's audio source, as the feeder of the mix sees it.
+    type ShareFeed: ShareAudioFeed;
+
+    /// Publishes a screen share's sound on this participant: a 48 kHz stereo track whose
+    /// source is `ScreenshareAudio`, with DTX off. It comes back unmuted. The future holds
+    /// nothing of the caller's, so that the session loop can go on while it runs.
+    fn publish_share_audio(
+        &self,
+    ) -> impl Future<Output = Result<(Self::ShareTrack, Self::ShareFeed), SdkError>> + Send + 'static;
+
     /// Leaves the room.
     fn close(self) -> impl Future<Output = ()> + Send;
+}
+
+/// The published share-audio track.
+pub trait ShareAudioTrack: Send + 'static {
+    /// Its id: the publication's the SDK has now, which a republish changes.
+    fn id(&self) -> String;
+    /// Whether the server still lets this participant publish a share's sound, as the SDK
+    /// knows it now. When it does not, the server has taken the share's grant back.
+    fn is_allowed(&self) -> bool;
+    /// Whether this track is still among the participant's publications. After a full
+    /// reconnect whose republish failed it is not, and its captures would feed nothing.
+    fn is_published(&self) -> bool;
+    /// Mutes it, and tells LiveKit: it stays published, and viewers see it muted.
+    fn mute(&self);
+    /// Unmutes it, and tells LiveKit.
+    fn unmute(&self);
+    /// Stops it sending what it is handed, without telling LiveKit anything: needed after a
+    /// republish, when it is muted already and enabled all the same.
+    fn disable(&self);
+    /// Unpublishes it.
+    fn unpublish(self) -> impl Future<Output = ()> + Send + 'static;
+}
+
+/// The way the share's mix reaches its published track.
+pub trait ShareAudioFeed: Send + 'static {
+    /// Hands one stereo frame of the mix to the track's audio source.
+    fn send(&mut self, frame: &StereoFrame) -> impl Future<Output = ()> + Send;
 }
 
 /// The published microphone track: the layer `conchd` observes. It is not the guarantee
