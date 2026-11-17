@@ -38,6 +38,8 @@ import {
   voiceControlPTT,
   voiceControlPTTProblem,
   voiceControlReason,
+  voiceControlShareAudio,
+  voiceControlShareAudioProblem,
   voiceControlTalkMode,
 } from '../../web/src/schema/generated.ts';
 import { channelOf, NOTIFICATION_SUPPORT, TAG_MAX, type Envelope, type FeedEvent, type InvokedFunction } from '../shared/bridge-names.ts';
@@ -83,13 +85,40 @@ const absent = (value: unknown): boolean => value === undefined;
 const isCount = (value: unknown): value is number => typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
 const isVocab = (check: (value: unknown) => string[], value: unknown): boolean => check(value).length === 0;
 
+// The helper's confirmed share-sound state (v3): the generated vocabularies
+// and a bounded count, no other key.
+function isShareAudio(value: unknown): boolean {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
+  const a = value as Record<string, unknown>;
+  return (
+    only(a, ['state', 'muted', 'problem', 'sources']) &&
+    isVocab(voiceControlShareAudio, a['state']) &&
+    typeof a['muted'] === 'boolean' &&
+    (absent(a['problem']) || isVocab(voiceControlShareAudioProblem, a['problem'])) &&
+    isCount(a['sources']) &&
+    a['sources'] <= 1024
+  );
+}
+
+const SHARE_SOUND_REASONS: ReadonlySet<unknown> = new Set(['old-helper', 'old-server', 'consent-failed', 'no-pipewire', 'no-process-tree', 'publish-refused', 'unavailable']);
+
+// Main's share-sound state: the profile's choice and, at most, one fixed reason.
+function isShareSound(value: unknown): boolean {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
+  const s = value as Record<string, unknown>;
+  return only(s, ['choice', 'unavailable']) && (s['choice'] === 'system_excluding_call' || s['choice'] === 'none') && (absent(s['unavailable']) || SHARE_SOUND_REASONS.has(s['unavailable']));
+}
+
 function isHelper(value: unknown): boolean {
   if (typeof value !== 'object' || value === null) return false;
   const h = value as Record<string, unknown>;
-  const keys = ['version', 'phase', 'reason', 'retryInMs', 'capture', 'playback', 'transmitting', 'muted', 'deafened', 'blocked', 'talkMode', 'ptt', 'pttProblem'];
+  const keys = ['version', 'phase', 'reason', 'retryInMs', 'capture', 'playback', 'transmitting', 'muted', 'deafened', 'blocked', 'talkMode', 'ptt', 'pttProblem', 'shareAudio'];
   return (
     only(h, keys) &&
-    (h['version'] === 1 || h['version'] === 2) &&
+    (h['version'] === 1 || h['version'] === 2 || h['version'] === 3) &&
+    // A v3 helper's view always has its share-sound state, and a v1 or v2
+    // one's never does.
+    (h['version'] === 3 ? isShareAudio(h['shareAudio']) : absent(h['shareAudio'])) &&
     isVocab(voiceControlPhase, h['phase']) &&
     (absent(h['reason']) || isVocab(voiceControlReason, h['reason'])) &&
     (absent(h['retryInMs']) || isCount(h['retryInMs'])) &&
@@ -112,7 +141,7 @@ function isNativeVoiceView(value: unknown): value is NativeVoiceView {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
   const v = value as Record<string, unknown>;
   return (
-    only(v, ['status', 'generation', 'channel', 'problem', 'cause', 'detail', 'retryable', 'helper', 'mutedByLock']) &&
+    only(v, ['status', 'generation', 'channel', 'problem', 'cause', 'detail', 'retryable', 'helper', 'mutedByLock', 'shareSound']) &&
     STATUSES.has(v['status']) &&
     isCount(v['generation']) &&
     (v['channel'] === null || (typeof v['channel'] === 'string' && v['channel'].length <= 1024)) &&
@@ -121,7 +150,8 @@ function isNativeVoiceView(value: unknown): value is NativeVoiceView {
     (absent(v['detail']) || (typeof v['detail'] === 'string' && v['detail'].length <= 201 && /^[\x20-\x7e…]*$/.test(v['detail']))) &&
     typeof v['retryable'] === 'boolean' &&
     (absent(v['helper']) || isHelper(v['helper'])) &&
-    (absent(v['mutedByLock']) || v['mutedByLock'] === true)
+    (absent(v['mutedByLock']) || v['mutedByLock'] === true) &&
+    (absent(v['shareSound']) || isShareSound(v['shareSound']))
   );
 }
 
@@ -422,5 +452,12 @@ export function createBridge(
     updateState: call('updateState'),
     updateRestart: call('updateRestart'),
     onUpdateState,
+    // The Linux screen share's sound (issue #1854): requests only. Main builds
+    // the scope and the application name, and answers only with its switch on.
+    shareSoundStart: call('shareSoundStart'),
+    shareSoundChoose: call('shareSoundChoose'),
+    shareSoundMute: call('shareSoundMute'),
+    shareSoundEnd: call('shareSoundEnd'),
+    shareSoundShareEnded: call('shareSoundShareEnded'),
   });
 }

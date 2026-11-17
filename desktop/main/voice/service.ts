@@ -31,6 +31,7 @@ import type {
   NativeVoiceHelper,
   NativeVoiceStatus,
   NativeVoiceView,
+  ShareSoundView,
   VoiceCommandResult,
   VoiceDeviceKey,
   VoiceKeyDevicesResult,
@@ -73,6 +74,19 @@ export interface VoiceSupervisor {
   setDeafen(deafened: boolean): Promise<CommandResult>;
   setDevices(devices: { readonly input?: string; readonly output?: string }): Promise<CommandResult>;
   setTalkMode(mode: VoiceControlTalkMode): Promise<CommandResult>;
+  // v3's (issue #1854), used by main's share sound alone. A supervisor without
+  // them (a test's) has no share-sound route: every call is unsupported.
+  setShareAudio?(want: { readonly capturing: false } | { readonly capturing: true; readonly applicationName: string }): Promise<CommandResult>;
+  setShareAudioMute?(muted: boolean): Promise<CommandResult>;
+}
+
+// What the voice view takes from main's share sound (issue #1854;
+// voice/share-audio.ts): its part of the view, and the order to end the sound
+// at a leave, which must come before the helper's leave is written (a helper
+// that is leaving takes no command).
+export interface ShareSoundSource {
+  view(): ShareSoundView | undefined;
+  leaving(): Promise<void>;
 }
 
 // The activation in force, as voice needs it. Everything but the credential
@@ -178,6 +192,7 @@ function helperOf(h: HelperView): NativeVoiceHelper {
     ...(h.talkMode === undefined ? {} : { talkMode: h.talkMode }),
     ptt: h.ptt,
     ...(h.pttProblem === undefined ? {} : { pttProblem: h.pttProblem }),
+    ...(h.shareAudio === undefined ? {} : { shareAudio: { ...h.shareAudio } }),
   };
 }
 
@@ -209,6 +224,9 @@ export class VoiceService {
   // Set when main muted the person at a screen lock (issue #1588): the view
   // says so until they unmute or leave.
   private lockMuted = false;
+  // Main's share sound (issue #1854), attached only with the Linux switch on.
+  // With none, the view carries nothing of it and a leave orders nothing.
+  private sound: ShareSoundSource | null = null;
 
   constructor(private readonly deps: VoiceServiceDeps) {
     this.bound = deps.stopBoundMs ?? VOICE_CONTROL_STOP_KILL_AFTER_MS;
@@ -226,10 +244,47 @@ export class VoiceService {
 
   // state is the view now.
   state(): NativeVoiceView {
+    return this.withSound(this.plain());
+  }
+
+  // plain is the view without main's share sound: the helper's and the
+  // voice service's own. The share sound reads this one (state() asks it for
+  // its part, so it must not ask state()).
+  plain(): NativeVoiceView {
     // A join that sign-out, a switch or a 401 has overtaken shows nothing:
     // not its channel, not its helper.
     if (this.active !== null && !this.active.current()) return { status: 'idle', generation: this.lastGeneration, channel: null, retryable: false };
     return this.withLockNote(this.override ?? this.view(this.deps.supervisor.state));
+  }
+
+  // attachShareSound makes main's share sound part of the view (issue #1854).
+  // Called once at startup, and only with the Linux switch on.
+  attachShareSound(source: ShareSoundSource): void {
+    this.sound = source;
+  }
+
+  // shareSoundChanged sends the view again after main's share sound changed
+  // its part of it (the choice, a reason).
+  shareSoundChanged(): void {
+    if (this.sound === null || (this.active !== null && !this.active.current())) return;
+    this.emit(this.state());
+  }
+
+  // setShareAudio and setShareAudioMute are the helper's v3 commands. They are
+  // main's share sound's alone: no IPC function reaches them, so no page names
+  // the scope, the application or the mute.
+  setShareAudio(want: { readonly capturing: false } | { readonly capturing: true; readonly applicationName: string }): Promise<CommandResult> {
+    return this.deps.supervisor.setShareAudio?.(want) ?? Promise.resolve({ ok: false, error: 'unsupported' });
+  }
+
+  setShareAudioMute(muted: boolean): Promise<CommandResult> {
+    return this.deps.supervisor.setShareAudioMute?.(muted) ?? Promise.resolve({ ok: false, error: 'unsupported' });
+  }
+
+  // Main's share sound rides on the view, when it is attached.
+  private withSound(view: NativeVoiceView): NativeVoiceView {
+    const sound = this.sound?.view();
+    return sound === undefined ? view : { ...view, shareSound: sound };
   }
 
   // setLockMuted records (or clears) that main muted the person at a lock,
@@ -259,7 +314,7 @@ export class VoiceService {
     this.override = null;
     // The note ends with the mute or the session.
     if (this.lockMuted && (s.status !== 'running' || !s.helper.muted)) this.lockMuted = false;
-    this.emit(this.withLockNote(this.view(s)));
+    this.emit(this.withSound(this.withLockNote(this.view(s))));
   }
 
   private emit(view: NativeVoiceView): void {
@@ -417,7 +472,13 @@ export class VoiceService {
   async leave(): Promise<NativeVoiceView> {
     this.epoch++;
     this.lockMuted = false;
+    // The share's sound ends first: its stop is written before the helper's
+    // leave (a helper that is leaving takes no command), and the withdrawal
+    // follows it. Begun here, synchronously, so no end of voice (a leave, a
+    // suspend, a teardown) writes the leave ahead of the stop.
+    const soundEnded = this.sound?.leaving().catch(() => undefined);
     await this.stopBounded(true);
+    await soundEnded;
     this.channel = null;
     this.override = null;
     // Nothing left to retry: a later lost or ended state must not rejoin the

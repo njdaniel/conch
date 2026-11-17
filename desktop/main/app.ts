@@ -28,6 +28,8 @@ import { Session } from './api/session.ts';
 import { deliverVoice } from './voice/events.ts';
 import { Companion, stillHeldBy } from './voice/companion.ts';
 import { OneShot } from './voice/oneshot.ts';
+import { OWNER_VERSIONS_SHARE_AUDIO } from './voice/protocol.ts';
+import { linuxShareAudioEnabled, registeredApplicationName, ShareSound } from './voice/share-audio.ts';
 import { VoiceService } from './voice/service.ts';
 import { Supervisor } from './voice/supervisor.ts';
 import { trayHostPresent } from './tray-detect.ts';
@@ -158,6 +160,9 @@ export async function start(): Promise<void> {
   // once on the grant and once on the capture. The gate it reads is the
   // newest activation's.
   const share = new ShareAllowance({ now: Date.now, generation: () => live.gate.generation });
+  // The share sound's word that a capture was granted (issue #1854): nothing
+  // until the share sound exists (below, with main's switch on).
+  let captureGranted = (): void => undefined;
   const capture = new DisplayCapture({
     owned: () => (live.window === null || live.window.isDestroyed() ? null : live.window.webContents),
     gate: () => live.gate,
@@ -165,6 +170,9 @@ export async function start(): Promise<void> {
     live: () => liveOrigin() !== null,
     available: () => portal.last(),
     getSources: (options) => desktopCapturer.getSources(options),
+    granted: () => {
+      captureGranted();
+    },
     log,
   });
   // One set of guard dependencies, for every web contents and every
@@ -440,11 +448,20 @@ export async function start(): Promise<void> {
   });
   await installed.start();
 
+  // The Linux screen share's sound (issue #1854): one experimental switch,
+  // CONCH_LINUX_SHARE_AUDIO=1 in main's own environment, on Linux, read here
+  // once. Off (the default and every release's): the helper is offered the
+  // versions it always was, no sound object exists, the view says nothing of
+  // sound and no share-sound IPC function answers. Neither the renderer nor a
+  // profile can turn it on; the default becomes on only in a later change that
+  // cites a passed L-S6 receipt.
+  const shareAudio = linuxShareAudioEnabled(process.env, process.platform);
+  if (shareAudio) log('conch-desktop: CONCH_LINUX_SHARE_AUDIO is on: the Linux screen share offers its sound (experimental)');
   // Set once Lifecycle exists (below); voice and the companion read it.
   let screenLocked: () => boolean = () => false;
   const voice = new VoiceService({
     locked: () => screenLocked(),
-    supervisor: new Supervisor({ resources: process.resourcesPath, env: process.env, log }),
+    supervisor: new Supervisor({ resources: process.resourcesPath, env: process.env, log, ...(shareAudio ? { versions: OWNER_VERSIONS_SHARE_AUDIO } : {}) }),
     // The device list and the saves run the same trusted helper, with no token.
     oneShot: new OneShot({ resources: process.resourcesPath, env: process.env, log }),
     identity: async () => {
@@ -480,6 +497,9 @@ export async function start(): Promise<void> {
     log,
   });
   callActive = () => voice.state().status === 'running';
+  // Main's share sound, made below once the companion exists; the companion
+  // tells it of every end of a share (its soundEnded).
+  let sound: ShareSound | null = null;
   // The screen companion (issue #1579, D4-02 of #772): the one holder of the
   // p<id>.screen grant. Its media hook is registered before voice's, so a
   // switch, sign-out or quit tells the page and removes the companion while
@@ -524,9 +544,31 @@ export async function start(): Promise<void> {
     granted: (contents, document) => {
       share.confirmGrant(contents, document);
     },
+    // Every end and stop of a held share: the sound's helper stop, then its
+    // consent's DELETE. Nothing with the switch off.
+    soundEnded: (held, reason) => sound?.ended(held, reason) ?? Promise.resolve(),
     log,
   });
   liveOrigin = () => companion.liveOrigin();
+  if (shareAudio) {
+    const made = new ShareSound({
+      voice,
+      companion,
+      // The choice is the active profile's own, kept by main; the page only
+      // ever asks to change it, after a click.
+      choice: () => profiles.shareSoundChoice(),
+      setChoice: (choice) => profiles.setShareSoundChoice(choice),
+      // The name this app's own audio streams carry, from the app's identity.
+      applicationName: registeredApplicationName(app.name),
+      log,
+    });
+    sound = made;
+    // A granted capture is the share's, in the document the gate shows now.
+    captureGranted = () => {
+      made.captureGranted(live.gate.generation);
+    };
+    voice.attachShareSound({ view: () => made.view(), leaving: () => made.leaving() });
+  }
   teardownHooks.media(
     'share',
     shareTeardown({
@@ -534,6 +576,7 @@ export async function start(): Promise<void> {
         activeClient = null;
       },
       companion,
+      ...(sound === null ? {} : { sound }),
     }),
   );
   app.on('render-process-gone', (_event, contents) => {
@@ -631,6 +674,7 @@ export async function start(): Promise<void> {
         }),
     },
     companion,
+    ...(sound === null ? {} : { shareSound: sound }),
     now: Date.now,
     log,
   });

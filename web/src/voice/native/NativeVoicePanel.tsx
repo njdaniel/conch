@@ -23,8 +23,9 @@ import { usePresence } from './usePresence';
 import { useNativeVoice } from './useNativeVoice';
 import { lockMutedNote, updatePendingWords } from './words';
 import { VoiceOptions } from './VoiceOptions';
-import { NativeStreams, ShareButton, ShareNotes, shareDisabledReason } from './NativeShare';
+import { NativeStreams, ShareButton, ShareNotes, ShareSoundMute, shareDisabledReason } from './NativeShare';
 import type { Companion } from './useCompanion';
+import { useShareSound } from './useShareSound';
 import { TalkKeySetup } from './TalkKeySetup';
 
 // How long the duplicate-identity warning waits for a second Join.
@@ -136,6 +137,9 @@ export function NativeVoicePanel({
   readonly soundRoute?: boolean;
 }) {
   const { view, words, actions } = useNativeVoice(source, binding);
+  // The share's sound (issue #1854): main's view of it and the two moments the
+  // page owes it; undefined unless main's switch is on.
+  const sound = useShareSound(source, companion, view);
   const session = hasSession(view);
   const [setup, setSetup] = useState(false);
   const joined = session ? view.channel : null;
@@ -295,6 +299,7 @@ export function NativeVoicePanel({
                   </>
                 ) : null}
                 {share}
+                {sound === undefined ? null : <ShareSoundMute sound={sound} />}
                 <OptionsButton open={options} onToggle={() => { setOptions(!options); }} />
                 <button type="button" className="danger" disabled={view.status === 'stopping' || actions === undefined} onClick={() => { if (actions !== undefined) void outcome(() => actions.leave()); }}>
                   <Glyph name="leave" />
@@ -325,7 +330,7 @@ export function NativeVoicePanel({
             {details ? <p className="hint voice-detail">{view.detail}</p> : null}
           </>
         )}
-        {companion === null || unavailable ? null : <ShareNotes companion={companion} joined={joined} reason={shareReason} soundRoute={soundRoute} />}
+        {companion === null || unavailable ? null : <ShareNotes companion={companion} joined={joined} reason={shareReason} soundRoute={soundRoute} sound={sound} />}
         {view.mutedByLock === true && muted ? <p role="status" className="hint">{lockMutedNote}</p> : null}
         {note === null ? null : <p role="status" className="hint">{note}</p>}
         {idle === null ? null : <p role="status" className="hint">{idle}</p>}

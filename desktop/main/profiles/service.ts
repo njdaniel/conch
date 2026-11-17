@@ -12,7 +12,7 @@
 // or the server is asked about a credential, /healthz must name a release on
 // the allowlist (or the development flag must allow it). The same verdict
 // decides whether a sign-in may happen in the window at all.
-import type { CompatView, ProfileAddResult, ProfileNotice, ProfilesView, ProfileView, StorageStatus } from '../../../web/src/platform/desktop/bridge.ts';
+import type { CompatView, ProfileAddResult, ProfileNotice, ProfilesView, ProfileView, ShareSoundChoice, StorageStatus } from '../../../web/src/platform/desktop/bridge.ts';
 import type { OperationId } from '../../../web/src/platform/operations.ts';
 import { parseServerAddress } from '../api/origin.ts';
 import { judge, permits, REQUIRED_FAMILIES, type CompatPolicy, type HealthResult, type Verdict } from '../compat.ts';
@@ -320,6 +320,32 @@ export class ProfilesService {
       compat: this.#compatView(),
       platform,
     };
+  }
+
+  // The choice for the Linux screen share's sound, of the profile in force
+  // (issue #1854): public, kept with the profile, the default when never set.
+  // None when no profile is active: no choice is ever read from the page.
+  shareSoundChoice(): ShareSoundChoice | null {
+    const id = this.#switcher.current?.profileId ?? null;
+    return id === null ? null : this.#deps.store.shareSound(id);
+  }
+
+  // Keeps a choice for the profile in force, after the person's act (the IPC
+  // layer has checked the act). The profile and the switch generation are
+  // those of this call, and are asked again when the write's turn comes: a
+  // switch or sign-out that overtook it writes nothing and says false. A
+  // choice the profile already has is true and writes nothing.
+  async setShareSoundChoice(choice: ShareSoundChoice): Promise<boolean> {
+    const activation = this.#switcher.current;
+    const id = activation?.profileId ?? null;
+    const generation = this.#switcher.generation;
+    if (id === null) return false;
+    try {
+      return await this.#deps.store.setShareSound(id, choice, () => this.#switcher.current === activation && this.#switcher.generation === generation);
+    } catch {
+      this.#deps.log(`conch-desktop: could not keep the share sound choice of profile ${id}`);
+      return false;
+    }
   }
 
   async add(address: string): Promise<ProfileAddResult> {

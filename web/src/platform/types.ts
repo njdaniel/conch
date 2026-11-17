@@ -10,7 +10,21 @@
 import type { ComponentType, ReactNode } from 'react';
 import type { VoiceControlTalkMode } from '../schema/generated';
 import type { Call, OperationId } from './operations';
-import type { ChannelName, CompanionEvent, CompanionGrantResult, NativeVoiceDevicesResult, NativeVoiceView, VoiceCommandResult, VoiceDeviceKey, VoiceKeyDevicesResult, VoiceSaveResult, VoiceTalkBindingResult } from './desktop/bridge';
+import type {
+  ChannelName,
+  CompanionEvent,
+  CompanionGrantResult,
+  NativeVoiceDevicesResult,
+  NativeVoiceView,
+  ShareSoundChoice,
+  ShareSoundChooseResult,
+  ShareSoundStartResult,
+  VoiceCommandResult,
+  VoiceDeviceKey,
+  VoiceKeyDevicesResult,
+  VoiceSaveResult,
+  VoiceTalkBindingResult,
+} from './desktop/bridge';
 
 // HttpTransport makes the requests of conchd that the operation table names.
 // Each takes a call (an operation id with its path values and query) and
@@ -178,6 +192,27 @@ export interface NativeCompanion {
   onEnd(listener: (event: CompanionEvent) => void): () => void;
 }
 
+// The Linux screen share's sound (issue #1854), over the bridge's five
+// requests. The page asks and main decides: main records the sharer's consent,
+// tells the helper, and says what is true in the voice view (the helper's
+// confirmed share_audio, main's choice and reason). The page names no scope, no
+// application and no identifier but the opaque share number main gave. Absent
+// where the bridge has none; the view then carries no share sound either and
+// the page offers no toggle.
+export interface NativeShareSound {
+  // After the page's share is live: ask main to add the share's sound.
+  start(): Promise<ShareSoundStartResult>;
+  // The person's click on the toggle: keep the choice and apply it now.
+  choose(choice: ShareSoundChoice): Promise<ShareSoundChooseResult>;
+  // The share-sound mute: apart from the microphone's mute and deafen.
+  mute(muted: boolean): Promise<VoiceCommandResult>;
+  // The share ended in the page; names the share main gave.
+  end(share: number): Promise<boolean>;
+  // The share ended in the page, whether or not it had a sound: main forgets
+  // that the capture was a share. Only takes away.
+  shareEnded(): Promise<boolean>;
+}
+
 // What a refused or failed native-voice call comes to: the bridge's own
 // refusal vocabulary, never a thrown string.
 export type NativeVoiceError = Extract<VoiceCommandResult, { readonly ok: false }>['error'];
@@ -213,6 +248,8 @@ export interface NativeVoice {
   readonly saveTalkBinding?: (request: { readonly deviceId: string; readonly code: number }) => Promise<VoiceTalkBindingResult>;
   // The screen companion (issue #1581). Absent when the bridge has none.
   readonly companion?: NativeCompanion;
+  // The share's sound (issue #1854). Absent when the bridge has none.
+  readonly shareSound?: NativeShareSound;
 }
 
 export interface Platform {

@@ -1,11 +1,34 @@
 import { describe, expect, it } from 'vitest';
-import type { NativeVoiceHelper, NativeVoiceStatus, NativeVoiceView } from '../../platform/desktop/bridge';
+import type { NativeShareAudio, NativeVoiceHelper, NativeVoiceStatus, NativeVoiceView, ShareSoundReason } from '../../platform/desktop/bridge';
 import type { VoiceControlBlock, VoiceControlPTT, VoiceControlPTTProblem, VoiceControlReason } from '../../schema/generated';
 import type { CompanionGrantError } from '../../platform/desktop/bridge';
 import type { ShareCause, ShareEnd, ShareState } from '../share';
 import { companionRefusals } from '../connection';
 import { removedFromVoice } from '../useVoice';
-import { blockWords, indicatorWords, pttProblemWords, pttWords, reasonWords, shareCauseWords, shareFailedWords, shareFullWords, shareNote, shareSourceClosedWords, shareUnavailableWords, statusWords, words } from './words';
+import {
+  blockWords,
+  indicatorWords,
+  noSoundRoute,
+  pttProblemWords,
+  pttWords,
+  reasonWords,
+  shareCauseWords,
+  shareFailedWords,
+  shareFullWords,
+  shareNote,
+  shareSoundMuteLabel,
+  shareSoundWords,
+  shareSourceClosedWords,
+  shareUnavailableWords,
+  shareWithSoundLabel,
+  shareWithoutSoundNote,
+  silentShareBefore,
+  silentShareWhile,
+  soundFromWords,
+  soundIndicatorWords,
+  statusWords,
+  words,
+} from './words';
 
 // Each Record is exhaustive at compile time; a vocabulary value added in Go
 // fails the typecheck here until it is listed, and the tables below until it
@@ -213,5 +236,81 @@ describe('share words', () => {
 
   it('names the channel in the indicator', () => {
     expect(indicatorWords('general')).toBe('Sharing your screen in #general');
+  });
+});
+
+// ---- the Linux share's sound (issue #1854)
+
+// Exhaustive at compile time: a reason added to the bridge fails the typecheck
+// here until it is listed, and the tests below until it has words.
+const soundReasons: Record<ShareSoundReason, true> = {
+  'old-helper': true,
+  'old-server': true,
+  'consent-failed': true,
+  'no-pipewire': true,
+  'no-process-tree': true,
+  'publish-refused': true,
+  unavailable: true,
+};
+
+const audio = (over: Partial<NativeShareAudio> = {}): NativeShareAudio => ({ state: 'on', muted: false, sources: 3, ...over });
+
+describe('the share sound’s words', () => {
+  it.each(Object.keys(soundReasons))('a reason with words, and none that names a machine, a room or a token: %s', (k) => {
+    const text = shareSoundWords[k as ShareSoundReason];
+    expect(text).not.toBe('');
+    expect(text).not.toMatch(/pipewire|pid|\/|token|room|process|device|#/i);
+    expect(Object.keys(shareSoundWords).sort()).toEqual(Object.keys(soundReasons).sort());
+  });
+
+  it('says each failure as the design proposes (§11), word for word', () => {
+    expect(shareSoundWords['old-server']).toBe("This server can't record a sound consent for the Linux app yet. Your screen is shared without sound.");
+    expect(shareSoundWords['consent-failed']).toBe("Sound couldn't be added to this share; try Share again.");
+    expect(shareSoundWords['publish-refused']).toBe("Sound couldn't be added to this share; try Share again.");
+    expect(shareSoundWords['no-pipewire']).toBe("Your screen's sound can't be shared right now: the sound system isn't reachable.");
+    expect(shareSoundWords['no-process-tree']).toBe("Your screen's sound can't be shared right now.");
+    // A helper with no route, and one that cannot carry it, say the generic line.
+    expect(shareSoundWords['old-helper']).toBe("Your screen's sound can't be shared right now.");
+    expect(shareSoundWords.unavailable).toBe("Your screen's sound can't be shared right now.");
+  });
+
+  it('only the two reasons with no route at all disable the toggle', () => {
+    expect([...noSoundRoute].sort()).toEqual(['old-helper', 'old-server']);
+  });
+
+  it('labels the toggle and the one-click alternative', () => {
+    expect(shareWithSoundLabel).toBe('Share with sound');
+    expect(shareWithoutSoundNote).toBe('Your screen will be shared without sound.');
+  });
+
+  it('labels the share-sound mute as its own, never the microphone’s', () => {
+    expect(shareSoundMuteLabel(false)).toBe('Mute share sound');
+    expect(shareSoundMuteLabel(true)).toBe('Unmute share sound');
+    expect(shareSoundMuteLabel(false)).not.toBe('Mute');
+  });
+
+  it('says "with sound" only when the helper said on', () => {
+    expect(soundIndicatorWords('general', audio())).toBe('Sharing your screen and its sound in #general (sound from 3 apps)');
+    expect(soundIndicatorWords('general', audio({ sources: 1 }))).toBe('Sharing your screen and its sound in #general (sound from 1 app)');
+    // Nothing is playing: still with sound, and says so.
+    expect(soundIndicatorWords('general', audio({ sources: 0, problem: 'no_sources' }))).toBe('Sharing your screen and its sound in #general (nothing is playing)');
+    // A muted track says so.
+    expect(soundIndicatorWords('general', audio({ muted: true }))).toBe('Sharing your screen and its sound in #general (sound muted, sound from 3 apps)');
+    // Anything else, and no state at all (an older helper): without sound.
+    for (const state of ['off', 'unavailable'] as const) {
+      expect(soundIndicatorWords('general', audio({ state, sources: 0 }))).toBe('Sharing your screen without sound in #general');
+    }
+    expect(soundIndicatorWords('general', undefined)).toBe('Sharing your screen without sound in #general');
+  });
+
+  it('the count is a number of apps and never a name', () => {
+    expect(soundFromWords(2)).toBe('sound from 2 apps');
+    expect(soundFromWords(1024)).toBe('sound from 1024 apps');
+  });
+
+  it('leaves the words of the share before this issue as they were', () => {
+    expect(indicatorWords('general')).toBe('Sharing your screen in #general');
+    expect(silentShareBefore).toBe("Your screen's sound isn't shared from the Linux app yet. Others will see your screen without sound.");
+    expect(silentShareWhile).toBe("Sharing without sound: your screen's sound isn't shared from the Linux app yet.");
   });
 });

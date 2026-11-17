@@ -4,9 +4,19 @@
 // and delegates every action to the bridge. It never constructs a VoiceClient,
 // opens a room or asks for the microphone: the helper owns all of that.
 import type { VoiceControlTalkMode } from '../../schema/generated';
-import type { NativeCompanion, NativeVoice, NativeVoiceOutcome } from '../types';
+import type { NativeCompanion, NativeShareSound, NativeVoice, NativeVoiceOutcome } from '../types';
 import { bridge } from './access';
-import type { CompanionGrantResult, DesktopCompanionBridge, DesktopVoiceBridge, NativeVoiceDevicesResult, NativeVoiceView, Unsubscribe, VoiceCommandResult, VoiceSaveResult } from './bridge';
+import type {
+  CompanionGrantResult,
+  DesktopCompanionBridge,
+  DesktopShareSoundBridge,
+  DesktopVoiceBridge,
+  NativeVoiceDevicesResult,
+  NativeVoiceView,
+  Unsubscribe,
+  VoiceCommandResult,
+  VoiceSaveResult,
+} from './bridge';
 
 const IDLE: NativeVoiceView = { status: 'idle', generation: 0, channel: null, retryable: false };
 const UNAVAILABLE: NativeVoiceView = { status: 'unavailable', generation: 0, channel: null, retryable: false, problem: 'unsupported' };
@@ -38,6 +48,18 @@ function companionBridge(whole: object | undefined): DesktopCompanionBridge | un
 }
 
 const grantFailed: CompanionGrantResult = { ok: false, error: 'failed' };
+
+// The share sound's half of the bridge (issue #1854), when the preload offers
+// all of it. An older preload, or main with its switch off, has none that
+// answers: main refuses every call then, and the view carries no share sound.
+const SHARE_SOUND_METHODS = ['shareSoundStart', 'shareSoundChoose', 'shareSoundMute', 'shareSoundEnd', 'shareSoundShareEnded'] as const;
+
+function shareSoundBridge(whole: object | undefined): DesktopShareSoundBridge | undefined {
+  if (whole === undefined) return undefined;
+  const b: Partial<DesktopShareSoundBridge> = whole;
+  for (const m of SHARE_SOUND_METHODS) if (typeof b[m] !== 'function') return undefined;
+  return b as DesktopShareSoundBridge;
+}
 
 // createNativeVoice builds a store over the voice bridge that get returns.
 export function createNativeVoice(get: () => DesktopVoiceBridge | undefined = voiceBridge): NativeVoice {
@@ -78,6 +100,56 @@ export function createNativeVoice(get: () => DesktopVoiceBridge | undefined = vo
         return b.onCompanion(listener);
       } catch {
         return () => undefined;
+      }
+    },
+  };
+
+  // A refusal or a failure is the call's own "no": nothing was added, kept or
+  // muted, and the view (main's) says what is true.
+  const shareSound: NativeShareSound = {
+    async start() {
+      const b = shareSoundBridge(get());
+      if (b === undefined) return { ok: false, error: 'not-offered' };
+      try {
+        return await b.shareSoundStart();
+      } catch {
+        return { ok: false, error: 'not-offered' };
+      }
+    },
+    async choose(choice) {
+      const b = shareSoundBridge(get());
+      if (b === undefined) return { ok: false, error: 'not-offered' };
+      try {
+        return await b.shareSoundChoose({ choice });
+      } catch {
+        return { ok: false, error: 'not-saved' };
+      }
+    },
+    async mute(muted) {
+      const b = shareSoundBridge(get());
+      if (b === undefined) return unsupported;
+      try {
+        return await b.shareSoundMute(muted);
+      } catch {
+        return lost;
+      }
+    },
+    async end(share) {
+      const b = shareSoundBridge(get());
+      if (b === undefined) return false;
+      try {
+        return await b.shareSoundEnd({ share });
+      } catch {
+        return false;
+      }
+    },
+    async shareEnded() {
+      const b = shareSoundBridge(get());
+      if (b === undefined) return false;
+      try {
+        return await b.shareSoundShareEnded();
+      } catch {
+        return false;
       }
     },
   };
@@ -175,6 +247,7 @@ export function createNativeVoice(get: () => DesktopVoiceBridge | undefined = vo
       }
     },
     companion,
+    shareSound,
     saveTalkBinding: async (request) => {
       const b = get();
       if (b === undefined || typeof b.voiceSaveTalkBinding !== 'function') return unsupported;
