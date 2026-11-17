@@ -578,6 +578,44 @@ describe('the companion’s DELETE after a channel rename', () => {
     expect(lists(r)).toBe(1);
   });
 
+  it('with an id held, a 2xx by the old name for a channel that took it is not a confirmation: the DELETE follows the id', async () => {
+    const r = rig();
+    await live(r);
+    // conchd answers 204 by "general", now another channel's; the share's
+    // channel (7) is "lounge".
+    r.id.value = 7;
+    r.rename.list = list({ id: 7, name: 'lounge' }, { id: 9, name: 'general' });
+    await r.companion.end('lock');
+    expect(deletes(r)).toEqual(['general', 'lounge']);
+    expect(lists(r)).toBe(1);
+    expect(r.reloads.count).toBe(0);
+  });
+
+  it('with an id held, a 2xx by the held name stands when the id still has that name', async () => {
+    const r = rig();
+    await live(r);
+    r.id.value = 7;
+    r.rename.list = list({ id: 7, name: 'general' });
+    await r.companion.stop();
+    expect(deletes(r)).toEqual(['general']);
+    expect(lists(r)).toBe(1);
+    expect(r.logs.filter((l) => l.includes('not confirmed'))).toEqual([]);
+    expect(r.reloads.count).toBe(0);
+  });
+
+  it('with an id held, a 2xx whose channel cannot be checked is not confirmed: the window reloads', async () => {
+    for (const unread of [{ kind: 'none' } as Exchange, list({ id: 9, name: 'general' })]) {
+      const r = rig();
+      await live(r);
+      r.id.value = 7;
+      r.rename.list = unread;
+      await r.companion.stop();
+      expect(deletes(r)).toEqual(['general']);
+      expect(r.logs).toContain('companion: the removal after stopped was not confirmed');
+      expect(r.reloads.count).toBe(1);
+    }
+  });
+
   it('the first DELETE has the whole removal bound, and the list read and retry only what is left of it', async () => {
     const r = rig();
     await live(r);

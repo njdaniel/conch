@@ -524,13 +524,16 @@ export class Companion {
     }
   }
 
-  // The one DELETE of an end. True when conchd confirmed it. By the held
-  // name; when it answers 404 channel_not_found and `id` is known (it is not
-  // for an unused grant, which no share's sound ever saw, nor for a watch
-  // with no share), the channel's name now is found by that id and the DELETE
-  // is sent once more with it. Nothing else is retried, and a name main's
-  // client refuses (paramOk, in currentName) is not sent. One deadline bounds
-  // the DELETE, the list read and the retry.
+  // The one DELETE of an end. True when conchd confirmed it, for the share's
+  // own channel when its id is known. It is sent by the held name. When `id`
+  // is known (it is not for an unused grant, which no share's sound ever saw,
+  // nor for a watch with no share, nor with the share sound switched off), the
+  // channel's name now is found by that id: a 404 channel_not_found is sent
+  // once more by it, and a 2xx stands only if the name is unchanged. Nothing
+  // else is retried, and a name main's client refuses (paramOk, in
+  // currentName) is not sent. One deadline bounds the DELETE, the list read
+  // and the retry. With no id, a 2xx by the held name is taken as it comes
+  // (#1883 would give main the id from the grant).
   async #remove(client: CompanionClient, channel: string, reason: RemoveReason, id: number | null = null): Promise<boolean> {
     const deadline = Date.now() + COMPANION_REMOVE_TIMEOUT_MS;
     const sendBy = async (name: string, first = false): Promise<Exchange> => {
@@ -543,9 +546,21 @@ export class Companion {
       }
     };
     let exchange = await sendBy(channel, true);
-    if (id !== null && isNotFound(exchange)) {
+    // With an id held, an answer by the held name is checked against it:
+    // a 404 is followed to the channel's name now, and a 2xx counts only if
+    // that name is still the held one. conchd answers 204 to this DELETE on
+    // any channel of the caller's with no room, so a channel that took the old
+    // name would confirm a removal that never reached the share's channel,
+    // and the unconfirmed end's reload (#unconfirmed) would be skipped.
+    const confirmed = exchange.kind === 'answer' && exchange.ok;
+    if (id !== null && (confirmed || isNotFound(exchange))) {
       const name = await currentName(client, id, deadline - Date.now());
-      if (name !== 'gone' && name !== 'unknown' && name.name !== channel) exchange = await sendBy(name.name);
+      if (name === 'gone' || name === 'unknown') {
+        // The channel's name now could not be checked: not confirmed.
+        if (confirmed) exchange = { kind: 'none' };
+      } else if (name.name !== channel) {
+        exchange = await sendBy(name.name);
+      }
     }
     if (exchange.kind === 'answer' && exchange.ok) return true;
     this.#deps.log(`companion: the removal after ${reason} was not confirmed`);
