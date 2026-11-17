@@ -35,7 +35,7 @@ use conch_voice_api::{
     VOICE_CONTROL_EVENT_QUEUE_LINES, VOICE_CONTROL_LEAVE_EXIT_MS, VOICE_CONTROL_OWNER_LOSS_EXIT_MS,
     VoiceControlCommand, VoiceControlCommandKind, VoiceControlErrorCode, VoiceControlEvent,
     VoiceControlHelloV1, VoiceControlPhase, VoiceControlReason, VoiceControlStateV1, parse_command,
-    parse_command_v2, parse_event, parse_event_v2,
+    parse_command_v2, parse_event, parse_event_v2, parse_event_v3,
 };
 use serde_json::{Value, json};
 use tokio::sync::Notify;
@@ -1642,6 +1642,15 @@ fn fixture_v2(name: &str) -> Value {
     serde_json::from_str(&text).unwrap()
 }
 
+/// A golden of `pkg/schema/testdata/voice-control-v3`, read in place.
+fn fixture_v3(name: &str) -> Value {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../pkg/schema/testdata/voice-control-v3")
+        .join(name);
+    let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    serde_json::from_str(&text).unwrap()
+}
+
 /// `open_hang_ms` in the v2 tests' `voice.toml`, the least there is, in frames: a hang of
 /// quiet is waited for as frames read, so a test does not wait longer than it must.
 const HANG_FRAMES: u64 = 10;
@@ -1674,6 +1683,7 @@ fn helper_values(rig: &ManagedRig, version: Option<Version>) -> Vec<Value> {
             let read = match (at, version) {
                 (0, _) | (_, None | Some(Version::V1)) => parse_event(line.as_bytes()).map(|_| ()),
                 (_, Some(Version::V2)) => parse_event_v2(line.as_bytes()).map(|_| ()),
+                (_, Some(Version::V3)) => parse_event_v3(line.as_bytes()).map(|_| ()),
             };
             read.unwrap_or_else(|refusal| panic!("the owner refuses {line}: {refusal}"));
             serde_json::from_str(line).unwrap()
@@ -1938,6 +1948,9 @@ fn read_owner_line(line: &str, version: Option<Version>) -> Read {
     match version {
         Some(Version::V1) => v1(line),
         Some(Version::V2) => v2(line),
+        // The v3 transcripts have their own driver (`tests/share_audio.rs`): no v2
+        // transcript starts a v3 session.
+        Some(Version::V3) => panic!("a v2 transcript started a v3 session: {line}"),
         None => match v2(line) {
             Read {
                 refusal: Some(VoiceControlErrorCode::UnknownSchema),
@@ -2050,10 +2063,17 @@ fn check_rules_v2(log: &[Step], exit: i32) {
                         .iter()
                         .map(|v| v.as_str().unwrap())
                         .collect();
+                    // The production hello offers v3 as well since #1586
+                    // (`event-hello-v1-v2-and-v3.json`); the v2 transcripts' own hello line
+                    // is matched by kind alone, and a v2 owner picks v2 from it all the same.
                     assert_eq!(
                         offers,
-                        ["conch.voice_control.v1", "conch.voice_control.v2"],
-                        "step {i}: the hello offers both versions"
+                        [
+                            "conch.voice_control.v1",
+                            "conch.voice_control.v2",
+                            "conch.voice_control.v3"
+                        ],
+                        "step {i}: the hello offers every version"
                     );
                     hello = true;
                     previous_was_state = false;
@@ -2365,17 +2385,19 @@ async fn a_dropped_rig_leaves_no_thread_of_its_pipe_behind() {
     }
 }
 
-/// The hello is v1's frozen shape, offering exactly v1 and v2, whichever the owner then
-/// chooses; the start fixes the version, and every event after it is in it.
+/// The hello is v1's frozen shape, offering exactly v1, v2 and v3 since #1586 (the signed v3
+/// golden, `event-hello-v1-v2-and-v3.json`; it offered v1 and v2 before), whichever the owner
+/// then chooses; the start fixes the version, and every event after it is in it. A v1 or v2
+/// owner's session never carries a share field.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_hello_offers_both_and_the_start_chooses_the_version_of_every_event_after_it() {
     for v2 in [false, true] {
         let mut rig = ManagedRig::start().await;
         rig.until("the hello", |rig| !rig.lines().is_empty()).await;
         let hello: Value = serde_json::from_str(&rig.lines()[0]).unwrap();
-        let mut golden = fixture_v2("event-hello-v1-and-v2.json");
+        let mut golden = fixture_v3("event-hello-v1-v2-and-v3.json");
         golden["helper_version"] = hello["helper_version"].clone();
-        assert_eq!(hello, golden, "the frozen shape, offering both");
+        assert_eq!(hello, golden, "the frozen shape, offering every version");
         if v2 {
             rig.send_start_v2();
         } else {
@@ -2407,6 +2429,7 @@ async fn the_hello_offers_both_and_the_start_chooses_the_version_of_every_event_
                 v2 && event["kind"] == "state",
                 "{line}"
             );
+            assert!(!line.contains("share_audio"), "{line}");
         }
         if v2 {
             // Read by v2's reader, whose Validate is Go's.

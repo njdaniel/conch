@@ -7,10 +7,23 @@
 //!
 //! Two things here are load-bearing:
 //!
-//! - **[`LiveKitFeed::send`] is the only function in this crate that hands audio to the
-//!   SDK**, and it takes a [`GatedFrame`]. The SDK is never asked to open a microphone
-//!   itself: the track is built on a [`NativeAudioSource`], which sends what it is given and
-//!   captures nothing.
+//! - **[`LiveKitFeed::send`] is the only function in this crate that hands the microphone's
+//!   audio to the SDK**, and it takes a [`GatedFrame`]. The SDK is never asked to open a
+//!   microphone itself: the track is built on a [`NativeAudioSource`], which sends what it is
+//!   given and captures nothing.
+//! - **A screen share's sound is a second track, never the microphone's.** It is published
+//!   only when the session asks ([`RoomHandle::publish_share_audio`]): a 48 kHz stereo
+//!   [`NativeAudioSource`], source `ScreenshareAudio`, DTX off. Each share track keeps its own
+//!   publication, apart from the microphone's, and a republish the SDK reports is routed by
+//!   the publication's source and the id it had, so that one never replaces the other: a
+//!   share republished never becomes what the microphone's mute acts on. A share track the
+//!   SDK republishes and nobody holds is unpublished at once. [`LiveKitShareFeed::send`]
+//!   hands it the mix of the captures and nothing else.
+//! - **The SDK's `LocalTrackUnpublished` is always this client's own doing** (livekit 0.9.4
+//!   sends it only from its own `unpublish_track`: a stop, `close`, a full reconnect's
+//!   republish). It is not passed on. The server taking a share's grant back is seen only as
+//!   a change of this participant's permission, which is passed on as
+//!   [`SdkEvent::PermissionChanged`], with whether that permission allows the share.
 //! - **Every text the SDK produces is scrubbed, put on one line and cut to a length before
 //!   it leaves this file** (`secrets.rs`): an error's message may hold an address or a
 //!   header on a path nobody measured, and when a join is refused it quotes the answer,
@@ -23,15 +36,17 @@
 //! runs behind `docs/design/conch-voice.md` §13.
 
 use std::borrow::Cow;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError, Weak};
 
 use conch_voice_api::{Secret, VoiceSessionResponseV1};
-use conch_voice_audio::{FRAME_LEN, Frame, GatedFrame, SAMPLE_RATE, SILENCE};
+use conch_voice_audio::{
+    FRAME_LEN, Frame, GatedFrame, SAMPLE_RATE, SILENCE, STEREO_FRAME_LEN, StereoFrame,
+};
 use futures_util::StreamExt;
 use livekit::DisconnectReason as LkReason;
 use livekit::options::TrackPublishOptions;
 use livekit::prelude::{
-    LocalAudioTrack, LocalTrack, LocalTrackPublication, RemoteAudioTrack, RemoteTrack,
+    LocalAudioTrack, LocalTrack, LocalTrackPublication, Participant, RemoteAudioTrack, RemoteTrack,
     RemoteTrackPublication, Room, RoomEvent, RoomOptions, TrackKind, TrackSource,
 };
 use livekit::webrtc::audio_frame::AudioFrame;
@@ -41,9 +56,11 @@ use livekit::webrtc::audio_stream::native::NativeAudioStream;
 use tokio::sync::mpsc;
 
 use crate::sdk::{
-    DisconnectReason, Joined, MicFeed, MicTrack, RoomHandle, SdkError, SdkEvent, Transport,
+    DisconnectReason, Joined, MicFeed, MicTrack, RoomHandle, SdkError, SdkEvent, ShareAudioFeed,
+    ShareAudioTrack, Transport,
 };
 use crate::secrets::Scrubber;
+use crate::share_capture::SHARE_CHANNELS;
 
 /// How much audio the SDK's source may hold before it sends it: the value every
 /// measurement in `docs/design/conch-voice.md` §13 was made with. Whatever is in it passed
@@ -285,6 +302,54 @@ fn reason(reason: LkReason) -> DisconnectReason {
 /// handle need it. It is touched on a mute, an unmute and a republish: never per frame.
 type Publication = Arc<Mutex<Option<LocalTrackPublication>>>;
 
+/// One share track's publication cell, per track: a republish puts the new publication in
+/// the cell that held the old one.
+type ShareCell = Arc<Mutex<Option<LocalTrackPublication>>>;
+
+/// Every share track's cell, held weakly: a track that is gone leaves nothing to follow.
+type ShareCells = Arc<Mutex<Vec<Weak<Mutex<Option<LocalTrackPublication>>>>>>;
+
+/// The publications a republish can replace, each in a place of its own.
+struct Published {
+    microphone: Publication,
+    share: ShareCells,
+}
+
+/// The protocol's wire value of `TrackSource::SCREEN_SHARE_AUDIO` (livekit-protocol 0.8.0,
+/// which the SDK does not re-export by name).
+const SCREEN_SHARE_AUDIO: i32 = 4;
+
+/// Whether a participant with this permission (`can_publish`, `can_publish_sources`) may
+/// publish a share's sound. An empty source list with `can_publish` means every source. No
+/// permission known: allowed here, and the server decides when the track is published.
+fn share_allowed(permission: Option<(bool, &[i32])>) -> bool {
+    match permission {
+        None => true,
+        Some((can_publish, sources)) => {
+            can_publish && (sources.is_empty() || sources.contains(&SCREEN_SHARE_AUDIO))
+        }
+    }
+}
+
+/// Puts `next` in the live cell whose publication had the id `previous`, and forgets the cells
+/// whose track is gone on the way. `Err(next)` when no cell held it: nobody owns that track.
+fn follow<P>(
+    cells: &mut Vec<Weak<Mutex<Option<P>>>>,
+    previous: &str,
+    next: P,
+    id: impl Fn(&P) -> String,
+) -> Result<(), P> {
+    cells.retain(|cell| cell.strong_count() > 0);
+    for cell in cells.iter().filter_map(Weak::upgrade) {
+        let mut held = cell.lock().unwrap_or_else(PoisonError::into_inner);
+        if held.as_ref().map(&id).as_deref() == Some(previous) {
+            *held = Some(next);
+            return Ok(());
+        }
+    }
+    Err(next)
+}
+
 impl Transport for LiveKit {
     type Room = LiveKitRoom;
 
@@ -303,17 +368,22 @@ impl Transport for LiveKit {
             .map_err(|error| scrubbed(&self.scrubber, "could not join the voice room", &error))?;
         let room = Arc::new(room);
         let publication = Publication::default();
+        let share = ShareCells::default();
         let (forward, forwarded) = mpsc::unbounded_channel();
         tokio::spawn(pump(
             Arc::clone(&room),
             events,
             forward,
-            Arc::clone(&publication),
+            Published {
+                microphone: Arc::clone(&publication),
+                share: Arc::clone(&share),
+            },
             subscription.clone(),
         ));
         let room = LiveKitRoom {
             room,
             publication,
+            share,
             scrubber: Arc::clone(&self.scrubber),
         };
         Ok((room, forwarded))
@@ -327,7 +397,7 @@ async fn pump(
     room: Arc<Room>,
     mut events: mpsc::UnboundedReceiver<RoomEvent>,
     forward: mpsc::UnboundedSender<SdkEvent>,
-    publication: Publication,
+    published: Published,
     rule: Subscription,
 ) {
     loop {
@@ -387,14 +457,57 @@ async fn pump(
                 SdkEvent::Reconnected
             }
             RoomEvent::LocalTrackRepublished {
+                previous_sid,
+                publication: republished,
+                ..
+            } if republished.source() == TrackSource::ScreenshareAudio => {
+                // Before the event is passed on, so that the mute it leads to reaches the
+                // publication the server now knows, in the cell of the track that had it.
+                let mut cells = published
+                    .share
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner);
+                match follow(&mut cells, previous_sid.as_str(), republished, |held| {
+                    held.sid().to_string()
+                }) {
+                    Ok(()) => SdkEvent::ShareRepublished,
+                    Err(orphan) => {
+                        // A share track nobody holds is never left published.
+                        log::warn!(
+                            "share audio: the SDK republished a share track nobody holds; it is unpublished"
+                        );
+                        let room = Arc::clone(&room);
+                        let sid = orphan.sid();
+                        tokio::spawn(async move {
+                            let _ = room.local_participant().unpublish_track(&sid).await;
+                        });
+                        continue;
+                    }
+                }
+            }
+            RoomEvent::LocalTrackRepublished {
                 publication: republished,
                 ..
             } => {
                 // Before the event is passed on, so that the mute it leads to reaches the
-                // publication the server now knows.
-                *publication.lock().unwrap_or_else(PoisonError::into_inner) = Some(republished);
+                // publication the server now knows, and never a share's.
+                *published
+                    .microphone
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner) = Some(republished);
                 SdkEvent::Republished
             }
+            // This participant's own permission: the share's grant may have been taken back.
+            RoomEvent::ParticipantPermissionChanged {
+                participant: Participant::Local(_),
+                permission,
+            } => SdkEvent::PermissionChanged {
+                allowed: share_allowed(
+                    permission
+                        .as_ref()
+                        .map(|held| (held.can_publish, held.can_publish_sources.as_slice())),
+                ),
+            },
             RoomEvent::Disconnected { reason: why } => SdkEvent::Disconnected(reason(why)),
             // Nothing else changes what this client does. A refreshed token in particular
             // is the SDK's own business: it is not kept, used or shown here.
@@ -434,12 +547,73 @@ async fn receive(track: RemoteAudioTrack, frames: mpsc::Sender<Frame>) {
 pub struct LiveKitRoom {
     room: Arc<Room>,
     publication: Publication,
+    /// Each share-audio track's publication, apart from the microphone's.
+    share: ShareCells,
     scrubber: Arc<Scrubber>,
 }
 
 impl RoomHandle for LiveKitRoom {
     type Track = LiveKitTrack;
     type Feed = LiveKitFeed;
+    type ShareTrack = LiveKitShareTrack;
+    type ShareFeed = LiveKitShareFeed;
+
+    fn publish_share_audio(
+        &self,
+    ) -> impl std::future::Future<Output = Result<(LiveKitShareTrack, LiveKitShareFeed), SdkError>>
+    + Send
+    + 'static {
+        let room = Arc::clone(&self.room);
+        let cells = Arc::clone(&self.share);
+        let scrubber = Arc::clone(&self.scrubber);
+        async move {
+            // A source of its own, stereo, with the SDK's audio processing off: the mix is
+            // sent as it was made.
+            let source = NativeAudioSource::new(
+                AudioSourceOptions::default(),
+                SAMPLE_RATE,
+                SHARE_CHANNELS,
+                SOURCE_QUEUE_MS,
+            );
+            let track = LocalAudioTrack::create_audio_track(
+                "screen_share_audio",
+                RtcAudioSource::Native(source.clone()),
+            );
+            // Kept, to disable it after a republish: the SDK republishes this same track.
+            let kept = track.clone();
+            // Music and games are not speech: no discontinuous transmission.
+            let options = TrackPublishOptions {
+                source: TrackSource::ScreenshareAudio,
+                dtx: false,
+                ..Default::default()
+            };
+            let published = room
+                .local_participant()
+                .publish_track(LocalTrack::Audio(track), options)
+                .await
+                .map_err(|error| {
+                    scrubbed(&scrubber, "could not publish the share's sound", &error)
+                })?;
+            // A cell of this track's own, followed by the pump through a republish.
+            let cell: ShareCell = Arc::new(Mutex::new(Some(published)));
+            cells
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push(Arc::downgrade(&cell));
+            let track = LiveKitShareTrack {
+                room,
+                track: kept,
+                publication: cell,
+            };
+            let feed = LiveKitShareFeed {
+                source,
+                samples: vec![0; STEREO_FRAME_LEN],
+                scrubber,
+                failed: false,
+            };
+            Ok((track, feed))
+        }
+    }
 
     async fn publish_microphone(&self) -> Result<(LiveKitTrack, LiveKitFeed), SdkError> {
         // The SDK's audio processing is off: a frame is sent as the gate passed it.
@@ -564,9 +738,135 @@ impl MicFeed for LiveKitFeed {
     }
 }
 
+/// The published share-audio track. Its publication is the one the SDK has now: a republish
+/// replaces it in this track's own cell (`pump`), and its id is that publication's.
+pub struct LiveKitShareTrack {
+    room: Arc<Room>,
+    /// The track itself, the same one a republish publishes again.
+    track: LocalAudioTrack,
+    publication: ShareCell,
+}
+
+impl LiveKitShareTrack {
+    fn with_publication<T>(&self, act: impl FnOnce(&LocalTrackPublication) -> T) -> Option<T> {
+        let publication = self
+            .publication
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        publication.as_ref().map(act)
+    }
+}
+
+impl ShareAudioTrack for LiveKitShareTrack {
+    fn id(&self) -> String {
+        self.with_publication(|publication| publication.sid().to_string())
+            .unwrap_or_default()
+    }
+
+    fn is_allowed(&self) -> bool {
+        let permission = self.room.local_participant().permission();
+        share_allowed(
+            permission
+                .as_ref()
+                .map(|held| (held.can_publish, held.can_publish_sources.as_slice())),
+        )
+    }
+
+    fn is_published(&self) -> bool {
+        self.with_publication(LocalTrackPublication::sid)
+            .is_some_and(|sid| {
+                self.room
+                    .local_participant()
+                    .track_publications()
+                    .contains_key(&sid)
+            })
+    }
+
+    fn mute(&self) {
+        self.with_publication(LocalTrackPublication::mute);
+    }
+
+    fn unmute(&self) {
+        self.with_publication(LocalTrackPublication::unmute);
+    }
+
+    fn disable(&self) {
+        self.track.disable();
+    }
+
+    fn unpublish(self) -> impl std::future::Future<Output = ()> + Send + 'static {
+        let sid = self.with_publication(LocalTrackPublication::sid);
+        let room = self.room;
+        async move {
+            let Some(sid) = sid else { return };
+            // The SDK takes the publication off this client before anything can fail (it
+            // has no wait inside). Not found is a track already gone, and nothing to do;
+            // any other error is the peer connection refusing to drop the sender, which is
+            // said by its reason: the track was muted before this was asked.
+            match room.local_participant().unpublish_track(&sid).await {
+                Ok(_) | Err(livekit::RoomError::Internal(_)) => {}
+                Err(_) => log::warn!(
+                    "share audio: the media server may still hold the share's track; it was muted"
+                ),
+            }
+        }
+    }
+}
+
+/// The share-audio track's audio source.
+pub struct LiveKitShareFeed {
+    source: NativeAudioSource,
+    /// One stereo frame as the SDK takes it, reused.
+    samples: Vec<i16>,
+    scrubber: Arc<Scrubber>,
+    /// A refusal by the SDK is logged once, not a hundred times a second.
+    failed: bool,
+}
+
+impl ShareAudioFeed for LiveKitShareFeed {
+    /// The one place the share's mix is handed to the SDK.
+    async fn send(&mut self, frame: &StereoFrame) {
+        for (out, sample) in self.samples.iter_mut().zip(frame) {
+            // Truncation is the point: the product is within an i16 after the clamp.
+            *out = (sample.clamp(-1.0, 1.0) * f32::from(i16::MAX)) as i16;
+        }
+        let frame = AudioFrame {
+            data: Cow::Borrowed(self.samples.as_slice()),
+            sample_rate: SAMPLE_RATE,
+            num_channels: SHARE_CHANNELS,
+            samples_per_channel: FRAME_LEN as u32,
+        };
+        match self.source.capture_frame(&frame).await {
+            Ok(()) => self.failed = false,
+            Err(error) if !self.failed => {
+                self.failed = true;
+                let text = error.to_string();
+                log::warn!(
+                    "the SDK refused a frame of the share's sound: {}",
+                    self.scrubber.scrub_line(&text)
+                );
+            }
+            Err(_) => {}
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The share's source is the SDK's own, in stereo: native code, with no room.
+    #[test]
+    fn the_share_source_is_48_khz_stereo() {
+        let source = NativeAudioSource::new(
+            AudioSourceOptions::default(),
+            SAMPLE_RATE,
+            SHARE_CHANNELS,
+            SOURCE_QUEUE_MS,
+        );
+        assert_eq!(source.sample_rate(), 48_000);
+        assert_eq!(source.num_channels(), 2);
+    }
 
     /// Creates the SDK's audio source, which is native code in libwebrtc: it proves that
     /// the pinned clang compiled the SDK's C++ and that the verified libwebrtc links and
@@ -852,5 +1152,58 @@ mod tests {
             subscribe_on(rule, Seen::Reconnected, || current.clone());
             assert_eq!(told(&current), wanted.map(|n| n * 2), "{rule:?}");
         }
+    }
+
+    /// The share's grant is the permission to publish its source: an empty list with
+    /// `can_publish` is every source, and nothing known leaves it to the server.
+    #[test]
+    fn the_share_is_allowed_by_the_permission_to_publish_its_source() {
+        let camera = 1;
+        let microphone = 2;
+        let screen = 3;
+        for (permission, allowed) in [
+            (None, true),
+            (Some((true, &[][..])), true),
+            (Some((true, &[microphone, SCREEN_SHARE_AUDIO][..])), true),
+            (Some((true, &[microphone][..])), false),
+            (Some((true, &[camera, microphone, screen][..])), false),
+            (Some((false, &[][..])), false),
+            (Some((false, &[SCREEN_SHARE_AUDIO][..])), false),
+        ] {
+            assert_eq!(share_allowed(permission), allowed, "{permission:?}");
+        }
+    }
+
+    /// A republish is followed into the cell of the track whose publication had the id
+    /// (`previous_sid`), and only that one; one that no live track had is nobody's.
+    #[test]
+    fn a_republish_is_followed_into_the_cell_that_held_the_old_id() {
+        let first = Arc::new(Mutex::new(Some("TR_a".to_owned())));
+        let second = Arc::new(Mutex::new(Some("TR_b".to_owned())));
+        let gone = Arc::new(Mutex::new(Some("TR_c".to_owned())));
+        let mut cells = vec![
+            Arc::downgrade(&first),
+            Arc::downgrade(&second),
+            Arc::downgrade(&gone),
+        ];
+        drop(gone);
+        let id = |held: &String| held.clone();
+
+        assert_eq!(follow(&mut cells, "TR_b", "TR_b2".to_owned(), id), Ok(()));
+        assert_eq!(first.lock().unwrap().as_deref(), Some("TR_a"));
+        assert_eq!(second.lock().unwrap().as_deref(), Some("TR_b2"));
+        // The cell whose track was dropped is forgotten.
+        assert_eq!(cells.len(), 2);
+
+        // The old id again, or the dropped track's: nobody holds it.
+        assert_eq!(
+            follow(&mut cells, "TR_b", "TR_x".to_owned(), id),
+            Err("TR_x".to_owned())
+        );
+        assert_eq!(
+            follow(&mut cells, "TR_c", "TR_y".to_owned(), id),
+            Err("TR_y".to_owned())
+        );
+        assert_eq!(second.lock().unwrap().as_deref(), Some("TR_b2"));
     }
 }

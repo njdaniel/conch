@@ -31,6 +31,17 @@
 //! written; and its channel, server and login come from its owner's start, not from the
 //! command line, `CONCH_SERVER` or `voice.toml`.
 //!
+//! A desktop owner speaking `conch.voice_control.v3` can also ask for the sound of its
+//! screen share (#1586, `docs/design/linux-share-audio.md`; [`share_audio`]): the input is
+//! then also, on Linux, the other applications' playback streams PipeWire lists, each
+//! captured by its serial and never a sink's monitor, with this process's own playback and
+//! the Conch process tree (read from `/proc`) left out ([`share_eligibility`],
+//! [`share_capture`]); the output is also a second LiveKit track of this participant, source
+//! `ScreenshareAudio`, carrying their stereo mix, with a mute of its own; and it owns those
+//! captures, the mix and that track from the owner's command until a stop, the end of the
+//! connection or the end of the session. None of it touches the microphone, its mute or the
+//! transmit gate. Elsewhere than Linux the request is answered `unsupported`.
+//!
 //! Owns: the connection to the channel's voice room, for as long as `join` runs; the
 //! process's logger ([`logger`]); and the tasks that hold the transmit gate ([`transmit`]),
 //! the mix ([`receive`]), the report queue ([`reports`]) and the presence socket
@@ -53,6 +64,8 @@
 //!   Windows over WASAPI through the `wasapi` crate.
 //! - [`session`]: the loop that decides everything, written against the traits in [`sdk`].
 //! - [`managed`]: `conch-voice managed`, the helper `conch`'s TUI starts and drives.
+//! - [`share_audio`], [`share_capture`] and [`share_eligibility`]: the sound of a v3 owner's
+//!   screen share: its state and track, its captures and mix, and what is left out of them.
 //! - [`livekit`]: those traits over LiveKit's SDK, kept thin.
 //! - [`secrets`] and [`logger`]: what keeps tokens and room names out of the output.
 //! - [`lines`]: the queue every line passes on its way to standard output or standard
@@ -90,6 +103,9 @@ pub mod reports;
 pub mod sdk;
 pub mod secrets;
 pub mod session;
+pub mod share_audio;
+pub mod share_capture;
+pub mod share_eligibility;
 pub mod status;
 pub mod transmit;
 
@@ -103,7 +119,8 @@ use tokio::sync::mpsc;
 
 use crate::audio::AudioSystem;
 use crate::cli::{
-    Environment, JoinArgs, ManagedArgs, MicChoice, Resolved, SinkChoice, TONE_AMPLITUDE,
+    Environment, JoinArgs, ManagedArgs, MicChoice, Resolved, ShareChoice, SinkChoice,
+    TONE_AMPLITUDE,
 };
 pub use crate::error::Error;
 use crate::input::AtEnd;
@@ -138,6 +155,33 @@ pub(crate) fn mic_opener(choice: MicChoice, audio: Option<AudioSystem>) -> OpenM
             MicChoice::Wav(path) => Some(Box::new(WavSource::open(path)?) as BoxedMic),
         })
     })
+}
+
+/// Where a managed helper captures a screen share's sound from, as `--test-share-source`
+/// chose: the synthetic applications, or the platform's captures, on the connection the
+/// microphone and the speakers use if there is one. Only Linux has captures; elsewhere a
+/// request is answered `unsupported`. Nothing is opened or captured here.
+pub(crate) fn share_source(
+    choice: &ShareChoice,
+    audio: Option<&AudioSystem>,
+) -> share_capture::ShareSource {
+    match choice {
+        ShareChoice::Synthetic(spec) => share_capture::synthetic_source(spec),
+        ShareChoice::AudioSystem => platform_share_source(audio),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn platform_share_source(audio: Option<&AudioSystem>) -> share_capture::ShareSource {
+    match audio {
+        Some(audio) => audio.share_source(),
+        None => share_capture::linux::pipewire_source(None),
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn platform_share_source(_audio: Option<&AudioSystem>) -> share_capture::ShareSource {
+    share_capture::ShareSource::Unsupported
 }
 
 /// What opens the speakers `--sink` chose, by the name it is given (`audio.output` when the
@@ -246,6 +290,8 @@ pub fn join(
             .map(|(device, _)| device.display().to_string()),
         unreachable_note: resolved.unreachable_note,
         share_audio_owner: args.share_audio_owner,
+        // `join` has no owner, and never captures a share's sound.
+        share_audio: share_capture::ShareSource::Unsupported,
         timings: Timings::default(),
     };
     let out = Output::stdout(args.json);
@@ -348,6 +394,7 @@ pub fn managed(
             managed::Devices::Choices {
                 mic: args.mic.clone(),
                 sink: args.sink.clone(),
+                share: args.share.clone(),
             },
             keys,
             args.share_audio_owner,

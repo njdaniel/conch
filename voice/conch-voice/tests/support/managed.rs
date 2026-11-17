@@ -36,6 +36,7 @@ use conch_voice::managed::{self, Devices, Host, KeySource, Watchdog};
 use conch_voice::receive::BoxedSink;
 use conch_voice::secrets::Scrubber;
 use conch_voice::session::Input;
+use conch_voice::share_capture::ShareSource;
 use conch_voice::transmit::BoxedMic;
 use conch_voice_api::{
     Secret, VoiceControlAckV2, VoiceControlEvent, VoiceControlEventV2, VoiceControlHelloV1,
@@ -101,6 +102,9 @@ pub struct ManagedSetup {
     /// Microphones and speakers opened by name, as the test arranges them; `None` for the
     /// tone and the counting sink, whatever is asked for.
     pub world: Option<World>,
+    /// Where a v3 session captures a share's sound from (#1586); `None` for nowhere, as on a
+    /// platform with no captures.
+    pub share: Option<ShareSource>,
 }
 
 impl Default for ManagedSetup {
@@ -113,6 +117,7 @@ impl Default for ManagedSetup {
             start_timeout: Duration::from_secs(10),
             no_mute_key: false,
             world: None,
+            share: None,
         }
     }
 }
@@ -445,6 +450,7 @@ impl ManagedRig {
             Arc::clone(&mic_closed),
             Arc::clone(&sink_closed),
         );
+        let share = setup.share.clone().unwrap_or(ShareSource::Unsupported);
         let devices = match setup.world.clone() {
             None => Devices::Given {
                 // A tone that never stops: whatever does not reach the fake's audio source
@@ -463,6 +469,7 @@ impl ManagedRig {
                     )) as BoxedSink)
                 }),
                 sink_tones: vec![440.0],
+                share,
             },
             Some(world) => {
                 let sinks = world.clone();
@@ -490,6 +497,7 @@ impl ManagedRig {
                         }) as BoxedSink)
                     }),
                     sink_tones: vec![440.0],
+                    share,
                 }
             }
         };

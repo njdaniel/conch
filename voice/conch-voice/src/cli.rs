@@ -48,6 +48,7 @@ use crate::audio::SYSTEM_NAME;
 use crate::error::Error;
 use crate::livekit::ShareAudioOwner;
 use crate::secrets::one_line;
+use crate::share_capture::SyntheticSpec;
 
 /// The environment variable that names the server, as for `conch`.
 pub const SERVER_ENV: &str = "CONCH_SERVER";
@@ -116,6 +117,17 @@ impl FromStr for MicChoice {
         }
         Err("expected tone:<hz>, wav:<path> or none".to_owned())
     }
+}
+
+/// What a screen share's sound is captured from, in `managed` only.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ShareChoice {
+    /// No `--test-share-source`: the platform's captures (PipeWire's application streams on
+    /// Linux; none elsewhere). There is no spelling for it on the command line.
+    AudioSystem,
+    /// `--test-share-source tone:<hz>,...`: synthetic applications playing tones, and one
+    /// standing for the helper's own playback, which must never be in the mix. Test only.
+    Synthetic(SyntheticSpec),
 }
 
 /// What stands in for the speakers.
@@ -239,6 +251,11 @@ pub struct ManagedArgs {
     /// helper does not read `keys.mute`, so no key press can unmute a session the owner
     /// muted, a locked screen's included. `conch` passes nothing, and `keys.mute` works.
     pub no_mute_key: bool,
+    /// `--test-share-source`, test only: synthetic applications in place of the platform's
+    /// captures of a share's sound. It chooses only where the sound would come from: a share's
+    /// sound is still captured only when a v3 owner asks for it on the command channel, which
+    /// cannot choose this.
+    pub share: ShareChoice,
 }
 
 /// What the command line asked for.
@@ -408,6 +425,14 @@ pub fn command() -> Command {
                 .value_parser(clap::value_parser!(PathBuf))
                 .hide(true)
                 .help("Test only: read key records from this named pipe instead of the key device voice.toml names"),
+        )
+        .arg(
+            Arg::new("test-share-source")
+                .long("test-share-source")
+                .value_name("SOURCE")
+                .value_parser(SyntheticSpec::from_str)
+                .hide(true)
+                .help("Test only: tone:<hz>[,<hz>...], synthetic applications playing these tones, and one standing for this helper's own playback, instead of the captures of a screen share's sound; still captured only when the owner asks, and nothing the owner sends can choose this"),
         )
         .arg(share_audio_owner_arg())
         .arg(
@@ -693,6 +718,10 @@ where
                 share_audio_owner: share_audio_owner(managed),
                 transmit_ceiling_secs: managed.get_one::<u32>("transmit-ceiling-secs").copied(),
                 no_mute_key: managed.get_flag("no-mute-key"),
+                share: managed
+                    .get_one::<SyntheticSpec>("test-share-source")
+                    .cloned()
+                    .map_or(ShareChoice::AudioSystem, ShareChoice::Synthetic),
             }));
         }
         Some(("devices", devices)) => {
@@ -1574,6 +1603,7 @@ mod tests {
                 share_audio_owner: ShareAudioOwner::Helper,
                 transmit_ceiling_secs: None,
                 no_mute_key: false,
+                share: ShareChoice::AudioSystem,
             })
         );
         assert_eq!(
@@ -1599,6 +1629,7 @@ mod tests {
                 share_audio_owner: ShareAudioOwner::Helper,
                 transmit_ceiling_secs: None,
                 no_mute_key: false,
+                share: ShareChoice::AudioSystem,
             })
         );
         // Nothing that names what to join, or where, or as whom.
@@ -1619,9 +1650,69 @@ mod tests {
             .render_help()
             .to_string();
         assert!(help.contains("--log-level"), "{help}");
-        for hidden in ["--mic", "--sink", "--test-key-device"] {
+        for hidden in [
+            "--mic",
+            "--sink",
+            "--test-key-device",
+            "--test-share-source",
+        ] {
             assert!(!help.contains(hidden), "{hidden} is shown: {help}");
         }
+    }
+
+    /// The synthetic share source (#1586) is `managed`'s alone, hidden, says it is for tests,
+    /// and takes tones and nothing else.
+    #[test]
+    fn the_test_share_source_is_managed_only_hidden_test_only_and_tones_only() {
+        let share = |line: &[&str]| match parse(line.iter().copied()) {
+            Ok(Invocation::Managed(args)) => Ok(args.share),
+            Ok(_) => Err(0),
+            Err(error) => Err(error.exit_code()),
+        };
+        assert_eq!(
+            share(&["conch-voice", "managed"]),
+            Ok(ShareChoice::AudioSystem)
+        );
+        assert_eq!(
+            share(&[
+                "conch-voice",
+                "managed",
+                "--test-share-source",
+                "tone:440,660"
+            ]),
+            Ok(ShareChoice::Synthetic("tone:440,660".parse().unwrap()))
+        );
+        for bad in [
+            "",
+            "monitor",
+            "tone:",
+            "tone:0",
+            "wav:/tmp/x.wav",
+            "default",
+        ] {
+            assert_eq!(
+                share(&["conch-voice", "managed", "--test-share-source", bad]),
+                Err(2),
+                "{bad:?}"
+            );
+        }
+        assert!(
+            parse(["conch-voice", "join", "--test-share-source", "tone:440"]).is_err(),
+            "join never captures a share's sound"
+        );
+        let mut command = command();
+        let managed = command.find_subcommand_mut("managed").unwrap();
+        let arg = managed
+            .get_arguments()
+            .find(|arg| arg.get_id() == "test-share-source")
+            .unwrap();
+        assert!(arg.is_hide_set());
+        let help = arg.get_help().unwrap().to_string();
+        assert!(help.starts_with("Test only"), "{help}");
+        assert!(
+            help.contains("nothing the owner sends can choose this"),
+            "{help}"
+        );
     }
 
     #[test]
