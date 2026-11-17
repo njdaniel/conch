@@ -260,6 +260,10 @@ export function rig(opts: RigOptions = {}): Rig {
           events.push('http:POST companion');
           return Promise.resolve(ok(ANSWER));
         case 'voiceViewerEnd':
+          if (rename.from !== null && request.params?.['channel'] === rename.from) {
+            events.push('http:DELETE companion (old name)');
+            return Promise.resolve(refusal(404, 'channel_not_found'));
+          }
           events.push('http:DELETE companion');
           return Promise.resolve(removal.shift() ?? ok());
         case 'voiceShareAudio':
@@ -300,6 +304,7 @@ export function rig(opts: RigOptions = {}): Rig {
     tell: () => undefined,
     log: (line) => logs.push(line),
     sleep: () => Promise.resolve(),
+    channelId: (share) => sound?.channelId(share) ?? null,
     ...(opts.sound === false ? {} : { soundEnded: (share, reason) => sound?.ended(share, reason) ?? Promise.resolve() }),
   });
   const views: Rig['views'] = [];

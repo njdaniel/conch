@@ -256,6 +256,41 @@ describe('a rename of the share’s channel', () => {
     expect(names(r, 'voiceShareAudioEnd')).toEqual(['general', 'lounge']);
   });
 
+  // The companion's own DELETE (issue #1881) runs alongside the sound's end,
+  // which forgets the id once its withdrawal is done: the companion takes the
+  // id first, so it still finds the new name, with a record or without one.
+  it('the companion’s own DELETE after a rename reaches the new name, while the sound ends alongside it', async () => {
+    const r = make();
+    await sounding(r);
+    await read(r, doc(sharing(SELF, STARTED)));
+    renamed(r, channels({ id: 1, name: 'lounge' }));
+    await r.companion.stop();
+    expect(r.events).toContain('http:DELETE companion (old name)');
+    expect(r.events.filter((e) => e === 'http:DELETE companion')).toHaveLength(1);
+    expect(names(r, 'voiceViewerEnd')).toEqual(['general', 'lounge']);
+    expect(names(r, 'voiceShareAudioEnd').at(-1)).toBe('lounge');
+    expect(r.logs.filter((l) => l.includes('not confirmed'))).toEqual([]);
+  });
+
+  it('the companion’s own DELETE reaches the new name when the share has no sound record', async () => {
+    const r = make();
+    await r.live();
+    await read(r, doc(sharing(SELF, STARTED)));
+    renamed(r, channels({ id: 1, name: 'lounge' }));
+    await r.companion.end('lock');
+    expect(names(r, 'voiceViewerEnd')).toEqual(['general', 'lounge']);
+  });
+
+  it('a watch learned no id: the companion’s DELETE is one by the held name, logged', async () => {
+    const r = make();
+    await r.watch();
+    renamed(r, channels({ id: 1, name: 'lounge' }));
+    await r.companion.stop();
+    expect(names(r, 'voiceViewerEnd')).toEqual(['general']);
+    expect(r.events).not.toContain('http:GET channels');
+    expect(r.logs).toContain('companion: the removal after stopped was not confirmed');
+  });
+
   it('no id known yet, then a 404: the sound ends (stop, DELETE attempt, capture cleared)', async () => {
     const r = make();
     await sounding(r);

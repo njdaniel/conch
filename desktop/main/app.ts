@@ -544,6 +544,10 @@ export async function start(): Promise<void> {
     granted: (contents, document) => {
       share.confirmGrant(contents, document);
     },
+    // The id of the share's channel the sound learned from conchd, for the
+    // companion's own DELETE after a rename (issue #1881). None with the
+    // switch off.
+    channelId: (held) => sound?.channelId(held) ?? null,
     // Every end and stop of a held share: the sound's helper stop, then its
     // consent's DELETE. Nothing with the switch off.
     soundEnded: (held, reason) => sound?.ended(held, reason) ?? Promise.resolve(),
