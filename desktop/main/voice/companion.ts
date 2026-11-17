@@ -38,6 +38,16 @@
 //    unconfirmed end. Main has no signal for whether the page's
 //    display-capture track still runs, so it cannot tell a page that ignored
 //    the end event;
+//  - the DELETE follows a rename of the channel (issue #1881, as the share's
+//    sound does, #1880): conchd resolves the channel by its current name, so
+//    after a rename the held name answers 404 channel_not_found. When main
+//    holds the channel's id (channelId, learned by the share's sound from a
+//    presence answer that showed this person's share, never from the page),
+//    that 404 alone makes main read conchd's channel list, find the id and
+//    send the DELETE once more by the name it has now. With no id, or a name
+//    main's client would refuse, the one DELETE by the held name stands, as it
+//    did, and its failure is logged. One bound covers the DELETE, the list
+//    read and the retry (COMPANION_REMOVE_TIMEOUT_MS);
 //  - every grant needs a new act: none is re-issued after a room renewal,
 //    which ends the share (Q-D4-2 on #1578).
 //
@@ -54,6 +64,7 @@ import type {
 import { voiceCompanionResponseV1, type VoiceCompanionRequestV1, type VoiceCompanionResponseV1 } from '../../../web/src/schema/generated.ts';
 import { fromServer } from '../../../web/src/schema/validate.ts';
 import type { Exchange, Send } from '../api/client.ts';
+import { currentName, isNotFound } from './channel-follow.ts';
 import type { VoiceService } from './service.ts';
 
 // One pass of conchd's voice poller: how long after the helper connects
@@ -122,6 +133,14 @@ export interface CompanionDeps {
   // Called at the start of every end() and stop(), whether or not a companion
   // is held (app.ts: clears the share allowance, share-allowance.ts).
   readonly ended?: () => void;
+  // The id of the live share's channel, as main learned it from conchd's own
+  // answers (ShareSound.channelId), or null when none was learned. Read at the
+  // start of every end() and stop(), synchronously and before any await: the
+  // share's sound (soundEnded) forgets the id once its own withdrawals are
+  // done, and the companion's DELETE runs alongside it and may need the id
+  // after its first answer. Absent: no id, and the DELETE is by the held name
+  // alone.
+  readonly channelId?: (share: ShareRef) => number | null;
   // The share's sound (issue #1854): told of every end and stop of a held
   // companion, once, with the share's ref and after the record is forgotten.
   // It sends the helper's stop and then the consent's DELETE, and resolves
@@ -296,12 +315,26 @@ export class Companion {
     return held === null ? null : { id: held.id, channel: held.channel, generation: held.generation, document: held.document, client: held.client, principal: held.principal };
   }
 
+  #refOf(held: Held): ShareRef {
+    return { id: held.id, channel: held.channel, generation: held.generation, document: held.document, client: held.client, principal: held.principal };
+  }
+
+  // #idOf is the id of the held share's channel, if main learned one; never
+  // throws. Taken before #endSound (see CompanionDeps.channelId).
+  #idOf(held: Held): number | null {
+    try {
+      return this.#deps.channelId?.(this.#refOf(held)) ?? null;
+    } catch {
+      return null;
+    }
+  }
+
   // #endSound tells the share's sound that this share ended, and never throws.
   #endSound(held: Held, reason: RemoveReason): Promise<void> {
     const sound = this.#deps.soundEnded;
     if (sound === undefined) return Promise.resolve();
     try {
-      return sound({ id: held.id, channel: held.channel, generation: held.generation, document: held.document, client: held.client, principal: held.principal }, reason).catch(() => {
+      return sound(this.#refOf(held), reason).catch(() => {
         this.#deps.log(`companion: the share's sound could not be ended after ${reason}`);
       });
     } catch {
@@ -399,11 +432,15 @@ export class Companion {
     // Ended is called above, before the record goes: no listener sees a held
     // grant after it.
     this.#announce();
+    // The id is read now, before the first await: the sound's end forgets it
+    // when its withdrawals are done (a microtask later when it has none), while
+    // the DELETE below may need it after its first answer.
+    const id = this.#idOf(held);
     // The share's sound ends first, at once: its stop is written now, ahead
     // of anything the removal does.
     const sound = this.#endSound(held, 'stopped');
     const closing = this.#close();
-    const removed = await this.#remove(held.client, held.channel, 'stopped');
+    const removed = await this.#remove(held.client, held.channel, 'stopped', id);
     await closing;
     await sound;
     this.#unconfirmed(removed, held, 'stopped');
@@ -426,12 +463,16 @@ export class Companion {
     } catch {
       // A window that cannot be told is not a reason to keep the companion.
     }
+    // The id is read now, before the first await: the sound's end forgets it
+    // when its withdrawals are done (a microtask later when it has none), while
+    // the DELETE below may need it after its first answer.
+    const id = this.#idOf(held);
     // The share's sound ends at once, with the end: its stop is written before
     // anything else here, and its withdrawal follows the stop.
     const sound = this.#endSound(held, reason);
     // Begun at once, alongside the DELETE: neither waits for the other.
     const closing = this.#close();
-    const removed = await this.#remove(held.client, held.channel, reason);
+    const removed = await this.#remove(held.client, held.channel, reason, id);
     await closing;
     await sound;
     this.#unconfirmed(removed, held, reason);
@@ -483,13 +524,28 @@ export class Companion {
     }
   }
 
-  // The one DELETE of an end: never retried. True when conchd confirmed it.
-  async #remove(client: CompanionClient, channel: string, reason: RemoveReason): Promise<boolean> {
-    let exchange: Exchange;
-    try {
-      exchange = await client.send({ op: 'voiceViewerEnd', params: { channel }, query: 'publish=screen', timeoutMs: COMPANION_REMOVE_TIMEOUT_MS });
-    } catch {
-      exchange = { kind: 'none' };
+  // The one DELETE of an end. True when conchd confirmed it. By the held
+  // name; when it answers 404 channel_not_found and `id` is known (it is not
+  // for an unused grant, which no share's sound ever saw, nor for a watch
+  // with no share), the channel's name now is found by that id and the DELETE
+  // is sent once more with it. Nothing else is retried, and a name main's
+  // client refuses (paramOk, in currentName) is not sent. One deadline bounds
+  // the DELETE, the list read and the retry.
+  async #remove(client: CompanionClient, channel: string, reason: RemoveReason, id: number | null = null): Promise<boolean> {
+    const deadline = Date.now() + COMPANION_REMOVE_TIMEOUT_MS;
+    const sendBy = async (name: string, first = false): Promise<Exchange> => {
+      const ms = first ? COMPANION_REMOVE_TIMEOUT_MS : deadline - Date.now();
+      if (ms <= 0) return { kind: 'none' };
+      try {
+        return await client.send({ op: 'voiceViewerEnd', params: { channel: name }, query: 'publish=screen', timeoutMs: ms });
+      } catch {
+        return { kind: 'none' };
+      }
+    };
+    let exchange = await sendBy(channel, true);
+    if (id !== null && isNotFound(exchange)) {
+      const name = await currentName(client, id, deadline - Date.now());
+      if (name !== 'gone' && name !== 'unknown' && name.name !== channel) exchange = await sendBy(name.name);
     }
     if (exchange.kind === 'answer' && exchange.ok) return true;
     this.#deps.log(`companion: the removal after ${reason} was not confirmed`);

@@ -49,6 +49,11 @@ interface Rig {
   readonly granted: [object | null, number][];
   readonly voice: { view: NativeVoiceView; set(view: NativeVoiceView): void };
   readonly document: { value: number };
+  // The channel id main learned of the live share (the sound's channelId), and
+  // a rename at the fake conchd: while `to` is set, a DELETE by any other name
+  // answers 404 (with `code`), and the channel list is `list`.
+  readonly id: { value: number | null; asked: number };
+  readonly rename: { to: string | null; code: string; list: Exchange | null };
   client: CompanionClient | null;
   sends(): Send[];
 }
@@ -74,9 +79,13 @@ function rig(view: NativeVoiceView = running(), share?: () => Promise<'no-portal
   const reloads: Rig['reloads'] = { count: 0, throws: false, seen: [] };
   const contents: Rig['contents'] = { value: win };
   const granted: [object | null, number][] = [];
+  const id: Rig['id'] = { value: null, asked: 0 };
+  const rename: Rig['rename'] = { to: null, code: 'channel_not_found', list: null };
   const client: CompanionClient = {
     send: (request) => {
       steps.push(['send', request]);
+      if (request.op === 'listChannels' && rename.list !== null) return Promise.resolve(rename.list);
+      if (request.op === 'voiceViewerEnd' && rename.to !== null && request.params?.['channel'] !== rename.to) return Promise.resolve(refusal(404, rename.code));
       if (request.op === 'voiceViewerEnd') return Promise.resolve(removals.shift() ?? ok());
       return Promise.resolve(answers.shift() ?? refusal(500));
     },
@@ -93,6 +102,8 @@ function rig(view: NativeVoiceView = running(), share?: () => Promise<'no-portal
     granted,
     voice,
     document,
+    id,
+    rename,
     client,
     sends: () => steps.flatMap((s) => (s[0] === 'send' ? [s[1]] : [])),
     companion: new Companion({
@@ -108,6 +119,10 @@ function rig(view: NativeVoiceView = running(), share?: () => Promise<'no-portal
       },
       client: () => r.client,
       document: () => document.value,
+      channelId: () => {
+        id.asked++;
+        return id.value;
+      },
       tell: (doc, event) => {
         steps.push(['tell', doc, event]);
       },
@@ -432,6 +447,145 @@ describe('the companion’s change signal (the tray follows it)', () => {
     });
     r.answers.push(ok(ANSWER));
     expect((await r.companion.grant({ channel: 'general' })).ok).toBe(true);
+  });
+});
+
+// A rename of the channel during a share or a watch (issue #1881): conchd
+// answers 404 to the old name. The companion's own DELETE follows the channel
+// by the id main learned, never the page's, or stays as it was.
+describe('the companion’s DELETE after a channel rename', () => {
+  const list = (...channels: { id: number; name: string }[]): Exchange => ok({ channels: channels.map((c) => ({ ...c, created_at: '2026-01-01T00:00:00Z' })) });
+  const deletes = (r: Rig): unknown[] => r.sends().filter((s) => s.op === 'voiceViewerEnd').map((s) => s.params?.['channel']);
+  const lists = (r: Rig): number => r.sends().filter((s) => s.op === 'listChannels').length;
+  const renamed = (r: Rig, to: string, id: number | null = 7): void => {
+    r.id.value = id;
+    r.rename.to = to;
+    r.rename.list = list({ id: 7, name: to }, { id: 9, name: 'other' });
+  };
+
+  it.each<[string, (r: Rig) => Promise<unknown>]>([
+    ['stop', (r) => r.companion.stop()],
+    ['end', (r) => r.companion.end('lock')],
+  ])('%s reaches the new name, found by the id', async (_n, end) => {
+    const r = rig();
+    await live(r);
+    renamed(r, 'lounge');
+    await end(r);
+    expect(deletes(r)).toEqual(['general', 'lounge']);
+    expect(lists(r)).toBe(1);
+    expect(r.logs.filter((l) => l.includes('not confirmed'))).toEqual([]);
+    expect(r.reloads.count).toBe(0);
+  });
+
+  it('reads the id once, at the end, never for an unused grant', async () => {
+    const r = rig();
+    const order: string[] = [];
+    const gated = new Companion({
+      voice: { state: () => r.voice.view, subscribe: () => () => undefined },
+      client: () => r.client,
+      document: () => r.document.value,
+      tell: () => undefined,
+      log: () => undefined,
+      locked: () => false,
+      channelId: () => {
+        order.push('id');
+        return 7;
+      },
+      soundEnded: () => {
+        order.push('sound');
+        return Promise.resolve();
+      },
+    });
+    r.answers.push(ok(ANSWER));
+    await gated.grant({ channel: 'general' });
+    await gated.stop();
+    expect(order).toEqual(['id', 'sound']);
+  });
+
+  it('the unused-grant cleanup has no id, so it sends one DELETE by the held name', async () => {
+    const r = rig();
+    r.rename.to = 'lounge';
+    r.rename.list = list({ id: 7, name: 'lounge' });
+    r.id.value = 7;
+    r.answers.push(ok(ANSWER));
+    const p = r.companion.grant({ channel: 'general' });
+    r.voice.set(idle);
+    expect(await p).toEqual({ ok: false, error: 'ended' });
+    expect(deletes(r)).toEqual(['general']);
+    expect(lists(r)).toBe(0);
+    expect(r.id.asked).toBe(0);
+  });
+
+  it('no id known: one DELETE by the held name, logged when it fails', async () => {
+    const r = rig();
+    await live(r);
+    renamed(r, 'lounge', null);
+    await r.companion.stop();
+    expect(deletes(r)).toEqual(['general']);
+    expect(lists(r)).toBe(0);
+    expect(r.logs).toContain('companion: the removal after stopped was not confirmed');
+    expect(r.reloads.count).toBe(1);
+  });
+
+  it('a name the client refuses is never sent', async () => {
+    for (const name of ['50% off', 'dev/ops', 'a\\b']) {
+      const r = rig();
+      await live(r);
+      renamed(r, name);
+      await r.companion.stop();
+      expect(deletes(r)).toEqual(['general']);
+      expect(lists(r)).toBe(1);
+      expect(r.logs).toContain('companion: the removal after stopped was not confirmed');
+    }
+  });
+
+  it('an id missing from the list sends nothing more', async () => {
+    const r = rig();
+    await live(r);
+    renamed(r, 'lounge');
+    r.rename.list = list({ id: 9, name: 'other' });
+    await r.companion.stop();
+    expect(deletes(r)).toEqual(['general']);
+  });
+
+  it('a 404 without channel_not_found reads no list', async () => {
+    const r = rig();
+    await live(r);
+    renamed(r, 'lounge');
+    r.rename.code = 'not_found';
+    await r.companion.stop();
+    expect(deletes(r)).toEqual(['general']);
+    expect(lists(r)).toBe(0);
+  });
+
+  it('a list that cannot be read leaves the one DELETE logged', async () => {
+    const r = rig();
+    await live(r);
+    renamed(r, 'lounge');
+    r.rename.list = { kind: 'none' };
+    await r.companion.stop();
+    expect(deletes(r)).toEqual(['general']);
+    expect(r.logs).toContain('companion: the removal after stopped was not confirmed');
+  });
+
+  it('the retry is not repeated when the new name answers 404 again', async () => {
+    const r = rig();
+    await live(r);
+    renamed(r, 'lounge');
+    r.rename.to = 'elsewhere';
+    await r.companion.stop();
+    expect(deletes(r)).toEqual(['general', 'lounge']);
+    expect(lists(r)).toBe(1);
+  });
+
+  it('the first DELETE has the whole removal bound, and the list read and retry only what is left of it', async () => {
+    const r = rig();
+    await live(r);
+    renamed(r, 'lounge');
+    await r.companion.stop();
+    const timeouts = r.sends().map((s) => s.timeoutMs);
+    expect(timeouts[0]).toBe(COMPANION_REMOVE_TIMEOUT_MS);
+    for (const t of timeouts.slice(1)) expect(t).toBeLessThanOrEqual(COMPANION_REMOVE_TIMEOUT_MS);
   });
 });
 

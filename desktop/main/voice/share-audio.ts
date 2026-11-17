@@ -72,11 +72,11 @@
 //
 // No log line carries a token, a room, a channel, a path, a device or an
 // application name: reasons only.
-import { VOICE_CONTROL_CAPTURE_STOP_MS, listChannelsResponse, voicePresenceV2, voicePresenceV2Schema, type VoiceCompanionAudioRequestV1, type ListChannelsResponse, type VoiceControlShareAudioProblem, type VoicePresenceV2 } from '../../../web/src/schema/generated.ts';
+import { VOICE_CONTROL_CAPTURE_STOP_MS, voicePresenceV2, voicePresenceV2Schema, type VoiceCompanionAudioRequestV1, type VoiceControlShareAudioProblem, type VoicePresenceV2 } from '../../../web/src/schema/generated.ts';
 import type { NativeVoiceView, ShareSoundChooseResult, ShareSoundChoice, ShareSoundReason, ShareSoundStartResult, ShareSoundView, VoiceCommandResult } from '../../../web/src/platform/desktop/bridge.ts';
 import { fromServer } from '../../../web/src/schema/validate.ts';
 import type { Exchange, Send } from '../api/client.ts';
-import { paramOk } from '../api/target.ts';
+import { currentName, isNotFound, type CurrentName } from './channel-follow.ts';
 import { LINUX_SHARE_AUDIO_SCOPE, validApplicationName } from './protocol.ts';
 import type { CommandResult } from './supervisor.ts';
 import type { Companion, RemoveReason, ShareRef } from './companion.ts';
@@ -162,11 +162,6 @@ const PRESENCE_TIMEOUT_MS = 10_000;
 // before the pick, so one such answer can be a read that raced the claim and
 // two cannot.
 const UNSHOWN_READS = 2;
-
-// conchd's word that it has no channel of that name for the caller (the voice
-// routes' 404, channel_not_found): any other 404 is not a rename.
-const isNotFound = (e: Exchange): boolean =>
-  e.kind === 'answer' && e.status === 404 && typeof e.body === 'object' && e.body !== null && (e.body as { code?: unknown }).code === 'channel_not_found';
 
 type Outcome = 'ok' | 'unavailable' | 'failed' | 'ended';
 
@@ -492,6 +487,15 @@ export class ShareSound {
     return c !== null && c.companion === share.id && c.name !== null ? c.name : share.channel;
   }
 
+  // channelId is the id of the share's channel as this module learned it from
+  // an answer that showed the share (#learnId), or null. Read-only, for the
+  // companion's own removal (issue #1881): the companion takes the id before
+  // it tells this module the share ended (ended()), so it never depends on
+  // the order of the two ends.
+  channelId(share: ShareRef): number | null {
+    return this.#idOf(share);
+  }
+
   #idOf(share: ShareRef): number | null {
     const c = this.#channel;
     return c !== null && c.companion === share.id ? c.id : null;
@@ -554,25 +558,16 @@ export class ShareSound {
   }
 
   // #currentName reads conchd's channel list for the id learned, with the
-  // companion's own client, and keeps and returns the name it has now. A name
-  // main's client would refuse to put in a path (a separator, a percent: see
-  // paramOk) cannot be followed, and is 'gone': the sound ends rather than
-  // every later request being refused before the wire.
-  async #currentName(share: ShareRef, timeoutMs: number): Promise<{ readonly name: string } | 'gone' | 'unknown'> {
+  // companion's own client (channel-follow.ts), and keeps and returns the name
+  // it has now. A name main's client would refuse to put in a path is 'gone':
+  // the sound ends rather than every later request being refused before the
+  // wire.
+  async #currentName(share: ShareRef, timeoutMs: number): Promise<CurrentName> {
     const id = this.#idOf(share);
     if (id === null) return 'gone';
-    if (timeoutMs <= 0) return 'unknown';
-    let answer: Exchange;
-    try {
-      answer = await share.client.send({ op: 'listChannels', timeoutMs });
-    } catch {
-      return 'unknown';
-    }
-    if (answer.kind !== 'answer' || !answer.ok || fromServer(listChannelsResponse)(answer.body).length !== 0) return 'unknown';
-    const found = (answer.body as ListChannelsResponse).channels.find((c) => c.id === id);
-    if (found === undefined || !paramOk(found.name)) return 'gone';
-    if (this.#channel?.companion === share.id) this.#channel.name = found.name;
-    return { name: found.name };
+    const found = await currentName(share.client, id, timeoutMs);
+    if (found !== 'gone' && found !== 'unknown' && this.#channel?.companion === share.id) this.#channel.name = found.name;
+    return found;
   }
 
   // #channelLost: main can no longer name the share's channel, so it cannot
