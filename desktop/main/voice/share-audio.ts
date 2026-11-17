@@ -142,6 +142,12 @@ export interface ShareSoundDeps {
 // bound on one read. A read that fails or times out says nothing.
 const PRESENCE_POLL_MS = 5000;
 const PRESENCE_TIMEOUT_MS = 10_000;
+// Answers in a row that list this person sharing nothing, before presence
+// has shown the share, after which the pick is taken to be no share (issue
+// #1876): conchd shows a claim from its answer, and an honest page claims
+// before the pick, so one such answer can be a read that raced the claim and
+// two cannot.
+const UNSHOWN_READS = 2;
 
 type Outcome = 'ok' | 'unavailable' | 'failed' | 'ended';
 
@@ -198,7 +204,10 @@ export class ShareSound {
   // What main's own presence reads have learned of the live companion's
   // share: the start (ms) presence showed this person sharing with, once it
   // showed one. Cleared by a new pick and by the presence end.
-  #watch: { readonly companion: number; start: number | null } | null = null;
+  #watch: { readonly companion: number; readonly pick: number; start: number | null; unshown: number } | null = null;
+  // Bumped by every pick (captureGranted): a read sent before a pick says
+  // nothing of the pick after it.
+  #pick = 0;
   // The next presence read, and whether one is in flight: one at a time, so
   // the answers are judged in the order conchd gave them.
   #pollTimer: NodeJS.Timeout | null = null;
@@ -237,6 +246,7 @@ export class ShareSound {
     const share = this.#deps.companion.current();
     this.#capture = share === null || share.document !== document ? null : { companion: share.id, document };
     // A new pick is learned afresh by presence.
+    this.#pick++;
     this.#watch = null;
     this.#schedulePresence();
   }
@@ -426,6 +436,7 @@ export class ShareSound {
   async #pollPresence(): Promise<void> {
     const share = this.#presenceWanted();
     if (share === null || this.#closed) return;
+    const pick = this.#pick;
     this.#polling = true;
     try {
       let answer: Exchange;
@@ -434,11 +445,19 @@ export class ShareSound {
       } catch {
         answer = { kind: 'none' };
       }
+      // Closed, or a new pick since the read was sent: the answer is of
+      // another moment and says nothing.
+      if (!this.#samePick(pick)) return;
       if (answer.kind === 'answer' && answer.ok && fromServer(voicePresenceV2)(answer.body).length === 0) this.#judgePresence(share, answer.body as VoicePresenceV2);
     } finally {
       this.#polling = false;
       this.#schedulePresence();
     }
+  }
+
+  // #samePick: not closed, and no new pick since `pick` was noted.
+  #samePick(pick: number): boolean {
+    return !this.#closed && pick === this.#pick;
   }
 
   // #judgePresence reads one presence answer for `share`. Only this person's
@@ -449,23 +468,27 @@ export class ShareSound {
   // one, else the start presence first showed after the pick. The share has
   // ended when conchd says so:
   //  - share_ended (conchd's own record of the sharer's last share, in their
-  //    document alone) names that start; no earlier sight is needed;
+  //    document alone) names that start or a newer one; no earlier sight is
+  //    needed;
   //  - presence lists this person sharing with a newer start (a new claim
   //    replaced it), or a start other than the consent's after it learned one;
-  //  - presence showed the share and now lists this person, not sharing.
+  //  - presence showed the share and now lists this person, not sharing;
+  //  - presence has not shown it, and UNSHOWN_READS answers in a row list this
+  //    person sharing nothing: a pick no claim stood behind (or one released
+  //    before main's first read) keeps no capture for a later share.
   // An answer that is not `available` (LiveKit unreachable) and one that does
   // not list this person (a room hidden after an outage) say nothing, so a
   // failed LiveKit call never cuts a live share's sound. A share listed with
-  // no start ties to nothing and ends nothing. Before presence has shown the
-  // share, "not sharing" ends nothing (a claim not shown yet).
+  // no start ties to nothing and ends nothing.
   #judgePresence(share: ShareRef, doc: VoicePresenceV2): void {
     if (this.#presenceWanted()?.id !== share.id) return;
     const o = this.#owned?.share.id === share.id ? this.#owned : null;
-    if (this.#watch?.companion !== share.id) this.#watch = { companion: share.id, start: null };
+    if (this.#watch?.companion !== share.id || this.#watch.pick !== this.#pick) this.#watch = { companion: share.id, pick: this.#pick, start: null, unshown: 0 };
     const watch = this.#watch;
     const ours = o?.startedAt == null ? Number.NaN : Date.parse(o.startedAt);
+    const bound = Number.isNaN(ours) ? watch.start : ours;
     const ended = doc.share_ended === undefined ? Number.NaN : Date.parse(doc.share_ended.started_at);
-    if (!Number.isNaN(ended) && (ended === watch.start || ended === ours)) {
+    if (!Number.isNaN(ended) && bound !== null && ended >= bound) {
       this.#presenceEnd(share, o);
       return;
     }
@@ -488,20 +511,19 @@ export class ShareSound {
       this.#presenceEnd(share, o);
       return;
     }
-    const bound = Number.isNaN(ours) ? watch.start : ours;
-    if (bound === null) {
-      if (starts.length > 0) watch.start = Math.max(...starts);
-      return;
-    }
-    if (starts.some((at) => at > bound)) {
+    if (bound !== null && starts.some((at) => at > bound)) {
       this.#presenceEnd(share, o);
       return;
     }
-    if (starts.includes(bound)) {
-      watch.start = bound;
+    if (bound === null ? starts.length > 0 : starts.includes(bound)) {
+      watch.start = bound ?? Math.max(...starts);
+      watch.unshown = 0;
       return;
     }
-    if (watch.start === bound && starts.length === 0 && !unbound) this.#presenceEnd(share, o);
+    if (starts.length > 0 || unbound) return;
+    // Listed, sharing nothing.
+    const shown = watch.start !== null && watch.start === bound;
+    if (shown || ++watch.unshown >= UNSHOWN_READS) this.#presenceEnd(share, o);
   }
 
   // #presenceEnd: the record ends as every other end does (the stop, then the

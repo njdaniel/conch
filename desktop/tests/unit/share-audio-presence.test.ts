@@ -6,7 +6,8 @@
 import { describe, expect, it } from 'vitest';
 
 import type { VoiceParticipantV2, VoicePresenceV2 } from '../../../web/src/schema/generated.ts';
-import { DOC, STARTED, ok, refusal, rig, settle, type Rig } from './share-audio.support.ts';
+import type { Exchange } from '../../main/api/client.ts';
+import { DOC, STARTED, consent, deferred, ok, refusal, rig, settle, type Rig } from './share-audio.support.ts';
 
 const SELF = 7; // the principal of p7.screen, the fixture grant's identity
 const OTHER = 9;
@@ -119,13 +120,68 @@ describe('presence ends the share’s sound', () => {
     expect(r.events.filter((e) => e !== 'http:GET presence')).toEqual([]);
   });
 
-  it('the lag: "not sharing" before presence has shown the share ends nothing', async () => {
+  it('the lag: one "not sharing" before presence has shown the share ends nothing', async () => {
     const r = make();
     await sounding(r);
-    await read(r, doc(idle(SELF)), doc(idle(SELF)));
+    await read(r, doc(idle(SELF)));
     expect(r.events.filter((e) => e !== 'http:GET presence')).toEqual([]);
     await read(r, doc(sharing(SELF, STARTED)), doc(idle(SELF)));
     expect(r.events.filter((e) => e !== 'http:GET presence')).toEqual(['helper:capture off', 'http:DELETE audio']);
+  });
+
+  it('a share presence never showed ends after two answers in a row of this person sharing nothing', async () => {
+    const r = make();
+    await sounding(r);
+    // An answer that says nothing does not break the run, nor count.
+    await read(r, doc(idle(SELF)), unavailable, doc(idle(OTHER)));
+    expect(r.events.filter((e) => e !== 'http:GET presence')).toEqual([]);
+    await read(r, doc(idle(SELF)));
+    expect(r.events.filter((e) => e !== 'http:GET presence')).toEqual(['helper:capture off', 'http:DELETE audio']);
+  });
+
+  it('a pick no claim stood behind keeps no capture: a later share gets no sound without a new pick', async () => {
+    const r = make();
+    await r.live();
+    await read(r, doc(idle(SELF)), doc(idle(SELF)));
+    expect(await r.sound?.start(DOC)).toEqual({ ok: false, error: 'no-share' });
+    expect(r.events).not.toContain('http:PUT audio');
+  });
+
+  it('a share_ended newer than this share’s start ends it', async () => {
+    const r = make();
+    await sounding(r);
+    await read(r, endedOf(LATER));
+    expect(r.events.filter((e) => e !== 'http:GET presence')).toEqual(['helper:capture off', 'http:DELETE audio']);
+  });
+
+  it('a read sent before a new pick says nothing of it: the new share is not bound to the old one', async () => {
+    const r = make();
+    await r.live();
+    const late = deferred<Exchange>();
+    r.presence.push(late.promise);
+    for (let i = 0; i < 20 && r.presence.length > 0; i++) await settle();
+    // The person stops and shares again: a new pick while the read is out.
+    r.sound?.captureGranted(DOC);
+    late.resolve(ok(doc(sharing(SELF, STARTED))));
+    await settle();
+    await read(r, doc(sharing(SELF, LATER)), doc(sharing(SELF, LATER)));
+    r.put.push(consent(LATER));
+    expect(await r.sound?.start(DOC)).toMatchObject({ ok: true });
+    await read(r, doc(sharing(SELF, LATER)));
+    expect(r.events).toContain('helper:capture on');
+    expect(r.events).not.toContain('helper:capture off');
+  });
+
+  it('an answer that arrives after close is not judged', async () => {
+    const r = make();
+    await sounding(r);
+    const late = deferred<Exchange>();
+    r.presence.push(late.promise);
+    for (let i = 0; i < 20 && r.presence.length > 0; i++) await settle();
+    r.sound?.close();
+    late.resolve(ok(endedOf(STARTED)));
+    await settle();
+    expect(r.events.filter((e) => e !== 'http:GET presence')).toEqual([]);
   });
 
   it('a share listed with no start ties to nothing and ends nothing', async () => {
