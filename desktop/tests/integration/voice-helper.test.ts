@@ -38,6 +38,37 @@ if (!have) {
 // redaction layers should never let through if an error body echoed it back.
 const JWT_CANARY = 'eyJhbGciOiJub25lIn0.eyJzdWIiOiJzeW50aGV0aWMtY2FuYXJ5In0.c3ludGhldGljLXNpZ25hdHVyZS1jYW5hcnk';
 
+// listening binds a stub server to a loopback port and rejects on the server's
+// 'error' event, so a bind failure fails the test at once instead of hanging
+// until the test timeout.
+function listening(server: Server): Promise<void> {
+  return new Promise<void>((resolveListen, reject) => {
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', () => {
+      server.off('error', reject);
+      resolveListen();
+    });
+  });
+}
+
+// The helper's logger writes its own records at the level asked and everything
+// from the SDK only at warn and error (voice/conch-voice/src/logger.rs), so no
+// SDK line can show that the helper ran at trace. Its own lines can: the
+// presence-socket refusal is written at debug, below the default level, and
+// the 503 the stub conchd answers makes the helper write it on every start.
+// A run at a lower level than debug does not show it, so its absence fails
+// the test. The helper has no trace-only record of its own on this path, so
+// this proves "debug or finer", and the --log-level trace argument itself is
+// what asks for trace.
+const RAN_VERBOSE = /^conch-voice: debug: the presence socket could not be opened/;
+const ranVerbose = (lines: readonly string[]): boolean => lines.some((l) => RAN_VERBOSE.test(l));
+// RAN_VERBOSE cannot tell debug from trace, so the level asked for is checked
+// on the command line itself: the helper was started with --log-level trace.
+const askedForTrace = (argv: readonly string[] | undefined): boolean => {
+  const i = argv?.lastIndexOf('--log-level') ?? -1;
+  return i >= 0 && argv?.[i + 1] === 'trace';
+};
+
 // NotLiveKit listens where a session says LiveKit is and answers every HTTP
 // request and every upgrade with 404 and a body of synthetic secrets. Like
 // NotLiveKit in voice/conch-voice/tests/binary.rs, it keeps what reached it
@@ -68,7 +99,7 @@ class NotLiveKit {
   }
 
   async listen(): Promise<this> {
-    await new Promise<void>((r) => this.server.listen(0, '127.0.0.1', r));
+    await listening(this.server);
     this.url = `ws://127.0.0.1:${String((this.server.address() as AddressInfo).port)}`;
     return this;
   }
@@ -78,6 +109,11 @@ class NotLiveKit {
     await new Promise<void>((r) => this.server.close(() => { r(); }));
   }
 }
+
+// No audio device, and the helper's log at trace. spawn.ts leaves RUST_LOG out
+// of the helper's environment by design, so the level is set by the supported
+// option, --log-level, which the supervisor passes through as an extra argument.
+const HELPER_ARGS = ['--mic', 'none', '--sink', 'count', '--log-level', 'trace'];
 
 describe.runIf(have)('the supervisor with the real conch-voice', () => {
   const whoami = readFixture<{ id: number }>('whoami-response-v1.json');
@@ -107,7 +143,7 @@ describe.runIf(have)('the supervisor with the real conch-voice', () => {
       // helper stays reconnecting without contacting LiveKit.
       res.writeHead(503, { 'content-type': 'application/json' }).end(JSON.stringify(readFixture('error.json')));
     });
-    await new Promise<void>((r) => conchd.listen(0, '127.0.0.1', r));
+    await listening(conchd);
     origin = `http://127.0.0.1:${String((conchd.address() as AddressInfo).port)}`;
     execFileSync(binary, ['--version'], { stdio: 'ignore' });
   });
@@ -120,6 +156,12 @@ describe.runIf(have)('the supervisor with the real conch-voice', () => {
   let states: VoiceState[];
   let children: ChildProcessWithoutNullStreams[];
   let nonces: string[];
+  // Each spawn's argument list, and the helper's standard error as it wrote it,
+  // before the supervisor's own redaction and its 32-line tail: the secret
+  // checks read both, so a line the tail evicted, or one the supervisor
+  // scrubbed, cannot hide a helper that leaked.
+  let argvs: (readonly string[])[];
+  let rawStderr: string[];
   let sup: Supervisor;
   let notLiveKit: NotLiveKit | null;
   beforeEach(() => {
@@ -133,13 +175,18 @@ describe.runIf(have)('the supervisor with the real conch-voice', () => {
     states = [];
     children = [];
     nonces = [];
+    argvs = [];
+    rawStderr = [];
     sup = new Supervisor({
       resources: s.resources,
-      env: { HOME: s.root, XDG_RUNTIME_DIR: s.run, PIPEWIRE_REMOTE: 'conch-voice-test-no-such-socket', RUST_LOG: 'trace' },
+      env: { HOME: s.root, XDG_RUNTIME_DIR: s.run, PIPEWIRE_REMOTE: 'conch-voice-test-no-such-socket' },
       log: (line) => logs.push({ at: Date.now(), line }),
       spawn: (command, args, options) => {
         nonces.push(options.env?.['CONCH_VOICE_ATTACH'] ?? '');
+        argvs.push([...args]);
         const child = defaultSpawn(command, args, options);
+        // A second listener only reads; the supervisor's own reader is unaffected.
+        child.stderr.on('data', (chunk: Buffer) => rawStderr.push(chunk.toString('utf8')));
         children.push(child);
         return child;
       },
@@ -167,7 +214,7 @@ describe.runIf(have)('the supervisor with the real conch-voice', () => {
       server: origin,
       channel: 'general',
       principalId: whoami.id,
-      extraArgs: ['--mic', 'none', '--sink', 'count'],
+      extraArgs: HELPER_ARGS,
     });
 
   const reconnecting = (): boolean => sup.state.status === 'running' && sup.state.helper.phase === 'reconnecting';
@@ -177,6 +224,9 @@ describe.runIf(have)('the supervisor with the real conch-voice', () => {
     expect(started.status, JSON.stringify({ started, logs, diag: sup.diagnostics() })).toBe('running');
     if (started.status === 'running') expect(started.helper.version).toBe(2);
     await until(reconnecting, 15_000, 'reconnecting');
+    // The helper's standard error is read apart from its events, so the
+    // record may arrive a moment after the state does.
+    await until(() => ranVerbose(sup.diagnostics()), 15_000, 'the helper\'s debug record');
     expect(seen).toContain('GET /v1/whoami');
     const t0 = Date.now();
     await sup.stop();
@@ -186,9 +236,13 @@ describe.runIf(have)('the supervisor with the real conch-voice', () => {
     expect(logs.some((l) => /SIGTERM|SIGKILL/.test(l.line))).toBe(false);
     console.log(`voice-helper integration: stop to reap took ${String(took)} ms`);
     expect(took).toBeLessThan(VOICE_CONTROL_STOP_KILL_AFTER_MS);
+    // The record was seen before the stop (see RAN_VERBOSE), so the check
+    // below covers the helper's standard error at the level asked, and not
+    // only at its default.
     // Neither secret is anywhere the owner shows or logs, the helper's own
-    // standard error at trace level included.
-    const shown = JSON.stringify([logs, states, sup.diagnostics()]);
+    // standard error included (the SDK's records only at warn and error).
+    expect(askedForTrace(argvs[0]), JSON.stringify(argvs[0])).toBe(true);
+    const shown = JSON.stringify([logs, states, sup.diagnostics(), rawStderr]);
     expect(nonces[0]?.length).toBe(43);
     expect(shown).not.toContain(nonces[0] ?? '?');
     expect(shown).not.toContain(FAKE_TOKEN);
@@ -214,7 +268,7 @@ describe.runIf(have)('the supervisor with the real conch-voice', () => {
     });
     // The service passes the ceiling; the test adds only the no-audio options.
     const spy = sup.start.bind(sup);
-    sup.start = (req) => spy({ ...req, extraArgs: [...(req.extraArgs ?? []), '--mic', 'none', '--sink', 'count'] });
+    sup.start = (req) => spy({ ...req, extraArgs: [...(req.extraArgs ?? []), ...HELPER_ARGS] });
     expect(CEILING_ARGS).toEqual(['--transmit-ceiling-secs', '30']);
     const view = await service.join({ channel: 'general', muted: false, deafened: false });
     expect(view.status, JSON.stringify({ view, logs, diag: sup.diagnostics() })).toBe('running');
@@ -261,7 +315,9 @@ describe.runIf(have)('the supervisor with the real conch-voice', () => {
 
     // Actionable (the SDK's own words for the refusal), printable, bounded:
     // 200 printable ASCII characters and at most one ellipsis.
-    expect(detail).toMatch(/404|not found|websocket|http/i);
+    // The SDK reports the refusal as "signal failure: client error: 404 Not
+    // Found"; the words after it are the echoed body and are not asserted.
+    expect(detail).toMatch(/signal failure: client error: 404 Not Found/);
     expect(detail).toMatch(/^[\x20-\x7e]+…?$/);
     expect(detail.length).toBeLessThanOrEqual(201);
     // The same words are in the log.
@@ -275,7 +331,14 @@ describe.runIf(have)('the supervisor with the real conch-voice', () => {
     expect(logs.some((l) => /SIGTERM|SIGKILL/.test(l.line))).toBe(false);
     expect(took).toBeLessThan(VOICE_CONTROL_STOP_KILL_AFTER_MS);
 
-    const shown = JSON.stringify([logs, states, failureDiagnostics, sup.diagnostics()]);
+    // The helper ran verbose during the failure, not only afterwards.
+    expect(ranVerbose(failureDiagnostics)).toBe(true);
+    // The printable and JWT-canary checks bite only when the SDK echoes the
+    // refusal body (it does today, in "client error: 404 Not Found - <body>"):
+    // if a later SDK drops the body they pass vacuously, which the join-token
+    // and room checks share. The body reaching the stub is asserted above.
+    expect(askedForTrace(argvs[0]), JSON.stringify(argvs[0])).toBe(true);
+    const shown = JSON.stringify([logs, states, failureDiagnostics, sup.diagnostics(), rawStderr]);
     expect(nonces[0]?.length).toBe(43);
     for (const secret of [nonces[0] ?? '?', FAKE_TOKEN, joinToken, room, JWT_CANARY]) {
       expect(shown).not.toContain(secret);

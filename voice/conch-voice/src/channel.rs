@@ -339,8 +339,14 @@ pub fn attach(
 
 /// Everything before the session for `--events-pipe name` on Windows, in this order: the
 /// name is `\\.\pipe\` and a name; the nonce is there and well formed; the pipe is opened
-/// (retried while it is busy, up to the hello's time from here); the attach line is written
-/// and flushed. The first thing to fail is the error, and nothing after it was done.
+/// (retried while it is busy, up to the hello's time from the start of this call); the
+/// attach line is written and flushed, within a hello's time of its own. The first thing to
+/// fail is the error, and nothing after it was done.
+///
+/// The two budgets are separate on purpose, as on Unix, where each attach sets its own
+/// write timeout. A budget shared with the open, or counted from the start of the process,
+/// leaves the write none when the process is old (a test binary's later tests) or the open
+/// used it up, and a write with no time fails on the first poll that is Pending.
 ///
 /// It must be called with a tokio runtime entered (`Runtime::enter`), the one the events
 /// are later written through: the pipe is registered with it.
@@ -355,9 +361,9 @@ pub fn attach(
     scrubber: &Scrubber,
 ) -> Result<Endpoint, Error> {
     use conch_voice_api::VOICE_CONTROL_HELLO_TIMEOUT_MS;
-    // One deadline for the retry and the attach write together: the hello's time from the
-    // start of the process, so the worst case is one hello timeout.
-    let deadline = process_start() + Duration::from_millis(VOICE_CONTROL_HELLO_TIMEOUT_MS);
+    // The open's budget starts here. `main` calls this within moments of the process
+    // starting, so the helper's worst case stays about one hello timeout for the open.
+    let deadline = Instant::now() + Duration::from_millis(VOICE_CONTROL_HELLO_TIMEOUT_MS);
     require_pipe_name(path)?;
     let secret = nonce(environment, scrubber)?;
     let handle = tokio::runtime::Handle::try_current().map_err(|_| Error::Attach("no runtime"))?;
@@ -368,23 +374,32 @@ pub fn attach(
         std::thread::sleep,
     )?;
     let half = Arc::new(client);
-    let mut events = BlockingWriter::new(Arc::clone(&half), handle.clone());
-    // The attach line is small; a peer that does not read it must not hold the helper.
-    events.limit = Some(deadline.saturating_duration_since(Instant::now()));
-    write_attach(&mut events, secret)?;
-    // The events are written without a limit, as to a pipe: a slow owner loses events
-    // (`managed::Events`), not the helper.
-    events.limit = None;
+    let events = write_attach_on(Arc::clone(&half), handle.clone(), secret)?;
     let end = BlockingReader::new(half, handle);
     Ok(Endpoint { events, end })
 }
 
-/// The time the process began, as far as this module knows: `main` calls this first thing
-/// and it keeps that moment; a caller that never did (a test) gets the moment of its first
-/// call. The events endpoint's time to attach is counted from it.
-pub fn process_start() -> std::time::Instant {
-    static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
-    *START.get_or_init(std::time::Instant::now)
+/// Writes the attach line to `half` with a full hello timeout for the write itself, whatever
+/// was spent before, and hands back the events' writer without a limit.
+///
+/// # Errors
+///
+/// [`Error::Attach`] if the line cannot be built or written in time.
+#[cfg(any(windows, test))]
+fn write_attach_on<H: Half>(
+    half: Arc<H>,
+    handle: tokio::runtime::Handle,
+    nonce: &Secret,
+) -> Result<BlockingWriter<H>, Error> {
+    use conch_voice_api::VOICE_CONTROL_HELLO_TIMEOUT_MS;
+    let mut events = BlockingWriter::new(half, handle);
+    // The attach line is small; a peer that does not read it must not hold the helper.
+    events.limit = Some(Duration::from_millis(VOICE_CONTROL_HELLO_TIMEOUT_MS));
+    write_attach(&mut events, nonce)?;
+    // The events are written without a limit, as to a pipe: a slow owner loses events
+    // (`managed::Events`), not the helper.
+    events.limit = None;
+    Ok(events)
 }
 
 /// The Windows error for a pipe that exists and has no instance waiting for a client.
@@ -649,6 +664,9 @@ mod bridge_tests {
         write_error: Option<ErrorKind>,
         /// A write that never finishes.
         write_hangs: bool,
+        /// A write that is not ready on its first poll and is a moment later: cleared by the
+        /// first write, so only that one is pending.
+        write_pending_once: std::sync::atomic::AtomicBool,
         reads: Mutex<VecDeque<std::io::Result<Vec<u8>>>>,
     }
 
@@ -656,6 +674,13 @@ mod bridge_tests {
         async fn write_some(&self, buf: &[u8]) -> std::io::Result<usize> {
             if self.write_hangs {
                 std::future::pending::<()>().await;
+            }
+            if self
+                .write_pending_once
+                .swap(false, std::sync::atomic::Ordering::SeqCst)
+            {
+                // Pending for real time, as an IOCP completion is, not just for a repoll.
+                tokio::time::sleep(Duration::from_millis(20)).await;
             }
             if let Some(kind) = self.write_error {
                 return Err(kind.into());
@@ -881,6 +906,28 @@ mod bridge_tests {
         assert_eq!(wrote.last(), Some(&b'\n'));
         let attached = conch_voice_api::parse_attached(&wrote[..wrote.len() - 1]).unwrap();
         assert!(attached.matches(FAKE_NONCE));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_attach_write_has_its_own_budget_when_the_first_poll_is_pending() {
+        // A connection that is not writable on the first poll, as an IOCP pipe can be. The
+        // write's budget is its own (write_attach_on takes no start), so nothing spent
+        // before it, by the open or by an old process, can leave it none.
+        let half = Arc::new(Fake {
+            write_pending_once: std::sync::atomic::AtomicBool::new(true),
+            ..Fake::default()
+        });
+        let kept = Arc::clone(&half);
+        let handle = handle();
+        let events = tokio::task::spawn_blocking(move || {
+            write_attach_on(half, handle, &Secret::new(FAKE_NONCE))
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        // The events after the attach are written without a limit, as to a pipe.
+        assert!(events.limit.is_none());
+        assert_eq!(kept.written.lock().unwrap().last(), Some(&b'\n'));
     }
 
     /// A fake nonce from `voice-control-pipe/sensitive.json`.
