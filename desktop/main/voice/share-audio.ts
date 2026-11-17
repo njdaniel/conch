@@ -41,6 +41,19 @@
 //    companion's own client, every PRESENCE_POLL_MS, and ends the record (the
 //    stop, then the DELETE, then the capture) once conchd says the share
 //    ended, whatever the page does or opens;
+//  - a channel's rename is followed by its id (issue #1880). conchd resolves
+//    /v1/channels/{channel} by the channel's current name, and the companion
+//    names it by the name it held at the grant, so after a rename the
+//    presence read, the consent and its withdrawal answer 404. Main learns
+//    the channel's id from a valid presence answer for the share (never the
+//    page's word), and on a 404 asks conchd's channel list (the companion's
+//    own client) for the current name of that id, retries the request once
+//    with it and uses it for every later request of that share's sound. A
+//    channel that cannot be named any more (no id learned yet, the id absent
+//    from the list, the retry still refused, or an old name that now answers
+//    for another channel) ends the sound as every other end does: stop, then
+//    the DELETE attempt, then the capture cleared. A list that cannot be read
+//    says nothing, and is tried again with the next read;
 //  - every step after an await asks again whether this record is still the
 //    one (not ended, not replaced) before it writes anything, so a consent
 //    answer that arrives after a stop, a leave or a new share sends no command
@@ -59,10 +72,10 @@
 //
 // No log line carries a token, a room, a channel, a path, a device or an
 // application name: reasons only.
-import { VOICE_CONTROL_CAPTURE_STOP_MS, voicePresenceV2, voicePresenceV2Schema, type VoiceCompanionAudioRequestV1, type VoiceControlShareAudioProblem, type VoicePresenceV2 } from '../../../web/src/schema/generated.ts';
+import { VOICE_CONTROL_CAPTURE_STOP_MS, listChannelsResponse, voicePresenceV2, voicePresenceV2Schema, type VoiceCompanionAudioRequestV1, type ListChannelsResponse, type VoiceControlShareAudioProblem, type VoicePresenceV2 } from '../../../web/src/schema/generated.ts';
 import type { NativeVoiceView, ShareSoundChooseResult, ShareSoundChoice, ShareSoundReason, ShareSoundStartResult, ShareSoundView, VoiceCommandResult } from '../../../web/src/platform/desktop/bridge.ts';
 import { fromServer } from '../../../web/src/schema/validate.ts';
-import type { Exchange } from '../api/client.ts';
+import type { Exchange, Send } from '../api/client.ts';
 import { LINUX_SHARE_AUDIO_SCOPE, validApplicationName } from './protocol.ts';
 import type { CommandResult } from './supervisor.ts';
 import type { Companion, RemoveReason, ShareRef } from './companion.ts';
@@ -149,6 +162,8 @@ const PRESENCE_TIMEOUT_MS = 10_000;
 // two cannot.
 const UNSHOWN_READS = 2;
 
+const isNotFound = (e: Exchange): boolean => e.kind === 'answer' && e.status === 404;
+
 type Outcome = 'ok' | 'unavailable' | 'failed' | 'ended';
 
 // One share's sound, from its consent to its withdrawal.
@@ -208,6 +223,11 @@ export class ShareSound {
   // Bumped by every pick (captureGranted): a read sent before a pick says
   // nothing of the pick after it.
   #pick = 0;
+  // The channel of the live companion as conchd names it now (issue #1880):
+  // its id, learned from a presence answer, and the current name once a
+  // rename was followed. Kept per companion, as #watch is, and dropped when
+  // that companion's end has finished.
+  #channel: { readonly companion: number; id: number | null; name: string | null } | null = null;
   // The next presence read, and whether one is in flight: one at a time, so
   // the answers are judged in the order conchd gave them.
   #pollTimer: NodeJS.Timeout | null = null;
@@ -440,19 +460,110 @@ export class ShareSound {
     this.#polling = true;
     try {
       let answer: Exchange;
+      let lost = false;
       try {
-        answer = await share.client.send({ op: 'voicePresence', params: { channel: share.channel }, query: `schema=${voicePresenceV2Schema}`, timeoutMs: PRESENCE_TIMEOUT_MS });
+        const read = await this.#sendFollowing(share, { op: 'voicePresence', query: `schema=${voicePresenceV2Schema}`, timeoutMs: PRESENCE_TIMEOUT_MS }, (e) => this.#presenceMoved(share, e));
+        answer = read.exchange;
+        lost = read.lost;
       } catch {
         answer = { kind: 'none' };
       }
       // Closed, or a new pick since the read was sent: the answer is of
       // another moment and says nothing.
       if (!this.#samePick(pick)) return;
-      if (answer.kind === 'answer' && answer.ok && fromServer(voicePresenceV2)(answer.body).length === 0) this.#judgePresence(share, answer.body as VoicePresenceV2);
+      if (lost) this.#channelLost(share);
+      else if (answer.kind === 'answer' && answer.ok && fromServer(voicePresenceV2)(answer.body).length === 0) this.#judgePresence(share, answer.body as VoicePresenceV2);
     } finally {
       this.#polling = false;
       this.#schedulePresence();
     }
+  }
+
+  // ------------------------------------------------- following a rename
+
+  // #channelOf: the name to put in a request of this share's sound: the
+  // current one once a rename was followed, else the one the grant named.
+  #channelOf(share: ShareRef): string {
+    const c = this.#channel;
+    return c !== null && c.companion === share.id && c.name !== null ? c.name : share.channel;
+  }
+
+  #idOf(share: ShareRef): number | null {
+    const c = this.#channel;
+    return c !== null && c.companion === share.id ? c.id : null;
+  }
+
+  // #learnId keeps the channel's id from a presence answer for the share: the
+  // first valid one only. A later answer for another id never replaces it
+  // (#presenceMoved handles that before it gets here).
+  #learnId(share: ShareRef, id: number): void {
+    if (!Number.isSafeInteger(id) || id <= 0) return;
+    if (this.#channel?.companion !== share.id) this.#channel = { companion: share.id, id: null, name: null };
+    if (this.#channel.id === null) this.#channel.id = id;
+  }
+
+  // #dropChannel forgets what was learned of this companion's channel.
+  #dropChannel(companionId: number): void {
+    if (this.#channel?.companion === companionId) this.#channel = null;
+  }
+
+  // #presenceMoved: the read answered 404, or answered for another channel
+  // than the one learned (the old name now belongs to a new channel).
+  #presenceMoved(share: ShareRef, e: Exchange): boolean {
+    if (isNotFound(e)) return true;
+    const id = this.#idOf(share);
+    if (id === null || e.kind !== 'answer' || !e.ok || fromServer(voicePresenceV2)(e.body).length !== 0) return false;
+    return (e.body as VoicePresenceV2).channel_id !== id;
+  }
+
+  // #sendFollowing sends one request of the share's sound by the channel's
+  // current name. When `moved` says the answer shows the channel is not at
+  // that name, it looks the name up by id and sends the request once more
+  // with it. `lost`: the channel cannot be named any more (no id learned, the
+  // id not in the list, or the retry moved again). A list that cannot be read
+  // is not lost: the first answer stands and the next request asks again.
+  async #sendFollowing(share: ShareRef, request: Omit<Send, 'params'>, moved: (e: Exchange) => boolean = isNotFound): Promise<{ exchange: Exchange; lost: boolean }> {
+    const sendBy = async (name: string): Promise<Exchange> => {
+      try {
+        return await share.client.send({ ...request, params: { channel: name } });
+      } catch {
+        return { kind: 'none' };
+      }
+    };
+    const first = await sendBy(this.#channelOf(share));
+    if (!moved(first)) return { exchange: first, lost: false };
+    const name = await this.#currentName(share);
+    if (name === 'unknown') return { exchange: first, lost: false };
+    if (name === 'gone') return { exchange: first, lost: true };
+    const again = await sendBy(name.name);
+    return { exchange: again, lost: moved(again) };
+  }
+
+  // #currentName reads conchd's channel list for the id learned, with the
+  // companion's own client, and keeps and returns the name it has now.
+  async #currentName(share: ShareRef): Promise<{ readonly name: string } | 'gone' | 'unknown'> {
+    const id = this.#idOf(share);
+    if (id === null) return 'gone';
+    let answer: Exchange;
+    try {
+      answer = await share.client.send({ op: 'listChannels', timeoutMs: PRESENCE_TIMEOUT_MS });
+    } catch {
+      return 'unknown';
+    }
+    if (answer.kind !== 'answer' || !answer.ok || fromServer(listChannelsResponse)(answer.body).length !== 0) return 'unknown';
+    const found = (answer.body as ListChannelsResponse).channels.find((c) => c.id === id);
+    if (found === undefined) return 'gone';
+    if (this.#channel?.companion === share.id) this.#channel.name = found.name;
+    return { name: found.name };
+  }
+
+  // #channelLost: main can no longer name the share's channel, so it cannot
+  // read its presence nor be sure to withdraw: the sound ends as every end
+  // does (the stop, the DELETE attempt, the capture cleared).
+  #channelLost(share: ShareRef): void {
+    if (this.#presenceWanted()?.id !== share.id) return;
+    this.#deps.log('share sound: the share’s channel can no longer be named');
+    this.#presenceEnd(share, this.#owned?.share.id === share.id ? this.#owned : null);
   }
 
   // #samePick: not closed, and no new pick since `pick` was noted.
@@ -480,8 +591,14 @@ export class ShareSound {
   // not list this person (a room hidden after an outage) say nothing, so a
   // failed LiveKit call never cuts a live share's sound. A share listed with
   // no start ties to nothing and ends nothing.
+  //
+  // A rename of the channel is followed before an answer gets here
+  // (#sendFollowing, by the id this learns from `channel_id`): an answer that
+  // names another channel than the learned id is never judged, and one that
+  // cannot be followed ends the sound (#channelLost).
   #judgePresence(share: ShareRef, doc: VoicePresenceV2): void {
     if (this.#presenceWanted()?.id !== share.id) return;
+    this.#learnId(share, doc.channel_id);
     const o = this.#owned?.share.id === share.id ? this.#owned : null;
     if (this.#watch?.companion !== share.id || this.#watch.pick !== this.#pick) this.#watch = { companion: share.id, pick: this.#pick, start: null, unshown: 0 };
     const watch = this.#watch;
@@ -550,8 +667,14 @@ export class ShareSound {
     if (reason === 'switch' || reason === 'sign-out' || reason === 'quit') this.#serverRefused = false;
     if (this.#capture?.companion === share.id) this.#capture = null;
     const o = this.#owned;
-    if (o === null || o.share.id !== share.id) return Promise.resolve();
-    return this.#end(o, reason);
+    if (o === null || o.share.id !== share.id) {
+      this.#dropChannel(share.id);
+      return Promise.resolve();
+    }
+    // The withdrawal of this end still needs the channel's current name.
+    return this.#end(o, reason).finally(() => {
+      this.#dropChannel(share.id);
+    });
   }
 
   // leaving is a leave of voice (any: the person's, a suspend's, a teardown's):
@@ -632,12 +755,7 @@ export class ShareSound {
   // #withdraw is the DELETE of the consent: once, never retried, bounded. A
   // failure is logged by its kind alone.
   async #withdraw(o: Owned): Promise<void> {
-    let exchange: Exchange;
-    try {
-      exchange = await o.share.client.send({ op: 'voiceShareAudioEnd', params: { channel: o.share.channel }, timeoutMs: WITHDRAW_TIMEOUT_MS });
-    } catch {
-      exchange = { kind: 'none' };
-    }
+    const { exchange } = await this.#sendFollowing(o.share, { op: 'voiceShareAudioEnd', timeoutMs: WITHDRAW_TIMEOUT_MS });
     if (!(exchange.kind === 'answer' && exchange.ok)) this.#deps.log('share sound: the withdrawal was not confirmed');
   }
 
@@ -766,11 +884,7 @@ export class ShareSound {
     const body: VoiceCompanionAudioRequestV1 = { scope: LINUX_SHARE_AUDIO_SCOPE, publisher: 'person' };
     o.consentSent = true;
     const sent = (async (): Promise<Exchange> => {
-      try {
-        return await o.share.client.send({ op: 'voiceShareAudio', params: { channel: o.share.channel }, body, timeoutMs: CONSENT_TIMEOUT_MS });
-      } catch {
-        return { kind: 'none' };
-      }
+      return (await this.#sendFollowing(o.share, { op: 'voiceShareAudio', body, timeoutMs: CONSENT_TIMEOUT_MS })).exchange;
     })();
     o.inflight = sent;
     void sent.finally(() => {
