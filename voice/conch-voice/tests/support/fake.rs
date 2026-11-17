@@ -6,17 +6,18 @@
 //! whatever its mute state, and muting a track that is muted already does nothing, so a
 //! republished track stays enabled until it is disabled.
 
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use conch_voice::livekit::Subscription;
 use conch_voice::sdk::{
-    DisconnectReason, Joined, MicFeed, MicTrack, RoomHandle, SdkError, SdkEvent, Transport,
+    DisconnectReason, Joined, MicFeed, MicTrack, RoomHandle, SdkError, SdkEvent, ShareAudioFeed,
+    ShareAudioTrack, Transport,
 };
 use conch_voice::secrets::Scrubber;
 use conch_voice_api::Secret;
-use conch_voice_audio::{Frame, GatedFrame};
+use conch_voice_audio::{Frame, GatedFrame, StereoFrame};
 use tokio::sync::{Notify, mpsc};
 
 /// One thing the client did to the SDK.
@@ -30,6 +31,54 @@ pub enum Call {
     /// One frame handed to the track's audio source.
     Frame,
     Close,
+    /// The share-audio track published (#1586): a second track, never the microphone's.
+    SharePublish,
+    /// The share-audio track muted, as LiveKit is told.
+    ShareMute,
+    /// The share-audio track unmuted.
+    ShareUnmute,
+    /// The share-audio track unpublished by the client.
+    ShareUnpublish,
+    /// The share-audio track disabled, LiveKit not told.
+    ShareDisable,
+}
+
+/// How many of the share's left-channel samples the fake keeps: two seconds.
+pub const SHARE_SAMPLES_KEPT: usize = 96_000;
+
+/// The share-audio track's side of the fake (#1586).
+#[derive(Default)]
+struct ShareSide {
+    /// What the next publishes fail with; when empty they succeed.
+    failures: VecDeque<String>,
+    /// While set, the next publish waits here after it has published.
+    hold: Option<Arc<Notify>>,
+    /// Which track is published now, if one is: its number (see `ids`).
+    live: Option<u64>,
+    /// Each track's id now, by its number. A republish gives the same track a new id, as
+    /// the server re-issues it.
+    ids: BTreeMap<u64, String>,
+    /// Republishes made so far, for their ids.
+    republishes: u64,
+    /// The share's grant taken back: the participant may no longer publish its sound.
+    revoked: bool,
+    /// Tracks published, ever.
+    published: u64,
+    /// LiveKit's muted flag of the track, as the SDK keeps it: a republish of the same track
+    /// leaves it as it was.
+    muted: bool,
+    /// Whether the track sends what it is handed: the SDK enables it on every publish, a
+    /// republish included, whatever `muted` says, and `mute` only disables a track that was
+    /// not muted already (livekit 0.9.4 `set_muted` returns early).
+    enabled: bool,
+    /// Frames handed over while the track was muted and still enabled: sent to the room
+    /// while the state says muted.
+    leaked: u64,
+    frames: u64,
+    loud_frames: u64,
+    frames_while_muted: u64,
+    /// The newest left-channel samples handed over, oldest first.
+    samples: VecDeque<f32>,
 }
 
 /// What a log record of the SDK's would be: written through the `log` facade while the
@@ -98,6 +147,7 @@ struct Inner {
     /// (`support::Script`) tells its frames apart by it.
     first_samples: Vec<f32>,
     tracks: u64,
+    share: ShareSide,
 }
 
 /// The fake. Cloning it gives another handle on the same one.
@@ -322,6 +372,119 @@ impl FakeSdk {
     pub fn is_enabled(&self) -> bool {
         self.lock().enabled
     }
+
+    // ------------------------------------------------- the share-audio track (#1586)
+
+    /// The next share-audio publish fails with this text: no share grant yet.
+    pub fn fail_next_share_publish(&self, text: &str) {
+        self.lock().share.failures.push_back(text.to_owned());
+    }
+
+    /// Makes the next share-audio publish stop after it has published and before it
+    /// returns, until the returned handle is notified.
+    pub fn hold_share_publish(&self) -> Arc<Notify> {
+        let hold = Arc::new(Notify::new());
+        self.lock().share.hold = Some(Arc::clone(&hold));
+        hold
+    }
+
+    /// The id of the share-audio track published now, if one is.
+    pub fn share_track(&self) -> Option<String> {
+        let inner = self.lock();
+        inner
+            .share
+            .live
+            .and_then(|n| inner.share.ids.get(&n).cloned())
+    }
+
+    /// Share-audio tracks published, ever.
+    pub fn share_published(&self) -> u64 {
+        self.lock().share.published
+    }
+
+    /// Whether the share-audio track is muted, as LiveKit was told.
+    pub fn share_muted(&self) -> bool {
+        self.lock().share.muted
+    }
+
+    /// Whether the share-audio track sends what it is handed.
+    pub fn share_enabled(&self) -> bool {
+        self.lock().share.enabled
+    }
+
+    /// Frames handed to the share-audio track while it was muted and still enabled: what a
+    /// muted share would have sent to the room.
+    pub fn share_leaked_frames(&self) -> u64 {
+        self.lock().share.leaked
+    }
+
+    /// Stereo frames handed to the share-audio track's source so far.
+    pub fn share_frames(&self) -> u64 {
+        self.lock().share.frames
+    }
+
+    /// Of those, the ones that were not silence.
+    pub fn share_loud_frames(&self) -> u64 {
+        self.lock().share.loud_frames
+    }
+
+    /// Of those, the ones handed over while the share-audio track was muted.
+    pub fn share_frames_while_muted(&self) -> u64 {
+        self.lock().share.frames_while_muted
+    }
+
+    /// The newest left-channel samples of the share's mix, oldest first, at most
+    /// [`SHARE_SAMPLES_KEPT`].
+    pub fn share_samples(&self) -> Vec<f32> {
+        self.lock().share.samples.iter().copied().collect()
+    }
+
+    /// Forgets the share's samples kept so far.
+    pub fn clear_share_samples(&self) {
+        self.lock().share.samples.clear();
+    }
+
+    /// The server takes the share's grant back, as the real one does: the participant's
+    /// permission no longer allows the share's sound, and that is all the SDK reports (livekit
+    /// 0.9.4 says nothing of a local track the server closed). The client's publication stays
+    /// until the client unpublishes it. `false` when no room is joined.
+    pub fn revoke_share_grant(&self) -> bool {
+        self.lock().share.revoked = true;
+        self.emit(SdkEvent::PermissionChanged { allowed: false })
+    }
+
+    /// The share's grant taken back and given again at once: two permission changes, the
+    /// first saying no and the second yes, read by the helper after both happened (so the
+    /// permission it holds then allows the share again). `false` when no room is joined.
+    pub fn revoke_and_regrant_share(&self) -> bool {
+        self.lock().share.revoked = false;
+        self.emit(SdkEvent::PermissionChanged { allowed: false })
+            && self.emit(SdkEvent::PermissionChanged { allowed: true })
+    }
+
+    /// The SDK's own full reconnect republishes the share-audio track too, as the real one
+    /// does: it unpublishes it (which it reports to nobody here: the real SDK's
+    /// `LocalTrackUnpublished` is not passed on) and publishes the same track again under a
+    /// new id. The track keeps its muted flag and is enabled all the same (`publish_track`
+    /// ends in `track.enable()`), then the SDK says so as the share's.
+    pub fn republish_share(&self) {
+        {
+            let mut inner = self.lock();
+            if let Some(n) = inner.share.live {
+                inner.share.republishes += 1;
+                let id = format!("TR_share{n}r{}", inner.share.republishes);
+                inner.share.ids.insert(n, id);
+            }
+            inner.share.enabled = true;
+        }
+        assert!(self.emit(SdkEvent::ShareRepublished), "no room is joined");
+    }
+
+    /// A full reconnect whose republish of the share's track failed: the track is no longer
+    /// among the participant's publications, and nothing is reported.
+    pub fn lose_share_in_republish(&self) {
+        self.lock().share.live = None;
+    }
 }
 
 impl Transport for FakeSdk {
@@ -387,6 +550,41 @@ pub struct FakeRoom {
 impl RoomHandle for FakeRoom {
     type Track = FakeTrack;
     type Feed = FakeFeed;
+    type ShareTrack = FakeShareTrack;
+    type ShareFeed = FakeShareFeed;
+
+    fn publish_share_audio(
+        &self,
+    ) -> impl std::future::Future<Output = Result<(FakeShareTrack, FakeShareFeed), SdkError>>
+    + Send
+    + 'static {
+        let inner = Arc::clone(&self.inner);
+        async move {
+            let (hold, id) = {
+                let mut inner = inner.lock().unwrap();
+                inner.calls.push(Call::SharePublish);
+                if let Some(text) = inner.share.failures.pop_front() {
+                    return Err(SdkError::scrubbed(text));
+                }
+                inner.share.published += 1;
+                let n = inner.share.published;
+                inner.share.ids.insert(n, format!("TR_share{n}"));
+                inner.share.live = Some(n);
+                // A new track: not muted, and enabled.
+                inner.share.muted = false;
+                inner.share.enabled = true;
+                (inner.share.hold.take(), n)
+            };
+            if let Some(hold) = hold {
+                hold.notified().await;
+            }
+            let track = FakeShareTrack {
+                inner: Arc::clone(&inner),
+                n: id,
+            };
+            Ok((track, FakeShareFeed { inner }))
+        }
+    }
 
     async fn publish_microphone(&self) -> Result<(FakeTrack, FakeFeed), SdkError> {
         let hold = {
@@ -512,6 +710,93 @@ impl MicTrack for FakeTrack {
         let mut inner = self.inner.lock().unwrap();
         inner.calls.push(Call::Disable);
         inner.enabled = false;
+    }
+}
+
+/// The fake's share-audio track.
+pub struct FakeShareTrack {
+    inner: Arc<Mutex<Inner>>,
+    /// This track's number: its id is the one `ids` holds for it now.
+    n: u64,
+}
+
+impl ShareAudioTrack for FakeShareTrack {
+    fn id(&self) -> String {
+        let inner = self.inner.lock().unwrap();
+        inner.share.ids.get(&self.n).cloned().unwrap_or_default()
+    }
+
+    fn is_allowed(&self) -> bool {
+        !self.inner.lock().unwrap().share.revoked
+    }
+
+    fn is_published(&self) -> bool {
+        self.inner.lock().unwrap().share.live == Some(self.n)
+    }
+
+    fn mute(&self) {
+        let mut inner = self.inner.lock().unwrap();
+        inner.calls.push(Call::ShareMute);
+        // As the SDK: muting a muted track changes nothing, an enabled one included.
+        if !inner.share.muted {
+            inner.share.muted = true;
+            inner.share.enabled = false;
+        }
+    }
+
+    fn disable(&self) {
+        let mut inner = self.inner.lock().unwrap();
+        inner.calls.push(Call::ShareDisable);
+        inner.share.enabled = false;
+    }
+
+    fn unmute(&self) {
+        let mut inner = self.inner.lock().unwrap();
+        inner.calls.push(Call::ShareUnmute);
+        if inner.share.muted {
+            inner.share.muted = false;
+            inner.share.enabled = true;
+        }
+    }
+
+    fn unpublish(self) -> impl std::future::Future<Output = ()> + Send + 'static {
+        let inner = Arc::clone(&self.inner);
+        async move {
+            let mut inner = inner.lock().unwrap();
+            inner.calls.push(Call::ShareUnpublish);
+            if inner.share.live == Some(self.n) {
+                inner.share.live = None;
+            }
+        }
+    }
+}
+
+/// The fake share-audio track's source: it counts what it is handed and keeps the newest
+/// left-channel samples.
+pub struct FakeShareFeed {
+    inner: Arc<Mutex<Inner>>,
+}
+
+impl ShareAudioFeed for FakeShareFeed {
+    async fn send(&mut self, frame: &StereoFrame) {
+        let mut inner = self.inner.lock().unwrap();
+        let share = &mut inner.share;
+        share.frames += 1;
+        if frame.iter().any(|sample| *sample != 0.0) {
+            share.loud_frames += 1;
+        }
+        if share.muted {
+            share.frames_while_muted += 1;
+            if share.enabled {
+                share.leaked += 1;
+            }
+        }
+        for pair in frame.chunks_exact(2) {
+            if share.samples.len() == SHARE_SAMPLES_KEPT {
+                share.samples.pop_front();
+            }
+            share.samples.push_back(pair[0]);
+        }
     }
 }
 

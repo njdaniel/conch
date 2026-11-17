@@ -405,10 +405,15 @@ fn the_hello_comes_first_and_an_owner_that_never_starts_it_ends_it() {
     match &helper.events()[0] {
         VoiceControlEvent::Hello(hello) => {
             assert_eq!(hello.seq, 1);
-            // Both versions, in v1's frozen shape (docs/design/tui-voice.md §20.2).
+            // Every version, in v1's frozen shape (docs/design/tui-voice.md §20.2): v3 since
+            // #1586 (docs/design/linux-share-audio.md §7), offered on every platform.
             assert_eq!(
                 hello.versions,
-                ["conch.voice_control.v1", "conch.voice_control.v2"]
+                [
+                    "conch.voice_control.v1",
+                    "conch.voice_control.v2",
+                    "conch.voice_control.v3"
+                ]
             );
             assert_eq!(
                 hello.helper_version,
