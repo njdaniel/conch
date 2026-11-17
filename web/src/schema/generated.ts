@@ -1479,6 +1479,7 @@ export interface VoiceCompanionResponseV1 {
   publish: VoiceCompanionPublish;
   subscribe: boolean;
   expires_at: string;
+  channel_id?: number;
 }
 
 export const voiceCompanionResponseV1 = object<VoiceCompanionResponseV1>({
@@ -1489,6 +1490,7 @@ export const voiceCompanionResponseV1 = object<VoiceCompanionResponseV1>({
   publish: voiceCompanionPublish,
   subscribe: bool,
   expires_at: timestamp,
+  channel_id: optional(int),
 });
 
 // schema.VoiceShareAudioScope
@@ -1523,12 +1525,14 @@ export interface VoiceCompanionAudioV1 {
   scope: VoiceShareAudioScope;
   publisher?: VoiceShareAudioPublisher;
   started_at: string;
+  channel_id?: number;
 }
 
 export const voiceCompanionAudioV1 = object<VoiceCompanionAudioV1>({
   scope: voiceShareAudioScope,
   publisher: optional(voiceShareAudioPublisher),
   started_at: timestamp,
+  channel_id: optional(int),
 });
 
 // schema.VoiceShareRequestV1

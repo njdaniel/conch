@@ -939,3 +939,55 @@ func TestVoiceCompanionPublishOnlyKeepsItsGrant(t *testing.T) {
 		}
 	}
 }
+
+// TestVoiceCompanionNamesTheChannel: the grant names the channel by id (issue
+// #1883), the id of the channel the route's name resolved to. The route is
+// addressed by name and a name can be given to another channel, so the id is
+// what lets the holder of a grant tell which channel a later answer is from:
+// a rename keeps it, and a channel created under the old name answers with
+// its own.
+func TestVoiceCompanionNamesTheChannel(t *testing.T) {
+	f, _ := newShareFixture(t)
+	want := f.ops.ID
+
+	screen := f.companion(t, "ann", "ops", companionScreen)
+	if got := decodeCompanion(t, screen).ChannelID; got != want {
+		t.Fatalf("the screen companion's channel_id = %d, want %d, the id of ops", got, want)
+	}
+	if field := fmt.Sprintf(`"channel_id":%d`, want); !strings.Contains(screen.body, field) {
+		t.Errorf("the answer does not carry %s: %s", field, screen.body)
+	}
+	if got := decodeCompanion(t, f.companion(t, "ann", "ops", companionViewerBody)).ChannelID; got != want {
+		t.Errorf("the viewer's channel_id = %d, want %d", got, want)
+	}
+
+	// Renamed: the old name is nobody's, and the new name answers with the
+	// id the first grant named.
+	f.renameChannel(t, want, "ops", "war-room")
+	if res := f.companion(t, "ann", "ops", companionViewerBody); res.status != http.StatusNotFound || errCode(t, res.body) != "channel_not_found" || strings.Contains(res.body, "channel_id") {
+		t.Fatalf("under the old name: %d %s, want 404 channel_not_found naming no channel", res.status, res.body)
+	}
+	if got := decodeCompanion(t, f.companion(t, "ann", "war-room", companionViewerBody)).ChannelID; got != want {
+		t.Errorf("after the rename the viewer's channel_id = %d, want %d still", got, want)
+	}
+	f.at(2_000) // past the pass gap in which the first screen token counts as a companion
+	f.pass(t)
+	if got := decodeCompanion(t, f.companion(t, "ann", "war-room", companionScreen)).ChannelID; got != want {
+		t.Errorf("after the rename the screen companion's channel_id = %d, want %d still", got, want)
+	}
+
+	// The old name given to another channel: a grant under it is for that
+	// channel, and says so.
+	ctx := context.Background()
+	taken, err := f.srv.store.CreateChannel(ctx, "ops")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.srv.store.AddChannelMember(ctx, "system", taken.ID, f.ids["ann"], 0); err != nil {
+		t.Fatal(err)
+	}
+	decodeSession(t, f.session(t, "ann", "ops")) // a room someone holds a session for
+	if got := decodeCompanion(t, f.companion(t, "ann", "ops", companionViewerBody)).ChannelID; got != taken.ID || got == want {
+		t.Errorf("under the old name, now another channel's: channel_id = %d, want %d and not %d", got, taken.ID, want)
+	}
+}
