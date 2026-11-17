@@ -66,4 +66,10 @@ ignore = [
     { id = "RUSTSEC-2026-0368", reason = "zip extraction never runs: LK_CUSTOM_WEBRTC is always set (#480, drop with #481)" },
     { id = "RUSTSEC-2026-0369", reason = "zip extraction never runs: LK_CUSTOM_WEBRTC is always set (#480, drop with #481)" },
     { id = "RUSTSEC-2026-0429", reason = "zip extraction never runs: LK_CUSTOM_WEBRTC is always set (#480, drop with #481; #1167)" },
+    { id = "RUSTSEC-2026-0545", reason = "zip extraction never runs: LK_CUSTOM_WEBRTC is always set (#480, drop with #481)" },
+    { id = "RUSTSEC-2026-0548", reason = "zip extraction never runs: LK_CUSTOM_WEBRTC is always set (#480, drop with #481)" },
+    # chrono is unmaintained (not a vulnerability) and reaches us only through
+    # livekit 0.9.4 (livekit, livekit-data-stream, pbjson-types). Drop when a
+    # livekit we take no longer uses it (#1886).
+    { id = "RUSTSEC-2026-0543", reason = "unmaintained only, via livekit; drop with #1886" },
 ]

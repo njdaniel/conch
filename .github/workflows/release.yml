@@ -383,6 +383,10 @@ jobs:
       - name: Create release
         env:
           GH_TOKEN: ${{ github.token }}
+          # This job has no checkout, so gh cannot infer the repository from
+          # a git remote: name it (v0.1.0-alpha.19's publish failed without it
+          # and was published by hand from the run's attested files).
+          GH_REPO: ${{ github.repository }}
         run: |
           checks="dogfood-check, p2-hardening-check and p3-local-check run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
           web="The web client is served at /app/ by default (built into conchd; --web-dir serves a directory instead, --no-web turns it off)."
@@ -392,7 +396,7 @@ jobs:
           # plain tag stays a draft that Nick publishes.
           case "$GITHUB_REF_NAME" in
             *-*)
-              gh release create "$GITHUB_REF_NAME" dist/* \
+              gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" \
                 --prerelease --verify-tag --title "$GITHUB_REF_NAME" --generate-notes \
                 --notes "Pre-release. $checks
 
@@ -401,7 +405,7 @@ jobs:
           $deb"
               ;;
             *)
-              gh release create "$GITHUB_REF_NAME" dist/* \
+              gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" \
                 --draft --verify-tag --title "$GITHUB_REF_NAME" \
                 --notes "Draft — Nick publishes. $checks
 
