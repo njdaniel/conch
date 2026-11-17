@@ -1539,6 +1539,20 @@ mod tests {
             "voice-companion-audio-v1-person.json",
             "the companion audio route is the desktop renderer's",
         ),
+        // The channel's id in the grant and the consent answer (issue #1883): the same
+        // two answers, read by the desktop, never by the voice client.
+        (
+            "voice-companion-response-v1-channel-id.json",
+            "the companion route is the desktop renderer's",
+        ),
+        (
+            "voice-companion-audio-v1-channel-id.json",
+            "the companion audio route is the desktop renderer's",
+        ),
+        (
+            "voice-companion-audio-v1-person-channel-id.json",
+            "the companion audio route is the desktop renderer's",
+        ),
     ];
 
     #[test]

@@ -8,6 +8,9 @@ release that Nick publishes.
 
 ## [Unreleased]
 
+### Added
+- **The channel's id in the companion grant and consent answers** (#1883). `VoiceCompanionResponseV1` (`POST /v1/channels/{channel}/voice/companion`) and `VoiceCompanionAudioV1` (`PUT …/voice/companion/audio`) gain an optional `channel_id`: the id of the channel conchd resolved the name to and granted for, never a value the client sent. Additive schema (`omitempty`); no version bump, and every published fixture is byte-identical. No client reads it yet.
+
 ## [0.1.0-alpha.19] - 2026-11-16
 
 This is a pre-1.0 release (`v0.1.0-alpha.19`). It has one new schema version, `conch.voice_control.v3`, which defines the voice helper's commands and state for a share's sound (#1851, signed by Nick). Nothing uses it yet: the helper and the desktop app still speak v1 and v2, and no sound is shared (see "Not shipped yet"). Apart from v3, `pkg/schema` gains only additive values and shapes, and every published fixture is byte-identical:
