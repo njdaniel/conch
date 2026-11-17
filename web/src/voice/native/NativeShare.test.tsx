@@ -244,6 +244,24 @@ describe('the quality choices (Q-D4-3, #1772)', () => {
     expect(option?.textContent).toBe(`${label} · ${estimateWords(quality ?? companionDefaultQuality)}`);
   });
 
+  it.each([{ kind: 'sharing' }, { kind: 'resuming' }, { kind: 'publishing' }])('is offered while the share is $kind, and a choice is sent to the client', ({ kind }) => {
+    const t = fake({ phase: 'connected', channel: 'general', companion: true, share: { kind, audio: false } as unknown as ShareState });
+    strip(t.companion);
+    fireEvent.change(screen.getByLabelText('Share quality'), { target: { value: '1080p60' } });
+    expect(t.calls).toEqual(['quality 1080p60']);
+  });
+
+  it.each([{ kind: 'claiming' }, { kind: 'picking' }, { kind: 'stopping' }])('is not offered while the share is $kind', (share) => {
+    strip(fake({ phase: 'connected', channel: 'general', companion: true, share: share as unknown as ShareState }).companion);
+    expect(screen.queryByLabelText('Share quality')).toBeNull();
+  });
+
+  it('says why when the live capture could not take the choice', () => {
+    const why = 'The share quality could not be changed on this capture.';
+    strip(fake({ phase: 'connected', channel: 'general', companion: true, share: { kind: 'sharing', audio: false }, why }).companion);
+    expect(screen.getByText(why)).toBeTruthy();
+  });
+
   it.each(['1080p30', '1080p60', 'source30', 'source60'])('chooses %s', (value) => {
     const t = fake();
     strip(t.companion);
@@ -276,9 +294,9 @@ describe('the quality choices (Q-D4-3, #1772)', () => {
     expect(screen.queryByRole('menu', { hidden: true })).toBeNull();
   });
 
-  it('is not offered while sharing', () => {
-    strip(fake({ share: { kind: 'sharing', audio: false } }).companion);
-    expect(screen.queryByLabelText('Share quality')).toBeNull();
+  it('is offered while sharing, showing the choice in force', () => {
+    strip(fake({ share: { kind: 'sharing', audio: false }, shareQuality: { resolution: '1080p', frameRate: 60 } }).companion);
+    expect(screen.getByLabelText<HTMLSelectElement>('Share quality').value).toBe('1080p60');
   });
 });
 

@@ -180,6 +180,12 @@ export function ShareNotes({
   const note = share.kind === 'idle' ? shareNote(share, state.companionRefusal, state.phase === 'stopped' ? state.why : null, state.companionShareUnavailable) : null;
   const quality = companionQualities.find((q) => qualityKey(q) === qualityKey(state.shareQuality)) ?? companionDefaultQuality;
   const caution = cautionFor(quality);
+  // The picker is open before a share and while one is live,
+  // never while it is starting or stopping. A live change reaches the
+  // capture and the sender without ending the share; if the capture cannot
+  // take it, state.why says so and the choice is kept for the next share.
+  const pickerOpen = share.kind === 'idle' ? reason === null : live;
+  const liveWhy = live ? state.why : null;
   // The toggle: before the picker, and during a share only when the hook
   // counts it live (sharing or resuming, not publishing), so a choice is never
   // made for a share the hook does not hold yet.
@@ -219,7 +225,7 @@ export function ShareNotes({
           {soundNote}
         </p>
       )}
-      {share.kind === 'idle' && reason === null ? (
+      {pickerOpen ? (
         <label className="share-quality">
           <span className="label">Share quality</span>
           <select
@@ -238,7 +244,8 @@ export function ShareNotes({
           </select>
         </label>
       ) : null}
-      {share.kind === 'idle' && reason === null && caution !== null ? <p id={cautionId} className="hint" role="note">{caution}</p> : null}
+      {pickerOpen && caution !== null ? <p id={cautionId} className="hint" role="note">{caution}</p> : null}
+      {liveWhy === null ? null : <p role="status" className="hint">{liveWhy}</p>}
       {note === null || note === reason ? null : <p role="status" className="hint">{note}</p>}
     </>
   );
