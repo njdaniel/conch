@@ -145,6 +145,7 @@ const MAX_ARGV = 64;
 const SCHEME = 'conch:';
 
 export interface InviteProtocolApp {
+  readonly isPackaged: boolean;
   isDefaultProtocolClient(scheme: string): boolean;
   setAsDefaultProtocolClient(scheme: string): boolean;
 }
@@ -152,8 +153,10 @@ export interface InviteProtocolApp {
 // Windows' per-user protocol registration (issue #1944). Repeated starts
 // leave an existing registration alone. Linux keeps its desktop-file
 // registration; no command line, invite code or shell is involved here.
+// Only a packaged app registers: an unpackaged run (electron .) would
+// register bare electron.exe and replace the installed app's handler.
 export function registerInviteProtocol(app: InviteProtocolApp, platform: NodeJS.Platform = process.platform): boolean {
-  if (platform !== 'win32') return true;
+  if (platform !== 'win32' || !app.isPackaged) return true;
   return app.isDefaultProtocolClient('conch') || app.setAsDefaultProtocolClient('conch');
 }
 

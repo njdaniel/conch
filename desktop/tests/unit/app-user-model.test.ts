@@ -65,6 +65,7 @@ describe('Windows invite registration', () => {
   it('registers conch once, leaving an existing registration alone', () => {
     let registered = false;
     const app = {
+      isPackaged: true,
       isDefaultProtocolClient: vi.fn(() => registered),
       setAsDefaultProtocolClient: vi.fn(() => (registered = true)),
     };
@@ -75,11 +76,18 @@ describe('Windows invite registration', () => {
   });
 
   it('reports registration failure and leaves other platforms alone', () => {
-    const app = { isDefaultProtocolClient: vi.fn(() => false), setAsDefaultProtocolClient: vi.fn(() => false) };
+    const app = { isPackaged: true, isDefaultProtocolClient: vi.fn(() => false), setAsDefaultProtocolClient: vi.fn(() => false) };
     for (const platform of ['linux', 'darwin'] as const) expect(registerInviteProtocol(app, platform)).toBe(true);
     expect(app.isDefaultProtocolClient).not.toHaveBeenCalled();
     expect(app.setAsDefaultProtocolClient).not.toHaveBeenCalled();
     expect(registerInviteProtocol(app, 'win32')).toBe(false);
+  });
+
+  it('an unpackaged run leaves the installed handler alone (#1944 review)', () => {
+    const app = { isPackaged: false, isDefaultProtocolClient: vi.fn(() => false), setAsDefaultProtocolClient: vi.fn(() => true) };
+    expect(registerInviteProtocol(app, 'win32')).toBe(true);
+    expect(app.isDefaultProtocolClient).not.toHaveBeenCalled();
+    expect(app.setAsDefaultProtocolClient).not.toHaveBeenCalled();
   });
 
   it('registers in startup only after obtaining the data-root lock', () => {
