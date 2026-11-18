@@ -1,3 +1,4 @@
+import { sounds, setSoundAudience } from './sounds';
 import { messagePreview } from './spoilerFiles';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import * as api from './api';
@@ -56,9 +57,11 @@ export function useNotifications({
   eventsLive,
   event,
   editEvent = null,
+  openChannel = null,
   readStateEvent,
   onOpen,
 }: {
+  readonly openChannel?: number | null;
   readonly signedIn: boolean;
   readonly origin: string;
   readonly principal: Account | null;
@@ -74,7 +77,23 @@ export function useNotifications({
   readonly onOpen: (channel: string) => void;
 }) {
   const account = principal?.id ?? 0;
+  useEffect(() => {
+    const unlock = (event: Event) => { if (event.isTrusted) sounds.unlock(); };
+    document.addEventListener('pointerdown', unlock);
+    document.addEventListener('keydown', unlock);
+    document.addEventListener('touchend', unlock);
+    return () => {
+      document.removeEventListener('pointerdown', unlock);
+      document.removeEventListener('keydown', unlock);
+      document.removeEventListener('touchend', unlock);
+    };
+  }, []);
+
   const [preferences, setPreferences] = useState<Preferences>(initial);
+  useEffect(() => {
+    setSoundAudience({ me: account, allows: (channel) => signedIn && eventsLive && account !== 0 && preferences.policy !== 'off' && !preferences.muted.includes(channel) && channels.some((c) => c.id === channel) });
+    return () => { setSoundAudience(null); };
+  }, [account, signedIn, eventsLive, preferences, channels]);
   const [alerts, setAlerts] = useState<readonly NotificationAlert[]>([]);
   const [browserPermission, setBrowserPermission] = useState<BrowserPermission>(permission);
   const natives = useRef(new Map<string, NativeNotification>());
@@ -183,11 +202,13 @@ export function useNotifications({
     return { channel, mention, id };
   }, [signedIn, eventsLive, principal, preferences, channels, origin, account]);
 
-  const deliver = useCallback((message: MessageV2) => {
+  const deliver = useCallback((message: MessageV2, live: boolean) => {
     const found = eligible(message);
     if (found === null) return;
     const { channel, mention, id } = found;
     delivered.current.add(id);
+    // Reconciliation keeps alerts, but missed history never starts audio.
+    if (live && (openChannel !== channel.id || document.visibilityState !== 'visible' || !document.hasFocus())) sounds.play('message');
     const alert = { id, message, channel: channel.name, mention };
     setAlerts((previous) => {
       const next = [...previous.filter((candidate) => candidate.id !== id), alert];
@@ -213,7 +234,7 @@ export function useNotifications({
         if (current !== undefined) latestOpen.current(current.name);
       };
     }
-  }, [eligible, browserPermission, close]);
+  }, [eligible, browserPermission, close, openChannel]);
   useEffect(() => {
     if (editEvent === null) return;
     if (editEvent.removed === true) removed.current.add(editEvent.id);
@@ -250,7 +271,7 @@ export function useNotifications({
     if (eventsLive && previousLive.current && caughtUp.current.has(event.channel_id) && !requests.current.has(event.channel_id)) {
       lastSeen.current.set(event.channel_id, Math.max(lastSeen.current.get(event.channel_id) ?? 0, event.id));
     }
-    deliver(event);
+    deliver(event, true);
   }, [event, deliver, eventsLive]);
 
   useEffect(() => {
@@ -293,7 +314,7 @@ export function useNotifications({
           lastSeen.current.set(channel.id, Math.max(lastSeen.current.get(channel.id) ?? 0, message.id));
           if (!first && latestEligible.current(message) !== null) announce.push(message);
         }
-        for (const message of announce.slice(-10)) latestDeliver.current(message);
+        for (const message of announce.slice(-10)) latestDeliver.current(message, false);
       } finally {
         if (requests.current.get(channel.id) === request) requests.current.delete(channel.id);
       }
