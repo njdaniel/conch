@@ -39,7 +39,7 @@ This is a pre-1.0 release (`v0.1.0-alpha.20`). `VoiceCompanionResponseV1` and `V
 - **Push enable rolls back if its registration cannot be saved locally** (#1907). The browser reads the saved record back, removes the server registration and unsubscribes on a mismatch, and reports the save failure instead of showing push as enabled.
 - **A departed person's voice audio element is removed** (#1908). Cleanup handles the SDK detaching the track before its unsubscribe event, so the element does not stay in the page.
 - **Release publishing names the repository explicitly** (#1885). The publish job can create the GitHub release without a checkout; alpha.19 needed publication by hand because it could not infer the repository.
-- **Test checks cover more failure paths** (#1874, #1909, #1913). Voice-helper redaction checks run at trace and inspect raw standard error, push sender assertions wait for the store write, and isolation rows cover five of six pending voice and race gates. The remaining `shareEntitled` isolation gate stays open under #1217.
+- **Test checks cover more failure paths** (#1874, #1909, #1913, #1914). Voice-helper redaction checks run at trace and inspect raw standard error, push sender assertions wait for the store write, the hanging-provider test proves other wakes continue, and isolation rows cover five of six pending voice and race gates. The remaining `shareEntitled` isolation gate stays open under #1217.
 
 ## [0.1.0-alpha.19] - 2026-11-16
 
