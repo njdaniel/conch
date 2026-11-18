@@ -16,7 +16,7 @@ import { app, BrowserWindow, desktopCapturer, dialog, ipcMain, Menu, Notificatio
 
 import { allowUnlisted, OVERRIDE_FLAG, parseCompat } from './compat.ts';
 import { activationFactory, healthReader, Live, prober, revoker, verifier } from './profiles/activation.ts';
-import { deliverInvite, Invites } from './invites.ts';
+import { deliverInvite, Invites, registerInviteProtocol } from './invites.ts';
 import { createProfileFiles } from './profiles/files.ts';
 import { TeardownHooks } from './profiles/hooks.ts';
 import { ProfilesService } from './profiles/service.ts';
@@ -206,6 +206,10 @@ export async function start(): Promise<void> {
     },
   );
   if (!first) return;
+
+  // Only the owning process registers the Windows invite handler. Failure
+  // leaves pasted invites available; never include argv or a link in the log.
+  if (!registerInviteProtocol(app)) log('conch-desktop: could not register the conch: protocol');
 
   // The app's settings, once the data root is known (below). Until then, and
   // with none, closing the last window quits.
