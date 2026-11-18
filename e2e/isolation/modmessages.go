@@ -1339,16 +1339,22 @@ func (m *mod) authorRemovals(readers []*reader, all func() []*feed) error {
 		if err != nil {
 			return err
 		}
-		// Wait for the original before taking the removal baseline.
+		// Wait for the original on every socket that is told of it before
+		// taking the removal baseline, as netRemoval does: the v2 sockets of
+		// both people in the audience and, as the new message it is, the
+		// events sockets of everyone in it but its author. An events socket
+		// reads and writes the new message on its own goroutine, after the v2
+		// hub has fanned it out, so a baseline taken once only the v2 sockets
+		// have it can count that original as a frame sent after the removal.
 		for _, r := range readers {
 			if r.p != m.pat && r.p != m.wes {
 				continue
 			}
 			for _, f := range r.feeds {
-				if kindOf(f) != kindMessageV2 {
+				if k := kindOf(f); k != kindMessageV2 && (k != kindEvents || r.p == m.pat) {
 					continue
 				}
-				if err := waitFor("author removal original", modWait, func() (bool, string) {
+				if err := waitFor(f.what+" to carry the author removal original", modWait, func() (bool, string) {
 					for _, fr := range f.received() {
 						if decodeFrame(fr).names(id) {
 							return true, ""
