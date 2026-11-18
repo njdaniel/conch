@@ -16,6 +16,7 @@ const pushFailureLine: Record<PushFailure, string> = {
   subscribe: 'Your browser could not subscribe to push notifications, so nothing was turned on.',
   register: 'The server did not accept this browser, so nothing was turned on.',
   preferences: 'Your notification settings could not be saved to the server, so nothing was turned on.',
+  save: 'This browser could not keep its push setting, so nothing was turned on.',
   end: 'It could not be turned off just now. Try again.',
   mirror: 'Your latest notification settings could not be saved to the server yet; it still uses the earlier ones.',
 };
