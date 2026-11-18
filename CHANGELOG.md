@@ -8,6 +8,11 @@ release that Nick publishes.
 
 ## [Unreleased]
 
+**Upgrade `conch` together with the server.** Authors can now remove their own messages (#1828). The new tombstone ("This message was removed by its author.") makes an older `conch` TUI or CLI drop its events connection and reconnect on every author removal, and label the message "removed by a moderator". History is unaffected.
+
+### Added
+- **An author removes their own message** (#1828). There's no time window. People and guests may; agents may not yet. A message carrying an approval or admin-action card stays moderator-only. Removal is soft: copies others already received are not recalled.
+
 ## [0.1.0-alpha.21] - 2026-11-18
 
 This is a pre-1.0 release (`v0.1.0-alpha.21`), with no wire-format changes. After the server upgrade, reload open browser tabs to get the web changes below. The Linux x86_64 `.deb` is still a preview for testers (#1603). The Windows installer is not part of this release: development builds come from CI, pending the hardware run (#903).
