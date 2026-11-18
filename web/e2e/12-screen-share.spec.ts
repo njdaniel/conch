@@ -941,7 +941,10 @@ test.describe('screen share with LiveKit', () => {
   // watching a share (the picture keeps its room: the stage is not squeezed to
   // its padding) and with Voice options open, at every short height; and, since
   // issue #1815, at 561, 600 and 640 px, where a tall dock used to squeeze the
-  // stage to a strip and clip the composer under the dock.
+  // stage to a strip and clip the composer under the dock. What is checked is
+  // what is drawn: the picture as much of the video as its frame and the stage
+  // show, and the conversation as its own section and its message log. In a
+  // 900 px window, where all of it fits, the page does not scroll at all.
   test('in a short window, joined and watching a share, the composer is on the dock and the picture keeps its room', async ({ browser }) => {
     const a = await person(browser, 'alice');
     const b = await person(browser, 'bob', { viewport: { width: 1215, height: 560 } });
@@ -950,6 +953,24 @@ test.describe('screen share with LiveKit', () => {
       await joinVoice(b, 'Join voice');
       const composer = b.page.locator('.composer');
       const dock = b.page.locator('.dock');
+      // How much of the picture is drawn: the video's box, cut by its frame
+      // and by the stage, which both clip it. A picture squeezed to nothing
+      // inside a tall stage, or scrolled out of it, is near zero.
+      const picture = (): Promise<number> => b.page.evaluate(() => {
+        const boxes = ['.stage video', '.stage .share-frame', '.stage'].map((sel) => document.querySelector(sel)?.getBoundingClientRect());
+        if (boxes.some((r) => r === undefined)) return 0;
+        const rects = boxes as DOMRect[];
+        return Math.max(0, Math.min(...rects.map((r) => r.bottom)) - Math.max(...rects.map((r) => r.top)));
+      });
+      // The conversation keeps its header, the log's minimum (6rem; 12rem at
+      // 560 px and under) and the composer: its own section and its log,
+      // measured directly (the areas around it include the stage).
+      const conversation = async (where: string): Promise<void> => {
+        const section = await b.page.getByRole('region', { name: 'Conversation' }).boundingBox();
+        const log = await b.page.getByRole('log', { name: 'Messages' }).boundingBox();
+        expect(section?.height ?? 0, `${where}: the conversation`).toBeGreaterThanOrEqual(200);
+        expect(log?.height ?? 0, `${where}: the message log`).toBeGreaterThanOrEqual(95);
+      };
       const check = async (what: string, stage: boolean): Promise<void> => {
         const size = b.page.viewportSize();
         if (size === null) throw new Error('no window size');
@@ -972,11 +993,12 @@ test.describe('screen share with LiveKit', () => {
           expect(c.y + c.height, `${where}: the composer's bottom at the end of the page`).toBeLessThanOrEqual(d.y + 1);
           expect(d.y + d.height, `${where}: the dock's bottom at the end of the page`).toBeLessThanOrEqual(size.height + 0.5);
         }).toPass({ timeout: 5000 });
+        await conversation(where);
         if (stage) {
-          const picture = await b.page.locator('.stage').boundingBox();
-          // At 560 px and under the stage is 465 to 480 px; over 560 px it
-          // keeps 300 px and its own top padding, or more where there is room.
-          expect(picture?.height ?? 0, `${where}: the stage while watching`).toBeGreaterThanOrEqual(300);
+          // At 560 px and under the whole picture shows (160 to 224 px, its
+          // 40vh); over 560 px the stage keeps 300 px and shows about 190 to
+          // 210 px of it, more where there is room.
+          expect(await picture(), `${where}: the picture drawn while watching`).toBeGreaterThanOrEqual(150);
         }
         await b.page.evaluate(() => {
           window.scrollTo(0, 0);
@@ -1003,9 +1025,23 @@ test.describe('screen share with LiveKit', () => {
       await voiceRegion(b.page).getByRole('button', { name: 'Voice options' }).click();
       for (const [width, height] of heights) {
         await b.page.setViewportSize({ width, height });
-        await check('watching, Voice options open', height > 560);
-        const areas = await b.page.locator('.areas').boundingBox();
-        expect(areas?.height ?? 0, `${String(width)}×${String(height)}: the conversation with Voice options open`).toBeGreaterThanOrEqual(200);
+        await check('watching, Voice options open', true);
+      }
+      // A window of normal height, Voice options closed: the stage, the
+      // conversation and the dock all fit, so the page does not scroll (the
+      // document model must not add height nothing needs), the composer is on
+      // the dock, and the picture is drawn large: 360 px at 40vh, of which the
+      // stage shows about 265 px at 1215 wide and 335 px at 1440.
+      await voiceRegion(b.page).getByRole('button', { name: 'Voice options' }).click();
+      for (const [width, height] of [[1215, 900], [1440, 900]] as const) {
+        await b.page.setViewportSize({ width, height });
+        const where = `${String(width)}×${String(height)}, watching`;
+        await check('watching', true);
+        await expect(async () => {
+          const scroll = await b.page.evaluate(() => ({ page: document.documentElement.scrollHeight, window: window.innerHeight }));
+          expect(scroll.page, `${where}: the page is ${String(scroll.page)} px tall in a ${String(scroll.window)} px window`).toBeLessThanOrEqual(scroll.window + 1);
+        }).toPass({ timeout: 5000 });
+        expect(await picture(), `${where}: the picture drawn`).toBeGreaterThanOrEqual(250);
       }
       await voiceRegion(a.page).getByRole('button', { name: 'Stop sharing' }).click();
     } finally {

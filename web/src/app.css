@@ -4877,7 +4877,11 @@ button.link {
    scrolls as a document, as the short-window rule above does, so the composer
    stays on the dock rather than being clipped under it. Otherwise the row is
    the rest of the window, as before. The channel list and the members panel
-   scroll inside themselves, so they do not set the row's height. */
+   scroll inside themselves, so they do not set the row's height. Nor does
+   anything else tall in the centre column: Run detail and the first-run panel
+   take what the row leaves and scroll inside themselves, as they did in the
+   full-height layout, so a long run never pushes the dock off the window. Only
+   what the dock squeezes (the composer and the stage's 300 px) grows the page. */
 @media (min-height: 561px) {
   .lobby:not(.phone) {
     height: auto;
@@ -4887,6 +4891,14 @@ button.link {
 
   .lobby:not(.phone) .channels,
   .lobby:not(.phone) .panel {
+    contain: size;
+  }
+
+  .lobby:not(.phone) .conversation > .ag-run,
+  .lobby:not(.phone) .conversation > .first-run {
+    flex: 1 1 0;
+    min-height: 0;
+    overflow-y: auto;
     contain: size;
   }
 }
