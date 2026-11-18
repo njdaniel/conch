@@ -10,7 +10,8 @@ import type { ReadStateV1 } from './schema/readstate';
 import type { MessageV2 } from './schema/message';
 import { chatFor, chatReducer, initialChat, maxHeld, pageSize } from './state/messages';
 
-// A test that renders a whole held history (#1940).
+// A test that renders a whole held history, or is otherwise slow: about 6 s
+// locally and three times that on CI runners (#1940).
 const heldHistoryTimeout = 60_000;
 
 const origin = 'http://127.0.0.1:8080';
@@ -826,7 +827,7 @@ describe('the opening unread position', () => {
     await screen.findByText('Cannot reach the first unread message: the history limit has been reached.', {}, { timeout: 10000 });
     expect(divider()).toBeNull();
     expect(scroll).not.toHaveBeenCalled();
-  }, 15000);
+  }, heldHistoryTimeout);
 
   it('keeps the opening divider after a reconnect returns an advanced mark', async () => {
     server.history = [message(1), message(2), message(3)];

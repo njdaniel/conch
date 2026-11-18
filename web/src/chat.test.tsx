@@ -8,7 +8,8 @@ import { pausedText } from './Composer';
 import { clock } from './Conversation';
 import { maxHeld, pageSize } from './state/messages';
 
-// A test that renders a whole held history (#1940).
+// A test that renders a whole held history, or is otherwise slow: about 6 s
+// locally and three times that on CI runners (#1940).
 const heldHistoryTimeout = 60_000;
 
 // The bound on the app's first boot, under the 5 s test timeout (see openChat).
@@ -2300,7 +2301,7 @@ describe('the reconnect refresh', () => {
     expect(screen.queryByText('secret before disconnect')).toBeNull();
     expect(screen.queryByText(stale)).toBeNull();
     expect(screen.getByLabelText<HTMLTextAreaElement>('Message #general').disabled).toBe(false);
-  }, 15000);
+  }, heldHistoryTimeout);
 
   it('keeps a frame the socket delivered while the refresh was in flight', async () => {
     server.history.general = [message(1, 'one'), message(2, 'two')];
@@ -2366,7 +2367,7 @@ describe('the reconnect refresh', () => {
     await act(async () => { asked[1]?.release(); await new Promise((r) => setTimeout(r, 50)); });
     await waitFor(() => { expect(screen.getByLabelText<HTMLTextAreaElement>('Message #general').disabled).toBe(false); });
     expect(screen.queryByText(stale)).toBeNull();
-  }, 15000);
+  }, heldHistoryTimeout);
 
   it('tries the refresh again under the new name when it was answered not-found because the channel was renamed', async () => {
     server.history.general = [message(1, 'secret before disconnect'), message(2, 'newest')];
@@ -2392,7 +2393,7 @@ describe('the reconnect refresh', () => {
     expect(screen.queryByText('secret before disconnect')).toBeNull();
     expect(FakeSocket.all).toHaveLength(2);
     expect(screen.queryByText(stale)).toBeNull();
-  }, 15000);
+  }, heldHistoryTimeout);
 });
 
 describe('message permalinks', () => {
