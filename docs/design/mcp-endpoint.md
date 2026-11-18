@@ -164,6 +164,7 @@ which
 - `method`, `params`, `name`, `arguments` and `attachments` use their exact
   lowercase spellings and occur only once in their respective objects,
   including variants under any case;
+- each routing object and attachment object has at most 32 keys;
 - there are at most 4 attachments;
 - each `data_base64` is a JSON string of padded standard base64 and nothing
   else (no escape, no line break);
@@ -174,7 +175,12 @@ The message that is stored is therefore within the bound every client reads
 (`schema.MaxMessageFrameBytes`), as before. The bytes let through as image data
 are always values at `params.arguments.attachments[i].data_base64`, which the
 MCP library can read only as an attachment's data or not at all; every other
-byte is held to the bound. Repeated keys in the routing objects are refused.
+byte is held to the bound. Repeated routing keys are refused; ignored keys
+are not retained. Exact matching is guaranteed for routing keys only. Attachment
+fields retain the size probe's case-insensitive matching and last-value rule
+(including Unicode case folds), whereas the SDK matches them exactly. A value
+excluded from the size bound is still checked as base64 even if the SDK ignores
+its field spelling. Objects over the 32-key scan limit are refused with 413.
 
 For requests over 1 MiB, send `data_base64` unescaped: use literal `/`, `+`
 and `=`, not `\/`, `\u002f`, `\u002b` or `\u003d`. Disable slash escaping

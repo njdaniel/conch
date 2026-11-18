@@ -754,18 +754,28 @@ func mcpProbeBenchmarkBody(upload int, refused bool) []byte {
 
 func TestMCPOversizeProbeAllocationBudget(t *testing.T) {
 	const upload = 3 << 20
-	for _, refused := range []bool{false, true} {
-		t.Run(fmt.Sprintf("refused=%v", refused), func(t *testing.T) {
-			body := mcpProbeBenchmarkBody(upload, refused)
+	for _, tt := range []struct {
+		name string
+		body []byte
+		want bool
+	}{
+		{"image", mcpProbeBenchmarkBody(upload, false), true},
+		{"duplicate routing", mcpProbeBenchmarkBody(upload, true), false},
+		{"many routing keys", mcpManyKeysBody(4<<20, false), false},
+		{"many attachment keys", mcpManyKeysBody(4<<20, true), false},
+		{"huge attachment key", []byte(`{"method":"tools/call","params":{"name":"post_message","arguments":{"attachments":[{"` + strings.Repeat("k", 4<<20) + `":0}]}}}`), false},
+		{"huge escaped key", []byte(`{"` + strings.Repeat(`\u006b`, 1<<20) + `":0}`), false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
 			result := testing.Benchmark(func(b *testing.B) {
 				for b.Loop() {
-					if got := mcpOversizeIsAttachments(body, upload); got == refused {
-						b.Fatalf("probe = %v, refused = %v", got, refused)
+					if got := mcpOversizeIsAttachments(tt.body, upload); got != tt.want {
+						b.Fatalf("probe = %v, want %v", got, tt.want)
 					}
 				}
 			})
-			if allocated := result.AllocedBytesPerOp(); allocated > 2*int64(len(body)) {
-				t.Fatalf("probe allocated %d bytes for a %d-byte body; budget is 2x", allocated, len(body))
+			if allocated := result.AllocedBytesPerOp(); allocated > 2*int64(len(tt.body)) {
+				t.Fatalf("probe allocated %d bytes for a %d-byte body; budget is 2x", allocated, len(tt.body))
 			}
 		})
 	}
@@ -784,6 +794,13 @@ func TestMCPRoutingProbe(t *testing.T) {
 		{"escaped exact key", strings.Replace(valid, `"method"`, `"m\u0065thod"`, 1), true},
 		{"nested unknown values", `{"extra":[{"text":"}\"[{","nested":[null,true,1.2]}],"method":"tools/call",` + params + `}`, true},
 		{"unicode fold ignored", `{"paramſ":null,"method":"tools/call",` + params + `}`, true},
+		{"escaped unicode fold ignored", `{"param\u017f":null,"method":"tools/call",` + params + `}`, true},
+		{"attachment uppercase", strings.Replace(valid, "data_base64", "DATA_BASE64", 1), true},
+		{"attachment unicode fold", strings.Replace(valid, "data_base64", "data_baſe64", 1), true},
+		{"attachment escaped key", strings.Replace(valid, "data_base64", `data_\u0062ase64`, 1), true},
+		{"fully escaped routing key", strings.Replace(valid, "attachments", `\u0061\u0074\u0074\u0061\u0063\u0068\u006d\u0065\u006e\u0074\u0073`, 1), true},
+		{"attachment last value wins", strings.Replace(valid, `"data_base64":"AAAA"`, `"data_base64":"!!!!","DATA_BASE64":"AAAA"`, 1), true},
+		{"attachment invalid last value", strings.Replace(valid, `"data_base64":"AAAA"`, `"data_base64":"AAAA","DATA_BASE64":"!!!!"`, 1), false},
 		{"batch", `[` + valid + `]`, false},
 		{"null", `null`, false},
 		{"params null", `{"method":"tools/call","params":null}`, false},
@@ -791,7 +808,7 @@ func TestMCPRoutingProbe(t *testing.T) {
 		{"missing attachments", strings.Replace(valid, `"attachments"`, `"other"`, 1), false},
 		{"trailing value", valid + `null`, false},
 		{"truncated", valid[:len(valid)-1], false},
-		{"duplicate unknown key", `{"extra":1,"Extra":2,"method":"tools/call",` + params + `}`, false},
+		{"duplicate ignored key", `{"extra":1,"Extra":2,"method":"tools/call",` + params + `}`, true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := mcpOversizeIsAttachments([]byte(tt.body), 3); got != tt.want {
@@ -823,6 +840,169 @@ func FuzzMCPProbeValue(f *testing.F) {
 		probe := mcpRoutingProbe{body: body}
 		if got := probe.value(); !bytes.Equal(got, body) || probe.pos != len(body) {
 			t.Fatalf("skipped %q at %d, want %q", got, probe.pos, body)
+		}
+	})
+}
+
+// Adversarial keys must cost no more than a constant amount per body byte.
+func mcpManyKeysBody(size int, attachment bool) []byte {
+	body := make([]byte, 0, size+128)
+	if attachment {
+		body = append(body, `{"method":"tools/call","params":{"name":"post_message","arguments":{"attachments":[{`...)
+	} else {
+		body = append(body, '{')
+	}
+	for i := 0; len(body) < size; i++ {
+		body = fmt.Appendf(body, `"%d":0,`, i)
+	}
+	body = append(body, `"end":0}`...)
+	if attachment {
+		body = append(body, `]}}}`...)
+	}
+	return body
+}
+
+func BenchmarkMCPAdversarialKeys(b *testing.B) {
+	for _, size := range []int{15 << 20, 35 << 20} {
+		for _, kind := range []string{"routing", "attachment", "huge_attachment_key"} {
+			b.Run(fmt.Sprintf("%s/bytes=%d", kind, size), func(b *testing.B) {
+				body := mcpManyKeysBody(size, kind == "attachment")
+				if kind == "huge_attachment_key" {
+					body = append([]byte(`{"method":"tools/call","params":{"name":"post_message","arguments":{"attachments":[{"`), bytes.Repeat([]byte("k"), size)...)
+					body = append(body, `":0}]}}}`...)
+				}
+				b.SetBytes(int64(len(body)))
+				b.ReportAllocs()
+				b.ResetTimer()
+				for b.Loop() {
+					if mcpOversizeIsAttachments(body, 25<<20) {
+						b.Fatal("accepted adversarial body")
+					}
+				}
+			})
+		}
+	}
+}
+
+// Exercise the SDK's actual decoder, including escaped routing keys. A tool
+// result alone is insufficient: assert the message and file were stored.
+func TestMCPLargeEscapedRoutingReachesSDK(t *testing.T) {
+	f := newAgentUploadFixture(t)
+	f.srv.cfg.MaxUploadBytes = 4 << 20
+	f.grant(t, "aria")
+	body := toolCall(t, "post_message", postWith(attachment("screen.png", schema.MediaTypePNG, pngOfSize(3<<19, 's'))))
+	for _, key := range []string{"method", "params", "name", "arguments", "attachments"} {
+		t.Run(key, func(t *testing.T) {
+			needle := []byte(`"` + key + `":`)
+			index := bytes.LastIndex(body, needle)
+			escaped := append(bytes.Clone(body[:index]), bytes.Replace(body[index:], needle, []byte(`"\u00`+fmt.Sprintf("%02x", key[0])+key[1:]+`":`), 1)...)
+			if len(escaped) <= schema.MaxPostRequestBytes || !mcpOversizeIsAttachments(escaped, f.srv.cfg.MaxUploadBytes) {
+				t.Fatal("fixture must pass large-body probe")
+			}
+			messages, files := f.messageCount(t), f.countFiles(t)
+			rec, _ := mcpSend(f.srv, f.p("aria").token, escaped, true)
+			if code, ok := toolError(rec); !ok || code != "" {
+				t.Fatalf("SDK call: %d %s", rec.Code, rec.Body)
+			}
+			if f.messageCount(t) != messages+1 || f.countFiles(t) != files+1 {
+				t.Fatal("post_message did not store message and attachment")
+			}
+		})
+	}
+}
+
+func TestMCPProbeObjectKeyLimit(t *testing.T) {
+	f := newAgentUploadFixture(t)
+	f.srv.cfg.MaxUploadBytes = 4 << 20
+	f.grant(t, "aria")
+	body := toolCall(t, "post_message", postWith(attachment("screen.png", schema.MediaTypePNG, pngOfSize(3<<19, 'b'))))
+	for _, tt := range []struct {
+		name, prefix string
+		keys         int
+	}{
+		{"request", "", 4},
+		{"params", `"params":`, 2},
+		{"arguments", `"arguments":`, 3},
+		{"attachment", `"attachments":[`, 3},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			start := 0
+			if tt.prefix != "" {
+				index := bytes.Index(body, []byte(tt.prefix))
+				if index < 0 {
+					t.Fatal("missing object prefix")
+				}
+				start = index + len(tt.prefix)
+			}
+			if body[start] != '{' {
+				t.Fatal("missing object")
+			}
+			keys := tt.keys
+			for _, over := range []bool{false, true} {
+				extra := mcpProbeMaxObjectKeys - keys
+				if over {
+					extra++
+				}
+				var fields []byte
+				for i := 0; i < extra; i++ {
+					fields = fmt.Appendf(fields, `"ignored%d":0,`, i)
+				}
+				candidate := append(bytes.Clone(body[:start+1]), fields...)
+				candidate = append(candidate, body[start+1:]...)
+				if got := mcpOversizeIsAttachments(candidate, f.srv.cfg.MaxUploadBytes); got == over {
+					t.Fatalf("probe=%v over=%v keys=%d", got, over, keys+extra)
+				}
+				if over {
+					rec, _ := mcpSend(f.srv, f.p("aria").token, candidate, true)
+					if rec.Code != http.StatusRequestEntityTooLarge {
+						t.Fatalf("over key limit: %d %s", rec.Code, rec.Body)
+					}
+				}
+			}
+		})
+	}
+}
+
+// Check the borrowed attachment scanner against encoding/json's field matching
+// and last-value rule. The probe may refuse more (notably at the key limit),
+// but every accepted body must satisfy the decoder's size accounting too.
+func FuzzMCPAttachmentProbe(f *testing.F) {
+	for _, seed := range []string{
+		`null`, `[]`, `[null]`, `[{}]`, `[true]`, `[[]]`,
+		`[{"data_base64":"AAAA"}]`,
+		`[{"data_baſe64":"AAAA"}]`,
+		`[{"data_\u0062ase64":"AAAA"}]`,
+		`[{"data_base64":"!!!!","DATA_BASE64":"AAAA"}]`,
+		`[{"data_base64":"AAAA","DATA_BASE64":null}]`,
+	} {
+		f.Add(seed)
+	}
+	f.Fuzz(func(t *testing.T, raw string) {
+		if !json.Valid([]byte(raw)) {
+			return
+		}
+		body := []byte(`{"method":"tools/call","params":{"name":"post_message","arguments":{"attachments":` + raw + `}}}`)
+		const maxUpload = 3
+		if !mcpOversizeIsAttachments(body, maxUpload) {
+			return
+		}
+		var attachments []struct {
+			Data json.RawMessage `json:"data_base64"`
+		}
+		if err := json.Unmarshal([]byte(raw), &attachments); err != nil || len(attachments) > schema.MaxAgentAttachments {
+			t.Fatalf("accepted attachments decoder refuses: %s (%v)", raw, err)
+		}
+		rest, decoded := len(body), int64(0)
+		for _, a := range attachments {
+			n, ok := base64StringLen(a.Data)
+			if !ok {
+				t.Fatalf("accepted non-base64 data: %s", raw)
+			}
+			decoded += n
+			rest -= len(a.Data)
+		}
+		if decoded > maxUpload || rest > schema.MaxPostRequestBytes {
+			t.Fatalf("accepted over-budget attachments: decoded=%d rest=%d", decoded, rest)
 		}
 	})
 }

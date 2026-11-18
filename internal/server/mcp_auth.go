@@ -340,7 +340,9 @@ func base64Len(n int64) int64 {
 // Routing keys must be unique under any case and use the SDK's exact
 // spelling. Otherwise encoding/json and the SDK can disagree about the tool
 // being called, letting a non-post tool hold a large-request place. The probe
-// checks each routing object before decoding the attachment values.
+// checks each routing object before scanning the attachment values. Exact key
+// matching applies only to routing; attachment fields match case-insensitively.
+// Each scanned object is limited to mcpProbeMaxObjectKeys keys (otherwise 413).
 func mcpOversizeIsAttachments(body []byte, maxUpload int64) bool {
 	// Validate once before the scanner borrows value slices. In particular this
 	// rejects malformed JSON and trailing data without a decoder buffer.
@@ -356,38 +358,56 @@ func mcpOversizeIsAttachments(body []byte, maxUpload int64) bool {
 		json.Unmarshal(probe.name, &name) != nil || name != "post_message" {
 		return false
 	}
-	var attachments []struct {
-		Data json.RawMessage `json:"data_base64"`
-	}
-	if json.Unmarshal(probe.attachments, &attachments) != nil {
+	// Scan attachment fields too: encoding/json would allocate for a huge
+	// ignored field name, even though the image values themselves are borrowed.
+	attachments := mcpRoutingProbe{body: probe.attachments}
+	if len(attachments.body) == 0 {
 		return false
 	}
-	if len(attachments) > schema.MaxAgentAttachments {
+	attachments.space()
+	if bytes.Equal(bytes.TrimSpace(attachments.body), []byte("null")) {
+		return len(body) <= schema.MaxPostRequestBytes
+	}
+	if attachments.body[attachments.pos] != '[' {
 		return false
 	}
+	attachments.pos++
 	rest := len(body)
 	var decoded int64
-	for _, a := range attachments {
-		n, ok := base64StringLen(a.Data)
+	for count := 0; ; count++ {
+		attachments.space()
+		if attachments.body[attachments.pos] == ']' {
+			break
+		}
+		if count >= schema.MaxAgentAttachments || !attachments.object(3) {
+			return false
+		}
+		n, ok := base64StringLen(attachments.data)
 		if !ok {
 			return false
 		}
 		if decoded += n; decoded > maxUpload {
 			return false
 		}
-		rest -= len(a.Data)
+		rest -= len(attachments.data)
+		attachments.space()
+		if attachments.body[attachments.pos] == ',' {
+			attachments.pos++
+		}
 	}
 	return rest <= schema.MaxPostRequestBytes
 }
 
 // mcpRoutingProbe walks the three routing objects in one pass, borrowing
-// slices from an already validated JSON document. Only keys are decoded here;
-// large string values are skipped without allocating a decoded or raw copy.
-// The attachment decode copies each data_base64 at most once.
+// slices from an already validated JSON document. Only short escaped keys are
+// decoded; ignored keys are never retained, and large string values are never
+// copied. Attachment fields retain encoding/json's case-insensitive matching and last-value rule.
+// Exact matching is guaranteed for routing keys only.
 type mcpRoutingProbe struct {
 	body                      []byte
 	pos                       int
 	method, name, attachments []byte
+	data                      []byte
 }
 
 func (p *mcpRoutingProbe) space() {
@@ -441,50 +461,93 @@ func (p *mcpRoutingProbe) value() []byte {
 	return p.body[start:p.pos]
 }
 
+// mcpProbeMaxObjectKeys bounds work and state per routing or attachment object.
+// json.Valid still makes a single linear pass over the entire body.
+const mcpProbeMaxObjectKeys = 32
+
+const (
+	mcpKeyMethod = iota
+	mcpKeyParams
+	mcpKeyName
+	mcpKeyArguments
+	mcpKeyAttachments
+)
+
+// mcpProbeKey compares raw key bytes first. An ASCII routing name can have at
+// most six wire bytes per character (a Unicode escape), so longer escaped keys
+// cannot match and need no unescaping. Unknown keys are never retained.
+func mcpProbeKey(raw []byte, attachment bool) (key int, exact bool) {
+	quoted := raw
+	raw = raw[1 : len(raw)-1] // quotes, already checked by json.Valid
+	if bytes.IndexByte(raw, '\\') >= 0 {
+		if len(raw) > 6*len("attachments") {
+			return -1, false
+		}
+		var decoded string
+		if json.Unmarshal(quoted, &decoded) != nil {
+			return -1, false
+		}
+		raw = []byte(decoded)
+	}
+	if attachment {
+		return 0, bytes.EqualFold(raw, []byte("data_base64"))
+	}
+	// The SDK ignores Unicode case folds such as long s in routing keys.
+	for _, c := range raw {
+		if c >= 0x80 {
+			return -1, false
+		}
+	}
+	for i, name := range [...]string{"method", "params", "name", "arguments", "attachments"} {
+		if bytes.EqualFold(raw, []byte(name)) {
+			return i, bytes.Equal(raw, []byte(name))
+		}
+	}
+	return -1, false
+}
+
 func (p *mcpRoutingProbe) object(level int) bool {
 	p.space()
 	if p.pos >= len(p.body) || p.body[p.pos] != '{' {
 		return false
 	}
 	p.pos++
-	seen := make(map[string]bool)
-	for {
+	var seen uint8
+	p.data = nil
+	for count := 0; ; count++ {
 		p.space()
 		if p.body[p.pos] == '}' {
 			p.pos++
 			return true
 		}
-		var key string
-		if json.Unmarshal(p.value(), &key) != nil {
+		if count >= mcpProbeMaxObjectKeys {
 			return false
 		}
-		folded := strings.ToLower(key)
-		if seen[folded] {
-			return false
-		}
-		seen[folded] = true
-		// Match the SDK exactly, including when a key uses JSON escapes.
-		switch folded {
-		case "method", "params", "name", "arguments", "attachments":
-			if key != folded {
+		key, exact := mcpProbeKey(p.value(), level == 3)
+		if level < 3 && key >= 0 {
+			bit := uint8(1 << key)
+			if !exact || seen&bit != 0 {
 				return false
 			}
+			seen |= bit
 		}
 		p.space()
 		p.pos++ // colon, already checked by json.Valid
-		if level == 0 && key == "params" || level == 1 && key == "arguments" {
+		if level == 0 && key == mcpKeyParams || level == 1 && key == mcpKeyArguments {
 			if !p.object(level + 1) {
 				return false
 			}
 		} else {
 			value := p.value()
 			switch {
-			case level == 0 && key == "method":
+			case level == 0 && key == mcpKeyMethod:
 				p.method = value
-			case level == 1 && key == "name":
+			case level == 1 && key == mcpKeyName:
 				p.name = value
-			case level == 2 && key == "attachments":
+			case level == 2 && key == mcpKeyAttachments:
 				p.attachments = value
+			case level == 3 && exact:
+				p.data = value
 			}
 		}
 		p.space()
