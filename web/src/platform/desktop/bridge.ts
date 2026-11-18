@@ -79,8 +79,8 @@ export type StorageStatus =
   | { readonly kind: 'session-only'; readonly reason: 'unavailable' | 'insecure-backend' | 'unknown-backend' | 'unsafe-root' }
   | { readonly kind: 'unavailable' };
 
-// Something the last switch or sign-out has to tell the person.
-export type ProfileNotice = 'sign-in-again' | 'could-not-verify' | 'account-mismatch' | 'revocation-unconfirmed' | 'revocation-unsent' | 'teardown-slow';
+// Something the last sign-in, switch or sign-out has to tell the person.
+export type ProfileNotice = 'operator-window-only' | 'sign-in-again' | 'could-not-verify' | 'account-mismatch' | 'revocation-unconfirmed' | 'revocation-unsent' | 'teardown-slow';
 
 // Whether the active server's release is one this app was tested with
 // (issue #946). none: no server is active. supported: it is on the list.

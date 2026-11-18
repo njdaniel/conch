@@ -175,6 +175,18 @@ describe('storage status', () => {
 describe('with a server active', () => {
   const active = view({ profiles: [profile(ID_A, 'chat.example.org', 'ada', true)], active: ID_A });
 
+  it('shows the operator sign-in explanation once, including when Servers is open', async () => {
+    install({ profiles: () => Promise.resolve({ ...active, notice: 'operator-window-only', storage: { kind: 'session-only', reason: 'unavailable' } }) });
+    render(<DesktopShell>{child}</DesktopShell>);
+    const note = await screen.findByText(/Operator sign-ins aren’t remembered on this computer/);
+    expect(note.textContent).toContain('this window only');
+    expect(note.textContent).toContain('12 hours or an hour idle');
+    expect(note.textContent).toContain('member account for everyday use');
+    expect(screen.queryByText('sign-in kept until the app closes')).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Servers' }));
+    expect(screen.getAllByText(/Operator sign-ins aren’t remembered/)).toHaveLength(1);
+  });
+
   it('shows the client under a strip with the host and the account, and restores the stand-in for a sign-in main holds', async () => {
     install({
       profiles: () => Promise.resolve(active),
@@ -185,6 +197,7 @@ describe('with a server active', () => {
     const bar = screen.getByRole('banner', { name: 'Server' });
     expect(bar.textContent).toContain('chat.example.org');
     expect(bar.textContent).toContain('ada');
+    expect(screen.queryByText(/Operator sign-ins aren’t remembered/)).toBeNull();
     expect(serverOrigin()).toBe('https://chat.example.org');
     expect(credentials.read()?.place).toBe('lasting');
   });

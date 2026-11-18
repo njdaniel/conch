@@ -160,6 +160,22 @@ describe('binding', () => {
 });
 
 describe('credentials and storage', () => {
+  it.each([
+    ['operator', false, 'operator-window-only'],
+    ['member', true, null],
+    ['guest', false, null],
+  ] as const)('shows the sign-in storage note only for an operator: %s', async (role, lasting, notice) => {
+    const s = await setup();
+    await addAndSwitch(s, ORIGIN_A);
+    s.active().held = 'tok-account';
+    expect(await s.service.signedIn({ id: 7, name: role, lasting, guest: role === 'guest' })).toBe(true);
+    expect(s.service.view().notice).toBe(notice);
+    // Polling the view keeps the same notice, rather than generating another.
+    expect(s.service.view().notice).toBe(notice);
+    await s.service.signOut();
+    expect(s.service.view().notice).toBeNull();
+  });
+
   it('with protected storage a profile starts signed in from the vault, as after a restart', async () => {
     const s = await setup();
     const id = await addAndSwitch(s, ORIGIN_A);
