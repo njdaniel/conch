@@ -1165,39 +1165,17 @@ async fn without_a_key_device_hold_to_talk_is_not_configured_and_the_rest_works(
     assert_eq!(rig.exit_code().await, 0);
 }
 
-#[cfg_attr(
-    windows,
-    ignore = "#1808: on Windows a stalled owner makes the helper drop no state (the events pipe holds more than the queue); under investigation"
-)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_slow_owner_loses_events_sees_the_gap_and_resynchronises() {
-    const STRIKES: i64 = 400;
     let mut rig = ManagedRig::start().await;
     rig.send_start();
     rig.ready().await;
     let base = rig.read().last().unwrap().seq();
-    let track_muted = rig.sdk.count(Call::Mute);
-    // The owner stops reading; meanwhile the mute key is struck far more often than the
-    // queue holds states. Each strike is one change, and so one state, and one seq.
-    rig.reader.stop(true);
-    for _ in 0..STRIKES {
-        rig.strike_mute();
-    }
-    rig.until("the writer waiting on the owner", |rig| {
-        rig.reader.is_waited_for()
-    })
-    .await;
-    // The owner reads again only once the helper has taken the strikes, all but perhaps
-    // the last: each strike that mutes mutes the track as well. That is more states than
-    // the helper holds for an owner who does not read, so some were dropped.
-    rig.until("the strikes taken", |rig| {
-        rig.sdk.count(Call::Mute) >= track_muted + STRIKES as usize / 2
-    })
-    .await;
+    let strikes = rig.overflow_events().await;
     rig.reader.stop(false);
 
-    // The owner reads first what the helper held for it: the event in its writer's hands
-    // and a full queue. Only then does it ask, as `conch` asks only once it has read an
+    // The owner first drains the transport's buffers, the event in the helper writer's
+    // hands and a full queue. Only then does it ask, as `conch` asks once it has read an
     // event after the gap. (Asked sooner, the answer waits behind the full queue and still
     // comes: the test after this one.)
     rig.until("the events held for the owner", |rig| {
@@ -1222,7 +1200,7 @@ async fn a_slow_owner_loses_events_sees_the_gap_and_resynchronises() {
             VoiceControlEvent::State(state) => state.clone(),
             other => panic!("get_state answered without a state just before: {other:?}"),
         };
-        if state.seq > base + STRIKES {
+        if state.seq > base + strikes {
             break state;
         }
         id += 1;
@@ -1245,30 +1223,17 @@ async fn a_slow_owner_loses_events_sees_the_gap_and_resynchronises() {
 /// Commands read while the owner is not reading and the queue is full are still answered,
 /// each exactly once and in order, once the owner reads again: an ack, and the state that
 /// answers `get_state`, are never dropped (§5, rules 8 and 10; #571).
-#[cfg_attr(
-    windows,
-    ignore = "#1808: on Windows a stalled owner makes the helper drop no state (the events pipe holds more than the queue); under investigation"
-)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn commands_sent_to_an_owner_that_is_not_reading_are_answered_once_it_reads() {
-    // Odd, so that the last strike mutes and the track says when it has been taken.
-    const STRIKES: i64 = 401;
     let mut rig = ManagedRig::start().await;
     rig.send_start();
     rig.ready().await;
     let track_muted = rig.sdk.count(Call::Mute);
-    // The owner stops reading, and the mute key is struck far more often than the queue
-    // holds states: when every strike has been taken, the queue is full.
-    rig.reader.stop(true);
-    for _ in 0..STRIKES {
-        rig.strike_mute();
-    }
-    rig.until("the writer waiting on the owner", |rig| {
-        rig.reader.is_waited_for()
-    })
-    .await;
+    let strikes = rig.overflow_events().await + 1;
+    // Odd, so that the final strike mutes and the SDK proves it was processed.
+    rig.strike_mute();
     rig.until("every strike taken", |rig| {
-        rig.sdk.count(Call::Mute) >= track_muted + (STRIKES as usize).div_ceil(2)
+        rig.sdk.count(Call::Mute) >= track_muted + (strikes as usize).div_ceil(2)
     })
     .await;
 
@@ -1279,7 +1244,7 @@ async fn commands_sent_to_an_owner_that_is_not_reading_are_answered_once_it_read
     rig.send(&ManagedRig::command("set_mute", 3, json!({"muted": false})));
     rig.send(&ManagedRig::command("set_mute", 4, json!({"muted": true})));
     rig.until("the last command taken", |rig| {
-        rig.sdk.count(Call::Mute) > track_muted + (STRIKES as usize).div_ceil(2)
+        rig.sdk.count(Call::Mute) > track_muted + (strikes as usize).div_ceil(2)
     })
     .await;
     rig.reader.stop(false);
