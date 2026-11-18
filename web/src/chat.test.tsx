@@ -2010,7 +2010,7 @@ describe('a long channel', () => {
   });
 
   // Rendering a whole held history (maxHeld messages) takes about 6 s here
-  // and three times that on CI's runners, past the default 15 s (#1940).
+  // and three times that on CI's runners, past its old 15 s (#1940).
   // The exact rule (another page only while it fits within maxHeld) is in
   // state/messages.test.ts. This shows what the reader sees at the cap: the
   // channel starts nearly full, so it takes two pages and not nineteen (#459).
