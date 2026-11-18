@@ -1,10 +1,14 @@
 // Unread counts and the read mark (UX-02), against a fake conchd (fetch) and a
 // fake WebSocket. No network, no browser.
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, renderHook, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { App } from './App';
-import { badgeText, markInterval } from './useReadState';
-import { maxHeld, pageSize } from './state/messages';
+import { restore } from './api';
+import { badgeText, markInterval, useReadState } from './useReadState';
+import { Conversation } from './Conversation';
+import type { ReadStateV1 } from './schema/readstate';
+import type { MessageV2 } from './schema/message';
+import { chatFor, chatReducer, initialChat, maxHeld, pageSize } from './state/messages';
 
 const origin = 'http://127.0.0.1:8080';
 const secret = 'conch_secret_token_value';
@@ -56,7 +60,7 @@ class FakeSocket {
 }
 
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status });
-const state = (channel_id: number, unread: number, last_read_id = 0) => ({
+const state = (channel_id: number, unread: number, last_read_id = 0): ReadStateV1 => ({
   schema: 'conch.read_state.v1',
   channel_id,
   last_read_id,
@@ -73,6 +77,8 @@ interface Server {
   read: () => unknown[];
   refusal: { status: number; code: string } | null;
   gets: number;
+  pages: number[];
+  olderDown: boolean;
   // Set to make a mark request fail with no answer at all.
   putsDown: boolean;
   puts: { channel: string; id: number; url: string }[];
@@ -81,7 +87,7 @@ interface Server {
 let server: Server;
 
 function install() {
-  server = { events: false, readDelay: null, history: [], read: () => [], refusal: null, gets: 0, putsDown: false, puts: [] };
+  server = { events: false, readDelay: null, history: [], read: () => [], refusal: null, gets: 0, pages: [], olderDown: false, putsDown: false, puts: [] };
   vi.stubGlobal('WebSocket', FakeSocket);
   vi.stubGlobal(
     'fetch',
@@ -116,6 +122,8 @@ function install() {
       if (m?.[2] === 'nets') return Promise.resolve(json({ nets: [] }));
       if (m?.[2] === 'messages') {
         const before = Number(url.searchParams.get('before') ?? Infinity);
+        server.pages.push(before);
+        if (before !== Infinity && server.olderDown) return Promise.resolve(json({}, 500));
         const messages = m[1] === 'general' ? server.history.filter((m) => (m as { id: number }).id < before).slice(-(before === Infinity ? server.firstPage ?? pageSize : pageSize)).reverse() : [];
         return Promise.resolve(json({ messages }));
       }
@@ -698,6 +706,55 @@ describe('the opening unread position', () => {
     expect(divider()?.tabIndex).toBe(target === undefined ? undefined : 0);
   });
 
+  it.each([0, 10])('resolves a full first page beginning immediately after mark %i', async (mark) => {
+    server.history = Array.from({ length: pageSize }, (_, i) => message(mark + i + 1));
+    server.read = () => [state(7, pageSize, mark)];
+    await openChat();
+    await waitFor(() => { expect(nextRow()).toBe(String(mark + 1)); });
+    expect(server.pages).toEqual([Infinity]);
+  });
+
+  it.each([0, 10])('reaches the first unread exactly at maxHeld after mark %i', async (mark) => {
+    server.history = Array.from({ length: maxHeld }, (_, i) => message(mark + i + 1));
+    // Start one page short of the cap to exercise the final page transition.
+    server.firstPage = maxHeld - pageSize;
+    server.read = () => [state(7, 1000, mark)];
+    await openChat();
+    Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', { configurable: true, value: vi.fn() });
+    fireEvent.click(screen.getByRole('button', { name: 'Jump to first unread' }));
+    await waitFor(() => { expect(nextRow()).toBe(String(mark + 1)); }, { timeout: 10000 });
+    await waitFor(() => { expect(document.activeElement?.getAttribute('data-message-id')).toBe(String(mark + 1)); });
+    expect(server.pages).toEqual([Infinity, mark + pageSize + 1]);
+    expect(screen.queryByText(/history limit has been reached/)).toBeNull();
+  }, 15000);
+
+  it.each([{ length: 450, mark: 300 }, { length: 150, mark: 0 }])('stops when only own posts and tombstones remain after mark $mark, and dismisses the notice', async ({ length, mark }) => {
+    server.history = Array.from({ length }, (_, i) => i % 2 === 0
+      ? message(i + 1, 'mine', 2) : { ...message(i + 1), removed: true });
+    server.read = () => [state(7, 1, mark)];
+    await openChat();
+    fireEvent.click(screen.getByRole('button', { name: 'Jump to first unread' }));
+    await screen.findByText('The first unread message is no longer available.');
+    expect(server.pages).toEqual([Infinity, length - pageSize + 1]);
+    expect(screen.queryByRole('button', { name: 'Jump to first unread' })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Dismiss unread notice' }));
+    expect(screen.queryByText('The first unread message is no longer available.')).toBeNull();
+  });
+
+  it('allows dismissing a failed jump after manually loading the unread row', async () => {
+    server.history = Array.from({ length: 150 }, (_, i) => message(i + 1));
+    server.read = () => [state(7, 150, 0)];
+    await openChat();
+    server.olderDown = true;
+    fireEvent.click(screen.getByRole('button', { name: 'Jump to first unread' }));
+    await screen.findByText('Cannot load older messages. Try jumping again.');
+    server.olderDown = false;
+    fireEvent.click(screen.getByRole('button', { name: /Load older messages/ }));
+    await waitFor(() => { expect(nextRow()).toBe('1'); });
+    fireEvent.click(screen.getByRole('button', { name: 'Dismiss unread notice' }));
+    expect(screen.queryByText('Cannot load older messages. Try jumping again.')).toBeNull();
+  });
+
   it('skips own posts and tombstones, and keeps a single divider after marking and new live messages', async () => {
     server.history = [message(1), message(2, 'mine', 2), { ...message(3, 'This message was removed by a moderator.'), removed: true }, message(4)];
     server.read = () => [state(7, 1, 1)];
@@ -775,5 +832,69 @@ describe('the opening unread position', () => {
     socket.send(message(2));
     expect(divider()).toBeNull();
     expect(screen.queryByRole('button', { name: 'Jump to first unread' })).toBeNull();
+  });
+});
+
+// These fixtures keep the owning hooks/reducer alive while the view remounts.
+describe('read-state recovery and retained history', () => {
+  beforeEach(async () => {
+    window.sessionStorage.setItem('conch.web.token', secret);
+    await restore();
+  });
+  const props = () => ({ signedIn: true, channels, loaded: true, open: 'general' as string | null,
+    ready: true, newest: { id: 2, author: 3 }, atBottom: false, status: 'open' as const,
+    eventsLive: true, event: null as ReturnType<typeof state> | null, me: 2, onUnauthorized: vi.fn() });
+
+  it.each([500, 0])('marks and clears badges after an initial read failure %i', async (status) => {
+    const fetch = vi.mocked(globalThis.fetch);
+    fetch.mockImplementationOnce(() => status === 0 ? Promise.reject(new TypeError('offline')) : Promise.resolve(json({}, status)));
+    const initial = props();
+    const view = renderHook((p) => useReadState(p), { initialProps: initial });
+    await act(async () => { await Promise.resolve(); });
+    expect(view.result.current.openingMark).toBeNull();
+    view.rerender({ ...initial, event: state(7, 2, 0) });
+    await waitFor(() => { expect(view.result.current.counts.get('general')).toBe(2); });
+    view.rerender({ ...initial, atBottom: true });
+    await waitFor(() => { expect(server.puts.map((p) => p.id)).toEqual([2]); });
+    expect(view.result.current.counts.get('general')).toBeUndefined();
+  });
+
+  it('can mark read after a failed snapshot without an event or reconnect', async () => {
+    server.refusal = { status: 500, code: 'internal_error' };
+    const initial = props();
+    const view = renderHook((p) => useReadState(p), { initialProps: initial });
+    await act(async () => { await Promise.resolve(); });
+    server.refusal = null;
+    view.rerender({ ...initial, atBottom: true });
+    await waitFor(() => { expect(server.puts.map((p) => p.id)).toEqual([2]); });
+    expect(view.result.current.openingMark).toBeNull();
+  });
+
+  it('reads and marks the first channel after starting with none', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true, toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    const initial = { ...props(), channels: [] as typeof channels, open: null as string | null, atBottom: true };
+    const view = renderHook((p) => useReadState(p), { initialProps: initial });
+    await waitFor(() => { expect(server.gets).toBe(1); });
+    view.rerender({ ...initial, channels, open: 'general' });
+    await act(async () => { await vi.advanceTimersByTimeAsync(markInterval); });
+    await waitFor(() => { expect(server.gets).toBe(2); expect(server.puts.map((p) => p.id)).toEqual([2]); });
+    expect(view.result.current.openingMark).toBe(0);
+  });
+
+  it.each([0, 1])('remounts ready history with opening mark %i and excludes later live arrivals', (mark) => {
+    let store = chatReducer(initialChat, { type: 'historyLoaded', channel: 'general', messages: [message(1) as MessageV2], more: false });
+    const conversation = () => <Conversation channel="general" chat={chatFor(store, 'general')} openingMark={mark}
+      live="open" people={new Map()} nets={new Map()} viewer={2} draft="" target={{ net: null, whisper: null, refusal: null, note: null }}
+      monitored={new Set()} onDraft={() => {}} onTarget={() => {}} onSend={() => {}} onReplySend={() => {}}
+      onRetrySend={() => {}} onDismissSend={() => {}} onLoadOlder={() => {}} onReload={() => {}} onBottom={() => {}} />;
+    const first = render(conversation());
+    first.unmount();
+    store = chatReducer(store, { type: 'received', channel: 'general', message: message(2) as MessageV2 });
+    const view = render(conversation());
+    const divider = () => screen.queryByRole('separator', { name: 'New messages' });
+    expect(divider()?.parentElement?.nextElementSibling?.getAttribute('data-message-id')).toBe(mark === 0 ? '1' : undefined);
+    store = chatReducer(store, { type: 'received', channel: 'general', message: message(3) as MessageV2 });
+    view.rerender(conversation());
+    expect(divider()?.parentElement?.nextElementSibling?.getAttribute('data-message-id')).toBe(mark === 0 ? '1' : undefined);
   });
 });

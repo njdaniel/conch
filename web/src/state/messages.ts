@@ -62,6 +62,8 @@ export interface ChannelChat {
   // Messages this tab sent and the POST confirmed, shown as `Sent`.
   readonly sentIds: ReadonlySet<number>;
   readonly history: HistoryStatus;
+  // Head of the initial history page for this visit, preserved across remounts.
+  readonly openingHead?: number;
   readonly older: OlderStatus;
   // Whether the server has nothing below the oldest message read: a page came
   // back shorter than asked for.
@@ -290,6 +292,7 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
           {
             ...prune(hold(track({ ...c, byId: new Map() }, action.messages), newest(c.byId, action.messages))),
             history: 'ready',
+            openingHead: action.messages.reduce((head, message) => Math.max(head, message.id), 0),
             older: 'idle',
             trimmed: false,
             exhausted: !action.more,

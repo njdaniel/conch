@@ -953,17 +953,17 @@ export function Conversation({
   const shown = ordered(chat);
   // Expanded threads share this channel timeline's mark; they deliberately
   // have no second divider or independent unread position.
-  // A reopened channel can render its cached page before the history loader
-  // runs. Capture the new visit's page, rather than freezing that cached head.
-  const [openingPage] = useState(chat.byId);
+  // The reducer retains the opening head across view remounts and live arrivals.
+  // A fresh history load starts a new visit, even if a cached page rendered first.
   const [unreadBoundary, setUnreadBoundary] = useState<{ readonly head: number; readonly target?: number | null } | null>(null);
-  if (unreadBoundary === null && chat.history === 'ready' && chat.byId !== openingPage) {
-    setUnreadBoundary({ head: lastId(chat) });
+  if (unreadBoundary !== null && chat.history === 'loading') setUnreadBoundary(null);
+  if (unreadBoundary === null && chat.history === 'ready') {
+    setUnreadBoundary({ head: chat.openingHead ?? lastId(chat) });
   }
   // A held page beginning after the mark cannot prove which message was first.
   // Wait until paging crosses it (or exhausts visible history) before placing.
   if (unreadBoundary !== null && unreadBoundary.target === undefined && openingMark !== null
-    && (oldestId(chat) <= openingMark || chat.exhausted)) {
+    && ((chat.byId.size > 0 && oldestId(chat) <= openingMark + 1) || chat.exhausted)) {
     const first = shown.find((m) => m.id > openingMark && m.id <= unreadBoundary.head && m.author_id !== viewer && m.removed !== true);
     setUnreadBoundary({ ...unreadBoundary, target: first?.id ?? null });
   }
@@ -1137,6 +1137,9 @@ export function Conversation({
         row.focus({ preventScroll: true });
       }
       setJumpUnread(false);
+    } else if (unreadBoundary?.target === null) {
+      setUnreadProblem('The first unread message is no longer available.');
+      setJumpUnread(false);
     } else if (chat.older === 'error') {
       setUnreadProblem('Cannot load older messages. Try jumping again.');
       setJumpUnread(false);
@@ -1293,7 +1296,12 @@ export function Conversation({
           {jumpUnread ? 'Loading first unread…' : 'Jump to first unread'}
         </button>
       ) : null}
-      {unreadProblem === '' ? null : <p className="unread-problem" role="status">{unreadProblem}</p>}
+      {unreadProblem === '' ? null : (
+        <div className="unread-problem">
+          <p role="status">{unreadProblem}</p>
+          <button type="button" onClick={() => { setUnreadProblem(''); }}>Dismiss unread notice</button>
+        </div>
+      )}
       {unseen ? (
         <button type="button" className="jump primary" onClick={jump}>
           Jump to latest
