@@ -1722,72 +1722,134 @@ test('a push-to-talk whose reports are slow is audited as the reported pair and 
       // While LiveKit was down the SDK's retries made Chromium log "WebSocket
       // connection to 'ws://<livekit>/rtc/v1?access_token=<join token>...'
       // failed: ... net::ERR_CONNECTION_REFUSED" (not an app log; issue
-      // #1760). Whether a retry fell in that window is timing, so lines of
-      // exactly that shape are allowed here and nowhere else.
+      // #1760), and the first try after it came back, to a room it no longer
+      // had, "... failed: Error during WebSocket handshake: Unexpected
+      // response code: 404" (issue #1915). Whether a try fell in either
+      // window, and whether it carried the join token conchd issued or the
+      // one LiveKit refreshed after the join, is timing, so lines of exactly
+      // those shapes are allowed here and nowhere else.
       await expectClean({ ...a, allowLiveKitRefusals: true });
     } finally {
       await closeAll(a.context);
     }
   });
 
-  // The allowance on a real refused socket, made on purpose: the page opens a
-  // WebSocket to LiveKit's address with its own join token, with LiveKit
-  // stopped, as the SDK does. Chromium logs it as an error entry whose text
-  // holds the address and so the token; expectClean refuses that, and
-  // refuses it no less with the allowance for any other line.
-  test('a refused LiveKit socket fails expectClean unless refusals are allowed', async ({ browser }) => {
-    const a = await person(browser, 'alice');
-    try {
-      const voice = voiceRegion(a.page);
-      await voice.getByRole('button', { name: 'Join voice' }).click();
-      await expect(voice).toContainText('Connected in', { timeout: 60_000 });
-      await a.watch.settled();
-      const join = vw.secrets.filter((x) => x.startsWith('eyJ')).at(-1);
-      if (join === undefined) throw new Error('no join token was captured from the session answers');
-      vw.stopLiveKit();
+  // The allowance on a real failed socket, made on purpose, in each of the two
+  // shapes it covers: the page opens a WebSocket to LiveKit's address with its
+  // own join token, as the SDK does, either with LiveKit stopped (refused,
+  // issue #1760) or with LiveKit up and a join request it cannot read, which
+  // it answers with 400 instead of the upgrade (the shape of the 404 after a
+  // restart, issue #1915). Chromium logs it as an error entry whose text holds
+  // the address and so the token; expectClean refuses that, and refuses it no
+  // less with the allowance for any other line: the page's own console.error
+  // of that very line, token and all, among them (the security review of
+  // #1915: the allowance goes by where a line came from, not only by what it
+  // says).
+  for (const { how, stopped, logged } of [
+    { how: 'a refused LiveKit socket', stopped: true, logged: 'Error in connection establishment: net::ERR_' },
+    { how: 'a rejected LiveKit handshake', stopped: false, logged: 'Error during WebSocket handshake: Unexpected response code: ' },
+  ]) {
+    test(`${how} fails expectClean unless refusals are allowed`, async ({ browser }) => {
+      const a = await person(browser, 'alice');
       try {
-        await a.page.evaluate(
-          ([o, t]) =>
-            new Promise<void>((done) => {
-              const ws = new WebSocket(`${o ?? ''}/rtc/v1?access_token=${t ?? ''}&join_request=x`);
-              ws.onerror = () => {
-                done();
-              };
-              ws.onopen = () => {
-                done();
-              };
-            }),
-          [vw.livekitOrigin, join],
-        );
-        await expect.poll(() => a.watch.console.filter((l) => l.includes('WebSocket connection to')).length, { timeout: 10_000 }).toBeGreaterThan(0);
-        await expect(expectClean(a), 'the refused socket, without the allowance').rejects.toThrow();
-        await expectClean({ ...a, allowLiveKitRefusals: true });
-        await a.page.evaluate((x) => {
-          console.log(x);
-        }, join);
-        await expect(expectClean({ ...a, allowLiveKitRefusals: true }), 'a logged token, with the allowance').rejects.toThrow();
+        const voice = voiceRegion(a.page);
+        await voice.getByRole('button', { name: 'Join voice' }).click();
+        await expect(voice).toContainText('Connected in', { timeout: 60_000 });
+        await a.watch.settled();
+        const join = vw.secrets.filter((x) => x.startsWith('eyJ')).at(-1);
+        if (join === undefined) throw new Error('no join token was captured from the session answers');
+        if (stopped) vw.stopLiveKit();
+        try {
+          await a.page.evaluate(
+            ([o, t]) =>
+              new Promise<void>((done) => {
+                const ws = new WebSocket(`${o ?? ''}/rtc/v1?access_token=${t ?? ''}&join_request=x`);
+                ws.onerror = () => {
+                  done();
+                };
+                ws.onopen = () => {
+                  ws.close();
+                  done();
+                };
+              }),
+            [vw.livekitOrigin, join],
+          );
+          // The line of this socket, not of the SDK's own retries (with
+          // LiveKit stopped they come too, the same address over and over).
+          const isLine = (l: string) => l.includes('WebSocket connection to') && l.includes("&join_request=x' failed: ") && l.includes(logged);
+          await expect.poll(() => a.watch.console.filter(isLine).length, { timeout: 10_000 }).toBeGreaterThan(0);
+          await expect(expectClean(a), `${how}, without the allowance`).rejects.toThrow();
+          await expectClean({ ...a, allowLiveKitRefusals: true });
+          // Chromium's line, as the page would log it itself with console.error.
+          // It is this socket's: the browser logged it once, and so allows one,
+          // whatever the views below leave out. (Copied from an SDK retry, a
+          // retry left out of a view would leave its Log entry to allow it.)
+          const line = a.watch.console.find(isLine)?.replace(/^error: /, '');
+          if (line === undefined) throw new Error(`no line of ${how} in the console`);
+          // Each leak is checked on its own: the console as it was clean, and
+          // the lines from that leak on (one leak must not pass for another).
+          const clean = [...a.watch.console];
+          const leaks: [string, () => Promise<void>][] = [
+            [
+              'a logged token, with the allowance',
+              () =>
+                a.page.evaluate((x) => {
+                  console.log(x);
+                }, join),
+            ],
+            [
+              'the same line logged by the page, with the allowance',
+              () =>
+                a.page.evaluate((x) => {
+                  console.error(x);
+                }, line),
+            ],
+          ];
+          for (const [what, leak] of leaks) {
+            const from = a.watch.console.length;
+            await leak();
+            await expect.poll(() => a.watch.console.length, { timeout: 10_000 }).toBeGreaterThan(from);
+            const watch = { ...a.watch, console: [...clean, ...a.watch.console.slice(from)] };
+            await expect(expectClean({ ...a, watch, allowLiveKitRefusals: true }), what).rejects.toThrow();
+          }
+        } finally {
+          if (stopped) await vw.startLiveKit();
+        }
       } finally {
-        await vw.startLiveKit();
+        await closeAll(a.context);
       }
-    } finally {
-      await closeAll(a.context);
-    }
-  });
+    });
+  }
 
-  // The allowance above is for Chromium's refusal line only: a secret that the
-  // page itself logs still fails expectClean in the test that has it.
-  test('a secret in the console still fails expectClean where refusals are allowed', async ({ browser }) => {
-    const a = await person(browser, 'alice');
-    try {
-      await expectClean({ ...a, allowLiveKitRefusals: true });
-      await a.page.evaluate((x) => {
-        console.log(x);
-      }, a.member.token);
-      await expect(expectClean({ ...a, allowLiveKitRefusals: true })).rejects.toThrow();
-    } finally {
-      await closeAll(a.context);
-    }
-  });
+  // The allowance above is for Chromium's refusal and rejection lines only: a
+  // secret that the page itself logs still fails expectClean in the test that
+  // has it, bare or in the exact shape of either of Chromium's lines (the
+  // member's own credential stands in for a join token: the page logs it, so
+  // the browser's network source never did).
+  for (const [what, level, shape] of [
+    ['bare', 'log', (_o: string, t: string) => t],
+    ['as a refused socket', 'error', (o: string, t: string) => `WebSocket connection to '${o}/rtc/v1?access_token=${t}&join_request=x' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED`],
+    ['as a rejected handshake', 'error', (o: string, t: string) => `WebSocket connection to '${o}/rtc/v1?access_token=${t}&join_request=x' failed: Error during WebSocket handshake: Unexpected response code: 404`],
+  ] as const) {
+    test(`a secret the page logs ${what} still fails expectClean where refusals are allowed`, async ({ browser }) => {
+      const a = await person(browser, 'alice');
+      try {
+        await expectClean({ ...a, allowLiveKitRefusals: true });
+        const from = a.watch.console.length;
+        await a.page.evaluate(
+          ([l, x]) => {
+            if (l === 'log') console.log(x);
+            else console.error(x);
+          },
+          [level, shape(vw.livekitOrigin.replace(/^http/, 'ws').replace(/\/+$/, ''), a.member.token)] as const,
+        );
+        await expect.poll(() => a.watch.console.length, { timeout: 10_000 }).toBeGreaterThan(from);
+        await expect(expectClean({ ...a, allowLiveKitRefusals: true })).rejects.toThrow();
+      } finally {
+        await closeAll(a.context);
+      }
+    });
+  }
 });
 
 // Two frames, so that a change of size has been laid out and drawn.
