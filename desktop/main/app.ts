@@ -453,15 +453,18 @@ export async function start(): Promise<void> {
   });
   await installed.start();
 
-  // The Linux screen share's sound (issue #1854): one experimental switch,
-  // CONCH_LINUX_SHARE_AUDIO=1 in main's own environment, on Linux, read here
-  // once. Off (the default and every release's): the helper is offered the
-  // versions it always was, no sound object exists, the view says nothing of
-  // sound and no share-sound IPC function answers. Neither the renderer nor a
-  // profile can turn it on; the default becomes on only in a later change that
-  // cites a passed L-S6 receipt.
+  // The Linux screen share's sound (issue #1854): on by default on Linux
+  // (Nick, 2026-11-18, #1952; the by-hand L-S6 run is still #922), read here
+  // once from main's own environment. CONCH_LINUX_SHARE_AUDIO=0 turns it off:
+  // the helper is offered the versions it always was, no sound object exists,
+  // the view says nothing of sound and no share-sound IPC function answers.
+  // Neither the renderer nor a profile can change the switch.
   const shareAudio = linuxShareAudioEnabled(process.env, process.platform);
-  if (shareAudio) log('conch-desktop: CONCH_LINUX_SHARE_AUDIO is on: the Linux screen share offers its sound (experimental)');
+  if (process.platform === 'linux') {
+    log(shareAudio
+      ? 'conch-desktop: the Linux screen share offers its sound (CONCH_LINUX_SHARE_AUDIO=0 turns it off)'
+      : 'conch-desktop: CONCH_LINUX_SHARE_AUDIO=0: the Linux screen share is silent');
+  }
   // Set once Lifecycle exists (below); voice and the companion read it.
   let screenLocked: () => boolean = () => false;
   const voice = new VoiceService({
