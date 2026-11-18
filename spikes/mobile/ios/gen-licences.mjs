@@ -52,7 +52,14 @@ if (!existsSync(podLock)) {
         });
         file = lookup.status === 0 ? lookup.stdout.trim() : '';
       }
-      const licence = file && existsSync(file) ? JSON.parse(readFileSync(file, 'utf8')).license : null;
+      // A spec repo may hold a Ruby .podspec (LiveKit's does) rather than
+      // .podspec.json: `pod ipc spec` prints any podspec as JSON.
+      const specJSON = () => {
+        if (!file.endsWith('.podspec')) return readFileSync(file, 'utf8');
+        const ipc = spawnSync('bundle', ['exec', 'pod', 'ipc', 'spec', file], { cwd: here, encoding: 'utf8' });
+        return ipc.status === 0 ? ipc.stdout : 'null';
+      };
+      const licence = file && existsSync(file) ? JSON.parse(specJSON())?.license : null;
       licences.set(key, typeof licence === 'string' ? licence : (licence?.type ?? 'NOT READ: check the pod repository'));
     }
     return licences.get(key);
