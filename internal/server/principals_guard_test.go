@@ -66,6 +66,8 @@ var principalReads = []principalRead{
 	{"store/bans.go", "Store.ListChannelBans", 1, readOperatorOrMaker},
 	{"store/bans.go", "managerBanTargetTx", 1, readOperatorOrMaker},
 	{"store/audience.go", "Store.ListChannelAuthors", 1, readGated},
+	// #1828: recheck only the removing caller’s kind under the write lock.
+	{"store/audience.go", "Store.removeMessage", 1, readOwnOrInternal},
 	// #1282: the humans who hold a message of an author that ListChannelAuthors
 	// would name it for, decided per reader by messageVisible; the ids go only
 	// to the hide signal, never to a member.

@@ -5,6 +5,7 @@ import (
 	"net/http"
 
 	"github.com/njdaniel/conch/internal/server/store"
+	"github.com/njdaniel/conch/pkg/schema"
 )
 
 // Message removal (issue #852, docs/design/moderation.md §7). DELETE
@@ -81,4 +82,34 @@ func (s *Server) broadcastMessageRemoved(ctx context.Context, removal store.Mess
 		s.broadcaster.BroadcastMessage(ctx, v0)
 	}
 	s.events.notifyMessageRemoved(msg.ChannelID, msg.ID)
+}
+
+// handleRemoveOwnMessage is the author-only sibling of the moderation route.
+// Identity is checked before lookups; the store checks visibility before
+// authorship so an invisible target answers exactly like an unknown message.
+// No MCP tool exposes this operation. Guests use their visit's human principal.
+func (s *Server) handleRemoveOwnMessage(w http.ResponseWriter, r *http.Request) {
+	caller, ok := callerFrom(r.Context())
+	if !ok || caller.Kind != store.PrincipalHuman {
+		writeJSON(w, http.StatusForbidden, &schema.Error{Code: "forbidden", Message: "only signed-in people and guests may remove their own messages"})
+		return
+	}
+	channel, ok := s.moderationChannel(w, r)
+	if !ok {
+		return
+	}
+	id, serr := parseEditMessageID(r.PathValue("message_id"))
+	if serr != nil {
+		writeReactionError(w, serr)
+		return
+	}
+	removal, err := s.store.RemoveOwnMessage(r.Context(), channel.ID, readerFor(r, apiV2), id, auditActor(r.Context()), s.now())
+	if serr := reactionStoreError(r.Context(), err); serr != nil {
+		writeReactionError(w, serr)
+		return
+	}
+	if removal.Changed {
+		s.broadcastMessageRemoved(r.Context(), removal)
+	}
+	w.WriteHeader(http.StatusNoContent)
 }

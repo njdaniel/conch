@@ -370,6 +370,7 @@ var routeExpectations = map[string]routeExpectation{
 	"DELETE /v2/channels/{channel}/messages/{message_id}/reactions/{emoji}/{principal_id}": {classManager, "/v2/channels/general/messages/9999/reactions/%F0%9F%91%8D/2", "", 404},
 	"DELETE /v2/channels/{channel}/messages/{message_id}/reactors/{principal_id}":          {classManager, "/v2/channels/general/messages/9999/reactors/2", "", 404},
 	"DELETE /v2/channels/{channel}/messages/{message_id}":                                  {classManager, "/v2/channels/general/messages/9999", "", 404},
+	"DELETE /v2/channels/{channel}/messages/{message_id}/own":                              {classAuth, "/v2/channels/general/messages/9999/own", "", 404},
 	"PUT /v2/channels/{channel}/messages/{message_id}/body":                                {classAuth, "/v2/channels/general/messages/9999/body", `{"body":"x"}`, 404},
 	"GET /v2/channels/{channel}/messages/{message_id}/revisions":                           {classAuth, "/v2/channels/general/messages/9999/revisions", "", 404},
 	"PUT /v1/principals/{id}/manifest":                                                     {classPerm, "/v1/principals/1/manifest", `{}`, 400},
@@ -750,6 +751,9 @@ func TestRoleMatrix(t *testing.T) {
 			// reports (issue #446) and message edits (issue #845: message
 			// 9999 does not exist, so a person gets message_not_found, and an
 			// agent is refused before any lookup).
+			if rt.pattern == "DELETE /v2/channels/{channel}/messages/{message_id}/own" {
+				agentWant = http.StatusForbidden
+			}
 			if (isInviteRoute(rt.pattern) && !inviteRetired) || rt.pattern == "POST /v1/reports" || rt.pattern == "POST /v1/channels" || isSelfMembershipRoute(rt.pattern) || isMessageEditRoute(rt.pattern) {
 				agentWant = http.StatusForbidden
 			}
@@ -861,6 +865,9 @@ func TestAuthOffUnchanged(t *testing.T) {
 				}
 				if isGuestPolicyRoute(rt.pattern) {
 					want = http.StatusForbidden // accounts_require_auth: no guest exists, nor anyone to admit one (design §7.4)
+				}
+				if rt.pattern == "DELETE /v2/channels/{channel}/messages/{message_id}/own" {
+					want = http.StatusForbidden
 				}
 				if isDeviceLinkRoute(rt.pattern) {
 					want = http.StatusForbidden // accounts_require_auth: no account to add a device to

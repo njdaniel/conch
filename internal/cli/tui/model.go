@@ -1307,7 +1307,7 @@ func (m Model) reloadWhoAmI() tea.Cmd {
 // every-channel view needs manage_channels. The offered keys and hints are
 // decided from the permissions each time they are drawn.
 func (m Model) permissionsMoved() Model {
-	if m.mod.pending != nil && !m.moderationStanding() {
+	if m.mod.pending != nil && m.mod.pending.op != removeOwnMessage && !m.moderationStanding() {
 		m.mod.pending = nil
 	}
 	if m.dir.all && !m.canManageChannels() {
@@ -2163,6 +2163,8 @@ func (m Model) submit() (tea.Model, tea.Cmd) {
 		return m.reactionCommand(strings.TrimPrefix(name, "/"), rest)
 	case "/emoji":
 		return m.emojiCommand(rest), nil
+	case "/remove-own-message":
+		return m.moderationCommand("remove-own-message", rest)
 	case "/voice-kick", "/member-remove", "/ban", "/unban", "/bans", "/remove-message":
 		return m.moderationCommand(strings.TrimPrefix(name, "/"), rest)
 	case "/help":

@@ -31,6 +31,8 @@ type reactionRoute struct {
 	probe func(ch string, message int64) probe
 	// moderation is the manager's routes.
 	moderation bool
+	// authorRemoval rejects agents before lookup but admits guests.
+	authorRemoval bool
 	// batch is the one that omits instead of refusing.
 	batch bool
 }
@@ -55,6 +57,8 @@ var reactionRoutes = []reactionRoute{
 	// see, the same refusal of an agent and a guest.
 	{route: "DELETE /v2/channels/{channel}/messages/{message_id}", moderation: true,
 		probe: func(ch string, m int64) probe { return del(reactionBase(ch, m)) }},
+	{route: "DELETE /v2/channels/{channel}/messages/{message_id}/own", authorRemoval: true,
+		probe: func(ch string, m int64) probe { return del(reactionBase(ch, m) + "/own") }},
 }
 
 func reactionBase(ch string, m int64) string { return "/v2/channels/" + ch + "/messages/" + id(m) }
@@ -103,7 +107,7 @@ func reactionAgentRows() []row {
 	var rows []row
 	for _, r := range reactionRoutes {
 		want := channelNotFound
-		if r.moderation {
+		if r.moderation || r.authorRemoval {
 			want = answer{http.StatusForbidden, "forbidden"}
 		}
 		rows = append(rows, row{route: r.route, what: "reacts through A's channel as an agent", pick: aChannel, want: want,

@@ -633,3 +633,52 @@ func TestReconcileFailureAppliesThePagesAlreadyRead(t *testing.T) {
 		t.Fatal("a failed batch cleared stale")
 	}
 }
+
+func (a *moderationStub) RemoveOwnMessage(_ context.Context, channel string, id int64) error {
+	a.calls = append(a.calls, moderationRequest{op: removeOwnMessage, channel: channel, target: id})
+	return a.err
+}
+
+func TestAuthorRemovalTUI(t *testing.T) {
+	m, api := moderationModelForTest()
+	m.role, m.owner = schema.RoleMember, false
+	m.messages["general"][0].AuthorID = m.authorID
+	m, _ = submitText(t, m, "/remove-own-message 41")
+	if m.mod.pending == nil || len(api.calls) != 0 {
+		t.Fatal("author removal did not wait for confirmation")
+	}
+	if !strings.Contains(m.View(), "copies already received cannot be recalled") {
+		t.Fatal("missing soft removal warning")
+	}
+	next, cmd := m.moderationKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+	m = next.(Model)
+	m = m.moderationFinished(cmd().(moderationDone))
+	if len(api.calls) != 1 || api.calls[0].op != removeOwnMessage {
+		t.Fatalf("wrong route: %+v", api.calls)
+	}
+	got := m.messages["general"][0]
+	if !got.RemovedByAuthor || got.Body != schema.MessageRemovedByAuthorBody {
+		t.Fatalf("wrong tombstone: %+v", got)
+	}
+	// Neither late history nor a duplicate original frame changes its kind.
+	safe := m.mod.withoutRemoved("general", []schema.MessageV2{{ID: 41, Body: "SECRET original"}})
+	if !safe[0].RemovedByAuthor || safe[0].Body != schema.MessageRemovedByAuthorBody {
+		t.Fatalf("late original restored: %+v", safe)
+	}
+}
+
+func TestAuthorRemovalRetryKeepsCanonicalModeratorKind(t *testing.T) {
+	m, api := moderationModelForTest()
+	api.history = schema.ListMessagesResponseV2{Messages: []schema.MessageV2{{ID: 41, AuthorID: m.authorID, Body: schema.MessageRemovedBody, Removed: true}}}
+	m = m.moderationFinished(m.runModeration(moderationRequest{op: removeOwnMessage, channel: "general", target: 41})().(moderationDone))
+	if got := m.messages["general"][0]; got.RemovedByAuthor || got.Body != schema.MessageRemovedBody {
+		t.Fatalf("retry relabeled moderator removal: %+v", got)
+	}
+	// History corrects an optimistic kind even if the live frame was missed.
+	m.mod.rememberAuthor("general", 41, true)
+	m.mod.withoutRemoved("general", api.history.Messages)
+	safe := m.mod.withoutRemoved("general", []schema.MessageV2{{ID: 41, Body: "SECRET old text"}})
+	if safe[0].RemovedByAuthor || safe[0].Body != schema.MessageRemovedBody {
+		t.Fatalf("late history changed canonical kind: %+v", safe)
+	}
+}

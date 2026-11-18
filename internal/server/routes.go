@@ -193,6 +193,8 @@ func (s *Server) routeTable() []route {
 		// member of the channel to see, for its whole audience. Reduce-only.
 		// The handler applies the content rules (message_removal.go).
 		rt("DELETE /v2/channels/{channel}/messages/{message_id}", accessChannelManager, hf(s.handleRemoveMessage)),
+		// Author removal (#1828) grants no moderation standing.
+		rt("DELETE /v2/channels/{channel}/messages/{message_id}/own", accessAuthenticated, hf(s.handleRemoveOwnMessage)),
 		rt("GET /v1/read-state", accessAuthenticated, hf(s.handleListReadState)),
 		// Notification preferences and the pending feed (issue #1713): people
 		// with a full credential only. An agent is refused in the handler

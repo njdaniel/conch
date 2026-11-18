@@ -1128,6 +1128,9 @@ BEGIN SELECT RAISE(ABORT, 'message removals are permanent'); END`,
 		`CREATE INDEX push_registrations_by_credential ON push_registrations (credential_id) WHERE state = 'active'`,
 		`CREATE INDEX push_registrations_by_principal ON push_registrations (principal_id) WHERE state = 'active'`,
 	},
+	// 50: distinguish author removals from moderation, including a moderator
+	// removing their own message. Existing rows keep their original meaning.
+	{`ALTER TABLE message_removals ADD COLUMN by_author INTEGER NOT NULL DEFAULT 0 CHECK (by_author IN (0, 1))`},
 }
 
 // migrationSteps holds Go code that runs inside a migration's transaction

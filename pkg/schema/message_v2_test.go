@@ -134,6 +134,10 @@ func TestMessageV2Validate(t *testing.T) {
 		// A removed message is the tombstone (moderation.md §7.3, issue
 		// #849): the fixed body, no payload, no edited_at. Position and
 		// attribution stay. A message not removed may say the sentence.
+		{name: "valid author removed", mutate: func(m *MessageV2) { m.Body, m.Removed, m.RemovedByAuthor = MessageRemovedByAuthorBody, true, true }},
+		{name: "author marker without removal", mutate: func(m *MessageV2) { m.RemovedByAuthor = true }, wantErr: "removed_by_author requires removed"},
+		{name: "author body without marker", mutate: func(m *MessageV2) { m.Body, m.Removed = MessageRemovedByAuthorBody, true }, wantErr: "removed message body must be"},
+		{name: "author marker with moderator body", mutate: func(m *MessageV2) { m.Body, m.Removed, m.RemovedByAuthor = MessageRemovedBody, true, true }, wantErr: "removed message body must be"},
 		{name: "valid removed", mutate: func(m *MessageV2) { m.Body, m.Removed = MessageRemovedBody, true }},
 		{name: "valid removed reply", mutate: func(m *MessageV2) {
 			m.Body, m.Removed = MessageRemovedBody, true

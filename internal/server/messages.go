@@ -425,6 +425,7 @@ func messageV2FromStore(message store.Message) schema.MessageV2 {
 	// projected the fixed body and dropped payload and edit time. v0 and v1
 	// have no marker and serve the fixed body alone.
 	m.Removed = message.Removed
+	m.RemovedByAuthor = message.RemovedByAuthor
 	if message.GuestAuthor != nil {
 		a := *message.GuestAuthor
 		m.GuestAuthor = &a

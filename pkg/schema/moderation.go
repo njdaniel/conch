@@ -15,10 +15,13 @@ import (
 // ErrorCodeMessageNotFound (reaction.go): one answer for a message that does
 // not exist, is in another channel, or is not visible to the caller.
 
-// MessageRemovedBody is the body of every removed message, on every read
+// MessageRemovedBody is the body of a moderator removal, on every read
 // surface and every envelope version (moderation.md §7.3). A v0 or v1 reader
 // gets it with no marker and still renders something safe.
 const MessageRemovedBody = "This message was removed by a moderator."
+
+// MessageRemovedByAuthorBody is the fixed body of an author removal (#1828).
+const MessageRemovedByAuthorBody = "This message was removed by its author."
 
 // MessageRemovedSchemaV1 names the events-socket frame that says a message
 // was removed (moderation.md §7.4). A frame of its own, as MessageEditedV1

@@ -367,6 +367,7 @@ export const operations = {
   banMember: op('PUT', '/v1/channels/{channel}/bans/{principal}', 'bearer'),
   unbanMember: op('DELETE', '/v1/channels/{channel}/bans/{principal}', 'bearer'),
   kickVoice: op('DELETE', '/v1/channels/{channel}/voice/participants/{principal}', 'bearer'),
+  removeOwnMessage: op('DELETE', '/v2/channels/{channel}/messages/{id}/own', 'bearer'),
   removeMessage: op('DELETE', '/v2/channels/{channel}/messages/{id}', 'bearer'),
   removeMember: op('DELETE', '/v1/channels/{channel}/members/{principal}', 'bearer'),
   listNets: op('GET', '/v1/channels/{channel}/nets', 'bearer', { response: reply(listNetsResponseV1) }),
