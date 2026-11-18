@@ -279,13 +279,14 @@ export function CallView({ client, state, tiles, hidden, open, viewed = state.ch
     else move();
   }, [focusTo]);
 
-  // A tile that held focus and went (filtered out, its camera off, its person
-  // or stream gone), enlarged or not: focus goes to the fallback rather than
-  // being lost, unless it already moved somewhere else.
-  const focusedTile = useRef<string | null>(null);
+  // A tile or camera control that held focus and went (filtered out, its
+  // camera off, its person or stream gone), enlarged or not: focus goes to
+  // the fallback unless it already moved elsewhere. Stream controls that
+  // change while their tile stays have their own focus handling below.
+  const focusedTile = useRef<{ key: string; element: Element } | null>(null);
   useEffect(() => {
-    const key = focusedTile.current;
-    if (key === null || shown.some((t) => keyOf(t) === key)) return;
+    const focused = focusedTile.current;
+    if (focused === null || shown.some((t) => keyOf(t) === focused.key && (t.kind === 'share' || focused.element.isConnected))) return;
     focusedTile.current = null;
     const at = document.activeElement;
     if (open && (at === null || at === document.body)) fallback()?.focus();
@@ -462,7 +463,7 @@ export function CallView({ client, state, tiles, hidden, open, viewed = state.ch
               key={key}
               role={open ? undefined : 'none'}
               tabIndex={isMain ? -1 : undefined}
-              onFocus={() => { focusedTile.current = key; }}
+              onFocus={(e) => { focusedTile.current = { key, element: e.target }; }}
               ref={(el) => { if (el === null) items.current.delete(key); else items.current.set(key, el); }}
               className={[t.kind === 'share' ? 'call-share' : 'call-tile', main === null ? (focus ? 'in-strip' : '') : isMain ? 'main' : 'in-strip', t.kind !== 'share' && state.speaking.has(t.principal) ? 'speaking' : ''].filter((c) => c !== '').join(' ')}
             >

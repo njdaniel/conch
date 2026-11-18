@@ -702,6 +702,10 @@ describe('picture-in-picture for a camera', () => {
     fireEvent.click(popOut() ?? callRegion());
     await settle();
     expect(current).not.toBeNull();
+    const returnButton = back();
+    if (returnButton === null) throw new Error('no Return');
+    returnButton.focus();
+    expect(document.activeElement).toBe(returnButton);
     if (action === 'the camera ends') redraw([tile(8, 'member-1', false), ...threeTiles.slice(1)], { cameraTracks: new Set() });
     else if (action === 'the person leaves') redraw(threeTiles.slice(1), {});
     else if (action === 'the view closes') redraw(threeTiles, arrived, false);
@@ -709,10 +713,25 @@ describe('picture-in-picture for a camera', () => {
     await settle();
     expect(exit).toHaveBeenCalledOnce();
     expect(current).toBeNull();
+    if (action === 'the camera ends' || action === 'the person leaves') {
+      expect(document.activeElement).toBe(within(callRegion()).getByRole('button', { name: 'Hide video' }));
+    }
     if (action !== 'the camera ends') return;
     // On again: offered afresh, not still pressed.
     redraw(threeTiles, arrived);
     expect(popOut()?.getAttribute('aria-pressed')).toBe('false');
+  });
+
+  it('moves focus from Pop out in the grid to Hide video when the person leaves', () => {
+    enable();
+    const { redraw } = callOf(threeTiles, arrived);
+    const button = popOut();
+    if (button === null) throw new Error('no Pop out');
+    button.focus();
+    expect(document.activeElement).toBe(button);
+    redraw(threeTiles.slice(1), {});
+    expect(popOut()).toBeNull();
+    expect(document.activeElement).toBe(within(callRegion()).getByRole('button', { name: 'Hide video' }));
   });
 
   it('a compact strip offers none: its picture is too small to carry it', () => {
