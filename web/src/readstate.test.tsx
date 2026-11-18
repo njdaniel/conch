@@ -703,7 +703,19 @@ describe('the opening unread position', () => {
     await openChat();
     await waitFor(() => { expect(server.puts.length).toBe(1); });
     expect(nextRow()).toBe(target);
-    expect(divider()?.tabIndex).toBe(target === undefined ? undefined : 0);
+    expect(divider()?.tabIndex).toBe(target === undefined ? undefined : -1);
+  });
+
+  it('does not mark own history or messages received while watching as unread', async () => {
+    server.history = [message(1, 'my first post', 2), message(2, 'my latest post', 2)];
+    server.read = () => [state(7, 0, 0)];
+    const socket = await openChat();
+    await waitFor(() => { expect(server.puts.at(-1)?.id).toBe(2); });
+    socket.send(message(3, 'my live post', 2));
+    socket.send(message(4, 'seen while watching'));
+    await screen.findByText('seen while watching');
+    expect(divider()).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Jump to first unread' })).toBeNull();
   });
 
   it.each([0, 10])('resolves a full first page beginning immediately after mark %i', async (mark) => {

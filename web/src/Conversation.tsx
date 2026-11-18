@@ -1162,6 +1162,11 @@ export function Conversation({
   return (
     <ReactionScope key={`${String(viewer)}/${String(channelId ?? channel)}`} channel={channel} channelId={channelId ?? shown[0]?.channel_id ?? 0} ids={shown.filter((m) => m.removed !== true).map((m) => m.id)} onUnauthorized={onUnauthorized}>
       <header className="conv-head">
+        {hasUnread && !unreadVisible ? (
+          <button type="button" className="jump-unread primary" disabled={jumpUnread} onClick={() => { setUnreadProblem(''); setJumpUnread(true); }}>
+            {jumpUnread ? 'Loading first unread…' : 'Jump to first unread'}
+          </button>
+        ) : null}
         <span className="hash" aria-hidden="true">
           #
         </span>
@@ -1234,8 +1239,8 @@ export function Conversation({
           {shown.map((message, i) => (
             <Fragment key={message.id}>
               {message.id === unreadId ? (
-                <li className="new-messages-row">
-                  <div ref={divider} className="new-messages" role="separator" aria-label="New messages" tabIndex={0}>New messages</div>
+                <li className="new-messages-row" role="presentation">
+                  <div ref={divider} className="new-messages" role="separator" aria-label="New messages">New messages</div>
                 </li>
               ) : null}
               <Message
@@ -1291,11 +1296,6 @@ export function Conversation({
           ))}
         </ol>
       </div>
-      {hasUnread && !unreadVisible ? (
-        <button type="button" className="jump jump-unread primary" disabled={jumpUnread} onClick={() => { setUnreadProblem(''); setJumpUnread(true); }}>
-          {jumpUnread ? 'Loading first unread…' : 'Jump to first unread'}
-        </button>
-      ) : null}
       {unreadProblem === '' ? null : (
         <div className="unread-problem">
           <p role="status">{unreadProblem}</p>

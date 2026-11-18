@@ -6253,10 +6253,9 @@ button.link {
   border-top: 1px solid currentColor;
 }
 
-.jump-unread {
-  top: var(--s3);
-  bottom: auto;
-  max-width: calc(100% - 2 * var(--s3));
+.conv-head > .jump-unread {
+  margin-left: 0;
+  flex: 0 1 auto;
 }
 
 .unread-problem {

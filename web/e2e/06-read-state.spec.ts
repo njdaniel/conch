@@ -128,8 +128,9 @@ for (const width of [1440, 390]) {
     await expect(jump).toHaveCount(0);
     await expect(messages(page).getByText('hidden whisper after the mark')).toHaveCount(0);
     await expectFits(page, 'unread jump');
-    await divider.focus();
-    await expect(divider).toBeFocused();
+    await expect(divider).not.toHaveAttribute('tabindex');
+    await expect(divider.locator('xpath=..')).not.toHaveAttribute('data-message-id');
+    await expect(row).toBeFocused();
     await post(world, world.tokens.guest, channel, 'new live post keeps the opening divider');
     await expect(messages(page).getByText('new live post keeps the opening divider')).toHaveCount(1);
     await expect(divider).toHaveCount(1);
