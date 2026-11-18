@@ -102,10 +102,18 @@ test.describe('@smoke @cross @voice with LiveKit', () => {
       // the tab-close and vanished-page paths are 67-voice-recovery's. The
       // bound is people.ts's leaveWithin, far under the 20 s a leave that never
       // arrived takes to time out.
+      //
+      // Each page plays one <audio> per other person in voice, and no more:
+      // when someone leaves, their element goes from the others' pages too
+      // (issue #1844: livekit-client detaches it before TrackUnsubscribed, so
+      // the handler must remove the one it holds).
+      const voices = (p: Someone) => p.page.locator('body > audio');
+      for (const p of people) await expect(voices(p), `${p.member.name} hears the other two`).toHaveCount(members.length - 1, { timeout: 15_000 });
       const remaining = [...people];
       for (const p of people) {
         await leaveVoice(p);
         remaining.splice(remaining.indexOf(p), 1);
+        for (const r of remaining) await expect(voices(r), `${r.member.name} keeps no audio of ${p.member.name}`).toHaveCount(remaining.length - 1);
         await expect
           .poll(() => answered(vw.participants()), { timeout: leaveWithin, message: `${p.member.name} leaves LiveKit at once` })
           .toEqual(remaining.map((r) => `p${String(r.member.id)}`).sort());
