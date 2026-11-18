@@ -8,6 +8,8 @@ release that Nick publishes.
 
 ## [Unreleased]
 
+**Linux share sound is now on by default** (#1952, Nick's decision on 2026-11-18, after his hand test of a Linux-to-phone share). Start the desktop with `CONCH_LINUX_SHARE_AUDIO=0` to turn it off. Consent per share, its own mute and the call's exclusion are unchanged. The by-hand L-S6 feedback test (#922) has not run yet.
+
 ## [0.1.0-alpha.20] - 2026-11-17
 
 This is a pre-1.0 release (`v0.1.0-alpha.20`). `VoiceCompanionResponseV1` and `VoiceCompanionAudioV1` gain an optional, additive `channel_id`, with no version bump (#1888). The desktop's use of that id (#1890) and the `channel_id` precondition on the companion and consent routes (#1911) ship together in this release. The new `files.upload` capability and `attach` channel permission are additive too (#1822). New database migrations: none; the database stays at migration 49.

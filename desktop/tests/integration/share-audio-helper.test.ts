@@ -410,17 +410,17 @@ describe.runIf(have)('the share sound with the real conch-voice: negotiation', (
     expect(r?.voice.state().shareSound).toEqual({ choice: 'system_excluding_call' });
   });
 
-  it('with the switch off main negotiates v2 as before, and the view says nothing of sound', async () => {
-    const view = await joined({});
+  it('with the switch off (0) main negotiates v2 as before, and the view says nothing of sound', async () => {
+    const view = await joined({ [SHARE_AUDIO_FLAG]: '0' });
     expect(view.helper?.version).toBe(2);
     expect(r?.plain().helper?.shareAudio).toBeUndefined();
     expect(r?.voice.state().shareSound).toBeUndefined();
     expect(r?.sound).toBeNull();
   });
 
-  it('with the switch set to anything but 1 it is off', async () => {
-    const view = await joined({ [SHARE_AUDIO_FLAG]: 'true' });
-    expect(view.helper?.version).toBe(2);
+  it('with no switch it is on: the default since #1952', async () => {
+    const view = await joined({});
+    expect(view.helper?.version).toBe(3);
   });
 });
 

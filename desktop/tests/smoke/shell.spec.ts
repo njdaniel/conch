@@ -90,7 +90,7 @@ test.describe('the packaged shell', () => {
         'companionGrant', 'companionEnd', 'shareArm', 'onCompanion',
         // The share's sound on Linux (#1854). Named here whatever the switch
         // says: main refuses each with 'disabled', before taking any act,
-        // unless CONCH_LINUX_SHARE_AUDIO=1 gave the family a handler.
+        // when CONCH_LINUX_SHARE_AUDIO=0 (or the platform) gave it none.
         'shareSoundStart', 'shareSoundChoose', 'shareSoundMute', 'shareSoundEnd', 'shareSoundShareEnded',
         // The installed files replaced under the running app (#1600).
         'updateState', 'updateRestart', 'onUpdateState',
