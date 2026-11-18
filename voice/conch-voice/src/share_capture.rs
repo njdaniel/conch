@@ -1352,11 +1352,14 @@ mod tests {
         );
         assert_eq!(late, 1);
         assert_eq!(counters.late_stops.load(Ordering::Relaxed), 1);
+        // The close bumps `closed` inside stop() and `open` only after it
+        // returns (Closing::drop): wait for both, or the read races (#1942).
         let deadline = Instant::now() + Duration::from_secs(5);
-        while closed.load(Ordering::SeqCst) == 0 {
+        while closed.load(Ordering::SeqCst) == 0 || counters.open.load(Ordering::SeqCst) != 0 {
             assert!(Instant::now() < deadline);
             std::thread::sleep(Duration::from_millis(5));
         }
+        assert_eq!(closed.load(Ordering::SeqCst), 1);
         assert_eq!(counters.open.load(Ordering::SeqCst), 0);
     }
 
