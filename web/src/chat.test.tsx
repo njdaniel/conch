@@ -8,6 +8,10 @@ import { pausedText } from './Composer';
 import { clock } from './Conversation';
 import { maxHeld, pageSize } from './state/messages';
 
+// A test that renders a whole held history, or is otherwise slow: about 6 s
+// locally and three times that on CI runners (#1940).
+const heldHistoryTimeout = 60_000;
+
 // The bound on the app's first boot, under the 5 s test timeout (see openChat).
 const bootMs = 4000;
 const origin = 'http://127.0.0.1:8080';
@@ -2005,6 +2009,8 @@ describe('a long channel', () => {
     expect(screen.queryByText('m301')).toBeNull();
   });
 
+  // Rendering a whole held history (maxHeld messages) takes about 6 s here
+  // and three times that on CI's runners, past its old 15 s (#1940).
   // The exact rule (another page only while it fits within maxHeld) is in
   // state/messages.test.ts. This shows what the reader sees at the cap: the
   // channel starts nearly full, so it takes two pages and not nineteen (#459).
@@ -2030,7 +2036,7 @@ describe('a long channel', () => {
     expect(screen.getByText(`m${String(maxHeld + 100)}`)).toBeDefined();
     expect(server.historyRequests).toHaveLength(3);
     // About 3.7 s locally; the default 5 s is too close on a busy runner.
-  }, 15000);
+  }, heldHistoryTimeout);
 });
 
 describe('the address bar', () => {
@@ -2295,7 +2301,7 @@ describe('the reconnect refresh', () => {
     expect(screen.queryByText('secret before disconnect')).toBeNull();
     expect(screen.queryByText(stale)).toBeNull();
     expect(screen.getByLabelText<HTMLTextAreaElement>('Message #general').disabled).toBe(false);
-  }, 15000);
+  }, heldHistoryTimeout);
 
   it('keeps a frame the socket delivered while the refresh was in flight', async () => {
     server.history.general = [message(1, 'one'), message(2, 'two')];
@@ -2361,7 +2367,7 @@ describe('the reconnect refresh', () => {
     await act(async () => { asked[1]?.release(); await new Promise((r) => setTimeout(r, 50)); });
     await waitFor(() => { expect(screen.getByLabelText<HTMLTextAreaElement>('Message #general').disabled).toBe(false); });
     expect(screen.queryByText(stale)).toBeNull();
-  }, 15000);
+  }, heldHistoryTimeout);
 
   it('tries the refresh again under the new name when it was answered not-found because the channel was renamed', async () => {
     server.history.general = [message(1, 'secret before disconnect'), message(2, 'newest')];
@@ -2387,7 +2393,7 @@ describe('the reconnect refresh', () => {
     expect(screen.queryByText('secret before disconnect')).toBeNull();
     expect(FakeSocket.all).toHaveLength(2);
     expect(screen.queryByText(stale)).toBeNull();
-  }, 15000);
+  }, heldHistoryTimeout);
 });
 
 describe('message permalinks', () => {
@@ -2425,9 +2431,13 @@ describe('message permalinks', () => {
     fireEvent.click(screen.getByRole('menuitem', { name: 'Copy link' }));
     const field = await screen.findByLabelText<HTMLTextAreaElement>('Copy manually');
     expect(field.value).toBe(`${window.location.origin}/app/#/c/general/m/1`);
-    expect(document.activeElement).toBe(field);
-    expect(field.selectionEnd).toBe(field.value.length);
-    expect(field.selectionStart).toBe(0);
+    // The field takes focus in an effect after it renders (#1940): wait for
+    // it. A later refocus elsewhere would still fail here.
+    await waitFor(() => {
+      expect(document.activeElement).toBe(field);
+      expect(field.selectionEnd).toBe(field.value.length);
+      expect(field.selectionStart).toBe(0);
+    });
   });
 
   it('loads older pages and focuses and highlights the linked message', async () => {

@@ -982,7 +982,7 @@ describe('the secret panel', () => {
     // The whole App renders and Settings opens first (open()), which is most of
     // the time; under a loaded CI machine that alone can near vitest's 5 s
     // default, so this test has its own bound (#1301).
-  }, 15000);
+  }, 60_000); // slow on CI runners (#1940)
 });
 
 describe('the hook form’s channels', () => {

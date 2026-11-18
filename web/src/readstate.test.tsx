@@ -10,6 +10,10 @@ import type { ReadStateV1 } from './schema/readstate';
 import type { MessageV2 } from './schema/message';
 import { chatFor, chatReducer, initialChat, maxHeld, pageSize } from './state/messages';
 
+// A test that renders a whole held history, or is otherwise slow: about 6 s
+// locally and three times that on CI runners (#1940).
+const heldHistoryTimeout = 60_000;
+
 const origin = 'http://127.0.0.1:8080';
 const secret = 'conch_secret_token_value';
 const ticketValue = 'conch_wst_TICKETTICKETTICKETTICKETTICKETTICKETTICKET';
@@ -726,6 +730,7 @@ describe('the opening unread position', () => {
     expect(server.pages).toEqual([Infinity]);
   });
 
+  // A whole held history: about 6 s here, three times that on CI (#1940).
   it.each([0, 10])('reaches the first unread exactly at maxHeld after mark %i', async (mark) => {
     server.history = Array.from({ length: maxHeld }, (_, i) => message(mark + i + 1));
     // Start one page short of the cap to exercise the final page transition.
@@ -738,7 +743,7 @@ describe('the opening unread position', () => {
     await waitFor(() => { expect(document.activeElement?.getAttribute('data-message-id')).toBe(String(mark + 1)); });
     expect(server.pages).toEqual([Infinity, mark + pageSize + 1]);
     expect(screen.queryByText(/history limit has been reached/)).toBeNull();
-  }, 15000);
+  }, heldHistoryTimeout);
 
   it.each([{ length: 450, mark: 300 }, { length: 150, mark: 0 }])('stops when only own posts and tombstones remain after mark $mark, and dismisses the notice', async ({ length, mark }) => {
     server.history = Array.from({ length }, (_, i) => i % 2 === 0
@@ -822,7 +827,7 @@ describe('the opening unread position', () => {
     await screen.findByText('Cannot reach the first unread message: the history limit has been reached.', {}, { timeout: 10000 });
     expect(divider()).toBeNull();
     expect(scroll).not.toHaveBeenCalled();
-  }, 15000);
+  }, heldHistoryTimeout);
 
   it('keeps the opening divider after a reconnect returns an advanced mark', async () => {
     server.history = [message(1), message(2), message(3)];
