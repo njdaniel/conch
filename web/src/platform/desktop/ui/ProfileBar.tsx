@@ -72,8 +72,9 @@ export function ProfileBar({ initial }: { readonly initial: ProfilesView }) {
       <header className="desktop-bar" aria-label="Server">
         <span className="desktop-bar-host">{current?.host ?? 'No server'}</span>
         <span className="desktop-bar-account">{current?.account ?? 'not signed in yet'}</span>
-        {kept ? null : <span className="desktop-bar-session">sign-in kept until the app closes</span>}
-        {view.notice === null ? null : <span className="desktop-bar-notice">{noticeLines[view.notice]}</span>}
+        {kept || view.notice === 'operator-window-only' ? null : <span className="desktop-bar-session">sign-in kept until the app closes</span>}
+        {/* The open server list already shows the operator note; say it once. */}
+        {view.notice === null || (open && view.notice === 'operator-window-only') ? null : <span className="desktop-bar-notice">{noticeLines[view.notice]}</span>}
         <button
           type="button"
           className="desktop-bar-settings"
