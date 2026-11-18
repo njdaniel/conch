@@ -3888,6 +3888,11 @@ body:has(.call-view.compact, .call-stage.compact) .dock {
   max-width: 36rem;
 }
 
+/* The two ways in have the same space and weight. */
+.invite-choice > button {
+  flex: 1;
+}
+
 .invite-preview {
   display: grid;
   grid-template-columns: max-content 1fr;

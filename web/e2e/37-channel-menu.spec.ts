@@ -109,6 +109,7 @@ for (const [size, options, phone] of sizes) {
 
     const { page } = await meet(options);
     await page.goto(inviteUrl(world, made.code));
+    await page.getByRole('button', { name: 'Create an account', exact: true }).click();
     await fillAccount(page, name);
     await expect(statusLine(page)).toContainText(name);
     await expect(statusLine(page)).toContainText('Connected');

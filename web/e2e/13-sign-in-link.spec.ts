@@ -53,6 +53,7 @@ test('B493 a joiner signs out, is warned first, and comes back into the same acc
   const name = unique('back');
   const laptop = await meet(desktop);
   await laptop.page.goto(inviteUrl(world, invite.code));
+  await laptop.page.getByRole('button', { name: 'Create an account', exact: true }).click();
   await fillAccount(laptop.page, name);
   await expect(statusLine(laptop.page)).toContainText('Connected');
   const firstToken = await keepToken(laptop.page, secrets);
@@ -116,6 +117,7 @@ test('G7a a reset link replaces a forgotten password, ends every sign-in, and th
   const name = unique('reset');
   const laptop = await meet(desktop);
   await laptop.page.goto(inviteUrl(world, invite.code));
+  await laptop.page.getByRole('button', { name: 'Create an account', exact: true }).click();
   await fillAccount(laptop.page, name);
   await expect(statusLine(laptop.page)).toContainText('Connected');
   const firstToken = await keepToken(laptop.page, secrets);
