@@ -144,10 +144,25 @@ const SERVER_ORIGIN = /^https?:\/\/[^/?#@\\\s]+$/iu;
 const MAX_ARGV = 64;
 const SCHEME = 'conch:';
 
+export interface InviteProtocolApp {
+  isDefaultProtocolClient(scheme: string): boolean;
+  setAsDefaultProtocolClient(scheme: string): boolean;
+}
+
+// Windows' per-user protocol registration (issue #1944). Repeated starts
+// leave an existing registration alone. Linux keeps its desktop-file
+// registration; no command line, invite code or shell is involved here.
+export function registerInviteProtocol(app: InviteProtocolApp, platform: NodeJS.Platform = process.platform): boolean {
+  if (platform !== 'win32') return true;
+  return app.isDefaultProtocolClient('conch') || app.setAsDefaultProtocolClient('conch');
+}
+
 // schemeLinkFrom picks the one argument that is a link of the scheme: the
 // first that is a string, does not start with "-" (a switch, however it
 // continues), and starts with "conch:" in any case. Later ones are not
 // considered, whether or not the first parses. Index 0 is the executable.
+// Windows supplies the URL last on a cold start and in second-instance;
+// the same selection rule handles both, without unquoting or splitting argv.
 export function schemeLinkFrom(argv: unknown): string | null {
   if (!Array.isArray(argv)) return null;
   for (const arg of argv.slice(1, MAX_ARGV) as unknown[]) {

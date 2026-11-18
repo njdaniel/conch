@@ -4,9 +4,10 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import { ALLOW_SHARED_SWITCH, dataRootVerdict, isInside, qualified, REFUSED_LINE, SHARED_LINE, USER_DATA_SWITCH, type DataRootVerdict } from '../../main/data-root.ts';
+import { acquire, type InstanceApp } from '../../main/instance.ts';
 
 const ENV = {
   USERPROFILE: 'C:\\Users\\nick',
@@ -293,5 +294,43 @@ describe('the call in app.ts', () => {
     expect(code.indexOf('prepareRoot(')).toBeGreaterThan(at);
     expect(code.slice(at, code.indexOf('acquire('))).toMatch(/=== 'refused'\) \{\s*app\.exit\(1\);\s*return;/);
     expect(code.split('dataRootVerdict(').length - 1).toBe(1);
+  });
+});
+
+describe('Windows single-instance data roots (#1944)', () => {
+  it('uses Electron’s lock: the same userData focuses its owner; an isolated userData can run', () => {
+    // Model Electron's userData-scoped lock, rather than an application-wide
+    // mutex. acquire must use each app's lock and leave its scope alone.
+    const owners = new Map<string, (event: unknown, argv: readonly string[]) => void>();
+    function fakeApp(userData: string) {
+      const app = {
+        requestSingleInstanceLock: vi.fn(() => !owners.has(userData)),
+        on: (_event: 'second-instance', listener: (event: unknown, argv: readonly string[]) => void) => { owners.set(userData, listener); },
+        exit: vi.fn(),
+      } satisfies InstanceApp;
+      return app;
+    }
+    const root = 'C:\\Users\\Alice\\AppData\\Roaming\\conch-desktop';
+    const primary = fakeApp(root);
+    const focus = vi.fn();
+    const receive = vi.fn();
+    expect(acquire(primary, focus, receive)).toBe(true);
+    expect(primary.requestSingleInstanceLock).toHaveBeenCalledExactlyOnceWith();
+
+    const duplicate = fakeApp(root);
+    expect(acquire(duplicate, vi.fn())).toBe(false);
+    expect(duplicate.exit).toHaveBeenCalledWith(0);
+    // Electron delivers the second launch's arguments to the existing owner.
+    const argv = ['C:\\Conch\\Conch.exe', 'conch://invite?server=https%3A%2F%2Fchat.example.org&code=abc'];
+    owners.get(root)?.({}, argv);
+    expect(focus).toHaveBeenCalledOnce();
+    expect(receive).toHaveBeenCalledWith(argv);
+
+    const isolated = fakeApp(`${root}-isolated-test`);
+    expect(acquire(isolated, vi.fn())).toBe(true);
+    expect(isolated.requestSingleInstanceLock).toHaveBeenCalledExactlyOnceWith();
+    expect(isolated.exit).not.toHaveBeenCalled();
+    expect(primary.exit).not.toHaveBeenCalled();
+    expect(owners.size).toBe(2);
   });
 });
