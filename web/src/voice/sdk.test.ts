@@ -1551,6 +1551,32 @@ describe('the watch view', () => {
   };
   const layers = () => state.calls.filter((c) => c.startsWith('quality') || c.startsWith('dimensions'));
 
+  it('lifts the unfocused cap only while its watched video is in PiP and restores LOW on leave', async () => {
+    const pub = remotePub('screen_share');
+    state.remote.set('p8', { identity: 'p8', trackPublications: new Map([['a', pub]]) } as unknown as { trackPublications: Map<string, StubRemotePub> });
+    const room = newLiveKitRoom();
+    await room.connect('wss://lk.example', 'tok-abcdef', 'room-abcdef', false, events);
+    room.setWatches(new Set([8]), null);
+    const sink = { video: document.createElement('video'), audio: document.createElement('audio') };
+    room.attachStream(8, sink);
+    state.handlers.get('ts')?.({ source: 'screen_share', kind: 'video', sid: pub.trackSid, attach: vi.fn(), detach: vi.fn(), on: vi.fn(), off: vi.fn(), emit: vi.fn() }, pub, { identity: 'p8' });
+    expect(pub.videoQuality).toBe(0);
+    const pip = Object.assign(new EventTarget(), { width: 960, height: 540 });
+    Object.defineProperty(document, 'pictureInPictureElement', { configurable: true, value: sink.video });
+    try {
+      const enter = new Event('enterpictureinpicture');
+      Object.defineProperty(enter, 'pictureInPictureWindow', { value: pip });
+      sink.video.dispatchEvent(enter);
+      expect(pub.videoQuality).toBe(2);
+      Object.defineProperty(document, 'pictureInPictureElement', { configurable: true, value: null });
+      sink.video.dispatchEvent(new Event('leavepictureinpicture'));
+      expect(pub.videoQuality).toBe(0);
+    } finally {
+      Reflect.deleteProperty(document, 'pictureInPictureElement');
+      room.attachStream(8, null);
+    }
+  });
+
   // The SDK stops no track it unpublishes, so that a share's capture
   // survives its room (issue #516); the adapter stops every track itself.
   it('joins with adaptive stream and dynacast on, and subscribes to nothing automatically', async () => {
@@ -1719,6 +1745,9 @@ describe('the watch view', () => {
       source,
       kind,
       sid: source,
+      on: vi.fn(),
+      off: vi.fn(),
+      emit: vi.fn(),
       attach: (el?: HTMLMediaElement) => {
         attached.push(`${source} ${el?.tagName ?? 'new'}`);
         return el ?? document.createElement('audio');
@@ -1760,6 +1789,9 @@ describe('the watch view', () => {
       source,
       kind,
       sid: source,
+      on: vi.fn(),
+      off: vi.fn(),
+      emit: vi.fn(),
       attach: (el?: HTMLMediaElement) => {
         attached.push(`${source} ${el?.tagName ?? 'new'}`);
         return el ?? document.createElement('audio');

@@ -9,6 +9,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { Glyph } from '../Icons';
 import { fullscreenVideo } from './fullscreen';
+import { usePictureInPicture } from './pictureInPicture';
 import type { VoiceClient, VoiceState } from './connection';
 import { askedText, nextShortfall, noShortfall, shareReadout, type ShortfallState } from './sdk';
 import type { SettledQuality, ShareDirection, ShareSample } from './share';
@@ -138,6 +139,7 @@ export function ShareView({
   const box = useRef<HTMLDivElement>(null);
   const video = useRef<HTMLVideoElement>(null);
   const sound = useRef<HTMLAudioElement>(null);
+  const pip = usePictureInPicture(video);
   const [volume, setOwnVolume] = useState(keptVolume ?? 1);
   const [muted, setMuted] = useState(false);
   // The browser would not start the sound without a tap (phones' autoplay
@@ -229,10 +231,12 @@ export function ShareView({
             </button>
           </>
         )}
+        {pip.supported ? <button type="button" aria-pressed={pip.active} onClick={() => { void pip.toggle(); }}>{pip.active ? 'Return to stage' : 'Pop out'}</button> : null}
         <button type="button" onClick={() => { client.watchStream(principal, false); }}>Stop watching</button>
         {onToggleLayout === undefined ? null : <button type="button" className="call-layout" aria-pressed={compact} onClick={onToggleLayout}>{compact ? 'Expand' : 'Compact'}</button>}
         {blocked && hasSound ? <button type="button" className="primary" onClick={tapToPlay}>Tap to play sound</button> : null}
       </div>
+      {pip.failed ? <p role="status" className="hint">Picture-in-picture could not open. Try again when the picture is playing.</p> : null}
       {state.deafened && hasSound ? <p className="hint">Deafened: the share&apos;s sound is off too.</p> : null}
     </section>
   );

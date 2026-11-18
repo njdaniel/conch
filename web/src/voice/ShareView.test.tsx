@@ -260,6 +260,118 @@ describe('watching', () => {
     return t;
   }
 
+  describe('picture-in-picture', () => {
+    let current: Element | null = null;
+    let exit: ReturnType<typeof vi.fn>;
+    const enable = () => {
+      Object.defineProperty(document, 'pictureInPictureEnabled', { configurable: true, value: true });
+      Object.defineProperty(document, 'pictureInPictureElement', { configurable: true, get: () => current });
+      Object.defineProperty(HTMLVideoElement.prototype, 'requestPictureInPicture', { configurable: true, value: vi.fn(function (this: HTMLVideoElement) {
+        current = document.querySelector('video');
+        this.dispatchEvent(new Event('enterpictureinpicture'));
+        return Promise.resolve({});
+      }) });
+      exit = vi.fn(() => {
+        const old = current;
+        current = null;
+        old?.dispatchEvent(new Event('leavepictureinpicture'));
+        return Promise.resolve();
+      });
+      Object.defineProperty(document, 'exitPictureInPicture', { configurable: true, value: exit });
+    };
+    afterEach(() => {
+      cleanup();
+      current = null;
+      Reflect.deleteProperty(document, 'pictureInPictureEnabled');
+      Reflect.deleteProperty(document, 'pictureInPictureElement');
+      Reflect.deleteProperty(document, 'exitPictureInPicture');
+      Reflect.deleteProperty(HTMLVideoElement.prototype, 'requestPictureInPicture');
+    });
+
+    it('hides Pop out without the API or when disabled', async () => {
+      await watching();
+      expect(screen.queryByRole('button', { name: 'Pop out' })).toBeNull();
+      cleanup();
+      enable();
+      Reflect.deleteProperty(HTMLVideoElement.prototype, 'requestPictureInPicture');
+      await watching();
+      expect(screen.queryByRole('button', { name: 'Pop out' })).toBeNull();
+      cleanup();
+      enable();
+      Object.defineProperty(document, 'pictureInPictureEnabled', { configurable: true, value: false });
+      await watching();
+      expect(screen.queryByRole('button', { name: 'Pop out' })).toBeNull();
+    });
+
+    it('follows browser enter and leave, keeping the same video, sound and destination', async () => {
+      enable();
+      const t = await watching();
+      const sink = t.rooms[0]?.sink;
+      const before = t.client.snapshot();
+      fireEvent.change(screen.getByLabelText('Share volume'), { target: { value: '0.3' } });
+      fireEvent.click(screen.getByRole('button', { name: 'Mute share' }));
+      const button = screen.getByRole('button', { name: 'Pop out', pressed: false });
+      button.focus();
+      expect(document.activeElement).toBe(button);
+      fireEvent.click(button);
+      await act(settle);
+      expect(current).toBe(sink?.video);
+      expect(screen.getByRole('button', { name: 'Return to stage', pressed: true })).toBeTruthy();
+      expect(sink?.audio.volume).toBeCloseTo(0.3);
+      expect(sink?.audio.muted).toBe(true);
+      expect(sink?.video.muted).toBe(true);
+      expect(t.client.snapshot().channel).toBe(before.channel);
+      expect(t.rooms[0]?.calls).toEqual([]);
+      await act(async () => { await document.exitPictureInPicture(); });
+      expect(screen.getByRole('button', { name: 'Pop out', pressed: false })).toBeTruthy();
+      expect(t.rooms[0]?.sink).toBe(sink);
+    });
+
+    it.each(['stop watching', 'share ends', 'leave voice'] as const)('closes when %s', async (action) => {
+      enable();
+      const t = await watching();
+      fireEvent.click(screen.getByRole('button', { name: 'Pop out' }));
+      await act(settle);
+      expect(current).not.toBeNull();
+      if (action === 'stop watching') fireEvent.click(screen.getByRole('button', { name: 'Stop watching' }));
+      else if (action === 'share ends') t.seen(presence(null));
+      else await act(async () => { await t.client.leave(); });
+      await act(settle);
+      expect(exit).toHaveBeenCalledOnce();
+      expect(current).toBeNull();
+    });
+
+    it('closes a request that finishes after Stop watching removed its tile', async () => {
+      enable();
+      const t = await watching();
+      const video = t.rooms[0]?.sink?.video;
+      if (video === undefined) throw new Error('no video');
+      let finish = () => { /* Replaced when the request starts. */ };
+      Object.defineProperty(HTMLVideoElement.prototype, 'requestPictureInPicture', { configurable: true, value: () => new Promise((resolve) => {
+        finish = () => {
+          current = video;
+          video.dispatchEvent(new Event('enterpictureinpicture'));
+          resolve({});
+        };
+      }) });
+      fireEvent.click(screen.getByRole('button', { name: 'Pop out' }));
+      fireEvent.click(screen.getByRole('button', { name: 'Stop watching' }));
+      await act(async () => { finish(); await settle(); });
+      expect(exit).toHaveBeenCalledOnce();
+      expect(current).toBeNull();
+    });
+
+    it('reports a refused request without a false active state', async () => {
+      enable();
+      await watching();
+      Object.defineProperty(HTMLVideoElement.prototype, 'requestPictureInPicture', { configurable: true, value: vi.fn().mockRejectedValue(new Error('refused')) });
+      fireEvent.click(screen.getByRole('button', { name: 'Pop out' }));
+      await act(settle);
+      expect(screen.getByRole('button', { name: 'Pop out', pressed: false })).toBeTruthy();
+      expect(screen.getByText(/Picture-in-picture could not open/)).toBeTruthy();
+    });
+  });
+
   it('subscribes on Watch and plays into an inline video and an unmuted audio element of its own', async () => {
     const t = await watching();
     const view = await screen.findByRole('region', { name: 'Shared screen' });

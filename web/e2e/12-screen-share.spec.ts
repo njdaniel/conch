@@ -241,6 +241,37 @@ test.describe('screen share with LiveKit', () => {
     return (await vw.audit()).filter((e) => e.action.startsWith('voice_share_')).map(({ action, detail }) => ({ action, detail }));
   }
 
+  test('a watched fake screen pops out and Stop watching closes picture-in-picture', async ({ browser, browserName }) => {
+    test.skip(browserName !== 'chromium', 'The browser video PiP API is exercised in Chromium.');
+    const a = await person(browser, 'alice');
+    const b = await person(browser, 'bob');
+    try {
+      await joinVoice(a, 'Join voice');
+      await share(a);
+      await joinVoice(b, 'Watch only');
+      await watching(b);
+      const before = { microphone: await micAsks(b.page), picker: await picks(b.page) };
+      const view = shareView(b.page);
+      await view.getByLabel('Share volume', { exact: true }).fill('0.3');
+      await view.getByRole('button', { name: 'Mute share', exact: true }).click();
+      await view.getByRole('button', { name: 'Pop out', exact: true }).click();
+      await expect.poll(() => view.locator('video').evaluate((v) => document.pictureInPictureElement === v)).toBe(true);
+      await expect(view.getByRole('button', { name: 'Return to stage', pressed: true })).toBeVisible();
+      await expect(view.locator('audio')).toHaveJSProperty('volume', 0.3);
+      await expect(view.locator('audio')).toHaveJSProperty('muted', true);
+      const frames = (await inbound(b.page)).frames;
+      await expect.poll(async () => (await inbound(b.page)).frames).toBeGreaterThan(frames);
+      expect({ microphone: await micAsks(b.page), picker: await picks(b.page) }).toEqual(before);
+      await view.getByRole('button', { name: 'Stop watching', exact: true }).click();
+      await expect.poll(() => b.page.evaluate(() => document.pictureInPictureElement === null)).toBe(true);
+      await expect(view).toHaveCount(0);
+      await expectClean(b);
+    } finally {
+      await a.close();
+      await b.close();
+    }
+  });
+
   // Issue #1084 (browser UX audit 4, F7): starting a share leaves no console
   // error. Until #1242 it left one, the camera report that Chromium made by
   // itself when getDisplayMedia opened the picker under camera=(); with the

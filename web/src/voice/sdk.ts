@@ -893,6 +893,51 @@ const uncapped: Track.Dimensions = { width: 7680, height: 4320 };
 
 const isShare = (source: Track.Source) => source === Track.Source.ScreenShare || source === Track.Source.ScreenShareAudio;
 
+// LiveKit 2.22.3 observes PiP visibility (including a background tab), but
+// HTMLElementInfo.width/height still read clientWidth/clientHeight. Supply
+// the actual PiP dimensions through the same track event the SDK observes.
+// Reapply after an in-page ResizeObserver update; no private SDK fields, DOM
+// sizing tricks or audio/subscription changes. The publication cap is lifted
+// only for this popped-out watched picture, and restored on leave.
+const pipWindows = new WeakMap<HTMLVideoElement, PictureInPictureWindow>();
+
+export function sizePictureInPicture(video: HTMLVideoElement, track: RemoteTrack, changed: () => void): () => void {
+  let window: PictureInPictureWindow | null = document.pictureInPictureElement === video ? pipWindows.get(video) ?? null : null;
+  let emitting = false;
+  const size = () => {
+    if (window === null || emitting) return;
+    emitting = true;
+    track.emit(TrackEvent.VideoDimensionsChanged, { width: window.width, height: window.height });
+    emitting = false;
+  };
+  const leave = () => {
+    window?.removeEventListener('resize', size);
+    window = null;
+    pipWindows.delete(video);
+    changed();
+    track.emit(TrackEvent.VideoDimensionsChanged, { width: video.clientWidth, height: video.clientHeight });
+  };
+  const enter = (event: Event) => {
+    window?.removeEventListener('resize', size);
+    window = (event as PictureInPictureEvent).pictureInPictureWindow;
+    pipWindows.set(video, window);
+    window.addEventListener('resize', size);
+    changed();
+    size();
+  };
+  video.addEventListener('enterpictureinpicture', enter);
+  video.addEventListener('leavepictureinpicture', leave);
+  track.on(TrackEvent.VideoDimensionsChanged, size);
+  window?.addEventListener('resize', size);
+  size();
+  return () => {
+    window?.removeEventListener('resize', size);
+    video.removeEventListener('enterpictureinpicture', enter);
+    video.removeEventListener('leavepictureinpicture', leave);
+    track.off(TrackEvent.VideoDimensionsChanged, size);
+  };
+}
+
 // A share's capture between two connections: still capturing, published on
 // neither.
 class Kept implements KeptScreen {
@@ -1029,6 +1074,7 @@ class LiveKitAdapter implements Room {
   private watching: ReadonlySet<number> = new Set();
   private focused: number | null = null;
   private readonly streamSinks = new Map<number, ShareSink>();
+  private readonly pipSizes = new Map<number, () => void>();
   private readonly remoteShares = new Map<number, { video: RemoteTrack | null; audio: RemoteTrack | null }>();
   // The camera this page captured, until it is stopped or kept; its
   // publication once published; whether this adapter is taking it down, so
@@ -1936,6 +1982,8 @@ class LiveKitAdapter implements Room {
   }
 
   attachStream(principal: number, sink: ShareSink | null): void {
+    this.pipSizes.get(principal)?.();
+    this.pipSizes.delete(principal);
     const old = this.streamSinks.get(principal);
     const tracks = this.remoteShares.get(principal);
     if (old !== undefined) {
@@ -1946,6 +1994,7 @@ class LiveKitAdapter implements Room {
     else this.streamSinks.set(principal, sink);
     if (sink !== null) {
       tracks?.video?.attach(sink.video);
+      if (tracks?.video != null) this.pipSizes.set(principal, sizePictureInPicture(sink.video, tracks.video, () => { this.subscribeAll(); }));
       tracks?.audio?.attach(sink.audio);
     }
   }
@@ -1973,7 +2022,7 @@ class LiveKitAdapter implements Room {
     // element: the top layer on a full stage, less on a phone
     // (voice-multi-share.md §8).
     if (want && pub.source === Track.Source.ScreenShare && principal !== null) {
-      if (wants.focused === principal) this.release(pub);
+      if (wants.focused === principal || (document.pictureInPictureElement != null && this.streamSinks.get(principal)?.video === document.pictureInPictureElement)) this.release(pub);
       else this.hold(pub);
     }
   }
@@ -2020,11 +2069,21 @@ class LiveKitAdapter implements Room {
     else current.audio = track;
     this.remoteShares.set(principal, current);
     const sink = this.streamSinks.get(principal);
-    if (sink !== undefined) track.attach(video ? sink.video : sink.audio);
+    if (sink !== undefined) {
+      track.attach(video ? sink.video : sink.audio);
+      if (video) {
+        this.pipSizes.get(principal)?.();
+        this.pipSizes.set(principal, sizePictureInPicture(sink.video, track, () => { this.subscribeAll(); }));
+      }
+    }
     this.events?.onStreamTracks(principal, { video: current.video !== null, audio: current.audio !== null });
   }
 
   private unshared(track: RemoteTrack, principal: number): void {
+    if (track.source === Track.Source.ScreenShare) {
+      this.pipSizes.get(principal)?.();
+      this.pipSizes.delete(principal);
+    }
     track.detach();
     const current = this.remoteShares.get(principal);
     if (current === undefined) return;
