@@ -392,12 +392,12 @@ export function decodeObject(line: Uint8Array): { readonly ok: true; readonly fi
 
 // ----------------------------------------------------------- field readers
 
-const INTEGER = /^-?(?:0|[1-9][0-9]*)$/;
+const INTEGER = /^(?:0|-?[1-9][0-9]*)$/;
 const INT64_MIN = -(2n ** 63n);
 const INT64_MAX = 2n ** 63n - 1n;
 
-// asInt reads a number as encoding/json reads it into an int64: integer text
-// in range, or nothing. Values past VOICE_CONTROL_MAX_ID are clamped to one
+// asInt reads integer text in int64 range, refusing negative zero as the Go
+// and Rust protocol readers do. Values past VOICE_CONTROL_MAX_ID are clamped to one
 // past it, which every caller refuses.
 function asInt(v: Json | undefined): number | undefined {
   if (v?.t !== 'num' || !INTEGER.test(v.raw)) return undefined;

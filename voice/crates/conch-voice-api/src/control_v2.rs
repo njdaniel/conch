@@ -1011,7 +1011,7 @@ mod tests {
 
     /// The conformance documents of the v2 readers, read as one, for the reason
     /// `control.rs` gives for v1's.
-    const CASE_FILES: [&str; 2] = ["cases.json", "cases-strings.json"];
+    const CASE_FILES: [&str; 3] = ["cases.json", "cases-strings.json", "cases-integers.json"];
 
     #[derive(Deserialize)]
     struct Cases {

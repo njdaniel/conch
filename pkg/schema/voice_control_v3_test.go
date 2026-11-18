@@ -241,9 +241,9 @@ func (e VoiceControlEventV3) kind() VoiceControlEventKind {
 }
 
 // voiceControlV3CaseFiles are the conformance documents of the v3 readers,
-// read as one: what a string may hold is in a file of its own, as in v1 and
-// v2.
-var voiceControlV3CaseFiles = []string{"cases.json", "cases-strings.json"}
+// read as one: additional string and integer cases are in files of their
+// own, as in v1 and v2.
+var voiceControlV3CaseFiles = []string{"cases.json", "cases-strings.json", "cases-integers.json"}
 
 func loadVoiceControlV3Cases(t *testing.T) []voiceControlCase {
 	t.Helper()

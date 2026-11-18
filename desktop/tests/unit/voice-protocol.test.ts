@@ -224,6 +224,29 @@ function casesOf(dir: string, direction: string): (Case & { readonly dir: string
     );
 }
 
+describe.each([
+  { dir: 'voice-control', parse: parseEventV1, field: 'retry_in_ms' },
+  { dir: 'voice-control-v2', parse: parseEventV2, field: 'retry_in_ms' },
+  { dir: 'voice-control-v3', parse: parseEventV3, field: 'retry_in_ms' },
+  { dir: 'voice-control-v3', parse: parseEventV3, field: 'share_audio_sources' },
+])('$dir integer field $field (#1857)', ({ dir, parse, field }) => {
+  const zero = readFixture<{ cases: Case[] }>(`${dir}/cases-integers.json`).cases.find((c) => c.name === `${field} may be zero`);
+
+  it.each(['-0', ' \t-0 '])('refuses %s as invalid', (raw) => {
+    expect(zero?.line).toBeDefined();
+    const line = zero?.line?.replace(`"${field}":0`, `"${field}":${raw}`) ?? '';
+    const got = parse(Buffer.from(line));
+    expect(got.ok ? 'accepted' : got.code).toBe('invalid');
+  });
+
+  it('accepts ordinary zero and ignores negative zero in unknown fields', () => {
+    expect(zero?.line).toBeDefined();
+    const line = zero?.line ?? '';
+    expect(parse(Buffer.from(line)).ok).toBe(true);
+    expect(parse(Buffer.from(line.replace(/}$/, ',"ignored":-0}'))).ok).toBe(true);
+  });
+});
+
 describe('the owner reads every conformance case as Go does', () => {
   const v1 = casesOf('voice-control', 'event');
   const v2 = casesOf('voice-control-v2', 'event');
