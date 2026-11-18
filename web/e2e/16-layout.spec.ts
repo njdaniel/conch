@@ -19,6 +19,51 @@ const sizes: readonly (readonly [string, BrowserContextOptions])[] = [
   ['1440×900 at 200%', { viewport: { width: 720, height: 450 }, deviceScaleFactor: 2 }],
 ];
 
+// Issue #1931: a layout probe using the shipped stylesheet, without LiveKit.
+// The conversation's intrinsic height exceeds the column: only a compact
+// stage may give its track a zero minimum instead of the min-content floor.
+// Both compact stage components use this rule. The former nested :has()
+// was discarded by Chromium, leaving the conversation at 300 px throughout.
+test('P1931 a compact stage lets the conversation use the remaining track', async ({ meet, world }) => {
+  const { page } = await meet({ viewport: { width: 1440, height: 900 } });
+  await page.goto(world.appUrl);
+  await page.evaluate(() => {
+    const centre = document.createElement('div');
+    centre.id = 'compact-stage-probe';
+    centre.className = 'centre';
+    centre.style.width = '600px';
+    centre.style.height = '200px';
+    const stage = document.createElement('div');
+    stage.className = 'stage';
+    const call = document.createElement('div');
+    // call-stage uses display: contents; its child supplies the row's height.
+    const row = document.createElement('div');
+    row.style.height = '44px';
+    row.style.flexShrink = '0';
+    call.append(row);
+    stage.append(call);
+    const conversation = document.createElement('div');
+    conversation.style.minHeight = '0';
+    const content = document.createElement('div');
+    content.style.height = '300px';
+    conversation.append(content);
+    centre.append(stage, conversation);
+    document.body.append(centre);
+  });
+  const centre = page.locator('#compact-stage-probe');
+  await expect(centre).toHaveCSS('display', 'grid');
+  const conversation = centre.locator(':scope > div').nth(1);
+  const height = () => conversation.evaluate((el) => el.getBoundingClientRect().height);
+  for (const component of ['call-view', 'call-stage']) {
+    const call = centre.locator('.stage > div');
+    await call.evaluate((el, name) => { el.setAttribute('class', name); }, component);
+    await expect.poll(height, 'an expanded stage keeps the min-content floor').toBeGreaterThanOrEqual(300);
+    await call.evaluate((el) => { el.classList.add('compact'); });
+    await expect.poll(height, `${component}: a compact stage leaves room for the conversation`).toBeGreaterThan(0);
+    await expect.poll(height, `${component}: the conversation fits below the compact row`).toBeLessThan(200);
+  }
+});
+
 async function must(world: World, token: string, method: 'POST' | 'PUT', path: string, body?: unknown): Promise<unknown> {
   const reply = await call(world, token, method, path, body);
   if (reply.status < 200 || reply.status > 299) throw new Error(`${method} ${path}: status ${String(reply.status)}`);

@@ -3255,8 +3255,9 @@ label {
 }
 
 /* Compact is a docked row, not an overlay: its content determines the first
-   track and the conversation takes everything left (issue #1498). */
-.centre:has(> .stage:not(:empty):has(.compact)) {
+   track and the conversation takes everything left (issue #1498). Match the
+   descendant in one :has(): nesting :has() invalidates the rule (issue #1931). */
+.centre:has(> .stage:not(:empty) .compact) {
   grid-template-rows: minmax(0, auto) minmax(0, 1fr);
 }
 
