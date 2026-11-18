@@ -8,7 +8,41 @@ release that Nick publishes.
 
 ## [Unreleased]
 
-**Linux share sound is now on by default** (#1952, Nick's decision on 2026-11-18, after his hand test of a Linux-to-phone share). Start the desktop with `CONCH_LINUX_SHARE_AUDIO=0` to turn it off. Consent per share, its own mute and the call's exclusion are unchanged. The by-hand L-S6 feedback test (#922) has not run yet.
+## [0.1.0-alpha.21] - 2026-11-18
+
+This is a pre-1.0 release (`v0.1.0-alpha.21`), with no wire-format changes. After the server upgrade, reload open browser tabs to get the web changes below. The Linux x86_64 `.deb` is still a preview for testers (#1603). The Windows installer is not part of this release: development builds come from CI, pending the hardware run (#903).
+
+**Linux share sound is now on by default** (#1952). Nick decided this on 2026-11-18, after testing a Linux-to-phone share by hand. Start the desktop with `CONCH_LINUX_SHARE_AUDIO=0` to turn it off. Consent per share, the share sound's own mute and the call's exclusion from capture are unchanged. The by-hand L-S6 feedback test (#922) has not run yet.
+
+### Added
+- **Picture-in-picture for a watched share** (#1839) and **for a remote camera tile** (#1954). Pop out and Return to stage work by keyboard, where the browser supports it. The floating window gets a layer sized for it. A watch held through a room renewal keeps its tile and its PiP.
+- **Message links** (#1833). Copy link and Copy text are in a message's menu. Opening a link loads back to the message, focuses it and highlights it. A reply opens its thread.
+- **Markdown lists, headings and a Copy button on code blocks** (#1836). Previews strip the markers. One budget of 500 structural elements per message keeps a huge body from flooding every reader.
+- **A "New messages" divider, Jump to first unread, and mark as unread** (#1827).
+- **Optional sounds for messages and calls, in the browser** (#1834). They're off by default. On the desktop they wait on a CSP decision (#1924).
+- **Windows desktop, ahead of its hardware run** (#903):
+  - lock and suspend handling through `powerMonitor`, and the native tray (#1935);
+  - invite links, single instance and app identity (#1944);
+  - notifications whose click does nothing for a stale profile (#1957);
+  - push-to-talk key setup (#777);
+  - the call's own process tree refused for application audio (#905);
+  - the helper refuses `credential: stored` (#902).
+
+### Fixed
+- **A share no longer opens on a viewer's screen without a click** (#1930). When a share ended before presence listed the viewer, the client took it for a renewed room and opened the next share unasked. A watch chosen before the listing still survives a genuine renewal.
+- **A tall voice dock no longer squeezes the conversation in windows over 560 px** (#1815). The composer stays whole, and a watched share keeps at least 300 px.
+- **The compact stage's layout rule now applies** (#1931). It nested `:has()`, so every browser dropped it.
+- **Test reliability:**
+  - main's web unit timeouts (#1940);
+  - push and share-capture test races (#1928, #1942);
+  - the test owner's line framing (#1934);
+  - the runs-list locator (#1933);
+  - in-flight frames after a revoke (#1962);
+  - the companion's track wait (#1958).
+- **Console-secret checks:**
+  - Chromium's refusal lines are allowed only when the browser's own network log wrote them (#1915).
+  - LiveKit's refreshed room tokens are on the watch list (#1948).
+  - A failure now says where the line came from (#1955).
 
 ## [0.1.0-alpha.20] - 2026-11-17
 
