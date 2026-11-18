@@ -1809,8 +1809,8 @@ describe('sharing a screen', () => {
       surfaceSwitching: 'include',
       suppressLocalAudioPlayback: false,
     });
-    // Nothing is published by picking; settings already fit the chosen caps.
-    expect(state.calls).toEqual(['pick']);
+    // Nothing is published by picking; the capture receives explicit caps.
+    expect(state.calls).toEqual(['pick', 'constrain']);
   });
 
   it('uses motion for the default and detail for a 15 fps choice', () => {
@@ -1887,26 +1887,93 @@ describe('sharing a screen', () => {
     }
   });
 
+  it.each(['stopScreen', 'close'] as const)('reattaches capture monitoring on adoptScreen and removes it on %s', async (finish) => {
+    vi.useFakeTimers();
+    const log = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const oldStalled = vi.fn();
+    const stalled = vi.fn();
+    const old = newLiveKitRoom();
+    const next = newLiveKitRoom();
+    try {
+      await old.connect('wss://lk.example', 'tok-abcdef', 'room-abcdef', true, { ...events, onScreenStalled: oldStalled });
+      await old.pickScreen();
+      const capture = state.screenTracks[0]?.mediaStreamTrack;
+      if (capture === undefined) throw new Error('no capture');
+      const kept = old.keepScreen();
+      if (kept === null) throw new Error('nothing kept');
+      await old.close();
+      const added = vi.spyOn(capture, 'addEventListener');
+      const removed = vi.spyOn(capture, 'removeEventListener');
+      await next.connect('wss://lk.example', 'tok-abcdef', 'room-abcdef', true, { ...events, onScreenStalled: stalled });
+      next.adoptScreen(kept);
+      // The first three listeners belong to watchScreenCapture; holdScreen
+      // also adds its own browser-ended listener.
+      const watchers = added.mock.calls.slice(0, 3);
+      expect(watchers.map(([type]) => type)).toEqual(['mute', 'unmute', 'ended']);
+      capture.mute();
+      vi.advanceTimersByTime(3000);
+      expect(stalled.mock.calls).toEqual([[true]]);
+      expect(oldStalled).not.toHaveBeenCalled();
+      capture.unmute();
+      expect(stalled.mock.calls).toEqual([[true], [false]]);
+      capture.mute();
+      await next[finish]();
+      for (const [type, listener] of watchers) expect(removed).toHaveBeenCalledWith(type, listener);
+      vi.advanceTimersByTime(3000);
+      capture.unmute();
+      capture.mute();
+      vi.advanceTimersByTime(3000);
+      expect(stalled.mock.calls).toEqual([[true], [false]]);
+      expect(log).toHaveBeenCalledTimes(1);
+    } finally {
+      await old.close();
+      await next.close();
+      log.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
   it('keeps the asked sender rate when capture settings report 1 fps', async () => {
     state.captured = { width: 1920, height: 1080, frameRate: 1 };
     const room = await connected();
     await room.pickScreen();
     await room.publishScreen();
     const track = state.screenTracks[0];
+    expect(track?.mediaStreamTrack.constraints).toEqual([{ width: { max: 1920 }, height: { max: 1080 }, frameRate: { max: 30 } }]);
     expect(track?.sender?.parameters.encodings.at(-1)?.maxFramerate).toBe(30);
     expect(state.published[0]?.options).toMatchObject({ screenShareEncoding: { maxFramerate: 30 } });
     await room.close();
   });
 
-  it('does not constrain settings that already satisfy the ask, on pick, publish or repeated quality', async () => {
+  it('applies caps on pick and skips them on publish or repeated quality with identical max constraints', async () => {
     const room = await connected();
     await room.pickScreen();
     await room.publishScreen();
     await room.setShareQuality({ resolution: '1080p', frameRate: 30 });
-    expect(state.screenTracks[0]?.mediaStreamTrack.constraints).toEqual([]);
+    expect(state.screenTracks[0]?.mediaStreamTrack.constraints).toEqual([{ width: { max: 1920 }, height: { max: 1080 }, frameRate: { max: 30 } }]);
     expect(state.screenTracks[0]?.sender?.parameters.degradationPreference).toBe('maintain-framerate');
     await room.setShareQuality({ resolution: '720p', frameRate: 15 });
     expect(state.screenTracks[0]?.sender?.parameters.degradationPreference).toBe('maintain-resolution');
+    await room.close();
+  });
+
+  it.each([
+    { name: 'frame rate on a static screen', settings: { width: 1920, height: 1080, frameRate: 1 }, quality: { resolution: '1080p', frameRate: 15 }, width: 1920, height: 1080, frameRate: 15 },
+    { name: 'resolution on a temporarily smaller window', settings: { width: 640, height: 360, frameRate: 30 }, quality: { resolution: '720p', frameRate: 30 }, width: 1280, height: 720, frameRate: 30 },
+  ] as const)('applies new max constraints when lowering $name', async ({ settings, quality, width, height, frameRate }) => {
+    const room = await connected();
+    await room.pickScreen({ resolution: '1080p', frameRate: 30 });
+    await room.publishScreen();
+    const track = state.screenTracks[0];
+    if (track === undefined) throw new Error('no screen track');
+    track.settings = settings;
+    const apply = vi.spyOn(track.mediaStreamTrack, 'applyConstraints');
+    await room.setShareQuality(quality);
+    expect(apply).toHaveBeenCalledExactlyOnceWith({ width: { max: width }, height: { max: height }, frameRate: { max: frameRate } });
+    apply.mockClear();
+    track.settings = settings;
+    await room.setShareQuality(quality);
+    expect(apply).not.toHaveBeenCalled();
     await room.close();
   });
 
@@ -1920,7 +1987,10 @@ describe('sharing a screen', () => {
     state.calls.length = 0;
     await room.setShareQuality({ resolution: '720p', frameRate: 15 });
     expect(track.mediaStreamTrack.contentHint).toBe('detail');
-    expect(track.mediaStreamTrack.constraints).toEqual([{ width: { max: 1280 }, height: { max: 720 }, frameRate: { max: 15 } }]);
+    expect(track.mediaStreamTrack.constraints).toEqual([
+      { width: { max: 1920 }, height: { max: 1080 }, frameRate: { max: 30 } },
+      { width: { max: 1280 }, height: { max: 720 }, frameRate: { max: 15 } },
+    ]);
     expect(track.sender?.parameters.encodings).toEqual([
       { rid: 'q', maxBitrate: 6_000_000, maxFramerate: 15, scaleResolutionDownBy: 1 },
       { rid: 'h', maxBitrate: 6_000_000, maxFramerate: 15, scaleResolutionDownBy: 1 },
@@ -2366,7 +2436,7 @@ describe('sharing a screen', () => {
       },
     );
     await settle();
-    expect(state.calls).toEqual(['pick', 'publish screen_share']);
+    expect(state.calls).toEqual(['pick', 'constrain', 'publish screen_share']);
     const kept = room.keepScreen();
     expect(state.screenTracks.map((t) => t.mediaStreamTrack.enabled), 'blanked at once').toEqual([false, false]);
     held.resolve(undefined);
@@ -3065,7 +3135,7 @@ describe('the screen companion room (issue #1581)', () => {
     expect(state.screenOptions).toMatchObject({ video: true, audio: false, resolution: ask, contentHint: 'motion' });
     await room.publishScreen();
     const track = state.screenTracks.find((t) => t.source === 'screen_share');
-    expect(track?.mediaStreamTrack.constraints).toEqual(q.resolution === 'source' && q.frameRate === 60 ? [] : [{ width: { max: ask.width }, height: { max: ask.height }, frameRate: { max: ask.frameRate } }]);
+    expect(track?.mediaStreamTrack.constraints).toEqual([{ width: { max: ask.width }, height: { max: ask.height }, frameRate: { max: ask.frameRate } }]);
     expect(track?.mediaStreamTrack.contentHint).toBe('motion');
     expect(state.published.map((p) => p.source)).toEqual(['screen_share']);
     expect(state.published[0]?.options).toMatchObject({ screenShareEncoding: top });

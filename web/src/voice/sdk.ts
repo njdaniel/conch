@@ -1698,21 +1698,17 @@ class LiveKitAdapter implements Room {
     await this.shapeSender(track, settled);
   }
 
-  // constrainShare checks the live capture against the chosen caps, applying
-  // them only when needed. Publish checks again when the choice has moved on.
+  // constrainShare applies the chosen caps unless the current constraints
+  // already have those exact maxima. Settings can reflect a static or smaller
+  // source and do not tell us whether the capture is capped.
   private async constrainShare(track: LocalVideoTrack, quality: ShareQuality): Promise<void> {
     const capture = track.mediaStreamTrack;
     const ask = shareAsk(quality);
     capture.contentHint = quality.frameRate === 15 ? 'detail' : 'motion';
-    const settings = capture.getSettings();
     const previous = capture.getConstraints();
-    // Lift earlier caps when quality increases, even when the smaller picture
-    // still fits the new box. Otherwise avoid renegotiating a live capturer.
-    const below = (constraint: ConstrainULong | ConstrainDouble | undefined, target: number): boolean =>
-      typeof constraint === 'object' && constraint.max !== undefined && constraint.max < target;
-    const fits = known(settings.width) && settings.width <= ask.width && known(settings.height) && settings.height <= ask.height
-      && known(settings.frameRate) && settings.frameRate <= ask.frameRate;
-    if (!fits || below(previous.width, ask.width) || below(previous.height, ask.height) || below(previous.frameRate, ask.frameRate)) {
+    const matches = (constraint: ConstrainULong | ConstrainDouble | undefined, target: number): boolean =>
+      typeof constraint === 'object' && constraint.max === target;
+    if (!matches(previous.width, ask.width) || !matches(previous.height, ask.height) || !matches(previous.frameRate, ask.frameRate)) {
       await capture.applyConstraints({ width: { max: ask.width }, height: { max: ask.height }, frameRate: { max: ask.frameRate } });
     }
     this.cappedAs = `${quality.resolution}/${String(quality.frameRate)}`;
