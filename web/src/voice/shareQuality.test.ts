@@ -52,7 +52,7 @@ describe('the chosen capture and encodings', () => {
 
   it('does not upscale a smaller capture and never sends a lower layer faster than the top', () => {
     expect(shareEncodings({ width: 1000, height: 700, frameRate: 15 }, { resolution: '1080p', frameRate: 60 })).toEqual({
-      top: { width: 1000, height: 700, maxBitrate: 6_000_000, maxFramerate: 15 },
+      top: { width: 1000, height: 700, maxBitrate: 6_000_000, maxFramerate: 60 },
       lower: [],
     });
     expect(shareEncodings({ width: 3840, height: 2160, frameRate: 60 }, { resolution: 'source', frameRate: 15 }).lower).toEqual([

@@ -475,7 +475,8 @@ export function shareEncodings(captured: CapturedVideo, quality: ShareQuality = 
   const ask = shareAsk(settleQuality(quality, captured));
   const [capturedWidth, capturedHeight] = known(captured.width) && known(captured.height) ? [captured.width, captured.height] : [ask.width, ask.height];
   const [width, height] = fitBox(capturedWidth, capturedHeight, ask.width, ask.height);
-  const fps = known(captured.frameRate) ? Math.min(captured.frameRate, ask.frameRate) : ask.frameRate;
+  // A transiently low capture reading must not become a lasting encoder cap.
+  const fps = ask.frameRate;
   const long = Math.max(width, height);
   const short = Math.min(width, height);
 
@@ -511,6 +512,39 @@ export function shareEstimateMbps(quality: ShareQuality): number {
   return Math.round(total / 1_000_000);
 }
 
+// A live capture can stop delivering frames without ending. Report a sustained
+// mute once, and clear it on recovery or when ownership of the track ends.
+export function watchScreenCapture(capture: MediaStreamTrack, changed: (stalled: boolean) => void): () => void {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  let stalled = false;
+  const clear = () => {
+    if (timer !== null) clearTimeout(timer);
+    timer = null;
+    if (stalled) changed(false);
+    stalled = false;
+  };
+  const mute = () => {
+    if (timer !== null || stalled || capture.readyState === 'ended') return;
+    timer = setTimeout(() => {
+      timer = null;
+      if (!capture.muted || capture.readyState === 'ended') return;
+      stalled = true;
+      console.warn('Screen capture stopped delivering frames (muted for 3 seconds).');
+      changed(true);
+    }, 3000);
+  };
+  capture.addEventListener('mute', mute);
+  capture.addEventListener('unmute', clear);
+  capture.addEventListener('ended', clear);
+  if (capture.muted) mute();
+  return () => {
+    capture.removeEventListener('mute', mute);
+    capture.removeEventListener('unmute', clear);
+    capture.removeEventListener('ended', clear);
+    clear();
+  };
+}
+
 // What the picker asks for: the chosen picture caps, unprocessed sound, the
 // Conch tab left out, and the shared tab still heard by the sharer. At 15 fps
 // detail keeps text sharp; at 30 and 60 motion keeps the frame rate instead.
@@ -537,6 +571,7 @@ export function videoPublishOptions(captured: CapturedVideo, quality: ShareQuali
   return {
     source: Track.Source.ScreenShare,
     simulcast: true,
+    degradationPreference: quality.frameRate === 15 ? 'maintain-resolution' : 'maintain-framerate',
     screenShareEncoding: new VideoPreset(top.width, top.height, top.maxBitrate, top.maxFramerate).encoding,
     screenShareSimulcastLayers: lower.map((l) => new VideoPreset(l.width, l.height, l.maxBitrate, l.maxFramerate)),
   };
@@ -979,6 +1014,7 @@ class LiveKitAdapter implements Room {
   // for a capture not capped here (just picked, or adopted).
   private cappedAs: string | null = null;
   private stoppingScreen = false;
+  private unwatchScreen: (() => void) | null = null;
   // Called at the next change of this connection's own permission, and when
   // the share is stopped, kept or closed: where a share's publish refused for
   // want of the claim's grant waits (publishGranted).
@@ -1662,14 +1698,24 @@ class LiveKitAdapter implements Room {
     await this.shapeSender(track, settled);
   }
 
-  // constrainShare holds the chosen caps on the live capture, and notes which
-  // (publishScreen holds them again only when the choice has moved on).
+  // constrainShare checks the live capture against the chosen caps, applying
+  // them only when needed. Publish checks again when the choice has moved on.
   private async constrainShare(track: LocalVideoTrack, quality: ShareQuality): Promise<void> {
-    this.cappedAs = `${quality.resolution}/${String(quality.frameRate)}`;
     const capture = track.mediaStreamTrack;
     const ask = shareAsk(quality);
     capture.contentHint = quality.frameRate === 15 ? 'detail' : 'motion';
-    await capture.applyConstraints({ width: { max: ask.width }, height: { max: ask.height }, frameRate: { max: ask.frameRate } });
+    const settings = capture.getSettings();
+    const previous = capture.getConstraints();
+    // Lift earlier caps when quality increases, even when the smaller picture
+    // still fits the new box. Otherwise avoid renegotiating a live capturer.
+    const below = (constraint: ConstrainULong | ConstrainDouble | undefined, target: number): boolean =>
+      typeof constraint === 'object' && constraint.max !== undefined && constraint.max < target;
+    const fits = known(settings.width) && settings.width <= ask.width && known(settings.height) && settings.height <= ask.height
+      && known(settings.frameRate) && settings.frameRate <= ask.frameRate;
+    if (!fits || below(previous.width, ask.width) || below(previous.height, ask.height) || below(previous.frameRate, ask.frameRate)) {
+      await capture.applyConstraints({ width: { max: ask.width }, height: { max: ask.height }, frameRate: { max: ask.frameRate } });
+    }
+    this.cappedAs = `${quality.resolution}/${String(quality.frameRate)}`;
   }
 
   // shapeSender sets the published encodings by position: the highest carries
@@ -1684,6 +1730,8 @@ class LiveKitAdapter implements Room {
     const sender = track.sender;
     if (sender === undefined) return;
     const { top, lower } = shareEncodings(settings, quality);
+    // A hint only: a browser that refuses it must not cost the encodings below.
+    await track.setDegradationPreference(quality.frameRate === 15 ? 'maintain-resolution' : 'maintain-framerate').catch(() => undefined);
     const parameters = sender.getParameters();
     const last = parameters.encodings.length - 1;
     // Smallest first: the order LiveKit builds them in.
@@ -1712,13 +1760,20 @@ class LiveKitAdapter implements Room {
   // holdScreen makes a capture this connection's share, picked here or kept
   // from an earlier connection.
   private holdScreen(tracks: LocalTrack[]): void {
+    this.unwatchScreen?.();
+    this.unwatchScreen = null;
     this.screen = tracks;
     this.captureEnded = false;
     const video = tracks.find((t) => t.source === Track.Source.ScreenShare);
     if (video === undefined) return;
+    this.unwatchScreen = watchScreenCapture(video.mediaStreamTrack, (stalled) => {
+      this.events?.onScreenStalled?.(stalled);
+    });
     video.mediaStreamTrack.addEventListener('ended', () => {
       // Kept for another connection since: not this one's to report.
       if (!this.screen.includes(video)) return;
+      this.unwatchScreen?.();
+      this.unwatchScreen = null;
       // A track stopped by script fires no ended event: this is the browser.
       this.captureEnded = true;
       if (!this.stoppingScreen && !this.closed) this.events?.onScreenEnded('browser');
@@ -1726,6 +1781,8 @@ class LiveKitAdapter implements Room {
   }
 
   keepScreen(): KeptScreen | null {
+    this.unwatchScreen?.();
+    this.unwatchScreen = null;
     const tracks = this.screen;
     this.screen = [];
     this.wakeGrant();
@@ -1841,6 +1898,8 @@ class LiveKitAdapter implements Room {
   }
 
   async stopScreen(): Promise<void> {
+    this.unwatchScreen?.();
+    this.unwatchScreen = null;
     const tracks = this.screen;
     this.screen = [];
     this.wakeGrant();
@@ -2284,6 +2343,8 @@ class LiveKitAdapter implements Room {
     // disconnect(true) stops published tracks; these may not have been
     // published yet.
     track?.stop();
+    this.unwatchScreen?.();
+    this.unwatchScreen = null;
     for (const t of this.screen) t.stop();
     this.screen = [];
     // The leave starts at once, not after the untap (issue #1764): closing the

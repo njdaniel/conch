@@ -84,6 +84,21 @@ export function ShareReadout({ client, direction, principal, prefix = '', asked,
   );
 }
 
+// Shared by the browser and desktop sharer's panels; recovery is always a
+// person choosing to stop and pick a source again.
+export function ShareCaptureWarning({ stalled, client }: {
+  readonly stalled: boolean;
+  readonly client: Pick<VoiceClient, 'restartShare'>;
+}) {
+  if (!stalled) return null;
+  return (
+    <p role="status" className="hint">
+      Screen capture stopped delivering frames.{' '}
+      <button type="button" onClick={() => { void client.restartShare(); }}>Restart share</button>
+    </p>
+  );
+}
+
 // A video element Safari on iPhone can put full screen: it has no
 // requestFullscreen for other elements.
 type AppleVideo = HTMLVideoElement & { readonly webkitEnterFullscreen?: () => void };
