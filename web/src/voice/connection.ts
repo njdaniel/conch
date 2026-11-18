@@ -494,6 +494,12 @@ export interface VoiceEnv {
 // How long the SDK's own reconnect is allowed before the client goes back to
 // conchd (conch-voice.md section 5).
 export const reconnectLimit = 20_000;
+// How long a watched stream gone before presence has listed this person is
+// held before its watch ends (follow, issue #1930): a renewal of the room
+// within it keeps the watch. conchd deletes a renewed room in LiveKit as it
+// tells presence the room is empty, so LiveKit's room_deleted follows the
+// empty presence within this, if it did not come first.
+export const endingLimit = 5_000;
 // A connection that lasted this long starts the retry wait over.
 export const healthyAfter = 30_000;
 // openAudio makes the level meter's audio context and resumes it, in this
@@ -679,6 +685,16 @@ export class VoiceClient {
   // (voice-multi-share.md §7.1).
   private readonly streamSinks = new Map<number, ShareSink>();
   private readonly awaiting = new Map<number, unknown>();
+  // Whether presence has listed this person since they joined. Until it has,
+  // their absence from it is conchd not having seen them yet, not a renewed
+  // room, and presence alone cannot tell a stopped share from a renewal
+  // (issue #1930).
+  private listedSinceJoin = false;
+  // ending holds one timer per watched publisher whose stream presence showed
+  // gone before it had listed this person (follow): the watch ends when the
+  // timer fires, unless this person's room goes first, a renewal, when the
+  // stream is waited for as any other that went with its room (drop).
+  private readonly ending = new Map<number, unknown>();
   // Who else holds a camera claim, from presence, and the elements the call
   // view plays cameras into: handed to every new connection.
   private cameraClaims: ReadonlySet<number> = new Set();
@@ -840,6 +856,8 @@ export class VoiceClient {
     // The camera is off on joining (design §3.4): only its button turns it
     // on, and why the last one ended is not news here.
     this.camera.reset();
+    // A new join is listed afresh (follow).
+    this.listedSinceJoin = false;
     // Joining is the person's own choice: a microphone missing before is
     // asked for again, as chosen.
     this.set({
@@ -1494,13 +1512,40 @@ export class VoiceClient {
   // and everyone left it) is waited for: the same publisher's stream coming
   // back is watched as before. A stream that is back ends the wait for it, and
   // another publisher's never takes its place (voice-multi-share.md §7.1).
+  //
+  // A person not yet listed since joining is absent from presence either way
+  // (issue #1930): conchd lists a page only once a pass has seen it, up to
+  // about 1.5 s after it connected. So presence alone does not say whether a
+  // stream gone then stopped or went with a renewed room, and LiveKit does: a
+  // renewal disconnects this person's room (room_deleted), and a stop leaves
+  // it connected. LiveKit's own track and participant events cannot settle it
+  // at once, since a deleted room may end its publishers before this
+  // person. The watch is held as ending (endingLimit): this room going within
+  // that keeps it, waited for (drop); otherwise it ends. The same publisher
+  // sharing again while this room stayed is a new share after a stop: the
+  // watch ends then, and nothing is watched unasked. Listed meanwhile, the
+  // stream still gone, the watch ends at once.
   private follow(live: ReadonlySet<number>, listed: boolean): void {
+    if (listed) this.listedSinceJoin = true;
     for (const principal of [...this.state.watched]) {
-      if (live.has(principal)) this.endAwaiting(principal);
+      if (this.ending.has(principal)) {
+        if (listed || live.has(principal)) this.watchStream(principal, false);
+      } else if (live.has(principal)) this.endAwaiting(principal);
       else if (this.awaiting.has(principal)) continue;
       else if (listed) this.watchStream(principal, false);
+      else if (!this.listedSinceJoin) this.holdEnding(principal);
       else this.awaitShare(principal);
     }
+  }
+
+  // holdEnding ends one watch after endingLimit, unless a renewal takes this
+  // person's room first (follow, drop).
+  private holdEnding(principal: number): void {
+    if (this.ending.has(principal)) return;
+    this.ending.set(principal, this.env.clock.setTimeout(() => {
+      this.ending.delete(principal);
+      this.watchStream(principal, false);
+    }, endingLimit));
   }
 
   // awaitShare waits for the same publisher's watched share that went with its
@@ -1513,15 +1558,19 @@ export class VoiceClient {
     }, resumeLimit));
   }
 
+  // endAwaiting ends the wait for one publisher's stream, or for every one,
+  // and an ending watch's timer with it (follow).
   private endAwaiting(principal?: number): void {
-    if (principal === undefined) {
-      for (const timer of this.awaiting.values()) this.env.clock.clearTimeout(timer);
-      this.awaiting.clear();
-      return;
+    for (const held of [this.awaiting, this.ending]) {
+      if (principal === undefined) {
+        for (const timer of held.values()) this.env.clock.clearTimeout(timer);
+        held.clear();
+        continue;
+      }
+      const timer = held.get(principal);
+      if (timer !== undefined) this.env.clock.clearTimeout(timer);
+      held.delete(principal);
     }
-    const timer = this.awaiting.get(principal);
-    if (timer !== undefined) this.env.clock.clearTimeout(timer);
-    this.awaiting.delete(principal);
   }
 
   // leave shuts the gate, lets the last report go, and disconnects.
@@ -1585,6 +1634,7 @@ export class VoiceClient {
     // its tap on it first.
     this.releaseAudio();
     this.endAwaiting();
+    this.listedSinceJoin = false;
     this.streamSinks.clear();
     // Nobody's camera is received out of voice; the next join reads presence.
     this.cameraClaims = new Set();
@@ -1865,6 +1915,14 @@ export class VoiceClient {
     else void this.share.lost(roomDeleted);
     // Every watched share goes with a deleted room and is waited for, whether
     // presence has said so yet or not (#1509).
+    // So does one held as ending (follow, issue #1930): its room went before
+    // the wait ran out, so its stream went with the room rather than stopped.
+    if (next.kind !== 'stop') {
+      for (const principal of [...this.ending.keys()]) {
+        this.endAwaiting(principal);
+        this.awaitShare(principal);
+      }
+    }
     if (roomDeleted && next.kind !== 'stop') for (const principal of this.state.watched) this.awaitShare(principal);
     const room = this.room;
     this.room = null;

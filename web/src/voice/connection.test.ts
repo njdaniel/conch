@@ -4,7 +4,7 @@ import type { ShareClaimResult, TransmitAnswer, VoiceSessionResult, VoiceViewerR
 import type { VoicePresenceV2 } from '../schema/voice';
 import type { CameraClaimResult } from '../api';
 import type { Camera, CameraProfile, KeptCamera } from './camera';
-import { VoiceClient, openAudio, chosenGone, companionDefaultQuality, companionQualities, companionEnds, companionQuality, companionLeftWatching, companionLost, companionRefusals, shareQualityRefusedNote, type CompanionEnv, earlierGone, levelEvery, meterEvery, outputMoved, outputRefused, reconnectLimit, reportWait, type CameraTrack, type Microphone, type ModeStore, type Output, type Phase, type Processing, type ProcessingStore, type Room, type RoomEvents, type ShareSink } from './connection';
+import { VoiceClient, openAudio, chosenGone, companionDefaultQuality, companionQualities, companionEnds, companionQuality, companionLeftWatching, companionLost, companionRefusals, shareQualityRefusedNote, type CompanionEnv, earlierGone, levelEvery, meterEvery, outputMoved, outputRefused, endingLimit, reconnectLimit, reportWait, type CameraTrack, type Microphone, type ModeStore, type Output, type Phase, type Processing, type ProcessingStore, type Room, type RoomEvents, type ShareSink } from './connection';
 import { shareNote } from './native/words';
 import { qualityLaterNote, resumeLimit, settleQuality, type Captured, type KeptScreen, type SettledQuality, type ShareQuality } from './share';
 import { defaultTail } from './gate';
@@ -1849,6 +1849,80 @@ describe('watching several streams', () => {
     t.client.presence(twoStreams([7, 8, 9], [8]));
     expect([...t.client.snapshot().watched]).toEqual([8, 9]);
     // 9 never comes back: that watch alone ends with the wait.
+    t.clock.advance(resumeLimit);
+    expect([...t.client.snapshot().watched]).toEqual([8]);
+  });
+
+  // Issue #1930: conchd lists a page only once a pass has seen it, up to
+  // about 1.5 s after it connected. A stream watched and stopped in that time
+  // has ended; it is not waited for as if a renewal had taken the room, so the
+  // sharer's next share is not watched unasked.
+  // Presence alone cannot tell that stop from a renewal, so the watch is held
+  // as ending for endingLimit; this person's room staying through it is the
+  // stop.
+  it('a stream that ends before presence first lists this person is let go, not waited for', async () => {
+    const t = setup();
+    await joined(t);
+    // 8 shares; this person (7) is connected but not listed yet.
+    t.client.presence(twoStreams([8], [8]));
+    t.client.watchStream(8, true);
+    // 8 stops, and still no pass has listed 7.
+    t.client.presence(twoStreams([8], []));
+    t.clock.advance(endingLimit);
+    expect([...t.client.snapshot().watched]).toEqual([]);
+    t.client.presence(twoStreams([7, 8], []));
+    // 8 shares again: Watch is offered, not pressed.
+    t.client.presence(twoStreams([7, 8], [8]));
+    expect([...t.client.snapshot().watched]).toEqual([]);
+    t.clock.advance(resumeLimit);
+    expect([...t.client.snapshot().watched]).toEqual([]);
+  });
+
+  // Issue #1930, the stop seen first in LiveKit: 8's tracks are unpublished
+  // while this room stays, and 8 shares again before the ending watch has
+  // run out. That is a new share, not the old one back, and is not watched
+  // unasked.
+  it('a stream unpublished before presence lists this person, and shared again, is not watched unasked', async () => {
+    const t = setup();
+    await joined(t);
+    t.client.presence(twoStreams([8], [8]));
+    t.client.watchStream(8, true);
+    t.rooms[0]?.events?.onStreamTracks(8, { video: true, audio: true });
+    // LiveKit: 8's share is unpublished; this room stays connected.
+    t.rooms[0]?.events?.onStreamTracks(8, { video: false, audio: false });
+    t.client.presence(twoStreams([8], []));
+    // 8 shares again at once, and 7 is still not listed.
+    t.client.presence(twoStreams([8], [8]));
+    expect([...t.client.snapshot().watched]).toEqual([]);
+    t.client.presence(twoStreams([7, 8], [8]));
+    t.clock.advance(endingLimit + resumeLimit);
+    expect([...t.client.snapshot().watched]).toEqual([]);
+    expect(t.rooms).toHaveLength(1);
+  });
+
+  // Issue #1930, the renewal: another member's removal renews the room in the
+  // first seconds, and conchd's empty presence comes before LiveKit's
+  // room_deleted. The watch 7 chose is kept, and 8's stream in the new room
+  // is watched as before, without another Watch.
+  it('a renewal before presence lists this person keeps the watch even when the empty presence comes first', async () => {
+    const t = setup([okSession(), okSession()]);
+    await joined(t);
+    t.client.presence(twoStreams([8], [8]));
+    t.client.watchStream(8, true);
+    // The old room is empty in presence; LiveKit has not said so yet.
+    t.client.presence(twoStreams([], []));
+    expect([...t.client.snapshot().watched]).toEqual([8]);
+    t.clock.advance(endingLimit / 2);
+    t.rooms[0]?.events?.onDisconnected('room_deleted');
+    await settle();
+    // The ending wait is over; the resume wait is what holds the watch now.
+    t.clock.advance(endingLimit);
+    expect([...t.client.snapshot().watched]).toEqual([8]);
+    expect(t.rooms[1]?.streamWatches.at(-1)).toEqual({ watched: [8], focused: null });
+    // The new room, 8's share resumed in it.
+    t.client.presence(twoStreams([8], []));
+    t.client.presence(twoStreams([7, 8], [8]));
+    expect([...t.client.snapshot().watched]).toEqual([8]);
     t.clock.advance(resumeLimit);
     expect([...t.client.snapshot().watched]).toEqual([8]);
   });
