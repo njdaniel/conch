@@ -404,10 +404,12 @@ for (const [size, options] of phoneSizes) {
 // middle row taller than the conversation. Now the conversation sets the row,
 // so at every height, with or without voice on the server and with a notice
 // bar above the page, the composer sits on the voice dock, and with the page
-// scrolled to its end the composer is whole. Joined and watching a share, which
-// hold the dock up, are in 12-screen-share, which has LiveKit.
+// scrolled to its end the composer is whole. Over 560 px the page fills the
+// window unless the dock leaves the conversation too little, when it scrolls the
+// same way (issue #1815), so 561, 600 and 640 are here too. Joined and watching
+// a share, which hold the dock up, are in 12-screen-share, which has LiveKit.
 const shortWindows: readonly (readonly [string, BrowserContextOptions])[] = [
-  ...[400, 470, 560, 561, 640].map((height): readonly [string, BrowserContextOptions] => [`1215×${String(height)}`, { viewport: { width: 1215, height } }]),
+  ...[400, 470, 560, 561, 600, 640].map((height): readonly [string, BrowserContextOptions] => [`1215×${String(height)}`, { viewport: { width: 1215, height } }]),
   ['720×450 at 200%', { viewport: { width: 720, height: 450 }, deviceScaleFactor: 2 }],
 ];
 
@@ -431,10 +433,6 @@ test('P1813 in a short window the composer stays on the voice dock, whole, as th
 
   for (const state of dockStates) {
     for (const [size, options] of shortWindows) {
-      // A window just over 560 px has the full-height layout, whose column
-      // clips (and scrolls inside itself) when a tall dock leaves it too little:
-      // that is the layout as it was, not this change's (issue #1815).
-      if (size.endsWith('×561') && state === 'voice set up, nobody joined') continue;
       const { page } = await meet(options);
       if (state === 'voice set up, nobody joined') await servePresence(page, world, me.token, channel, others.slice(0, 2).map((o) => o.id));
       await signIn(page, world, me.token, me.name);

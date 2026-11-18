@@ -939,7 +939,9 @@ test.describe('screen share with LiveKit', () => {
   // Issue #1813: in a short desktop window the page scrolls as a document and
   // the composer sits on the voice dock, joined (the dock is 200 px or more),
   // watching a share (the picture keeps its room: the stage is not squeezed to
-  // its padding) and with Voice options open, at every short height.
+  // its padding) and with Voice options open, at every short height; and, since
+  // issue #1815, at 561, 600 and 640 px, where a tall dock used to squeeze the
+  // stage to a strip and clip the composer under the dock.
   test('in a short window, joined and watching a share, the composer is on the dock and the picture keeps its room', async ({ browser }) => {
     const a = await person(browser, 'alice');
     const b = await person(browser, 'bob', { viewport: { width: 1215, height: 560 } });
@@ -972,18 +974,22 @@ test.describe('screen share with LiveKit', () => {
         }).toPass({ timeout: 5000 });
         if (stage) {
           const picture = await b.page.locator('.stage').boundingBox();
-          // On main at these heights the stage is 465 to 480 px.
+          // At 560 px and under the stage is 465 to 480 px; over 560 px it
+          // keeps 300 px and its own top padding, or more where there is room.
           expect(picture?.height ?? 0, `${where}: the stage while watching`).toBeGreaterThanOrEqual(300);
         }
         await b.page.evaluate(() => {
           window.scrollTo(0, 0);
         });
       };
-      // 561 px is the full-height layout, which squeezes a share to nothing in
-      // a window this short whatever the page does at 560 (a pre-existing
-      // limit, not this change's: issue #1815); joined, the composer is on the dock there too.
-      const heights: readonly (readonly [number, number])[] = [[1215, 560], [1215, 470], [1215, 400], [720, 450]];
-      for (const [width, height] of [...heights, [1215, 561]] as const) {
+      // Over 560 px the page fills the window, unless the dock leaves the
+      // conversation less than its composer whole and the stage 300 px: then
+      // it scrolls as a document too (issue #1815). Those heights are checked
+      // the same way, the stage keeping 300 px with Voice options open as well.
+      const short: readonly (readonly [number, number])[] = [[1215, 560], [1215, 470], [1215, 400], [720, 450]];
+      const taller: readonly (readonly [number, number])[] = [[1215, 561], [1215, 600], [1215, 640]];
+      const heights = [...short, ...taller];
+      for (const [width, height] of heights) {
         await b.page.setViewportSize({ width, height });
         await check('joined', false);
       }
@@ -997,7 +1003,7 @@ test.describe('screen share with LiveKit', () => {
       await voiceRegion(b.page).getByRole('button', { name: 'Voice options' }).click();
       for (const [width, height] of heights) {
         await b.page.setViewportSize({ width, height });
-        await check('watching, Voice options open', false);
+        await check('watching, Voice options open', height > 560);
         const areas = await b.page.locator('.areas').boundingBox();
         expect(areas?.height ?? 0, `${String(width)}×${String(height)}: the conversation with Voice options open`).toBeGreaterThanOrEqual(200);
       }
