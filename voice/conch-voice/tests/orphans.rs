@@ -57,6 +57,10 @@ fn exists(pid: u32) -> bool {
 }
 
 #[test]
+#[cfg_attr(
+    target_os = "macos",
+    ignore = "observes the child and zombie via Linux /proc"
+)]
 fn a_test_that_panics_while_it_holds_the_binary_leaves_no_child() {
     let private = tempfile::tempdir().unwrap();
     let mut command = join_without_a_server(private.path());

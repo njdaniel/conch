@@ -1446,6 +1446,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        target_os = "macos",
+        ignore = "MF2 (#1738): successful socket attach needs a macOS current_uid implementation"
+    )]
     fn attach_attaches_with_the_line_first_and_hands_back_both_handles() {
         let fixture = fixture();
         let scrubber = Scrubber::new();

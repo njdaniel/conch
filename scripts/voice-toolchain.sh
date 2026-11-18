@@ -11,14 +11,15 @@
 #     hash (scripts/voice-pins.sh says why).
 #
 # What this does not fetch, because the distribution has it at a version that will do, is
-# installed by apt: GLib's, PipeWire's and libclang's development headers
+# installed on Linux by apt: GLib's, PipeWire's and libclang's development headers
 # (libglib2.0-dev libpipewire-0.3-dev libclang-dev pkg-config) and g++. scripts/voice-env.sh
-# checks for each and says which is missing.
+# checks for each and says which is missing. Apple silicon uses Apple's clang
+# and SDK, a Darwin cargo-deny archive and the unmodified mac-arm64 libwebrtc.
 #
 # Versions and hashes are in scripts/voice-pins.sh. Each download is verified
 # against its SHA-256 before anything is unpacked. Nothing is installed
-# system-wide and no root is needed. Running it again does nothing once all
-# everything is in place.
+# system-wide and no root is needed. On Linux and macOS it reuses installed
+# tools on subsequent runs.
 #
 # With the argument `deny` it fetches cargo-deny only (the advisories job in CI
 # needs nothing else).
@@ -45,15 +46,12 @@ LLVM_SHA256=$CONCH_LLVM_SHA256
 LLVM_URL="${CONCH_VOICE_LLVM_URL:-https://github.com/llvm/llvm-project/releases/download/llvmorg-${LLVM_VERSION}/${LLVM_ARCHIVE}}"
 
 DENY_VERSION=$CONCH_DENY_VERSION
-DENY_ARCHIVE="cargo-deny-${DENY_VERSION}-x86_64-unknown-linux-musl.tar.gz"
+DENY_TRIPLE=x86_64-unknown-linux-musl
 DENY_SHA256=$CONCH_DENY_SHA256
-DENY_URL="${CONCH_VOICE_DENY_URL:-https://github.com/EmbarkStudios/cargo-deny/releases/download/${DENY_VERSION}/${DENY_ARCHIVE}}"
 
 WEBRTC_TAG=$CONCH_WEBRTC_TAG
 WEBRTC_TRIPLE=linux-x64-release
-WEBRTC_ARCHIVE="webrtc-${WEBRTC_TRIPLE}.zip"
 WEBRTC_SHA256=$CONCH_WEBRTC_SHA256
-WEBRTC_URL="${CONCH_VOICE_WEBRTC_URL:-https://github.com/livekit/rust-sdks/releases/download/${WEBRTC_TAG}/${WEBRTC_ARCHIVE}}"
 
 cache="${CONCH_CACHE:-$HOME/.cache/conch}"
 llvm_dir="$cache/llvm-$LLVM_VERSION"
@@ -114,10 +112,27 @@ MINGW* | MSYS* | CYGWIN*)
     ;;
 esac
 
-if [ "$(uname -s)-$(uname -m)" != "Linux-x86_64" ]; then
-    echo "voice-toolchain: FAIL: only Linux x86_64 is supported (ADR-006), this is $(uname -s) $(uname -m)" >&2
+host="$(uname -s)-$(uname -m)"
+case "$host" in
+Linux-x86_64) ;;
+Darwin-arm64)
+    DENY_TRIPLE=aarch64-apple-darwin
+    DENY_SHA256=$CONCH_DENY_MAC_SHA256
+    deny_dir="$deny_dir-$DENY_TRIPLE-${DENY_SHA256:0:12}"
+    WEBRTC_TRIPLE=mac-arm64-release
+    WEBRTC_SHA256=$CONCH_WEBRTC_MAC_SHA256
+    webrtc_dir="$webrtc_dir-mac-${WEBRTC_SHA256:0:12}"
+    ;;
+*)
+    echo "voice-toolchain: FAIL: expected Linux x86_64 or macOS arm64, this is $host" >&2
     exit 1
-fi
+    ;;
+esac
+
+DENY_ARCHIVE="cargo-deny-${DENY_VERSION}-${DENY_TRIPLE}.tar.gz"
+DENY_URL="${CONCH_VOICE_DENY_URL:-https://github.com/EmbarkStudios/cargo-deny/releases/download/${DENY_VERSION}/${DENY_ARCHIVE}}"
+WEBRTC_ARCHIVE="webrtc-${WEBRTC_TRIPLE}.zip"
+WEBRTC_URL="${CONCH_VOICE_WEBRTC_URL:-https://github.com/livekit/rust-sdks/releases/download/${WEBRTC_TAG}/${WEBRTC_ARCHIVE}}"
 
 # fetch <url> <sha256> <destination file>: download, then verify. The file is
 # removed again if the hash does not match, so a bad download is never kept.
@@ -125,7 +140,11 @@ fetch() {
     local url=$1 want=$2 dest=$3 got
     echo "voice-toolchain: downloading $url"
     curl --fail --silent --show-error --location --output "$dest" "$url"
-    got=$(sha256sum "$dest" | cut -d' ' -f1)
+    if [ "$host" = Darwin-arm64 ]; then
+        got=$(shasum -a 256 "$dest" | cut -d' ' -f1)
+    else
+        got=$(sha256sum "$dest" | cut -d' ' -f1)
+    fi
     if [ "$got" != "$want" ]; then
         rm -f "$dest"
         echo "voice-toolchain: FAIL: SHA-256 of $url is $got, expected $want; nothing was unpacked" >&2
@@ -139,14 +158,34 @@ mkdir -p "$cache"
 # would otherwise each replace the directory the other had just put in place,
 # under a build that may already be using it. The second waits, then finds
 # everything present.
-exec 9>"$cache/.toolchain.lock"
-flock 9
+if [ "$host" = Darwin-arm64 ]; then
+    # mkdir is atomic and is available on stock macOS. A bounded wait also
+    # gives a diagnostic if a killed process leaves the lock behind.
+    lock="$cache/.toolchain-mac.lock"
+    deadline=$((SECONDS + 300))
+    until mkdir "$lock" 2>/dev/null; do
+        if [ ! -d "$lock" ] || [ "$SECONDS" -ge "$deadline" ]; then
+            echo "voice-toolchain: FAIL: cannot acquire $lock; if a previous fetch was killed, remove its empty lock directory once that fetch is stopped" >&2
+            exit 1
+        fi
+        sleep 1
+    done
+    work=
+    trap 'if [ -n "$work" ]; then rm -rf "$work"; fi; rmdir "$lock"' EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+else
+    exec 9>"$cache/.toolchain.lock"
+    flock 9
+fi
 
 work=$(mktemp -d "$cache/.fetch.XXXXXX")
-trap 'rm -rf "$work"' EXIT
+if [ "$host" = Linux-x86_64 ]; then
+    trap 'rm -rf "$work"' EXIT
+fi
 
-if [ "$only" = deny ]; then
-    : # clang is not needed to read the advisory database
+if [ "$only" = deny ] || [ "$host" = Darwin-arm64 ]; then
+    : # clang is not needed for advisories; macOS uses Apple's clang
 elif [ -x "$llvm_dir/bin/clang" ]; then
     echo "voice-toolchain: clang $LLVM_VERSION is already in $llvm_dir"
 else
@@ -169,7 +208,15 @@ if [ -x "$deny_dir/cargo-deny" ]; then
 else
     fetch "$DENY_URL" "$DENY_SHA256" "$work/$DENY_ARCHIVE"
     mkdir "$work/deny"
-    tar -xzf "$work/$DENY_ARCHIVE" -C "$work/deny" --strip-components=1 --wildcards '*/cargo-deny'
+    if [ "$host" = Darwin-arm64 ]; then
+        # bsdtar can extract an exact member without GNU tar's --wildcards.
+        deny_member=$(tar -tzf "$work/$DENY_ARCHIVE" | awk '/(^|\/)cargo-deny$/ { print }')
+        test -n "$deny_member"
+        tar -xOzf "$work/$DENY_ARCHIVE" "$deny_member" >"$work/deny/cargo-deny"
+        chmod +x "$work/deny/cargo-deny"
+    else
+        tar -xzf "$work/$DENY_ARCHIVE" -C "$work/deny" --strip-components=1 --wildcards '*/cargo-deny'
+    fi
     "$work/deny/cargo-deny" --version
     rm -rf "$deny_dir"
     mv "$work/deny" "$deny_dir"
@@ -178,7 +225,8 @@ fi
 
 if [ "$only" = deny ]; then
     : # nor is libwebrtc
-elif [ -f "$webrtc_dir/$WEBRTC_TRIPLE/webrtc.ninja" ]; then
+elif [ -f "$webrtc_dir/$WEBRTC_TRIPLE/webrtc.ninja" ] &&
+    { [ "$host" = Linux-x86_64 ] || [ -f "$webrtc_dir/$WEBRTC_TRIPLE/lib/libwebrtc.a" ]; }; then
     echo "voice-toolchain: libwebrtc $WEBRTC_TAG is already in $webrtc_dir"
 else
     fetch "$WEBRTC_URL" "$WEBRTC_SHA256" "$work/$WEBRTC_ARCHIVE"
@@ -189,9 +237,17 @@ else
     python3 -c 'import sys, zipfile; zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])' "$work/$WEBRTC_ARCHIVE" "$work/webrtc"
     rm -f "$work/$WEBRTC_ARCHIVE"
     test -f "$work/webrtc/$WEBRTC_TRIPLE/webrtc.ninja"
+    if [ "$host" = Darwin-arm64 ]; then
+        test -f "$work/webrtc/$WEBRTC_TRIPLE/lib/libwebrtc.a"
+    fi
     rm -rf "$webrtc_dir"
     mv "$work/webrtc" "$webrtc_dir"
     echo "voice-toolchain: libwebrtc $WEBRTC_TAG unpacked into $webrtc_dir"
+fi
+
+# The macOS download has no PipeWire stubs. Link it as shipped.
+if [ "$host" = Darwin-arm64 ]; then
+    exit 0
 fi
 
 # What conch-voice links is that download with one member, pipewire_stubs.o,
