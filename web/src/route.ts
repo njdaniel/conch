@@ -1,10 +1,13 @@
-// Hash routing by hand: #/c/<channel> names the open channel. The hash is per
+// Hash routing by hand: #/c/<channel> names the open channel, and
+// #/c/<channel>/m/<id> names a message in it. The hash is per
 // tab and survives a reload, and a link to it carries no credential.
 // #/invite/<code> is an invite link, #/signin/<code> a sign-in link and
 // #/setup/<token> a setup link, each taken out of the address as soon as the
 // page reads it.
 
 export function channelFromHash(hash: string): string | null {
+  const message = messageFromHash(hash);
+  if (message !== null) return message.channel;
   const match = /^#\/c\/(.+)$/.exec(hash);
   if (match?.[1] === undefined) return null;
   try {
@@ -16,6 +19,26 @@ export function channelFromHash(hash: string): string | null {
 
 export function hashForChannel(name: string): string {
   return `#/c/${encodeURIComponent(name)}`;
+}
+
+// Message links carry only a channel and a positive, exactly representable id.
+// Parse this form before the legacy channel route; encoded slashes stay names.
+export function messageFromHash(hash: string): { readonly channel: string; readonly id: number | null } | null {
+  const match = /^#\/c\/([^/]+)\/m\/([^/]+)$/.exec(hash);
+  if (match === null) return null;
+  try {
+    const channel = decodeURIComponent(match[1] ?? '');
+    const raw = match[2] ?? '';
+    const id = /^[0-9]+$/.test(raw) ? Number(raw) : NaN;
+    return { channel, id: Number.isSafeInteger(id) && id > 0 ? id : null };
+  } catch {
+    return null;
+  }
+}
+
+export function hashForMessage(channel: string, id: number): string {
+  if (!Number.isSafeInteger(id) || id <= 0) throw new RangeError('Invalid message id');
+  return `${hashForChannel(channel)}/m/${String(id)}`;
 }
 
 // Invite links (issue #440): <origin>/app/#/invite/<code>. The code is in the

@@ -68,11 +68,11 @@ function conversation(messages: readonly MessageV2[], { held, onEdited = vi.fn()
 // Controls are named by author and time, never by id (issue #1040), and two
 // messages made a moment apart may fall in different minutes: each is found
 // inside its own item, by the shape of its name.
-const item = (id: number) => document.querySelector<HTMLElement>(`[data-message-id="${String(id)}"]`);
+const item = (id: number) => document.querySelector<HTMLElement>(`.log > .messages > [data-message-id="${String(id)}"]`);
 const within1 = (id: number) => within(item(id) ?? document.body);
 const moreName = /^More actions for ada's message, \d\d:\d\d$/;
 const editName = /^Edit ada's message, \d\d:\d\d$/;
-const more = (id: number) => within1(id).queryByRole('button', { name: moreName });
+const more = (id: number) => within1(id).queryByRole('button', { name: /^More actions for/ });
 const box = (id: number) => within1(id).getByRole('textbox', { name: editName });
 const noBox = (id: number) => within1(id).queryByRole('textbox', { name: editName });
 
@@ -82,6 +82,17 @@ function openEditor(id: number): HTMLTextAreaElement {
   fireEvent.click(button);
   fireEvent.click(within(screen.getByRole('menu')).getByRole('menuitem', { name: 'Edit' }));
   return box(id) as HTMLTextAreaElement;
+}
+
+// Copy actions remain even when Edit is unavailable (#1833).
+function expectNoEdit(id: number) {
+  const button = more(id);
+  expect(button).not.toBeNull();
+  if (button === null) throw new Error('no copy menu');
+  fireEvent.click(button);
+  expect(screen.queryByRole('menuitem', { name: 'Edit' })).toBeNull();
+  expect(screen.getByRole('menuitem', { name: 'Copy link' })).toBeTruthy();
+  fireEvent.keyDown(screen.getByRole('menu'), { key: 'Escape' });
 }
 
 beforeEach(() => {
@@ -109,19 +120,19 @@ describe('which messages offer Edit', () => {
     render(conversation([own, attachment, others, approval, old], { pending: [pending] }));
     expect(more(1)).not.toBeNull();
     expect(more(2)).not.toBeNull();
-    expect(more(3)).toBeNull();
-    expect(more(4)).toBeNull();
-    expect(more(5)).toBeNull();
+    expectNoEdit(3);
+    expectNoEdit(4);
+    expectNoEdit(5);
     // A failed send has Retry and Dismiss, and no menu.
-    expect(screen.getAllByRole('button', { name: /^More actions/ })).toHaveLength(2);
+    expect(screen.getAllByRole('button', { name: /^More actions/ })).toHaveLength(5);
   });
 
-  it('none for an agent, nor where the page cannot save an edit', () => {
+  it('keeps copying for an agent and where the page cannot save an edit', () => {
     const { unmount } = render(conversation([msg(1)], { kind: 'agent' }));
-    expect(more(1)).toBeNull();
+    expectNoEdit(1);
     unmount();
     render(conversation([msg(1)], { edits: false }));
-    expect(more(1)).toBeNull();
+    expectNoEdit(1);
   });
 });
 
@@ -136,7 +147,7 @@ describe('the actions menu', () => {
     const menu = screen.getByRole('menu', { name: moreName });
     expect(document.activeElement).toBe(within(menu).getByRole('menuitem', { name: 'Edit' }));
     fireEvent.keyDown(menu, { key: 'ArrowDown' });
-    expect(document.activeElement).toBe(within(menu).getByRole('menuitem', { name: 'Edit' }));
+    expect(document.activeElement).toBe(within(menu).getByRole('menuitem', { name: 'Copy link' }));
     fireEvent.keyDown(menu, { key: 'Escape' });
     expect(screen.queryByRole('menu')).toBeNull();
     expect(document.activeElement).toBe(button);
@@ -150,9 +161,10 @@ describe('the actions menu', () => {
     expect(fireEvent.contextMenu(within(own).getByText('text 1'))).toBe(false);
     expect(screen.getByRole('menu', { name: moreName })).toBeTruthy();
     fireEvent.keyDown(screen.getByRole('menu'), { key: 'Escape' });
-    // Nothing to offer on someone else's message: the browser keeps its menu.
-    expect(fireEvent.contextMenu(within(others).getByText('text 3'))).toBe(true);
-    expect(screen.queryByRole('menu')).toBeNull();
+    // Someone else's message offers copying, while Edit stays absent.
+    expect(fireEvent.contextMenu(within(others).getByText('text 3'))).toBe(false);
+    expect(screen.queryByRole('menuitem', { name: 'Edit' })).toBeNull();
+    expect(screen.getByRole('menuitem', { name: 'Copy text' })).toBeTruthy();
   });
 
   it('opens on a long press, and not on a tap or a scroll', () => {
@@ -363,7 +375,7 @@ describe('refusals', () => {
     });
     // The open editor is the person's; the other message stops offering Edit.
     expect(box(1)).toHaveProperty('value', 'too late');
-    expect(more(2)).toBeNull();
+    expectNoEdit(2);
     fireEvent.click(screen.getByRole('button', { name: 'Save' }));
     await act(async () => {
       await Promise.resolve();
@@ -372,9 +384,9 @@ describe('refusals', () => {
     expect(screen.getByRole('alert').textContent).toBe('This message can no longer be edited: it is more than an hour old.');
     fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
     expect(noBox(1)).toBeNull();
-    expect(more(1)).toBeNull();
-    // Focus goes to the message, which no longer has a ⋯.
-    expect(document.activeElement).toBe(item(1));
+    // Focus returns to the copy menu after Edit disappears.
+    expect(document.activeElement).toBe(more(1));
+    expectNoEdit(1);
   });
 });
 
@@ -413,7 +425,7 @@ describe('the edit limit', () => {
     expect(more(1)).not.toBeNull();
     unmount();
     render(rendered(known(10)));
-    expect(more(1)).toBeNull();
+    expectNoEdit(1);
   });
 
   it('a page opened after the edits, knowing none, still offers Edit', () => {
@@ -423,7 +435,7 @@ describe('the edit limit', () => {
 
   it('a message marked final is not offered Edit', () => {
     render(rendered({ ...chat([msg(1)]), final: new Set([1]) }));
-    expect(more(1)).toBeNull();
+    expectNoEdit(1);
   });
 
   it.each(['message_edit_limit_reached', 'message_edit_window_closed'])('%s tells the page the message is final, keeping the text', async (code) => {
@@ -725,7 +737,7 @@ describe('Up from the composer', () => {
     fireEvent.keyDown(replyBox, { key: 'ArrowUp' });
     const editor = within(thread).getByRole('textbox', { name: editName });
     fireEvent.change(editor, { target: { value: 'unsaved' } });
-    fireEvent.click(screen.getByRole('button', { name: moreName }));
+    fireEvent.click(within1(2).getByRole('button', { name: moreName }));
     fireEvent.click(screen.getByRole('menuitem', { name: 'Edit' }));
     expect(within(thread).getByRole('textbox', { name: editName })).toBe(editor);
     expect(editor).toHaveProperty('value', 'unsaved');

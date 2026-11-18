@@ -6272,3 +6272,14 @@ button.link {
   padding: var(--s2);
   background: var(--raised);
 }
+
+/* Message permalinks (#1833). No animation, including under reduced motion. */
+.message.message-linked {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+.message label textarea[readonly] {
+  display: block;
+  width: 100%;
+  max-width: 100%;
+}
