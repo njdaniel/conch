@@ -22,7 +22,7 @@ export class BrowserSoundSink implements AudioSink {
       for (const sound of ['message', 'join', 'leave', 'share'] as const) {
         if (this.buffers.has(sound) || this.loading.has(sound)) continue;
         this.loading.add(sound);
-        void fetch(`${import.meta.env.BASE_URL}sounds/${sound}.wav`)
+        void fetch(new URL(`sounds/${sound}.wav`, document.baseURI).href)
           .then((r) => { if (!r.ok) throw new Error('Sound unavailable'); return r.arrayBuffer(); })
           .then((bytes) => context.decodeAudioData(bytes))
           .then((buffer) => { this.buffers.set(sound, buffer); }).catch(() => undefined)

@@ -4,7 +4,7 @@ import { SoundPlayer, readSoundPreferences, setSoundPreferences, voiceSounds, ty
 import type { VoicePresenceV2 } from './schema/voice';
 const enabled: SoundPreferences = { message: true, join: true, leave: true, share: true, volume: 0.3 };
 beforeEach(() => { localStorage.clear(); });
-afterEach(() => { vi.unstubAllGlobals(); });
+afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); });
 describe('optional sounds', () => {
   it('never plays before unlock, never queues, and applies every toggle and volume', () => {
     let preferences = enabled;
@@ -37,6 +37,7 @@ describe('optional sounds', () => {
     expect(readSoundPreferences()).toMatchObject({ volume: 1, message: false });
   });
   it.each(['offline', 'http', 'decode'])('retries a failed %s cue on a later gesture while running, without replaying skipped cues', async (failure) => {
+    vi.spyOn(document, 'baseURI', 'get').mockReturnValue('https://conch.example/app/');
     const start = vi.fn();
     const connect = vi.fn().mockReturnThis();
     let fail = true;
@@ -61,6 +62,9 @@ describe('optional sounds', () => {
     sink.unlock();
     sink.unlock(); // In-flight loads are shared.
     expect(fetchCue).toHaveBeenCalledTimes(4);
+    expect(fetchCue.mock.calls.map(([url]) => url)).toEqual(
+      ['message', 'join', 'leave', 'share'].map((sound) => `https://conch.example/app/sounds/${sound}.wav`),
+    );
     await vi.waitFor(() => { expect(decode).toHaveBeenCalledTimes(failure === 'decode' ? 4 : 3); });
     await new Promise((resolve) => setTimeout(resolve, 0));
     const silentStarts = start.mock.calls.length;
