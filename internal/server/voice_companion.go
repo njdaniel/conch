@@ -144,6 +144,9 @@ func (p *voicePoller) companionRemoved(roomName string, principalID int64, role 
 //     entitled and the room still live (voiceGrant);
 //  12. the audit row is written before the body.
 //
+// The answer names the channel by id (issue #1883): the one the route's name
+// resolved to at step 2, which every later step was made against.
+//
 // A refusal at any step issues nothing: no holder row, no LiveKit call (except
 // the idempotent CreateRoom at step 11) and no audit row (an agent's denial is
 // the one audit row, and it records the denial).
@@ -242,6 +245,10 @@ func (s *Server) handleVoiceCompanion(w http.ResponseWriter, r *http.Request) {
 		Publish:    req.Publish,
 		Subscribe:  req.Subscribe,
 		ExpiresAt:  grant.ExpiresAt,
+		// The channel the route's name resolved to, the one every check
+		// above was made against and the room was found in (issue #1883).
+		// Nothing the client sent: the request names no channel but the path.
+		ChannelID: channel.ID,
 	}
 	if err := resp.Validate(); err != nil {
 		slog.ErrorContext(ctx, "voice: built an invalid companion response", "channel", channel.ID, "error", err)

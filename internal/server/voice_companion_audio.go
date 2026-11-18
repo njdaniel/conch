@@ -52,7 +52,8 @@ import (
 // voice_share_audio_started row is written (actor the person, detail
 // channel=<id> scope=<scope>, with publisher=person added when the consent
 // names the person), and the consent is answered as VoiceCompanionAudioV1
-// with the share's started_at and the publisher as the request named it.
+// with the share's started_at, the publisher as the request named it and the
+// id of the channel the route's name resolved to (issue #1883).
 // With publisher: person LiveKit is not asked and the companion is not
 // granted the sound.
 //
@@ -109,6 +110,11 @@ func (s *Server) handleVoiceCompanionAudio(w http.ResponseWriter, r *http.Reques
 		writeInternalError(w)
 		return
 	}
+	// The channel the route's name resolved to and the caller was checked
+	// against (issue #1883): the room the consent is recorded in was found by
+	// this id. Nothing the client sent: the request names no channel but the
+	// path.
+	audio.ChannelID = channel.ID
 	if err := audio.Validate(); err != nil {
 		slog.ErrorContext(ctx, "voice: built an invalid companion audio answer", "channel", channel.ID, "error", err)
 		writeInternalError(w)
@@ -210,6 +216,8 @@ func (p *voicePoller) grantCompanionAudio(ctx context.Context, room store.VoiceR
 		r.order.Unlock()
 		return schema.VoiceCompanionAudioV1{}, errVoiceShareNotConnected
 	}
+	// The handler adds the channel's id (issue #1883): it holds the channel
+	// the route's name resolved to.
 	answer := schema.VoiceCompanionAudioV1{Scope: scope, Publisher: named, StartedAt: schema.NewTimestamp(c.startedAt)}
 	key := voiceWithdrawKey{principalID, voiceRoleScreen}
 	detail := fmt.Sprintf("channel=%d scope=%s", r.channelID, scope)

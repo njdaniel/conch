@@ -223,8 +223,9 @@ export class ShareSound {
   // nothing of the pick after it.
   #pick = 0;
   // The channel of the live companion as conchd names it now (issue #1880):
-  // its id, learned from a presence answer, and the current name once a
-  // rename was followed. Kept per companion, as #watch is, and dropped when
+  // its id (the grant's when it carried one, ShareRef.channelId, issue #1883;
+  // else learned from a presence answer), and the current name once a rename
+  // was followed. Kept per companion, as #watch is, and dropped when
   // that companion's end has finished.
   #channel: { readonly companion: number; id: number | null; name: string | null } | null = null;
   // The next presence read, and whether one is in flight: one at a time, so
@@ -487,8 +488,8 @@ export class ShareSound {
     return c !== null && c.companion === share.id && c.name !== null ? c.name : share.channel;
   }
 
-  // channelId is the id of the share's channel as this module learned it from
-  // an answer that showed the share (#learnId), or null. Read-only, for the
+  // channelId is the id of the share's channel: the grant's, else the one this
+  // module learned from an answer that showed the share (#learnId), or null. Read-only, for the
   // companion's own removal (issue #1881): the companion takes the id before
   // it tells this module the share ended (ended()), so it never depends on
   // the order of the two ends.
@@ -497,6 +498,7 @@ export class ShareSound {
   }
 
   #idOf(share: ShareRef): number | null {
+    if (share.channelId !== null) return share.channelId;
     const c = this.#channel;
     return c !== null && c.companion === share.id ? c.id : null;
   }
@@ -507,7 +509,8 @@ export class ShareSound {
   // may be another channel's, one that took the name, so it teaches nothing. A later answer for another id never replaces it
   // (#presenceMoved handles that before it gets here).
   #learnId(share: ShareRef, id: number): void {
-    if (!Number.isSafeInteger(id) || id <= 0) return;
+    // The grant named the id: presence teaches nothing (the fallback only).
+    if (share.channelId !== null || !Number.isSafeInteger(id) || id <= 0) return;
     if (this.#channel?.companion !== share.id) this.#channel = { companion: share.id, id: null, name: null };
     if (this.#channel.id === null) this.#channel.id = id;
   }
@@ -566,7 +569,13 @@ export class ShareSound {
     const id = this.#idOf(share);
     if (id === null) return 'gone';
     const found = await currentName(share.client, id, timeoutMs);
-    if (found !== 'gone' && found !== 'unknown' && this.#channel?.companion === share.id) this.#channel.name = found.name;
+    if (found === 'gone' || found === 'unknown') return found;
+    // With the grant's id there is no record from presence yet: make it, to
+    // keep the name followed.
+    // Never another companion's record: a late follow by an ended share must
+    // not wipe a newer share's followed name.
+    if (this.#channel === null) this.#channel = { companion: share.id, id: null, name: null };
+    if (this.#channel.companion === share.id) this.#channel.name = found.name;
     return found;
   }
 
@@ -778,8 +787,34 @@ export class ShareSound {
 
   // #withdraw is the DELETE of the consent: once, never retried, bounded. A
   // failure is logged by its kind alone.
+  // With the channel's id held, a 2xx by the name the DELETE went to is
+  // checked after the fact, as the companion's removal is (#1884): conchd
+  // answers 204 to this DELETE on any channel of the caller's, with no body
+  // naming it, so a channel that took the name would confirm a withdrawal that
+  // never reached the share's. A name that has changed gets the DELETE by the
+  // name now; one that cannot be checked leaves it unconfirmed (logged). It is
+  // after the fact and can be raced; a precondition conchd checks would close
+  // it (#1891). One bound covers all of it.
   async #withdraw(o: Owned): Promise<void> {
-    const { exchange } = await this.#sendFollowing(o.share, { op: 'voiceShareAudioEnd', timeoutMs: WITHDRAW_TIMEOUT_MS });
+    const deadline = Date.now() + WITHDRAW_TIMEOUT_MS;
+    const sentBy = this.#channelOf(o.share);
+    let { exchange } = await this.#sendFollowing(o.share, { op: 'voiceShareAudioEnd', timeoutMs: WITHDRAW_TIMEOUT_MS });
+    const id = this.#idOf(o.share);
+    // Followed already (the name changed during the send): conchd's own list
+    // gave that name for the id just now.
+    if (id !== null && exchange.kind === 'answer' && exchange.ok && this.#channelOf(o.share) === sentBy) {
+      const now = await currentName(o.share.client, id, deadline - Date.now());
+      if (now === 'gone' || now === 'unknown') {
+        exchange = { kind: 'none' };
+      } else if (now.name !== sentBy) {
+        const ms = deadline - Date.now();
+        try {
+          exchange = ms <= 0 ? { kind: 'none' } : await o.share.client.send({ op: 'voiceShareAudioEnd', params: { channel: now.name }, timeoutMs: ms });
+        } catch {
+          exchange = { kind: 'none' };
+        }
+      }
+    }
     if (!(exchange.kind === 'answer' && exchange.ok)) this.#deps.log('share sound: the withdrawal was not confirmed');
   }
 
@@ -897,7 +932,15 @@ export class ShareSound {
   // share's: the scope and the publisher as sent, and the share's start time
   // the same as any earlier consent of this record (another is another share).
   #bound(o: Owned, body: unknown): 'ok' | ShareSoundReason {
-    const answer = typeof body === 'object' && body !== null ? (body as { scope?: unknown; publisher?: unknown; started_at?: unknown }) : {};
+    const answer = typeof body === 'object' && body !== null ? (body as { scope?: unknown; publisher?: unknown; started_at?: unknown; channel_id?: unknown }) : {};
+    // A consent that names another channel than the share's is another
+    // channel's (a name retaken): never this share's.
+    const id = this.#idOf(o.share);
+    // A grant that named its channel comes from a server that names it in the
+    // consent answer too (#1883): one that is missing or names another
+    // channel is refused, and withdrawn as every refused consent is.
+    if (o.share.channelId !== null && answer.channel_id !== o.share.channelId) return 'consent-failed';
+    if (id !== null && answer.channel_id !== undefined && answer.channel_id !== id) return 'consent-failed';
     if (answer.scope !== LINUX_SHARE_AUDIO_SCOPE || answer.publisher !== 'person' || typeof answer.started_at !== 'string') return 'consent-failed';
     if (o.startedAt !== null && o.startedAt !== answer.started_at) return 'consent-failed';
     o.startedAt = answer.started_at;

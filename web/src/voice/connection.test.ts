@@ -4,7 +4,7 @@ import type { ShareClaimResult, TransmitAnswer, VoiceSessionResult, VoiceViewerR
 import type { VoicePresenceV2 } from '../schema/voice';
 import type { CameraClaimResult } from '../api';
 import type { Camera, CameraProfile, KeptCamera } from './camera';
-import { VoiceClient, openAudio, chosenGone, companionDefaultQuality, companionQualities, companionEnds, companionQuality, companionLeftWatching, companionLost, companionRefusals, type CompanionEnv, earlierGone, levelEvery, meterEvery, outputMoved, outputRefused, reconnectLimit, reportWait, type CameraTrack, type Microphone, type ModeStore, type Output, type Phase, type Processing, type ProcessingStore, type Room, type RoomEvents, type ShareSink } from './connection';
+import { VoiceClient, openAudio, chosenGone, companionDefaultQuality, companionQualities, companionEnds, companionQuality, companionLeftWatching, companionLost, companionRefusals, shareQualityRefusedNote, type CompanionEnv, earlierGone, levelEvery, meterEvery, outputMoved, outputRefused, reconnectLimit, reportWait, type CameraTrack, type Microphone, type ModeStore, type Output, type Phase, type Processing, type ProcessingStore, type Room, type RoomEvents, type ShareSink } from './connection';
 import { shareNote } from './native/words';
 import { qualityLaterNote, resumeLimit, settleQuality, type Captured, type KeptScreen, type SettledQuality, type ShareQuality } from './share';
 import { defaultTail } from './gate';
@@ -1535,6 +1535,21 @@ describe('sharing through the client', () => {
     expect(t.shares).toEqual(['claim general', 'claim general', 'stop general']);
     expect(t.rooms[0]?.calls).toEqual(['pick', 'publish', 'stop']);
     expect(t.client.snapshot().share).toEqual({ kind: 'idle', ended: 'left' });
+  });
+
+  it('a refused live change leaves its note, and the next change that applies clears it', async () => {
+    const t = await joined();
+    t.client.startShare();
+    await settle();
+    const room = t.rooms[0];
+    if (room === undefined) throw new Error('no room');
+    const kept = room.setShareQuality;
+    room.setShareQuality = () => Promise.reject(new Error('the capture refused'));
+    await t.client.setShareQuality({ resolution: 'source', frameRate: 60 });
+    expect(t.client.snapshot().why).toBe(shareQualityRefusedNote);
+    room.setShareQuality = kept;
+    await t.client.setShareQuality({ resolution: '1080p', frameRate: 30 });
+    expect(t.client.snapshot().why).toBeNull();
   });
 
   it('a quality change while live republishes the encodings, then re-POSTs; over the rate bound the sharer is told and it is sent again', async () => {
