@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/njdaniel/conch/internal/server/livekit"
@@ -135,7 +136,8 @@ func (p *voicePoller) companionRemoved(roomName string, principalID int64, role 
 //  1. a verified caller; 2. the channel exists and the caller is a member;
 //  3. the caller is human; 4. the caller holds voice; 5. voice is configured
 //     (voiceSessionCaller, shared with the session route);
-//  6. the body is one strictly decoded request;
+//  6. the optional channel_id precondition matches, then the body is one
+//     strictly decoded request;
 //  7. the request carries a credential to record the holder under;
 //  8. the channel has a live channel-wide room someone holds a session for;
 //  9. (screen) the caller's own p<id> is in it, as the last pass saw;
@@ -154,6 +156,9 @@ func (s *Server) handleVoiceCompanion(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	channel, caller, ok := s.voiceClaimCaller(w, r)
 	if !ok {
+		return
+	}
+	if !voiceCompanionChannelMatches(w, r, channel.ID) {
 		return
 	}
 
@@ -247,7 +252,7 @@ func (s *Server) handleVoiceCompanion(w http.ResponseWriter, r *http.Request) {
 		ExpiresAt:  grant.ExpiresAt,
 		// The channel the route's name resolved to, the one every check
 		// above was made against and the room was found in (issue #1883).
-		// Nothing the client sent: the request names no channel but the path.
+		// The optional precondition was checked against this resolved id.
 		ChannelID: channel.ID,
 	}
 	if err := resp.Validate(); err != nil {
@@ -320,7 +325,7 @@ func (s *Server) voiceCompanionGrant(ctx context.Context, p store.Principal, ch 
 // DELETE /v1/channels/{channel}/voice/companion[?publish=screen|none]: the
 // caller removes their own screen companion (publish=screen), viewer
 // (publish=none) or both (no parameter) from the channel's room. It runs
-// checks 1-5 of the POST, then reads the parameter, so a non-member learns
+// checks 1-5 of the POST, then checks channel_id and reads publish, so a non-member learns
 // nothing from a malformed one.
 //
 // It answers 204 whether or not anyone was removed: the caller may be a
@@ -334,6 +339,9 @@ func (s *Server) handleVoiceCompanionDelete(w http.ResponseWriter, r *http.Reque
 	ctx := r.Context()
 	channel, caller, ok := s.voiceSessionCaller(w, r)
 	if !ok {
+		return
+	}
+	if !voiceCompanionChannelMatches(w, r, channel.ID) {
 		return
 	}
 	roles := []voiceRole{voiceRoleScreen, voiceRoleView}
@@ -403,6 +411,30 @@ func (s *Server) removeCompanion(ctx context.Context, w http.ResponseWriter, cha
 		store.AuditVoiceCompanionRemoved, fmt.Sprintf("channel:%d", channel.ID), detail); err != nil {
 		// The participant is gone either way; an unwritten row is logged.
 		slog.ErrorContext(ctx, "voice: audit voice_companion_removed failed", "channel", channel.ID, "error", err)
+	}
+	return true
+}
+
+// voiceCompanionChannelMatches checks the optional precondition after access
+// checks, before any grant, removal, consent or audit effect. All later work
+// uses this resolved id, even if the name is renamed or retaken meanwhile.
+func voiceCompanionChannelMatches(w http.ResponseWriter, r *http.Request, channelID int64) bool {
+	values, present := r.URL.Query()[schema.VoiceCompanionChannelIDParam]
+	if !present {
+		return true
+	}
+	var id int64
+	var err error
+	if len(values) == 1 {
+		id, err = strconv.ParseInt(values[0], 10, 64)
+	}
+	if len(values) != 1 || err != nil || id <= 0 {
+		writeError(w, http.StatusBadRequest, "invalid_request", "channel_id must be a positive integer, given once")
+		return false
+	}
+	if id != channelID {
+		writeError(w, http.StatusConflict, schema.ErrorCodeChannelMismatch, "the channel name now resolves to another channel")
+		return false
 	}
 	return true
 }

@@ -17,6 +17,10 @@ import { fromServer } from '../../../web/src/schema/validate.ts';
 export const isNotFound = (e: Exchange): boolean =>
   e.kind === 'answer' && e.status === 404 && typeof e.body === 'object' && e.body !== null && (e.body as { code?: unknown }).code === 'channel_not_found';
 
+// A precondition refusal is also a move: follow only the id main holds.
+export const isMoved = (e: Exchange): boolean => isNotFound(e) ||
+  (e.kind === 'answer' && e.status === 409 && typeof e.body === 'object' && e.body !== null && (e.body as { code?: unknown }).code === 'channel_mismatch');
+
 // The channel's name now, or why there is none. 'gone': the list was read and
 // the id is not in it, or its name is one the client would refuse to put in a
 // path (a separator, a percent: see paramOk), so it cannot be followed.

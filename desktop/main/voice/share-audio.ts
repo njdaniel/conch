@@ -76,7 +76,7 @@ import { VOICE_CONTROL_CAPTURE_STOP_MS, voicePresenceV2, voicePresenceV2Schema, 
 import type { NativeVoiceView, ShareSoundChooseResult, ShareSoundChoice, ShareSoundReason, ShareSoundStartResult, ShareSoundView, VoiceCommandResult } from '../../../web/src/platform/desktop/bridge.ts';
 import { fromServer } from '../../../web/src/schema/validate.ts';
 import type { Exchange, Send } from '../api/client.ts';
-import { currentName, isNotFound, type CurrentName } from './channel-follow.ts';
+import { currentName, isNotFound, isMoved, type CurrentName } from './channel-follow.ts';
 import { LINUX_SHARE_AUDIO_SCOPE, validApplicationName } from './protocol.ts';
 import type { CommandResult } from './supervisor.ts';
 import type { Companion, RemoveReason, ShareRef } from './companion.ts';
@@ -538,14 +538,16 @@ export class ShareSound {
   // again; an answer that was another channel's is then not handed on to be
   // judged. The request's timeout bounds all of it, the list read and the
   // retry included, so an end's withdrawal keeps its bound.
-  async #sendFollowing(share: ShareRef, request: Omit<Send, 'params'> & { readonly timeoutMs: number }, moved: (e: Exchange) => boolean = isNotFound): Promise<{ exchange: Exchange; lost: boolean }> {
+  async #sendFollowing(share: ShareRef, request: Omit<Send, 'params'> & { readonly timeoutMs: number }, moved: (e: Exchange) => boolean = isMoved): Promise<{ exchange: Exchange; lost: boolean }> {
     const deadline = Date.now() + request.timeoutMs;
     const left = (): number => deadline - Date.now();
     const sendBy = async (name: string): Promise<Exchange> => {
       const ms = left();
       if (ms <= 0) return { kind: 'none' };
       try {
-        return await share.client.send({ ...request, params: { channel: name }, timeoutMs: ms });
+        const id = this.#idOf(share);
+        const query = id !== null && (request.op === 'voiceShareAudio' || request.op === 'voiceShareAudioEnd') ? `channel_id=${String(id)}` : request.query;
+        return await share.client.send({ ...request, query, params: { channel: name }, timeoutMs: ms });
       } catch {
         return { kind: 'none' };
       }
@@ -793,8 +795,9 @@ export class ShareSound {
   // naming it, so a channel that took the name would confirm a withdrawal that
   // never reached the share's. A name that has changed gets the DELETE by the
   // name now; one that cannot be checked leaves it unconfirmed (logged). It is
-  // after the fact and can be raced; a precondition conchd checks would close
-  // it (#1891). One bound covers all of it.
+  // after the fact for older servers only: a grant carrying channel_id proves
+  // the server checks the precondition (#1891), so no list read is needed.
+  // One bound covers all of it.
   async #withdraw(o: Owned): Promise<void> {
     const deadline = Date.now() + WITHDRAW_TIMEOUT_MS;
     const sentBy = this.#channelOf(o.share);
@@ -802,14 +805,14 @@ export class ShareSound {
     const id = this.#idOf(o.share);
     // Followed already (the name changed during the send): conchd's own list
     // gave that name for the id just now.
-    if (id !== null && exchange.kind === 'answer' && exchange.ok && this.#channelOf(o.share) === sentBy) {
+    if (id !== null && o.share.channelId === null && exchange.kind === 'answer' && exchange.ok && this.#channelOf(o.share) === sentBy) {
       const now = await currentName(o.share.client, id, deadline - Date.now());
       if (now === 'gone' || now === 'unknown') {
         exchange = { kind: 'none' };
       } else if (now.name !== sentBy) {
         const ms = deadline - Date.now();
         try {
-          exchange = ms <= 0 ? { kind: 'none' } : await o.share.client.send({ op: 'voiceShareAudioEnd', params: { channel: now.name }, timeoutMs: ms });
+          exchange = ms <= 0 ? { kind: 'none' } : await o.share.client.send({ op: 'voiceShareAudioEnd', params: { channel: now.name }, query: `channel_id=${String(id)}`, timeoutMs: ms });
         } catch {
           exchange = { kind: 'none' };
         }

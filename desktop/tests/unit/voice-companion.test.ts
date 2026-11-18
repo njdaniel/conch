@@ -566,18 +566,52 @@ describe('the companion’s DELETE after a channel rename', () => {
     expect(r.id.asked).toBe(0);
   });
 
-  it('a grant with an id: a 2xx by a name another channel took is not a confirmation', async () => {
+  it('a grant with an id: channel_mismatch follows the id and a missing id stays unconfirmed', async () => {
     const r = rig();
     r.answers.push(ok({ ...ANSWER, channel_id: 7 }));
     await r.companion.grant({ channel: 'general' });
     r.steps.length = 0;
-    // The id is not in the list now: the 204 by the held name, which may be
-    // another channel's, confirms nothing.
+    // The precondition refused the retaken name; the id is no longer listed.
+    r.removals.push(refusal(409, 'channel_mismatch'));
     r.rename.list = list({ id: 9, name: 'general' });
     await r.companion.stop();
     expect(deletes(r)).toEqual(['general']);
     expect(r.logs).toContain('companion: the removal after stopped was not confirmed');
     expect(r.reloads.count).toBe(1);
+  });
+
+  it('sends the id on both DELETEs when a mismatch is followed', async () => {
+    const r = rig();
+    r.answers.push(ok({ ...ANSWER, channel_id: 7 }));
+    await r.companion.grant({ channel: 'general' });
+    r.removals.push(refusal(409, 'channel_mismatch'));
+    r.rename.list = list({ id: 7, name: 'lounge' });
+    await r.companion.stop();
+    expect(deletes(r)).toEqual(['general', 'lounge']);
+    expect(r.sends().filter((s) => s.op === 'voiceViewerEnd').map((s) => s.query)).toEqual(['publish=screen&channel_id=7', 'publish=screen&channel_id=7']);
+    expect(r.reloads.count).toBe(0);
+  });
+
+  it('a name retaken before the retry leaves removal unconfirmed', async () => {
+    const r = rig();
+    r.answers.push(ok({ ...ANSWER, channel_id: 7 }));
+    await r.companion.grant({ channel: 'general' });
+    r.removals.push(refusal(409, 'channel_mismatch'), refusal(409, 'channel_mismatch'));
+    r.rename.list = list({ id: 7, name: 'lounge' });
+    await r.companion.stop();
+    expect(deletes(r)).toEqual(['general', 'lounge']);
+    expect(lists(r)).toBe(1);
+    expect(r.reloads.count).toBe(1);
+  });
+
+  it('a grant id proves the DELETE precondition is honored: no list read', async () => {
+    const r = rig();
+    r.answers.push(ok({ ...ANSWER, channel_id: 7 }));
+    await r.companion.grant({ channel: 'general' });
+    await r.companion.stop();
+    expect(lists(r)).toBe(0);
+    expect(r.sends().find((s) => s.op === 'voiceViewerEnd')?.query).toBe('publish=screen&channel_id=7');
+    expect(r.reloads.count).toBe(0);
   });
 
   it('no id known: one DELETE by the held name, logged when it fails', async () => {
