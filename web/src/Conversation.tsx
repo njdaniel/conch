@@ -1086,6 +1086,28 @@ export function Conversation({
     if (held !== null && row !== null) el.scrollTop += row.getBoundingClientRect().top - el.getBoundingClientRect().top - held.offset;
   }, [density]);
 
+  // The New messages divider is usually placed after the log has settled at
+  // the newest message: the opening read mark arrives after the history, or
+  // paging crosses it. The divider, and the full header its first unread
+  // message then shows, add height above the view without changing the newest
+  // message, so the effect above does not follow it. A reader at the bottom
+  // stays there; one who has scrolled up keeps the message they were reading
+  // where it was. Only Jump to first unread scrolls to the divider.
+  const placedUnread = useRef<number | null>(null);
+  useLayoutEffect(() => {
+    if (placedUnread.current === unreadId) return;
+    placedUnread.current = unreadId;
+    const el = log.current;
+    if (el === null) return;
+    if (atBottom.current) {
+      el.scrollTop = el.scrollHeight;
+      return;
+    }
+    const held = view.current;
+    const row = held === null ? null : el.querySelector<HTMLElement>(`:scope > .messages > li[data-message-id="${held.id}"]`);
+    if (held !== null && row !== null) el.scrollTop += row.getBoundingClientRect().top - el.getBoundingClientRect().top - held.offset;
+  }, [unreadId]);
+
   // Anything that changes the log's own height (the whisper picker, the voice
   // strip, a share's stage) keeps a reader at the newest message there; one
   // who has scrolled up is left where they are. Browsers without a

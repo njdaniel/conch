@@ -136,3 +136,42 @@ for (const width of [1440, 390]) {
     await expect(divider).toHaveCount(1);
   });
 }
+
+// The read state can answer after the open channel's history has been drawn
+// at the newest message (CI is slow enough for that). The divider then lands
+// above the view; it must not push the newest message below the log's end, nor
+// scroll to itself: only Jump to first unread does that.
+test('a divider placed after the history keeps a reader at the newest message', async ({ meet, world }) => {
+  const mark = await post(world, world.tokens.guest, 'general', 'late divider already read');
+  const marked = await call(world, world.tokens.nick, 'PUT', '/v1/channels/general/read-state', { last_read_id: mark.id });
+  expect(marked.status).toBe(200);
+  const bodies = Array.from({ length: 40 }, (_, i) => `late divider unread ${String(i + 1)}`);
+  for (const body of bodies) await post(world, world.tokens.guest, 'general', body);
+
+  const page = (await meet({ viewport: { width: 360, height: 740 }, hasTouch: true })).page;
+  let release = (): void => undefined;
+  const held = new Promise<void>((done) => { release = done; });
+  await page.route('**/v1/read-state', async (route) => {
+    await held;
+    await route.continue();
+  });
+  await signIn(page, world, world.tokens.nick, 'nick-test');
+  const log = messages(page);
+  const newest = log.getByRole('listitem').filter({ hasText: bodies[bodies.length - 1] ?? '' });
+  await expect(newest).toBeVisible();
+  const divider = log.getByRole('separator', { name: 'New messages' });
+  await expect(divider).toHaveCount(0);
+  release();
+  await expect(divider).toHaveCount(1);
+  const gap = await log.evaluate((el) => new Promise<number>((done) => {
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        done(el.scrollHeight - el.scrollTop - el.clientHeight);
+      });
+    });
+  }));
+  expect(gap, 'the log is still at its end once the divider is placed').toBeLessThanOrEqual(1);
+  await expect(newest).toBeInViewport();
+  await expect(divider).not.toBeInViewport();
+  await expect(page.getByRole('button', { name: 'Jump to first unread' })).toBeVisible();
+});
