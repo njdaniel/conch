@@ -278,6 +278,31 @@ describe('browser permission and cleanup', () => {
   };
   const ids = (alerts: readonly NotificationAlert[]) => alerts.map((item) => item.message.id).sort((a, b) => a - b);
 
+  it.each([false, true])('backfills once when channels finish loading with the reconnect: %s', async (loadedOnReconnect) => {
+    const history = vi.spyOn(api, 'loadMessagesAscending').mockResolvedValue({ ok: true, complete: true, value: [message(1)] });
+    const { result, rerender } = await baseline();
+    expect(result.current.alerts).toHaveLength(0);
+    rerender({ ...props(), event: message(2) });
+    rerender({ ...props(), eventsLive: false, loaded: false });
+    history.mockClear();
+    history.mockResolvedValue({ ok: true, complete: true, value: [message(3)] });
+    rerender({ ...props(), eventsLive: true, loaded: loadedOnReconnect });
+    if (!loadedOnReconnect) {
+      expect(history).not.toHaveBeenCalled();
+      // A live message while waiting must not move the cursor past the gap.
+      rerender({ ...props(), loaded: false, event: message(4) });
+      rerender({ ...props(), loaded: true, event: message(4) });
+    }
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(history).toHaveBeenCalledExactlyOnceWith('general', 2);
+    expect(ids(result.current.alerts)).toEqual(loadedOnReconnect ? [3] : [3, 4]);
+    // An ordinary channel-list refresh must not repeat the reconciliation.
+    rerender({ ...props(), channels: [...channels] });
+    expect(history).toHaveBeenCalledTimes(1);
+  });
+
   it('keeps the cursor behind a reconnect read that failed, whatever arrives live after it', async () => {
     const history = vi.spyOn(api, 'loadMessagesAscending').mockResolvedValue({ ok: true, complete: true, value: [message(1)] });
     const { result, rerender } = await baseline();

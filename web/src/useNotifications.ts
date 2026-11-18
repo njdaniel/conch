@@ -90,6 +90,7 @@ export function useNotifications({
   const accessEpoch = useRef(new Map<number, number>());
   const requests = useRef(new Map<number, object>());
   const previousLive = useRef(false);
+  const pendingReconnect = useRef(false);
   const latestOpen = useRef(onOpen);
   latestOpen.current = onOpen;
   // The channels as of the latest render, so a click on a notification shown
@@ -125,6 +126,7 @@ export function useNotifications({
     accessEpoch.current.clear();
     requests.current.clear();
     previousLive.current = false;
+    pendingReconnect.current = false;
     setPreferences(api.readNotificationPreferences(origin, account));
     setBrowserPermission(permission());
     clear();
@@ -252,10 +254,17 @@ export function useNotifications({
   }, [event, deliver, eventsLive]);
 
   useEffect(() => {
-    const reconnect = previousLive.current !== eventsLive;
+    const liveChanged = previousLive.current !== eventsLive;
     previousLive.current = eventsLive;
-    if (reconnect) caughtUp.current.clear();
+    if (liveChanged) {
+      caughtUp.current.clear();
+      if (eventsLive) pendingReconnect.current = true;
+    }
     if (!signedIn || !eventsLive || !loaded || account === 0) return;
+    // Remember a reconnect until channels are ready to reconcile. Updating
+    // previousLive above still keeps live messages from skipping an unread gap.
+    const reconnect = pendingReconnect.current;
+    pendingReconnect.current = false;
     let cancelled = false;
     void Promise.all(channels.map(async (channel) => {
       const first = !initialized.current.has(channel.id);
