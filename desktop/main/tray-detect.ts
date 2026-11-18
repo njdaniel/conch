@@ -1,7 +1,14 @@
-// Is a tray host on the session bus? (issue #1589, D5-03; linux-desktop.md §9,
-// Q-D5-2). Input: a RunFile. Output: whether org.kde.StatusNotifierWatcher
-// has an owner and reports a registered host (IsStatusNotifierHostRegistered):
+// Is a tray host available? Linux uses the session bus (issue #1589, D5-03;
+// linux-desktop.md §9, Q-D5-2); Windows uses the native tray (#1935).
+// Input: a RunFile and platform. Output: on Linux, whether
+// org.kde.StatusNotifierWatcher has an owner and reports a registered host
+// (IsStatusNotifierHostRegistered):
 // a watcher with no host draws no icon. Owns: the two gdbus command lines.
+//
+// On Windows, Electron creates the native notification-area icon: there is
+// no bus probe. This only permits an opt-in attempt; TrayController must
+// create the icon and the person must confirm visibility before close hides.
+// Real notification-area visibility and Explorer recovery are F14 (#903).
 //
 // This is necessary and not sufficient for a working tray: Electron gives no
 // "is the icon visible" answer, so the person also confirms they can see it
@@ -83,8 +90,10 @@ export async function watcherPresent(run: RunFile, env: Readonly<Record<string, 
   return result !== null && result.code === 0 && parseHasOwner(result.stdout) === true;
 }
 
-// trayHostPresent: the watcher has an owner and a host is registered with it.
-export async function trayHostPresent(run: RunFile, env: Readonly<Record<string, string>> = busEnv()): Promise<boolean> {
+// trayHostPresent: on Linux, the watcher has an owner and a registered host;
+// on Windows, permit native icon creation and the visibility confirmation.
+export async function trayHostPresent(run: RunFile, env: Readonly<Record<string, string>> = busEnv(), platform: NodeJS.Platform = process.platform): Promise<boolean> {
+  if (platform === 'win32') return true;
   if (!(await watcherPresent(run, env))) return false;
   const result = await run(GDBUS, HOST_ARGV, env);
   return result !== null && result.code === 0 && parseHostRegistered(result.stdout) === true;
