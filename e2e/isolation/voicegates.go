@@ -17,13 +17,12 @@ import (
 )
 
 // The live-media rows of the permission gates (issue #1217, ADR-014 design
-// §7.5): the four voice gates that need a participant in a LiveKit room or a
+// §7.5): the voice gates that need a participant in a LiveKit room or a
 // live share, which a request and its response cannot make. They run only
-// with LiveKit; without it voiceMemberRows' caller says so.
+// with LiveKit; without it their callers print a skip.
 //
 //   - the voice switch's hook (handleVoicePermission, voiceAfterVoiceOff,
-//     voiceEvictLost; not voiceWithheldAmong, which only a column cut or a
-//     role change reaches, see pendingGates): the owner switches a member's
+//     voiceEvictLost): the owner switches a member's
 //     voice off through the real PUT, and the moment the PUT answers LiveKit
 //     no longer lists the member and the removal is audited;
 //   - voiceEntitlement: a join token signed before that switch still
@@ -33,6 +32,10 @@ import (
 //     restart, a missed call), and the next pass ends the live share and
 //     withdraws its tracks, audited access_lost, while the member stays in
 //     the room.
+//
+// voiceWithheldAmongRow runs the column-cut hook after B's final socket
+// scan, since that hook must close B's voice sockets too. It checks the
+// removal and audit immediately after the PUT answers.
 //
 // Each row has its control: with the cell back the same member is entitled
 // again (a new session, a connection that stays; a fresh claim of the share).
@@ -752,4 +755,68 @@ func (w *world) cameraGateRows(channel string, name func(string) string) (rows i
 		return rows, fmt.Errorf("the control: the member stops the camera: %w", err)
 	}
 	return rows, nil
+}
+
+// voiceWithheldAmongRow runs after B's final socket scan: the real column
+// cut must close every affected voice socket, including B's. Unlike the
+// per-person switch, this PUT runs voiceWithheldAmong itself.
+func (w *world) voiceWithheldAmongRow(channel string) error {
+	var original schema.PermissionsResponseV1
+	if err := w.op.call(http.MethodGet, "/v1/permissions", nil, &original); err != nil {
+		return err
+	}
+	var restore []schema.PermissionChangeV1
+	for _, row := range original.Rows {
+		if row.Permission == schema.PermUseVoice || row.Permission == schema.PermShareScreen || row.Permission == schema.PermUseCamera {
+			restore = append(restore, schema.PermissionChangeV1{Permission: row.Permission, Role: schema.PermissionRoleMember, Granted: row.Member})
+		}
+	}
+	restoreCells := func() error {
+		var doc schema.PermissionsResponseV1
+		if err := w.op.call(http.MethodGet, "/v1/permissions", nil, &doc); err != nil {
+			return err
+		}
+		return w.op.call(http.MethodPut, "/v1/permissions", schema.PutPermissionsRequestV1{Revision: doc.Revision, Changes: restore}, nil)
+	}
+	m, err := w.newPerson("voice-column-control", channel)
+	if err != nil {
+		return err
+	}
+	room, live, err := w.joinAs(m, channel)
+	if err != nil {
+		return err
+	}
+	defer live.Close()
+	if err := w.requireListed("the column-cut participant", room, m); err != nil {
+		return err
+	}
+	defer func() { _ = restoreCells() }()
+	if err := w.setCells(schema.PermissionRoleMember, false, schema.PermUseVoice, schema.PermShareScreen, schema.PermUseCamera); err != nil {
+		return err
+	}
+	const row = "a participant whose member use_voice cell was cut (voiceWithheldAmong)"
+	if gone, saw := w.lk.gone(room, m.id); !gone {
+		return fmt.Errorf("%s: still listed when PUT answered: %s", row, saw)
+	}
+	if n, err := w.removalsOf(m.id); err != nil {
+		return err
+	} else if n == 0 {
+		return fmt.Errorf("%s: no audited removal when PUT answered", row)
+	}
+	status, body, err := m.api.do(http.MethodPost, "/v1/channels/"+channel+"/voice/session", nil)
+	if err := refusedNaming(row, status, body, err, schema.ErrorCodeVoiceNotAllowed, schema.PermUseVoice); err != nil {
+		return err
+	}
+	if err := restoreCells(); err != nil {
+		return err
+	}
+	room, back, err := w.joinAs(m, channel)
+	if err != nil {
+		return fmt.Errorf("the control: with use_voice back: %w", err)
+	}
+	defer back.Close()
+	if err := w.requireListed("the restored-cell participant", room, m); err != nil {
+		return err
+	}
+	return w.requireStays("the control: with the member use_voice cell back", room, m)
 }

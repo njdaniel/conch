@@ -390,6 +390,16 @@ func run(h *harness) (summary, error) {
 	}
 	h.say("ok   AI administrator: B's agent granted every agent-grantable permission was refused on each of %d administrative routes it called directly, exactly as B's ungranted agent was; through the admin door %d of its catalog's reads answered", dn, dr)
 
+	// A column cut closes B's voice sockets. Run it after their final scan.
+	if lk != nil {
+		if err := w.voiceWithheldAmongRow(w.b.main()); err != nil {
+			return sum, fmt.Errorf("the use_voice column cut: %w", err)
+		}
+		h.say("ok   voiceWithheldAmong: the member column cut removed a live participant and was audited before the PUT answered; with the cell back the member joined and stayed")
+	} else {
+		h.say("     skipped, no LiveKit in this run: voiceWithheldAmong's live participant and restored-cell control")
+	}
+
 	if err := h.checkCalls(table); err != nil {
 		return sum, err
 	}
