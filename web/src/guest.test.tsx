@@ -793,14 +793,16 @@ describe('an invite and its join modes', () => {
     expect(calls.some((c) => c.path.includes('guest'))).toBe(false);
   });
 
-  it('offers the account form alone for an invite that allows accounts', async () => {
+  it('offers a choice before the account form for an invite that allows accounts', async () => {
     opened({ 'POST /v2/invites/preview': () => json(preview({ guest: true, account: true })) });
+    fireEvent.click(await screen.findByRole('button', { name: 'Create an account' }));
     expect(await screen.findByLabelText('Choose a password')).toBeDefined();
     expect(screen.queryByLabelText('Name to show (optional)')).toBeNull();
   });
 
-  it('offers the account form alone for an account-only invite, as invites were', async () => {
+  it('offers a choice before the account form for an account-only invite', async () => {
     opened({ 'POST /v2/invites/preview': () => json(preview({ guest: false, account: true })) });
+    fireEvent.click(await screen.findByRole('button', { name: 'Create an account' }));
     expect(await screen.findByLabelText('Choose a password')).toBeDefined();
     expect(screen.queryByLabelText('Name to show (optional)')).toBeNull();
   });
@@ -830,7 +832,7 @@ describe('an invite and its join modes', () => {
       'POST /v1/login': () => json({ ...signedIn, token: otherToken, principal: { id: 2, kind: 'human', name: 'ada', created_at: at } }),
       ...people({ [otherToken]: otherWho }),
     });
-    fireEvent.click(await screen.findByRole('button', { name: 'Sign in instead' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Sign in' }));
     signInWithPassword('ada');
     const said = await screen.findByText(/Signing in did not use the invite from ada/);
     expect(said.textContent).toContain('this account is not in #red');

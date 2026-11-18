@@ -465,8 +465,9 @@ export class ProfilesService {
   }
 
   // signedIn is called after a sign-in the active window just completed. It
-  // applies the binding rule and then keeps the credential: in the vault when
-  // storage is protected, in memory otherwise. false when the profile belongs
+  // applies the binding rule and then keeps a member's credential: in the vault
+  // when storage is protected, in memory otherwise. An operator's stays in the
+  // window, with a notice explaining why. false when the profile belongs
   // to another account: the credential is then forgotten and revoked.
   async signedIn(account: Account): Promise<boolean> {
     const { store } = this.#deps;
@@ -486,7 +487,14 @@ export class ProfilesService {
       }
       return false;
     }
-    if (!account.lasting) return true;
+    // A completed sign-in from a window already left must not change the
+    // notice of the window now in force.
+    if (this.#switcher.current !== current) return true;
+    if (!account.lasting) {
+      this.#notice = 'operator-window-only';
+      return true;
+    }
+    if (this.#notice === 'operator-window-only') this.#notice = null;
     const token = current.token();
     // The window may have moved on while the store was written.
     if (token === null || this.#switcher.current !== current) return true;

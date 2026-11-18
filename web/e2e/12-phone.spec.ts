@@ -135,6 +135,7 @@ for (const [size, options] of phones) {
       const { page } = await meet(options);
       await page.goto(inviteUrl(world, made.code));
       await expectFits(page, 'the invite landing page');
+      await page.getByRole('button', { name: 'Create an account', exact: true }).tap();
       // An invite makes an account with a password (issue #713).
       await page.getByLabel('Your name').tap();
       await page.getByLabel('Your name').fill(name);

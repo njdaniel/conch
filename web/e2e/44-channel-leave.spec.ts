@@ -35,6 +35,7 @@ for (const [size, options, phone] of sizes) {
 
     const { page } = await meet(options);
     await page.goto(inviteUrl(world, made.code));
+    await page.getByRole('button', { name: 'Create an account', exact: true }).click();
     await fillAccount(page, name);
     await expect(statusLine(page)).toContainText(name);
     await expect(statusLine(page)).toContainText('Connected');
@@ -74,6 +75,7 @@ test('P1095 at 390×844 a private-channel confirmation and last-member refusal f
 
   const { page } = await meet({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 3, isMobile: true, hasTouch: true });
   await page.goto(inviteUrl(world, made.code));
+  await page.getByRole('button', { name: 'Create an account', exact: true }).click();
   await fillAccount(page, name);
   await expect(statusLine(page)).toContainText('Connected');
   const token = await page.evaluate(() => window.localStorage.getItem('conch.web.token'));
