@@ -1,5 +1,5 @@
 import { ModerationConfirm, useMayModerate, useTombstones } from './Moderation';
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
+import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
 import * as api from './api';
 import { archivedLine } from './archived';
 import { ReactionBar, ReactionScope, useHasReactions } from './Reactions';
@@ -607,7 +607,10 @@ export function Conversation({
   visibility,
   archived = false,
   density = '',
+  openingMark = null,
 }: {
+  // The read mark captured when this channel opened, held for this visit.
+  readonly openingMark?: number | null;
   // The channel is archived (issue #844): it opens read-only. History, search
   // and threads read as before; the composer is replaced by one line.
   readonly archived?: boolean;
@@ -948,6 +951,29 @@ export function Conversation({
   }, [repliesSettled, channelId, viewer, replyDrafts]);
 
   const shown = ordered(chat);
+  // Expanded threads share this channel timeline's mark; they deliberately
+  // have no second divider or independent unread position.
+  // The reducer retains the opening head across view remounts and live arrivals.
+  // A fresh history load starts a new visit, even if a cached page rendered first.
+  const [unreadBoundary, setUnreadBoundary] = useState<{ readonly head: number; readonly target?: number | null } | null>(null);
+  if (unreadBoundary !== null && chat.history === 'loading') setUnreadBoundary(null);
+  if (unreadBoundary === null && chat.history === 'ready') {
+    setUnreadBoundary({ head: chat.openingHead ?? lastId(chat) });
+  }
+  // A held page beginning after the mark cannot prove which message was first.
+  // Wait until paging crosses it (or exhausts visible history) before placing.
+  if (unreadBoundary !== null && unreadBoundary.target === undefined && openingMark !== null
+    && ((chat.byId.size > 0 && oldestId(chat) <= openingMark + 1) || chat.exhausted)) {
+    const first = shown.find((m) => m.id > openingMark && m.id <= unreadBoundary.head && m.author_id !== viewer && m.removed !== true);
+    setUnreadBoundary({ ...unreadBoundary, target: first?.id ?? null });
+  }
+  const unreadId = unreadBoundary?.target ?? null;
+  const unreadHeld = unreadId !== null && chat.byId.has(unreadId);
+  const hasUnread = openingMark !== null && unreadBoundary !== null && openingMark < unreadBoundary.head && unreadBoundary.target !== null;
+  const divider = useRef<HTMLDivElement>(null);
+  const [unreadVisible, setUnreadVisible] = useState(false);
+  const [jumpUnread, setJumpUnread] = useState(false);
+  const [unreadProblem, setUnreadProblem] = useState('');
   const sentMark = newestSent(shown, viewer, chat.sentIds);
   // The log's roving tab stop (issue #1040): the message last focused, else the
   // newest. A message arriving moves the stop, never focus.
@@ -1060,6 +1086,28 @@ export function Conversation({
     if (held !== null && row !== null) el.scrollTop += row.getBoundingClientRect().top - el.getBoundingClientRect().top - held.offset;
   }, [density]);
 
+  // The New messages divider is usually placed after the log has settled at
+  // the newest message: the opening read mark arrives after the history, or
+  // paging crosses it. The divider, and the full header its first unread
+  // message then shows, add height above the view without changing the newest
+  // message, so the effect above does not follow it. A reader at the bottom
+  // stays there; one who has scrolled up keeps the message they were reading
+  // where it was. Only Jump to first unread scrolls to the divider.
+  const placedUnread = useRef<number | null>(null);
+  useLayoutEffect(() => {
+    if (placedUnread.current === unreadId) return;
+    placedUnread.current = unreadId;
+    const el = log.current;
+    if (el === null) return;
+    if (atBottom.current) {
+      el.scrollTop = el.scrollHeight;
+      return;
+    }
+    const held = view.current;
+    const row = held === null ? null : el.querySelector<HTMLElement>(`:scope > .messages > li[data-message-id="${held.id}"]`);
+    if (held !== null && row !== null) el.scrollTop += row.getBoundingClientRect().top - el.getBoundingClientRect().top - held.offset;
+  }, [unreadId]);
+
   // Anything that changes the log's own height (the whisper picker, the voice
   // strip, a share's stage) keeps a reader at the newest message there; one
   // who has scrolled up is left where they are. Browsers without a
@@ -1086,6 +1134,45 @@ export function Conversation({
     onLoadOlder();
   }
 
+  // Visibility is relative to the scrolling log, including after resizing on
+  // a phone or opening a thread. The jump remains available for unloaded rows.
+  useEffect(() => {
+    const root = log.current;
+    const bar = divider.current;
+    setUnreadVisible(false);
+    if (root === null || bar === null || typeof IntersectionObserver !== 'function') return;
+    const observer = new IntersectionObserver(([entry]) => {
+      setUnreadVisible(entry?.isIntersecting ?? false);
+    }, { root });
+    observer.observe(bar);
+    return () => { observer.disconnect(); };
+  }, [unreadId, unreadHeld]);
+
+  useEffect(() => {
+    if (!jumpUnread || loadingOlder || chat.history !== 'ready') return;
+    if (unreadId !== null && chat.byId.has(unreadId)) {
+      const row = list.current?.querySelector<HTMLElement>(`:scope > [data-message-id="${String(unreadId)}"]`);
+      if (row !== null && row !== undefined) {
+        atBottom.current = false;
+        onBottom(false);
+        row.scrollIntoView({ block: 'center' });
+        row.focus({ preventScroll: true });
+      }
+      setJumpUnread(false);
+    } else if (unreadBoundary?.target === null) {
+      setUnreadProblem('The first unread message is no longer available.');
+      setJumpUnread(false);
+    } else if (chat.older === 'error') {
+      setUnreadProblem('Cannot load older messages. Try jumping again.');
+      setJumpUnread(false);
+    } else if (hasOlder) {
+      showOlder();
+    } else {
+      setUnreadProblem(chat.exhausted ? 'The first unread message is no longer available.' : 'Cannot reach the first unread message: the history limit has been reached.');
+      setJumpUnread(false);
+    }
+  });
+
   function jump() {
     const el = log.current;
     if (el !== null) el.scrollTop = el.scrollHeight;
@@ -1097,6 +1184,11 @@ export function Conversation({
   return (
     <ReactionScope key={`${String(viewer)}/${String(channelId ?? channel)}`} channel={channel} channelId={channelId ?? shown[0]?.channel_id ?? 0} ids={shown.filter((m) => m.removed !== true).map((m) => m.id)} onUnauthorized={onUnauthorized}>
       <header className="conv-head">
+        {hasUnread && !unreadVisible ? (
+          <button type="button" className="jump-unread primary" disabled={jumpUnread} onClick={() => { setUnreadProblem(''); setJumpUnread(true); }}>
+            {jumpUnread ? 'Loading first unread…' : 'Jump to first unread'}
+          </button>
+        ) : null}
         <span className="hash" aria-hidden="true">
           #
         </span>
@@ -1167,58 +1259,71 @@ export function Conversation({
           }}
         >
           {shown.map((message, i) => (
-            <Message
-              stop={message.id === stop}
-              reactionNavigation
-              replies={replyCounts.get(message.id) ?? 0}
-              {...(message.thread_root_id === undefined ? {} : { context: replyContext(chat.byId.get(message.thread_root_id), people) })}
-              key={message.id}
-              message={message}
-              people={people}
-              nets={nets}
-              viewer={viewer}
-              channel={channel}
-              sent={message.id === sentMark}
-              cont={continues(shown[i - 1], message)}
-              onUnauthorized={onUnauthorized}
-              onReply={openFrom}
-              onOpenThread={openFrom}
-              actions={onEdited !== undefined && editable(message) ? [{ key: 'edit', label: 'Edit', onSelect: () => { startEdit(message.id); } }] : []}
-              notice={notices.get(message.id) ?? null}
-              editor={editThread === null ? editorFor(message) : undefined}
-              thread={threadAnchor === null || message.id !== threadAnchor ? null : (
-                <ThreadView
-                  key={openThread}
-                  rootId={openThread as number}
-                  root={chat.byId.get(openThread as number)}
-                  chat={chat}
-                  channel={channel}
-                  live={live}
-                  archived={archived}
-                  people={people}
-                  nets={nets}
-                  viewer={viewer}
-                  draft={replyDrafts.get(openThread as number) ?? ''}
-                  onDraft={(text) => {
-                    setReplyDrafts((previous) => new Map(previous).set(openThread as number, text));
-                  }}
-                  onEditLast={(messages, composer) => editLast(messages, composer, openThread)}
-                  editorFor={(message, onSaved) => editThread === openThread ? editorFor(message, onSaved) : undefined}
-                  notices={notices}
-                  onClose={closeThread}
-                  onReplySend={onReplySend}
-                  onRetrySend={onRetrySend}
-                  onDismissSend={onDismissSend}
-                  onUnauthorized={onUnauthorized}
-                />
-              )}
-            />
+            <Fragment key={message.id}>
+              {message.id === unreadId ? (
+                <li className="new-messages-row" role="presentation">
+                  <div ref={divider} className="new-messages" role="separator" aria-label="New messages">New messages</div>
+                </li>
+              ) : null}
+              <Message
+                stop={message.id === stop}
+                reactionNavigation
+                replies={replyCounts.get(message.id) ?? 0}
+                {...(message.thread_root_id === undefined ? {} : { context: replyContext(chat.byId.get(message.thread_root_id), people) })}
+                key={message.id}
+                message={message}
+                people={people}
+                nets={nets}
+                viewer={viewer}
+                channel={channel}
+                sent={message.id === sentMark}
+                cont={message.id !== unreadId && continues(shown[i - 1], message)}
+                onUnauthorized={onUnauthorized}
+                onReply={openFrom}
+                onOpenThread={openFrom}
+                actions={onEdited !== undefined && editable(message) ? [{ key: 'edit', label: 'Edit', onSelect: () => { startEdit(message.id); } }] : []}
+                notice={notices.get(message.id) ?? null}
+                editor={editThread === null ? editorFor(message) : undefined}
+                thread={threadAnchor === null || message.id !== threadAnchor ? null : (
+                  <ThreadView
+                    key={openThread}
+                    rootId={openThread as number}
+                    root={chat.byId.get(openThread as number)}
+                    chat={chat}
+                    channel={channel}
+                    live={live}
+                    archived={archived}
+                    people={people}
+                    nets={nets}
+                    viewer={viewer}
+                    draft={replyDrafts.get(openThread as number) ?? ''}
+                    onDraft={(text) => {
+                      setReplyDrafts((previous) => new Map(previous).set(openThread as number, text));
+                    }}
+                    onEditLast={(messages, composer) => editLast(messages, composer, openThread)}
+                    editorFor={(message, onSaved) => editThread === openThread ? editorFor(message, onSaved) : undefined}
+                    notices={notices}
+                    onClose={closeThread}
+                    onReplySend={onReplySend}
+                    onRetrySend={onRetrySend}
+                    onDismissSend={onDismissSend}
+                    onUnauthorized={onUnauthorized}
+                  />
+                )}
+              />
+            </Fragment>
           ))}
           {chat.pending.filter((send) => send.threadRootId === undefined).map((send) => (
             <Pending key={`local-${String(send.localId)}`} send={send} me={me} nets={nets} viewer={viewer} onRetry={onRetrySend} onDismiss={onDismissSend} />
           ))}
         </ol>
       </div>
+      {unreadProblem === '' ? null : (
+        <div className="unread-problem">
+          <p role="status">{unreadProblem}</p>
+          <button type="button" onClick={() => { setUnreadProblem(''); }}>Dismiss unread notice</button>
+        </div>
+      )}
       {unseen ? (
         <button type="button" className="jump primary" onClick={jump}>
           Jump to latest

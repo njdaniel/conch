@@ -1425,6 +1425,7 @@ label {
 }
 
 .conv-head {
+  position: relative;
   display: flex;
   align-items: baseline;
   gap: var(--s2);
@@ -6230,4 +6231,44 @@ button.link {
 .share-frame:fullscreen > :not(video),
 .call-frame:fullscreen > :not(video) {
   display: none;
+}
+
+/* The opening read mark stays fixed for this channel visit. */
+.new-messages-row {
+  list-style: none;
+}
+
+.new-messages {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  margin: var(--s3) 0;
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.new-messages::before,
+.new-messages::after {
+  content: '';
+  flex: 1;
+  border-top: 1px solid currentColor;
+}
+
+.conv-head > .jump-unread {
+  /* Float over the log without taking height from the phone's header. Its
+     DOM position before the heading preserves the log's F15 tab sequence. */
+  position: absolute;
+  top: calc(100% + var(--s2));
+  right: var(--s3);
+  z-index: 1;
+  max-width: calc(100% - 2 * var(--s3));
+}
+
+.unread-problem {
+  position: absolute;
+  top: calc(var(--s3) + 3rem);
+  left: var(--s3);
+  right: var(--s3);
+  padding: var(--s2);
+  background: var(--raised);
 }

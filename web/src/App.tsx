@@ -732,7 +732,7 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
   const held = selected === null ? null : chatFor(chat, selected);
   const headId = held === null ? 0 : lastId(held);
   const head = held?.byId.get(headId);
-  const unread = useReadState({
+  const { counts: unread, openingMark } = useReadState({
     signedIn,
     channels: channels.channels,
     loaded: channels.loaded,
@@ -2055,6 +2055,7 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
                 <div className="conversation-body" hidden={agents.state.detail !== null || searchOpen}>
               <Conversation
                 key={channelId}
+                openingMark={openingMark}
                 density={appearance.density}
                 historyBounded={agents.membersFor === channelId && (agents.members.find((m) => m.principal_id === auth.principal.id)?.history_after ?? 0) > 0}
                 channelId={channelId}
