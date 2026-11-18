@@ -11,7 +11,7 @@
 // Someone.close), never with context.close alone: see closeAll in fixtures.ts.
 import type { Browser, BrowserContext, BrowserContextOptions, Page } from '@playwright/test';
 import { closeAll, expect, openChannel, rememberPushToTalk, showView, signIn } from './fixtures';
-import { withoutJoinTokenInSocketRefusals } from './console-lines';
+import { secretLines, withoutJoinTokenInSocketRefusals } from './console-lines';
 import { watchPage, type Member, type VoiceWorld, type Watch } from './voice-world';
 
 export interface Someone {
@@ -170,6 +170,17 @@ export async function inbound(page: Page, options: { perTrack?: boolean } = {}):
   }, options.perTrack === true);
 }
 
+// What a secret is, for expectClean's message (issue #1955), never the secret
+// itself: one of this page's own tokens, a credential, or another page's
+// token or a room name.
+function secretKind(vw: VoiceWorld, p: Pick<Someone, 'watch'> & { readonly member: Pick<Member, 'token'> }, s: string): string {
+  if (p.watch.conchdTokens.includes(s)) return 'a room token conchd gave this page';
+  if (p.watch.livekitTokens.includes(s)) return 'a token LiveKit gave this page';
+  if (s === p.member.token) return "this page's credential";
+  if (s === vw.operator || [vw.alice, vw.bob, vw.carol].some((m) => m.token === s)) return 'a credential';
+  return "another page's token, a room name, or a member's credential";
+}
+
 // expectClean checks that no secret of the world, no join token or room name
 // the page was given, and no token LiveKit refreshed it with (read from its
 // signalling frames by watchPage, issue #1948), is in anything the page said
@@ -240,9 +251,12 @@ export async function expectClean(
   const said = lines.join('\n');
   // Asserted as booleans: a failing not.toContain would print the secret
   // and the whole page text into the report and the CI log.
+  // A secret in the console is reported with the lines that hold it, each
+  // with the secrets written as their numbers and where it came from
+  // (secretLines, issue #1955), so that a failure says which line it was.
   vw.secrets.forEach((s, i) => {
     expect(kept.includes(s), `secret #${String(i)} in the page, its storage or its cookies`).toBe(false);
-    expect(said.includes(s), `secret #${String(i)} in the console`).toBe(false);
+    expect(said.includes(s), `secret #${String(i)} (${secretKind(vw, p, s)}) in the console${said.includes(s) ? `:\n${secretLines(lines, p.watch.browserLog, vw.secrets).join('\n')}` : ''}`).toBe(false);
   });
   expect(p.watch.console.filter((l) => /Content Security Policy|Refused to|[Pp]ermissions policy/.test(l))).toEqual([]);
   expect(p.watch.policy, 'Permissions-Policy reports').toEqual([]);
