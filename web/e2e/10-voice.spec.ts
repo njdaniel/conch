@@ -98,6 +98,12 @@ test.describe('with LiveKit', () => {
   // that the person never sees: people.ts expectClean says what is checked.
   const expectClean = (p: Parameters<typeof expectCleanPage>[1]): Promise<void> => expectCleanPage(vw, p);
 
+  // The join token conchd last gave a page, from the session answers: the
+  // newest one in the world's secrets that LiveKit did not give the page
+  // itself (a refreshed token, issue #1948, is added after the join's).
+  const conchdJoinToken = (p: { readonly watch: { readonly livekitTokens: readonly string[] } }): string | undefined =>
+    vw.secrets.filter((x) => x.startsWith('eyJ') && !p.watch.livekitTokens.includes(x)).at(-1);
+
   test('a member joins, is heard only while transmitting, shows as talking, and is audited as a reported pair', async ({ browser }) => {
     const a = await person(browser, 'alice');
     const b = await person(browser, 'bob');
@@ -1543,7 +1549,7 @@ test('a push-to-talk whose reports are slow is audited as the reported pair and 
       await voice.getByRole('button', { name: 'Join voice' }).click();
       await expect(voice).toContainText('Connected in', { timeout: 60_000 });
       await a.watch.settled();
-      const join = vw.secrets.filter((x) => x.startsWith('eyJ')).at(-1);
+      const join = conchdJoinToken(a);
       if (join === undefined) throw new Error('no join token was captured from the session answers');
       const origin = vw.livekitOrigin.replace(/^ws/, 'http');
       await a.page.evaluate(async ([o, t]) => {
@@ -1756,7 +1762,7 @@ test('a push-to-talk whose reports are slow is audited as the reported pair and 
         await voice.getByRole('button', { name: 'Join voice' }).click();
         await expect(voice).toContainText('Connected in', { timeout: 60_000 });
         await a.watch.settled();
-        const join = vw.secrets.filter((x) => x.startsWith('eyJ')).at(-1);
+        const join = conchdJoinToken(a);
         if (join === undefined) throw new Error('no join token was captured from the session answers');
         if (stopped) vw.stopLiveKit();
         try {
@@ -1826,23 +1832,27 @@ test('a push-to-talk whose reports are slow is audited as the reported pair and 
   // has it, bare or in the exact shape of either of Chromium's lines (the
   // member's own credential stands in for a join token: the page logs it, so
   // the browser's network source never did).
-  for (const [what, level, shape] of [
+  const selfLogged = [
     ['bare', 'log', (_o: string, t: string) => t],
     ['as a refused socket', 'error', (o: string, t: string) => `WebSocket connection to '${o}/rtc/v1?access_token=${t}&join_request=x' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED`],
     ['as a rejected handshake', 'error', (o: string, t: string) => `WebSocket connection to '${o}/rtc/v1?access_token=${t}&join_request=x' failed: Error during WebSocket handshake: Unexpected response code: 404`],
-  ] as const) {
+  ] as const;
+  const logFromPage = (page: Page, level: 'log' | 'error', line: string) =>
+    page.evaluate(
+      ([l, x]) => {
+        if (l === 'log') console.log(x);
+        else console.error(x);
+      },
+      [level, line] as const,
+    );
+  const livekitWs = () => vw.livekitOrigin.replace(/^http/, 'ws').replace(/\/+$/, '');
+  for (const [what, level, shape] of selfLogged) {
     test(`a secret the page logs ${what} still fails expectClean where refusals are allowed`, async ({ browser }) => {
       const a = await person(browser, 'alice');
       try {
         await expectClean({ ...a, allowLiveKitRefusals: true });
         const from = a.watch.console.length;
-        await a.page.evaluate(
-          ([l, x]) => {
-            if (l === 'log') console.log(x);
-            else console.error(x);
-          },
-          [level, shape(vw.livekitOrigin.replace(/^http/, 'ws').replace(/\/+$/, ''), a.member.token)] as const,
-        );
+        await logFromPage(a.page, level, shape(livekitWs(), a.member.token));
         await expect.poll(() => a.watch.console.length, { timeout: 10_000 }).toBeGreaterThan(from);
         await expect(expectClean({ ...a, allowLiveKitRefusals: true })).rejects.toThrow();
       } finally {
@@ -1850,6 +1860,46 @@ test('a push-to-talk whose reports are slow is audited as the reported pair and 
       }
     });
   }
+
+  // LiveKit's own token (issue #1948): after a join LiveKit sends the page a
+  // token of its own, refreshed from the one conchd issued, which the SDK
+  // reconnects with (it joins the room as well as conchd's does) and conchd
+  // never sees. watchPage reads it from the signalling frames the browser
+  // received, as each arrives, and never from anything the page logs; from
+  // then on it is a secret like any join token. The page logging it fails
+  // expectClean, bare and in the exact shape of each of Chromium's lines, with
+  // the allowance or without (the browser's network source never logged it).
+  test('a token LiveKit refreshes after the join is watched for, and the page logging it fails expectClean', async ({ browser }) => {
+    const a = await person(browser, 'alice');
+    try {
+      const voice = voiceRegion(a.page);
+      await voice.getByRole('button', { name: 'Join voice' }).click();
+      await expect(voice).toContainText('Connected in', { timeout: 60_000 });
+      await expect.poll(() => a.watch.livekitTokens.length, { timeout: 30_000, message: 'a token LiveKit gave the page after the join' }).toBeGreaterThan(0);
+      await a.watch.settled();
+      const refreshed = a.watch.livekitTokens.at(-1) ?? '';
+      // Compared as booleans, never printed: a failure must not put a token in the report.
+      expect(refreshed.startsWith('eyJ'), 'the refreshed token is a JWT').toBe(true);
+      expect(refreshed === conchdJoinToken(a), 'the refreshed token is not the join token conchd issued').toBe(false);
+      expect(vw.secrets.includes(refreshed), "the refreshed token is in the world's secrets").toBe(true);
+      // Nothing the page did on its own shows it.
+      await expectClean(a);
+      await expectClean({ ...a, allowLiveKitRefusals: true });
+      // Each leak on its own: the console as it was clean, and the lines from
+      // that leak on (one leak must not pass for another).
+      const clean = [...a.watch.console];
+      for (const [what, level, shape] of selfLogged) {
+        const from = a.watch.console.length;
+        await logFromPage(a.page, level, shape(livekitWs(), refreshed));
+        await expect.poll(() => a.watch.console.length, { timeout: 10_000 }).toBeGreaterThan(from);
+        const watch = { ...a.watch, console: [...clean, ...a.watch.console.slice(from)] };
+        await expect(expectClean({ ...a, watch }), `the refreshed token logged ${what}`).rejects.toThrow(/in the console/);
+        await expect(expectClean({ ...a, watch, allowLiveKitRefusals: true }), `the refreshed token logged ${what}, with the allowance`).rejects.toThrow(/in the console/);
+      }
+    } finally {
+      await closeAll(a.context);
+    }
+  });
 });
 
 // Two frames, so that a change of size has been laid out and drawn.
