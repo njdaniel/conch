@@ -446,6 +446,7 @@ describe('NativeVoicePanel', () => {
         startCompanionShare: (c) => { calls.push(`share ${c}`); },
         watchCompanionStream: (c, p) => { calls.push(`watch ${c} ${String(p)}`); },
         stopShare: () => { calls.push('stop'); },
+        restartShare: () => { calls.push('restart'); return Promise.resolve(); },
         watchStream: () => undefined,
         focusShare: () => undefined,
         setShareQuality: () => Promise.resolve(),

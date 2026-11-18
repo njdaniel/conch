@@ -3462,6 +3462,24 @@ describe('the screen companion', () => {
     expect(t.client.snapshot()).toMatchObject({ phase: 'connected', companion: true, watchOnly: true, viewer: false });
   });
 
+  it('restarts with a fresh picker, arming synchronously and keeping the companion joined between shares', async () => {
+    const t = companionSetup();
+    t.client.startCompanionShare('general');
+    await settle();
+    expect(t.client.snapshot().share.kind).toBe('sharing');
+    const room = t.rooms[0];
+    if (room === undefined) throw new Error('no room');
+    room.calls.length = 0;
+    const restart = t.client.restartShare();
+    expect(t.native.state.arms).toBe(2);
+    await restart;
+    await settle();
+    expect(room.calls).toEqual(['stop', 'pick', 'publish']);
+    expect(t.native.state.endCalls).toBe(0);
+    expect(t.native.state.grants).toEqual(['general']);
+    expect(t.client.snapshot().share.kind).toBe('sharing');
+  });
+
   it('arms the share allowance first, synchronously in the Share click, before the grant (B1)', async () => {
     const t = companionSetup();
     t.client.startCompanionShare('general');

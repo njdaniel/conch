@@ -85,6 +85,21 @@ export function ShareReadout({ client, direction, principal, prefix = '', asked,
   );
 }
 
+// Shared by the browser and desktop sharer's panels; recovery is always a
+// person choosing to stop and pick a source again.
+export function ShareCaptureWarning({ stalled, client }: {
+  readonly stalled: boolean;
+  readonly client: Pick<VoiceClient, 'restartShare'>;
+}) {
+  if (!stalled) return null;
+  return (
+    <p role="status" className="hint">
+      Screen capture stopped delivering frames.{' '}
+      <button type="button" onClick={() => { void client.restartShare(); }}>Restart share</button>
+    </p>
+  );
+}
+
 // ShareView plays one watched publisher's screen and sound with independent
 // controls and an optional focus action (voice-multi-share.md §7.1, #1509).
 // Compact changes only its presentation and controls, never its attachment or

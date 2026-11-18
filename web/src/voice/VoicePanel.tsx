@@ -65,7 +65,7 @@ import { keyLabel, talkKeyForMouseButton } from './keys';
 import { occupants, qualityLabel, sharers, type Occupant } from './presence';
 import { endedNote, ownPageNote, resumedNote, resumingNote, sharedNote, shortShareNote, soundNote, type ShareFrameRate, type ShareResolution } from './share';
 import { ShareQualityMenu, autoNote, cautionFor, estimateWords, resolutionWords, shareFrameRates, shareResolutions } from './ShareQualityMenu';
-import { ShareReadout, ShareView } from './ShareView';
+import { ShareCaptureWarning, ShareReadout, ShareView } from './ShareView';
 import { nobody, type InVoice } from './useOccupancy';
 import type { VoiceControl } from './useVoice';
 import { VoiceStatus } from './VoiceStatus';
@@ -1487,6 +1487,7 @@ function ShareNotes({ voice, onMore, othersShare }: { readonly voice: VoiceContr
         <>
           <p role="status" className="sharing-note">{sharedNote(share.audio, features)}</p>
           <p className="hint voice-supplemental"><ShareReadout client={client} direction="sent" prefix="Sending: " asked={state.shareQuality.resolution === 'auto' ? share.settled : { resolution: state.shareQuality.resolution, frameRate: state.shareQuality.frameRate }} /></p>
+          <ShareCaptureWarning stalled={state.shareCaptureStalled} client={client} />
           {share.resumed === true ? <p className="hint">{resumedNote}</p> : null}
         </>
       );

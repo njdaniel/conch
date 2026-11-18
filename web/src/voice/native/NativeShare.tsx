@@ -18,7 +18,7 @@ import { companionDefaultQuality, companionQualities, shareQualityRefusedNote } 
 import { cautionFor, estimateWords } from '../ShareQualityMenu';
 import { qualityLabel, sharers, type Sharer } from '../presence';
 import type { VoicePresenceV2 } from '../../schema/voice';
-import { ShareReadout, ShareView } from '../ShareView';
+import { ShareCaptureWarning, ShareReadout, ShareView } from '../ShareView';
 import { provisionalQuality, qualityLaterNote, type ShareQuality } from '../share';
 import { nameOf } from '../VoicePanel';
 import type { Companion } from './useCompanion';
@@ -213,6 +213,7 @@ export function ShareNotes({
           <ShareReadout client={client} direction="sent" prefix="Sending: " asked={provisionalQuality(quality)} />
         </p>
       ) : null}
+      {share.kind === 'sharing' ? <ShareCaptureWarning stalled={state.shareCaptureStalled} client={client} /> : null}
       {!offered && live ? <p className="hint">{silentShareWhile}</p> : null}
       {showToggle ? <ShareSoundToggle sound={sound} /> : null}
       {sound !== undefined && soundReason !== undefined && (share.kind === 'idle' ? reason === null : live || starting) ? (

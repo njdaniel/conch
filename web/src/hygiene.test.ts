@@ -33,9 +33,13 @@ describe('credential handling', () => {
     expect(sending).toEqual(['./admin/AddAIAdmin.tsx', './platform/browser/http.ts']);
   });
 
-  it('is never logged: the page makes no console call', () => {
+  it('is never logged: the only console call is the fixed capture-stall diagnostic', () => {
+    // Issue #1903 requires one content-free diagnostic. Permit this literal
+    // call alone: no variable, context, credential or captured content.
+    const diagnostic = "console.warn('Screen capture stopped delivering frames (muted for 3 seconds).');";
+    expect(sources['./voice/sdk.ts']?.split(diagnostic)).toHaveLength(2);
     const logging = Object.entries(sources)
-      .filter(([, code]) => /\bconsole\s*\./.test(code))
+      .filter(([path, code]) => /\bconsole\s*\./.test(path === './voice/sdk.ts' ? code.replace(diagnostic, '') : code))
       .map(([path]) => path);
     expect(logging).toEqual([]);
   });
@@ -436,7 +440,7 @@ describe('the history exception', () => {
 
 // The invite code (issue #440) is handled like a credential. It is held under
 // the name inviteCode, in the modules that must hold it, and nowhere else: it
-// is never stored, logged (no module logs at all), put in a URL other than the
+// is never stored, logged (the sole diagnostic is a fixed string), put in a URL other than the
 // creator's link, or rendered.
 const inviteHolders = ['./App.tsx', './Invite.tsx', './api.ts', './route.ts'];
 const inviteStored = /(setItem|getItem|removeItem)\([^)]*\binviteCode\b/;

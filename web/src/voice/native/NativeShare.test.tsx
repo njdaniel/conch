@@ -41,6 +41,7 @@ function fake(over: Partial<VoiceState> = {}, stats: ShareSample | null = null):
     startCompanionShare: (c) => { calls.push(`share ${c}`); },
     watchCompanionStream: (c, p) => { calls.push(`watch ${c} ${String(p)}`); },
     stopShare: () => { calls.push('stop'); },
+    restartShare: () => { calls.push('restart'); return Promise.resolve(); },
     watchStream: (p, on) => { calls.push(`watchStream ${String(p)} ${String(on)}`); },
     focusShare: (p) => { calls.push(`focus ${String(p)}`); },
     setShareQuality: (q) => { calls.push(`quality ${q.resolution}${String(q.frameRate)}`); return Promise.resolve(); },
@@ -67,6 +68,16 @@ function strip(c: Companion, over: { joined?: string | null; shown?: string | nu
     </>,
   );
 }
+
+it('shows capture loss and offers a manual restart in the desktop panel', () => {
+  const t = fake({ share: { kind: 'sharing', audio: false }, shareCaptureStalled: true });
+  const view = render(<ShareNotes companion={t.companion} joined="general" reason={null} />);
+  expect(screen.getByText(/Screen capture stopped delivering frames/)).toBeTruthy();
+  fireEvent.click(screen.getByRole('button', { name: 'Restart share' }));
+  expect(t.calls).toEqual(['restart']);
+  view.rerender(<ShareNotes companion={{ ...t.companion, state: { ...t.companion.state, shareCaptureStalled: false } }} joined="general" reason={null} />);
+  expect(screen.queryByRole('button', { name: 'Restart share' })).toBeNull();
+});
 
 describe('Share is offered only in the joined channel while the helper is connected', () => {
   it('starts the share in the joined channel from the click', () => {

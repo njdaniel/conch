@@ -21,6 +21,7 @@ import { settleQuality, type Captured, type KeptScreen, type SettledQuality, typ
 import { ShareReadout, ShareView } from './ShareView';
 import type { Snapshot, VoiceControl } from './useVoice';
 import { VoicePanel } from './VoicePanel';
+import { watchScreenCapture } from './sdk';
 
 class StubRoom implements Room {
   events: RoomEvents | null = null;
@@ -73,7 +74,7 @@ class StubRoom implements Room {
     this.calls.push('publish');
     return Promise.resolve();
   };
-  stopScreen = (): Promise<void> => Promise.resolve();
+  stopScreen = (): Promise<void> => { this.calls.push('stop'); return Promise.resolve(); };
   keepScreen = (): KeptScreen | null => ({ audio: true, live: () => true, onEnded: null, stop: () => undefined });
   adoptScreen = (): void => undefined;
   setMicrophone = (): void => undefined;
@@ -534,6 +535,45 @@ describe('sharing', () => {
     fireEvent.click(within(voice()).getByRole('button', { name: 'Stop sharing' }));
     await act(settle);
     expect(await within(voice()).findByText('You stopped sharing.')).toBeTruthy();
+  });
+
+  it('shows a capture stalled for 3 seconds, clears on unmute, and restarts only on a click', async () => {
+    const t = setup();
+    t.client.join('general');
+    await act(settle);
+    fireEvent.click(within(voice()).getByRole('button', { name: 'Share screen' }));
+    await act(settle);
+    const room = t.rooms[0];
+    if (room === undefined) throw new Error('no room');
+    class Capture extends EventTarget {
+      muted = false;
+      readyState = 'live';
+      mute() { this.muted = true; this.dispatchEvent(new Event('mute')); }
+      unmute() { this.muted = false; this.dispatchEvent(new Event('unmute')); }
+    }
+    const capture = new Capture();
+    const log = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    vi.useFakeTimers();
+    const off = watchScreenCapture(capture as unknown as MediaStreamTrack, (stalled) => room.events?.onScreenStalled?.(stalled));
+    try {
+      act(() => { capture.mute(); vi.advanceTimersByTime(2999); });
+      expect(screen.queryByRole('button', { name: 'Restart share' })).toBeNull();
+      act(() => { vi.advanceTimersByTime(1); });
+      expect(within(voice()).getByText(/Screen capture stopped delivering frames/)).toBeTruthy();
+      expect(within(voice()).getByRole('button', { name: 'Restart share' })).toBeTruthy();
+      expect(room.calls).toEqual(['pick', 'publish']);
+      expect(log).toHaveBeenCalledTimes(1);
+      act(() => { capture.unmute(); });
+      expect(screen.queryByRole('button', { name: 'Restart share' })).toBeNull();
+      act(() => { capture.mute(); vi.advanceTimersByTime(3000); });
+      fireEvent.click(within(voice()).getByRole('button', { name: 'Restart share' }));
+      await act(settle);
+      expect(room.calls).toEqual(['pick', 'publish', 'stop', 'pick', 'publish']);
+      expect(screen.queryByRole('button', { name: 'Restart share' })).toBeNull();
+    } finally {
+      act(off);
+      vi.useRealTimers();
+    }
   });
 
   it('tells the sharer when the capture has no sound track, in words for the browser', async () => {

@@ -201,6 +201,8 @@ export interface RoomEvents {
   readonly onSpeakers: (principals: readonly number[]) => void;
   // This page's published share is gone (share.ts).
   readonly onScreenEnded: (cause: ScreenEnd) => void;
+  // The held screen capture has been muted for 3 s, or has recovered.
+  readonly onScreenStalled?: (stalled: boolean) => void;
   // Which of one publisher's watched stream tracks have arrived (#1509).
   readonly onStreamTracks: (principal: number, tracks: ShareTracks) => void;
   // The microphone was lost: its capture ended, or the device chosen is no
@@ -371,6 +373,8 @@ export interface VoiceState {
   readonly speaking: ReadonlySet<number>;
   readonly reportNote: 'retrying' | 'rate_limited' | null;
   readonly share: ShareState;
+  // Capture starvation, independently of the connection and share sound.
+  readonly shareCaptureStalled: boolean;
   // The capture and top-layer caps chosen by the sharer, kept locally.
   readonly shareQuality: ShareQuality;
   // Which shares this page watches by publisher, which one is focused (the
@@ -601,6 +605,7 @@ export const initialVoice: VoiceState = {
   speaking: new Set(),
   reportNote: null,
   share: idleShare,
+  shareCaptureStalled: false,
   shareQuality: defaultShareQuality,
   watched: new Set(),
   focusedShare: null,
@@ -649,6 +654,7 @@ export class VoiceClient {
   private readonly gate: TransmitGate;
   private readonly reports: ReportQueue;
   private state: VoiceState = initialVoice;
+  private restartingShare = false;
   private listeners = new Set<() => void>();
   private room: Room | null = null;
   // The meter's audio context, made in the Join gesture (issue #1794) and
@@ -749,7 +755,7 @@ export class VoiceClient {
     this.share = new ScreenShare(
       { claim: env.claimShare, release: env.stopShare },
       (share) => {
-        this.set({ share });
+        this.set({ share, ...(share.kind === 'idle' || share.kind === 'stopping' || share.kind === 'resuming' ? { shareCaptureStalled: false } : {}) });
         this.settleCompanion();
       },
       env.clock,
@@ -947,7 +953,7 @@ export class VoiceClient {
   // and no watch. It is not asked for again by itself.
   private settleCompanion(): void {
     const s = this.state;
-    if (!s.companion || this.companionLeaving !== null || s.phase !== 'connected' || this.afterConnect !== null) return;
+    if (this.restartingShare || !s.companion || this.companionLeaving !== null || s.phase !== 'connected' || this.afterConnect !== null) return;
     if (s.share.kind !== 'idle' || s.watched.size > 0) return;
     void this.leaveVoice(s.companionShareUnavailable !== null);
   }
@@ -1237,6 +1243,23 @@ export class VoiceClient {
 
   stopShare(): void {
     void this.share.stop('self');
+  }
+
+  // The person's restart gets a fresh portal pick through the ordinary start
+  // path. Keep an otherwise idle companion joined between stop and start.
+  async restartShare(): Promise<void> {
+    if (this.restartingShare || this.state.share.kind !== 'sharing') return;
+    this.restartingShare = true;
+    const room = this.room;
+    const attempt = this.attempt;
+    this.env.companion?.arm().catch(() => undefined);
+    try {
+      await this.share.stop('self');
+      if (room === this.room && attempt === this.attempt) this.startShare();
+    } finally {
+      this.restartingShare = false;
+      this.settleCompanion();
+    }
   }
 
   // ---- the camera
@@ -1964,6 +1987,10 @@ export class VoiceClient {
       onSpeakers: (ids) => {
         if (mine !== this.attempt) return;
         this.set({ speaking: new Set(ids) });
+      },
+      onScreenStalled: (stalled) => {
+        if (mine !== this.attempt) return;
+        this.set({ shareCaptureStalled: stalled });
       },
       onScreenEnded: (cause) => {
         if (mine !== this.attempt) return;
