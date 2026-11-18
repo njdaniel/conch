@@ -54,6 +54,7 @@ import type { DesktopCapturerSource, SourcesOptions } from 'electron';
 import type { ShareAvailability } from './portal.ts';
 import { INITIAL_URL } from './scheme.ts';
 import type { ShareAllowance } from './share-allowance.ts';
+import { resolveApplicationAudio, type ApplicationAudioDecision, type ApplicationAudioDeps } from './voice/application-audio.ts';
 
 export interface CaptureFrame {
   readonly frameToken: string;
@@ -105,6 +106,19 @@ export interface CaptureRequest {
 }
 
 export type CaptureSource = Pick<DesktopCapturerSource, 'id' | 'name'>;
+
+// F16's Windows picker boundary (#905). Called only after an explicit
+// "this application" choice, with the source the person picked and a
+// main-owned native resolver. The result always keeps that picture and gives
+// the picker words for a refusal. #778 supplies the Windows picker/native
+// adapter and consumes an allowed root immediately for include-tree capture;
+// this does not enable audio on the Linux portal route below.
+export async function applicationAudioPick(video: CaptureSource, deps: ApplicationAudioDeps): Promise<{
+  readonly video: CaptureSource;
+  readonly applicationAudio: ApplicationAudioDecision;
+}> {
+  return { video, applicationAudio: await resolveApplicationAudio(video.id, deps) };
+}
 
 export interface DisplayCaptureDeps {
   // The app's one window's web contents, or null.

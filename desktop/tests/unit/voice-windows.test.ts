@@ -36,6 +36,9 @@ import { Supervisor, type StartRequest, type VoiceState } from '../../main/voice
 import { profileConfigDir } from '../../main/vault/files.ts';
 import { FAKE_TOKEN, readFixture, transcript, until } from './voice-support.ts';
 
+import { applicationAudioPick } from '../../main/display-capture.ts';
+import { APPLICATION_AUDIO_REASONS, applicationAudioDecision, type AudioProcess, type PlaybackProcesses, type WindowProcessSnapshot } from '../../main/voice/application-audio.ts';
+
 const ON_WINDOWS = process.platform === 'win32';
 
 // A nonce of the attach shape: 43 characters of base64url, the last one of
@@ -1033,5 +1036,116 @@ describe('owner loss on Windows (§3.6)', () => {
     rmSync(join(dir, 'resources', WINDOWS_HELPER_NAME));
     expect(await r.sup.start(request)).toEqual({ status: 'unavailable', reason: 'not-installed' });
     expect(r.h.names).toEqual([]);
+  });
+});
+
+// F16 fake process trees run in desktop-windows as well as the Linux job.
+const playback: PlaybackProcesses = { shellPid: 100, helperPid: 102 };
+const processes: readonly AudioProcess[] = [
+  { pid: 100, parentPid: 0 }, // Electron main
+  { pid: 101, parentPid: 100 }, // its window's renderer
+  { pid: 102, parentPid: 100 }, // the helper playing remote voice
+  { pid: 200, parentPid: 0 }, // another application
+  { pid: 201, parentPid: 200 }, // its picked child window
+  { pid: 202, parentPid: 201 },
+];
+const snapshot = (windowPid: number, tree = processes): WindowProcessSnapshot => ({ windowPid, processes: tree });
+const unavailable = { allowed: false, reason: 'unavailable', message: APPLICATION_AUDIO_REASONS.unavailable };
+const containsCall = { allowed: false, reason: 'contains-call', message: APPLICATION_AUDIO_REASONS['contains-call'] };
+
+describe('Windows include-tree audio (F16)', () => {
+  it.each([100, 101, 102])('refuses the call tree when the picked window belongs to pid %i', (windowPid) => {
+    expect(applicationAudioDecision(snapshot(windowPid), playback)).toEqual(containsCall);
+  });
+
+  it('resolves a nested application window to its root for include-tree capture', () => {
+    expect(applicationAudioDecision(snapshot(202), playback)).toEqual({ allowed: true, rootPid: 200 });
+  });
+
+  it('refuses another application when the helper has been placed in its tree', () => {
+    const tree = processes.map((p) => p.pid === 102 ? { ...p, parentPid: 202 } : p);
+    expect(applicationAudioDecision(snapshot(201, tree), playback)).toEqual(containsCall);
+  });
+
+  it('refuses the shell tree even when the helper lives elsewhere', () => {
+    const tree = processes.map((p) => p.pid === 102 ? { ...p, parentPid: 200 } : p);
+    expect(applicationAudioDecision(snapshot(101, tree), playback)).toEqual(containsCall);
+  });
+
+  it('still excludes the shell when no helper is running', () => {
+    expect(applicationAudioDecision(snapshot(101), { ...playback, helperPid: null })).toEqual(containsCall);
+    expect(applicationAudioDecision(snapshot(201), { ...playback, helperPid: null })).toEqual({ allowed: true, rootPid: 200 });
+  });
+
+  it('handles an exited launcher without requiring that absent parent', () => {
+    const tree = processes.map((p) => p.pid === 200 ? { ...p, parentPid: 999 } : p);
+    expect(applicationAudioDecision(snapshot(201, tree), playback)).toEqual({ allowed: true, rootPid: 200 });
+  });
+
+  it('ignores the Windows idle process entry without following pid 0 as a parent', () => {
+    expect(applicationAudioDecision(snapshot(201, [{ pid: 0, parentPid: 0 }, ...processes]), playback)).toEqual({ allowed: true, rootPid: 200 });
+  });
+
+  it.each([100, 102, 201])('fails closed when the window or playback pid %i is missing', (missing) => {
+    expect(applicationAudioDecision(snapshot(201, processes.filter((p) => p.pid !== missing)), playback)).toEqual(unavailable);
+  });
+
+  it.each([0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, 0x1_0000_0000])('fails closed for invalid pid %s', (invalid) => {
+    expect(applicationAudioDecision(snapshot(invalid), playback)).toEqual(unavailable);
+    expect(applicationAudioDecision(snapshot(201), { ...playback, shellPid: invalid })).toEqual(unavailable);
+    expect(applicationAudioDecision(snapshot(201), { ...playback, helperPid: invalid })).toEqual(unavailable);
+    expect(applicationAudioDecision(snapshot(201, [...processes, { pid: invalid, parentPid: 200 }]), playback)).toEqual(unavailable);
+    if (invalid !== 0) expect(applicationAudioDecision(snapshot(201, [...processes, { pid: 300, parentPid: invalid }]), playback)).toEqual(unavailable);
+  });
+
+  it('rejects duplicate pids rather than choosing one parent', () => {
+    expect(applicationAudioDecision(snapshot(201, [...processes, { pid: 102, parentPid: 200 }]), playback)).toEqual(unavailable);
+  });
+
+  it.each([100, 102, 200])('fails closed on a cycle on a relevant ancestry path (%i)', (cyclic) => {
+    const tree = processes.map((p) => p.pid === cyclic ? { ...p, parentPid: cyclic } : p);
+    expect(applicationAudioDecision(snapshot(201, tree), playback)).toEqual(unavailable);
+  });
+
+  it('fails closed on a multi-process ancestry cycle', () => {
+    const tree = processes.map((p) => p.pid === 200 ? { ...p, parentPid: 202 } : p);
+    expect(applicationAudioDecision(snapshot(201, tree), playback)).toEqual(unavailable);
+  });
+});
+
+describe('Windows application-audio picker boundary', () => {
+  it.each(['Conch', 'A game', ''])('keeps the own-window picture and explains refusal regardless of title %s', async (name) => {
+    const video = { id: 'window:98765:0', name };
+    const resolve = vi.fn().mockResolvedValue(snapshot(101));
+    expect(await applicationAudioPick(video, { resolve, playback: () => playback })).toEqual({ video, applicationAudio: containsCall });
+    expect(resolve).toHaveBeenCalledExactlyOnceWith(video.id);
+  });
+
+  it('uses pid identity even if an unrelated application is named Conch', async () => {
+    const video = { id: 'window:3456:0', name: 'Conch' };
+    expect(await applicationAudioPick(video, {
+      resolve: () => Promise.resolve(snapshot(201)), playback: () => playback,
+    })).toEqual({ video, applicationAudio: { allowed: true, rootPid: 200 } });
+  });
+
+  it.each(['missing', 'rejected'] as const)('keeps the picture with the unsupported reason when resolution is %s', async (failure) => {
+    const video = { id: 'window:98765:0', name: 'Window' };
+    expect(await applicationAudioPick(video, {
+      resolve: () => failure === 'missing' ? Promise.resolve(null) : Promise.reject(new Error('private OS detail')),
+      playback: () => playback,
+    })).toEqual({ video, applicationAudio: unavailable });
+  });
+
+  it('refuses a stale snapshot after the helper restarts while resolving', async () => {
+    let current = playback;
+    const video = { id: 'window:98765:0', name: 'Window' };
+    const result = await applicationAudioPick(video, {
+      resolve: () => {
+        current = { shellPid: 100, helperPid: 203 };
+        return Promise.resolve(snapshot(201));
+      },
+      playback: () => current,
+    });
+    expect(result).toEqual({ video, applicationAudio: unavailable });
   });
 });
