@@ -28,6 +28,7 @@ function chat(messages: readonly MessageV2[], pending: readonly PendingSend[] = 
 }
 
 interface Options {
+  readonly held?: ChannelChat;
   readonly onEdited?: (message: MessageV2) => void;
   readonly kind?: Person['kind'];
   readonly pending?: readonly PendingSend[];
@@ -37,12 +38,12 @@ interface Options {
   readonly onLoadOlder?: () => void;
 }
 
-function conversation(messages: readonly MessageV2[], { onEdited = vi.fn(), kind = 'human', pending = [], edits = true, channelId, exhausted = true, onLoadOlder = () => undefined }: Options = {}) {
+function conversation(messages: readonly MessageV2[], { held, onEdited = vi.fn(), kind = 'human', pending = [], edits = true, channelId, exhausted = true, onLoadOlder = () => undefined }: Options = {}) {
   return (
     <Conversation
       {...(channelId === undefined ? {} : { channelId })}
       channel="general"
-      chat={chat(messages, pending, exhausted)}
+      chat={held ?? chat(messages, pending, exhausted)}
       live="open"
       people={people(kind)}
       nets={new Map()}
@@ -639,5 +640,66 @@ describe('an open edit across a reload (issue #1039)', () => {
     render(conversation([msg(1, { body: 'helo' })], { channelId: 7 }));
     fireEvent.change(openEditor(1), { target: { value: 'fixed' } });
     expect((box(1) as HTMLTextAreaElement).value).toBe('fixed');
+  });
+});
+
+describe('Up from the composer', () => {
+  const composer = () => screen.getByRole('textbox', { name: 'Message #general' });
+  it('edits the newest own message regardless of map order, then Escape returns to the composer', () => {
+    render(conversation([msg(4, { author_id: 3 }), msg(2), msg(1)]));
+    composer().focus();
+    fireEvent.keyDown(composer(), { key: 'ArrowUp' });
+    expect(document.activeElement).toBe(box(2));
+    expect(noBox(1)).toBeNull();
+    fireEvent.keyDown(box(2), { key: 'Escape' });
+    expect(noBox(2)).toBeNull();
+    expect(document.activeElement).toBe(composer());
+  });
+
+  it.each([
+    ['no messages', []],
+    ['only another author', [msg(1, { author_id: 3 })]],
+    ['newest outside the window', [msg(1), msg(2, { created_at: ago(editWindowMs + minute) })]],
+    ['removed newest', [msg(1), msg(2, { removed: true })]],
+  ] as const)('leaves Up alone with %s, without falling back', (_name, messages) => {
+    render(conversation(messages));
+    expect(fireEvent.keyDown(composer(), { key: 'ArrowUp' })).toBe(true);
+    expect(screen.queryByRole('textbox', { name: editName })).toBeNull();
+  });
+
+  it.each(['ten edits', 'final refusal'])('does not skip a newest message with %s', (reason) => {
+    const held = { ...chat([msg(1), msg(2)]),
+      edits: new Map([[2, new Set(Array.from({ length: 10 }, (_, i) => String(i)))]]),
+      final: new Set(reason === 'final refusal' ? [2] : []),
+    };
+    if (reason === 'final refusal') held.edits.clear();
+    render(conversation([], { held }));
+    expect(fireEvent.keyDown(composer(), { key: 'ArrowUp' })).toBe(true);
+    expect(screen.queryByRole('textbox', { name: editName })).toBeNull();
+  });
+
+  it('edits the newest own message in the open thread, including replies outside channel history', async () => {
+    const root = msg(1, { author_id: 3 });
+    const reply = msg(2, { thread_root_id: 1 });
+    vi.spyOn(api, 'loadThread').mockResolvedValue({ ok: true, value: { messages: [root, reply] } });
+    const onEdited = vi.fn();
+    vi.spyOn(api, 'editMessage').mockResolvedValue({ ok: true, message: { ...reply, body: 'fixed', edited_at: new Date().toISOString() } });
+    render(conversation([root, msg(3)], { onEdited }));
+    fireEvent.click(screen.getByRole('button', { name: /^Reply to bea/ }));
+    const thread = screen.getByRole('region', { name: /^Thread around/ });
+    await within(thread).findByText('text 2');
+    const replyBox = within(thread).getByRole('textbox', { name: 'Reply to bea' });
+    fireEvent.keyDown(replyBox, { key: 'ArrowUp' });
+    const editor = within(thread).getByRole('textbox', { name: editName });
+    expect(document.activeElement).toBe(editor);
+    expect(noBox(3)).toBeNull();
+    fireEvent.keyDown(editor, { key: 'Escape' });
+    expect(document.activeElement).toBe(replyBox);
+    fireEvent.keyDown(replyBox, { key: 'ArrowUp' });
+    fireEvent.change(within(thread).getByRole('textbox', { name: editName }), { target: { value: 'fixed' } });
+    fireEvent.click(within(thread).getByRole('button', { name: 'Save' }));
+    await waitFor(() => { expect(onEdited).toHaveBeenCalledWith(expect.objectContaining({ id: 2, body: 'fixed' })); });
+    expect(within(thread).getByText('fixed')).toBeTruthy();
+    expect(within(thread).queryByRole('textbox', { name: editName })).toBeNull();
   });
 });
