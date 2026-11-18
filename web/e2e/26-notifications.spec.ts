@@ -169,3 +169,25 @@ test('@mention completes from the channel and the person named sees the mark', a
   await expect(plain).toHaveCount(1);
   await expect(plain).not.toHaveClass(/mentions-you/);
 });
+
+
+test('optional sound controls default off and survive reload', async ({ meet, world }) => {
+  const { page } = await meet();
+  await signIn(page, world, world.tokens.browser, 'browser-test');
+  await page.getByRole('button', { name: 'Settings' }).click();
+  for (const label of ['Message sound', 'Call join sound', 'Call leave sound', 'Share start sound']) {
+    await expect(page.getByLabel(label, { exact: true })).not.toBeChecked();
+  }
+  await page.getByLabel('Message sound', { exact: true }).check();
+  await page.getByLabel('Call join sound', { exact: true }).check();
+  const volume = page.getByLabel('Sound volume', { exact: true });
+  await volume.press('Home');
+  for (let step = 0; step < 25; step++) await volume.press('ArrowRight');
+  await page.reload();
+  await page.getByRole('button', { name: 'Settings' }).click();
+  await expect(page.getByLabel('Message sound', { exact: true })).toBeChecked();
+  await expect(page.getByLabel('Call join sound', { exact: true })).toBeChecked();
+  await expect(page.getByLabel('Call leave sound', { exact: true })).not.toBeChecked();
+  await expect(page.getByLabel('Share start sound', { exact: true })).not.toBeChecked();
+  await expect(page.getByLabel('Sound volume', { exact: true })).toHaveValue('25');
+});

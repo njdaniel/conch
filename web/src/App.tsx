@@ -22,7 +22,7 @@ import { archivedLine, channelArchived, isArchived } from './archived';
 import { ChannelSettingsAsk } from './ChannelSettingsAsk';
 import { RenameChannel } from './RenameChannel';
 import { SetTopic } from './SetTopic';
-import { channelFromHash, forgetChannel, hashForChannel, rememberChannel, rememberedChannel, showChannelInAddress, takeLinkFromAddress } from './route';
+import { channelFromHash, messageFromHash, forgetChannel, hashForChannel, rememberChannel, rememberedChannel, showChannelInAddress, takeLinkFromAddress } from './route';
 import type { ChannelDocV1 } from './schema/channel';
 import type { WhoAmIResponseV1 } from './schema/principal';
 import type { ReadStateV1 } from './schema/readstate';
@@ -340,16 +340,26 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
     lastPhase.current = auth.phase;
   }, [auth.phase]);
 
+  const [messageLink, setMessageLink] = useState(() => messageFromHash(window.location.hash));
+  const [linkNotice, setLinkNotice] = useState('');
+  const [highlightedId, setHighlightedId] = useState<number | null>(null);
   // The hash names the open channel, so back, forward and a pasted link work.
   // A hash that names a channel this person cannot open is corrected to the one
-  // shown, in place (F26); nothing is said of the one asked for.
+  // shown, in place (F26). Message links use the same unavailable notice
+  // for every inaccessible destination.
   useEffect(() => {
     if (!signedIn) return;
     function onHash() {
+      const linked = messageFromHash(window.location.hash);
+      setMessageLink(linked);
+      if (linked !== null) setSearchOpen(false);
+      setLinkNotice('');
+      setHighlightedId(null);
       const name = channelFromHash(window.location.hash);
       if (name === null) return;
       const held = channelsNow.current;
       if (held.selected !== null && !held.channels.some((c) => c.name === name)) {
+        if (messageFromHash(window.location.hash) !== null) setLinkNotice("This message isn't available");
         showChannelInAddress(held.selected);
         return;
       }
@@ -368,11 +378,14 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
     if (channels.selected === null) return;
     rememberChannel(channels.selected);
     const hash = hashForChannel(channels.selected);
-    if (window.location.hash === hash) return;
+    if (window.location.hash === hash || messageFromHash(window.location.hash)?.channel === channels.selected) return;
     // The address names a channel that is not this person's to open (a pasted
     // link, say): it is corrected in place, not added to the history.
     const asked = channelFromHash(window.location.hash);
-    if (asked !== null && !channels.channels.some((c) => c.name === asked)) showChannelInAddress(channels.selected);
+    if (asked !== null && !channels.channels.some((c) => c.name === asked)) {
+      if (messageFromHash(window.location.hash) !== null) setLinkNotice("This message isn't available");
+      showChannelInAddress(channels.selected);
+    }
     else window.location.hash = hash;
   }, [channels.selected]);
 
@@ -732,7 +745,7 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
   const held = selected === null ? null : chatFor(chat, selected);
   const headId = held === null ? 0 : lastId(held);
   const head = held?.byId.get(headId);
-  const unread = useReadState({
+  const { counts: unread, openingMark } = useReadState({
     signedIn,
     channels: channels.channels,
     loaded: channels.loaded,
@@ -751,6 +764,7 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
     reload: reloadReadState,
   });
   const notifications = useNotifications({
+    openChannel: previewing ? null : channelId,
     signedIn,
     origin,
     principal: principal === null ? null : { id: principal.id, name: shownName },
@@ -815,6 +829,37 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
     el.scrollIntoView({ block: 'center' });
     el.focus({ preventScroll: true });
   }, [scrollTo, detailOpen, searchOpen]);
+
+  // Only viewer-filtered history is examined. Missing, removed and inaccessible
+  // targets share one notice, including when the held-history budget runs out.
+  useEffect(() => {
+    if (!signedIn || messageLink === null || !channels.loaded) return;
+    if (!channels.channels.some((channel) => channel.name === messageLink.channel) || messageLink.id === null) {
+      setLinkNotice("This message isn't available");
+      setMessageLink(null);
+      return;
+    }
+    if (selected === null || selected !== messageLink.channel) return;
+    const held = chatFor(chat, selected);
+    if (held.history === 'loading' || held.history === 'idle' || held.older === 'loading') return;
+    const target = held.byId.get(messageLink.id);
+    if (target !== undefined && target.removed !== true) {
+      setSearchOpen(false);
+      closeRun('');
+      setHighlightedId(target.id);
+      setMessageLink(null);
+    } else if (target === undefined && held.history === 'ready' && held.older !== 'error' && canLoadOlder(held) && oldestId(held) > messageLink.id) {
+      live.loadOlder();
+    } else {
+      setLinkNotice("This message isn't available");
+      setMessageLink(null);
+    }
+  }, [signedIn, messageLink, selected, channels, chat, live.loadOlder, closeRun]);
+  useEffect(() => {
+    if (highlightedId === null) return;
+    const timer = window.setTimeout(() => { setHighlightedId(null); }, 4000);
+    return () => { window.clearTimeout(timer); };
+  }, [highlightedId]);
 
   const principalId = principal?.id ?? null;
   const [appearance, setAppearance] = useState<AppearancePreferences>(defaultAppearance);
@@ -2032,7 +2077,7 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
             ) : null
           }
           conversation={
-            selected === null || channelId === null ? null : (
+            selected === null || channelId === null ? (linkNotice === '' ? null : <p role="status">{linkNotice}</p>) : (
               <ModerationScope who={auth.principal} members={agents.membersFor === channelId ? agents.members : []} guest={visit !== null}>
                 {agents.state.detail === null ? null : <RunDetail agents={agents} now={now} onGoToMessage={goToMessage} />}
                 {!searchOpen ? null : (
@@ -2051,9 +2096,12 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
                     }}
                   />
                 )}
+                {linkNotice === '' ? null : <p role="status">{linkNotice}</p>}
                 <div className="conversation-body" hidden={agents.state.detail !== null || searchOpen}>
               <Conversation
+                highlightedId={highlightedId}
                 key={channelId}
+                openingMark={openingMark}
                 density={appearance.density}
                 historyBounded={agents.membersFor === channelId && (agents.members.find((m) => m.principal_id === auth.principal.id)?.history_after ?? 0) > 0}
                 channelId={channelId}

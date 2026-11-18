@@ -189,9 +189,13 @@ export async function inbound(page: Page, options: { perTrack?: boolean } = {}):
 // allowLiveKitRefusals is for a test that stops LiveKit while the page is
 // joined (issue #1760): the SDK's retries then make Chromium log "WebSocket
 // connection to 'ws://<livekit>/rtc/v1?access_token=<join token>...' failed:
-// ... net::ERR_CONNECTION_REFUSED", and whether one lands is timing. Lines of
-// exactly that shape lose the join token before the check (console-lines.ts);
-// every other line, and every other secret, is checked as always.
+// ... net::ERR_CONNECTION_REFUSED", and once LiveKit is back, without the
+// room, "... failed: Error during WebSocket handshake: Unexpected response
+// code: 404" (issue #1915); whether either lands is timing. Lines of exactly
+// those shapes, and only those the browser's network source logged itself
+// (Watch.browserLog; a page's own console.error of the same text is not
+// allowed), lose the join token before the check (console-lines.ts); every
+// other line, and every other secret, is checked as always.
 export async function expectClean(
   vw: VoiceWorld,
   p: Pick<Someone, 'page' | 'watch'> & { readonly member: Pick<Member, 'token'>; readonly allowLiveKitRefusals?: boolean },
@@ -231,7 +235,7 @@ export async function expectClean(
   for (const credential of credentials) {
     expect(credential === null || credential === p.member.token, "the stored credential is the member's own").toBe(true);
   }
-  const lines = p.allowLiveKitRefusals === true ? withoutJoinTokenInSocketRefusals(p.watch.console, vw.livekitOrigin) : p.watch.console;
+  const lines = p.allowLiveKitRefusals === true ? withoutJoinTokenInSocketRefusals(p.watch.console, p.watch.browserLog, vw.livekitOrigin) : p.watch.console;
   const said = lines.join('\n');
   // Asserted as booleans: a failing not.toContain would print the secret
   // and the whole page text into the report and the CI log.

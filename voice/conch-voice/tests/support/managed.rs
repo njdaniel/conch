@@ -27,7 +27,7 @@ use std::io::{PipeWriter, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use conch_voice::Error;
 use conch_voice::cli::Environment;
@@ -110,7 +110,12 @@ pub struct ManagedSetup {
 impl Default for ManagedSetup {
     fn default() -> Self {
         Self {
-            login: Login::Stored,
+            // Windows has no checked stored login (F13): its owner passes CONCH_TOKEN.
+            login: if cfg!(windows) {
+                Login::Env
+            } else {
+                Login::Stored
+            },
             voice_toml: Some(KEYS_TOML.to_owned()),
             keyboard: true,
             keyboard_unplugged: false,
@@ -715,6 +720,7 @@ impl ManagedRig {
     }
 
     /// The start every test begins with: id 1, principal 7, as the stub's login is.
+    /// Windows uses the environment login (F13); Unix keeps the stored login.
     pub fn start_command(&self) -> Value {
         json!({
             "schema": "conch.voice_control.v1",
@@ -723,7 +729,7 @@ impl ManagedRig {
             "server": self.conchd.url(),
             "channel": CHANNEL,
             "principal_id": OWN_PRINCIPAL,
-            "credential": "stored",
+            "credential": if cfg!(windows) { "env" } else { "stored" },
             "muted": false,
             "deafened": false,
         })
@@ -788,9 +794,62 @@ impl ManagedRig {
         self.keys(&bytes);
     }
 
-    /// Every line written to the event pipe so far.
+    /// Stops the owner and strikes mute until a whole batch, larger than the event
+    /// queue, is processed without the helper completing a write. That proves overflow
+    /// without assuming a transport capacity. Returns the (even) number of strikes.
+    ///
+    /// On Windows `Reader::is_waited_for` alone only means the pump is holding a chunk:
+    /// the pipe (Tokio defaults to 64 KiB), Mio's read-ahead and one overlapped write
+    /// can still absorb states. Keep the default buffers so CI measures that path too.
+    pub async fn overflow_events(&mut self) -> i64 {
+        use super::fake::Call;
+        use conch_voice_api::VOICE_CONTROL_EVENT_QUEUE_LINES;
+
+        let batch = 2 * VOICE_CONTROL_EVENT_QUEUE_LINES;
+        let muted = self.sdk.count(Call::Mute);
+        let mut strikes = 0;
+        let deadline = Instant::now() + PATIENCE;
+        self.reader.stop(true);
+        #[cfg(windows)]
+        self.owner.report("owner stopped", strikes);
+        loop {
+            #[cfg(windows)]
+            let before = self.owner.written();
+            for _ in 0..batch {
+                self.strike_mute();
+            }
+            strikes += batch;
+            // Each batch is even. The last mute is the penultimate strike; at most its
+            // state and the final unmute remain to be enqueued when this returns.
+            self.until("the overflow batch taken", |rig| {
+                rig.sdk.count(Call::Mute) >= muted + strikes / 2
+            })
+            .await;
+            #[cfg(windows)]
+            let stalled = self.owner.written() == before && self.owner.writing();
+            #[cfg(not(windows))]
+            let stalled = self.reader.is_waited_for();
+            let overflowed = stalled && self.reader.is_waited_for();
+            #[cfg(windows)]
+            self.owner.report(
+                if overflowed {
+                    "overflow proved"
+                } else {
+                    "batch taken"
+                },
+                strikes,
+            );
+            if overflowed {
+                return i64::try_from(strikes).unwrap();
+            }
+            assert!(Instant::now() < deadline, "events writer never stalled");
+        }
+    }
+
+    /// Every complete line written to the event pipe so far. The Windows pump reads
+    /// arbitrary chunks, so the last event may still be waiting for its newline.
     pub fn lines(&self) -> Vec<String> {
-        self.events.text().lines().map(str::to_owned).collect()
+        complete_event_lines(&self.events)
     }
 
     /// Every event so far, read by the owner's rules. A line it would refuse fails the test.
@@ -937,13 +996,56 @@ impl ManagedRig {
     }
 }
 
+/// A snapshot can end anywhere in a record, even inside a UTF-8 character. Keep that
+/// unfinished suffix in `Written` for the next snapshot; only decode terminated lines.
+fn complete_event_lines(events: &Written) -> Vec<String> {
+    events
+        .0
+        .lock()
+        .unwrap()
+        .split_inclusive(|byte| *byte == b'\n')
+        .filter(|line| line.ends_with(b"\n"))
+        .map(|line| String::from_utf8(line[..line.len() - 1].to_vec()).unwrap())
+        .collect()
+}
+
+#[test]
+fn the_owner_waits_for_complete_event_lines_across_every_split_read() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../pkg/schema/testdata/voice-control/transcript-join-mute-leave.json");
+    let transcript: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    let mut hello = transcript["steps"][0]["message"].clone();
+    // Unknown fields are ignored by the protocol reader; the helper version itself
+    // is restricted to ASCII. Exercise UTF-8 framing in an extension field instead.
+    hello["extension"] = json!("é声");
+    let state = &transcript["steps"][2]["message"];
+    let expected = vec![hello.to_string(), state.to_string()];
+    let bytes = format!("{}\n{}\n", expected[0], expected[1]).into_bytes();
+
+    // Includes a snapshot ending in `fals`, splits inside multibyte characters,
+    // complete JSON awaiting its newline, and multiple records in a single read.
+    for split in 0..=bytes.len() {
+        let mut events = Written::default();
+        events.write_all(&bytes[..split]).unwrap();
+        let lines = complete_event_lines(&events);
+        let count = bytes[..split].iter().filter(|byte| **byte == b'\n').count();
+        assert_eq!(lines, expected[..count], "split at {split}");
+        for line in &lines {
+            parse_event(line.as_bytes()).unwrap();
+        }
+
+        events.write_all(&bytes[split..]).unwrap();
+        assert_eq!(complete_event_lines(&events), expected, "split at {split}");
+    }
+}
+
 /// The owner's end of the events endpoint on Windows: a real named pipe, as the desktop app's
 /// owner holds one, in place of the in-memory buffer the Unix rig writes to.
 #[cfg(windows)]
 mod owner_pipe {
     use std::path::PathBuf;
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
     use std::time::{Duration, Instant};
 
     use conch_voice::channel;
@@ -962,24 +1064,35 @@ mod owner_pipe {
     /// A fake nonce from `pkg/schema/testdata/voice-control-pipe/sensitive.json`.
     const FAKE_NONCE: &str = "FAKE_nonce_do_not_print_0123456789abcdefghA";
 
-    /// How much the helper wrote to the pipe, and how much of it the owner has read.
+    /// Event bytes accepted by Tokio/Mio, received by the pump, and delivered past
+    /// the stoppable reader. The first can include Mio's pending overlapped write.
     #[derive(Clone, Default)]
     struct Counts {
         written: Arc<AtomicU64>,
+        received: Arc<AtomicU64>,
         read: Arc<AtomicU64>,
+        writing: Arc<AtomicBool>,
     }
 
-    /// The helper's event writer, counting what reaches the pipe.
+    /// The helper's event writer, counting what Tokio/Mio accepts.
     struct Counted<W> {
         inner: W,
-        written: Arc<AtomicU64>,
+        counts: Counts,
     }
 
     impl<W: std::io::Write> std::io::Write for Counted<W> {
         fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            let wrote = self.inner.write(buf)?;
-            self.written.fetch_add(wrote as u64, Ordering::SeqCst);
-            Ok(wrote)
+            self.counts.writing.store(true, Ordering::SeqCst);
+            let result = self.inner.write(buf);
+            if let Ok(wrote) = result {
+                // Accepted by Tokio/Mio, including its pending overlapped write; this
+                // does not mean the owner or even the kernel has consumed the bytes.
+                self.counts
+                    .written
+                    .fetch_add(wrote as u64, Ordering::SeqCst);
+            }
+            self.counts.writing.store(false, Ordering::SeqCst);
+            result
         }
 
         fn flush(&mut self) -> std::io::Result<()> {
@@ -1013,12 +1126,33 @@ mod owner_pipe {
     /// pipe, which ends the thread that watches the helper's end.
     pub struct Owner {
         counts: Counts,
+        in_buffer_size: u32,
         /// Threads of the owner's end still running: the reader and the end's watcher.
         alive: Arc<AtomicU32>,
         _cancel: oneshot::Sender<()>,
     }
 
     impl Owner {
+        pub fn written(&self) -> u64 {
+            self.counts.written.load(Ordering::SeqCst)
+        }
+
+        pub fn writing(&self) -> bool {
+            self.counts.writing.load(Ordering::SeqCst)
+        }
+
+        /// Captured by `voice-windows`; run with --nocapture to retain passing measurements.
+        pub fn report(&self, what: &str, strikes: usize) {
+            let received = self.counts.received.load(Ordering::SeqCst);
+            let delivered = self.counts.read.load(Ordering::SeqCst);
+            eprintln!(
+                "events pipe: {what}; strikes={strikes}, in_buffer_size={}, accepted={}, received={received}, delivered={delivered}, writing={}",
+                self.in_buffer_size,
+                self.written(),
+                self.writing(),
+            );
+        }
+
         /// How many threads of the owner's end are still running; the rig's drop ends them.
         pub fn threads(&self) -> Arc<AtomicU32> {
             Arc::clone(&self.alive)
@@ -1106,7 +1240,9 @@ mod owner_pipe {
         let (cancel, cancelled) = oneshot::channel::<()>();
         let alive = Arc::new(AtomicU32::new(2));
 
+        let in_buffer_size = server.info().unwrap().in_buffer_size;
         let counts = Counts::default();
+        let received = Arc::clone(&counts.received);
         let pumped = Arc::clone(&counts.read);
         let mut reader = reader.clone();
         let handle = tokio::runtime::Handle::current();
@@ -1128,6 +1264,7 @@ mod owner_pipe {
                 });
                 match step {
                     Some(Ok(count)) if count > 0 => {
+                        received.fetch_add(count as u64, Ordering::SeqCst);
                         if reader.write_all(&chunk[..count]).is_err() {
                             return;
                         }
@@ -1144,12 +1281,13 @@ mod owner_pipe {
         channel::watch_end(end, inputs.clone(), watchdog);
         let events = Counted {
             inner: endpoint.events,
-            written: Arc::clone(&counts.written),
+            counts: counts.clone(),
         };
         (
             Box::new(events),
             Owner {
                 counts,
+                in_buffer_size,
                 alive,
                 _cancel: cancel,
             },

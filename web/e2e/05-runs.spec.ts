@@ -32,9 +32,10 @@ test('P3-06 and P3-08 a slow run shows with the API ids and states, Cancel is ac
     expect(live?.current_run).toBe(started.id);
 
     // Unfolded, the panel lists the session and the run with the ids and the
-    // state the API reports.
+    // state the API reports. Only direct session rows: nested runs can share
+    // the session's id in a fresh world.
     await agent.click();
-    const sessionRow = panel.getByRole('list', { name: `Sessions of worker-test` }).getByRole('listitem').filter({ hasText: `#${String(started.session_id)}` });
+    const sessionRow = panel.getByRole('list', { name: `Sessions of worker-test` }).locator(':scope > li').filter({ has: page.getByText(`#${String(started.session_id)}`, { exact: true }) });
     await expect(sessionRow).toBeVisible();
     await expect(sessionRow).toContainText(live?.status ?? 'running');
     const runButton = panel.getByRole('button', { name: new RegExp(`^Run #${String(started.id)} · `) });

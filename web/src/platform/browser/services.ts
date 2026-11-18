@@ -4,12 +4,14 @@
 // test that installs one) is read as it stands.
 import type { NativeNotification, NotificationPermissionState, Services } from '../types';
 import { push } from './push';
+import { BrowserSoundSink } from './sounds';
 
 function supported(): boolean {
   return typeof window.Notification === 'function';
 }
 
 export const services: Services = {
+  sounds: new BrowserSoundSink(),
   origin: () => window.location.origin,
 
   push,

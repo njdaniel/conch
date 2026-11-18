@@ -8,6 +8,7 @@
 // clipboard or the Notification API, and nothing but browser/credentials.ts
 // touches the credential's storage.
 import type { ComponentType, ReactNode } from 'react';
+import type { AudioSink } from '../sounds';
 import type { VoiceControlTalkMode } from '../schema/generated';
 import type { Call, OperationId } from './operations';
 import type {
@@ -136,6 +137,8 @@ export interface PushService {
 }
 
 export interface Services {
+  // Optional interface audio. Unavailable on desktop pending #1924.
+  readonly sounds?: AudioSink;
   // Absent where the place has no service workers (the desktop shell).
   push?: PushService;
   // The address the client is served from: the server's own, for the browser.

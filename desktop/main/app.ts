@@ -16,7 +16,7 @@ import { app, BrowserWindow, desktopCapturer, dialog, ipcMain, Menu, Notificatio
 
 import { allowUnlisted, OVERRIDE_FLAG, parseCompat } from './compat.ts';
 import { activationFactory, healthReader, Live, prober, revoker, verifier } from './profiles/activation.ts';
-import { deliverInvite, Invites } from './invites.ts';
+import { deliverInvite, Invites, registerInviteProtocol } from './invites.ts';
 import { createProfileFiles } from './profiles/files.ts';
 import { TeardownHooks } from './profiles/hooks.ts';
 import { ProfilesService } from './profiles/service.ts';
@@ -50,6 +50,7 @@ import { Links } from './links.ts';
 import { integrationsView } from './integrations.ts';
 import { Lifecycle } from './lifecycle.ts';
 import { LinuxLifecycle } from './lifecycle-linux.ts';
+import { WindowsLifecycle } from './lifecycle-windows.ts';
 import { executable, Portal, runFile } from './portal.ts';
 import { COMPANION_EVENTS } from '../shared/bridge-names.ts';
 import { Autostart } from './autostart.ts';
@@ -205,6 +206,10 @@ export async function start(): Promise<void> {
     },
   );
   if (!first) return;
+
+  // Only the owning process registers the Windows invite handler. Failure
+  // leaves pasted invites available; never include argv or a link in the log.
+  if (!registerInviteProtocol(app)) log('conch-desktop: could not register the conch: protocol');
 
   // The app's settings, once the data root is known (below). Until then, and
   // with none, closing the last window quits.
@@ -594,8 +599,8 @@ export async function start(): Promise<void> {
   teardownHooks.media('voice', () => voice.teardown());
 
   // Lock and suspend fail closed (issue #1588, D5-02): mute on lock, leave on
-  // suspend, end the share, hide notification text. Linux only: the lock is
-  // observed through logind (lifecycle-linux.ts). Where it cannot be, the
+  // suspend, end the share, hide notification text. Linux observes the lock
+  // through logind; Windows through powerMonitor (#1935). Where it cannot be, the
   // rules keep notification text hidden and say so on the log.
   //
   // The companion is the real one (issue #1579, above): lock ends a live share
@@ -607,10 +612,13 @@ export async function start(): Promise<void> {
     log,
   });
   screenLocked = () => lifecycle.locked;
-  let watcher: LinuxLifecycle | null = null;
+  let watcher: LinuxLifecycle | WindowsLifecycle | null = null;
   if (process.platform === 'linux') {
     watcher = new LinuxLifecycle({ rules: lifecycle, powerMonitor, pid: process.pid, log });
     void watcher.start();
+  } else if (process.platform === 'win32') {
+    watcher = new WindowsLifecycle({ rules: lifecycle, powerMonitor });
+    watcher.start();
   }
   // Every change of the helper's confirmed state goes to the owned window.
   voice.subscribe((view) => {
@@ -671,7 +679,7 @@ export async function start(): Promise<void> {
           settings: () => settingsService.view(),
           notificationSupported: () => notifications.supported(),
           lockObservation: () => lifecycle.lockObservation,
-          lockTrying: () => watcher?.trying ?? false,
+          lockTrying: () => watcher instanceof LinuxLifecycle && watcher.trying,
           share: () => portal.last(),
           storage: () => profiles.view().storage,
           voice: () => voice.state(),
@@ -739,7 +747,7 @@ export async function start(): Promise<void> {
     ending = true;
     event.preventDefault();
     installed.stop();
-    // The lock monitor's child goes with the app, by its own handle.
+    // Stop power listeners and, on Linux, the monitor child by its own handle.
     watcher?.stop();
     // Media stops before the process goes.
     void profiles.close().finally(() => {

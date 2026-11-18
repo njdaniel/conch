@@ -66,9 +66,12 @@ it.each([
 ])('message moderation uses effective permission and channel standing: %j', ({ role, permissions, manages, guest, visible }) => {
   render(<ModerationScope who={{ ...who, role, permissions }} members={[{ ...member, manages }]} guest={guest}><Message message={{ ...original, payload: undefined }} viewer={1} channel="ops" people={new Map()} nets={new Map()} sent={false} cont={false} /></ModerationScope>);
   const button = screen.queryByRole('button', { name: /More actions/ });
-  expect(button !== null).toBe(visible);
+  expect(button).not.toBeNull();
   if (button !== null) {
     fireEvent.click(button);
+    expect(screen.queryByRole('menuitem', { name: 'Remove message' }) !== null).toBe(visible);
+    expect(screen.getByRole('menuitem', { name: 'Copy link' })).toBeDefined();
+    if (!visible) return;
     fireEvent.click(screen.getByRole('menuitem', { name: 'Remove message' }));
     expect(api.moderate).not.toHaveBeenCalled();
     expect(screen.getByText(/copies already received cannot be recalled/)).toBeDefined();

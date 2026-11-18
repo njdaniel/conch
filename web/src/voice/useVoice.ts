@@ -4,6 +4,7 @@
 // releases (blur, hidden, pagehide).
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react';
 import * as api from '../api';
+import { soundAudience, sounds, voiceSounds } from '../sounds';
 import { pageHiddenOnPhone } from '../phone';
 import { platform } from '../platform';
 import type { ChannelV0 } from '../schema/channel';
@@ -484,6 +485,10 @@ export function useVoice({
     lost.current = false;
     setSnapshot({ kind: 'loading' });
     const show = (presence: VoicePresenceV2) => {
+      const audience = soundAudience;
+      if (joinedRef.current !== null && audience?.allows(presence.channel_id)) {
+        voiceSounds(lost.current ? null : latest.current, presence, audience.me, (sound) => { sounds.play(sound); });
+      }
       latest.current = presence;
       lost.current = false;
       setSnapshot({ kind: 'presence', presence });

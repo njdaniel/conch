@@ -8,6 +8,8 @@
 import type { BrowserContextOptions, Locator, Page, WebSocketRoute } from '@playwright/test';
 import { voicePresenceV2, type VoicePresenceV2 } from '../src/schema/voice';
 import { channelButton, expect, expectFits, mainNav, messages, openChannel, phoneSizes, showView, signIn, test } from './fixtures';
+import { runV1 } from '../src/schema/run';
+import { openSession } from './api';
 import { call, ok, type World } from './world';
 
 const sizes: readonly (readonly [string, BrowserContextOptions])[] = [
@@ -16,6 +18,51 @@ const sizes: readonly (readonly [string, BrowserContextOptions])[] = [
   ['1440×900', { viewport: { width: 1440, height: 900 } }],
   ['1440×900 at 200%', { viewport: { width: 720, height: 450 }, deviceScaleFactor: 2 }],
 ];
+
+// Issue #1931: a layout probe using the shipped stylesheet, without LiveKit.
+// The conversation's intrinsic height exceeds the column: only a compact
+// stage may give its track a zero minimum instead of the min-content floor.
+// Both compact stage components use this rule. The former nested :has()
+// was discarded by Chromium, leaving the conversation at 300 px throughout.
+test('P1931 a compact stage lets the conversation use the remaining track', async ({ meet, world }) => {
+  const { page } = await meet({ viewport: { width: 1440, height: 900 } });
+  await page.goto(world.appUrl);
+  await page.evaluate(() => {
+    const centre = document.createElement('div');
+    centre.id = 'compact-stage-probe';
+    centre.className = 'centre';
+    centre.style.width = '600px';
+    centre.style.height = '200px';
+    const stage = document.createElement('div');
+    stage.className = 'stage';
+    const call = document.createElement('div');
+    // call-stage uses display: contents; its child supplies the row's height.
+    const row = document.createElement('div');
+    row.style.height = '44px';
+    row.style.flexShrink = '0';
+    call.append(row);
+    stage.append(call);
+    const conversation = document.createElement('div');
+    conversation.style.minHeight = '0';
+    const content = document.createElement('div');
+    content.style.height = '300px';
+    conversation.append(content);
+    centre.append(stage, conversation);
+    document.body.append(centre);
+  });
+  const centre = page.locator('#compact-stage-probe');
+  await expect(centre).toHaveCSS('display', 'grid');
+  const conversation = centre.locator(':scope > div').nth(1);
+  const height = () => conversation.evaluate((el) => el.getBoundingClientRect().height);
+  for (const component of ['call-view', 'call-stage']) {
+    const call = centre.locator('.stage > div');
+    await call.evaluate((el, name) => { el.setAttribute('class', name); }, component);
+    await expect.poll(height, 'an expanded stage keeps the min-content floor').toBeGreaterThanOrEqual(300);
+    await call.evaluate((el) => { el.classList.add('compact'); });
+    await expect.poll(height, `${component}: a compact stage leaves room for the conversation`).toBeGreaterThan(0);
+    await expect.poll(height, `${component}: the conversation fits below the compact row`).toBeLessThan(200);
+  }
+});
 
 async function must(world: World, token: string, method: 'POST' | 'PUT', path: string, body?: unknown): Promise<unknown> {
   const reply = await call(world, token, method, path, body);
@@ -404,10 +451,12 @@ for (const [size, options] of phoneSizes) {
 // middle row taller than the conversation. Now the conversation sets the row,
 // so at every height, with or without voice on the server and with a notice
 // bar above the page, the composer sits on the voice dock, and with the page
-// scrolled to its end the composer is whole. Joined and watching a share, which
-// hold the dock up, are in 12-screen-share, which has LiveKit.
+// scrolled to its end the composer is whole. Over 560 px the page fills the
+// window unless the dock leaves the conversation too little, when it scrolls the
+// same way (issue #1815), so 561, 600 and 640 are here too. Joined and watching
+// a share, which hold the dock up, are in 12-screen-share, which has LiveKit.
 const shortWindows: readonly (readonly [string, BrowserContextOptions])[] = [
-  ...[400, 470, 560, 561, 640].map((height): readonly [string, BrowserContextOptions] => [`1215×${String(height)}`, { viewport: { width: 1215, height } }]),
+  ...[400, 470, 560, 561, 600, 640].map((height): readonly [string, BrowserContextOptions] => [`1215×${String(height)}`, { viewport: { width: 1215, height } }]),
   ['720×450 at 200%', { viewport: { width: 720, height: 450 }, deviceScaleFactor: 2 }],
 ];
 
@@ -431,10 +480,6 @@ test('P1813 in a short window the composer stays on the voice dock, whole, as th
 
   for (const state of dockStates) {
     for (const [size, options] of shortWindows) {
-      // A window just over 560 px has the full-height layout, whose column
-      // clips (and scrolls inside itself) when a tall dock leaves it too little:
-      // that is the layout as it was, not this change's (issue #1815).
-      if (size.endsWith('×561') && state === 'voice set up, nobody joined') continue;
       const { page } = await meet(options);
       if (state === 'voice set up, nobody joined') await servePresence(page, world, me.token, channel, others.slice(0, 2).map((o) => o.id));
       await signIn(page, world, me.token, me.name);
@@ -495,5 +540,63 @@ test('P1813 in a short window the composer stays on the voice dock, whole, as th
       await page.keyboard.press('End');
       await settled('the End key');
     }
+  }
+});
+
+// ---------------------------------------------------------------- issue #1815
+
+// Over 560 px the page grows past the window only for what a tall dock
+// squeezes: the composer and the stage's 300 px (issue #1815). Anything else
+// tall in the centre column keeps scrolling inside itself, as in the
+// full-height layout. Run detail with a long task and a many-line outcome, at
+// 1440×900 and in a window just over 560 px: the page does not scroll, the
+// dock is whole in the window, and the run detail ends on the dock and
+// scrolls inside itself to its last line.
+test('P1815 a long Run detail scrolls inside its column, and the dock stays in the window', async ({ meet, world }) => {
+  const tag = `p1815-${String(Date.now())}`;
+  const session = await openSession(world, world.tokens.worker, `${tag}-client`);
+  // The longest task the schema allows (one line), and an outcome of many lines.
+  const task = `${tag} ${'a long task for the layout '.repeat(18)}`.slice(0, 512);
+  const outcome = Array.from({ length: 120 }, (_, i) => String(i)).join('\n').slice(0, 512);
+  const started = await ok(world, world.tokens.worker, 'POST', `/v1/sessions/${String(session.id)}/runs`, runV1, { channel: 'general', task });
+  await must(world, world.tokens.worker, 'POST', `/v1/runs/${String(started.id)}/state`, { state: 'running', outcome });
+  try {
+    const { page } = await meet({ viewport: { width: 1440, height: 900 } });
+    await signIn(page, world, world.tokens.browser, 'browser-test');
+    await openChannel(page, 'general');
+    const panel = page.getByRole('region', { name: 'Members list' });
+    await panel.getByRole('button', { name: 'Show sessions for worker-test' }).click();
+    await panel.getByRole('button', { name: new RegExp(`^Run #${String(started.id)} · `) }).click();
+    const detail = page.getByRole('article', { name: 'Run detail' });
+    await expect(detail.getByRole('heading', { name: `Run #${String(started.id)}` })).toBeVisible();
+    const outcomeText = detail.locator('dd.ag-prose');
+    await expect(outcomeText).toBeVisible();
+    const dock = page.locator('.dock');
+
+    for (const viewport of [{ width: 1440, height: 900 }, { width: 1215, height: 600 }]) {
+      await page.setViewportSize(viewport);
+      const where = `${String(viewport.width)}×${String(viewport.height)}, a long Run detail`;
+      await expect(async () => {
+        const scroll = await page.evaluate(() => ({ page: document.documentElement.scrollHeight, window: window.innerHeight }));
+        expect(scroll.page, `${where}: the page is ${String(scroll.page)} px tall in a ${String(scroll.window)} px window`).toBeLessThanOrEqual(scroll.window + 1);
+        const d = await boxOf(dock, `${where}: the dock`);
+        expect(d.y, `${where}: the dock's top`).toBeGreaterThanOrEqual(0);
+        expect(d.y + d.height, `${where}: the dock's bottom`).toBeLessThanOrEqual(viewport.height + 0.5);
+        const r = await boxOf(detail, `${where}: the run detail`);
+        expect(r.y + r.height, `${where}: the run detail's bottom`).toBeLessThanOrEqual(d.y + 1);
+      }).toPass({ timeout: 5000 });
+      // It scrolls inside itself, to its last line, above the dock.
+      const inside = await detail.evaluate((el) => {
+        el.scrollTop = el.scrollHeight;
+        return { scrolled: el.scrollTop, overflow: el.scrollHeight - el.clientHeight };
+      });
+      expect(inside.overflow, `${where}: the run detail is taller than its box`).toBeGreaterThan(0);
+      expect(inside.scrolled, `${where}: the run detail scrolls`).toBeGreaterThan(0);
+      const last = await boxOf(outcomeText, `${where}: the outcome`);
+      const d = await boxOf(dock, `${where}: the dock`);
+      expect(last.y + last.height, `${where}: the outcome's end, scrolled to`).toBeLessThanOrEqual(d.y + 1);
+    }
+  } finally {
+    await call(world, world.tokens.worker, 'DELETE', `/v1/sessions/${String(session.id)}`);
   }
 });

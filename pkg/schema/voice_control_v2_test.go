@@ -159,7 +159,7 @@ func (e VoiceControlEventV2) kind() VoiceControlEventKind {
 
 // voiceControlV2CaseFiles are the conformance documents of the v2 readers,
 // read as one, for the reason voiceControlCaseFiles gives.
-var voiceControlV2CaseFiles = []string{"cases.json", "cases-strings.json"}
+var voiceControlV2CaseFiles = []string{"cases.json", "cases-strings.json", "cases-integers.json"}
 
 func loadVoiceControlV2Cases(t *testing.T) []voiceControlCase {
 	t.Helper()

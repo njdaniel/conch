@@ -3,6 +3,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as api from '../../api';
+import { setSoundAudience, sounds } from '../../sounds';
 import type { NativeVoiceHelper, NativeVoiceView } from '../../platform/desktop/bridge';
 import type { NativeVoice, NativeVoiceError, NativeVoiceOutcome } from '../../platform/types';
 import type { ChannelV0 } from '../../schema/channel';
@@ -92,6 +93,7 @@ beforeEach(() => {
 });
 afterEach(() => {
   cleanup();
+  setSoundAudience(null);
   vi.useRealTimers();
   vi.restoreAllMocks();
 });
@@ -117,6 +119,25 @@ function strip(fake: Fake, channel: string | null = 'general', binding?: string,
 }
 
 describe('NativeVoicePanel', () => {
+  it('keeps remote join, leave and share changes silent, including after reconnect', async () => {
+    const play = vi.spyOn(sounds, 'play').mockImplementation(() => undefined);
+    setSoundAudience({ me: 1, allows: () => true });
+    strip(new Fake(running()));
+    const one = presence([1, '2026-11-17T00:00:00Z']);
+    const two = presence([1, '2026-11-17T00:00:00Z'], [2, '2026-11-17T00:01:00Z']);
+    const sharing: VoicePresenceV2 = { ...two, rooms: [{ participants: (two.rooms[0]?.participants ?? []).map((p) => p.principal_id === 2 ? { ...p, sharing: true, share_started_at: '2026-11-17T00:02:00Z' } : p) }] };
+    await frame(one);
+    await frame(two);
+    await frame(sharing);
+    await frame(one);
+    const connections = sockets.length;
+    act(() => { sockets.at(-1)?.events.onClose(1006); });
+    await waitFor(() => { expect(sockets).toHaveLength(connections + 1); }, { timeout: 3000 });
+    await frame(two);
+    await frame(one);
+    expect(play).not.toHaveBeenCalled();
+  });
+
   it('never builds the browser engine or asks for a device', async () => {
     const room = vi.spyOn(sdk, 'newLiveKitRoom');
     const gum = vi.fn();

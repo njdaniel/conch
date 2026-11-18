@@ -49,6 +49,7 @@ type observer struct {
 	mu       sync.Mutex
 	wakes    map[string]int
 	failures map[string]int
+	events   []string
 }
 
 func newObserver() *observer {
@@ -58,12 +59,14 @@ func newObserver() *observer {
 func (o *observer) Wake(outcome string) {
 	o.mu.Lock()
 	o.wakes[outcome]++
+	o.events = append(o.events, "wake:"+outcome)
 	o.mu.Unlock()
 }
 
 func (o *observer) Failure(class string) {
 	o.mu.Lock()
 	o.failures[class]++
+	o.events = append(o.events, "failure:"+class)
 	o.mu.Unlock()
 }
 
@@ -77,6 +80,12 @@ func (o *observer) failure(class string) int {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	return o.failures[class]
+}
+
+func (o *observer) recordedEvents() []string {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return slices.Clone(o.events)
 }
 
 // source is a Source with a fixed target list.
@@ -648,6 +657,14 @@ func TestHangingProviderTimesOut(t *testing.T) {
 	h.sender.Enqueue(post)
 	waitFor(t, "the second wake to be sent while the first hangs", func() bool { return h.obs.wake(OutcomeSent) == 1 })
 	waitFor(t, "the timeout", func() bool { return h.obs.failure(ClassTimeout) == 1 })
+	// Compare recorded order instead of checking for no timeout after observing
+	// sent: the timeout could occur between that observation and the check.
+	// One worker must time out before it can send the second wake, so fails here.
+	events := h.obs.recordedEvents()
+	sent, timeout := slices.Index(events, "wake:"+OutcomeSent), slices.Index(events, "failure:"+ClassTimeout)
+	if sent >= timeout {
+		t.Fatalf("second wake must be sent before the first times out; events = %v", events)
+	}
 }
 
 // TestSenderBounds: the queue is bounded and never blocks, drops are counted,
@@ -1197,7 +1214,11 @@ func TestEndpointNowForbiddenIsRefusedOnEverySend(t *testing.T) {
 				h.clk.Advance(2 * time.Hour) // past the backoff each refusal starts
 				h.sender.Enqueue(post)
 				want := i + 1
-				waitFor(t, "a refusal", func() bool { return h.obs.failure(ClassAddressRefused) == want })
+				// The sender records the class, then the outcome: wait for
+				// both, or the read below races the last one (issue #1928).
+				waitFor(t, "a refusal", func() bool {
+					return h.obs.failure(ClassAddressRefused) == want && h.obs.wake(OutcomeFailed) == want
+				})
 			}
 			if h.prov.Count() != 0 {
 				t.Errorf("%d requests reached the provider", h.prov.Count())
