@@ -503,7 +503,7 @@ jobs:
           npm ci
           bundle install
           bundle exec pod --version
-          (cd ios && bundle exec pod install)
+          (cd ios && bundle exec pod install --repo-update)
           test -s ios/Podfile.lock
           node gen-licences.mjs > licences.md
 
