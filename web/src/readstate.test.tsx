@@ -10,6 +10,9 @@ import type { ReadStateV1 } from './schema/readstate';
 import type { MessageV2 } from './schema/message';
 import { chatFor, chatReducer, initialChat, maxHeld, pageSize } from './state/messages';
 
+// A test that renders a whole held history (#1940).
+const heldHistoryTimeout = 60_000;
+
 const origin = 'http://127.0.0.1:8080';
 const secret = 'conch_secret_token_value';
 const ticketValue = 'conch_wst_TICKETTICKETTICKETTICKETTICKETTICKETTICKET';
@@ -726,6 +729,7 @@ describe('the opening unread position', () => {
     expect(server.pages).toEqual([Infinity]);
   });
 
+  // A whole held history: about 6 s here, three times that on CI (#1940).
   it.each([0, 10])('reaches the first unread exactly at maxHeld after mark %i', async (mark) => {
     server.history = Array.from({ length: maxHeld }, (_, i) => message(mark + i + 1));
     // Start one page short of the cap to exercise the final page transition.
@@ -751,7 +755,7 @@ describe('the opening unread position', () => {
     expect(screen.queryByRole('button', { name: 'Jump to first unread' })).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: 'Dismiss unread notice' }));
     expect(screen.queryByText('The first unread message is no longer available.')).toBeNull();
-  });
+  }, heldHistoryTimeout);
 
   it('allows dismissing a failed jump after manually loading the unread row', async () => {
     server.history = Array.from({ length: 150 }, (_, i) => message(i + 1));

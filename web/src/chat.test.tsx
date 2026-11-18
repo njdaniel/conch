@@ -8,6 +8,9 @@ import { pausedText } from './Composer';
 import { clock } from './Conversation';
 import { maxHeld, pageSize } from './state/messages';
 
+// A test that renders a whole held history (#1940).
+const heldHistoryTimeout = 60_000;
+
 // The bound on the app's first boot, under the 5 s test timeout (see openChat).
 const bootMs = 4000;
 const origin = 'http://127.0.0.1:8080';
@@ -2005,6 +2008,8 @@ describe('a long channel', () => {
     expect(screen.queryByText('m301')).toBeNull();
   });
 
+  // Rendering a whole held history (maxHeld messages) takes about 6 s here
+  // and three times that on CI's runners, past the default 15 s (#1940).
   // The exact rule (another page only while it fits within maxHeld) is in
   // state/messages.test.ts. This shows what the reader sees at the cap: the
   // channel starts nearly full, so it takes two pages and not nineteen (#459).
@@ -2044,7 +2049,7 @@ describe('the address bar', () => {
     expect(window.location.search).toBe('');
     expect(window.location.hash).toBe('#/c/general');
     expect(document.body.innerHTML).not.toContain(ticketValue);
-  });
+  }, heldHistoryTimeout);
 });
 
 describe('scrolling', () => {
@@ -2425,9 +2430,13 @@ describe('message permalinks', () => {
     fireEvent.click(screen.getByRole('menuitem', { name: 'Copy link' }));
     const field = await screen.findByLabelText<HTMLTextAreaElement>('Copy manually');
     expect(field.value).toBe(`${window.location.origin}/app/#/c/general/m/1`);
-    expect(document.activeElement).toBe(field);
-    expect(field.selectionEnd).toBe(field.value.length);
-    expect(field.selectionStart).toBe(0);
+    // The field takes focus in an effect after it renders (#1940): wait for
+    // it. A later refocus elsewhere would still fail here.
+    await waitFor(() => {
+      expect(document.activeElement).toBe(field);
+      expect(field.selectionEnd).toBe(field.value.length);
+      expect(field.selectionStart).toBe(0);
+    });
   });
 
   it('loads older pages and focuses and highlights the linked message', async () => {
