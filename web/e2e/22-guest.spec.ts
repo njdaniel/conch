@@ -49,6 +49,7 @@ test('G6 an invite offers an account form and no choice of a guest visit', async
   const made = await makeMemberLink(world, world.tokens.operator, { kind: 'member', landing_channels: ['general'] });
   const { page } = await meet();
   await page.goto(inviteUrl(world, made.code));
+  await page.getByRole('button', { name: 'Create an account', exact: true }).click();
   await expect(page.getByLabel('Choose a password')).toBeVisible();
   await expect(page.getByRole('group', { name: 'How to join' })).toHaveCount(0);
   await expect(page.getByRole('button', { name: 'Join as guest' })).toHaveCount(0);

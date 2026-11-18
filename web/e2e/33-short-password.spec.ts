@@ -27,6 +27,7 @@ test('G977 a four-letter password creates an account, signs in, changes and rese
   const name = `g977-${String(Date.now())}`;
   const { page } = await meet();
   await page.goto(inviteUrl(world, invite.code));
+  await page.getByRole('button', { name: 'Create an account', exact: true }).click();
   await expect(page.getByText(/at least 15|15 characters/)).toHaveCount(0);
   await fillAccount(page, name, first);
   await expect(statusLine(page)).toContainText('Connected');
