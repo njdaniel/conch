@@ -127,3 +127,56 @@ describe('the one runFile (voice/spawn.ts)', () => {
     expect(r?.stdout).not.toContain('HOME=');
   });
 });
+
+// Windows uses the production detector with fake tasklist replies: no Windows
+// executable, notification area or FFI is needed on the unit-test host.
+describe('Windows trayHostPresent', () => {
+  const env = { SystemRoot: 'C:\\Windows' };
+  const own = { code: 0, stdout: `"Conch.exe","${String(process.pid)}","Console","2","12,345 K"\r\n` };
+  const explorer = { code: 0, stdout: '"explorer.exe","4321","Console","2","123,456 K"\r\n' };
+
+  it('queries Explorer in this process session, using absolute-path argv', async () => {
+    const calls: [string, readonly string[], Readonly<Record<string, string>>][] = [];
+    const run: RunFile = (file, args, childEnv) => {
+      calls.push([file, args, childEnv]);
+      return Promise.resolve(calls.length === 1 ? own : explorer);
+    };
+    expect(await trayHostPresent(run, env, 'win32')).toBe(true);
+    expect(calls).toEqual([
+      ['C:\\Windows\\System32\\tasklist.exe', ['/FI', `PID eq ${String(process.pid)}`, '/FO', 'CSV', '/NH'], env],
+      ['C:\\Windows\\System32\\tasklist.exe', ['/FI', 'IMAGENAME eq explorer.exe', '/FI', 'SESSION eq 2', '/FO', 'CSV', '/NH'], env],
+    ]);
+  });
+
+  it.each([
+    ['Explorer absent', { code: 0, stdout: 'INFO: No tasks are running which match the specified criteria.' }],
+    ['timeout (RunFile returns null)', null],
+    ['failed command', { code: 1, stdout: explorer.stdout }],
+    ['garbage', { code: 0, stdout: 'explorer.exe is running' }],
+    ['empty output', { code: 0, stdout: '' }],
+    ['another session', { code: 0, stdout: '"explorer.exe","4321","RDP-Tcp#1","3","123 K"' }],
+    ['another image', { code: 0, stdout: '"other.exe","4321","Console","2","123 K"' }],
+    ['mixed garbage', { code: 0, stdout: explorer.stdout + 'garbage' }],
+    ['invalid PID', { code: 0, stdout: '"explorer.exe","oops","Console","2","123 K"' }],
+  ])('fails closed for %s', async (_name, result) => {
+    let calls = 0;
+    const run: RunFile = () => Promise.resolve(++calls === 1 ? own : result);
+    expect(await trayHostPresent(run, env, 'win32')).toBe(false);
+  });
+
+  it.each([null, { code: 0, stdout: 'garbage' }, { code: 0, stdout: '"Conch.exe","999999999","Console","2","12 K"' }])('requires a known current session: %j', async (result) => {
+    const f = fake(result);
+    expect(await trayHostPresent(f.run, env, 'win32')).toBe(false);
+    expect(f.calls).toHaveLength(1);
+  });
+
+  it('fails closed for a rejected runner or an unknown system root', async () => {
+    expect(await trayHostPresent(() => Promise.reject(new Error('unavailable')), env, 'win32')).toBe(false);
+    const missingRoots: Readonly<Record<string, string>>[] = [{}, { SystemRoot: 'relative' }];
+    for (const missing of missingRoots) {
+      const f = fake(explorer);
+      expect(await trayHostPresent(f.run, missing, 'win32')).toBe(false);
+      expect(f.calls).toHaveLength(0);
+    }
+  });
+});

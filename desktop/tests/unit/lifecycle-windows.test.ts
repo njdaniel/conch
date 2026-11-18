@@ -13,7 +13,7 @@ import type { NativeVoiceView } from '../../../web/src/platform/desktop/bridge.t
 import { Lifecycle } from '../../main/lifecycle.ts';
 import { WindowsLifecycle } from '../../main/lifecycle-windows.ts';
 import { SettingsService } from '../../main/settings.ts';
-import { trayHostPresent } from '../../main/tray-detect.ts';
+import { trayHostPresent, type RunFile } from '../../main/tray-detect.ts';
 import { TrayController, type TrayLike, type TrayMenuItem } from '../../main/tray.ts';
 import { TeardownHooks } from '../../main/profiles/hooks.ts';
 import { Switcher } from '../../main/profiles/switch.ts';
@@ -123,6 +123,16 @@ class FakeTray implements TrayLike {
 function trayRig(teardown?: () => Promise<void>) {
   const icon = new FakeTray();
   const state = { available: true, createFails: false, hidden: false };
+  // Feed tasklist output through the production Windows detection path, both
+  // for settings and the controller's periodic/close-time checks.
+  const run: RunFile = (_file, args) => Promise.resolve({
+    code: 0,
+    stdout: args.includes('IMAGENAME eq explorer.exe')
+      ? state.available ? '"explorer.exe","4321","Console","2","123 K"' : 'INFO: No tasks are running which match the specified criteria.'
+      : `"Conch.exe","${String(process.pid)}","Console","2","12 K"`,
+  });
+  const detect = () => trayHostPresent(run, { SystemRoot: 'C:\\Windows' }, 'win32');
+  let tick = (): void => undefined;
   let view: NativeVoiceView = {
     status: 'running', generation: 1, channel: 'general', retryable: false,
     helper: { version: 2, phase: 'connected', capture: 'on', playback: 'on', transmitting: true, muted: false, deafened: false, blocked: [], ptt: 'ready' },
@@ -141,10 +151,10 @@ function trayRig(teardown?: () => Promise<void>) {
   hooks.media('voice', async () => { await voice.leave(); await teardown?.(); });
   const switcher = new Switcher({ hooks, open: () => { throw new Error('Quit must never activate'); }, now: Date.now, log: () => undefined });
   let ending: Promise<unknown> | undefined;
-    const settings: SettingsService = new SettingsService({
+  const settings: SettingsService = new SettingsService({
     files: { read: () => Promise.resolve({ kind: 'absent' }), write: () => Promise.resolve() },
     autostart: { availability: () => Promise.resolve(null), enable: () => Promise.resolve({ ok: true }), disable: () => Promise.resolve({ ok: true }) },
-    trayDetected: () => Promise.resolve(state.available),
+    trayDetected: detect,
     trayWorking: () => tray.working(), trayExists: () => tray.exists, log: () => undefined,
   });
   const tray: TrayController = new TrayController({
@@ -153,23 +163,36 @@ function trayRig(teardown?: () => Promise<void>) {
     sharing: () => false, endCompanion: () => Promise.resolve(true), profile: () => 'Home',
     show: () => { state.hidden = false; }, hidden: () => state.hidden,
     quit: () => { ending = switcher.close({ reason: 'quit' }); },
-    detect: () => Promise.resolve(state.available), revoke: () => { settings.revokeTrayConfirmation(); },
+    detect, revoke: () => { settings.revokeTrayConfirmation(); },
     settings: () => settings.current, confirmed: () => settings.trayConfirmed,
-    every: () => () => undefined, log: () => undefined,
+    every: (fn) => { tick = fn; return () => undefined; }, log: () => undefined,
   });
   const close = async (): Promise<void> => {
     await tray.check();
     if (settings.closeAction(false) === 'stay') state.hidden = true;
     else await switcher.close({ reason: 'quit' });
   };
-  return { tray, settings, state, voice, icon, close, ending: () => ending };
+  return { tray, settings, state, voice, icon, close, tick: () => { tick(); }, ending: () => ending };
 }
 
 describe('Windows close and tray reuse the shared policy', () => {
-  it('Windows detection permits an attempt without executing gdbus', async () => {
-    const run = vi.fn(() => Promise.resolve(null));
-    expect(await trayHostPresent(run, {}, 'win32')).toBe(true);
-    expect(run).not.toHaveBeenCalled();
+  it('restores a confirmed hidden call when Explorer disappears at a periodic check', async () => {
+    const r = trayRig();
+    expect((await r.settings.set({ closeToTray: true })).ok).toBe(true);
+    await r.tray.sync();
+    expect((await r.settings.set({ trayConfirmed: true })).ok).toBe(true);
+    await r.close();
+    expect(r.state.hidden).toBe(true);
+    expect(r.tray.working()).toBe(true);
+    r.state.available = false;
+    r.tick();
+    await vi.waitFor(() => { expect(r.state.hidden).toBe(false); });
+    expect(r.settings.trayConfirmed).toBe(false);
+    expect(r.tray.working()).toBe(false);
+    expect(r.voice.setMute).toHaveBeenCalledWith(true);
+    r.state.available = true;
+    await r.tray.check();
+    expect(r.tray.working()).toBe(false); // Recovery requires fresh confirmation.
   });
 
   it('close quits and stops media by default', async () => {
