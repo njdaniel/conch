@@ -472,6 +472,10 @@ func TestStatuses(t *testing.T) {
 			h.prov.WaitFor(t, tt.requests, 5*time.Second)
 			if tt.outcome != "" {
 				waitFor(t, "outcome "+tt.outcome, func() bool { return h.obs.wake(tt.outcome) == 1 })
+				// Outcomes are counted before store writes; wait for the worker
+				// to finish before checking their side effects. Pending retries
+				// keep the sender busy, so only terminal outcomes wait for Idle.
+				waitFor(t, "the sender to finish", h.sender.Idle)
 			} else {
 				waitFor(t, "a retry to be scheduled", func() bool { return len(h.timers.delays()) == 1 })
 				if got := h.timers.delays()[0]; got != tt.firstWait {
