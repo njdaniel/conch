@@ -2444,7 +2444,7 @@ describe('message permalinks', () => {
     expect(scroll).toHaveBeenCalled();
   });
 
-  for (const hash of ['#/c/general/m/9999', '#/c/private/m/1', '#/c/general/m/0']) {
+  for (const hash of ['#/c/general/m/9999', '#/c/private/m/1', '#/c/general/m/0', '#/c/general/m/', '#/c/general/m/1/extra']) {
     it(`gives the same unavailable notice for ${hash}`, async () => {
       server.history.general = [message(1, 'visible')];
       await openChat(hash);

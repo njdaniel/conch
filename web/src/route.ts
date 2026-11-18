@@ -24,7 +24,7 @@ export function hashForChannel(name: string): string {
 // Message links carry only a channel and a positive, exactly representable id.
 // Parse this form before the legacy channel route; encoded slashes stay names.
 export function messageFromHash(hash: string): { readonly channel: string; readonly id: number | null } | null {
-  const match = /^#\/c\/([^/]+)\/m\/([^/]+)$/.exec(hash);
+  const match = /^#\/c\/([^/]+)\/m\/(.*)$/.exec(hash);
   if (match === null) return null;
   try {
     const channel = decodeURIComponent(match[1] ?? '');

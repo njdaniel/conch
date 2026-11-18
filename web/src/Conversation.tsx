@@ -225,6 +225,15 @@ export function Message({
   const [copyNotice, setCopyNotice] = useState('');
   const [manualCopy, setManualCopy] = useState<string | null>(null);
   const copyField = useRef<HTMLTextAreaElement>(null);
+  const copyRequest = useRef(0);
+  useLayoutEffect(() => {
+    if (message.removed === true) {
+      setManualCopy(null);
+      setCopyNotice('');
+    }
+    // A clipboard result cannot restore content after removal or unmount.
+    return () => { copyRequest.current++; };
+  }, [message.removed]);
   useEffect(() => {
     if (manualCopy !== null) { copyField.current?.focus(); copyField.current?.select(); }
   }, [manualCopy]);
@@ -234,11 +243,16 @@ export function Message({
     row.current?.focus({ preventScroll: true });
   }, [highlighted]);
   function copy(kind: 'link' | 'text') {
+    if (message.removed === true) return;
+    const request = ++copyRequest.current;
     const value = kind === 'link' ? `${platform.services.origin()}/app/${hashForMessage(channel, message.id)}` : message.body;
     setManualCopy(null);
+    more.current?.focus();
     void Promise.resolve().then(() => platform.services.copyText(value)).then(() => {
+      if (request !== copyRequest.current) return;
       setCopyNotice(kind === 'link' ? 'Link copied.' : 'Text copied.');
     }).catch(() => {
+      if (request !== copyRequest.current) return;
       setCopyNotice('Clipboard unavailable. Copy the selected text.');
       setManualCopy(value);
     });
@@ -289,8 +303,8 @@ export function Message({
           </span>
         )}
       </Line>
-      {copyNotice === '' ? null : <p role="status">{copyNotice}</p>}
-      {manualCopy === null ? null : <label>Copy manually<textarea ref={copyField} readOnly value={manualCopy} onFocus={(event) => { event.currentTarget.select(); }} /></label>}
+      {message.removed === true || copyNotice === '' ? null : <p role="status">{copyNotice}</p>}
+      {message.removed === true || manualCopy === null ? null : <label>Copy manually<textarea ref={copyField} readOnly value={manualCopy} onFocus={(event) => { event.currentTarget.select(); }} /></label>}
       {notice === undefined || notice === null ? null : <p role="status" className="edit-notice">{notice}</p>}
       {items.length === 0 ? null : (
         <ActionsMenu label={`More actions for ${who}`} items={items} open={menuOpen} onOpenChange={setMenuOpen} button={more} />
@@ -535,7 +549,7 @@ function ThreadView({ highlightedId, rootId, root, chat, channel, live, archived
           <p className="hint">Replying to {rootMessage.audience === undefined ? `#${channel}` : audienceLabel(rootMessage.audience, viewer, nets)}; the audience cannot be changed.</p>
           <label htmlFor={`reply-${String(rootId)}`}>Reply to {authorOf(rootMessage, people)}</label>
           <div className="reply-box">
-            <textarea id={`reply-${String(rootId)}`} autoFocus rows={2} value={draft} disabled={live !== 'open'} onChange={(event) => {
+            <textarea id={`reply-${String(rootId)}`} autoFocus={highlightedId === null} rows={2} value={draft} disabled={live !== 'open'} onChange={(event) => {
               onDraft(event.target.value);
             }} onCompositionStart={() => { composing.current = true; }} onCompositionEnd={() => { composing.current = false; }} onKeyDown={(event) => {
               if (event.key === 'ArrowUp' && draft === '' && !composing.current && !event.nativeEvent.isComposing && !event.shiftKey && !event.ctrlKey && !event.altKey && !event.metaKey && onEditLast(messages, event.currentTarget)) {

@@ -6,6 +6,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as api from './api';
+import { platform } from './platform';
 import { Conversation } from './Conversation';
 import { editWindowMs, when } from './MessageEdit';
 import { longPressMs } from './MessageMenu';
@@ -28,6 +29,7 @@ function chat(messages: readonly MessageV2[], pending: readonly PendingSend[] = 
 }
 
 interface Options {
+  readonly highlightedId?: number;
   readonly held?: ChannelChat;
   readonly onEdited?: (message: MessageV2) => void;
   readonly kind?: Person['kind'];
@@ -38,10 +40,11 @@ interface Options {
   readonly onLoadOlder?: () => void;
 }
 
-function conversation(messages: readonly MessageV2[], { held, onEdited = vi.fn(), kind = 'human', pending = [], edits = true, channelId, exhausted = true, onLoadOlder = () => undefined }: Options = {}) {
+function conversation(messages: readonly MessageV2[], { highlightedId, held, onEdited = vi.fn(), kind = 'human', pending = [], edits = true, channelId, exhausted = true, onLoadOlder = () => undefined }: Options = {}) {
   return (
     <Conversation
       {...(channelId === undefined ? {} : { channelId })}
+      highlightedId={highlightedId}
       channel="general"
       chat={held ?? chat(messages, pending, exhausted)}
       live="open"
@@ -813,5 +816,63 @@ describe('Up from the composer', () => {
     await waitFor(() => { expect(onEdited).toHaveBeenCalledWith(expect.objectContaining({ id: 2, body: 'fixed' })); });
     expect(within(thread).getByText('fixed')).toBeTruthy();
     expect(within(thread).queryByRole('textbox', { name: editName })).toBeNull();
+  });
+});
+
+
+describe('message link and clipboard focus', () => {
+  it('keeps focus on a recent linked reply when its older root arrives', async () => {
+    const root = msg(1, { author_id: 3 });
+    const reply = msg(110, { thread_root_id: 1 });
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    vi.spyOn(api, 'loadThread').mockImplementation(async () => {
+      await gate;
+      return { ok: true, value: { messages: [root, reply] } };
+    });
+    render(conversation([reply], { highlightedId: reply.id }));
+    const thread = screen.getByRole('region', { name: 'Thread' });
+    const linked = thread.querySelector('[data-message-id="110"]');
+    expect(document.activeElement).toBe(linked);
+    expect(within(thread).queryByRole('textbox')).toBeNull();
+    await act(async () => { release(); await gate; });
+    await within(thread).findByRole('textbox', { name: 'Reply to bea' });
+    expect(document.activeElement).toBe(linked);
+  });
+
+  it.each(['Copy link', 'Copy text'])('returns focus to the menu button after %s succeeds', async (action) => {
+    vi.spyOn(platform.services, 'copyText').mockResolvedValue();
+    render(conversation([msg(1)], { edits: false }));
+    const button = more(1);
+    if (button === null) throw new Error('no copy menu');
+    button.focus();
+    fireEvent.click(button);
+    const entry = screen.getByRole('menuitem', { name: action });
+    entry.focus();
+    fireEvent.click(entry);
+    await screen.findByText(action === 'Copy link' ? 'Link copied.' : 'Text copied.');
+    expect(document.activeElement).toBe(button);
+  });
+
+  it.each([false, true])('removes manual copy content on a tombstone (late clipboard failure: %s)', async (late) => {
+    let refuse: () => void = () => undefined;
+    const gate = new Promise<void>((_resolve, reject) => { refuse = () => { reject(new Error('refused')); }; });
+    const copy = vi.spyOn(platform.services, 'copyText').mockReturnValue(gate);
+    const original = msg(1, { body: 'secret removed text' });
+    const view = render(conversation([original], { edits: false }));
+    fireEvent.click(more(1) as HTMLElement);
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Copy text' }));
+    await waitFor(() => { expect(copy).toHaveBeenCalledWith(original.body); });
+    if (!late) {
+      await act(async () => { refuse(); await Promise.resolve(); });
+      const field = await screen.findByLabelText<HTMLTextAreaElement>('Copy manually');
+      expect(field.value).toBe(original.body);
+      expect(document.activeElement).toBe(field);
+    }
+    view.rerender(conversation([{ ...original, body: 'This message was removed by a moderator.', removed: true }], { edits: false }));
+    if (late) await act(async () => { refuse(); await Promise.resolve(); });
+    expect(screen.queryByLabelText('Copy manually')).toBeNull();
+    expect(screen.queryByText('Clipboard unavailable. Copy the selected text.')).toBeNull();
+    expect(document.body.textContent).not.toContain(original.body);
   });
 });

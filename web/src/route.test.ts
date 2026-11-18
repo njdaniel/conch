@@ -10,7 +10,7 @@ describe('message routes', () => {
       expect(channelFromHash(hashForMessage(channel, 42))).toBe(channel);
     });
   }
-  for (const id of ['abc', '0', '-1', '1.2', '9007199254740992', '999999999999999999999999']) {
+  for (const id of ['', '1/extra', 'abc', '0', '-1', '1.2', '9007199254740992', '999999999999999999999999']) {
     it(`rejects id ${id} without treating it as a channel name`, () => {
       expect(messageFromHash(`#/c/general/m/${id}`)).toEqual({ channel: 'general', id: null });
       expect(channelFromHash(`#/c/general/m/${id}`)).toBe('general');
