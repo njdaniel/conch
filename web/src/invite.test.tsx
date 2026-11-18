@@ -194,14 +194,57 @@ describe('the landing page', () => {
     const onBack = vi.fn();
     render(<Invite origin={origin} inviteCode={inviteCode} signedInAs={null} unchecked={false}
       onNewPerson={() => Promise.resolve(true)} onBack={onBack} onJoined={vi.fn()} onSignIn={vi.fn()} />);
-    fireEvent.click(await screen.findByRole('button', { name: 'Create an account' }));
-    expect(screen.getByLabelText('Your name')).toBeDefined();
-    fireEvent.click(screen.getByRole('button', { name: 'Go back' }));
+    const create = await screen.findByRole('button', { name: 'Create an account' });
+    create.focus();
+    fireEvent.click(create);
+    expect(document.activeElement).toBe(screen.getByLabelText('Your name'));
+    const back = screen.getByRole('button', { name: 'Go back' });
+    back.focus();
+    fireEvent.click(back);
     expect(screen.getByRole('button', { name: 'Sign in' })).toBeDefined();
     expect(screen.getByRole('button', { name: 'Create an account' })).toBeDefined();
     expect(screen.queryByLabelText('Your name')).toBeNull();
+    expect(document.activeElement).toBe(screen.getByRole('heading', { level: 1 }));
     expect(onBack).not.toHaveBeenCalled();
     expect(calls.some((c) => c.path === '/v2/invites/redeem')).toBe(false);
+  });
+
+  it.each([
+    { state: 'paused', answer: () => json({ ...preview, join: { ...preview.join, paused: true } }), line: 'Joining through this invite is paused for now. Try the link again later.' },
+    { state: 'closed', answer: () => refusal(404, 'invite_invalid'), line: noLongerWorks },
+    { state: 'insecure', answer: () => json(preview), line: insecureLine },
+    { state: 'account:false', answer: () => json({ ...preview, join: { guest: true, account: false } }), line: 'This invite cannot be used to join right now. Ask ada for another way in.' },
+    { state: 'signed in', answer: () => json(preview), line: /You are signed in here as/ },
+  ])('offers no account form or choice when $state', async ({ state, answer, line }) => {
+    const calls = serve({ ...joining, 'POST /v2/invites/preview': answer });
+    render(<Invite origin={state === 'insecure' ? 'http://192.168.1.20:8080' : origin}
+      inviteCode={inviteCode} signedInAs={state === 'signed in' ? 'ada' : null} unchecked={false}
+      onNewPerson={() => Promise.resolve(true)} onBack={vi.fn()} onJoined={vi.fn()} onSignIn={vi.fn()} />);
+    expect(await screen.findByText(line)).toBeDefined();
+    expect(screen.queryByLabelText('Your name')).toBeNull();
+    expect(document.querySelector('input[type="password"]')).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Create an account' })).toBeNull();
+    expect(calls.some((c) => c.path === '/v2/invites/redeem')).toBe(false);
+  });
+
+  it('returns to the choice and clears the previous refusal when the invite code changes', async () => {
+    const calls = serve({ ...joining, 'POST /v2/invites/redeem': () => refusal(409, 'principal_exists') });
+    const props = { origin, signedInAs: null, unchecked: false,
+      onNewPerson: () => Promise.resolve(true), onBack: vi.fn(), onJoined: vi.fn(), onSignIn: vi.fn() };
+    const view = render(<Invite {...props} inviteCode={inviteCode} />);
+    await chooseName('wren');
+    const line = 'That name is taken. Choose another.';
+    expect(await screen.findByText(line)).toBeDefined();
+
+    const nextCode = `conch_inv_${'R'.repeat(40)}`;
+    view.rerender(<Invite {...props} inviteCode={nextCode} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Create an account' }));
+    expect(calls.filter((c) => c.path === '/v2/invites/preview').map((c) => c.body)).toEqual([
+      { code: inviteCode }, { code: nextCode },
+    ]);
+    expect(screen.queryByText(line)).toBeNull();
+    expect(screen.getByLabelText<HTMLInputElement>('Your name').value).toBe('');
+    expect(document.activeElement).toBe(screen.getByLabelText('Your name'));
   });
 
   it('shows the preview, then a choice, and joins into the lobby with the code nowhere', async () => {

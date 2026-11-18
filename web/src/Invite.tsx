@@ -180,7 +180,13 @@ export function Invite({
   const heading = useRef<HTMLHeadingElement>(null);
 
   useEffect(() => {
+    setMakingAccount(false);
+    setProblem(null);
+  }, [inviteCode]);
+
+  useEffect(() => {
     let live = true;
+    setPreview({ state: 'loading' });
     void api.previewMemberLink(inviteCode).then((result) => {
       if (!live) return;
       if (result.ok) setPreview({ state: 'ready', preview: result.value });
@@ -192,8 +198,8 @@ export function Invite({
   }, [inviteCode, attempt]);
 
   useEffect(() => {
-    heading.current?.focus();
-  }, [preview.state]);
+    if (preview.state !== 'ready' || !makingAccount) heading.current?.focus();
+  }, [preview.state, makingAccount]);
 
   const ready = preview.state === 'ready' ? preview.preview : null;
   const offer = ready === null ? null : offerOf(ready);
@@ -396,7 +402,7 @@ export function Invite({
                   </p>
                 </>
               ) : null}
-              {way === 'account' && (!canChoose || makingAccount) ? (
+              {canChoose && makingAccount ? (
                 <CreateAccount
                   purpose="invite"
                   busy={busy}
@@ -405,8 +411,7 @@ export function Invite({
                   onCancel={() => {
                     if (busy) return;
                     setProblem(null);
-                    if (canChoose) setMakingAccount(false);
-                    else onBack();
+                    setMakingAccount(false);
                   }}
                 />
               ) : null}
