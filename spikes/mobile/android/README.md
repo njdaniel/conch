@@ -18,6 +18,18 @@ Deviation from the RN template: it names compileSdk 37, Build-Tools 37.0.0 and t
 
 Roughly 13 GB for the SDK, system image, Gradle cache and AVD, plus about 3 GB of build output in `android/app/build`.
 
+## Standalone APK for the device run (#1920)
+
+The debug build loads its JavaScript from Metro, so it needs the computer. For the unplugged M4 rows (lock, background, interruptions) build the release variant: it bundles the JS (`assets/index.android.bundle`), is signed with the debug keystore (`android/app/debug.keystore`), and needs no Metro or USB. No Gradle change is needed: the release build type already does this. It refuses cleartext (`usesCleartextTraffic=false`), so the server must be `https://`.
+
+    source ~/.cache/conch/android-env.sh
+    nvm use && npm ci
+    (cd android && ./gradlew assembleRelease)
+    # -> android/app/build/outputs/apk/release/app-release.apk (about 107 MiB)
+    adb install -r android/app/build/outputs/apk/release/app-release.apk   # or copy the file to the phone and open it
+
+Open the app and, at sign-in, type `https://alpha.gankbears.com` as the server, then the name and password, or paste a one-use sign-in link (`conch admin principal sign-in-link <id>`). Check the bundle with `unzip -l app-release.apk | grep index.android.bundle`. An emulator start with Metro stopped is not device evidence.
+
 ## Checks
 
 `./check.sh` runs `scripts/web-depgate.sh` and `scripts/web-licences.sh` against this directory's manifest, lockfile and allowlists, then `npm ci` and `tsc --noEmit`, then checks the Gradle lockfiles for exact versions.
