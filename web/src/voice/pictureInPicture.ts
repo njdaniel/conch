@@ -1,6 +1,9 @@
 // Video PiP keeps the same muted video and its separate in-page audio sink.
 // Never detach or replace the video on enter/leave: LiveKit observes these
-// events to keep receiving while the page is in the background.
+// events to keep receiving while the page is in the background. Unmounting
+// the view closes PiP: that is the watch ending (Stop watching, the share
+// gone, leaving voice). A renewed room does not unmount it (VoicePanel's
+// heldTiles), since PiP opens again only from a tap.
 import { useEffect, useState, type RefObject } from 'react';
 
 export function usePictureInPicture(video: RefObject<HTMLVideoElement | null>) {

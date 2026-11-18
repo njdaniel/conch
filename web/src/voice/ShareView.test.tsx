@@ -17,7 +17,7 @@ import { initialChannels } from '../state/channels';
 import type { Person } from '../useLiveChannel';
 import { VoiceClient, type Room, type RoomEvents, type ShareSink } from './connection';
 import { FakeClock, noCamera, settle } from './fakes';
-import { settleQuality, type Captured, type KeptScreen, type SettledQuality, type ShareFeatures, type ShareQuality, type ShareSample } from './share';
+import { resumeLimit, settleQuality, type Captured, type KeptScreen, type SettledQuality, type ShareFeatures, type ShareQuality, type ShareSample } from './share';
 import { ShareReadout, ShareView } from './ShareView';
 import type { Snapshot, VoiceControl } from './useVoice';
 import { VoicePanel } from './VoicePanel';
@@ -144,8 +144,9 @@ const chrome: ShareFeatures = { canShare: true, chromium: true, platform: 'linux
 // wrap puts the panel where the page puts it, for a test of the layout.
 function setup(claims: ShareClaimResult[] = [], features: ShareFeatures = chrome, wrap?: (panel: ReactNode) => ReactNode, viewed = 'general', channels: readonly { id: number; name: string; created_at: string; manages?: boolean }[] = []) {
   const rooms: StubRoom[] = [];
+  const clock = new FakeClock();
   const client = new VoiceClient({
-    clock: new FakeClock(),
+    clock,
     mode: { get: () => 'ptt', set: () => undefined },
     random: () => 0.5,
     createSession: () => Promise.resolve(session),
@@ -198,7 +199,7 @@ function setup(claims: ShareClaimResult[] = [], features: ShareFeatures = chrome
     });
     view.rerender(tree());
   };
-  return { client, rooms, joins, seen, view };
+  return { client, clock, rooms, joins, seen, view };
 }
 
 vi.mock('../api', async (original) => ({ ...await original<typeof import('../api')>(), moderate: vi.fn() }));
@@ -339,6 +340,57 @@ describe('watching', () => {
       await act(settle);
       expect(exit).toHaveBeenCalledOnce();
       expect(current).toBeNull();
+    });
+
+    // A renewed room (#1947 holds the watch): presence lists nobody, then
+    // LiveKit deletes the room, then the share resumes in the next one. The
+    // browser enters PiP only from a tap, so the view, and its video element,
+    // stay through the wait and the next room plays into that same element.
+    const renewed = { ...presence(null), rooms: [{ participants: [] }] };
+    it('stays open through a renewal: empty presence, room deleted, the share resumed, in the same element', async () => {
+      enable();
+      const t = await watching();
+      act(() => { t.rooms[0]?.events?.onStreamTracks(8, { video: true, audio: true }); });
+      fireEvent.click(screen.getByRole('button', { name: 'Pop out' }));
+      await act(settle);
+      const video = t.rooms[0]?.streamSinks.get(8)?.video;
+      expect(video).toBeDefined();
+      expect(current).toBe(video);
+      t.seen(renewed);
+      expect(screen.getByRole('region', { name: 'Shared screen' }).textContent).toContain('bea · Reconnecting');
+      expect(document.querySelector('video')).toBe(video);
+      act(() => { t.rooms[0]?.events?.onDisconnected('room_deleted'); });
+      await act(settle);
+      expect(t.rooms).toHaveLength(2);
+      expect(t.rooms[1]?.streamSinks.get(8)?.video).toBe(video);
+      expect(screen.getByText('Waiting for the stream to come back')).toBeTruthy();
+      expect(document.querySelector('video')).toBe(video);
+      t.seen(presence(8, true));
+      act(() => { t.rooms[1]?.events?.onStreamTracks(8, { video: true, audio: true }); });
+      await act(settle);
+      expect(streamView('bea')).toBeTruthy();
+      expect(document.querySelector('video')).toBe(video);
+      expect(t.rooms[1]?.streamSinks.get(8)?.video).toBe(video);
+      expect(exit).not.toHaveBeenCalled();
+      expect(current).toBe(video);
+      expect(screen.getByRole('button', { name: 'Return to stage', pressed: true })).toBeTruthy();
+    });
+
+    it.each(['the wait runs out', 'stop watching'] as const)('closes when a renewal was waited for and %s', async (end) => {
+      enable();
+      const t = await watching();
+      fireEvent.click(screen.getByRole('button', { name: 'Pop out' }));
+      await act(settle);
+      t.seen(renewed);
+      act(() => { t.rooms[0]?.events?.onDisconnected('room_deleted'); });
+      await act(settle);
+      expect(exit).not.toHaveBeenCalled();
+      if (end === 'stop watching') fireEvent.click(screen.getByRole('button', { name: 'Stop watching' }));
+      else act(() => { t.clock.advance(resumeLimit); });
+      await act(settle);
+      expect(exit).toHaveBeenCalledOnce();
+      expect(current).toBeNull();
+      expect(screen.queryByRole('region', { name: 'Shared screen' })).toBeNull();
     });
 
     it('closes a request that finishes after Stop watching removed its tile', async () => {

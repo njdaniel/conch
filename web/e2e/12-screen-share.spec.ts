@@ -19,6 +19,7 @@
 // person with the devices (#474).
 import type { Browser, BrowserContextOptions, Locator, Page } from '@playwright/test';
 import type { VoicePresenceV2 } from '../src/schema/voice';
+import { resumeLimit } from '../src/voice/share';
 import { expect, expectFits, openChannel, phones, showView, test } from './fixtures';
 import { enter, expectClean as expectCleanPage, inbound, joinVoice, type Someone } from './people';
 import { dockerAvailable, startVoiceWorld, type Member, type VoiceWorld } from './voice-world';
@@ -665,7 +666,9 @@ test.describe('screen share with LiveKit', () => {
   // again in the new room and publishes the same capture: the audit shows the
   // share stopped by the renewal and started again. A sharer who is the one
   // disabled gets no session, and the share does not come back.
-  test('a share carries on when another member is disabled, and ends for good when the sharer is', async ({ browser }) => {
+  test('a share carries on when another member is disabled, and ends for good when the sharer is', async ({ browser, browserName }) => {
+    // The viewer waits out the resume of the share that does not come back.
+    test.setTimeout(150_000);
     const before = (await shareRows()).length;
     const dave = await vw.addMember('dave');
     const erin = await vw.addMember('erin');
@@ -680,6 +683,16 @@ test.describe('screen share with LiveKit', () => {
       await joinVoice(d, 'Join voice');
       await share(a);
       await watching(b);
+      // Where the browser has video PiP (#1839), the viewer pops the picture
+      // out first: it stays out through the renewal, in the same element,
+      // which the old room's track leaves and the new room's plays into.
+      const pip = browserName === 'chromium';
+      const video = shareView(b.page).locator('video');
+      if (pip) {
+        await shareView(b.page).getByRole('button', { name: 'Pop out', exact: true }).click();
+        await expect.poll(() => video.evaluate((v) => document.pictureInPictureElement === v)).toBe(true);
+        await video.evaluate((v) => { v.dataset.before = 'renewal'; });
+      }
 
       // Another member is disabled: the room is renewed, every page
       // reconnects, and the share is back without anyone doing anything.
@@ -694,12 +707,20 @@ test.describe('screen share with LiveKit', () => {
       await expect.poll(async () => (await inbound(b.page)).frames, { timeout: 30_000 }).toBeGreaterThan(10);
       const frames = (await inbound(b.page)).frames;
       await expect.poll(async () => (await inbound(b.page)).frames, { timeout: 15_000 }).toBeGreaterThan(frames);
+      if (pip) {
+        expect(await b.page.evaluate(() => (document.pictureInPictureElement as HTMLElement | null)?.dataset.before ?? null), 'the same element is still in PiP').toBe('renewal');
+        await expect(shareView(b.page).getByRole('button', { name: 'Return to stage', pressed: true })).toBeVisible();
+        await shareView(b.page).getByRole('button', { name: 'Return to stage', exact: true }).click();
+        await expect.poll(() => b.page.evaluate(() => document.pictureInPictureElement === null)).toBe(true);
+      }
       await expect
         .poll(async () => (await shareRows()).slice(before).map((r) => `${r.action} ${/reason=(\w+)/.exec(r.detail)?.[1] ?? ''}`.trim()), { timeout: 15_000 })
         .toEqual(['voice_share_started', 'voice_share_stopped rotated', 'voice_share_started']);
 
       // The sharer is the one disabled: the share ends, and does not come
-      // back; the capture is stopped.
+      // back; the capture is stopped. The viewer's page cannot tell that from
+      // a renewal it waits out, so the view stays, reconnecting, until the
+      // wait for the share runs out (resumeLimit; #1839), and then goes.
       await voiceRegion(a.page).getByRole('button', { name: 'Stop sharing' }).click();
       await expect(voiceRegion(a.page)).toContainText('You stopped sharing.');
       await joinVoice(e, 'Join voice');
@@ -708,12 +729,13 @@ test.describe('screen share with LiveKit', () => {
       await watching(b, 'erin');
       const middle = (await shareRows()).length;
       await vw.disable(erin);
-      await expect(shareView(b.page)).toHaveCount(0, { timeout: 30_000 });
+      await expect(shareView(b.page)).toContainText('erin · Reconnecting', { timeout: 30_000 });
       await expect
         .poll(() => e.page.evaluate(() => (window as unknown as { __screen: MediaStream | null }).__screen?.getVideoTracks()[0]?.readyState ?? 'gone'), { timeout: 30_000 })
         .toBe('ended');
-      // Long enough for a resume to have been claimed (it takes a reconnect).
-      await b.page.waitForTimeout(10_000);
+      // The wait is long enough for a resume to have been claimed (it takes a
+      // reconnect).
+      await expect(shareView(b.page)).toHaveCount(0, { timeout: resumeLimit + 15_000 });
       expect((await shareRows()).slice(middle).map((r) => `${r.action} ${/reason=(\w+)/.exec(r.detail)?.[1] ?? ''}`.trim())).toEqual(['voice_share_stopped rotated']);
       await expect(voiceRegion(b.page).getByRole('button', { name: 'Watch' })).toHaveCount(0);
       await expectClean(a);
