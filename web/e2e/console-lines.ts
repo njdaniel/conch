@@ -76,3 +76,23 @@ export function withoutJoinTokenInSocketRefusals(lines: readonly string[], brows
     return line.replace(shape, '$1$2$3');
   });
 }
+
+// What expectClean says when a secret is in the console (issue #1955): each
+// line that holds a secret, with every secret in it written as "[secret #i]"
+// so that no secret is printed, and where the line came from: "browser log
+// (<source>)" when the browser logged that exact line itself, "page console"
+// otherwise. It reads the lines as given to the check (after the allowance
+// above), so it shows what the check refused.
+export function secretLines(lines: readonly string[], browserLog: readonly BrowserLogEntry[], secrets: readonly string[]): string[] {
+  const out: string[] = [];
+  for (const line of lines) {
+    const found = secrets.map((s, i) => ({ s, i })).filter(({ s }) => s !== '' && line.includes(s));
+    if (found.length === 0) continue;
+    const from = browserLog.find((e) => `${e.level}: ${e.text}` === line);
+    let shown = line;
+    // The longest first, so that a secret inside another is not left half written.
+    for (const { s, i } of [...found].sort((x, y) => y.s.length - x.s.length)) shown = shown.replaceAll(s, `[secret #${String(i)}]`);
+    out.push(`${from === undefined ? 'page console' : `browser log (${from.source})`}: ${shown}`);
+  }
+  return out;
+}

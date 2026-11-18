@@ -1,7 +1,8 @@
-// The one console allowance of expectClean (issues #1760 and #1915). A unit
-// test: no browser, no network.
+// The one console allowance of expectClean (issues #1760 and #1915), and what
+// it says of a line it refuses (issue #1955). A unit test: no browser, no
+// network.
 import { describe, expect, it } from 'vitest';
-import { withoutJoinTokenInSocketRefusals, type BrowserLogEntry } from './console-lines';
+import { secretLines, withoutJoinTokenInSocketRefusals, type BrowserLogEntry } from './console-lines';
 
 const origin = 'ws://127.0.0.1:22197';
 const tail = "' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED";
@@ -84,5 +85,24 @@ describe('withoutJoinTokenInSocketRefusals', () => {
     const line = `error: WebSocket connection to '${origin}/rtc/v1?access_token=eyJjoin${tail}`;
     const [out] = withoutJoinTokenInSocketRefusals([line], [logged(line)], 'http://127.0.0.1:22197/');
     expect(out).not.toContain('eyJjoin');
+  });
+});
+
+// What expectClean prints of a line holding a secret (issue #1955): never the
+// secret, and where the line came from.
+describe('secretLines', () => {
+  it('writes each secret as its number and says the browser logged the line', () => {
+    expect(secretLines([refused], [logged(refused)], ['conch_pat_x', 'eyJjoin'])).toEqual([
+      `browser log (network): error: WebSocket connection to '${origin}/rtc/v1?access_token=[secret #1]&join_request=CAES%3D${tail}`,
+    ]);
+  });
+
+  it('says the page logged a line the browser did not, and skips lines without a secret', () => {
+    expect(secretLines(['log: hello', 'error: token eyJjoin'], [logged(refused)], ['eyJjoin'])).toEqual(['page console: error: token [secret #0]']);
+  });
+
+  it('writes a secret inside another as the longer one', () => {
+    const out = secretLines(['log: eyJjoin.sig'], [], ['eyJjoin', 'eyJjoin.sig']);
+    expect(out).toEqual(['page console: log: [secret #1]']);
   });
 });
