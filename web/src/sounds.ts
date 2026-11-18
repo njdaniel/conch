@@ -1,4 +1,3 @@
-import { BrowserSoundSink } from './platform/browser/sounds';
 // Optional interface audio owns its context only; it never opens a device or
 // changes the voice client's audio routing. Skipped sounds are never queued.
 import { useSyncExternalStore } from 'react';
@@ -32,16 +31,16 @@ export interface AudioSink {
 }
 export class SoundPlayer {
   private unlocked = false;
-  constructor(private sink: AudioSink, private preferences: () => SoundPreferences) {}
+  constructor(private sink: AudioSink | undefined, private preferences: () => SoundPreferences) {}
   unlock(): void {
     const p = this.preferences();
-    if (!p.message && !p.join && !p.leave && !p.share) return;
+    if (this.sink === undefined || (!p.message && !p.join && !p.leave && !p.share)) return;
     this.unlocked = true;
     this.sink.unlock();
   }
   play(sound: Sound): void {
     const p = this.preferences();
-    if (!this.unlocked || !p[sound] || p.volume === 0 || !this.sink.ready()) return;
+    if (!this.unlocked || !p[sound] || p.volume === 0 || !this.sink?.ready()) return;
     try { this.sink.play(sound, p.volume); } catch { /* Audio failure is silent. */ }
   }
 }
@@ -52,7 +51,7 @@ const subscribe = (listener: () => void) => {
   listeners.add(listener);
   return () => { listeners.delete(listener); };
 };
-export const sounds = new SoundPlayer(new BrowserSoundSink(), snapshot);
+export const sounds = new SoundPlayer(platform.services.sounds, snapshot);
 export function setSoundPreferences(next: SoundPreferences): void {
   preferences = next;
   try { platform.credentials.writePreference(key, JSON.stringify(next)); } catch { /* Keep the choice in memory. */ }

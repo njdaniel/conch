@@ -717,6 +717,9 @@ describe('browser permission and cleanup', () => {
   it('shows denied and unsupported fallbacks in settings', () => {
     const view = render(<NotificationSettings policy="mentions" native={false} permission="denied" supported={true} onPolicy={() => undefined} onEnable={() => undefined} />);
     expect(screen.getByLabelText('Message notifications')).toHaveProperty('value', 'mentions');
+    expect(screen.getByRole('group', { name: 'Sounds' })).toBeDefined();
+    expect(screen.getByLabelText('Message sound')).toBeDefined();
+    expect(screen.getByLabelText('Sound volume')).toBeDefined();
     expect(screen.getByText(/Browser permission is denied/).textContent).toContain('Alerts stay here');
     view.unmount();
     render(<NotificationSettings policy="off" native={false} permission="unsupported" supported={false} onPolicy={() => undefined} onEnable={() => undefined} />);
@@ -797,6 +800,23 @@ describe('an edited message', () => {
 
 
 describe('message sounds', () => {
+  it('keeps reconnect backlog alerts silent and resumes sounds for live delivery', async () => {
+    const play = vi.spyOn(sounds, 'play').mockImplementation(() => undefined);
+    const history = vi.spyOn(api, 'loadMessagesAscending').mockResolvedValue({ ok: true, complete: true, value: [message(1)] });
+    const base = props();
+    const { result, rerender } = renderHook((p: Props) => useNotifications(p), { initialProps: base });
+    await act(async () => { await Promise.resolve(); });
+    act(() => { result.current.setPolicy('all'); });
+    rerender({ ...base, eventsLive: false });
+    history.mockResolvedValue({ ok: true, complete: true, value: Array.from({ length: 30 }, (_, i) => message(i + 2)) });
+    rerender(base);
+    await vi.waitFor(() => { expect(result.current.alerts).toHaveLength(10); });
+    expect(play).not.toHaveBeenCalled();
+    rerender({ ...base, event: message(32) });
+    expect(play.mock.calls).toEqual([['message']]);
+    vi.restoreAllMocks();
+  });
+
   it('sounds once for eligible live messages and excludes own, muted, off, non-mention, open focused and edits', () => {
     const play = vi.spyOn(sounds, 'play').mockImplementation(() => undefined);
     vi.spyOn(document, 'hasFocus').mockReturnValue(true);

@@ -15,6 +15,6 @@ for name, notes in NOTES.items():
         for i in range(length):
             envelope = math.sin(math.pi * i / (length - 1)) ** 2
             samples.append(round(8000 * envelope * math.sin(2 * math.pi * frequency * i / RATE)))
-    with wave.open(str(Path(__file__).with_name(name + '.wav')), 'wb') as output:
+    with wave.open(str(Path(__file__).resolve().parents[2] / 'web' / 'public' / 'sounds' / (name + '.wav')), 'wb') as output:
         output.setparams((1, 2, RATE, 0, 'NONE', 'not compressed'))
         output.writeframes(struct.pack('<' + 'h' * len(samples), *samples))

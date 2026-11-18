@@ -1,9 +1,10 @@
 import { BrowserSoundSink } from './platform/browser/sounds';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { SoundPlayer, readSoundPreferences, setSoundPreferences, voiceSounds, type SoundPreferences } from './sounds';
 import type { VoicePresenceV2 } from './schema/voice';
 const enabled: SoundPreferences = { message: true, join: true, leave: true, share: true, volume: 0.3 };
 beforeEach(() => { localStorage.clear(); });
+afterEach(() => { vi.unstubAllGlobals(); });
 describe('optional sounds', () => {
   it('never plays before unlock, never queues, and applies every toggle and volume', () => {
     let preferences = enabled;
@@ -35,6 +36,45 @@ describe('optional sounds', () => {
     localStorage.setItem('conch.web.sounds.v1', '{"volume":9,"message":"true"}');
     expect(readSoundPreferences()).toMatchObject({ volume: 1, message: false });
   });
+  it.each(['offline', 'http', 'decode'])('retries a failed %s cue on a later gesture while running, without replaying skipped cues', async (failure) => {
+    const start = vi.fn();
+    const connect = vi.fn().mockReturnThis();
+    let fail = true;
+    const decode = vi.fn((bytes: ArrayBuffer) => fail && failure === 'decode' && bytes.byteLength === 1
+      ? Promise.reject(new Error('bad audio')) : Promise.resolve({}));
+    vi.stubGlobal('AudioContext', class {
+      state = 'running';
+      sampleRate = 24000;
+      destination = {};
+      createBufferSource = () => ({ buffer: null, connect, start, disconnect: vi.fn(), onended: null });
+      createBuffer = () => ({});
+      createGain = () => ({ gain: { value: 0 }, connect, disconnect: vi.fn() });
+      decodeAudioData = decode;
+    });
+    const fetchCue = vi.fn((url: string) => {
+      const message = url.endsWith('/message.wav');
+      if (fail && message && failure === 'offline') return Promise.reject(new Error('offline'));
+      return Promise.resolve({ ok: !(fail && message && failure === 'http'), arrayBuffer: () => Promise.resolve(new ArrayBuffer(message ? 1 : 2)) });
+    });
+    vi.stubGlobal('fetch', fetchCue);
+    const sink = new BrowserSoundSink();
+    sink.unlock();
+    sink.unlock(); // In-flight loads are shared.
+    expect(fetchCue).toHaveBeenCalledTimes(4);
+    await vi.waitFor(() => { expect(decode).toHaveBeenCalledTimes(failure === 'decode' ? 4 : 3); });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const silentStarts = start.mock.calls.length;
+    sink.play('message', 0.3);
+    expect(start).toHaveBeenCalledTimes(silentStarts);
+    fail = false;
+    sink.unlock();
+    await vi.waitFor(() => { expect(decode).toHaveBeenCalledTimes(failure === 'decode' ? 5 : 4); });
+    expect(fetchCue).toHaveBeenCalledTimes(5); // Successful cues remain cached.
+    expect(start).toHaveBeenCalledTimes(silentStarts); // Recovery never replays skipped cues.
+    sink.play('message', 0.3);
+    expect(start).toHaveBeenCalledTimes(silentStarts + 1);
+  });
+
   it('creates no context before a gesture and stays silent if Safari is suspended', () => {
     const constructor = vi.fn();
     vi.stubGlobal('AudioContext', constructor);

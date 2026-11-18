@@ -202,12 +202,13 @@ export function useNotifications({
     return { channel, mention, id };
   }, [signedIn, eventsLive, principal, preferences, channels, origin, account]);
 
-  const deliver = useCallback((message: MessageV2) => {
+  const deliver = useCallback((message: MessageV2, live: boolean) => {
     const found = eligible(message);
     if (found === null) return;
     const { channel, mention, id } = found;
     delivered.current.add(id);
-    if (openChannel !== channel.id || document.visibilityState !== 'visible' || !document.hasFocus()) sounds.play('message');
+    // Reconciliation keeps alerts, but missed history never starts audio.
+    if (live && (openChannel !== channel.id || document.visibilityState !== 'visible' || !document.hasFocus())) sounds.play('message');
     const alert = { id, message, channel: channel.name, mention };
     setAlerts((previous) => {
       const next = [...previous.filter((candidate) => candidate.id !== id), alert];
@@ -270,7 +271,7 @@ export function useNotifications({
     if (eventsLive && previousLive.current && caughtUp.current.has(event.channel_id) && !requests.current.has(event.channel_id)) {
       lastSeen.current.set(event.channel_id, Math.max(lastSeen.current.get(event.channel_id) ?? 0, event.id));
     }
-    deliver(event);
+    deliver(event, true);
   }, [event, deliver, eventsLive]);
 
   useEffect(() => {
@@ -313,7 +314,7 @@ export function useNotifications({
           lastSeen.current.set(channel.id, Math.max(lastSeen.current.get(channel.id) ?? 0, message.id));
           if (!first && latestEligible.current(message) !== null) announce.push(message);
         }
-        for (const message of announce.slice(-10)) latestDeliver.current(message);
+        for (const message of announce.slice(-10)) latestDeliver.current(message, false);
       } finally {
         if (requests.current.get(channel.id) === request) requests.current.delete(channel.id);
       }
