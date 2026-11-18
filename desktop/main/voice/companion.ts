@@ -44,7 +44,8 @@
 //    holds the channel's id (issue #1883: the grant answer's channel_id, the
 //    channel conchd resolved and granted for; for a server that sends none,
 //    learned by the share's sound from a presence answer that showed this
-//    person's share; never from the page), that 404 alone makes main read conchd's channel list, find the id and
+//    person's share; never from the page), a 404 or 409 channel_mismatch
+//    makes main read conchd's channel list, find the id and
 //    send the DELETE once more by the name it has now. With no id, or a name
 //    main's client would refuse, the one DELETE by the held name stands, as it
 //    did, and its failure is logged. One bound covers the DELETE, the list
@@ -65,7 +66,7 @@ import type {
 import { voiceCompanionResponseV1, type VoiceCompanionRequestV1, type VoiceCompanionResponseV1 } from '../../../web/src/schema/generated.ts';
 import { fromServer } from '../../../web/src/schema/validate.ts';
 import type { Exchange, Send } from '../api/client.ts';
-import { currentName, isNotFound } from './channel-follow.ts';
+import { currentName, isMoved } from './channel-follow.ts';
 import type { VoiceService } from './service.ts';
 
 // One pass of conchd's voice poller: how long after the helper connects
@@ -416,7 +417,7 @@ export class Companion {
     if (given === null || overtaken) {
       // conchd has issued a companion nobody will use: remove it.
       if (given === null) this.#deps.log('companion: the answer was not the grant asked for');
-      await this.#remove(client, asking.channel, 'unused', given?.channelId ?? null);
+      await this.#remove(client, asking.channel, 'unused', given?.channelId ?? null, given?.channelId != null);
       return refuse(given === null ? 'failed' : 'ended');
     }
     const contents = this.#deps.contents?.() ?? null;
@@ -453,7 +454,7 @@ export class Companion {
     // of anything the removal does.
     const sound = this.#endSound(held, 'stopped');
     const closing = this.#close();
-    const removed = await this.#remove(held.client, held.channel, 'stopped', id);
+    const removed = await this.#remove(held.client, held.channel, 'stopped', id, held.channelId !== null);
     await closing;
     await sound;
     this.#unconfirmed(removed, held, 'stopped');
@@ -485,7 +486,7 @@ export class Companion {
     const sound = this.#endSound(held, reason);
     // Begun at once, alongside the DELETE: neither waits for the other.
     const closing = this.#close();
-    const removed = await this.#remove(held.client, held.channel, reason, id);
+    const removed = await this.#remove(held.client, held.channel, reason, id, held.channelId !== null);
     await closing;
     await sound;
     this.#unconfirmed(removed, held, reason);
@@ -537,37 +538,34 @@ export class Companion {
     }
   }
 
-  // The one DELETE of an end. True when conchd confirmed it, for the share's
-  // own channel when its id is known. It is sent by the held name. When `id`
-  // is known (the grant's, issue #1883; for a server that sends none, only one
-  // the share's sound learned, so not for an unused grant, nor a watch with no
-  // share, nor with the share sound switched off), the channel's name now is found by that id: a 404 channel_not_found is sent
-  // once more by it, and a 2xx stands only if the name is unchanged. Nothing
-  // else is retried, and a name main's client refuses (paramOk, in
-  // currentName) is not sent. One deadline bounds the DELETE, the list read
-  // and the retry. With no id (a server that does not send one), a 2xx by the
-  // held name is taken as it comes. The answer is 204 with no body, so it
-  // cannot name the channel itself.
-  async #remove(client: CompanionClient, channel: string, reason: RemoveReason, id: number | null = null): Promise<boolean> {
+  // The one DELETE of an end, with channel_id whenever held: the grant's
+  // (#1883), else the share sound's presence-derived fallback. A grant carrying
+  // its id proves the server honors the precondition (#1891), so a 2xx needs
+  // no list read. Older servers keep the after-the-fact name check: their 204
+  // has no body and can otherwise confirm a DELETE on a retaken name.
+  // A 404 channel_not_found or 409 channel_mismatch follows the id to its
+  // current name and retries once, still with the id. One deadline bounds
+  // the DELETE, list read and retry; a name currentName refuses is not sent.
+  // With no id, a 2xx by the held name is taken as it comes.
+  async #remove(client: CompanionClient, channel: string, reason: RemoveReason, id: number | null = null, precondition = false): Promise<boolean> {
     const deadline = Date.now() + COMPANION_REMOVE_TIMEOUT_MS;
     const sendBy = async (name: string, first = false): Promise<Exchange> => {
       const ms = first ? COMPANION_REMOVE_TIMEOUT_MS : deadline - Date.now();
       if (ms <= 0) return { kind: 'none' };
       try {
-        return await client.send({ op: 'voiceViewerEnd', params: { channel: name }, query: 'publish=screen', timeoutMs: ms });
+        return await client.send({ op: 'voiceViewerEnd', params: { channel: name }, query: `publish=screen${id === null ? '' : `&channel_id=${String(id)}`}`, timeoutMs: ms });
       } catch {
         return { kind: 'none' };
       }
     };
     let exchange = await sendBy(channel, true);
-    // With an id held, an answer by the held name is checked against it:
-    // a 404 is followed to the channel's name now, and a 2xx counts only if
-    // that name is still the held one. conchd answers 204 to this DELETE on
+    // Without proof of precondition support, a 2xx needs the legacy check.
+    // A move is followed to the id's name now in either case. conchd answers 204 to this DELETE on
     // any channel of the caller's with no room, so a channel that took the old
     // name would confirm a removal that never reached the share's channel,
     // and the unconfirmed end's reload (#unconfirmed) would be skipped.
     const confirmed = exchange.kind === 'answer' && exchange.ok;
-    if (id !== null && (confirmed || isNotFound(exchange))) {
+    if (id !== null && ((confirmed && !precondition) || isMoved(exchange))) {
       const name = await currentName(client, id, deadline - Date.now());
       if (name === 'gone' || name === 'unknown') {
         // The channel's name now could not be checked: not confirmed.

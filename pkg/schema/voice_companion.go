@@ -24,6 +24,17 @@ import (
 // rather than dropped. The response tolerates unknown fields, as a client of a
 // newer server must.
 
+// VoiceCompanionChannelIDParam is an optional positive channel id precondition
+// on companion POST/DELETE and audio PUT/DELETE. After resolving the path's
+// name and checking access, conchd refuses a different id before any effect.
+// Absent preserves legacy behavior; malformed or repeated values are 400
+// invalid_request. Servers returning a grant's channel_id honor this parameter.
+const VoiceCompanionChannelIDParam = "channel_id"
+
+// ErrorCodeChannelMismatch (409) means the path resolved to another channel
+// than the precondition. Clients may follow the held id to its current name.
+const ErrorCodeChannelMismatch = "channel_mismatch"
+
 // ErrorCodeVoiceCompanionBusy: the caller already has a companion in this room
 // (HTTP 409). A room has one companion per person at a time, and a second
 // request never displaces the first: the person who wants to move a share
@@ -146,7 +157,7 @@ type VoiceCompanionResponseV1 struct {
 	ExpiresAt Timestamp `json:"expires_at"`
 	// ChannelID is the id of the channel the grant is for (issue #1883): the
 	// one conchd resolved the route's {channel} to and checked the caller
-	// against. It is never a value the client sent; the request carries none.
+	// against. It is the resolved id, not an echo of the optional precondition.
 	// The route is addressed by name, and a name can be given to another
 	// channel, so a holder that asks again by name checks what it is answered
 	// against this id. conchd sends it on every answer. It is omitted when
@@ -333,7 +344,7 @@ type VoiceCompanionAudioV1 struct {
 	StartedAt Timestamp `json:"started_at"`
 	// ChannelID is the id of the channel the consent was recorded in
 	// (issue #1883): the one conchd resolved the route's {channel} to and
-	// checked the caller against, never a value the client sent. As on
+	// checked the caller against, not an echo of the precondition. As on
 	// VoiceCompanionResponseV1, a holder that asks by name checks the answer
 	// against the id its grant named. conchd sends it on every answer; it is
 	// omitted when zero, which is how an answer from a server before #1883

@@ -270,6 +270,17 @@ describe('the channel id of the grant', () => {
     r.put.push(consent(STARTED, { channel_id: 1 }));
     await r.live();
     expect(await r.sound?.start(DOC)).toMatchObject({ ok: true });
+    expect(r.sends.find((s) => s.op === 'voiceShareAudio')?.query).toBe('channel_id=1');
+  });
+
+  it('a consent mismatch follows the id and keeps the precondition on PUT', async () => {
+    const r = granted(1);
+    r.put.push(refusal(409, 'channel_mismatch'), consent(STARTED, { channel_id: 1 }));
+    r.rename.list = channels({ id: 1, name: 'lounge' });
+    await r.live();
+    expect(await r.sound?.start(DOC)).toMatchObject({ ok: true });
+    expect(names(r, 'voiceShareAudio')).toEqual(['general', 'lounge']);
+    expect(r.sends.filter((s) => s.op === 'voiceShareAudio').map((s) => s.query)).toEqual(['channel_id=1', 'channel_id=1']);
   });
 
   it('with a grant id, a consent answer that names no channel fails', async () => {
@@ -280,16 +291,18 @@ describe('the channel id of the grant', () => {
     expect(r.events).not.toContain('helper:capture on');
   });
 
-  it('the withdrawal’s 2xx by a name another channel took is not taken: the DELETE goes to the id’s name now', async () => {
+  it('the withdrawal’s channel_mismatch is followed with the id on both DELETEs', async () => {
     const r = granted(1);
     await sounding(r);
+    r.withdraw.push(refusal(409, 'channel_mismatch'));
     r.rename.list = channels({ id: 1, name: 'lounge' }, { id: 9, name: 'general' });
     expect(await r.sound?.shareEnded(DOC)).toBe(true);
     expect(names(r, 'voiceShareAudioEnd')).toEqual(['general', 'lounge']);
+    expect(r.sends.filter((s) => s.op === 'voiceShareAudioEnd').map((s) => s.query)).toEqual(['channel_id=1', 'channel_id=1']);
     expect(r.logs).not.toContain('share sound: the withdrawal was not confirmed');
   });
 
-  it('the withdrawal’s 2xx stands when the id still has that name, and is unconfirmed when it cannot be checked', async () => {
+  it('a grant id proves the DELETE precondition is honored without a list read', async () => {
     const same = granted(1);
     await sounding(same);
     same.rename.list = channels({ id: 1, name: 'general' });
@@ -301,7 +314,8 @@ describe('the channel id of the grant', () => {
     unread.rename.list = { kind: 'none' };
     await unread.sound?.shareEnded(DOC);
     expect(names(unread, 'voiceShareAudioEnd')).toEqual(['general']);
-    expect(unread.logs).toContain('share sound: the withdrawal was not confirmed');
+    expect(unread.logs).not.toContain('share sound: the withdrawal was not confirmed');
+    expect(unread.sends.filter((s) => s.op === 'listChannels')).toHaveLength(0);
   });
 
   it('without a grant id the fallback stands: a consent naming any channel is taken', async () => {

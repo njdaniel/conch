@@ -43,8 +43,9 @@ import (
 // The checks, in order: 1-5 of the companion route (voiceClaimCaller: a
 // verified caller, the channel exists and the caller is a member, the caller
 // is human, holds voice, voice is configured; then an archived channel is
-// refused), the body (one strictly decoded request, within 1 KiB: 400
-// invalid_request, 413 request_too_large), then under the room's claims: the
+// refused), the optional channel_id precondition, the body (one strictly
+// decoded request, within 1 KiB: 400 invalid_request, 413 request_too_large),
+// then under the room's claims: the
 // caller holds a share of their own (none, or still pending: 409
 // voice_no_session; one person's consent never reaches another's stream) and their p<id>.screen is in
 // the room as the last pass listed it (else 409 voice_no_session). Then the
@@ -67,6 +68,9 @@ func (s *Server) handleVoiceCompanionAudio(w http.ResponseWriter, r *http.Reques
 	ctx := r.Context()
 	channel, caller, ok := s.voiceClaimCaller(w, r)
 	if !ok {
+		return
+	}
+	if !voiceCompanionChannelMatches(w, r, channel.ID) {
 		return
 	}
 
@@ -112,8 +116,7 @@ func (s *Server) handleVoiceCompanionAudio(w http.ResponseWriter, r *http.Reques
 	}
 	// The channel the route's name resolved to and the caller was checked
 	// against (issue #1883): the room the consent is recorded in was found by
-	// this id. Nothing the client sent: the request names no channel but the
-	// path.
+	// this id. The optional precondition was checked against this resolved id.
 	audio.ChannelID = channel.ID
 	if err := audio.Validate(); err != nil {
 		slog.ErrorContext(ctx, "voice: built an invalid companion audio answer", "channel", channel.ID, "error", err)
@@ -126,8 +129,8 @@ func (s *Server) handleVoiceCompanionAudio(w http.ResponseWriter, r *http.Reques
 // handleVoiceCompanionAudioDelete serves
 // DELETE /v1/channels/{channel}/voice/companion/audio: the share's holder
 // withdraws their consent. Checks 1-5 (voiceSessionCaller: a route that lets
-// go keeps working in an archived channel), then the caller's companion is set
-// back to screen_share alone, when the consent named the companion (one
+// go keeps working in an archived channel), then channel_id is checked
+// before the caller's companion is set back to screen_share alone, when the consent named the companion (one
 // naming the person granted it nothing, so LiveKit is not asked), and
 // voice_share_audio_stopped (reason=self) is written, when a consent of theirs
 // was recorded. 204 either way: a consent
@@ -138,6 +141,9 @@ func (s *Server) handleVoiceCompanionAudioDelete(w http.ResponseWriter, r *http.
 	ctx := r.Context()
 	channel, caller, ok := s.voiceSessionCaller(w, r)
 	if !ok {
+		return
+	}
+	if !voiceCompanionChannelMatches(w, r, channel.ID) {
 		return
 	}
 	room, found, err := s.voiceChannelRoom(ctx, channel.ID)
