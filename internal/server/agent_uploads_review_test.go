@@ -589,3 +589,130 @@ func TestAgentBoundWebhookCannotAttachTheAgentsUpload(t *testing.T) {
 		t.Errorf("a member fetching the file once the agent attached it = %d", got.status)
 	}
 }
+
+// gatedMCPBody stops at the first read, after admission has taken its place.
+// This makes overlapping requests deterministic without sleeps or tool waits.
+type gatedMCPBody struct {
+	io.Reader
+	started chan struct{}
+	resume  chan struct{}
+	once    sync.Once
+}
+
+func (b *gatedMCPBody) Read(p []byte) (int, error) {
+	b.once.Do(func() { close(b.started); <-b.resume })
+	return b.Reader.Read(p)
+}
+
+func TestMCPLargeRequestsPerPrincipal(t *testing.T) {
+	for _, same := range []bool{true, false} {
+		t.Run(fmt.Sprintf("same principal=%v", same), func(t *testing.T) {
+			f := newAgentUploadFixture(t)
+			f.srv.cfg.MaxUploadBytes = 4 << 20
+			f.grant(t, "aria")
+			f.grant(t, "arlo")
+			body := toolCall(t, "post_message", postWith(attachment("screen.png", schema.MediaTypePNG, pngOfSize(3<<19, 'p'))))
+			posted := func(rec *httptest.ResponseRecorder) bool {
+				code, ok := toolError(rec)
+				return ok && code == ""
+			}
+			start := func(token string) (*gatedMCPBody, <-chan *httptest.ResponseRecorder) {
+				gated := &gatedMCPBody{Reader: bytes.NewReader(body), started: make(chan struct{}), resume: make(chan struct{})}
+				done := make(chan *httptest.ResponseRecorder, 1)
+				req := httptest.NewRequest(http.MethodPost, "/mcp", gated)
+				req.ContentLength = int64(len(body))
+				req.Header.Set("Authorization", "Bearer "+token)
+				req.Header.Set("Content-Type", "application/json")
+				req.Header.Set("Accept", "application/json, text/event-stream")
+				go func() {
+					rec := httptest.NewRecorder()
+					f.srv.Handler().ServeHTTP(rec, req)
+					done <- rec
+				}()
+				return gated, done
+			}
+			first, firstDone := start(f.p("aria").token)
+			// Always unblock the body if an assertion below fails.
+			defer close(first.resume)
+			select {
+			case <-first.started:
+			case rec := <-firstDone:
+				t.Fatalf("first principal refused: %d %s", rec.Code, rec.Body)
+			}
+			if same {
+				for _, declared := range []bool{true, false} {
+					rec, _ := mcpSend(f.srv, f.p("aria").token, body, declared)
+					var e schema.Error
+					if rec.Code != 503 || json.Unmarshal(rec.Body.Bytes(), &e) != nil || e.Code != schema.ErrorCodeServerBusy || rec.Header().Get("Retry-After") != "2" || e.RetryAfterSeconds != 2 {
+						t.Fatalf("second request (declared=%v): %d %s", declared, rec.Code, rec.Body)
+					}
+				}
+			} else {
+				second, secondDone := start(f.p("arlo").token)
+				select {
+				case <-second.started:
+				case rec := <-secondDone:
+					t.Fatalf("other principal refused: %d %s", rec.Code, rec.Body)
+				}
+				close(second.resume)
+				if rec := <-secondDone; !posted(rec) {
+					t.Fatalf("other principal: %d %s", rec.Code, rec.Body)
+				}
+			}
+			// Release the first body and wait before fixture cleanup.
+			first.resume <- struct{}{}
+			if rec := <-firstDone; !posted(rec) {
+				t.Fatalf("first principal: %d %s", rec.Code, rec.Body)
+			}
+			if len(f.srv.mcpLargeSlots) != 0 {
+				t.Fatal("large-request place leaked")
+			}
+			if rec, _ := mcpSend(f.srv, f.p("aria").token, body, true); !posted(rec) {
+				t.Fatalf("principal's place not returned: %d %s", rec.Code, rec.Body)
+			}
+		})
+	}
+}
+
+func TestMCPLargeAmbiguousRoutingAndEscapedBase64(t *testing.T) {
+	f := newAgentUploadFixture(t)
+	f.srv.cfg.MaxUploadBytes = 4 << 20
+	f.grant(t, "aria")
+	body := toolCall(t, "post_message", postWith(attachment("screen.png", schema.MediaTypePNG, pngOfSize(3<<19, 'q'))))
+	for _, key := range []string{"method", "params", "name", "arguments", "attachments"} {
+		for _, variant := range []string{key, strings.ToUpper(key), `\u00` + fmt.Sprintf("%02x", key[0]) + key[1:]} {
+			t.Run(key+"/"+variant, func(t *testing.T) {
+				needle := []byte(`"` + key + `":`)
+				duplicate := []byte(`"` + variant + `":null,"` + key + `":`)
+				// The attachment also has a name; the tool's routing name
+				// is the last occurrence in this JSON-encoded request.
+				index := bytes.LastIndex(body, needle)
+				if index < 0 {
+					t.Fatalf("missing routing key %q", key)
+				}
+				ambiguous := append(bytes.Clone(body[:index]), bytes.Replace(body[index:], needle, duplicate, 1)...)
+				if rec, _ := mcpSend(f.srv, f.p("aria").token, ambiguous, true); rec.Code != http.StatusRequestEntityTooLarge {
+					t.Fatalf("duplicate routing key: %d %s", rec.Code, rec.Body)
+				}
+			})
+		}
+	}
+	// The original exploit: the probe used the second, differently cased
+	// name and arguments while the SDK ran the first tool (await_decision).
+	exploit := bytes.Replace(body, []byte(`"name":"post_message"`), []byte(`"name":"await_decision","Name":"post_message"`), 1)
+	exploit = bytes.Replace(exploit, []byte(`"arguments":`), []byte(`"arguments":{},"Arguments":`), 1)
+	if rec, _ := mcpSend(f.srv, f.p("aria").token, exploit, true); rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("await_decision exploit: %d %s", rec.Code, rec.Body)
+	}
+	data := strings.Repeat("/+8A", 300000) + "AA=="
+	plain := toolCall(t, "post_message", map[string]any{"channel": "ops", "body": "escaped image", "attachments": []any{map[string]any{"name": "image.png", "media_type": schema.MediaTypePNG, "data_base64": data}}})
+	for _, escape := range []struct{ from, to string }{{"/", `\/`}, {"/", `\u002f`}, {"+", `\u002b`}, {"=", `\u003d`}} {
+		t.Run(escape.to, func(t *testing.T) {
+			// Escape only image data, not the method or media type.
+			escaped := bytes.Replace(plain, []byte(data), []byte(strings.ReplaceAll(data, escape.from, escape.to)), 1)
+			if rec, _ := mcpSend(f.srv, f.p("aria").token, escaped, true); rec.Code != http.StatusRequestEntityTooLarge {
+				t.Fatalf("escaped base64 over 1 MiB: %d %s", rec.Code, rec.Body)
+			}
+		})
+	}
+}

@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -39,6 +40,8 @@ type mcpIdentity struct {
 type mcpIdentityKey struct{}
 
 func (s *Server) mcpHandler() http.Handler {
+	// This state lives with the registered /mcp handler, shared by all credentials.
+	principals := &mcpLargePrincipals{active: make(map[int64]bool)}
 	if n := len(s.cfg.MCPBearerTokens); n > 0 {
 		slog.Warn("mcp: static --mcp-token mappings are deprecated; issue credentials with POST /v1/principals/{id}/credentials instead", "mappings", n)
 	}
@@ -79,7 +82,7 @@ func (s *Server) mcpHandler() http.Handler {
 		// makes of a body that ends early. One caller may send more, for the
 		// images of a post_message (issue #1798); readMCPBody has the rules.
 		if r.Method == http.MethodPost && r.Body != nil {
-			body, release, ok := s.readMCPBody(w, r, identity)
+			body, release, ok := s.readMCPBody(w, r, identity, principals)
 			if !ok {
 				return
 			}
@@ -126,14 +129,33 @@ func writeMCPRequestTooLarge(w http.ResponseWriter) {
 	writeError(w, http.StatusRequestEntityTooLarge, "request_too_large", "request body exceeds the maximum size")
 }
 
-// takeMCPLargeSlot takes one of the places for a large /mcp request, without
-// waiting. It reports false when all are taken.
-func (s *Server) takeMCPLargeSlot() bool {
+// mcpLargePrincipals prevents one principal, including one using several
+// credentials, from occupying both server-wide places. Only active holders
+// are retained, so its size is bounded by mcpLargeRequestSlots.
+type mcpLargePrincipals struct {
+	mu     sync.Mutex
+	active map[int64]bool
+}
+
+// takeMCPLargeSlot takes a server place and the principal's place atomically,
+// without waiting. The returned release must be called once.
+func (s *Server) takeMCPLargeSlot(principalID int64, principals *mcpLargePrincipals) (func(), bool) {
+	principals.mu.Lock()
+	defer principals.mu.Unlock()
+	if principals.active[principalID] {
+		return nil, false
+	}
 	select {
 	case s.mcpLargeSlots <- struct{}{}:
-		return true
+		principals.active[principalID] = true
+		return func() {
+			principals.mu.Lock()
+			defer principals.mu.Unlock()
+			delete(principals.active, principalID)
+			<-s.mcpLargeSlots
+		}, true
 	default:
-		return false
+		return nil, false
 	}
 }
 
@@ -151,9 +173,10 @@ func (s *Server) takeMCPLargeSlot() bool {
 //   - a request that declares more than the larger limit is refused (413)
 //     before any of it is read;
 //   - the server handles only mcpLargeRequestSlots requests over the bound at
-//     once. One more is refused before its body is read: all of it when the
-//     length is declared, and all but the first MaxPostRequestBytes+1 bytes
-//     when it is not (those are read to learn that it is over the bound; a
+//     once, with at most one per principal. One more is refused before its
+//     body is read: all of it when the length is declared, and all but the
+//     first MaxPostRequestBytes+1 bytes when it is not (those are read to
+//     learn that it is over the bound; a
 //     request without a declared length that turns out to be small is an
 //     ordinary one and takes no place). The refusal is 503 with Retry-After
 //     and the usual error body, not 429: the limit is the server's, shared by
@@ -163,22 +186,23 @@ func (s *Server) takeMCPLargeSlot() bool {
 //   - a body over the bound must be what the larger limit is for
 //     (mcpOversizeIsAttachments), or it is refused (413) before the MCP
 //     library sees it.
-func (s *Server) readMCPBody(w http.ResponseWriter, r *http.Request, identity mcpIdentity) ([]byte, func(), bool) {
+func (s *Server) readMCPBody(w http.ResponseWriter, r *http.Request, identity mcpIdentity, principals *mcpLargePrincipals) ([]byte, func(), bool) {
 	base := int64(schema.MaxPostRequestBytes)
 	limit := base
 	if r.ContentLength > base || r.ContentLength < 0 {
 		limit = s.mcpRequestLimit(r.Context(), identity)
 	}
 	release := func() {}
+	// Keep ownership here until a successful return transfers it to the handler.
+	handedOff := false
+	defer func() {
+		if !handedOff {
+			release()
+		}
+	}()
 	tooLarge := func() { writeMCPRequestTooLarge(w) }
 	unreadable := func() {
 		writeError(w, http.StatusBadRequest, "invalid_request", "request body could not be read")
-	}
-	// refuse answers a request that goes no further, and gives its place
-	// back if it had taken one.
-	refuse := func(answer func()) {
-		release()
-		answer()
 	}
 	var head []byte
 	if limit > base {
@@ -186,7 +210,7 @@ func (s *Server) readMCPBody(w http.ResponseWriter, r *http.Request, identity mc
 		// connection instead of waiting for what it has refused.
 		unread := func(answer func()) {
 			w.Header().Set("Connection", "close")
-			refuse(answer)
+			answer()
 		}
 		if r.ContentLength > limit {
 			unread(tooLarge)
@@ -195,19 +219,20 @@ func (s *Server) readMCPBody(w http.ResponseWriter, r *http.Request, identity mc
 		if r.ContentLength < 0 {
 			var err error
 			if head, err = io.ReadAll(io.LimitReader(r.Body, base+1)); err != nil {
-				refuse(unreadable)
+				unreadable()
 				return nil, nil, false
 			}
 		}
 		if r.ContentLength > base || int64(len(head)) > base {
-			if !s.takeMCPLargeSlot() {
+			slotRelease, admitted := s.takeMCPLargeSlot(identity.principalID, principals)
+			if !admitted {
 				unread(func() {
 					w.Header().Set("Retry-After", strconv.Itoa(errMCPBusy.RetryAfterSeconds))
 					writeJSON(w, http.StatusServiceUnavailable, errMCPBusy)
 				})
 				return nil, nil, false
 			}
-			release = func() { <-s.mcpLargeSlots }
+			release = slotRelease
 			// Not every ResponseWriter can set a deadline (a test's cannot);
 			// a real connection can, and that is the one a slow sender is on.
 			rc := http.NewResponseController(w)
@@ -220,9 +245,9 @@ func (s *Server) readMCPBody(w http.ResponseWriter, r *http.Request, identity mc
 	if err != nil {
 		var over *http.MaxBytesError
 		if errors.As(err, &over) {
-			refuse(tooLarge)
+			tooLarge()
 		} else {
-			refuse(unreadable)
+			unreadable()
 		}
 		return nil, nil, false
 	}
@@ -231,9 +256,10 @@ func (s *Server) readMCPBody(w http.ResponseWriter, r *http.Request, identity mc
 		body = append(head, rest...)
 	}
 	if int64(len(body)) > base && !mcpOversizeIsAttachments(body, s.cfg.MaxUploadBytes) {
-		refuse(tooLarge)
+		tooLarge()
 		return nil, nil, false
 	}
+	handedOff = true
 	return body, release, true
 }
 
@@ -311,45 +337,37 @@ func base64Len(n int64) int64 {
 // memory: a string of bytes that are not text grows threefold when it is
 // decoded, and the library decodes the request more than once.
 //
-// Why bytes let through here can never become a message's text. The argument
-// is about where the bytes are, not about which of two repeated keys wins.
-// Every byte this subtracts from the request is part of a JSON value that
-// stands at params.arguments.attachments[i].data_base64, each value counted
-// once (json.RawMessage holds the value as it stands in the request, not
-// decoded, which could lengthen it). Every other byte of the request is held
-// to MaxPostRequestBytes. The MCP library reads the same document, and a value
-// at that position is to it an attachment's data or nothing: its decoder
-// matches keys exactly and the tool's schema refuses a key it does not know,
-// so it can read such a value as data_base64 of an attachment, or skip it, or
-// refuse the call, and never as body or payload, which stand elsewhere.
-//
-// This holds however keys are repeated, and that matters, because the two
-// decoders do not agree on a repeated key. encoding/json, used here, decodes
-// a second "attachments" list into the elements of the first, so with
-// "attachments":[{"data_base64":"..."}],"attachments":[{}] the first list's
-// data is still counted; it also matches keys without regard to case. Both
-// only ever make this count values at the position above that the library
-// will go on to skip. They cannot make it count bytes that stand anywhere
-// else. post_message bounds its text again for itself.
+// Routing keys must be unique under any case and use the SDK's exact
+// spelling. Otherwise encoding/json and the SDK can disagree about the tool
+// being called, letting a non-post tool hold a large-request place. The probe
+// checks each routing object before decoding the attachment values.
 func mcpOversizeIsAttachments(body []byte, maxUpload int64) bool {
-	var call struct {
-		Method string `json:"method"`
-		Params struct {
-			Name      string `json:"name"`
-			Arguments struct {
-				Attachments []struct {
-					Data json.RawMessage `json:"data_base64"`
-				} `json:"attachments"`
-			} `json:"arguments"`
-		} `json:"params"`
-	}
-	if err := json.Unmarshal(body, &call); err != nil {
+	envelope, ok := mcpProbeObject(body)
+	if !ok {
 		return false
 	}
-	if call.Method != "tools/call" || call.Params.Name != "post_message" {
+	var method string
+	if json.Unmarshal(envelope["method"], &method) != nil || method != "tools/call" {
 		return false
 	}
-	attachments := call.Params.Arguments.Attachments
+	params, ok := mcpProbeObject(envelope["params"])
+	if !ok {
+		return false
+	}
+	var name string
+	if json.Unmarshal(params["name"], &name) != nil || name != "post_message" {
+		return false
+	}
+	arguments, ok := mcpProbeObject(params["arguments"])
+	if !ok {
+		return false
+	}
+	var attachments []struct {
+		Data json.RawMessage `json:"data_base64"`
+	}
+	if json.Unmarshal(arguments["attachments"], &attachments) != nil {
+		return false
+	}
 	if len(attachments) > schema.MaxAgentAttachments {
 		return false
 	}
@@ -366,6 +384,53 @@ func mcpOversizeIsAttachments(body []byte, maxUpload int64) bool {
 		rest -= len(a.Data)
 	}
 	return rest <= schema.MaxPostRequestBytes
+}
+
+// mcpProbeObject reads a routing object without encoding/json's repeated-key
+// merging or case folding. Rejecting duplicate keys here also covers escaped
+// spellings, since Decoder.Token returns the decoded key.
+func mcpProbeObject(raw []byte) (map[string]json.RawMessage, bool) {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	token, err := dec.Token()
+	if err != nil || token != json.Delim('{') {
+		return nil, false
+	}
+	fields := make(map[string]json.RawMessage)
+	seen := make(map[string]bool)
+	for dec.More() {
+		token, err = dec.Token()
+		if err != nil {
+			return nil, false
+		}
+		key, ok := token.(string)
+		if !ok {
+			return nil, false
+		}
+		folded := strings.ToLower(key)
+		if seen[folded] {
+			return nil, false
+		}
+		seen[folded] = true
+		// These keys must agree with the SDK's case-sensitive routing.
+		switch folded {
+		case "method", "params", "name", "arguments", "attachments":
+			if key != folded {
+				return nil, false
+			}
+		}
+		var value json.RawMessage
+		if dec.Decode(&value) != nil {
+			return nil, false
+		}
+		fields[key] = value
+	}
+	if _, err = dec.Token(); err != nil {
+		return nil, false
+	}
+	if _, err = dec.Token(); err != io.EOF {
+		return nil, false
+	}
+	return fields, true
 }
 
 // base64StringLen reports how many bytes raw decodes to, when raw is a JSON
