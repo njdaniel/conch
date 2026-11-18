@@ -56,3 +56,26 @@ it('tests only confirmed active-session state and respects mute and deafen', () 
   expect(screen.getByText(/Deafened; nothing is sent/)).toBeTruthy();
   expect(f.saveTalkBinding).not.toHaveBeenCalled();
 });
+
+it.each(['Enter', ' '])('keeps keyboard focus through %s activation, Escape cancellation and a key selection', (key) => {
+  setup();
+  const control = screen.getByRole('button', { name: 'Set talk key' });
+  control.focus();
+  expect(document.activeElement).toBe(control);
+  // jsdom does not synthesize a button click from keyboard events.
+  const activate = () => {
+    fireEvent.keyDown(control, { key });
+    fireEvent.keyUp(control, { key });
+    fireEvent.click(control);
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Cancel' }));
+  };
+  activate();
+  fireEvent.keyDown(document.activeElement ?? window, { code: 'Escape' });
+  expect(document.activeElement).toBe(control);
+  activate();
+  fireEvent.keyDown(document.activeElement ?? window, { code: 'ControlRight' });
+  expect(document.activeElement).toBe(control);
+  activate();
+  fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+  expect(document.activeElement).toBe(control);
+});

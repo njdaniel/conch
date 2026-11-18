@@ -31,6 +31,7 @@ import { OneShot } from './voice/oneshot.ts';
 import { OWNER_VERSIONS_SHARE_AUDIO } from './voice/protocol.ts';
 import { linuxShareAudioEnabled, registeredApplicationName, ShareSound } from './voice/share-audio.ts';
 import { VoiceService } from './voice/service.ts';
+import { createVoiceIdentity } from './voice/identity.ts';
 import { Supervisor } from './voice/supervisor.ts';
 import { trayHostPresent } from './tray-detect.ts';
 import { TrayController, unblankSoon } from './tray.ts';
@@ -480,22 +481,11 @@ export async function start(): Promise<void> {
       } catch {
         return null;
       }
-      // The session generation the credential was read under: the fence
-      // compares to it, so a sign-in inside this activation (before the join)
-      // is fine and a sign-out or 401 after it trips.
-      let read = -1;
-      return {
+      return createVoiceIdentity(activation, () => profiles.active === activation, {
         profileId: id,
         configDir: profileConfigDir(root, id),
         principalId: principal.id,
-        credential: () => {
-          const c = activation.voiceCredential();
-          if (c === null) return null;
-          read = c.generation;
-          return { origin: c.origin, token: c.token };
-        },
-        current: () => profiles.active === activation && activation.voiceCurrent(read),
-      };
+      });
     },
     updated: () => installed.updated(),
     recheck: () => installed.check(),

@@ -7,6 +7,9 @@ import { join } from 'node:path';
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { Session } from '../../main/api/session.ts';
+import { createVoiceIdentity } from '../../main/voice/identity.ts';
+
 import type { VoiceSaveResult } from '../../../web/src/platform/desktop/bridge.ts';
 import {
   BY_ID_DIR,
@@ -459,6 +462,33 @@ describe('Windows talk binding configuration', () => {
     const svc = new VoiceService({ platform: 'win32', locked: () => false, supervisor: noSupervisor, oneShot: one, identity, log: () => undefined });
     return { one, svc };
   };
+  it('saves Mouse 5 with the production identity fence without reading a bearer, and fences session loss', async () => {
+    const session = new Session();
+    session.setOrigin('https://conch.example.org');
+    session.adopt('conch_test_token');
+    const credential = vi.spyOn(session, 'voiceCredential');
+    // The same token-free initialization and current check as activationFactory.
+    const activation = {
+      voiceGeneration: () => session.signedIn && session.origin !== null ? session.generation : null,
+      voiceCredential: () => session.voiceCredential(),
+      voiceCurrent: (generation: number) => session.generation === generation,
+    };
+    const { one, svc } = make(() => Promise.resolve(createVoiceIdentity(activation, () => true, {
+      profileId: 'p1', configDir: '/nonexistent/config/p1', principalId: 7,
+    })));
+    expect(await svc.saveTalkBinding({ windowsCode: 'Mouse5', generation: 0 })).toEqual({ ok: true });
+    expect(one.calls).toEqual([['/nonexistent/config/p1', 'keys.talk', 'mouse:5']]);
+    let release: () => void = () => undefined;
+    one.gate = new Promise<void>((resolve) => { release = resolve; });
+    const pending = svc.saveTalkBinding({ windowsCode: 'Mouse5', generation: 0 });
+    await vi.waitFor(() => { expect(one.calls).toHaveLength(2); });
+    session.forget();
+    release();
+    expect(await pending).toEqual({ ok: false, error: 'cancelled' });
+    expect(await svc.saveTalkBinding({ windowsCode: 'Mouse5', generation: 0 })).toEqual({ ok: false, error: 'cancelled' });
+    expect(one.calls).toHaveLength(2);
+    expect(credential).not.toHaveBeenCalled();
+  });
   it('lists Windows configuration without enumerating Linux devices, and saves only a translated binding', async () => {
     const { one, svc } = make();
     expect(await svc.keyDevices()).toEqual({ ok: true, platform: 'win32', devices: [], disclosure: [] });

@@ -20,6 +20,9 @@ export function WindowsTalkKeySetup({ source, onSaved, onClose }: {
   const [note, setNote] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [testing, setTesting] = useState(false);
+  const captureButton = useRef<HTMLButtonElement>(null);
+  const cancelButton = useRef<HTMLButtonElement>(null);
+  const wasCapturing = useRef(false);
   const alive = useRef(true);
   const generation = useRef(view.generation);
   const heading = useId();
@@ -30,6 +33,11 @@ export function WindowsTalkKeySetup({ source, onSaved, onClose }: {
     setNote(null);
     generation.current = view.generation;
   }, [view.generation, view.channel, view.status]);
+  useEffect(() => {
+    if (capturing) cancelButton.current?.focus();
+    else if (wasCapturing.current) captureButton.current?.focus();
+    wasCapturing.current = capturing;
+  }, [capturing]);
   useEffect(() => {
     if (!capturing) return;
     const take = (code: string) => {
@@ -86,10 +94,11 @@ export function WindowsTalkKeySetup({ source, onSaved, onClose }: {
     <h3 id={heading}>Talk key</h3>
     <p>Choose one physical key or modifier, or Mouse 4/5. Conch observes the binding without blocking game input. Game and system shortcuts may also use it; conflicts with other applications cannot be detected here.</p>
     <p>Talk key: <strong>{key?.label ?? 'none chosen'}</strong></p>
+    <button ref={captureButton} type="button" disabled={saving || capturing} onClick={() => { setCapturing(true); setNote(null); }}>Set talk key</button>
     {capturing ? <>
       <p role="status">Press a key or Mouse 4/5 now. Escape cancels.</p>
-      <button type="button" onClick={() => { setCapturing(false); }}>Cancel</button>
-    </> : <button type="button" disabled={saving} onClick={() => { setCapturing(true); setNote(null); }}>Set talk key</button>}
+      <button ref={cancelButton} type="button" onClick={() => { setCapturing(false); }}>Cancel</button>
+    </> : null}
     <label>Or pick one <select disabled={saving || capturing} value={key?.code ?? ''} onChange={(e) => { setKey(windowsKey(e.target.value)); }}>
       <option value="">Choose a key…</option>
       {windowsKeys.map((row) => <option key={row.code} value={row.code}>{row.label}</option>)}
