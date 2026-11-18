@@ -1,8 +1,10 @@
 // What Chromium itself writes to a page's console when LiveKit refuses a
 // connection (issue #1760) or rejects its handshake (issue #1915), and the one
 // allowance expectClean makes for it.
-// Input: console lines and LiveKit's origin. Output: the lines with the join
-// token taken out of those line shapes. It owns the shapes and nothing else.
+// Input: console lines, the entries the browser logged itself, and LiveKit's
+// origin. Output: the lines with the join token taken out of those line
+// shapes, where the browser's network source wrote them. It owns the shapes
+// and the rule of where a line must come from, and nothing else.
 
 // A WebSocket that fails to open is logged by Chromium, not by the app, with
 // the whole address, and livekit-client puts the join token in that address.
@@ -22,18 +24,53 @@
 // watchPage), and Chromium writes these as type error, so the line is
 // "error: WebSocket connection to ...".
 //
+// What a line says is not enough: the page can console.error the very same
+// text, token and all, and Playwright's console event does not tell the two
+// apart. Where it came from does. Chromium writes these lines itself, through
+// the DevTools Log domain (Log.entryAdded, source "network"), while every
+// console.* call of the page arrives through Runtime.consoleAPICalled and is
+// never a Log entry. watchPage records the Log entries beside the console
+// (Watch.browserLog, Chromium only), and a line is allowed only when the
+// browser's network source logged that exact line; each such entry allows one
+// line, so a copy the page logs of a real one is still caught.
+//
 // withoutJoinTokenInSocketRefusals takes the token out of lines of exactly those
 // shapes: the given LiveKit origin, the /rtc or /rtc/v1 path, access_token
 // first, and one of Chromium's two endings, "Error in connection
 // establishment: net::ERR_..." or "Error during WebSocket handshake:
-// Unexpected response code: <three digits>". A line of any other shape (another
-// of Chromium's endings among them) keeps its token, so expectClean still
-// rejects it; and what is left of an allowed line (the join_request, for one)
-// is still checked for every other secret.
-export function withoutJoinTokenInSocketRefusals(lines: readonly string[], livekitOrigin: string): string[] {
+// Unexpected response code: <three digits>", and only as many of them as the
+// browser's network source logged. A line of any other shape (another of
+// Chromium's endings among them), and a line of that shape the page logged
+// itself, keeps its token, so expectClean still rejects it; and what is left
+// of an allowed line (the join_request, for one) is still checked for every
+// other secret.
+
+// One entry the browser logged itself (DevTools Log.entryAdded): its source
+// ("network", "javascript", "violation", ...), its level and its text.
+export interface BrowserLogEntry {
+  readonly source: string;
+  readonly level: string;
+  readonly text: string;
+}
+
+export function withoutJoinTokenInSocketRefusals(lines: readonly string[], browserLog: readonly BrowserLogEntry[], livekitOrigin: string): string[] {
   const origin = livekitOrigin.replace(/^http/, 'ws').replace(/\/+$/, '');
   const escaped = origin.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   const ending = '(?:Error in connection establishment: net::ERR_[A-Z_]+|Error during WebSocket handshake: Unexpected response code: [0-9]{3})';
   const shape = new RegExp(`^(error: WebSocket connection to '${escaped}/rtc(?:/v1)?\\?access_token=)[^&'\\s]*(&[^'\\s]*)?(' failed: ${ending})$`);
-  return lines.map((line) => line.replace(shape, '$1$2$3'));
+  // How many times the browser's network source logged each line, written as
+  // watchPage writes a console line.
+  const fromNetwork = new Map<string, number>();
+  for (const e of browserLog) {
+    if (e.source !== 'network') continue;
+    const line = `${e.level}: ${e.text}`;
+    fromNetwork.set(line, (fromNetwork.get(line) ?? 0) + 1);
+  }
+  return lines.map((line) => {
+    if (!shape.test(line)) return line;
+    const left = fromNetwork.get(line) ?? 0;
+    if (left === 0) return line;
+    fromNetwork.set(line, left - 1);
+    return line.replace(shape, '$1$2$3');
+  });
 }

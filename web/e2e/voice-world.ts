@@ -12,6 +12,7 @@ import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Page } from '@playwright/test';
+import type { BrowserLogEntry } from './console-lines';
 import { listIdentities, listTracks, roomCount, untilAnswered, type NoAnswer, type PublishedTrack } from './livekit-admin';
 import { repoRoot, safePath, type World } from './world';
 
@@ -348,6 +349,12 @@ room:
 export interface Watch {
   // Every console message and uncaught error of the page, in order.
   readonly console: readonly string[];
+  // Every entry the browser logged itself (DevTools Log.entryAdded), as
+  // opposed to the page's own console.* calls (Runtime.consoleAPICalled):
+  // what lets console-lines.ts tell Chromium's failed-socket line from a page
+  // that logs the same text. Chromium only; empty in Firefox and WebKit, where
+  // the allowance that needs it then allows nothing.
+  readonly browserLog: readonly BrowserLogEntry[];
   // Every request to conchd the browser counted as failed, as its method,
   // path and error: one aborted or never answered, or one answered and its
   // body let go unread (Chromium's net::ERR_ABORTED after a 204).
@@ -356,7 +363,8 @@ export interface Watch {
   // ReportingObserver, as the feature and where in a script it was asked for.
   readonly policy: readonly string[];
   // Resolves once every voice session answer seen so far has been read and
-  // its join tokens and room names added to the world's secrets.
+  // its join tokens and room names added to the world's secrets, and every
+  // entry the browser had logged by then is in browserLog.
   settled: () => Promise<void>;
 }
 
@@ -390,6 +398,27 @@ export async function watchPage(page: Page, vw: VoiceWorld): Promise<Watch> {
   page.on('console', (m) => {
     lines.push(`${m.type()}: ${m.text()}`);
   });
+  // The browser's own log, through a DevTools session of the test's (Watch.browserLog).
+  // Chromium only: web-e2e runs Chromium, and the Firefox and WebKit projects
+  // (the @cross tests) have no CDP and allow no failed-socket line. Playwright
+  // delivers this session's events apart from its console events, so a Log
+  // entry can arrive after the console line it matches; settled() makes a
+  // round trip on the session, which Chromium answers only after every entry
+  // it had sent before.
+  const browserLog: BrowserLogEntry[] = [];
+  let browserLogged = (): Promise<void> => Promise.resolve();
+  if (page.context().browser()?.browserType().name() === 'chromium') {
+    const cdp = await page.context().newCDPSession(page);
+    cdp.on('Log.entryAdded', ({ entry }) => {
+      browserLog.push({ source: entry.source, level: entry.level, text: entry.text });
+    });
+    await cdp.send('Log.enable');
+    browserLogged = async () => {
+      // A failed round trip (the page closed) leaves browserLog short, which
+      // only ever allows fewer lines.
+      await cdp.send('Runtime.evaluate', { expression: '0' }).catch(() => undefined);
+    };
+  }
   page.on('pageerror', (err) => {
     lines.push(`pageerror: ${err.message}`);
   });
@@ -420,10 +449,12 @@ export async function watchPage(page: Page, vw: VoiceWorld): Promise<Watch> {
   });
   return {
     console: lines,
+    browserLog,
     failed,
     policy,
     settled: async () => {
       await Promise.all(reads);
+      await browserLogged();
     },
   };
 }
