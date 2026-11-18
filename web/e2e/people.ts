@@ -170,12 +170,13 @@ export async function inbound(page: Page, options: { perTrack?: boolean } = {}):
   }, options.perTrack === true);
 }
 
-// expectClean checks that no secret of the world, and no join token or room
-// name the page was given, is in anything the page said or kept: its console,
-// its DOM and address, its storage and cookies, and its resource timing
-// entries; that no policy violation is in the console; and that the browser
-// reports nothing wrong that the person never sees (a Permissions-Policy
-// report, a failed request to conchd, issue #595).
+// expectClean checks that no secret of the world, no join token or room name
+// the page was given, and no token LiveKit refreshed it with (read from its
+// signalling frames by watchPage, issue #1948), is in anything the page said
+// or kept: its console, its DOM and address, its storage and cookies, and its
+// resource timing entries; that no policy violation is in the console; and
+// that the browser reports nothing wrong that the person never sees (a
+// Permissions-Policy report, a failed request to conchd, issue #595).
 //
 // The one secret a page keeps by design is its own credential, under
 // conch.web.token: a member's in localStorage (issue #439), an operator's in

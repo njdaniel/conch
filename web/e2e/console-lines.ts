@@ -15,10 +15,12 @@
 // restart test, issue #1915; 400 for a join request it cannot read):
 //   error: WebSocket connection to 'ws://127.0.0.1:1234/rtc/v1?access_token=...&join_request=...' failed: Error during WebSocket handshake: Unexpected response code: 404
 // Whether either line is written, and whether it carries a join token conchd
-// issued or one LiveKit refreshed after the join, is a matter of timing. The
-// token is the person's own, short-lived, and only in their own devtools
-// console; it is not an app log (the page's own logging is checked everywhere
-// else).
+// issued or one LiveKit refreshed after the join, is a matter of timing. Both
+// are in the world's secrets (watchPage in voice-world.ts reads the refreshed
+// one from the signalling frames, issue #1948), so either is taken out of an
+// allowed line here and caught on any other. The token is the person's own,
+// short-lived, and only in their own devtools console; it is not an app log
+// (the page's own logging is checked everywhere else).
 //
 // The page's watcher records each console entry as "<type>: <text>" (voice-world.ts
 // watchPage), and Chromium writes these as type error, so the line is

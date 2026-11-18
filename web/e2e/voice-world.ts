@@ -14,6 +14,7 @@ import { join } from 'node:path';
 import type { Page } from '@playwright/test';
 import type { BrowserLogEntry } from './console-lines';
 import { listIdentities, listTracks, roomCount, untilAnswered, type NoAnswer, type PublishedTrack } from './livekit-admin';
+import { tokensInSignal } from './signal-tokens';
 import { repoRoot, safePath, type World } from './world';
 
 // The same image, by version and digest, as e2e/internal/lkit/kit.go (which
@@ -119,12 +120,19 @@ export interface VoiceWorld {
   // the channel (issue #447: a second group must see nothing of this one).
   readonly operator: string;
   // Every secret of this world, for the check that none shows on a page: the
-  // credentials and the LiveKit secret, and every join token and room name a
-  // page was given (added by watchPage as the sessions are answered).
+  // credentials and the LiveKit secret, every join token and room name a page
+  // was given (added by watchPage as the sessions are answered), and every
+  // token LiveKit itself gave a page over its signalling socket, a refreshed
+  // one after a join among them (added by watchPage as each frame arrives,
+  // issue #1948).
   readonly secrets: readonly string[];
-  // How many join tokens and room names watchPage has added.
+  // How many join tokens and room names watchPage has added from conchd's
+  // answers (the tokens LiveKit gave are not counted).
   readonly sessionSecrets: () => number;
   addSecret: (value: string) => void;
+  // Adds a token LiveKit gave a page to secrets, without counting it in
+  // sessionSecrets.
+  addLiveKitToken: (value: string) => void;
   api: (token: string, method: 'GET' | 'POST' | 'PUT' | 'DELETE', path: string, body?: unknown) => Promise<{ status: number; text: string }>;
   // The audit trail as the operator exports it: one line per event.
   audit: () => Promise<{ actor: string; action: string; subject: string; detail: string }[]>;
@@ -285,6 +293,10 @@ room:
         secrets.push(value);
         fromSessions++;
       },
+      addLiveKitToken: (value) => {
+        if (value === '' || secrets.includes(value)) return;
+        secrets.push(value);
+      },
       api,
       audit: async () => {
         const r = await api(operator, 'GET', '/v1/audit');
@@ -359,12 +371,25 @@ export interface Watch {
   // path and error: one aborted or never answered, or one answered and its
   // body let go unread (Chromium's net::ERR_ABORTED after a 204).
   readonly failed: readonly string[];
+  // Every room token conchd gave this page, read from its answers and never
+  // from the world's secrets: the join token of each room in a voice session
+  // answer, and the token of each viewer companion answer, in the order the
+  // answers were read (so the last is the newest once settled() has
+  // resolved); each is in the world's secrets too.
+  readonly conchdTokens: readonly string[];
+  // Every token LiveKit gave this page over its signalling sockets (a
+  // refreshed one after each join, and one on a room move), in the order the
+  // frames arrived; each is in the world's secrets too. A JWT-shaped string
+  // only signal-tokens.ts's scan found comes with its signed part (ending in
+  // a dot), which is no token.
+  readonly livekitTokens: readonly string[];
   // Every Permissions-Policy violation the page was told of by a
   // ReportingObserver, as the feature and where in a script it was asked for.
   readonly policy: readonly string[];
   // Resolves once every voice session answer seen so far has been read and
-  // its join tokens and room names added to the world's secrets, and every
-  // entry the browser had logged by then is in browserLog.
+  // its join tokens and room names added to the world's secrets, every frame
+  // LiveKit had sent by then has been read for tokens, and every entry the
+  // browser had logged by then is in browserLog.
   settled: () => Promise<void>;
 }
 
@@ -387,14 +412,17 @@ const reportPolicy = () => {
 };
 
 // watchPage records everything page writes to its console, every request to
-// conchd that fails and every Permissions-Policy report, and adds the join
-// token and room name of every voice session conchd answers it with to vw's
-// secrets. Call it before the page loads.
+// conchd that fails and every Permissions-Policy report, and adds to vw's
+// secrets the join token and room name of every voice session (and viewer
+// companion) conchd answers it with, and every token LiveKit hands it over a
+// signalling socket. Call it before the page loads.
 export async function watchPage(page: Page, vw: VoiceWorld): Promise<Watch> {
   const lines: string[] = [];
   const failed: string[] = [];
   const policy: string[] = [];
   const reads: Promise<void>[] = [];
+  const conchdTokens: string[] = [];
+  const livekitTokens: string[] = [];
   page.on('console', (m) => {
     lines.push(`${m.type()}: ${m.text()}`);
   });
@@ -432,28 +460,57 @@ export async function watchPage(page: Page, vw: VoiceWorld): Promise<Watch> {
   });
   await page.addInitScript(reportPolicy);
   page.on('response', (res) => {
-    if (!new URL(res.url()).pathname.endsWith('/voice/session')) return;
+    const path = new URL(res.url()).pathname;
+    const session = path.endsWith('/voice/session');
+    if (!session && !path.endsWith('/voice/companion')) return;
     reads.push(
       res.json().then(
         (body: unknown) => {
-          const rooms = (body as { rooms?: unknown }).rooms;
+          // A session answers with a grant per room; a viewer companion with
+          // one grant of its own (VoiceCompanionResponseV1).
+          const rooms = session ? (body as { rooms?: unknown }).rooms : [body];
           if (!Array.isArray(rooms)) return;
-          for (const g of rooms as { token?: unknown; room?: unknown }[]) {
-            if (typeof g.token === 'string') vw.addSecret(g.token);
-            if (typeof g.room === 'string') vw.addSecret(g.room);
+          for (const g of rooms as ({ token?: unknown; room?: unknown } | null)[]) {
+            if (typeof g?.token === 'string') {
+              vw.addSecret(g.token);
+              conchdTokens.push(g.token);
+            }
+            if (typeof g?.room === 'string') vw.addSecret(g.room);
           }
         },
         () => undefined,
       ),
     );
   });
+  // LiveKit's own tokens (issue #1948): after a join it sends the page a
+  // refreshed token, which the SDK reconnects with and conchd never sees.
+  // They are read here from the frames the browser received on a socket to
+  // LiveKit's origin, as each arrives, and never by having the page log them.
+  // The handler runs before Playwright reports anything later on the page, so
+  // a token is a secret before the page could show it.
+  const livekit = new URL(vw.livekitOrigin).origin;
+  page.on('websocket', (ws) => {
+    if (new URL(ws.url()).origin !== livekit) return;
+    ws.on('framereceived', ({ payload }) => {
+      for (const t of tokensInSignal(typeof payload === 'string' ? payload : new Uint8Array(payload))) {
+        vw.addLiveKitToken(t);
+        if (!livekitTokens.includes(t)) livekitTokens.push(t);
+      }
+    });
+  });
   return {
     console: lines,
     browserLog,
     failed,
+    conchdTokens,
+    livekitTokens,
     policy,
     settled: async () => {
       await Promise.all(reads);
+      // A round trip on Playwright's own session to the page: its answer comes
+      // after every frame event the page had by then, so each has been read.
+      // A closed page has no more frames to give.
+      await page.evaluate(() => 0).catch(() => undefined);
       await browserLogged();
     },
   };
