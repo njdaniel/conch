@@ -119,7 +119,7 @@ function strip(fake: Fake, channel: string | null = 'general', binding?: string,
 }
 
 describe('NativeVoicePanel', () => {
-  it('keeps remote join, leave and share changes silent, including after reconnect', async () => {
+  it('plays remote join, leave and share cues once, with no initial or reconnect backlog', async () => {
     const play = vi.spyOn(sounds, 'play').mockImplementation(() => undefined);
     setSoundAudience({ me: 1, allows: () => true });
     strip(new Fake(running()));
@@ -127,15 +127,41 @@ describe('NativeVoicePanel', () => {
     const two = presence([1, '2026-11-17T00:00:00Z'], [2, '2026-11-17T00:01:00Z']);
     const sharing: VoicePresenceV2 = { ...two, rooms: [{ participants: (two.rooms[0]?.participants ?? []).map((p) => p.principal_id === 2 ? { ...p, sharing: true, share_started_at: '2026-11-17T00:02:00Z' } : p) }] };
     await frame(one);
+    expect(play).not.toHaveBeenCalled();
     await frame(two);
     await frame(sharing);
+    await frame(sharing);
     await frame(one);
+    expect(play.mock.calls).toEqual([['join'], ['share'], ['leave']]);
     const connections = sockets.length;
     act(() => { sockets.at(-1)?.events.onClose(1006); });
     await waitFor(() => { expect(sockets).toHaveLength(connections + 1); }, { timeout: 3000 });
     await frame(two);
+    expect(play.mock.calls).toEqual([['join'], ['share'], ['leave']]);
     await frame(one);
+    expect(play.mock.calls).toEqual([['join'], ['share'], ['leave'], ['leave']]);
+  });
+
+  it('keeps presence cues silent without an audience, while muted, or when only browsing', async () => {
+    const play = vi.spyOn(sounds, 'play').mockImplementation(() => undefined);
+    const fake = new Fake(running());
+    strip(fake);
+    const one = presence([1, '2026-11-17T00:00:00Z']);
+    const two = presence([1, '2026-11-17T00:00:00Z'], [2, '2026-11-17T00:01:00Z']);
+    await frame(one);
+    await frame(two);
+    setSoundAudience({ me: 1, allows: () => false });
+    await frame(one);
+    await frame(two);
+    setSoundAudience({ me: 1, allows: () => true });
+    fake.set(idle);
+    await frame(one);
+    await frame(two);
     expect(play).not.toHaveBeenCalled();
+    // Rejoining this app resumes live cues without replacing its socket.
+    fake.set(running());
+    await frame(one);
+    expect(play.mock.calls).toEqual([['leave']]);
   });
 
   it('never builds the browser engine or asks for a device', async () => {

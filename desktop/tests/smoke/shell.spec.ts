@@ -57,7 +57,7 @@ test.describe('the packaged shell', () => {
     expect(response.status()).toBe(200);
     const h = response.headers();
     expect(h['content-security-policy']).toBe(
-      "default-src 'none'; script-src 'self'; style-src 'self'; font-src 'self'; img-src 'self' blob: data:; connect-src wss: https:; object-src 'none'; base-uri 'none'; frame-src 'none'; frame-ancestors 'none'; form-action 'none'; worker-src 'none'",
+      "default-src 'none'; script-src 'self'; style-src 'self'; font-src 'self'; img-src 'self' blob: data:; media-src 'self'; connect-src wss: https:; object-src 'none'; base-uri 'none'; frame-src 'none'; frame-ancestors 'none'; form-action 'none'; worker-src 'none'",
     );
     expect(h['x-content-type-options']).toBe('nosniff');
     expect(h['content-type']).toBe('text/html; charset=utf-8');
