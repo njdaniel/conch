@@ -3322,11 +3322,6 @@ label {
   object-fit: contain;
 }
 
-.share-frame:fullscreen video {
-  height: 100%;
-  max-height: none;
-}
-
 .share-frame .hint {
   position: absolute;
   inset: auto 0 0;
@@ -3763,11 +3758,6 @@ body:has(.call-view.compact, .call-stage.compact) .dock {
   width: 100%;
   height: 100%;
   object-fit: contain;
-}
-
-.call-frame:fullscreen {
-  max-height: none;
-  border-radius: 0;
 }
 
 /* The speaking person's tile: a ring, and the word (never colour alone). The
@@ -6199,4 +6189,40 @@ button.link {
   display: inline-flex;
   align-items: center;
   gap: var(--s2);
+}
+
+/* Full screen leaves the stage's phone, focused and compact size limits
+   behind (#1898). The max-size overrides must beat those layout selectors,
+   including the phone's 18vh picture cap and the focused tile's 30vh cap. */
+.share-frame:fullscreen,
+.call-frame:fullscreen {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100vw;
+  height: 100dvh;
+  max-width: none !important;
+  max-height: none !important;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  aspect-ratio: auto;
+  background: #000000;
+}
+
+.share-frame:fullscreen video,
+.call-frame:fullscreen video {
+  width: 100%;
+  height: 100%;
+  max-width: none !important;
+  max-height: none !important;
+  object-fit: contain;
+}
+
+/* Titles and playback controls are outside the full-screen frames. Hide the
+   in-frame hints, labels and focus buttons so only the picture covers it. */
+.share-frame:fullscreen > :not(video),
+.call-frame:fullscreen > :not(video) {
+  display: none;
 }

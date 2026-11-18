@@ -51,6 +51,7 @@ import { Avatar, Glyph } from '../Icons';
 import { usePhone } from '../phone';
 import type { VoiceClient, VoiceState } from './connection';
 import { gridOf } from './gridOf';
+import { fullscreenVideo } from './fullscreen';
 import type { Occupant } from './presence';
 import { VoiceStatus } from './VoiceStatus';
 
@@ -478,10 +479,6 @@ export function CallView({ client, state, tiles, hidden, open, viewed = state.ch
   );
 }
 
-// A video element Safari on iPhone can put full screen: it has no
-// requestFullscreen for other elements.
-type AppleVideo = HTMLVideoElement & { readonly webkitEnterFullscreen?: () => void };
-
 // TileView is one person's tile: their camera (the person's own from the
 // local track, mirrored; anyone else's received only while it is claimed and
 // this view is open), or their initial and "Camera off". The same element
@@ -538,10 +535,7 @@ function TileView({ client, tile, arrived, speaking, main, frameRef, onEnlarge, 
   }, [main]);
 
   const fullscreen = () => {
-    const el = frame.current;
-    const v: AppleVideo | null = video.current;
-    if (el !== null && document.fullscreenEnabled) void el.requestFullscreen().catch(() => undefined);
-    else if (v?.webkitEnterFullscreen !== undefined) v.webkitEnterFullscreen();
+    void fullscreenVideo(frame.current, video.current);
   };
 
   const setFrame = (el: HTMLElement | null) => {
