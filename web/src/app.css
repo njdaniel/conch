@@ -1425,6 +1425,7 @@ label {
 }
 
 .conv-head {
+  position: relative;
   display: flex;
   align-items: baseline;
   gap: var(--s2);
@@ -6254,8 +6255,13 @@ button.link {
 }
 
 .conv-head > .jump-unread {
-  margin-left: 0;
-  flex: 0 1 auto;
+  /* Float over the log without taking height from the phone's header. Its
+     DOM position before the heading preserves the log's F15 tab sequence. */
+  position: absolute;
+  top: calc(100% + var(--s2));
+  right: var(--s3);
+  z-index: 1;
+  max-width: calc(100% - 2 * var(--s3));
 }
 
 .unread-problem {
