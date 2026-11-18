@@ -1,3 +1,4 @@
+import { sounds } from './sounds';
 import { act, cleanup, fireEvent, render, renderHook, screen } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Message } from './Conversation';
@@ -791,5 +792,38 @@ describe('an edited message', () => {
     rerender({ ...props(), editEvent: edited(5, 'now with @ada', '2026-10-26T00:01:00Z') });
     expect(result.current.alerts).toHaveLength(0);
     expect(FakeNotification.all).toHaveLength(0);
+  });
+});
+
+
+describe('message sounds', () => {
+  it('sounds once for eligible live messages and excludes own, muted, off, non-mention, open focused and edits', () => {
+    const play = vi.spyOn(sounds, 'play').mockImplementation(() => undefined);
+    vi.spyOn(document, 'hasFocus').mockReturnValue(true);
+    const base: Props = { ...props(), openChannel: 7 };
+    const { result, rerender } = renderHook((p: Props) => useNotifications(p), { initialProps: base });
+    act(() => { result.current.setPolicy('all'); });
+    rerender({ ...base, event: message(1) });
+    expect(play).not.toHaveBeenCalled();
+    rerender({ ...base, openChannel: null, event: message(2) });
+    rerender({ ...base, openChannel: null, event: message(2) });
+    expect(play).toHaveBeenCalledTimes(1);
+    expect(play).toHaveBeenLastCalledWith('message');
+    rerender({ ...base, openChannel: null, event: message(3, 'own', 2) });
+    act(() => { result.current.toggleMute(7); });
+    rerender({ ...base, openChannel: null, event: message(4) });
+    act(() => { result.current.toggleMute(7); result.current.setPolicy('off'); });
+    rerender({ ...base, openChannel: null, event: message(5) });
+    act(() => { result.current.setPolicy('mentions'); });
+    rerender({ ...base, openChannel: null, event: message(6) });
+    rerender({ ...base, openChannel: null, editEvent: message(7, '@ada') });
+    expect(play).toHaveBeenCalledTimes(1);
+    rerender({ ...base, openChannel: null, event: message(8, '@ada') });
+    expect(play).toHaveBeenCalledTimes(2);
+    visibility('hidden');
+    rerender({ ...base, event: message(9, '@ada') });
+    expect(play).toHaveBeenCalledTimes(3);
+    play.mockRestore();
+    vi.restoreAllMocks();
   });
 });

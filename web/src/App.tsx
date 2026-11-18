@@ -751,6 +751,7 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
     reload: reloadReadState,
   });
   const notifications = useNotifications({
+    openChannel: previewing ? null : channelId,
     signedIn,
     origin,
     principal: principal === null ? null : { id: principal.id, name: shownName },
