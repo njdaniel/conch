@@ -317,6 +317,11 @@ async fn drive(rig: &mut ManagedRig, name: &str) -> (Vec<Logged>, i32) {
                 let mut message = step["message"].clone();
                 if message["kind"] == "start" {
                     message["server"] = json!(rig.conchd.url());
+                    // F13: Windows owners pass the login in the environment.
+                    #[cfg(windows)]
+                    {
+                        message["credential"] = json!("env");
+                    }
                 }
                 let line = message.to_string();
                 rig.line(line.as_bytes());
@@ -1069,6 +1074,13 @@ async fn the_login_comes_from_where_the_start_says_and_nowhere_else() {
         ),
     ];
     for (login, credential, fails) in cases {
+        // F13 refuses every Windows stored start, even if CONCH_TOKEN is also set.
+        #[cfg(windows)]
+        let fails = if credential == "stored" {
+            Some(VoiceControlReason::NotSignedIn)
+        } else {
+            fails
+        };
         let setup = ManagedSetup {
             login,
             ..ManagedSetup::default()
@@ -1800,6 +1812,11 @@ async fn drive_v2(
                 let mut message = step["message"].clone();
                 if message["kind"] == "start" {
                     message["server"] = json!(rig.conchd.url());
+                    // F13: Windows owners pass the login in the environment.
+                    #[cfg(windows)]
+                    {
+                        message["credential"] = json!("env");
+                    }
                     if version.is_none() {
                         version = Some(match message["schema"].as_str() {
                             Some("conch.voice_control.v2") => Version::V2,

@@ -110,7 +110,12 @@ pub struct ManagedSetup {
 impl Default for ManagedSetup {
     fn default() -> Self {
         Self {
-            login: Login::Stored,
+            // Windows has no checked stored login (F13): its owner passes CONCH_TOKEN.
+            login: if cfg!(windows) {
+                Login::Env
+            } else {
+                Login::Stored
+            },
             voice_toml: Some(KEYS_TOML.to_owned()),
             keyboard: true,
             keyboard_unplugged: false,
@@ -715,6 +720,7 @@ impl ManagedRig {
     }
 
     /// The start every test begins with: id 1, principal 7, as the stub's login is.
+    /// Windows uses the environment login (F13); Unix keeps the stored login.
     pub fn start_command(&self) -> Value {
         json!({
             "schema": "conch.voice_control.v1",
@@ -723,7 +729,7 @@ impl ManagedRig {
             "server": self.conchd.url(),
             "channel": CHANNEL,
             "principal_id": OWN_PRINCIPAL,
-            "credential": "stored",
+            "credential": if cfg!(windows) { "env" } else { "stored" },
             "muted": false,
             "deafened": false,
         })
