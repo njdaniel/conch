@@ -156,6 +156,7 @@ export function fakeFactory(log: string[] = []) {
       signedOut: false,
       profileId: spec.profile?.id ?? null,
       token: () => activation.held,
+      voiceGeneration: () => null,
       voiceCredential: () => null,
       voiceCurrent: () => activation.held !== null,
       whoami: () => Promise.resolve(activation.account),

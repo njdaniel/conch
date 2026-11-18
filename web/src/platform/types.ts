@@ -25,6 +25,7 @@ import type {
   VoiceKeyDevicesResult,
   VoiceSaveResult,
   VoiceTalkBindingResult,
+  VoiceTalkBindingRequest,
 } from './desktop/bridge';
 
 // HttpTransport makes the requests of conchd that the operation table names.
@@ -248,7 +249,7 @@ export interface NativeVoice {
   saveDevice(request: { readonly key: VoiceDeviceKey; readonly value: string }): Promise<VoiceSaveResult>;
   // The talk-key setup (issue #1382, D3-11). Absent when the bridge has none.
   readonly keyDevices?: () => Promise<VoiceKeyDevicesResult>;
-  readonly saveTalkBinding?: (request: { readonly deviceId: string; readonly code: number }) => Promise<VoiceTalkBindingResult>;
+  readonly saveTalkBinding?: (request: VoiceTalkBindingRequest) => Promise<VoiceTalkBindingResult>;
   // The screen companion (issue #1581). Absent when the bridge has none.
   readonly companion?: NativeCompanion;
   // The share's sound (issue #1854). Absent when the bridge has none.

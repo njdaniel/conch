@@ -25,6 +25,7 @@
 //   - a run past ONE_SHOT_TIMEOUT_MS is SIGKILLed and reaped;
 //   - one run at a time: a second is refused 'busy', and cancel() (the
 //     profile-switch media hook) kills the one running and waits for it.
+import { isWindowsBinding } from '../../../web/src/platform/desktop/windows-keys.ts';
 import { VOICE_DEVICES_MAX_BYTES, voiceControlTalkMode } from '../../../web/src/schema/generated.ts';
 import type { NativeVoiceDevicesResult, VoiceBindingKey, VoiceDeviceKey, VoiceOneShotError, VoiceSaveResult } from '../../../web/src/platform/desktop/bridge.ts';
 import { parseVoiceDevices } from './devices.ts';
@@ -80,11 +81,13 @@ export function keyCodeText(code: unknown): string | null {
 // rule); for the talk mode, a word of its vocabulary; for keys.device, the
 // by-id path of a name fit for a udev rule (stricter than the helper, which
 // takes any clean path under /dev/input/); for keys.talk, a canonical decimal
-// code from 1 to 767 (the helper also takes KEY_* names). It is checked here,
+// code from 1 to 767, or the closed Windows grammar (the helper also takes
+// KEY_* names on Linux). It is checked here,
 // in the IPC layer and again by the service, before anything is passed.
 export function saveValueFits(key: unknown, value: unknown): value is string {
   if (!isSaveKey(key) || typeof value !== 'string') return false;
   if (key === 'audio.talk_mode') return voiceControlTalkMode(value).length === 0;
+  if (key === 'keys.talk' && isWindowsBinding(value)) return true;
   if (key === 'keys.talk') return /^[1-9]\d{0,2}$/u.test(value) && keyCodeText(Number(value)) === value;
   if (key === 'keys.device') return value.startsWith(`${BY_ID_DIR}/`) && value.length <= BY_ID_DIR.length + 1 + 200 && fitForARule(value.slice(BY_ID_DIR.length + 1));
   return value === DEFAULT_DEVICE || (validDeviceName(value) && !NO_SEPARATOR.test(value));

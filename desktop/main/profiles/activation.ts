@@ -108,6 +108,7 @@ export function activationFactory(env: ActivationEnv, live: Live): (spec: Activa
       profileId: profile?.id ?? null,
       token: () => identity.capture().token,
       voiceCredential: () => identity.voiceCredential(),
+      voiceGeneration: () => identity.signedIn && identity.origin !== null ? identity.generation : null,
       voiceCurrent: (generation) => identity.generation === generation && live.service === service,
       async whoami(): Promise<Account | null> {
         const outcome = await service.restore();

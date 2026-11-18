@@ -516,12 +516,20 @@ export type VoiceKeyDevicesResult =
   | {
       readonly ok: true;
       readonly devices: readonly VoiceKeyDevice[];
+      readonly platform?: 'win32';
       // What a read grant means, to be shown before the rule is.
       readonly disclosure: readonly string[];
     }
   | { readonly ok: false; readonly error: VoiceOneShotError };
 
-// Saves keys.device then keys.talk. failed says which of the two did not save.
+// Windows capture carries only an allowlisted physical code and the voice
+// generation shown during configuration. Main translates it; no event or text.
+export type VoiceTalkBindingRequest =
+  | { readonly deviceId: string; readonly code: number }
+  | { readonly windowsCode: string; readonly generation: number };
+
+// Linux saves keys.device then keys.talk; Windows saves only keys.talk.
+// failed says which write did not save.
 export type VoiceTalkBindingResult =
   | { readonly ok: true }
   | { readonly ok: false; readonly error: VoiceOneShotError; readonly failed?: 'device' | 'talk' };
@@ -538,7 +546,7 @@ export interface DesktopVoiceBridge {
   voiceDevices(): Promise<NativeVoiceDevicesResult>;
   voiceSaveDevice(request: { readonly key: VoiceDeviceKey; readonly value: string }): Promise<VoiceSaveResult>;
   voiceKeyDevices(): Promise<VoiceKeyDevicesResult>;
-  voiceSaveTalkBinding(request: { readonly deviceId: string; readonly code: number }): Promise<VoiceTalkBindingResult>;
+  voiceSaveTalkBinding(request: VoiceTalkBindingRequest): Promise<VoiceTalkBindingResult>;
   onVoiceState(listener: (view: NativeVoiceView) => void): Unsubscribe;
 }
 
