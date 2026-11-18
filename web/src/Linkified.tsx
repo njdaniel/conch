@@ -79,7 +79,7 @@ function closing(next: NextMarkers, marker: InlineMarker, from: number): number 
 // A closed spoiler may span lines within one block, but not a quote or a code
 // block, list or heading, so the toolbar wraps each line of a selection in
 // its own. An unclosed || stays literal, as in Discord.
-function inline(text: string, prefix: string, depth: number, budget: Budget): ReactNode[] {
+function inline(text: string, prefix: string, depth: number, budget: Budget, plainText = false): ReactNode[] {
   const next = nextMarkers(text);
   const out: ReactNode[] = [];
   let literal = 0;
@@ -114,12 +114,12 @@ function inline(text: string, prefix: string, depth: number, budget: Budget): Re
   while (at < text.length) {
     if (text[at] === '\\' && at + 1 < text.length && /[*`~|[\]\\]/.test(text[at + 1] ?? '')) {
       flush(at);
-      add(budget.preview ? text.slice(at, at + 2) : text[at + 1]);
+      add(budget.preview || plainText ? text.slice(at, at + 2) : text[at + 1]);
       at += 2;
       literal = at;
       continue;
     }
-    if (text[at] === '`') {
+    if (!plainText && text[at] === '`') {
       const end = closing(next, '`', at + 1);
       if (end >= 0) {
         flush(at);
@@ -139,7 +139,7 @@ function inline(text: string, prefix: string, depth: number, budget: Budget): Re
           add('[spoiler]');
         } else {
           budget.spoilers += 1;
-          const content = depth < maxInlineDepth ? inline(inner, `${prefix}-${String(at)}`, depth + 1, budget) : inner;
+          const content = depth < maxInlineDepth ? inline(inner, `${prefix}-${String(at)}`, depth + 1, budget, plainText) : inner;
           out.push(<Spoiler key={`${prefix}-${String(at)}`}>{content}</Spoiler>);
         }
         at = end + 2;
@@ -147,7 +147,7 @@ function inline(text: string, prefix: string, depth: number, budget: Budget): Re
         continue;
       }
     }
-    if (text.startsWith('***', at)) {
+    if (!plainText && text.startsWith('***', at)) {
       const end = closing(next, '***', at + 3);
       if (end >= 0 && depth < maxInlineDepth) {
         flush(at);
@@ -159,7 +159,7 @@ function inline(text: string, prefix: string, depth: number, budget: Budget): Re
         continue;
       }
     }
-    if (wrap('**', 'strong') || wrap('~~', 's') || wrap('*', 'em')) continue;
+    if (!plainText && (wrap('**', 'strong') || wrap('~~', 's') || wrap('*', 'em'))) continue;
     at += 1;
   }
   flush(text.length);
@@ -190,7 +190,9 @@ function CodeBlock({ text }: { readonly text: string }) {
 }
 
 const maxListDepth = 3;
-const maxListItems = 500;
+// Share one per-message budget across block kinds: near-1 MiB bodies can
+// otherwise create hundreds of thousands of elements and stateful Copy controls.
+const maxStructuralElements = 500;
 interface ListLine {
   readonly depth: number;
   readonly ordered: boolean;
@@ -213,7 +215,7 @@ interface MarkdownList {
 }
 
 // Build iteratively, flattening indentation jumps and levels beyond three.
-// Rendering only recurses through that fixed depth; the per-message item cap
+// Rendering only recurses through that fixed depth; the shared structural cap
 // leaves excess lines as source text instead of making unbounded DOM nodes.
 function lists(lines: readonly ListLine[], prefix: string, budget: Budget): ReactNode {
   if (budget.preview) return lines.map((line) => text_(inline(line.body, prefix, 0, budget))).join('\n');
@@ -249,7 +251,7 @@ function blocks(text: string, preview = false): ReactNode[] {
   const lines = text.split('\n');
   const out: ReactNode[] = [];
   let ordinary: string[] = [];
-  let listItems = 0;
+  let structuralElements = 0;
   const flush = () => {
     if (ordinary.length === 0) return;
     const body = ordinary.join('\n');
@@ -259,8 +261,17 @@ function blocks(text: string, preview = false): ReactNode[] {
   };
 
   for (let at = 0; at < lines.length;) {
+    if (structuralElements >= maxStructuralElements) {
+      flush();
+      // Preserve all remaining source in one block. Only links and bounded
+      // spoilers become components; Markdown markers stay readable as text.
+      const nodes = inline(lines.slice(at).join('\n'), 'overflow', 0, budget, true);
+      out.push(preview ? text_(nodes) : <span key="overflow">{nodes}</span>);
+      break;
+    }
     const line = lines[at] ?? '';
     if (line.startsWith('```')) {
+      structuralElements += 1;
       flush();
       const fence = at;
       at += 1;
@@ -275,6 +286,7 @@ function blocks(text: string, preview = false): ReactNode[] {
       continue;
     }
     if (line === '>' || line.startsWith('> ')) {
+      structuralElements += 1;
       flush();
       const quote: string[] = [];
       while (at < lines.length) {
@@ -290,6 +302,7 @@ function blocks(text: string, preview = false): ReactNode[] {
     }
     const heading = /^(#{1,2}) (.*)$/.exec(line);
     if (heading !== null) {
+      structuralElements += 1;
       flush();
       const nodes = inline(heading[2] ?? '', `heading-${String(out.length)}`, 0, budget);
       // Message text must not enter the page's screen-reader heading outline.
@@ -297,14 +310,14 @@ function blocks(text: string, preview = false): ReactNode[] {
       at += 1;
       continue;
     }
-    if (listItems < maxListItems && listLine(line) !== null) {
+    if (listLine(line) !== null) {
       flush();
       const items: ListLine[] = [];
-      while (at < lines.length && listItems < maxListItems) {
+      while (at < lines.length && structuralElements < maxStructuralElements) {
         const item = listLine(lines[at] ?? '');
         if (item === null) break;
         items.push(item);
-        listItems += 1;
+        structuralElements += 1;
         at += 1;
       }
       const nodes = lists(items, `list-${String(out.length)}`, budget);

@@ -126,6 +126,39 @@ describe('message Markdown pathological input', () => {
     expect(container.textContent).not.toContain('z');
   }, 30_000);
 
+  it.each([
+    { name: '100,000 headings', units: ['# x\n'], headings: 500, items: 0, code: 0 },
+    { name: '100,000 fenced blocks', units: ['```\nx\n```\n'], headings: 0, items: 0, code: 500 },
+    { name: '100,000 mixed blocks', units: ['# x\n', '- x\n', '```\nx\n```\n'], headings: 167, items: 167, code: 166 },
+  ])('shares a structural budget for $name and retains every overflow character', ({ units, headings, items, code }) => {
+    const blocks = Array.from({ length: 100_000 }, (_, i) => units[i % units.length] ?? '');
+    const body = blocks.join('');
+    expect(body.length).toBeLessThanOrEqual(MAX_POST_REQUEST_BYTES);
+    const { container } = render(<Linkified text={body} />);
+    expect(container.querySelectorAll('.markdown-heading')).toHaveLength(headings);
+    expect(container.querySelectorAll('li')).toHaveLength(items);
+    expect(container.querySelectorAll('.markdown-code-block')).toHaveLength(code);
+    expect(container.querySelectorAll('button')).toHaveLength(code);
+    expect(container.querySelectorAll('*').length).toBeLessThan(4000);
+    // A single source-text span keeps all 99,500 remaining blocks readable.
+    const overflow = blocks.slice(500).join('');
+    expect(container.lastChild?.textContent).toBe(overflow);
+    expect(previewText(body).endsWith(overflow)).toBe(true);
+  });
+
+  it('keeps overflow linkified and spoiler-safe without creating more Markdown elements', () => {
+    const tail = '# **heading**\n\\*escaped*\n- *item*\n> quote\n```\n`||secret||`\n```\nhttps://example.com\n' + '||hidden||'.repeat(1000);
+    const { container } = render(<Linkified text={'# x\n'.repeat(500) + tail} />);
+    expect(container.querySelectorAll('.markdown-heading')).toHaveLength(500);
+    expect(container.querySelector('li, blockquote, pre, code, strong, em')).toBeNull();
+    expect(container.lastChild?.textContent).toContain('# **heading**\n\\*escaped*\n- *item*\n> quote\n```');
+    expect(screen.getByRole('link').getAttribute('href')).toBe('https://example.com/');
+    expect(container.querySelectorAll('.spoiler')).toHaveLength(500);
+    expect(container.textContent).not.toContain('secret');
+    expect(container.textContent).not.toContain('hidden');
+    expect(previewText('# x\n'.repeat(500) + tail)).not.toMatch(/secret|hidden/);
+  });
+
   // A body of tens of thousands of links once overflowed the call stack (a
   // spread of every segment into one push) and blanked the whole page.
   it('renders a body of 80 000 links without overflowing the stack', () => {
