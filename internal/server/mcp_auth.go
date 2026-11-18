@@ -342,30 +342,24 @@ func base64Len(n int64) int64 {
 // being called, letting a non-post tool hold a large-request place. The probe
 // checks each routing object before decoding the attachment values.
 func mcpOversizeIsAttachments(body []byte, maxUpload int64) bool {
-	envelope, ok := mcpProbeObject(body)
-	if !ok {
+	// Validate once before the scanner borrows value slices. In particular this
+	// rejects malformed JSON and trailing data without a decoder buffer.
+	if !json.Valid(body) {
 		return false
 	}
-	var method string
-	if json.Unmarshal(envelope["method"], &method) != nil || method != "tools/call" {
+	probe := mcpRoutingProbe{body: body}
+	if !probe.object(0) {
 		return false
 	}
-	params, ok := mcpProbeObject(envelope["params"])
-	if !ok {
-		return false
-	}
-	var name string
-	if json.Unmarshal(params["name"], &name) != nil || name != "post_message" {
-		return false
-	}
-	arguments, ok := mcpProbeObject(params["arguments"])
-	if !ok {
+	var method, name string
+	if json.Unmarshal(probe.method, &method) != nil || method != "tools/call" ||
+		json.Unmarshal(probe.name, &name) != nil || name != "post_message" {
 		return false
 	}
 	var attachments []struct {
 		Data json.RawMessage `json:"data_base64"`
 	}
-	if json.Unmarshal(arguments["attachments"], &attachments) != nil {
+	if json.Unmarshal(probe.attachments, &attachments) != nil {
 		return false
 	}
 	if len(attachments) > schema.MaxAgentAttachments {
@@ -386,51 +380,118 @@ func mcpOversizeIsAttachments(body []byte, maxUpload int64) bool {
 	return rest <= schema.MaxPostRequestBytes
 }
 
-// mcpProbeObject reads a routing object without encoding/json's repeated-key
-// merging or case folding. Rejecting duplicate keys here also covers escaped
-// spellings, since Decoder.Token returns the decoded key.
-func mcpProbeObject(raw []byte) (map[string]json.RawMessage, bool) {
-	dec := json.NewDecoder(bytes.NewReader(raw))
-	token, err := dec.Token()
-	if err != nil || token != json.Delim('{') {
-		return nil, false
-	}
-	fields := make(map[string]json.RawMessage)
-	seen := make(map[string]bool)
-	for dec.More() {
-		token, err = dec.Token()
-		if err != nil {
-			return nil, false
+// mcpRoutingProbe walks the three routing objects in one pass, borrowing
+// slices from an already validated JSON document. Only keys are decoded here;
+// large string values are skipped without allocating a decoded or raw copy.
+// The attachment decode copies each data_base64 at most once.
+type mcpRoutingProbe struct {
+	body                      []byte
+	pos                       int
+	method, name, attachments []byte
+}
+
+func (p *mcpRoutingProbe) space() {
+	for p.pos < len(p.body) {
+		switch p.body[p.pos] {
+		case ' ', '\t', '\r', '\n':
+			p.pos++
+		default:
+			return
 		}
-		key, ok := token.(string)
-		if !ok {
-			return nil, false
+	}
+}
+
+// value skips one valid JSON value, including nested containers and escaped
+// quotes. json.Valid has already checked delimiters, escapes and nesting depth.
+func (p *mcpRoutingProbe) value() []byte {
+	p.space()
+	start := p.pos
+	depth := 0
+	for p.pos < len(p.body) {
+		c := p.body[p.pos]
+		switch c {
+		case '"':
+			p.pos++
+			for p.body[p.pos] != '"' {
+				if p.body[p.pos] == '\\' {
+					p.pos++
+				}
+				p.pos++
+			}
+		case '{', '[':
+			depth++
+		case '}', ']':
+			if depth == 0 {
+				return p.body[start:p.pos]
+			}
+			depth--
+		case ',', ':', ' ', '\t', '\r', '\n':
+			if depth == 0 {
+				return p.body[start:p.pos]
+			}
+		}
+		p.pos++
+		if depth == 0 {
+			// Scalars other than strings continue until their delimiter.
+			if c == '"' || c == '}' || c == ']' {
+				return p.body[start:p.pos]
+			}
+		}
+	}
+	return p.body[start:p.pos]
+}
+
+func (p *mcpRoutingProbe) object(level int) bool {
+	p.space()
+	if p.pos >= len(p.body) || p.body[p.pos] != '{' {
+		return false
+	}
+	p.pos++
+	seen := make(map[string]bool)
+	for {
+		p.space()
+		if p.body[p.pos] == '}' {
+			p.pos++
+			return true
+		}
+		var key string
+		if json.Unmarshal(p.value(), &key) != nil {
+			return false
 		}
 		folded := strings.ToLower(key)
 		if seen[folded] {
-			return nil, false
+			return false
 		}
 		seen[folded] = true
-		// These keys must agree with the SDK's case-sensitive routing.
+		// Match the SDK exactly, including when a key uses JSON escapes.
 		switch folded {
 		case "method", "params", "name", "arguments", "attachments":
 			if key != folded {
-				return nil, false
+				return false
 			}
 		}
-		var value json.RawMessage
-		if dec.Decode(&value) != nil {
-			return nil, false
+		p.space()
+		p.pos++ // colon, already checked by json.Valid
+		if level == 0 && key == "params" || level == 1 && key == "arguments" {
+			if !p.object(level + 1) {
+				return false
+			}
+		} else {
+			value := p.value()
+			switch {
+			case level == 0 && key == "method":
+				p.method = value
+			case level == 1 && key == "name":
+				p.name = value
+			case level == 2 && key == "attachments":
+				p.attachments = value
+			}
 		}
-		fields[key] = value
+		p.space()
+		if p.body[p.pos] == ',' {
+			p.pos++
+		}
 	}
-	if _, err = dec.Token(); err != nil {
-		return nil, false
-	}
-	if _, err = dec.Token(); err != io.EOF {
-		return nil, false
-	}
-	return fields, true
 }
 
 // base64StringLen reports how many bytes raw decodes to, when raw is a JSON

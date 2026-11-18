@@ -640,8 +640,12 @@ func TestMCPLargeRequestsPerPrincipal(t *testing.T) {
 				t.Fatalf("first principal refused: %d %s", rec.Code, rec.Body)
 			}
 			if same {
+				_, secondToken, err := f.srv.store.CreateCredential(t.Context(), "system", f.p("aria").ID, "second MCP credential", nil)
+				if err != nil {
+					t.Fatal(err)
+				}
 				for _, declared := range []bool{true, false} {
-					rec, _ := mcpSend(f.srv, f.p("aria").token, body, declared)
+					rec, _ := mcpSend(f.srv, secondToken, body, declared)
 					var e schema.Error
 					if rec.Code != 503 || json.Unmarshal(rec.Body.Bytes(), &e) != nil || e.Code != schema.ErrorCodeServerBusy || rec.Header().Get("Retry-After") != "2" || e.RetryAfterSeconds != 2 {
 						t.Fatalf("second request (declared=%v): %d %s", declared, rec.Code, rec.Body)
@@ -715,4 +719,110 @@ func TestMCPLargeAmbiguousRoutingAndEscapedBase64(t *testing.T) {
 			}
 		})
 	}
+}
+
+// Keep probe allocations bounded even for requests refused after the image.
+// Build the body outside the measured region; ReportAllocs measures the probe.
+func BenchmarkMCPOversizeIsAttachments(b *testing.B) {
+	for _, upload := range []int{10 << 20, 25 << 20} {
+		for _, refused := range []bool{false, true} {
+			b.Run(fmt.Sprintf("upload=%d/refused=%v", upload, refused), func(b *testing.B) {
+				body := mcpProbeBenchmarkBody(upload, refused)
+				b.SetBytes(int64(len(body)))
+				b.ReportAllocs()
+				b.ResetTimer()
+				for b.Loop() {
+					if got := mcpOversizeIsAttachments(body, int64(upload)+2); got == refused {
+						b.Fatalf("probe = %v, refused = %v", got, refused)
+					}
+				}
+				b.StopTimer()
+			})
+		}
+	}
+}
+
+func mcpProbeBenchmarkBody(upload int, refused bool) []byte {
+	body := []byte(`{"method":"tools/call","params":{"name":"post_message","arguments":{"attachments":[{"data_base64":"`)
+	body = append(body, bytes.Repeat([]byte("A"), int(base64Len(int64(upload))))...)
+	body = append(body, []byte(`"}]}}`)...)
+	if refused {
+		body = append(body, []byte(`,"method":"tools/list"`)...)
+	}
+	return append(body, '}')
+}
+
+func TestMCPOversizeProbeAllocationBudget(t *testing.T) {
+	const upload = 3 << 20
+	for _, refused := range []bool{false, true} {
+		t.Run(fmt.Sprintf("refused=%v", refused), func(t *testing.T) {
+			body := mcpProbeBenchmarkBody(upload, refused)
+			result := testing.Benchmark(func(b *testing.B) {
+				for b.Loop() {
+					if got := mcpOversizeIsAttachments(body, upload); got == refused {
+						b.Fatalf("probe = %v, refused = %v", got, refused)
+					}
+				}
+			})
+			if allocated := result.AllocedBytesPerOp(); allocated > 2*int64(len(body)) {
+				t.Fatalf("probe allocated %d bytes for a %d-byte body; budget is 2x", allocated, len(body))
+			}
+		})
+	}
+}
+
+func TestMCPRoutingProbe(t *testing.T) {
+	const params = `"params":{"name":"post_message","arguments":{"attachments":[{"data_base64":"AAAA"}]}}`
+	const valid = `{"method":"tools/call",` + params + `}`
+	for _, tt := range []struct {
+		name, body string
+		want       bool
+	}{
+		{"valid", valid, true},
+		{"whitespace", " \n" + valid + "\t", true},
+		{"reordered", `{` + params + `,"method":"tools/call"}`, true},
+		{"escaped exact key", strings.Replace(valid, `"method"`, `"m\u0065thod"`, 1), true},
+		{"nested unknown values", `{"extra":[{"text":"}\"[{","nested":[null,true,1.2]}],"method":"tools/call",` + params + `}`, true},
+		{"unicode fold ignored", `{"paramſ":null,"method":"tools/call",` + params + `}`, true},
+		{"batch", `[` + valid + `]`, false},
+		{"null", `null`, false},
+		{"params null", `{"method":"tools/call","params":null}`, false},
+		{"arguments array", strings.Replace(valid, `"arguments":{"attachments":[{"data_base64":"AAAA"}]}`, `"arguments":[]`, 1), false},
+		{"missing attachments", strings.Replace(valid, `"attachments"`, `"other"`, 1), false},
+		{"trailing value", valid + `null`, false},
+		{"truncated", valid[:len(valid)-1], false},
+		{"duplicate unknown key", `{"extra":1,"Extra":2,"method":"tools/call",` + params + `}`, false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := mcpOversizeIsAttachments([]byte(tt.body), 3); got != tt.want {
+				t.Fatalf("probe = %v, want %v", got, tt.want)
+			}
+		})
+	}
+	for _, key := range []string{"method", "params", "name", "arguments", "attachments"} {
+		t.Run("miscased/"+key, func(t *testing.T) {
+			body := strings.Replace(valid, `"`+key+`"`, `"`+strings.ToUpper(key)+`"`, 1)
+			if mcpOversizeIsAttachments([]byte(body), 3) {
+				t.Fatal("accepted miscased routing key")
+			}
+		})
+	}
+}
+
+// The scanner relies on json.Valid; every valid value must be skipped exactly,
+// even when quotes, escapes and container delimiters occur inside strings.
+func FuzzMCPProbeValue(f *testing.F) {
+	for _, seed := range []string{`null`, `true`, `-1.25e+3`, `""`, `"\\\"}{[]"`, `[1,{"x":[null,"}"]}]`, `{}`, `"\u1234"`} {
+		f.Add(seed)
+	}
+	f.Fuzz(func(t *testing.T, raw string) {
+		body := bytes.TrimSpace([]byte(raw))
+		if !json.Valid(body) {
+			return
+		}
+		probe := mcpRoutingProbe{body: body}
+		if got := probe.value(); !bytes.Equal(got, body) || probe.pos != len(body) {
+			t.Fatalf("skipped %q at %d, want %q", got, probe.pos, body)
+		}
+	})
 }
