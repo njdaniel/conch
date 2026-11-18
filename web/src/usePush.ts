@@ -25,7 +25,7 @@ export type PushState =
   | { readonly kind: 'on' };
 
 // The step that failed, so the person is told which one.
-export type PushFailure = 'permission' | 'subscribe' | 'register' | 'preferences' | 'end' | 'mirror';
+export type PushFailure = 'permission' | 'subscribe' | 'register' | 'preferences' | 'save' | 'end' | 'mirror';
 
 // A copy that failed to reach the server is sent again: after the server's
 // Retry-After when it gave one, else after a wait that doubles to this bound.
@@ -288,7 +288,20 @@ export function usePush({
       await fail('register', () => push.unsubscribe());
       return;
     }
-    api.keepPushRegistration({ id: registered.value.id, account: mine });
+    // The record is what the mirror and the next load go by; storage that
+    // refused it (keepPushRegistration swallows that) would leave a live
+    // registration under a stale server copy and push shown off. So read it
+    // back, and with no record end the registration and the subscription.
+    const entry = { id: registered.value.id, account: mine };
+    api.keepPushRegistration(entry);
+    const kept = api.readPushRegistration();
+    if (kept?.id !== entry.id || kept.account !== mine) {
+      await fail('save', async () => {
+        await api.endPushRegistration(entry.id);
+        await push.unsubscribe();
+      });
+      return;
+    }
     sent.current = want.key;
     known.current = true;
     setState({ kind: 'on' });

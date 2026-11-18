@@ -464,6 +464,26 @@ describe('turning it on', () => {
     expect(api.readPushRegistration()).toBeNull();
   });
 
+  it('rolls back when the registration record cannot be stored: ends it at the server, unsubscribes, reports save', async () => {
+    const { fake, server, hook } = await ready();
+    // Storage that refuses the write after the sign-in was accepted.
+    const write = vi.spyOn(platform.credentials, 'writePreference').mockImplementation(() => {
+      throw new Error('quota');
+    });
+    await act(async () => {
+      await hook.result.current.enable();
+    });
+    write.mockRestore();
+    expect(hook.result.current).toMatchObject({ state: { kind: 'off' }, failure: 'save' });
+    expect(fake.calls).toEqual(['subscribe AQID', 'unsubscribe']);
+    expect(server.requests.map((request) => `${request.method} ${request.path}`)).toEqual([
+      'PUT /v1/notifications/preferences',
+      'POST /v1/push/registrations',
+      'DELETE /v1/push/registrations/reg-1',
+    ]);
+    expect(api.readPushRegistration()).toBeNull();
+  });
+
   it('registers nothing and drops the subscription when the policy cannot be mirrored', async () => {
     const { fake, server, hook } = await ready();
     const base = server.answer;
