@@ -95,6 +95,25 @@ func (w *world) requireListed(what, room string, m *member) error {
 	})
 }
 
+// requirePresent waits until conchd's poller has recorded m, so the column
+// cut's voicePrincipals scan can find this otherwise socket-free participant.
+func (w *world) requirePresent(channel string, m *member) error {
+	return waitFor("conchd presence to list the column-cut participant", voiceGatePasses, func() (bool, string) {
+		var doc schema.VoicePresenceV1
+		if err := w.op.call(http.MethodGet, "/v1/channels/"+channel+"/voice", nil, &doc); err != nil {
+			return false, err.Error()
+		}
+		for _, room := range doc.Rooms {
+			for _, p := range room.Participants {
+				if p.PrincipalID == m.id {
+					return true, ""
+				}
+			}
+		}
+		return false, fmt.Sprintf("principal %d not yet in conchd presence", m.id)
+	})
+}
+
 // requireStays requires that LiveKit still lists m in room after the poller
 // has had two passes to decide otherwise: the control that the member is
 // entitled.
@@ -788,6 +807,9 @@ func (w *world) voiceWithheldAmongRow(channel string) error {
 	}
 	defer live.Close()
 	if err := w.requireListed("the column-cut participant", room, m); err != nil {
+		return err
+	}
+	if err := w.requirePresent(channel, m); err != nil {
 		return err
 	}
 	defer func() { _ = restoreCells() }()
