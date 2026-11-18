@@ -588,6 +588,152 @@ describe('the call view in a small group', () => {
   });
 });
 
+// Issue #1954: someone else's camera pops out into the browser's
+// picture-in-picture, as a watched share does (#1839), from its tile's own
+// button, in the grid, the strip or enlarged; the person's own camera never.
+describe('picture-in-picture for a camera', () => {
+  let current: Element | null = null;
+  let exit: ReturnType<typeof vi.fn>;
+  let request: ReturnType<typeof vi.fn>;
+  const enable = () => {
+    Object.defineProperty(document, 'pictureInPictureEnabled', { configurable: true, value: true });
+    Object.defineProperty(document, 'pictureInPictureElement', { configurable: true, get: () => current });
+    // Only member-1's camera pops out here; which element was asked is
+    // request.mock.contexts.
+    request = vi.fn(function (this: HTMLVideoElement) {
+      current = document.querySelector("video[aria-label=\"member-1's camera\"]");
+      this.dispatchEvent(new Event('enterpictureinpicture'));
+      return Promise.resolve({});
+    });
+    Object.defineProperty(HTMLVideoElement.prototype, 'requestPictureInPicture', { configurable: true, value: request });
+    exit = vi.fn(() => {
+      const old = current;
+      current = null;
+      old?.dispatchEvent(new Event('leavepictureinpicture'));
+      return Promise.resolve();
+    });
+    Object.defineProperty(document, 'exitPictureInPicture', { configurable: true, value: exit });
+  };
+  afterEach(() => {
+    cleanup();
+    current = null;
+    Reflect.deleteProperty(document, 'pictureInPictureEnabled');
+    Reflect.deleteProperty(document, 'pictureInPictureElement');
+    Reflect.deleteProperty(document, 'exitPictureInPicture');
+    Reflect.deleteProperty(HTMLVideoElement.prototype, 'requestPictureInPicture');
+  });
+  const arrived = { cameraTracks: new Set([8]) };
+  const popOut = () => within(callRegion()).queryByRole('button', { name: "Pop out member-1's video" });
+  const back = () => within(callRegion()).queryByRole('button', { name: "Return member-1's video to the stage" });
+  const videoOf = (name: string) => itemOf(name).querySelector('video');
+  const settle = () => act(async () => { await Promise.resolve(); });
+
+  it('is not offered without the API, or where the browser disables it', () => {
+    callOf(threeTiles, arrived);
+    expect(popOut()).toBeNull();
+    cleanup();
+    enable();
+    Object.defineProperty(document, 'pictureInPictureEnabled', { configurable: true, value: false });
+    callOf(threeTiles, arrived);
+    expect(popOut()).toBeNull();
+  });
+
+  it("is offered on someone else's camera once its picture is there, never on the person's own or a camera that is off", () => {
+    enable();
+    const { redraw } = callOf(threeTiles);
+    expect(popOut()).toBeNull();
+    redraw(threeTiles, arrived);
+    expect(popOut()?.getAttribute('aria-pressed')).toBe('false');
+    expect(within(itemOf('You')).queryByRole('button', { name: /Pop out|Return/ })).toBeNull();
+    expect(within(itemOf('member-2')).queryByRole('button')).toBeNull();
+    const names = within(callRegion()).getAllByRole('button').map((b) => b.getAttribute('aria-label') ?? b.textContent);
+    expect(names.filter((n) => /Pop out|Return/.test(n))).toEqual(["Pop out member-1's video"]);
+    // It comes after the tile's enlarge button by Tab.
+    const item = itemOf('member-1');
+    const order = [...item.querySelectorAll('button')].map((b) => b.getAttribute('aria-label') ?? b.textContent);
+    expect(order).toEqual(["Enlarge member-1's video", "Pop out member-1's video"]);
+  });
+
+  it('pops out and returns from the keyboard, with the same element, in the grid and enlarged', async () => {
+    enable();
+    const { client } = callOf(threeTiles, arrived);
+    const attach = vi.spyOn(client, 'attachCamera');
+    const video = videoOf('member-1');
+    const button = popOut();
+    if (button === null) throw new Error('no Pop out');
+    button.focus();
+    expect(document.activeElement).toBe(button);
+    fireEvent.click(button);
+    await settle();
+    expect(request.mock.contexts).toEqual([video]);
+    expect(current).toBe(video);
+    expect(back()?.getAttribute('aria-pressed')).toBe('true');
+    // Enlarged, the same element is out, and Return is still the tile's.
+    fireEvent.click(within(callRegion()).getByRole('button', { name: "Enlarge member-1's video" }));
+    expect(videoOf('member-1')).toBe(video);
+    expect(current).toBe(video);
+    expect(attach).not.toHaveBeenCalled();
+    // Enlarged, it is in the controls row, after Full screen, which stays
+    // the next stop from the tile; not on the picture's corner.
+    const row = itemOf('member-1').querySelector('.call-tile-controls');
+    expect([...(row?.querySelectorAll('button') ?? [])].map((b) => b.textContent)).toEqual(['Full screen', "Return member-1's video to the stage"]);
+    expect(itemOf('member-1').querySelector('figure .call-pip')).toBeNull();
+    fireEvent.click(back() ?? callRegion());
+    await settle();
+    expect(exit).toHaveBeenCalledOnce();
+    expect(current).toBeNull();
+    expect(popOut()?.getAttribute('aria-pressed')).toBe('false');
+    expect(videoOf('member-1')).toBe(video);
+  });
+
+  it('a reconnect that lost the track while presence still shows the camera keeps the picture out and offers Return', async () => {
+    enable();
+    const { redraw } = callOf(threeTiles, arrived);
+    fireEvent.click(popOut() ?? callRegion());
+    await settle();
+    redraw(threeTiles, { cameraTracks: new Set() });
+    expect(exit).not.toHaveBeenCalled();
+    expect(back()).not.toBeNull();
+  });
+
+  it.each(['the camera ends', 'the person leaves', 'the view closes', 'this page leaves voice'] as const)('closes when %s', async (action) => {
+    enable();
+    const { redraw } = callOf(threeTiles, arrived);
+    fireEvent.click(popOut() ?? callRegion());
+    await settle();
+    expect(current).not.toBeNull();
+    if (action === 'the camera ends') redraw([tile(8, 'member-1', false), ...threeTiles.slice(1)], { cameraTracks: new Set() });
+    else if (action === 'the person leaves') redraw(threeTiles.slice(1), {});
+    else if (action === 'the view closes') redraw(threeTiles, arrived, false);
+    else cleanup();
+    await settle();
+    expect(exit).toHaveBeenCalledOnce();
+    expect(current).toBeNull();
+    if (action !== 'the camera ends') return;
+    // On again: offered afresh, not still pressed.
+    redraw(threeTiles, arrived);
+    expect(popOut()?.getAttribute('aria-pressed')).toBe('false');
+  });
+
+  it('a compact strip offers none: its picture is too small to carry it', () => {
+    enable();
+    callOf(threeTiles, arrived);
+    fireEvent.click(within(callRegion()).getByRole('button', { name: 'Compact' }));
+    expect(popOut()).toBeNull();
+  });
+
+  it('says so when the browser will not open it', async () => {
+    enable();
+    Object.defineProperty(HTMLVideoElement.prototype, 'requestPictureInPicture', { configurable: true, value: vi.fn().mockRejectedValue(new Error('refused')) });
+    callOf(threeTiles, arrived);
+    fireEvent.click(popOut() ?? callRegion());
+    await settle();
+    const status = within(callRegion()).getAllByRole('status').find((x) => x.textContent.startsWith('Picture-in-picture could not open.'));
+    expect(status).toBeDefined();
+    expect(popOut()?.getAttribute('aria-pressed')).toBe('false');
+  });
+});
+
 describe('stream tiles in the call view', () => {
   const shareRegion = () => within(callRegion()).getByRole('region', { name: 'Shared screen' });
 

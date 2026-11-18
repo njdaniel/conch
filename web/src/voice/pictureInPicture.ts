@@ -4,9 +4,17 @@
 // the view closes PiP: that is the watch ending (Stop watching, the share
 // gone, leaving voice). A renewed room does not unmount it (VoicePanel's
 // heldTiles), since PiP opens again only from a tap.
+//
+// A remote camera's tile uses the same hook (CallView's TileView, issue
+// #1954). Its video element is drawn only while the camera is on, so mounted
+// says whether it is: the camera ending, or its tile going (leaving voice,
+// the call view closing), unmounts the element and closes PiP. A reconnect
+// that only loses the track keeps the element, so PiP stays out; nothing
+// holds a camera's tile through a renewed room as heldTiles hold a watch's,
+// so a camera that presence drops meanwhile ends as any camera does.
 import { useEffect, useState, type RefObject } from 'react';
 
-export function usePictureInPicture(video: RefObject<HTMLVideoElement | null>) {
+export function usePictureInPicture(video: RefObject<HTMLVideoElement | null>, mounted = true) {
   const [active, setActive] = useState(false);
   const [failed, setFailed] = useState(false);
   const supported = document.pictureInPictureEnabled &&
@@ -28,8 +36,11 @@ export function usePictureInPicture(video: RefObject<HTMLVideoElement | null>) {
       el.removeEventListener('enterpictureinpicture', enter);
       el.removeEventListener('leavepictureinpicture', leave);
       closePictureInPicture(el);
+      // Its leave event is no longer heard: a camera's tile that stays
+      // (its camera off) would otherwise still say Return.
+      setActive(false);
     };
-  }, [video, supported]);
+  }, [video, supported, mounted]);
   const toggle = async () => {
     const el = video.current;
     if (el === null) return;

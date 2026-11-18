@@ -3310,6 +3310,10 @@ describe('receiving cameras', () => {
         return el ?? document.createElement('audio');
       },
       detach: () => [],
+      // A played camera is sized for PiP through its track events (#1954).
+      on: vi.fn(),
+      off: vi.fn(),
+      emit: vi.fn(),
     });
     const pubs = [remotePub('microphone', 'video'), remotePub('camera', 'audio')];
     state.handlers.get('ts')?.(track('microphone', 'video'), pubs[0], { identity: 'p8' });
@@ -3329,6 +3333,92 @@ describe('receiving cameras', () => {
     state.handlers.get('ts')?.(track('camera', 'video'), stray, { identity: 'p9' });
     expect(stray.isSubscribed).toBe(false);
     expect(told).toEqual([[8]]);
+  });
+
+  // Issue #1954: a remote camera's tile in PiP is sized to the PiP window,
+  // as a watched share's is, from whichever way its track and tile meet (the
+  // tile first, or the track first), and a new track for the same tile (a
+  // renewed room) keeps the size. Its tile let go, its track gone, or the
+  // room closed, nothing is listened to any more.
+  it("sizes a camera's tile to its PiP window however track and tile meet, and stops when either goes", async () => {
+    const room = newLiveKitRoom();
+    await room.connect('wss://lk.example', 'tok-abcdef', 'room-abcdef', false, events);
+    room.setViewing(true);
+    room.setCameras(new Set([8, 9]));
+    const camera = (sid: string) => {
+      const listeners = new Set<() => void>();
+      const sizes: { width: number; height: number }[] = [];
+      return {
+        source: 'camera', kind: 'video', sid, attach: vi.fn(), detach: vi.fn(() => []),
+        on: (_event: string, l: () => void) => { listeners.add(l); },
+        off: (_event: string, l: () => void) => { listeners.delete(l); },
+        emit: (_event: string, d: { width: number; height: number }) => { sizes.push(d); },
+        listeners, sizes,
+      };
+    };
+    const tile = (width: number, height: number) => {
+      const v = document.createElement('video');
+      Object.defineProperty(v, 'clientWidth', { value: width });
+      Object.defineProperty(v, 'clientHeight', { value: height });
+      return v;
+    };
+    let current: Element | null = null;
+    Object.defineProperty(document, 'pictureInPictureElement', { configurable: true, get: () => current });
+    try {
+      // The tile first, then the track.
+      const eight = tile(320, 180);
+      room.attachCamera(8, eight);
+      const first = camera('c8');
+      state.handlers.get('ts')?.(first, remotePub('camera', 'video'), { identity: 'p8' });
+      expect(first.attach).toHaveBeenCalledWith(eight);
+      expect(first.listeners.size).toBe(1);
+      const pip = Object.assign(new EventTarget(), { width: 640, height: 360 });
+      current = eight;
+      const enter = new Event('enterpictureinpicture');
+      Object.defineProperty(enter, 'pictureInPictureWindow', { value: pip });
+      eight.dispatchEvent(enter);
+      expect(first.sizes.at(-1)).toEqual({ width: 640, height: 360 });
+      // A new track for the same tile, as a renewed room brings: sized to
+      // the window still open, and the old one is let go.
+      const second = camera('c8b');
+      state.handlers.get('ts')?.(second, remotePub('camera', 'video'), { identity: 'p8' });
+      expect(first.listeners.size).toBe(0);
+      expect(second.sizes.at(-1)).toEqual({ width: 640, height: 360 });
+      current = null;
+      eight.dispatchEvent(new Event('leavepictureinpicture'));
+      expect(second.sizes.at(-1)).toEqual({ width: 320, height: 180 });
+      // Its tile let go: nothing is listened to.
+      room.attachCamera(8, null);
+      expect(second.listeners.size).toBe(0);
+      const count = second.sizes.length;
+      eight.dispatchEvent(enter);
+      expect(second.sizes).toHaveLength(count);
+
+      // The track first, then the tile; the track gone stops it.
+      const nine = camera('c9');
+      state.handlers.get('ts')?.(nine, remotePub('camera', 'video'), { identity: 'p9' });
+      expect(nine.listeners.size).toBe(0);
+      const ninth = tile(160, 90);
+      room.attachCamera(9, ninth);
+      expect(nine.attach).toHaveBeenCalledWith(ninth);
+      expect(nine.listeners.size).toBe(1);
+      current = ninth;
+      const enterNine = new Event('enterpictureinpicture');
+      Object.defineProperty(enterNine, 'pictureInPictureWindow', { value: Object.assign(new EventTarget(), { width: 480, height: 270 }) });
+      ninth.dispatchEvent(enterNine);
+      expect(nine.sizes.at(-1)).toEqual({ width: 480, height: 270 });
+      state.handlers.get('tu')?.(nine, remotePub('camera', 'video'), { identity: 'p9' });
+      expect(nine.listeners.size).toBe(0);
+
+      // Closing the room lets go of every camera's sizing.
+      const again = camera('c9b');
+      state.handlers.get('ts')?.(again, remotePub('camera', 'video'), { identity: 'p9' });
+      expect(again.listeners.size).toBe(1);
+      await room.close();
+      expect(again.listeners.size).toBe(0);
+    } finally {
+      Reflect.deleteProperty(document, 'pictureInPictureElement');
+    }
   });
 
   it('a track refused for its kind is never subscribed again, however often presence comes', async () => {
