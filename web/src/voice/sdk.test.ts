@@ -2552,6 +2552,29 @@ describe('the volume of each person', () => {
     await room.close();
   });
 
+  // livekit-client detaches a track's elements, then emits TrackUnsubscribed
+  // (RemoteTrackPublication.setTrack): detach() answers [] by then.
+  it('removes the element of a person who left, the SDK having detached it first', async () => {
+    const room = await connected();
+    const made: HTMLAudioElement[] = [];
+    const gone = {
+      source: 'microphone',
+      kind: 'audio',
+      sid: 'a',
+      attach: () => {
+        const el = document.createElement('audio');
+        made.push(el);
+        return el;
+      },
+      detach: () => [] as HTMLAudioElement[],
+    };
+    arrive(gone, 'p8');
+    expect(played()).toHaveLength(1);
+    state.handlers.get('tu')?.(gone, undefined, { identity: 'p8' });
+    expect(played()).toEqual([]);
+    await room.close();
+  });
+
   it('0 stays 0 when the track is attached again: the person leaving and coming back', async () => {
     const room = await connected();
     room.setVolume(8, 0);

@@ -1108,8 +1108,14 @@ class LiveKitAdapter implements Room {
           this.cameraGone(track);
           return;
         }
+        // livekit-client has already detached the track's elements when it
+        // emits this (RemoteTrackPublication.setTrack: prevTrack.detach(), then
+        // the Unsubscribed event), so detach() gives back [] here: the element
+        // this adapter holds for the sid is removed as well, or it stays in
+        // the page for the rest of the call.
         for (const el of track.detach()) el.remove();
         const gone = this.elements.get(track.sid ?? '');
+        gone?.el.remove();
         gone?.el.removeEventListener('volumechange', gone.held);
         gone?.el.removeEventListener('playing', this.reportPlayback);
         gone?.el.removeEventListener('pause', this.reportPlayback);
