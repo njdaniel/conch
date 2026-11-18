@@ -678,6 +678,106 @@ describe('Up from the composer', () => {
     expect(screen.queryByRole('textbox', { name: editName })).toBeNull();
   });
 
+  it('refocuses an existing edit without replacing unsaved text', () => {
+    render(conversation([msg(1)]));
+    const editor = openEditor(1);
+    fireEvent.change(editor, { target: { value: 'unsaved' } });
+    composer().focus();
+    expect(fireEvent.keyDown(composer(), { key: 'ArrowUp' })).toBe(false);
+    expect(box(1)).toBe(editor);
+    expect(editor.value).toBe('unsaved');
+    expect(document.activeElement).toBe(editor);
+  });
+
+  it.each(['close button', 'thread_not_found'])('asks before closing a dirty thread edit through %s, then allows channel editing', async (reason) => {
+    const root = msg(1, { author_id: 3 });
+    const reply = msg(2, { thread_root_id: 1 });
+    vi.spyOn(api, 'loadThread').mockResolvedValueOnce({ ok: true, value: { messages: [root, reply], next_after: 2 } })
+      .mockResolvedValue({ ok: false, failure: 'invalid', code: 'thread_not_found' });
+    render(conversation([root, msg(3)]));
+    fireEvent.click(screen.getByRole('button', { name: /^Reply to bea/ }));
+    const thread = screen.getByRole('region', { name: /^Thread around/ });
+    await within(thread).findByText('text 2');
+    fireEvent.keyDown(within(thread).getByRole('textbox', { name: 'Reply to bea' }), { key: 'ArrowUp' });
+    fireEvent.change(within(thread).getByRole('textbox', { name: editName }), { target: { value: 'unsaved' } });
+    const close = () => fireEvent.click(within(thread).getByRole('button', { name: reason === 'close button' ? 'Close thread' : 'Load more replies' }));
+    close();
+    await within(thread).findByRole('alertdialog', { name: 'Discard your edit?' });
+    fireEvent.click(within(thread).getByRole('button', { name: 'Keep editing' }));
+    expect(within(thread).getByRole('textbox', { name: editName })).toHaveProperty('value', 'unsaved');
+    close();
+    await within(thread).findByRole('alertdialog', { name: 'Discard your edit?' });
+    fireEvent.click(within(thread).getByRole('button', { name: 'Discard' }));
+    expect(screen.queryByRole('region', { name: /^Thread around/ })).toBeNull();
+    expect(openEditor(3).value).toBe('text 3');
+    expect(screen.queryByRole('alertdialog')).toBeNull();
+  });
+
+  it('keeps a thread edit and its origin when the same message is requested from the channel', async () => {
+    const root = msg(1, { author_id: 3 });
+    const reply = msg(2, { thread_root_id: 1 });
+    vi.spyOn(api, 'loadThread').mockResolvedValue({ ok: true, value: { messages: [root, reply] } });
+    render(conversation([root, reply]));
+    fireEvent.click(screen.getByRole('button', { name: /^Reply to bea/ }));
+    const thread = screen.getByRole('region', { name: /^Thread around/ });
+    await within(thread).findByText('text 2');
+    const replyBox = within(thread).getByRole('textbox', { name: 'Reply to bea' });
+    fireEvent.keyDown(replyBox, { key: 'ArrowUp' });
+    const editor = within(thread).getByRole('textbox', { name: editName });
+    fireEvent.change(editor, { target: { value: 'unsaved' } });
+    fireEvent.click(screen.getByRole('button', { name: moreName }));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Edit' }));
+    expect(within(thread).getByRole('textbox', { name: editName })).toBe(editor);
+    expect(editor).toHaveProperty('value', 'unsaved');
+    expect(document.activeElement).toBe(editor);
+    composer().focus();
+    fireEvent.keyDown(composer(), { key: 'ArrowUp' });
+    expect(within(thread).getByRole('textbox', { name: editName })).toBe(editor);
+    expect(editor).toHaveProperty('value', 'unsaved');
+    fireEvent.keyDown(editor, { key: 'Escape' });
+    expect(document.activeElement).toBe(replyBox);
+  });
+
+  it('keeps the current surface while another edit request awaits discard confirmation', async () => {
+    const root = msg(1, { author_id: 3 });
+    const reply = msg(2, { thread_root_id: 1 });
+    vi.spyOn(api, 'loadThread').mockResolvedValue({ ok: true, value: { messages: [root, reply] } });
+    render(conversation([root, msg(3)]));
+    const editor = openEditor(3);
+    fireEvent.change(editor, { target: { value: 'unsaved channel text' } });
+    fireEvent.click(screen.getByRole('button', { name: /^Reply to bea/ }));
+    const thread = screen.getByRole('region', { name: /^Thread around/ });
+    await within(thread).findByText('text 2');
+    const replyBox = within(thread).getByRole('textbox', { name: 'Reply to bea' });
+    fireEvent.keyDown(replyBox, { key: 'ArrowUp' });
+    expect(box(3)).toBe(editor);
+    expect(within(thread).queryByRole('textbox', { name: editName })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Keep editing' }));
+    expect(document.activeElement).toBe(editor);
+    fireEvent.keyDown(replyBox, { key: 'ArrowUp' });
+    fireEvent.click(screen.getByRole('button', { name: 'Discard' }));
+    const threadEditor = within(thread).getByRole('textbox', { name: editName });
+    expect(document.activeElement).toBe(threadEditor);
+    fireEvent.keyDown(threadEditor, { key: 'Escape' });
+    expect(document.activeElement).toBe(replyBox);
+  });
+
+  it.each(['message_not_found', 'channel_not_found'])('shows %s after a failed edit of a reply outside channel history', async (code) => {
+    const root = msg(1, { author_id: 3 });
+    const reply = msg(2, { thread_root_id: 1 });
+    vi.spyOn(api, 'loadThread').mockResolvedValue({ ok: true, value: { messages: [root, reply] } });
+    vi.spyOn(api, 'editMessage').mockResolvedValue({ ok: false, failure: 'refused', code });
+    render(conversation([root]));
+    fireEvent.click(screen.getByRole('button', { name: /^Reply to bea/ }));
+    const thread = screen.getByRole('region', { name: /^Thread around/ });
+    await within(thread).findByText('text 2');
+    fireEvent.keyDown(within(thread).getByRole('textbox', { name: 'Reply to bea' }), { key: 'ArrowUp' });
+    fireEvent.change(within(thread).getByRole('textbox', { name: editName }), { target: { value: 'fixed' } });
+    fireEvent.click(within(thread).getByRole('button', { name: 'Save' }));
+    await waitFor(() => { expect(within(thread).queryByRole('textbox', { name: editName })).toBeNull(); });
+    expect(within(thread).getByText('This message is no longer available to you.')).toBeTruthy();
+  });
+
   it('edits the newest own message in the open thread, including replies outside channel history', async () => {
     const root = msg(1, { author_id: 3 });
     const reply = msg(2, { thread_root_id: 1 });

@@ -382,7 +382,8 @@ function continues(before: MessageV2 | undefined, message: MessageV2): boolean {
   return Date.parse(message.created_at) - Date.parse(before.created_at) < sameRun;
 }
 
-function ThreadView({ rootId, root, chat, channel, live, archived, people: known, nets, viewer, draft, onDraft, onClose, onReplySend, onRetrySend, onDismissSend, onUnauthorized, onEditLast, editorFor }: {
+function ThreadView({ rootId, root, chat, channel, live, archived, people: known, nets, viewer, draft, onDraft, onClose, onReplySend, onRetrySend, onDismissSend, onUnauthorized, onEditLast, editorFor, notices }: {
+  readonly notices: ReadonlyMap<number, string>;
   readonly onEditLast: (messages: readonly MessageV2[], composer: HTMLTextAreaElement) => boolean;
   readonly editorFor: (message: MessageV2, onSaved: (saved: MessageV2) => void) => ReactNode;
   readonly rootId: number;
@@ -427,6 +428,8 @@ function ThreadView({ rootId, root, chat, channel, live, archived, people: known
     if (current !== request.current) return;
     if (!result.ok) {
       if (result.failure === 'unauthorized' || result.code === 'thread_not_found') {
+        // Closing may await confirmation of unsaved text in this thread.
+        setStatus('ready');
         closeNow.current();
         if (result.failure === 'unauthorized') unauthorizedNow.current?.();
       } else setStatus('error');
@@ -479,7 +482,7 @@ function ThreadView({ rootId, root, chat, channel, live, archived, people: known
         </div>
       ) : null}
       <ol className="messages" aria-label="Root and replies">
-        {messages.map((message) => <Message key={message.id} message={message} people={people} nets={nets} viewer={viewer} channel={channel} sent={message.id === sentMark} cont={false} onUnauthorized={onUnauthorized} editor={editorFor(message, (saved) => { setFetched((previous) => previous.map((held) => held.id === saved.id ? saved : held)); })} />)}
+        {messages.map((message) => <Message key={message.id} message={message} people={people} nets={nets} viewer={viewer} channel={channel} sent={message.id === sentMark} cont={false} onUnauthorized={onUnauthorized} notice={notices.get(message.id) ?? null} editor={editorFor(message, (saved) => { setFetched((previous) => previous.map((held) => held.id === saved.id ? saved : held)); })} />)}
         {pending.map((send) => <Pending key={`local-${String(send.localId)}`} send={send} me={me} nets={nets} viewer={viewer} onRetry={onRetrySend} onDismiss={onDismissSend} />)}
       </ol>
       {nextAfter === undefined ? null : (
@@ -693,7 +696,7 @@ export function Conversation({
   const chatNow = useRef(chat);
   openNow.current = openThread;
   chatNow.current = chat;
-  const closeThread = useCallback(() => {
+  const finishCloseThread = useCallback(() => {
     const open = openNow.current;
     if (open !== null) {
       const loaded = ordered(chatNow.current);
@@ -724,11 +727,14 @@ export function Conversation({
   // reach; and the time the window is counted from, moved on when the next
   // of the viewer's messages leaves it, so Edit goes when it can no longer be
   // used.
-  const [edit, setEdit] = useState<{ readonly id: number; readonly text: string; readonly next: number | null } | null>(null);
+  type EditOrigin = { readonly composer: HTMLTextAreaElement; readonly thread: number | null };
+  type EditRequest = { readonly id: number; readonly origin: EditOrigin | undefined };
+  const [edit, setEdit] = useState<{ readonly id: number; readonly text: string; readonly next: EditRequest | 'close-thread' | null } | null>(null);
+  const [editFocus, setEditFocus] = useState(0);
   const [notices, setNotices] = useState<ReadonlyMap<number, string>>(new Map());
   const [now, setNow] = useState(() => Date.now());
   const focusBack = useRef<number | null>(null);
-  const editOrigins = useRef(new Map<number, { readonly composer: HTMLTextAreaElement; readonly thread: number | null }>());
+  const editOrigins = useRef(new Map<number, EditOrigin>());
   const editThread = edit === null ? null : (editOrigins.current.get(edit.id)?.thread ?? null);
   // Thread history can include messages outside the channel's loaded page.
   const threadEditMessages = useRef(new Map<number, MessageV2>());
@@ -781,17 +787,45 @@ export function Conversation({
     const fetched = threadEditMessages.current.get(id);
     return fetched !== undefined && (held === undefined || isLater(fetched, held)) ? fetched : held;
   }, []);
-  const startEdit = useCallback((id: number) => {
-    const message = heldForEdit(id);
-    if (message === undefined) return;
-    note(id, null);
-    setEdit((current) => {
-      // Unsaved text elsewhere is dropped only once the person says so.
-      const was = current === null ? undefined : heldForEdit(current.id);
-      if (current !== null && current.id !== id && was !== undefined && current.text !== was.body) return { ...current, next: id };
-      return { id, text: message.body, next: null };
-    });
-  }, [note, heldForEdit]);
+  const acceptEdit = (request: EditRequest) => {
+    const message = heldForEdit(request.id);
+    if (edit !== null) editOrigins.current.delete(edit.id);
+    if (message === undefined) {
+      setEdit(null);
+      return;
+    }
+    if (request.origin === undefined) editOrigins.current.delete(request.id);
+    else editOrigins.current.set(request.id, request.origin);
+    note(request.id, null);
+    setEdit({ id: request.id, text: message.body, next: null });
+  };
+  const startEdit = (id: number, origin?: EditOrigin) => {
+    if (edit?.id === id) {
+      // Re-entering the same edit preserves its text and surface.
+      setEditFocus((previous) => previous + 1);
+      return;
+    }
+    if (heldForEdit(id) === undefined) return;
+    const request = { id, origin };
+    const was = edit === null ? undefined : heldForEdit(edit.id);
+    if (edit !== null && was !== undefined && edit.text !== was.body) {
+      setEdit({ ...edit, next: request });
+      return;
+    }
+    acceptEdit(request);
+  };
+  const closeThread = () => {
+    if (edit !== null && editThread === openNow.current) {
+      const was = heldForEdit(edit.id);
+      if (was !== undefined && edit.text !== was.body) {
+        setEdit({ ...edit, next: 'close-thread' });
+        return;
+      }
+      editOrigins.current.delete(edit.id);
+      setEdit(null);
+    }
+    finishCloseThread();
+  };
   const closeEdit = useCallback((id: number) => {
     focusBack.current = id;
     setEdit((current) => (current?.id === id ? null : current));
@@ -807,8 +841,7 @@ export function Conversation({
     }
     if (newest === undefined || !editable(newest, Date.now())) return false;
     if (thread !== null) threadEditMessages.current.set(newest.id, newest);
-    editOrigins.current.set(newest.id, { composer, thread });
-    startEdit(newest.id);
+    startEdit(newest.id, { composer, thread });
     return true;
   };
   const editorFor = (message: MessageV2, onSaved?: (saved: MessageV2) => void): ReactNode => {
@@ -816,6 +849,7 @@ export function Conversation({
     return (
       <MessageEditor
         message={message}
+        focusRequest={editFocus}
         channel={channel}
         label={`Edit ${messageName(message, people)}`}
         text={edit.text}
@@ -841,8 +875,11 @@ export function Conversation({
         discard={edit.next === null ? undefined : {
           onDiscard: () => {
             const next = edit.next;
-            const target = next === null ? undefined : heldForEdit(next);
-            setEdit(target === undefined ? null : { id: target.id, text: target.body, next: null });
+            if (next === 'close-thread') {
+              editOrigins.current.delete(edit.id);
+              setEdit(null);
+              finishCloseThread();
+            } else if (next !== null) acceptEdit(next);
           },
           onKeep: () => {
             setEdit((current) => (current === null ? null : { ...current, next: null }));
@@ -1146,7 +1183,7 @@ export function Conversation({
               onUnauthorized={onUnauthorized}
               onReply={openFrom}
               onOpenThread={openFrom}
-              actions={onEdited !== undefined && editable(message) ? [{ key: 'edit', label: 'Edit', onSelect: () => { editOrigins.current.delete(message.id); startEdit(message.id); } }] : []}
+              actions={onEdited !== undefined && editable(message) ? [{ key: 'edit', label: 'Edit', onSelect: () => { startEdit(message.id); } }] : []}
               notice={notices.get(message.id) ?? null}
               editor={editThread === null ? editorFor(message) : undefined}
               thread={threadAnchor === null || message.id !== threadAnchor ? null : (
@@ -1167,6 +1204,7 @@ export function Conversation({
                   }}
                   onEditLast={(messages, composer) => editLast(messages, composer, openThread)}
                   editorFor={(message, onSaved) => editThread === openThread ? editorFor(message, onSaved) : undefined}
+                  notices={notices}
                   onClose={closeThread}
                   onReplySend={onReplySend}
                   onRetrySend={onRetrySend}
