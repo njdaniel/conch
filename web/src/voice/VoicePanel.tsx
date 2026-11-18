@@ -279,6 +279,9 @@ export function VoicePanel({
   // ended: say whose it was. Other streams' state does not affect that decision
   // (issue #591, F15; voice-multi-share.md §7.1, #1509).
   const liveStreams = new Set(streams.map((s) => s.principal));
+  // Watches the client still holds while their streams are gone from
+  // presence: the room is being renewed (heldTiles below).
+  const held = [...state.watched].filter((principal) => principal !== viewer && !liveStreams.has(principal));
   useEffect(() => {
     for (const principal of state.watched) {
       if (liveStreams.has(principal)) watchedNames.current.set(principal, nameOf(people, principal, viewer));
@@ -340,6 +343,7 @@ export function VoicePanel({
     !strip &&
     hideNonVideo &&
     streams.length === 0 &&
+    held.length === 0 &&
     state.cameraTrack === 'none' &&
     !videoRoster.some((o) => o.principal !== viewer && o.camera);
   useEffect(() => {
@@ -450,6 +454,29 @@ export function VoicePanel({
       },
     };
   });
+  // A watch the client still holds while its stream is gone from presence:
+  // the room is being renewed, and the client waits for the same publisher's
+  // stream (connection.ts awaitShare, holdEnding; #1509, #1930). Its tile, and
+  // the video element in it, stay as they were, saying it is reconnecting:
+  // the next room plays the stream into that same element, so a picture
+  // popped out stays popped out, which the browser lets a page do again only
+  // from a tap (#1839). The tile goes when the watch does: the wait running
+  // out, or Stop watching.
+  const heldTiles: Tile[] = held.map((principal) => {
+    const name = nameOf(people, principal, viewer);
+    return {
+      principal,
+      name,
+      me: false,
+      camera: false,
+      kind: 'share',
+      watched: true,
+      render: (focus, compact, onToggleLayout) => (
+        <ShareView client={client} state={state} principal={principal} name={name} audio={false} reconnecting volume={shareVolumes.current.get(principal) ?? 1} onVolumeChange={(volume) => { shareVolumes.current.set(principal, volume); }} onFocus={focus} compact={compact} onToggleLayout={onToggleLayout} />
+      ),
+    };
+  });
+  streamTiles.push(...heldTiles);
   // The call view is open while the person asked for video or live streams
   // offer tiles. Camera and stream tiles share one layout on the stage: the
   // focused stream is the main picture and the other tiles are the strip. The
@@ -457,9 +484,10 @@ export function VoicePanel({
   // streams alone open it with their tiles and nothing else, so no camera tile
   // waits for a camera that is not received. It stays the one CallView whether
   // open or closed, so no watched player is drawn again by opening or closing
-  // it (design §7.4; multi-share §7.1, #1509).
-  const callOpen = inVoice && (state.viewing || streams.length > 0) && !strip;
-  const call = callOpen && state.viewing ? callTiles(roster, viewer, state.cameraTrack !== 'none', (id) => nameOf(people, id, viewer), viewerName, hideNonVideo, streams.length) : null;
+  // it (design §7.4; multi-share §7.1, #1509). A watch held through a renewal
+  // keeps it as its live stream did (heldTiles).
+  const callOpen = inVoice && (state.viewing || streamTiles.length > 0) && !strip;
+  const call = callOpen && state.viewing ? callTiles(roster, viewer, state.cameraTrack !== 'none', (id) => nameOf(people, id, viewer), viewerName, hideNonVideo, streamTiles.length) : null;
   // In the phone layout under Chat and Channels (the strip) the stage holds a
   // focused watched share only: no call view and no camera tile, and no camera
   // received (showVideo). The person's choice to view is kept, so the view and

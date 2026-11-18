@@ -3331,6 +3331,31 @@ label {
   color: #dddddd;
 }
 
+/* Pop out (#1839): over the picture's top right corner, above the focus
+   button that covers a strip tile, so it takes no room in the controls row.
+   Compact puts it in its row instead (ShareView). Full screen hides it with
+   the frame's other parts. */
+.share-frame .share-pip {
+  position: absolute;
+  inset: var(--s1) var(--s1) auto auto;
+  z-index: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 2.75rem;
+  min-height: 2.75rem;
+  padding: var(--s1);
+  background: color-mix(in srgb, #000000 60%, transparent);
+  border: 0;
+  border-radius: var(--radius-sm);
+  color: #ffffff;
+}
+
+.share-frame .share-pip[aria-pressed='true'] {
+  background: var(--accent);
+  color: var(--on-accent);
+}
+
 .share-controls {
   display: flex;
   flex-wrap: wrap;
