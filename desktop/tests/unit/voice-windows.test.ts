@@ -1049,11 +1049,40 @@ const processes: readonly AudioProcess[] = [
   { pid: 201, parentPid: 200 }, // its picked child window
   { pid: 202, parentPid: 201 },
 ];
-const snapshot = (windowPid: number, tree = processes): WindowProcessSnapshot => ({ windowPid, processes: tree });
+const snapshot = (windowPid: number, tree = processes): WindowProcessSnapshot => ({ windowPid, applicationRootPid: windowPid < 200 ? 100 : 200, processes: tree });
 const unavailable = { allowed: false, reason: 'unavailable', message: APPLICATION_AUDIO_REASONS.unavailable };
 const containsCall = { allowed: false, reason: 'contains-call', message: APPLICATION_AUDIO_REASONS['contains-call'] };
 
 describe('Windows include-tree audio (F16)', () => {
+  it.each([false, true])('keeps capture inside the game when Explorer also launches music (shared Conch launcher: %s)', (sharedConchLauncher) => {
+    const tree = [
+      ...processes.map((p) => p.pid === 200 || (sharedConchLauncher && p.pid === 100) ? { ...p, parentPid: 300 } : p),
+      { pid: 300, parentPid: 0 }, // Explorer
+      { pid: 400, parentPid: 300 }, // unrelated music application
+    ];
+    expect(applicationAudioDecision(snapshot(201, tree), playback)).toEqual({ allowed: true, rootPid: 200 });
+    expect(applicationAudioDecision({ ...snapshot(201, tree), applicationRootPid: null }, playback)).toEqual(unavailable);
+    expect(applicationAudioDecision(snapshot(101, tree), playback)).toEqual(containsCall);
+    const helperInGame = tree.map((p) => p.pid === 102 ? { ...p, parentPid: 202 } : p);
+    expect(applicationAudioDecision(snapshot(201, helperInGame), playback)).toEqual(containsCall);
+  });
+
+  it('refuses a snapshot that omits native boundary evidence', () => {
+    const legacy = { ...snapshot(201) };
+    Reflect.deleteProperty(legacy, 'applicationRootPid');
+    expect(applicationAudioDecision(legacy, playback)).toEqual(unavailable);
+  });
+
+  it('refuses an unverified boundary even when the selected process has no surviving parent', () => {
+    expect(applicationAudioDecision({ ...snapshot(201), applicationRootPid: null }, playback)).toEqual(unavailable);
+    const tree = processes.map((p) => p.pid === 200 ? { ...p, parentPid: 999 } : p);
+    expect(applicationAudioDecision({ ...snapshot(201, tree), applicationRootPid: null }, playback)).toEqual(unavailable);
+  });
+
+  it.each([0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, 0x1_0000_0000, 999, 100, 202])('refuses an invalid, missing or non-ancestor application boundary %s', (applicationRootPid) => {
+    expect(applicationAudioDecision({ ...snapshot(201), applicationRootPid }, playback)).toEqual(unavailable);
+  });
+
   it.each([100, 101, 102])('refuses the call tree when the picked window belongs to pid %i', (windowPid) => {
     expect(applicationAudioDecision(snapshot(windowPid), playback)).toEqual(containsCall);
   });
@@ -1077,7 +1106,7 @@ describe('Windows include-tree audio (F16)', () => {
     expect(applicationAudioDecision(snapshot(201), { ...playback, helperPid: null })).toEqual({ allowed: true, rootPid: 200 });
   });
 
-  it('handles an exited launcher without requiring that absent parent', () => {
+  it('accepts a verified application boundary after its launcher exits', () => {
     const tree = processes.map((p) => p.pid === 200 ? { ...p, parentPid: 999 } : p);
     expect(applicationAudioDecision(snapshot(201, tree), playback)).toEqual({ allowed: true, rootPid: 200 });
   });
@@ -1114,6 +1143,14 @@ describe('Windows include-tree audio (F16)', () => {
 });
 
 describe('Windows application-audio picker boundary', () => {
+  it('keeps the picture when the native adapter cannot verify an application boundary', async () => {
+    const video = { id: 'window:3456:0', name: 'A game' };
+    expect(await applicationAudioPick(video, {
+      resolve: () => Promise.resolve({ ...snapshot(201), applicationRootPid: null }),
+      playback: () => playback,
+    })).toEqual({ video, applicationAudio: unavailable });
+  });
+
   it.each(['Conch', 'A game', ''])('keeps the own-window picture and explains refusal regardless of title %s', async (name) => {
     const video = { id: 'window:98765:0', name };
     const resolve = vi.fn().mockResolvedValue(snapshot(101));

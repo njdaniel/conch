@@ -14,6 +14,12 @@ export interface WindowProcessSnapshot {
   // The owner of the picked window, resolved by the native adapter, not its
   // title (and not Electron's source id interpreted as a pid).
   readonly windowPid: number;
+  // Native-verified boundary of exactly the selected application, resolved in
+  // the same read. null means the adapter cannot prove that include-tree
+  // capture stays within that application. Parent links, executable names,
+  // an exited parent or a shared launcher (Explorer, Steam, etc.) alone are
+  // not boundary evidence. The adapter must return null without such proof.
+  readonly applicationRootPid: number | null;
   // A complete process snapshot, from the same read as the window owner.
   // An absent parent denotes a process whose launcher has already exited.
   readonly processes: readonly AudioProcess[];
@@ -42,11 +48,11 @@ function pid(value: number): boolean {
   return Number.isSafeInteger(value) && value > 0 && value <= 0xffff_ffff;
 }
 
-// root walks parent links, including when the window belongs to a child of
-// the application. Cycles, duplicate pids and incomplete identities cannot
-// prove that include-tree audio excludes the call, so they fail closed.
+// Parent links validate the native boundary and test subtree membership;
+// they never establish an application boundary themselves. Cycles, duplicate
+// pids and incomplete identities fail closed.
 export function applicationAudioDecision(snapshot: WindowProcessSnapshot, playback: PlaybackProcesses): ApplicationAudioDecision {
-  if (!pid(snapshot.windowPid) || !pid(playback.shellPid) || (playback.helperPid !== null && !pid(playback.helperPid))) return refuse('unavailable');
+  if (snapshot.applicationRootPid === null || !pid(snapshot.applicationRootPid) || !pid(snapshot.windowPid) || !pid(playback.shellPid) || (playback.helperPid !== null && !pid(playback.helperPid))) return refuse('unavailable');
   const processes = new Map<number, AudioProcess>();
   for (const process of snapshot.processes) {
     // Windows' system-wide snapshot can include the idle process (0).
@@ -55,7 +61,7 @@ export function applicationAudioDecision(snapshot: WindowProcessSnapshot, playba
     if (!pid(process.pid) || !(process.parentPid === 0 || pid(process.parentPid)) || processes.has(process.pid)) return refuse('unavailable');
     processes.set(process.pid, process);
   }
-  const root = (start: number): number | null => {
+  const ancestry = (start: number): Set<number> | null => {
     let current = processes.get(start);
     if (current === undefined) return null;
     const seen = new Set<number>();
@@ -63,16 +69,17 @@ export function applicationAudioDecision(snapshot: WindowProcessSnapshot, playba
       if (seen.has(current.pid)) return null;
       seen.add(current.pid);
       const parent = processes.get(current.parentPid);
-      if (parent === undefined) return current.pid;
+      if (parent === undefined) return seen;
       current = parent;
     }
   };
-  const selectedRoot = root(snapshot.windowPid);
-  const shellRoot = root(playback.shellPid);
-  const helperRoot = playback.helperPid === null ? null : root(playback.helperPid);
-  if (selectedRoot === null || shellRoot === null || (playback.helperPid !== null && helperRoot === null)) return refuse('unavailable');
-  if (selectedRoot === shellRoot || selectedRoot === helperRoot) return refuse('contains-call');
-  return { allowed: true, rootPid: selectedRoot };
+  const selected = ancestry(snapshot.windowPid);
+  const shell = ancestry(playback.shellPid);
+  const helper = playback.helperPid === null ? null : ancestry(playback.helperPid);
+  if (selected === null || shell === null || (playback.helperPid !== null && helper === null)
+    || !selected.has(snapshot.applicationRootPid)) return refuse('unavailable');
+  if (shell.has(snapshot.applicationRootPid) || helper?.has(snapshot.applicationRootPid)) return refuse('contains-call');
+  return { allowed: true, rootPid: snapshot.applicationRootPid };
 }
 
 export interface ApplicationAudioDeps {
