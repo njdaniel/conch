@@ -4839,7 +4839,13 @@ export const adminActionV1 = object<AdminActionV1>({
 });
 
 // schema.ChannelPermission
-export type ChannelPermission = 'read' | 'post' | 'post_net' | 'whisper' | 'whisper_agent';
+export type ChannelPermission =
+  | 'read'
+  | 'post'
+  | 'post_net'
+  | 'whisper'
+  | 'whisper_agent'
+  | 'attach';
 
 export const channelPermission = vocab<ChannelPermission>({
   read: true,
@@ -4847,6 +4853,7 @@ export const channelPermission = vocab<ChannelPermission>({
   post_net: true,
   whisper: true,
   whisper_agent: true,
+  attach: true,
 });
 
 // schema.ChannelGrant
@@ -4869,7 +4876,8 @@ export type Capability =
   | 'approvals.check'
   | 'sessions.manage'
   | 'runs.manage'
-  | 'admin.act';
+  | 'admin.act'
+  | 'files.upload';
 
 export const capability = vocab<Capability>({
   'messages.read': true,
@@ -4880,6 +4888,7 @@ export const capability = vocab<Capability>({
   'sessions.manage': true,
   'runs.manage': true,
   'admin.act': true,
+  'files.upload': true,
 });
 
 // schema.RateLimit

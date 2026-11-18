@@ -9,19 +9,28 @@ import (
 	"github.com/njdaniel/conch/pkg/schema"
 )
 
-// An agent cannot upload files, so a post_message carrying a file attachment
-// can never be honoured: every file it names fails the "uploaded by the
-// author" check. That is the caller's mistake and must be answered as one,
-// with the same code the REST post routes give, not as a server failure with
-// an error line in the log that any agent with the post grant could produce at
-// will (issue #240).
+// A post_message whose payload attaches a file the agent did not upload can
+// never be honoured: every such file fails the "uploaded by the author" check.
+// That is the caller's mistake and must be answered as one, with the same code
+// the REST post routes give, not as a server failure with an error line in the
+// log that any agent with the post grant could produce at will (issue #240).
+//
+// When this was written no agent could upload, so that was every file. Since
+// issue #1798 an agent may hold a grant to upload images (files.upload and
+// attach), and attaches those with the attachments argument or by naming its
+// own upload; agent_uploads_test.go has both. The agent here holds that grant
+// and has uploaded nothing, and what it cannot do is unchanged: attach someone
+// else's file, or one that does not exist. It holds the grant because a post
+// that names files without it is refused before the store is asked, and
+// audited as a denial (TestAgentAttachingNeedsTheGrantNow); this test is about
+// the store's refusal, which is the caller's mistake and writes no audit row.
 func TestMCPPostWithFileAttachmentIsRefusedAsInvalid(t *testing.T) {
 	f := newFileFixture(t)
 	// A real file, uploaded by a human and never attached: the agent must not
 	// be able to attach it either.
 	theirs := f.mustUpload(t, "ann", "plan.txt", []byte("ann's file"))
 	f.manifest(t, "aria", nil, schema.ChannelPermissionRead, schema.ChannelPermissionPost,
-		schema.ChannelPermissionPostNet, schema.ChannelPermissionWhisper)
+		schema.ChannelPermissionPostNet, schema.ChannelPermissionWhisper, schema.ChannelPermissionAttach)
 	f.seat(t, "net1", "aria", schema.NetRoleMember)
 
 	var logs strings.Builder
