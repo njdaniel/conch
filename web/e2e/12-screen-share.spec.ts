@@ -203,7 +203,9 @@ test.describe('screen share with LiveKit', () => {
   const picks = (page: Page) => page.evaluate(() => (window as unknown as { __picks: number }).__picks);
 
   async function watching(p: Someone, who = 'alice'): Promise<void> {
-    await p.page.getByRole('button', { name: 'Watch' }).click({ timeout: 30_000 });
+    // Exactly Watch: a name match is otherwise a substring, and "Stop
+    // watching" on a view already open would be pressed instead (issue #1930).
+    await p.page.getByRole('button', { name: 'Watch', exact: true }).click({ timeout: 30_000 });
     const view = shareView(p.page);
     await expect(view).toContainText(`${who} · LIVE`);
     await expect(view.locator('audio')).toHaveJSProperty('muted', false);

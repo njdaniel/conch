@@ -1852,6 +1852,25 @@ describe('watching several streams', () => {
     t.clock.advance(resumeLimit);
     expect([...t.client.snapshot().watched]).toEqual([8]);
   });
+
+  // Issue #1930: conchd lists a page only once a pass has seen it, up to
+  // about 1.5 s after it connected. A stream watched and stopped in that time
+  // has ended; it is not waited for as if a renewal had taken the room, so the
+  // sharer's next share is not watched unasked.
+  it('a stream that ends before presence first lists this person is let go, not waited for', async () => {
+    const t = setup();
+    await joined(t);
+    // 8 shares; this person (7) is connected but not listed yet.
+    t.client.presence(twoStreams([8], [8]));
+    t.client.watchStream(8, true);
+    // 8 stops, and still no pass has listed 7.
+    t.client.presence(twoStreams([8], []));
+    expect([...t.client.snapshot().watched]).toEqual([]);
+    t.client.presence(twoStreams([7, 8], []));
+    // 8 shares again: Watch is offered, not pressed.
+    t.client.presence(twoStreams([7, 8], [8]));
+    expect([...t.client.snapshot().watched]).toEqual([]);
+  });
 });
 
 // Issue #658: the microphone chosen, the switch, and the microphone missing.

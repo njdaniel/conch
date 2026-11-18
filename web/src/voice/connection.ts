@@ -679,6 +679,10 @@ export class VoiceClient {
   // (voice-multi-share.md §7.1).
   private readonly streamSinks = new Map<number, ShareSink>();
   private readonly awaiting = new Map<number, unknown>();
+  // Whether presence has listed this person since they joined. Until it has,
+  // their absence from it is conchd not having seen them yet, not a renewed
+  // room (issue #1930), and nothing is waited for.
+  private listedSinceJoin = false;
   // Who else holds a camera claim, from presence, and the elements the call
   // view plays cameras into: handed to every new connection.
   private cameraClaims: ReadonlySet<number> = new Set();
@@ -840,6 +844,8 @@ export class VoiceClient {
     // The camera is off on joining (design §3.4): only its button turns it
     // on, and why the last one ended is not news here.
     this.camera.reset();
+    // A new join is listed afresh (follow).
+    this.listedSinceJoin = false;
     // Joining is the person's own choice: a microphone missing before is
     // asked for again, as chosen.
     this.set({
@@ -1494,11 +1500,16 @@ export class VoiceClient {
   // and everyone left it) is waited for: the same publisher's stream coming
   // back is watched as before. A stream that is back ends the wait for it, and
   // another publisher's never takes its place (voice-multi-share.md §7.1).
+  // A person not yet listed since joining was never in the room as presence
+  // sees it, so nothing went with them: conchd lists a page only once a pass
+  // has seen it, up to about 1.5 s after it connected, and a stream that ends
+  // before then has ended (issue #1930).
   private follow(live: ReadonlySet<number>, listed: boolean): void {
+    if (listed) this.listedSinceJoin = true;
     for (const principal of [...this.state.watched]) {
       if (live.has(principal)) this.endAwaiting(principal);
       else if (this.awaiting.has(principal)) continue;
-      else if (listed) this.watchStream(principal, false);
+      else if (listed || !this.listedSinceJoin) this.watchStream(principal, false);
       else this.awaitShare(principal);
     }
   }
@@ -1585,6 +1596,7 @@ export class VoiceClient {
     // its tap on it first.
     this.releaseAudio();
     this.endAwaiting();
+    this.listedSinceJoin = false;
     this.streamSinks.clear();
     // Nobody's camera is received out of voice; the next join reads presence.
     this.cameraClaims = new Set();
