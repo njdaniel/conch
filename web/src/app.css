@@ -6295,3 +6295,14 @@ button.link {
   white-space: normal;
 }
 .markdown-code-actions [role='status'] { font-size: 0.875em; }
+
+/* Message permalinks (#1833). No animation, including under reduced motion. */
+.message.message-linked {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+.message label textarea[readonly] {
+  display: block;
+  width: 100%;
+  max-width: 100%;
+}

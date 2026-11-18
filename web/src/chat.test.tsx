@@ -3,6 +3,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { App } from './App';
+import { platform } from './platform';
 import { pausedText } from './Composer';
 import { clock } from './Conversation';
 import { maxHeld, pageSize } from './state/messages';
@@ -2387,4 +2388,67 @@ describe('the reconnect refresh', () => {
     expect(FakeSocket.all).toHaveLength(2);
     expect(screen.queryByText(stale)).toBeNull();
   }, 15000);
+});
+
+describe('message permalinks', () => {
+  afterEach(() => { vi.restoreAllMocks(); });
+  it('copies a link using the platform origin and copies the raw body', async () => {
+    const copy = vi.spyOn(platform.services, 'copyText').mockResolvedValue();
+    server.history.general = [message(1, '**raw** body')];
+    await openChat();
+    fireEvent.click(screen.getByRole('button', { name: /More actions for/ }));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Copy link' }));
+    await screen.findByText('Link copied.');
+    expect(copy).toHaveBeenLastCalledWith(`${window.location.origin}/app/#/c/general/m/1`);
+    fireEvent.click(screen.getByRole('button', { name: /More actions for/ }));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Copy text' }));
+    await screen.findByText('Text copied.');
+    expect(copy).toHaveBeenLastCalledWith('**raw** body');
+  });
+
+  it('uses the selected server origin for a desktop clipboard link', async () => {
+    vi.spyOn(platform.services, 'origin').mockReturnValue('https://chat.example');
+    const copy = vi.spyOn(platform.services, 'copyText').mockResolvedValue();
+    server.history.general = [message(1, 'body')];
+    await openChat();
+    fireEvent.click(screen.getByRole('button', { name: /More actions for/ }));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Copy link' }));
+    await screen.findByText('Link copied.');
+    expect(copy).toHaveBeenCalledWith('https://chat.example/app/#/c/general/m/1');
+  });
+
+  it('selects the link for manual copying when the clipboard is refused', async () => {
+    vi.spyOn(platform.services, 'copyText').mockRejectedValue(new Error('refused'));
+    server.history.general = [message(1, 'body')];
+    await openChat();
+    fireEvent.click(screen.getByRole('button', { name: /More actions for/ }));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Copy link' }));
+    const field = await screen.findByLabelText<HTMLTextAreaElement>('Copy manually');
+    expect(field.value).toBe(`${window.location.origin}/app/#/c/general/m/1`);
+    expect(document.activeElement).toBe(field);
+    expect(field.selectionEnd).toBe(field.value.length);
+    expect(field.selectionStart).toBe(0);
+  });
+
+  it('loads older pages and focuses and highlights the linked message', async () => {
+    const scroll = vi.fn();
+    HTMLElement.prototype.scrollIntoView = scroll;
+    server.history.general = Array.from({ length: 110 }, (_, i) => message(i + 1, `message ${String(i + 1)}`));
+    await openChat('#/c/general/m/1');
+    await waitFor(() => {
+      const row = screen.getByLabelText('Messages').querySelector('[data-message-id="1"]');
+      expect(row?.classList.contains('message-linked')).toBe(true);
+      expect(document.activeElement).toBe(row);
+    });
+    expect(server.historyRequests.some((url) => url.searchParams.has('before'))).toBe(true);
+    expect(scroll).toHaveBeenCalled();
+  });
+
+  for (const hash of ['#/c/general/m/9999', '#/c/private/m/1', '#/c/general/m/0', '#/c/general/m/', '#/c/general/m/1/extra']) {
+    it(`gives the same unavailable notice for ${hash}`, async () => {
+      server.history.general = [message(1, 'visible')];
+      await openChat(hash);
+      await screen.findByText("This message isn't available");
+    });
+  }
 });

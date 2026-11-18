@@ -1,3 +1,5 @@
+import { platform } from './platform';
+import { hashForMessage } from './route';
 import { ModerationConfirm, useMayModerate, useTombstones } from './Moderation';
 import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
 import * as api from './api';
@@ -171,6 +173,7 @@ export function Message({
   notice,
   stop = false,
   reactionNavigation = false,
+  highlighted = false,
 }: {
   readonly message: MessageV2;
   readonly people: ReadonlyMap<number, Person>;
@@ -190,8 +193,8 @@ export function Message({
   // null when the page does not hold it. Undefined draws nothing.
   readonly context?: ReplyContext | null;
   readonly thread?: ReactNode;
-  // The message's actions menu (issue #845): only what the viewer may do
-  // here, and none at all draws no menu.
+  // Additional actions in the message's menu (issue #845): only what the
+  // viewer may do here. Non-removed messages always offer copying (#1833).
   readonly actions?: readonly MenuItem[];
   // The inline editor, in place of the text, while the viewer edits it.
   readonly editor?: ReactNode;
@@ -200,6 +203,7 @@ export function Message({
   // This message is the log's one tab stop (issue #1040); the rest are -1.
   readonly stop?: boolean;
   readonly reactionNavigation?: boolean;
+  readonly highlighted?: boolean;
 }) {
   const row = useRef<HTMLLIElement>(null);
   useLayoutEffect(() => {
@@ -218,14 +222,54 @@ export function Message({
   // unchanged (F26).
   const [fileNames, setFileNames] = useState<ReadonlyMap<number, string>>(new Map());
   const nameOnly = attachments !== null && attachments.file_ids.every((id) => fileNames.has(id)) && message.body === attachments.file_ids.map((id) => fileNames.get(id)).join(', ');
-  const items: readonly MenuItem[] = message.removed === true ? [] : [...(editor === undefined ? actions ?? [] : []), ...(mayModerate ? [{ key: 'remove-message', label: 'Remove message', onSelect: () => { setRemoving(true); } }] : [])];
+  const [copyNotice, setCopyNotice] = useState('');
+  const [manualCopy, setManualCopy] = useState<string | null>(null);
+  const copyField = useRef<HTMLTextAreaElement>(null);
+  const copyRequest = useRef(0);
+  useLayoutEffect(() => {
+    if (message.removed === true) {
+      setManualCopy(null);
+      setCopyNotice('');
+    }
+    // A clipboard result cannot restore content after removal or unmount.
+    return () => { copyRequest.current++; };
+  }, [message.removed]);
+  useEffect(() => {
+    if (manualCopy !== null) { copyField.current?.focus(); copyField.current?.select(); }
+  }, [manualCopy]);
+  useEffect(() => {
+    if (!highlighted) return;
+    row.current?.scrollIntoView({ block: 'center', behavior: 'instant' });
+    row.current?.focus({ preventScroll: true });
+  }, [highlighted]);
+  function copy(kind: 'link' | 'text') {
+    if (message.removed === true) return;
+    const request = ++copyRequest.current;
+    const value = kind === 'link' ? `${platform.services.origin()}/app/${hashForMessage(channel, message.id)}` : message.body;
+    setManualCopy(null);
+    more.current?.focus();
+    void Promise.resolve().then(() => platform.services.copyText(value)).then(() => {
+      if (request !== copyRequest.current) return;
+      setCopyNotice(kind === 'link' ? 'Link copied.' : 'Text copied.');
+    }).catch(() => {
+      if (request !== copyRequest.current) return;
+      setCopyNotice('Clipboard unavailable. Copy the selected text.');
+      setManualCopy(value);
+    });
+  }
+  const items: readonly MenuItem[] = message.removed === true ? [] : [
+    ...(editor === undefined ? actions ?? [] : []),
+    ...(mayModerate ? [{ key: 'remove-message', label: 'Remove message', onSelect: () => { setRemoving(true); } }] : []),
+    { key: 'copy-link', label: 'Copy link', onSelect: () => { copy('link'); } },
+    { key: 'copy-text', label: 'Copy text', onSelect: () => { copy('text'); } },
+  ];
   const [menuOpen, setMenuOpen] = useState(false);
   const more = useRef<HTMLButtonElement>(null);
   const openers = useOpeners(items.length > 0, () => {
     setMenuOpen(true);
   });
   const named = approval === null && editor === undefined && mentions(message.body, people.get(viewer)?.name ?? '');
-  const classes = ['message', ...(cont ? ['cont'] : []), ...(named ? ['mentions-you'] : []), ...(items.length > 0 ? ['has-actions'] : []), ...(editor === undefined ? [] : ['editing'])];
+  const classes = ['message', ...(highlighted ? ['message-linked'] : []), ...(cont ? ['cont'] : []), ...(named ? ['mentions-you'] : []), ...(items.length > 0 ? ['has-actions'] : []), ...(editor === undefined ? [] : ['editing'])];
   return (
     <li ref={row} className={classes.join(' ')} data-message-id={message.id} tabIndex={stop ? 0 : -1} aria-description={hasReactions && reactionNavigation ? "Use Right Arrow for reaction controls; Left and Right Arrow move between them, Escape returns to the message." : undefined} {...(context === undefined ? {} : { 'aria-describedby': `reply-context-${String(message.id)}` })} {...openers}>
       {named ? <span className="vh">Mentions you. </span> : null}
@@ -259,6 +303,8 @@ export function Message({
           </span>
         )}
       </Line>
+      {message.removed === true || copyNotice === '' ? null : <p role="status">{copyNotice}</p>}
+      {message.removed === true || manualCopy === null ? null : <label>Copy manually<textarea ref={copyField} readOnly value={manualCopy} onFocus={(event) => { event.currentTarget.select(); }} /></label>}
       {notice === undefined || notice === null ? null : <p role="status" className="edit-notice">{notice}</p>}
       {items.length === 0 ? null : (
         <ActionsMenu label={`More actions for ${who}`} items={items} open={menuOpen} onOpenChange={setMenuOpen} button={more} />
@@ -382,7 +428,8 @@ function continues(before: MessageV2 | undefined, message: MessageV2): boolean {
   return Date.parse(message.created_at) - Date.parse(before.created_at) < sameRun;
 }
 
-function ThreadView({ rootId, root, chat, channel, live, archived, people: known, nets, viewer, draft, onDraft, onClose, onReplySend, onRetrySend, onDismissSend, onUnauthorized, onEditLast, editorFor, notices }: {
+function ThreadView({ highlightedId, rootId, root, chat, channel, live, archived, people: known, nets, viewer, draft, onDraft, onClose, onReplySend, onRetrySend, onDismissSend, onUnauthorized, onEditLast, editorFor, notices }: {
+  readonly highlightedId: number | null;
   readonly notices: ReadonlyMap<number, string>;
   readonly onEditLast: (messages: readonly MessageV2[], composer: HTMLTextAreaElement) => boolean;
   readonly editorFor: (message: MessageV2, onSaved: (saved: MessageV2) => void) => ReactNode;
@@ -482,7 +529,7 @@ function ThreadView({ rootId, root, chat, channel, live, archived, people: known
         </div>
       ) : null}
       <ol className="messages" aria-label="Root and replies">
-        {messages.map((message) => <Message key={message.id} message={message} people={people} nets={nets} viewer={viewer} channel={channel} sent={message.id === sentMark} cont={false} onUnauthorized={onUnauthorized} notice={notices.get(message.id) ?? null} editor={editorFor(message, (saved) => { setFetched((previous) => previous.map((held) => held.id === saved.id ? saved : held)); })} />)}
+        {messages.map((message) => <Message highlighted={message.id === highlightedId} key={message.id} message={message} people={people} nets={nets} viewer={viewer} channel={channel} sent={message.id === sentMark} cont={false} onUnauthorized={onUnauthorized} notice={notices.get(message.id) ?? null} editor={editorFor(message, (saved) => { setFetched((previous) => previous.map((held) => held.id === saved.id ? saved : held)); })} />)}
         {pending.map((send) => <Pending key={`local-${String(send.localId)}`} send={send} me={me} nets={nets} viewer={viewer} onRetry={onRetrySend} onDismiss={onDismissSend} />)}
       </ol>
       {nextAfter === undefined ? null : (
@@ -502,7 +549,7 @@ function ThreadView({ rootId, root, chat, channel, live, archived, people: known
           <p className="hint">Replying to {rootMessage.audience === undefined ? `#${channel}` : audienceLabel(rootMessage.audience, viewer, nets)}; the audience cannot be changed.</p>
           <label htmlFor={`reply-${String(rootId)}`}>Reply to {authorOf(rootMessage, people)}</label>
           <div className="reply-box">
-            <textarea id={`reply-${String(rootId)}`} autoFocus rows={2} value={draft} disabled={live !== 'open'} onChange={(event) => {
+            <textarea id={`reply-${String(rootId)}`} autoFocus={highlightedId === null} rows={2} value={draft} disabled={live !== 'open'} onChange={(event) => {
               onDraft(event.target.value);
             }} onCompositionStart={() => { composing.current = true; }} onCompositionEnd={() => { composing.current = false; }} onKeyDown={(event) => {
               if (event.key === 'ArrowUp' && draft === '' && !composing.current && !event.nativeEvent.isComposing && !event.shiftKey && !event.ctrlKey && !event.altKey && !event.metaKey && onEditLast(messages, event.currentTarget)) {
@@ -579,6 +626,7 @@ function topOfView(log: HTMLElement): { readonly id: string; readonly offset: nu
 
 // The open channel: its messages in id order, and the box to write in.
 export function Conversation({
+  highlightedId = null,
   channelId,
   channel,
   topic,
@@ -609,6 +657,7 @@ export function Conversation({
   density = '',
   openingMark = null,
 }: {
+  readonly highlightedId?: number | null;
   // The read mark captured when this channel opened, held for this visit.
   readonly openingMark?: number | null;
   // The channel is archived (issue #844): it opens read-only. History, search
@@ -680,6 +729,10 @@ export function Conversation({
   const sized = useRef<number | null>(null);
   const [unseen, setUnseen] = useState(false);
   const [openThread, setOpenThread] = useState<number | null>(null);
+  useEffect(() => {
+    const message = highlightedId === null ? undefined : chat.byId.get(highlightedId);
+    if (message?.thread_root_id !== undefined) setOpenThread(message.thread_root_id);
+  }, [highlightedId, chat.byId]);
   const opener = useRef<HTMLElement | null>(null);
   const threadReturn = useRef<{ readonly root: number; readonly anchor: number | null; readonly opener: HTMLElement | null } | null>(null);
   const openFrom = useCallback((id: number, from: HTMLElement) => {
@@ -1266,6 +1319,7 @@ export function Conversation({
                 </li>
               ) : null}
               <Message
+                highlighted={message.id === highlightedId && message.thread_root_id === undefined}
                 stop={message.id === stop}
                 reactionNavigation
                 replies={replyCounts.get(message.id) ?? 0}
@@ -1286,6 +1340,7 @@ export function Conversation({
                 editor={editThread === null ? editorFor(message) : undefined}
                 thread={threadAnchor === null || message.id !== threadAnchor ? null : (
                   <ThreadView
+                    highlightedId={highlightedId}
                     key={openThread}
                     rootId={openThread as number}
                     root={chat.byId.get(openThread as number)}
