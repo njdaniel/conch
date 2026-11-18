@@ -150,7 +150,7 @@ export function NativeVoicePanel({
   const [setup, setSetup] = useState(false);
   const joined = session ? view.channel : null;
   const shown = joined ?? (signedIn ? channel : null);
-  const snapshot = usePresence({ channel: shown, voiceAllowed, onUnauthorized });
+  const snapshot = usePresence({ channel: shown, joined, voiceAllowed, onUnauthorized });
   const presence = snapshot.kind === 'presence' ? snapshot.presence : null;
   const named = useVoiceNames({ joined, viewed: channel, presence, people });
 

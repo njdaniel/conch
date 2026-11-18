@@ -3,9 +3,9 @@ import { describe, expect, it } from 'vitest';
 import { CONTENT_SECURITY_POLICY } from '../../main/csp.ts';
 
 describe('CONTENT_SECURITY_POLICY', () => {
-  it('is exactly the policy of linux-desktop.md §3 as amended by Q-D4-1 (connect-src wss: https:)', () => {
+  it('is exactly the policy of linux-desktop.md §3 as amended by Q-D4-1 and Nick’s #1924 decision (media-src self only)', () => {
     expect(CONTENT_SECURITY_POLICY).toBe(
-      "default-src 'none'; script-src 'self'; style-src 'self'; font-src 'self'; img-src 'self' blob: data:; connect-src wss: https:; object-src 'none'; base-uri 'none'; frame-src 'none'; frame-ancestors 'none'; form-action 'none'; worker-src 'none'",
+      "default-src 'none'; script-src 'self'; style-src 'self'; font-src 'self'; img-src 'self' blob: data:; media-src 'self'; connect-src wss: https:; object-src 'none'; base-uri 'none'; frame-src 'none'; frame-ancestors 'none'; form-action 'none'; worker-src 'none'",
     );
   });
 
