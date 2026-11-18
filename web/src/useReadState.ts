@@ -100,7 +100,7 @@ export function useReadState({
   // #1517): no mark is made, and a mark waiting on its timer is dropped. The
   // newest message is marked again, if it is on screen, when the preview ends.
   readonly paused?: boolean;
-}): ReadonlyMap<string, number> {
+}): { readonly counts: ReadonlyMap<string, number>; readonly openingMark: number | null } {
   const [counts, setCounts] = useState<ReadonlyMap<number, number>>(new Map());
   const openId = idOf(channels, open);
   const [visible, setVisible] = useState(() => document.visibilityState !== 'hidden');
@@ -109,6 +109,13 @@ export function useReadState({
   const reading = atBottom && visible;
 
   const marks = useRef(newMarks());
+  // Freeze the mark for this visit before sending any read of the open history.
+  // Reconnects and read-state events may advance acked, never this snapshot.
+  const [opening, setOpening] = useState<{ readonly channel: number | null; readonly mark: number | null }>({ channel: openId, mark: null });
+  if (opening.channel !== openId) {
+    setOpening({ channel: openId, mark: openId === null ? null : marks.current.acked.get(openId) ?? null });
+  }
+  const openingMark = opening.channel === openId ? opening.mark : null;
   const consumed = useRef<ReadStateV1 | null>(null);
   // Set when the server says it holds no read state for this credential (an
   // agent, or authentication off): from then on nothing is asked or shown.
@@ -158,6 +165,14 @@ export function useReadState({
       }
       const { channels: known, open: current, ready: held, reading: now } = latest.current;
       const ids = new Set(known.map((c) => c.id));
+      for (const state of result.value) {
+        if (ids.has(state.channel_id)) marks.current.acked.set(state.channel_id, Math.max(marks.current.acked.get(state.channel_id) ?? 0, state.last_read_id));
+      }
+      // A missing entry means this channel has never been read.
+      for (const id of ids) if (!marks.current.acked.has(id)) marks.current.acked.set(id, 0);
+      setOpening((previous) => previous.channel === current && previous.mark === null
+        ? { channel: current, mark: current === null ? null : marks.current.acked.get(current) ?? 0 }
+        : previous);
       const next = new Map<number, number>();
       for (const state of result.value) {
         const id = state.channel_id;
@@ -327,7 +342,7 @@ export function useReadState({
   // The mark moves to the newest message shown: when a channel is opened, when
   // a message arrives at the bottom, and when the newest comes back into view.
   useEffect(() => {
-    if (!signedIn || openId === null || !ready || !reading || off.current || paused) return;
+    if (!signedIn || openId === null || openingMark === null || !ready || !reading || off.current || paused) return;
     setCount(openId, 0);
     const m = marks.current;
     if (newestId <= (m.marked.get(openId) ?? 0)) return;
@@ -355,7 +370,7 @@ export function useReadState({
         if (!off.current && !latest.current.paused && latest.current.connected && id > (m.marked.get(channel) ?? 0)) send(channel, id);
       }, last + markInterval - now),
     );
-  }, [signedIn, openId, ready, reading, newestId, status, send, setCount, paused]);
+  }, [signedIn, openId, openingMark, ready, reading, newestId, status, send, setCount, paused]);
 
   // The counts by name, as the list shows them, from the names it holds now.
   const byName = useMemo(() => {
@@ -367,5 +382,5 @@ export function useReadState({
     return named;
   }, [channels, counts]);
 
-  return off.current ? none : byName;
+  return { counts: off.current ? none : byName, openingMark: off.current ? null : openingMark };
 }

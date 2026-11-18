@@ -4,11 +4,13 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-libra
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { App } from './App';
 import { badgeText, markInterval } from './useReadState';
+import { maxHeld, pageSize } from './state/messages';
 
 const origin = 'http://127.0.0.1:8080';
 const secret = 'conch_secret_token_value';
 const ticketValue = 'conch_wst_TICKETTICKETTICKETTICKETTICKETTICKETTICKET';
 const at = '2026-10-14T10:42:00Z';
+const originalScrollIntoView = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'scrollIntoView');
 
 const channels = [
   { id: 7, name: 'general', created_at: at },
@@ -66,6 +68,7 @@ interface Server {
   events: boolean;
   readDelay: Promise<void> | null;
   history: unknown[];
+  firstPage?: number;
   // What GET /v1/read-state answers; null is the refusal below.
   read: () => unknown[];
   refusal: { status: number; code: string } | null;
@@ -111,7 +114,11 @@ function install() {
       const m = /^\/v[12]\/channels\/([^/]+)\/(members|nets|messages)$/.exec(path);
       if (m?.[2] === 'members') return Promise.resolve(json({ members: [{ principal_id: 2, created_at: at, name: 'ada', kind: 'human' }] }));
       if (m?.[2] === 'nets') return Promise.resolve(json({ nets: [] }));
-      if (m?.[2] === 'messages') return Promise.resolve(json({ messages: m[1] === 'general' ? [...server.history].reverse() : [] }));
+      if (m?.[2] === 'messages') {
+        const before = Number(url.searchParams.get('before') ?? Infinity);
+        const messages = m[1] === 'general' ? server.history.filter((m) => (m as { id: number }).id < before).slice(-(before === Infinity ? server.firstPage ?? pageSize : pageSize)).reverse() : [];
+        return Promise.resolve(json({ messages }));
+      }
       return Promise.resolve(json({}, 404));
     }),
   );
@@ -163,6 +170,8 @@ beforeEach(() => {
 });
 afterEach(() => {
   cleanup();
+  if (originalScrollIntoView === undefined) Reflect.deleteProperty(HTMLElement.prototype, 'scrollIntoView');
+  else Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', originalScrollIntoView);
   vi.unstubAllGlobals();
   vi.useRealTimers();
   setVisibility('visible');
@@ -668,5 +677,103 @@ describe('after review', () => {
     });
     await advance(markInterval * 3);
     expect(server.puts).toHaveLength(3);
+  });
+});
+
+
+describe('the opening unread position', () => {
+  const divider = () => screen.queryByRole('separator', { name: 'New messages' });
+  const nextRow = () => divider()?.parentElement?.nextElementSibling?.getAttribute('data-message-id');
+
+  it.each([
+    { mark: 0, target: '1' },
+    { mark: 2, target: '3' },
+    { mark: 4, target: undefined },
+  ])('places the divider for mark $mark', async ({ mark, target }) => {
+    server.history = [1, 2, 3, 4].map((id) => message(id));
+    server.read = () => [state(7, 4 - mark, mark)];
+    await openChat();
+    await waitFor(() => { expect(server.puts.length).toBe(1); });
+    expect(nextRow()).toBe(target);
+    expect(divider()?.tabIndex).toBe(target === undefined ? undefined : 0);
+  });
+
+  it('skips own posts and tombstones, and keeps a single divider after marking and new live messages', async () => {
+    server.history = [message(1), message(2, 'mine', 2), { ...message(3, 'This message was removed by a moderator.'), removed: true }, message(4)];
+    server.read = () => [state(7, 1, 1)];
+    const socket = await openChat();
+    await waitFor(() => { expect(nextRow()).toBe('4'); });
+    await waitFor(() => { expect(server.puts.at(-1)?.id).toBe(4); });
+    socket.send(message(5));
+    expect(nextRow()).toBe('4');
+    expect(screen.getAllByRole('separator', { name: 'New messages' })).toHaveLength(1);
+    await waitFor(() => { expect(server.puts.at(-1)?.id).toBe(5); }, { timeout: 3000 });
+    fireEvent.click(screen.getByRole('button', { name: 'ops' }));
+    await screen.findByLabelText('Message #ops');
+    server.history.push(message(6));
+    fireEvent.click(screen.getByRole('button', { name: 'general' }));
+    await screen.findByText('m6');
+    await waitFor(() => { expect(nextRow()).toBe('6'); });
+  });
+
+  it.each([1, 2])('waits for opening mark %i and excludes live arrivals while the read is pending', async (mark) => {
+    let release: () => void = () => {};
+    server.readDelay = new Promise<void>((resolve) => { release = resolve; });
+    server.history = [message(1), message(2)];
+    server.read = () => [state(7, 2 - mark, mark)];
+    const socket = await openChat();
+    expect(server.puts).toHaveLength(0);
+    socket.send(message(3));
+    release();
+    await waitFor(() => { expect(server.puts.at(-1)?.id).toBe(3); });
+    expect(nextRow()).toBe(mark === 1 ? '2' : undefined);
+  });
+
+  it.each([0, 10])('loads across pages before placing and focusing the first unread after mark %i', async (mark) => {
+    server.history = Array.from({ length: 320 }, (_, i) => message(i + 1));
+    server.read = () => [state(7, 320 - mark, mark)];
+    await openChat();
+    expect(divider()).toBeNull();
+    const scroll = vi.fn();
+    Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', { configurable: true, value: scroll });
+    fireEvent.click(screen.getByRole('button', { name: 'Jump to first unread' }));
+    await waitFor(() => { expect(nextRow()).toBe(String(mark + 1)); });
+    await waitFor(() => { expect(document.activeElement?.getAttribute('data-message-id')).toBe(String(mark + 1)); });
+    expect(scroll).toHaveBeenCalledWith({ block: 'center' });
+  });
+
+  it('says when the history limit prevents the jump, without focusing a substitute row', async () => {
+    server.history = Array.from({ length: maxHeld + 100 }, (_, i) => message(i + 1));
+    server.firstPage = maxHeld;
+    server.read = () => [state(7, 1000, 1)];
+    await openChat();
+    const scroll = vi.fn();
+    Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', { configurable: true, value: scroll });
+    fireEvent.click(screen.getByRole('button', { name: 'Jump to first unread' }));
+    await screen.findByText('Cannot reach the first unread message: the history limit has been reached.', {}, { timeout: 10000 });
+    expect(divider()).toBeNull();
+    expect(scroll).not.toHaveBeenCalled();
+  }, 15000);
+
+  it('keeps the opening divider after a reconnect returns an advanced mark', async () => {
+    server.history = [message(1), message(2), message(3)];
+    server.read = () => [state(7, 2, 1)];
+    const socket = await openChat();
+    await waitFor(() => { expect(nextRow()).toBe('2'); });
+    server.read = () => [state(7, 0, 3)];
+    socket.drop(1006);
+    await waitFor(() => { expect(FakeSocket.all).toHaveLength(2); }, { timeout: 3000 });
+    (FakeSocket.all[1] as FakeSocket).open();
+    await waitFor(() => { expect(server.gets).toBe(2); });
+    expect(nextRow()).toBe('2');
+  });
+
+  it('does not introduce a divider for new live messages after opening a fully read channel', async () => {
+    server.history = [message(1)];
+    server.read = () => [state(7, 0, 1)];
+    const socket = await openChat();
+    socket.send(message(2));
+    expect(divider()).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Jump to first unread' })).toBeNull();
   });
 });

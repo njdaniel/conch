@@ -6231,3 +6231,39 @@ button.link {
 .call-frame:fullscreen > :not(video) {
   display: none;
 }
+
+/* The opening read mark stays fixed for this channel visit. */
+.new-messages-row {
+  list-style: none;
+}
+
+.new-messages {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  margin: var(--s3) 0;
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.new-messages::before,
+.new-messages::after {
+  content: '';
+  flex: 1;
+  border-top: 1px solid currentColor;
+}
+
+.jump-unread {
+  top: var(--s3);
+  bottom: auto;
+  max-width: calc(100% - 2 * var(--s3));
+}
+
+.unread-problem {
+  position: absolute;
+  top: calc(var(--s3) + 3rem);
+  left: var(--s3);
+  right: var(--s3);
+  padding: var(--s2);
+  background: var(--raised);
+}
