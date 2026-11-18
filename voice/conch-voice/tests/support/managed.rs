@@ -846,9 +846,10 @@ impl ManagedRig {
         }
     }
 
-    /// Every line written to the event pipe so far.
+    /// Every complete line written to the event pipe so far. The Windows pump reads
+    /// arbitrary chunks, so the last event may still be waiting for its newline.
     pub fn lines(&self) -> Vec<String> {
-        self.events.text().lines().map(str::to_owned).collect()
+        complete_event_lines(&self.events)
     }
 
     /// Every event so far, read by the owner's rules. A line it would refuse fails the test.
@@ -992,6 +993,49 @@ impl ManagedRig {
             Ok(()) => 0,
             Err(error) => i32::from(error.exit_code()),
         }
+    }
+}
+
+/// A snapshot can end anywhere in a record, even inside a UTF-8 character. Keep that
+/// unfinished suffix in `Written` for the next snapshot; only decode terminated lines.
+fn complete_event_lines(events: &Written) -> Vec<String> {
+    events
+        .0
+        .lock()
+        .unwrap()
+        .split_inclusive(|byte| *byte == b'\n')
+        .filter(|line| line.ends_with(b"\n"))
+        .map(|line| String::from_utf8(line[..line.len() - 1].to_vec()).unwrap())
+        .collect()
+}
+
+#[test]
+fn the_owner_waits_for_complete_event_lines_across_every_split_read() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../pkg/schema/testdata/voice-control/transcript-join-mute-leave.json");
+    let transcript: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    let mut hello = transcript["steps"][0]["message"].clone();
+    // Unknown fields are ignored by the protocol reader; the helper version itself
+    // is restricted to ASCII. Exercise UTF-8 framing in an extension field instead.
+    hello["extension"] = json!("é声");
+    let state = &transcript["steps"][2]["message"];
+    let expected = vec![hello.to_string(), state.to_string()];
+    let bytes = format!("{}\n{}\n", expected[0], expected[1]).into_bytes();
+
+    // Includes a snapshot ending in `fals`, splits inside multibyte characters,
+    // complete JSON awaiting its newline, and multiple records in a single read.
+    for split in 0..=bytes.len() {
+        let mut events = Written::default();
+        events.write_all(&bytes[..split]).unwrap();
+        let lines = complete_event_lines(&events);
+        let count = bytes[..split].iter().filter(|byte| **byte == b'\n').count();
+        assert_eq!(lines, expected[..count], "split at {split}");
+        for line in &lines {
+            parse_event(line.as_bytes()).unwrap();
+        }
+
+        events.write_all(&bytes[split..]).unwrap();
+        assert_eq!(complete_event_lines(&events), expected, "split at {split}");
     }
 }
 

@@ -288,7 +288,8 @@ fn write_all(mut out: Box<dyn Write + Send>, items: &Receiver<Item>, waiting: &A
         waiting.fetch_sub(1, Ordering::SeqCst);
         match item {
             Item::Line(mut line) => {
-                // The line and its end in one write, so that a reader never sees half.
+                // Include the line's end and retry short writes. A stream reader can
+                // still receive fragments and must wait for the newline before parsing.
                 line.push('\n');
                 let _ = out.write_all(line.as_bytes());
                 let _ = out.flush();
