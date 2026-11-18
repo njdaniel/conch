@@ -742,7 +742,7 @@ describe('the opening unread position', () => {
     await waitFor(() => { expect(document.activeElement?.getAttribute('data-message-id')).toBe(String(mark + 1)); });
     expect(server.pages).toEqual([Infinity, mark + pageSize + 1]);
     expect(screen.queryByText(/history limit has been reached/)).toBeNull();
-  }, 15000);
+  }, heldHistoryTimeout);
 
   it.each([{ length: 450, mark: 300 }, { length: 150, mark: 0 }])('stops when only own posts and tombstones remain after mark $mark, and dismisses the notice', async ({ length, mark }) => {
     server.history = Array.from({ length }, (_, i) => i % 2 === 0
@@ -755,7 +755,7 @@ describe('the opening unread position', () => {
     expect(screen.queryByRole('button', { name: 'Jump to first unread' })).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: 'Dismiss unread notice' }));
     expect(screen.queryByText('The first unread message is no longer available.')).toBeNull();
-  }, heldHistoryTimeout);
+  });
 
   it('allows dismissing a failed jump after manually loading the unread row', async () => {
     server.history = Array.from({ length: 150 }, (_, i) => message(i + 1));

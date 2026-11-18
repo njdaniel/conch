@@ -2035,7 +2035,7 @@ describe('a long channel', () => {
     expect(screen.getByText(`m${String(maxHeld + 100)}`)).toBeDefined();
     expect(server.historyRequests).toHaveLength(3);
     // About 3.7 s locally; the default 5 s is too close on a busy runner.
-  }, 15000);
+  }, heldHistoryTimeout);
 });
 
 describe('the address bar', () => {
@@ -2049,7 +2049,7 @@ describe('the address bar', () => {
     expect(window.location.search).toBe('');
     expect(window.location.hash).toBe('#/c/general');
     expect(document.body.innerHTML).not.toContain(ticketValue);
-  }, heldHistoryTimeout);
+  });
 });
 
 describe('scrolling', () => {
