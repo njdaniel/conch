@@ -24,7 +24,7 @@ function image(name: string, type = 'image/png'): File {
 
 type Folk = ReadonlyMap<number, { readonly name: string; readonly kind: 'human' | 'agent' }>;
 
-function Harness({ onSend, people = new Map([[2, { name: 'ada', kind: 'human' as const }]]) }: { readonly onSend: (body: string, audience: Audience | undefined, attachments?: readonly unknown[]) => void; readonly people?: Folk }) {
+function Harness({ onSend, onEditLast, people = new Map([[2, { name: 'ada', kind: 'human' as const }]]) }: { readonly onSend: (body: string, audience: Audience | undefined, attachments?: readonly unknown[]) => void; readonly people?: Folk; readonly onEditLast?: (composer: HTMLTextAreaElement) => boolean }) {
   const [draft, setDraft] = useState('');
   const [attachments, dispatch] = useReducer(attachmentDraftsReducer, initialAttachmentDrafts);
   return (
@@ -50,6 +50,7 @@ function Harness({ onSend, people = new Map([[2, { name: 'ada', kind: 'human' as
         onDraft={setDraft}
         onTarget={() => undefined}
         onSend={onSend}
+        {...(onEditLast === undefined ? {} : { onEditLast })}
         atBottom={() => undefined}
       />
     </ComposerAttachmentProvider>
@@ -304,5 +305,51 @@ describe('Mark as spoiler on a draft (issue #1500)', () => {
     const toggle = await screen.findByRole('button', { name: 'Mark one.png as spoiler' });
     expect(toggle.tagName).toBe('BUTTON');
     expect(toggle.getAttribute('type')).toBe('button');
+  });
+});
+
+describe('Up to edit the last message', () => {
+  const box = () => screen.getByLabelText('Message #general');
+  it('calls the edit handler only for an empty draft and consumes only a successful edit', () => {
+    const onEditLast = vi.fn(() => true);
+    render(<Harness onSend={vi.fn()} onEditLast={onEditLast} />);
+    expect(fireEvent.keyDown(box(), { key: 'ArrowUp' })).toBe(false);
+    expect(onEditLast).toHaveBeenCalledWith(box());
+    onEditLast.mockReturnValue(false);
+    expect(fireEvent.keyDown(box(), { key: 'ArrowUp' })).toBe(true);
+    onEditLast.mockClear();
+    for (const text of ['text', ' ', '\n']) {
+      fireEvent.change(box(), { target: { value: text } });
+      expect(fireEvent.keyDown(box(), { key: 'ArrowUp' })).toBe(true);
+    }
+    expect(onEditLast).not.toHaveBeenCalled();
+  });
+
+  it.each(['shiftKey', 'ctrlKey', 'altKey', 'metaKey', 'isComposing'])('ignores %s', (flag) => {
+    const onEditLast = vi.fn(() => true);
+    render(<Harness onSend={vi.fn()} onEditLast={onEditLast} />);
+    expect(fireEvent.keyDown(box(), { key: 'ArrowUp', [flag]: true })).toBe(true);
+    expect(onEditLast).not.toHaveBeenCalled();
+  });
+
+  it('ignores Up during an IME composition even without the keyboard event flag', () => {
+    const onEditLast = vi.fn(() => true);
+    render(<Harness onSend={vi.fn()} onEditLast={onEditLast} />);
+    fireEvent.compositionStart(box());
+    fireEvent.keyDown(box(), { key: 'ArrowUp' });
+    expect(onEditLast).not.toHaveBeenCalled();
+    fireEvent.compositionEnd(box());
+    fireEvent.keyDown(box(), { key: 'ArrowUp' });
+    expect(onEditLast).toHaveBeenCalledOnce();
+  });
+
+  it.each(['@', ':fir'])('keeps Up navigating the %s suggestion list', async (text) => {
+    const onEditLast = vi.fn(() => true);
+    render(<Harness onSend={vi.fn()} onEditLast={onEditLast} people={new Map([[3, { name: 'bea', kind: 'human' }]])} />);
+    fireEvent.change(box(), { target: { value: text, selectionStart: text.length } });
+    const list = await screen.findByRole('listbox');
+    expect(fireEvent.keyDown(box(), { key: 'ArrowUp' })).toBe(false);
+    expect(within(list).getAllByRole('option').at(-1)?.getAttribute('aria-selected')).toBe('true');
+    expect(onEditLast).not.toHaveBeenCalled();
   });
 });

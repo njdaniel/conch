@@ -364,3 +364,34 @@ for (const [size, options] of phoneSizes.filter(([name]) => name === '320×640' 
     await expect(versions).toBeHidden();
   });
 }
+
+test('Up from an empty desktop composer edits the last message and leaves a nonempty draft alone', async ({ meet, secrets, world }) => {
+  const { channel, people } = await community(world, secrets, 'up', ['typist']);
+  const [author] = people as [Someone];
+  const { page } = await meet();
+  await signIn(page, world, author.token, author.name);
+  await openChannel(page, channel);
+  const body = word('upedit');
+  await say(page, channel, body);
+  const id = await postedId(world, author.token, channel, body);
+  await expect(row(page, id)).toContainText(body);
+  const composer = page.getByRole('textbox', { name: `Message #${channel}` });
+  await expect(composer).toHaveValue('');
+  await composer.press('ArrowUp');
+  const editor = page.getByRole('textbox', { name: editName });
+  await expect(editor).toBeFocused();
+  await editor.press('Escape');
+  await expect(composer).toBeFocused();
+  await composer.press('ArrowUp');
+  await expect(editor).toBeFocused();
+  await editor.fill(`${body} fixed`);
+  await editor.press('Enter');
+  await expect(editor).toHaveCount(0);
+  await expect(row(page, id)).toContainText(`${body} fixed`);
+  await expect(marker(row(page, id))).toHaveText('(edited)');
+  await composer.fill('draft');
+  await composer.press('ArrowUp');
+  await expect(editor).toHaveCount(0);
+  await expect(composer).toBeFocused();
+  await expect(composer).toHaveValue('draft');
+});
