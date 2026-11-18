@@ -1,11 +1,18 @@
-import { cleanup, fireEvent, render, screen } from '@testing-library/react';
-import { afterEach, describe, expect, it } from 'vitest';
+import { act, cleanup, fireEvent, render, renderHook, screen, waitFor, within } from '@testing-library/react';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { BodyBoundary, Linkified, previewText } from './Linkified';
+import { useNotifications } from './useNotifications';
+import { platform } from './platform';
+import { SearchPanel } from './SearchPanel';
+import { NotificationCenter } from './NotificationCenter';
+import { messagePreview } from './spoilerFiles';
+import * as api from './api';
+import type { MessageV2 } from './schema/message';
 import { formatText } from './formatting';
-import { excerptOf } from './Conversation';
+import { Conversation, excerptOf } from './Conversation';
 import { MAX_POST_REQUEST_BYTES } from './schema/message';
 
-afterEach(cleanup);
+afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 
 describe('message Markdown', () => {
   it('renders inline formatting and a code block without rendering source HTML', () => {
@@ -276,5 +283,195 @@ describe('previews outside the message view', () => {
     ['plain text', 'plain text'],
   ])('%j previews as %j', (body, preview) => {
     expect(previewText(body)).toBe(preview);
+  });
+});
+
+
+describe('lists, headings and code controls', () => {
+  const golden = [
+    { name: 'unordered markers', body: '- one\n* two', text: 'onetwo', lists: 1, items: 2, headings: 0, preview: 'one\ntwo' },
+    { name: 'ordered markers', body: '1. one\n1. two', text: 'onetwo', lists: 1, items: 2, headings: 0, preview: 'one\ntwo' },
+    { name: 'mixed nested lists', body: '- one\n  1. two\n    * three\n      - four\n- five', text: 'onetwothreefourfive', lists: 3, items: 5, headings: 0, preview: 'one\ntwo\nthree\nfour\nfive' },
+    { name: 'indentation jumps', body: '- one\n        - two\n- three', text: 'onetwothree', lists: 2, items: 3, headings: 0, preview: 'one\ntwo\nthree' },
+    { name: 'two heading styles', body: '# One\n## Two\n### literal', text: 'OneTwo### literal', lists: 0, items: 0, headings: 2, preview: 'One\nTwo\n### literal' },
+    { name: 'inline code', body: '`# literal`\n`- literal`', text: '# literal\n- literal', lists: 0, items: 0, headings: 0, preview: '`# literal`\n`- literal`' },
+    { name: 'fenced code', body: '```ts\n# literal\n- literal\n1. literal\n```', text: 'Copy# literal\n- literal\n1. literal', lists: 0, items: 0, headings: 0, preview: '```ts\n# literal\n- literal\n1. literal\n```' },
+    { name: 'links and spoilers', body: '# ||secret||\n- https://example.com ||hidden||', text: 'Reveal spoilerhttps://example.com Reveal spoiler', lists: 1, items: 1, headings: 1, preview: '[spoiler]\nhttps://example.com [spoiler]' },
+    { name: 'escaped markers', body: '\\# literal\n\\* literal', text: '\\# literal\n* literal', lists: 0, items: 0, headings: 0, preview: '\\# literal\n\\* literal' },
+  ];
+  it.each(golden)('$name', ({ body, text, lists, items, headings, preview }) => {
+    const { container } = render(<Linkified text={body} />);
+    expect(container.textContent).toBe(text);
+    expect(screen.queryAllByRole('list')).toHaveLength(lists);
+    expect(screen.queryAllByRole('listitem')).toHaveLength(items);
+    expect(container.querySelectorAll('.markdown-heading')).toHaveLength(headings);
+    expect(container.querySelector('h1,h2,h3,h4,h5,h6,[role="heading"]')).toBeNull();
+    expect(container.querySelector('script,style,[style]')).toBeNull();
+    expect(previewText(body)).toBe(preview);
+    for (const list of screen.queryAllByRole('list')) {
+      expect(['UL', 'OL']).toContain(list.tagName);
+      expect(list.querySelector(':scope > li')).not.toBeNull();
+    }
+    for (const link of screen.queryAllByRole('link')) expect(link.getAttribute('rel')).toBe('noopener noreferrer');
+  });
+
+  it.each(['- ', '1. '])('bounds a 4,000-item %s list and keeps excess source readable', (marker) => {
+    const body = Array.from({ length: 4000 }, (_, i) => `${'  '.repeat(i % 5)}${marker}item`).join('\n');
+    const start = performance.now();
+    const { container } = render(<Linkified text={body} />);
+    expect(performance.now() - start).toBeLessThan(1000);
+    expect(container.querySelectorAll('li')).toHaveLength(500);
+    expect(container.querySelector('.markdown-list .markdown-list .markdown-list .markdown-list')).toBeNull();
+    expect(container.textContent).toContain(`${marker}item`);
+    expect(previewText(body).split('\n').slice(0, 500)).toEqual(Array<string>(500).fill('item'));
+    expect(previewText(body).split('\n')[500]).toBe(`${marker}item`);
+  });
+
+  it('bounds 4,000 alternating inline markers inside a list item', () => {
+    const body = `- ${'**~~*'.repeat(4000)}end`;
+    const start = performance.now();
+    render(<Linkified text={body} />);
+    expect(performance.now() - start).toBeLessThan(1000);
+    expect(screen.getAllByRole('listitem')).toHaveLength(1);
+  });
+
+  it('copies exact code through the platform service and announces success without moving focus', async () => {
+    const text = '\t# literal  \n- item\n\n';
+    const copy = vi.spyOn(platform.services, 'copyText').mockResolvedValue();
+    render(<Linkified text={`\`\`\`ts\n${text}\n\`\`\``} />);
+    const button = screen.getByRole('button', { name: 'Copy code' });
+    expect(button.tagName).toBe('BUTTON');
+    expect(button.getAttribute('type')).toBe('button');
+    button.focus();
+    // Native keyboard activation emits click with detail 0 (jsdom does not
+    // synthesize a browser's default Enter/Space action from keydown).
+    fireEvent.click(button, { detail: 0 });
+    await waitFor(() => { expect(screen.getByRole('status').textContent).toBe('Copied'); });
+    expect(copy).toHaveBeenCalledExactlyOnceWith(text);
+    expect(document.activeElement).toBe(button);
+  });
+
+  it('announces clipboard failure and allows retry', async () => {
+    vi.spyOn(platform.services, 'copyText').mockRejectedValueOnce(new Error('denied')).mockResolvedValueOnce();
+    render(<Linkified text={'```\ncode\n```'} />);
+    const button = screen.getByRole('button', { name: 'Copy code' });
+    fireEvent.click(button);
+    await waitFor(() => { expect(screen.getByRole('status').textContent).toBe('Could not copy. Try again.'); });
+    fireEvent.click(button);
+    await waitFor(() => { expect(screen.getByRole('status').textContent).toBe('Copied'); });
+  });
+
+  it('keeps Copy in only the focused message Tab order (F15)', async () => {
+    HTMLElement.prototype.scrollIntoView = vi.fn();
+    vi.spyOn(api, 'readReactions').mockResolvedValue({ ok: true, value: { summaries: [] } });
+    const messages: MessageV2[] = [1, 2].map((id) => ({ schema: 'conch.message.v2', id, channel_id: 7, author_id: 3, created_at: '2026-11-18T00:00:00Z', body: `\`\`\`\nblock ${String(id)}\n\`\`\`` }));
+    render(<Conversation channel="general" live="open" people={new Map()} nets={new Map()} viewer={2} draft=""
+      chat={{ byId: new Map(messages.map((message) => [message.id, message])), pending: [], sentIds: new Set(), history: 'ready', older: 'idle', exhausted: true, trimmed: false, dropped: 0, nextLocalId: 9, edits: new Map(), final: new Set() }}
+      target={{ net: null, whisper: null, refusal: null, note: null }} monitored={new Set()}
+      onDraft={() => undefined} onTarget={() => undefined} onSend={() => undefined} onReplySend={() => undefined}
+      onRetrySend={() => undefined} onDismissSend={() => undefined} onLoadOlder={() => undefined}
+      onReload={() => undefined} onBottom={() => undefined} onEdited={() => undefined} />);
+    const [first, last] = screen.getAllByRole('button', { name: 'Copy code' });
+    expect(first?.tabIndex).toBe(-1);
+    expect(last?.tabIndex).toBe(0);
+    const row = first?.closest<HTMLElement>('[data-message-id]');
+    if (row === null || row === undefined) throw new Error('missing message row');
+    act(() => { row.focus(); });
+    await waitFor(() => { expect(first?.tabIndex).toBe(0); });
+    expect(last?.tabIndex).toBe(-1);
+  });
+
+  const previewCases = [
+    { body: '# Title', preview: 'Title', rendered: 'Title' },
+    { body: '## Title', preview: 'Title', rendered: 'Title' },
+    { body: '- item', preview: 'item', rendered: 'item' },
+    { body: '* item', preview: 'item', rendered: 'item' },
+    { body: '  1. item', preview: 'item', rendered: 'item' },
+    { body: '# # Title', preview: '# Title', rendered: '# Title' },
+    { body: '- - item', preview: '- item', rendered: '- item' },
+    { body: '### literal', preview: '### literal', rendered: '### literal' },
+    { body: '2. literal', preview: '2. literal', rendered: '2. literal' },
+    { body: '`# Title`', preview: '`# Title`', rendered: '# Title' },
+    { body: '`- item`', preview: '`- item`', rendered: '- item' },
+    { body: '```\n# Title\n- item\n```', preview: '```\n# Title\n- item\n```', rendered: '# Title\n- item' },
+    { body: '# Topic\n- visible ||secret||\n  1. child', preview: 'Topic\nvisible [spoiler]\nchild', rendered: 'Topic' },
+  ];
+
+  it.each(previewCases)('projects $body through the shared preview helper', ({ body, preview }) => {
+    expect(previewText(body)).toBe(preview);
+  });
+
+  it.each(previewCases)('quotes $body in reply excerpts', ({ body, preview }) => {
+    expect(excerptOf(body)).toBe(preview.split('\n')[0]);
+  });
+
+  it.each(previewCases)('renders $body in search results', async ({ body, rendered }) => {
+    const message: MessageV2 = { schema: 'conch.message.v2', id: 1836, channel_id: 7, author_id: 3, created_at: '2026-11-18T00:00:00Z', body };
+    vi.spyOn(api, 'searchMessages').mockResolvedValue({ ok: true, value: { messages: [message] } });
+    render(<SearchPanel channelId={7} channel="general" live="open" people={new Map()} nets={new Map()} viewer={2} onClose={() => undefined} onMissing={() => undefined} />);
+    fireEvent.change(screen.getByRole('searchbox'), { target: { value: 'item' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Search' }));
+    const results = await screen.findByRole('list', { name: 'Search results' });
+    expect(within(results).getByText(rendered, { normalizer: (text) => text }).textContent).toBe(rendered);
+    expect(results.textContent).not.toContain('secret');
+  });
+
+  it.each(previewCases)('previews $body in the notification center', ({ body, preview }) => {
+    const message: MessageV2 = { schema: 'conch.message.v2', id: 1836, channel_id: 7, author_id: 3, created_at: '2026-11-18T00:00:00Z', body };
+    expect(messagePreview(message)).toBe(preview);
+    render(<NotificationCenter alerts={[{ id: 'markdown', channel: 'general', message, mention: false }]} onOpen={() => undefined} onClear={() => undefined} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Notifications (1)' }));
+    const notification = screen.getByRole('button', { name: /New message in #general/ });
+    expect(notification.textContent).toContain(preview);
+    expect(notification.getAttribute('aria-label')).not.toContain('secret');
+  });
+
+  it.each(previewCases)('previews $body in native notification snippets', async ({ body, preview }) => {
+    const visibility = Object.getOwnPropertyDescriptor(document, 'visibilityState');
+    Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'hidden' });
+    vi.spyOn(platform.services.notifications, 'supported').mockReturnValue(true);
+    vi.spyOn(platform.services.notifications, 'permission').mockReturnValue('granted');
+    const show = vi.spyOn(platform.services.notifications, 'show').mockReturnValue({ close: () => undefined, onclick: null });
+    vi.spyOn(api, 'readNotificationPreferences').mockReturnValue({ policy: 'all', muted: [], native: true });
+    vi.spyOn(api, 'writeNotificationPreferences').mockImplementation(() => undefined);
+    vi.spyOn(api, 'loadMessagesAscending').mockResolvedValue({ ok: true, complete: true, value: [] });
+    const initial: Parameters<typeof useNotifications>[0] = {
+      signedIn: true, origin: 'https://markdown.example', principal: { id: 2, name: 'ada' },
+      channels: [{ id: 7, name: 'general', created_at: '2026-11-18T00:00:00Z' }],
+      loaded: true, eventsLive: true, event: null, readStateEvent: null, onOpen: () => undefined,
+    };
+    try {
+      const { rerender } = renderHook((props: typeof initial) => useNotifications(props), { initialProps: initial });
+      await act(async () => { await Promise.resolve(); });
+      rerender({ ...initial, event: { schema: 'conch.message.v2', id: 1836, channel_id: 7, author_id: 3, created_at: '2026-11-18T00:00:00Z', body } });
+      expect(show).toHaveBeenCalledWith('New message in #general', preview.replace(/\s+/g, ' ').trim(), expect.any(String), 'general');
+    } finally {
+      cleanup();
+      if (visibility === undefined) Reflect.deleteProperty(document, 'visibilityState');
+      else Object.defineProperty(document, 'visibilityState', visibility);
+    }
+  });
+
+  it('shares heading and list text across replies, search and notification previews', async () => {
+    const body = '# Topic\n- visible ||secret||\n  1. child';
+    const message: MessageV2 = { schema: 'conch.message.v2', id: 1836, channel_id: 7, author_id: 3, created_at: '2026-11-18T00:00:00Z', body };
+    expect(excerptOf(body)).toBe('Topic');
+    expect(messagePreview(message)).toBe('Topic\nvisible [spoiler]\nchild');
+    vi.spyOn(api, 'searchMessages').mockResolvedValue({ ok: true, value: { messages: [message] } });
+    render(<SearchPanel channelId={7} channel="general" live="open" people={new Map()} nets={new Map()} viewer={2} onClose={() => undefined} onMissing={() => undefined} />);
+    fireEvent.change(screen.getByRole('searchbox'), { target: { value: 'Topic' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Search' }));
+    const results = await screen.findByRole('list', { name: 'Search results' });
+    await waitFor(() => { expect(within(results).getByText('Topic')).toBeTruthy(); });
+    expect(within(results).getAllByRole('listitem')).toHaveLength(3);
+    expect(results.textContent).not.toContain('# Topic');
+    expect(results.textContent).not.toContain('secret');
+    cleanup();
+    render(<NotificationCenter alerts={[{ id: 'markdown', channel: 'general', message, mention: false }]} onOpen={() => undefined} onClear={() => undefined} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Notifications (1)' }));
+    const notification = screen.getByRole('button', { name: /New message in #general/ });
+    expect(notification.textContent).toContain('Topic\nvisible [spoiler]\nchild');
+    expect(notification.getAttribute('aria-label')).not.toContain('secret');
+    expect(notification.textContent).not.toContain('# Topic');
   });
 });

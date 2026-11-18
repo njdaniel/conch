@@ -6272,3 +6272,26 @@ button.link {
   padding: var(--s2);
   background: var(--raised);
 }
+
+/* Message Markdown lists, headings and code controls (issue #1836). */
+.markdown-list {
+  margin: 0.25rem 0;
+  padding-inline-start: 1.5rem;
+  white-space: normal;
+}
+.markdown-list > li {
+  white-space: pre-wrap;
+}
+.markdown-heading {
+  margin-block: 0.5rem 0.25rem;
+  font-weight: 700;
+}
+.markdown-heading-1 { font-size: 1.3em; }
+.markdown-heading-2 { font-size: 1.15em; }
+.markdown-code-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  white-space: normal;
+}
+.markdown-code-actions [role='status'] { font-size: 0.875em; }
