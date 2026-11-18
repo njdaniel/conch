@@ -1214,7 +1214,11 @@ func TestEndpointNowForbiddenIsRefusedOnEverySend(t *testing.T) {
 				h.clk.Advance(2 * time.Hour) // past the backoff each refusal starts
 				h.sender.Enqueue(post)
 				want := i + 1
-				waitFor(t, "a refusal", func() bool { return h.obs.failure(ClassAddressRefused) == want })
+				// The sender records the class, then the outcome: wait for
+				// both, or the read below races the last one (issue #1928).
+				waitFor(t, "a refusal", func() bool {
+					return h.obs.failure(ClassAddressRefused) == want && h.obs.wake(OutcomeFailed) == want
+				})
 			}
 			if h.prov.Count() != 0 {
 				t.Errorf("%d requests reached the provider", h.prov.Count())
