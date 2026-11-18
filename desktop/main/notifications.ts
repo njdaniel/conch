@@ -1,7 +1,13 @@
-// Desktop notifications (issue #1590, D5-04; linux-desktop.md §4). Main owns
+// Desktop notifications (#1590, D5-04; #1957, W5; linux-desktop.md §4 and
+// windows-desktop.md §9.2). Main owns
 // each native notification and the activation and document it belongs to. A
 // click may reach only that same committed document; sign-out, profile switch,
 // quit and lock close the notifications that could expose its message text.
+// Access, mute and privacy preferences are applied by the shared renderer
+// before notify; main preserves that text and adds the shared lock redaction.
+// On Windows, main.ts sets the app's AppUserModelID before any notification.
+// Windows controls delivery and lock-screen visibility (including Focus
+// Assist); the app can redact its text, but cannot override those OS settings.
 import { NOTIFICATION_EVENTS, type NotificationEvent } from '../shared/bridge-names.ts';
 import type { NotifyRequest } from '../../web/src/platform/desktop/bridge.ts';
 import type { DocumentGate } from './document.ts';
@@ -188,13 +194,19 @@ export class Notifications {
     if (entry === undefined) return;
     this.#entries.delete(notification);
     try {
+      // Check ownership before any window action: a late click from a removed
+      // or switched-away profile must not even focus the current profile.
+      const current = this.#deps.current();
+      if (current === null || current.activation !== entry.activation || !current.gate.shows(entry.document)) return;
       const window = this.#deps.window();
       if (window === null || window.isDestroyed()) return;
       if (window.isMinimized()) window.restore();
       window.show();
       window.focus();
-      const current = this.#deps.current();
-      if (current === null || current.activation !== entry.activation || !current.gate.shows(entry.document)) return;
+      // Focusing can run app callbacks; retain the delivery-time ownership
+      // check as well, in case the active document changed while showing it.
+      const ready = this.#deps.current();
+      if (ready === null || ready.activation !== entry.activation || !ready.gate.shows(entry.document)) return;
       window.webContents.send(NOTIFICATION_EVENTS, { type: 'click', tag: entry.tag });
     } finally {
       notification.close();
