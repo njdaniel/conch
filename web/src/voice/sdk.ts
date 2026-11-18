@@ -899,39 +899,49 @@ const isShare = (source: Track.Source) => source === Track.Source.ScreenShare ||
 // Reapply after an in-page ResizeObserver update; no private SDK fields, DOM
 // sizing tricks or audio/subscription changes. The publication cap is lifted
 // only for this popped-out watched picture, and restored on leave.
+// Both sizes are scaled as the SDK scales its own (pixelDensity), so a dense
+// screen is sent the layer it would be sent for an element of that size.
 const pipWindows = new WeakMap<HTMLVideoElement, PictureInPictureWindow>();
 
+// pixelDensity is the SDK's default (roomOptions sets none): 2 on a screen
+// denser than 2, else 1 (RemoteVideoTrack.getPixelDensity).
+const pixelDensity = () => (window.devicePixelRatio > 2 ? 2 : 1);
+
 export function sizePictureInPicture(video: HTMLVideoElement, track: RemoteTrack, changed: () => void): () => void {
-  let window: PictureInPictureWindow | null = document.pictureInPictureElement === video ? pipWindows.get(video) ?? null : null;
+  let pip: PictureInPictureWindow | null = document.pictureInPictureElement === video ? pipWindows.get(video) ?? null : null;
   let emitting = false;
+  const emit = (width: number, height: number) => {
+    const density = pixelDensity();
+    track.emit(TrackEvent.VideoDimensionsChanged, { width: width * density, height: height * density });
+  };
   const size = () => {
-    if (window === null || emitting) return;
+    if (pip === null || emitting) return;
     emitting = true;
-    track.emit(TrackEvent.VideoDimensionsChanged, { width: window.width, height: window.height });
+    emit(pip.width, pip.height);
     emitting = false;
   };
   const leave = () => {
-    window?.removeEventListener('resize', size);
-    window = null;
+    pip?.removeEventListener('resize', size);
+    pip = null;
     pipWindows.delete(video);
     changed();
-    track.emit(TrackEvent.VideoDimensionsChanged, { width: video.clientWidth, height: video.clientHeight });
+    emit(video.clientWidth, video.clientHeight);
   };
   const enter = (event: Event) => {
-    window?.removeEventListener('resize', size);
-    window = (event as PictureInPictureEvent).pictureInPictureWindow;
-    pipWindows.set(video, window);
-    window.addEventListener('resize', size);
+    pip?.removeEventListener('resize', size);
+    pip = (event as PictureInPictureEvent).pictureInPictureWindow;
+    pipWindows.set(video, pip);
+    pip.addEventListener('resize', size);
     changed();
     size();
   };
   video.addEventListener('enterpictureinpicture', enter);
   video.addEventListener('leavepictureinpicture', leave);
   track.on(TrackEvent.VideoDimensionsChanged, size);
-  window?.addEventListener('resize', size);
+  pip?.addEventListener('resize', size);
   size();
   return () => {
-    window?.removeEventListener('resize', size);
+    pip?.removeEventListener('resize', size);
     video.removeEventListener('enterpictureinpicture', enter);
     video.removeEventListener('leavepictureinpicture', leave);
     track.off(TrackEvent.VideoDimensionsChanged, size);

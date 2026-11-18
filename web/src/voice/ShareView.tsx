@@ -197,6 +197,15 @@ export function ShareView({
     );
   };
 
+  // Shown only where the browser offers the video PiP API.
+  const popLabel = pip.active ? 'Return to stage' : 'Pop out';
+  const popOut = pip.supported ? (
+    <button type="button" className={compact ? undefined : 'share-pip'} aria-pressed={pip.active} title={popLabel} onClick={() => { void pip.toggle(); }}>
+      <Glyph name="external" />
+      <span className={compact ? 'label' : 'vh'}>{popLabel}</span>
+    </button>
+  ) : null;
+
   return (
     <section aria-label="Shared screen" className="share-view">
       <p className="share-title">
@@ -208,6 +217,11 @@ export function ShareView({
         <video ref={video} aria-label={`${name}'s screen`} playsInline autoPlay muted />
         {tracks.video ? null : <p className="hint">Waiting for the picture</p>}
         {onFocus === undefined ? null : <button type="button" className="call-enlarge" aria-label={`Focus ${name}'s screen`} onClick={onFocus} />}
+        {/* Picture-in-picture (#1839): on the picture's corner, not in the
+            row below, which is full on a phone (the log keeps its floor,
+            #1028). The compact row scrolls rather than wraps, and the
+            thumbnail is too small to carry it, so there it is in the row. */}
+        {compact ? null : popOut}
       </div>
       <audio ref={sound} autoPlay aria-label={`${name}'s stream audio`} />
       <div className="share-controls">
@@ -231,7 +245,7 @@ export function ShareView({
             </button>
           </>
         )}
-        {pip.supported ? <button type="button" aria-pressed={pip.active} onClick={() => { void pip.toggle(); }}>{pip.active ? 'Return to stage' : 'Pop out'}</button> : null}
+        {compact ? popOut : null}
         <button type="button" onClick={() => { client.watchStream(principal, false); }}>Stop watching</button>
         {onToggleLayout === undefined ? null : <button type="button" className="call-layout" aria-pressed={compact} onClick={onToggleLayout}>{compact ? 'Expand' : 'Compact'}</button>}
         {blocked && hasSound ? <button type="button" className="primary" onClick={tapToPlay}>Tap to play sound</button> : null}

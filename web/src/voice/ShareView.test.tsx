@@ -361,6 +361,21 @@ describe('watching', () => {
       expect(current).toBeNull();
     });
 
+    // On the picture's corner, so the controls row keeps one line on a
+    // phone; in compact the thumbnail is too small, and the row (which
+    // scrolls, not wraps) carries it.
+    it('puts Pop out on the picture, or in the compact row', () => {
+      enable();
+      const t = setup();
+      const { rerender } = render(<ShareView client={t.client} state={t.client.snapshot()} principal={8} name="bea" audio={false} />);
+      const pop = () => screen.getByRole('button', { name: 'Pop out' });
+      expect(pop().closest('.share-frame')).not.toBeNull();
+      expect(pop().closest('.share-controls')).toBeNull();
+      rerender(<ShareView client={t.client} state={t.client.snapshot()} principal={8} name="bea" audio={false} compact onToggleLayout={vi.fn()} />);
+      expect(pop().closest('.share-controls')).not.toBeNull();
+      expect(pop().closest('.share-frame')).toBeNull();
+    });
+
     it('reports a refused request without a false active state', async () => {
       enable();
       await watching();

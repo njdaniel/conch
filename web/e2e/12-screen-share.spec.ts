@@ -264,6 +264,18 @@ test.describe('screen share with LiveKit', () => {
       const frames = (await inbound(b.page)).frames;
       await expect.poll(async () => (await inbound(b.page)).frames).toBeGreaterThan(frames);
       expect({ microphone: await micAsks(b.page), picker: await picks(b.page) }).toEqual(before);
+      // Closing the PiP window puts the picture back on the stage, still
+      // playing, in the same video element.
+      await view.getByRole('button', { name: 'Return to stage', exact: true }).click();
+      await expect.poll(() => b.page.evaluate(() => document.pictureInPictureElement === null)).toBe(true);
+      await expect(view.getByRole('button', { name: 'Pop out', pressed: false })).toBeVisible();
+      await expect(view.locator('video')).toHaveCount(1);
+      const back = (await inbound(b.page)).frames;
+      await expect.poll(async () => (await inbound(b.page)).frames).toBeGreaterThan(back);
+      // Popped out again, Stop watching closes it.
+      await view.getByRole('button', { name: 'Pop out', exact: true }).click();
+      await expect.poll(() => view.locator('video').evaluate((v) => document.pictureInPictureElement === v)).toBe(true);
+      expect({ microphone: await micAsks(b.page), picker: await picks(b.page) }).toEqual(before);
       await view.getByRole('button', { name: 'Stop watching', exact: true }).click();
       await expect.poll(() => b.page.evaluate(() => document.pictureInPictureElement === null)).toBe(true);
       await expect(view).toHaveCount(0);
