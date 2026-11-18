@@ -4869,6 +4869,65 @@ button.link {
   }
 }
 
+/* A taller window with a tall dock (issue #1815): over 560 px the desktop page
+   fills the window, but the conversation never gets less than it needs. That
+   is its header, the log's minimum and the composer whole, and while a share
+   or call is watched also the stage at its own height up to 300 px. When the
+   window leaves the middle row less than that, the row keeps it and the page
+   scrolls as a document, as the short-window rule above does, so the composer
+   stays on the dock rather than being clipped under it. Otherwise the row is
+   the rest of the window, as before. The channel list and the members panel
+   scroll inside themselves, so they do not set the row's height. Nor does
+   anything else tall in the centre column: Run detail and the first-run panel
+   take what the row leaves and scroll inside themselves, as they did in the
+   full-height layout, so a long run never pushes the dock off the window. Only
+   what the dock squeezes (the composer and the stage's 300 px) grows the page. */
+@media (min-height: 561px) {
+  .lobby:not(.phone) {
+    height: auto;
+    min-height: calc(100vh - var(--notice-h, 0px));
+    min-height: calc(100dvh - var(--notice-h, 0px));
+  }
+
+  .lobby:not(.phone) .channels,
+  .lobby:not(.phone) .panel {
+    contain: size;
+  }
+
+  .lobby:not(.phone) .conversation > .ag-run,
+  .lobby:not(.phone) .conversation > .first-run {
+    flex: 1 1 0;
+    min-height: 0;
+    overflow-y: auto;
+    contain: size;
+  }
+}
+
+/* While watching (not compact), the centre column is a flexed column in place
+   of the grid above, so that what it needs counts the stage at no more than
+   300 px. The stage starts at 300 px (or its own height, if less) and takes
+   the room first, up to its own height; the conversation never shrinks below
+   its header, the log's minimum and the composer, and takes what the stage
+   leaves. In a browser without max-content heights the grid above stays.
+   (The compact test is beside the :has(), not in it: :has() inside :has() is
+   not valid, and drops the whole rule.) */
+@supports (max-height: max-content) {
+  @media (min-height: 561px) {
+    .lobby:not(.phone) .centre:has(> .stage:not(:empty)):not(:has(> .stage > .call-view.compact, > .stage > .call-stage.compact)) {
+      display: flex;
+    }
+
+    .lobby:not(.phone) .centre:has(> .stage:not(:empty)):not(:has(> .stage > .call-view.compact, > .stage > .call-stage.compact)) > .stage {
+      flex: 1000 1 300px;
+      max-height: max-content;
+    }
+
+    .lobby:not(.phone) .centre:has(> .stage:not(:empty)):not(:has(> .stage > .call-view.compact, > .stage > .call-stage.compact)) > .conversation {
+      flex: 1 0 auto;
+    }
+  }
+}
+
 /* The talk key needs a keyboard; on a touch screen Hold to talk is the way,
    and Voice options still says what the key does. */
 @media (pointer: coarse) {
