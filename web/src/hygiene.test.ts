@@ -821,8 +821,9 @@ describe('the platform seam', () => {
     // Only the build-selected alias reaches the adapter; no source imports it.
     // A type-only import of the bridge contract is erased and is allowed (the
     // native-voice view types, issue #1375).
-    // The DOM-to-evdev table is pure data and imports nothing (issue #1382).
-    const typeOnlyBridge = /^import (type )?[^;]*from\s+'[^']*desktop\/(bridge|evdev)';?$/gm;
+    // The DOM-to-evdev table (#1382) and Windows binding translation (#777)
+    // are pure data; the latter imports only that same evdev table.
+    const typeOnlyBridge = /^import (type )?[^;]*from\s+'[^']*desktop\/(bridge|evdev|windows-keys)';?$/gm;
     const importing = Object.entries(sources)
       .filter(([path, code]) => !path.startsWith('./platform/desktop/') && /platform\/desktop|from\s+['"]\.\/desktop/.test(code.replace(typeOnlyBridge, '')))
       .map(([path]) => path);

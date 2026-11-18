@@ -37,7 +37,9 @@ import type {
   VoiceKeyDevicesResult,
   VoiceSaveResult,
   VoiceTalkBindingResult,
+  VoiceTalkBindingRequest,
 } from '../../../web/src/platform/desktop/bridge.ts';
+import { windowsKey } from '../../../web/src/platform/desktop/windows-keys.ts';
 import { devicePath, KEY_DEVICE_DISCLOSURE, listKeyDevices, type KeyDeviceDeps } from './keydevices.ts';
 import { isPageSaveKey, keyCodeText, saveValueFits, type OneShot } from './oneshot.ts';
 import type { CommandResult, HelperView, StartRequest, VoiceState } from './supervisor.ts';
@@ -115,6 +117,7 @@ export interface VoiceServiceDeps {
   readonly log: (line: string) => void;
   // Test seams for the key-device listing (issue #1381).
   readonly keyDevices?: KeyDeviceDeps;
+  readonly platform?: NodeJS.Platform;
   // Whether the installed files were replaced under this running app (issue
   // #1600): a new helper is then not started from them. Absent means never.
   readonly updated?: () => boolean;
@@ -532,9 +535,13 @@ export class VoiceService {
 
   // keyDevices lists the devices a talk key could be bound on, by name from
   // /dev/input/by-id, opening none (issue #1381). It needs no login and
-  // starts no helper. The ids it gives are good for the next saveTalkBinding
+  // starts no helper. On Windows it selects the device-free configuration UI.
+  // The ids it gives on Linux are good for the next saveTalkBinding
   // until the next listing.
   async keyDevices(): Promise<VoiceKeyDevicesResult> {
+    if ((this.deps.platform ?? process.platform) === 'win32') {
+      return { ok: true, platform: 'win32', devices: [], disclosure: [] };
+    }
     const begun = this.teardowns;
     try {
       const { devices } = await listKeyDevices({ uid: process.getuid?.(), ...this.deps.keyDevices });
@@ -551,8 +558,11 @@ export class VoiceService {
   // saveTalkBinding saves keys.device (the by-id path of a device of the
   // current listing) and then keys.talk (a key code 1..767) for the profile in
   // force, and says which of the two did not save. The id and the code are
-  // checked here again, whatever the caller.
-  async saveTalkBinding(request: { readonly deviceId: string; readonly code: number }): Promise<VoiceTalkBindingResult> {
+  // checked here again, whatever the caller. Windows uses only keys.talk,
+  // translated from an allowlisted physical code and fenced to the session.
+  async saveTalkBinding(request: VoiceTalkBindingRequest): Promise<VoiceTalkBindingResult> {
+    if ('windowsCode' in request) return this.saveWindowsBinding(request);
+    if ((this.deps.platform ?? process.platform) === 'win32') return { ok: false, error: 'invalid' };
     const name = typeof request.deviceId === 'string' ? this.listing.get(request.deviceId) : undefined;
     const code = keyCodeText(request.code);
     if (name === undefined || code === null) return { ok: false, error: 'invalid' };
@@ -569,6 +579,28 @@ export class VoiceService {
       if (!device.ok) return { ok: false, error: device.error, failed: 'device' };
       const talk = await this.deps.oneShot.save(identity.configDir, 'keys.talk', code);
       return talk.ok ? { ok: true } : { ok: false, error: talk.error, failed: 'talk' };
+    } finally {
+      this.bindingSave = false;
+    }
+  }
+
+  // Configuration never restarts or retargets voice. A running helper keeps
+  // its binding until an explicit leave/join. Fence every awaited step by the
+  // activation, lifecycle epoch and generation that configuration began in.
+  private async saveWindowsBinding(request: { readonly windowsCode: string; readonly generation: number }): Promise<VoiceTalkBindingResult> {
+    const binding = windowsKey(request.windowsCode);
+    if ((this.deps.platform ?? process.platform) !== 'win32' || binding === null || request.generation !== this.state().generation) return { ok: false, error: 'invalid' };
+    if (this.bindingSave) return { ok: false, error: 'busy' };
+    this.bindingSave = true;
+    const epoch = this.epoch;
+    const current = () => epoch === this.epoch && request.generation === this.state().generation;
+    try {
+      if (await this.oneShotRefused()) return { ok: false, error: UPDATE_PENDING };
+      const identity = await this.deps.identity();
+      if (identity === null || !identity.current() || !current()) return { ok: false, error: 'cancelled' };
+      const saved = await this.deps.oneShot.save(identity.configDir, 'keys.talk', binding.value);
+      if (!identity.current() || !current()) return { ok: false, error: 'cancelled' };
+      return saved.ok ? { ok: true } : { ok: false, error: saved.error, failed: 'talk' };
     } finally {
       this.bindingSave = false;
     }

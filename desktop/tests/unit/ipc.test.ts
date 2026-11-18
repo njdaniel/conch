@@ -646,6 +646,7 @@ describe('the voice family (issue #1374)', () => {
     await f.ipc.invoke(f.event(), 'voiceSaveDevice', [{ key: 'audio.talk_mode', value: 'open' }]);
     await f.ipc.invoke(f.event(), 'voiceKeyDevices', []);
     await f.ipc.invoke(f.event(), 'voiceSaveTalkBinding', [{ deviceId: 'abc-123', code: 275 }]);
+    await f.ipc.invoke(f.event(), 'voiceSaveTalkBinding', [{ windowsCode: 'Mouse5', generation: 7 }]);
     expect(f.calls).toEqual([
       ['voice.state', []],
       ['voice.join', [join]],
@@ -664,11 +665,16 @@ describe('the voice family (issue #1374)', () => {
       ['voice.saveDevice', [{ key: 'audio.talk_mode', value: 'open' }]],
       ['voice.keyDevices', []],
       ['voice.saveTalkBinding', [{ deviceId: 'abc-123', code: 275 }]],
+      ['voice.saveTalkBinding', [{ windowsCode: 'Mouse5', generation: 7 }]],
     ]);
     expect(f.ipc.refusals).toBe(0);
   });
 
   it.each([
+    ['voiceSaveTalkBinding', [{ windowsCode: 'KeyA', generation: -1 }]],
+    ['voiceSaveTalkBinding', [{ windowsCode: 'KeyA', generation: 1, text: 'private' }]],
+    ['voiceSaveTalkBinding', [{ windowsCode: 'private text', generation: 1 }]],
+    ['voiceSaveTalkBinding', [{ windowsCode: 'KeyA' }]],
     ['voiceState', [1]],
     ['voiceLeave', ['x']],
     ['voiceRetry', [{}]],

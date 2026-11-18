@@ -136,7 +136,13 @@ export function NativeVoicePanel({
   // Linux yet, so the silent-share notes are said.
   readonly soundRoute?: boolean;
 }) {
-  const { view, words, actions } = useNativeVoice(source, binding);
+  // A Windows config save is for the next helper. Persist its readable label
+  // through onBound, while this generation continues to show its old key.
+  const [previousBinding, setPreviousBinding] = useState<{ readonly generation: number; readonly label: string | undefined } | null>(null);
+  const { view, words, actions } = useNativeVoice(source, previousBinding === null ? binding : previousBinding.label);
+  useEffect(() => {
+    if (previousBinding !== null && previousBinding.generation !== view.generation) setPreviousBinding(null);
+  }, [previousBinding, view.generation]);
   // The share's sound (issue #1854): main's view of it and the two moments the
   // page owes it; undefined unless main's switch is on.
   const sound = useShareSound(source, companion, view);
@@ -347,7 +353,10 @@ export function NativeVoicePanel({
         <TalkKeySetup
           source={source}
           joined={session}
-          onSaved={(label) => { onBound?.(label); }}
+          onSaved={(label, nextJoinOnly) => {
+            if (nextJoinOnly === true) setPreviousBinding((old) => old ?? { generation: view.generation, label: binding });
+            onBound?.(label);
+          }}
           onClose={() => { setSetup(false); }}
         />
       ) : null}

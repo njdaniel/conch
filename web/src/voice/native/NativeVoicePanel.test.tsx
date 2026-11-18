@@ -672,3 +672,24 @@ describe('NativeVoicePanel', () => {
     });
   });
 });
+
+it('keeps the active Windows binding label until a new helper generation, even when browsing text', async () => {
+  const f = new Fake(running());
+  const source: NativeVoice = { ...f.nv,
+    keyDevices: () => Promise.resolve({ ok: true, platform: 'win32', devices: [], disclosure: [] }),
+    saveTalkBinding: () => Promise.resolve({ ok: true }),
+  };
+  const onBound = vi.fn();
+  const panel = (binding: string, channel = 'general') => <NativeVoicePanel source={source} binding={binding} onBound={onBound} signedIn channel={channel} viewer={1} people={people} voiceAllowed channels={channels} onUnauthorized={() => undefined} onOpen={() => undefined} />;
+  const ui = render(panel('Left Ctrl'));
+  fireEvent.click(screen.getByRole('button', { name: 'Talk key' }));
+  await screen.findByText('none chosen');
+  fireEvent.change(screen.getByRole('combobox', { name: 'Or pick one' }), { target: { value: 'Mouse5' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+  await waitFor(() => { expect(onBound).toHaveBeenCalledWith('Mouse 5'); });
+  ui.rerender(panel('Mouse 5', 'another-text-channel'));
+  expect(screen.getByText('mic on · hold Left Ctrl to talk')).toBeTruthy();
+  f.set({ ...running(), generation: 2 });
+  expect(await screen.findByText('mic on · hold Mouse 5 to talk')).toBeTruthy();
+  expect(f.calls).toEqual([]);
+});

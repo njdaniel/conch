@@ -15,6 +15,7 @@
 // (registerNotificationSupport), which Electron's ipcMain.on answers through
 // event.returnValue. notificationSupported() runs the same caller, rate and
 // shape checks and returns an Envelope too.
+import { windowsKey } from '../../web/src/platform/desktop/windows-keys.ts';
 import type { IpcMain } from 'electron';
 
 import type { BridgeReply, BridgeRequest, FeedRequest, IntegrationsView, InviteTarget, NotifyRequest, SettingsChange, SignInOutcome, VoiceDeviceKey } from '../../web/src/platform/desktop/bridge.ts';
@@ -426,9 +427,15 @@ function parseSaveDevice(args: readonly unknown[]): readonly unknown[] | null {
 
 // A talk binding is exactly an id from the last listing (an opaque string, no
 // longer than a UUID plus a margin; the service looks it up) and a key code.
+// Windows accepts only an allowlisted physical code and a voice generation.
 function parseTalkBinding(args: readonly unknown[]): readonly unknown[] | null {
   const [request] = args;
-  if (args.length !== 1 || !isRecord(request) || !hasExactKeys(request, ['deviceId', 'code'])) return null;
+  if (args.length !== 1 || !isRecord(request)) return null;
+  if (hasExactKeys(request, ['windowsCode', 'generation'])) {
+    const { windowsCode, generation } = request;
+    return typeof windowsCode === 'string' && windowsKey(windowsCode) !== null && typeof generation === 'number' && Number.isSafeInteger(generation) && generation >= 0 ? [{ windowsCode, generation }] : null;
+  }
+  if (!hasExactKeys(request, ['deviceId', 'code'])) return null;
   const { deviceId, code } = request;
   if (typeof deviceId !== 'string' || !/^[A-Za-z0-9-]{1,64}$/u.test(deviceId) || keyCodeText(code) === null) return null;
   return [{ deviceId, code }];
@@ -700,7 +707,7 @@ export const SPECS: Readonly<Record<InvokedFunction, Spec>> = {
     limit: 10,
     maxBytes: 256,
     parse: parseTalkBinding,
-    run: ({ voice }, [request]) => voice.saveTalkBinding(request as { deviceId: string; code: number }),
+    run: ({ voice }, [request]) => voice.saveTalkBinding(request as import('../../web/src/platform/desktop/bridge.ts').VoiceTalkBindingRequest),
     gesture: true,
   },
   // The update family (issue #1600). Restart is the person's act alone: it
