@@ -434,7 +434,8 @@ describe('watching', () => {
     expect(screen.queryByRole('button', { name: 'Tap to play sound' })).toBeNull();
   });
 
-  it('goes full screen on request', async () => {
+  it('goes full screen on the share frame in the phone layout', async () => {
+    windowOf(true);
     await watching();
     const view = await screen.findByRole('region', { name: 'Shared screen' });
     Object.defineProperty(document, 'fullscreenEnabled', { value: true, configurable: true });

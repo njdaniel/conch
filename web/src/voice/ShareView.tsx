@@ -8,6 +8,7 @@
 // no device.
 import { useEffect, useRef, useState } from 'react';
 import { Glyph } from '../Icons';
+import { fullscreenVideo } from './fullscreen';
 import type { VoiceClient, VoiceState } from './connection';
 import { askedText, nextShortfall, noShortfall, shareReadout, type ShortfallState } from './sdk';
 import type { SettledQuality, ShareDirection, ShareSample } from './share';
@@ -83,10 +84,6 @@ export function ShareReadout({ client, direction, principal, prefix = '', asked,
     </span>
   );
 }
-
-// A video element Safari on iPhone can put full screen: it has no
-// requestFullscreen for other elements.
-type AppleVideo = HTMLVideoElement & { readonly webkitEnterFullscreen?: () => void };
 
 // ShareView plays one watched publisher's screen and sound with independent
 // controls and an optional focus action (voice-multi-share.md §7.1, #1509).
@@ -171,10 +168,7 @@ export function ShareView({
   }, [hasSound]);
 
   const fullscreen = () => {
-    const el = box.current;
-    const v: AppleVideo | null = video.current;
-    if (el !== null && document.fullscreenEnabled) void el.requestFullscreen().catch(() => undefined);
-    else if (v?.webkitEnterFullscreen !== undefined) v.webkitEnterFullscreen();
+    void fullscreenVideo(box.current, video.current);
   };
 
   const tapToPlay = () => {
