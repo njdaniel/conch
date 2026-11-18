@@ -473,6 +473,11 @@ async fn drive_v3(
             let mut message = step["message"].clone();
             if message["kind"] == "start" {
                 message["server"] = json!(rig.conchd.url());
+                // F13: Windows owners pass the login in the environment.
+                #[cfg(windows)]
+                {
+                    message["credential"] = json!("env");
+                }
                 if version.is_none() {
                     version = Some(version_of(message["schema"].as_str().unwrap_or_default()));
                 }

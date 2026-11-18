@@ -5,15 +5,16 @@
 //! is the hardware run of #903, not here.
 //!
 //! Run only by the `voice-windows` job. No test needs LiveKit, a microphone or a keyboard:
-//! no session is started, so `conchd` is not asked for anything; the hello is written
-//! before the helper reads a start, and that is as far as these go. The nonces and the pipe
-//! names are obviously fake.
+//! `conchd` is not asked for anything. The channel tests stop at the hello, which is
+//! written before the helper reads a start; F13 also sends a stored start and checks its
+//! refusal before any login file is read. The nonces and the pipe names are obviously fake.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 // Windows only: the named pipes are the Windows ones. The Linux half is `managed_process.rs`.
 #![cfg(windows)]
 
-use std::io::Read;
+use std::io::{Read, Write};
+use std::os::windows::fs::OpenOptionsExt;
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
@@ -21,7 +22,7 @@ use std::time::{Duration, Instant};
 
 use conch_voice_api::{
     VOICE_CONTROL_HELLO_TIMEOUT_MS, VOICE_CONTROL_OWNER_LOSS_EXIT_MS, VoiceControlEvent,
-    parse_attached, parse_event,
+    VoiceControlPhase, VoiceControlReason, parse_attached, parse_event,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::windows::named_pipe::{ClientOptions, NamedPipeServer, ServerOptions};
@@ -168,6 +169,67 @@ async fn read_to_end(server: &mut NamedPipeServer, mut got: Vec<u8>) -> Vec<u8> 
             Ok(Ok(read)) if read > 0 => got.extend_from_slice(&chunk[..read]),
             _ => return got,
         }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_stored_start_fails_not_signed_in_without_reading_the_credentials_file() {
+    for locked in [false, true] {
+        let conchd = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        conchd.set_nonblocking(true).unwrap();
+        let address = format!("http://{}", conchd.local_addr().unwrap());
+        let name = pipe_name();
+        let mut owner = server(&name, true);
+        let mut helper = Helper::spawn(&name, Some(FAKE_NONCE));
+        connected(&owner).await;
+        let got = read_lines(&mut owner, 2).await;
+        let path = helper._config.path().join("credentials.json");
+        std::fs::write(
+            &path,
+            serde_json::json!({address.clone(): {"token": "conch_FAKE_stored_do_not_print"}})
+                .to_string(),
+        )
+        .unwrap();
+        // An exclusive handle makes even an attempted read fail with a diagnostic.
+        // The unlocked case would supply a login if the helper read the file.
+        let _lock = locked.then(|| {
+            std::fs::OpenOptions::new()
+                .read(true)
+                .share_mode(0)
+                .open(&path)
+                .unwrap()
+        });
+        let mut start: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../pkg/schema/testdata/voice-control/command-start.json"
+        ))
+        .unwrap();
+        start["server"] = serde_json::json!(address);
+        writeln!(helper.stdin.as_mut().unwrap(), "{start}").unwrap();
+        assert_eq!(helper.exit_within(PATIENCE).await, Some(1));
+        let all = read_to_end(&mut owner, got).await;
+        let text = String::from_utf8(all).unwrap();
+        let last = text.lines().last().unwrap();
+        match parse_event(last.as_bytes()).unwrap() {
+            VoiceControlEvent::State(state) => assert_eq!(
+                (state.phase, state.reason),
+                (
+                    VoiceControlPhase::Failed,
+                    Some(VoiceControlReason::NotSignedIn)
+                ),
+            ),
+            other => panic!("the final event is {other:?}"),
+        }
+        let stderr = helper.stderr();
+        assert!(!stderr.contains("credentials.json"), "{stderr}");
+        assert!(
+            !stderr.contains("conch_FAKE_stored_do_not_print"),
+            "{stderr}"
+        );
+        assert!(!text.contains("conch_FAKE_stored_do_not_print"), "{text}");
+        assert_eq!(
+            conchd.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
     }
 }
 

@@ -35,6 +35,9 @@
 //! process of the same user that creates another instance of the pipe's name
 //! (`CreateNamedPipeW`) can be the one the helper opens, and that is out of scope by design
 //! and named (§3.4 to §3.5).
+//! A Windows start with `credential: stored` fails with `not_signed_in` without reading
+//! `credentials.json`: until an ACL-based stored-login check exists, the owner must use
+//! `credential: env` (`docs/design/windows-desktop.md` §3.7, F13).
 //! Owns: the event writer and its numbering; the thread that reads standard input; the
 //! watch on the parent; and the watchdog that ends the process when it does not end by
 //! itself in time after its owner has gone or asked it to leave. The voice session itself
@@ -159,6 +162,19 @@ const IDENTITY_MISMATCH: &str = "the login found is not the account conch is sig
 const BAD_ENVIRONMENT: &str = "CONCH_TOKEN is set, and conch named the stored login";
 const NOT_A_PERSON: &str = "voice is for people: this login is not a person's";
 const VOICE_NOT_ALLOWED: &str = "this account may not use voice";
+
+/// Windows has no checked stored login (§3.7, F13). This decision performs no I/O; the
+/// platform is an argument so both platforms' rules can be checked on Linux.
+#[cfg(any(windows, test))]
+fn credential_refusal(
+    credential: VoiceControlCredential,
+    windows: bool,
+) -> Option<VoiceControlReason> {
+    match (windows, credential) {
+        (true, VoiceControlCredential::Stored) => Some(VoiceControlReason::NotSignedIn),
+        _ => None,
+    }
+}
 
 /// Which version of the protocol a session speaks: the one its start was written in, fixed
 /// for the session (`docs/design/tui-voice.md` §20.2).
@@ -2120,6 +2136,15 @@ impl Boot {
         // The login, from where the start says and nowhere else.
         let server = ServerAddress::parse(&start.server)
             .map_err(|error| Halt::Fail(Reason::InternalError, Error::Api(error)))?;
+        #[cfg(windows)]
+        if let Some(reason) = credential_refusal(start.credential, true) {
+            return Err(Halt::Fail(
+                reason,
+                Error::Api(ApiError::NotSignedIn {
+                    server: server.key().to_owned(),
+                }),
+            ));
+        }
         let token = match start.credential {
             VoiceControlCredential::Stored => {
                 if environment.token.is_some() {
@@ -2391,6 +2416,22 @@ mod unsupported_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_windows_refuses_stored_credentials_before_resolving_a_token() {
+        for (windows, credential, refusal) in [
+            (
+                true,
+                VoiceControlCredential::Stored,
+                Some(VoiceControlReason::NotSignedIn),
+            ),
+            (true, VoiceControlCredential::Env, None),
+            (false, VoiceControlCredential::Stored, None),
+            (false, VoiceControlCredential::Env, None),
+        ] {
+            assert_eq!(credential_refusal(credential, windows), refusal);
+        }
+    }
 
     #[test]
     fn the_watchdog_says_when_it_ends_a_room_leave_still_running() {
