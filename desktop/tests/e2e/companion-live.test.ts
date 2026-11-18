@@ -516,7 +516,11 @@ describe('the desktop screen companion with the real helper, conchd, LiveKit and
     // Watch: V shares with sound; A's companion watches it.
     await w.share();
     // (The REST snapshot lists one share; V's is read from LiveKit's list.)
-    await eventually(async () => ((await listed(idOf(v))) ?? []).some((s) => SCREEN_AUDIO.test(s)), 20_000, 'LiveKit to list V sharing with sound');
+    // The two tracks publish separately: wait for both (issue #1958).
+    await eventually(async () => {
+      const tracks = (await listed(idOf(v))) ?? [];
+      return tracks.some((s) => SCREEN_AUDIO.test(s)) && tracks.some((s) => SCREEN.test(s));
+    }, 20_000, 'LiveKit to list V sharing a screen with sound');
     expect(((await listed(idOf(v))) ?? []).some((s) => SCREEN.test(s)), 'V shares a screen').toBe(true);
     await a.watch(v.id);
     await eventually(
