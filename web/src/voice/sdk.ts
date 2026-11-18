@@ -898,7 +898,9 @@ const isShare = (source: Track.Source) => source === Track.Source.ScreenShare ||
 // the actual PiP dimensions through the same track event the SDK observes.
 // Reapply after an in-page ResizeObserver update; no private SDK fields, DOM
 // sizing tricks or audio/subscription changes. The publication cap is lifted
-// only for this popped-out watched picture, and restored on leave.
+// only for this popped-out watched picture, and restored on leave. A remote
+// camera's tile is sized the same way (playCamera, issue #1954); it has no
+// cap to lift.
 // Both sizes are scaled as the SDK scales its own (pixelDensity), so a dense
 // screen is sent the layer it would be sent for an element of that size.
 const pipWindows = new WeakMap<HTMLVideoElement, PictureInPictureWindow>();
@@ -1119,6 +1121,9 @@ class LiveKitAdapter implements Room {
   private companion = false;
   private readonly remoteCameras = new Map<number, RemoteTrack>();
   private readonly cameraViews = new Map<number, HTMLVideoElement>();
+  // Each played camera's PiP sizing (sizePictureInPicture, issue #1954), by
+  // principal, while its track plays into its tile.
+  private readonly cameraPipSizes = new Map<number, () => void>();
 
   async connect(url: string, token: string, roomName: string, publish: boolean, events: RoomEvents, audio?: AudioContext | null): Promise<void> {
     this.ensureOpen();
@@ -2348,13 +2353,14 @@ class LiveKitAdapter implements Room {
   }
 
   attachCamera(principal: number, el: HTMLVideoElement | null): void {
+    this.unsizeCamera(principal);
     const old = this.cameraViews.get(principal);
     const track = this.remoteCameras.get(principal);
     if (old !== undefined) track?.detach(old);
     if (el === null) this.cameraViews.delete(principal);
     else {
       this.cameraViews.set(principal, el);
-      track?.attach(el);
+      if (track !== undefined) this.playCamera(principal, track, el);
     }
   }
 
@@ -2362,19 +2368,39 @@ class LiveKitAdapter implements Room {
     const principal = principalOf(participant.identity);
     if (principal === null) return;
     const before = this.remoteCameras.get(principal);
-    if (before !== undefined && before !== track) before.detach();
+    if (before !== undefined && before !== track) {
+      this.unsizeCamera(principal);
+      before.detach();
+    }
     this.remoteCameras.set(principal, track);
     const el = this.cameraViews.get(principal);
-    if (el !== undefined) track.attach(el);
+    if (el !== undefined) this.playCamera(principal, track, el);
     this.events?.onCameraTracks([...this.remoteCameras.keys()]);
   }
 
   private cameraGone(track: RemoteTrack): void {
     track.detach();
     for (const [principal, t] of this.remoteCameras) {
-      if (t === track) this.remoteCameras.delete(principal);
+      if (t !== track) continue;
+      this.unsizeCamera(principal);
+      this.remoteCameras.delete(principal);
     }
     this.events?.onCameraTracks([...this.remoteCameras.keys()]);
+  }
+
+  // playCamera plays a camera into its tile, sized as a share's picture is
+  // while that tile's element is in PiP (issue #1954). A camera's layer is
+  // never capped (hold is a share's), so nothing is asked again on enter or
+  // leave: adaptive stream follows the size given.
+  private playCamera(principal: number, track: RemoteTrack, el: HTMLVideoElement): void {
+    track.attach(el);
+    this.unsizeCamera(principal);
+    this.cameraPipSizes.set(principal, sizePictureInPicture(el, track, () => undefined));
+  }
+
+  private unsizeCamera(principal: number): void {
+    this.cameraPipSizes.get(principal)?.();
+    this.cameraPipSizes.delete(principal);
   }
 
   async close(): Promise<void> {
@@ -2398,6 +2424,7 @@ class LiveKitAdapter implements Room {
       tracks.audio?.detach();
     }
     this.remoteShares.clear();
+    for (const principal of [...this.cameraPipSizes.keys()]) this.unsizeCamera(principal);
     for (const t of this.remoteCameras.values()) t.detach();
     this.remoteCameras.clear();
     this.cameraViews.clear();

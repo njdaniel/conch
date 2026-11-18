@@ -26,6 +26,12 @@
 // strip, and focus moves to it. Escape, or "Back to grid", returns, with focus
 // back on the tile it came from. An enlarged camera has Full screen, as a share
 // has; inside full screen Escape is the browser's, and leaves full screen only.
+// Someone else's camera has Pop out, and Return while it is out, where the
+// browser offers picture-in-picture (issue #1954; a share's is ShareView's):
+// on its picture's corner in the grid and the strip, and in the enlarged
+// tile's controls after Full screen, which stays the next stop from it. The person's own camera never has
+// it, nor does a compact strip's tile, whose picture is too small to carry
+// it. The camera ending, or the tile going, puts the picture back.
 // If the enlarged tile goes, the view returns to the grid, and focus that was
 // on the tile goes to what is left of it (a stream's still card), else to Hide
 // video, or without it to the first control left, or to the view itself.
@@ -52,6 +58,7 @@ import { usePhone } from '../phone';
 import type { VoiceClient, VoiceState } from './connection';
 import { gridOf } from './gridOf';
 import { fullscreenVideo } from './fullscreen';
+import { usePictureInPicture } from './pictureInPicture';
 import type { Occupant } from './presence';
 import { VoiceStatus } from './VoiceStatus';
 
@@ -102,6 +109,8 @@ export function callTiles(roster: readonly Occupant[], viewer: number, ownCamera
 // The words of a tile and its states.
 export const enlargeName = (t: Tile): string => (t.me ? 'Enlarge your video' : `Enlarge ${t.name}'s video`);
 export const enlargedWords = (t: Tile): string => (t.me ? 'Your video is enlarged' : `${t.name}'s video is enlarged`);
+export const popOutName = (t: Tile): string => `Pop out ${t.name}'s video`;
+export const returnName = (t: Tile): string => `Return ${t.name}'s video to the stage`;
 export const cameraOnWords = (name: string): string => `${name}'s camera is on`;
 export const cameraOffWords = (name: string): string => `${name}'s camera is off`;
 
@@ -270,13 +279,14 @@ export function CallView({ client, state, tiles, hidden, open, viewed = state.ch
     else move();
   }, [focusTo]);
 
-  // A tile that held focus and went (filtered out, its camera off, its person
-  // or stream gone), enlarged or not: focus goes to the fallback rather than
-  // being lost, unless it already moved somewhere else.
-  const focusedTile = useRef<string | null>(null);
+  // A tile or camera control that held focus and went (filtered out, its
+  // camera off, its person or stream gone), enlarged or not: focus goes to
+  // the fallback unless it already moved elsewhere. Stream controls that
+  // change while their tile stays have their own focus handling below.
+  const focusedTile = useRef<{ key: string; element: Element } | null>(null);
   useEffect(() => {
-    const key = focusedTile.current;
-    if (key === null || shown.some((t) => keyOf(t) === key)) return;
+    const focused = focusedTile.current;
+    if (focused === null || shown.some((t) => keyOf(t) === focused.key && (t.kind === 'share' || focused.element.isConnected))) return;
     focusedTile.current = null;
     const at = document.activeElement;
     if (open && (at === null || at === document.body)) fallback()?.focus();
@@ -453,7 +463,7 @@ export function CallView({ client, state, tiles, hidden, open, viewed = state.ch
               key={key}
               role={open ? undefined : 'none'}
               tabIndex={isMain ? -1 : undefined}
-              onFocus={() => { focusedTile.current = key; }}
+              onFocus={(e) => { focusedTile.current = { key, element: e.target }; }}
               ref={(el) => { if (el === null) items.current.delete(key); else items.current.set(key, el); }}
               className={[t.kind === 'share' ? 'call-share' : 'call-tile', main === null ? (focus ? 'in-strip' : '') : isMain ? 'main' : 'in-strip', t.kind !== 'share' && state.speaking.has(t.principal) ? 'speaking' : ''].filter((c) => c !== '').join(' ')}
             >
@@ -464,6 +474,7 @@ export function CallView({ client, state, tiles, hidden, open, viewed = state.ch
                   arrived={t.me || state.cameraTracks.has(t.principal)}
                   speaking={state.speaking.has(t.principal)}
                   main={isMain}
+                  compact={compact}
                   frameRef={isMain ? mainFrame : null}
                   onEnlarge={() => { enlarge(t); }}
                   buttonRef={(el) => { if (el === null) buttons.current.delete(key); else buttons.current.set(key, el); }}
@@ -483,13 +494,14 @@ export function CallView({ client, state, tiles, hidden, open, viewed = state.ch
 // local track, mirrored; anyone else's received only while it is claimed and
 // this view is open), or their initial and "Camera off". The same element
 // whether the tile is in the grid, enlarged or in the strip, so its video is
-// never started again by a change of place.
-function TileView({ client, tile, arrived, speaking, main, frameRef, onEnlarge, buttonRef }: {
+// never started again by a change of place, nor taken out of picture-in-picture.
+function TileView({ client, tile, arrived, speaking, main, compact, frameRef, onEnlarge, buttonRef }: {
   readonly client: VoiceClient;
   readonly tile: Tile;
   readonly arrived: boolean;
   readonly speaking: boolean;
   readonly main: boolean;
+  readonly compact: boolean;
   readonly frameRef: RefObject<HTMLElement | null> | null;
   readonly onEnlarge: () => void;
   readonly buttonRef: (el: HTMLButtonElement | null) => void;
@@ -498,6 +510,9 @@ function TileView({ client, tile, arrived, speaking, main, frameRef, onEnlarge, 
   const frame = useRef<HTMLElement>(null);
   const on = tile.camera;
   const { me, principal } = tile;
+  // Someone else's camera alone may pop out; its element is there only while
+  // the camera is on (usePictureInPicture closes PiP when it goes).
+  const pip = usePictureInPicture(video, on && !me);
   useEffect(() => {
     if (!on) return;
     if (me) {
@@ -538,6 +553,17 @@ function TileView({ client, tile, arrived, speaking, main, frameRef, onEnlarge, 
     void fullscreenVideo(frame.current, video.current);
   };
 
+  // Pop out is offered once the picture is there (or while it is out,
+  // through a reconnect that lost the track), so never over "Waiting for the
+  // picture"; a compact strip's tile has none.
+  const offered = on && !me && !compact && pip.supported && (arrived || pip.active);
+  const popOut = (className: string | undefined, text: string) => (offered ? (
+    <button type="button" className={className} aria-pressed={pip.active} title={pip.active ? returnName(tile) : popOutName(tile)} onClick={() => { void pip.toggle(); }}>
+      <Glyph name="external" />
+      <span className={text}>{pip.active ? returnName(tile) : popOutName(tile)}</span>
+    </button>
+  ) : null);
+
   const setFrame = (el: HTMLElement | null) => {
     frame.current = el;
     if (frameRef !== null) frameRef.current = el;
@@ -551,8 +577,12 @@ function TileView({ client, tile, arrived, speaking, main, frameRef, onEnlarge, 
         <figcaption className="call-name">{tile.name}</figcaption>
         {speaking ? <span className="call-speaking">speaking</span> : null}
         {on && !main ? <button ref={buttonRef} type="button" className="call-enlarge" aria-label={enlargeName(tile)} onClick={onEnlarge} /> : null}
+        {/* After the enlarge button, which covers the tile, so it is drawn
+            over it and comes after it by Tab. */}
+        {main ? null : popOut('call-pip', 'vh')}
       </figure>
-      {main ? <div className="call-tile-controls"><button ref={fullButton} type="button" onClick={fullscreen}><Glyph name="fullscreen" /><span className="label">Full screen</span></button></div> : null}
+      {main ? <div className="call-tile-controls"><button ref={fullButton} type="button" onClick={fullscreen}><Glyph name="fullscreen" /><span className="label">Full screen</span></button>{popOut(undefined, 'label')}</div> : null}
+      {pip.failed && on && !me ? <p role="status" className="hint">Picture-in-picture could not open. Try again when the picture is playing.</p> : null}
     </>
   );
 }

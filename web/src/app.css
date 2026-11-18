@@ -3334,8 +3334,13 @@ label {
 /* Pop out (#1839): over the picture's top right corner, above the focus
    button that covers a strip tile, so it takes no room in the controls row.
    Compact puts it in its row instead (ShareView). Full screen hides it with
-   the frame's other parts. */
-.share-frame .share-pip {
+   the frame's other parts. A remote camera's (#1954) is the same button on
+   its tile's top left corner, since "speaking" holds the top right; the
+   enlarge button it sits over covers the whole tile. An enlarged camera
+   tile has it in its controls row instead, and a compact one has none
+   (CallView). */
+.share-frame .share-pip,
+.call-frame .call-pip {
   position: absolute;
   inset: var(--s1) var(--s1) auto auto;
   z-index: 1;
@@ -3351,7 +3356,12 @@ label {
   color: #ffffff;
 }
 
-.share-frame .share-pip[aria-pressed='true'] {
+.call-frame .call-pip {
+  inset: var(--s1) auto auto var(--s1);
+}
+
+.share-frame .share-pip[aria-pressed='true'],
+.call-frame .call-pip[aria-pressed='true'] {
   background: var(--accent);
   color: var(--on-accent);
 }
