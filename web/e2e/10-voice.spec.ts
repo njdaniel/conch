@@ -98,11 +98,13 @@ test.describe('with LiveKit', () => {
   // that the person never sees: people.ts expectClean says what is checked.
   const expectClean = (p: Parameters<typeof expectCleanPage>[1]): Promise<void> => expectCleanPage(vw, p);
 
-  // The join token conchd last gave a page, from the session answers: the
-  // newest one in the world's secrets that LiveKit did not give the page
-  // itself (a refreshed token, issue #1948, is added after the join's).
-  const conchdJoinToken = (p: { readonly watch: { readonly livekitTokens: readonly string[] } }): string | undefined =>
-    vw.secrets.filter((x) => x.startsWith('eyJ') && !p.watch.livekitTokens.includes(x)).at(-1);
+  // The join token conchd last gave a page, read by watchPage from conchd's
+  // answers to that page and never from the world's secrets, which hold the
+  // tokens LiveKit gave the page too (issue #1948). Read after settled().
+  const conchdJoinToken = (p: { readonly watch: { readonly conchdTokens: readonly string[] } }): string | undefined => p.watch.conchdTokens.at(-1);
+  // The tokens LiveKit gave a page, without the signed parts that come with a
+  // token only the scan found (signal-tokens.ts), which end in a dot.
+  const livekitTokens = (p: { readonly watch: { readonly livekitTokens: readonly string[] } }): string[] => p.watch.livekitTokens.filter((t) => !t.endsWith('.'));
 
   test('a member joins, is heard only while transmitting, shows as talking, and is audited as a reported pair', async ({ browser }) => {
     const a = await person(browser, 'alice');
@@ -1866,21 +1868,28 @@ test('a push-to-talk whose reports are slow is audited as the reported pair and 
   // reconnects with (it joins the room as well as conchd's does) and conchd
   // never sees. watchPage reads it from the signalling frames the browser
   // received, as each arrives, and never from anything the page logs; from
-  // then on it is a secret like any join token. The page logging it fails
-  // expectClean, bare and in the exact shape of each of Chromium's lines, with
-  // the allowance or without (the browser's network source never logged it).
+  // then on it is a secret like any join token. It is told from the join token
+  // by comparing it with the token conchd's session answer gave the page, read
+  // from that answer itself, so a LiveKit that handed the join token back
+  // unchanged fails here. The page logging it fails expectClean, bare and in
+  // the exact shape of each of Chromium's lines, with the allowance or without
+  // (the browser's network source never logged it).
   test('a token LiveKit refreshes after the join is watched for, and the page logging it fails expectClean', async ({ browser }) => {
     const a = await person(browser, 'alice');
     try {
       const voice = voiceRegion(a.page);
       await voice.getByRole('button', { name: 'Join voice' }).click();
       await expect(voice).toContainText('Connected in', { timeout: 60_000 });
-      await expect.poll(() => a.watch.livekitTokens.length, { timeout: 30_000, message: 'a token LiveKit gave the page after the join' }).toBeGreaterThan(0);
+      await expect.poll(() => livekitTokens(a).length, { timeout: 30_000, message: 'a token LiveKit gave the page after the join' }).toBeGreaterThan(0);
       await a.watch.settled();
-      const refreshed = a.watch.livekitTokens.at(-1) ?? '';
+      const join = conchdJoinToken(a);
+      if (join === undefined) throw new Error('no join token was captured from the session answer');
+      const refreshed = livekitTokens(a).at(-1) ?? '';
       // Compared as booleans, never printed: a failure must not put a token in the report.
+      expect(join.startsWith('eyJ'), 'the join token conchd issued is a JWT').toBe(true);
       expect(refreshed.startsWith('eyJ'), 'the refreshed token is a JWT').toBe(true);
-      expect(refreshed === conchdJoinToken(a), 'the refreshed token is not the join token conchd issued').toBe(false);
+      expect(refreshed === join, 'the refreshed token is not the join token conchd issued').toBe(false);
+      expect(a.watch.conchdTokens.includes(refreshed), 'the refreshed token is none conchd issued').toBe(false);
       expect(vw.secrets.includes(refreshed), "the refreshed token is in the world's secrets").toBe(true);
       // Nothing the page did on its own shows it.
       await expectClean(a);

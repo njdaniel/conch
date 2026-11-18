@@ -371,9 +371,17 @@ export interface Watch {
   // path and error: one aborted or never answered, or one answered and its
   // body let go unread (Chromium's net::ERR_ABORTED after a 204).
   readonly failed: readonly string[];
+  // Every room token conchd gave this page, read from its answers and never
+  // from the world's secrets: the join token of each room in a voice session
+  // answer, and the token of each viewer companion answer, in the order the
+  // answers were read (so the last is the newest once settled() has
+  // resolved); each is in the world's secrets too.
+  readonly conchdTokens: readonly string[];
   // Every token LiveKit gave this page over its signalling sockets (a
   // refreshed one after each join, and one on a room move), in the order the
-  // frames arrived; each is in the world's secrets too.
+  // frames arrived; each is in the world's secrets too. A JWT-shaped string
+  // only signal-tokens.ts's scan found comes with its signed part (ending in
+  // a dot), which is no token.
   readonly livekitTokens: readonly string[];
   // Every Permissions-Policy violation the page was told of by a
   // ReportingObserver, as the feature and where in a script it was asked for.
@@ -413,6 +421,7 @@ export async function watchPage(page: Page, vw: VoiceWorld): Promise<Watch> {
   const failed: string[] = [];
   const policy: string[] = [];
   const reads: Promise<void>[] = [];
+  const conchdTokens: string[] = [];
   const livekitTokens: string[] = [];
   page.on('console', (m) => {
     lines.push(`${m.type()}: ${m.text()}`);
@@ -462,7 +471,10 @@ export async function watchPage(page: Page, vw: VoiceWorld): Promise<Watch> {
           const rooms = session ? (body as { rooms?: unknown }).rooms : [body];
           if (!Array.isArray(rooms)) return;
           for (const g of rooms as ({ token?: unknown; room?: unknown } | null)[]) {
-            if (typeof g?.token === 'string') vw.addSecret(g.token);
+            if (typeof g?.token === 'string') {
+              vw.addSecret(g.token);
+              conchdTokens.push(g.token);
+            }
             if (typeof g?.room === 'string') vw.addSecret(g.room);
           }
         },
@@ -490,6 +502,7 @@ export async function watchPage(page: Page, vw: VoiceWorld): Promise<Watch> {
     console: lines,
     browserLog,
     failed,
+    conchdTokens,
     livekitTokens,
     policy,
     settled: async () => {
