@@ -478,8 +478,12 @@ async fn a_server_that_cannot_be_reached_names_the_stored_logins_and_nothing_els
         .unwrap();
     assert_eq!(waiting["reason"], "server_unreachable");
     let detail = waiting["detail"].as_str().unwrap();
+    // Linux refuses the stub's closed port at once; macOS can leave the
+    // connect to time out instead. Both are an unreachable server, and the
+    // reason above is the same: only the detail's first words differ.
     assert!(
-        detail.starts_with("could not connect to conchd: ")
+        (detail.starts_with("could not connect to conchd: ")
+            || detail.starts_with("conchd did not answer within the timeout"))
             && detail.ends_with(&format!(" ({NOTE})")),
         "{detail}"
     );
