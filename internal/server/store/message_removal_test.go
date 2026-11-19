@@ -26,7 +26,7 @@ func (f *audienceFixture) countRows(t *testing.T, query string, args ...any) int
 }
 
 func (f *audienceFixture) removeAs(who Principal, msg int64) (MessageRemoval, error) {
-	return f.s.RemoveMessage(context.Background(), f.ch.ID, rdr(who), msg, principalActor(who.ID), time.Now())
+	return f.s.RemoveMessage(context.Background(), f.ch.ID, rdr(who), msg, principalActor(who.ID), 0, time.Now())
 }
 
 func TestRemoveMessageRules(t *testing.T) {
@@ -70,7 +70,7 @@ func TestRemoveMessageRules(t *testing.T) {
 		t.Errorf("%d removal rows, want only the successful one", n)
 	}
 	// A reader that is not scoped is no one's moderator.
-	if _, err := f.s.RemoveMessage(ctx, f.ch.ID, Reader{PrincipalID: f.erin.ID}, net1, "x", time.Now()); !errors.Is(err, ErrNotChannelMember) {
+	if _, err := f.s.RemoveMessage(ctx, f.ch.ID, Reader{PrincipalID: f.erin.ID}, net1, "x", 0, time.Now()); !errors.Is(err, ErrNotChannelMember) {
 		t.Errorf("an unscoped reader: %v", err)
 	}
 }

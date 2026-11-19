@@ -2491,7 +2491,8 @@ func (s *Store) OwnMessageRevisions(ctx context.Context, channelID int64, reader
 
 // AuditMessageRemoved is written in the removal's transaction when a message
 // goes from visible to removed: subject "message:<id>", detail "channel=<id>".
-// Never any text, payload, reason or recipient.
+// For an approved admin removal, detail also names the approval and the
+// person whose decision resolved it. Never any text, payload, reason or recipient.
 const AuditMessageRemoved = "message_removed"
 
 // MessageRemoval is RemoveMessage's answer.
@@ -2558,24 +2559,27 @@ func visibleMessageTx(ctx context.Context, tx execer, channelID int64, reader Re
 //  3. the message is in the channel and reader may see it by the one message
 //     rule and their history bound (ErrMessageNotFound for every other case:
 //     unknown, another channel, a whisper or net message they are not on,
-//     before their bound). Owners and operators get no exemption;
+//     before their bound). Owners and operators get no exemption. A
+//     dispatched agent also needs the manifest grant to read the channel;
 //  4. already removed: nothing is written (Changed false);
-//  5. the removal row and the message_removed audit row.
+//  5. the removal row and the message_removed audit row, including approval
+//     attribution when approvalID is nonzero.
 //
 // An archived channel allows it (Q1, reduce-only). The original body and
 // payload are never read into the answer or the audit row.
-func (s *Store) RemoveMessage(ctx context.Context, channelID int64, reader Reader, messageID int64, actor string, now time.Time) (MessageRemoval, error) {
-	return s.removeMessage(ctx, channelID, reader, messageID, actor, now, false)
+func (s *Store) RemoveMessage(ctx context.Context, channelID int64, reader Reader, messageID int64, actor string, approvalID int64, now time.Time) (MessageRemoval, error) {
+	return s.removeMessage(ctx, channelID, reader, messageID, actor, approvalID, now, false)
 }
 
 // RemoveOwnMessage has no time limit. People (including active guests) may
 // remove only their own visible messages, excluding reserved approval/admin
 // cards. Membership, identity and visibility are rechecked under the lock.
+// It is never approval-gated, so it carries no approval attribution.
 func (s *Store) RemoveOwnMessage(ctx context.Context, channelID int64, reader Reader, messageID int64, actor string, now time.Time) (MessageRemoval, error) {
-	return s.removeMessage(ctx, channelID, reader, messageID, actor, now, true)
+	return s.removeMessage(ctx, channelID, reader, messageID, actor, 0, now, true)
 }
 
-func (s *Store) removeMessage(ctx context.Context, channelID int64, reader Reader, messageID int64, actor string, now time.Time, byAuthor bool) (MessageRemoval, error) {
+func (s *Store) removeMessage(ctx context.Context, channelID int64, reader Reader, messageID int64, actor string, approvalID int64, now time.Time, byAuthor bool) (MessageRemoval, error) {
 	var out MessageRemoval
 	err := s.withImmediateTx(ctx, func(tx execer) error {
 		if reader.PrincipalID > 0 {
@@ -2591,6 +2595,21 @@ func (s *Store) removeMessage(ctx context.Context, channelID int64, reader Reade
 		} else if _, err := memberActorStandingTx(ctx, tx, channelID, reader.PrincipalID); err != nil {
 			return err
 		}
+		if adminDispatched(ctx) && reader.PrincipalID > 0 {
+			human, err := actorIsHumanTx(ctx, tx, principalActor(reader.PrincipalID))
+			if err != nil {
+				return err
+			}
+			if !human {
+				m, err := agentManifestTx(ctx, tx, reader.PrincipalID)
+				if err != nil {
+					return err
+				}
+				if !m.Allows(schema.CapabilityMessagesRead) || !m.AllowsChannel(channelID, schema.ChannelPermissionRead) {
+					return ErrMessageNotFound
+				}
+			}
+		}
 		msg, err := visibleMessageTx(ctx, tx, channelID, reader, messageID)
 		if err != nil {
 			return err
@@ -2602,6 +2621,23 @@ func (s *Store) removeMessage(ctx context.Context, channelID int64, reader Reade
 			out = MessageRemoval{Message: msg}
 			return nil
 		}
+		detail := fmt.Sprintf("channel=%d", channelID)
+		if byAuthor {
+			detail += " removed_by=author"
+		}
+		if approvalID != 0 {
+			resolution, err := resolutionByApprovalID(ctx, tx, approvalID)
+			if err != nil {
+				return err
+			}
+			// Decisions are stored in cast order. The last cast brought the
+			// winning option to quorum and resolved the approval.
+			if resolution.Outcome != schema.OutcomeApproved || len(resolution.Decisions) == 0 {
+				return fmt.Errorf("store: removal approval %d has no approving decision", approvalID)
+			}
+			decider := resolution.Decisions[len(resolution.Decisions)-1].PrincipalID
+			detail += fmt.Sprintf(" approval=%d approved_by=%s", approvalID, principalActor(decider))
+		}
 		var by any
 		if reader.PrincipalID > 0 {
 			by = reader.PrincipalID
@@ -2612,12 +2648,7 @@ func (s *Store) removeMessage(ctx context.Context, channelID int64, reader Reade
 			messageID, channelID, by, at.UnixMilli(), byAuthor); err != nil {
 			return fmt.Errorf("store: remove message %d: %w", messageID, err)
 		}
-		detail := fmt.Sprintf("channel=%d", channelID)
-		if byAuthor {
-			detail += " removed_by=author"
-		}
-		if err := appendAuditEventTx(ctx, tx, actor, AuditMessageRemoved, messageSubject(messageID),
-			detail, at); err != nil {
+		if err := appendAuditEventTx(ctx, tx, actor, AuditMessageRemoved, messageSubject(messageID), detail, at); err != nil {
 			return err
 		}
 		var recipients []int64

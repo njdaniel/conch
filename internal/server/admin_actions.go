@@ -156,6 +156,7 @@ var adminCatalog = []adminCatalogEntry{
 	// it holds manage_channels, and the route's write-rate bound (#1667)
 	// applies to the agent as to anyone.
 	{action: schema.AdminActionSetChannelTopic, pattern: "PUT /v1/channels/{id}/topic", permission: pChannels, gate: direct, target: tChannel, build: buildSetChannelTopic, changesTarget: true},
+	{action: schema.AdminActionRemoveMessage, pattern: "DELETE /v2/channels/{channel}/messages/{message_id}", permission: pChannels, gate: approval, target: tChannel, build: buildRemoveMessage, changesTarget: true},
 }
 
 // adminCatalogByAction indexes adminCatalog.
@@ -189,8 +190,9 @@ func entryOf(ctx context.Context) adminCatalogEntry {
 type adminBuildingKey struct{}
 
 // fillPath fills the pattern's path parameters: {channel} with the target
-// channel's name, {principal_id} with member, any other with the target's id.
-func fillPath(pattern string, target *schema.AdminTargetV1, member int64) (method, path string) {
+// channel's name, {principal_id} or {message_id} with the secondary id,
+// and any other with the target's id.
+func fillPath(pattern string, target *schema.AdminTargetV1, secondaryID int64) (method, path string) {
 	method, path, _ = strings.Cut(pattern, " ")
 	for {
 		i := strings.Index(path, "{")
@@ -203,8 +205,8 @@ func fillPath(pattern string, target *schema.AdminTargetV1, member int64) (metho
 		switch {
 		case name == "channel" && target != nil:
 			val = url.PathEscape(target.Name)
-		case name == "principal_id":
-			val = strconv.FormatInt(member, 10)
+		case name == "principal_id" || name == "message_id":
+			val = strconv.FormatInt(secondaryID, 10)
 		case target != nil:
 			val = strconv.FormatInt(target.ID, 10)
 		}
@@ -505,6 +507,20 @@ func buildMemberPath(rights bool) adminBuilder {
 		stored, _ := json.Marshal(p)
 		return adminRequest{method: method, path: path, body: body}, adminTouches{channels: targetChannels(in), member: p.PrincipalID, params: stored}, nil
 	}
+}
+
+// buildRemoveMessage binds the channel and the message ID with no route body.
+func buildRemoveMessage(ctx context.Context, _ *Server, in adminBuildInput) (adminRequest, adminTouches, *adminRefusal) {
+	e := entryOf(ctx)
+	var p schema.RemoveMessageParamsV1
+	dec := json.NewDecoder(bytes.NewReader(in.params))
+	dec.DisallowUnknownFields()
+	if dec.Decode(&p) != nil || p.MessageID <= 0 {
+		return adminRequest{}, adminTouches{}, badParams(e.action, "params must contain only a positive message_id")
+	}
+	method, path := fillPath(e.pattern, in.target, p.MessageID)
+	stored, _ := json.Marshal(p)
+	return adminRequest{method: method, path: path}, adminTouches{channels: touchedIf(e, in), params: stored}, nil
 }
 
 // buildMemberLink clamps the link (§3.3): a member link, at most five uses

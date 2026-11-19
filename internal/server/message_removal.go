@@ -10,8 +10,9 @@ import (
 
 // Message removal (issue #852, docs/design/moderation.md §7). DELETE
 // /v2/channels/{channel}/messages/{message_id} is in the accessChannelManager
-// class: the guard admits an owner, an operator holding manage_channels, or a
-// manager of the channel who is a member. The class is not a content right.
+// class: the guard admits an owner, an operator holding manage_channels, a
+// manager of the channel who is a member, or a dispatched administrator with
+// manage_channels. The class is not a content right.
 // This handler then applies the ordinary content rules, in this order:
 //
 //  1. the channel gate (moderationChannel): an unknown channel and a caller
@@ -25,7 +26,7 @@ import (
 //     are not on, one before their bound) are the one 404 message_not_found,
 //     owners and operators included. Then the removal row and the
 //     message_removed audit row, atomically. A message already removed is
-//     204 and writes nothing.
+//     204 (409 for a dispatched admin action) and writes nothing.
 //
 // The body, payload, author and recipient list are in no answer, frame or
 // audit row. An archived channel allows it (Q1). A message carrying an
@@ -41,18 +42,28 @@ func (s *Server) handleRemoveMessage(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	// The channel name was looked up again after the route guard. A rename
+	// between the two lookups must not move an approved action to another ID.
+	if dispatchedChannelChanged(r, channel.ID) {
+		writeTargetChanged(w)
+		return
+	}
 	messageID, serr := parseEditMessageID(r.PathValue("message_id"))
 	if serr != nil {
 		writeReactionError(w, serr)
 		return
 	}
-	removal, err := s.store.RemoveMessage(ctx, channel.ID, readerFor(r, apiV2), messageID, auditActor(ctx), s.now())
+	dispatch, dispatched := dispatchedHere(r)
+	removal, err := s.store.RemoveMessage(ctx, channel.ID, readerFor(r, apiV2), messageID, auditActor(ctx), dispatch.approvalID, s.now())
 	if serr := reactionStoreError(ctx, err); serr != nil {
 		writeReactionError(w, serr)
 		return
 	}
 	if removal.Changed {
 		s.broadcastMessageRemoved(ctx, removal)
+	} else if dispatched {
+		writeError(w, http.StatusConflict, schema.ErrorCodeMessageAlreadyRemoved, "the message has already been removed")
+		return
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
