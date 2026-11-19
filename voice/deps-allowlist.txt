@@ -54,5 +54,6 @@ wasapi
 # 2026-11-11.
 winit
 # The helper's uid on Unix, for event socket ownership checks. Already in Cargo.lock,
-# pinned =1.1.5 with only the process feature. Nick's sign-off on #1738, 2026-11-19.
+# pinned =1.1.6 with only the process feature. Nick's sign-off on #1738, 2026-11-19;
+# 1.1.6 rather than the locked 1.1.5 for RUSTSEC-2026-0486 (xattr functions; not used here).
 rustix

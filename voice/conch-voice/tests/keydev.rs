@@ -40,7 +40,8 @@ fn key(key: Key, action: KeyAction) -> Input {
 
 const READY: Input = Input::KeyDevice(DeviceState::Ready);
 
-/// A device that has not been read since the watcher started.
+/// A device that has not been read since the watcher started. Only the Linux tests use it.
+#[cfg(target_os = "linux")]
 fn missing(problem: Problem) -> Input {
     Input::KeyDevice(DeviceState::Missing(problem))
 }
