@@ -106,6 +106,7 @@ describe('Share is offered only in the joined channel while the helper is connec
   });
 
   it.each([
+    ['capture-unsupported' as const, 'Screen sharing is not available in this desktop app yet.'],
     ['no-portal' as const, 'This desktop has no screen-cast portal'],
     ['not-wayland' as const, shareUnavailableWords['not-wayland']],
   ])('says so, from the grant, on a desktop that cannot share (%s; Q-D4-4), and is not locked off', (companionShareUnavailable, words) => {

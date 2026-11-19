@@ -112,8 +112,7 @@ export interface ProfilesView {
   readonly recovery: boolean;
   readonly notice: ProfileNotice | null;
   readonly compat: CompatView;
-  // The platform, for the storage text (DPAPI does not protect from other apps
-  // of the same user).
+  // The main process's OS, for platform-specific copy such as the limits of DPAPI.
   readonly platform: string;
 }
 
@@ -632,10 +631,11 @@ export interface DesktopSettingsView {
   readonly trayConfirmed: boolean;
   // Whether this build may set launch at login (an installed build may).
   readonly launchAvailable: boolean;
-  // Why not, when it is not: an unpackaged run, or an app that sits where
-  // others could change it.
-  readonly launchUnavailable?: 'unpackaged' | 'unsafe-location';
+  // Why this install or platform cannot set launch at login.
+  readonly launchUnavailable?: LaunchUnavailable;
 }
+
+export type LaunchUnavailable = 'unpackaged' | 'unsafe-location' | 'launch-unsupported';
 
 export interface SettingsChange {
   readonly closeToTray?: boolean;
@@ -646,7 +646,7 @@ export interface SettingsChange {
 
 export type SettingsResult =
   | { readonly ok: true; readonly view: DesktopSettingsView }
-  | { readonly ok: false; readonly reason: 'unpackaged' | 'unsafe-location' | 'foreign-file' | 'no-tray' | 'failed' };
+  | { readonly ok: false; readonly reason: LaunchUnavailable | 'foreign-file' | 'no-tray' | 'failed' };
 
 // What works on this desktop (issue #1593, D5-07 of #773; UX-23). One row per
 // integration, read from the state main already holds: nothing is probed to
@@ -666,16 +666,14 @@ export type IntegrationWhy =
   | 'notifications-unsupported'
   | 'lock-unobserved'
   | 'lock-checking'
-  | 'no-portal'
-  | 'not-wayland'
+  | CompanionShareUnavailable
   | 'portal-unasked'
   | 'secret-store-missing'
   | 'insecure-backend'
   | 'unknown-backend'
   | 'unsafe-root'
   | 'secret-store-silent'
-  | 'unpackaged'
-  | 'unsafe-location'
+  | LaunchUnavailable
   | 'share-silent'
   | 'not-installed'
   | 'untrusted'
@@ -739,9 +737,9 @@ export type CompanionGrantError = 'not-in-voice' | 'not-yet' | 'elsewhere' | 'en
 // Q-D4-4 on #1578): the grant still serves watching others' shares. Share
 // goes only through the screen-cast portal's own picker. no-portal: the
 // portal does not answer for ScreenCast; not-wayland: the session is not
-// Wayland, where Chromium would not use the portal. The page says "share
-// unavailable: no screen-cast portal" for either, and main opens no capture.
-export type CompanionShareUnavailable = 'no-portal' | 'not-wayland';
+// Wayland, where Chromium would not use the portal; capture-unsupported:
+// this platform has no implemented capture path.
+export type CompanionShareUnavailable = 'no-portal' | 'not-wayland' | 'capture-unsupported';
 
 export type CompanionGrantResult =
   | { readonly ok: true; readonly grant: CompanionGrant; readonly shareUnavailable?: CompanionShareUnavailable }
@@ -765,8 +763,8 @@ export interface CompanionEvent {
 export interface DesktopCompanionBridge {
   // The companion's grant for the voice destination. Only right after the
   // person's own click or key.
-  // The result's shareUnavailable ('no-portal' | 'not-wayland') is how the
-  // page learns, before it picks, that this desktop has no screen-cast portal.
+  // The result's shareUnavailable is how the page learns, before it picks,
+  // that this desktop cannot start a screen share.
   companionGrant(request: { readonly channel: ChannelName }): Promise<CompanionGrantResult>;
   // Arms the share allowance (issue #1580, D4-03): the page calls this
   // synchronously at the very start of the Share click, before anything else

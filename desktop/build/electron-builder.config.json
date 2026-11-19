@@ -5,6 +5,7 @@
   "directories": { "output": "dist" },
   "files": ["package.json", "out/main/**", "out/preload/**", "out/ui/**", "out/ui-manifest.json", "out/compat.json", "build/icons/tray/*.png"],
   "asar": true,
+  "afterPack": "./build/after-pack.mjs",
   "npmRebuild": false,
   "nodeGypRebuild": false,
   "buildDependenciesFromSource": false,
@@ -24,6 +25,7 @@
     "category": "Network"
   },
   "win": {
+    "files": ["build/icons/48.png"],
     "target": [{ "target": "nsis", "arch": ["x64"] }],
     "extraResources": [{ "from": "out/win-resources", "to": ".", "filter": ["conch-voice.exe", "version"] }]
   },

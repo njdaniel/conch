@@ -694,6 +694,8 @@ export async function start(): Promise<void> {
     createTray: (icon) => new Tray(icon),
     buildMenu: (items) => Menu.buildFromTemplate([...items]),
     iconDir: join(appPath, 'build', 'icons', 'tray'),
+    // The filled app icon is legible on both light and dark Windows taskbars.
+    ...(process.platform === 'win32' ? { idleIcon: join(appPath, 'build', 'icons', '48.png') } : {}),
     voice,
     sharing: () => companion.liveOrigin() !== null,
     endCompanion: () => companion.end('lock'),

@@ -152,6 +152,7 @@ type Refusal =
   | 'not display capture'
   | 'no share allowance'
   | 'no grant'
+  | 'share unavailable: screen capture is not supported on this platform'
   | 'share unavailable: no screen-cast portal'
   | 'a pick is already open'
   | 'cancelled or denied'
@@ -200,7 +201,9 @@ export class DisplayCapture {
   // the portal.
   #ready(): Refusal | null {
     if (!this.#deps.live()) return 'no grant';
-    if (this.#deps.available() !== 'available') return 'share unavailable: no screen-cast portal';
+    const available = this.#deps.available();
+    if (available === 'capture-unsupported') return 'share unavailable: screen capture is not supported on this platform';
+    if (available !== 'available') return 'share unavailable: no screen-cast portal';
     return null;
   }
 

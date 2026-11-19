@@ -30,11 +30,12 @@ function tree(): { readonly top: string; readonly exec: string } {
 }
 const EXEC = '/opt/Conch/conch-desktop';
 
-function make(config: string, over: { packaged?: boolean; execPath?: string; above?: string } = {}) {
+function make(config: string, over: { packaged?: boolean; platform?: NodeJS.Platform; execPath?: string; above?: string } = {}) {
   const logs: string[] = [];
   const target = over.execPath === undefined ? tree() : null;
   const auto = new Autostart({
     packaged: over.packaged ?? true,
+    platform: over.platform ?? 'linux',
     execPath: over.execPath ?? target?.exec ?? EXEC,
     ...(over.execPath === undefined ? { trustedAbove: target?.top } : over.above === undefined ? {} : { trustedAbove: over.above }),
     env: { XDG_CONFIG_HOME: config },
@@ -97,6 +98,17 @@ describe('turning it on and off', () => {
     expect(existsSync(file)).toBe(false);
     // Off again is not an error.
     expect(await auto.disable()).toEqual({ ok: true });
+  });
+
+  it('reports Windows as unsupported and leaves XDG entries alone', async () => {
+    const config = tmp();
+    const { auto: linux, file } = make(config);
+    expect(await linux.enable()).toEqual({ ok: true });
+    const { auto } = make(config, { platform: 'win32' });
+    expect(await auto.availability()).toBe('launch-unsupported');
+    expect(await auto.enable()).toEqual({ ok: false, reason: 'launch-unsupported' });
+    expect(await auto.disable()).toEqual({ ok: true });
+    expect(existsSync(file)).toBe(true);
   });
 
   it('refuses an unpackaged build, with a reason, and writes nothing', async () => {

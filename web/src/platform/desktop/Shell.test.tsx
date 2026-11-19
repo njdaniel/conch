@@ -1,6 +1,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { BridgeReply, CompatView, ConchDesktopBridge, DesktopInviteBridge, DesktopSettingsBridge, DesktopSettingsView, IntegrationRow, InviteCheck, ProfileAddResult, ProfilesView, ProfileView, SettingsResult } from './bridge';
+import { NotificationSettings } from '../../NotificationSettings';
 import { credentials } from './credentials';
 import { DesktopShell } from './Shell';
 import { SWAP_GUARD_MS } from './ui/InviteLink';
@@ -272,8 +273,8 @@ describe('the desktop app settings (issue #1587)', () => {
   const active = view({ profiles: [profile(ID_A, 'chat.example.org', 'ada', true)], active: ID_A });
   const settings = (over: Partial<DesktopSettingsView> = {}): DesktopSettingsView => ({ closeToTray: false, launchAtLogin: false, trayWorking: false, trayDetected: false, trayConfirmed: false, launchAvailable: true, ...over });
 
-  function installSettings(first: DesktopSettingsView, settingsSet: DesktopSettingsBridge['settingsSet']): void {
-    install({ profiles: () => Promise.resolve(active) });
+  function installSettings(first: DesktopSettingsView, settingsSet: DesktopSettingsBridge['settingsSet'], platform = 'linux'): void {
+    install({ profiles: () => Promise.resolve({ ...active, platform }) });
     const base = window.conchDesktop;
     Object.defineProperty(window, 'conchDesktop', { value: { ...base, settings: () => Promise.resolve(first), settingsSet }, configurable: true, writable: true });
   }
@@ -359,6 +360,36 @@ describe('the desktop app settings (issue #1587)', () => {
     await open();
     expect(screen.getByRole('checkbox', { name: 'Open Conch when I log in' })).toHaveProperty('disabled', true);
     expect(screen.getByText(/Only an installed copy of Conch/)).toBeDefined();
+  });
+
+  it('explains what Windows supports in settings and the integration list', async () => {
+    installSettings(settings({ launchAvailable: false, launchUnavailable: 'launch-unsupported' }), () => Promise.reject(new Error('unexpected')), 'win32');
+    const rows: readonly IntegrationRow[] = [
+      { id: 'launch', state: 'unavailable', why: 'launch-unsupported' },
+      { id: 'capture', state: 'unavailable', why: 'capture-unsupported' },
+      { id: 'storage', state: 'working' },
+    ];
+    Object.defineProperty(window, 'conchDesktop', { value: { ...window.conchDesktop, integrations: () => Promise.resolve({ rows }) }, configurable: true, writable: true });
+    await open();
+    expect(screen.getByRole('checkbox', { name: 'Open Conch when I log in' })).toHaveProperty('disabled', true);
+    expect(screen.getByText('Open at login is not available on Windows yet.')).toBeDefined();
+    const list = await screen.findByRole('list');
+    expect(list.textContent).toContain('Open at login is not available on Windows yet.');
+    expect(list.textContent).toContain('Screen sharing is not available in this desktop app yet.');
+    expect(list.textContent).toContain('sealed by Windows (DPAPI)');
+  });
+
+  it('describes Windows notifications in terms of the app window', async () => {
+    install({ profiles: () => Promise.resolve({ ...active, platform: 'win32' }) });
+    const noop = () => undefined;
+    render(
+      <DesktopShell>
+        <NotificationSettings policy="all" native permission="granted" supported onPolicy={noop} onEnable={noop}
+          push={{ state: { kind: 'unsupported' }, failure: null, onEnable: noop, onDisable: noop }} />
+      </DesktopShell>,
+    );
+    expect(await screen.findByText(/when the Conch window is in the background/)).toBeDefined();
+    expect(screen.getByText('Notifications when Conch is closed are not available in the desktop app.')).toBeDefined();
   });
 
   describe('what works on this desktop (issue #1593)', () => {

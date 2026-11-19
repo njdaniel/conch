@@ -622,7 +622,6 @@ describe('Portal', () => {
   });
 
   const unavailable: { name: string; over: Partial<PortalDeps> & { env?: Env }; expected: string }[] = [
-    { name: 'not Linux', over: { platform: 'darwin' }, expected: 'no-portal' },
     { name: 'X11, where Chromium would list every source with no picker', over: { env: { XDG_SESSION_TYPE: 'x11', DISPLAY: ':0' } }, expected: 'not-wayland' },
     { name: 'no gdbus', over: { executable: () => false }, expected: 'no-portal' },
     { name: 'the call fails', over: { run: () => Promise.resolve({ code: 1, stdout: '' }) }, expected: 'no-portal' },
@@ -637,6 +636,14 @@ describe('Portal', () => {
     expect(await p.probe()).toBe(expected);
     expect(p.last()).toBe(expected);
     expect(logs.join('\n')).toContain('share unavailable: no screen-cast portal');
+  });
+
+  it('reports unsupported capture on Windows without probing for a portal', async () => {
+    const { p, runs, logs } = portal({ platform: 'win32' });
+    expect(await p.probe()).toBe('capture-unsupported');
+    expect(p.last()).toBe('capture-unsupported');
+    expect(runs).toEqual([]);
+    expect(logs).toEqual(['conch-desktop: share unavailable: screen capture is not supported on this platform']);
   });
 
   it('asks again with every probe: a portal started since is found, and a change is one log line', async () => {
