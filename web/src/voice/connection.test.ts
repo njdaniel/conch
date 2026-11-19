@@ -3551,8 +3551,8 @@ describe('the screen companion', () => {
       });
       t.client.watchCompanionStream('general', 9);
       await settle();
-      expect(t.native.state.whys).toEqual([{ kind: 'disconnected', detail: 'csp:connect-src:ws' }]);
-      expect(t.client.snapshot()).toMatchObject({ phase: 'stopped', why: companionLost });
+      expect(t.native.state.whys).toEqual([{ kind: 'insecure-address', detail: 'csp:connect-src:ws' }]);
+      expect(t.client.snapshot()).toMatchObject({ phase: 'stopped', why: companionInsecure });
       // Once the connection has failed, a refusal elsewhere in the page is not
       // the companion's.
       document.dispatchEvent(Object.assign(new Event('securitypolicyviolation'), { effectiveDirective: 'img-src', blockedURI: 'https://x.example' }));
@@ -3603,13 +3603,31 @@ describe('the screen companion', () => {
 
   // Issue #1992: a dev stack's ws:// LiveKit is refused by the desktop CSP
   // before any request leaves the window, so the Watch tile waited for ever.
-  it.each(['ws://127.0.0.1:27880', 'http://lk.example'])('does not connect to a LiveKit address that is not wss or https (%s), says why, and tells main', async (livekitUrl) => {
-    const t = companionSetup([{ ...grantOk, grant: { ...grantOk.grant, livekitUrl } }]);
+  // The CSP is the judge: the refusal is said in words, whether the connect
+  // throws first or LiveKit reports a disconnect first.
+  it.each([['ws', false], ['http', false], ['ws', true]] as const)('a companion connection the CSP refuses as %s (disconnect reported first: %s) says the address is not secure, and tells main', async (scheme, disconnectFirst) => {
+    const t = companionSetup([], (room) => {
+      const connect = room.connect;
+      room.connect = (url, token, roomName, publish, events, audio) => {
+        document.dispatchEvent(Object.assign(new Event('securitypolicyviolation'), { effectiveDirective: 'connect-src', blockedURI: `${scheme}://127.0.0.1:27880/rtc?access_token=secret` }));
+        if (disconnectFirst) events.onDisconnected('lost');
+        room.connectError = true;
+        return connect(url, token, roomName, publish, events, audio);
+      };
+    });
     t.client.watchCompanionStream('general', 9);
     await settle();
-    expect(t.rooms).toHaveLength(0);
     expect(t.client.snapshot()).toMatchObject({ phase: 'stopped', why: companionInsecure, watched: new Set() });
-    expect(t.native.state.whys).toEqual([{ kind: 'insecure-address', detail: livekitUrl.slice(0, livekitUrl.indexOf(':')) }]);
+    expect(t.native.state.whys).toEqual([{ kind: 'insecure-address', detail: `csp:connect-src:${scheme}` }]);
+    expect(JSON.stringify(t.native.state.whys)).not.toContain('secret');
+  });
+
+  it('a page outside the desktop CSP connects to a ws:// LiveKit as before (the live tests, a browser)', async () => {
+    const t = companionSetup([{ ...grantOk, grant: { ...grantOk.grant, livekitUrl: 'ws://127.0.0.1:27880' } }]);
+    t.client.watchCompanionStream('general', 9);
+    await settle();
+    expect(t.rooms).toHaveLength(1);
+    expect(t.native.state.whys).toEqual([]);
   });
 
   it('a Watch on a companion that stops shows the stream with Watch again, not a picture it will never get (issue #1992)', async () => {

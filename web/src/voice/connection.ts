@@ -592,17 +592,14 @@ export const companionLeftWatching = 'You left voice, so the screens you were wa
 // The companion's own connection lost: it is not reconnected by itself.
 export const companionLost = 'The screen connection dropped. Share or watch again if you want to.';
 
-// The LiveKit address conchd gave is not wss or https (issue #1992): the
-// desktop's window may reach LiveKit only over TLS (its CSP's connect-src is
-// `wss: https:`, linux-desktop.md §3), so the companion is not even tried.
-// Voice itself (the helper) is unaffected.
+// The window's CSP refused the companion's connection to LiveKit (issue
+// #1992): the desktop's window may reach LiveKit only over TLS (its CSP's
+// connect-src is `wss: https:`, linux-desktop.md §3), and conchd named a
+// plain ws or http address. The CSP is the judge, not the page: a page outside
+// it (a browser, the live tests) connects as before. Voice itself (the helper)
+// is unaffected.
 export const companionInsecure = "Screens can't be watched or shared in the desktop app on this server: its voice address isn't secure (wss).";
 
-// secureAddress says whether the window may connect to a LiveKit address:
-// wss or https only.
-export function secureAddress(url: string): boolean {
-  return schemeOf(url) === 'wss' || schemeOf(url) === 'https';
-}
 
 // schemeOf is a URL's scheme alone, for a log line: never the rest of it.
 function schemeOf(url: string): string {
@@ -636,6 +633,12 @@ function cspRefusals(): { readonly last: () => string | null; readonly stop: () 
       last = null;
     },
   };
+}
+
+// refusedInsecure says whether a refusal cspRefusals recorded is the CSP
+// refusing a plain ws or http connection: the LiveKit address isn't secure.
+function refusedInsecure(refused: string | null): refused is string {
+  return refused === 'csp:connect-src:ws' || refused === 'csp:connect-src:http';
 }
 
 // The grammar main's parseCompanionEnd accepts for a detail
@@ -2086,7 +2089,7 @@ export class VoiceClient {
       this.act({ kind: 'stop', why: 'This channel has no voice room for everyone' }, mine);
       return;
     }
-    if (this.state.companion && this.notConnectingCompanion(session.value.livekit_url, mine)) return;
+    if (this.state.companion && this.notConnectingCompanion()) return;
     // The viewer's identity is p<id>.view: the person it stands for is p<id>.
     this.me = this.state.companion ? personOf(session.value.identity) : principalOf(session.value.identity.replace(/\.view$/, ''));
     const room = this.env.newRoom();
@@ -2121,7 +2124,12 @@ export class VoiceClient {
       },
       onDisconnected: (cause) => {
         if (mine !== this.attempt) return;
-        this.drop(afterDisconnect(cause), cameraAfter(cause), cause === 'room_deleted', false, { kind: 'disconnected', detail: refusals?.last() ?? cause });
+        const refused = refusals?.last() ?? null;
+        if (this.state.companion && refusedInsecure(refused)) {
+          this.drop({ kind: 'stop', why: companionInsecure }, cameraAfter(cause), false, false, { kind: 'insecure-address', detail: refused });
+          return;
+        }
+        this.drop(afterDisconnect(cause), cameraAfter(cause), cause === 'room_deleted', false, { kind: 'disconnected', detail: refused ?? cause });
       },
       onSpeakers: (ids) => {
         if (mine !== this.attempt) return;
@@ -2266,6 +2274,11 @@ export class VoiceClient {
       const why = deviceReason(name);
       // A companion that cannot connect is over: main is told, and the next
       // grant is the person's next act.
+      if (this.state.companion && refusedInsecure(refused)) {
+        void this.endCompanion({ kind: 'insecure-address', detail: refused });
+        this.act({ kind: 'stop', why: companionInsecure }, next);
+        return;
+      }
       if (this.state.companion) {
         const detail = refused ?? pageEndDetail(err);
         void this.endCompanion(detail === undefined ? { kind: 'connect-failed' } : { kind: 'connect-failed', detail });
@@ -2323,20 +2336,16 @@ export class VoiceClient {
   // Share whose grant says this desktop cannot share (Windows has no capture
   // yet), with nothing watched, leaves at once with that note: no room is
   // joined only to be left, and the note is not overtaken by a connection's
-  // failure. A LiveKit address the window may not reach (not wss or https)
-  // stops it in words: the CSP would refuse the connection unseen. Main is
-  // told why, for its log.
-  private notConnectingCompanion(url: string, mine: number): boolean {
+  // failure. Main is told why, for its log. (A LiveKit address the window's
+  // CSP refuses is said once the CSP has refused it: refusedInsecure.)
+  private notConnectingCompanion(): boolean {
     const unavailable = this.grantUnavailable;
     if (unavailable !== null && this.joinedByShare && this.afterConnect === 'share' && this.state.watched.size === 0) {
       this.set({ companionShareUnavailable: unavailable });
       void this.leaveVoice(true, { kind: 'cannot-share', detail: unavailable });
       return true;
     }
-    if (secureAddress(url)) return false;
-    this.act({ kind: 'stop', why: companionInsecure }, mine);
-    void this.endCompanion({ kind: 'insecure-address', detail: schemeOf(url) });
-    return true;
+    return false;
   }
 
   // outOfVoice is the person's voice ending (the desktop's helper left the
