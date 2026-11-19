@@ -250,9 +250,11 @@ pub fn client_for(server: &str, timeout: Duration) -> Client {
 /// given while this value lives. The socket is bound but never told to listen: the kernel
 /// keeps the port reserved, so a parallel test's `bind("127.0.0.1:0")` cannot get it,
 /// and a connection to it is still refused. (Binding and then dropping would free the
-/// port for another test's stub to take, and this test would dial that stub.)
+/// port for another test's stub to take, and this test would dial that stub.) On macOS a
+/// bound, non-listening port is not refused (the connect hangs to the timeout), so there
+/// the port is released and that small risk is accepted (#1737).
 pub struct ClosedPort {
-    _socket: TcpSocket,
+    _socket: Option<TcpSocket>,
     addr: SocketAddr,
 }
 
@@ -267,6 +269,16 @@ pub async fn closed_port() -> ClosedPort {
     let socket = TcpSocket::new_v4().unwrap();
     socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
     let addr = socket.local_addr().unwrap();
+    // Linux refuses a connect to a bound, non-listening port at once, and keeping it
+    // bound stops anything else taking it. macOS lets such a connect hang until the
+    // timeout instead (#1737), so there the port is released: a connect to it is then
+    // refused, at the small risk of another process binding it meanwhile.
+    let socket = if cfg!(target_os = "macos") {
+        drop(socket);
+        None
+    } else {
+        Some(socket)
+    };
     ClosedPort {
         _socket: socket,
         addr,
