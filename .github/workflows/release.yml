@@ -1,29 +1,32 @@
 name: Release
 
-# Tag-triggered: only Nick pushes v* tags (releases are Tier-H, ADR-000), so
-# the tag push is the sign-off act. Procedure: .claude/skills/release/.
+# Only Nick pushes v* tags (releases are Tier-H, ADR-000), so the tag push
+# is the release sign-off act. Procedure: .claude/skills/release/.
 # Re-runs the full gate plus the three canaries, dogfood-check (P1),
 # p2-hardening-check (P2) and p3-local-check (P3); a release does not ship
-# when any fails. Builds both binaries, and the Linux desktop .deb with the
-# bundled voice helper (issue #1598). A plain tag (v1.2.3) creates a DRAFT
+# when any fails. Builds both binaries, the Linux desktop .deb (issue #1598),
+# and the unsigned Windows installer (issue #1991), both with the bundled
+# voice helper. A plain tag (v1.2.3) creates a DRAFT
 # release that Nick publishes; a tag with a pre-release suffix
 # (v0.1.0-alpha.1) is published at once as a GitHub pre-release, since
 # pushing that tag is itself Nick's sign-off for a test build.
 #
-# Four jobs, so that nothing is released unless everything built:
+# Five jobs, so that nothing is released unless everything built:
 #   release      the gates and the Go binaries (unchanged), uploaded as an
 #                artifact. It no longer writes checksums or the release.
 #   desktop-deb  the guard (the tag is HEAD, the tree is clean, the helper's
 #                version is the tag's), conch-voice with the pinned toolchain,
 #                the .deb and its package test, uploaded as an artifact.
+#   desktop-windows  the same guard, conch-voice.exe, and the unsigned preview
+#                    installer, uploaded after checking the installed files.
 #   attest       the only job with id-token and attestations: write. It
-#                collects both artifacts, writes the one checksums.txt over
+#                collects the three artifacts, writes the one checksums.txt over
 #                all of them and attests every file (GitHub artifact
 #                attestations). Before attesting it asserts the exact file
-#                set: the six Go binaries for the tag, one .deb, nothing else.
+#                set: the six Go binaries, one .deb and the installer for the tag.
 #   publish      verifies the attestation of every file, then creates the
 #                release from them.
-# A failure in any of the first three creates no release. A release is never
+# A failure before publish creates no release. A release is never
 # re-run: a re-run would build again under the same tag. Tag a new version.
 #
 # Verify a download the way the release notes say, which pins the workflow and
@@ -35,6 +38,12 @@ name: Release
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      windows_preview_tag:
+        description: 'Tag to stamp on the Windows dry-run build (must match voice/Cargo.toml, e.g. v0.1.0-alpha.22)'
+        type: string
+        required: true
 
 # Least privilege: every job reads. Only publish writes contents, and only
 # attest gets the two attestation write permissions (#1598); publish reads
@@ -44,14 +53,15 @@ permissions:
 
 jobs:
   release:
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
 
       # cache: false, as in the desktop-deb job: a release is built from
       # nothing a cache could have supplied unverified (a poisoned cache from
       # another ref would otherwise reach the released binaries).
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.5.0
         with:
           go-version-file: go.mod
           cache: false
@@ -72,7 +82,7 @@ jobs:
           echo "version=v${v#v}" >> "$GITHUB_OUTPUT"
 
       - name: golangci-lint
-        uses: golangci/golangci-lint-action@v8
+        uses: golangci/golangci-lint-action@1e7e51e771db61008b38414a730f564565cf7c20 # v8.0.0
         with:
           version: ${{ steps.lint-version.outputs.version }}
           verify: false # network-dependent; see ci.yml
@@ -101,7 +111,7 @@ jobs:
       # needs the Node that web/.nvmrc pins, as the p3-local-check job in
       # ci.yml does. P3-13 runs the real Claude Code command only with
       # --real-adapter, which this step does not pass.
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version-file: web/.nvmrc
           cache: npm
@@ -134,10 +144,10 @@ jobs:
               -o "dist/conch_${GITHUB_REF_NAME}_${target%/*}_${target#*/}" ./cmd/conch
           done
 
-      # The checksums are written once, over every file, by the attest job
-      # (so they cover the .deb too); this job hands over the binaries only.
+      # The attest job writes one checksums file covering the binaries and
+      # both desktop installers. This job hands over the binaries only.
       - name: Keep the binaries for the later jobs
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: go-dist
           path: dist
@@ -156,6 +166,7 @@ jobs:
     # oldest system desktop-deb.sh supports (found by #1652's lifecycle run,
     # 43098834902). Build on the oldest supported release; the Go jobs are
     # static (CGO_ENABLED=0) and are unaffected.
+    if: github.event_name == 'push'
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     env:
@@ -165,7 +176,7 @@ jobs:
       DESKTOP_REQUIRE_VOICE: "1"
     steps:
       # Full history: the guard checks that the tagged commit is on main.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           fetch-depth: 0
 
@@ -192,7 +203,7 @@ jobs:
       # cache: false, as in the desktop-deb job: a release is built from
       # nothing a cache could have supplied unverified (a poisoned cache from
       # another ref would otherwise reach the released binaries).
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.5.0
         with:
           go-version-file: go.mod
           cache: false
@@ -204,7 +215,7 @@ jobs:
           echo "version=$ImageVersion" >> "$GITHUB_OUTPUT"
 
       - name: rust system packages cache
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: ~/.cache/conch-apt
           key: voice-apt-${{ runner.os }}-${{ hashFiles('scripts/ci-voice-apt.sh') }}-${{ steps.image.outputs.os }}-${{ steps.image.outputs.version }}
@@ -233,7 +244,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends dpkg-dev desktop-file-utils
 
       # desktop/.nvmrc is the desktop's Node; web/.nvmrc names the same one.
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version-file: desktop/.nvmrc
           cache: npm
@@ -242,7 +253,7 @@ jobs:
             desktop/package-lock.json
 
       - name: electron cache
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: ~/.cache/conch/electron
           key: desktop-electron-${{ runner.os }}-${{ hashFiles('scripts/desktop-pins.sh') }}
@@ -265,10 +276,181 @@ jobs:
           du -sh voice/target 2>/dev/null || true
 
       - name: Keep the .deb for the later jobs
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: desktop-deb
           path: desktop/dist/conch-desktop_*_amd64.deb
+          if-no-files-found: error
+          retention-days: 7
+
+  desktop-windows:
+    # The release guard and production manifest are the same as desktop-deb;
+    # the helper, Electron and NSIS steps follow desktop-windows in ci.yml.
+    # Dry run: dispatch Release on the branch to test with windows_preview_tag
+    # set to v plus voice/Cargo.toml's workspace version. It exercises release
+    # stamping and the install test, then uploads the desktop-windows artifact.
+    # The guard, attestation and publication run only on tag pushes.
+    if: github.event_name == 'push' || github.ref_type == 'branch'
+    runs-on: windows-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    env:
+      CONCH_RELEASE_VERSION: ${{ github.event_name == 'push' && github.ref_name || inputs.windows_preview_tag }}
+    steps:
+      # Full history for the same ancestry check as the Linux release guard.
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        env:
+          # Keep LF for Git Bash and the guard's Cargo.toml parser.
+          GIT_CONFIG_COUNT: '1'
+          GIT_CONFIG_KEY_0: core.autocrlf
+          GIT_CONFIG_VALUE_0: 'false'
+        with:
+          fetch-depth: 0
+
+      - name: guard the tag
+        if: github.event_name == 'push'
+        run: ./scripts/desktop-release-guard.sh "$GITHUB_REF_NAME"
+
+      - name: validate dry-run tag
+        if: github.event_name == 'workflow_dispatch'
+        run: ./scripts/desktop-version.sh app "$CONCH_RELEASE_VERSION"
+
+      # Both web/ and desktop/ build with the desktop's pinned Node.
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version-file: desktop/.nvmrc
+
+      - name: npm ci
+        working-directory: desktop
+        run: npm ci --no-audit
+
+      # Fetch the pinned toolchain cold, as desktop-deb does. The toolchain
+      # script verifies the archive before unpacking, and Cargo builds fresh.
+      - name: rust toolchain
+        run: ./scripts/voice-toolchain.sh
+
+      # Build the same release helper as CI. The installed copy is run and
+      # checked against the app version before the installer is uploaded.
+      - name: build the voice helper (release)
+        run: |
+          . scripts/voice-pins.sh
+          # The verified tree must be there: without it webrtc-sys downloads
+          # its own copy unchecked (as voice-env.sh refuses on Linux).
+          webrtc="$(cygpath -m "$HOME/.cache/conch/$CONCH_WEBRTC_TAG/win-x64-release")"
+          test -f "$webrtc/webrtc.ninja"
+          export LK_CUSTOM_WEBRTC="$webrtc"
+          cd voice
+          cargo build --locked --release -p conch-voice
+
+      # The Windows Electron of the pinned version, for electronDist, so that
+      # electron-builder downloads no Electron itself. It is kept only if its
+      # SHA-256 equals the hash in desktop/node_modules/electron/checksums.json,
+      # which npm ci verified against desktop/package-lock.json, the second of
+      # the two hashes scripts/desktop-electron.sh checks on Linux.
+      # scripts/desktop-pins.sh has no Windows hash: adding one is a pin change
+      # (Nick's sign-off). Unpacked with Python's zipfile, as
+      # voice-toolchain.sh unpacks libwebrtc here.
+      - name: windows electron
+        run: |
+          . scripts/desktop-pins.sh
+          have=$(node -p "require('./desktop/package.json').devDependencies.electron")
+          if [ "$have" != "$CONCH_ELECTRON_VERSION" ]; then
+            echo "desktop/package.json pins electron $have but scripts/desktop-pins.sh pins $CONCH_ELECTRON_VERSION"; exit 1
+          fi
+          archive="electron-v${CONCH_ELECTRON_VERSION}-win32-x64.zip"
+          want=$(node -p "require('./desktop/node_modules/electron/checksums.json')['$archive'] || ''")
+          if ! [[ "$want" =~ ^[0-9a-f]{64}$ ]]; then echo "checksums.json has no SHA-256 for $archive"; exit 1; fi
+          curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
+            --output "$RUNNER_TEMP/$archive" "https://github.com/electron/electron/releases/download/v${CONCH_ELECTRON_VERSION}/$archive"
+          # From standard input: Git Bash's sha256sum prefixes the hash with a
+          # backslash when the file name holds one, as $RUNNER_TEMP does.
+          got=$(sha256sum < "$RUNNER_TEMP/$archive" | cut -d' ' -f1)
+          if [ "$got" != "$want" ]; then echo "SHA-256 of $archive is $got, but checksums.json says $want; nothing was unpacked"; exit 1; fi
+          rm -rf desktop/out/electron-dist-win
+          py=python3
+          command -v python3 >/dev/null 2>&1 || py=python
+          "$py" -I -c 'import sys, zipfile; zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])' "$RUNNER_TEMP/$archive" desktop/out/electron-dist-win
+          test -f desktop/out/electron-dist-win/electron.exe
+          echo "Electron $CONCH_ELECTRON_VERSION (win32-x64, $got) unpacked into desktop/out/electron-dist-win"
+
+      # Build web and desktop as in CI. CONCH_RELEASE_VERSION makes the
+      # manifest use the tag plus compat-extra.json for the server list.
+      # The same version goes into app metadata and the installed stamp.
+      # MSYS_NO_PATHCONV preserves Vite's --base / under Git Bash.
+      - name: build the installer
+        id: installer
+        run: |
+          . scripts/desktop-pins.sh
+          root=$(cygpath -m "$PWD")
+          version=$(./scripts/desktop-version.sh app "$CONCH_RELEASE_VERSION")
+          (cd web && npm ci --no-audit)
+          (cd web && MSYS_NO_PATHCONV=1 ./node_modules/.bin/vite build --mode desktop --base / --outDir "$root/desktop/out/ui" --emptyOutDir)
+          (cd desktop && npm run bundle && node build/manifest.ts)
+          rm -rf desktop/out/win-resources desktop/dist
+          mkdir -p desktop/out/win-resources
+          cp voice/target/release/conch-voice.exe desktop/out/win-resources/conch-voice.exe
+          printf '%s\n' "$version" >desktop/out/win-resources/version
+          # CI=true keeps electron-builder from asking the registry for a
+          # newer electron-builder; dist:win passes --publish never.
+          (cd desktop && CI=true npm run dist:win -- \
+            "-c.electronDist=$root/desktop/out/electron-dist-win" "-c.electronVersion=$CONCH_ELECTRON_VERSION" \
+            "-c.extraMetadata.version=$version")
+          setup="desktop/dist/Conch-$version-unsigned-preview-setup.exe"
+          test -f "$setup"
+          echo "installer: $setup (version $version)"
+          echo "version=$version" >>"$GITHUB_OUTPUT"
+
+      # NSIS /S installs per-user into %LOCALAPPDATA%\Programs\Conch, as in CI.
+      - name: install and check the release package
+        shell: pwsh
+        working-directory: desktop
+        env:
+          APP_VERSION: ${{ steps.installer.outputs.version }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $setup = Get-Item -LiteralPath "dist/Conch-${env:APP_VERSION}-unsigned-preview-setup.exe"
+          $p = Start-Process -FilePath $setup.FullName -ArgumentList '/S' -Wait -PassThru
+          if ($null -eq $p.ExitCode -or $p.ExitCode -ne 0) { throw "the installer exited $($p.ExitCode)" }
+
+          $dir = Join-Path $env:LOCALAPPDATA 'Programs\Conch'
+          $exe = Get-Item -LiteralPath (Join-Path $dir 'Conch.exe')
+          $resources = Join-Path $dir 'resources'
+          $asar = Join-Path $resources 'app.asar'
+          $helper = Join-Path $resources 'conch-voice.exe'
+          if ($exe.VersionInfo.FileVersion -ne $env:APP_VERSION) { throw "Conch.exe has version $($exe.VersionInfo.FileVersion)" }
+          if (Test-Path -LiteralPath (Join-Path $resources 'default_app.asar')) { throw 'Electron default_app.asar was installed' }
+          $stamp = (Get-Content -LiteralPath (Join-Path $resources 'version') -Raw).Trim()
+          if ($stamp -ne $env:APP_VERSION) { throw "resources\version says '$stamp', expected '$env:APP_VERSION'" }
+          $voiceVersion = & $helper --version
+          if ($LASTEXITCODE -ne 0 -or $voiceVersion -cnotlike "conch-voice $env:APP_VERSION (*)") {
+            throw "unexpected installed conch-voice.exe version '$voiceVersion' (exit $LASTEXITCODE)"
+          }
+          $contents = & node node_modules/@electron/asar/bin/asar.js list --is-pack $asar
+          if ($LASTEXITCODE -ne 0) { throw "could not list app.asar (exit $LASTEXITCODE)" }
+          if ($contents -cnotcontains 'pack   : \build\icons\48.png') { throw 'the Windows tray icon is missing from app.asar' }
+
+          @'
+          import assert from 'node:assert/strict';
+          import { readFileSync } from 'node:fs';
+          import { join } from 'node:path';
+          import { extractFile } from '@electron/asar';
+          const asar = process.argv[2];
+          const pkg = JSON.parse(extractFile(asar, 'package.json'));
+          assert.equal(pkg.version, process.env.APP_VERSION);
+          const compatPath = join('out', 'compat.json');
+          const compat = extractFile(asar, compatPath);
+          assert.deepEqual(compat, readFileSync(compatPath));
+          assert.equal(JSON.parse(compat).servers[0], process.env.CONCH_RELEASE_VERSION);
+          '@ | node --input-type=module - $asar
+          if ($LASTEXITCODE -ne 0) { throw "installed app version or compat list check failed (exit $LASTEXITCODE)" }
+
+      - name: Keep the checked installer
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: desktop-windows
+          path: desktop/dist/Conch-${{ steps.installer.outputs.version }}-unsigned-preview-setup.exe
           if-no-files-found: error
           retention-days: 7
 
@@ -276,7 +458,8 @@ jobs:
     # Collects every artifact, writes the one checksums.txt over all of them
     # and attests them (Q-D6-4). The only job with the two attestation
     # permissions; it needs nothing else but to read this run's artifacts.
-    needs: [release, desktop-deb]
+    if: github.event_name == 'push'
+    needs: [release, desktop-deb, desktop-windows]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -293,11 +476,12 @@ jobs:
           mkdir -p dist
           gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" --name go-dist --dir dist
           gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" --name desktop-deb --dir dist
+          gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" --name desktop-windows --dir dist
           # The exact set, before anything is checksummed or attested: the
           # six Go binaries named for this tag (the release job's matrix:
           # conchd and conch, each for linux/amd64, linux/arm64 and
-          # darwin/arm64), one .deb, and nothing else: no other file and no
-          # subdirectory. find lists directories and nested files too.
+          # darwin/arm64), one .deb, and the installer named for this tag.
+          # find also lists directories and nested files, which are refused.
           debs=$(find dist -mindepth 1 -maxdepth 1 -type f -name 'conch-desktop_*_amd64.deb' -printf '%f\n')
           if [ "$(printf '%s\n' "$debs" | grep -c .)" != 1 ]; then
             echo "want exactly one .deb, have:"; echo "$debs"; find dist; exit 1
@@ -310,6 +494,7 @@ jobs:
                 done
               done
               echo "$debs"
+              echo "Conch-${GITHUB_REF_NAME#v}-unsigned-preview-setup.exe"
             } | LC_ALL=C sort
           )
           have=$(find dist -mindepth 1 -printf '%P\n' | LC_ALL=C sort)
@@ -318,7 +503,7 @@ jobs:
             echo "have:"; echo "$have"; exit 1
           fi
           if [ -n "$(find dist -mindepth 1 ! -type f)" ]; then echo "dist holds a non-file"; find dist; exit 1; fi
-          # One checksums.txt, over the binaries and the .deb, in the form
+          # One checksums.txt, over the binaries and both installers, in the form
           # `sha256sum -c` takes from the directory the files are in.
           (cd dist && sha256sum -- * > ../checksums.txt && mv ../checksums.txt checksums.txt && sha256sum -c checksums.txt)
           cat dist/checksums.txt
@@ -333,7 +518,7 @@ jobs:
           subject-path: dist/*
 
       - name: Keep the release files for publish
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: release-files
           path: dist
@@ -341,6 +526,7 @@ jobs:
           retention-days: 7
 
   publish:
+    if: github.event_name == 'push'
     needs: attest
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -391,6 +577,7 @@ jobs:
           checks="dogfood-check, p2-hardening-check and p3-local-check run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
           web="The web client is served at /app/ by default (built into conchd; --web-dir serves a directory instead, --no-web turns it off)."
           deb="The Linux desktop app is conch-desktop_*_amd64.deb: a technical preview until real-device acceptance is recorded (#1603), not a supported release. Verify it with: sha256sum -c --ignore-missing checksums.txt, and gh attestation verify <file> --repo $GITHUB_REPOSITORY --signer-workflow $GITHUB_REPOSITORY/.github/workflows/release.yml --source-ref refs/tags/$GITHUB_REF_NAME."
+          windows="The Windows x64 installer, Conch-${GITHUB_REF_NAME#v}-unsigned-preview-setup.exe, is an unsigned preview for testers. Windows SmartScreen may warn. [Verify the download and follow the Windows install steps]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/blob/$GITHUB_REF_NAME/docs/desktop/windows.md)."
           # A tag with a semver pre-release suffix (v0.1.0-alpha.1) is
           # published at once, marked a pre-release, with generated notes; a
           # plain tag stays a draft that Nick publishes.
@@ -402,7 +589,9 @@ jobs:
 
           $web
 
-          $deb"
+          $deb
+
+          $windows"
               ;;
             *)
               gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" \
@@ -411,6 +600,8 @@ jobs:
 
           $web
 
-          $deb"
+          $deb
+
+          $windows"
               ;;
           esac
