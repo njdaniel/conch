@@ -681,8 +681,9 @@ export const SPECS: Readonly<Record<InvokedFunction, Spec>> = {
     parse: parseDevices,
     run: ({ voice }, [devices]) => voice.setDevices(devices as { input?: string; output?: string }),
   },
-  // A confirmed talk-mode choice can switch and save on the same gesture
-  // (issue #1993). The save is limited to the exact mode validated here.
+  // A confirmed open-mic choice can switch and save on the same gesture
+  // (issue #1993). Push-to-talk reduces microphone exposure and can be chosen
+  // with a radio arrow key, which arms no gesture. A save uses the validated mode.
   voiceSetTalkMode: {
     limit: 30,
     maxBytes: 32,
@@ -693,18 +694,21 @@ export const SPECS: Readonly<Record<InvokedFunction, Spec>> = {
     run: ({ voice }, [mode, save]) => save === true
       ? voice.setAndSaveTalkMode(mode as VoiceControlTalkMode)
       : voice.setTalkMode(mode as VoiceControlTalkMode),
-    gesture: ([mode, save]) => mode === 'open' || save === true,
+    gesture: ([mode]) => mode === 'open',
   },
   // The helper's one-shot runs (issue #1378). The list is read-only; a save
-  // writes the person's voice.toml and is the person's act alone. Each is
-  // one process at a time, so the rates are low.
+  // writes the person's voice.toml and requires a gesture except for choosing
+  // push-to-talk. Each is one process at a time, so the rates are low.
   voiceDevices: { limit: 30, maxBytes: 0, parse: none, run: ({ voice }) => voice.devices() },
   voiceSaveDevice: {
     limit: 30,
     maxBytes: 2 * VOICE_DEVICES_MAX_NAME_BYTES + 128,
     parse: parseSaveDevice,
     run: ({ voice }, [request]) => voice.saveDevice(request as { key: VoiceDeviceKey; value: string }),
-    gesture: true,
+    gesture: ([request]) => {
+      const { key, value } = request as { key: VoiceDeviceKey; value: string };
+      return key !== 'audio.talk_mode' || value !== 'push_to_talk';
+    },
   },
   // Talk-key setup (issue #1381). The listing opens no device; a save writes
   // the person's voice.toml and is the person's act alone. Two processes in a

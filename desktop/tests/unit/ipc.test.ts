@@ -1,3 +1,4 @@
+import { EventEmitter } from 'node:events';
 import type { IpcMainEvent } from 'electron';
 import { describe, expect, it } from 'vitest';
 
@@ -5,6 +6,7 @@ import type { Feeds } from '../../main/api/feeds.ts';
 import type { Files } from '../../main/files.ts';
 import type { Service } from '../../main/api/service.ts';
 import { DocumentGate } from '../../main/document.ts';
+import { Gestures, LINK_GESTURE_MS } from '../../main/gestures.ts';
 import { checkCaller, Ipc, parseRequest, plain, type CompanionApi, type InstalledApi, type IntegrationsApi, type InvitesApi, type NotificationsApi, type ProfilesApi, type VoiceApi, type SettingsApi, type ContentsLike, type FrameLike, type InvokeEvent } from '../../main/ipc.ts';
 import { COMPANION_FUNCTIONS, INVOKED_FUNCTIONS, TAG_MAX, VOICE_EVENTS, VOICE_FUNCTIONS } from '../../shared/bridge-names.ts';
 import { ShareAllowance } from '../../main/share-allowance.ts';
@@ -19,7 +21,7 @@ function frame(token = 'frame-1', over: Partial<FrameLike> = {}): FrameLike {
 interface Fixture {
   readonly ipc: Ipc;
   readonly gate: DocumentGate;
-  readonly contents: ContentsLike & { destroyed: boolean };
+  readonly contents: ContentsLike & EventEmitter & { destroyed: boolean };
   readonly main: FrameLike;
   readonly calls: [string, unknown][];
   readonly logs: string[];
@@ -32,9 +34,9 @@ interface Fixture {
   event(over?: Partial<InvokeEvent>): InvokeEvent;
 }
 
-function fixture(takeGesture?: () => 'pointer' | null): Fixture {
+function fixture(realGestures?: Gestures): Fixture {
   const main = frame();
-  const contents = { destroyed: false, mainFrame: main, isDestroyed() { return this.destroyed; } };
+  const contents = Object.assign(new EventEmitter(), { destroyed: false, mainFrame: main, isDestroyed() { return this.destroyed; } });
   const gate = new DocumentGate();
   gate.begin();
   gate.commit(main);
@@ -64,7 +66,8 @@ function fixture(takeGesture?: () => 'pointer' | null): Fixture {
   const settings = new Proxy({} as SettingsApi, { get: (_t, name: string) => record(`settings.${name}`) });
   const integrations = new Proxy({} as IntegrationsApi, { get: (_t, name: string) => record(`integrations.${name}`) });
   const companion = new Proxy({} as CompanionApi, { get: (_t, name: string) => record(`companion.${name}`) });
-  const gestures = { take: takeGesture ?? (() => (input.recent ? ('pointer' as const) : null)) };
+  realGestures?.attach(contents);
+  const gestures = realGestures ?? { take: () => (input.recent ? ('pointer' as const) : null) };
   const installed = new Proxy({} as InstalledApi, { get: (_t, name: string) => record(`installed.${name}`) });
   const share = new ShareAllowance({ now: () => clock.now, generation: () => gate.generation });
   const ipc = new Ipc({ owned: () => contents, gate, service, feeds, files, gestures, profiles, voice, invites, notifications, settings, integrations, companion, share, installed, now: () => clock.now, log: (line) => logs.push(line) });
@@ -807,7 +810,7 @@ describe('the voice family (issue #1374)', () => {
     ['voiceRetry', []],
     ['voiceSetTalkMode', ['open']],
     ['voiceSetTalkMode', ['open', true]],
-    ['voiceSetTalkMode', ['push_to_talk', true]],
+    ['voiceSaveDevice', [{ key: 'audio.talk_mode', value: 'open' }]],
     ['voiceSaveDevice', [{ key: 'audio.input', value: 'Mic' }]],
     ['voiceSaveTalkBinding', [{ deviceId: 'abc', code: 275 }]],
   ] as const)('refuses %s without a recent gesture and executes nothing', async (name, args) => {
@@ -820,17 +823,35 @@ describe('the voice family (issue #1374)', () => {
     expect(f.calls).toHaveLength(1);
   });
 
-  it('consumes one gesture for a live switch and its save (issue #1993)', async () => {
-    let recent = true;
-    const f = fixture(() => {
-      if (!recent) return null;
-      recent = false;
-      return 'pointer';
-    });
+  it('consumes one gesture for switching to open mic and saving it (issue #1993)', async () => {
+    const gestures = new Gestures(() => 0);
+    const f = fixture(gestures);
+    f.contents.emit('input-event', {}, { type: 'rawKeyDown', key: 'Enter', code: 'Enter' });
     expect(await f.ipc.invoke(f.event(), 'voiceSetTalkMode', ['open', true])).toEqual({ ok: true, value: { ran: 'voice.setAndSaveTalkMode' } });
     expect(await f.ipc.invoke(f.event(), 'voiceSetTalkMode', ['open', true])).toEqual({ ok: false, kind: 'refused' });
     expect(await f.ipc.invoke(f.event(), 'voiceSaveDevice', [{ key: 'audio.talk_mode', value: 'open' }])).toEqual({ ok: false, kind: 'refused' });
     expect(f.calls).toEqual([['voice.setAndSaveTalkMode', ['open']]]);
+  });
+
+  it('switches and saves push-to-talk when a radio arrow key follows an expired gesture', async () => {
+    let now = 0;
+    const gestures = new Gestures(() => now);
+    const f = fixture(gestures);
+    f.contents.emit('input-event', {}, { type: 'mouseUp' });
+    now += LINK_GESTURE_MS + 1;
+    f.contents.emit('input-event', {}, { type: 'rawKeyDown', key: 'ArrowUp', code: 'ArrowUp' });
+
+    // The selected radio sends the same request on a keyboard change.
+    expect(await f.ipc.invoke(f.event(), 'voiceSetTalkMode', ['push_to_talk', true])).toEqual({ ok: true, value: { ran: 'voice.setAndSaveTalkMode' } });
+    expect(f.calls).toEqual([['voice.setAndSaveTalkMode', ['push_to_talk']]]);
+    expect(gestures.take(f.contents, LINK_GESTURE_MS)).toBeNull();
+  });
+
+  it('saves push-to-talk without a gesture when no live switch is requested', async () => {
+    const f = fixture();
+    const choice = { key: 'audio.talk_mode', value: 'push_to_talk' };
+    expect((await f.ipc.invoke(f.event(), 'voiceSaveDevice', [choice])).ok).toBe(true);
+    expect(f.calls).toEqual([['voice.saveDevice', [choice]]]);
   });
 
   it('needs no gesture to leave, mute, deafen, set devices or choose push-to-talk, nor to read the state', async () => {

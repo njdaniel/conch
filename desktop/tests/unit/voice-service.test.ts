@@ -649,17 +649,21 @@ describe('the one-shot runs (issue #1378)', () => {
     ]);
   });
 
-  it('switches from push-to-talk and saves open mic after the helper accepts it', async () => {
-    expect(await join()).toMatchObject({ status: 'running', helper: { talkMode: 'push_to_talk' } });
+  it.each([
+    ['push_to_talk', 'open'],
+    ['open', 'push_to_talk'],
+  ] as const)('switches from %s to %s and saves after the helper accepts it', async (before, mode) => {
+    fake.next = { status: 'running', generation: 1, helper: helper({ talkMode: before }) };
+    expect(await join()).toMatchObject({ status: 'running', helper: { talkMode: before } });
     let acknowledge: (result: CommandResult) => void = () => undefined;
     const apply = vi.spyOn(fake, 'setTalkMode').mockReturnValue(new Promise((resolve) => { acknowledge = resolve; }));
-    const choice = svc.setAndSaveTalkMode('open');
-    expect(apply).toHaveBeenCalledWith('open');
+    const choice = svc.setAndSaveTalkMode(mode);
+    expect(apply).toHaveBeenCalledWith(mode);
     expect(oneShot.calls).toEqual([]);
-    expect(await svc.setAndSaveTalkMode('push_to_talk')).toEqual({ ok: false, error: 'busy' });
+    expect(await svc.setAndSaveTalkMode(before)).toEqual({ ok: false, error: 'busy' });
     acknowledge({ ok: true });
     expect(await choice).toEqual({ ok: true, saved: { ok: true } });
-    expect(oneShot.calls).toEqual([['save', id.configDir, 'audio.talk_mode', 'open']]);
+    expect(oneShot.calls).toEqual([['save', id.configDir, 'audio.talk_mode', mode]]);
   });
 
   it('does not save a mode the live helper refused', async () => {
