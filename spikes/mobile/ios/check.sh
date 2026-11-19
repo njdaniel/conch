@@ -1,9 +1,15 @@
 #!/usr/bin/env bash
 # The iOS spike's gate (#1393): the repository's npm gates pointed at this
 # directory, then the typecheck, then the CocoaPods checks. Outside `make
-# check` on purpose. Needs the Node in .nvmrc. Runs on Linux; the Pod half is
-# "pending the Mac build" until Podfile.lock is committed from the Mac.
+# check` on purpose. Needs Bash 4+ and the Node in .nvmrc. Runs on Linux; the
+# Pod half is "pending the Mac build" until Podfile.lock is available.
+# Use --installed after npm ci to reuse the installed dependencies.
 set -euo pipefail
+
+if [ "$#" -gt 1 ] || { [ "$#" -eq 1 ] && [ "$1" != --installed ]; }; then
+    echo "usage: $0 [--installed]" >&2
+    exit 2
+fi
 
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 root=$(git -C "$here" rev-parse --show-toplevel)
@@ -19,7 +25,10 @@ fi
 scripts/web-depgate.sh "$rel" "$rel/deps-allowlist.txt"
 scripts/web-licences.sh "$rel/package-lock.json" "$rel/licences-allowlist.txt"
 
-(cd "$here" && npm ci --ignore-scripts && npx tsc --noEmit)
+if [ "$#" -eq 0 ]; then
+    (cd "$here" && npm ci --ignore-scripts)
+fi
+(cd "$here" && npm run typecheck)
 echo "check: tsc OK"
 
 # The logic's unit tests (node --test over tsc output; no test dependency) and
@@ -28,10 +37,10 @@ echo "check: tsc OK"
 echo "check: unit tests OK"
 
 # CocoaPods: Podfile.lock is produced on the Mac (`pod install`). Until it is
-# committed, report it as pending, not as a pass.
+# available, report it as pending, not as a pass.
 lock="$here/ios/Podfile.lock"
 if [ ! -s "$lock" ]; then
-    echo "check: Pods PENDING the Mac build: ios/Podfile.lock not committed yet (README step 3)"
+    echo "check: Pods PENDING the Mac build: ios/Podfile.lock missing (README step 3)"
     echo "check: OK (npm half only; nothing iOS-native has been built)"
     exit 0
 fi
@@ -49,7 +58,7 @@ if grep -q 'PENDING THE MAC BUILD' "$here/licences.md"; then
     echo "check: FAIL: Podfile.lock exists but licences.md still has the Pod placeholder (regenerate it)" >&2
     exit 1
 fi
-if grep -q 'NOT READ' "$here/licences.md"; then
+if grep -Eq '^\| .*\| NOT READ:' "$here/licences.md"; then
     echo "check: FAIL: licences.md has Pod licences that were not read; fill them in from the pod repositories" >&2
     exit 1
 fi

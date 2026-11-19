@@ -1,3 +1,9 @@
+# LiveKitWebRTC is published to LiveKit's spec repo as well as trunk;
+# declaring any source turns trunk off, so the CDN is listed too
+# (livekit/client-sdk-react-native README, iOS setup).
+source 'https://github.com/livekit/podspecs.git'
+source 'https://cdn.cocoapods.org/'
+
 # Resolve react_native_pods.rb with node to allow for hoisting
 require Pod::Executable.execute_command('node', ['-p',
   'require.resolve(

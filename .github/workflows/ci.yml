@@ -29,8 +29,9 @@ concurrency:
 jobs:
   # Which kind of change this is (issue #1300). A pull request whose every
   # changed path is documentation (scripts/ci-docs-only.sh) gets the text
-  # checks of the check job and nothing else; every other job is skipped,
-  # which satisfies branch protection. A push to main always runs everything.
+  # checks of the check job and nothing else; every other code job is skipped,
+  # which satisfies branch protection. A push to main runs the full code checks.
+  # The iOS spike has its own path check for both events.
   # The classifier is taken from main's side of the merge, never from the
   # pull request, so a pull request cannot rewrite it to skip its own
   # checks; one that adds or changes the script runs everything. If this job
@@ -40,11 +41,11 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       code: ${{ steps.classify.outputs.code }}
+      ios: ${{ steps.ios.outputs.changed }}
     steps:
-      - uses: actions/checkout@v4
-        if: github.event_name == 'pull_request'
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
-          fetch-depth: 2 # the merge commit and both its parents
+          fetch-depth: 2 # the PR merge and its parents, or the latest push and its parent
 
       - name: classify the change
         id: classify
@@ -62,6 +63,41 @@ jobs:
           fi
           echo "code=$code" >> "$GITHUB_OUTPUT"
           echo "code=$code (false: docs only, light run)"
+
+      - name: check for iOS spike changes
+        id: ios
+        shell: bash
+        env:
+          EVENT: ${{ github.event_name }}
+          BEFORE: ${{ github.event.before }}
+        run: |
+          if [ "$EVENT" = pull_request ]; then
+            base=HEAD^1
+          elif [ "$BEFORE" = 0000000000000000000000000000000000000000 ]; then
+            base=$(git hash-object -w -t tree /dev/null)
+          else
+            base=$BEFORE
+            if ! git cat-file -e "$base^{commit}" 2>/dev/null; then
+              git fetch --no-tags --depth=1 origin "$base"
+            fi
+          fi
+
+          paths=$(git diff --name-only --no-renames "$base" HEAD -- spikes/mobile/ios/)
+          workflow=.github/workflows/ci.yml
+          # Compare just the job block so edits to other jobs do not allocate a Mac.
+          ios_job() {
+            awk '/^  [^ ]/ { job = ($0 == "  ios-spike:") } job && NF'
+          }
+          previous=
+          if git cat-file -e "$base:$workflow" 2>/dev/null; then
+            previous=$(git show "$base:$workflow" | ios_job)
+          fi
+          current=$(ios_job < "$workflow")
+          changed=false
+          if [ -n "$paths" ] || [ "$previous" != "$current" ]; then
+            changed=true
+          fi
+          echo "changed=$changed" >> "$GITHUB_OUTPUT"
 
   # The repository checks, as parallel jobs on GitHub-hosted runners (#1318).
   # They used to be one job on the self-hosted runners (#1286), which the
@@ -896,6 +932,100 @@ jobs:
             | "\(.key): \(.value.result)"' <<<"$NEEDS")
           if [ -n "$bad" ]; then echo "not every check passed:"; echo "$bad"; exit 1; fi
           echo "every check passed (docs only: $DOCS_ONLY)"
+
+  ios-spike:
+    needs: changes
+    if: ${{ needs.changes.outputs.ios == 'true' }}
+    runs-on: macos-15
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
+        working-directory: spikes/mobile/ios
+    env:
+      # React Native 0.88 needs Xcode 26+. The macos-15 image defaults to 16.4.
+      DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: prepare build environment
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/.tmp/ios-spike"
+          echo "TMPDIR=$GITHUB_WORKSPACE/.tmp/ios-spike" >> "$GITHUB_ENV"
+          sw_vers
+          xcodebuild -version
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version-file: spikes/mobile/ios/.nvmrc
+          cache: npm
+          cache-dependency-path: spikes/mobile/ios/package-lock.json
+
+      - uses: ruby/setup-ruby@0481980f17b760ef6bca5e8c55809102a0af1e5a # v1.263.0
+        with:
+          ruby-version: '3.3'
+
+      - name: install npm and CocoaPods dependencies
+        run: |
+          npm ci
+          bundle install
+          bundle exec pod --version
+          (cd ios && bundle exec pod install --repo-update)
+          test -s ios/Podfile.lock
+          node gen-licences.mjs > licences.md
+
+      - name: check dependencies, types, unit tests and Pod licences
+        run: |
+          # The shared npm licence check uses associative arrays (Bash 4+).
+          brew install bash
+          PATH="$(brew --prefix bash)/bin:$PATH" bash ./check.sh --installed
+
+      - name: build the unsigned Simulator app
+        run: |
+          # Release embeds the JavaScript bundle for launch without Metro.
+          xcodebuild -workspace ios/ConchSpike.xcworkspace -scheme ConchSpike \
+            -configuration Release -sdk iphonesimulator -destination 'generic/platform=iOS Simulator' \
+            -derivedDataPath build/DerivedData CODE_SIGNING_ALLOWED=NO build
+
+      - name: launch and capture the first screen
+        timeout-minutes: 10
+        run: |
+          simulators=$(xcrun simctl list --json)
+          # Use the newest available iOS runtime that has an available iPhone.
+          selection=$(jq -ce '
+            .devices as $devices
+            | [.runtimes[] | select(.isAvailable and (.identifier | startswith("com.apple.CoreSimulator.SimRuntime.iOS-")))]
+            | sort_by(.version | split(".") | map(tonumber)) | reverse
+            | first(.[] | . as $runtime | $devices[.identifier][]?
+                | select(.isAvailable and ((.deviceTypeIdentifier // "") | startswith("com.apple.CoreSimulator.SimDeviceType.iPhone-")))
+                | {udid, name, runtime: $runtime.name})
+          ' <<< "$simulators") || {
+            echo "No available iPhone Simulator found."
+            xcrun simctl list
+            exit 1
+          }
+          echo "$selection"
+          udid=$(jq -r .udid <<< "$selection")
+          xcrun simctl bootstatus "$udid" -b
+
+          app=build/DerivedData/Build/Products/Release-iphonesimulator/ConchSpike.app
+          test -s "$app/main.jsbundle"
+          bundle_id=$(plutil -extract CFBundleIdentifier raw -o - "$app/Info.plist")
+          xcrun simctl install "$udid" "$app"
+          launch=$(xcrun simctl launch "$udid" "$bundle_id")
+          echo "$launch"
+          sleep 8 # Give React Native time to render the sign-in screen.
+          kill -0 "${launch##*: }"
+          xcrun simctl io "$udid" screenshot build/first-screen.png
+
+      - name: upload Simulator screenshot
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ios-spike-simulator
+          path: spikes/mobile/ios/build/first-screen.png
+          if-no-files-found: error
 
   # Does a push to main touch what the desktop .deb is made of (#1598)? The
   # .deb job below builds the Rust voice helper, the web client and the

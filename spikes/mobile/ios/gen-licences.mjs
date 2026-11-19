@@ -1,13 +1,15 @@
 // Generates licences.md (#1393): the npm lockfile, and the CocoaPods inventory
-// from Podfile.lock when it exists. The Pod licences are read from each pod's
-// podspec under ios/Pods/Local Podspecs and ios/Pods/*/ after `pod install` on
-// the Mac; where a licence cannot be read it says so, and Nick fills it in
+// from Podfile.lock when it exists. After `pod install` on the Mac, read the
+// local podspecs or ask CocoaPods for the locked version in its spec repo.
+// Where a licence cannot be read it says so, and Nick fills it in
 // from the pod's own repository before signing. No dependencies.
 // usage: node gen-licences.mjs > licences.md
-import { readFileSync, existsSync, readdirSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-const here = new URL('.', import.meta.url).pathname;
+const here = fileURLToPath(new URL('.', import.meta.url));
 const lock = JSON.parse(readFileSync(join(here, 'package-lock.json'), 'utf8'));
 const pkg = JSON.parse(readFileSync(join(here, 'package.json'), 'utf8'));
 const out = [];
@@ -37,14 +39,33 @@ if (!existsSync(podLock)) {
     .map((l) => /^ {2}- ([^ (]+) \(([^)]+)\)/.exec(l)).filter(Boolean)
     .map((m) => [m[1], m[2]]);
   const specs = join(here, 'ios/Pods/Local Podspecs');
-  const licenceOf = (name) => {
-    const f = join(specs, `${name}.podspec.json`);
-    if (!existsSync(f)) return 'NOT READ: check the pod repository';
-    const l = JSON.parse(readFileSync(f, 'utf8')).license;
-    return typeof l === 'string' ? l : (l?.type ?? 'NOT READ: check the pod repository');
+  const licences = new Map();
+  const licenceOf = (name, version) => {
+    // Subspecs inherit the root pod's licence.
+    const [root] = name.split('/');
+    const key = `${root}@${version}`;
+    if (!licences.has(key)) {
+      let file = join(specs, `${root}.podspec.json`);
+      if (!existsSync(file)) {
+        const lookup = spawnSync('bundle', ['exec', 'pod', 'spec', 'which', root, `--version=${version}`], {
+          cwd: here, encoding: 'utf8',
+        });
+        file = lookup.status === 0 ? lookup.stdout.trim() : '';
+      }
+      // A spec repo may hold a Ruby .podspec (LiveKit's does) rather than
+      // .podspec.json: `pod ipc spec` prints any podspec as JSON.
+      const specJSON = () => {
+        if (!file.endsWith('.podspec')) return readFileSync(file, 'utf8');
+        const ipc = spawnSync('bundle', ['exec', 'pod', 'ipc', 'spec', file], { cwd: here, encoding: 'utf8' });
+        return ipc.status === 0 ? ipc.stdout : 'null';
+      };
+      const licence = file && existsSync(file) ? JSON.parse(specJSON())?.license : null;
+      licences.set(key, typeof licence === 'string' ? licence : (licence?.type ?? 'NOT READ: check the pod repository'));
+    }
+    return licences.get(key);
   };
-  out.push('Linked into the app. Licence read from the podspec in `ios/Pods/Local Podspecs` (pods fetched from a spec repo have no local podspec: those say NOT READ and Nick fills them in).', '');
+  out.push('Linked into the app. Licences come from the local or registry podspecs. Rows marked NOT READ need a licence from the pod repository.', '');
   out.push('| Pod | Version | Licence |', '| --- | --- | --- |');
-  for (const [n, v] of pods.sort((a, b) => a[0].localeCompare(b[0]))) out.push(`| \`${n}\` | ${v} | ${licenceOf(n)} |`);
+  for (const [n, v] of pods.sort((a, b) => a[0].localeCompare(b[0]))) out.push(`| \`${n}\` | ${v} | ${licenceOf(n, v)} |`);
 }
 console.log(out.join('\n'));

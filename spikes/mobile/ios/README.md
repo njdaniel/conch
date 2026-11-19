@@ -2,7 +2,7 @@
 
 A bare React Native 0.88.1 app (no Expo) for the iOS real-device experiment, under [ADR-016](../../../docs/adr/ADR-016-mobile-app.md) and [the design's section 7.2](../../../docs/design/mobile-app.md). M5-A is the scaffold, M5-B the logic (`src/logic/`, unit tested), and M5-C the app: sign-in, the channel list, Join, hold to talk, mute, deafen, open microphone, listen-only, diagnostics, and the native bridge for `AVAudioSession`. M5-D (this slice) adds the camera (`src/app/camera/`). It lives outside `make check` and `web/`.
 
-**Status: nothing iOS-native has been built or run.** M5-C was written on Linux, where Swift, Xcode and CocoaPods do not exist: `ConchVoice.swift`, `ConchVoice.m`, the bridging header, the `AppDelegate`, the `project.pbxproj` edits and `Info.plist` are uncompiled. Only the TypeScript is type-checked and unit tested (`npm test`, `./check.sh`). The Xcode project, `Podfile` and `Info.plist` are the React Native 0.88.1 template (`@react-native-community/template@0.88.1`), renamed. `ios/Podfile.lock` and the Pod licence inventory are produced on the Mac by Nick, by hand (decisions of 2026-11-05 on #1110); `./check.sh` reports them "pending the Mac build".
+**Status: first native verification is pending.** M5-C was written on Linux, where only the TypeScript checks and unit tests were run (`npm test`, `./check.sh`). The Xcode project, `Podfile` and `Info.plist` are the React Native 0.88.1 template (`@react-native-community/template@0.88.1`), renamed. The Mac steps below produce the lockfiles and Pod licence inventory for review (decisions of 2026-11-05 on #1110).
 
 ## Pins
 
@@ -10,11 +10,15 @@ React Native 0.88.1, React 19.3.0, Node 24.21.0 (`.nvmrc`, `engines`), Xcode 27.
 
 Deviations from the RN template: the deployment target is 16.4 (the template follows `min_ios_version_supported`, 15.1), the bundle id is `com.conchspike`, and the display name is "Conch Spike". The template's empty `NSLocationWhenInUseUsageDescription` is dropped: nothing here reads the location, and the spike declares only the permissions and capabilities its matrix needs (the iOS counterpart of trimming the Android manifest). The Android project, `react-native-safe-area-context` and `@react-native/new-app-screen` are dropped.
 
-The `Gemfile` is kept because `pod install` is run through it (`bundle exec pod install`, the template's way of pinning CocoaPods). Its gem requirements are ranges, so the Mac run produces `Gemfile.lock` with the exact versions, and that is committed too.
+The `Gemfile` pins CocoaPods 1.15.2 for `bundle exec pod install`. The Mac run produces `Gemfile.lock` with the exact versions of the remaining gems, and that is committed too.
+
+## Simulator CI (#1974)
+
+The `ios-spike` job in `.github/workflows/ci.yml` runs on `macos-15` when this directory or the job changes. It uses the runner's Xcode 26.3 and Ruby 3.3.10, installs the pinned npm packages and bundled gems, installs Pods, generates the licence inventory, and runs `./check.sh --installed` with Homebrew Bash. It builds an unsigned Release app for the Simulator with the JavaScript bundle embedded, boots an available iPhone, and uploads the first-screen screenshot as the `ios-spike-simulator` artifact. The screenshot records Simulator launch evidence.
 
 ## Mac steps (Nick, by hand)
 
-Prerequisites: Xcode 27.2 (`xcodebuild -version`), its command-line tools (`xcode-select --install`), Ruby with Bundler, Node 24.21.0 via `nvm`, an iPhone on iOS 16.4 or later, a USB cable, and an Apple ID signed in under Xcode > Settings > Accounts.
+Prerequisites: Xcode 27.2 (`xcodebuild -version`), its command-line tools (`xcode-select --install`), Ruby with Bundler, Bash 4+, Node 24.21.0 via `nvm`, an iPhone on iOS 16.4 or later, a USB cable, and an Apple ID signed in under Xcode > Settings > Accounts.
 
 1. `cd spikes/mobile/ios && nvm use && npm ci`
 2. `bundle config set path vendor/bundle && bundle install`  (writes `Gemfile.lock`)
@@ -112,7 +116,7 @@ Unverified on a device: that iOS reports AppState `inactive` for the camera perm
 
 ## Checks
 
-`./check.sh` (Linux or Mac) runs `scripts/web-depgate.sh` and `scripts/web-licences.sh` against this directory's manifest, lockfile and allowlists, then `npm ci --ignore-scripts` and `tsc --noEmit`. Then, if `ios/Podfile.lock` is not committed, it says "Pods PENDING the Mac build" and exits 0 for the npm half; once it is, it checks the lockfile has checksums and no ranges, and that `licences.md` has no placeholder or unread licence.
+`./check.sh` (Linux or Mac) runs `scripts/web-depgate.sh` and `scripts/web-licences.sh` against this directory's manifest, lockfile and allowlists, then runs `npm ci --ignore-scripts`, the typecheck and the unit tests. Use `./check.sh --installed` after `npm ci` to reuse the installed packages. If `ios/Podfile.lock` is missing, the script reports "Pods PENDING the Mac build" and exits 0 for the npm checks. With the lockfile present, it checks for checksums, version ranges, and placeholder or unread entries in `licences.md`.
 
 ## Licences
 
