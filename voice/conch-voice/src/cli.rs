@@ -236,10 +236,9 @@ pub struct ManagedArgs {
     /// `\\.\pipe\` and a name, of `keys_windows`'s fake Raw Input records (#1791); any other
     /// path is refused.
     pub test_key_device: Option<PathBuf>,
-    /// `--events-pipe`: a Unix-socket path (on Windows a `\\.\pipe\` name) to connect to for
-    /// events instead of file descriptor 3. Not secret. The desktop owner passes it; nobody
-    /// types it (`docs/design/linux-desktop.md` §5.2, `docs/design/windows-desktop.md` §3.3).
-    /// Checked by [`crate::channel`], not here.
+    /// `--events-pipe`: the desktop owner's Unix socket path or Windows named pipe.
+    /// Required on macOS and Windows. On Linux it replaces the inherited fd 3.
+    /// The endpoint name is public and [`crate::channel`] validates it.
     pub events_pipe: Option<PathBuf>,
     /// `--share-audio-owner`, passed by an owner that runs a companion (`helper` for the
     /// TUI, which passes nothing).
@@ -466,7 +465,9 @@ pub fn command() -> Command {
                 .value_parser(clap::value_parser!(OsString))
                 .help("connect to this endpoint for events instead of file descriptor 3; the desktop owner passes a Unix-socket path, on Windows a \\\\.\\pipe\\ name, never typed by hand"),
         );
-    let devices = Command::new("devices")
+    let devices = Command::new("devices");
+    #[cfg(target_os = "linux")]
+    let devices = devices
         .about("List microphones and speakers by the names the configuration takes, and keyboards")
         .long_about(format!(
             "Lists the microphones and the speakers {SYSTEM_NAME} has, by the names `input` and \
@@ -475,7 +476,16 @@ pub fn command() -> Command {
              read it, and prints a udev rule that would grant you read access to that one \
              device. It opens each keyboard to see whether it can, and reads nothing from any \
              of them; it opens no audio device."
-        ))
+        ));
+    #[cfg(not(target_os = "linux"))]
+    let devices = devices
+        .about("List microphones and speakers by the names the configuration takes")
+        .long_about(format!(
+            "Lists the microphones and the speakers {SYSTEM_NAME} has, by the names `input` and \
+             `output` under [audio] in the configuration file take, and marks the defaults. \
+             It opens no audio device."
+        ));
+    let devices = devices
         .arg(
             Arg::new("json")
                 .long("json")

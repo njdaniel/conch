@@ -9,8 +9,8 @@
 //! the parent process changing, SIGTERM and SIGINT, each of which is the owner done with
 //! this process; and then what `join` takes, but for the channel, the server and the login,
 //! which the start names (§9).
-//! Output: events on file descriptor 3, one JSON object per line, written by this module's
-//! [`Events`] and by nothing else: a hello first, offering v1, v2 and v3, then states, acks
+//! Output: events on Linux's inherited fd 3 or on the owner's endpoint, one JSON object
+//! per line, written by [`Events`]: a hello first, offering v1, v2 and v3, then states, acks
 //! and protocol errors in the session's version. Nothing else this process writes is read
 //! as the protocol.
 //! With `--events-pipe <path>` the events go instead to a Unix socket the desktop owner
@@ -23,8 +23,9 @@
 //! binding and **not authentication**: a process of the same user that unlinks the socket
 //! and binds its own before the helper connects receives the attach line and every event,
 //! and that same-user unlink-and-rebind is out of scope by design
-//! (`docs/design/linux-desktop.md` §5.2). Without the option nothing here changes and
-//! `CONCH_VOICE_ATTACH` is not read.
+//! (`docs/design/linux-desktop.md` §5.2). Without the option, Linux uses the inherited pipe
+//! and macOS returns the event-pipe error (`docs/design/macos-desktop.md` §3.2).
+//! `CONCH_VOICE_ATTACH` is read only with the option.
 //! On Windows `--events-pipe` takes the name of a named pipe the owner created
 //! (`\\.\pipe\conch-voice-<id>`, `docs/design/windows-desktop.md` §3.3, #938) and is the
 //! only events channel there is: file descriptor 3 does not exist. The session on it is
@@ -94,11 +95,11 @@
 
 use std::collections::VecDeque;
 use std::fs::File;
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 use std::fs::OpenOptions;
 use std::future::Future;
 use std::io::{Read, Write};
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 use std::os::unix::fs::FileTypeExt;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
@@ -1488,7 +1489,7 @@ pub fn signals(inputs: mpsc::UnboundedSender<Input>, watchdog: Watchdog) -> std:
     Ok(())
 }
 
-/// Opens the event pipe the owner handed over as file descriptor 3, without `unsafe`: the
+/// On Linux, opens the event pipe the owner handed over as file descriptor 3, without `unsafe`: the
 /// same pipe opened again by its name under `/proc/self/fd`, checked to be a pipe before
 /// and after. The inherited descriptor stays open beside it. Opening a pipe to write waits
 /// for a reader; the owner reads it from the start, and one that is gone already is not
@@ -1497,7 +1498,7 @@ pub fn signals(inputs: mpsc::UnboundedSender<Input>, watchdog: Watchdog) -> std:
 /// # Errors
 ///
 /// [`Error::EventPipe`] if file descriptor 3 is not open, is not a pipe, or has no reader.
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 pub fn open_event_pipe() -> Result<File, Error> {
     use conch_voice_api::{VOICE_CONTROL_EVENT_FD, VOICE_CONTROL_HELLO_TIMEOUT_MS};
     let path = PathBuf::from(format!("/proc/self/fd/{VOICE_CONTROL_EVENT_FD}"));
@@ -1520,6 +1521,17 @@ pub fn open_event_pipe() -> Result<File, Error> {
         return Err(Error::EventPipe("is not a pipe"));
     }
     Ok(file)
+}
+
+/// macOS lacks `/proc/self/fd`. The owner supplies a Unix socket with `--events-pipe`
+/// (macOS desktop design §3.2).
+///
+/// # Errors
+///
+/// Always [`Error::EventPipe`].
+#[cfg(all(unix, not(target_os = "linux")))]
+pub fn open_event_pipe() -> Result<File, Error> {
+    Err(Error::EventPipe("is not open"))
 }
 
 /// What [`open_event_pipe`] answers where there is no inherited file descriptor 3 to open

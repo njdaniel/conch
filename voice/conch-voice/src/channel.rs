@@ -245,8 +245,8 @@ pub fn check_endpoint(path: &Path, uid: u32) -> Result<(), Error> {
     Ok(())
 }
 
-/// Connects to `path`, once: there is no retry on Linux, a socket whose listener is not
-/// there is an owner that is not. The owner's backlog being full would make a blocking
+/// Connects to `path` once. A socket without a listener means the owner is gone.
+/// The owner's backlog being full would make a blocking
 /// connect wait, so it is made on a thread and given what the hello is given.
 ///
 /// # Errors
@@ -1385,14 +1385,15 @@ mod tests {
 
     /// The directory's owner is its own refusal, before its mode: a socket of ours in a
     /// directory of someone else's (`/dev/shm` is root's) is `parent not owned`, though the
-    /// socket is ours. Needs a writable `/dev/shm`; where there is none the case is skipped.
+    /// socket is ours. Needs a writable Linux `/dev/shm`.
+    #[cfg(target_os = "linux")]
     #[test]
     fn a_directory_of_someone_elses_is_refused_though_the_socket_is_ours() {
         let shm = Path::new("/dev/shm");
         let Ok(root_owned) = std::fs::metadata(shm).map(|m| m.uid()) else {
             return;
         };
-        let ours = std::fs::metadata("/proc/self").unwrap().uid();
+        let ours = crate::devices::current_uid().unwrap();
         if root_owned == ours {
             return;
         }
@@ -1446,10 +1447,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(
-        target_os = "macos",
-        ignore = "MF2 (#1738): successful socket attach needs a macOS current_uid implementation"
-    )]
     fn attach_attaches_with_the_line_first_and_hands_back_both_handles() {
         let fixture = fixture();
         let scrubber = Scrubber::new();

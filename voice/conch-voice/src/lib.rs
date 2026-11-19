@@ -27,9 +27,9 @@
 //!
 //! `conch-voice managed` is the same client run for `conch`'s TUI ([`managed`]): its
 //! input is also its owner's commands on standard input, and the end of that input; its
-//! output is also one JSON event per line on file descriptor 3, where nothing else is
-//! written; and its channel, server and login come from its owner's start, not from the
-//! command line, `CONCH_SERVER` or `voice.toml`.
+//! output is one JSON event per line on Linux's inherited file descriptor 3 or the
+//! endpoint named by `--events-pipe` (required on macOS and Windows). Its channel, server
+//! and login come from its owner's start.
 //!
 //! A desktop owner speaking `conch.voice_control.v3` can also ask for the sound of its
 //! screen share (#1586, `docs/design/linux-share-audio.md`; [`share_audio`]): the input is
@@ -343,10 +343,10 @@ pub fn join(
 ///
 /// # Errors
 ///
-/// [`Error::EventPipe`] if file descriptor 3 is not a pipe that can be written, before
-/// anything else is done; with `--events-pipe`, which file descriptor 3 is not consulted
-/// for, [`Error::Attach`] if the endpoint cannot be attached to ([`channel::attach`]), before
-/// anything else is done; otherwise what the owner was told in a failed state.
+/// [`Error::EventPipe`] if Linux cannot write to the pipe on file descriptor 3 or macOS
+/// starts without `--events-pipe`; [`Error::Unsupported`] if Windows starts without it.
+/// With `--events-pipe`, only that endpoint is consulted ([`channel::attach`]), and a
+/// failed attach returns [`Error::Attach`]. These checks precede the session.
 pub fn managed(
     args: &ManagedArgs,
     environment: &Environment,
@@ -355,11 +355,9 @@ pub fn managed(
 ) -> Result<(), Error> {
     #[cfg(not(unix))]
     let _ = parent;
-    // Descriptor 3 is looked at before anything is created: a runtime holds descriptors of
-    // its own (epoll), and with 3 closed one of them would become 3 and be judged in place
-    // of what the owner handed over (Linux's behaviour is unchanged by `--events-pipe`
-    // existing). Nothing else has been opened or read yet. Exactly one of the two sources
-    // is looked at.
+    // On Linux, validate the inherited descriptor before creating the runtime: an epoll
+    // descriptor could otherwise take the place of a closed fd 3. On macOS and Windows,
+    // refuse a missing endpoint here, before starting the runtime.
     let fd3 = match &args.events_pipe {
         Some(_) => None,
         None => Some(managed::open_event_pipe()?),
@@ -443,10 +441,10 @@ fn list_devices(_wait: Duration) -> Result<devices::DeviceTable, Error> {
 }
 
 /// `conch-voice devices`: the microphones and speakers PipeWire has, by the names the
-/// configuration takes, and then the keyboards under `/dev/input/by-id`, whether this user
-/// can read each, and the udev rule that would grant one. No audio device is opened and
-/// nothing is read from any keyboard. A machine PipeWire does not run on gets a line that
-/// says so, and the keyboards all the same.
+/// configuration takes. On Linux, it also lists keyboards under `/dev/input/by-id`, whether
+/// this user can read each, and the udev rule that would grant access to one. No audio
+/// device is opened and nothing is read from any keyboard. Failure to list audio devices
+/// is reported in the audio section.
 ///
 /// With `json`, only the first half, as one `conch.voice_devices.v1` line
 /// ([`devices::device_list`]): no keyboard is listed, opened or looked up, and nothing is
@@ -461,6 +459,7 @@ pub fn devices(json: bool, environment: &Environment, scrubber: &Scrubber) -> Re
         environment,
         scrubber,
         || list_devices(audio::LISTING_WAIT).map_err(|error| error.to_string()),
+        #[cfg(target_os = "linux")]
         |out| {
             devices::report(
                 Path::new(devices::BY_ID),
@@ -469,6 +468,8 @@ pub fn devices(json: bool, environment: &Environment, scrubber: &Scrubber) -> Re
                 out,
             )
         },
+        #[cfg(not(target_os = "linux"))]
+        |_| Ok(()),
         &mut std::io::stdout().lock(),
         &mut std::io::stderr().lock(),
     )

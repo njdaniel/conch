@@ -163,8 +163,8 @@ pub enum Error {
     #[error("cannot write to standard output: {0}")]
     Output(#[source] std::io::Error),
 
-    /// `managed` was started without its event pipe: file descriptor 3 is not open, or is
-    /// not a pipe (`docs/design/tui-voice.md` §2). Nothing else was done.
+    /// Linux could not open the inherited event pipe on fd 3, or macOS was started
+    /// without `--events-pipe` (`docs/design/macos-desktop.md` §3.2).
     #[error("managed: file descriptor 3 {0}; conch-voice managed is started by conch, not by hand")]
     EventPipe(&'static str),
 

@@ -199,7 +199,7 @@ So the Linux layout, `conch/<profile-id>/<name>`, does not fit on macOS for ids 
 
 `channel::check_endpoint` compares the socket's and its directory's owner with the helper's uid. Three ways to learn it under `forbid(unsafe_code)`:
 
-1. **`rustix::process::getuid()`**, a safe function (memory, not checked) of a crate already in `Cargo.lock` at 1.1.5 through `tempfile` and the PipeWire bindings. As a direct dependency it is a line in `voice/deps-allowlist.txt` and Nick's sign-off. It also serves Linux, and would retire the `/proc/self` read there.
+1. **`rustix::process::geteuid()`** (the effective uid, as the owner of `/proc/self` was; taken in #1738), a safe function (memory, not checked) of a crate already in `Cargo.lock` at 1.1.5 through `tempfile` and the PipeWire bindings. As a direct dependency it is a line in `voice/deps-allowlist.txt` and Nick's sign-off. It also serves Linux, and would retire the `/proc/self` read there.
 2. **No new dependency:** the helper creates a file of its own with `create_new` in the socket's directory, reads that file's owner, and removes it. A new file is owned by the process's effective uid. It writes to disk to learn a number, and it needs write access to a directory the helper otherwise only reads.
 3. `libc::getuid`: `unsafe`. Refused.
 
