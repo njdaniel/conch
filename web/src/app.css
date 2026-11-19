@@ -6426,3 +6426,29 @@ button.link {
   width: 100%;
   max-width: 100%;
 }
+
+/* Personal blocks (issue #1832): a blocked person's message is one quiet row
+   with Show; the confirmation reuses .member-confirm. */
+.message.blocked {
+  color: var(--muted, #6b6b6b);
+  font-style: italic;
+}
+.blocked-message {
+  display: flex;
+  gap: 0.5rem;
+  align-items: baseline;
+}
+.blocked-people ul {
+  list-style: none;
+  padding: 0;
+}
+.blocked-people li {
+  display: flex;
+  gap: 0.5rem;
+  align-items: baseline;
+  margin: 0.25rem 0;
+}
+.profile-card-block,
+.voice-volume-unmute {
+  margin-top: 0.25rem;
+}

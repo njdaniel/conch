@@ -313,6 +313,9 @@ func TestAuthorRemovalMigrationPreservesOldModeratorTombstone(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Reconstruct the previous schema, including a moderator's own removal.
+	if _, err := s.db.Exec("DROP TABLE blocks"); err != nil { // migration 51 (issue #1832)
+		t.Fatal(err)
+	}
 	if _, err := s.db.Exec("ALTER TABLE message_removals DROP COLUMN by_author"); err != nil {
 		t.Fatal(err)
 	}

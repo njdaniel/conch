@@ -638,6 +638,8 @@ var reauthDecisions = map[string]reauthDecision{
 	"POST /v1/channels":                                                                    {reauthNone, "a member makes a channel: no grant beyond the creator's own membership of it"},
 	"POST /v1/channels/{channel}/join":                                                     {reauthNone, "a member joins a public channel themselves, with can_decide = 0: no grant"},
 	"PUT /v1/notifications/preferences":                                                    {reauthNone, "a person sets their own sign-in's notification preferences (issue #1713): no grant, and nothing another person can see"},
+	"PUT /v1/blocks/{principal_id}":                                                        {reauthNone, "a person blocks someone on their own list (issue #1832): a preference, no grant, and nothing another person can see"},
+	"DELETE /v1/blocks/{principal_id}":                                                     {reauthNone, "a person unblocks someone on their own list (issue #1832): no grant"},
 	"POST /v1/push/registrations":                                                          {reauthNone, "a person registers their own sign-in for push (issue #1714): no grant, and the target is write-only"},
 	"PUT /v1/push/registrations/{id}":                                                      {reauthNone, "a person replaces the target of their own sign-in's registration (issue #1714): no grant"},
 	"DELETE /v1/push/registrations/{id}":                                                   {reauthNone, "a person ends their own sign-in's registration (issue #1714): no grant"},

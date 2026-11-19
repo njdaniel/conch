@@ -5187,6 +5187,43 @@ export const listPendingNotificationsResponseV1 = object<ListPendingNotification
   more: bool,
 });
 
+// schema.BlockV1
+export interface BlockV1 {
+  principal_id: number;
+  name: string;
+  kind: PrincipalKind;
+  created_at: string;
+}
+
+export const blockV1 = object<BlockV1>({
+  principal_id: int,
+  name: str,
+  kind: principalKind,
+  created_at: timestamp,
+});
+
+// schema.ListBlocksResponseV1
+export interface ListBlocksResponseV1 {
+  blocks: BlockV1[];
+  limit: number;
+}
+
+export const listBlocksResponseV1 = object<ListBlocksResponseV1>({
+  blocks: array(blockV1),
+  limit: int,
+});
+
+// schema.BlocksChangedV1
+export const blocksChangedV1Schema = 'conch.blocks_changed.v1';
+
+export interface BlocksChangedV1 {
+  schema: typeof blocksChangedV1Schema;
+}
+
+export const blocksChangedV1 = object<BlocksChangedV1>({
+  schema: vocab<typeof blocksChangedV1Schema>({ [blocksChangedV1Schema]: true }),
+});
+
 // schema.Error
 export interface ErrorV0 {
   code: string;

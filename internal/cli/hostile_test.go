@@ -328,6 +328,8 @@ func walkCases(t *testing.T) []walkCase {
 		}},
 		{key: "whoami", args: func(u, _ string) []string { return []string{"whoami", "--server", u} }},
 		{key: "rename", whoamiOK: true, args: func(u, _ string) []string { return []string{"rename", "--server", u, "bob"} }},
+		{key: "block", args: func(u, _ string) []string { return []string{"block", "list", "--server", u} }},
+		{key: "block", args: func(u, _ string) []string { return []string{"block", "add", "--server", u, "9"} }},
 		{key: "report", quietWhenOK: true, args: func(u, _ string) []string {
 			return []string{"report", "--server", u, "--did", "a", "--expected", "b", "--happened", "c", "--often", "once", "--yes"}
 		}},
@@ -459,6 +461,10 @@ func hostileServer(t *testing.T, ok, whoamiOK bool) *httptest.Server {
 			write(w, http.StatusCreated, schema.CreateChannelResponse{Channel: schema.ChannelV0{ID: 1, Name: hostile, CreatedAt: ts.Time()}})
 		case "POST /v0/principals":
 			write(w, http.StatusCreated, schema.CreatePrincipalResponse{Principal: schema.PrincipalV0{ID: 9, Kind: schema.PrincipalKind(hostile), Name: hostile, CreatedAt: ts.Time()}})
+		case "GET /v1/blocks":
+			write(w, http.StatusOK, schema.ListBlocksResponseV1{Blocks: []schema.BlockV1{{PrincipalID: 9, Name: hostile, Kind: schema.PrincipalHuman, CreatedAt: ts}}, Limit: schema.MaxBlocks})
+		case "PUT /v1/blocks/9":
+			write(w, http.StatusOK, schema.BlockV1{PrincipalID: 9, Name: hostile, Kind: schema.PrincipalHuman, CreatedAt: ts})
 		case "PUT /v1/principals/9/name", "PUT /v1/principals/42/name":
 			write(w, http.StatusOK, schema.RenamePrincipalResponseV1{Principal: schema.PrincipalV0{ID: 9, Kind: schema.PrincipalKind(hostile), Name: hostile, CreatedAt: ts.Time()}})
 		case "GET /v1/principals":

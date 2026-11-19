@@ -294,6 +294,7 @@ export function useAgents({
   onChannelsChanged,
   onPermissionsChanged,
   onDirectoryChanged,
+  onBlocksChanged,
 }: {
   readonly signedIn: boolean;
   readonly channel: string | null;
@@ -325,6 +326,9 @@ export function useAgents({
   // The directory answer may have changed (conch.directory_changed.v1, issue
   // #993): the community is read again and replaced.
   readonly onDirectoryChanged?: () => void;
+  // The person's block list may have changed (conch.blocks_changed.v1, issue
+  // #1832), or the socket was down and it may have meanwhile.
+  readonly onBlocksChanged?: () => void;
 }): Agents {
   const [state, dispatch] = useReducer(agentsReducer, initialAgents);
   const [members, setMembers] = useState<readonly ChannelMemberV1[]>([]);
@@ -436,6 +440,9 @@ export function useAgents({
           // again, the first of a feed too: a feed made after a channel was
           // selected has missed whatever changed before it, and no event says so.
           onPermissionsChanged?.();
+          // So does the block list: a block made on another device while
+          // this socket was down sent its signal to no one here.
+          onBlocksChanged?.();
           break;
         case 'waiting':
           interrupted = true;
@@ -530,6 +537,9 @@ export function useAgents({
           case 'directoryChanged':
             onDirectoryChanged?.();
             break;
+          case 'blocksChanged':
+            onBlocksChanged?.();
+            break;
         }
       },
       onStatus,
@@ -540,7 +550,7 @@ export function useAgents({
       if (retry !== null) realClock.clearTimeout(retry);
       feed.stop();
     };
-  }, [open, channelId, nameOf, viewer, sessionId, onUnauthorized, onChannel, onManages, onReadState, onMessage, onMessageEdited, onChannelsChanged, onPermissionsChanged, onDirectoryChanged, replace, healthy]);
+  }, [open, channelId, nameOf, viewer, sessionId, onUnauthorized, onChannel, onManages, onReadState, onMessage, onMessageEdited, onChannelsChanged, onPermissionsChanged, onDirectoryChanged, onBlocksChanged, replace, healthy]);
 
   // The members line is read again each time the socket comes back.
   useEffect(() => {
