@@ -56,7 +56,7 @@ export function Note(props: { text: string | null; kind?: 'warn' | 'plain' }) {
 }
 
 export const styles = StyleSheet.create({
-  screen: { flex: 1, backgroundColor: colours.paper, padding: 16, paddingTop: 40 },
+  screen: { flex: 1, backgroundColor: colours.paper, padding: 16 },
   header: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 },
   title: { fontSize: 22, fontWeight: '600', color: colours.ink },
   label: { fontSize: 14, color: colours.muted, marginTop: 12, marginBottom: 4 },
