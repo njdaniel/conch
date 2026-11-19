@@ -1282,8 +1282,19 @@ async fn an_attach_line_that_cannot_be_written_is_exit_2_having_done_nothing_els
             let _held = loop {
                 match owner.listener.accept() {
                     Ok((stream, _)) => {
-                        stream.shutdown(Shutdown::Read).unwrap();
-                        break stream;
+                        // Linux fails a write into a socket its peer shut for reading
+                        // (EPIPE); macOS keeps taking such writes, so there the owner
+                        // closes its end outright, which fails the write as Linux does.
+                        #[cfg(target_os = "linux")]
+                        {
+                            stream.shutdown(Shutdown::Read).unwrap();
+                            break Some(stream);
+                        }
+                        #[cfg(not(target_os = "linux"))]
+                        {
+                            drop(stream);
+                            break None;
+                        }
                     }
                     Err(_) if Instant::now() < deadline => std::hint::spin_loop(),
                     Err(error) => panic!("the helper never connected: {error}"),
