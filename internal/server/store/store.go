@@ -1131,6 +1131,18 @@ BEGIN SELECT RAISE(ABORT, 'message removals are permanent'); END`,
 	// 50: distinguish author removals from moderation, including a moderator
 	// removing their own message. Existing rows keep their original meaning.
 	{`ALTER TABLE message_removals ADD COLUMN by_author INTEGER NOT NULL DEFAULT 0 CHECK (by_author IN (0, 1))`},
+	// 51 (credentialProvenanceMigration): who made each credential (issue
+	// #2042, provenance.go). credentials.self_made is 1 when the principal
+	// made it for themselves, 0 when another principal made it or nobody
+	// knows; sign_in_links.self_made is 1 for a device link made on a
+	// self-made credential, which is what its redemption passes on. Every
+	// existing row is 0, made by another: the conservative answer, since
+	// which path made an old row is not on record. The DM and call routes
+	// refuse a credential that is not self-made; nothing else reads it.
+	{
+		`ALTER TABLE credentials ADD COLUMN self_made INTEGER NOT NULL DEFAULT 0 CHECK (self_made IN (0, 1))`,
+		`ALTER TABLE sign_in_links ADD COLUMN self_made INTEGER NOT NULL DEFAULT 0 CHECK (self_made IN (0, 1))`,
+	},
 }
 
 // migrationSteps holds Go code that runs inside a migration's transaction

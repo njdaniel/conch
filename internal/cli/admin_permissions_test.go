@@ -70,7 +70,7 @@ manage_channels          off      on         members
 change_server_settings   off      off        members
 read_audit_log           off      off        members
 use_camera               on       on         -
-act_as_members: can sign in as, and post as, any member who isn't an owner
+act_as_members: can sign in as, and post as, any member who isn't an owner. It does not reach their direct messages or calls
 read_audit_log: sees every member and every private channel's name in the audit trail
 preset: group
 you may change: member, operator
@@ -513,7 +513,7 @@ func TestAdminPermissionsHostileServer(t *testing.T) {
 		wantSafe bool
 	}{
 		{name: "show: unknown names print by name", doc: hostileDoc, args: []string{"show"}, wantSafe: true,
-			wantOut: []string{`\u202e`, "act_as_members: can sign in as, and post as, any member who isn't an owner\n", "warning: open_signup_on: members cannot make member links"}},
+			wantOut: []string{`\u202e`, "act_as_members: can sign in as, and post as, any member who isn't an owner. It does not reach their direct messages or calls\n", "warning: open_signup_on: members cannot make member links"}},
 		{name: "show: an oversized document", raw: oversized, args: []string{"show"}, wantErr: "larger than"},
 		{name: "show: not a document", raw: `["x"]`, args: []string{"show"}, wantErr: "decode read permissions response"},
 		{name: "set: unknown values in the answer", doc: hostileDoc, args: []string{"set", "--members", "off", "use_voice"}, wantSafe: true,

@@ -256,6 +256,10 @@ type usableLink struct {
 	purpose   schema.SignInLinkPurpose
 	label     string
 	principal Principal
+	// selfMade says the credential its redemption issues is the person's
+	// own (issue #2042): a device link its person made on a self-made
+	// credential. Every other link is made by another.
+	selfMade bool
 }
 
 // liveLink is a link whose row still works, before anything about its
@@ -264,6 +268,8 @@ type liveLink struct {
 	id, principalID, createdBy int64
 	purpose                    schema.SignInLinkPurpose
 	label                      string
+	// selfMade is the row's sign_in_links.self_made (issue #2042).
+	selfMade bool
 }
 
 // liveSignInLinkTx finds the link whose code hashes to codeHash and returns
@@ -283,9 +289,9 @@ func liveSignInLinkTx(ctx context.Context, tx execer, codeHash string, now time.
 	)
 	switch err := tx.QueryRowContext(ctx,
 		`SELECT l.id, l.code_hash, l.principal_id, l.created_by, l.expires_at, l.used_at, l.closed_at, l.purpose, l.label,
-		        l.auth_generation = p.auth_generation
+		        l.auth_generation = p.auth_generation, l.self_made
 		 FROM sign_in_links l JOIN principals p ON p.id = l.principal_id WHERE l.code_hash = ?`, codeHash,
-	).Scan(&l.id, &storedHash, &l.principalID, &l.createdBy, &expiresAt, &usedAt, &closedAt, &purpose, &label, &current); {
+	).Scan(&l.id, &storedHash, &l.principalID, &l.createdBy, &expiresAt, &usedAt, &closedAt, &purpose, &label, &current, &l.selfMade); {
 	case errors.Is(err, sql.ErrNoRows):
 		return liveLink{}, ErrSignInLinkInvalid
 	case err != nil:
@@ -364,7 +370,12 @@ func usableSignInLinkTx(ctx context.Context, tx execer, codeHash string, now tim
 	case err != nil:
 		return usableLink{}, fmt.Errorf("store: sign-in link principal: %w", err)
 	}
-	return usableLink{id: l.id, purpose: l.purpose, label: l.label, principal: p}, nil
+	// Only a device link can pass on a self-made credential, and only one its
+	// person made on a self-made credential of their own; any other link was
+	// made by someone else (an act_as_members holder), whatever its row says
+	// (issue #2042).
+	self := l.purpose == schema.SignInLinkPurposeDevice && l.createdBy == l.principalID && l.selfMade
+	return usableLink{id: l.id, purpose: l.purpose, label: l.label, principal: p, selfMade: self}, nil
 }
 
 // usableLinkOfTx is usableSignInLinkTx for a route that takes only the
@@ -460,8 +471,10 @@ func (s *Store) RedeemSignInLink(ctx context.Context, codeHash string, now time.
 			}
 		}
 		// Issued by the link, not by a principal: issued_by stays NULL, as
-		// the credential_created row's actor is the link (issue #1024).
-		cred, err := insertCredentialTx(ctx, tx, p.ID, label, token, now, &exp, lifetime, 0)
+		// the credential_created row's actor is the link (issue #1024). Its
+		// provenance is the link's (issue #2042): self-made only for the
+		// person's own device link made on a self-made credential.
+		cred, err := insertCredentialTx(ctx, tx, p.ID, label, token, now, &exp, lifetime, 0, credentialMaker(l.selfMade))
 		if err != nil {
 			return err
 		}
@@ -657,10 +670,17 @@ func (s *Store) CreateDeviceLink(ctx context.Context, actor string, principalID,
 		if req.Label != "" {
 			label = req.Label
 		}
+		// The link passes on the provenance of the credential that made it
+		// (issue #2042): one made on a credential someone else made for the
+		// person must not sign a device in as self-made.
+		maker, err := credentialSelfMadeTx(ctx, tx, credentialID, principalID)
+		if err != nil {
+			return err
+		}
 		res, err := tx.ExecContext(ctx,
-			`INSERT INTO sign_in_links (code_hash, principal_id, created_by, created_at, expires_at, purpose, label, auth_generation)
-			 SELECT ?, ?, ?, ?, ?, 'device', ?, auth_generation FROM principals WHERE id = ?`,
-			HashSignInLinkCode(code), principalID, principalID, now.UnixMilli(), expires.UnixMilli(), label, principalID)
+			`INSERT INTO sign_in_links (code_hash, principal_id, created_by, created_at, expires_at, purpose, label, auth_generation, self_made)
+			 SELECT ?, ?, ?, ?, ?, 'device', ?, auth_generation, ? FROM principals WHERE id = ?`,
+			HashSignInLinkCode(code), principalID, principalID, now.UnixMilli(), expires.UnixMilli(), label, bool(maker), principalID)
 		if err != nil {
 			return fmt.Errorf("store: create device link: insert: %w", err)
 		}

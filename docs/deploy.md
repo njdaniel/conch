@@ -597,7 +597,7 @@ A permission is a switch with one cell for members and one for operators. Owners
 
 Two of them need a sentence:
 
-- **`act_as_members`** "can sign in as, and post as, any member who isn't an owner": it covers making a credential, a sign-in link or a hook for someone else. It needs `manage_members`.
+- **`act_as_members`** "can sign in as, and post as, any member who isn't an owner": it covers making a credential, a sign-in link or a hook for someone else. It needs `manage_members`. It does not reach a member's direct messages or calls: every credential records whether its person made it themselves (a password sign-in, their own invite, or a device link they made) or someone else did, and the DM and call routes refuse one made by someone else with `403 own_sign_in_required`, telling the member to sign in themselves. Credentials from before this check are treated as made by someone else, so after the upgrade each member signs in once more before their DMs and calls open; nothing else changes.
 - **`read_audit_log`** "sees every member and every private channel's name in the audit trail".
 
 A member's cell can't be on while the operators' is off, `share_screen` and `use_camera` need `use_voice`, and the "fixed" cells can't be changed. The server refuses a change that breaks one of these and says which.
