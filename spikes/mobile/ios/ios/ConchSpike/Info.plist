@@ -44,6 +44,8 @@
 		<key>NSAllowsLocalNetworking</key>
 		<true/>
 	</dict>
+	<key>NSCameraUsageDescription</key>
+	<string>Conch Spike uses the camera to send your picture to a voice channel when you turn the camera on.</string>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>Conch Spike connects to the conch server and the voice server on your local network during development.</string>
 	<key>NSMicrophoneUsageDescription</key>
