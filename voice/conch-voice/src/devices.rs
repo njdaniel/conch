@@ -1,18 +1,18 @@
 //! `conch-voice devices`: the microphones and speakers PipeWire has, by the names the
-//! configuration takes; on Linux, also the keyboards, whether this user can read each,
-//! and how to grant read access to one (`docs/design/conch-voice.md` §4 and §8).
+//! configuration takes. Except on macOS, it also reports on keyboards, whether this user
+//! can read each, and how to grant read access to one (`docs/design/conch-voice.md` §4 and §8).
 //!
 //! Input: the platform's list of devices (a [`DeviceTable`], which the caller reads and this
-//! module only formats) and, on Linux, the entries of `/dev/input/by-id/`. Output: text
+//! module only formats) and, except on macOS, the entries of `/dev/input/by-id/`. Output: text
 //! on standard output or, for `--json`, one `conch.voice_devices.v1` document ([`device_list`])
-//! from the audio table. Owns nothing: **no audio device is opened**. The Linux text report
-//! opens each keyboard read-only to check access and closes it at once.
+//! from the audio table. Owns nothing: **no audio device is opened**. The text report checks each
+//! keyboard with the platform's event-device rule and closes any file it opens at once.
 //!
 //! The audio half lists a device only under a name that can be written into the
 //! configuration file as it stands: a name with a control character, a quotation mark or a
 //! backslash is counted and not shown.
 //!
-//! What the Linux keyboard report keeps to:
+//! What the keyboard report keeps to:
 //!
 //! - It says what read access to a keyboard gives **before** it says how to grant it, and
 //!   all of it: every key, the means to take the keyboard from everything else, for a user
@@ -28,7 +28,7 @@
 //!   Every line passes [`one_line`] as well.
 
 use std::io::{self, Write};
-#[cfg(target_os = "linux")]
+#[cfg(not(target_os = "macos"))]
 use std::path::Path;
 
 use conch_voice_api::{
@@ -36,13 +36,13 @@ use conch_voice_api::{
     VoiceDevice, VoiceDevicesConfig, VoiceDevicesPipeWire, VoiceDevicesV1, default_config_dir,
     is_writable_device_name,
 };
-#[cfg(target_os = "linux")]
+#[cfg(not(target_os = "macos"))]
 use conch_voice_control::DEFAULT_MAX_TRANSMIT_SECS;
 
 use crate::audio::SYSTEM_NAME;
 use crate::cli::{Environment, read_config};
 use crate::error::Error;
-#[cfg(target_os = "linux")]
+#[cfg(not(target_os = "macos"))]
 use crate::keydev::{self, DeviceRule, Problem};
 use crate::secrets::{CUT_MARK, cut, one_line};
 
@@ -270,23 +270,23 @@ pub fn audio_unavailable(why: &str, out: &mut dyn Write) -> io::Result<()> {
 }
 
 /// Where udev links each input device under a name that does not change between boots.
-#[cfg(target_os = "linux")]
+#[cfg(not(target_os = "macos"))]
 pub const BY_ID: &str = "/dev/input/by-id";
 
 /// How udev ends the name of a keyboard's event device. It is a convention of udev's
 /// rules, not a guarantee: some keyboards have a second entry for their media keys, and a
 /// device that is not a keyboard can claim to be one.
-#[cfg(target_os = "linux")]
+#[cfg(not(target_os = "macos"))]
 const KEYBOARD_SUFFIX: &str = "-kbd";
 
 /// The file the printed rule goes in. It must sort after the rules that make the
 /// `by-id` links (60), since the rule matches on one.
-#[cfg(target_os = "linux")]
+#[cfg(not(target_os = "macos"))]
 const RULES_FILE: &str = "/etc/udev/rules.d/70-conch-voice.rules";
 
 /// One keyboard found in the directory.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[cfg(target_os = "linux")]
+#[cfg(not(target_os = "macos"))]
 pub struct Keyboard {
     /// The entry's name, such as `usb-Example_Keyboard-event-kbd`.
     pub name: String,
@@ -296,7 +296,7 @@ pub struct Keyboard {
 
 /// What the directory holds that claims to be a keyboard.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
-#[cfg(target_os = "linux")]
+#[cfg(not(target_os = "macos"))]
 pub struct Found {
     /// The keyboards whose names are fit to show, by name.
     pub keyboards: Vec<Keyboard>,
@@ -312,7 +312,7 @@ pub struct Found {
 /// # Errors
 ///
 /// What the operating system said, if the directory cannot be listed.
-#[cfg(target_os = "linux")]
+#[cfg(not(target_os = "macos"))]
 pub fn keyboards(by_id: &Path, rule: DeviceRule) -> io::Result<Found> {
     let mut found = Found::default();
     for entry in std::fs::read_dir(by_id)? {
@@ -341,7 +341,7 @@ pub fn keyboards(by_id: &Path, rule: DeviceRule) -> io::Result<Found> {
 /// and digits and `#+-.:=@_`. Anything else is not put in a rule, and is not shown at all:
 /// a name can hold characters that reorder or hide text on a terminal without being
 /// control characters.
-#[cfg(target_os = "linux")]
+#[cfg(not(target_os = "macos"))]
 fn fit_for_a_rule(name: &str) -> bool {
     !name.is_empty()
         && name
@@ -356,7 +356,7 @@ fn fit_for_a_rule(name: &str) -> bool {
 /// entry to read it. It changes neither the device's owner nor its group, and grants no
 /// write access.
 #[must_use]
-#[cfg(target_os = "linux")]
+#[cfg(not(target_os = "macos"))]
 pub fn udev_rule(name: &str, uid: u32) -> Option<String> {
     fit_for_a_rule(name).then(|| {
         format!(
@@ -383,7 +383,7 @@ pub fn current_uid() -> Option<u32> {
 }
 
 /// What read access to a keyboard gives. Printed before any way of granting it.
-#[cfg(target_os = "linux")]
+#[cfg(not(target_os = "macos"))]
 const WHAT_IS_GRANTED: &str = "\
 What granting access means
   Read access to a keyboard's event device lets a program see every key pressed on that
@@ -411,7 +411,7 @@ What granting access means
 ";
 
 /// What can keep a release from being seen.
-#[cfg(target_os = "linux")]
+#[cfg(not(target_os = "macos"))]
 fn what_swallows_a_release() -> String {
     format!(
         "\
@@ -425,7 +425,7 @@ What can swallow a release
     )
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(not(target_os = "macos"))]
 fn readable_line(readable: &Result<(), Problem>) -> String {
     match readable {
         Ok(()) => "  you can read it: yes".to_owned(),
@@ -434,7 +434,7 @@ fn readable_line(readable: &Result<(), Problem>) -> String {
 }
 
 /// How to grant read access to one keyboard, and how to take it back.
-#[cfg(target_os = "linux")]
+#[cfg(not(target_os = "macos"))]
 fn grant(device: &str, name: &str, uid: Option<u32>) -> Vec<String> {
     let Some(uid) = uid else {
         return vec![
@@ -492,7 +492,7 @@ fn grant(device: &str, name: &str, uid: Option<u32>) -> Vec<String> {
 ///
 /// What the operating system said, if `out` cannot be written to. A directory that cannot
 /// be listed is not an error: the text says so and the rest is still printed.
-#[cfg(target_os = "linux")]
+#[cfg(not(target_os = "macos"))]
 pub fn report(
     by_id: &Path,
     rule: DeviceRule,

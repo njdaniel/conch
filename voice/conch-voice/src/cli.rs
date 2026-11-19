@@ -466,7 +466,7 @@ pub fn command() -> Command {
                 .help("connect to this endpoint for events instead of file descriptor 3; the desktop owner passes a Unix-socket path, on Windows a \\\\.\\pipe\\ name, never typed by hand"),
         );
     let devices = Command::new("devices");
-    #[cfg(target_os = "linux")]
+    #[cfg(not(target_os = "macos"))]
     let devices = devices
         .about("List microphones and speakers by the names the configuration takes, and keyboards")
         .long_about(format!(
@@ -477,7 +477,7 @@ pub fn command() -> Command {
              device. It opens each keyboard to see whether it can, and reads nothing from any \
              of them; it opens no audio device."
         ));
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "macos")]
     let devices = devices
         .about("List microphones and speakers by the names the configuration takes")
         .long_about(format!(
@@ -1831,6 +1831,26 @@ mod tests {
             line.extend(bad);
             assert_eq!(parse(line).unwrap_err().exit_code(), 2, "{bad:?}");
         }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_devices_help_keeps_the_keyboard_text() {
+        let command = command();
+        let devices = command.find_subcommand("devices").unwrap();
+        assert_eq!(
+            devices.get_about().unwrap().to_string(),
+            "List microphones and speakers by the names the configuration takes, and keyboards"
+        );
+        assert_eq!(
+            devices.get_long_about().unwrap().to_string(),
+            "Lists the microphones and the speakers WASAPI has, by the names `input` and \
+             `output` under [audio] in the configuration file take, and marks the defaults. \
+             Then lists the keyboards under /dev/input/by-id, says for each whether you can \
+             read it, and prints a udev rule that would grant you read access to that one \
+             device. It opens each keyboard to see whether it can, and reads nothing from any \
+             of them; it opens no audio device."
+        );
     }
 
     #[test]

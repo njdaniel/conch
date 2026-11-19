@@ -23,7 +23,9 @@
 
 mod support;
 
-use std::fs::{File, OpenOptions};
+#[cfg(target_os = "linux")]
+use std::fs::File;
+use std::fs::OpenOptions;
 #[cfg(target_os = "linux")]
 use std::io::{BufRead, BufReader};
 use std::io::{Read, Write};

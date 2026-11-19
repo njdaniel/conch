@@ -441,8 +441,8 @@ fn list_devices(_wait: Duration) -> Result<devices::DeviceTable, Error> {
 }
 
 /// `conch-voice devices`: the microphones and speakers PipeWire has, by the names the
-/// configuration takes. On Linux, it also lists keyboards under `/dev/input/by-id`, whether
-/// this user can read each, and the udev rule that would grant access to one. No audio
+/// configuration takes. Except on macOS, it also reports on keyboards under
+/// `/dev/input/by-id`, including a directory error if the listing fails. No audio
 /// device is opened and nothing is read from any keyboard. Failure to list audio devices
 /// is reported in the audio section.
 ///
@@ -459,7 +459,7 @@ pub fn devices(json: bool, environment: &Environment, scrubber: &Scrubber) -> Re
         environment,
         scrubber,
         || list_devices(audio::LISTING_WAIT).map_err(|error| error.to_string()),
-        #[cfg(target_os = "linux")]
+        #[cfg(not(target_os = "macos"))]
         |out| {
             devices::report(
                 Path::new(devices::BY_ID),
@@ -468,7 +468,7 @@ pub fn devices(json: bool, environment: &Environment, scrubber: &Scrubber) -> Re
                 out,
             )
         },
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(target_os = "macos")]
         |_| Ok(()),
         &mut std::io::stdout().lock(),
         &mut std::io::stderr().lock(),
@@ -590,6 +590,43 @@ mod tests {
         scrubber.always(&Secret::new(FAKE_LOGIN));
         scrubber.connection(&Secret::new(FAKE_JOIN), &Secret::new(FAKE_ROOM));
         scrubber
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_devices_prints_the_audio_status_then_the_keyboard_directory_error() {
+        let private = tempfile::tempdir().unwrap();
+        let missing = private.path().join("by-id");
+        let error = std::fs::read_dir(&missing).unwrap_err();
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        devices_with(
+            false,
+            &Environment::default(),
+            &scrubber(),
+            || list_devices(audio::LISTING_WAIT).map_err(|error| error.to_string()),
+            |out| {
+                devices::report(
+                    &missing,
+                    DeviceRule::EventDevice,
+                    devices::current_uid(),
+                    out,
+                )
+            },
+            &mut out,
+            &mut err,
+        )
+        .unwrap();
+        let out = String::from_utf8(out).unwrap();
+        assert!(err.is_empty());
+        assert!(out.starts_with(
+            "Audio devices (WASAPI)\n  not listed: this platform (windows) has no audio backend yet\n\n\
+             What granting access means\n"
+        ));
+        assert!(out.contains(&format!("\nKeyboards in {}\n", missing.display())));
+        assert!(out.contains(&format!(
+            "\n  cannot list it: {error}\n\nWhat can swallow a release\n"
+        )));
     }
 
     /// The login token is registered with the scrubber by signing in, not by anything a

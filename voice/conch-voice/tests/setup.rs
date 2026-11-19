@@ -7,22 +7,29 @@
 //! opens or lists anything under `/dev/input`.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
-// Exercises Linux evdev and its setup commands with fake files and FIFOs.
-#![cfg(target_os = "linux")]
+// Synthetic FIFO records and terminal refusal work on Unix. The evdev and udev
+// cases exercise Linux setup.
+#![cfg(unix)]
 
 mod support;
 
+#[cfg(target_os = "linux")]
 use std::ffi::OsStr;
 use std::io::Write;
 #[cfg(target_os = "linux")]
 use std::os::unix::ffi::OsStrExt;
+#[cfg(target_os = "linux")]
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
+#[cfg(target_os = "linux")]
 use std::time::Duration;
 
 use conch_voice::Error;
+#[cfg(target_os = "linux")]
 use conch_voice::devices::{self, Keyboard};
-use conch_voice::keydev::{DeviceRule, Problem, Refusal};
+#[cfg(target_os = "linux")]
+use conch_voice::keydev::Refusal;
+use conch_voice::keydev::{DeviceRule, Problem};
 use conch_voice::keys;
 
 use support::keyboard::{EV_KEY, Pipe, press, record, release, stroke};
@@ -34,6 +41,7 @@ fn run_keys(device: &Path, rule: DeviceRule, terminal: bool) -> (Result<(), Erro
     (result, String::from_utf8(written).unwrap())
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn keys_says_what_it_will_show_before_it_tries_the_device() {
     let dir = tempfile::tempdir().unwrap();
@@ -87,6 +95,7 @@ fn keys_refuses_when_its_output_is_not_a_terminal_and_then_opens_and_writes_noth
     }
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn keys_applies_the_watchers_check_and_reads_nothing_it_refuses() {
     let dir = tempfile::tempdir().unwrap();
@@ -174,12 +183,15 @@ fn keys_stops_at_part_of_a_record() {
     assert!(!written.contains("key 97"), "nothing of a faulty read");
 }
 
+#[cfg(target_os = "linux")]
 const READABLE: &str = "usb-Example_Keyboard-event-kbd";
+#[cfg(target_os = "linux")]
 const LOCKED: &str = "usb-Locked_Board-if01-event-kbd";
 
 /// Names with no business in a rule, in a command or on a terminal: what udev's rule
 /// syntax gives a meaning to, control characters, a right-to-left override (which is not a
 /// control character, and reorders what a terminal shows), and letters that are not ASCII.
+#[cfg(target_os = "linux")]
 const HOSTILE: [&str; 12] = [
     "usb-Evil\" RUN+=\"x-event-kbd",
     "usb-Esc\u{1b}[2J\nline-event-kbd",
@@ -197,6 +209,7 @@ const HOSTILE: [&str; 12] = [
 
 /// A directory standing in for `/dev/input/by-id`: two keyboards, one of them unreadable,
 /// and a mouse.
+#[cfg(target_os = "linux")]
 fn by_id() -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
     for name in [READABLE, LOCKED, "usb-Example_Mouse-event-mouse"] {
@@ -208,22 +221,20 @@ fn by_id() -> tempfile::TempDir {
 }
 
 /// That directory with every hostile name in it as well.
+#[cfg(target_os = "linux")]
 fn by_id_with_hostile_names() -> tempfile::TempDir {
     let dir = by_id();
     for name in HOSTILE {
         std::fs::write(dir.path().join(name), press(97)).unwrap();
     }
-    // Linux can store a name that is not text at all. APFS requires valid UTF-8,
-    // so use another name outside udev's allowed alphabet on other Unix targets.
-    #[cfg(target_os = "linux")]
+    // Linux can store a name that is not text at all.
     let bytes_name = OsStr::from_bytes(b"usb-Bytes\xff\xfe-event-kbd");
-    #[cfg(not(target_os = "linux"))]
-    let bytes_name = OsStr::new("usb-Bytes\u{fffd}-event-kbd");
     std::fs::write(dir.path().join(bytes_name), press(97)).unwrap();
     dir
 }
 
 /// The keyboard half of `devices` for that directory.
+#[cfg(target_os = "linux")]
 fn report(by_id: &Path, rule: DeviceRule, uid: Option<u32>) -> String {
     let mut written = Vec::new();
     devices::report(by_id, rule, uid, &mut written).unwrap();
@@ -231,10 +242,12 @@ fn report(by_id: &Path, rule: DeviceRule, uid: Option<u32>) -> String {
 }
 
 /// True when this user can open a file nobody may read: root.
+#[cfg(target_os = "linux")]
 fn reads_anything(dir: &Path) -> bool {
     std::fs::File::open(dir.join(LOCKED)).is_ok()
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn devices_lists_the_keyboards_by_path_and_says_which_can_be_read() {
     let dir = by_id();
@@ -293,6 +306,7 @@ fn devices_lists_the_keyboards_by_path_and_says_which_can_be_read() {
     );
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn each_rule_devices_prints_names_that_one_device_and_this_user() {
     let dir = by_id_with_hostile_names();
@@ -341,6 +355,7 @@ fn each_rule_devices_prints_names_that_one_device_and_this_user() {
     }
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn the_names_a_rule_may_hold_are_exactly_the_ones_udev_itself_gives() {
     // Every character from U+0000 to U+2FFF, and a few beyond, alone in an otherwise
@@ -379,6 +394,7 @@ fn the_names_a_rule_may_hold_are_exactly_the_ones_udev_itself_gives() {
     assert_eq!(devices::udev_rule("", 1000), None);
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn a_keyboard_whose_name_is_not_fit_for_a_rule_is_counted_and_not_shown() {
     let dir = by_id_with_hostile_names();
@@ -442,6 +458,7 @@ fn a_keyboard_whose_name_is_not_fit_for_a_rule_is_counted_and_not_shown() {
     assert!(!text.contains("SYMLINK=="), "{text}");
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn an_entry_that_is_not_shown_is_not_opened_either() {
     // A pipe with nothing writing to it, under a name that is not shown: opening it would
@@ -466,6 +483,7 @@ fn an_entry_that_is_not_shown_is_not_opened_either() {
     assert_eq!(found.unshown, 1);
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn devices_says_everything_the_grant_gives_before_how_and_never_suggests_a_group() {
     let dir = by_id();
@@ -572,6 +590,7 @@ fn devices_says_everything_the_grant_gives_before_how_and_never_suggests_a_group
     );
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn devices_with_no_keyboard_or_no_directory_still_says_what_matters() {
     let empty = tempfile::tempdir().unwrap();
@@ -596,6 +615,7 @@ fn devices_with_no_keyboard_or_no_directory_still_says_what_matters() {
     assert!(text.contains("What can swallow a release"), "{text}");
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn devices_reads_nothing_from_a_keyboard() {
     // It opens each keyboard to see whether it can, and that is all: there is no read in
