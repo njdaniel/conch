@@ -214,6 +214,34 @@ async function servePresence(page: Page, world: World, token: string, channel: s
 
 type Box = NonNullable<Awaited<ReturnType<Locator['boundingBox']>>>;
 
+// drawDesktopStrip puts what the desktop shell draws over the client
+// (Shell.tsx, ProfileBar.tsx) at the top of #root, beside the lobby: the
+// strip with the server's host, the account and its two buttons. The browser
+// build the e2e lane runs has no desktop shell of its own.
+async function drawDesktopStrip(page: Page): Promise<void> {
+  await page.evaluate(() => {
+    const root = document.getElementById('root');
+    if (root === null) throw new Error('no #root');
+    const bar = document.createElement('header');
+    bar.className = 'desktop-bar';
+    bar.setAttribute('aria-label', 'Server');
+    for (const [cls, text] of [['desktop-bar-host', 'conch.example.org'], ['desktop-bar-account', 'someone']] as const) {
+      const span = document.createElement('span');
+      span.className = cls;
+      span.textContent = text;
+      bar.append(span);
+    }
+    for (const [cls, text] of [['desktop-bar-settings', 'Desktop app'], ['', 'Servers']] as const) {
+      const button = document.createElement('button');
+      button.type = 'button';
+      if (cls !== '') button.className = cls;
+      button.textContent = text;
+      bar.append(button);
+    }
+    root.prepend(bar);
+  });
+}
+
 async function boxOf(element: Locator, what: string): Promise<Box> {
   const box = await element.boundingBox();
   if (box === null) throw new Error(`${what} has no box on the screen`);
@@ -449,8 +477,9 @@ for (const [size, options] of phoneSizes) {
 // In a short desktop window the page scrolls as a document (issue #536). It
 // used to leave an empty band under the composer: the members list made the
 // middle row taller than the conversation. Now the conversation sets the row,
-// so at every height, with or without voice on the server and with a notice
-// bar above the page, the composer sits on the voice dock, and with the page
+// so at every height, with or without voice on the server, with a notice bar
+// above the page and under the desktop app's strip (issue #1980), the composer
+// sits on the voice dock, and with the page
 // scrolled to its end the composer is whole. Over 560 px the page fills the
 // window unless the dock leaves the conversation too little, when it scrolls the
 // same way (issue #1815), so 561, 600 and 640 are here too. Joined and watching
@@ -461,8 +490,10 @@ const shortWindows: readonly (readonly [string, BrowserContextOptions])[] = [
 ];
 
 // With voice set up on the server the dock is taller: the strip's roster, its
-// buttons and its status (about 130 px against 58 px without).
-const dockStates = ['no voice', 'voice set up, nobody joined', 'a notice bar above the page'] as const;
+// buttons and its status (about 130 px against 58 px without). In the desktop
+// app the client is under the app's strip, which takes its own height from the
+// page (issue #1980).
+const dockStates = ['no voice', 'voice set up, nobody joined', 'a notice bar above the page', "voice set up, under the desktop app's strip"] as const;
 
 test('P1813 in a short window the composer stays on the voice dock, whole, as the person scrolls', async ({ meet, secrets, world }) => {
   const tag = `p1813-${String(Date.now())}`;
@@ -481,10 +512,11 @@ test('P1813 in a short window the composer stays on the voice dock, whole, as th
   for (const state of dockStates) {
     for (const [size, options] of shortWindows) {
       const { page } = await meet(options);
-      if (state === 'voice set up, nobody joined') await servePresence(page, world, me.token, channel, others.slice(0, 2).map((o) => o.id));
+      if (state === 'voice set up, nobody joined' || state === "voice set up, under the desktop app's strip") await servePresence(page, world, me.token, channel, others.slice(0, 2).map((o) => o.id));
       await signIn(page, world, me.token, me.name);
       await openChannel(page, channel);
       await expect(messages(page).getByText(`${tag} message 59`)).toBeVisible();
+      if (state === "voice set up, under the desktop app's strip") await drawDesktopStrip(page);
       if (state === 'a notice bar above the page') {
         // What the update notice does (UpdateNotice.tsx): a bar above the
         // page, its height in --notice-h on the root.
@@ -598,5 +630,64 @@ test('P1815 a long Run detail scrolls inside its column, and the dock stays in t
     }
   } finally {
     await call(world, world.tokens.worker, 'DELETE', `/v1/sessions/${String(session.id)}`);
+  }
+});
+
+// ---------------------------------------------------------------- issue #1980
+
+// A maximized window on a Windows laptop's screen: the taskbar (48 px) and the
+// window's title bar (32 px) come off the screen's height. Not in voice and
+// not watching, with voice set up on the server, a members list and a log
+// longer than the window: the page does not scroll and the voice dock is whole
+// in the window. In the desktop app the client sits under the app's strip
+// (ProfileBar's header.desktop-bar), in #root beside the lobby: the lobby
+// takes what the strip leaves of the window. It used to be a whole window
+// tall under the strip, so the dock was the strip's height under the window's
+// edge and the page scrolled; the browser cases passed throughout.
+const windowsScreens = [
+  [1280, 800],
+  [1366, 768],
+  [1280, 720],
+] as const;
+const windowsChrome = 48 + 32;
+const clientPlaces = ['in a browser', "under the desktop app's strip"] as const;
+
+test('P1980 on a Windows laptop screen, not in voice, the dock is in the window and the page does not scroll', async ({ meet, secrets, world }) => {
+  const tag = `p1980-${String(Date.now())}`;
+  const channel = `${tag}-c`;
+  await must(world, world.tokens.operator, 'POST', '/v0/channels', { name: channel });
+  const me = await member(world, channel, `${tag}-me`);
+  secrets.push(me.token);
+  const others: Member[] = [];
+  for (let i = 0; i < 30; i++) others.push(await member(world, channel, `${tag}-roster-${String(i)}`));
+  for (const o of others) secrets.push(o.token);
+  for (let i = 0; i < 40; i++) {
+    await must(world, me.token, 'POST', `/v2/channels/${encodeURIComponent(channel)}/messages`, { body: `${tag} message ${String(i)} ${'words '.repeat(i % 7 === 0 ? 40 : 3)}` });
+  }
+
+  for (const place of clientPlaces) {
+    for (const [width, height] of windowsScreens) {
+      const viewport = { width, height: height - windowsChrome };
+      const { page } = await meet({ viewport });
+      await servePresence(page, world, me.token, channel, []);
+      await signIn(page, world, me.token, me.name);
+      await openChannel(page, channel);
+      await expect(messages(page).getByText(`${tag} message 39`)).toBeVisible();
+      const dock = page.locator('.dock');
+      await expect(dock.getByRole('button', { name: 'Join voice' })).toBeVisible();
+      if (place === "under the desktop app's strip") await drawDesktopStrip(page);
+      const where = `a maximized window (${String(viewport.width)}×${String(viewport.height)}) on a ${String(width)}×${String(height)} screen, ${place}`;
+      await expect(async () => {
+        const scroll = await page.evaluate(() => ({ page: document.documentElement.scrollHeight, window: window.innerHeight }));
+        expect(scroll.page, `${where}: the page is ${String(scroll.page)} px tall in a ${String(scroll.window)} px window`).toBeLessThanOrEqual(scroll.window + 1);
+        const d = await boxOf(dock, `${where}: the dock`);
+        expect(d.y, `${where}: the dock's top`).toBeGreaterThanOrEqual(0);
+        expect(d.y + d.height, `${where}: the dock's bottom`).toBeLessThanOrEqual(viewport.height + 0.5);
+      }).toPass({ timeout: 5000 });
+      // The composer still sits on the dock.
+      const c = await boxOf(page.locator('.composer'), `${where}: the composer`);
+      const d = await boxOf(dock, `${where}: the dock`);
+      expect(Math.abs(c.y + c.height - d.y), `${where}: the composer is ${String(d.y - c.y - c.height)} px above the dock`).toBeLessThanOrEqual(1);
+    }
   }
 });

@@ -4939,6 +4939,28 @@ button.link {
   }
 }
 
+/* In the desktop app the client sits under the app's strip (ProfileBar's
+   header, and any panel or notice the shell draws above the client), all of
+   it in #root beside the lobby (issue #1980). The window-tall minimum above
+   would put the lobby's bottom, the voice dock, that far under the window's
+   edge, so the page scrolled even with nothing to show. Here #root is the
+   window-tall column instead and the lobby takes what is left of it: never
+   less than it needs (its height is still its content's, as above, so the
+   short-window and #1815 cases scroll the page just as before), and otherwise
+   the rest of the window, with the dock on its bottom edge. The phone layout
+   keeps its own height. */
+#root:has(> .desktop-bar) {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+  min-height: 100dvh;
+}
+
+#root:has(> .desktop-bar) > .lobby:not(.phone) {
+  flex: 1 0 auto;
+  min-height: 0;
+}
+
 /* While watching (not compact), the centre column is a flexed column in place
    of the grid above, so that what it needs counts the stage at no more than
    300 px. The stage starts at 300 px (or its own height, if less) and takes
