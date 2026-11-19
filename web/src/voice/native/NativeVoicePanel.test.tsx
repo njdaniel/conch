@@ -486,6 +486,7 @@ describe('NativeVoicePanel', () => {
     function companionOf(over: Partial<VoiceState> = {}) {
       const calls: string[] = [];
       const presences: VoicePresenceV2[] = [];
+      const outs: number[] = [];
       const state: VoiceState = { ...initialVoice, ...over };
       const client: CompanionClient = {
         subscribe: () => () => undefined,
@@ -500,9 +501,10 @@ describe('NativeVoicePanel', () => {
         presence: (p) => { presences.push(p); },
         attachStream: () => undefined,
         readShareStats: () => Promise.resolve(null),
+        outOfVoice: () => { outs.push(outs.length + 1); },
       };
       const companion: Companion = { client, state };
-      return { companion, calls, presences };
+      return { companion, calls, presences, outs };
     }
     function withCompanion(fake: Fake, companion: Companion | null, channel = 'general') {
       return render(
@@ -546,6 +548,18 @@ describe('NativeVoicePanel', () => {
       expect(fake.calls).toEqual([]);
       expect(screen.getByRole('button', { name: 'Unmute' })).toBeTruthy();
       expect(screen.getByRole('button', { name: 'Leave voice' })).toBeTruthy();
+    });
+
+    it('tells the companion when voice is left, so a notice from before the leave goes (issue #1992)', async () => {
+      const fake = new Fake(running());
+      const c = companionOf();
+      withCompanion(fake, c.companion);
+      await frame(presence([1, '2026-01-01T00:00:00Z']));
+      expect(c.outs).toEqual([]);
+      act(() => {
+        fake.set(idle);
+      });
+      expect(c.outs).toEqual([1]);
     });
 
     it('is disabled with its reason out of voice, and while the helper connects', async () => {

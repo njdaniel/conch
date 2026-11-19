@@ -18,7 +18,7 @@
 import { windowsKey } from '../../web/src/platform/desktop/windows-keys.ts';
 import type { IpcMain } from 'electron';
 
-import type { BridgeReply, BridgeRequest, FeedRequest, IntegrationsView, InviteTarget, NotifyRequest, SettingsChange, SignInOutcome, VoiceDeviceKey } from '../../web/src/platform/desktop/bridge.ts';
+import type { BridgeReply, BridgeRequest, CompanionPageEnd, CompanionPageEndKind, FeedRequest, IntegrationsView, InviteTarget, NotifyRequest, SettingsChange, SignInOutcome, VoiceDeviceKey } from '../../web/src/platform/desktop/bridge.ts';
 import { VOICE_DEVICES_MAX_NAME_BYTES, voiceControlTalkMode, type VoiceControlTalkMode } from '../../web/src/schema/generated.ts';
 import { isPageSaveKey, keyCodeText, saveValueFits } from './voice/oneshot.ts';
 import { validChannel, validDeviceName } from './voice/protocol.ts';
@@ -450,6 +450,25 @@ function parseCompanionGrant(args: readonly unknown[]): readonly unknown[] | nul
   return isChannel(channel) ? [{ channel }] : null;
 }
 
+// The page's reason for ending its companion (issue #1992), for main's log
+// alone: none (an end as before), or exactly a kind of the closed vocabulary
+// and at most one short word of detail (an error's name and LiveKit's reason
+// name, a disconnect's cause, a URL's scheme). Nothing that could hold an
+// address, a message or a token passes, since it is written to the log.
+const PAGE_END_KINDS: readonly CompanionPageEndKind[] = ['left', 'connect-failed', 'disconnected', 'dropped', 'insecure-address', 'cannot-share'];
+const isPageEndKind = (value: unknown): value is CompanionPageEndKind => typeof value === 'string' && (PAGE_END_KINDS as readonly string[]).includes(value);
+
+export function parseCompanionEnd(args: readonly unknown[]): readonly unknown[] | null {
+  if (args.length === 0) return args;
+  const [why] = args;
+  if (args.length !== 1 || !isRecord(why)) return null;
+  const { kind, detail } = why;
+  if (!isPageEndKind(kind)) return null;
+  if (hasExactKeys(why, ['kind'])) return [{ kind } satisfies CompanionPageEnd];
+  if (!hasExactKeys(why, ['kind', 'detail']) || typeof detail !== 'string' || !/^[A-Za-z][A-Za-z0-9_:-]{0,63}$/u.test(detail)) return null;
+  return [{ kind, detail } satisfies CompanionPageEnd];
+}
+
 // The share sound's choice is exactly one of the two words of its vocabulary:
 // no scope, application or name rides with it (main builds those).
 function parseShareSoundChoose(args: readonly unknown[]): readonly unknown[] | null {
@@ -790,7 +809,9 @@ export const SPECS: Readonly<Record<InvokedFunction, Spec>> = {
   // calls it synchronously at the start of the click, before anything else.
   // It carries no argument: nothing the page says is trusted.
   shareArm: { limit: 20, maxBytes: 0, parse: none, run: ({ arm }) => arm(), gesture: true },
-  companionEnd: { limit: 60, maxBytes: 0, parse: none, run: ({ companion }) => companion.stop() },
+  // Its one optional argument is the page's reason, for main's log alone
+  // (issue #1992); stopping needs no act either way.
+  companionEnd: { limit: 60, maxBytes: 256, parse: parseCompanionEnd, run: ({ companion }, args) => (args.length === 0 ? companion.stop() : companion.stop(args[0] as CompanionPageEnd)) },
   // The Linux screen share's sound (issue #1854). Each is refused outright
   // unless main's own switch is on. None carries a scope, an application, a
   // process, a device or a gesture flag: main builds the first four, and the

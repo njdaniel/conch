@@ -78,7 +78,7 @@
 // new act, and any end (its own, main's, a lost connection, a renewed room)
 // stops it and the share with it, in words.
 import type { CameraClaimResult, ShareClaimResult, TransmitAnswer, VoiceSessionResult, VoiceViewerResult } from '../api';
-import type { CompanionEndReason, CompanionGrantError, CompanionGrantResult, CompanionShareUnavailable } from '../platform/desktop/bridge';
+import type { CompanionEndReason, CompanionGrantError, CompanionGrantResult, CompanionPageEnd, CompanionShareUnavailable } from '../platform/desktop/bridge';
 import type { VoicePresenceV2, VoiceTransmitState } from '../schema/voice';
 import type { Clock } from '../state/feed';
 import { CameraClient, cameraOff, cameraOn, findCamera, type Camera, type CameraLoss, type CameraProfile, type CameraRoom, type CameraState } from './camera';
@@ -441,7 +441,9 @@ export interface CompanionEnv {
   // Arms the share allowance: called synchronously at the start of the Share
   // click (issue #1580), before the grant.
   readonly arm: () => Promise<unknown>;
-  readonly end: () => Promise<unknown>;
+  // why is for main's log (issue #1992): the page's own end is otherwise
+  // invisible outside the page.
+  readonly end: (why?: CompanionPageEnd) => Promise<unknown>;
   readonly onEnd: (listener: (reason: CompanionEndReason) => void) => () => void;
   readonly deafened: () => boolean;
   readonly onDeafened: (listener: () => void) => () => void;
@@ -589,6 +591,70 @@ export const companionLeftWatching = 'You left voice, so the screens you were wa
 
 // The companion's own connection lost: it is not reconnected by itself.
 export const companionLost = 'The screen connection dropped. Share or watch again if you want to.';
+
+// The window's CSP refused the companion's connection to LiveKit (issue
+// #1992): the desktop's window may reach LiveKit only over TLS (its CSP's
+// connect-src is `wss: https:`, linux-desktop.md §3), and conchd named a
+// plain ws or http address. The CSP is the judge, not the page: a page outside
+// it (a browser, the live tests) connects as before. Voice itself (the helper)
+// is unaffected.
+export const companionInsecure = "Screens can't be watched or shared in the desktop app on this server: its voice address isn't secure (wss).";
+
+
+// schemeOf is a URL's scheme alone, for a log line: never the rest of it.
+function schemeOf(url: string): string {
+  const m = /^([a-z][a-z0-9+.-]{0,15}):/i.exec(url);
+  return m?.[1] === undefined ? 'none' : m[1].toLowerCase();
+}
+
+// cspRefusals listens, while the companion connects, for the page's CSP
+// refusing a connection (issue #1992). Such a refusal never reaches main's
+// request filter, so main cannot log it, and the SDK reports it as it would
+// any network failure. Only connect-src counts: another directive's refusal
+// at the same moment is not why a connection failed. last is the latest as
+// `csp:connect-src:<scheme>`, never the address, and is forgotten once the
+// connection is made, so a later disconnect is not blamed on it.
+function cspRefusals(): { readonly last: () => string | null; readonly stop: () => void; readonly connected: () => void } {
+  if (typeof document === 'undefined') return { last: () => null, stop: () => undefined, connected: () => undefined };
+  let last: string | null = null;
+  const on = (e: SecurityPolicyViolationEvent): void => {
+    if (e.effectiveDirective !== 'connect-src') return;
+    last = `csp:connect-src:${schemeOf(e.blockedURI)}`;
+  };
+  document.addEventListener('securitypolicyviolation', on);
+  const stop = (): void => {
+    document.removeEventListener('securitypolicyviolation', on);
+  };
+  return {
+    last: () => last,
+    stop,
+    connected: () => {
+      stop();
+      last = null;
+    },
+  };
+}
+
+// refusedInsecure says whether a refusal cspRefusals recorded is the CSP
+// refusing a plain ws or http connection: the LiveKit address isn't secure.
+function refusedInsecure(refused: string | null): refused is string {
+  return refused === 'csp:connect-src:ws' || refused === 'csp:connect-src:http';
+}
+
+// The grammar main's parseCompanionEnd accepts for a detail
+// (desktop/main/ipc.ts). A detail outside it would get the whole end refused,
+// and main would keep the companion: so one is sent only when it fits.
+const PAGE_END_DETAIL = /^[A-Za-z][A-Za-z0-9_:-]{0,63}$/u;
+
+// pageEndDetail is an error's name and LiveKit's reason name, for main's log
+// (CompanionPageEnd.detail): never its message, and nothing main would refuse.
+function pageEndDetail(err: unknown): string | undefined {
+  const name = errorName(err);
+  if (typeof name !== 'string') return undefined;
+  const reason = typeof err === 'object' && err !== null && 'reasonName' in err ? err.reasonName : undefined;
+  const detail = typeof reason === 'string' && /^[A-Za-z]{1,32}$/.test(reason) ? `${name}:${reason}` : name;
+  return PAGE_END_DETAIL.test(detail) ? detail : undefined;
+}
 
 export const initialVoice: VoiceState = {
   phase: 'idle',
@@ -748,6 +814,9 @@ export class VoiceClient {
   // may be old by the time Share is clicked: a portal started since is not
   // seen in it (startShare).
   private joinedByShare = false;
+  // Whether main's end of this companion was the person leaving voice, whose
+  // words are about that leave and stay after it (outOfVoice).
+  private endedByLeave = false;
 
   constructor(env: VoiceEnv, now: () => number = () => Date.now()) {
     this.env = env;
@@ -852,6 +921,7 @@ export class VoiceClient {
     this.afterConnect = null;
     this.grantUnavailable = null;
     this.joinedByShare = false;
+    this.endedByLeave = false;
     this.failures = 0;
     // The camera is off on joining (design §3.4): only its button turns it
     // on, and why the last one ended is not news here.
@@ -956,15 +1026,16 @@ export class VoiceClient {
     if (!s.companion || (s.phase !== 'connecting' && s.phase !== 'connected' && s.phase !== 'reconnecting' && s.phase !== 'unavailable')) return;
     // Someone only watching had no screen of their own to end.
     const why = reason === 'leave' && s.share.kind === 'idle' ? companionLeftWatching : companionEnds[reason];
+    this.endedByLeave = reason === 'leave';
     void this.share.stop(reason === 'leave' ? 'left' : reason === 'renewal' ? 'rotated' : 'lost');
     this.drop({ kind: 'stop', why }, 'stop', reason === 'renewal', true);
   }
 
   // endCompanion tells main the companion is over, so that conchd is asked to
   // remove it. It never rejects.
-  private endCompanion(): Promise<void> {
+  private endCompanion(why: CompanionPageEnd = { kind: 'left' }): Promise<void> {
     const end = this.env.companion?.end;
-    return end === undefined ? Promise.resolve() : end().then(() => undefined, () => undefined);
+    return end === undefined ? Promise.resolve() : end(why).then(() => undefined, () => undefined);
   }
 
   // settleCompanion lets the companion go once it has nothing to do: no share
@@ -1591,7 +1662,7 @@ export class VoiceClient {
   // leaveVoice is leave; keepNote is the companion settling after a Share it
   // could not make on a desktop that cannot share, whose note stays to be
   // read. A person leaving voice clears it.
-  private async leaveVoice(keepNote: boolean): Promise<void> {
+  private async leaveVoice(keepNote: boolean, why: CompanionPageEnd = { kind: 'left' }): Promise<void> {
     const mine = ++this.attempt;
     const companion = this.state.companion;
     if (companion) this.companionLeaving = mine;
@@ -1678,7 +1749,7 @@ export class VoiceClient {
     // ended, and main's record of it is always ended, whoever else woke up.
     if (companion) {
       this.unfollowCompanion();
-      await this.within(this.endCompanion(), leaveDrain);
+      await this.within(this.endCompanion(why), leaveDrain);
       if (this.companionLeaving === mine) this.companionLeaving = null;
     }
   }
@@ -1894,7 +1965,7 @@ export class VoiceClient {
   // person's act, and a share is not resumed in a renewed room, Q-D4-2 on
   // #1578): any end stops it, and a renewal says so. fromMain: main ended it
   // and has told conchd, so main is not told again.
-  private drop(wanted: Next, camera: CameraLoss, roomDeleted = false, fromMain = false): void {
+  private drop(wanted: Next, camera: CameraLoss, roomDeleted = false, fromMain = false, end: CompanionPageEnd = { kind: 'dropped' }): void {
     const companion = this.state.companion;
     const next: Next = companion && wanted.kind !== 'stop' ? { kind: 'stop', why: roomDeleted ? companionEnds.renewal : companionLost } : wanted;
     const mine = ++this.attempt;
@@ -1932,7 +2003,7 @@ export class VoiceClient {
     // button about this one's would stay up through the retry.
     this.set({ speaking: new Set(), level: 0, talking: false, transmitting: false, meter: true, playback: true, streamTracks: new Map(), cameraTracks: noCameraTracks, ...nothingInUse, ...this.cameraNow() });
     if (room !== null) void room.close().catch(() => undefined);
-    if (companion && !fromMain) void this.endCompanion();
+    if (companion && !fromMain) void this.endCompanion(end);
     this.act(next, mine);
   }
 
@@ -1947,7 +2018,16 @@ export class VoiceClient {
         // The stay is over (a join that failed for good, or a stop): nobody is
         // left to hear with it.
         this.releaseAudio();
-        this.set({ phase: 'stopped', why: next.why, viewing: false, cameraTracks: noCameraTracks });
+        this.set({
+          phase: 'stopped',
+          why: next.why,
+          viewing: false,
+          cameraTracks: noCameraTracks,
+          // A stopped companion is never reconnected by itself, so a share it
+          // watched would wait for its picture for ever (issue #1992): the
+          // stream offers Watch again instead.
+          ...(this.state.companion ? { watched: new Set<number>(), focusedShare: null, streamTracks: new Map() } : {}),
+        });
         break;
       case 'new_session':
         this.set({ phase: 'connecting', why: null });
@@ -2009,11 +2089,15 @@ export class VoiceClient {
       this.act({ kind: 'stop', why: 'This channel has no voice room for everyone' }, mine);
       return;
     }
+    if (this.state.companion && this.notConnectingCompanion()) return;
     // The viewer's identity is p<id>.view: the person it stands for is p<id>.
     this.me = this.state.companion ? personOf(session.value.identity) : principalOf(session.value.identity.replace(/\.view$/, ''));
     const room = this.env.newRoom();
     this.room = room;
     if (this.state.companion) room.setCompanion?.(true);
+    // A companion's connection refused by the CSP is said as such to main
+    // (issue #1992), from the connect until it is made or has failed.
+    let refusals: ReturnType<typeof cspRefusals> | null = null;
     const events: RoomEvents = {
       onReconnecting: () => {
         if (mine !== this.attempt) return;
@@ -2026,7 +2110,7 @@ export class VoiceClient {
           this.reconnectTimer = null;
           if (mine !== this.attempt) return;
           // The SDK did not recover in time: close it and let conchd decide.
-          this.drop({ kind: 'new_session' }, 'keep');
+          this.drop({ kind: 'new_session' }, 'keep', false, false, { kind: 'dropped', detail: 'reconnect-timeout' });
         }, reconnectLimit);
       },
       onReconnected: () => {
@@ -2040,7 +2124,12 @@ export class VoiceClient {
       },
       onDisconnected: (cause) => {
         if (mine !== this.attempt) return;
-        this.drop(afterDisconnect(cause), cameraAfter(cause), cause === 'room_deleted');
+        const refused = refusals?.last() ?? null;
+        if (this.state.companion && refusedInsecure(refused)) {
+          this.drop({ kind: 'stop', why: companionInsecure }, cameraAfter(cause), false, false, { kind: 'insecure-address', detail: refused });
+          return;
+        }
+        this.drop(afterDisconnect(cause), cameraAfter(cause), cause === 'room_deleted', false, { kind: 'disconnected', detail: refused ?? cause });
       },
       onSpeakers: (ids) => {
         if (mine !== this.attempt) return;
@@ -2147,9 +2236,12 @@ export class VoiceClient {
     room.setMicrophone(microphone);
     const processing = this.state.processing;
     room.setProcessing(processing);
+    if (this.state.companion) refusals = cspRefusals();
     try {
       await room.connect(session.value.livekit_url, grant.token, grant.room, publish && !this.state.missing, events, this.audio);
     } catch (err: unknown) {
+      const refused = refusals?.last() ?? null;
+      refusals?.stop();
       // A microphone refused or missing is said by the error's name alone.
       const name = errorName(err);
       if (typeof name === 'string' && deviceErrors.has(name)) record({ kind: 'device_error', name });
@@ -2182,10 +2274,19 @@ export class VoiceClient {
       const why = deviceReason(name);
       // A companion that cannot connect is over: main is told, and the next
       // grant is the person's next act.
-      if (this.state.companion) void this.endCompanion();
+      if (this.state.companion && refusedInsecure(refused)) {
+        void this.endCompanion({ kind: 'insecure-address', detail: refused });
+        this.act({ kind: 'stop', why: companionInsecure }, next);
+        return;
+      }
+      if (this.state.companion) {
+        const detail = refused ?? pageEndDetail(err);
+        void this.endCompanion(detail === undefined ? { kind: 'connect-failed' } : { kind: 'connect-failed', detail });
+      }
       this.act(why === null ? { kind: 'retry' } : { kind: 'stop', why }, next);
       return;
     }
+    refusals?.connected();
     if (mine !== this.attempt) {
       void room.close().catch(() => undefined);
       return;
@@ -2228,6 +2329,36 @@ export class VoiceClient {
     if (!viewer.ok) return viewer;
     const v = viewer.value;
     return { ok: true, value: { livekit_url: v.livekit_url, identity: v.identity, rooms: [{ room: v.room, token: v.token, can_publish: false, expires_at: v.expires_at }] } };
+  }
+
+  // notConnectingCompanion stops a companion before its connection where that
+  // connection could do nothing (issue #1992), and says whether it did. A
+  // Share whose grant says this desktop cannot share (Windows has no capture
+  // yet), with nothing watched, leaves at once with that note: no room is
+  // joined only to be left, and the note is not overtaken by a connection's
+  // failure. Main is told why, for its log. (A LiveKit address the window's
+  // CSP refuses is said once the CSP has refused it: refusedInsecure.)
+  private notConnectingCompanion(): boolean {
+    const unavailable = this.grantUnavailable;
+    if (unavailable !== null && this.joinedByShare && this.afterConnect === 'share' && this.state.watched.size === 0) {
+      this.set({ companionShareUnavailable: unavailable });
+      void this.leaveVoice(true, { kind: 'cannot-share', detail: unavailable });
+      return true;
+    }
+    return false;
+  }
+
+  // outOfVoice is the person's voice ending (the desktop's helper left the
+  // channel, issue #1992). A companion that ended before that leave has
+  // nothing more to say: its words were about a voice that is over, and would
+  // stay in the dock after it. The words main's end gave for the leave itself
+  // are kept, and a companion still live is main's to end.
+  outOfVoice(): void {
+    const s = this.state;
+    if ((s.phase !== 'idle' && s.phase !== 'stopped') || this.endedByLeave) return;
+    this.share.forget();
+    if (s.phase === 'idle' && s.why === null && s.companionRefusal === null && s.companionShareUnavailable === null) return;
+    this.set({ phase: 'idle', why: null, companion: false, companionRefusal: null, companionShareUnavailable: null });
   }
 
   // companionSession asks main for the companion's grant and shapes it as a

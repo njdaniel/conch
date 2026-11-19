@@ -15,7 +15,7 @@ import { companionEnv } from './companionEnv';
 // satisfies it in a test.
 export type CompanionClient = Pick<
   VoiceClient,
-  'subscribe' | 'snapshot' | 'startCompanionShare' | 'watchCompanionStream' | 'stopShare' | 'restartShare' | 'watchStream' | 'focusShare' | 'setShareQuality' | 'presence' | 'attachStream' | 'readShareStats'
+  'subscribe' | 'snapshot' | 'startCompanionShare' | 'watchCompanionStream' | 'stopShare' | 'restartShare' | 'watchStream' | 'focusShare' | 'setShareQuality' | 'presence' | 'attachStream' | 'readShareStats' | 'outOfVoice'
 >;
 
 const realClock = {

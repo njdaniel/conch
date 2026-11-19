@@ -13,7 +13,7 @@ export function companionEnv(source: NativeVoice | undefined): CompanionEnv | un
   return {
     grant: (channel) => companion.grant({ channel }),
     arm: () => companion.shareArm(),
-    end: () => companion.end(),
+    end: (why) => companion.end(why),
     onEnd: (listener) =>
       companion.onEnd((event) => {
         listener(event.reason);
