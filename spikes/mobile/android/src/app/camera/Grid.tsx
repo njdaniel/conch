@@ -9,6 +9,7 @@ import { cameraNote } from '../../logic/camera';
 import { Button, Note, colours, styles } from '../ui/common';
 import { controller } from '../services';
 import { cameraStore } from './store';
+import { cameraTiles } from './tiles';
 import { useVoiceState } from '../ui/useVoiceState';
 
 function Tile(props: { name: string; track: RemoteVideoTrack }) {
@@ -22,12 +23,9 @@ function Tile(props: { name: string; track: RemoteVideoTrack }) {
 
 export function CameraGrid(props: { me: number; names: ReadonlyMap<number, string> }) {
   const tracks = useSyncExternalStore(cameraStore.subscribe, cameraStore.get);
-  // Presence can arrive before the member list. Wait for the person's name
-  // before showing their camera, so the tile and its accessible label agree.
-  const tiles = [...tracks.entries()].sort(([a], [b]) => a - b).flatMap(([id, track]) => {
-    const name = props.names.get(id);
-    return id === props.me || name === undefined ? [] : [<Tile key={id} name={name} track={track} />];
-  });
+  const tiles = cameraTiles(tracks, props.me, props.names).map(({ id, name, track }) => (
+    <Tile key={id} name={name} track={track} />
+  ));
   if (tiles.length === 0) return null;
   return (
     <View>

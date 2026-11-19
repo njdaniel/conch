@@ -7,7 +7,8 @@
 //   authorization). It is never in a URL, a log line or the diagnostics.
 // - A 401 from an authenticated call is the credential being dead: onSignal is
 //   told 'whoami_401' or 'ticket_401' so the app tears media down before it
-//   shows signed out (logic/auth.ts).
+//   shows signed out (logic/auth.ts). Session cleanup can finish after sign-out
+//   and does not signal the current login.
 // - Nothing here persists: no storage, no file. A relaunch is signed out.
 import type { ApiFailure, CameraClaimResult, TransmitAnswer, VoiceSessionResult } from '../logic/api';
 import { afterAuthSignal } from '../logic/auth';
@@ -66,6 +67,16 @@ export interface ClientOptions {
   readonly onSignal: (signal: AuthSignal, steps: readonly AuthStep[]) => void;
   // A line for the diagnostics: route name and status only, never a URL.
   readonly note?: (message: string) => void;
+}
+
+export interface SessionRegistration {
+  readonly id: number;
+  readonly end: () => Promise<void>;
+}
+
+interface SessionAuth {
+  readonly origin: string;
+  readonly bearer: string | null;
 }
 
 export class ApiClient {
@@ -139,10 +150,17 @@ export class ApiClient {
     return this.getJson('listMembers', { channel }, listChannelMembersResponseV1, 'whoami_401');
   }
 
-  async createSession(signal: AbortSignal): Promise<Result<SessionV1>> {
+  async createSession(): Promise<Result<SessionRegistration>> {
+    // The server may commit before sign-out. Keep reading the reply and bind
+    // cleanup to this request's server and bearer, even after another login.
+    const auth = { origin: this.origin, bearer: this.bearer };
     const body: CreateSessionRequestV1 = { client: 'android' };
-    const reply = await this.send('createSession', {}, {}, body, true, signal, 'whoami_401');
-    return reply.ok ? this.read(reply.value, sessionV1) : reply;
+    const reply = await this.send('createSession', {}, {}, body, true, undefined, 'whoami_401', auth);
+    if (!reply.ok) return reply;
+    const session = await this.read(reply.value, sessionV1);
+    if (!session.ok) return session;
+    const { id } = session.value;
+    return { ok: true, value: { id, end: () => this.endSession(id, auth) } };
   }
 
   async heartbeatSession(id: number, signal: AbortSignal): Promise<Result<SessionV1>> {
@@ -150,8 +168,8 @@ export class ApiClient {
     return reply.ok ? this.read(reply.value, sessionV1) : reply;
   }
 
-  async endSession(id: number): Promise<void> {
-    await this.send('endSession', { id: String(id) }, {}, undefined, true, undefined, 'whoami_401');
+  private async endSession(id: number, auth: SessionAuth): Promise<void> {
+    await this.send('endSession', { id: String(id) }, {}, undefined, true, undefined, null, auth);
   }
 
   async presence(channel: string): Promise<Result<VoicePresenceV1>> {
@@ -209,7 +227,7 @@ export class ApiClient {
   }
 
   // send makes one request from the list. It answers the response on a 2xx and
-  // a failure otherwise; a 401 on an authenticated call raises the auth signal.
+  // a failure otherwise. A 401 raises the auth signal for the current login.
   private async send(
     name: RequestName,
     params: Record<string, string>,
@@ -217,11 +235,12 @@ export class ApiClient {
     body: unknown,
     authed: boolean,
     abort?: AbortSignal,
-    signal: AuthSignal = 'ticket_401',
+    signal: AuthSignal | null = 'ticket_401',
+    auth: SessionAuth = { origin: this.origin, bearer: this.bearer },
   ): Promise<{ ok: true; value: HttpResponse } | { ok: false; failure: ApiFailure; status?: number; code?: string }> {
     const built: Built = build(name, params, query);
     const headers: Record<string, string> = { Accept: 'application/json' };
-    const bearer = this.bearer;
+    const { origin, bearer } = auth;
     if (authed) {
       if (bearer === null) return { ok: false, failure: 'unauthorized' };
       Object.assign(headers, authorization(bearer));
@@ -229,7 +248,7 @@ export class ApiClient {
     if (body !== undefined) headers['Content-Type'] = 'application/json';
     let res: HttpResponse;
     try {
-      res = await this.options.fetch(this.origin + built.url, {
+      res = await this.options.fetch(origin + built.url, {
         method: built.method,
         headers,
         ...(body === undefined ? {} : { body: JSON.stringify(body) }),
@@ -244,7 +263,7 @@ export class ApiClient {
     if (res.status === 401 && authed) {
       // The credential is dead: forget it, then let the app tear media down and
       // show signed out (auth.ts gives the order).
-      if (!abort?.aborted && bearer === this.bearer) {
+      if (signal !== null && !abort?.aborted && bearer === this.bearer && origin === this.origin) {
         this.bearer = null;
         this.options.onSignal(signal, afterAuthSignal(signal));
       }

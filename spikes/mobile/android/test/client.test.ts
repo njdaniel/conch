@@ -2,6 +2,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { ApiClient, signInCode, signInTarget, type Fetch, type HttpInit } from '../src/app/client';
+import { cameraTiles } from '../src/app/camera/tiles';
 import { PeopleSession } from '../src/app/peopleSession';
 import { FakeClock, settle } from './fakes';
 
@@ -10,14 +11,16 @@ interface Call {
   init: HttpInit;
 }
 
-function client(answer: (c: Call) => { status: number; body: unknown }) {
+type Answer = { status: number; body: unknown };
+
+function client(answer: (c: Call) => Answer | Promise<Answer>) {
   const calls: Call[] = [];
   const signals: string[] = [];
-  const fetch: Fetch = (url, init) => {
+  const fetch: Fetch = async (url, init) => {
     const c = { url, init };
     calls.push(c);
-    const a = answer(c);
-    return Promise.resolve({ status: a.status, json: () => Promise.resolve(a.body) });
+    const a = await answer(c);
+    return { status: a.status, json: () => Promise.resolve(a.body) };
   };
   const api = new ApiClient({ fetch, onSignal: (s, steps) => signals.push(`${s}: ${steps.join(', ')}`) });
   api.setServer('http://example.test:1/');
@@ -27,6 +30,14 @@ function client(answer: (c: Call) => { status: number; body: unknown }) {
 const principal = { id: 7, kind: 'human', name: 'sam', created_at: '2026-11-05T10:00:00Z' };
 const credential = { id: 1, principal_id: 7, label: 'phone', created_at: '2026-11-05T10:00:00Z' };
 
+function sessionAnswer(id: number): Answer {
+  return { status: 200, body: {
+    schema: 'conch.session.v1', id, principal_id: principal.id, name: principal.name, kind: principal.kind,
+    client: 'android', state: 'online', status: 'online', started_at: principal.created_at,
+    last_seen_at: principal.created_at, interventions: [], outcome_unknown: false,
+  } };
+}
+
 test('the Android People session registers, heartbeats, recovers a missing session and ends on sign-out', async () => {
   let id = 0;
   let missing = false;
@@ -35,11 +46,7 @@ test('the Android People session registers, heartbeats, recovers a missing sessi
     if (init.method === 'DELETE') return { status: 204, body: null };
     if (url.endsWith('/heartbeat') && missing) return { status: 404, body: {} };
     if (url.endsWith('/v1/sessions')) id++;
-    return { status: 200, body: {
-      schema: 'conch.session.v1', id, principal_id: principal.id, name: principal.name, kind: principal.kind,
-      client: 'android', state: 'online', status: 'online', started_at: principal.created_at,
-      last_seen_at: principal.created_at, interventions: [], outcome_unknown: false,
-    } };
+    return sessionAnswer(id);
   });
   await api.login('sam', 'pw');
   const clock = new FakeClock();
@@ -64,6 +71,86 @@ test('the Android People session registers, heartbeats, recovers a missing sessi
     ['DELETE', '/v1/sessions/2', 'Bearer b'],
   ]);
   assert.deepEqual(calls[1]?.init.body, JSON.stringify({ client: 'android' }));
+});
+
+void test('sign-out ends a session whose registration reply arrives during a new sign-in', async () => {
+  const late = Promise.withResolvers<Answer>();
+  const { api, calls } = client(({ url, init }) => {
+    const oldServer = new URL(url).hostname === 'example.test';
+    if (url.endsWith('/v1/login')) {
+      return { status: 200, body: { next: 'signed_in', principal, credential, token: oldServer ? 'old' : 'new' } };
+    }
+    if (init.method === 'DELETE') return { status: 204, body: null };
+    return oldServer ? late.promise : sessionAnswer(2);
+  });
+  await api.login('sam', 'pw');
+  const clock = new FakeClock();
+  const session = new PeopleSession(api, clock);
+  session.start();
+  session.stop();
+  api.signOut();
+  api.setServer('https://other.test');
+  await api.login('sam', 'pw');
+  session.start();
+  await settle();
+
+  assert.equal(calls[1]?.init.signal?.aborted ?? false, false);
+  late.resolve(sessionAnswer(1));
+  await settle();
+  clock.advance(15_000);
+  await settle();
+  assert.deepEqual(calls.slice(4).map(({ url, init }) => [init.method, url, init.headers.Authorization]), [
+    ['DELETE', 'http://example.test:1/v1/sessions/1', 'Bearer old'],
+    ['POST', 'https://other.test/v1/sessions/2/heartbeat', 'Bearer new'],
+  ]);
+});
+
+void test('a stalled heartbeat expires and the next heartbeat runs even before the first settles', async () => {
+  const stalled = Promise.withResolvers<Answer>();
+  let heartbeats = 0;
+  const { api, calls } = client(({ url }) => {
+    if (url.endsWith('/v1/login')) return { status: 200, body: { next: 'signed_in', principal, credential, token: 'b' } };
+    if (url.endsWith('/heartbeat') && ++heartbeats === 1) return stalled.promise;
+    return sessionAnswer(1);
+  });
+  await api.login('sam', 'pw');
+  const clock = new FakeClock();
+  const session = new PeopleSession(api, clock);
+  session.start();
+  await settle();
+  clock.advance(15_000);
+  const firstSignal = calls.at(2)?.init.signal;
+  assert.ok(firstSignal);
+  assert.equal(firstSignal.aborted, false);
+  clock.advance(5_000);
+  assert.equal(firstSignal.aborted, true);
+  clock.advance(15_000);
+  assert.equal(heartbeats, 2);
+  await settle();
+
+  stalled.resolve({ status: 404, body: {} });
+  await settle();
+  session.refresh();
+  assert.equal(heartbeats, 3);
+  assert.ok(calls.slice(2).every(({ url }) => url.endsWith('/v1/sessions/1/heartbeat')));
+});
+
+void test('the camera grid keeps a remote tile with a generic label when the member list returns 503', async () => {
+  const { api } = client(({ url }) => url.endsWith('/v1/login')
+    ? { status: 200, body: { next: 'signed_in', principal, credential, token: 'b' } }
+    : { status: 503, body: {} });
+  await api.login('sam', 'pw');
+  const members = await api.members('general');
+  assert.ok(!members.ok && members.status === 503);
+
+  // The voice view passes an empty names map until it gets a member list.
+  const tracks = new Map([[principal.id, 'local track'], [42, 'remote track']]);
+  assert.deepEqual(cameraTiles(tracks, principal.id, new Map()), [
+    { id: 42, track: 'remote track', name: 'Unknown person' },
+  ]);
+  assert.deepEqual(cameraTiles(tracks, principal.id, new Map([[42, 'Lee']])), [
+    { id: 42, track: 'remote track', name: 'Lee' },
+  ]);
 });
 
 test('login keeps the bearer in memory and never puts it in a URL', async () => {

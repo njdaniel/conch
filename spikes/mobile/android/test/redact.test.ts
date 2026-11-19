@@ -68,6 +68,18 @@ test('diagnostics hide opaque room and participant context and keep unrelated fi
   assert.equal(d.export(), 'warn: rtc disconnected {"nested":{"roomName":"[redacted]","roomSid":"[redacted]","participantIdentity":"[redacted]","status":503}}');
 });
 
+void test('diagnostics hide identifiers at the starts of lines in nested SDK context', () => {
+  const d = new Diagnostics();
+  d.add('warn', 'negotiation disconnected', {
+    error: { details: ['remote description\nPA_A1b2C3d4E5f6\r\nRM_B2c3D4e5F6g7\np42.screen\nlab-2-abcdefghijklmnopqrstuvwxyz'] },
+    status: 503,
+  });
+  assert.equal(d.export(), 'warn: negotiation disconnected ' + JSON.stringify({
+    error: { details: ['remote description\n[redacted]\r\n[redacted]\n[redacted]\n[redacted]'] },
+    status: 503,
+  }));
+});
+
 test('scrub hides configurable room names and suffixed identities in warning text', () => {
   assert.equal(scrub('room lab-2-abcdefghijklmnopqrstuvwxyz closed for p42.screen and p1.view'), 'room [redacted] closed for [redacted] and [redacted]');
 });

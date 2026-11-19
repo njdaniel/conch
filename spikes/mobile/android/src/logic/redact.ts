@@ -44,13 +44,14 @@ export class Redactor {
     return out;
   }
 
-  // json redacts context at every depth. A cyclic or otherwise
-  // unserializable context is omitted, leaving the warning itself.
-  json(context: unknown): string | undefined {
+  // json redacts context at every depth. Scrub string values before
+  // serialization so JSON escapes cannot hide identifier boundaries.
+  // A cyclic or otherwise unserializable context is omitted.
+  json(context: unknown, scrub: (line: string) => string): string | undefined {
     try {
       return JSON.stringify(context, (key, value: unknown) => {
         if (value !== undefined && voiceContextKey.test(key)) return placeholder;
-        return typeof value === 'string' ? this.text(value) : value;
+        return typeof value === 'string' ? scrub(this.text(value)) : value;
       });
     } catch {
       return undefined;
@@ -73,7 +74,7 @@ export class LogRing {
   }
 
   add(level: string, message: string, context?: unknown): void {
-    const json = this.redactor.json(context);
+    const json = this.redactor.json(context, this.scrub);
     const extra = json === undefined ? '' : ` ${json}`;
     this.lines.push(this.scrub(this.redactor.text(`${level}: ${message}${extra}`)));
     if (this.lines.length > this.size) this.lines.shift();
