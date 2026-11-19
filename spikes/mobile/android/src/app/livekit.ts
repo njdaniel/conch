@@ -30,6 +30,7 @@ import {
   createLocalAudioTrack,
 } from 'livekit-client';
 import type { DisconnectCause } from '../logic/disconnect';
+import { settleDropped, type DroppedEngine } from '../logic/dropped';
 import { publishMicrophone, type Mutable } from '../logic/mic';
 import type { TrackKind, TrackSource } from '../logic/subscribe';
 import { LiveKitCamera } from './camera/capture';
@@ -95,6 +96,31 @@ export interface LiveKitRoomOptions {
   readonly onMicrophone: (track: LocalAudioTrack | null) => void;
   // The cameras received, by principal, whenever they change.
   readonly onCameras: (tracks: ReadonlyMap<number, RemoteVideoTrack>) => void;
+  // A dropped connection's engine was still reconnecting at droppedLimit
+  // (logic/dropped.ts); for the diagnostics.
+  readonly onDroppedTimeout?: () => void;
+}
+
+type RoomEngine = Room['engine'];
+
+// droppedEngine is the SDK's engine as logic/dropped.ts sees it. Pinned to
+// livekit-client 2.22.3: `attemptingReconnect` is private there (true while
+// RTCEngine.attemptReconnect runs, a restart's signal join included). Read
+// at run time; if a later SDK renames it, this reads false and the settle
+// falls back to closing the engine once, without waiting for the attempt.
+function droppedEngine(engine: RoomEngine): DroppedEngine {
+  return {
+    get closed() {
+      return engine.isClosed;
+    },
+    get reconnecting() {
+      return (engine as unknown as { attemptingReconnect?: unknown }).attemptingReconnect === true;
+    },
+    leave: async () => {
+      if (!engine.client.isDisconnected) await engine.client.sendLeave();
+    },
+    close: () => engine.close('dropped by the app'),
+  };
 }
 
 export class LiveKitRoom implements RoomPort {
@@ -209,8 +235,16 @@ export class LiveKitRoom implements RoomPort {
     }
   }
 
+  // disconnect resolves once this connection is gone for good: the room is
+  // disconnected, and the SDK's engine is closed with no reconnect of its own
+  // still in flight (logic/dropped.ts, #1972). The controller waits for it
+  // before it opens another connection.
   async disconnect(): Promise<void> {
     this.closed = true;
+    // Taken before the room lets it go: Room.disconnect clears room.engine,
+    // and a room that has already reported a disconnect returns early
+    // without touching an engine whose restart may still be running.
+    const engine: RoomEngine | undefined = this.room.engine;
     this.camera.close();
     this.cameras.clear();
     this.options.onCameras(new Map());
@@ -223,6 +257,13 @@ export class LiveKitRoom implements RoomPort {
     } finally {
       track?.stop();
       await stopAudio().catch(() => undefined);
+      if (engine !== undefined) {
+        const settled = await settleDropped(droppedEngine(engine), {
+          wait: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+          now: Date.now,
+        });
+        if (settled === 'timed_out') this.options.onDroppedTimeout?.();
+      }
     }
   }
 

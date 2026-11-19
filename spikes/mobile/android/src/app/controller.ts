@@ -15,6 +15,9 @@
 //    resuming never open it (the resume latch is in logic/gate.ts).
 //  - Leave and sign-out tear the media down: the gate shuts, the room
 //    disconnects, focus is abandoned and the service stops.
+//  - One connection at a time: after a room is dropped, the next connection
+//    waits until the dropped one has stopped reconnecting on its own (#1972),
+//    so the SDK's rejoin and the app's never both stand.
 import type { Clock } from '../logic/clock';
 import { cameraOff, type CameraRoom, type CameraState } from '../logic/camera';
 import { afterDisconnect, afterRefusal, cameraAfter, retryDelay, type DisconnectCause, type Next } from '../logic/disconnect';
@@ -165,6 +168,10 @@ export class VoiceController {
   private readonly reports: ReportQueue;
   private readonly transmitter: Transmitter;
   private room: RoomPort | null = null;
+  // The disconnects of the rooms dropped so far, settled once each has
+  // stopped reconnecting on its own (#1972). A new connection waits for it,
+  // so the SDK's rejoin and the app's never both stand.
+  private dropping: Promise<void> = Promise.resolve();
   // Numbers each join and each connection: a late answer from an older one
   // does nothing.
   private attempt = 0;
@@ -348,6 +355,12 @@ export class VoiceController {
   }
 
   private async connect(channel: string, mine: number): Promise<void> {
+    // A dropped room may still be rejoining on its old token (the SDK's own
+    // reconnect, which its disconnect has to stop: livekit.ts, #1972). The
+    // session is asked for only once it has stopped; a session asked for
+    // earlier could be displaced by it.
+    await this.dropping;
+    if (mine !== this.attempt) return;
     const session = await this.o.api.voiceSession(channel);
     if (mine !== this.attempt) return;
     if (!session.ok) {
@@ -416,7 +429,7 @@ export class VoiceController {
       return;
     }
     if (mine !== this.attempt || room !== this.room) {
-      void room.disconnect();
+      this.retire(room);
       return;
     }
     this.everConnected = true;
@@ -473,8 +486,16 @@ export class VoiceController {
     this.transmitter.reset();
     this.reports.reset();
     this.gate.setBlocked(true);
-    if (room !== null) void room.disconnect().catch(() => undefined);
+    if (room !== null) this.retire(room);
     this.claimed = new Set();
+  }
+
+  // retire disconnects a room that is no longer the phone's, and adds its
+  // disconnect to what the next connection waits for.
+  private retire(room: RoomPort): void {
+    const gone = room.disconnect().catch(() => undefined);
+    const before = this.dropping;
+    this.dropping = Promise.all([before, gone]).then(() => undefined);
   }
 
   // leave is the Leave button. graceful waits (briefly) for the microphone to

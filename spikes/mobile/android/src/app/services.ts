@@ -82,6 +82,9 @@ export const controller = new VoiceController({
       onCameras: (tracks) => {
         cameraStore.set(tracks);
       },
+      onDroppedTimeout: () => {
+        diagnostics.add('voice', 'a dropped connection was still reconnecting at the limit (#1972)');
+      },
     }),
   clock,
   random: Math.random,

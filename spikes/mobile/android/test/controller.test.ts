@@ -89,9 +89,20 @@ class FakeRoom implements RoomPort {
   setDeafened(on: boolean): void {
     this.log.push(`deafen ${on}`);
   }
+  // Set before the room is dropped: its disconnect then settles only when
+  // finishDisconnect is called, as a room whose SDK is still reconnecting on
+  // its own does (#1972).
+  slowDisconnect = false;
+  finishDisconnect: () => void = () => undefined;
   disconnect(): Promise<void> {
     this.log.push('room disconnect');
-    return Promise.resolve();
+    if (!this.slowDisconnect) return Promise.resolve();
+    return new Promise((resolve) => {
+      this.finishDisconnect = () => {
+        this.log.push('room settled');
+        resolve();
+      };
+    });
   }
 }
 
@@ -413,6 +424,47 @@ test('a connection lost in the foreground is retried through conchd with the gat
   assert.equal(bg.c.state.phase, 'idle');
   assert.match(bg.c.state.why ?? '', /app was away/);
   assert.equal(bg.log.filter((l) => l === 'session').length, 1, 'no rejoin from the background');
+});
+
+test('a dropped room still reconnecting on its own is waited for: no new session until it has stopped (#1972)', async () => {
+  const r = rig();
+  await joined(r);
+  const dropped = r.rooms[0];
+  assert.ok(dropped !== undefined);
+  dropped.slowDisconnect = true;
+  // The SDK reported a disconnect while its own restart was still running.
+  dropped.events?.onDisconnected('lost');
+  await settle();
+  r.clock.advance(60_000);
+  await settle();
+  assert.equal(r.c.state.phase, 'reconnecting');
+  assert.equal(r.log.filter((l) => l === 'session').length, 1, 'no session while the dropped room may still rejoin');
+  assert.equal(r.rooms.length, 1, 'no second room');
+  dropped.finishDisconnect();
+  await settle();
+  assert.equal(r.c.state.phase, 'connected');
+  assert.equal(r.rooms.length, 2);
+  const s = steps(r.log);
+  assert.ok(s.indexOf('room settled') < s.lastIndexOf('session'), 'the session is asked for after the dropped room settled');
+
+  // Leave while waiting: nothing connects once the dropped room settles.
+  const l = rig();
+  await joined(l);
+  const first = l.rooms[0];
+  assert.ok(first !== undefined);
+  first.slowDisconnect = true;
+  first.events?.onDisconnected('lost');
+  await settle();
+  l.clock.advance(60_000);
+  await settle();
+  await l.c.leave();
+  first.finishDisconnect();
+  await settle();
+  l.clock.advance(60_000);
+  await settle();
+  assert.equal(l.c.state.phase, 'idle');
+  assert.equal(l.log.filter((x) => x === 'session').length, 1);
+  assert.equal(l.rooms.length, 1);
 });
 
 test('opening the app never joins voice', () => {
