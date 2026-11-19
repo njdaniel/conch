@@ -66,6 +66,7 @@ test('screenshots for design review', async ({ browser }, info) => {
       const code = (JSON.parse(invite.text) as { code: string }).code;
       const guest = await signInPage.newPage();
       await guest.goto(inviteUrl(vw, code));
+      await guest.getByRole('button', { name: 'Create an account', exact: true }).click();
       await expect(guest.getByLabel('Your name')).toBeVisible();
       await shot(guest, 'invite');
 

@@ -3,15 +3,16 @@
 //! (`docs/design/tui-voice.md`, the helper's side, §13).
 //!
 //! Input: commands on standard input, one JSON object per line, in the version the start
-//! was written in (`conch.voice_control.v1`, read by `conch_voice_api::parse_command`, or
-//! `conch.voice_control.v2`, read by `parse_command_v2`; §20.2); the end of standard input,
+//! was written in (`conch.voice_control.v1`, read by `conch_voice_api::parse_command`,
+//! `conch.voice_control.v2`, read by `parse_command_v2`, §20.2, or `conch.voice_control.v3`,
+//! read by `parse_command_v3`, `docs/design/linux-share-audio.md` §7); the end of standard input,
 //! the parent process changing, SIGTERM and SIGINT, each of which is the owner done with
 //! this process; and then what `join` takes, but for the channel, the server and the login,
 //! which the start names (§9).
 //! Output: events on file descriptor 3, one JSON object per line, written by this module's
-//! [`Events`] and by nothing else: a hello first, offering v1 and v2, then states, acks and
-//! protocol errors in the session's version. Nothing else this process writes is read as
-//! the protocol.
+//! [`Events`] and by nothing else: a hello first, offering v1, v2 and v3, then states, acks
+//! and protocol errors in the session's version. Nothing else this process writes is read
+//! as the protocol.
 //! With `--events-pipe <path>` the events go instead to a Unix socket the desktop owner
 //! listens on, which [`crate::channel`] connects to, after checking the socket and its
 //! directory, and on which it writes one attach line (`conch.voice_control_pipe.v1`, the
@@ -24,6 +25,19 @@
 //! and that same-user unlink-and-rebind is out of scope by design
 //! (`docs/design/linux-desktop.md` §5.2). Without the option nothing here changes and
 //! `CONCH_VOICE_ATTACH` is not read.
+//! On Windows `--events-pipe` takes the name of a named pipe the owner created
+//! (`\\.\pipe\conch-voice-<id>`, `docs/design/windows-desktop.md` §3.3, #938) and is the
+//! only events channel there is: file descriptor 3 does not exist. The session on it is
+//! byte for byte the one above, attach line and hello first. There is no parent watch
+//! ([`parent_id`] is 0), so owner loss is the pipe's end or error, a byte received on it,
+//! the end of standard input, or an events write that fails; each is [`Input::OwnerLost`].
+//! The attach line is a spawn-to-pipe binding, **not authentication**, there as here: a
+//! process of the same user that creates another instance of the pipe's name
+//! (`CreateNamedPipeW`) can be the one the helper opens, and that is out of scope by design
+//! and named (§3.4 to §3.5).
+//! A Windows start with `credential: stored` fails with `not_signed_in` without reading
+//! `credentials.json`: until an ACL-based stored-login check exists, the owner must use
+//! `credential: env` (`docs/design/windows-desktop.md` §3.7, F13).
 //! Owns: the event writer and its numbering; the thread that reads standard input; the
 //! watch on the parent; and the watchdog that ends the process when it does not end by
 //! itself in time after its owner has gone or asked it to leave. The voice session itself
@@ -35,7 +49,7 @@
 //! - **Nothing is captured before a valid start, and nothing before the identity check**
 //!   (§8.1). The hello is written before anything is read, opened or asked. After the start
 //!   the configuration is read, the login taken from where the start says, `conchd` asked
-//!   who that login is, and only for the account the owner named are PipeWire, the
+//!   who that login is, and only for the account the owner named are the audio system, the
 //!   speakers and the key device opened, and the session loop run. The loop opens the
 //!   microphone when a session first allows publishing, as for `join`.
 //! - **Standard input is the owner, not a key.** Its end is the owner gone, never "a
@@ -64,15 +78,27 @@
 //!   command opens the gate: a microphone switch and a mode change both end a transmission
 //!   at once (`session.rs`), and only a fresh press, or in open mode a fresh onset, sends
 //!   again. While starting, both are kept and used once the session loop runs.
+//! - **v3 is v2 and the sound of a screen share** (`share_audio.rs`). Its states say the
+//!   share's sound in four fields, always: off in `starting` and the final phases. A
+//!   `set_share_audio` read while starting is answered ok with that off state and is not
+//!   kept; in the session loop it is refused into the state, or carried out, and its ack waits
+//!   for the outcome ([`Owner::hold`]): acks after it wait behind it, so that acks keep the
+//!   order the commands were read in, while those commands are carried out at once. A v1 or
+//!   v2 session never reads either share command, never sees a share field, and is byte for
+//!   byte what it was but for the hello, which offers v3 as well.
 //!
 //! Where the start-up has to choose: a change of the key device's state while starting is
 //! part of the one start-up step, so it is first shown by the connecting state, which says
 //! what was found; a change made by a command or a mute or deafen key while starting is
 //! shown at once, as every other change is.
 
-use std::fs::{File, OpenOptions};
+use std::collections::VecDeque;
+use std::fs::File;
+#[cfg(unix)]
+use std::fs::OpenOptions;
 use std::future::Future;
 use std::io::{Read, Write};
+#[cfg(unix)]
 use std::os::unix::fs::FileTypeExt;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
@@ -81,17 +107,19 @@ use std::time::Duration;
 
 pub use conch_voice_api::VoiceControlCapture as Capture;
 use conch_voice_api::{
-    Error as ApiError, ServerAddress, VOICE_CONTROL_EVENT_FD, VOICE_CONTROL_EVENT_QUEUE_LINES,
-    VOICE_CONTROL_HELLO_TIMEOUT_MS, VOICE_CONTROL_LEAVE_EXIT_MS, VOICE_CONTROL_MAX_IN_FLIGHT,
-    VOICE_CONTROL_MAX_LINE_BYTES, VOICE_CONTROL_MAX_RETRY_IN_MS, VOICE_CONTROL_OWNER_LOSS_EXIT_MS,
-    VOICE_CONTROL_OWNER_POLL_MS, VOICE_CONTROL_SCHEMA_V1, VOICE_CONTROL_SCHEMA_V2,
-    VOICE_CONTROL_START_TIMEOUT_MS, VoiceControlAckV1, VoiceControlAckV2, VoiceControlBlock,
-    VoiceControlCommand, VoiceControlCommandV2, VoiceControlCredential, VoiceControlErrorCode,
-    VoiceControlEventKind, VoiceControlHelloV1, VoiceControlPhase, VoiceControlPlayback,
-    VoiceControlProtocolErrorV1, VoiceControlProtocolErrorV2, VoiceControlPtt,
-    VoiceControlPttProblem, VoiceControlReason, VoiceControlStartV1, VoiceControlStartV2,
-    VoiceControlStateV1, VoiceControlStateV2, VoiceControlTalkMode, default_config_dir,
-    parse_command, parse_command_v2, resolve_token, to_line,
+    Error as ApiError, ServerAddress, VOICE_CONTROL_EVENT_QUEUE_LINES, VOICE_CONTROL_LEAVE_EXIT_MS,
+    VOICE_CONTROL_MAX_IN_FLIGHT, VOICE_CONTROL_MAX_LINE_BYTES, VOICE_CONTROL_MAX_RETRY_IN_MS,
+    VOICE_CONTROL_OWNER_LOSS_EXIT_MS, VOICE_CONTROL_OWNER_POLL_MS, VOICE_CONTROL_SCHEMA_V1,
+    VOICE_CONTROL_SCHEMA_V2, VOICE_CONTROL_SCHEMA_V3, VOICE_CONTROL_START_TIMEOUT_MS,
+    VoiceControlAckV1, VoiceControlAckV2, VoiceControlAckV3, VoiceControlBlock,
+    VoiceControlCommand, VoiceControlCommandV2, VoiceControlCommandV3, VoiceControlCredential,
+    VoiceControlErrorCode, VoiceControlEventKind, VoiceControlHelloV1, VoiceControlPhase,
+    VoiceControlPlayback, VoiceControlProtocolErrorV1, VoiceControlProtocolErrorV2,
+    VoiceControlProtocolErrorV3, VoiceControlPtt, VoiceControlPttProblem, VoiceControlReason,
+    VoiceControlShareAudio, VoiceControlShareAudioProblem, VoiceControlStartV1,
+    VoiceControlStartV2, VoiceControlStartV3, VoiceControlStateV1, VoiceControlStateV2,
+    VoiceControlStateV3, VoiceControlTalkMode, default_config_dir, parse_command, parse_command_v2,
+    parse_command_v3, resolve_token, to_line,
 };
 use conch_voice_control::{
     Config, Key, KeyAction, KeyBindings, KeyEvent, LineCommand, Ptt, PttInput, PttStatus,
@@ -99,8 +127,8 @@ use conch_voice_control::{
 };
 use tokio::sync::{mpsc, oneshot};
 
-use crate::audio::PipeWire;
-use crate::cli::{self, Environment, MicChoice, SinkChoice};
+use crate::audio::{AudioSystem, CONNECTION_LOST};
+use crate::cli::{self, Environment, MicChoice, ShareChoice, SinkChoice};
 use crate::error::Error;
 use crate::input::{self, Bounded, Ended, LastLine};
 use crate::keydev::{self, DeviceRule, DeviceState, KeyTimings, Problem};
@@ -113,6 +141,8 @@ use crate::session::{
     self, Conchd, DeviceSwitch, Input, OpenMic, OpenSink, REPORT_TIMEOUT, REQUEST_TIMEOUT,
     Settings, Timings,
 };
+use crate::share_audio::{ShareRequest, ShareView};
+use crate::share_capture::ShareSource;
 
 /// How long a press's final `stopped` report is given while leaving (§8.2).
 pub const REPORT_LIMIT: Duration = Duration::from_secs(1);
@@ -133,6 +163,19 @@ const BAD_ENVIRONMENT: &str = "CONCH_TOKEN is set, and conch named the stored lo
 const NOT_A_PERSON: &str = "voice is for people: this login is not a person's";
 const VOICE_NOT_ALLOWED: &str = "this account may not use voice";
 
+/// Windows has no checked stored login (§3.7, F13). This decision performs no I/O; the
+/// platform is an argument so both platforms' rules can be checked on Linux.
+#[cfg(any(windows, test))]
+fn credential_refusal(
+    credential: VoiceControlCredential,
+    windows: bool,
+) -> Option<VoiceControlReason> {
+    match (windows, credential) {
+        (true, VoiceControlCredential::Stored) => Some(VoiceControlReason::NotSignedIn),
+        _ => None,
+    }
+}
+
 /// Which version of the protocol a session speaks: the one its start was written in, fixed
 /// for the session (`docs/design/tui-voice.md` §20.2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -141,6 +184,8 @@ pub enum Version {
     V1,
     /// `conch.voice_control.v2`: device switching and the open microphone besides.
     V2,
+    /// `conch.voice_control.v3`: v2, and the sound of the owner's screen share.
+    V3,
 }
 
 impl Version {
@@ -150,13 +195,15 @@ impl Version {
         match self {
             Version::V1 => VOICE_CONTROL_SCHEMA_V1,
             Version::V2 => VOICE_CONTROL_SCHEMA_V2,
+            Version::V3 => VOICE_CONTROL_SCHEMA_V3,
         }
     }
 }
 
 /// A command of the owner's as the session takes it: read, checked, and numbered. It holds
-/// no text but the device names of a `set_devices`, which its `Debug` does not show
-/// ([`DeviceSwitch`]), so it travels with the other inputs as they do.
+/// no text but the device names of a `set_devices` and the application name of a
+/// `set_share_audio`, which its `Debug` does not show ([`DeviceSwitch`], [`ShareRequest`]),
+/// so it travels with the other inputs as they do.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Control {
     /// `set_mute`.
@@ -196,6 +243,20 @@ pub enum Control {
         id: i64,
         /// The mode wanted.
         talk_mode: TalkMode,
+    },
+    /// `set_share_audio` (v3): capture and publish the share's sound, or stop.
+    SetShareAudio {
+        /// The command's id.
+        id: i64,
+        /// What it asks for.
+        request: ShareRequest,
+    },
+    /// `set_share_audio_mute` (v3): the share's own mute.
+    SetShareAudioMute {
+        /// The command's id.
+        id: i64,
+        /// The state wanted.
+        muted: bool,
     },
     /// A command refused with an ack, after which the helper goes on: of a kind it does
     /// not know, invalid, or a second start.
@@ -330,8 +391,16 @@ pub struct Snapshot {
     pub ptt_problem: Option<VoiceControlPttProblem>,
     /// The speakers' stream: said in v2 only.
     pub playback: VoiceControlPlayback,
-    /// The talk mode in force: said in v2 only.
+    /// The talk mode in force: said in v2 and v3 only.
     pub talk_mode: VoiceControlTalkMode,
+    /// Whether the share's sound is being captured and published: said in v3 only.
+    pub share_audio: VoiceControlShareAudio,
+    /// The share's own mute: said in v3 only.
+    pub share_audio_muted: bool,
+    /// Why the share's sound is unavailable, or `no_sources`: said in v3 only.
+    pub share_audio_problem: Option<VoiceControlShareAudioProblem>,
+    /// How many streams are mixed into it: said in v3 only.
+    pub share_audio_sources: i64,
 }
 
 impl Snapshot {
@@ -372,7 +441,26 @@ impl Snapshot {
             ptt_problem,
             playback: VoiceControlPlayback::Off,
             talk_mode: VoiceControlTalkMode::PushToTalk,
+            share_audio: VoiceControlShareAudio::Off,
+            share_audio_muted: false,
+            share_audio_problem: None,
+            share_audio_sources: 0,
         }
+    }
+
+    /// The same snapshot, with the share's sound as `view` says and its mute, which a v3
+    /// state says. Before the session runs and after it has ended (starting and the final
+    /// phases) the share's sound is off, nothing is counted and no problem is said, whatever
+    /// is passed; the mute is a desired state and is said in every phase.
+    #[must_use]
+    pub fn with_share(mut self, view: ShareView, muted: bool) -> Self {
+        let closed = self.phase == VoiceControlPhase::Starting || self.phase.is_final();
+        let view = if closed { ShareView::OFF } else { view };
+        self.share_audio = view.share_audio;
+        self.share_audio_problem = view.problem;
+        self.share_audio_sources = view.sources;
+        self.share_audio_muted = muted;
+        self
     }
 
     /// The same snapshot, with the speakers' state and the talk mode in force, which a v2
@@ -413,6 +501,14 @@ impl Snapshot {
             seen.playback = VoiceControlPlayback::Off;
             seen.talk_mode = VoiceControlTalkMode::PushToTalk;
             seen.reason = seen.reason.map(VoiceControlReason::for_v1);
+        }
+        // Neither v1 nor v2 has the share's sound: a change of it is no change to their
+        // owners, and writes no state.
+        if version != Version::V3 {
+            seen.share_audio = VoiceControlShareAudio::Off;
+            seen.share_audio_muted = false;
+            seen.share_audio_problem = None;
+            seen.share_audio_sources = 0;
         }
         seen
     }
@@ -462,6 +558,30 @@ impl Snapshot {
             talk_mode: self.talk_mode,
             ptt: self.ptt,
             ptt_problem: self.ptt_problem,
+        }
+    }
+
+    fn event_v3(&self, seq: i64) -> VoiceControlStateV3 {
+        VoiceControlStateV3 {
+            schema: VOICE_CONTROL_SCHEMA_V3.to_owned(),
+            kind: VoiceControlEventKind::State,
+            seq,
+            phase: self.phase,
+            reason: self.reason,
+            retry_in_ms: self.retry_in_ms,
+            capture: self.capture,
+            playback: self.playback,
+            transmitting: self.transmitting,
+            muted: self.muted,
+            deafened: self.deafened,
+            blocked: self.blocked.clone(),
+            talk_mode: self.talk_mode,
+            ptt: self.ptt,
+            ptt_problem: self.ptt_problem,
+            share_audio: self.share_audio,
+            share_audio_muted: self.share_audio_muted,
+            share_audio_problem: self.share_audio_problem,
+            share_audio_sources: self.share_audio_sources,
         }
     }
 }
@@ -601,11 +721,12 @@ impl Events {
     }
 
     /// The hello: the first event, written before anything is read. It is v1's, in the
-    /// frozen shape, and offers both versions (§20.2).
+    /// frozen shape, and offers every version this helper speaks (§20.2,
+    /// `docs/design/linux-share-audio.md` §7): v1, v2 and v3, on every platform.
     pub fn hello(&mut self) {
         // The first event, into an empty queue.
         self.write(Keep::IfThereIsRoom, |seq| {
-            let mut hello = VoiceControlHelloV1::v1_and_v2(cli::version());
+            let mut hello = VoiceControlHelloV1::v1_v2_and_v3(cli::version());
             hello.seq = seq;
             to_line(&hello)
         });
@@ -615,6 +736,7 @@ impl Events {
         match self.version {
             Version::V1 => self.write(keep, |seq| to_line(&snapshot.event(seq))),
             Version::V2 => self.write(keep, |seq| to_line(&snapshot.event_v2(seq))),
+            Version::V3 => self.write(keep, |seq| to_line(&snapshot.event_v3(seq))),
         }
     }
 
@@ -625,6 +747,9 @@ impl Events {
             }),
             Version::V2 => self.write(Keep::Answer, |seq| {
                 to_line(&VoiceControlAckV2::new(seq, id, refusal))
+            }),
+            Version::V3 => self.write(Keep::Answer, |seq| {
+                to_line(&VoiceControlAckV3::new(seq, id, refusal))
             }),
         }
     }
@@ -637,6 +762,9 @@ impl Events {
             Version::V2 => self.write(Keep::IfThereIsRoom, |seq| {
                 to_line(&VoiceControlProtocolErrorV2::new(seq, code))
             }),
+            Version::V3 => self.write(Keep::IfThereIsRoom, |seq| {
+                to_line(&VoiceControlProtocolErrorV3::new(seq, code))
+            }),
         }
     }
 
@@ -644,6 +772,17 @@ impl Events {
     pub async fn flush(&self, limit: Duration) -> bool {
         self.queue.flush(limit).await
     }
+}
+
+/// An answer that waits behind a held one ([`Owner::hold`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Held {
+    /// A command whose outcome is not known yet.
+    Waiting(i64),
+    /// An ack, carried out or refused.
+    Ack(i64, Option<VoiceControlErrorCode>),
+    /// The answer to `get_state`: the state when it is written, and the ack.
+    State(i64),
 }
 
 /// The owner, as the helper tells it things: the events, and the last state it was told,
@@ -654,6 +793,9 @@ pub struct Owner {
     /// Told when the session is failing, so that a process the watchdog ends exits as a
     /// failure, as the owner was told.
     watchdog: Watchdog,
+    /// Answers waiting, in the order their commands were read, behind a command whose
+    /// outcome is not known yet. Empty but while one is: then every ack is written at once.
+    held: VecDeque<Held>,
 }
 
 impl Owner {
@@ -662,6 +804,58 @@ impl Owner {
             events,
             shown: None,
             watchdog,
+            held: VecDeque::new(),
+        }
+    }
+
+    /// Holds the ack of command `id` until [`Owner::release`] says its outcome is known:
+    /// every answer after it waits behind it, so that acks keep the order their commands
+    /// were read in. The commands themselves are carried out meanwhile, and their states
+    /// written.
+    pub fn hold(&mut self, id: i64) {
+        self.held.push_back(Held::Waiting(id));
+    }
+
+    /// Whether answers are waiting.
+    #[must_use]
+    pub fn holding(&self) -> bool {
+        !self.held.is_empty()
+    }
+
+    /// Answers `get_state`: the state, forced, and the ack; behind a held answer, both wait
+    /// and the state written is the one at the time.
+    pub fn answer_state(&mut self, now: &Snapshot, id: i64) {
+        if self.held.is_empty() {
+            self.state(now, true);
+            self.events.ack(id, None);
+        } else {
+            self.held.push_back(Held::State(id));
+        }
+    }
+
+    /// The outcome of the first `resolved` held commands is known, and the state that says
+    /// it has been written: their acks, carried out, and every answer behind them up to the
+    /// next command still held, are written now, in order. `now` answers a `get_state`.
+    pub fn release(&mut self, mut resolved: usize, now: &Snapshot) {
+        for held in &mut self.held {
+            if resolved == 0 {
+                break;
+            }
+            if let Held::Waiting(id) = *held {
+                *held = Held::Ack(id, None);
+                resolved -= 1;
+            }
+        }
+        while let Some(held) = self.held.front().copied() {
+            match held {
+                Held::Waiting(_) => break,
+                Held::Ack(id, refusal) => self.events.ack(id, refusal),
+                Held::State(id) => {
+                    self.state(now, true);
+                    self.events.ack(id, None);
+                }
+            }
+            self.held.pop_front();
         }
     }
 
@@ -685,20 +879,34 @@ impl Owner {
         }
     }
 
-    /// Answers command `id`: carried out, or refused for `refusal`.
+    /// Answers command `id`: carried out, or refused for `refusal`. Behind a held answer it
+    /// waits its turn.
     pub fn ack(&mut self, id: i64, refusal: Option<VoiceControlErrorCode>) {
-        self.events.ack(id, refusal);
+        if self.held.is_empty() {
+            self.events.ack(id, refusal);
+        } else {
+            self.held.push_back(Held::Ack(id, refusal));
+        }
     }
 
-    /// Says that a line cannot be acted on. The session fails for it.
-    pub fn protocol_error(&mut self, code: VoiceControlErrorCode) {
+    /// Says that a line cannot be acted on. The session fails for it. Whatever was held is
+    /// answered first, carried out: every command read before the line gets its ack.
+    pub fn protocol_error(&mut self, code: VoiceControlErrorCode, now: &Snapshot) {
+        self.release(usize::MAX, now);
         self.watchdog.failed();
         self.events.protocol_error(code);
     }
 
     /// Tells the owner the final state, and gives it [`FINAL_STATE_LIMIT`] to be written.
-    /// Nothing is written after it: this is the end of the owner.
+    /// Nothing is written after it: this is the end of the owner. Anything still held is
+    /// answered first, as the session leaving answers every command it read.
     pub async fn finish(mut self, last: &Snapshot) {
+        if self.holding() {
+            // A `get_state` among them is answered as the session is: on its way out.
+            let mut leaving = last.clone();
+            leaving.phase = VoiceControlPhase::Stopping;
+            self.release(usize::MAX, &leaving);
+        }
         // In the owner's version, as every state is: a v1 owner's last reason is one v1 has.
         let last = last.seen_in(self.events.version);
         self.events.state(&last, Keep::Last);
@@ -724,6 +932,8 @@ pub struct Handoff {
     /// The devices the owner named while starting (v2), used once the session loop runs:
     /// a side left out is left alone.
     pub switch: DeviceSwitch,
+    /// The share's mute the owner asked for while starting (v3).
+    pub share_muted: bool,
 }
 
 impl Handoff {
@@ -731,7 +941,7 @@ impl Handoff {
     /// with the machine as it was handed over.
     pub async fn fail(self, error: &Error) {
         let reason = match error {
-            Error::PipeWire { .. } | Error::Audio(_) => VoiceControlReason::AudioUnavailable,
+            Error::AudioSystem { .. } | Error::Audio(_) => VoiceControlReason::AudioUnavailable,
             _ => VoiceControlReason::InternalError,
         };
         let key = match self.key_state {
@@ -749,7 +959,8 @@ impl Handoff {
             Capture::Off,
             status,
             key,
-        );
+        )
+        .with_share(ShareView::OFF, self.share_muted);
         self.owner.finish(&last).await;
     }
 }
@@ -918,6 +1129,21 @@ impl From<VoiceControlStartV2> for Start {
     }
 }
 
+impl From<VoiceControlStartV3> for Start {
+    fn from(start: VoiceControlStartV3) -> Self {
+        Self {
+            version: Version::V3,
+            id: start.id,
+            server: start.server,
+            channel: start.channel,
+            principal_id: start.principal_id,
+            credential: start.credential,
+            muted: start.muted,
+            deafened: start.deafened,
+        }
+    }
+}
+
 /// What the first line of the control pipe came to.
 #[derive(Debug)]
 pub enum First {
@@ -931,10 +1157,10 @@ pub enum First {
 }
 
 /// The first line: a valid start, or the code that refuses it. It is read with the reader
-/// of the version it names, since the hello offered both (§20.2), and so fixes the version:
-/// a line of v2 by v2's reader, any other by v1's, which refuses a third version as
-/// `unknown_schema`. A line refused for a code that ends a session keeps that code; anything
-/// else that is not a start is not_started.
+/// of the version it names, since the hello offered every one (§20.2), and so fixes the
+/// version: a line of v3 by v3's reader, one of v2 by v2's, any other by v1's, which refuses
+/// a fourth version as `unknown_schema`. A line refused for a code that ends a session keeps
+/// that code; anything else that is not a start is not_started.
 ///
 /// # Errors
 ///
@@ -950,6 +1176,15 @@ pub fn first_line(line: Bounded<'_>) -> Result<Start, VoiceControlErrorCode> {
             VoiceControlErrorCode::NotStarted
         }
     };
+    match parse_command_v3(bytes) {
+        Ok(VoiceControlCommandV3::Start(start)) => return Ok(start.into()),
+        Ok(_) => return Err(VoiceControlErrorCode::NotStarted),
+        Err(refusal) if refusal.code != VoiceControlErrorCode::UnknownSchema => {
+            return Err(refused(refusal.code));
+        }
+        // Not a line of v3: read as v2, and then v1, as before v3 existed.
+        Err(_) => {}
+    }
     match parse_command_v2(bytes) {
         Ok(VoiceControlCommandV2::Start(start)) => Ok(start.into()),
         Ok(_) => Err(VoiceControlErrorCode::NotStarted),
@@ -965,15 +1200,23 @@ pub fn first_line(line: Bounded<'_>) -> Result<Start, VoiceControlErrorCode> {
     }
 }
 
-/// The version a first line that is not a valid start is answered in: v2 when it is a
-/// line of v2 (one JSON object whose schema is v2's), so that the owner that wrote it reads
-/// the answer; v1 otherwise, the version of the hello, which any owner reads.
+/// The version a first line that is not a valid start is answered in: v3 or v2 when it is a
+/// line of that version (one JSON object whose schema is its), so that the owner that wrote
+/// it reads the answer; v1 otherwise, the version of the hello, which any owner reads.
 #[must_use]
 pub fn version_named(line: Bounded<'_>) -> Version {
     use VoiceControlErrorCode as Code;
     let Bounded::Line(bytes) = line else {
         return Version::V1;
     };
+    match parse_command_v3(bytes) {
+        Err(refusal)
+            if matches!(
+                refusal.code,
+                Code::TooLong | Code::Malformed | Code::UnknownSchema
+            ) => {}
+        Ok(_) | Err(_) => return Version::V3,
+    }
     match parse_command_v2(bytes) {
         Err(refusal)
             if matches!(
@@ -996,6 +1239,31 @@ enum Command {
     Leave,
     SetDevices(DeviceSwitch),
     SetTalkMode(TalkMode),
+    SetShareAudio(ShareRequest),
+    SetShareAudioMute(bool),
+}
+
+impl From<VoiceControlCommandV3> for Command {
+    fn from(command: VoiceControlCommandV3) -> Self {
+        match command {
+            VoiceControlCommandV3::Start(_) => Command::Start,
+            VoiceControlCommandV3::SetMute(c) => Command::SetMute(c.muted),
+            VoiceControlCommandV3::SetDeafen(c) => Command::SetDeafen(c.deafened),
+            VoiceControlCommandV3::GetState(_) => Command::GetState,
+            VoiceControlCommandV3::Leave(_) => Command::Leave,
+            VoiceControlCommandV3::SetDevices(c) => Command::SetDevices(DeviceSwitch {
+                input: c.input,
+                output: c.output,
+            }),
+            VoiceControlCommandV3::SetTalkMode(c) => Command::SetTalkMode(talk_mode(c.talk_mode)),
+            VoiceControlCommandV3::SetShareAudio(c) => Command::SetShareAudio(ShareRequest {
+                capturing: c.capturing,
+                scope: c.scope,
+                application_name: c.application_name,
+            }),
+            VoiceControlCommandV3::SetShareAudioMute(c) => Command::SetShareAudioMute(c.muted),
+        }
+    }
 }
 
 impl From<VoiceControlCommand> for Command {
@@ -1073,6 +1341,9 @@ impl Later {
             Version::V2 => {
                 parse_command_v2(bytes).map(|command| (command.id(), Command::from(command)))
             }
+            Version::V3 => {
+                parse_command_v3(bytes).map(|command| (command.id(), Command::from(command)))
+            }
         };
         let (id, command) = match parsed {
             Ok((id, command)) => (id, Ok(command)),
@@ -1102,6 +1373,8 @@ impl Later {
             Ok(Command::Leave) => Control::Leave { id },
             Ok(Command::SetDevices(switch)) => Control::SetDevices { id, switch },
             Ok(Command::SetTalkMode(talk_mode)) => Control::SetTalkMode { id, talk_mode },
+            Ok(Command::SetShareAudio(request)) => Control::SetShareAudio { id, request },
+            Ok(Command::SetShareAudioMute(muted)) => Control::SetShareAudioMute { id, muted },
         }
     }
 }
@@ -1158,6 +1431,24 @@ pub fn spawn_reader(
     });
 }
 
+/// The process id of this process's parent, to be recorded before anything else and given to
+/// [`watch_parent`].
+///
+/// Windows has no such call in `std` and its process ids are reused, so there the answer is
+/// always 0, and [`watch_parent`] is not run there: a Windows owner is noticed by its events
+/// pipe ending or failing to be written (`channel`, #938), not by this poll.
+#[must_use]
+pub fn parent_id() -> u32 {
+    #[cfg(unix)]
+    {
+        std::os::unix::process::parent_id()
+    }
+    #[cfg(not(unix))]
+    {
+        0
+    }
+}
+
 /// Looks every [`VOICE_CONTROL_OWNER_POLL_MS`] at whether the process that started this one
 /// is still its parent, and says the owner is lost when it is not: a dead owner's children
 /// are given to another parent, which catches a death the control pipe misses (§8.3).
@@ -1168,7 +1459,7 @@ pub fn watch_parent(parent: u32, inputs: mpsc::UnboundedSender<Input>, watchdog:
             if inputs.is_closed() {
                 return;
             }
-            if std::os::unix::process::parent_id() != parent {
+            if parent_id() != parent {
                 watchdog.arm(Duration::from_millis(VOICE_CONTROL_OWNER_LOSS_EXIT_MS));
                 let _ = inputs.send(Input::OwnerLost);
                 return;
@@ -1177,7 +1468,7 @@ pub fn watch_parent(parent: u32, inputs: mpsc::UnboundedSender<Input>, watchdog:
     });
 }
 
-/// Turns SIGTERM and SIGINT into [`Input::Signal`], which a managed session takes as
+/// Turns SIGTERM and SIGINT (on Windows, Ctrl-C only) into [`Input::Signal`], which a managed session takes as
 /// `leave` (§8.4), and arms the watchdog for a leave's bound. Must be called inside the
 /// runtime.
 ///
@@ -1185,15 +1476,9 @@ pub fn watch_parent(parent: u32, inputs: mpsc::UnboundedSender<Input>, watchdog:
 ///
 /// What the operating system said, if a handler could not be installed.
 pub fn signals(inputs: mpsc::UnboundedSender<Input>, watchdog: Watchdog) -> std::io::Result<()> {
-    use tokio::signal::unix::{SignalKind, signal};
-    let mut interrupt = signal(SignalKind::interrupt())?;
-    let mut terminate = signal(SignalKind::terminate())?;
+    let mut interrupts = input::Interrupts::install()?;
     tokio::spawn(async move {
-        loop {
-            tokio::select! {
-                _ = interrupt.recv() => {}
-                _ = terminate.recv() => {}
-            }
+        while interrupts.recv().await.is_some() {
             watchdog.arm(Duration::from_millis(VOICE_CONTROL_LEAVE_EXIT_MS));
             if inputs.send(Input::Signal).is_err() {
                 return;
@@ -1212,7 +1497,9 @@ pub fn signals(inputs: mpsc::UnboundedSender<Input>, watchdog: Watchdog) -> std:
 /// # Errors
 ///
 /// [`Error::EventPipe`] if file descriptor 3 is not open, is not a pipe, or has no reader.
+#[cfg(unix)]
 pub fn open_event_pipe() -> Result<File, Error> {
+    use conch_voice_api::{VOICE_CONTROL_EVENT_FD, VOICE_CONTROL_HELLO_TIMEOUT_MS};
     let path = PathBuf::from(format!("/proc/self/fd/{VOICE_CONTROL_EVENT_FD}"));
     let named = std::fs::metadata(&path).map_err(|_| Error::EventPipe("is not open"))?;
     if !named.file_type().is_fifo() {
@@ -1235,7 +1522,30 @@ pub fn open_event_pipe() -> Result<File, Error> {
     Ok(file)
 }
 
-/// How the microphone and the speakers are opened, once the identity has been checked.
+/// What [`open_event_pipe`] answers where there is no inherited file descriptor 3 to open
+/// by name: [`Error::Unsupported`]. A Windows owner attaches to a named pipe instead, with
+/// `--events-pipe` (#938).
+///
+/// # Errors
+///
+/// Always [`Error::Unsupported`].
+#[cfg(not(unix))]
+pub fn open_event_pipe() -> Result<File, Error> {
+    Err(unsupported_event_pipe())
+}
+
+/// The error behind the non-Unix [`open_event_pipe`], compiled on Linux too so that a test
+/// holds its words.
+#[cfg(any(not(unix), test))]
+fn unsupported_event_pipe() -> Error {
+    Error::Unsupported {
+        what: "the inherited event pipe (file descriptor 3)",
+        path: None,
+    }
+}
+
+/// How the microphone and the speakers are opened, once the identity has been checked, and
+/// where a screen share's sound would be captured from.
 pub enum Devices {
     /// PipeWire's, or with `managed`'s test options a tone, a WAV file and a counting sink.
     Choices {
@@ -1243,6 +1553,8 @@ pub enum Devices {
         mic: MicChoice,
         /// `--sink`.
         sink: SinkChoice,
+        /// `--test-share-source`, or the platform's captures.
+        share: ShareChoice,
     },
     /// Opened by the caller: for the library's tests.
     Given {
@@ -1252,6 +1564,8 @@ pub enum Devices {
         open_sink: OpenSink,
         /// The tones the mix is measured for.
         sink_tones: Vec<f32>,
+        /// Where a share's sound is captured from.
+        share: ShareSource,
     },
 }
 
@@ -1260,7 +1574,8 @@ pub enum Devices {
 pub enum KeySource {
     /// The key device `voice.toml` names, read as an event device.
     Configured,
-    /// `--test-key-device`: a named pipe of records, with the keys `voice.toml` binds.
+    /// `--test-key-device`: a named pipe of records, with the keys `voice.toml` binds. On Windows
+    /// the records are `keys_windows`'s four-byte fake Raw Input transitions (#1791).
     NamedPipe(PathBuf),
 }
 
@@ -1370,9 +1685,9 @@ pub async fn run<T: Transport>(
         }
         Begin::Bad(code, version) => {
             events.speak(version);
-            let mut owner = Owner::new(events, watchdog);
-            owner.protocol_error(code);
-            let boot = Boot::new(owner, received, false, false);
+            let mut boot = Boot::new(Owner::new(events, watchdog), received, false, false);
+            let now = boot.snapshot(VoiceControlPhase::Starting, None);
+            boot.owner.protocol_error(code, &now);
             boot.finish(VoiceControlPhase::Failed, VoiceControlReason::ProtocolError)
                 .await;
             return Err(Error::Managed(PROTOCOL_ERROR));
@@ -1442,6 +1757,7 @@ pub async fn run<T: Transport>(
                 key_state,
                 talk_key,
                 switch: boot.switch,
+                share_muted: boot.share_muted,
             };
             session::serve(
                 settings,
@@ -1552,6 +1868,10 @@ struct Boot {
     /// The talk mode `set_talk_mode` chose while starting (v2), which the session runs in
     /// whatever `voice.toml` says. Not said while starting: a state then is push-to-talk.
     talk_mode: Option<TalkMode>,
+    /// The share's mute `set_share_audio_mute` asked for while starting (v3): a desired
+    /// state, said at once and kept for the session loop. A `set_share_audio` while starting
+    /// is not kept: nothing can be captured before the session is connected.
+    share_muted: bool,
 }
 
 impl Boot {
@@ -1574,6 +1894,7 @@ impl Boot {
                 output: None,
             },
             talk_mode: None,
+            share_muted: false,
         }
     }
 
@@ -1586,6 +1907,7 @@ impl Boot {
             self.ptt.status(),
             self.key,
         )
+        .with_share(ShareView::OFF, self.share_muted)
     }
 
     /// Tells the owner the starting state, if it changed.
@@ -1615,7 +1937,9 @@ impl Boot {
                     Control::SetMute { id, .. }
                     | Control::SetDeafen { id, .. }
                     | Control::SetDevices { id, .. }
-                    | Control::SetTalkMode { id, .. } => {
+                    | Control::SetTalkMode { id, .. }
+                    | Control::SetShareAudio { id, .. }
+                    | Control::SetShareAudioMute { id, .. } => {
                         self.owner.ack(id, Some(VoiceControlErrorCode::Stopping));
                     }
                     Control::GetState { id } => {
@@ -1626,7 +1950,8 @@ impl Boot {
                     Control::Leave { id } => self.owner.ack(id, None),
                     Control::Refused { id, code } => self.owner.ack(id, Some(code)),
                     Control::Fatal { code } => {
-                        self.owner.protocol_error(code);
+                        let now = self.snapshot(VoiceControlPhase::Stopping, Some(reason));
+                        self.owner.protocol_error(code, &now);
                         phase = VoiceControlPhase::Failed;
                         reason = VoiceControlReason::ProtocolError;
                         break;
@@ -1698,12 +2023,28 @@ impl Boot {
                     self.owner.ack(id, None);
                     None
                 }
+                // Starting: the share's sound is off, and a state that says anything else
+                // would not hold together. The command is answered with that state, and is
+                // not kept: nothing is captured or published before the session is
+                // connected, and the owner asks again once it sees `connected`.
+                Control::SetShareAudio { id, .. } => {
+                    self.owner.ack(id, None);
+                    None
+                }
+                // The share's mute is a desired state, said in any phase, and kept.
+                Control::SetShareAudioMute { id, muted } => {
+                    self.share_muted = muted;
+                    self.tell();
+                    self.owner.ack(id, None);
+                    None
+                }
                 Control::Refused { id, code } => {
                     self.owner.ack(id, Some(code));
                     None
                 }
                 Control::Fatal { code } => {
-                    self.owner.protocol_error(code);
+                    let now = self.snapshot(VoiceControlPhase::Starting, None);
+                    self.owner.protocol_error(code, &now);
                     Some(Halt::Fail(
                         VoiceControlReason::ProtocolError,
                         Error::Managed(PROTOCOL_ERROR),
@@ -1777,6 +2118,7 @@ impl Boot {
             environment.conch_config_dir.as_deref(),
             environment.xdg_config_home.as_deref(),
             environment.home.as_deref(),
+            environment.appdata.as_deref(),
         )
         .map_err(|error| Halt::Fail(Reason::BadConfig, Error::Api(error)))?;
         let config = match &config_dir {
@@ -1794,6 +2136,15 @@ impl Boot {
         // The login, from where the start says and nowhere else.
         let server = ServerAddress::parse(&start.server)
             .map_err(|error| Halt::Fail(Reason::InternalError, Error::Api(error)))?;
+        #[cfg(windows)]
+        if let Some(reason) = credential_refusal(start.credential, true) {
+            return Err(Halt::Fail(
+                reason,
+                Error::Api(ApiError::NotSignedIn {
+                    server: server.key().to_owned(),
+                }),
+            ));
+        }
         let token = match start.credential {
             VoiceControlCredential::Stored => {
                 if environment.token.is_some() {
@@ -1844,17 +2195,14 @@ impl Boot {
             ));
         }
 
-        // PipeWire and the speakers. The microphone is the session loop's to open.
+        // The audio system and the speakers. The microphone is the session loop's to open.
         let audio_unavailable = |error| Halt::Fail(Reason::AudioUnavailable, error);
-        let (open_mic, sink, sink_tones) = match devices {
-            Devices::Choices { mic, sink } => {
-                let pipewire = if mic == MicChoice::PipeWire || sink == SinkChoice::PipeWire {
-                    let connecting = tokio::task::spawn_blocking(PipeWire::connect);
+        let (open_mic, sink, sink_tones, share) = match devices {
+            Devices::Choices { mic, sink, share } => {
+                let audio = if mic == MicChoice::AudioSystem || sink == SinkChoice::AudioSystem {
+                    let connecting = tokio::task::spawn_blocking(AudioSystem::connect);
                     let connected = self.wait(connecting).await?.map_err(|_| {
-                        Halt::Fail(
-                            Reason::InternalError,
-                            Error::Managed("the connection to PipeWire was lost"),
-                        )
+                        Halt::Fail(Reason::InternalError, Error::Managed(CONNECTION_LOST))
                     })?;
                     Some(connected.map_err(audio_unavailable)?)
                 } else {
@@ -1862,17 +2210,21 @@ impl Boot {
                 };
                 let sink_tones = match &sink {
                     SinkChoice::Count(tones) => tones.clone(),
-                    SinkChoice::PipeWire => Vec::new(),
+                    SinkChoice::AudioSystem => Vec::new(),
                 };
-                let open_mic = crate::mic_opener(mic, pipewire.clone());
-                let open_sink = crate::sink_opener(sink, pipewire);
-                (open_mic, open_sink, sink_tones)
+                // Nothing is captured here: the source says where a share's sound would be
+                // captured from once the owner asks for it.
+                let share = crate::share_source(&share, audio.as_ref());
+                let open_mic = crate::mic_opener(mic, audio.clone());
+                let open_sink = crate::sink_opener(sink, audio);
+                (open_mic, open_sink, sink_tones, share)
             }
             Devices::Given {
                 open_mic,
                 open_sink,
                 sink_tones,
-            } => (open_mic, open_sink, sink_tones),
+                share,
+            } => (open_mic, open_sink, sink_tones, share),
         };
         // The speakers are opened now, so that speakers that cannot be opened fail the
         // start: those the owner named already, if they can be opened by their name, or else
@@ -1924,7 +2276,13 @@ impl Boot {
         let talk_mode = match self.version {
             Version::V1 => v1_talk_mode(config.audio.talk_mode),
             // What the owner chose while starting, or else what the file says (§20.6).
-            Version::V2 => self.talk_mode.unwrap_or(config.audio.talk_mode),
+            Version::V2 | Version::V3 => self.talk_mode.unwrap_or(config.audio.talk_mode),
+        };
+        // Only a v3 owner can ask for a share's sound; for any other session there is
+        // nothing to capture it from at all.
+        let share = match self.version {
+            Version::V3 => share,
+            Version::V1 | Version::V2 => ShareSource::Unsupported,
         };
         let settings = Settings {
             channel: start.channel.clone(),
@@ -1947,6 +2305,7 @@ impl Boot {
             key_device,
             unreachable_note: None,
             share_audio_owner: setup.share_audio_owner,
+            share_audio: share,
             timings,
         };
         Ok((settings, conchd))
@@ -1992,6 +2351,7 @@ fn whoami_reason(error: &ApiError) -> VoiceControlReason {
         ApiError::Forbidden(_) => Reason::NotAPerson,
         ApiError::VoiceRequiresAuth(_) => Reason::VoiceRequiresAuth,
         ApiError::Timeout
+        | ApiError::BodyTimeout
         | ApiError::Connect { .. }
         | ApiError::Transport { .. }
         | ApiError::UnexpectedResponse { .. }
@@ -2034,8 +2394,45 @@ fn key_source(
 }
 
 #[cfg(test)]
+mod unsupported_tests {
+    use super::*;
+
+    #[test]
+    fn the_non_unix_event_pipe_is_a_typed_unsupported_error_that_names_fd_3() {
+        let error = unsupported_event_pipe();
+        assert!(matches!(error, Error::Unsupported { .. }));
+        assert!(error.to_string().contains("file descriptor 3"), "{error}");
+        assert_eq!(error.exit_code(), 2);
+    }
+
+    /// Where there is no parent id to read, the poll must never see it change.
+    #[cfg(not(unix))]
+    #[test]
+    fn without_unix_the_parent_id_is_zero_and_never_changes() {
+        assert_eq!(parent_id(), 0);
+        assert_eq!(parent_id(), parent_id());
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_windows_refuses_stored_credentials_before_resolving_a_token() {
+        for (windows, credential, refusal) in [
+            (
+                true,
+                VoiceControlCredential::Stored,
+                Some(VoiceControlReason::NotSignedIn),
+            ),
+            (true, VoiceControlCredential::Env, None),
+            (false, VoiceControlCredential::Stored, None),
+            (false, VoiceControlCredential::Env, None),
+        ] {
+            assert_eq!(credential_refusal(credential, windows), refusal);
+        }
+    }
 
     #[test]
     fn the_watchdog_says_when_it_ends_a_room_leave_still_running() {
@@ -2044,6 +2441,7 @@ mod tests {
     }
 
     /// One evdev key record: the event type EV_KEY (1), a code and a value (1 is a press).
+    #[cfg(not(windows))]
     fn record(code: u16, value: i32) -> [u8; conch_voice_control::INPUT_EVENT_LEN] {
         let mut bytes = [0u8; conch_voice_control::INPUT_EVENT_LEN];
         bytes[16..18].copy_from_slice(&1u16.to_le_bytes());
@@ -2052,10 +2450,70 @@ mod tests {
         bytes
     }
 
+    /// The seam of #1791 (and Linux's pipe before it) is behind the hidden option alone: a
+    /// run without `--test-key-device` is [`KeySource::Configured`], and that is read as an
+    /// event device and nothing else, whatever `voice.toml` says.
+    #[cfg(not(windows))]
+    #[test]
+    fn a_normal_run_reads_its_keys_under_the_event_device_rule_and_never_the_pipe_rule() {
+        let toml = "[keys]\ndevice = \"/dev/input/event-fake\"\ntalk = \"KEY_F13\"\n";
+        let config = Config::parse(toml, "voice.toml").unwrap();
+        for no_mute_key in [false, true] {
+            let (_, _, rule) = key_source(&config, &KeySource::Configured, no_mute_key)
+                .unwrap()
+                .unwrap();
+            assert_eq!(rule, DeviceRule::EventDevice);
+        }
+        let (_, _, rule) = key_source(&config, &KeySource::NamedPipe(PathBuf::from("p")), false)
+            .unwrap()
+            .unwrap();
+        assert_eq!(rule, DeviceRule::NamedPipeForTests);
+    }
+
+    /// #1631 on Windows: the same rule, for a source with no device, bound in the grammar of
+    /// the design's section 4.5. (The test below is the Linux one, with a device and evdev
+    /// records.)
+    #[cfg(windows)]
+    #[test]
+    fn on_windows_the_mute_key_is_not_read_with_no_mute_key_and_is_read_without() {
+        let bind = |text: &str| conch_voice_control::parse_windows_binding(text).unwrap();
+        let mut config = Config::default();
+        config.keys.talk = Some(bind("sc:0x29"));
+        config.keys.mute = Some(bind("mouse:4"));
+        config.keys.deafen = Some(bind("sc:0xE0,0x1D"));
+
+        let (_, bindings, _) = key_source(&config, &KeySource::Configured, false)
+            .unwrap()
+            .unwrap();
+        assert_eq!(bindings.mute(), config.keys.mute);
+
+        let (_, bindings, _) = key_source(&config, &KeySource::Configured, true)
+            .unwrap()
+            .unwrap();
+        assert_eq!(bindings.mute(), None, "mute is bound");
+        assert_eq!(bindings.talk(), config.keys.talk);
+        assert_eq!(bindings.deafen(), config.keys.deafen);
+
+        let mut only_mute = Config::default();
+        only_mute.keys.mute = config.keys.mute;
+        assert!(
+            key_source(&only_mute, &KeySource::Configured, false)
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            key_source(&only_mute, &KeySource::Configured, true)
+                .unwrap()
+                .is_none(),
+            "only mute, and the owner mutes alone"
+        );
+    }
+
     /// #1631: with `--no-mute-key`, `keys.mute` never reaches the key device, so no key
     /// press can unmute a session the owner locked. Talk and deafen are kept; with only
     /// mute bound there is nothing to read. Without the flag (the TUI) the mute key is read.
     /// No keyboard: the decoder is given hand-built records.
+    #[cfg(not(windows))]
     #[test]
     fn the_mute_key_is_not_read_with_no_mute_key_and_is_read_without() {
         let toml = "[keys]\ndevice = \"/dev/input/event-fake\"\ntalk = \"KEY_F13\"\nmute = \"KEY_F14\"\ndeafen = \"KEY_F15\"\n";
@@ -2149,9 +2607,20 @@ mod tests {
         let table = [
             ("", VoiceControlErrorCode::Malformed),
             ("leave", VoiceControlErrorCode::Malformed),
+            // A version the hello does not offer (v3 is offered since #1586).
+            (
+                r#"{"schema":"conch.voice_control.v4","kind":"start","id":1}"#,
+                VoiceControlErrorCode::UnknownSchema,
+            ),
+            // v3 is read by its own reader: this start lacks its fields, and a share command
+            // is no start.
             (
                 r#"{"schema":"conch.voice_control.v3","kind":"start","id":1}"#,
-                VoiceControlErrorCode::UnknownSchema,
+                VoiceControlErrorCode::Invalid,
+            ),
+            (
+                r#"{"schema":"conch.voice_control.v3","kind":"set_share_audio_mute","id":1,"muted":true}"#,
+                VoiceControlErrorCode::NotStarted,
             ),
             // A version the hello offers is read by its own reader: this v2 start lacks its
             // fields.
@@ -2208,8 +2677,13 @@ mod tests {
                 r#"{"schema":"conch.voice_control.v2","kind":"leave"}"#,
                 Version::V2,
             ),
+            // A line of v3 is answered in v3 since #1586; a version not offered, in v1.
             (
                 r#"{"schema":"conch.voice_control.v3","kind":"start","id":1}"#,
+                Version::V3,
+            ),
+            (
+                r#"{"schema":"conch.voice_control.v4","kind":"start","id":1}"#,
                 Version::V1,
             ),
             ("start", Version::V1),
@@ -2217,6 +2691,84 @@ mod tests {
             assert_eq!(version_named(line(text)), version, "{text}");
         }
         assert_eq!(version_named(Bounded::TooLong), Version::V1);
+    }
+
+    const START_V3: &str = r#"{"schema":"conch.voice_control.v3","kind":"start","id":1,"server":"https://conch.example.org","channel":"general","principal_id":7,"credential":"stored","muted":false,"deafened":true}"#;
+
+    /// A start in v3 makes a v3 session (#1586), whose later lines are read as v3: the two
+    /// share commands, the application name never shown, and a v2 line `unknown_schema`.
+    #[test]
+    fn a_start_in_v3_makes_a_v3_session_whose_lines_are_read_as_v3() {
+        let start = first_line(line(START_V3)).unwrap();
+        assert_eq!(start.version, Version::V3);
+        assert_eq!((start.id, start.muted, start.deafened), (1, false, true));
+        let mut later = Later::after_in(1, Version::V3);
+        let control = later.line(line(
+            r#"{"schema":"conch.voice_control.v3","kind":"set_share_audio","id":2,"capturing":true,"scope":"system_excluding_call","application_name":"Secret Desktop"}"#,
+        ));
+        assert_eq!(
+            control,
+            Control::SetShareAudio {
+                id: 2,
+                request: ShareRequest {
+                    capturing: true,
+                    scope: Some(conch_voice_api::VoiceShareAudioScope::SystemExcludingCall),
+                    application_name: Some("Secret Desktop".to_owned()),
+                },
+            }
+        );
+        assert!(!format!("{control:?}").contains("Secret"));
+        assert_eq!(
+            later.line(line(
+                r#"{"schema":"conch.voice_control.v3","kind":"set_share_audio_mute","id":3,"muted":true}"#
+            )),
+            Control::SetShareAudioMute { id: 3, muted: true }
+        );
+        // A stop that carries a scope breaks the shape: refused with an ack.
+        assert_eq!(
+            later.line(line(
+                r#"{"schema":"conch.voice_control.v3","kind":"set_share_audio","id":4,"capturing":false,"scope":"application"}"#
+            )),
+            Control::Refused {
+                id: 4,
+                code: VoiceControlErrorCode::Invalid
+            }
+        );
+        // The application scope is a valid command: it is refused into the state, later.
+        assert!(matches!(
+            later.line(line(
+                r#"{"schema":"conch.voice_control.v3","kind":"set_share_audio","id":5,"capturing":true,"scope":"application","application_name":"Conch"}"#
+            )),
+            Control::SetShareAudio { id: 5, .. }
+        ));
+        assert_eq!(
+            later.line(line(
+                r#"{"schema":"conch.voice_control.v2","kind":"get_state","id":6}"#
+            )),
+            Control::Fatal {
+                code: VoiceControlErrorCode::UnknownSchema
+            }
+        );
+        // And a v2 session never reads a share command.
+        let mut v2 = Later::after_in(1, Version::V2);
+        assert_eq!(
+            v2.line(line(
+                r#"{"schema":"conch.voice_control.v3","kind":"set_share_audio_mute","id":2,"muted":true}"#
+            )),
+            Control::Fatal {
+                code: VoiceControlErrorCode::UnknownSchema
+            }
+        );
+        let mut v2 = Later::after_in(1, Version::V2);
+        assert_eq!(
+            v2.line(line(
+                r#"{"schema":"conch.voice_control.v2","kind":"set_share_audio_mute","id":2,"muted":true}"#
+            )),
+            Control::Refused {
+                id: 2,
+                code: VoiceControlErrorCode::UnknownKind
+            }
+        );
     }
 
     /// After a start in v2, lines are read as v2: the two new commands, a v1 line refused
@@ -3130,7 +3682,7 @@ mod tests {
             quiet_events(Box::new(Stallable::default())),
             watchdog.clone(),
         );
-        owner.protocol_error(VoiceControlErrorCode::Malformed);
+        owner.protocol_error(VoiceControlErrorCode::Malformed, &starting());
         assert_eq!(watchdog.exit_code(), 1);
     }
 

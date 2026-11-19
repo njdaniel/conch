@@ -11,6 +11,7 @@
 // Someone.close), never with context.close alone: see closeAll in fixtures.ts.
 import type { Browser, BrowserContext, BrowserContextOptions, Page } from '@playwright/test';
 import { closeAll, expect, openChannel, rememberPushToTalk, showView, signIn } from './fixtures';
+import { secretLines, withoutJoinTokenInSocketRefusals } from './console-lines';
 import { watchPage, type Member, type VoiceWorld, type Watch } from './voice-world';
 
 export interface Someone {
@@ -95,6 +96,23 @@ export async function joinVoice(p: Someone, how: 'Join voice' | 'Watch only'): P
   await expect(voiceRegion(p.page)).toContainText(new RegExp(`Connected in #${p.channel.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`), { timeout: 30_000 });
 }
 
+// How long LiveKit may take to drop someone whose Leave reached it. The page
+// sends Leave and LiveKit removes the participant at once, so 5 s is generous
+// (a delivered leave measured 4 to 7 ms over 5 runs); a leave that did not
+// arrive is removed only by LiveKit's dead-connection window (about 20 s, see
+// vanishedWithin in 67-voice-recovery), so 5 s tells the two apart.
+export const leaveWithin = 5_000;
+
+// leaveVoice leaves voice by the page's own button (the person leaves; the
+// page stays) and waits for "Join voice". That shows once the client is out of
+// voice and has started closing its room, which sends LiveKit its leave
+// (issue #1764): it does not say LiveKit has been told. A test that needs that
+// polls LiveKit's own list within leaveWithin.
+export async function leaveVoice(p: Someone): Promise<void> {
+  await voiceRegion(p.page).getByRole('button', { name: 'Leave voice' }).click();
+  await expect(voiceRegion(p.page).getByRole('button', { name: 'Join voice' })).toBeVisible();
+}
+
 // leave closes the person's pages and then their context (closeAll in
 // fixtures.ts says why in that order), the context even if a page will not
 // close. Safe to call twice.
@@ -152,12 +170,24 @@ export async function inbound(page: Page, options: { perTrack?: boolean } = {}):
   }, options.perTrack === true);
 }
 
-// expectClean checks that no secret of the world, and no join token or room
-// name the page was given, is in anything the page said or kept: its console,
-// its DOM and address, its storage and cookies, and its resource timing
-// entries; that no policy violation is in the console; and that the browser
-// reports nothing wrong that the person never sees (a Permissions-Policy
-// report, a failed request to conchd, issue #595).
+// What a secret is, for expectClean's message (issue #1955), never the secret
+// itself: one of this page's own tokens, a credential, or another page's
+// token or a room name.
+function secretKind(vw: VoiceWorld, p: Pick<Someone, 'watch'> & { readonly member: Pick<Member, 'token'> }, s: string): string {
+  if (p.watch.conchdTokens.includes(s)) return 'a room token conchd gave this page';
+  if (p.watch.livekitTokens.includes(s)) return 'a token LiveKit gave this page';
+  if (s === p.member.token) return "this page's credential";
+  if (s === vw.operator || [vw.alice, vw.bob, vw.carol].some((m) => m.token === s)) return 'a credential';
+  return "another page's token, a room name, or a member's credential";
+}
+
+// expectClean checks that no secret of the world, no join token or room name
+// the page was given, and no token LiveKit refreshed it with (read from its
+// signalling frames by watchPage, issue #1948), is in anything the page said
+// or kept: its console, its DOM and address, its storage and cookies, and its
+// resource timing entries; that no policy violation is in the console; and
+// that the browser reports nothing wrong that the person never sees (a
+// Permissions-Policy report, a failed request to conchd, issue #595).
 //
 // The one secret a page keeps by design is its own credential, under
 // conch.web.token: a member's in localStorage (issue #439), an operator's in
@@ -167,7 +197,21 @@ export async function inbound(page: Page, options: { perTrack?: boolean } = {}):
 // its /rtc/v1/validate request and the resource timing records that URL
 // (docs/manual.md, "Voice in the browser"); that parameter, in a URL on
 // LiveKit's origin with exactly that path, is left out of the timing entries.
-export async function expectClean(vw: VoiceWorld, p: Pick<Someone, 'page' | 'watch'> & { readonly member: Pick<Member, 'token'> }): Promise<void> {
+//
+// allowLiveKitRefusals is for a test that stops LiveKit while the page is
+// joined (issue #1760): the SDK's retries then make Chromium log "WebSocket
+// connection to 'ws://<livekit>/rtc/v1?access_token=<join token>...' failed:
+// ... net::ERR_CONNECTION_REFUSED", and once LiveKit is back, without the
+// room, "... failed: Error during WebSocket handshake: Unexpected response
+// code: 404" (issue #1915); whether either lands is timing. Lines of exactly
+// those shapes, and only those the browser's network source logged itself
+// (Watch.browserLog; a page's own console.error of the same text is not
+// allowed), lose the join token before the check (console-lines.ts); every
+// other line, and every other secret, is checked as always.
+export async function expectClean(
+  vw: VoiceWorld,
+  p: Pick<Someone, 'page' | 'watch'> & { readonly member: Pick<Member, 'token'>; readonly allowLiveKitRefusals?: boolean },
+): Promise<void> {
   await p.watch.settled();
   const livekit = new URL(vw.livekitOrigin.replace(/^ws/, 'http')).origin;
   const { kept, credentials } = await p.page.evaluate((livekitHttp) => {
@@ -203,12 +247,16 @@ export async function expectClean(vw: VoiceWorld, p: Pick<Someone, 'page' | 'wat
   for (const credential of credentials) {
     expect(credential === null || credential === p.member.token, "the stored credential is the member's own").toBe(true);
   }
-  const said = p.watch.console.join('\n');
+  const lines = p.allowLiveKitRefusals === true ? withoutJoinTokenInSocketRefusals(p.watch.console, p.watch.browserLog, vw.livekitOrigin) : p.watch.console;
+  const said = lines.join('\n');
   // Asserted as booleans: a failing not.toContain would print the secret
   // and the whole page text into the report and the CI log.
+  // A secret in the console is reported with the lines that hold it, each
+  // with the secrets written as their numbers and where it came from
+  // (secretLines, issue #1955), so that a failure says which line it was.
   vw.secrets.forEach((s, i) => {
     expect(kept.includes(s), `secret #${String(i)} in the page, its storage or its cookies`).toBe(false);
-    expect(said.includes(s), `secret #${String(i)} in the console`).toBe(false);
+    expect(said.includes(s), `secret #${String(i)} (${secretKind(vw, p, s)}) in the console${said.includes(s) ? `:\n${secretLines(lines, p.watch.browserLog, vw.secrets).join('\n')}` : ''}`).toBe(false);
   });
   expect(p.watch.console.filter((l) => /Content Security Policy|Refused to|[Pp]ermissions policy/.test(l))).toEqual([]);
   expect(p.watch.policy, 'Permissions-Policy reports').toEqual([]);

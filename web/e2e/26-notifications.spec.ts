@@ -37,13 +37,13 @@ const alertItems = (page: Page) => page.getByRole('list', { name: 'Recent notifi
 async function policy(page: Page, value: 'off' | 'mentions' | 'all'): Promise<void> {
   await page.getByRole('button', { name: 'Settings' }).click();
   await page.getByLabel('Message notifications').selectOption(value);
-  await page.getByRole('button', { name: 'Close' }).click();
+  await page.getByRole('button', { name: 'Close', exact: true }).click();
 }
 
 async function enableNative(page: Page): Promise<void> {
   await page.getByRole('button', { name: 'Settings' }).click();
   await page.getByRole('button', { name: 'Enable browser notifications' }).click();
-  await page.getByRole('button', { name: 'Close' }).click();
+  await page.getByRole('button', { name: 'Close', exact: true }).click();
 }
 
 async function toggleMute(page: Page, channel: string): Promise<void> {
@@ -51,7 +51,7 @@ async function toggleMute(page: Page, channel: string): Promise<void> {
   const checkbox = page.getByLabel(`Mute notifications for #${channel}`);
   if (await checkbox.isHidden()) await page.getByText('Channel mutes', { exact: true }).click();
   await checkbox.click();
-  await page.getByRole('button', { name: 'Close' }).click();
+  await page.getByRole('button', { name: 'Close', exact: true }).click();
 }
 
 async function openCenter(page: Page): Promise<void> {
@@ -168,4 +168,26 @@ test('@mention completes from the channel and the person named sees the mark', a
   const plain = conversation(viewer.page).getByRole('listitem').filter({ hasText: `${tag} no name here` });
   await expect(plain).toHaveCount(1);
   await expect(plain).not.toHaveClass(/mentions-you/);
+});
+
+
+test('optional sound controls default off and survive reload', async ({ meet, world }) => {
+  const { page } = await meet();
+  await signIn(page, world, world.tokens.browser, 'browser-test');
+  await page.getByRole('button', { name: 'Settings' }).click();
+  for (const label of ['Message sound', 'Call join sound', 'Call leave sound', 'Share start sound']) {
+    await expect(page.getByLabel(label, { exact: true })).not.toBeChecked();
+  }
+  await page.getByLabel('Message sound', { exact: true }).check();
+  await page.getByLabel('Call join sound', { exact: true }).check();
+  const volume = page.getByLabel('Sound volume', { exact: true });
+  await volume.press('Home');
+  for (let step = 0; step < 25; step++) await volume.press('ArrowRight');
+  await page.reload();
+  await page.getByRole('button', { name: 'Settings' }).click();
+  await expect(page.getByLabel('Message sound', { exact: true })).toBeChecked();
+  await expect(page.getByLabel('Call join sound', { exact: true })).toBeChecked();
+  await expect(page.getByLabel('Call leave sound', { exact: true })).not.toBeChecked();
+  await expect(page.getByLabel('Share start sound', { exact: true })).not.toBeChecked();
+  await expect(page.getByLabel('Sound volume', { exact: true })).toHaveValue('25');
 });

@@ -14,6 +14,7 @@
 // design §5.3): the key is typed into the app.
 import { useEffect, useId, useLayoutEffect, useRef, useState, type SyntheticEvent } from 'react';
 import * as api from './api';
+import { DESKTOP_UNAVAILABLE, desktopUnavailableLine } from './appLimit';
 import { waitWords } from './Invite';
 import { revealLimits, sharingLine, useTabSharing } from './Reveal';
 import type { TOTPEnrollmentV1 } from './schema/auth';
@@ -39,6 +40,8 @@ type Refusal = { readonly failure: api.ApiFailure; readonly code?: string; reado
 function refusalLine(result: Refusal): string {
   if (result.failure === 'network') return 'Cannot reach the server. Try again.';
   switch (result.code) {
+    case DESKTOP_UNAVAILABLE:
+      return desktopUnavailableLine;
     case 'setup_token_invalid':
       return 'That setup token does not work. Each works once, for ten minutes: make a new one on the server’s host (conchd operator setup).';
     case 'auth_failed':

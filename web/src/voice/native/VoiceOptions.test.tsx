@@ -3,6 +3,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { NativeVoiceDevicesResult, NativeVoiceHelper, NativeVoiceView, VoiceCommandResult, VoiceSaveResult } from '../../platform/desktop/bridge';
+import { DesktopOS } from '../../platform/os';
 import type { NativeVoice } from '../../platform/types';
 import type { VoiceControlPTT, VoiceControlPTTProblem, VoiceDevice } from '../../schema/generated';
 import { pttProblemWords, pttWords } from './words';
@@ -103,6 +104,14 @@ describe('VoiceOptions devices', () => {
     await open(fake);
     expect(screen.getByText(noPipeWire)).toBeTruthy();
     expect(screen.queryByLabelText('Microphone')).toBeNull();
+  });
+
+  it('describes an unavailable Windows device list without naming PipeWire', async () => {
+    const fake = new Fake();
+    fake.list = { ok: true, pipewire: 'unavailable', synced: true, microphones: [], speakers: [] };
+    render(<DesktopOS.Provider value="win32"><VoiceOptions source={fake.nv} view={idle} open /></DesktopOS.Provider>);
+    expect(await screen.findByText('Audio devices could not be listed on Windows.')).toBeTruthy();
+    expect(screen.queryByText(noPipeWire)).toBeNull();
   });
 
   it('says why the list failed and offers a retry', async () => {

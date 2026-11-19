@@ -11,14 +11,16 @@
 #     hash (scripts/voice-pins.sh says why).
 #
 # What this does not fetch, because the distribution has it at a version that will do, is
-# installed by apt: GLib's, PipeWire's and libclang's development headers
+# installed on Linux by apt: GLib's, PipeWire's and libclang's development headers
 # (libglib2.0-dev libpipewire-0.3-dev libclang-dev pkg-config) and g++. scripts/voice-env.sh
-# checks for each and says which is missing.
+# checks for each and says which is missing. Apple silicon uses Apple's clang
+# and SDK, a Darwin cargo-deny archive and the unmodified mac-arm64 libwebrtc.
 #
 # Versions and hashes are in scripts/voice-pins.sh. Each download is verified
 # against its SHA-256 before anything is unpacked. Nothing is installed
-# system-wide and no root is needed. Running it again does nothing once all
-# everything is in place.
+# system-wide and no root is needed. On Linux and macOS it reuses installed
+# tools on subsequent runs, checking cargo-deny and the linked libwebrtc
+# against their pinned downloads or the pinned Linux link archive hash.
 #
 # With the argument `deny` it fetches cargo-deny only (the advisories job in CI
 # needs nothing else).
@@ -29,6 +31,7 @@
 set -euo pipefail
 
 . "$(dirname "$0")/voice-pins.sh"
+. "$(dirname "$0")/voice-cache.sh"
 
 only="${1:-all}"
 case "$only" in
@@ -45,25 +48,93 @@ LLVM_SHA256=$CONCH_LLVM_SHA256
 LLVM_URL="${CONCH_VOICE_LLVM_URL:-https://github.com/llvm/llvm-project/releases/download/llvmorg-${LLVM_VERSION}/${LLVM_ARCHIVE}}"
 
 DENY_VERSION=$CONCH_DENY_VERSION
-DENY_ARCHIVE="cargo-deny-${DENY_VERSION}-x86_64-unknown-linux-musl.tar.gz"
+DENY_TRIPLE=x86_64-unknown-linux-musl
 DENY_SHA256=$CONCH_DENY_SHA256
-DENY_URL="${CONCH_VOICE_DENY_URL:-https://github.com/EmbarkStudios/cargo-deny/releases/download/${DENY_VERSION}/${DENY_ARCHIVE}}"
 
 WEBRTC_TAG=$CONCH_WEBRTC_TAG
 WEBRTC_TRIPLE=linux-x64-release
-WEBRTC_ARCHIVE="webrtc-${WEBRTC_TRIPLE}.zip"
 WEBRTC_SHA256=$CONCH_WEBRTC_SHA256
-WEBRTC_URL="${CONCH_VOICE_WEBRTC_URL:-https://github.com/livekit/rust-sdks/releases/download/${WEBRTC_TAG}/${WEBRTC_ARCHIVE}}"
 
 cache="${CONCH_CACHE:-$HOME/.cache/conch}"
 llvm_dir="$cache/llvm-$LLVM_VERSION"
 deny_dir="$cache/cargo-deny-$DENY_VERSION"
 webrtc_dir="$cache/$WEBRTC_TAG"
 
-if [ "$(uname -s)-$(uname -m)" != "Linux-x86_64" ]; then
-    echo "voice-toolchain: FAIL: only Linux x86_64 is supported (ADR-006), this is $(uname -s) $(uname -m)" >&2
+# Windows x64 (Git Bash on the CI runner; #890, docs/design/windows-desktop.md
+# section 1): only the verified win-x64 libwebrtc is fetched, into the same
+# cache layout ($cache/$WEBRTC_TAG/win-x64-release). The compiler is MSVC's,
+# which the runner has, and nothing is removed from the archive: it has no
+# PipeWire. cargo-deny is not fetched here (the Linux jobs run it). The Linux
+# path below is untouched.
+#
+# What is kept is the downloaded zip, never trusted unread: every run hashes it
+# against CONCH_WEBRTC_WIN_SHA256 and unpacks it afresh, so the tree the build
+# links is always the verified bytes (the Linux path re-hashes the archive it
+# links on every run, for the same reason). No lock: Git Bash has no flock, and
+# a CI runner runs one job at a time; two runs at once on one machine could
+# race on the final move.
+case "$(uname -s)" in
+MINGW* | MSYS* | CYGWIN*)
+    if [ "$only" = deny ]; then
+        echo "voice-toolchain: FAIL: cargo-deny is not fetched on Windows (the Linux jobs run it)" >&2
+        exit 1
+    fi
+    win_triple=win-x64-release
+    win_archive="webrtc-${win_triple}.zip"
+    win_url="${CONCH_VOICE_WEBRTC_URL:-https://github.com/livekit/rust-sdks/releases/download/${WEBRTC_TAG}/${win_archive}}"
+    zip="$webrtc_dir/$win_archive"
+    mkdir -p "$webrtc_dir"
+    work=$(mktemp -d "$cache/.fetch.XXXXXX")
+    trap 'rm -rf "$work"' EXIT
+    if [ -f "$zip" ] && [ "$(sha256sum "$zip" | cut -d' ' -f1)" = "$CONCH_WEBRTC_WIN_SHA256" ]; then
+        echo "voice-toolchain: libwebrtc $WEBRTC_TAG ($win_triple): the kept download matches its pin"
+    else
+        rm -f "$zip"
+        echo "voice-toolchain: downloading $win_url"
+        curl --fail --silent --show-error --location --output "$work/$win_archive" "$win_url"
+        got=$(sha256sum "$work/$win_archive" | cut -d' ' -f1)
+        if [ "$got" != "$CONCH_WEBRTC_WIN_SHA256" ]; then
+            echo "voice-toolchain: FAIL: SHA-256 of $win_url is $got, expected $CONCH_WEBRTC_WIN_SHA256; nothing was unpacked" >&2
+            exit 1
+        fi
+        mv "$work/$win_archive" "$zip"
+    fi
+    mkdir "$work/webrtc"
+    py=python3
+    command -v python3 >/dev/null 2>&1 || py=python
+    # Verified before this line. zipfile drops absolute paths, drive letters
+    # and ".." from member names; -I keeps a zipfile.py in the working
+    # directory from being imported.
+    "$py" -I -c 'import sys, zipfile; zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])' "$zip" "$work/webrtc"
+    test -f "$work/webrtc/$win_triple/webrtc.ninja"
+    rm -rf "${webrtc_dir:?}/$win_triple"
+    mv "$work/webrtc/$win_triple" "$webrtc_dir/$win_triple"
+    echo "voice-toolchain: libwebrtc $WEBRTC_TAG ($win_triple) unpacked from the verified download into $webrtc_dir"
+    exit 0
+    ;;
+esac
+
+host="$(uname -s)-$(uname -m)"
+case "$host" in
+Linux-x86_64) ;;
+Darwin-arm64)
+    DENY_TRIPLE=aarch64-apple-darwin
+    DENY_SHA256=$CONCH_DENY_MAC_SHA256
+    deny_dir="$deny_dir-$DENY_TRIPLE-${DENY_SHA256:0:12}"
+    WEBRTC_TRIPLE=mac-arm64-release
+    WEBRTC_SHA256=$CONCH_WEBRTC_MAC_SHA256
+    webrtc_dir="$webrtc_dir-mac-${WEBRTC_SHA256:0:12}"
+    ;;
+*)
+    echo "voice-toolchain: FAIL: expected Linux x86_64 or macOS arm64, this is $host" >&2
     exit 1
-fi
+    ;;
+esac
+
+DENY_ARCHIVE="cargo-deny-${DENY_VERSION}-${DENY_TRIPLE}.tar.gz"
+DENY_URL="${CONCH_VOICE_DENY_URL:-https://github.com/EmbarkStudios/cargo-deny/releases/download/${DENY_VERSION}/${DENY_ARCHIVE}}"
+WEBRTC_ARCHIVE="webrtc-${WEBRTC_TRIPLE}.zip"
+WEBRTC_URL="${CONCH_VOICE_WEBRTC_URL:-https://github.com/livekit/rust-sdks/releases/download/${WEBRTC_TAG}/${WEBRTC_ARCHIVE}}"
 
 # fetch <url> <sha256> <destination file>: download, then verify. The file is
 # removed again if the hash does not match, so a bad download is never kept.
@@ -71,7 +142,11 @@ fetch() {
     local url=$1 want=$2 dest=$3 got
     echo "voice-toolchain: downloading $url"
     curl --fail --silent --show-error --location --output "$dest" "$url"
-    got=$(sha256sum "$dest" | cut -d' ' -f1)
+    if [ "$host" = Darwin-arm64 ]; then
+        got=$(shasum -a 256 "$dest" | cut -d' ' -f1)
+    else
+        got=$(sha256sum "$dest" | cut -d' ' -f1)
+    fi
     if [ "$got" != "$want" ]; then
         rm -f "$dest"
         echo "voice-toolchain: FAIL: SHA-256 of $url is $got, expected $want; nothing was unpacked" >&2
@@ -85,96 +160,153 @@ mkdir -p "$cache"
 # would otherwise each replace the directory the other had just put in place,
 # under a build that may already be using it. The second waits, then finds
 # everything present.
-exec 9>"$cache/.toolchain.lock"
-flock 9
+if [ "$host" = Darwin-arm64 ]; then
+    # macOS has flock(2) but no flock command. Python takes the lock on the
+    # shell's open descriptor. The PID is diagnostic: the kernel releases
+    # the lock when the holder exits, even after SIGKILL. Keep the inode so a
+    # waiter and a new arrival always contend on the same lock.
+    lock="$cache/.toolchain-mac.flock"
+    exec 9<>"$lock"
+    python3 -I - "$$" "$lock" <<'PY'
+import fcntl
+import os
+import sys
+import time
 
-work=$(mktemp -d "$cache/.fetch.XXXXXX")
-trap 'rm -rf "$work"' EXIT
-
-if [ "$only" = deny ]; then
-    : # clang is not needed to read the advisory database
-elif [ -x "$llvm_dir/bin/clang" ]; then
-    echo "voice-toolchain: clang $LLVM_VERSION is already in $llvm_dir"
+deadline = time.monotonic() + 300
+while True:
+    try:
+        fcntl.flock(9, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        break
+    except BlockingIOError:
+        if time.monotonic() >= deadline:
+            sys.exit(f"voice-toolchain: FAIL: timed out acquiring {sys.argv[2]}")
+        time.sleep(0.1)
+os.ftruncate(9, 0)
+os.write(9, (sys.argv[1] + "\n").encode())
+PY
 else
-    fetch "$LLVM_URL" "$LLVM_SHA256" "$work/$LLVM_ARCHIVE"
-    # Only the compiler, the linker and the compiler's own headers: about a
-    # third of the release.
-    mkdir "$work/llvm"
-    tar -xJf "$work/$LLVM_ARCHIVE" -C "$work/llvm" --strip-components=1 --wildcards \
-        '*/bin/clang' '*/bin/clang++' "*/bin/clang-${LLVM_VERSION%%.*}" \
-        '*/bin/lld' '*/bin/ld.lld' '*/bin/llvm-ar' '*/lib/clang/*'
-    rm -f "$work/$LLVM_ARCHIVE"
-    "$work/llvm/bin/clang" --version | head -n1
-    rm -rf "$llvm_dir"
-    mv "$work/llvm" "$llvm_dir" # the directory appears complete or not at all
-    echo "voice-toolchain: clang $LLVM_VERSION unpacked into $llvm_dir"
+    exec 9>"$cache/.toolchain.lock"
+    flock 9
 fi
 
-if [ -x "$deny_dir/cargo-deny" ]; then
-    echo "voice-toolchain: cargo-deny $DENY_VERSION is already in $deny_dir"
-else
-    fetch "$DENY_URL" "$DENY_SHA256" "$work/$DENY_ARCHIVE"
-    mkdir "$work/deny"
-    tar -xzf "$work/$DENY_ARCHIVE" -C "$work/deny" --strip-components=1 --wildcards '*/cargo-deny'
-    "$work/deny/cargo-deny" --version
-    rm -rf "$deny_dir"
-    mv "$work/deny" "$deny_dir"
-    echo "voice-toolchain: cargo-deny $DENY_VERSION unpacked into $deny_dir"
-fi
-
-if [ "$only" = deny ]; then
-    : # nor is libwebrtc
-elif [ -f "$webrtc_dir/$WEBRTC_TRIPLE/webrtc.ninja" ]; then
-    echo "voice-toolchain: libwebrtc $WEBRTC_TAG is already in $webrtc_dir"
-else
-    fetch "$WEBRTC_URL" "$WEBRTC_SHA256" "$work/$WEBRTC_ARCHIVE"
-    mkdir "$work/webrtc"
-    # The archive's root is the one directory $WEBRTC_TRIPLE. It has been
-    # verified above; zipfile also drops absolute paths and ".." components
-    # from member names, so nothing is written outside the directory given.
-    python3 -c 'import sys, zipfile; zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])' "$work/$WEBRTC_ARCHIVE" "$work/webrtc"
-    rm -f "$work/$WEBRTC_ARCHIVE"
-    test -f "$work/webrtc/$WEBRTC_TRIPLE/webrtc.ninja"
-    rm -rf "$webrtc_dir"
-    mv "$work/webrtc" "$webrtc_dir"
-    echo "voice-toolchain: libwebrtc $WEBRTC_TAG unpacked into $webrtc_dir"
-fi
-
-# What conch-voice links is that download with one member, pipewire_stubs.o,
-# removed from lib/libwebrtc.a (scripts/voice-pins.sh says why). It is made
-# beside the download, which stays as it was verified: a directory of its own,
-# named by the hash of its archive, holding that archive and pointing at the
-# download for everything else. A directory of its own because the SDK's build
-# is rerun when the directory it is given changes, and not when a file inside
-# it does: the archive is copied into the SDK's compiled library, and an
-# archive changed in place would leave the old copy in every existing build.
-# The pinned llvm-ar removes the member, which gives the same bytes every time,
-# so the result is checked against its own pinned hash.
-linked_dir="$cache/$WEBRTC_TAG-linked-${CONCH_WEBRTC_LINKED_SHA256:0:12}"
-linked_lib="$linked_dir/$WEBRTC_TRIPLE/lib/libwebrtc.a"
-if [ "$only" = deny ]; then
-    :
-elif [ -f "$linked_lib" ] && [ -f "$linked_dir/$WEBRTC_TRIPLE/webrtc.ninja" ] &&
-    [ "$(sha256sum "$linked_lib" | cut -d' ' -f1)" = "$CONCH_WEBRTC_LINKED_SHA256" ]; then
-    echo "voice-toolchain: libwebrtc without pipewire_stubs.o is already in $linked_dir"
-else
-    mkdir -p "$work/linked/$WEBRTC_TRIPLE/lib"
-    for entry in "$webrtc_dir/$WEBRTC_TRIPLE"/*; do
-        name=${entry##*/}
-        [ "$name" = lib ] || ln -s "../../$WEBRTC_TAG/$WEBRTC_TRIPLE/$name" "$work/linked/$WEBRTC_TRIPLE/$name"
-    done
-    for entry in "$webrtc_dir/$WEBRTC_TRIPLE/lib"/*; do
-        name=${entry##*/}
-        [ "$name" = libwebrtc.a ] || ln -s "../../../$WEBRTC_TAG/$WEBRTC_TRIPLE/lib/$name" "$work/linked/$WEBRTC_TRIPLE/lib/$name"
-    done
-    cp "$webrtc_dir/$WEBRTC_TRIPLE/lib/libwebrtc.a" "$work/linked/$WEBRTC_TRIPLE/lib/libwebrtc.a"
-    "$llvm_dir/bin/llvm-ar" d "$work/linked/$WEBRTC_TRIPLE/lib/libwebrtc.a" pipewire_stubs.o
-    got=$(sha256sum "$work/linked/$WEBRTC_TRIPLE/lib/libwebrtc.a" | cut -d' ' -f1)
-    if [ "$got" != "$CONCH_WEBRTC_LINKED_SHA256" ]; then
-        echo "voice-toolchain: FAIL: libwebrtc.a without pipewire_stubs.o has SHA-256 $got, expected $CONCH_WEBRTC_LINKED_SHA256; nothing was put in place. If $webrtc_dir is not as it was downloaded, remove it and run this again" >&2
-        exit 1
+install_toolchain() {
+    work=$(mktemp -d "$cache/.fetch.XXXXXX")
+    trap 'rm -rf "$work"' EXIT
+    if [ "$host" = Darwin-arm64 ]; then
+        trap 'exit 130' INT
+        trap 'exit 143' TERM
     fi
-    rm -rf "$linked_dir"
-    mv "$work/linked" "$linked_dir" # the directory appears complete or not at all
-    echo "voice-toolchain: libwebrtc without pipewire_stubs.o is in $linked_dir"
-fi
+
+    if [ "$only" = deny ] || [ "$host" = Darwin-arm64 ]; then
+        : # clang is not needed for advisories; macOS uses Apple's clang
+    elif [ -x "$llvm_dir/bin/clang" ]; then
+        echo "voice-toolchain: clang $LLVM_VERSION is already in $llvm_dir"
+    else
+        fetch "$LLVM_URL" "$LLVM_SHA256" "$work/$LLVM_ARCHIVE"
+        # Only the compiler, the linker and the compiler's own headers: about a
+        # third of the release.
+        mkdir "$work/llvm"
+        tar -xJf "$work/$LLVM_ARCHIVE" -C "$work/llvm" --strip-components=1 --wildcards \
+            '*/bin/clang' '*/bin/clang++' "*/bin/clang-${LLVM_VERSION%%.*}" \
+            '*/bin/lld' '*/bin/ld.lld' '*/bin/llvm-ar' '*/lib/clang/*'
+        rm -f "$work/$LLVM_ARCHIVE"
+        "$work/llvm/bin/clang" --version | head -n1
+        rm -rf "$llvm_dir"
+        mv "$work/llvm" "$llvm_dir" # the directory appears complete or not at all
+        echo "voice-toolchain: clang $LLVM_VERSION unpacked into $llvm_dir"
+    fi
+
+    if voice_deny_matches "$deny_dir" "$DENY_SHA256"; then
+        echo "voice-toolchain: cargo-deny $DENY_VERSION in $deny_dir matches its pin"
+    else
+        fetch "$DENY_URL" "$DENY_SHA256" "$work/$DENY_ARCHIVE"
+        mkdir "$work/deny"
+        if [ "$host" = Darwin-arm64 ]; then
+            # bsdtar can extract an exact member without GNU tar's --wildcards.
+            deny_member=$(tar -tzf "$work/$DENY_ARCHIVE" | awk '/(^|\/)cargo-deny$/ { print }')
+            test -n "$deny_member"
+            tar -xOzf "$work/$DENY_ARCHIVE" "$deny_member" >"$work/deny/cargo-deny"
+            chmod +x "$work/deny/cargo-deny"
+        else
+            tar -xzf "$work/$DENY_ARCHIVE" -C "$work/deny" --strip-components=1 --wildcards '*/cargo-deny'
+        fi
+        mv "$work/$DENY_ARCHIVE" "$work/deny/release.tar.gz"
+        "$work/deny/cargo-deny" --version
+        rm -rf "$deny_dir"
+        mv "$work/deny" "$deny_dir"
+        echo "voice-toolchain: cargo-deny $DENY_VERSION unpacked into $deny_dir"
+    fi
+
+    if [ "$only" = deny ]; then
+        : # nor is libwebrtc
+    elif { [ "$host" = Linux-x86_64 ] && [ -f "$webrtc_dir/$WEBRTC_TRIPLE/webrtc.ninja" ]; } ||
+        { [ "$host" = Darwin-arm64 ] && voice_mac_webrtc_matches "$webrtc_dir" "$WEBRTC_SHA256"; }; then
+        echo "voice-toolchain: libwebrtc $WEBRTC_TAG is already in $webrtc_dir"
+    else
+        fetch "$WEBRTC_URL" "$WEBRTC_SHA256" "$work/$WEBRTC_ARCHIVE"
+        mkdir "$work/webrtc"
+        # The archive's root is the one directory $WEBRTC_TRIPLE. It has been
+        # verified above; zipfile also drops absolute paths and ".." components
+        # from member names, so nothing is written outside the directory given.
+        python3 -I -c 'import sys, zipfile; zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])' "$work/$WEBRTC_ARCHIVE" "$work/webrtc"
+        test -f "$work/webrtc/$WEBRTC_TRIPLE/webrtc.ninja"
+        if [ "$host" = Darwin-arm64 ]; then
+            test -f "$work/webrtc/$WEBRTC_TRIPLE/lib/libwebrtc.a"
+            mv "$work/$WEBRTC_ARCHIVE" "$work/webrtc/release.zip"
+        else
+            rm -f "$work/$WEBRTC_ARCHIVE"
+        fi
+        rm -rf "$webrtc_dir"
+        mv "$work/webrtc" "$webrtc_dir"
+        echo "voice-toolchain: libwebrtc $WEBRTC_TAG unpacked into $webrtc_dir"
+    fi
+
+    # The macOS download has no PipeWire stubs. Link it as shipped.
+    if [ "$host" = Darwin-arm64 ]; then
+        return 0
+    fi
+
+    # What conch-voice links is that download with one member, pipewire_stubs.o,
+    # removed from lib/libwebrtc.a (scripts/voice-pins.sh says why). It is made
+    # beside the download, which stays as it was verified: a directory of its own,
+    # named by the hash of its archive, holding that archive and pointing at the
+    # download for everything else. A directory of its own because the SDK's build
+    # is rerun when the directory it is given changes, and not when a file inside
+    # it does: the archive is copied into the SDK's compiled library, and an
+    # archive changed in place would leave the old copy in every existing build.
+    # The pinned llvm-ar removes the member, which gives the same bytes every time,
+    # so the result is checked against its own pinned hash.
+    linked_dir="$cache/$WEBRTC_TAG-linked-${CONCH_WEBRTC_LINKED_SHA256:0:12}"
+    linked_lib="$linked_dir/$WEBRTC_TRIPLE/lib/libwebrtc.a"
+    if [ "$only" = deny ]; then
+        :
+    elif [ -f "$linked_lib" ] && [ -f "$linked_dir/$WEBRTC_TRIPLE/webrtc.ninja" ] &&
+        [ "$(sha256sum "$linked_lib" | cut -d' ' -f1)" = "$CONCH_WEBRTC_LINKED_SHA256" ]; then
+        echo "voice-toolchain: libwebrtc without pipewire_stubs.o is already in $linked_dir"
+    else
+        mkdir -p "$work/linked/$WEBRTC_TRIPLE/lib"
+        for entry in "$webrtc_dir/$WEBRTC_TRIPLE"/*; do
+            name=${entry##*/}
+            [ "$name" = lib ] || ln -s "../../$WEBRTC_TAG/$WEBRTC_TRIPLE/$name" "$work/linked/$WEBRTC_TRIPLE/$name"
+        done
+        for entry in "$webrtc_dir/$WEBRTC_TRIPLE/lib"/*; do
+            name=${entry##*/}
+            [ "$name" = libwebrtc.a ] || ln -s "../../../$WEBRTC_TAG/$WEBRTC_TRIPLE/lib/$name" "$work/linked/$WEBRTC_TRIPLE/lib/$name"
+        done
+        cp "$webrtc_dir/$WEBRTC_TRIPLE/lib/libwebrtc.a" "$work/linked/$WEBRTC_TRIPLE/lib/libwebrtc.a"
+        "$llvm_dir/bin/llvm-ar" d "$work/linked/$WEBRTC_TRIPLE/lib/libwebrtc.a" pipewire_stubs.o
+        got=$(sha256sum "$work/linked/$WEBRTC_TRIPLE/lib/libwebrtc.a" | cut -d' ' -f1)
+        if [ "$got" != "$CONCH_WEBRTC_LINKED_SHA256" ]; then
+            echo "voice-toolchain: FAIL: libwebrtc.a without pipewire_stubs.o has SHA-256 $got, expected $CONCH_WEBRTC_LINKED_SHA256; nothing was put in place. If $webrtc_dir is not as it was downloaded, remove it and run this again" >&2
+            exit 1
+        fi
+        rm -rf "$linked_dir"
+        mv "$work/linked" "$linked_dir" # the directory appears complete or not at all
+        echo "voice-toolchain: libwebrtc without pipewire_stubs.o is in $linked_dir"
+    fi
+}
+
+# Keep the lock in this shell. Downloads and other subprocesses must not
+# hold it open if the shell is killed while waiting for them.
+install_toolchain 9>&-

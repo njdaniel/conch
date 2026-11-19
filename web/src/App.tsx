@@ -2,6 +2,7 @@ import { ModerationScope } from './Moderation';
 // The browser client's top level: sign-in, the operator warning, then the
 // lobby. The auth, connection and channels reducers hold the state; src/api.ts
 // does every call and is the only code that sees the credential.
+import { flushSync } from 'react-dom';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState } from 'react';
 import * as api from './api';
 import { uploadRefusalLine } from './fileSize';
@@ -21,7 +22,7 @@ import { archivedLine, channelArchived, isArchived } from './archived';
 import { ChannelSettingsAsk } from './ChannelSettingsAsk';
 import { RenameChannel } from './RenameChannel';
 import { SetTopic } from './SetTopic';
-import { channelFromHash, forgetChannel, hashForChannel, rememberChannel, rememberedChannel, showChannelInAddress, takeLinkFromAddress } from './route';
+import { channelFromHash, messageFromHash, forgetChannel, hashForChannel, rememberChannel, rememberedChannel, showChannelInAddress, takeLinkFromAddress } from './route';
 import type { ChannelDocV1 } from './schema/channel';
 import type { WhoAmIResponseV1 } from './schema/principal';
 import type { ReadStateV1 } from './schema/readstate';
@@ -57,6 +58,7 @@ import {
 import { canLoadOlder, chatFor, chatReducer, initialChat, lastId, oldestId, ordered, sameSend, type ChatAction, type PendingSend } from './state/messages';
 import { useLiveChannel } from './useLiveChannel';
 import { useNotifications } from './useNotifications';
+import { usePush } from './usePush';
 import { NotificationCenter } from './NotificationCenter';
 import { NotificationSettings } from './NotificationSettings';
 import { SearchPanel } from './SearchPanel';
@@ -338,16 +340,26 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
     lastPhase.current = auth.phase;
   }, [auth.phase]);
 
+  const [messageLink, setMessageLink] = useState(() => messageFromHash(window.location.hash));
+  const [linkNotice, setLinkNotice] = useState('');
+  const [highlightedId, setHighlightedId] = useState<number | null>(null);
   // The hash names the open channel, so back, forward and a pasted link work.
   // A hash that names a channel this person cannot open is corrected to the one
-  // shown, in place (F26); nothing is said of the one asked for.
+  // shown, in place (F26). Message links use the same unavailable notice
+  // for every inaccessible destination.
   useEffect(() => {
     if (!signedIn) return;
     function onHash() {
+      const linked = messageFromHash(window.location.hash);
+      setMessageLink(linked);
+      if (linked !== null) setSearchOpen(false);
+      setLinkNotice('');
+      setHighlightedId(null);
       const name = channelFromHash(window.location.hash);
       if (name === null) return;
       const held = channelsNow.current;
       if (held.selected !== null && !held.channels.some((c) => c.name === name)) {
+        if (messageFromHash(window.location.hash) !== null) setLinkNotice("This message isn't available");
         showChannelInAddress(held.selected);
         return;
       }
@@ -366,11 +378,14 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
     if (channels.selected === null) return;
     rememberChannel(channels.selected);
     const hash = hashForChannel(channels.selected);
-    if (window.location.hash === hash) return;
+    if (window.location.hash === hash || messageFromHash(window.location.hash)?.channel === channels.selected) return;
     // The address names a channel that is not this person's to open (a pasted
     // link, say): it is corrected in place, not added to the history.
     const asked = channelFromHash(window.location.hash);
-    if (asked !== null && !channels.channels.some((c) => c.name === asked)) showChannelInAddress(channels.selected);
+    if (asked !== null && !channels.channels.some((c) => c.name === asked)) {
+      if (messageFromHash(window.location.hash) !== null) setLinkNotice("This message isn't available");
+      showChannelInAddress(channels.selected);
+    }
     else window.location.hash = hash;
   }, [channels.selected]);
 
@@ -598,6 +613,11 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
   const [readStateEvent, setReadStateEvent] = useState<ReadStateV1 | null>(null);
   const [messageEvent, setMessageEvent] = useState<MessageV2 | null>(null);
   const [editEvent, setEditEvent] = useState<MessageV2 | null>(null);
+  const onMessageFrame = useCallback((message: MessageV2) => {
+    flushSync(() => {
+      setMessageEvent(message);
+    });
+  }, []);
   useEffect(() => {
     setReadStateEvent(null);
     setMessageEvent(null);
@@ -665,7 +685,10 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
     onManages,
     onMissing,
     onReadState: setReadStateEvent,
-    onMessage: setMessageEvent,
+    // Synchronous, so two frames handled in one tick each reach the
+    // notification hook: it is fed through this one slot, and its cursor
+    // moves past a frame the slot overwrote before a render (issue #1824).
+    onMessage: onMessageFrame,
     onMessageEdited,
     onChannelsChanged: refreshChannels,
     onPermissionsChanged: permissionsChanged,
@@ -722,7 +745,7 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
   const held = selected === null ? null : chatFor(chat, selected);
   const headId = held === null ? 0 : lastId(held);
   const head = held?.byId.get(headId);
-  const unread = useReadState({
+  const { counts: unread, openingMark } = useReadState({
     signedIn,
     channels: channels.channels,
     loaded: channels.loaded,
@@ -741,6 +764,7 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
     reload: reloadReadState,
   });
   const notifications = useNotifications({
+    openChannel: previewing ? null : channelId,
     signedIn,
     origin,
     principal: principal === null ? null : { id: principal.id, name: shownName },
@@ -751,6 +775,15 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
     editEvent,
     readStateEvent,
     onOpen,
+  });
+  // "Notify me when Conch is closed" (issue #1826). Only a person with a full
+  // credential: the server refuses a guest and an agent.
+  const push = usePush({
+    signedIn,
+    eligible: principal !== null && principal.kind === 'human' && visit === null,
+    account: principal?.id ?? 0,
+    policy: notifications.policy,
+    muted: notifications.muted,
   });
 
   const now = useNow(signedIn);
@@ -796,6 +829,37 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
     el.scrollIntoView({ block: 'center' });
     el.focus({ preventScroll: true });
   }, [scrollTo, detailOpen, searchOpen]);
+
+  // Only viewer-filtered history is examined. Missing, removed and inaccessible
+  // targets share one notice, including when the held-history budget runs out.
+  useEffect(() => {
+    if (!signedIn || messageLink === null || !channels.loaded) return;
+    if (!channels.channels.some((channel) => channel.name === messageLink.channel) || messageLink.id === null) {
+      setLinkNotice("This message isn't available");
+      setMessageLink(null);
+      return;
+    }
+    if (selected === null || selected !== messageLink.channel) return;
+    const held = chatFor(chat, selected);
+    if (held.history === 'loading' || held.history === 'idle' || held.older === 'loading') return;
+    const target = held.byId.get(messageLink.id);
+    if (target !== undefined && target.removed !== true) {
+      setSearchOpen(false);
+      closeRun('');
+      setHighlightedId(target.id);
+      setMessageLink(null);
+    } else if (target === undefined && held.history === 'ready' && held.older !== 'error' && canLoadOlder(held) && oldestId(held) > messageLink.id) {
+      live.loadOlder();
+    } else {
+      setLinkNotice("This message isn't available");
+      setMessageLink(null);
+    }
+  }, [signedIn, messageLink, selected, channels, chat, live.loadOlder, closeRun]);
+  useEffect(() => {
+    if (highlightedId === null) return;
+    const timer = window.setTimeout(() => { setHighlightedId(null); }, 4000);
+    return () => { window.clearTimeout(timer); };
+  }, [highlightedId]);
 
   const principalId = principal?.id ?? null;
   const [appearance, setAppearance] = useState<AppearancePreferences>(defaultAppearance);
@@ -1048,13 +1112,13 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
     // The session is ended first, and waited for: the request needs the
     // credential that signing out revokes, and the revoke ends the session.
     void releaseSession()
-      .then(() => api.signOut())
+      .then(() => api.signOut(principalId ?? undefined))
       .then((told) => {
         signingOut.current = false;
         forgetChannel();
         dispatchAuth({ type: 'signOut', notice: told ? null : 'untold' });
       });
-  }, [releaseSession]);
+  }, [releaseSession, principalId]);
 
   // Sign out everywhere revokes every credential of the person. If the server
   // does not do it, the person stays signed in here and is told, so they can
@@ -1376,11 +1440,11 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
   // revoked, before the invite or the link signs someone in.
   const leaveForInvite = useCallback(async (): Promise<boolean> => {
     await releaseSession();
-    const told = await api.signOut();
+    const told = await api.signOut(principalId ?? undefined);
     forgetChannel();
     dispatchAuth({ type: 'signOut', notice: told ? null : 'untold' });
     return told;
-  }, [releaseSession]);
+  }, [releaseSession, principalId]);
 
   // Joined, or signed back in through a sign-in link: the code is dropped and
   // the lobby opens, on the first channel an invite granted. A redemption is
@@ -1800,6 +1864,17 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
                 channels={channels.channels}
                 muted={notifications.muted}
                 onToggleMute={notifications.toggleMute}
+                push={{
+                  state: push.state,
+                  failure: push.failure,
+                  mutesCut: push.mutesCut,
+                  onEnable: () => {
+                    void push.enable();
+                  },
+                  onDisable: () => {
+                    void push.disable();
+                  },
+                }}
                 onPolicy={notifications.setPolicy}
                 onEnable={() => {
                   void notifications.enableNative();
@@ -2002,7 +2077,7 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
             ) : null
           }
           conversation={
-            selected === null || channelId === null ? null : (
+            selected === null || channelId === null ? (linkNotice === '' ? null : <p role="status">{linkNotice}</p>) : (
               <ModerationScope who={auth.principal} members={agents.membersFor === channelId ? agents.members : []} guest={visit !== null}>
                 {agents.state.detail === null ? null : <RunDetail agents={agents} now={now} onGoToMessage={goToMessage} />}
                 {!searchOpen ? null : (
@@ -2021,9 +2096,12 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
                     }}
                   />
                 )}
+                {linkNotice === '' ? null : <p role="status">{linkNotice}</p>}
                 <div className="conversation-body" hidden={agents.state.detail !== null || searchOpen}>
               <Conversation
+                highlightedId={highlightedId}
                 key={channelId}
+                openingMark={openingMark}
                 density={appearance.density}
                 historyBounded={agents.membersFor === channelId && (agents.members.find((m) => m.principal_id === auth.principal.id)?.history_after ?? 0) > 0}
                 channelId={channelId}

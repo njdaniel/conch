@@ -461,6 +461,56 @@ func TestConfigDirSharedVectors(t *testing.T) {
 	}
 }
 
+// TestConfigDirSharedVectorsWindows runs testdata/config-dir-vectors-windows.json
+// through the real resolution on Windows: CONCH_CONFIG_DIR, then os.UserConfigDir,
+// which there is Getenv("AppData") alone (the Go source, os/file.go, UserConfigDir:
+// `case "windows": dir = Getenv("AppData"); if dir == "" { return "", errors.New(
+// "%AppData% is not defined") }`). The same file drives the Rust test in
+// voice/crates/conch-voice-api/src/login.rs; the CI job voice-windows runs both.
+func TestConfigDirSharedVectorsWindows(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("the vectors are Windows paths: os.UserConfigDir reads %AppData% only there")
+	}
+	data, err := os.ReadFile(filepath.Join("testdata", "config-dir-vectors-windows.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var vectors []struct {
+		ConchConfigDir string `json:"conch_config_dir"`
+		AppData        string `json:"appdata"`
+		Want           string `json:"want"`
+		WantError      bool   `json:"want_error"`
+		Note           string `json:"note"`
+	}
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&vectors); err != nil {
+		t.Fatalf("config-dir-vectors-windows.json: %v", err)
+	}
+	if len(vectors) < 10 {
+		t.Fatalf("config-dir-vectors-windows.json has %d vectors; the file was cut short", len(vectors))
+	}
+	old := userConfigDir
+	userConfigDir = os.UserConfigDir
+	t.Cleanup(func() { userConfigDir = old })
+	for _, v := range vectors {
+		t.Run(v.Note, func(t *testing.T) {
+			t.Setenv(configDirEnv, v.ConchConfigDir)
+			t.Setenv("AppData", v.AppData)
+			got, err := configDir()
+			if v.WantError {
+				if err == nil || got != "" || !strings.Contains(err.Error(), configDirEnv) {
+					t.Fatalf("configDir() = %q, %v; want an error naming %s", got, err, configDirEnv)
+				}
+				return
+			}
+			if err != nil || got != v.Want {
+				t.Fatalf("configDir() = %q, %v; want %q", got, err, v.Want)
+			}
+		})
+	}
+}
+
 // TestCredentialsRelativeConfigDirRefused: a relative CONCH_CONFIG_DIR fails
 // every operation with one line naming the variable, and writes nothing.
 func TestCredentialsRelativeConfigDirRefused(t *testing.T) {

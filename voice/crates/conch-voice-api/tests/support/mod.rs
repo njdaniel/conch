@@ -72,6 +72,8 @@ pub enum Reply {
     Redirect(u16, String),
     /// Say nothing for this long (the slow server), then answer 200.
     Stall(Duration),
+    /// Send the headers, then pause before finishing the promised body.
+    StallBody(u16, Duration),
     /// Read the request and close the connection without a word.
     Hangup,
     /// Promise a body, send half of it, and close.
@@ -113,7 +115,11 @@ pub enum Step {
     CloseAndStall(u16, &'static str, Duration),
     /// Close the TCP connection with no close frame.
     Drop,
-    /// Reset the TCP connection.
+    /// Reset the TCP connection, once the client has shown it read everything sent so
+    /// far: the stub pings with its own payload and waits for that pong (at most
+    /// `RESET_PONG_WAIT`; a client that has already gone is reset at once). A reset sent
+    /// at once can overtake the upgrade response on Windows, and the client would then
+    /// fail to open the socket instead of seeing it reset.
     Reset,
 }
 
@@ -245,8 +251,8 @@ pub fn client_for(server: &str, timeout: Duration) -> Client {
 /// An address on this machine that nothing listens on, and that no other test can be
 /// given while this value lives. The socket is bound but never told to listen: the kernel
 /// keeps the port reserved, so a parallel test's `bind("127.0.0.1:0")` cannot get it,
-/// and a connection to it is still refused. (Binding and then dropping would free the
-/// port for another test's stub to take, and this test would dial that stub.)
+/// and a connection to it is refused on Linux. macOS and Windows can instead let the
+/// connect time out (#1737). Keep the port bound on all platforms so no stub can take it.
 pub struct ClosedPort {
     _socket: TcpSocket,
     addr: SocketAddr,
@@ -257,6 +263,33 @@ impl ClosedPort {
     pub fn url(&self) -> String {
         format!("http://{}", self.addr)
     }
+
+    pub fn client(&self) -> Client {
+        #[cfg(not(any(windows, target_os = "macos")))]
+        let timeout = Duration::from_secs(5);
+        #[cfg(any(windows, target_os = "macos"))]
+        let timeout = Duration::from_millis(500);
+        client_for(&self.url(), timeout)
+    }
+}
+
+pub fn is_closed_port_failure(error: &conch_voice_api::Error) -> bool {
+    use conch_voice_api::Error;
+    let refused = matches!(error, Error::Connect { .. });
+    #[cfg(any(windows, target_os = "macos"))]
+    let refused = refused || matches!(error, Error::Timeout);
+    refused
+}
+
+/// A port that was bound and then released: every platform refuses a connect to it at
+/// once (macOS and Windows do not refuse a bound, non-listening one, see `closed_port`).
+/// Another test may bind it meanwhile, so use it only where a refusal must be seen on
+/// every platform and a rare collision would fail loudly rather than pass wrongly.
+pub fn released_port_url() -> String {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    drop(listener);
+    format!("http://{addr}")
 }
 
 pub async fn closed_port() -> ClosedPort {
@@ -346,6 +379,13 @@ async fn answer(
             tokio::time::sleep(wait).await;
             response(200, Some("application/json"), "", b"{}")
         }
+        Reply::StallBody(status, wait) => {
+            let mut bytes = response(status, Some("application/json"), "", b"{}");
+            let body = bytes.split_off(bytes.len() - 2);
+            stream.write_all(&bytes).await?;
+            tokio::time::sleep(wait).await;
+            body
+        }
         Reply::Hangup => return Ok(()),
         Reply::Truncated(status) => {
             let whole = response(status, Some("application/json"), "", &[b' '; 64]);
@@ -356,6 +396,10 @@ async fn answer(
     stream.write_all(&bytes).await?;
     stream.shutdown().await
 }
+
+// Step::Reset's ping payload, and how long it waits for the matching pong.
+const RESET_PING: &[u8] = b"reset";
+const RESET_PONG_WAIT: Duration = Duration::from_secs(5);
 
 async fn play(
     stream: TcpStream,
@@ -421,6 +465,25 @@ async fn play(
             }
             Step::Drop => return Ok(()),
             Step::Reset => {
+                // The client answers a ping only after it has read the upgrade response
+                // and every frame before the ping, so the reset cannot overtake them. The
+                // payload is this step's own, so a pong owed to an earlier `Step::Ping`
+                // does not count; and a client that never answers fails the test within
+                // RESET_PONG_WAIT instead of hanging it.
+                socket
+                    .send(Message::Ping(RESET_PING.to_vec().into()))
+                    .await?;
+                let answered = tokio::time::timeout(RESET_PONG_WAIT, async {
+                    while let Some(Ok(message)) = socket.next().await {
+                        if matches!(&message, Message::Pong(payload) if payload.as_ref() == RESET_PING) {
+                            break;
+                        }
+                    }
+                })
+                .await;
+                if answered.is_err() {
+                    return Err("Step::Reset: the client did not answer the ping".into());
+                }
                 socket.get_ref().set_zero_linger()?;
                 return Ok(());
             }

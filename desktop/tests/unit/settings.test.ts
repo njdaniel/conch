@@ -211,6 +211,27 @@ describe('start-up re-judges an existing launch-at-login entry', () => {
     expect(off.current.launchAtLogin).toBe(false);
   });
 
+  it('turns off launch at login in settings.json restored on Windows', async () => {
+    const root = tmp();
+    const file = join(root, 'settings.json');
+    writeFileSync(file, '{"closeToTray":true,"launchAtLogin":true}');
+    const log = () => undefined;
+    const autostart = new Autostart({ platform: 'win32', packaged: true, execPath: join(root, 'Conch.exe'), env: {}, home: root, log });
+    const service = new SettingsService({ files: createSettingsFiles(root), autostart, trayWorking: () => false, log });
+
+    await service.load();
+    expect(service.current.launchAtLogin).toBe(true);
+    await service.rejudge();
+
+    expect(await service.view()).toMatchObject({
+      closeToTray: true,
+      launchAtLogin: false,
+      launchAvailable: false,
+      launchUnavailable: 'launch-unsupported',
+    });
+    expect(parseSettings(readFileSync(file, 'utf8'))).toEqual({ closeToTray: true, launchAtLogin: false });
+  });
+
   it('removes its own entry from a loosened install even when the setting reads off', async () => {
     // settings.json unreadable: load() falls back to the default (off), but
     // the entry written earlier is still there.

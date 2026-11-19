@@ -16,18 +16,22 @@ import { app, BrowserWindow, desktopCapturer, dialog, ipcMain, Menu, Notificatio
 
 import { allowUnlisted, OVERRIDE_FLAG, parseCompat } from './compat.ts';
 import { activationFactory, healthReader, Live, prober, revoker, verifier } from './profiles/activation.ts';
-import { deliverInvite, Invites } from './invites.ts';
+import { deliverInvite, Invites, registerInviteProtocol } from './invites.ts';
 import { createProfileFiles } from './profiles/files.ts';
 import { TeardownHooks } from './profiles/hooks.ts';
 import { ProfilesService } from './profiles/service.ts';
 import { ProfileStore } from './profiles/store.ts';
+import { dataRootVerdict } from './data-root.ts';
 import { acquire, keepNewest, prepareRoot } from './instance.ts';
 import { Client } from './api/client.ts';
 import { Session } from './api/session.ts';
 import { deliverVoice } from './voice/events.ts';
 import { Companion, stillHeldBy } from './voice/companion.ts';
 import { OneShot } from './voice/oneshot.ts';
+import { OWNER_VERSIONS_SHARE_AUDIO } from './voice/protocol.ts';
+import { linuxShareAudioEnabled, registeredApplicationName, ShareSound } from './voice/share-audio.ts';
 import { VoiceService } from './voice/service.ts';
+import { createVoiceIdentity } from './voice/identity.ts';
 import { Supervisor } from './voice/supervisor.ts';
 import { trayHostPresent } from './tray-detect.ts';
 import { TrayController, unblankSoon } from './tray.ts';
@@ -47,6 +51,7 @@ import { Links } from './links.ts';
 import { integrationsView } from './integrations.ts';
 import { Lifecycle } from './lifecycle.ts';
 import { LinuxLifecycle } from './lifecycle-linux.ts';
+import { WindowsLifecycle } from './lifecycle-windows.ts';
 import { executable, Portal, runFile } from './portal.ts';
 import { COMPANION_EVENTS } from '../shared/bridge-names.ts';
 import { Autostart } from './autostart.ts';
@@ -55,6 +60,7 @@ import { createSettingsFiles, memorySettingsFiles, SettingsService } from './set
 import { saveChosenFile } from './save-file.ts';
 import { parseManifest, SCHEME, SCHEME_PRIVILEGES } from './scheme.ts';
 import { electronStorage } from './vault/electron-storage.ts';
+import { profileConfigDir } from './vault/files.ts';
 import { createVault, type Vault } from './vault/vault.ts';
 
 // The hooks #771 (native voice) and #772 (share) register their teardown on:
@@ -93,6 +99,17 @@ export async function start(): Promise<void> {
   // A launch that turned the PipeWire capturer off would let one source
   // stand in for the portal's pick (display-capture.ts).
   if (captureVerdict(app.isPackaged, (name) => app.commandLine.getSwitchValue(name), log) === 'refused') {
+    app.exit(1);
+    return;
+  }
+  // On Windows, a --user-data-dir must be under the user's profile, whose ACL
+  // keeps other local accounts out (data-root.ts, issue #1788). Checked before
+  // the lock below, which is the first thing to write into the root.
+  const rootVerdict = dataRootVerdict(
+    { platform: process.platform, hasSwitch: (name) => app.commandLine.hasSwitch(name), root: app.getPath('userData'), env: process.env },
+    log,
+  );
+  if (rootVerdict === 'refused') {
     app.exit(1);
     return;
   }
@@ -145,6 +162,9 @@ export async function start(): Promise<void> {
   // once on the grant and once on the capture. The gate it reads is the
   // newest activation's.
   const share = new ShareAllowance({ now: Date.now, generation: () => live.gate.generation });
+  // The share sound's word that a capture was granted (issue #1854): nothing
+  // until the share sound exists (below, with main's switch on).
+  let captureGranted = (): void => undefined;
   const capture = new DisplayCapture({
     owned: () => (live.window === null || live.window.isDestroyed() ? null : live.window.webContents),
     gate: () => live.gate,
@@ -152,6 +172,9 @@ export async function start(): Promise<void> {
     live: () => liveOrigin() !== null,
     available: () => portal.last(),
     getSources: (options) => desktopCapturer.getSources(options),
+    granted: () => {
+      captureGranted();
+    },
     log,
   });
   // One set of guard dependencies, for every web contents and every
@@ -184,6 +207,10 @@ export async function start(): Promise<void> {
     },
   );
   if (!first) return;
+
+  // Only the owning process registers the Windows invite handler. Failure
+  // leaves pasted invites available; never include argv or a link in the log.
+  if (!registerInviteProtocol(app)) log('conch-desktop: could not register the conch: protocol');
 
   // The app's settings, once the data root is known (below). Until then, and
   // with none, closing the last window quits.
@@ -270,7 +297,8 @@ export async function start(): Promise<void> {
     log,
   });
   await settings.load();
-  // An entry written earlier is judged again: the install may have been loosened since.
+  // Recheck launch at login after loading: the install may have been
+  // loosened, or the setting restored on an unsupported platform.
   await settings.rejudge();
   const store = new ProfileStore(
     checked.ok
@@ -427,11 +455,23 @@ export async function start(): Promise<void> {
   });
   await installed.start();
 
+  // The Linux screen share's sound (issue #1854): on by default on Linux
+  // (Nick, 2026-11-18, #1952; the by-hand L-S6 run is still #922), read here
+  // once from main's own environment. CONCH_LINUX_SHARE_AUDIO=0 turns it off:
+  // the helper is offered the versions it always was, no sound object exists,
+  // the view says nothing of sound and no share-sound IPC function answers.
+  // Neither the renderer nor a profile can change the switch.
+  const shareAudio = linuxShareAudioEnabled(process.env, process.platform);
+  if (process.platform === 'linux') {
+    log(shareAudio
+      ? 'conch-desktop: the Linux screen share offers its sound (CONCH_LINUX_SHARE_AUDIO=0 turns it off)'
+      : 'conch-desktop: CONCH_LINUX_SHARE_AUDIO=0: the Linux screen share is silent');
+  }
   // Set once Lifecycle exists (below); voice and the companion read it.
   let screenLocked: () => boolean = () => false;
   const voice = new VoiceService({
     locked: () => screenLocked(),
-    supervisor: new Supervisor({ resources: process.resourcesPath, env: process.env, log }),
+    supervisor: new Supervisor({ resources: process.resourcesPath, env: process.env, log, ...(shareAudio ? { versions: OWNER_VERSIONS_SHARE_AUDIO } : {}) }),
     // The device list and the saves run the same trusted helper, with no token.
     oneShot: new OneShot({ resources: process.resourcesPath, env: process.env, log }),
     identity: async () => {
@@ -445,28 +485,20 @@ export async function start(): Promise<void> {
       } catch {
         return null;
       }
-      // The session generation the credential was read under: the fence
-      // compares to it, so a sign-in inside this activation (before the join)
-      // is fine and a sign-out or 401 after it trips.
-      let read = -1;
-      return {
+      return createVoiceIdentity(activation, () => profiles.active === activation, {
         profileId: id,
-        configDir: join(root, 'profiles', id),
+        configDir: profileConfigDir(root, id),
         principalId: principal.id,
-        credential: () => {
-          const c = activation.voiceCredential();
-          if (c === null) return null;
-          read = c.generation;
-          return { origin: c.origin, token: c.token };
-        },
-        current: () => profiles.active === activation && activation.voiceCurrent(read),
-      };
+      });
     },
     updated: () => installed.updated(),
     recheck: () => installed.check(),
     log,
   });
   callActive = () => voice.state().status === 'running';
+  // Main's share sound, made below once the companion exists; the companion
+  // tells it of every end of a share (its soundEnded).
+  let sound: ShareSound | null = null;
   // The screen companion (issue #1579, D4-02 of #772): the one holder of the
   // p<id>.screen grant. Its media hook is registered before voice's, so a
   // switch, sign-out or quit tells the page and removes the companion while
@@ -511,9 +543,35 @@ export async function start(): Promise<void> {
     granted: (contents, document) => {
       share.confirmGrant(contents, document);
     },
+    // The id of the share's channel the sound learned from conchd, for the
+    // companion's own DELETE after a rename (issue #1881). None with the
+    // switch off.
+    channelId: (held) => sound?.channelId(held) ?? null,
+    // Every end and stop of a held share: the sound's helper stop, then its
+    // consent's DELETE. Nothing with the switch off.
+    soundEnded: (held, reason) => sound?.ended(held, reason) ?? Promise.resolve(),
     log,
   });
   liveOrigin = () => companion.liveOrigin();
+  if (shareAudio) {
+    const made = new ShareSound({
+      voice,
+      companion,
+      // The choice is the active profile's own, kept by main; the page only
+      // ever asks to change it, after a click.
+      choice: () => profiles.shareSoundChoice(),
+      setChoice: (choice) => profiles.setShareSoundChoice(choice),
+      // The name this app's own audio streams carry, from the app's identity.
+      applicationName: registeredApplicationName(app.name),
+      log,
+    });
+    sound = made;
+    // A granted capture is the share's, in the document the gate shows now.
+    captureGranted = () => {
+      made.captureGranted(live.gate.generation);
+    };
+    voice.attachShareSound({ view: () => made.view(), leaving: () => made.leaving() });
+  }
   teardownHooks.media(
     'share',
     shareTeardown({
@@ -521,6 +579,7 @@ export async function start(): Promise<void> {
         activeClient = null;
       },
       companion,
+      ...(sound === null ? {} : { sound }),
     }),
   );
   app.on('render-process-gone', (_event, contents) => {
@@ -534,8 +593,8 @@ export async function start(): Promise<void> {
   teardownHooks.media('voice', () => voice.teardown());
 
   // Lock and suspend fail closed (issue #1588, D5-02): mute on lock, leave on
-  // suspend, end the share, hide notification text. Linux only: the lock is
-  // observed through logind (lifecycle-linux.ts). Where it cannot be, the
+  // suspend, end the share, hide notification text. Linux observes the lock
+  // through logind; Windows through powerMonitor (#1935). Where it cannot be, the
   // rules keep notification text hidden and say so on the log.
   //
   // The companion is the real one (issue #1579, above): lock ends a live share
@@ -547,10 +606,13 @@ export async function start(): Promise<void> {
     log,
   });
   screenLocked = () => lifecycle.locked;
-  let watcher: LinuxLifecycle | null = null;
+  let watcher: LinuxLifecycle | WindowsLifecycle | null = null;
   if (process.platform === 'linux') {
     watcher = new LinuxLifecycle({ rules: lifecycle, powerMonitor, pid: process.pid, log });
     void watcher.start();
+  } else if (process.platform === 'win32') {
+    watcher = new WindowsLifecycle({ rules: lifecycle, powerMonitor });
+    watcher.start();
   }
   // Every change of the helper's confirmed state goes to the owned window.
   voice.subscribe((view) => {
@@ -575,9 +637,9 @@ export async function start(): Promise<void> {
     log,
   });
   // A scheme link in any launch's arguments, this one's or a later one's, is
-  // kept by the router and the page told; the page asks for it, and the same
-  // checks and the same choice as a pasted link follow. A link arriving while
-  // a sign-in or switch is under way waits for the page like any other.
+  // checked by the router and the page told; the page asks for the result
+  // and shows the choice for a valid link or a message for a refusal. A link
+  // arriving while a sign-in or switch is under way waits for the page.
   argvSink = (argv) => {
     if (invites.arrive(argv)) deliverInvite({ contents: () => (live.owned() === null ? null : (live.window?.webContents ?? null)), gate: () => live.gate });
   };
@@ -611,13 +673,14 @@ export async function start(): Promise<void> {
           settings: () => settingsService.view(),
           notificationSupported: () => notifications.supported(),
           lockObservation: () => lifecycle.lockObservation,
-          lockTrying: () => watcher?.trying ?? false,
+          lockTrying: () => watcher instanceof LinuxLifecycle && watcher.trying,
           share: () => portal.last(),
           storage: () => profiles.view().storage,
           voice: () => voice.state(),
         }),
     },
     companion,
+    ...(sound === null ? {} : { shareSound: sound }),
     now: Date.now,
     log,
   });
@@ -632,6 +695,8 @@ export async function start(): Promise<void> {
     createTray: (icon) => new Tray(icon),
     buildMenu: (items) => Menu.buildFromTemplate([...items]),
     iconDir: join(appPath, 'build', 'icons', 'tray'),
+    // The filled app icon is legible on both light and dark Windows taskbars.
+    ...(process.platform === 'win32' ? { idleIcon: join(appPath, 'build', 'icons', '48.png') } : {}),
     voice,
     sharing: () => companion.liveOrigin() !== null,
     endCompanion: () => companion.end('lock'),
@@ -678,7 +743,7 @@ export async function start(): Promise<void> {
     ending = true;
     event.preventDefault();
     installed.stop();
-    // The lock monitor's child goes with the app, by its own handle.
+    // Stop power listeners and, on Linux, the monitor child by its own handle.
     watcher?.stop();
     // Media stops before the process goes.
     void profiles.close().finally(() => {

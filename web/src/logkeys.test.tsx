@@ -95,7 +95,7 @@ describe('the log is one tab stop', () => {
     act(() => { item(30).focus(); });
     fireEvent.keyDown(item(30), { key: 'ArrowUp' });
     expect(document.activeElement).toBe(item(29));
-    expect(stops().map((el) => el.getAttribute('data-message-id') ?? el.textContent)).toEqual(['29', 'owner', 'Reply']);
+    expect(stops().map((el) => el.getAttribute('data-message-id') ?? el.textContent)).toEqual(['29', 'owner', '⋯', 'Reply']);
     fireEvent.keyDown(item(29), { key: 'ArrowRight' });
     expect(document.activeElement).toBe(add(29));
     expect(add(29).parentElement).toBe(within(item(29)).getByRole('button', { name: /^Reply to / }).parentElement);
@@ -125,7 +125,7 @@ describe('the log is one tab stop', () => {
   it('moves the stop to the message last focused, with its controls', () => {
     render(conversation(many(6)));
     fireEvent.focus(item(3));
-    expect(stops().map((el) => el.getAttribute('data-message-id') ?? el.textContent)).toEqual(['3', 'owner', 'Reply']);
+    expect(stops().map((el) => el.getAttribute('data-message-id') ?? el.textContent)).toEqual(['3', 'owner', '⋯', 'Reply']);
     // Focus on a control inside another message moves the stop there too.
     fireEvent.focus(within(item(4)).getByRole('button', { name: /^Reply to / }));
     expect(stops()[0]).toBe(item(4));

@@ -31,12 +31,15 @@ import type {
   NativeVoiceHelper,
   NativeVoiceStatus,
   NativeVoiceView,
+  ShareSoundView,
   VoiceCommandResult,
   VoiceDeviceKey,
   VoiceKeyDevicesResult,
   VoiceSaveResult,
   VoiceTalkBindingResult,
+  VoiceTalkBindingRequest,
 } from '../../../web/src/platform/desktop/bridge.ts';
+import { windowsKey } from '../../../web/src/platform/desktop/windows-keys.ts';
 import { devicePath, KEY_DEVICE_DISCLOSURE, listKeyDevices, type KeyDeviceDeps } from './keydevices.ts';
 import { isPageSaveKey, keyCodeText, saveValueFits, type OneShot } from './oneshot.ts';
 import type { CommandResult, HelperView, StartRequest, VoiceState } from './supervisor.ts';
@@ -73,6 +76,19 @@ export interface VoiceSupervisor {
   setDeafen(deafened: boolean): Promise<CommandResult>;
   setDevices(devices: { readonly input?: string; readonly output?: string }): Promise<CommandResult>;
   setTalkMode(mode: VoiceControlTalkMode): Promise<CommandResult>;
+  // v3's (issue #1854), used by main's share sound alone. A supervisor without
+  // them (a test's) has no share-sound route: every call is unsupported.
+  setShareAudio?(want: { readonly capturing: false } | { readonly capturing: true; readonly applicationName: string }): Promise<CommandResult>;
+  setShareAudioMute?(muted: boolean): Promise<CommandResult>;
+}
+
+// What the voice view takes from main's share sound (issue #1854;
+// voice/share-audio.ts): its part of the view, and the order to end the sound
+// at a leave, which must come before the helper's leave is written (a helper
+// that is leaving takes no command).
+export interface ShareSoundSource {
+  view(): ShareSoundView | undefined;
+  leaving(): Promise<void>;
 }
 
 // The activation in force, as voice needs it. Everything but the credential
@@ -101,6 +117,7 @@ export interface VoiceServiceDeps {
   readonly log: (line: string) => void;
   // Test seams for the key-device listing (issue #1381).
   readonly keyDevices?: KeyDeviceDeps;
+  readonly platform?: NodeJS.Platform;
   // Whether the installed files were replaced under this running app (issue
   // #1600): a new helper is then not started from them. Absent means never.
   readonly updated?: () => boolean;
@@ -178,6 +195,7 @@ function helperOf(h: HelperView): NativeVoiceHelper {
     ...(h.talkMode === undefined ? {} : { talkMode: h.talkMode }),
     ptt: h.ptt,
     ...(h.pttProblem === undefined ? {} : { pttProblem: h.pttProblem }),
+    ...(h.shareAudio === undefined ? {} : { shareAudio: { ...h.shareAudio } }),
   };
 }
 
@@ -209,6 +227,9 @@ export class VoiceService {
   // Set when main muted the person at a screen lock (issue #1588): the view
   // says so until they unmute or leave.
   private lockMuted = false;
+  // Main's share sound (issue #1854), attached only with the Linux switch on.
+  // With none, the view carries nothing of it and a leave orders nothing.
+  private sound: ShareSoundSource | null = null;
 
   constructor(private readonly deps: VoiceServiceDeps) {
     this.bound = deps.stopBoundMs ?? VOICE_CONTROL_STOP_KILL_AFTER_MS;
@@ -226,10 +247,47 @@ export class VoiceService {
 
   // state is the view now.
   state(): NativeVoiceView {
+    return this.withSound(this.plain());
+  }
+
+  // plain is the view without main's share sound: the helper's and the
+  // voice service's own. The share sound reads this one (state() asks it for
+  // its part, so it must not ask state()).
+  plain(): NativeVoiceView {
     // A join that sign-out, a switch or a 401 has overtaken shows nothing:
     // not its channel, not its helper.
     if (this.active !== null && !this.active.current()) return { status: 'idle', generation: this.lastGeneration, channel: null, retryable: false };
     return this.withLockNote(this.override ?? this.view(this.deps.supervisor.state));
+  }
+
+  // attachShareSound makes main's share sound part of the view (issue #1854).
+  // Called once at startup, and only with the Linux switch on.
+  attachShareSound(source: ShareSoundSource): void {
+    this.sound = source;
+  }
+
+  // shareSoundChanged sends the view again after main's share sound changed
+  // its part of it (the choice, a reason).
+  shareSoundChanged(): void {
+    if (this.sound === null || (this.active !== null && !this.active.current())) return;
+    this.emit(this.state());
+  }
+
+  // setShareAudio and setShareAudioMute are the helper's v3 commands. They are
+  // main's share sound's alone: no IPC function reaches them, so no page names
+  // the scope, the application or the mute.
+  setShareAudio(want: { readonly capturing: false } | { readonly capturing: true; readonly applicationName: string }): Promise<CommandResult> {
+    return this.deps.supervisor.setShareAudio?.(want) ?? Promise.resolve({ ok: false, error: 'unsupported' });
+  }
+
+  setShareAudioMute(muted: boolean): Promise<CommandResult> {
+    return this.deps.supervisor.setShareAudioMute?.(muted) ?? Promise.resolve({ ok: false, error: 'unsupported' });
+  }
+
+  // Main's share sound rides on the view, when it is attached.
+  private withSound(view: NativeVoiceView): NativeVoiceView {
+    const sound = this.sound?.view();
+    return sound === undefined ? view : { ...view, shareSound: sound };
   }
 
   // setLockMuted records (or clears) that main muted the person at a lock,
@@ -259,7 +317,7 @@ export class VoiceService {
     this.override = null;
     // The note ends with the mute or the session.
     if (this.lockMuted && (s.status !== 'running' || !s.helper.muted)) this.lockMuted = false;
-    this.emit(this.withLockNote(this.view(s)));
+    this.emit(this.withSound(this.withLockNote(this.view(s))));
   }
 
   private emit(view: NativeVoiceView): void {
@@ -279,16 +337,16 @@ export class VoiceService {
       case 'idle':
         return { status, generation: this.lastGeneration, channel: null, retryable: false };
       case 'unavailable':
-        return { status, generation: this.lastGeneration, channel: null, problem: s.reason, retryable: false };
+        return { status, generation: this.lastGeneration, channel: null, problem: s.reason, retryable: false, ...(s.cause === undefined ? {} : { cause: s.cause }) };
       case 'starting':
       case 'stopping':
         return { status, generation: s.generation, channel: this.channel, retryable: false };
       case 'running':
-        return { status, generation: s.generation, channel: this.channel, retryable: false, helper: helperOf(s.helper) };
+        return { status, generation: s.generation, channel: this.channel, retryable: false, helper: helperOf(s.helper), ...(s.detail === undefined ? {} : { detail: s.detail }) };
       case 'ended': {
         const reason = s.helper.reason;
         const retryable = reason !== undefined && RETRYABLE_REASONS.has(reason);
-        return { status, generation: s.generation, channel: this.channel, ...(reason === undefined ? {} : { problem: reason }), retryable, helper: helperOf(s.helper) };
+        return { status, generation: s.generation, channel: this.channel, ...(reason === undefined ? {} : { problem: reason }), retryable, helper: helperOf(s.helper), ...(s.detail === undefined ? {} : { detail: s.detail }) };
       }
       case 'failed':
       case 'lost':
@@ -417,7 +475,13 @@ export class VoiceService {
   async leave(): Promise<NativeVoiceView> {
     this.epoch++;
     this.lockMuted = false;
+    // The share's sound ends first: its stop is written before the helper's
+    // leave (a helper that is leaving takes no command), and the withdrawal
+    // follows it. Begun here, synchronously, so no end of voice (a leave, a
+    // suspend, a teardown) writes the leave ahead of the stop.
+    const soundEnded = this.sound?.leaving().catch(() => undefined);
     await this.stopBounded(true);
+    await soundEnded;
     this.channel = null;
     this.override = null;
     // Nothing left to retry: a later lost or ended state must not rejoin the
@@ -471,9 +535,13 @@ export class VoiceService {
 
   // keyDevices lists the devices a talk key could be bound on, by name from
   // /dev/input/by-id, opening none (issue #1381). It needs no login and
-  // starts no helper. The ids it gives are good for the next saveTalkBinding
+  // starts no helper. On Windows it selects the device-free configuration UI.
+  // The ids it gives on Linux are good for the next saveTalkBinding
   // until the next listing.
   async keyDevices(): Promise<VoiceKeyDevicesResult> {
+    if ((this.deps.platform ?? process.platform) === 'win32') {
+      return { ok: true, platform: 'win32', devices: [], disclosure: [] };
+    }
     const begun = this.teardowns;
     try {
       const { devices } = await listKeyDevices({ uid: process.getuid?.(), ...this.deps.keyDevices });
@@ -490,8 +558,11 @@ export class VoiceService {
   // saveTalkBinding saves keys.device (the by-id path of a device of the
   // current listing) and then keys.talk (a key code 1..767) for the profile in
   // force, and says which of the two did not save. The id and the code are
-  // checked here again, whatever the caller.
-  async saveTalkBinding(request: { readonly deviceId: string; readonly code: number }): Promise<VoiceTalkBindingResult> {
+  // checked here again, whatever the caller. Windows uses only keys.talk,
+  // translated from an allowlisted physical code and fenced to the session.
+  async saveTalkBinding(request: VoiceTalkBindingRequest): Promise<VoiceTalkBindingResult> {
+    if ('windowsCode' in request) return this.saveWindowsBinding(request);
+    if ((this.deps.platform ?? process.platform) === 'win32') return { ok: false, error: 'invalid' };
     const name = typeof request.deviceId === 'string' ? this.listing.get(request.deviceId) : undefined;
     const code = keyCodeText(request.code);
     if (name === undefined || code === null) return { ok: false, error: 'invalid' };
@@ -508,6 +579,28 @@ export class VoiceService {
       if (!device.ok) return { ok: false, error: device.error, failed: 'device' };
       const talk = await this.deps.oneShot.save(identity.configDir, 'keys.talk', code);
       return talk.ok ? { ok: true } : { ok: false, error: talk.error, failed: 'talk' };
+    } finally {
+      this.bindingSave = false;
+    }
+  }
+
+  // Configuration never restarts or retargets voice. A running helper keeps
+  // its binding until an explicit leave/join. Fence every awaited step by the
+  // activation, lifecycle epoch and generation that configuration began in.
+  private async saveWindowsBinding(request: { readonly windowsCode: string; readonly generation: number }): Promise<VoiceTalkBindingResult> {
+    const binding = windowsKey(request.windowsCode);
+    if ((this.deps.platform ?? process.platform) !== 'win32' || binding === null || request.generation !== this.state().generation) return { ok: false, error: 'invalid' };
+    if (this.bindingSave) return { ok: false, error: 'busy' };
+    this.bindingSave = true;
+    const epoch = this.epoch;
+    const current = () => epoch === this.epoch && request.generation === this.state().generation;
+    try {
+      if (await this.oneShotRefused()) return { ok: false, error: UPDATE_PENDING };
+      const identity = await this.deps.identity();
+      if (identity === null || !identity.current() || !current()) return { ok: false, error: 'cancelled' };
+      const saved = await this.deps.oneShot.save(identity.configDir, 'keys.talk', binding.value);
+      if (!identity.current() || !current()) return { ok: false, error: 'cancelled' };
+      return saved.ok ? { ok: true } : { ok: false, error: saved.error, failed: 'talk' };
     } finally {
       this.bindingSave = false;
     }

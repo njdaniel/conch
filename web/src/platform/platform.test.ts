@@ -63,6 +63,12 @@ describe('the desktop bridge type', () => {
       createAccount: true,
       signOut: true,
       replaceCredential: true,
+      createMemberLink: true,
+      createSignInLink: true,
+      totpEnroll: true,
+      createPrincipalSignInLink: true,
+      createPrincipalCredential: true,
+      createHook: true,
       profiles: true,
       profileAdd: true,
       profileRename: true,
@@ -78,6 +84,6 @@ describe('the desktop bridge type', () => {
       notificationSupported: true,
       onNotification: true,
     };
-    expect(Object.keys(named)).toHaveLength(31);
+    expect(Object.keys(named)).toHaveLength(37);
   });
 });

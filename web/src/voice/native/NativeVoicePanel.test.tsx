@@ -3,6 +3,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as api from '../../api';
+import { setSoundAudience, sounds } from '../../sounds';
 import type { NativeVoiceHelper, NativeVoiceView } from '../../platform/desktop/bridge';
 import type { NativeVoice, NativeVoiceError, NativeVoiceOutcome } from '../../platform/types';
 import type { ChannelV0 } from '../../schema/channel';
@@ -92,6 +93,7 @@ beforeEach(() => {
 });
 afterEach(() => {
   cleanup();
+  setSoundAudience(null);
   vi.useRealTimers();
   vi.restoreAllMocks();
 });
@@ -117,6 +119,51 @@ function strip(fake: Fake, channel: string | null = 'general', binding?: string,
 }
 
 describe('NativeVoicePanel', () => {
+  it('plays remote join, leave and share cues once, with no initial or reconnect backlog', async () => {
+    const play = vi.spyOn(sounds, 'play').mockImplementation(() => undefined);
+    setSoundAudience({ me: 1, allows: () => true });
+    strip(new Fake(running()));
+    const one = presence([1, '2026-11-17T00:00:00Z']);
+    const two = presence([1, '2026-11-17T00:00:00Z'], [2, '2026-11-17T00:01:00Z']);
+    const sharing: VoicePresenceV2 = { ...two, rooms: [{ participants: (two.rooms[0]?.participants ?? []).map((p) => p.principal_id === 2 ? { ...p, sharing: true, share_started_at: '2026-11-17T00:02:00Z' } : p) }] };
+    await frame(one);
+    expect(play).not.toHaveBeenCalled();
+    await frame(two);
+    await frame(sharing);
+    await frame(sharing);
+    await frame(one);
+    expect(play.mock.calls).toEqual([['join'], ['share'], ['leave']]);
+    const connections = sockets.length;
+    act(() => { sockets.at(-1)?.events.onClose(1006); });
+    await waitFor(() => { expect(sockets).toHaveLength(connections + 1); }, { timeout: 3000 });
+    await frame(two);
+    expect(play.mock.calls).toEqual([['join'], ['share'], ['leave']]);
+    await frame(one);
+    expect(play.mock.calls).toEqual([['join'], ['share'], ['leave'], ['leave']]);
+  });
+
+  it('keeps presence cues silent without an audience, while muted, or when only browsing', async () => {
+    const play = vi.spyOn(sounds, 'play').mockImplementation(() => undefined);
+    const fake = new Fake(running());
+    strip(fake);
+    const one = presence([1, '2026-11-17T00:00:00Z']);
+    const two = presence([1, '2026-11-17T00:00:00Z'], [2, '2026-11-17T00:01:00Z']);
+    await frame(one);
+    await frame(two);
+    setSoundAudience({ me: 1, allows: () => false });
+    await frame(one);
+    await frame(two);
+    setSoundAudience({ me: 1, allows: () => true });
+    fake.set(idle);
+    await frame(one);
+    await frame(two);
+    expect(play).not.toHaveBeenCalled();
+    // Rejoining this app resumes live cues without replacing its socket.
+    fake.set(running());
+    await frame(one);
+    expect(play.mock.calls).toEqual([['leave']]);
+  });
+
   it('never builds the browser engine or asks for a device', async () => {
     const room = vi.spyOn(sdk, 'newLiveKitRoom');
     const gum = vi.fn();
@@ -313,6 +360,38 @@ describe('NativeVoicePanel', () => {
       expect(screen.getByText('The voice helper is not trusted, so it was not started.')).toBeTruthy();
       expect(screen.queryByRole('button', { name: /Join/ })).toBeNull();
     });
+    it('says the folder is the problem for an untrusted helper in a writable folder (issue #1850)', () => {
+      strip(new Fake({ status: 'unavailable', generation: 1, channel: null, retryable: false, problem: 'untrusted', cause: 'folder-writable' }));
+      expect(screen.getByText("voice is not available here; text chat is unaffected: the voice helper's folder can be changed by other users")).toBeTruthy();
+      expect(screen.getByText('The voice helper is in a folder that other users can change, so it was not started.')).toBeTruthy();
+    });
+    it('keeps the connection detail behind Details, as text (issue #1850)', () => {
+      const detail = '<b>could not reach</b> wss://lk.example/rtc?access_token=<redacted>';
+      strip(new Fake({ status: 'ended', generation: 1, channel: 'general', retryable: true, problem: 'connect_failed', helper: helper(), detail }));
+      expect(screen.queryByText(detail)).toBeNull();
+      const toggle = screen.getByRole('button', { name: 'Details' });
+      expect(toggle.getAttribute('aria-expanded')).toBe('false');
+      fireEvent.click(toggle);
+      expect(screen.getByText(detail).tagName).toBe('P');
+      expect(screen.getByText(detail).querySelector('b')).toBeNull();
+      expect(toggle.getAttribute('aria-expanded')).toBe('true');
+    });
+    it('says the folder is the problem for an untrusted helper in a writable folder (issue #1850)', () => {
+      strip(new Fake({ status: 'unavailable', generation: 1, channel: null, retryable: false, problem: 'untrusted', cause: 'folder-writable' }));
+      expect(screen.getByText("voice is not available here; text chat is unaffected: the voice helper's folder can be changed by other users")).toBeTruthy();
+      expect(screen.getByText('The voice helper is in a folder that other users can change, so it was not started.')).toBeTruthy();
+    });
+    it('keeps the connection detail behind Details, as text (issue #1850)', () => {
+      const detail = '<b>could not reach</b> wss://lk.example/rtc?access_token=<redacted>';
+      strip(new Fake({ status: 'ended', generation: 1, channel: 'general', retryable: true, problem: 'connect_failed', helper: helper(), detail }));
+      expect(screen.queryByText(detail)).toBeNull();
+      const toggle = screen.getByRole('button', { name: 'Details' });
+      expect(toggle.getAttribute('aria-expanded')).toBe('false');
+      fireEvent.click(toggle);
+      expect(screen.getByText(detail).tagName).toBe('P');
+      expect(screen.getByText(detail).querySelector('b')).toBeNull();
+      expect(toggle.getAttribute('aria-expanded')).toBe('true');
+    });
     it('says to restart after an update replaced the install, and offers neither Join nor Retry (issue #1600)', () => {
       strip(new Fake({ status: 'unavailable', generation: 1, channel: null, retryable: false, problem: 'update-pending' }));
       expect(screen.getByText('Restart Conch to finish the update.')).toBeTruthy();
@@ -414,6 +493,7 @@ describe('NativeVoicePanel', () => {
         startCompanionShare: (c) => { calls.push(`share ${c}`); },
         watchCompanionStream: (c, p) => { calls.push(`watch ${c} ${String(p)}`); },
         stopShare: () => { calls.push('stop'); },
+        restartShare: () => { calls.push('restart'); return Promise.resolve(); },
         watchStream: () => undefined,
         focusShare: () => undefined,
         setShareQuality: () => Promise.resolve(),
@@ -503,5 +583,139 @@ describe('NativeVoicePanel', () => {
       expect(c.presences).toEqual([]);
       expect(screen.queryByRole('region', { name: "Ada's stream" })).toBeNull();
     });
+
+    // The Linux share's sound (issue #1854): main's view carries it only with
+    // main's switch on.
+    describe('the share’s sound', () => {
+      const v3 = (audio: NonNullable<NativeVoiceHelper['shareAudio']>, over: Partial<NativeVoiceHelper> = {}): NativeVoiceHelper =>
+        helper({ version: 3, playback: 'on', talkMode: 'push_to_talk', shareAudio: audio, ...over });
+      const on = { state: 'on', muted: false, sources: 2 } as const;
+      const sounding = (audio: NonNullable<NativeVoiceHelper['shareAudio']> = on): NativeVoiceView => ({
+        status: 'running',
+        generation: 1,
+        channel: 'general',
+        retryable: false,
+        helper: v3(audio),
+        shareSound: { choice: 'system_excluding_call' },
+      });
+      const sharing = (): Companion => companionOf({ phase: 'connected', channel: 'general', companion: true, share: { kind: 'sharing', audio: false } }).companion;
+
+      function withSource(fake: Fake, calls: string[], companion: Companion) {
+        const source: NativeVoice = {
+          ...fake.nv,
+          shareSound: {
+            start: () => {
+              calls.push('start');
+              return Promise.resolve({ ok: false, error: 'not-offered' });
+            },
+            choose: (c) => {
+              calls.push(`choose ${c}`);
+              return Promise.resolve({ ok: true, share: null });
+            },
+            mute: (m) => {
+              calls.push(`share-mute ${String(m)}`);
+              return Promise.resolve({ ok: true });
+            },
+            end: () => {
+              calls.push('end');
+              return Promise.resolve(true);
+            },
+            shareEnded: () => {
+              calls.push('share ended');
+              return Promise.resolve(true);
+            },
+          },
+        };
+        return render(
+          <NativeVoicePanel source={source} signedIn channel="general" viewer={1} people={people} voiceAllowed channels={channels} companion={companion} onUnauthorized={() => undefined} onOpen={() => undefined} />,
+        );
+      }
+
+      it('with the switch off (no share sound in the view): no toggle, no mute, the silent words, and nothing asked of main', async () => {
+        const calls: string[] = [];
+        withSource(new Fake({ status: 'running', generation: 1, channel: 'general', retryable: false, helper: v3(on) }), calls, sharing());
+        await frame(presence([1, '2026-01-01T00:00:00Z']));
+        expect(screen.queryByRole('checkbox', { name: 'Share with sound' })).toBeNull();
+        expect(screen.queryByRole('button', { name: /share sound/ })).toBeNull();
+        expect(screen.getByText('Sharing your screen in #general')).toBeTruthy();
+        expect(calls).toEqual([]);
+      });
+
+      it('the mute sits beside Stop, shows the helper’s confirmed state, and is apart from the microphone’s Mute and Deafen', async () => {
+        const calls: string[] = [];
+        const fake = new Fake(sounding());
+        withSource(fake, calls, sharing());
+        await frame(presence([1, '2026-01-01T00:00:00Z']));
+        const stop = screen.getByRole('button', { name: 'Stop sharing' });
+        const mute = screen.getByRole('button', { name: 'Mute share sound' });
+        expect(stop.nextElementSibling).toBe(mute);
+        expect(mute.getAttribute('aria-pressed')).toBe('false');
+        expect(screen.getByText('Sharing your screen and its sound in #general (sound from 2 apps)')).toBeTruthy();
+        // The share-sound mute asks main for the share's mute and nothing of the microphone's.
+        fireEvent.click(mute);
+        await waitFor(() => { expect(calls).toContain('share-mute true'); });
+        expect(fake.calls).toEqual([]);
+        // The microphone's Mute is its own and asks for no share mute.
+        calls.length = 0;
+        fireEvent.click(screen.getByRole('button', { name: 'Mute' }));
+        expect(fake.calls).toEqual(['mute true']);
+        expect(calls.filter((c) => c.startsWith('share-mute'))).toEqual([]);
+        // The helper's word moves the button, nothing else.
+        fake.set(sounding({ state: 'on', muted: true, sources: 2 }));
+        expect(screen.getByRole('button', { name: 'Unmute share sound' }).getAttribute('aria-pressed')).toBe('true');
+      });
+
+      it('says without sound until the helper says on, then with it', async () => {
+        const fake = new Fake(sounding({ state: 'off', muted: false, sources: 0 }));
+        withSource(fake, [], sharing());
+        await frame(presence([1, '2026-01-01T00:00:00Z']));
+        expect(screen.getByText('Sharing your screen without sound in #general')).toBeTruthy();
+        expect(screen.queryByRole('button', { name: /share sound/ })).toBeNull();
+        fake.set(sounding());
+        expect(screen.getByText(/Sharing your screen and its sound in #general/)).toBeTruthy();
+        expect(screen.getByRole('button', { name: 'Mute share sound' })).toBeTruthy();
+      });
+
+      it('asks main to add the sound when the share goes live (the end is the hook’s, tested with it)', async () => {
+        const calls: string[] = [];
+        const fake = new Fake(sounding({ state: 'off', muted: false, sources: 0 }));
+        withSource(fake, calls, sharing());
+        await frame(presence([1, '2026-01-01T00:00:00Z']));
+        await waitFor(() => { expect(calls).toEqual(['start']); });
+      });
+
+      it('the toggle before the picker: on by default, and one click to “without sound”', async () => {
+        const calls: string[] = [];
+        const idleShare = companionOf({ phase: 'connected', channel: 'general', companion: true }).companion;
+        withSource(new Fake(sounding({ state: 'off', muted: false, sources: 0 })), calls, idleShare);
+        await frame(presence([1, '2026-01-01T00:00:00Z']));
+        const box = screen.getByRole<HTMLInputElement>('checkbox', { name: 'Share with sound' });
+        expect(box.checked).toBe(true);
+        expect(screen.queryByText(silentShareBefore)).toBeNull();
+        fireEvent.click(box);
+        await waitFor(() => { expect(calls).toEqual(['choose none']); });
+      });
+    });
   });
+});
+
+it('keeps the active Windows binding label until a new helper generation, even when browsing text', async () => {
+  const f = new Fake(running());
+  const source: NativeVoice = { ...f.nv,
+    keyDevices: () => Promise.resolve({ ok: true, platform: 'win32', devices: [], disclosure: [] }),
+    saveTalkBinding: () => Promise.resolve({ ok: true }),
+  };
+  const onBound = vi.fn();
+  const panel = (binding: string, channel = 'general') => <NativeVoicePanel source={source} binding={binding} onBound={onBound} signedIn channel={channel} viewer={1} people={people} voiceAllowed channels={channels} onUnauthorized={() => undefined} onOpen={() => undefined} />;
+  const ui = render(panel('Left Ctrl'));
+  fireEvent.click(screen.getByRole('button', { name: 'Talk key' }));
+  await screen.findByText('none chosen');
+  fireEvent.change(screen.getByRole('combobox', { name: 'Or pick one' }), { target: { value: 'Mouse5' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+  await waitFor(() => { expect(onBound).toHaveBeenCalledWith('Mouse 5'); });
+  ui.rerender(panel('Mouse 5', 'another-text-channel'));
+  expect(screen.getByText('mic on · hold Left Ctrl to talk')).toBeTruthy();
+  f.set({ ...running(), generation: 2 });
+  expect(await screen.findByText('mic on · hold Mouse 5 to talk')).toBeTruthy();
+  expect(f.calls).toEqual([]);
 });

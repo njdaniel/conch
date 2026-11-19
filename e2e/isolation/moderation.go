@@ -355,6 +355,7 @@ func outRefusals(term string) []refusal {
 	transmit := schema.VoiceTransmitReportV1{State: schema.VoiceTransmitStateStarted}
 	companion := schema.VoiceCompanionRequestV1{Publish: schema.VoiceCompanionPublishScreen, Subscribe: true}
 	companionAudio := schema.VoiceCompanionAudioRequestV1{Scope: schema.VoiceShareAudioScopeApplication}
+	companionAudioPerson := schema.VoiceCompanionAudioRequestV1{Scope: schema.VoiceShareAudioScopeApplication, Publisher: schema.VoiceShareAudioPublisherPerson}
 	extra := []refusal{
 		{route: "POST /v1/channels/{channel}/leave", build: func(ch string, _, _ int64) probe { return post("/v1/channels/"+ch+"/leave", nil) }},
 		{route: "POST /v1/channels/{channel}/voice/transmit", build: func(ch string, _, _ int64) probe { return post("/v1/channels/"+ch+"/voice/transmit", transmit) }},
@@ -363,6 +364,9 @@ func outRefusals(term string) []refusal {
 		{route: "POST /v1/channels/{channel}/voice/companion", build: func(ch string, _, _ int64) probe { return post("/v1/channels/"+ch+"/voice/companion", companion) }},
 		{route: "PUT /v1/channels/{channel}/voice/companion/audio", build: func(ch string, _, _ int64) probe {
 			return put("/v1/channels/"+ch+"/voice/companion/audio", companionAudio)
+		}},
+		{route: "PUT /v1/channels/{channel}/voice/companion/audio", build: func(ch string, _, _ int64) probe {
+			return put("/v1/channels/"+ch+"/voice/companion/audio", companionAudioPerson)
 		}},
 	}
 	// The reaction and edit routes of the table, and the removal route (listed

@@ -47,7 +47,7 @@
 //                          vanishedWithin below.
 import type { Browser, Locator, Page, WebSocketRoute } from '@playwright/test';
 import { expect, messages, say, test } from './fixtures';
-import { enter, expectClean, inbound, joinVoice, leave, type Someone } from './people';
+import { enter, expectClean, inbound, joinVoice, leave, leaveVoice, leaveWithin, type Someone } from './people';
 import { answered, mustAnswer, noAnswer, type NoAnswer } from './livekit-admin';
 import { dockerAvailable, emptiesWithin, startVoiceWorld, type Member, type VoiceWorld } from './voice-world';
 import { loadWorld } from './world';
@@ -88,12 +88,7 @@ const recoverWithin = signalCutFor + reconnectLimit + margin;
 // context closing to the identity leaving the list. Bound: the longest seen,
 // 22 s, plus the 10 s margin.
 const vanishedWithin = 22_000 + margin;
-// How long LiveKit may take to drop someone whose Leave reached it. The page
-// sends Leave and LiveKit removes the participant at once, so 5 s is generous
-// (a delivered leave measured 4 to 7 ms over 5 runs); a leave that did not arrive is
-// removed only by the dead-connection window above (about 20 s), so 5 s
-// tells the two apart.
-const leaveWithin = 5_000;
+// leaveWithin (people.ts) is how long LiveKit may take to drop someone whose Leave reached it.
 // Requests of a page that lost them while its context was offline.
 // by method, path and error, exactly as watchPage records them: conchd's
 // approvals poll is the one request carol's page makes while offline.
@@ -342,7 +337,7 @@ test.describe('voice recovery', () => {
       // Bob leaves by his button while his page is alive, so that the leave
       // reaches LiveKit through the wrapper; closing the page at once could
       // lose it and leave LiveKit waiting out a dead connection (vanishedWithin).
-      await showLeave(b);
+      await leaveVoice(b);
       const leftAt = Date.now();
       await expect.poll(() => answered(vw.participants()), { timeout: leaveWithin, message: 'bob leaves LiveKit at once' }).toEqual(identities(vw.alice, vw.carol));
       info.annotations.push({ type: 'LiveKit dropped bob after his Leave', description: `${String(Date.now() - leftAt)} ms (bound ${String(leaveWithin)} ms)` });
@@ -369,7 +364,7 @@ test.describe('voice recovery', () => {
         // Meanwhile: alice says something, bob leaves voice, and alice holds
         // the talk key so that carol's media shows whether it carries on.
         await say(a.page, vw.channel, body);
-        await showLeave(b);
+        await leaveVoice(b);
         await a.page.getByRole('heading', { name: 'Conch' }).click();
         await a.page.keyboard.down('Backquote');
         try {
@@ -498,7 +493,7 @@ test.describe('voice recovery', () => {
     try {
       const before = await sureMicrophones(vw.bob);
       expect(before, "one microphone publication of bob's before").toHaveLength(1);
-      await showLeave(b);
+      await leaveVoice(b);
       await expect.poll(() => answered(vw.participants()), { timeout: leaveWithin, message: 'bob leaves LiveKit at once' }).toEqual(identities(vw.alice, vw.carol));
       for (const p of [a, c]) await expect(roster(p.page)).not.toContainText('bob', { timeout: rosterBound + margin });
 
@@ -517,10 +512,4 @@ test.describe('voice recovery', () => {
     }
     await empty();
   });
-
-  // Leave voice by the page's own button (the person leaves; the page stays).
-  async function showLeave(p: Someone): Promise<void> {
-    await voiceRegion(p.page).getByRole('button', { name: 'Leave voice' }).click();
-    await expect(voiceRegion(p.page).getByRole('button', { name: 'Join voice' })).toBeVisible();
-  }
 });

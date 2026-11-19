@@ -81,6 +81,13 @@
 //! a signal all shut the gate at once, with no release tail, before anything is said. In
 //! `conch.voice_control.v2` the owner's `set_devices` is the switch above and its
 //! `set_talk_mode` the change of mode, and a snapshot says `playback` and `talk_mode` too.
+//! In `conch.voice_control.v3` the owner's `set_share_audio` and `set_share_audio_mute` are
+//! the share's sound (`share_audio.rs`): a second track of this participant, published,
+//! muted and unpublished beside the microphone's and never in its place, whose captures run
+//! on a thread of their own. Nothing of it touches the machine, the gate or the microphone's
+//! track, and no step of the loop waits for it: a command whose outcome is not known yet has
+//! its ack held ([`Owner::hold`]) and the loop goes on. Leaving, the owner going and a signal
+//! close its captures first; the end of a connection closes them too.
 
 use std::collections::BTreeMap;
 use std::future::Future;
@@ -114,6 +121,8 @@ use crate::receive::{self, BoxedSink, MixCommand, MixStats, Playing};
 use crate::reports::{Answer, MakeClient, ReportEvent, ReportTimings, Reports};
 use crate::sdk::{DisconnectReason, MicTrack, RoomHandle, SdkError, SdkEvent, Transport};
 use crate::secrets::Scrubber;
+use crate::share_audio::{Answer as ShareAnswer, Link, STOP_LIMIT, ShareAudio};
+use crate::share_capture::ShareSource;
 use crate::transmit::{self, BoxedMic, Transmitter, TxCommand, TxEvent};
 
 /// Opens the microphone source with this name, a PipeWire `node.name`, or PipeWire's default
@@ -380,13 +389,16 @@ pub struct Settings {
     /// The key device being watched, as it is named when its state is shown. `None` when
     /// presses come from standard input only.
     pub key_device: Option<String>,
-    /// Added, in brackets, to what is shown when no connection to `conchd` could be made:
+    /// Added, in brackets, to what is shown when a session request cannot connect or times out:
     /// the stored logins, when the server is the default and they are for others
     /// (`cli::Resolved::unreachable_note`).
     pub unreachable_note: Option<String>,
     /// Who plays other participants' share audio when the session names a companion
     /// (`--share-audio-owner`; the helper for the TUI).
     pub share_audio_owner: ShareAudioOwner,
+    /// Where the owner's screen share's sound is captured from, when a v3 owner asks for it:
+    /// [`ShareSource::Unsupported`] for `join` and for v1 and v2 owners.
+    pub share_audio: ShareSource,
     /// Waits and limits.
     pub timings: Timings,
 }
@@ -457,9 +469,10 @@ pub fn session_outcome(error: &ApiError) -> Option<(Outcome, &'static str)> {
         ApiError::ChannelNotFound(_) => (Outcome::NotAMember, "not_a_member"),
         ApiError::NotConfigured(_) => (Outcome::VoiceNotConfigured, "voice_not_configured"),
         ApiError::Unavailable(_) => (Outcome::VoiceUnavailable, "voice_unavailable"),
-        ApiError::Timeout | ApiError::Connect { .. } | ApiError::Transport { .. } => {
-            (Outcome::ServerUnreachable, "server_unreachable")
-        }
+        ApiError::Timeout
+        | ApiError::BodyTimeout
+        | ApiError::Connect { .. }
+        | ApiError::Transport { .. } => (Outcome::ServerUnreachable, "server_unreachable"),
         // Not an answer of conchd's, or conchd in trouble: a proxy in the way, a restart.
         // It may pass, so it is waited out like a server that cannot be reached.
         ApiError::UnexpectedResponse { .. }
@@ -498,6 +511,8 @@ struct Established<T: Transport> {
     mic: Option<(Track<T>, Feed<T>)>,
     can_publish: bool,
     identity: String,
+    /// Whether `conchd` named a companion in this connection's session.
+    companion: bool,
 }
 
 /// Why there is no room.
@@ -553,6 +568,7 @@ async fn establish<T: Transport>(
     // The rule is built from this session and no other: a re-join asks for a new session
     // and so builds a new rule, and none outlives the connection it was made for.
     let subscription = Subscription::for_session(&session, share_audio_owner);
+    let companion = session.companion_identity().is_some();
     // From here on, whatever the SDK writes is searched for these two values. They are not
     // forgotten when the connection ends: the SDK's tasks for a room go on, and may log,
     // after the room was left.
@@ -564,8 +580,11 @@ async fn establish<T: Transport>(
         transport,
         session.livekit_url.clone(),
         grant.token.clone(),
-        grant.can_publish,
-        session.identity.clone(),
+        As {
+            can_publish: grant.can_publish,
+            identity: session.identity.clone(),
+            companion,
+        },
         subscription,
         limits,
     );
@@ -600,6 +619,14 @@ async fn establish<T: Transport>(
     }
 }
 
+/// Who a connection joins as: what its grant allows, its identity, and whether its session
+/// named a companion.
+struct As {
+    can_publish: bool,
+    identity: String,
+    companion: bool,
+}
+
 /// The SDK's part of a connection attempt: the join, and for a grant that allows it the
 /// publish and, straight after it, the mute. Each step has a limit. A client whose join
 /// never answers has failed closed (it is not connected, so the gate is shut), but it must
@@ -608,11 +635,15 @@ async fn join_room<T: Transport>(
     transport: Arc<T>,
     livekit_url: String,
     token: Secret,
-    can_publish: bool,
-    identity: String,
+    who: As,
     subscription: Subscription,
     limits: AttemptLimits,
 ) -> Result<Established<T>, Failure> {
+    let As {
+        can_publish,
+        identity,
+        companion,
+    } = who;
     let joining = transport.connect(&livekit_url, &token, &subscription);
     let (room, events) = match tokio::time::timeout(limits.connect, joining).await {
         Ok(joined) => joined.map_err(Failure::Sdk)?,
@@ -625,6 +656,7 @@ async fn join_room<T: Transport>(
             mic: None,
             can_publish,
             identity,
+            companion,
         });
     }
     let published = tokio::time::timeout(limits.publish, room.publish_microphone()).await;
@@ -638,6 +670,7 @@ async fn join_room<T: Transport>(
                 mic: Some((track, feed)),
                 can_publish,
                 identity,
+                companion,
             });
         }
         Ok(Err(error)) => Failure::Sdk(error),
@@ -650,6 +683,16 @@ async fn join_room<T: Transport>(
     Err(failure)
 }
 
+/// What the share's sound is told of the connection: `connected` as the owner is told it,
+/// whether this connection's session named a companion, and its room.
+fn share_link<T: Transport>(live: Option<&Live<T>>, connected: bool) -> Link<'_, T::Room> {
+    Link {
+        connected: connected && live.is_some(),
+        companion: live.is_some_and(|live| live.companion),
+        room: live.map(|live| &live.room),
+    }
+}
+
 /// A connection in use.
 struct Live<T: Transport> {
     room: T::Room,
@@ -658,6 +701,8 @@ struct Live<T: Transport> {
     track: Option<Track<T>>,
     /// This client's own identity in the room.
     identity: String,
+    /// Whether `conchd` named a companion in this connection's session.
+    companion: bool,
     /// Subscribed tracks, by id, with the speaker each belongs to.
     tracks: BTreeMap<String, String>,
     /// When the SDK said `Reconnecting`, until it says `Reconnected`.
@@ -819,6 +864,8 @@ struct Session<T: Transport> {
     mic: Mic,
     /// The speakers, for the owner's `playback`.
     playback: Playback,
+    /// The owner's screen share's sound (v3): its track, its captures and its state.
+    share: ShareAudio<T::Room>,
 }
 
 /// Where the microphone is, as a managed helper's owner is told it.
@@ -878,8 +925,10 @@ pub async fn serve<T: Transport>(
     handoff: Handoff,
 ) -> Result<(), Error> {
     // Standard output carries a managed helper's native noise, which its owner discards;
-    // nothing of this program's goes there.
-    let out = Output::new(false, Box::new(std::io::sink()));
+    // nothing of this program's goes there. Standard error is the owner's to read, and it
+    // keeps the tail of it: so the connection's changes are written there, with the
+    // error's text (scrubbed), and nothing of who is in the room or the user's own state.
+    let out = Output::queued(false, Box::new(std::io::stderr())).diagnostics_only();
     let mut session = match Session::new(settings, conchd, transport, scrubber, inputs, out) {
         Ok(session) => session,
         Err(error) => {
@@ -894,10 +943,13 @@ pub async fn serve<T: Transport>(
         key_state,
         talk_key,
         switch,
+        share_muted,
     } = handoff;
     session.owner = Some(owner);
     session.key_state = key_state;
     session.talk_key = talk_key;
+    // The share's mute asked for while starting: kept, and applied when a track is published.
+    session.share.set_mute(share_muted);
     // The machine as the start, and keys pressed while starting, left it.
     if muted {
         session.tell(PttInput::Line(LineCommand::Mute));
@@ -951,6 +1003,7 @@ impl<T: Transport> Session<T> {
             key_device,
             unreachable_note,
             share_audio_owner,
+            share_audio,
             timings,
         } = settings;
         let transmitter = transmit::spawn_with_press_cap(
@@ -1016,6 +1069,7 @@ impl<T: Transport> Session<T> {
             talk_key: true,
             mic: Mic::NotOpened,
             playback,
+            share: ShareAudio::new(share_audio),
         };
         // The machine's first words: the gate is told why it is shut, and the first status.
         session.obey(first);
@@ -1050,6 +1104,13 @@ impl<T: Transport> Session<T> {
                 // After the inputs: a release that is already waiting ends the press before
                 // its track would open.
                 answer = answered(&mut self.opening) => self.on_answer(answer),
+                // The share's sound: its publish, its engine's word, or a wait that ran out.
+                // Nothing of it holds up anything above.
+                wake = self.share.wake() => {
+                    let connected = self.is_connected();
+                    let link = share_link::<T>(self.live.as_ref(), connected);
+                    self.share.on_wake(wake, &link);
+                }
                 // The machine's own deadline: a press that has reached the transmit limit.
                 () = sleep_until(tick_at) => self.tell(PttInput::Tick),
                 () = sleep_until(grace_ends) => self.disconnected(Ended {
@@ -1070,8 +1131,28 @@ impl<T: Transport> Session<T> {
                     let _ = self.receiver.commands.send(MixCommand::Stats);
                 }
             }
-            // The step has been applied in full: a managed owner is told what changed.
+            // The step has been applied in full: a managed owner is told what changed, and
+            // then answered what waited for it.
             self.settle(false);
+            self.release_held();
+        }
+    }
+
+    /// Whether the session is in phase `connected`, as the owner would be told.
+    fn is_connected(&self) -> bool {
+        self.ending.is_none() && self.managed_phase().0 == VoiceControlPhase::Connected
+    }
+
+    /// Answers the commands whose acks waited for the share's sound to settle, now that the
+    /// state that says how it settled has been written.
+    fn release_held(&mut self) {
+        let resolved = self.share.take_resolved();
+        if resolved == 0 {
+            return;
+        }
+        let now = self.snapshot();
+        if let Some(owner) = self.owner.as_mut() {
+            owner.release(resolved, &now);
         }
     }
 
@@ -1238,7 +1319,9 @@ impl<T: Transport> Session<T> {
                     Failure::Sdk(error) => self.decide(Ended {
                         outcome: Outcome::ConnectFailed,
                         reason: "connect_failed",
-                        detail: Some(error.to_string()),
+                        // Scrubbed where it was made; once more here, since this text
+                        // is written to a managed helper's standard error.
+                        detail: Some(self.shown_text(&error)),
                     }),
                 }
             }
@@ -1257,6 +1340,7 @@ impl<T: Transport> Session<T> {
             mic,
             can_publish,
             identity,
+            companion,
         } = established;
         self.tell(PttInput::PublishGrant(can_publish));
         let track = mic.map(|(track, feed)| {
@@ -1274,6 +1358,7 @@ impl<T: Transport> Session<T> {
             events,
             track,
             identity,
+            companion,
             tracks: BTreeMap::new(),
             reconnecting_since: None,
             ignored_a_track: false,
@@ -1283,6 +1368,9 @@ impl<T: Transport> Session<T> {
         // Only now, with the track muted: until this the machine answers a press with
         // "not connected".
         self.tell(PttInput::Connected(true));
+        // A share's sound refused while not connected is not kept: it is off now, and the
+        // owner asks again.
+        self.share.connected();
     }
 
     /// Opens the microphone `input` names and hands it to the transmit task. One that cannot
@@ -1336,11 +1424,13 @@ impl<T: Transport> Session<T> {
         self.scrubber.scrub_line(&error.to_string())
     }
 
-    /// What is shown for a session request that failed: the error, and when no connection
-    /// could be made at all, the note on the stored logins, as `conch` adds it.
+    /// What is shown for a session request that failed: the error, with the note on stored
+    /// logins when the connection failed or the request timed out without an answer.
     fn session_failure_text(&self, error: &ApiError) -> String {
         match (error, &self.unreachable_note) {
-            (ApiError::Connect { .. }, Some(note)) => self.shown_text(&format!("{error} ({note})")),
+            (ApiError::Connect { .. } | ApiError::Timeout, Some(note)) => {
+                self.shown_text(&format!("{error} ({note})"))
+            }
             _ => self.shown_text(error),
         }
     }
@@ -1414,6 +1504,9 @@ impl<T: Transport> Session<T> {
                     self.show(Connection::Reconnecting);
                     // Not connected from this moment: the gate is forced shut.
                     self.tell(PttInput::Connected(false));
+                    // And the share's captures close; its track and request are kept for
+                    // this room.
+                    self.share.reconnecting();
                 }
             }
             Some(SdkEvent::Reconnected) => {
@@ -1423,7 +1516,17 @@ impl<T: Transport> Session<T> {
                     // A republished track was muted and disabled before this: the SDK
                     // reports the republish first, and events are handled in order.
                     self.tell(PttInput::Connected(true));
+                    let connected = self.is_connected();
+                    let link = share_link::<T>(self.live.as_ref(), connected);
+                    self.share.reconnected(&link);
                 }
+            }
+            // The share's track, never the microphone's: its own mute is applied again.
+            Some(SdkEvent::ShareRepublished) => self.share.republished(),
+            // This participant's permission changed: if the share's grant was taken back,
+            // its track is unpublished here and its captures close.
+            Some(SdkEvent::PermissionChanged { allowed }) => {
+                self.share.permission_changed(allowed);
             }
             Some(SdkEvent::TrackSubscribed {
                 speaker,
@@ -1499,6 +1602,9 @@ impl<T: Transport> Session<T> {
         }
         // While the track is still at hand: the gate is forced shut and the track muted.
         self.tell(PttInput::Connected(false));
+        // The share's captures close, and nothing of its request is kept for the next
+        // connection.
+        self.share.disconnected();
         let Some(live) = self.live.take() else {
             return;
         };
@@ -1633,7 +1739,46 @@ impl<T: Transport> Session<T> {
                 self.set_state(id, ShutReason::Deafened, deafened);
             }
             Control::GetState { id } => {
-                self.settle(true);
+                if self.owner.as_ref().is_some_and(Owner::holding) {
+                    // Behind a held ack: the state and the ack are written in their turn.
+                    let now = self.snapshot();
+                    if let Some(owner) = self.owner.as_mut() {
+                        owner.answer_state(&now, id);
+                    }
+                } else {
+                    self.settle(true);
+                    self.ack(id, None);
+                }
+            }
+            Control::SetShareAudio { id, request } => {
+                if self.stopping() {
+                    self.ack(id, Some(VoiceControlErrorCode::Stopping));
+                    return;
+                }
+                let connected = self.is_connected();
+                let link = share_link::<T>(self.live.as_ref(), connected);
+                let answer = self.share.request(request, &link);
+                self.settle(false);
+                // What waited before this command is answered before it.
+                self.release_held();
+                match answer {
+                    ShareAnswer::Now => self.ack(id, None),
+                    ShareAnswer::Held => {
+                        if let Some(owner) = self.owner.as_mut() {
+                            owner.hold(id);
+                        }
+                    }
+                }
+            }
+            // The share's own mute, and nothing else: the microphone, the machine and the
+            // captures are left as they are.
+            Control::SetShareAudioMute { id, muted } => {
+                if self.stopping() {
+                    self.ack(id, Some(VoiceControlErrorCode::Stopping));
+                    return;
+                }
+                self.share.set_mute(muted);
+                self.settle(false);
                 self.ack(id, None);
             }
             Control::Leave { id } => {
@@ -1665,14 +1810,16 @@ impl<T: Transport> Session<T> {
             }
             Control::Refused { id, code } => self.ack(id, Some(code)),
             Control::Fatal { code } => {
+                let now = self.snapshot();
                 if let Some(owner) = self.owner.as_mut() {
-                    owner.protocol_error(code);
+                    owner.protocol_error(code, &now);
                 }
                 // The owner sent what cannot be acted on: the session fails for it,
                 // whatever it was doing, and the next state the owner is told is the failed
                 // one (`settle` writes nothing more).
                 self.ending = Some(Ending::failed(VoiceControlReason::ProtocolError));
                 self.shut_now();
+                self.share.leave();
                 self.exit = Some(Err(Error::Managed(PROTOCOL_ERROR)));
             }
         }
@@ -1814,6 +1961,9 @@ impl<T: Transport> Session<T> {
             }
         }
         self.shut_now();
+        // The share's track is silenced and its captures begin to close at once; leaving
+        // waits for them before it says the share's sound is off.
+        self.share.leave();
         self.exit.get_or_insert(Ok(()));
     }
 
@@ -1880,6 +2030,7 @@ impl<T: Transport> Session<T> {
         };
         Snapshot::new(phase, reason, retry_in, capture, status, key)
             .with_playback_and_mode(playback, self.ptt.talk_mode())
+            .with_share(self.share.view(), self.share.muted())
     }
 
     /// The phase a managed owner is shown, with its reason and how long until `conchd` is
@@ -2053,6 +2204,19 @@ impl<T: Transport> Session<T> {
         let (none, _) = mpsc::unbounded_channel();
         drop(std::mem::replace(&mut self.receiver.commands, none));
         self.set_playback(Playback::Off);
+        // The share's sound: its track silenced (when stopping began), its captures closed
+        // within the protocol's bound, and only then is it said to be off and the commands
+        // that waited for it answered (§10: owner loss closes the captures with the rest).
+        // After the microphone and the speakers, whose own bound this does not touch. A
+        // session that never had a share's sound writes nothing more here: v1 and v2
+        // sessions end as they always did.
+        let shown = self.share.view();
+        self.share.leave();
+        self.share.until_closed(STOP_LIMIT).await;
+        if self.share.view() != shown {
+            self.settle(false);
+        }
+        self.release_held();
 
         // A press that was open is over: the machine produces its `stopped` once the gate
         // says it has shut, which after a forced shut it says at once.
@@ -2209,20 +2373,21 @@ fn answer_while_stopping(
         Control::SetMute { id, .. }
         | Control::SetDeafen { id, .. }
         | Control::SetDevices { id, .. }
-        | Control::SetTalkMode { id, .. } => {
+        | Control::SetTalkMode { id, .. }
+        | Control::SetShareAudio { id, .. }
+        | Control::SetShareAudioMute { id, .. } => {
             owner.ack(id, Some(VoiceControlErrorCode::Stopping));
         }
         Control::GetState { id } => {
             let mut now = stopping.clone();
             now.reason = Some(ending.reason);
-            owner.state(&now, true);
-            owner.ack(id, None);
+            owner.answer_state(&now, id);
         }
         // A second leave: what it asks for is under way.
         Control::Leave { id } => owner.ack(id, None),
         Control::Refused { id, code } => owner.ack(id, Some(code)),
         Control::Fatal { code } => {
-            owner.protocol_error(code);
+            owner.protocol_error(code, stopping);
             *ending = Ending::failed(VoiceControlReason::ProtocolError);
             *result = Err(Error::Managed(PROTOCOL_ERROR));
         }
@@ -2261,12 +2426,42 @@ mod tests {
     impl RoomHandle for NoRoom {
         type Track = NoTrack;
         type Feed = NoFeed;
+        type ShareTrack = NoTrack;
+        type ShareFeed = NoFeed;
 
         async fn publish_microphone(&self) -> Result<(NoTrack, NoFeed), SdkError> {
             std::future::pending().await
         }
 
+        fn publish_share_audio(
+            &self,
+        ) -> impl Future<Output = Result<(NoTrack, NoFeed), SdkError>> + Send + 'static {
+            std::future::pending()
+        }
+
         async fn close(self) {}
+    }
+
+    impl crate::sdk::ShareAudioTrack for NoTrack {
+        fn id(&self) -> String {
+            String::new()
+        }
+        fn is_allowed(&self) -> bool {
+            true
+        }
+        fn is_published(&self) -> bool {
+            true
+        }
+        fn mute(&self) {}
+        fn disable(&self) {}
+        fn unmute(&self) {}
+        fn unpublish(self) -> impl Future<Output = ()> + Send + 'static {
+            std::future::ready(())
+        }
+    }
+
+    impl crate::sdk::ShareAudioFeed for NoFeed {
+        async fn send(&mut self, _frame: &conch_voice_audio::StereoFrame) {}
     }
 
     struct NoTrack;
@@ -2321,11 +2516,30 @@ mod tests {
             key_device: None,
             unreachable_note: None,
             share_audio_owner: ShareAudioOwner::Helper,
+            share_audio: ShareSource::Unsupported,
             timings: Timings::default(),
         };
         let (_inputs, received) = mpsc::unbounded_channel();
         let out = Output::new(false, Box::new(std::io::sink()));
         Session::new(settings, conchd, Nowhere, Scrubber::new(), received, out).unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_timeout_before_headers_gets_the_stored_logins_note_when_available() {
+        let mut session = session(Box::new(|_| Ok(Box::new(CountingSink::new(&[])?))));
+        assert_eq!(
+            session.session_failure_text(&ApiError::Timeout),
+            "conchd did not answer within the timeout"
+        );
+        session.unreachable_note = Some("logins are stored for http://a.test:1".to_owned());
+        assert_eq!(
+            session.session_failure_text(&ApiError::Timeout),
+            "conchd did not answer within the timeout (logins are stored for http://a.test:1)"
+        );
+        assert_eq!(
+            session.session_failure_text(&ApiError::BodyTimeout),
+            "conchd did not answer within the timeout"
+        );
     }
 
     fn switch_speakers(session: &mut Session<Nowhere>, name: &str) {
@@ -2362,7 +2576,7 @@ mod tests {
                 match name {
                     None => Ok(Box::new(CountingSink::new(&[])?) as BoxedSink),
                     Some("headset") => Ok(Box::new(Plugged(Arc::clone(&absent))) as BoxedSink),
-                    Some(_) => Err(Error::PipeWire {
+                    Some(_) => Err(Error::AudioSystem {
                         doing: "open the speakers",
                         detail: "FAKE: the stream could not be made".to_owned(),
                     }),
@@ -2462,6 +2676,52 @@ mod tests {
         assert_eq!(
             shown,
             "SwitchDevices(DeviceSwitch { input: Some(\"..\"), output: None })"
+        );
+    }
+
+    /// What a test's [`Output`] wrote, shared with the test.
+    #[derive(Clone, Default)]
+    struct Written(Arc<Mutex<Vec<u8>>>);
+
+    impl std::io::Write for Written {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// A managed session writes why the connection failed to the stream it was given, with
+    /// the error's text scrubbed, and nothing else of its own state.
+    #[tokio::test]
+    async fn a_managed_session_writes_the_connection_failure_scrubbed_to_its_stream() {
+        let open_sink: OpenSink = Box::new(|_| Ok(Box::new(CountingSink::new(&[])?) as BoxedSink));
+        let mut session = session(open_sink);
+        let written = Written::default();
+        session.out = Output::new(false, Box::new(written.clone())).diagnostics_only();
+        session
+            .scrubber
+            .always(&Secret::new("FAKE-login-token-do-not-print"));
+        let jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJwNyJ9.c2lnbmF0dXJlLWJ5dGVz";
+        session.on_progress(Progress::Established(Err(Failure::Sdk(
+            SdkError::scrubbed(format!(
+                "could not connect: token FAKE-login-token-do-not-print and {jwt}\nsecond line"
+            )),
+        ))));
+        let text = String::from_utf8(written.0.lock().unwrap().clone()).unwrap();
+        assert!(
+            text.starts_with(
+                "not connected: connect failed (could not connect: token [redacted] and [redacted] second line);"
+            ),
+            "{text}"
+        );
+        assert_eq!(text.matches('\n').count(), 1, "one line: {text}");
+        assert!(
+            !text.contains("FAKE-login-token") && !text.contains("eyJ"),
+            "{text}"
         );
     }
 }
