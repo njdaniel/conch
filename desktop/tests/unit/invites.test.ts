@@ -415,9 +415,17 @@ describe('expiry by timer', () => {
 const scheme = (origin: string, code = CODE): string => `conch://invite?server=${encodeURIComponent(origin)}&code=${encodeURIComponent(code)}`;
 
 describe('parseSchemeLink', () => {
-  it('accepts the documented shape and gives what parseInviteLink gives for the https link it names', () => {
-    expect(parseSchemeLink(scheme(ORIGIN_A))).toEqual({ ok: true, origin: ORIGIN_A, code: CODE });
-    expect(parseSchemeLink(scheme(ORIGIN_A))).toEqual(parseInviteLink(link(ORIGIN_A)));
+  it.each([
+    ['the documented form', '//invite?'],
+    ['the form Windows passes', '//invite/?'],
+  ])('accepts %s and gives what parseInviteLink gives for the web link it names', (_name, prefix) => {
+    const input = scheme(ORIGIN_A).replace('//invite?', prefix);
+    expect(parseSchemeLink(input)).toEqual({ ok: true, origin: ORIGIN_A, code: CODE });
+    expect(parseSchemeLink(input)).toEqual(parseInviteLink(link(ORIGIN_A)));
+    expect(parseSchemeLink(scheme('http://127.0.0.1:18480', 'abc_def').replace('//invite?', prefix))).toEqual({ ok: true, origin: 'http://127.0.0.1:18480', code: 'abc_def' });
+  });
+
+  it('accepts the supported parameter, scheme, origin and code variants', () => {
     // Either order; the scheme in any case; a port and loopback over http.
     expect(parseSchemeLink(`conch://invite?code=abc&server=${encodeURIComponent(ORIGIN_A)}`)).toEqual({ ok: true, origin: ORIGIN_A, code: 'abc' });
     expect(parseSchemeLink(`CONCH://invite?server=${encodeURIComponent(ORIGIN_A)}&code=abc`)).toMatchObject({ ok: true });
@@ -447,7 +455,8 @@ describe('parseSchemeLink', () => {
     ['the host in capitals', `conch://INVITE?server=${encodeURIComponent(ORIGIN_A)}&code=${CODE}`, 'malformed'],
     ['userinfo before the host', `conch://u:p@invite?server=${encodeURIComponent(ORIGIN_A)}&code=${CODE}`, 'malformed'],
     ['a path after the host', `conch://invite/x?server=${encodeURIComponent(ORIGIN_A)}&code=${CODE}`, 'malformed'],
-    ['a slash before the query', `conch://invite/?server=${encodeURIComponent(ORIGIN_A)}&code=${CODE}`, 'malformed'],
+    ['two slashes before the query', `conch://invite//?server=${encodeURIComponent(ORIGIN_A)}&code=${CODE}`, 'malformed'],
+    ['an encoded slash before the query', `conch://invite%2F?server=${encodeURIComponent(ORIGIN_A)}&code=${CODE}`, 'malformed'],
     ['no query', 'conch://invite', 'malformed'],
     ['an empty query', 'conch://invite?', 'malformed'],
     ['a fragment', `conch://invite?server=${encodeURIComponent(ORIGIN_A)}&code=${CODE}#x`, 'fragment'],
@@ -640,10 +649,11 @@ describe('a scheme link reaching the router', () => {
     expect(invites.take()).toBeNull();
   });
 
-  it('is refused by the same host rules as a pasted link, and logs the reason alone', async () => {
+  it('is refused by the same host rules as a pasted link, and reports the reason alone once', async () => {
     const s = await setup();
     const hostile = `conch://invite?server=${encodeURIComponent('http://2130706433')}&code=${CODE}`;
-    expect(s.invites.arrive([exe, hostile])).toBe(false);
+    expect(s.invites.arrive([exe, hostile])).toBe(true);
+    expect(s.invites.arrived()).toEqual({ ok: false, refusal: 'host' });
     expect(s.invites.arrived()).toBeNull();
     expect(s.log.at(-1)).toBe('conch-desktop: refused a conch: link (host)');
   });
@@ -660,8 +670,8 @@ describe('a scheme link reaching the router', () => {
 
   it('considers only the first link; a malformed first is not made up for by a good second', async () => {
     const s = await setup();
-    expect(s.invites.arrive([exe, 'conch://invite?server=x', scheme(ORIGIN_A)])).toBe(false);
-    expect(s.invites.arrived()).toBeNull();
+    expect(s.invites.arrive([exe, 'conch://invite?server=x', scheme(ORIGIN_A)])).toBe(true);
+    expect(s.invites.arrived()).toEqual({ ok: false, refusal: 'malformed' });
     expect(s.invites.arrive([exe, scheme(ORIGIN_A, 'first'), scheme(ORIGIN_B, 'second')])).toBe(true);
     expect(s.invites.arrived()).toMatchObject({ ok: true, origin: ORIGIN_A });
   });

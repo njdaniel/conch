@@ -797,6 +797,34 @@ describe('opening an invite link (issue #1591)', () => {
     });
   });
 
+  it.each(['on launch', 'while the client is open'])('shows a fixed message for a refused link %s', async (when) => {
+    const running = when === 'while the client is open';
+    const refusal: InviteCheck = { ok: false, refusal: 'malformed' };
+    const inviteArrived = vi.fn().mockResolvedValueOnce(running ? null : refusal);
+    let tell: () => void = () => undefined;
+    install({
+      profiles: () => Promise.resolve(running ? active : view()),
+      inviteCheck: () => Promise.reject(new Error('unexpected')),
+      inviteArrived,
+      onInviteArrived: (listener) => {
+        tell = listener;
+        return () => undefined;
+      },
+    });
+    render(<DesktopShell>{child}</DesktopShell>);
+    if (running) {
+      await screen.findByText('the client');
+      await waitFor(() => {
+        expect(inviteArrived).toHaveBeenCalledOnce();
+      });
+      inviteArrived.mockResolvedValueOnce(refusal);
+      tell();
+    }
+    const message = await screen.findByText('The desktop app could not read that link.');
+    expect(message.getAttribute('role')).toBe('alert');
+    expect(screen.queryByRole('group', { name: 'Open this invite' })).toBeNull();
+  });
+
   it('opens the server panel over the client when a link arrives, and a newer link replaces and cancels the older', async () => {
     const second = `invite-${'1'.repeat(32)}`;
     let tell: () => void = () => undefined;

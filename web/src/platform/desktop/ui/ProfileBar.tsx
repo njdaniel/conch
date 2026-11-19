@@ -18,9 +18,9 @@ export function ProfileBar({ initial }: { readonly initial: ProfilesView }) {
   const [open, setOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   // A conch:// link that reached the app (issue #1592), as main checked it.
-  // It opens the server panel, where the same choice as a pasted link is
-  // shown; nothing is contacted or switched until the person's click there.
-  const [arrival, setArrival] = useState<Extract<InviteCheck, { ok: true }> | null>(null);
+  // It opens the server panel, where the invite choice or refusal is shown.
+  // Nothing is contacted or switched until the person's click there.
+  const [arrival, setArrival] = useState<InviteCheck | null>(null);
 
   // Asked for once at mount (a cold start's link waited for this page) and
   // whenever main says one arrived.
@@ -31,7 +31,7 @@ export function ProfileBar({ initial }: { readonly initial: ProfilesView }) {
     const ask = (): void => {
       void b.inviteArrived?.().then(
         (answer) => {
-          if (!live || answer?.ok !== true) return;
+          if (!live || answer === null) return;
           setArrival(answer);
           setOpen(true);
         },

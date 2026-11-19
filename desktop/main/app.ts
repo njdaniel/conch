@@ -636,9 +636,9 @@ export async function start(): Promise<void> {
     log,
   });
   // A scheme link in any launch's arguments, this one's or a later one's, is
-  // kept by the router and the page told; the page asks for it, and the same
-  // checks and the same choice as a pasted link follow. A link arriving while
-  // a sign-in or switch is under way waits for the page like any other.
+  // checked by the router and the page told; the page asks for the result
+  // and shows the choice for a valid link or a message for a refusal. A link
+  // arriving while a sign-in or switch is under way waits for the page.
   argvSink = (argv) => {
     if (invites.arrive(argv)) deliverInvite({ contents: () => (live.owned() === null ? null : (live.window?.webContents ?? null)), gate: () => live.gate });
   };

@@ -5,7 +5,7 @@
 // main has it, and the invite's code is never in this page: only a handle.
 //
 // A conch:// link (issue #1592) reaches the same choice: main checks it as it
-// checks a pasted one, and this page is handed the same answer, a handle and
+// checks a pasted one, and this page is handed a refusal or a handle and
 // the server, never the link or the code. It asks main for it when it mounts
 // and when main says one arrived (or, when ProfileBar holds the asking, is
 // handed the answer). Nothing happens until the person's click.
@@ -17,6 +17,7 @@ import { takeInvite } from '../invite';
 import { inviteAcceptLines, inviteRefusalLines } from './text';
 
 type Checked = Extract<InviteCheck, { ok: true }>;
+const LINK_UNREADABLE = 'The desktop app could not read that link.';
 
 // How long the choices stay disabled after a newer link replaces the one on
 // show (issue #1592, security review S1): a click aimed at the old server must
@@ -26,9 +27,9 @@ type Checked = Extract<InviteCheck, { ok: true }>;
 export const SWAP_GUARD_MS = 1_000;
 
 interface Props {
-  // A link that reached the app, already checked by main, handed down by the
+  // The result of checking a link in main, handed down by the
   // strip that asks for it (./ProfileBar). Undefined: this page asks itself.
-  readonly arrival?: Checked | null;
+  readonly arrival?: InviteCheck | null;
   // Told once the arrival has been taken up, so it is not taken up twice.
   readonly onArrivalTaken?: () => void;
   // Whether the active profile's client is on the page. On the "unsupported
@@ -93,7 +94,9 @@ export function InviteLink({ clientMounted, arrival, onArrivalTaken }: Props) {
     const ask = (): void => {
       void b.inviteArrived?.().then(
         (answer) => {
-          if (live && answer?.ok === true) adopt(answer);
+          if (!live || answer === null) return;
+          if (answer.ok) adopt(answer);
+          else setLine(LINK_UNREADABLE);
         },
         () => undefined,
       );
@@ -110,7 +113,8 @@ export function InviteLink({ clientMounted, arrival, onArrivalTaken }: Props) {
   // Handed down: take it up once.
   useEffect(() => {
     if (arrival === undefined || arrival === null) return;
-    adopt(arrival);
+    if (arrival.ok) adopt(arrival);
+    else setLine(LINK_UNREADABLE);
     onArrivalTaken?.();
   }, [arrival]);
 
@@ -132,7 +136,7 @@ export function InviteLink({ clientMounted, arrival, onArrivalTaken }: Props) {
       if (answer.ok) adopt(answer);
       else setLine(inviteRefusalLines[answer.refusal]);
     } catch {
-      setLine('The desktop app could not read that link.');
+      setLine(LINK_UNREADABLE);
     } finally {
       setBusy(false);
     }
