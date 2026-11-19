@@ -130,12 +130,14 @@ export function NotificationSettings({ policy, native, permission, supported, ch
             {soundNames[sound]}
           </label>
         ))}
-        <label>Sound volume
-          <input type="range" min="0" max="100" value={Math.round(soundPreferences.volume * 100)} onChange={(event) => {
-            setSoundPreferences({ ...soundPreferences, volume: Number(event.target.value) / 100 });
-            sounds.unlock();
-          }} />
-        </label>
+        <div>
+          <label>Sound volume
+            <input type="range" min="0" max="100" value={Math.round(soundPreferences.volume * 100)} onChange={(event) => {
+              setSoundPreferences({ ...soundPreferences, volume: Number(event.target.value) / 100 });
+              sounds.unlock();
+            }} />
+          </label>
+        </div>
       </fieldset>}
       {push === undefined ? null : <BackgroundPush push={push} policy={policy} />}
     </div>

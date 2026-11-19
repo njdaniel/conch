@@ -89,7 +89,7 @@ export const untested = (server: string | null, desktop: string): string =>
   `This server’s version (${server ?? 'unknown'}) has not been tested with this app (${desktop}).`;
 
 export const unreadable = (desktop: string): string =>
-  `This server’s version could not be read because it did not answer, so it cannot be checked against this app (${desktop}). Nothing was signed in.`;
+  `This server’s version could not be read because it did not answer, so it cannot be checked against this app (${desktop}).`;
 
 export const overrideLine = 'Development build: servers that are not on the tested list are allowed (--allow-unlisted-server). A packaged app has no such option.';
 

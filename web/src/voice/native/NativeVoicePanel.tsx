@@ -238,6 +238,8 @@ export function NativeVoicePanel({
   const live = helper !== undefined && view.status === 'running' && helper.phase === 'connected';
   const muted = helper?.muted === true;
   const deafened = helper?.deafened === true;
+  const needsTalkSetup = helper?.talkMode !== 'open' &&
+    (helper?.ptt === 'not_configured' || helper?.ptt === 'unavailable' || helper?.ptt === 'lost');
   const dest = channel === null ? null : <span className="dest">in #{channel}</span>;
   const where =
     joined === null ? null : joined === channel ? (
@@ -349,7 +351,7 @@ export function NativeVoicePanel({
         {!session && !unavailable && channel !== null && presence === null && idle === null ? <p className="hint">Checking whether voice is available.</p> : null}
         {unavailable || source.keyDevices === undefined || setup ? null : (
           <button type="button" className="more" onClick={() => { setSetup(true); }}>
-            {helper?.ptt === 'not_configured' || helper?.ptt === 'unavailable' || helper?.ptt === 'lost' ? 'Set up the talk key' : 'Talk key'}
+            {needsTalkSetup ? 'Set up the talk key' : 'Talk key'}
           </button>
         )}
       </div>

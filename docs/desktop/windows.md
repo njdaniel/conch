@@ -35,3 +35,17 @@ gh attestation verify $installer --repo njdaniel/conch --signer-workflow njdanie
    is unsigned, so Windows may display an unknown publisher warning.
 2. Follow the installer prompts. Conch installs for your Windows account.
 3. Open **Conch** from the Start menu and sign in to your server.
+
+## First voice call and screen share
+
+Windows Defender Firewall may ask whether to allow network access the first
+time you use voice or watch a screen share.
+
+- **conch-voice** is the native voice helper. Windows may show **Publisher:
+  Unknown** for the unsigned preview.
+- **Conch.exe** is the desktop app, which also handles watching screen shares.
+
+On the test VM, choosing **Cancel** on both prompts still allowed voice and
+screen-share watching to work. The preview installer leaves firewall settings
+alone. Installer-managed rules are deferred until the Windows signing
+decision ([#780](https://github.com/njdaniel/conch/issues/780)).

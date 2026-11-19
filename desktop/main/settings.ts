@@ -73,10 +73,10 @@ function isCode(err: unknown, code: string): boolean {
   return typeof err === 'object' && err !== null && (err as { code?: unknown }).code === code;
 }
 
-// The disk: <root>/settings.json. The root is the data root, already checked
-// private by prepareRoot; the file is 0600 and replaced by rename.
-export function createSettingsFiles(root: string): SettingsFiles {
-  const file = join(root, FILE_NAME);
+// The app-wide settings and window state files live in the data root,
+// already checked private by prepareRoot. Each is 0600 and replaced by rename.
+export function createSettingsFiles(root: string, name: typeof FILE_NAME | 'window-state.json' = FILE_NAME): SettingsFiles {
+  const file = join(root, name);
   return {
     async read() {
       try {
@@ -89,7 +89,7 @@ export function createSettingsFiles(root: string): SettingsFiles {
     },
     async write(text) {
       await mkdir(root, { recursive: true, mode: 0o700 });
-      const tmp = join(root, `${FILE_NAME}.${randomBytes(8).toString('hex')}.tmp`);
+      const tmp = join(root, `${name}.${randomBytes(8).toString('hex')}.tmp`);
       try {
         const fh = await open(tmp, 'wx', FILE_MODE);
         try {

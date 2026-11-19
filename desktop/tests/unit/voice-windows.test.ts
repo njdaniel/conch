@@ -6,7 +6,8 @@
 // Nothing here needs Windows. The pipe is a Node server: on Windows it is the
 // real `\\.\pipe\conch-voice-<id>`; elsewhere a test seam binds the same name
 // to a Unix socket in a private directory, and the supervisor runs with
-// platform 'win32' against a fake child process. The tests that only a real
+// platform 'win32' against a fake child process. The diagnostic test uses
+// loopback TCP, since it needs only the event stream. The tests that only a real
 // pipe can answer (a real squat, the real name) run on the desktop-windows
 // job. What only hardware answers (libuv's listener against tokio's client,
 // ERROR_PIPE_BUSY, the DACL, cross-user access) is E2 (#903).
@@ -716,11 +717,11 @@ interface Rig {
   child(): FakeChild;
 }
 
-function rig(opts: { behaviour?: 'cooperative' | 'hung'; nonce?: () => string; timings?: { helloTimeoutMs?: number; killAfterMs?: number; termAfterMs?: number }; extra?: EndpointDeps; env?: NodeJS.ProcessEnv } = {}): Rig {
+function rig(opts: { behaviour?: 'cooperative' | 'hung'; nonce?: () => string; timings?: { helloTimeoutMs?: number; killAfterMs?: number; termAfterMs?: number }; extra?: EndpointDeps; env?: NodeJS.ProcessEnv; harness?: Harness } = {}): Rig {
   const resources = join(dir, 'resources');
   mkdirSync(resources, { recursive: true });
   writeFileSync(join(resources, WINDOWS_HELPER_NAME), 'MZ');
-  const h = pipes(opts.extra);
+  const h = opts.harness ?? pipes(opts.extra);
   const logs: string[] = [];
   const states: VoiceState[] = [];
   const spawns: Rig['spawns'] = [];
@@ -804,6 +805,52 @@ describe('the supervisor on Windows', () => {
     await until(() => r.child().exited, 5000, 'the helper to be reaped');
     expect(r.child().stdin.writableEnded).toBe(true);
     expect(r.child().written).toEqual([]);
+  });
+
+  it('logs the checked Windows talk-key loss reason once per change', async () => {
+    const ports = new Map<string, number>();
+    const r = rig({ harness: {
+      names: [],
+      deps: {
+        listen: (server, name) => new Promise<void>((resolve, reject) => {
+          server.once('error', reject);
+          server.listen({ host: '127.0.0.1', port: 0 }, () => {
+            server.off('error', reject);
+            const address = server.address();
+            if (address === null || typeof address === 'string') {
+              reject(new Error('no loopback port'));
+              return;
+            }
+            ports.set(name, address.port);
+            resolve();
+          });
+        }),
+      },
+      connect: (name) => {
+        const port = ports.get(name);
+        if (port === undefined) throw new Error('no listener for the helper');
+        return connect(port, '127.0.0.1');
+      },
+    } });
+    const started = r.sup.start(request);
+    const c = await helperJoins(r);
+    try {
+      expect((await started).status).toBe('running');
+      const base = transcript(V2)[5]?.message;
+      const ended = { ...base, ptt: 'lost', ptt_problem: 'ended', blocked: ['key_device_lost'] };
+      const stalled = { ...base, ptt: 'lost', ptt_problem: 'read_failed', talk_mode: 'open' };
+      const states = [ended, ended, base, stalled];
+      await c.send(states.map((state, i) => JSON.stringify({ ...state, seq: i + 6 })).join('\n') + '\n');
+      const lossLogs = () => r.logs.filter((line) => line.includes('Windows talk key lost'));
+      await until(() => lossLogs().some((line) => line.includes('read_failed')), 5000, 'the key loss reports');
+      expect(lossLogs()).toEqual([
+        'voice: Windows talk key lost (ended, mode push_to_talk)',
+        'voice: Windows talk key lost (read_failed, mode open)',
+      ]);
+    } finally {
+      await r.sup.stop();
+      c.socket.destroy();
+    }
   });
 
   it('a wrong nonce from a connection is closed, and the helper’s own connection still attaches', async () => {

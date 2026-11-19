@@ -8,6 +8,7 @@ import { useEffect, type ReactNode } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { windowOf } from './fakewindow';
 import { Lobby } from './Lobby';
+import { DesktopOS } from './platform/os';
 import { initialChannels } from './state/channels';
 
 const events: string[] = [];
@@ -23,9 +24,9 @@ function Probe({ name }: { readonly name: string }) {
   return <p>{name}</p>;
 }
 
-function lobby(voice: ReactNode = <Probe name="voice" />) {
+function lobby(voice: ReactNode = <Probe name="voice" />, os: string | null = null) {
   return render(
-    <Lobby
+    <DesktopOS.Provider value={os}><Lobby
       origin="http://127.0.0.1:8080"
       name="ada"
       me={2}
@@ -41,7 +42,7 @@ function lobby(voice: ReactNode = <Probe name="voice" />) {
       onSignOut={() => undefined}
       onSignOutEverywhere={() => undefined}
       signOutProblem={null}
-    />,
+    /></DesktopOS.Provider>,
   );
 }
 
@@ -70,6 +71,7 @@ describe('Settings', () => {
     expect(button.getAttribute('aria-expanded')).toBe('true');
     expect(document.activeElement).toBe(screen.getByRole('heading', { name: 'Settings' }));
     expect(panel.textContent).toContain('Signed in as ada');
+    expect(panel.textContent).toContain('in every tab of this browser');
     // Modal: the rest of the page is inert while it is open, and only then.
     expect(panel.getAttribute('aria-modal')).toBe('true');
     expect(button.closest('[inert]')).not.toBeNull();
@@ -78,6 +80,17 @@ describe('Settings', () => {
     expect(document.activeElement).toBe(button);
     expect(button.closest('[inert]')).toBeNull();
     await act(async () => {});
+  });
+
+  it('uses app wording in desktop Settings and the sign-out confirmation', () => {
+    windowOf(true);
+    lobby(undefined, 'win32');
+    fireEvent.click(screen.getByRole('button', { name: /^Settings/ }));
+    const panel = screen.getByRole('dialog', { name: 'Settings' });
+    expect(panel.textContent).toContain('Sign out ends this sign-in in this app.');
+    expect(panel.textContent).not.toContain('browser');
+    fireEvent.click(within(panel).getByRole('button', { name: 'Sign out' }));
+    expect(within(panel).getByText(/Sign out of this app\?/)).toBeDefined();
   });
 
   it('closes on its close button and on a click outside, each time giving focus back', () => {

@@ -200,6 +200,9 @@ function runningWords(view: NativeVoiceView, binding: string | undefined): Voice
   if (h.muted) blocked.add('muted');
   if (h.capture === 'unavailable') blocked.add('no_microphone');
   for (const b of blockOrder) if (blocked.has(b)) return { text: blockWords[b], retry: false };
+  // The helper still watches the bindings in open mode, but the talk key
+  // does not gate an open microphone.
+  if (h.talkMode === 'open') return { text: 'mic on · open mic', retry: false };
   switch (h.ptt) {
     case 'not_configured':
       return { text: pttWords.not_configured, retry: false };
@@ -211,7 +214,6 @@ function runningWords(view: NativeVoiceView, binding: string | undefined): Voice
     case 'unknown':
       return { text: 'mic on', retry: false };
     case 'ready':
-      if (h.talkMode === 'open') return { text: 'mic on · open mic', retry: false };
       return { text: binding === undefined || binding === '' ? 'mic on · hold your talk key to talk' : `mic on · hold ${binding} to talk`, retry: false };
   }
 }

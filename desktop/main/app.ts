@@ -57,6 +57,7 @@ import { COMPANION_EVENTS } from '../shared/bridge-names.ts';
 import { Autostart } from './autostart.ts';
 import { Notifications } from './notifications.ts';
 import { createSettingsFiles, memorySettingsFiles, SettingsService } from './settings.ts';
+import { WindowMaximized } from './window.ts';
 import { saveChosenFile } from './save-file.ts';
 import { parseManifest, SCHEME, SCHEME_PRIVILEGES } from './scheme.ts';
 import { electronStorage } from './vault/electron-storage.ts';
@@ -280,6 +281,10 @@ export async function start(): Promise<void> {
   const checked = await prepareRoot(root);
   if (!checked.ok) log('conch-desktop: the data directory is not private to you; nothing will be saved');
   const files = createProfileFiles(root);
+  const maximized = process.platform === 'win32'
+    ? new WindowMaximized(checked.ok ? createSettingsFiles(root, 'window-state.json') : memorySettingsFiles(), log)
+    : undefined;
+  await maximized?.load();
   // The app-wide settings: <root>/settings.json, in memory only when the root
   // is not private. The tray (below) answers trayWorking; with none, closing
   // always quits.
@@ -341,7 +346,11 @@ export async function start(): Promise<void> {
     });
   };
   const openActivation = activationFactory(
-    { packaged: app.isPackaged, appPath, manifest, readUi: (path) => readFile(join(ui, ...path.split('/').slice(1))), connect: createNodeConnect(log), guard, makeFiles, now: Date.now, log },
+    {
+      packaged: app.isPackaged, appPath, manifest, readUi: (path) => readFile(join(ui, ...path.split('/').slice(1))),
+      connect: createNodeConnect(log), guard, makeFiles, now: Date.now, log,
+      ...(maximized === undefined ? {} : { maximized }),
+    },
     live,
   );
   const profiles = new ProfilesService({
@@ -743,7 +752,8 @@ export async function start(): Promise<void> {
     // Stop power listeners and, on Linux, the monitor child by its own handle.
     watcher?.stop();
     // Media stops before the process goes.
-    void profiles.close().finally(() => {
+    void profiles.close().finally(async () => {
+      await maximized?.flush();
       app.quit();
     });
   });
