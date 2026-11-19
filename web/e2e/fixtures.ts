@@ -140,6 +140,35 @@ export async function signInWithPassword(page: Page, name: string, password = ac
   await page.getByRole('button', { name: 'Sign in', exact: true }).click();
 }
 
+// drawDesktopStrip puts what the desktop shell draws over the client
+// (Shell.tsx, ProfileBar.tsx) at the top of #root, beside the lobby or the
+// sign-in card: the strip with the server's host, the account and its two
+// buttons (issue #1980). The browser build the e2e lane runs has no desktop
+// shell of its own. A reload takes it away.
+export async function drawDesktopStrip(page: Page): Promise<void> {
+  await page.evaluate(() => {
+    const root = document.getElementById('root');
+    if (root === null) throw new Error('no #root');
+    const bar = document.createElement('header');
+    bar.className = 'desktop-bar';
+    bar.setAttribute('aria-label', 'Server');
+    for (const [cls, text] of [['desktop-bar-host', 'conch.example.org'], ['desktop-bar-account', 'someone']] as const) {
+      const span = document.createElement('span');
+      span.className = cls;
+      span.textContent = text;
+      bar.append(span);
+    }
+    for (const [cls, text] of [['desktop-bar-settings', 'Desktop app'], ['', 'Servers']] as const) {
+      const button = document.createElement('button');
+      button.type = 'button';
+      if (cls !== '') button.className = cls;
+      button.textContent = text;
+      bar.append(button);
+    }
+    root.prepend(bar);
+  });
+}
+
 export const statusLine = (page: Page) => page.getByRole('status', { name: 'Status' });
 export const channelButton = (page: Page, name: string) => page.getByRole('navigation', { name: 'Channels' }).getByRole('button', { name, exact: true });
 // The phone layout's bottom navigation (issue #929), present only below 700 px.
