@@ -29,6 +29,18 @@
     "target": [{ "target": "nsis", "arch": ["x64"] }],
     "extraResources": [{ "from": "out/win-resources", "to": ".", "filter": ["conch-voice.exe", "version"] }]
   },
+  "mac": {
+    "target": [{ "target": "dmg", "arch": ["arm64"] }],
+    "minimumSystemVersion": "15.0",
+    "identity": null,
+    "notarize": false,
+    "extraResources": [{ "from": "out/mac-resources", "to": ".", "filter": ["conch-voice", "version"] }]
+  },
+  "dmg": {
+    "sign": false,
+    "writeUpdateInfo": false,
+    "artifactName": "${productName}-${version}-${arch}-unsigned-preview.${ext}"
+  },
   "nsis": {
     "oneClick": false,
     "perMachine": false,

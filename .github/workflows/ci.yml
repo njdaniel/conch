@@ -892,13 +892,117 @@ jobs:
           }
           Write-Output "uninstalled: $dir, the conch:// key and the shortcut are gone; $($seeded.Count) seeded files are unchanged"
 
+  # MF13 (#1749, docs/design/macos-desktop.md section 12): a tester DMG for
+  # Apple silicon. The packaged files are checked on the runner. Opening the
+  # app and testing it on a Mac belong to MF17.
+  desktop-macos:
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
+    runs-on: macos-15
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "15.0"
+      TMPDIR: ${{ github.workspace }}/.tmp
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: prepare the runner
+        run: |
+          mkdir -p "$TMPDIR"
+          test "$(uname -m)" = arm64
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: desktop/.nvmrc
+          cache: npm
+          cache-dependency-path: |
+            web/package-lock.json
+            desktop/package-lock.json
+
+      # The same download cache as voice-macos. voice-toolchain.sh verifies
+      # its native archives separately from the Cargo cache each run.
+      - name: rust dependency cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+          key: voice-deps-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('voice/Cargo.lock') }}
+
+      - name: rust toolchain
+        run: ./scripts/voice-toolchain.sh
+
+      - name: build the voice helper (release)
+        run: |
+          . scripts/voice-env.sh
+          cd voice
+          cargo build --locked --release --target aarch64-apple-darwin -p conch-voice
+
+      # Bundle the same UI, main, preload and development manifest as the
+      # Windows preview. Contents/Resources is where main looks for the
+      # helper and the installed version stamp.
+      - name: build the unsigned preview DMG
+        run: |
+          . scripts/desktop-pins.sh
+          version="0.0.0-dev+$(git rev-parse --short HEAD)"
+          root=$PWD
+          echo "Building the unsigned macOS preview ($version)"
+          (cd web && npm ci --no-audit)
+          (cd desktop && npm ci --no-audit)
+          test "$(node -p "require('./desktop/package.json').devDependencies.electron")" = "$CONCH_ELECTRON_VERSION"
+          (cd web && ./node_modules/.bin/vite build --mode desktop --base / --outDir "$root/desktop/out/ui" --emptyOutDir)
+          (cd desktop && npm run bundle && node build/manifest.ts)
+          mkdir -p desktop/out/mac-resources
+          install -m 0755 voice/target/aarch64-apple-darwin/release/conch-voice desktop/out/mac-resources/conch-voice
+          printf '%s\n' "$version" >desktop/out/mac-resources/version
+          # Stock Electron is downloaded and checksum-verified by the pinned
+          # packager, which removes default_app.asar. The fuse hook refreshes
+          # the ad-hoc signature required to load modified arm64 code.
+          # The DMG has no signature or notarization ticket.
+          (cd desktop && ./node_modules/.bin/electron-builder --mac dmg --arm64 --publish never \
+            --config build/electron-builder.config.json "-c.electronVersion=$CONCH_ELECTRON_VERSION" \
+            -c.electronFuses.resetAdHocDarwinSignature=true \
+            "-c.extraMetadata.version=$version")
+
+      - name: check the disk image contents
+        run: |
+          images=(desktop/dist/*-arm64-unsigned-preview.dmg)
+          if [ "${#images[@]}" -ne 1 ] || [ ! -f "${images[0]}" ]; then
+            echo 'expected one arm64 unsigned preview DMG in desktop/dist'; ls -la desktop/dist; exit 1
+          fi
+          mount_dir=$(mktemp -d "$TMPDIR/conch-dmg.XXXXXX")
+          hdiutil attach "${images[0]}" -readonly -nobrowse -mountpoint "$mount_dir"
+          trap 'hdiutil detach "$mount_dir"' EXIT
+          contents="$mount_dir/Conch.app/Contents"
+          resources="$contents/Resources"
+          set -x
+          test "$(xcrun lipo -archs "$contents/MacOS/Conch")" = arm64
+          test "$(xcrun lipo -archs "$resources/conch-voice")" = arm64
+          "$resources/conch-voice" --version
+          test -f "$resources/app.asar"
+          test ! -e "$resources/default_app.asar"
+          test "$(cat "$resources/version")" = "0.0.0-dev+$(git rev-parse --short HEAD)"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' "$contents/Info.plist")" = 15.0
+          echo "Verified ${images[0]} (macOS 15.0+, arm64)"
+
+      - name: upload the unsigned preview
+        uses: actions/upload-artifact@v4
+        with:
+          name: unsigned-preview
+          path: desktop/dist/*-arm64-unsigned-preview.dmg
+          retention-days: 30
+          if-no-files-found: error
+
   # The required status check. It runs the text checks every pull request
   # gets, docs-only ones included, then passes only if every job it needs
   # that should have run succeeded: skipped is accepted only for a docs-only
   # change (changes said code=false). It runs even when one of them failed,
   # so the failure is reported here rather than as a skipped check. changes
   # itself is not judged: if it fails, code is unset and every job runs in
-  # full. voice-macos reports separately, as required by MF1
+  # full. voice-macos and desktop-macos report separately
   # (docs/design/macos-desktop.md section 13, "never a gate on Linux work").
   check:
     needs: [changes, go, go-test-server, go-test, rust, voice-windows, web, desktop, desktop-windows]
