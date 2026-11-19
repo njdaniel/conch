@@ -11,10 +11,12 @@
 # report one:
 #   - the package.json inside the asar (what app.getVersion() returns);
 #   - resources/version, the installed stamp the app reads (#1600);
-#   - out/compat.json, which lists the tag as a tested server;
+#   - the packaged out/compat.json, which lists exactly the tag plus the
+#     release extras (checked with the same script as the Windows installer);
 #   - the .deb's file name and its control Version (the Debian spelling);
 #   - the bundled helper, which the build ran with --version.
-# And that a helper which does not say the tag's version fails the build.
+# Also rejects a helper with the wrong version and a packaged development
+# compat list that happens to start with the release tag.
 #
 # Writes desktop/dist and desktop/out, as `make desktop-build` does. Needs the
 # desktop Node (desktop/.nvmrc, on PATH), dpkg-dev, and the pinned Electron
@@ -23,7 +25,6 @@
 set -euo pipefail
 
 cd "$(git rev-parse --show-toplevel)"
-root=$PWD
 
 fail() {
     echo "desktop-release-build-test: FAIL: $*" >&2
@@ -62,22 +63,33 @@ debfile=desktop/dist/conch-desktop_${deb}_amd64.deb
 
 # 3. The version is the tag's, in every place.
 tree=desktop/dist/linux-unpacked
-./desktop/node_modules/.bin/asar extract "$tree/resources/app.asar" "$tmp/asar"
-asar_version=$(node -p 'require(process.argv[1]).version' "$tmp/asar/package.json")
-[ "$asar_version" = "$app" ] || fail "the asar's package.json says '$asar_version', not $app"
+check_asar() { # check_asar <path>
+    CONCH_RELEASE_VERSION=$tag APP_VERSION=$app node desktop/build/check-release-asar.ts "$1"
+}
+check_asar "$tree/resources/app.asar"
 [ "$(git status --porcelain -- desktop/package.json)" = "" ] || fail "the build changed the checked-in desktop/package.json"
 
 [ "$(cat "$tree/resources/version")" = "$app" ] || fail "resources/version says '$(cat "$tree/resources/version")', not $app"
-
-node -e '
-  const c = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
-  const s = JSON.stringify(c);
-  if (!s.includes(process.argv[2])) { console.error("compat.json does not list " + process.argv[2] + ": " + s); process.exit(1); }
-' desktop/out/compat.json "$app" || fail "out/compat.json does not name the tag"
 
 control_version=$(dpkg-deb -f "$debfile" Version)
 [ "$control_version" = "$deb" ] || fail "the package's Version is '$control_version', not $deb"
 helper_says=$(dpkg-deb --fsys-tarfile "$debfile" | tar -xOf - ./opt/conch-desktop/resources/conch-voice | grep -c "conch-voice $app" || true)
 [ "$helper_says" = 1 ] || fail "the packaged helper is not the stand-in for $app"
+
+# 4. A development list with the right first entry still fails. Use the
+# checked-in development entries so the fixture exercises a real fallback.
+mkdir -p "$tmp/dev/out"
+printf '{"version":"%s"}\n' "$app" >"$tmp/dev/package.json"
+node -e '
+  const dev = require("./desktop/build/compat.json");
+  dev.servers.unshift(process.argv[1]);
+  process.stdout.write(JSON.stringify(dev));
+' "$tag" >"$tmp/dev/out/compat.json"
+./desktop/node_modules/.bin/asar pack "$tmp/dev" "$tmp/dev.asar"
+if check_asar "$tmp/dev.asar" >"$tmp/dev.log" 2>&1; then
+    fail "a packaged development compat list starting with $tag was accepted"
+fi
+grep -q 'packaged compat list must match the release tag' "$tmp/dev.log" ||
+    fail "the development compat list was refused for the wrong reason: $(cat "$tmp/dev.log")"
 
 echo "desktop-release-build-test: OK: $tag built as $app / $deb"
