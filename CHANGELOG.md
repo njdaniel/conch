@@ -8,6 +8,8 @@ release that Nick publishes.
 
 ## [Unreleased]
 
+**Linux share sound is off by default again** (#1999). In alpha.21 it was on, and it captured the call itself: the other person heard their own voice through a screen share. Until the leak is fixed and the L-S6 echo test (#922) passes, a Linux share is silent unless the desktop is started with `CONCH_LINUX_SHARE_AUDIO=1`. **alpha.21 Linux desktop testers: don't share with sound,** or start the app with `CONCH_LINUX_SHARE_AUDIO=0`.
+
 **Upgrade `conch` together with the server.** Authors can now remove their own messages (#1828). The new tombstone ("This message was removed by its author.") makes an older `conch` TUI or CLI drop its events connection and reconnect on every author removal, and label the message "removed by a moderator". History is unaffected.
 
 ### Added
