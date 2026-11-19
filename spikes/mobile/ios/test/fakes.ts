@@ -1,0 +1,44 @@
+// Copied from spikes/mobile/android at ea00f74f (#1390, M4-B) for the iOS spike (#1394, M5-B).
+// Test doubles: a clock moved by hand, and a log of what a fake did.
+import type { Clock } from '../src/logic/clock';
+
+export class FakeClock implements Clock {
+  now = 0;
+  private next = 1;
+  private timers = new Map<number, { at: number; run: () => void }>();
+
+  setTimeout = (run: () => void, ms: number): unknown => {
+    const id = this.next++;
+    this.timers.set(id, { at: this.now + ms, run });
+    return id;
+  };
+
+  clearTimeout = (handle: unknown): void => {
+    this.timers.delete(handle as number);
+  };
+
+  // advance moves time forward, running each timer due on the way in order.
+  advance(ms: number): void {
+    const end = this.now + ms;
+    for (;;) {
+      let pick: [number, { at: number; run: () => void }] | null = null;
+      for (const entry of this.timers) {
+        if (entry[1].at <= end && (pick === null || entry[1].at < pick[1].at)) pick = entry;
+      }
+      if (pick === null) break;
+      this.timers.delete(pick[0]);
+      this.now = Math.max(this.now, pick[1].at);
+      pick[1].run();
+    }
+    this.now = end;
+  }
+
+  get pending(): number {
+    return this.timers.size;
+  }
+}
+
+// settle lets promise continuations run.
+export async function settle(): Promise<void> {
+  for (let i = 0; i < 20; i++) await Promise.resolve();
+}

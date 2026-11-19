@@ -22,6 +22,11 @@ scripts/web-licences.sh "$rel/package-lock.json" "$rel/licences-allowlist.txt"
 (cd "$here" && npm ci --ignore-scripts && npx tsc --noEmit)
 echo "check: tsc OK"
 
+# The logic's unit tests (node --test over tsc output; no test dependency) and
+# the byte-identity check of the schema copy.
+(cd "$here" && npm test)
+echo "check: unit tests OK"
+
 # CocoaPods: Podfile.lock is produced on the Mac (`pod install`). Until it is
 # committed, report it as pending, not as a pass.
 lock="$here/ios/Podfile.lock"
