@@ -1166,6 +1166,9 @@ jobs:
           cache: npm
           cache-dependency-path: spikes/mobile/android/package-lock.json
 
+      # The JDK and the SDK only. The Gradle home (GRADLE_USER_HOME, also under
+      # CONCH_CACHE) is not cached: it would cost more of the repository's cache
+      # budget than it saves.
       - name: Android toolchain cache
         uses: actions/cache@v4
         with:
@@ -1177,24 +1180,52 @@ jobs:
       - name: install pinned Android toolchain
         env:
           CONCH_ACCEPT_ANDROID_LICENCES: '1'
+          # The APK build needs no emulator or system image.
+          CONCH_ANDROID_NO_EMULATOR: '1'
         run: ./toolchain.sh
 
       - name: install npm dependencies and check licences, types and unit tests
         # check.sh runs npm ci --ignore-scripts, npm test and the Gradle lockfile checks.
         run: ./check.sh
 
-      - name: build the standalone release APK and generate native licence inventory
+      - name: build the standalone release APK with the pinned toolchain
         run: |
           source "$CONCH_CACHE/android-env.sh"
-          (cd android && ./gradlew assembleRelease)
+          # The runner image has its own SDK, NDK and JDKs and points
+          # ANDROID_NDK_HOME (and its siblings) at them. Build with the pinned
+          # ones only, and check that is what is in use.
+          unset ANDROID_NDK_HOME ANDROID_NDK_ROOT ANDROID_NDK ANDROID_NDK_LATEST_HOME
+          fail() { echo "android-spike: $*" >&2; exit 1; }
+          jdk_version=$(sed -n 's/^JDK_VERSION="\(.*\)"$/\1/p' toolchain.sh)
+          [ -n "$jdk_version" ] || fail "no JDK_VERSION in toolchain.sh"
+          case "$ANDROID_HOME" in
+            "$CONCH_CACHE"/*) ;;
+            *) fail "ANDROID_HOME=$ANDROID_HOME is not under $CONCH_CACHE" ;;
+          esac
+          [ "$ANDROID_SDK_ROOT" = "$ANDROID_HOME" ] || fail "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT is not ANDROID_HOME"
+          [ "$JAVA_HOME" = "$CONCH_CACHE/jdk-$jdk_version" ] || fail "JAVA_HOME=$JAVA_HOME is not the pinned JDK"
+          [ "$(command -v java)" = "$JAVA_HOME/bin/java" ] || fail "java on PATH is $(command -v java), not the pinned JDK"
+          java -version 2>&1 | grep -F "build $jdk_version" || fail "java is not version $jdk_version"
+          # A package missing from the pinned SDK fails the build instead of
+          # being downloaded by the Android Gradle plugin.
+          (cd android && ./gradlew assembleRelease -Pandroid.builder.sdkDownload=false)
+
+      - name: check licences.md matches the build's licence inventory
+        run: |
+          source "$CONCH_CACHE/android-env.sh"
           node gen-licences.mjs > licences.md
+          git diff --exit-code -- licences.md
 
       - name: verify and stage the APK
         id: apk
+        env:
+          # The pull request's head commit, not the merge commit GITHUB_SHA
+          # names on a pull_request run.
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
           apk=android/app/build/outputs/apk/release/app-release.apk
           unzip -Z1 "$apk" | grep -Fx 'assets/index.android.bundle'
-          name="conch-android-spike-${GITHUB_SHA:0:7}"
+          name="conch-android-spike-${HEAD_SHA:0:7}"
           cp "$apk" "$TMPDIR/$name.apk"
           cd "$TMPDIR"
           sha256sum "$name.apk" > "$name.apk.sha256"

@@ -16,7 +16,7 @@ Deviation from the RN template: it names compileSdk 37, Build-Tools 37.0.0 and t
     npm ci
     (cd android && ./gradlew assembleDebug)
 
-Roughly 13 GB for the SDK, system image, Gradle cache and AVD, plus about 3 GB of build output in `android/app/build`.
+Roughly 13 GB for the SDK, system image, Gradle cache and AVD, plus about 3 GB of build output in `android/app/build`. `CONCH_ANDROID_NO_EMULATOR=1` skips the emulator and the system image, for a build-only toolchain (CI uses it).
 
 ## Standalone APK for the device run (#1920)
 
@@ -34,7 +34,7 @@ Open the app and, at sign-in, type `https://alpha.gankbears.com` as the server, 
 
 CI builds the same standalone APK as the recipe above, so no local toolchain is needed for a device run. It's for test devices only: it is signed with the spike's committed debug keystore, and anyone with the file can install it.
 
-1. On GitHub, open **Actions → ci**, and either pick the latest run on `main` that ran the **android-spike** job, or start one with **Run workflow** (on `main`; a manual run always builds the APK).
+1. On GitHub, open **Actions → CI**, and either pick the latest run on `main` that ran the **android-spike** job, or start one with **Run workflow** (a manual run always builds the APK). A manual run on `main` shares the concurrency group of `main`'s push runs, so start it when no push run is pending, or run it on a branch.
 2. At the bottom of the run, under **Artifacts**, download `conch-android-spike-<commit>`. GitHub delivers it as a zip holding the `.apk` and its `.apk.sha256`.
 3. Unzip it and check it: `sha256sum -c conch-android-spike-<commit>.apk.sha256` must say `OK`.
 4. Copy the `.apk` to the phone (USB, or download the artifact in the phone's browser while signed in to GitHub), open it, and allow installs from that app when Android asks. Or, with USB debugging on: `adb install -r conch-android-spike-<commit>.apk`.
@@ -50,7 +50,7 @@ CI builds the same standalone APK as the recipe above, so no local toolchain is 
 
 ## Licences
 
-`licences.md` is generated: `node gen-licences.mjs > licences.md` after a build.
+`licences.md` is generated: `node gen-licences.mjs > licences.md` after a build. CI regenerates it after its build and fails if it differs from the committed file.
 
 ## Emulator
 
