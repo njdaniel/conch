@@ -120,7 +120,7 @@ export interface ControllerOptions {
   // Wall-clock milliseconds [Date.now]. Timers pause in the background, so
   // waits that must not outlive a freeze are measured with this, not ticks.
   readonly now?: () => number;
-  // Registers values the diagnostics must never show (the LiveKit host).
+  // Registers values the diagnostics must never show from a LiveKit grant.
   readonly hold?: (...secrets: string[]) => void;
   // How often presence is read while a channel is open, in ms.
   readonly pollEvery?: number;
@@ -360,10 +360,10 @@ export class VoiceController {
       this.act({ kind: 'stop', why: 'This channel has no voice room for everyone.' }, mine);
       return;
     }
-    // The grant's address is the server's, and never for a log: its host, and
-    // host:port, are held by the diagnostics whatever shape they take.
+    // Register the room and credentials before the SDK can log them. The
+    // grant's address, host and host:port are also held whatever shape they take.
     const target = /^[a-z][a-z0-9+.-]*:\/\/([^/?#]+)/i.exec(session.value.livekit_url)?.[1];
-    this.o.hold?.(session.value.livekit_url, ...(target === undefined ? [] : [target, target.replace(/:\d+$/, '')]));
+    this.o.hold?.(grant.room, grant.token, session.value.livekit_url, ...(target === undefined ? [] : [target, target.replace(/:\d+$/, '')]));
     const room = this.o.newRoom();
     this.room = room;
     this.transmitter.reset();

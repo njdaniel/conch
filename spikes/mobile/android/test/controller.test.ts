@@ -25,7 +25,7 @@ function presence(ids: number[], options: { available?: boolean } = {}): VoicePr
 }
 
 function session(canPublish = true, url = 'x'): VoiceSessionResponseV1 {
-  return { livekit_url: url, identity: `p${me}`, rooms: [{ room: 'r', token: 't', can_publish: canPublish, expires_at: '2026-11-05T10:00:15Z' }] };
+  return { livekit_url: url, identity: `p${me}`, rooms: [{ room: 'voice-room-test', token: 'voice-token-test', can_publish: canPublish, expires_at: '2026-11-05T10:00:15Z' }] };
 }
 
 const startedAt = '2026-11-05T10:00:00Z';
@@ -889,9 +889,9 @@ test('another channel\'s view closing does not shut the joined channel\'s gate',
   assert.equal(r.c.gate.open, true);
 });
 
-test('the LiveKit grant\'s host and host:port are registered with the diagnostics', async () => {
+test('the LiveKit grant fields are registered with the diagnostics', async () => {
   const held: string[] = [];
   const r = rig({ livekitUrl: 'wss://livekit.example.me:7880', held });
   await joined(r);
-  assert.deepEqual(held, ['wss://livekit.example.me:7880', 'livekit.example.me:7880', 'livekit.example.me']);
+  assert.deepEqual(held, ['voice-room-test', 'voice-token-test', 'wss://livekit.example.me:7880', 'livekit.example.me:7880', 'livekit.example.me']);
 });

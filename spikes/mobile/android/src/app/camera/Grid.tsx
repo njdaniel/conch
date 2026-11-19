@@ -20,18 +20,20 @@ function Tile(props: { name: string; track: RemoteVideoTrack }) {
   );
 }
 
-export function CameraGrid(props: { me: number }) {
+export function CameraGrid(props: { me: number; names: ReadonlyMap<number, string> }) {
   const tracks = useSyncExternalStore(cameraStore.subscribe, cameraStore.get);
-  const ids = [...tracks.keys()].filter((id) => id !== props.me).sort((a, b) => a - b);
-  if (ids.length === 0) return null;
+  // Presence can arrive before the member list. Wait for the person's name
+  // before showing their camera, so the tile and its accessible label agree.
+  const tiles = [...tracks.entries()].sort(([a], [b]) => a - b).flatMap(([id, track]) => {
+    const name = props.names.get(id);
+    return id === props.me || name === undefined ? [] : [<Tile key={id} name={name} track={track} />];
+  });
+  if (tiles.length === 0) return null;
   return (
     <View>
       <Text style={styles.label}>Cameras</Text>
       <View style={{ flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'space-between' }}>
-        {ids.map((id) => {
-          const track = tracks.get(id);
-          return track === undefined ? null : <Tile key={id} name={'Person ' + String(id)} track={track} />;
-        })}
+        {tiles}
       </View>
     </View>
   );

@@ -8,6 +8,7 @@ import { appStateOf, deliver } from './bridge';
 import { VoiceController } from './controller';
 import { LiveKitRoom } from './livekit';
 import { quietSdk } from './logging';
+import { PeopleSession } from './peopleSession';
 import { isLocked, nativePort, onNativeEvent, routes } from './native';
 import type { LocalAudioTrack } from 'livekit-client';
 import { cameraStore } from './camera/store';
@@ -44,6 +45,7 @@ async function onSignal(signal: AuthSignal, steps: readonly AuthStep[]): Promise
   for (const step of steps) {
     if (step === 'tear_down_media') await controller.tearDown();
     else if (step === 'show_signed_out') {
+      peopleSession.stop();
       who.id = -1;
       onSignedOut();
     } else {
@@ -70,6 +72,8 @@ export const clock = {
   },
 };
 
+const peopleSession = new PeopleSession(client, clock);
+
 export const controller = new VoiceController({
   api: client,
   native: nativePort,
@@ -94,14 +98,15 @@ export const controller = new VoiceController({
   },
 });
 
-// signedIn records the principal and tells the diagnostics what must never
-// appear in an export.
+// signedIn records the principal, registers sign-in secrets with diagnostics,
+// and starts the signed-in client session for People.
 export function signedIn(id: number, name: string): void {
   who.id = id;
   who.name = name;
   const bearer = client.secret;
   if (bearer !== null) diagnostics.hold(bearer);
   if (client.server !== '') diagnostics.hold(client.server, client.server.replace(/^https?:\/\//, ''));
+  peopleSession.start();
 }
 
 export function principal(): { id: number; name: string } {
@@ -111,6 +116,7 @@ export function principal(): { id: number; name: string } {
 // signOut: media first, then the bearer (M-K3).
 export async function signOut(): Promise<void> {
   await controller.tearDown();
+  peopleSession.stop();
   client.signOut();
   who.id = -1;
 }
@@ -134,6 +140,7 @@ export function bridgeLifecycle(): void {
     // Back in front: ask the OS whether it is still locked, so a missed
     // broadcast cannot leave the lock block on, or off.
     if (state === 'active') {
+      peopleSession.refresh();
       void isLocked().then((locked) => {
         controller.screenLocked(locked);
       });

@@ -14,11 +14,14 @@ import { afterAuthSignal } from '../logic/auth';
 import type { AuthSignal, AuthStep } from '../logic/auth';
 import { authorization, build, type Built, type RequestName } from '../logic/requests';
 import type {
+  CreateSessionRequestV1,
+  ListChannelMembersResponseV1,
   ListChannelsResponse,
   LoginRequestV1,
   LoginResponseV1,
   RedeemSignInLinkRequestV1,
   RedeemSignInLinkResponseV1,
+  SessionV1,
   VoiceTransmitReportV1,
   VoicePresenceV1,
   VoiceTransmitState,
@@ -26,9 +29,11 @@ import type {
 } from '../logic/schema/generated';
 import {
   errorV0,
+  listChannelMembersResponseV1,
   listChannelsResponse,
   loginResponseV1,
   redeemSignInLinkResponseV1,
+  sessionV1,
   voiceCameraV1,
   voicePresenceV1,
   voiceSessionResponseV1,
@@ -130,6 +135,25 @@ export class ApiClient {
     return this.getJson('listChannels', {}, listChannelsResponse, 'whoami_401');
   }
 
+  async members(channel: string): Promise<Result<ListChannelMembersResponseV1>> {
+    return this.getJson('listMembers', { channel }, listChannelMembersResponseV1, 'whoami_401');
+  }
+
+  async createSession(signal: AbortSignal): Promise<Result<SessionV1>> {
+    const body: CreateSessionRequestV1 = { client: 'android' };
+    const reply = await this.send('createSession', {}, {}, body, true, signal, 'whoami_401');
+    return reply.ok ? this.read(reply.value, sessionV1) : reply;
+  }
+
+  async heartbeatSession(id: number, signal: AbortSignal): Promise<Result<SessionV1>> {
+    const reply = await this.send('heartbeatSession', { id: String(id) }, {}, undefined, true, signal, 'whoami_401');
+    return reply.ok ? this.read(reply.value, sessionV1) : reply;
+  }
+
+  async endSession(id: number): Promise<void> {
+    await this.send('endSession', { id: String(id) }, {}, undefined, true, undefined, 'whoami_401');
+  }
+
   async presence(channel: string): Promise<Result<VoicePresenceV1>> {
     return this.getJson('voicePresence', { channel }, voicePresenceV1, 'whoami_401');
   }
@@ -197,9 +221,10 @@ export class ApiClient {
   ): Promise<{ ok: true; value: HttpResponse } | { ok: false; failure: ApiFailure; status?: number; code?: string }> {
     const built: Built = build(name, params, query);
     const headers: Record<string, string> = { Accept: 'application/json' };
+    const bearer = this.bearer;
     if (authed) {
-      if (this.bearer === null) return { ok: false, failure: 'unauthorized' };
-      Object.assign(headers, authorization(this.bearer));
+      if (bearer === null) return { ok: false, failure: 'unauthorized' };
+      Object.assign(headers, authorization(bearer));
     }
     if (body !== undefined) headers['Content-Type'] = 'application/json';
     let res: HttpResponse;
@@ -219,8 +244,10 @@ export class ApiClient {
     if (res.status === 401 && authed) {
       // The credential is dead: forget it, then let the app tear media down and
       // show signed out (auth.ts gives the order).
-      this.bearer = null;
-      this.options.onSignal(signal, afterAuthSignal(signal));
+      if (!abort?.aborted && bearer === this.bearer) {
+        this.bearer = null;
+        this.options.onSignal(signal, afterAuthSignal(signal));
+      }
       return { ok: false, failure: 'unauthorized', status: 401 };
     }
     const code = await refusalCode(res);

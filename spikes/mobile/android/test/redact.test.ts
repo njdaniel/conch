@@ -45,6 +45,33 @@ test('registered secrets are hidden in whatever shape they appear', () => {
   for (const s of [bearer, address, device]) assert.ok(!out.includes(s));
 });
 
+test('diagnostics redact the LiveKit negotiation warning from the emulator smoke run', () => {
+  // The message and context from 15-diagnostics-end.png on 2026-11-18,
+  // with the identifiers replaced by values of the same shape.
+  const message = 'negotiation disconnected';
+  const context = {
+    room: 'conch-ax2bcdefghjkmnpqrstuvwxyza',
+    roomID: 'RM_A1b2C3d4E5f6',
+    participant: 'p2',
+    participantID: 'PA_B2c3D4e5F6g7',
+  };
+  const d = new Diagnostics();
+  d.add('warn', message, context);
+  const redacted = '{"room":"[redacted]","roomID":"[redacted]","participant":"[redacted]","participantID":"[redacted]"}';
+  assert.equal(d.export(), `warn: ${message} ${redacted}`);
+  assert.equal(scrub(`warn: ${message} ${JSON.stringify(context)}`), `warn: ${message} ${redacted}`);
+});
+
+test('diagnostics hide opaque room and participant context and keep unrelated fields', () => {
+  const d = new Diagnostics();
+  d.add('warn', 'rtc disconnected', { nested: { roomName: 'arbitrary name', roomSid: 42, participantIdentity: 'arbitrary identity', status: 503 } });
+  assert.equal(d.export(), 'warn: rtc disconnected {"nested":{"roomName":"[redacted]","roomSid":"[redacted]","participantIdentity":"[redacted]","status":503}}');
+});
+
+test('scrub hides configurable room names and suffixed identities in warning text', () => {
+  assert.equal(scrub('room lab-2-abcdefghijklmnopqrstuvwxyz closed for p42.screen and p1.view'), 'room [redacted] closed for [redacted] and [redacted]');
+});
+
 test('ordinary text survives', () => {
   assert.equal(scrub('gate open at 1200 ms'), 'gate open at 1200 ms');
 });

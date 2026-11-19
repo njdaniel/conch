@@ -2,6 +2,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { ApiClient, signInCode, signInTarget, type Fetch, type HttpInit } from '../src/app/client';
+import { PeopleSession } from '../src/app/peopleSession';
+import { FakeClock, settle } from './fakes';
 
 interface Call {
   url: string;
@@ -24,6 +26,45 @@ function client(answer: (c: Call) => { status: number; body: unknown }) {
 
 const principal = { id: 7, kind: 'human', name: 'sam', created_at: '2026-11-05T10:00:00Z' };
 const credential = { id: 1, principal_id: 7, label: 'phone', created_at: '2026-11-05T10:00:00Z' };
+
+test('the Android People session registers, heartbeats, recovers a missing session and ends on sign-out', async () => {
+  let id = 0;
+  let missing = false;
+  const { api, calls } = client(({ url, init }) => {
+    if (url.endsWith('/v1/login')) return { status: 200, body: { next: 'signed_in', principal, credential, token: 'b' } };
+    if (init.method === 'DELETE') return { status: 204, body: null };
+    if (url.endsWith('/heartbeat') && missing) return { status: 404, body: {} };
+    if (url.endsWith('/v1/sessions')) id++;
+    return { status: 200, body: {
+      schema: 'conch.session.v1', id, principal_id: principal.id, name: principal.name, kind: principal.kind,
+      client: 'android', state: 'online', status: 'online', started_at: principal.created_at,
+      last_seen_at: principal.created_at, interventions: [], outcome_unknown: false,
+    } };
+  });
+  await api.login('sam', 'pw');
+  const clock = new FakeClock();
+  const session = new PeopleSession(api, clock);
+  session.start();
+  await settle();
+  clock.advance(15_000);
+  await settle();
+  missing = true;
+  session.refresh();
+  await settle();
+  clock.advance(15_000);
+  await settle();
+  session.stop();
+  api.signOut();
+  clock.advance(30_000);
+  assert.deepEqual(calls.slice(1).map(({ url, init }) => [init.method, new URL(url).pathname, init.headers.Authorization]), [
+    ['POST', '/v1/sessions', 'Bearer b'],
+    ['POST', '/v1/sessions/1/heartbeat', 'Bearer b'],
+    ['POST', '/v1/sessions/1/heartbeat', 'Bearer b'],
+    ['POST', '/v1/sessions', 'Bearer b'],
+    ['DELETE', '/v1/sessions/2', 'Bearer b'],
+  ]);
+  assert.deepEqual(calls[1]?.init.body, JSON.stringify({ client: 'android' }));
+});
 
 test('login keeps the bearer in memory and never puts it in a URL', async () => {
   const { api, calls } = client((c) =>
