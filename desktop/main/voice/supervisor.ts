@@ -774,10 +774,18 @@ export class Supervisor {
       case 'protocol_error':
         this.log(`voice: helper ${String(run.generation)} reported ${ev.error.code}`);
         return;
-      case 'state':
+      case 'state': {
+        const previous = run.view;
         run.view = viewOf(ev.state, run.hello?.helper_version ?? '');
+        // Log only checked protocol vocabulary. Raw input, device names and
+        // helper stderr are unnecessary to distinguish a removal from a stall.
+        const { ptt, pttProblem, talkMode } = run.view;
+        if (run.windows && ptt === 'lost' && (previous?.ptt !== ptt || previous.pttProblem !== pttProblem)) {
+          this.log(`voice: Windows talk key lost (${pttProblem ?? 'no reason'}, mode ${talkMode ?? 'unknown'})`);
+        }
         if (run.outcome === null) this.publish(run);
         break;
+      }
       case 'ack':
         this.answered(run, ev.ack, acked);
         break;

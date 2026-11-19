@@ -46,6 +46,7 @@ export function InviteLink({ clientMounted, arrival, onArrivalTaken }: Props) {
   const [swapped, setSwapped] = useState(false);
   const swapTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const field = useRef<HTMLInputElement>(null);
+  const choice = useRef<HTMLDivElement>(null);
   const id = useId();
   const available = inviteBridge()?.inviteCheck !== undefined;
   // The handle on show, so a newer link can spend it.
@@ -131,6 +132,16 @@ export function InviteLink({ clientMounted, arrival, onArrivalTaken }: Props) {
     else refuseArrival();
     onArrivalTaken?.();
   }, [arrival]);
+
+  // A checked invite can appear below the saved server list. Bring it into
+  // view and give it keyboard focus only when nothing else has focus.
+  useEffect(() => {
+    const card = choice.current;
+    if (checked === null || card === null) return;
+    const active = document.activeElement;
+    if (active === null || active === document.body) card.focus({ preventScroll: true });
+    if (typeof card.scrollIntoView === 'function') card.scrollIntoView({ block: 'nearest' });
+  }, [checked]);
 
   async function check(event: SyntheticEvent): Promise<void> {
     event.preventDefault();
@@ -220,7 +231,7 @@ export function InviteLink({ clientMounted, arrival, onArrivalTaken }: Props) {
           <p className="hint">Paste the link you were sent. The app shows which server it is for; nothing is contacted until you choose.</p>
         </form>
       ) : (
-        <div className="desktop-invite-choice" role="group" aria-label="Open this invite">
+        <div ref={choice} tabIndex={-1} className="desktop-invite-choice" role="group" aria-label="Open this invite">
           <p>
             This invite is for <strong>{checked.origin}</strong>.
           </p>

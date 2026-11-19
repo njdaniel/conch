@@ -174,6 +174,11 @@ describe('words', () => {
       }
     }
   });
+
+  it('shows open mic when the helper loses the talk key', () => {
+    expect(running({ talkMode: 'open', ptt: 'lost', pttProblem: 'read_failed' })).toBe('mic on · open mic');
+    expect(running({ talkMode: 'open', ptt: 'lost', pttProblem: 'read_failed', muted: true })).toBe('muted');
+  });
 });
 
 // ---- share and watch (issue #1582)

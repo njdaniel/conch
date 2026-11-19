@@ -22,7 +22,7 @@ import { DocumentGate } from '../document.ts';
 import { guardSession, type GuardDeps } from '../guards.ts';
 import type { ContentsLike } from '../ipc.ts';
 import { handle, SCHEME, type Manifest } from '../scheme.ts';
-import { createWindow, partitionFor } from '../window.ts';
+import { createWindow, partitionFor, type WindowMaximized } from '../window.ts';
 import type { HealthResult } from '../compat.ts';
 import type { ActivationSpec, ProbeResult, StoredCheck } from './service.ts';
 import type { Account, Activation } from './switch.ts';
@@ -30,6 +30,7 @@ import type { Account, Activation } from './switch.ts';
 export interface ActivationEnv {
   readonly packaged: boolean;
   readonly appPath: string;
+  readonly maximized?: WindowMaximized;
   readonly manifest: Manifest;
   readonly readUi: (path: string) => Promise<Uint8Array>;
   readonly connect: Connect;
@@ -92,6 +93,7 @@ export function activationFactory(env: ActivationEnv, live: Live): (spec: Activa
     window = createWindow(env.packaged, env.appPath, gate, {
       partition: partitionFor(spec.generation),
       ...(bounds === undefined ? {} : { bounds }),
+      ...(env.maximized === undefined ? {} : { maximized: env.maximized }),
       prepare: (made) => {
         const ses = made.webContents.session;
         guardSession(ses, env.guard);

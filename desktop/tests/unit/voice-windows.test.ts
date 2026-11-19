@@ -806,6 +806,29 @@ describe('the supervisor on Windows', () => {
     expect(r.child().written).toEqual([]);
   });
 
+  it('logs the checked Windows talk-key loss reason once per change', async () => {
+    const r = rig();
+    const started = r.sup.start(request);
+    const c = await helperJoins(r);
+    try {
+      expect((await started).status).toBe('running');
+      const base = transcript(V2)[5]?.message;
+      const ended = { ...base, ptt: 'lost', ptt_problem: 'ended', blocked: ['key_device_lost'] };
+      const stalled = { ...base, ptt: 'lost', ptt_problem: 'read_failed', talk_mode: 'open' };
+      const states = [ended, ended, base, stalled];
+      await c.send(states.map((state, i) => JSON.stringify({ ...state, seq: i + 6 })).join('\n') + '\n');
+      const lossLogs = () => r.logs.filter((line) => line.includes('Windows talk key lost'));
+      await until(() => lossLogs().some((line) => line.includes('read_failed')), 5000, 'the key loss reports');
+      expect(lossLogs()).toEqual([
+        'voice: Windows talk key lost (ended, mode push_to_talk)',
+        'voice: Windows talk key lost (read_failed, mode open)',
+      ]);
+    } finally {
+      await r.sup.stop();
+      c.socket.destroy();
+    }
+  });
+
   it('a wrong nonce from a connection is closed, and the helper’s own connection still attaches', async () => {
     const r = rig();
     const started = r.sup.start(request);

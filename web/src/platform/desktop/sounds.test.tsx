@@ -105,7 +105,11 @@ it('provides desktop audio and shows working sound toggles and volume in notific
     fireEvent.click(toggle);
     expect(toggle.checked).toBe(true);
   }
-  fireEvent.change(screen.getByLabelText('Sound volume'), { target: { value: '30' } });
+  const volume = screen.getByLabelText('Sound volume');
+  const shareLabel = screen.getByLabelText('Share start sound').closest('label');
+  expect(volume.closest('label')?.parentElement).toBe(shareLabel?.nextElementSibling);
+  expect(shareLabel?.nextElementSibling?.tagName).toBe('DIV');
+  fireEvent.change(volume, { target: { value: '30' } });
   sounds.unlock();
   for (const sound of ['message', 'join', 'leave', 'share'] as const) sounds.play(sound);
   expect(clips).toHaveLength(4);

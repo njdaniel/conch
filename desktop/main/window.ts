@@ -8,6 +8,7 @@ import { BrowserWindow, type WebPreferences } from 'electron';
 
 import { trackDocument, type DocumentGate } from './document.ts';
 import { INITIAL_URL } from './scheme.ts';
+import type { SettingsFiles } from './settings.ts';
 
 // An in-memory session: no "persist:" prefix, so nothing the page stores
 // outlives the process. The scheme handler and the guards are installed on it.
@@ -51,9 +52,58 @@ export function preloadPath(appPath: string): string {
   return join(appPath, 'out', 'preload', 'index.cjs');
 }
 
+// The maximized preference belongs to the app, across profiles and restarts.
+// Update it on explicit window-state events so minimizing, hiding and
+// destroying the window for a profile switch do not replace the preference.
+export class WindowMaximized {
+  #value = false;
+  #inFlight: Promise<void> | undefined;
+  #pending: Promise<void> | undefined;
+
+  constructor(private readonly files: SettingsFiles, private readonly log: (line: string) => void) {}
+
+  async load(): Promise<void> {
+    const saved = await this.files.read();
+    this.#value = saved.kind === 'text' && saved.text.trim() === 'true';
+  }
+
+  get value(): boolean {
+    return this.#value;
+  }
+
+  set(value: boolean): void {
+    if (value === this.#value) return;
+    this.#value = value;
+    if (this.#pending !== undefined) return;
+    if (this.#inFlight === undefined) {
+      void this.#write(value);
+      return;
+    }
+    // Keep one pending write and take the latest value when it starts.
+    this.#pending = this.#inFlight.then(() => {
+      this.#pending = undefined;
+      return this.#write(this.#value);
+    });
+  }
+
+  #write(value: boolean): Promise<void> {
+    this.#inFlight = Promise.resolve().then(() => this.files.write(`${String(value)}\n`)).catch(() => {
+      this.log('conch-desktop: window-state.json could not be written');
+    }).finally(() => {
+      this.#inFlight = undefined;
+    });
+    return this.#inFlight;
+  }
+
+  flush(): Promise<void> {
+    return this.#pending ?? this.#inFlight ?? Promise.resolve();
+  }
+}
+
 export interface WindowOptions {
   readonly partition?: string;
   readonly bounds?: { readonly x: number; readonly y: number; readonly width: number; readonly height: number };
+  readonly maximized?: WindowMaximized;
   // Called with the window after it is made and before its first load: the
   // session's handlers are installed here.
   readonly prepare?: (window: BrowserWindow) => void;
@@ -73,7 +123,13 @@ export function createWindow(packaged: boolean, appPath: string, gate: DocumentG
   // The document generation begins at each navigation, before the first load.
   trackDocument(window.webContents, gate);
   options.prepare?.(window);
+  const maximized = options.maximized;
+  if (maximized !== undefined) {
+    window.on('maximize', () => { maximized.set(true); });
+    window.on('unmaximize', () => { maximized.set(false); });
+  }
   window.once('ready-to-show', () => {
+    if (maximized?.value === true) window.maximize();
     window.show();
   });
   void window.loadURL(INITIAL_URL);

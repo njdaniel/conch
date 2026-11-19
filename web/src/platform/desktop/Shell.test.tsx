@@ -565,7 +565,9 @@ describe('server compatibility (issue #946)', () => {
     const profileSwitch = vi.fn(() => Promise.resolve(true));
     install({ profiles: () => Promise.resolve(on({ state: 'unreachable' })), profileSwitch });
     render(<DesktopShell>{child}</DesktopShell>);
-    expect((await screen.findByText(/could not be read/)).textContent).toMatch(/Nothing was signed in/);
+    const reason = await screen.findByText(/could not be read because it did not answer/);
+    expect(reason.textContent).not.toContain('Nothing was signed in');
+    expect(screen.getAllByText(/Nothing was signed in/)).toHaveLength(1);
     expect(screen.queryByText('the client')).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: 'Check again' }));
     await waitFor(() => {
@@ -719,7 +721,10 @@ describe('opening an invite link (issue #1591)', () => {
     const field = await screen.findByLabelText('Invite link');
     fireEvent.change(field, { target: { value: LINK } });
     fireEvent.click(screen.getByRole('button', { name: 'Check link' }));
+    const address = screen.getByLabelText('Server address');
+    address.focus();
     const group = await screen.findByRole('group', { name: 'Open this invite' });
+    expect(document.activeElement).toBe(address);
     expect(group.textContent).toContain('This invite is for https://chat.example.org.');
     expect(inviteCheck).toHaveBeenCalledWith(LINK);
     // The link and its code are gone from the page; nothing has happened.
@@ -817,8 +822,22 @@ describe('opening an invite link (issue #1591)', () => {
     const profileSwitch = vi.fn();
     const profileAdd = vi.fn();
     install({ profiles: () => Promise.resolve(view()), inviteCheck: () => Promise.reject(new Error('unexpected')), inviteArrived, onInviteArrived: () => () => undefined, inviteAccept, profileSwitch, profileAdd });
-    render(<DesktopShell>{child}</DesktopShell>);
-    const group = await screen.findByRole('group', { name: 'Open this invite' });
+    const scroll = vi.fn();
+    const prototype = Element.prototype;
+    const original = Object.getOwnPropertyDescriptor(prototype, 'scrollIntoView');
+    Object.defineProperty(prototype, 'scrollIntoView', { configurable: true, value: scroll });
+    const group = await (async () => {
+      try {
+        render(<DesktopShell>{child}</DesktopShell>);
+        return await screen.findByRole('group', { name: 'Open this invite' });
+      } finally {
+        if (original === undefined) Reflect.deleteProperty(prototype, 'scrollIntoView');
+        else Object.defineProperty(prototype, 'scrollIntoView', original);
+      }
+    })();
+    expect(document.activeElement).toBe(group);
+    expect(scroll).toHaveBeenCalledExactlyOnceWith({ block: 'nearest' });
+    expect(scroll.mock.contexts[0]).toBe(group);
     expect(group.textContent).toContain('This invite is for https://chat.example.org.');
     expect(document.body.textContent).not.toContain('CANARY');
     expect(inviteAccept).not.toHaveBeenCalled();
@@ -904,8 +923,9 @@ describe('opening an invite link (issue #1591)', () => {
       },
       inviteCancel,
     });
-    render(<DesktopShell>{child}</DesktopShell>);
-    await screen.findByText('the client');
+    render(<DesktopShell><textarea aria-label="Message" /></DesktopShell>);
+    const message = await screen.findByRole('textbox', { name: 'Message' });
+    message.focus();
     expect(screen.queryByLabelText('Invite link')).toBeNull();
     // The ask at mount has been answered (nothing waiting) before main speaks.
     await waitFor(() => {
@@ -913,6 +933,7 @@ describe('opening an invite link (issue #1591)', () => {
     });
     tell();
     const group = await screen.findByRole('group', { name: 'Open this invite' });
+    expect(document.activeElement).toBe(message);
     expect(group.textContent).toContain('https://chat.example.org');
     tell();
     await waitFor(() => {

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
+import { useCallback, useContext, useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
 import { ChannelList } from './ChannelList';
 import { ChannelNav } from './ChannelNav';
 import { GroupsPanel } from './ChannelGroups';
@@ -11,6 +11,7 @@ import { Avatar, Glyph } from './Icons';
 import { ServerVersion, TemporaryBanner } from './ServerVersion';
 import { AddPerson, JoiningSettings, SettingsOpen, type JoiningRequest } from './joiningSettings';
 import { MicTestShown, phoneViews, ShowChat, useAppHeight, usePhone, VoiceLive, VoiceStrip, type PhoneView } from './phone';
+import { DesktopOS } from './platform/os';
 import type { ChannelV0 } from './schema/channel';
 import { StageHost } from './stage';
 import type { ChannelsState } from './state/channels';
@@ -49,9 +50,10 @@ function useWide(): boolean {
 // a password signs in again with it (issue #713).
 export const signOutWarning = 'To come back into this account, you will need a new link from an operator.';
 export const passwordSignOutWarning = 'To come back into this account, sign in again with your name and password.';
-function signOutQuestion(which: 'here' | 'everywhere', passwordSet: boolean): string {
+function signOutQuestion(which: 'here' | 'everywhere', passwordSet: boolean, desktop: boolean): string {
   const warning = passwordSet ? passwordSignOutWarning : signOutWarning;
-  return which === 'here' ? `Sign out of this browser? ${warning}` : `Sign out on every device, this browser included? ${warning}`;
+  const place = desktop ? 'this app' : 'this browser';
+  return which === 'here' ? `Sign out of ${place}? ${warning}` : `Sign out on every device, ${place} included? ${warning}`;
 }
 
 // The lobby: a top bar (who, which server, the connection, Invite, Members,
@@ -195,6 +197,7 @@ export function Lobby({
   // stays as it was, so what was being typed is kept.
   readonly overlay?: ReactNode;
 }) {
+  const desktop = useContext(DesktopOS) !== null;
   const [panelOpen, setPanelOpen] = useState(isWide);
   const wideNow = useWide();
   // A column left open would cover the page once the window narrows: it
@@ -635,7 +638,7 @@ export function Lobby({
                   </button>
                 </div>
                 <p id="signout-note" className="hint">
-                  Sign out ends this sign-in, in every tab of this browser. Sign out everywhere ends all of yours, on every device.
+                  Sign out ends this sign-in {desktop ? 'in this app' : 'in every tab of this browser'}. Sign out everywhere ends all of yours, on every device.
                   {passwordSet
                     ? ' Either way, you sign in again with your name and password.'
                     : ' Either way, you will need a new link from an operator to come back into this account.'}
@@ -643,7 +646,7 @@ export function Lobby({
               </>
             ) : (
               <div role="group" aria-labelledby="signout-question" className="signout-confirm">
-                <p id="signout-question">{signOutQuestion(confirming, passwordSet)}</p>
+                <p id="signout-question">{signOutQuestion(confirming, passwordSet, desktop)}</p>
                 <div className="actions">
                   <button
                     type="button"

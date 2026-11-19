@@ -713,6 +713,16 @@ describe('NativeVoicePanel', () => {
   });
 });
 
+it('keeps the Talk key label in open mode when the helper loses the key', async () => {
+  const lost = { ptt: 'lost', pttProblem: 'read_failed' } as const;
+  const f = new Fake(running({ ...lost, talkMode: 'open' }));
+  const source: NativeVoice = { ...f.nv, keyDevices: () => Promise.resolve({ ok: true, platform: 'win32', devices: [], disclosure: [] }) };
+  render(<NativeVoicePanel source={source} signedIn channel="general" viewer={1} people={people} voiceAllowed channels={channels} onUnauthorized={() => undefined} onOpen={() => undefined} />);
+  expect(screen.getByRole('button', { name: 'Talk key' })).toBeTruthy();
+  f.set(running({ ...lost, talkMode: 'push_to_talk', blocked: ['key_device_lost'] }));
+  expect(await screen.findByRole('button', { name: 'Set up the talk key' })).toBeTruthy();
+});
+
 it('keeps the active Windows binding label until a new helper generation, even when browsing text', async () => {
   const f = new Fake(running());
   const source: NativeVoice = { ...f.nv,
