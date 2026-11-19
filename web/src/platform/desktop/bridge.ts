@@ -760,6 +760,25 @@ export interface CompanionEvent {
   readonly reason: CompanionEndReason;
 }
 
+// Why the page ended its own companion, for main's log only (issue #1992):
+// the page's connection fails where main cannot see it (the CSP refuses a
+// request before main's filter does, and the SDK's errors stay in the page).
+// left: the page left (the person's Stop or Leave, or nothing left to do);
+// connect-failed: the first connection failed; disconnected: LiveKit ended a
+// connection that was up; dropped: the page gave up on it (a reconnect that
+// did not recover, conchd's word); insecure-address: the LiveKit address
+// conchd gave is not wss or https, which the window may never reach;
+// cannot-share: a Share whose grant said this desktop cannot share.
+export type CompanionPageEndKind = 'left' | 'connect-failed' | 'disconnected' | 'dropped' | 'insecure-address' | 'cannot-share';
+
+// detail is short words only, checked again by main: an error's name and
+// LiveKit's reason name (ConnectionError:WebSocket), a disconnect's cause, a
+// URL's scheme. Never an error's message, an address, a room or a token.
+export interface CompanionPageEnd {
+  readonly kind: CompanionPageEndKind;
+  readonly detail?: string;
+}
+
 export interface DesktopCompanionBridge {
   // The companion's grant for the voice destination. Only right after the
   // person's own click or key.
@@ -780,7 +799,8 @@ export interface DesktopCompanionBridge {
   // sign-out, a switch and quit.
   shareArm(): Promise<boolean>;
   // Removes the live companion, if there is one, and says whether there was.
-  companionEnd(): Promise<boolean>;
+  // why, when given, is logged by main (issue #1992) and changes nothing else.
+  companionEnd(why?: CompanionPageEnd): Promise<boolean>;
   onCompanion(listener: (event: CompanionEvent) => void): Unsubscribe;
 }
 

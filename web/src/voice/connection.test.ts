@@ -1,10 +1,10 @@
 import { describe, expect, it, vi } from 'vitest';
-import type { CompanionEndReason, CompanionGrantResult } from '../platform/desktop/bridge';
+import type { CompanionEndReason, CompanionGrantResult, CompanionPageEnd } from '../platform/desktop/bridge';
 import type { ShareClaimResult, TransmitAnswer, VoiceSessionResult, VoiceViewerResult } from '../api';
 import type { VoicePresenceV2 } from '../schema/voice';
 import type { CameraClaimResult } from '../api';
 import type { Camera, CameraProfile, KeptCamera } from './camera';
-import { VoiceClient, openAudio, chosenGone, companionDefaultQuality, companionQualities, companionEnds, companionQuality, companionLeftWatching, companionLost, companionRefusals, shareQualityRefusedNote, type CompanionEnv, earlierGone, levelEvery, meterEvery, outputMoved, outputRefused, endingLimit, reconnectLimit, reportWait, type CameraTrack, type Microphone, type ModeStore, type Output, type Phase, type Processing, type ProcessingStore, type Room, type RoomEvents, type ShareSink } from './connection';
+import { VoiceClient, openAudio, chosenGone, companionDefaultQuality, companionInsecure, companionQualities, companionEnds, companionQuality, companionLeftWatching, companionLost, companionRefusals, shareQualityRefusedNote, type CompanionEnv, earlierGone, levelEvery, meterEvery, outputMoved, outputRefused, endingLimit, reconnectLimit, reportWait, type CameraTrack, type Microphone, type ModeStore, type Output, type Phase, type Processing, type ProcessingStore, type Room, type RoomEvents, type ShareSink } from './connection';
 import { shareNote } from './native/words';
 import { qualityLaterNote, resumeLimit, settleQuality, type Captured, type KeptScreen, type SettledQuality, type ShareQuality } from './share';
 import { defaultTail } from './gate';
@@ -3459,7 +3459,7 @@ function nativeCompanion(order: string[], answers: CompanionGrantResult[] = []) 
   const deafs = new Set<() => void>();
   // held is main's record of a grant: like the real main, it refuses another
   // grant (elsewhere) until end clears it.
-  const state = { deaf: false, grants: [] as string[], calls: [] as string[], arms: 0, armRejects: false, endCalls: 0, held: false };
+  const state = { deaf: false, grants: [] as string[], calls: [] as string[], arms: 0, armRejects: false, endCalls: 0, held: false, whys: [] as (CompanionPageEnd | undefined)[] };
   const env: CompanionEnv = {
     arm: () => {
       state.arms++;
@@ -3475,9 +3475,10 @@ function nativeCompanion(order: string[], answers: CompanionGrantResult[] = []) 
       if (answer.ok) state.held = true;
       return Promise.resolve(answer);
     },
-    end: () => {
+    end: (why) => {
       order.push('end');
       state.endCalls++;
+      state.whys.push(why);
       state.held = false;
       return Promise.resolve(true);
     },
@@ -3522,6 +3523,122 @@ function companionSetup(answers: CompanionGrantResult[] = [], prepare?: (room: S
 }
 
 describe('the screen companion', () => {
+  // Issue #1992: the companion's own end was invisible outside the page (the
+  // Windows VM's Watch and Share ended with nothing in main's log).
+  describe('why it ends, for main’s log (issue #1992)', () => {
+    it('a connection that fails tells main the error’s name and LiveKit’s reason, never its message', async () => {
+      const failure = Object.assign(new Error('could not establish signal connection: wss://lk.example/rtc?access_token=secret'), { name: 'ConnectionError', reasonName: 'WebSocket' });
+      const t = companionSetup([], (room) => {
+        room.connectFailure = failure;
+      });
+      t.client.watchCompanionStream('general', 9);
+      await settle();
+      expect(t.native.state.whys).toEqual([{ kind: 'connect-failed', detail: 'ConnectionError:WebSocket' }]);
+      expect(JSON.stringify(t.native.state.whys)).not.toContain('secret');
+      expect(t.client.snapshot()).toMatchObject({ phase: 'stopped', why: companionLost });
+    });
+
+    it('a connection the page’s CSP refused says so, by directive and scheme alone, even when LiveKit reports the disconnect first', async () => {
+      const t = companionSetup([], (room) => {
+        const connect = room.connect;
+        room.connect = (url, token, roomName, publish, events, audio) => {
+          const refused = Object.assign(new Event('securitypolicyviolation'), { effectiveDirective: 'connect-src', blockedURI: 'ws://127.0.0.1:27880/rtc?access_token=secret' });
+          document.dispatchEvent(refused);
+          events.onDisconnected('lost');
+          room.connectError = true;
+          return connect(url, token, roomName, publish, events, audio);
+        };
+      });
+      t.client.watchCompanionStream('general', 9);
+      await settle();
+      expect(t.native.state.whys).toEqual([{ kind: 'disconnected', detail: 'csp:connect-src:ws' }]);
+      expect(t.client.snapshot()).toMatchObject({ phase: 'stopped', why: companionLost });
+      // Once the connection has failed, a refusal elsewhere in the page is not
+      // the companion's.
+      document.dispatchEvent(Object.assign(new Event('securitypolicyviolation'), { effectiveDirective: 'img-src', blockedURI: 'https://x.example' }));
+      expect(t.native.state.whys).toHaveLength(1);
+    });
+
+    it('a connection LiveKit ends says the cause, and a Stop with nothing left says left', async () => {
+      const t = companionSetup();
+      t.client.startCompanionShare('general');
+      await settle();
+      t.rooms[0]?.events?.onDisconnected('lost');
+      await settle();
+      expect(t.native.state.whys).toEqual([{ kind: 'disconnected', detail: 'lost' }]);
+      t.client.watchCompanionStream('general', 9);
+      await settle();
+      t.client.watchStream(9, false);
+      await settle();
+      expect(t.native.state.whys.at(-1)).toEqual({ kind: 'left' });
+    });
+  });
+
+  // Issue #1992: a dev stack's ws:// LiveKit is refused by the desktop CSP
+  // before any request leaves the window, so the Watch tile waited for ever.
+  it.each(['ws://127.0.0.1:27880', 'http://lk.example'])('does not connect to a LiveKit address that is not wss or https (%s), says why, and tells main', async (livekitUrl) => {
+    const t = companionSetup([{ ...grantOk, grant: { ...grantOk.grant, livekitUrl } }]);
+    t.client.watchCompanionStream('general', 9);
+    await settle();
+    expect(t.rooms).toHaveLength(0);
+    expect(t.client.snapshot()).toMatchObject({ phase: 'stopped', why: companionInsecure, watched: new Set() });
+    expect(t.native.state.whys).toEqual([{ kind: 'insecure-address', detail: livekitUrl.slice(0, livekitUrl.indexOf(':')) }]);
+  });
+
+  it('a Watch on a companion that stops shows the stream with Watch again, not a picture it will never get (issue #1992)', async () => {
+    const t = companionSetup();
+    t.client.watchCompanionStream('general', 9);
+    await settle();
+    expect(t.client.snapshot().watched).toEqual(new Set([9]));
+    t.rooms[0]?.events?.onDisconnected('lost');
+    await settle();
+    expect(t.client.snapshot()).toMatchObject({ phase: 'stopped', why: companionLost, watched: new Set(), focusedShare: null, streamTracks: new Map() });
+  });
+
+  // Issue #1992: on Windows the grant says capture-unsupported; the Share
+  // connected anyway, and its failure's words overtook the right ones.
+  it('a Share on a desktop that cannot capture joins no room, says so, and tells main why', async () => {
+    const t = companionSetup([{ ...grantOk, grant: { ...grantOk.grant, livekitUrl: 'ws://127.0.0.1:27880' }, shareUnavailable: 'capture-unsupported' }]);
+    t.client.startCompanionShare('general');
+    await settle();
+    await settle();
+    expect(t.rooms).toHaveLength(0);
+    expect(t.client.snapshot()).toMatchObject({ phase: 'idle', why: null, companion: false, companionShareUnavailable: 'capture-unsupported', share: { kind: 'idle' } });
+    expect(t.native.state.whys).toEqual([{ kind: 'cannot-share', detail: 'capture-unsupported' }]);
+  });
+
+  describe('out of voice (issue #1992)', () => {
+    it('a notice from before the leave goes: a lost companion, and a desktop that cannot share', async () => {
+      const t = companionSetup([grantOk, { ...grantOk, shareUnavailable: 'capture-unsupported' }]);
+      t.client.watchCompanionStream('general', 9);
+      await settle();
+      t.rooms[0]?.events?.onDisconnected('lost');
+      await settle();
+      expect(t.client.snapshot()).toMatchObject({ phase: 'stopped', why: companionLost });
+      t.client.outOfVoice();
+      expect(t.client.snapshot()).toMatchObject({ phase: 'idle', why: null, companion: false });
+      t.client.startCompanionShare('general');
+      await settle();
+      await settle();
+      expect(t.client.snapshot().companionShareUnavailable).toBe('capture-unsupported');
+      t.client.outOfVoice();
+      expect(t.client.snapshot()).toMatchObject({ phase: 'idle', why: null, companionShareUnavailable: null });
+    });
+
+    it('keeps the words main gave for the leave itself, and leaves a live companion to main', async () => {
+      const t = companionSetup();
+      t.client.watchCompanionStream('general', 9);
+      await settle();
+      t.client.outOfVoice();
+      expect(t.client.snapshot()).toMatchObject({ phase: 'connected', companion: true });
+      t.native.end('leave');
+      await settle();
+      expect(t.client.snapshot()).toMatchObject({ phase: 'stopped', why: companionLeftWatching });
+      t.client.outOfVoice();
+      expect(t.client.snapshot()).toMatchObject({ phase: 'stopped', why: companionLeftWatching });
+    });
+  });
+
   it('connects only with the grant main returned, after a Share, never asking for the person’s own session', async () => {
     const t = companionSetup();
     expect(t.native.state.grants).toEqual([]);
@@ -3573,12 +3690,12 @@ describe('the screen companion', () => {
     expect(t.native.state.calls.filter((c) => c === 'arm')).toHaveLength(2);
   });
 
-  it.each(['no-portal', 'not-wayland'] as const)('a desktop with no screen-cast portal (%s) opens no picker, says so, and lets the companion go when nothing is watched', async (shareUnavailable) => {
+  it.each(['no-portal', 'not-wayland'] as const)('a desktop with no screen-cast portal (%s) opens no picker, joins no room (issue #1992), says so, and lets the companion go when nothing is watched', async (shareUnavailable) => {
     const t = companionSetup([{ ...grantOk, shareUnavailable }]);
     t.client.startCompanionShare('general');
     await settle();
     await settle();
-    expect(t.rooms[0]?.calls).not.toContain('pick');
+    expect(t.rooms).toHaveLength(0);
     expect(t.shares).toEqual([]);
     expect(t.client.snapshot()).toMatchObject({ companionShareUnavailable: shareUnavailable, share: { kind: 'idle' } });
     expect(t.native.state.endCalls).toBe(1);

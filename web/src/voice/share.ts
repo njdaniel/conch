@@ -754,6 +754,13 @@ export class ScreenShare {
     if (this.channel !== null) this.channel = channel;
   }
 
+  // forget lets an idle share's end go unsaid from now on: the desktop
+  // companion's, once the person's voice is over (issue #1992), whose words
+  // would otherwise stay in the dock after the leave.
+  forget(): void {
+    if (this.state.kind === 'idle' && (this.state.ended !== null || this.state.cause !== undefined)) this.set(idleShare);
+  }
+
   // abandon is the client stopping (signed out, no longer a member, another
   // device took over): a share being resumed ends.
   abandon(): void {

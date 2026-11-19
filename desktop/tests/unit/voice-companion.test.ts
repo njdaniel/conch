@@ -217,6 +217,19 @@ describe('the companion’s grant', () => {
     expect(r.logs).toEqual(['companion: issued']);
   });
 
+  it('logs the page’s reason when the page ends the companion, and nothing when it gives none (issue #1992)', async () => {
+    const r = rig();
+    r.answers.push(ok(ANSWER));
+    await r.companion.grant({ channel: 'general' });
+    await r.companion.stop({ kind: 'connect-failed', detail: 'ConnectionError:WebSocket' });
+    expect(r.logs.filter((l) => l.includes('the page ended'))).toEqual(['companion: the page ended it: connect-failed (ConnectionError:WebSocket)']);
+    const quiet = rig();
+    quiet.answers.push(ok(ANSWER));
+    await quiet.companion.grant({ channel: 'general' });
+    await quiet.companion.stop();
+    expect(quiet.logs.filter((l) => l.includes('the page ended'))).toEqual([]);
+  });
+
   it('asks once more after one pass when conchd has not seen p<id> yet, and then gives the grant', async () => {
     const r = rig();
     r.answers.push(refusal(409, 'voice_no_session'), ok(ANSWER));

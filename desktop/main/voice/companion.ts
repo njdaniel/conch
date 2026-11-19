@@ -60,6 +60,7 @@ import type {
   CompanionGrant,
   CompanionGrantError,
   CompanionGrantResult,
+  CompanionPageEnd,
   CompanionShareUnavailable,
   NativeVoiceView,
 } from '../../../web/src/platform/desktop/bridge.ts';
@@ -227,7 +228,10 @@ function lossOf(view: NativeVoiceView, held: Asking): CompanionEndReason | null 
 }
 
 // livekitOrigin is the origin of the LiveKit URL conchd named: wss or https,
-// or ws or http to loopback (development), with no user information.
+// or ws or http to loopback (development), with no user information. The
+// window's CSP allows only wss and https, so a loopback ws or http grant can
+// never connect: the page refuses it before connecting and says why
+// (insecure-address, #1992). Screens on a local stack need it served over TLS.
 function livekitOrigin(text: string): string | null {
   if (text.length > MAX_URL_LENGTH) return null;
   let url: URL;
@@ -436,8 +440,12 @@ export class Companion {
 
   // stop is the page's own companionEnd: the record goes and conchd is asked
   // to remove the companion. The page asked, so it is not told. A request
-  // still in flight is overtaken.
-  async stop(): Promise<boolean> {
+  // still in flight is overtaken. why is the page's reason, already checked
+  // by the IPC (parseCompanionPageEnd): it is logged and changes nothing, so
+  // that an end the page alone saw (a connection the CSP refused, an SDK
+  // error) is visible in the app's log (issue #1992).
+  async stop(why?: CompanionPageEnd): Promise<boolean> {
+    if (why !== undefined) this.#deps.log(`companion: the page ended it: ${why.kind}${why.detail === undefined ? '' : ` (${why.detail})`}`);
     this.#epoch++;
     this.#deps.ended?.();
     const held = this.#held;

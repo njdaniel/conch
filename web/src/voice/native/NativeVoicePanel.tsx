@@ -160,6 +160,11 @@ export function NativeVoicePanel({
   useEffect(() => {
     if (companionClient !== undefined && joined !== null && presence !== null) companionClient.presence(presence);
   }, [companionClient, joined, presence]);
+  // Out of voice, a companion that ended before the leave says nothing more
+  // (issue #1992): its notice was about the voice just left.
+  useEffect(() => {
+    if (companionClient !== undefined && joined === null) companionClient.outOfVoice();
+  }, [companionClient, joined]);
 
   const helper = view.helper;
   // The person's last mute and deafen, as the helper confirmed them: what the

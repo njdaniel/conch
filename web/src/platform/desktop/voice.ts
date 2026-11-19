@@ -84,11 +84,11 @@ export function createNativeVoice(get: () => DesktopVoiceBridge | undefined = vo
         return false;
       }
     },
-    async end() {
+    async end(why) {
       const b = companionBridge(get());
       if (b === undefined) return false;
       try {
-        return await b.companionEnd();
+        return await (why === undefined ? b.companionEnd() : b.companionEnd(why));
       } catch {
         return false;
       }

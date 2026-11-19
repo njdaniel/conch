@@ -15,6 +15,7 @@ import type {
   ChannelName,
   CompanionEvent,
   CompanionGrantResult,
+  CompanionPageEnd,
   NativeVoiceDevicesResult,
   NativeVoiceView,
   ShareSoundChoice,
@@ -189,7 +190,8 @@ export interface NativeCompanion {
   // anything; never rejects.
   shareArm(): Promise<boolean>;
   // Removes the live companion, if there is one, and says whether there was.
-  end(): Promise<boolean>;
+  // why is for main's log alone (issue #1992).
+  end(why?: CompanionPageEnd): Promise<boolean>;
   // Main's word (the conch:companion channel) that it ended the companion:
   // leave, helper loss, renewal, lock, suspend, sign-out, crash. Returns the
   // function that stops listening.

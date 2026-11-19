@@ -936,6 +936,16 @@ describe('the companion family (issue #1579)', () => {
     ['companionEnd', [1]],
     ['companionEnd', [{}]],
     ['companionEnd', ['general']],
+    // The page's reason (issue #1992) is a closed kind and one short word:
+    // nothing that could carry an address, a message or a token reaches the log.
+    ['companionEnd', [{ kind: 'gone' }]],
+    ['companionEnd', [{ kind: 'connect-failed', detail: 'wss://lk.example/rtc?access_token=t' }]],
+    ['companionEnd', [{ kind: 'connect-failed', detail: 'could not connect' }]],
+    ['companionEnd', [{ kind: 'connect-failed', detail: 'x'.repeat(65) }]],
+    ['companionEnd', [{ kind: 'connect-failed', detail: '' }]],
+    ['companionEnd', [{ kind: 'connect-failed', detail: 5 }]],
+    ['companionEnd', [{ kind: 'left', token: 't' }]],
+    ['companionEnd', [{ kind: 'left' }, 'extra']],
   ])('refuses a bad argument before the companion is called: %s %j', async (name, args) => {
     const f = fixture();
     f.input.recent = true;
@@ -966,6 +976,18 @@ describe('the companion family (issue #1579)', () => {
     const f = fixture();
     f.input.recent = true;
     expect(await f.ipc.invoke(f.event(), name, ['x'])).toEqual({ ok: false, kind: 'refused' });
+  });
+
+  it.each([
+    [{ kind: 'left' }],
+    [{ kind: 'connect-failed', detail: 'ConnectionError:WebSocket' }],
+    [{ kind: 'disconnected', detail: 'room_deleted' }],
+    [{ kind: 'insecure-address', detail: 'ws' }],
+    [{ kind: 'cannot-share', detail: 'capture-unsupported' }],
+  ])('passes the page’s reason for ending the companion on to it, for the log (issue #1992): %j', async (why) => {
+    const f = fixture();
+    expect(await f.ipc.invoke(f.event(), 'companionEnd', [why])).toEqual({ ok: true, value: { ran: 'companion.stop' } });
+    expect(f.calls).toEqual([['companion.stop', [why]]]);
   });
 
   it('needs no gesture to end the companion', async () => {
