@@ -1,15 +1,26 @@
 // The iOS spike's app (#1110, M5-C): sign in, the channel list, the voice
 // screen and the diagnostics. A state switch, no navigation library.
 import { useEffect, useState } from 'react';
+import { SafeAreaView } from 'react-native';
 import { Channels } from './src/app/ui/Channels';
 import { Diagnostics } from './src/app/ui/Diagnostics';
 import { SignIn } from './src/app/ui/SignIn';
 import { Voice } from './src/app/ui/Voice';
+import { colours } from './src/app/ui/common';
 import { bridgeLifecycle, signOut, whenSignedOut } from './src/app/services';
 
 type Screen = { kind: 'signin' } | { kind: 'channels' } | { kind: 'voice'; channel: string } | { kind: 'diagnostics' };
 
 function App() {
+  // Let iOS apply the safe-area insets once for every screen.
+  return (
+    <SafeAreaView style={{ flex: 1, backgroundColor: colours.paper }}>
+      <AppScreens />
+    </SafeAreaView>
+  );
+}
+
+function AppScreens() {
   const [screen, setScreen] = useState<Screen>({ kind: 'signin' });
 
   useEffect(() => {
