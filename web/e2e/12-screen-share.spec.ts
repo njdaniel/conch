@@ -20,7 +20,7 @@
 import type { Browser, BrowserContextOptions, Locator, Page } from '@playwright/test';
 import type { VoicePresenceV2 } from '../src/schema/voice';
 import { resumeLimit } from '../src/voice/share';
-import { expect, expectFits, openChannel, phones, showView, test } from './fixtures';
+import { drawDesktopStrip, expect, expectFits, openChannel, phones, showView, test } from './fixtures';
 import { enter, expectClean as expectCleanPage, inbound, joinVoice, type Someone } from './people';
 import { dockerAvailable, startVoiceWorld, type Member, type VoiceWorld } from './voice-world';
 
@@ -1109,6 +1109,37 @@ test.describe('screen share with LiveKit', () => {
         await expect(async () => {
           const scroll = await b.page.evaluate(() => ({ page: document.documentElement.scrollHeight, window: window.innerHeight }));
           expect(scroll.page, `${where}: the page is ${String(scroll.page)} px tall in a ${String(scroll.window)} px window`).toBeLessThanOrEqual(scroll.window + 1);
+        }).toPass({ timeout: 5000 });
+        expect(await picture(), `${where}: the picture drawn`).toBeGreaterThanOrEqual(200);
+      }
+      // In the desktop app the client is under the app's strip, in #root
+      // beside the lobby, which takes what the strip leaves of the window
+      // (issue #1980). Watching there, the same holds at every height: the
+      // composer on the dock, whole at the end of the page, the conversation
+      // its minimum, and over 560 px the stage its 300 px (a 600 px window is
+      // the strip's height shorter for the lobby, and must not squeeze the
+      // share to its controls). Where all of it fits, the page does not scroll
+      // and the dock is on the window's bottom edge.
+      await drawDesktopStrip(b.page);
+      const stage = b.page.locator('.centre > .stage');
+      for (const [width, height] of heights) {
+        await b.page.setViewportSize({ width, height });
+        await check("watching, under the desktop app's strip", true);
+        if (height > 560) {
+          const s = await stage.boundingBox();
+          expect(s?.height ?? 0, `${String(width)}×${String(height)}, watching under the desktop app's strip: the stage`).toBeGreaterThanOrEqual(299.5);
+        }
+      }
+      for (const [width, height] of [[1215, 900], [1440, 900]] as const) {
+        await b.page.setViewportSize({ width, height });
+        const where = `${String(width)}×${String(height)}, watching under the desktop app's strip`;
+        await check("watching, under the desktop app's strip", true);
+        await expect(async () => {
+          const scroll = await b.page.evaluate(() => ({ page: document.documentElement.scrollHeight, window: window.innerHeight }));
+          expect(scroll.page, `${where}: the page is ${String(scroll.page)} px tall in a ${String(scroll.window)} px window`).toBeLessThanOrEqual(scroll.window + 1);
+          const d = await dock.boundingBox();
+          if (d === null) throw new Error(`${where}: no dock`);
+          expect(Math.abs(d.y + d.height - height), `${where}: the dock's bottom is at ${String(d.y + d.height)}`).toBeLessThanOrEqual(1);
         }).toPass({ timeout: 5000 });
         expect(await picture(), `${where}: the picture drawn`).toBeGreaterThanOrEqual(200);
       }

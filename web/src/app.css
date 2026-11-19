@@ -4948,8 +4948,11 @@ button.link {
    less than it needs (its height is still its content's, as above, so the
    short-window and #1815 cases scroll the page just as before), and otherwise
    the rest of the window, with the dock on its bottom edge. The phone layout
-   keeps its own height. */
-#root:has(> .desktop-bar) {
+   keeps its own height. Only a non-phone lobby straight under #root makes it
+   a column: the sign-in card the shell draws under the strip (checking a kept
+   credential, then the form) keeps its width from its auto margins, which a
+   flex item would instead shrink to fit its content. */
+#root:has(> .desktop-bar):has(> .lobby:not(.phone)) {
   display: flex;
   flex-direction: column;
   min-height: 100vh;
