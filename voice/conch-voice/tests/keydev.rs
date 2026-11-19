@@ -7,9 +7,8 @@
 //! by hand. No test here opens or lists anything under `/dev/input`.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
-// Unix only: A key device is a Linux event device, and the stand-in is a named pipe made
-// with mkfifo. Windows runs the unit tests in `src/`, which include the answers a non-Unix
-// platform gives, and the tests in this directory that need none of this (#1309).
+// The watcher reads synthetic records from Unix FIFOs. The tests that exercise the
+// real evdev open rule are Linux-only.
 #![cfg(unix)]
 
 mod support;
@@ -41,7 +40,8 @@ fn key(key: Key, action: KeyAction) -> Input {
 
 const READY: Input = Input::KeyDevice(DeviceState::Ready);
 
-/// A device that has not been read since the watcher started.
+/// A device that has not been read since the watcher started. Only the Linux tests use it.
+#[cfg(target_os = "linux")]
 fn missing(problem: Problem) -> Input {
     Input::KeyDevice(DeviceState::Missing(problem))
 }
@@ -194,6 +194,7 @@ fn a_device_that_cannot_be_opened_is_said_once_and_opened_when_it_appears() {
     assert_eq!(next(&mut inputs), key(Key::Talk, KeyAction::Press));
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn a_regular_file_and_a_pipe_are_refused_by_the_real_rule_and_nothing_is_read_from_them() {
     let pipe = Pipe::new();
@@ -644,7 +645,7 @@ fn under_the_real_rule_the_path_is_checked_before_it_is_opened_and_the_file_befo
 
 #[test]
 fn withdrawing_permission_does_not_stop_a_watcher_that_has_the_device_open() {
-    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    use std::os::unix::fs::PermissionsExt;
     // Permission is checked when a device is opened. Taking it away afterwards (which is
     // what removing the udev rule or the ACL entry does) changes nothing for a reader
     // that already has the device open: the setup text says so, and this is why.
@@ -654,7 +655,7 @@ fn withdrawing_permission_does_not_stop_a_watcher_that_has_the_device_open() {
     assert_eq!(next(&mut inputs), READY);
 
     std::fs::set_permissions(&pipe.path, std::fs::Permissions::from_mode(0o000)).unwrap();
-    let root = std::fs::metadata("/proc/self").is_ok_and(|own| own.uid() == 0);
+    let root = conch_voice::devices::current_uid() == Some(0);
     assert!(
         root || std::fs::File::open(&pipe.path).is_err(),
         "a new open is refused"
@@ -677,6 +678,7 @@ fn withdrawing_permission_does_not_stop_a_watcher_that_has_the_device_open() {
     }
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn a_device_that_turns_out_to_be_refused_is_said_and_the_watcher_stops() {
     // Under the real rule: first there is nothing at the path, which is tried again; then

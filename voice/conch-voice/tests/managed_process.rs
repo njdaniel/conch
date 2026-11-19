@@ -1,7 +1,7 @@
-//! `conch-voice managed` as a process (`docs/design/tui-voice.md` §2, §8): its event pipe
-//! on file descriptor 3, its exit codes, and that it ends within its bounds when its owner
-//! goes, by the end of its standard input or by its parent dying, with the key device
-//! being read.
+//! `conch-voice managed` as a process: its exit codes and owner-loss bounds over the
+//! Unix socket supplied with `--events-pipe`, or on Linux over the inherited event pipe on
+//! fd 3 (`docs/design/tui-voice.md` §2, §8). Owner loss includes EOF on standard input,
+//! a parent dying, or an EOF or byte on the events socket.
 //!
 //! The same for a v2 owner (`conch.voice_control.v2`, §20): the hello offers both
 //! versions, and the start chooses the one every event after it is in.
@@ -17,15 +17,18 @@
 //! them), and one must never be handed to the helper by accident.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
-// Linux only: reopening fd 3 and finding the socket owner's uid both use /proc.
-// MF2 (#1738) brings up the macOS socket transport and its process tests.
+// Only Linux reopens the inherited FIFO. Linux and macOS share the socket tests.
 // Windows has its own process tests in managed_windows.rs.
-#![cfg(target_os = "linux")]
+#![cfg(any(target_os = "linux", target_os = "macos"))]
 
 mod support;
 
-use std::fs::{File, OpenOptions};
-use std::io::{BufRead, BufReader, Read, Write};
+#[cfg(target_os = "linux")]
+use std::fs::File;
+use std::fs::OpenOptions;
+#[cfg(target_os = "linux")]
+use std::io::{BufRead, BufReader};
+use std::io::{Read, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{ChildStdin, Command, Stdio};
@@ -33,18 +36,22 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
+#[cfg(target_os = "linux")]
 use conch_voice::managed::V1_PUSH_TO_TALK;
 use conch_voice_api::{
     VOICE_CONTROL_OWNER_LOSS_EXIT_MS, VOICE_CONTROL_OWNER_POLL_MS, VoiceControlEvent,
-    VoiceControlEventV2, VoiceControlPhase, VoiceControlReason, VoiceControlStateV2, parse_event,
-    parse_event_v2,
+    VoiceControlPhase, VoiceControlReason, parse_event,
 };
+#[cfg(target_os = "linux")]
+use conch_voice_api::{VoiceControlEventV2, VoiceControlStateV2, parse_event_v2};
 use serde_json::json;
 
 use support::keyboard::Pipe;
 use support::managed::KEYS_TOML;
 use support::reaped::Reaped;
-use support::stub::{FAKE_JOIN, FAKE_LOGIN, FAKE_ROOM, Reply, Stub, whoami};
+#[cfg(target_os = "linux")]
+use support::stub::whoami;
+use support::stub::{FAKE_JOIN, FAKE_LOGIN, FAKE_ROOM, Reply, Stub};
 
 const BIN: &str = env!("CARGO_BIN_EXE_conch-voice");
 
@@ -60,6 +67,7 @@ enum Fd3 {
     /// A regular file at this path.
     File(PathBuf),
     /// A named pipe at this path, which the test reads.
+    #[cfg(target_os = "linux")]
     Pipe(PathBuf),
 }
 
@@ -102,6 +110,7 @@ impl Private {
         self.dir.path()
     }
 
+    #[cfg(target_os = "linux")]
     fn events(&self) -> PathBuf {
         let path = self.path().join("events");
         let made = Command::new("mkfifo").arg(&path).status().unwrap();
@@ -115,7 +124,9 @@ impl Private {
 fn shell_line(fd3: &Fd3, background: bool) -> String {
     let redirect = match fd3 {
         Fd3::Closed => "3>&-",
-        Fd3::File(_) | Fd3::Pipe(_) => "3>\"$f\"",
+        Fd3::File(_) => "3>\"$f\"",
+        #[cfg(target_os = "linux")]
+        Fd3::Pipe(_) => "3>\"$f\"",
     };
     if background {
         // The helper's standard input is the shell's, through fd 4 (an asynchronous
@@ -144,10 +155,13 @@ fn spawn_env(
 ) -> Helper {
     let target = match &fd3 {
         Fd3::Closed => String::new(),
-        Fd3::File(path) | Fd3::Pipe(path) => path.display().to_string(),
+        Fd3::File(path) => path.display().to_string(),
+        #[cfg(target_os = "linux")]
+        Fd3::Pipe(path) => path.display().to_string(),
     };
     let events = Arc::new(Mutex::new(Vec::new()));
     let events_ended = Arc::new(Mutex::new(None));
+    #[cfg(target_os = "linux")]
     if let Fd3::Pipe(path) = &fd3 {
         let (path, kept, ended) = (path.clone(), Arc::clone(&events), Arc::clone(&events_ended));
         std::thread::spawn(move || {
@@ -197,7 +211,10 @@ fn spawn_env(
         events,
         events_ended,
         exited_at: None,
+        #[cfg(target_os = "linux")]
         reads_events: matches!(fd3, Fd3::Pipe(_)) && !background,
+        #[cfg(target_os = "macos")]
+        reads_events: false,
         stderr,
         stderr_reader: Mutex::new(Some(stderr_reader)),
     }
@@ -368,6 +385,8 @@ fn without_its_event_pipe_it_exits_2_having_done_nothing() {
         let stderr = helper.stderr();
         assert_eq!(stderr.lines().count(), 1, "{stderr}");
         assert!(stderr.contains("file descriptor 3"), "{stderr}");
+        #[cfg(target_os = "macos")]
+        assert!(stderr.contains("file descriptor 3 is not open"), "{stderr}");
     }
     assert_eq!(
         std::fs::read(&file).unwrap(),
@@ -378,6 +397,7 @@ fn without_its_event_pipe_it_exits_2_having_done_nothing() {
 
 /// The reason is the one for what the owner handed over (or did not): the runtime's own
 /// descriptors, made after fd 3 is looked at, must not stand in for it (#938).
+#[cfg(target_os = "linux")]
 #[test]
 fn the_event_pipe_refusal_names_what_fd_3_is_not_the_runtimes_descriptor() {
     let private = Private::new(None);
@@ -396,6 +416,7 @@ fn the_event_pipe_refusal_names_what_fd_3_is_not_the_runtimes_descriptor() {
     }
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn the_hello_comes_first_and_an_owner_that_never_starts_it_ends_it() {
     let private = Private::new(None);
@@ -429,6 +450,7 @@ fn the_hello_comes_first_and_an_owner_that_never_starts_it_ends_it() {
     assert_eq!(helper.events().len(), 1, "nothing after the hello");
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn a_bad_first_command_fails_before_anything_is_opened() {
     let private = Private::new(None);
@@ -450,6 +472,7 @@ fn a_bad_first_command_fails_before_anything_is_opened() {
     );
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_identity_that_is_not_the_owners_fails_before_a_session_is_asked_for() {
     let conchd = Stub::start().await;
@@ -485,6 +508,7 @@ async fn an_identity_that_is_not_the_owners_fails_before_a_session_is_asked_for(
 async fn the_end_of_standard_input_ends_it_within_its_bound_while_the_key_device_is_read() {
     let conchd = refusing_stub().await;
     let private = Private::new(Some(KEYS_TOML));
+    #[cfg(target_os = "linux")]
     let events = private.events();
     // The keyboard, held open for as long as the test runs: the watcher stays in its read.
     let keyboard = Pipe::new();
@@ -500,7 +524,10 @@ async fn the_end_of_standard_input_ends_it_within_its_bound_while_the_key_device
     let line = start(&conchd);
     let (code, took, helper) = tokio::task::spawn_blocking(move || {
         let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        #[cfg(target_os = "linux")]
         let mut helper = spawn(&private, Fd3::Pipe(events), &args, false);
+        #[cfg(target_os = "macos")]
+        let (mut helper, _wire) = spawn_socket_owner(&private, &args, false);
         helper.send(&line);
         helper.until("reconnecting with the key device read", |helper| {
             helper.events().iter().any(|event| {
@@ -542,10 +569,14 @@ async fn the_end_of_standard_input_ends_it_within_its_bound_while_the_key_device
 async fn a_parent_that_dies_while_the_control_pipe_stays_open_is_noticed_and_it_ends() {
     let conchd = refusing_stub().await;
     let private = Private::new(None);
+    #[cfg(target_os = "linux")]
     let events = private.events();
     let line = start(&conchd);
     let (took, helper) = tokio::task::spawn_blocking(move || {
+        #[cfg(target_os = "linux")]
         let mut helper = spawn(&private, Fd3::Pipe(events), &NO_DEVICES, true);
+        #[cfg(target_os = "macos")]
+        let (mut helper, _wire) = spawn_socket_owner(&private, &NO_DEVICES, true);
         helper.send(&line);
         helper.until("reconnecting", |helper| {
             helper
@@ -603,6 +634,7 @@ async fn a_parent_that_dies_while_the_control_pipe_stays_open_is_noticed_and_it_
     );
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn sigterm_leaves_as_leave_does_with_reason_signal() {
     let conchd = refusing_stub().await;
@@ -648,6 +680,7 @@ async fn sigterm_leaves_as_leave_does_with_reason_signal() {
 /// The v2 events a helper wrote, read as a v2 owner reads them: the hello by v1's reader,
 /// the rest by v2's (Go's `ParseVoiceControlEventV2` and its `Validate`). A line either
 /// refuses fails the test.
+#[cfg(target_os = "linux")]
 fn events_v2(helper: &Helper) -> Vec<VoiceControlEventV2> {
     let lines = helper.events.lock().unwrap().clone();
     lines
@@ -672,6 +705,7 @@ fn events_v2(helper: &Helper) -> Vec<VoiceControlEventV2> {
         .collect()
 }
 
+#[cfg(target_os = "linux")]
 fn states_v2(helper: &Helper) -> Vec<VoiceControlStateV2> {
     events_v2(helper)
         .into_iter()
@@ -683,6 +717,7 @@ fn states_v2(helper: &Helper) -> Vec<VoiceControlStateV2> {
 }
 
 /// The test options with the key device a named pipe the test holds open, and the pipe.
+#[cfg(target_os = "linux")]
 fn with_keys() -> (Vec<String>, Pipe, File) {
     let keyboard = Pipe::new();
     let held = OpenOptions::new()
@@ -699,6 +734,7 @@ fn with_keys() -> (Vec<String>, Pipe, File) {
 /// A v2 owner, as a process: the start in v2 makes every event after the hello v2, open
 /// mode from `voice.toml` is in force and said, the speakers are said, and the end of
 /// standard input ends the helper within its bound with the key device being read.
+#[cfg(target_os = "linux")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_v2_owner_gets_v2_events_and_the_end_of_standard_input_ends_it_in_open_mode() {
     let conchd = refusing_stub().await;
@@ -773,6 +809,7 @@ async fn a_v2_owner_gets_v2_events_and_the_end_of_standard_input_ends_it_in_open
 
 /// A v1 owner of the same helper, with the same `voice.toml`, as a process: the session is
 /// v1 as it has always been, push-to-talk, and the helper's log says so in one line.
+#[cfg(target_os = "linux")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_v1_owner_with_open_mode_configured_gets_v1_and_one_line_in_the_log() {
     let conchd = refusing_stub().await;
@@ -823,6 +860,7 @@ async fn a_v1_owner_with_open_mode_configured_gets_v1_and_one_line_in_the_log() 
 // the test: a stand-in for the desktop owner. No test here needs more than the others do.
 
 use std::net::Shutdown;
+#[cfg(target_os = "linux")]
 use std::os::fd::OwnedFd;
 use std::os::unix::net::{UnixListener, UnixStream};
 
@@ -831,8 +869,8 @@ use conch_voice_api::{VOICE_CONTROL_PIPE_SCHEMA_V1, parse_attached};
 /// A fake nonce from `pkg/schema/testdata/voice-control-pipe/sensitive.json`.
 const FAKE_NONCE: &str = "FAKE_nonce_do_not_print_0123456789abcdefghA";
 
-/// The owner's side of the endpoint: a private runtime directory with the profile's
-/// directory in it, and the socket bound.
+/// The owner's side of the endpoint: the runtime directory, the socket's private
+/// parent directory, and the bound socket.
 struct Listening {
     run: PathBuf,
     dir: PathBuf,
@@ -847,9 +885,12 @@ fn private_dir(path: &Path) {
 
 fn listening(private: &Private) -> Listening {
     let run = private.path().join("run");
-    let dir = run.join("conch").join("profile");
+    let dir = run.join("conch");
     private_dir(&run);
-    private_dir(&run.join("conch"));
+    private_dir(&dir);
+    // macOS uses the shared conch directory to fit its shorter socket path limit.
+    #[cfg(target_os = "linux")]
+    let dir = dir.join("profile");
     private_dir(&dir);
     let socket = dir.join("e.sock");
     let listener = UnixListener::bind(&socket).unwrap();
@@ -892,7 +933,8 @@ impl Wire {
 
 /// Accepts the helper's connection on a thread, and files what arrives: the first line as
 /// the attach line, every line after it as an event of `helper`'s.
-fn serve(listener: UnixListener, helper: &Helper) -> Wire {
+fn serve(listener: UnixListener, helper: &mut Helper) -> Wire {
+    helper.reads_events = true;
     let wire = Wire {
         raw: Arc::default(),
         peer: Arc::default(),
@@ -944,6 +986,24 @@ fn spawn_endpoint(
     spawn_env(private, fd3, &line, false, &envs)
 }
 
+/// The macOS owner-loss tests use a socket in place of Linux's inherited FIFO.
+#[cfg(target_os = "macos")]
+fn spawn_socket_owner(private: &Private, args: &[&str], background: bool) -> (Helper, Wire) {
+    let owner = listening(private);
+    let socket = socket_str(&owner.socket);
+    let mut line = vec!["--events-pipe", &socket];
+    line.extend_from_slice(args);
+    let mut helper = spawn_env(
+        private,
+        Fd3::Closed,
+        &line,
+        background,
+        &[("CONCH_VOICE_ATTACH", FAKE_NONCE)],
+    );
+    let wire = serve(owner.listener, &mut helper);
+    (helper, wire)
+}
+
 fn socket_str(socket: &Path) -> String {
     socket.display().to_string()
 }
@@ -965,7 +1025,7 @@ async fn the_attach_line_comes_first_then_the_hello_and_the_nonce_is_on_the_wire
             Fd3::Closed,
             &args,
         );
-        let wire = serve(owner.listener, &helper);
+        let wire = serve(owner.listener, &mut helper);
         helper.send(&line);
         helper.until("reconnecting", |helper| {
             helper
@@ -974,12 +1034,8 @@ async fn the_attach_line_comes_first_then_the_hello_and_the_nonce_is_on_the_wire
                 .any(|(phase, _)| *phase == VoiceControlPhase::Reconnecting)
         });
         helper.close();
+        // This also waits for the events reader to collect the final states.
         let code = helper.exit_within(Duration::from_secs(10));
-        // The connection reached its end: what the scan below reads includes the final
-        // stopping and stopped lines.
-        helper.until("the events to end", |helper| {
-            helper.events_ended.lock().unwrap().is_some()
-        });
         (code, helper, wire)
     })
     .await
@@ -1223,11 +1279,22 @@ async fn an_attach_line_that_cannot_be_written_is_exit_2_having_done_nothing_els
                 &NO_DEVICES,
             );
             let deadline = Instant::now() + Duration::from_secs(10);
-            let _held = loop {
+            let _held: Option<UnixStream> = loop {
                 match owner.listener.accept() {
                     Ok((stream, _)) => {
-                        stream.shutdown(Shutdown::Read).unwrap();
-                        break stream;
+                        // Linux fails a write into a socket its peer shut for reading
+                        // (EPIPE); macOS keeps taking such writes, so there the owner
+                        // closes its end outright, which fails the write as Linux does.
+                        #[cfg(target_os = "linux")]
+                        {
+                            stream.shutdown(Shutdown::Read).unwrap();
+                            break Some(stream);
+                        }
+                        #[cfg(not(target_os = "linux"))]
+                        {
+                            drop(stream);
+                            break None;
+                        }
                     }
                     Err(_) if Instant::now() < deadline => std::hint::spin_loop(),
                     Err(error) => panic!("the helper never connected: {error}"),
@@ -1314,7 +1381,7 @@ async fn the_owner_is_lost_by(what: &'static str, act: fn(&Wire)) {
             Fd3::Closed,
             &args,
         );
-        let wire = serve(owner.listener, &helper);
+        let wire = serve(owner.listener, &mut helper);
         helper.send(&line);
         helper.until("reconnecting with the key device read", |helper| {
             helper.events().iter().any(|event| {
@@ -1390,7 +1457,7 @@ fn a_descriptor_at_3_is_not_consulted_when_an_endpoint_is_given() {
         Fd3::File(unrelated.clone()),
         &NO_DEVICES,
     );
-    let wire = serve(owner.listener, &helper);
+    let wire = serve(owner.listener, &mut helper);
     helper.until("the hello", |helper| !helper.events().is_empty());
     // The owner speaks no version it offers: standard input closes with nothing written.
     helper.close();
@@ -1404,6 +1471,7 @@ fn a_descriptor_at_3_is_not_consulted_when_an_endpoint_is_given() {
     assert_eq!(helper.events().len(), 1, "nothing after the hello");
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn without_an_endpoint_the_attach_variable_is_not_read_and_file_descriptor_3_is_the_way() {
     // A value that no nonce rule would accept, in the environment of a helper that is
@@ -1431,6 +1499,7 @@ fn without_an_endpoint_the_attach_variable_is_not_read_and_file_descriptor_3_is_
 /// The finding of `docs/design/linux-desktop.md` §5.1: an Electron owner's fourth stdio
 /// entry is a `SOCK_STREAM` socket, not a pipe, and the helper started that way without
 /// `--events-pipe` refuses it having opened nothing.
+#[cfg(target_os = "linux")]
 #[test]
 fn a_socket_stream_on_fd_3_without_an_endpoint_is_exit_2_not_a_pipe_having_done_nothing() {
     let private = Private::new(None);

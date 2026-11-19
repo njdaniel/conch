@@ -1,5 +1,7 @@
-//! The key device: the configured keyboard's event device, read for the talk, mute and
-//! deafen keys (`docs/design/conch-voice.md` §4).
+//! Key source dispatch and device status. On Linux, the watcher reads the configured
+//! keyboard's event device for the talk, mute and deafen keys (`docs/design/conch-voice.md` §4).
+//! The file watcher also reads a synthetic FIFO for Unix process tests. Windows dispatches
+//! to the Raw Input watcher or its test named pipe in `keys_windows`.
 //!
 //! **Read access to a keyboard's event device exposes every key pressed on it**, in every
 //! application, passwords included. This module is where those bytes enter the program, so
@@ -59,11 +61,13 @@
 
 use std::fmt;
 use std::fs::File;
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 use std::fs::Metadata;
 use std::io::{self, Read};
 #[cfg(unix)]
-use std::os::unix::fs::{FileTypeExt, MetadataExt};
+use std::os::unix::fs::FileTypeExt;
+#[cfg(target_os = "linux")]
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -73,9 +77,11 @@ use tokio::sync::mpsc;
 use crate::session::Input;
 
 /// Where the kernel's input devices are. Only an event device directly in it is read.
+#[cfg(target_os = "linux")]
 pub const DEV_INPUT: &str = "/dev/input";
 
 /// How the kernel names an event device there: this, and then a number.
+#[cfg(target_os = "linux")]
 const EVENT_NAME: &str = "event";
 
 /// How many records one read can take. The kernel hands over as many whole records as fit.
@@ -127,8 +133,8 @@ pub enum Refusal {
     /// ([`DeviceRule::NamedPipeForTests`]).
     NotANamedPipe,
     /// This platform has no event devices to read: key devices are Linux's (`/dev/input`).
-    /// Final, as every refusal but [`Refusal::Changed`] is. A Windows key source is
-    /// separate work (`docs/design/windows-desktop.md` section 4).
+    /// Final, as every refusal but [`Refusal::Changed`] is. Windows uses Raw Input for
+    /// its watcher (`docs/design/windows-desktop.md` section 4).
     Unsupported,
 }
 
@@ -303,6 +309,7 @@ impl DeviceState {
 }
 
 /// True for `event` followed by one or more digits: the name of an event device.
+#[cfg(target_os = "linux")]
 fn is_event_name(name: &str) -> bool {
     name.strip_prefix(EVENT_NAME).is_some_and(|number| {
         !number.is_empty() && number.bytes().all(|digit| digit.is_ascii_digit())
@@ -317,6 +324,7 @@ fn is_event_name(name: &str) -> bool {
 /// The [`Refusal`] for a path that is not strictly under [`DEV_INPUT`]; for one that is
 /// not `event` and a number directly in it; or for something that is not a character
 /// device.
+#[cfg(target_os = "linux")]
 pub fn permitted(canonical: &Path, is_char_device: bool) -> Result<(), Refusal> {
     let dev_input = Path::new(DEV_INPUT);
     // By components, so `/dev/inputs/x` is outside; and the directory itself is not a device.
@@ -341,14 +349,14 @@ pub fn permitted(canonical: &Path, is_char_device: bool) -> Result<(), Refusal> 
 
 /// What makes a device node the one it is: the file system it is on, its inode, and the
 /// device it stands for.
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 fn identity(metadata: &Metadata) -> (u64, u64, u64) {
     (metadata.dev(), metadata.ino(), metadata.rdev())
 }
 
 /// Checks the file that was opened, not the path: it must be a character device, and the
 /// very one the path named when the rule was applied to it.
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 fn confirm(named: &Metadata, opened: &Metadata) -> Result<(), Refusal> {
     if !opened.file_type().is_char_device() {
         return Err(Refusal::NotCharacterDevice);
@@ -362,7 +370,7 @@ fn confirm(named: &Metadata, opened: &Metadata) -> Result<(), Refusal> {
 /// Opens a key device read-only, with ordinary file I/O, and checks what was opened before
 /// anything is read from it.
 ///
-/// Under [`DeviceRule::EventDevice`] the path is resolved first and nothing is opened
+/// On Linux, under [`DeviceRule::EventDevice`], the path is resolved first and nothing is opened
 /// unless it leads to an event device, a character device named `event` and a number
 /// directly in `/dev/input`; what was then opened is checked again from the open file
 /// itself, so that the thing checked is the thing read.
@@ -389,7 +397,7 @@ pub fn open(device: &Path, rule: DeviceRule) -> Result<File, Problem> {
             }
             Ok(file)
         }
-        #[cfg(unix)]
+        #[cfg(target_os = "linux")]
         DeviceRule::EventDevice => {
             let canonical = std::fs::canonicalize(device).map_err(cannot)?;
             // Of the resolved path itself: a link put there since is not followed.
@@ -400,12 +408,11 @@ pub fn open(device: &Path, rule: DeviceRule) -> Result<File, Problem> {
             confirm(&named, &opened).map_err(Problem::Refused)?;
             Ok(file)
         }
-        // Devices and named pipes as these rules mean them are Unix's: a typed refusal, not
-        // a panic, and nothing is opened.
+        // The file watcher opens evdev devices on Linux and test FIFOs on Unix.
+        #[cfg(not(target_os = "linux"))]
+        DeviceRule::EventDevice => Err(Problem::Refused(Refusal::Unsupported)),
         #[cfg(not(unix))]
-        DeviceRule::NamedPipeForTests | DeviceRule::EventDevice => {
-            Err(Problem::Refused(Refusal::Unsupported))
-        }
+        DeviceRule::NamedPipeForTests => Err(Problem::Refused(Refusal::Unsupported)),
     }
 }
 
@@ -687,6 +694,7 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn the_rule_takes_an_event_device_directly_under_dev_input_and_nothing_else() {
         let not_event = Err(Refusal::NotAnEventDevice);
@@ -759,18 +767,25 @@ mod tests {
         );
     }
 
-    /// Where there are no event devices, the two rules that need them refuse without
-    /// opening anything, and the one that opens any file still does.
-    #[cfg(not(unix))]
+    #[cfg(not(target_os = "linux"))]
     #[test]
-    fn without_unix_the_device_rules_refuse_and_never_open() {
-        let refused = Err(Problem::Refused(Refusal::Unsupported));
-        for rule in [DeviceRule::EventDevice, DeviceRule::NamedPipeForTests] {
-            assert_eq!(open(Path::new("anything"), rule).map(|_| ()), refused);
-        }
+    fn outside_linux_the_event_device_rule_refuses_before_opening() {
+        assert_eq!(
+            open(Path::new("anything"), DeviceRule::EventDevice).map(drop),
+            Err(Problem::Refused(Refusal::Unsupported))
+        );
     }
 
-    #[cfg(unix)]
+    #[cfg(not(unix))]
+    #[test]
+    fn outside_unix_the_fifo_rule_refuses_before_opening() {
+        assert_eq!(
+            open(Path::new("anything"), DeviceRule::NamedPipeForTests).map(drop),
+            Err(Problem::Refused(Refusal::Unsupported))
+        );
+    }
+
+    #[cfg(target_os = "linux")]
     #[test]
     fn what_was_opened_must_be_the_character_device_the_path_named() {
         // Character devices that are no keyboard: nothing is read from either.

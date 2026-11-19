@@ -229,24 +229,37 @@ pub fn check_endpoint(path: &Path, uid: u32) -> Result<(), Error> {
     if !directory.file_type().is_dir() {
         return Err(Error::Attach("parent not a directory"));
     }
-    if directory.uid() != uid {
-        return Err(Error::Attach("parent not owned"));
-    }
-    if directory.mode() & 0o777 != 0o700 {
-        return Err(Error::Attach("parent mode"));
-    }
+    let (directory_uid, directory_mode) = (directory.uid(), directory.mode());
+    check_endpoint_owners(uid, directory_uid, directory_mode, None)?;
     let socket = std::fs::symlink_metadata(path).map_err(|_| Error::Attach("cannot examine"))?;
     if !socket.file_type().is_socket() {
         return Err(Error::Attach("not a socket"));
     }
-    if socket.uid() != uid {
+    check_endpoint_owners(uid, directory_uid, directory_mode, Some(socket.uid()))
+}
+
+/// A missing socket UID lets the caller validate the directory before inspecting the socket.
+#[cfg(unix)]
+fn check_endpoint_owners(
+    own_uid: u32,
+    directory_uid: u32,
+    directory_mode: u32,
+    socket_uid: Option<u32>,
+) -> Result<(), Error> {
+    if directory_uid != own_uid {
+        return Err(Error::Attach("parent not owned"));
+    }
+    if directory_mode & 0o777 != 0o700 {
+        return Err(Error::Attach("parent mode"));
+    }
+    if socket_uid.is_some_and(|uid| uid != own_uid) {
         return Err(Error::Attach("not owned"));
     }
     Ok(())
 }
 
-/// Connects to `path`, once: there is no retry on Linux, a socket whose listener is not
-/// there is an owner that is not. The owner's backlog being full would make a blocking
+/// Connects to `path` once. A socket without a listener means the owner is gone.
+/// The owner's backlog being full would make a blocking
 /// connect wait, so it is made on a thread and given what the hello is given.
 ///
 /// # Errors
@@ -1314,6 +1327,34 @@ mod tests {
     }
 
     #[test]
+    fn endpoint_owners_must_both_match_and_the_directory_must_be_private() {
+        let own = 1000;
+        let foreign = 1001;
+        for directory in [own, foreign] {
+            for mode in [0o40700, 0o40755] {
+                for socket in [own, foreign] {
+                    let result = check_endpoint_owners(own, directory, mode, Some(socket)).map_err(
+                        |error| match error {
+                            Error::Attach(reason) => reason,
+                            other => panic!("unexpected error: {other}"),
+                        },
+                    );
+                    let expected = match (directory == own, mode == 0o40700, socket == own) {
+                        (false, _, _) => Err("parent not owned"),
+                        (true, false, _) => Err("parent mode"),
+                        (true, true, false) => Err("not owned"),
+                        (true, true, true) => Ok(()),
+                    };
+                    assert_eq!(
+                        result, expected,
+                        "directory={directory} mode={mode:o} socket={socket}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn a_socket_in_a_private_directory_of_ours_passes() {
         let fixture = fixture();
         check_endpoint(&fixture.socket, fixture.uid).unwrap();
@@ -1385,14 +1426,15 @@ mod tests {
 
     /// The directory's owner is its own refusal, before its mode: a socket of ours in a
     /// directory of someone else's (`/dev/shm` is root's) is `parent not owned`, though the
-    /// socket is ours. Needs a writable `/dev/shm`; where there is none the case is skipped.
+    /// socket is ours. Needs a writable Linux `/dev/shm`.
+    #[cfg(target_os = "linux")]
     #[test]
     fn a_directory_of_someone_elses_is_refused_though_the_socket_is_ours() {
         let shm = Path::new("/dev/shm");
         let Ok(root_owned) = std::fs::metadata(shm).map(|m| m.uid()) else {
             return;
         };
-        let ours = std::fs::metadata("/proc/self").unwrap().uid();
+        let ours = crate::devices::current_uid().unwrap();
         if root_owned == ours {
             return;
         }
@@ -1446,10 +1488,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(
-        target_os = "macos",
-        ignore = "MF2 (#1738): successful socket attach needs a macOS current_uid implementation"
-    )]
     fn attach_attaches_with_the_line_first_and_hands_back_both_handles() {
         let fixture = fixture();
         let scrubber = Scrubber::new();

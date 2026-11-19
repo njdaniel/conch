@@ -678,6 +678,7 @@ async fn joining(private: &Path, extra: &[&str]) -> (Command, Stub, NotLiveKit) 
     (command, conchd, not_livekit)
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_key_device_that_cannot_be_opened_is_said_once_and_the_client_runs_on_with_no_input() {
     for json in [false, true] {
