@@ -82,15 +82,12 @@ import type { CommandResult } from './supervisor.ts';
 import type { Companion, RemoveReason, ShareRef } from './companion.ts';
 import { COMPANION_PASS_MS } from './companion.ts';
 
-// The one switch, read by main alone. On Linux, share sound is offered by
-// default (Nick, 2026-11-18, #1952, ahead of the by-hand L-S6 run in #922);
-// the exact value "0" turns it off. Never the renderer's, never a profile's,
-// never an argument. Every other rule (consent per share, its own mute, the
-// call excluded, lock, leave and quit ending it) is unchanged by the default.
+// The one switch, read by main alone: the exact value "1", on Linux. Never the
+// renderer's, never a profile's, never an argument.
 export const SHARE_AUDIO_FLAG = 'CONCH_LINUX_SHARE_AUDIO';
 
 export function linuxShareAudioEnabled(env: NodeJS.ProcessEnv, platform: NodeJS.Platform): boolean {
-  return platform === 'linux' && env[SHARE_AUDIO_FLAG] !== '0';
+  return platform === 'linux' && env[SHARE_AUDIO_FLAG] === '1';
 }
 
 // The name this app's own audio streams carry (the registered application

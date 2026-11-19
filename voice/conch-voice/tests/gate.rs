@@ -657,18 +657,21 @@ async fn the_gates_own_cap_ends_a_transmission_when_no_timer_fires() {
 // ------------------------------------------------------------------ the open microphone
 //
 // `talk_mode = "open"` (`docs/design/tui-voice.md` §20.6), with a scripted microphone read
-// every 10 ms, the default level (-40 dBFS) and hang (400 ms, forty frames), and the rig's
+// every 10 ms, the default level (-40 dBFS) and hang (800 ms, eighty frames), and the rig's
 // release tail of 20 ms (two frames).
 
 use std::sync::Arc;
 
 use conch_voice::session::Timings;
-use conch_voice_control::{Key, KeyAction, KeyEvent, TalkMode};
+use conch_voice_audio::FRAME_MS;
+use conch_voice_control::{DEFAULT_OPEN_HANG_MS, Key, KeyAction, KeyEvent, TalkMode};
 use support::MakeMic;
 use support::script::{After, Played, Script, Switch, frame_number};
 
 /// The hang, in frames.
-const HANG: u64 = 40;
+const HANG: u64 = (DEFAULT_OPEN_HANG_MS / FRAME_MS) as u64;
+/// The four loud frames used for the 40 ms attack, before the gate can send audio.
+const ATTACK: u64 = 4;
 /// The release tail, in frames.
 const TAIL: u64 = 2;
 /// Frames the gate may forward past the hang and tail while the session tells it quiet has
@@ -700,7 +703,7 @@ fn scripted(microphone: MakeMic, played: &Arc<Played>) -> Setup {
 /// The numbers of the scripted frames the track was handed, in order.
 fn sent(rig: &Rig) -> Vec<u64> {
     rig.sdk
-        .first_samples()
+        .middle_samples()
         .into_iter()
         .map(frame_number)
         .collect()
@@ -716,7 +719,7 @@ async fn transmissions(rig: &Rig, pairs: usize) {
 
 /// Issue #654's first criterion: a microphone of 1 s silence, 1 s tone, 1 s silence and
 /// 0.5 s tone is two transmissions. Frames reach the track only from each tone's onset to
-/// its end, the hang and the release tail; the onset frame itself is not sent.
+/// its end, the hang and the release tail; none of the attack frames are sent.
 #[tokio::test]
 async fn in_open_mode_two_utterances_are_two_transmissions_sent_from_onset_to_hang_and_tail() {
     let (mic, played) = Script::make(
@@ -734,28 +737,25 @@ async fn in_open_mode_two_utterances_are_two_transmissions_sent_from_onset_to_ha
         ["started", "stopped", "started", "stopped"]
     );
     let sent = sent(&rig);
-    // (onset, end): the frames of each tone.
+    // (start, end): the frames of each tone.
     let tones = [(100, 200), (300, 350)];
-    for &(onset, end) in &tones {
+    for &(start, end) in &tones {
         let last = end - 1 + HANG + TAIL;
-        let of_this: Vec<u64> = sent
-            .iter()
-            .copied()
-            .filter(|n| (onset..=last + SLACK).contains(n))
-            .collect();
-        assert!(
-            !of_this.contains(&onset),
-            "the onset frame was sent: {sent:?}"
+        // The first frame sent follows the four attack frames.
+        assert_eq!(
+            sent.iter().find(|&&n| n >= start),
+            Some(&(start + ATTACK)),
+            "{sent:?}"
         );
         // The tone to its end, and the hang and tail after it, reached the track.
         for n in [end - 1, end - 1 + HANG, last] {
-            assert!(of_this.contains(&n), "frame {n} is missing: {sent:?}");
+            assert!(sent.contains(&n), "frame {n} is missing: {sent:?}");
         }
     }
     for n in &sent {
         let inside = tones
             .iter()
-            .any(|&(onset, end)| *n > onset && *n <= end - 1 + HANG + TAIL + SLACK);
+            .any(|&(start, end)| (start + ATTACK..=end - 1 + HANG + TAIL + SLACK).contains(n));
         assert!(inside, "frame {n} outside every transmission: {sent:?}");
     }
     assert_frames_only_while_unmuted(&rig.sdk.calls());
@@ -783,7 +783,7 @@ async fn in_open_mode_nothing_is_sent_muted_or_deafened_and_unmuting_needs_a_fre
     let rig = Rig::start_with(Stub::start().await, open_mode(mic), |_| {}).await;
     rig.ready().await;
     let set = |on: bool| loud.set(on);
-    // Sixty frames: longer than the hang of forty, counted as the detector counts.
+    // A full hang plus twenty frames, counted as the detector counts.
     let longer_than_the_hang = || loud.frames_pass(HANG + 20);
     // The detector hears its first quiet.
     longer_than_the_hang().await;
@@ -836,8 +836,15 @@ async fn in_open_mode_nothing_is_sent_muted_or_deafened_and_unmuting_needs_a_fre
 /// not open again until quiet and a new onset.
 #[tokio::test]
 async fn in_open_mode_the_limit_cuts_a_long_tone_and_stands_until_quiet_and_a_new_onset() {
+    const FIRST_TONE: u64 = 50 + HANG;
+    const SECOND_TONE: u64 = FIRST_TONE + 300 + HANG + 20;
     let (mic, played) = Script::make(
-        &[(50, false), (300, true), (60, false), (30, true)],
+        &[
+            (FIRST_TONE, false),
+            (300, true),
+            (HANG + 20, false),
+            (30, true),
+        ],
         After::Quiet,
     );
     let setup = Setup {
@@ -858,20 +865,20 @@ async fn in_open_mode_the_limit_cuts_a_long_tone_and_stands_until_quiet_and_a_ne
         ["started", "stopped", "started", "stopped"]
     );
     let sent = sent(&rig);
-    let (first, second): (Vec<u64>, Vec<u64>) = sent.iter().partition(|n| **n < 410);
+    let (first, second): (Vec<u64>, Vec<u64>) = sent.iter().partition(|n| **n < SECOND_TONE);
     // One second of the tone at most, and none of the rest of it.
     assert!(first.len() <= 100, "{} frames in the first", first.len());
-    assert!(first.iter().all(|n| *n > 50), "{sent:?}");
+    assert_eq!(first.first(), Some(&(FIRST_TONE + ATTACK)), "{sent:?}");
+    assert!(first.iter().all(|n| *n >= FIRST_TONE + ATTACK), "{sent:?}");
     let (lo, hi) = (first[0], first[first.len() - 1]);
     assert!(hi - lo < 100, "the first opening ran from {lo} to {hi}");
-    assert!(hi < 349, "the tone was not cut: {sent:?}");
+    assert!(hi < FIRST_TONE + 299, "the tone was not cut: {sent:?}");
     // The second opening: from the new onset to its hang and tail.
+    assert_eq!(second.first(), Some(&(SECOND_TONE + ATTACK)), "{sent:?}");
     assert!(
-        !second.is_empty() && second.iter().all(|n| *n > 410),
-        "{sent:?}"
-    );
-    assert!(
-        second.iter().all(|n| *n <= 439 + HANG + TAIL + SLACK),
+        second
+            .iter()
+            .all(|n| (SECOND_TONE + ATTACK..=SECOND_TONE + 29 + HANG + TAIL + SLACK).contains(n)),
         "{sent:?}"
     );
     assert_frames_only_while_unmuted(&rig.sdk.calls());
@@ -879,29 +886,33 @@ async fn in_open_mode_the_limit_cuts_a_long_tone_and_stands_until_quiet_and_a_ne
 }
 
 /// A microphone that trickles one quiet frame every 200 ms after an utterance (the review's
-/// S2): counted in frames, quiet would come only after twenty of them, 4 s. The gate shuts
+/// S2): counted in frames, quiet would come only after eighty of them, 16 s. The gate shuts
 /// within the hang and the tail of the last loud frame, by the clock.
 #[tokio::test]
 async fn in_open_mode_a_trickling_microphone_shuts_the_gate_within_hang_and_tail() {
+    const START: u64 = HANG + 20;
+    const END: u64 = START + 60;
     let (mic, played) = Script::make(
-        &[(50, false), (60, true)],
+        &[(START, false), (END - START, true)],
         After::Trickle(Duration::from_millis(200)),
     );
     let rig = Rig::start_with(Stub::start().await, open_mode(mic), |_| {}).await;
     rig.talking().await;
     rig.until("the last loud frame", |_| {
-        played.frames.load(std::sync::atomic::Ordering::SeqCst) > 110
+        played.frames.load(std::sync::atomic::Ordering::SeqCst) > END
     })
     .await;
     rig.not_talking().await;
     let last_loud = played.last_loud_at.lock().unwrap().unwrap();
-    let after = last_loud.elapsed();
+    let after = rig.sdk.last_mute_at().unwrap().duration_since(last_loud);
+    let hang = Duration::from_millis(u64::from(DEFAULT_OPEN_HANG_MS));
+    let tail = Duration::from_millis(TAIL * u64::from(FRAME_MS));
     assert!(
-        after >= Duration::from_millis(380),
+        after >= hang - Duration::from_millis(20),
         "shut before the hang: {after:?}"
     );
     assert!(
-        after <= Duration::from_millis(400 + 20 + 300),
+        after <= hang + tail + Duration::from_millis(300),
         "shut {after:?} after the last loud frame"
     );
     transmissions(&rig, 1).await;
@@ -914,28 +925,36 @@ async fn in_open_mode_a_trickling_microphone_shuts_the_gate_within_hang_and_tail
 /// hang and the tail: time with no frame is quiet, and the tail, counted in frames, is cut.
 #[tokio::test]
 async fn in_open_mode_a_microphone_that_stops_delivering_shuts_the_gate_within_hang_and_tail() {
-    let (mic, played) = Script::make(&[(50, false), (60, true)], After::Stop);
+    const START: u64 = HANG + 20;
+    const END: u64 = START + 60;
+    let (mic, played) = Script::make(&[(START, false), (END - START, true)], After::Stop);
     let rig = Rig::start_with(Stub::start().await, open_mode(mic), |_| {}).await;
     rig.talking().await;
     rig.until("the script's end", |_| {
-        played.frames.load(std::sync::atomic::Ordering::SeqCst) == 110
+        played.frames.load(std::sync::atomic::Ordering::SeqCst) == END
     })
     .await;
     rig.not_talking().await;
     let last = played.last_at.lock().unwrap().unwrap();
-    let after = last.elapsed();
-    // The hang is 400 ms and the tail 20; the rest is the loop and this test looking.
+    let after = rig.sdk.last_mute_at().unwrap().duration_since(last);
+    // The configured hang and tail, with room for the loop to handle the shut.
+    let hang = Duration::from_millis(u64::from(DEFAULT_OPEN_HANG_MS));
+    let tail = Duration::from_millis(TAIL * u64::from(FRAME_MS));
     assert!(
-        after >= Duration::from_millis(380),
+        after >= hang - Duration::from_millis(20),
         "shut before the hang: {after:?}"
     );
     assert!(
-        after <= Duration::from_millis(400 + 20 + 300),
+        after <= hang + tail + Duration::from_millis(300),
         "shut {after:?} after the last frame"
     );
     transmissions(&rig, 1).await;
     assert_eq!(rig.conchd.reported(), ["started", "stopped"]);
-    assert!(sent(&rig).iter().all(|n| *n > 50 && *n < 110));
+    let sent = sent(&rig);
+    assert!(
+        sent.iter().all(|n| (START + ATTACK..END).contains(n)),
+        "{sent:?}"
+    );
     assert!(rig.sdk.is_muted());
     assert_eq!(rig.sdk.frames_while_muted(), 0);
 }

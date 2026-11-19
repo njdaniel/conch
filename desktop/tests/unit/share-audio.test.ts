@@ -35,16 +35,13 @@ async function sounding(r: Rig): Promise<number> {
 }
 
 describe('the switch', () => {
-  it('is on by default on Linux, off for CONCH_LINUX_SHARE_AUDIO=0 exactly, and never elsewhere (#1952)', () => {
-    expect(linuxShareAudioEnabled({}, 'linux')).toBe(true);
-    for (const value of [undefined, '', '1', 'true', 'yes', 'off', ' 0', '0 ', '00', 'false']) {
-      expect(linuxShareAudioEnabled({ CONCH_LINUX_SHARE_AUDIO: value }, 'linux'), String(value)).toBe(true);
+  it('is CONCH_LINUX_SHARE_AUDIO=1 exactly, on Linux, and nothing else', () => {
+    expect(linuxShareAudioEnabled({ CONCH_LINUX_SHARE_AUDIO: '1' }, 'linux')).toBe(true);
+    for (const value of [undefined, '', '0', 'true', 'yes', 'on', ' 1', '1 ', '01', '2', 'TRUE']) {
+      expect(linuxShareAudioEnabled({ CONCH_LINUX_SHARE_AUDIO: value }, 'linux'), String(value)).toBe(false);
     }
-    expect(linuxShareAudioEnabled({ CONCH_LINUX_SHARE_AUDIO: '0' }, 'linux')).toBe(false);
-    for (const platform of ['win32', 'darwin'] as const) {
-      expect(linuxShareAudioEnabled({}, platform)).toBe(false);
-      expect(linuxShareAudioEnabled({ CONCH_LINUX_SHARE_AUDIO: '1' }, platform)).toBe(false);
-    }
+    expect(linuxShareAudioEnabled({}, 'linux')).toBe(false);
+    for (const platform of ['win32', 'darwin'] as const) expect(linuxShareAudioEnabled({ CONCH_LINUX_SHARE_AUDIO: '1' }, platform)).toBe(false);
   });
 
   it('the application name is the registered one when the wire can carry it, else the product’s', () => {

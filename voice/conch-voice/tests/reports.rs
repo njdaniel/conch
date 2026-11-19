@@ -633,7 +633,8 @@ async fn a_started_answered_401_stops_the_client_and_mutes_the_track() {
 // ------------------------------------------------------------------ the open microphone
 
 use conch_voice::session::OPEN_MIC_WARNING;
-use conch_voice_control::TalkMode;
+use conch_voice_audio::FRAME_MS;
+use conch_voice_control::{DEFAULT_OPEN_HANG_MS, TalkMode};
 use support::script::{After, Script};
 
 /// Each opening of the open microphone is one transmission: `started` before its track is
@@ -691,7 +692,8 @@ async fn in_open_mode_each_opening_is_reported_started_then_stopped_once() {
 /// words the user's own state for it.
 #[tokio::test]
 async fn in_open_mode_plain_output_warns_once_and_says_open_microphone_and_talking() {
-    let (mic, _) = Script::make(&[(50, false), (40, true)], After::Quiet);
+    let quiet = u64::from(DEFAULT_OPEN_HANG_MS / FRAME_MS) + 20;
+    let (mic, _) = Script::make(&[(quiet, false), (40, true)], After::Quiet);
     let setup = Setup {
         json: false,
         talk_mode: TalkMode::Open,

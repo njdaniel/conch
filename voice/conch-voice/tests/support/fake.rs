@@ -17,7 +17,7 @@ use conch_voice::sdk::{
 };
 use conch_voice::secrets::Scrubber;
 use conch_voice_api::Secret;
-use conch_voice_audio::{Frame, GatedFrame, StereoFrame};
+use conch_voice_audio::{FRAME_LEN, Frame, GatedFrame, StereoFrame};
 use tokio::sync::{Notify, mpsc};
 
 /// One thing the client did to the SDK.
@@ -144,8 +144,10 @@ struct Inner {
     /// Frames handed over while the track was muted or disabled.
     frames_while_muted: u64,
     /// The first sample of each frame handed over, in order: a scripted microphone
-    /// (`support::Script`) tells its frames apart by it.
+    /// can tell which microphone a frame came from.
     first_samples: Vec<f32>,
+    /// The middle sample of each frame handed over, in order.
+    middle_samples: Vec<f32>,
     tracks: u64,
     share: ShareSide,
 }
@@ -333,6 +335,11 @@ impl FakeSdk {
     /// The first sample of every frame handed over, in order.
     pub fn first_samples(&self) -> Vec<f32> {
         self.lock().first_samples.clone()
+    }
+
+    /// The middle sample of every frame handed over, in order.
+    pub fn middle_samples(&self) -> Vec<f32> {
+        self.lock().middle_samples.clone()
     }
 
     /// The join token of every connection attempt, in order.
@@ -827,6 +834,7 @@ impl MicFeed for FakeFeed {
                 inner.calls.push(Call::Frame);
                 inner.frames += 1;
                 inner.first_samples.push(frame.samples()[0]);
+                inner.middle_samples.push(frame.samples()[FRAME_LEN / 2]);
                 if frame.samples().iter().any(|sample| *sample != 0.0) {
                     inner.loud_frames += 1;
                 }

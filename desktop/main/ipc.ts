@@ -108,7 +108,7 @@ export type ProfilesApi = Pick<
 export type InstalledApi = Pick<Installed, 'view' | 'restart'>;
 export type InvitesApi = Pick<Invites, 'check' | 'accept' | 'cancel' | 'take' | 'arrived'>;
 
-export type VoiceApi = Pick<VoiceService, 'state' | 'join' | 'leave' | 'retry' | 'setMute' | 'setDeafen' | 'setDevices' | 'setTalkMode' | 'devices' | 'saveDevice' | 'keyDevices' | 'saveTalkBinding'>;
+export type VoiceApi = Pick<VoiceService, 'state' | 'join' | 'leave' | 'retry' | 'setMute' | 'setDeafen' | 'setDevices' | 'setTalkMode' | 'setAndSaveTalkMode' | 'devices' | 'saveDevice' | 'keyDevices' | 'saveTalkBinding'>;
 export type NotificationsApi = Pick<Notifications, 'show' | 'close' | 'supported'>;
 
 export type SettingsApi = Pick<SettingsService, 'view' | 'set'>;
@@ -681,23 +681,34 @@ export const SPECS: Readonly<Record<InvokedFunction, Spec>> = {
     parse: parseDevices,
     run: ({ voice }, [devices]) => voice.setDevices(devices as { input?: string; output?: string }),
   },
+  // A confirmed open-mic choice can switch and save on the same gesture
+  // (issue #1993). Push-to-talk reduces microphone exposure and can be chosen
+  // with a radio arrow key, which arms no gesture. A save uses the validated mode.
   voiceSetTalkMode: {
     limit: 30,
     maxBytes: 32,
-    parse: (args) => (args.length === 1 && typeof args[0] === 'string' && voiceControlTalkMode(args[0]).length === 0 ? args : null),
-    run: ({ voice }, [mode]) => voice.setTalkMode(mode as VoiceControlTalkMode),
-    gesture: (args) => args[0] === 'open',
+    parse: (args) => (
+      (args.length === 1 || (args.length === 2 && args[1] === true))
+      && typeof args[0] === 'string' && voiceControlTalkMode(args[0]).length === 0 ? args : null
+    ),
+    run: ({ voice }, [mode, save]) => save === true
+      ? voice.setAndSaveTalkMode(mode as VoiceControlTalkMode)
+      : voice.setTalkMode(mode as VoiceControlTalkMode),
+    gesture: ([mode]) => mode === 'open',
   },
   // The helper's one-shot runs (issue #1378). The list is read-only; a save
-  // writes the person's voice.toml and is the person's act alone. Each is
-  // one process at a time, so the rates are low.
+  // writes the person's voice.toml and requires a gesture except for choosing
+  // push-to-talk. Each is one process at a time, so the rates are low.
   voiceDevices: { limit: 30, maxBytes: 0, parse: none, run: ({ voice }) => voice.devices() },
   voiceSaveDevice: {
     limit: 30,
     maxBytes: 2 * VOICE_DEVICES_MAX_NAME_BYTES + 128,
     parse: parseSaveDevice,
     run: ({ voice }, [request]) => voice.saveDevice(request as { key: VoiceDeviceKey; value: string }),
-    gesture: true,
+    gesture: ([request]) => {
+      const { key, value } = request as { key: VoiceDeviceKey; value: string };
+      return key !== 'audio.talk_mode' || value !== 'push_to_talk';
+    },
   },
   // Talk-key setup (issue #1381). The listing opens no device; a save writes
   // the person's voice.toml and is the person's act alone. Two processes in a
