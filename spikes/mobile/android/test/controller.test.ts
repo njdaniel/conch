@@ -8,6 +8,7 @@ import { VoiceController, type NativePort, type RoomEvents, type RoomPort, type 
 import { appStateOf, deliver } from '../src/app/bridge';
 import { defaultTail, phoneMax } from '../src/logic/gate';
 import { reportWait } from '../src/logic/mic';
+import { settledRetired, type Retired } from '../src/logic/dropped';
 import type { VoicePresenceV1, VoiceSessionResponseV1, VoiceTransmitState } from '../src/logic/schema/generated';
 import { tapAgain } from '../src/app/camera/controls';
 import { FakeClock, settle } from './fakes';
@@ -91,16 +92,29 @@ class FakeRoom implements RoomPort {
   }
   // Set before the room is dropped: its disconnect then settles only when
   // finishDisconnect is called, as a room whose SDK is still reconnecting on
-  // its own does (#1972).
+  // its own does (#1972). finishDisconnect(false) is the limit reached: the
+  // room lingers until finishLinger is called.
   slowDisconnect = false;
-  finishDisconnect: () => void = () => undefined;
-  disconnect(): Promise<void> {
+  finishDisconnect: (settled?: boolean) => void = () => undefined;
+  finishLinger: () => void = () => undefined;
+  disconnect(): Promise<Retired> {
     this.log.push('room disconnect');
-    if (!this.slowDisconnect) return Promise.resolve();
+    if (!this.slowDisconnect) return Promise.resolve(settledRetired);
     return new Promise((resolve) => {
-      this.finishDisconnect = () => {
-        this.log.push('room settled');
-        resolve();
+      this.finishDisconnect = (settled = true) => {
+        if (settled) {
+          this.log.push('room settled');
+          resolve(settledRetired);
+          return;
+        }
+        this.log.push('room lingers');
+        const lingering = new Promise<void>((done) => {
+          this.finishLinger = () => {
+            this.log.push('room settled');
+            done();
+          };
+        });
+        resolve({ settled: false, lingering });
       };
     });
   }
@@ -465,6 +479,87 @@ test('a dropped room still reconnecting on its own is waited for: no new session
   assert.equal(l.c.state.phase, 'idle');
   assert.equal(l.log.filter((x) => x === 'session').length, 1);
   assert.equal(l.rooms.length, 1);
+});
+
+test('the app going away while a dropped room settles: no session, no room, it leaves and says so (M-L7, #1972)', async () => {
+  // Each way of going away, after the drop, before the dropped room settles.
+  const ways: [string, (r: Rig) => void][] = [
+    ['HOME', (r) => {
+      r.c.appState('background');
+      r.c.activityStopped(true);
+    }],
+    ['background', (r) => r.c.appState('background')],
+    ['lock', (r) => r.c.screenLocked(true)],
+  ];
+  for (const [name, goAway] of ways) {
+    const r = rig();
+    await joined(r);
+    const dropped = r.rooms[0];
+    assert.ok(dropped !== undefined);
+    dropped.slowDisconnect = true;
+    dropped.events?.onDisconnected('lost');
+    await settle();
+    r.clock.advance(60_000);
+    await settle();
+    assert.equal(r.c.state.phase, 'reconnecting', name);
+    goAway(r);
+    dropped.finishDisconnect();
+    await settle();
+    r.clock.advance(60_000);
+    await settle();
+    assert.equal(r.c.state.phase, 'idle', name);
+    assert.match(r.c.state.why ?? '', /app was away/, name);
+    assert.equal(r.log.filter((l) => l === 'session').length, 1, `${name}: no session from the background`);
+    assert.equal(r.rooms.length, 1, `${name}: no room from the background`);
+    assert.ok(r.log.includes('service stop'), name);
+  }
+});
+
+test('a dropped room still unsettled at the limit: the next connection goes ahead, and a displacement while it lingers reconnects instead of stopping (#1972)', async () => {
+  const r = rig();
+  await joined(r);
+  const dropped = r.rooms[0];
+  assert.ok(dropped !== undefined);
+  dropped.slowDisconnect = true;
+  dropped.events?.onDisconnected('lost');
+  await settle();
+  r.clock.advance(60_000);
+  await settle();
+  // The limit: the dropped room did not settle, and lingers.
+  dropped.finishDisconnect(false);
+  await settle();
+  r.clock.advance(60_000);
+  await settle();
+  assert.equal(r.c.state.phase, 'connected', 'not held back past the limit');
+  assert.equal(r.rooms.length, 2);
+  const second = r.rooms[1];
+  assert.ok(second !== undefined);
+
+  // The lingering engine came back on its old token and displaced the
+  // replacement: reconnect, but only once the lingering one has settled.
+  second.events?.onDisconnected('duplicate_identity');
+  await settle();
+  r.clock.advance(60_000);
+  await settle();
+  assert.equal(r.c.state.phase, 'reconnecting', 'not stopped: the displacer was the phone\'s own');
+  assert.equal(r.rooms.length, 2, 'no room while the lingering one may still come back');
+  dropped.finishLinger();
+  await settle();
+  r.clock.advance(60_000);
+  await settle();
+  assert.equal(r.c.state.phase, 'connected');
+  assert.equal(r.rooms.length, 3);
+  const s = steps(r.log);
+  assert.ok(s.lastIndexOf('room settled') < s.lastIndexOf('session'), 'the session is asked for after the lingering room settled');
+
+  // Nothing lingers now: a displacement is another device's, and stops.
+  r.rooms[2]?.events?.onDisconnected('duplicate_identity');
+  await settle();
+  r.clock.advance(60_000);
+  await settle();
+  assert.equal(r.c.state.phase, 'idle');
+  assert.match(r.c.state.why ?? '', /Another device/);
+  assert.equal(r.rooms.length, 3);
 });
 
 test('opening the app never joins voice', () => {

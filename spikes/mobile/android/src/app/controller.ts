@@ -17,9 +17,13 @@
 //    disconnects, focus is abandoned and the service stops.
 //  - One connection at a time: after a room is dropped, the next connection
 //    waits until the dropped one has stopped reconnecting on its own (#1972),
-//    so the SDK's rejoin and the app's never both stand.
+//    so the SDK's rejoin and the app's never both stand. The wait is bounded
+//    (logic/dropped.ts); a dropped room still unsettled at the limit lingers
+//    under guard, and a displacement while one lingers is taken for its doing
+//    and reconnected, not for another device's.
 import type { Clock } from '../logic/clock';
 import { cameraOff, type CameraRoom, type CameraState } from '../logic/camera';
+import type { Retired } from '../logic/dropped';
 import { afterDisconnect, afterRefusal, cameraAfter, retryDelay, type DisconnectCause, type Next } from '../logic/disconnect';
 import { TransmitGate, phoneMax, type GateMode } from '../logic/gate';
 import { Lifecycle, type AppState } from '../logic/lifecycle';
@@ -81,7 +85,9 @@ export interface RoomPort {
   // Unmutes (true) or mutes (false) the track and its publication.
   setSending(sending: boolean): Promise<void>;
   setDeafened(deafened: boolean): void;
-  disconnect(): Promise<void>;
+  // Resolves once the connection can no longer come back on its own, or at
+  // the limit with what still lingers (logic/dropped.ts, #1972).
+  disconnect(): Promise<Retired>;
   // The camera of this connection (logic/camera.ts CameraRoom). Nothing is
   // captured until the camera button is pressed.
   readonly camera: CameraRoom;
@@ -172,6 +178,10 @@ export class VoiceController {
   // stopped reconnecting on its own (#1972). A new connection waits for it,
   // so the SDK's rejoin and the app's never both stand.
   private dropping: Promise<void> = Promise.resolve();
+  // The dropped rooms still unsettled at the limit, whose guard is still
+  // running (Retired.lingering), and the end of all of them.
+  private lingering = 0;
+  private lingered: Promise<void> = Promise.resolve();
   // Numbers each join and each connection: a late answer from an older one
   // does nothing.
   private attempt = 0;
@@ -354,15 +364,20 @@ export class VoiceController {
     this.lifecycleChanged(before);
   }
 
-  private async connect(channel: string, mine: number): Promise<void> {
+  // again is a reconnect after a drop (afterAway), not a Join press.
+  private async connect(channel: string, mine: number, again = false): Promise<void> {
     // A dropped room may still be rejoining on its old token (the SDK's own
     // reconnect, which its disconnect has to stop: livekit.ts, #1972). The
     // session is asked for only once it has stopped; a session asked for
     // earlier could be displaced by it.
     await this.dropping;
     if (mine !== this.attempt) return;
+    // The app may have gone away during that wait: a connection that ended
+    // is not opened again from the background (M-L7, as afterAway).
+    if (again && this.awayNow()) return;
     const session = await this.o.api.voiceSession(channel);
     if (mine !== this.attempt) return;
+    if (again && this.awayNow()) return;
     if (!session.ok) {
       this.camera.refused();
       this.act(afterRefusal(session), mine);
@@ -397,9 +412,18 @@ export class VoiceController {
         // The SDK's own reconnect: the camera's claim is named again.
         void this.camera.reconnected();
       },
-      onDisconnected: (cause) => {
+      onDisconnected: (reported) => {
         if (mine !== this.attempt || room !== this.room) return;
-        this.o.log(`disconnected: ${cause}`);
+        this.o.log(`disconnected: ${reported}`);
+        let cause = reported;
+        if (cause === 'duplicate_identity' && this.lingering > 0) {
+          // Displaced while a dropped room of this phone's own may still come
+          // back on its old token (#1972): that is the likelier displacer, so
+          // the phone reconnects, once it has settled, instead of stopping.
+          this.o.log('displaced while a dropped connection lingers: reconnecting');
+          this.dropping = Promise.all([this.dropping, this.lingered]).then(() => undefined);
+          cause = 'lost';
+        }
         // The capture stops, or is held for the next connection, before
         // anything else is decided (disconnect.ts cameraAfter).
         this.camera.lost(cameraAfter(cause));
@@ -476,8 +500,16 @@ export class VoiceController {
     this.retryTimer = this.o.clock.setTimeout(() => {
       this.retryTimer = null;
       if (mine !== this.attempt) return;
-      void this.connect(channel, mine);
+      void this.connect(channel, mine, true);
     }, delay);
+  }
+
+  // awayNow is afterAway's check, again later on: while the app is away the
+  // phone leaves voice and says so, rather than open a connection.
+  private awayNow(): boolean {
+    if (!this.lifecycle.blocked) return false;
+    void this.leave(away, false);
+    return true;
   }
 
   private dropRoom(): void {
@@ -491,11 +523,26 @@ export class VoiceController {
   }
 
   // retire disconnects a room that is no longer the phone's, and adds its
-  // disconnect to what the next connection waits for.
+  // disconnect to what the next connection waits for. One still unsettled at
+  // the limit is counted as lingering until its guard ends.
   private retire(room: RoomPort): void {
-    const gone = room.disconnect().catch(() => undefined);
+    const gone = room.disconnect().then(
+      (retired) => {
+        if (retired.lingering !== null) this.linger(retired.lingering);
+      },
+      () => undefined,
+    );
     const before = this.dropping;
     this.dropping = Promise.all([before, gone]).then(() => undefined);
+  }
+
+  private linger(guard: Promise<void>): void {
+    this.lingering++;
+    this.o.log('a dropped connection is still reconnecting at the limit');
+    const done = guard.catch(() => undefined).then(() => {
+      this.lingering--;
+    });
+    this.lingered = Promise.all([this.lingered, done]).then(() => undefined);
   }
 
   // leave is the Leave button. graceful waits (briefly) for the microphone to
