@@ -214,3 +214,26 @@ test('LiveKit: a manager confirms a voice-only removal with retry, a member cann
     vw.stop();
   }
 });
+
+test('an author removes a message and a second client sees the author tombstone live', async ({ meet, world, secrets }) => {
+  const channel = await room(world);
+  const author = await human(world, secrets, channel);
+  const observer = await human(world, secrets, channel);
+  const writer = await meet(); const reader = await meet();
+  for (const [client, person] of [[writer, author], [reader, observer]] as const) {
+    await signIn(client.page, world, person.token, person.name);
+    await openChannel(client.page, channel);
+  }
+  const message = await post(world, author.token, channel, unique('author-removal'));
+  const own = messageRow(writer.page, message.id);
+  await expect(messageRow(reader.page, message.id)).toContainText(message.body);
+  await own.getByRole('button', { name: /^More actions/ }).click();
+  await own.getByRole('menuitem', { name: 'Remove', exact: true }).click();
+  await expect(own).toContainText('copies already received cannot be recalled');
+  await own.getByRole('button', { name: 'Confirm' }).click();
+  for (const page of [writer.page, reader.page]) {
+    await expect(messageRow(page, message.id)).toContainText('This message was removed by its author.');
+    await expect(messageRow(page, message.id)).toHaveCount(1);
+    await expect(page.getByText(message.body, { exact: true })).toHaveCount(0);
+  }
+});

@@ -586,3 +586,120 @@ func queryDB(t *testing.T, srv *Server, query string) string {
 	}
 	return out.String
 }
+
+func TestAuthorMessageRemovalChecks(t *testing.T) {
+	w := newRemovalWorld(t)
+	for _, tt := range []struct {
+		name, who, channel string
+		id                 int64
+		status             int
+		code               string
+	}{
+		{"non-author visible", "wes", "ops", w.wide, 403, "forbidden"},
+		{"non-author invisible", "olga", "ops", w.whisper, 404, "message_not_found"},
+		{"manager cannot use author route for another", "olga", "ops", w.wide, 403, "forbidden"},
+		{"operator outside", "op2", "ops", w.wide, 404, "channel_not_found"},
+		{"agent", "aria", "ops", w.wide, 403, "forbidden"},
+		{"agent unknown target", "aria", "missing", 99999, 403, "forbidden"},
+		{"unknown", "ann", "ops", 999999, 404, "message_not_found"},
+		{"author wide", "ann", "ops", w.wide, 204, ""},
+		{"repeat", "ann", "ops", w.wide, 204, ""},
+		{"author whisper", "ann", "ops", w.whisper, 204, ""},
+		{"author net", "ann", "ops", w.net, 204, ""},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			res := w.callREST(t, "DELETE", rmPath(tt.channel, tt.id)+"/own", w.p(tt.who).token, "")
+			if res.status != tt.status || (tt.code != "" && reactErrCode(res) != tt.code) {
+				t.Fatalf("%d %s, want %d %s", res.status, res.body, tt.status, tt.code)
+			}
+		})
+	}
+	if rows := w.removals(t); len(rows) != 3 {
+		t.Fatalf("%d removal audits, want 3", len(rows))
+	} else {
+		for _, row := range rows {
+			if !strings.Contains(row.Detail, "removed_by=author") || strings.Contains(row.Detail, "SECRET") {
+				t.Fatalf("bad audit: %+v", row)
+			}
+		}
+	}
+	for _, version := range []string{"v0", "v1", "v2"} {
+		res := w.callREST(t, "GET", "/"+version+"/channels/ops/messages", w.p("ann").token, "")
+		if res.status != 200 || !strings.Contains(res.body, schema.MessageRemovedByAuthorBody) || strings.Contains(res.body, "SECRET-wide") {
+			t.Fatalf("%s history: %d %s", version, res.status, res.body)
+		}
+		if version == "v2" && !strings.Contains(res.body, `"removed_by_author":true`) {
+			t.Fatalf("missing marker: %s", res.body)
+		}
+	}
+}
+
+func TestGuestAuthorMessageRemoval(t *testing.T) {
+	w := newRemovalWorld(t)
+	guest := newGuest(t, w.srv, "Pat", time.Hour, 2*time.Hour, w.ops.ID)
+	res := w.callREST(t, "POST", "/v2/channels/ops/messages", guest.Token, `{"body":"guest text"}`)
+	var posted schema.PostMessageResponseV2
+	if err := json.Unmarshal([]byte(res.body), &posted); err != nil || res.status != 201 {
+		t.Fatalf("post: %d %s %v", res.status, res.body, err)
+	}
+	for range 2 {
+		if res := w.callREST(t, "DELETE", rmPath("ops", posted.Message.ID)+"/own", guest.Token, ""); res.status != 204 {
+			t.Fatalf("guest remove: %d %s", res.status, res.body)
+		}
+	}
+	old := w.callREST(t, "DELETE", rmPath("ops", w.wide)+"/own", guest.Token, "")
+	if old.status != 404 || reactErrCode(old) != "message_not_found" {
+		t.Fatalf("guest before history bound: %d %s", old.status, old.body)
+	}
+}
+
+func TestAuthorRemovalProtectsCards(t *testing.T) {
+	w := newRemovalWorld(t)
+	// Persist cards as internal card writers do. The ordinary post route
+	// already refuses reserved payloads, including versions it does not know.
+	for _, name := range []string{schema.ApprovalV1Name, schema.AdminActionV1Name, "conch.approval.v2"} {
+		marker := w.mustPost(t, "ann", `{"body":"marker before card"}`)
+		id := marker + 1
+		execOnDB(t, w.srv,
+			"INSERT INTO messages(channel_id, author_id, body, created_at, payload_schema, payload_json) VALUES (?, ?, 'card', ?, ?, '{}')",
+			w.ops.ID, w.p("ann").ID, time.Now().UnixMilli(), name)
+		got := w.callREST(t, "DELETE", rmPath("ops", id)+"/own", w.p("ann").token, "")
+		if got.status != 403 || reactErrCode(got) != "forbidden" {
+			t.Fatalf("author removed %s card: %d %s", name, got.status, got.body)
+		}
+		// The separate moderator path retains its authority over the card.
+		w.mustRemove(t, "olga", id)
+	}
+	if len(w.removals(t)) != 3 {
+		t.Fatal("refused author removal wrote an audit")
+	}
+}
+
+func TestAuthorRemovalBroadcasterAndFiles(t *testing.T) {
+	w := newRemovalWorld(t)
+	baseline := len(w.rec.messages())
+	for _, id := range []int64{w.whisper, w.net} {
+		got := w.callREST(t, "DELETE", rmPath("ops", id)+"/own", w.p("ann").token, "")
+		if got.status != 204 {
+			t.Fatalf("scoped removal: %d %s", got.status, got.body)
+		}
+	}
+	if len(w.rec.messages()) != baseline {
+		t.Fatal("scoped removal reached configured broadcaster")
+	}
+	got := w.callREST(t, "DELETE", rmPath("ops", w.attached)+"/own", w.p("ann").token, "")
+	if got.status != 204 {
+		t.Fatalf("attachment removal: %d %s", got.status, got.body)
+	}
+	frames := w.rec.messages()[baseline:]
+	if len(frames) != 1 || frames[0].ID != w.attached || frames[0].Body != schema.MessageRemovedByAuthorBody {
+		t.Fatalf("unsafe wide broadcast: %+v", frames)
+	}
+	for _, who := range []string{"ann", "wes", "root"} {
+		for _, res := range []fileResp{w.fetch(t, who, w.file.ID), w.meta(t, who, w.file.ID)} {
+			if res.status != 404 || !strings.Contains(string(res.body), "file_not_found") {
+				t.Fatalf("%s can read removed file: %d %s", who, res.status, res.body)
+			}
+		}
+	}
+}

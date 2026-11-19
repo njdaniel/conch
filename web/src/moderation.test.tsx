@@ -156,3 +156,22 @@ it('a delayed search response cannot restore the original after a live tombstone
   expect(screen.queryByRole('img')).toBeNull();
   watch.mockRestore(); search.mockRestore();
 });
+
+it.each([false, true])('an author can remove their own message, including as a guest (%s)', async (guest) => {
+  vi.mocked(api.moderate).mockResolvedValue({ ok: true, value: null });
+  const author = { ...who, id: 2 };
+  render(<ModerationScope who={author} members={[]} guest={guest}><ul><Message message={{ ...original, payload: undefined }} people={new Map()} viewer={2} channel="ops" nets={new Map()} sent={false} cont={false} /></ul></ModerationScope>);
+  fireEvent.click(screen.getByRole('button', { name: /^More actions/ }));
+  fireEvent.click(screen.getByRole('menuitem', { name: /^Remove$/ }));
+  expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Cancel' }));
+  expect(screen.getByText(/Text stays in the database and backups; copies already received cannot be recalled/)).toBeDefined();
+  fireEvent.click(screen.getByRole('button', { name: 'Confirm' }));
+  await screen.findByText('Removed or already absent/removed.');
+  expect(api.moderate).toHaveBeenCalledWith('ops', 'removeOwnMessage', original.id);
+});
+
+it.each(['conch.approval.v1', 'conch.admin_action.v1', 'conch.approval.v2'])('an author cannot remove a reserved card %s', (schema) => {
+  render(<ModerationScope who={{ ...who, id: 2 }} members={[]} guest={false}><ul><Message message={{ ...original, payload: { schema, data: {} } }} people={new Map()} viewer={2} channel="ops" nets={new Map()} sent={false} cont={false} /></ul></ModerationScope>);
+  fireEvent.click(screen.getByRole('button', { name: /^More actions/ }));
+  expect(screen.queryByRole('menuitem', { name: /^Remove/ })).toBeNull();
+});

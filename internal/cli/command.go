@@ -41,6 +41,8 @@ func RunWithStdin(ctx context.Context, args []string, stdin io.Reader, stdout, s
 		return errors.New("cli: no command given")
 	}
 	switch args[0] {
+	case "remove-message":
+		return runRemoveOwnMessage(ctx, args[1:], stdin, stdout, stderr)
 	case "send":
 		return runSend(ctx, args[1:], stderr)
 	case "tail":
@@ -117,6 +119,7 @@ func Usage(w io.Writer) {
 
 Usage:
   conch send [--server <url>] [--author <id>] [--net <name> | --to <id>[,<id>...] | --reply-to <id>] <channel> <text>
+  conch remove-message [--server <url>] [--yes] <channel> <message-id>
   conch tail [--server <url>] <channel>
   conch thread [--server <url>] <channel> <id>
   conch search [--server <url>] [--limit <n>] [--before <id>] <channel> <words...>

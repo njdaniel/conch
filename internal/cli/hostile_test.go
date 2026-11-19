@@ -247,6 +247,9 @@ func walkCases(t *testing.T) []walkCase {
 		{key: "admin ban add|remove", ownWords: true, quietWhenOK: true, args: func(u, _ string) []string {
 			return []string{"admin", "ban", "remove", "--server", u, "general", "9", "--yes"}
 		}},
+		{key: "remove-message", ownWords: true, quietWhenOK: true, args: func(u, _ string) []string {
+			return []string{"remove-message", "--server", u, "general", "42", "--yes"}
+		}},
 		{key: "admin message remove", ownWords: true, quietWhenOK: true, args: func(u, _ string) []string {
 			return []string{"admin", "message", "remove", "--server", u, "general", "42", "--yes"}
 		}},
@@ -474,7 +477,7 @@ func hostileServer(t *testing.T, ok, whoamiOK bool) *httptest.Server {
 		case "POST /v1/principals/hide":
 			write(w, http.StatusOK, schema.HidePrincipalsResponseV1{DryRun: true, Count: 1, Principals: []schema.HiddenPrincipalV1{{ID: 9, Name: hostile}}, Remaining: 2})
 		case "POST /v1/principals/9/disable", "DELETE /v1/credentials/9", "PUT /v1/channels/general/members/9", "DELETE /v1/channels/general/members/9",
-			"DELETE /v1/channels/general/voice/participants/9", "PUT /v1/channels/general/bans/9", "DELETE /v1/channels/general/bans/9", "DELETE /v2/channels/general/messages/42":
+			"DELETE /v1/channels/general/voice/participants/9", "PUT /v1/channels/general/bans/9", "DELETE /v1/channels/general/bans/9", "DELETE /v2/channels/general/messages/42", "DELETE /v2/channels/general/messages/42/own":
 			w.WriteHeader(http.StatusNoContent)
 		case "GET /v1/channels/general/bans":
 			write(w, http.StatusOK, schema.ListChannelBansResponseV1{Bans: []schema.ChannelBanV1{{PrincipalID: 9, Name: hostile, CreatedBy: 42, CreatedAt: ts}}})

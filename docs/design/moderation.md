@@ -279,6 +279,34 @@ After commit, the server broadcasts the **tombstone projection**, never the orig
 
 Live retraction is best effort until the frame arrives. The durable guarantee is about subsequent server reads, not remote copies already displayed or saved.
 
+### 7.5 Author removal (#1828; Nick’s sign-off, 2026-11-18)
+
+`DELETE /v2/channels/{channel}/messages/{message_id}/own` is an authenticated,
+author-only sibling of the unchanged moderator route. People and active guests
+may remove their own messages without a time limit; agents are refused before
+any lookup and no MCP removal tool is exposed. Current membership and message
+visibility (including audience and history bounds) are checked again under the
+write lock. Invisible or unknown messages return the same 404 `message_not_found`;
+a visible message belonging to someone else returns 403 `forbidden`. Approval
+and admin-action cards, including future versions, are refused for authors;
+moderators retain their existing rights. Repeats return 204 and write nothing.
+
+The additive v2 `removed_by_author: true` marker selects
+`MessageRemovedByAuthorBody` (“This message was removed by its author.”).
+An absent marker keeps the moderator tombstone; v0 and v1 carry the fixed body
+alone. Migration 50 adds a `by_author` flag defaulting to false, preserving old
+removals and moderation of a moderator’s own message. Author removals atomically
+write the ordinary `message_removed` audit row with `removed_by=author` in its
+detail, without body, payload or recipients. All projection, attachment and
+live-audience rules above apply equally. The text remains in the database and
+backups; copies already received cannot be recalled. Undo and hard erasure
+remain out of scope.
+
+The browser offers **Remove** for the viewer’s own eligible messages. The CLI
+uses `conch remove-message [--yes] <channel> <message-id>` and the TUI uses
+`/remove-own-message [message-id]`; both use this author route and confirm the
+soft-removal consequences. The separate admin command keeps its moderator route.
+
 ## 8. Operation interaction guide
 
 | Desired outcome | Correct action | Do not substitute |

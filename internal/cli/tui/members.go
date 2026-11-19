@@ -370,7 +370,7 @@ func (m Model) replaceMembers(channel string, members []schema.ChannelMemberV1) 
 	m.memberRevision[channel]++
 	m.members[channel] = names
 	m.forgetAuthors(channel)
-	if m.mod.pending != nil && m.mod.pending.channel == channel && !m.moderationStanding() {
+	if m.mod.pending != nil && m.mod.pending.channel == channel && m.mod.pending.op != removeOwnMessage && !m.moderationStanding() {
 		m.mod.pending = nil
 	}
 	return m, m.nameAuthors(channel)

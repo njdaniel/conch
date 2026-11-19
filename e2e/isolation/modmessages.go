@@ -564,6 +564,10 @@ func (m *mod) messages() error {
 
 	// ---- a net's message
 
+	if err := m.authorRemovals(readers, all); err != nil {
+		return err
+	}
+
 	if err := m.netRemoval(readers, all); err != nil {
 		return err
 	}
@@ -1310,5 +1314,102 @@ func (m *mod) netRemoval(readers []*reader, all func() []*feed) error {
 			return fmt.Errorf("%s replayed the removed net message in %d frames (%d tombstones), on the net: %v", c.p.name, names, tombs, c.onNet)
 		}
 	}
+	return nil
+}
+
+// authorRemovals exercises both scoped audiences on every socket version,
+// and an attachment removed by its uploader. No outsider gets a live frame.
+func (m *mod) authorRemovals(readers []*reader, all func() []*feed) error {
+	for _, net := range []bool{false, true} {
+		body := m.text("author removal")
+		audience := &schema.Audience{Kind: schema.AudienceKindPrincipals, PrincipalIDs: []int64{m.wes.id}}
+		if net {
+			audience = &schema.Audience{Kind: schema.AudienceKindNet, NetID: m.netID}
+		}
+		file, err := m.upload(m.pat, m.text("author attachment")+".txt", m.text("author bytes"))
+		if err != nil {
+			return err
+		}
+		raw, err := json.Marshal(schema.FileAttachmentV1{FileIDs: []int64{file}})
+		if err != nil {
+			return err
+		}
+		payload := &schema.Payload{Schema: schema.FileAttachmentV1Name, Data: raw}
+		id, err := m.post(m.pat, "author removal", schema.PostMessageRequestV2{Body: body, Audience: audience, Payload: payload})
+		if err != nil {
+			return err
+		}
+		// Wait for the original on every socket that is told of it before
+		// taking the removal baseline, as netRemoval does: the v2 sockets of
+		// both people in the audience and, as the new message it is, the
+		// events sockets of everyone in it but its author. An events socket
+		// reads and writes the new message on its own goroutine, after the v2
+		// hub has fanned it out, so a baseline taken once only the v2 sockets
+		// have it can count that original as a frame sent after the removal.
+		for _, r := range readers {
+			if r.p != m.pat && r.p != m.wes {
+				continue
+			}
+			for _, f := range r.feeds {
+				if k := kindOf(f); k != kindMessageV2 && (k != kindEvents || r.p == m.pat) {
+					continue
+				}
+				if err := waitFor(f.what+" to carry the author removal original", modWait, func() (bool, string) {
+					for _, fr := range f.received() {
+						if decodeFrame(fr).names(id) {
+							return true, ""
+						}
+					}
+					return false, "waiting"
+				}); err != nil {
+					return err
+				}
+			}
+		}
+		base := feedCounts(all())
+		path := "/v2/channels/" + url.PathEscape(m.main) + "/messages/" + itoa(id) + "/own"
+		if res, err := m.w.send(m.pat.api, del(path)); err != nil || res.status != http.StatusNoContent {
+			return fmt.Errorf("author removal: %d %s", res.status, errText(err))
+		}
+		owed := func(f *feed) want {
+			for _, r := range readers {
+				if (r.p == m.pat || r.p == m.wes) && slices.Contains(r.feeds, f) {
+					return scopedWant(f)
+				}
+			}
+			return wantNothing
+		}
+		if err := m.checkRemoval("author scoped message", all(), base, id, owed, body); err != nil {
+			return err
+		}
+		for _, f := range all() {
+			for _, fr := range f.since(base[f]) {
+				df := decodeFrame(fr)
+				if df.tombstone(id) {
+					msg := df.Message
+					if msg == nil {
+						var envelope schema.MessageV2
+						if err := json.Unmarshal(fr, &envelope); err != nil {
+							return err
+						}
+						msg = &envelope
+					}
+					if !msg.RemovedByAuthor || msg.Body != schema.MessageRemovedByAuthorBody {
+						return fmt.Errorf("author tombstone lost kind: %s", fr)
+					}
+				}
+			}
+		}
+		for _, format := range []string{"/v2/files/%d", "/v2/files/%d/meta"} {
+			got, err := m.pat.api.do2(http.MethodGet, fmt.Sprintf(format, file))
+			if err != nil {
+				return err
+			}
+			if got.status != http.StatusNotFound || !bytes.Contains(got.body, []byte("file_not_found")) {
+				return fmt.Errorf("uploader can read removed attachment: %d %s", got.status, got.body)
+			}
+		}
+	}
+	m.say("author removal: whisper and net tombstones reached only their original audience across all socket versions; uploader file and metadata reads were refused")
 	return nil
 }

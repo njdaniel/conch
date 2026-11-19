@@ -74,3 +74,12 @@ func (c *Client) RemoveMessage(ctx context.Context, channel string, messageID in
 	endpoint := c.resolve("v2", "channels", channel, "messages", id)
 	return c.roundTrip(ctx, "remove message", http.MethodDelete, endpoint, nil, nil)
 }
+
+// RemoveOwnMessage soft-removes the caller's own message through the author route.
+func (c *Client) RemoveOwnMessage(ctx context.Context, channel string, messageID int64) error {
+	id, err := moderationTarget(channel, messageID)
+	if err != nil {
+		return err
+	}
+	return c.roundTrip(ctx, "remove own message", http.MethodDelete, c.resolve("v2", "channels", channel, "messages", id, "own"), nil, nil)
+}

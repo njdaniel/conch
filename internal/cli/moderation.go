@@ -122,3 +122,34 @@ func adminMessageRemove(ctx context.Context, r *adminRun) error {
 	}
 	return r.say("message %d in %s is removed or was already removed; future reads show a tombstone and received copies are not erased\n", r.id, channel)
 }
+
+// runRemoveOwnMessage is deliberately separate from the admin command.
+func runRemoveOwnMessage(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) error {
+	fs := newFlagSet("remove-message", stderr)
+	server := fs.String("server", serverEnvOr(), "conchd HTTP URL")
+	yes := fs.Bool("yes", false, "remove without asking")
+	pos, err := reactionPositionals(fs, args)
+	if err != nil {
+		return err
+	}
+	if len(pos) != 2 {
+		return errors.New("cli: remove-message: expected <channel> <message-id>")
+	}
+	id, err := positiveID(pos[1])
+	if err != nil {
+		return errors.New("cli: message id must be a positive integer")
+	}
+	question := fmt.Sprintf("Remove your message %d in %s for everyone in its audience. Future reads show a tombstone; text stays in the database and backups; copies already received cannot be recalled.", id, safeLine(pos[0]))
+	if err := confirmModeration(newPrompter(ctx, stdin, stderr), *yes, question); err != nil {
+		return err
+	}
+	client, _, err := NewAuthClient(*server)
+	if err != nil {
+		return err
+	}
+	if err := client.RemoveOwnMessage(ctx, pos[0], id); err != nil {
+		return refused(err, moderationRefusals)
+	}
+	_, err = fmt.Fprintf(stdout, "message %d is removed or was already removed; received copies are not erased\n", id)
+	return err
+}

@@ -160,9 +160,10 @@ jobs:
   # longest by ten minutes (#471, #1318). Shards 1 to 4 split the package's
   # tests by the letter after "Test" (about 1150 tests, counted 2026-11-05);
   # shard 4 also takes any test whose name continues with something other
-  # than a capital letter, so a test can't fall between the shards. Shard 5
-  # is the subpackages (store, approvals, hub, livekit, names). The package
-  # has no fuzz targets or examples, which -run '^Test' would leave out.
+  # than a capital letter, so a test can't fall between the shards, and the
+  # package's fuzz targets (#1849), whose seed corpora -run runs as tests.
+  # Shard 5 is the subpackages (store, approvals, hub, livekit, names). The
+  # package has no examples, which no shard's pattern would run.
   go-test-server:
     needs: changes
     if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
@@ -176,7 +177,7 @@ jobs:
           - { shard: 1, run: "^Test[A-E]" }
           - { shard: 2, run: "^Test[F-M]" }
           - { shard: 3, run: "^Test[N-S]" }
-          - { shard: 4, run: "^Test([T-Z]|[^A-Z])" }
+          - { shard: 4, run: "^(Test([T-Z]|[^A-Z])|Fuzz)" }
           - { shard: 5, run: "" }
     steps:
       - uses: actions/checkout@v4
@@ -192,11 +193,11 @@ jobs:
           RUN: ${{ matrix.run }}
         run: |
           if [ -z "$RUN" ]; then
-            # The package's examples and fuzz targets would match no shard's
-            # "^Test" pattern: fail here so one gets added when the first
-            # lands, rather than leave it unrun.
-            if go test -list '^(Example|Fuzz)' ./internal/server | grep -E '^(Example|Fuzz)'; then
-              echo "internal/server has examples or fuzz targets: give them a shard"; exit 1
+            # The package's examples would match no shard's pattern (shard 4
+            # takes the fuzz targets): fail here so one gets added when the
+            # first lands, rather than leave it unrun.
+            if go test -list '^Example' ./internal/server | grep -E '^Example'; then
+              echo "internal/server has examples: give them a shard"; exit 1
             fi
             pkgs=$(go list ./internal/server/... | grep -v '/internal/server$')
             [ -n "$pkgs" ] || { echo "no internal/server subpackages listed"; exit 1; }

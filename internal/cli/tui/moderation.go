@@ -26,12 +26,13 @@ type moderationAPI interface {
 type moderationOp string
 
 const (
-	moderateVoice   moderationOp = "voice-kick"
-	moderateMember  moderationOp = "member-remove"
-	moderateBan     moderationOp = "ban"
-	moderateUnban   moderationOp = "unban"
-	moderateBans    moderationOp = "bans"
-	moderateMessage moderationOp = "remove-message"
+	moderateVoice    moderationOp = "voice-kick"
+	moderateMember   moderationOp = "member-remove"
+	moderateBan      moderationOp = "ban"
+	moderateUnban    moderationOp = "unban"
+	moderateBans     moderationOp = "bans"
+	moderateMessage  moderationOp = "remove-message"
+	removeOwnMessage moderationOp = "remove-own-message"
 )
 
 type moderationRequest struct {
@@ -46,8 +47,9 @@ type moderationModel struct {
 	writing bool
 	// removed is, per channel, the ids known to be removed (bounded, oldest
 	// forgotten first); removedOrder is the insertion order for eviction.
-	removed      map[string]map[int64]bool
-	removedOrder map[string][]int64
+	removed       map[string]map[int64]bool
+	authorRemoved map[string]map[int64]bool
+	removedOrder  map[string][]int64
 	// stale marks channels whose held messages could not be reconciled after a
 	// reconnect; reconcileBackoff is the wait before the next attempt.
 	stale            map[string]bool
@@ -73,6 +75,7 @@ func (m *moderationModel) remember(channel string, id int64) {
 	m.removedOrder[channel] = append(m.removedOrder[channel], id)
 	for len(m.removedOrder[channel]) > maxRemembered {
 		delete(m.removed[channel], m.removedOrder[channel][0])
+		delete(m.authorRemoved[channel], m.removedOrder[channel][0])
 		m.removedOrder[channel] = m.removedOrder[channel][1:]
 	}
 }
@@ -83,6 +86,9 @@ func (m moderationModel) knows(channel string, id int64) bool { return m.removed
 func tombstoned(message schema.MessageV2) schema.MessageV2 {
 	message.Removed = true
 	message.Body = schema.MessageRemovedBody
+	if message.RemovedByAuthor {
+		message.Body = schema.MessageRemovedByAuthorBody
+	}
 	message.Payload = nil
 	message.EditedAt = nil
 	return message
@@ -90,15 +96,20 @@ func tombstoned(message schema.MessageV2) schema.MessageV2 {
 
 // withoutRemoved replaces every message in incoming whose id is known removed
 // by its tombstone. It copies the slice only when something changes.
-func (m moderationModel) withoutRemoved(channel string, incoming []schema.MessageV2) []schema.MessageV2 {
+func (m *moderationModel) withoutRemoved(channel string, incoming []schema.MessageV2) []schema.MessageV2 {
 	var out []schema.MessageV2
 	for i, message := range incoming {
-		if message.Removed || !m.knows(channel, message.ID) {
+		if message.Removed {
+			m.rememberAuthor(channel, message.ID, message.RemovedByAuthor)
+			continue
+		}
+		if !m.knows(channel, message.ID) {
 			continue
 		}
 		if out == nil {
 			out = slices.Clone(incoming)
 		}
+		message.RemovedByAuthor = m.authorRemoved[channel][message.ID]
 		out[i] = tombstoned(message)
 	}
 	if out == nil {
@@ -118,9 +129,12 @@ type messagesReconciled struct {
 }
 
 type moderationDone struct {
-	request moderationRequest
-	bans    schema.ListChannelBansResponseV1
-	err     error
+	// canonical is the server tombstone after an author removal. A 204 may
+	// be a repeat of a moderator removal, so the route alone cannot tell.
+	canonical *schema.MessageV2
+	request   moderationRequest
+	bans      schema.ListChannelBansResponseV1
+	err       error
 }
 
 type messageRemovalReceived struct {
@@ -130,7 +144,7 @@ type messageRemovalReceived struct {
 }
 
 func newModerationModel(api API) moderationModel {
-	m := moderationModel{removed: map[string]map[int64]bool{}, removedOrder: map[string][]int64{}, stale: map[string]bool{}, reconcileBackoff: map[string]time.Duration{}}
+	m := moderationModel{removed: map[string]map[int64]bool{}, authorRemoved: map[string]map[int64]bool{}, removedOrder: map[string][]int64{}, stale: map[string]bool{}, reconcileBackoff: map[string]time.Duration{}}
 	m.api, _ = api.(moderationAPI)
 	return m
 }
@@ -169,7 +183,7 @@ func (m Model) moderationCommand(command, rest string) (Model, tea.Cmd) {
 		m.setStatus(modeChannels, "loading bans…")
 		return m, m.runModeration(req)
 	}
-	if req.op == moderateMessage && len(fields) == 0 {
+	if (req.op == moderateMessage || req.op == removeOwnMessage) && len(fields) == 0 {
 		id, ok := m.reactionTarget()
 		if !ok {
 			m.setStatus(modeChannels, "no message selected")
@@ -205,6 +219,8 @@ func moderationQuestion(req moderationRequest) string {
 		return fmt.Sprintf("remove principal %d from %s and block this principal from being added again; other channels are unaffected; a new account or guest visit is not identified; if this is you, an operator must unban and re-add you;", req.target, channel)
 	case moderateUnban:
 		return fmt.Sprintf("lift the ban on principal %d in %s; this does not re-add them or restore any rights;", req.target, channel)
+	case removeOwnMessage:
+		return fmt.Sprintf("remove your message %d in %s for everyone in its audience; text stays in the database and backups; copies already received cannot be recalled;", req.target, channel)
 	case moderateMessage:
 		return fmt.Sprintf("remove message %d in %s for everyone in its audience; future reads show a tombstone; server backups and copies already received cannot be recalled;", req.target, channel)
 	}
@@ -243,6 +259,20 @@ func (m Model) runModeration(req moderationRequest) tea.Cmd {
 			result.bans, result.err = api.ListChannelBans(m.ctx, req.channel)
 		case moderateMessage:
 			result.err = api.RemoveMessage(m.ctx, req.channel, req.target)
+		case removeOwnMessage:
+			if own, ok := m.api.(interface {
+				RemoveOwnMessage(context.Context, string, int64) error
+			}); ok {
+				result.err = own.RemoveOwnMessage(m.ctx, req.channel, req.target)
+				if result.err == nil {
+					page, err := m.api.ListMessagesV2Page(m.ctx, req.channel, cli.MessagesPage{NewestFirst: true, Before: req.target + 1}, 1)
+					if err == nil && len(page.Messages) == 1 && page.Messages[0].ID == req.target && page.Messages[0].Removed {
+						result.canonical = &page.Messages[0]
+					}
+				}
+			} else {
+				result.err = fmt.Errorf("author removal is not available on this client")
+			}
 		}
 		return result
 	}
@@ -261,7 +291,23 @@ func (m Model) moderationFinished(msg moderationDone) Model {
 		}
 		return m
 	}
-	if req.op == moderateMessage {
+	if req.op == moderateMessage || req.op == removeOwnMessage {
+		// Prefer the server's canonical kind on idempotent retries. Live
+		// frames and subsequent reconciliation replace the fallback too.
+		if msg.canonical != nil {
+			m.mod.rememberAuthor(req.channel, req.target, msg.canonical.RemovedByAuthor)
+		}
+		// Preserve a live frame already received, including on an idempotent retry.
+		if !m.mod.knows(req.channel, req.target) {
+			byAuthor := req.op == removeOwnMessage
+			for _, held := range m.messages[req.channel] {
+				if held.ID == req.target && held.Removed {
+					byAuthor = held.RemovedByAuthor
+					break
+				}
+			}
+			m.mod.rememberAuthor(req.channel, req.target, byAuthor)
+		}
 		m.mod.remember(req.channel, req.target)
 		m.tombstoneHeld(req.channel, req.target)
 	}
@@ -278,7 +324,7 @@ func (m Model) moderationFinished(msg moderationDone) Model {
 		m.setStatus(modeChannels, fmt.Sprintf("ban is in force for principal %d in %s (it may already have been); membership and nets removed", req.target, channel))
 	case moderateUnban:
 		m.setStatus(modeChannels, fmt.Sprintf("principal %d is unbanned or was already not banned in %s; membership and rights are not restored", req.target, channel))
-	case moderateMessage:
+	case moderateMessage, removeOwnMessage:
 		m.setStatus(modeChannels, fmt.Sprintf("message %d is removed or was already removed; received copies are not erased", req.target))
 	case moderateBans:
 		m.setStatus(modeChannels, banListStatus(req.channel, msg.bans))
@@ -306,6 +352,7 @@ func (m *Model) tombstoneHeld(channel string, id int64) {
 		if message.ID != id {
 			continue
 		}
+		message.RemovedByAuthor = m.mod.authorRemoved[channel][id]
 		m.addMessages(channel, []schema.MessageV2{tombstoned(message)})
 		return
 	}
@@ -318,7 +365,7 @@ func (m Model) messageRemoval(msg messageRemovalReceived) (tea.Model, tea.Cmd) {
 	}
 	// Remembered even when the message is not held: a history read that began
 	// before the removal may still be on its way with the original.
-	m.mod.remember(msg.channel, msg.message.ID)
+	m.mod.rememberAuthor(msg.channel, msg.message.ID, msg.message.RemovedByAuthor)
 	if msg.channel != m.current() {
 		return m, wait
 	}
@@ -479,4 +526,13 @@ func (m Model) compactConfirmation(width, height int) string {
 	}
 	lines = append(lines, warnStyle.Render(fitCells(confirmKeys, width)))
 	return strings.Join(lines[:min(len(lines), height)], "\n")
+}
+
+// rememberAuthor keeps the removal kind across stale in-flight history reads.
+func (m *moderationModel) rememberAuthor(channel string, id int64, author bool) {
+	if m.authorRemoved[channel] == nil {
+		m.authorRemoved[channel] = map[int64]bool{}
+	}
+	m.authorRemoved[channel][id] = author
+	m.remember(channel, id)
 }

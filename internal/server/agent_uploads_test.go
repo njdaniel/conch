@@ -1208,17 +1208,9 @@ func TestMCPOversizeIsAttachments(t *testing.T) {
 		{"data that is an object", call(`{"name":"post_message","arguments":{"attachments":[{"data_base64":{"k":%q}}]}}`, data), false},
 		{"data that is a list", call(`{"name":"post_message","arguments":{"attachments":[{"data_base64":[%q]}]}}`, data), false},
 		{"an attachment with no data beside one with", call(`{"name":"post_message","arguments":{"attachments":[{"data_base64":%q},{"name":"b.png"}]}}`, data), false},
-		// Repeated keys. The standard library's decoder, which the probe
-		// uses, and the MCP library's do not read these alike, and the probe
-		// does not need them to: what it lets through is only ever a value
-		// at params.arguments.attachments[i].data_base64, and everything else
-		// is held to the bound (see mcpOversizeIsAttachments).
+		// Repeated routing keys are refused before either decoder can choose.
 		{"attachments given twice, the second list empty", call(`{"name":"post_message","arguments":{"attachments":[{"data_base64":%q}],"attachments":[]}}`, data), false},
-		// The second list is decoded into the elements of the first, so the
-		// first list's data is still counted and the request passes. That is
-		// safe: the data stands where only attachment data can, and the MCP
-		// library, which sees an attachment with no fields, refuses the call.
-		{"attachments given twice, the second with an empty item", call(`{"name":"post_message","arguments":{"attachments":[{"data_base64":%q}],"attachments":[{}]}}`, data), true},
+		{"attachments given twice, the second with an empty item", call(`{"name":"post_message","arguments":{"attachments":[{"data_base64":%q}],"attachments":[{}]}}`, data), false},
 		{"attachments given twice, and text over the bound", call(`{"name":"post_message","arguments":{"body":%q,"attachments":[{"data_base64":%q}],"attachments":[{}]}}`, over, data), false},
 		{"data given twice in one item", call(`{"name":"post_message","arguments":{"attachments":[{"data_base64":%q,"data_base64":"AAAA"}]}}`, data), false},
 		{"arguments given twice, the text in the second", call(`{"name":"post_message","arguments":{"attachments":[{"data_base64":%q}]},"arguments":{"body":%q}}`, data, over), false},

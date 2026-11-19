@@ -1,6 +1,6 @@
 import { platform } from './platform';
 import { hashForMessage } from './route';
-import { ModerationConfirm, useMayModerate, useTombstones } from './Moderation';
+import { ModerationConfirm, useMayModerate, useMayRemoveOwn, useTombstones } from './Moderation';
 import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
 import * as api from './api';
 import { archivedLine } from './archived';
@@ -211,8 +211,10 @@ export function Message({
     return () => { if (node?.contains(document.activeElement) === true) node.focus(); };
   }, [message.removed]);
   const mayModerate = useMayModerate();
+  const mayRemoveOwn = useMayRemoveOwn() && message.author_id === viewer && !/^conch\.(approval|admin_action)(\.|$)/.test(message.payload?.schema ?? '');
+  const mayRemove = mayModerate || mayRemoveOwn;
   const [removing, setRemoving] = useState(false);
-  useEffect(() => { if (message.removed === true || !mayModerate) setRemoving(false); }, [message.removed, mayModerate]);
+  useEffect(() => { if (message.removed === true || !mayRemove) setRemoving(false); }, [message.removed, mayRemove]);
   const hasReactions = useHasReactions() && message.removed !== true;
   const who = messageName(message, people);
   const approval = message.removed === true ? null : approvalOf(message);
@@ -259,7 +261,7 @@ export function Message({
   }
   const items: readonly MenuItem[] = message.removed === true ? [] : [
     ...(editor === undefined ? actions ?? [] : []),
-    ...(mayModerate ? [{ key: 'remove-message', label: 'Remove message', onSelect: () => { setRemoving(true); } }] : []),
+    ...(mayRemove ? [{ key: 'remove-message', label: mayRemoveOwn ? 'Remove' : 'Remove message', onSelect: () => { setRemoving(true); } }] : []),
     { key: 'copy-link', label: 'Copy link', onSelect: () => { copy('link'); } },
     { key: 'copy-text', label: 'Copy text', onSelect: () => { copy('text'); } },
   ];
@@ -323,7 +325,7 @@ export function Message({
           onOpenThread(message.id, event.currentTarget);
         }}>{replies === 1 ? '1 reply' : `${String(replies)} replies`}</button>}
       </ReactionBar>
-      {removing && mayModerate ? <ModerationConfirm op="removeMessage" id={message.id} name={who} channel={channel} onUnauthorized={onUnauthorized} onClose={() => { setRemoving(false); more.current?.focus(); }} /> : null}
+      {removing && mayRemove ? <ModerationConfirm op={mayRemoveOwn ? "removeOwnMessage" : "removeMessage"} id={message.id} name={who} channel={channel} onUnauthorized={onUnauthorized} onClose={() => { setRemoving(false); more.current?.focus(); }} /> : null}
       {thread}
     </li>
   );
