@@ -4660,7 +4660,8 @@ export type KnownAdminAction =
   | 'list_channel_bans'
   | 'ban_channel_member'
   | 'unban_channel_member'
-  | 'set_channel_topic';
+  | 'set_channel_topic'
+  | 'remove_message';
 export type AdminAction = KnownAdminAction | (string & {});
 
 export const adminAction = tolerant<KnownAdminAction>({
@@ -4708,6 +4709,7 @@ export const adminAction = tolerant<KnownAdminAction>({
   ban_channel_member: true,
   unban_channel_member: true,
   set_channel_topic: true,
+  remove_message: true,
 });
 
 // schema.AgentAdminV1

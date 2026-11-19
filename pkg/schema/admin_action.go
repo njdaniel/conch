@@ -91,6 +91,8 @@ const (
 	// of #1503, docs/design/channel-topic.md §4.3). Added at the end, as the
 	// vocabulary only grows.
 	AdminActionSetChannelTopic AdminAction = "set_channel_topic"
+	// Moderator message removal (manage_channels; issue #1967).
+	AdminActionRemoveMessage AdminAction = "remove_message"
 )
 
 // AdminActions is the catalog in wire order: the order of every list of
@@ -114,7 +116,7 @@ var AdminActions = []AdminAction{
 	AdminActionListReports, AdminActionGetReport, AdminActionUpdateReport,
 	AdminActionExportAudit,
 	AdminActionListChannelBans, AdminActionBanChannelMember, AdminActionUnbanChannelMember,
-	AdminActionSetChannelTopic,
+	AdminActionSetChannelTopic, AdminActionRemoveMessage,
 }
 
 // Valid reports whether a is an action of the catalog.
@@ -138,11 +140,17 @@ func (a AdminAction) Valid() bool {
 		AdminActionListReports, AdminActionGetReport, AdminActionUpdateReport,
 		AdminActionExportAudit,
 		AdminActionListChannelBans, AdminActionBanChannelMember, AdminActionUnbanChannelMember,
-		AdminActionSetChannelTopic:
+		AdminActionSetChannelTopic, AdminActionRemoveMessage:
 		return true
 	default:
 		return false
 	}
+}
+
+// RemoveMessageParamsV1 is the admin action's params object. MessageID names
+// the message in the target channel, and must be positive.
+type RemoveMessageParamsV1 struct {
+	MessageID int64 `json:"message_id"`
 }
 
 // AdminGate is an action's gate class (design §3.3): direct runs at once,

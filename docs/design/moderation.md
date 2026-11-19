@@ -244,9 +244,13 @@ Although operators pass the route class from outside a channel, this handler the
 
 The author may be any principal, including an owner/operator, agent or guest; content moderation is not an account action. A manager can remove only what they can already read, not every message in the channel by ID enumeration.
 
+Issue #1967 adds the approval-gated `remove_message` admin action on this route. Its target is the channel ID and its params contain the positive `message_id`. The agent needs `manage_channels`, channel membership, and `messages.read` with read on the channel. Its designated approval channel is protected. Removal has no age limit and applies to visible approval and admin-action cards. A dispatched action returns 409 `message_already_removed` for a visible tombstone.
+
 ### 7.2 Stored representation and audit
 
 A migration adds `message_removals` keyed by `message_id`, with channel ID, actor and timestamp. The original `messages` row, author, audience, thread relation and timestamp remain. The removal and `message_removed` audit row commit atomically; the actor is re-checked under the write lock.
+
+For an approved admin action, the removal audit row names the agent as actor. Its detail includes the approval ID and the person whose decision reached quorum.
 
 The original body and payload remain in the server database and backups in this alpha slice. They are suppressed on every product read surface, not cryptographically or physically erased. There is no unremove route. A later compliance/retention feature would be a separate design and must not be implied by this operation.
 
@@ -335,7 +339,7 @@ Nick signed off the shapes above as recommended on the M1 sign-off sheet, with t
 - Q1, archived channels (#844): ban, unban and message removal are reduce-only and allowed in an archived channel, like member removal. Enforced in M3/M4; no shape impact.
 - Q2, a message carrying a reserved payload (`conch.approval.*`, `conch.admin_action.*`): removal is allowed and the tombstone drops the payload; the approval stays pending and decidable through `/v1/approvals`, `await_decision`/`check_decision` and the approvals list. No new error code. M4 therefore carries the `approval-path` label and an end-to-end case (request, notify, remove the card, resolve, audit).
 - Q3, threads: the tombstone keeps `thread_root_id`; a removed root is a tombstone, not `thread_not_found`. M4 refuses new replies to a removed root with the existing `thread_not_found`; existing replies stand.
-- Q4, AI administrators (#1326): land with M3, not M1 (the catalog's structural test needs the route): `list_channel_bans` (direct), `ban_channel_member` (approval), `unban_channel_member` (approval), all under `manage_channels`, target channel. `remove_message` is deferred to a follow-up: the door's agent must be a channel member who can see the message (§7.1).
+- Q4, AI administrators (#1326): land with M3, not M1 (the catalog's structural test needs the route): `list_channel_bans` (direct), `ban_channel_member` (approval), `unban_channel_member` (approval), all under `manage_channels`, target channel. Follow-up #1967 adds `remove_message` for an agent who is a channel member and can see the message (§7.1).
 - Q5, `guest` attribution on `ChannelBanV1`: not in M1; `name` reads the handle, which is enough to confirm an unban. Additive later if M6 needs it.
 - Q6, `MessageRemovedBody` as a TypeScript constant: no.
 

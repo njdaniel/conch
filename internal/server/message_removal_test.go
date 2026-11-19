@@ -538,13 +538,13 @@ func TestMessageRemovalArchivedAndStore(t *testing.T) {
 	ctx := context.Background()
 	st := w.srv.store
 	reader := func(who string) store.Reader { return store.Reader{PrincipalID: w.p(who).ID, Scoped: true} }
-	if _, err := st.RemoveMessage(ctx, w.ops.ID, reader("ann"), w.wide, "principal:x", time.Now()); err == nil {
+	if _, err := st.RemoveMessage(ctx, w.ops.ID, reader("ann"), w.wide, "principal:x", 0, time.Now()); err == nil {
 		t.Error("a plain member removed a message through the store")
 	}
-	if _, err := st.RemoveMessage(ctx, w.ops.ID, reader("root"), w.whisper, "principal:x", time.Now()); err == nil {
+	if _, err := st.RemoveMessage(ctx, w.ops.ID, reader("root"), w.whisper, "principal:x", 0, time.Now()); err == nil {
 		t.Error("the owner removed a whisper they are not in through the store")
 	}
-	if _, err := st.RemoveMessage(ctx, w.ops.ID, store.Reader{PrincipalID: w.p("olga").ID}, w.wide, "principal:x", time.Now()); err == nil {
+	if _, err := st.RemoveMessage(ctx, w.ops.ID, store.Reader{PrincipalID: w.p("olga").ID}, w.wide, "principal:x", 0, time.Now()); err == nil {
 		t.Error("a reader that is not scoped removed a message")
 	}
 	if res := w.callREST(t, http.MethodPut, fmt.Sprintf("/v1/channels/%d/settings", w.ops.ID), w.rootTok, `{"archived":true}`); res.status != 200 {
@@ -556,10 +556,10 @@ func TestMessageRemovalArchivedAndStore(t *testing.T) {
 	w.mustRemove(t, "olga", w.wide)
 	// With authentication off (no principal) the system actor removes a
 	// channel-wide message, and only one.
-	if _, err := st.RemoveMessage(ctx, w.ops.ID, store.Reader{}, w.whisper, "system", time.Now()); err == nil {
+	if _, err := st.RemoveMessage(ctx, w.ops.ID, store.Reader{}, w.whisper, "system", 0, time.Now()); err == nil {
 		t.Error("the system actor removed a whisper")
 	}
-	off, err := st.RemoveMessage(ctx, w.ops.ID, store.Reader{}, w.typed, "system", time.Now())
+	off, err := st.RemoveMessage(ctx, w.ops.ID, store.Reader{}, w.typed, "system", 0, time.Now())
 	if err != nil || !off.Changed || !off.Message.Removed || off.Message.Payload != nil {
 		t.Errorf("removal with authentication off = %+v, %v", off, err)
 	}

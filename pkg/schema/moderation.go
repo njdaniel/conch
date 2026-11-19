@@ -20,6 +20,10 @@ import (
 // gets it with no marker and still renders something safe.
 const MessageRemovedBody = "This message was removed by a moderator."
 
+// ErrorCodeMessageAlreadyRemoved is the admin action's conflict for a
+// visible message that already has a tombstone.
+const ErrorCodeMessageAlreadyRemoved = "message_already_removed"
+
 // MessageRemovedSchemaV1 names the events-socket frame that says a message
 // was removed (moderation.md §7.4). A frame of its own, as MessageEditedV1
 // is, because on the events socket a MessageV2 means "a new message" and a

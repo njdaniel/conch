@@ -702,8 +702,12 @@ func (s *Store) ExpireApproval(ctx context.Context, id int64) (*schema.ApprovalR
 // approval, or ErrNotFound when the approval has not reached a terminal state.
 // Every reader — awaiters, pollers, the audit trail — sees this same event.
 func (s *Store) ResolutionByApprovalID(ctx context.Context, approvalID int64) (schema.ApprovalResolutionV1, error) {
+	return resolutionByApprovalID(ctx, s.db, approvalID)
+}
+
+func resolutionByApprovalID(ctx context.Context, db execer, approvalID int64) (schema.ApprovalResolutionV1, error) {
 	var body string
-	err := s.db.QueryRowContext(ctx,
+	err := db.QueryRowContext(ctx,
 		"SELECT resolution_json FROM approval_resolutions WHERE approval_id = ?", approvalID).Scan(&body)
 	if errors.Is(err, sql.ErrNoRows) {
 		return schema.ApprovalResolutionV1{}, fmt.Errorf("store: resolution for approval %d: %w", approvalID, ErrNotFound)
