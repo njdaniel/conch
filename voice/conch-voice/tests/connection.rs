@@ -475,10 +475,11 @@ async fn a_server_that_cannot_be_reached_names_the_stored_logins_and_nothing_els
     // Linux refuses the bound, non-listening port at once; macOS and Windows can leave the
     // connect to time out instead. Both are an unreachable server, and the
     // reason above is the same: only the detail's first words differ.
+    let refused = detail.starts_with("could not connect to conchd: ");
+    #[cfg(any(windows, target_os = "macos"))]
+    let refused = refused || detail.starts_with("conchd did not answer within the timeout");
     assert!(
-        (detail.starts_with("could not connect to conchd: ")
-            || detail.starts_with("conchd did not answer within the timeout"))
-            && detail.ends_with(&format!(" ({NOTE})")),
+        refused && detail.ends_with(&format!(" ({NOTE})")),
         "{detail}"
     );
 

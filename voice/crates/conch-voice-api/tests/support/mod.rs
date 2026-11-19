@@ -72,6 +72,8 @@ pub enum Reply {
     Redirect(u16, String),
     /// Say nothing for this long (the slow server), then answer 200.
     Stall(Duration),
+    /// Send the headers, then pause before finishing the promised body.
+    StallBody(u16, Duration),
     /// Read the request and close the connection without a word.
     Hangup,
     /// Promise a body, send half of it, and close.
@@ -249,12 +251,10 @@ pub fn client_for(server: &str, timeout: Duration) -> Client {
 /// An address on this machine that nothing listens on, and that no other test can be
 /// given while this value lives. The socket is bound but never told to listen: the kernel
 /// keeps the port reserved, so a parallel test's `bind("127.0.0.1:0")` cannot get it,
-/// and a connection to it is still refused. (Binding and then dropping would free the
-/// port for another test's stub to take, and this test would dial that stub.) On macOS a
-/// bound, non-listening port is not refused (the connect hangs to the timeout), so there
-/// the port is released and that small risk is accepted (#1737).
+/// and a connection to it is refused on Linux. macOS and Windows can instead let the
+/// connect time out (#1737). Keep the port bound on all platforms so no stub can take it.
 pub struct ClosedPort {
-    _socket: Option<TcpSocket>,
+    _socket: TcpSocket,
     addr: SocketAddr,
 }
 
@@ -263,22 +263,28 @@ impl ClosedPort {
     pub fn url(&self) -> String {
         format!("http://{}", self.addr)
     }
+
+    pub fn client(&self) -> Client {
+        #[cfg(not(any(windows, target_os = "macos")))]
+        let timeout = Duration::from_secs(5);
+        #[cfg(any(windows, target_os = "macos"))]
+        let timeout = Duration::from_millis(500);
+        client_for(&self.url(), timeout)
+    }
+}
+
+pub fn is_closed_port_failure(error: &conch_voice_api::Error) -> bool {
+    use conch_voice_api::Error;
+    let refused = matches!(error, Error::Connect { .. });
+    #[cfg(any(windows, target_os = "macos"))]
+    let refused = refused || matches!(error, Error::Timeout);
+    refused
 }
 
 pub async fn closed_port() -> ClosedPort {
     let socket = TcpSocket::new_v4().unwrap();
     socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
     let addr = socket.local_addr().unwrap();
-    // Linux refuses a connect to a bound, non-listening port at once, and keeping it
-    // bound stops anything else taking it. macOS lets such a connect hang until the
-    // timeout instead (#1737), so there the port is released: a connect to it is then
-    // refused, at the small risk of another process binding it meanwhile.
-    let socket = if cfg!(target_os = "macos") {
-        drop(socket);
-        None
-    } else {
-        Some(socket)
-    };
     ClosedPort {
         _socket: socket,
         addr,
@@ -361,6 +367,13 @@ async fn answer(
         Reply::Stall(wait) => {
             tokio::time::sleep(wait).await;
             response(200, Some("application/json"), "", b"{}")
+        }
+        Reply::StallBody(status, wait) => {
+            let mut bytes = response(status, Some("application/json"), "", b"{}");
+            let body = bytes.split_off(bytes.len() - 2);
+            stream.write_all(&bytes).await?;
+            tokio::time::sleep(wait).await;
+            body
         }
         Reply::Hangup => return Ok(()),
         Reply::Truncated(status) => {

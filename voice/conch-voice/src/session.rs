@@ -469,9 +469,10 @@ pub fn session_outcome(error: &ApiError) -> Option<(Outcome, &'static str)> {
         ApiError::ChannelNotFound(_) => (Outcome::NotAMember, "not_a_member"),
         ApiError::NotConfigured(_) => (Outcome::VoiceNotConfigured, "voice_not_configured"),
         ApiError::Unavailable(_) => (Outcome::VoiceUnavailable, "voice_unavailable"),
-        ApiError::Timeout | ApiError::Connect { .. } | ApiError::Transport { .. } => {
-            (Outcome::ServerUnreachable, "server_unreachable")
-        }
+        ApiError::Timeout
+        | ApiError::BodyTimeout
+        | ApiError::Connect { .. }
+        | ApiError::Transport { .. } => (Outcome::ServerUnreachable, "server_unreachable"),
         // Not an answer of conchd's, or conchd in trouble: a proxy in the way, a restart.
         // It may pass, so it is waited out like a server that cannot be reached.
         ApiError::UnexpectedResponse { .. }
@@ -2524,7 +2525,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_session_request_timeout_includes_the_stored_logins_note_when_available() {
+    async fn a_timeout_before_headers_gets_the_stored_logins_note_when_available() {
         let mut session = session(Box::new(|_| Ok(Box::new(CountingSink::new(&[])?))));
         assert_eq!(
             session.session_failure_text(&ApiError::Timeout),
@@ -2534,6 +2535,10 @@ mod tests {
         assert_eq!(
             session.session_failure_text(&ApiError::Timeout),
             "conchd did not answer within the timeout (logins are stored for http://a.test:1)"
+        );
+        assert_eq!(
+            session.session_failure_text(&ApiError::BodyTimeout),
+            "conchd did not answer within the timeout"
         );
     }
 

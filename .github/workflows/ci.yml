@@ -270,8 +270,10 @@ jobs:
 
       # The toolchain script fetches one pinned clang, cargo-deny and
       # libwebrtc and verifies each against the SHA-256 in
-      # scripts/voice-pins.sh, which is therefore the cache key. rustup, on
-      # the runner, installs the Rust version voice/rust-toolchain.toml names.
+      # scripts/voice-pins.sh, which is therefore part of the cache key. The
+      # v2 cache retains the verified cargo-deny archive. Reuse the existing
+      # clang and libwebrtc from v1 when populating it. rustup installs the
+      # Rust version voice/rust-toolchain.toml names.
       - name: rust toolchain cache
         uses: actions/cache@v4
         with:
@@ -279,7 +281,9 @@ jobs:
             ~/.cache/conch/llvm-*
             ~/.cache/conch/cargo-deny-*
             ~/.cache/conch/webrtc-*
-          key: voice-toolchain-${{ runner.os }}-${{ hashFiles('scripts/voice-pins.sh') }}
+          key: voice-toolchain-v2-${{ runner.os }}-${{ hashFiles('scripts/voice-pins.sh') }}
+          restore-keys: |
+            voice-toolchain-${{ runner.os }}-${{ hashFiles('scripts/voice-pins.sh') }}
 
       # -lt: built with line tables (above), so never mixed with a cache of
       # full-debug builds.
@@ -845,14 +849,15 @@ jobs:
           Write-Output "uninstalled: $dir, the conch:// key and the shortcut are gone; $($seeded.Count) seeded files are unchanged"
 
   # The required status check. It runs the text checks every pull request
-  # gets, docs-only ones included, then passes only if every job above that
-  # should have run succeeded: skipped is accepted only for a docs-only
+  # gets, docs-only ones included, then passes only if every job it needs
+  # that should have run succeeded: skipped is accepted only for a docs-only
   # change (changes said code=false). It runs even when one of them failed,
   # so the failure is reported here rather than as a skipped check. changes
   # itself is not judged: if it fails, code is unset and every job runs in
-  # full, so a pass here still means every check ran and passed.
+  # full. voice-macos reports separately, as required by MF1
+  # (docs/design/macos-desktop.md section 13, "never a gate on Linux work").
   check:
-    needs: [changes, go, go-test-server, go-test, rust, voice-windows, voice-macos, web, desktop, desktop-windows]
+    needs: [changes, go, go-test-server, go-test, rust, voice-windows, web, desktop, desktop-windows]
     if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -970,7 +975,9 @@ jobs:
             ~/.cache/conch/llvm-*
             ~/.cache/conch/cargo-deny-*
             ~/.cache/conch/webrtc-*
-          key: voice-toolchain-${{ runner.os }}-${{ hashFiles('scripts/voice-pins.sh') }}
+          key: voice-toolchain-v2-${{ runner.os }}-${{ hashFiles('scripts/voice-pins.sh') }}
+          restore-keys: |
+            voice-toolchain-${{ runner.os }}-${{ hashFiles('scripts/voice-pins.sh') }}
 
       - name: rust system packages cache
         uses: actions/cache@v4
@@ -1527,7 +1534,9 @@ jobs:
             ~/.cache/conch/llvm-*
             ~/.cache/conch/cargo-deny-*
             ~/.cache/conch/webrtc-*
-          key: voice-toolchain-${{ runner.os }}-${{ hashFiles('scripts/voice-pins.sh') }}
+          key: voice-toolchain-v2-${{ runner.os }}-${{ hashFiles('scripts/voice-pins.sh') }}
+          restore-keys: |
+            voice-toolchain-${{ runner.os }}-${{ hashFiles('scripts/voice-pins.sh') }}
 
       - name: rust build cache
         uses: actions/cache/restore@v4
@@ -1635,7 +1644,9 @@ jobs:
             ~/.cache/conch/llvm-*
             ~/.cache/conch/cargo-deny-*
             ~/.cache/conch/webrtc-*
-          key: voice-toolchain-${{ runner.os }}-${{ hashFiles('scripts/voice-pins.sh') }}
+          key: voice-toolchain-v2-${{ runner.os }}-${{ hashFiles('scripts/voice-pins.sh') }}
+          restore-keys: |
+            voice-toolchain-${{ runner.os }}-${{ hashFiles('scripts/voice-pins.sh') }}
 
       - name: rust build cache
         uses: actions/cache/restore@v4

@@ -5,10 +5,12 @@
 # It puts the pinned cargo-deny from scripts/voice-toolchain.sh on PATH and
 # points the livekit crate at the verified libwebrtc. On Linux it also selects
 # the pinned clang and checks the system headers. macOS uses Apple's clang
-# and SDK. It fails and says what to run if the fetched toolchain is missing.
+# and SDK. It fails and says what to run if the toolchain is missing or fails
+# verification.
 
 # BASH_SOURCE: this file is sourced, so $0 is the caller.
 . "$(dirname "${BASH_SOURCE[0]}")/voice-pins.sh"
+. "$(dirname "${BASH_SOURCE[0]}")/voice-cache.sh"
 
 _conch_cache="${CONCH_CACHE:-$HOME/.cache/conch}"
 _conch_host="$(uname -s)-$(uname -m)"
@@ -16,9 +18,9 @@ case "$_conch_host" in
 Darwin-arm64)
     _conch_deny="$_conch_cache/cargo-deny-$CONCH_DENY_VERSION-aarch64-apple-darwin-${CONCH_DENY_MAC_SHA256:0:12}"
     _conch_webrtc="$_conch_cache/$CONCH_WEBRTC_TAG-mac-${CONCH_WEBRTC_MAC_SHA256:0:12}/mac-arm64-release"
-    if [ ! -x "$_conch_deny/cargo-deny" ] || [ ! -f "$_conch_webrtc/webrtc.ninja" ] ||
-        [ ! -f "$_conch_webrtc/lib/libwebrtc.a" ]; then
-        echo "voice: FAIL: the pinned macOS cargo-deny $CONCH_DENY_VERSION or libwebrtc $CONCH_WEBRTC_TAG is not in $_conch_cache; run scripts/voice-toolchain.sh" >&2
+    if ! voice_deny_matches "$_conch_deny" "$CONCH_DENY_MAC_SHA256" ||
+        ! voice_mac_webrtc_matches "$(dirname "$_conch_webrtc")" "$CONCH_WEBRTC_MAC_SHA256"; then
+        echo "voice: FAIL: the pinned macOS cargo-deny $CONCH_DENY_VERSION or libwebrtc $CONCH_WEBRTC_TAG is missing or failed verification in $_conch_cache; run scripts/voice-toolchain.sh" >&2
         return 1 2>/dev/null || exit 1
     fi
     if ! command -v cargo >/dev/null 2>&1; then
@@ -34,8 +36,9 @@ Linux-x86_64)
     # stand-ins (scripts/voice-pins.sh says why), in a directory named by its archive's hash.
     _conch_webrtc="$_conch_cache/$CONCH_WEBRTC_TAG-linked-$(printf %s "$CONCH_WEBRTC_LINKED_SHA256" | cut -c1-12)/linux-x64-release"
 
-    if [ ! -x "$_conch_llvm/bin/clang" ] || [ ! -x "$_conch_deny/cargo-deny" ] || [ ! -f "$_conch_webrtc/webrtc.ninja" ]; then
-        echo "voice: FAIL: the pinned clang $CONCH_LLVM_VERSION, cargo-deny $CONCH_DENY_VERSION or libwebrtc $CONCH_WEBRTC_TAG is not in $_conch_cache; run scripts/voice-toolchain.sh" >&2
+    if [ ! -x "$_conch_llvm/bin/clang" ] || [ ! -f "$_conch_webrtc/webrtc.ninja" ] ||
+        ! voice_deny_matches "$_conch_deny" "$CONCH_DENY_SHA256"; then
+        echo "voice: FAIL: the pinned clang $CONCH_LLVM_VERSION, cargo-deny $CONCH_DENY_VERSION or libwebrtc $CONCH_WEBRTC_TAG is missing or failed verification in $_conch_cache; run scripts/voice-toolchain.sh" >&2
         return 1 2>/dev/null || exit 1
     fi
     # The archive that is linked must be the pinned one. With the download's own, conch-voice

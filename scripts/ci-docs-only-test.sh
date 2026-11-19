@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Test for scripts/ci-docs-only.sh (issue #1300): the classification table,
 # and that every test reading a docs file has that file listed, so a docs
-# change it depends on still runs the whole CI workflow.
+# change it depends on still runs the whole CI workflow. Also checks the
+# required check's dependency list against the macOS MF1 design.
 set -euo pipefail
 
 cd "$(git rev-parse --show-toplevel)"
@@ -74,6 +75,16 @@ done
 while IFS= read -r doc; do
     case $doc in */) [ -d "$doc" ] ;; *) [ -f "$doc" ] ;; esac || fail "READ_BY_TESTS lists $doc, which does not exist"
 done <<<"$listed"
+
+# macOS must report independently of the required check on Linux work.
+workflow=.github/workflows/ci.yml
+grep -qx '  voice-macos:' "$workflow" || fail "the macOS voice job is missing"
+check_needs=$(sed -n '/^  check:$/,/^    if:/s/^    needs: //p' "$workflow")
+case "$check_needs" in
+    *voice-macos*) fail "the required check depends on voice-macos" ;;
+    *rust*) ;;
+    *) fail "could not find the required check's Rust dependency" ;;
+esac
 
 if [ "$fails" -ne 0 ]; then exit 1; fi
 echo "ci-docs-only-test: OK"
