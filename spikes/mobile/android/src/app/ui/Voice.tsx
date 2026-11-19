@@ -1,14 +1,45 @@
 // The voice screen: presence, the hand-off warning, Join and Leave, hold to
 // talk, mute, deafen, the open microphone and listen-only. The minimum the
 // matrix needs (#1109: production UI is M2's).
-import { useSyncExternalStore, useEffect } from 'react';
+import { useSyncExternalStore, useEffect, useState } from 'react';
 import { Text, View } from 'react-native';
 import { useTrackVolume } from '@livekit/react-native';
 import type { LocalAudioTrack } from 'livekit-client';
-import { controller, micStore, principal } from '../services';
+import { client, controller, micStore, principal } from '../services';
 import { useVoiceState } from './useVoiceState';
 import { Button, Note, Screen, colours, styles } from './common';
 import { CameraControl, CameraGrid } from '../camera/Grid';
+
+const noNames: ReadonlyMap<number, string> = new Map();
+
+// Voice presence reports principal IDs. Resolve them against this channel's
+// members and refresh while the screen is open for people who join or rename.
+function useMemberNames(channel: string): ReadonlyMap<number, string> {
+  const [result, setResult] = useState<{ channel: string; names: ReadonlyMap<number, string> }>();
+  useEffect(() => {
+    let closed = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const read = async (): Promise<void> => {
+      const reply = await client.members(channel);
+      if (closed) return;
+      if (reply.ok) {
+        const names = new Map<number, string>();
+        for (const { principal_id, name, guest } of reply.value.members) {
+          const label = guest === undefined ? name : guest.label ? `Guest: ${guest.label} · ${guest.tag}` : guest.handle;
+          if (label) names.set(principal_id, label);
+        }
+        setResult({ channel, names });
+      }
+      timer = setTimeout(() => void read(), 15_000);
+    };
+    void read();
+    return () => {
+      closed = true;
+      clearTimeout(timer);
+    };
+  }, [channel]);
+  return result?.channel === channel ? result.names : noNames;
+}
 
 // Reads the microphone's level for the open microphone. Rendered only in the
 // open mode while connected.
@@ -59,7 +90,8 @@ export function Voice(props: { channel: string; onBack: () => void }) {
   const inVoice = v.phase === 'connected' || v.phase === 'reconnecting';
   const mine = v.channel === props.channel;
   const shown = mine || v.phase === 'idle';
-  const me = principal().id;
+  const me = principal();
+  const names = useMemberNames(props.channel);
 
   useEffect(() => {
     controller.watch(props.channel);
@@ -131,7 +163,7 @@ export function Voice(props: { channel: string; onBack: () => void }) {
           {v.mode === 'open' && mic !== null ? <LevelProbe track={mic} /> : null}
           <Text style={styles.small}>{v.transmitting ? 'Audio is being sent.' : 'Nothing is being sent.'}</Text>
           <CameraControl />
-          <CameraGrid me={me} />
+          <CameraGrid me={me.id} names={names} />
           <Button label="Leave voice" kind="danger" onPress={() => void controller.leave()} />
         </View>
       ) : null}
@@ -141,11 +173,15 @@ export function Voice(props: { channel: string; onBack: () => void }) {
       {!mine && v.phase !== 'idle' ? <Text style={styles.small}>{'You are in voice in # ' + String(v.channel) + '.'}</Text> : null}
       <Text style={styles.label}>In this voice room</Text>
       {shown && v.participants.length === 0 ? <Text style={styles.small}>Nobody.</Text> : null}
-      {(shown ? v.participants : []).map((p) => (
-        <Text key={p.principal_id} style={{ fontSize: 16, color: colours.ink }}>
-          {(p.principal_id === me ? 'You' : 'Person ' + String(p.principal_id)) + (p.transmitting ? ' (transmitting)' : '') + (p.can_publish ? '' : ' (listening)')}
-        </Text>
-      ))}
+      {shown ? v.participants.map((p) => {
+        const name = names.get(p.principal_id);
+        const label = p.principal_id === me.id ? `${name ?? me.name} (you)` : name ?? 'Unknown person';
+        return (
+          <Text key={p.principal_id} style={{ fontSize: 16, color: colours.ink }}>
+            {label + (p.transmitting ? ' (transmitting)' : '') + (p.can_publish ? '' : ' (listening)')}
+          </Text>
+        );
+      }) : null}
       {v.route !== '' ? <Text style={styles.small}>{'Audio devices: ' + v.route}</Text> : null}
     </Screen>
   );

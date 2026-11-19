@@ -1,5 +1,6 @@
 // The diagnostics export (#1109): a bounded, redacted record that holds no
-// bearer, no address and no device identifier. Built on the browser's
+// bearer, no address, no device identifier and no voice room or participant
+// identifiers. Built on the browser's
 // Redactor (redact.ts), which hides registered secrets and signed tokens; this
 // adds the shapes a phone's log carries that the browser's does not.
 import { LogRing, Redactor, placeholder } from './redact';
@@ -24,9 +25,16 @@ const patterns: readonly RegExp[] = [
   /\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi,
   /\b[0-9a-f]{16}\b/gi,
   /\b(?:[0-9a-f]{2}:){5}[0-9a-f]{2}\b/gi,
+  // Room names in free text: the default prefix and configurable server
+  // prefixes whose suffix is 128 bits in lowercase base32.
+  /\bconch-[a-z0-9-]+\b/gi,
+  /(?<![\w-])[a-z0-9-]{0,31}-[a-z2-7]{26}\b/g,
+  // LiveKit room and participant SIDs, and Conch participant identities.
+  /\b(?:RM|PA)_[a-z0-9_-]+\b/gi,
+  /\bp\d+(?:\.(?:screen|view))?\b/g,
 ];
 
-// scrub replaces everything shaped like a secret, an address or a device id.
+// scrub replaces recognizable secrets, addresses and identifiers in log text.
 export function scrub(input: string): string {
   let out = input;
   for (const p of patterns) {
@@ -41,7 +49,7 @@ export class Diagnostics {
   private readonly owner = {};
 
   constructor(size = 50) {
-    this.ring = new LogRing(this.redactor, size);
+    this.ring = new LogRing(this.redactor, size, scrub);
   }
 
   // hold registers values that must never appear (the bearer, the server
@@ -54,8 +62,8 @@ export class Diagnostics {
     this.ring.add(level, message, context);
   }
 
-  // export is the text the person may share: every line scrubbed once more.
+  // export serves the same redacted lines to the screen and the share sheet.
   export(): string {
-    return this.ring.recent().map(scrub).join('\n');
+    return this.ring.recent().join('\n');
   }
 }

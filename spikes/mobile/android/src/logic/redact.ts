@@ -1,14 +1,18 @@
 // Copied from web/src/voice/redact.ts at ed4a68f9 and adapted for the phone (#1109, M4-B).
-// Differences are listed in the "Phone" notes below; the rest is the browser's.
 // Keeps the join token and the room name out of anything the SDK says. The SDK
 // logs the room name at info and debug and may carry a token in a URL; before a
 // record is kept, the token and room name in use and anything shaped like a
-// signed token are replaced with a placeholder.
+// signed token are replaced with a placeholder. The phone also masks voice
+// identifiers from structured logger context.
 export const placeholder = '[redacted]';
 
 // A signed token is three base64url parts joined by dots, the first starting
 // with eyJ (a JSON header).
 const signedToken = /eyJ[\w-]+\.[\w-]+\.[\w-]*/g;
+
+// LiveKit uses these keys for identities and SIDs in logger context. Match the
+// keys as well as the shapes in diagnostics.ts so opaque values are hidden.
+const voiceContextKey = /^(?:room(?:name|id|sid)?|(?:remote|local)?participant(?:identity|id|sid)?|identity)$/i;
 
 export class Redactor {
   // The values to hide, by the connection that registered them. Each
@@ -40,14 +44,18 @@ export class Redactor {
     return out;
   }
 
-  // any redacts every string inside a value that is logged as context.
-  any(value: unknown, depth = 0): unknown {
-    if (typeof value === 'string') return this.text(value);
-    if (depth > 4 || value === null || typeof value !== 'object') return value;
-    if (Array.isArray(value)) return value.map((v) => this.any(v, depth + 1));
-    const out: Record<string, unknown> = {};
-    for (const [k, v] of Object.entries(value)) out[k] = this.any(v, depth + 1);
-    return out;
+  // json redacts context at every depth. Scrub string values before
+  // serialization so JSON escapes cannot hide identifier boundaries.
+  // A cyclic or otherwise unserializable context is omitted.
+  json(context: unknown, scrub: (line: string) => string): string | undefined {
+    try {
+      return JSON.stringify(context, (key, value: unknown) => {
+        if (value !== undefined && voiceContextKey.test(key)) return placeholder;
+        return typeof value === 'string' ? scrub(this.text(value)) : value;
+      });
+    } catch {
+      return undefined;
+    }
   }
 }
 
@@ -57,27 +65,22 @@ export class LogRing {
   private readonly lines: string[] = [];
   private readonly redactor: Redactor;
   private readonly size: number;
+  private readonly scrub: (line: string) => string;
 
-  constructor(redactor: Redactor, size = 20) {
+  constructor(redactor: Redactor, size: number, scrub: (line: string) => string) {
     this.redactor = redactor;
     this.size = size;
+    this.scrub = scrub;
   }
 
   add(level: string, message: string, context?: unknown): void {
-    const extra = context === undefined ? '' : ` ${safeJson(this.redactor.any(context))}`;
-    this.lines.push(`${level}: ${this.redactor.text(message)}${this.redactor.text(extra)}`);
+    const json = this.redactor.json(context, this.scrub);
+    const extra = json === undefined ? '' : ` ${json}`;
+    this.lines.push(this.scrub(this.redactor.text(`${level}: ${message}${extra}`)));
     if (this.lines.length > this.size) this.lines.shift();
   }
 
   recent(): readonly string[] {
     return [...this.lines];
-  }
-}
-
-function safeJson(value: unknown): string {
-  try {
-    return JSON.stringify(value);
-  } catch {
-    return '';
   }
 }

@@ -1,5 +1,6 @@
 // The diagnostics screen and its redacted export: a bounded ring of what the app
-// and the SDK said, scrubbed of the bearer, the address and device ids
+// and the SDK said, scrubbed of sign-in details, addresses, device IDs and
+// voice room and participant identifiers
 // (logic/diagnostics.ts). Sharing hands the text to Android's share sheet.
 import { useState } from 'react';
 import { ScrollView, Share, Text } from 'react-native';
@@ -20,7 +21,7 @@ export function Diagnostics(props: { onBack: () => void }) {
   ].join('\n');
   return (
     <Screen title="Diagnostics">
-      <Text style={styles.small}>Redacted: no sign-in, address or device id.</Text>
+      <Text style={styles.small}>Sign-in details, addresses, device IDs, room names and IDs, and participant IDs are redacted.</Text>
       <ScrollView style={{ flex: 1, marginTop: 8 }}>
         <Text selectable style={styles.mono}>
           {status + '\n\n' + (text === '' ? '(nothing yet)' : text)}

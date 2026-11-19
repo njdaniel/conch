@@ -9,6 +9,7 @@ import { cameraNote } from '../../logic/camera';
 import { Button, Note, colours, styles } from '../ui/common';
 import { controller } from '../services';
 import { cameraStore } from './store';
+import { cameraTiles } from './tiles';
 import { useVoiceState } from '../ui/useVoiceState';
 
 function Tile(props: { name: string; track: RemoteVideoTrack }) {
@@ -20,18 +21,17 @@ function Tile(props: { name: string; track: RemoteVideoTrack }) {
   );
 }
 
-export function CameraGrid(props: { me: number }) {
+export function CameraGrid(props: { me: number; names: ReadonlyMap<number, string> }) {
   const tracks = useSyncExternalStore(cameraStore.subscribe, cameraStore.get);
-  const ids = [...tracks.keys()].filter((id) => id !== props.me).sort((a, b) => a - b);
-  if (ids.length === 0) return null;
+  const tiles = cameraTiles(tracks, props.me, props.names).map(({ id, name, track }) => (
+    <Tile key={id} name={name} track={track} />
+  ));
+  if (tiles.length === 0) return null;
   return (
     <View>
       <Text style={styles.label}>Cameras</Text>
       <View style={{ flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'space-between' }}>
-        {ids.map((id) => {
-          const track = tracks.get(id);
-          return track === undefined ? null : <Tile key={id} name={'Person ' + String(id)} track={track} />;
-        })}
+        {tiles}
       </View>
     </View>
   );
