@@ -20,7 +20,9 @@
 #     the check scripts/desktop-version.sh helper makes on the built binary:
 #     it fails in seconds, before a twenty-minute Rust build, with the fix.
 #
-# usage: desktop-release-guard.sh <tag>
+# The Windows dry run checks the tag format and workspace version without
+# requiring a tagged, clean checkout on main.
+# usage: desktop-release-guard.sh [--dry-run] <tag>
 # DESKTOP_GUARD_ROOT moves the repository root, for the script's test.
 set -euo pipefail
 
@@ -29,7 +31,12 @@ fail() {
     exit 1
 }
 
-[ $# -eq 1 ] || fail "usage: desktop-release-guard.sh <tag>"
+dry_run=false
+if [ "${1:-}" = --dry-run ]; then
+    dry_run=true
+    shift
+fi
+[ $# -eq 1 ] || fail "usage: desktop-release-guard.sh [--dry-run] <tag>"
 tag=$1
 
 here=$(cd "$(dirname "$0")" && pwd)
@@ -39,28 +46,30 @@ app=$("$here/desktop-version.sh" app "$tag") || exit 1
 
 cd "$root"
 
-# --tags: describe looks at annotated tags only without it, and a lightweight
-# one must still name the commit. The tag it finds must be this tag: another
-# tag on the same commit is not the one being released.
-described=$(git describe --tags --exact-match HEAD 2>/dev/null) ||
-    fail "HEAD is not at a tag: $tag must point at the commit being built"
-[ "$described" = "$tag" ] || {
-    # More than one tag may point at HEAD; accept this one among them.
-    git tag --points-at HEAD | grep -qxF -- "$tag" ||
-        fail "HEAD is tagged $described, not $tag"
-}
+if [ "$dry_run" = false ]; then
+    # --tags: describe looks at annotated tags only without it, and a lightweight
+    # one must still name the commit. The tag it finds must be this tag: another
+    # tag on the same commit is not the one being released.
+    described=$(git describe --tags --exact-match HEAD 2>/dev/null) ||
+        fail "HEAD is not at a tag: $tag must point at the commit being built"
+    [ "$described" = "$tag" ] || {
+        # More than one tag may point at HEAD; accept this one among them.
+        git tag --points-at HEAD | grep -qxF -- "$tag" ||
+            fail "HEAD is tagged $described, not $tag"
+    }
 
-dirty=$(git status --porcelain --untracked-files=all)
-[ -z "$dirty" ] || fail "the working tree is not clean:
+    dirty=$(git status --porcelain --untracked-files=all)
+    [ -z "$dirty" ] || fail "the working tree is not clean:
 $dirty"
 
-# Read-only: this updates one remote-tracking ref and fetches no tags. The
-# release job checks out with full history (fetch-depth: 0), so the ancestry
-# test below sees every commit between HEAD and main.
-git fetch --quiet --no-tags origin '+refs/heads/main:refs/remotes/origin/main' ||
-    fail "cannot fetch origin/main to check that $tag is on main"
-git merge-base --is-ancestor HEAD refs/remotes/origin/main ||
-    fail "HEAD ($(git rev-parse --short HEAD)) is not on origin/main: tag the reviewed main commit (.claude/skills/release/SKILL.md)"
+    # Read-only: this updates one remote-tracking ref and fetches no tags. The
+    # release job checks out with full history (fetch-depth: 0), so the ancestry
+    # test below sees every commit between HEAD and main.
+    git fetch --quiet --no-tags origin '+refs/heads/main:refs/remotes/origin/main' ||
+        fail "cannot fetch origin/main to check that $tag is on main"
+    git merge-base --is-ancestor HEAD refs/remotes/origin/main ||
+        fail "HEAD ($(git rev-parse --short HEAD)) is not on origin/main: tag the reviewed main commit (.claude/skills/release/SKILL.md)"
+fi
 
 cargo=voice/Cargo.toml
 [ -f "$cargo" ] || fail "$cargo is missing"
@@ -76,6 +85,11 @@ got=$(awk '
     }
 ' "$cargo")
 [ -n "$got" ] || fail "no version in the [workspace.package] table of $cargo"
+if [ "$dry_run" = true ]; then
+    [ "$got" = "$app" ] || fail "$cargo says version $got; use v$got as windows_preview_tag"
+    echo "desktop-release-guard: OK: dry-run tag $tag matches the helper version $app"
+    exit 0
+fi
 [ "$got" = "$app" ] ||
     fail "$cargo says version $got, but the tag $tag is $app; set [workspace.package] version to $app on main before tagging (.claude/skills/release/SKILL.md)"
 

@@ -41,7 +41,7 @@ on:
   workflow_dispatch:
     inputs:
       windows_preview_tag:
-        description: 'Tag to stamp on the Windows dry-run build (must match voice/Cargo.toml, e.g. v0.1.0-alpha.22)'
+        description: 'Tag to stamp on the Windows dry-run build (v plus the workspace version in voice/Cargo.toml)'
         type: string
         required: true
 
@@ -289,7 +289,8 @@ jobs:
     # Dry run: dispatch Release on the branch to test with windows_preview_tag
     # set to v plus voice/Cargo.toml's workspace version. It exercises release
     # stamping and the install test, then uploads the desktop-windows artifact.
-    # The guard, attestation and publication run only on tag pushes.
+    # The dry run checks the workspace version before building. The guard's
+    # Git checks, attestation and publication run only on tag pushes.
     if: github.event_name == 'push' || github.ref_type == 'branch'
     runs-on: windows-latest
     timeout-minutes: 60
@@ -315,7 +316,7 @@ jobs:
 
       - name: validate dry-run tag
         if: github.event_name == 'workflow_dispatch'
-        run: ./scripts/desktop-version.sh app "$CONCH_RELEASE_VERSION"
+        run: ./scripts/desktop-release-guard.sh --dry-run "$CONCH_RELEASE_VERSION"
 
       # Both web/ and desktop/ build with the desktop's pinned Node.
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
@@ -431,19 +432,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "could not list app.asar (exit $LASTEXITCODE)" }
           if ($contents -cnotcontains 'pack   : \build\icons\48.png') { throw 'the Windows tray icon is missing from app.asar' }
 
-          @'
-          import assert from 'node:assert/strict';
-          import { readFileSync } from 'node:fs';
-          import { join } from 'node:path';
-          import { extractFile } from '@electron/asar';
-          const asar = process.argv[2];
-          const pkg = JSON.parse(extractFile(asar, 'package.json'));
-          assert.equal(pkg.version, process.env.APP_VERSION);
-          const compatPath = join('out', 'compat.json');
-          const compat = extractFile(asar, compatPath);
-          assert.deepEqual(compat, readFileSync(compatPath));
-          assert.equal(JSON.parse(compat).servers[0], process.env.CONCH_RELEASE_VERSION);
-          '@ | node --input-type=module - $asar
+          # Check the packaged metadata against the release inputs.
+          node build/check-release-asar.ts $asar
           if ($LASTEXITCODE -ne 0) { throw "installed app version or compat list check failed (exit $LASTEXITCODE)" }
 
       - name: Keep the checked installer
