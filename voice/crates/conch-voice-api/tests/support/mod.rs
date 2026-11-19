@@ -281,6 +281,17 @@ pub fn is_closed_port_failure(error: &conch_voice_api::Error) -> bool {
     refused
 }
 
+/// A port that was bound and then released: every platform refuses a connect to it at
+/// once (macOS and Windows do not refuse a bound, non-listening one, see `closed_port`).
+/// Another test may bind it meanwhile, so use it only where a refusal must be seen on
+/// every platform and a rare collision would fail loudly rather than pass wrongly.
+pub fn released_port_url() -> String {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    drop(listener);
+    format!("http://{addr}")
+}
+
 pub async fn closed_port() -> ClosedPort {
     let socket = TcpSocket::new_v4().unwrap();
     socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
