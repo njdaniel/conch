@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -39,6 +40,8 @@ type mcpIdentity struct {
 type mcpIdentityKey struct{}
 
 func (s *Server) mcpHandler() http.Handler {
+	// This state lives with the registered /mcp handler, shared by all credentials.
+	principals := &mcpLargePrincipals{active: make(map[int64]bool)}
 	if n := len(s.cfg.MCPBearerTokens); n > 0 {
 		slog.Warn("mcp: static --mcp-token mappings are deprecated; issue credentials with POST /v1/principals/{id}/credentials instead", "mappings", n)
 	}
@@ -79,7 +82,7 @@ func (s *Server) mcpHandler() http.Handler {
 		// makes of a body that ends early. One caller may send more, for the
 		// images of a post_message (issue #1798); readMCPBody has the rules.
 		if r.Method == http.MethodPost && r.Body != nil {
-			body, release, ok := s.readMCPBody(w, r, identity)
+			body, release, ok := s.readMCPBody(w, r, identity, principals)
 			if !ok {
 				return
 			}
@@ -126,14 +129,33 @@ func writeMCPRequestTooLarge(w http.ResponseWriter) {
 	writeError(w, http.StatusRequestEntityTooLarge, "request_too_large", "request body exceeds the maximum size")
 }
 
-// takeMCPLargeSlot takes one of the places for a large /mcp request, without
-// waiting. It reports false when all are taken.
-func (s *Server) takeMCPLargeSlot() bool {
+// mcpLargePrincipals prevents one principal, including one using several
+// credentials, from occupying both server-wide places. Only active holders
+// are retained, so its size is bounded by mcpLargeRequestSlots.
+type mcpLargePrincipals struct {
+	mu     sync.Mutex
+	active map[int64]bool
+}
+
+// takeMCPLargeSlot takes a server place and the principal's place atomically,
+// without waiting. The returned release must be called once.
+func (s *Server) takeMCPLargeSlot(principalID int64, principals *mcpLargePrincipals) (func(), bool) {
+	principals.mu.Lock()
+	defer principals.mu.Unlock()
+	if principals.active[principalID] {
+		return nil, false
+	}
 	select {
 	case s.mcpLargeSlots <- struct{}{}:
-		return true
+		principals.active[principalID] = true
+		return func() {
+			principals.mu.Lock()
+			defer principals.mu.Unlock()
+			delete(principals.active, principalID)
+			<-s.mcpLargeSlots
+		}, true
 	default:
-		return false
+		return nil, false
 	}
 }
 
@@ -151,9 +173,10 @@ func (s *Server) takeMCPLargeSlot() bool {
 //   - a request that declares more than the larger limit is refused (413)
 //     before any of it is read;
 //   - the server handles only mcpLargeRequestSlots requests over the bound at
-//     once. One more is refused before its body is read: all of it when the
-//     length is declared, and all but the first MaxPostRequestBytes+1 bytes
-//     when it is not (those are read to learn that it is over the bound; a
+//     once, with at most one per principal. One more is refused before its
+//     body is read: all of it when the length is declared, and all but the
+//     first MaxPostRequestBytes+1 bytes when it is not (those are read to
+//     learn that it is over the bound; a
 //     request without a declared length that turns out to be small is an
 //     ordinary one and takes no place). The refusal is 503 with Retry-After
 //     and the usual error body, not 429: the limit is the server's, shared by
@@ -163,22 +186,23 @@ func (s *Server) takeMCPLargeSlot() bool {
 //   - a body over the bound must be what the larger limit is for
 //     (mcpOversizeIsAttachments), or it is refused (413) before the MCP
 //     library sees it.
-func (s *Server) readMCPBody(w http.ResponseWriter, r *http.Request, identity mcpIdentity) ([]byte, func(), bool) {
+func (s *Server) readMCPBody(w http.ResponseWriter, r *http.Request, identity mcpIdentity, principals *mcpLargePrincipals) ([]byte, func(), bool) {
 	base := int64(schema.MaxPostRequestBytes)
 	limit := base
 	if r.ContentLength > base || r.ContentLength < 0 {
 		limit = s.mcpRequestLimit(r.Context(), identity)
 	}
 	release := func() {}
+	// Keep ownership here until a successful return transfers it to the handler.
+	handedOff := false
+	defer func() {
+		if !handedOff {
+			release()
+		}
+	}()
 	tooLarge := func() { writeMCPRequestTooLarge(w) }
 	unreadable := func() {
 		writeError(w, http.StatusBadRequest, "invalid_request", "request body could not be read")
-	}
-	// refuse answers a request that goes no further, and gives its place
-	// back if it had taken one.
-	refuse := func(answer func()) {
-		release()
-		answer()
 	}
 	var head []byte
 	if limit > base {
@@ -186,7 +210,7 @@ func (s *Server) readMCPBody(w http.ResponseWriter, r *http.Request, identity mc
 		// connection instead of waiting for what it has refused.
 		unread := func(answer func()) {
 			w.Header().Set("Connection", "close")
-			refuse(answer)
+			answer()
 		}
 		if r.ContentLength > limit {
 			unread(tooLarge)
@@ -195,19 +219,20 @@ func (s *Server) readMCPBody(w http.ResponseWriter, r *http.Request, identity mc
 		if r.ContentLength < 0 {
 			var err error
 			if head, err = io.ReadAll(io.LimitReader(r.Body, base+1)); err != nil {
-				refuse(unreadable)
+				unreadable()
 				return nil, nil, false
 			}
 		}
 		if r.ContentLength > base || int64(len(head)) > base {
-			if !s.takeMCPLargeSlot() {
+			slotRelease, admitted := s.takeMCPLargeSlot(identity.principalID, principals)
+			if !admitted {
 				unread(func() {
 					w.Header().Set("Retry-After", strconv.Itoa(errMCPBusy.RetryAfterSeconds))
 					writeJSON(w, http.StatusServiceUnavailable, errMCPBusy)
 				})
 				return nil, nil, false
 			}
-			release = func() { <-s.mcpLargeSlots }
+			release = slotRelease
 			// Not every ResponseWriter can set a deadline (a test's cannot);
 			// a real connection can, and that is the one a slow sender is on.
 			rc := http.NewResponseController(w)
@@ -220,9 +245,9 @@ func (s *Server) readMCPBody(w http.ResponseWriter, r *http.Request, identity mc
 	if err != nil {
 		var over *http.MaxBytesError
 		if errors.As(err, &over) {
-			refuse(tooLarge)
+			tooLarge()
 		} else {
-			refuse(unreadable)
+			unreadable()
 		}
 		return nil, nil, false
 	}
@@ -231,9 +256,10 @@ func (s *Server) readMCPBody(w http.ResponseWriter, r *http.Request, identity mc
 		body = append(head, rest...)
 	}
 	if int64(len(body)) > base && !mcpOversizeIsAttachments(body, s.cfg.MaxUploadBytes) {
-		refuse(tooLarge)
+		tooLarge()
 		return nil, nil, false
 	}
+	handedOff = true
 	return body, release, true
 }
 
@@ -311,61 +337,224 @@ func base64Len(n int64) int64 {
 // memory: a string of bytes that are not text grows threefold when it is
 // decoded, and the library decodes the request more than once.
 //
-// Why bytes let through here can never become a message's text. The argument
-// is about where the bytes are, not about which of two repeated keys wins.
-// Every byte this subtracts from the request is part of a JSON value that
-// stands at params.arguments.attachments[i].data_base64, each value counted
-// once (json.RawMessage holds the value as it stands in the request, not
-// decoded, which could lengthen it). Every other byte of the request is held
-// to MaxPostRequestBytes. The MCP library reads the same document, and a value
-// at that position is to it an attachment's data or nothing: its decoder
-// matches keys exactly and the tool's schema refuses a key it does not know,
-// so it can read such a value as data_base64 of an attachment, or skip it, or
-// refuse the call, and never as body or payload, which stand elsewhere.
-//
-// This holds however keys are repeated, and that matters, because the two
-// decoders do not agree on a repeated key. encoding/json, used here, decodes
-// a second "attachments" list into the elements of the first, so with
-// "attachments":[{"data_base64":"..."}],"attachments":[{}] the first list's
-// data is still counted; it also matches keys without regard to case. Both
-// only ever make this count values at the position above that the library
-// will go on to skip. They cannot make it count bytes that stand anywhere
-// else. post_message bounds its text again for itself.
+// Routing keys must be unique under any case and use the SDK's exact
+// spelling. Otherwise encoding/json and the SDK can disagree about the tool
+// being called, letting a non-post tool hold a large-request place. The probe
+// checks each routing object before scanning the attachment values. Exact key
+// matching applies only to routing; attachment fields match case-insensitively.
+// Each scanned object is limited to mcpProbeMaxObjectKeys keys (otherwise 413).
 func mcpOversizeIsAttachments(body []byte, maxUpload int64) bool {
-	var call struct {
-		Method string `json:"method"`
-		Params struct {
-			Name      string `json:"name"`
-			Arguments struct {
-				Attachments []struct {
-					Data json.RawMessage `json:"data_base64"`
-				} `json:"attachments"`
-			} `json:"arguments"`
-		} `json:"params"`
-	}
-	if err := json.Unmarshal(body, &call); err != nil {
+	// Validate once before the scanner borrows value slices. In particular this
+	// rejects malformed JSON and trailing data without a decoder buffer.
+	if !json.Valid(body) {
 		return false
 	}
-	if call.Method != "tools/call" || call.Params.Name != "post_message" {
+	probe := mcpRoutingProbe{body: body}
+	if !probe.object(0) {
 		return false
 	}
-	attachments := call.Params.Arguments.Attachments
-	if len(attachments) > schema.MaxAgentAttachments {
+	var method, name string
+	if json.Unmarshal(probe.method, &method) != nil || method != "tools/call" ||
+		json.Unmarshal(probe.name, &name) != nil || name != "post_message" {
 		return false
 	}
+	// Scan attachment fields too: encoding/json would allocate for a huge
+	// ignored field name, even though the image values themselves are borrowed.
+	attachments := mcpRoutingProbe{body: probe.attachments}
+	if len(attachments.body) == 0 {
+		return false
+	}
+	attachments.space()
+	if bytes.Equal(bytes.TrimSpace(attachments.body), []byte("null")) {
+		return len(body) <= schema.MaxPostRequestBytes
+	}
+	if attachments.body[attachments.pos] != '[' {
+		return false
+	}
+	attachments.pos++
 	rest := len(body)
 	var decoded int64
-	for _, a := range attachments {
-		n, ok := base64StringLen(a.Data)
+	for count := 0; ; count++ {
+		attachments.space()
+		if attachments.body[attachments.pos] == ']' {
+			break
+		}
+		if count >= schema.MaxAgentAttachments || !attachments.object(3) {
+			return false
+		}
+		n, ok := base64StringLen(attachments.data)
 		if !ok {
 			return false
 		}
 		if decoded += n; decoded > maxUpload {
 			return false
 		}
-		rest -= len(a.Data)
+		rest -= len(attachments.data)
+		attachments.space()
+		if attachments.body[attachments.pos] == ',' {
+			attachments.pos++
+		}
 	}
 	return rest <= schema.MaxPostRequestBytes
+}
+
+// mcpRoutingProbe walks the three routing objects in one pass, borrowing
+// slices from an already validated JSON document. Only short escaped keys are
+// decoded; ignored keys are never retained, and large string values are never
+// copied. Attachment fields retain encoding/json's case-insensitive matching and last-value rule.
+// Exact matching is guaranteed for routing keys only.
+type mcpRoutingProbe struct {
+	body                      []byte
+	pos                       int
+	method, name, attachments []byte
+	data                      []byte
+}
+
+func (p *mcpRoutingProbe) space() {
+	for p.pos < len(p.body) {
+		switch p.body[p.pos] {
+		case ' ', '\t', '\r', '\n':
+			p.pos++
+		default:
+			return
+		}
+	}
+}
+
+// value skips one valid JSON value, including nested containers and escaped
+// quotes. json.Valid has already checked delimiters, escapes and nesting depth.
+func (p *mcpRoutingProbe) value() []byte {
+	p.space()
+	start := p.pos
+	depth := 0
+	for p.pos < len(p.body) {
+		c := p.body[p.pos]
+		switch c {
+		case '"':
+			p.pos++
+			for p.body[p.pos] != '"' {
+				if p.body[p.pos] == '\\' {
+					p.pos++
+				}
+				p.pos++
+			}
+		case '{', '[':
+			depth++
+		case '}', ']':
+			if depth == 0 {
+				return p.body[start:p.pos]
+			}
+			depth--
+		case ',', ':', ' ', '\t', '\r', '\n':
+			if depth == 0 {
+				return p.body[start:p.pos]
+			}
+		}
+		p.pos++
+		if depth == 0 {
+			// Scalars other than strings continue until their delimiter.
+			if c == '"' || c == '}' || c == ']' {
+				return p.body[start:p.pos]
+			}
+		}
+	}
+	return p.body[start:p.pos]
+}
+
+// mcpProbeMaxObjectKeys bounds work and state per routing or attachment object.
+// json.Valid still makes a single linear pass over the entire body.
+const mcpProbeMaxObjectKeys = 32
+
+const (
+	mcpKeyMethod = iota
+	mcpKeyParams
+	mcpKeyName
+	mcpKeyArguments
+	mcpKeyAttachments
+)
+
+// mcpProbeKey compares raw key bytes first. An ASCII routing name can have at
+// most six wire bytes per character (a Unicode escape), so longer escaped keys
+// cannot match and need no unescaping. Unknown keys are never retained.
+func mcpProbeKey(raw []byte, attachment bool) (key int, exact bool) {
+	quoted := raw
+	raw = raw[1 : len(raw)-1] // quotes, already checked by json.Valid
+	if bytes.IndexByte(raw, '\\') >= 0 {
+		if len(raw) > 6*len("attachments") {
+			return -1, false
+		}
+		var decoded string
+		if json.Unmarshal(quoted, &decoded) != nil {
+			return -1, false
+		}
+		raw = []byte(decoded)
+	}
+	if attachment {
+		return 0, bytes.EqualFold(raw, []byte("data_base64"))
+	}
+	// The SDK ignores Unicode case folds such as long s in routing keys.
+	for _, c := range raw {
+		if c >= 0x80 {
+			return -1, false
+		}
+	}
+	for i, name := range [...]string{"method", "params", "name", "arguments", "attachments"} {
+		if bytes.EqualFold(raw, []byte(name)) {
+			return i, bytes.Equal(raw, []byte(name))
+		}
+	}
+	return -1, false
+}
+
+func (p *mcpRoutingProbe) object(level int) bool {
+	p.space()
+	if p.pos >= len(p.body) || p.body[p.pos] != '{' {
+		return false
+	}
+	p.pos++
+	var seen uint8
+	p.data = nil
+	for count := 0; ; count++ {
+		p.space()
+		if p.body[p.pos] == '}' {
+			p.pos++
+			return true
+		}
+		if count >= mcpProbeMaxObjectKeys {
+			return false
+		}
+		key, exact := mcpProbeKey(p.value(), level == 3)
+		if level < 3 && key >= 0 {
+			bit := uint8(1 << key)
+			if !exact || seen&bit != 0 {
+				return false
+			}
+			seen |= bit
+		}
+		p.space()
+		p.pos++ // colon, already checked by json.Valid
+		if level == 0 && key == mcpKeyParams || level == 1 && key == mcpKeyArguments {
+			if !p.object(level + 1) {
+				return false
+			}
+		} else {
+			value := p.value()
+			switch {
+			case level == 0 && key == mcpKeyMethod:
+				p.method = value
+			case level == 1 && key == mcpKeyName:
+				p.name = value
+			case level == 2 && key == mcpKeyAttachments:
+				p.attachments = value
+			case level == 3 && exact:
+				p.data = value
+			}
+		}
+		p.space()
+		if p.body[p.pos] == ',' {
+			p.pos++
+		}
+	}
 }
 
 // base64StringLen reports how many bytes raw decodes to, when raw is a JSON
