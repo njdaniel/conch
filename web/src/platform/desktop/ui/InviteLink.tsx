@@ -75,6 +75,20 @@ export function InviteLink({ clientMounted, arrival, onArrivalTaken }: Props) {
     }
   }
 
+  function clearChoice(): void {
+    shown.current = null;
+    setChecked(null);
+    if (swapTimer.current !== null) clearTimeout(swapTimer.current);
+    swapTimer.current = null;
+    setSwapped(false);
+  }
+
+  // Main spent the earlier handles when it handed over this refusal.
+  function refuseArrival(): void {
+    clearChoice();
+    setLine(LINK_UNREADABLE);
+  }
+
   // No timer outlives the page.
   useEffect(
     () => () => {
@@ -96,7 +110,7 @@ export function InviteLink({ clientMounted, arrival, onArrivalTaken }: Props) {
         (answer) => {
           if (!live || answer === null) return;
           if (answer.ok) adopt(answer);
-          else setLine(LINK_UNREADABLE);
+          else refuseArrival();
         },
         () => undefined,
       );
@@ -107,14 +121,14 @@ export function InviteLink({ clientMounted, arrival, onArrivalTaken }: Props) {
       live = false;
       stop?.();
     };
-    // adopt only reads a ref and sets state, so it is not a dependency.
+    // adopt and refuseArrival only use the bridge, refs and state setters.
   }, [own]);
 
   // Handed down: take it up once.
   useEffect(() => {
     if (arrival === undefined || arrival === null) return;
     if (arrival.ok) adopt(arrival);
-    else setLine(LINK_UNREADABLE);
+    else refuseArrival();
     onArrivalTaken?.();
   }, [arrival]);
 
@@ -179,12 +193,10 @@ export function InviteLink({ clientMounted, arrival, onArrivalTaken }: Props) {
 
   function cancel(): void {
     const b = inviteBridge();
-    const handle = checked?.handle;
-    shown.current = null;
-    setChecked(null);
-    setSwapped(false);
+    const handle = shown.current;
+    clearChoice();
     setLine('');
-    if (b?.inviteCancel !== undefined && handle !== undefined) void b.inviteCancel(handle).catch(() => undefined);
+    if (b?.inviteCancel !== undefined && handle !== null) void b.inviteCancel(handle).catch(() => undefined);
   }
 
   if (!available) return null;

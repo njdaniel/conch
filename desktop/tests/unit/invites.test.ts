@@ -668,6 +668,22 @@ describe('a scheme link reaching the router', () => {
     expect(s.log).toHaveLength(before);
   });
 
+  it('spends a shown handle when the page reads a refusal', async () => {
+    const s = await setup();
+    const work = await s.add(ORIGIN_A);
+    const switched = vi.spyOn(s.profiles, 'switchTo');
+    expect(s.invites.arrive([exe, scheme(ORIGIN_A)])).toBe(true);
+    const shown = s.invites.arrived();
+    if (shown === null || !shown.ok) throw new Error('nothing arrived');
+    s.clock.now += SWAP_GUARD_MS;
+
+    expect(s.invites.arrive([exe, 'conch://invite?server=x'])).toBe(true);
+    expect(s.invites.arrived()).toEqual({ ok: false, refusal: 'malformed' });
+    expect(await s.invites.accept(shown.handle, { profile: work })).toEqual({ ok: false, refusal: 'expired' });
+    expect(switched).not.toHaveBeenCalled();
+    expect(s.invites.take()).toBeNull();
+  });
+
   it('considers only the first link; a malformed first is not made up for by a good second', async () => {
     const s = await setup();
     expect(s.invites.arrive([exe, 'conch://invite?server=x', scheme(ORIGIN_A)])).toBe(true);
@@ -682,6 +698,22 @@ describe('a scheme link reaching the router', () => {
     s.invites.arrive([exe, scheme(ORIGIN_B, 'second')]);
     expect(s.invites.arrived()).toMatchObject({ ok: true, origin: ORIGIN_B });
     expect(s.invites.arrived()).toBeNull();
+  });
+
+  it('keeps a valid launch link when a refusal arrives before the page asks', async () => {
+    const s = await setup();
+    const work = await s.add(ORIGIN_A);
+    expect(s.invites.arrive([exe, scheme(ORIGIN_A)])).toBe(true);
+    expect(s.invites.arrive([exe, 'conch://invite?server=x'])).toBe(false);
+    expect(s.log.at(-1)).toBe('conch-desktop: refused a conch: link (malformed)');
+
+    const answer = s.invites.arrived();
+    if (answer === null || !answer.ok) throw new Error('valid launch link was lost');
+    expect(answer.origin).toBe(ORIGIN_A);
+    expect(s.invites.arrived()).toBeNull();
+    s.clock.now += SWAP_GUARD_MS;
+    expect(await s.invites.accept(answer.handle, { profile: work })).toMatchObject({ ok: true });
+    expect(s.invites.take()).toBe(CODE);
   });
 
   it('lets a kept link lapse at its time though nothing else happens, and leaves no timer when taken', async () => {

@@ -261,7 +261,7 @@ export class Invites {
   readonly #deps: InvitesDeps;
   readonly #pending = new Map<string, Pending>();
   // The one scheme link result waiting for the page to ask for it; a newer
-  // link replaces it.
+  // valid link replaces it. A refusal can only replace another refusal.
   #arrival: Arrival | null = null;
   #staged: Staged | null = null;
   #stagedTimer: ReturnType<typeof setTimeout> | null = null;
@@ -284,31 +284,36 @@ export class Invites {
 
   // arrive is a launch's arguments: a first launch's, or a second one's while
   // this process holds the lock. It keeps the parsed scheme link or its
-  // refusal until arrived() takes it (or PENDING_MS passes). It contacts
-  // nothing and answers whether a result was kept, which is the cue to tell
-  // the page.
+  // refusal until arrived() takes it (or PENDING_MS passes). A refusal is
+  // logged but cannot displace a valid link waiting for the page. It contacts
+  // nothing and answers whether a new result was kept, which is the cue to
+  // tell the page.
   arrive(argv: unknown): boolean {
     const link = schemeLinkFrom(argv);
     if (link === null) return false;
     const parsed = parseSchemeLink(link);
+    this.#deps.log(parsed.ok ? 'conch-desktop: a conch: invite link arrived' : `conch-desktop: refused a conch: link (${parsed.refusal})`);
+    if (!parsed.ok && this.#arrival?.parsed.ok === true) return false;
     this.#dropArrival();
     const timer = setTimeout(() => {
       this.#arrival = null;
     }, PENDING_MS);
     timer.unref();
     this.#arrival = { parsed, timer };
-    this.#deps.log(parsed.ok ? 'conch-desktop: a conch: invite link arrived' : `conch-desktop: refused a conch: link (${parsed.refusal})`);
     return true;
   }
 
   // arrived hands the page what arrive kept, once, as a check of a pasted
   // link is handed: a refusal, or a handle with the server and its profiles.
-  // The code is never handed to the page here.
+  // The code is never handed to the page here. A delivered refusal clears
+  // the panel's choice, so main spends any earlier handles too.
   arrived(): InviteCheck | null {
     const kept = this.#arrival;
     this.#dropArrival();
     if (kept === null) return null;
-    return kept.parsed.ok ? this.#register(kept.parsed, true) : kept.parsed;
+    if (kept.parsed.ok) return this.#register(kept.parsed, true);
+    for (const handle of this.#pending.keys()) this.#spend(handle);
+    return kept.parsed;
   }
 
   #dropArrival(): void {
