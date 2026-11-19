@@ -63,6 +63,14 @@ export const MAX_DM_SNAPSHOT_CONVERSATIONS = 200;
 export const MAX_DM_CLIENT_NONCE_BYTES = 64;
 export const DM_CLIENT_NONCE_WINDOW_SECONDS = 86400;
 export const MAX_DM_CURSOR_BYTES = 128;
+export const PRIVATE_CALL_RING_SECONDS = 40;
+export const PRIVATE_CALL_JOIN_SECONDS = 30;
+export const PRIVATE_CALL_RECONNECT_GRACE_SECONDS = 20;
+export const PRIVATE_CALL_ACTION_WINDOW_SECONDS = 3600;
+export const MIN_PRIVATE_CALL_ID_BYTES = 16;
+export const MAX_PRIVATE_CALL_ID_BYTES = 64;
+export const MAX_PRIVATE_CALL_ACTION_ID_BYTES = 64;
+export const MAX_PRIVATE_CALL_HISTORY_PAGE = 50;
 
 // schema.PrincipalKind
 export type PrincipalKind = 'human' | 'agent';
@@ -5622,6 +5630,224 @@ export const listPendingNotificationsResponseV2 = object<ListPendingNotification
   summaries: array(notificationSummaryV2),
   cursor: optional(str),
   more: bool,
+});
+
+// schema.PrivateCallRole
+export type PrivateCallRole = 'caller' | 'callee';
+
+export const privateCallRole = vocab<PrivateCallRole>({ caller: true, callee: true });
+
+// schema.PrivateCallState
+export type PrivateCallState =
+  | 'unavailable'
+  | 'ringing'
+  | 'accepted'
+  | 'active'
+  | 'declined'
+  | 'cancelled'
+  | 'missed'
+  | 'ended'
+  | 'failed';
+
+export const privateCallState = vocab<PrivateCallState>({
+  unavailable: true,
+  ringing: true,
+  accepted: true,
+  active: true,
+  declined: true,
+  cancelled: true,
+  missed: true,
+  ended: true,
+  failed: true,
+});
+
+// schema.PrivateCallReason: closed on the server and client-tolerant, so a value this
+// bundle does not know is kept and shown by its name; KnownPrivateCallReason is the known ones.
+export type KnownPrivateCallReason = 'hangup' | 'gone' | 'join_timeout' | 'server_restart';
+export type PrivateCallReason = KnownPrivateCallReason | (string & {});
+
+export const privateCallReason = tolerant<KnownPrivateCallReason>({
+  hangup: true,
+  gone: true,
+  join_timeout: true,
+  server_restart: true,
+});
+
+// schema.PrivateCallV1
+export const privateCallV1Schema = 'conch.private_call.v1';
+
+export interface PrivateCallV1 {
+  schema: typeof privateCallV1Schema;
+  id: string;
+  conversation_id: number;
+  caller_id: number;
+  callee_id: number;
+  role: PrivateCallRole;
+  state: PrivateCallState;
+  reason?: PrivateCallReason;
+  revision: number;
+  created_at: string;
+  ring_deadline?: string;
+  join_deadline?: string;
+  ended_at?: string;
+  selected_here: boolean;
+}
+
+export const privateCallV1 = object<PrivateCallV1>({
+  schema: vocab<typeof privateCallV1Schema>({ [privateCallV1Schema]: true }),
+  id: str,
+  conversation_id: int,
+  caller_id: int,
+  callee_id: int,
+  role: privateCallRole,
+  state: privateCallState,
+  reason: optional(privateCallReason),
+  revision: int,
+  created_at: timestamp,
+  ring_deadline: optional(timestamp),
+  join_deadline: optional(timestamp),
+  ended_at: optional(timestamp),
+  selected_here: bool,
+});
+
+// schema.InvitePrivateCallRequestV1
+export interface InvitePrivateCallRequestV1 {
+  action_id: string;
+}
+
+export const invitePrivateCallRequestV1 = object<InvitePrivateCallRequestV1>({
+  action_id: str,
+});
+
+// schema.PrivateCallActionRequestV1
+export interface PrivateCallActionRequestV1 {
+  action_id: string;
+  revision: number;
+}
+
+export const privateCallActionRequestV1 = object<PrivateCallActionRequestV1>({
+  action_id: str,
+  revision: int,
+});
+
+// schema.PrivateCallResponseV1
+export interface PrivateCallResponseV1 {
+  call: PrivateCallV1;
+  replayed?: boolean;
+  glare?: boolean;
+}
+
+export const privateCallResponseV1 = object<PrivateCallResponseV1>({
+  call: privateCallV1,
+  replayed: optional(bool),
+  glare: optional(bool),
+});
+
+// schema.PrivateCallConflictV1
+export interface PrivateCallConflictV1 {
+  code: string;
+  message: string;
+  call: PrivateCallV1;
+}
+
+export const privateCallConflictV1 = object<PrivateCallConflictV1>({
+  code: str,
+  message: str,
+  call: privateCallV1,
+});
+
+// schema.PrivateCallSessionV1
+export const privateCallSessionV1Schema = 'conch.private_call_session.v1';
+
+export interface PrivateCallSessionV1 {
+  schema: typeof privateCallSessionV1Schema;
+  call_id: string;
+  revision: number;
+  livekit_url: string;
+  identity: string;
+  room: string;
+  token: string;
+  expires_at: string;
+}
+
+export const privateCallSessionV1 = object<PrivateCallSessionV1>({
+  schema: vocab<typeof privateCallSessionV1Schema>({ [privateCallSessionV1Schema]: true }),
+  call_id: str,
+  revision: int,
+  livekit_url: str,
+  identity: str,
+  room: str,
+  token: str,
+  expires_at: timestamp,
+});
+
+// schema.PrivateCallRingingV1
+export const privateCallRingingV1Schema = 'conch.private_call_ringing.v1';
+
+export interface PrivateCallRingingV1 {
+  schema: typeof privateCallRingingV1Schema;
+  call: PrivateCallV1;
+}
+
+export const privateCallRingingV1 = object<PrivateCallRingingV1>({
+  schema: vocab<typeof privateCallRingingV1Schema>({ [privateCallRingingV1Schema]: true }),
+  call: privateCallV1,
+});
+
+// schema.PrivateCallStopRingingV1
+export const privateCallStopRingingV1Schema = 'conch.private_call_stop_ringing.v1';
+
+export interface PrivateCallStopRingingV1 {
+  schema: typeof privateCallStopRingingV1Schema;
+  call_id: string;
+  revision: number;
+  state: PrivateCallState;
+}
+
+export const privateCallStopRingingV1 = object<PrivateCallStopRingingV1>({
+  schema: vocab<typeof privateCallStopRingingV1Schema>({ [privateCallStopRingingV1Schema]: true }),
+  call_id: str,
+  revision: int,
+  state: privateCallState,
+});
+
+// schema.PrivateCallStateV1
+export const privateCallStateV1Schema = 'conch.private_call_state.v1';
+
+export interface PrivateCallStateV1 {
+  schema: typeof privateCallStateV1Schema;
+  call: PrivateCallV1;
+}
+
+export const privateCallStateV1 = object<PrivateCallStateV1>({
+  schema: vocab<typeof privateCallStateV1Schema>({ [privateCallStateV1Schema]: true }),
+  call: privateCallV1,
+});
+
+// schema.PrivateCallSnapshotV1
+export const privateCallSnapshotV1Schema = 'conch.private_call_snapshot.v1';
+
+export interface PrivateCallSnapshotV1 {
+  schema: typeof privateCallSnapshotV1Schema;
+  call?: PrivateCallV1;
+  taken_at: string;
+}
+
+export const privateCallSnapshotV1 = object<PrivateCallSnapshotV1>({
+  schema: vocab<typeof privateCallSnapshotV1Schema>({ [privateCallSnapshotV1Schema]: true }),
+  call: optional(privateCallV1),
+  taken_at: timestamp,
+});
+
+// schema.ListPrivateCallsResponseV1
+export interface ListPrivateCallsResponseV1 {
+  calls: PrivateCallV1[];
+  next_cursor?: string;
+}
+
+export const listPrivateCallsResponseV1 = object<ListPrivateCallsResponseV1>({
+  calls: array(privateCallV1),
+  next_cursor: optional(str),
 });
 
 // schema.Error

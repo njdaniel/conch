@@ -1,0 +1,4 @@
+{
+  "code": "call_wrong_device",
+  "message": "this device is not the one in this call"
+}

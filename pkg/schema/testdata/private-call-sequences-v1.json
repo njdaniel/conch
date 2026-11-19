@@ -1,0 +1,256 @@
+{
+  "sequences": [
+    {
+      "name": "answered and hung up",
+      "steps": [
+        {
+          "schema": "conch.private_call.v1",
+          "id": "c4Kq9ZxT2mWb7LpR1vNs3A",
+          "conversation_id": 12,
+          "caller_id": 3,
+          "callee_id": 5,
+          "role": "callee",
+          "state": "ringing",
+          "revision": 1,
+          "created_at": "2026-11-19T10:00:00.000Z",
+          "ring_deadline": "2026-11-19T10:00:40.000Z",
+          "selected_here": false
+        },
+        {
+          "schema": "conch.private_call.v1",
+          "id": "c4Kq9ZxT2mWb7LpR1vNs3A",
+          "conversation_id": 12,
+          "caller_id": 3,
+          "callee_id": 5,
+          "role": "callee",
+          "state": "accepted",
+          "revision": 2,
+          "created_at": "2026-11-19T10:00:00.000Z",
+          "join_deadline": "2026-11-19T10:00:42.000Z",
+          "selected_here": true
+        },
+        {
+          "schema": "conch.private_call.v1",
+          "id": "c4Kq9ZxT2mWb7LpR1vNs3A",
+          "conversation_id": 12,
+          "caller_id": 3,
+          "callee_id": 5,
+          "role": "callee",
+          "state": "active",
+          "revision": 3,
+          "created_at": "2026-11-19T10:00:00.000Z",
+          "selected_here": true
+        },
+        {
+          "schema": "conch.private_call.v1",
+          "id": "c4Kq9ZxT2mWb7LpR1vNs3A",
+          "conversation_id": 12,
+          "caller_id": 3,
+          "callee_id": 5,
+          "role": "callee",
+          "state": "ended",
+          "reason": "hangup",
+          "revision": 4,
+          "created_at": "2026-11-19T10:00:00.000Z",
+          "ended_at": "2026-11-19T10:07:30.000Z",
+          "selected_here": false
+        }
+      ]
+    },
+    {
+      "name": "declined",
+      "steps": [
+        {
+          "schema": "conch.private_call.v1",
+          "id": "c4Kq9ZxT2mWb7LpR1vNs3A",
+          "conversation_id": 12,
+          "caller_id": 3,
+          "callee_id": 5,
+          "role": "caller",
+          "state": "ringing",
+          "revision": 1,
+          "created_at": "2026-11-19T10:00:00.000Z",
+          "ring_deadline": "2026-11-19T10:00:40.000Z",
+          "selected_here": false
+        },
+        {
+          "schema": "conch.private_call.v1",
+          "id": "c4Kq9ZxT2mWb7LpR1vNs3A",
+          "conversation_id": 12,
+          "caller_id": 3,
+          "callee_id": 5,
+          "role": "caller",
+          "state": "declined",
+          "revision": 2,
+          "created_at": "2026-11-19T10:00:00.000Z",
+          "ended_at": "2026-11-19T10:00:09.000Z",
+          "selected_here": false
+        }
+      ]
+    },
+    {
+      "name": "missed",
+      "steps": [
+        {
+          "schema": "conch.private_call.v1",
+          "id": "c4Kq9ZxT2mWb7LpR1vNs3A",
+          "conversation_id": 12,
+          "caller_id": 3,
+          "callee_id": 5,
+          "role": "callee",
+          "state": "ringing",
+          "revision": 1,
+          "created_at": "2026-11-19T10:00:00.000Z",
+          "ring_deadline": "2026-11-19T10:00:40.000Z",
+          "selected_here": false
+        },
+        {
+          "schema": "conch.private_call.v1",
+          "id": "c4Kq9ZxT2mWb7LpR1vNs3A",
+          "conversation_id": 12,
+          "caller_id": 3,
+          "callee_id": 5,
+          "role": "callee",
+          "state": "missed",
+          "revision": 2,
+          "created_at": "2026-11-19T10:00:00.000Z",
+          "ended_at": "2026-11-19T10:00:40.000Z",
+          "selected_here": false
+        }
+      ]
+    },
+    {
+      "name": "join never completes",
+      "steps": [
+        {
+          "schema": "conch.private_call.v1",
+          "id": "c4Kq9ZxT2mWb7LpR1vNs3A",
+          "conversation_id": 12,
+          "caller_id": 3,
+          "callee_id": 5,
+          "role": "caller",
+          "state": "ringing",
+          "revision": 1,
+          "created_at": "2026-11-19T10:00:00.000Z",
+          "ring_deadline": "2026-11-19T10:00:40.000Z",
+          "selected_here": false
+        },
+        {
+          "schema": "conch.private_call.v1",
+          "id": "c4Kq9ZxT2mWb7LpR1vNs3A",
+          "conversation_id": 12,
+          "caller_id": 3,
+          "callee_id": 5,
+          "role": "caller",
+          "state": "accepted",
+          "revision": 2,
+          "created_at": "2026-11-19T10:00:00.000Z",
+          "join_deadline": "2026-11-19T10:00:42.000Z",
+          "selected_here": true
+        },
+        {
+          "schema": "conch.private_call.v1",
+          "id": "c4Kq9ZxT2mWb7LpR1vNs3A",
+          "conversation_id": 12,
+          "caller_id": 3,
+          "callee_id": 5,
+          "role": "caller",
+          "state": "failed",
+          "reason": "join_timeout",
+          "revision": 3,
+          "created_at": "2026-11-19T10:00:00.000Z",
+          "ended_at": "2026-11-19T10:00:42.000Z",
+          "selected_here": false
+        }
+      ]
+    },
+    {
+      "name": "access change while ringing",
+      "steps": [
+        {
+          "schema": "conch.private_call.v1",
+          "id": "c4Kq9ZxT2mWb7LpR1vNs3A",
+          "conversation_id": 12,
+          "caller_id": 3,
+          "callee_id": 5,
+          "role": "callee",
+          "state": "ringing",
+          "revision": 1,
+          "created_at": "2026-11-19T10:00:00.000Z",
+          "ring_deadline": "2026-11-19T10:00:40.000Z",
+          "selected_here": false
+        },
+        {
+          "schema": "conch.private_call.v1",
+          "id": "c4Kq9ZxT2mWb7LpR1vNs3A",
+          "conversation_id": 12,
+          "caller_id": 3,
+          "callee_id": 5,
+          "role": "callee",
+          "state": "cancelled",
+          "revision": 2,
+          "created_at": "2026-11-19T10:00:00.000Z",
+          "ended_at": "2026-11-19T10:00:20.000Z",
+          "selected_here": false
+        }
+      ]
+    },
+    {
+      "name": "restart while active",
+      "steps": [
+        {
+          "schema": "conch.private_call.v1",
+          "id": "c4Kq9ZxT2mWb7LpR1vNs3A",
+          "conversation_id": 12,
+          "caller_id": 3,
+          "callee_id": 5,
+          "role": "caller",
+          "state": "ringing",
+          "revision": 1,
+          "created_at": "2026-11-19T10:00:00.000Z",
+          "ring_deadline": "2026-11-19T10:00:40.000Z",
+          "selected_here": false
+        },
+        {
+          "schema": "conch.private_call.v1",
+          "id": "c4Kq9ZxT2mWb7LpR1vNs3A",
+          "conversation_id": 12,
+          "caller_id": 3,
+          "callee_id": 5,
+          "role": "caller",
+          "state": "accepted",
+          "revision": 2,
+          "created_at": "2026-11-19T10:00:00.000Z",
+          "join_deadline": "2026-11-19T10:00:42.000Z",
+          "selected_here": true
+        },
+        {
+          "schema": "conch.private_call.v1",
+          "id": "c4Kq9ZxT2mWb7LpR1vNs3A",
+          "conversation_id": 12,
+          "caller_id": 3,
+          "callee_id": 5,
+          "role": "caller",
+          "state": "active",
+          "revision": 3,
+          "created_at": "2026-11-19T10:00:00.000Z",
+          "selected_here": true
+        },
+        {
+          "schema": "conch.private_call.v1",
+          "id": "c4Kq9ZxT2mWb7LpR1vNs3A",
+          "conversation_id": 12,
+          "caller_id": 3,
+          "callee_id": 5,
+          "role": "caller",
+          "state": "failed",
+          "reason": "server_restart",
+          "revision": 4,
+          "created_at": "2026-11-19T10:00:00.000Z",
+          "ended_at": "2026-11-19T10:05:00.000Z",
+          "selected_here": false
+        }
+      ]
+    }
+  ]
+}

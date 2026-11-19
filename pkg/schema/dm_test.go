@@ -600,7 +600,8 @@ func TestDMAndChannelIdentitiesStayApart(t *testing.T) {
 		if err := json.Unmarshal(raw, &doc); err != nil {
 			continue // a fixture that is not one JSON document is another test's
 		}
-		isDM := strings.Contains(base, "dm-")
+		// Private calls name a conversation, never a channel, as DMs do.
+		isDM := strings.Contains(base, "dm-") || strings.Contains(base, "private-call")
 		switch {
 		case isDM:
 			dm++

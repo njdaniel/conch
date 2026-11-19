@@ -241,6 +241,18 @@ var Vocabularies = map[string][]string{
 	"DMAcceptPolicy":     values(DMAcceptEveryone, DMAcceptSharedChannel, DMAcceptNobody),
 	"DMChangeKind":       values(DMChangeOpened, DMChangeRead, DMChangeState, DMChangeParticipant),
 	"MessageContextKind": values(MessageContextChannel, MessageContextDirect),
+
+	// Private calls (issue #2029, DRAFT pending ADR-017).
+	"PrivateCallState": values(
+		PrivateCallStateUnavailable, PrivateCallStateRinging, PrivateCallStateAccepted,
+		PrivateCallStateActive, PrivateCallStateDeclined, PrivateCallStateCancelled,
+		PrivateCallStateMissed, PrivateCallStateEnded, PrivateCallStateFailed,
+	),
+	"PrivateCallReason": values(
+		PrivateCallReasonHangup, PrivateCallReasonGone,
+		PrivateCallReasonJoinTimeout, PrivateCallReasonServerRestart,
+	),
+	"PrivateCallRole": values(PrivateCallRoleCaller, PrivateCallRoleCallee),
 }
 
 // values lists a vocabulary by its constants, so an entry above cannot hold a
