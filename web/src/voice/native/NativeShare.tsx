@@ -11,7 +11,8 @@
 // client, which asks main for the grant inside that click. The browser's
 // share UI is not used here; the stream tile is the browser's ShareView,
 // which takes the client as a prop.
-import { useRef, type ReactNode } from 'react';
+import { useContext, useRef, type ReactNode } from 'react';
+import { DesktopOS } from '../../platform/os';
 import { Glyph } from '../../Icons';
 import type { Person } from '../../useLiveChannel';
 import { companionDefaultQuality, companionQualities, shareQualityRefusedNote } from '../connection';
@@ -41,8 +42,8 @@ import {
 
 // Why Share is not offered now, in words, or null when it is. Share is for
 // the channel joined, shown, with the helper connected (UX-15). A desktop
-// with no screen-cast portal is said in the notes after the grant says so; it
-// never turns Share off, so there is no lock to get stuck in.
+// that cannot share is described in the notes after the grant says so. The
+// next click can still ask main to check again.
 export function shareDisabledReason({ joined, shown, live }: { readonly joined: string | null; readonly shown: string | null; readonly live: boolean }): string | null {
   if (joined === null) return shareDisabledWords.notJoined;
   if (shown !== null && shown !== joined) return shareElsewhereWords(joined);
@@ -174,6 +175,7 @@ export function ShareNotes({
   const share = state.share;
   const live = share.kind === 'sharing' || share.kind === 'resuming' || share.kind === 'publishing';
   const starting = share.kind === 'claiming' || share.kind === 'picking';
+  const windows = useContext(DesktopOS) === 'win32';
   const offered = soundRoute || sound !== undefined;
   const soundReason = sound?.view.unavailable;
   const soundNote = sound?.note ?? null;
@@ -207,14 +209,14 @@ export function ShareNotes({
               : 'Starting your screen share…'}
         </p>
       ) : null}
-      {!offered && (share.kind === 'idle' ? reason === null : starting) ? <p className="hint">{silentShareBefore}</p> : null}
+      {!windows && !offered && (share.kind === 'idle' ? reason === null : starting) ? <p className="hint">{silentShareBefore}</p> : null}
       {share.kind === 'sharing' ? (
         <p className="hint voice-supplemental">
           <ShareReadout client={client} direction="sent" prefix="Sending: " asked={provisionalQuality(quality)} />
         </p>
       ) : null}
       {share.kind === 'sharing' ? <ShareCaptureWarning stalled={state.shareCaptureStalled} client={client} /> : null}
-      {!offered && live ? <p className="hint">{silentShareWhile}</p> : null}
+      {!windows && !offered && live ? <p className="hint">{silentShareWhile}</p> : null}
       {showToggle ? <ShareSoundToggle sound={sound} /> : null}
       {sound !== undefined && soundReason !== undefined && (share.kind === 'idle' ? reason === null : live || starting) ? (
         <p id={soundWhyId} role="status" className="hint">

@@ -5,12 +5,13 @@
 // host is on the desktop, and once made it waits for the person to say they
 // can see the icon (Q-D5-2, #1589). Launch at login is off by default and is
 // the person's own choice.
-import { useCallback, useEffect, useId, useRef, useState } from 'react';
+import { useCallback, useContext, useEffect, useId, useRef, useState } from 'react';
 
 import { settingsBridge } from '../access';
+import { DesktopOS } from '../../os';
 import { copyText } from '../clipboard';
 import type { DesktopSettingsView, IntegrationsView, SettingsChange } from '../bridge';
-import { integrationNames, integrationSentence, integrationsPlainText, integrationsText, integrationStateWords, settingsRefusalLines, settingsText } from './text';
+import { integrationNames, integrationSentence, integrationsPlainText, integrationsText, integrationStateWords, settingsRefusalLine, settingsText } from './text';
 
 // What works on this desktop (issue #1593): main's held states as a list, and
 // a "Copy this list" button for a problem report. Shown only when main
@@ -18,6 +19,7 @@ import { integrationNames, integrationSentence, integrationsPlainText, integrati
 // open, so the list is asked for again whenever the settings view changes
 // (`settings`) and again when Copy is clicked, so the copied text is current.
 function Integrations({ settings }: { readonly settings: DesktopSettingsView }) {
+  const platform = useContext(DesktopOS);
   const [view, setView] = useState<IntegrationsView | null>(null);
   const [copied, setCopied] = useState<'' | 'yes' | 'no'>('');
   const id = useId();
@@ -54,7 +56,7 @@ function Integrations({ settings }: { readonly settings: DesktopSettingsView }) 
     const fresh = await refresh();
     const rows = fresh !== null && fresh.rows.length > 0 ? fresh : held;
     try {
-      await copyText(integrationsPlainText(rows));
+      await copyText(integrationsPlainText(rows, platform));
       setCopied('yes');
     } catch {
       setCopied('no');
@@ -67,7 +69,7 @@ function Integrations({ settings }: { readonly settings: DesktopSettingsView }) 
       <ul>
         {view.rows.map((row) => (
           <li key={row.id}>
-            <strong>{integrationNames[row.id]}</strong>: {integrationStateWords[row.state]}. {integrationSentence(row)}
+            <strong>{integrationNames[row.id]}</strong>: {integrationStateWords[row.state]}. {integrationSentence(row, platform)}
           </li>
         ))}
       </ul>
@@ -85,6 +87,7 @@ function Integrations({ settings }: { readonly settings: DesktopSettingsView }) 
 }
 
 export function DesktopSettings() {
+  const platform = useContext(DesktopOS);
   const [view, setView] = useState<DesktopSettingsView | null>(null);
   const [line, setLine] = useState('');
   const [busy, setBusy] = useState(false);
@@ -113,7 +116,7 @@ export function DesktopSettings() {
     try {
       const result = await b.settingsSet(next);
       if (result.ok) setView(result.view);
-      else setLine(settingsRefusalLines[result.reason]);
+      else setLine(settingsRefusalLine(result.reason, platform));
     } catch {
       setLine(settingsText.failed);
     } finally {
@@ -194,7 +197,7 @@ export function DesktopSettings() {
       </label>
       {view.launchAvailable ? null : (
         <p id={`${id}-launch`} className="desktop-settings-note">
-          {view.launchUnavailable === 'unsafe-location' ? settingsText.launchUnsafe : settingsText.launchUnavailable}
+          {settingsRefusalLine(view.launchUnavailable ?? 'unpackaged', platform)}
         </p>
       )}
       {line === '' ? null : <p role="alert">{line}</p>}

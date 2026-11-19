@@ -228,6 +228,21 @@ describe('the tray exists only while closeToTray is on', () => {
 });
 
 describe('the menu', () => {
+  it('uses the higher-contrast idle asset and still shows active voice states', async () => {
+    const r = rig();
+    const idleIcon = join(import.meta.dirname, '../../build/icons/48.png');
+    expect(existsSync(idleIcon)).toBe(true);
+    const controller = new TrayController({ ...r.deps, idleIcon });
+    await controller.sync();
+    expect(r.trays[0]?.image).toBe(idleIcon);
+    r.state.view = running();
+    emit(r);
+    expect(r.trays[0]?.image).toBe('/icons/voice.png');
+    r.state.view = IDLE;
+    emit(r);
+    expect(r.trays[0]?.image).toBe(idleIcon);
+  });
+
   it('reads Not in voice with the profile, and offers Show, the voice actions disabled, and Quit', async () => {
     const r = rig();
     await new TrayController(r.deps).sync();

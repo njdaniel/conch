@@ -241,8 +241,9 @@ export const shareCauseWords: Readonly<Record<ShareCause, string>> = {
 };
 
 // Why this desktop cannot share, as the grant says (CompanionShareUnavailable):
-// no portal for ScreenCast, or a session that is not Wayland (X11).
+// capture is unimplemented, the ScreenCast portal is missing, or the session is X11.
 export const shareUnavailableWords: Readonly<Record<CompanionShareUnavailable, string>> = {
+  'capture-unsupported': 'Screen sharing is not available in this desktop app yet.',
   'no-portal': shareDisabledWords.noPortal,
   'not-wayland': 'Sharing a screen from the Linux app needs a Wayland session; this desktop is running X11',
 };

@@ -1,6 +1,6 @@
 // What the server list says, in words (issue #945). Pure functions of the
 // bridge's view; no component state.
-import type { IntegrationId, IntegrationRow, IntegrationState, IntegrationsView, IntegrationWhy, InviteAccept, InviteRefusal, ProfileAddResult, ProfileNotice, StorageStatus } from '../bridge';
+import type { IntegrationId, IntegrationRow, IntegrationState, IntegrationsView, IntegrationWhy, InviteAccept, InviteRefusal, ProfileAddResult, ProfileNotice, SettingsResult, StorageStatus } from '../bridge';
 
 // Written in two parts: the page's source holds no absolute URL.
 export const example = ['https:', 'chat.example.org'].join('//');
@@ -53,10 +53,12 @@ export function storageLine(storage: StorageStatus, platform: string): string {
         ? 'Sign-ins are kept on this computer, sealed by Windows (DPAPI). That protects them from other users of this computer, not from other apps running as you.'
         : 'Sign-ins are kept on this computer, sealed by the system’s secret store.';
     case 'unavailable':
+      if (platform === 'win32') return 'Windows credential protection did not answer. Sign-ins are kept only until the app closes. Retry to check again.';
       return 'The system’s secret store did not answer, so sign-ins are kept only until the app closes. Retry to check again.';
     case 'session-only':
       switch (storage.reason) {
         case 'unavailable':
+          if (platform === 'win32') return 'Windows credential protection is unavailable. Sign-ins are kept only until the app closes. You will sign in again next time.';
           return 'This computer has no secret store available, so sign-ins are kept only until the app closes. You will sign in again next time.';
         case 'insecure-backend':
           return 'The system’s secret store here protects nothing (it uses a built-in password), so sign-ins are kept only until the app closes. You will sign in again next time.';
@@ -105,13 +107,14 @@ export const settingsText = {
   trayYes: 'Yes, I can see it',
   trayNo: 'No, quit when I close',
   launch: 'Open Conch when I log in',
-  launchUnavailable: 'Only an installed copy of Conch can open when you log in.',
-  launchUnsafe: 'Launch at login needs the app installed in a place only you or the system can change.',
   failed: 'The desktop app could not change that.',
 } as const;
 
-export const settingsRefusalLines: Readonly<Record<'unpackaged' | 'unsafe-location' | 'foreign-file' | 'no-tray' | 'failed', string>> = {
+type SettingsRefusal = Extract<SettingsResult, { ok: false }>['reason'];
+
+const settingsRefusalLines: Readonly<Record<SettingsRefusal, string>> = {
   unpackaged: 'Only an installed copy of Conch can open when you log in.',
+  'launch-unsupported': 'Open at login is not available on this platform yet.',
   'unsafe-location': 'Launch at login needs the app installed in a place only you or the system can change.',
   'foreign-file': 'Another program already has a startup entry with Conch’s name, so it was left alone.',
   'no-tray': 'No tray is available on this desktop, so closing the window will quit Conch.',
@@ -170,6 +173,7 @@ const whyLines: Readonly<Record<IntegrationWhy, string>> = {
   'notifications-unsupported': 'This desktop does not show notifications for Conch, so you will not be told of new messages while the window is out of sight.',
   'lock-checking': 'Conch is still checking whether it can tell when your screen locks.',
   'lock-unobserved': 'Conch can’t tell when your screen locks on this desktop: locking won’t mute you, and notification text stays hidden.',
+  'capture-unsupported': 'Screen sharing is not available in this desktop app yet. You can watch other people’s shares.',
   'no-portal': 'This desktop has no screen-share service Conch can use, so you can watch shares but not start one.',
   'not-wayland': 'This desktop is not using the newer display system that Conch needs to share a screen, so you can watch shares but not start one here.',
   'portal-unasked': 'Conch has not checked yet whether this desktop can share a screen.',
@@ -179,6 +183,7 @@ const whyLines: Readonly<Record<IntegrationWhy, string>> = {
   'unsafe-root': 'The folder where Conch keeps its files is not private to you, so nothing is saved and sign-ins are kept only until the app closes.',
   'secret-store-silent': 'The password keyring did not answer, so Conch can’t tell yet whether sign-ins will be kept.',
   unpackaged: 'Only an installed copy of Conch can open when you log in.',
+  'launch-unsupported': settingsRefusalLines['launch-unsupported'],
   'unsafe-location': 'Launch at login needs Conch installed in a place only you or the system can change.',
   'share-silent': 'Conch makes no sound when a share starts or ends on this desktop yet, so look at the window instead.',
   'not-installed': 'The voice helper is not installed, so voice is off and text chat is unaffected.',
@@ -192,16 +197,32 @@ const whyLines: Readonly<Record<IntegrationWhy, string>> = {
   'key-unavailable': 'Conch can’t read your talk key right now, so use the mute button.',
 };
 
-export function integrationSentence(row: IntegrationRow): string {
+export function settingsRefusalLine(reason: SettingsRefusal, platform: string | null): string {
+  return reason === 'launch-unsupported' && platform === 'win32'
+    ? 'Open at login is not available on Windows yet.'
+    : settingsRefusalLines[reason];
+}
+
+export function integrationSentence(row: IntegrationRow, platform: string | null = null): string {
+  if (row.id === 'storage' && platform === 'win32') {
+    switch (row.why) {
+      case 'secret-store-missing':
+        return storageLine({ kind: 'session-only', reason: 'unavailable' }, platform);
+      case 'secret-store-silent':
+        return storageLine({ kind: 'unavailable' }, platform);
+    }
+    if (row.state === 'working') return storageLine({ kind: 'protected' }, platform);
+  }
   if (row.state === 'working') return workingLines[row.id];
+  if (row.why === 'launch-unsupported') return settingsRefusalLine(row.why, platform);
   if (row.why !== undefined) return whyLines[row.why];
   return row.state === 'unknown' ? 'Conch can’t tell yet.' : 'This is not available on this desktop.';
 }
 
 // The list as plain text for a problem report: one line per row, the state
 // then its sentence.
-export function integrationsPlainText(view: IntegrationsView): string {
-  return [integrationsText.copyTitle, ...view.rows.map((row) => `${integrationNames[row.id]}: ${integrationStateWords[row.state]}. ${integrationSentence(row)}`)].join('\n');
+export function integrationsPlainText(view: IntegrationsView, platform: string | null = null): string {
+  return [integrationsText.copyTitle, ...view.rows.map((row) => `${integrationNames[row.id]}: ${integrationStateWords[row.state]}. ${integrationSentence(row, platform)}`)].join('\n');
 }
 
 // The update notice (issue #1600). The version is main's, checked to be a

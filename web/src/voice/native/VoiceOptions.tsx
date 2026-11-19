@@ -16,8 +16,9 @@
 // format characters: they are stripped of those, and each is set apart in its
 // own isolate (an isolating mark pair inside an option, a bdi elsewhere), so
 // one name cannot reorder the words around it.
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useContext, useEffect, useRef, useState } from 'react';
 import type { NativeVoiceDevicesResult, NativeVoiceView, VoiceDeviceKey, VoiceOneShotError } from '../../platform/desktop/bridge';
+import { DesktopOS } from '../../platform/os';
 import type { NativeVoice } from '../../platform/types';
 import { updatePendingWords } from './words';
 import type { VoiceControlTalkMode, VoiceDevice } from '../../schema/generated';
@@ -94,6 +95,7 @@ export function VoiceOptions({
   readonly view: NativeVoiceView;
   readonly open: boolean;
 }) {
+  const windows = useContext(DesktopOS) === 'win32';
   const [devices, setDevices] = useState<Listing>({ kind: 'loading' });
   const [chosen, setChosen] = useState<Chosen>({});
   const [busy, setBusy] = useState<Side | 'talk' | null>(null);
@@ -176,7 +178,7 @@ export function VoiceOptions({
 
   return (
     <div id="voice-options" className="voice-options" hidden={!open}>
-      {devices.kind === 'pipewire' ? <p role="status" className="hint">{noPipeWire}</p> : null}
+      {devices.kind === 'pipewire' ? <p role="status" className="hint">{windows ? 'Audio devices could not be listed on Windows.' : noPipeWire}</p> : null}
       {devices.kind === 'failed' ? (
         <p role="status" className="hint">
           Devices could not be listed: {oneShotWords[devices.error]}{' '}

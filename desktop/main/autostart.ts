@@ -1,11 +1,12 @@
 // Launch at login on Linux (issue #1587, linux-desktop.md §9). Input: whether
-// this is a packaged build, its executable's absolute path and the XDG config
+// this is a packaged Linux build, its executable's absolute path and the XDG config
 // directory. Output: at most one file, $XDG_CONFIG_HOME/autostart/
 // chat.conch.desktop.desktop (~/.config when the variable is unset), which
 // carries a marker key.
 //
 // Electron's app.setLoginItemSettings is documented for macOS and Windows
-// only, so main writes the standard XDG autostart entry itself. Rules:
+// only, so on Linux main writes the standard XDG autostart entry itself.
+// Launch at login is unimplemented on the other platforms. Rules:
 //   - only a packaged build writes it; an unpackaged run refuses and says why;
 //   - the executable must sit where only the user or the system can change it:
 //     its real path is a regular file and no ancestor is writable by group or
@@ -21,6 +22,7 @@
 import { randomBytes } from 'node:crypto';
 import { lstat, mkdir, open, readFile, realpath, rename, rm, stat } from 'node:fs/promises';
 import { dirname, isAbsolute, join } from 'node:path';
+import type { LaunchUnavailable } from '../../web/src/platform/desktop/bridge.ts';
 
 // The app id of desktop/build/electron-builder.config.json.
 export const APP_ID = 'chat.conch.desktop';
@@ -28,11 +30,12 @@ export const MARKER_KEY = 'X-Conch-Autostart';
 const MARKER_LINE = `${MARKER_KEY}=true`;
 const MAX_BYTES = 16 * 1024;
 
-export type AutostartRefusal = 'unpackaged' | 'unsafe-location' | 'foreign-file' | 'failed';
+export type AutostartRefusal = LaunchUnavailable | 'foreign-file' | 'failed';
 export type AutostartResult = { readonly ok: true } | { readonly ok: false; readonly reason: AutostartRefusal };
 
 export interface AutostartDeps {
   readonly packaged: boolean;
+  readonly platform?: NodeJS.Platform;
   // process.execPath: the packaged executable.
   readonly execPath: string;
   readonly env: Readonly<Record<string, string | undefined>>;
@@ -116,9 +119,10 @@ export class Autostart {
   }
 
   // Why this build may not write the entry, or null when it may.
-  async availability(): Promise<'unpackaged' | 'unsafe-location' | null> {
+  async availability(): Promise<LaunchUnavailable | null> {
+    if ((this.#deps.platform ?? process.platform) !== 'linux') return 'launch-unsupported';
     if (!this.#deps.packaged) return 'unpackaged';
-    if (process.platform !== 'linux' || execValue(this.#deps.execPath) === null) return 'unsafe-location';
+    if (execValue(this.#deps.execPath) === null) return 'unsafe-location';
     return (await trustedTarget(this.#deps.execPath, this.#deps.trustedAbove)) === null ? 'unsafe-location' : null;
   }
 
@@ -139,7 +143,8 @@ export class Autostart {
       this.#deps.log('conch-desktop: launch at login is only for an installed build; an unpackaged run does not write an autostart entry');
       return { ok: false, reason: 'unpackaged' };
     }
-    if (why !== null) {
+    if (why === 'launch-unsupported') return { ok: false, reason: why };
+    if (why === 'unsafe-location') {
       this.#deps.log('conch-desktop: launch at login needs the app installed where only you or the system can change it; no autostart entry was written');
       return { ok: false, reason: 'unsafe-location' };
     }
@@ -175,6 +180,8 @@ export class Autostart {
   }
 
   async disable(): Promise<AutostartResult> {
+    // There is no startup entry to remove on platforms without autostart.
+    if ((this.#deps.platform ?? process.platform) !== 'linux') return { ok: true };
     try {
       switch (await this.#existing()) {
         case 'absent':
