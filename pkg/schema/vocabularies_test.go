@@ -222,6 +222,7 @@ var validators = map[string]func(string) bool{
 
 	// Version 3 of the voice-helper control protocol (issue #1851).
 	"VoiceControlCommandKindV3":     validOf[VoiceControlCommandKindV3](),
+	"VoiceControlCommandKindV4":     validOf[VoiceControlCommandKindV4](),
 	"VoiceControlShareAudio":        validOf[VoiceControlShareAudio](),
 	"VoiceControlShareAudioProblem": validOf[VoiceControlShareAudioProblem](),
 

@@ -316,6 +316,20 @@ var TSTypes = []TSType{
 	{Value: VoiceControlAckV3{}, Schema: VoiceControlSchemaV3},
 	{Value: VoiceControlStateV3{}, Schema: VoiceControlSchemaV3},
 	{Value: VoiceControlProtocolErrorV3{}, Schema: VoiceControlSchemaV3},
+	// v4 (issue #2039, ADR-017 Decision 13): v3 and a start that names a
+	// channel or a private call. Its fixtures are in testdata/voice-control-v4/.
+	{Value: VoiceControlStartV4{}, Schema: VoiceControlSchemaV4},
+	{Value: VoiceControlSetMuteV4{}, Schema: VoiceControlSchemaV4},
+	{Value: VoiceControlSetDeafenV4{}, Schema: VoiceControlSchemaV4},
+	{Value: VoiceControlGetStateV4{}, Schema: VoiceControlSchemaV4},
+	{Value: VoiceControlLeaveV4{}, Schema: VoiceControlSchemaV4},
+	{Value: VoiceControlSetDevicesV4{}, Schema: VoiceControlSchemaV4},
+	{Value: VoiceControlSetTalkModeV4{}, Schema: VoiceControlSchemaV4},
+	{Value: VoiceControlSetShareAudioV4{}, Schema: VoiceControlSchemaV4},
+	{Value: VoiceControlSetShareAudioMuteV4{}, Schema: VoiceControlSchemaV4},
+	{Value: VoiceControlAckV4{}, Schema: VoiceControlSchemaV4},
+	{Value: VoiceControlStateV4{}, Schema: VoiceControlSchemaV4},
+	{Value: VoiceControlProtocolErrorV4{}, Schema: VoiceControlSchemaV4},
 	{Value: VoiceControlPipeAttachedV1{}, Schema: VoiceControlPipeSchemaV1},
 	// The device list `conch-voice devices --json` writes (issue #1378, D3-7
 	// of #771): the desktop owner reads it from a one-shot run. Its fixtures
@@ -817,6 +831,7 @@ var TSVocabularyModes = map[string]TSVocabularyMode{
 	// Strict, for the same reason: version 3 of that protocol (issue #1851),
 	// its command kinds and the state of a share's sound.
 	"VoiceControlCommandKindV3":     TSStrict,
+	"VoiceControlCommandKindV4":     TSStrict,
 	"VoiceControlShareAudio":        TSStrict,
 	"VoiceControlShareAudioProblem": TSStrict,
 

@@ -1597,6 +1597,7 @@ func (r *fieldReader) int(key string) int64 {
 	return n
 }
 
+//nolint:unparam // every state of every version has one optional integer, retry_in_ms; the key stays a parameter, as in the other readers (optStr, optWord)
 func (r *fieldReader) optInt(key string) *int64 {
 	var n int64
 	if !r.take(key, &n, false) {

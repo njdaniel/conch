@@ -107,6 +107,13 @@ var Vocabularies = map[string][]string{
 		VoiceControlCommandV3SetDevices, VoiceControlCommandV3SetTalkMode,
 		VoiceControlCommandV3SetShareAudio, VoiceControlCommandV3SetShareAudioMute,
 	),
+	// v4's, likewise (voice_control_v4.go): v3's nine words, in v4's own type.
+	"VoiceControlCommandKindV4": values(
+		VoiceControlCommandV4Start, VoiceControlCommandV4SetMute, VoiceControlCommandV4SetDeafen,
+		VoiceControlCommandV4GetState, VoiceControlCommandV4Leave,
+		VoiceControlCommandV4SetDevices, VoiceControlCommandV4SetTalkMode,
+		VoiceControlCommandV4SetShareAudio, VoiceControlCommandV4SetShareAudioMute,
+	),
 	"VoiceControlCredential": values(VoiceControlCredentialStored, VoiceControlCredentialEnv),
 	"VoiceControlErrorCode": values(
 		VoiceControlErrorTooLong, VoiceControlErrorMalformed, VoiceControlErrorUnknownSchema,
