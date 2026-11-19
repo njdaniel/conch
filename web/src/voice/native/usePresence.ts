@@ -5,6 +5,7 @@
 // presence; it never opens a room or asks for a device.
 import { useEffect, useRef, useState } from 'react';
 import * as api from '../../api';
+import { soundAudience, sounds, voiceSounds } from '../../sounds';
 import type { VoicePresenceV2 } from '../../schema/voice';
 import { Feed, type FeedStatus } from '../../state/feed';
 import { parsePresence } from '../presence';
@@ -24,17 +25,23 @@ const voiceNotAllowed = 'voice_not_allowed';
 
 export function usePresence({
   channel,
+  joined,
   voiceAllowed,
   onUnauthorized,
 }: {
   // The channel whose presence is shown; null asks for none.
   readonly channel: string | null;
+  // Only this app’s joined channel may make interface cues, not a roster
+  // browsed while this account is in voice on another client.
+  readonly joined: string | null;
   readonly voiceAllowed: boolean;
   readonly onUnauthorized: () => void;
 }): Snapshot {
   const [snapshot, setSnapshot] = useState<Snapshot>({ kind: 'loading' });
   const unauthorized = useRef(onUnauthorized);
   unauthorized.current = onUnauthorized;
+  const joinedRef = useRef(joined);
+  joinedRef.current = joined;
 
   useEffect(() => {
     if (channel === null) {
@@ -48,6 +55,15 @@ export function usePresence({
     let live = true;
     let first = true;
     let closeReason = '';
+    let previous: VoicePresenceV2 | null = null;
+    const show = (presence: VoicePresenceV2) => {
+      const audience = soundAudience;
+      if (joinedRef.current === channel && audience?.allows(presence.channel_id)) {
+        voiceSounds(previous, presence, audience.me, (sound) => { sounds.play(sound); });
+      }
+      previous = presence;
+      setSnapshot({ kind: 'presence', presence });
+    };
     setSnapshot({ kind: 'loading' });
     const feed = new Feed({
       channel,
@@ -66,19 +82,23 @@ export function usePresence({
       onFrame: (data) => {
         const presence: VoicePresenceV2 | null = parsePresence(data);
         if (presence === null || !live) return;
-        setSnapshot({ kind: 'presence', presence });
+        show(presence);
       },
       onStatus: (status: FeedStatus) => {
         if (!live) return;
         const was = first;
         first = false;
         if (status === 'unauthorized') unauthorized.current();
-        else if (status === 'waiting' || (status === 'connecting' && !was)) setSnapshot({ kind: 'unreachable' });
-        else if (status === 'denied') settle();
+        else if (status === 'waiting' || (status === 'connecting' && !was)) {
+          // A reconnect is a fresh baseline, never a backlog of cues.
+          previous = null;
+          setSnapshot({ kind: 'unreachable' });
+        } else if (status === 'denied') settle();
       },
     });
     // A 1008 close says only that the server meant it; one read says why.
     const settle = () => {
+      previous = null;
       if (closeReason === noLongerMember) {
         setSnapshot({ kind: 'gone' });
         return;
@@ -86,7 +106,7 @@ export function usePresence({
       void api.getVoicePresence(channel).then((result) => {
         if (!live) return;
         if (result.ok) {
-          setSnapshot({ kind: 'presence', presence: result.value });
+          show(result.value);
           feed.retryLater();
         } else if (result.failure === 'unauthorized') unauthorized.current();
         else setSnapshot({ kind: result.code === voiceNotAllowed ? 'not_allowed' : 'gone' });

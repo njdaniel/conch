@@ -14,7 +14,7 @@
 import type { Page } from '@playwright/test';
 import { history, post } from './api';
 import { expect, messages, say, signIn, statusLine, test } from './fixtures';
-import { enter, expectClean, joinVoice, leave, type Someone } from './people';
+import { enter, expectClean, joinVoice, leave, leaveVoice, leaveWithin, type Someone } from './people';
 import { answered } from './livekit-admin';
 import { dockerAvailable, emptiesWithin, startVoiceWorld, type VoiceWorld } from './voice-world';
 import { loadWorld, principalId } from './world';
@@ -94,6 +94,30 @@ test.describe('@smoke @cross @voice with LiveKit', () => {
       await expect.poll(() => answered(vw.participants()), { timeout: 15_000 }).toEqual(members.map((m) => `p${String(m.id)}`).sort());
 
       for (const p of people) await expectClean(vw, p);
+
+      // Each person leaves by the page's own button, and LiveKit's own list
+      // loses exactly that person within leaveWithin, while the pages are
+      // still open (issue #1764). A page closed instead is left to
+      // livekit-client's pagehide handler, which races the page's teardown;
+      // the tab-close and vanished-page paths are 67-voice-recovery's. The
+      // bound is people.ts's leaveWithin, far under the 20 s a leave that never
+      // arrived takes to time out.
+      //
+      // Each page plays one <audio> per other person in voice, and no more:
+      // when someone leaves, their element goes from the others' pages too
+      // (issue #1844: livekit-client detaches it before TrackUnsubscribed, so
+      // the handler must remove the one it holds).
+      const voices = (p: Someone) => p.page.locator('body > audio');
+      for (const p of people) await expect(voices(p), `${p.member.name} hears the other two`).toHaveCount(members.length - 1, { timeout: 15_000 });
+      const remaining = [...people];
+      for (const p of people) {
+        await leaveVoice(p);
+        remaining.splice(remaining.indexOf(p), 1);
+        for (const r of remaining) await expect(voices(r), `${r.member.name} keeps no audio of ${p.member.name}`).toHaveCount(remaining.length - 1);
+        await expect
+          .poll(() => answered(vw.participants()), { timeout: leaveWithin, message: `${p.member.name} leaves LiveKit at once` })
+          .toEqual(remaining.map((r) => `p${String(r.member.id)}`).sort());
+      }
     } finally {
       for (const p of people) await leave(p);
     }

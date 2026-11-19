@@ -175,6 +175,8 @@ export class SettingsService {
   // The entry is removed from an unsafe location even when the stored setting
   // reads off (#1642's review): settings.json may have been unreadable, so the
   // default off says nothing about whether an entry of ours is still there.
+  // A setting restored on an unsupported platform is turned off without
+  // removing an entry, since this platform never creates one.
   rejudge(): Promise<void> {
     const run = this.#queue.then(() => this.#rejudge());
     this.#queue = run.catch(() => undefined);
@@ -182,18 +184,22 @@ export class SettingsService {
   }
 
   async #rejudge(): Promise<void> {
-    if ((await this.#deps.autostart.availability()) !== 'unsafe-location') return;
-    if (!this.#current.launchAtLogin) {
-      // Nothing to store; only an entry of ours that outlived the setting.
-      const stale = await this.#deps.autostart.disable();
-      if (!stale.ok && stale.reason !== 'foreign-file') this.#deps.log('conch-desktop: a stale autostart entry could not be removed');
-      return;
-    }
-    this.#deps.log('conch-desktop: launch at login is on but the app no longer sits where only you or the system can change it; the autostart entry is removed and the setting turned off');
-    const done = await this.#deps.autostart.disable();
-    // A foreign file is left alone and there is nothing of ours to remove.
-    if (!done.ok && done.reason !== 'foreign-file') {
-      this.#deps.log('conch-desktop: the autostart entry could not be removed; the setting stays on');
+    const reason = await this.#deps.autostart.availability();
+    if (reason === 'unsafe-location') {
+      if (!this.#current.launchAtLogin) {
+        // Nothing to store; only an entry of ours that outlived the setting.
+        const stale = await this.#deps.autostart.disable();
+        if (!stale.ok && stale.reason !== 'foreign-file') this.#deps.log('conch-desktop: a stale autostart entry could not be removed');
+        return;
+      }
+      this.#deps.log('conch-desktop: launch at login is on but the app no longer sits where only you or the system can change it; the autostart entry is removed and the setting turned off');
+      const done = await this.#deps.autostart.disable();
+      // A foreign file is left alone and there is nothing of ours to remove.
+      if (!done.ok && done.reason !== 'foreign-file') {
+        this.#deps.log('conch-desktop: the autostart entry could not be removed; the setting stays on');
+        return;
+      }
+    } else if (reason !== 'launch-unsupported' || !this.#current.launchAtLogin) {
       return;
     }
     const next: AppSettings = { ...this.#current, launchAtLogin: false };

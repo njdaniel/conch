@@ -7,6 +7,7 @@
 // (origin, principal id). A bound profile never takes another principal, and
 // two profiles never hold the same (origin, principal id): a second account on
 // a server is a second profile. Nothing here is secret.
+import type { ShareSoundChoice } from '../../../web/src/platform/desktop/bridge.ts';
 import { parseServerAddress } from '../api/origin.ts';
 import type { ProfileFiles } from './files.ts';
 import { isProfileId, newProfileId } from './ids.ts';
@@ -21,7 +22,16 @@ export interface Profile {
   readonly label: string;
   readonly origin: string;
   readonly principal: Principal | null;
+  // The person's choice for the Linux screen share's sound (issue #1854): an
+  // optional, public, non-secret preference kept with the profile. Absent means
+  // system_excluding_call (#1552's default); a file is never rewritten to say
+  // so. Only a person's act writes it (setShareSound).
+  readonly shareAudio?: ShareSoundChoice;
 }
+
+export const DEFAULT_SHARE_SOUND: ShareSoundChoice = 'system_excluding_call';
+
+const isShareSoundChoice = (value: unknown): value is ShareSoundChoice => value === 'system_excluding_call' || value === 'none';
 
 export const MAX_PROFILES = 32;
 export const MAX_LABEL = 64;
@@ -57,16 +67,18 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function parseProfile(value: unknown): Profile | null {
   if (!isRecord(value)) return null;
-  const { id, label, origin, principal } = value;
-  if (Object.keys(value).some((k) => !['id', 'label', 'origin', 'principal'].includes(k))) return null;
+  const { id, label, origin, principal, shareAudio } = value;
+  if (Object.keys(value).some((k) => !['id', 'label', 'origin', 'principal', 'shareAudio'].includes(k))) return null;
   if (!isProfileId(id) || typeof label !== 'string' || cleanLabel(label) !== label || typeof origin !== 'string') return null;
+  if (shareAudio !== undefined && !isShareSoundChoice(shareAudio)) return null;
   const parsed = parseServerAddress(origin);
   if (!parsed.ok || parsed.origin !== origin) return null;
-  if (principal === null) return { id, label, origin, principal: null };
+  const choice = shareAudio === undefined ? {} : { shareAudio };
+  if (principal === null) return { id, label, origin, principal: null, ...choice };
   if (!isRecord(principal) || Object.keys(principal).length !== 2) return null;
   const { id: pid, name } = principal;
   if (typeof pid !== 'number' || !Number.isSafeInteger(pid) || pid <= 0 || typeof name !== 'string' || name.length === 0 || name.length > 256) return null;
-  return { id, label, origin, principal: { id: pid, name } };
+  return { id, label, origin, principal: { id: pid, name }, ...choice };
 }
 
 // parseState reads profiles.json's text, or null when it is not exactly what
@@ -220,6 +232,29 @@ export class ProfileStore {
     );
     if (removed) await this.#files.removeProfileDir(id).catch(() => undefined);
     return removed;
+  }
+
+  // shareSound is the profile's choice for the Linux share's sound, the
+  // default when none was ever set.
+  shareSound(id: string): ShareSoundChoice {
+    return this.get(id)?.shareAudio ?? DEFAULT_SHARE_SOUND;
+  }
+
+  // setShareSound keeps the choice with the profile, in the same write turn as
+  // every other change: current() is asked when that turn comes, after any
+  // earlier change has landed, so a switch or sign-out that overtook the call
+  // writes nothing (false). Setting the default writes nothing for a profile
+  // that never had one set, so no existing file is rewritten for it.
+  async setShareSound(id: string, choice: ShareSoundChoice, current: () => boolean): Promise<boolean> {
+    let kept = false;
+    await this.#commit((state) => {
+      const profile = state.profiles.find((p) => p.id === id);
+      if (!current() || profile === undefined) return null;
+      kept = true;
+      if ((profile.shareAudio ?? DEFAULT_SHARE_SOUND) === choice) return null;
+      return { ...state, profiles: state.profiles.map((p) => (p.id === id ? { ...p, shareAudio: choice } : p)) };
+    });
+    return kept;
   }
 
   async setActive(id: string | null): Promise<void> {

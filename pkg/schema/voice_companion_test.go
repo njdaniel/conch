@@ -1,6 +1,7 @@
 package schema
 
 import (
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -31,6 +32,7 @@ func TestVoiceCompanionGoldenFixtures(t *testing.T) {
 		{name: "request, viewer", file: "voice-companion-request-v1-viewer.json", new: func() any { return new(VoiceCompanionRequestV1) }},
 		{name: "response, companion", file: "voice-companion-response-v1.json", new: func() any { return new(VoiceCompanionResponseV1) }},
 		{name: "response, viewer", file: "voice-companion-response-v1-viewer.json", new: func() any { return new(VoiceCompanionResponseV1) }},
+		{name: "response, naming the channel", file: "voice-companion-response-v1-channel-id.json", new: func() any { return new(VoiceCompanionResponseV1) }},
 		{name: "session, naming the companion", file: "voice-session-response-v1-companion.json", new: func() any { return new(VoiceSessionResponseV1) }},
 	}
 	for _, tt := range tests {
@@ -100,6 +102,8 @@ func TestVoiceCompanionResponseValidate(t *testing.T) {
 		{name: "no token", mutate: func(r *VoiceCompanionResponseV1) { r.Token = "" }, wantErr: true},
 		{name: "no expiry", mutate: func(r *VoiceCompanionResponseV1) { r.ExpiresAt = Timestamp{} }, wantErr: true},
 		{name: "unknown publish", mutate: func(r *VoiceCompanionResponseV1) { r.Publish = "camera" }, wantErr: true},
+		{name: "naming the channel", mutate: func(r *VoiceCompanionResponseV1) { r.ChannelID = 7 }},
+		{name: "a negative channel id", mutate: func(r *VoiceCompanionResponseV1) { r.ChannelID = -7 }, wantErr: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -225,6 +229,10 @@ func TestVoiceCompanionAudioGoldenFixtures(t *testing.T) {
 		{name: "request, application", file: "voice-companion-audio-request-v1.json", new: func() any { return new(VoiceCompanionAudioRequestV1) }},
 		{name: "request, system excluding the call", file: "voice-companion-audio-request-v1-system.json", new: func() any { return new(VoiceCompanionAudioRequestV1) }},
 		{name: "response", file: "voice-companion-audio-v1.json", new: func() any { return new(VoiceCompanionAudioV1) }},
+		{name: "request, publisher person", file: "voice-companion-audio-request-v1-person.json", new: func() any { return new(VoiceCompanionAudioRequestV1) }},
+		{name: "response, publisher person", file: "voice-companion-audio-v1-person.json", new: func() any { return new(VoiceCompanionAudioV1) }},
+		{name: "response, naming the channel", file: "voice-companion-audio-v1-channel-id.json", new: func() any { return new(VoiceCompanionAudioV1) }},
+		{name: "response, publisher person, naming the channel", file: "voice-companion-audio-v1-person-channel-id.json", new: func() any { return new(VoiceCompanionAudioV1) }},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -270,6 +278,11 @@ func TestVoiceCompanionAudioValidate(t *testing.T) {
 		{name: "no scope", audio: VoiceCompanionAudioV1{StartedAt: voiceAudioStartedAt}, wantErr: true},
 		{name: "unknown scope", audio: VoiceCompanionAudioV1{Scope: "none", StartedAt: voiceAudioStartedAt}, wantErr: true},
 		{name: "no started_at", audio: VoiceCompanionAudioV1{Scope: VoiceShareAudioScopeApplication}, wantErr: true},
+		{name: "publisher companion", audio: VoiceCompanionAudioV1{Scope: VoiceShareAudioScopeApplication, Publisher: VoiceShareAudioPublisherCompanion, StartedAt: voiceAudioStartedAt}},
+		{name: "publisher person", audio: VoiceCompanionAudioV1{Scope: VoiceShareAudioScopeApplication, Publisher: VoiceShareAudioPublisherPerson, StartedAt: voiceAudioStartedAt}},
+		{name: "unknown publisher", audio: VoiceCompanionAudioV1{Scope: VoiceShareAudioScopeApplication, Publisher: "both", StartedAt: voiceAudioStartedAt}, wantErr: true},
+		{name: "naming the channel", audio: VoiceCompanionAudioV1{Scope: VoiceShareAudioScopeApplication, StartedAt: voiceAudioStartedAt, ChannelID: 7}},
+		{name: "a negative channel id", audio: VoiceCompanionAudioV1{Scope: VoiceShareAudioScopeApplication, StartedAt: voiceAudioStartedAt, ChannelID: -7}, wantErr: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -289,6 +302,14 @@ func TestDecodeVoiceCompanionAudioRequestV1(t *testing.T) {
 	}{
 		{name: "application", body: `{"scope":"application"}`, want: VoiceCompanionAudioRequestV1{Scope: VoiceShareAudioScopeApplication}},
 		{name: "system excluding the call", body: `{"scope":"system_excluding_call"}`, want: VoiceCompanionAudioRequestV1{Scope: VoiceShareAudioScopeSystemExcludingCall}},
+		{name: "publisher companion", body: `{"scope":"application","publisher":"companion"}`, want: VoiceCompanionAudioRequestV1{Scope: VoiceShareAudioScopeApplication, Publisher: VoiceShareAudioPublisherCompanion}},
+		{name: "publisher person", body: `{"scope":"system_excluding_call","publisher":"person"}`, want: VoiceCompanionAudioRequestV1{Scope: VoiceShareAudioScopeSystemExcludingCall, Publisher: VoiceShareAudioPublisherPerson}},
+		{name: "unknown publisher", body: `{"scope":"application","publisher":"both"}`, wantErr: true},
+		{name: "wrong case publisher", body: `{"scope":"application","publisher":"Person"}`, wantErr: true},
+		{name: "empty publisher", body: `{"scope":"application","publisher":""}`, want: VoiceCompanionAudioRequestV1{Scope: VoiceShareAudioScopeApplication}},
+		{name: "null publisher is absent", body: `{"scope":"application","publisher":null}`, want: VoiceCompanionAudioRequestV1{Scope: VoiceShareAudioScopeApplication}},
+		{name: "publisher not a string", body: `{"scope":"application","publisher":1}`, wantErr: true},
+		{name: "publisher person, trailing junk", body: `{"scope":"application","publisher":"person"} x`, wantErr: true},
 		{name: "none is not a scope", body: `{"scope":"none"}`, wantErr: true},
 		{name: "unknown scope", body: `{"scope":"system"}`, wantErr: true},
 		{name: "wrong case", body: `{"scope":"Application"}`, wantErr: true},
@@ -336,6 +357,7 @@ func TestVoiceCompanionAudioRequestFixturesDecodeStrictly(t *testing.T) {
 	}{
 		{"voice-companion-audio-request-v1.json", VoiceCompanionAudioRequestV1{Scope: VoiceShareAudioScopeApplication}},
 		{"voice-companion-audio-request-v1-system.json", VoiceCompanionAudioRequestV1{Scope: VoiceShareAudioScopeSystemExcludingCall}},
+		{"voice-companion-audio-request-v1-person.json", VoiceCompanionAudioRequestV1{Scope: VoiceShareAudioScopeSystemExcludingCall, Publisher: VoiceShareAudioPublisherPerson}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.file, func(t *testing.T) {
@@ -355,5 +377,131 @@ func TestVoiceCompanionAudioRequestFixturesDecodeStrictly(t *testing.T) {
 func TestVoiceShareAudioScopeVocabulary(t *testing.T) {
 	if got := Vocabularies["VoiceShareAudioScope"]; !slices.Equal(got, []string{"application", "system_excluding_call"}) {
 		t.Errorf(`Vocabularies["VoiceShareAudioScope"] = %v, want [application system_excluding_call]`, got)
+	}
+}
+
+func TestVoiceShareAudioPublisherVocabulary(t *testing.T) {
+	if got := Vocabularies["VoiceShareAudioPublisher"]; !slices.Equal(got, []string{"companion", "person"}) {
+		t.Errorf(`Vocabularies["VoiceShareAudioPublisher"] = %v, want [companion person]`, got)
+	}
+}
+
+// An absent publisher is omitted on the wire, so a v1 request or response is
+// byte-identical to what it always was (issue #1853: omitempty).
+func TestVoiceCompanionAudioPublisherOmittedWhenAbsent(t *testing.T) {
+	tests := []struct {
+		name string
+		v    any
+		want string
+	}{
+		{"request", VoiceCompanionAudioRequestV1{Scope: VoiceShareAudioScopeApplication}, `{"scope":"application"}`},
+		{"response", VoiceCompanionAudioV1{Scope: VoiceShareAudioScopeApplication, StartedAt: voiceAudioStartedAt}, `{"scope":"application","started_at":"2026-10-09T12:00:30.000Z"}`},
+		{"request, person", VoiceCompanionAudioRequestV1{Scope: VoiceShareAudioScopeApplication, Publisher: VoiceShareAudioPublisherPerson}, `{"scope":"application","publisher":"person"}`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			b, err := json.Marshal(tt.v)
+			if err != nil || string(b) != tt.want {
+				t.Errorf("Marshal = %s, %v; want %s", b, err, tt.want)
+			}
+		})
+	}
+}
+
+func TestVoiceCompanionAudioRequestEffectivePublisher(t *testing.T) {
+	tests := []struct {
+		in   VoiceShareAudioPublisher
+		want VoiceShareAudioPublisher
+	}{
+		{"", VoiceShareAudioPublisherCompanion},
+		{VoiceShareAudioPublisherCompanion, VoiceShareAudioPublisherCompanion},
+		{VoiceShareAudioPublisherPerson, VoiceShareAudioPublisherPerson},
+	}
+	for _, tt := range tests {
+		if got := (VoiceCompanionAudioRequestV1{Scope: VoiceShareAudioScopeApplication, Publisher: tt.in}).EffectivePublisher(); got != tt.want {
+			t.Errorf("EffectivePublisher(%q) = %q, want %q", tt.in, got, tt.want)
+		}
+	}
+}
+
+// The channel's id in the companion grant and consent answers (issue #1883).
+
+// The published answer fixtures do not name the channel: the field is omitted
+// when zero, so each is byte-identical, decodes with no id and still
+// validates, which is also how an answer from a server before #1883 reads.
+// The fixtures added with the field name channel 7, the channel of the voice
+// presence fixtures.
+func TestVoiceCompanionChannelIDIsOptional(t *testing.T) {
+	response := func(raw []byte) (int64, error) {
+		var r VoiceCompanionResponseV1
+		if err := json.Unmarshal(raw, &r); err != nil {
+			return 0, err
+		}
+		return r.ChannelID, r.Validate()
+	}
+	audio := func(raw []byte) (int64, error) {
+		var a VoiceCompanionAudioV1
+		if err := json.Unmarshal(raw, &a); err != nil {
+			return 0, err
+		}
+		return a.ChannelID, a.Validate()
+	}
+	tests := []struct {
+		file   string
+		decode func([]byte) (int64, error)
+		want   int64
+	}{
+		{"voice-companion-response-v1.json", response, 0},
+		{"voice-companion-response-v1-viewer.json", response, 0},
+		{"voice-companion-audio-v1.json", audio, 0},
+		{"voice-companion-audio-v1-person.json", audio, 0},
+		{"voice-companion-response-v1-channel-id.json", response, 7},
+		{"voice-companion-audio-v1-channel-id.json", audio, 7},
+		{"voice-companion-audio-v1-person-channel-id.json", audio, 7},
+	}
+	for _, tt := range tests {
+		t.Run(tt.file, func(t *testing.T) {
+			raw, err := os.ReadFile(filepath.Join("testdata", tt.file)) // #nosec G304 -- fixed fixture names
+			if err != nil {
+				t.Fatal(err)
+			}
+			if named := strings.Contains(string(raw), "channel_id"); named != (tt.want != 0) {
+				t.Errorf("names channel_id = %v, want %v; published fixtures must not change", named, tt.want != 0)
+			}
+			if got, err := tt.decode(raw); err != nil || got != tt.want {
+				t.Errorf("channel id = %d, %v; want %d", got, err, tt.want)
+			}
+		})
+	}
+}
+
+// An absent channel id is omitted on the wire, and one that is present is
+// written last, after every field v1 already had.
+func TestVoiceCompanionChannelIDOnTheWire(t *testing.T) {
+	grant := VoiceCompanionResponseV1{
+		LivekitURL: "wss://voice.example", Identity: "p7.screen", Room: "room", Token: "tok",
+		Publish: VoiceCompanionPublishScreen, Subscribe: true, ExpiresAt: voiceExpiresAt,
+	}
+	grantNamed := grant
+	grantNamed.ChannelID = 7
+	const grantJSON = `{"livekit_url":"wss://voice.example","identity":"p7.screen","room":"room","token":"tok","publish":"screen","subscribe":true,"expires_at":"2026-10-09T12:00:45.000Z"`
+	tests := []struct {
+		name string
+		v    any
+		want string
+	}{
+		{"grant, no id", grant, grantJSON + `}`},
+		{"grant", grantNamed, grantJSON + `,"channel_id":7}`},
+		{"consent, no id", VoiceCompanionAudioV1{Scope: VoiceShareAudioScopeApplication, StartedAt: voiceAudioStartedAt}, `{"scope":"application","started_at":"2026-10-09T12:00:30.000Z"}`},
+		{"consent", VoiceCompanionAudioV1{Scope: VoiceShareAudioScopeApplication, StartedAt: voiceAudioStartedAt, ChannelID: 7}, `{"scope":"application","started_at":"2026-10-09T12:00:30.000Z","channel_id":7}`},
+		{"consent, person", VoiceCompanionAudioV1{Scope: VoiceShareAudioScopeApplication, Publisher: VoiceShareAudioPublisherPerson, StartedAt: voiceAudioStartedAt, ChannelID: 7}, `{"scope":"application","publisher":"person","started_at":"2026-10-09T12:00:30.000Z","channel_id":7}`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			b, err := json.Marshal(tt.v)
+			if err != nil || string(b) != tt.want {
+				t.Errorf("Marshal = %s, %v; want %s", b, err, tt.want)
+			}
+		})
 	}
 }

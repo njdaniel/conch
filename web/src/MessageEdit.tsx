@@ -280,7 +280,10 @@ export function MessageEditor({
   onUnauthorized,
   discard,
   label,
+  focusRequest = 0,
 }: {
+  // Changes when an already open editor is requested again.
+  readonly focusRequest?: number;
   // The editor's accessible name: the author and time, never the id.
   readonly label: string;
   // The message as held now: its body is what Save compares with.
@@ -326,7 +329,7 @@ export function MessageEditor({
     if (el === null) return;
     el.focus();
     el.setSelectionRange(el.value.length, el.value.length);
-  }, []);
+  }, [focusRequest]);
 
   // A rate refusal showing when the tenth edit becomes known is the limit.
   const finalNow = useRef(onFinal);

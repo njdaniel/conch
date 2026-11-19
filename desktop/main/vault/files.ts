@@ -10,6 +10,8 @@ import { randomBytes } from 'node:crypto';
 import { chmod, lstat, mkdir, open, readFile, rename, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 
+import { isProfileId } from '../profiles/ids.ts';
+
 const FILE_NAME = 'credential.bin';
 const DIR_MODE = 0o700;
 const FILE_MODE = 0o600;
@@ -20,6 +22,19 @@ const PROFILE_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
 
 export function validProfileId(id: string): boolean {
   return PROFILE_ID.test(id);
+}
+
+// profileConfigDir is <root>/profiles/<id>: one profile's own folder under the
+// data root, which is also the CONCH_CONFIG_DIR the voice helper is given
+// (issue #1785): it reads its voice.toml from there and from nowhere shared,
+// so it can never read another profile's. On Windows the root is userData,
+// under %APPDATA%, whose default ACL is the protection; no drive root is ever
+// the base (windows-desktop.md §2.7).
+export function profileConfigDir(root: string, id: string): string {
+  // The profile store's own id: 32 lowercase hex, which no path syntax can
+  // use to leave profiles/.
+  if (!isProfileId(id)) throw new Error('invalid profile id');
+  return profileDir(root, id);
 }
 
 function profileDir(root: string, id: string): string {

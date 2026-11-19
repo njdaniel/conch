@@ -9,6 +9,10 @@
 //! which is why every test holds its client through [`Reaped`].
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
+// Unix only: It looks for a process under /proc. Windows runs the unit tests in `src/`,
+// which include the answers a non-Unix platform gives, and the tests in this directory that
+// need none of this (#1309).
+#![cfg(unix)]
 
 mod support;
 
@@ -53,6 +57,10 @@ fn exists(pid: u32) -> bool {
 }
 
 #[test]
+#[cfg_attr(
+    target_os = "macos",
+    ignore = "observes the child and zombie via Linux /proc"
+)]
 fn a_test_that_panics_while_it_holds_the_binary_leaves_no_child() {
     let private = tempfile::tempdir().unwrap();
     let mut command = join_without_a_server(private.path());

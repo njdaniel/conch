@@ -114,6 +114,7 @@ fn each_refusal_of_a_session_is_its_own_outcome() {
             "wait",
         ),
         (ApiError::Timeout, Outcome::ServerUnreachable, "wait"),
+        (ApiError::BodyTimeout, Outcome::ServerUnreachable, "wait"),
         (
             ApiError::Connect {
                 detail: "connection refused".into(),

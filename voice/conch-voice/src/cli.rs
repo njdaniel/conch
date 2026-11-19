@@ -20,13 +20,14 @@
 //! at all (`keydev::DeviceRule`).
 //!
 //! The order in which a value is taken, first wins: the command line, the environment
-//! (`CONCH_SERVER`), the configuration file (`voice.toml` in the configuration directory: `$CONCH_CONFIG_DIR`, else `$XDG_CONFIG_HOME/conch`), the
+//! (`CONCH_SERVER`), the configuration file (`voice.toml` in the configuration directory: `$CONCH_CONFIG_DIR`, else `$XDG_CONFIG_HOME/conch`; on Windows `%APPDATA%\conch`), the
 //! default. For the server, the stored login comes before the default, as in `conch`: when
 //! exactly one login is stored and `CONCH_TOKEN` is not set, its server is used. The login
 //! token is `CONCH_TOKEN`, or else what `conch login` stored for the server; this program
 //! never writes that file.
 
 use std::ffi::OsString;
+#[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
 use std::path::PathBuf;
 use std::str::FromStr;
@@ -43,9 +44,11 @@ use conch_voice_control::{
 };
 use log::LevelFilter;
 
+use crate::audio::SYSTEM_NAME;
 use crate::error::Error;
 use crate::livekit::ShareAudioOwner;
 use crate::secrets::one_line;
+use crate::share_capture::SyntheticSpec;
 
 /// The environment variable that names the server, as for `conch`.
 pub const SERVER_ENV: &str = "CONCH_SERVER";
@@ -58,16 +61,31 @@ pub const CHOOSE_A_SERVER: &str =
 /// The environment variable that moves the configuration directory, as for `conch`.
 pub const CONFIG_DIR_ENV: &str = "CONCH_CONFIG_DIR";
 
+/// What the help says of the default configuration directory.
+#[cfg(not(windows))]
+const CONFIG_DIR_DEFAULT_HELP: &str = "Default: $XDG_CONFIG_HOME/conch, else $HOME/.config/conch. ";
+
+/// What the help says of the default configuration directory on Windows, and of what is
+/// trusted there: the directory, not the file (`docs/design/windows-desktop.md` §2.7).
+#[cfg(windows)]
+const CONFIG_DIR_DEFAULT_HELP: &str = "Default: %APPDATA%\\conch (recommended). On Windows \
+     conch-voice trusts the directory, not the file: it checks only that the file itself is \
+     an ordinary file, not a link, and a link or junction at `conch`, at %APPDATA% or at any \
+     parent directory is followed. It cannot tell who may write a directory: a directory \
+     made under a drive root (C:\\work\\alice) is writable by every local user by default, \
+     and then another account can choose the server your token is sent to. Keep it under \
+     your profile. ";
+
 /// The peak level of `--mic tone:<hz>`: a quarter of full scale.
 pub const TONE_AMPLITUDE: f32 = 0.25;
 
 /// What stands in for the microphone.
 #[derive(Debug, Clone, PartialEq)]
 pub enum MicChoice {
-    /// No `--mic`: the microphone PipeWire has, or the one `audio.input` names. There is no
+    /// No `--mic`: the microphone the audio system has, or the one `audio.input` names. There is no
     /// spelling for it on the command line: it is what a user gets, and the options below
     /// are for tests.
-    PipeWire,
+    AudioSystem,
     /// `--mic none`: no microphone.
     None,
     /// `--mic tone:<hz>`: a steady tone of this frequency.
@@ -101,11 +119,22 @@ impl FromStr for MicChoice {
     }
 }
 
+/// What a screen share's sound is captured from, in `managed` only.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ShareChoice {
+    /// No `--test-share-source`: the platform's captures (PipeWire's application streams on
+    /// Linux; none elsewhere). There is no spelling for it on the command line.
+    AudioSystem,
+    /// `--test-share-source tone:<hz>,...`: synthetic applications playing tones, and one
+    /// standing for the helper's own playback, which must never be in the mix. Test only.
+    Synthetic(SyntheticSpec),
+}
+
 /// What stands in for the speakers.
 #[derive(Debug, Clone, PartialEq)]
 pub enum SinkChoice {
     /// No `--sink`: the output PipeWire has, or the one `audio.output` names.
-    PipeWire,
+    AudioSystem,
     /// `--sink count[:<hz>,<hz>,...]`: a sink that plays nothing and counts, looking for
     /// these tones.
     Count(Vec<f32>),
@@ -203,11 +232,14 @@ pub struct ManagedArgs {
     /// `--sink`, test only.
     pub sink: SinkChoice,
     /// `--test-key-device`, test only: a named pipe of `input_event` records read instead
-    /// of the key device `voice.toml` names, with the keys it binds.
+    /// of the key device `voice.toml` names, with the keys it binds. On Windows, a pipe named
+    /// `\\.\pipe\` and a name, of `keys_windows`'s fake Raw Input records (#1791); any other
+    /// path is refused.
     pub test_key_device: Option<PathBuf>,
-    /// `--events-pipe`: a Unix-socket path to connect to for events instead of file
-    /// descriptor 3. Not secret. The desktop owner passes it; nobody types it
-    /// (`docs/design/linux-desktop.md` §5.2). Checked by [`crate::channel`], not here.
+    /// `--events-pipe`: a Unix-socket path (on Windows a `\\.\pipe\` name) to connect to for
+    /// events instead of file descriptor 3. Not secret. The desktop owner passes it; nobody
+    /// types it (`docs/design/linux-desktop.md` §5.2, `docs/design/windows-desktop.md` §3.3).
+    /// Checked by [`crate::channel`], not here.
     pub events_pipe: Option<PathBuf>,
     /// `--share-audio-owner`, passed by an owner that runs a companion (`helper` for the
     /// TUI, which passes nothing).
@@ -219,6 +251,11 @@ pub struct ManagedArgs {
     /// helper does not read `keys.mute`, so no key press can unmute a session the owner
     /// muted, a locked screen's included. `conch` passes nothing, and `keys.mute` works.
     pub no_mute_key: bool,
+    /// `--test-share-source`, test only: synthetic applications in place of the platform's
+    /// captures of a share's sound. It chooses only where the sound would come from: a share's
+    /// sound is still captured only when a v3 owner asks for it on the command channel, which
+    /// cannot choose this.
+    pub share: ShareChoice,
 }
 
 /// What the command line asked for.
@@ -322,14 +359,14 @@ pub fn command() -> Command {
                 .long("mic")
                 .value_name("SOURCE")
                 .value_parser(MicChoice::from_str)
-                .help("Test microphone instead of PipeWire's: tone:<hz>, wav:<path> (48 kHz mono 16-bit) or none"),
+                .help(format!("Test microphone instead of {SYSTEM_NAME}'s: tone:<hz>, wav:<path> (48 kHz mono 16-bit) or none")),
         )
         .arg(
             Arg::new("sink")
                 .long("sink")
                 .value_name("SINK")
                 .value_parser(sink_tones)
-                .help("Test speakers instead of PipeWire's: count, or count:<hz>,<hz>,... to name the tones to look for"),
+                .help(format!("Test speakers instead of {SYSTEM_NAME}'s: count, or count:<hz>,<hz>,... to name the tones to look for")),
         )
         .arg(
             Arg::new("stdin-keys")
@@ -371,7 +408,7 @@ pub fn command() -> Command {
                 .value_name("SOURCE")
                 .value_parser(MicChoice::from_str)
                 .hide(true)
-                .help("Test only: tone:<hz>, wav:<path> or none instead of PipeWire's microphone"),
+                .help(format!("Test only: tone:<hz>, wav:<path> or none instead of {SYSTEM_NAME}'s microphone")),
         )
         .arg(
             Arg::new("sink")
@@ -379,7 +416,7 @@ pub fn command() -> Command {
                 .value_name("SINK")
                 .value_parser(sink_tones)
                 .hide(true)
-                .help("Test only: count or count:<hz>,... instead of PipeWire's speakers"),
+                .help(format!("Test only: count or count:<hz>,... instead of {SYSTEM_NAME}'s speakers")),
         )
         .arg(
             Arg::new("test-key-device")
@@ -388,6 +425,14 @@ pub fn command() -> Command {
                 .value_parser(clap::value_parser!(PathBuf))
                 .hide(true)
                 .help("Test only: read key records from this named pipe instead of the key device voice.toml names"),
+        )
+        .arg(
+            Arg::new("test-share-source")
+                .long("test-share-source")
+                .value_name("SOURCE")
+                .value_parser(SyntheticSpec::from_str)
+                .hide(true)
+                .help("Test only: tone:<hz>[,<hz>...], synthetic applications playing these tones, and one standing for this helper's own playback, instead of the captures of a screen share's sound; still captured only when the owner asks, and nothing the owner sends can choose this"),
         )
         .arg(share_audio_owner_arg())
         .arg(
@@ -409,18 +454,18 @@ pub fn command() -> Command {
                 .value_name("PATH")
                 // Any text, the empty one included: `channel` refuses it with a reason of its own.
                 .value_parser(clap::value_parser!(OsString))
-                .help("connect to this endpoint for events instead of file descriptor 3; conch passes a Unix-socket path, the desktop owner's, never typed by hand"),
+                .help("connect to this endpoint for events instead of file descriptor 3; the desktop owner passes a Unix-socket path, on Windows a \\\\.\\pipe\\ name, never typed by hand"),
         );
     let devices = Command::new("devices")
         .about("List microphones and speakers by the names the configuration takes, and keyboards")
-        .long_about(
-            "Lists the microphones and the speakers PipeWire has, by the names `input` and \
+        .long_about(format!(
+            "Lists the microphones and the speakers {SYSTEM_NAME} has, by the names `input` and \
              `output` under [audio] in the configuration file take, and marks the defaults. \
              Then lists the keyboards under /dev/input/by-id, says for each whether you can \
              read it, and prints a udev rule that would grant you read access to that one \
              device. It opens each keyboard to see whether it can, and reads nothing from any \
-             of them; it opens no audio device.",
-        )
+             of them; it opens no audio device."
+        ))
         .arg(
             Arg::new("json")
                 .long("json")
@@ -468,7 +513,7 @@ pub fn command() -> Command {
             Arg::new("value")
                 .required(true)
                 .value_name("VALUE")
-                .help("For a device, its name as `conch-voice devices` lists it, or `default` for PipeWire's default; for audio.talk_mode, push_to_talk or open; for keys.device, a path under /dev/input/; for keys.talk, keys.mute and keys.deafen, a KEY_* name or a key code"),
+                .help(format!("For a device, its name as `conch-voice devices` lists it, or `default` for {SYSTEM_NAME}'s default; for audio.talk_mode, push_to_talk or open; for keys.device, a path under /dev/input/; for keys.talk, keys.mute and keys.deafen, a KEY_* name or a key code")),
         );
     let unset = Command::new("unset")
         .about("Remove the key device or a key binding from voice.toml")
@@ -494,17 +539,17 @@ pub fn command() -> Command {
         .subcommand(unset);
     Command::new("conch-voice")
         .about("The Conch voice client: push-to-talk voice for a channel")
-        .after_help(
+        .after_help(format!(
             "Environment:\n  \
              CONCH_CONFIG_DIR  The directory that holds voice.toml and the credentials.json \
              `conch login` wrote, used exactly as given (no `conch` is added); it must be an \
-             absolute path. Default: $XDG_CONFIG_HOME/conch, else $HOME/.config/conch. \
+             absolute path. {CONFIG_DIR_DEFAULT_HELP}\
              Use it to run two logins on one machine; `conch` reads the same variable.\n  \
              CONCH_SERVER      The address of conchd. Without it, --server or `server` in \
              voice.toml, the server of the stored login when exactly one is stored and \
              CONCH_TOKEN is not set, else http://127.0.0.1:8080.\n  \
-             CONCH_TOKEN       A login token, used instead of the stored one.",
-        )
+             CONCH_TOKEN       A login token, used instead of the stored one."
+        ))
         .version(version)
         .subcommand_required(true)
         .arg_required_else_help(true)
@@ -661,11 +706,11 @@ where
                 mic: managed
                     .get_one::<MicChoice>("mic")
                     .cloned()
-                    .unwrap_or(MicChoice::PipeWire),
+                    .unwrap_or(MicChoice::AudioSystem),
                 sink: managed
                     .get_one::<Vec<f32>>("sink")
                     .cloned()
-                    .map_or(SinkChoice::PipeWire, SinkChoice::Count),
+                    .map_or(SinkChoice::AudioSystem, SinkChoice::Count),
                 test_key_device: managed.get_one::<PathBuf>("test-key-device").cloned(),
                 events_pipe: managed
                     .get_one::<OsString>("events-pipe")
@@ -673,6 +718,10 @@ where
                 share_audio_owner: share_audio_owner(managed),
                 transmit_ceiling_secs: managed.get_one::<u32>("transmit-ceiling-secs").copied(),
                 no_mute_key: managed.get_flag("no-mute-key"),
+                share: managed
+                    .get_one::<SyntheticSpec>("test-share-source")
+                    .cloned()
+                    .map_or(ShareChoice::AudioSystem, ShareChoice::Synthetic),
             }));
         }
         Some(("devices", devices)) => {
@@ -706,11 +755,11 @@ where
         mic: join
             .get_one::<MicChoice>("mic")
             .cloned()
-            .unwrap_or(MicChoice::PipeWire),
+            .unwrap_or(MicChoice::AudioSystem),
         sink: join
             .get_one::<Vec<f32>>("sink")
             .cloned()
-            .map_or(SinkChoice::PipeWire, SinkChoice::Count),
+            .map_or(SinkChoice::AudioSystem, SinkChoice::Count),
         log_level: join
             .get_one::<LevelFilter>("log-level")
             .copied()
@@ -730,6 +779,8 @@ pub struct Environment {
     pub xdg_config_home: Option<OsString>,
     /// `HOME`.
     pub home: Option<OsString>,
+    /// `APPDATA`: where the configuration directory is on Windows, and read nowhere else.
+    pub appdata: Option<OsString>,
     /// `CONCH_SERVER`.
     pub server: Option<String>,
     /// `CONCH_TOKEN`. Held as a secret: its `Debug` is a placeholder.
@@ -749,6 +800,7 @@ impl Environment {
             conch_config_dir: std::env::var_os(CONFIG_DIR_ENV),
             xdg_config_home: std::env::var_os("XDG_CONFIG_HOME"),
             home: std::env::var_os("HOME"),
+            appdata: std::env::var_os("APPDATA"),
             server: text(SERVER_ENV),
             token: text(TOKEN_ENV).map(Secret::new),
             conch_voice_attach: None,
@@ -785,11 +837,23 @@ pub struct Resolved {
 }
 
 /// Reads `voice.toml`: a missing file is the default configuration. The file's `server`
-/// decides where the login token is sent, so a file that is not a regular file or that
-/// group or others can write is refused. Looked at before it is opened, because opening a
-/// FIFO waits for a writer. A symbolic link is followed: what counts is the file it names.
+/// decides where the login token is sent, so a file that is not a regular file is refused,
+/// and so is one that group or others can write on Unix. Looked at before it is opened,
+/// because opening a FIFO waits for a writer. On Unix a symbolic link is followed: what
+/// counts is the file it names.
+///
+/// On Windows the protection is the configuration directory's, not the file's: there are no
+/// mode bits, and an ACL cannot be read without a Win32 binding this program does not have.
+/// The file is trusted when it is an ordinary file, not a reparse point, in the directory
+/// (`docs/design/windows-desktop.md` §2.7). A link is refused rather than followed, and the
+/// file is opened as itself and its attributes checked on the opened handle, so a link
+/// swapped in after the look cannot make this read another file.
 pub(crate) fn read_config(path: &std::path::Path) -> Result<Config, Error> {
-    let meta = match std::fs::metadata(path) {
+    #[cfg(unix)]
+    let meta = std::fs::metadata(path);
+    #[cfg(windows)]
+    let meta = std::fs::symlink_metadata(path);
+    let meta = match meta {
         Ok(meta) => meta,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             return Ok(Config::default());
@@ -801,11 +865,58 @@ pub(crate) fn read_config(path: &std::path::Path) -> Result<Config, Error> {
             });
         }
     };
+    #[cfg(windows)]
+    if meta.file_type().is_symlink() {
+        return Err(Error::ConfigLink {
+            path: path.to_owned(),
+        });
+    }
     if !meta.is_file() {
         return Err(Error::ConfigNotRegular {
             path: path.to_owned(),
         });
     }
+    refuse_if_others_can_write(&meta, path)?;
+    let unreadable = |source| Error::ConfigRead {
+        path: path.to_owned(),
+        source,
+    };
+    #[cfg(unix)]
+    let text = std::fs::read_to_string(path);
+    #[cfg(windows)]
+    let text = {
+        use std::io::Read;
+        match conch_voice_api::open_unfollowed(path) {
+            Ok(conch_voice_api::Unfollowed::File(mut file, _)) => {
+                let mut text = String::new();
+                file.read_to_string(&mut text).map(|_| text)
+            }
+            Ok(conch_voice_api::Unfollowed::Link) => {
+                return Err(Error::ConfigLink {
+                    path: path.to_owned(),
+                });
+            }
+            Ok(conch_voice_api::Unfollowed::NotRegular) => {
+                return Err(Error::ConfigNotRegular {
+                    path: path.to_owned(),
+                });
+            }
+            Err(error) => Err(error),
+        }
+    };
+    match text {
+        Ok(text) => Ok(Config::parse(&text, &format!("{path:?}"))?),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Config::default()),
+        Err(source) => Err(unreadable(source)),
+    }
+}
+
+/// Refuses a configuration file that group or others can write.
+#[cfg(unix)]
+fn refuse_if_others_can_write(
+    meta: &std::fs::Metadata,
+    path: &std::path::Path,
+) -> Result<(), Error> {
     let mode = meta.mode() & 0o777;
     if mode & 0o022 != 0 {
         return Err(Error::ConfigWritable {
@@ -813,14 +924,19 @@ pub(crate) fn read_config(path: &std::path::Path) -> Result<Config, Error> {
             mode,
         });
     }
-    match std::fs::read_to_string(path) {
-        Ok(text) => Ok(Config::parse(&text, &format!("{path:?}"))?),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Config::default()),
-        Err(source) => Err(Error::ConfigRead {
-            path: path.to_owned(),
-            source,
-        }),
-    }
+    Ok(())
+}
+
+/// Windows has no mode to read, and the file's ACL cannot be read from safe Rust: nothing to
+/// refuse here. The protection is the directory's, not the file's, and the checks that a
+/// file must be an ordinary one are in [`read_config`].
+#[cfg(not(unix))]
+#[allow(clippy::unnecessary_wraps)]
+fn refuse_if_others_can_write(
+    _meta: &std::fs::Metadata,
+    _path: &std::path::Path,
+) -> Result<(), Error> {
+    Ok(())
 }
 
 /// Lays the command line over the environment over the configuration file, and finds the
@@ -835,6 +951,7 @@ pub fn resolve(args: &JoinArgs, environment: &Environment) -> Result<Resolved, E
         environment.conch_config_dir.as_deref(),
         environment.xdg_config_home.as_deref(),
         environment.home.as_deref(),
+        environment.appdata.as_deref(),
     )?;
     let mut config = match &config_dir {
         Some(dir) => {
@@ -927,6 +1044,49 @@ pub fn stored_elsewhere(
     ))
 }
 
+/// What the key source is called where there is no device to name: on Windows, Raw Input
+/// reads every keyboard and mouse (`docs/design/windows-desktop.md` section 4.5), and what is
+/// shown as the "device" must not be a path.
+pub const WINDOWS_KEY_SOURCE: &str = "raw-input";
+
+/// The key source `join` and `managed` start, by platform: on Windows the keys named in the
+/// grammar of section 4.5 and read from Raw Input, with no device; elsewhere the event device
+/// [`evdev_key_device`] names.
+///
+/// # Errors
+///
+/// [`Error::Config`] if two of talk, mute and deafen are bound to one key; on Windows also if
+/// `keys.device` is set or a key is bound in the Linux form, which would look bound and never
+/// be.
+pub fn key_device(
+    config: &Config,
+    stdin_only: bool,
+) -> Result<Option<(PathBuf, KeyBindings)>, Error> {
+    #[cfg(windows)]
+    {
+        windows_key_device(config, stdin_only)
+    }
+    #[cfg(not(windows))]
+    {
+        evdev_key_device(config, stdin_only)
+    }
+}
+
+/// [`key_device`] on Windows: the keys, with a name that is not a path, if there are any to
+/// read and `--stdin-keys` was not given.
+#[cfg(any(windows, test))]
+fn windows_key_device(
+    config: &Config,
+    stdin_only: bool,
+) -> Result<Option<(PathBuf, KeyBindings)>, Error> {
+    conch_voice_control::require_windows_keys(&config.keys, "voice.toml")?;
+    let bindings = config.key_bindings()?;
+    if stdin_only || bindings.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some((PathBuf::from(WINDOWS_KEY_SOURCE), bindings)))
+}
+
 /// The device to watch and the keys to look for on it, if `join` is to watch one at all:
 /// not with `--stdin-keys`, not without a device, and not without a key to look for, since
 /// a keyboard is not opened for nothing.
@@ -934,7 +1094,8 @@ pub fn stored_elsewhere(
 /// # Errors
 ///
 /// [`Error::Config`] if two of talk, mute and deafen are bound to one key.
-pub fn key_device(
+#[cfg(any(not(windows), test))]
+fn evdev_key_device(
     config: &Config,
     stdin_only: bool,
 ) -> Result<Option<(PathBuf, KeyBindings)>, Error> {
@@ -960,8 +1121,128 @@ pub fn key_device(
     }
 }
 
+/// The Windows rule for `voice.toml`: an ordinary file in the directory is trusted, a link or
+/// a directory is not, and a link swapped in after the look is caught on the opened handle
+/// (`docs/design/windows-desktop.md` §2.7(3), (4)).
+#[cfg(all(test, windows))]
+mod windows_config_tests {
+    use super::*;
+
+    /// A file symbolic link at `link` to `target`, or false: that needs a privilege or
+    /// developer mode, and GitHub's Windows runners have it. On CI (`CI` or
+    /// `GITHUB_ACTIONS` set) a failure is a panic, never a skip: libtest captures the
+    /// message of a skip, so a skipped test would be invisible there.
+    fn symlink(target: &std::path::Path, link: &std::path::Path) -> bool {
+        match std::os::windows::fs::symlink_file(target, link) {
+            Ok(()) => true,
+            Err(error) => {
+                assert!(
+                    std::env::var_os("CI").is_none()
+                        && std::env::var_os("GITHUB_ACTIONS").is_none(),
+                    "a symbolic link cannot be created on CI: {error}"
+                );
+                eprintln!("skipped: this process may not create a symbolic link: {error}");
+                false
+            }
+        }
+    }
+
+    /// A directory junction at `link` to the directory `target`: `mklink /J` needs no
+    /// privilege.
+    fn junction(target: &std::path::Path, link: &std::path::Path) {
+        let status = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(link)
+            .arg(target)
+            .stdout(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        assert!(status.success(), "mklink /J failed");
+    }
+
+    #[test]
+    fn a_junction_at_the_path_is_refused_and_the_target_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        let other = dir.path().join("other");
+        std::fs::create_dir(&other).unwrap();
+        std::fs::write(other.join("voice.toml"), "server = \"http://evil.test\"\n").unwrap();
+        let path = dir.path().join("voice.toml");
+        junction(&other, &path);
+        let error = read_config(&path).unwrap_err();
+        assert!(
+            matches!(
+                error,
+                Error::ConfigLink { .. } | Error::ConfigNotRegular { .. }
+            ),
+            "{error:?}"
+        );
+        assert!(!error.to_string().contains("evil.test"), "{error}");
+    }
+
+    #[test]
+    fn an_ordinary_file_is_read_whatever_its_attributes_and_a_missing_one_is_the_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("voice.toml");
+        assert_eq!(read_config(&path).unwrap(), Config::default());
+
+        std::fs::write(&path, "channel = \"ops\"\n").unwrap();
+        let want = read_config(&path).unwrap();
+        assert_eq!(want.channel.as_deref(), Some("ops"));
+        // Read-only is an ordinary file still.
+        let mut permissions = std::fs::metadata(&path).unwrap().permissions();
+        permissions.set_readonly(true);
+        std::fs::set_permissions(&path, permissions).unwrap();
+        assert_eq!(read_config(&path).unwrap(), want);
+    }
+
+    #[test]
+    fn a_directory_or_a_link_at_the_path_is_refused_and_names_no_text() {
+        // A directory.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("voice.toml");
+        std::fs::create_dir(&path).unwrap();
+        let error = read_config(&path).unwrap_err();
+        assert!(matches!(error, Error::ConfigNotRegular { .. }), "{error:?}");
+
+        // A link, even to a good file: refused, not followed.
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real.toml");
+        std::fs::write(&real, "server = \"http://evil.test\"\n").unwrap();
+        let path = dir.path().join("voice.toml");
+        if !symlink(&real, &path) {
+            return;
+        }
+        let error = read_config(&path).unwrap_err();
+        assert!(matches!(error, Error::ConfigLink { .. }), "{error:?}");
+        assert!(!error.to_string().contains("evil.test"), "{error}");
+    }
+
+    #[test]
+    fn a_link_swapped_in_after_the_look_is_opened_as_itself_and_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let other = dir.path().join("other.toml");
+        let other_text = "server = \"http://evil.test\"\n";
+        std::fs::write(&other, other_text).unwrap();
+        let path = dir.path().join("voice.toml");
+        std::fs::write(&path, "channel = \"ops\"\n").unwrap();
+        // Looked at: a regular file.
+        assert!(std::fs::symlink_metadata(&path).unwrap().is_file());
+        // Then replaced by a link to another file, before the open.
+        std::fs::remove_file(&path).unwrap();
+        if !symlink(&other, &path) {
+            return;
+        }
+        match conch_voice_api::open_unfollowed(&path).unwrap() {
+            conch_voice_api::Unfollowed::Link => {}
+            other => panic!("expected the link itself, got {other:?}"),
+        }
+        assert_eq!(std::fs::read_to_string(&other).unwrap(), other_text);
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
 
     use super::*;
@@ -982,18 +1263,21 @@ mod tests {
             conch_config_dir: Some(dir.as_os_str().to_owned()),
             xdg_config_home: None,
             home: None,
+            appdata: None,
             server: None,
             token: Some(Secret::new(FAKE_LOGIN)),
             conch_voice_attach: None,
         }
     }
 
-    /// A private configuration directory chosen by XDG_CONFIG_HOME alone, so the `conch`
-    /// directory under it is the one used.
+    /// A private configuration directory chosen by the user configuration directory alone
+    /// (XDG_CONFIG_HOME, and APPDATA where that is the one read), so the `conch` directory
+    /// under it is the one used.
     fn xdg_environment(dir: &std::path::Path) -> Environment {
         Environment {
             conch_config_dir: None,
             xdg_config_home: Some(dir.as_os_str().to_owned()),
+            appdata: Some(dir.as_os_str().to_owned()),
             ..environment(dir)
         }
     }
@@ -1002,9 +1286,11 @@ mod tests {
         let path = dir.join("voice.toml");
         std::fs::write(&path, text).unwrap();
         // Not left to the umask of whoever runs the tests.
+        #[cfg(unix)]
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_configuration_others_can_write_is_refused_and_a_fifo_is_not_waited_on() {
         for mode in [0o664, 0o646, 0o666, 0o620, 0o602] {
@@ -1053,6 +1339,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_configuration_error_is_one_line_even_if_the_directory_name_has_a_newline() {
         let parent = tempfile::tempdir().unwrap();
@@ -1085,6 +1372,7 @@ mod tests {
         // CONCH_CONFIG_DIR wins over XDG_CONFIG_HOME and is used without `conch` added.
         let mut both = environment(alice.path());
         both.xdg_config_home = Some(xdg.path().as_os_str().to_owned());
+        both.appdata = Some(xdg.path().as_os_str().to_owned());
         assert_eq!(resolve(&args, &both).unwrap().channel, "alice");
     }
 
@@ -1125,8 +1413,8 @@ mod tests {
                 channel: None,
                 server: None,
                 json: false,
-                mic: MicChoice::PipeWire,
-                sink: SinkChoice::PipeWire,
+                mic: MicChoice::AudioSystem,
+                sink: SinkChoice::AudioSystem,
                 log_level: LevelFilter::Warn,
                 stdin_keys: false,
                 share_audio_owner: ShareAudioOwner::Helper,
@@ -1308,13 +1596,14 @@ mod tests {
             parse(["conch-voice", "managed"]).unwrap(),
             Invocation::Managed(ManagedArgs {
                 log_level: LevelFilter::Warn,
-                mic: MicChoice::PipeWire,
-                sink: SinkChoice::PipeWire,
+                mic: MicChoice::AudioSystem,
+                sink: SinkChoice::AudioSystem,
                 test_key_device: None,
                 events_pipe: None,
                 share_audio_owner: ShareAudioOwner::Helper,
                 transmit_ceiling_secs: None,
                 no_mute_key: false,
+                share: ShareChoice::AudioSystem,
             })
         );
         assert_eq!(
@@ -1340,6 +1629,7 @@ mod tests {
                 share_audio_owner: ShareAudioOwner::Helper,
                 transmit_ceiling_secs: None,
                 no_mute_key: false,
+                share: ShareChoice::AudioSystem,
             })
         );
         // Nothing that names what to join, or where, or as whom.
@@ -1360,9 +1650,69 @@ mod tests {
             .render_help()
             .to_string();
         assert!(help.contains("--log-level"), "{help}");
-        for hidden in ["--mic", "--sink", "--test-key-device"] {
+        for hidden in [
+            "--mic",
+            "--sink",
+            "--test-key-device",
+            "--test-share-source",
+        ] {
             assert!(!help.contains(hidden), "{hidden} is shown: {help}");
         }
+    }
+
+    /// The synthetic share source (#1586) is `managed`'s alone, hidden, says it is for tests,
+    /// and takes tones and nothing else.
+    #[test]
+    fn the_test_share_source_is_managed_only_hidden_test_only_and_tones_only() {
+        let share = |line: &[&str]| match parse(line.iter().copied()) {
+            Ok(Invocation::Managed(args)) => Ok(args.share),
+            Ok(_) => Err(0),
+            Err(error) => Err(error.exit_code()),
+        };
+        assert_eq!(
+            share(&["conch-voice", "managed"]),
+            Ok(ShareChoice::AudioSystem)
+        );
+        assert_eq!(
+            share(&[
+                "conch-voice",
+                "managed",
+                "--test-share-source",
+                "tone:440,660"
+            ]),
+            Ok(ShareChoice::Synthetic("tone:440,660".parse().unwrap()))
+        );
+        for bad in [
+            "",
+            "monitor",
+            "tone:",
+            "tone:0",
+            "wav:/tmp/x.wav",
+            "default",
+        ] {
+            assert_eq!(
+                share(&["conch-voice", "managed", "--test-share-source", bad]),
+                Err(2),
+                "{bad:?}"
+            );
+        }
+        assert!(
+            parse(["conch-voice", "join", "--test-share-source", "tone:440"]).is_err(),
+            "join never captures a share's sound"
+        );
+        let mut command = command();
+        let managed = command.find_subcommand_mut("managed").unwrap();
+        let arg = managed
+            .get_arguments()
+            .find(|arg| arg.get_id() == "test-share-source")
+            .unwrap();
+        assert!(arg.is_hide_set());
+        let help = arg.get_help().unwrap().to_string();
+        assert!(help.starts_with("Test only"), "{help}");
+        assert!(
+            help.contains("nothing the owner sends can choose this"),
+            "{help}"
+        );
     }
 
     #[test]
@@ -1394,8 +1744,8 @@ mod tests {
             .to_string();
         assert!(
             help.contains(
-                "connect to this endpoint for events instead of file descriptor 3; conch passes \
-                 a Unix-socket path, the desktop owner's, never typed by hand"
+                "connect to this endpoint for events instead of file descriptor 3; the desktop \
+                 owner passes a Unix-socket path, on Windows a \\\\.\\pipe\\ name, never typed by hand"
             ),
             "{help}"
         );
@@ -1619,16 +1969,68 @@ mod tests {
     fn a_key_device_is_watched_only_with_a_device_a_key_and_no_stdin_keys() {
         let both =
             config("[keys]\ndevice = \"/dev/input/by-id/x-event-kbd\"\ntalk = \"KEY_F13\"\n");
-        let (device, keys) = key_device(&both, false).unwrap().unwrap();
+        let (device, keys) = evdev_key_device(&both, false).unwrap().unwrap();
         assert_eq!(device, PathBuf::from("/dev/input/by-id/x-event-kbd"));
         assert_eq!(keys.talk().map(|key| key.code()), Some(183));
-        assert!(key_device(&both, true).unwrap().is_none(), "--stdin-keys");
+        assert!(
+            evdev_key_device(&both, true).unwrap().is_none(),
+            "--stdin-keys"
+        );
 
         let no_key = config("[keys]\ndevice = \"/dev/input/by-id/x-event-kbd\"\n");
-        assert!(key_device(&no_key, false).unwrap().is_none());
+        assert!(evdev_key_device(&no_key, false).unwrap().is_none());
         let no_device = config("[keys]\ntalk = \"KEY_F13\"\n");
-        assert!(key_device(&no_device, false).unwrap().is_none());
-        assert!(key_device(&Config::default(), false).unwrap().is_none());
+        assert!(evdev_key_device(&no_device, false).unwrap().is_none());
+        assert!(
+            evdev_key_device(&Config::default(), false)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    /// What Windows asks of a configuration before it starts a key source. The configuration
+    /// is built from parts, since `sc:` is read from a file on Windows alone; what is tested
+    /// is `windows_key_device`, which is built on every platform.
+    #[test]
+    fn the_windows_key_source_has_no_device_and_refuses_what_is_linux() {
+        use conch_voice_control::{Error as ControlError, parse_windows_binding};
+
+        let bind = |text: &str| parse_windows_binding(text).unwrap();
+        let mut config = Config::default();
+        assert!(
+            windows_key_device(&config, false).unwrap().is_none(),
+            "no key"
+        );
+
+        config.keys.talk = Some(bind("sc:0x29"));
+        config.keys.mute = Some(bind("mouse:4"));
+        let (name, keys) = windows_key_device(&config, false).unwrap().unwrap();
+        assert_eq!(name, PathBuf::from(WINDOWS_KEY_SOURCE));
+        assert!(
+            !name.to_string_lossy().contains('/') && !name.to_string_lossy().contains('\\'),
+            "what is shown for the source is not a path"
+        );
+        assert_eq!(keys.talk(), config.keys.talk);
+        assert!(
+            windows_key_device(&config, true).unwrap().is_none(),
+            "--stdin-keys"
+        );
+
+        // A device is a Linux setting, refused rather than ignored.
+        let mut with_device = config.clone();
+        with_device.keys.device = Some("/dev/input/by-id/x-event-kbd".to_owned());
+        assert!(matches!(
+            windows_key_device(&with_device, false),
+            Err(Error::Config(ControlError::KeyDeviceNotOnWindows { .. }))
+        ));
+
+        // An evdev binding would look bound and never be.
+        let mut evdev = Config::default();
+        evdev.keys.talk = Some("KEY_F13".parse().unwrap());
+        assert!(matches!(
+            windows_key_device(&evdev, false),
+            Err(Error::Config(ControlError::WrongKeyForm { .. }))
+        ));
     }
 
     #[test]
@@ -1695,6 +2097,7 @@ mod tests {
             format!("{{\"http://127.0.0.1:8080\":{{\"token\":\"{FAKE_LOGIN}\"}}}}"),
         )
         .unwrap();
+        #[cfg(unix)]
         std::fs::set_permissions(&credentials, std::fs::Permissions::from_mode(0o600)).unwrap();
         let mut environment = environment(dir.path());
         environment.token = None;
@@ -1721,6 +2124,7 @@ mod tests {
             .collect();
         let path = dir.join("credentials.json");
         std::fs::write(&path, serde_json::Value::Object(logins).to_string()).unwrap();
+        #[cfg(unix)]
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
     }
 

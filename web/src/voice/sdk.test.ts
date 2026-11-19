@@ -19,9 +19,9 @@
 // microphone, at attach and at every change, 0 included; apart from deafen,
 // kept through an output switch, and never on a share's sound.
 // No network, no microphone, no screen.
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { VoiceSessionResult } from '../api';
-import { VoiceClient } from './connection';
+import { VoiceClient, companionQualities } from './connection';
 import { FakeClock, settle } from './fakes';
 
 type Sink = (...args: unknown[]) => void;
@@ -93,6 +93,8 @@ interface Stub {
   // Run inside connect, before it resolves (the SDK's signal events).
   duringConnect: (() => void) | null;
   audioContexts: number;
+  // When set, an AudioContext's close() settles only when this does.
+  contextClose: Promise<void> | null;
   // The global names that were there before any module of this file loaded.
   baseline: ReadonlySet<string>;
   // Issue #444: what the room was made and joined with, the share's tracks
@@ -128,6 +130,8 @@ interface Stub {
   // browser leaves the capture as it was when constrained (it may).
   rids: string[];
   ignoreConstraints: boolean;
+  // When set, the next picker waits for the test to answer it (issue #1659).
+  pickGate: Deferred<undefined> | null;
   // Issue #658: the captures made, what each restart was asked for, when set
   // the next restart waits for the test or fails, the devices the browser
   // lists, what each listing was asked, and the audio contexts made.
@@ -137,7 +141,7 @@ interface Stub {
   restartFails: Error | null;
   devices: StubDevice[];
   listed: unknown[][];
-  contexts: { closed: number }[];
+  contexts: StubAudio[];
   // Issue #659: the filters the browser keeps on whatever it is asked.
   keptOn: string[];
   // Issue #660: whether the browser can choose an output, each output the
@@ -145,6 +149,11 @@ interface Stub {
   outputSelection: boolean;
   outputs: string[];
   outputFails: Error | null;
+  // The room's canPlaybackAudio, and what startAudio does: how many times it
+  // was called, and the error it rejects with (null: it succeeds).
+  canPlayback: boolean;
+  startAudios: number;
+  startAudioFails: Error | null;
   // ADR-015: what each camera capture was asked for, the captures made, a
   // refusal of the next one, and this connection's permission as LiveKit
   // last told it.
@@ -164,6 +173,7 @@ interface StubSettings {
   frameRate?: number;
 }
 interface StubParameters {
+  degradationPreference?: RTCDegradationPreference;
   encodings: RTCRtpEncodingParameters[];
 }
 interface StubSender {
@@ -172,9 +182,10 @@ interface StubSender {
   setParameters: (parameters: StubParameters) => Promise<void>;
 }
 interface StubScreenTrack {
+  setDegradationPreference: (preference: RTCDegradationPreference) => Promise<void>;
   source: string;
   stopped: number;
-  mediaStreamTrack: { readyState: string; enabled: boolean; contentHint: string; constraints: MediaTrackConstraints[]; getSettings: () => StubSettings; applyConstraints: (constraints: MediaTrackConstraints) => Promise<void>; addEventListener: (type: string, fn: () => void) => void; ended: () => void };
+  mediaStreamTrack: { readyState: string; enabled: boolean; contentHint: string; muted: boolean; getConstraints: () => MediaTrackConstraints; removeEventListener: (type: string, fn: () => void) => void; constraints: MediaTrackConstraints[]; getSettings: () => StubSettings; applyConstraints: (constraints: MediaTrackConstraints) => Promise<void>; addEventListener: (type: string, fn: () => void) => void; ended: () => void; mute: () => void; unmute: () => void };
   // What getSettings answers; a test may change it, as a capture can change size.
   settings: StubSettings;
   sender?: StubSender;
@@ -229,6 +240,7 @@ const state = vi.hoisted((): Stub => {
     connectLog: null,
     duringConnect: null,
     audioContexts: 0,
+    contextClose: null,
     baseline: new Set(Object.getOwnPropertyNames(globalThis)),
     roomOptions: undefined,
     connectOptions: undefined,
@@ -245,6 +257,7 @@ const state = vi.hoisted((): Stub => {
     captured: { width: 1920, height: 1080, frameRate: 30 },
     rids: ['q', 'h'],
     ignoreConstraints: false,
+    pickGate: null,
     medias: [],
     restarts: [],
     restart: null,
@@ -256,6 +269,9 @@ const state = vi.hoisted((): Stub => {
     outputSelection: true,
     outputs: [],
     outputFails: null,
+    canPlayback: true,
+    startAudios: 0,
+    startAudioFails: null,
     videoOptions: [],
     videoTracks: [],
     videoFails: null,
@@ -279,15 +295,25 @@ vi.mock('livekit-client', () => {
     unmute: () => (state.calls.push('unmute'), Promise.resolve()),
   });
   const screenTrack = (source: string): StubScreenTrack => {
-    const listeners: (() => void)[] = [];
+    const listeners = new Map<string, Set<() => void>>();
+    const emit = (type: string) => { for (const fn of listeners.get(type) ?? []) fn(); };
     const track: StubScreenTrack = {
       source,
       stopped: 0,
+      setDegradationPreference: (preference) => {
+        if (track.sender !== undefined) track.sender.parameters.degradationPreference = preference;
+        return Promise.resolve();
+      },
       settings: source === 'screen_share' ? { ...state.captured } : { channelCount: 2 },
       mediaStreamTrack: {
         readyState: 'live',
         enabled: true,
         contentHint: 'motion',
+        muted: false,
+        getConstraints: () => track.mediaStreamTrack.constraints.at(-1) ?? {},
+        removeEventListener: (_type, fn) => {
+          listeners.get(_type)?.delete(fn);
+        },
         constraints: [],
         getSettings: () => ({ ...track.settings }),
         applyConstraints: (constraints) => {
@@ -301,13 +327,16 @@ vi.mock('livekit-client', () => {
           return Promise.resolve();
         },
         addEventListener: (type, fn) => {
-          if (type === 'ended') listeners.push(fn);
+          if (!listeners.has(type)) listeners.set(type, new Set());
+          listeners.get(type)?.add(fn);
         },
         // The browser ends the capture (its own stop control).
         ended: () => {
           track.mediaStreamTrack.readyState = 'ended';
-          for (const fn of listeners) fn();
+          emit('ended');
         },
+        mute: () => { track.mediaStreamTrack.muted = true; emit('mute'); },
+        unmute: () => { track.mediaStreamTrack.muted = false; emit('unmute'); },
       },
       sender: source === 'screen_share' ? {
         parameters: { encodings: state.rids.map((rid) => ({ rid })) },
@@ -540,7 +569,9 @@ vi.mock('livekit-client', () => {
         state.screenOptions = options;
         const tracks = [screenTrack('screen_share'), screenTrack('screen_share_audio')];
         state.screenTracks.push(...tracks);
-        return Promise.resolve(tracks);
+        const gate = state.pickGate;
+        state.pickGate = null;
+        return gate === null ? Promise.resolve(tracks) : gate.promise.then(() => tracks);
       },
       unpublishTrack: (track: StubScreenTrack, stop: boolean) => {
         state.calls.push(`unpublish ${track.source}`);
@@ -569,6 +600,18 @@ vi.mock('livekit-client', () => {
     on(event: string, fn: (...args: unknown[]) => void) {
       state.handlers.set(event, fn);
       return this;
+    }
+    get canPlaybackAudio() {
+      return state.canPlayback;
+    }
+    startAudio() {
+      state.startAudios++;
+      if (state.startAudioFails !== null) return Promise.reject(state.startAudioFails);
+      // As the SDK's: every element it plays is unmuted first, synchronously.
+      for (const el of document.querySelectorAll('audio')) el.muted = false;
+      state.canPlayback = true;
+      state.handlers.get('apc')?.(true);
+      return Promise.resolve();
     }
     connect(_url: string, token: string, options: unknown) {
       state.connectOptions = options;
@@ -615,6 +658,7 @@ vi.mock('livekit-client', () => {
       MediaDevicesChanged: 'mdc',
       ActiveDeviceChanged: 'adc',
       SignalConnected: 'sc',
+      AudioPlaybackStatusChanged: 'apc',
     },
     TrackEvent: { Ended: 'ended' },
     PublishTrackError,
@@ -669,12 +713,60 @@ vi.mock('livekit-client', () => {
 });
 
 import { cameraOptions, cameraPublishOptions, captureOptions, grantWait, newLiveKitRoom, principalOf, sdkLog, shareEncodings, wanted, type ShareLayer } from './sdk';
-import type { Room } from './connection';
+import type { Room, RoomEvents } from './connection';
 import { CameraClient } from './camera';
 import { Track } from 'livekit-client';
 
 // What the module did to the SDK's loggers when it loaded, before any test.
 const atLoad = { levelCalls: [...state.levelCalls], factoryReplaced: state.logger.methodFactory !== state.stubFactory, calls: [...state.calls] };
+
+// An audio context as the browser has one: it runs, may be suspended, says so
+// to its listeners, and counts what is done to it (issue #1794). sample is the
+// byte every read of the analyser fills the buffer with (128 is silence).
+class StubAudio {
+  closed = 0;
+  resumed = 0;
+  state: 'running' | 'suspended' | 'interrupted' | 'closed' = 'running';
+  // What resume() does: runs the context, leaves it as it is, or refuses.
+  onResume: 'run' | 'stay' | 'refuse' = 'run';
+  sample = 128;
+  sources = 0;
+  disconnected = 0;
+  readonly listeners = new Set<() => void>();
+  createAnalyser() {
+    return { fftSize: 0, getByteTimeDomainData: (b: Uint8Array) => b.fill(this.sample), disconnect: () => { this.disconnected++; } };
+  }
+  createMediaStreamSource() {
+    this.sources++;
+    return { connect: () => undefined, disconnect: () => { this.disconnected++; } };
+  }
+  addEventListener(type: string, l: () => void) {
+    if (type === 'statechange') this.listeners.add(l);
+  }
+  removeEventListener(type: string, l: () => void) {
+    if (type === 'statechange') this.listeners.delete(l);
+  }
+  resume() {
+    this.resumed++;
+    if (this.onResume === 'refuse') return Promise.reject(new DOMException('no gesture', 'NotAllowedError'));
+    if (this.onResume === 'run') this.become('running');
+    return Promise.resolve();
+  }
+  close() {
+    this.closed++;
+    this.state = 'closed';
+    return state.contextClose ?? Promise.resolve();
+  }
+  // The browser changing the context's state, and saying so.
+  become(next: StubAudio['state']) {
+    if (this.state === next) return;
+    this.state = next;
+    for (const l of [...this.listeners]) l();
+  }
+  asContext(): AudioContext {
+    return this as unknown as AudioContext;
+  }
+}
 
 function deferred<T>(): Deferred<T> {
   let resolve: (value: T) => void = () => undefined;
@@ -698,6 +790,10 @@ beforeEach(() => {
   state.connectLog = null;
   state.duringConnect = null;
   state.audioContexts = 0;
+  state.canPlayback = true;
+  state.startAudios = 0;
+  state.startAudioFails = null;
+  state.contextClose = null;
   state.roomOptions = undefined;
   state.connectOptions = undefined;
   state.screenOptions = undefined;
@@ -730,24 +826,11 @@ beforeEach(() => {
   state.permissions = undefined;
   vi.stubGlobal(
     'AudioContext',
-    class {
-      private readonly made = { closed: 0 };
+    class extends StubAudio {
       constructor() {
+        super();
         state.audioContexts++;
-        state.contexts.push(this.made);
-      }
-      createAnalyser() {
-        return { fftSize: 0, getByteTimeDomainData: () => undefined };
-      }
-      createMediaStreamSource() {
-        return { connect: () => undefined };
-      }
-      resume() {
-        return Promise.resolve();
-      }
-      close() {
-        this.made.closed++;
-        return Promise.resolve();
+        state.contexts.push(this);
       }
     },
   );
@@ -764,6 +847,8 @@ const events = {
   onScreenEnded: () => undefined,
   onStreamTracks: () => undefined,
   onMicrophoneLost: () => undefined,
+  onMeter: () => undefined,
+  onPlayback: () => undefined,
   onDevicesChanged: () => undefined,
   onOutputMoved: () => undefined,
   onCameraEnded: () => undefined,
@@ -778,6 +863,236 @@ describe('the SDK adapter', () => {
     await newLiveKitRoom().connect('wss://lk.example', 'tok-abcdef', 'room-abcdef', true, events);
     expect(state.captureOptions).toEqual({ echoCancellation: true, noiseSuppression: true, autoGainControl: true });
     expect(state.calls).toEqual(['connect', 'capture', 'premute', 'publish', 'mute']);
+  });
+
+  // The tap only feeds the level meter: an audio context the browser refuses
+  // must not tear down a join that worked, or the client would retry for ever.
+  it('a tap that cannot be made leaves the room connected and the track published, and says there is no meter', async () => {
+    vi.stubGlobal(
+      'AudioContext',
+      function AudioContext() {
+        throw new DOMException('too many audio contexts', 'NotSupportedError');
+      },
+    );
+    const meter: boolean[] = [];
+    const names: (string | undefined)[] = [];
+    const room = newLiveKitRoom();
+    await room.connect('wss://lk.example', 'tok-abcdef', 'room-abcdef', true, {
+      ...events,
+      onMeter: (on: boolean, name?: string) => {
+        meter.push(on);
+        names.push(name);
+      },
+    });
+    expect(state.calls).toEqual(['connect', 'capture', 'premute', 'publish', 'mute']);
+    expect(meter).toEqual([false]);
+    // The browser's error is named to the client.
+    expect(names).toEqual(['NotSupportedError']);
+    // The clone made before the context failed is let go.
+    expect(state.medias[0]?.clones[0]?.stopped).toBe(1);
+    expect(room.level()).toBe(0);
+    await room.setSending(true);
+    await room.close();
+  });
+
+  // An AudioContext whose source cannot be made: the failure is after the
+  // context exists, so the context itself is closed too. fails is read at
+  // each construction, so a test can let the first tap work and fail the next.
+  function sourceThrows(fails: () => boolean) {
+    vi.stubGlobal(
+      'AudioContext',
+      class extends StubAudio {
+        private readonly fail = fails();
+        constructor() {
+          super();
+          state.audioContexts++;
+          state.contexts.push(this);
+        }
+        override createMediaStreamSource(): ReturnType<StubAudio['createMediaStreamSource']> {
+          if (this.fail) throw new DOMException('no source', 'InvalidStateError');
+          return super.createMediaStreamSource();
+        }
+      },
+    );
+  }
+
+  // iOS Safari plays nothing until a tap: the adapter tells the client what the
+  // room says after the join and whenever it changes, and the tap goes to the
+  // room's startAudio in the same call.
+  describe('playback held back until a tap', () => {
+    it('says what the room says after the join', async () => {
+      state.canPlayback = false;
+      const told: boolean[] = [];
+      const room = newLiveKitRoom();
+      await room.connect('wss://lk.example', 'tok-abcdef', 'room-abcdef', true, { ...events, onPlayback: (on: boolean) => told.push(on) });
+      expect(told).toEqual([false]);
+      await room.close();
+    });
+
+    it('says true after the join when the browser lets it play', async () => {
+      const told: boolean[] = [];
+      const room = newLiveKitRoom();
+      await room.connect('wss://lk.example', 'tok-abcdef', 'room-abcdef', false, { ...events, onPlayback: (on: boolean) => told.push(on) });
+      expect(told).toEqual([true]);
+      await room.close();
+    });
+
+    it('says what the room says whenever the event fires', async () => {
+      const told: boolean[] = [];
+      const room = newLiveKitRoom();
+      await room.connect('wss://lk.example', 'tok-abcdef', 'room-abcdef', true, { ...events, onPlayback: (on: boolean) => told.push(on) });
+      state.canPlayback = false;
+      state.handlers.get('apc')?.(false);
+      state.canPlayback = true;
+      state.handlers.get('apc')?.(true);
+      expect(told).toEqual([true, false, true]);
+      await room.close();
+    });
+
+    it('the tap calls startAudio at once, and success is told by the event', async () => {
+      state.canPlayback = false;
+      const told: boolean[] = [];
+      const room = newLiveKitRoom();
+      await room.connect('wss://lk.example', 'tok-abcdef', 'room-abcdef', true, { ...events, onPlayback: (on: boolean) => told.push(on) });
+      const done = room.startAudio();
+      // Called in the same turn as the tap, before anything was awaited.
+      expect(state.startAudios).toBe(1);
+      await done;
+      expect(told).toEqual([false, true]);
+      await room.close();
+    });
+
+    it('a refusal rejects with the browser\'s error and tells nothing more', async () => {
+      state.canPlayback = false;
+      const told: boolean[] = [];
+      const room = newLiveKitRoom();
+      await room.connect('wss://lk.example', 'tok-abcdef', 'room-abcdef', true, { ...events, onPlayback: (on: boolean) => told.push(on) });
+      state.startAudioFails = new DOMException('blocked', 'NotAllowedError');
+      await expect(room.startAudio()).rejects.toMatchObject({ name: 'NotAllowedError' });
+      expect(told).toEqual([false]);
+      await room.close();
+    });
+
+    // The room says canPlaybackAudio the moment any one element plays, while
+    // a voice the browser refused earlier stays paused (#1793).
+    it('stays false while a voice the browser refused is paused, and says true when it plays', async () => {
+      const told: boolean[] = [];
+      const room = newLiveKitRoom();
+      await room.connect('wss://lk.example', 'tok-abcdef', 'room-abcdef', false, { ...events, onPlayback: (on: boolean) => told.push(on) });
+      const made: HTMLAudioElement[] = [];
+      const refused = { source: 'microphone', kind: 'audio', sid: 'r1', attach: () => { const el = document.createElement('audio'); made.push(el); return el; }, detach: () => made.splice(0) };
+      state.handlers.get('ts')?.(refused, undefined, { identity: 'p8' });
+      const el = made[0];
+      expect(el).toBeDefined();
+      if (el === undefined) return;
+      // jsdom's element is paused; another track played, so the room says true.
+      state.canPlayback = true;
+      state.handlers.get('apc')?.(true);
+      expect(told).toEqual([true, false]);
+      let paused = true;
+      Object.defineProperty(el, 'paused', { get: () => paused });
+      paused = false;
+      el.dispatchEvent(new Event('playing'));
+      expect(told).toEqual([true, false, true]);
+      // The browser lets go of it again (an interruption): the tap is back.
+      paused = true;
+      el.dispatchEvent(new Event('pause'));
+      expect(told).toEqual([true, false, true, false]);
+      await room.close();
+    });
+
+    it('a voice that left no longer holds playback back', async () => {
+      const told: boolean[] = [];
+      const room = newLiveKitRoom();
+      await room.connect('wss://lk.example', 'tok-abcdef', 'room-abcdef', false, { ...events, onPlayback: (on: boolean) => told.push(on) });
+      const made: HTMLAudioElement[] = [];
+      const refused = { source: 'microphone', kind: 'audio', sid: 'r1', attach: () => { const el = document.createElement('audio'); made.push(el); return el; }, detach: () => made.splice(0) };
+      state.handlers.get('ts')?.(refused, undefined, { identity: 'p8' });
+      state.handlers.get('apc')?.(true);
+      state.handlers.get('tu')?.(refused, undefined, { identity: 'p8' });
+      expect(told).toEqual([true, false, true]);
+      await room.close();
+    });
+
+    it('a voice element tells nothing once it has left, or once the room is closed', async () => {
+      const told: boolean[] = [];
+      const room = newLiveKitRoom();
+      await room.connect('wss://lk.example', 'tok-abcdef', 'room-abcdef', false, { ...events, onPlayback: (on: boolean) => told.push(on) });
+      const made: HTMLAudioElement[] = [];
+      const left = { source: 'microphone', kind: 'audio', sid: 'r1', attach: () => { const el = document.createElement('audio'); made.push(el); return el; }, detach: () => made.splice(0) };
+      state.handlers.get('ts')?.(left, undefined, { identity: 'p8' });
+      const gone = made[0];
+      state.handlers.get('tu')?.(left, undefined, { identity: 'p8' });
+      const before = [...told];
+      gone?.dispatchEvent(new Event('pause'));
+      gone?.dispatchEvent(new Event('playing'));
+      expect(told).toEqual(before);
+      // A voice still attached at the close: livekit may reuse its element.
+      const kept = { source: 'microphone', kind: 'audio', sid: 'r2', attach: () => { const el = document.createElement('audio'); made.push(el); return el; }, detach: () => made.splice(0) };
+      state.handlers.get('ts')?.(kept, undefined, { identity: 'p9' });
+      const reused = made[0];
+      expect(reused).toBeDefined();
+      if (reused === undefined) return;
+      const removal = vi.spyOn(reused, 'removeEventListener');
+      await room.close();
+      expect(removal.mock.calls.map((call) => call[0])).toEqual(expect.arrayContaining(['playing', 'pause']));
+    });
+
+    it('tells nothing after a close', async () => {
+      const told: boolean[] = [];
+      const room = newLiveKitRoom();
+      await room.connect('wss://lk.example', 'tok-abcdef', 'room-abcdef', true, { ...events, onPlayback: (on: boolean) => told.push(on) });
+      await room.close();
+      state.handlers.get('apc')?.(false);
+      expect(told).toEqual([true]);
+    });
+  });
+
+  it('a source that cannot be made closes the context and its clone, and says there is no meter', async () => {
+    sourceThrows(() => true);
+    const meter: boolean[] = [];
+    const room = newLiveKitRoom();
+    await room.connect('wss://lk.example', 'tok-abcdef', 'room-abcdef', true, { ...events, onMeter: (on: boolean) => meter.push(on) });
+    expect(meter).toEqual([false]);
+    expect(state.contexts).toHaveLength(1);
+    expect(state.contexts[0]?.closed).toBe(1);
+    expect(state.medias[0]?.clones[0]?.stopped).toBe(1);
+    expect(room.level()).toBe(0);
+    await room.close();
+  });
+
+  // Switching microphones makes a new tap, so the meter can come back or go.
+  it('a tap that failed at the join is made again by a switch, and says the meter is back', async () => {
+    let failing = true;
+    sourceThrows(() => failing);
+    const meter: boolean[] = [];
+    const room = newLiveKitRoom();
+    await room.connect('wss://lk.example', 'tok-abcdef', 'room-abcdef', true, { ...events, onMeter: (on: boolean) => meter.push(on) });
+    expect(meter).toEqual([false]);
+    failing = false;
+    await room.switchMicrophone('mic-2');
+    expect(meter).toEqual([false, true]);
+    await room.close();
+  });
+
+  it('a tap that works and then fails at a switch says the meter is gone, and lets the old tap go', async () => {
+    let failing = false;
+    sourceThrows(() => failing);
+    const meter: boolean[] = [];
+    const room = newLiveKitRoom();
+    await room.connect('wss://lk.example', 'tok-abcdef', 'room-abcdef', true, { ...events, onMeter: (on: boolean) => meter.push(on) });
+    expect(meter).toEqual([true]);
+    const old = state.medias[0];
+    failing = true;
+    await room.switchMicrophone('mic-2');
+    expect(meter).toEqual([true, false]);
+    expect(old?.clones[0]?.stopped).toBe(1);
+    expect(state.contexts[0]?.closed).toBe(1);
+    // The failed tap's own context and clone are let go as well.
+    expect(state.contexts[1]?.closed).toBe(1);
+    expect(state.medias[1]?.clones[0]?.stopped).toBe(1);
+    expect(room.level()).toBe(0);
+    await room.close();
   });
 
   it('a Leave while the captured track is being muted stops it, and publishes nothing', async () => {
@@ -1052,6 +1367,22 @@ describe('the microphone chosen', () => {
     expect(state.contexts.every((c) => c.closed > 0)).toBe(true);
   });
 
+  // Issue #1764: the leave must not wait for the tap's AudioContext to close;
+  // a page closed meanwhile never sent it.
+  it('close starts the disconnect at once, even when the tap\'s AudioContext close hangs', async () => {
+    const { room } = await connected('mic-1');
+    let release: () => void = () => undefined;
+    state.contextClose = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    state.calls.length = 0;
+    const closing = room.close();
+    await settle();
+    expect(state.calls).toContain('disconnect');
+    release();
+    await closing;
+  });
+
   it('a close during a switch leaves no capture open', async () => {
     const { room } = await connected('mic-1');
     const held = deferred<undefined>();
@@ -1219,6 +1550,32 @@ describe('the watch view', () => {
     return p;
   };
   const layers = () => state.calls.filter((c) => c.startsWith('quality') || c.startsWith('dimensions'));
+
+  it('lifts the unfocused cap only while its watched video is in PiP and restores LOW on leave', async () => {
+    const pub = remotePub('screen_share');
+    state.remote.set('p8', { identity: 'p8', trackPublications: new Map([['a', pub]]) } as unknown as { trackPublications: Map<string, StubRemotePub> });
+    const room = newLiveKitRoom();
+    await room.connect('wss://lk.example', 'tok-abcdef', 'room-abcdef', false, events);
+    room.setWatches(new Set([8]), null);
+    const sink = { video: document.createElement('video'), audio: document.createElement('audio') };
+    room.attachStream(8, sink);
+    state.handlers.get('ts')?.({ source: 'screen_share', kind: 'video', sid: pub.trackSid, attach: vi.fn(), detach: vi.fn(), on: vi.fn(), off: vi.fn(), emit: vi.fn() }, pub, { identity: 'p8' });
+    expect(pub.videoQuality).toBe(0);
+    const pip = Object.assign(new EventTarget(), { width: 960, height: 540 });
+    Object.defineProperty(document, 'pictureInPictureElement', { configurable: true, value: sink.video });
+    try {
+      const enter = new Event('enterpictureinpicture');
+      Object.defineProperty(enter, 'pictureInPictureWindow', { value: pip });
+      sink.video.dispatchEvent(enter);
+      expect(pub.videoQuality).toBe(2);
+      Object.defineProperty(document, 'pictureInPictureElement', { configurable: true, value: null });
+      sink.video.dispatchEvent(new Event('leavepictureinpicture'));
+      expect(pub.videoQuality).toBe(0);
+    } finally {
+      Reflect.deleteProperty(document, 'pictureInPictureElement');
+      room.attachStream(8, null);
+    }
+  });
 
   // The SDK stops no track it unpublishes, so that a share's capture
   // survives its room (issue #516); the adapter stops every track itself.
@@ -1388,6 +1745,9 @@ describe('the watch view', () => {
       source,
       kind,
       sid: source,
+      on: vi.fn(),
+      off: vi.fn(),
+      emit: vi.fn(),
       attach: (el?: HTMLMediaElement) => {
         attached.push(`${source} ${el?.tagName ?? 'new'}`);
         return el ?? document.createElement('audio');
@@ -1429,6 +1789,9 @@ describe('the watch view', () => {
       source,
       kind,
       sid: source,
+      on: vi.fn(),
+      off: vi.fn(),
+      emit: vi.fn(),
       attach: (el?: HTMLMediaElement) => {
         attached.push(`${source} ${el?.tagName ?? 'new'}`);
         return el ?? document.createElement('audio');
@@ -1478,7 +1841,7 @@ describe('sharing a screen', () => {
       surfaceSwitching: 'include',
       suppressLocalAudioPlayback: false,
     });
-    // Nothing is published by picking; the chosen caps are held on the capture.
+    // Nothing is published by picking; the capture receives explicit caps.
     expect(state.calls).toEqual(['pick', 'constrain']);
   });
 
@@ -1508,6 +1871,7 @@ describe('sharing a screen', () => {
         options: {
           source: 'screen_share',
           simulcast: true,
+          degradationPreference: 'maintain-framerate',
           screenShareEncoding: { maxBitrate: 6_000_000, maxFramerate: 30 },
           screenShareSimulcastLayers: [{ width: 1280, height: 720, encoding: { maxBitrate: 2_000_000, maxFramerate: 30 } }],
         },
@@ -1517,6 +1881,132 @@ describe('sharing a screen', () => {
         options: { source: 'screen_share_audio', audioPreset: { maxBitrate: 128000 }, dtx: false, red: false, forceStereo: true },
       },
     ]);
+  });
+
+  it('reports a sustained capture mute once, clears on unmute, and removes listeners when kept', async () => {
+    vi.useFakeTimers();
+    const log = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const stalled = vi.fn();
+    const room = newLiveKitRoom();
+    try {
+      await room.connect('wss://lk.example', 'tok-abcdef', 'room-abcdef', true, { ...events, onScreenStalled: stalled });
+      await room.pickScreen();
+      const capture = state.screenTracks[0]?.mediaStreamTrack;
+      if (capture === undefined) throw new Error('no capture');
+      capture.mute();
+      vi.advanceTimersByTime(2999);
+      expect(stalled).not.toHaveBeenCalled();
+      vi.advanceTimersByTime(1);
+      expect(stalled.mock.calls).toEqual([[true]]);
+      capture.mute();
+      vi.advanceTimersByTime(5000);
+      expect(log).toHaveBeenCalledTimes(1);
+      capture.unmute();
+      expect(stalled.mock.calls).toEqual([[true], [false]]);
+      capture.mute();
+      const kept = room.keepScreen();
+      vi.advanceTimersByTime(3000);
+      expect(stalled).toHaveBeenCalledTimes(2);
+      capture.unmute();
+      capture.mute();
+      vi.advanceTimersByTime(3000);
+      expect(stalled).toHaveBeenCalledTimes(2);
+      kept?.stop();
+    } finally {
+      await room.close();
+      log.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it.each(['stopScreen', 'close'] as const)('reattaches capture monitoring on adoptScreen and removes it on %s', async (finish) => {
+    vi.useFakeTimers();
+    const log = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const oldStalled = vi.fn();
+    const stalled = vi.fn();
+    const old = newLiveKitRoom();
+    const next = newLiveKitRoom();
+    try {
+      await old.connect('wss://lk.example', 'tok-abcdef', 'room-abcdef', true, { ...events, onScreenStalled: oldStalled });
+      await old.pickScreen();
+      const capture = state.screenTracks[0]?.mediaStreamTrack;
+      if (capture === undefined) throw new Error('no capture');
+      const kept = old.keepScreen();
+      if (kept === null) throw new Error('nothing kept');
+      await old.close();
+      const added = vi.spyOn(capture, 'addEventListener');
+      const removed = vi.spyOn(capture, 'removeEventListener');
+      await next.connect('wss://lk.example', 'tok-abcdef', 'room-abcdef', true, { ...events, onScreenStalled: stalled });
+      next.adoptScreen(kept);
+      // The first three listeners belong to watchScreenCapture; holdScreen
+      // also adds its own browser-ended listener.
+      const watchers = added.mock.calls.slice(0, 3);
+      expect(watchers.map(([type]) => type)).toEqual(['mute', 'unmute', 'ended']);
+      capture.mute();
+      vi.advanceTimersByTime(3000);
+      expect(stalled.mock.calls).toEqual([[true]]);
+      expect(oldStalled).not.toHaveBeenCalled();
+      capture.unmute();
+      expect(stalled.mock.calls).toEqual([[true], [false]]);
+      capture.mute();
+      await next[finish]();
+      for (const [type, listener] of watchers) expect(removed).toHaveBeenCalledWith(type, listener);
+      vi.advanceTimersByTime(3000);
+      capture.unmute();
+      capture.mute();
+      vi.advanceTimersByTime(3000);
+      expect(stalled.mock.calls).toEqual([[true], [false]]);
+      expect(log).toHaveBeenCalledTimes(1);
+    } finally {
+      await old.close();
+      await next.close();
+      log.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps the asked sender rate when capture settings report 1 fps', async () => {
+    state.captured = { width: 1920, height: 1080, frameRate: 1 };
+    const room = await connected();
+    await room.pickScreen();
+    await room.publishScreen();
+    const track = state.screenTracks[0];
+    expect(track?.mediaStreamTrack.constraints).toEqual([{ width: { max: 1920 }, height: { max: 1080 }, frameRate: { max: 30 } }]);
+    expect(track?.sender?.parameters.encodings.at(-1)?.maxFramerate).toBe(30);
+    expect(state.published[0]?.options).toMatchObject({ screenShareEncoding: { maxFramerate: 30 } });
+    await room.close();
+  });
+
+  it('applies caps on pick and skips them on publish or repeated quality with identical max constraints', async () => {
+    const room = await connected();
+    await room.pickScreen();
+    await room.publishScreen();
+    await room.setShareQuality({ resolution: '1080p', frameRate: 30 });
+    expect(state.screenTracks[0]?.mediaStreamTrack.constraints).toEqual([{ width: { max: 1920 }, height: { max: 1080 }, frameRate: { max: 30 } }]);
+    expect(state.screenTracks[0]?.sender?.parameters.degradationPreference).toBe('maintain-framerate');
+    await room.setShareQuality({ resolution: '720p', frameRate: 15 });
+    expect(state.screenTracks[0]?.sender?.parameters.degradationPreference).toBe('maintain-resolution');
+    await room.close();
+  });
+
+  it.each([
+    { name: 'frame rate on a static screen', settings: { width: 1920, height: 1080, frameRate: 1 }, quality: { resolution: '1080p', frameRate: 15 }, width: 1920, height: 1080, frameRate: 15 },
+    { name: 'resolution on a temporarily smaller window', settings: { width: 640, height: 360, frameRate: 30 }, quality: { resolution: '720p', frameRate: 30 }, width: 1280, height: 720, frameRate: 30 },
+  ] as const)('applies new max constraints when lowering $name', async ({ settings, quality, width, height, frameRate }) => {
+    const room = await connected();
+    await room.pickScreen({ resolution: '1080p', frameRate: 30 });
+    await room.publishScreen();
+    const track = state.screenTracks[0];
+    if (track === undefined) throw new Error('no screen track');
+    track.settings = settings;
+    const apply = vi.spyOn(track.mediaStreamTrack, 'applyConstraints');
+    await room.setShareQuality(quality);
+    expect(apply).toHaveBeenCalledExactlyOnceWith({ width: { max: width }, height: { max: height }, frameRate: { max: frameRate } });
+    apply.mockClear();
+    track.settings = settings;
+    await room.setShareQuality(quality);
+    expect(apply).not.toHaveBeenCalled();
+    await room.close();
   });
 
   it('changes a live capture and its sender encodings without republishing', async () => {
@@ -1529,7 +2019,10 @@ describe('sharing a screen', () => {
     state.calls.length = 0;
     await room.setShareQuality({ resolution: '720p', frameRate: 15 });
     expect(track.mediaStreamTrack.contentHint).toBe('detail');
-    expect(track.mediaStreamTrack.constraints).toEqual([{ width: { max: 1920 }, height: { max: 1080 }, frameRate: { max: 30 } }, { width: { max: 1280 }, height: { max: 720 }, frameRate: { max: 15 } }]);
+    expect(track.mediaStreamTrack.constraints).toEqual([
+      { width: { max: 1920 }, height: { max: 1080 }, frameRate: { max: 30 } },
+      { width: { max: 1280 }, height: { max: 720 }, frameRate: { max: 15 } },
+    ]);
     expect(track.sender?.parameters.encodings).toEqual([
       { rid: 'q', maxBitrate: 6_000_000, maxFramerate: 15, scaleResolutionDownBy: 1 },
       { rid: 'h', maxBitrate: 6_000_000, maxFramerate: 15, scaleResolutionDownBy: 1 },
@@ -1572,6 +2065,94 @@ describe('sharing a screen', () => {
     ]);
   });
 
+  // Auto (issue #1659): settled once from the capture as it came, then capped
+  // as settled; what it settled to is what is declared and published.
+  it.each([
+    { name: '1920x1080 is Source, capped at 4K', captured: { width: 1920, height: 1080, frameRate: 60 }, want: { resolution: 'source', frameRate: 30 }, cap: { width: { max: 3840 }, height: { max: 2160 }, frameRate: { max: 30 } }, top: 6_000_000 },
+    { name: '2560x1440 is 1080p, capped at 1080p', captured: { width: 2560, height: 1440, frameRate: 60 }, want: { resolution: '1080p', frameRate: 30 }, cap: { width: { max: 1920 }, height: { max: 1080 }, frameRate: { max: 30 } }, top: 6_000_000 },
+    { name: '4K is 1080p, capped at 1080p', captured: { width: 3840, height: 2160, frameRate: 60 }, want: { resolution: '1080p', frameRate: 30 }, cap: { width: { max: 1920 }, height: { max: 1080 }, frameRate: { max: 30 } }, top: 6_000_000 },
+  ])('Auto: $name', async ({ captured, want, cap, top }) => {
+    state.captured = captured;
+    const room = await connected();
+    expect(room.settled({ resolution: 'auto', frameRate: 30 })).toEqual({ resolution: '1080p', frameRate: 30 });
+    await room.pickScreen({ resolution: 'auto', frameRate: 30 });
+    expect(room.settled({ resolution: 'auto', frameRate: 30 })).toEqual(want);
+    await room.publishScreen();
+    const track = state.screenTracks[0];
+    expect(track?.mediaStreamTrack.constraints).toEqual([cap]);
+    expect(state.published[0]?.options).toMatchObject({ screenShareEncoding: { maxBitrate: top, maxFramerate: 30 } });
+    expect(track?.mediaStreamTrack.contentHint).toBe('motion');
+    // Other choices settle to themselves, and Auto stays as it was settled.
+    expect(room.settled({ resolution: '720p', frameRate: 15 })).toEqual({ resolution: '720p', frameRate: 15 });
+    await room.setShareQuality({ resolution: 'auto', frameRate: 30 });
+    expect(room.settled({ resolution: 'auto', frameRate: 30 })).toEqual(want);
+  });
+
+  it('Auto chosen live lifts an earlier cap to read the screen\'s size', async () => {
+    state.captured = { width: 2560, height: 1440, frameRate: 60 };
+    const old = await connected();
+    await old.pickScreen({ resolution: '720p', frameRate: 30 });
+    await old.publishScreen();
+    await old.setShareQuality({ resolution: 'auto', frameRate: 30 });
+    // The 720p cap was lifted to Auto's ask before the size was read.
+    expect(old.settled({ resolution: 'auto', frameRate: 30 })).toEqual({ resolution: '1080p', frameRate: 30 });
+  });
+
+  it('a kept capture carries what Auto settled to, for the next connection', async () => {
+    state.captured = { width: 1920, height: 1080, frameRate: 60 };
+    const old = await connected();
+    await old.pickScreen({ resolution: 'auto', frameRate: 30 });
+    expect(old.settled({ resolution: 'auto', frameRate: 30 })).toEqual({ resolution: 'source', frameRate: 30 });
+    const kept = old.keepScreen();
+    expect(kept).not.toBeNull();
+    const next = await connected();
+    if (kept !== null) next.adoptScreen(kept);
+    expect(next.settled({ resolution: 'auto', frameRate: 30 })).toEqual({ resolution: 'source', frameRate: 30 });
+  });
+
+  // A choice made while the share is being picked, or while a kept capture is
+  // resumed (issue #1659): the capture is settled and capped to the choice as it
+  // is when it is published, to Auto and from it.
+  it.each([
+    { name: 'to Auto while the picker is open', from: { resolution: '720p', frameRate: 15 }, to: { resolution: 'auto', frameRate: 30 }, captured: { width: 1920, height: 1080, frameRate: 60 }, settled: { resolution: 'source', frameRate: 30 }, cap: { width: { max: 3840 }, height: { max: 2160 }, frameRate: { max: 30 } } },
+    { name: 'to Auto on a larger screen while the picker is open', from: { resolution: '720p', frameRate: 15 }, to: { resolution: 'auto', frameRate: 30 }, captured: { width: 2560, height: 1440, frameRate: 60 }, settled: { resolution: '1080p', frameRate: 30 }, cap: { width: { max: 1920 }, height: { max: 1080 }, frameRate: { max: 30 } } },
+    { name: 'from Auto to 720p while the picker is open', from: { resolution: 'auto', frameRate: 30 }, to: { resolution: '720p', frameRate: 15 }, captured: { width: 3840, height: 2160, frameRate: 60 }, settled: { resolution: '720p', frameRate: 15 }, cap: { width: { max: 1280 }, height: { max: 720 }, frameRate: { max: 15 } } },
+    { name: 'from Source to 1080p60 while the picker is open', from: { resolution: 'source', frameRate: 30 }, to: { resolution: '1080p', frameRate: 60 }, captured: { width: 3840, height: 2160, frameRate: 60 }, settled: { resolution: '1080p', frameRate: 60 }, cap: { width: { max: 1920 }, height: { max: 1080 }, frameRate: { max: 60 } } },
+  ] as const)('picking: $name', async ({ from, to, captured, settled, cap }) => {
+    state.captured = captured;
+    const room = await connected();
+    state.pickGate = deferred();
+    const gate = state.pickGate;
+    const pick = room.pickScreen(from);
+    await Promise.resolve();
+    await room.setShareQuality(to);
+    gate.resolve(undefined);
+    await pick;
+    expect(room.settled(to)).toEqual(settled);
+    await room.publishScreen();
+    const track = state.screenTracks[0];
+    expect(track?.mediaStreamTrack.constraints.at(-1)).toEqual(cap);
+    expect(state.published[0]?.options).toMatchObject({ screenShareEncoding: { maxFramerate: settled.frameRate } });
+  });
+
+  it.each([
+    { name: 'to Auto', from: { resolution: '720p', frameRate: 15 }, to: { resolution: 'auto', frameRate: 30 }, settled: { resolution: 'source', frameRate: 30 }, cap: { width: { max: 3840 }, height: { max: 2160 }, frameRate: { max: 30 } } },
+    { name: 'from Auto to 720p', from: { resolution: 'auto', frameRate: 30 }, to: { resolution: '720p', frameRate: 15 }, settled: { resolution: '720p', frameRate: 15 }, cap: { width: { max: 1280 }, height: { max: 720 }, frameRate: { max: 15 } } },
+  ] as const)('resuming: a kept capture changed $name is settled and capped before it is published', async ({ from, to, settled, cap }) => {
+    state.captured = { width: 1920, height: 1080, frameRate: 60 };
+    const old = await connected();
+    await old.pickScreen(from);
+    const kept = old.keepScreen();
+    expect(kept).not.toBeNull();
+    const next = await connected();
+    // The choice is made after the capture was kept, before it is adopted.
+    await next.setShareQuality(to);
+    if (kept !== null) next.adoptScreen(kept);
+    await next.publishScreen();
+    expect(next.settled(to)).toEqual(settled);
+    expect(state.screenTracks[0]?.mediaStreamTrack.constraints.at(-1)).toEqual(cap);
+  });
+
   it('publishes a Source 4K60 picture at 60 fps and 18 Mb/s with layers of 720p30 and 1080p30', async () => {
     state.captured = { width: 3840, height: 2160, frameRate: 60 };
     const room = await connected();
@@ -1580,6 +2161,7 @@ describe('sharing a screen', () => {
     expect(state.published[0]?.options).toEqual({
       source: 'screen_share',
       simulcast: true,
+      degradationPreference: 'maintain-framerate',
       screenShareEncoding: { maxBitrate: 18_000_000, maxFramerate: 60 },
       screenShareSimulcastLayers: [
         { width: 1280, height: 720, encoding: { maxBitrate: 2_000_000, maxFramerate: 30 } },
@@ -1677,6 +2259,7 @@ describe('sharing a screen', () => {
         {
           source: 'screen_share',
           simulcast: true,
+          degradationPreference: 'maintain-framerate',
           screenShareEncoding: { maxBitrate: 6_000_000, maxFramerate: 30 },
           screenShareSimulcastLayers: [{ width: 1280, height: 720, encoding: { maxBitrate: 2_000_000, maxFramerate: 30 } }],
         },
@@ -1712,6 +2295,7 @@ describe('sharing a screen', () => {
     expect(state.published[0]?.options).toEqual({
       source: 'screen_share',
       simulcast: true,
+      degradationPreference: 'maintain-framerate',
       screenShareEncoding: { maxBitrate: 10_000_000, maxFramerate: 60 },
       screenShareSimulcastLayers: [
         { width: 1280, height: 720, encoding: { maxBitrate: 2_000_000, maxFramerate: 30 } },
@@ -1938,7 +2522,7 @@ describe('sharing a screen', () => {
   });
 });
 
-// Source keeps the capture's own size and rate up to 4K60. The top layer's
+// Source keeps the capture's own size up to 4K, with the asked 60 fps cap. The top layer's
 // bitrate follows its longer side; below it are 720p30 at 2 Mbps and 1080p30,
 // smallest first, each left out unless it is smaller than the capture.
 describe("a share's encodings", () => {
@@ -1956,7 +2540,7 @@ describe("a share's encodings", () => {
     { width: 3840, height: 2160, fps: 30, bitrate: 18_000_000, lower: [p720, p1080] },
     { width: 3840, height: 2160, fps: 60, bitrate: 18_000_000, lower: [p720, p1080] },
   ])('a $width x $height capture at $fps fps', ({ width, height, fps, bitrate, lower }) => {
-    expect(sourceEncodings({ width, height, frameRate: fps })).toEqual({ top: { width, height, maxBitrate: bitrate, maxFramerate: fps }, lower });
+    expect(sourceEncodings({ width, height, frameRate: fps })).toEqual({ top: { width, height, maxBitrate: bitrate, maxFramerate: 60 }, lower });
   });
 
   it.each<{ readonly what: string; readonly width: number; readonly height: number; readonly bitrate: number; readonly lower: readonly ShareLayer[] }>([
@@ -1980,10 +2564,10 @@ describe("a share's encodings", () => {
   it('never sends more than 60 fps, nor a lower layer faster than the top', () => {
     expect(sourceEncodings({ width: 3840, height: 2160, frameRate: 120 }).top.maxFramerate).toBe(60);
     expect(sourceEncodings({ width: 3840, height: 2160, frameRate: 24 })).toEqual({
-      top: { width: 3840, height: 2160, maxBitrate: 18_000_000, maxFramerate: 24 },
-      lower: [{ ...p720, maxFramerate: 24 }, { ...p1080, maxFramerate: 24 }],
+      top: { width: 3840, height: 2160, maxBitrate: 18_000_000, maxFramerate: 60 },
+      lower: [p720, p1080],
     });
-    expect(sourceEncodings({ width: 1920, height: 1080, frameRate: 10 }).lower).toEqual([{ ...p720, maxFramerate: 10 }]);
+    expect(sourceEncodings({ width: 1920, height: 1080, frameRate: 10 }).lower).toEqual([p720]);
   });
 
   it('takes a Source capture whose settings do not say its size as 4K, and one without a frame rate as 60 fps', () => {
@@ -2148,6 +2732,29 @@ describe('the volume of each person', () => {
     await room.close();
   });
 
+  // livekit-client detaches a track's elements, then emits TrackUnsubscribed
+  // (RemoteTrackPublication.setTrack): detach() answers [] by then.
+  it('removes the element of a person who left, the SDK having detached it first', async () => {
+    const room = await connected();
+    const made: HTMLAudioElement[] = [];
+    const gone = {
+      source: 'microphone',
+      kind: 'audio',
+      sid: 'a',
+      attach: () => {
+        const el = document.createElement('audio');
+        made.push(el);
+        return el;
+      },
+      detach: () => [] as HTMLAudioElement[],
+    };
+    arrive(gone, 'p8');
+    expect(played()).toHaveLength(1);
+    state.handlers.get('tu')?.(gone, undefined, { identity: 'p8' });
+    expect(played()).toEqual([]);
+    await room.close();
+  });
+
   it('0 stays 0 when the track is attached again: the person leaving and coming back', async () => {
     const room = await connected();
     room.setVolume(8, 0);
@@ -2185,6 +2792,51 @@ describe('the volume of each person', () => {
     room.setDeafened(false);
     expect(played().map((el) => [el.muted, el.volume])).toEqual([[false, 0], [false, 0.4], [false, 1]]);
     await room.close();
+  });
+
+  // The SDK's startAudio unmutes every element it plays; the tap must not
+  // undo a deafen.
+  it('a tap while deafened leaves every voice muted, and while not deafened plays them', async () => {
+    const room = await connected();
+    arrive(voice('a'), 'p8');
+    arrive(voice('b'), 'p9');
+    room.setDeafened(true);
+    await room.startAudio();
+    expect(played().map((el) => el.muted)).toEqual([true, true]);
+    room.setDeafened(false);
+    await room.startAudio();
+    expect(played().map((el) => el.muted)).toEqual([false, false]);
+    await room.close();
+  });
+
+  it('the playback event re-mutes the voices while deafened', async () => {
+    const room = await connected();
+    arrive(voice('a'), 'p8');
+    room.setDeafened(true);
+    for (const el of played()) el.muted = false;
+    state.handlers.get('apc')?.(true);
+    expect(played().map((el) => el.muted)).toEqual([true]);
+    await room.close();
+  });
+
+  it('a volumechange that unmuted a voice while deafened is undone, and left alone otherwise', async () => {
+    const room = await connected();
+    arrive(voice('a'), 'p8');
+    const el = played()[0];
+    if (el === undefined) throw new Error('no element');
+    room.setDeafened(true);
+    el.muted = false;
+    el.dispatchEvent(new Event('volumechange'));
+    expect(el.muted).toBe(true);
+    room.setDeafened(false);
+    el.dispatchEvent(new Event('volumechange'));
+    expect(el.muted).toBe(false);
+    // A closed room's elements no longer hold anything.
+    room.setDeafened(true);
+    await room.close();
+    el.muted = false;
+    el.dispatchEvent(new Event('volumechange'));
+    expect(el.muted).toBe(false);
   });
 
   it('holds through a switch of the speakers', async () => {
@@ -2516,6 +3168,39 @@ describe('the screen companion room (issue #1581)', () => {
     expect(state.published.map((p) => p.source)).toEqual(['screen_share']);
   });
 
+  // Issue #1772: the companion captures and publishes through the same rows as
+  // the browser (shareAsk, shareTops, contentHint), so each of the desktop's
+  // choices reaches the picker's constraints, the capture's caps and the
+  // encodings: the top layer is never larger than asked and its fps is the
+  // chosen one. The capture here is a 4K60 screen, larger than any ask.
+  it.each([
+    { name: '720p30', q: { resolution: '720p', frameRate: 30 }, ask: { width: 1280, height: 720, frameRate: 30 }, top: { maxBitrate: 6_000_000, maxFramerate: 30 } },
+    { name: '1080p30', q: { resolution: '1080p', frameRate: 30 }, ask: { width: 1920, height: 1080, frameRate: 30 }, top: { maxBitrate: 6_000_000, maxFramerate: 30 } },
+    { name: '1080p60', q: { resolution: '1080p', frameRate: 60 }, ask: { width: 1920, height: 1080, frameRate: 60 }, top: { maxBitrate: 6_000_000, maxFramerate: 60 } },
+    { name: 'Source 30', q: { resolution: 'source', frameRate: 30 }, ask: { width: 3840, height: 2160, frameRate: 30 }, top: { maxBitrate: 18_000_000, maxFramerate: 30 } },
+    { name: 'Source 60', q: { resolution: 'source', frameRate: 60 }, ask: { width: 3840, height: 2160, frameRate: 60 }, top: { maxBitrate: 18_000_000, maxFramerate: 60 } },
+  ] as const)('the companion captures and publishes $name as asked', async ({ q, ask, top }) => {
+    expect(companionQualities).toContainEqual(q);
+    state.captured = { width: 3840, height: 2160, frameRate: 60 };
+    state.ignoreConstraints = false;
+    const room = newLiveKitRoom();
+    room.setCompanion?.(true);
+    await room.connect('wss://lk.example', 'tok-abcdef', 'room-abcdef', false, events);
+    await room.pickScreen(q);
+    expect(state.screenOptions).toMatchObject({ video: true, audio: false, resolution: ask, contentHint: 'motion' });
+    await room.publishScreen();
+    const track = state.screenTracks.find((t) => t.source === 'screen_share');
+    expect(track?.mediaStreamTrack.constraints).toEqual([{ width: { max: ask.width }, height: { max: ask.height }, frameRate: { max: ask.frameRate } }]);
+    expect(track?.mediaStreamTrack.contentHint).toBe('motion');
+    expect(state.published.map((p) => p.source)).toEqual(['screen_share']);
+    expect(state.published[0]?.options).toMatchObject({ screenShareEncoding: top });
+    const topEncoding = track?.sender?.parameters.encodings.at(-1);
+    expect(topEncoding).toMatchObject({ maxBitrate: top.maxBitrate, maxFramerate: top.maxFramerate });
+    // Never larger than asked: the capture is scaled down to the ask.
+    expect(track?.mediaStreamTrack.getSettings().width).toBeLessThanOrEqual(ask.width);
+    expect(track?.mediaStreamTrack.getSettings().height).toBeLessThanOrEqual(ask.height);
+  });
+
   it('never captures or publishes a microphone', async () => {
     const room = newLiveKitRoom();
     room.setCompanion?.(true);
@@ -2625,6 +3310,10 @@ describe('receiving cameras', () => {
         return el ?? document.createElement('audio');
       },
       detach: () => [],
+      // A played camera is sized for PiP through its track events (#1954).
+      on: vi.fn(),
+      off: vi.fn(),
+      emit: vi.fn(),
     });
     const pubs = [remotePub('microphone', 'video'), remotePub('camera', 'audio')];
     state.handlers.get('ts')?.(track('microphone', 'video'), pubs[0], { identity: 'p8' });
@@ -2644,6 +3333,92 @@ describe('receiving cameras', () => {
     state.handlers.get('ts')?.(track('camera', 'video'), stray, { identity: 'p9' });
     expect(stray.isSubscribed).toBe(false);
     expect(told).toEqual([[8]]);
+  });
+
+  // Issue #1954: a remote camera's tile in PiP is sized to the PiP window,
+  // as a watched share's is, from whichever way its track and tile meet (the
+  // tile first, or the track first), and a new track for the same tile (a
+  // renewed room) keeps the size. Its tile let go, its track gone, or the
+  // room closed, nothing is listened to any more.
+  it("sizes a camera's tile to its PiP window however track and tile meet, and stops when either goes", async () => {
+    const room = newLiveKitRoom();
+    await room.connect('wss://lk.example', 'tok-abcdef', 'room-abcdef', false, events);
+    room.setViewing(true);
+    room.setCameras(new Set([8, 9]));
+    const camera = (sid: string) => {
+      const listeners = new Set<() => void>();
+      const sizes: { width: number; height: number }[] = [];
+      return {
+        source: 'camera', kind: 'video', sid, attach: vi.fn(), detach: vi.fn(() => []),
+        on: (_event: string, l: () => void) => { listeners.add(l); },
+        off: (_event: string, l: () => void) => { listeners.delete(l); },
+        emit: (_event: string, d: { width: number; height: number }) => { sizes.push(d); },
+        listeners, sizes,
+      };
+    };
+    const tile = (width: number, height: number) => {
+      const v = document.createElement('video');
+      Object.defineProperty(v, 'clientWidth', { value: width });
+      Object.defineProperty(v, 'clientHeight', { value: height });
+      return v;
+    };
+    let current: Element | null = null;
+    Object.defineProperty(document, 'pictureInPictureElement', { configurable: true, get: () => current });
+    try {
+      // The tile first, then the track.
+      const eight = tile(320, 180);
+      room.attachCamera(8, eight);
+      const first = camera('c8');
+      state.handlers.get('ts')?.(first, remotePub('camera', 'video'), { identity: 'p8' });
+      expect(first.attach).toHaveBeenCalledWith(eight);
+      expect(first.listeners.size).toBe(1);
+      const pip = Object.assign(new EventTarget(), { width: 640, height: 360 });
+      current = eight;
+      const enter = new Event('enterpictureinpicture');
+      Object.defineProperty(enter, 'pictureInPictureWindow', { value: pip });
+      eight.dispatchEvent(enter);
+      expect(first.sizes.at(-1)).toEqual({ width: 640, height: 360 });
+      // A new track for the same tile, as a renewed room brings: sized to
+      // the window still open, and the old one is let go.
+      const second = camera('c8b');
+      state.handlers.get('ts')?.(second, remotePub('camera', 'video'), { identity: 'p8' });
+      expect(first.listeners.size).toBe(0);
+      expect(second.sizes.at(-1)).toEqual({ width: 640, height: 360 });
+      current = null;
+      eight.dispatchEvent(new Event('leavepictureinpicture'));
+      expect(second.sizes.at(-1)).toEqual({ width: 320, height: 180 });
+      // Its tile let go: nothing is listened to.
+      room.attachCamera(8, null);
+      expect(second.listeners.size).toBe(0);
+      const count = second.sizes.length;
+      eight.dispatchEvent(enter);
+      expect(second.sizes).toHaveLength(count);
+
+      // The track first, then the tile; the track gone stops it.
+      const nine = camera('c9');
+      state.handlers.get('ts')?.(nine, remotePub('camera', 'video'), { identity: 'p9' });
+      expect(nine.listeners.size).toBe(0);
+      const ninth = tile(160, 90);
+      room.attachCamera(9, ninth);
+      expect(nine.attach).toHaveBeenCalledWith(ninth);
+      expect(nine.listeners.size).toBe(1);
+      current = ninth;
+      const enterNine = new Event('enterpictureinpicture');
+      Object.defineProperty(enterNine, 'pictureInPictureWindow', { value: Object.assign(new EventTarget(), { width: 480, height: 270 }) });
+      ninth.dispatchEvent(enterNine);
+      expect(nine.sizes.at(-1)).toEqual({ width: 480, height: 270 });
+      state.handlers.get('tu')?.(nine, remotePub('camera', 'video'), { identity: 'p9' });
+      expect(nine.listeners.size).toBe(0);
+
+      // Closing the room lets go of every camera's sizing.
+      const again = camera('c9b');
+      state.handlers.get('ts')?.(again, remotePub('camera', 'video'), { identity: 'p9' });
+      expect(again.listeners.size).toBe(1);
+      await room.close();
+      expect(again.listeners.size).toBe(0);
+    } finally {
+      Reflect.deleteProperty(document, 'pictureInPictureElement');
+    }
   });
 
   it('a track refused for its kind is never subscribed again, however often presence comes', async () => {
@@ -3075,5 +3850,299 @@ describe('the camera', () => {
     room.attachSelf(self);
     await room.captureCamera(null);
     expect(state.videoTracks.at(-1)?.attached).toEqual([self]);
+  });
+});
+
+// Issue #1794: the meter listens with the audio context the client made in
+// the Join gesture, because iOS leaves one made later suspended; and it
+// reports and reads the meter only while that context runs.
+describe('the meter\'s audio context', () => {
+  const connect = (room: Room, audio: StubAudio | null, on: Partial<RoomEvents> = {}) =>
+    room.connect('wss://lk.example', 'tok-abcdef', 'room-abcdef', true, { ...events, ...on }, audio?.asContext() ?? null);
+
+  it('listens with the context it was given, and makes none of its own', async () => {
+    const given = new StubAudio();
+    const meter: boolean[] = [];
+    const room = newLiveKitRoom();
+    await connect(room, given, { onMeter: (on: boolean) => meter.push(on) });
+    expect(state.contexts).toHaveLength(0);
+    expect(given.sources).toBe(1);
+    expect(meter).toEqual([true]);
+    // The room never closes what it does not own, and lets go of what it added.
+    await room.close();
+    expect(given.closed).toBe(0);
+    expect(given.listeners.size).toBe(0);
+    expect(given.disconnected).toBeGreaterThan(0);
+  });
+
+  it('a mic switch taps the same context again, and makes no new one', async () => {
+    const given = new StubAudio();
+    const room = newLiveKitRoom();
+    await connect(room, given, {});
+    await room.switchMicrophone('mic-2');
+    await room.switchMicrophone('mic-3');
+    expect(state.contexts).toHaveLength(0);
+    expect(state.audioContexts).toBe(0);
+    expect(given.sources).toBe(3);
+    expect(given.closed).toBe(0);
+    // One listener, the newest tap's.
+    expect(given.listeners.size).toBe(1);
+    await room.close();
+  });
+
+  it('a given context that is already closed is not used: the room makes its own, as before', async () => {
+    const given = new StubAudio();
+    given.state = 'closed';
+    const meter: boolean[] = [];
+    const room = newLiveKitRoom();
+    await connect(room, given, { onMeter: (on: boolean) => meter.push(on) });
+    expect(given.sources).toBe(0);
+    expect(state.contexts).toHaveLength(1);
+    expect(state.contexts[0]?.sources).toBe(1);
+    expect(meter).toEqual([true]);
+    await room.close();
+    // What the room made, it closes.
+    expect(state.contexts[0]?.closed).toBe(1);
+    expect(given.closed).toBe(0);
+  });
+
+  it('with none given the room makes its own, and if the browser refuses it the meter is gone (#1795)', async () => {
+    vi.stubGlobal('AudioContext', function AudioContext() {
+      throw new DOMException('refused', 'NotSupportedError');
+    });
+    const meter: boolean[] = [];
+    const room = newLiveKitRoom();
+    await connect(room, null, { onMeter: (on: boolean) => meter.push(on) });
+    expect(meter).toEqual([false]);
+    await room.close();
+  });
+
+  it('a given context whose source cannot be made is left to the client to close, and says there is no meter', async () => {
+    const given = new StubAudio();
+    given.createMediaStreamSource = () => {
+      throw new DOMException('no source', 'InvalidStateError');
+    };
+    const meter: boolean[] = [];
+    const room = newLiveKitRoom();
+    await connect(room, given, { onMeter: (on: boolean) => meter.push(on) });
+    expect(meter).toEqual([false]);
+    expect(given.closed).toBe(0);
+    await room.close();
+  });
+
+  it('level() is 0 while the context is suspended or interrupted, whatever the analyser last held', async () => {
+    const given = new StubAudio();
+    given.sample = 255;
+    const room = newLiveKitRoom();
+    await connect(room, given, {});
+    expect(room.level()).toBeGreaterThan(0.5);
+    // The page would resume it; here the browser does not.
+    given.onResume = 'stay';
+    given.become('suspended');
+    expect(room.level()).toBe(0);
+    given.become('interrupted');
+    expect(room.level()).toBe(0);
+    given.become('running');
+    expect(room.level()).toBeGreaterThan(0.5);
+    await room.close();
+  });
+
+  it('a state change tells the client: running is a working meter, anything else is not', async () => {
+    const given = new StubAudio();
+    const meter: boolean[] = [];
+    const room = newLiveKitRoom();
+    await connect(room, given, { onMeter: (on: boolean) => meter.push(on) });
+    expect(meter).toEqual([true]);
+    given.become('suspended');
+    given.become('running');
+    given.become('interrupted');
+    expect(meter).toEqual([true, false, true, false]);
+    // After the room is closed nothing is told.
+    await room.close();
+    given.become('running');
+    expect(meter).toEqual([true, false, true, false]);
+  });
+
+  it('a switch drops the old tap\'s listener: one state change tells the client once', async () => {
+    const given = new StubAudio();
+    const meter: boolean[] = [];
+    const room = newLiveKitRoom();
+    await connect(room, given, { onMeter: (on: boolean) => meter.push(on) });
+    await room.switchMicrophone('mic-2');
+    meter.length = 0;
+    given.onResume = 'stay';
+    given.become('suspended');
+    expect(meter).toEqual([false]);
+    await room.close();
+  });
+
+  it('does not say the meter works before the context runs', async () => {
+    const given = new StubAudio();
+    given.state = 'suspended';
+    given.onResume = 'stay';
+    const meter: boolean[] = [];
+    const room = newLiveKitRoom();
+    await connect(room, given, { onMeter: (on: boolean) => meter.push(on) });
+    expect(given.resumed).toBe(1);
+    await settle();
+    // A context that never runs is not a working meter: silently, with no
+    // name, the client is told there is none.
+    expect(meter.length).toBeGreaterThan(0);
+    expect(meter.every((on) => !on)).toBe(true);
+    expect(room.level()).toBe(0);
+    given.become('running');
+    expect(meter.at(-1)).toBe(true);
+    await room.close();
+  });
+
+  it('a context that stays pending or comes back not running is no meter, and records no name', async () => {
+    const given = new StubAudio();
+    given.state = 'suspended';
+    given.onResume = 'stay';
+    const names: (string | undefined)[] = [];
+    const room = newLiveKitRoom();
+    await connect(room, given, { onMeter: (_on: boolean, name?: string) => names.push(name) });
+    await settle();
+    expect(names.every((n) => n === undefined)).toBe(true);
+    await room.close();
+  });
+
+  it('a context that the room resumes is said working once it runs, and never before', async () => {
+    const given = new StubAudio();
+    given.state = 'suspended';
+    const meter: boolean[] = [];
+    const room = newLiveKitRoom();
+    await connect(room, given, { onMeter: (on: boolean) => meter.push(on) });
+    await settle();
+    // Not working until it runs, then working, and it ends working.
+    expect(meter[0]).toBe(false);
+    expect(meter.at(-1)).toBe(true);
+    await room.close();
+  });
+
+  it('a resume the browser refuses says there is no meter', async () => {
+    const given = new StubAudio();
+    given.state = 'suspended';
+    given.onResume = 'refuse';
+    const meter: boolean[] = [];
+    const room = newLiveKitRoom();
+    await connect(room, given, { onMeter: (on: boolean) => meter.push(on) });
+    await settle();
+    expect(meter.length).toBeGreaterThan(0);
+    expect(meter.every((on) => !on)).toBe(true);
+    await room.close();
+  });
+
+  // Issue #1794 review: nothing else brings back a context an interruption
+  // suspended, so the page resumes it when it is visible.
+  describe('after an interruption', () => {
+    const visible = (v: 'visible' | 'hidden'): void => {
+      Object.defineProperty(document, 'visibilityState', { value: v, configurable: true });
+    };
+    afterEach(() => {
+      Reflect.deleteProperty(document, 'visibilityState');
+    });
+
+    it('a context that suspends while the page is visible is resumed', async () => {
+      visible('visible');
+      const given = new StubAudio();
+      const room = newLiveKitRoom();
+      await connect(room, given, {});
+      given.onResume = 'stay';
+      given.become('suspended');
+      expect(given.resumed).toBe(1);
+      await room.close();
+    });
+
+    it('a context that suspends while the page is hidden waits for it to be visible', async () => {
+      visible('hidden');
+      const given = new StubAudio();
+      const room = newLiveKitRoom();
+      await connect(room, given, {});
+      given.onResume = 'stay';
+      given.become('suspended');
+      expect(given.resumed).toBe(0);
+      visible('visible');
+      document.dispatchEvent(new Event('visibilitychange'));
+      expect(given.resumed).toBe(1);
+      await room.close();
+    });
+
+    it('a visible page does not resume a context that runs', async () => {
+      visible('visible');
+      const given = new StubAudio();
+      const room = newLiveKitRoom();
+      await connect(room, given, {});
+      document.dispatchEvent(new Event('visibilitychange'));
+      expect(given.resumed).toBe(0);
+      await room.close();
+    });
+
+    it('stops listening for the page being visible when the tap goes', async () => {
+      visible('visible');
+      const given = new StubAudio();
+      const room = newLiveKitRoom();
+      await connect(room, given, {});
+      await room.close();
+      given.state = 'suspended';
+      document.dispatchEvent(new Event('visibilitychange'));
+      expect(given.resumed).toBe(0);
+    });
+  });
+
+  // Use microphone after Watch only: a click, so its context is the page's.
+  it('a microphone published after a watch only join taps the context handed to it', async () => {
+    const given = new StubAudio();
+    const meter: boolean[] = [];
+    const room = newLiveKitRoom();
+    await room.connect('wss://lk.example', 'tok-abcdef', 'room-abcdef', false, { ...events, onMeter: (on: boolean) => meter.push(on) });
+    expect(given.sources).toBe(0);
+    await room.publishMicrophone(given.asContext());
+    expect(state.contexts).toHaveLength(0);
+    expect(given.sources).toBe(1);
+    expect(meter).toEqual([true]);
+    await room.close();
+    expect(given.closed).toBe(0);
+  });
+
+  // The gate: an open microphone that was talking on speech must not stay open
+  // on a buffer the suspended analyser kept.
+  it('a context that suspends shuts an open microphone that was talking, and a running one lets it open again', async () => {
+    const given = new StubAudio();
+    given.sample = 255;
+    const session: VoiceSessionResult = {
+      ok: true,
+      value: { livekit_url: 'wss://lk.example', identity: 'p7', rooms: [{ room: 'r', token: 't', can_publish: true, expires_at: '2026-11-13T10:00:15.000Z' }] },
+    };
+    const clock = new FakeClock();
+    const client = new VoiceClient({
+      clock,
+      random: () => 0.5,
+      createSession: () => Promise.resolve(session),
+      report: () => Promise.resolve('ok'),
+      newRoom: newLiveKitRoom,
+      claimShare: () => Promise.resolve({ ok: false, failure: 'network' }),
+      stopShare: () => Promise.resolve(),
+    });
+    client.join('general', { audio: given.asContext() });
+    await settle();
+    await settle();
+    expect(client.snapshot()).toMatchObject({ phase: 'connected', meter: true });
+    client.setMode('open');
+    clock.advance(100);
+    expect(client.snapshot().talking).toBe(true);
+    given.onResume = 'stay';
+    given.become('suspended');
+    await settle();
+    expect(client.snapshot()).toMatchObject({ meter: false, talking: false });
+    // Still loud in its buffer, still shut.
+    clock.advance(100);
+    expect(client.snapshot().talking).toBe(false);
+    given.become('running');
+    clock.advance(100);
+    expect(client.snapshot()).toMatchObject({ meter: true, talking: true });
+    await client.leave();
+    // Closed once, by the client; the room's close did not.
+    expect(given.closed).toBe(1);
   });
 });

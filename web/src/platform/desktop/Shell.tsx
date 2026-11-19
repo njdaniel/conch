@@ -22,6 +22,7 @@
 import { useEffect, useState, type ReactNode } from 'react';
 import { signedIn } from './credentials';
 import { bridge } from './access';
+import { DesktopOS } from '../os';
 import type { ProfilesView } from './bridge';
 import { takeInvite } from './invite';
 import { setServerOrigin } from './state';
@@ -96,10 +97,10 @@ function Phases({ children }: { readonly children: ReactNode }) {
 
   if (phase === 'ready' && view !== null) {
     return (
-      <>
+      <DesktopOS.Provider value={view.platform}>
         <ProfileBar initial={view} />
         {children}
-      </>
+      </DesktopOS.Provider>
     );
   }
   if (phase === 'loading') {

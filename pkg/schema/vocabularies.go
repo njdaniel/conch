@@ -24,10 +24,11 @@ var Vocabularies = map[string][]string{
 		CapabilityMessagesRead, CapabilityMessagesPost,
 		CapabilityApprovalsRequest, CapabilityApprovalsAwait, CapabilityApprovalsCheck,
 		CapabilitySessionsManage, CapabilityRunsManage, CapabilityAdminAct,
+		CapabilityFilesUpload,
 	),
 	"ChannelPermission": values(
 		ChannelPermissionRead, ChannelPermissionPost, ChannelPermissionPostNet,
-		ChannelPermissionWhisper, ChannelPermissionWhisperAgent,
+		ChannelPermissionWhisper, ChannelPermissionWhisperAgent, ChannelPermissionAttach,
 	),
 	"DiagnosticEventKind": values(
 		DiagnosticSocketOpen, DiagnosticSocketClose, DiagnosticReconnect,
@@ -98,6 +99,14 @@ var Vocabularies = map[string][]string{
 		VoiceControlCommandGetState, VoiceControlCommandLeave,
 		VoiceControlCommandSetDevices, VoiceControlCommandSetTalkMode,
 	),
+	// v3's kinds are a vocabulary of their own: the published v1 and v2
+	// commands keep the one above as it is (voice_control_v3.go).
+	"VoiceControlCommandKindV3": values(
+		VoiceControlCommandV3Start, VoiceControlCommandV3SetMute, VoiceControlCommandV3SetDeafen,
+		VoiceControlCommandV3GetState, VoiceControlCommandV3Leave,
+		VoiceControlCommandV3SetDevices, VoiceControlCommandV3SetTalkMode,
+		VoiceControlCommandV3SetShareAudio, VoiceControlCommandV3SetShareAudioMute,
+	),
 	"VoiceControlCredential": values(VoiceControlCredentialStored, VoiceControlCredentialEnv),
 	"VoiceControlErrorCode": values(
 		VoiceControlErrorTooLong, VoiceControlErrorMalformed, VoiceControlErrorUnknownSchema,
@@ -121,8 +130,9 @@ var Vocabularies = map[string][]string{
 		VoiceControlPTTProblemCannotOpen, VoiceControlPTTProblemRefused, VoiceControlPTTProblemReadFailed,
 		VoiceControlPTTProblemEnded, VoiceControlPTTProblemPartialRecord,
 	),
-	"VoiceCompanionPublish": values(VoiceCompanionPublishScreen, VoiceCompanionPublishNone),
-	"VoiceShareAudioScope":  values(VoiceShareAudioScopeApplication, VoiceShareAudioScopeSystemExcludingCall),
+	"VoiceCompanionPublish":    values(VoiceCompanionPublishScreen, VoiceCompanionPublishNone),
+	"VoiceShareAudioScope":     values(VoiceShareAudioScopeApplication, VoiceShareAudioScopeSystemExcludingCall),
+	"VoiceShareAudioPublisher": values(VoiceShareAudioPublisherCompanion, VoiceShareAudioPublisherPerson),
 	"VoiceControlReason": values(
 		VoiceControlReasonRoomDeleted, VoiceControlReasonParticipantRemoved, VoiceControlReasonConnectionLost,
 		VoiceControlReasonReconnectTimedOut, VoiceControlReasonConnectFailed, VoiceControlReasonServerUnreachable,
@@ -133,6 +143,15 @@ var Vocabularies = map[string][]string{
 		VoiceControlReasonVoiceNotAllowed, VoiceControlReasonNotAMember, VoiceControlReasonVoiceNotConfigured,
 		VoiceControlReasonDuplicateIdentity, VoiceControlReasonVoiceRemoved, VoiceControlReasonAudioUnavailable,
 		VoiceControlReasonStartTimeout, VoiceControlReasonProtocolError, VoiceControlReasonInternalError,
+	),
+	"VoiceControlShareAudio": values(
+		VoiceControlShareAudioOff, VoiceControlShareAudioOn, VoiceControlShareAudioUnavailable,
+	),
+	"VoiceControlShareAudioProblem": values(
+		VoiceControlShareAudioProblemNoPipeWire, VoiceControlShareAudioProblemNoProcessTree,
+		VoiceControlShareAudioProblemPublishRefused, VoiceControlShareAudioProblemUnsupportedScope,
+		VoiceControlShareAudioProblemUnsupported, VoiceControlShareAudioProblemNotConnected,
+		VoiceControlShareAudioProblemNoSources,
 	),
 	"VoiceControlTalkMode": values(VoiceControlTalkModePushToTalk, VoiceControlTalkModeOpen),
 	"VoiceDevicesConfig": values(

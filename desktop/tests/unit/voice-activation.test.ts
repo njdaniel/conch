@@ -29,6 +29,7 @@ describe('the voice fence', () => {
     const env = { packaged: false, appPath: '/x', manifest: {}, readUi: () => Promise.resolve(new Uint8Array()), connect: () => ({}), guard: {}, makeFiles: () => ({}), now: Date.now, log: () => undefined } as unknown as ActivationEnv;
     const open = activationFactory(env, live);
     const activation = await open({ profile: { id: 'a'.repeat(32), label: 'a', origin: server.origin, principal: { id: 7, name: 'ada' } }, generation: 1, token: null, onInvalid: () => undefined });
+    expect(activation.voiceGeneration()).toBeNull();
     expect(activation.voiceCredential()).toBeNull();
     // Sign in inside the same activation (a pasted credential, kept).
     const service = live.service;
@@ -38,12 +39,14 @@ describe('the voice fence', () => {
     expect(service?.keepCredential(handle)).toBe(true);
     // Join: the credential is read under the generation now in force.
     const read = activation.voiceCredential();
+    expect(activation.voiceGeneration()).toBe(read?.generation);
     expect(read?.token).toBe('conch_pasted_token');
     expect(read?.origin).toBe(server.origin);
     expect(activation.voiceCurrent(read?.generation ?? -1)).toBe(true);
     // Sign-out or a 401: the identity ends.
     activation.endRequests();
     expect(activation.voiceCurrent(read?.generation ?? -1)).toBe(false);
+    expect(activation.voiceGeneration()).toBeNull();
     expect(activation.voiceCredential()).toBeNull();
   });
 });

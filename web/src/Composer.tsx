@@ -144,6 +144,7 @@ export function Composer({
   onDraft,
   onTarget,
   onSend,
+  onEditLast,
   atBottom,
 }: {
   readonly channel: string;
@@ -161,6 +162,8 @@ export function Composer({
   readonly onDraft: (text: string) => void;
   readonly onTarget: (action: TargetAction) => void;
   readonly onSend: (body: string, audience: Audience | undefined, attachments?: readonly DraftAttachment[]) => void;
+  // True when an editor opened; otherwise leave the key to the textarea.
+  readonly onEditLast?: (composer: HTMLTextAreaElement) => boolean;
   // Called when a send starts, so the log follows the new message.
   readonly atBottom: () => void;
 }) {
@@ -640,6 +643,10 @@ export function Composer({
               setDismissed(completionKey);
               return;
             }
+          }
+          if (event.key === 'ArrowUp' && editable && draft === '' && !mentioning && !suggesting && !composing.current && !event.nativeEvent.isComposing && !event.shiftKey && !event.ctrlKey && !event.altKey && !event.metaKey && onEditLast?.(event.currentTarget)) {
+            event.preventDefault();
+            return;
           }
           if (event.key === 'Escape' && whispering) {
             event.preventDefault();

@@ -6,7 +6,7 @@ resolver = "3"
 members = ["crates/*", "conch-voice"]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.1.0-alpha.21"
 edition = "2024"
 license = "AGPL-3.0-only"
 repository = "https://github.com/njdaniel/conch"
@@ -17,7 +17,9 @@ publish = false
 # there fails scripts/voice-depgate.sh. New crates need Nick's sign-off.
 [workspace.dependencies]
 # Exact: its build downloads a prebuilt libwebrtc chosen by this version.
-livekit = "=0.9.4"
+# The SDK's default enables native networking but no TLS. Deployed signaling
+# is wss://; use the system roots, as conch-voice-api does for HTTPS.
+livekit = { version = "=0.9.4", features = ["rustls-tls-native-roots"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

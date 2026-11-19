@@ -14,6 +14,10 @@
 //! that cannot dies on a signal before it prints anything.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
+// Linux only: It needs PipeWire and reads Unix exit signals. Windows runs the unit tests in
+// `src/`, which include the answers a non-Unix platform gives, and the tests in this
+// directory that need none of this (#1309).
+#![cfg(target_os = "linux")]
 
 use std::os::unix::process::ExitStatusExt;
 use std::process::{Command, Stdio};

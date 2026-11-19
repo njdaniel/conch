@@ -3,10 +3,17 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { App } from './App';
+import { platform } from './platform';
 import { pausedText } from './Composer';
 import { clock } from './Conversation';
 import { maxHeld, pageSize } from './state/messages';
 
+// A test that renders a whole held history, or is otherwise slow: about 6 s
+// locally and three times that on CI runners (#1940).
+const heldHistoryTimeout = 60_000;
+
+// The bound on the app's first boot, under the 5 s test timeout (see openChat).
+const bootMs = 4000;
 const origin = 'http://127.0.0.1:8080';
 const secret = 'conch_secret_token_value';
 const ticketValue = 'conch_wst_TICKETTICKETTICKETTICKETTICKETTICKETTICKET';
@@ -156,10 +163,16 @@ async function openChat(hash = '') {
   window.sessionStorage.setItem('conch.web.token', secret);
   window.location.hash = hash;
   render(<App origin={origin} />);
-  await screen.findByRole('log', { name: 'Messages' });
+  // By label, then one role check, not a role query: that walks the whole
+  // page's accessibility tree on every poll and competes with the render it
+  // waits for. The bound is a hang detector, just under the 5 s test timeout
+  // (the boot is real fetch bodies, which nothing can order), so a real hang
+  // still names the missing element (issue #1780).
+  const log = await screen.findByLabelText('Messages', undefined, { timeout: bootMs });
+  expect(log.getAttribute('role')).toBe('log');
   await waitFor(() => {
     expect(FakeSocket.all.length).toBeGreaterThan(0);
-  });
+  }, { timeout: bootMs });
   return FakeSocket.all[FakeSocket.all.length - 1] as FakeSocket;
 }
 
@@ -168,10 +181,12 @@ async function connect(socket: FakeSocket) {
   socket.open();
   await waitFor(() => {
     expect(screen.getByLabelText<HTMLTextAreaElement>('Message #general').disabled).toBe(false);
-  });
+  }, { timeout: bootMs });
 }
 
-const lines = () => within(screen.getByRole('log', { name: 'Messages' })).queryAllByRole('listitem').map((li) => {
+// The log's own items, by selector: a role walk over every row costs what the
+// rows do, and a loaded machine feels it (issue #1780).
+const lines = () => Array.from(screen.getByLabelText('Messages').querySelectorAll<HTMLElement>('ol.messages > li')).map((li) => {
   const copy = li.cloneNode(true) as HTMLElement;
   // Action buttons are controls, not message text. The author's name is a
   // button too (issue #1544), but stays in the HH:MM name [agent]: text.
@@ -1843,14 +1858,24 @@ describe('a long channel', () => {
     expect(screen.getByRole<HTMLButtonElement>('button', { name: 'Load older messages' }).disabled).toBe(false);
   });
 
+  // The newest page is 100 and the older page is 1 row, shorter than 100,
+  // which is all the rule needs: 101 rows, not 150 (issue #1780). Every row is a list item
+  // with several buttons, and a role query walks them all, so this test's cost
+  // is its row count and its role queries; under a loaded machine that cost,
+  // against findBy's 1 s, was what failed. The button is found by its text
+  // (it is the only element with it), which walks no accessibility tree.
   it('hides the button at the end of history: a page shorter than 100', async () => {
-    server.history.general = Array.from({ length: 150 }, (_, i) => message(i + 1, `m${String(i + 1)}`));
+    server.history.general = Array.from({ length: 101 }, (_, i) => message(i + 1, `m${String(i + 1)}`));
     await openChat();
-    await screen.findByText('m150');
-    fireEvent.click(screen.getByRole('button', { name: 'Load older messages' }));
-    await screen.findByText('m1');
-    expect(lines()).toHaveLength(150);
-    expect(olderButton()).toBeNull();
+    // Two renders of up to 101 rows from real fetch bodies: a hang detector
+    // just under the 5 s test timeout, not a measure of the work.
+    await screen.findByText('m101', undefined, { timeout: bootMs });
+    const older = screen.getByText('Load older messages');
+    expect(older.tagName).toBe('BUTTON');
+    fireEvent.click(older);
+    await screen.findByText('m1', undefined, { timeout: bootMs });
+    expect(lines()).toHaveLength(101);
+    expect(screen.queryByText('Load older messages')).toBeNull();
   });
 
   it('hides the button at once when the newest page is short', async () => {
@@ -1984,6 +2009,8 @@ describe('a long channel', () => {
     expect(screen.queryByText('m301')).toBeNull();
   });
 
+  // Rendering a whole held history (maxHeld messages) takes about 6 s here
+  // and three times that on CI's runners, past its old 15 s (#1940).
   // The exact rule (another page only while it fits within maxHeld) is in
   // state/messages.test.ts. This shows what the reader sees at the cap: the
   // channel starts nearly full, so it takes two pages and not nineteen (#459).
@@ -2009,7 +2036,7 @@ describe('a long channel', () => {
     expect(screen.getByText(`m${String(maxHeld + 100)}`)).toBeDefined();
     expect(server.historyRequests).toHaveLength(3);
     // About 3.7 s locally; the default 5 s is too close on a busy runner.
-  }, 15000);
+  }, heldHistoryTimeout);
 });
 
 describe('the address bar', () => {
@@ -2274,7 +2301,7 @@ describe('the reconnect refresh', () => {
     expect(screen.queryByText('secret before disconnect')).toBeNull();
     expect(screen.queryByText(stale)).toBeNull();
     expect(screen.getByLabelText<HTMLTextAreaElement>('Message #general').disabled).toBe(false);
-  }, 15000);
+  }, heldHistoryTimeout);
 
   it('keeps a frame the socket delivered while the refresh was in flight', async () => {
     server.history.general = [message(1, 'one'), message(2, 'two')];
@@ -2340,7 +2367,7 @@ describe('the reconnect refresh', () => {
     await act(async () => { asked[1]?.release(); await new Promise((r) => setTimeout(r, 50)); });
     await waitFor(() => { expect(screen.getByLabelText<HTMLTextAreaElement>('Message #general').disabled).toBe(false); });
     expect(screen.queryByText(stale)).toBeNull();
-  }, 15000);
+  }, heldHistoryTimeout);
 
   it('tries the refresh again under the new name when it was answered not-found because the channel was renamed', async () => {
     server.history.general = [message(1, 'secret before disconnect'), message(2, 'newest')];
@@ -2366,5 +2393,72 @@ describe('the reconnect refresh', () => {
     expect(screen.queryByText('secret before disconnect')).toBeNull();
     expect(FakeSocket.all).toHaveLength(2);
     expect(screen.queryByText(stale)).toBeNull();
-  }, 15000);
+  }, heldHistoryTimeout);
+});
+
+describe('message permalinks', () => {
+  afterEach(() => { vi.restoreAllMocks(); });
+  it('copies a link using the platform origin and copies the raw body', async () => {
+    const copy = vi.spyOn(platform.services, 'copyText').mockResolvedValue();
+    server.history.general = [message(1, '**raw** body')];
+    await openChat();
+    fireEvent.click(screen.getByRole('button', { name: /More actions for/ }));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Copy link' }));
+    await screen.findByText('Link copied.');
+    expect(copy).toHaveBeenLastCalledWith(`${window.location.origin}/app/#/c/general/m/1`);
+    fireEvent.click(screen.getByRole('button', { name: /More actions for/ }));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Copy text' }));
+    await screen.findByText('Text copied.');
+    expect(copy).toHaveBeenLastCalledWith('**raw** body');
+  });
+
+  it('uses the selected server origin for a desktop clipboard link', async () => {
+    vi.spyOn(platform.services, 'origin').mockReturnValue('https://chat.example');
+    const copy = vi.spyOn(platform.services, 'copyText').mockResolvedValue();
+    server.history.general = [message(1, 'body')];
+    await openChat();
+    fireEvent.click(screen.getByRole('button', { name: /More actions for/ }));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Copy link' }));
+    await screen.findByText('Link copied.');
+    expect(copy).toHaveBeenCalledWith('https://chat.example/app/#/c/general/m/1');
+  });
+
+  it('selects the link for manual copying when the clipboard is refused', async () => {
+    vi.spyOn(platform.services, 'copyText').mockRejectedValue(new Error('refused'));
+    server.history.general = [message(1, 'body')];
+    await openChat();
+    fireEvent.click(screen.getByRole('button', { name: /More actions for/ }));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Copy link' }));
+    const field = await screen.findByLabelText<HTMLTextAreaElement>('Copy manually');
+    expect(field.value).toBe(`${window.location.origin}/app/#/c/general/m/1`);
+    // The field takes focus in an effect after it renders (#1940): wait for
+    // it. A later refocus elsewhere would still fail here.
+    await waitFor(() => {
+      expect(document.activeElement).toBe(field);
+      expect(field.selectionEnd).toBe(field.value.length);
+      expect(field.selectionStart).toBe(0);
+    });
+  });
+
+  it('loads older pages and focuses and highlights the linked message', async () => {
+    const scroll = vi.fn();
+    HTMLElement.prototype.scrollIntoView = scroll;
+    server.history.general = Array.from({ length: 110 }, (_, i) => message(i + 1, `message ${String(i + 1)}`));
+    await openChat('#/c/general/m/1');
+    await waitFor(() => {
+      const row = screen.getByLabelText('Messages').querySelector('[data-message-id="1"]');
+      expect(row?.classList.contains('message-linked')).toBe(true);
+      expect(document.activeElement).toBe(row);
+    });
+    expect(server.historyRequests.some((url) => url.searchParams.has('before'))).toBe(true);
+    expect(scroll).toHaveBeenCalled();
+  });
+
+  for (const hash of ['#/c/general/m/9999', '#/c/private/m/1', '#/c/general/m/0', '#/c/general/m/', '#/c/general/m/1/extra']) {
+    it(`gives the same unavailable notice for ${hash}`, async () => {
+      server.history.general = [message(1, 'visible')];
+      await openChat(hash);
+      await screen.findByText("This message isn't available");
+    });
+  }
 });

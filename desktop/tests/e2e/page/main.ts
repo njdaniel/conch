@@ -23,7 +23,9 @@ import type { CompanionEndReason, CompanionGrantResult } from '../../../../web/s
 import type { BridgeReply, BridgeRequest } from '../../../../web/src/platform/desktop/bridge';
 import { signedIn } from '../../../../web/src/platform/desktop/credentials';
 import { VoiceClient, type CompanionEnv } from '../../../../web/src/voice/connection';
-import { newLiveKitRoom } from '../../../../web/src/voice/sdk';
+import { askedText, newLiveKitRoom, shareReadout } from '../../../../web/src/voice/sdk';
+import { companionQuality } from '../../../../web/src/voice/connection';
+import { provisionalQuality, type ShareQuality } from '../../../../web/src/voice/share';
 
 // What the test process exposes (Playwright exposeFunction).
 interface Bridge {
@@ -150,6 +152,23 @@ function publications(): PublicationFact[] {
 class CompanionPage {
   share(channel: string): void {
     client.startCompanionShare(channel);
+  }
+
+  // The strip's quality select (issue #1772): the choice the next Share uses.
+  async setQuality(quality: ShareQuality): Promise<ShareQuality> {
+    await client.setShareQuality(quality);
+    return client.snapshot().shareQuality;
+  }
+
+  // The sharer's readout (issue #1772) as the strip builds it: what was asked,
+  // then what the companion's own publication stats say is sent, from two
+  // samples a second apart (the first has no bitrate).
+  async readout(): Promise<{ readonly asked: string; readonly sending: string | null }> {
+    const asked = askedText(provisionalQuality(companionQuality(client.snapshot().shareQuality)));
+    const first = await client.readShareStats('sent');
+    await new Promise((resolve) => window.setTimeout(resolve, 1000));
+    const second = await client.readShareStats('sent');
+    return { asked, sending: second === null ? null : shareReadout(second, first) };
   }
 
   watch(channel: string, principal: number): void {

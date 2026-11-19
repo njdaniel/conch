@@ -5,9 +5,13 @@
 //! records here are made up, never recorded: a recording of a keyboard is someone's
 //! keystrokes.
 
-use std::fs::{File, OpenOptions};
+use std::fs::File;
+#[cfg(unix)]
+use std::fs::OpenOptions;
 use std::io::Write;
+#[cfg(unix)]
 use std::path::PathBuf;
+#[cfg(unix)]
 use std::process::Command;
 use std::time::{Duration, Instant};
 
@@ -90,13 +94,15 @@ pub fn quick_keys() -> KeyTimings {
     }
 }
 
-/// A named pipe under a temporary directory.
+/// A named pipe under a temporary directory. Unix only: there is no `mkfifo`.
+#[cfg(unix)]
 pub struct Pipe {
     /// Holds the directory for as long as the pipe is in use.
     pub dir: tempfile::TempDir,
     pub path: PathBuf,
 }
 
+#[cfg(unix)]
 impl Pipe {
     /// A new pipe that nothing has open.
     pub fn new() -> Self {

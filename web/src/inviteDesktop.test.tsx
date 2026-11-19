@@ -68,8 +68,8 @@ describe('the invite page in a browser', () => {
     const open = vi.spyOn(window, 'open').mockReturnValue(null);
     const view = opened();
     const button = await screen.findByRole('button', { name: 'Open in the desktop app' });
-    // The join is still there, first; this is beside it and not a link.
-    expect(screen.getByLabelText('Your name')).toBeDefined();
+    // The account choice is still there, first; this is beside it and not a link.
+    expect(screen.getByRole('button', { name: 'Create an account' })).toBeDefined();
     expect(button.tagName).toBe('BUTTON');
     expect(button.closest('a')).toBeNull();
     expect(button.getAttribute('class')).toBe('link');
@@ -82,7 +82,7 @@ describe('the invite page in a browser', () => {
     fireEvent.click(button);
     expect(open).toHaveBeenCalledExactlyOnceWith(desktopInviteLink(origin, inviteCode), '_self');
     // The page is where it was: still the invite, still joinable.
-    expect(screen.getByLabelText('Your name')).toBeDefined();
+    expect(screen.getByRole('button', { name: 'Create an account' })).toBeDefined();
     expect(view.container.innerHTML).not.toContain(inviteCode);
   });
 
@@ -99,7 +99,7 @@ describe('the invite page in a browser', () => {
     delete platform.services.openDesktopApp;
     try {
       opened();
-      await screen.findByLabelText('Your name');
+      await screen.findByRole('button', { name: 'Create an account' });
       expect(screen.queryByRole('button', { name: 'Open in the desktop app' })).toBeNull();
     } finally {
       if (saved !== undefined) Object.defineProperty(platform.services, 'openDesktopApp', saved);

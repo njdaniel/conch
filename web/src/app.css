@@ -1425,6 +1425,7 @@ label {
 }
 
 .conv-head {
+  position: relative;
   display: flex;
   align-items: baseline;
   gap: var(--s2);
@@ -3017,6 +3018,77 @@ label {
   margin-left: auto;
 }
 
+/* Share screen with its quality menu beside it (issue #1659): one control to
+   the eye, two buttons to the keyboard. */
+.share-split {
+  display: inline-flex;
+  align-items: stretch;
+}
+
+.share-split > button {
+  border-top-right-radius: 0;
+  border-bottom-right-radius: 0;
+}
+
+.share-chooser {
+  position: relative;
+  display: inline-flex;
+}
+
+.share-chooser-button {
+  border-top-left-radius: 0;
+  border-bottom-left-radius: 0;
+  margin-left: -1px;
+  padding-inline: 0.5rem;
+}
+
+.share-chooser-menu:not([hidden]) {
+  position: absolute;
+  top: 100%;
+  right: 0;
+  z-index: 20;
+  display: grid;
+  gap: var(--s2);
+  width: max-content;
+  max-width: min(22rem, 90vw);
+  margin-top: var(--s1);
+  padding: var(--s2);
+  background: var(--bg);
+  border: 1px solid var(--border-strong);
+  border-radius: 0.5rem;
+}
+
+.voice.strip .share-chooser-menu:not([hidden]) {
+  top: auto;
+  bottom: 100%;
+  margin-top: 0;
+  margin-bottom: var(--s1);
+}
+
+.share-chooser-menu [role='group'] {
+  display: grid;
+  gap: var(--s1);
+}
+
+.share-chooser-menu button[role^='menuitem'] {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 0 var(--s3);
+  text-align: left;
+}
+
+.share-chooser-menu button[aria-checked='true'] {
+  border-color: var(--accent);
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.share-chooser-menu .item-hint {
+  font-size: 0.8125rem;
+  opacity: 0.8;
+}
+
 .voice .talk {
   min-height: 2.75rem;
   min-width: 9rem;
@@ -3183,8 +3255,9 @@ label {
 }
 
 /* Compact is a docked row, not an overlay: its content determines the first
-   track and the conversation takes everything left (issue #1498). */
-.centre:has(> .stage:not(:empty):has(.compact)) {
+   track and the conversation takes everything left (issue #1498). Match the
+   descendant in one :has(): nesting :has() invalidates the rule (issue #1931). */
+.centre:has(> .stage:not(:empty) .compact) {
   grid-template-rows: minmax(0, auto) minmax(0, 1fr);
 }
 
@@ -3251,16 +3324,46 @@ label {
   object-fit: contain;
 }
 
-.share-frame:fullscreen video {
-  height: 100%;
-  max-height: none;
-}
-
 .share-frame .hint {
   position: absolute;
   inset: auto 0 0;
   padding: 0.4rem;
   color: #dddddd;
+}
+
+/* Pop out (#1839): over the picture's top right corner, above the focus
+   button that covers a strip tile, so it takes no room in the controls row.
+   Compact puts it in its row instead (ShareView). Full screen hides it with
+   the frame's other parts. A remote camera's (#1954) is the same button on
+   its tile's top left corner, since "speaking" holds the top right; the
+   enlarge button it sits over covers the whole tile. An enlarged camera
+   tile has it in its controls row instead, and a compact one has none
+   (CallView). */
+.share-frame .share-pip,
+.call-frame .call-pip {
+  position: absolute;
+  inset: var(--s1) var(--s1) auto auto;
+  z-index: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 2.75rem;
+  min-height: 2.75rem;
+  padding: var(--s1);
+  background: color-mix(in srgb, #000000 60%, transparent);
+  border: 0;
+  border-radius: var(--radius-sm);
+  color: #ffffff;
+}
+
+.call-frame .call-pip {
+  inset: var(--s1) auto auto var(--s1);
+}
+
+.share-frame .share-pip[aria-pressed='true'],
+.call-frame .call-pip[aria-pressed='true'] {
+  background: var(--accent);
+  color: var(--on-accent);
 }
 
 .share-controls {
@@ -3694,11 +3797,6 @@ body:has(.call-view.compact, .call-stage.compact) .dock {
   object-fit: contain;
 }
 
-.call-frame:fullscreen {
-  max-height: none;
-  border-radius: 0;
-}
-
 /* The speaking person's tile: a ring, and the word (never colour alone). The
    ring is a shadow outside the frame, so the focus outline shows with it. */
 .call-tile.speaking .call-frame {
@@ -3815,6 +3913,11 @@ body:has(.call-view.compact, .call-stage.compact) .dock {
 /* An invite link's landing page (issue #440): one column, which fits a phone. */
 .invite {
   max-width: 36rem;
+}
+
+/* The two ways in have the same space and weight. */
+.invite-choice > button {
+  flex: 1;
 }
 
 .invite-preview {
@@ -4759,28 +4862,130 @@ button.link {
   }
 }
 
-/* A short window (200% zoom of a laptop's screen is about 720×450): the page
-   scrolls as a document rather than squeezing each column into the window.
-   The conversation keeps a height of its own, so it still scrolls and loads
-   older messages as before. */
+/* A short window (200% zoom of a laptop's screen is about 720×450, issue
+   #536): the page scrolls as a document rather than squeezing each column into
+   the window. The conversation sets the height of the middle row (the channel
+   list and the members panel scroll inside themselves, so they no longer make
+   the row as tall as their content: that left an empty band under the
+   composer, issue #1813). When the page is taller than the window it scrolls
+   and the composer stays directly above the voice dock; when it is shorter the
+   row fills the window and the log takes what is left, never less than 12rem,
+   so it still scrolls and loads older messages as before. */
 @media (max-height: 560px) {
   .lobby {
     height: auto;
-    min-height: 100vh;
+    min-height: calc(100vh - var(--notice-h, 0px));
+    min-height: calc(100dvh - var(--notice-h, 0px));
+  }
+
+  .lobby:not(.phone) .channels,
+  .lobby:not(.phone) .panel {
+    contain: size;
   }
 
   .share-frame video {
     max-height: 60vh;
   }
 
-  .log-wrap {
+  .lobby:not(.phone) .log-wrap {
+    flex: 1 1 auto;
+    min-height: 12rem;
+  }
+
+  .lobby.phone .log-wrap {
     flex: none;
     height: 70vh;
     min-height: 12rem;
   }
 
-  .dock {
+  /* The dock keeps its half of the window (Voice options open can be taller
+     than the window), scrolling inside itself, except on a phone. */
+  .lobby.phone .dock {
     max-height: none;
+  }
+}
+
+/* A taller window with a tall dock (issue #1815): over 560 px the desktop page
+   fills the window, but the conversation never gets less than it needs. That
+   is its header, the log's minimum and the composer whole, and while a share
+   or call is watched also the stage at its own height up to 300 px. When the
+   window leaves the middle row less than that, the row keeps it and the page
+   scrolls as a document, as the short-window rule above does, so the composer
+   stays on the dock rather than being clipped under it. Otherwise the row is
+   the rest of the window, as before. The channel list and the members panel
+   scroll inside themselves, so they do not set the row's height. Nor does
+   anything else tall in the centre column: Run detail and the first-run panel
+   take what the row leaves and scroll inside themselves, as they did in the
+   full-height layout, so a long run never pushes the dock off the window. Only
+   what the dock squeezes (the composer and the stage's 300 px) grows the page. */
+@media (min-height: 561px) {
+  .lobby:not(.phone) {
+    height: auto;
+    min-height: calc(100vh - var(--notice-h, 0px));
+    min-height: calc(100dvh - var(--notice-h, 0px));
+  }
+
+  .lobby:not(.phone) .channels,
+  .lobby:not(.phone) .panel {
+    contain: size;
+  }
+
+  .lobby:not(.phone) .conversation > .ag-run,
+  .lobby:not(.phone) .conversation > .first-run {
+    flex: 1 1 0;
+    min-height: 0;
+    overflow-y: auto;
+    contain: size;
+  }
+}
+
+/* In the desktop app the client sits under the app's strip (ProfileBar's
+   header, and any panel or notice the shell draws above the client), all of
+   it in #root beside the lobby (issue #1980). The window-tall minimum above
+   would put the lobby's bottom, the voice dock, that far under the window's
+   edge, so the page scrolled even with nothing to show. Here #root is the
+   window-tall column instead and the lobby takes what is left of it: never
+   less than it needs (its height is still its content's, as above, so the
+   short-window and #1815 cases scroll the page just as before), and otherwise
+   the rest of the window, with the dock on its bottom edge. The phone layout
+   keeps its own height. Only a non-phone lobby straight under #root makes it
+   a column: the sign-in card the shell draws under the strip (checking a kept
+   credential, then the form) keeps its width from its auto margins, which a
+   flex item would instead shrink to fit its content. */
+#root:has(> .desktop-bar):has(> .lobby:not(.phone)) {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+  min-height: 100dvh;
+}
+
+#root:has(> .desktop-bar) > .lobby:not(.phone) {
+  flex: 1 0 auto;
+  min-height: 0;
+}
+
+/* While watching (not compact), the centre column is a flexed column in place
+   of the grid above, so that what it needs counts the stage at no more than
+   300 px. The stage starts at 300 px (or its own height, if less) and takes
+   the room first, up to its own height; the conversation never shrinks below
+   its header, the log's minimum and the composer, and takes what the stage
+   leaves. In a browser without max-content heights the grid above stays.
+   (The compact test is beside the :has(), not in it: :has() inside :has() is
+   not valid, and drops the whole rule.) */
+@supports (max-height: max-content) {
+  @media (min-height: 561px) {
+    .lobby:not(.phone) .centre:has(> .stage:not(:empty)):not(:has(> .stage > .call-view.compact, > .stage > .call-stage.compact)) {
+      display: flex;
+    }
+
+    .lobby:not(.phone) .centre:has(> .stage:not(:empty)):not(:has(> .stage > .call-view.compact, > .stage > .call-stage.compact)) > .stage {
+      flex: 1000 1 300px;
+      max-height: max-content;
+    }
+
+    .lobby:not(.phone) .centre:has(> .stage:not(:empty)):not(:has(> .stage > .call-view.compact, > .stage > .call-stage.compact)) > .conversation {
+      flex: 1 0 auto;
+    }
   }
 }
 
@@ -6105,8 +6310,119 @@ button.link {
   margin-top: var(--s2);
 }
 
-.share-quality {
+.share-quality,
+.share-sound {
   display: inline-flex;
   align-items: center;
   gap: var(--s2);
+}
+
+/* Full screen leaves the stage's phone, focused and compact size limits
+   behind (#1898). The max-size overrides must beat those layout selectors,
+   including the phone's 18vh picture cap and the focused tile's 30vh cap. */
+.share-frame:fullscreen,
+.call-frame:fullscreen {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100vw;
+  height: 100dvh;
+  max-width: none !important;
+  max-height: none !important;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  aspect-ratio: auto;
+  background: #000000;
+}
+
+.share-frame:fullscreen video,
+.call-frame:fullscreen video {
+  width: 100%;
+  height: 100%;
+  max-width: none !important;
+  max-height: none !important;
+  object-fit: contain;
+}
+
+/* Titles and playback controls are outside the full-screen frames. Hide the
+   in-frame hints, labels and focus buttons so only the picture covers it. */
+.share-frame:fullscreen > :not(video),
+.call-frame:fullscreen > :not(video) {
+  display: none;
+}
+
+/* The opening read mark stays fixed for this channel visit. */
+.new-messages-row {
+  list-style: none;
+}
+
+.new-messages {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  margin: var(--s3) 0;
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.new-messages::before,
+.new-messages::after {
+  content: '';
+  flex: 1;
+  border-top: 1px solid currentColor;
+}
+
+.conv-head > .jump-unread {
+  /* Float over the log without taking height from the phone's header. Its
+     DOM position before the heading preserves the log's F15 tab sequence. */
+  position: absolute;
+  top: calc(100% + var(--s2));
+  right: var(--s3);
+  z-index: 1;
+  max-width: calc(100% - 2 * var(--s3));
+}
+
+.unread-problem {
+  position: absolute;
+  top: calc(var(--s3) + 3rem);
+  left: var(--s3);
+  right: var(--s3);
+  padding: var(--s2);
+  background: var(--raised);
+}
+
+/* Message Markdown lists, headings and code controls (issue #1836). */
+.markdown-list {
+  margin: 0.25rem 0;
+  padding-inline-start: 1.5rem;
+  white-space: normal;
+}
+.markdown-list > li {
+  white-space: pre-wrap;
+}
+.markdown-heading {
+  margin-block: 0.5rem 0.25rem;
+  font-weight: 700;
+}
+.markdown-heading-1 { font-size: 1.3em; }
+.markdown-heading-2 { font-size: 1.15em; }
+.markdown-code-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  white-space: normal;
+}
+.markdown-code-actions [role='status'] { font-size: 0.875em; }
+
+/* Message permalinks (#1833). No animation, including under reduced motion. */
+.message.message-linked {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+.message label textarea[readonly] {
+  display: block;
+  width: 100%;
+  max-width: 100%;
 }

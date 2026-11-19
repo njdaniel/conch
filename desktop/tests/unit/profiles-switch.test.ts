@@ -177,6 +177,7 @@ describe('a profile switch ends a preview (issue #1540)', () => {
       return Promise.resolve({
         profileId: spec.profile?.id ?? null,
         token: () => session.capture().token,
+        voiceGeneration: () => null,
         voiceCredential: () => null,
         voiceCurrent: () => false,
         whoami: () => Promise.resolve(null),

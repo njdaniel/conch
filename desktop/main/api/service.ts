@@ -60,6 +60,13 @@ export type SignInStep =
 // way.
 export type ReplaceStep = 'changePassword' | 'setPassword' | 'convertGuest' | 'reauth';
 
+// The operations whose answer holds a secret made for someone or something
+// else (an invite's link, a sign-in link, an authenticator's seed, a script's
+// credential, a hook's secret), by the bridge function that sends each (issue
+// #1768). The person has to read or copy it, so unlike a bearer it goes back
+// to the page once, in that call's result (Service.display).
+export type DisplayStep = 'createMemberLink' | 'createSignInLink' | 'totpEnroll' | 'createPrincipalSignInLink' | 'createPrincipalCredential' | 'createHook';
+
 // Operations the renderer may invoke that still have their own bridge
 // function, so the generic request refuses them.
 const DEDICATED: ReadonlySet<OperationId> = new Set<OperationId>(['logout']);
@@ -158,6 +165,28 @@ export class Service {
       // An answer of a required family that is not the document this app was
       // built for is an incompatibility, not a network error (issue #946).
       if (exchange.reason === 'invalid') this.#deps.onInvalid?.(id);
+    }
+    return replyOf(exchange);
+  }
+
+  // One of the six operations whose answer holds a secret for someone else
+  // (DisplayStep). Main makes the request with its bearer, exactly as the page
+  // would, and the answer goes back to the page once, for display and copy
+  // only. The request is already validated against the operation's request
+  // validator. The answer lives in this call's locals alone: it is not logged
+  // (a line names the operation and a reason, never a body), not stored and not
+  // kept after it returns. The generic request still refuses all six
+  // (invocable is unchanged): this is one function per operation, never a
+  // pass-through, and it takes no URL, header or method.
+  async display(step: DisplayStep, params: Readonly<Record<string, number>> | undefined, body: unknown): Promise<BridgeReply> {
+    const exchange = await this.#deps.client.send({
+      op: step,
+      ...(params === undefined ? {} : { params }),
+      ...(body === undefined ? {} : { body }),
+    });
+    if (exchange.kind === 'none') {
+      this.#note(step, exchange.reason);
+      if (exchange.reason === 'invalid') this.#deps.onInvalid?.(step);
     }
     return replyOf(exchange);
   }

@@ -57,6 +57,11 @@ export function CreateAccount({
   const again = useRef<HTMLInputElement>(null);
   const shown = local ?? problem;
 
+  // The invite's choice button is replaced by this form when it opens.
+  useEffect(() => {
+    if (purpose === 'invite') nameField.current?.focus();
+  }, [purpose]);
+
   // After a refusal, focus goes to the field it is about; a password that
   // was refused is emptied, so the next one is typed afresh.
   useEffect(() => {

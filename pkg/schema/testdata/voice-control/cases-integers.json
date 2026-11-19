@@ -1,0 +1,78 @@
+{
+  "description": "Additional integer conformance cases shared by Go and Rust: -0 is invalid in integer fields, including when surrounded by JSON whitespace. Ordinary zero remains valid where allowed; unknown fields are ignored. Published fixtures are unchanged (#1857).",
+  "cases": [
+    {
+      "name": "command id is negative zero",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v1\",\"kind\":\"get_state\",\"id\":-0}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid"
+      }
+    },
+    {
+      "name": "start principal_id is negative zero",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v1\",\"kind\":\"start\",\"id\":1,\"server\":\"https://conch.example.org\",\"channel\":\"general\",\"principal_id\":-0,\"credential\":\"stored\",\"muted\":false,\"deafened\":false}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid",
+        "id": 1
+      }
+    },
+    {
+      "name": "event seq is negative zero",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v1\",\"kind\":\"ack\",\"seq\":-0,\"id\":1,\"ok\":true}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid"
+      }
+    },
+    {
+      "name": "ack id is negative zero",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v1\",\"kind\":\"ack\",\"seq\":3,\"id\":-0,\"ok\":true}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid"
+      }
+    },
+    {
+      "name": "retry_in_ms is negative zero",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v1\",\"kind\":\"state\",\"seq\":8,\"phase\":\"reconnecting\",\"reason\":\"room_deleted\",\"retry_in_ms\":-0,\"capture\":\"on\",\"transmitting\":false,\"muted\":false,\"deafened\":false,\"blocked\":[\"not_connected\"],\"ptt\":\"ready\"}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid"
+      }
+    },
+    {
+      "name": "retry_in_ms is negative zero with whitespace",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v1\",\"kind\":\"state\",\"seq\":8,\"phase\":\"reconnecting\",\"reason\":\"room_deleted\",\"retry_in_ms\": \t-0 ,\"capture\":\"on\",\"transmitting\":false,\"muted\":false,\"deafened\":false,\"blocked\":[\"not_connected\"],\"ptt\":\"ready\"}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid"
+      }
+    },
+    {
+      "name": "retry_in_ms may be zero",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v1\",\"kind\":\"state\",\"seq\":8,\"phase\":\"reconnecting\",\"reason\":\"room_deleted\",\"retry_in_ms\":0,\"capture\":\"on\",\"transmitting\":false,\"muted\":false,\"deafened\":false,\"blocked\":[\"not_connected\"],\"ptt\":\"ready\"}",
+      "want": {
+        "result": "accept",
+        "kind": "state"
+      }
+    },
+    {
+      "name": "negative zero in an ignored field is ignored",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v1\",\"kind\":\"get_state\",\"id\":4,\"ignored\":-0}",
+      "want": {
+        "result": "accept",
+        "kind": "get_state"
+      }
+    }
+  ]
+}

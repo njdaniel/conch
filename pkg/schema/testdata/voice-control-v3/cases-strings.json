@@ -1,0 +1,173 @@
+{
+  "description": "Conformance cases for the two v3 readers, in the form of cases.json, pinning what a string may hold: the rules of voice-control/cases-strings.json (#690), which v3 shares through v1's framing, shown on v3's own lines. A \\u escape of a surrogate that is not half of a pair makes the line malformed wherever it is, an application name, a key or an ignored field alike. An application name is printable ASCII, however it is written: a surrogate pair and the character U+FFFD are well-formed JSON and still not a name. An optional word (a set_share_audio's scope or application_name, an ack's error, a state's reason, ptt_problem or share_audio_problem) that is present and empty is invalid: none is said by leaving the field out.",
+  "cases": [
+    {
+      "name": "set_share_audio with an empty scope: an empty word is not absence",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v3\",\"kind\":\"set_share_audio\",\"id\":7,\"capturing\":true,\"scope\":\"\",\"application_name\":\"Conch\"}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid",
+        "id": 7
+      }
+    },
+    {
+      "name": "set_share_audio with an empty application name",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v3\",\"kind\":\"set_share_audio\",\"id\":7,\"capturing\":true,\"scope\":\"system_excluding_call\",\"application_name\":\"\"}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid",
+        "id": 7
+      }
+    },
+    {
+      "name": "set_share_audio to stop with an empty scope: a stop says no scope by leaving it out",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v3\",\"kind\":\"set_share_audio\",\"id\":7,\"capturing\":false,\"scope\":\"\"}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid",
+        "id": 7
+      }
+    },
+    {
+      "name": "set_share_audio to stop with an empty application name",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v3\",\"kind\":\"set_share_audio\",\"id\":7,\"capturing\":false,\"application_name\":\"\"}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid",
+        "id": 7
+      }
+    },
+    {
+      "name": "set_share_audio with a name holding a lone high surrogate escape: malformed, as not UTF-8 is",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v3\",\"kind\":\"set_share_audio\",\"id\":7,\"capturing\":true,\"scope\":\"system_excluding_call\",\"application_name\":\"\\ud800\"}",
+      "want": {
+        "result": "refuse",
+        "code": "malformed"
+      }
+    },
+    {
+      "name": "set_share_audio with a name holding a lone low surrogate escape",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v3\",\"kind\":\"set_share_audio\",\"id\":7,\"capturing\":true,\"scope\":\"system_excluding_call\",\"application_name\":\"Conch\\udc00\"}",
+      "want": {
+        "result": "refuse",
+        "code": "malformed"
+      }
+    },
+    {
+      "name": "set_share_audio with a name holding a surrogate pair escape: well-formed, a character outside ASCII, so invalid and not malformed",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v3\",\"kind\":\"set_share_audio\",\"id\":7,\"capturing\":true,\"scope\":\"system_excluding_call\",\"application_name\":\"\\ud83d\\ude00\"}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid",
+        "id": 7
+      }
+    },
+    {
+      "name": "set_share_audio with a name holding the character U+FFFD itself: not ASCII",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v3\",\"kind\":\"set_share_audio\",\"id\":7,\"capturing\":true,\"scope\":\"system_excluding_call\",\"application_name\":\"�\"}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid",
+        "id": 7
+      }
+    },
+    {
+      "name": "set_share_audio with a name written with escapes of printable ASCII: the rule is about the characters, not how they are written",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v3\",\"kind\":\"set_share_audio\",\"id\":7,\"capturing\":true,\"scope\":\"system_excluding_call\",\"application_name\":\"\\u0043onch\"}",
+      "want": {
+        "result": "accept",
+        "kind": "set_share_audio"
+      }
+    },
+    {
+      "name": "set_share_audio with a lone surrogate escape in a key the kind does not declare: malformed, not ignored",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v3\",\"kind\":\"set_share_audio\",\"id\":7,\"capturing\":true,\"scope\":\"system_excluding_call\",\"application_name\":\"Conch\",\"\\ud800\":true}",
+      "want": {
+        "result": "refuse",
+        "code": "malformed"
+      }
+    },
+    {
+      "name": "set_share_audio with a lone surrogate escape in a field the kind does not declare: malformed, not ignored",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v3\",\"kind\":\"set_share_audio\",\"id\":7,\"capturing\":true,\"scope\":\"system_excluding_call\",\"application_name\":\"Conch\",\"note\":\"\\udc00\"}",
+      "want": {
+        "result": "refuse",
+        "code": "malformed"
+      }
+    },
+    {
+      "name": "state with an empty share_audio_problem: none is said by leaving it out",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v3\",\"kind\":\"state\",\"seq\":5,\"phase\":\"connected\",\"capture\":\"on\",\"playback\":\"on\",\"transmitting\":false,\"muted\":false,\"deafened\":false,\"blocked\":[],\"talk_mode\":\"push_to_talk\",\"ptt\":\"ready\",\"share_audio\":\"off\",\"share_audio_muted\":false,\"share_audio_problem\":\"\",\"share_audio_sources\":0}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid"
+      }
+    },
+    {
+      "name": "state with share audio on and an empty share_audio_problem",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v3\",\"kind\":\"state\",\"seq\":7,\"phase\":\"connected\",\"capture\":\"on\",\"playback\":\"on\",\"transmitting\":false,\"muted\":false,\"deafened\":false,\"blocked\":[],\"talk_mode\":\"push_to_talk\",\"ptt\":\"ready\",\"share_audio\":\"on\",\"share_audio_muted\":false,\"share_audio_problem\":\"\",\"share_audio_sources\":2}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid"
+      }
+    },
+    {
+      "name": "state with a share_audio_problem holding a lone surrogate escape",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v3\",\"kind\":\"state\",\"seq\":7,\"phase\":\"connected\",\"capture\":\"on\",\"playback\":\"on\",\"transmitting\":false,\"muted\":false,\"deafened\":false,\"blocked\":[],\"talk_mode\":\"push_to_talk\",\"ptt\":\"ready\",\"share_audio\":\"unavailable\",\"share_audio_muted\":false,\"share_audio_problem\":\"\\ud800\",\"share_audio_sources\":0}",
+      "want": {
+        "result": "refuse",
+        "code": "malformed"
+      }
+    },
+    {
+      "name": "state with an empty share_audio: a word of the vocabulary is required",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v3\",\"kind\":\"state\",\"seq\":5,\"phase\":\"connected\",\"capture\":\"on\",\"playback\":\"on\",\"transmitting\":false,\"muted\":false,\"deafened\":false,\"blocked\":[],\"talk_mode\":\"push_to_talk\",\"ptt\":\"ready\",\"share_audio\":\"\",\"share_audio_muted\":false,\"share_audio_sources\":0}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid"
+      }
+    },
+    {
+      "name": "ack with ok and an empty error: an empty word is not absence",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v3\",\"kind\":\"ack\",\"seq\":3,\"id\":1,\"ok\":true,\"error\":\"\"}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid"
+      }
+    },
+    {
+      "name": "state with an empty reason: an empty word is not absence",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v3\",\"kind\":\"state\",\"seq\":5,\"phase\":\"connected\",\"reason\":\"\",\"capture\":\"on\",\"playback\":\"on\",\"transmitting\":false,\"muted\":false,\"deafened\":false,\"blocked\":[],\"talk_mode\":\"push_to_talk\",\"ptt\":\"ready\",\"share_audio\":\"off\",\"share_audio_muted\":false,\"share_audio_sources\":0}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid"
+      }
+    },
+    {
+      "name": "state with an empty ptt_problem: an empty word is not absence",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v3\",\"kind\":\"state\",\"seq\":5,\"phase\":\"connected\",\"capture\":\"on\",\"playback\":\"on\",\"transmitting\":false,\"muted\":false,\"deafened\":false,\"blocked\":[],\"talk_mode\":\"push_to_talk\",\"ptt\":\"ready\",\"ptt_problem\":\"\",\"share_audio\":\"off\",\"share_audio_muted\":false,\"share_audio_sources\":0}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid"
+      }
+    }
+  ]
+}

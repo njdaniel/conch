@@ -1,12 +1,12 @@
 import { createHash } from 'node:crypto';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { buildCompat, buildManifest } from '../../build/manifest.ts';
-import { parseManifest } from '../../main/scheme.ts';
+import { handle, parseManifest } from '../../main/scheme.ts';
 
 const dirs: string[] = [];
 afterEach(() => {
@@ -31,6 +31,26 @@ describe('buildManifest', () => {
     expect(Object.keys(m.files)).toEqual(['/assets/a-1.css', '/assets/a-1.js', '/favicon-16.png', '/index.html']);
     expect(m.files['/assets/a-1.js']).toEqual({ sha256: createHash('sha256').update('x').digest('hex'), type: 'text/javascript; charset=utf-8' });
     expect(parseManifest(JSON.stringify(m)).size).toBe(4);
+  });
+
+  it('packages the shipped public assets with WAV content types', async () => {
+    const root = tree({ 'index.html': '<html>' });
+    cpSync(join(import.meta.dirname, '../../../web/public'), root, { recursive: true });
+    const manifest = parseManifest(JSON.stringify(buildManifest(root)));
+    expect([...manifest.keys()].filter((path) => path.startsWith('/sounds/')).sort()).toEqual(
+      ['/sounds/join.wav', '/sounds/leave.wav', '/sounds/message.wav', '/sounds/share.wav'],
+    );
+    for (const sound of ['message', 'join', 'leave', 'share']) {
+      const url = `conch-app://ui/sounds/${sound}.wav`;
+      const response = await handle({ url, method: 'GET' }, {
+        manifest,
+        readFile: (path) => Promise.resolve(readFileSync(join(root, path))),
+        log: () => undefined,
+      });
+      expect(response.status).toBe(200);
+      expect(response.headers.get('Content-Type')).toBe('audio/wav');
+      expect(Buffer.from(await response.arrayBuffer())).toEqual(readFileSync(join(root, 'sounds', `${sound}.wav`)));
+    }
   });
 
   it('fails on an extension with no content type', () => {

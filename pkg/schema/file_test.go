@@ -171,3 +171,51 @@ func TestSpoilerFilePrefix(t *testing.T) {
 		}
 	}
 }
+
+// An agent may upload three image types and nothing else (issue #1798). The
+// match is exact, so what NormalizeMediaType gives for a header is accepted
+// and nothing a caller could spell differently is.
+func TestAgentUploadMediaTypes(t *testing.T) {
+	want := []string{"image/png", "image/jpeg", "image/webp"}
+	got := AgentUploadMediaTypes()
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("AgentUploadMediaTypes() = %v, want %v", got, want)
+	}
+	got[0] = "text/plain"
+	if AgentUploadMediaTypes()[0] != "image/png" {
+		t.Error("AgentUploadMediaTypes() does not return a copy")
+	}
+	tests := []struct {
+		mediaType string
+		want      bool
+	}{
+		{"image/png", true},
+		{"image/jpeg", true},
+		{"image/webp", true},
+		{"image/gif", false},
+		{"image/svg+xml", false},
+		{"image/jpg", false},
+		{"image/*", false},
+		{"text/plain", false},
+		{"application/octet-stream", false},
+		{"IMAGE/PNG", false},
+		{"image/png; charset=binary", false},
+		{" image/png", false},
+		{"", false},
+	}
+	for _, tt := range tests {
+		if got := IsAgentUploadMediaType(tt.mediaType); got != tt.want {
+			t.Errorf("IsAgentUploadMediaType(%q) = %v, want %v", tt.mediaType, got, tt.want)
+		}
+	}
+	for _, mt := range want {
+		if ValidateMediaType(mt) != nil || NormalizeMediaType(mt) != mt {
+			t.Errorf("%q is not a media type a file may record", mt)
+		}
+	}
+	// The message the server posts for an agent's attachments is always a
+	// valid attachment.
+	if MaxAgentAttachments < 1 || MaxAgentAttachments > MaxFileAttachments {
+		t.Errorf("MaxAgentAttachments = %d, want 1 to %d", MaxAgentAttachments, MaxFileAttachments)
+	}
+}

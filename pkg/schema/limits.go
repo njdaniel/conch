@@ -24,5 +24,12 @@ const (
 	// Every way a message is posted holds its request to MaxPostRequestBytes:
 	// the REST post routes, the webhook route, and the MCP endpoint (issue
 	// #237). A new one must too, or it reopens the hole.
+	//
+	// One request may be larger (issue #1798): a post_message whose
+	// attachments carry images, from an agent granted files.upload. The
+	// server holds everything in it but the image data to
+	// MaxPostRequestBytes, and the image data is stored as files, never in
+	// the message, so the message it becomes is within the bound like any
+	// other.
 	MaxMessageFrameBytes = 6*MaxPostRequestBytes + 64<<10
 )

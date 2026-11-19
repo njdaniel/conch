@@ -7,6 +7,7 @@
 // target (path and query), or null for anything that is not exactly a call of
 // the table. This module owns what a value may be; the table owns the routes.
 import { operations, type OperationId } from '../../../web/src/platform/operations.ts';
+import { operationOf, type SendableOperationId } from './main-operations.ts';
 
 export const MAX_PARAM_LENGTH = 256;
 export const MAX_QUERY_LENGTH = 2048;
@@ -45,8 +46,8 @@ function queryOk(query: string): string | null {
   return new URLSearchParams(pairs).toString();
 }
 
-export function targetOf(id: OperationId, params: Readonly<Record<string, unknown>> | undefined, query: string | undefined): string | null {
-  const template = operations[id].path;
+export function targetOf(id: SendableOperationId, params: Readonly<Record<string, unknown>> | undefined, query: string | undefined): string | null {
+  const template = operationOf(id).path;
   const names = [...template.matchAll(/\{(\w+)\}/gu)].map((m) => m[1] ?? '');
   const given = Object.keys(params ?? {});
   if (given.length !== names.length || !names.every((name) => given.includes(name))) return null;
@@ -64,7 +65,7 @@ export function targetOf(id: OperationId, params: Readonly<Record<string, unknow
 // previewable says whether an operation may carry Conch-Preview-As: the five
 // previewable reads of main's own table of operations (issue #1540), and only
 // as a GET. Nothing the renderer sends is asked.
-export function previewable(id: OperationId): boolean {
-  const op = operations[id];
+export function previewable(id: SendableOperationId): boolean {
+  const op = operationOf(id);
   return op.previewable === true && op.method === 'GET';
 }
