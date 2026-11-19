@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { VOICE_CONTROL_STOP_KILL_AFTER_MS, type VoiceControlTalkMode } from '../../../web/src/schema/generated.ts';
 import { Supervisor, type CommandResult, type StartRequest, type VoiceState } from '../../main/voice/supervisor.ts';
-import { CEILING_ARGS, DESKTOP_MISSED_RELEASE_SECS, HELPER_ARGS, MUTE_OWNER_ARGS, SHARE_AUDIO_ARGS, VoiceService, type VoiceIdentity, type VoiceSupervisor } from '../../main/voice/service.ts';
+import { CEILING_ARGS, DESKTOP_MISSED_RELEASE_SECS, ECHO_ARGS, HELPER_ARGS, MUTE_OWNER_ARGS, SHARE_AUDIO_ARGS, VoiceService, type VoiceIdentity, type VoiceSupervisor } from '../../main/voice/service.ts';
 import type { NativeVoiceDevicesResult, NativeVoiceView, VoiceDeviceKey, VoiceSaveResult } from '../../../web/src/platform/desktop/bridge.ts';
 import { FAKE_TOKEN, fixture, scratch, until, type Scratch } from './voice-support.ts';
 
@@ -140,7 +140,7 @@ describe('join', () => {
         principalId: 7,
         muted: true,
         deafened: false,
-        extraArgs: ['--share-audio-owner', 'companion', '--no-mute-key', '--transmit-ceiling-secs', '30'],
+        extraArgs: ['--share-audio-owner', 'companion', '--no-mute-key', '--echo-cancellation-default', '--transmit-ceiling-secs', '30'],
       },
     ]);
     expect(DESKTOP_MISSED_RELEASE_SECS).toBe(30);
@@ -150,7 +150,7 @@ describe('join', () => {
 
   it('every start carries --share-audio-owner companion beside the ceiling, and a retry too (#1581)', async () => {
     expect(SHARE_AUDIO_ARGS).toEqual(['--share-audio-owner', 'companion']);
-    expect(HELPER_ARGS).toEqual(['--share-audio-owner', 'companion', '--no-mute-key', '--transmit-ceiling-secs', '30']);
+    expect(HELPER_ARGS).toEqual(['--share-audio-owner', 'companion', '--no-mute-key', '--echo-cancellation-default', '--transmit-ceiling-secs', '30']);
     await join('general');
     await svc.leave();
     await join('ops');
@@ -164,6 +164,14 @@ describe('join', () => {
     await svc.leave();
     await join('ops');
     expect(fake.starts.every((s) => s.extraArgs?.includes('--no-mute-key') === true)).toBe(true);
+  });
+
+  it('every start turns echo cancellation on unless voice.toml turns it off, and a retry too (#186)', async () => {
+    expect(ECHO_ARGS).toEqual(['--echo-cancellation-default']);
+    await join('general');
+    await svc.leave();
+    await join('ops');
+    expect(fake.starts.every((s) => s.extraArgs?.includes('--echo-cancellation-default') === true)).toBe(true);
   });
 
   it('a second join while one runs is refused busy and starts nothing', async () => {
@@ -405,7 +413,7 @@ describe('retry', () => {
     const v = await svc.retry();
     expect(v.status).toBe('running');
     expect(fake.starts.length).toBe(2);
-    expect(fake.starts[1]).toMatchObject({ channel: 'ops', muted: true, deafened: true, extraArgs: ['--share-audio-owner', 'companion', '--no-mute-key', '--transmit-ceiling-secs', '30'] });
+    expect(fake.starts[1]).toMatchObject({ channel: 'ops', muted: true, deafened: true, extraArgs: ['--share-audio-owner', 'companion', '--no-mute-key', '--echo-cancellation-default', '--transmit-ceiling-secs', '30'] });
   });
 
   it('is refused for a failure a retry cannot fix', async () => {

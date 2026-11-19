@@ -170,6 +170,32 @@ async fn frames_reach_the_track_only_between_a_press_and_the_gates_shut() {
     assert_eq!(calls.last(), Some(&Call::Mute));
 }
 
+/// #186: with echo cancellation on, the gate still decides what is sent. The session makes
+/// the SDK's echo canceller, and every captured frame goes through it, but nothing reaches
+/// the track before a press or after the gate shuts.
+#[tokio::test]
+async fn with_echo_cancellation_on_frames_reach_the_track_only_while_the_gate_is_open() {
+    let setup = Setup {
+        echo_cancellation: true,
+        ..Setup::default()
+    };
+    let rig = Rig::start_with(Stub::start().await, setup, |_| {}).await;
+    rig.ready().await;
+    several_frames().await;
+    assert_eq!(rig.sdk.frames(), 0, "nothing before a press");
+
+    rig.line(Down);
+    rig.frames_beyond(5).await;
+    rig.line(Up);
+    rig.not_talking().await;
+    let sent = rig.sdk.frames();
+    several_frames().await;
+    assert_eq!(rig.sdk.frames(), sent, "nothing after the gate shut");
+
+    assert_frames_only_while_unmuted(&rig.sdk.calls());
+    assert_eq!(rig.sdk.frames_while_muted(), 0);
+}
+
 #[tokio::test]
 async fn the_release_tail_is_sent_and_then_the_track_is_muted() {
     let setup = Setup {

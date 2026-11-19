@@ -45,6 +45,18 @@
 //!   handed over is always said, whether it gave a frame or not, so that the session learns
 //!   whether the new one is there before it counts it as a microphone.
 //!
+//! - With `audio.echo_cancellation` on (issue #186), each captured frame is first run through
+//!   the echo canceller ([`crate::echo`]), in place, before the level detector and the gate
+//!   see it. This task owns the canceller: what the speakers played reaches it from the mix
+//!   task through a queue that never makes either task wait. The canceller only changes the
+//!   frame it is given; it hands nothing onward. So the gate is still the last step between
+//!   the microphone and the track, and decides what is sent whether the canceller is there
+//!   or not. The canceller's output can hold audio it was given a few frames before, so for
+//!   [`crate::echo::HISTORY_FRAMES`] frames after the gate opens from shut (a press, or the
+//!   open microphone's onset) silence is offered to the gate in place of what it put out:
+//!   nothing captured while the gate was shut reaches the track through the canceller's
+//!   memory. With it off there is no canceller.
+//!
 //! The task is told what to do with [`TxCommand`]s and says what happened with
 //! [`TxEvent`]s. Commands are taken before the next frame, so a forced shut is never behind
 //! audio.
@@ -75,6 +87,7 @@ use conch_voice_control::{
 use tokio::sync::mpsc;
 use tokio::time::Instant;
 
+use crate::echo::EchoCanceller;
 use crate::pace::Pace;
 use crate::sdk::MicFeed;
 
@@ -364,13 +377,16 @@ pub fn spawn_with_level<F: MicFeed>(
     level: LevelConfig,
     clock: TxClock,
 ) -> Result<Transmitter<F>, AudioError> {
-    spawn_with_press_cap(config, config.max_open_ms, level, clock)
+    spawn_with_press_cap(config, config.max_open_ms, level, clock, None)
 }
 
 /// As [`spawn_with_level`], with a cap for a push-to-talk press of its own (`press_max_ms`,
 /// see [`press_cap_ms`]) while `config.max_open_ms` caps each opening in open mode. Both are
 /// the gate's own counts of frames, so neither depends on any timer (issue #1453). The task
-/// starts in push-to-talk mode, so the press cap is in force first.
+/// starts in push-to-talk mode, so the press cap is in force first. With `echo`, each
+/// captured frame goes through the echo canceller before the detector and the gate see it,
+/// and what it puts out just after each opening is hidden (see the module doc); with `None`
+/// (`audio.echo_cancellation` off) frames are not touched.
 ///
 /// # Errors
 ///
@@ -381,6 +397,7 @@ pub fn spawn_with_press_cap<F: MicFeed>(
     press_max_ms: Option<u32>,
     level: LevelConfig,
     clock: TxClock,
+    echo: Option<EchoCanceller>,
 ) -> Result<Transmitter<F>, AudioError> {
     let mut gate = TransmitGate::new(config)?;
     gate.set_max_open_ms(press_max_ms)?;
@@ -405,6 +422,7 @@ pub fn spawn_with_press_cap<F: MicFeed>(
         track_lock: track_lock.clone(),
         listen,
         mic_changes: 0,
+        echo,
     };
     tokio::spawn(task.run());
     Ok(Transmitter {
@@ -441,6 +459,10 @@ struct Task<F> {
     listen: Listen,
     /// How many commands that change the microphone have been taken ([`changes_microphone`]).
     mic_changes: u64,
+    /// The echo canceller, with `audio.echo_cancellation` on, owned by this task: it changes
+    /// each captured frame in place before the detector and the gate see it, and hands
+    /// nothing onward.
+    echo: Option<EchoCanceller>,
 }
 
 /// The open microphone's part of the task: which talk mode is in force, and the level
@@ -665,9 +687,16 @@ impl<F: MicFeed> Task<F> {
         }
         match command {
             TxCommand::Gate(GateCommand::Open) => {
+                let was_shut = matches!(self.gate.status(), GateStatus::Shut(_));
                 self.discard_waiting();
                 match self.gate.open() {
                     OpenOutcome::Opened => {
+                        // What the canceller puts out next can still hold audio captured
+                        // while the gate was shut: it is hidden ([`EchoCanceller::gate_opened`]).
+                        // An opening during the release tail follows audio that was sent.
+                        if let (true, Some(echo)) = (was_shut, self.echo.as_mut()) {
+                            echo.gate_opened();
+                        }
                         self.listen.open_frames = 0;
                         self.listen.tail_from = None;
                     }
@@ -763,6 +792,12 @@ impl<F: MicFeed> Task<F> {
             self.no_frame();
             return false;
         }
+        // With echo cancellation on, what the speakers played is taken out of the frame
+        // first, in place, so that neither the detector nor the gate judges the echo. The
+        // frame still goes onward only through the gate below.
+        if let Some(echo) = self.echo.as_mut() {
+            echo.capture(captured);
+        }
         // Open mode: the detector judges the frame before the gate does, and hands it
         // nowhere. Its word goes to the machine; the frame itself goes to the gate below,
         // which is shut for an onset frame.
@@ -772,6 +807,11 @@ impl<F: MicFeed> Task<F> {
             sound.is_some_and(|said| self.listen.quiet_without_tail(said, status));
         if let Some(said) = sound.filter(|_| !quiet_without_tail) {
             self.report(said);
+        }
+        // Just after an opening, the canceller's output can hold audio from before it:
+        // silence goes to the gate in its place. The detector has judged the frame itself.
+        if let Some(echo) = self.echo.as_mut() {
+            echo.hide_history(captured);
         }
         if self.listen.is_open() && !matches!(status, GateStatus::Shut(_)) {
             self.fade_open_mic(captured, status, quiet_without_tail);
@@ -883,6 +923,11 @@ mod tests {
         /// Frame number `n` is `n` in every sample, so that a frame is told by its first.
         fn push(&self, n: usize) {
             self.frames.lock().unwrap().push_back([n as f32; FRAME_LEN]);
+        }
+
+        /// A frame of the test's own.
+        fn push_frame(&self, frame: Frame) {
+            self.frames.lock().unwrap().push_back(frame);
         }
 
         fn waiting(&self) -> usize {
@@ -1120,6 +1165,7 @@ mod tests {
             track_lock: open_lock(),
             listen: push_to_talk(),
             mic_changes: 0,
+            echo: None,
         };
         for n in 1..=5 {
             ring.push(n);
@@ -1136,6 +1182,192 @@ mod tests {
         ring.push(6);
         assert!(task.frame(&mut captured).await);
         assert_eq!(record.heard(), [6.0]);
+    }
+
+    /// Issue #186: with echo cancellation on, the gate still decides what is sent. Loud
+    /// audio captured, and audio played to the canceller as its reference, while the gate is
+    /// shut, in push-to-talk and in open mode (where it is an onset the detector reports),
+    /// reaches nothing; once the gate opens, the processed frames go through it; once it
+    /// shuts, nothing follows.
+    #[tokio::test]
+    async fn with_echo_cancellation_on_the_gate_still_decides_what_is_sent() {
+        let (events, mut said) = mpsc::unbounded_channel();
+        let (_, commands) = mpsc::unbounded_channel();
+        let (ring, record) = (Ring::default(), Record::default());
+        let (echo, reference) = EchoCanceller::if_enabled(true).expect("the switch is on");
+        let hand = Hand::default();
+        let mut task = Task {
+            gate: TransmitGate::new(gate_config(0, Duration::from_secs(60))).unwrap(),
+            open_max_ms: None,
+            press_max_ms: None,
+            mic: Some(Box::new(RingMic(ring.clone()))),
+            mic_present: true,
+            mic_heard: true,
+            pace: Pace::new(Pacing::Ring),
+            feed: Some(record.clone()),
+            commands,
+            events,
+            frames_sent: Arc::new(AtomicU64::new(0)),
+            track_lock: open_lock(),
+            listen: Listen::new(level_config(-40, 400), Duration::ZERO, hand.clock()).unwrap(),
+            mic_changes: 0,
+            echo: Some(echo),
+        };
+        // A loud tone, a different one played than spoken, so that the canceller is busy
+        // and what is captured is not all echo.
+        let tone = |n: usize, hz: f32| -> Frame {
+            let mut frame = SILENCE;
+            for (i, sample) in frame.iter_mut().enumerate() {
+                let t = (n * FRAME_LEN + i) as f32 / 48_000.0;
+                *sample = 0.5 * (std::f32::consts::TAU * hz * t).sin();
+            }
+            frame
+        };
+        let mut n = 0;
+        // Ten milliseconds a frame: the far end's tone played, and the near end's captured,
+        // or silence captured when the near end is `quiet`.
+        let mut step = async |task: &mut Task<Record>, frames: usize, quiet: bool| {
+            let mut captured = SILENCE;
+            for _ in 0..frames {
+                reference.played(&tone(n, 300.0));
+                ring.push_frame(if quiet { SILENCE } else { tone(n, 700.0) });
+                assert!(task.frame(&mut captured).await, "a frame was read");
+                hand.advance(Duration::from_millis(10));
+                n += 1;
+            }
+        };
+
+        step(&mut task, 200, false).await;
+        assert!(record.heard().is_empty(), "push-to-talk: sent while shut");
+        // Open mode: quiet past the hang, then the near end's voice, an onset.
+        task.obey(TxCommand::Gate(GateCommand::TalkMode(TalkMode::Open)));
+        step(&mut task, 60, true).await;
+        step(&mut task, 200, false).await;
+        assert!(record.heard().is_empty(), "open mode: sent while shut");
+        // In open mode the detector heard the onset and said so; nobody opened the gate.
+        let mut onset = false;
+        while let Ok(event) = said.try_recv() {
+            onset |= matches!(event, TxEvent::Sound { sounding: true, .. });
+        }
+        assert!(onset, "the detector heard the processed frames");
+
+        task.obey(TxCommand::Gate(GateCommand::TalkMode(TalkMode::PushToTalk)));
+        task.obey(TxCommand::Gate(GateCommand::Open));
+        step(&mut task, 50, false).await;
+        let heard = record.heard();
+        assert_eq!(heard.len(), 50, "every frame while open");
+        // The first frames after the opening are hidden: the canceller's output could
+        // still hold what was captured while the gate was shut.
+        assert!(
+            heard[..crate::echo::HISTORY_FRAMES]
+                .iter()
+                .all(|first| *first == 0.0),
+            "{heard:?}"
+        );
+        task.obey(TxCommand::Gate(GateCommand::Shut));
+        step(&mut task, 100, false).await;
+        assert_eq!(record.heard().len(), 50, "nothing after the shut");
+    }
+
+    /// What reached the track, frame by frame, as the RMS level of each.
+    #[derive(Clone, Default)]
+    struct Levels(Arc<Mutex<Vec<f32>>>);
+
+    impl Levels {
+        fn sent(&self) -> Vec<f32> {
+            self.0.lock().unwrap().clone()
+        }
+    }
+
+    impl MicFeed for Levels {
+        fn send(&mut self, frame: GatedFrame<'_>) -> impl std::future::Future<Output = ()> + Send {
+            let samples = frame.samples();
+            let energy: f32 = samples.iter().map(|s| s * s).sum();
+            self.0
+                .lock()
+                .unwrap()
+                .push((energy / samples.len() as f32).sqrt());
+            async {}
+        }
+    }
+
+    /// Issue #186's review: the echo canceller keeps a little of what it was given (its
+    /// filters' memory), so what was captured while the gate was shut could come out of it
+    /// just after the gate opens. Someone speaks until the moment the gate opens and is
+    /// silent after: no frame that reaches the track holds anything of that speech (each is
+    /// below -80 dB of full scale, what a silent microphone gives), whether a press opened
+    /// the gate or, in open mode, the onset of that speech did. The speech ends at moments
+    /// across a few frames, so that its last syllable is cut at different points.
+    #[tokio::test]
+    async fn with_echo_cancellation_on_nothing_captured_before_an_opening_is_sent() {
+        for (open_mode, spoken) in [(false, 30), (false, 33), (true, 30), (true, 35)] {
+            let (events, _said) = mpsc::unbounded_channel();
+            let (_, commands) = mpsc::unbounded_channel();
+            let (ring, levels) = (Ring::default(), Levels::default());
+            let (echo, reference) = EchoCanceller::if_enabled(true).expect("the switch is on");
+            let hand = Hand::default();
+            let mut task = Task {
+                gate: TransmitGate::new(gate_config(0, Duration::from_secs(60))).unwrap(),
+                open_max_ms: None,
+                press_max_ms: None,
+                mic: Some(Box::new(RingMic(ring.clone()))),
+                mic_present: true,
+                mic_heard: true,
+                pace: Pace::new(Pacing::Ring),
+                feed: Some(levels.clone()),
+                commands,
+                events,
+                frames_sent: Arc::new(AtomicU64::new(0)),
+                track_lock: open_lock(),
+                listen: Listen::new(level_config(-40, 400), Duration::ZERO, hand.clock()).unwrap(),
+                mic_changes: 0,
+                echo: Some(echo),
+            };
+            if open_mode {
+                task.obey(TxCommand::Gate(GateCommand::TalkMode(TalkMode::Open)));
+            }
+            // A voice, roughly: two tones a syllable at a time, loud.
+            let voice = |n: usize| -> Frame {
+                let mut frame = SILENCE;
+                for (i, sample) in frame.iter_mut().enumerate() {
+                    let t = (n * FRAME_LEN + i) as f32 / 48_000.0;
+                    let syllable = (std::f32::consts::TAU * 5.0 * t).sin().abs();
+                    *sample = syllable
+                        * (0.4 * (std::f32::consts::TAU * 220.0 * t).sin()
+                            + 0.2 * (std::f32::consts::TAU * 1_330.0 * t).sin());
+                }
+                frame
+            };
+            let mut captured = SILENCE;
+            for n in 0..spoken {
+                reference.played(&SILENCE);
+                ring.push_frame(voice(n));
+                assert!(task.frame(&mut captured).await);
+                hand.advance(Duration::from_millis(10));
+            }
+            assert!(levels.sent().is_empty(), "nothing while shut");
+            // The press, or what the machine does on the onset: the gate opens.
+            task.obey(TxCommand::Gate(GateCommand::Open));
+            for _ in 0..30 {
+                reference.played(&SILENCE);
+                ring.push_frame(SILENCE);
+                assert!(task.frame(&mut captured).await);
+                hand.advance(Duration::from_millis(10));
+            }
+            let sent = levels.sent();
+            assert_eq!(
+                sent.len(),
+                30,
+                "open mode {open_mode}: every frame while open"
+            );
+            for (n, level) in sent.iter().enumerate() {
+                assert!(
+                    *level < 1e-4,
+                    "open mode {open_mode}, {spoken} spoken: frame {n} after the opening \
+                     holds {level}: {sent:?}"
+                );
+            }
+        }
     }
 
     /// #1453: a push-to-talk press is capped by the gate's own count of frames, at the press
@@ -1165,6 +1397,7 @@ mod tests {
             track_lock: open_lock(),
             listen: push_to_talk(),
             mic_changes: 0,
+            echo: None,
         };
         // Opens the gate, offers `n` frames that are all waiting at once, and says how many
         // went through: the gate's own limit, since no timer acts here.
@@ -1247,6 +1480,7 @@ mod tests {
             track_lock: open_lock(),
             listen: push_to_talk(),
             mic_changes: 0,
+            echo: None,
         };
         task.obey(TxCommand::Gate(GateCommand::Open));
         for n in 1..=4 {
@@ -1295,6 +1529,7 @@ mod tests {
             track_lock: open_lock(),
             listen: push_to_talk(),
             mic_changes: 0,
+            echo: None,
         };
         task.obey(TxCommand::Gate(GateCommand::Open));
         for n in 1..=3 {
@@ -1381,6 +1616,7 @@ mod tests {
             track_lock: track_lock.clone(),
             listen: push_to_talk(),
             mic_changes: 0,
+            echo: None,
         };
         task.obey(TxCommand::Gate(GateCommand::Open));
         ring.push(1);
@@ -1451,6 +1687,7 @@ mod tests {
                 )
                 .unwrap(),
                 mic_changes: 0,
+                echo: None,
             };
             (task, ring, record, said)
         }

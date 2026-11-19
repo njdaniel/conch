@@ -2474,6 +2474,51 @@ fn sent_levels(rig: &ManagedRig, from: u64) -> Vec<f32> {
         .split_off(usize::try_from(from).unwrap())
 }
 
+/// #186's review: what the managed helper's session runs with is the file's
+/// `audio.echo_cancellation` where it is written, and else the owner's default: on with
+/// `--echo-cancellation-default` (the desktop app) and the key left out, off with it and the
+/// key `false`, and the same without the flag. Seen in what reaches the track: the
+/// microphone here gives frames of one constant level ([`level_of`]), and the echo
+/// canceller's high-pass filter takes that constant out, so with it on every frame sent is
+/// near silence (the first ones hidden outright), and with it off every frame is the level.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_echo_cancellation_a_managed_session_runs_with_is_the_files_else_the_owners_default() {
+    // (what `voice.toml` adds to `[audio]`, `--echo-cancellation-default`, whether it is on)
+    let cases = [
+        ("", true, true),
+        ("echo_cancellation = false\n", true, false),
+        ("", false, false),
+        ("echo_cancellation = true\n", false, true),
+    ];
+    for (extra, default, on) in cases {
+        let world = World::default();
+        let setup = ManagedSetup {
+            voice_toml: Some(format!("{KEYS_TOML}{QUICK_HANG}{extra}")),
+            world: Some(world.clone()),
+            echo_cancellation_default: default,
+            ..ManagedSetup::default()
+        };
+        let mut rig = ManagedRig::start_with(Stub::start().await, setup, |_| {}).await;
+        rig.send_start_v2();
+        rig.ready_v2().await;
+        // Long enough for the filter to settle on the constant before the press.
+        world.frames_pass(30).await;
+        rig.press_talk();
+        rig.transmitting_v2(true).await;
+        rig.until("frames reaching the track", |rig| rig.sdk.frames() >= 10)
+            .await;
+        let sent = sent_levels(&rig, 0);
+        let level = level_of(None);
+        let case = format!("{extra:?}, default {default}: {sent:?}");
+        if on {
+            assert!(sent.iter().all(|first| first.abs() < 0.01), "on: {case}");
+        } else {
+            assert!(sent.iter().all(|first| *first == level), "off: {case}");
+        }
+        rig.release_talk();
+    }
+}
+
 /// `set_devices` during a transmission: it ends with one `stopped`; no frame of either
 /// microphone reaches the track after the switch began; the state before the ack has
 /// stopped transmitting; the next states show the new microphone's capture; and only a

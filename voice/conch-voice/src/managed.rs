@@ -1598,6 +1598,9 @@ pub struct Host<T: Transport> {
     pub transmit_ceiling_secs: Option<u32>,
     /// `--no-mute-key`: `keys.mute` is not read (#1631).
     pub no_mute_key: bool,
+    /// `--echo-cancellation-default`: echo cancellation is on where `voice.toml` does not
+    /// say (#186).
+    pub echo_cancellation_default: bool,
     /// The session loop's waits.
     pub timings: Timings,
     /// The key device's waits.
@@ -1628,6 +1631,7 @@ impl<T: Transport> Host<T> {
             share_audio_owner,
             transmit_ceiling_secs: None,
             no_mute_key: false,
+            echo_cancellation_default: false,
             timings: Timings::default(),
             key_timings: KeyTimings::default(),
             start_timeout: Duration::from_millis(VOICE_CONTROL_START_TIMEOUT_MS),
@@ -1725,6 +1729,7 @@ pub async fn run<T: Transport>(
         share_audio_owner,
         transmit_ceiling_secs,
         no_mute_key,
+        echo_cancellation_default,
         timings,
         key_timings,
         ..
@@ -1733,6 +1738,7 @@ pub async fn run<T: Transport>(
         share_audio_owner,
         transmit_ceiling_secs,
         no_mute_key,
+        echo_cancellation_default,
         environment: &environment,
         scrubber: &scrubber,
         keys: &keys,
@@ -1845,6 +1851,7 @@ struct Setup<'a> {
     share_audio_owner: ShareAudioOwner,
     transmit_ceiling_secs: Option<u32>,
     no_mute_key: bool,
+    echo_cancellation_default: bool,
     inputs: &'a mpsc::UnboundedSender<Input>,
 }
 
@@ -2297,6 +2304,10 @@ impl Boot {
                 config.audio.max_transmit_secs,
                 setup.transmit_ceiling_secs,
             ),
+            // The file's word where it has one, else the owner's default (#186).
+            echo_cancellation: config
+                .audio
+                .echo_cancellation_or(setup.echo_cancellation_default),
             talk_mode,
             level: crate::transmit::level_config(
                 config.audio.open_threshold_db,

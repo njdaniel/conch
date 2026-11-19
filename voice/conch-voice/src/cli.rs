@@ -251,6 +251,10 @@ pub struct ManagedArgs {
     /// helper does not read `keys.mute`, so no key press can unmute a session the owner
     /// muted, a locked screen's included. `conch` passes nothing, and `keys.mute` works.
     pub no_mute_key: bool,
+    /// `--echo-cancellation-default`, passed by the desktop app (#186): echo cancellation is
+    /// on unless `audio.echo_cancellation` in `voice.toml` says otherwise. Without it, as for
+    /// `join` and `conch`'s TUI, it is off unless the file turns it on.
+    pub echo_cancellation_default: bool,
     /// `--test-share-source`, test only: synthetic applications in place of the platform's
     /// captures of a share's sound. It chooses only where the sound would come from: a share's
     /// sound is still captured only when a v3 owner asks for it on the command channel, which
@@ -447,6 +451,12 @@ pub fn command() -> Command {
                 .long("no-mute-key")
                 .action(clap::ArgAction::SetTrue)
                 .help("Do not read keys.mute: the owner alone mutes (the desktop app passes this)"),
+        )
+        .arg(
+            Arg::new("echo-cancellation-default")
+                .long("echo-cancellation-default")
+                .action(clap::ArgAction::SetTrue)
+                .help("Cancel echo unless audio.echo_cancellation in voice.toml is false (the desktop app passes this)"),
         )
         .arg(
             Arg::new("events-pipe")
@@ -718,6 +728,7 @@ where
                 share_audio_owner: share_audio_owner(managed),
                 transmit_ceiling_secs: managed.get_one::<u32>("transmit-ceiling-secs").copied(),
                 no_mute_key: managed.get_flag("no-mute-key"),
+                echo_cancellation_default: managed.get_flag("echo-cancellation-default"),
                 share: managed
                     .get_one::<SyntheticSpec>("test-share-source")
                     .cloned()
@@ -1591,6 +1602,20 @@ mod tests {
     }
 
     #[test]
+    fn managed_takes_echo_cancellation_default_and_join_does_not() {
+        let default = |args: &[&str]| match parse(args.iter().copied()) {
+            Ok(Invocation::Managed(args)) => Some(args.echo_cancellation_default),
+            _ => None,
+        };
+        assert_eq!(default(&["conch-voice", "managed"]), Some(false));
+        assert_eq!(
+            default(&["conch-voice", "managed", "--echo-cancellation-default"]),
+            Some(true)
+        );
+        assert!(parse(["conch-voice", "join", "--echo-cancellation-default"]).is_err());
+    }
+
+    #[test]
     fn managed_takes_no_channel_server_or_login_and_hides_its_test_options() {
         assert_eq!(
             parse(["conch-voice", "managed"]).unwrap(),
@@ -1603,6 +1628,7 @@ mod tests {
                 share_audio_owner: ShareAudioOwner::Helper,
                 transmit_ceiling_secs: None,
                 no_mute_key: false,
+                echo_cancellation_default: false,
                 share: ShareChoice::AudioSystem,
             })
         );
@@ -1629,6 +1655,7 @@ mod tests {
                 share_audio_owner: ShareAudioOwner::Helper,
                 transmit_ceiling_secs: None,
                 no_mute_key: false,
+                echo_cancellation_default: false,
                 share: ShareChoice::AudioSystem,
             })
         );

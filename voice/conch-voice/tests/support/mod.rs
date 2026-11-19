@@ -243,6 +243,8 @@ pub struct Setup {
     pub open_mic: Option<OpenNamedMic>,
     /// Opens the speakers by the name the session asks for, instead of a counting sink.
     pub open_sink: Option<OpenNamedSink>,
+    /// `audio.echo_cancellation` (#186): the session makes the SDK's echo canceller.
+    pub echo_cancellation: bool,
 }
 
 /// Makes a microphone, each time the session opens one.
@@ -279,6 +281,7 @@ impl Default for Setup {
             microphone: None,
             open_mic: None,
             open_sink: None,
+            echo_cancellation: false,
         }
     }
 }
@@ -383,6 +386,7 @@ impl Rig {
             release_tail_ms: setup.release_tail_ms,
             max_transmit: setup.max_transmit,
             push_to_talk_max: setup.push_to_talk_max.unwrap_or(setup.max_transmit),
+            echo_cancellation: setup.echo_cancellation,
             talk_mode: setup.talk_mode,
             level: transmit::level_config(setup.open_threshold_db, setup.open_hang_ms),
             key_device: setup.key_device,
